@@ -227,6 +227,22 @@ class BattleHandle:
         return self.last["choiceErrors"]
 
     @property
+    def rolls(self) -> list[dict[str, Any]]:
+        """Rolls Showdown asked for during the last step, in order.
+
+        ``{'kind': 'chance', 'numerator': 1, 'denominator': 8}`` for
+        ``randomChance(1, 8)``, ``{'kind': 'random', 'from': 2, 'to': 5}`` for
+        ``random(2, 5)``, and ``{'kind': 'sample', 'values': [...]}`` for ``sample``.
+
+        The policy pins every answer, so this is not a way to observe outcomes -- it is a
+        way to see the odds the simulator would have used. Three probabilities in the
+        resolver turned out to be the base game's rather than the champions mod's (full
+        paralysis 1/4 against the mod's 1/8, thawing 1/5 against 1/4), and a hardcoded
+        probability is exactly the kind of thing that cannot be checked any other way.
+        """
+        return list(self.last.get("rolls") or [])
+
+    @property
     def log(self) -> list[str]:
         return self.last["log"]
 

@@ -30,6 +30,10 @@ from pokeuraou.oracle import ORACLE_JS, Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Effect, MoveSlot, Position
 from pokeuraou.regulation import Regulation
 from pokeuraou.resolve import (
+    FREEZE_COUNTER,
+    FULL_PARALYSIS_CHANCE,
+    SLEEP_COUNTER_MODAL,
+    SLEEP_COUNTER_PINNED,
     Average,
     BestOf,
     Budget,
@@ -272,6 +276,22 @@ def test_protect_used_twice_is_a_branch(reg: Regulation, team_a: list[TeamSet]) 
     assert len(result.branches) >= 2
     assert sum(weights) == pytest.approx(1.0)
     assert any(w == pytest.approx(1 / 3, abs=0.05) for w in weights)
+
+
+def _protect_both(pos: Position, side: int) -> SideAction:
+    """Both of a side's actives use the move in their first slot.
+
+    Paired with `_install_move(..., "protect")` this makes a turn in which nothing can
+    faint, which is what a test about how long a status lasts needs -- otherwise the
+    subject dies to an incidental attack and the test skips.
+    """
+    return SideAction(
+        slots=tuple(
+            _move_action(pos, side, slot, pos.sides[side].pokemon[party].moves[0].id, None)
+            for slot, party in enumerate(pos.sides[side].active)
+            if party is not None
+        )
+    )
 
 
 def _install_move(pos: Position, side: int, slot: int, move_id: str) -> None:
@@ -1158,3 +1178,238 @@ def test_throat_chop_locks_sound_moves(reg: Regulation, team_a: list[TeamSet]) -
     assert "partingshot" not in offered, (
         f"a throat-chopped Pokemon must not be offered a sound move: {sorted(offered)}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Status odds, read from the simulator rather than written down
+# ---------------------------------------------------------------------------
+
+
+#: A Prankster paralyser, a sleeper and a Poison/Water target that can take both.
+_INFLICTOR_TEAM = [
+    TeamSet(
+        "Grimmsnarl",
+        "Prankster",
+        "Careful",
+        ["thunderwave", "protect", "lightscreen", "reflect"],
+        {"hp": 32},
+        item="lightclay",
+    ),
+    TeamSet(
+        "Venusaur",
+        "Chlorophyll",
+        "Modest",
+        ["sleeppowder", "protect", "gigadrain", "sludgebomb"],
+        {"spa": 32},
+        item="lifeorb",
+    ),
+    TeamSet(
+        "Kingambit",
+        "Defiant",
+        "Adamant",
+        ["protect", "ironhead", "suckerpunch", "swordsdance"],
+        {"atk": 32},
+        item="focussash",
+    ),
+    TeamSet(
+        "Tyranitar",
+        "Sand Stream",
+        "Jolly",
+        ["protect", "crunch", "rockslide", "earthquake"],
+        {"spe": 32},
+        item="chopleberry",
+    ),
+]
+
+_VICTIM_TEAM = [
+    TeamSet(
+        "Toxapex",
+        "Regenerator",
+        "Relaxed",
+        ["protect", "wideguard", "toxic", "infestation"],
+        {"hp": 32},
+        item="leftovers",
+    ),
+    TeamSet(
+        "Venusaur",
+        "Chlorophyll",
+        "Modest",
+        ["protect", "gigadrain", "sludgebomb", "sleeppowder"],
+        {"spa": 32},
+        item="lifeorb",
+    ),
+    TeamSet(
+        "Garchomp",
+        "Rough Skin",
+        "Jolly",
+        ["protect", "dragonclaw", "earthquake", "rockslide"],
+        {"spe": 32},
+        item="choicescarf",
+    ),
+    TeamSet(
+        "Charizard",
+        "Blaze",
+        "Timid",
+        ["protect", "airslash", "heatwave", "flamethrower"],
+        {"spe": 32},
+        item="charcoal",
+    ),
+]
+
+
+def _chance_denominators(rolls: list[dict[str, object]], numerator: int = 1) -> set[int]:
+    return {
+        int(r["denominator"])
+        for r in rolls
+        if r["kind"] == "chance" and int(r["numerator"]) == numerator
+    }
+
+
+@pytest.mark.oracle
+def test_the_paralysis_chance_is_the_one_the_simulator_rolls(oracle: Oracle) -> None:
+    """`FULL_PARALYSIS_CHANCE` against the odds Showdown asks the policy for.
+
+    The champions mod overrides the base game's 1/4 with `randomChance(1, 8)`, and we
+    carried 0.25 -- twice the real rate, multiplied through every branch of every turn a
+    paralysed Pokemon was on the field.
+
+    It cannot be tested by counting outcomes, because the policy pins every roll's answer;
+    that is what the policy is for. The *arguments* are the evidence, and the oracle records
+    them, so this reads the denominator instead of trusting a number in a comment. It also
+    fails if a future regulation changes the rate, which a hand-written constant cannot.
+    """
+    handle = oracle.create(
+        FORMAT_ID, _VICTIM_TEAM, _INFLICTOR_TEAM, policy=RandomnessPolicy(damage_roll=8)
+    )
+    handle.step(["team 1,2,3,4", "team 1,2,3,4"])
+    # Thunder Wave from Prankster Grimmsnarl onto Toxapex, which is neither Ground nor
+    # Electric nor Dark, so it lands. The victim must not Protect on this turn.
+    handle.step(["move 3 1, move 1", "move 1 1, move 2"])
+    assert not handle.choice_errors, handle.choice_errors
+    assert any(
+        line.startswith("|-status|p1a") and line.endswith("par") for line in handle.log
+    ), "the setup did not paralyse anything, so there is nothing to measure"
+
+    # Now it tries to move, which is when `par.onBeforeMove` rolls.
+    handle.step(["move 1, move 1", "move 2, move 2"])
+    assert not handle.choice_errors, handle.choice_errors
+    denominators = _chance_denominators(handle.rolls)
+    assert denominators, f"no 1-in-N roll recorded at all: {handle.rolls}"
+    expected = round(1 / FULL_PARALYSIS_CHANCE)
+    assert expected in denominators, (
+        f"FULL_PARALYSIS_CHANCE is 1/{expected} but the simulator rolled "
+        f"1 in {sorted(denominators)} on a paralysed Pokemon's turn"
+    )
+    handle.close()
+
+
+@pytest.mark.oracle
+def test_the_sleep_counter_is_the_distribution_the_simulator_samples(oracle: Oracle) -> None:
+    """Champions sleep is `sample([2, 3, 3])`, and we pinned the 1-in-3 outcome.
+
+    "The first action is always asleep, the second wakes one time in three, the third always
+    acts" -- so the counter is 2 a third of the time and 3 the rest, and the modal outcome
+    is two turns of sleep rather than one. The base game rolls `random(2, 5)` instead, which
+    is where our pinned 2 came from.
+
+    A `sample` is the one distribution no denominator reveals, which is why the oracle
+    records its values.
+    """
+    handle = oracle.create(
+        FORMAT_ID, _VICTIM_TEAM, _INFLICTOR_TEAM, policy=RandomnessPolicy(damage_roll=8)
+    )
+    handle.step(["team 1,2,3,4", "team 1,2,3,4"])
+    # Sleep Powder from p2b onto p1a.
+    handle.step(["move 3 1, move 1", "move 2, move 1 1"])
+    assert not handle.choice_errors, handle.choice_errors
+
+    samples = [r["values"] for r in handle.rolls if r["kind"] == "sample"]
+    assert samples, f"no sample recorded on the turn sleep landed: {handle.rolls}"
+    counters = sorted(int(v) for v in samples[0])
+    assert counters, samples
+    modal = max(set(counters), key=counters.count)
+    assert modal == SLEEP_COUNTER_MODAL, (
+        f"the simulator samples {counters}, whose modal value is {modal}, but the resolver "
+        f"uses {SLEEP_COUNTER_MODAL} when it does not branch the duration"
+    )
+    # And the pinned reading has to stay the policy's answer, or the differential test
+    # stops being an equality test.
+    assert counters[0] == SLEEP_COUNTER_PINNED, (
+        f"the policy answers sample() with its first element ({counters[0]}), so the "
+        f"pinned counter must match it, not {SLEEP_COUNTER_PINNED}"
+    )
+    handle.close()
+
+
+def test_a_sleeping_pokemon_wakes_and_the_counter_is_not_the_lucky_one(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """End to end: the modal counter costs two turns, and sleep does end.
+
+    The pinned counter of 2 cost one turn, which is Champions' one-in-three outcome -- so
+    every sleep in the search was priced as the best case for the sleeper. Asserting the
+    number of turns lost rather than the counter is what makes this independent of how the
+    counter is spelled.
+    """
+    pos = _synthetic_position(reg, team_a)
+    # Nobody attacks: an earlier version of this let the sleeper faint to whatever action
+    # happened to be first, and skipped. A test that skips proves nothing.
+    for side in (0, 1):
+        for slot in (0, 1):
+            _install_move(pos, side, slot, "protect")
+    target = pos.sides[1].pokemon[pos.sides[1].active[0]]
+    turn = _Turn(reg, pos, Budget.matrix(), {})
+    assert turn.apply_status(1, 0, "slp", reason="test")
+    assert target.status == "slp"
+    assert target.status_counter == SLEEP_COUNTER_MODAL
+
+    asleep = 0
+    for _ in range(5):
+        both = [_protect_both(pos, 0), _protect_both(pos, 1)]
+        result = resolve_turn(reg, pos, both, budget=Budget.matrix())
+        pos = max(result.branches, key=lambda b: b.probability).position
+        mon = pos.sides[1].pokemon[pos.sides[1].active[0]]
+        assert not mon.fainted, "nothing should be able to faint in a turn of Protects"
+        if mon.status == "slp":
+            asleep += 1
+        else:
+            break
+    assert asleep == SLEEP_COUNTER_MODAL - 1, (
+        f"Champions' modal sleep is {SLEEP_COUNTER_MODAL - 1} turns, counted {asleep}"
+    )
+
+
+def test_freeze_cannot_last_the_whole_battle(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """The mod caps a freeze at three attempts; we had only the 1-in-4 roll to end it.
+
+    Without the counter a freeze ends with probability 1/4 a turn and never otherwise, so it
+    holds for the rest of the battle with probability (3/4)^n -- the same "no duration,
+    therefore permanent" shape that made four volatiles permanent, in geometric clothing.
+    Checked with the roll pinned to "no", which is the state that used to be a trap.
+    """
+    pos = _synthetic_position(reg, team_a)
+    for side in (0, 1):
+        for slot in (0, 1):
+            _install_move(pos, side, slot, "protect")
+    target = pos.sides[1].pokemon[pos.sides[1].active[0]]
+    turn = _Turn(reg, pos, Budget.matrix(), {})
+    assert turn.apply_status(1, 0, "frz", reason="test")
+    assert target.status_counter == FREEZE_COUNTER, (
+        "a freeze needs a counter, or only the roll can ever end it"
+    )
+
+    for _ in range(FREEZE_COUNTER + 2):
+        both = [_protect_both(pos, 0), _protect_both(pos, 1)]
+        result = resolve_turn(reg, pos, both, budget=Budget.matrix())
+        pos = max(result.branches, key=lambda b: b.probability).position
+        mon = pos.sides[1].pokemon[pos.sides[1].active[0]]
+        assert not mon.fainted, "nothing should be able to faint in a turn of Protects"
+        if mon.status != "frz":
+            break
+    else:
+        raise AssertionError(
+            f"still frozen after {FREEZE_COUNTER + 2} turns with the thaw roll pinned to "
+            "no, so nothing but the roll can end it"
+        )

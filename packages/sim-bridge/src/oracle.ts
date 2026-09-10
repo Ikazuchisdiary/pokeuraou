@@ -48,13 +48,34 @@ export const DEFAULT_POLICY: RandomnessPolicy = {
 /** Crit denominators used by Showdown, i.e. the values that identify a crit roll. */
 const CRIT_DENOMINATORS = new Set([24, 8, 2, 1]);
 
+/**
+ * One roll Showdown asked the policy for.
+ *
+ * `chance` is `randomChance(numerator, denominator)`, `random` is `random(from, to)`, and
+ * `sample` is `sample(values)`. The policy pins the answer, so these arguments are the only
+ * evidence of what odds the simulator would have used -- which is what makes a hardcoded
+ * probability on our side checkable rather than asserted.
+ */
+export type RollRecord =
+	| { kind: 'chance'; numerator: number; denominator: number }
+	| { kind: 'random'; from?: number; to?: number }
+	| { kind: 'sample'; values: string[] };
+
 function installPolicy(battle: AnyBattle, policy: RandomnessPolicy) {
 	const trunc: (n: number, bits?: number) => number = battle.trunc.bind(battle);
 	const roll = Math.max(0, Math.min(15, policy.damageRoll | 0));
 
 	battle.randomizer = (baseDamage: number) => trunc(trunc(baseDamage * (100 - roll)) / 100);
 
+	// Every roll Showdown asks for, in order, so the consumer can check a pinned
+	// probability against the odds the simulator actually used. The policy answers these
+	// with a fixed value, so the outcome says nothing -- the arguments say everything. Read
+	// and cleared per step; see `rolls` in the step result.
+	const rolls: RollRecord[] = [];
+	battle._pokeuraouRolls = rolls;
+
 	battle.randomChance = (numerator: number, denominator: number): boolean => {
+		rolls.push({ kind: 'chance', numerator, denominator });
 		if (numerator === 1 && CRIT_DENOMINATORS.has(denominator)) {
 			// A guaranteed crit (denominator 1) stays guaranteed.
 			return denominator === 1 ? true : policy.crit;
@@ -65,6 +86,7 @@ function installPolicy(battle: AnyBattle, policy: RandomnessPolicy) {
 	};
 
 	battle.random = (from?: number, to?: number): number => {
+		rolls.push({ kind: 'random', from, to });
 		if (from === undefined) return policy.secondary ? 0 : 0.999999;
 		if (to === undefined) {
 			// random(n) -> [0, n)
@@ -81,7 +103,13 @@ function installPolicy(battle: AnyBattle, policy: RandomnessPolicy) {
 		}
 	};
 	battle.prng.shuffle = shuffle;
-	battle.sample = <T>(items: readonly T[]): T => items[0];
+	// Recorded because the champions mod expresses the Champions sleep rule as
+	// `sample([2, 3, 3])` -- one turn of sleep a third of the time and two the rest -- and
+	// no denominator would reveal that distribution.
+	battle.sample = <T>(items: readonly T[]): T => {
+		rolls.push({ kind: 'sample', values: items.map(v => String(v)) });
+		return items[0];
+	};
 }
 
 export interface TeamSet {
@@ -148,6 +176,14 @@ export interface StepResult {
 	/** Protocol lines produced since the previous step. */
 	log: string[];
 	choiceErrors: string[];
+	/**
+	 * Rolls Showdown asked the policy for since the previous step.
+	 *
+	 * The policy pins the answers, so the outcome of a roll says nothing -- but the odds it
+	 * was asked with are the simulator's own, mod overrides included. That is what makes a
+	 * probability hardcoded on the consumer's side checkable instead of asserted.
+	 */
+	rolls: RollRecord[];
 }
 
 export class OracleSession {
@@ -197,6 +233,7 @@ export class OracleSession {
 			requests: this.battle.sides.map((s: AnyBattle) => s.activeRequest ?? null),
 			log,
 			choiceErrors: this.choiceErrors.splice(0),
+			rolls: (this.battle._pokeuraouRolls as RollRecord[]).splice(0),
 		};
 	}
 

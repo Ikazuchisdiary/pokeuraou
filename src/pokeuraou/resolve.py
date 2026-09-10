@@ -103,9 +103,39 @@ INTIMIDATE_PROOF_ABILITIES = frozenset(
      "whitesmoke", "fullmetalbody", "hypercutter"}
 )
 
-FULL_PARALYSIS_CHANCE = 0.25
+#: Full paralysis. The champions mod overrides the base game's 1/4:
+#:     par: { inherit: true, onBeforeMove(pokemon) { if (this.randomChance(1, 8)) ... } }
+#: Verified by reading the roll the simulator asked for -- `randomChance(1, 8)` on every
+#: turn a paralysed Pokemon tries to move. This was 0.25, i.e. twice the real rate, and the
+#: search multiplied it through every branch.
+FULL_PARALYSIS_CHANCE = 1.0 / 8.0
+
 CONFUSION_SELF_HIT_CHANCE = 1.0 / 3.0
-THAW_CHANCE = 0.2
+
+#: Thawing. The champions mod rewrites `frz.onBeforeMove` to `randomChance(1, 4)` with a
+#: hard three-turn cap, where the base game uses 1/5 and no cap. Taken from the mod's source
+#: rather than from an observed roll: the policy has to force secondaries on before a freeze
+#: can be applied at all, and no thaw roll was recorded in that state, so this one is not
+#: independently confirmed the way paralysis is.
+THAW_CHANCE = 0.25
+
+#: Champions sleep is `sample([2, 3, 3])` in the mod: the counter starts at 2 one time in
+#: three and at 3 the rest. With the decrement in `_can_act` that is one turn of sleep or
+#: two -- "the first action is always asleep, the second wakes one time in three, the third
+#: always acts". The base game rolls `random(2, 5)`, so 1, 2 or 3 turns equally.
+#:
+#: This is the modal outcome, which is what an unbranched sleep uses. Pinning 2 assumed the
+#: lucky case on every sleep in the search.
+SLEEP_COUNTER_MODAL = 3
+
+#: Freeze, as the mod writes it: `startTime = 3`, decremented on each attempt to move, and
+#: a forced thaw at zero on top of the 1/4 roll. Without the cap a freeze had only the
+#: geometric tail of the roll to end it, so it could hold for the rest of the battle.
+FREEZE_COUNTER = 3
+
+#: The oracle's policy answers `sample(values)` with `values[0]`, so this is what the
+#: differential test's Showdown produces.
+SLEEP_COUNTER_PINNED = 2
 
 #: Residual amounts, as (numerator, denominator) of max HP.
 BURN_DAMAGE = (1, 16)
@@ -173,6 +203,14 @@ class Budget:
     enumerate_status_checks: bool = True
     enumerate_secondary: bool = True
     enumerate_speed_ties: bool = True
+    #: Reproduce the oracle's pinned randomness policy rather than the real distribution.
+    #:
+    #: Only the differential test wants this. That policy answers `sample(values)` with
+    #: `values[0]` and `random(a, b)` with `a`, so a Champions sleep reads as 2 turns and a
+    #: bind as 5 -- and the resolver has to agree for the comparison to be an equality test.
+    #: Everywhere else those are the *shortest* outcome of a real distribution, and
+    #: assuming them is a bias in favour of whoever is being locked down.
+    pinned_policy: bool = False
     #: Hard cap on live branches, enforced *while* each generation is built so the peak
     #: is bounded too. When it binds, the least likely branches are dropped, the rest are
     #: renormalised, and the reduction is recorded -- ``TurnResult.exact`` goes false.
@@ -216,8 +254,16 @@ class Budget:
         it is 3.4x in a mirror, where every pair is tied. `max_branches` has to allow for
         the tie branches or they would be truncated back out again.
         """
+        # `pinned_policy` is cleared explicitly. It is built from `deterministic`, which
+        # exists to reproduce the oracle's pinned randomness, and inheriting that flag would
+        # quietly put the *search* in "answer every roll the way the differential test's
+        # policy does" mode -- a Champions sleep read as its one-in-three short outcome
+        # rather than its modal one.
         return replace(
-            Budget.deterministic(roll), enumerate_speed_ties=True, max_branches=16
+            Budget.deterministic(roll),
+            enumerate_speed_ties=True,
+            max_branches=16,
+            pinned_policy=False,
         )
 
     @staticmethod
@@ -249,6 +295,7 @@ class Budget:
             enumerate_status_checks=False,
             enumerate_secondary=False,
             enumerate_speed_ties=False,
+            pinned_policy=True,
             max_branches=1,
         ).with_fixed_roll(roll)
 
@@ -682,12 +729,23 @@ class _Turn:
         mon.status = status
         if status == "tox":
             mon.status_counter = 0
+        elif status == "frz":
+            mon.status_counter = FREEZE_COUNTER
         elif status == "slp":
-            # Showdown rolls 2-4 turns (gen 5+: 1-3 counted down). The duration is part of
-            # the state, so the resolver records the modal value and flags it rather than
-            # branching three ways on every sleep.
-            mon.status_counter = 2
-            self.unmodelled.add("sleep duration (recorded as 2 turns)")
+            # The duration is part of the state, so it has to be a number here rather than
+            # a distribution -- branching it would mean branching the position from inside
+            # a status application, which this function cannot do. The modal outcome is
+            # used and reported; under the pinned policy the oracle's `sample` returns the
+            # first element, and matching that is what keeps the differential an equality
+            # test.
+            if self.budget.pinned_policy:
+                mon.status_counter = SLEEP_COUNTER_PINNED
+            else:
+                mon.status_counter = SLEEP_COUNTER_MODAL
+                self.unmodelled.add(
+                    f"sleep duration ({SLEEP_COUNTER_MODAL - 1} turns, the modal outcome "
+                    f"of Champions' 1-or-2; not branched)"
+                )
         self.log(f"{self.name(side, slot)} -> {status} ({reason})")
         if mon.item == "lumberry":
             self.consume_item(side, slot, reason="lumberry")
@@ -1294,11 +1352,21 @@ def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[fl
             return [(1.0, None)]
         return [(1.0, "slp")]
     if mon.status == "frz":
-        return (
-            [(THAW_CHANCE, None), (1 - THAW_CHANCE, "frz")]
-            if budget.enumerate_status_checks
-            else [(1.0, "frz")]
-        )
+        # `time--; if (time <= 0 || randomChance(1, 4))` -- the counter is spent on the
+        # attempt to move, and reaching zero thaws regardless of the roll.
+        mon.status_counter = (mon.status_counter or FREEZE_COUNTER) - 1
+        if mon.status_counter <= 0:
+            mon.status = None
+            mon.status_counter = None
+            turn.log(f"{turn.name(action.side, action.slot)} thawed (counter)")
+            return [(1.0, None)]
+        if not budget.enumerate_status_checks:
+            return [(1.0, "frz")]
+        # The two outcomes differ in more than "did it act": one of them is no longer
+        # frozen next turn, and `_can_act` returns weights rather than states, so it cannot
+        # express that. The weights are right and the cured state is reported as missing.
+        turn.unmodelled.add("thaw roll (1 in 4; the cured state is not branched)")
+        return [(THAW_CHANCE, None), (1 - THAW_CHANCE, "frz")]
 
     # Priority-blocking abilities and Psychic Terrain stop the move before it starts --
     # but only a move aimed at the protected side. A self-targeting priority move such as
