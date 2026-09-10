@@ -328,7 +328,11 @@ def test_endure_consults_and_raises_the_counter(
     )
     after = result.branches[0].position.sides[0]
     user = after.pokemon[after.active[0]]
-    assert any(v.id == "endure" for v in user.volatiles)
+    # Showdown's Endure condition is `duration: 1`, so the volatile is gone by the end of
+    # the turn it was used and only the counter persists. This test used to assert the
+    # opposite, which was the bug: with no duration the volatile stayed for the rest of
+    # the battle and the Pokemon survived every lethal hit at 1 HP.
+    assert not any(v.id == "endure" for v in user.volatiles)
     stall = next((v for v in user.volatiles if v.id == "stall"), None)
     assert stall is not None and stall.counter == 3
 
@@ -628,3 +632,105 @@ def test_the_matrix_budget_gives_the_lp_a_zero_sum_game(reg: Regulation) -> None
     )
     # Same action on both sides of a mirror is an even position, exactly.
     assert np.abs(np.diag(matrix) - 0.5).max() < 1e-9
+
+
+def test_every_volatile_that_should_expire_has_a_duration(reg: Regulation) -> None:
+    """A volatile added with no duration is kept for the rest of the battle.
+
+    The expiry loop reads ``if volatile.duration is not None: volatile.duration -= 1``, so
+    ``None`` means permanent. `_duration` used to look only at the move's own ``condition``
+    field, while Showdown keeps most durations on the condition in conditions.ts -- and that
+    silently made four effects permanent:
+
+    - **partiallytrapped** (bind, Fire Spin, Infestation, Sand Tomb, Snap Trap, Whirlpool,
+      Thunder Cage): the target could never switch again and lost an eighth of its HP every
+      turn for the rest of the game. Infestation is played on 40% of the turns Toxapex is
+      out, so this was frequent rather than exotic.
+    - **Endure**: a stalling move whose volatile is not in ``PROTECT_VOLATILES``, so it
+      missed the unconditional one-turn removal too. Once used, the Pokemon survived every
+      lethal hit at 1 HP for the rest of the battle.
+    - magnetrise, electrify: same shape, rarer moves.
+
+    This is the audit that would have caught all four, so it lives here as a test rather
+    than as a one-off script: every move whose volatile Showdown gives a duration must get
+    one from us, unless the volatile is in the set the residual removes unconditionally.
+    """
+    from pokeuraou.resolve import PROTECT_VOLATILES, _duration
+
+    # Removed every turn regardless of duration, so `None` is harmless for these.
+    single_turn = set(PROTECT_VOLATILES) | {
+        "flinch", "helpinghand", "followme", "ragepowder", "spotlight", "glaiverush",
+    }
+    # The expectation comes from the dump rather than from a list here, so it cannot drift
+    # from Showdown -- which is the whole point: the hand-written list this replaced was
+    # both incomplete (four permanent effects) and wrong (Tailwind 5, Showdown says 4).
+    permanent: list[str] = []
+    for move in reg.moves.values():
+        volatile = move.raw.get("volatileStatus")
+        if not isinstance(volatile, str) or volatile in single_turn:
+            continue
+        declared = (move.raw.get("durations") or {}).get(volatile)
+        if not isinstance(declared, dict) or "duration" not in declared:
+            continue  # Showdown leaves it permanent too, so None is correct.
+        if _duration(move, volatile) is None:
+            permanent.append(f"{move.id} -> {volatile}")
+
+    assert not permanent, (
+        "these would be added with no duration and never expire: " + ", ".join(sorted(permanent))
+    )
+    # And the two that mattered, by name.
+    assert _duration(reg.moves["infestation"], "partiallytrapped") == 5
+    assert _duration(reg.moves["tailwind"], "tailwind") == 4, "Tailwind is 4 turns, not 5"
+    assert _duration(reg.moves["endure"], "endure") == 1
+
+
+def test_a_bind_expires_and_blocks_switching_until_it_does(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """End to end: the volatile counts down, and the target cannot switch while it is on."""
+    from pokeuraou.actions import SwitchAction
+
+    pos = _synthetic_position(reg, team_a)
+    target = pos.sides[1].pokemon[pos.sides[1].active[0]]
+    target.volatiles.append(Effect(id="partiallytrapped", duration=5, source_slot="00"))
+
+    # Trapped: no switch is offered for that slot.
+    offered = [
+        s
+        for action in side_actions(reg, pos, 1)
+        for s in action.slots
+        if isinstance(s, SwitchAction) and s.slot == 0
+    ]
+    assert not offered, "a bound Pokemon must not be offered a switch"
+
+    # The duration has to fall by exactly one per turn. Asserting the decrement rather
+    # than only the eventual removal is what makes this test independent of how long the
+    # trapper survives -- and a `None` duration fails it on the first step, which is
+    # precisely the bug. Removal is asserted too, when the battle lasts long enough.
+    seen: list[int | None] = [5]
+    for _ in range(6):
+        both = [side_actions(reg, pos, 0)[0], side_actions(reg, pos, 1)[0]]
+        result = resolve_turn(reg, pos, both, budget=Budget.matrix())
+        pos = max(result.branches, key=lambda b: b.probability).position
+        volatile = pos.sides[1].pokemon[pos.sides[1].active[0]].volatile("partiallytrapped")
+        seen.append(volatile.duration if volatile else None)
+        trapper_gone = pos.sides[0].pokemon[0].fainted
+        if volatile is None:
+            # A bind also ends when its source leaves or faints, which is correct Showdown
+            # behaviour and a different event from expiry. Only the second one says
+            # anything about the duration.
+            released_early = trapper_gone
+            break
+        if trapper_gone:
+            released_early = True
+            break
+    else:
+        released_early = False
+
+    counted = [d for d in seen if d is not None]
+    assert len(counted) >= 2, f"never got two turns of bind to compare: {seen}"
+    steps = [a - b for a, b in zip(counted, counted[1:], strict=False)]
+    # A `None` duration never falls, so this is the assertion that catches the bug.
+    assert all(step == 1 for step in steps), f"duration did not fall by one a turn: {seen}"
+    if seen[-1] is None and not released_early:
+        assert counted[-1] == 1, f"expired from the wrong duration: {seen}"

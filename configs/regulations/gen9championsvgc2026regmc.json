@@ -20,7 +20,7 @@
 		"teraEnabled": false,
 		"megaPerSide": 1,
 		"showdownCommit": "cc089d36b7717dec78ce8ab5d1745c03ad5c97e4",
-		"generatedAt": "2026-09-09T19:12:05.708Z"
+		"generatedAt": "2026-09-10T10:11:39.486Z"
 	},
 	"natures": [
 		{
@@ -12866,6 +12866,11 @@
 				"onHit",
 				"onPrepareHit"
 			],
+			"durations": {
+				"banefulbunker": {
+					"duration": 1
+				}
+			},
 			"volatileStatus": "banefulbunker",
 			"stallingMove": true,
 			"ignoreImmunity": true,
@@ -13145,6 +13150,11 @@
 				"condition.onStart",
 				"onTryHit"
 			],
+			"durations": {
+				"disable": {
+					"duration": 5
+				}
+			},
 			"volatileStatus": "disable",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -13223,6 +13233,11 @@
 				"condition.onStart",
 				"onTryHit"
 			],
+			"durations": {
+				"electrify": {
+					"duration": 1
+				}
+			},
 			"volatileStatus": "electrify",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -13255,6 +13270,11 @@
 				"condition.onResidual",
 				"condition.onStart"
 			],
+			"durations": {
+				"encore": {
+					"duration": 3
+				}
+			},
 			"volatileStatus": "encore",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -13533,6 +13553,11 @@
 				"onHit",
 				"onPrepareHit"
 			],
+			"durations": {
+				"kingsshield": {
+					"duration": 1
+				}
+			},
 			"volatileStatus": "kingsshield",
 			"stallingMove": true,
 			"ignoreImmunity": true,
@@ -13798,6 +13823,11 @@
 				"onHit",
 				"onPrepareHit"
 			],
+			"durations": {
+				"protect": {
+					"duration": 1
+				}
+			},
 			"volatileStatus": "protect",
 			"stallingMove": true,
 			"ignoreImmunity": true,
@@ -13976,6 +14006,12 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
+			"durations": {
+				"partiallytrapped": {
+					"duration": 5,
+					"durationCallback": true
+				}
+			},
 			"volatileStatus": "partiallytrapped",
 			"nonGhostTarget": ""
 		},
@@ -14044,6 +14080,11 @@
 				"onHit",
 				"onPrepareHit"
 			],
+			"durations": {
+				"spikyshield": {
+					"duration": 1
+				}
+			},
 			"volatileStatus": "spikyshield",
 			"stallingMove": true,
 			"ignoreImmunity": true,
@@ -14959,6 +15000,12 @@
 				"condition.onSideStart",
 				"onTry"
 			],
+			"durations": {
+				"auroraveil": {
+					"duration": 5,
+					"durationCallback": true
+				}
+			},
 			"sideCondition": "auroraveil",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -15165,6 +15212,12 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
+			"durations": {
+				"partiallytrapped": {
+					"duration": 5,
+					"durationCallback": true
+				}
+			},
 			"volatileStatus": "partiallytrapped",
 			"nonGhostTarget": ""
 		},
@@ -16628,6 +16681,11 @@
 				"onHit",
 				"onPrepareHit"
 			],
+			"durations": {
+				"protect": {
+					"duration": 1
+				}
+			},
 			"volatileStatus": "protect",
 			"stallingMove": true,
 			"ignoreImmunity": true,
@@ -17416,6 +17474,11 @@
 				"onHit",
 				"onPrepareHit"
 			],
+			"durations": {
+				"endure": {
+					"duration": 1
+				}
+			},
 			"volatileStatus": "endure",
 			"stallingMove": true,
 			"ignoreImmunity": true,
@@ -17643,6 +17706,11 @@
 				"condition.onFieldStart",
 				"condition.onTrapPokemon"
 			],
+			"durations": {
+				"fairylock": {
+					"duration": 2
+				}
+			},
 			"pseudoWeather": "fairylock",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -17935,6 +18003,12 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
+			"durations": {
+				"partiallytrapped": {
+					"duration": 5,
+					"durationCallback": true
+				}
+			},
 			"volatileStatus": "partiallytrapped",
 			"nonGhostTarget": ""
 		},
@@ -18374,6 +18448,11 @@
 				"condition.onStart",
 				"onTry"
 			],
+			"durations": {
+				"followme": {
+					"duration": 1
+				}
+			},
 			"volatileStatus": "followme",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -18760,6 +18839,12 @@
 				"condition.onModifyAccuracy",
 				"condition.onModifyMove"
 			],
+			"durations": {
+				"gravity": {
+					"duration": 5,
+					"durationCallback": true
+				}
+			},
 			"pseudoWeather": "gravity",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -19207,6 +19292,11 @@
 				"condition.onStart",
 				"onTryHit"
 			],
+			"durations": {
+				"helpinghand": {
+					"duration": 1
+				}
+			},
 			"volatileStatus": "helpinghand",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -19800,6 +19890,12 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
+			"durations": {
+				"partiallytrapped": {
+					"duration": 5,
+					"durationCallback": true
+				}
+			},
 			"volatileStatus": "partiallytrapped",
 			"nonGhostTarget": ""
 		},
@@ -20256,6 +20352,12 @@
 				"condition.onSideEnd",
 				"condition.onSideStart"
 			],
+			"durations": {
+				"lightscreen": {
+					"duration": 5,
+					"durationCallback": true
+				}
+			},
 			"sideCondition": "lightscreen",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -20504,6 +20606,12 @@
 				"condition.onFieldRestart",
 				"condition.onFieldStart"
 			],
+			"durations": {
+				"magicroom": {
+					"duration": 5,
+					"durationCallback": true
+				}
+			},
 			"pseudoWeather": "magicroom",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -20557,6 +20665,11 @@
 				"condition.onStart",
 				"onTry"
 			],
+			"durations": {
+				"magnetrise": {
+					"duration": 5
+				}
+			},
 			"volatileStatus": "magnetrise",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -22230,6 +22343,11 @@
 				"onHitSide",
 				"onTry"
 			],
+			"durations": {
+				"quickguard": {
+					"duration": 1
+				}
+			},
 			"sideCondition": "quickguard",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -22284,6 +22402,11 @@
 				"condition.onStart",
 				"onTry"
 			],
+			"durations": {
+				"ragepowder": {
+					"duration": 1
+				}
+			},
 			"volatileStatus": "ragepowder",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -22494,6 +22617,12 @@
 				"condition.onSideEnd",
 				"condition.onSideStart"
 			],
+			"durations": {
+				"reflect": {
+					"duration": 5,
+					"durationCallback": true
+				}
+			},
 			"sideCondition": "reflect",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -22592,6 +22721,11 @@
 			"customHooks": [
 				"onTryHit"
 			],
+			"durations": {
+				"revivalblessing": {
+					"duration": 1
+				}
+			},
 			"slotCondition": "revivalblessing",
 			"selfSwitch": true,
 			"ignoreImmunity": true,
@@ -22912,6 +23046,12 @@
 				"condition.onSideStart",
 				"condition.onTryAddVolatile"
 			],
+			"durations": {
+				"safeguard": {
+					"duration": 5,
+					"durationCallback": true
+				}
+			},
 			"sideCondition": "safeguard",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -22935,6 +23075,12 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
+			"durations": {
+				"partiallytrapped": {
+					"duration": 5,
+					"durationCallback": true
+				}
+			},
 			"volatileStatus": "partiallytrapped",
 			"nonGhostTarget": ""
 		},
@@ -24856,6 +25002,12 @@
 				"condition.onSideEnd",
 				"condition.onSideStart"
 			],
+			"durations": {
+				"tailwind": {
+					"duration": 4,
+					"durationCallback": true
+				}
+			},
 			"sideCondition": "tailwind",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -24886,6 +25038,11 @@
 				"condition.onEnd",
 				"condition.onStart"
 			],
+			"durations": {
+				"taunt": {
+					"duration": 3
+				}
+			},
 			"volatileStatus": "taunt",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -25560,6 +25717,12 @@
 				"condition.onFieldRestart",
 				"condition.onFieldStart"
 			],
+			"durations": {
+				"trickroom": {
+					"duration": 5,
+					"durationCallback": true
+				}
+			},
 			"pseudoWeather": "trickroom",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -26005,6 +26168,12 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
+			"durations": {
+				"partiallytrapped": {
+					"duration": 5,
+					"durationCallback": true
+				}
+			},
 			"volatileStatus": "partiallytrapped",
 			"nonGhostTarget": ""
 		},
@@ -26058,6 +26227,11 @@
 				"onHitSide",
 				"onTry"
 			],
+			"durations": {
+				"wideguard": {
+					"duration": 1
+				}
+			},
 			"sideCondition": "wideguard",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -26136,6 +26310,12 @@
 				"condition.onFieldStart",
 				"condition.onModifyMove"
 			],
+			"durations": {
+				"wonderroom": {
+					"duration": 5,
+					"durationCallback": true
+				}
+			},
 			"pseudoWeather": "wonderroom",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -26214,6 +26394,12 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
+			"durations": {
+				"partiallytrapped": {
+					"duration": 5,
+					"durationCallback": true
+				}
+			},
 			"volatileStatus": "partiallytrapped",
 			"nonGhostTarget": ""
 		},
@@ -26264,6 +26450,11 @@
 				"condition.onStart",
 				"onTryHit"
 			],
+			"durations": {
+				"yawn": {
+					"duration": 2
+				}
+			},
 			"volatileStatus": "yawn",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""

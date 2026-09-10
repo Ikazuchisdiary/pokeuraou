@@ -146,6 +146,16 @@ export interface MoveEntry {
 	 * measurable instead of guessed.
 	 */
 	hasCustomCode: boolean;
+	/**
+	 * How long the effect this move applies lasts, as Showdown declares it. Emitted so the
+	 * resolver reads durations from the dump instead of from a hand-written list -- four
+	 * effects were silently permanent because they were missing from one.
+	 *
+	 * `durationCallback` says the fixed number is not the whole answer: `partiallytrapped`
+	 * declares 5 and its callback returns `random(5, 7)`, i.e. 5 or 6. The consumer is
+	 * expected to report the approximation rather than pretend the fixed value is exact.
+	 */
+	durations?: Record<string, { duration?: number; durationCallback?: boolean }>;
 	customHooks: string[];
 }
 
@@ -218,6 +228,46 @@ function codeHooks(obj: object): string[] {
 
 /** Showdown stores type effectiveness as an index into [neutral, weak, resist, immune]. */
 const TYPE_MOD: Record<number, number> = { 0: 1, 1: 2, 2: 0.5, 3: 0 };
+
+/**
+ * Durations for every effect one move can apply, keyed by effect id.
+ *
+ * Reads the condition on the move itself, then the named conditions its `volatileStatus`,
+ * `sideCondition`, `slotCondition` and `pseudoWeather` refer to. A named condition is
+ * looked up through the dex so a mod's override is honoured -- Champions changes several.
+ */
+function collectDurations(
+	dex: ReturnType<typeof Dex.forFormat>,
+	move: Record<string, unknown>
+): Record<string, { duration?: number; durationCallback?: boolean }> {
+	const out: Record<string, { duration?: number; durationCallback?: boolean }> = {};
+
+	const record = (id: unknown, condition: unknown) => {
+		if (typeof id !== 'string' || !id || !condition || typeof condition !== 'object') return;
+		const c = condition as Record<string, unknown>;
+		const entry: { duration?: number; durationCallback?: boolean } = {};
+		if (typeof c.duration === 'number') entry.duration = c.duration;
+		if (typeof c.durationCallback === 'function') entry.durationCallback = true;
+		if (Object.keys(entry).length) out[id] = entry;
+	};
+
+	// The move's own condition applies to whichever effect the move names.
+	const own = move.condition;
+	for (const key of ['volatileStatus', 'sideCondition', 'slotCondition', 'pseudoWeather']) {
+		record(move[key], own);
+	}
+	// ...and the named condition, which is where conditions.ts keeps most of them.
+	for (const key of ['volatileStatus', 'sideCondition', 'slotCondition', 'pseudoWeather']) {
+		const id = move[key];
+		if (typeof id !== 'string' || !id) continue;
+		try {
+			record(id, dex.conditions.get(id));
+		} catch {
+			// A condition the dex does not know is not a duration we can report.
+		}
+	}
+	return out;
+}
 
 const DECLARATIVE_MOVE_KEYS = [
 	'boosts', 'status', 'volatileStatus', 'sideCondition', 'slotCondition', 'pseudoWeather',
@@ -360,6 +410,8 @@ export function buildRegulationConfig(formatId: string, showdownCommit: string):
 			hasCustomCode: hooks.length > 0,
 			customHooks: hooks,
 		};
+		const durations = collectDurations(dex, m as unknown as Record<string, unknown>);
+		if (Object.keys(durations).length) entry.durations = durations;
 		Object.assign(entry, pickDeclarative(m as unknown as Record<string, unknown>, DECLARATIVE_MOVE_KEYS));
 		if (m.self) {
 			entry.self = {

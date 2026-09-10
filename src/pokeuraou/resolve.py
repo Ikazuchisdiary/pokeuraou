@@ -1583,7 +1583,11 @@ def _do_protect(
     chance = stall_success_chance(counter)
 
     def succeed(state: _Turn) -> None:
-        state.add_volatile(*me, move.id)
+        # One turn, stated here rather than relying on membership of `PROTECT_VOLATILES`:
+        # Endure is a stalling move and is *not* in that table, so it used to be added with
+        # no duration, miss the unconditional removal, and last the rest of the battle --
+        # the Pokemon surviving every lethal hit at 1 HP forever.
+        state.add_volatile(*me, move.id, duration=1)
         _bump_stall(state, *me)
         state.log(f"{action.label(reg)} protected (1 in {counter})")
 
@@ -1620,7 +1624,12 @@ def _apply_status_move(
     me = (action.side, action.slot)
 
     if raw.get("sideCondition"):
-        turn.add_side_condition(action.side, str(raw["sideCondition"]), duration=_duration(move))
+        side_condition = str(raw["sideCondition"])
+        turn.add_side_condition(
+            action.side, side_condition, duration=_duration(move, side_condition)
+        )
+        if _duration_is_random(move, side_condition):
+            turn.unmodelled.add(f"{side_condition} duration (Showdown rolls it; pinned)")
     if raw.get("weather"):
         turn.pos.field.weather = str(raw["weather"]).lower().replace(" ", "")
         turn.pos.field.weather_duration = 5
@@ -1662,7 +1671,8 @@ def _apply_status_move(
         if raw.get("status"):
             turn.apply_status(*target, str(raw["status"]), reason=move.id)
         if raw.get("volatileStatus"):
-            turn.add_volatile(*target, str(raw["volatileStatus"]), duration=_duration(move))
+            volatile_id = str(raw["volatileStatus"])
+            turn.add_volatile(*target, volatile_id, duration=_duration(move, volatile_id))
         if raw.get("heal"):
             mon = turn.mon_at(*target)
             if mon is not None:
@@ -1720,21 +1730,48 @@ def _apply_status_move(
         turn.unmodelled.add(f"status move: {move.id}")
 
 
-def _duration(move: Move) -> int | None:
-    condition = move.raw.get("condition")
-    if isinstance(condition, dict) and isinstance(condition.get("duration"), int):
-        return int(condition["duration"])
-    if move.id in ("tailwind", "trickroom", "lightscreen", "reflect", "safeguard", "auroraveil"):
-        return 5
-    if move.id in ("taunt", "encore", "torment", "disable"):
-        return 3
-    if move.id == "yawn":
-        return 2
-    # The guards last a single turn. Without a duration here the generic sideCondition
-    # branch would add them permanently, and the explicit call below would be a no-op.
-    if move.id in ("wideguard", "quickguard", "craftyshield", "matblock"):
-        return 1
+def _duration(move: Move, effect_id: str | None = None) -> int | None:
+    """How long the effect this move applies lasts, from the regulation dump.
+
+    Keyed by the effect actually being added, because one move can name a volatile, a side
+    condition and a slot condition and they need not share a duration. Passing ``None``
+    falls back to the move's single declared effect when there is exactly one, which keeps
+    the older call sites working.
+
+    This used to be a hand-written list, and the list was the root cause of a whole class
+    of bug: the dump carried no `condition` at all, so the function's first branch never
+    fired and anything missing from the list became a *permanent* effect. Four were --
+    including a bind the target could never escape and an Endure that survived every lethal
+    hit for the rest of the battle. The list was also simply wrong about Tailwind, which
+    Showdown gives 4 turns and the list gave 5.
+
+    A ``durationCallback`` in the dump means the fixed number is not the whole answer
+    (`partiallytrapped` declares 5 and returns 5 or 6; Tailwind declares 4 and returns 6
+    under Persistent). The fixed value is the pinned reading, which is what the
+    differential test's randomness policy produces, and the caller reports the
+    approximation.
+    """
+    durations = move.raw.get("durations")
+    if not isinstance(durations, dict) or not durations:
+        return None
+    if effect_id is not None:
+        entry = durations.get(effect_id)
+    elif len(durations) == 1:
+        entry = next(iter(durations.values()))
+    else:
+        entry = None
+    if isinstance(entry, dict) and isinstance(entry.get("duration"), int):
+        return int(entry["duration"])
     return None
+
+
+def _duration_is_random(move: Move, effect_id: str) -> bool:
+    """Whether Showdown rolls this duration rather than using the declared number."""
+    durations = move.raw.get("durations")
+    if not isinstance(durations, dict):
+        return False
+    entry = durations.get(effect_id)
+    return bool(isinstance(entry, dict) and entry.get("durationCallback"))
 
 
 def _blocked_by_protect(
@@ -2109,7 +2146,9 @@ def _after_hit(
     if defender is not None and not defender.fainted:
         if raw.get("volatileStatus"):
             vid = str(raw["volatileStatus"])
-            turn.add_volatile(*target, vid, duration=_duration(move))
+            turn.add_volatile(*target, vid, duration=_duration(move, vid))
+            if _duration_is_random(move, vid):
+                turn.unmodelled.add(f"{vid} duration (Showdown rolls it; pinned to the declared value)")
             # A trap ends when whoever applied it leaves, so record who that was.
             applied = defender.volatile(vid)
             if applied is not None and vid == "partiallytrapped":
