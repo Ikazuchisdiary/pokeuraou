@@ -45,6 +45,13 @@ def main() -> None:
         "at every node is a win probability too. Needs the optional learn group.",
     )
     ap.add_argument("--device", default=None, help="cuda or cpu; default is cuda if present")
+    ap.add_argument(
+        "--torch-threads",
+        type=int,
+        default=1,
+        help="threads per worker. 1 is right for a parallel run: N processes each spawning "
+        "a pool on the same cores is slower than one process. Raise it for a single run.",
+    )
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--report", action="store_true", help="print a summary of the output file")
     ap.add_argument(
@@ -91,6 +98,8 @@ def main() -> None:
         # Imported here so a run without --value never loads torch: the resolver, the
         # differential tests and the M1 path stay installable without a CUDA wheel.
         import torch
+
+        torch.set_num_threads(args.torch_threads)
 
         from pokeuraou.encode import Encoder
         from pokeuraou.value import BatchedValue, load_model

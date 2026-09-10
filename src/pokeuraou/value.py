@@ -539,11 +539,17 @@ class BatchedValue:
         """(N,) probability that side 0 wins, for Position objects or their JSON form."""
         if not positions:
             return np.zeros(0, dtype=np.float64)
-        payloads = [p if isinstance(p, dict) else p.to_json() for p in positions]
-        out = np.empty(len(payloads), dtype=np.float64)
-        for start in range(0, len(payloads), self.batch_size):
-            chunk = payloads[start : start + self.batch_size]
-            encoded = self.encoder.encode(chunk)
+        # Position objects go straight to `encode_positions`; only a caller that already
+        # has JSON pays the conversion, and `to_json` was 64% of the per-leaf cost.
+        as_json = bool(positions) and isinstance(positions[0], dict)
+        out = np.empty(len(positions), dtype=np.float64)
+        for start in range(0, len(positions), self.batch_size):
+            chunk = positions[start : start + self.batch_size]
+            encoded = (
+                self.encoder.encode(chunk)
+                if as_json
+                else self.encoder.encode_positions(chunk)
+            )
             batch = {
                 "species": torch.from_numpy(encoded.species),
                 "ability": torch.from_numpy(encoded.ability),
@@ -558,7 +564,7 @@ class BatchedValue:
             out[start : start + len(chunk)] = (
                 torch.sigmoid(self.net(batch)).double().cpu().numpy()
             )
-        self.evaluated += len(payloads)
+        self.evaluated += len(positions)
         return out
 
     def objective(self, name: str = "win") -> Any:  # noqa: ANN401

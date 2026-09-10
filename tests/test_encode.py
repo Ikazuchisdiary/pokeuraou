@@ -252,3 +252,25 @@ def test_an_encoder_refuses_a_vocabulary_from_another_regulation() -> None:
 
 def test_the_volatile_vocabulary_has_no_duplicates() -> None:
     assert len(set(VOLATILES)) == len(VOLATILES)
+
+
+def test_both_entry_points_agree(encoder_and_positions) -> None:  # noqa: ANN001
+    """`encode` (JSON) and `encode_positions` (dataclass) must produce identical arrays.
+
+    There is only one implementation -- `encode` converts and defers -- so this is really a
+    round-trip check on `Position.to_json` / `from_json`: a field that serialises lossily
+    would make the training set disagree with what the search sees, and only the search
+    path takes the direct route.
+
+    The direct route exists because `to_json` was 64% of the per-leaf cost in the search
+    (0.228 ms against 0.117 ms of encoding and 0.012 ms of forward pass), and the search
+    already holds Position objects.
+    """
+    from pokeuraou.position import Position
+
+    encoder, positions = encoder_and_positions
+    from_json = encoder.encode(positions)
+    direct = encoder.encode_positions([Position.from_json(p) for p in positions])
+    for name in ("species", "ability", "item", "moves", "mon", "mask", "side", "field"):
+        assert np.array_equal(getattr(from_json, name), getattr(direct, name)), name
+    assert from_json.unknown_volatiles == direct.unknown_volatiles

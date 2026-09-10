@@ -45,7 +45,15 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=77)
     ap.add_argument("--max-turns", type=int, default=40)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument(
+        "--torch-threads",
+        type=int,
+        default=1,
+        help="threads per worker. 1 is right for a parallel run: N processes each spawning "
+        "a pool on the same cores is slower than one process. Raise it for a single run.",
+    )
     args = ap.parse_args()
+    torch.set_num_threads(args.torch_threads)
 
     roster = load_roster(args.roster)
     reg = roster.reg

@@ -32,6 +32,7 @@ from typing import Any
 
 import numpy as np
 
+from .position import Position
 from .regulation import STAT_IDS, Regulation
 from .stats import nature_multipliers, stats_from_sp
 
@@ -348,6 +349,22 @@ class Encoder:
         }
 
     def encode(self, positions: list[dict[str, Any]]) -> Encoded:
+        """Encodes positions in their JSON form.
+
+        Converts to :class:`~pokeuraou.position.Position` and defers, so there is exactly
+        one implementation of every field read. The conversion is only paid on the offline
+        path -- reading a training set from JSONL -- where 51 seconds for 175,778 positions
+        is not a number anyone waits on. The search calls :meth:`encode_positions`.
+        """
+        return self.encode_positions([Position.from_json(p) for p in positions])
+
+    def encode_positions(self, positions: list[Position]) -> Encoded:
+        """Encodes positions directly, which is the path the search uses.
+
+        Reading the dataclass avoids building a nested dict per leaf, which was 64% of the
+        per-leaf cost: 0.228 ms of `to_json` against 0.117 ms of encoding and 0.012 ms of
+        forward pass.
+        """
         n = len(positions)
         m = self.mons_per_side
         species = np.zeros((n, 2, m), dtype=np.int64)
@@ -362,16 +379,16 @@ class Encoder:
 
         for b, position in enumerate(positions):
             self._encode_field(field[b], position)
-            for s, side_json in enumerate(position["sides"]):
-                self._encode_side(side[b, s], side_json)
-                for p, mon_json in enumerate(side_json["pokemon"][:m]):
+            for s, one_side in enumerate(position.sides):
+                self._encode_side(side[b, s], one_side)
+                for p, one_mon in enumerate(one_side.pokemon[:m]):
                     mask[b, s, p] = 1.0
-                    species[b, s, p] = self.vocab.species.get(mon_json["species"], 0)
-                    ability[b, s, p] = self.vocab.abilities.get(mon_json.get("ability") or "", 0)
-                    item[b, s, p] = self.vocab.items.get(mon_json.get("item") or "", 0)
-                    for k, slot in enumerate(mon_json.get("moves", [])[:4]):
-                        moves[b, s, p, k] = self.vocab.moves.get(slot["id"], 0)
-                    self._encode_mon(mon[b, s, p], mon_json, side_json, unknown)
+                    species[b, s, p] = self.vocab.species.get(one_mon.species, 0)
+                    ability[b, s, p] = self.vocab.abilities.get(one_mon.ability or "", 0)
+                    item[b, s, p] = self.vocab.items.get(one_mon.item or "", 0)
+                    for k, slot in enumerate(one_mon.moves[:4]):
+                        moves[b, s, p, k] = self.vocab.moves.get(slot.id, 0)
+                    self._encode_mon(mon[b, s, p], one_mon, one_side, unknown)
         return Encoded(
             species=species,
             ability=ability,
@@ -386,65 +403,55 @@ class Encoder:
 
     # ------------------------------------------------------------------ pieces --
 
-    def _encode_field(self, out: np.ndarray, position: dict[str, Any]) -> None:
+    def _encode_field(self, out: np.ndarray, position: Position) -> None:
         names = self.field_names
+        state = position.field
         base = 0
-        weather = position["field"].get("weather")
-        wid = (weather or {}).get("id") if isinstance(weather, dict) else weather
+        wid = state.weather
         out[base] = 1.0 if not wid else 0.0
         for i, name in enumerate(WEATHERS):
             out[base + 1 + i] = 1.0 if wid == name else 0.0
-        duration = (weather or {}).get("duration") if isinstance(weather, dict) else None
-        out[base + 1 + len(WEATHERS)] = float(duration or 0) / 8.0
+        out[base + 1 + len(WEATHERS)] = float(state.weather_duration or 0) / 8.0
         base += 2 + len(WEATHERS)
 
-        terrain = position["field"].get("terrain")
-        tid = (terrain or {}).get("id") if isinstance(terrain, dict) else terrain
+        tid = state.terrain
         out[base] = 1.0 if not tid else 0.0
         for i, name in enumerate(TERRAINS):
             out[base + 1 + i] = 1.0 if tid == name else 0.0
-        duration = (terrain or {}).get("duration") if isinstance(terrain, dict) else None
-        out[base + 1 + len(TERRAINS)] = float(duration or 0) / 8.0
+        out[base + 1 + len(TERRAINS)] = float(state.terrain_duration or 0) / 8.0
         base += 2 + len(TERRAINS)
 
-        present = {
-            (p.get("id") if isinstance(p, dict) else p)
-            for p in position["field"].get("pseudoWeather", [])
-        }
+        present = {effect.id for effect in state.pseudo_weather}
         for i, name in enumerate(PSEUDO_WEATHERS):
             out[base + i] = 1.0 if name in present else 0.0
         base += len(PSEUDO_WEATHERS)
 
-        turn = float(position.get("turn", 1))
+        turn = float(position.turn)
         out[base] = min(turn, TURN_CLIP) / TURN_CLIP
         out[base + 1] = 1.0 if turn <= 1 else 0.0
         assert base + 2 == len(names)
 
-    def _encode_side(self, out: np.ndarray, side_json: dict[str, Any]) -> None:
-        conditions = {c["id"] for c in side_json.get("sideConditions", [])}
+    def _encode_side(self, out: np.ndarray, side: Any) -> None:  # noqa: ANN401
+        conditions = {c.id for c in side.side_conditions}
         base = 0
         for i, name in enumerate(SIDE_CONDITIONS):
             out[base + i] = 1.0 if name in conditions else 0.0
         base += len(SIDE_CONDITIONS)
 
-        mons = side_json["pokemon"]
-        alive = [p for p in mons if not p.get("fainted")]
-        out[base] = 1.0 if side_json.get("megaUsed") else 0.0
+        mons = side.pokemon
+        alive = sum(1 for p in mons if not p.fainted)
+        out[base] = 1.0 if side.mega_used else 0.0
         # Mega is a once-per-battle side resource, so "still has it" is a real feature of
         # the side and not of any one Pokemon.
-        out[base + 1] = (
-            1.0
-            if not side_json.get("megaUsed") and side_json.get("megaCapableSlots")
-            else 0.0
-        )
-        out[base + 2] = len(alive) / max(len(mons), 1)
-        total = sum(p["maxhp"] for p in mons) or 1
-        out[base + 3] = sum(p["hp"] for p in mons) / total
+        out[base + 1] = 1.0 if not side.mega_used and side.mega_capable_slots else 0.0
+        out[base + 2] = alive / max(len(mons), 1)
+        total = sum(p.maxhp for p in mons) or 1
+        out[base + 3] = sum(p.hp for p in mons) / total
         base += 4
 
-        slots = side_json.get("slotConditions") or []
+        slots = side.slot_conditions
         for slot in range(2):
-            ids = {c["id"] for c in slots[slot]} if slot < len(slots) else set()
+            ids = {c.id for c in slots[slot]} if slot < len(slots) else set()
             for i, name in enumerate(SLOT_CONDITIONS):
                 out[base + i] = 1.0 if name in ids else 0.0
             base += len(SLOT_CONDITIONS)
@@ -453,74 +460,69 @@ class Encoder:
     def _encode_mon(
         self,
         out: np.ndarray,
-        mon: dict[str, Any],
-        side_json: dict[str, Any],
+        mon: Any,  # noqa: ANN401
+        side: Any,  # noqa: ANN401
         unknown: dict[str, int],
     ) -> None:
-        maxhp = float(mon["maxhp"]) or 1.0
+        maxhp = float(mon.maxhp) or 1.0
         base = 0
-        out[base] = float(mon["hp"]) / maxhp
+        out[base] = float(mon.hp) / maxhp
         out[base + 1] = maxhp / HP_SCALE
         base += 2
 
-        sp = mon.get("sp") or {}
+        sp = mon.sp or {}
         sp_tuple = tuple(int(sp.get(s, 0)) for s in STAT_IDS)
-        stats = self._stats.get(mon["species"], mon.get("nature", "Serious"), sp_tuple)
+        stats = self._stats.get(mon.species, mon.nature or "Serious", sp_tuple)
         out[base : base + 6] = stats / STAT_SCALE
         base += 6
         out[base : base + 6] = np.array(sp_tuple, dtype=np.float32) / 32.0
         base += 6
 
-        boosts = mon.get("boosts") or {}
+        boosts = mon.boosts or {}
         for i, boost in enumerate(BOOST_IDS):
             out[base + i] = float(boosts.get(boost, 0)) / 6.0
         base += len(BOOST_IDS)
 
-        status = mon.get("status")
+        status = mon.status
         out[base] = 1.0 if not status else 0.0
         for i, name in enumerate(STATUSES):
             out[base + 1 + i] = 1.0 if status == name else 0.0
         base += 1 + len(STATUSES)
 
-        active_index = mon.get("activeIndex")
-        capable = set(side_json.get("megaCapableSlots") or [])
+        active_index = mon.active_index
         out[base + 0] = 1.0 if active_index is not None else 0.0
         out[base + 1] = 1.0 if active_index == 0 else 0.0
         out[base + 2] = 1.0 if active_index == 1 else 0.0
-        out[base + 3] = 1.0 if mon.get("fainted") else 0.0
-        out[base + 4] = 1.0 if mon.get("isMega") else 0.0
+        out[base + 3] = 1.0 if mon.fainted else 0.0
+        out[base + 4] = 1.0 if mon.is_mega else 0.0
         out[base + 5] = (
             1.0
-            if mon["slot"] in capable and not side_json.get("megaUsed") and not mon.get("isMega")
+            if mon.slot in side.mega_capable_slots and not side.mega_used and not mon.is_mega
             else 0.0
         )
-        out[base + 6] = 1.0 if mon.get("trapped") else 0.0
-        out[base + 7] = 1.0 if mon.get("newlySwitched") else 0.0
+        out[base + 6] = 1.0 if mon.trapped else 0.0
+        out[base + 7] = 1.0 if mon.newly_switched else 0.0
         base += 8
 
-        for kind in mon.get("types", []):
+        for kind in mon.types:
             index = self._type_index.get(kind)
             if index is not None:
                 out[base + index] = 1.0
         base += len(self.vocab.types)
 
-        move_slots = mon.get("moves", [])
-        for i in range(4):
-            if i < len(move_slots):
-                slot = move_slots[i]
-                out[base + i] = float(slot["pp"]) / max(float(slot["maxpp"]), 1.0)
-                out[base + 4 + i] = 1.0 if slot.get("disabled") else 0.0
+        for i, slot in enumerate(mon.moves[:4]):
+            out[base + i] = float(slot.pp) / max(float(slot.maxpp), 1.0)
+            out[base + 4 + i] = 1.0 if slot.disabled else 0.0
         base += 8
 
-        for volatile in mon.get("volatiles", []):
-            vid = volatile["id"] if isinstance(volatile, dict) else volatile
-            index = self._volatile_index.get(vid)
+        for volatile in mon.volatiles:
+            index = self._volatile_index.get(volatile.id)
             if index is None:
                 out[base + len(VOLATILES)] = 1.0
-                unknown[vid] = unknown.get(vid, 0) + 1
+                unknown[volatile.id] = unknown.get(volatile.id, 0) + 1
             else:
                 out[base + index] = 1.0
-        for vid in mon.get("unmodelledVolatiles", []):
+        for vid in mon.unmodelled_volatiles:
             out[base + len(VOLATILES)] = 1.0
             unknown[vid] = unknown.get(vid, 0) + 1
         base += len(VOLATILES) + 1
