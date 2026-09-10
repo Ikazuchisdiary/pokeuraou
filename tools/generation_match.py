@@ -16,6 +16,7 @@ was exactly that, and it was worth 9 points in a mirror.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -44,6 +45,20 @@ def main() -> None:
     ap.add_argument("--objective", default="hp-share", help="the leaf the older generation used")
     ap.add_argument("--seed", type=int, default=77)
     ap.add_argument("--max-turns", type=int, default=40)
+    ap.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="append one JSON line per seat as it completes, so a stopped run is not lost "
+        "and several runs can be pooled by reading the files.",
+    )
+    ap.add_argument(
+        "--report-every",
+        type=int,
+        default=25,
+        help="print a progress line every N games. Redirected stdout is fully buffered, so "
+        "these are flushed explicitly or they are invisible until the process exits.",
+    )
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument(
         "--torch-threads",
@@ -87,7 +102,14 @@ def main() -> None:
         rng = np.random.default_rng(args.seed)
         seat_wins = seat_played = unfinished = 0
         started = time.perf_counter()
-        for _ in range(args.games):
+        for played_so_far in range(args.games):
+            if played_so_far and played_so_far % args.report_every == 0:
+                rate = seat_wins / seat_played * 100 if seat_played else float("nan")
+                print(
+                    f"    [{seat}] {played_so_far}/{args.games} played, "
+                    f"gen2 {rate:.1f}%, {(time.perf_counter() - started) / played_so_far:.2f} s/game",
+                    flush=True,
+                )
             team = pool[int(rng.integers(len(pool)))]
             foe_six = sample_standings_team(rng, reg, prior, team)
             own_pick = selections[int(rng.integers(len(selections)))]
@@ -119,14 +141,37 @@ def main() -> None:
         )
         print(
             f"  {seat:>26}  {seat_played:>6}  {rate * 100:>8.1f}%  +-{half * 100:.1f}  "
-            f"{elapsed / args.games:>7.2f}   (打ち切り {unfinished})"
+            f"{elapsed / args.games:>7.2f}   (打ち切り {unfinished})",
+            flush=True,
         )
+        if args.out is not None:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            with args.out.open("a", encoding="utf-8") as handle:
+                handle.write(
+                    json.dumps(
+                        {
+                            "seat": seat,
+                            "seed": args.seed,
+                            "model": args.value.name,
+                            "objective": args.objective,
+                            "limit": args.limit,
+                            "played": seat_played,
+                            "gen2_wins": seat_wins,
+                            "unfinished": unfinished,
+                            "seconds": elapsed,
+                        }
+                    )
+                    + "\n"
+                )
         wins += seat_wins
         played += seat_played
 
     rate = wins / played if played else float("nan")
     half = 1.96 * (rate * (1 - rate) / played) ** 0.5 if played else float("nan")
-    print(f"\n  両席あわせて {played} ゲーム: gen2 の勝率 {rate * 100:.1f}% +-{half * 100:.1f}")
+    print(
+        f"\n  両席あわせて {played} ゲーム: gen2 の勝率 {rate * 100:.1f}% +-{half * 100:.1f}",
+        flush=True,
+    )
     if rate - half > 0.5:
         print("  → gen2 が有意に強い。次世代のデータ生成に使える。")
     elif rate + half < 0.5:
