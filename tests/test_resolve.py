@@ -29,7 +29,7 @@ from pokeuraou.actions import (
 )
 from pokeuraou.oracle import ORACLE_JS, Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Effect, MoveSlot, Position
-from pokeuraou.regulation import Regulation
+from pokeuraou.regulation import Regulation, to_id
 from pokeuraou.resolve import (
     FREEZE_COUNTER,
     FULL_PARALYSIS_CHANCE,
@@ -2259,3 +2259,231 @@ def test_feint_also_strips_wide_guard_from_the_side(
     assert not after.sides[1].has_side_condition("wideguard"), (
         "Feint has to strip Wide Guard: " + " / ".join(result.branches[0].events)
     )
+
+
+@pytest.mark.oracle
+def test_the_leads_switch_in_abilities_fire_before_turn_one(
+    reg: Regulation, oracle: Oracle
+) -> None:
+    """Showdown has applied Intimidate, Defiant and a lead's weather before `|turn|1`.
+
+        |-ability|p1a: Incineroar|Intimidate|boost
+        |-unboost|p2a: Kingambit|atk|1
+        |-ability|p2a: Kingambit|Defiant|boost
+        |-boost|p2a: Kingambit|atk|2
+        |-unboost|p2b: Torkoal|atk|1
+        |-weather|SunnyDay|[from] ability: Drought|[of] p2b: Torkoal
+        |turn|1
+
+    `position_from_sets` returned the raw position, so none of that existed: Intimidate is
+    on 41% of the field through Incineroar alone, Defiant and Competitive answer it on
+    another 17%, and every sun or rain team was being searched with no weather at all.
+
+    The differential test cannot catch this, because it takes its positions *from* Showdown
+    -- our own opening construction had never been compared to anything. So the comparison
+    is made here, against the position Showdown reports at turn 1.
+    """
+    from pokeuraou.priors import SampledSet
+    from pokeuraou.selfplay import position_from_sets
+
+    ours = [
+        TeamSet("Incineroar", "Intimidate", "Brave",
+                ["fakeout", "flareblitz", "partingshot", "protect"], {"hp": 32},
+                item="sitrusberry"),
+        TeamSet("Charizard", "Blaze", "Timid",
+                ["heatwave", "airslash", "protect", "flamethrower"], {"spe": 32},
+                item="charcoal"),
+        TeamSet("Garchomp", "Rough Skin", "Jolly",
+                ["earthquake", "dragonclaw", "protect", "rockslide"], {"spe": 32},
+                item="choicescarf"),
+        TeamSet("Venusaur", "Chlorophyll", "Modest",
+                ["sludgebomb", "gigadrain", "protect", "sleeppowder"], {"spa": 32},
+                item="lifeorb"),
+    ]
+    theirs = [
+        TeamSet("Kingambit", "Defiant", "Adamant",
+                ["ironhead", "suckerpunch", "swordsdance", "protect"], {"atk": 32},
+                item="focussash"),
+        TeamSet("Torkoal", "Drought", "Bold",
+                ["eruption", "protect", "helpinghand", "weatherball"], {"hp": 32},
+                item="charcoal"),
+        TeamSet("Toxapex", "Regenerator", "Relaxed",
+                ["infestation", "toxic", "wideguard", "protect"], {"hp": 32},
+                item="leftovers"),
+        TeamSet("Sylveon", "Pixilate", "Modest",
+                ["hypervoice", "protect", "yawn", "quickattack"], {"spa": 32},
+                item="lifeorb"),
+    ]
+
+    def sampled(sets: list[TeamSet]) -> list[SampledSet]:
+        return [
+            SampledSet(
+                species=to_id(t.species),
+                ability=to_id(t.ability),
+                item=to_id(t.item) if t.item else None,
+                nature=t.nature,
+                moves=[to_id(m) for m in t.moves],
+                sp=dict(t.sp),
+            )
+            for t in sets
+        ]
+
+    handle = oracle.create(FORMAT_ID, ours, theirs, policy=RandomnessPolicy(damage_roll=8))
+    handle.step(["team 1,2,3,4", "team 1,2,3,4"])
+    showdown = Position.from_json(handle.position)
+    mine = position_from_sets(reg, sampled(ours), sampled(theirs))
+
+    assert mine.field.weather == showdown.field.weather == "sunnyday", (
+        f"a lead's Drought has to put the sun up: ours {mine.field.weather}, "
+        f"showdown {showdown.field.weather}"
+    )
+    assert mine.field.weather_duration == showdown.field.weather_duration
+
+    for side in range(2):
+        for slot in range(2):
+            ours_mon = mine.sides[side].pokemon[mine.sides[side].active[slot]]
+            their_mon = showdown.sides[side].pokemon[showdown.sides[side].active[slot]]
+            assert ours_mon.species == their_mon.species, "the leads must line up"
+            assert ours_mon.boosts == their_mon.boosts, (
+                f"p{side + 1} slot {slot} ({ours_mon.species}): ours {ours_mon.boosts} vs "
+                f"showdown {their_mon.boosts}"
+            )
+    # And specifically the interaction the user reported: Intimidate lowers it, Defiant
+    # answers with +2, so Kingambit is a net +1 before anyone has chosen anything.
+    kingambit = mine.sides[1].pokemon[mine.sides[1].active[0]]
+    assert kingambit.boosts.get("atk") == 1, kingambit.boosts
+    handle.close()
+
+
+def test_fake_out_only_works_on_the_turn_its_user_came_in(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """`if (source.activeMoveActions > 1) return false` -- and we tracked no such counter.
+
+    Fake Out is the most common move in the tournament field, on 234 of 394 teams, and it
+    worked on every turn. A recorded game had Incineroar using it on turn 4 having been on
+    the field since turn 1.
+
+    The counter is reset by a switch, so a Pokemon that leaves and comes back may use it
+    again -- asserted too, because gating on "turn 1" instead of "first move since coming
+    in" would pass the first half of this test and fail the game.
+    """
+    pos = _synthetic_position(reg, team_a)
+    _install_move(pos, 0, 0, "fakeout")
+    _install_move(pos, 0, 1, "protect")
+    for slot in (0, 1):
+        _install_move(pos, 1, slot, "swordsdance")
+    ours = SideAction(
+        slots=(
+            _move_action(pos, 0, 0, "fakeout", 1),
+            _move_action(pos, 0, 1, "protect", None),
+        )
+    )
+    theirs = _protect_both(pos, 1)
+
+    def flinched(position: Position) -> bool:
+        """Whether the target lost its action -- Swords Dance never raised its Attack."""
+        result = resolve_turn(reg, position, [ours, theirs], budget=Budget.deterministic(8))
+        after = result.branches[0].position.sides[1]
+        return after.pokemon[after.active[0]].boosts.get("atk", 0) <= 0
+
+    assert flinched(pos), "the first move out has to work"
+
+    # Second turn on the field: refused.
+    user = pos.sides[0].pokemon[pos.sides[0].active[0]]
+    user.active_move_actions = 1
+    assert not flinched(pos), "Fake Out must fail once its user has already moved"
+
+    # And a switch re-arms it, which is why the counter is on the Pokemon and not the turn.
+    user.active_move_actions = 0
+    assert flinched(pos), "coming back in re-arms Fake Out"
+
+
+def test_a_choice_item_locks_its_holder_into_one_move(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """`choicelock` was written by the resolver and read by nothing.
+
+    107 of the 394 tournament teams carry a Choice Scarf, and being locked is most of what
+    the Scarf costs -- so a Garchomp that switched moves every turn was getting the Speed
+    for free.
+
+    The existing guards could not see it, and the reason is structural: they take their
+    positions *from* Showdown, whose snapshot already marks the locked-out moves
+    `disabled`, so our own `usable` filtered them without ever consulting the volatile. The
+    bug only existed in positions self-play builds itself. That makes this test's starting
+    point -- a position we constructed -- the point of it.
+    """
+    assert "choicescarf" in reg.choice_items, "the dump has to say which items lock"
+
+    pos = _synthetic_position(reg, team_a)
+    mon = pos.sides[0].pokemon[pos.sides[0].active[0]]
+    mon.item = "choicescarf"
+    assert len(mon.moves) >= 2, "the fixture needs a second move to be locked out of"
+    locked_move = mon.moves[0].id
+    other = mon.moves[1].id
+
+    def offered() -> set[str]:
+        return {
+            a.move_id
+            for action in side_actions(reg, pos, 0)
+            for a in action.slots
+            if isinstance(a, MoveAction) and a.slot == 0
+        }
+
+    assert {locked_move, other} <= offered(), "unlocked, everything is on offer"
+
+    mon.volatiles.append(Effect(id="choicelock", move=locked_move))
+    assert offered() == {locked_move}, (
+        f"a Choice holder may only repeat its move, got {sorted(offered())}"
+    )
+
+    # `onDisableMove` drops the lock when the item goes, so Knock Off frees the holder.
+    mon.item = None
+    assert other in offered(), "losing the item has to free the holder"
+
+    # ...and when the move itself is gone, which is the other half of the same guard.
+    mon.item = "choicescarf"
+    mon.volatiles = [Effect(id="choicelock", move="somemovenotknown")]
+    assert other in offered(), "a lock naming a move it does not know cannot hold"
+
+
+def test_using_a_move_with_a_choice_item_sets_the_lock(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """The lock has to be applied by the turn, not just honoured when present.
+
+    Set for any item the dump marks `isChoice` rather than for `choicescarf` by name -- the
+    old code named the Scarf, which is the only Choice item in this regulation's pool but
+    is not what the rule says.
+    """
+    pos = _synthetic_position(reg, team_a)
+    mon = pos.sides[0].pokemon[pos.sides[0].active[0]]
+    mon.item = "choicescarf"
+    _install_move(pos, 0, 0, "ironhead")
+    _install_move(pos, 0, 1, "protect")
+    for slot in (0, 1):
+        _install_move(pos, 1, slot, "swordsdance")
+
+    ours = SideAction(
+        slots=(
+            _move_action(pos, 0, 0, "ironhead", 1),
+            _move_action(pos, 0, 1, "protect", None),
+        )
+    )
+    result = resolve_turn(
+        reg, pos, [ours, _protect_both(pos, 1)], budget=Budget.deterministic(8)
+    )
+    after = result.branches[0].position
+    holder = after.sides[0].pokemon[after.sides[0].active[0]]
+    lock = holder.volatile("choicelock")
+    assert lock is not None and lock.move == "ironhead", (
+        f"using a move on a Choice item has to record it: {lock}"
+    )
+    offered = {
+        a.move_id
+        for action in side_actions(reg, after, 0)
+        for a in action.slots
+        if isinstance(a, MoveAction) and a.slot == 0
+    }
+    assert offered == {"ironhead"}, f"next turn only that move is legal: {sorted(offered)}"

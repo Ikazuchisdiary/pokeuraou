@@ -503,6 +503,10 @@ ITEM_MODIFIERS: dict[str, tuple[Modifier, ...]] = {
     "expertbelt": (
         Modifier("expertbelt", "damage", 4915, 4096, when=lambda c: c.type_mod > 0),
     ),
+    # Choice Band and Choice Specs are deliberately absent: neither is in this
+    # regulation's item pool, so a modifier for them could never fire and could never be
+    # tested. `tools/coverage.py` reports an unmodelled item that does exist; untestable
+    # code that guards against a hypothetical one is worse than that report.
     "muscleband": (Modifier("muscleband", "base_power", 4505, 4096, when=_is_physical),),
     "wiseglasses": (Modifier("wiseglasses", "base_power", 4505, 4096, when=_is_special),),
     "normalgem": (

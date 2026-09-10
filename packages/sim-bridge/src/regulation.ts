@@ -164,6 +164,11 @@ export interface ItemEntry {
 	name: string;
 	num: number;
 	isBerry: boolean;
+	/**
+	 * A Choice item: it locks its holder into the first move it uses. Not emitted before,
+	 * so the consumer had no way to know which items lock and simply never enforced it.
+	 */
+	isChoice?: boolean;
 	naturalGift?: { basePower: number; type: string };
 	fling?: { basePower: number; status?: string; volatileStatus?: string };
 	/** { "Charizard": "Charizard-Mega-Y" } */
@@ -582,6 +587,7 @@ export function buildRegulationConfig(formatId: string, showdownCommit: string):
 			name: it.name,
 			num: it.num,
 			isBerry: !!it.isBerry,
+			...(it.isChoice ? { isChoice: true } : {}),
 			...(it.naturalGift ? { naturalGift: { ...it.naturalGift } } : {}),
 			...(it.fling ? { fling: { ...it.fling } } : {}),
 			...(it.megaStone ? { megaStone: { ...it.megaStone } } : {}),

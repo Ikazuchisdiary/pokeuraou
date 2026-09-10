@@ -140,6 +140,10 @@ class Pokemon:
     move_last_turn_failed: bool = False
     #: Times this Pokemon has been hit, which is Rage Fist's base power.
     times_attacked: int = 0
+    #: Move actions taken since coming in -- Showdown's `activeMoveActions`, reset by a
+    #: switch and incremented per move. Fake Out and its two relatives refuse to work once
+    #: this is above one, which is the whole of "only on your first turn out".
+    active_move_actions: int = 0
     #: The ability's own state. Protean and Libero record here that they have already
     #: retyped their user this switch-in, so it is not derivable from the volatiles.
     ability_state: dict[str, Any] = field(default_factory=dict)
@@ -212,6 +216,7 @@ class Pokemon:
             locked_move=self.locked_move,
             move_last_turn_failed=self.move_last_turn_failed,
             times_attacked=self.times_attacked,
+            active_move_actions=self.active_move_actions,
             ability_state=dict(self.ability_state),
             stats_override=dict(self.stats_override) if self.stats_override is not None else None,
             transformed=self.transformed,
@@ -249,6 +254,7 @@ class Pokemon:
             locked_move=d.get("lockedMove"),
             move_last_turn_failed=bool(d.get("moveLastTurnFailed")),
             times_attacked=int(d.get("timesAttacked", 0)),
+            active_move_actions=int(d.get("activeMoveActions", 0)),
             ability_state=dict(d.get("abilityState", {})),
             stats_override=dict(d["statsOverride"]) if d.get("statsOverride") else None,
             transformed=bool(d.get("transformed")),
@@ -283,6 +289,7 @@ class Pokemon:
             "lockedMove": self.locked_move,
             "moveLastTurnFailed": self.move_last_turn_failed,
             "timesAttacked": self.times_attacked,
+            "activeMoveActions": self.active_move_actions,
             "abilityState": dict(self.ability_state),
             "transformed": self.transformed,
         }

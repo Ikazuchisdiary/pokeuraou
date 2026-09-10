@@ -64,6 +64,12 @@ from .view import battler, field_state, move_hits_multiple
 #: Protect-family volatiles, and what each blocks. Endure is deliberately absent: it is a
 #: stalling move that shares the counter, but its volatile caps damage rather than
 #: blocking the hit, so it is handled in `deal_damage` instead.
+#: Moves that only work on the turn their user came in. Showdown writes the rule three
+#: times, once per move, as `if (source.activeMoveActions > 1) return false`. Fake Out is
+#: the one that matters -- 234 of the 394 tournament teams carry it, more than any other
+#: move -- and it worked on every turn until this existed.
+FIRST_TURN_OUT_MOVES = frozenset({"fakeout", "firstimpression", "matblock"})
+
 PROTECT_VOLATILES: dict[str, str] = {
     "protect": "all",
     "detect": "all",
@@ -1281,6 +1287,9 @@ def _do_switch(
 
     incoming.active_index = action.slot
     incoming.newly_switched = True
+    # `pokemon.activeMoveActions = 0` sits beside the `moveSlot.used = false` loop in
+    # Showdown's `switchIn`, and it is what re-arms Fake Out for the Pokemon coming in.
+    incoming.active_move_actions = 0
     for move_slot in incoming.moves:
         move_slot.used = False
     # `tox.onSwitchIn` resets the stage, so a badly poisoned Pokemon coming back in starts
@@ -1544,7 +1553,9 @@ def _use_move(
     mon = turn.mon_at(action.side, action.slot)
     if mon is not None:
         mon.last_move = action.move_id
-        if mon.item == "choicescarf":
+        # Any Choice item, not just the Scarf: the dump says which, so Band and Specs are
+        # covered without naming them.
+        if mon.item is not None and mon.item in reg.choice_items:
             turn.add_volatile(action.side, action.slot, "choicelock")
             locked = mon.volatile("choicelock")
             if locked is not None:
@@ -1563,6 +1574,15 @@ def _use_move(
         )
         if wanted is not None and mon.species != wanted:
             _change_forme(turn, action.side, action.slot, wanted)
+
+    # `runMove` increments this before `onTry` runs, so the counter is 1 during the first
+    # move a Pokemon makes after coming in.
+    if mon is not None:
+        mon.active_move_actions += 1
+        if action.move_id in FIRST_TURN_OUT_MOVES and mon.active_move_actions > 1:
+            turn.log(f"{action.label(reg)} failed (only on the first turn out)")
+            turn.move_failed.add((action.side, action.slot))
+            return [(1.0, turn, "")]
 
     if action.move_id == "lastresort" and mon is not None:
         # Fails until every *other* move the Pokemon knows has been used, and needs at
@@ -3505,6 +3525,48 @@ def turn_expectation(
     return plan.value([value(p) for p in plan.positions]), plan.unmodelled
 
 
+def apply_lead_abilities(reg: Regulation, pos: Position) -> ReplacementResult:
+    """Runs the leads' switch-in effects, as Showdown does before `|turn|1`.
+
+    A freshly built turn-1 position has had nothing applied to it: no Intimidate, no
+    Defiant answering it, no weather from a lead's ability. Showdown has done all of that
+    before the first request goes out, so a position without it is not the position the
+    game starts from.
+
+    Speed-ordered, fastest first, like the replacement phase -- and via the same
+    `_on_switch_in`, so hazards and White Herb behave identically should a caller ever hand
+    this a position that has them.
+    """
+    state = _Turn(reg, pos.copy(), Budget.deterministic(0), {})
+    placed: list[tuple[int, int, np.ndarray]] = []
+    for side_index, side in enumerate(state.pos.sides):
+        for slot, party in enumerate(side.active):
+            if party is None:
+                continue
+            incoming = state.battler_at(side_index, slot)
+            speed = (
+                effective_speed(
+                    reg,
+                    incoming,
+                    state.field(),
+                    frozenset(c.id for c in side.side_conditions),
+                )
+                if incoming is not None
+                else np.zeros(1, dtype=np.int64)
+            )
+            placed.append((side_index, slot, speed))
+
+    placed.sort(key=lambda entry: (-int(entry[2][0]), entry[0], entry[1]))
+    for side_index, slot, _speed in placed:
+        _on_switch_in(reg, state, side_index, slot)
+
+    return ReplacementResult(
+        position=state.pos,
+        events=list(state.events),
+        unmodelled=tuple(sorted(state.unmodelled)),
+    )
+
+
 def _slot_of(turn: _Turn, source_slot: str | None) -> tuple[int, int] | None:
     """Turns a Showdown slot label like ``p2a`` into our (side, slot) pair."""
     if not source_slot or len(source_slot) < 3:
@@ -3748,10 +3810,18 @@ __all__ = [
     "Branch",
     "Budget",
     "ReplacementResult",
+    "SuspendedTurn",
+    "TurnLeaves",
     "TurnResult",
+    "apply_lead_abilities",
+    "pending_attacks",
     "replacements_needed",
     "resolve_replacements",
-    "pending_attacks",
     "resolve_turn",
+    "resume_alternatives",
+    "resume_turn",
+    "self_switches_needed",
     "stratified_rolls",
+    "turn_expectation",
+    "turn_leaves",
 ]

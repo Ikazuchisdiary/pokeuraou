@@ -20,9 +20,12 @@ fields from measured usage, and an archetype whose species has no usage data rai
 Selection is 6 bring / 4 pick, and picking is not modelled: :func:`pick_four` draws
 uniformly from the six. That is not the real distribution -- players pick for the matchup,
 and a uniform draw gives leads nobody would lead with -- but it is the only choice that can
-be *stated*, and it covers all fifteen combinations so the value function is usable
-whichever four are brought. Solving the selection is its own problem, and it has the same
-Bayesian shape as everything else here.
+be *stated*, and it covers all ninety *ordered* selections (C(6,2) lead pairs x C(4,2)
+behind them) so the value function is usable whichever four are brought and whichever two
+of them lead. This said "fifteen combinations" while `pick_four` said ninety: the unordered
+count is the one that stopped being right when the leads started being drawn separately.
+Solving the selection is its own problem, and it has the same Bayesian shape as everything
+else here.
 """
 
 from __future__ import annotations
@@ -492,14 +495,26 @@ def pick_four(
     is its own game and has the same shape as everything else here: a 90x90 simultaneous
     move whose cells are win probabilities, i.e. exactly what the value function supplies.
     """
-    if len(six) < size:
-        raise TeamError(f"cannot pick {size} from {len(six)}")
+    return [six[i] for i in pick_four_indices(rng, len(six), size)]
+
+
+def pick_four_indices(
+    rng: np.random.Generator, available: int, size: int = 4
+) -> tuple[int, ...]:
+    """The ordered selection as party indices, leads first.
+
+    Separate from :func:`pick_four` so a caller can record *which* four were brought and in
+    what order. Recovering that from the returned sets would mean matching by identity or by
+    species, and an inverse that can be avoided should be.
+    """
+    if available < size:
+        raise TeamError(f"cannot pick {size} from {available}")
     # Two independent uniform draws: which `size` come, and which two of those lead.
-    chosen = [int(i) for i in rng.choice(len(six), size=size, replace=False)]
+    chosen = [int(i) for i in rng.choice(available, size=size, replace=False)]
     leads = [int(i) for i in rng.choice(size, size=2, replace=False)]
     front = [chosen[i] for i in sorted(leads)]
     back = [chosen[i] for i in range(size) if i not in leads]
-    return [six[i] for i in front + back]
+    return tuple(front + back)
 
 
 def all_picks(six: list[SampledSet], size: int = 4) -> list[tuple[int, ...]]:

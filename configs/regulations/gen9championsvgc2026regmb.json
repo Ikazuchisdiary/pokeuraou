@@ -20,7 +20,7 @@
 		"teraEnabled": false,
 		"megaPerSide": 1,
 		"showdownCommit": "cc089d36b7717dec78ce8ab5d1745c03ad5c97e4",
-		"generatedAt": "2026-09-10T12:33:23.950Z"
+		"generatedAt": "2026-09-10T15:31:23.242Z"
 	},
 	"natures": [
 		{
@@ -27363,6 +27363,7 @@
 			"name": "Choice Scarf",
 			"num": 287,
 			"isBerry": false,
+			"isChoice": true,
 			"fling": {
 				"basePower": 10
 			},

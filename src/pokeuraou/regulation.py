@@ -184,6 +184,12 @@ class Regulation:
         #: type chart keys `damageTaken` by attacking type *and* by a few effect names,
         #: and these are the effect names: prankster, powder, trapped, the statuses and the
         #: weathers.
+        #: Items that lock their holder into one move. From the dump, because "which items
+        #: are Choice items" is regulation data and a list of three ids here would be the
+        #: kind of copy that goes stale.
+        self.choice_items: frozenset[str] = frozenset(
+            entry["id"] for entry in data["items"] if entry.get("isChoice")
+        )
         self.effect_immunities: dict[str, frozenset[str]] = {
             key: frozenset(value)
             for key, value in (data.get("effectImmunities") or {}).items()

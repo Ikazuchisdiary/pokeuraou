@@ -240,6 +240,19 @@ def _usable_move_slots(mon, reg: Regulation) -> list[tuple[int, str]]:  # noqa: 
     # disabled, so the legal set is the same one move.
     encored = mon.volatile("encore")
     encored_move = encored.move if encored is not None else None
+    # A Choice item locks its holder into the move it used. `onDisableMove` drops the
+    # volatile when the item is gone or the move is, so both are checked here rather than
+    # trusting the volatile to have been cleaned up.
+    choice = mon.volatile("choicelock")
+    choice_move = None
+    if (
+        choice is not None
+        and choice.move
+        and mon.item is not None
+        and mon.item in reg.choice_items
+        and any(m.id == choice.move for m in mon.moves)
+    ):
+        choice_move = choice.move
     out: list[tuple[int, str]] = []
     for i, m in enumerate(mon.moves, start=1):
         if not m.usable:
@@ -252,6 +265,8 @@ def _usable_move_slots(mon, reg: Regulation) -> list[tuple[int, str]]:  # noqa: 
         if disabled_move is not None and m.id == disabled_move:
             continue
         if encored_move is not None and m.id != encored_move:
+            continue
+        if choice_move is not None and m.id != choice_move:
             continue
         if tormented and mon.last_move == m.id:
             continue

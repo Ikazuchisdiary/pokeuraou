@@ -44,6 +44,7 @@ from .resolve import (
     Fold,
     SuspendedTurn,
     TurnResult,
+    apply_lead_abilities,
     fold_value,
     replacements_needed,
     resolve_replacements,
@@ -57,7 +58,7 @@ from .stats import nature_multipliers, stats_from_sp
 from .teams import (
     Archetype,
     Roster,
-    pick_four,
+    pick_four_indices,
     sample_archetype,
     sample_metagame_team,
 )
@@ -104,6 +105,11 @@ class Decision:
     #: The search's own value at this position, in the units of the objective used. Kept
     #: for diagnostics -- it is *not* the training target.
     search_value: float
+    #: What each side actually played, as the choice string. The mixture above is what the
+    #: search computed and stays the policy target; this is the draw from it, kept so a
+    #: recorded game reads back as a game.
+    own_chosen: str | None = None
+    foe_chosen: str | None = None
 
 
 @dataclass(slots=True)
@@ -120,6 +126,13 @@ class GameRecord:
     #: on an unmodelled effect is still a real Showdown-checked result, but the reader
     #: should be able to see which ones were involved.
     unmodelled: list[str] = field(default_factory=list)
+    #: The selection, when the caller knows it: each side's six species and the ordered
+    #: party indices it brought. Ordered because the first two lead, which is a different
+    #: decision from the other two -- 90 selections a side, not 15.
+    own_six: list[str] = field(default_factory=list)
+    foe_six: list[str] = field(default_factory=list)
+    own_pick: list[int] = field(default_factory=list)
+    foe_pick: list[int] = field(default_factory=list)
 
     def to_json(self, *, objective: str, search_limit: int | tuple[int, int]) -> dict[str, Any]:
         return {
@@ -134,6 +147,10 @@ class GameRecord:
             if isinstance(search_limit, tuple)
             else search_limit,
             "targetIsRealOutcome": True,
+            "ownSix": self.own_six,
+            "foeSix": self.foe_six,
+            "ownPick": self.own_pick,
+            "foePick": self.foe_pick,
             "unmodelled": sorted(set(self.unmodelled)),
             "decisions": [
                 {
@@ -145,6 +162,8 @@ class GameRecord:
                     "foeActions": d.foe_actions,
                     "foePolicy": d.foe_policy,
                     "searchValue": d.search_value,
+                    "ownChosen": d.own_chosen,
+                    "foeChosen": d.foe_chosen,
                 }
                 for d in self.decisions
             ],
@@ -190,6 +209,11 @@ def position_from_sets(
     the value function's job is to answer "who wins from this position", and our
     uncertainty about the opponent's spread is integrated by the belief layer at query
     time, over positions of exactly this shape.
+
+    What *was* wrong is that this returned the raw position: Showdown runs every lead's
+    switch-in ability before it prints `|turn|1`, so the game starts with Intimidate
+    applied, Defiant having answered it, and a lead's weather already up. Without that,
+    every sun and rain team in the format was searched with no weather.
     """
     sides: list[Side] = []
     for side_index, sets in enumerate((own, foe)):
@@ -209,7 +233,8 @@ def position_from_sets(
                 ],
             )
         )
-    return Position(format=reg.meta.format_id, sides=sides, turn=1, field=Field())
+    opening = Position(format=reg.meta.format_id, sides=sides, turn=1, field=Field())
+    return apply_lead_abilities(reg, opening).position
 
 
 def _sample_index(rng: np.random.Generator, weights: np.ndarray) -> int:
@@ -300,6 +325,7 @@ def play_game(
     search_limit: int | tuple[int, int] = SEARCH_LIMIT,
     max_turns: int = MAX_TURNS,
     evaluate: LeafEvaluator | None | tuple[LeafEvaluator | None, LeafEvaluator | None] = None,
+    selection: tuple[list[str], list[str], tuple[int, ...], tuple[int, ...]] | None = None,
 ) -> GameRecord:
     """Plays one game to a result, sampling both sides from the turn's equilibrium.
 
@@ -314,6 +340,12 @@ def play_game(
         foe_team=[_set_json(reg, s) for s in foe],
         foe_archetype=foe_archetype,
     )
+    if selection is not None:
+        own_six, foe_six, own_pick, foe_pick = selection
+        record.own_six = list(own_six)
+        record.foe_six = list(foe_six)
+        record.own_pick = list(own_pick)
+        record.foe_pick = list(foe_pick)
     pos = position_from_sets(reg, own, foe)
     budget = Budget.matrix()
 
@@ -354,6 +386,10 @@ def play_game(
             except EquilibriumError:
                 break
 
+        chosen = [
+            ours[_sample_index(rng, equilibrium.row_strategy)],
+            theirs[_sample_index(rng, foe_equilibrium.col_strategy)],
+        ]
         record.decisions.append(
             Decision(
                 turn=pos.turn,
@@ -364,13 +400,10 @@ def play_game(
                 foe_actions=[a.to_choice() for a in theirs],
                 foe_policy=[float(x) for x in foe_equilibrium.col_strategy],
                 search_value=float(equilibrium.value),
+                own_chosen=chosen[0].to_choice(),
+                foe_chosen=chosen[1].to_choice(),
             )
         )
-
-        chosen = [
-            ours[_sample_index(rng, equilibrium.row_strategy)],
-            theirs[_sample_index(rng, foe_equilibrium.col_strategy)],
-        ]
         result = resolve_turn(reg, pos, chosen, budget=Budget.exact())
         record.unmodelled.extend(result.unmodelled)
         advanced = _advance(reg, rng, result, record, leaves, objective)
@@ -476,6 +509,8 @@ def _do_self_switch_node(
             foe_actions=waiting if chooser == 0 else options,
             foe_policy=[1.0] if chooser == 0 else policy,
             search_value=float(scores[best]),
+            own_chosen=options[best] if chooser == 0 else waiting[0],
+            foe_chosen=waiting[0] if chooser == 0 else options[best],
         )
     )
     return alternatives[best][1]
@@ -535,6 +570,10 @@ def _do_replacement_node(
         foe_policy = [1.0 / len(options[1])] * len(options[1])
         value = float(payoff.mean())
 
+    chosen = [
+        options[0][_sample_index(rng, np.array(own_policy))],
+        options[1][_sample_index(rng, np.array(foe_policy))],
+    ]
     record.decisions.append(
         Decision(
             turn=pos.turn,
@@ -545,12 +584,10 @@ def _do_replacement_node(
             foe_actions=[a.to_choice() for a in options[1]],
             foe_policy=foe_policy,
             search_value=value,
+            own_chosen=chosen[0].to_choice(),
+            foe_chosen=chosen[1].to_choice(),
         )
     )
-    chosen = [
-        options[0][_sample_index(rng, np.array(own_policy))],
-        options[1][_sample_index(rng, np.array(foe_policy))],
-    ]
     outcome = resolve_replacements(reg, pos, chosen)
     record.unmodelled.extend(outcome.unmodelled)
     return outcome.position
@@ -663,13 +700,25 @@ def generate(
                 archetype = archetypes[int(rng.integers(len(archetypes)))]
                 label = archetype.id
                 foe_six = sample_archetype(rng, reg, prior, archetype)
-            own_four = pick_four(rng, roster.sets, size=reg.meta.picked_team_size)
-            foe_four = pick_four(rng, foe_six, size=reg.meta.picked_team_size)
+            own_pick = pick_four_indices(
+                rng, len(roster.sets), size=reg.meta.picked_team_size
+            )
+            foe_pick = pick_four_indices(
+                rng, len(foe_six), size=reg.meta.picked_team_size
+            )
+            own_four = [roster.sets[i] for i in own_pick]
+            foe_four = [foe_six[i] for i in foe_pick]
 
             record = play_game(
                 reg, rng, own_four, foe_four, label,
                 objective=objective, search_limit=search_limit, max_turns=max_turns,
                 evaluate=evaluate,
+                selection=(
+                    [entry.species for entry in roster.sets],
+                    [entry.species for entry in foe_six],
+                    own_pick,
+                    foe_pick,
+                ),
             )
             stats["games"] += 1
             if record.outcome is None:
