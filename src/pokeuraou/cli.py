@@ -44,7 +44,7 @@ from .observe import Observation, UpdateReport, parse_observations, update
 from .payoff import OBJECTIVES, Objective
 from .position import Position
 from .priors import find_cached_chaos, load_chaos
-from .resolve import Budget, resolve_turn
+from .resolve import Budget, resolve_turn, turn_leaves
 from .setup import Scenario, load_scenario, with_spreads
 from .view import battler
 
@@ -325,10 +325,23 @@ def analyse(
             for index, (_weight, pos) in enumerate(positions):
                 result = resolve_turn(reg, pos, [ours, theirs], budget=budget)
                 # One resolve, both objectives: the cross-check costs a second pass over
-                # the branch list, not a second turn.
-                matrices[index][i, j] = result.expected(objective)
-                cross_matrices[index][i, j] = result.expected(cross)
-                unmodelled.update(result.unmodelled)
+                # the leaf list, not a second turn.
+                if result.suspended:
+                    # A self-switching move stopped the turn for a replacement, which is a
+                    # choice and not a chance event -- `turn_leaves` carries the fold that
+                    # says so.
+                    plan = turn_leaves(reg, result)
+                    matrices[index][i, j] = plan.value(
+                        [objective(p) for p in plan.positions]
+                    )
+                    cross_matrices[index][i, j] = plan.value(
+                        [cross(p) for p in plan.positions]
+                    )
+                    unmodelled.update(plan.unmodelled)
+                else:
+                    matrices[index][i, j] = result.expected(objective)
+                    cross_matrices[index][i, j] = result.expected(cross)
+                    unmodelled.update(result.unmodelled)
                 all_exact = all_exact and result.exact
             exact_cells += int(all_exact)
     seconds = time.perf_counter() - started

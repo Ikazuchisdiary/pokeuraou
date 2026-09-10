@@ -227,12 +227,17 @@ def _usable_move_slots(mon, reg: Regulation) -> list[tuple[int, str]]:  # noqa: 
 
     taunted = mon.has_volatile("taunt")
     tormented = mon.has_volatile("torment")
+    # Throat Chop's `onDisableMove` disables every sound move on the target for two turns,
+    # so they never reach the request in the first place.
+    throat_chopped = mon.has_volatile("throatchop")
     out: list[tuple[int, str]] = []
     for i, m in enumerate(mon.moves, start=1):
         if not m.usable:
             continue
         move = reg.moves.get(m.id)
         if taunted and move is not None and move.category == "Status":
+            continue
+        if throat_chopped and move is not None and "sound" in move.flags:
             continue
         if tormented and mon.last_move == m.id:
             continue

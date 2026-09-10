@@ -14,30 +14,60 @@ silent rate is what the threshold holds.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
-from pokeuraou.actions import MoveAction, PassAction, SideAction, SwitchAction, side_actions
-from pokeuraou.oracle import ORACLE_JS, TeamSet
+from pokeuraou.actions import (
+    MoveAction,
+    PassAction,
+    SideAction,
+    SwitchAction,
+    side_actions,
+    switch_actions_after_faint,
+)
+from pokeuraou.oracle import ORACLE_JS, Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Effect, MoveSlot, Position
 from pokeuraou.regulation import Regulation
 from pokeuraou.resolve import (
+    Average,
+    BestOf,
     Budget,
     _Turn,
     multihit_counts,
     pending_attacks,
     resolve_turn,
+    resume_alternatives,
+    resume_turn,
+    self_switches_needed,
     stall_success_chance,
     stratified_rolls,
+    turn_expectation,
+    turn_leaves,
 )
 
 from . import _diff_turn_entry as diff_turn
+from .conftest import FORMAT_ID
 from .test_actions import _synthetic_position
 
-#: Measured over 445 turns against the pinned Showdown commit: 4.9% total, 2.9% silent.
+#: Measured over 963 turns against the pinned Showdown commit: 10.4% total, 4.0% silent.
 #: The headroom above the measurement is deliberate but small; a regression that pushes
 #: past it fails here and ``tools/diverge_report.py`` names the cause by statistical lift.
+#:
+#: The total was 0.08, measured at 4.9%, while the harness skipped every turn containing a
+#: self-switching move -- 75 turns in this same sweep. That skip hid the class completely,
+#: and five real bugs with it: the mid-turn interrupt itself, Defiant answering a two-stat
+#: drop once instead of twice, Parting Shot leaving when its drops did nothing, a
+#: Prankster-boosted status move landing on a Dark type, and Throat Chop failing to lock
+#: sound moves. On the same 16 seeds the old code scored 863 turns at 8.57% total with those
+#: 75 skipped; this code scores 963 at 10.38% with none skipped, and 46 of the 58
+#: newly-scored turns match exactly. The remaining gap is smaller than the spread between
+#: two blocks of the same code (6.82% on seeds 1-8, 10.40% on 9-16).
+#:
+#: The silent rate keeps the threshold it had: it is the number that matters, it did not
+#: need loosening (3.95% against 0.05), and giving it away here would cost the guard.
 MAX_SILENT_DIVERGENCE = 0.05
-MAX_TOTAL_DIVERGENCE = 0.08
+MAX_TOTAL_DIVERGENCE = 0.12
 
 
 # ---------------------------------------------------------------------------
@@ -734,3 +764,397 @@ def test_a_bind_expires_and_blocks_switching_until_it_does(
     assert all(step == 1 for step in steps), f"duration did not fall by one a turn: {seen}"
     if seen[-1] is None and not released_early:
         assert counted[-1] == 1, f"expired from the wrong duration: {seen}"
+
+
+# ---------------------------------------------------------------------------
+# Mid-turn replacement (self-switching moves)
+# ---------------------------------------------------------------------------
+
+
+#: A Prankster user and a Dark type, so the immunity is exercised by name rather than by
+#: whatever the usage sampler happens to draw.
+_PRANKSTER_TEAM = [
+    TeamSet(
+        "Whimsicott", "Prankster", "Timid",
+        ['charm', 'tailwind', 'moonblast', 'protect'],
+        {'spe': 32},
+    ),
+    TeamSet(
+        "Incineroar", "Intimidate", "Brave",
+        ['partingshot', 'throatchop', 'flareblitz', 'fakeout'],
+        {'hp': 32},
+    ),
+    TeamSet(
+        "Garchomp", "Rough Skin", "Jolly",
+        ['earthquake', 'dragonclaw', 'protect', 'rockslide'],
+        {'spe': 32},
+    ),
+    TeamSet(
+        "Venusaur", "Chlorophyll", "Modest",
+        ['sludgebomb', 'gigadrain', 'protect', 'sleeppowder'],
+        {'spa': 32},
+    ),
+]
+
+_DARK_TEAM = [
+    TeamSet(
+        "Kingambit", "Defiant", "Adamant",
+        ['ironhead', 'suckerpunch', 'swordsdance', 'protect'],
+        {'atk': 32},
+    ),
+    TeamSet(
+        "Tyranitar", "Sand Stream", "Jolly",
+        ['rockslide', 'crunch', 'protect', 'earthquake'],
+        {'spe': 32},
+    ),
+    TeamSet(
+        "Toxapex", "Regenerator", "Relaxed",
+        ['infestation', 'toxic', 'wideguard', 'protect'],
+        {'hp': 32},
+    ),
+    TeamSet(
+        "Charizard", "Blaze", "Timid",
+        ['heatwave', 'airslash', 'protect', 'flamethrower'],
+        {'spe': 32},
+    ),
+]
+
+
+def test_a_self_switch_suspends_the_turn_instead_of_finishing_it(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """The resolver must hand the turn back at the interrupt, not run past it.
+
+    Showdown checks `switchFlag` at the end of `runAction`, which runs after every action,
+    so a self-switching move stops the turn there. Finishing the turn instead left the
+    Pokemon that used the move standing in the slot for the rest of it -- the opposite of
+    what the move does.
+    """
+    pos = _synthetic_position(reg, team_a)
+    mover = pos.sides[0].pokemon[pos.sides[0].active[0]]
+    mover.moves[0] = MoveSlot(id="uturn", pp=20, maxpp=20)
+
+    ours = SideAction(
+        slots=(
+            MoveAction(slot=0, move_index=1, move_id="uturn", target=1),
+            PassAction(slot=1),
+        )
+    )
+    theirs = side_actions(reg, pos, 1)[0]
+    result = resolve_turn(reg, pos, [ours, theirs], budget=Budget.deterministic(8))
+
+    assert result.suspended, "a self-switching move has to suspend the turn"
+    assert result.total_probability == pytest.approx(1.0), (
+        "branches and suspensions together are the whole turn"
+    )
+    # The turn number has not advanced and the user is still in its slot: the position is
+    # mid-turn, which is exactly what the chooser is looking at.
+    pause = result.suspended[0]
+    assert pause.position.turn == pos.turn
+    owed = self_switches_needed(pause.position)
+    assert owed[0][0] and not any(owed[1]), f"only the mover owes a replacement: {owed}"
+
+
+def test_summarising_a_suspended_turn_is_refused(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """A partial expectation is worse than an error, because it looks like a number.
+
+    Averaging over `branches` while a suspension holds part of the mass gives a value short
+    by that fraction and perfectly ordinary-looking. Every caller has to answer the
+    replacement first.
+    """
+    pos = _synthetic_position(reg, team_a)
+    mover = pos.sides[0].pokemon[pos.sides[0].active[0]]
+    mover.moves[0] = MoveSlot(id="uturn", pp=20, maxpp=20)
+    ours = SideAction(
+        slots=(
+            MoveAction(slot=0, move_index=1, move_id="uturn", target=1),
+            PassAction(slot=1),
+        )
+    )
+    theirs = side_actions(reg, pos, 1)[0]
+    result = resolve_turn(reg, pos, [ours, theirs], budget=Budget.deterministic(8))
+    assert result.suspended
+
+    with pytest.raises(ValueError, match="suspended"):
+        result.expected(lambda _p: 0.0)
+
+    # ...and the fold does produce a number, once the choice is part of it.
+    value, _flags = turn_expectation(reg, result, lambda _p: 0.5)
+    assert value == pytest.approx(0.5)
+
+
+def test_the_mid_turn_replacement_is_a_choice_and_not_an_average(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """The interrupted side gets its best option, not the mean of all of them.
+
+    This is the whole reason `TurnLeaves` exists. Which Pokemon comes in is a decision, so
+    averaging over the bench would price a Parting Shot as if the player brought in
+    something at random. Zero-sum means side 0 maximises and side 1 minimises, and the
+    direction is asserted both ways because getting the sign backwards would be invisible
+    in aggregate.
+    """
+    pos = _synthetic_position(reg, team_a)
+    mover = pos.sides[0].pokemon[pos.sides[0].active[0]]
+    mover.moves[0] = MoveSlot(id="uturn", pp=20, maxpp=20)
+    ours = SideAction(
+        slots=(
+            MoveAction(slot=0, move_index=1, move_id="uturn", target=1),
+            PassAction(slot=1),
+        )
+    )
+    theirs = side_actions(reg, pos, 1)[0]
+    result = resolve_turn(reg, pos, [ours, theirs], budget=Budget.deterministic(8))
+    assert result.suspended
+
+    chooser, alternatives = resume_alternatives(reg, result.suspended[0])
+    assert chooser == 0
+    assert len(alternatives) >= 2, "a bench of two is the point of the test"
+
+    # Score each candidate by which species ended up in the slot, so the values are
+    # distinct and the best one is known independently of the value function.
+    plan = turn_leaves(reg, result)
+    species = [
+        (p.sides[0].pokemon[p.sides[0].active[0]].species if p.sides[0].active[0] is not None else "")
+        for p in plan.positions
+    ]
+    scores = {name: float(i + 1) for i, name in enumerate(sorted(set(species)))}
+    values = [scores[name] for name in species]
+
+    assert plan.value(values) == pytest.approx(max(scores.values())), (
+        "side 0 chooses, so the fold must take the option it likes most"
+    )
+    # Flip the fold's owner and the same leaves must produce the worst value instead.
+    flipped = replace(
+        plan,
+        root=Average(
+            parts=[
+                (w, BestOf(chooser=1, options=node.options) if isinstance(node, BestOf) else node)
+                for w, node in plan.root.parts
+            ]
+        ),
+    )
+    assert flipped.value(values) == pytest.approx(min(scores.values()))
+
+
+@pytest.mark.oracle
+def test_the_replacement_takes_the_residual_and_not_the_departing_pokemon(
+    reg: Regulation, oracle: Oracle
+) -> None:
+    """Against Showdown: the interrupt is in front of the residual phase.
+
+    This is the case that made deferring the choice to the post-turn phase wrong even when
+    the self-switching move resolved *last*. Incineroar is deliberately the slowest thing
+    on the field, so nothing but the residual phase is queued behind its Parting Shot --
+    and Showdown still stops, brings the replacement in, and only then applies the
+    sandstorm. Deferring meant Incineroar took weather it never sees in the real game.
+    """
+    handle = oracle.create(
+        FORMAT_ID, _PRANKSTER_TEAM, _DARK_TEAM, policy=RandomnessPolicy(damage_roll=8)
+    )
+    handle.step(["team 2,1,3,4", "team 2,1,3,4"])
+    before = Position.from_json(handle.position)
+
+    # p1a Incineroar uses Parting Shot on p2b Kingambit (Dark, but Incineroar is not a
+    # Prankster user, so it lands); everything else attacks so nothing blocks it.
+    ours = SideAction(
+        slots=(
+            MoveAction(slot=0, move_index=1, move_id="partingshot", target=2),
+            MoveAction(slot=1, move_index=3, move_id="moonblast", target=1),
+        )
+    )
+    theirs = SideAction(
+        slots=(
+            MoveAction(slot=0, move_index=1, move_id="rockslide", target=None),
+            MoveAction(slot=1, move_index=1, move_id="ironhead", target=1),
+        )
+    )
+    handle.step([ours.to_choice(), theirs.to_choice()])
+    assert not handle.choice_errors, handle.choice_errors
+
+    result = resolve_turn(reg, before, [ours, theirs], budget=Budget.deterministic(8))
+    assert result.suspended, "Parting Shot must suspend the turn"
+    assert any(r and r.get("forceSwitch") for r in handle.requests), (
+        "Showdown must be asking for a replacement at the same point"
+    )
+    assert not any(line.startswith("|upkeep") for line in handle.log), (
+        "the residual phase must still be ahead of us, or the premise of the fix is wrong"
+    )
+
+    # Answer both the same way, then compare the finished turn.
+    owed = self_switches_needed(result.suspended[0].position)
+    options = switch_actions_after_faint(reg, result.suspended[0].position, 0, list(owed[0]))
+    pick = options[0]
+    handle.step([pick.to_choice(), None])
+    assert not handle.choice_errors, handle.choice_errors
+
+    passes = SideAction(slots=(PassAction(slot=0), PassAction(slot=1)))
+    finished = resume_turn(reg, result.suspended[0], [pick, passes])
+    assert len(finished.branches) == 1
+    ours_after = finished.branches[0].position
+    theirs_after = Position.from_json(handle.position)
+
+    for side in range(2):
+        for mon_index in range(4):
+            mine = ours_after.sides[side].pokemon[mon_index]
+            yours = theirs_after.sides[side].pokemon[mon_index]
+            assert (mine.species, mine.hp) == (yours.species, yours.hp), (
+                f"p{side + 1} slot {mon_index}: ours {mine.species} {mine.hp} "
+                f"vs showdown {yours.species} {yours.hp}"
+            )
+
+
+def test_parting_shot_stays_in_when_its_drops_do_nothing(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """`if (!success && !target.hasAbility('mirrorarmor')) delete move.selfSwitch`.
+
+    A target already at the floor keeps the user on the field. We used to suspend the turn
+    for a replacement Showdown never asks for, which the differential test sees as a
+    disagreement about whether the turn stopped at all.
+    """
+    pos = _synthetic_position(reg, team_a)
+    mover = pos.sides[0].pokemon[pos.sides[0].active[0]]
+    mover.moves[0] = MoveSlot(id="partingshot", pp=20, maxpp=20)
+    target = pos.sides[1].pokemon[pos.sides[1].active[0]]
+    target.boosts = {"atk": -6, "spa": -6}
+
+    ours = SideAction(
+        slots=(
+            MoveAction(slot=0, move_index=1, move_id="partingshot", target=1),
+            PassAction(slot=1),
+        )
+    )
+    theirs = side_actions(reg, pos, 1)[0]
+    result = resolve_turn(reg, pos, [ours, theirs], budget=Budget.deterministic(8))
+    assert not result.suspended, (
+        "Parting Shot that lowered nothing must not switch its user out"
+    )
+
+
+def test_defiant_answers_every_stat_a_foe_lowers(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """`runEvent('AfterEachBoost')` is inside Showdown's per-stat loop, not after it.
+
+    Parting Shot drops Attack and Special Attack, so Defiant answers twice. The raise also
+    lands *between* the two drops, so the arithmetic from neutral is
+    ``-1 -> +2 (defiant) -> (spa -1) -> +2 (defiant) = +3``; firing once per call gave +1.
+    Measured against Showdown from +1 Attack it was ours {'atk': 2} vs theirs {'atk': 4},
+    and Incineroar's Parting Shot into Kingambit is an ordinary line in this format.
+    """
+    pos = _synthetic_position(reg, team_a)
+    mover = pos.sides[0].pokemon[pos.sides[0].active[0]]
+    mover.moves[0] = MoveSlot(id="partingshot", pp=20, maxpp=20)
+    target = pos.sides[1].pokemon[pos.sides[1].active[0]]
+    target.ability = "defiant"
+
+    ours = SideAction(
+        slots=(
+            MoveAction(slot=0, move_index=1, move_id="partingshot", target=1),
+            PassAction(slot=1),
+        )
+    )
+    theirs = side_actions(reg, pos, 1)[0]
+    result = resolve_turn(reg, pos, [ours, theirs], budget=Budget.deterministic(8))
+    after = (result.suspended[0].position if result.suspended else result.branches[0].position)
+    hit = after.sides[1].pokemon[after.sides[1].active[0]]
+    assert hit.boosts.get("atk") == 3, (
+        f"two drops means two Defiant triggers, not one: {hit.boosts}"
+    )
+    assert hit.boosts.get("spa") == -1
+
+
+def test_a_prankster_status_move_does_not_reach_a_dark_type(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """Since gen 7 a Prankster-boosted status move simply fails against a foe Dark type.
+
+        gen >= 7 && move.pranksterBoosted && pokemon.hasAbility('prankster') &&
+            !targets[i].isAlly(pokemon) && !this.dex.getImmunity('prankster', target)
+
+    Whimsicott and Grimmsnarl are the format's Prankster users and Incineroar is in 41% of
+    its teams, so this decides real turns. The immunity is read from the regulation dump
+    rather than written here, because a hand-kept copy of what the simulator declares is
+    what made four effects permanent.
+    """
+    assert reg.immune_to_effect("prankster", ("Dark",))
+    assert not reg.immune_to_effect("prankster", ("Fairy", "Grass"))
+
+    pos = _synthetic_position(reg, team_a)
+    mover = pos.sides[0].pokemon[pos.sides[0].active[0]]
+    mover.ability = "prankster"
+    mover.moves[0] = MoveSlot(id="charm", pp=20, maxpp=20)
+    target = pos.sides[1].pokemon[pos.sides[1].active[0]]
+    target.types = ("Dark",)
+    target.boosts = {}
+
+    ours = SideAction(
+        slots=(
+            MoveAction(slot=0, move_index=1, move_id="charm", target=1),
+            PassAction(slot=1),
+        )
+    )
+    theirs = side_actions(reg, pos, 1)[0]
+    result = resolve_turn(reg, pos, [ours, theirs], budget=Budget.deterministic(8))
+    after = result.branches[0].position
+    hit = after.sides[1].pokemon[after.sides[1].active[0]]
+    assert not hit.boosts, f"Charm must not reach a Dark type from Prankster: {hit.boosts}"
+
+    # Without Prankster the same Charm lands, so the test is about the ability and not
+    # about Charm being broken.
+    mover.ability = "chlorophyll"
+    result = resolve_turn(reg, pos, [ours, theirs], budget=Budget.deterministic(8))
+    after = result.branches[0].position
+    hit = after.sides[1].pokemon[after.sides[1].active[0]]
+    assert hit.boosts.get("atk") == -2, f"Charm should have landed: {hit.boosts}"
+
+
+def test_throat_chop_locks_sound_moves(reg: Regulation, team_a: list[TeamSet]) -> None:
+    """Two turns without sound moves, which is how Throat Chop answers Parting Shot.
+
+    Showdown blocks it twice -- `onDisableMove` keeps a sound move out of the request and
+    `onBeforeMove` refuses it if used anyway -- so both are checked. The volatile is added
+    from a 100%-chance `secondary.onHit`, so nothing declarative in the dump pointed at it
+    and we applied neither.
+    """
+    pos = _synthetic_position(reg, team_a)
+    attacker = pos.sides[0].pokemon[pos.sides[0].active[0]]
+    attacker.moves[0] = MoveSlot(id="throatchop", pp=15, maxpp=15)
+    target = pos.sides[1].pokemon[pos.sides[1].active[0]]
+    target.moves[0] = MoveSlot(id="partingshot", pp=20, maxpp=20)
+    assert "sound" in reg.moves["partingshot"].flags
+
+    ours = SideAction(
+        slots=(
+            MoveAction(slot=0, move_index=1, move_id="throatchop", target=1),
+            PassAction(slot=1),
+        )
+    )
+    theirs = SideAction(slots=(PassAction(slot=0), PassAction(slot=1)))
+    result = resolve_turn(reg, pos, [ours, theirs], budget=Budget.deterministic(8))
+    after = max(result.branches, key=lambda b: b.probability).position
+    hit = after.sides[1].pokemon[after.sides[1].active[0]]
+    if hit.fainted:
+        pytest.skip("the target did not survive the hit, so there is no lock to check")
+
+    lock = hit.volatile("throatchop")
+    assert lock is not None, "Throat Chop has to apply its own volatile"
+    # Declared as 2 and decremented by the residual phase of the same turn, so one turn of
+    # lock is left. What matters is that it is a number at all: a volatile added without a
+    # duration never expires, and Throat Chop's is only reachable through the move's own
+    # condition, which the dump did not carry until now.
+    assert lock.duration == 1, f"declared 2, one residual spent, got {lock.duration}"
+
+    # And the legal action set no longer offers the sound move.
+    offered = {
+        s.move_id
+        for action in side_actions(reg, after, 1)
+        for s in action.slots
+        if isinstance(s, MoveAction) and s.slot == 0
+    }
+    assert "partingshot" not in offered, (
+        f"a throat-chopped Pokemon must not be offered a sound move: {sorted(offered)}"
+    )

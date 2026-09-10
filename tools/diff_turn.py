@@ -15,6 +15,7 @@ is a measurement.
 from __future__ import annotations
 
 import argparse
+import os
 import random
 import sys
 from collections import Counter
@@ -26,13 +27,25 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from pokeuraou.actions import MoveAction, SideAction, side_actions  # noqa: E402
+from pokeuraou.actions import (  # noqa: E402
+    MoveAction,
+    PassAction,
+    SideAction,
+    side_actions,
+    switch_actions_after_faint,
+)
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet  # noqa: E402
 from pokeuraou.position import Position  # noqa: E402
 from pokeuraou.priors import find_cached_chaos, load_chaos, sample_team  # noqa: E402
 from pokeuraou.regulation import Regulation, load_regulation  # noqa: E402
-from pokeuraou.resolve import Budget, resolve_turn  # noqa: E402
+from pokeuraou.resolve import (  # noqa: E402
+    Budget,
+    TurnResult,
+    resolve_turn,
+    resume_turn,
+    self_switches_needed,
+)
 from pokeuraou.speed import action_overriding_effects  # noqa: E402
 
 FORMAT_ID = "gen9championsvgc2026regmc"
@@ -108,6 +121,15 @@ class Report:
     unmodelled: Counter[str] = field(default_factory=Counter)
     examples: list[str] = field(default_factory=list)
     branch_counts: Counter[int] = field(default_factory=Counter)
+    #: Turns the resolver suspended for a mid-turn replacement, and how the pause itself
+    #: compared. Tracked separately because the class used to be skipped entirely: these
+    #: counts are the evidence that it is now covered.
+    paused: int = 0
+    paused_matched: int = 0
+    #: Divergences on turns that were interrupted, split out because the whole class used
+    #: to be skipped: a change in the headline rate says nothing without this.
+    paused_divergences: int = 0
+    paused_by_field: Counter[str] = field(default_factory=Counter)
 
     @property
     def divergence_rate(self) -> float:
@@ -125,6 +147,19 @@ class Report:
             f"(silent {self.silent_rate * 100:.3f}%, "
             f"flagged {self.flagged_divergences})"
         ]
+        if self.paused:
+            out.append(
+                f"  mid-turn replacement requests: {self.paused}, "
+                f"state at the interrupt matched {self.paused_matched}, "
+                f"turns diverging after resuming {self.paused_divergences}"
+            )
+            if self.paused_by_field:
+                out.append(
+                    "    on interrupted turns: "
+                    + ", ".join(
+                        f"{k} x{v}" for k, v in self.paused_by_field.most_common(8)
+                    )
+                )
         if self.branch_counts:
             out.append(
                 "  branches produced: "
@@ -156,14 +191,123 @@ def describe_actions(reg: Regulation, chosen: list[SideAction]) -> str:
     return " | ".join(a.describe(reg) for a in chosen)
 
 
+def showdown_paused_mid_turn(handle: Any) -> bool:
+    """Whether Showdown stopped inside the turn rather than at the end of it.
+
+    A mid-turn interrupt and an end-of-turn faint replacement both present as a
+    ``forceSwitch`` request with no ``|turn|`` line. What separates them is the residual
+    phase: it runs before the end-of-turn request and is behind the mid-turn one, so
+    ``|upkeep`` is present in the second case and absent in the first.
+    """
+    if not any(r and r.get("forceSwitch") for r in handle.requests):
+        return False
+    return not any(line.startswith("|upkeep") for line in handle.log)
+
+
+def resolve_pauses(
+    reg: Regulation,
+    result: TurnResult,
+    handle: Any,
+    py_rng: random.Random,
+    roll: int,
+    report: Report,
+) -> TurnResult | None:
+    """Answers each mid-turn replacement identically on both sides and resumes.
+
+    Returns the finished turn, or ``None`` when the turn could not be carried through --
+    in which case the reason has already been recorded.
+    """
+    del roll
+    for _ in range(4):
+        if not result.suspended:
+            return result
+        if len(result.suspended) != 1 or result.branches:
+            report.skipped["a deterministic turn split at the interrupt"] += 1
+            return None
+        pause = result.suspended[0]
+        report.paused += 1
+        if not showdown_paused_mid_turn(handle):
+            report.silent_divergences += 1
+            report.by_field["mid-turn interrupt"] += 1
+            report.examples.append(
+                "resolver suspended but Showdown did not stop: "
+                + " / ".join(pause.events[-4:])
+            )
+            if os.environ.get("DIFF_DUMP_PAUSE"):
+                print("=== resolver suspended, Showdown did not ===")
+                print("  our events: " + " / ".join(pause.events))
+                print("  requests: " + repr(handle.requests))
+                for line in handle.log:
+                    print("    " + line)
+            return None
+
+        # The two must agree about *which* slots owe a replacement before the choice can be
+        # made identically on both sides.
+        owed = self_switches_needed(pause.position)
+        theirs = [
+            list((r or {}).get("forceSwitch") or []) for r in handle.requests
+        ]
+        for side_index, flags in enumerate(owed):
+            want = [bool(x) for x in theirs[side_index]][: len(flags)]
+            if want and list(flags) != want:
+                report.silent_divergences += 1
+                report.by_field["mid-turn interrupt"] += 1
+                report.examples.append(
+                    f"forceSwitch slots differ on p{side_index + 1}: "
+                    f"ours {list(flags)} vs showdown {want}"
+                )
+                return None
+
+        # Compare the state at the pause: this is what the chooser can see, so if it is
+        # wrong the choice is being made on a wrong position.
+        at_pause = canonical(pause.position)
+        showdown_pause = canonical(Position.from_json(handle.position))
+        pause_diffs = [k for k in at_pause if at_pause[k] != showdown_pause.get(k)]
+        if pause_diffs:
+            report.by_field["at the interrupt"] += len(pause_diffs)
+            report.examples.append(
+                "at the interrupt: "
+                + ", ".join(
+                    f"{k}: ours {at_pause[k]!r} vs showdown {showdown_pause.get(k)!r}"
+                    for k in pause_diffs[:3]
+                )
+            )
+        else:
+            report.paused_matched += 1
+
+        picks: list[SideAction] = []
+        told: list[str | None] = []
+        for side_index in range(2):
+            request = handle.requests[side_index]
+            slots = range(len(pause.position.sides[side_index].active))
+            if not request or request.get("wait") or not request.get("forceSwitch"):
+                picks.append(SideAction(slots=tuple(PassAction(slot=i) for i in slots)))
+                told.append(None)
+                continue
+            options = switch_actions_after_faint(
+                reg, pause.position, side_index, list(owed[side_index])
+            )
+            pick = py_rng.choice(options)
+            picks.append(pick)
+            told.append(pick.to_choice())
+        handle.step(told)
+        if handle.choice_errors:
+            report.skipped[f"replacement rejected: {handle.choice_errors}"] += 1
+            return None
+        result = resume_turn(reg, pause, picks)
+    report.skipped["more than four mid-turn interrupts"] += 1
+    return None
+
+
 def compare_turn(
     reg: Regulation,
     before: Position,
     chosen: list[SideAction],
-    after_json: dict[str, Any],
+    handle: Any,
     lines: list[str],
     roll: int,
     report: Report,
+    py_rng: random.Random,
 ) -> None:
     # An Encore-style action override replaces a queued action after the turn starts,
     # which the resolver does not model; those turns are named rather than scored.
@@ -172,26 +316,38 @@ def compare_turn(
         return
 
     result = resolve_turn(reg, before, chosen, budget=Budget.deterministic(roll))
-    report.branch_counts[len(result.branches)] += 1
+    report.branch_counts[len(result.branches) + len(result.suspended)] += 1
     for name in result.unmodelled:
         report.unmodelled[name] += 1
-    if len(result.branches) != 1:
-        report.skipped[f"{len(result.branches)} branches under a deterministic budget"] += 1
+    if len(result.branches) + len(result.suspended) != 1:
+        report.skipped[
+            f"{len(result.branches) + len(result.suspended)} branches under a "
+            "deterministic budget"
+        ] += 1
         return
 
-    # The resolver deliberately stops at a pending replacement: which Pokemon comes in
-    # after a self-switch is the player's choice, and after a forced switch it is drawn at
-    # random. Showdown resolves both immediately, so these turns are classified rather
-    # than scored -- the resolver is not wrong, it has handed the decision back.
-    undetermined = [
-        name for name in result.unmodelled if name.startswith(("selfSwitch", "forceSwitch"))
-    ]
+    # A self-switching move interrupts the turn, so the replacement is chosen and the turn
+    # carries on -- answered the same way on both sides so this stays an equality test.
+    was_paused = bool(result.suspended)
+    if result.suspended:
+        finished = resolve_pauses(reg, result, handle, py_rng, roll, report)
+        if finished is None:
+            return
+        result = finished
+        if len(result.branches) != 1:
+            report.skipped["resuming produced more than one branch"] += 1
+            return
+        lines = handle.log
+
+    # A forced switch (Roar, Whirlwind, Dragon Tail) drags in a *random* replacement rather
+    # than asking, so it is still deferred to the post-turn phase and classified here.
+    undetermined = [name for name in result.unmodelled if name.startswith("forceSwitch")]
     if undetermined:
         report.skipped["pending replacement (resolver defers to a choice)"] += 1
         return
 
     ours = canonical(result.branches[0].position)
-    theirs = canonical(Position.from_json(after_json))
+    theirs = canonical(Position.from_json(handle.position))
 
     report.compared += 1
     differences = [k for k in ours if ours[k] != theirs.get(k)]
@@ -203,6 +359,10 @@ def compare_turn(
         report.flagged_divergences += 1
     else:
         report.silent_divergences += 1
+    if was_paused:
+        report.paused_divergences += 1
+        for key in differences:
+            report.paused_by_field[field_kind(key)] += 1
 
     moves = [
         s.move_id
@@ -305,7 +465,7 @@ def run(
                     report.skipped["replacement turn"] += 1
                     continue
                 compare_turn(
-                    reg, before, chosen, handle.position, handle.log, roll, report
+                    reg, before, chosen, handle, handle.log, roll, report, py_rng
                 )
             handle.close()
 

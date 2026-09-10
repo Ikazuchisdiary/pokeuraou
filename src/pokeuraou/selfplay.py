@@ -39,7 +39,19 @@ from .payoff import HP_SHARE, Objective
 from .position import Field, MoveSlot, Pokemon, Position, Side
 from .priors import Cooccurrence, MetagamePrior, SampledSet
 from .regulation import STAT_IDS, Regulation, repo_root
-from .resolve import Budget, replacements_needed, resolve_replacements, resolve_turn
+from .resolve import (
+    Budget,
+    Fold,
+    SuspendedTurn,
+    TurnResult,
+    fold_value,
+    replacements_needed,
+    resolve_replacements,
+    resolve_turn,
+    resume_alternatives,
+    turn_expectation,
+    turn_leaves,
+)
 from .standings import Standings, cluster_teams, label_for, sample_standings_team
 from .stats import nature_multipliers, stats_from_sp
 from .teams import (
@@ -233,16 +245,27 @@ def _solve_matrix(
         for i, a in enumerate(ours):
             for j, b in enumerate(theirs):
                 result = resolve_turn(reg, pos, [a, b], budget=budget)
-                payoff[i, j] = result.expected(objective)
-                unmodelled.update(result.unmodelled)
+                value, flags = turn_expectation(reg, result, objective)
+                payoff[i, j] = value
+                unmodelled.update(flags)
         return payoff, unmodelled
 
     leaves: list[Position] = []
     weights: list[np.ndarray] = []
     spans: list[tuple[int, int, int, int]] = []
+    #: Cells whose turn stopped for a mid-turn replacement, and so fold through a choice
+    #: rather than an average. Kept separate so the common cell stays one dot product.
+    folded: list[tuple[int, int, Fold]] = []
     for i, a in enumerate(ours):
         for j, b in enumerate(theirs):
             result = resolve_turn(reg, pos, [a, b], budget=budget)
+            if result.suspended:
+                plan = turn_leaves(reg, result)
+                unmodelled.update(plan.unmodelled)
+                if plan.positions:
+                    folded.append((i, j, plan.shifted(len(leaves))))
+                    leaves.extend(plan.positions)
+                continue
             unmodelled.update(result.unmodelled)
             total = result.total_probability
             if not result.branches or total <= 0:
@@ -261,6 +284,8 @@ def _solve_matrix(
     for (i, j, start, count), w in zip(spans, weights, strict=True):
         if count:
             payoff[i, j] = float(values[start : start + count] @ w)
+    for i, j, root in folded:
+        payoff[i, j] = fold_value(root, values)
     return payoff, unmodelled
 
 
@@ -348,13 +373,112 @@ def play_game(
         ]
         result = resolve_turn(reg, pos, chosen, budget=Budget.exact())
         record.unmodelled.extend(result.unmodelled)
-        weights = np.array([b.probability for b in result.branches], dtype=np.float64)
-        pos = result.branches[_sample_index(rng, weights)].position
+        advanced = _advance(reg, rng, result, record, leaves, objective)
+        if advanced is None:
+            break
+        pos = advanced
         record.turns = pos.turn
 
     if pos.ended and pos.winner is not None:
         record.outcome = 1.0 if pos.winner == pos.sides[0].id else 0.0
     return record
+
+
+def _advance(
+    reg: Regulation,
+    rng: np.random.Generator,
+    result: TurnResult,
+    record: GameRecord,
+    leaves: tuple[LeafEvaluator | None, LeafEvaluator | None],
+    objective: Objective,
+) -> Position | None:
+    """Samples one outcome of a resolved turn, answering any mid-turn request on the way.
+
+    Returns ``None`` when the turn produced nothing to continue from, which the caller
+    treats as the end of the game.
+    """
+    for _ in range(5):
+        weights = np.array(
+            [b.probability for b in result.branches]
+            + [p.probability for p in result.suspended],
+            dtype=np.float64,
+        )
+        if not weights.size or float(weights.sum()) <= 0:
+            return None
+        index = _sample_index(rng, weights)
+        if index < len(result.branches):
+            return result.branches[index].position
+        pause = result.suspended[index - len(result.branches)]
+        resumed = _do_self_switch_node(reg, pause, record, leaves, objective)
+        if resumed is None:
+            return None
+        result = resumed
+    record.unmodelled.append("more than five mid-turn replacements in one turn")
+    return None
+
+
+def _do_self_switch_node(
+    reg: Regulation,
+    pause: SuspendedTurn,
+    record: GameRecord,
+    leaves: tuple[LeafEvaluator | None, LeafEvaluator | None],
+    objective: Objective,
+) -> TurnResult | None:
+    """Chooses the replacement a self-switching move demanded, and finishes the turn.
+
+    Unlike the post-turn replacement phase this is not simultaneous: one side is asked and
+    the other is on `wait`, so there is no matrix to solve. The chooser takes the option it
+    values most, scored with its own value function.
+
+    The approximation left here is an information one, and it is the same one the depth-1
+    search makes everywhere: the rest of the turn is already committed in this line, so the
+    choice is made against a known continuation where a real player would only have seen
+    the turn up to the interrupt. It is reported rather than papered over.
+    """
+    chooser, alternatives = resume_alternatives(reg, pause)
+    if chooser is None or not alternatives:
+        return None
+    record.unmodelled.append(
+        "mid-turn replacement chosen against the opponent's already-committed action"
+    )
+
+    plans = [turn_leaves(reg, resumed) for _option, resumed in alternatives]
+    flat = [position for plan in plans for position in plan.positions]
+    if not flat:
+        return None
+    evaluate = leaves[chooser]
+    values = (
+        evaluate(flat)
+        if evaluate is not None
+        else np.array([objective(position) for position in flat], dtype=np.float64)
+    )
+    scores: list[float] = []
+    offset = 0
+    for plan in plans:
+        count = len(plan.positions)
+        scores.append(plan.value(values[offset : offset + count]))
+        record.unmodelled.extend(plan.unmodelled)
+        offset += count
+
+    # Side 0 is the maximiser the payoff matrices are written for.
+    best = int(np.argmax(scores)) if chooser == 0 else int(np.argmin(scores))
+    policy = [0.0] * len(alternatives)
+    policy[best] = 1.0
+    options = [option.to_choice() for option, _resumed in alternatives]
+    waiting = ["pass"]
+    record.decisions.append(
+        Decision(
+            turn=pause.position.turn,
+            kind="selfswitch",
+            position=pause.position.to_json(),
+            own_actions=options if chooser == 0 else waiting,
+            own_policy=policy if chooser == 0 else [1.0],
+            foe_actions=waiting if chooser == 0 else options,
+            foe_policy=[1.0] if chooser == 0 else policy,
+            search_value=float(scores[best]),
+        )
+    )
+    return alternatives[best][1]
 
 
 def _do_replacement_node(

@@ -29,7 +29,7 @@ from pokeuraou.belief import (
 from pokeuraou.payoff import HP_SHARE
 from pokeuraou.priors import find_cached_chaos, load_chaos
 from pokeuraou.regulation import Regulation
-from pokeuraou.resolve import Budget, resolve_turn
+from pokeuraou.resolve import Budget, resolve_turn, turn_expectation
 from pokeuraou.setup import load_scenario, with_spreads
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "scenario-turn1.json"
@@ -179,7 +179,11 @@ def test_the_reduction_is_lossless(scenario) -> None:  # noqa: ANN001
             for a in ours:
                 for b in theirs:
                     result = resolve_turn(reg, pos, [a, b], budget=Budget.deterministic(0))
-                    row.append(result.expected(HP_SHARE))
+                    # `turn_expectation` rather than `expected`: a self-switching move
+                    # suspends the turn for a replacement choice, and two members of one
+                    # equivalence class have to agree on that choice too.
+                    value, _flags = turn_expectation(reg, result, HP_SHARE)
+                    row.append(value)
             values.append(row)
         for other in values[1:]:
             assert other == pytest.approx(values[0], abs=1e-12), (

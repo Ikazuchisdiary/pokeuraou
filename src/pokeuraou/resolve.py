@@ -27,12 +27,18 @@ landing reorders what has not happened yet. Each branch re-sorts against its own
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 
 import numpy as np
 
-from .actions import MoveAction, PassAction, SideAction, SwitchAction
+from .actions import (
+    MoveAction,
+    PassAction,
+    SideAction,
+    SwitchAction,
+    switch_actions_after_faint,
+)
 from .battler import Battler, FieldState
 from .damage import calculate, crit_probability
 from .effects import (
@@ -326,6 +332,33 @@ class Branch:
 
 
 @dataclass
+class SuspendedTurn:
+    """A turn Showdown stopped halfway through to ask for a replacement.
+
+    A self-switching move sets `switchFlag`, and the check at the end of ``runAction`` --
+    which runs after every action -- turns that into a fresh switch request. So the turn is
+    genuinely paused: the replacement enters before the rest of the queue runs, the residual
+    phase included.
+
+    The pause is also the honest information state. Whoever owes the replacement chooses it
+    without seeing how the remaining actions turn out, so the choice has to be made here,
+    once, rather than separately inside each of the outcomes that follow it.
+
+    Resume with :func:`resume_turn`. ``position`` is the state at the pause, which is what
+    the chooser can see.
+    """
+
+    probability: float
+    position: Position
+    #: Readable trace of what happened up to the pause.
+    events: list[str] = field(default_factory=list)
+    #: Continuation state. Private because resuming has to go through `resume_turn`, which
+    #: copies it -- one suspension is resumed once per candidate replacement.
+    _turn: _Turn | None = None
+    _remaining: tuple[QueuedAction, ...] = ()
+
+
+@dataclass
 class TurnResult:
     branches: list[Branch]
     #: True when every source of chance was enumerated in full.
@@ -334,16 +367,38 @@ class TurnResult:
     reductions: dict[str, int] = field(default_factory=dict)
     #: Effects encountered that the resolver does not model. Reported, never ignored.
     unmodelled: tuple[str, ...] = ()
+    #: Outcomes that stopped at a mid-turn replacement request. These are *not* finished
+    #: turns: `branches` and `suspended` together carry the turn's probability, and a
+    #: caller that ignores this field silently drops that mass.
+    suspended: tuple[SuspendedTurn, ...] = ()
 
     @property
     def total_probability(self) -> float:
-        return sum(b.probability for b in self.branches)
+        """The whole turn's mass, suspended outcomes included."""
+        return sum(b.probability for b in self.branches) + sum(
+            s.probability for s in self.suspended
+        )
 
     def expected(self, value: Callable[[Position], float]) -> float:
         total = self.total_probability
         if total <= 0:
             return 0.0
+        self._require_resumed("expected")
         return sum(b.probability * value(b.position) for b in self.branches) / total
+
+    def _require_resumed(self, what: str) -> None:
+        """Refuses to summarise a turn that has not finished.
+
+        Averaging over `branches` alone while a suspension holds part of the mass gives a
+        number that is short by that fraction and looks perfectly ordinary. Whoever owes the
+        mid-turn replacement has to choose it first -- see `resume_turn`.
+        """
+        if self.suspended:
+            raise ValueError(
+                f"{what}() on a turn with {len(self.suspended)} suspended outcome(s): a "
+                "self-switching move paused the turn for a replacement choice. Resolve "
+                "them with resume_turn() first."
+            )
 
     def collapse(self, key: Callable[[Position], object]) -> dict[object, float]:
         """Groups branches by a projection of the position, summing probabilities.
@@ -351,6 +406,7 @@ class TurnResult:
         "Which Pokemon faint" is such a projection, and has a handful of values even when
         there are hundreds of branches -- which is what makes the output readable.
         """
+        self._require_resumed("collapse")
         out: dict[object, float] = {}
         for b in self.branches:
             k = key(b.position)
@@ -369,7 +425,7 @@ class _Turn:
 
     __slots__ = ("reg", "pos", "budget", "attacks", "events", "unmodelled",
                  "hurt_this_turn", "move_failed", "move_damage_total", "move_connected",
-                 "acted", "actions_remaining")
+                 "acted", "actions_remaining", "self_switch_pending")
 
     def __init__(
         self,
@@ -400,6 +456,10 @@ class _Turn:
         #: How many actions are still queued behind the one resolving. Protect fails when
         #: this is zero -- Showdown gates it on `queue.willAct()`.
         self.actions_remaining = 0
+        #: Set when a self-switching move has left a slot owing a replacement, which
+        #: suspends the turn. A flag rather than a scan of the position because it is
+        #: consulted after every action in the resolver's innermost loop.
+        self.self_switch_pending = False
 
     def clone(self) -> _Turn:
         fresh = _Turn(self.reg, self.pos.copy(), self.budget, self.attacks)
@@ -411,6 +471,7 @@ class _Turn:
         fresh.move_connected = self.move_connected
         fresh.acted = set(self.acted)
         fresh.actions_remaining = self.actions_remaining
+        fresh.self_switch_pending = self.self_switch_pending
         return fresh
 
     # -- lookups ------------------------------------------------------------
@@ -540,17 +601,22 @@ class _Turn:
 
     def apply_boosts(
         self, side: int, slot: int, boosts: dict[str, int], *, reason: str, from_foe: bool = True
-    ) -> None:
+    ) -> bool:
+        """Applies a boost table, and says whether any stat actually moved.
+
+        The return value is Showdown's `success` from `Battle#boost`, which Parting Shot
+        reads to decide whether it switches out at all.
+        """
         mon = self.mon_at(side, slot)
         if mon is None or mon.fainted:
-            return
+            return False
         if mon.ability == "contrary":
             # `onChangeBoost` inverts every stat change aimed at the holder, whatever the
             # source -- including the drops from its own Close Combat, which is the point
             # of Mega Staraptor. The inversion happens *before* anything reads the sign,
             # so Defiant does not see a foe's drop that became a raise.
             boosts = {stat: -delta for stat, delta in boosts.items()}
-        lowered = False
+        changed = False
         for stat, delta in boosts.items():
             if stat not in BOOST_IDS:
                 self.unmodelled.add(f"boost:{stat}")
@@ -573,10 +639,14 @@ class _Turn:
             else:
                 mon.boosts.pop(stat, None)
             self.log(f"{self.name(side, slot)} {stat} {delta:+d} -> {after} ({reason})")
-            if delta < 0:
-                lowered = True
-        if lowered and from_foe:
-            self.on_stat_lowered_by_foe(side, slot)
+            changed = True
+            # `runEvent('AfterEachBoost', ...)` sits *inside* Showdown's per-stat loop and
+            # only fires when the stat actually moved, so Defiant answers each drop
+            # separately: Parting Shot's two drops are +4, not +2. It also fires between
+            # them, so the raise is part of the state the next drop is applied to.
+            if delta < 0 and from_foe:
+                self.on_stat_lowered_by_foe(side, slot)
+        return changed
 
     def on_stat_lowered_by_foe(self, side: int, slot: int) -> None:
         """Defiant and Competitive react only to a drop the opponent caused."""
@@ -713,6 +783,7 @@ def resolve_turn(
     queues = build_queue(reg, pos, side_actions, battlers, fs)
 
     branches: list[Branch] = []
+    suspended: list[SuspendedTurn] = []
     unmodelled: set[str] = set()
     reductions: dict[str, int] = {}
     exact = True
@@ -730,6 +801,9 @@ def resolve_turn(
             for branch in sub.branches:
                 branch.probability *= weight * tie_weight
                 branches.append(branch)
+            for pause in sub.suspended:
+                pause.probability *= weight * tie_weight
+                suspended.append(pause)
             unmodelled |= set(sub.unmodelled)
             exact = exact and sub.exact
             for key, value in sub.reductions.items():
@@ -740,6 +814,7 @@ def resolve_turn(
         exact=exact,
         reductions=reductions,
         unmodelled=tuple(sorted(unmodelled)),
+        suspended=tuple(suspended),
     )
 
 
@@ -787,8 +862,20 @@ def _resolve_sequence(
     attacks: dict[tuple[int, int], bool],
 ) -> TurnResult:
     """Resolves one ordered action sequence, enumerating each action's randomness."""
-    live = [_Live(1.0, _Turn(reg, pos.copy(), budget, attacks), list(sequence))]
+    return _run_queue(
+        reg, [_Live(1.0, _Turn(reg, pos.copy(), budget, attacks), list(sequence))], budget
+    )
+
+
+def _run_queue(reg: Regulation, start: list[_Live], budget: Budget) -> TurnResult:
+    """Runs branches until their queues are empty or a replacement request interrupts them.
+
+    Entered both at the top of a turn and again from `resume_turn`, so a turn interrupted
+    twice -- two U-turns on the same side, say -- goes through exactly one code path.
+    """
+    live = list(start)
     finished: list[_Live] = []
+    paused: list[_Live] = []
     reductions: dict[str, int] = {}
     exact = True
 
@@ -836,8 +923,18 @@ def _resolve_sequence(
                 # Showdown ends the battle as soon as a side is wiped and abandons the
                 # rest of the queue. Carrying on would apply moves that never happened --
                 # including a spread move hitting the winner's own partner.
-                remaining_actions = [] if _side_wiped(turn) else list(rest)
-                nxt.append(_Live(item.weight * weight, turn, remaining_actions))
+                wiped = _side_wiped(turn)
+                remaining_actions = [] if wiped else list(rest)
+                child = _Live(item.weight * weight, turn, remaining_actions)
+                # A self-switching move ends `runAction` with `switchFlag` set, and
+                # Showdown answers that with a fresh switch request -- so the turn stops
+                # here, before the rest of the queue and before the residual phase. The
+                # branch is handed back for the replacement choice instead of being run on
+                # with the wrong Pokemon still standing in the slot.
+                if not wiped and turn.self_switch_pending:
+                    paused.append(child)
+                else:
+                    nxt.append(child)
             # Prune as the generation is built, not after. Building it in full first would
             # peak at the cap times the branching factor -- a quarter of a million copied
             # positions for an exact budget, which is enough to exhaust memory.
@@ -846,6 +943,7 @@ def _resolve_sequence(
 
         nxt = prune(nxt)
         finished = prune(finished)
+        paused = prune(paused)
         if dropped:
             exact = False
         live = nxt
@@ -856,9 +954,11 @@ def _resolve_sequence(
     # Renormalise once, at the end: dropping low-probability branches leaves the rest
     # summing to less than one, and rescaling after every generation would compound the
     # rounding.
-    total_weight = sum(item.weight for item in finished)
-    if finished and total_weight > 0 and abs(total_weight - 1.0) > 1e-12:
-        for item in finished:
+    total_weight = sum(item.weight for item in finished) + sum(
+        item.weight for item in paused
+    )
+    if total_weight > 0 and abs(total_weight - 1.0) > 1e-12:
+        for item in (*finished, *paused):
             item.weight /= total_weight
 
     out_branches: list[Branch] = []
@@ -871,11 +971,27 @@ def _resolve_sequence(
         )
         unmodelled |= item.turn.unmodelled
 
+    # A paused branch gets no residuals and no turn increment: the residual phase is behind
+    # the interrupt, so it belongs to whatever `resume_turn` produces.
+    out_suspended: list[SuspendedTurn] = []
+    for item in paused:
+        out_suspended.append(
+            SuspendedTurn(
+                probability=item.weight,
+                position=item.turn.pos,
+                events=list(item.turn.events),
+                _turn=item.turn,
+                _remaining=tuple(item.remaining),
+            )
+        )
+        unmodelled |= item.turn.unmodelled
+
     return TurnResult(
         branches=out_branches,
         exact=exact,
         reductions=reductions,
         unmodelled=tuple(sorted(unmodelled)),
+        suspended=tuple(out_suspended),
     )
 
 
@@ -1495,6 +1611,9 @@ def _do_status_move(
             if blocked is not None:
                 turn.log(f"{action.label(reg)} blocked by {blocked}")
                 continue
+        if _prankster_immune(reg, turn, action, move, target):
+            turn.log(f"{turn.name(*target)} immune (prankster vs Dark)")
+            continue
         reachable.append(target)
 
     if not reachable and targets:
@@ -1613,6 +1732,34 @@ def _do_protect(
     return [(chance, hit_state, ""), (1 - chance, turn, "")]
 
 
+def _prankster_immune(
+    reg: Regulation,
+    turn: _Turn,
+    action: QueuedAction,
+    move: Move,
+    target: tuple[int, int],
+) -> bool:
+    """Showdown's natural Prankster immunity: a foe Dark type ignores the move entirely.
+
+        gen >= 7 && move.pranksterBoosted && pokemon.hasAbility('prankster') &&
+            !targets[i].isAlly(pokemon) && !this.dex.getImmunity('prankster', target)
+
+    `pranksterBoosted` is set by the ability's own `onModifyPriority`, so it means exactly
+    "a Status move used by a Prankster holder" -- which is what is checked here. Allies are
+    exempt, so Prankster Tailwind and screens are unaffected; it is the moves aimed across
+    the field that fail.
+    """
+    if move.category != "Status" or target[0] == action.side:
+        return False
+    attacker = turn.mon_at(action.side, action.slot)
+    if attacker is None or attacker.ability != "prankster":
+        return False
+    defender = turn.mon_at(*target)
+    if defender is None or defender.fainted:
+        return False
+    return reg.immune_to_effect("prankster", tuple(turn.types_of(defender)))
+
+
 def _apply_status_move(
     reg: Regulation,
     turn: _Turn,
@@ -1622,6 +1769,8 @@ def _apply_status_move(
 ) -> None:
     raw = move.raw
     me = (action.side, action.slot)
+    #: Set by a move whose own handler deletes `selfSwitch` when it achieved nothing.
+    suppress_self_switch = False
 
     if raw.get("sideCondition"):
         side_condition = str(raw["sideCondition"])
@@ -1692,9 +1841,22 @@ def _apply_status_move(
 
     if move.id == "partingshot":
         # Showdown applies the drops in an onHit handler, so they are not in the dumped
-        # declarative fields. The self-switch stays unmodelled and is reported below.
+        # declarative fields:
+        #     const success = this.boost({atk: -1, spa: -1}, target, source);
+        #     if (!success && !target.hasAbility('mirrorarmor')) delete move.selfSwitch;
+        # So a target that cannot be lowered any further, or that is behind Clear Body,
+        # leaves the user standing. Mirror Armor is the exception: it bounces the drops back
+        # and the user still leaves.
+        landed = False
         for target in targets:
-            turn.apply_boosts(*target, {"atk": -1, "spa": -1}, reason="partingshot")
+            if turn.apply_boosts(*target, {"atk": -1, "spa": -1}, reason="partingshot"):
+                landed = True
+            mon = turn.mon_at(*target)
+            if mon is not None and mon.ability == "mirrorarmor":
+                landed = True
+        if not landed:
+            suppress_self_switch = True
+            turn.log(f"{action.label(reg)} did nothing, so nobody switched")
 
     if move.id in ("followme", "ragepowder", "spotlight"):
         turn.add_volatile(*me, move.id)
@@ -1720,7 +1882,7 @@ def _apply_status_move(
                 mon.volatiles.append(Effect(id="perishsong", duration=4))
                 turn.log(f"{turn.name(side, slot)} perish3")
 
-    if move.raw.get("selfSwitch"):
+    if move.raw.get("selfSwitch") and not suppress_self_switch:
         _mark_self_switch(turn, action)
     if move.raw.get("forceSwitch"):
         for target in targets:
@@ -2172,6 +2334,13 @@ def _after_hit(
     ):
         turn.apply_status(*me, "brn", reason="spicyspray")
 
+    # Throat Chop adds its own condition from a 100%-chance `secondary.onHit`, so there is
+    # nothing declarative in the dump to drive it. Two turns, which the dump now carries
+    # because the duration collector reads a condition named after the move itself.
+    if move.id == "throatchop" and defender is not None and not defender.fainted and dealt > 0:
+        turn.add_volatile(*target, "throatchop", duration=_duration(move, "throatchop"))
+        turn.log(f"{turn.name(*target)} cannot use sound moves (throatchop)")
+
     # The contact effects are `onDamagingHit` handlers, which Showdown runs from `damage()`
     # -- before the faint is processed. So Rough Skin still hurts the attacker when the
     # Pokemon holding it is knocked out by that very hit, and gating on survival loses the
@@ -2268,7 +2437,10 @@ def _after_move(turn: _Turn, action: QueuedAction, move: Move) -> None:
         if self_boost.get("boosts"):
             turn.apply_boosts(*me, dict(self_boost["boosts"]), reason=move.id, from_foe=False)
 
-    if raw.get("selfSwitch"):
+    # `else if (move.selfSwitch && source.hp && !source.volatiles['commanded'])`, reached
+    # only when the move `didAnything`: a U-turn into a Ghost type, or one that missed,
+    # leaves its user in place.
+    if raw.get("selfSwitch") and turn.move_connected:
         _mark_self_switch(turn, action)
 
     # `onAnyAfterMove`: every holder on the field is checked, not just the attacker.
@@ -2359,9 +2531,12 @@ def _swap_items(turn: _Turn, a: tuple[int, int], b: tuple[int, int]) -> None:
 def _mark_self_switch(turn: _Turn, action: QueuedAction) -> None:
     """Records that the user of a self-switching move has to be replaced.
 
-    Which Pokemon comes in is the player's choice, made in a fresh request, so the
-    resolver does not pick one. It records the pending replacement on the position and
-    reports it, which is honest about where the turn stops being determined.
+    Which Pokemon comes in is the player's choice, so the resolver does not pick one. The
+    mark is what suspends the turn: `_run_queue` sees it and hands the branch back with its
+    remaining queue, and `resume_turn` continues once the choice is made.
+
+    A Pokemon with an empty bench is not marked at all -- Showdown's `switchFlag` has
+    nothing to answer it with, and the move simply leaves it in place.
     """
     mon = turn.mon_at(action.side, action.slot)
     if mon is None or mon.fainted:
@@ -2370,8 +2545,8 @@ def _mark_self_switch(turn: _Turn, action: QueuedAction) -> None:
     if not bench:
         return
     turn.add_volatile(action.side, action.slot, "pendingselfswitch")
+    turn.self_switch_pending = True
     turn.log(f"{turn.name(action.side, action.slot)} must switch out")
-    turn.unmodelled.add("selfSwitch (replacement is the player's choice)")
 
 
 def _mark_force_switch(turn: _Turn, target: tuple[int, int]) -> None:
@@ -2439,6 +2614,119 @@ def _trapper_gone(turn: _Turn, trap: Effect) -> bool:
 
 #: Volatiles that record a replacement the resolver deliberately did not choose.
 PENDING_REPLACEMENT_VOLATILES = ("pendingselfswitch", "pendingforceswitch")
+
+
+def self_switches_needed(pos: Position) -> tuple[tuple[bool, ...], ...]:
+    """Per side, per active slot, whether a self-switching move is waiting on a choice.
+
+    Narrower than `replacements_needed` on purpose. A faint is answered after the turn and
+    a forced switch is a random drag, but a self-switch interrupts the turn *now*, so only
+    these slots may be filled by `resume_turn`.
+    """
+    out: list[tuple[bool, ...]] = []
+    for side in pos.sides:
+        bench = sum(1 for mon in side.pokemon if not mon.fainted and not mon.is_active)
+        flags: list[bool] = []
+        for party_index in side.active:
+            mon = side.pokemon[party_index] if party_index is not None else None
+            flags.append(
+                bench > 0
+                and mon is not None
+                and not mon.fainted
+                and mon.has_volatile("pendingselfswitch")
+            )
+        out.append(tuple(flags))
+    return tuple(out)
+
+
+def resume_turn(
+    reg: Regulation, paused: SuspendedTurn, choices: list[SideAction]
+) -> TurnResult:
+    """Finishes a turn that stopped at a mid-turn replacement request.
+
+    ``choices`` is one :class:`SideAction` per side, shaped like the post-turn replacement
+    phase: a switch for each slot that owes one, a pass everywhere else. The replacement
+    enters and then the rest of the queue runs, the residual phase included -- which is the
+    whole point, since Showdown puts the interrupt in front of both.
+
+    Returns a :class:`TurnResult` because resuming can suspend again: two U-turns on the
+    same side produce two separate requests, exactly as Showdown does.
+
+    The suspension is not consumed. One pause is resumed once per candidate replacement
+    when the caller is choosing between them, so the state is copied here.
+    """
+    if paused._turn is None:
+        raise ValueError("this SuspendedTurn carries no continuation state")
+    turn = paused._turn.clone()
+    owed = self_switches_needed(turn.pos)
+    unmodelled: set[str] = set()
+
+    placed: list[tuple[int, int, np.ndarray]] = []
+    for side_index, side_action in enumerate(choices):
+        for slot_action in side_action.slots:
+            if isinstance(slot_action, PassAction):
+                if owed[side_index][slot_action.slot]:
+                    unmodelled.add(
+                        f"self-switch replacement owed at "
+                        f"p{side_index + 1}[{slot_action.slot}] but none was chosen"
+                    )
+                continue
+            if not isinstance(slot_action, SwitchAction):
+                unmodelled.add(f"a replacement only takes switches, got {slot_action!r}")
+                continue
+            slot = slot_action.slot
+            if not owed[side_index][slot]:
+                # Only the interrupted slot may move. Filling any other one here would be
+                # a free switch that the turn never offered.
+                unmodelled.add(
+                    f"p{side_index + 1}[{slot}] does not owe a self-switch replacement"
+                )
+                continue
+            outgoing = turn.mon_at(side_index, slot)
+            if outgoing is not None:
+                outgoing.volatiles = [
+                    v for v in outgoing.volatiles if v.id != "pendingselfswitch"
+                ]
+            queued = QueuedAction(
+                side=side_index,
+                slot=slot,
+                kind="switch",
+                order=103,
+                priority=0,
+                fractional=0.0,
+                speed=np.zeros(1, dtype=np.int64),
+                switch_to=slot_action.party_index,
+                switch_species=slot_action.species,
+            )
+            _do_switch(reg, turn, queued, run_switch_in=False)
+            incoming = turn.battler_at(side_index, slot)
+            speed = (
+                effective_speed(
+                    reg,
+                    incoming,
+                    turn.field(),
+                    frozenset(c.id for c in turn.pos.sides[side_index].side_conditions),
+                )
+                if incoming is not None
+                else np.zeros(1, dtype=np.int64)
+            )
+            placed.append((side_index, slot, speed))
+
+    # `runSwitch` is order 101 sorted on speed, fastest first, so a fast replacement takes
+    # the hazards and fires its ability before a slow one. Same rule as the post-turn phase.
+    placed.sort(key=lambda entry: (-int(entry[2][0]), entry[0], entry[1]))
+    for side_index, slot, _speed in placed:
+        _on_switch_in(reg, turn, side_index, slot)
+
+    turn.self_switch_pending = any(any(f) for f in self_switches_needed(turn.pos))
+    result = _run_queue(reg, [_Live(1.0, turn, list(paused._remaining))], turn.budget)
+    if unmodelled:
+        result.unmodelled = tuple(sorted(set(result.unmodelled) | unmodelled))
+    for branch in result.branches:
+        branch.probability *= paused.probability
+    for pause in result.suspended:
+        pause.probability *= paused.probability
+    return result
 
 
 @dataclass
@@ -2551,6 +2839,176 @@ def resolve_replacements(
         events=list(state.events),
         unmodelled=tuple(sorted(unmodelled | state.unmodelled)),
     )
+
+
+def resume_alternatives(
+    reg: Regulation, paused: SuspendedTurn
+) -> tuple[int | None, list[tuple[SideAction, TurnResult]]]:
+    """Every replacement the interrupted side could send in, and the turn each produces.
+
+    Showdown checks `switchFlag` after each action, so at most one side is ever asked at a
+    time and the choice belongs to one player. If both sides somehow owe one at once the
+    choices interact and it is no longer a single-player decision, so that is reported
+    rather than quietly treated as one.
+    """
+    owed = self_switches_needed(paused.position)
+    sides = [i for i, flags in enumerate(owed) if any(flags)]
+    if not sides:
+        return None, []
+    chooser = sides[0]
+    options = switch_actions_after_faint(
+        reg, paused.position, chooser, list(owed[chooser])
+    )
+    other = 1 - chooser
+    passes = SideAction(
+        slots=tuple(
+            PassAction(slot=i) for i in range(len(paused.position.sides[other].active))
+        )
+    )
+    out: list[tuple[SideAction, TurnResult]] = []
+    for option in options:
+        choices = [option, passes] if chooser == 0 else [passes, option]
+        resumed = resume_turn(reg, paused, choices)
+        if len(sides) > 1:
+            resumed.unmodelled = tuple(
+                sorted({*resumed.unmodelled, "simultaneous mid-turn replacements"})
+            )
+        out.append((option, resumed))
+    return chooser, out
+
+
+@dataclass
+class LeafRef:
+    """One evaluated position."""
+
+    index: int
+
+
+@dataclass
+class Average:
+    """What chance decides: the weighted mean of its parts, normalised by their weight."""
+
+    parts: list[tuple[float, Fold]] = field(default_factory=list)
+
+
+@dataclass
+class BestOf:
+    """What a player decides: the option that side likes most.
+
+    Side 0 is the maximiser the payoff matrix is written for, so side 1 choosing means
+    taking the value it likes least.
+    """
+
+    chooser: int
+    options: list[Fold] = field(default_factory=list)
+
+
+Fold = LeafRef | Average | BestOf
+
+
+def fold_value(node: Fold, values: Sequence[float]) -> float:
+    """Collapses a fold tree against one value per leaf position."""
+    if isinstance(node, LeafRef):
+        return float(values[node.index])
+    if isinstance(node, BestOf):
+        scored = [fold_value(option, values) for option in node.options]
+        if not scored:
+            return 0.0
+        return max(scored) if node.chooser == 0 else min(scored)
+    total = sum(weight for weight, _ in node.parts)
+    if total <= 0:
+        return 0.0
+    return sum(weight * fold_value(part, values) for weight, part in node.parts) / total
+
+
+@dataclass
+class TurnLeaves:
+    """A turn's leaf positions and the fold that turns their values into the turn's value."""
+
+    positions: list[Position]
+    root: Fold
+    unmodelled: tuple[str, ...] = ()
+
+    def value(self, values: Sequence[float]) -> float:
+        return fold_value(self.root, values)
+
+    def shifted(self, offset: int) -> Fold:
+        """The fold re-indexed for a caller that appended these positions to a larger batch.
+
+        The search evaluates every leaf in a node in one forward pass, so each cell's
+        positions land at an offset in a shared list.
+        """
+        return _shift(self.root, offset)
+
+
+def turn_leaves(reg: Regulation, result: TurnResult, *, depth: int = 0) -> TurnLeaves:
+    """Flattens a turn -- suspensions included -- into leaf positions plus a fold.
+
+    Recurses because resuming can be interrupted again: two U-turns on the same side are two
+    separate requests, exactly as Showdown issues them.
+    """
+    positions: list[Position] = []
+    parts: list[tuple[float, Fold]] = []
+    unmodelled: set[str] = set(result.unmodelled)
+
+    def add_leaf(position: Position) -> LeafRef:
+        positions.append(position)
+        return LeafRef(index=len(positions) - 1)
+
+    for branch in result.branches:
+        parts.append((branch.probability, add_leaf(branch.position)))
+
+    for pause in result.suspended:
+        # Four Pokemon a side means a turn cannot interrupt itself indefinitely. The guard
+        # is against a bug turning into unbounded recursion, and it reports rather than
+        # hides the position it stopped at.
+        if depth >= 4:
+            unmodelled.add("more than four mid-turn replacements in one turn")
+            parts.append((pause.probability, add_leaf(pause.position)))
+            continue
+        chooser, alternatives = resume_alternatives(reg, pause)
+        if chooser is None or not alternatives:
+            unmodelled.add("a suspended turn offered no replacement")
+            parts.append((pause.probability, add_leaf(pause.position)))
+            continue
+        options: list[Fold] = []
+        for _option, resumed in alternatives:
+            sub = turn_leaves(reg, resumed, depth=depth + 1)
+            offset = len(positions)
+            positions.extend(sub.positions)
+            options.append(_shift(sub.root, offset))
+            unmodelled |= set(sub.unmodelled)
+        parts.append((pause.probability, BestOf(chooser=chooser, options=options)))
+
+    return TurnLeaves(
+        positions=positions, root=Average(parts=parts), unmodelled=tuple(sorted(unmodelled))
+    )
+
+
+def _shift(node: Fold, offset: int) -> Fold:
+    """Re-indexes a sub-tree's leaves after its positions were appended to a larger list."""
+    if isinstance(node, LeafRef):
+        return LeafRef(index=node.index + offset)
+    if isinstance(node, BestOf):
+        return BestOf(
+            chooser=node.chooser, options=[_shift(o, offset) for o in node.options]
+        )
+    return Average(parts=[(w, _shift(part, offset)) for w, part in node.parts])
+
+
+def turn_expectation(
+    reg: Regulation, result: TurnResult, value: Callable[[Position], float]
+) -> tuple[float, tuple[str, ...]]:
+    """The turn's value under ``value``, with every mid-turn replacement chosen.
+
+    The convenience form of `turn_leaves` for callers that score one turn at a time.
+    ``value`` is read from side 0's point of view, which is the convention the payoff
+    matrices and the LP already use.
+    """
+    if not result.suspended:
+        return result.expected(value), result.unmodelled
+    plan = turn_leaves(reg, result)
+    return plan.value([value(p) for p in plan.positions]), plan.unmodelled
 
 
 def _slot_of(turn: _Turn, source_slot: str | None) -> tuple[int, int] | None:

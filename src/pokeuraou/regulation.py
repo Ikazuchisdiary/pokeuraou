@@ -180,6 +180,14 @@ class Regulation:
 
         self.types: tuple[str, ...] = tuple(data["types"])
         self.typechart: dict[str, dict[str, float]] = data["typechart"]
+        #: Types immune to a named non-type effect, e.g. ``prankster -> {"Dark"}``. The
+        #: type chart keys `damageTaken` by attacking type *and* by a few effect names,
+        #: and these are the effect names: prankster, powder, trapped, the statuses and the
+        #: weathers.
+        self.effect_immunities: dict[str, frozenset[str]] = {
+            key: frozenset(value)
+            for key, value in (data.get("effectImmunities") or {}).items()
+        }
 
         self.species: dict[str, Species] = {}
         for s in data["species"]:
@@ -268,6 +276,17 @@ class Regulation:
         for t in defending_types:
             mult *= row.get(t, 1.0)
         return mult
+
+    def immune_to_effect(self, effect: str, defending_types: tuple[str, ...]) -> bool:
+        """Whether any of these types is immune to a named non-type effect.
+
+        ``reg.immune_to_effect("prankster", ("Dark", "Steel"))`` is Showdown's
+        ``!this.dex.getImmunity('prankster', target)``.
+        """
+        immune = self.effect_immunities.get(effect)
+        if not immune:
+            return False
+        return any(t in immune for t in defending_types)
 
     def mega_target(self, species_id: str, item_id: str | None) -> str | None:
         if not item_id:

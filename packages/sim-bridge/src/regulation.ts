@@ -200,6 +200,14 @@ export interface RegulationConfig {
 	types: string[];
 	/** typechart[attackingType][defendingType]: 0 immune, 0.5 resist, 1 neutral, 2 super */
 	typechart: Record<string, Record<string, number>>;
+	/**
+	 * Types immune to a named non-type effect, e.g. `prankster: ['Dark']`.
+	 *
+	 * `damageTaken` mixes attacking types with a handful of effect names, and these are the
+	 * effect names. Prankster is the one that matters in practice: since gen 7 a
+	 * Prankster-boosted status move simply fails against a foe Dark type.
+	 */
+	effectImmunities: Record<string, string[]>;
 	species: SpeciesEntry[];
 	moves: MoveEntry[];
 	items: ItemEntry[];
@@ -251,11 +259,17 @@ function collectDurations(
 		if (Object.keys(entry).length) out[id] = entry;
 	};
 
-	// The move's own condition applies to whichever effect the move names.
+	// The move's own condition applies to whichever effect the move names...
 	const own = move.condition;
 	for (const key of ['volatileStatus', 'sideCondition', 'slotCondition', 'pseudoWeather']) {
 		record(move[key], own);
 	}
+	// ...and to a volatile named after the move itself, which is how a move that adds its
+	// own condition from a handler does it. Throat Chop's duration-2 sound lock is only
+	// reachable this way: it names no effect and calls `addVolatile('throatchop')` from a
+	// 100%-chance secondary, so without this the volatile would be added with no duration
+	// and never expire -- the bug class that made four effects permanent.
+	record(move.id, own);
 	// ...and the named condition, which is where conditions.ts keeps most of them.
 	for (const key of ['volatileStatus', 'sideCondition', 'slotCondition', 'pseudoWeather']) {
 		const id = move[key];
@@ -473,6 +487,19 @@ export function buildRegulationConfig(formatId: string, showdownCommit: string):
 		}
 	}
 
+	// The keys of `damageTaken` that are not attacking types: named effects a type can be
+	// immune to. Only value 3 (immune) is meaningful for these -- there is no "resists
+	// Prankster".
+	const effectImmunities: Record<string, string[]> = {};
+	const typeNames = new Set(types);
+	for (const def of types) {
+		for (const [key, taken] of Object.entries(dex.types.get(def).damageTaken)) {
+			if (typeNames.has(key) || taken !== 3) continue;
+			(effectImmunities[key] ??= []).push(def);
+		}
+	}
+	for (const list of Object.values(effectImmunities)) list.sort();
+
 	const natures: NatureEntry[] = dex.natures.all()
 		.map(n => ({
 			name: n.name,
@@ -488,6 +515,7 @@ export function buildRegulationConfig(formatId: string, showdownCommit: string):
 		statIds: [...Dex.stats.ids()],
 		types,
 		typechart,
+		effectImmunities,
 		species,
 		moves,
 		items,

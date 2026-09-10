@@ -20,7 +20,7 @@
 		"teraEnabled": false,
 		"megaPerSide": 1,
 		"showdownCommit": "cc089d36b7717dec78ce8ab5d1745c03ad5c97e4",
-		"generatedAt": "2026-09-10T10:11:39.486Z"
+		"generatedAt": "2026-09-10T10:50:10.979Z"
 	},
 	"natures": [
 		{
@@ -593,6 +593,42 @@
 			"Stellar": 1,
 			"Water": 0.5
 		}
+	},
+	"effectImmunities": {
+		"prankster": [
+			"Dark"
+		],
+		"par": [
+			"Electric"
+		],
+		"brn": [
+			"Fire"
+		],
+		"trapped": [
+			"Ghost"
+		],
+		"powder": [
+			"Grass"
+		],
+		"sandstorm": [
+			"Ground",
+			"Rock",
+			"Steel"
+		],
+		"hail": [
+			"Ice"
+		],
+		"frz": [
+			"Ice"
+		],
+		"psn": [
+			"Poison",
+			"Steel"
+		],
+		"tox": [
+			"Poison",
+			"Steel"
+		]
 	},
 	"species": [
 		{
@@ -12904,6 +12940,11 @@
 				"onAfterMove",
 				"priorityChargeCallback"
 			],
+			"durations": {
+				"beakblast": {
+					"duration": 1
+				}
+			},
 			"nonGhostTarget": ""
 		},
 		{
@@ -14214,6 +14255,11 @@
 				"condition.onStart",
 				"condition.onUpdate"
 			],
+			"durations": {
+				"syrupbomb": {
+					"duration": 4
+				}
+			},
 			"nonGhostTarget": "",
 			"secondaries": [
 				{
@@ -14628,6 +14674,11 @@
 				"onHit",
 				"onPrepareHit"
 			],
+			"durations": {
+				"allyswitch": {
+					"duration": 2
+				}
+			},
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
 		},
@@ -15519,6 +15570,11 @@
 				"condition.onSourceBasePower",
 				"onTryMove"
 			],
+			"durations": {
+				"bounce": {
+					"duration": 2
+				}
+			},
 			"nonGhostTarget": "",
 			"secondaries": [
 				{
@@ -16004,6 +16060,11 @@
 				"condition.onBeforeMove",
 				"priorityChargeCallback"
 			],
+			"durations": {
+				"chillyreception": {
+					"duration": 1
+				}
+			},
 			"weather": "snowscape",
 			"selfSwitch": true,
 			"ignoreImmunity": true,
@@ -16346,6 +16407,11 @@
 				"damageCallback",
 				"onTry"
 			],
+			"durations": {
+				"counter": {
+					"duration": 1
+				}
+			},
 			"nonGhostTarget": ""
 		},
 		{
@@ -16721,6 +16787,11 @@
 				"condition.onSourceModifyDamage",
 				"onTryMove"
 			],
+			"durations": {
+				"dig": {
+					"duration": 2
+				}
+			},
 			"nonGhostTarget": ""
 		},
 		{
@@ -16781,6 +16852,11 @@
 				"condition.onSourceModifyDamage",
 				"onTryMove"
 			],
+			"durations": {
+				"dive": {
+					"duration": 2
+				}
+			},
 			"nonGhostTarget": ""
 		},
 		{
@@ -17344,6 +17420,12 @@
 				"condition.onSetStatus",
 				"condition.onTryAddVolatile"
 			],
+			"durations": {
+				"electricterrain": {
+					"duration": 5,
+					"durationCallback": true
+				}
+			},
 			"terrain": "electricterrain",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -18309,6 +18391,11 @@
 				"condition.onSourceModifyDamage",
 				"onTryMove"
 			],
+			"durations": {
+				"fly": {
+					"duration": 2
+				}
+			},
 			"nonGhostTarget": ""
 		},
 		{
@@ -18424,6 +18511,11 @@
 				"condition.onTryAddVolatile",
 				"priorityChargeCallback"
 			],
+			"durations": {
+				"focuspunch": {
+					"duration": 1
+				}
+			},
 			"nonGhostTarget": ""
 		},
 		{
@@ -18809,6 +18901,12 @@
 				"condition.onFieldStart",
 				"condition.onResidual"
 			],
+			"durations": {
+				"grassyterrain": {
+					"duration": 5,
+					"durationCallback": true
+				}
+			},
 			"terrain": "grassyterrain",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -20416,6 +20514,11 @@
 				"onHit",
 				"onTryHit"
 			],
+			"durations": {
+				"lockon": {
+					"duration": 2
+				}
+			},
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
 		},
@@ -20970,6 +21073,11 @@
 				"damageCallback",
 				"onTry"
 			],
+			"durations": {
+				"mirrorcoat": {
+					"duration": 1
+				}
+			},
 			"nonGhostTarget": ""
 		},
 		{
@@ -21021,6 +21129,12 @@
 				"condition.onSetStatus",
 				"condition.onTryAddVolatile"
 			],
+			"durations": {
+				"mistyterrain": {
+					"duration": 5,
+					"durationCallback": true
+				}
+			},
 			"terrain": "mistyterrain",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -21558,6 +21672,11 @@
 				"condition.onResidual",
 				"onHitField"
 			],
+			"durations": {
+				"perishsong": {
+					"duration": 4
+				}
+			},
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
 		},
@@ -21635,6 +21754,11 @@
 			"customHooks": [
 				"onTryMove"
 			],
+			"durations": {
+				"phantomforce": {
+					"duration": 2
+				}
+			},
 			"breaksProtect": true,
 			"nonGhostTarget": ""
 		},
@@ -22176,6 +22300,12 @@
 				"condition.onFieldStart",
 				"condition.onTryHit"
 			],
+			"durations": {
+				"psychicterrain": {
+					"duration": 5,
+					"durationCallback": true
+				}
+			},
 			"terrain": "psychicterrain",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -22961,6 +23091,11 @@
 				"condition.onStart",
 				"condition.onType"
 			],
+			"durations": {
+				"roost": {
+					"duration": 1
+				}
+			},
 			"heal": [
 				1,
 				2
@@ -25247,6 +25382,11 @@
 				"condition.onModifyMove",
 				"condition.onStart"
 			],
+			"durations": {
+				"throatchop": {
+					"duration": 2
+				}
+			},
 			"nonGhostTarget": "",
 			"secondaries": [
 				{
@@ -25865,6 +26005,11 @@
 				"condition.onStart",
 				"onTryHit"
 			],
+			"durations": {
+				"uproar": {
+					"duration": 3
+				}
+			},
 			"nonGhostTarget": "",
 			"self": {
 				"volatileStatus": "uproar"
