@@ -69,8 +69,16 @@ def main() -> None:
                 row = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            if "gen2_wins" in row and "played" in row:
-                seats.setdefault(row["seat"], []).append((row["gen2_wins"], row["played"]))
+            # The win count's key names whichever arm is being measured -- `gen2_wins`
+            # for a generation match, `wide_wins` for a candidate-width match. Pooling is
+            # the same arithmetic either way, so the key is read from a list rather than
+            # forcing every producer to call its arm "gen2".
+            wins = next(
+                (row[key] for key in ("gen2_wins", "wide_wins", "wins") if key in row),
+                None,
+            )
+            if wins is not None and "played" in row:
+                seats.setdefault(row["seat"], []).append((wins, row["played"]))
 
     # The text form carries the rate rather than the count, so wins are recovered from it.
     # Rounding costs at most half a game per row, which is nothing against 400.
@@ -85,7 +93,7 @@ def main() -> None:
     if not seats:
         raise SystemExit(f"no results found in {args.dir}")
 
-    print(f"  {'seat':>16}  {'runs':>5}  {'games':>7}  {'gen2 win':>9}  {'95% (Wilson)':>16}")
+    print(f"  {'seat':>16}  {'runs':>5}  {'games':>7}  {'arm win':>9}  {'95% (Wilson)':>16}")
     total_wins = total_played = 0
     for seat, rows in sorted(seats.items()):
         wins = sum(w for w, _ in rows)

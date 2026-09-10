@@ -25,7 +25,17 @@ LIMIT="${LIMIT:-16}"
 # BOOK=data/selection/rizabanadohido-value-gen2.jsonl.gz bash tools/generate_parallel.sh ...
 BOOK="${BOOK:-}"
 EPSILON="${EPSILON:-0.25}"
-TEMPERATURE="${TEMPERATURE:-0.05}"
+# 0.5, not 0.05: the coverage table over all 394 solved teams says the rarest of our 90
+# selections gets 0.0 games in a generation at 0.05 and 11.9 at 0.5, with three quarters of
+# games still on the equilibrium either way. A setting that leaves a selection with no games
+# recreates a failure this project already had.
+TEMPERATURE="${TEMPERATURE:-0.5}"
+# Games played against our own six, spreads included. The mirror is the one case with
+# knowledge from outside the model (configs/knowledge/), and no generation had ever
+# contained a single mirror game -- so every mirror answer was extrapolation. It also
+# asserts 50%: a true mirror is antisymmetric, so its win rate is a calibration check on
+# search, resolver and evaluator together.
+MIRROR_SHARE="${MIRROR_SHARE:-0.1}"
 book_args=()
 if [ -n "$BOOK" ]; then
 	book_args=(--selection-book "$BOOK" --explore-epsilon "$EPSILON" --explore-temperature "$TEMPERATURE")
@@ -40,6 +50,7 @@ if [ -n "$BOOK" ]; then
 else
 	echo "  selection: uniform 4-of-6 on both sides"
 fi
+echo "  mirror share: $MIRROR_SHARE (its win rate must come out at 50%)"
 echo "  seeds $FIRST_SEED..$((FIRST_SEED + WORKERS - 1))"
 started=$(date +%s)
 
@@ -54,6 +65,8 @@ for i in $(seq 0 $((WORKERS - 1))); do
 		--value "$VALUE" \
 		--device cpu \
 		--torch-threads 1 \
+		--mirror-share "$MIRROR_SHARE" \
+		"${book_args[@]}" \
 		--out "$OUT_DIR/games-seed$seed.jsonl" \
 		>"$OUT_DIR/logs/seed$seed.log" 2>&1 &
 	pids+=($!)

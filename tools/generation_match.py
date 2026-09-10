@@ -42,6 +42,15 @@ def main() -> None:
     ap.add_argument("--value", type=Path, default=Path("data/models/value-worlds.pt"))
     ap.add_argument("--games", type=int, default=200, help="games per seat, so twice this in total")
     ap.add_argument("--limit", type=int, default=16)
+    ap.add_argument(
+        "--baseline",
+        type=Path,
+        default=None,
+        help="the older generation's *model*. Given, the match is model against model, "
+        "which is what every generation after the second needs -- the first comparison "
+        "was a value function against hp-share and that is all --objective can express. "
+        "`play_game` already takes a leaf per side.",
+    )
     ap.add_argument("--objective", default="hp-share", help="the leaf the older generation used")
     ap.add_argument("--seed", type=int, default=77)
     ap.add_argument("--max-turns", type=int, default=40)
@@ -83,21 +92,40 @@ def main() -> None:
     device = torch.device(args.device)
     value = BatchedValue(net.to(device), encoder, device=device)
     objective = OBJECTIVES[args.objective]
+    baseline = None
+    if args.baseline is not None:
+        if not args.baseline.exists():
+            raise SystemExit(f"no baseline model at {args.baseline}")
+        base_net, base_meta = load_model(args.baseline, encoder)
+        baseline = BatchedValue(base_net.to(device), encoder, device=device)
 
     print(
-        f"gen2 leaf: {args.value.name} (trained on {meta.get('games', '?')} games, "
+        f"new leaf: {args.value.name} (trained on {meta.get('games', '?')} games, "
         f"val AUC {meta.get('val_auc', float('nan')):.4f})",
         file=sys.stderr,
     )
-    print(f"gen1 leaf: {args.objective}", file=sys.stderr)
+    if baseline is not None:
+        print(
+            f"old leaf: {args.baseline.name} (trained on "
+            f"{base_meta.get('games', '?')} games, val AUC "
+            f"{base_meta.get('val_auc', float('nan')):.4f})",
+            file=sys.stderr,
+        )
+        print(
+            "  同じ探索・同じチーム・同じ選出・同じ乱数で、葉だけが違います。"
+            "検証 AUC は世代間で比較できないので、勝率だけが判定です",
+            file=sys.stderr,
+        )
+    else:
+        print(f"old leaf: {args.objective}（評価軸）", file=sys.stderr)
 
     # Seat A: the value function is side 0. Seat B: it is side 1. Both seats use our six
     # against the field, so a seat advantage cancels when the two are combined.
     print(f"\n  {'seat':>26}  {'games':>6}  {'gen2 win':>9}  {'95%':>6}  {'s/game':>7}")
     wins = played = 0
     for seat, leaves in (
-        ("gen2 = side 0", (value, None)),
-        ("gen2 = side 1", (None, value)),
+        ("gen2 = side 0", (value, baseline)),
+        ("gen2 = side 1", (baseline, value)),
     ):
         rng = np.random.default_rng(args.seed)
         seat_wins = seat_played = unfinished = 0
@@ -153,6 +181,9 @@ def main() -> None:
                             "seat": seat,
                             "seed": args.seed,
                             "model": args.value.name,
+                            "baseline": (
+                                args.baseline.name if args.baseline else args.objective
+                            ),
                             "objective": args.objective,
                             "limit": args.limit,
                             "played": seat_played,
