@@ -20,7 +20,7 @@
 		"teraEnabled": false,
 		"megaPerSide": 1,
 		"showdownCommit": "cc089d36b7717dec78ce8ab5d1745c03ad5c97e4",
-		"generatedAt": "2026-09-10T10:50:11.046Z"
+		"generatedAt": "2026-09-10T12:02:33.908Z"
 	},
 	"natures": [
 		{
@@ -12970,7 +12970,12 @@
 			"durations": {
 				"partiallytrapped": {
 					"duration": 5,
-					"durationCallback": true
+					"durationCallback": true,
+					"base": 5,
+					"rolled": true,
+					"byItem": {
+						"gripclaw": 8
+					}
 				}
 			},
 			"volatileStatus": "partiallytrapped",
@@ -13974,7 +13979,11 @@
 			"durations": {
 				"auroraveil": {
 					"duration": 5,
-					"durationCallback": true
+					"durationCallback": true,
+					"base": 5,
+					"byItem": {
+						"lightclay": 8
+					}
 				}
 			},
 			"sideCondition": "auroraveil",
@@ -14186,7 +14195,12 @@
 			"durations": {
 				"partiallytrapped": {
 					"duration": 5,
-					"durationCallback": true
+					"durationCallback": true,
+					"base": 5,
+					"rolled": true,
+					"byItem": {
+						"gripclaw": 8
+					}
 				}
 			},
 			"volatileStatus": "partiallytrapped",
@@ -16343,7 +16357,11 @@
 			"durations": {
 				"electricterrain": {
 					"duration": 5,
-					"durationCallback": true
+					"durationCallback": true,
+					"base": 5,
+					"byItem": {
+						"terrainextender": 8
+					}
 				}
 			},
 			"terrain": "electricterrain",
@@ -17008,7 +17026,12 @@
 			"durations": {
 				"partiallytrapped": {
 					"duration": 5,
-					"durationCallback": true
+					"durationCallback": true,
+					"base": 5,
+					"rolled": true,
+					"byItem": {
+						"gripclaw": 8
+					}
 				}
 			},
 			"volatileStatus": "partiallytrapped",
@@ -17824,7 +17847,11 @@
 			"durations": {
 				"grassyterrain": {
 					"duration": 5,
-					"durationCallback": true
+					"durationCallback": true,
+					"base": 5,
+					"byItem": {
+						"terrainextender": 8
+					}
 				}
 			},
 			"terrain": "grassyterrain",
@@ -17860,7 +17887,11 @@
 			"durations": {
 				"gravity": {
 					"duration": 5,
-					"durationCallback": true
+					"durationCallback": true,
+					"base": 5,
+					"byAbility": {
+						"persistent": 7
+					}
 				}
 			},
 			"pseudoWeather": "gravity",
@@ -18911,7 +18942,12 @@
 			"durations": {
 				"partiallytrapped": {
 					"duration": 5,
-					"durationCallback": true
+					"durationCallback": true,
+					"base": 5,
+					"rolled": true,
+					"byItem": {
+						"gripclaw": 8
+					}
 				}
 			},
 			"volatileStatus": "partiallytrapped",
@@ -19373,7 +19409,11 @@
 			"durations": {
 				"lightscreen": {
 					"duration": 5,
-					"durationCallback": true
+					"durationCallback": true,
+					"base": 5,
+					"byItem": {
+						"lightclay": 8
+					}
 				}
 			},
 			"sideCondition": "lightscreen",
@@ -19632,7 +19672,11 @@
 			"durations": {
 				"magicroom": {
 					"duration": 5,
-					"durationCallback": true
+					"durationCallback": true,
+					"base": 5,
+					"byAbility": {
+						"persistent": 7
+					}
 				}
 			},
 			"pseudoWeather": "magicroom",
@@ -20052,7 +20096,11 @@
 			"durations": {
 				"mistyterrain": {
 					"duration": 5,
-					"durationCallback": true
+					"durationCallback": true,
+					"base": 5,
+					"byItem": {
+						"terrainextender": 8
+					}
 				}
 			},
 			"terrain": "mistyterrain",
@@ -21223,7 +21271,11 @@
 			"durations": {
 				"psychicterrain": {
 					"duration": 5,
-					"durationCallback": true
+					"durationCallback": true,
+					"base": 5,
+					"byItem": {
+						"terrainextender": 8
+					}
 				}
 			},
 			"terrain": "psychicterrain",
@@ -21670,7 +21722,11 @@
 			"durations": {
 				"reflect": {
 					"duration": 5,
-					"durationCallback": true
+					"durationCallback": true,
+					"base": 5,
+					"byItem": {
+						"lightclay": 8
+					}
 				}
 			},
 			"sideCondition": "reflect",
@@ -22104,7 +22160,11 @@
 			"durations": {
 				"safeguard": {
 					"duration": 5,
-					"durationCallback": true
+					"durationCallback": true,
+					"base": 5,
+					"byAbility": {
+						"persistent": 7
+					}
 				}
 			},
 			"sideCondition": "safeguard",
@@ -22133,7 +22193,12 @@
 			"durations": {
 				"partiallytrapped": {
 					"duration": 5,
-					"durationCallback": true
+					"durationCallback": true,
+					"base": 5,
+					"rolled": true,
+					"byItem": {
+						"gripclaw": 8
+					}
 				}
 			},
 			"volatileStatus": "partiallytrapped",
@@ -24060,7 +24125,11 @@
 			"durations": {
 				"tailwind": {
 					"duration": 4,
-					"durationCallback": true
+					"durationCallback": true,
+					"base": 4,
+					"byAbility": {
+						"persistent": 6
+					}
 				}
 			},
 			"sideCondition": "tailwind",
@@ -24780,7 +24849,11 @@
 			"durations": {
 				"trickroom": {
 					"duration": 5,
-					"durationCallback": true
+					"durationCallback": true,
+					"base": 5,
+					"byAbility": {
+						"persistent": 7
+					}
 				}
 			},
 			"pseudoWeather": "trickroom",
@@ -25236,7 +25309,12 @@
 			"durations": {
 				"partiallytrapped": {
 					"duration": 5,
-					"durationCallback": true
+					"durationCallback": true,
+					"base": 5,
+					"rolled": true,
+					"byItem": {
+						"gripclaw": 8
+					}
 				}
 			},
 			"volatileStatus": "partiallytrapped",
@@ -25378,7 +25456,11 @@
 			"durations": {
 				"wonderroom": {
 					"duration": 5,
-					"durationCallback": true
+					"durationCallback": true,
+					"base": 5,
+					"byAbility": {
+						"persistent": 7
+					}
 				}
 			},
 			"pseudoWeather": "wonderroom",
@@ -25462,7 +25544,12 @@
 			"durations": {
 				"partiallytrapped": {
 					"duration": 5,
-					"durationCallback": true
+					"durationCallback": true,
+					"base": 5,
+					"rolled": true,
+					"byItem": {
+						"gripclaw": 8
+					}
 				}
 			},
 			"volatileStatus": "partiallytrapped",

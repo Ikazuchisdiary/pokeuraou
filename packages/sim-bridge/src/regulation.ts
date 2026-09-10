@@ -155,7 +155,7 @@ export interface MoveEntry {
 	 * declares 5 and its callback returns `random(5, 7)`, i.e. 5 or 6. The consumer is
 	 * expected to report the approximation rather than pretend the fixed value is exact.
 	 */
-	durations?: Record<string, { duration?: number; durationCallback?: boolean }>;
+	durations?: Record<string, DurationEntry>;
 	customHooks: string[];
 }
 
@@ -237,25 +237,50 @@ function codeHooks(obj: object): string[] {
 /** Showdown stores type effectiveness as an index into [neutral, weak, resist, immune]. */
 const TYPE_MOD: Record<number, number> = { 0: 1, 1: 2, 2: 0.5, 3: 0 };
 
+/** How long an effect lasts, and what changes that. */
+export interface DurationEntry {
+	/** The number declared on the condition, if any. */
+	duration?: number;
+	/** True when a `durationCallback` exists at all. */
+	durationCallback?: boolean;
+	/** What the callback returns with nothing held: the ordinary case. */
+	base?: number;
+	/** itemId -> duration, for items that change the answer (Light Clay, Grip Claw). */
+	byItem?: Record<string, number>;
+	/** abilityId -> duration, for abilities that change it (Persistent). */
+	byAbility?: Record<string, number>;
+	/** True when the callback's answer moves with `this.random`, i.e. it is really rolled. */
+	rolled?: boolean;
+}
+
 /**
  * Durations for every effect one move can apply, keyed by effect id.
  *
  * Reads the condition on the move itself, then the named conditions its `volatileStatus`,
  * `sideCondition`, `slotCondition` and `pseudoWeather` refer to. A named condition is
  * looked up through the dex so a mod's override is honoured -- Champions changes several.
+ *
+ * A `durationCallback` is *called* rather than merely noted, because "there is a callback"
+ * was being read as "Showdown rolls this" and for thirteen of the fourteen effects that have
+ * one it actually means "an item or an ability extends it". See `probeDurationCallback`.
  */
 function collectDurations(
 	dex: ReturnType<typeof Dex.forFormat>,
-	move: Record<string, unknown>
-): Record<string, { duration?: number; durationCallback?: boolean }> {
-	const out: Record<string, { duration?: number; durationCallback?: boolean }> = {};
+	move: Record<string, unknown>,
+	items: readonly string[],
+	abilities: readonly string[]
+): Record<string, DurationEntry> {
+	const out: Record<string, DurationEntry> = {};
 
 	const record = (id: unknown, condition: unknown) => {
 		if (typeof id !== 'string' || !id || !condition || typeof condition !== 'object') return;
 		const c = condition as Record<string, unknown>;
-		const entry: { duration?: number; durationCallback?: boolean } = {};
+		const entry: DurationEntry = {};
 		if (typeof c.duration === 'number') entry.duration = c.duration;
-		if (typeof c.durationCallback === 'function') entry.durationCallback = true;
+		if (typeof c.durationCallback === 'function') {
+			entry.durationCallback = true;
+			Object.assign(entry, probeDurationCallback(c.durationCallback as CallbackFn, items, abilities));
+		}
 		if (Object.keys(entry).length) out[id] = entry;
 	};
 
@@ -282,6 +307,94 @@ function collectDurations(
 	}
 	return out;
 }
+
+/* eslint-disable @typescript-eslint/no-explicit-any */
+type CallbackFn = (this: any, target?: any, source?: any, effect?: any) => unknown;
+
+/**
+ * Calls a `durationCallback` under controlled conditions and reports what moves the answer.
+ *
+ * The callbacks in play read only three things: `source.hasItem(id)`, `source.hasAbility(id)`
+ * and `this.random(a, b)`. So a stub source that admits to exactly one item or ability, and
+ * a stub `this` whose `random` returns a chosen end of its range, is enough to read the whole
+ * function off without hardcoding any of it. `this.add` is a no-op because two of them log.
+ *
+ * Anything that throws is skipped rather than guessed at: a callback needing more context
+ * than this reports only its declared `duration`, which is the state before this existed.
+ */
+function probeDurationCallback(
+	callback: CallbackFn,
+	items: readonly string[],
+	abilities: readonly string[]
+): Partial<DurationEntry> {
+	const source = (item?: string, ability?: string) => ({
+		hasItem: (id: unknown) => id === item,
+		hasAbility: (id: unknown) => id === ability,
+		getItem: () => ({ id: item ?? '' }),
+		volatiles: {},
+		side: { sideConditions: {} },
+	});
+	const battle = (low: boolean) => ({
+		random: (from?: number, to?: number) => {
+			if (from === undefined) return low ? 0 : 0.999999;
+			if (to === undefined) return low ? 0 : from - 1;
+			return low ? from : to - 1;
+		},
+		add: () => {},
+		debug: () => {},
+		effectState: {},
+		hint: () => {},
+	});
+
+	// The signatures differ by effect kind: a side condition's callback is
+	// `(target, source, effect)` while a terrain's or a room's is `(source, effect)`. Both
+	// orders are tried and the one that reacts to the stub is the one that matters --
+	// guessing wrong is how Terrain Extender and Persistent went missing on the first pass.
+	const call = (item?: string, ability?: string, low = true): number[] => {
+		const held = source(item, ability);
+		const out: number[] = [];
+		const orders: any[][] = [[source(), held, {}], [held, {}]];
+		for (const args of orders) {
+			try {
+				const value = callback.apply(battle(low), args as [any, any, any]);
+				if (typeof value === 'number') out.push(value);
+			} catch {
+				// A callback needing more context than this reports only its declared
+				// duration, which is the state before this existed.
+			}
+		}
+		return out;
+	};
+
+	const baseline = call();
+	if (!baseline.length) return {};
+	const base = baseline[0];
+	const out: Partial<DurationEntry> = { base };
+	const bases = new Set(baseline);
+
+	// Rolled, not extended: the answer moves when `random` returns the other end.
+	if (call(undefined, undefined, false).some(v => !bases.has(v))) out.rolled = true;
+
+	const differing = (values: number[]): number | undefined =>
+		values.find(v => !bases.has(v));
+
+	const byItem: Record<string, number> = {};
+	for (const id of items) {
+		const value = differing(call(id));
+		if (value !== undefined) byItem[id] = value;
+	}
+	if (Object.keys(byItem).length) out.byItem = byItem;
+
+	const byAbility: Record<string, number> = {};
+	for (const id of abilities) {
+		const value = differing(call(undefined, id));
+		if (value !== undefined) byAbility[id] = value;
+	}
+	if (Object.keys(byAbility).length) out.byAbility = byAbility;
+
+	return out;
+}
+/* eslint-enable @typescript-eslint/no-explicit-any */
 
 const DECLARATIVE_MOVE_KEYS = [
 	'boosts', 'status', 'volatileStatus', 'sideCondition', 'slotCondition', 'pseudoWeather',
@@ -397,6 +510,11 @@ export function buildRegulationConfig(formatId: string, showdownCommit: string):
 
 	// ---- moves -----------------------------------------------------------------
 	const moves: MoveEntry[] = [];
+	// The candidate ids the duration callbacks are probed against. Every item and ability
+	// the dex knows, so a new Light Clay in a later regulation is found without editing this.
+	const itemIds = dex.items.all().map(i => i.id);
+	const abilityIds = dex.abilities.all().map(a => a.id);
+
 	for (const m of dex.moves.all()) {
 		if (!m.exists || m.isNonstandard || m.isZ || m.isMax) continue;
 		const hooks = codeHooks(m as unknown as object);
@@ -424,7 +542,9 @@ export function buildRegulationConfig(formatId: string, showdownCommit: string):
 			hasCustomCode: hooks.length > 0,
 			customHooks: hooks,
 		};
-		const durations = collectDurations(dex, m as unknown as Record<string, unknown>);
+		const durations = collectDurations(
+			dex, m as unknown as Record<string, unknown>, itemIds, abilityIds
+		);
 		if (Object.keys(durations).length) entry.durations = durations;
 		Object.assign(entry, pickDeclarative(m as unknown as Record<string, unknown>, DECLARATIVE_MOVE_KEYS));
 		if (m.self) {

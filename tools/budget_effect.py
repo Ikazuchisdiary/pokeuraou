@@ -22,6 +22,11 @@ So for each knob this measures, against the same positions:
              share of the time the two strategies would play differently
   cost       ms per cell, and the branch count, because that is what has to be afforded
 
+Positions come from recorded games rather than being built fresh. The first version of this
+sampled turn-1 positions, where nothing is paralysed, confused or boosted -- so the
+status-check knob had nothing to act on and reported "no effect" when what it had measured
+was "no opportunity". A mid-game position is the one the search actually has to price.
+
     uv run python tools/budget_effect.py --positions 12
 """
 
@@ -42,16 +47,8 @@ from pokeuraou.equilibrium import EquilibriumError, solve  # noqa: E402
 from pokeuraou.narrow import narrow  # noqa: E402
 from pokeuraou.payoff import OBJECTIVES  # noqa: E402
 from pokeuraou.position import Position  # noqa: E402
-from pokeuraou.priors import find_cached_chaos, load_chaos  # noqa: E402
-from pokeuraou.regulation import Regulation  # noqa: E402
+from pokeuraou.regulation import Regulation, load_regulation  # noqa: E402
 from pokeuraou.resolve import Budget, resolve_turn, turn_expectation  # noqa: E402
-from pokeuraou.selfplay import position_from_sets  # noqa: E402
-from pokeuraou.standings import (  # noqa: E402
-    find_cached_standings,
-    load_standings,
-    sample_standings_team,
-)
-from pokeuraou.teams import all_selections, load_roster  # noqa: E402
 
 #: The knobs, each turned on alone so the effects do not mask one another.
 KNOBS: tuple[tuple[str, dict[str, object]], ...] = (
@@ -89,6 +86,36 @@ def matrix_for(
     return payoff, time.perf_counter() - started, leaves
 
 
+def load_positions(games_dir: Path, min_turn: int, seed: int) -> list[Position]:
+    """Mid-game positions from recorded games, shuffled.
+
+    Every recorded decision carries the position it was made in, which is a far better
+    sample than anything built by hand: statuses, boosts, weather and depleted benches are
+    all present in the proportions the search really meets them.
+    """
+    import json
+    import random
+
+    out: list[Position] = []
+    for path in sorted(games_dir.glob("*.jsonl")):
+        with path.open(encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                for decision in record.get("decisions", ()):
+                    if decision.get("kind") != "move":
+                        continue
+                    if int(decision.get("turn", 0)) < min_turn:
+                        continue
+                    out.append(Position.from_json(decision["position"]))
+        if len(out) > 4000:
+            break
+    random.Random(seed).shuffle(out)
+    return out
+
+
 def total_variation(a: np.ndarray, b: np.ndarray) -> float:
     """Share of the time two mixtures would play differently."""
     return 0.5 * float(np.abs(a - b).sum())
@@ -98,7 +125,14 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--positions", type=int, default=10)
     ap.add_argument("--limit", type=int, default=8, help="candidate actions per side")
-    ap.add_argument("--roster", default="rizabanadohido")
+    ap.add_argument("--games-dir", type=Path, default=Path("data/selfplay-worlds"))
+    ap.add_argument(
+        "--min-turn",
+        type=int,
+        default=3,
+        help="skip the opening turns, where nothing is statused or boosted yet and a "
+        "collapse can look free because it had no opportunity",
+    )
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--objective", default="hp-share", choices=sorted(OBJECTIVES))
     ap.add_argument(
@@ -111,15 +145,12 @@ def main() -> None:
     )
     args = ap.parse_args()
 
-    roster = load_roster(args.roster)
-    reg = roster.reg
+    positions = list(load_positions(args.games_dir, args.min_turn, args.seed))
+    if not positions:
+        raise SystemExit(f"no recorded positions found under {args.games_dir}")
+    reg = load_regulation(positions[0].format)
     register_mega_stones(reg)
     objective = OBJECTIVES[args.objective]
-    prior = load_chaos(find_cached_chaos(reg.meta.format_id), reg)
-    standings = load_standings(find_cached_standings(), reg)
-    pool = standings.pool("all")
-    selections = tuple(all_selections(reg.meta.team_size, reg.meta.picked_team_size))
-    rng = np.random.default_rng(args.seed)
 
     base = Budget.matrix()
     print(f"{args.limit}x{args.limit} matrices on {args.positions} positions, "
@@ -129,14 +160,10 @@ def main() -> None:
     base_cost: list[tuple[float, int]] = []
 
     built = 0
-    while built < args.positions:
-        team = pool[int(rng.integers(len(pool)))]
-        foe_six = sample_standings_team(rng, reg, prior, team)
-        own_pick = selections[int(rng.integers(len(selections)))]
-        foe_pick = selections[int(rng.integers(len(selections)))]
-        pos = position_from_sets(
-            reg, [roster.sets[i] for i in own_pick], [foe_six[j] for j in foe_pick]
-        )
+    taken = 0
+    while built < args.positions and taken < len(positions):
+        pos = positions[taken]
+        taken += 1
         ours = narrow(reg, pos, 0, limit=args.limit).actions
         theirs = narrow(reg, pos, 1, limit=args.limit).actions
         if not ours or not theirs:

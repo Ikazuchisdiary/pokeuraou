@@ -253,6 +253,35 @@ class Budget:
         The cost is 1.06x on real matchups, where different spreads make exact ties rare;
         it is 3.4x in a mirror, where every pair is tied. `max_branches` has to allow for
         the tie branches or they would be truncated back out again.
+
+        Status checks and secondaries are enumerated too, and both are bargains. Measured
+        on 12 mid-game positions from recorded games with each knob turned on alone
+        (`tools/budget_effect.py`), against the equilibrium this budget produces:
+
+            knob             value shift   policy TV    cost   worst value shift
+            accuracy              0.0001       0.006   1.08x              0.0010
+            crit                  0.0005       0.003   2.68x              0.0026
+            status checks         0.0040       0.083   0.97x              0.0485
+            secondary             0.0083       0.087   1.20x              0.0957
+
+        "policy TV" is the share of the equilibrium's mass that moves, which is the share
+        of the time the two strategies would actually choose differently.
+
+        Collapsing status checks had the search believe a paralysed Pokemon always acts, a
+        confused one never hits itself and a repeated Protect always fails, for no
+        measurable saving. Collapsing secondaries had Heat Wave never burn and Iron Head
+        never flinch -- and flinch is not chip damage, it is the target losing its action,
+        with Iron Head on 36% of the tournament field and Rock Slide on 62%.
+
+        Accuracy is enumerated as well. Its measured policy effect is the smallest of the
+        four, but 1.08x is close enough to free that faithfulness wins the tie: a move that
+        misses one time in four is a move the search should know can miss. Hurricane is 70%,
+        Sleep Powder 75%, and Heat Wave and Rock Slide -- the two most common moves in the
+        field -- are 90% each, thrown twice a turn for a dozen turns.
+
+        Crit is the one that stays collapsed: 2.7x for a thirtieth of the policy effect, and
+        unlike a miss a crit changes one damage number rather than whether the move happened
+        at all.
         """
         # `pinned_policy` is cleared explicitly. It is built from `deterministic`, which
         # exists to reproduce the oracle's pinned randomness, and inheriting that flag would
@@ -262,6 +291,9 @@ class Budget:
         return replace(
             Budget.deterministic(roll),
             enumerate_speed_ties=True,
+            enumerate_status_checks=True,
+            enumerate_secondary=True,
+            enumerate_accuracy=True,
             max_branches=16,
             pinned_policy=False,
         )
@@ -472,7 +504,8 @@ class _Turn:
 
     __slots__ = ("reg", "pos", "budget", "attacks", "events", "unmodelled",
                  "hurt_this_turn", "move_failed", "move_damage_total", "move_connected",
-                 "acted", "actions_remaining", "self_switch_pending")
+                 "acted", "actions_remaining", "self_switch_pending",
+                 "pending_secondaries", "current_actor")
 
     def __init__(
         self,
@@ -507,6 +540,14 @@ class _Turn:
         #: suspends the turn. A flag rather than a scan of the position because it is
         #: consulted after every action in the resolver's innermost loop.
         self.self_switch_pending = False
+        #: Sub-100% secondaries the hit would apply, as (chance, secondary, target).
+        #: Recorded rather than applied because applying one is a branch and this state is
+        #: singular; the hit loop owns the fan-out.
+        self.pending_secondaries: list[tuple[float, dict, tuple[int, int]]] = []
+        #: The slot whose move is resolving. Disable's duration depends on whether its
+        #: subject is the Pokemon that triggered it, which is how Cursed Body gets four
+        #: turns rather than five.
+        self.current_actor: tuple[int, int] | None = None
 
     def clone(self) -> _Turn:
         fresh = _Turn(self.reg, self.pos.copy(), self.budget, self.attacks)
@@ -519,6 +560,8 @@ class _Turn:
         fresh.acted = set(self.acted)
         fresh.actions_remaining = self.actions_remaining
         fresh.self_switch_pending = self.self_switch_pending
+        fresh.pending_secondaries = list(self.pending_secondaries)
+        fresh.current_actor = self.current_actor
         return fresh
 
     # -- lookups ------------------------------------------------------------
@@ -1144,6 +1187,10 @@ def _do_switch(
         leaving.volatiles = []
         leaving.last_move = None
         leaving.locked_move = None
+        # Volatiles do not survive a switch, and Disable's flag lives on the move slot
+        # rather than in the volatile, so it has to be cleared alongside them.
+        for move_slot in leaving.moves:
+            move_slot.disabled = False
         leaving.newly_switched = False
         if leaving.fainted:
             # `if (oldActive.fainted) oldActive.status = ''`: the fainted marker is
@@ -1324,10 +1371,50 @@ def _do_move(
             state.move_failed.add((action.side, action.slot))
             outcomes.append((act_probability, state, ""))
             continue
+        _stance_change(reg, state, action, move)
         for weight, sub_state, note in _use_move(reg, state, action, move, budget):
             outcomes.append((act_probability * weight, sub_state, note))
 
     return outcomes or [(1.0, turn, "")]
+
+
+def _stance_change(
+    reg: Regulation, turn: _Turn, action: QueuedAction, move: Move
+) -> None:
+    """Aegislash takes the forme that matches the move it is about to use.
+
+    Showdown hangs this on `onModifyMove`, which runs while the move is being set up, so
+    the new forme's stats apply to that very move. A status move other than King's Shield
+    leaves the forme alone.
+
+    The two formes are 50/140 and 140/50 in attack and defence, so getting this wrong is
+    not cosmetic: a Shield-forme Aegislash using Iron Head was priced at a third of the
+    attack it really has.
+    """
+    mon = turn.mon_at(action.side, action.slot)
+    if mon is None or mon.fainted or mon.ability != "stancechange":
+        return
+    if mon.transformed:
+        return
+    base = reg.species.get(mon.species)
+    if base is None or base.base_species != "Aegislash":
+        return
+    if move.category == "Status" and move.id != "kingsshield":
+        return
+    target = "aegislash" if move.id == "kingsshield" else "aegislashblade"
+    if mon.species == target or target not in reg.species:
+        return
+
+    species = reg.species[target]
+    maxhp_before = mon.maxhp
+    mon.species = target
+    mon.types = species.types
+    refreshed = battler(reg, mon)
+    mon.maxhp = int(refreshed.maxhp[0])
+    # No Aegislash forme changes the HP base stat, so this is a no-op today and correct if
+    # a regulation ever changes one.
+    mon.hp = min(mon.maxhp, mon.hp + (mon.maxhp - maxhp_before))
+    turn.log(f"{turn.name(action.side, action.slot)} -> {target} (stancechange)")
 
 
 def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[float, str | None]]:
@@ -1421,6 +1508,7 @@ def _use_move(
     """The move itself: PP, the Sucker Punch condition, targets, then effects."""
     assert action.move_id is not None
     _spend_pp(turn, action)
+    turn.current_actor = (action.side, action.slot)
     mon = turn.mon_at(action.side, action.slot)
     if mon is not None:
         mon.last_move = action.move_id
@@ -1843,10 +1931,14 @@ def _apply_status_move(
     if raw.get("sideCondition"):
         side_condition = str(raw["sideCondition"])
         turn.add_side_condition(
-            action.side, side_condition, duration=_duration(move, side_condition)
+            action.side,
+            side_condition,
+            duration=_effect_duration(turn, move, side_condition, action.side, action.slot),
         )
         if _duration_is_random(move, side_condition):
-            turn.unmodelled.add(f"{side_condition} duration (Showdown rolls it; pinned)")
+            turn.unmodelled.add(
+                f"{side_condition} duration (Showdown rolls it; pinned to the low end)"
+            )
     if raw.get("weather"):
         turn.pos.field.weather = str(raw["weather"]).lower().replace(" ", "")
         turn.pos.field.weather_duration = 5
@@ -1889,7 +1981,20 @@ def _apply_status_move(
             turn.apply_status(*target, str(raw["status"]), reason=move.id)
         if raw.get("volatileStatus"):
             volatile_id = str(raw["volatileStatus"])
-            turn.add_volatile(*target, volatile_id, duration=_duration(move, volatile_id))
+            if volatile_id == "disable":
+                # Disable has to record *which* move, and fails outright when the target
+                # has not moved, so the generic path cannot express it.
+                if not _apply_disable(turn, *target, move=move):
+                    turn.log(f"{action.label(reg)} failed (nothing to disable)")
+                    turn.move_failed.add((action.side, action.slot))
+            else:
+                turn.add_volatile(
+                    *target,
+                    volatile_id,
+                    duration=_effect_duration(
+                        turn, move, volatile_id, action.side, action.slot
+                    ),
+                )
         if raw.get("heal"):
             mon = turn.mon_at(*target)
             if mon is not None:
@@ -1996,12 +2101,54 @@ def _duration(move: Move, effect_id: str | None = None) -> int | None:
 
 
 def _duration_is_random(move: Move, effect_id: str) -> bool:
-    """Whether Showdown rolls this duration rather than using the declared number."""
+    """Whether Showdown really *rolls* this duration.
+
+    `durationCallback` alone does not mean that. Thirteen of the fourteen effects that have
+    one use it to apply an item or ability extension, and only `partiallytrapped` calls
+    `this.random`. The dumper now distinguishes the two by calling the callback, so this
+    reads `rolled` rather than the mere presence of a function -- which is what had Tailwind
+    and every screen reported as "Showdown rolls it".
+    """
+    entry = _duration_entry(move, effect_id)
+    return bool(entry and entry.get("rolled"))
+
+
+def _duration_entry(move: Move | None, effect_id: str) -> dict | None:
+    if move is None:
+        return None
     durations = move.raw.get("durations")
     if not isinstance(durations, dict):
-        return False
+        return None
     entry = durations.get(effect_id)
-    return bool(isinstance(entry, dict) and entry.get("durationCallback"))
+    return entry if isinstance(entry, dict) else None
+
+
+def _effect_duration(
+    turn: _Turn, move: Move, effect_id: str, side: int, slot: int
+) -> int | None:
+    """How long this effect lasts for *this* user, extensions included.
+
+    `durationCallback(target, source)` reads the source's item and ability, and the dump
+    carries what it returns for each -- so Light Clay's screens, Grip Claw's binds,
+    Persistent's rooms and Terrain Extender's terrains all follow from the position rather
+    than from a number written down here.
+    """
+    entry = _duration_entry(move, effect_id)
+    if entry is None:
+        return _duration(move, effect_id)
+    mon = turn.mon_at(side, slot)
+    if mon is not None:
+        by_item = entry.get("byItem")
+        if isinstance(by_item, dict) and mon.item and mon.item in by_item:
+            return int(by_item[mon.item])
+        by_ability = entry.get("byAbility")
+        if isinstance(by_ability, dict) and mon.ability in by_ability:
+            return int(by_ability[mon.ability])
+    base = entry.get("base")
+    if isinstance(base, int):
+        return base
+    declared = entry.get("duration")
+    return int(declared) if isinstance(declared, int) else None
 
 
 def _blocked_by_protect(
@@ -2189,10 +2336,59 @@ def _hit_target(
                         )
                     if hits > 1:
                         state.log(f"{action.label(reg)} hit {hit_index + 1}x for {total}")
-                    outcomes.append(
-                        (acc_weight * crit_weight * roll_weight * hit_weight, state, note)
-                    )
+                    weight = acc_weight * crit_weight * roll_weight * hit_weight
+                    for extra, expanded in _spread_secondaries(state, action, hits > 1):
+                        outcomes.append((weight * extra, expanded, note))
     return outcomes or [(1.0, turn, "")]
+
+
+#: How many sub-100% secondaries one hit will branch before the rest are collapsed. Each
+#: doubles the states for that hit, and the turn's tree is the product over every hit, so
+#: four targets each carrying two secondaries would be 256 states from this alone. Two is
+#: enough for every real move: a spread move's two targets each carry one.
+MAX_BRANCHED_SECONDARIES = 2
+
+
+def _spread_secondaries(
+    state: _Turn, action: QueuedAction, multihit: bool
+) -> list[tuple[float, _Turn]]:
+    """Fans one resolved hit out over the secondaries it would roll.
+
+    Returns (weight, state) pairs summing to one. With nothing pending that is the state
+    itself, which is the overwhelmingly common case and costs one list allocation.
+
+    Each secondary is independent, so the fan-out is a cross product. It is capped: past
+    the cap the remaining secondaries are collapsed to "did not happen" and reported, which
+    is the old behaviour applied to the tail rather than to everything.
+    """
+    pending = state.pending_secondaries
+    if not pending:
+        return [(1.0, state)]
+    state.pending_secondaries = []
+
+    branched = pending[:MAX_BRANCHED_SECONDARIES]
+    for chance, secondary, _target in pending[MAX_BRANCHED_SECONDARIES:]:
+        state.unmodelled.add(
+            f"secondary {int(chance * 100)}%: beyond the {MAX_BRANCHED_SECONDARIES} "
+            "branched on one hit (not branched)"
+        )
+        del secondary
+
+    out: list[tuple[float, _Turn]] = [(1.0, state)]
+    for chance, secondary, target in branched:
+        expanded: list[tuple[float, _Turn]] = []
+        for weight, current in out:
+            fired = current.clone()
+            fired.pending_secondaries = []
+            _apply_secondary(fired, action, secondary, target)
+            if multihit:
+                fired.unmodelled.add(
+                    "secondary on a multi-hit move (applied after the last hit)"
+                )
+            expanded.append((weight * chance, fired))
+            expanded.append((weight * (1 - chance), current))
+        out = expanded
+    return out
 
 
 #: Abilities that heal a quarter of maximum HP from the type they absorb.
@@ -2376,9 +2572,15 @@ def _after_hit(
     if defender is not None and not defender.fainted:
         if raw.get("volatileStatus"):
             vid = str(raw["volatileStatus"])
-            turn.add_volatile(*target, vid, duration=_duration(move, vid))
+            turn.add_volatile(
+                *target,
+                vid,
+                duration=_effect_duration(turn, move, vid, action.side, action.slot),
+            )
             if _duration_is_random(move, vid):
-                turn.unmodelled.add(f"{vid} duration (Showdown rolls it; pinned to the declared value)")
+                turn.unmodelled.add(
+                    f"{vid} duration (Showdown rolls it; pinned to the low end)"
+                )
             # A trap ends when whoever applied it leaves, so record who that was.
             applied = defender.volatile(vid)
             if applied is not None and vid == "partiallytrapped":
@@ -2413,6 +2615,23 @@ def _after_hit(
     # -- before the faint is processed. So Rough Skin still hurts the attacker when the
     # Pokemon holding it is knocked out by that very hit, and gating on survival loses the
     # chip damage that often decides the next turn.
+    # Cursed Body: `onDamagingHit` with `randomChance(3, 10)`, not gated on contact and
+    # not gated on the target surviving. 43 of the 394 tournament teams carry it, which
+    # makes it the most common ability the resolver did not model.
+    if (
+        defender is not None
+        and defender.ability == "cursedbody"
+        and attacker is not None
+        and dealt > 0
+        and not attacker.has_volatile("disable")
+    ):
+        if budget.enumerate_secondary:
+            turn.pending_secondaries.append((0.3, {"disable": True}, me))
+        elif not budget.pinned_policy:
+            # Same reasoning as a secondary: under the pinned policy `randomChance(3, 10)`
+            # is answered with no, so not applying it is exact rather than approximate.
+            turn.unmodelled.add("cursedbody (30% disable, not branched)")
+
     if defender is not None and "contact" in move.flags and dealt > 0:
         if defender.ability in ("roughskin", "ironbarbs") and attacker is not None:
             turn.deal_damage(*me, max(1, attacker.maxhp // 8), reason=defender.ability)
@@ -2458,11 +2677,21 @@ def _after_hit(
         chance = float(secondary.get("chance", 100)) / 100.0
         if chance >= 1.0:
             _apply_secondary(turn, action, secondary, target)
-        elif budget.enumerate_secondary:
-            # A sub-100% secondary is a real branch. Rather than silently taking one side,
-            # it is recorded: branching here doubles the tree per hit, and how much of
-            # that to pay for is the caller's decision.
-            turn.unmodelled.add(f"secondary {int(chance * 100)}%: {move.id}")
+            continue
+        if not budget.enumerate_secondary:
+            # Collapsed to "it did not happen", which is what the cheap budgets buy. Said
+            # out loud, because under such a budget a Rock Slide never flinches -- except
+            # under the pinned policy, where "it did not happen" is not an approximation at
+            # all: the oracle answers every secondary roll with no, so the collapse is
+            # exact. Declaring it there would flag turns that are right, which lowers the
+            # differential test's silent rate without improving anything.
+            if not budget.pinned_policy:
+                turn.unmodelled.add(
+                    f"secondary {int(chance * 100)}%: {move.id} (not branched)"
+                )
+            continue
+        # A branch, and this function holds one state. The hit loop fans it out.
+        turn.pending_secondaries.append((chance, dict(secondary), target))
 
     if raw.get("forceSwitch"):
         _mark_force_switch(turn, target)
@@ -2643,9 +2872,46 @@ def _round_fraction(amount: int, ratio: list[int] | tuple[int, int]) -> int:
     return max(1, int(value))
 
 
+def _apply_disable(turn: _Turn, side: int, slot: int, move: Move | None = None) -> bool:
+    """Disables the target's last move, as Showdown's `disable` condition does.
+
+    Fails when the target has not moved yet, or when the move it last used has no PP left
+    -- both are `return false` in `onStart`, which means no volatile at all rather than a
+    volatile that disables nothing.
+
+    The duration is decremented immediately when the target still owes an action this turn
+    or when it is the Pokemon whose own move triggered this, which covers Cursed Body and
+    the ordinary Disable; five turns is left for disabling something that has already acted.
+    """
+    mon = turn.mon_at(side, slot)
+    if mon is None or mon.fainted or mon.last_move is None:
+        return False
+    if mon.has_volatile("disable"):
+        return False
+    slot_for_move = next((m for m in mon.moves if m.id == mon.last_move), None)
+    if slot_for_move is None or slot_for_move.pp <= 0:
+        return False
+
+    duration = _duration(move, "disable") if move is not None else 5
+    if duration is None:
+        duration = 5
+    if (side, slot) not in turn.acted or (side, slot) == turn.current_actor:
+        duration -= 1
+
+    mon.volatiles.append(Effect(id="disable", duration=duration, move=mon.last_move))
+    slot_for_move.disabled = True
+    turn.log(f"{turn.name(side, slot)} cannot use {mon.last_move} (disable)")
+    return True
+
+
 def _apply_secondary(
     turn: _Turn, action: QueuedAction, secondary: dict, target: tuple[int, int]
 ) -> None:
+    if secondary.get("disable"):
+        # Cursed Body, pushed through the secondary fan-out because it is the same shape:
+        # a chance whose consequence outlives the turn.
+        _apply_disable(turn, *target)
+        return
     if secondary.get("status"):
         turn.apply_status(*target, str(secondary["status"]), reason="secondary")
     if secondary.get("volatileStatus"):
@@ -3224,6 +3490,17 @@ def _residuals(reg: Regulation, turn: _Turn) -> None:
         if perish.duration <= 0:
             turn.faint(side, slot)
 
+    # Residual order 28: Speed Boost. `if (pokemon.activeTurns)` is what stops it firing on
+    # the turn its holder came in, and `newly_switched` is that flag -- cleared at the very
+    # end of this function, so it is still readable here.
+    for side, slot in actives():
+        mon = turn.mon_at(side, slot)
+        if mon is None or mon.fainted or mon.ability != "speedboost":
+            continue
+        if mon.newly_switched:
+            continue
+        turn.apply_boosts(side, slot, {"spe": 1}, reason="speedboost", from_foe=False)
+
     # Residual order 29: the last of White Herb's four chances to fire.
     _check_white_herb(turn)
 
@@ -3280,6 +3557,12 @@ def _residuals(reg: Regulation, turn: _Turn) -> None:
                     # of the turn after it lands, not when it hits.
                     if volatile.id == "yawn":
                         turn.apply_status(side, slot, "slp", reason="yawn")
+                    if volatile.id == "disable" and volatile.move:
+                        # The flag lives on the move slot, so it has to be cleared here or
+                        # the move stays unusable for the rest of the battle.
+                        for move_slot in mon.moves:
+                            if move_slot.id == volatile.move:
+                                move_slot.disabled = False
                     continue
             kept_volatiles.append(volatile)
         mon.volatiles = kept_volatiles

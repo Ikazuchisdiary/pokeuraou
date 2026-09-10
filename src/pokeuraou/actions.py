@@ -230,6 +230,11 @@ def _usable_move_slots(mon, reg: Regulation) -> list[tuple[int, str]]:  # noqa: 
     # Throat Chop's `onDisableMove` disables every sound move on the target for two turns,
     # so they never reach the request in the first place.
     throat_chopped = mon.has_volatile("throatchop")
+    # Disable and Cursed Body set `MoveSlot.disabled`, which `MoveSlot.usable` already
+    # honours -- but nothing set it until the resolver learned to, so this is where the
+    # legality half of that mechanic lands.
+    disabled = mon.volatile("disable")
+    disabled_move = disabled.move if disabled is not None else None
     out: list[tuple[int, str]] = []
     for i, m in enumerate(mon.moves, start=1):
         if not m.usable:
@@ -238,6 +243,8 @@ def _usable_move_slots(mon, reg: Regulation) -> list[tuple[int, str]]:  # noqa: 
         if taunted and move is not None and move.category == "Status":
             continue
         if throat_chopped and move is not None and "sound" in move.flags:
+            continue
+        if disabled_move is not None and m.id == disabled_move:
             continue
         if tormented and mon.last_move == m.id:
             continue

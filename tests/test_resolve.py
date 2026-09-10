@@ -37,6 +37,7 @@ from pokeuraou.resolve import (
     Average,
     BestOf,
     Budget,
+    _apply_disable,
     _Turn,
     multihit_counts,
     pending_attacks,
@@ -54,7 +55,7 @@ from . import _diff_turn_entry as diff_turn
 from .conftest import FORMAT_ID
 from .test_actions import _synthetic_position
 
-#: Measured over 963 turns against the pinned Showdown commit: 10.4% total, 4.0% silent.
+#: Measured over 498 turns against the pinned Showdown commit: 7.8% total, 3.4% silent.
 #: The headroom above the measurement is deliberate but small; a regression that pushes
 #: past it fails here and ``tools/diverge_report.py`` names the cause by statistical lift.
 #:
@@ -69,9 +70,17 @@ from .test_actions import _synthetic_position
 #: two blocks of the same code (6.82% on seeds 1-8, 10.40% on 9-16).
 #:
 #: The silent rate keeps the threshold it had: it is the number that matters, it did not
-#: need loosening (3.95% against 0.05), and giving it away here would cost the guard.
+#: need loosening (3.41% against 0.05), and giving it away here would cost the guard.
+#:
+#: The total came back down to 7.83% once the resolver learned the mechanics the newly
+#: scored turns exposed -- secondary effects, the status probabilities the champions mod
+#: overrides, item-extended durations, Cursed Body, Disable, Stance Change, Speed Boost and
+#: the Prankster immunity. That is *below* the 8.57% the old code managed while skipping 75
+#: turns, so the tightening is real coverage rather than a reclassification: the flagged
+#: count fell from 31 to 23 at the same time, because thirteen effects were being declared
+#: as "Showdown rolls it" when they are extended by an item and not rolled at all.
 MAX_SILENT_DIVERGENCE = 0.05
-MAX_TOTAL_DIVERGENCE = 0.12
+MAX_TOTAL_DIVERGENCE = 0.10
 
 
 # ---------------------------------------------------------------------------
@@ -276,6 +285,17 @@ def test_protect_used_twice_is_a_branch(reg: Regulation, team_a: list[TeamSet]) 
     assert len(result.branches) >= 2
     assert sum(weights) == pytest.approx(1.0)
     assert any(w == pytest.approx(1 / 3, abs=0.05) for w in weights)
+
+
+def branch_target_fainted(branch) -> bool:  # noqa: ANN001
+    """Whether side 1's first slot fainted in this branch.
+
+    A fainted Pokemon also fails to act, so a test about flinching has to exclude it or it
+    would count a knock-out as a flinch.
+    """
+    side = branch.position.sides[1]
+    party = side.active[0]
+    return party is None or side.pokemon[party].fainted
 
 
 def _protect_both(pos: Position, side: int) -> SideAction:
@@ -1413,3 +1433,419 @@ def test_freeze_cannot_last_the_whole_battle(
             f"still frozen after {FREEZE_COUNTER + 2} turns with the thaw roll pinned to "
             "no, so nothing but the roll can end it"
         )
+
+
+def test_speed_boost_raises_speed_every_turn_but_not_on_arrival(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """`onResidual(pokemon) { if (pokemon.activeTurns) this.boost({spe: 1}); }`.
+
+    The ability was not implemented at all, so a Pokemon the search believed had a fixed
+    Speed was in fact getting faster every turn -- and turn order is the part of a doubles
+    turn that decides the rest of it.
+
+    `activeTurns` is zero on the turn its holder switches in, which is the half of the rule
+    that is easy to miss: Speed Boost does not fire immediately.
+    """
+    pos = _synthetic_position(reg, team_a)
+    for side in (0, 1):
+        for slot in (0, 1):
+            _install_move(pos, side, slot, "protect")
+    holder = pos.sides[0].pokemon[pos.sides[0].active[0]]
+    holder.ability = "speedboost"
+
+    # Fresh off a switch: no raise.
+    holder.newly_switched = True
+    result = resolve_turn(
+        reg, pos, [_protect_both(pos, 0), _protect_both(pos, 1)], budget=Budget.matrix()
+    )
+    after = max(result.branches, key=lambda b: b.probability).position
+    assert after.sides[0].pokemon[after.sides[0].active[0]].boosts.get("spe", 0) == 0, (
+        "Speed Boost must not fire on the turn its holder arrives"
+    )
+
+    # Settled in: one stage a turn, and it keeps going.
+    pos = after
+    for expected in (1, 2, 3):
+        result = resolve_turn(
+            reg, pos, [_protect_both(pos, 0), _protect_both(pos, 1)], budget=Budget.matrix()
+        )
+        pos = max(result.branches, key=lambda b: b.probability).position
+        mon = pos.sides[0].pokemon[pos.sides[0].active[0]]
+        assert not mon.fainted, "nothing should faint in a turn of Protects"
+        assert mon.boosts.get("spe", 0) == expected, (
+            f"expected +{expected} Speed after {expected} turns, got {mon.boosts}"
+        )
+
+
+def test_a_secondary_effect_is_a_branch_with_the_right_weight(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    '''A sub-100% secondary never happened, in any budget.
+
+    `enumerate_secondary` read like a switch between branching and collapsing and was
+    neither: with the flag on it reported the secondary, with it off it said nothing, and
+    both discarded the effect. So Sludge Bomb never poisoned and Rock Slide never flinched.
+    '''
+    pos = _synthetic_position(reg, team_a)
+    _install_move(pos, 0, 0, "sludgebomb")
+    _install_move(pos, 0, 1, "protect")
+    # Not Protect on the target: Protect blocks the move whose secondary is under test,
+    # which is how the first version of this test managed to assert nothing.
+    for slot in (0, 1):
+        _install_move(pos, 1, slot, "swordsdance")
+    secondary = reg.moves["sludgebomb"].raw.get("secondaries") or []
+    chance = float(secondary[0]["chance"]) / 100.0 if secondary else 0.0
+    assert 0.0 < chance < 1.0, f"the fixture move needs a real secondary: {secondary}"
+
+    ours = SideAction(
+        slots=(
+            _move_action(pos, 0, 0, "sludgebomb", 1),
+            _move_action(pos, 0, 1, "protect", None),
+        )
+    )
+    theirs = _protect_both(pos, 1)  # both use the move in slot 1, i.e. Swords Dance
+    budget = replace(Budget.matrix(), enumerate_secondary=True, max_branches=64)
+    result = resolve_turn(reg, pos, [ours, theirs], budget=budget)
+    assert result.total_probability == pytest.approx(1.0)
+
+    poisoned = sum(
+        b.probability
+        for b in result.branches
+        if b.position.sides[1].pokemon[b.position.sides[1].active[0]].status == "psn"
+    )
+    assert poisoned == pytest.approx(chance, abs=1e-9), (
+        f"the secondary should carry its own {chance:.0%}, got {poisoned:.3f} over "
+        f"{len(result.branches)} branches"
+    )
+
+    # And with the knob off it is collapsed to "did not happen" *and* said out loud. That
+    # is what the cheap budgets buy; the search's own budget now enumerates them.
+    collapsed = resolve_turn(
+        reg, pos, [ours, theirs], budget=replace(Budget.matrix(), enumerate_secondary=False)
+    )
+    assert not any(
+        b.position.sides[1].pokemon[b.position.sides[1].active[0]].status == "psn"
+        for b in collapsed.branches
+    )
+    assert any("not branched" in f for f in collapsed.unmodelled), collapsed.unmodelled
+
+
+def test_a_flinch_actually_costs_the_target_its_action(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    '''Flinch is the secondary that matters: the target loses its turn, not some HP.
+
+    Iron Head is on 36% of the tournament field and Rock Slide on 62%, and neither could
+    flinch anything. Asserting that the flinched branch *did not resolve the target's move*
+    is the point -- applying the volatile and then ignoring it would pass a weaker test.
+    '''
+    pos = _synthetic_position(reg, team_a)
+    _install_move(pos, 0, 0, "ironhead")
+    _install_move(pos, 0, 1, "protect")
+    # Swords Dance rather than Protect: Protect would block Iron Head outright, and its
+    # `atk +1` event is the witness for whether the target got to act.
+    for slot in (0, 1):
+        _install_move(pos, 1, slot, "swordsdance")
+    # The flincher has to move first, or a flinch cannot land.
+    pos.sides[0].pokemon[pos.sides[0].active[0]].boosts = {"spe": 6}
+    pos.sides[1].pokemon[pos.sides[1].active[0]].boosts = {"spe": -6}
+
+    ours = SideAction(
+        slots=(
+            _move_action(pos, 0, 0, "ironhead", 1),
+            _move_action(pos, 0, 1, "protect", None),
+        )
+    )
+    theirs = _protect_both(pos, 1)
+    budget = replace(Budget.matrix(), enumerate_secondary=True, max_branches=64)
+    result = resolve_turn(reg, pos, [ours, theirs], budget=budget)
+
+    # The witness is the consequence, not the volatile: the volatile is single-turn and is
+    # gone by the time the branch is handed back, and asserting on it would pass even if
+    # `_can_act` ignored it entirely.
+    def acted(branch) -> bool:  # noqa: ANN001
+        target = branch.position.sides[1].pokemon[branch.position.sides[1].active[0]]
+        return target.boosts.get("atk", 0) > 0
+
+    flinched = [b for b in result.branches if not acted(b) and not
+                branch_target_fainted(b)]
+    got_to_move = [b for b in result.branches if acted(b)]
+    assert flinched, (
+        "no branch has the target losing its action: "
+        + " | ".join(" / ".join(b.events) for b in result.branches[:3])
+    )
+    assert got_to_move, "and it must sometimes get to move, or this is not a branch"
+
+    chance = float((reg.moves["ironhead"].raw["secondaries"] or [{}])[0]["chance"]) / 100.0
+    total = sum(b.probability for b in flinched)
+    assert total == pytest.approx(chance, abs=1e-9), (
+        f"Iron Head flinches {chance:.0%} of the time, got {total:.3f}"
+    )
+
+
+def test_aegislash_takes_the_forme_that_matches_its_move(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """Stance Change was declared and not implemented, so Aegislash never left Shield.
+
+    The formes are 50/140 and 140/50 in attack and defence, so this is not cosmetic: a
+    Shield-forme Aegislash swinging Iron Head was priced at a third of the attack it has.
+    Showdown hangs the change on `onModifyMove`, so the new forme's stats apply to the very
+    move that triggered it -- which is what the damage assertion here is for.
+    """
+    if "aegislashblade" not in reg.species:
+        pytest.skip("this regulation has no Aegislash-Blade")
+
+    pos = _synthetic_position(reg, team_a)
+    for slot in (0, 1):
+        _install_move(pos, 1, slot, "swordsdance")
+    _install_move(pos, 0, 1, "protect")
+    attacker = pos.sides[0].pokemon[pos.sides[0].active[0]]
+    attacker.species = "aegislash"
+    attacker.base_species = "aegislash"
+    attacker.types = reg.species["aegislash"].types
+    attacker.ability = "stancechange"
+    attacker.item = None
+    _install_move(pos, 0, 0, "ironhead")
+
+    ours = SideAction(
+        slots=(
+            _move_action(pos, 0, 0, "ironhead", 1),
+            _move_action(pos, 0, 1, "protect", None),
+        )
+    )
+    theirs = _protect_both(pos, 1)
+    budget = replace(Budget.matrix(), enumerate_secondary=False)
+    result = resolve_turn(reg, pos, [ours, theirs], budget=budget)
+    after = max(result.branches, key=lambda b: b.probability).position
+    changed = after.sides[0].pokemon[after.sides[0].active[0]]
+    assert changed.species == "aegislashblade", (
+        f"a damaging move has to put Aegislash in Blade forme, got {changed.species}"
+    )
+    blade_damage = (
+        pos.sides[1].pokemon[pos.sides[1].active[0]].hp
+        - after.sides[1].pokemon[after.sides[1].active[0]].hp
+    )
+
+    # King's Shield puts it back, and a status move that is not King's Shield leaves it.
+    _install_move(pos, 0, 0, "kingsshield")
+    shielded = resolve_turn(
+        reg,
+        pos,
+        [
+            SideAction(
+                slots=(
+                    _move_action(pos, 0, 0, "kingsshield", None),
+                    _move_action(pos, 0, 1, "protect", None),
+                )
+            ),
+            theirs,
+        ],
+        budget=budget,
+    )
+    kept = max(shielded.branches, key=lambda b: b.probability).position
+    assert kept.sides[0].pokemon[kept.sides[0].active[0]].species == "aegislash", (
+        "King's Shield is the one status move that changes the forme, back to Shield"
+    )
+
+    # The stats really followed the forme: the same Iron Head from a Pokemon stuck in
+    # Shield forme does far less. 140 against 50 is a factor near three.
+    attacker_shield = pos.sides[0].pokemon[pos.sides[0].active[0]]
+    attacker_shield.ability = "blaze"  # anything but Stance Change
+    _install_move(pos, 0, 0, "ironhead")
+    stuck = resolve_turn(reg, pos, [ours, theirs], budget=budget)
+    stuck_after = max(stuck.branches, key=lambda b: b.probability).position
+    shield_damage = (
+        pos.sides[1].pokemon[pos.sides[1].active[0]].hp
+        - stuck_after.sides[1].pokemon[stuck_after.sides[1].active[0]].hp
+    )
+    assert blade_damage > shield_damage * 2, (
+        f"Blade forme should hit far harder: {blade_damage} vs {shield_damage}"
+    )
+
+
+def test_cursed_body_can_disable_the_move_that_hit_it(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """`MoveSlot.disabled` existed and `usable` honoured it, and nothing ever set it.
+
+    Cursed Body is on 43 of the 394 tournament teams -- the most common ability the resolver
+    did not model -- and it is `onDamagingHit` with `randomChance(3, 10)`, so it belongs in
+    the same fan-out as any other sub-100% chance. The half that decides games is the
+    legality half: a disabled move must not be offered next turn.
+    """
+    pos = _synthetic_position(reg, team_a)
+    _install_move(pos, 0, 0, "ironhead")
+    _install_move(pos, 0, 1, "protect")
+    for slot in (0, 1):
+        _install_move(pos, 1, slot, "swordsdance")
+    defender = pos.sides[1].pokemon[pos.sides[1].active[0]]
+    defender.ability = "cursedbody"
+    defender.hp = defender.maxhp
+
+    ours = SideAction(
+        slots=(
+            _move_action(pos, 0, 0, "ironhead", 1),
+            _move_action(pos, 0, 1, "protect", None),
+        )
+    )
+    budget = replace(Budget.matrix(), max_branches=64)
+    result = resolve_turn(reg, pos, [ours, _protect_both(pos, 1)], budget=budget)
+    assert result.total_probability == pytest.approx(1.0)
+
+    def attacker_of(branch):  # noqa: ANN001, ANN202
+        side = branch.position.sides[0]
+        return side.pokemon[side.active[0]]
+
+    hit = sum(
+        b.probability
+        for b in result.branches
+        if attacker_of(b).volatile("disable") is not None
+    )
+    assert hit == pytest.approx(0.3, abs=1e-9), (
+        f"Cursed Body is 3 in 10, got {hit:.3f} over {len(result.branches)} branches"
+    )
+
+    disabled_branch = next(
+        b for b in result.branches if attacker_of(b).volatile("disable") is not None
+    )
+    volatile = attacker_of(disabled_branch).volatile("disable")
+    assert volatile is not None and volatile.move == "ironhead", (
+        f"the disabled move has to be the one that hit: {volatile}"
+    )
+
+    # The legality half: Iron Head is no longer on offer, and the rest of the moves are.
+    offered = {
+        a.move_id
+        for action in side_actions(reg, disabled_branch.position, 0)
+        for a in action.slots
+        if isinstance(a, MoveAction) and a.slot == 0
+    }
+    assert "ironhead" not in offered, f"a disabled move must not be offered: {offered}"
+    assert offered, "and the rest of the moves must still be there"
+
+
+def test_a_disable_expires_and_the_move_comes_back(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """The flag lives on the move slot, so expiry has to clear it or it is permanent.
+
+    This is the shape that made four volatiles permanent: state kept somewhere the expiry
+    loop does not look. Asserting the move returns is the only way to catch it.
+    """
+    pos = _synthetic_position(reg, team_a)
+    for side in (0, 1):
+        for slot in (0, 1):
+            _install_move(pos, side, slot, "protect")
+    mon = pos.sides[0].pokemon[pos.sides[0].active[0]]
+    mon.last_move = "protect"
+    turn = _Turn(reg, pos, Budget.matrix(), {})
+    turn.current_actor = (0, 0)
+    assert _apply_disable(turn, 0, 0)
+    volatile = mon.volatile("disable")
+    assert volatile is not None and volatile.duration is not None
+    assert not mon.moves[0].usable, "the move slot has to carry the flag"
+
+    seen: list[int | None] = [volatile.duration]
+    for _ in range(volatile.duration + 2):
+        result = resolve_turn(
+            reg, pos, [_protect_both(pos, 0), _protect_both(pos, 1)], budget=Budget.matrix()
+        )
+        pos = max(result.branches, key=lambda b: b.probability).position
+        mon = pos.sides[0].pokemon[pos.sides[0].active[0]]
+        assert not mon.fainted, "nothing should faint in a turn of Protects"
+        current = mon.volatile("disable")
+        seen.append(current.duration if current else None)
+        if current is None:
+            break
+    assert seen[-1] is None, f"the disable never expired: durations {seen}"
+    assert all(m.usable or m.pp <= 0 for m in mon.moves), (
+        f"the move slot's flag was not cleared on expiry: "
+        f"{[(m.id, m.disabled, m.pp) for m in mon.moves]}"
+    )
+
+
+@pytest.mark.oracle
+def test_light_clay_extends_a_screen_and_the_dump_says_so(
+    reg: Regulation, oracle: Oracle
+) -> None:
+    """`durationCallback` does not mean "Showdown rolls it" -- usually it means an item.
+
+        lightscreen: durationCallback(target, source) {
+            if (source?.hasItem('lightclay')) return 8;
+            return 5;
+        }
+
+    We used the unextended number and reported it as a roll, which was wrong twice over. 34
+    of the 394 tournament teams hold Light Clay -- about seven in ten of the teams carrying a
+    screen at all -- so a screen lasting 5 turns instead of 8 is an ordinary occurrence.
+
+    Compared against the simulator's own stored duration, and the same battle without the
+    item, so the test fails if the extension is applied unconditionally as well as if it is
+    not applied at all.
+    """
+    entry = (reg.moves["lightscreen"].raw.get("durations") or {}).get("lightscreen") or {}
+    assert entry.get("byItem", {}).get("lightclay") == 8, (
+        f"the dump has to carry the extension, not just that a callback exists: {entry}"
+    )
+    assert not entry.get("rolled"), "a screen is extended, not rolled"
+
+    def team(item: str) -> list[TeamSet]:
+        held = list(_INFLICTOR_TEAM)
+        first = held[0]
+        held[0] = TeamSet(
+            first.species, first.ability, first.nature, list(first.moves), dict(first.sp),
+            item=item,
+        )
+        return held
+
+    for item, expected in (("lightclay", 8), ("leftovers", 5)):
+        handle = oracle.create(
+            FORMAT_ID, team(item), _VICTIM_TEAM, policy=RandomnessPolicy(damage_roll=8)
+        )
+        handle.step(["team 1,2,3,4", "team 1,2,3,4"])
+        before = Position.from_json(handle.position)
+        # Grimmsnarl's Light Screen is slot 3; the victim uses Swords Dance so nothing is
+        # blocked and nothing faints.
+        ours = SideAction(
+            slots=(
+                _move_action(before, 0, 0, "lightscreen", None),
+                _move_action(before, 0, 1, "protect", None),
+            )
+        )
+        theirs = SideAction(
+            slots=(
+                _move_action(before, 1, 0, "protect", None),
+                _move_action(before, 1, 1, "protect", None),
+            )
+        )
+        handle.step([ours.to_choice(), theirs.to_choice()])
+        assert not handle.choice_errors, handle.choice_errors
+
+        showdown = next(
+            (
+                c.duration
+                for c in Position.from_json(handle.position).sides[0].side_conditions
+                if c.id == "lightscreen"
+            ),
+            None,
+        )
+        result = resolve_turn(reg, before, [ours, theirs], budget=Budget.deterministic(8))
+        mine = next(
+            (
+                c.duration
+                for c in result.branches[0].position.sides[0].side_conditions
+                if c.id == "lightscreen"
+            ),
+            None,
+        )
+        # Both have spent one turn of it by the time the turn ends, so the stored number is
+        # one less than the duration the callback returned.
+        assert mine == showdown == expected - 1, (
+            f"with {item}: ours {mine}, showdown {showdown}, expected {expected - 1}"
+        )
+        assert not any("lightscreen duration" in f for f in result.unmodelled), (
+            f"an extended screen is not an approximation: {result.unmodelled}"
+        )
+        handle.close()
