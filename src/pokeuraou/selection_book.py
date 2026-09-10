@@ -187,6 +187,10 @@ def perplexity(distribution: np.ndarray) -> float:
     p = p[p > 0]
     if p.size == 0:
         return 0.0
+    # Normalised first, because this is also called on distributions *summed* over teams
+    # -- "how wide is our play across the whole field" -- and entropy on a vector summing
+    # to 394 comes out as zero, which reads as total collapse instead of as a mistake.
+    p = p / p.sum()
     return float(np.exp(-(p * np.log(p)).sum()))
 
 
@@ -435,6 +439,69 @@ class SelectionBook:
             )
 
 
+#: The selection rules a head-to-head run can put on either seat, as "ours/theirs".
+#: "book" is the equilibrium, "gen" is the equilibrium plus the exploration share that
+#: generation actually plays, and "uniform" is the draw generation used before any of this.
+ARMS = ("uniform/uniform", "book/uniform", "book/book", "gen/gen")
+
+
+def _pick(rng: np.random.Generator, weights: np.ndarray) -> int:
+    cumulative = np.cumsum(np.asarray(weights, dtype=np.float64))
+    cumulative /= cumulative[-1]
+    return min(
+        int(np.searchsorted(cumulative, rng.random(), side="right")), len(cumulative) - 1
+    )
+
+
+def draw_arm(
+    arm: str,
+    entry: BookEntry,
+    class_index: int,
+    rng: np.random.Generator,
+    *,
+    epsilon: float = DEFAULT_EPSILON,
+    temperature: float = DEFAULT_TEMPERATURE,
+) -> tuple[int, int]:
+    """(our selection index, theirs) under one named rule, ours drawn first.
+
+    Lives here rather than in the measurement tool because it carries the same invariant
+    :meth:`BookEntry.draw` does, and an invariant worth stating is worth testing: whatever
+    the arm, our index is a function of the entry and the stream, never of
+    ``class_index``. That argument exists only to look up the opponent's column strategy,
+    which is theirs to know -- they hold the investment, we do not.
+
+    A harness that mixes rules is exactly where the leak would reappear, because there the
+    two sides are drawn by different code paths and the tempting shortcut is to pass the
+    class into both.
+    """
+    if arm not in ARMS:
+        raise ValueError(f"unknown arm {arm!r}; expected one of {ARMS}")
+    ours_rule, theirs_rule = arm.split("/")
+    count = len(entry.selections)
+
+    if ours_rule == "book":
+        ours = _pick(rng, entry.our_strategy)
+    elif ours_rule == "gen":
+        ours = _pick(
+            rng, entry.our_mixture(epsilon=epsilon, temperature=temperature)
+        )
+    else:
+        ours = int(rng.integers(count))
+
+    if theirs_rule == "book":
+        theirs = _pick(rng, entry.their_strategies[class_index])
+    elif theirs_rule == "gen":
+        theirs = _pick(
+            rng,
+            entry.their_mixture(
+                class_index, epsilon=epsilon, temperature=temperature
+            ),
+        )
+    else:
+        theirs = int(rng.integers(count))
+    return ours, theirs
+
+
 def start_book(path: Path, *, roster: str, model: str, format_id: str) -> None:
     """Writes the header if ``path`` is new, so entries can be appended one at a time.
 
@@ -466,12 +533,14 @@ def find_cached_book(name: str) -> Path | None:
 
 
 __all__ = [
+    "ARMS",
     "DEFAULT_EPSILON",
     "DEFAULT_TEMPERATURE",
     "BookEntry",
     "SelectionBook",
     "SelectionDraw",
     "append_entry",
+    "draw_arm",
     "explore_mixture",
     "find_cached_book",
     "key_for_team",

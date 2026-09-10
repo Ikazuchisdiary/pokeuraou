@@ -33,9 +33,11 @@ from pokeuraou.payoff import HP_SHARE
 from pokeuraou.priors import SampledSet
 from pokeuraou.selection import SpreadClass, book_entry, solve_selection
 from pokeuraou.selection_book import (
+    ARMS,
     BookEntry,
     SelectionBook,
     append_entry,
+    draw_arm,
     explore_mixture,
     key_for_team,
     perplexity,
@@ -204,6 +206,17 @@ def test_our_draw_is_independent_of_the_opponents_spread_class(roster) -> None: 
         )
         assert np.array_equal(drawn.our_equilibrium, ours)
 
+    # The same precise pin as the arm test: our selection is the one the stream's first
+    # uniform names against our own mixture. Independence alone would survive a reorder
+    # (a PRNG's successive draws are independent either way); this pins the claim the
+    # docstring actually makes, that nothing downstream of their type precedes our draw.
+    first = np.random.default_rng(11).random()
+    expected = int(np.searchsorted(np.cumsum(ours / ours.sum()), first, side="right"))
+    assert (
+        SELECTIONS.index(entry.draw(np.random.default_rng(11), epsilon=0.0).our_pick)
+        == expected
+    )
+
     assert len(per_class[0]) > 1500 and len(per_class[1]) > 1500
     counts = []
     for picks in per_class.values():
@@ -226,6 +239,73 @@ def test_our_mixture_takes_no_spread_class_argument() -> None:
     assert "class_index" in theirs
     assert "class_index" not in ours
     assert set(ours) == {"self", "epsilon", "temperature"}
+
+
+def test_no_arm_lets_our_draw_see_the_opponents_spread_class(roster) -> None:  # noqa: ANN001
+    """The head-to-head harness mixes rules, which is where the leak would come back.
+
+    Two sides drawn by different code paths invite passing the class into both. So for
+    every arm, with the stream fixed, our index must be identical whichever class the
+    opponent turns out to hold -- while theirs moves, because it is allowed to.
+    """
+    ours = np.zeros(len(SELECTIONS))
+    ours[:6] = 1.0 / 6.0
+    entry = _entry(
+        ours=ours,
+        theirs=[_point_mass(0), _point_mass(len(SELECTIONS) - 1)],
+        sets=roster.sets,
+    )
+    for arm in ARMS:
+        picks = [
+            draw_arm(arm, entry, k, np.random.default_rng(4), epsilon=0.3)
+            for k in (0, 1)
+        ]
+        assert picks[0][0] == picks[1][0], f"{arm} moved our draw with their class"
+    # Stronger, because the assertion above would also pass if the two draws were
+    # *reordered* -- each consumes exactly one uniform, so a swap is invisible to it.
+    # Our index must be the one the stream's FIRST uniform names against our own
+    # distribution, which pins the order as well as the independence.
+    for arm, mine in (
+        ("book/uniform", entry.our_strategy),
+        ("book/book", entry.our_strategy),
+        ("gen/gen", entry.our_mixture(epsilon=0.3)),
+    ):
+        first = np.random.default_rng(4).random()
+        expected = int(
+            np.searchsorted(np.cumsum(mine / mine.sum()), first, side="right")
+        )
+        got, _ = draw_arm(arm, entry, 1, np.random.default_rng(4), epsilon=0.3)
+        assert got == expected, f"{arm} did not draw ours from the first uniform"
+
+    # And the control: the arms that read their strategy do see the difference, so the
+    # test above is not passing because nothing is wired up.
+    for arm in ("book/book", "gen/gen"):
+        picks = [
+            draw_arm(arm, entry, k, np.random.default_rng(4), epsilon=0.0)
+            for k in (0, 1)
+        ]
+        assert picks[0][1] != picks[1][1], f"{arm} ignored their class entirely"
+
+
+def test_an_unknown_arm_is_refused() -> None:
+    entry = _entry(ours=_point_mass(0), theirs=[_point_mass(0)], sets=[])
+    with pytest.raises(ValueError, match="unknown arm"):
+        draw_arm("book/best-response", entry, 0, np.random.default_rng(0))
+
+
+def test_the_uniform_arm_really_is_uniform(roster) -> None:  # noqa: ANN001
+    """The baseline has to be the old behaviour, or the comparison measures nothing."""
+    entry = _entry(
+        ours=_point_mass(0), theirs=[_point_mass(0)], sets=roster.sets
+    )
+    rng = np.random.default_rng(2)
+    seen = np.zeros(len(SELECTIONS))
+    for _ in range(9000):
+        ours, theirs = draw_arm("uniform/uniform", entry, 0, rng)
+        seen[ours] += 1
+        seen[theirs] += 1
+    share = seen / seen.sum()
+    assert np.abs(share - 1.0 / len(SELECTIONS)).max() < 0.004
 
 
 # --------------------------------------------------------------- the exploration mixture
@@ -288,6 +368,19 @@ def test_a_pure_equilibrium_alone_would_generate_one_selection_pair(roster) -> N
 
 
 # ------------------------------------------------------------------------ persistence
+
+
+def test_the_effective_width_of_a_pooled_distribution_is_the_normalised_one() -> None:
+    """It is called on strategies *summed* over the field, which do not sum to 1.
+
+    Entropy on a vector summing to 394 comes out at zero, and zero reads as "the whole
+    field plays one selection" -- the exact conclusion the number exists to test for. So
+    it normalises, and this is the test that says so.
+    """
+    one = np.array([0.5, 0.25, 0.25, 0.0])
+    assert perplexity(one * 394) == pytest.approx(perplexity(one))
+    assert perplexity(np.ones(90)) == pytest.approx(90.0)
+    assert perplexity(_point_mass(0)) == pytest.approx(1.0)
 
 
 def test_a_book_round_trips_through_disk(roster, tmp_path) -> None:  # noqa: ANN001
