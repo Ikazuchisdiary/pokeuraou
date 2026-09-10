@@ -28,6 +28,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
+import diff_turn  # noqa: E402
 from diff_turn import canonical, field_kind  # noqa: E402
 
 from pokeuraou.actions import MoveAction, SideAction, side_actions  # noqa: E402
@@ -217,7 +218,7 @@ def run(seeds: int, battles: int, roll: int, max_turns: int) -> Aggregate:
                     if forced or len(chosen) != 2:
                         agg.skipped["replacement turn"] += 1
                         continue
-                    _score(reg, before, chosen, handle.position, handle.log, budget, agg)
+                    _score(reg, before, chosen, handle, budget, agg, py_rng)
                 handle.close()
     return agg
 
@@ -226,25 +227,39 @@ def _score(
     reg: Regulation,
     before: Position,
     chosen: list[SideAction],
-    after_json: dict[str, Any],
-    lines: list[str],
+    handle: Any,
     budget: Budget,
     agg: Aggregate,
+    py_rng: random.Random,
 ) -> None:
-    if action_overriding_effects(lines):
+    # Only the overrides the resolver cannot reproduce: Encore is modelled.
+    if action_overriding_effects(handle.log, only_unmodelled=True):
         agg.skipped["action overridden mid-turn"] += 1
         return
     result = resolve_turn(reg, before, chosen, budget=budget)
+    if result.suspended:
+        # A self-switching move interrupted the turn. These used to fall into "not a single
+        # branch" and be dropped, which meant the ranking below was computed without Parting
+        # Shot, U-turn, Flip Turn or Volt Switch in it at all. `diff_turn.resolve_pauses`
+        # answers the request the same way on both sides and is tested; its own bookkeeping
+        # is discarded here because what this tool wants is the finished turn.
+        finished = diff_turn.resolve_pauses(
+            reg, result, handle, py_rng, 0, diff_turn.Report()
+        )
+        if finished is None:
+            agg.skipped["mid-turn replacement could not be carried through"] += 1
+            return
+        result = finished
     if len(result.branches) != 1:
         agg.skipped["not a single branch"] += 1
         return
-    if any(n.startswith(("selfSwitch", "forceSwitch")) for n in result.unmodelled):
+    if any(n.startswith("forceSwitch") for n in result.unmodelled):
         agg.skipped["pending replacement"] += 1
         return
 
     effects = effects_in_play(reg, before, chosen)
     ours = canonical(result.branches[0].position)
-    theirs = canonical(Position.from_json(after_json))
+    theirs = canonical(Position.from_json(handle.position))
     differences = [k for k in ours if ours[k] != theirs.get(k)]
 
     if not differences:

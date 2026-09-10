@@ -311,7 +311,10 @@ def compare_turn(
 ) -> None:
     # An Encore-style action override replaces a queued action after the turn starts,
     # which the resolver does not model; those turns are named rather than scored.
-    if action_overriding_effects(lines):
+    # An action override replaces a queued action after the turn starts. Encore is
+    # modelled now, so only the ones that are not are excluded -- a skip is a blind spot
+    # and this class had been hiding Encore entirely.
+    if action_overriding_effects(lines, only_unmodelled=True):
         report.skipped["action overridden mid-turn"] += 1
         return
 

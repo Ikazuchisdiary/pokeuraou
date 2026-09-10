@@ -473,17 +473,35 @@ SPEED_CHANGING_EFFECTS = frozenset(
 
 
 #: Effects that replace a queued action after the turn has started, which reorders the
-#: queue for a reason that is not a Speed change. Encore is the one that occurs: it
-#: overrides its target's action, and Showdown reinserts the replacement.
+#: queue for a reason that is not a Speed change.
 ACTION_OVERRIDING_EFFECTS = frozenset({"encore", "instruct", "dancer", "afteryou", "quash"})
 
+#: The subset the resolver models, and which therefore must *not* be excluded from a
+#: differential comparison. Encore is the only one of the five that occurs in this format --
+#: 109 of the 394 tournament teams carry it, against none for Instruct and Quash -- and it
+#: was being skipped, which is precisely how a whole class of bug stays invisible while the
+#: divergence rate looks healthy.
+MODELLED_ACTION_OVERRIDES = frozenset({"encore"})
 
-def action_overriding_effects(protocol_lines: list[str]) -> set[str]:
-    """Which action-overriding effects a turn's protocol shows."""
+
+def action_overriding_effects(
+    protocol_lines: list[str], *, only_unmodelled: bool = False
+) -> set[str]:
+    """Which action-overriding effects a turn's protocol shows.
+
+    ``only_unmodelled`` is for callers that *skip* on the result: they want what the
+    resolver cannot reproduce, not everything that reordered the queue. A caller that
+    merely names the causes of a re-sort wants all of them.
+    """
+    names = (
+        ACTION_OVERRIDING_EFFECTS - MODELLED_ACTION_OVERRIDES
+        if only_unmodelled
+        else ACTION_OVERRIDING_EFFECTS
+    )
     found: set[str] = set()
     for line in protocol_lines:
         lowered = line.lower()
-        for name in ACTION_OVERRIDING_EFFECTS:
+        for name in names:
             if f"move: {name}" in lowered or f"|{name}|" in lowered:
                 found.add(name)
     return found

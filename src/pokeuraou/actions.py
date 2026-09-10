@@ -235,6 +235,11 @@ def _usable_move_slots(mon, reg: Regulation) -> list[tuple[int, str]]:  # noqa: 
     # legality half of that mechanic lands.
     disabled = mon.volatile("disable")
     disabled_move = disabled.move if disabled is not None else None
+    # Encore leaves exactly one move on offer. Showdown expresses it as an action override
+    # rather than a request filter, but the request it sends does mark every other move
+    # disabled, so the legal set is the same one move.
+    encored = mon.volatile("encore")
+    encored_move = encored.move if encored is not None else None
     out: list[tuple[int, str]] = []
     for i, m in enumerate(mon.moves, start=1):
         if not m.usable:
@@ -245,6 +250,8 @@ def _usable_move_slots(mon, reg: Regulation) -> list[tuple[int, str]]:  # noqa: 
         if throat_chopped and move is not None and "sound" in move.flags:
             continue
         if disabled_move is not None and m.id == disabled_move:
+            continue
+        if encored_move is not None and m.id != encored_move:
             continue
         if tormented and mon.last_move == m.id:
             continue

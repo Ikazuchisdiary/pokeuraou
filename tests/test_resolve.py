@@ -16,6 +16,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 
+import numpy as np
 import pytest
 
 from pokeuraou.actions import (
@@ -38,6 +39,8 @@ from pokeuraou.resolve import (
     BestOf,
     Budget,
     _apply_disable,
+    _apply_encore,
+    _encore_override,
     _Turn,
     multihit_counts,
     pending_attacks,
@@ -50,6 +53,7 @@ from pokeuraou.resolve import (
     turn_expectation,
     turn_leaves,
 )
+from pokeuraou.speed import QueuedAction
 
 from . import _diff_turn_entry as diff_turn
 from .conftest import FORMAT_ID
@@ -1587,12 +1591,19 @@ def test_a_flinch_actually_costs_the_target_its_action(
 def test_aegislash_takes_the_forme_that_matches_its_move(
     reg: Regulation, team_a: list[TeamSet]
 ) -> None:
-    """Stance Change was declared and not implemented, so Aegislash never left Shield.
+    """Stance Change, which turned out to be implemented all along -- but not *declared*.
 
-    The formes are 50/140 and 140/50 in attack and defence, so this is not cosmetic: a
-    Shield-forme Aegislash swinging Iron Head was priced at a third of the attack it has.
-    Showdown hangs the change on `onModifyMove`, so the new forme's stats apply to the very
-    move that triggered it -- which is what the damage assertion here is for.
+    I read the differential's `species: ours 'aegislashblade' vs showdown 'aegislash'` and
+    the coverage report's "stancechange uncovered" together and concluded the ability did
+    nothing. `_use_move` had handled it since before this session. What was missing was its
+    entry in `all_modelled_abilities`, so the calculator reported
+    `attacker.ability:stancechange` on every hit -- 158 times in a 13,000-game run -- for an
+    ability that works. "Reported as unmodelled" is not "unimplemented": the reporting can
+    be the broken half. The duplicate implementation I added on that reading is gone.
+
+    The test earns its place anyway: the formes are 50/140 and 140/50 in attack and defence,
+    so a Shield-forme Aegislash swinging Iron Head at a third of its real attack would be a
+    large silent error, and nothing covered it before.
     """
     if "aegislashblade" not in reg.species:
         pytest.skip("this regulation has no Aegislash-Blade")
@@ -1849,3 +1860,402 @@ def test_light_clay_extends_a_screen_and_the_dump_says_so(
             f"an extended screen is not an approximation: {result.unmodelled}"
         )
         handle.close()
+
+
+def test_encore_leaves_exactly_one_move_on_offer(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """Encore added a volatile and locked nothing, on 27.7% of the field's teams.
+
+    109 of the 394 tournament teams carry it -- the third most common of the moves that
+    interfere with an action, behind Fake Out and ahead of Taunt. Locking the opponent into
+    one move is most of what makes it worth a slot, and the search could neither use it nor
+    fear it.
+
+    Duration is the mirror of Disable's: 3, or 4 when the target has already moved this
+    turn, because the volatile is decremented at the end of it either way.
+    """
+    pos = _synthetic_position(reg, team_a)
+    for side in (0, 1):
+        for slot in (0, 1):
+            _install_move(pos, side, slot, "protect")
+    target = pos.sides[1].pokemon[pos.sides[1].active[0]]
+    target.last_move = target.moves[1].id
+    turn = _Turn(reg, pos, Budget.matrix(), {})
+    assert _apply_encore(turn, 1, 0, reg.moves["encore"])
+    locked = target.volatile("encore")
+    assert locked is not None and locked.move == target.moves[1].id
+    assert locked.duration == 3, f"3 when the target has not moved yet: {locked.duration}"
+
+    offered = {
+        a.move_id
+        for action in side_actions(reg, pos, 1)
+        for a in action.slots
+        if isinstance(a, MoveAction) and a.slot == 0
+    }
+    assert offered == {locked.move}, (
+        f"an encored Pokemon may only pick the encored move, got {sorted(offered)}"
+    )
+
+    # A Pokemon that has already acted gets the extra turn back.
+    fresh = _synthetic_position(reg, team_a)
+    other = fresh.sides[1].pokemon[fresh.sides[1].active[0]]
+    other.last_move = other.moves[1].id
+    later = _Turn(reg, fresh, Budget.matrix(), {})
+    later.acted.add((1, 0))
+    assert _apply_encore(later, 1, 0, reg.moves["encore"])
+    assert other.volatile("encore").duration == 4
+
+
+def test_encore_refuses_what_showdown_refuses(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """`onStart` returns false three ways, and each means no volatile at all.
+
+    A volatile that locks a Pokemon into a move it cannot use would leave it with an empty
+    legal action set, which is the shape of bug that spun the replacement phase in place.
+    """
+    pos = _synthetic_position(reg, team_a)
+    target = pos.sides[1].pokemon[pos.sides[1].active[0]]
+    encore = reg.moves["encore"]
+
+    # Never moved.
+    target.last_move = None
+    assert not _apply_encore(_Turn(reg, pos, Budget.matrix(), {}), 1, 0, encore)
+    assert target.volatile("encore") is None
+
+    # A move that carries `failencore` -- Struggle, Sleep Talk, Copycat, Transform, Encore.
+    assert "failencore" in reg.moves["encore"].flags
+    target.moves[0] = MoveSlot(id="encore", pp=5, maxpp=5)
+    target.last_move = "encore"
+    assert not _apply_encore(_Turn(reg, pos, Budget.matrix(), {}), 1, 0, encore)
+
+    # Out of PP.
+    target.moves[0] = MoveSlot(id="protect", pp=0, maxpp=5)
+    target.last_move = "protect"
+    assert not _apply_encore(_Turn(reg, pos, Budget.matrix(), {}), 1, 0, encore)
+
+
+def test_an_encored_action_is_rewritten_but_keeps_its_priority(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """The turn Encore lands, the target had already chosen something else.
+
+        const priority = baseMove.priority;
+        ...
+        baseMove.priority = priority;   // the *original* move's priority
+
+    So a Pokemon that picked Protect executes the encored move at +4 and still moves first.
+    Getting that backwards would reorder the turn, so it is asserted rather than assumed:
+    the encored move here has priority 0 and the chosen one +4, and the rewritten action has
+    to keep the +4.
+    """
+    pos = _synthetic_position(reg, team_a)
+    _install_move(pos, 1, 0, "protect")
+    mon = pos.sides[1].pokemon[pos.sides[1].active[0]]
+    mon.moves[1] = MoveSlot(id="ironhead", pp=15, maxpp=15)
+    mon.volatiles.append(Effect(id="encore", duration=3, move="ironhead"))
+
+    chosen = QueuedAction(
+        side=1,
+        slot=0,
+        kind="move",
+        order=200,
+        priority=reg.moves["protect"].priority,
+        fractional=0.0,
+        speed=np.zeros(1, dtype=np.int64),
+        move_id="protect",
+        target=None,
+    )
+    assert chosen.priority > 0, "the point of the test is a priority move being overridden"
+
+    turn = _Turn(reg, pos, Budget.matrix(), {})
+    variants = _encore_override(reg, turn, chosen)
+    assert sum(w for w, _ in variants) == pytest.approx(1.0)
+    for _weight, rewritten in variants:
+        assert rewritten.move_id == "ironhead", "the action has to become the encored move"
+        assert rewritten.priority == chosen.priority, (
+            f"Showdown keeps the original move's priority: {rewritten.priority} vs "
+            f"{chosen.priority}"
+        )
+
+    # `getRandomTarget` is uniform over adjacent foes, so both live foes come back with
+    # equal weight. Picking one instead would bias the matchup rather than approximate it:
+    # the encored move would always land on the same slot.
+    assert sorted(v.target for _w, v in variants) == [1, 2], (
+        f"both live foes have to be offered: {[v.target for _w, v in variants]}"
+    )
+    assert all(w == pytest.approx(0.5) for w, _ in variants)
+
+    # With one foe down there is nothing to flip.
+    pos.sides[0].pokemon[pos.sides[0].active[1]].fainted = True
+    pos.sides[0].pokemon[pos.sides[0].active[1]].hp = 0
+    single = _encore_override(reg, _Turn(reg, pos, Budget.matrix(), {}), chosen)
+    assert len(single) == 1 and single[0][0] == pytest.approx(1.0)
+
+    # An action that already matches is left alone, object and all.
+    matching = replace(chosen, move_id="ironhead", target=1)
+    assert _encore_override(reg, turn, matching) == [(1.0, matching)]
+
+
+def test_every_duration_the_dump_carries_is_keyed_the_way_it_is_looked_up(
+    reg: Regulation,
+) -> None:
+    """A duration nobody can find is a duration that silently falls back to a literal.
+
+    Showdown's `weather` field is inconsistently cased -- 'sunnyday' but 'RainDance' and
+    'Sandstorm' -- and the resolver normalises before looking the entry up, so an unnormalised
+    key means rain and sand quietly keep the hardcoded 5 while sun gets its 8. Checking every
+    key rather than the three that happened to be noticed.
+    """
+    for move in reg.moves.values():
+        durations = move.raw.get("durations")
+        if not isinstance(durations, dict):
+            continue
+        for key in durations:
+            assert key == key.lower() and key.isalnum(), (
+                f"{move.id} carries a duration keyed {key!r}, which is not how any caller "
+                "spells an effect id"
+            )
+
+    # And the item extensions are actually reachable for the effect kinds that have them.
+    for move_id, effect, item, extended in (
+        ("lightscreen", "lightscreen", "lightclay", 8),
+        ("sunnyday", "sunnyday", "heatrock", 8),
+        ("raindance", "raindance", "damprock", 8),
+        ("electricterrain", "electricterrain", "terrainextender", 8),
+    ):
+        if move_id not in reg.moves:
+            continue
+        entry = (reg.moves[move_id].raw.get("durations") or {}).get(effect) or {}
+        assert entry.get("byItem", {}).get(item) == extended, (
+            f"{move_id}: {item} should make {effect} last {extended}, dump says {entry}"
+        )
+
+
+def test_a_weather_duration_follows_its_rock(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """The three lines under the side-condition fix still read `= 5`.
+
+    No holder of a weather rock is in the current field, so this changes no number today --
+    which is exactly why it went unnoticed, and exactly why a literal duration is the wrong
+    shape. "No team happens to run Heat Rock this season" is not a property of the code.
+    """
+    entry = (reg.moves["sunnyday"].raw.get("durations") or {}).get("sunnyday") or {}
+    rock = next(iter(entry.get("byItem", {})), None)
+    if rock is None:
+        pytest.skip("this regulation has no weather-extending item")
+
+    pos = _synthetic_position(reg, team_a)
+    _install_move(pos, 0, 0, "sunnyday")
+    _install_move(pos, 0, 1, "protect")
+    for slot in (0, 1):
+        _install_move(pos, 1, slot, "protect")
+    ours = SideAction(
+        slots=(
+            _move_action(pos, 0, 0, "sunnyday", None),
+            _move_action(pos, 0, 1, "protect", None),
+        )
+    )
+    theirs = _protect_both(pos, 1)
+
+    seen = {}
+    for item in (None, rock):
+        pos.sides[0].pokemon[pos.sides[0].active[0]].item = item
+        result = resolve_turn(reg, pos, [ours, theirs], budget=Budget.deterministic(8))
+        after = result.branches[0].position.field
+        assert after.weather == "sunnyday"
+        seen[item] = after.weather_duration
+
+    # One turn of it is spent by the residual phase, so the stored numbers are one less.
+    assert seen[None] == entry["base"] - 1, seen
+    assert seen[rock] == entry["byItem"][rock] - 1, (
+        f"{rock} has to extend the weather: {seen}"
+    )
+
+
+def test_a_grass_type_ignores_a_powder_move(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """The immunity was in the dump and only Rage Powder consulted it.
+
+        gen >= 6 && move.flags['powder'] && target !== pokemon &&
+            !this.dex.getImmunity('powder', target)
+
+    So Sleep Powder put Grass types to sleep. 61 of the 394 tournament teams carry Sleep
+    Powder and 304 of them field a Grass type, and `diverge_report.py` ranked
+    `move:sleeppowder` first by lift with every divergence on `status` -- the fingerprint of
+    a status landing that should not have.
+    """
+    assert reg.immune_to_effect("powder", ("Grass",))
+    assert "powder" in reg.moves["sleeppowder"].flags
+
+    pos = _synthetic_position(reg, team_a)
+    _install_move(pos, 0, 0, "sleeppowder")
+    _install_move(pos, 0, 1, "protect")
+    for slot in (0, 1):
+        _install_move(pos, 1, slot, "protect")
+    target = pos.sides[1].pokemon[pos.sides[1].active[0]]
+    ours = SideAction(
+        slots=(
+            _move_action(pos, 0, 0, "sleeppowder", 1),
+            _move_action(pos, 0, 1, "protect", None),
+        )
+    )
+    # Swords Dance on the target, not Protect: Protect would block the move for the wrong
+    # reason and the baseline case would fail while looking like the immunity works.
+    for slot in (0, 1):
+        _install_move(pos, 1, slot, "swordsdance")
+    theirs = _protect_both(pos, 1)
+
+    def slept(types: tuple[str, ...], **overrides: object) -> bool:
+        target.types = types
+        target.status = None
+        target.ability = str(overrides.get("ability", "blaze"))
+        target.item = overrides.get("item")  # type: ignore[assignment]
+        result = resolve_turn(reg, pos, [ours, theirs], budget=Budget.deterministic(8))
+        after = result.branches[0].position.sides[1]
+        return after.pokemon[after.active[0]].status == "slp"
+
+    assert slept(("Fire",)), "the setup has to be able to land the move at all"
+    assert not slept(("Grass",)), "a Grass type ignores a powder move"
+    assert not slept(("Grass", "Poison")), "one immune type is enough"
+    assert not slept(("Fire",), ability="overcoat"), "Overcoat blocks powder"
+    assert not slept(("Fire",), item="safetygoggles"), "Safety Goggles blocks powder"
+
+
+def test_prankster_immunity_survived_being_folded_together(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """`_prankster_immune` became `_immune_to_move`; the rule it held has to still hold.
+
+    Two per-target immunities in one loop want one place to live, but a refactor that drops
+    a rule on the way is the reason this is checked separately from the powder one.
+    """
+    pos = _synthetic_position(reg, team_a)
+    mover = pos.sides[0].pokemon[pos.sides[0].active[0]]
+    mover.ability = "prankster"
+    _install_move(pos, 0, 0, "charm")
+    _install_move(pos, 0, 1, "protect")
+    # Nasty Plot, not Swords Dance: Prankster Charm resolves first at +1 priority, and a
+    # target raising its own Attack afterwards would cancel the drop exactly -- which is how
+    # the first version of this test managed to fail on its own baseline.
+    for slot in (0, 1):
+        _install_move(pos, 1, slot, "nastyplot")
+    target = pos.sides[1].pokemon[pos.sides[1].active[0]]
+    target.boosts = {}
+
+    ours = SideAction(
+        slots=(
+            _move_action(pos, 0, 0, "charm", 1),
+            _move_action(pos, 0, 1, "protect", None),
+        )
+    )
+    theirs = _protect_both(pos, 1)
+
+    target.types = ("Fire",)
+    landed = resolve_turn(reg, pos, [ours, theirs], budget=Budget.deterministic(8))
+    hit = landed.branches[0].position.sides[1]
+    assert hit.pokemon[hit.active[0]].boosts.get("atk", 0) < 0, (
+        "the setup has to be able to land Charm at all"
+    )
+
+    target.types = ("Dark",)
+    target.boosts = {}
+    result = resolve_turn(reg, pos, [ours, theirs], budget=Budget.deterministic(8))
+    after = result.branches[0].position.sides[1]
+    blocked = after.pokemon[after.active[0]].boosts
+    assert blocked.get("atk", 0) >= 0, (
+        f"Charm must not reach a Dark type from Prankster: {blocked}"
+    )
+
+
+def test_feint_tears_the_guard_down_for_the_rest_of_the_turn(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """Letting the move through was only half of `hitStepBreakProtect`.
+
+    Showdown *removes* the Protect volatile and the side's Wide Guard, so the target's
+    partner is exposed too -- which is the entire reason to bring Feint to a doubles game:
+    break the Protect, then land the partner's move. We returned "not blocked" for the
+    breaking move and left the volatile standing, so the partner was still blocked.
+    `diverge_report.py` ranked `move:feint` second by lift with its divergences on `hp`.
+
+    Breaking anything also clears `stall`, so the target's next Protect is certain again
+    rather than one in three.
+    """
+    assert reg.moves["feint"].raw.get("breaksProtect")
+
+    pos = _synthetic_position(reg, team_a)
+    _install_move(pos, 0, 0, "feint")
+    _install_move(pos, 0, 1, "ironhead")
+    for slot in (0, 1):
+        _install_move(pos, 1, slot, "protect")
+    # Feint has +2 priority so it lands before the partner's Iron Head either way, but the
+    # Protect has to already be up when Feint arrives -- which is what a Protect chosen the
+    # same turn gives, since it resolves at +4.
+    target = pos.sides[1].pokemon[pos.sides[1].active[0]]
+    target.hp = target.maxhp
+    partner_target = pos.sides[1].pokemon[pos.sides[1].active[1]]
+    del partner_target
+
+    ours = SideAction(
+        slots=(
+            _move_action(pos, 0, 0, "feint", 1),
+            _move_action(pos, 0, 1, "ironhead", 1),
+        )
+    )
+    theirs = _protect_both(pos, 1)
+    result = resolve_turn(reg, pos, [ours, theirs], budget=Budget.deterministic(8))
+    after = result.branches[0].position
+    hit = after.sides[1].pokemon[after.sides[1].active[0]]
+
+    assert hit.hp < target.maxhp, (
+        "Feint itself has to get through a Protect: " + " / ".join(result.branches[0].events)
+    )
+    assert hit.volatile("protect") is None and hit.volatile("detect") is None, (
+        "the Protect has to be gone, not merely bypassed: "
+        + " / ".join(result.branches[0].events)
+    )
+    assert hit.volatile("stall") is None, "breaking a guard also resets the Protect counter"
+    # And the consequence that matters: the partner's Iron Head landed too.
+    assert any("ironhead" in event for event in result.branches[0].events), (
+        "the partner's move should not be blocked any more: "
+        + " / ".join(result.branches[0].events)
+    )
+    assert not any("blocked by protect" in event for event in result.branches[0].events), (
+        " / ".join(result.branches[0].events)
+    )
+
+
+def test_feint_also_strips_wide_guard_from_the_side(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """`hitStepBreakProtect` removes the side conditions as well, from gen 6 regardless of side.
+
+    Wide Guard is the doubles-relevant one: it is what stops the partner's spread move, so
+    stripping only the single-target Protect would leave the interaction half modelled.
+    """
+    pos = _synthetic_position(reg, team_a)
+    _install_move(pos, 0, 0, "feint")
+    _install_move(pos, 0, 1, "protect")
+    for slot in (0, 1):
+        _install_move(pos, 1, slot, "swordsdance")
+    side = pos.sides[1]
+    side.side_conditions.append(Effect(id="wideguard", duration=1))
+    assert side.has_side_condition("wideguard")
+
+    ours = SideAction(
+        slots=(
+            _move_action(pos, 0, 0, "feint", 1),
+            _move_action(pos, 0, 1, "protect", None),
+        )
+    )
+    result = resolve_turn(
+        reg, pos, [ours, _protect_both(pos, 1)], budget=Budget.deterministic(8)
+    )
+    after = result.branches[0].position
+    assert not after.sides[1].has_side_condition("wideguard"), (
+        "Feint has to strip Wide Guard: " + " / ".join(result.branches[0].events)
+    )

@@ -51,7 +51,13 @@ from .effects import (
 )
 from .moveinfo import MoveContext
 from .position import Effect, Pokemon, Position
-from .regulation import BOOST_IDS, Move, Regulation
+from .regulation import (
+    BOOST_IDS,
+    TARGETS_REQUIRING_FOE,
+    TARGETS_WITHOUT_CHOICE,
+    Move,
+    Regulation,
+)
 from .speed import QueuedAction, build_queue, effective_speed, order_groups
 from .view import battler, field_state, move_hits_multiple
 
@@ -1017,25 +1023,34 @@ def _run_queue(reg: Regulation, start: list[_Live], budget: Budget) -> TurnResul
             # `queue.willAct()` counts the actions still queued behind this one, which is
             # what Protect is gated on.
             item.turn.actions_remaining = len(rest)
-            for weight, turn, note in _execute(reg, item.turn, action, step_budget):
-                if note:
-                    reductions[note] = reductions.get(note, 0) + 1
-                    exact = False
-                # Showdown ends the battle as soon as a side is wiped and abandons the
-                # rest of the queue. Carrying on would apply moves that never happened --
-                # including a spread move hitting the winner's own partner.
-                wiped = _side_wiped(turn)
-                remaining_actions = [] if wiped else list(rest)
-                child = _Live(item.weight * weight, turn, remaining_actions)
-                # A self-switching move ends `runAction` with `switchFlag` set, and
-                # Showdown answers that with a fresh switch request -- so the turn stops
-                # here, before the rest of the queue and before the residual phase. The
-                # branch is handed back for the replacement choice instead of being run on
-                # with the wrong Pokemon still standing in the slot.
-                if not wiped and turn.self_switch_pending:
-                    paused.append(child)
-                else:
-                    nxt.append(child)
+            # An Encore that landed earlier this turn rewrites the action, and Showdown
+            # re-picks its target at random -- so this is a list, not a single action.
+            variants = _encore_override(reg, item.turn, action)
+            for variant_weight, variant in variants:
+                # Each variant needs its own state: `_execute` mutates what it is given,
+                # and the last one may reuse the branch's own turn.
+                base = item.turn if variant is variants[-1][1] else item.turn.clone()
+                for weight, turn, note in _execute(reg, base, variant, step_budget):
+                    if note:
+                        reductions[note] = reductions.get(note, 0) + 1
+                        exact = False
+                    # Showdown ends the battle as soon as a side is wiped and abandons the
+                    # rest of the queue. Carrying on would apply moves that never happened
+                    # -- including a spread move hitting the winner's own partner.
+                    wiped = _side_wiped(turn)
+                    remaining_actions = [] if wiped else list(rest)
+                    child = _Live(
+                        item.weight * variant_weight * weight, turn, remaining_actions
+                    )
+                    # A self-switching move ends `runAction` with `switchFlag` set, and
+                    # Showdown answers that with a fresh switch request -- so the turn
+                    # stops here, before the rest of the queue and before the residual
+                    # phase. The branch is handed back for the replacement choice instead
+                    # of being run on with the wrong Pokemon still standing in the slot.
+                    if not wiped and turn.self_switch_pending:
+                        paused.append(child)
+                    else:
+                        nxt.append(child)
             # Prune as the generation is built, not after. Building it in full first would
             # peak at the cap times the branching factor -- a quarter of a million copied
             # positions for an exact budget, which is enough to exhaust memory.
@@ -1094,6 +1109,63 @@ def _run_queue(reg: Regulation, start: list[_Live], budget: Budget) -> TurnResul
         unmodelled=tuple(sorted(unmodelled)),
         suspended=tuple(out_suspended),
     )
+
+
+def _encore_override(
+    reg: Regulation, turn: _Turn, action: QueuedAction
+) -> list[tuple[float, QueuedAction]]:
+    """The action Encore forces its user to take, with its target's odds.
+
+    Only reachable on the turn Encore lands: after that the original action never reaches
+    the queue, because `side_actions` offers the encored move alone. Showdown keeps the
+    *original* move's priority, which costs nothing here -- the queue was already ordered on
+    it and only the move changes.
+
+    The target is re-picked with `getRandomTarget`, which is uniform over adjacent foes, so
+    a single-target encored move against two standing foes is a genuine coin flip and is
+    returned as two weighted actions. Picking one and reporting it was the earlier answer,
+    and it biases a matchup rather than merely approximating it: the encored move would
+    always land on the same slot, and the search would learn a preference the game does not
+    have.
+
+    Weights sum to one, and the ordinary case -- no Encore, or an Encore the action already
+    obeys -- is the single action unchanged.
+    """
+    unchanged = [(1.0, action)]
+    if action.kind != "move" or action.move_id is None:
+        return unchanged
+    mon = turn.mon_at(action.side, action.slot)
+    if mon is None or mon.fainted:
+        return unchanged
+    locked = mon.volatile("encore")
+    if locked is None or not locked.move or locked.move == action.move_id:
+        return unchanged
+    replacement = reg.moves.get(locked.move)
+    if replacement is None:
+        return unchanged
+
+    targets: list[int | None] = [action.target]
+    if replacement.target in TARGETS_REQUIRING_FOE:
+        foe_side = 1 - action.side
+        live = [
+            index + 1
+            for index in range(len(turn.pos.sides[foe_side].active))
+            if (m := turn.mon_at(foe_side, index)) is not None and not m.fainted
+        ]
+        if not live:
+            return unchanged
+        targets = list(live)
+    elif replacement.target in TARGETS_WITHOUT_CHOICE:
+        targets = [None]
+
+    turn.log(f"{turn.name(action.side, action.slot)} must use {locked.move} (encore)")
+    if (action.side, action.slot) in turn.attacks:
+        turn.unmodelled.add("encore override changed the move Sucker Punch was read against")
+    weight = 1.0 / len(targets)
+    return [
+        (weight, replace(action, move_id=locked.move, target=target))
+        for target in targets
+    ]
 
 
 def _side_wiped(turn: _Turn) -> bool:
@@ -1371,50 +1443,10 @@ def _do_move(
             state.move_failed.add((action.side, action.slot))
             outcomes.append((act_probability, state, ""))
             continue
-        _stance_change(reg, state, action, move)
         for weight, sub_state, note in _use_move(reg, state, action, move, budget):
             outcomes.append((act_probability * weight, sub_state, note))
 
     return outcomes or [(1.0, turn, "")]
-
-
-def _stance_change(
-    reg: Regulation, turn: _Turn, action: QueuedAction, move: Move
-) -> None:
-    """Aegislash takes the forme that matches the move it is about to use.
-
-    Showdown hangs this on `onModifyMove`, which runs while the move is being set up, so
-    the new forme's stats apply to that very move. A status move other than King's Shield
-    leaves the forme alone.
-
-    The two formes are 50/140 and 140/50 in attack and defence, so getting this wrong is
-    not cosmetic: a Shield-forme Aegislash using Iron Head was priced at a third of the
-    attack it really has.
-    """
-    mon = turn.mon_at(action.side, action.slot)
-    if mon is None or mon.fainted or mon.ability != "stancechange":
-        return
-    if mon.transformed:
-        return
-    base = reg.species.get(mon.species)
-    if base is None or base.base_species != "Aegislash":
-        return
-    if move.category == "Status" and move.id != "kingsshield":
-        return
-    target = "aegislash" if move.id == "kingsshield" else "aegislashblade"
-    if mon.species == target or target not in reg.species:
-        return
-
-    species = reg.species[target]
-    maxhp_before = mon.maxhp
-    mon.species = target
-    mon.types = species.types
-    refreshed = battler(reg, mon)
-    mon.maxhp = int(refreshed.maxhp[0])
-    # No Aegislash forme changes the HP base stat, so this is a no-op today and correct if
-    # a regulation ever changes one.
-    mon.hp = min(mon.maxhp, mon.hp + (mon.maxhp - maxhp_before))
-    turn.log(f"{turn.name(action.side, action.slot)} -> {target} (stancechange)")
 
 
 def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[float, str | None]]:
@@ -1588,6 +1620,12 @@ def _use_move(
         turn.log(f"{action.label(reg)} had no target")
         turn.move_failed.add((action.side, action.slot))
         return [(1.0, turn, "")]
+
+    # `hitStepBreakProtect` runs before the hits and for every target, so a Feint that
+    # breaks one Pokemon's Protect also strips its side's Wide Guard for the rest of the
+    # turn -- which is what the partner's move needs.
+    if move.raw.get("breaksProtect"):
+        _break_protection(turn, action, move, targets)
 
     if move.category == "Status":
         return _do_status_move(reg, turn, action, move, targets, budget)
@@ -1767,8 +1805,9 @@ def _do_status_move(
             if blocked is not None:
                 turn.log(f"{action.label(reg)} blocked by {blocked}")
                 continue
-        if _prankster_immune(reg, turn, action, move, target):
-            turn.log(f"{turn.name(*target)} immune (prankster vs Dark)")
+        immunity = _immune_to_move(reg, turn, action, move, target)
+        if immunity is not None:
+            turn.log(f"{turn.name(*target)} immune ({immunity})")
             continue
         reachable.append(target)
 
@@ -1888,32 +1927,57 @@ def _do_protect(
     return [(chance, hit_state, ""), (1 - chance, turn, "")]
 
 
-def _prankster_immune(
+def _immune_to_move(
     reg: Regulation,
     turn: _Turn,
     action: QueuedAction,
     move: Move,
     target: tuple[int, int],
-) -> bool:
-    """Showdown's natural Prankster immunity: a foe Dark type ignores the move entirely.
+) -> str | None:
+    """Why this target ignores this move outright, or None if it does not.
 
-        gen >= 7 && move.pranksterBoosted && pokemon.hasAbility('prankster') &&
-            !targets[i].isAlly(pokemon) && !this.dex.getImmunity('prankster', target)
+    Two immunities that Showdown checks per target before anything else happens, both read
+    from the regulation's `effectImmunities` rather than written down here.
 
-    `pranksterBoosted` is set by the ability's own `onModifyPriority`, so it means exactly
-    "a Status move used by a Prankster holder" -- which is what is checked here. Allies are
-    exempt, so Prankster Tailwind and screens are unaffected; it is the moves aimed across
-    the field that fail.
+    **Powder.** `hitStepTryImmunity`:
+
+        gen >= 6 && move.flags['powder'] && target !== pokemon &&
+            !this.dex.getImmunity('powder', target)
+
+    So a Grass type ignores Sleep Powder, Spore and Stun Spore. Overcoat and Safety Goggles
+    block them by a separate `onTryHit`, which is included for completeness -- one team in
+    the field has either, but half a rule reads as a whole one to the next person.
+
+    **Prankster.** `gen >= 7 && move.pranksterBoosted && pokemon.hasAbility('prankster') &&
+    !targets[i].isAlly(pokemon) && !this.dex.getImmunity('prankster', target)`.
+    `pranksterBoosted` is set by the ability's own `onModifyPriority`, so it means exactly "a
+    Status move used by a Prankster holder". Allies are exempt, so Prankster Tailwind and
+    screens are unaffected.
     """
-    if move.category != "Status" or target[0] == action.side:
-        return False
     attacker = turn.mon_at(action.side, action.slot)
-    if attacker is None or attacker.ability != "prankster":
-        return False
     defender = turn.mon_at(*target)
     if defender is None or defender.fainted:
-        return False
-    return reg.immune_to_effect("prankster", tuple(turn.types_of(defender)))
+        return None
+    self_targeted = target == (action.side, action.slot)
+
+    if "powder" in move.flags and not self_targeted:
+        types = tuple(turn.types_of(defender))
+        if reg.immune_to_effect("powder", types):
+            return "powder vs Grass"
+        if defender.ability == "overcoat":
+            return "overcoat"
+        if defender.item == "safetygoggles":
+            return "safetygoggles"
+
+    if (
+        move.category == "Status"
+        and target[0] != action.side
+        and attacker is not None
+        and attacker.ability == "prankster"
+        and reg.immune_to_effect("prankster", tuple(turn.types_of(defender)))
+    ):
+        return "prankster vs Dark"
+    return None
 
 
 def _apply_status_move(
@@ -1940,13 +2004,22 @@ def _apply_status_move(
                 f"{side_condition} duration (Showdown rolls it; pinned to the low end)"
             )
     if raw.get("weather"):
-        turn.pos.field.weather = str(raw["weather"]).lower().replace(" ", "")
-        turn.pos.field.weather_duration = 5
-        turn.log(f"weather -> {turn.pos.field.weather}")
+        weather = str(raw["weather"]).lower().replace(" ", "")
+        turn.pos.field.weather = weather
+        # Read, not written down: the rocks (Heat, Damp, Smooth, Icy) make it 8. None is in
+        # the current field, which is why this was a literal 5 and nothing complained.
+        turn.pos.field.weather_duration = _effect_duration(
+            turn, move, weather, action.side, action.slot
+        ) or 5
+        turn.log(f"weather -> {weather}")
     if raw.get("terrain"):
-        turn.pos.field.terrain = str(raw["terrain"]).lower().replace(" ", "")
-        turn.pos.field.terrain_duration = 5
-        turn.log(f"terrain -> {turn.pos.field.terrain}")
+        terrain = str(raw["terrain"]).lower().replace(" ", "")
+        turn.pos.field.terrain = terrain
+        # Terrain Extender makes it 8.
+        turn.pos.field.terrain_duration = _effect_duration(
+            turn, move, terrain, action.side, action.slot
+        ) or 5
+        turn.log(f"terrain -> {terrain}")
     if raw.get("pseudoWeather"):
         pid = str(raw["pseudoWeather"]).lower().replace(" ", "")
         already = turn.pos.field.has_pseudo_weather(pid)
@@ -1958,7 +2031,9 @@ def _apply_status_move(
             ]
             turn.log(f"{pid} ended")
         elif not already:
-            turn.pos.field.pseudo_weather.append(Effect(id=pid, duration=5))
+            # Persistent makes Trick Room and Gravity 7.
+            duration = _effect_duration(turn, move, pid, action.side, action.slot) or 5
+            turn.pos.field.pseudo_weather.append(Effect(id=pid, duration=duration))
             turn.log(f"{pid} started")
         else:
             turn.log(f"{pid} failed (already active)")
@@ -1986,6 +2061,11 @@ def _apply_status_move(
                 # has not moved, so the generic path cannot express it.
                 if not _apply_disable(turn, *target, move=move):
                     turn.log(f"{action.label(reg)} failed (nothing to disable)")
+                    turn.move_failed.add((action.side, action.slot))
+            elif volatile_id == "encore":
+                # Same: which move is the whole effect.
+                if not _apply_encore(turn, *target, move=move):
+                    turn.log(f"{action.label(reg)} failed (nothing to encore)")
                     turn.move_failed.add((action.side, action.slot))
             else:
                 turn.add_volatile(
@@ -2149,6 +2229,53 @@ def _effect_duration(
         return base
     declared = entry.get("duration")
     return int(declared) if isinstance(declared, int) else None
+
+
+#: Side conditions a `breaksProtect` move removes. From gen 6 it strips them regardless of
+#: whose side they are on, which is why there is no ally test here.
+BREAKABLE_SIDE_CONDITIONS = ("craftyshield", "matblock", "quickguard", "wideguard")
+
+
+def _break_protection(
+    turn: _Turn, action: QueuedAction, move: Move, targets: list[tuple[int, int]]
+) -> None:
+    """Strips the guards a `breaksProtect` move tears down, for the rest of the turn.
+
+    Letting the move through was only half of it: the volatile survived, so the target's
+    *partner* was still protected and the point of Feint in doubles -- break the Protect,
+    then hit with the partner -- never happened.
+
+    Every protect-family volatile in `PROTECT_VOLATILES` is removed rather than Showdown's
+    literal seven, because our volatiles are keyed by move id: Detect stays `detect` here
+    where Showdown rewrites it to `protect`. The behaviour has to match, not the spelling.
+
+    Breaking anything also clears `stall`, so the target's next Protect is certain again
+    instead of one in three.
+    """
+    for target in targets:
+        mon = turn.mon_at(*target)
+        if mon is None:
+            continue
+        broke = [v.id for v in mon.volatiles if v.id in PROTECT_VOLATILES]
+        if broke:
+            mon.volatiles = [v for v in mon.volatiles if v.id not in PROTECT_VOLATILES]
+
+        side = turn.pos.sides[target[0]]
+        stripped = [
+            c.id for c in side.side_conditions if c.id in BREAKABLE_SIDE_CONDITIONS
+        ]
+        if stripped:
+            side.side_conditions = [
+                c for c in side.side_conditions if c.id not in BREAKABLE_SIDE_CONDITIONS
+            ]
+
+        if broke or stripped:
+            mon.volatiles = [v for v in mon.volatiles if v.id != "stall"]
+            turn.log(
+                f"{action.label(turn.reg)} broke "
+                + ", ".join(broke + stripped)
+                + f" on {turn.name(*target)}"
+            )
 
 
 def _blocked_by_protect(
@@ -2904,6 +3031,39 @@ def _apply_disable(turn: _Turn, side: int, slot: int, move: Move | None = None) 
     return True
 
 
+def _apply_encore(turn: _Turn, side: int, slot: int, move: Move) -> bool:
+    """Locks the target into the move it last used.
+
+    Fails when the target has not moved, when the move it used cannot be encored
+    (`failencore`: Struggle, Sleep Talk, Copycat, Transform and Encore itself), or when that
+    move is out of PP -- all three are `return false` in `onStart`, which means no volatile
+    rather than a volatile that locks nothing.
+
+    Duration 3, or 4 when the target has already moved this turn: `if (!queue.willMove(target))
+    duration++`. The volatile is decremented at the end of this turn either way, so the
+    increment is what gives a Pokemon that has already acted its full three turns.
+    """
+    mon = turn.mon_at(side, slot)
+    if mon is None or mon.fainted or mon.last_move is None:
+        return False
+    if mon.has_volatile("encore"):
+        return False
+    last = turn.reg.moves.get(mon.last_move)
+    if last is None or "failencore" in last.flags:
+        return False
+    slot_for_move = next((m for m in mon.moves if m.id == mon.last_move), None)
+    if slot_for_move is None or slot_for_move.pp <= 0:
+        return False
+
+    duration = _duration(move, "encore") or 3
+    if (side, slot) in turn.acted:
+        duration += 1
+
+    mon.volatiles.append(Effect(id="encore", duration=duration, move=mon.last_move))
+    turn.log(f"{turn.name(side, slot)} is locked into {mon.last_move} (encore)")
+    return True
+
+
 def _apply_secondary(
     turn: _Turn, action: QueuedAction, secondary: dict, target: tuple[int, int]
 ) -> None:
@@ -3563,6 +3723,13 @@ def _residuals(reg: Regulation, turn: _Turn) -> None:
                         for move_slot in mon.moves:
                             if move_slot.id == volatile.move:
                                 move_slot.disabled = False
+                    continue
+            if volatile.id == "encore" and volatile.move:
+                # `onResidual`: an Encore whose move has run out of PP ends early, which
+                # matters because otherwise the only legal move would be an unusable one.
+                spent = next((m for m in mon.moves if m.id == volatile.move), None)
+                if spent is None or spent.pp <= 0:
+                    turn.log(f"{turn.name(side, slot)} is free of encore (no PP)")
                     continue
             kept_volatiles.append(volatile)
         mon.volatiles = kept_volatiles

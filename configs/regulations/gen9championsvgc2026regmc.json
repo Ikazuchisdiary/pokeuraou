@@ -20,7 +20,7 @@
 		"teraEnabled": false,
 		"megaPerSide": 1,
 		"showdownCommit": "cc089d36b7717dec78ce8ab5d1745c03ad5c97e4",
-		"generatedAt": "2026-09-10T12:02:33.272Z"
+		"generatedAt": "2026-09-10T12:33:23.314Z"
 	},
 	"natures": [
 		{
@@ -13978,6 +13978,16 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
+			"durations": {
+				"sandstorm": {
+					"duration": 5,
+					"durationCallback": true,
+					"base": 5,
+					"byItem": {
+						"smoothrock": 8
+					}
+				}
+			},
 			"weather": "Sandstorm",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -14098,6 +14108,16 @@
 			"flags": {},
 			"hasCustomCode": false,
 			"customHooks": [],
+			"durations": {
+				"snowscape": {
+					"duration": 5,
+					"durationCallback": true,
+					"base": 5,
+					"byItem": {
+						"icyrock": 8
+					}
+				}
+			},
 			"weather": "snowscape",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -16075,6 +16095,14 @@
 				"priorityChargeCallback"
 			],
 			"durations": {
+				"snowscape": {
+					"duration": 5,
+					"durationCallback": true,
+					"base": 5,
+					"byItem": {
+						"icyrock": 8
+					}
+				},
 				"chillyreception": {
 					"duration": 1
 				}
@@ -22657,6 +22685,16 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
+			"durations": {
+				"raindance": {
+					"duration": 5,
+					"durationCallback": true,
+					"base": 5,
+					"byItem": {
+						"damprock": 8
+					}
+				}
+			},
 			"weather": "RainDance",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
@@ -24870,6 +24908,16 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
+			"durations": {
+				"sunnyday": {
+					"duration": 5,
+					"durationCallback": true,
+					"base": 5,
+					"byItem": {
+						"heatrock": 8
+					}
+				}
+			},
 			"weather": "sunnyday",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""

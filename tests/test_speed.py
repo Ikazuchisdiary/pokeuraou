@@ -256,6 +256,14 @@ def test_speed_changing_effects_are_detected() -> None:
 def test_action_overriding_effects_are_detected() -> None:
     assert action_overriding_effects(["|-start|p2a: Y|move: Encore"]) == {"encore"}
     assert action_overriding_effects(["|move|p1a: X|Tackle|p2a: Y"]) == set()
+    # `only_unmodelled` is what the differential harnesses skip on, and Encore is modelled
+    # now -- so it must not be excluded, or the class goes back to being invisible.
+    assert action_overriding_effects(
+        ["|-start|p2a: Y|move: Encore"], only_unmodelled=True
+    ) == set()
+    assert action_overriding_effects(
+        ["|-activate|p1a: X|move: Instruct"], only_unmodelled=True
+    ) == {"instruct"}
 
 
 @pytest.mark.oracle

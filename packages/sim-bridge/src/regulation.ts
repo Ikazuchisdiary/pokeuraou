@@ -237,6 +237,16 @@ function codeHooks(obj: object): string[] {
 /** Showdown stores type effectiveness as an index into [neutral, weak, resist, immune]. */
 const TYPE_MOD: Record<number, number> = { 0: 1, 1: 2, 2: 0.5, 3: 0 };
 
+/**
+ * The move fields that name an effect whose duration is worth reading.
+ *
+ * `weather` was missing, so a weather move carried no duration at all and the consumer used
+ * a hardcoded 5 -- which is also where Heat Rock, Damp Rock, Smooth Rock and Icy Rock live.
+ */
+const EFFECT_NAMING_KEYS = [
+	'volatileStatus', 'sideCondition', 'slotCondition', 'pseudoWeather', 'weather', 'terrain',
+] as const;
+
 /** How long an effect lasts, and what changes that. */
 export interface DurationEntry {
 	/** The number declared on the condition, if any. */
@@ -272,8 +282,12 @@ function collectDurations(
 ): Record<string, DurationEntry> {
 	const out: Record<string, DurationEntry> = {};
 
-	const record = (id: unknown, condition: unknown) => {
-		if (typeof id !== 'string' || !id || !condition || typeof condition !== 'object') return;
+	const record = (rawId: unknown, condition: unknown) => {
+		if (typeof rawId !== 'string' || !rawId || !condition || typeof condition !== 'object') return;
+		// Showdown's `weather` field is inconsistently cased -- 'sunnyday' but 'RainDance' and
+		// 'Sandstorm' -- and the consumer normalises before looking the duration up, so the
+		// key has to be normalised here or rain and sand silently miss their entry.
+		const id = rawId.toLowerCase().replace(/[^a-z0-9]/g, '');
 		const c = condition as Record<string, unknown>;
 		const entry: DurationEntry = {};
 		if (typeof c.duration === 'number') entry.duration = c.duration;
@@ -286,7 +300,7 @@ function collectDurations(
 
 	// The move's own condition applies to whichever effect the move names...
 	const own = move.condition;
-	for (const key of ['volatileStatus', 'sideCondition', 'slotCondition', 'pseudoWeather']) {
+	for (const key of EFFECT_NAMING_KEYS) {
 		record(move[key], own);
 	}
 	// ...and to a volatile named after the move itself, which is how a move that adds its
@@ -296,7 +310,7 @@ function collectDurations(
 	// and never expire -- the bug class that made four effects permanent.
 	record(move.id, own);
 	// ...and the named condition, which is where conditions.ts keeps most of them.
-	for (const key of ['volatileStatus', 'sideCondition', 'slotCondition', 'pseudoWeather']) {
+	for (const key of EFFECT_NAMING_KEYS) {
 		const id = move[key];
 		if (typeof id !== 'string' || !id) continue;
 		try {

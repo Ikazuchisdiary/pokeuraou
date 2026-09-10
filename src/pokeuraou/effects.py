@@ -597,6 +597,12 @@ def all_modelled_abilities() -> frozenset[str]:
         | HIT_ABSORBING_ABILITIES
         # Abilities with no effect on a damage calculation.
         | {
+            # Implemented in the resolver rather than the calculator, and missing from
+            # this set -- so the calculator reported `attacker.ability:stancechange` on
+            # every hit, 158 times in a 13,000-game run, for an ability that works. The
+            # forme change it drives does not touch a damage modifier; it changes which
+            # Pokemon the stats are read from, which happens before `calculate` is called.
+            "stancechange",
             "defiant", "competitive", "intimidate", "prankster", "roughskin", "ironbarbs",
             "hospitality", "unburden", "armortail", "queenlymajesty", "dazzling", "contrary",
             "stamina", "poisontouch", "chlorophyll", "swiftswim", "sandrush", "slushrush",
