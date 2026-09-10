@@ -254,6 +254,15 @@ def test_enumeration_agrees_with_showdown_over_whole_battles(
             forced = _request_forced_switch(request)
             if forced is not None:
                 actions = switch_actions_after_faint(reg, pos, side_index, forced)
+                # Showdown does not ask a question with no answers, so an empty list is a
+                # bug and not a position. It was one: two slots owing a replacement with a
+                # single Pokemon left gave nothing, the caller passed both slots, and the
+                # replacement phase was re-entered on an unchanged position until the step
+                # budget ran out -- which quietly threw away 3 of every 20 generated games.
+                assert actions, (
+                    f"turn {pos.turn} side {side_index}: Showdown asked for a replacement "
+                    f"({forced}) and we offered no way to answer"
+                )
                 # Replacement choices are also probed for acceptance.
                 probed = handle.probe(side_index, [a.to_choice() for a in actions])
                 bad = [r for r in probed if not r["ok"]]
@@ -292,6 +301,57 @@ def test_enumeration_agrees_with_showdown_over_whole_battles(
     assert decision_points >= 3, f"battle ended too early to be a real test ({decision_points})"
     assert total_choices > 200
     assert total_misses > 100
+
+
+def test_a_lone_survivor_can_fill_either_empty_slot(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """Both actives down and one Pokemon left: two choices, not none.
+
+    `product` over the per-slot options only offered the same Pokemon in both slots, the
+    duplicate-index filter removed it, and the function returned an empty list. Showdown
+    allows a pass for a slot there is nobody left to fill, and which slot gets the survivor
+    is the player's choice -- so the answer is two options.
+    """
+    pos = _synthetic_position(reg, team_a)
+    side = pos.sides[0]
+    for slot in (0, 1):
+        mon = side.pokemon[side.active[slot]]
+        mon.hp = 0
+        mon.fainted = True
+    # Leave exactly one on the bench. The fixture side is a full party, so every other
+    # benched Pokemon has to go down for the case to be the one that broke.
+    bench = [m for m in side.pokemon if not m.is_active]
+    survivor = bench[0]
+    for mon in bench[1:]:
+        mon.hp = 0
+        mon.fainted = True
+    assert not survivor.fainted and not survivor.is_active
+
+    options = switch_actions_after_faint(reg, pos, 0, [True, True])
+    assert [o.to_choice() for o in options] == [
+        f"switch {survivor.slot + 1}, pass",
+        f"pass, switch {survivor.slot + 1}",
+    ], [o.to_choice() for o in options]
+
+    # With two on the bench the pass options disappear again: you fill what you can, so
+    # every owed slot is filled and the ordinary case is unchanged.
+    second = bench[1]
+    second.hp = second.maxhp
+    second.fainted = False
+    both = switch_actions_after_faint(reg, pos, 0, [True, True])
+    assert len(both) == 2, [o.to_choice() for o in both]
+    assert all(
+        sum(1 for a in o.slots if isinstance(a, SwitchAction)) == 2 for o in both
+    ), [o.to_choice() for o in both]
+
+    # And with an empty bench the only answer is to pass both, which is what Showdown
+    # accepts when a side has nothing left to place.
+    for mon in side.pokemon:
+        mon.hp = 0
+        mon.fainted = True
+    empty = switch_actions_after_faint(reg, pos, 0, [True, True])
+    assert [o.to_choice() for o in empty] == ["pass, pass"]
 
 
 def test_mega_is_a_once_per_side_resource(reg: Regulation, team_a: list[TeamSet]) -> None:

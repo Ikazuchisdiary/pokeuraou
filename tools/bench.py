@@ -23,9 +23,9 @@ from pokeuraou.actions import side_actions  # noqa: E402
 from pokeuraou.damage import calculate, register_mega_stones  # noqa: E402
 from pokeuraou.equilibrium import solve  # noqa: E402
 from pokeuraou.oracle import load_team  # noqa: E402
-from pokeuraou.position import Position  # noqa: E402
+from pokeuraou.position import MoveSlot, Position  # noqa: E402
 from pokeuraou.regulation import STAT_IDS, load_regulation  # noqa: E402
-from pokeuraou.resolve import Budget, resolve_turn  # noqa: E402
+from pokeuraou.resolve import Budget, resolve_turn, turn_leaves  # noqa: E402
 from pokeuraou.speed import build_queue, effective_speed, order_groups  # noqa: E402
 from pokeuraou.stats import nature_multipliers, stats_from_sp  # noqa: E402
 from pokeuraou.view import active_battlers, field_state  # noqa: E402
@@ -133,20 +133,47 @@ def bench_equilibrium() -> None:
 
 def bench_matrix(reg, pos: Position, size: int) -> None:  # noqa: ANN001
     """The end-to-end cost of one matrix, which is what the tool has to pay per position."""
-    print(f"one {size}x{size} matrix, Budget.matrix()")
+    self_switch = sorted(
+        {
+            m.id
+            for side in pos.sides
+            for mon in side.pokemon
+            if mon.is_active
+            for m in mon.moves
+            if reg.moves.get(m.id) is not None and reg.moves[m.id].raw.get("selfSwitch")
+        }
+    )
+    label = f" (self-switch on the field: {', '.join(self_switch)})" if self_switch else ""
+    print(f"one {size}x{size} matrix, Budget.matrix(){label}")
     ours = side_actions(reg, pos, 0)[:size]
     theirs = side_actions(reg, pos, 1)[:size]
     budget = Budget.matrix()
     start = time.perf_counter()
     cells = 0
+    suspended = 0
+    leaves = 0
     for a in ours:
         for b in theirs:
-            resolve_turn(reg, pos, [a, b], budget=budget)
+            result = resolve_turn(reg, pos, [a, b], budget=budget)
+            if result.suspended:
+                # The cell is not finished: the interrupted side has to pick a replacement
+                # and the rest of the turn runs behind it. `turn_leaves` is what the search
+                # calls, so timing it here keeps this number the one the tool actually pays.
+                suspended += 1
+                plan = turn_leaves(reg, result)
+                plan.value([0.0] * len(plan.positions))
+                leaves += len(plan.positions)
+            else:
+                leaves += len(result.branches)
             cells += 1
     total = time.perf_counter() - start
     print(
         f"  {cells} cells in {total:.2f} s  ({total / cells * 1e3:.2f} ms/cell, "
         f"{cells / total:,.0f} cells/s)"
+    )
+    print(
+        f"  {suspended} cells stopped for a mid-turn replacement; "
+        f"{leaves:,} leaves in total ({leaves / cells:.1f} per cell)"
     )
     print(
         f"  a 24x24 matrix would be {576 * total / cells:.1f} s on one core, "
@@ -181,6 +208,14 @@ def main() -> None:
     if not args.skip_matrix:
         print()
         bench_matrix(reg, pos, args.matrix)
+        # Again with a self-switching move on the field. The fixture team has none, so
+        # without this the benchmark says nothing about what a mid-turn replacement costs --
+        # and four of the format's common moves are self-switching.
+        print()
+        with_uturn = pos.copy()
+        mover = with_uturn.sides[0].pokemon[with_uturn.sides[0].active[0]]
+        mover.moves[0] = MoveSlot(id="uturn", pp=20, maxpp=20)
+        bench_matrix(reg, with_uturn, args.matrix)
 
 
 if __name__ == "__main__":

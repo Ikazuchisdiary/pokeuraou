@@ -406,9 +406,22 @@ def switch_actions_after_faint(
     """Replacement choices after a faint.
 
     ``must_switch`` mirrors Showdown's ``forceSwitch``: one flag per active slot.
+
+    A slot may pass when there is nobody left to fill it, and which slot the last Pokemon
+    takes is the player's choice -- so two slots owing a replacement with one Pokemon on the
+    bench gives two options, not none. The rule is "fill as many as you can": the number of
+    switches is exactly ``min(bench, owed)``, which with enough bench excludes every pass and
+    leaves the ordinary case as it was.
+
+    Returning nothing here was a spin rather than a wrong answer: the caller passed both
+    slots, the position came back unchanged, and the replacement phase was entered again on
+    it.
     """
     side = pos.sides[side_index]
     bench = [p for p in side.pokemon if not p.fainted and not p.is_active]
+    owed = sum(1 for needed in must_switch if needed)
+    fillable = min(len(bench), owed)
+
     per_slot: list[list[SlotAction]] = []
     for slot, needed in enumerate(must_switch):
         if not needed:
@@ -417,12 +430,15 @@ def switch_actions_after_faint(
         options: list[SlotAction] = [
             SwitchAction(slot=slot, party_index=p.slot + 1, species=p.species) for p in bench
         ]
-        per_slot.append(options or [PassAction(slot=slot)])
+        options.append(PassAction(slot=slot))
+        per_slot.append(options)
 
     out: list[SideAction] = []
     for combo in product(*per_slot):
         switches = [a.party_index for a in combo if isinstance(a, SwitchAction)]
         if len(switches) != len(set(switches)):
+            continue
+        if len(switches) != fillable:
             continue
         out.append(SideAction(slots=tuple(combo)))
     return out
