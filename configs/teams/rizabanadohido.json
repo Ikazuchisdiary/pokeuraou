@@ -1,0 +1,76 @@
+{
+  "id": "rizabanadohido",
+  "name": "リザバナドヒド",
+  "side": "own",
+  "regulation": "gen9championsvgc2026regmb",
+  "source": {
+    "kind": "team sheet screenshot",
+    "teamId": "DAUKC1HDUV",
+    "author": "しゅうか",
+    "article": "https://note.com/shuuka_poke/n/n4202d6975aea",
+    "note": "SP と最終能力値は実機のステータス画面から転記。natures は画面の上下矢印から確定（例: ガブリアスは こうげき↑ / とくこう↓ = いじっぱり）。記事本文は配分を「HB特化」等の文言でしか書いていないので数値はスクリーンショットが唯一の出典"
+  },
+  "megaPlan": "リザードン → メガリザードンY（リザードナイトY）。フシギバナはメガストーンを持たないので晴れ下のようりょくそで動く",
+  "team": [
+    {
+      "species": "Charizard",
+      "ability": "Blaze",
+      "item": "Charizardite Y",
+      "nature": "Timid",
+      "gender": "M",
+      "moves": ["Heat Wave", "Weather Ball", "Ancient Power", "Protect"],
+      "sp": { "hp": 16, "def": 18, "spa": 6, "spe": 26 },
+      "shownStats": { "hp": 169, "atk": 93, "def": 116, "spa": 135, "spd": 105, "spe": 160 }
+    },
+    {
+      "species": "Venusaur",
+      "ability": "Chlorophyll",
+      "item": "Life Orb",
+      "nature": "Modest",
+      "gender": "M",
+      "moves": ["Solar Beam", "Sludge Bomb", "Earth Power", "Protect"],
+      "sp": { "hp": 4, "spa": 30, "spe": 32 },
+      "shownStats": { "hp": 159, "atk": 91, "def": 103, "spa": 165, "spd": 120, "spe": 132 }
+    },
+    {
+      "species": "Garchomp",
+      "ability": "Rough Skin",
+      "item": "Choice Scarf",
+      "nature": "Adamant",
+      "gender": "M",
+      "moves": ["Earthquake", "Dragon Claw", "Stomping Tantrum", "Rock Slide"],
+      "sp": { "hp": 14, "atk": 11, "def": 9, "spe": 32 },
+      "shownStats": { "hp": 197, "atk": 177, "def": 124, "spa": 90, "spd": 105, "spe": 154 }
+    },
+    {
+      "species": "Sylveon",
+      "ability": "Pixilate",
+      "item": "Fairy Feather",
+      "nature": "Quiet",
+      "gender": "F",
+      "moves": ["Hyper Voice", "Quick Attack", "Yawn", "Detect"],
+      "sp": { "hp": 13, "atk": 1, "def": 32, "spa": 20 },
+      "shownStats": { "hp": 183, "atk": 86, "def": 117, "spa": 165, "spd": 150, "spe": 72 }
+    },
+    {
+      "species": "Toxapex",
+      "ability": "Regenerator",
+      "item": "Leftovers",
+      "nature": "Relaxed",
+      "gender": "F",
+      "moves": ["Infestation", "Toxic", "Wide Guard", "Baneful Bunker"],
+      "sp": { "hp": 32, "def": 32, "spd": 2 },
+      "shownStats": { "hp": 157, "atk": 83, "def": 224, "spa": 73, "spd": 164, "spe": 49 }
+    },
+    {
+      "species": "Incineroar",
+      "ability": "Intimidate",
+      "item": "Sitrus Berry",
+      "nature": "Careful",
+      "gender": "M",
+      "moves": ["Flare Blitz", "Fake Out", "Parting Shot", "Protect"],
+      "sp": { "hp": 32, "def": 8, "spd": 2, "spe": 24 },
+      "shownStats": { "hp": 202, "atk": 135, "def": 118, "spa": 90, "spd": 123, "spe": 104 }
+    }
+  ]
+}

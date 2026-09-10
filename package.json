@@ -1,0 +1,14 @@
+{
+  "name": "pokeuraou",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Pokemon Champions doubles solver — TypeScript sim-bridge layer",
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "build": "npm run -w @pokeuraou/sim-bridge build",
+    "typecheck": "npm run -w @pokeuraou/sim-bridge typecheck",
+    "dump-regulation": "npm run -w @pokeuraou/sim-bridge dump-regulation",
+    "test": "npm run -w @pokeuraou/sim-bridge test"
+  },
+  "engines": { "node": ">=22" }
+}

@@ -1,0 +1,471 @@
+{
+  "regulation": "gen9championsvgc2026regmb",
+  "note": "相手プールの一次資料は大会結果。環境は少数アーキタイプの混合であって、ペアの同時採用モデルでは混合を表現できない（どのペアが同居するかしか言えないので、誰も持ち込んでいない 6 匹を平気で作る）。したがって既定は大会構築で、使用率の同時採用行列は『この一覧がどれだけ環境を説明できているか』の監査に使う（tools/archetype_audit.py）。observed が null のものはブログ由来で、大会での観測数が無いという意味。",
+  "sources": [
+    "https://champions.gcxxblog.com/build/double-big6-whimsicott-floette-charizard-team/",
+    "https://koku-byakunews.com/archives/90476",
+    "https://metavgc.com/teams/featured/worlds-2026",
+    "https://note.com/osr_game/n/n624be6288dfc"
+  ],
+  "unstatedFields": "ability が null の個体は、記事がメガ後の特性しか書いていないもの（メガリザードンY の ひでり、メガフラエッテ の フェアリーオーラ）。メガ前の特性は不明なので事前分布から引く。",
+  "archetypes": [
+    {
+      "id": "big6",
+      "name": "BIG6（リザードン＋フラエッテ）",
+      "species": [
+        "Charizard",
+        "Whimsicott",
+        "Floette-Eternal",
+        "Kingambit",
+        "Basculegion",
+        "Garchomp"
+      ],
+      "plan": "エルフーンの追い風から、メガリザードンY と メガフラエッテ の全体技で押す。日本語のレポートが 2 位・8 位の構築をそのまま『BIG6』と呼んでいる",
+      "source": "https://metavgc.com/teams/featured/worlds-2026 / https://koku-byakunews.com/archives/90476",
+      "observed": {
+        "count": 3,
+        "of": 10,
+        "event": "WCS2026 マスターカテゴリ Top 10（2026-08-28〜30, San Francisco）",
+        "places": [
+          2,
+          8,
+          9
+        ]
+      },
+      "megaStones": {
+        "Charizard": "Charizardite Y",
+        "Floette-Eternal": "Floettite"
+      },
+      "sets": [
+        {
+          "species": "Floette-Eternal",
+          "ability": null,
+          "item": "Floettite",
+          "nature": "Modest",
+          "moves": [
+            "Moonblast",
+            "Dazzling Gleam",
+            "Light of Ruin",
+            "Protect"
+          ],
+          "sp": {
+            "hp": 8,
+            "def": 1,
+            "spa": 25,
+            "spe": 32
+          }
+        },
+        {
+          "species": "Charizard",
+          "ability": null,
+          "item": "Charizardite Y",
+          "nature": "Modest",
+          "moves": [
+            "Heat Wave",
+            "Weather Ball",
+            "Solar Beam",
+            "Protect"
+          ],
+          "sp": {
+            "hp": 16,
+            "def": 25,
+            "spa": 12,
+            "spe": 13
+          }
+        },
+        {
+          "species": "Whimsicott",
+          "ability": "Prankster",
+          "item": "Focus Sash",
+          "nature": "Timid",
+          "moves": [
+            "Moonblast",
+            "Tailwind",
+            "Encore",
+            "Protect"
+          ],
+          "sp": {
+            "hp": 2,
+            "spa": 32,
+            "spe": 32
+          }
+        },
+        {
+          "species": "Garchomp",
+          "ability": "Rough Skin",
+          "item": "Roseli Berry",
+          "nature": "Jolly",
+          "moves": [
+            "Dragon Claw",
+            "Stomping Tantrum",
+            "Rock Slide",
+            "Poison Jab"
+          ],
+          "sp": {
+            "atk": 30,
+            "def": 4,
+            "spe": 32
+          }
+        },
+        {
+          "species": "Basculegion",
+          "ability": "Adaptability",
+          "item": "Mystic Water",
+          "nature": "Adamant",
+          "moves": [
+            "Wave Crash",
+            "Aqua Jet",
+            "Last Respects",
+            "Protect"
+          ],
+          "sp": {
+            "hp": 4,
+            "atk": 31,
+            "def": 11,
+            "spe": 20
+          }
+        },
+        {
+          "species": "Kingambit",
+          "ability": "Defiant",
+          "item": "Occa Berry",
+          "nature": "Adamant",
+          "moves": [
+            "Kowtow Cleave",
+            "Sucker Punch",
+            "Iron Head",
+            "Protect"
+          ],
+          "sp": {
+            "hp": 32,
+            "atk": 32,
+            "spd": 1,
+            "spe": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "big6-dragonite-sneasler",
+      "name": "BIG6系（メガカイリュー＋オオニューラ）",
+      "species": [
+        "Floette-Eternal",
+        "Basculegion",
+        "Kingambit",
+        "Dragonite",
+        "Garchomp",
+        "Sneasler"
+      ],
+      "plan": "優勝構築。BIG6 の核（ドドゲザン・イダイトウ・メガフラエッテ）に メガカイリューとオオニューラを足した形で、リザードンとエルフーンを抜いている",
+      "source": "https://metavgc.com/teams/featured/worlds-2026 / https://koku-byakunews.com/archives/90476",
+      "observed": {
+        "count": 2,
+        "of": 10,
+        "event": "WCS2026 マスターカテゴリ Top 10（2026-08-28〜30, San Francisco）",
+        "places": [
+          1,
+          6
+        ]
+      },
+      "sourceDisagreement": "6 位 Wakasugi の 6 枠目が食い違う。日本語レポートはガブリアス、metavgc はエルフーン。1 位 Yamazaki の 6 匹は両ソース一致なので、ここではガブリアスを採り、食い違いを記録して残す",
+      "megaStones": {
+        "Floette-Eternal": "Floettite",
+        "Dragonite": "Dragoninite"
+      }
+    },
+    {
+      "id": "froslass-scovillain-worlds",
+      "name": "メガユキメノコ＋メガスコヴィラン（世界大会版）",
+      "species": [
+        "Froslass",
+        "Scovillain",
+        "Sneasler",
+        "Lycanroc-Dusk",
+        "Basculegion",
+        "Kingambit"
+      ],
+      "plan": "3 位と 4 位が 6 匹まったく同一。メガストーンを 2 つ持ち込み、対面でどちらをメガするか選ぶ。ルガルガン（たそがれ）にメガはない",
+      "source": "https://metavgc.com/teams/featured/worlds-2026 / https://koku-byakunews.com/archives/90476",
+      "observed": {
+        "count": 2,
+        "of": 10,
+        "event": "WCS2026 マスターカテゴリ Top 10（2026-08-28〜30, San Francisco）",
+        "places": [
+          3,
+          4
+        ]
+      },
+      "megaStones": {
+        "Froslass": "Froslassite",
+        "Scovillain": "Scovillainite"
+      }
+    },
+    {
+      "id": "sun-charizard-venusaur-worlds",
+      "name": "晴れリザバナ（世界大会版・自陣と同型）",
+      "species": [
+        "Incineroar",
+        "Toxapex",
+        "Garchomp",
+        "Charizard",
+        "Venusaur",
+        "Sylveon"
+      ],
+      "plan": "5 位 Antonio Sánchez。**configs/teams/rizabanadohido.json と 6 匹が同一**なので、この相手を引くとミラーマッチになる。自陣の構築が世界大会 Top 8 に実在することの記録",
+      "source": "https://metavgc.com/teams/featured/worlds-2026 / https://koku-byakunews.com/archives/90476",
+      "observed": {
+        "count": 1,
+        "of": 10,
+        "event": "WCS2026 マスターカテゴリ Top 10（2026-08-28〜30, San Francisco）",
+        "places": [
+          5
+        ]
+      },
+      "megaStones": {
+        "Charizard": "Charizardite Y"
+      }
+    },
+    {
+      "id": "aerodactyl-charizard-worlds",
+      "name": "プテリザ（旧バージョン）",
+      "species": [
+        "Sylveon",
+        "Aerodactyl",
+        "Farigiraf",
+        "Garchomp",
+        "Kingambit",
+        "Charizard"
+      ],
+      "plan": "7 位。日本語レポートの分類は「プテリザ旧バージョン」。リキキリンでトリル対策と全体技の通し",
+      "source": "https://metavgc.com/teams/featured/worlds-2026 / https://koku-byakunews.com/archives/90476",
+      "observed": {
+        "count": 1,
+        "of": 10,
+        "event": "WCS2026 マスターカテゴリ Top 10（2026-08-28〜30, San Francisco）",
+        "places": [
+          7
+        ]
+      },
+      "megaStones": {
+        "Aerodactyl": "Aerodactylite",
+        "Charizard": "Charizardite Y"
+      }
+    },
+    {
+      "id": "big6-sneasler",
+      "name": "BIG6系（オオニューラ入り）",
+      "species": [
+        "Garchomp",
+        "Sneasler",
+        "Kingambit",
+        "Basculegion",
+        "Charizard",
+        "Whimsicott"
+      ],
+      "plan": "10 位。BIG6 のメガフラエッテ枠をオオニューラに替えた形",
+      "source": "https://metavgc.com/teams/featured/worlds-2026",
+      "observed": {
+        "count": 1,
+        "of": 10,
+        "event": "WCS2026 マスターカテゴリ Top 10（2026-08-28〜30, San Francisco）",
+        "places": [
+          10
+        ]
+      },
+      "megaStones": {
+        "Charizard": "Charizardite Y"
+      }
+    },
+    {
+      "id": "big6-osr",
+      "name": "BIG6（OSR 紹介の並び）",
+      "species": [
+        "Charizard",
+        "Floette-Eternal",
+        "Whimsicott",
+        "Sylveon",
+        "Kingambit",
+        "Toxapex"
+      ],
+      "plan": "同じ軸で受け寄りの 6 体。セットは事前分布から",
+      "source": "https://note.com/osr_game/n/n624be6288dfc",
+      "megaStones": {
+        "Charizard": "Charizardite Y",
+        "Floette-Eternal": "Floettite"
+      },
+      "observed": null
+    },
+    {
+      "id": "aerodactyl-charizard",
+      "name": "プテラ＋リザードン",
+      "species": [
+        "Aerodactyl",
+        "Charizard",
+        "Sylveon",
+        "Kingambit",
+        "Farigiraf",
+        "Whimsicott"
+      ],
+      "plan": "メガプテラが最速から岩雪崩と追い風を両立させる",
+      "source": "https://note.com/osr_game/n/n624be6288dfc",
+      "megaStones": {
+        "Aerodactyl": "Aerodactylite",
+        "Charizard": "Charizardite Y"
+      },
+      "observed": null
+    },
+    {
+      "id": "sun-venusaur",
+      "name": "リザードン＋フシギバナ＋ドヒドイデ",
+      "species": [
+        "Charizard",
+        "Venusaur",
+        "Toxapex",
+        "Sylveon",
+        "Kingambit",
+        "Pelipper"
+      ],
+      "plan": "晴れでフシギバナの素早さを通す。自陣と同型",
+      "source": "https://note.com/osr_game/n/n624be6288dfc",
+      "megaStones": {
+        "Charizard": "Charizardite Y",
+        "Venusaur": "Venusaurite"
+      },
+      "observed": null
+    },
+    {
+      "id": "rain-charizard",
+      "name": "雨＋リザードン",
+      "species": [
+        "Charizard",
+        "Swampert",
+        "Archaludon",
+        "Pelipper",
+        "Incineroar",
+        "Snorlax"
+      ],
+      "plan": "晴れと雨を同居させ、選出で分岐する",
+      "source": "https://note.com/osr_game/n/n624be6288dfc",
+      "megaStones": {
+        "Charizard": "Charizardite Y",
+        "Swampert": "Swampertite"
+      },
+      "observed": null
+    },
+    {
+      "id": "rain-perish",
+      "name": "雨＋滅びの歌",
+      "species": [
+        "Gengar",
+        "Politoed",
+        "Pelipper",
+        "Swampert",
+        "Snorlax",
+        "Toxapex"
+      ],
+      "plan": "かげふみで交代を止めて滅びの歌で勝つ",
+      "source": "https://note.com/osr_game/n/n624be6288dfc",
+      "megaStones": {
+        "Gengar": "Gengarite",
+        "Swampert": "Swampertite"
+      },
+      "observed": null
+    },
+    {
+      "id": "delphox-blastoise",
+      "name": "マフォクシー＋カメックス",
+      "species": [
+        "Delphox",
+        "Blastoise",
+        "Kingambit",
+        "Whimsicott",
+        "Sylveon",
+        "Toxapex"
+      ],
+      "plan": "積んだメガをサポートで通す",
+      "source": "https://note.com/osr_game/n/n624be6288dfc",
+      "megaStones": {
+        "Delphox": "Delphoxite",
+        "Blastoise": "Blastoisinite"
+      },
+      "observed": null
+    },
+    {
+      "id": "sand-staraptor",
+      "name": "砂＋ムクホーク",
+      "species": [
+        "Staraptor",
+        "Tyranitar",
+        "Excadrill",
+        "Incineroar",
+        "Toxapex",
+        "Lycanroc"
+      ],
+      "plan": "砂でメガムクホークを軸に、リザードンY 両形態に強く出る",
+      "source": "https://note.com/osr_game/n/n624be6288dfc",
+      "megaStones": {
+        "Staraptor": "Staraptite"
+      },
+      "observed": null
+    },
+    {
+      "id": "staraptor-delphox",
+      "name": "ムクホーク＋マフォクシー",
+      "species": [
+        "Staraptor",
+        "Delphox",
+        "Whimsicott",
+        "Glimmora",
+        "Sylveon",
+        "Toxapex"
+      ],
+      "plan": "あまえるで火力を落としつつ攻める",
+      "source": "https://note.com/osr_game/n/n624be6288dfc",
+      "megaStones": {
+        "Staraptor": "Staraptite",
+        "Delphox": "Delphoxite"
+      },
+      "observed": null
+    },
+    {
+      "id": "froslass-scovillain",
+      "name": "ユキメノコ＋スコヴィラン",
+      "species": [
+        "Froslass",
+        "Scovillain",
+        "Lycanroc",
+        "Sylveon",
+        "Toxapex",
+        "Incineroar"
+      ],
+      "plan": "サポートと単体火力を両立させる",
+      "source": "https://note.com/osr_game/n/n624be6288dfc",
+      "megaStones": {
+        "Froslass": "Froslassite",
+        "Scovillain": "Scovillainite"
+      },
+      "observed": null
+    },
+    {
+      "id": "staraptor-raichu",
+      "name": "ムクホーク＋ライチュウ",
+      "species": [
+        "Staraptor",
+        "Raichu",
+        "Whimsicott",
+        "Kingambit",
+        "Sylveon",
+        "Toxapex"
+      ],
+      "plan": "電磁砲と追い風で素早さを操作する",
+      "source": "https://note.com/osr_game/n/n624be6288dfc",
+      "megaStones": {
+        "Staraptor": "Staraptite",
+        "Raichu": "Raichunite Y"
+      },
+      "observed": null
+    }
+  ],
+  "megaStoneNote": "アーキタイプ名が「メガ○○」と名指ししている個体は、出典がメガであることを述べているのでメガストーンを stated 扱いにする。これを事前分布に任せると、メガリザードンY 軸の構築にこだわりスカーフのリザードンが出てきて構築の identity が消える。",
+  "observedNote": "observed.count は引用した順位表のうち、その 6 匹に一致したチーム数。分母 of=10 は metavgc の Top 10。統計ではなく観測数なので、重み付けはこの数そのものを使う（平滑化などの発明はしない）。"
+}

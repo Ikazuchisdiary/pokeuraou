@@ -1,0 +1,144 @@
+{
+  "regulation": "gen9championsvgc2026regmc",
+  "turn": 5,
+  "sides": [
+    {
+      "id": "p1",
+      "name": "自陣",
+      "team": [
+        {
+          "species": "Kingambit",
+          "ability": "defiant",
+          "item": "chopleberry",
+          "nature": "Adamant",
+          "moves": [
+            "Sucker Punch",
+            "Kowtow Cleave",
+            "Protect",
+            "Iron Head"
+          ],
+          "sp": {
+            "hp": 32,
+            "atk": 32,
+            "spd": 1,
+            "spe": 1
+          },
+          "active": true,
+          "hp": 120
+        },
+        {
+          "species": "Incineroar",
+          "ability": "intimidate",
+          "item": "sitrusberry",
+          "nature": "Impish",
+          "moves": [
+            "Fake Out",
+            "Parting Shot",
+            "Flare Blitz",
+            "Throat Chop"
+          ],
+          "sp": {
+            "hp": 32,
+            "def": 20,
+            "spd": 12,
+            "spe": 2
+          },
+          "active": true
+        },
+        {
+          "species": "Garchomp",
+          "ability": "roughskin",
+          "item": "lifeorb",
+          "nature": "Jolly",
+          "moves": [
+            "Dragon Claw",
+            "Earthquake",
+            "Rock Slide",
+            "Protect"
+          ],
+          "sp": {
+            "hp": 2,
+            "atk": 32,
+            "spe": 32
+          }
+        },
+        {
+          "species": "Basculegion",
+          "ability": "adaptability",
+          "item": "choicescarf",
+          "nature": "Jolly",
+          "moves": [
+            "Last Respects",
+            "Aqua Jet",
+            "Wave Crash",
+            "Protect"
+          ],
+          "sp": {
+            "hp": 2,
+            "atk": 32,
+            "spe": 32
+          }
+        }
+      ]
+    },
+    {
+      "id": "p2",
+      "name": "相手",
+      "team": [
+        {
+          "species": "Sneasler",
+          "ability": "unburden",
+          "item": "focussash",
+          "nature": "Jolly",
+          "moves": [
+            "Close Combat",
+            "Fake Out",
+            "Dire Claw",
+            "Protect"
+          ],
+          "active": true,
+          "hp": "62%"
+        },
+        {
+          "species": "Sinistcha",
+          "ability": "hospitality",
+          "item": "colburberry",
+          "nature": "Bold",
+          "moves": [
+            "Matcha Gotcha",
+            "Rage Powder",
+            "Protect",
+            "Trick Room"
+          ],
+          "active": true,
+          "hp": "50%g"
+        },
+        {
+          "species": "Whimsicott",
+          "ability": "prankster",
+          "item": "focussash",
+          "nature": "Timid",
+          "moves": [
+            "Tailwind",
+            "Moonblast",
+            "Encore",
+            "Protect"
+          ]
+        },
+        {
+          "species": "Farigiraf",
+          "ability": "armortail",
+          "item": "sitrusberry",
+          "nature": "Calm",
+          "moves": [
+            "Trick Room",
+            "Psychic",
+            "Helping Hand",
+            "Protect"
+          ]
+        }
+      ]
+    }
+  ],
+  "field": {}
+}

@@ -1,0 +1,20 @@
+[
+  {"species":"Basculegion","item":"Choice Scarf","ability":"Adaptability","nature":"Adamant",
+   "sp":{"hp":4,"atk":32,"spe":30},
+   "moves":["Wave Crash","Last Respects","Aqua Jet","Protect"]},
+  {"species":"Sneasler","item":"Focus Sash","ability":"Poison Touch","nature":"Jolly",
+   "sp":{"hp":2,"atk":32,"spe":32},
+   "moves":["Close Combat","Dire Claw","Fake Out","Protect"]},
+  {"species":"Sinistcha","item":"Leftovers","ability":"Hospitality","nature":"Bold",
+   "sp":{"hp":32,"def":32,"spd":2},
+   "moves":["Matcha Gotcha","Rage Powder","Trick Room","Protect"]},
+  {"species":"Farigiraf","item":"Sitrus Berry","ability":"Armor Tail","nature":"Bold",
+   "sp":{"hp":32,"def":30,"spd":4},
+   "moves":["Psychic","Trick Room","Helping Hand","Protect"]},
+  {"species":"Sylveon","item":"Wise Glasses","ability":"Pixilate","nature":"Modest",
+   "sp":{"hp":32,"spa":32,"spd":2},
+   "moves":["Hyper Voice","Dazzling Gleam","Mystical Fire","Protect"]},
+  {"species":"Delphox","item":"Delphoxite","ability":"Magician","nature":"Timid",
+   "sp":{"hp":4,"spa":30,"spe":32},
+   "moves":["Fire Blast","Dazzling Gleam","Protect","Trick Room"]}
+]

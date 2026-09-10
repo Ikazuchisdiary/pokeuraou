@@ -1,0 +1,21 @@
+{
+  "name": "@pokeuraou/sim-bridge",
+  "private": true,
+  "version": "0.0.0",
+  "type": "commonjs",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "dump-regulation": "node dist/cli/dump-regulation.js",
+    "oracle": "node dist/cli/oracle.js",
+    "test": "node --test dist/test/"
+  },
+  "dependencies": {
+    "pokemon-showdown": "file:../../vendor/pokemon-showdown"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.6.0"
+  }
+}

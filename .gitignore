@@ -1,0 +1,29 @@
+node_modules/
+dist/
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+.uv/
+# Everything under data/ is generated or fetched, never authored:
+#   priors/raw    Smogon usage stats -- fetched monthly, NOT redistributable
+#   standings/    tournament standings from a public API, same handling
+#   selfplay*/    generated games, reproducible from the seed in the filename
+#   *.npz         encoded datasets, derived from the games
+#   models/       trained weights, derived from the datasets
+# Ignored wholesale rather than pattern by pattern, because a pattern drifted once:
+# `data/selfplay-gen*/` did not match `data/selfplay-worlds/`, and 1.5 GB of games was
+# staged for the first commit.
+data/
+bench/out/
+
+# Self-play games. Generated, large, and reproducible from the seed in the filename;
+# the value function is trained from these but they are not the source of truth.
+
+# Encoded datasets and trained weights. Both are derived: the .npz is `encode_dataset.py`
+# over the games above, and the weights are `train_value.py` over the .npz. What belongs
+# in the repository is the code and the measured numbers in the README, not the artefacts.
+
+# Tournament standings fetched from a public API. Cached locally, not redistributed,
+# same handling as the Smogon usage data.

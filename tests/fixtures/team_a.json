@@ -1,0 +1,20 @@
+[
+  {"species":"Kingambit","item":"Chople Berry","ability":"Defiant","nature":"Adamant",
+   "sp":{"hp":32,"atk":32,"spd":1,"spe":1},
+   "moves":["Sucker Punch","Kowtow Cleave","Protect","Iron Head"]},
+  {"species":"Incineroar","item":"Sitrus Berry","ability":"Intimidate","nature":"Impish",
+   "sp":{"hp":32,"def":20,"spd":12,"spe":2},
+   "moves":["Fake Out","Flare Blitz","Parting Shot","Will-O-Wisp"]},
+  {"species":"Charizard","item":"Charizardite Y","ability":"Blaze","nature":"Modest",
+   "sp":{"hp":32,"def":2,"spa":32},
+   "moves":["Heat Wave","Air Slash","Protect","Solar Beam"]},
+  {"species":"Whimsicott","item":"Focus Sash","ability":"Prankster","nature":"Timid",
+   "sp":{"hp":4,"spa":30,"spe":32},
+   "moves":["Tailwind","Encore","Moonblast","Light Screen"]},
+  {"species":"Absol","item":"Absolite Z","ability":"Justified","nature":"Jolly",
+   "sp":{"hp":4,"atk":30,"spe":32},
+   "moves":["Sucker Punch","Play Rough","Protect","Swords Dance"]},
+  {"species":"Garchomp","item":"Life Orb","ability":"Rough Skin","nature":"Jolly",
+   "sp":{"hp":2,"atk":32,"spe":32},
+   "moves":["Earthquake","Dragon Claw","Protect","Rock Slide"]}
+]
