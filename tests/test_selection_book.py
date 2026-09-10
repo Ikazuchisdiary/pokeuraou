@@ -548,6 +548,58 @@ def test_generation_draws_both_sides_from_the_book(roster, tmp_path) -> None:  #
         assert all("hp" in sp for sp in brought)
 
 
+def test_a_mirror_game_is_our_own_six_with_our_own_spreads(roster, tmp_path) -> None:  # noqa: ANN001
+    """Not "a team like ours" -- the same sets, or the 50% assertion is worth nothing.
+
+    A mirror whose opponent had resampled spreads is not antisymmetric, so its win rate
+    would no longer be forced to 50% and the free calibration check would quietly become
+    a number with no requirement attached to it.
+    """
+    reg = roster.reg
+    out = tmp_path / "games.jsonl"
+    stats = generate(
+        reg,
+        None,
+        roster,
+        [],
+        games=2,
+        seed=5,
+        out=out,
+        objective=HP_SHARE,
+        search_limit=2,
+        # Mirrors of this composition are stally -- two Toxapex and two Incineroar on the
+        # field -- so a three-turn cap finishes nothing and the assertions below would all
+        # be skipped over an empty file.
+        max_turns=25,
+        mirror_share=1.0,
+    )
+    assert stats["mirror_games"] == 2
+    assert stats["book_hits"] == 0
+    lines = [ln for ln in out.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert lines
+    for line in lines:
+        record = json.loads(line)
+        assert record["foeArchetype"] == "mirror"
+        assert record["foeSix"] == [entry.species for entry in roster.sets]
+        # Both sides brought four of the *same* six sets. They are different fours -- the
+        # picks are independent -- so the teams are not equal; what must hold is that every
+        # member of either is one of our roster's sets, spreads included.
+        exact = {
+            (entry.species, tuple(sorted((k, v) for k, v in entry.sp.items() if v)))
+            for entry in roster.sets
+        }
+        for side in ("ownTeam", "foeTeam"):
+            members = {
+                (m["species"], tuple(sorted(m["sp"].items()))) for m in record[side]
+            }
+            assert members <= exact, f"{side} is not our own six"
+
+
+def test_a_mirror_share_must_be_a_probability(roster) -> None:  # noqa: ANN001
+    with pytest.raises(ValueError, match="mirror_share"):
+        generate(roster.reg, None, roster, [], games=1, mirror_share=1.5)
+
+
 def test_a_team_the_book_does_not_cover_falls_back_to_a_uniform_draw(roster) -> None:  # noqa: ANN001
     """Counted, not silently mixed in: two distributions in one dataset need labels."""
     reg = roster.reg

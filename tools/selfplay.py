@@ -108,6 +108,16 @@ def main() -> None:
         help="in win probability: how far down the EV-loss list the exploration share "
         "reaches. inf spreads it uniformly.",
     )
+    ap.add_argument(
+        "--mirror-share",
+        type=float,
+        default=0.0,
+        help="fraction of games played against our own six, spreads included. The mirror "
+        "is where the only external knowledge about this team lives, and self-play had "
+        "never played one -- so every mirror judgement was extrapolation. A true mirror is "
+        "antisymmetric, so its win rate must come out at 50%%: a free calibration check on "
+        "search, resolver and evaluator together.",
+    )
     args = ap.parse_args()
 
     roster = load_roster(args.roster)
@@ -251,6 +261,7 @@ def main() -> None:
         book=book,
         explore_epsilon=args.explore_epsilon,
         explore_temperature=args.explore_temperature,
+        mirror_share=args.mirror_share,
     )
     elapsed = time.perf_counter() - started
     finished = stats["finished"] or 1
@@ -265,6 +276,14 @@ def main() -> None:
         f"turns {stats['turns'] / finished:.1f} per game\n"
         f"  -> {stats['path']}"
     )
+    if stats["mirror_games"]:
+        rate = stats["mirror_wins"] / stats["mirror_games"]
+        half = 1.96 * (0.25 / stats["mirror_games"]) ** 0.5
+        verdict = "要件どおり" if abs(rate - 0.5) <= half else "ずれている（座席バイアス）"
+        print(
+            f"  ミラー {stats['mirror_games']} 戦の勝率 {rate * 100:.1f}% "
+            f"±{half * 100:.1f}（50% が要件 → {verdict}）"
+        )
     if book is not None:
         print(
             f"  選出は選出解から {stats['book_hits']} 件、一様に戻したのが "

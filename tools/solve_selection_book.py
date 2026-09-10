@@ -38,6 +38,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
+from pokeuraou.names import localiser
 from pokeuraou.priors import find_cached_chaos, load_chaos
 from pokeuraou.selection import SpreadClass, book_entry, solve_selection
 from pokeuraou.selection_book import (
@@ -163,10 +164,20 @@ def coverage_table(book: SelectionBook, selections: list[tuple[int, ...]]) -> st
     return "\n".join(lines)
 
 
-def report(book: SelectionBook, reg: object, seconds: float | None = None) -> None:
+def report(
+    book: SelectionBook,
+    reg: object,
+    seconds: float | None = None,
+    namer: object = None,
+) -> str:
+    """The whole report as text, so it can be written as UTF-8 rather than only printed.
+
+    Python's stderr on Windows encodes as cp932 and the terminal mangles it, which for a
+    report nobody can read is the same as not producing one -- the same reason
+    ``show_game.py`` writes to a file.
+    """
     if not book.entries:
-        print("空の本です", file=sys.stderr)
-        return
+        return "空の本です"
     values = np.array([e.value for e in book.entries.values()])
     gaps = np.array([e.duality_gap for e in book.entries.values()])
     anti = np.array([e.antisymmetry_error for e in book.entries.values()])
@@ -175,25 +186,22 @@ def report(book: SelectionBook, reg: object, seconds: float | None = None) -> No
     )
     selections = all_selections(reg.meta.team_size, reg.meta.picked_team_size)
 
-    print("", file=sys.stderr)
+    out: list[str] = []
     head = f"■ {len(book)} チーム"
     if seconds is not None:
         head += f"、{seconds / 60:.1f} 分"
-    print(head, file=sys.stderr)
-    print(
+    out.append(head)
+    out.append(
         f"  均衡値 平均 {values.mean() * 100:.1f}%  中央 {np.median(values) * 100:.1f}%  "
-        f"最小 {values.min() * 100:.1f}%  最大 {values.max() * 100:.1f}%",
-        file=sys.stderr,
+        f"最小 {values.min() * 100:.1f}%  最大 {values.max() * 100:.1f}%"
     )
-    print(
+    out.append(
         f"  LP の双対ギャップ 最大 {gaps.max():.2e}、"
-        f"反対称性の検査 最大 {anti.max():.2e}（どちらも 0 が要件）",
-        file=sys.stderr,
+        f"反対称性の検査 最大 {anti.max():.2e}（どちらも 0 が要件）"
     )
-    print(
+    out.append(
         f"  均衡の支持 平均 {supports.mean():.2f} 通り / 90"
-        f"（1 は純戦略。{int((supports == 1).sum())} チームがそう）",
-        file=sys.stderr,
+        f"（1 は純戦略。{int((supports == 1).sum())} チームがそう）"
     )
     # Which of our selections the field's equilibria name, and how often. Printed because
     # "the solver says bring these four against everyone" is a claim about the metagame
@@ -202,18 +210,23 @@ def report(book: SelectionBook, reg: object, seconds: float | None = None) -> No
     for entry in book.entries.values():
         pooled += entry.our_strategy
     pooled /= pooled.sum()
-    print("  自陣の均衡選出の分布（相手を通じて平均）:", file=sys.stderr)
+    out.append("  自陣の均衡選出の分布（相手を通じて平均）:")
     for index in np.argsort(-pooled)[:6]:
         if pooled[index] <= 1e-6:
             break
         selection = selections[index]
-        print(
+
+        def name(i: int) -> str:
+            return namer(i) if namer is not None else str(i)
+
+        out.append(
             f"    {pooled[index] * 100:5.1f}%  #{int(index):>2} "
-            f"{selection[:2]} / {selection[2:]}",
-            file=sys.stderr,
+            f"{'+'.join(name(i) for i in selection[:2])} / "
+            f"{'+'.join(name(i) for i in selection[2:])}"
         )
-    print("", file=sys.stderr)
-    print(coverage_table(book, selections), file=sys.stderr)
+    out.append("")
+    out.append(coverage_table(book, selections))
+    return "\n".join(out)
 
 
 def main() -> None:
@@ -251,6 +264,13 @@ def main() -> None:
         action="store_true",
         help="report on an existing book without solving or merging anything.",
     )
+    ap.add_argument(
+        "--text",
+        type=Path,
+        default=None,
+        help="also write the report here as UTF-8. The Windows console mangles Japanese, "
+        "and a report nobody can read is not a report.",
+    )
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument(
         "--torch-threads",
@@ -267,9 +287,27 @@ def main() -> None:
     reg = roster.reg
     register_mega_stones(reg)
     out = args.out or (selection_dir() / f"{args.roster}-{args.model.stem}.jsonl.gz")
+    loc = localiser(reg, "ja")
+
+    def namer(index: int) -> str:
+        """Party index -> the Japanese name of that member of our six.
+
+        Our roster is fixed, so a selection is a set of indices into it and printing the
+        indices makes the report unreadable for the person who has to act on it.
+        """
+        species_id = roster.sets[index].species
+        return loc.species(species_id) if loc else reg.species[species_id].name
+
+    def emit(text: str) -> None:
+        """Prints the report and, with --text, writes it as UTF-8 as well."""
+        print(text, file=sys.stderr)
+        if args.text is not None:
+            args.text.parent.mkdir(parents=True, exist_ok=True)
+            args.text.write_text(text + "\n", encoding="utf-8")
+            print(f"（読める形: {args.text}）", file=sys.stderr)
 
     if args.report:
-        report(SelectionBook.read(out), reg)
+        emit(report(SelectionBook.read(out), reg, namer=namer))
         return
 
     if args.merge:
@@ -287,7 +325,7 @@ def main() -> None:
             print(f"  {part.name}: {len(book)} チーム", file=sys.stderr)
         merged.write(out)
         print(f"→ {out}（{len(merged)} チーム）", file=sys.stderr)
-        report(merged, reg)
+        emit(report(merged, reg, namer=namer))
         return
 
     chaos = find_cached_chaos(reg.meta.format_id)
@@ -358,7 +396,14 @@ def main() -> None:
         )
 
     if args.shards == 1:
-        report(SelectionBook.read(target), reg, time.perf_counter() - started)
+        emit(
+            report(
+                SelectionBook.read(target),
+                reg,
+                time.perf_counter() - started,
+                namer=namer,
+            )
+        )
     else:
         print(
             f"shard {args.shard} 完了: {len(pending)} チーム、"

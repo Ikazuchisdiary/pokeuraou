@@ -676,6 +676,7 @@ def generate(
     book: SelectionBook | None = None,
     explore_epsilon: float = DEFAULT_EPSILON,
     explore_temperature: float = DEFAULT_TEMPERATURE,
+    mirror_share: float = 0.0,
 ) -> dict[str, Any]:
     """Plays games and appends one JSON line per finished game.
 
@@ -702,7 +703,26 @@ def generate(
     than from a fresh usage draw, because the column strategy the game uses is the strategy
     of a player holding exactly that investment. A team the book does not cover falls back
     to the uniform draw and is counted in ``book_misses``.
+
+    ``mirror_share`` plays that fraction of games against **our own six, spreads
+    included**. Two reasons, and the second was not obvious:
+
+    - the mirror is where the only *external* knowledge about this team lives (a reported
+      three-way cycle among three selections, in ``configs/knowledge/``), and until now
+      self-play had never played one -- every opponent came from the tournament field, so
+      every mirror judgement the value function makes is extrapolation. Checking a model
+      against human knowledge on positions it was never trained on measures extrapolation
+      rather than the model;
+    - a true mirror is exactly antisymmetric, so its win rate **must** come out at 50%.
+      That makes a mirror share a free calibration assertion on the whole pipeline --
+      search, resolver, evaluator -- reported in ``mirror_wins`` / ``mirror_games``. A
+      speed-tie bias in the search matrix was once caught by precisely this kind of sum.
+
+    Mirror games draw their selection uniformly: the book is keyed on tournament sheets and
+    has no entry for ourselves, and a uniform draw is what covers the 90 anyway.
     """
+    if not 0.0 <= mirror_share <= 1.0:
+        raise ValueError(f"mirror_share must be a probability, got {mirror_share}")
     if book is not None and standings is None:
         raise ValueError(
             "a selection book is keyed on tournament team sheets, so it needs the "
@@ -712,10 +732,12 @@ def generate(
         field = cluster_labels(reg, standings, standings_pool)
     else:
         field = {}
-        if cooc is None and archetype_share < 1.0:
-            archetype_share = 1.0
-        if not archetypes and archetype_share > 0.0:
-            raise ValueError("archetype_share > 0 but no archetypes were given")
+        # An all-mirror run needs no opponent pool at all: the opponent is us.
+        if mirror_share < 1.0:
+            if cooc is None and archetype_share < 1.0:
+                archetype_share = 1.0
+            if not archetypes and archetype_share > 0.0:
+                raise ValueError("archetype_share > 0 but no archetypes were given")
     rng = np.random.default_rng(seed)
     path = out or (selfplay_dir() / f"games-seed{seed}.jsonl")
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -724,6 +746,8 @@ def generate(
         "games": 0,
         "book_hits": 0,
         "book_misses": 0,
+        "mirror_games": 0,
+        "mirror_wins": 0,
         "finished": 0,
         "discarded_unfinished": 0,
         "wins": 0,
@@ -733,7 +757,13 @@ def generate(
     with path.open("a", encoding="utf-8") as handle:
         for _ in range(games):
             drawn = None
-            if standings is not None:
+            mirror = mirror_share > 0.0 and rng.random() < mirror_share
+            if mirror:
+                # Our own six, the same spreads, no sampling: an approximate mirror would
+                # not be antisymmetric and would lose the 50% assertion that is the point.
+                label = "mirror"
+                foe_six = list(roster.sets)
+            elif standings is not None:
                 pool = standings.pool(standings_pool)
                 team = pool[int(rng.integers(len(pool)))]
                 label = field.get(team.player, "worlds")
@@ -793,6 +823,10 @@ def generate(
                 record.foe_selection_mixture = [float(x) for x in drawn.foe_mixture]
                 record.selection_value = drawn.value
             stats["games"] += 1
+            if mirror:
+                stats["mirror_games"] += 1
+                if record.outcome is not None:
+                    stats["mirror_wins"] += int(record.outcome > 0.5)
             if record.outcome is None:
                 stats["discarded_unfinished"] += 1
                 continue

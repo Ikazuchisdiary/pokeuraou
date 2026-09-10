@@ -1,0 +1,36 @@
+{
+  "id": "rizabanadohido-mirror",
+  "roster": "rizabanadohido",
+  "regulation": "gen9championsvgc2026regmb",
+  "kind": "known selection cycle",
+  "source": {
+    "kind": "player knowledge",
+    "author": "16918436+Ikazuchisdiary@users.noreply.github.com",
+    "date": "2026-09-11",
+    "note": "ミラーでこの3つが3すくみになっていることが知られている、という報告。原文の記法は「①←②←③←①」。矢印の向きは原文からは一意に決まらないので、ツールは向きを仮定せず測った向きを表示する"
+  },
+  "note": "This is *human* knowledge, not a model output, which is why it is worth keeping: the mirror is the one case where the game's value is forced to 0.500 by the value function's antisymmetry, so a cycle here is a claim the model can be checked against rather than a claim derived from it. A pure equilibrium in the mirror is incompatible with a genuine three-cycle, so this file is also the disproof of any pure mirror recommendation.",
+  "cycles": [
+    {
+      "id": "toxapex-core",
+      "note": "全員がドヒドイデを先発に置く3通り。裏の2枚と、先発のもう1枚だけが違う",
+      "ring": [
+        {
+          "label": "①",
+          "leads": ["toxapex", "incineroar"],
+          "bench": ["venusaur", "garchomp"]
+        },
+        {
+          "label": "②",
+          "leads": ["toxapex", "venusaur"],
+          "bench": ["incineroar", "garchomp"]
+        },
+        {
+          "label": "③",
+          "leads": ["toxapex", "charizard"],
+          "bench": ["incineroar", "venusaur"]
+        }
+      ]
+    }
+  ]
+}
