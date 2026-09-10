@@ -73,6 +73,11 @@ VOLATILES = (
     # guessing turn order for a quarter of the field.
     "unburden",
     "lockedmove",
+    # Throat Chop's two-turn sound lock, added once the resolver started applying it. It
+    # takes Parting Shot, Hyper Voice, Boomburst and Snarl away from the holder, so a value
+    # function that cannot see it misprices the Incineroar mirror -- Throat Chop answering
+    # Parting Shot is the whole point of that matchup.
+    "throatchop",
 )
 
 #: Status conditions, in the order Showdown names them. Index 0 is "no status".
