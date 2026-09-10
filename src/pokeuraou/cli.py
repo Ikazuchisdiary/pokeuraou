@@ -23,6 +23,7 @@ import json
 import sys
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 
@@ -512,9 +513,15 @@ def render(analysis: Analysis, loc: Localiser | None = None) -> str:
     out.append("■ 評価軸（この数値が何なのか）")
     out.append(f"  {a.objective.name}: {a.objective.formula}")
     out.append(f"  見えていないもの: {a.objective.blind_to}")
-    out.append(
-        "  これは勝率ではありません。勝率を出すには学習した価値関数が必要で、M3 の課題です。"
-    )
+    if a.objective.name.startswith("value:"):
+        out.append(
+            "  これは勝率です（学習した価値関数の単位）。ただし校正はその学習に使った"
+            "探索の強さと相手プールに条件付きで、絶対的な勝率ではありません。"
+        )
+    else:
+        out.append(
+            "  これは勝率ではありません。勝率で見るには --value に学習した価値関数を渡してください。"
+        )
     out.append("")
 
     if a.update_report is not None:
@@ -837,6 +844,17 @@ def main(argv: list[str] | None = None) -> int:
         help=f"相手2体の同時配分クラス数（既定 {DEFAULT_BELIEF_CLASSES}）",
     )
     ap.add_argument(
+        "--value",
+        type=Path,
+        default=None,
+        help="学習した価値関数（data/models/*.pt）を評価軸にする。セルが勝率になるので、"
+        "均衡値も EV 損もそのまま勝率のポイントとして読める。--objective より優先。"
+        "指定しない場合は hp-share のままで、それは勝率ではありません",
+    )
+    ap.add_argument(
+        "--device", default=None, help="cuda か cpu。既定は cuda があればそれ"
+    )
+    ap.add_argument(
         "--objective", default="hp-share", choices=sorted(OBJECTIVES),
         help="評価軸（既定 hp-share）",
     )
@@ -862,9 +880,39 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     scenario = load_scenario(args.scenario)
+    objective = OBJECTIVES[args.objective]
+    if args.value is not None:
+        # Imported here so a run without --value never loads torch: the resolver, the
+        # differential tests and the whole M1 path stay installable without a CUDA wheel.
+        import torch
+
+        from .encode import Encoder
+        from .value import BatchedValue, load_model
+
+        if not args.value.exists():
+            raise SystemExit(f"{args.value} が無い。tools/train_value.py で学習してください")
+        register_mega_stones(scenario.reg)
+        encoder = Encoder(scenario.reg)
+        net, meta = load_model(args.value, encoder)
+        device = torch.device(
+            args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        )
+        # One position at a time: `analyse` folds each cell's branches through the
+        # objective protocol, so batching would mean restructuring that loop. The forward
+        # pass is a millisecond and the resolve around it is the cost -- measured, not
+        # assumed: `matrix` budget spends 11.5s on a 24x24x4 matrix either way.
+        objective = BatchedValue(net.to(device), encoder, device=device).objective(
+            f"value:{args.value.stem}"
+        )
+        print(
+            f"評価軸 = {args.value.name} on {device}"
+            f"（{meta.get('games', '?')} ゲームで学習、検証 AUC "
+            f"{meta.get('val_auc', float('nan')):.4f}）",
+            file=sys.stderr,
+        )
     analysis = analyse(
         scenario,
-        objective=OBJECTIVES[args.objective],
+        objective=objective,
         cross=OBJECTIVES[args.cross_check],
         limit=args.limit,
         belief_classes=args.belief_classes,
@@ -874,7 +922,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.stability:
         doubled = analyse(
             scenario,
-            objective=OBJECTIVES[args.objective],
+            objective=objective,
             cross=OBJECTIVES[args.cross_check],
             limit=args.limit,
             belief_classes=args.belief_classes * 2,

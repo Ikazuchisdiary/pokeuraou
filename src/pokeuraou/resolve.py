@@ -517,7 +517,7 @@ class _Turn:
     __slots__ = ("reg", "pos", "budget", "attacks", "events", "unmodelled",
                  "hurt_this_turn", "move_failed", "move_damage_total", "move_connected",
                  "acted", "actions_remaining", "self_switch_pending",
-                 "pending_secondaries", "current_actor")
+                 "pending_secondaries", "current_actor", "wipe_order")
 
     def __init__(
         self,
@@ -560,6 +560,12 @@ class _Turn:
         #: subject is the Pokemon that triggered it, which is how Cursed Body gets four
         #: turns rather than five.
         self.current_actor: tuple[int, int] | None = None
+        #: Side indices in the order their last Pokemon fainted. Showdown's `checkWin`
+        #: decides a mutual wipe-out by the side of the Pokemon that fainted *last*
+        #: (`this.win(faintData.target.side)` for gen > 4), and a sequential wipe-out ends
+        #: the battle the moment one side runs out -- which is the same rule read the same
+        #: way: whichever side's wipe-out completed last is the winner.
+        self.wipe_order: list[int] = []
 
     def clone(self) -> _Turn:
         fresh = _Turn(self.reg, self.pos.copy(), self.budget, self.attacks)
@@ -569,6 +575,7 @@ class _Turn:
         fresh.move_failed = set(self.move_failed)
         fresh.move_damage_total = self.move_damage_total
         fresh.move_connected = self.move_connected
+        fresh.wipe_order = list(self.wipe_order)
         fresh.acted = set(self.acted)
         fresh.actions_remaining = self.actions_remaining
         fresh.self_switch_pending = self.self_switch_pending
@@ -667,6 +674,12 @@ class _Turn:
         mon.status = "fnt"
         mon.status_counter = None
         self.log(f"{self.name(side, slot)} fainted")
+        # The order matters and only this moment knows it: which side ran out last is what
+        # decides a mutual wipe-out, and by the end of the turn both sides just look empty.
+        if side not in self.wipe_order and all(
+            m.fainted for m in self.pos.sides[side].pokemon
+        ):
+            self.wipe_order.append(side)
 
     # -- items, status, boosts ---------------------------------------------
 
@@ -3343,16 +3356,46 @@ def resolve_replacements(
     for side_index, slot, _speed in placed:
         _on_switch_in(reg, state, side_index, slot)
 
-    for side_index, side in enumerate(state.pos.sides):
-        if all(mon.fainted for mon in side.pokemon):
-            state.pos.ended = True
-            state.pos.winner = state.pos.sides[1 - side_index].id
+    settle_outcome(state.pos, state.wipe_order)
 
     return ReplacementResult(
         position=state.pos,
         events=list(state.events),
         unmodelled=tuple(sorted(unmodelled | state.unmodelled)),
     )
+
+
+def settle_outcome(pos: Position, wipe_order: Sequence[int] = ()) -> None:
+    """Marks the battle over and names the winner, the way Showdown's `checkWin` does.
+
+        checkWin(faintData) {
+            if (this.sides.every(side => !side.pokemonLeft)) {
+                this.win(faintData && this.gen > 4 ? faintData.target.side : null);
+
+    Two cases and one rule. One side out: the other wins, and Showdown ends the battle at
+    the faint that emptied it rather than at the end of the turn. Both sides out: gen 5 and
+    later give it to the side of the Pokemon that fainted *last*. Both readings are
+    "whichever side's wipe-out completed last wins", so ``wipe_order`` -- recorded as the
+    faints happen, because by now both sides just look empty -- answers them together.
+
+    This was wrong in a way that only a rare position exposed: the old code looped over the
+    sides and assigned a winner per wiped side, so with both wiped the second iteration
+    overwrote the first and side 0 won every mutual knockout. That is a seat-dependent
+    result on the closest games there are, and every one of them was labelled a win for our
+    roster in the training data.
+
+    Without ``wipe_order`` -- a position that arrived already empty, from an earlier turn --
+    a mutual wipe-out cannot be attributed and is left as a draw rather than guessed.
+    """
+    wiped = [i for i, side in enumerate(pos.sides) if all(m.fainted for m in side.pokemon)]
+    if not wiped:
+        return
+    pos.ended = True
+    if len(wiped) == 1:
+        pos.winner = pos.sides[1 - wiped[0]].id
+        return
+    ordered = [i for i in wipe_order if i in wiped]
+    pos.winner = pos.sides[ordered[-1]].id if ordered else None
 
 
 def resume_alternatives(
@@ -3525,6 +3568,71 @@ def turn_expectation(
     return plan.value([value(p) for p in plan.positions]), plan.unmodelled
 
 
+def batched_payoff(
+    reg: Regulation,
+    pos: Position,
+    ours: Sequence[SideAction],
+    theirs: Sequence[SideAction],
+    evaluate: Callable[[list[Position]], np.ndarray],
+    *,
+    budget: Budget,
+) -> tuple[np.ndarray, set[str]]:
+    """One payoff matrix, with every leaf in the node scored in a single call.
+
+    The alternative is to apply a per-position objective branch by branch, which for a
+    learned value function means one forward pass per leaf: measured on a 24x24 matrix over
+    four spread classes, 656 seconds against 11.5 with a parameter-free objective. The
+    forward pass is a few percent of the per-leaf cost, so batching across the node is the
+    whole optimisation.
+
+    Two kinds of cell, kept apart because they fold differently. An ordinary cell is an
+    average over chance branches -- one dot product. A cell whose turn stopped for a
+    mid-turn replacement folds through a *choice* as well, which is what `turn_leaves`
+    builds and `fold_value` evaluates; its leaves are shifted into this node's flat leaf
+    list so both kinds can share one forward pass.
+
+    Lives here rather than in the callers because there are now two of them -- self-play
+    and the analyser -- and the fold semantics are the part that must not exist twice.
+    """
+    payoff = np.zeros((len(ours), len(theirs)), dtype=np.float64)
+    unmodelled: set[str] = set()
+    leaves: list[Position] = []
+    weights: list[np.ndarray] = []
+    spans: list[tuple[int, int, int, int]] = []
+    folded: list[tuple[int, int, Fold]] = []
+
+    for i, a in enumerate(ours):
+        for j, b in enumerate(theirs):
+            result = resolve_turn(reg, pos, [a, b], budget=budget)
+            if result.suspended:
+                plan = turn_leaves(reg, result)
+                unmodelled.update(plan.unmodelled)
+                if plan.positions:
+                    folded.append((i, j, plan.shifted(len(leaves))))
+                    leaves.extend(plan.positions)
+                continue
+            unmodelled.update(result.unmodelled)
+            total = result.total_probability
+            if not result.branches or total <= 0:
+                spans.append((i, j, len(leaves), 0))
+                weights.append(np.zeros(0))
+                continue
+            start = len(leaves)
+            leaves.extend(branch.position for branch in result.branches)
+            weights.append(
+                np.array([branch.probability for branch in result.branches]) / total
+            )
+            spans.append((i, j, start, len(result.branches)))
+
+    values = np.asarray(evaluate(leaves), dtype=np.float64) if leaves else np.zeros(0)
+    for (i, j, start, count), w in zip(spans, weights, strict=True):
+        if count:
+            payoff[i, j] = float(values[start : start + count] @ w)
+    for i, j, root in folded:
+        payoff[i, j] = fold_value(root, values)
+    return payoff, unmodelled
+
+
 def apply_lead_abilities(reg: Regulation, pos: Position) -> ReplacementResult:
     """Runs the leads' switch-in effects, as Showdown does before `|turn|1`.
 
@@ -3586,11 +3694,52 @@ def _residuals(reg: Regulation, turn: _Turn) -> None:
     field_ = turn.pos.field
 
     def actives() -> list[tuple[int, int]]:
-        return [
-            (side, slot)
-            for side in range(2)
-            for slot in range(len(turn.pos.sides[side].active))
-        ]
+        """Active slots in Showdown's residual order: by Speed, fastest first.
+
+            eachEvent(eventid, effect, relayVar) {
+                const actives = this.getAllActive();
+                ...
+                this.speedSort(actives, (a, b) => b.speed - a.speed);
+
+        ``pokemon.speed`` is the Trick-Room-inverted value, so under Trick Room the order
+        reverses -- the same quantity the action queue sorts on.
+
+        This used to iterate side 0 then side 1, which made the residual phase
+        seat-dependent: in a mirrored position our burn and trap resolved before their
+        poison in *both* orientations, so a faint that the residuals cause landed on a
+        different side depending on which seat we held. Measured at 4.8 points on one
+        cell of a turn-14 position.
+
+        Speed ties are broken by species and slot rather than by side, which is
+        deliberate but not faithful: Showdown breaks them at random, and the residual
+        phase does not branch yet. A side-indexed tie-break would put back exactly the
+        asymmetry this fixes, so the tie is reported instead of being resolved by seat.
+        """
+        entries: list[tuple[int, int, str, int, int]] = []
+        trick_room = turn.pos.field.trick_room
+        state = turn.field()
+        speeds: list[int] = []
+        for side in range(2):
+            conditions = frozenset(
+                c.id for c in turn.pos.sides[side].side_conditions
+            )
+            for slot in range(len(turn.pos.sides[side].active)):
+                mon = turn.mon_at(side, slot)
+                fighter = turn.battler_at(side, slot)
+                if mon is None or fighter is None:
+                    # Empty and fainted slots keep their place in the list -- callers skip
+                    # them -- but sort last, where they cannot affect anything.
+                    entries.append((1, 0, "", slot, side))
+                    continue
+                speed = int(effective_speed(reg, fighter, state, conditions)[0])
+                if trick_room:
+                    speed = 10000 - speed
+                speeds.append(speed)
+                entries.append((0, -speed, mon.species, slot, side))
+        if len(speeds) != len(set(speeds)):
+            turn.unmodelled.add("residual speed tie (Showdown breaks it at random)")
+        entries.sort()
+        return [(side, slot) for _empty, _speed, _species, slot, side in entries]
 
     # Residual order 1: weather. Its duration is decremented *before* its handler runs and
     # the handler is skipped when it expires, so the last turn of a sandstorm deals no
@@ -3799,11 +3948,7 @@ def _residuals(reg: Regulation, turn: _Turn) -> None:
         # Carry this turn's outcome forward for Stomping Tantrum and Temper Flare.
         mon.move_last_turn_failed = (side, slot) in turn.move_failed
 
-    del reg
-    for side_index, side in enumerate(turn.pos.sides):
-        if all(m.fainted for m in side.pokemon):
-            turn.pos.ended = True
-            turn.pos.winner = turn.pos.sides[1 - side_index].id
+    settle_outcome(turn.pos, turn.wipe_order)
 
 
 __all__ = [
@@ -3814,7 +3959,9 @@ __all__ = [
     "TurnLeaves",
     "TurnResult",
     "apply_lead_abilities",
+    "batched_payoff",
     "pending_attacks",
+    "settle_outcome",
     "replacements_needed",
     "resolve_replacements",
     "resolve_turn",

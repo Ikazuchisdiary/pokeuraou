@@ -417,6 +417,17 @@ class Field:
         return out
 
 
+def _swap_source_slot(source_slot: str | None) -> str | None:
+    """Flips the side in a ``source_slot``, in either of the two encodings in use."""
+    if not source_slot:
+        return source_slot
+    if len(source_slot) >= 2 and source_slot[0] in "01" and source_slot[1].isdigit():
+        return ("1" if source_slot[0] == "0" else "0") + source_slot[1:]
+    if len(source_slot) >= 3 and source_slot[0] == "p" and source_slot[1] in "12":
+        return "p" + ("2" if source_slot[1] == "1" else "1") + source_slot[2:]
+    return source_slot
+
+
 @dataclass(slots=True)
 class Position:
     format: str
@@ -437,6 +448,47 @@ class Position:
             ended=self.ended,
             winner=self.winner,
         )
+
+    def swapped(self) -> Position:
+        """The same battle seen from the other seat.
+
+        Swapping ``sides`` is not enough, and getting that wrong looks exactly like a bug
+        in the resolver. Effects carry a ``source_slot`` naming who applied them -- the
+        Pokemon whose Infestation is trapping you, the one whose Leech Seed is draining you
+        -- and those references are *side-indexed*. Leave them alone and the mirrored
+        position says the trap belongs to the side that is now trapped, which changes
+        whether it is released. That difference is worth about seven points on a cell.
+
+        Two encodings are in the field, because two writers produce them: ``"01"`` (side
+        digit, slot digit) from the resolver, and Showdown's ``"p1a"`` from a dumped
+        battle. Both are remapped; anything else is left as-is rather than guessed at.
+
+        Used by the antisymmetry checks, where a genuine mirror is the whole point: the
+        value function must answer ``1 - V`` and the resolver must produce the mirrored
+        turn, and neither claim can be tested with an approximate swap.
+        """
+        out = self.copy()
+        out.sides = [out.sides[1], out.sides[0]]
+        out.sides[0].id, out.sides[1].id = out.sides[1].id, out.sides[0].id
+        out.sides[0].name, out.sides[1].name = out.sides[1].name, out.sides[0].name
+        for effect in out.effects():
+            effect.source_slot = _swap_source_slot(effect.source_slot)
+        return out
+
+    def effects(self) -> list[Effect]:
+        """Every Effect the position holds, wherever it lives.
+
+        Enumerated in one place so a new container cannot be silently missed by the
+        things that have to walk them all.
+        """
+        out: list[Effect] = list(self.field.pseudo_weather)
+        for side in self.sides:
+            out.extend(side.side_conditions)
+            for slot in side.slot_conditions:
+                out.extend(slot)
+            for mon in side.pokemon:
+                out.extend(mon.volatiles)
+        return out
 
     @staticmethod
     def from_json(d: dict[str, Any]) -> Position:

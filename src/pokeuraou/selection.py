@@ -164,15 +164,11 @@ def solve_selection(
         )
         for k in range(min(8, len(selections)))
     ]
-    mirrored = []
-    for pos in sample:
-        flipped = pos.copy()
-        flipped.sides = [flipped.sides[1], flipped.sides[0]]
-        flipped.sides[0].id, flipped.sides[1].id = (
-            flipped.sides[1].id,
-            flipped.sides[0].id,
-        )
-        mirrored.append(flipped)
+    # `Position.swapped` rather than swapping the list here: effects carry side-indexed
+    # source slots, and an approximate mirror makes an antisymmetry check meaningless. It
+    # happens to be harmless on a turn-1 position, which has no such effects yet -- but a
+    # check that only works on turn 1 is a check waiting to mislead.
+    mirrored = [pos.swapped() for pos in sample]
     forward = evaluate(sample)
     backward = evaluate(mirrored)
     evaluated += len(sample) + len(mirrored)
