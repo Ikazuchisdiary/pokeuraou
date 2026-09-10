@@ -21,11 +21,25 @@ FIRST_SEED="${3:-601}"
 WORKERS="${WORKERS:-14}"
 VALUE="${VALUE:-data/models/value-worlds.pt}"
 LIMIT="${LIMIT:-16}"
+# Optional: draw both sides' 4-of-6 from cached selection equilibria instead of uniformly.
+# BOOK=data/selection/rizabanadohido-value-gen2.jsonl.gz bash tools/generate_parallel.sh ...
+BOOK="${BOOK:-}"
+EPSILON="${EPSILON:-0.25}"
+TEMPERATURE="${TEMPERATURE:-0.05}"
+book_args=()
+if [ -n "$BOOK" ]; then
+	book_args=(--selection-book "$BOOK" --explore-epsilon "$EPSILON" --explore-temperature "$TEMPERATURE")
+fi
 
 mkdir -p "$OUT_DIR" "$OUT_DIR/logs"
 
 echo "generation: $WORKERS workers x $GAMES_PER_WORKER games -> $OUT_DIR"
 echo "  leaf: $VALUE (cpu, 1 torch thread), search limit $LIMIT"
+if [ -n "$BOOK" ]; then
+	echo "  selection: $BOOK (eps=$EPSILON, T=$TEMPERATURE) -- both sides drawn from the equilibrium"
+else
+	echo "  selection: uniform 4-of-6 on both sides"
+fi
 echo "  seeds $FIRST_SEED..$((FIRST_SEED + WORKERS - 1))"
 started=$(date +%s)
 

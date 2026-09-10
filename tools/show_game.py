@@ -28,6 +28,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pokeuraou.names import Localiser, load_names
 from pokeuraou.regulation import Regulation, load_regulation
+from pokeuraou.teams import all_selections
 
 
 def hp_bar(current: int, maximum: int, width: int = 10) -> str:
@@ -85,9 +86,16 @@ def render(reg: Regulation, loc: Localiser, record: dict, top: int) -> str:
     # The selection, when the record carries it. Ordered, so the first two are the leads --
     # a different decision from the two behind them, and the reason there are 90 selections
     # a side rather than 15.
-    for label, six_key, pick_key in (
-        ("自", "ownSix", "ownPick"),
-        ("相手", "foeSix", "foePick"),
+    if record.get("selectionSource") == "book":
+        value = record.get("selectionValue")
+        shown = f"均衡値 {value * 100:.1f}%、" if value is not None else ""
+        out.write(
+            f"選出は選出解から（{shown}"
+            "実際に引いたのは均衡＋探索の混合なので下の頻度とずれることがある）\n"
+        )
+    for label, six_key, pick_key, policy_key in (
+        ("自", "ownSix", "ownPick", "ownSelectionPolicy"),
+        ("相手", "foeSix", "foePick", "foeSelectionPolicy"),
     ):
         six = record.get(six_key) or []
         pick = record.get(pick_key) or []
@@ -101,6 +109,24 @@ def render(reg: Regulation, loc: Localiser, record: dict, top: int) -> str:
             f" ／ 裏 {' + '.join(brought[2:])}"
             f"   （不選出: {'・'.join(left)}）\n"
         )
+        # The mixture it was drawn from, when the game came from a selection book. One
+        # selection with a frequency is a recommendation; the whole mixture is the answer,
+        # which is the shape this tool is supposed to print everywhere else too.
+        policy = record.get(policy_key) or []
+        if not policy:
+            continue
+        selections = all_selections(len(six), len(pick))
+        order = sorted(range(len(policy)), key=lambda i: -policy[i])
+        for rank, index in enumerate(order):
+            if rank >= top or policy[index] <= 1e-6:
+                break
+            selection = selections[index]
+            chosen = " ←選択" if list(selection) == list(pick) else ""
+            out.write(
+                f"    {policy[index] * 100:5.1f}%  "
+                f"{' + '.join(names[i] for i in selection[:2])}"
+                f" ／ {' + '.join(names[i] for i in selection[2:])}{chosen}\n"
+            )
     out.write(
         f"結果: {verdict}   {record.get('turns', '?')} ターン   "
         f"探索 {record.get('searchLimit', '?')}x / 葉 {record.get('searchObjective', '?')}\n"

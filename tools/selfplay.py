@@ -22,6 +22,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.priors import build_cooccurrence, find_cached_chaos, load_chaos
+from pokeuraou.selection_book import (
+    DEFAULT_EPSILON,
+    DEFAULT_TEMPERATURE,
+    SelectionBook,
+)
 from pokeuraou.selfplay import MAX_TURNS, SEARCH_LIMIT, generate
 from pokeuraou.standings import find_cached_standings, load_standings
 from pokeuraou.teams import load_archetypes, load_roster, usable_archetypes
@@ -79,6 +84,29 @@ def main() -> None:
         choices=("all", "phase2", "cut"),
         help="all (default) is the whole field, which is what a player faces. cut is the "
         "13 teams that won, which is a different distribution and not a metagame.",
+    )
+    ap.add_argument(
+        "--selection-book",
+        type=Path,
+        default=None,
+        help="draw both sides' four-of-six from cached selection equilibria instead of "
+        "uniformly (tools/solve_selection_book.py). Looked up by the opponent's team "
+        "sheet, so our draw never sees which four they brought.",
+    )
+    ap.add_argument(
+        "--explore-epsilon",
+        type=float,
+        default=DEFAULT_EPSILON,
+        help="share of games drawn off the equilibrium, for coverage. 0 plays the "
+        "equilibrium exactly and visits one selection pair per opponent, which starves "
+        "the next solve of cells.",
+    )
+    ap.add_argument(
+        "--explore-temperature",
+        type=float,
+        default=DEFAULT_TEMPERATURE,
+        help="in win probability: how far down the EV-loss list the exploration share "
+        "reaches. inf spreads it uniformly.",
     )
     args = ap.parse_args()
 
@@ -150,6 +178,28 @@ def main() -> None:
                 file=sys.stderr,
             )
 
+    book = None
+    if args.selection_book is not None:
+        if standings is None:
+            raise SystemExit(
+                "--selection-book is keyed on tournament team sheets, so it only applies "
+                "to --opponents worlds"
+            )
+        book = SelectionBook.read(args.selection_book)
+        book.require_roster(args.roster)
+        hit, total = book.covered(standings.pool(args.standings_pool))
+        print(
+            f"選出解: {len(book)} チーム分（{book.model}）"
+            f" プールの {hit}/{total} を被覆、"
+            f"ε={args.explore_epsilon}, T={args.explore_temperature}",
+            file=sys.stderr,
+        )
+        if hit == 0:
+            raise SystemExit(
+                f"{args.selection_book} covers none of the {total} teams in this pool; "
+                "it was solved for another field or another roster"
+            )
+
     cooc = build_cooccurrence(prior) if args.opponents in ("metagame", "mix") else None
     if cooc is not None:
         print(cooc.summary(), file=sys.stderr)
@@ -198,6 +248,9 @@ def main() -> None:
         standings_pool=args.standings_pool,
         evaluate=evaluate,
         leaf=leaf_label,
+        book=book,
+        explore_epsilon=args.explore_epsilon,
+        explore_temperature=args.explore_temperature,
     )
     elapsed = time.perf_counter() - started
     finished = stats["finished"] or 1
@@ -212,6 +265,12 @@ def main() -> None:
         f"turns {stats['turns'] / finished:.1f} per game\n"
         f"  -> {stats['path']}"
     )
+    if book is not None:
+        print(
+            f"  選出は選出解から {stats['book_hits']} 件、一様に戻したのが "
+            f"{stats['book_misses']} 件\n"
+            "  注: 生成は均衡＋探索の混合から引いているので、上の勝率は均衡値ではない"
+        )
 
     if args.report:
         report(Path(stats["path"]))

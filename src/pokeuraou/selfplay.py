@@ -53,6 +53,11 @@ from .resolve import (
     turn_expectation,
     turn_leaves,
 )
+from .selection_book import (
+    DEFAULT_EPSILON,
+    DEFAULT_TEMPERATURE,
+    SelectionBook,
+)
 from .standings import Standings, cluster_teams, label_for, sample_standings_team
 from .stats import nature_multipliers, stats_from_sp
 from .teams import (
@@ -133,6 +138,21 @@ class GameRecord:
     foe_six: list[str] = field(default_factory=list)
     own_pick: list[int] = field(default_factory=list)
     foe_pick: list[int] = field(default_factory=list)
+    #: Where the selection came from: "uniform" for an unweighted draw, "book" for a draw
+    #: from the cached 6->4 equilibrium. Recorded per game because a dataset will contain
+    #: both and the distributions are not the same.
+    selection_source: str = "uniform"
+    #: The equilibrium mixtures over the 90 ordered selections, when a book was used.
+    #: These are the policy targets a selection head would learn -- the *solver's*
+    #: recommendation, not the softened distribution the game was drawn from.
+    own_selection_policy: list[float] = field(default_factory=list)
+    foe_selection_policy: list[float] = field(default_factory=list)
+    #: The distributions actually drawn from: equilibrium mixed with exploration. Kept
+    #: separately so nobody reads a generated win rate as the equilibrium value.
+    own_selection_mixture: list[float] = field(default_factory=list)
+    foe_selection_mixture: list[float] = field(default_factory=list)
+    #: The equilibrium value of the selection game, in win probability.
+    selection_value: float | None = None
 
     def to_json(self, *, objective: str, search_limit: int | tuple[int, int]) -> dict[str, Any]:
         return {
@@ -151,6 +171,12 @@ class GameRecord:
             "foeSix": self.foe_six,
             "ownPick": self.own_pick,
             "foePick": self.foe_pick,
+            "selectionSource": self.selection_source,
+            "ownSelectionPolicy": self.own_selection_policy,
+            "foeSelectionPolicy": self.foe_selection_policy,
+            "ownSelectionMixture": self.own_selection_mixture,
+            "foeSelectionMixture": self.foe_selection_mixture,
+            "selectionValue": self.selection_value,
             "unmodelled": sorted(set(self.unmodelled)),
             "decisions": [
                 {
@@ -647,6 +673,9 @@ def generate(
     standings: Standings | None = None,
     standings_pool: str = "all",
     evaluate: LeafEvaluator | None = None,
+    book: SelectionBook | None = None,
+    explore_epsilon: float = DEFAULT_EPSILON,
+    explore_temperature: float = DEFAULT_TEMPERATURE,
 ) -> dict[str, Any]:
     """Plays games and appends one JSON line per finished game.
 
@@ -665,7 +694,20 @@ def generate(
     abstraction and no pairwise model. Only the SP spread is filled from usage, which
     matches the information a player really has: open team sheets show the nature and blank
     the investment. Games record which pool they came from in ``foeArchetype``.
+
+    ``book`` replaces the uniform 4-of-6 draw with the solved selection equilibrium, for
+    *both* sides. It is looked up by the opponent's team sheet, so nothing about the four
+    they bring reaches our draw -- :mod:`pokeuraou.selection_book` lists the four ways that
+    could have gone wrong. The opponent's spreads then come from the sampled class rather
+    than from a fresh usage draw, because the column strategy the game uses is the strategy
+    of a player holding exactly that investment. A team the book does not cover falls back
+    to the uniform draw and is counted in ``book_misses``.
     """
+    if book is not None and standings is None:
+        raise ValueError(
+            "a selection book is keyed on tournament team sheets, so it needs the "
+            "standings pool it was solved against"
+        )
     if standings is not None:
         field = cluster_labels(reg, standings, standings_pool)
     else:
@@ -680,6 +722,8 @@ def generate(
 
     stats = {
         "games": 0,
+        "book_hits": 0,
+        "book_misses": 0,
         "finished": 0,
         "discarded_unfinished": 0,
         "wins": 0,
@@ -688,11 +732,24 @@ def generate(
     }
     with path.open("a", encoding="utf-8") as handle:
         for _ in range(games):
+            drawn = None
             if standings is not None:
                 pool = standings.pool(standings_pool)
                 team = pool[int(rng.integers(len(pool)))]
                 label = field.get(team.player, "worlds")
-                foe_six = sample_standings_team(rng, reg, prior, team)
+                entry = book.get(team) if book is not None else None
+                if entry is None:
+                    if book is not None:
+                        stats["book_misses"] += 1
+                    foe_six = sample_standings_team(rng, reg, prior, team)
+                else:
+                    stats["book_hits"] += 1
+                    drawn = entry.draw(
+                        rng,
+                        epsilon=explore_epsilon,
+                        temperature=explore_temperature,
+                    )
+                    foe_six = list(drawn.foe_six)
             elif cooc is not None and rng.random() >= archetype_share:
                 label = "metagame"
                 foe_six = sample_metagame_team(rng, reg, prior, cooc)
@@ -700,12 +757,16 @@ def generate(
                 archetype = archetypes[int(rng.integers(len(archetypes)))]
                 label = archetype.id
                 foe_six = sample_archetype(rng, reg, prior, archetype)
-            own_pick = pick_four_indices(
-                rng, len(roster.sets), size=reg.meta.picked_team_size
-            )
-            foe_pick = pick_four_indices(
-                rng, len(foe_six), size=reg.meta.picked_team_size
-            )
+            if drawn is not None:
+                own_pick = drawn.our_pick
+                foe_pick = drawn.foe_pick
+            else:
+                own_pick = pick_four_indices(
+                    rng, len(roster.sets), size=reg.meta.picked_team_size
+                )
+                foe_pick = pick_four_indices(
+                    rng, len(foe_six), size=reg.meta.picked_team_size
+                )
             own_four = [roster.sets[i] for i in own_pick]
             foe_four = [foe_six[i] for i in foe_pick]
 
@@ -720,6 +781,17 @@ def generate(
                     foe_pick,
                 ),
             )
+            if drawn is not None:
+                record.selection_source = "book"
+                record.own_selection_policy = [
+                    float(x) for x in drawn.our_equilibrium
+                ]
+                record.foe_selection_policy = [
+                    float(x) for x in drawn.foe_equilibrium
+                ]
+                record.own_selection_mixture = [float(x) for x in drawn.our_mixture]
+                record.foe_selection_mixture = [float(x) for x in drawn.foe_mixture]
+                record.selection_value = drawn.value
             stats["games"] += 1
             if record.outcome is None:
                 stats["discarded_unfinished"] += 1

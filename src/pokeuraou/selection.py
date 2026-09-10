@@ -40,6 +40,7 @@ from .equilibrium import BayesianEquilibrium, solve_bayesian
 from .position import Position
 from .priors import SampledSet
 from .regulation import Regulation
+from .selection_book import BookEntry
 from .selfplay import position_from_sets
 from .teams import all_selections
 
@@ -199,6 +200,43 @@ def solve_selection(
     )
 
 
+def book_entry(
+    analysis: SelectionAnalysis,
+    *,
+    key: str,
+    player: str = "",
+    place: int = 0,
+    model: str = "",
+) -> BookEntry:
+    """The solved game in cache form, for :mod:`pokeuraou.selection_book`.
+
+    Nothing is recomputed: the row strategy, the per-class column strategies and both EV
+    loss vectors are exactly what the LP returned. What the entry adds is the *key* -- the
+    opponent's public sheet -- which is the reason a cached row is not 後出しジャンケン.
+    """
+    eq = analysis.equilibrium
+    return BookEntry(
+        key=key,
+        player=player,
+        place=place,
+        selections=analysis.ours,
+        our_strategy=np.asarray(eq.row_strategy, dtype=np.float64),
+        our_ev_loss=np.asarray(eq.row_ev_loss, dtype=np.float64),
+        class_weights=np.asarray(eq.weights, dtype=np.float64),
+        class_sets=tuple(c.sets for c in analysis.classes),
+        their_strategies=tuple(
+            np.asarray(y, dtype=np.float64) for y in eq.col_strategies
+        ),
+        their_ev_loss=tuple(np.asarray(y, dtype=np.float64) for y in eq.col_ev_loss),
+        value=analysis.value,
+        duality_gap=float(eq.duality_gap),
+        antisymmetry_error=analysis.antisymmetry_error,
+        seconds=analysis.seconds,
+        model=model,
+        notes=analysis.notes,
+    )
+
+
 def cyclic_share(matrix: np.ndarray) -> tuple[float, float, float]:
     """Splits a symmetric game's matrix into transitive and cyclic parts.
 
@@ -314,6 +352,7 @@ def render(analysis: SelectionAnalysis, namer: Any = None, top: int = 8) -> str:
 __all__ = [
     "SelectionAnalysis",
     "SpreadClass",
+    "book_entry",
     "cyclic_share",
     "render",
     "solve_selection",
