@@ -9,7 +9,7 @@
     "date": "2026-09-11",
     "note": "ミラーでこの3つが3すくみになっていることが知られている、という報告。原文の記法は「①←②←③←①」。矢印の向きは原文からは一意に決まらないので、ツールは向きを仮定せず測った向きを表示する"
   },
-  "note": "This is *human* knowledge, not a model output, which is why it is worth keeping: the mirror is the one case where the game's value is forced to 0.500 by the value function's antisymmetry, so a cycle here is a claim the model can be checked against rather than a claim derived from it. A pure equilibrium in the mirror is incompatible with a genuine three-cycle, so this file is also the disproof of any pure mirror recommendation.",
+  "note": "This is *human* knowledge, not a model output, which is why it is worth keeping: the mirror is the one case where the game's value is forced to 0.500 by the value function's antisymmetry, so a cycle here is a claim the model can be checked against rather than a claim derived from it. Read `scope` before drawing any conclusion from it: the ring is about these three against each other and nothing else.",
   "cycles": [
     {
       "id": "toxapex-core",
@@ -17,20 +17,39 @@
       "ring": [
         {
           "label": "①",
-          "leads": ["toxapex", "incineroar"],
-          "bench": ["venusaur", "garchomp"]
+          "leads": [
+            "toxapex",
+            "incineroar"
+          ],
+          "bench": [
+            "venusaur",
+            "garchomp"
+          ]
         },
         {
           "label": "②",
-          "leads": ["toxapex", "venusaur"],
-          "bench": ["incineroar", "garchomp"]
+          "leads": [
+            "toxapex",
+            "venusaur"
+          ],
+          "bench": [
+            "incineroar",
+            "garchomp"
+          ]
         },
         {
           "label": "③",
-          "leads": ["toxapex", "charizard"],
-          "bench": ["incineroar", "venusaur"]
+          "leads": [
+            "toxapex",
+            "charizard"
+          ],
+          "bench": [
+            "incineroar",
+            "venusaur"
+          ]
         }
       ]
     }
-  ]
+  ],
+  "scope": "ミラー限定、かつこの3通りの相互関係だけ。この3つが他の編成に強いという主張ではなく、ミラーの90通りの中で上位だという主張でもない。3つの間に環があっても、3つ全部に勝つ4番目があれば全体の均衡は純戦略のままで矛盾しない — 検証すべきは 3x3 の部分行列と、それに制限したゲームの均衡だけ"
 }

@@ -1,10 +1,14 @@
 """Plays the mirror's reported three-way cycle instead of asking the value function.
 
 ``mirror_cycle.py`` asks the model, and the model says there is no cycle: it has the three
-cited selections as a ladder, and rates all three about 25 points below the selection it
-prefers. There is a good reason to distrust that answer -- **self-play has never played a
-mirror.** Opponents are drawn from the tournament field, our six are ours, so the mirror's
-8,100 cells are extrapolation from a function calibrated on something else entirely.
+cited selections as a ladder, one edge of the ring pointing the wrong way. There is a good
+reason to distrust that answer -- **self-play has never played a mirror.** Opponents are
+drawn from the tournament field, our six are ours, so the mirror's 8,100 cells are
+extrapolation from a function calibrated on something else entirely.
+
+The scope is narrow on purpose: the ring is a claim about these three against *each other*,
+in the mirror. It does not say they are strong selections, and the model preferring a
+different selection over the whole 90 is not evidence either way.
 
 So this settles it by playing. Each edge of the ring is played with the real search on both
 sides, and the measured win rate is printed next to the cell the value function claimed.

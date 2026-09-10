@@ -7,14 +7,23 @@ Anything else is a wiring bug. That makes it the right place to check a claim fr
 the model -- and ``configs/knowledge/*.json`` records one: three selections that players
 know beat each other in a ring.
 
-Two things follow, and both are checkable:
+**What the report is and is not about.** The claim is that these three beat each other in
+a ring. It says nothing about how they fare against the other 87 selections, and nothing
+about them being good: a ring among three is entirely compatible with a fourth selection
+beating all three, in which case the whole game still has a pure equilibrium. So the test
+is the 3x3 submatrix and the equilibrium *restricted to it* -- comparing the ring's members
+against the selection the model prefers over the whole 90 would be answering a question
+nobody asked. (An earlier version of this tool made exactly that mistake, and read the
+model's 25-point preference for a different selection as a disagreement with the players.)
 
-- **a genuine three-cycle rules out a pure equilibrium.** A pure strategy is a claim that
-  one selection is unbeaten; a ring says every selection has an answer. The mirror solve
-  printing a pure recommendation and the cycle being real cannot both be true.
-- **the ring's direction is measurable.** The report says which way the model has it,
-  rather than assuming the direction the note was written in -- "①←②" does not fix the
-  arrow, and reading it wrongly would turn a confirmation into a contradiction.
+Two things are therefore checkable here:
+
+- **the ring itself.** Every edge must go the same way round, and the restricted 3x3 game
+  must have a mixed equilibrium -- a pure one over three selections means one of them
+  dominates the other two, which is the opposite of a ring;
+- **the ring's direction.** The report says which way the model has it, rather than
+  assuming the direction the note was written in -- "①←②" does not fix the arrow, and
+  reading it wrongly would turn a confirmation into a contradiction.
 
     uv run --group learn python tools/mirror_cycle.py --text /c/tmp/mirror.txt
 
@@ -197,12 +206,11 @@ def main() -> None:
             f"  3x3 の巡回の割合 {sub_share * 100:.1f}%"
             "（3すくみなら 100% に近い。0% ならただの強弱）"
         )
-        if len(support) == 1:
-            out.append(
-                "  注: 90 通り全体の均衡は純戦略。報告された3すくみが実在するなら、"
-                "その純戦略には答えがあるはず — つまり両方は成り立たない。"
-                "どちらが誤りかを決めるのは実際の対戦（tools/book_check.py の形）"
-            )
+        out.append(
+            "  注: この検証は3通りの*相互関係*だけの話。3すくみが実在しても、"
+            "この3つ全部に勝つ4番目の選出があれば全体の均衡は純戦略のままで、"
+            "矛盾しない。報告された知識はミラー限定で、他の編成への強さは主張していない"
+        )
 
     # The three cited selections are a sample of the 90; the pure recommendation is only
     # credible if *nothing* beats it, so the best replies to it are worth naming.
@@ -220,7 +228,8 @@ def main() -> None:
             )
         out.append(
             "  行が 50% を超える選出が一つも無ければ、その純戦略は「無敗」の主張として"
-            "整合している（推定誤差の範囲内での話）"
+            "整合している（推定誤差の範囲内での話）。"
+            "これは3すくみの検証ではなく、純戦略それ自体の整合性の検査"
         )
         out.append(
             f"  最大 {column.max() * 100:.1f}%"
