@@ -50,7 +50,7 @@ from .resolve import (
     resume_alternatives,
     turn_leaves,
 )
-from .search import search
+from .search import leaf_ranking, search
 from .selection_book import (
     DEFAULT_EPSILON,
     DEFAULT_TEMPERATURE,
@@ -268,6 +268,40 @@ def _sample_index(rng: np.random.Generator, weights: np.ndarray) -> int:
     return int(rng.choice(len(weights), p=weights / total))
 
 
+def _menus(
+    reg: Regulation,
+    pos: Position,
+    limits: tuple[int, int],
+    evaluate: LeafEvaluator,
+    budget: Budget,
+    rank_by_leaf: bool,
+) -> tuple[list[SideAction], list[SideAction]]:
+    """Both sides' candidate menus, as one agent sees them.
+
+    A menu belongs to the agent that built it, not to the position: with `rank_by_leaf`
+    the candidates are ordered by what the leaf thinks of where they lead rather than by
+    expected damage, and two agents ranking differently are choosing from different menus.
+    That is why this returns a pair and why `play_game` calls it once per agent when the
+    settings differ -- handing one agent's menu to the other would make a ranking
+    comparison measure nothing.
+    """
+    if not rank_by_leaf:
+        return (
+            narrow(reg, pos, 0, limit=limits[0]).actions,
+            narrow(reg, pos, 1, limit=limits[1]).actions,
+        )
+    return (
+        narrow(
+            reg, pos, 0, limit=limits[0],
+            rank=leaf_ranking(reg, pos, 0, evaluate, budget=budget),
+        ).actions,
+        narrow(
+            reg, pos, 1, limit=limits[1],
+            rank=leaf_ranking(reg, pos, 1, evaluate, budget=budget),
+        ).actions,
+    )
+
+
 def play_game(
     reg: Regulation,
     rng: np.random.Generator,
@@ -281,6 +315,7 @@ def play_game(
     evaluate: LeafEvaluator | None | tuple[LeafEvaluator | None, LeafEvaluator | None] = None,
     selection: tuple[list[str], list[str], tuple[int, ...], tuple[int, ...]] | None = None,
     depth: int | tuple[int, int] = 1,
+    rank_by_leaf: bool | tuple[bool, bool] = False,
 ) -> GameRecord:
     """Plays one game to a result, sampling both sides from the turn's equilibrium.
 
@@ -294,6 +329,11 @@ def play_game(
     """
     limits = (search_limit, search_limit) if isinstance(search_limit, int) else search_limit
     depths = (depth, depth) if isinstance(depth, int) else depth
+    ranked = (
+        (rank_by_leaf, rank_by_leaf)
+        if isinstance(rank_by_leaf, bool)
+        else rank_by_leaf
+    )
     leaves = evaluate if isinstance(evaluate, tuple) else (evaluate, evaluate)
     record = GameRecord(
         own_team=[_set_json(reg, s) for s in own],
@@ -318,39 +358,42 @@ def play_game(
             pos = _do_replacement_node(reg, rng, pos, owed, record, leaves[0])
             continue
 
-        ours = narrow(reg, pos, 0, limit=limits[0]).actions
-        theirs = narrow(reg, pos, 1, limit=limits[1]).actions
+        own_leaf = leaves[0] if leaves[0] is not None else objective.batch
+        foe_leaf = leaves[1] if leaves[1] is not None else objective.batch
+        ours, theirs = _menus(reg, pos, limits, own_leaf, budget, ranked[0])
         if not ours or not theirs:
             break
 
         try:
             own_search = search(
-                reg,
-                pos,
-                ours,
-                theirs,
-                leaves[0] if leaves[0] is not None else objective.batch,
-                budget=budget,
-                depth=depths[0],
+                reg, pos, ours, theirs, own_leaf, budget=budget, depth=depths[0]
             )
         except EquilibriumError:
             break
         record.unmodelled.extend(own_search.unmodelled)
         equilibrium = own_search.equilibrium
 
-        # With different leaves the two sides are no longer solving one game, so the
-        # column player's strategy has to come from *its* matrix. Same evaluator and the
-        # same depth on both sides skips this entirely.
+        # With a different leaf, depth or ranking the two sides are no longer solving one
+        # game, so the column player's strategy has to come from *its* matrix -- over
+        # *its* menu, because a ranking that differs is a different menu. Identical
+        # settings on both sides skip all of this and behave exactly as before.
         foe_equilibrium = equilibrium
-        if leaves[1] is not leaves[0] or depths[1] != depths[0]:
+        foe_theirs = theirs
+        if (
+            leaves[1] is not leaves[0]
+            or depths[1] != depths[0]
+            or ranked[1] != ranked[0]
+        ):
+            foe_ours, foe_theirs = (
+                (ours, theirs)
+                if ranked[1] == ranked[0]
+                else _menus(reg, pos, limits, foe_leaf, budget, ranked[1])
+            )
+            if not foe_ours or not foe_theirs:
+                break
             try:
                 foe_search = search(
-                    reg,
-                    pos,
-                    ours,
-                    theirs,
-                    leaves[1] if leaves[1] is not None else objective.batch,
-                    budget=budget,
+                    reg, pos, foe_ours, foe_theirs, foe_leaf, budget=budget,
                     depth=depths[1],
                 )
             except EquilibriumError:
@@ -360,7 +403,7 @@ def play_game(
 
         chosen = [
             ours[_sample_index(rng, equilibrium.row_strategy)],
-            theirs[_sample_index(rng, foe_equilibrium.col_strategy)],
+            foe_theirs[_sample_index(rng, foe_equilibrium.col_strategy)],
         ]
         record.decisions.append(
             Decision(
@@ -369,7 +412,7 @@ def play_game(
                 position=pos.to_json(),
                 own_actions=[a.to_choice() for a in ours],
                 own_policy=[float(x) for x in equilibrium.row_strategy],
-                foe_actions=[a.to_choice() for a in theirs],
+                foe_actions=[a.to_choice() for a in foe_theirs],
                 foe_policy=[float(x) for x in foe_equilibrium.col_strategy],
                 search_value=float(equilibrium.value),
                 own_chosen=chosen[0].to_choice(),

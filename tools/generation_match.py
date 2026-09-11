@@ -70,6 +70,14 @@ def main() -> None:
         "on both sides this makes the match a pure width comparison, which is how "
         "'does a wider menu actually win' gets answered without building anything.",
     )
+    ap.add_argument(
+        "--rank-leaf",
+        action="store_true",
+        help="the arm under test ranks candidates with the leaf instead of the damage "
+        "score. With the same model and width on both sides this is a pure ranking "
+        "comparison.",
+    )
+    ap.add_argument("--baseline-rank-leaf", action="store_true", help="same for the other arm")
     ap.add_argument("--seed", type=int, default=77)
     ap.add_argument("--max-turns", type=int, default=40)
     ap.add_argument(
@@ -163,12 +171,14 @@ def main() -> None:
         tags += f"@d{args.depth}"
     if other_limit != args.limit:
         tags += f"@w{args.limit}"
+    if args.rank_leaf != args.baseline_rank_leaf:
+        tags += "@leafrank" if args.rank_leaf else "@damagerank"
     arm = f"{new_name}{tags}" if tags else new_name
-    for seat, leaves, depths, limits in (
+    for seat, leaves, depths, limits, ranks in (
         (f"{arm} = side 0", (value, baseline), (args.depth, args.baseline_depth),
-         (args.limit, other_limit)),
+         (args.limit, other_limit), (args.rank_leaf, args.baseline_rank_leaf)),
         (f"{arm} = side 1", (baseline, value), (args.baseline_depth, args.depth),
-         (other_limit, args.limit)),
+         (other_limit, args.limit), (args.baseline_rank_leaf, args.rank_leaf)),
     ):
         side_leaves = (
             (new_name, old_name) if leaves[0] is value else (old_name, new_name)
@@ -199,6 +209,7 @@ def main() -> None:
                 max_turns=args.max_turns,
                 evaluate=leaves,
                 depth=depths,
+                rank_by_leaf=ranks,
             )
             if record.outcome is None:
                 unfinished += 1
