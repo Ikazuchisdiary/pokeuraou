@@ -476,18 +476,21 @@ impl<'a> Turn<'a> {
         {
             return Ok(false);
         }
-        if status == "slp" && !self.budget.pinned_policy {
-            // The duration is part of the state and the modal outcome is an approximation
-            // Python reports; refusing keeps the port's answers exact.
-            return Err("sleep duration is not branched".into());
-        }
+        let sleep_counter = if self.budget.pinned_policy {
+            SLEEP_COUNTER_PINNED
+        } else {
+            SLEEP_COUNTER_MODAL
+        };
         let lum = {
             let mon = self.mon_at_mut(side, slot).unwrap();
             mon.status = Some(Id::new(status));
             mon.status_counter = match status {
                 "tox" => Some(0),
                 "frz" => Some(FREEZE_COUNTER),
-                "slp" => Some(SLEEP_COUNTER_PINNED),
+                // Champions' sleep is `sample([2, 3, 3])`. Python uses the modal
+                // outcome and reports it; under the pinned policy the oracle's `sample`
+                // returns the first element. Both are deterministic, so both are matched.
+                "slp" => Some(sleep_counter),
                 _ => None,
             };
             mon.item.map(|i| i.as_str() == "lumberry").unwrap_or(false)
@@ -532,6 +535,7 @@ impl<'a> Turn<'a> {
 
 pub const FREEZE_COUNTER: i64 = 3;
 pub const SLEEP_COUNTER_PINNED: i64 = 2;
+pub const SLEEP_COUNTER_MODAL: i64 = 3;
 pub const FULL_PARALYSIS_CHANCE: f64 = 1.0 / 8.0;
 pub const CONFUSION_SELF_HIT_CHANCE: f64 = 1.0 / 3.0;
 pub const THAW_CHANCE: f64 = 0.25;
@@ -626,7 +630,20 @@ fn ability_handled(ability: &str) -> bool {
             | "pressure" | "shadowtag" | "arenatrap" | "magnetpull" | "runaway" | "telepathy"
             | "healer" | "symbiosis" | "sweetveil" | "flowerveil" | "aromaveil" | "damp"
             | "lightmetal" | "heavymetal" | "sandveil" | "snowcloak" | "stall"
-    )
+            // Weather setters this port applies on switch-in and mega.
+            | "desolateland" | "primordialsea" | "deltastream"
+            // Type changers and retypers: the damage layer owns them, and the resolver
+            // never rewrites the Pokemon's types for them -- nor does Python.
+            | "aerilate" | "pixilate" | "galvanize" | "refrigerate" | "normalize"
+            | "liquidvoice" | "protean" | "libero"
+            // Fractional priority and the weather HP abilities, both implemented here.
+            | "quickdraw" | "icebody" | "raindish" | "comatose" | "mirrorarmor"
+            // Python reports these and changes nothing, so ignoring them agrees with it.
+            // (`cursedbody` is deliberately absent: with secondaries enumerated it really
+            // does branch a Disable, which this port does not implement.)
+            | "static" | "flamebody" | "effectspore" | "poisonpoint" | "cutecharm"
+            | "poisontouch" | "angerpoint" | "berserk" | "angershell" | "truant" | "dancer"
+    ) || crate::inert::ability_is_inert(ability)
 }
 
 /// Items likewise. A held item this port does not know is refused rather than ignored.
@@ -646,17 +663,19 @@ fn item_handled(item: &str) -> bool {
             | "terrainextender" | "damprock" | "heatrock" | "icyrock" | "smoothrock"
             | "assaultvest" | "clearamulet" | "covertcloak" | "loadeddice" | "protectivepads"
             | "ejectpack" | "boosterenergy" | "abilityshield" | "mirrorherb" | "punchingglove"
-    ) || item.ends_with("ite")
+    ) || crate::inert::item_is_inert(item)
+        // Mega stones carry no turn effect of their own; the mega action owns the forme
+        // change, and `reg.mega_targets` is what says which stone belongs to whom.
+        || item.ends_with("ite")
         || item.ends_with("itex")
         || item.ends_with("itey")
 }
 
 /// Move fields this port does not implement. A move carrying one is refused.
-const UNHANDLED_MOVE_FIELDS: [&str; 12] = [
+const UNHANDLED_MOVE_FIELDS: [&str; 11] = [
     "damageCallback",
     "ohko",
     "multiaccuracy",
-    "thawsTarget",
     "selfdestruct",
     "struggleRecoil",
     "mindBlownRecoil",
@@ -681,7 +700,8 @@ pub(crate) fn status_move_handled(move_id: &str) -> bool {
             | "bulkup" | "howl" | "growl" | "leer" | "tailwhip" | "screech" | "charm"
             | "faketears" | "metalsound" | "willowisp" | "thunderwave" | "toxic" | "taunt"
             | "leechseed" | "partingshot" | "lifedew" | "recover" | "softboiled" | "slackoff"
-            | "milkdrink" | "confuseray"
+            | "milkdrink" | "confuseray" | "yawn" | "hypnosis" | "spore" | "sleeppowder"
+            | "encore"
     )
 }
 
@@ -722,9 +742,39 @@ pub(crate) const TWO_TURN_MOVES: [(&str, &[&str]); 12] = [
     ("geomancy", &[]),
 ];
 
-fn check_position_supported(pos: &Position) -> Result<(), String> {
-    for side in &pos.sides {
-        for mon in &side.pokemon {
+/// The Pokemon this turn can involve: the four on the field, plus anything a chosen
+/// switch brings in. A benched Pokemon with an ability this port does not model cannot
+/// affect the turn, and refusing for it was throwing away half the coverage.
+fn involved<'a>(pos: &'a Position, side_actions: &[Vec<SlotAction>; 2]) -> Vec<&'a Pokemon> {
+    let mut out: Vec<&Pokemon> = Vec::new();
+    for (side_index, side) in pos.sides.iter().enumerate() {
+        for slot in 0..side.active.len() {
+            if let Some(mon) = side.active_pokemon(slot) {
+                out.push(mon);
+            }
+        }
+        for action in &side_actions[side_index] {
+            if let SlotAction::Switch { party_index, species, .. } = action {
+                let found = side
+                    .pokemon
+                    .iter()
+                    .find(|mon| mon.species == *species || mon.base_species == *species)
+                    .or_else(|| side.pokemon.get(party_index.saturating_sub(1)));
+                if let Some(mon) = found {
+                    out.push(mon);
+                }
+            }
+        }
+    }
+    out
+}
+
+fn check_position_supported(
+    pos: &Position,
+    side_actions: &[Vec<SlotAction>; 2],
+) -> Result<(), String> {
+    {
+        for mon in involved(pos, side_actions) {
             if !ability_handled(mon.ability.as_str()) {
                 return Err(format!("ability: {}", mon.ability));
             }
@@ -744,6 +794,12 @@ fn check_position_supported(pos: &Position) -> Result<(), String> {
             if mon.transformed || mon.stats_override.is_some() {
                 return Err("transformed Pokemon".into());
             }
+            // Three abilities change the position in ways this port does not implement.
+            // They are refused here rather than at the point of use so a turn can never
+            // get half-way through one.
+            if matches!(mon.ability.as_str(), "cursedbody" | "stancechange" | "slowstart") {
+                return Err(format!("ability: {}", mon.ability));
+            }
         }
     }
     Ok(())
@@ -762,7 +818,7 @@ fn volatile_handled(vid: &str) -> bool {
             | "leechseed" | "partiallytrapped" | "saltcure" | "perishsong" | "endure"
             | "unburden" | "charge" | "smackdown" | "ingrain" | "magnetrise" | "telekinesis"
             | "focusenergy" | "dragoncheer" | "taunt" | "choicelock" | "glaiverush"
-            | "throatchop" | "flashfire" | "yawn"
+            | "throatchop" | "flashfire" | "yawn" | "encore"
     )
 }
 
@@ -814,7 +870,7 @@ pub fn resolve_turn(
     side_actions: &[Vec<SlotAction>; 2],
     budget: Budget,
 ) -> Result<TurnResult, String> {
-    check_position_supported(pos)?;
+    check_position_supported(pos, side_actions)?;
     if pos.sides.len() != 2 || pos.sides.iter().any(|s| s.active.len() != 2) {
         return Err("this port handles two sides of two active slots".into());
     }
@@ -1319,6 +1375,9 @@ fn switch_in_ability(turn: &mut Turn, side: usize, slot: usize) {
         "drizzle" => Some("raindance"),
         "sandstream" => Some("sandstorm"),
         "snowwarning" => Some("snowscape"),
+        "desolateland" => Some("desolateland"),
+        "primordialsea" => Some("primordialsea"),
+        "deltastream" => Some("deltastream"),
         _ => None,
     };
     if let Some(weather) = weather {

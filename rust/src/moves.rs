@@ -900,6 +900,13 @@ fn after_hit(
         turn.apply_status(me.0, me.1, "brn")?;
     }
 
+    // Throat Chop adds its own condition from a 100%-chance `secondary.onHit`, so there is
+    // nothing declarative in the dump to drive it.
+    if mv.id == "throatchop" && dealt > 0 && defender_alive {
+        let duration = effect_duration(turn, mv, "throatchop", action.side, action.slot);
+        turn.add_volatile(target.0, target.1, "throatchop", duration);
+    }
+
     if mv.has_flag("contact") && dealt > 0 {
         let (ability, item) = match turn.mon_at(target.0, target.1) {
             None => (None, None),
@@ -1276,6 +1283,44 @@ fn immune_to_move(
     None
 }
 
+/// Locks the target into the move it last used. Fails -- with no volatile at all --
+/// when the target has not moved, when that move cannot be encored, or when it is out of
+/// PP, all three of which are `return false` in Showdown's `onStart`.
+fn apply_encore(turn: &mut Turn, side: usize, slot: usize, mv: &Move) -> bool {
+    let (last_move, already) = match turn.mon_at(side, slot) {
+        None => return false,
+        Some(mon) if mon.fainted => return false,
+        Some(mon) => (mon.last_move, mon.has_volatile("encore")),
+    };
+    let Some(last_move) = last_move else { return false };
+    if already {
+        return false;
+    }
+    match turn.reg.moves.get(last_move.as_str()) {
+        None => return false,
+        Some(last) if last.has_flag("failencore") => return false,
+        Some(_) => {}
+    }
+    let has_pp = match turn.mon_at(side, slot) {
+        None => false,
+        Some(mon) => mon.moves.get(last_move).map(|m| m.pp > 0).unwrap_or(false),
+    };
+    if !has_pp {
+        return false;
+    }
+    let mut duration = effect_duration(turn, mv, "encore", side, slot).unwrap_or(3);
+    if turn.acted[side][slot] {
+        duration += 1;
+    }
+    if let Some(mon) = turn.mon_at_mut(side, slot) {
+        let mut effect = Effect::new(Id::new("encore"));
+        effect.duration = Some(duration);
+        effect.move_id = Some(last_move);
+        mon.volatiles.push(effect);
+    }
+    true
+}
+
 fn stall_success_chance(counter: i64) -> f64 {
     1.0 / counter.max(1) as f64
 }
@@ -1442,8 +1487,14 @@ fn apply_status_move(
         }
         if let Some(vid) = mv.raw_str("volatileStatus") {
             let vid = vid.to_string();
-            if matches!(vid.as_str(), "disable" | "encore") {
-                return Err(format!("status move volatile: {vid}"));
+            if vid == "encore" {
+                if !apply_encore(turn, target.0, target.1, mv) {
+                    turn.move_failed[action.side][action.slot] = true;
+                }
+                continue;
+            }
+            if vid == "disable" {
+                return Err("status move volatile: disable".into());
             }
             if !crate::resolve::volatile_is_handled(&vid) {
                 return Err(format!("status move volatile: {vid}"));
@@ -1809,6 +1860,17 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
                     if volatile.id.as_str() == "yawn" {
                         yawn_expired = true;
                     }
+                    continue;
+                }
+            }
+            if volatile.id.as_str() == "encore" {
+                // `onResidual`: an Encore whose move has run out of PP ends early.
+                let spent = volatile
+                    .move_id
+                    .and_then(|id| mon.moves.get(id))
+                    .map(|slot| slot.pp > 0)
+                    .unwrap_or(false);
+                if !spent {
                     continue;
                 }
             }

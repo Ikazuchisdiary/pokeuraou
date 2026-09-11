@@ -12,6 +12,7 @@ mod damage;
 mod effects;
 mod fixedpoint;
 mod id;
+mod inert;
 mod moveinfo;
 mod moves;
 mod position;
@@ -100,7 +101,7 @@ pub fn report_json_diff(path: &str, left: &Value, right: &Value, shown: &mut usi
         }
         (Value::Array(a), Value::Array(b)) => {
             if a.len() != b.len() {
-                println!("  {path}: python has {} items, rust has {}", a.len(), b.len());
+                println!("  {path}: python has {} items {}, rust has {} {}", a.len(), serde_json::to_string(a).unwrap_or_default(), b.len(), serde_json::to_string(b).unwrap_or_default());
                 *shown += 1;
                 return;
             }
