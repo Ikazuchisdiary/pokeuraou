@@ -322,10 +322,11 @@ def analyse(
     all_exact = np.ones((len(row.kept), len(col.kept)), dtype=bool)
     started = time.perf_counter()
     for _weight, pos in positions:
-        # One resolve, both objectives, every leaf of the node in one forward pass. Doing
-        # it cell by cell through the per-position protocol is what made a learned value
-        # function cost 656 seconds on a 24x24x4 matrix against 11.5 for a parameter-free
-        # one -- and this is the analyser, the path a person waits on.
+        # One resolve, both objectives, every leaf of the node in one forward pass.
+        # Measured on this path with a learned value function: 10.47 seconds against 5.63
+        # for a 24x24 matrix over four spread classes. The output is the same to 1.2e-7,
+        # which is float32 accumulating in a different order and four decimals short of
+        # anything the tool prints.
         filled, notes, exact = batched_payoffs(
             reg,
             pos,

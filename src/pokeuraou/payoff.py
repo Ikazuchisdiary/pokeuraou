@@ -51,13 +51,12 @@ class Objective(Protocol):
     def batch(self, positions: Sequence[Position]) -> np.ndarray:
         """The same payoff for many positions at once.
 
-        Part of the protocol rather than an optimisation a caller may or may not find,
-        because the difference is not small for a learned value function: scoring a
-        24x24 matrix over four spread classes one position at a time took 656 seconds
-        against 11.5 for a parameter-free objective, and almost none of that is the
-        forward pass -- it is the per-position work around it. A caller that has a whole
-        node's leaves in hand should never be the one to decide whether batching is
-        worth it.
+        Part of the protocol rather than an optimisation a caller may or may not find.
+        A caller holding a whole node's leaves should not be the one deciding whether
+        batching is worth it: for a parameter-free objective it costs nothing and this
+        loops, and for a learned value function it is 1.86x on a 24x24 matrix over four
+        spread classes -- almost none of which is the forward pass itself, it is the
+        per-position work around it.
         """
         ...
 

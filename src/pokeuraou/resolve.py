@@ -3677,11 +3677,17 @@ def batched_payoffs(
 ) -> tuple[list[np.ndarray], set[str], np.ndarray]:
     """One payoff matrix per evaluator, with every leaf in the node scored in one call.
 
-    The alternative is to apply a per-position objective branch by branch, which for a
-    learned value function means one forward pass per leaf: measured on a 24x24 matrix over
-    four spread classes, 656 seconds against 11.5 with a parameter-free objective. The
-    forward pass is a few percent of the per-leaf cost, so batching across the node is the
-    whole optimisation.
+    The alternative is to apply a per-position objective branch by branch, one forward
+    pass per leaf. Measured on a 24x24 matrix over four spread classes with a learned
+    value function, that is 10.47 seconds against 5.63 -- 1.86x, from scoring 576 cells'
+    leaves in one call instead of thousands.
+
+    This docstring used to claim 656 seconds against 11.5 for the same comparison, and
+    that number is no longer about anything: it was taken when every leaf went through
+    `to_json` on its way to the encoder, which was 64% of the per-leaf cost, and Position
+    objects have gone straight to `encode_positions` since. A stale measurement argues for
+    the right change for a reason that has stopped being true, which is worse than no
+    measurement -- it cannot be checked without redoing it.
 
     Several evaluators rather than one because the analyser runs a cross-check: the same
     position scored by a second objective, to show whether a recommendation survives a

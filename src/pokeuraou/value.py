@@ -572,8 +572,8 @@ class BatchedValue:
 
         `__call__` takes one position at a time and is correspondingly slow; `batch`
         carries this object's own batch form, so a caller holding a whole node's leaves
-        pays one forward pass rather than one per leaf. That is the difference between
-        11.5 seconds and 656 on a 24x24 matrix over four spread classes.
+        pays one forward pass rather than one per leaf -- 1.86x on a 24x24 matrix over
+        four spread classes, measured through the analyser.
         """
         from .payoff import _Objective
 
