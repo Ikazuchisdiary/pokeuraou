@@ -3698,57 +3698,76 @@ def _slot_of(turn: _Turn, source_slot: str | None) -> tuple[int, int] | None:
     return side, slot
 
 
+def residual_order(reg: Regulation, turn: _Turn) -> list[tuple[int, int]]:
+    """Active slots in Showdown's residual order: by Speed, fastest first.
+
+        eachEvent(eventid, effect, relayVar) {
+            const actives = this.getAllActive();
+            ...
+            this.speedSort(actives, (a, b) => b.speed - a.speed);
+
+    ``pokemon.speed`` is the Trick-Room-inverted value, so under Trick Room the order
+    reverses -- the same quantity the action queue sorts on.
+
+    This used to iterate side 0 then side 1, which made the residual phase
+    seat-dependent: in a mirrored position our burn and trap resolved before their
+    poison in *both* orientations, so a faint that the residuals cause landed on a
+    different side depending on which seat we held. Measured at 4.8 points on one
+    cell of a turn-14 position.
+
+    Speed ties are broken by species and slot rather than by side, which is
+    deliberate but not faithful: Showdown breaks them at random, and the residual
+    phase does not branch yet. A side-indexed tie-break would put back exactly the
+    asymmetry this fixes, so the tie is reported instead of being resolved by seat.
+    """
+    entries: list[tuple[int, int, str, int, int]] = []
+    trick_room = turn.pos.field.trick_room
+    state = turn.field()
+    speeds: list[int] = []
+    for side in range(2):
+        conditions = frozenset(c.id for c in turn.pos.sides[side].side_conditions)
+        for slot in range(len(turn.pos.sides[side].active)):
+            mon = turn.mon_at(side, slot)
+            fighter = turn.battler_at(side, slot)
+            if mon is None or fighter is None:
+                # Empty and fainted slots keep their place in the list -- callers skip
+                # them -- but sort last, where they cannot affect anything.
+                entries.append((1, 0, "", slot, side))
+                continue
+            speed = int(effective_speed(reg, fighter, state, conditions)[0])
+            if trick_room:
+                speed = 10000 - speed
+            speeds.append(speed)
+            entries.append((0, -speed, mon.species, slot, side))
+    if len(speeds) != len(set(speeds)):
+        turn.unmodelled.add("residual speed tie (Showdown breaks it at random)")
+    entries.sort()
+    return [(side, slot) for _empty, _speed, _species, slot, side in entries]
+
+
 def _residuals(reg: Regulation, turn: _Turn) -> None:
     """End-of-turn effects, in Showdown's residual order."""
     field_ = turn.pos.field
+    order: list[tuple[int, int]] | None = None
 
     def actives() -> list[tuple[int, int]]:
-        """Active slots in Showdown's residual order: by Speed, fastest first.
+        """The residual order, computed once for the whole phase.
 
-            eachEvent(eventid, effect, relayVar) {
-                const actives = this.getAllActive();
-                ...
-                this.speedSort(actives, (a, b) => b.speed - a.speed);
+        Once, not per residual, for both of the reasons that usually disagree.
 
-        ``pokemon.speed`` is the Trick-Room-inverted value, so under Trick Room the order
-        reverses -- the same quantity the action queue sorts on.
+        Faithfulness: Showdown's ``eachEvent('Residual')`` speed-sorts the actives a
+        single time and then walks that list, so a Speed change *during* the phase --
+        Speed Boost is itself an ``onResidual`` -- does not reorder what is left of it.
+        Recomputing before every residual reordered it.
 
-        This used to iterate side 0 then side 1, which made the residual phase
-        seat-dependent: in a mirrored position our burn and trap resolved before their
-        poison in *both* orientations, so a faint that the residuals cause landed on a
-        different side depending on which seat we held. Measured at 4.8 points on one
-        cell of a turn-14 position.
-
-        Speed ties are broken by species and slot rather than by side, which is
-        deliberate but not faithful: Showdown breaks them at random, and the residual
-        phase does not branch yet. A side-indexed tie-break would put back exactly the
-        asymmetry this fixes, so the tie is reported instead of being resolved by seat.
+        Cost: each computation is four Speed calculations, each of which builds a
+        battler view. Eight residuals per phase made it 30% of generation time, which is
+        what a profile of a real game said before this cache existed.
         """
-        entries: list[tuple[int, int, str, int, int]] = []
-        trick_room = turn.pos.field.trick_room
-        state = turn.field()
-        speeds: list[int] = []
-        for side in range(2):
-            conditions = frozenset(
-                c.id for c in turn.pos.sides[side].side_conditions
-            )
-            for slot in range(len(turn.pos.sides[side].active)):
-                mon = turn.mon_at(side, slot)
-                fighter = turn.battler_at(side, slot)
-                if mon is None or fighter is None:
-                    # Empty and fainted slots keep their place in the list -- callers skip
-                    # them -- but sort last, where they cannot affect anything.
-                    entries.append((1, 0, "", slot, side))
-                    continue
-                speed = int(effective_speed(reg, fighter, state, conditions)[0])
-                if trick_room:
-                    speed = 10000 - speed
-                speeds.append(speed)
-                entries.append((0, -speed, mon.species, slot, side))
-        if len(speeds) != len(set(speeds)):
-            turn.unmodelled.add("residual speed tie (Showdown breaks it at random)")
-        entries.sort()
-        return [(side, slot) for _empty, _speed, _species, slot, side in entries]
+        nonlocal order
+        if order is None:
+            order = residual_order(reg, turn)
+        return order
 
     # Residual order 1: weather. Its duration is decremented *before* its handler runs and
     # the handler is skipped when it expires, so the last turn of a sandstorm deals no

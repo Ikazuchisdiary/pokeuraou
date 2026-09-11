@@ -179,12 +179,24 @@ class Pokemon:
         return self.boosts.get(stat, 0)
 
     def copy(self) -> Pokemon:
-        """A deep copy, by hand.
+        """A deep copy, by hand -- except for the three dicts nothing ever writes into.
 
         ``copy.deepcopy`` costs about 390 microseconds on a full position, and the resolver
         makes one per branch per action -- which put a single turn at 21 seconds. Copying
         the known fields explicitly is roughly twenty times faster, and the shape is fixed
         so there is nothing to miss.
+
+        ``sp``, ``ability_state`` and ``stats_override`` are *shared* with the original
+        rather than copied. All three are write-once: a spread is fixed for the battle,
+        ``ability_state`` is only ever read (``.get``), and ``stats_override`` is set when
+        Transform copies a target and read afterwards. Nothing indexes into any of them to
+        assign, so a copy of each -- three dict constructions per Pokemon, eight Pokemon
+        per position, a million positions per generation -- buys nothing.
+
+        Sharing them is only safe as long as that stays true, which is not something to
+        take on trust: ``test_position_copy.py`` wraps all three in a read-only proxy and
+        resolves real turns, so the first line that writes into one fails a test instead
+        of quietly leaking a mutation into a sibling branch.
         """
         return Pokemon(
             slot=self.slot,
@@ -200,7 +212,7 @@ class Pokemon:
             gender=self.gender,
             item=self.item,
             base_item=self.base_item,
-            sp=dict(self.sp) if self.sp is not None else None,
+            sp=self.sp,
             fainted=self.fainted,
             status=self.status,
             status_duration=self.status_duration,
@@ -217,8 +229,8 @@ class Pokemon:
             move_last_turn_failed=self.move_last_turn_failed,
             times_attacked=self.times_attacked,
             active_move_actions=self.active_move_actions,
-            ability_state=dict(self.ability_state),
-            stats_override=dict(self.stats_override) if self.stats_override is not None else None,
+            ability_state=self.ability_state,
+            stats_override=self.stats_override,
             transformed=self.transformed,
         )
 

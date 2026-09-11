@@ -7,10 +7,13 @@
 # cores" is the wrong rule here.
 #
 # --device cpu --torch-threads 1 is deliberate. CPU inference is only 8% slower per process
-# and removes the ~1 GB CUDA context per worker that caps a 12 GB card at nine; the forward
-# pass is 3% of the per-leaf cost, so the GPU has almost nothing to win. And torch defaults
-# to a machine-sized thread pool per process, so without the thread cap fourteen processes
-# spawn a hundred threads onto eight cores and the run ends up slower than a serial one.
+# and removes the ~1 GB CUDA context per worker that caps a 12 GB card at nine, and the GPU
+# has almost nothing to win: re-measured at width 24 with the learned leaf
+# (tools/profile_generation.py), the forward pass is 1.3% of a game and building the batch
+# in Python is ten times that. Moving 1.3% to a card cannot pay for the contexts.
+# And torch defaults to a machine-sized thread pool per process, so without the thread cap
+# fourteen processes spawn a hundred threads onto eight cores and the run ends up slower
+# than a serial one.
 #
 #   bash tools/generate_parallel.sh data/selfplay-gen2 1000 601
 set -uo pipefail
