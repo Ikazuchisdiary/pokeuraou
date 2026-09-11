@@ -40,6 +40,7 @@ from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
 from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.priors import find_cached_chaos, load_chaos
+from pokeuraou.provenance import open_games, provenance, write_game
 from pokeuraou.selfplay import play_game
 from pokeuraou.standings import find_cached_standings, load_standings, sample_standings_team
 from pokeuraou.teams import all_selections, load_roster
@@ -57,6 +58,14 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=77)
     ap.add_argument("--max-turns", type=int, default=40)
     ap.add_argument("--out", type=Path, default=None, help="append one JSON line per seat")
+    ap.add_argument(
+        "--games-out",
+        type=Path,
+        default=None,
+        help="also append every game as self-play-shaped JSONL with a provenance block. "
+        "The two sides search to different widths here, so the block records the width "
+        "per side and a dataset can weigh that however it decides to.",
+    )
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--torch-threads", type=int, default=1)
     args = ap.parse_args()
@@ -82,6 +91,7 @@ def main() -> None:
         file=sys.stderr,
     )
 
+    games_file = open_games(args.games_out)
     for seat, limits in (
         ("wide = side 0", (args.wide, args.narrow)),
         ("wide = side 1", (args.narrow, args.wide)),
@@ -108,6 +118,18 @@ def main() -> None:
             if record.outcome is None:
                 unfinished += 1
                 continue
+            write_game(
+                games_file,
+                record,
+                objective=f"value:{args.value.stem}",
+                search_limit=limits,
+                source=provenance(
+                    "width-match",
+                    seat=seat,
+                    leaves=(args.value.name, args.value.name),
+                    limits=limits,
+                ),
+            )
             seat_played += 1
             # `outcome` is side 0's result, so flip it when the wide side sits at 1.
             wide_won = record.outcome > 0.5 if limits[0] == args.wide else record.outcome < 0.5

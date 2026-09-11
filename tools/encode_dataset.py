@@ -23,6 +23,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pokeuraou.encode import Encoded, Encoder
+from pokeuraou.provenance import SELF_PLAY
 from pokeuraou.regulation import load_regulation
 from pokeuraou.value import Dataset, save_dataset
 
@@ -34,6 +35,14 @@ def main() -> None:
     ap.add_argument("--regulation", default=None, help="default: read it from the games")
     ap.add_argument("--limit", type=int, default=0, help="stop after this many games")
     ap.add_argument("--chunk", type=int, default=4096, help="positions per encode call")
+    ap.add_argument(
+        "--kinds",
+        nargs="*",
+        default=None,
+        help="keep only games with these provenance kinds (selfplay, generation-match, "
+        "width-match, ...). Default keeps everything and prints the breakdown, because "
+        "the question of whether match games help is one to measure, not to assume.",
+    )
     args = ap.parse_args()
 
     files = sorted(args.dir.glob("*.jsonl"))
@@ -53,6 +62,7 @@ def main() -> None:
     foe_index: dict[str, int] = {}
     branching: Counter[int] = Counter()
     search_limits: Counter[str] = Counter()
+    provenances: Counter[str] = Counter()
     unknown: Counter[str] = Counter()
     game_id = 0
     started = time.perf_counter()
@@ -86,6 +96,14 @@ def main() -> None:
                         f"encoding for {encoder.vocab.format_id} "
                         f"(vocab {encoder.vocab.fingerprint()}), widths {encoder.widths}"
                     )
+                # Where the game came from. Self-play is the default and the only thing
+                # that existed before the head-to-head tools started recording; a match
+                # game has real outcomes but a *mismatched* pair of agents, so a dataset
+                # that silently mixes them would blur what the value is conditional on.
+                kind = (record.get("provenance") or {}).get("kind", SELF_PLAY)
+                if args.kinds and kind not in args.kinds:
+                    continue
+                provenances[kind] += 1
                 search_limits[str(record.get("searchLimit"))] += 1
                 label = record.get("foeArchetype", "?")
                 if label not in foe_index:
@@ -135,6 +153,7 @@ def main() -> None:
     print(f"\n{game_id:,} finished games, {len(dataset):,} decisions")
     print(f"  side-0 win rate {dataset.outcome.mean() * 100:.1f}%")
     print(f"  search budget per game: {dict(search_limits)}")
+    print(f"  games by provenance: {dict(provenances)}")
     single = branching[1]
     total = sum(branching.values())
     print(
@@ -159,6 +178,7 @@ def main() -> None:
             "source_dir": str(args.dir),
             "games": game_id,
             "search_limits": dict(search_limits),
+            "provenances": dict(provenances),
         },
     )
     size = out.stat().st_size / 1e6

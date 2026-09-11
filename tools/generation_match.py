@@ -30,6 +30,7 @@ from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
 from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.priors import find_cached_chaos, load_chaos
+from pokeuraou.provenance import open_games, provenance, write_game
 from pokeuraou.selfplay import play_game
 from pokeuraou.standings import find_cached_standings, load_standings, sample_standings_team
 from pokeuraou.teams import all_selections, load_roster
@@ -67,6 +68,15 @@ def main() -> None:
         default=25,
         help="print a progress line every N games. Redirected stdout is fully buffered, so "
         "these are flushed explicitly or they are invisible until the process exits.",
+    )
+    ap.add_argument(
+        "--games-out",
+        type=Path,
+        default=None,
+        help="also append every game played, as self-play-shaped JSONL with a provenance "
+        "block. These carry real outcomes and are training data that has already been "
+        "paid for; the block records the leaf and width *per side*, because the two are "
+        "deliberately mismatched here and a dataset must be able to say so.",
     )
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument(
@@ -123,10 +133,16 @@ def main() -> None:
     # against the field, so a seat advantage cancels when the two are combined.
     print(f"\n  {'seat':>26}  {'games':>6}  {'gen2 win':>9}  {'95%':>6}  {'s/game':>7}")
     wins = played = 0
+    games_file = open_games(args.games_out)
+    new_name = args.value.name
+    old_name = args.baseline.name if args.baseline else args.objective
     for seat, leaves in (
         ("gen2 = side 0", (value, baseline)),
         ("gen2 = side 1", (baseline, value)),
     ):
+        side_leaves = (
+            (new_name, old_name) if leaves[0] is value else (old_name, new_name)
+        )
         rng = np.random.default_rng(args.seed)
         seat_wins = seat_played = unfinished = 0
         started = time.perf_counter()
@@ -156,6 +172,18 @@ def main() -> None:
             if record.outcome is None:
                 unfinished += 1
                 continue
+            write_game(
+                games_file,
+                record,
+                objective=f"value:{args.value.stem}",
+                search_limit=args.limit,
+                source=provenance(
+                    "generation-match",
+                    seat=seat,
+                    leaves=side_leaves,
+                    limits=(args.limit, args.limit),
+                ),
+            )
             seat_played += 1
             # `outcome` is side 0's result, so flip it when the value function sits at 1.
             gen2_won = record.outcome > 0.5 if leaves[0] is value else record.outcome < 0.5
