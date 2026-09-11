@@ -62,6 +62,14 @@ def main() -> None:
         "leaf, same width, same teams, same seed, one side looking a ply further.",
     )
     ap.add_argument("--baseline-depth", type=int, default=1, help="depth for the other arm")
+    ap.add_argument(
+        "--baseline-limit",
+        type=int,
+        default=None,
+        help="candidate width for the other arm; defaults to --limit. With the same model "
+        "on both sides this makes the match a pure width comparison, which is how "
+        "'does a wider menu actually win' gets answered without building anything.",
+    )
     ap.add_argument("--seed", type=int, default=77)
     ap.add_argument("--max-turns", type=int, default=40)
     ap.add_argument(
@@ -149,10 +157,18 @@ def main() -> None:
     # game's provenance, and a reader of that dataset a month from now has no way to know
     # which generation "gen2" meant on the day the match ran -- the `leaves` pair is
     # authoritative, but a label that contradicts it is worse than no label.
-    arm = f"{new_name}@d{args.depth}" if args.depth != args.baseline_depth else new_name
-    for seat, leaves, depths in (
-        (f"{arm} = side 0", (value, baseline), (args.depth, args.baseline_depth)),
-        (f"{arm} = side 1", (baseline, value), (args.baseline_depth, args.depth)),
+    other_limit = args.limit if args.baseline_limit is None else args.baseline_limit
+    tags = ""
+    if args.depth != args.baseline_depth:
+        tags += f"@d{args.depth}"
+    if other_limit != args.limit:
+        tags += f"@w{args.limit}"
+    arm = f"{new_name}{tags}" if tags else new_name
+    for seat, leaves, depths, limits in (
+        (f"{arm} = side 0", (value, baseline), (args.depth, args.baseline_depth),
+         (args.limit, other_limit)),
+        (f"{arm} = side 1", (baseline, value), (args.baseline_depth, args.depth),
+         (other_limit, args.limit)),
     ):
         side_leaves = (
             (new_name, old_name) if leaves[0] is value else (old_name, new_name)
@@ -179,7 +195,7 @@ def main() -> None:
                 [foe_six[j] for j in foe_pick],
                 seat,
                 objective=objective,
-                search_limit=args.limit,
+                search_limit=limits,
                 max_turns=args.max_turns,
                 evaluate=leaves,
                 depth=depths,
@@ -196,7 +212,7 @@ def main() -> None:
                     "generation-match",
                     seat=seat,
                     leaves=side_leaves,
-                    limits=(args.limit, args.limit),
+                    limits=limits,
                     note=(
                         f"search depth {depths[0]} vs {depths[1]} by side"
                         if depths[0] != depths[1]
