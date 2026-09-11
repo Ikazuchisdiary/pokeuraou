@@ -43,6 +43,7 @@ from .battler import Battler
 from .damage import calculate, effective_damage
 from .position import Position
 from .regulation import Regulation
+from .resolve import FIRST_TURN_OUT_MOVES
 
 if TYPE_CHECKING:
     from .names import Localiser
@@ -297,6 +298,50 @@ def _battlers_from_position(reg: Regulation, pos: Position) -> dict[tuple[int, i
     return out
 
 
+def drop_dead_actions(
+    reg: Regulation, pos: Position, side: int, pool: list[SideAction]
+) -> list[SideAction]:
+    """Removes actions that cannot do anything, before the candidate budget is spent.
+
+    Fake Out, First Impression and Mat Block fail outright unless their user came in this
+    turn -- Showdown lets a player pick one anyway and fails it at execution, so they are
+    *legal* and `side_actions` is right to offer them. They are not worth a candidate
+    slot: a move that provably does nothing is dominated by every other move, and the
+    solver was not merely wasting a slot on one, it was putting 41.6% of a node's
+    equilibrium weight on it, because a value function's noisy cells do not know the move
+    is dead.
+
+    This is deliberately narrower than the legal set, and only here -- `side_actions`
+    still enumerates them, so the differential harness keeps checking that Showdown fails
+    them the way we do.
+
+    A combination is dropped when *any* slot's move is dead. In doubles an action is a
+    pair, so requiring both to be dead leaves every pairing of a dead Fake Out with a
+    live partner in the pool -- which is most of them, and was the first version of this.
+    Dropping on `any` is still safe: the same partner action exists alongside every other
+    move in the dead slot, so nothing that survives is worse.
+
+    Nothing is dropped when that would empty the pool -- a Pokemon whose only usable move
+    is a dead Fake Out must still offer it, because an empty list becomes Struggle and
+    that is a different, illegal action.
+    """
+    if not pool:
+        return pool
+    dead: list[bool] = []
+    for action in pool:
+        slots = []
+        for slot_action in action.slots:
+            move_id = getattr(slot_action, "move_id", None)
+            if move_id is None or move_id not in FIRST_TURN_OUT_MOVES:
+                slots.append(False)
+                continue
+            mon = pos.sides[side].active_pokemon()[slot_action.slot]
+            slots.append(mon is not None and mon.active_move_actions > 1)
+        dead.append(any(slots))
+    alive = [action for action, is_dead in zip(pool, dead, strict=True) if not is_dead]
+    return alive or pool
+
+
 def narrow(
     reg: Regulation,
     pos: Position,
@@ -317,6 +362,7 @@ def narrow(
     if limit < 1:
         raise ValueError("limit must be at least 1")
     pool = candidates if candidates is not None else side_actions(reg, pos, side)
+    pool = drop_dead_actions(reg, pos, side, pool)
     if not pool:
         return Narrowed(kept=[], considered=0)
     table = dict(battlers) if battlers is not None else _battlers_from_position(reg, pos)

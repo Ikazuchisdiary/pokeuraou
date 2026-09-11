@@ -111,3 +111,63 @@ def test_switches_and_protect_are_not_ranked_out(
 
     if has_switch(pool):
         assert has_switch(result.actions), "every switch was ranked out of the matrix"
+
+
+def test_a_fake_out_that_cannot_work_is_not_offered_as_a_candidate() -> None:
+    """Legal, and still not worth a candidate slot.
+
+    Showdown lets a player pick Fake Out on any turn and fails it at execution -- there is
+    no `disabled` flag for it -- so `side_actions` is right to enumerate it and the
+    differential harness keeps checking that we fail it the same way. But a move that
+    provably does nothing is dominated by every other move, and the search was not merely
+    spending one of its 24 slots on one: in a recorded game the equilibrium put 41.6% of a
+    node's weight on a Fake Out that could not fire, because the value function's cells
+    do not know the move is dead.
+    """
+    from pokeuraou.actions import side_actions
+    from pokeuraou.damage import register_mega_stones
+    from pokeuraou.narrow import drop_dead_actions
+    from pokeuraou.selfplay import position_from_sets
+    from pokeuraou.teams import load_roster
+
+    roster = load_roster("rizabanadohido")
+    reg = roster.reg
+    register_mega_stones(reg)
+    incineroar = roster.sets[5]
+    assert "fakeout" in incineroar.moves
+    sets = [incineroar, roster.sets[1], roster.sets[2], roster.sets[3]]
+    pos = position_from_sets(reg, sets, sets)
+
+    def fake_outs(position) -> int:  # noqa: ANN001
+        pool = side_actions(reg, position, 0)
+        kept = drop_dead_actions(reg, position, 0, pool)
+        return sum(
+            1
+            for action in kept
+            for slot_action in action.slots
+            if getattr(slot_action, "move_id", None) == "fakeout"
+        )
+
+    # Turn one out: it works, so it must be offered.
+    assert pos.sides[0].pokemon[0].active_move_actions == 0
+    assert fake_outs(pos) > 0
+
+    # After it has already acted twice, Showdown's `onTry` fails it every time.
+    pos.sides[0].pokemon[0].active_move_actions = 2
+    assert fake_outs(pos) == 0
+    # ...and the legal set still has it, because that is what Showdown offers.
+    assert any(
+        getattr(slot_action, "move_id", None) == "fakeout"
+        for action in side_actions(reg, pos, 0)
+        for slot_action in action.slots
+    )
+
+    # The last action is never dropped: an empty list becomes Struggle, which is a
+    # different and illegal action.
+    only = [
+        action
+        for action in side_actions(reg, pos, 0)
+        if any(getattr(s, "move_id", None) == "fakeout" for s in action.slots)
+    ]
+    assert only, "the position must offer at least one Fake Out combination"
+    assert drop_dead_actions(reg, pos, 0, only) == only
