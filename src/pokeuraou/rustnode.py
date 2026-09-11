@@ -93,6 +93,19 @@ def dump_budget(budget: Budget) -> dict[str, Any]:
 
 
 @dataclass
+class ResolvedTurn:
+    """One turn's branch weights, and optionally the branch that was chosen."""
+
+    branches: list[float]
+    #: Weights of the outcomes that stopped at a mid-turn replacement. Their continuation
+    #: state stays in the Rust process, so a caller that draws one resolves the turn itself.
+    suspended: list[float]
+    exact: bool
+    unmodelled: tuple[str, ...]
+    position: Position | None
+
+
+@dataclass
 class NodeResult:
     """One matrix per objective, plus what the port declined to fill."""
 
@@ -101,6 +114,45 @@ class NodeResult:
     #: (row, column, why) for every cell the port refused.
     refused: list[tuple[int, int, str]]
     unmodelled: tuple[str, ...]
+
+
+#: One process per regulation, per interpreter. A generation worker is a process, so
+#: this is one Rust process per worker, which is what the parallelism wants.
+_NODES: dict[str, "RustNode | None"] = {}
+
+
+def node_for(reg: Regulation) -> "RustNode | None":
+    """The warm process for this regulation, or None if it is not usable.
+
+    A failure here is not a reason to fail a run that was working: the caller falls back
+    to Python, and the reason is printed once so it cannot be silently slow instead of
+    silently wrong.
+    """
+    format_id = reg.meta.format_id
+    if format_id in _NODES:
+        return _NODES[format_id]
+    if not available():
+        _NODES[format_id] = None
+        return None
+    try:
+        _NODES[format_id] = RustNode(reg)
+    except Exception as exc:  # noqa: BLE001 - any failure means "use Python"
+        print(f"[rustnode] disabled: {exc}", file=sys.stderr)
+        _NODES[format_id] = None
+    return _NODES[format_id]
+
+
+def disable(reason: str) -> None:
+    """Stops using the bridge for the rest of this process, and says why."""
+    print(f"[rustnode] falling back to Python: {reason}", file=sys.stderr)
+    for key in list(_NODES):
+        node = _NODES[key]
+        if node is not None:
+            try:
+                node.close()
+            except Exception:  # noqa: BLE001
+                pass
+        _NODES[key] = None
 
 
 class RustNode:
@@ -125,6 +177,52 @@ class RustNode:
             self._process.stdin.close()
             self._process.wait(timeout=5)
 
+    def resolve(
+        self,
+        pos: Position,
+        actions: list[SideAction],
+        budget: Budget,
+        select: int | None = None,
+    ) -> ResolvedTurn | None:
+        """One turn, for advancing a game. None when the port declines it.
+
+        Two calls rather than one: the weights come back first so the caller can sample an
+        index with its own generator -- which is what keeps a generated game identical to
+        one played without this bridge -- and only then is the chosen position asked for.
+        An exact budget produces a hundred-odd branches, and sending all of them would be
+        two megabytes a turn against thirty kilobytes for this.
+        """
+        request = {
+            "kind": "resolve",
+            "position": pos.to_json(),
+            "actions": [[dump_action(a) for a in side.slots] for side in actions],
+            "budget": dump_budget(budget),
+            "select": select,
+        }
+        response = self._exchange(request)
+        if response.get("refused"):
+            return None
+        raw = response.get("position")
+        return ResolvedTurn(
+            branches=list(response["branches"]),
+            suspended=list(response.get("suspended", [])),
+            exact=bool(response["exact"]),
+            unmodelled=tuple(response["unmodelled"]),
+            position=Position.from_json(raw) if raw else None,
+        )
+
+    def _exchange(self, request: dict[str, Any]) -> dict[str, Any]:
+        self._process.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
+        self._process.stdin.flush()
+        line = self._process.stdout.readline()
+        if not line:
+            stderr = self._process.stderr.read()
+            raise RuntimeError(f"the Rust node process stopped: {stderr.strip()}")
+        response = json.loads(line)
+        if "error" in response:
+            raise RuntimeError(f"the Rust node refused the request: {response['error']}")
+        return response
+
     def fill(
         self,
         pos: Position,
@@ -140,15 +238,7 @@ class RustNode:
             "budget": dump_budget(budget),
             "objectives": objectives,
         }
-        self._process.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
-        self._process.stdin.flush()
-        line = self._process.stdout.readline()
-        if not line:
-            stderr = self._process.stderr.read()
-            raise RuntimeError(f"the Rust node process stopped: {stderr.strip()}")
-        response = json.loads(line)
-        if "error" in response:
-            raise RuntimeError(f"the Rust node refused the request: {response['error']}")
+        response = self._exchange(request)
         return NodeResult(
             payoffs=response["payoffs"],
             exact=response["exact"],

@@ -97,6 +97,12 @@ def main() -> None:
 
     search_mod.resolve_turn = recording
 
+    # The positions are collected with the bridge off: with it on the search never calls
+    # Python's resolver, so the hook that collects them would see almost nothing.
+    import os
+
+    was = os.environ.get("POKEURAOU_RUST_NODE", "")
+    os.environ["POKEURAOU_RUST_NODE"] = "0"
     rng = np.random.default_rng(args.seed)
     for _ in range(args.games):
         team = pool[int(rng.integers(len(pool)))]
@@ -115,6 +121,7 @@ def main() -> None:
         )
     resolve_mod.resolve_turn = real_resolve
     search_mod.resolve_turn = real_resolve
+    os.environ["POKEURAOU_RUST_NODE"] = was or "1"
 
     # One node per distinct position, up to the cap.
     seen: set[str] = set()

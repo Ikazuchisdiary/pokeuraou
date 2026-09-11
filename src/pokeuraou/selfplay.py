@@ -376,9 +376,7 @@ def play_game(
                 foe_chosen=chosen[1].to_choice(),
             )
         )
-        result = resolve_turn(reg, pos, chosen, budget=Budget.exact())
-        record.unmodelled.extend(result.unmodelled)
-        advanced = _advance(reg, rng, result, record, leaves, objective)
+        advanced = _advance_turn(reg, rng, pos, chosen, record, leaves, objective)
         if advanced is None:
             break
         pos = advanced
@@ -389,6 +387,59 @@ def play_game(
     return record
 
 
+def _advance_turn(
+    reg: Regulation,
+    rng: np.random.Generator,
+    pos: Position,
+    chosen: list[SideAction],
+    record: GameRecord,
+    leaves: tuple[LeafEvaluator | None, LeafEvaluator | None],
+    objective: Objective,
+) -> Position | None:
+    """Resolves the chosen actions and samples one outcome.
+
+    The Rust port fills this when it is enabled and the turn does not suspend -- a
+    suspension carries continuation state that cannot cross a process boundary, and the
+    replacement it asks for is a decision node rather than a chance node. The sampling
+    stays here either way, so the generator draws the same way and a game played through
+    the bridge is the same game.
+    """
+    from . import rustnode
+
+    if rustnode.available():
+        node = rustnode.node_for(reg)
+        if node is not None:
+            try:
+                weights = node.resolve(pos, chosen, Budget.exact())
+                if weights is not None:
+                    record.unmodelled.extend(weights.unmodelled)
+                    counts = np.array(
+                        weights.branches + weights.suspended, dtype=np.float64
+                    )
+                    if not counts.size or float(counts.sum()) <= 0:
+                        return None
+                    index = _sample_index(rng, counts)
+                    if index < len(weights.branches):
+                        picked = node.resolve(pos, chosen, Budget.exact(), select=index)
+                        if picked is not None and picked.position is not None:
+                            return picked.position
+                    else:
+                        # A replacement was drawn. Its continuation lives in the Rust
+                        # process, so the turn is resolved here -- but the draw has already
+                        # happened, and re-drawing would put this game on a different
+                        # random stream than one played without the bridge.
+                        result = resolve_turn(reg, pos, chosen, budget=Budget.exact())
+                        return _advance(
+                            reg, rng, result, record, leaves, objective, first_index=index
+                        )
+            except Exception as exc:  # noqa: BLE001 - a broken bridge must not fail a run
+                rustnode.disable(str(exc))
+
+    result = resolve_turn(reg, pos, chosen, budget=Budget.exact())
+    record.unmodelled.extend(result.unmodelled)
+    return _advance(reg, rng, result, record, leaves, objective)
+
+
 def _advance(
     reg: Regulation,
     rng: np.random.Generator,
@@ -396,13 +447,18 @@ def _advance(
     record: GameRecord,
     leaves: tuple[LeafEvaluator | None, LeafEvaluator | None],
     objective: Objective,
+    first_index: int | None = None,
 ) -> Position | None:
     """Samples one outcome of a resolved turn, answering any mid-turn request on the way.
 
     Returns ``None`` when the turn produced nothing to continue from, which the caller
     treats as the end of the game.
+
+    ``first_index`` is for a caller that has already drawn the first index -- the Rust
+    bridge hands back the weights and samples there, so that the generator is used exactly
+    once per turn whichever path the turn takes.
     """
-    for _ in range(5):
+    for attempt in range(5):
         weights = np.array(
             [b.probability for b in result.branches]
             + [p.probability for p in result.suspended],
@@ -410,7 +466,11 @@ def _advance(
         )
         if not weights.size or float(weights.sum()) <= 0:
             return None
-        index = _sample_index(rng, weights)
+        index = (
+            first_index
+            if attempt == 0 and first_index is not None
+            else _sample_index(rng, weights)
+        )
         if index < len(result.branches):
             return result.branches[index].position
         pause = result.suspended[index - len(result.branches)]

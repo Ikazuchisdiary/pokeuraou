@@ -100,6 +100,51 @@ pub fn fill(reg: &Reg, request: &Request) -> Value {
     })
 }
 
+/// One turn, for advancing a game rather than filling a matrix.
+///
+/// The weights come back first and the caller samples an index with its own generator --
+/// which is what keeps a generated game bit-identical to one played without this bridge,
+/// since `numpy.random.Generator.choice` is the stream. Then it asks for that one
+/// position. Returning every branch instead would be right and useless: an exact budget
+/// produces a hundred-odd of them, and a hundred positions is two megabytes of JSON per
+/// turn against the thirty kilobytes this costs.
+pub fn resolve_one(reg: &Reg, value: &Value) -> Value {
+    let position = Position::from_json(&value["position"]);
+    if position.format != reg.format_id {
+        return json!({ "refused": "position is for another regulation" });
+    }
+    let actions_value = &value["actions"];
+    let actions = [
+        parse_actions_list(&actions_value[0]),
+        parse_actions_list(&actions_value[1]),
+    ];
+    let budget = Budget::from_json(&value["budget"]);
+    let result = match resolve_turn(reg, &position, &actions, budget) {
+        Err(reason) => return json!({ "refused": reason }),
+        Ok(result) => result,
+    };
+    // A suspension's continuation state cannot cross a process boundary, but its weight
+    // can -- and the caller only has to resolve the turn itself when it actually draws
+    // one, which is rarer than merely having one.
+    let weights: Vec<f64> = result.branches.iter().map(|b| b.probability).collect();
+    let paused: Vec<f64> = result.suspended.iter().map(|s| s.probability).collect();
+    let selected = value.get("select").and_then(Value::as_u64).map(|k| k as usize);
+    let chosen = match selected {
+        None => Value::Null,
+        Some(index) => match result.branches.get(index) {
+            None => return json!({ "refused": "branch index out of range" }),
+            Some(branch) => branch.position.to_json(),
+        },
+    };
+    json!({
+        "branches": weights,
+        "suspended": paused,
+        "exact": result.exact,
+        "unmodelled": result.unmodelled.iter().cloned().collect::<Vec<_>>(),
+        "position": chosen,
+    })
+}
+
 /// JSONL over stdio: one request per line, one response per line.
 pub fn serve(reg: &Reg) {
     let stdin = std::io::stdin();
@@ -111,6 +156,7 @@ pub fn serve(reg: &Reg) {
         }
         let response = match serde_json::from_str::<Value>(&line) {
             Err(error) => json!({ "error": error.to_string() }),
+            Ok(value) if value["kind"].as_str() == Some("resolve") => resolve_one(reg, &value),
             Ok(value) => match parse_request(&value) {
                 Err(reason) => json!({ "error": reason }),
                 Ok(request) => {

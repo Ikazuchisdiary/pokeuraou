@@ -3710,6 +3710,10 @@ def batched_payoffs(
     full while its neighbour is narrowed. Reporting it as "all or nothing from the budget
     name" would be a number nobody measured.
     """
+    ported = _rust_payoffs(reg, pos, ours, theirs, evaluators, budget)
+    if ported is not None:
+        return ported
+
     payoffs = [np.zeros((len(ours), len(theirs)), dtype=np.float64) for _ in evaluators]
     exact = np.zeros((len(ours), len(theirs)), dtype=bool)
     unmodelled: set[str] = set()
@@ -3749,6 +3753,84 @@ def batched_payoffs(
                 payoff[i, j] = float(values[start : start + count] @ w)
         for i, j, root in folded:
             payoff[i, j] = fold_value(root, values)
+    return payoffs, unmodelled, exact
+
+
+def _objective_names(evaluators: Sequence[Callable]) -> list[str] | None:
+    """The objective behind each evaluator, when every one of them is a plain objective.
+
+    `Objective.batch` is a bound method, so the objective is `__self__` and its name is the
+    one the port answers to. A learned value function has no such name and the answer is
+    None, which is the honest one: its input is the leaves, and those do not cross a
+    process boundary.
+    """
+    names: list[str] = []
+    for evaluate in evaluators:
+        name = getattr(getattr(evaluate, "__self__", None), "name", None)
+        if not isinstance(name, str):
+            return None
+        names.append(name)
+    return names
+
+
+#: The objectives the Rust port implements. Anything else stays in Python.
+_PORTED_OBJECTIVES = frozenset({"hp-share", "faints"})
+
+#: Set while a refused cell is being filled here. Without it the fill would ask the port
+#: again, be refused again, and recurse until the stack ran out -- which is exactly what
+#: happened the first time a generated game was played through the bridge.
+_FILLING_REFUSED = False
+
+
+def _rust_payoffs(
+    reg: Regulation,
+    pos: Position,
+    ours: Sequence[SideAction],
+    theirs: Sequence[SideAction],
+    evaluators: Sequence[Callable],
+    budget: Budget,
+) -> tuple[list[np.ndarray], set[str], np.ndarray] | None:
+    """The node filled by the Rust port, or None to do it here.
+
+    Opt-in: `POKEURAOU_RUST_NODE=1` and a built binary. Off, missing, broken or handed an
+    objective it does not implement, this returns None and nothing changes.
+
+    Cells the port refuses come back named, and are filled here -- so a partial port is
+    usable rather than merely measurable, and the two halves add up to this function's own
+    answer. `tools/diff_node.py` is what says they do.
+    """
+    global _FILLING_REFUSED
+    from . import rustnode
+
+    if _FILLING_REFUSED or not rustnode.available():
+        return None
+    names = _objective_names(evaluators)
+    if names is None or not set(names) <= _PORTED_OBJECTIVES:
+        return None
+    node = rustnode.node_for(reg)
+    if node is None:
+        return None
+    try:
+        filled = node.fill(pos, list(ours), list(theirs), names, budget)
+    except Exception as exc:  # noqa: BLE001 - a broken bridge must not fail the run
+        rustnode.disable(str(exc))
+        return None
+
+    payoffs = [np.array(matrix, dtype=np.float64) for matrix in filled.payoffs]
+    exact = np.array(filled.exact, dtype=bool)
+    unmodelled = set(filled.unmodelled)
+    _FILLING_REFUSED = True
+    try:
+        for i, j, _why in filled.refused:
+            cell, notes, cell_exact = batched_payoffs(
+                reg, pos, [ours[i]], [theirs[j]], evaluators, budget=budget
+            )
+            for index in range(len(payoffs)):
+                payoffs[index][i, j] = cell[index][0, 0]
+            exact[i, j] = cell_exact[0, 0]
+            unmodelled |= notes
+    finally:
+        _FILLING_REFUSED = False
     return payoffs, unmodelled, exact
 
 

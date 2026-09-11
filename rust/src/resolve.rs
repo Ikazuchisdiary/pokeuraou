@@ -744,6 +744,12 @@ pub(crate) fn status_move_handled(move_id: &str) -> bool {
 }
 
 fn check_move_supported(reg: &Reg, move_id: &str) -> Result<(), String> {
+    // The recharge turn is a fake move with no dex entry: Showdown builds the request
+    // entry by hand and intercepts the action before anything is executed, so there is
+    // nothing to look up and nothing to check.
+    if move_id == "recharge" {
+        return Ok(());
+    }
     let Some(mv) = reg.moves.get(move_id) else {
         return Err(format!("move not in the regulation: {move_id}"));
     };
@@ -848,16 +854,21 @@ pub(crate) fn volatile_is_handled(vid: &str) -> bool {
 }
 
 fn volatile_handled(vid: &str) -> bool {
-    matches!(
-        vid,
-        "protect" | "detect" | "banefulbunker" | "burningbulwark" | "spikyshield"
-            | "kingsshield" | "obstruct" | "silktrap" | "maxguard" | "stall" | "flinch"
-            | "helpinghand" | "followme" | "ragepowder" | "spotlight" | "confusion"
-            | "leechseed" | "partiallytrapped" | "saltcure" | "perishsong" | "endure"
-            | "unburden" | "charge" | "smackdown" | "ingrain" | "magnetrise" | "telekinesis"
-            | "focusenergy" | "dragoncheer" | "taunt" | "choicelock" | "glaiverush"
-            | "throatchop" | "flashfire" | "yawn" | "encore" | "pendingselfswitch"
-    )
+    // Inverted on purpose. A whitelist of volatiles refused whatever it had not been told
+    // about -- Hyper Beam's `mustrecharge` cost 45% of the cells of a node, for an effect
+    // this port implements -- so what is listed here is the far shorter set the Python
+    // resolver acts on by name and this port does not:
+    //
+    //   disable   the flag lives on the move slot, and the residual has to clear it there
+    //
+    // Everything else is either implemented here or carried generically: added, counted
+    // down, and removed at zero, which is what Python does with a volatile it does not
+    // name. The names Python *does* name are, in full: choicelock, confusion, disable,
+    // encore, endure, flinch, followme, glaiverush, helpinghand, ingrain, leechseed,
+    // magnetrise, mustrecharge, partiallytrapped, pendingselfswitch, perishsong,
+    // ragepowder, saltcure, smackdown, spotlight, stall, taunt, telekinesis, throatchop,
+    // torment, twoturnmove, unburden, yawn -- and all but `disable` are handled.
+    vid != "disable"
 }
 
 // ---------------------------------------------------------------------------
@@ -1067,6 +1078,11 @@ fn build_queue(
                     let mut chosen = *move_id;
                     if let Some(charging) = mon.volatile("twoturnmove") {
                         if let Some(stored) = charging.move_id {
+                            // A Pokemon part-way through a charging move is locked into
+                            // it, whatever was chosen -- so the move that will actually
+                            // resolve is this one, and it is the one that has to be
+                            // supported.
+                            check_move_supported(reg, stored.as_str())?;
                             chosen = stored;
                         }
                     }
