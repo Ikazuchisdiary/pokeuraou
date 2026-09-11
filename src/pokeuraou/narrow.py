@@ -25,7 +25,7 @@ in the *choice of candidates* and cannot bias a printed figure.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
@@ -356,6 +356,7 @@ def narrow(
     battlers: Mapping[tuple[int, int], Battler] | None = None,
     weights: Mapping[tuple[int, int], np.ndarray] | None = None,
     candidates: list[SideAction] | None = None,
+    rank: Callable[[list[SideAction]], Sequence[float]] | None = None,
 ) -> Narrowed:
     """Narrows one side's legal choices to at most ``limit``, covering every option.
 
@@ -363,6 +364,14 @@ def narrow(
     in: the belief layer builds one Battler carrying every particle, and ``weights`` gives
     their probabilities so the score is a belief-weighted mean rather than a guess at the
     opponent's investment.
+
+    ``rank`` replaces the damage score with the caller's own, one value per candidate in
+    the order they are handed over. It exists because the damage score and the thing that
+    fills the matrix are different functions, and they disagree: measured over 59
+    decisions where they disagreed by more than 0.05, playing the action the *leaf*
+    preferred instead of the best one on the menu was worth +14.3 points [+7.1, +21.5].
+    Coverage, the greedy cover and the tie-break are untouched -- only the ordering
+    changes, which is the part that was never claimed to be principled.
     """
     if limit < 1:
         raise ValueError("limit must be at least 1")
@@ -373,6 +382,15 @@ def narrow(
     table = dict(battlers) if battlers is not None else _battlers_from_position(reg, pos)
 
     scored = [score_action(reg, pos, side, a, battlers=table, weights=weights) for a in pool]
+    if rank is not None:
+        # The damage detail is kept beside the new score rather than thrown away: a
+        # surprising leaf ranking is exactly when a reader wants to see what the cheap
+        # score thought.
+        values = rank(pool)
+        scored = [
+            replace(c, score=float(v), detail=(f"leaf {float(v):+.4f}", *c.detail))
+            for c, v in zip(scored, values, strict=True)
+        ]
     n_slots = len(pool[0].slots)
     # Highest score first, with a stable tiebreak so the same position gives the same
     # answer twice.

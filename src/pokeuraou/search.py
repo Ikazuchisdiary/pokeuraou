@@ -97,6 +97,58 @@ DEFAULT_SUB_LIMIT = 8
 DEFAULT_SUB_BRANCHES = 3
 
 
+#: Opponent actions a leaf ranking resolves each candidate against. One is the cheapest
+#: thing that is not arbitrary; more than two buys little, because the ranking only has to
+#: order candidates and not value them.
+DEFAULT_REFERENCES = 2
+
+
+def leaf_ranking(
+    reg: Regulation,
+    pos: Position,
+    side: int,
+    evaluate: LeafEvaluator,
+    *,
+    budget: Budget,
+    references: int = DEFAULT_REFERENCES,
+    reference_limit: int = 8,
+) -> Callable[[list[SideAction]], np.ndarray]:
+    """A ranking for `narrow` that scores candidates with the leaf instead of with damage.
+
+    `narrow` ranks by expected damage fraction, and the matrix is filled by the leaf. The
+    two disagree, and the disagreement is not cosmetic: over 59 decisions where the menu's
+    best reply and the best legal reply differed by more than 0.05 of win probability,
+    playing the leaf's choice was worth +14.3 points [+7.1, +21.5] in real games. The
+    damage score cannot see a weak move that leads somewhere good, so such a move only
+    ever reaches the menu paired with whatever partner the coverage rule happened to give
+    it.
+
+    Each candidate is resolved against a small set of opponent replies and scored by the
+    leaf on the resulting positions. The replies come from the *damage* score, which is
+    circular only in the harmless direction: a reference that is merely plausible is
+    enough to order candidates, and using the leaf to pick the references too would cost
+    another pass over the pool for no measured gain.
+
+    Cost is `len(pool) * references` resolves against the matrix's own `limit**2`, so a
+    24-wide matrix ranked over a hundred legal pairs at two references pays about a third
+    again. Width 48 costs four times. Whether the cheaper one buys the same thing is a
+    question for a head-to-head, which is why this is an option and not a default.
+    """
+    replies = narrow(reg, pos, 1 - side, limit=reference_limit).actions[:references]
+
+    def rank(pool: list[SideAction]) -> np.ndarray:
+        if not replies:
+            return np.zeros(len(pool))
+        # One matrix, pool x references, through the same batching the search uses: the
+        # leaves of every candidate against every reference go out in a single call.
+        ours, theirs = (pool, replies) if side == 0 else (replies, pool)
+        payoff, _notes = batched_payoff(reg, pos, ours, theirs, evaluate, budget=budget)
+        # `payoff` is always side 0's win probability, so the column player wants it low.
+        return payoff.mean(axis=1) if side == 0 else -payoff.mean(axis=0)
+
+    return rank
+
+
 @dataclass(slots=True)
 class SearchResult:
     """What the search decided, and what it cost to decide it."""
@@ -311,9 +363,11 @@ def _subgame_value(
 
 __all__ = [
     "DEFAULT_PASSES",
+    "DEFAULT_REFERENCES",
     "DEFAULT_REFINE",
     "DEFAULT_SUB_BRANCHES",
     "DEFAULT_SUB_LIMIT",
     "SearchResult",
+    "leaf_ranking",
     "search",
 ]

@@ -44,6 +44,7 @@ from pokeuraou.equilibrium import solve
 from pokeuraou.narrow import narrow
 from pokeuraou.position import Position
 from pokeuraou.resolve import Budget, batched_payoff
+from pokeuraou.search import leaf_ranking
 from pokeuraou.teams import load_roster
 
 
@@ -56,6 +57,14 @@ def main() -> None:
     ap.add_argument("--per-game", type=int, default=3, help="decisions sampled per game")
     ap.add_argument("--limit", type=int, default=24)
     ap.add_argument("--seed", type=int, default=5)
+    ap.add_argument(
+        "--leaf-rank",
+        action="store_true",
+        help="rank candidates with the leaf instead of the damage score. The regret this "
+        "tool measures is the gap between the menu and the full legal set *by the leaf*, "
+        "so ranking by the leaf should shrink it -- and if it does not, the ranking is "
+        "not doing what it was built to do.",
+    )
     args = ap.parse_args()
 
     reg = load_roster(args.roster).reg
@@ -82,7 +91,8 @@ def main() -> None:
     encoder = Encoder(reg)
     net, _meta = load_model(Path("data/models") / f"{leaf_name}.pt", encoder)
     evaluate = BatchedValue(net, encoder).__call__
-    print(f"leaf {leaf_name}, width {args.limit}, {len(records)} games")
+    ranking = "leaf" if args.leaf_rank else "damage"
+    print(f"leaf {leaf_name}, width {args.limit}, ranking by {ranking}, {len(records)} games")
 
     rng = np.random.default_rng(args.seed)
     regrets: list[float] = []
@@ -99,8 +109,18 @@ def main() -> None:
         for which in pick:
             decision = moves[int(which)]
             pos = Position.from_json(decision["position"])
-            row = narrow(reg, pos, 0, limit=args.limit).actions
-            col = narrow(reg, pos, 1, limit=args.limit).actions
+            ranks = (
+                {
+                    side: leaf_ranking(
+                        reg, pos, side, evaluate, budget=Budget.matrix()
+                    )
+                    for side in (0, 1)
+                }
+                if args.leaf_rank
+                else {0: None, 1: None}
+            )
+            row = narrow(reg, pos, 0, limit=args.limit, rank=ranks[0]).actions
+            col = narrow(reg, pos, 1, limit=args.limit, rank=ranks[1]).actions
             if not row or not col:
                 continue
             payoff, _n = batched_payoff(
