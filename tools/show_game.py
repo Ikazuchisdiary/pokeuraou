@@ -217,6 +217,7 @@ PHRASES = (
     ("did not happen", "不発"),
     ("had no effect", "効果がなかった"),
     ("must switch out", "交代が必要"),
+    # The id `recharge` translates on its own, so only the verb in front of it is left.
     ("must recharge", "反動で動けない"),
     ("stat drops undone", "能力低下を戻した"),
     ("cannot use sound moves", "音技が使えない"),
@@ -317,6 +318,12 @@ def translate_event(loc: Localiser, line: str, occupants: dict[str, str]) -> str
     # the closing bracket was attached to `berry`, and stripping it to look the word up
     # threw it away. So the group is matched whole, and only then looked up.
     body = re.sub(r"\(([^)]*)\)", lambda m: f"（{translate_reason(loc, m.group(1))}）", body)
+    # English phrases before bare ids, not after. `p2b must recharge` is one line whose
+    # last word is also a move id, so translating tokens first turned it into "must
+    # 反動で動けない" and the phrase "must recharge" no longer matched anything. Longest
+    # first, so "did not happen" is not found as "happen" once "did" and "not" are gone.
+    for english, japanese in PHRASES:
+        body = body.replace(english, japanese)
     # Ids also appear bare -- `set sunnyday`, `side +wideguard` -- where there is no group
     # to match, so those are still done token by token.
     pieces = []
@@ -331,10 +338,6 @@ def translate_event(loc: Localiser, line: str, occupants: dict[str, str]) -> str
     body = " ".join(pieces)
     for pattern, replacement in REORDERINGS:
         body = pattern.sub(replacement, body)
-    # Longest first: "did not happen" must not be found as "happen" after "did" and "not"
-    # have been replaced out from under it.
-    for english, japanese in PHRASES:
-        body = body.replace(english, japanese)
     return f"{head} {body}".strip().replace(" （", "（")
 
 
@@ -571,6 +574,24 @@ def render(reg: Regulation, loc: Localiser, record: dict, top: int) -> str:
     outcome = record.get("outcome")
     verdict = "勝ち" if outcome == 1.0 else "負け" if outcome == 0.0 else "打ち切り"
     out.write(f"自陣: {own}\n相手: {foe}  [{record.get('foeArchetype', '?')}]\n")
+    # A match game's `foeArchetype` is the seat label the tool played under -- something
+    # like "value-gen234.pt = side 0" -- which on the 相手 line reads as if that model
+    # were the opponent, when it is whichever side the label says. The provenance block
+    # is the authority and names both sides, so print it whenever it is there.
+    source = record.get("provenance")
+    if source:
+        leaves = source.get("leaves") or []
+        limits = source.get("limits") or []
+        if len(leaves) == 2:
+            out.write(
+                f"対戦: {source.get('kind', '?')}  自(side 0) の葉 {leaves[0]}"
+                f" ／ 敵(side 1) の葉 {leaves[1]}"
+            )
+            if len(limits) == 2:
+                out.write(f"  探索幅 {limits[0]}/{limits[1]}")
+            if source.get("note"):
+                out.write(f"  {source['note']}")
+            out.write("\n")
     # The selection, when the record carries it. Ordered, so the first two are the leads --
     # a different decision from the two behind them, and the reason there are 90 selections
     # a side rather than 15.
