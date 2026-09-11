@@ -1,16 +1,29 @@
-"""Trains the value function, and reports it against the proxy it has to beat.
+"""Trains the value function, and reports it against the two baselines that matter.
 
-The comparison is the point. `hp-share` already scores AUC 0.910 over all decisions, so a
-learned function that reports 0.92 has done almost nothing -- the headroom is not spread
-evenly. It sits at turn 1 (proxy AUC 0.769) and disappears by turn 13 (0.961), because
-late in a game the remaining material *is* the answer. So every number here is broken out
-by turn, and the proxy's number is printed beside the model's on the same rows and the
-same validation games.
+The comparison is the point, and *which* comparison is the point is worth stating
+carefully, because getting it wrong here is cheap and costly at once.
+
+**hp-share** is the parameter-free objective. Beating it is what justifies having a
+learned value function at all. On generation 2-4 data it scores AUC 0.828 over all
+decisions and 0.544 at turn 1, where material is nearly uninformative -- the headroom is
+not spread evenly, and it disappears by turn 10 (0.907), because late in a game the
+remaining material *is* the answer.
+
+**The generating search** is the value the search that produced the data reported: the
+previous generation's model backed by a full 24x24 one-ply equilibrium. It scores 0.883.
+A freshly trained *raw* evaluation sitting a little below that is the expected state of
+affairs and not a defect -- the gap is what one ply of search is worth, which is the
+whole reason the solver does any.
+
+Those two were printed under one name for three generations. The array had been called
+`proxy` when generation was driven by `hp-share` and the two really were the same number;
+generation moved to a learned leaf and the name did not follow. Read as hp-share, the
+number says a learned value function trained on 20,613 games cannot beat a material
+heuristic, which is alarming and false.
 
 Calibration is reported next to discrimination. AUC only asks whether won positions score
 above lost ones; this tool is supposed to print a win *probability*, so being right about
-the level matters separately. The proxy is badly wrong there early on -- it says 0.51 at
-turn 1 where the true rate is 72% -- and a model can fix that without ranking any better.
+the level matters separately.
 
     uv run --group learn python tools/train_value.py --data data/selfplay-gen1-encoded.npz
 """
@@ -53,14 +66,14 @@ def by_turn(
     dataset: Dataset,
     index: np.ndarray,
     model_p: np.ndarray,
-    proxy: np.ndarray,
+    searched: np.ndarray,
     minimum: int,
 ) -> None:
     turns = dataset.turn[index]
     labels = dataset.outcome[index]
     print(
-        f"  {'turn':>5}  {'n':>7}  {'model AUC':>9}  {'proxy AUC':>9}  "
-        f"{'model mean':>10}  {'proxy mean':>10}  {'actual':>7}"
+        f"  {'turn':>5}  {'n':>7}  {'model AUC':>9}  {'search AUC':>10}  "
+        f"{'model mean':>10}  {'search mean':>11}  {'actual':>7}"
     )
     for turn in sorted(set(turns.tolist())):
         pick = turns == turn
@@ -68,8 +81,8 @@ def by_turn(
             continue
         print(
             f"  {turn:>5}  {int(pick.sum()):>7}  {auc(model_p[pick], labels[pick]):>9.3f}  "
-            f"{auc(proxy[pick], labels[pick]):>9.3f}  {model_p[pick].mean():>10.3f}  "
-            f"{proxy[pick].mean():>10.3f}  {labels[pick].mean() * 100:>6.1f}%"
+            f"{auc(searched[pick], labels[pick]):>10.3f}  {model_p[pick].mean():>10.3f}  "
+            f"{searched[pick].mean():>11.3f}  {labels[pick].mean() * 100:>6.1f}%"
         )
 
 
@@ -107,7 +120,10 @@ def learning_curve(
     shuffled = train_games.copy()
     rng.shuffle(shuffled)
     labels = dataset.outcome[val_idx]
-    proxy = dataset.proxy[val_idx]
+    searched = dataset.search_value[val_idx]
+    hp_share = (
+        dataset.hp_share[val_idx] if dataset.hp_share.size else np.zeros(0, np.float32)
+    )
     turn1 = dataset.turn[val_idx] <= 1
 
     print(
@@ -128,7 +144,8 @@ def learning_curve(
             outcome=dataset.outcome,
             game=np.where(subset | np.isin(np.arange(len(dataset)), val_idx), dataset.game, -1),
             turn=dataset.turn,
-            proxy=dataset.proxy,
+            search_value=dataset.search_value,
+            hp_share=dataset.hp_share,
             kind=dataset.kind,
             foe=dataset.foe,
             foe_names=dataset.foe_names,
@@ -153,10 +170,16 @@ def learning_curve(
             f"{auc(p[turn1], labels[turn1]):>10.4f}  {len(history):>6}"
         )
     print(
-        f"  {'proxy':>7}  {'--':>10}  {auc(proxy, labels):>7.4f}  "
-        f"{logloss(proxy, labels):>9.4f}  {brier(proxy, labels):>7.4f}  "
-        f"{auc(proxy[turn1], labels[turn1]):>10.4f}  {'--':>6}"
+        f"  {'gen search':>7}  {'--':>10}  {auc(searched, labels):>7.4f}  "
+        f"{logloss(searched, labels):>9.4f}  {brier(searched, labels):>7.4f}  "
+        f"{auc(searched[turn1], labels[turn1]):>10.4f}  {'--':>6}"
     )
+    if hp_share.size:
+        print(
+            f"  {'hp-share':>7}  {'--':>10}  {auc(hp_share, labels):>7.4f}  "
+            f"{logloss(hp_share, labels):>9.4f}  {brier(hp_share, labels):>7.4f}  "
+            f"{auc(hp_share[turn1], labels[turn1]):>10.4f}  {'--':>6}"
+        )
 
 
 def main() -> None:
@@ -236,7 +259,10 @@ def main() -> None:
 
     logit = predict(net, dataset, val_idx, device=device)
     model_p = 1.0 / (1.0 + np.exp(-logit))
-    proxy = dataset.proxy[val_idx]
+    searched = dataset.search_value[val_idx]
+    hp_share = (
+        dataset.hp_share[val_idx] if dataset.hp_share.size else np.zeros(0, np.float32)
+    )
     labels = dataset.outcome[val_idx]
 
     net.eval()
@@ -248,9 +274,20 @@ def main() -> None:
         f"{float((forward + mirrored - 1.0).abs().max()):.2e}"
     )
 
-    print("\nheld-out games, model versus the proxy it has to beat")
+    # Two baselines, because they answer different questions and one of them used to be
+    # printed under the other's name. `hp-share` is the parameter-free objective: beating
+    # it is what justifies having a learned value function at all. `generating search` is
+    # the value the search that *produced* the data reported -- the previous model backed
+    # by a full one-ply equilibrium -- so a freshly trained raw evaluation sitting
+    # slightly below it is the expected state of affairs and not a defect. Reading the
+    # second under the first's name once produced the conclusion that 20,613 games had
+    # bought nothing.
+    print("\nheld-out games, model versus the baselines")
     print(f"  {'':>18}  {'AUC':>7}  {'log loss':>9}  {'Brier':>7}")
-    for name, score in (("learned value", model_p), ("hp-share proxy", proxy)):
+    rows = [("learned value", model_p), ("generating search", searched)]
+    if hp_share.size:
+        rows.append(("hp-share", hp_share))
+    for name, score in rows:
         print(
             f"  {name:>18}  {auc(score, labels):>7.4f}  {logloss(score, labels):>9.4f}  "
             f"{brier(score, labels):>7.4f}"
@@ -263,20 +300,20 @@ def main() -> None:
     )
 
     print("\nby turn (the aggregate hides this)")
-    by_turn(dataset, val_idx, model_p, proxy, args.min_turn_rows)
+    by_turn(dataset, val_idx, model_p, searched, args.min_turn_rows)
 
     print("\nis the number a probability? learned value")
     reliability(model_p, labels, 8)
-    print("\nthe same for the proxy")
-    reliability(proxy, labels, 8)
+    print("\nthe same for the generating search")
+    reliability(searched, labels, 8)
 
     move = dataset.kind[val_idx] == 0
     for name, pick in (("move nodes", move), ("replacement nodes", ~move)):
         if pick.sum() > 50:
             print(
                 f"\n{name}: n {int(pick.sum()):,}  model AUC "
-                f"{auc(model_p[pick], labels[pick]):.4f}  proxy AUC "
-                f"{auc(proxy[pick], labels[pick]):.4f}"
+                f"{auc(model_p[pick], labels[pick]):.4f}  generating-search AUC "
+                f"{auc(searched[pick], labels[pick]):.4f}"
             )
 
     if not args.no_save:
@@ -287,14 +324,18 @@ def main() -> None:
             best,
             encoder.vocab,
             config,
+            widths=encoder.widths,
             meta={
                 "data": str(args.data),
                 "decisions": len(dataset),
                 "games": int(len(np.unique(dataset.game))),
                 "val_auc": auc(model_p, labels),
                 "val_logloss": logloss(model_p, labels),
-                "proxy_auc": auc(proxy, labels),
-                "proxy_logloss": logloss(proxy, labels),
+                "search_auc": auc(searched, labels),
+                "search_logloss": logloss(searched, labels),
+                **(
+                    {"hp_share_auc": auc(hp_share, labels)} if hp_share.size else {}
+                ),
                 "epochs_run": len(history),
             },
         )

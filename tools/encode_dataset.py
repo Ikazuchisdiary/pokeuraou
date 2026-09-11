@@ -23,6 +23,8 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pokeuraou.encode import Encoded, Encoder
+from pokeuraou.payoff import HP_SHARE
+from pokeuraou.position import Position
 from pokeuraou.provenance import SELF_PLAY
 from pokeuraou.regulation import load_regulation
 from pokeuraou.value import Dataset, save_dataset
@@ -50,12 +52,17 @@ def main() -> None:
         raise SystemExit(f"no games in {args.dir}")
 
     encoder: Encoder | None = None
-    pending: list[dict] = []
+    pending: list[Position] = []
     chunks: list[Encoded] = []
     outcomes: list[float] = []
     games: list[int] = []
     turns: list[int] = []
+    #: The value the generating search reported. Named `proxies` when that was hp-share;
+    #: it has been the previous model's searched value since generation 2.
     proxies: list[float] = []
+    #: The parameter-free hp-share of the position, which is what "is a learned value
+    #: function worth having" is measured against.
+    hp_shares: list[float] = []
     kinds: list[int] = []
     foes: list[int] = []
     foe_names: list[str] = []
@@ -71,7 +78,7 @@ def main() -> None:
         nonlocal pending
         if not pending or encoder is None:
             return
-        piece = encoder.encode(pending)
+        piece = encoder.encode_positions(pending)
         unknown.update(piece.unknown_volatiles)
         chunks.append(piece)
         pending = []
@@ -110,11 +117,16 @@ def main() -> None:
                     foe_index[label] = len(foe_names)
                     foe_names.append(label)
                 for decision in record["decisions"]:
-                    pending.append(decision["position"])
+                    # Converted once and used twice: the encoder took JSON and converted
+                    # it internally, so this moves the conversion rather than adding one,
+                    # and hp-share needs the same object.
+                    position = Position.from_json(decision["position"])
+                    pending.append(position)
                     outcomes.append(float(record["outcome"]))
                     games.append(game_id)
                     turns.append(int(decision["turn"]))
                     proxies.append(float(decision["searchValue"]))
+                    hp_shares.append(float(HP_SHARE(position)))
                     kinds.append(0 if decision["kind"] == "move" else 1)
                     foes.append(foe_index[label])
                     branching[len(decision["ownActions"])] += 1
@@ -144,7 +156,8 @@ def main() -> None:
         outcome=np.array(outcomes, dtype=np.float32),
         game=np.array(games, dtype=np.int32),
         turn=np.array(turns, dtype=np.int16),
-        proxy=np.array(proxies, dtype=np.float32),
+        search_value=np.array(proxies, dtype=np.float32),
+        hp_share=np.array(hp_shares, dtype=np.float32),
         kind=np.array(kinds, dtype=np.int8),
         foe=np.array(foes, dtype=np.int32),
         foe_names=tuple(foe_names),

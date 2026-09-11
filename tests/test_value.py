@@ -71,7 +71,8 @@ def bundle():  # noqa: ANN201
         outcome=np.array(outcomes, dtype=np.float32),
         game=np.array(games, dtype=np.int32),
         turn=np.ones(len(positions), dtype=np.int16),
-        proxy=np.full(len(positions), 0.5, dtype=np.float32),
+        search_value=np.full(len(positions), 0.5, dtype=np.float32),
+        hp_share=np.full(len(positions), 0.5, dtype=np.float32),
         kind=np.zeros(len(positions), dtype=np.int8),
         foe=np.zeros(len(positions), dtype=np.int32),
         foe_names=("metagame",),
@@ -133,7 +134,8 @@ def test_a_balanced_position_is_exactly_even(bundle) -> None:  # noqa: ANN001
         outcome=np.zeros(1, dtype=np.float32),
         game=np.zeros(1, dtype=np.int32),
         turn=np.ones(1, dtype=np.int16),
-        proxy=np.zeros(1, dtype=np.float32),
+        search_value=np.zeros(1, dtype=np.float32),
+        hp_share=np.zeros(1, dtype=np.float32),
         kind=np.zeros(1, dtype=np.int8),
     ).tensors(np.arange(1), torch.device("cpu"))
     with torch.no_grad():

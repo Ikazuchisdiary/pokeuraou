@@ -199,10 +199,21 @@ class Dataset:
     #: Which game each decision belongs to, so a split can be by game.
     game: np.ndarray
     turn: np.ndarray
-    #: The search's own `hp-share` value, kept as the baseline to beat -- never a target.
-    proxy: np.ndarray
+    #: The value the search reported at this decision, in the units of whatever leaf
+    #: generated the game. It was named `proxy` when every generation was produced with
+    #: the `hp-share` objective and the two were the same number; they stopped being the
+    #: same the moment generation moved to a learned leaf, and the name did not. It is now
+    #: the *previous generation's model, backed by a full one-ply equilibrium search* --
+    #: a much stronger baseline than any parameter-free objective, and one a freshly
+    #: trained raw evaluation is expected to sit slightly below, because search is what
+    #: the difference is made of. Never a target.
+    search_value: np.ndarray
+    #: The parameter-free `hp-share` of the position, which is the baseline that answers
+    #: "is a learned value function worth having at all". Zero-length for datasets encoded
+    #: before it was stored.
+    hp_share: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.float32))
     #: 'move' or 'replacement', as an index into :attr:`kinds`.
-    kind: np.ndarray
+    kind: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int32))
     kinds: tuple[str, ...] = ("move", "replacement")
     #: Opponent pool label per decision, for per-archetype reporting.
     foe: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int32))
@@ -260,7 +271,11 @@ def load_dataset(path: str | Path) -> Dataset:
         outcome=data["outcome"],
         game=data["game"],
         turn=data["turn"],
-        proxy=data["proxy"],
+        # `proxy` is the old name for the same array. Files written before the rename are
+        # still readable, and are still the generating search's value rather than
+        # hp-share, whatever their key says.
+        search_value=data["search_value"] if "search_value" in data else data["proxy"],
+        hp_share=data["hp_share"] if "hp_share" in data else np.zeros(0, np.float32),
         kind=data["kind"],
         foe=data["foe"],
         foe_names=tuple(meta["foe_names"]),
@@ -282,7 +297,8 @@ def save_dataset(path: str | Path, dataset: Dataset, meta: dict[str, Any]) -> No
         outcome=dataset.outcome,
         game=dataset.game,
         turn=dataset.turn,
-        proxy=dataset.proxy,
+        search_value=dataset.search_value,
+        hp_share=dataset.hp_share,
         kind=dataset.kind,
         foe=dataset.foe,
         meta_json=json.dumps(
@@ -443,6 +459,7 @@ def save_model(
     vocab: Vocabulary,
     config: ValueConfig,
     meta: dict[str, Any],
+    widths: dict[str, int] | None = None,
 ) -> None:
     """Writes weights with the fingerprint of the vocabulary they were trained on."""
     torch.save(
@@ -452,6 +469,7 @@ def save_model(
             "format_id": vocab.format_id,
             "vocab_fingerprint": vocab.fingerprint(),
             "active_feature": net._active_feature,
+            "widths": dict(widths or {}),
             "meta": meta,
         },
         Path(path),
@@ -476,6 +494,19 @@ def load_model(path: str | Path, encoder: Encoder) -> tuple[ValueNet, dict[str, 
             f"vocabulary fingerprint {encoder.vocab.fingerprint()} does not match the "
             f"model's {blob['vocab_fingerprint']}; the regulation dump changed under it, "
             "so the same integer no longer means the same Pokemon"
+        )
+    # The fingerprint covers the vocabulary -- which species is which integer -- and not
+    # the numeric feature blocks beside it. Adding a side feature shifts every feature
+    # after it, and a model loaded across that change would read boosts where it expects
+    # HP. A shape mismatch would eventually raise from `load_state_dict`, but only if the
+    # change happened to alter a width the weights touch, and the message would name a
+    # tensor rather than the cause.
+    stored = blob.get("widths") or {}
+    if stored and stored != encoder.widths:
+        raise ValueError(
+            f"feature widths {encoder.widths} do not match the model's {stored}; the "
+            "encoder gained or lost a feature, so the same column no longer means the "
+            "same quantity"
         )
     config = ValueConfig(**blob["config"])
     net = build(encoder, config)
