@@ -282,3 +282,45 @@ def test_the_search_reports_what_it_approximated(roster) -> None:  # noqa: ANN00
         if not deep.converged:
             assert any("settled" in note for note in deep.unmodelled)
     assert saw_refinement, "no position was refined, so the reporting was not exercised"
+
+
+def test_depth_two_keeps_the_seat_identity(roster) -> None:  # noqa: ANN001
+    """Swapping the sides must swap the answer, at depth 2 as at depth 1.
+
+        V(P) + V(swap(P)) = 1
+
+    hp-share is antisymmetric by construction and neither the resolver nor the LP has any
+    business knowing which seat it works for, so the identity holds exactly at depth 1 --
+    `test_symmetry.py` is built on it. Depth 2 adds a step that could break it without
+    breaking anything else: the refinement picks cells by equilibrium probability, and a
+    tie broken by index rather than by something seat-agnostic would refine a different
+    set of cells in the two orientations and quietly give one seat a better search.
+
+    That is not hypothetical. A speed tie broken by side index was worth nine points in a
+    mirror, and every match result this search produces is confounded if it recurs here.
+    """
+    reg = roster.reg
+    positions = _played(roster)
+    assert len(positions) >= 3, "the game ended too early to test anything"
+    worst = 0.0
+    checked = 0
+    for pos in positions:
+        mirror = pos.swapped()
+        ours = narrow(reg, pos, 0, limit=6).actions
+        theirs = narrow(reg, pos, 1, limit=6).actions
+        swapped_row = narrow(reg, mirror, 0, limit=6).actions
+        swapped_col = narrow(reg, mirror, 1, limit=6).actions
+        if not ours or not theirs or not swapped_row or not swapped_col:
+            continue
+        forward = search(reg, pos, ours, theirs, LEAF, budget=Budget.matrix(), depth=2)
+        backward = search(
+            reg, mirror, swapped_row, swapped_col, LEAF, budget=Budget.matrix(), depth=2
+        )
+        total = forward.equilibrium.value + backward.equilibrium.value
+        worst = max(worst, abs(total - 1.0))
+        checked += 1
+    assert checked >= 3, f"only {checked} positions checked"
+    # The same 2e-3 tolerance test_symmetry.py uses: the one known asymmetry left is a
+    # same-species Speed tie in the residual phase, measured at 0.001 and reported rather
+    # than resolved. Anything larger is new, and it would be the search that added it.
+    assert worst < 2e-3, f"depth 2 broke the seat identity by {worst:.4f}"
