@@ -27,9 +27,11 @@ The learned value function of milestone 3 replaces these; it is a drop-in for
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Protocol
+
+import numpy as np
 
 from .position import Position
 
@@ -46,6 +48,19 @@ class Objective(Protocol):
 
     def __call__(self, pos: Position) -> float: ...
 
+    def batch(self, positions: Sequence[Position]) -> np.ndarray:
+        """The same payoff for many positions at once.
+
+        Part of the protocol rather than an optimisation a caller may or may not find,
+        because the difference is not small for a learned value function: scoring a
+        24x24 matrix over four spread classes one position at a time took 656 seconds
+        against 11.5 for a parameter-free objective, and almost none of that is the
+        forward pass -- it is the per-position work around it. A caller that has a whole
+        node's leaves in hand should never be the one to decide whether batching is
+        worth it.
+        """
+        ...
+
 
 @dataclass(frozen=True, slots=True)
 class _Objective:
@@ -53,9 +68,23 @@ class _Objective:
     formula: str
     blind_to: str
     _value: Callable[[Position], float]
+    #: A batch form, when the payoff has one worth using. `None` means loop over `_value`.
+    _batch: Callable[[Sequence[Position]], np.ndarray] | None = None
 
     def __call__(self, pos: Position) -> float:
         return self._value(pos)
+
+    def batch(self, positions: Sequence[Position]) -> np.ndarray:
+        """One array for many positions, through `_batch` when one was supplied.
+
+        A parameter-free objective has nothing to gain from batching and loops; a value
+        function passes its own batch form in and the loop never runs.
+        """
+        if self._batch is not None:
+            return np.asarray(self._batch(positions), dtype=np.float64)
+        return np.fromiter(
+            (self._value(p) for p in positions), dtype=np.float64, count=len(positions)
+        )
 
 
 def _decided(pos: Position) -> float | None:

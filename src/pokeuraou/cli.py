@@ -45,7 +45,7 @@ from .observe import Observation, UpdateReport, parse_observations, update
 from .payoff import OBJECTIVES, Objective
 from .position import Position
 from .priors import find_cached_chaos, load_chaos
-from .resolve import Budget, resolve_turn, turn_leaves
+from .resolve import Budget, batched_payoffs
 from .setup import Scenario, load_scenario, with_spreads
 from .view import battler
 
@@ -314,38 +314,32 @@ def analyse(
         (c.weight, with_spreads(scenario, c.assignment, c.hp)) for c in classes
     ] or [(1.0, base)]
 
-    shape = (len(row.kept), len(col.kept))
-    matrices = [np.zeros(shape, dtype=np.float64) for _ in positions]
-    cross_matrices = [np.zeros(shape, dtype=np.float64) for _ in positions]
+    matrices: list[np.ndarray] = []
+    cross_matrices: list[np.ndarray] = []
     unmodelled: set[str] = set()
-    exact_cells = 0
+    # A cell counts as exact only if it was exact for *every* spread class, because the
+    # number the matrix carries is the average over them.
+    all_exact = np.ones((len(row.kept), len(col.kept)), dtype=bool)
     started = time.perf_counter()
-    for i, ours in enumerate(row.actions):
-        for j, theirs in enumerate(col.actions):
-            all_exact = True
-            for index, (_weight, pos) in enumerate(positions):
-                result = resolve_turn(reg, pos, [ours, theirs], budget=budget)
-                # One resolve, both objectives: the cross-check costs a second pass over
-                # the leaf list, not a second turn.
-                if result.suspended:
-                    # A self-switching move stopped the turn for a replacement, which is a
-                    # choice and not a chance event -- `turn_leaves` carries the fold that
-                    # says so.
-                    plan = turn_leaves(reg, result)
-                    matrices[index][i, j] = plan.value(
-                        [objective(p) for p in plan.positions]
-                    )
-                    cross_matrices[index][i, j] = plan.value(
-                        [cross(p) for p in plan.positions]
-                    )
-                    unmodelled.update(plan.unmodelled)
-                else:
-                    matrices[index][i, j] = result.expected(objective)
-                    cross_matrices[index][i, j] = result.expected(cross)
-                    unmodelled.update(result.unmodelled)
-                all_exact = all_exact and result.exact
-            exact_cells += int(all_exact)
+    for _weight, pos in positions:
+        # One resolve, both objectives, every leaf of the node in one forward pass. Doing
+        # it cell by cell through the per-position protocol is what made a learned value
+        # function cost 656 seconds on a 24x24x4 matrix against 11.5 for a parameter-free
+        # one -- and this is the analyser, the path a person waits on.
+        filled, notes, exact = batched_payoffs(
+            reg,
+            pos,
+            row.actions,
+            col.actions,
+            [objective.batch, cross.batch],
+            budget=budget,
+        )
+        matrices.append(filled[0])
+        cross_matrices.append(filled[1])
+        unmodelled.update(notes)
+        all_exact &= exact
     seconds = time.perf_counter() - started
+    exact_cells = int(all_exact.sum())
 
     weights = np.array([weight for weight, _pos in positions], dtype=np.float64)
     # The average is for the report's "the matrix ranges over" line only. Solving it

@@ -3659,13 +3659,35 @@ def batched_payoff(
     *,
     budget: Budget,
 ) -> tuple[np.ndarray, set[str]]:
-    """One payoff matrix, with every leaf in the node scored in a single call.
+    """One payoff matrix; see :func:`batched_payoffs`, of which this is the single case."""
+    matrices, unmodelled, _exact = batched_payoffs(
+        reg, pos, ours, theirs, [evaluate], budget=budget
+    )
+    return matrices[0], unmodelled
+
+
+def batched_payoffs(
+    reg: Regulation,
+    pos: Position,
+    ours: Sequence[SideAction],
+    theirs: Sequence[SideAction],
+    evaluators: Sequence[Callable[[list[Position]], np.ndarray]],
+    *,
+    budget: Budget,
+) -> tuple[list[np.ndarray], set[str], np.ndarray]:
+    """One payoff matrix per evaluator, with every leaf in the node scored in one call.
 
     The alternative is to apply a per-position objective branch by branch, which for a
     learned value function means one forward pass per leaf: measured on a 24x24 matrix over
     four spread classes, 656 seconds against 11.5 with a parameter-free objective. The
     forward pass is a few percent of the per-leaf cost, so batching across the node is the
     whole optimisation.
+
+    Several evaluators rather than one because the analyser runs a cross-check: the same
+    position scored by a second objective, to show whether a recommendation survives a
+    change of payoff. That must not cost a second pass over the *resolver*, which is
+    where the time goes -- so the turns are resolved once and the leaf list is scored
+    once per evaluator.
 
     Two kinds of cell, kept apart because they fold differently. An ordinary cell is an
     average over chance branches -- one dot product. A cell whose turn stopped for a
@@ -3675,8 +3697,15 @@ def batched_payoff(
 
     Lives here rather than in the callers because there are now two of them -- self-play
     and the analyser -- and the fold semantics are the part that must not exist twice.
+
+    The third return value is a per-cell mask of which cells the budget resolved exactly.
+    It is per cell and not per matrix because it genuinely varies: the branch budget is
+    divided among the live branches as a turn unfolds, so one cell can be enumerated in
+    full while its neighbour is narrowed. Reporting it as "all or nothing from the budget
+    name" would be a number nobody measured.
     """
-    payoff = np.zeros((len(ours), len(theirs)), dtype=np.float64)
+    payoffs = [np.zeros((len(ours), len(theirs)), dtype=np.float64) for _ in evaluators]
+    exact = np.zeros((len(ours), len(theirs)), dtype=bool)
     unmodelled: set[str] = set()
     leaves: list[Position] = []
     weights: list[np.ndarray] = []
@@ -3686,6 +3715,7 @@ def batched_payoff(
     for i, a in enumerate(ours):
         for j, b in enumerate(theirs):
             result = resolve_turn(reg, pos, [a, b], budget=budget)
+            exact[i, j] = result.exact
             if result.suspended:
                 plan = turn_leaves(reg, result)
                 unmodelled.update(plan.unmodelled)
@@ -3706,13 +3736,14 @@ def batched_payoff(
             )
             spans.append((i, j, start, len(result.branches)))
 
-    values = np.asarray(evaluate(leaves), dtype=np.float64) if leaves else np.zeros(0)
-    for (i, j, start, count), w in zip(spans, weights, strict=True):
-        if count:
-            payoff[i, j] = float(values[start : start + count] @ w)
-    for i, j, root in folded:
-        payoff[i, j] = fold_value(root, values)
-    return payoff, unmodelled
+    for payoff, evaluate in zip(payoffs, evaluators, strict=True):
+        values = np.asarray(evaluate(leaves), dtype=np.float64) if leaves else np.zeros(0)
+        for (i, j, start, count), w in zip(spans, weights, strict=True):
+            if count:
+                payoff[i, j] = float(values[start : start + count] @ w)
+        for i, j, root in folded:
+            payoff[i, j] = fold_value(root, values)
+    return payoffs, unmodelled, exact
 
 
 def apply_lead_abilities(reg: Regulation, pos: Position) -> ReplacementResult:
@@ -4062,6 +4093,7 @@ __all__ = [
     "TurnResult",
     "apply_lead_abilities",
     "batched_payoff",
+    "batched_payoffs",
     "pending_attacks",
     "settle_outcome",
     "replacements_needed",
