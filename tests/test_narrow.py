@@ -171,3 +171,63 @@ def test_a_fake_out_that_cannot_work_is_not_offered_as_a_candidate() -> None:
     ]
     assert only, "the position must offer at least one Fake Out combination"
     assert drop_dead_actions(reg, pos, 0, only) == only
+
+
+def test_the_scorer_prices_last_respects_at_its_real_power() -> None:
+    """Variable base power has to reach the *scorer*, not only the resolver.
+
+    Last Respects is 50 + 50 per fainted ally, from a `basePowerCallback` -- the declared
+    `basePower: 50` in the move data is only its floor. The resolver built a MoveContext
+    and got this right; `narrow` and `observe` called the calculator without one and took
+    the default, where no ally has ever fainted. So the ranking that decides which actions
+    the search even considers priced a 200-power move at 50, and the belief layer inferred
+    spreads from the same wrong number.
+    """
+    from pokeuraou.damage import calculate, register_mega_stones
+    from pokeuraou.priors import SampledSet
+    from pokeuraou.selfplay import position_from_sets
+    from pokeuraou.teams import load_roster
+    from pokeuraou.view import battler, field_state, move_context
+
+    roster = load_roster("rizabanadohido")
+    reg = roster.reg
+    register_mega_stones(reg)
+    basculegion = SampledSet(
+        species="basculegion",
+        ability="adaptability",
+        item="lifeorb",
+        nature="Adamant",
+        sp={"hp": 8, "atk": 32, "spe": 26},
+        moves=["lastrespects", "wavecrash", "aquajet", "protect"],
+    )
+    pos = position_from_sets(
+        reg, list(roster.sets[:4]), [basculegion, *roster.sets[1:4]]
+    )
+    attacker = battler(reg, pos.sides[1].pokemon[0])
+    defender = battler(reg, pos.sides[0].pokemon[0])
+
+    def damage() -> int:
+        result = calculate(
+            reg,
+            attacker,
+            defender,
+            "lastrespects",
+            field_state(pos, reg),
+            defender_side=0,
+            spread=False,
+            # The context a scorer can build from the position alone -- which is the
+            # thing that was missing.
+            move_ctx=move_context(pos, 1, 0),
+        )
+        return int(result.rolls.max())
+
+    fresh = damage()
+    # Faint two of *their* bench, not their actives: emptying an active slot changes the
+    # position rather than the move's power, which is a different measurement.
+    for index in (2, 3):
+        pos.sides[1].pokemon[index].fainted = True
+        pos.sides[1].pokemon[index].hp = 0
+    after = damage()
+    assert after >= 2.5 * fresh, (
+        f"two fainted allies must roughly triple it: {fresh} -> {after}"
+    )

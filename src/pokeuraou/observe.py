@@ -43,7 +43,7 @@ from .hpdisplay import band_bounds, uses_floor_display
 from .position import Position
 from .regulation import Regulation
 from .speed import move_priority
-from .view import battler, field_state
+from .view import battler, field_state, move_context
 
 #: (side index, active slot), as everywhere else.
 SlotKey = tuple[int, int]
@@ -216,9 +216,14 @@ def _rolls(
     spread: bool,
 ) -> np.ndarray | None:
     """(N, 16) damage rolls, or None when the calculator cannot speak to this hit."""
+    # The same context the resolver builds. An observed Last Respects scored at its
+    # declared 50 would infer an Attack stat several times too large from the damage it
+    # actually did, and the belief layer would then be confidently wrong about the
+    # opponent's spread.
     result = calculate(
         reg, attacker, defender, move_id, field_state(pos, reg),
         defender_side=defender_side, spread=spread, crit=crit,
+        move_ctx=move_context(pos, 1 - defender_side, 0),
     )
     if result.immune or result.unmodelled:
         return None

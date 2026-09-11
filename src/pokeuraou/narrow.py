@@ -47,7 +47,7 @@ from .resolve import FIRST_TURN_OUT_MOVES
 
 if TYPE_CHECKING:
     from .names import Localiser
-from .view import battler, field_state
+from .view import battler, field_state, move_context
 
 #: How many action combinations per side reach the exact solver by default. The matrix is
 #: the product of the two sides', so this is 576 resolved turns.
@@ -210,6 +210,7 @@ def _expected_fraction(
     defender_side: int,
     weights: np.ndarray | None,
     attacker_weights: np.ndarray | None = None,
+    move_ctx: object = None,
 ) -> tuple[float, bool]:
     """Mean damage as a fraction of the defender's current HP, and whether it is usable.
 
@@ -223,7 +224,7 @@ def _expected_fraction(
         weights = None
     result = calculate(
         reg, attacker, defender, move_id, field,  # type: ignore[arg-type]
-        defender_side=defender_side, spread=spread,
+        defender_side=defender_side, spread=spread, move_ctx=move_ctx,  # type: ignore[arg-type]
     )
     if result.immune:
         return 0.0, True
@@ -275,6 +276,10 @@ def score_action(
             fraction, exact = _expected_fraction(
                 reg, attacker, defender, slot.move_id, field,
                 spread=spread, defender_side=target_side,
+                # Without this the scorer reads the declared base power and prices Last
+                # Respects at 50 for the whole battle -- so a 200-power move can fail to
+                # make the candidate list at all.
+                move_ctx=move_context(pos, side, index),
                 weights=None if weights is None else weights.get((target_side, target_slot)),
                 attacker_weights=None if weights is None else weights.get((side, index)),
             )

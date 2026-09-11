@@ -14,6 +14,7 @@ from __future__ import annotations
 import numpy as np
 
 from .battler import Battler, FieldState
+from .moveinfo import MoveContext
 from .position import Pokemon, Position, Side
 from .regulation import STAT_IDS, Regulation
 from .stats import nature_multipliers, stats_from_sp
@@ -152,6 +153,36 @@ def battler(
         volatiles=frozenset(v.id for v in mon.volatiles),
         gender=mon.gender,
         ability_state=dict(mon.ability_state),
+    )
+
+
+def move_context(
+    pos: Position, side: int, slot: int, *, hit_index: int = 1
+) -> MoveContext:
+    """The position-derived half of a move's context: everything a *scorer* can know.
+
+    Base power is not always a constant, and reading the declared one where a callback
+    exists is how Last Respects came to be worth 50 for the whole battle. The resolver
+    built this context and the scorers did not, so the ranking that decides which actions
+    the search even considers priced a 200-power move at 50 -- and the belief layer's
+    likelihoods inferred a spread from the same wrong number.
+
+    What is missing here is only what a turn in progress knows: whether the target has
+    already been hurt this turn, whether it damaged the attacker first. Those default to
+    False, which is the right reading for a scorer looking at a position before anyone
+    has moved.
+    """
+    mon = None
+    active = pos.sides[side].active
+    if 0 <= slot < len(active) and active[slot] is not None:
+        mon = pos.sides[side].pokemon[active[slot]]
+    return MoveContext(
+        weather=pos.field.weather,
+        terrain=pos.field.terrain,
+        side_total_fainted=sum(1 for m in pos.sides[side].pokemon if m.fainted),
+        times_attacked=mon.times_attacked if mon is not None else 0,
+        previous_move_failed=bool(mon is not None and mon.move_last_turn_failed),
+        hit_index=hit_index,
     )
 
 
