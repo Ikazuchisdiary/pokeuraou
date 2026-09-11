@@ -18,7 +18,7 @@ function that can honestly carry that label.
 from __future__ import annotations
 
 import argparse
-import itertools
+import heapq
 import json
 import sys
 import time
@@ -140,6 +140,68 @@ def build_beliefs(scenario: Scenario) -> dict[tuple[int, int], SpreadBelief]:
     return out
 
 
+def _heaviest_combinations(
+    per_slot: list[list[tuple[float, tuple[int, int], np.ndarray, int, str]]],
+    limit: int,
+) -> list[tuple[tuple[float, tuple[int, int], np.ndarray, int, str], ...]]:
+    """The heaviest `limit` combinations, without building the rest.
+
+    This used to be `itertools.product` followed by a sort, and the product is the problem:
+    two hidden Pokemon with about 1,150 spread-and-HP entries each is 1.36 million
+    combinations built, sorted, and thrown away except for four. Measured at 4.6 seconds,
+    which was 29% of a whole analysis.
+
+    Each slot's entries are already sorted heaviest first and a combination's weight is the
+    product of one entry per slot, so the heaviest combination is the head of every list
+    and every other candidate is one step down one axis from a combination already taken.
+    That makes it a k-way merge over a lattice: keep a frontier in a heap, and expand a
+    point into its neighbours when it is popped.
+
+    Ties are broken by position in `itertools.product` order -- the last axis varying
+    fastest -- because that is what the stable sort over the materialised list did, and the
+    answer must not change.
+    """
+    if not per_slot:
+        return [()]
+    if any(not entries for entries in per_slot):
+        return []
+
+    sizes = [len(entries) for entries in per_slot]
+    strides = [1] * len(sizes)
+    for axis in range(len(sizes) - 2, -1, -1):
+        strides[axis] = strides[axis + 1] * sizes[axis + 1]
+
+    def weight_of(index: tuple[int, ...]) -> float:
+        product = 1.0
+        for axis, position in enumerate(index):
+            product *= per_slot[axis][position][0]
+        return product
+
+    def ordinal(index: tuple[int, ...]) -> int:
+        return sum(position * strides[axis] for axis, position in enumerate(index))
+
+    start = (0,) * len(sizes)
+    frontier: list[tuple[float, int, tuple[int, ...]]] = [
+        (-weight_of(start), ordinal(start), start)
+    ]
+    seen = {start}
+    out: list[tuple[tuple[float, tuple[int, int], np.ndarray, int, str], ...]] = []
+    while frontier and len(out) < limit:
+        _weight, _order, index = heapq.heappop(frontier)
+        out.append(tuple(per_slot[axis][position] for axis, position in enumerate(index)))
+        for axis, position in enumerate(index):
+            if position + 1 >= sizes[axis]:
+                continue
+            neighbour = index[:axis] + (position + 1,) + index[axis + 1 :]
+            if neighbour in seen:
+                continue
+            seen.add(neighbour)
+            heapq.heappush(
+                frontier, (-weight_of(neighbour), ordinal(neighbour), neighbour)
+            )
+    return out
+
+
 def joint_classes(
     scenario: Scenario,
     reductions: dict[tuple[int, int], Reduction],
@@ -196,8 +258,8 @@ def joint_classes(
         entries.sort(key=lambda e: -e[0])
         per_slot.append(entries)
 
-    combos: list[JointClass] = []
-    for combination in itertools.product(*per_slot) if per_slot else [()]:
+    kept: list[JointClass] = []
+    for combination in _heaviest_combinations(per_slot, limit):
         weight = 1.0
         assignment = dict(fixed)
         hp_choice: dict[tuple[int, int], int] = {}
@@ -207,7 +269,7 @@ def joint_classes(
             assignment[key] = spread
             hp_choice[key] = hp
             labels.append(label)
-        combos.append(
+        kept.append(
             JointClass(
                 weight=weight,
                 assignment=assignment,
@@ -215,11 +277,15 @@ def joint_classes(
                 label=" + ".join(labels),
             )
         )
-    combos.sort(key=lambda c: -c.weight)
 
-    kept = combos[:limit]
     covered = sum(c.weight for c in kept)
-    total = sum(c.weight for c in combos) or 1.0
+    # The total over *every* combination, without enumerating them: a combination's weight
+    # is the product of one entry per slot, so the sum over the product is the product of
+    # the sums. Exactly, and in two multiplications rather than 1.36 million.
+    total = 1.0
+    for entries in per_slot:
+        total *= sum(entry[0] for entry in entries)
+    total = total or 1.0
     for c in kept:
         c.weight /= covered or 1.0
     return kept, covered / total, tuple(sorted(set(bench)))
