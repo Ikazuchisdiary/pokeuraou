@@ -50,6 +50,54 @@ def occupant(loc: Localiser, side: dict, slot: int) -> str:
     return loc.species(mon["species"])
 
 
+def _effect_text(loc: Localiser, effect: dict) -> str:
+    """One field effect: its name, then how much of it is left.
+
+    Duration counts the residual phases still to come, this turn's included, so `残1` is
+    the last turn -- which is also the turn a sandstorm deals no damage, because Showdown
+    decrements before the handler runs. Layers are Spikes and Toxic Spikes, which stack
+    instead of expiring, so they never carry a duration and it is not printed as zero.
+    """
+    out = named_id(loc, effect.get("id", ""))
+    layers = effect.get("layers")
+    if layers and layers > 1:
+        out += f" {layers}層"
+    duration = effect.get("duration")
+    if duration is not None:
+        out += f" 残{duration}"
+    return out
+
+
+def field_line(loc: Localiser, position: dict) -> str:
+    """Weather, terrain, room and screens, with what is left of each.
+
+    Printed only when something is up. A line reading "場: なし" on the great majority of
+    turns would push the part a reader is looking for further down the screen every time,
+    to say something they can already see from its absence.
+
+    Everything is read from the position rather than from the event log, so this is the
+    state the search was given -- which is the point of showing it next to the mixture.
+    """
+    field = position.get("field") or {}
+    parts: list[str] = []
+    for key, duration_key in (("weather", "weatherDuration"), ("terrain", "terrainDuration")):
+        value = field.get(key)
+        if value:
+            parts.append(_effect_text(loc, {"id": value, "duration": field.get(duration_key)}))
+    parts.extend(_effect_text(loc, e) for e in field.get("pseudoWeather") or [])
+
+    for index, side in enumerate(position.get("sides") or []):
+        label = "自" if index == 0 else "敵"
+        own: list[str] = [_effect_text(loc, e) for e in side.get("sideConditions") or []]
+        # Slot conditions are Wish and Healing Wish: they belong to one slot of one side,
+        # so they are named with the slot rather than folded into the side's list.
+        for slot, group in enumerate(side.get("slotConditions") or []):
+            own.extend(f"{slot + 1}番:{_effect_text(loc, e)}" for e in group)
+        if own:
+            parts.append(f"{label} " + "・".join(own))
+    return "  ｜  ".join(parts)
+
+
 def name_action(
     reg: Regulation, loc: Localiser, sides: list[dict], actor: int, choice: str
 ) -> str:
@@ -576,6 +624,9 @@ def render(reg: Regulation, loc: Localiser, record: dict, top: int) -> str:
     for position_in_game, decision in enumerate(decisions):
         sides = decision["position"]["sides"]
         out.write(f"\n─── ターン {decision['turn']}  ({decision['kind']})\n")
+        conditions = field_line(loc, decision["position"])
+        if conditions:
+            out.write(f"  場: {conditions}\n")
         for index, side in enumerate(sides):
             label = "自" if index == 0 else "敵"
             live = []
