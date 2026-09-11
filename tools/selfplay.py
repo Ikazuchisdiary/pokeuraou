@@ -39,6 +39,15 @@ def main() -> None:
     ap.add_argument("--roster", default="rizabanadohido")
     ap.add_argument("--archetypes", default="wcs2026-regmb")
     ap.add_argument("--limit", type=int, default=SEARCH_LIMIT)
+    ap.add_argument(
+        "--depth",
+        type=int,
+        default=1,
+        help="1 is the one-ply search this project has always used. 2 refines the cells "
+        "the equilibrium actually weights with the next turn's own equilibrium, which "
+        "costs several times as much per decision -- worth it or not is a question for "
+        "tools/depth_match.py, not for a default.",
+    )
     ap.add_argument("--max-turns", type=int, default=MAX_TURNS)
     ap.add_argument("--objective", default="hp-share", choices=sorted(OBJECTIVES))
     ap.add_argument(
@@ -251,6 +260,7 @@ def main() -> None:
         out=args.out,
         objective=OBJECTIVES[args.objective],
         search_limit=args.limit,
+        depth=args.depth,
         max_turns=args.max_turns,
         cooc=cooc,
         archetype_share=archetype_share,

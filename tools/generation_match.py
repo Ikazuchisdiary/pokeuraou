@@ -53,6 +53,15 @@ def main() -> None:
         "`play_game` already takes a leaf per side.",
     )
     ap.add_argument("--objective", default="hp-share", help="the leaf the older generation used")
+    ap.add_argument(
+        "--depth",
+        type=int,
+        default=1,
+        help="search depth for the arm under test. With --baseline pointing at the same "
+        "model, --depth 2 --baseline-depth 1 makes this a pure depth comparison: same "
+        "leaf, same width, same teams, same seed, one side looking a ply further.",
+    )
+    ap.add_argument("--baseline-depth", type=int, default=1, help="depth for the other arm")
     ap.add_argument("--seed", type=int, default=77)
     ap.add_argument("--max-turns", type=int, default=40)
     ap.add_argument(
@@ -140,9 +149,10 @@ def main() -> None:
     # game's provenance, and a reader of that dataset a month from now has no way to know
     # which generation "gen2" meant on the day the match ran -- the `leaves` pair is
     # authoritative, but a label that contradicts it is worse than no label.
-    for seat, leaves in (
-        (f"{new_name} = side 0", (value, baseline)),
-        (f"{new_name} = side 1", (baseline, value)),
+    arm = f"{new_name}@d{args.depth}" if args.depth != args.baseline_depth else new_name
+    for seat, leaves, depths in (
+        (f"{arm} = side 0", (value, baseline), (args.depth, args.baseline_depth)),
+        (f"{arm} = side 1", (baseline, value), (args.baseline_depth, args.depth)),
     ):
         side_leaves = (
             (new_name, old_name) if leaves[0] is value else (old_name, new_name)
@@ -172,6 +182,7 @@ def main() -> None:
                 search_limit=args.limit,
                 max_turns=args.max_turns,
                 evaluate=leaves,
+                depth=depths,
             )
             if record.outcome is None:
                 unfinished += 1
@@ -186,6 +197,11 @@ def main() -> None:
                     seat=seat,
                     leaves=side_leaves,
                     limits=(args.limit, args.limit),
+                    note=(
+                        f"search depth {depths[0]} vs {depths[1]} by side"
+                        if depths[0] != depths[1]
+                        else ""
+                    ),
                 ),
             )
             seat_played += 1
@@ -218,6 +234,8 @@ def main() -> None:
                             ),
                             "objective": args.objective,
                             "limit": args.limit,
+                            "depth": args.depth,
+                            "baselineDepth": args.baseline_depth,
                             "played": seat_played,
                             "gen2_wins": seat_wins,
                             "unfinished": unfinished,
@@ -232,14 +250,14 @@ def main() -> None:
     rate = wins / played if played else float("nan")
     half = 1.96 * (rate * (1 - rate) / played) ** 0.5 if played else float("nan")
     print(
-        f"\n  両席あわせて {played} ゲーム: gen2 の勝率 {rate * 100:.1f}% +-{half * 100:.1f}",
+        f"\n  両席あわせて {played} ゲーム: {arm} の勝率 {rate * 100:.1f}% +-{half * 100:.1f}",
         flush=True,
     )
     if rate - half > 0.5:
-        print("  → gen2 が有意に強い。次世代のデータ生成に使える。")
+        print(f"  → {arm} が有意に強い。次世代のデータ生成に使える。")
     elif rate + half < 0.5:
         print(
-            "  → gen2 が有意に弱い。価値関数を葉に入れると悪化しているので、"
+            f"  → {arm} が有意に弱い。この設定は採用しない。"
             "生成する前に原因を出すべき。"
         )
     else:

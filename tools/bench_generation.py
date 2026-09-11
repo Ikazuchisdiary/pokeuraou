@@ -45,6 +45,7 @@ def main() -> None:
     ap.add_argument("--device", default="cpu", choices=("cpu", "cuda"))
     ap.add_argument("--games", type=int, default=6)
     ap.add_argument("--limit", type=int, default=16)
+    ap.add_argument("--depth", type=int, default=1, help="1 = one ply, 2 = refined cells")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument(
         "--torch-threads",
@@ -93,6 +94,7 @@ def main() -> None:
             "bench",
             objective=OBJECTIVES["hp-share"],
             search_limit=args.limit,
+            depth=args.depth,
             max_turns=40,
             evaluate=evaluate,
         )
@@ -103,7 +105,7 @@ def main() -> None:
 
     leaf = args.value.stem if args.value else "hp-share"
     print(
-        f"{leaf} on {args.device} (torch threads {args.torch_threads}): "
+        f"{leaf} on {args.device} depth {args.depth} (torch threads {args.torch_threads}): "
         f"{elapsed / args.games:.3f} s/game, {args.games / elapsed * 60:.1f} games/min "
         f"per process"
     )

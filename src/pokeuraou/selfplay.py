@@ -41,18 +41,16 @@ from .priors import Cooccurrence, MetagamePrior, SampledSet
 from .regulation import STAT_IDS, Regulation, repo_root
 from .resolve import (
     Budget,
-    Fold,
     SuspendedTurn,
     TurnResult,
     apply_lead_abilities,
-    fold_value,
     replacements_needed,
     resolve_replacements,
     resolve_turn,
     resume_alternatives,
-    turn_expectation,
     turn_leaves,
 )
+from .search import search
 from .selection_book import (
     DEFAULT_EPSILON,
     DEFAULT_TEMPERATURE,
@@ -80,7 +78,7 @@ class LeafEvaluator(Protocol):
     A protocol rather than a concrete type so the resolver and the self-play loop never
     import torch: :class:`pokeuraou.value.BatchedValue` satisfies it, and so does a stub in
     a test. Positions arrive as a list because the batch is the unit -- see
-    :func:`_solve_matrix`.
+    :func:`pokeuraou.search.search`.
     """
 
     def __call__(self, positions: list[Position]) -> np.ndarray: ...
@@ -270,76 +268,6 @@ def _sample_index(rng: np.random.Generator, weights: np.ndarray) -> int:
     return int(rng.choice(len(weights), p=weights / total))
 
 
-def _solve_matrix(
-    reg: Regulation,
-    pos: Position,
-    ours: list[SideAction],
-    theirs: list[SideAction],
-    objective: Objective,
-    budget: Budget,
-    evaluate: LeafEvaluator | None = None,
-) -> tuple[np.ndarray, set[str]]:
-    """The payoff matrix, with every leaf in the node scored in one call.
-
-    With ``evaluate`` the leaves go to the value function as a single batch spanning the
-    whole matrix. Calling it per branch instead would be 256 forward passes for a 16x16
-    node, and the forward pass is 3% of the per-leaf cost -- so batching across the node is
-    the whole optimisation, and it also makes the GPU's fixed overhead amortise.
-
-    Without ``evaluate`` this is the parameter-free objective applied branch by branch,
-    unchanged, because the differential tests and the M1 analysis path still use it.
-    """
-    payoff = np.zeros((len(ours), len(theirs)), dtype=np.float64)
-    unmodelled: set[str] = set()
-
-    if evaluate is None:
-        for i, a in enumerate(ours):
-            for j, b in enumerate(theirs):
-                result = resolve_turn(reg, pos, [a, b], budget=budget)
-                value, flags = turn_expectation(reg, result, objective)
-                payoff[i, j] = value
-                unmodelled.update(flags)
-        return payoff, unmodelled
-
-    leaves: list[Position] = []
-    weights: list[np.ndarray] = []
-    spans: list[tuple[int, int, int, int]] = []
-    #: Cells whose turn stopped for a mid-turn replacement, and so fold through a choice
-    #: rather than an average. Kept separate so the common cell stays one dot product.
-    folded: list[tuple[int, int, Fold]] = []
-    for i, a in enumerate(ours):
-        for j, b in enumerate(theirs):
-            result = resolve_turn(reg, pos, [a, b], budget=budget)
-            if result.suspended:
-                plan = turn_leaves(reg, result)
-                unmodelled.update(plan.unmodelled)
-                if plan.positions:
-                    folded.append((i, j, plan.shifted(len(leaves))))
-                    leaves.extend(plan.positions)
-                continue
-            unmodelled.update(result.unmodelled)
-            total = result.total_probability
-            if not result.branches or total <= 0:
-                # Nothing resolved: leave the cell at zero and let the caller see it.
-                spans.append((i, j, len(leaves), 0))
-                weights.append(np.zeros(0))
-                continue
-            start = len(leaves)
-            leaves.extend(branch.position for branch in result.branches)
-            weights.append(
-                np.array([branch.probability for branch in result.branches]) / total
-            )
-            spans.append((i, j, start, len(result.branches)))
-
-    values = evaluate(leaves) if leaves else np.zeros(0)
-    for (i, j, start, count), w in zip(spans, weights, strict=True):
-        if count:
-            payoff[i, j] = float(values[start : start + count] @ w)
-    for i, j, root in folded:
-        payoff[i, j] = fold_value(root, values)
-    return payoff, unmodelled
-
-
 def play_game(
     reg: Regulation,
     rng: np.random.Generator,
@@ -352,14 +280,20 @@ def play_game(
     max_turns: int = MAX_TURNS,
     evaluate: LeafEvaluator | None | tuple[LeafEvaluator | None, LeafEvaluator | None] = None,
     selection: tuple[list[str], list[str], tuple[int, ...], tuple[int, ...]] | None = None,
+    depth: int | tuple[int, int] = 1,
 ) -> GameRecord:
     """Plays one game to a result, sampling both sides from the turn's equilibrium.
 
     ``search_limit`` may be a pair, giving each side its own number of candidates. Equal
     values are the training setting; an unequal pair is a diagnostic -- if one side wins
     less when searched just as widely, the imbalance was in the search and not the teams.
+
+    ``depth`` takes a pair for the same reason, and it is how depth-2 is measured against
+    depth-1: one side looks a ply further and the win rate says what that bought. Depth 1
+    on both sides is the search this project has always had.
     """
     limits = (search_limit, search_limit) if isinstance(search_limit, int) else search_limit
+    depths = (depth, depth) if isinstance(depth, int) else depth
     leaves = evaluate if isinstance(evaluate, tuple) else (evaluate, evaluate)
     record = GameRecord(
         own_team=[_set_json(reg, s) for s in own],
@@ -389,28 +323,40 @@ def play_game(
         if not ours or not theirs:
             break
 
-        payoff, unmodelled = _solve_matrix(
-            reg, pos, ours, theirs, objective, budget, leaves[0]
-        )
-        record.unmodelled.extend(unmodelled)
         try:
-            equilibrium = solve(payoff)
+            own_search = search(
+                reg,
+                pos,
+                ours,
+                theirs,
+                leaves[0] if leaves[0] is not None else objective.batch,
+                budget=budget,
+                depth=depths[0],
+            )
         except EquilibriumError:
             break
+        record.unmodelled.extend(own_search.unmodelled)
+        equilibrium = own_search.equilibrium
 
         # With different leaves the two sides are no longer solving one game, so the
-        # column player's strategy has to come from *its* matrix. Same evaluator on both
-        # sides skips this entirely and the behaviour is identical to before.
+        # column player's strategy has to come from *its* matrix. Same evaluator and the
+        # same depth on both sides skips this entirely.
         foe_equilibrium = equilibrium
-        if leaves[1] is not leaves[0]:
-            foe_payoff, foe_unmodelled = _solve_matrix(
-                reg, pos, ours, theirs, objective, budget, leaves[1]
-            )
-            record.unmodelled.extend(foe_unmodelled)
+        if leaves[1] is not leaves[0] or depths[1] != depths[0]:
             try:
-                foe_equilibrium = solve(foe_payoff)
+                foe_search = search(
+                    reg,
+                    pos,
+                    ours,
+                    theirs,
+                    leaves[1] if leaves[1] is not None else objective.batch,
+                    budget=budget,
+                    depth=depths[1],
+                )
             except EquilibriumError:
                 break
+            record.unmodelled.extend(foe_search.unmodelled)
+            foe_equilibrium = foe_search.equilibrium
 
         chosen = [
             ours[_sample_index(rng, equilibrium.row_strategy)],
@@ -677,6 +623,7 @@ def generate(
     explore_epsilon: float = DEFAULT_EPSILON,
     explore_temperature: float = DEFAULT_TEMPERATURE,
     mirror_share: float = 0.0,
+    depth: int | tuple[int, int] = 1,
 ) -> dict[str, Any]:
     """Plays games and appends one JSON line per finished game.
 
@@ -804,6 +751,7 @@ def generate(
                 reg, rng, own_four, foe_four, label,
                 objective=objective, search_limit=search_limit, max_turns=max_turns,
                 evaluate=evaluate,
+                depth=depth,
                 selection=(
                     [entry.species for entry in roster.sets],
                     [entry.species for entry in foe_six],
