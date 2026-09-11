@@ -149,6 +149,21 @@ def translate_event(loc: Localiser, line: str, occupants: dict[str, str]) -> str
             return f"{SLOT_LABELS[index]} {was} {arrow} {occupants[code]}（{how}）".strip()
         who = occupants.get(code, "")
         head = f"{SLOT_LABELS[index]} {who}".strip()
+        # `atk -1 -> -1` is "dropped by one, now at -1", not "from -1 to -1" -- the
+        # resolver writes the delta first and the resulting stage second. Printed raw it
+        # reads as a change that did not happen.
+        if (
+            len(rest) >= 4
+            and rest[1][:1] in "+-"
+            and rest[2] == "->"
+            and rest[1][1:].isdigit()
+        ):
+            reason = rest[4].strip("()") if len(rest) > 4 else ""
+            caused = f"（{named_id(loc, reason)}）" if reason else ""
+            return (
+                f"{head} {loc.stat(rest[0], short=True)} {rest[1]}段階"
+                f" → 現在 {rest[3]}{caused}"
+            )
     elif code in ("p1", "p2"):
         head = "自" if code == "p1" else "敵"
     else:
@@ -231,6 +246,7 @@ def turn_events(
 
     result = resolve_turn(reg, pos, lookup, budget=Budget.exact())
     prefix: list[str] = []
+    resumed = False
     if result.suspended:
         # A self-switching move -- Parting Shot, U-turn, Volt Switch -- stops the turn for
         # a replacement choice, and that choice is the *next* recorded decision. Bailing
@@ -238,15 +254,19 @@ def turn_events(
         # changed, which is the one thing a log must not do.
         paused = result.suspended[0]
         prefix = list(paused.events)
-        answer = (following or {}).get("ownChosen") or (following or {}).get("foeChosen")
+        # Which side owes the replacement decides which half of the next record answers
+        # it. Reading `ownChosen` either way silently lost every turn where the *opponent*
+        # was the one switching out -- half of them.
         side, alternatives = resume_alternatives(reg, paused)
+        key = "foeChosen" if side == 1 else "ownChosen"
+        answer = (following or {}).get(key)
         picked = next(
             (r for action, r in alternatives if action.to_choice() == answer), None
         )
         if picked is None or not picked.branches:
             return [
                 *[translate_event(loc, line, _occupants(loc, pos)) for line in prefix],
-                "（すてゼリフ等でターンが中断。以降は次のノード）",
+                f"（中断までの表示。記録の交代手 {answer!r} が再開手と一致しない）",
             ]
         result = picked
         # The resumed result carries the *whole* turn, the part before the interrupt
@@ -255,6 +275,7 @@ def turn_events(
         # And the position it lands in is not the one the next decision recorded -- that
         # is two nodes later -- so there is nothing to match a branch against.
         following = None
+        resumed = True
     if not result.branches:
         return []
     branch = max(result.branches, key=lambda b: b.probability)
@@ -276,7 +297,14 @@ def turn_events(
         if distance(branch) != 0:
             note = "（記録と完全には一致しない枝: 乱数の再現に失敗している）"
     elif len(result.branches) > 1:
-        note = "（最終ターンなので最尤の枝）"
+        # Two different reasons to have nothing to match against, and saying the wrong one
+        # is worse than saying nothing: a mid-game turn labelled "the last turn" sends a
+        # reader looking for a bug in the game rather than in the note.
+        note = (
+            "（中断ターンを再開して再現。枝は最尤）"
+            if resumed
+            else "（最終ターンなので最尤の枝）"
+        )
 
     occupants = _occupants(loc, pos)
     lines = [
