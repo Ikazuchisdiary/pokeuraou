@@ -412,6 +412,12 @@ def stratified_rolls(budget: Budget) -> list[tuple[int, float]]:
     return out
 
 
+#: The label `acts` uses for the end-of-turn phase, which belongs to nobody. Every other
+#: label comes from `QueuedAction.label` and therefore starts with a slot code (`p1a`), so
+#: the two can never be confused.
+RESIDUAL_PHASE = "residual"
+
+
 @dataclass
 class Branch:
     """One fully determined outcome of the turn."""
@@ -420,6 +426,16 @@ class Branch:
     position: Position
     #: Readable trace of what happened, in order.
     events: list[str] = field(default_factory=list)
+    #: Where each action's events start: `(index into events, action label)`, in the order
+    #: the turn ran them. The trace is a flat list because that is what the resolver
+    #: produces, but "what happened" is a question about actions -- a reader wants Heat
+    #: Wave's two damage lines under Heat Wave, not interleaved with the partner's.
+    #:
+    #: Attribution has to come from here rather than be reconstructed by a reader, because
+    #: the trace does not carry enough to recover it: a line names the move that caused it,
+    #: not who used it, and in a mirror both sides use the same moves. Guessing would be
+    #: right most of the time, which is the worst way for a log to be wrong.
+    acts: list[tuple[int, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -443,6 +459,8 @@ class SuspendedTurn:
     position: Position
     #: Readable trace of what happened up to the pause.
     events: list[str] = field(default_factory=list)
+    #: Per-action offsets into `events`; see :attr:`Branch.acts`.
+    acts: list[tuple[int, str]] = field(default_factory=list)
     #: Continuation state. Private because resuming has to go through `resume_turn`, which
     #: copies it -- one suspension is resumed once per candidate replacement.
     _turn: _Turn | None = None
@@ -517,7 +535,7 @@ class _Turn:
     __slots__ = ("reg", "pos", "budget", "attacks", "events", "unmodelled",
                  "hurt_this_turn", "move_failed", "move_damage_total", "move_connected",
                  "acted", "actions_remaining", "self_switch_pending",
-                 "pending_secondaries", "current_actor", "wipe_order")
+                 "pending_secondaries", "current_actor", "wipe_order", "acts")
 
     def __init__(
         self,
@@ -566,6 +584,9 @@ class _Turn:
         #: the battle the moment one side runs out -- which is the same rule read the same
         #: way: whichever side's wipe-out completed last is the winner.
         self.wipe_order: list[int] = []
+        #: Where each action's events begin: `(index into events, label)`. See
+        #: :attr:`Branch.acts`, which is where this ends up.
+        self.acts: list[tuple[int, str]] = []
 
     def clone(self) -> _Turn:
         fresh = _Turn(self.reg, self.pos.copy(), self.budget, self.attacks)
@@ -581,6 +602,7 @@ class _Turn:
         fresh.self_switch_pending = self.self_switch_pending
         fresh.pending_secondaries = list(self.pending_secondaries)
         fresh.current_actor = self.current_actor
+        fresh.acts = list(self.acts)
         return fresh
 
     # -- lookups ------------------------------------------------------------
@@ -603,6 +625,15 @@ class _Turn:
 
     def log(self, message: str) -> None:
         self.events.append(message)
+
+    def begin(self, label: str) -> None:
+        """Marks the start of one action's events, for :attr:`Branch.acts`.
+
+        Called once per queued action and once for the residual phase. Repeated labels are
+        fine and expected -- both sides use Flare Blitz in a mirror -- because the index
+        is what attributes an event, not the label.
+        """
+        self.acts.append((len(self.events), label))
 
     @staticmethod
     def name(side: int, slot: int) -> str:
@@ -1049,6 +1080,7 @@ def _run_queue(reg: Regulation, start: list[_Live], budget: Budget) -> TurnResul
                 # Each variant needs its own state: `_execute` mutates what it is given,
                 # and the last one may reuse the branch's own turn.
                 base = item.turn if variant is variants[-1][1] else item.turn.clone()
+                base.begin(variant.label(reg))
                 for weight, turn, note in _execute(reg, base, variant, step_budget):
                     if note:
                         reductions[note] = reductions.get(note, 0) + 1
@@ -1102,7 +1134,12 @@ def _run_queue(reg: Regulation, start: list[_Live], budget: Budget) -> TurnResul
         _residuals(reg, item.turn)
         item.turn.pos.turn += 1
         out_branches.append(
-            Branch(probability=item.weight, position=item.turn.pos, events=list(item.turn.events))
+            Branch(
+                probability=item.weight,
+                position=item.turn.pos,
+                events=list(item.turn.events),
+                acts=list(item.turn.acts),
+            )
         )
         unmodelled |= item.turn.unmodelled
 
@@ -1115,6 +1152,7 @@ def _run_queue(reg: Regulation, start: list[_Live], budget: Budget) -> TurnResul
                 probability=item.weight,
                 position=item.turn.pos,
                 events=list(item.turn.events),
+                acts=list(item.turn.acts),
                 _turn=item.turn,
                 _remaining=tuple(item.remaining),
             )
@@ -3747,6 +3785,7 @@ def residual_order(reg: Regulation, turn: _Turn) -> list[tuple[int, int]]:
 
 def _residuals(reg: Regulation, turn: _Turn) -> None:
     """End-of-turn effects, in Showdown's residual order."""
+    turn.begin(RESIDUAL_PHASE)
     field_ = turn.pos.field
     order: list[tuple[int, int]] | None = None
 

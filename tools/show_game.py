@@ -21,13 +21,15 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import re
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pokeuraou.names import Localiser, load_names
-from pokeuraou.regulation import Regulation, load_regulation
+from pokeuraou.regulation import Regulation, load_regulation, to_id
+from pokeuraou.resolve import RESIDUAL_PHASE
 from pokeuraou.teams import all_selections
 
 
@@ -117,6 +119,82 @@ def named_id(loc: Localiser, ident: str) -> str:
     return ident
 
 
+#: Reasons the resolver names that are not the id of any game object -- mechanics rather
+#: than moves, items or abilities, so `named_id` cannot find them. Everything here was
+#: taken from a tally over real games (25 games put `tox` at 115 occurrences and
+#: `partiallytrapped` at 56), not from reading the resolver for things it might write:
+#: a table built from the source grows entries nobody ever sees, and misses the ones that
+#: matter.
+MECHANICS = {
+    "flinch": "ひるみ",
+    "recoil": "反動",
+    "partiallytrapped": "バインド",
+    "fainted": "瀕死",
+    "pinch berry": "HP減少",
+    "berry": "きのみ",
+    "counter": "カウント",
+    "no target": "対象なし",
+    "crit": "急所",
+}
+
+#: Phrases that need the words moved, not just replaced. Japanese puts the cause before
+#: the verb, so `blocked by Baneful Bunker` cannot be done with a word-for-word table.
+REORDERINGS = (
+    (re.compile(r"blocked by (\S+)"), r"\1に防がれた"),
+    (re.compile(r"absorbed by (\S+)"), r"\1に吸収された"),
+    (re.compile(r"immune（([^）]*)）"), r"無効（\1）"),
+    # Protect's success is gated on how many times in a row it has been used, and the
+    # resolver writes the odds as "1 in 4". As a bare fragment it reads like a count.
+    (re.compile(r"（(\d+) in (\d+)）"), r"（確率 \1/\2）"),
+)
+
+#: Whole-line replacements, longest first. A shorter phrase that is a substring of a
+#: longer one would otherwise consume it.
+PHRASES = (
+    ("did not happen", "不発"),
+    ("had no effect", "効果がなかった"),
+    ("must switch out", "交代が必要"),
+    ("stat drops undone", "能力低下を戻した"),
+    ("cannot use sound moves", "音技が使えない"),
+    ("must use", "この技しか出せない:"),
+    ("retargeted to", "対象変更:"),
+    ("redirected to", "対象そらし:"),
+    ("did nothing, so nobody switched", "不発のため交代なし"),
+    ("nothing left to act", "行動できる味方がいない"),
+    ("woke up", "目を覚ました"),
+    ("is charging", "溜め"),
+    ("blocked the drop", "低下を防いだ"),
+    ("absorbed", "吸収"),
+    ("protected", "防いだ"),
+    ("fainted", "瀕死"),
+    ("missed", "外れ"),
+    ("thawed", "解凍"),
+    ("started", "開始"),
+    ("ended", "終了"),
+    ("failed", "失敗"),
+    ("immune", "無効"),
+    ("lost", "消費:"),
+    ("side", "サイド"),
+    ("set", "展開:"),
+)
+
+
+def translate_reason(loc: Localiser, text: str) -> str:
+    """What was inside a pair of brackets: a mechanic, a game object, or a status.
+
+    Tried in that order because the sets overlap in the wrong direction -- `psn` is a
+    status and not an item, but a lookup that guesses will find *something* for almost
+    any string, and a confidently wrong name is worse than an English one.
+    """
+    if text in MECHANICS:
+        return MECHANICS[text]
+    named = named_id(loc, text)
+    if named != text:
+        return named
+    status = loc.status(text) if text in STATUSES else ""
+    return status or text
+
+
 def translate_event(loc: Localiser, line: str, occupants: dict[str, str]) -> str:
     """One resolver event, with the slot codes and ids turned into names.
 
@@ -169,31 +247,29 @@ def translate_event(loc: Localiser, line: str, occupants: dict[str, str]) -> str
     else:
         head = code
 
-    # Ids appear bare (`set sunnyday`, `side +wideguard`) or in parentheses (the move or
-    # item that caused the line). Translating token by token covers both without needing
-    # to know the grammar of every event the resolver writes.
+    body = " ".join(rest)
+    # A parenthetical is one reason, not a sequence of words, and it has to be translated
+    # as one. Translating it token by token turned `(pinch berry)` into `(pinch きのみ`:
+    # the closing bracket was attached to `berry`, and stripping it to look the word up
+    # threw it away. So the group is matched whole, and only then looked up.
+    body = re.sub(r"\(([^)]*)\)", lambda m: f"（{translate_reason(loc, m.group(1))}）", body)
+    # Ids also appear bare -- `set sunnyday`, `side +wideguard` -- where there is no group
+    # to match, so those are still done token by token.
     pieces = []
-    for word in rest:
-        stripped = word.strip("()")
-        prefix = word[: len(word) - len(word.lstrip("(+-"))]
-        sign = prefix if prefix in ("+", "-") else ""
-        core = stripped.lstrip("+-")
-        named = named_id(loc, core)
-        if named != core:
-            pieces.append(
-                f"（{named}）" if word.startswith("(") else f"{sign}{named}"
-            )
-        else:
+    for word in body.split():
+        if word.startswith("（"):
             pieces.append(word)
+            continue
+        sign = word[0] if word[:1] in "+-" else ""
+        core = word.lstrip("+-")
+        named = named_id(loc, core)
+        pieces.append(f"{sign}{named}" if named != core else word)
     body = " ".join(pieces)
-    for english, japanese in (
-        ("fainted", "瀕死"),
-        ("missed", "外れ"),
-        ("side", "サイド"),
-        ("set", "展開:"),
-        ("protected", "で防いだ"),
-        ("did not happen", "不発"),
-    ):
+    for pattern, replacement in REORDERINGS:
+        body = pattern.sub(replacement, body)
+    # Longest first: "did not happen" must not be found as "happen" after "did" and "not"
+    # have been replaced out from under it.
+    for english, japanese in PHRASES:
         body = body.replace(english, japanese)
     return f"{head} {body}".strip().replace(" （", "（")
 
@@ -211,9 +287,101 @@ def _occupants(loc: Localiser, pos: object) -> dict[str, str]:
     return out
 
 
+def translate_act(
+    loc: Localiser, label: str, occupants: dict[str, str], pos: object
+) -> str:
+    """One action's header: who acted, and what they did.
+
+    `label` is `QueuedAction.label` -- `"p2a Flare Blitz"`, `"p1b switch->2"`,
+    `"p1a mega"` -- or `RESIDUAL_PHASE` for the end of the turn, which is nobody's
+    action. The move arrives as its English display name because that is what the
+    resolver's own event lines carry, so it is turned back into an id the way Showdown
+    would and looked up from there.
+
+    `occupants` is read, not written: the caller keeps it current as the turn's lines go
+    by, so an action that happens after a switch is attributed to whoever is standing in
+    the slot by then rather than to whoever started the turn there.
+    """
+    if label == RESIDUAL_PHASE:
+        return "ターン終了"
+    words = label.split()
+    code = words[0]
+    if not (code[:2] in ("p1", "p2") and len(code) >= 3 and code[2] in "ab"):
+        return label
+    index = (0 if code[1] == "1" else 2) + (0 if code[2] == "a" else 1)
+    who = f"{SLOT_LABELS[index]} {occupants.get(code, '')}".strip()
+    rest = " ".join(words[1:])
+    if rest.startswith("switch->"):
+        # The label carries the party index; the position says which Pokemon that is.
+        party = rest[len("switch->"):]
+        side = pos.sides[0 if code[1] == "1" else 1]
+        incoming = (
+            loc.species(side.pokemon[int(party)].species)
+            if party.isdigit() and int(party) < len(side.pokemon)
+            else f"#{party}"
+        )
+        return f"{who}: 交代 → {incoming}"
+    if rest == "mega":
+        return f"{who}: メガシンカ"
+    named = loc.move(to_id(rest))
+    return f"{who}: {named if named else rest}"
+
+
+def group_events(
+    loc: Localiser, events: list[str], acts: list[tuple[int, str]], pos: object
+) -> list[tuple[str | None, list[str]]]:
+    """The flat trace, cut into one group per action, each headed by whose action it was.
+
+    The cut points come from the resolver (`Branch.acts`) rather than from reading the
+    lines, because the lines do not carry enough to recover them: a damage line names the
+    move that caused it, not who used it, and in a mirror both sides use the same moves.
+
+    A group with no header holds lines that precede the first action, which should not
+    happen -- but printing them unattributed is the right failure, because a log that
+    silently drops events is worse than one with an odd-looking first group.
+    """
+    occupants = _occupants(loc, pos)
+    bounds = [start for start, _label in acts] + [len(events)]
+    groups: list[tuple[str | None, list[str]]] = []
+    if acts and acts[0][0] > 0:
+        groups.append(
+            (None, [translate_event(loc, line, occupants) for line in events[: acts[0][0]]])
+        )
+    elif not acts:
+        return [(None, [translate_event(loc, line, occupants) for line in events])]
+    for k, (start, label) in enumerate(acts):
+        header = translate_act(loc, label, occupants, pos)
+        words = label.split()
+        move_id = (
+            to_id(" ".join(words[1:]))
+            if len(words) > 1 and not words[1].startswith(("switch->", "mega"))
+            else ""
+        )
+        cause = f"({move_id})"
+        lines = []
+        for line in events[start : bounds[k + 1]]:
+            # Two kinds of redundancy, both of which the header now covers.
+            #
+            # A line that repeats the action's own label -- "p1a Earth Power did not
+            # happen (fainted)" under the Earth Power header -- keeps its slot code and
+            # loses the move name.
+            if line.startswith(label + " "):
+                line = words[0] + line[len(label) :]
+            # And a consequence attributed to the action's own move -- "-159
+            # (flareblitz)" under Flare Blitz -- loses the attribution. Only when it is
+            # the *same* move: Life Orb recoil and Leftovers name something else, and
+            # that is the part a reader needs.
+            elif move_id and line.endswith(cause):
+                line = line[: -len(cause)].rstrip()
+            lines.append(translate_event(loc, line, occupants))
+        if lines:
+            groups.append((header, lines))
+    return groups
+
+
 def turn_events(
     reg: Regulation, loc: Localiser, decision: dict, following: dict | None
-) -> list[str]:
+) -> list[tuple[str | None, list[str]]]:
     """What actually happened, by re-resolving the turn that was played.
 
     The records keep the position and both chosen actions but not the resolver's event
@@ -265,8 +433,8 @@ def turn_events(
         )
         if picked is None or not picked.branches:
             return [
-                *[translate_event(loc, line, _occupants(loc, pos)) for line in prefix],
-                f"（中断までの表示。記録の交代手 {answer!r} が再開手と一致しない）",
+                *group_events(loc, list(prefix), list(paused.acts), pos),
+                (None, [f"（中断までの表示。記録の交代手 {answer!r} が再開手と一致しない）"]),
             ]
         result = picked
         # The resumed result carries the *whole* turn, the part before the interrupt
@@ -306,13 +474,10 @@ def turn_events(
             else "（最終ターンなので最尤の枝）"
         )
 
-    occupants = _occupants(loc, pos)
-    lines = [
-        translate_event(loc, line, occupants) for line in (*prefix, *branch.events)
-    ]
+    groups = group_events(loc, [*prefix, *branch.events], list(branch.acts), pos)
     if note:
-        lines.append(note)
-    return lines
+        groups.append((None, [note]))
+    return groups
 
 
 def render(reg: Regulation, loc: Localiser, record: dict, top: int) -> str:
@@ -453,8 +618,14 @@ def render(reg: Regulation, loc: Localiser, record: dict, top: int) -> str:
         happened = turn_events(reg, loc, decision, following)
         if happened:
             out.write("  起きたこと:\n")
-            for line in happened:
-                out.write(f"    ・{line}\n")
+            for header, lines in happened:
+                # No header means the lines belong to no single action -- a note about
+                # which branch was shown, or a trace that began before the first action.
+                if header:
+                    out.write(f"    {header}\n")
+                indent = "      " if header else "    "
+                for line in lines:
+                    out.write(f"{indent}・{line}\n")
     return out.getvalue()
 
 
