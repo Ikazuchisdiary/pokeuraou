@@ -838,6 +838,17 @@ fn check_position_supported(
             if mon.transformed || mon.stats_override.is_some() {
                 return Err("transformed Pokemon".into());
             }
+            // A position the game could not reach is not a thing to hold two
+            // implementations to: Python deals negative damage on one, and whatever this
+            // port did instead would be a different wrong answer rather than a bug. These
+            // are `position.validate_position`'s own checks, on the Pokemon a turn can
+            // involve.
+            if mon.hp < 0 || mon.hp > mon.maxhp {
+                return Err(format!("hp {} outside 0..{}", mon.hp, mon.maxhp));
+            }
+            if mon.fainted != (mon.hp == 0) {
+                return Err(format!("fainted={} disagrees with hp={}", mon.fainted, mon.hp));
+            }
             // Three abilities change the position in ways this port does not implement.
             // They are refused here rather than at the point of use so a turn can never
             // get half-way through one.

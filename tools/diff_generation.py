@@ -57,7 +57,7 @@ def main() -> None:
     def run(use_rust: bool) -> tuple[list[str], float, int]:
         os.environ[rustnode.ENV_ENABLE] = "1" if use_rust else "0"
         # A toggle mid-process must not keep a process from the other setting.
-        rustnode.disable("switching") if not use_rust else None
+        rustnode.reset()
         records: list[str] = []
         turns = 0
         rng = np.random.default_rng(args.seed)
@@ -84,6 +84,9 @@ def main() -> None:
                     {
                         "turns": record.turns,
                         "outcome": record.outcome,
+                        # The reported effects are part of a game record, and a caller
+                        # reads them; a bridged game must not report a different set.
+                        "unmodelled": sorted(set(record.unmodelled)),
                         "decisions": [
                             [d.own_chosen, d.foe_chosen, round(d.search_value, 12)]
                             for d in record.decisions

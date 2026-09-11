@@ -49,12 +49,16 @@ def binary_path() -> Path:
     return repo_root() / "rust" / "target" / "release" / name
 
 
+#: Set once the bridge has failed, so a broken one is not retried for every node.
+_GAVE_UP = False
+
+
 def enabled() -> bool:
     return os.environ.get(ENV_ENABLE, "") not in ("", "0", "false", "no")
 
 
 def available() -> bool:
-    return enabled() and binary_path().exists()
+    return not _GAVE_UP and enabled() and binary_path().exists()
 
 
 def dump_action(action: object) -> dict[str, Any]:
@@ -142,17 +146,35 @@ def node_for(reg: Regulation) -> "RustNode | None":
     return _NODES[format_id]
 
 
-def disable(reason: str) -> None:
-    """Stops using the bridge for the rest of this process, and says why."""
-    print(f"[rustnode] falling back to Python: {reason}", file=sys.stderr)
+def reset() -> None:
+    """Closes the warm processes and forgets them, so the next call decides afresh.
+
+    For a caller that is turning the bridge on and off deliberately -- a test, or a tool
+    timing both paths. It is not the same as giving up on a broken one.
+    """
+    global _GAVE_UP
+    _GAVE_UP = False
     for key in list(_NODES):
-        node = _NODES[key]
-        if node is not None:
-            try:
-                node.close()
-            except Exception:  # noqa: BLE001
-                pass
-        _NODES[key] = None
+        node = _NODES.pop(key)
+        if node is None:
+            continue
+        try:
+            node.close()
+        except Exception:  # noqa: BLE001
+            pass
+
+
+def disable(reason: str) -> None:
+    """Stops using the bridge for the rest of this process, and says why.
+
+    A bridge that failed once is not retried for every node afterwards: the failure is
+    named, the run continues in Python, and it continues at Python's speed rather than
+    paying a broken subprocess per node on top.
+    """
+    global _GAVE_UP
+    print(f"[rustnode] falling back to Python: {reason}", file=sys.stderr)
+    reset()
+    _GAVE_UP = True
 
 
 class RustNode:
