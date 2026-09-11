@@ -1,0 +1,5 @@
+target/
+# Generated fixtures: the `tools/dump_*.py` scripts rebuild them, and they are tens of MB.
+cases*.json
+turns*.json
+refused.json
