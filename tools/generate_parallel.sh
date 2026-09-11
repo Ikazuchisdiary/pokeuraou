@@ -39,6 +39,15 @@ TEMPERATURE="${TEMPERATURE:-0.5}"
 # asserts 50%: a true mirror is antisymmetric, so its win rate is a calibration check on
 # search, resolver and evaluator together.
 MIRROR_SHARE="${MIRROR_SHARE:-0.1}"
+# Order candidates by the leaf rather than by expected damage. The two disagree, and the
+# disagreement is measured: the menu drops the leaf's preferred reply in 37% of decisions,
+# playing the dropped one instead is worth +14.3 points where they disagree, and the wider
+# menu that contains them wins whole games by +5.5. Costs about 1.4x per decision.
+RANK_LEAF="${RANK_LEAF:-0}"
+rank_args=()
+if [ "$RANK_LEAF" != "0" ]; then
+	rank_args=(--rank-leaf)
+fi
 book_args=()
 if [ -n "$BOOK" ]; then
 	book_args=(--selection-book "$BOOK" --explore-epsilon "$EPSILON" --explore-temperature "$TEMPERATURE")
@@ -54,6 +63,11 @@ else
 	echo "  selection: uniform 4-of-6 on both sides"
 fi
 echo "  mirror share: $MIRROR_SHARE (its win rate must come out at 50%)"
+if [ "$RANK_LEAF" != "0" ]; then
+	echo "  candidate ranking: the leaf"
+else
+	echo "  candidate ranking: expected damage"
+fi
 echo "  seeds $FIRST_SEED..$((FIRST_SEED + WORKERS - 1))"
 started=$(date +%s)
 
@@ -69,6 +83,7 @@ for i in $(seq 0 $((WORKERS - 1))); do
 		--device cpu \
 		--torch-threads 1 \
 		--mirror-share "$MIRROR_SHARE" \
+		"${rank_args[@]}" \
 		"${book_args[@]}" \
 		--out "$OUT_DIR/games-seed$seed.jsonl" \
 		>"$OUT_DIR/logs/seed$seed.log" 2>&1 &

@@ -667,6 +667,7 @@ def generate(
     explore_temperature: float = DEFAULT_TEMPERATURE,
     mirror_share: float = 0.0,
     depth: int | tuple[int, int] = 1,
+    rank_by_leaf: bool = False,
 ) -> dict[str, Any]:
     """Plays games and appends one JSON line per finished game.
 
@@ -795,6 +796,7 @@ def generate(
                 objective=objective, search_limit=search_limit, max_turns=max_turns,
                 evaluate=evaluate,
                 depth=depth,
+                rank_by_leaf=rank_by_leaf,
                 selection=(
                     [entry.species for entry in roster.sets],
                     [entry.species for entry in foe_six],
