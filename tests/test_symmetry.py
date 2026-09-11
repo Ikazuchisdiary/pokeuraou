@@ -277,3 +277,51 @@ def test_swapping_relocates_the_effects_that_name_a_side(roster) -> None:  # noq
     again = flipped.swapped()
     assert again.sides[1].pokemon[0].volatile("partiallytrapped").source_slot == "00"
     assert again.sides[0].pokemon[1].volatile("leechseed").source_slot == "p2b"
+
+
+def test_a_poison_type_never_misses_toxic(roster) -> None:  # noqa: ANN001
+    """From gen 8, Toxic used by a Poison type cannot miss -- and the move data hides it.
+
+    `toxic` still says `accuracy: 90`; the exemption lives in `Scripts#tryMoveHit`, behind
+    a comment in the move's own entry pointing at it. Reading the dump alone leaves a
+    Poison type's Toxic failing one time in ten, which is what our Toxapex was doing in
+    every generated game.
+
+    Both directions are asserted from one position: Toxapex is Poison/Water, and giving it
+    an explicit non-Poison typing -- the field Protean and Soak write -- must bring the
+    miss branch back. A test that only checked the Poison case would pass just as well if
+    the rule had been written as "Toxic never misses".
+    """
+    reg = roster.reg
+    poisoner = roster.sets[4]
+    assert poisoner.species == "toxapex" and "toxic" in poisoner.moves
+    sets = [poisoner, roster.sets[1], roster.sets[2], roster.sets[3]]
+    index = poisoner.moves.index("toxic")
+
+    def outcome(types: tuple[str, ...] | None) -> set[bool]:
+        pos = position_from_sets(reg, sets, sets)
+        if types is not None:
+            pos.sides[0].pokemon[0].types = types
+        ours = SideAction(
+            slots=(
+                MoveAction(slot=0, move_index=index, move_id="toxic", target=1),
+                MoveAction(slot=1, move_index=3, move_id="protect", target=None),
+            )
+        )
+        # The target must not be behind a Protect: blocking the very move under test is
+        # how a test like this passes while checking nothing. Infestation is Toxapex's
+        # attacking move, so slot 0 stands there and takes it.
+        theirs = SideAction(
+            slots=(
+                MoveAction(slot=0, move_index=0, move_id="infestation", target=1),
+                MoveAction(slot=1, move_index=3, move_id="protect", target=None),
+            )
+        )
+        result = resolve_turn(reg, pos, [ours, theirs], budget=Budget.exact())
+        return {
+            any("Toxic" in line and "missed" in line for line in branch.events)
+            for branch in result.branches
+        }
+
+    assert outcome(None) == {False}, "a Poison type's Toxic must not have a miss branch"
+    assert True in outcome(("Water",)), "without the typing the 90% must come back"

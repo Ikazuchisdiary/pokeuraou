@@ -2659,6 +2659,15 @@ def _accuracy(turn: _Turn, move: Move, attacker: Battler, defender: Battler) -> 
         return 1.0
     if attacker.ability == "noguard" or defender.ability == "noguard":
         return 1.0
+    # Toxic never misses when a Poison type uses it, from gen 8 on. The rule is not in the
+    # move's data -- `toxic` still says `accuracy: 90`, with a comment pointing at the hook
+    # -- so reading the dump alone leaves a Poison type's Toxic failing one time in ten:
+    #
+    #     move.alwaysHit || (move.id === 'toxic' && this.battle.gen >= 8 &&
+    #                        pokemon.hasType('Poison')) || ...
+    #         accuracy = true;
+    if move.id == "toxic" and "Poison" in attacker.types:
+        return 1.0
     accuracy = float(move.accuracy)
     weather = turn.pos.field.weather
     if move.id == "blizzard" and weather in ("hail", "snowscape", "snow"):

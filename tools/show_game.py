@@ -85,7 +85,10 @@ def name_action(
                 target = int(tokens[2])
                 # Positive numbers are the foes' slots, negative the allies'.
                 whose = foes if target > 0 else side
-                text += f" → {occupant(loc, whose, abs(target) - 1)}"
+                # Which side, not just which species: both teams can bring Incineroar,
+                # and "→ ガオガエン" then says nothing about who is being hit.
+                marker = "敵" if target > 0 else "味方"
+                text += f" → {marker}{occupant(loc, whose, abs(target) - 1)}"
             if tokens[-1] == "mega":
                 text += " + メガ"
             parts.append(text)
@@ -180,6 +183,19 @@ def translate_event(loc: Localiser, line: str, occupants: dict[str, str]) -> str
     return f"{head} {body}".strip().replace(" （", "（")
 
 
+def _occupants(loc: Localiser, pos: object) -> dict[str, str]:
+    """slot code -> who stands there at the start of the turn."""
+    out: dict[str, str] = {}
+    for side_index, side in enumerate(pos.sides):
+        for slot, party in enumerate(side.active):
+            if party is None:
+                continue
+            out[f"p{side_index + 1}{'ab'[slot]}"] = loc.species(
+                side.pokemon[party].species
+            )
+    return out
+
+
 def turn_events(
     reg: Regulation, loc: Localiser, decision: dict, following: dict | None
 ) -> list[str]:
@@ -195,7 +211,7 @@ def turn_events(
     """
     from pokeuraou.narrow import narrow
     from pokeuraou.position import Position
-    from pokeuraou.resolve import Budget, resolve_turn
+    from pokeuraou.resolve import Budget, resolve_turn, resume_alternatives
 
     own = decision.get("ownChosen")
     foe = decision.get("foeChosen")
@@ -214,7 +230,32 @@ def turn_events(
         lookup.append(actions[wanted])
 
     result = resolve_turn(reg, pos, lookup, budget=Budget.exact())
-    if result.suspended or not result.branches:
+    prefix: list[str] = []
+    if result.suspended:
+        # A self-switching move -- Parting Shot, U-turn, Volt Switch -- stops the turn for
+        # a replacement choice, and that choice is the *next* recorded decision. Bailing
+        # out here left the turn with no explanation at all while the position visibly
+        # changed, which is the one thing a log must not do.
+        paused = result.suspended[0]
+        prefix = list(paused.events)
+        answer = (following or {}).get("ownChosen") or (following or {}).get("foeChosen")
+        side, alternatives = resume_alternatives(reg, paused)
+        picked = next(
+            (r for action, r in alternatives if action.to_choice() == answer), None
+        )
+        if picked is None or not picked.branches:
+            return [
+                *[translate_event(loc, line, _occupants(loc, pos)) for line in prefix],
+                "（すてゼリフ等でターンが中断。以降は次のノード）",
+            ]
+        result = picked
+        # The resumed result carries the *whole* turn, the part before the interrupt
+        # included, so prepending what was collected before it prints everything twice.
+        prefix = []
+        # And the position it lands in is not the one the next decision recorded -- that
+        # is two nodes later -- so there is nothing to match a branch against.
+        following = None
+    if not result.branches:
         return []
     branch = max(result.branches, key=lambda b: b.probability)
     note = ""
@@ -237,14 +278,10 @@ def turn_events(
     elif len(result.branches) > 1:
         note = "（最終ターンなので最尤の枝）"
 
-    occupants: dict[str, str] = {}
-    for side_index, side in enumerate(pos.sides):
-        for slot, party in enumerate(side.active):
-            if party is None:
-                continue
-            code = f"p{side_index + 1}{'ab'[slot]}"
-            occupants[code] = loc.species(side.pokemon[party].species)
-    lines = [translate_event(loc, line, occupants) for line in branch.events]
+    occupants = _occupants(loc, pos)
+    lines = [
+        translate_event(loc, line, occupants) for line in (*prefix, *branch.events)
+    ]
     if note:
         lines.append(note)
     return lines
