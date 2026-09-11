@@ -446,8 +446,25 @@ def group_events(
     return groups
 
 
+def _winner_side(pos: object) -> float | None:
+    """A finished position's result in the same units as a record's `outcome`.
+
+    1.0 when side 0 won, 0.0 when side 1 did, 0.5 for a mutual wipe-out. `None` when the
+    battle has not ended, so a caller can tell "not decided" from "decided as a draw".
+    """
+    if not pos.ended:
+        return None
+    if pos.winner is None:
+        return 0.5
+    return 1.0 if pos.winner == pos.sides[0].id else 0.0
+
+
 def turn_events(
-    reg: Regulation, loc: Localiser, decision: dict, following: dict | None
+    reg: Regulation,
+    loc: Localiser,
+    decision: dict,
+    following: dict | None,
+    outcome: float | None = None,
 ) -> list[tuple[str | None, list[str]]]:
     """What actually happened, by re-resolving the turn that was played.
 
@@ -547,15 +564,32 @@ def turn_events(
                 "⚠ 以下は記録と一致しない枝です。実際に起きたことではありません"
                 "（乱数の再現に失敗）"
             )
-    elif len(result.branches) > 1:
-        # Two different reasons to have nothing to match against, and saying the wrong one
-        # is worse than saying nothing: a mid-game turn labelled "the last turn" sends a
-        # reader looking for a bug in the game rather than in the note.
-        note = (
-            "以下は中断ターンを再開した最尤の枝です"
-            if resumed
-            else "以下は最終ターンの最尤の枝です（照合先がない）"
-        )
+    elif resumed and len(result.branches) > 1:
+        note = "以下は中断ターンを再開した最尤の枝です"
+    else:
+        # The last turn has no next position to match against -- but the *outcome* is
+        # recorded, and that is a match key too. Without it the log showed the likeliest
+        # branch, which on a turn decided by a 1-in-3 Protect is the branch where nothing
+        # happens: the game visibly stopped one turn short of ending, with the side that
+        # lost still standing. The record said 11 turns and a loss; the log ended at 10
+        # and looked like a bug in the engine.
+        decided = [
+            b
+            for b in result.branches
+            if b.position.ended and _winner_side(b.position) == outcome
+        ]
+        if outcome is not None and decided:
+            branch = max(decided, key=lambda b: b.probability)
+            note = (
+                "以下は最終ターンです。記録の勝敗に一致する枝のうち最尤のものを表示"
+                "（局面の照合先はない）"
+            )
+        elif outcome is not None and any(b.position.ended for b in result.branches):
+            note = (
+                "⚠ 最終ターン: 決着する枝はありますが、どれも記録の勝敗と一致しません"
+            )
+        elif len(result.branches) > 1:
+            note = "以下は最終ターンの最尤の枝です（照合先がない）"
 
     groups = group_events(loc, [*prefix, *branch.events], list(branch.acts), pos)
     if note:
@@ -723,7 +757,7 @@ def render(reg: Regulation, loc: Localiser, record: dict, top: int) -> str:
             if position_in_game + 1 < len(decisions)
             else None
         )
-        happened = turn_events(reg, loc, decision, following)
+        happened = turn_events(reg, loc, decision, following, record.get("outcome"))
         if happened:
             out.write("  起きたこと:\n")
             for header, lines in happened:
