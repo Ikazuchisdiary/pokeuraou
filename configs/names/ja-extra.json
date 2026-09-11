@@ -1,17 +1,5 @@
 {
   "_note": "Showdown が訳していない項目を手で補うファイル。生成される ja.json とは別なので、ダンプを再生成しても消えない。値が空文字のものは英語名にフォールバックするので、途中まで埋めた状態でも安全。根拠のない訳を入れないこと（tools/names_report.py が不足を数える）。",
-  "species": {
-    "alcremie": "",
-    "alcremiecaramelswirl": "",
-    "alcremielemoncream": "",
-    "alcremiematchacream": "",
-    "alcremiemintcream": "",
-    "alcremierainbowswirl": "",
-    "alcremierubycream": "",
-    "alcremierubyswirl": "",
-    "floetteeternal": "",
-    "floettemega": ""
-  },
   "items": {
     "abomasite": "",
     "absolite": "",
@@ -88,5 +76,20 @@
     "tyranitarite": "",
     "venusaurite": "",
     "victreebelite": ""
+  },
+  "moves": {
+    "recharge": "反動で動けない"
+  },
+  "species": {
+    "alcremie": "",
+    "alcremiecaramelswirl": "",
+    "alcremielemoncream": "",
+    "alcremiematchacream": "",
+    "alcremiemintcream": "",
+    "alcremierainbowswirl": "",
+    "alcremierubycream": "",
+    "alcremierubyswirl": "",
+    "floetteeternal": "",
+    "floettemega": ""
   }
 }

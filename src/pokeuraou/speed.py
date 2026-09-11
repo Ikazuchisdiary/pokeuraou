@@ -173,7 +173,11 @@ def move_priority(
     reg: Regulation, move_id: str, mon: Battler, field_state: FieldState
 ) -> int:
     """The move's priority after ability and terrain modifiers."""
-    move = reg.moves[move_id]
+    move = reg.moves.get(move_id)
+    if move is None:
+        # The recharge turn's fake move. It has no dex entry and nothing to modify:
+        # Showdown queues the action at plain priority 0 and intercepts it before it runs.
+        return 0
     priority = move.priority
 
     # At most one of these applies to any real move, but they are separate abilities and
@@ -198,8 +202,15 @@ def fractional_priority(
 
     Quick Claw and Quick Draw are coin flips, so they produce two branches. Everything
     else is deterministic and produces one.
+
+    The recharge turn's fake move has no dex entry, and is given plain priority with no
+    roll. Showdown would consult Quick Claw against an empty move object, but the turn
+    does nothing either way and a fractional-priority branch on it would double the
+    branch count of every recharge turn to move a no-op earlier or later.
     """
-    move = reg.moves[move_id]
+    move = reg.moves.get(move_id)
+    if move is None:
+        return [(0.0, 1.0)]
     if mon.ability == "stall":
         return [(-0.1, 1.0)]
     if mon.ability == "myceliummight" and move.category == "Status":
@@ -243,7 +254,10 @@ class QueuedAction:
             return f"p{self.side + 1}{'ab'[self.slot]} switch->{self.switch_to}"
         if self.kind == "mega":
             return f"p{self.side + 1}{'ab'[self.slot]} mega"
-        name = reg.moves[self.move_id].name if self.move_id else "?"
+        # `.get`: the recharge turn's action names a move with no dex entry, and the
+        # label goes into the event log, where a crash would be the worst outcome.
+        known = reg.moves.get(self.move_id) if self.move_id else None
+        name = known.name if known is not None else (self.move_id or "?")
         return f"p{self.side + 1}{'ab'[self.slot]} {name}"
 
 

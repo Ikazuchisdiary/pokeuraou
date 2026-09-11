@@ -414,14 +414,19 @@ def run(
                     # Prefer damaging moves and never switch: a switch resolves before
                     # moves and would change the state the hit is computed against.
                     actions = side_actions(reg, pos, side_index, allow_switch=False)
+
+                    def _damaging(slot) -> bool:  # noqa: ANN001
+                        # `.get`: a recharging Pokemon's only action is a fake move with
+                        # no dex entry, and it is certainly not a damaging one.
+                        if not isinstance(slot, MoveAction):
+                            return False
+                        move = reg.moves.get(slot.move_id)
+                        return move is not None and move.category != "Status"
+
                     damaging = [
                         a
                         for a in actions
-                        if all(
-                            isinstance(s, MoveAction)
-                            and reg.moves[s.move_id].category != "Status"
-                            for s in a.slots
-                        )
+                        if all(_damaging(s) for s in a.slots)
                         and not any(isinstance(s, SwitchAction) for s in a.slots)
                     ]
                     pick = py_rng.choice(damaging or actions)

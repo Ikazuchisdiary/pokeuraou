@@ -27,6 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from pokeuraou.actions import RECHARGE
 from pokeuraou.names import Localiser, load_names
 from pokeuraou.regulation import Regulation, load_regulation, to_id
 from pokeuraou.resolve import RESIDUAL_PHASE
@@ -77,13 +78,27 @@ def name_action(
             parts.append(f"{who}: 交代 → {to}")
         elif tokens[0] == "move":
             index = int(tokens[1]) - 1
+            # `move 1` means the one fake move Showdown offers, not the first move slot,
+            # when the Pokemon owes a recharge. Reading the slot instead named the log's
+            # recharge turn after whatever happens to sit in slot 1 -- usually the Hyper
+            # Beam that caused it, which reads as the move being used twice.
+            recharging = any(
+                v.get("id") == "mustrecharge" for v in (mon or {}).get("volatiles") or []
+            )
             move_id = (
-                mon["moves"][index]["id"]
-                if mon and 0 <= index < len(mon["moves"])
-                else f"?{tokens[1]}"
+                RECHARGE
+                if recharging
+                else (
+                    mon["moves"][index]["id"]
+                    if mon and 0 <= index < len(mon["moves"])
+                    else f"?{tokens[1]}"
+                )
             )
             text = f"{who}: {loc.move(move_id)}"
-            if len(tokens) > 2 and tokens[2] not in ("mega",):
+            # The recharge takes no target. Pre-fix records carry one anyway, because the
+            # generator offered the real move's targets; printing it would teach a reader
+            # a rule that does not exist.
+            if not recharging and len(tokens) > 2 and tokens[2] not in ("mega",):
                 target = int(tokens[2])
                 # Positive numbers are the foes' slots, negative the allies'.
                 whose = foes if target > 0 else side
@@ -154,6 +169,7 @@ PHRASES = (
     ("did not happen", "不発"),
     ("had no effect", "効果がなかった"),
     ("must switch out", "交代が必要"),
+    ("must recharge", "反動で動けない"),
     ("stat drops undone", "能力低下を戻した"),
     ("cannot use sound moves", "音技が使えない"),
     ("must use", "この技しか出せない:"),
@@ -409,7 +425,20 @@ def turn_events(
     for side, wanted in ((0, own), (1, foe)):
         actions = {a.to_choice(): a for a in narrow(reg, pos, side, limit=max(limit, 24)).actions}
         if wanted not in actions:
-            return []
+            # Say so rather than print nothing. A recorded choice that is no longer legal
+            # is what a fixed rule looks like from an old record -- every pre-fix Hyper
+            # Beam recharge turn is one -- and a turn with an empty "what happened" block
+            # reads as a turn where nothing happened.
+            label = "自" if side == 0 else "敵"
+            return [
+                (
+                    None,
+                    [
+                        f"⚠ 再現できません: 記録の{label}の手 {wanted!r} は、"
+                        "現在の合法手生成では選べません（記録より後に直った規則があります）"
+                    ],
+                )
+            ]
         lookup.append(actions[wanted])
 
     result = resolve_turn(reg, pos, lookup, budget=Budget.exact())
@@ -463,20 +492,27 @@ def turn_events(
 
         branch = min(result.branches, key=distance)
         if distance(branch) != 0:
-            note = "（記録と完全には一致しない枝: 乱数の再現に失敗している）"
+            note = (
+                "⚠ 以下は記録と一致しない枝です。実際に起きたことではありません"
+                "（乱数の再現に失敗）"
+            )
     elif len(result.branches) > 1:
         # Two different reasons to have nothing to match against, and saying the wrong one
         # is worse than saying nothing: a mid-game turn labelled "the last turn" sends a
         # reader looking for a bug in the game rather than in the note.
         note = (
-            "（中断ターンを再開して再現。枝は最尤）"
+            "以下は中断ターンを再開した最尤の枝です"
             if resumed
-            else "（最終ターンなので最尤の枝）"
+            else "以下は最終ターンの最尤の枝です（照合先がない）"
         )
 
     groups = group_events(loc, [*prefix, *branch.events], list(branch.acts), pos)
     if note:
-        groups.append((None, [note]))
+        # In front of the events, not after them. A caveat about a list belongs before the
+        # list: printed underneath, it was read past, and a poison tick from a branch that
+        # was never played got reported as a missing-damage bug. The reader was right to
+        # trust the lines -- the log was the thing that was wrong.
+        groups.insert(0, (None, [note]))
     return groups
 
 

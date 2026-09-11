@@ -33,6 +33,7 @@ from dataclasses import dataclass, field, replace
 import numpy as np
 
 from .actions import (
+    RECHARGE,
     MoveAction,
     PassAction,
     SideAction,
@@ -899,8 +900,11 @@ def pending_attacks(
     for side_index, action in enumerate(side_actions):
         for slot_action in action.slots:
             if isinstance(slot_action, MoveAction):
+                # `.get`, because the recharge turn's action is a fake move with no dex
+                # entry; a spent turn attacks nothing, so Sucker Punch reads it as false.
+                chosen = reg.moves.get(slot_action.move_id)
                 out[(side_index, slot_action.slot)] = (
-                    reg.moves[slot_action.move_id].category != "Status"
+                    chosen is not None and chosen.category != "Status"
                 )
             elif isinstance(slot_action, SwitchAction | PassAction):
                 out[(side_index, slot_action.slot)] = False
@@ -1481,6 +1485,8 @@ def _do_move(
     reg: Regulation, turn: _Turn, action: QueuedAction, budget: Budget
 ) -> list[Outcome]:
     assert action.move_id is not None
+    if action.move_id == RECHARGE:
+        return _do_recharge(turn, action)
     move = reg.moves[action.move_id]
     outcomes: list[Outcome] = []
     checks = _can_act(turn, action, budget)
@@ -1507,6 +1513,35 @@ def _do_move(
             outcomes.append((act_probability * weight, sub_state, note))
 
     return outcomes or [(1.0, turn, "")]
+
+
+def _do_recharge(turn: _Turn, action: QueuedAction) -> list[Outcome]:
+    """The turn after Hyper Beam: nothing happens, and the lock lifts.
+
+        onBeforeMovePriority: 11,
+        onBeforeMove(pokemon) {
+            this.add('cant', pokemon, 'recharge');
+            pokemon.removeVolatile('mustrecharge');
+            pokemon.removeVolatile('truant');
+            return null;
+        },
+
+    Priority 11 is above sleep's 10 and flinch's 8, so the recharge is spent even by a
+    Pokemon that could not have moved anyway -- which is why this sits ahead of
+    `_can_act` rather than inside it. No PP is spent: there is no move slot to spend it
+    from, and Showdown's request confirms it (Hyper Beam stays at 7 of 8 across the
+    recharge turn).
+
+    Truant is not modelled, so only `mustrecharge` is removed. The volatile's `duration:
+    2` is not tracked either: the only way to hold it past this point is to be forced out,
+    and a switch clears volatiles anyway.
+    """
+    mon = turn.mon_at(action.side, action.slot)
+    if mon is not None:
+        mon.volatiles = [v for v in mon.volatiles if v.id != "mustrecharge"]
+    turn.log(f"{turn.name(action.side, action.slot)} must recharge")
+    turn.move_failed.add((action.side, action.slot))
+    return [(1.0, turn, "")]
 
 
 def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[float, str | None]]:

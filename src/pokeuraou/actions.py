@@ -76,6 +76,17 @@ def target_names(pos: Position, side_index: int) -> TargetNames:
 #: Volatiles that prevent switching outright.
 TRAPPING_VOLATILES = frozenset({"partiallytrapped", "octolock", "trapped"})
 
+#: The fake move a Pokemon spends its recharge turn on. There is no `recharge` move in
+#: the dex -- Showdown builds the request entry by hand:
+#:
+#:     if (lockedMove === 'recharge') return [{ move: 'Recharge', id: 'recharge' }];
+#:
+#: and `mustrecharge.onBeforeMove` intercepts the action before anything is executed, so
+#: nothing ever looks the id up. It is a special case in Showdown and stays one here;
+#: putting it in the regulation dump would mean inventing data that the simulator does
+#: not have.
+RECHARGE = "recharge"
+
 #: Abilities on an adjacent foe that trap; each also has an escape condition, so this is
 #: only consulted when the position does not already carry Showdown's `trapped` flag.
 TRAPPING_ABILITIES = frozenset({"shadowtag", "arenatrap", "magnetpull"})
@@ -340,6 +351,20 @@ def slot_actions(
     mon = side.pokemon[party_slot]
     if mon.fainted:
         return [PassAction(slot=slot)]
+
+    # Hyper Beam's recharge turn replaces the whole request. Showdown offers one fake move
+    # and sets `trapped: true`, so there is exactly one legal action and switching is not
+    # among them:
+    #
+    #     {"moves": [{"move": "Recharge", "id": "recharge"}], "trapped": true}
+    #
+    # That has to be honoured here rather than inside the resolver, because the action set
+    # *is* what the equilibrium is computed over: offering the real four moves would put
+    # probability on choices Showdown rejects, and offering a switch would let the search
+    # escape a downside the move is priced on. Before this, Hyper Beam was a 150-power
+    # move with no cost at all, and 569 of them were played in one worker's 500 games.
+    if mon.has_volatile("mustrecharge"):
+        return [MoveAction(slot=slot, move_index=1, move_id=RECHARGE, target=None)]
 
     out: list[SlotAction] = []
 
