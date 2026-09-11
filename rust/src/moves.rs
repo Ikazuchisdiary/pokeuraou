@@ -172,9 +172,11 @@ fn can_act(
         if !budget.enumerate_status_checks {
             return Ok(vec![(1.0, Some("frz".into()))]);
         }
-        // Python branches the weights but cannot express the cured state, and reports it.
-        // Refusing keeps this port exact.
-        return Err("thaw roll (the cured state is not branched)".into());
+        // The two outcomes differ in more than "did it act": one of them is no longer
+        // frozen next turn, and this returns weights rather than states, so it cannot
+        // express that. The weights are right and the cured state is reported as missing.
+        turn.report("thaw roll (1 in 4; the cured state is not branched)");
+        return Ok(vec![(THAW_CHANCE, None), (1.0 - THAW_CHANCE, Some("frz".into()))]);
     }
 
     // Priority-blocking abilities and Psychic Terrain.
@@ -1117,6 +1119,28 @@ fn attacker_ability_of(turn: &Turn, me: Slot) -> Option<Id> {
     turn.mon_at(me.0, me.1).map(|mon| mon.ability)
 }
 
+/// Records that the user of a self-switching move has to be replaced.
+///
+/// Which Pokemon comes in is the player's choice, so nothing is picked here. A Pokemon with
+/// an empty bench is not marked at all -- Showdown's `switchFlag` has nothing to answer it
+/// with, and the move simply leaves it in place.
+fn mark_self_switch(turn: &mut Turn, action: &QueuedAction) {
+    let alive = matches!(turn.mon_at(action.side, action.slot), Some(mon) if !mon.fainted);
+    if !alive {
+        return;
+    }
+    let bench = turn.pos.sides[action.side]
+        .pokemon
+        .iter()
+        .filter(|mon| !mon.fainted && !mon.is_active())
+        .count();
+    if bench == 0 {
+        return;
+    }
+    turn.add_volatile(action.side, action.slot, "pendingselfswitch", None);
+    turn.self_switch_pending = true;
+}
+
 fn round_fraction(amount: i64, ratio: &Value) -> i64 {
     let list = ratio.as_array();
     let (numerator, denominator) = match list {
@@ -1192,7 +1216,7 @@ fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), S
     }
 
     if mv.raw_bool("selfSwitch") && turn.move_connected {
-        return Err("selfSwitch move suspends the turn".into());
+        mark_self_switch(turn, action);
     }
 
     check_white_herb(turn);
@@ -1607,7 +1631,7 @@ fn apply_status_move(
         turn.report(format!("status move: {}", mv.id));
     }
     if mv.raw_bool("selfSwitch") && !suppress_self_switch {
-        return Err("selfSwitch status move suspends the turn".into());
+        mark_self_switch(turn, action);
     }
     if mv.raw_bool("forceSwitch") {
         return Err("forceSwitch status move".into());

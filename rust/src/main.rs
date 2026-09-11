@@ -3,6 +3,7 @@
 //!     cargo run --release -- damage    <regulation.json> <cases.json> [repeats]
 //!     cargo run --release -- roundtrip <turns.json>
 //!     cargo run --release -- turns     <regulation.json> <turns.json> [repeats]
+//!     cargo run --release -- node      <regulation.json>          # JSONL over stdio
 //!
 //! Python stays the oracle for Rust, and Showdown stays the oracle for Python
 //! (`tools/diff_*.py`), so the chain of verification is not broken by the port.
@@ -15,6 +16,8 @@ mod id;
 mod inert;
 mod modelled;
 mod moveinfo;
+mod node;
+mod objective;
 mod moves;
 mod position;
 mod reg;
@@ -30,6 +33,7 @@ fn main() {
         Some("damage") => damage_main(&args[2..]),
         Some("roundtrip") => roundtrip_main(&args[2..]),
         Some("turns") => turns_main(&args[2..]),
+        Some("node") => node_main(&args[2..]),
         _ => {
             eprintln!(
                 "usage:\n  {0} damage <regulation.json> <cases.json> [repeats]\n  \
@@ -39,6 +43,15 @@ fn main() {
             std::process::exit(2);
         }
     }
+}
+
+/// Serves whole nodes over stdio, so a caller can fill a matrix in one crossing.
+fn node_main(args: &[String]) {
+    let reg = reg::Reg::load(&args[0]).unwrap_or_else(|e| {
+        eprintln!("regulation: {e}");
+        std::process::exit(1);
+    });
+    node::serve(&reg);
 }
 
 // ---------------------------------------------------------------------------
@@ -266,10 +279,11 @@ fn compare_turn(
     expect: &Value,
     raw_positions: &[Value],
 ) -> Option<String> {
-    if got.suspended != expect["suspended"].as_bool().unwrap_or(false) {
+    if got.is_suspended() != expect["suspended"].as_bool().unwrap_or(false) {
         return Some(format!(
             "suspended: python {}, rust {}",
-            expect["suspended"], got.suspended
+            expect["suspended"],
+            got.is_suspended()
         ));
     }
     // The reported effects are part of the answer: a caller prints them, and a port that

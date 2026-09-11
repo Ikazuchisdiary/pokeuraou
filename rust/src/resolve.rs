@@ -181,12 +181,31 @@ pub struct Branch {
     pub position: Position,
 }
 
-pub struct TurnResult {
+/// A turn Showdown stopped half-way through to ask for a replacement.
+///
+/// The pause is the honest information state: whoever owes the replacement chooses it
+/// without seeing how the rest of the turn goes, so the choice is made once, here, rather
+/// than inside each outcome that follows it.
+pub struct Suspended<'a> {
+    pub probability: f64,
+    pub turn: Turn<'a>,
+    pub remaining: Vec<QueuedAction>,
+}
+
+pub struct TurnResult<'a> {
     pub branches: Vec<Branch>,
     pub exact: bool,
-    pub suspended: bool,
+    /// Outcomes that stopped at a mid-turn replacement. `branches` and these together
+    /// carry the turn's probability; a caller that ignores them drops that mass.
+    pub suspended: Vec<Suspended<'a>>,
     /// The union over every branch, as Python's `TurnResult.unmodelled` is.
     pub unmodelled: std::collections::BTreeSet<String>,
+}
+
+impl TurnResult<'_> {
+    pub fn is_suspended(&self) -> bool {
+        !self.suspended.is_empty()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -692,9 +711,8 @@ fn item_handled(item: &str) -> bool {
 }
 
 /// Move fields this port does not implement. A move carrying one is refused.
-const UNHANDLED_MOVE_FIELDS: [&str; 11] = [
+const UNHANDLED_MOVE_FIELDS: [&str; 10] = [
     "damageCallback",
-    "ohko",
     "multiaccuracy",
     "selfdestruct",
     "struggleRecoil",
@@ -838,7 +856,7 @@ fn volatile_handled(vid: &str) -> bool {
             | "leechseed" | "partiallytrapped" | "saltcure" | "perishsong" | "endure"
             | "unburden" | "charge" | "smackdown" | "ingrain" | "magnetrise" | "telekinesis"
             | "focusenergy" | "dragoncheer" | "taunt" | "choicelock" | "glaiverush"
-            | "throatchop" | "flashfire" | "yawn" | "encore"
+            | "throatchop" | "flashfire" | "yawn" | "encore" | "pendingselfswitch"
     )
 }
 
@@ -854,42 +872,44 @@ pub enum SlotAction {
     Pass { slot: usize },
 }
 
-pub fn parse_actions(case: &Value) -> [Vec<SlotAction>; 2] {
-    let read = |key: &str| -> Vec<SlotAction> {
-        case[key]
-            .as_array()
-            .map(|list| {
-                list.iter()
-                    .map(|entry| {
-                        let slot = entry["slot"].as_u64().unwrap_or(0) as usize;
-                        match entry["kind"].as_str().unwrap_or("pass") {
-                            "move" => SlotAction::Move {
-                                slot,
-                                move_id: Id::new(entry["moveId"].as_str().unwrap_or_default()),
-                                target: entry["target"].as_i64(),
-                                mega: entry["mega"].as_bool().unwrap_or(false),
-                            },
-                            "switch" => SlotAction::Switch {
-                                slot,
-                                party_index: entry["partyIndex"].as_u64().unwrap_or(1) as usize,
-                                species: Id::new(entry["species"].as_str().unwrap_or_default()),
-                            },
-                            _ => SlotAction::Pass { slot },
-                        }
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-    [read("ours"), read("theirs")]
+/// One side's choice for a turn: one slot action per active slot.
+pub fn parse_actions_list(value: &Value) -> Vec<SlotAction> {
+    value
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .map(|entry| {
+                    let slot = entry["slot"].as_u64().unwrap_or(0) as usize;
+                    match entry["kind"].as_str().unwrap_or("pass") {
+                        "move" => SlotAction::Move {
+                            slot,
+                            move_id: Id::new(entry["moveId"].as_str().unwrap_or_default()),
+                            target: entry["target"].as_i64(),
+                            mega: entry["mega"].as_bool().unwrap_or(false),
+                        },
+                        "switch" => SlotAction::Switch {
+                            slot,
+                            party_index: entry["partyIndex"].as_u64().unwrap_or(1) as usize,
+                            species: Id::new(entry["species"].as_str().unwrap_or_default()),
+                        },
+                        _ => SlotAction::Pass { slot },
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
-pub fn resolve_turn(
-    reg: &Reg,
+pub fn parse_actions(case: &Value) -> [Vec<SlotAction>; 2] {
+    [parse_actions_list(&case["ours"]), parse_actions_list(&case["theirs"])]
+}
+
+pub fn resolve_turn<'a>(
+    reg: &'a Reg,
     pos: &Position,
     side_actions: &[Vec<SlotAction>; 2],
     budget: Budget,
-) -> Result<TurnResult, String> {
+) -> Result<TurnResult<'a>, String> {
     check_position_supported(pos, side_actions)?;
     if pos.sides.len() != 2 || pos.sides.iter().any(|s| s.active.len() != 2) {
         return Err("this port handles two sides of two active slots".into());
@@ -918,6 +938,7 @@ pub fn resolve_turn(
     let queues = build_queue(reg, pos, side_actions, &field)?;
 
     let mut branches: Vec<Branch> = Vec::new();
+    let mut suspended: Vec<Suspended<'a>> = Vec::new();
     let mut exact = true;
     let mut unmodelled: std::collections::BTreeSet<String> = Default::default();
     for queue in queues {
@@ -941,9 +962,13 @@ pub fn resolve_turn(
                 branch.probability *= weight * tie_weight;
                 branches.push(branch);
             }
+            for mut pause in sub.suspended {
+                pause.probability *= weight * tie_weight;
+                suspended.push(pause);
+            }
         }
     }
-    Ok(TurnResult { branches, exact, suspended: false, unmodelled })
+    Ok(TurnResult { branches, exact, suspended, unmodelled })
 }
 
 fn tie_permutations(
@@ -1116,9 +1141,10 @@ fn run_queue<'a>(
     reg: &'a Reg,
     start: Vec<Live<'a>>,
     budget: Budget,
-) -> Result<TurnResult, String> {
+) -> Result<TurnResult<'a>, String> {
     let mut live = start;
     let mut finished: Vec<Live<'a>> = Vec::new();
+    let mut paused: Vec<Live<'a>> = Vec::new();
     let mut exact = true;
     let mut dropped = 0usize;
 
@@ -1149,17 +1175,41 @@ fn run_queue<'a>(
             let action = ordered[0].clone();
             let rest: Vec<QueuedAction> = ordered[1..].to_vec();
             item.turn.actions_remaining = rest.len();
-            if encore_pending(&item.turn, &action) {
-                return Err("encore overrides the queued action".into());
-            }
             item.turn.budget = step_budget;
-            for (weight, turn) in execute(reg, item.turn, &action, step_budget)? {
-                let wiped = turn.pos.sides.iter().any(|s| s.pokemon.iter().all(|m| m.fainted));
-                if !wiped && turn.self_switch_pending {
-                    return Err("a self-switching move suspended the turn".into());
+            // An Encore that landed earlier this turn rewrites the action, and Showdown
+            // re-picks its target at random -- so this is a list, not a single action.
+            let variants = encore_override(reg, &item.turn, &action);
+            let overridden = variants
+                .first()
+                .map(|(_, variant)| variant.move_id != action.move_id)
+                .unwrap_or(false);
+            let mut outcomes: Vec<(f64, Turn<'a>)> = Vec::new();
+            for (variant_weight, variant) in &variants {
+                let mut base = item.turn.clone();
+                if overridden {
+                    // Sucker Punch was read against the move the side chose, and Encore
+                    // has just replaced it; Python says so and so does this.
+                    base.report(
+                        "encore override changed the move Sucker Punch was read against",
+                    );
                 }
+                for (weight, turn) in execute(reg, base, variant, step_budget)? {
+                    outcomes.push((variant_weight * weight, turn));
+                }
+            }
+            for (weight, turn) in outcomes {
+                let wiped = turn.pos.sides.iter().any(|s| s.pokemon.iter().all(|m| m.fainted));
                 let remaining_actions = if wiped { Vec::new() } else { rest.clone() };
-                next.push(Live { weight: item.weight * weight, turn, remaining: remaining_actions });
+                let child =
+                    Live { weight: item.weight * weight, turn, remaining: remaining_actions };
+                // A self-switching move ends `runAction` with `switchFlag` set, and
+                // Showdown answers that with a fresh switch request -- so the turn stops
+                // here, before the rest of the queue and before the residual phase.
+                if !wiped && child.turn.self_switch_pending {
+                    paused.push(child);
+                } else {
+                    next.push(child);
+                }
             }
             if next.len() > 2 * budget.max_branches {
                 prune(&mut next, &mut dropped);
@@ -1167,15 +1217,20 @@ fn run_queue<'a>(
         }
         prune(&mut next, &mut dropped);
         prune(&mut finished, &mut dropped);
+        prune(&mut paused, &mut dropped);
         if dropped > 0 {
             exact = false;
         }
         live = next;
     }
 
-    let total: f64 = finished.iter().map(|item| item.weight).sum();
+    // Renormalise once, at the end: dropping low-probability branches leaves the rest
+    // summing to less than one, and rescaling after every generation would compound the
+    // rounding.
+    let total: f64 = finished.iter().map(|item| item.weight).sum::<f64>()
+        + paused.iter().map(|item| item.weight).sum::<f64>();
     if total > 0.0 && (total - 1.0).abs() > 1e-12 {
-        for item in finished.iter_mut() {
+        for item in finished.iter_mut().chain(paused.iter_mut()) {
             item.weight /= total;
         }
     }
@@ -1188,21 +1243,78 @@ fn run_queue<'a>(
         unmodelled.extend(item.turn.unmodelled.iter().cloned());
         branches.push(Branch { probability: item.weight, position: item.turn.pos });
     }
-    Ok(TurnResult { branches, exact, suspended: false, unmodelled })
+    // A paused branch gets no residuals and no turn increment: the residual phase is
+    // behind the interrupt, so it belongs to whatever the resume produces.
+    let mut suspended = Vec::with_capacity(paused.len());
+    for item in paused {
+        unmodelled.extend(item.turn.unmodelled.iter().cloned());
+        suspended.push(Suspended {
+            probability: item.weight,
+            turn: item.turn,
+            remaining: item.remaining,
+        });
+    }
+    Ok(TurnResult { branches, exact, suspended, unmodelled })
 }
 
-fn encore_pending(turn: &Turn, action: &QueuedAction) -> bool {
+/// The action Encore forces its user to take, with its target's odds.
+///
+/// Showdown keeps the original move's priority -- the queue was already ordered on it and
+/// only the move changes -- and re-picks the target with `getRandomTarget`, which is
+/// uniform over adjacent foes. A single-target encored move against two standing foes is
+/// therefore a genuine coin flip, and returning one of them would teach the search a
+/// preference the game does not have.
+fn encore_override(
+    reg: &Reg,
+    turn: &Turn,
+    action: &QueuedAction,
+) -> Vec<(f64, QueuedAction)> {
+    let unchanged = vec![(1.0, action.clone())];
     if action.kind != ActionKind::Move {
-        return false;
+        return unchanged;
     }
-    let Some(mon) = turn.mon_at(action.side, action.slot) else { return false };
-    match mon.volatile("encore") {
-        None => false,
-        Some(encore) => match (encore.move_id, action.move_id) {
-            (Some(forced), Some(chosen)) => forced != chosen,
-            _ => false,
-        },
+    let Some(mon) = turn.mon_at(action.side, action.slot) else { return unchanged };
+    if mon.fainted {
+        return unchanged;
     }
+    let Some(encore) = mon.volatile("encore") else { return unchanged };
+    let Some(forced) = encore.move_id else { return unchanged };
+    if Some(forced) == action.move_id {
+        return unchanged;
+    }
+    let Some(replacement) = reg.moves.get(forced.as_str()) else { return unchanged };
+
+    let targets: Vec<Option<i64>> = match replacement.target.as_str() {
+        "normal" | "any" | "adjacentFoe" => {
+            let foe_side = 1 - action.side;
+            let live: Vec<Option<i64>> = (0..turn.pos.sides[foe_side].active.len())
+                .filter(|slot| {
+                    matches!(turn.mon_at(foe_side, *slot), Some(m) if !m.fainted)
+                })
+                .map(|slot| Some(slot as i64 + 1))
+                .collect();
+            if live.is_empty() {
+                return unchanged;
+            }
+            live
+        }
+        "self" | "all" | "allAdjacent" | "allAdjacentFoes" | "allies" | "allySide"
+        | "allyTeam" | "foeSide" | "randomNormal" | "scripted" | "adjacentAllyOrSelf" => {
+            vec![None]
+        }
+        _ => vec![action.target],
+    };
+
+    let weight = 1.0 / targets.len() as f64;
+    targets
+        .into_iter()
+        .map(|target| {
+            let mut copy = action.clone();
+            copy.move_id = Some(forced);
+            copy.target = target;
+            (weight, copy)
+        })
+        .collect()
 }
 
 fn resort(
@@ -1259,6 +1371,17 @@ fn execute<'a>(
 }
 
 fn do_switch(reg: &Reg, turn: &mut Turn, action: &QueuedAction) -> Result<(), String> {
+    do_switch_with(reg, turn, action, true)
+}
+
+/// `run_switch_in` is false for a mid-turn replacement, where every incoming Pokemon is
+/// placed before any of them sees a hazard or an Intimidate.
+fn do_switch_with(
+    reg: &Reg,
+    turn: &mut Turn,
+    action: &QueuedAction,
+    run_switch_in: bool,
+) -> Result<(), String> {
     let Some(_) = action.switch_to else { return Ok(()) };
     let incoming_index = {
         let side = &turn.pos.sides[action.side];
@@ -1328,7 +1451,274 @@ fn do_switch(reg: &Reg, turn: &mut Turn, action: &QueuedAction) -> Result<(), St
             incoming.status_counter = Some(0);
         }
     }
-    on_switch_in(reg, turn, action.side, action.slot)
+    if run_switch_in {
+        on_switch_in(reg, turn, action.side, action.slot)?;
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Mid-turn replacements
+// ---------------------------------------------------------------------------
+
+/// Per side, per active slot, whether a self-switching move is waiting on a choice.
+pub fn self_switches_needed(pos: &Position) -> [[bool; 2]; 2] {
+    let mut out = [[false; 2]; 2];
+    for (side_index, side) in pos.sides.iter().enumerate() {
+        let bench = side
+            .pokemon
+            .iter()
+            .filter(|mon| !mon.fainted && !mon.is_active())
+            .count();
+        for slot in 0..side.active.len().min(2) {
+            out[side_index][slot] = bench > 0
+                && matches!(side.active_pokemon(slot), Some(mon)
+                    if !mon.fainted && mon.has_volatile("pendingselfswitch"));
+        }
+    }
+    out
+}
+
+/// The replacements the interrupted side could send in, as one action list per option.
+///
+/// `switch_actions_after_faint`: fill as many slots as there are Pokemon to fill them
+/// with, and which slot the last one takes is the player's choice.
+fn replacement_options(
+    pos: &Position,
+    side_index: usize,
+    owed: [bool; 2],
+) -> Vec<Vec<SlotAction>> {
+    let side = &pos.sides[side_index];
+    let bench: Vec<&Pokemon> = side
+        .pokemon
+        .iter()
+        .filter(|mon| !mon.fainted && !mon.is_active())
+        .collect();
+    let owed_count = owed.iter().filter(|needed| **needed).count();
+    let fillable = bench.len().min(owed_count);
+
+    let mut per_slot: Vec<Vec<SlotAction>> = Vec::new();
+    for (slot, needed) in owed.iter().enumerate().take(side.active.len()) {
+        if !needed {
+            per_slot.push(vec![SlotAction::Pass { slot }]);
+            continue;
+        }
+        let mut options: Vec<SlotAction> = bench
+            .iter()
+            .map(|mon| SlotAction::Switch {
+                slot,
+                party_index: mon.slot + 1,
+                species: mon.species,
+            })
+            .collect();
+        options.push(SlotAction::Pass { slot });
+        per_slot.push(options);
+    }
+
+    let mut out: Vec<Vec<SlotAction>> = Vec::new();
+    let mut combination: Vec<SlotAction> = Vec::new();
+    build_combinations(&per_slot, 0, &mut combination, fillable, &mut out);
+    out
+}
+
+fn build_combinations(
+    per_slot: &[Vec<SlotAction>],
+    index: usize,
+    current: &mut Vec<SlotAction>,
+    fillable: usize,
+    out: &mut Vec<Vec<SlotAction>>,
+) {
+    if index == per_slot.len() {
+        let switches: Vec<usize> = current
+            .iter()
+            .filter_map(|a| match a {
+                SlotAction::Switch { party_index, .. } => Some(*party_index),
+                _ => None,
+            })
+            .collect();
+        let mut unique = switches.clone();
+        unique.sort_unstable();
+        unique.dedup();
+        if unique.len() == switches.len() && switches.len() == fillable {
+            out.push(current.clone());
+        }
+        return;
+    }
+    for option in &per_slot[index] {
+        current.push(option.clone());
+        build_combinations(per_slot, index + 1, current, fillable, out);
+        current.pop();
+    }
+}
+
+/// Finishes a turn that stopped at a mid-turn replacement request.
+pub fn resume_turn<'a>(
+    reg: &'a Reg,
+    paused: &Suspended<'a>,
+    choices: &[Vec<SlotAction>; 2],
+) -> Result<TurnResult<'a>, String> {
+    let mut turn = paused.turn.clone();
+    let owed = self_switches_needed(&turn.pos);
+    let mut placed: Vec<(i64, usize, usize)> = Vec::new();
+
+    for (side_index, actions) in choices.iter().enumerate() {
+        for action in actions {
+            let SlotAction::Switch { slot, party_index, species } = action else { continue };
+            if !owed[side_index][*slot] {
+                continue;
+            }
+            if let Some(mon) = turn.mon_at_mut(side_index, *slot) {
+                mon.volatiles.retain(|v| v.id.as_str() != "pendingselfswitch");
+            }
+            let queued = QueuedAction {
+                side: side_index,
+                slot: *slot,
+                kind: ActionKind::Switch,
+                order: ORDER_SWITCH,
+                priority: 0,
+                fractional: 0.0,
+                speed: 0,
+                move_id: None,
+                target: None,
+                switch_to: Some(party_index - 1),
+                switch_species: Some(*species),
+                branch_probability: 1.0,
+            };
+            do_switch_with(reg, &mut turn, &queued, false)?;
+            let speed = match turn.battler_at(side_index, *slot)? {
+                None => 0,
+                Some(incoming) => {
+                    let field = turn.field();
+                    let conditions: Vec<Id> = turn.pos.sides[side_index]
+                        .side_conditions
+                        .iter()
+                        .map(|c| c.id)
+                        .collect();
+                    effective_speed(&incoming, &field, &conditions)
+                }
+            };
+            placed.push((speed, side_index, *slot));
+        }
+    }
+
+    // `runSwitch` is order 101 sorted on speed, fastest first, so a fast replacement takes
+    // the hazards and fires its ability before a slow one.
+    placed.sort_by_key(|(speed, side, slot)| (-speed, *side, *slot));
+    for (_speed, side_index, slot) in placed {
+        on_switch_in(reg, &mut turn, side_index, slot)?;
+    }
+
+    turn.self_switch_pending = self_switches_needed(&turn.pos)
+        .iter()
+        .any(|side| side.iter().any(|flag| *flag));
+    let budget = turn.budget;
+    let remaining = paused.remaining.clone();
+    let mut result = run_queue(reg, vec![Live { weight: 1.0, turn, remaining }], budget)?;
+    for branch in result.branches.iter_mut() {
+        branch.probability *= paused.probability;
+    }
+    for pause in result.suspended.iter_mut() {
+        pause.probability *= paused.probability;
+    }
+    Ok(result)
+}
+
+/// Every replacement the interrupted side could send in, and the turn each produces.
+pub fn resume_alternatives<'a>(
+    reg: &'a Reg,
+    paused: &Suspended<'a>,
+) -> Result<(Option<usize>, Vec<TurnResult<'a>>), String> {
+    let owed = self_switches_needed(&paused.turn.pos);
+    let sides: Vec<usize> = (0..2).filter(|i| owed[*i].iter().any(|f| *f)).collect();
+    let Some(&chooser) = sides.first() else { return Ok((None, Vec::new())) };
+    let other = 1 - chooser;
+    let passes: Vec<SlotAction> = (0..paused.turn.pos.sides[other].active.len())
+        .map(|slot| SlotAction::Pass { slot })
+        .collect();
+
+    let mut out = Vec::new();
+    for option in replacement_options(&paused.turn.pos, chooser, owed[chooser]) {
+        let choices = if chooser == 0 {
+            [option, passes.clone()]
+        } else {
+            [passes.clone(), option]
+        };
+        let mut resumed = resume_turn(reg, paused, &choices)?;
+        if sides.len() > 1 {
+            resumed.unmodelled.insert("simultaneous mid-turn replacements".into());
+        }
+        out.push(resumed);
+    }
+    Ok((Some(chooser), out))
+}
+
+/// The turn's value under one objective, folding through the replacement choice.
+///
+/// Python builds a tree of leaf positions and folds values over it, because its leaves are
+/// scored elsewhere. Here the objective is in hand, so the fold is the recursion itself --
+/// the same arithmetic: chance is a weighted mean normalised by its own weight, and a
+/// replacement is the option its chooser likes most.
+pub fn turn_value(
+    reg: &Reg,
+    result: &TurnResult,
+    score: fn(&Position) -> f64,
+    depth: usize,
+    notes: &mut std::collections::BTreeSet<String>,
+) -> Result<f64, String> {
+    notes.extend(result.unmodelled.iter().cloned());
+    let total: f64 = result.branches.iter().map(|b| b.probability).sum::<f64>()
+        + result.suspended.iter().map(|s| s.probability).sum::<f64>();
+    if total <= 0.0 {
+        return Ok(0.0);
+    }
+    // Python has two code paths here and they round differently, so this has two as
+    // well. An ordinary cell is `values @ (probabilities / total)` -- divided first, then
+    // summed -- and a cell that folds through a replacement is
+    // `sum(weight * value) / total`. Matching the arithmetic is what makes the node
+    // differential an equality test rather than a tolerance.
+    if result.suspended.is_empty() {
+        let mut dotted = 0.0;
+        for branch in &result.branches {
+            dotted += (branch.probability / total) * score(&branch.position);
+        }
+        return Ok(dotted);
+    }
+    let mut accumulated = 0.0;
+    for branch in &result.branches {
+        accumulated += branch.probability * score(&branch.position);
+    }
+    for pause in &result.suspended {
+        // Four Pokemon a side means a turn cannot interrupt itself indefinitely; the guard
+        // is against a bug becoming unbounded recursion, and it reports where it stopped.
+        if depth >= 4 {
+            notes.insert("more than four mid-turn replacements in one turn".into());
+            accumulated += pause.probability * score(&pause.turn.pos);
+            continue;
+        }
+        let (chooser, alternatives) = resume_alternatives(reg, pause)?;
+        let Some(chooser) = chooser else {
+            notes.insert("a suspended turn offered no replacement".into());
+            accumulated += pause.probability * score(&pause.turn.pos);
+            continue;
+        };
+        if alternatives.is_empty() {
+            notes.insert("a suspended turn offered no replacement".into());
+            accumulated += pause.probability * score(&pause.turn.pos);
+            continue;
+        }
+        let mut scored: Vec<f64> = Vec::with_capacity(alternatives.len());
+        for resumed in &alternatives {
+            scored.push(turn_value(reg, resumed, score, depth + 1, notes)?);
+        }
+        // Side 0 is the maximiser the payoff matrix is written for.
+        let best = if chooser == 0 {
+            scored.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+        } else {
+            scored.iter().cloned().fold(f64::INFINITY, f64::min)
+        };
+        accumulated += pause.probability * best;
+    }
+    Ok(accumulated / total)
 }
 
 fn on_switch_in(reg: &Reg, turn: &mut Turn, side: usize, slot: usize) -> Result<(), String> {
