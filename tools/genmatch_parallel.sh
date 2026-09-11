@@ -17,6 +17,12 @@
 # Model against model costs about twice a normal game: with different leaves the two sides
 # stop solving one game and each solves its own matrix.
 #
+# Every game is also written out with its provenance. A match is thousands of real games
+# played to a real outcome, and keeping only the win rate throws away training data that
+# has already been paid for -- an afternoon of these comes to about a tenth of a
+# generation. They are not self-play and the provenance block says so per side, so a
+# dataset builder can include, exclude or reweight them and the effect can be measured.
+#
 #   NEW=data/models/value-gen3.pt OLD=data/models/value-gen2.pt bash tools/genmatch_parallel.sh
 set -uo pipefail
 
@@ -41,6 +47,7 @@ for i in $(seq 0 $((WORKERS - 1))); do
 		--roster "$ROSTER" --value "$NEW" --baseline "$OLD" \
 		--games "$GAMES" --limit "$LIMIT" --seed "$seed" \
 		--out "$OUT_DIR/seed$seed.jsonl" \
+		--games-out "$OUT_DIR/games-seed$seed.jsonl" \
 		--device cpu --torch-threads 1 \
 		>"$OUT_DIR/seed$seed.log" 2>&1 &
 	pids+=($!)
