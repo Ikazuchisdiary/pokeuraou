@@ -113,10 +113,13 @@ def write_modelled(regulation: str) -> None:
     from pokeuraou.effects import all_modelled_abilities, all_modelled_items
     from pokeuraou.regulation import load_regulation
 
+    from pokeuraou.resolve import STATUS_MOVES_FULLY_MODELLED
+
     reg = load_regulation(regulation)
     register_mega_stones(reg)
     abilities = sorted(all_modelled_abilities())
     items = sorted(all_modelled_items(frozenset(reg.mega_map)))
+    status_moves = sorted(STATUS_MOVES_FULLY_MODELLED)
     header = (
         "//! The ids Python's calculator accounts for, and therefore does not report.\n"
         "//!\n"
@@ -134,6 +137,13 @@ def write_modelled(regulation: str) -> None:
             "item_is_modelled",
             items,
             "/// `effects.all_modelled_items(mega_stones)` for this regulation's stones.",
+        )
+        + "\n"
+        + rust_predicate(
+            "status_move_is_fully_modelled",
+            status_moves,
+            "/// `resolve.STATUS_MOVES_FULLY_MODELLED`: the status moves whose whole effect\n"
+            "/// is the declarative fields, so the resolver does not report them.",
         )
     )
     (ROOT / "rust" / "src" / "modelled.rs").write_text(body, encoding="utf-8")

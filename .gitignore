@@ -27,3 +27,6 @@ bench/out/
 
 # Tournament standings fetched from a public API. Cached locally, not redistributed,
 # same handling as the Smogon usage data.
+
+# Worktrees the tooling creates here are separate repositories, not content.
+.claude/worktrees/

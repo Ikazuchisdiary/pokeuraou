@@ -40,6 +40,13 @@ def main() -> None:
     ap.add_argument("--archetypes", default="wcs2026-regmb")
     ap.add_argument("--limit", type=int, default=SEARCH_LIMIT)
     ap.add_argument(
+        "--rank-leaf",
+        action="store_true",
+        help="order candidates by the leaf instead of by expected damage. The two "
+        "disagree, and the disagreement costs games -- see tools/narrow_regret.py and "
+        "tools/regret_playout.py. Costs about 1.4x per decision.",
+    )
+    ap.add_argument(
         "--depth",
         type=int,
         default=1,
@@ -261,6 +268,7 @@ def main() -> None:
         objective=OBJECTIVES[args.objective],
         search_limit=args.limit,
         depth=args.depth,
+        rank_by_leaf=args.rank_leaf,
         max_turns=args.max_turns,
         cooc=cooc,
         archetype_share=archetype_share,

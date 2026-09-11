@@ -27,7 +27,7 @@ from pokeuraou.narrow import narrow
 from pokeuraou.payoff import HP_SHARE
 from pokeuraou.position import Position
 from pokeuraou.resolve import Budget, batched_payoff, resolve_turn
-from pokeuraou.search import search
+from pokeuraou.search import leaf_ranking, search
 from pokeuraou.selfplay import position_from_sets
 from pokeuraou.teams import load_roster
 
@@ -324,3 +324,90 @@ def test_depth_two_keeps_the_seat_identity(roster) -> None:  # noqa: ANN001
     # same-species Speed tie in the residual phase, measured at 0.001 and reported rather
     # than resolved. Anything larger is new, and it would be the search that added it.
     assert worst < 2e-3, f"depth 2 broke the seat identity by {worst:.4f}"
+
+
+def test_a_leaf_ranking_keeps_the_coverage_guarantee(roster) -> None:  # noqa: ANN001
+    """Changing the order must not change what narrowing promises.
+
+    The guarantee is that every individual slot option appears somewhere in the kept set,
+    so nothing is eliminated outright -- a Protect or a Fake Out scores no damage and
+    would vanish from a pure ranking. `rank` replaces the ordering and nothing else.
+
+    Asserted at a budget wide enough to cover everything, because that is where the
+    guarantee is a guarantee. At a tight budget the cover is greedy and takes the
+    best-scoring candidate among those covering the most, so a different order genuinely
+    leaves a different set uncovered -- a first draft of this test asserted the sets were
+    equal and failed on exactly that, which is the algorithm working rather than breaking.
+    What must still hold at a tight budget is that the same budget is spent.
+    """
+    reg = roster.reg
+    positions = _played(roster)
+    checked = 0
+    for pos in positions:
+        for side in (0, 1):
+            ranking = leaf_ranking(reg, pos, side, LEAF, budget=Budget.matrix())
+            wide = narrow(reg, pos, side, limit=99, rank=ranking)
+            assert wide.uncovered == (), (
+                f"nothing should be left out at a budget of 99: {wide.uncovered}"
+            )
+            plain = narrow(reg, pos, side, limit=8)
+            ranked = narrow(reg, pos, side, limit=8, rank=ranking)
+            assert len(ranked.kept) == len(plain.kept), "the same budget is spent"
+            assert ranked.considered == plain.considered
+            assert len(ranked.uncovered) == len(ranked.uncovered_options)
+            checked += 1
+    assert checked >= 6, f"only {checked} narrowings checked"
+
+
+def test_a_leaf_ranking_actually_reorders(roster) -> None:  # noqa: ANN001
+    """The two scores disagree, which is the entire reason the option exists.
+
+    If the leaf ordered candidates the way expected damage does, there would be nothing to
+    measure and nothing to fix -- so this fails loudly rather than letting a head-to-head
+    spend two hours discovering the two arms were the same arm.
+    """
+    reg = roster.reg
+    positions = _played(roster)
+    differed = 0
+    compared = 0
+    for pos in positions:
+        for side in (0, 1):
+            plain = narrow(reg, pos, side, limit=6)
+            ranked = narrow(
+                reg,
+                pos,
+                side,
+                limit=6,
+                rank=leaf_ranking(reg, pos, side, LEAF, budget=Budget.matrix()),
+            )
+            if plain.complete:
+                continue  # nothing was narrowed, so nothing could be reordered
+            compared += 1
+            before = [a.to_choice() for a in plain.actions]
+            after = [a.to_choice() for a in ranked.actions]
+            differed += int(before != after)
+    assert compared >= 2, f"only {compared} positions were narrowed at all"
+    assert differed >= 1, "the leaf ranking never changed the menu on any position"
+
+
+def test_the_leaf_ranking_scores_what_it_says_it_scores(roster) -> None:  # noqa: ANN001
+    """The score of a candidate is the leaf's mean over the reference replies.
+
+    Recomputed from the definition rather than compared against itself: the ranking is
+    about to decide which actions the solver ever sees, and a score that is not the
+    quantity its docstring names would move that choice for reasons nobody could state.
+    """
+    reg = roster.reg
+    pos = _played(roster)[1]
+    for side in (0, 1):
+        rank = leaf_ranking(reg, pos, side, LEAF, budget=Budget.matrix(), references=2)
+        pool = narrow(reg, pos, side, limit=99).actions[:5]
+        got = np.asarray(rank(pool), dtype=np.float64)
+        replies = narrow(reg, pos, 1 - side, limit=8).actions[:2]
+        ours, theirs = (pool, replies) if side == 0 else (replies, pool)
+        payoff, _notes = batched_payoff(
+            reg, pos, ours, theirs, LEAF, budget=Budget.matrix()
+        )
+        # Side 0's payoff either way, so side 1 wants it small and its score is negated.
+        want = payoff.mean(axis=1) if side == 0 else -payoff.mean(axis=0)
+        assert np.allclose(got, want, atol=1e-12), f"side {side}: {got} != {want}"

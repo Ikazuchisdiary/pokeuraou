@@ -724,7 +724,11 @@ const UNHANDLED_MOVE_FIELDS: [&str; 10] = [
     "willCrit",
 ];
 
-/// Status moves whose whole effect is the declarative fields plus the special cases below.
+/// The status moves this port resolves.
+///
+/// Narrower than Python's own `STATUS_MOVES_FULLY_MODELLED`, which answers a different
+/// question -- which ones it does not *report* -- and is generated into `modelled.rs`
+/// rather than retyped. One list was briefly doing both jobs.
 pub(crate) fn status_move_handled(move_id: &str) -> bool {
     matches!(
         move_id,
@@ -739,7 +743,8 @@ pub(crate) fn status_move_handled(move_id: &str) -> bool {
             | "faketears" | "metalsound" | "willowisp" | "thunderwave" | "toxic" | "taunt"
             | "leechseed" | "partingshot" | "lifedew" | "recover" | "softboiled" | "slackoff"
             | "milkdrink" | "confuseray" | "yawn" | "hypnosis" | "spore" | "sleeppowder"
-            | "encore"
+            | "encore" | "shellsmash" | "roost" | "moonlight" | "synthesis" | "morningsun"
+            | "perishsong" | "knockoff" | "thief" | "covet"
     )
 }
 
@@ -764,9 +769,10 @@ fn check_move_supported(reg: &Reg, move_id: &str) -> Result<(), String> {
     if TWO_TURN_MOVES.iter().any(|(id, _)| *id == move_id) && move_id != "solarbeam" {
         return Err(format!("two-turn move: {move_id}"));
     }
-    if matches!(move_id, "lastresort" | "trick" | "switcheroo" | "knockoff" | "thief" | "covet")
-    {
-        return Err(format!("item-moving or history move: {move_id}"));
+    // Trick and Switcheroo swap items, which this port does not implement; Last Resort
+    // reads which of its user's other moves have been used.
+    if matches!(move_id, "lastresort" | "trick" | "switcheroo") {
+        return Err(format!("item-swapping or history move: {move_id}"));
     }
     Ok(())
 }

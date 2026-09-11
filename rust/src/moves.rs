@@ -960,6 +960,33 @@ fn after_hit(
         turn.consume_item(target.0, target.1);
     }
 
+    // Knock Off removes what it hit; Thief and Covet take it when the attacker has
+    // nothing. A mega stone refuses to leave the species it belongs to, and only that
+    // species, which `item_is_removable` reads from the regulation's own mega map.
+    if matches!(mv.id.as_str(), "knockoff" | "thief" | "covet") {
+        let target_item = match turn.mon_at(target.0, target.1) {
+            None => None,
+            Some(mon) if mon.fainted => None,
+            Some(mon) => mon.item,
+        };
+        if let Some(item) = target_item {
+            let species = turn.mon_at(target.0, target.1).unwrap().species;
+            let removable = turn
+                .reg
+                .item_is_removable(species.as_str(), Some(item.as_str()));
+            let attacker_empty =
+                matches!(turn.mon_at(me.0, me.1), Some(mon) if mon.item.is_none());
+            if removable && mv.id == "knockoff" {
+                turn.consume_item(target.0, target.1);
+            } else if removable && attacker_empty {
+                turn.consume_item(target.0, target.1);
+                if let Some(mon) = turn.mon_at_mut(me.0, me.1) {
+                    mon.item = Some(item);
+                }
+            }
+        }
+    }
+
     let attacker_ability = turn.mon_at(me.0, me.1).map(|m| m.ability);
     if let Some(list) = mv.raw.get("secondaries").and_then(Value::as_array) {
         for secondary in list {
@@ -1626,7 +1653,7 @@ fn apply_status_move(
     }
 
     if mv.raw.get("hasCustomCode").and_then(Value::as_bool).unwrap_or(false)
-        && !crate::resolve::status_move_handled(&mv.id)
+        && !crate::modelled::status_move_is_fully_modelled(&mv.id)
     {
         turn.report(format!("status move: {}", mv.id));
     }
