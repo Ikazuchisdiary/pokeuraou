@@ -669,6 +669,9 @@ fn hit_target<'a>(
             None,
             false,
         );
+        for note in &result.unmodelled {
+            turn.report(note.clone());
+        }
         if result.immune {
             let mut state = turn.clone();
             state.move_failed[action.side][action.slot] = true;
@@ -880,6 +883,11 @@ fn after_hit(
                 return Err(format!("move volatile: {vid}"));
             }
             let duration = effect_duration(turn, mv, &vid, action.side, action.slot);
+            if duration_is_rolled(mv, &vid) {
+                turn.report(format!(
+                    "{vid} duration (Showdown rolls it; pinned to the low end)"
+                ));
+            }
             turn.add_volatile(target.0, target.1, &vid, duration);
             if vid == "partiallytrapped" {
                 if let Some(mon) = turn.mon_at_mut(target.0, target.1) {
@@ -919,6 +927,20 @@ fn after_hit(
         if is(item, "rockyhelmet") {
             turn.deal_damage(me.0, me.1, (attacker_maxhp / 6).max(1), false)?;
         }
+        if let Some(ability) = ability {
+            if matches!(
+                ability.as_str(),
+                "static" | "flamebody" | "effectspore" | "poisonpoint" | "cutecharm"
+            ) {
+                turn.report(format!("contact ability: {ability}"));
+            }
+        }
+    }
+
+    if matches!(attacker_ability_of(turn, me), Some(a) if a.as_str() == "poisontouch")
+        && mv.has_flag("contact")
+    {
+        turn.report("ability: poisontouch (30% poison not branched)");
     }
 
     // A resist berry is eaten only by a hit it actually weakened.
@@ -953,6 +975,13 @@ fn after_hit(
                 continue;
             }
             if !budget.enumerate_secondary {
+                if !budget.pinned_policy {
+                    turn.report(format!(
+                        "secondary {}%: {} (not branched)",
+                        (chance * 100.0) as i64,
+                        mv.id
+                    ));
+                }
                 continue;
             }
             turn.pending_secondaries.push((chance, secondary.clone(), target));
@@ -1078,7 +1107,14 @@ fn on_being_hit(
             turn.apply_boosts(target.0, target.1, boosts, false);
         }
     }
+    if matches!(ability.as_str(), "angerpoint" | "berserk" | "angershell" | "cursedbody") {
+        turn.report(format!("on-hit ability: {ability}"));
+    }
     Ok(())
+}
+
+fn attacker_ability_of(turn: &Turn, me: Slot) -> Option<Id> {
+    turn.mon_at(me.0, me.1).map(|mon| mon.ability)
 }
 
 fn round_fraction(amount: i64, ratio: &Value) -> i64 {
@@ -1381,6 +1417,20 @@ fn do_protect<'a>(
     Ok(vec![(chance, hit_state), (1.0 - chance, turn)])
 }
 
+/// Whether Showdown really *rolls* this duration. A `durationCallback` alone does not
+/// mean that -- most of them apply an item or ability extension -- so the dumper records
+/// whether calling it consumed randomness, and that is what this reads.
+fn duration_is_rolled(mv: &Move, effect_id: &str) -> bool {
+    mv.raw
+        .get("durations")
+        .and_then(Value::as_object)
+        .and_then(|durations| durations.get(effect_id))
+        .and_then(Value::as_object)
+        .and_then(|entry| entry.get("rolled"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
 fn effect_duration(
     turn: &Turn,
     mv: &Move,
@@ -1422,6 +1472,11 @@ fn apply_status_move(
     if let Some(condition) = mv.raw_str("sideCondition") {
         let condition = condition.to_string();
         let duration = effect_duration(turn, mv, &condition, action.side, action.slot);
+        if duration_is_rolled(mv, &condition) {
+            turn.report(format!(
+                "{condition} duration (Showdown rolls it; pinned to the low end)"
+            ));
+        }
         turn.add_side_condition(action.side, &condition, duration);
     }
     if let Some(weather) = mv.raw_str("weather") {
@@ -1546,6 +1601,11 @@ fn apply_status_move(
         bump_stall(turn, action.side, action.slot);
     }
 
+    if mv.raw.get("hasCustomCode").and_then(Value::as_bool).unwrap_or(false)
+        && !crate::resolve::status_move_handled(&mv.id)
+    {
+        turn.report(format!("status move: {}", mv.id));
+    }
     if mv.raw_bool("selfSwitch") && !suppress_self_switch {
         return Err("selfSwitch status move suspends the turn".into());
     }
@@ -1584,7 +1644,7 @@ fn trapper_gone(turn: &Turn, source_slot: Option<Id>) -> bool {
 }
 
 /// Active slots in Showdown's residual order: by Speed, fastest first.
-fn residual_order(turn: &Turn) -> Result<Vec<Slot>, String> {
+fn residual_order(turn: &Turn) -> Result<(Vec<Slot>, bool), String> {
     let trick_room = turn.pos.field.trick_room();
     let field = turn.field();
     let mut entries: Vec<(i64, i64, String, usize, usize)> = Vec::new();
@@ -1608,17 +1668,27 @@ fn residual_order(turn: &Turn) -> Result<Vec<Slot>, String> {
             }
         }
     }
+    let mut unique = speeds.clone();
+    unique.sort_unstable();
+    unique.dedup();
+    let tied = unique.len() != speeds.len();
     // A Speed tie here is reported by Python rather than branched, and broken by
     // (-speed, species, slot, side) -- deliberately not by side, so the residual phase
     // cannot become seat-dependent. The same sort gives the same order, so the tie is not
     // a reason to refuse; it is a reason to sort on exactly the same key.
     entries.sort();
-    Ok(entries.into_iter().map(|(_, _, _, slot, side)| (side, slot)).collect())
+    Ok((
+        entries.into_iter().map(|(_, _, _, slot, side)| (side, slot)).collect(),
+        tied,
+    ))
 }
 
 pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
     let _ = reg;
-    let order = residual_order(turn)?;
+    let (order, tied) = residual_order(turn)?;
+    if tied {
+        turn.report("residual speed tie (Showdown breaks it at random)");
+    }
 
     // Residual order 1: weather.
     let mut weather_expired = false;

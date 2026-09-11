@@ -169,6 +169,9 @@ pub struct DamageResult {
     pub effectiveness: f64,
     pub type_mod: i64,
     pub immune: bool,
+    /// What the calculator could not account for, in Python's own wording. Usually empty,
+    /// and an empty `Vec` does not allocate.
+    pub unmodelled: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------

@@ -21,6 +21,24 @@ use crate::moveinfo::{
 use crate::position::Types;
 use crate::reg::Reg;
 
+/// `damage._unmodelled`: the abilities and items on this hit that the calculator does
+/// not account for, named so the caller can report them.
+fn unmodelled_effects(attacker: &Battler, defender: &Battler) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (mon, who) in [(attacker, "attacker"), (defender, "defender")] {
+        if !mon.ability.is_empty() && !crate::modelled::ability_is_modelled(mon.ability.as_str())
+        {
+            out.push(format!("{who}.ability:{}", mon.ability));
+        }
+        if let Some(item) = mon.item {
+            if !crate::modelled::item_is_modelled(item.as_str()) {
+                out.push(format!("{who}.item:{item}"));
+            }
+        }
+    }
+    out
+}
+
 fn same(value: Option<Id>, name: &str) -> bool {
     matches!(value, Some(v) if v.as_str() == name)
 }
@@ -344,7 +362,14 @@ pub fn calculate(
             None => type_effectiveness(reg, move_type.as_str(), defender),
         };
 
-    let zeros = DamageResult { rolls: [0; N_ROLLS], effectiveness: eff, type_mod, immune: false };
+    let unmodelled = unmodelled_effects(attacker, defender);
+    let zeros = DamageResult {
+        rolls: [0; N_ROLLS],
+        effectiveness: eff,
+        type_mod,
+        immune: false,
+        unmodelled: unmodelled.clone(),
+    };
 
     if defender.ability == "disguise" && defender.species == "mimikyu" {
         return zeros;
@@ -353,7 +378,13 @@ pub fn calculate(
         return zeros;
     }
     if mv.category == "Status" || immune {
-        return DamageResult { rolls: [0; N_ROLLS], effectiveness: eff, type_mod, immune };
+        return DamageResult {
+            rolls: [0; N_ROLLS],
+            effectiveness: eff,
+            type_mod,
+            immune,
+            unmodelled,
+        };
     }
 
     if let Some(fixed) = fixed_damage(move_id, attacker, defender) {
@@ -362,6 +393,7 @@ pub fn calculate(
             effectiveness: eff,
             type_mod,
             immune: false,
+            unmodelled,
         };
     }
 
@@ -369,10 +401,20 @@ pub fn calculate(
         Some(bp) => Some(bp),
         None => base_power(reg, move_id, attacker, defender, ctx_move),
     };
+    let mut unmodelled = unmodelled;
     let base_power_value = match declared {
         Some(bp) if bp > 0 => bp,
-        _ => return zeros,
+        _ => {
+            let mut out = zeros;
+            out.unmodelled.push(format!("move.basePowerCallback:{move_id}"));
+            return out;
+        }
     };
+    if base_power_override.is_none() && crate::moveinfo::is_approximate(move_id) {
+        // A declared base power is still a number, but for these moves it is a fallback
+        // rather than the real one; say so instead of printing it as if it were right.
+        unmodelled.push(format!("move.basePowerCallback (approximated):{move_id}"));
+    }
 
     let mut ally_abilities: Vec<Id> = field.active_abilities[defender_side].clone();
     if let Some(index) = ally_abilities.iter().position(|a| *a == defender.ability) {
@@ -551,7 +593,7 @@ pub fn calculate(
         *value = trunc16((*value).max(1));
     }
 
-    DamageResult { rolls: dmg, effectiveness: eff, type_mod, immune: false }
+    DamageResult { rolls: dmg, effectiveness: eff, type_mod, immune: false, unmodelled }
 }
 
 /// `crit_stage`, before Showdown's clamp to 0..4.

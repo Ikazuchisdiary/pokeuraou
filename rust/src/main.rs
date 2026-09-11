@@ -13,6 +13,7 @@ mod effects;
 mod fixedpoint;
 mod id;
 mod inert;
+mod modelled;
 mod moveinfo;
 mod moves;
 mod position;
@@ -269,6 +270,19 @@ fn compare_turn(
         return Some(format!(
             "suspended: python {}, rust {}",
             expect["suspended"], got.suspended
+        ));
+    }
+    // The reported effects are part of the answer: a caller prints them, and a port that
+    // resolved a turn without reporting what it approximated would quietly shrink that
+    // list.
+    let wanted_notes: Vec<&str> = expect["unmodelled"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).collect())
+        .unwrap_or_default();
+    let got_notes: Vec<&str> = got.unmodelled.iter().map(String::as_str).collect();
+    if wanted_notes != got_notes {
+        return Some(format!(
+            "unmodelled: python {wanted_notes:?}, rust {got_notes:?}"
         ));
     }
     let want = expect["branches"].as_array().unwrap();

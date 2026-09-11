@@ -185,6 +185,8 @@ pub struct TurnResult {
     pub branches: Vec<Branch>,
     pub exact: bool,
     pub suspended: bool,
+    /// The union over every branch, as Python's `TurnResult.unmodelled` is.
+    pub unmodelled: std::collections::BTreeSet<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -208,6 +210,10 @@ pub struct Turn<'a> {
     pub(crate) pending_secondaries: Vec<(f64, Value, Slot)>,
     pub(crate) current_actor: Option<Slot>,
     pub(crate) wipe_order: Vec<usize>,
+    /// Effects met that this port models only approximately -- the same strings Python
+    /// reports, because a caller that prints them must not see the set shrink just
+    /// because the turn was resolved in Rust.
+    pub(crate) unmodelled: std::collections::BTreeSet<String>,
 }
 
 impl<'a> Turn<'a> {
@@ -227,7 +233,12 @@ impl<'a> Turn<'a> {
             pending_secondaries: Vec::new(),
             current_actor: None,
             wipe_order: Vec::new(),
+            unmodelled: Default::default(),
         }
+    }
+
+    pub(crate) fn report(&mut self, note: impl Into<String>) {
+        self.unmodelled.insert(note.into());
     }
 
     pub fn mon_at(&self, side: usize, slot: usize) -> Option<&Pokemon> {
@@ -404,7 +415,10 @@ impl<'a> Turn<'a> {
         let mut changed = false;
         for (stat, raw_delta) in boosts {
             let delta = if contrary { -raw_delta } else { *raw_delta };
-            let Some(index) = boost_index(stat) else { continue };
+            let Some(index) = boost_index(stat) else {
+                self.report(format!("boost:{stat}"));
+                continue;
+            };
             if delta < 0 && from_foe && blocks_drops {
                 continue;
             }
@@ -481,6 +495,12 @@ impl<'a> Turn<'a> {
         } else {
             SLEEP_COUNTER_MODAL
         };
+        if status == "slp" && !self.budget.pinned_policy {
+            self.report(format!(
+                "sleep duration ({} turns, the modal outcome of Champions' 1-or-2; not branched)",
+                SLEEP_COUNTER_MODAL - 1
+            ));
+        }
         let lum = {
             let mon = self.mon_at_mut(side, slot).unwrap();
             mon.status = Some(Id::new(status));
@@ -899,6 +919,7 @@ pub fn resolve_turn(
 
     let mut branches: Vec<Branch> = Vec::new();
     let mut exact = true;
+    let mut unmodelled: std::collections::BTreeSet<String> = Default::default();
     for queue in queues {
         if queue.is_empty() {
             continue;
@@ -915,13 +936,14 @@ pub fn resolve_turn(
             };
             let sub = run_queue(reg, vec![start], budget)?;
             exact = exact && sub.exact;
+            unmodelled.extend(sub.unmodelled);
             for mut branch in sub.branches {
                 branch.probability *= weight * tie_weight;
                 branches.push(branch);
             }
         }
     }
-    Ok(TurnResult { branches, exact, suspended: false })
+    Ok(TurnResult { branches, exact, suspended: false, unmodelled })
 }
 
 fn tie_permutations(
@@ -1159,12 +1181,14 @@ fn run_queue<'a>(
     }
 
     let mut branches = Vec::with_capacity(finished.len());
+    let mut unmodelled: std::collections::BTreeSet<String> = Default::default();
     for mut item in finished {
         residuals(reg, &mut item.turn)?;
         item.turn.pos.turn += 1;
+        unmodelled.extend(item.turn.unmodelled.iter().cloned());
         branches.push(Branch { probability: item.weight, position: item.turn.pos });
     }
-    Ok(TurnResult { branches, exact, suspended: false })
+    Ok(TurnResult { branches, exact, suspended: false, unmodelled })
 }
 
 fn encore_pending(turn: &Turn, action: &QueuedAction) -> bool {
