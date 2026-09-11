@@ -131,14 +131,18 @@ def main() -> None:
 
     # Seat A: the value function is side 0. Seat B: it is side 1. Both seats use our six
     # against the field, so a seat advantage cancels when the two are combined.
-    print(f"\n  {'seat':>26}  {'games':>6}  {'gen2 win':>9}  {'95%':>6}  {'s/game':>7}")
+    print(f"\n  {'seat':>30}  {'games':>6}  {'new win':>8}  {'95%':>6}  {'s/game':>7}")
     wins = played = 0
     games_file = open_games(args.games_out)
     new_name = args.value.name
     old_name = args.baseline.name if args.baseline else args.objective
+    # The seat label names the model, not "gen2". It is stamped into every recorded
+    # game's provenance, and a reader of that dataset a month from now has no way to know
+    # which generation "gen2" meant on the day the match ran -- the `leaves` pair is
+    # authoritative, but a label that contradicts it is worse than no label.
     for seat, leaves in (
-        ("gen2 = side 0", (value, baseline)),
-        ("gen2 = side 1", (baseline, value)),
+        (f"{new_name} = side 0", (value, baseline)),
+        (f"{new_name} = side 1", (baseline, value)),
     ):
         side_leaves = (
             (new_name, old_name) if leaves[0] is value else (old_name, new_name)
@@ -151,7 +155,7 @@ def main() -> None:
                 rate = seat_wins / seat_played * 100 if seat_played else float("nan")
                 print(
                     f"    [{seat}] {played_so_far}/{args.games} played, "
-                    f"gen2 {rate:.1f}%, {(time.perf_counter() - started) / played_so_far:.2f} s/game",
+                    f"new {rate:.1f}%, {(time.perf_counter() - started) / played_so_far:.2f} s/game",
                     flush=True,
                 )
             team = pool[int(rng.integers(len(pool)))]
@@ -186,8 +190,8 @@ def main() -> None:
             )
             seat_played += 1
             # `outcome` is side 0's result, so flip it when the value function sits at 1.
-            gen2_won = record.outcome > 0.5 if leaves[0] is value else record.outcome < 0.5
-            seat_wins += int(gen2_won)
+            new_won = record.outcome > 0.5 if leaves[0] is value else record.outcome < 0.5
+            seat_wins += int(new_won)
         elapsed = time.perf_counter() - started
         rate = seat_wins / seat_played if seat_played else float("nan")
         half = (
@@ -196,7 +200,7 @@ def main() -> None:
             else float("nan")
         )
         print(
-            f"  {seat:>26}  {seat_played:>6}  {rate * 100:>8.1f}%  +-{half * 100:.1f}  "
+            f"  {seat:>30}  {seat_played:>6}  {rate * 100:>7.1f}%  +-{half * 100:.1f}  "
             f"{elapsed / args.games:>7.2f}   (打ち切り {unfinished})",
             flush=True,
         )

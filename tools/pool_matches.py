@@ -33,7 +33,10 @@ import json
 import re
 from pathlib import Path
 
-SEAT_LINE = re.compile(r"(gen2 = side \d)\s+(\d+)\s+([\d.]+)%")
+#: The seat label is whatever the producing tool called its arm -- it used to be the
+#: literal "gen2", and is now the model's filename -- so the name is matched loosely and
+#: only its shape, `<something> = side N`, is relied on.
+SEAT_LINE = re.compile(r"(\S[^\s]* = side \d)\s+(\d+)\s+([\d.]+)%")
 
 
 def wilson(wins: int, played: int) -> tuple[float, float, float]:
