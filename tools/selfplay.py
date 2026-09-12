@@ -7,6 +7,10 @@ investment is knowable.
 
     uv run python tools/selfplay.py --games 200 --seed 1
     uv run python tools/selfplay.py --games 20 --report   # what a short run looks like
+
+With `--queue host:port` the games come from `tools/generate_queue.py` one at a time
+instead of being dealt in advance, which is how a run stops ending when its unluckiest
+worker does.
 """
 
 from __future__ import annotations
@@ -15,6 +19,7 @@ import argparse
 import json
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -35,6 +40,13 @@ from pokeuraou.teams import load_archetypes, load_roster, usable_archetypes
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--games", type=int, default=100)
+    ap.add_argument(
+        "--queue",
+        default=None,
+        help="host:port of a work queue to draw game numbers from, instead of playing "
+        "--games in a row. Each game is then seeded from its own number rather than from "
+        "the games before it, so it is the same game whichever worker draws it.",
+    )
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--roster", default="rizabanadohido")
     ap.add_argument("--archetypes", default="wcs2026-regmb")
@@ -266,6 +278,19 @@ def main() -> None:
         f"search {args.limit}x{args.limit} / leaf {leaf_label}",
         file=sys.stderr,
     )
+    client = None
+    drawn: Iterator[int] | None = None
+    if args.queue:
+        from pokeuraou.workqueue import WorkClient
+
+        client = WorkClient(args.queue)
+
+        def from_queue(source: WorkClient) -> Iterator[int]:
+            while (index := source.take()) is not None:
+                yield index
+
+        drawn = from_queue(client)
+
     started = time.perf_counter()
     stats = generate(
         reg,
@@ -274,6 +299,8 @@ def main() -> None:
         usable,
         games=args.games,
         seed=args.seed,
+        indices=drawn,
+        on_finish=client.finish if client is not None else None,
         out=args.out,
         objective=OBJECTIVES[args.objective],
         search_limit=args.limit,
@@ -292,6 +319,8 @@ def main() -> None:
         explore_temperature=args.explore_temperature,
         mirror_share=args.mirror_share,
     )
+    if client is not None:
+        client.close()
     elapsed = time.perf_counter() - started
     finished = stats["finished"] or 1
     print(

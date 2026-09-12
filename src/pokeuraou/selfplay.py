@@ -26,6 +26,7 @@ represent our uncertainty would duplicate machinery that exists and is tested.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -758,6 +759,8 @@ def generate(
     depth: int | tuple[int, int] = 1,
     rank_by_leaf: bool = False,
     solve_sparsely: bool = False,
+    indices: Iterable[int] | None = None,
+    on_finish: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
     """Plays games and appends one JSON line per finished game.
 
@@ -801,6 +804,18 @@ def generate(
 
     Mirror games draw their selection uniformly: the book is keyed on tournament sheets and
     has no entry for ourselves, and a uniform draw is what covers the 90 anyway.
+
+    ``indices`` plays the games with those numbers instead of ``games`` in a row, which is
+    how a worker draws from a shared queue. It changes where the randomness comes from, and
+    it has to: a run streamed one generator through a whole block, so the seventeenth game
+    was whatever the sixteen before it left behind. That is fine when the block is fixed
+    and meaningless when the order is a race. With ``indices`` each game is seeded from its
+    own number, so a game is the same game whichever worker draws it, in whatever order,
+    and a game replayed after a worker died is the game that was lost.
+
+    ``on_finish`` is called with an index once its game has been *written*, not once it has
+    been played. The gap is the point: a worker that dies in between should have that game
+    handed to somebody else.
     """
     if not 0.0 <= mirror_share <= 1.0:
         raise ValueError(f"mirror_share must be a probability, got {mirror_share}")
@@ -819,7 +834,15 @@ def generate(
                 archetype_share = 1.0
             if not archetypes and archetype_share > 0.0:
                 raise ValueError("archetype_share > 0 but no archetypes were given")
-    rng = np.random.default_rng(seed)
+    def scheduled() -> Iterator[tuple[int | None, np.random.Generator]]:
+        if indices is None:
+            rng = np.random.default_rng(seed)
+            for _ in range(games):
+                yield None, rng
+        else:
+            for index in indices:
+                yield index, np.random.default_rng([seed, index])
+
     path = out or (selfplay_dir() / f"games-seed{seed}.jsonl")
     path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -836,7 +859,7 @@ def generate(
         "turns": 0,
     }
     with path.open("a", encoding="utf-8") as handle:
-        for _ in range(games):
+        for index, rng in scheduled():
             drawn = None
             mirror = mirror_share > 0.0 and rng.random() < mirror_share
             if mirror:
@@ -913,21 +936,26 @@ def generate(
                     stats["mirror_wins"] += int(record.outcome > 0.5)
             if record.outcome is None:
                 stats["discarded_unfinished"] += 1
-                continue
-            stats["finished"] += 1
-            stats["wins"] += int(record.outcome > 0.5)
-            stats["decisions"] += len(record.decisions)
-            stats["turns"] += record.turns
-            handle.write(
-                json.dumps(
-                    record.to_json(
-                        objective=leaf or objective.name, search_limit=search_limit
-                    ),
-                    ensure_ascii=False,
+            else:
+                stats["finished"] += 1
+                stats["wins"] += int(record.outcome > 0.5)
+                stats["decisions"] += len(record.decisions)
+                stats["turns"] += record.turns
+                handle.write(
+                    json.dumps(
+                        record.to_json(
+                            objective=leaf or objective.name, search_limit=search_limit
+                        ),
+                        ensure_ascii=False,
+                    )
+                    + "\n"
                 )
-                + "\n"
-            )
-            handle.flush()
+                handle.flush()
+            if index is not None and on_finish is not None:
+                # After the write, and after a discard too: a game that was played and
+                # came to nothing has still been played, and handing it back would have
+                # the queue retry it until it ran out of attempts.
+                on_finish(index)
     stats["path"] = str(path)
     return stats
 
