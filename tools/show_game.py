@@ -488,15 +488,21 @@ def turn_events(
         pos = Position.from_json(decision["position"])
     except Exception:  # noqa: BLE001 - a log must not die on one unreadable record
         return []
-    limit = len(decision["ownActions"])
+    # Every legal pair, not the menu the search would build. `narrow` ranks and truncates,
+    # and the ranking is a *setting* -- generation ranks by the leaf, this has no model and
+    # ranks by damage -- so rebuilding the menu here asks whether a different ranking would
+    # have offered the same move, which is not the question. A recorded choice is legal by
+    # construction; it just need not survive someone else's top 48. Doubles tops out near
+    # 54 legal pairs, so this keeps them all.
+    ALL_LEGAL = 512
     lookup = []
     for side, wanted in ((0, own), (1, foe)):
-        actions = {a.to_choice(): a for a in narrow(reg, pos, side, limit=max(limit, 24)).actions}
+        actions = {a.to_choice(): a for a in narrow(reg, pos, side, limit=ALL_LEGAL).actions}
         if wanted not in actions:
-            # Say so rather than print nothing. A recorded choice that is no longer legal
-            # is what a fixed rule looks like from an old record -- every pre-fix Hyper
-            # Beam recharge turn is one -- and a turn with an empty "what happened" block
-            # reads as a turn where nothing happened.
+            # Say so rather than print nothing. With the whole legal set in hand this now
+            # means what it says: a rule genuinely changed since the record was written --
+            # every pre-fix Hyper Beam recharge turn is one -- and a turn with an empty
+            # "what happened" block reads as a turn where nothing happened.
             label = "自" if side == 0 else "敵"
             return [
                 (
