@@ -97,6 +97,20 @@ def main() -> None:
     ap.add_argument("--rank-leaf", action="store_true")
     ap.add_argument("--solve-sparsely", action="store_true")
     ap.add_argument("--max-turns", type=int, default=40)
+    ap.add_argument(
+        "--flat-turns",
+        dest="flat_turns",
+        action="store_true",
+        default=True,
+        help="draw the turn uniformly first, then a position within it. On by default, "
+        "because the recorded tail decays steeply -- 12,232 decisions at turn 12 against "
+        "408 at turn 20 and 101 at turn 25 -- so drawing positions uniformly would spend "
+        "a third of the budget on the turn that is already the least scarce. The rarest "
+        "bands get resampled several times as a result, which is the intended trade: a "
+        "repeated start still plays out differently, and the alternative is not sampling "
+        "that phase at all.",
+    )
+    ap.add_argument("--no-flat-turns", dest="flat_turns", action="store_false")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -125,13 +139,31 @@ def main() -> None:
     value = BatchedValue(net.to(device), encoder, device=device)
     objective = OBJECTIVES[args.objective]
 
+    by_turn: dict[int, list[dict]] = {}
+    for entry in starts:
+        by_turn.setdefault(entry["turn"], []).append(entry)
+    turns = sorted(by_turn)
+    if args.flat_turns:
+        print(
+            "  turns "
+            + ", ".join(f"{t}:{len(by_turn[t])}" for t in turns[:8])
+            + (" ..." if len(turns) > 8 else "")
+            + f"  ({len(turns)} bands, drawn evenly)",
+            file=sys.stderr,
+        )
+
     rng = np.random.default_rng(args.seed)
     games_file = open_games(args.out)
     finished = unfinished = 0
     started = time.perf_counter()
-    reached = []
+    reached: list[int] = []
+    starts_used: list[int] = []
     for _index in range(args.games):
-        pick = starts[int(rng.integers(len(starts)))]
+        if args.flat_turns:
+            band = by_turn[turns[int(rng.integers(len(turns)))]]
+            pick = band[int(rng.integers(len(band)))]
+        else:
+            pick = starts[int(rng.integers(len(starts)))]
         position = Position.from_json(pick["position"])
         record = play_game(
             reg,
@@ -151,6 +183,7 @@ def main() -> None:
             unfinished += 1
             continue
         finished += 1
+        starts_used.append(pick["turn"])
         if record.decisions:
             reached.append(max(d.turn for d in record.decisions))
         write_game(
@@ -177,6 +210,9 @@ def main() -> None:
 
     elapsed = time.perf_counter() - started
     print(f"\n{finished} finished, {unfinished} unfinished, {elapsed / 60:.1f} min")
+    if starts_used:
+        arr = np.array(starts_used)
+        print(f"  start turn: mean {arr.mean():.1f}, median {np.median(arr):.0f}, max {arr.max()}")
     if reached:
         arr = np.array(reached)
         print(f"  final turn: mean {arr.mean():.1f}, median {np.median(arr):.0f}, max {arr.max()}")
