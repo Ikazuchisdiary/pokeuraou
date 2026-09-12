@@ -224,6 +224,8 @@ def main() -> None:
                     seat=seat,
                     leaves=side_leaves,
                     limits=limits,
+                    depths=depths,
+                    rankings=tuple("leaf" if r else "damage" for r in ranks),
                     note=(
                         f"search depth {depths[0]} vs {depths[1]} by side"
                         if depths[0] != depths[1]

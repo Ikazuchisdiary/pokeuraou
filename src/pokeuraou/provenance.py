@@ -40,24 +40,61 @@ def provenance(
     seat: str,
     leaves: tuple[str, str],
     limits: tuple[int, int],
+    depths: tuple[int, int] = (1, 1),
+    rankings: tuple[str, str] = ("damage", "damage"),
     selection: str = "uniform",
     note: str = "",
 ) -> dict[str, Any]:
     """What produced this game, per side, in the order the sides appear in the record.
 
-    ``leaves`` and ``limits`` are per side rather than per agent on purpose: a reader of
-    the dataset has a position with side 0 and side 1 in it, and needs to know which of
-    them was searched how. Translating "the new generation won this seat" into "side 1
-    held it" is exactly the step that gets done wrong.
+    Everything that distinguishes the two agents is per side and structured, because a
+    rating fitted across matches has to know *which agent* won a game, and an agent here is
+    not a model -- it is a model together with the search that ran it. Width 48 beat width
+    24 with the same model by +5.5, so a record that says only which model played says
+    almost nothing.
+
+    They are per side rather than per agent for the same reason they always were: a reader
+    has a position with side 0 and side 1 in it. Translating "the new generation won this
+    seat" into "side 1 held it" is exactly the step that gets done wrong.
+
+    `depths` and `rankings` were once carried in the free-text `seat` label and in `note`
+    respectively, which was three places for one kind of fact. A match whose two agents
+    differed only in the candidate ranking recorded identical `leaves` and identical
+    `limits`, and the only thing separating them was a substring of a human-readable
+    string -- fine to read, impossible to fit a rating from.
     """
     return {
         "kind": kind,
         "seat": seat,
         "leaves": list(leaves),
         "limits": list(limits),
+        "depths": list(depths),
+        "rankings": list(rankings),
         "selection": selection,
         **({"note": note} if note else {}),
     }
+
+
+def agent_name(source: dict[str, Any], side: int) -> str:
+    """A stable name for the agent that played one side of a recorded game.
+
+    The name is the whole configuration, because that is what was played: the leaf, the
+    candidate width, the search depth and the ranking. Two records naming the same agent
+    must mean the same agent, or a rating pools games that were not comparable.
+
+    Records written before a field existed are read at its default, which is what those
+    runs actually used.
+    """
+    leaf = (source.get("leaves") or ["?", "?"])[side]
+    limit = (source.get("limits") or [0, 0])[side]
+    depth = (source.get("depths") or [1, 1])[side]
+    ranking = (source.get("rankings") or ["damage", "damage"])[side]
+    name = f"{leaf}/w{limit}"
+    if depth != 1:
+        name += f"/d{depth}"
+    if ranking != "damage":
+        name += f"/{ranking}"
+    return name
 
 
 def write_game(
@@ -90,4 +127,4 @@ def open_games(path: Path | None) -> Any:  # noqa: ANN401
     return path.open("a", encoding="utf-8")
 
 
-__all__ = ["SELF_PLAY", "open_games", "provenance", "write_game"]
+__all__ = ["SELF_PLAY", "agent_name", "open_games", "provenance", "write_game"]
