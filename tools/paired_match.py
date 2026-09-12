@@ -71,16 +71,22 @@ def pair_up(paths: list[str]) -> tuple[list[tuple[bool, float]], list[tuple[floa
             # The seat label ends in the side the new solver played.
             seats[int(game["foeArchetype"].strip()[-1])][_key(game)].append(game)
         for key, first in seats[0].items():
-            for a, b in zip(first, seats[1].get(key, [])):
+            for a, b in zip(first, seats[1].get(key, []), strict=False):
                 # `outcome` is always side 0's, so the new solver's score is `outcome` in
                 # the seat where it played side 0 and the complement in the other.
                 pairs.append((_chosen(a) == _chosen(b), a["outcome"] + (1.0 - b["outcome"])))
-                for ta, tb in zip(a["decisions"], b["decisions"]):
+                for ta, tb in zip(a["decisions"], b["decisions"], strict=False):
                     if ta["position"] != tb["position"] or ta["ownActions"] != tb["ownActions"]:
                         break  # the games have parted; later turns are different questions
                     searches.append(
                         (
-                            0.5 * sum(abs(x - y) for x, y in zip(ta["ownPolicy"], tb["ownPolicy"])),
+                            0.5
+                            * sum(
+                                abs(x - y)
+                                for x, y in zip(
+                                    ta["ownPolicy"], tb["ownPolicy"], strict=False
+                                )
+                            ),
                             abs(ta["searchValue"] - tb["searchValue"]),
                         )
                     )
