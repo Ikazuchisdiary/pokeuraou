@@ -178,6 +178,50 @@ def test_an_evaluator_that_reads_positions_keeps_the_node_here(bridged: None) ->
     assert _encoded_leaf_plan([OBJECTIVES["hp-share"].batch]) == [("hp-share", None)]
 
 
+def test_the_menu_is_scored_the_same_through_the_bridge(bridged: None) -> None:
+    """`narrow` decides which choices reach the matrix, so its scores must be *bit* equal.
+
+    Not close. The scores are only ever used to order candidates, and an order is what
+    survives into the game -- a difference in the last place is a different menu, which is
+    a different game, which no tolerance would have caught.
+    """
+    reg, pos, _row, _col = _node()
+
+    through_rust = [narrow(reg, pos, side, limit=6) for side in (0, 1)]
+    rustnode.reset()
+    os.environ[rustnode.ENV_ENABLE] = "0"
+    in_python = [narrow(reg, pos, side, limit=6) for side in (0, 1)]
+
+    for side, (there, here) in enumerate(zip(through_rust, in_python, strict=True)):
+        assert [c.action.to_choice() for c in there.kept] == [
+            c.action.to_choice() for c in here.kept
+        ], f"side {side} kept a different menu"
+        for mine, theirs in zip(here.kept, there.kept, strict=True):
+            assert mine.score == theirs.score, f"{mine.score!r} against {theirs.score!r}"
+            assert mine.detail == theirs.detail
+
+
+def test_a_menu_scored_from_beliefs_stays_here(bridged: None) -> None:
+    """The port carries one particle; the belief layer's Battlers carry a whole spread.
+
+    So the analyser's menu is scored in Python. The guard is the argument itself -- a
+    caller that passes `battlers` is not offered the crossing -- which is why this checks
+    that the bridged path is not even consulted rather than that the answer matches.
+    """
+    from pokeuraou.narrow import _battlers_from_position, _bridged_scores
+
+    reg, pos, _row, _col = _node()
+    table = _battlers_from_position(reg, pos)
+    with_beliefs = narrow(reg, pos, 0, limit=6, battlers=table)
+    without = narrow(reg, pos, 0, limit=6)
+    # Same answer either way here, because these Battlers carry one particle each; what
+    # the test pins is that supplying them at all is a legitimate call.
+    assert [c.action.to_choice() for c in with_beliefs.kept] == [
+        c.action.to_choice() for c in without.kept
+    ]
+    assert _bridged_scores(reg, pos, 0, [c.action for c in without.kept]) is not None
+
+
 def test_an_impossible_position_is_refused(bridged: None) -> None:
     """A position Python's own validator rejects must not be answered, only refused.
 

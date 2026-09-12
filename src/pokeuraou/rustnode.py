@@ -268,6 +268,32 @@ class RustNode:
             self._process.stdin.close()
             self._process.wait(timeout=5)
 
+    def score(
+        self,
+        pos: Position,
+        side: int,
+        candidates: list[SideAction],
+    ) -> list[tuple[float, list[tuple[int, int, bool, float, bool]]]] | None:
+        """The damage score of each candidate, or None when the port declines the position.
+
+        What decides which choices reach the matrix at all. The legality of the pool is
+        settled here in Python -- it is 0.2% of a run and 500 lines of rules -- and only
+        the arithmetic crosses.
+        """
+        request = {
+            "kind": "score",
+            "position": pos.to_json(),
+            "side": side,
+            "candidates": [[dump_action(a) for a in c.slots] for c in candidates],
+        }
+        response = self._exchange(request)
+        if response.get("refused"):
+            return None
+        return [
+            (float(score), [(int(a), int(b), bool(c), float(d), bool(e)) for a, b, c, d, e in parts])
+            for score, parts in zip(response["scores"], response["detail"], strict=True)
+        ]
+
     def resolve(
         self,
         pos: Position,

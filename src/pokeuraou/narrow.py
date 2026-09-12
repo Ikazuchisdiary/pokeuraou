@@ -239,6 +239,48 @@ def _expected_fraction(
     return min(value, 1.0), not result.unmodelled
 
 
+def _bridged_scores(
+    reg: Regulation,
+    pos: Position,
+    side: int,
+    pool: list[SideAction],
+) -> list[Candidate] | None:
+    """The whole pool scored by the Rust port in one crossing, or None to do it here.
+
+    `score_action` is `damage.calculate` in a loop, and that loop was 13.9% of a bridged
+    generation run -- the largest thing left in Python once the resolver crossed over. The
+    legality of the pool is 0.2% and stays here; only the arithmetic goes.
+
+    The port carries one particle, so a caller with beliefs is not offered this. It hands
+    back which target each move hit and for how much rather than the readable line, so the
+    line is still written here and still says the same thing.
+    """
+    from . import rustnode
+
+    if not rustnode.available():
+        return None
+    node = rustnode.node_for(reg)
+    if node is None:
+        return None
+    try:
+        scored = node.score(pos, side, pool)
+    except Exception as exc:  # noqa: BLE001 - a broken bridge must not fail the run
+        rustnode.disable(str(exc))
+        return None
+    if scored is None:
+        return None
+
+    out: list[Candidate] = []
+    for action, (total, parts) in zip(pool, scored, strict=True):
+        detail = tuple(
+            f"{action.slots[slot].describe(reg)} -> "
+            f"{'foe' if is_foe else 'ally'}{target_slot + 1} {signed:+.3f}{'' if exact else '?'}"
+            for slot, target_slot, is_foe, signed, exact in parts
+        )
+        out.append(Candidate(action=action, score=total, detail=detail))
+    return out
+
+
 def score_action(
     reg: Regulation,
     pos: Position,
@@ -379,9 +421,14 @@ def narrow(
     pool = drop_dead_actions(reg, pos, side, pool)
     if not pool:
         return Narrowed(kept=[], considered=0)
-    table = dict(battlers) if battlers is not None else _battlers_from_position(reg, pos)
-
-    scored = [score_action(reg, pos, side, a, battlers=table, weights=weights) for a in pool]
+    scored = None
+    if battlers is None and weights is None:
+        scored = _bridged_scores(reg, pos, side, pool)
+    if scored is None:
+        table = dict(battlers) if battlers is not None else _battlers_from_position(reg, pos)
+        scored = [
+            score_action(reg, pos, side, a, battlers=table, weights=weights) for a in pool
+        ]
     if rank is not None:
         # The damage detail is kept beside the new score rather than thrown away: a
         # surprising leaf ranking is exactly when a reader wants to see what the cheap

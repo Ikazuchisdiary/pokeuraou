@@ -151,6 +151,42 @@ pub fn resolve_one(reg: &Reg, value: &Value) -> Value {
     })
 }
 
+/// Scores a pool of candidates, which is what decides the menu the matrix is filled from.
+///
+/// Separate from `fill` because it is a different question with a different shape: no
+/// turns are resolved, only damage calculated, and what comes back is one number per
+/// candidate rather than a matrix.
+fn score_pool(reg: &Reg, value: &Value) -> Value {
+    let position = Position::from_json(&value["position"]);
+    if &*position.format != reg.format_id.as_str() {
+        return json!({
+            "error": format!(
+                "position is {} but the regulation is {}", position.format, reg.format_id
+            )
+        });
+    }
+    let side = value["side"].as_u64().unwrap_or(0) as usize;
+    let candidates: Vec<Vec<crate::resolve::SlotAction>> = value["candidates"]
+        .as_array()
+        .map(|list| list.iter().map(crate::resolve::parse_actions_list).collect())
+        .unwrap_or_default();
+    match crate::score::score_candidates(reg, &position, side, &candidates) {
+        Err(reason) => json!({ "refused": reason }),
+        Ok(scored) => json!({
+            "scores": scored.iter().map(|s| s.score).collect::<Vec<_>>(),
+            "detail": scored
+                .iter()
+                .map(|s| {
+                    s.detail
+                        .iter()
+                        .map(|c| json!([c.slot, c.target_slot, c.is_foe, c.signed, c.exact]))
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>(),
+        }),
+    }
+}
+
 /// JSONL over stdio: one request per line, one response per line.
 pub fn serve(reg: &Reg) {
     let encoder = crate::encode::Encoder::new(reg);
@@ -164,6 +200,7 @@ pub fn serve(reg: &Reg) {
         let response = match serde_json::from_str::<Value>(&line) {
             Err(error) => json!({ "error": error.to_string() }),
             Ok(value) if value["kind"].as_str() == Some("resolve") => resolve_one(reg, &value),
+            Ok(value) if value["kind"].as_str() == Some("score") => score_pool(reg, &value),
             Ok(value) => match parse_request(&value) {
                 Err(reason) => json!({ "error": reason }),
                 Ok(request) => {

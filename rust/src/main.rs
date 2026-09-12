@@ -25,6 +25,7 @@ mod moves;
 mod position;
 mod reg;
 mod resolve;
+mod score;
 mod speed;
 
 use serde_json::Value;
