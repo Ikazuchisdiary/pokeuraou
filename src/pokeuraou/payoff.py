@@ -29,7 +29,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Any, Protocol
 
 import numpy as np
 
@@ -69,6 +69,13 @@ class _Objective:
     _value: Callable[[Position], float]
     #: A batch form, when the payoff has one worth using. `None` means loop over `_value`.
     _batch: Callable[[Sequence[Position]], np.ndarray] | None = None
+    #: A batch form for leaves that arrive already encoded, or `None`.
+    #:
+    #: A parameter-free objective has none and never will: it reads the position. A
+    #: learned value function's input *is* the encoding, and that is what lets a caller
+    #: holding the encoding -- the Rust port, which encodes the leaves it already has --
+    #: hand them over as arrays instead of rebuilding positions for this to encode again.
+    from_encoded: Callable[[Any], np.ndarray] | None = None
 
     def __call__(self, pos: Position) -> float:
         return self._value(pos)

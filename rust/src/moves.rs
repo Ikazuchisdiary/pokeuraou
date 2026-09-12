@@ -14,6 +14,7 @@ use crate::reg::{Move, Reg};
 use crate::resolve::{
     check_white_herb, grounded, stratified_rolls, Budget, Outcome, Slot, Turn,
     CONFUSION_SELF_HIT_CHANCE, FREEZE_COUNTER, FULL_PARALYSIS_CHANCE, THAW_CHANCE,
+    TWO_TURN_MOVES,
 };
 use crate::speed::QueuedAction;
 use serde_json::Value;
@@ -36,6 +37,19 @@ const PROTECT_VOLATILES: [(&str, &str); 9] = [
 const FIRST_TURN_OUT_MOVES: [&str; 3] = ["fakeout", "firstimpression", "matblock"];
 const STALL_BUMPING_MOVES: [&str; 2] = ["wideguard", "quickguard"];
 const MAX_BRANCHED_SECONDARIES: usize = 2;
+
+const CHARGE_SPA: &[(&str, i64)] = &[("spa", 1)];
+const CHARGE_GEOMANCY: &[(&str, i64)] = &[("spa", 2), ("spd", 2), ("spe", 2)];
+
+/// Stat changes a charge turn brings with it. Electro Shot and Meteor Beam raise Special
+/// Attack while winding up, which is most of the reason to use them.
+fn charge_turn_boosts(move_id: &str) -> Option<&'static [(&'static str, i64)]> {
+    match move_id {
+        "electroshot" | "meteorbeam" => Some(CHARGE_SPA),
+        "geomancy" => Some(CHARGE_GEOMANCY),
+        _ => None,
+    }
+}
 
 fn is(value: Option<Id>, name: &str) -> bool {
     matches!(value, Some(v) if v.as_str() == name)
@@ -308,21 +322,40 @@ fn use_move<'a>(
         }
     }
 
-    // Solar Beam is the one two-turn move this port handles, and only when the weather
-    // lets it skip the charge; everything else was refused before the turn started.
-    if move_id.as_str() == "solarbeam" {
+    // A move that spends a turn winding up. Python models exactly this much of them and
+    // no more -- there is no semi-invulnerability anywhere in the engine -- so Fly and Dig
+    // have the same shape here as Solar Beam, and having the same shape is the whole
+    // requirement: the oracle for this port is Python, not Showdown.
+    if let Some((_, skip_weather)) =
+        TWO_TURN_MOVES.iter().find(|(id, _)| *id == move_id.as_str())
+    {
         let charged = turn
             .mon_at(action.side, action.slot)
             .map(|mon| mon.has_volatile("twoturnmove"))
             .unwrap_or(false);
         if charged {
+            // The charge already happened last turn: drop the marker and attack. Showdown's
+            // `onTryMove` starts with `if (attacker.removeVolatile(move.id)) return;`, so
+            // there is no second boost.
             if let Some(mon) = turn.mon_at_mut(action.side, action.slot) {
                 mon.volatiles.retain(|v| v.id.as_str() != "twoturnmove");
             }
         } else {
-            let sunny = matches!(turn.pos.field.weather, Some(w)
-                if matches!(w.as_str(), "sunnyday" | "desolateland"));
-            if !sunny {
+            // The charge-turn boost applies whether or not the charge is skipped: Showdown
+            // boosts first and only then checks the weather. Electro Shot in rain both
+            // raises Special Attack and attacks in the same turn, so leaving the boost out
+            // understates its damage by a whole stage.
+            if let Some(boosts) = charge_turn_boosts(move_id.as_str()) {
+                turn.apply_boosts(action.side, action.slot, boosts, false);
+            }
+            let skipped = turn
+                .pos
+                .field
+                .weather
+                .as_ref()
+                .map(|w| skip_weather.contains(&w.as_str()))
+                .unwrap_or(false);
+            if !skipped {
                 turn.add_volatile(action.side, action.slot, "twoturnmove", None);
                 return Ok(vec![(1.0, turn)]);
             }

@@ -72,12 +72,22 @@ pub struct Reg {
     pub mega_by_species: HashSet<(String, String)>,
     pub level: i64,
     pub active_per_side: usize,
+    pub picked_team_size: usize,
     /// Items that lock their holder into one move, from the dump's `isChoice`.
     pub choice_items: HashSet<String>,
     /// (speciesId, itemId) -> the mega forme it becomes.
     pub mega_targets: HashMap<(String, String), String>,
     /// Effect name -> the types immune to it, from the dump's `effectImmunities`.
     pub effect_immunities: HashMap<String, HashSet<String>>,
+    /// Every id in the dump, sorted -- the encoder's vocabulary is an offset into these,
+    /// and `encode.build_vocabulary` sorts for exactly the reason this does: a model's
+    /// weights are meaningless the moment the same integer means a different Pokemon.
+    pub species_ids: Vec<String>,
+    pub ability_ids: Vec<String>,
+    pub item_ids: Vec<String>,
+    pub move_ids: Vec<String>,
+    /// The types any species has, sorted. Index into this, not into `types`.
+    pub species_types: Vec<String>,
 }
 
 impl Reg {
@@ -212,10 +222,51 @@ impl Reg {
             return Err("this port implements the level-50 closed form only".into());
         }
 
+        let mut species_ids: Vec<String> = species.keys().cloned().collect();
+        species_ids.sort();
+        let mut move_ids: Vec<String> = moves.keys().cloned().collect();
+        move_ids.sort();
+        let mut ability_ids: Vec<String> = doc["abilities"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| e["id"].as_str())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        ability_ids.sort();
+        let mut item_ids: Vec<String> = doc["items"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|e| e["id"].as_str())
+                    .map(String::from)
+                    .collect()
+            })
+            .unwrap_or_default();
+        item_ids.sort();
+        let mut species_types: Vec<String> = {
+            let mut seen: HashSet<String> = HashSet::new();
+            for entry in species.values() {
+                for kind in &entry.types {
+                    seen.insert(kind.clone());
+                }
+            }
+            seen.into_iter().collect()
+        };
+        species_types.sort();
+
         Ok(Reg {
+            species_ids,
+            ability_ids,
+            item_ids,
+            move_ids,
+            species_types,
             natures,
             level: doc["meta"]["level"].as_i64().unwrap_or(50),
             active_per_side: doc["meta"]["activePerSide"].as_u64().unwrap_or(2) as usize,
+            picked_team_size: doc["meta"]["pickedTeamSize"].as_u64().unwrap_or(4) as usize,
             format_id: doc["meta"]["formatId"].as_str().unwrap_or_default().to_string(),
             stat_ids: doc["statIds"]
                 .as_array()

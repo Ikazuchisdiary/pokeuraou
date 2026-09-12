@@ -167,8 +167,14 @@ def main() -> None:
     )
     moves = sorted({c["move"] for c in cases})
     print(f"{len(cases)} distinct cases over {len(moves)} moves -> {out}")
-    print(f"  abilities: {sorted({c['attacker']['ability'] for c in cases} | {c['defender']['ability'] for c in cases})}")
-    print(f"  items: {sorted({str(c['attacker']['item']) for c in cases} | {str(c['defender']['item']) for c in cases})}")
+    abilities = {c["attacker"]["ability"] for c in cases} | {
+        c["defender"]["ability"] for c in cases
+    }
+    items = {str(c["attacker"]["item"]) for c in cases} | {
+        str(c["defender"]["item"]) for c in cases
+    }
+    print(f"  abilities: {sorted(abilities)}")
+    print(f"  items: {sorted(items)}")
 
 
 if __name__ == "__main__":

@@ -598,6 +598,40 @@ class BatchedValue:
         self.evaluated += len(positions)
         return out
 
+    @torch.no_grad()
+    def from_encoded(self, encoded: Encoded) -> np.ndarray:
+        """(N,) win probability for a batch that is already encoded.
+
+        The encoding is 11% of a generation run and the forward pass is 5%, so a caller
+        that can produce the arrays some other way -- the Rust port does, from the leaves
+        it already holds -- should not have to hand back positions for this to re-encode.
+
+        The forward pass stays here on purpose. It is float32 matrix arithmetic, and a
+        second implementation would sum it in a different order; a difference in the last
+        places of a win probability is a difference in the payoff, which is a difference in
+        the equilibrium. Only the input crosses.
+        """
+        n = len(encoded.species)
+        if n == 0:
+            return np.zeros(0, dtype=np.float64)
+        out = np.empty(n, dtype=np.float64)
+        for start in range(0, n, self.batch_size):
+            stop = min(start + self.batch_size, n)
+            batch = {
+                "species": torch.from_numpy(encoded.species[start:stop]),
+                "ability": torch.from_numpy(encoded.ability[start:stop]),
+                "item": torch.from_numpy(encoded.item[start:stop]),
+                "moves": torch.from_numpy(encoded.moves[start:stop]),
+                "mon": torch.from_numpy(encoded.mon[start:stop]),
+                "mask": torch.from_numpy(encoded.mask[start:stop]),
+                "side": torch.from_numpy(encoded.side[start:stop]),
+                "field": torch.from_numpy(encoded.field[start:stop]),
+            }
+            batch = {k: v.to(self.device) for k, v in batch.items()}
+            out[start:stop] = torch.sigmoid(self.net(batch)).double().cpu().numpy()
+        self.evaluated += n
+        return out
+
     def objective(self, name: str = "win") -> Any:  # noqa: ANN401
         """The value function as a single-position :class:`~pokeuraou.payoff.Objective`.
 
@@ -614,4 +648,5 @@ class BatchedValue:
             blind_to="学習に使った探索の強さと相手プールに条件付き",
             _value=lambda pos: float(self([pos])[0]),
             _batch=lambda positions: self(list(positions)),
+            from_encoded=self.from_encoded,
         )

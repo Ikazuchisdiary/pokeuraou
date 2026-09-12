@@ -3782,6 +3782,121 @@ _PORTED_OBJECTIVES = frozenset({"hp-share", "faints"})
 _FILLING_REFUSED = False
 
 
+def _fold_from_json(node: dict) -> Fold:
+    """The fold tree the port describes, as the objects `fold_value` already folds.
+
+    Chance is an `Average` normalised by its own weight and a replacement is a `BestOf`
+    taken by whoever chooses it -- the same two shapes `turn_leaves` builds here, so the
+    collapse itself is not duplicated.
+    """
+    if "leaf" in node:
+        return LeafRef(index=int(node["leaf"]))
+    if "best" in node:
+        return BestOf(
+            chooser=int(node["best"]),
+            options=[_fold_from_json(option) for option in node["options"]],
+        )
+    return Average(parts=[(float(w), _fold_from_json(part)) for w, part in node["avg"]])
+
+
+def _encoded_leaf_plan(
+    evaluators: Sequence[Callable],
+) -> list[tuple[str | None, Callable | None]] | None:
+    """How each evaluator would score the port's leaves, or None if one of them cannot.
+
+    Two ways to score a leaf that is over there. A learned value function's input *is* the
+    encoding, so it scores the arrays here (`BatchedValue.from_encoded`). A parameter-free
+    objective reads the position -- which does not cross -- but it is ported, so the port
+    scores it per leaf and sends the values back with them.
+
+    The mixture is the analyser's own case: the learned objective and hp-share beside it as
+    a cross-check. It would be a poor trade to send a whole node home for the second column.
+
+    What arrives is the batch callable, not the thing behind it: `objective.batch` bound to
+    an `_Objective`, or the `BatchedValue` itself where a tool passes one directly. Both
+    lead to the same owner, which is where the encoded form lives if there is one.
+    """
+    plan: list[tuple[str | None, Callable | None]] = []
+    for evaluate in evaluators:
+        owner = getattr(evaluate, "__self__", evaluate)
+        scorer = getattr(owner, "from_encoded", None)
+        if scorer is not None:
+            plan.append((None, scorer))
+            continue
+        names = _objective_names([evaluate])
+        if names is None or names[0] not in _PORTED_OBJECTIVES:
+            return None
+        plan.append((names[0], None))
+    return plan
+
+
+def _rust_encoded_payoffs(
+    reg: Regulation,
+    pos: Position,
+    ours: Sequence[SideAction],
+    theirs: Sequence[SideAction],
+    evaluators: Sequence[Callable],
+    budget: Budget,
+) -> tuple[list[np.ndarray], set[str], np.ndarray] | None:
+    """The node filled by the port, with the leaves scored here by the learned net.
+
+    The port resolves the turns and encodes their leaves; the arrays cross; the forward
+    pass stays in torch, because a second implementation of float32 matrix arithmetic would
+    sum it in a different order and a win probability that differs in its last places is a
+    payoff that differs, which is an equilibrium that differs.
+    """
+    from . import rustnode
+
+    global _FILLING_REFUSED
+    if _FILLING_REFUSED or not rustnode.available():
+        return None
+    plan = _encoded_leaf_plan(evaluators)
+    if plan is None or not any(scorer is not None for _name, scorer in plan):
+        # Nothing here needs the leaves themselves; the cheaper crossing already refused it.
+        return None
+    node = rustnode.node_for(reg)
+    if node is None:
+        return None
+    named = [name for name, _scorer in plan if name is not None]
+    try:
+        filled = node.fill_encoded(pos, list(ours), list(theirs), budget, named)
+    except Exception as exc:  # noqa: BLE001 - a broken bridge must not fail the run
+        rustnode.disable(str(exc))
+        return None
+
+    payoffs = [np.zeros((len(ours), len(theirs)), dtype=np.float64) for _ in evaluators]
+    exact = np.array(filled.exact, dtype=bool)
+    unmodelled = set(filled.unmodelled)
+    for index, (name, score) in enumerate(plan):
+        values = (
+            np.asarray(filled.leaf_values[name], dtype=np.float64)
+            if score is None
+            else np.asarray(score(filled.encoded), dtype=np.float64)
+        )
+        for i, j, start, weights in filled.spans:
+            if not weights:
+                continue
+            payoffs[index][i, j] = float(
+                values[start : start + len(weights)] @ np.asarray(weights)
+            )
+        for i, j, root in filled.folded:
+            payoffs[index][i, j] = fold_value(_fold_from_json(root), values)
+
+    _FILLING_REFUSED = True
+    try:
+        for i, j, _why in filled.refused:
+            cell, notes, cell_exact = batched_payoffs(
+                reg, pos, [ours[i]], [theirs[j]], evaluators, budget=budget
+            )
+            for index in range(len(payoffs)):
+                payoffs[index][i, j] = cell[index][0, 0]
+            exact[i, j] = cell_exact[0, 0]
+            unmodelled |= notes
+    finally:
+        _FILLING_REFUSED = False
+    return payoffs, unmodelled, exact
+
+
 def _rust_payoffs(
     reg: Regulation,
     pos: Position,
@@ -3806,7 +3921,8 @@ def _rust_payoffs(
         return None
     names = _objective_names(evaluators)
     if names is None or not set(names) <= _PORTED_OBJECTIVES:
-        return None
+        # A learned leaf takes the other crossing: the encoding, not the payoff.
+        return _rust_encoded_payoffs(reg, pos, ours, theirs, evaluators, budget)
     node = rustnode.node_for(reg)
     if node is None:
         return None

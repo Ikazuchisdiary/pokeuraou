@@ -2,4 +2,6 @@ target/
 # Generated fixtures: the `tools/dump_*.py` scripts rebuild them, and they are tens of MB.
 cases*.json
 turns*.json
-refused.json
+refused*.json
+# Encoded leaves dumped by the `encode` subcommand, for the encoder differential.
+*.bin

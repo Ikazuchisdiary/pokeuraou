@@ -24,11 +24,12 @@ so a caller can fall back silently rather than fail a run that was working.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import subprocess
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -97,6 +98,77 @@ def dump_budget(budget: Budget) -> dict[str, Any]:
 
 
 @dataclass
+class EncodedNode:
+    """One node's leaves as the encoder's arrays, plus the fold back to a matrix."""
+
+    encoded: Any
+    #: (row, column, start, weights) for a cell that is a plain weighted mean.
+    spans: list[tuple[int, int, int, list[float]]]
+    #: (row, column, fold tree) for a cell whose turn stopped for a replacement.
+    folded: list[tuple[int, int, dict]]
+    exact: list[list[bool]]
+    refused: list[tuple[int, int, str]]
+    unmodelled: tuple[str, ...]
+    #: One value per leaf for each named objective the request asked for beside the leaves.
+    leaf_values: dict[str, Any] = field(default_factory=dict)
+
+    @staticmethod
+    def unpack(header: dict[str, Any], body: bytearray) -> EncodedNode:
+        import numpy as np
+
+        from .encode import Encoded
+
+        n = int(header["leaves"])
+        m = int(header["monsPerSide"])
+        layout = [
+            ("species", np.int32, (n, 2, m)),
+            ("ability", np.int32, (n, 2, m)),
+            ("item", np.int32, (n, 2, m)),
+            ("moves", np.int32, (n, 2, m, 4)),
+            ("mon", np.float32, (n, 2, m, int(header["monWidth"]))),
+            ("mask", np.float32, (n, 2, m)),
+            ("side", np.float32, (n, 2, int(header["sideWidth"]))),
+            ("field", np.float32, (n, int(header["fieldWidth"]))),
+        ]
+        arrays: dict[str, Any] = {}
+        offset = 0
+        for name, dtype, shape in layout:
+            count = 1
+            for axis in shape:
+                count *= axis
+            flat = np.frombuffer(body, dtype=dtype, count=count, offset=offset)
+            offset += count * np.dtype(dtype).itemsize
+            # The embeddings want int64; the wire does not have to carry it.
+            arrays[name] = (
+                flat.astype(np.int64) if dtype is np.int32 else flat
+            ).reshape(shape)
+        return EncodedNode(
+            encoded=Encoded(
+                species=arrays["species"],
+                ability=arrays["ability"],
+                item=arrays["item"],
+                moves=arrays["moves"],
+                mon=arrays["mon"],
+                mask=arrays["mask"],
+                side=arrays["side"],
+                field=arrays["field"],
+                unknown_volatiles=dict(header.get("unknownVolatiles", {})),
+            ),
+            spans=[(int(i), int(j), int(start), list(w)) for i, j, start, w in header["spans"]],
+            folded=[(int(i), int(j), root) for i, j, root in header["folded"]],
+            exact=header["exact"],
+            refused=[(int(i), int(j), str(why)) for i, j, why in header["refused"]],
+            unmodelled=tuple(header["unmodelled"]),
+            leaf_values={
+                name: np.frombuffer(
+                    body, dtype=np.float64, count=n, offset=offset + index * n * 8
+                )
+                for index, name in enumerate(header.get("leafObjectives", []))
+            },
+        )
+
+
+@dataclass
 class ResolvedTurn:
     """One turn's branch weights, and optionally the branch that was chosen."""
 
@@ -122,10 +194,10 @@ class NodeResult:
 
 #: One process per regulation, per interpreter. A generation worker is a process, so
 #: this is one Rust process per worker, which is what the parallelism wants.
-_NODES: dict[str, "RustNode | None"] = {}
+_NODES: dict[str, RustNode | None] = {}
 
 
-def node_for(reg: Regulation) -> "RustNode | None":
+def node_for(reg: Regulation) -> RustNode | None:
     """The warm process for this regulation, or None if it is not usable.
 
     A failure here is not a reason to fail a run that was working: the caller falls back
@@ -158,10 +230,8 @@ def reset() -> None:
         node = _NODES.pop(key)
         if node is None:
             continue
-        try:
+        with contextlib.suppress(Exception):
             node.close()
-        except Exception:  # noqa: BLE001
-            pass
 
 
 def disable(reason: str) -> None:
@@ -184,14 +254,13 @@ class RustNode:
         self.format_id = reg.meta.format_id
         self.binary = binary or binary_path()
         regulation = repo_root() / "configs" / "regulations" / f"{self.format_id}.json"
+        # Binary, not text: an encoded node is a JSON header line followed by the raw
+        # little-endian arrays on the same pipe, and a text stream would mangle them.
         self._process = subprocess.Popen(
             [str(self.binary), "node", str(regulation)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            text=True,
-            encoding="utf-8",
-            bufsize=1,
         )
 
     def close(self) -> None:
@@ -234,16 +303,63 @@ class RustNode:
         )
 
     def _exchange(self, request: dict[str, Any]) -> dict[str, Any]:
-        self._process.stdin.write(json.dumps(request, ensure_ascii=False) + "\n")
+        payload = json.dumps(request, ensure_ascii=False).encode("utf-8")
+        self._process.stdin.write(payload + b"\n")
         self._process.stdin.flush()
         line = self._process.stdout.readline()
         if not line:
-            stderr = self._process.stderr.read()
+            stderr = self._process.stderr.read().decode("utf-8", "replace")
             raise RuntimeError(f"the Rust node process stopped: {stderr.strip()}")
-        response = json.loads(line)
+        response = json.loads(line.decode("utf-8"))
         if "error" in response:
             raise RuntimeError(f"the Rust node refused the request: {response['error']}")
         return response
+
+    def _read_exactly(self, count: int) -> bytearray:
+        """The blob that follows an encoded node's header, in full.
+
+        A `bytearray` rather than `bytes` so the arrays built over it are writable. torch
+        warns about a tensor sharing read-only memory -- writing through it is undefined --
+        and the alternative is a copy of every float block on arrival.
+        """
+        body = bytearray()
+        while len(body) < count:
+            chunk = self._process.stdout.read(count - len(body))
+            if not chunk:
+                stderr = self._process.stderr.read().decode("utf-8", "replace")
+                raise RuntimeError(
+                    f"the Rust node sent {len(body)} of {count} bytes: {stderr.strip()}"
+                )
+            body += chunk
+        return body
+
+    def fill_encoded(
+        self,
+        pos: Position,
+        ours: list[SideAction],
+        theirs: list[SideAction],
+        budget: Budget,
+        objectives: list[str] | None = None,
+    ) -> EncodedNode:
+        """The node's leaves, already encoded, and how to fold their values.
+
+        For a learned leaf: its input is the leaves, so the leaves have to cross -- but as
+        the encoder's arrays rather than as positions, which is 3.7 KB each instead of
+        15 KB of JSON to parse and then encode anyway.
+        """
+        request = {
+            "position": pos.to_json(),
+            "ours": [[dump_action(a) for a in side.slots] for side in ours],
+            "theirs": [[dump_action(a) for a in side.slots] for side in theirs],
+            "budget": dump_budget(budget),
+            # Named objectives asked for alongside: scored per leaf over there, since the
+            # leaves are there already.
+            "objectives": list(objectives or []),
+            "encode": True,
+        }
+        header = self._exchange(request)
+        body = self._read_exactly(int(header["bytes"]))
+        return EncodedNode.unpack(header, body)
 
     def fill(
         self,

@@ -4,6 +4,7 @@
 //!     cargo run --release -- roundtrip <turns.json>
 //!     cargo run --release -- turns     <regulation.json> <turns.json> [repeats]
 //!     cargo run --release -- node      <regulation.json>          # JSONL over stdio
+//!     cargo run --release -- encode    <regulation.json> <turns.json> <out.bin>
 //!
 //! Python stays the oracle for Rust, and Showdown stays the oracle for Python
 //! (`tools/diff_*.py`), so the chain of verification is not broken by the port.
@@ -11,6 +12,8 @@
 mod battler;
 mod damage;
 mod effects;
+mod encode;
+mod encoded_node;
 mod fixedpoint;
 mod id;
 mod inert;
@@ -34,6 +37,7 @@ fn main() {
         Some("roundtrip") => roundtrip_main(&args[2..]),
         Some("turns") => turns_main(&args[2..]),
         Some("node") => node_main(&args[2..]),
+        Some("encode") => encode_main(&args[2..]),
         _ => {
             eprintln!(
                 "usage:\n  {0} damage <regulation.json> <cases.json> [repeats]\n  \
@@ -42,6 +46,77 @@ fn main() {
             );
             std::process::exit(2);
         }
+    }
+}
+
+/// Encodes the positions of a fixture, for the encoder differential.
+///
+/// Writes a JSON header line and then the raw little-endian buffers, which is what the
+/// node protocol does too -- the arrays are the network's input and JSON would be both
+/// larger and lossy about float32.
+fn encode_main(args: &[String]) {
+    use std::io::Write;
+
+    let reg = reg::Reg::load(&args[0]).unwrap_or_else(|e| {
+        eprintln!("regulation: {e}");
+        std::process::exit(1);
+    });
+    let text = std::fs::read_to_string(&args[1]).expect("fixture");
+    let doc: Value = serde_json::from_str(&text).expect("fixture json");
+    require_same_format(&doc, &reg);
+    let positions: Vec<position::Position> = doc["positions"]
+        .as_array()
+        .expect("positions")
+        .iter()
+        .map(position::Position::from_json)
+        .collect();
+    let borrowed: Vec<&position::Position> = positions.iter().collect();
+
+    let encoder = encode::Encoder::new(&reg);
+    let started = Instant::now();
+    let encoded = encoder.encode_positions(&borrowed);
+    let elapsed = started.elapsed().as_secs_f64();
+    eprintln!(
+        "encoded {} positions in {:.3} s = {:.1} us each",
+        positions.len(),
+        elapsed,
+        elapsed / positions.len() as f64 * 1e6
+    );
+
+    let mut out = std::io::BufWriter::new(std::fs::File::create(&args[2]).expect("output"));
+    let header = serde_json::json!({
+        "positions": positions.len(),
+        "monsPerSide": encoder.widths.mons_per_side,
+        "monWidth": encoder.widths.mon,
+        "sideWidth": encoder.widths.side,
+        "fieldWidth": encoder.widths.field,
+        "types": encoder.vocab.types,
+        "unknownVolatiles": encoded.unknown_volatiles,
+    });
+    writeln!(out, "{header}").expect("header");
+    for value in &encoded.species {
+        out.write_all(&value.to_le_bytes()).expect("species");
+    }
+    for value in &encoded.ability {
+        out.write_all(&value.to_le_bytes()).expect("ability");
+    }
+    for value in &encoded.item {
+        out.write_all(&value.to_le_bytes()).expect("item");
+    }
+    for value in &encoded.moves {
+        out.write_all(&value.to_le_bytes()).expect("moves");
+    }
+    for value in &encoded.mon {
+        out.write_all(&value.to_le_bytes()).expect("mon");
+    }
+    for value in &encoded.mask {
+        out.write_all(&value.to_le_bytes()).expect("mask");
+    }
+    for value in &encoded.side {
+        out.write_all(&value.to_le_bytes()).expect("side");
+    }
+    for value in &encoded.field {
+        out.write_all(&value.to_le_bytes()).expect("field");
     }
 }
 
@@ -57,6 +132,21 @@ fn node_main(args: &[String]) {
 // ---------------------------------------------------------------------------
 // The position model: does it survive a round trip through Rust unchanged?
 // ---------------------------------------------------------------------------
+
+/// A fixture is for one regulation and so is a `Reg`; comparing across two is comparing
+/// two different games. The damage differential has always checked this; the turn one did
+/// not, and was quietly holding an M-C build to an M-B fixture.
+fn require_same_format(doc: &Value, reg: &reg::Reg) {
+    let fixture = doc["format_id"].as_str().unwrap_or("");
+    if fixture != reg.format_id {
+        eprintln!(
+            "the fixture is for {fixture} but the regulation is {}; \
+             pass configs/regulations/{fixture}.json",
+            reg.format_id
+        );
+        std::process::exit(1);
+    }
+}
 
 fn roundtrip_main(args: &[String]) {
     let text = std::fs::read_to_string(&args[0]).expect("turns file");
@@ -143,6 +233,7 @@ fn turns_main(args: &[String]) {
     let doc: Value = serde_json::from_str(&text).expect("turns json");
     let repeats: u32 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(0);
 
+    require_same_format(&doc, &reg);
     let positions: Vec<position::Position> = doc["positions"]
         .as_array()
         .expect("positions")

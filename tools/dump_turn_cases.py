@@ -80,6 +80,20 @@ def main() -> None:
         "--stride", type=int, default=7, help="keep one call in this many, to spread the sample"
     )
     ap.add_argument("--roster", default="rizabanadohido")
+    ap.add_argument(
+        "--only-move",
+        default=None,
+        help="comma-separated move ids; keep only calls where one of them is a chosen "
+        "action, and keep every such call. For holding the port to moves it has just "
+        "learned, which a spread sample may contain none of.",
+    )
+    ap.add_argument(
+        "--value",
+        default=None,
+        help="play the games with a trained value function (data/models/*.pt). The games a "
+        "generation run actually plays are these, and they reach different positions.",
+    )
+    ap.add_argument("--device", default="cpu")
     ap.add_argument("--out", default="rust/turns.json")
     args = ap.parse_args()
 
@@ -90,6 +104,21 @@ def main() -> None:
     standings = load_standings(find_cached_standings(), reg)
     pool = standings.pool("all")
     selections = tuple(all_selections(reg.meta.team_size, reg.meta.picked_team_size))
+
+    if args.value:
+        import torch
+
+        from pokeuraou.encode import Encoder
+        from pokeuraou.value import BatchedValue, load_model
+
+        device = torch.device(args.device)
+        encoder = Encoder(reg)
+        net, _meta = load_model(Path(args.value), encoder)
+        objective = BatchedValue(net.to(device), encoder, device=device).objective("win")
+    else:
+        objective = OBJECTIVES["hp-share"]
+
+    wanted_moves = {m for m in (args.only_move or "").split(",") if m}
 
     positions: list[dict] = []
     position_index: dict[str, int] = {}
@@ -110,9 +139,18 @@ def main() -> None:
         nonlocal seen_cases
         result = real(reg_, pos, actions, budget=budget)
         seen_cases += 1
+        wanted = True
+        if wanted_moves:
+            wanted = any(
+                getattr(a, "move_id", None) in wanted_moves
+                for side in actions
+                for a in side.slots
+            )
         # Keep a spread across the run rather than the first N, which would all come from
-        # turn 1 of game 1 and hide everything the later turns reach.
-        if len(cases) < args.cases and seen_cases % max(1, args.stride) == 0:
+        # turn 1 of game 1 and hide everything the later turns reach. A move filter keeps
+        # every match instead: there are few of them and the point is to have any at all.
+        stride = 1 if wanted_moves else max(1, args.stride)
+        if wanted and len(cases) < args.cases and seen_cases % stride == 0:
             cases.append(
                 {
                     "position": intern(pos),
@@ -163,7 +201,7 @@ def main() -> None:
             [roster.sets[i] for i in own_pick],
             [foe_six[j] for j in foe_pick],
             "turn-dump",
-            objective=OBJECTIVES["hp-share"],
+            objective=objective,
             search_limit=args.limit,
             max_turns=args.max_turns,
         )

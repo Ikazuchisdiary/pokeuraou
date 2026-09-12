@@ -766,9 +766,6 @@ fn check_move_supported(reg: &Reg, move_id: &str) -> Result<(), String> {
     if mv.category == "Status" && !status_move_handled(move_id) {
         return Err(format!("status move: {move_id}"));
     }
-    if TWO_TURN_MOVES.iter().any(|(id, _)| *id == move_id) && move_id != "solarbeam" {
-        return Err(format!("two-turn move: {move_id}"));
-    }
     // Trick and Switcheroo swap items, which this port does not implement; Last Resort
     // reads which of its user's other moves have been used.
     if matches!(move_id, "lastresort" | "trick" | "switcheroo") {

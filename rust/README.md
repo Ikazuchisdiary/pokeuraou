@@ -8,7 +8,19 @@
 3 ゲーム / 種 77     python 59.1 s -> rust 2.5 s   24.0x   試合一致 3/3
 ```
 
-再現は `uv run python tools/diff_generation.py --games 3 --seed 5`。
+**学習済みの価値関数でも同じです。** `data/models/*.pt` を評価軸にした生成は
+GPU で **15〜17 倍**、CPU で順伝播しても **8〜10 倍**速くなり、
+対戦はやはり 1 バイトも変わりません。比が hp-share より小さいのは、
+解決器が速くなったあとに**残るのが torch** だからです。
+
+```
+6 ゲーム / 種 77  (cuda)  python 71.7 s -> rust 4.8 s   14.9x   試合一致 6/6
+4 ゲーム / 種 23  (cuda)  python 51.6 s -> rust 3.0 s   17.3x   試合一致 4/4
+2 ゲーム / 種 11  (cpu)   python 19.6 s -> rust 2.6 s    7.6x   試合一致 2/2
+```
+
+再現は `uv run python tools/diff_generation.py --games 3 --seed 5`、
+価値関数なら `--value data/models/value-gen234.pt` を足します。
 
 ## なぜ解決器だったのか
 
@@ -52,9 +64,13 @@ Python がオラクル、Showdown は Python のオラクル（`tools/diff_*.py`
 | 局面 JSON の往復 | 6,200 局面 | **全一致** |
 | 1 ターン解決（狭いサンプル） | 1,190 ターン | **1,190 一致 / 誤り 0 / 拒否 0** |
 | 1 ターン解決（広いサンプル） | 1,863 ターン | **1,863 一致 / 誤り 0 / 拒否 0** |
+| 1 ターン解決（二段技だけを集めた） | 3,495 ターン | **3,495 一致 / 誤り 0 / 拒否 0** |
+| 符号化（`encode.py` の 8 配列） | 9,730 局面 | **全配列ビット一致** |
 | ノード（行列）充填 | 25 ノード 12,192 セル | **拒否 0**、最大差 6.7e-16 |
+| ノード充填（学習済み価値関数 + 対照軸） | 10 ノード 9,696 セル | **拒否 0**、最大差 3.9e-16 |
 | 生成した対戦 | 9 ゲーム / 3 種 | **全て同一**（申告リスト含む） |
-| 既存のテスト一式（オラクル差分込み） | 338 件 | **全通過**（ブリッジの有無どちらでも） |
+| 生成した対戦（学習済み価値関数） | 12 ゲーム / 3 種 | **全て同一** |
+| 既存のテスト一式（オラクル差分込み） | 343 件 | **全通過**（ブリッジの有無どちらでも） |
 
 「一致」は分岐・確率・結果局面の全フィールド・**申告した未対応効果**まで含みます。
 最後の 1 つを比較していなかった時点で `noguard` の申告漏れが見つかったので、
@@ -99,7 +115,14 @@ CLI が印字する最下位桁より 12 桁下です。生成した対戦が完
 | `resolve_turn`（狭いサンプル） | 3482.9 us | 82.9 us | **42.0x** |
 | `resolve_turn`（広いサンプル） | 3378.3 us | 89.6 us | **37.7x** |
 | ノード充填（24x24、2 評価軸） | 56.0 s / 25 ノード | 1.4 s | **40.3x** |
+| ノード充填（学習済み価値関数 + 対照軸） | 20.7 s / 10 ノード | 2.2 s | **9.4x** |
+| 符号化（`encode.py`） | 66.1 us | 3.5 us | **18.9x** |
 | 生成（エンドツーエンド） | 1.1〜1.8 s/ターン | 0.056〜0.079 s/ターン | **19〜24x** |
+| 生成（学習済み価値関数・cuda） | 0.99〜1.05 s/ターン | 0.057〜0.071 s/ターン | **15〜17x** |
+| 生成（学習済み価値関数・cpu） | 1.11〜1.22 s/ターン | 0.115〜0.160 s/ターン | **8〜10x** |
+
+学習済み価値関数の比が小さいのは、解決器が速くなった後に**残るのが torch** だからです。
+順伝播と符号化の受け取りは Python 側の仕事で、そこは移植の対象ではありません。
 
 ## CLI の 1 局面：15.95 秒 → 2.38 秒
 
@@ -163,12 +186,29 @@ Python 側が自分の乱数生成器で 1 つ引き、その 1 局面だけを�
 これが「対戦がビット単位で同じ」を保つ仕組みです——
 `numpy.random.Generator.choice` が乱数列そのものなので、引く回数と引き方を変えられません。
 
-### 渡らないもの
+### 学習済み価値関数：渡るのは葉の「符号化」
 
-**学習した価値関数は渡りません。** 入力が葉そのもので、1 ノードの葉は数十 MB の JSON です。
-これを渡すには `encode.py` も移植して特徴ベクトルだけを渡す必要があります。
-今日の生成が `hp-share` で動いているのは、このレギュレーションにまだ学習済みモデルが
-無いからで、そこは移植の限界ではなく現状の設定です。
+パラメータ無しの評価軸（`hp-share`、`faints`）は Rust 側で計算され、**行列だけ**が帰ります。
+学習した価値関数はそれができません——**入力が葉そのもの**だからです。
+そこで境界の向きを変えて、葉を `encode.py` の配列にしてから渡します:
+
+| | 渡るもの | 1 ノードあたり |
+|---|---|---|
+| 局面 JSON を渡す（却下） | 葉の局面 | 約 2,000 × 15 KB + パース |
+| **符号化を渡す（採用）** | 8 本の配列 | 約 2,000 × 3.7 KB、パース無し |
+
+**順伝播は torch に残します。** float32 の行列演算をもう 1 つ実装すれば加算順序が変わり、
+勝率の下位桁が変われば利得が変わり、利得が変われば均衡が変わります。渡るのは入力だけです。
+`encode.rs` は `encode.py` の移植で、9,730 局面 × 8 配列を**ビット単位で**突合済み
+（`tools/diff_encode.py`）。速度は 3.5 us 対 66.1 us で **18.9x**。
+
+折り畳みは Python のままです。Rust が返すのは「葉」と「畳み方」——
+ふつうのセルは (開始位置, 重み列) の内積、途中で交代が入ったセルは `turn_leaves` が作る木
+（偶然は平均、交代は選ぶ側の最大）——で、`fold_value` はすでにある関数です。
+
+**対照軸も同じ往復に乗ります。** 解析は学習軸の隣にパラメータ無しの軸をもう 1 本置きますが、
+葉は向こうにあるので**そちらで葉ごとに採点して**値を一緒に返します。
+2 本目の列のためにノードごと帰すより安く、実測で 2.11 s 対 2.19 s（差はほぼ 0）。
 
 ## まだ Python にあるもの
 
@@ -182,6 +222,24 @@ Python 側が自分の乱数生成器で 1 つ引き、その 1 局面だけを�
 | LP | 0.15 | 6% |
 
 次に効くのは `narrow` で、これは Python のままです。
+
+### 拒否の残り（学習済み価値関数の生成、10 ゲーム 34,959 セル）
+
+| 理由 | セル数 |
+|---|---|
+| `ability: cursedbody` | 1,152 |
+| `status move: afteryou` | 666 |
+| **合計** | 1,818（**5.2%**） |
+
+拒否されたセルは Python が埋めるので答えは変わりませんが、**そのセルだけ速くありません**。
+学習済み価値関数ではもう 1 つ副作用があります——拒否されたセルの葉は、
+ノード全体とは別の小さな順伝播で採点されるので、float32 の行列演算が
+形に依存する分だけ値が動きます（実測 1e-8）。**移植の穴が数値にも出る**ということです。
+
+直前まで 1 位だったのは `two-turn move: electroshot` で、6 ゲーム 23,304 セルの 1.5% でした。
+Python は二段技を「溜めターンの能力上昇 → 天候で溜めを飛ばすか判定」だけでモデル化しており
+（無敵状態はどこにもありません）、移植も同じだけにしたところ 0 になりました。
+`tools/dump_turn_cases.py --only-move ...` で集めた 3,495 ターンで突合済みです。
 
 ## 走らせ方
 
@@ -198,9 +256,24 @@ cd rust && cargo build --release
 ./target/release/pokeuraou-damage roundtrip turns.json
 ./target/release/pokeuraou-damage turns     ../configs/regulations/gen9championsvgc2026regmc.json turns.json
 
+# 符号化の差分（学習済み価値関数を使うなら必須）
+./target/release/pokeuraou-damage encode ../configs/regulations/gen9championsvgc2026regmb.json turns.json encoded.bin
+uv run python tools/diff_encode.py rust/turns.json rust/encoded.bin
+
 # ノードと対戦の差分（こちらが実使用の形）
 POKEURAOU_RUST_NODE=1 uv run python tools/diff_node.py --games 2 --nodes 20
 uv run python tools/diff_generation.py --games 3 --seed 5
+
+# 学習済み価値関数で同じことをする
+POKEURAOU_RUST_NODE=1 uv run --group learn python tools/diff_node.py \
+    --games 2 --nodes 10 --value data/models/value-gen234.pt
+POKEURAOU_RUST_NODE=1 uv run --group learn python tools/diff_generation.py \
+    --games 6 --seed 77 --device cuda --value data/models/value-gen234.pt
+
+# 覚えたばかりの技だけを集めて突合する（普通のサンプルには 1 件も入らない）
+uv run python tools/dump_turn_cases.py --games 8 --seed 404 \
+    --only-move fly,dig,dive,bounce,phantomforce,shadowforce,skyattack,meteorbeam \
+    --out rust/turns-twoturn.json
 
 # 白リストの再生成（エンジンが効果を覚えたら必ず）
 uv run python tools/port_coverage.py --rust

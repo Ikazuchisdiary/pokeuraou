@@ -23,6 +23,8 @@ pub struct Request {
     pub theirs: Vec<Vec<SlotAction>>,
     pub budget: Budget,
     pub objectives: Vec<String>,
+    /// Return the encoder's arrays and a fold instead of payoffs, for a learned leaf.
+    pub encode: bool,
 }
 
 pub fn parse_request(value: &Value) -> Result<Request, String> {
@@ -37,12 +39,16 @@ pub fn parse_request(value: &Value) -> Result<Request, String> {
         .as_array()
         .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
         .unwrap_or_default();
+    let encode = value.get("encode").and_then(Value::as_bool).unwrap_or(false);
+    // An encoded node may still be asked for named objectives beside the learned leaf --
+    // the analyser runs one as a cross-check -- so the names are checked either way.
     for name in &objectives {
         if objective::by_name(name).is_none() {
             return Err(format!("objective not available in the port: {name}"));
         }
     }
     Ok(Request {
+        encode,
         position,
         ours: read("ours"),
         theirs: read("theirs"),
@@ -147,6 +153,7 @@ pub fn resolve_one(reg: &Reg, value: &Value) -> Value {
 
 /// JSONL over stdio: one request per line, one response per line.
 pub fn serve(reg: &Reg) {
+    let encoder = crate::encode::Encoder::new(reg);
     let stdin = std::io::stdin();
     let mut stdout = std::io::stdout();
     for line in stdin.lock().lines() {
@@ -167,6 +174,19 @@ pub fn serve(reg: &Reg) {
                                 request.position.format, reg.format_id
                             )
                         })
+                    } else if request.encode {
+                        // A header line, then the raw buffers on the same pipe.
+                        let (header, bytes) = crate::encoded_node::fill(reg, &encoder, &request);
+                        if writeln!(stdout, "{header}").is_err() {
+                            break;
+                        }
+                        if stdout.write_all(&bytes).is_err() {
+                            break;
+                        }
+                        if stdout.flush().is_err() {
+                            break;
+                        }
+                        continue;
                     } else {
                         fill(reg, &request)
                     }

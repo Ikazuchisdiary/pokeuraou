@@ -112,7 +112,6 @@ def write_modelled(regulation: str) -> None:
     from pokeuraou.damage import register_mega_stones
     from pokeuraou.effects import all_modelled_abilities, all_modelled_items
     from pokeuraou.regulation import load_regulation
-
     from pokeuraou.resolve import STATUS_MOVES_FULLY_MODELLED
 
     reg = load_regulation(regulation)

@@ -115,7 +115,10 @@ def main() -> None:
     items = {c["attacker"]["item"] for c in cases} | {c["defender"]["item"] for c in cases}
     print(f"\n{len(cases)} distinct cases -> {out}")
     print(f"  moves     {len({c['move'] for c in cases})}")
-    print(f"  species   {len({c['attacker']['species'] for c in cases} | {c['defender']['species'] for c in cases})}")
+    species = {c["attacker"]["species"] for c in cases} | {
+        c["defender"]["species"] for c in cases
+    }
+    print(f"  species   {len(species)}")
     print(f"  abilities {len(abilities)}")
     print(f"  items     {len(items - {None})}")
 
