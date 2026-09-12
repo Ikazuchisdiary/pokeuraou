@@ -440,10 +440,15 @@ fn stats_json(values: Option<[i64; 6]>, names: &[&str; 6]) -> Value {
 
 #[derive(Clone, Debug)]
 pub struct Side {
-    pub id: String,
-    pub name: String,
+    pub id: Rc<str>,
+    pub name: Rc<str>,
     pub active: Vec<Option<usize>>,
-    pub pokemon: Vec<Pokemon>,
+    /// Shared, not owned. A `Pokemon` is 928 bytes and a side holds six, so cloning a
+    /// position used to copy eleven kilobytes -- and the resolver clones one 44 times a
+    /// turn, which measured at 65% of its whole cost. A turn touches the two Pokemon that
+    /// are out; the rest are on the bench and identical in every branch. `Rc::make_mut`
+    /// copies one only when something writes to it while it is still shared.
+    pub pokemon: Vec<Rc<Pokemon>>,
     pub side_conditions: Vec<Effect>,
     pub slot_conditions: Vec<Vec<Effect>>,
     pub mega_used: bool,
@@ -453,19 +458,20 @@ pub struct Side {
 impl Side {
     pub fn from_json(value: &Value) -> Side {
         Side {
-            id: value["id"].as_str().unwrap_or_default().to_string(),
-            name: value
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or_else(|| value["id"].as_str().unwrap_or_default())
-                .to_string(),
+            id: Rc::from(value["id"].as_str().unwrap_or_default()),
+            name: Rc::from(
+                value
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_else(|| value["id"].as_str().unwrap_or_default()),
+            ),
             active: value["active"]
                 .as_array()
                 .map(|a| a.iter().map(|v| v.as_u64().map(|n| n as usize)).collect())
                 .unwrap_or_default(),
             pokemon: value["pokemon"]
                 .as_array()
-                .map(|a| a.iter().map(Pokemon::from_json).collect())
+                .map(|a| a.iter().map(|v| Rc::new(Pokemon::from_json(v))).collect())
                 .unwrap_or_default(),
             side_conditions: value
                 .get("sideConditions")
@@ -496,13 +502,13 @@ impl Side {
 
     pub fn to_json(&self) -> Value {
         json!({
-            "id": self.id,
-            "name": self.name,
+            "id": &*self.id,
+            "name": &*self.name,
             "active": self.active.iter().map(|s| match s {
                 None => Value::Null,
                 Some(v) => json!(v),
             }).collect::<Vec<_>>(),
-            "pokemon": self.pokemon.iter().map(Pokemon::to_json).collect::<Vec<_>>(),
+            "pokemon": self.pokemon.iter().map(|m| m.to_json()).collect::<Vec<_>>(),
             "sideConditions": self.side_conditions.iter().map(Effect::to_json).collect::<Vec<_>>(),
             "slotConditions": self.slot_conditions.iter()
                 .map(|g| g.iter().map(Effect::to_json).collect::<Vec<_>>())
@@ -521,7 +527,7 @@ impl Side {
     }
 
     pub fn active_pokemon(&self, slot: usize) -> Option<&Pokemon> {
-        self.active.get(slot).copied().flatten().map(|index| &self.pokemon[index])
+        self.active.get(slot).copied().flatten().map(|index| &*self.pokemon[index])
     }
 }
 
@@ -575,48 +581,75 @@ impl Field {
     }
 }
 
-#[derive(Clone, Debug)]
+/// How many positions have been cloned. The resolver's cost is largely this, and a
+/// counter is the only honest way to say how largely: an atomic increment beside an
+/// allocation is noise, and the alternative is guessing.
+pub static CLONES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+impl Clone for Position {
+    fn clone(&self) -> Position {
+        CLONES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Position {
+            format: self.format.clone(),
+            sides: self.sides.clone(),
+            turn: self.turn,
+            field: self.field.clone(),
+            request_state: self.request_state.clone(),
+            ended: self.ended,
+            winner: self.winner.clone(),
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct Position {
-    pub format: String,
-    pub sides: Vec<Side>,
+    /// `Rc<str>` rather than `String` throughout: none of these ever changes during a turn,
+    /// and cloning one used to be an allocation apiece. With the Pokemon shared the clone
+    /// became allocation-bound rather than copy-bound, and this is where the allocations
+    /// were. A refcount bump has no length limit, which `Id` would impose.
+    pub format: Rc<str>,
+    /// Exactly two, which is what a battle has. A `Vec` here was one more allocation per
+    /// clone for a length that is never anything else.
+    pub sides: [Side; 2],
     pub turn: i64,
     pub field: Field,
-    pub request_state: String,
+    pub request_state: Rc<str>,
     pub ended: bool,
-    pub winner: Option<String>,
+    pub winner: Option<Rc<str>>,
 }
 
 impl Position {
     pub fn from_json(value: &Value) -> Position {
         Position {
-            format: value["format"].as_str().unwrap_or_default().to_string(),
-            sides: value["sides"]
-                .as_array()
-                .map(|a| a.iter().map(Side::from_json).collect())
-                .unwrap_or_default(),
+            format: Rc::from(value["format"].as_str().unwrap_or_default()),
+            sides: {
+                let listed = value["sides"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+                if listed.len() != 2 {
+                    panic!("a position has two sides, not {}", listed.len());
+                }
+                [Side::from_json(&listed[0]), Side::from_json(&listed[1])]
+            },
             turn: value.get("turn").and_then(Value::as_i64).unwrap_or(1),
             field: value.get("field").map(Field::from_json).unwrap_or_default(),
-            request_state: value
-                .get("requestState")
-                .and_then(Value::as_str)
-                .unwrap_or("move")
-                .to_string(),
+            request_state: Rc::from(
+                value.get("requestState").and_then(Value::as_str).unwrap_or("move"),
+            ),
             ended: value.get("ended").and_then(Value::as_bool).unwrap_or(false),
-            winner: value.get("winner").and_then(Value::as_str).map(String::from),
+            winner: value.get("winner").and_then(Value::as_str).map(Rc::from),
         }
     }
 
     pub fn to_json(&self) -> Value {
         json!({
-            "format": self.format,
+            "format": &*self.format,
             "turn": self.turn,
             "field": self.field.to_json(),
             "sides": self.sides.iter().map(Side::to_json).collect::<Vec<_>>(),
-            "requestState": self.request_state,
+            "requestState": &*self.request_state,
             "ended": self.ended,
             "winner": match &self.winner {
                 None => Value::Null,
-                Some(w) => json!(w),
+                Some(w) => json!(&**w),
             },
         })
     }
@@ -627,6 +660,6 @@ impl Position {
 
     pub fn mon_at_mut(&mut self, side: usize, slot: usize) -> Option<&mut Pokemon> {
         let index = (*self.sides.get(side)?).active.get(slot).copied().flatten()?;
-        Some(&mut self.sides[side].pokemon[index])
+        Some(Rc::make_mut(&mut self.sides[side].pokemon[index]))
     }
 }

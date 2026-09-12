@@ -116,7 +116,7 @@ pub fn fill(reg: &Reg, request: &Request) -> Value {
 /// turn against the thirty kilobytes this costs.
 pub fn resolve_one(reg: &Reg, value: &Value) -> Value {
     let position = Position::from_json(&value["position"]);
-    if position.format != reg.format_id {
+    if &*position.format != reg.format_id.as_str() {
         return json!({ "refused": "position is for another regulation" });
     }
     let actions_value = &value["actions"];
@@ -167,7 +167,7 @@ pub fn serve(reg: &Reg) {
             Ok(value) => match parse_request(&value) {
                 Err(reason) => json!({ "error": reason }),
                 Ok(request) => {
-                    if request.position.format != reg.format_id {
+                    if &*request.position.format != reg.format_id.as_str() {
                         json!({
                             "error": format!(
                                 "position is {} but the regulation is {}",

@@ -38,6 +38,7 @@ fn main() {
         Some("turns") => turns_main(&args[2..]),
         Some("node") => node_main(&args[2..]),
         Some("encode") => encode_main(&args[2..]),
+        Some("clones") => clones_main(&args[2..]),
         _ => {
             eprintln!(
                 "usage:\n  {0} damage <regulation.json> <cases.json> [repeats]\n  \
@@ -146,6 +147,47 @@ fn require_same_format(doc: &Value, reg: &reg::Reg) {
         );
         std::process::exit(1);
     }
+}
+
+/// How long does cloning a position take?
+///
+/// The resolver clones one per branch and per action, and a `Position` owns a String and a
+/// dozen Vecs, so a clone is tens of allocations on an allocator nobody chose. Whether that
+/// is worth restructuring for is a measurement, not an opinion -- this is the measurement.
+fn clones_main(args: &[String]) {
+    let text = std::fs::read_to_string(&args[0]).expect("turns file");
+    let doc: Value = serde_json::from_str(&text).expect("turns json");
+    let positions: Vec<position::Position> = doc["positions"]
+        .as_array()
+        .expect("positions")
+        .iter()
+        .map(position::Position::from_json)
+        .collect();
+    let repeats: usize = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(200);
+    println!(
+        "sizes: Position {} B, Side {} B, Pokemon {} B, Effect {} B, MoveSlot {} B",
+        std::mem::size_of::<position::Position>(),
+        std::mem::size_of::<position::Side>(),
+        std::mem::size_of::<position::Pokemon>(),
+        std::mem::size_of::<position::Effect>(),
+        std::mem::size_of::<position::MoveSlot>(),
+    );
+
+    let started = std::time::Instant::now();
+    let mut sink = 0usize;
+    for _ in 0..repeats {
+        for position in &positions {
+            let copy = position.clone();
+            sink += copy.sides.len() + copy.turn as usize;
+            std::hint::black_box(&copy);
+        }
+    }
+    let elapsed = started.elapsed().as_secs_f64();
+    let count = repeats * positions.len();
+    println!(
+        "clones: {count} in {elapsed:.3} s = {:.3} us each [sink {sink}]",
+        elapsed / count as f64 * 1e6
+    );
 }
 
 fn roundtrip_main(args: &[String]) {
@@ -347,6 +389,10 @@ fn turns_main(args: &[String]) {
             elapsed / calls * 1e6,
             calls / elapsed
         );
+        let clones = position::CLONES.load(std::sync::atomic::Ordering::Relaxed) as f64;
+        println!("  position clones: {clones:.0} = {:.1} per turn", clones / calls);
+        let hits = damage::CALLS.load(std::sync::atomic::Ordering::Relaxed) as f64;
+        println!("  damage calls:    {hits:.0} = {:.1} per turn", hits / calls);
     }
 }
 

@@ -22,6 +22,8 @@ use crate::id::Id;
 use crate::moveinfo::MoveContext;
 use crate::position::{boost_index, Effect, Pokemon, Position, Types, BOOST_IDS};
 use crate::reg::{Move, Reg};
+use std::rc::Rc;
+
 use crate::speed::{
     effective_speed, fractional_priority, move_priority, order_actions, ActionKind, QueuedAction,
     ORDER_MEGA, ORDER_MOVE, ORDER_SWITCH,
@@ -1455,7 +1457,8 @@ fn do_switch_with(
             turn.heal(action.side, action.slot, amount);
         }
         {
-            let leaving = &mut turn.pos.sides[action.side].pokemon[leaving_index];
+            let leaving =
+                Rc::make_mut(&mut turn.pos.sides[action.side].pokemon[leaving_index]);
             leaving.active_index = None;
             leaving.boosts = [0; 7];
             leaving.volatiles.clear();
@@ -1473,13 +1476,13 @@ fn do_switch_with(
         // Swap party positions, as `BattleActions#switchIn` does.
         let vacated = turn.pos.sides[action.side].pokemon[incoming_index].slot;
         turn.pos.sides[action.side].pokemon.swap(incoming_index, leaving_index);
-        turn.pos.sides[action.side].pokemon[action.slot].slot = action.slot;
-        turn.pos.sides[action.side].pokemon[vacated].slot = vacated;
+        Rc::make_mut(&mut turn.pos.sides[action.side].pokemon[action.slot]).slot = action.slot;
+        Rc::make_mut(&mut turn.pos.sides[action.side].pokemon[vacated]).slot = vacated;
     }
     turn.pos.sides[action.side].active[action.slot] = Some(action.slot);
 
     {
-        let incoming = &mut turn.pos.sides[action.side].pokemon[action.slot];
+        let incoming = Rc::make_mut(&mut turn.pos.sides[action.side].pokemon[action.slot]);
         incoming.active_index = Some(action.slot);
         incoming.newly_switched = true;
         incoming.active_move_actions = 0;
@@ -1531,6 +1534,7 @@ fn replacement_options(
     let bench: Vec<&Pokemon> = side
         .pokemon
         .iter()
+        .map(|mon| &**mon)
         .filter(|mon| !mon.fainted && !mon.is_active())
         .collect();
     let owed_count = owed.iter().filter(|needed| **needed).count();

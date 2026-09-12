@@ -311,6 +311,10 @@ fn apply_weather_damage(base: i64, weather: Option<Id>, move_type: &str) -> i64 
     base
 }
 
+/// How many damage calculations have been made. Counted for the same reason position
+/// clones are: the resolver's cost has to be attributed, not guessed at.
+pub static CALLS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 #[allow(clippy::too_many_arguments)]
 pub fn calculate(
     reg: &Reg,
@@ -325,6 +329,7 @@ pub fn calculate(
     base_power_override: Option<i64>,
     attacker_is_defender: bool,
 ) -> DamageResult {
+    CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mv = &reg.moves[move_id];
     let owned_ctx;
     let ctx_move = match move_ctx {
