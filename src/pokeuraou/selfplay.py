@@ -322,6 +322,7 @@ def play_game(
     depth: int | tuple[int, int] = 1,
     rank_by_leaf: bool | tuple[bool, bool] = False,
     solve_sparsely: bool | tuple[bool, bool] = False,
+    start: Position | None = None,
 ) -> GameRecord:
     """Plays one game to a result, sampling both sides from the turn's equilibrium.
 
@@ -332,6 +333,14 @@ def play_game(
     ``depth`` takes a pair for the same reason, and it is how depth-2 is measured against
     depth-1: one side looks a ply further and the win rate says what that bought. Depth 1
     on both sides is the search this project has always had.
+
+    ``start`` resumes from a position instead of building one from the two teams, which is
+    how a phase that self-play rarely reaches gets sampled. Games average 9.4 turns and
+    only 5.4% of them reach turn 15, so a value function sees the endgame -- where a stall
+    plan finally pays -- in one position in twenty. Resuming from recorded turn-12
+    positions and playing them out produces real outcomes in that phase without waiting
+    for self-play to arrive there on its own. The label stays sound because the game is
+    still played to a win or a loss; what changes is which positions get labelled.
 
     ``solve_sparsely`` takes a pair too, and it is the one whose two values are supposed
     to be *equally correct*: both settle on an equilibrium of the same game, verified to
@@ -364,7 +373,7 @@ def play_game(
         record.foe_six = list(foe_six)
         record.own_pick = list(own_pick)
         record.foe_pick = list(foe_pick)
-    pos = position_from_sets(reg, own, foe)
+    pos = start if start is not None else position_from_sets(reg, own, foe)
     budget = Budget.matrix()
 
     for _step in range(max_turns * 2):
