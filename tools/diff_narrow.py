@@ -102,8 +102,8 @@ def main() -> None:
     selections = tuple(all_selections(reg.meta.team_size, reg.meta.picked_team_size))
 
     positions = collect_positions(reg, roster, prior, pool, selections, args)
-    if not rustnode.binary_path().exists():
-        raise SystemExit(f"no Rust binary at {rustnode.binary_path()}; build it first")
+    build = rustnode.require_current_binary()
+    print(f"binary {build['sha256']} built {build['built']}")
 
     checked = candidates = identical = 0
     worst = 0.0

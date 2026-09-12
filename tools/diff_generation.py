@@ -156,8 +156,8 @@ def main() -> None:
             )
         return records, time.perf_counter() - started, turns
 
-    if not rustnode.binary_path().exists():
-        raise SystemExit(f"no Rust binary at {rustnode.binary_path()}; build it first")
+    build = rustnode.require_current_binary()
+    print(f"binary {build['sha256']} built {build['built']}")
 
     python_records, python_seconds, turns = run(False)
     rust_records, rust_seconds, rust_turns = run(True)

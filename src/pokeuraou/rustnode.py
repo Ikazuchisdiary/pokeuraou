@@ -25,6 +25,7 @@ so a caller can fall back silently rather than fail a run that was working.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import os
 import subprocess
@@ -33,6 +34,7 @@ import tempfile
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -61,6 +63,69 @@ def binary_path() -> Path:
 
 #: Set once the bridge has failed, so a broken one is not retried for every node.
 _GAVE_UP = False
+
+
+def binary_fingerprint() -> dict[str, Any]:
+    """What the binary *is*, for a record that has to mean the code that ran.
+
+    A differential that only checks the binary exists can pass against a build from before
+    the change it is meant to check. Hashing the sources would not help: the games are
+    played by the executable, and between an edit and a `cargo build` the two disagree.
+    So this hashes the executable.
+    """
+    path = binary_path()
+    if not path.exists():
+        return {"path": str(path), "present": False}
+    raw = path.read_bytes()
+    return {
+        "path": str(path),
+        "present": True,
+        "bytes": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest()[:16],
+        "built": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
+    }
+
+
+def sources_newer_than_binary() -> list[str]:
+    """Rust sources edited since the binary was built, newest first.
+
+    Empty when the binary is current, when it cannot be told (`POKEURAOU_RUST_NODE_BIN`
+    points somewhere of the caller's choosing), or when there is no binary at all -- the
+    caller has a better message for that one.
+    """
+    path = binary_path()
+    if os.environ.get(ENV_BINARY) or not path.exists():
+        return []
+    built = path.stat().st_mtime
+    sources = sorted(
+        (p for p in (repo_root() / "rust" / "src").glob("*.rs") if p.stat().st_mtime > built),
+        key=lambda p: -p.stat().st_mtime,
+    )
+    manifest = repo_root() / "rust" / "Cargo.toml"
+    if manifest.exists() and manifest.stat().st_mtime > built:
+        sources.append(manifest)
+    return [p.name for p in sources]
+
+
+def require_current_binary() -> dict[str, Any]:
+    """The fingerprint, refusing if the binary is older than the sources.
+
+    For the differentials. Holding a build to a fixture and reporting "0 wrong" is a
+    statement about whatever was compiled, and saying it about code that has not been
+    compiled yet is the failure the differential exists to catch, wearing its face.
+    """
+    path = binary_path()
+    if not path.exists():
+        raise SystemExit(f"no Rust binary at {path}; `cd rust && cargo build --release`")
+    stale = sources_newer_than_binary()
+    if stale:
+        listed = ", ".join(stale[:4]) + ("..." if len(stale) > 4 else "")
+        raise SystemExit(
+            f"{path.name} was built before {listed} changed. A differential against a "
+            "stale binary says nothing about the code you edited; "
+            "`cd rust && cargo build --release` first."
+        )
+    return binary_fingerprint()
 
 
 def enabled() -> bool:

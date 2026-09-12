@@ -148,8 +148,8 @@ def main() -> None:
         evaluators = [OBJECTIVES[name].batch for name in names]
 
     positions = collect_positions(reg, roster, prior, pool, selections, args)
-    if not rustnode.binary_path().exists():
-        raise SystemExit(f"no Rust binary at {rustnode.binary_path()}; build it first")
+    build = rustnode.require_current_binary()
+    print(f"binary {build['sha256']} built {build['built']}")
 
     # A refused cell is filled by Python, and for a learned leaf that means its leaves are
     # scored in a forward pass of their own rather than with the rest of the node. float32
