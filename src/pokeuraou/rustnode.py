@@ -244,8 +244,9 @@ def reset() -> None:
     For a caller that is turning the bridge on and off deliberately -- a test, or a tool
     timing both paths. It is not the same as giving up on a broken one.
     """
-    global _GAVE_UP
+    global _GAVE_UP, _RESTARTS
     _GAVE_UP = False
+    _RESTARTS = 0
     for key in list(_NODES):
         node = _NODES.pop(key)
         if node is None:
@@ -254,16 +255,35 @@ def reset() -> None:
             node.close()
 
 
-def disable(reason: str) -> None:
-    """Stops using the bridge for the rest of this process, and says why.
+#: How many times a failure may be answered by starting a fresh process before the bridge
+#: is given up on for good.
+#:
+#: One failure used to end it: the process fell back to Python and stayed there, at a
+#: twentieth of the speed, for however many games were left. Two generation workers hit
+#: that and did not finish. A node process holds no state between requests -- the
+#: regulation is loaded from a file and every request carries its own position -- so
+#: starting another one costs a second and loses nothing.
+RESTARTS_ALLOWED = int(os.environ.get("POKEURAOU_RUST_NODE_RESTARTS", "3"))
 
-    A bridge that failed once is not retried for every node afterwards: the failure is
-    named, the run continues in Python, and it continues at Python's speed rather than
-    paying a broken subprocess per node on top.
+_RESTARTS = 0
+
+
+def disable(reason: str) -> None:
+    """Answers a failed bridge with a fresh process, or gives up if that keeps happening.
+
+    Giving up is still the end state -- a broken bridge must not cost a subprocess per
+    node on top of Python's own time -- but it is no longer the first move.
     """
-    global _GAVE_UP
-    print(f"[rustnode] falling back to Python: {reason}", file=sys.stderr)
+    global _GAVE_UP, _RESTARTS
     reset()
+    if _RESTARTS < RESTARTS_ALLOWED:
+        _RESTARTS += 1
+        print(
+            f"[rustnode] restarting the node ({_RESTARTS} of {RESTARTS_ALLOWED}): {reason}",
+            file=sys.stderr,
+        )
+        return
+    print(f"[rustnode] falling back to Python: {reason}", file=sys.stderr)
     _GAVE_UP = True
 
 

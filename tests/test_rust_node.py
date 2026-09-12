@@ -222,6 +222,34 @@ def test_a_menu_scored_from_beliefs_stays_here(bridged: None) -> None:
     assert _bridged_scores(reg, pos, 0, [c.action for c in without.kept]) is not None
 
 
+def test_a_node_that_dies_is_replaced_rather_than_given_up_on(bridged: None) -> None:
+    """One failure used to end the bridge for the whole process.
+
+    It fell back to Python and stayed there, at a twentieth of the speed, for however many
+    games were left -- and a generation run lost two workers to exactly that. A node
+    process holds nothing between requests, so the answer to one dying is another one.
+    """
+    reg, pos, row, col = _node()
+    evaluators = [OBJECTIVES["hp-share"].batch]
+    before, _notes, _exact = batched_payoffs(
+        reg, pos, row, col, evaluators, budget=Budget.matrix()
+    )
+
+    node = rustnode.node_for(reg)
+    assert node is not None
+    node._process.kill()  # noqa: SLF001 - the failure a generation run saw
+
+    after, _n2, _e2 = batched_payoffs(reg, pos, row, col, evaluators, budget=Budget.matrix())
+    assert np.allclose(np.asarray(after[0]), np.asarray(before[0])), "the answer changed"
+    assert rustnode.available(), "one failure gave up on the bridge"
+
+    # And the next node goes through the port again rather than through Python.
+    replacement = rustnode.node_for(reg)
+    assert replacement is not None
+    filled = replacement.fill(pos, row, col, ["hp-share"], Budget.matrix())
+    assert not filled.refused
+
+
 def test_an_impossible_position_is_refused(bridged: None) -> None:
     """A position Python's own validator rejects must not be answered, only refused.
 

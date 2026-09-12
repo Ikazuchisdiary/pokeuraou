@@ -21,6 +21,7 @@ use crate::reg::Reg;
 use crate::resolve::{resolve_turn, resume_alternatives, Suspended, TurnResult};
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
+use std::io::Write;
 
 /// What one cell contributes: leaves, and how to fold their values back into a number.
 enum Cell {
@@ -152,7 +153,12 @@ impl<'a> Collector<'a> {
 }
 
 /// Fills a node as leaves plus a fold, and encodes the leaves.
-pub fn fill(reg: &Reg, encoder: &Encoder, request: &Request) -> (Value, Vec<u8>) {
+///
+/// Returns the header, the encoded arrays and the per-leaf objective values; `write_body`
+/// puts the last two on the wire. They are not packed into one buffer here because that
+/// buffer is the largest allocation this process makes and it is a copy of what it is
+/// built from.
+pub fn fill(reg: &Reg, encoder: &Encoder, request: &Request) -> (Value, Encoded, Vec<f64>) {
     let rows = request.ours.len();
     let cols = request.theirs.len();
     let mut exact = vec![vec![false; cols]; rows];
@@ -215,18 +221,17 @@ pub fn fill(reg: &Reg, encoder: &Encoder, request: &Request) -> (Value, Vec<u8>)
     let borrowed: Vec<&Position> = collector.leaves.iter().collect();
     let encoded = encoder.encode_positions(&borrowed);
     let encode_us = encode_started.elapsed().as_secs_f64() * 1e6;
-    let mut bytes = pack(&encoded);
 
     // A node can want both: the learned leaf, and a parameter-free objective beside it as
     // a cross-check. The leaves are here and these are cheap, so they go back per leaf and
     // fold through the same spans rather than sending the whole node back for the sake of
     // the second column.
+    let mut leaf_values: Vec<f64> = Vec::new();
     for name in &request.objectives {
         let score = crate::objective::by_name(name).expect("the request was checked");
-        for position in &collector.leaves {
-            bytes.extend_from_slice(&score(position).to_le_bytes());
-        }
+        leaf_values.extend(collector.leaves.iter().map(score));
     }
+    let body_bytes = packed_len(&encoded) + leaf_values.len() * 8;
 
     let mut spans: Vec<Value> = Vec::new();
     let mut folded: Vec<Value> = Vec::new();
@@ -252,11 +257,59 @@ pub fn fill(reg: &Reg, encoder: &Encoder, request: &Request) -> (Value, Vec<u8>)
         "monWidth": encoder.widths.mon,
         "sideWidth": encoder.widths.side,
         "fieldWidth": encoder.widths.field,
-        "bytes": bytes.len(),
+        "bytes": body_bytes,
         "resolveUs": resolve_us,
         "encodeUs": encode_us,
     });
-    (header, bytes)
+    (header, encoded, leaf_values)
+}
+
+/// How many bytes `write_body` will write for the arrays, without building them.
+fn packed_len(encoded: &Encoded) -> usize {
+    (encoded.species.len() + encoded.ability.len() + encoded.item.len() + encoded.moves.len())
+        * 4
+        + (encoded.mon.len() + encoded.mask.len() + encoded.side.len() + encoded.field.len())
+            * 4
+}
+
+/// Writes the buffers straight out, in the order the reader expects, little-endian.
+///
+/// Streamed rather than packed into a `Vec` first. A width-48 node is 40 to 60 MB, and
+/// building that beside the arrays it is copied from doubled the peak for the largest
+/// thing this process ever holds -- on a machine running fourteen of these, next to
+/// fourteen Python workers holding a gigabyte each. The reusable window is 64 KB.
+pub fn write_body<W: Write>(
+    out: &mut W,
+    encoded: &Encoded,
+    leaf_values: &[f64],
+) -> std::io::Result<()> {
+    const WINDOW: usize = 1 << 16;
+    let mut buffer: Vec<u8> = Vec::with_capacity(WINDOW + 8);
+
+    macro_rules! stream {
+        ($values:expr) => {
+            for value in $values {
+                buffer.extend_from_slice(&value.to_le_bytes());
+                if buffer.len() >= WINDOW {
+                    out.write_all(&buffer)?;
+                    buffer.clear();
+                }
+            }
+        };
+    }
+    stream!(&encoded.species);
+    stream!(&encoded.ability);
+    stream!(&encoded.item);
+    stream!(&encoded.moves);
+    stream!(&encoded.mon);
+    stream!(&encoded.mask);
+    stream!(&encoded.side);
+    stream!(&encoded.field);
+    stream!(leaf_values);
+    if !buffer.is_empty() {
+        out.write_all(&buffer)?;
+    }
+    Ok(())
 }
 
 /// The buffers in the order the reader expects, little-endian.

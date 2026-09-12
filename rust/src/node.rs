@@ -197,44 +197,67 @@ pub fn serve(reg: &Reg) {
         if line.trim().is_empty() {
             continue;
         }
-        let response = match serde_json::from_str::<Value>(&line) {
-            Err(error) => json!({ "error": error.to_string() }),
-            Ok(value) if value["kind"].as_str() == Some("resolve") => resolve_one(reg, &value),
-            Ok(value) if value["kind"].as_str() == Some("score") => score_pool(reg, &value),
-            Ok(value) => match parse_request(&value) {
-                Err(reason) => json!({ "error": reason }),
-                Ok(request) => {
-                    if &*request.position.format != reg.format_id.as_str() {
-                        json!({
-                            "error": format!(
-                                "position is {} but the regulation is {}",
-                                request.position.format, reg.format_id
-                            )
-                        })
-                    } else if request.encode {
-                        // A header line, then the raw buffers on the same pipe.
-                        let (header, bytes) = crate::encoded_node::fill(reg, &encoder, &request);
-                        if writeln!(stdout, "{header}").is_err() {
-                            break;
-                        }
-                        if stdout.write_all(&bytes).is_err() {
-                            break;
-                        }
-                        if stdout.flush().is_err() {
-                            break;
-                        }
-                        continue;
-                    } else {
-                        fill(reg, &request)
-                    }
+        // A panic answering one node must not cost the caller the rest of the run. The
+        // node it panicked on is refused, which the caller already knows how to fill in
+        // Python, and the process stays up. Two generation workers lost a thousand games
+        // each to a failure that took the bridge down for good.
+        let answered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            answer(reg, &encoder, &line, &mut stdout)
+        }));
+        match answered {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                // Loudly. Every one of these used to be a bare `break`, so the process
+                // exited cleanly with nothing on stderr and the caller was left holding
+                // "the Rust node sent 0 of 64219920 bytes:" with no reason after the colon.
+                eprintln!("node: the pipe failed ({error}); stopping");
+                break;
+            }
+            Err(_) => {
+                // `catch_unwind` has already printed the panic and where it came from.
+                let refusal = json!({ "refused": "the port panicked on this node" });
+                if writeln!(stdout, "{refusal}").and_then(|()| stdout.flush()).is_err() {
+                    break;
                 }
-            },
-        };
-        if writeln!(stdout, "{response}").is_err() {
-            break;
-        }
-        if stdout.flush().is_err() {
-            break;
+            }
         }
     }
+}
+
+/// Answers one request onto `stdout`. `Err` means the pipe is gone and serving is over.
+fn answer<W: Write>(
+    reg: &Reg,
+    encoder: &crate::encode::Encoder,
+    line: &str,
+    stdout: &mut W,
+) -> std::io::Result<()> {
+    let response = match serde_json::from_str::<Value>(line) {
+        Err(error) => json!({ "error": error.to_string() }),
+        Ok(value) if value["kind"].as_str() == Some("resolve") => resolve_one(reg, &value),
+        Ok(value) if value["kind"].as_str() == Some("score") => score_pool(reg, &value),
+        Ok(value) => match parse_request(&value) {
+            Err(reason) => json!({ "error": reason }),
+            Ok(request) => {
+                if &*request.position.format != reg.format_id.as_str() {
+                    json!({
+                        "error": format!(
+                            "position is {} but the regulation is {}",
+                            request.position.format, reg.format_id
+                        )
+                    })
+                } else if request.encode {
+                    // A header line, then the raw buffers on the same pipe.
+                    let (header, encoded, leaf_values) =
+                        crate::encoded_node::fill(reg, encoder, &request);
+                    writeln!(stdout, "{header}")?;
+                    crate::encoded_node::write_body(stdout, &encoded, &leaf_values)?;
+                    return stdout.flush();
+                } else {
+                    fill(reg, &request)
+                }
+            }
+        },
+    };
+    writeln!(stdout, "{response}")?;
+    stdout.flush()
 }
