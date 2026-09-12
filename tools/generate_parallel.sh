@@ -43,6 +43,16 @@ MIRROR_SHARE="${MIRROR_SHARE:-0.1}"
 # disagreement is measured: the menu drops the leaf's preferred reply in 37% of decisions,
 # playing the dropped one instead is worth +14.3 points where they disagree, and the wider
 # menu that contains them wins whole games by +5.5. Costs about 1.4x per decision.
+# The Rust node fills the payoff matrix and encodes the leaves; only the forward pass
+# stays in torch. Measured here, identical games either way, learned leaf at width 24:
+# 8.33 s/game in Python, 0.84 with the node on the CPU, 0.51 on the GPU.
+#
+# `DEVICE` matters now in a way it did not before. The comment above about the GPU having
+# nothing to win was true when it was written: with the resolver and the encoder in Python
+# the forward pass was 1.3% of a game. With both of those in Rust it is most of what is
+# left, and the balance turns over.
+RUST_NODE="${RUST_NODE:-0}"
+DEVICE="${DEVICE:-cpu}"
 RANK_LEAF="${RANK_LEAF:-0}"
 rank_args=()
 if [ "$RANK_LEAF" != "0" ]; then
@@ -56,7 +66,12 @@ fi
 mkdir -p "$OUT_DIR" "$OUT_DIR/logs"
 
 echo "generation: $WORKERS workers x $GAMES_PER_WORKER games -> $OUT_DIR"
-echo "  leaf: $VALUE (cpu, 1 torch thread), search limit $LIMIT"
+echo "  leaf: $VALUE ($DEVICE, 1 torch thread), search limit $LIMIT"
+if [ "$RUST_NODE" != "0" ]; then
+	echo "  node: the Rust port (POKEURAOU_RUST_NODE=1)"
+else
+	echo "  node: Python"
+fi
 if [ -n "$BOOK" ]; then
 	echo "  selection: $BOOK (eps=$EPSILON, T=$TEMPERATURE) -- both sides drawn from the equilibrium"
 else
@@ -74,13 +89,13 @@ started=$(date +%s)
 pids=()
 for i in $(seq 0 $((WORKERS - 1))); do
 	seed=$((FIRST_SEED + i))
-	uv run --group learn python tools/selfplay.py \
+	POKEURAOU_RUST_NODE="$RUST_NODE" uv run --group learn python tools/selfplay.py \
 		--games "$GAMES_PER_WORKER" \
 		--seed "$seed" \
 		--limit "$LIMIT" \
 		--opponents worlds \
 		--value "$VALUE" \
-		--device cpu \
+		--device "$DEVICE" \
 		--torch-threads 1 \
 		--mirror-share "$MIRROR_SHARE" \
 		"${rank_args[@]}" \
