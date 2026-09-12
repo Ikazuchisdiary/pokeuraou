@@ -108,6 +108,7 @@ def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict
     provenances: Counter[str] = Counter()
     engines: Counter[str] = Counter()
     objectives: Counter[str] = Counter()
+    selections: Counter[str] = Counter()
     unknown: Counter[str] = Counter()
     game_id = 0
     started = time.perf_counter()
@@ -151,6 +152,7 @@ def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict
                 provenances[kind] += 1
                 search_limits[str(record.get("searchLimit"))] += 1
                 objectives[str(record.get("searchObjective"))] += 1
+                selections[str(record.get("selectionSource", "uniform"))] += 1
                 engine = record.get("engine") or {}
                 engines[str(engine.get("sources", "unrecorded"))] += 1
                 label = record.get("foeArchetype", "?")
@@ -220,6 +222,12 @@ def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict
         # target. The TD target refuses a pool that mixes the two, and this is how it
         # knows.
         "objectives": dict(objectives),
+        # How the four of six were chosen. The axis that separates generation 8 from
+        # every generation before it, and the one a pooled dataset would otherwise lose:
+        # drawing the selection from the cached equilibrium instead of uniformly is worth
+        # +18.9 points, so "how much of this pool is book-selected" is a question about
+        # the data's quality, not its bookkeeping.
+        "selections": dict(selections),
         # How many actions each decision offered. Kept in the shard because it is a
         # property of the games, not of the arrays, and re-deriving it would mean
         # re-reading the JSON that the shard exists to avoid re-reading.
@@ -285,6 +293,7 @@ def main() -> None:
     provenances = merged("provenances")
     engines = merged("engines")
     objectives = merged("objectives")
+    selections = merged("selections")
     unknown = Counter(dataset.encoded.unknown_volatiles)
 
     print(f"\n{total_games:,} finished games, {len(dataset):,} decisions")
@@ -293,6 +302,7 @@ def main() -> None:
     print(f"  games by provenance: {provenances}")
     print(f"  games by engine build: {engines}")
     print(f"  games by generating leaf: {objectives}")
+    print(f"  games by selection rule: {selections}")
     branching = merged("branching")
     total = sum(branching.values())
     if total:
@@ -326,6 +336,7 @@ def main() -> None:
                 "provenances": provenances,
                 "engines": engines,
                 "objectives": objectives,
+                "selections": selections,
             },
         )
     size = out.stat().st_size / 1e6
