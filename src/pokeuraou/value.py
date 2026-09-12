@@ -28,6 +28,8 @@ job is the early game, and a single average hides whether it was done.
 from __future__ import annotations
 
 import json
+from collections import Counter
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -249,6 +251,78 @@ class Dataset:
             "side": torch.from_numpy(np.ascontiguousarray(e.side[index])).to(device),
             "field": torch.from_numpy(np.ascontiguousarray(e.field[index])).to(device),
         }
+
+
+def concat_datasets(parts: Sequence[Dataset]) -> Dataset:
+    """Joins per-generation shards into one dataset.
+
+    Two index spaces are local to a shard and have to be rebuilt, or the join is silently
+    wrong rather than loudly wrong:
+
+    * ``game`` numbers restart at zero in every shard. Left alone, generation 6's game 12
+      and generation 7's game 12 would be one game, and :meth:`Dataset.split_by_game`
+      would put half of each on both sides of the validation split -- the exact leak that
+      splitting by game exists to prevent.
+    * ``foe`` indexes into that shard's ``foe_names``, so the same number means different
+      opponents in different shards.
+
+    ``hp_share`` is refused rather than zero-filled when a shard predates it. A zero there
+    reads as "the opponent has everything", and it would go straight into the baseline
+    this project measures the value function against.
+    """
+    if not parts:
+        raise ValueError("nothing to concatenate")
+    if len(parts) == 1:
+        return parts[0]
+    missing = [i for i, p in enumerate(parts) if len(p.hp_share) != len(p)]
+    if missing:
+        raise ValueError(
+            f"shard(s) {missing} carry no hp_share; re-encode them rather than joining, "
+            "because a zero there is a real value (the opponent has everything left)"
+        )
+    kinds = parts[0].kinds
+    if any(p.kinds != kinds for p in parts):
+        raise ValueError("shards disagree on `kinds`")
+
+    names: list[str] = []
+    index: dict[str, int] = {}
+    foes: list[np.ndarray] = []
+    games: list[np.ndarray] = []
+    offset = 0
+    for part in parts:
+        remap = np.empty(len(part.foe_names), dtype=np.int32)
+        for i, name in enumerate(part.foe_names):
+            if name not in index:
+                index[name] = len(names)
+                names.append(name)
+            remap[i] = index[name]
+        foes.append(remap[part.foe] if len(part.foe) else part.foe)
+        games.append(part.game.astype(np.int64) + offset)
+        # +1 because game ids are dense from zero; an empty shard leaves the offset alone.
+        offset += int(part.game.max()) + 1 if len(part.game) else 0
+
+    unknown: Counter[str] = Counter()
+    for part in parts:
+        unknown.update(part.encoded.unknown_volatiles)
+    encoded = Encoded(
+        **{
+            name: np.concatenate([getattr(p.encoded, name) for p in parts])
+            for name in ("species", "ability", "item", "moves", "mon", "mask", "side", "field")
+        },
+        unknown_volatiles=dict(unknown),
+    )
+    return Dataset(
+        encoded=encoded,
+        outcome=np.concatenate([p.outcome for p in parts]),
+        game=np.concatenate(games).astype(np.int32),
+        turn=np.concatenate([p.turn for p in parts]),
+        search_value=np.concatenate([p.search_value for p in parts]),
+        hp_share=np.concatenate([p.hp_share for p in parts]),
+        kind=np.concatenate([p.kind for p in parts]),
+        kinds=kinds,
+        foe=np.concatenate(foes),
+        foe_names=tuple(names),
+    )
 
 
 def load_dataset(path: str | Path) -> Dataset:
