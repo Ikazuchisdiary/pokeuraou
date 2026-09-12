@@ -77,12 +77,14 @@ pub(crate) fn do_move<'a>(
 
     let checks = can_act(&mut turn, action, &budget)?;
     let mut outcomes: Vec<Outcome<'a>> = Vec::new();
-    let last = checks.len() - 1;
-    for (index, (probability, blocked)) in checks.iter().enumerate() {
+    // The last check cannot hand `turn` over instead of copying it, however tempting: the
+    // fallback below needs it if every branch turns out to weigh nothing, and a move that
+    // produced no outcome at all is a thing Python answers rather than refuses.
+    for (probability, blocked) in checks.iter() {
         if *probability <= 0.0 {
             continue;
         }
-        let mut state = if index == last { turn.clone() } else { turn.clone() };
+        let mut state = turn.clone();
         match blocked {
             Some(reason) => {
                 if reason.as_str() == "flinch" {

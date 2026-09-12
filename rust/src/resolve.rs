@@ -1225,17 +1225,33 @@ fn run_queue<'a>(
                 .map(|(_, variant)| variant.move_id != action.move_id)
                 .unwrap_or(false);
             let mut outcomes: Vec<(f64, Turn<'a>)> = Vec::new();
-            for (variant_weight, variant) in &variants {
-                let mut base = item.turn.clone();
+            // One variant is the ordinary case -- Encore is what makes it more than one --
+            // and a turn is an eleven-kilobyte position, so the ordinary case hands the
+            // state over rather than copying it. This one clone was 28% of all of them.
+            if variants.len() == 1 {
+                let (variant_weight, variant) = &variants[0];
+                let mut base = item.turn;
                 if overridden {
-                    // Sucker Punch was read against the move the side chose, and Encore
-                    // has just replaced it; Python says so and so does this.
                     base.report(
                         "encore override changed the move Sucker Punch was read against",
                     );
                 }
                 for (weight, turn) in execute(reg, base, variant, step_budget)? {
                     outcomes.push((variant_weight * weight, turn));
+                }
+            } else {
+                for (variant_weight, variant) in &variants {
+                    let mut base = item.turn.clone();
+                    if overridden {
+                        // Sucker Punch was read against the move the side chose, and Encore
+                        // has just replaced it; Python says so and so does this.
+                        base.report(
+                            "encore override changed the move Sucker Punch was read against",
+                        );
+                    }
+                    for (weight, turn) in execute(reg, base, variant, step_budget)? {
+                        outcomes.push((variant_weight * weight, turn));
+                    }
                 }
             }
             for (weight, turn) in outcomes {
