@@ -665,6 +665,20 @@ def render(reg: Regulation, loc: Localiser, record: dict, top: int) -> str:
         if not policy:
             continue
         selections = all_selections(len(six), len(pick))
+        # What was actually drawn, and how likely that was. Generation draws from the
+        # equilibrium *softened* by exploration, so a pure equilibrium still misses a
+        # quarter of the time -- and a line reading "100.0%" above a different selection
+        # is a contradiction to anyone who has not memorised that. Saying the drawn
+        # probability here puts the explanation where the confusion is.
+        mixture = record.get(policy_key.replace("Policy", "Mixture")) or []
+        drawn = next(
+            (i for i, s in enumerate(selections) if list(s) == list(pick)), None
+        )
+        if drawn is not None and policy[drawn] <= 1e-6:
+            odds = f"{mixture[drawn] * 100:.2f}%" if drawn < len(mixture) else "?"
+            out.write(
+                f"   ※ 実際に引いたのは均衡の外（探索）: この選出の確率 {odds}\n"
+            )
         order = sorted(range(len(policy)), key=lambda i: -policy[i])
         for rank, index in enumerate(order):
             if rank >= top or policy[index] <= 1e-6:
