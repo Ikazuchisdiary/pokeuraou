@@ -23,11 +23,18 @@
   "matchups": [
     {
       "id": "big6",
-      "against": "リザードン+フローエッテ+エルフーン系（BIG6）",
-      "note": "①②が定石。相手の『表 リザードン/ガブリアス・裏 イダイトウ/ドドゲザン』がつらく③も検討されている。勝ち筋は『ドヒドイデ+フシギバナを残した状態でイダイトウ@1と対面して詰ませる』。ガオガエンのすてゼリフでデバフを入れることが重要",
+      "against": "BIG6",
+      "assumed_six": [
+        "フラエッテ",
+        "リザードン",
+        "エルフーン",
+        "ガブリアス",
+        "イダイトウ♂",
+        "ドドゲザン"
+      ],
+      "note": "①②が定石。相手の『表 リザードン/ガブリアス・裏 イダイトウ/ドドゲザン』がつらく③も検討されている。勝ち筋は『ドヒドイデ+フシギバナを残した状態でイダイトウ@1と対面して詰ませる』",
       "selections": [
         {
-          "label": "①",
           "lead": [
             "charizard",
             "incineroar"
@@ -36,10 +43,10 @@
             "toxapex",
             "venusaur"
           ],
+          "label": "①",
           "note": "基本"
         },
         {
-          "label": "②",
           "lead": [
             "toxapex",
             "incineroar"
@@ -47,10 +54,10 @@
           "bench": [
             "charizard",
             "venusaur"
-          ]
+          ],
+          "label": "②"
         },
         {
-          "label": "③",
           "lead": [
             "garchomp",
             "sylveon"
@@ -58,7 +65,8 @@
           "bench": [
             "charizard",
             "venusaur"
-          ]
+          ],
+          "label": "③"
         }
       ],
       "standings": {
@@ -75,6 +83,14 @@
     {
       "id": "rizapputera",
       "against": "リザプテラ",
+      "assumed_six": [
+        "リザードン",
+        "プテラ",
+        "ガブリアス",
+        "ドドゲザン",
+        "ニンフィア",
+        "リキキリン"
+      ],
       "selections": [
         {
           "lead": [
@@ -84,7 +100,8 @@
           "bench": [
             "incineroar",
             "garchomp"
-          ]
+          ],
+          "label": "①"
         },
         {
           "lead": [
@@ -94,7 +111,8 @@
           "bench": [
             "charizard",
             "garchomp"
-          ]
+          ],
+          "label": "②"
         }
       ],
       "standings": {
@@ -108,8 +126,51 @@
       }
     },
     {
+      "id": "dual-weather",
+      "against": "デュアルウェザー",
+      "assumed_six": [
+        "リザードン",
+        "ラグラージ",
+        "フシギバナ",
+        "ペリッパー",
+        "ブリジュラス",
+        "オーロンゲ"
+      ],
+      "selections": [
+        {
+          "lead": [
+            "charizard",
+            "incineroar"
+          ],
+          "bench": [
+            "venusaur",
+            "garchomp"
+          ],
+          "note": "裏は フシギバナ/ガブリアス or ニンフィア"
+        }
+      ],
+      "standings": {
+        "core": [
+          "pelipper",
+          "swampert",
+          "charizard"
+        ],
+        "teams": 26,
+        "best_place": 17,
+        "best_player": "Narawitch Naenna"
+      }
+    },
+    {
       "id": "mafokame",
       "against": "マフォカメ",
+      "assumed_six": [
+        "マフォクシー",
+        "カメックス",
+        "オオニューラ",
+        "ドドゲザン",
+        "ガオガエン",
+        "ヤバソチャ"
+      ],
       "selections": [
         {
           "lead": [
@@ -135,7 +196,175 @@
     {
       "id": "mirror",
       "against": "6匹ミラー",
-      "note": "ドヒドイデ+ガオガエンを残した状態でイダイトウと対面して詰ませるプランが理想"
+      "assumed_six": [
+        "リザードン",
+        "フシギバナ",
+        "ガブリアス",
+        "ニンフィア",
+        "ドヒドイデ",
+        "ガオガエン"
+      ],
+      "note": "ドヒドイデ+ガオガエンを残した状態でイダイトウと対面して詰ませるプランが理想。3本ともドヒドイデ先発",
+      "selections": [
+        {
+          "lead": [
+            "toxapex",
+            "incineroar"
+          ],
+          "bench": [
+            "venusaur",
+            "garchomp"
+          ],
+          "label": "①"
+        },
+        {
+          "lead": [
+            "toxapex",
+            "venusaur"
+          ],
+          "bench": [
+            "incineroar",
+            "garchomp"
+          ],
+          "label": "②"
+        },
+        {
+          "lead": [
+            "toxapex",
+            "charizard"
+          ],
+          "bench": [
+            "incineroar",
+            "venusaur"
+          ],
+          "label": "③"
+        }
+      ]
+    },
+    {
+      "id": "menokorugan",
+      "against": "メノコルガン",
+      "assumed_six": [
+        "ユキメノコ",
+        "スコヴィラン",
+        "黄昏ルガルガン",
+        "ドドゲザン",
+        "イダイトウ♂",
+        "オオニューラ"
+      ],
+      "selections": [
+        {
+          "lead": [
+            "charizard",
+            "garchomp"
+          ],
+          "bench": [
+            "toxapex",
+            "incineroar"
+          ],
+          "label": "①"
+        },
+        {
+          "lead": [
+            "toxapex",
+            "garchomp"
+          ],
+          "bench": [
+            "charizard",
+            "incineroar"
+          ],
+          "label": "②"
+        }
+      ],
+      "standings": {
+        "core": [
+          "froslass",
+          "lycanrocdusk"
+        ],
+        "teams": 15,
+        "best_place": 3,
+        "best_player": "Zachary Weed"
+      }
+    },
+    {
+      "id": "kimuraichu",
+      "against": "キムライチュウ",
+      "assumed_six": [
+        "ライチュウ",
+        "ムクホーク",
+        "ヒスイウインディ",
+        "ニンフィア",
+        "ドドゲザン",
+        "リキキリン"
+      ],
+      "selections": [
+        {
+          "lead": [
+            "charizard",
+            "garchomp"
+          ],
+          "bench": [
+            "sylveon",
+            "incineroar"
+          ],
+          "label": "①"
+        },
+        {
+          "lead": [
+            "sylveon",
+            "incineroar"
+          ],
+          "bench": [
+            "charizard",
+            "garchomp"
+          ],
+          "label": "②"
+        }
+      ],
+      "standings": {
+        "core": [
+          "raichu",
+          "staraptor",
+          "arcaninehisui"
+        ],
+        "teams": 23,
+        "best_place": 11,
+        "best_player": "Cary D'Ortona"
+      }
+    },
+    {
+      "id": "perish-gengar",
+      "against": "滅びゲンガー",
+      "assumed_six": [
+        "ゲンガー",
+        "ラグラージ",
+        "ニョロトノ",
+        "ブリジュラス",
+        "ビビヨン",
+        "ガオガエン"
+      ],
+      "selections": [
+        {
+          "lead": [
+            "charizard",
+            "incineroar"
+          ],
+          "bench": [
+            "garchomp",
+            "venusaur"
+          ],
+          "note": "裏は ガブリアス/フシギバナ or ニンフィア"
+        }
+      ],
+      "standings": {
+        "core": [
+          "gengar",
+          "politoed"
+        ],
+        "teams": 8,
+        "best_place": 74,
+        "best_player": "Eduardo Cunha"
+      }
     }
   ],
   "disagreement": {
@@ -144,5 +373,33 @@
     "hypothesis": "いかく（着地時）と ねこだまし（初手）はどちらも先発でしか効かず、すてゼリフ と どく の蓄積は何ターンもかけて効く。価値関数が遅効性の盤面資産を即時の攻撃圧に比べて過小評価していれば、『連れて行くが後ろに置く』という観測どおりの分布になる",
     "test": "tools/selection_check.py --place 2 --force-selection ... で、同じ均衡相手に対して①②③と book の選出を打ち比べる。②は book と同じ4体なので、どの4体を連れるかの影響が相殺され、順序だけの比較になる"
   },
-  "standings_note": "記事が挙げる仮想敵は3つとも大会プールに実在する（core は種族での照合、teams は その core を含むチーム数、best_place はその最上位）。`tools/selection_check.py --place <best_place>` で、定石をその相手に対して直接打ち比べられる。core は種族だけ なので、同じ core でも技構成の違うチームが混ざる — 最上位1チームで測ったものを アーキタイプ全体の結論にしないこと"
+  "standings_note": "記事が挙げる仮想敵は3つとも大会プールに実在する（core は種族での照合、teams は その core を含むチーム数、best_place はその最上位）。`tools/selection_check.py --place <best_place>` で、定石をその相手に対して直接打ち比べられる。core は種族だけ なので、同じ core でも技構成の違うチームが混ざる — 最上位1チームで測ったものを アーキタイプ全体の結論にしないこと",
+  "default_selection": {
+    "lead": [
+      "charizard",
+      "incineroar"
+    ],
+    "bench": "通りが良さそうな2匹",
+    "note": "記事の『基本選出』。相手を問わない既定の先発が リザガエン であることが、book（リザードン+ガオガエン 先発の質量 0.0%）との最大の食い違い"
+  },
+  "lead_tally": {
+    "lines": 15,
+    "human_by_species": {
+      "charizard": 8,
+      "incineroar": 8,
+      "toxapex": 7,
+      "garchomp": 4,
+      "sylveon": 2,
+      "venusaur": 1
+    },
+    "book_lead_mass_percent": {
+      "charizard": 77.4,
+      "venusaur": 35.3,
+      "garchomp": 46.3,
+      "sylveon": 31.9,
+      "toxapex": 2.5,
+      "incineroar": 6.6
+    },
+    "note": "左は記事の全15パターンで各ポケモンが先発した回数、右は `value-all` の book が394チームに置いた先発質量（1選出につき2体が先発するので合計200%）。**食い違いは種族で綺麗に割れる。** 人間が先発させてモデルがさせないのは ガオガエン（53% 対 6.6%）と ドヒドイデ（47% 対 2.5%）— どちらも*遅効性の盤面制圧*の駒（いかく・ねこだまし・すてゼリフ／どくの蓄積）。逆にモデルが先発させて人間がさせないのは フシギバナ（7% 対 35.3%）・ニンフィア（13% 対 31.9%）・ガブリアス（27% 対 46.3%）— どれも*即時の攻撃*の駒。リザードンだけは両者とも高い（53% 対 77.4%）。**価値関数が即時の攻撃圧を盤面制圧より高く見ている**という仮説が、1つの相手ではなく種族の分類として出ている"
+  }
 }
