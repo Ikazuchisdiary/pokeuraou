@@ -3674,6 +3674,7 @@ def batched_payoffs(
     evaluators: Sequence[Callable[[list[Position]], np.ndarray]],
     *,
     budget: Budget,
+    cells: Sequence[tuple[int, int]] | None = None,
 ) -> tuple[list[np.ndarray], set[str], np.ndarray]:
     """One payoff matrix per evaluator, with every leaf in the node scored in one call.
 
@@ -3710,7 +3711,7 @@ def batched_payoffs(
     full while its neighbour is narrowed. Reporting it as "all or nothing from the budget
     name" would be a number nobody measured.
     """
-    ported = _rust_payoffs(reg, pos, ours, theirs, evaluators, budget)
+    ported = _rust_payoffs(reg, pos, ours, theirs, evaluators, budget, cells)
     if ported is not None:
         return ported
 
@@ -3722,29 +3723,34 @@ def batched_payoffs(
     spans: list[tuple[int, int, int, int]] = []
     folded: list[tuple[int, int, Fold]] = []
 
-    for i, a in enumerate(ours):
-        for j, b in enumerate(theirs):
-            result = resolve_turn(reg, pos, [a, b], budget=budget)
-            exact[i, j] = result.exact
-            if result.suspended:
-                plan = turn_leaves(reg, result)
-                unmodelled.update(plan.unmodelled)
-                if plan.positions:
-                    folded.append((i, j, plan.shifted(len(leaves))))
-                    leaves.extend(plan.positions)
-                continue
-            unmodelled.update(result.unmodelled)
-            total = result.total_probability
-            if not result.branches or total <= 0:
-                spans.append((i, j, len(leaves), 0))
-                weights.append(np.zeros(0))
-                continue
-            start = len(leaves)
-            leaves.extend(branch.position for branch in result.branches)
-            weights.append(
-                np.array([branch.probability for branch in result.branches]) / total
-            )
-            spans.append((i, j, start, len(result.branches)))
+    wanted = (
+        [(i, j) for i in range(len(ours)) for j in range(len(theirs))]
+        if cells is None
+        else [(i, j) for i, j in cells if i < len(ours) and j < len(theirs)]
+    )
+    for i, j in wanted:
+        a, b = ours[i], theirs[j]
+        result = resolve_turn(reg, pos, [a, b], budget=budget)
+        exact[i, j] = result.exact
+        if result.suspended:
+            plan = turn_leaves(reg, result)
+            unmodelled.update(plan.unmodelled)
+            if plan.positions:
+                folded.append((i, j, plan.shifted(len(leaves))))
+                leaves.extend(plan.positions)
+            continue
+        unmodelled.update(result.unmodelled)
+        total = result.total_probability
+        if not result.branches or total <= 0:
+            spans.append((i, j, len(leaves), 0))
+            weights.append(np.zeros(0))
+            continue
+        start = len(leaves)
+        leaves.extend(branch.position for branch in result.branches)
+        weights.append(
+            np.array([branch.probability for branch in result.branches]) / total
+        )
+        spans.append((i, j, start, len(result.branches)))
 
     for payoff, evaluate in zip(payoffs, evaluators, strict=True):
         values = np.asarray(evaluate(leaves), dtype=np.float64) if leaves else np.zeros(0)
@@ -3837,6 +3843,7 @@ def _rust_encoded_payoffs(
     theirs: Sequence[SideAction],
     evaluators: Sequence[Callable],
     budget: Budget,
+    cells: Sequence[tuple[int, int]] | None = None,
 ) -> tuple[list[np.ndarray], set[str], np.ndarray] | None:
     """The node filled by the port, with the leaves scored here by the learned net.
 
@@ -3859,7 +3866,7 @@ def _rust_encoded_payoffs(
         return None
     named = [name for name, _scorer in plan if name is not None]
     try:
-        filled = node.fill_encoded(pos, list(ours), list(theirs), budget, named)
+        filled = node.fill_encoded(pos, list(ours), list(theirs), budget, named, cells)
     except Exception as exc:  # noqa: BLE001 - a broken bridge must not fail the run
         rustnode.disable(str(exc))
         return None
@@ -3904,6 +3911,7 @@ def _rust_payoffs(
     theirs: Sequence[SideAction],
     evaluators: Sequence[Callable],
     budget: Budget,
+    cells: Sequence[tuple[int, int]] | None = None,
 ) -> tuple[list[np.ndarray], set[str], np.ndarray] | None:
     """The node filled by the Rust port, or None to do it here.
 
@@ -3922,12 +3930,12 @@ def _rust_payoffs(
     names = _objective_names(evaluators)
     if names is None or not set(names) <= _PORTED_OBJECTIVES:
         # A learned leaf takes the other crossing: the encoding, not the payoff.
-        return _rust_encoded_payoffs(reg, pos, ours, theirs, evaluators, budget)
+        return _rust_encoded_payoffs(reg, pos, ours, theirs, evaluators, budget, cells)
     node = rustnode.node_for(reg)
     if node is None:
         return None
     try:
-        filled = node.fill(pos, list(ours), list(theirs), names, budget)
+        filled = node.fill(pos, list(ours), list(theirs), names, budget, cells)
     except Exception as exc:  # noqa: BLE001 - a broken bridge must not fail the run
         rustnode.disable(str(exc))
         return None

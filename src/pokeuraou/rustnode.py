@@ -31,6 +31,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
@@ -514,6 +515,7 @@ class RustNode:
         theirs: list[SideAction],
         budget: Budget,
         objectives: list[str] | None = None,
+        cells: Sequence[tuple[int, int]] | None = None,
     ) -> EncodedNode:
         """The node's leaves, already encoded, and how to fold their values.
 
@@ -531,6 +533,9 @@ class RustNode:
             "objectives": list(objectives or []),
             "encode": True,
         }
+        # Only these cells, when the caller is solving rather than tabulating.
+        if cells is not None:
+            request["cells"] = [[int(i), int(j)] for i, j in cells]
         header = self._exchange(request)
         body = self._read_exactly(int(header["bytes"]))
         return EncodedNode.unpack(header, body)
@@ -542,6 +547,7 @@ class RustNode:
         theirs: list[SideAction],
         objectives: list[str],
         budget: Budget,
+        cells: Sequence[tuple[int, int]] | None = None,
     ) -> NodeResult:
         request = {
             "position": pos.to_json(),
@@ -550,6 +556,8 @@ class RustNode:
             "budget": dump_budget(budget),
             "objectives": objectives,
         }
+        if cells is not None:
+            request["cells"] = [[int(i), int(j)] for i, j in cells]
         response = self._exchange(request)
         return NodeResult(
             payoffs=response["payoffs"],

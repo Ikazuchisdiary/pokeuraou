@@ -25,6 +25,28 @@ pub struct Request {
     pub objectives: Vec<String>,
     /// Return the encoder's arrays and a fold instead of payoffs, for a learned leaf.
     pub encode: bool,
+    /// Which cells to fill, or all of them.
+    ///
+    /// An equilibrium does not need the whole matrix -- an unplayed action only has to be
+    /// shown not to beat the opponent's mixed strategy, and that strategy sits on a few
+    /// columns -- so the caller asks for what it needs and comes back for more.
+    pub cells: Option<Vec<(usize, usize)>>,
+}
+
+impl Request {
+    /// The (row, column) pairs to resolve, in the order they will be reported.
+    pub fn wanted_cells(&self) -> Vec<(usize, usize)> {
+        match &self.cells {
+            Some(listed) => listed
+                .iter()
+                .copied()
+                .filter(|(i, j)| *i < self.ours.len() && *j < self.theirs.len())
+                .collect(),
+            None => (0..self.ours.len())
+                .flat_map(|i| (0..self.theirs.len()).map(move |j| (i, j)))
+                .collect(),
+        }
+    }
 }
 
 pub fn parse_request(value: &Value) -> Result<Request, String> {
@@ -47,8 +69,18 @@ pub fn parse_request(value: &Value) -> Result<Request, String> {
             return Err(format!("objective not available in the port: {name}"));
         }
     }
+    let cells = value.get("cells").and_then(Value::as_array).map(|listed| {
+        listed
+            .iter()
+            .filter_map(|pair| {
+                let pair = pair.as_array()?;
+                Some((pair.first()?.as_u64()? as usize, pair.get(1)?.as_u64()? as usize))
+            })
+            .collect()
+    });
     Ok(Request {
         encode,
+        cells,
         position,
         ours: read("ours"),
         theirs: read("theirs"),
@@ -73,9 +105,9 @@ pub fn fill(reg: &Reg, request: &Request) -> Value {
     let mut refused: Vec<Value> = Vec::new();
     let mut unmodelled: BTreeSet<String> = BTreeSet::new();
 
-    for (i, ours) in request.ours.iter().enumerate() {
-        for (j, theirs) in request.theirs.iter().enumerate() {
-            let actions = [ours.clone(), theirs.clone()];
+    for (i, j) in request.wanted_cells() {
+        {
+            let actions = [request.ours[i].clone(), request.theirs[j].clone()];
             match resolve_turn(reg, &request.position, &actions, request.budget) {
                 Err(reason) => refused.push(json!([i, j, reason])),
                 Ok(result) => {

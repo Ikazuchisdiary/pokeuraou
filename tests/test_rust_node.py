@@ -222,6 +222,35 @@ def test_a_menu_scored_from_beliefs_stays_here(bridged: None) -> None:
     assert _bridged_scores(reg, pos, 0, [c.action for c in without.kept]) is not None
 
 
+def test_asking_for_some_cells_answers_those_cells(bridged: None) -> None:
+    """A restricted fill must equal the whole one, cell for cell, on both paths.
+
+    This is what lets a caller solve a node without resolving all of it: the equilibrium
+    needs about a fifth of a wide matrix, and the rest is work nobody reads. What must not
+    happen is a cell answering differently because of who it was asked alongside.
+    """
+    reg, pos, row, col = _node()
+    evaluators = [OBJECTIVES["hp-share"].batch, OBJECTIVES["faints"].batch]
+    wanted = [(0, 0), (1, 2), (2, 1), (0, 3)]
+    wanted = [(i, j) for i, j in wanted if i < len(row) and j < len(col)]
+
+    for bridge in ("1", "0"):
+        os.environ[rustnode.ENV_ENABLE] = bridge
+        rustnode.reset()
+        whole, _n, whole_exact = batched_payoffs(
+            reg, pos, row, col, evaluators, budget=Budget.matrix()
+        )
+        some, _n2, some_exact = batched_payoffs(
+            reg, pos, row, col, evaluators, budget=Budget.matrix(), cells=wanted
+        )
+        for index in range(len(evaluators)):
+            for i, j in wanted:
+                assert some[index][i, j] == whole[index][i, j], (
+                    f"cell {(i, j)} differs with the bridge {bridge}"
+                )
+                assert some_exact[i, j] == whole_exact[i, j]
+
+
 def test_a_node_that_dies_is_replaced_rather_than_given_up_on(bridged: None) -> None:
     """One failure used to end the bridge for the whole process.
 

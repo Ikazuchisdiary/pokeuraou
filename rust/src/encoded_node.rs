@@ -174,9 +174,9 @@ pub fn fill(reg: &Reg, encoder: &Encoder, request: &Request) -> (Value, Encoded,
     // being guessed at from two benchmarks that did not add up. It goes back in the header.
     let resolve_started = std::time::Instant::now();
 
-    for (i, ours) in request.ours.iter().enumerate() {
-        for (j, theirs) in request.theirs.iter().enumerate() {
-            let actions = [ours.clone(), theirs.clone()];
+    for (i, j) in request.wanted_cells() {
+        {
+            let actions = [request.ours[i].clone(), request.theirs[j].clone()];
             let result = match resolve_turn(reg, &request.position, &actions, request.budget) {
                 Err(reason) => {
                     refused.push(json!([i, j, reason]));
