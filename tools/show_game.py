@@ -465,6 +465,7 @@ def turn_events(
     decision: dict,
     following: dict | None,
     outcome: float | None = None,
+    after_next: dict | None = None,
 ) -> list[tuple[str | None, list[str]]]:
     """What actually happened, by re-resolving the turn that was played.
 
@@ -543,9 +544,13 @@ def turn_events(
         # The resumed result carries the *whole* turn, the part before the interrupt
         # included, so prepending what was collected before it prints everything twice.
         prefix = []
-        # And the position it lands in is not the one the next decision recorded -- that
-        # is two nodes later -- so there is nothing to match a branch against.
-        following = None
+        # The position it lands in is not the one the next decision recorded -- that one
+        # is mid-turn, taken at the interrupt -- but the decision *after* it is the end of
+        # this turn, and that is a match target. Treating "two nodes later" as "nothing to
+        # match against" is what made this branch the likeliest rather than the played
+        # one, and a likeliest branch is a different damage roll: one game showed Toxapex
+        # fainting to Rough Skin on a turn it ended at 66 HP.
+        following = after_next
         resumed = True
     if not result.branches:
         return []
@@ -571,7 +576,7 @@ def turn_events(
                 "（乱数の再現に失敗）"
             )
     elif resumed and len(result.branches) > 1:
-        note = "以下は中断ターンを再開した最尤の枝です"
+        note = "以下は中断ターンを再開した最尤の枝です（照合先がない）"
     else:
         # The last turn has no next position to match against -- but the *outcome* is
         # recorded, and that is a match key too. Without it the log showed the likeliest
@@ -777,7 +782,14 @@ def render(reg: Regulation, loc: Localiser, record: dict, top: int) -> str:
             if position_in_game + 1 < len(decisions)
             else None
         )
-        happened = turn_events(reg, loc, decision, following, record.get("outcome"))
+        after_next = (
+            decisions[position_in_game + 2]
+            if position_in_game + 2 < len(decisions)
+            else None
+        )
+        happened = turn_events(
+            reg, loc, decision, following, record.get("outcome"), after_next
+        )
         if happened:
             out.write("  起きたこと:\n")
             for header, lines in happened:
