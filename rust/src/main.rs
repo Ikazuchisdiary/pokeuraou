@@ -10,6 +10,8 @@
 //! (`tools/diff_*.py`), so the chain of verification is not broken by the port.
 
 mod battler;
+#[cfg(feature = "count-allocations")]
+mod counting_alloc;
 mod damage;
 mod effects;
 mod encode;
@@ -27,6 +29,10 @@ mod reg;
 mod resolve;
 mod score;
 mod speed;
+
+#[cfg(feature = "count-allocations")]
+#[global_allocator]
+static ALLOCATOR: counting_alloc::Counting = counting_alloc::Counting;
 
 use serde_json::Value;
 use std::time::Instant;
@@ -165,6 +171,46 @@ fn clones_main(args: &[String]) {
         .map(position::Position::from_json)
         .collect();
     let repeats: usize = args.get(1).and_then(|a| a.parse().ok()).unwrap_or(200);
+    // What a Battler costs to build, since the resolver builds hundreds a turn. Only when
+    // a regulation is named, because loading one is the expensive half of this subcommand.
+    if let Some(Ok(reg)) = args.get(2).map(|path| reg::Reg::load(path)) {
+        let mut sink = 0i64;
+        let mons: Vec<&position::Pokemon> = positions
+            .iter()
+            .flat_map(|p| p.sides.iter().flat_map(|s| s.pokemon.iter().map(|m| &**m)))
+            .take(400)
+            .collect();
+        let started = std::time::Instant::now();
+        for _ in 0..500 {
+            for mon in &mons {
+                if let Ok(battler) = battler::Battler::from_pokemon(&reg, mon) {
+                    sink += battler.hp;
+                }
+            }
+        }
+        let elapsed = started.elapsed().as_secs_f64();
+        let n = 500 * mons.len();
+        println!(
+            "battlers: {n} in {elapsed:.3} s = {:.3} us each [sink {sink}]",
+            elapsed / n as f64 * 1e6
+        );
+    }
+    // What one small allocation costs, since a turn makes 557 of them. The pattern is the
+    // resolver's: allocate, use, free, in a tight loop where the block is reused.
+    {
+        let mut sink = 0usize;
+        let started = std::time::Instant::now();
+        for i in 0..2_000_000usize {
+            let v: Vec<u64> = vec![i as u64; 8];
+            sink += v.len();
+            std::hint::black_box(&v);
+        }
+        let elapsed = started.elapsed().as_secs_f64();
+        println!(
+            "one 64-byte alloc+free: {:.1} ns [sink {sink}]",
+            elapsed / 2_000_000.0 * 1e9
+        );
+    }
     println!(
         "sizes: Position {} B, Side {} B, Pokemon {} B, Effect {} B, MoveSlot {} B",
         std::mem::size_of::<position::Position>(),
@@ -373,6 +419,9 @@ fn turns_main(args: &[String]) {
             })
             .collect();
         let mut sink = 0usize;
+        resolve::reset_counters();
+        #[cfg(feature = "count-allocations")]
+        counting_alloc::reset();
         let started = Instant::now();
         for _ in 0..repeats {
             for (index, actions, budget) in &prepared {
@@ -396,6 +445,26 @@ fn turns_main(args: &[String]) {
         println!("  damage calls:    {hits:.0} = {:.1} per turn", hits / calls);
         let copies = position::UNSHARED.load(std::sync::atomic::Ordering::Relaxed) as f64;
         println!("  forced copies:   {copies:.0} = {:.1} per turn", copies / calls);
+        let relaxed = std::sync::atomic::Ordering::Relaxed;
+        let builds = battler::BUILDS.load(relaxed) as f64;
+        let resorts = resolve::RESORTS.load(relaxed) as f64;
+        let residuals = resolve::RESIDUALS.load(relaxed) as f64;
+        println!("  battlers built:  {builds:.0} = {:.1} per turn", builds / calls);
+        println!("  queue re-sorts:  {resorts:.0} = {:.1} per turn", resorts / calls);
+        println!("  residual phases: {residuals:.0} = {:.1} per turn", residuals / calls);
+        #[cfg(feature = "count-allocations")]
+        counting_alloc::report(calls);
+        #[cfg(feature = "profile")]
+        for (index, name) in resolve::PHASE_NAMES.iter().enumerate() {
+            let ns = resolve::PHASE_NS[index].load(relaxed) as f64;
+            let allocs = resolve::PHASE_ALLOCS[index].load(relaxed) as f64;
+            println!(
+                "  {name:<16} {:>7.2} us/turn ({:>4.1}%), {:>6.1} allocs/turn",
+                ns / calls / 1000.0,
+                ns / 1000.0 / (elapsed * 1e6) * 100.0,
+                allocs / calls
+            );
+        }
     }
 }
 

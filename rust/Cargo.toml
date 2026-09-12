@@ -3,6 +3,14 @@ name = "pokeuraou-damage"
 version = "0.1.0"
 edition = "2021"
 
+[features]
+# A counting global allocator, for answering "how many allocations is a turn" without
+# guessing from the shape of the code. Off by default: the counter is not free.
+count-allocations = ["profile"]
+# Phase timers inside a turn. Off by default: a clock read is 25 ns and the innermost
+# phase runs ten times a turn.
+profile = []
+
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
