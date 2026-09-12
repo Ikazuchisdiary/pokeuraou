@@ -121,6 +121,7 @@ def provenance(
     depths: tuple[int, int] = (1, 1),
     rankings: tuple[str, str] = ("damage", "damage"),
     solvers: tuple[str, str] = ("full", "full"),
+    books: tuple[str, str] = ("uniform", "uniform"),
     selection: str = "uniform",
     note: str = "",
 ) -> dict[str, Any]:
@@ -150,6 +151,7 @@ def provenance(
         "depths": list(depths),
         "rankings": list(rankings),
         "solvers": list(solvers),
+        "books": list(books),
         "selection": selection,
         **({"note": note} if note else {}),
     }
@@ -176,6 +178,7 @@ def agent_name(source: dict[str, Any], side: int) -> str:
     depth = (source.get("depths") or [1, 1])[side]
     ranking = (source.get("rankings") or ["damage", "damage"])[side]
     solver = (source.get("solvers") or ["full", "full"])[side]
+    book = (source.get("books") or ["uniform", "uniform"])[side]
     name = f"{leaf}/w{limit}"
     if depth != 1:
         name += f"/d{depth}"
@@ -183,6 +186,11 @@ def agent_name(source: dict[str, Any], side: int) -> str:
         name += f"/{ranking}"
     if solver != "full":
         name += f"/{solver}"
+    # The selection rule, because drawing the four of six from a solved equilibrium is
+    # worth +22.1 points against drawing them uniformly -- a bigger difference than any
+    # two models on this scale. An agent that selects from a book is not the same agent.
+    if book != "uniform":
+        name += f"/book:{book}"
     return name
 
 
