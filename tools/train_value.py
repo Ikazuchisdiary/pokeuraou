@@ -49,6 +49,7 @@ from pokeuraou.value import (
     load_dataset,
     predict,
     save_model,
+    td_target,
     train,
 )
 
@@ -192,6 +193,17 @@ def main() -> None:
     ap.add_argument("--holdout", type=float, default=0.15)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--min-turn-rows", type=int, default=200)
+    ap.add_argument(
+        "--td-lambda",
+        type=float,
+        default=0.0,
+        help="fit (1-L)*outcome + L*searchValue instead of the outcome alone. The outcome "
+        "is the truth but a very noisy sample of it -- 13 decisions of a game share one "
+        "label, so the independent information in a pool is its game count. The "
+        "generating search's value is biased and not noisy, and on the same validation "
+        "games it beats the raw network. Validation always stays against the real "
+        "outcome, whatever this is set to, or the rows stop being comparable.",
+    )
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--no-save", action="store_true")
     ap.add_argument(
@@ -204,6 +216,30 @@ def main() -> None:
     args = ap.parse_args()
 
     dataset = load_dataset(args.data)
+    target = None
+    if args.td_lambda:
+        meta = __import__("json").loads(str(np.load(args.data)["meta_json"]))
+        leaves = meta.get("objectives") or {}
+        # `hp-share` and a learned leaf both land in [0, 1] and mean different things, so
+        # a pool that mixes them cannot have its search values folded into one target.
+        # Shards encoded before the leaf was recorded say nothing, and silence is not
+        # permission.
+        if not leaves:
+            raise SystemExit(
+                "this dataset does not record which leaf generated it; re-encode it "
+                "before using --td-lambda"
+            )
+        wrong = sorted(k for k in leaves if not k.startswith("value:"))
+        if wrong:
+            raise SystemExit(
+                f"--td-lambda needs searchValue to be a win probability, but {wrong} "
+                "generated part of this pool"
+            )
+        target = td_target(dataset, args.td_lambda)
+        print(
+            f"TD target: {1 - args.td_lambda:.2f} x outcome + {args.td_lambda:.2f} x "
+            f"searchValue (leaves {sorted(leaves)}). Validation stays on the outcome."
+        )
     reg = load_regulation(
         __import__("json").loads(str(np.load(args.data)["meta_json"]))["format_id"]
     )
@@ -239,6 +275,12 @@ def main() -> None:
     print(f"antisymmetry V(x) + V(mirror x) - 1: max |error| {worst:.2e} at init")
 
     if args.curve:
+        if args.td_lambda:
+            # Rather than quietly train the curve on a different target than the banner
+            # said. The curve answers "would more games help", which is a question about
+            # the outcome label; mixing in the search value changes what "more games"
+            # buys, so the two experiments do not belong in one run.
+            raise SystemExit("--curve and --td-lambda answer different questions; run them apart")
         learning_curve(
             dataset, encoder, config, device, args, [float(x) for x in args.curve.split(",")]
         )
@@ -253,7 +295,7 @@ def main() -> None:
 
     print("\ntraining")
     history, best = train(
-        net, dataset, config, device=device, holdout=args.holdout, log=log
+        net, dataset, config, device=device, holdout=args.holdout, log=log, target=target
     )
     net.load_state_dict(best)
 
@@ -337,6 +379,7 @@ def main() -> None:
                     {"hp_share_auc": auc(hp_share, labels)} if hp_share.size else {}
                 ),
                 "epochs_run": len(history),
+                "td_lambda": args.td_lambda,
             },
         )
         print(f"\n-> {args.out}")

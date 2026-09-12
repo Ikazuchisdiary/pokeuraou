@@ -325,6 +325,42 @@ def concat_datasets(parts: Sequence[Dataset]) -> Dataset:
     )
 
 
+def td_target(dataset: Dataset, lam: float) -> np.ndarray:
+    """``(1 - lam) * outcome + lam * search_value``, the label to fit instead of the outcome.
+
+    The outcome is the truth but it is an extremely noisy sample of it. Every decision in
+    a game carries that game's single win or loss, so 13 decisions share one label and the
+    independent information in a pool is the number of *games*, not decisions. At turn 1
+    the label is close to a coin flip about a position that is not.
+
+    :attr:`Dataset.search_value` is the other end of that trade: the value the generating
+    search reported at this very decision, from a full one-ply equilibrium over the
+    previous model. It is biased -- it is a model's opinion, and fitting it alone would
+    only reproduce the model it came from -- but it is not noisy, and it is already
+    recorded at every decision. On the same validation games the generating search scores
+    0.8850 / 0.4184 against the raw network's 0.8809 / 0.4221, so the opinion being mixed
+    in is a better one than the network currently holds.
+
+    ``lam = 0`` is the outcome and nothing else, which is what every generation so far was
+    trained on. ``lam = 1`` is pure distillation of the previous generation and cannot
+    exceed it. The useful settings are in between, and which one is a measurement.
+
+    Both arrays are side-0 relative -- all three places that record ``searchValue`` write
+    the equilibrium value of a matrix whose maximiser is side 0, the same orientation as
+    ``outcome`` -- so no flip is needed and none is applied.
+    """
+    if not 0.0 <= lam <= 1.0:
+        raise ValueError(f"lam must be in [0, 1], got {lam}")
+    if len(dataset.search_value) != len(dataset):
+        raise ValueError("the dataset carries no search_value to mix in")
+    outcome = dataset.outcome.astype(np.float32)
+    if lam == 0.0:
+        return outcome
+    return ((1.0 - lam) * outcome + lam * dataset.search_value.astype(np.float32)).astype(
+        np.float32
+    )
+
+
 def load_dataset(path: str | Path) -> Dataset:
     """Reads a cache written by ``tools/encode_dataset.py``."""
     data = np.load(Path(path), allow_pickle=False)
@@ -409,12 +445,18 @@ def train(
     log: Any = None,
     train_index: np.ndarray | None = None,
     val_index: np.ndarray | None = None,
+    target: np.ndarray | None = None,
 ) -> tuple[list[EpochReport], dict[str, Tensor]]:
     """Fits the network and returns the epoch history and the best weights.
 
     "Best" is by validation loss rather than by validation AUC. AUC only asks whether
     winning positions score above losing ones; the tool needs the number itself to be a
     probability, so the criterion has to be the one that punishes miscalibration.
+
+    :param target: what to fit, per decision, when it should not be the game's outcome --
+        see :func:`td_target`. Validation is *always* against the real outcome, whatever
+        this is, or the number stops meaning "how often does this position win" and rows
+        with different targets stop being comparable to each other.
     """
     import time
 
@@ -426,6 +468,7 @@ def train(
         # holding the validation games fixed so the rows can be compared to each other.
         train_idx, val_idx = train_index, val_index
     outcome = torch.from_numpy(dataset.outcome.astype(np.float32))
+    fitted = outcome if target is None else torch.from_numpy(target.astype(np.float32))
 
     optimiser = torch.optim.AdamW(
         net.parameters(), lr=config.lr, weight_decay=config.weight_decay
@@ -452,9 +495,8 @@ def train(
         for start in range(0, len(order) - config.batch_size + 1, config.batch_size):
             batch_idx = order[start : start + config.batch_size]
             batch = dataset.tensors(batch_idx, device)
-            target = outcome[batch_idx].to(device)
             logit = net(batch)
-            loss = loss_fn(logit, target)
+            loss = loss_fn(logit, fitted[batch_idx].to(device))
             optimiser.zero_grad(set_to_none=True)
             loss.backward()
             nn.utils.clip_grad_norm_(net.parameters(), 1.0)

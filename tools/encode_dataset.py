@@ -107,6 +107,7 @@ def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict
     search_limits: Counter[str] = Counter()
     provenances: Counter[str] = Counter()
     engines: Counter[str] = Counter()
+    objectives: Counter[str] = Counter()
     unknown: Counter[str] = Counter()
     game_id = 0
     started = time.perf_counter()
@@ -149,6 +150,7 @@ def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict
                     continue
                 provenances[kind] += 1
                 search_limits[str(record.get("searchLimit"))] += 1
+                objectives[str(record.get("searchObjective"))] += 1
                 engine = record.get("engine") or {}
                 engines[str(engine.get("sources", "unrecorded"))] += 1
                 label = record.get("foeArchetype", "?")
@@ -212,6 +214,12 @@ def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict
         # Which build of the engine played these games. Recorded per shard because a
         # dataset that spans an engine fix needs to be able to say where the seam is.
         "engines": dict(engines),
+        # Which leaf produced `search_value`. A `value:<model>` leaf makes it a win
+        # probability; `hp-share` makes it a share of remaining HP, which is a different
+        # quantity on the same [0, 1] scale and cannot be mixed into a win-probability
+        # target. The TD target refuses a pool that mixes the two, and this is how it
+        # knows.
+        "objectives": dict(objectives),
         # How many actions each decision offered. Kept in the shard because it is a
         # property of the games, not of the arrays, and re-deriving it would mean
         # re-reading the JSON that the shard exists to avoid re-reading.
@@ -276,6 +284,7 @@ def main() -> None:
     search_limits = merged("search_limits")
     provenances = merged("provenances")
     engines = merged("engines")
+    objectives = merged("objectives")
     unknown = Counter(dataset.encoded.unknown_volatiles)
 
     print(f"\n{total_games:,} finished games, {len(dataset):,} decisions")
@@ -283,6 +292,7 @@ def main() -> None:
     print(f"  search budget per game: {search_limits}")
     print(f"  games by provenance: {provenances}")
     print(f"  games by engine build: {engines}")
+    print(f"  games by generating leaf: {objectives}")
     branching = merged("branching")
     total = sum(branching.values())
     if total:
@@ -315,6 +325,7 @@ def main() -> None:
                 "search_limits": search_limits,
                 "provenances": provenances,
                 "engines": engines,
+                "objectives": objectives,
             },
         )
     size = out.stat().st_size / 1e6
