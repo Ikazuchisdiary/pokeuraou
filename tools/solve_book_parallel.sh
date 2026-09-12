@@ -5,9 +5,15 @@
 # positions costs 2.23s, encoding them 0.49s and the forward pass 0.77s -- so a single
 # process leaves fifteen threads and the whole GPU idle. Sharded, the field takes minutes.
 #
-# 14 workers, --device cpu, one torch thread each: the same measured setting as
-# generate_parallel.sh, for the same reasons (16 workers collapse; a CUDA context per
-# worker buys nothing when the forward pass is a fifth of the cost).
+# 8 workers on the GPU, which reverses what this script used to say. "16 workers collapse"
+# and "a CUDA context buys nothing when the forward pass is a fifth of the cost" were both
+# measured before the resolver moved to Rust, and the port changed every share measured
+# against it: at width 48 torch is 35.4% of a cpu process and 9.4% of a cuda one, and
+# whole-machine throughput is 307.9 games/min on cuda against 190.6 on cpu. The same
+# correction was applied to generate_parallel.sh.
+#
+# RUST_NODE defaults to 1 here too. It was not passed at all, which is the trap rather
+# than the default: a run launched without it pays about fifteen times over in silence.
 #
 # Spread classes are seeded per team, so the merged book does not depend on the shard count.
 #
@@ -15,9 +21,11 @@
 #   CLASSES=16 WORKERS=14 bash tools/solve_book_parallel.sh
 set -uo pipefail
 
-MODEL="${MODEL:-data/models/value-gen2.pt}"
+MODEL="${MODEL:-data/models/value-all.pt}"
 ROSTER="${ROSTER:-rizabanadohido}"
-WORKERS="${WORKERS:-14}"
+WORKERS="${WORKERS:-8}"
+DEVICE="${DEVICE:-cuda}"
+RUST_NODE="${RUST_NODE:-1}"
 CLASSES="${CLASSES:-8}"
 POOL="${POOL:-all}"
 SEED="${SEED:-0}"
@@ -29,7 +37,7 @@ started=$(date +%s)
 
 pids=()
 for i in $(seq 0 $((WORKERS - 1))); do
-	uv run --group learn python tools/solve_selection_book.py \
+	POKEURAOU_RUST_NODE="$RUST_NODE" uv run --group learn python tools/solve_selection_book.py \
 		--roster "$ROSTER" \
 		--model "$MODEL" \
 		--classes "$CLASSES" \
@@ -37,7 +45,7 @@ for i in $(seq 0 $((WORKERS - 1))); do
 		--seed "$SEED" \
 		--shard "$i" \
 		--shards "$WORKERS" \
-		--device cpu \
+		--device "$DEVICE" \
 		>"$LOGS/shard$i.log" 2>&1 &
 	pids+=($!)
 done
