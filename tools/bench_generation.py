@@ -86,6 +86,17 @@ def main() -> None:
     selections = tuple(all_selections(reg.meta.team_size, reg.meta.picked_team_size))
     rng = np.random.default_rng(args.seed)
 
+    if evaluate is not None:
+        # One forward pass before the clock starts. The first one in a process pays for
+        # the CUDA context and for whatever kernels the shapes need built, and that lands
+        # inside the timed loop otherwise: the same command measured 9.17 s/game and
+        # 1.35 s/game on the same model, which is one 8-second warm-up spread over four
+        # games or over forty.
+        from pokeuraou.selfplay import position_from_sets
+
+        picked = [roster.sets[i] for i in selections[0]]
+        evaluate([position_from_sets(reg, picked, picked)] * 64)
+
     turns = decisions = finished = 0
     started = time.perf_counter()
     for _ in range(args.games):
