@@ -61,6 +61,13 @@ def engine_fingerprint() -> dict[str, Any]:
     than "the rules". A docstring edit changes it and that is a false alarm; the opposite
     error is what cost three generations. Over-broad is recoverable by looking, and
     under-broad is not recoverable at all.
+
+    The compiled node is hashed separately, because the Rust *source* is not what played
+    the game -- the binary is, and the two come apart every time a Rust change is pulled
+    and not yet rebuilt. In that window the source hash would name a fix the running code
+    does not contain, which is the exact failure this function exists to prevent, dressed
+    as a solution to it. A run with no binary records `null` rather than a hash, because
+    "there was no Rust node" is a real and different fact from "the node was this one".
     """
     global _ENGINE
     if _ENGINE is not None:
@@ -85,8 +92,24 @@ def engine_fingerprint() -> dict[str, Any]:
         )
     except (OSError, subprocess.SubprocessError):
         pass
-    _ENGINE = {"sources": digest.hexdigest(), "commit": commit, "dirty": dirty}
+    _ENGINE = {
+        "sources": digest.hexdigest(),
+        "node": _node_digest(),
+        "commit": commit,
+        "dirty": dirty,
+    }
     return _ENGINE
+
+
+def _node_digest() -> str | None:
+    """The compiled Rust node as it is on disk, or None when there is no binary."""
+    from .rustnode import binary_path
+
+    try:
+        data = binary_path().read_bytes()
+    except OSError:
+        return None
+    return hashlib.blake2b(data, digest_size=8).hexdigest()
 
 
 def provenance(
