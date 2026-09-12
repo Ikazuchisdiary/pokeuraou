@@ -34,21 +34,42 @@ GAMES="${GAMES:-50}"
 LIMIT="${LIMIT:-16}"
 FIRST_SEED="${FIRST_SEED:-880}"
 OUT_DIR="${OUT_DIR:-data/matches/genmatch-$(basename "$NEW" .pt)-vs-$(basename "$OLD" .pt)}"
+# The leaf, the width and the candidate ranking are all part of what an agent *is*, and
+# the rating fit reads them back out of the recorded provenance. A match run with a
+# different ranking than the generation it is meant to describe is a different agent
+# wearing the same name, so these are knobs rather than constants.
+DEVICE="${DEVICE:-cpu}"
+# Set apart, because the two arms are allowed to differ and the interesting matches do.
+# An agent already on the rating scale has a fixed configuration; to attach a new one to
+# the scale, the new arm plays the way it generates and the old arm plays the way it was
+# rated, mismatched on purpose.
+RANK_LEAF="${RANK_LEAF:-0}"
+OLD_RANK_LEAF="${OLD_RANK_LEAF:-$RANK_LEAF}"
+RUST_NODE="${RUST_NODE:-0}"
+rank_args=()
+if [ "$RANK_LEAF" != "0" ]; then
+	rank_args+=(--rank-leaf)
+fi
+if [ "$OLD_RANK_LEAF" != "0" ]; then
+	rank_args+=(--baseline-rank-leaf)
+fi
 
 mkdir -p "$OUT_DIR"
 echo "generation match: $(basename "$NEW") vs $(basename "$OLD")"
 echo "  $WORKERS workers x $GAMES games per seat, search limit $LIMIT"
+echo "  device $DEVICE, rust node $RUST_NODE, leaf ranking $RANK_LEAF (baseline $OLD_RANK_LEAF)"
 started=$(date +%s)
 
 pids=()
 for i in $(seq 0 $((WORKERS - 1))); do
 	seed=$((FIRST_SEED + i))
-	uv run --group learn python tools/generation_match.py \
+	POKEURAOU_RUST_NODE="$RUST_NODE" uv run --group learn python tools/generation_match.py \
 		--roster "$ROSTER" --value "$NEW" --baseline "$OLD" \
 		--games "$GAMES" --limit "$LIMIT" --seed "$seed" \
+		"${rank_args[@]}" \
 		--out "$OUT_DIR/seed$seed.jsonl" \
 		--games-out "$OUT_DIR/games-seed$seed.jsonl" \
-		--device cpu --torch-threads 1 \
+		--device "$DEVICE" --torch-threads 1 \
 		>"$OUT_DIR/seed$seed.log" 2>&1 &
 	pids+=($!)
 done
