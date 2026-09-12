@@ -47,6 +47,16 @@ def main() -> None:
         "tools/regret_playout.py. Costs about 1.4x per decision.",
     )
     ap.add_argument(
+        "--solve-sparsely",
+        action="store_true",
+        help="prove the equilibrium from the fifth of the matrix that settles it rather "
+        "than filling all of it. Not an approximation -- the round ends only when neither "
+        "side has a better reply over every action, which is a proof about the cells never "
+        "solved. It does land on a different vertex of a degenerate optimum, so the games "
+        "differ from a full-matrix run; measured at 2,544 games that is worth -0.2 points "
+        "[-2.1, +1.8] against 1.94x the speed.",
+    )
+    ap.add_argument(
         "--depth",
         type=int,
         default=1,
@@ -269,6 +279,7 @@ def main() -> None:
         search_limit=args.limit,
         depth=args.depth,
         rank_by_leaf=args.rank_leaf,
+        solve_sparsely=args.solve_sparsely,
         max_turns=args.max_turns,
         cooc=cooc,
         archetype_share=archetype_share,

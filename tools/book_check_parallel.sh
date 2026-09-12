@@ -10,27 +10,36 @@ set -uo pipefail
 
 MODEL="${MODEL:-data/models/value-gen2.pt}"
 ROSTER="${ROSTER:-rizabanadohido}"
-WORKERS="${WORKERS:-14}"
+WORKERS="${WORKERS:-8}"
 GAMES="${GAMES:-280}"
 LIMIT="${LIMIT:-16}"
 SEED="${SEED:-11}"
 EPSILON="${EPSILON:-0.25}"
-TEMPERATURE="${TEMPERATURE:-0.05}"
+# 0.5, matching generate_parallel.sh. It was 0.05 here, which only moves the gen/gen arm
+# -- but that arm exists to be "what generation actually plays", and the coverage table
+# gives the thinnest selection 0.0 games in a generation at 0.05 against 11.9 at 0.5. An
+# arm that answers for a setting nobody runs answers nothing.
+TEMPERATURE="${TEMPERATURE:-0.5}"
+# The port, which this launcher never asked for: without it every arm runs the Python
+# resolver at about fifteen times the cost.
+RUST_NODE="${RUST_NODE:-1}"
+DEVICE="${DEVICE:-cuda}"
 OUT="${OUT:-data/matches/book-check.jsonl}"
 LOGS="${LOGS:-data/matches/logs}"
 
 mkdir -p "$LOGS" "$(dirname "$OUT")"
 echo "book check: $WORKERS shards x $GAMES games x 4 arms, leaf $MODEL, eps=$EPSILON T=$TEMPERATURE"
+echo "  device $DEVICE, rust node $RUST_NODE, width $LIMIT"
 started=$(date +%s)
 
 pids=()
 for i in $(seq 0 $((WORKERS - 1))); do
-	uv run --group learn python tools/book_check.py \
+	POKEURAOU_RUST_NODE="$RUST_NODE" uv run --group learn python tools/book_check.py \
 		--roster "$ROSTER" --model "$MODEL" \
 		--games "$GAMES" --limit "$LIMIT" --seed "$SEED" \
 		--epsilon "$EPSILON" --temperature "$TEMPERATURE" \
 		--shard "$i" --shards "$WORKERS" \
-		--out "$OUT" --device cpu --torch-threads 1 \
+		--out "$OUT" --device "$DEVICE" --torch-threads 1 \
 		>"$LOGS/check$i.log" 2>&1 &
 	pids+=($!)
 done

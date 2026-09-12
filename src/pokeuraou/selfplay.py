@@ -748,6 +748,7 @@ def generate(
     mirror_share: float = 0.0,
     depth: int | tuple[int, int] = 1,
     rank_by_leaf: bool = False,
+    solve_sparsely: bool = False,
 ) -> dict[str, Any]:
     """Plays games and appends one JSON line per finished game.
 
@@ -877,6 +878,7 @@ def generate(
                 evaluate=evaluate,
                 depth=depth,
                 rank_by_leaf=rank_by_leaf,
+                solve_sparsely=solve_sparsely,
                 selection=(
                     [entry.species for entry in roster.sets],
                     [entry.species for entry in foe_six],

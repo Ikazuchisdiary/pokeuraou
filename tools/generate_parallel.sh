@@ -66,9 +66,21 @@ MIRROR_SHARE="${MIRROR_SHARE:-0.1}"
 RUST_NODE="${RUST_NODE:-1}"
 DEVICE="${DEVICE:-cuda}"
 RANK_LEAF="${RANK_LEAF:-0}"
+# Prove the equilibrium from the fifth of the matrix that settles it, instead of filling
+# all of it. Not an approximation: the round ends by asking both sides for a better reply
+# over *every* action and getting none, which is a proof about the cells that were never
+# solved (exploitability 7.7e-08). It does pick a different vertex of a degenerate optimum
+# in six nodes out of eight, and that is what was measured rather than assumed: 2,544
+# games, same model and width on both sides, 49.8% [47.9, 51.8], a = -0.2. Against the
+# 1.94x it is worth taking -- 1.94x the games is 0.96 of a doubling and the learning curve
+# pays +1.7 to +3.6 points per doubling.
+SOLVE_SPARSELY="${SOLVE_SPARSELY:-1}"
 rank_args=()
 if [ "$RANK_LEAF" != "0" ]; then
 	rank_args=(--rank-leaf)
+fi
+if [ "$SOLVE_SPARSELY" != "0" ]; then
+	rank_args+=(--solve-sparsely)
 fi
 book_args=()
 if [ -n "$BOOK" ]; then
