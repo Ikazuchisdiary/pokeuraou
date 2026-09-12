@@ -49,7 +49,7 @@ from pokeuraou.teams import load_roster
 from pokeuraou.value import BatchedValue, load_model
 
 
-def collect(paths: list[Path], from_turn: int, limit: int) -> list[dict]:
+def collect(paths: list[Path], from_turn: int, to_turn: int, limit: int) -> list[dict]:
     """Every recorded move decision at or past `from_turn`, with its game's context.
 
     Move decisions only. A replacement or a self-switch node is mid-turn: resuming from
@@ -69,7 +69,9 @@ def collect(paths: list[Path], from_turn: int, limit: int) -> list[dict]:
                 if record.get("outcome") is None:
                     continue
                 for decision in record["decisions"]:
-                    if decision["kind"] != "move" or decision["turn"] < from_turn:
+                    if decision["kind"] != "move":
+                        continue
+                    if not from_turn <= decision["turn"] <= to_turn:
                         continue
                     out.append(
                         {
@@ -89,6 +91,17 @@ def main() -> None:
     ap.add_argument("--dir", type=Path, nargs="+", default=[Path("data/selfplay-gen8")])
     ap.add_argument("--roster", default="rizabanadohido")
     ap.add_argument("--from-turn", type=int, default=12)
+    ap.add_argument(
+        "--to-turn",
+        type=int,
+        default=25,
+        help="upper bound on the starting turn. Needed because --flat-turns spreads the "
+        "budget over every band that exists, and the pool has bands out to turn 75: an "
+        "unbounded run put 27% of its games past turn 70 and only 22% in the 15-25 range "
+        "the human plans actually live in. Turn-70 doubles is a degenerate one-on-one "
+        "stall, far enough outside the deployment distribution to risk the harm measured "
+        "when generation 8's narrow data was added to the pool.",
+    )
     ap.add_argument("--games", type=int, default=500)
     ap.add_argument("--pool", type=int, default=0, help="cap on positions collected (0 = all)")
     ap.add_argument("--value", type=Path, default=Path("data/models/value-all.pt"))
@@ -121,11 +134,13 @@ def main() -> None:
     paths = sorted(p for d in args.dir for p in d.glob("games-seed*.jsonl"))
     if not paths:
         raise SystemExit(f"no recorded games under {args.dir}")
-    starts = collect(paths, args.from_turn, args.pool)
+    starts = collect(paths, args.from_turn, args.to_turn, args.pool)
     if not starts:
-        raise SystemExit(f"no move decisions at or past turn {args.from_turn}")
+        raise SystemExit(
+            f"no move decisions between turns {args.from_turn} and {args.to_turn}"
+        )
     print(
-        f"{len(starts):,} starting positions at turn >= {args.from_turn} "
+        f"{len(starts):,} starting positions at turn {args.from_turn}-{args.to_turn} "
         f"from {len(paths)} files",
         file=sys.stderr,
     )

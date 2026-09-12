@@ -19,6 +19,10 @@ WORKERS="${WORKERS:-8}"
 VALUE="${VALUE:-data/models/value-all.pt}"
 LIMIT="${LIMIT:-48}"
 FROM_TURN="${FROM_TURN:-12}"
+# Bounded on both sides. The first unbounded run spread its budget over every band the
+# pool has, out to turn 75, and put 27% of its games past turn 70 against 22% in the
+# 15-25 range the human plans live in. Turn-70 doubles is a degenerate stall.
+TO_TURN="${TO_TURN:-25}"
 RANK_LEAF="${RANK_LEAF:-1}"
 DEVICE="${DEVICE:-cuda}"
 RUST_NODE="${RUST_NODE:-1}"
@@ -29,7 +33,7 @@ fi
 
 mkdir -p "$OUT_DIR" "$OUT_DIR/logs"
 echo "resume generation: $WORKERS workers x $GAMES games -> $OUT_DIR"
-echo "  starts: $SRC, turn >= $FROM_TURN"
+echo "  starts: $SRC, turn $FROM_TURN-$TO_TURN"
 echo "  leaf: $VALUE ($DEVICE), width $LIMIT, rust node $RUST_NODE"
 started=$(date +%s)
 
@@ -39,6 +43,7 @@ for i in $(seq 0 $((WORKERS - 1))); do
 	POKEURAOU_RUST_NODE="$RUST_NODE" uv run --group learn python tools/resume_generate.py \
 		--dir $SRC \
 		--from-turn "$FROM_TURN" \
+		--to-turn "$TO_TURN" \
 		--games "$GAMES" \
 		--value "$VALUE" \
 		--limit "$LIMIT" \

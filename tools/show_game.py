@@ -27,7 +27,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from pokeuraou.actions import RECHARGE
+from pokeuraou.actions import RECHARGE, STRUGGLE
 from pokeuraou.names import Localiser, load_names
 from pokeuraou.regulation import Regulation, load_regulation, to_id
 from pokeuraou.resolve import RESIDUAL_PHASE
@@ -133,9 +133,19 @@ def name_action(
             recharging = any(
                 v.get("id") == "mustrecharge" for v in (mon or {}).get("volatiles") or []
             )
+            # Same shape, different cause: with every move out of PP, Showdown offers
+            # Struggle and offers it as `move 1`. Reading slot 1 named a 75-turn stall's
+            # closing turns after Infestation and Muddy Water, the two moves that had run
+            # dry and were the reason Struggle was on offer at all -- so the log showed
+            # both sides using moves they could not use, and the result made no sense.
+            struggling = bool(mon) and all(
+                (m.get("pp") or 0) <= 0 for m in mon.get("moves") or [{}]
+            )
             move_id = (
                 RECHARGE
                 if recharging
+                else STRUGGLE
+                if struggling
                 else (
                     mon["moves"][index]["id"]
                     if mon and 0 <= index < len(mon["moves"])
@@ -146,7 +156,7 @@ def name_action(
             # The recharge takes no target. Pre-fix records carry one anyway, because the
             # generator offered the real move's targets; printing it would teach a reader
             # a rule that does not exist.
-            if not recharging and len(tokens) > 2 and tokens[2] not in ("mega",):
+            if not recharging and not struggling and len(tokens) > 2 and tokens[2] not in ("mega",):
                 target = int(tokens[2])
                 # Positive numbers are the foes' slots, negative the allies'.
                 whose = foes if target > 0 else side
