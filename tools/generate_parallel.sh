@@ -1,19 +1,32 @@
 #!/usr/bin/env bash
 # Generation 2 data: one process per worker, because generation is the whole bottleneck.
 #
-# 14 workers, not 16. Measured on this machine (8 physical cores / 16 threads,
-# tools/bench_scaling.py): 14 workers give 112.3 games/min and 16 collapse to 80.2, because
-# sixteen workers on sixteen logical threads leave nothing for the OS. "workers = logical
-# cores" is the wrong rule here.
+# 8 workers on the GPU, which reverses two settings this script used to argue for at
+# length. Both arguments were correct when they were made and both were invalidated by the
+# same event: the resolver moved to Rust and got twenty times faster, so every share
+# measured against it changed.
 #
-# --device cpu --torch-threads 1 is deliberate. CPU inference is only 8% slower per process
-# and removes the ~1 GB CUDA context per worker that caps a 12 GB card at nine, and the GPU
-# has almost nothing to win: re-measured at width 24 with the learned leaf
-# (tools/profile_generation.py), the forward pass is 1.3% of a game and building the batch
-# in Python is ten times that. Moving 1.3% to a card cannot pay for the contexts.
-# And torch defaults to a machine-sized thread pool per process, so without the thread cap
-# fourteen processes spawn a hundred threads onto eight cores and the run ends up slower
-# than a serial one.
+#   "the forward pass is 1.3% of a game, and 1.3% cannot pay for a 1 GB CUDA context per
+#   worker" -- that 1.3% was of a game whose resolver was Python. Re-measured against the
+#   port: width 48, cpu, torch is 35.4% of a process; on cuda it is 9.4% and the process
+#   takes 4.85 s instead of 10.68. Whole machine, width 48, --rank-leaf, idle: cuda at 8
+#   workers 263.8 games/min against cpu at 24 workers 146.3. The nine-context cap is real
+#   and no longer binds, because nine beats twenty-four.
+#
+#   "14 workers, not 16; 16 collapse to 80.2 games/min" -- also pre-port. A worker is much
+#   lighter now and the cpu curve no longer collapses at 16 or 24. On cuda the knee is 8
+#   to 9, which is where the contexts run out anyway.
+#
+# --torch-threads 1 stays. torch defaults to a machine-sized pool per process, so without
+# the cap eight processes spawn a hundred threads onto eight cores.
+#
+# Two things that are *not* the machine, measured separately: a game's cost varies
+# eight-fold (1.77 to 13.75 s/game measured strictly serially on an idle machine), because
+# a position needing an exact budget expands one matrix cell into many leaves; and the
+# cuda-over-cpu margin depends on which games are in the mix, since the GPU wins the cheap
+# games by about 2x and the CPU wins the dear ones by about 14%. A benchmark on a light
+# seed therefore flatters cuda and one on a heavy seed flatters cpu. Neither ever says cpu
+# is the better default.
 #
 #   bash tools/generate_parallel.sh data/selfplay-gen2 1000 601
 set -uo pipefail
@@ -21,7 +34,7 @@ set -uo pipefail
 OUT_DIR="${1:-data/selfplay-gen2}"
 GAMES_PER_WORKER="${2:-1000}"
 FIRST_SEED="${3:-601}"
-WORKERS="${WORKERS:-14}"
+WORKERS="${WORKERS:-8}"
 VALUE="${VALUE:-data/models/value-worlds.pt}"
 LIMIT="${LIMIT:-16}"
 # Optional: draw both sides' 4-of-6 from cached selection equilibria instead of uniformly.
@@ -47,12 +60,11 @@ MIRROR_SHARE="${MIRROR_SHARE:-0.1}"
 # stays in torch. Measured here, identical games either way, learned leaf at width 24:
 # 8.33 s/game in Python, 0.84 with the node on the CPU, 0.51 on the GPU.
 #
-# `DEVICE` matters now in a way it did not before. The comment above about the GPU having
-# nothing to win was true when it was written: with the resolver and the encoder in Python
-# the forward pass was 1.3% of a game. With both of those in Rust it is most of what is
-# left, and the balance turns over.
-RUST_NODE="${RUST_NODE:-0}"
-DEVICE="${DEVICE:-cpu}"
+# `RUST_NODE` defaults to 1. It defaulted to 0, which meant a run launched without the
+# variable quietly used the Python resolver and paid twenty times over for it -- a default
+# that costs 20x when you forget it is not a default, it is a trap.
+RUST_NODE="${RUST_NODE:-1}"
+DEVICE="${DEVICE:-cuda}"
 RANK_LEAF="${RANK_LEAF:-0}"
 rank_args=()
 if [ "$RANK_LEAF" != "0" ]; then
