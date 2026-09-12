@@ -88,6 +88,13 @@ def main() -> None:
         "learned, which a spread sample may contain none of.",
     )
     ap.add_argument(
+        "--only-ability",
+        default=None,
+        help="comma-separated ability ids; keep only calls where one of them is on the "
+        "field. Coverage is a property of the sample -- an ability no sampled team carries "
+        "is an ability the differential says nothing about.",
+    )
+    ap.add_argument(
         "--value",
         default=None,
         help="play the games with a trained value function (data/models/*.pt). The games a "
@@ -119,6 +126,7 @@ def main() -> None:
         objective = OBJECTIVES["hp-share"]
 
     wanted_moves = {m for m in (args.only_move or "").split(",") if m}
+    wanted_abilities = {a for a in (args.only_ability or "").split(",") if a}
 
     positions: list[dict] = []
     position_index: dict[str, int] = {}
@@ -146,10 +154,17 @@ def main() -> None:
                 for side in actions
                 for a in side.slots
             )
+        if wanted and wanted_abilities:
+            wanted = any(
+                mon.ability in wanted_abilities
+                for side in pos.sides
+                for mon in side.pokemon
+                if not mon.fainted
+            )
         # Keep a spread across the run rather than the first N, which would all come from
         # turn 1 of game 1 and hide everything the later turns reach. A move filter keeps
         # every match instead: there are few of them and the point is to have any at all.
-        stride = 1 if wanted_moves else max(1, args.stride)
+        stride = 1 if (wanted_moves or wanted_abilities) else max(1, args.stride)
         if wanted and len(cases) < args.cases and seen_cases % stride == 0:
             cases.append(
                 {

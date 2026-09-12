@@ -677,9 +677,10 @@ fn ability_handled(ability: &str) -> bool {
             | "liquidvoice" | "protean" | "libero"
             // Fractional priority and the weather HP abilities, both implemented here.
             | "quickdraw" | "icebody" | "raindish" | "comatose" | "mirrorarmor"
+            // With secondaries enumerated this one branches a Disable, which is why it
+            // took implementing the `disable` condition before it could be listed here.
+            | "cursedbody"
             // Python reports these and changes nothing, so ignoring them agrees with it.
-            // (`cursedbody` is deliberately absent: with secondaries enumerated it really
-            // does branch a Disable, which this port does not implement.)
             | "static" | "flamebody" | "effectspore" | "poisonpoint" | "cutecharm"
             | "poisontouch" | "angerpoint" | "berserk" | "angershell" | "truant" | "dancer"
     ) || crate::inert::ability_is_inert(ability)
@@ -763,7 +764,14 @@ fn check_move_supported(reg: &Reg, move_id: &str) -> Result<(), String> {
             return Err(format!("move field {field}: {move_id}"));
         }
     }
-    if mv.category == "Status" && !status_move_handled(move_id) {
+    // A status move Python does not fully model gets the declarative fields and a report,
+    // and nothing else -- which is exactly what this port does with one too. So refusing is
+    // right only where Python has custom code it *does* model and this port has not
+    // implemented it; refusing the rest was refusing to do the same nothing.
+    if mv.category == "Status"
+        && !status_move_handled(move_id)
+        && crate::modelled::status_move_is_fully_modelled(move_id)
+    {
         return Err(format!("status move: {move_id}"));
     }
     // Trick and Switcheroo swap items, which this port does not implement; Last Resort
@@ -852,10 +860,10 @@ fn check_position_supported(
             if mon.fainted != (mon.hp == 0) {
                 return Err(format!("fainted={} disagrees with hp={}", mon.fainted, mon.hp));
             }
-            // Three abilities change the position in ways this port does not implement.
+            // Two abilities change the position in ways this port does not implement.
             // They are refused here rather than at the point of use so a turn can never
             // get half-way through one.
-            if matches!(mon.ability.as_str(), "cursedbody" | "stancechange" | "slowstart") {
+            if matches!(mon.ability.as_str(), "stancechange" | "slowstart") {
                 return Err(format!("ability: {}", mon.ability));
             }
         }
@@ -868,12 +876,12 @@ pub(crate) fn volatile_is_handled(vid: &str) -> bool {
 }
 
 fn volatile_handled(vid: &str) -> bool {
-    // Inverted on purpose. A whitelist of volatiles refused whatever it had not been told
-    // about -- Hyper Beam's `mustrecharge` cost 45% of the cells of a node, for an effect
-    // this port implements -- so what is listed here is the far shorter set the Python
-    // resolver acts on by name and this port does not:
-    //
-    //   disable   the flag lives on the move slot, and the residual has to clear it there
+    // Inverted on purpose, and now empty. A whitelist of volatiles refused whatever it had
+    // not been told about -- Hyper Beam's `mustrecharge` cost 45% of the cells of a node,
+    // for an effect this port implements -- so what belongs here is the set the Python
+    // resolver acts on by name and this port does not. `disable` was the last of them and
+    // is implemented; the flag on the move slot and its clearing in the residual were the
+    // work.
     //
     // Everything else is either implemented here or carried generically: added, counted
     // down, and removed at zero, which is what Python does with a volatile it does not
@@ -881,8 +889,9 @@ fn volatile_handled(vid: &str) -> bool {
     // encore, endure, flinch, followme, glaiverush, helpinghand, ingrain, leechseed,
     // magnetrise, mustrecharge, partiallytrapped, pendingselfswitch, perishsong,
     // ragepowder, saltcure, smackdown, spotlight, stall, taunt, telekinesis, throatchop,
-    // torment, twoturnmove, unburden, yawn -- and all but `disable` are handled.
-    vid != "disable"
+    // torment, twoturnmove, unburden, yawn -- and all of them are handled.
+    let _ = vid;
+    true
 }
 
 // ---------------------------------------------------------------------------

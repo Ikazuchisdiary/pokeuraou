@@ -49,10 +49,17 @@ GPU で **15〜17 倍**、CPU で順伝播しても **8〜10 倍**速くなり�
 - **拒否理由は数えられる**ので、次に実装すべきものは推測ではなく影響の大きさで決まる
 
 実際この数えが次を順に名指ししました: `pixilate`(730) → `poisontouch`(177) →
-`thawsTarget`(96) → `mustrecharge`（1 ノードの 45% のセル）→ `recharge` 疑似技。
-最後の 2 つは「この移植が実装済みの効果」を白リストに書き忘れていただけで、
-**白リストを反転させて解決しました**——列挙するのは「Python が名指しで扱っていて、こちらが
-実装していないもの」だけ（揮発性状態では `disable` 1 つ）。
+`thawsTarget`(96) → `mustrecharge`（1 ノードの 45% のセル）→ `recharge` 疑似技 →
+`electroshot`(1.5%) → `afteryou`(1.9%) → `cursedbody`(3.3%)。
+**白リストは 2 つとも反転させました**——列挙するのは「Python が名指しで扱っていて、こちらが
+実装していないもの」だけ:
+
+- 揮発性状態: 以前は `disable` 1 つ。`disable` を実装したので**今は空**です。
+- 状態技: Python が完全にモデル化していない技は、Python 自身も宣言的フィールドを適用して
+  申告するだけです。こちらも同じことをするので、**拒否が正しいのは Python が独自コードを
+  モデル化していてこちらが未実装のときだけ**。112 技が拒否から解決に変わりました。
+
+学習済み価値関数の生成 10 ゲーム・34,959 セルで、**拒否は 0** です。
 
 ## 検証
 
@@ -65,6 +72,8 @@ Python がオラクル、Showdown は Python のオラクル（`tools/diff_*.py`
 | 1 ターン解決（狭いサンプル） | 1,190 ターン | **1,190 一致 / 誤り 0 / 拒否 0** |
 | 1 ターン解決（広いサンプル） | 1,863 ターン | **1,863 一致 / 誤り 0 / 拒否 0** |
 | 1 ターン解決（二段技だけを集めた） | 3,495 ターン | **3,495 一致 / 誤り 0 / 拒否 0** |
+| 1 ターン解決（`cursedbody` を場に含む） | 1,154 ターン | **1,154 一致 / 誤り 0 / 拒否 0** |
+| 1 ターン解決（新たに解決する状態技） | 667 ターン | **667 一致 / 誤り 0 / 拒否 0** |
 | 符号化（`encode.py` の 8 配列） | 9,730 局面 | **全配列ビット一致** |
 | ノード（行列）充填 | 25 ノード 12,192 セル | **拒否 0**、最大差 6.7e-16 |
 | ノード充填（学習済み価値関数 + 対照軸） | 10 ノード 9,696 セル | **拒否 0**、最大差 3.9e-16 |
@@ -223,23 +232,30 @@ Python 側が自分の乱数生成器で 1 つ引き、その 1 局面だけを�
 
 次に効くのは `narrow` で、これは Python のままです。
 
-### 拒否の残り（学習済み価値関数の生成、10 ゲーム 34,959 セル）
+### 拒否は 0 になりました
 
-| 理由 | セル数 |
-|---|---|
-| `ability: cursedbody` | 1,152 |
-| `status move: afteryou` | 666 |
-| **合計** | 1,818（**5.2%**） |
+学習済み価値関数の生成 10 ゲーム・34,959 セルで拒否 0。そこに至るまでの 3 つ:
+
+| 理由 | 測ったときの割合 | 中身 |
+|---|---|---|
+| `two-turn move: electroshot` | 1.5% | 溜め技 12 種すべて |
+| `status move: afteryou` | 1.9% | 状態技の白リスト反転（112 技） |
+| `ability: cursedbody` | 3.3% | `disable` 条件そのもの |
 
 拒否されたセルは Python が埋めるので答えは変わりませんが、**そのセルだけ速くありません**。
 学習済み価値関数ではもう 1 つ副作用があります——拒否されたセルの葉は、
 ノード全体とは別の小さな順伝播で採点されるので、float32 の行列演算が
-形に依存する分だけ値が動きます（実測 1e-8）。**移植の穴が数値にも出る**ということです。
+形に依存する分だけ値が動きます。実際 1 つの探索値が 1e-8 動いていました。
+**移植の穴が数値にも出る**ということです。埋めたら消えました。
 
-直前まで 1 位だったのは `two-turn move: electroshot` で、6 ゲーム 23,304 セルの 1.5% でした。
-Python は二段技を「溜めターンの能力上昇 → 天候で溜めを飛ばすか判定」だけでモデル化しており
-（無敵状態はどこにもありません）、移植も同じだけにしたところ 0 になりました。
-`tools/dump_turn_cases.py --only-move ...` で集めた 3,495 ターンで突合済みです。
+`cursedbody` は 30% で Disable を分岐します。だから Disable 条件——どの技を止めたかを
+覚える揮発性状態、技スロットの `disabled` フラグ、残留処理での解除——を実装するまで
+実装できませんでした。43/394 のチームが持っています。
+
+サンプルの作り方も変えました。普通のサンプルには `electroshot` が 1 件も入っていません。
+`tools/dump_turn_cases.py --only-move` / `--only-ability` は「覚えたばかりのものだけ」を
+集めます。**カバー率はサンプルの性質**なので、実装した直後に必要なのは
+そのサンプルです。
 
 ## 走らせ方
 
@@ -270,10 +286,13 @@ POKEURAOU_RUST_NODE=1 uv run --group learn python tools/diff_node.py \
 POKEURAOU_RUST_NODE=1 uv run --group learn python tools/diff_generation.py \
     --games 6 --seed 77 --device cuda --value data/models/value-gen234.pt
 
-# 覚えたばかりの技だけを集めて突合する（普通のサンプルには 1 件も入らない）
+# 覚えたばかりのものだけを集めて突合する（普通のサンプルには 1 件も入らない）
 uv run python tools/dump_turn_cases.py --games 8 --seed 404 \
     --only-move fly,dig,dive,bounce,phantomforce,shadowforce,skyattack,meteorbeam \
     --out rust/turns-twoturn.json
+uv run python tools/dump_turn_cases.py --games 10 --seed 404 \
+    --value data/models/value-gen234.pt --only-ability cursedbody \
+    --out rust/turns-cursedbody.json
 
 # 白リストの再生成（エンジンが効果を覚えたら必ず）
 uv run python tools/port_coverage.py --rust

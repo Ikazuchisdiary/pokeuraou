@@ -17,7 +17,7 @@ use crate::resolve::{
     TWO_TURN_MOVES,
 };
 use crate::speed::QueuedAction;
-use serde_json::Value;
+use serde_json::{json, Value};
 
 const RECHARGE: &str = "recharge";
 
@@ -950,6 +950,25 @@ fn after_hit(
         turn.add_volatile(target.0, target.1, "throatchop", duration);
     }
 
+    // Cursed Body: `onDamagingHit` with `randomChance(3, 10)`, gated on neither contact
+    // nor the target surviving -- the handler runs from `damage()`, before the faint is
+    // processed. 43 of the 394 tournament teams carry it.
+    if dealt > 0 && matches!(defender_ability, Some(a) if a.as_str() == "cursedbody") {
+        let attacker_free = turn
+            .mon_at(me.0, me.1)
+            .map(|mon| !mon.has_volatile("disable"))
+            .unwrap_or(false);
+        if attacker_free {
+            if budget.enumerate_secondary {
+                turn.pending_secondaries.push((0.3, json!({ "disable": true }), me));
+            } else if !budget.pinned_policy {
+                // Same reasoning as a secondary: under the pinned policy `randomChance`
+                // is answered with no, so not applying it is exact rather than approximate.
+                turn.report("cursedbody (30% disable, not branched)");
+            }
+        }
+    }
+
     if mv.has_flag("contact") && dealt > 0 {
         let (ability, item) = match turn.mon_at(target.0, target.1) {
             None => (None, None),
@@ -1073,6 +1092,12 @@ fn apply_secondary(
     secondary: &Value,
     target: Slot,
 ) -> Result<(), String> {
+    if secondary.get("disable").and_then(Value::as_bool).unwrap_or(false) {
+        // Cursed Body, pushed through the secondary fan-out because it is the same shape:
+        // a chance whose consequence outlives the turn.
+        apply_disable(turn, target.0, target.1, None);
+        return Ok(());
+    }
     if let Some(status) = secondary.get("status").and_then(Value::as_str) {
         let status = status.to_string();
         turn.apply_status(target.0, target.1, &status)?;
@@ -1169,6 +1194,8 @@ fn on_being_hit(
             turn.apply_boosts(target.0, target.1, boosts, false);
         }
     }
+    // Cursed Body stays on this list even though the Disable is branched: Python reports
+    // it here regardless, and the report is part of what a turn returns.
     if matches!(ability.as_str(), "angerpoint" | "berserk" | "angershell" | "cursedbody") {
         turn.report(format!("on-hit ability: {ability}"));
     }
@@ -1403,6 +1430,52 @@ fn immune_to_move(
     None
 }
 
+/// Disables the target's last move, as Showdown's `disable` condition does.
+///
+/// Fails -- with no volatile at all -- when the target has not moved yet, or when the move
+/// it last used has no PP left; both are `return false` in `onStart`, which means no
+/// volatile rather than a volatile that disables nothing.
+///
+/// The duration is decremented immediately when the target still owes an action this turn
+/// or when it is the Pokemon whose own move triggered this, which covers Cursed Body and
+/// the ordinary Disable; five turns is left for disabling something that has already acted.
+fn apply_disable(turn: &mut Turn, side: usize, slot: usize, mv: Option<&Move>) -> bool {
+    let (last_move, already) = match turn.mon_at(side, slot) {
+        None => return false,
+        Some(mon) if mon.fainted => return false,
+        Some(mon) => (mon.last_move, mon.has_volatile("disable")),
+    };
+    let Some(last_move) = last_move else { return false };
+    if already {
+        return false;
+    }
+    let has_pp = match turn.mon_at(side, slot) {
+        None => false,
+        Some(mon) => mon.moves.get(last_move).map(|m| m.pp > 0).unwrap_or(false),
+    };
+    if !has_pp {
+        return false;
+    }
+    let mut duration = match mv {
+        Some(mv) => effect_duration(turn, mv, "disable", side, slot).unwrap_or(5),
+        None => 5,
+    };
+    if !turn.acted[side][slot] || turn.current_actor == Some((side, slot)) {
+        duration -= 1;
+    }
+    if let Some(mon) = turn.mon_at_mut(side, slot) {
+        let mut effect = Effect::new(Id::new("disable"));
+        effect.duration = Some(duration);
+        effect.move_id = Some(last_move);
+        mon.volatiles.push(effect);
+        // The flag lives on the move slot, which is what the legality half reads.
+        if let Some(move_slot) = mon.moves.get_mut(last_move) {
+            move_slot.disabled = true;
+        }
+    }
+    true
+}
+
 /// Locks the target into the move it last used. Fails -- with no volatile at all --
 /// when the target has not moved, when that move cannot be encored, or when it is out of
 /// PP, all three of which are `return false` in Showdown's `onStart`.
@@ -1633,7 +1706,12 @@ fn apply_status_move(
                 continue;
             }
             if vid == "disable" {
-                return Err("status move volatile: disable".into());
+                // Which move is the whole effect, and it fails outright when the target has
+                // not moved, so the generic path cannot express it.
+                if !apply_disable(turn, target.0, target.1, Some(mv)) {
+                    turn.move_failed[action.side][action.slot] = true;
+                }
+                continue;
             }
             if !crate::resolve::volatile_is_handled(&vid) {
                 return Err(format!("status move volatile: {vid}"));
@@ -2013,6 +2091,15 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
                 if duration - 1 <= 0 {
                     if volatile.id.as_str() == "yawn" {
                         yawn_expired = true;
+                    }
+                    if volatile.id.as_str() == "disable" {
+                        // The flag lives on the move slot, so it has to be cleared here or
+                        // the move stays unusable for the rest of the battle.
+                        if let Some(move_id) = volatile.move_id {
+                            if let Some(move_slot) = mon.moves.get_mut(move_id) {
+                                move_slot.disabled = false;
+                            }
+                        }
                     }
                     continue;
                 }
