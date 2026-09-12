@@ -586,6 +586,10 @@ impl Field {
 /// allocation is noise, and the alternative is guessing.
 pub static CLONES: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// How many times a write to a shared Pokemon forced a copy of it. The counterpart to
+/// `CLONES`: sharing only pays if this stays well under twelve per clone.
+pub static UNSHARED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 impl Clone for Position {
     fn clone(&self) -> Position {
         CLONES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -660,6 +664,10 @@ impl Position {
 
     pub fn mon_at_mut(&mut self, side: usize, slot: usize) -> Option<&mut Pokemon> {
         let index = (*self.sides.get(side)?).active.get(slot).copied().flatten()?;
-        Some(Rc::make_mut(&mut self.sides[side].pokemon[index]))
+        let shared = &mut self.sides[side].pokemon[index];
+        if Rc::strong_count(shared) > 1 {
+            UNSHARED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        Some(Rc::make_mut(shared))
     }
 }

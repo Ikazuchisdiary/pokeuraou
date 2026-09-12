@@ -394,6 +394,8 @@ fn turns_main(args: &[String]) {
         println!("  position clones: {clones:.0} = {:.1} per turn", clones / calls);
         let hits = damage::CALLS.load(std::sync::atomic::Ordering::Relaxed) as f64;
         println!("  damage calls:    {hits:.0} = {:.1} per turn", hits / calls);
+        let copies = position::UNSHARED.load(std::sync::atomic::Ordering::Relaxed) as f64;
+        println!("  forced copies:   {copies:.0} = {:.1} per turn", copies / calls);
     }
 }
 
