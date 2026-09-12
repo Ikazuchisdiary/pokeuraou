@@ -24,14 +24,69 @@ Whether it helps is not assumed. This module only makes the question askable.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
+
+from .regulation import repo_root
 
 #: Recorded games whose `provenance.kind` is this came from ordinary self-play, where both
 #: sides are the same agent. Absent provenance means the same thing -- every game written
 #: before this existed was self-play.
 SELF_PLAY = "selfplay"
+
+
+#: Computed once per process: it reads a few dozen files and never changes while running.
+_ENGINE: dict[str, Any] | None = None
+
+
+def engine_fingerprint() -> dict[str, Any]:
+    """Which engine produced this game, so a later fix can be dated against the data.
+
+    Generations 2, 3 and 4 were all generated with Hyper Beam costing nothing -- no
+    recharge turn, 569 of them in one worker's 500 games -- and the records say nothing
+    about it. There is no field to filter on, so the only way to know which pool predates
+    the fix is to remember. At a few tens of thousands of games that is merely unpleasant;
+    at the millions this is heading for, a defect found late means either discarding
+    everything or trusting a memory.
+
+    Two identifiers, because they fail differently. The commit is what a person wants --
+    it names the fixes that were in -- and it is a lie the moment the tree is dirty, which
+    is most of the time during a day's work. The source hash cannot lie: two games with
+    the same hash came from the same code, whatever anyone remembers.
+
+    The hash covers every Python source and every Rust source, which is deliberately more
+    than "the rules". A docstring edit changes it and that is a false alarm; the opposite
+    error is what cost three generations. Over-broad is recoverable by looking, and
+    under-broad is not recoverable at all.
+    """
+    global _ENGINE
+    if _ENGINE is not None:
+        return _ENGINE
+    root = repo_root()
+    digest = hashlib.blake2b(digest_size=8)
+    for pattern in ("src/pokeuraou/*.py", "rust/src/*.rs"):
+        for path in sorted(root.glob(pattern)):
+            digest.update(path.name.encode("utf-8"))
+            digest.update(path.read_bytes())
+    commit, dirty = "", False
+    try:
+        commit = subprocess.run(  # noqa: S603
+            ["git", "rev-parse", "HEAD"],  # noqa: S607
+            cwd=root, capture_output=True, text=True, timeout=10, check=True,
+        ).stdout.strip()
+        dirty = bool(
+            subprocess.run(  # noqa: S603
+                ["git", "status", "--porcelain"],  # noqa: S607
+                cwd=root, capture_output=True, text=True, timeout=10, check=True,
+            ).stdout.strip()
+        )
+    except (OSError, subprocess.SubprocessError):
+        pass
+    _ENGINE = {"sources": digest.hexdigest(), "commit": commit, "dirty": dirty}
+    return _ENGINE
 
 
 def provenance(
@@ -127,4 +182,11 @@ def open_games(path: Path | None) -> Any:  # noqa: ANN401
     return path.open("a", encoding="utf-8")
 
 
-__all__ = ["SELF_PLAY", "agent_name", "open_games", "provenance", "write_game"]
+__all__ = [
+    "SELF_PLAY",
+    "agent_name",
+    "engine_fingerprint",
+    "open_games",
+    "provenance",
+    "write_game",
+]

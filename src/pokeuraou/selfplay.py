@@ -38,6 +38,7 @@ from .narrow import narrow
 from .payoff import HP_SHARE, Objective
 from .position import Field, MoveSlot, Pokemon, Position, Side
 from .priors import Cooccurrence, MetagamePrior, SampledSet
+from .provenance import engine_fingerprint
 from .regulation import STAT_IDS, Regulation, repo_root
 from .resolve import (
     Budget,
@@ -165,6 +166,10 @@ class GameRecord:
             if isinstance(search_limit, tuple)
             else search_limit,
             "targetIsRealOutcome": True,
+            # Which engine produced this, so a fix found later can be dated against the
+            # data rather than remembered. Three generations were produced with Hyper Beam
+            # costing nothing and carry no field that says so.
+            "engine": engine_fingerprint(),
             "ownSix": self.own_six,
             "foeSix": self.foe_six,
             "ownPick": self.own_pick,
