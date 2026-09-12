@@ -29,6 +29,9 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -37,6 +40,12 @@ from .actions import MoveAction, PassAction, SideAction, SwitchAction
 from .position import Position
 from .regulation import Regulation, repo_root
 from .resolve import Budget
+
+#: Seconds to wait for one node before giving up on the subprocess entirely. Not a
+#: latency budget: a width-48 node is tens of megabytes and a dozen workers share one
+#: machine, so this only has to be longer than the slowest honest answer and shorter than
+#: "the run never finishes".
+NODE_TIMEOUT = float(os.environ.get("POKEURAOU_RUST_NODE_TIMEOUT", "300"))
 
 ENV_ENABLE = "POKEURAOU_RUST_NODE"
 ENV_BINARY = "POKEURAOU_RUST_NODE_BIN"
@@ -256,17 +265,58 @@ class RustNode:
         regulation = repo_root() / "configs" / "regulations" / f"{self.format_id}.json"
         # Binary, not text: an encoded node is a JSON header line followed by the raw
         # little-endian arrays on the same pipe, and a text stream would mangle them.
+        #
+        # stderr goes to a temporary *file*, not a pipe. A pipe nobody drains fills at
+        # about 64 KB and blocks the child inside `eprintln!`, with the parent blocked
+        # reading stdout -- the two wait on each other and the worker never moves again.
+        # That is not hypothetical: a generation run at width 48 had one worker do zero
+        # games in ninety seconds while its eleven siblings did fourteen to twenty-seven,
+        # with nothing in its log. A file never blocks, and the diagnostics survive.
+        # Held for the life of the process and closed in `close`, so a context
+        # manager is the wrong shape here.
+        self._errors = tempfile.TemporaryFile()  # noqa: SIM115
         self._process = subprocess.Popen(
             [str(self.binary), "node", str(regulation)],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=self._errors,
         )
+        # One thread, so a read that never returns can be abandoned. Killing the child
+        # closes the pipe, which is what actually unblocks it.
+        self._reader = ThreadPoolExecutor(max_workers=1)
 
     def close(self) -> None:
         if self._process.poll() is None:
             self._process.stdin.close()
             self._process.wait(timeout=5)
+        self._reader.shutdown(wait=False)
+        self._errors.close()
+
+    def _stderr_text(self) -> str:
+        """Whatever the child has written to stderr so far. Never blocks."""
+        try:
+            self._errors.seek(0)
+            return self._errors.read().decode("utf-8", "replace").strip()
+        except OSError:
+            return ""
+
+    def _with_deadline(self, call, what: str):  # noqa: ANN001, ANN202
+        """Run a blocking read with a deadline; a child that wedges becomes a fallback.
+
+        The deadline is generous on purpose. A width-48 node can be tens of megabytes and
+        the machine may be running a dozen of these at once, so this is not a latency
+        budget -- it is the difference between a run that finishes slowly and one that
+        does not finish. On expiry the child is killed, which closes the pipe and releases
+        the thread still blocked inside the read.
+        """
+        try:
+            return self._reader.submit(call).result(timeout=NODE_TIMEOUT)
+        except FuturesTimeout:
+            self._process.kill()
+            raise RuntimeError(
+                f"the Rust node did not answer within {NODE_TIMEOUT:.0f}s ({what}); "
+                f"killed it. {self._stderr_text()}"
+            ) from None
 
     def score(
         self,
@@ -332,10 +382,9 @@ class RustNode:
         payload = json.dumps(request, ensure_ascii=False).encode("utf-8")
         self._process.stdin.write(payload + b"\n")
         self._process.stdin.flush()
-        line = self._process.stdout.readline()
+        line = self._with_deadline(self._process.stdout.readline, "header")
         if not line:
-            stderr = self._process.stderr.read().decode("utf-8", "replace")
-            raise RuntimeError(f"the Rust node process stopped: {stderr.strip()}")
+            raise RuntimeError(f"the Rust node process stopped: {self._stderr_text()}")
         response = json.loads(line.decode("utf-8"))
         if "error" in response:
             raise RuntimeError(f"the Rust node refused the request: {response['error']}")
@@ -350,11 +399,14 @@ class RustNode:
         """
         body = bytearray()
         while len(body) < count:
-            chunk = self._process.stdout.read(count - len(body))
+            want = count - len(body)
+            chunk = self._with_deadline(
+                lambda n=want: self._process.stdout.read(n), f"{count} byte body"
+            )
             if not chunk:
-                stderr = self._process.stderr.read().decode("utf-8", "replace")
                 raise RuntimeError(
-                    f"the Rust node sent {len(body)} of {count} bytes: {stderr.strip()}"
+                    f"the Rust node sent {len(body)} of {count} bytes: "
+                    f"{self._stderr_text()}"
                 )
             body += chunk
         return body
