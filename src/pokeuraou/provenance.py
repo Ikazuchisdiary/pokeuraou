@@ -120,6 +120,7 @@ def provenance(
     limits: tuple[int, int],
     depths: tuple[int, int] = (1, 1),
     rankings: tuple[str, str] = ("damage", "damage"),
+    solvers: tuple[str, str] = ("full", "full"),
     selection: str = "uniform",
     note: str = "",
 ) -> dict[str, Any]:
@@ -148,6 +149,7 @@ def provenance(
         "limits": list(limits),
         "depths": list(depths),
         "rankings": list(rankings),
+        "solvers": list(solvers),
         "selection": selection,
         **({"note": note} if note else {}),
     }
@@ -157,8 +159,14 @@ def agent_name(source: dict[str, Any], side: int) -> str:
     """A stable name for the agent that played one side of a recorded game.
 
     The name is the whole configuration, because that is what was played: the leaf, the
-    candidate width, the search depth and the ranking. Two records naming the same agent
-    must mean the same agent, or a rating pools games that were not comparable.
+    candidate width, the search depth, the ranking and how the node was solved. Two
+    records naming the same agent must mean the same agent, or a rating pools games that
+    were not comparable.
+
+    The solver is in the name even though both settings solve the same game to the same
+    value. They land on different vertices of a degenerate optimum, so they play different
+    mixtures, and whether that costs anything is the question -- a name that could not
+    tell them apart would answer it by assumption.
 
     Records written before a field existed are read at its default, which is what those
     runs actually used.
@@ -167,11 +175,14 @@ def agent_name(source: dict[str, Any], side: int) -> str:
     limit = (source.get("limits") or [0, 0])[side]
     depth = (source.get("depths") or [1, 1])[side]
     ranking = (source.get("rankings") or ["damage", "damage"])[side]
+    solver = (source.get("solvers") or ["full", "full"])[side]
     name = f"{leaf}/w{limit}"
     if depth != 1:
         name += f"/d{depth}"
     if ranking != "damage":
         name += f"/{ranking}"
+    if solver != "full":
+        name += f"/{solver}"
     return name
 
 

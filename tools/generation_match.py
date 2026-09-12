@@ -78,6 +78,19 @@ def main() -> None:
         "comparison.",
     )
     ap.add_argument("--baseline-rank-leaf", action="store_true", help="same for the other arm")
+    ap.add_argument(
+        "--solve-sparsely",
+        action="store_true",
+        help="the arm under test proves the equilibrium from about a fifth of the matrix "
+        "instead of filling all of it. Both settle on an equilibrium of the same game "
+        "(exploitability 7.7e-08), so this is not a strength setting in theory -- what "
+        "differs is which vertex of a degenerate optimum gets played, and a maximin "
+        "strategy only guarantees the value. Against an opponent who is not playing the "
+        "equilibrium, two equilibria can take different amounts, and that is measurable.",
+    )
+    ap.add_argument(
+        "--baseline-solve-sparsely", action="store_true", help="same for the other arm"
+    )
     ap.add_argument("--seed", type=int, default=77)
     ap.add_argument("--max-turns", type=int, default=40)
     ap.add_argument(
@@ -173,12 +186,16 @@ def main() -> None:
         tags += f"@w{args.limit}"
     if args.rank_leaf != args.baseline_rank_leaf:
         tags += "@leafrank" if args.rank_leaf else "@damagerank"
+    if args.solve_sparsely != args.baseline_solve_sparsely:
+        tags += "@sparse" if args.solve_sparsely else "@fullmatrix"
     arm = f"{new_name}{tags}" if tags else new_name
-    for seat, leaves, depths, limits, ranks in (
+    for seat, leaves, depths, limits, ranks, sparse in (
         (f"{arm} = side 0", (value, baseline), (args.depth, args.baseline_depth),
-         (args.limit, other_limit), (args.rank_leaf, args.baseline_rank_leaf)),
+         (args.limit, other_limit), (args.rank_leaf, args.baseline_rank_leaf),
+         (args.solve_sparsely, args.baseline_solve_sparsely)),
         (f"{arm} = side 1", (baseline, value), (args.baseline_depth, args.depth),
-         (other_limit, args.limit), (args.baseline_rank_leaf, args.rank_leaf)),
+         (other_limit, args.limit), (args.baseline_rank_leaf, args.rank_leaf),
+         (args.baseline_solve_sparsely, args.solve_sparsely)),
     ):
         side_leaves = (
             (new_name, old_name) if leaves[0] is value else (old_name, new_name)
@@ -210,6 +227,7 @@ def main() -> None:
                 evaluate=leaves,
                 depth=depths,
                 rank_by_leaf=ranks,
+                solve_sparsely=sparse,
             )
             if record.outcome is None:
                 unfinished += 1
@@ -226,6 +244,7 @@ def main() -> None:
                     limits=limits,
                     depths=depths,
                     rankings=tuple("leaf" if r else "damage" for r in ranks),
+                    solvers=tuple("sparse" if x else "full" for x in sparse),
                     note=(
                         f"search depth {depths[0]} vs {depths[1]} by side"
                         if depths[0] != depths[1]

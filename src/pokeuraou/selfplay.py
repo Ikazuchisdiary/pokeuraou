@@ -321,7 +321,7 @@ def play_game(
     selection: tuple[list[str], list[str], tuple[int, ...], tuple[int, ...]] | None = None,
     depth: int | tuple[int, int] = 1,
     rank_by_leaf: bool | tuple[bool, bool] = False,
-    solve_sparsely: bool = False,
+    solve_sparsely: bool | tuple[bool, bool] = False,
 ) -> GameRecord:
     """Plays one game to a result, sampling both sides from the turn's equilibrium.
 
@@ -332,6 +332,13 @@ def play_game(
     ``depth`` takes a pair for the same reason, and it is how depth-2 is measured against
     depth-1: one side looks a ply further and the win rate says what that bought. Depth 1
     on both sides is the search this project has always had.
+
+    ``solve_sparsely`` takes a pair too, and it is the one whose two values are supposed
+    to be *equally correct*: both settle on an equilibrium of the same game, verified to
+    an exploitability of 7.7e-08. What differs is which vertex of a degenerate optimum
+    they land on, and a maximin strategy only guarantees the value -- against an opponent
+    who is not playing the equilibrium, two equilibria can take different amounts. That is
+    what a mismatched pair measures.
     """
     limits = (search_limit, search_limit) if isinstance(search_limit, int) else search_limit
     depths = (depth, depth) if isinstance(depth, int) else depth
@@ -339,6 +346,11 @@ def play_game(
         (rank_by_leaf, rank_by_leaf)
         if isinstance(rank_by_leaf, bool)
         else rank_by_leaf
+    )
+    sparse = (
+        (solve_sparsely, solve_sparsely)
+        if isinstance(solve_sparsely, bool)
+        else solve_sparsely
     )
     leaves = evaluate if isinstance(evaluate, tuple) else (evaluate, evaluate)
     record = GameRecord(
@@ -373,7 +385,7 @@ def play_game(
         try:
             own_search = search(
                 reg, pos, ours, theirs, own_leaf, budget=budget, depth=depths[0],
-                solve_sparsely=solve_sparsely,
+                solve_sparsely=sparse[0],
             )
         except EquilibriumError:
             break
@@ -390,6 +402,7 @@ def play_game(
             leaves[1] is not leaves[0]
             or depths[1] != depths[0]
             or ranked[1] != ranked[0]
+            or sparse[1] != sparse[0]
         ):
             foe_ours, foe_theirs = (
                 (ours, theirs)
@@ -401,7 +414,7 @@ def play_game(
             try:
                 foe_search = search(
                     reg, pos, foe_ours, foe_theirs, foe_leaf, budget=budget,
-                    depth=depths[1], solve_sparsely=solve_sparsely,
+                    depth=depths[1], solve_sparsely=sparse[1],
                 )
             except EquilibriumError:
                 break
