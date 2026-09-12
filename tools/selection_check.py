@@ -46,6 +46,7 @@ from pokeuraou.encode import Encoder
 from pokeuraou.names import localiser
 from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.priors import find_cached_chaos, load_chaos
+from pokeuraou.regulation import to_id
 from pokeuraou.selection import SpreadClass, solve_selection
 from pokeuraou.selfplay import play_game
 from pokeuraou.standings import find_cached_standings, load_standings, sample_standings_team
@@ -71,6 +72,18 @@ def main() -> None:
         "independent answer: the mirror of this composition is known not to want Charizard, "
         "so the equilibrium arm reproducing that is a check against human knowledge rather "
         "than against the model's own estimates.",
+    )
+    ap.add_argument(
+        "--force-lead",
+        default=None,
+        help="two species, comma separated, to put in the lead -- 'charizard,incineroar'. "
+        "Adds an arm that plays the best selection *with that lead* against the same "
+        "equilibrium opponent as the equilibrium arm, which is how a claim about human "
+        "practice gets tested against the solver's advice rather than argued with. The "
+        "book brings Incineroar in 71.5% of its mass and leads it in 0.0%, and the human "
+        "report is that leading it is the common line; Intimidate and Fake Out are both "
+        "lead effects, so a value function that under-prices them would produce exactly "
+        "the bring-but-bench distribution observed.",
     )
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
@@ -133,7 +146,30 @@ def main() -> None:
 
     print(f"\n  {'自陣 vs 相手':>20}  {'games':>6}  {'win':>7}  {'95%':>6}")
     results: dict[str, float] = {}
-    for arm in ("均衡 vs 一様", "一様 vs 一様", "均衡 vs 均衡"):
+    forced: list[int] = []
+    forced_arm = ""
+    if args.force_lead:
+        want = {to_id(x) for x in args.force_lead.split(",") if x.strip()}
+        species = [s.species for s in roster.sets]
+        forced = [
+            i
+            for i, sel in enumerate(selections)
+            if {species[sel[0]], species[sel[1]]} == want
+        ]
+        if not forced:
+            raise SystemExit(f"no selection leads with {sorted(want)}")
+        # The best of them by the solver's own lights, so the comparison is against the
+        # advice rather than against a random member of the restricted set.
+        forced.sort(key=lambda i: -strategy[i])
+        forced_arm = f"{args.force_lead} 先発 vs 均衡"
+        print(
+            f"  強制先発: {args.force_lead} に合う選出 {len(forced)} 通り、"
+            f"うち均衡質量 {sum(strategy[i] for i in forced) * 100:.1f}%"
+        )
+    arms = ["均衡 vs 一様", "一様 vs 一様", "均衡 vs 均衡"]
+    if forced_arm:
+        arms.append(forced_arm)
+    for arm in arms:
         # Same seed per arm, so the opponent's spreads, selections and every roll inside
         # the games line up and only our selection rule differs.
         game_rng = np.random.default_rng(args.seed + 1)
@@ -144,12 +180,14 @@ def main() -> None:
                 if args.mirror
                 else sample_standings_team(game_rng, reg, prior, team)
             )
-            if arm == "均衡 vs 均衡":
+            if arm == "均衡 vs 均衡" or arm == forced_arm:
                 which = int(game_rng.choice(len(col), p=class_weights))
                 foe_pick = selections[int(game_rng.choice(len(col[which]), p=col[which]))]
             else:
                 foe_pick = selections[int(game_rng.integers(len(selections)))]
-            if arm.startswith("均衡"):
+            if arm == forced_arm:
+                index = forced[0]
+            elif arm.startswith("均衡"):
                 index = int(game_rng.choice(len(strategy), p=strategy))
             else:
                 index = int(game_rng.integers(len(selections)))

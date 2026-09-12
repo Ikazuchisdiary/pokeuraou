@@ -24,6 +24,15 @@ TEMPERATURE="${TEMPERATURE:-0.5}"
 # resolver at about fifteen times the cost.
 RUST_NODE="${RUST_NODE:-1}"
 DEVICE="${DEVICE:-cuda}"
+# Which book, separately from which model plays. They default together -- a book solved by
+# a model is the one that model's name finds -- and the interesting comparison breaks that
+# pairing on purpose: the same model playing two books says what re-solving bought, where
+# changing both at once says only that something changed.
+BOOK="${BOOK:-}"
+book_args=()
+if [ -n "$BOOK" ]; then
+	book_args=(--book "$BOOK")
+fi
 OUT="${OUT:-data/matches/book-check.jsonl}"
 LOGS="${LOGS:-data/matches/logs}"
 
@@ -36,6 +45,7 @@ pids=()
 for i in $(seq 0 $((WORKERS - 1))); do
 	POKEURAOU_RUST_NODE="$RUST_NODE" uv run --group learn python tools/book_check.py \
 		--roster "$ROSTER" --model "$MODEL" \
+		"${book_args[@]}" \
 		--games "$GAMES" --limit "$LIMIT" --seed "$SEED" \
 		--epsilon "$EPSILON" --temperature "$TEMPERATURE" \
 		--shard "$i" --shards "$WORKERS" \
