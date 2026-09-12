@@ -75,14 +75,18 @@ pub(crate) fn do_move<'a>(
     }
     let mv = reg.moves.get(move_id.as_str()).ok_or("move not in the regulation")?;
 
+    let started = crate::resolve::phase_start();
     let checks = can_act(&mut turn, action, &budget)?;
+    crate::resolve::phase_end(7, started);
     let mut outcomes: Vec<Outcome<'a>> = Vec::new();
-    let last = checks.len() - 1;
-    for (index, (probability, blocked)) in checks.iter().enumerate() {
+    // The last check cannot hand `turn` over instead of copying it, however tempting: the
+    // fallback below needs it if every branch turns out to weigh nothing, and a move that
+    // produced no outcome at all is a thing Python answers rather than refuses.
+    for (probability, blocked) in checks.iter() {
         if *probability <= 0.0 {
             continue;
         }
-        let mut state = if index == last { turn.clone() } else { turn.clone() };
+        let mut state = turn.clone();
         match blocked {
             Some(reason) => {
                 if reason.as_str() == "flinch" {
@@ -98,7 +102,10 @@ pub(crate) fn do_move<'a>(
                 outcomes.push((*probability, state));
             }
             None => {
-                for (weight, sub_state) in use_move(reg, state, action, mv, budget)? {
+                let started = crate::resolve::phase_start();
+                let produced = use_move(reg, state, action, mv, budget)?;
+                crate::resolve::phase_end(8, started);
+                for (weight, sub_state) in produced {
                     outcomes.push((probability * weight, sub_state));
                 }
             }
@@ -387,9 +394,10 @@ fn use_move<'a>(
     for target in &targets {
         let mut expanded: Vec<Outcome<'a>> = Vec::new();
         for (weight, state) in branches.into_iter() {
-            for (inner_weight, inner_state) in
-                hit_target(reg, state, action, mv, *target, spread, budget)?
-            {
+            let started = crate::resolve::phase_start();
+            let hit = hit_target(reg, state, action, mv, *target, spread, budget)?;
+            crate::resolve::phase_end(9, started);
+            for (inner_weight, inner_state) in hit {
                 expanded.push((weight * inner_weight, inner_state));
             }
         }
@@ -651,7 +659,13 @@ fn hit_target<'a>(
             vec![(1.0, crit_p >= 1.0)]
         };
     let rolls = stratified_rolls(&budget);
+    // Does not depend on the roll, and the exact budget enumerates sixteen of them -- so
+    // building this inside the loop was fifteen wasted allocations per hit on the path that
+    // advances a game. Under the matrix budget the roll is fixed and it costs nothing,
+    // which is why the allocation count barely moved and the clock did.
+    let hit_counts = multihit_counts(mv, &budget);
 
+    let ctx_started = crate::resolve::phase_start();
     let move_ctx = MoveContext {
         weather: turn.pos.field.weather.map(|w| w.as_str().to_string()),
         terrain: turn.pos.field.terrain.map(|t| t.as_str().to_string()),
@@ -675,6 +689,8 @@ fn hit_target<'a>(
         ally_used_same_move: false,
     };
 
+    crate::resolve::phase_end(12, ctx_started);
+
     let mut outcomes: Vec<Outcome<'a>> = Vec::new();
     for (acc_weight, hit) in accuracy_branches {
         if acc_weight <= 0.0 {
@@ -691,6 +707,7 @@ fn hit_target<'a>(
         if crit_weight <= 0.0 {
             continue;
         }
+        let started = crate::resolve::phase_start();
         let result = calculate(
             reg,
             &attacker,
@@ -704,6 +721,7 @@ fn hit_target<'a>(
             None,
             false,
         );
+        crate::resolve::phase_end(10, started);
         for note in &result.unmodelled {
             turn.report(note.clone());
         }
@@ -715,7 +733,7 @@ fn hit_target<'a>(
             continue;
         }
         for (roll, roll_weight) in &rolls {
-            for (hits, hit_weight) in multihit_counts(mv, &budget) {
+            for (hits, hit_weight) in hit_counts.iter().copied() {
                 let mut state = turn.clone();
                 for hit_index in 0..hits {
                     let gone = match state.mon_at(target.0, target.1) {
@@ -758,7 +776,9 @@ fn hit_target<'a>(
                         again.rolls[*roll]
                     };
                     let dealt = state.deal_damage(target.0, target.1, amount, true)?;
+                    let after_started = crate::resolve::phase_start();
                     after_hit(&mut state, action, mv, target, dealt, &budget, result.type_mod)?;
+                    crate::resolve::phase_end(11, after_started);
                 }
                 let weight = acc_weight * crit_weight * roll_weight * hit_weight;
                 for (extra, expanded) in spread_secondaries(state, action, hits > 1)? {
@@ -1812,8 +1832,7 @@ fn residual_order(turn: &Turn) -> Result<(Vec<Slot>, bool), String> {
     let mut entries: Vec<(i64, i64, String, usize, usize)> = Vec::new();
     let mut speeds: Vec<i64> = Vec::new();
     for side in 0..2 {
-        let conditions: Vec<Id> =
-            turn.pos.sides[side].side_conditions.iter().map(|c| c.id).collect();
+        let conditions = turn.pos.sides[side].side_conditions.clone();
         for slot in 0..turn.pos.sides[side].active.len() {
             let mon = turn.mon_at(side, slot);
             let fighter = turn.battler_at(side, slot)?;
@@ -1846,6 +1865,7 @@ fn residual_order(turn: &Turn) -> Result<(Vec<Slot>, bool), String> {
 }
 
 pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
+    crate::resolve::RESIDUALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let _ = reg;
     let (order, tied) = residual_order(turn)?;
     if tied {

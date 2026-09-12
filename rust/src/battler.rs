@@ -15,6 +15,11 @@ use crate::reg::Reg;
 use serde::Deserialize;
 use std::collections::{HashMap, HashSet};
 
+/// How many Battlers the resolver has built. It rebuilds them whenever the queue is
+/// re-sorted and whenever damage is calculated, and the stats come from the SP spread
+/// every time, so the count is what says whether that is worth avoiding.
+pub static BUILDS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Number of damage rolls Showdown uses: 100%, 99%, ..., 85%.
 pub const N_ROLLS: usize = 16;
 
@@ -76,6 +81,7 @@ pub struct Battler {
 impl Battler {
     /// `view.battler` for a known spread: stats from the SP, HP from the position.
     pub fn from_pokemon(reg: &Reg, mon: &Pokemon) -> Result<Battler, String> {
+        BUILDS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let species = reg
             .species
             .get(mon.species.as_str())

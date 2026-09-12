@@ -1,0 +1,185 @@
+diff --git a/rust/src/position.rs b/rust/src/position.rs
+index c907d09..8a065cd 100644
+--- a/rust/src/position.rs
++++ b/rust/src/position.rs
+@@ -438,21 +438,96 @@ fn stats_json(values: Option<[i64; 6]>, names: &[&str; 6]) -> Value {
+     }
+ }
+ 
++/// A side's party, stored inline.
++///
++/// Six is the team size and the count never changes during a battle, so the `Vec` this
++/// replaces was an allocation per side per clone -- 47 a turn, an eighth of every
++/// allocation the resolver made. The Pokemon themselves stay behind `Rc`; what is inline
++/// is the six pointers.
++#[derive(Clone, Debug, Default)]
++pub struct Party {
++    slots: [Option<Rc<Pokemon>>; MAX_PARTY],
++    len: usize,
++}
++
++pub const MAX_PARTY: usize = 6;
++
++impl Party {
++    pub fn len(&self) -> usize {
++        self.len
++    }
++
++    pub fn is_empty(&self) -> bool {
++        self.len == 0
++    }
++
++    pub fn push(&mut self, mon: Rc<Pokemon>) {
++        assert!(self.len < MAX_PARTY, "a party holds {MAX_PARTY} Pokemon, not more");
++        self.slots[self.len] = Some(mon);
++        self.len += 1;
++    }
++
++    pub fn iter(&self) -> impl Iterator<Item = &Rc<Pokemon>> {
++        self.slots[..self.len].iter().map(|slot| slot.as_ref().unwrap())
++    }
++
++    pub fn get(&self, index: usize) -> Option<&Rc<Pokemon>> {
++        self.slots.get(index).and_then(Option::as_ref)
++    }
++
++    pub fn swap(&mut self, a: usize, b: usize) {
++        self.slots.swap(a, b);
++    }
++
++    pub fn position<F: Fn(&Pokemon) -> bool>(&self, test: F) -> Option<usize> {
++        (0..self.len).find(|index| test(self.slots[*index].as_ref().unwrap()))
++    }
++}
++
++impl std::ops::Index<usize> for Party {
++    type Output = Rc<Pokemon>;
++
++    fn index(&self, index: usize) -> &Rc<Pokemon> {
++        self.slots[index].as_ref().expect("no Pokemon in that party slot")
++    }
++}
++
++impl std::ops::IndexMut<usize> for Party {
++    fn index_mut(&mut self, index: usize) -> &mut Rc<Pokemon> {
++        self.slots[index].as_mut().expect("no Pokemon in that party slot")
++    }
++}
++
++impl FromIterator<Rc<Pokemon>> for Party {
++    fn from_iter<T: IntoIterator<Item = Rc<Pokemon>>>(items: T) -> Party {
++        let mut party = Party::default();
++        for mon in items {
++            party.push(mon);
++        }
++        party
++    }
++}
++
+ #[derive(Clone, Debug)]
+ pub struct Side {
+     pub id: Rc<str>,
+     pub name: Rc<str>,
+-    pub active: Vec<Option<usize>>,
++    /// Two slots, which is what doubles has and what the resolver refuses anything else
++    /// for. It was a `Vec`, and a `Vec` of two `Option<usize>` is an allocation per side
++    /// per clone -- of which a turn makes 23.
++    pub active: [Option<usize>; 2],
+     /// Shared, not owned. A `Pokemon` is 928 bytes and a side holds six, so cloning a
+     /// position used to copy eleven kilobytes -- and the resolver clones one 44 times a
+     /// turn, which measured at 65% of its whole cost. A turn touches the two Pokemon that
+     /// are out; the rest are on the bench and identical in every branch. `Rc::make_mut`
+     /// copies one only when something writes to it while it is still shared.
+-    pub pokemon: Vec<Rc<Pokemon>>,
++    pub pokemon: Party,
+     pub side_conditions: Vec<Effect>,
+-    pub slot_conditions: Vec<Vec<Effect>>,
++    /// Behind `Rc` because nothing in the resolver writes to either: they are read, and
++    /// carried from one position to the next. A refcount bump is not an allocation.
++    pub slot_conditions: Rc<Vec<Vec<Effect>>>,
+     pub mega_used: bool,
+-    pub mega_capable_slots: Vec<usize>,
++    pub mega_capable_slots: Rc<Vec<usize>>,
+ }
+ 
+ impl Side {
+@@ -465,10 +540,16 @@ impl Side {
+                     .and_then(Value::as_str)
+                     .unwrap_or_else(|| value["id"].as_str().unwrap_or_default()),
+             ),
+-            active: value["active"]
+-                .as_array()
+-                .map(|a| a.iter().map(|v| v.as_u64().map(|n| n as usize)).collect())
+-                .unwrap_or_default(),
++            active: {
++                let listed = value["active"].as_array().map(Vec::as_slice).unwrap_or(&[]);
++                if listed.len() != 2 {
++                    panic!("a side has two active slots, not {}", listed.len());
++                }
++                [
++                    listed[0].as_u64().map(|n| n as usize),
++                    listed[1].as_u64().map(|n| n as usize),
++                ]
++            },
+             pokemon: value["pokemon"]
+                 .as_array()
+                 .map(|a| a.iter().map(|v| Rc::new(Pokemon::from_json(v))).collect())
+@@ -478,25 +559,31 @@ impl Side {
+                 .and_then(Value::as_array)
+                 .map(|a| a.iter().map(Effect::from_json).collect())
+                 .unwrap_or_default(),
+-            slot_conditions: value
+-                .get("slotConditions")
+-                .and_then(Value::as_array)
+-                .map(|a| {
+-                    a.iter()
+-                        .map(|g| {
+-                            g.as_array()
+-                                .map(|inner| inner.iter().map(Effect::from_json).collect())
+-                                .unwrap_or_default()
+-                        })
+-                        .collect()
+-                })
+-                .unwrap_or_default(),
++            slot_conditions: Rc::new(
++                value
++                    .get("slotConditions")
++                    .and_then(Value::as_array)
++                    .map(|a| {
++                        a.iter()
++                            .map(|g| {
++                                g.as_array()
++                                    .map(|inner| inner.iter().map(Effect::from_json).collect())
++                                    .unwrap_or_default()
++                            })
++                            .collect()
++                    })
++                    .unwrap_or_default(),
++            ),
+             mega_used: value.get("megaUsed").and_then(Value::as_bool).unwrap_or(false),
+-            mega_capable_slots: value
+-                .get("megaCapableSlots")
+-                .and_then(Value::as_array)
+-                .map(|a| a.iter().filter_map(Value::as_u64).map(|v| v as usize).collect())
+-                .unwrap_or_default(),
++            mega_capable_slots: Rc::new(
++                value
++                    .get("megaCapableSlots")
++                    .and_then(Value::as_array)
++                    .map(|a| {
++                        a.iter().filter_map(Value::as_u64).map(|v| v as usize).collect()
++                    })
++                    .unwrap_or_default(),
++            ),
+         }
+     }
+ 
+@@ -514,7 +601,7 @@ impl Side {
+                 .map(|g| g.iter().map(Effect::to_json).collect::<Vec<_>>())
+                 .collect::<Vec<_>>(),
+             "megaUsed": self.mega_used,
+-            "megaCapableSlots": self.mega_capable_slots,
++            "megaCapableSlots": &**self.mega_capable_slots,
+         })
+     }
+ 

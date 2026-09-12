@@ -100,6 +100,9 @@ pub fn fill(reg: &Reg, encoder: &Encoder, request: &Request) -> (Value, Vec<u8>)
     let mut refused: Vec<Value> = Vec::new();
     let mut cells: Vec<(usize, usize, Cell)> = Vec::new();
     let mut collector = Collector { reg, leaves: Vec::new(), notes: BTreeSet::new() };
+    // Resolving and encoding are different costs with different fixes, and the split was
+    // being guessed at from two benchmarks that did not add up. It goes back in the header.
+    let resolve_started = std::time::Instant::now();
 
     for (i, ours) in request.ours.iter().enumerate() {
         for (j, theirs) in request.theirs.iter().enumerate() {
@@ -138,8 +141,11 @@ pub fn fill(reg: &Reg, encoder: &Encoder, request: &Request) -> (Value, Vec<u8>)
         }
     }
 
+    let resolve_us = resolve_started.elapsed().as_secs_f64() * 1e6;
+    let encode_started = std::time::Instant::now();
     let borrowed: Vec<&Position> = collector.leaves.iter().collect();
     let encoded = encoder.encode_positions(&borrowed);
+    let encode_us = encode_started.elapsed().as_secs_f64() * 1e6;
     let mut bytes = pack(&encoded);
 
     // A node can want both: the learned leaf, and a parameter-free objective beside it as
@@ -178,6 +184,8 @@ pub fn fill(reg: &Reg, encoder: &Encoder, request: &Request) -> (Value, Vec<u8>)
         "sideWidth": encoder.widths.side,
         "fieldWidth": encoder.widths.field,
         "bytes": bytes.len(),
+        "resolveUs": resolve_us,
+        "encodeUs": encode_us,
     });
     (header, bytes)
 }

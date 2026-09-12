@@ -946,7 +946,9 @@ pub fn resolve_turn<'a>(
     side_actions: &[Vec<SlotAction>; 2],
     budget: Budget,
 ) -> Result<TurnResult<'a>, String> {
+    let started = phase_start();
     check_position_supported(pos, side_actions)?;
+    phase_end(0, started);
     if pos.sides.len() != 2 || pos.sides.iter().any(|s| s.active.len() != 2) {
         return Err("this port handles two sides of two active slots".into());
     }
@@ -970,8 +972,10 @@ pub fn resolve_turn<'a>(
         }
     }
 
+    let started = phase_start();
     let field = field_state(pos);
     let queues = build_queue(reg, pos, side_actions, &field)?;
+    phase_end(1, started);
 
     let mut branches: Vec<Branch> = Vec::new();
     let mut suspended: Vec<Suspended<'a>> = Vec::new();
@@ -991,7 +995,9 @@ pub fn resolve_turn<'a>(
                 turn: Turn::new(reg, pos.clone(), budget, attacks),
                 remaining: sequence,
             };
+            let started = phase_start();
             let sub = run_queue(reg, vec![start], budget)?;
+            phase_end(2, started);
             exact = exact && sub.exact;
             unmodelled.extend(sub.unmodelled);
             for mut branch in sub.branches {
@@ -1056,8 +1062,7 @@ fn build_queue(
                 continue;
             }
             let battler = Battler::from_pokemon(reg, mon)?;
-            let conditions: Vec<Id> = side.side_conditions.iter().map(|c| c.id).collect();
-            let speed = effective_speed(&battler, field, &conditions);
+            let speed = effective_speed(&battler, field, &side.side_conditions);
 
             match action {
                 SlotAction::Switch { party_index, species, .. } => {
@@ -1212,30 +1217,53 @@ fn run_queue<'a>(
                 finished.push(item);
                 continue;
             }
+            let started = phase_start();
             let ordered = resort(reg, &item.turn, &item.remaining)?;
+            phase_end(5, started);
             let action = ordered[0].clone();
             let rest: Vec<QueuedAction> = ordered[1..].to_vec();
             item.turn.actions_remaining = rest.len();
             item.turn.budget = step_budget;
             // An Encore that landed earlier this turn rewrites the action, and Showdown
             // re-picks its target at random -- so this is a list, not a single action.
+            let started = phase_start();
             let variants = encore_override(reg, &item.turn, &action);
+            phase_end(4, started);
             let overridden = variants
                 .first()
                 .map(|(_, variant)| variant.move_id != action.move_id)
                 .unwrap_or(false);
             let mut outcomes: Vec<(f64, Turn<'a>)> = Vec::new();
-            for (variant_weight, variant) in &variants {
-                let mut base = item.turn.clone();
+            // One variant is the ordinary case -- Encore is what makes it more than one --
+            // and a turn is an eleven-kilobyte position, so the ordinary case hands the
+            // state over rather than copying it. This one clone was 28% of all of them.
+            if variants.len() == 1 {
+                let (variant_weight, variant) = &variants[0];
+                let mut base = item.turn;
                 if overridden {
-                    // Sucker Punch was read against the move the side chose, and Encore
-                    // has just replaced it; Python says so and so does this.
                     base.report(
                         "encore override changed the move Sucker Punch was read against",
                     );
                 }
-                for (weight, turn) in execute(reg, base, variant, step_budget)? {
+                let started = phase_start();
+                let produced = execute(reg, base, variant, step_budget)?;
+                phase_end(6, started);
+                for (weight, turn) in produced {
                     outcomes.push((variant_weight * weight, turn));
+                }
+            } else {
+                for (variant_weight, variant) in &variants {
+                    let mut base = item.turn.clone();
+                    if overridden {
+                        // Sucker Punch was read against the move the side chose, and Encore
+                        // has just replaced it; Python says so and so does this.
+                        base.report(
+                            "encore override changed the move Sucker Punch was read against",
+                        );
+                    }
+                    for (weight, turn) in execute(reg, base, variant, step_budget)? {
+                        outcomes.push((variant_weight * weight, turn));
+                    }
                 }
             }
             for (weight, turn) in outcomes {
@@ -1279,7 +1307,9 @@ fn run_queue<'a>(
     let mut branches = Vec::with_capacity(finished.len());
     let mut unmodelled: std::collections::BTreeSet<String> = Default::default();
     for mut item in finished {
+        let started = phase_start();
         residuals(reg, &mut item.turn)?;
+        phase_end(3, started);
         item.turn.pos.turn += 1;
         unmodelled.extend(item.turn.unmodelled.iter().cloned());
         branches.push(Branch { probability: item.weight, position: item.turn.pos });
@@ -1358,6 +1388,98 @@ fn encore_override(
         .collect()
 }
 
+/// Wall clock inside the phases of a turn, in nanoseconds. Coarse on purpose: a timer
+/// costs about 25 ns here, so it goes around things called a handful of times a turn and
+/// never around anything in the innermost loop, where it would measure itself.
+pub static PHASE_NS: [std::sync::atomic::AtomicU64; 13] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 13];
+pub const PHASE_NAMES: [&str; 13] = [
+    "supported",
+    "build_queue",
+    "run_queue",
+    "residuals",
+    "encore_override",
+    "resort",
+    "execute",
+    "  can_act",
+    "  use_move",
+    "  hit_target",
+    "    calculate",
+    "    after_hit",
+    "    clone+ctx",
+];
+
+/// Zeroes every counter. The differential pass resolves each fixture once before the
+/// speed loop does, and counting both made a per-turn figure a third too large.
+pub fn reset_counters() {
+    let relaxed = std::sync::atomic::Ordering::Relaxed;
+    for slot in PHASE_NS.iter() {
+        slot.store(0, relaxed);
+    }
+    for slot in PHASE_ALLOCS.iter() {
+        slot.store(0, relaxed);
+    }
+    RESORTS.store(0, relaxed);
+    RESIDUALS.store(0, relaxed);
+    crate::position::CLONES.store(0, relaxed);
+    crate::position::UNSHARED.store(0, relaxed);
+    crate::damage::CALLS.store(0, relaxed);
+    crate::battler::BUILDS.store(0, relaxed);
+}
+
+/// Allocations made inside each phase, when the counting allocator is built in. The
+/// phases nest, so an inner one's allocations are counted by the outer one too.
+pub static PHASE_ALLOCS: [std::sync::atomic::AtomicU64; 13] =
+    [const { std::sync::atomic::AtomicU64::new(0) }; 13];
+
+#[cfg(feature = "count-allocations")]
+fn allocations_now() -> usize {
+    crate::counting_alloc::ALLOCATIONS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+#[cfg(not(feature = "count-allocations"))]
+fn allocations_now() -> usize {
+    0
+}
+
+/// What a phase measurement carries, which with `profile` off is nothing at all.
+///
+/// A clock read costs about 25 ns here and the innermost of these is entered ten times a
+/// turn, so the timers are behind a feature rather than shipped: a build that is not being
+/// profiled should not be paying to be profiled.
+#[cfg(feature = "profile")]
+pub(crate) type PhaseStart = (std::time::Instant, usize);
+#[cfg(not(feature = "profile"))]
+pub(crate) type PhaseStart = ();
+
+#[cfg(feature = "profile")]
+#[inline]
+pub(crate) fn phase_start() -> PhaseStart {
+    (std::time::Instant::now(), allocations_now())
+}
+
+#[cfg(not(feature = "profile"))]
+#[inline]
+pub(crate) fn phase_start() -> PhaseStart {}
+
+#[cfg(feature = "profile")]
+#[inline]
+pub(crate) fn phase_end(index: usize, start: PhaseStart) {
+    let relaxed = std::sync::atomic::Ordering::Relaxed;
+    PHASE_NS[index].fetch_add(start.0.elapsed().as_nanos() as u64, relaxed);
+    PHASE_ALLOCS[index].fetch_add((allocations_now() - start.1) as u64, relaxed);
+}
+
+#[cfg(not(feature = "profile"))]
+#[inline]
+pub(crate) fn phase_end(_index: usize, _start: PhaseStart) {}
+
+/// How often the queue is re-sorted, and how often a residual phase runs. Both rebuild
+/// Battlers, which is the expensive part of each, so the counts are what say whether the
+/// rebuilding is worth avoiding.
+pub static RESORTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+pub static RESIDUALS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 fn resort(
     reg: &Reg,
     turn: &Turn,
@@ -1366,17 +1488,14 @@ fn resort(
     if remaining.len() < 2 {
         return Ok(remaining.to_vec());
     }
+    RESORTS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let field = turn.field();
     let mut refreshed: Vec<QueuedAction> = Vec::with_capacity(remaining.len());
     for action in remaining {
         let mut copy = action.clone();
         if let Some(battler) = turn.battler_at(action.side, action.slot)? {
-            let conditions: Vec<Id> = turn.pos.sides[action.side]
-                .side_conditions
-                .iter()
-                .map(|c| c.id)
-                .collect();
-            copy.speed = effective_speed(&battler, &field, &conditions);
+            let conditions = &turn.pos.sides[action.side].side_conditions;
+            copy.speed = effective_speed(&battler, &field, conditions);
         }
         refreshed.push(copy);
     }
@@ -1632,12 +1751,8 @@ pub fn resume_turn<'a>(
                 None => 0,
                 Some(incoming) => {
                     let field = turn.field();
-                    let conditions: Vec<Id> = turn.pos.sides[side_index]
-                        .side_conditions
-                        .iter()
-                        .map(|c| c.id)
-                        .collect();
-                    effective_speed(&incoming, &field, &conditions)
+                    let conditions = &turn.pos.sides[side_index].side_conditions;
+                    effective_speed(&incoming, &field, conditions)
                 }
             };
             placed.push((speed, side_index, *slot));

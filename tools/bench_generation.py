@@ -48,6 +48,13 @@ def main() -> None:
     ap.add_argument("--depth", type=int, default=1, help="1 = one ply, 2 = refined cells")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument(
+        "--rank-leaf",
+        action="store_true",
+        help="rank the menu by the leaf, as a real generation run does. It is 75% on top "
+        "at width 24 and almost nothing at width 48, so a benchmark that leaves it out is "
+        "not measuring the run it is meant to stand for.",
+    )
+    ap.add_argument(
         "--torch-threads",
         type=int,
         default=1,
@@ -94,6 +101,7 @@ def main() -> None:
             "bench",
             objective=OBJECTIVES["hp-share"],
             search_limit=args.limit,
+            rank_by_leaf=args.rank_leaf,
             depth=args.depth,
             max_turns=40,
             evaluate=evaluate,
@@ -105,7 +113,8 @@ def main() -> None:
 
     leaf = args.value.stem if args.value else "hp-share"
     print(
-        f"{leaf} on {args.device} depth {args.depth} (torch threads {args.torch_threads}): "
+        f"{leaf} on {args.device} width {args.limit} depth {args.depth} "
+        f"(rank-leaf {args.rank_leaf}, torch threads {args.torch_threads}): "
         f"{elapsed / args.games:.3f} s/game, {args.games / elapsed * 60:.1f} games/min "
         f"per process"
     )

@@ -65,11 +65,17 @@ fn effective_weather(field: &FieldState, mon: &Battler) -> Option<Id> {
 }
 
 /// `Pokemon#getStat('spe')`: boosts, then one accumulated ModifySpe chain, then paralysis.
-pub fn effective_speed(mon: &Battler, field: &FieldState, side_conditions: &[Id]) -> i64 {
+/// The side's conditions are taken as they are stored rather than as a list of ids: the
+/// caller was collecting one per action, and the queue is re-sorted five times a turn.
+pub fn effective_speed(
+    mon: &Battler,
+    field: &FieldState,
+    side_conditions: &[crate::position::Effect],
+) -> i64 {
     let mut spe = mon.stat("spe", false);
     let mut chain = Chain::new();
 
-    let has = |name: &str| side_conditions.iter().any(|c| c.as_str() == name);
+    let has = |name: &str| side_conditions.iter().any(|c| c.id.as_str() == name);
     if has("tailwind") {
         chain.add(2.0, 1.0, "tailwind");
     }

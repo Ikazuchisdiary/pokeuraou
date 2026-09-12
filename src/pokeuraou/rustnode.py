@@ -118,6 +118,10 @@ class EncodedNode:
     exact: list[list[bool]]
     refused: list[tuple[int, int, str]]
     unmodelled: tuple[str, ...]
+    #: Microseconds the port spent resolving the turns and encoding their leaves. Two
+    #: different costs with two different fixes, so they are reported apart.
+    resolve_us: float = 0.0
+    encode_us: float = 0.0
     #: One value per leaf for each named objective the request asked for beside the leaves.
     leaf_values: dict[str, Any] = field(default_factory=dict)
 
@@ -168,6 +172,8 @@ class EncodedNode:
             exact=header["exact"],
             refused=[(int(i), int(j), str(why)) for i, j, why in header["refused"]],
             unmodelled=tuple(header["unmodelled"]),
+            resolve_us=float(header.get("resolveUs", 0.0)),
+            encode_us=float(header.get("encodeUs", 0.0)),
             leaf_values={
                 name: np.frombuffer(
                     body, dtype=np.float64, count=n, offset=offset + index * n * 8
