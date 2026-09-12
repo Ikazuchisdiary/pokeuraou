@@ -71,10 +71,17 @@ RANK_LEAF="${RANK_LEAF:-0}"
 # over *every* action and getting none, which is a proof about the cells that were never
 # solved (exploitability 7.7e-08). It does pick a different vertex of a degenerate optimum
 # in six nodes out of eight, and that is what was measured rather than assumed: 2,544
-# games, same model and width on both sides, 49.8% [47.9, 51.8], a = -0.2. Against the
-# 1.94x it is worth taking -- 1.94x the games is 0.96 of a doubling and the learning curve
-# pays +1.7 to +3.6 points per doubling.
-SOLVE_SPARSELY="${SOLVE_SPARSELY:-1}"
+# games, same model and width on both sides, 49.8% [47.9, 51.8], a = -0.2.
+#
+# Off by default, because the speed-up it is traded against is 1.14x, not the 1.94x first
+# reported. Measured properly -- same seeds, generation's own shape, one flag: 3.62 s/game
+# against 4.13. The 1.94x came from comparing a sparse match against a *depth-2* match,
+# which is not a like-for-like baseline; that was an error in the comparison, not in the
+# solver. At 1.14x the gain is 0.19 of a doubling, worth +0.3 to +0.7 points, which is
+# inside the interval of the -0.2 it costs. Turn it on when the boundary gets cheaper:
+# skipping 80% of the cells buys only 12% because the rounds each pay a round trip, and
+# the round trip is what is expensive.
+SOLVE_SPARSELY="${SOLVE_SPARSELY:-0}"
 rank_args=()
 if [ "$RANK_LEAF" != "0" ]; then
 	rank_args=(--rank-leaf)
