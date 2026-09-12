@@ -51,6 +51,8 @@ def run_wave(workers: int, args: argparse.Namespace) -> tuple[float, float, int]
     ]
     if args.value:
         command += ["--value", args.value]
+    if args.rank_leaf:
+        command += ["--rank-leaf"]
 
     started = time.perf_counter()
     running = [
@@ -83,6 +85,12 @@ def main() -> None:
     ap.add_argument("--workers", default="1,2,4,8,12,16", help="comma-separated counts")
     ap.add_argument("--games", type=int, default=3, help="games per worker")
     ap.add_argument("--limit", type=int, default=24)
+    ap.add_argument(
+        "--rank-leaf",
+        action="store_true",
+        help="rank the menu by the leaf, as generation does. Nearly free at width 48 and "
+        "75% at width 24, because its cost is the pool against the matrix's limit^2.",
+    )
     ap.add_argument("--device", default="cpu", choices=("cpu", "cuda"))
     ap.add_argument("--value", default=None, help="a trained value function, or hp-share")
     ap.add_argument("--seed", type=int, default=1000)
