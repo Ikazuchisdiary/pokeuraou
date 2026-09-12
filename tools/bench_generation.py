@@ -48,6 +48,12 @@ def main() -> None:
     ap.add_argument("--depth", type=int, default=1, help="1 = one ply, 2 = refined cells")
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument(
+        "--solve-sparsely",
+        action="store_true",
+        help="solve each node by resolving the fifth of it that proves the equilibrium "
+        "rather than filling the matrix. Same value, not necessarily the same vertex.",
+    )
+    ap.add_argument(
         "--rank-leaf",
         action="store_true",
         help="rank the menu by the leaf, as a real generation run does. It is 75% on top "
@@ -113,6 +119,7 @@ def main() -> None:
             objective=OBJECTIVES["hp-share"],
             search_limit=args.limit,
             rank_by_leaf=args.rank_leaf,
+            solve_sparsely=args.solve_sparsely,
             depth=args.depth,
             max_turns=40,
             evaluate=evaluate,
@@ -125,7 +132,8 @@ def main() -> None:
     leaf = args.value.stem if args.value else "hp-share"
     print(
         f"{leaf} on {args.device} width {args.limit} depth {args.depth} "
-        f"(rank-leaf {args.rank_leaf}, torch threads {args.torch_threads}): "
+        f"(rank-leaf {args.rank_leaf}, sparse {args.solve_sparsely}, "
+        f"torch threads {args.torch_threads}): "
         f"{elapsed / args.games:.3f} s/game, {args.games / elapsed * 60:.1f} games/min "
         f"per process"
     )

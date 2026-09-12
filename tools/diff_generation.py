@@ -89,6 +89,12 @@ def main() -> None:
         "hp-share",
     )
     ap.add_argument("--device", default="cpu")
+    ap.add_argument(
+        "--solve-sparsely",
+        action="store_true",
+        help="solve nodes by proving the equilibrium rather than filling the matrix. The "
+        "port must not change the answer with it on either.",
+    )
     args = ap.parse_args()
 
     roster = load_roster(args.roster)
@@ -134,6 +140,7 @@ def main() -> None:
                 objective=objective,
                 search_limit=args.limit,
                 max_turns=args.max_turns,
+                solve_sparsely=args.solve_sparsely,
             )
             turns += record.turns
             # The decisions are what a difference would show up in first.

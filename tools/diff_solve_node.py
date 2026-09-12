@@ -51,6 +51,7 @@ def main() -> None:
     ap.add_argument("--games", type=int, default=3)
     ap.add_argument("--value", default=None, help="a trained value function, or hp-share")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--seeded", type=int, default=1, help="top-k candidates to start from")
     args = ap.parse_args()
 
     roster = load_roster("rizabanadohido")
@@ -144,7 +145,9 @@ def main() -> None:
         full_seconds += time.perf_counter() - started
 
         started = time.perf_counter()
-        solved = solve_node(reg, pos, row, col, scorer, budget=Budget.matrix())
+        solved = solve_node(
+            reg, pos, row, col, scorer, budget=Budget.matrix(), seeded=args.seeded
+        )
         oracle_seconds += time.perf_counter() - started
 
         # The claim is about cells it never asked for: measured against the full matrix,

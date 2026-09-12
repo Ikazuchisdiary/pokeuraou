@@ -321,6 +321,7 @@ def play_game(
     selection: tuple[list[str], list[str], tuple[int, ...], tuple[int, ...]] | None = None,
     depth: int | tuple[int, int] = 1,
     rank_by_leaf: bool | tuple[bool, bool] = False,
+    solve_sparsely: bool = False,
 ) -> GameRecord:
     """Plays one game to a result, sampling both sides from the turn's equilibrium.
 
@@ -371,7 +372,8 @@ def play_game(
 
         try:
             own_search = search(
-                reg, pos, ours, theirs, own_leaf, budget=budget, depth=depths[0]
+                reg, pos, ours, theirs, own_leaf, budget=budget, depth=depths[0],
+                solve_sparsely=solve_sparsely,
             )
         except EquilibriumError:
             break
@@ -399,7 +401,7 @@ def play_game(
             try:
                 foe_search = search(
                     reg, pos, foe_ours, foe_theirs, foe_leaf, budget=budget,
-                    depth=depths[1],
+                    depth=depths[1], solve_sparsely=solve_sparsely,
                 )
             except EquilibriumError:
                 break

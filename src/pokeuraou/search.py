@@ -70,6 +70,7 @@ import numpy as np
 from .actions import SideAction
 from .equilibrium import Equilibrium, EquilibriumError, solve
 from .narrow import narrow
+from .node_solver import solve_node
 from .position import Position
 from .regulation import Regulation
 from .resolve import Budget, batched_payoff, resolve_turn
@@ -181,6 +182,7 @@ def search(
     passes: int = DEFAULT_PASSES,
     sub_limit: int = DEFAULT_SUB_LIMIT,
     sub_branches: int = DEFAULT_SUB_BRANCHES,
+    solve_sparsely: bool = False,
 ) -> SearchResult:
     """Solve this turn's matrix game, optionally refining the cells that decide it.
 
@@ -191,6 +193,18 @@ def search(
     """
     row = list(ours)
     col = list(theirs)
+    if solve_sparsely and depth <= 1:
+        # An equilibrium needs about a fifth of a wide matrix and can prove it; the rest
+        # of the cells are work nobody reads. It reaches *an* equilibrium of the same
+        # value rather than the one a full LP returns, so it is asked for, not assumed.
+        solved = solve_node(reg, pos, row, col, evaluate, budget=budget)
+        return SearchResult(
+            equilibrium=solved.equilibrium,
+            payoff=solved.payoff,
+            ours=row,
+            theirs=col,
+            unmodelled=solved.unmodelled,
+        )
     payoff, unmodelled = batched_payoff(reg, pos, row, col, evaluate, budget=budget)
     equilibrium = solve(payoff)
     if depth <= 1:

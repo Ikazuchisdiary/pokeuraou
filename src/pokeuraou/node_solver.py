@@ -69,6 +69,7 @@ def solve_node(
     evaluate: Callable[[list[Position]], np.ndarray],
     *,
     budget: Budget,
+    seeded: int = 1,
 ) -> SolvedNode:
     """The equilibrium of a node, resolving the cells that prove it and no others.
 
@@ -96,10 +97,11 @@ def solve_node(
             have[i, j] = True
         unmodelled.update(notes)
 
-    # The first candidate each side: `narrow` puts its highest-scoring one there, which is
-    # a better start than an arbitrary one and costs nothing either way.
-    restricted_rows: list[int] = [0]
-    restricted_cols: list[int] = [0]
+    # `narrow` hands its candidates over best-first, so the restricted game starts from
+    # the top `seeded` of each. More of them costs cells in the first round and saves
+    # rounds after it, and a round is a crossing and a forward pass.
+    restricted_rows: list[int] = list(range(min(seeded, rows)))
+    restricted_cols: list[int] = list(range(min(seeded, cols)))
 
     for round_index in range(1, MAX_ROUNDS + 1):
         resolve([(i, j) for i in restricted_rows for j in restricted_cols])
