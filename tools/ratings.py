@@ -54,6 +54,13 @@ from pokeuraou.provenance import agent_name
 #: Elo's scale: 400 points is a factor of ten in odds. Logits are what the model is in.
 ELO_PER_LOGIT = 400.0 / math.log(10.0)
 
+#: Zero is the parameter-free objective. It is the only competitor here that cannot drift:
+#: `hp-share` has no weights, no training set and no version, so a rating measured against
+#: it means the same thing next month as it does today -- which a rating anchored on
+#: whichever model happens to be current does not. It also reads as the quantity that
+#: matters: what the learned machinery is worth over having none of it.
+ANCHOR = "hp-share/w24"
+
 
 def recover_old_axes(source: dict) -> int:
     """Fill in `depths` and `rankings` for records written before they existed.
@@ -115,13 +122,19 @@ def fit(
     anchor: str | None = None,
     iterations: int = 500,
     prior: float = 1.0,
-) -> tuple[dict[str, float], float, np.ndarray]:
-    """Ratings in logits, the seat advantage, and the Hessian's diagonal.
+) -> tuple[dict[str, float], float, dict[str, float]]:
+    """Ratings in logits, the seat advantage, and a standard error per agent.
 
     Gradient ascent on the log likelihood rather than a solver, because the problem is
     tiny and a dependency is not worth it. The prior is a weak pull towards zero: two
     agents that only ever beat each other would otherwise run off to infinity, and an
     agent with one game would be reported with more confidence than it has earned.
+
+    The error is of the *difference from the anchor*, which needs the whole covariance
+    rather than its diagonal. Only differences are observable -- adding a constant to
+    every rating changes no prediction -- so a marginal error printed beside an anchored
+    rating would be answering a question nobody can ask. The anchor's own is exactly zero,
+    which is what holding it there means.
     """
     names = sorted({a for a, _b, _r in games} | {b for _a, b, _r in games})
     index = {name: i for i, name in enumerate(names)}
@@ -146,15 +159,30 @@ def fit(
     # p(1-p) to both of its players; the prior contributes its own weight.
     predicted = 1.0 / (1.0 + np.exp(-(rating[rows] - rating[cols] + seat)))
     weight = predicted * (1.0 - predicted)
-    information = np.full(len(names), prior)
-    np.add.at(information, rows, weight)
-    np.add.at(information, cols, weight)
+    hessian = np.diag(np.full(len(names), float(prior)))
+    np.add.at(hessian, (rows, rows), weight)
+    np.add.at(hessian, (cols, cols), weight)
+    np.add.at(hessian, (rows, cols), -weight)
+    np.add.at(hessian, (cols, rows), -weight)
+    covariance = np.linalg.inv(hessian)
 
-    if anchor is not None:
+    if anchor is None:
+        errors = np.sqrt(np.clip(np.diag(covariance), 0.0, None))
+    else:
         if anchor not in index:
             raise SystemExit(f"no agent named {anchor!r}; try one of {names}")
-        rating = rating - rating[index[anchor]]
-    return dict(zip(names, rating, strict=True)), seat, information
+        a = index[anchor]
+        rating = rating - rating[a]
+        errors = np.sqrt(
+            np.clip(
+                np.diag(covariance) + covariance[a, a] - 2.0 * covariance[:, a], 0.0, None
+            )
+        )
+    return (
+        dict(zip(names, rating, strict=True)),
+        seat,
+        dict(zip(names, errors, strict=True)),
+    )
 
 
 def main() -> None:
@@ -163,8 +191,12 @@ def main() -> None:
         "--games", default="data/matches/**/games-seed*.jsonl",
         help="glob for recorded match games",
     )
-    ap.add_argument("--anchor", default=None, help="agent to hold at zero")
-    ap.add_argument("--elo", action="store_true", help="print Elo instead of logits")
+    ap.add_argument(
+        "--anchor",
+        default=ANCHOR,
+        help="agent held at zero. Empty string for a mean-zero scale instead.",
+    )
+    ap.add_argument("--logit", action="store_true", help="print logits instead of Elo")
     ap.add_argument("--min-games", type=int, default=1)
     args = ap.parse_args()
 
@@ -176,11 +208,10 @@ def main() -> None:
         played[a] += 1
         played[b] += 1
 
-    rating, seat, information = fit(games, anchor=args.anchor)
-    scale = ELO_PER_LOGIT if args.elo else 1.0
-    unit = "Elo" if args.elo else "logit"
+    rating, seat, errors = fit(games, anchor=args.anchor or None)
+    scale = 1.0 if args.logit else ELO_PER_LOGIT
+    unit = "logit" if args.logit else "Elo"
     names = sorted(rating, key=lambda n: -rating[n])
-    order = {n: i for i, n in enumerate(sorted(rating))}
 
     print(f"{len(games)} games, {len(rating)} agents")
     if repaired:
@@ -192,11 +223,16 @@ def main() -> None:
         f"seat advantage {seat:+.3f} logit = side 0 wins "
         f"{100 / (1 + math.exp(-seat)):.1f}% between equals"
     )
+    if args.anchor:
+        print(
+            f"anchored at {args.anchor} = 0, so a rating is what an agent is worth "
+            "over the parameter-free objective"
+        )
     print(f"\n  {'agent':<34} {unit:>9}  {'+-':>6}  {'games':>6}")
     for name in names:
         if played[name] < args.min_games:
             continue
-        half = 1.96 / math.sqrt(information[order[name]]) * scale
+        half = 1.96 * errors[name] * scale
         print(f"  {name:<34} {rating[name] * scale:>9.1f}  {half:>6.1f}  {played[name]:>6}")
 
     # Where the one-number assumption is failing, if it is.
