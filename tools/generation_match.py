@@ -31,6 +31,7 @@ from pokeuraou.encode import Encoder
 from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.priors import find_cached_chaos, load_chaos
 from pokeuraou.provenance import open_games, provenance, write_game
+from pokeuraou.selection_book import SelectionBook
 from pokeuraou.selfplay import play_game
 from pokeuraou.standings import find_cached_standings, load_standings, sample_standings_team
 from pokeuraou.teams import all_selections, load_roster
@@ -91,6 +92,19 @@ def main() -> None:
     ap.add_argument(
         "--baseline-solve-sparsely", action="store_true", help="same for the other arm"
     )
+    ap.add_argument(
+        "--selection-book",
+        type=Path,
+        default=None,
+        help="draw both sides' four of six from a cached selection equilibrium instead of "
+        "uniformly. Every rating measured so far used a uniform draw on both sides, which "
+        "is worth -22.1 points against the advice, so an agent measured that way is an "
+        "agent playing a selection nobody would play. Given, the book's own opponent "
+        "sheets and spread classes are used, so the arms face what the book was solved "
+        "against. Exploration is deliberately *not* applied: epsilon exists to keep "
+        "generation's coverage wide, and a rating wants the strategy rather than the "
+        "training noise.",
+    )
     ap.add_argument("--seed", type=int, default=77)
     ap.add_argument("--max-turns", type=int, default=40)
     ap.add_argument(
@@ -135,6 +149,11 @@ def main() -> None:
     pool = standings.pool("all")
     selections = tuple(all_selections(reg.meta.team_size, reg.meta.picked_team_size))
 
+    book = SelectionBook.read(args.selection_book) if args.selection_book else None
+    if book is not None:
+        print(f"selection: {args.selection_book.name} ({len(book)} teams), no exploration",
+              file=sys.stderr)
+
     encoder = Encoder(reg)
     net, meta = load_model(args.value, encoder)
     device = torch.device(args.device)
@@ -171,6 +190,7 @@ def main() -> None:
     # against the field, so a seat advantage cancels when the two are combined.
     print(f"\n  {'seat':>30}  {'games':>6}  {'new win':>8}  {'95%':>6}  {'s/game':>7}")
     wins = played = 0
+    book_misses = 0
     games_file = open_games(args.games_out)
     new_name = args.value.name
     old_name = args.baseline.name if args.baseline else args.objective
@@ -179,6 +199,10 @@ def main() -> None:
     # which generation "gen2" meant on the day the match ran -- the `leaves` pair is
     # authoritative, but a label that contradicts it is worse than no label.
     other_limit = args.limit if args.baseline_limit is None else args.baseline_limit
+    # Both arms draw from the same book, so it is not what distinguishes them -- but it is
+    # part of what each *is*, and a rating that cannot tell a book-selected agent from a
+    # uniform one pools two different strengths under one name.
+    selection_label = args.selection_book.stem if args.selection_book else "uniform"
     tags = ""
     if args.depth != args.baseline_depth:
         tags += f"@d{args.depth}"
@@ -212,9 +236,20 @@ def main() -> None:
                     flush=True,
                 )
             team = pool[int(rng.integers(len(pool)))]
-            foe_six = sample_standings_team(rng, reg, prior, team)
-            own_pick = selections[int(rng.integers(len(selections)))]
-            foe_pick = selections[int(rng.integers(len(selections)))]
+            entry = book.get(team) if book is not None else None
+            if entry is not None:
+                # epsilon 0: the rating asks what the strategy is worth, and exploration
+                # is a property of generation rather than of the agent.
+                drawn = entry.draw(rng, epsilon=0.0, temperature=1.0)
+                foe_six = list(drawn.foe_six)
+                own_pick = drawn.our_pick
+                foe_pick = drawn.foe_pick
+            else:
+                foe_six = sample_standings_team(rng, reg, prior, team)
+                own_pick = selections[int(rng.integers(len(selections)))]
+                foe_pick = selections[int(rng.integers(len(selections)))]
+                if book is not None:
+                    book_misses += 1
             record = play_game(
                 reg,
                 rng,
@@ -245,6 +280,7 @@ def main() -> None:
                     depths=depths,
                     rankings=tuple("leaf" if r else "damage" for r in ranks),
                     solvers=tuple("sparse" if x else "full" for x in sparse),
+                    books=(selection_label, selection_label),
                     note=(
                         f"search depth {depths[0]} vs {depths[1]} by side"
                         if depths[0] != depths[1]

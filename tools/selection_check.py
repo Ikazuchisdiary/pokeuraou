@@ -85,6 +85,17 @@ def main() -> None:
         "lead effects, so a value function that under-prices them would produce exactly "
         "the bring-but-bench distribution observed.",
     )
+    ap.add_argument(
+        "--force-selection",
+        action="append",
+        default=None,
+        help="a whole selection to test, four species comma separated, lead first: "
+        "'charizard,incineroar,toxapex,venusaur'. Repeatable, one arm each, all against "
+        "the same equilibrium opponent as the equilibrium arm. --force-lead fixes only "
+        "the front two and lets the solver pick the back two by equilibrium mass, which "
+        "is meaningless when the lead carries no mass; naming all four tests a line as "
+        "played rather than a lead with an arbitrary bench.",
+    )
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
 
@@ -166,9 +177,32 @@ def main() -> None:
             f"  強制先発: {args.force_lead} に合う選出 {len(forced)} 通り、"
             f"うち均衡質量 {sum(strategy[i] for i in forced) * 100:.1f}%"
         )
+    named: dict[str, int] = {}
+    for spec in args.force_selection or []:
+        want = [to_id(x) for x in spec.split(",") if x.strip()]
+        if len(want) != len(roster.sets) - 2:
+            raise SystemExit(f"--force-selection wants 4 species, got {len(want)}: {spec}")
+        species = [s.species for s in roster.sets]
+        index = next(
+            (
+                i
+                for i, sel in enumerate(selections)
+                # Lead order within the pair is not a choice the game exposes, so the
+                # front two are compared as a set; the split between front and back is.
+                if {species[sel[0]], species[sel[1]]} == set(want[:2])
+                and {species[sel[2]], species[sel[3]]} == set(want[2:])
+            ),
+            None,
+        )
+        if index is None:
+            raise SystemExit(f"no selection matches {spec}")
+        label = "+".join(want[:2]) + " / " + "+".join(want[2:])
+        named[label] = index
+        print(f"  指定選出 {label}: 均衡質量 {strategy[index] * 100:.1f}%")
     arms = ["均衡 vs 一様", "一様 vs 一様", "均衡 vs 均衡"]
     if forced_arm:
         arms.append(forced_arm)
+    arms.extend(named)
     for arm in arms:
         # Same seed per arm, so the opponent's spreads, selections and every roll inside
         # the games line up and only our selection rule differs.
@@ -180,12 +214,14 @@ def main() -> None:
                 if args.mirror
                 else sample_standings_team(game_rng, reg, prior, team)
             )
-            if arm == "均衡 vs 均衡" or arm == forced_arm:
+            if arm == "均衡 vs 均衡" or arm == forced_arm or arm in named:
                 which = int(game_rng.choice(len(col), p=class_weights))
                 foe_pick = selections[int(game_rng.choice(len(col[which]), p=col[which]))]
             else:
                 foe_pick = selections[int(game_rng.integers(len(selections)))]
-            if arm == forced_arm:
+            if arm in named:
+                index = named[arm]
+            elif arm == forced_arm:
                 index = forced[0]
             elif arm.startswith("均衡"):
                 index = int(game_rng.choice(len(strategy), p=strategy))

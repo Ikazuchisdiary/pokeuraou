@@ -1,0 +1,61 @@
+{
+  "id": "rizabanadohido-selection",
+  "roster": "rizabanadohido",
+  "regulation": "gen9championsvgc2026regmb",
+  "kind": "human selection repertoire",
+  "source": {
+    "kind": "player knowledge",
+    "author": "16918436+Ikazuchisdiary@users.noreply.github.com",
+    "date": "2026-09-13",
+    "reference": "https://note.com/shuuka_poke/n/n4202d6975aea",
+    "note": "人間界の定石として報告されたもの。①②が定石だったが、BIG6側の『表 リザードン/ガブリアス・裏 イダイトウ/ドドゲザン』がつらく、③もありかという議論があるとのこと"
+  },
+  "premise": "選出は順序付きの90通りであって、どの4体を連れるかの15通りではない。同じ4体でも表と裏を入れ替えれば別の選出であり、人間はその区別に強い意見を持っている",
+  "scope": "これは*人間の実践の報告*であって、盤上での測定ではない。ここに書いた選出が実際に強いかどうかは対戦でしか決まらない。このファイルの役割は、モデルの選出解と人間の実践が食い違う場所を名指しできるようにすること。食い違いはモデルの誤りの証拠にも、人間の定石が古い証拠にもなり得る",
+  "roles": {
+    "charizard": "先発適正が高い。メガシンカしながら盤面へ干渉し、取り巻きに圧をかける。メガY の ひでり が フシギバナ のスイープ条件を作る",
+    "venusaur": "晴れ下であればスイープ可能。晴れは リザードン が作るので、*リザードンの後*に効く資産。スカーフ勢より先に動ける",
+    "incineroar": "いかく で強引な詰ませ盤面を作る。ねこだまし はターン稼ぎで定数ダメージを蓄積させる。すてゼリフ は有利盤面の維持で、相手に交代や守るを強要して ドヒドイデ のダメージを蓄積させる。ドヒドイデ の隣で時間を稼ぐ後発運用もある",
+    "toxapex": "五分の試合を確実な有利に持っていくための中盤・後発向き",
+    "garchomp": "スカーフ地震型。ドドゲザン珠不意打ち最高乱数切り耐え",
+    "sylveon": "③の先発として登場する"
+  },
+  "matchups": [
+    {
+      "id": "big6",
+      "against": "リザードン+フローエッテ+エルフーン系（BIG6）",
+      "note": "①②が定石。相手の『表 リザードン/ガブリアス・裏 イダイトウ/ドドゲザン』がつらく③も検討されている。勝ち筋は『ドヒドイデ+フシギバナを残した状態でイダイトウ@1と対面して詰ませる』。ガオガエンのすてゼリフでデバフを入れることが重要",
+      "selections": [
+        {"label": "①", "lead": ["charizard", "incineroar"], "bench": ["toxapex", "venusaur"], "note": "基本"},
+        {"label": "②", "lead": ["toxapex", "incineroar"], "bench": ["charizard", "venusaur"]},
+        {"label": "③", "lead": ["garchomp", "sylveon"], "bench": ["charizard", "venusaur"]}
+      ]
+    },
+    {
+      "id": "rizapputera",
+      "against": "リザプテラ",
+      "selections": [
+        {"lead": ["charizard", "toxapex"], "bench": ["incineroar", "garchomp"]},
+        {"lead": ["incineroar", "toxapex"], "bench": ["charizard", "garchomp"]}
+      ]
+    },
+    {
+      "id": "mafokame",
+      "against": "マフォカメ",
+      "selections": [
+        {"lead": ["charizard", "incineroar"], "bench": ["garchomp", "venusaur"]}
+      ]
+    },
+    {
+      "id": "mirror",
+      "against": "6匹ミラー",
+      "note": "ドヒドイデ+ガオガエンを残した状態でイダイトウと対面して詰ませるプランが理想"
+    }
+  ],
+  "disagreement": {
+    "observed": "2026-09-13 に `value-all` で394チームを解いた book と比較した結果",
+    "note": "book は BIG6(2位 Hiroshi Onishi) に対して『表 リザードン+フシギバナ・裏 ドヒドイデ+ガオガエン』を100%で選ぶ。これは②と*同じ4体で表裏が逆*。394チーム全体でも リザードン+ガオガエン の先発質量は0.0%（10通り中最下位）で、一方 ガオガエン は71.5%の質量で*連れて行かれている*。メンバーは合っていて順序が違う",
+    "hypothesis": "いかく（着地時）と ねこだまし（初手）はどちらも先発でしか効かず、すてゼリフ と どく の蓄積は何ターンもかけて効く。価値関数が遅効性の盤面資産を即時の攻撃圧に比べて過小評価していれば、『連れて行くが後ろに置く』という観測どおりの分布になる",
+    "test": "tools/selection_check.py --place 2 --force-selection ... で、同じ均衡相手に対して①②③と book の選出を打ち比べる。②は book と同じ4体なので、どの4体を連れるかの影響が相殺され、順序だけの比較になる"
+  }
+}
