@@ -44,7 +44,7 @@ fn blob_from(value: Option<&Value>) -> Blob {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Effect {
     pub id: Id,
     pub duration: Option<i64>,
@@ -105,7 +105,7 @@ impl Effect {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MoveSlot {
     pub id: Id,
     pub pp: i64,
@@ -141,7 +141,7 @@ impl MoveSlot {
 }
 
 /// Up to four move slots, inline.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Moves {
     slots: [Option<MoveSlot>; 4],
 }
@@ -173,7 +173,7 @@ impl Moves {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Pokemon {
     pub slot: usize,
     pub species: Id,
@@ -438,7 +438,7 @@ fn stats_json(values: Option<[i64; 6]>, names: &[&str; 6]) -> Value {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Side {
     pub id: Rc<str>,
     pub name: Rc<str>,
@@ -531,7 +531,7 @@ impl Side {
     }
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct Field {
     pub weather: Option<Id>,
     pub weather_duration: Option<i64>,
@@ -605,7 +605,7 @@ impl Clone for Position {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub struct Position {
     /// `Rc<str>` rather than `String` throughout: none of these ever changes during a turn,
     /// and cloning one used to be an allocation apiece. With the Pokemon shared the clone

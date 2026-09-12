@@ -3873,12 +3873,12 @@ def _rust_encoded_payoffs(
             if score is None
             else np.asarray(score(filled.encoded), dtype=np.float64)
         )
-        for i, j, start, weights in filled.spans:
+        for i, j, indices, weights in filled.spans:
             if not weights:
                 continue
-            payoffs[index][i, j] = float(
-                values[start : start + len(weights)] @ np.asarray(weights)
-            )
+            # The same dot product in the same order; only where the values were read
+            # from changed, because a leaf shared between cells is stored once.
+            payoffs[index][i, j] = float(values[indices] @ np.asarray(weights))
         for i, j, root in filled.folded:
             payoffs[index][i, j] = fold_value(_fold_from_json(root), values)
 

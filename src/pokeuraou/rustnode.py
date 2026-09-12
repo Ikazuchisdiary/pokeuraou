@@ -112,7 +112,9 @@ class EncodedNode:
 
     encoded: Any
     #: (row, column, start, weights) for a cell that is a plain weighted mean.
-    spans: list[tuple[int, int, int, list[float]]]
+    #: (row, column, leaf indices, weights). Indices rather than a start, because the
+    #: port shares a leaf between cells when it is the same position.
+    spans: list[tuple[int, int, list[int], list[float]]]
     #: (row, column, fold tree) for a cell whose turn stopped for a replacement.
     folded: list[tuple[int, int, dict]]
     exact: list[list[bool]]
@@ -167,7 +169,10 @@ class EncodedNode:
                 field=arrays["field"],
                 unknown_volatiles=dict(header.get("unknownVolatiles", {})),
             ),
-            spans=[(int(i), int(j), int(start), list(w)) for i, j, start, w in header["spans"]],
+            spans=[
+                (int(i), int(j), list(indices), list(w))
+                for i, j, indices, w in header["spans"]
+            ],
             folded=[(int(i), int(j), root) for i, j, root in header["folded"]],
             exact=header["exact"],
             refused=[(int(i), int(j), str(why)) for i, j, why in header["refused"]],
