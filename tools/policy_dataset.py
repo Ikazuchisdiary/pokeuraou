@@ -32,7 +32,8 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from pokeuraou.actions import SideAction, side_actions  # noqa: E402
+from pokeuraou.actions import SideAction, side_actions, target_names  # noqa: E402
+from pokeuraou.encode import Encoder  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.narrow import _bridged_scores, score_action  # noqa: E402
 from pokeuraou.position import Position  # noqa: E402
@@ -54,6 +55,13 @@ SCORE_FEATURES = 4
 #: one can.
 POSITION_FEATURES = 6
 FEATURES = 2 * SLOT_FEATURES + PAIR_FEATURES + SCORE_FEATURES + POSITION_FEATURES
+
+#: Per slot: who is acting, which move, what it switches to, and what it points at -- as
+#: vocabulary indices, for the model to embed. The first attempt had only the move's *slot
+#: number*, which says nothing across different Pokemon, and lost to the leaf ordering by
+#: twenty points. Identity is the thing that was missing.
+IDS_PER_SLOT = 4
+IDS = 2 * IDS_PER_SLOT
 
 
 def _slot_features(action: SideAction, index: int, pos: Position, side: int) -> np.ndarray:
@@ -116,6 +124,37 @@ def _position_features(pos: Position, side: int, turn: int) -> np.ndarray:
     return out
 
 
+def ids_for(
+    encoder: Encoder,
+    pos: Position,
+    side: int,
+    actions: list[SideAction],
+) -> np.ndarray:
+    """Vocabulary indices for each action: actor, move, switch target, aim."""
+    vocab = encoder.vocab
+    names = target_names(pos, side)
+    active = pos.sides[side].active_pokemon()
+    out = np.zeros((len(actions), IDS), dtype=np.int32)
+    for row, action in enumerate(actions):
+        for index, slot in enumerate(action.slots[:2]):
+            base = index * IDS_PER_SLOT
+            actor = active[index] if index < len(active) else None
+            if actor is not None:
+                out[row, base] = vocab.species.get(actor.species, 0)
+            move_id = getattr(slot, "move_id", None)
+            if move_id is not None:
+                out[row, base + 1] = vocab.moves.get(move_id, 0)
+            switch_to = getattr(slot, "species", None)
+            if switch_to is not None:
+                out[row, base + 2] = vocab.species.get(switch_to, 0)
+            target = getattr(slot, "target", None)
+            if target is not None:
+                aimed = names.species_for(int(target))
+                if aimed is not None:
+                    out[row, base + 3] = vocab.species.get(aimed, 0)
+    return out
+
+
 def features_for(
     reg: Regulation,
     pos: Position,
@@ -157,6 +196,8 @@ def main() -> None:
     args = ap.parse_args()
 
     reg: Regulation | None = None
+    encoder: Encoder | None = None
+    identities: list[np.ndarray] = []
     menus: list[np.ndarray] = []
     targets: list[np.ndarray] = []
     ranks: list[np.ndarray] = []
@@ -181,6 +222,7 @@ def main() -> None:
                     if reg is None:
                         reg = load_regulation(pos.format)
                         register_mega_stones(reg)
+                        encoder = Encoder(reg)
                     for side, (names, weights) in enumerate(
                         (
                             (turn["ownActions"], turn["ownPolicy"]),
@@ -210,6 +252,7 @@ def main() -> None:
                                 turn=int(turn.get("turn", 0)),
                             )
                         )
+                        identities.append(ids_for(encoder, pos, side, chosen))
                         targets.append(policy / policy.sum())
                         ranks.append(np.arange(len(names), dtype=np.int16))
                         decisions += 1
@@ -226,14 +269,17 @@ def main() -> None:
     np.savez_compressed(
         args.out,
         features=np.concatenate(menus).astype(np.float32),
+        ids=np.concatenate(identities).astype(np.int32),
         targets=np.concatenate(targets).astype(np.float32),
         ranks=np.concatenate(ranks).astype(np.int16),
         lengths=lengths,
+        species_vocab=len(encoder.vocab.species) + 1,
+        move_vocab=len(encoder.vocab.moves) + 1,
     )
     support = [int((t > 1e-9).sum()) for t in targets]
     print(f"{decisions:,} decisions from {games:,} games -> {args.out}")
     print(f"  menu {lengths.mean():.1f} wide on average, {lengths.sum():,} rows, "
-          f"{FEATURES} features")
+          f"{FEATURES} features and {IDS} identities")
     print(f"  support {np.mean(support):.2f} actions on average, "
           f"max {max(support)}")
     if unmatched:

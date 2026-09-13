@@ -119,12 +119,15 @@ def _load_policy(path, reg, device_name: str = "cpu"):
     it is the same fact as everything else in `rust/README.md`: a small batch never reaches
     the card's arithmetic at all.
     """
+def _load_policy(path, reg, device_name: str):
+    """The learned ordering, as a function from (position, side, actions) to scores."""
     import torch
 
     sys.path.insert(0, str(ROOT / "tools"))
     from policy_dataset import features_for, ids_for
 
     from pokeuraou.encode import Encoder
+    from pokeuraou.narrow import _bridged_scores, score_action
 
     blob = torch.load(path, map_location="cpu", weights_only=False)
     encoder = Encoder(reg)
@@ -160,6 +163,10 @@ def _load_policy(path, reg, device_name: str = "cpu"):
             scored = _bridged_scores(reg, pos, side, list(actions))
             if scored is None:
                 scored = [score_action(reg, pos, side, a, battlers=None) for a in actions]
+    def rank(pos, side: int, actions):
+        scored = _bridged_scores(reg, pos, side, list(actions))
+        if scored is None:
+            scored = [score_action(reg, pos, side, a, battlers=None) for a in actions]
         by_choice = {c.action.to_choice(): c.score for c in scored}
         scores = [by_choice.get(a.to_choice(), 0.0) for a in actions]
         x = torch.from_numpy(
@@ -221,6 +228,7 @@ def main() -> None:
     policy = (
         _load_policy(args.policy, reg, args.policy_device) if args.policy else None
     )
+    policy = _load_policy(args.policy, reg, args.device) if args.policy else None
 
     budget = Budget.matrix()
     print(f"{len(positions)} recorded positions, {args.wide}-wide menus, "
