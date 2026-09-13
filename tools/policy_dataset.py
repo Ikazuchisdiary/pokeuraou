@@ -187,18 +187,75 @@ def features_for(
     return rows
 
 
+def _load_trunk(path: Path, encoder: Encoder, device_name: str):
+    """A frozen position representation: what the value function's own head is given.
+
+    `side_vectors` is (B, 2, side_dim) and the head sees `[ours, theirs, field]`, so that
+    is what an ordering should see too -- the position as the function that fills the
+    matrix understands it. The weights are frozen: this asks whether the representation
+    helps, not whether it can be improved.
+    """
+    import torch
+
+    from pokeuraou.value import load_model
+
+    net, _meta = load_model(path, encoder)
+    device = torch.device(device_name)
+    net = net.to(device).eval()
+
+    @torch.no_grad()
+    def embed(items: list[tuple[Position, int]]) -> np.ndarray:
+        positions = [p for p, _side in items]
+        encoded = encoder.encode_positions(positions)
+        batch = {
+            "species": torch.from_numpy(encoded.species),
+            "ability": torch.from_numpy(encoded.ability),
+            "item": torch.from_numpy(encoded.item),
+            "moves": torch.from_numpy(encoded.moves),
+            "mon": torch.from_numpy(encoded.mon),
+            "mask": torch.from_numpy(encoded.mask),
+            "side": torch.from_numpy(encoded.side),
+            "field": torch.from_numpy(encoded.field),
+        }
+        batch = {k: v.to(device) for k, v in batch.items()}
+        sides = net.side_vectors(batch)
+        index = torch.tensor([s for _p, s in items], device=device)
+        rows = torch.arange(len(items), device=device)
+        ours = sides[rows, index]
+        theirs = sides[rows, 1 - index]
+        return torch.cat([ours, theirs, batch["field"]], dim=-1).cpu().numpy()
+
+    return embed
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--games-dir", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--games", type=int, default=2000, help="games to read")
     ap.add_argument("--min-turn", type=int, default=1)
+    ap.add_argument(
+        "--value",
+        type=Path,
+        default=None,
+        help="a trained value function, used frozen as a position representation. Its "
+        "`side_vectors` is what its own head consumes, so it is the position as the thing "
+        "that fills the matrix sees it -- and the ordering's job is to guess what that "
+        "will conclude.",
+    )
+    ap.add_argument("--device", default="cuda", choices=("cpu", "cuda"))
+    ap.add_argument("--chunk", type=int, default=2048, help="positions encoded at once")
     args = ap.parse_args()
 
     reg: Regulation | None = None
     encoder: Encoder | None = None
     identities: list[np.ndarray] = []
     menus: list[np.ndarray] = []
+    #: (position, acting side) per menu, embedded in chunks so the positions are not all
+    #: held at once.
+    pending: list[tuple[Position, int]] = []
+    embeddings: list[np.ndarray] = []
+    net = None
     targets: list[np.ndarray] = []
     ranks: list[np.ndarray] = []
     unmatched = 0
@@ -253,6 +310,13 @@ def main() -> None:
                             )
                         )
                         identities.append(ids_for(encoder, pos, side, chosen))
+                        if args.value is not None:
+                            pending.append((pos, side))
+                            if len(pending) >= args.chunk:
+                                if net is None:
+                                    net = _load_trunk(args.value, encoder, args.device)
+                                embeddings.append(net(pending))
+                                pending = []
                         targets.append(policy / policy.sum())
                         ranks.append(np.arange(len(names), dtype=np.int16))
                         decisions += 1
@@ -261,15 +325,31 @@ def main() -> None:
         if games >= args.games:
             break
 
+    if pending:
+        if net is None:
+            net = _load_trunk(args.value, encoder, args.device)
+        embeddings.append(net(pending))
+        pending = []
+
     if not menus:
         raise SystemExit("no usable decisions found")
 
     lengths = np.array([len(m) for m in menus], dtype=np.int32)
     args.out.parent.mkdir(parents=True, exist_ok=True)
+    extra = {}
+    if embeddings:
+        stacked = np.concatenate(embeddings).astype(np.float16)
+        if len(stacked) != len(lengths):
+            raise SystemExit(
+                f"{len(stacked)} embeddings for {len(lengths)} menus -- they are per "
+                f"menu and must line up"
+            )
+        extra["position"] = stacked
     np.savez_compressed(
         args.out,
         features=np.concatenate(menus).astype(np.float32),
         ids=np.concatenate(identities).astype(np.int32),
+        **extra,
         targets=np.concatenate(targets).astype(np.float32),
         ranks=np.concatenate(ranks).astype(np.int16),
         lengths=lengths,
@@ -279,7 +359,8 @@ def main() -> None:
     support = [int((t > 1e-9).sum()) for t in targets]
     print(f"{decisions:,} decisions from {games:,} games -> {args.out}")
     print(f"  menu {lengths.mean():.1f} wide on average, {lengths.sum():,} rows, "
-          f"{FEATURES} features and {IDS} identities")
+          f"{FEATURES} features and {IDS} identities"
+          + (f", {extra['position'].shape[1]} position dims" if extra else ""))
     print(f"  support {np.mean(support):.2f} actions on average, "
           f"max {max(support)}")
     if unmatched:

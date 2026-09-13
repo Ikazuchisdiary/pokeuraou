@@ -58,11 +58,16 @@ def main() -> None:
     identities = blob["ids"]
     species_vocab = int(blob["species_vocab"])
     move_vocab = int(blob["move_vocab"])
+    # One vector a menu, frozen, from the value function's own `side_vectors`. Absent when
+    # the dataset was built without `--value`, and the model then sees only the summaries.
+    position = blob["position"].astype(np.float32) if "position" in blob else None
     starts = np.concatenate([[0], np.cumsum(lengths)])
     menus = len(lengths)
     print(f"{menus:,} menus, {len(features):,} rows, {features.shape[1]} features, "
           f"{identities.shape[1]} identities "
-          f"({species_vocab} species, {move_vocab} moves)")
+          f"({species_vocab} species, {move_vocab} moves)"
+          + (f", {position.shape[1]} position dims" if position is not None else
+             ", no position"))
 
     rng = np.random.default_rng(args.seed)
     order = rng.permutation(menus)
@@ -82,28 +87,45 @@ def main() -> None:
         """
 
         def __init__(
-            self, floats: int, width: int, embed: int = 24, dropout: float = 0.1
+            self,
+            floats: int,
+            width: int,
+            embed: int = 24,
+            dropout: float = 0.1,
+            position_dims: int = 0,
+            position_width: int = 96,
         ) -> None:
             super().__init__()
             self.species = nn.Embedding(species_vocab, embed, padding_idx=0)
             self.moves = nn.Embedding(move_vocab, embed, padding_idx=0)
+            # The position is the same for every action on a menu, so it is compressed once
+            # and handed to each of them rather than widening every row by 408.
+            self.position = (
+                nn.Sequential(nn.Linear(position_dims, position_width), nn.ReLU())
+                if position_dims
+                else None
+            )
             # Per slot: actor, move, switch target, aim -- three species and one move.
-            size = floats + 2 * 4 * embed
+            size = floats + 2 * 4 * embed + (position_width if position_dims else 0)
             self.trunk = nn.Sequential(
                 nn.Linear(size, width), nn.ReLU(), nn.Dropout(dropout),
                 nn.Linear(width, width), nn.ReLU(), nn.Dropout(dropout),
                 nn.Linear(width, 1),
             )
 
-        def forward(self, x, ids):
+        def forward(self, x, ids, pos=None):
             species = self.species(ids[..., [0, 2, 3, 4, 6, 7]])
             moves = self.moves(ids[..., [1, 5]])
-            flat = torch.cat(
-                [x, species.flatten(-2), moves.flatten(-2)], dim=-1
-            )
-            return self.trunk(flat)
+            parts = [x, species.flatten(-2), moves.flatten(-2)]
+            if self.position is not None and pos is not None:
+                summary = self.position(pos)
+                parts.append(summary.unsqueeze(-2).expand(*x.shape[:-1], summary.shape[-1]))
+            return self.trunk(torch.cat(parts, dim=-1))
 
-    model = Policy(features.shape[1], args.hidden, dropout=args.dropout).to(device)
+    model = Policy(
+        features.shape[1], args.hidden, dropout=args.dropout,
+        position_dims=0 if position is None else position.shape[1],
+    ).to(device)
     optimiser = torch.optim.Adam(
         model.parameters(), lr=args.lr, weight_decay=args.weight_decay
     )
@@ -122,15 +144,17 @@ def main() -> None:
             k[row, :n] = identities[start:stop]
             y[row, :n] = targets[start:stop]
             mask[row, :n] = True
+        p = None if position is None else torch.from_numpy(position[ids]).to(device)
         return (
             torch.from_numpy(x).to(device),
             torch.from_numpy(k).to(device),
             torch.from_numpy(y).to(device),
             torch.from_numpy(mask).to(device),
+            p,
         )
 
-    def loss_for(x, k, y, mask):
-        logits = model(x, k).squeeze(-1).masked_fill(~mask, -1e9)
+    def loss_for(x, k, y, mask, p):
+        logits = model(x, k, p).squeeze(-1).masked_fill(~mask, -1e9)
         return -(y * torch.log_softmax(logits, dim=-1).clamp_min(-30)).sum(-1).mean()
 
     best: tuple[float, int, dict] = (float("inf"), 0, {})
@@ -140,8 +164,8 @@ def main() -> None:
         total, seen = 0.0, 0
         for start in range(0, len(shuffled), args.batch):
             ids = shuffled[start : start + args.batch]
-            x, k, y, mask = batch_of(ids)
-            loss = loss_for(x, k, y, mask)
+            x, k, y, mask, p = batch_of(ids)
+            loss = loss_for(x, k, y, mask, p)
             optimiser.zero_grad()
             loss.backward()
             optimiser.step()
@@ -149,8 +173,8 @@ def main() -> None:
             seen += len(ids)
         model.eval()
         with torch.no_grad():
-            x, k, y, mask = batch_of(test_ids[:2048])
-            held = float(loss_for(x, k, y, mask))
+            x, k, y, mask, p = batch_of(test_ids[:2048])
+            held = float(loss_for(x, k, y, mask, p))
         # Kept by holdout rather than by the last epoch: the first run's holdout loss
         # turned upward while the training loss kept falling, so the last epoch is not
         # the model to report.
@@ -170,8 +194,8 @@ def main() -> None:
     with torch.no_grad():
         for start in range(0, len(test_ids), 512):
             ids = test_ids[start : start + 512]
-            x, k, _y, mask = batch_of(ids)
-            scores = model(x, k).squeeze(-1).masked_fill(~mask, -1e9).cpu().numpy()
+            x, k, _y, mask, p = batch_of(ids)
+            scores = model(x, k, p).squeeze(-1).masked_fill(~mask, -1e9).cpu().numpy()
             for row, menu in enumerate(ids):
                 begin, stop = starts[menu], starts[menu] + lengths[menu]
                 target = targets[begin:stop]
@@ -195,7 +219,9 @@ def main() -> None:
         args.out.parent.mkdir(parents=True, exist_ok=True)
         torch.save({"state": model.state_dict(), "features": features.shape[1],
                     "hidden": args.hidden, "species_vocab": species_vocab,
-                    "move_vocab": move_vocab}, args.out)
+                    "move_vocab": move_vocab,
+                    "position_dims": 0 if position is None else position.shape[1]},
+                   args.out)
         print(f"\n  -> {args.out}")
 
 
