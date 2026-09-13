@@ -33,8 +33,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from pokeuraou.actions import SideAction, side_actions, target_names  # noqa: E402
-from pokeuraou.encode import Encoder  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
+from pokeuraou.encode import Encoder  # noqa: E402
 from pokeuraou.narrow import _bridged_scores, score_action  # noqa: E402
 from pokeuraou.position import Position  # noqa: E402
 from pokeuraou.regulation import Regulation, load_regulation  # noqa: E402
