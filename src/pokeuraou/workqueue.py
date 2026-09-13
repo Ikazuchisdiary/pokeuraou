@@ -30,9 +30,13 @@ from __future__ import annotations
 import os
 import socket
 import socketserver
+import subprocess
+import sys
 import threading
+import time
 from collections import deque
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Sequence
+from pathlib import Path
 
 #: Environment variable carrying "host:port" to a worker.
 ENV_QUEUE = "POKEURAOU_WORK_QUEUE"
@@ -138,6 +142,109 @@ def serve(queue: WorkQueue, on_return=None) -> tuple[_Server, str]:
     threading.Thread(target=server.serve_forever, daemon=True).start()
     host, port = server.server_address[:2]
     return server, f"{host}:{port}"
+
+
+def run_workers(
+    indices: Iterable[int],
+    build_command: Callable[[int, str], Sequence[str]],
+    *,
+    workers: int,
+    out_dir: Path,
+    env: dict[str, str] | None = None,
+    cwd: str | None = None,
+    label: str = "run",
+    counts: Callable[[], int] | None = None,
+) -> int:
+    """Serves a queue, runs `workers` processes against it, and reports what happened.
+
+    Generation and matches had a driver each, differing only in which program they start
+    and how the indices are laid out -- and the second one to be written inherited none of
+    the first one's reporting. So the driver is here and the tools are the two things that
+    actually differ: `build_command(worker, address)` and what an index means.
+
+    An index means whatever the caller decides, and the decision matters. Generation makes
+    it a game. A match makes it *a seat of* a game -- `i // 2` played from seat `i % 2` --
+    because draining seats separately lets one of them empty the queue while the other
+    starves, and the pairing between them is the whole reason for playing both.
+
+    Returns a process exit code: non-zero when work was left unplayed or a worker failed,
+    so an incomplete run says so rather than being discovered by counting files later.
+    """
+    queue = WorkQueue(indices)
+    returned: list[int] = []
+
+    def note_return(back: list[int]) -> None:
+        returned.extend(back)
+        print(
+            f"  a worker went away holding {len(back)} job(s); back on the queue",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    server, address = serve(queue, on_return=note_return)
+    (out_dir / "logs").mkdir(parents=True, exist_ok=True)
+    started = time.perf_counter()
+    running = []
+    for worker in range(workers):
+        log = (out_dir / "logs" / f"worker{worker}.log").open("w", encoding="utf-8")
+        running.append((
+            worker,
+            subprocess.Popen(  # noqa: S603
+                list(build_command(worker, address)),
+                env=env, cwd=cwd, stdout=log, stderr=log, text=True,
+            ),
+            log,
+        ))
+
+    failed = 0
+    finished_at: dict[int, float] = {}
+
+    def watch(worker: int, process: subprocess.Popen) -> None:
+        nonlocal failed
+        process.wait()
+        finished_at[worker] = time.perf_counter() - started
+        # Work nobody holds. A worker leaving while others still hold jobs has run out of
+        # queue, which is what is supposed to happen at the end.
+        left = queue.pending
+        if process.returncode != 0 or left:
+            print(
+                f"  worker {worker} exited with {process.returncode} after "
+                f"{finished_at[worker]:.0f}s, {left} job(s) still unclaimed",
+                file=sys.stderr,
+                flush=True,
+            )
+        if process.returncode != 0:
+            failed += 1
+
+    threads = [threading.Thread(target=watch, args=(w, p)) for w, p, _ in running]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    for _worker, _process, log in running:
+        log.close()
+    server.shutdown()
+
+    elapsed = time.perf_counter() - started
+    order = sorted(finished_at.values())
+    idle = sum(order[-1] - t for t in order) if order else 0.0
+    written = counts() if counts is not None else len(queue.done)
+    print(
+        f"{label} done in {elapsed / 60:.1f} min: {written} written, "
+        f"{len(queue.done)} jobs finished"
+        + (f", {queue.remaining} left unplayed" if queue.remaining else "")
+        + (f", {len(queue.abandoned)} abandoned" if queue.abandoned else "")
+        + (f", {len(returned)} replayed after a worker went away" if returned else "")
+        + (f", {failed} worker(s) failed" if failed else ""),
+        file=sys.stderr,
+    )
+    if order:
+        print(
+            f"  workers finished {order[-1] - order[0]:.0f}s apart, "
+            f"{idle / (len(order) * elapsed):.1%} of the machine idle at the end",
+            file=sys.stderr,
+        )
+    return 1 if (queue.remaining or queue.abandoned or failed) else 0
 
 
 class WorkClient:

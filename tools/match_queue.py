@@ -15,9 +15,13 @@ Games are seeded from their index inside the worker, so the work is the same who
 it and in whatever order. That is what makes a queue reproducible and a retried game the
 game that was lost.
 
-    uv run --group learn python tools/match_queue.py \
-        --out data/matches/foo --games 848 --workers 8 \
-        --value data/models/a.pt --baseline data/models/b.pt \
+The driver is `pokeuraou.workqueue.run_workers`, shared with generation: the two had a copy
+each, differing only in which program they start and how the indices are laid out, and the
+second one written inherited none of the first one's reporting.
+
+    uv run --group learn python tools/match_queue.py \\
+        --out data/matches/foo --games 848 --workers 8 \\
+        --value data/models/a.pt --baseline data/models/b.pt \\
         -- --limit 48 --rank-leaf --baseline-rank-leaf
 """
 
@@ -25,15 +29,13 @@ from __future__ import annotations
 
 import argparse
 import os
-import subprocess
 import sys
-import time
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from pokeuraou.workqueue import WorkQueue, serve  # noqa: E402
+from pokeuraou.workqueue import run_workers  # noqa: E402
 
 
 def main() -> None:
@@ -55,39 +57,15 @@ def main() -> None:
     extra = args.rest[1:] if args.rest and args.rest[0] == "--" else args.rest
 
     out_dir: Path = args.out
-    (out_dir / "logs").mkdir(parents=True, exist_ok=True)
-
-    # Two seats per game, interleaved, so a straggler cannot strand half of a pair.
-    queue = WorkQueue(range(2 * args.games))
-    returned: list[int] = []
-
-    def note_return(indices: list[int]) -> None:
-        returned.extend(indices)
-        print(
-            f"  a worker went away holding {len(indices)} game(s); back on the queue",
-            file=sys.stderr,
-            flush=True,
-        )
-
-    server, address = serve(queue, on_return=note_return)
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     env = dict(os.environ)
     env["POKEURAOU_RUST_NODE"] = "0" if args.no_bridge else "1"
     env["PYTHONPATH"] = str(ROOT / "src")
 
-    print(
-        f"match: {args.workers} workers sharing {2 * args.games} seat-games "
-        f"-> {out_dir}\n  queue at {address}, seed {args.seed}, device {args.device}",
-        file=sys.stderr,
-        flush=True,
-    )
-
-    started = time.perf_counter()
-    workers = []
-    for worker in range(args.workers):
+    def build(worker: int, address: str) -> list[str]:
         command = [
-            sys.executable,
-            str(ROOT / "tools" / "generation_match.py"),
+            sys.executable, str(ROOT / "tools" / "generation_match.py"),
             "--queue", address,
             "--seed", str(args.seed),
             "--games", str(args.games),
@@ -99,35 +77,30 @@ def main() -> None:
         ]
         if args.baseline:
             command += ["--baseline", *args.baseline]
-        command += extra
-        log = (out_dir / "logs" / f"worker{worker}.log").open("w", encoding="utf-8")
-        workers.append((worker, subprocess.Popen(command, env=env, cwd=str(ROOT),  # noqa: S603
-                                                 stdout=log, stderr=log), log))
+        return command + extra
 
-    failed = 0
-    for worker, process, log in workers:
-        if process.wait() != 0:
-            failed += 1
-            print(f"  worker {worker} exited {process.returncode}", file=sys.stderr)
-        log.close()
-    server.shutdown()
+    def written() -> int:
+        return sum(
+            1
+            for path in out_dir.glob("games-worker*.jsonl")
+            for line in path.open(encoding="utf-8")
+            if line.strip()
+        )
 
-    elapsed = time.perf_counter() - started
-    written = sum(
-        1
-        for path in out_dir.glob("games-worker*.jsonl")
-        for line in path.open(encoding="utf-8")
-        if line.strip()
-    )
     print(
-        f"done in {elapsed / 60:.1f} min: {written} games, {failed} worker(s) failed, "
-        f"{queue.remaining} left on the queue, {len(returned)} handed back",
+        f"match: {args.workers} workers sharing {2 * args.games} seat-games "
+        f"-> {out_dir}\n  seed {args.seed}, device {args.device}",
         file=sys.stderr,
+        flush=True,
     )
-    # A queue knows what it did not hand out, so an incomplete run says so instead of
-    # being discovered by counting files afterwards.
-    if queue.remaining or failed:
-        raise SystemExit(1)
+    # Two seats per game, interleaved, so a straggler cannot strand half of a pair.
+    raise SystemExit(
+        run_workers(
+            range(2 * args.games), build,
+            workers=args.workers, out_dir=out_dir, env=env, cwd=str(ROOT),
+            label="match", counts=written,
+        )
+    )
 
 
 if __name__ == "__main__":
