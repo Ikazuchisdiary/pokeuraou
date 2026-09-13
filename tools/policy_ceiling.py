@@ -124,6 +124,12 @@ def main() -> None:
                     help="a model from tools/policy_train.py, ranked alongside the others")
     ap.add_argument("--policy-device", default="cpu", choices=("cpu", "cuda"),
                     help="the CPU is 16x quicker on a menu-sized batch")
+    ap.add_argument("--policy-value", type=Path, default=None,
+                    help="the value function supplying the policy's frozen position "
+                    "representation; defaults to --value, which is how a policy is "
+                    "trained. Setting it apart holds the ground truth fixed while the "
+                    "representation changes, which is what says whether a policy is being "
+                    "given the one it learned on.")
     ap.add_argument("--device", default="cuda", choices=("cpu", "cuda"))
     args = ap.parse_args()
 
@@ -151,11 +157,20 @@ def main() -> None:
         evaluate = BatchedValue(net.to(torch.device(args.device)), encoder,
                                 device=torch.device(args.device))
 
+    # The position representation is the policy's, not the leaf's. They are the same model
+    # by default because that is how the policy was trained, but holding the leaf fixed and
+    # varying only the representation is the one way to ask what the representation is
+    # worth -- and to find out whether a policy has been handed the wrong one.
+    policy_net = getattr(evaluate, "net", None)
+    if args.policy_value is not None:
+        import torch
+
+        from pokeuraou.value import load_model
+
+        loaded, _ = load_model(args.policy_value, encoder)
+        policy_net = loaded.to(torch.device(args.device)).eval()
     policy = (
-        load_policy(
-            args.policy, reg, args.policy_device,
-            value_net=getattr(evaluate, "net", None),
-        )
+        load_policy(args.policy, reg, args.policy_device, value_net=policy_net)
         if args.policy
         else None
     )
