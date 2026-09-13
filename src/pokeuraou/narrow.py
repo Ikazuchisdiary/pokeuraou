@@ -398,7 +398,7 @@ def narrow(
     battlers: Mapping[tuple[int, int], Battler] | None = None,
     weights: Mapping[tuple[int, int], np.ndarray] | None = None,
     candidates: list[SideAction] | None = None,
-    rank: Callable[[list[SideAction]], Sequence[float]] | None = None,
+    rank: Callable[[list[SideAction], list[Candidate]], Sequence[float]] | None = None,
 ) -> Narrowed:
     """Narrows one side's legal choices to at most ``limit``, covering every option.
 
@@ -414,6 +414,11 @@ def narrow(
     preferred instead of the best one on the menu was worth +14.3 points [+7.1, +21.5].
     Coverage, the greedy cover and the tie-break are untouched -- only the ordering
     changes, which is the part that was never claimed to be principled.
+
+    It is handed the damage candidates as well as the pool. They are computed here on every
+    call whatever the ordering is, so a ranker that wants them -- a learned one does, as a
+    feature -- should not pay for them twice: recomputing them cost a second crossing to
+    the port, 0.779 ms a pool, which was 16% of what the learned ordering cost.
     """
     if limit < 1:
         raise ValueError("limit must be at least 1")
@@ -433,7 +438,7 @@ def narrow(
         # The damage detail is kept beside the new score rather than thrown away: a
         # surprising leaf ranking is exactly when a reader wants to see what the cheap
         # score thought.
-        values = rank(pool)
+        values = rank(pool, scored)
         scored = [
             replace(c, score=float(v), detail=(f"leaf {float(v):+.4f}", *c.detail))
             for c, v in zip(scored, values, strict=True)

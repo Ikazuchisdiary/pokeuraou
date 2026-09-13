@@ -113,7 +113,7 @@ def leaf_ranking(
     budget: Budget,
     references: int = DEFAULT_REFERENCES,
     reference_limit: int = 8,
-) -> Callable[[list[SideAction]], np.ndarray]:
+) -> Callable[..., np.ndarray]:
     """A ranking for `narrow` that scores candidates with the leaf instead of with damage.
 
     `narrow` ranks by expected damage fraction, and the matrix is filled by the leaf. The
@@ -137,7 +137,7 @@ def leaf_ranking(
     """
     replies = narrow(reg, pos, 1 - side, limit=reference_limit).actions[:references]
 
-    def rank(pool: list[SideAction]) -> np.ndarray:
+    def rank(pool: list[SideAction], _scored: object = None) -> np.ndarray:
         if not replies:
             return np.zeros(len(pool))
         # One matrix, pool x references, through the same batching the search uses: the
