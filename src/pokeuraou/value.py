@@ -361,6 +361,24 @@ def td_target(dataset: Dataset, lam: float) -> np.ndarray:
     )
 
 
+def load_ensemble(
+    paths: Sequence[str | Path], encoder: Encoder
+) -> tuple[list[ValueNet], list[dict[str, Any]]]:
+    """Several trained nets to be averaged as one leaf.
+
+    They must share a vocabulary and feature widths -- `load_model` checks both -- because
+    averaging logits from nets that mean different things by embedding index 41 would be
+    averaging noise.
+    """
+    nets: list[ValueNet] = []
+    metas: list[dict[str, Any]] = []
+    for path in paths:
+        net, meta = load_model(path, encoder)
+        nets.append(net)
+        metas.append(meta)
+    return nets, metas
+
+
 def load_dataset(path: str | Path) -> Dataset:
     """Reads a cache written by ``tools/encode_dataset.py``."""
     data = np.load(Path(path), allow_pickle=False)
@@ -668,18 +686,41 @@ class BatchedValue:
 
     def __init__(
         self,
-        net: ValueNet,
+        net: ValueNet | Sequence[ValueNet],
         encoder: Encoder,
         *,
         device: torch.device | None = None,
         batch_size: int = 8192,
     ) -> None:
-        self.net = net.eval()
+        #: One net, or several to average. Several because a *training run* moves more
+        #: than the settings being compared do: the same data and configuration at three
+        #: seeds spanned 0.9489 to 0.9725 on one held-out set, where the configurations
+        #: under test differed by 0.004. A comparison of two single runs measures seed
+        #: luck. Averaging removes it from the leaf, so what is left to measure is the
+        #: thing that was changed.
+        self.nets = [net.eval()] if isinstance(net, ValueNet) else [n.eval() for n in net]
+        self.net = self.nets[0]
         self.encoder = encoder
-        self.device = device or next(net.parameters()).device
+        self.device = device or next(self.nets[0].parameters()).device
         self.batch_size = batch_size
         #: Positions scored so far, so a caller can report the cost it incurred.
         self.evaluated = 0
+
+    def _mean_logit(self, batch: dict[str, Tensor]) -> Tensor:
+        """The average of the members' logits, which stays antisymmetric.
+
+        Each member returns `head(ours, theirs) - head(theirs, ours)`, so mirroring a
+        position negates its logit exactly. A mean of negated logits is the negation of
+        the mean, and `V(x) + V(mirror x) = 1` survives the ensemble unchanged. Averaging
+        probabilities would preserve it too; logits are averaged because that is where the
+        model is linear and a confident member does not get flattened by an unsure one.
+        """
+        if len(self.nets) == 1:
+            return self.nets[0](batch)
+        total = self.nets[0](batch)
+        for member in self.nets[1:]:
+            total = total + member(batch)
+        return total / len(self.nets)
 
     @torch.no_grad()
     def __call__(self, positions: list[Any]) -> np.ndarray:
@@ -709,7 +750,7 @@ class BatchedValue:
             }
             batch = {k: v.to(self.device) for k, v in batch.items()}
             out[start : start + len(chunk)] = (
-                torch.sigmoid(self.net(batch)).double().cpu().numpy()
+                torch.sigmoid(self._mean_logit(batch)).double().cpu().numpy()
             )
         self.evaluated += len(positions)
         return out
@@ -744,7 +785,7 @@ class BatchedValue:
                 "field": torch.from_numpy(encoded.field[start:stop]),
             }
             batch = {k: v.to(self.device) for k, v in batch.items()}
-            out[start:stop] = torch.sigmoid(self.net(batch)).double().cpu().numpy()
+            out[start:stop] = torch.sigmoid(self._mean_logit(batch)).double().cpu().numpy()
         self.evaluated += n
         return out
 
