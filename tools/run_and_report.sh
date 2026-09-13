@@ -26,7 +26,10 @@ status=$?
 elapsed=$(($(date +%s) - started))
 
 # What the job produced, in the units this project actually counts.
-games=$(cat "$OUT_DIR"/games-seed*.jsonl 2>/dev/null | wc -l)
+# Both layouts: a fixed split names its files by seed, a queued run by worker. Counting
+# only one of them reported a 107-game run as zero games, from the very tool written to
+# stop an empty run being called a success.
+games=$(cat "$OUT_DIR"/games-*.jsonl 2>/dev/null | wc -l)
 games=${games:-0}
 errors=$(grep -lE "Traceback" "$OUT_DIR"/*.log 2>/dev/null | wc -l)
 errors=${errors:-0}
