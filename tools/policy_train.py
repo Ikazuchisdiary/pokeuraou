@@ -220,7 +220,13 @@ def main() -> None:
         torch.save({"state": model.state_dict(), "features": features.shape[1],
                     "hidden": args.hidden, "species_vocab": species_vocab,
                     "move_vocab": move_vocab,
-                    "position_dims": 0 if position is None else position.shape[1]},
+                    "position_dims": 0 if position is None else position.shape[1],
+                    # Carried through from the dataset: the position representation is
+                    # one value function's, and at search time it has to be given that
+                    # same one. Absent for models trained before this was recorded.
+                    "position_value": (
+                        str(blob["value_model"]) if "value_model" in blob else ""
+                    )},
                    args.out)
         print(f"\n  -> {args.out}")
 

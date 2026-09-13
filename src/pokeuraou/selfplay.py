@@ -37,6 +37,7 @@ from .actions import SideAction, switch_actions_after_faint
 from .equilibrium import EquilibriumError, solve
 from .narrow import narrow
 from .payoff import HP_SHARE, Objective
+from .policy import policy_ranking
 from .position import Field, MoveSlot, Pokemon, Position, Side
 from .priors import Cooccurrence, MetagamePrior, SampledSet
 from .provenance import engine_fingerprint
@@ -281,6 +282,7 @@ def _menus(
     evaluate: LeafEvaluator,
     budget: Budget,
     rank_by_leaf: bool,
+    policy: Any = None,
 ) -> tuple[list[SideAction], list[SideAction]]:
     """Both sides' candidate menus, as one agent sees them.
 
@@ -290,7 +292,21 @@ def _menus(
     That is why this returns a pair and why `play_game` calls it once per agent when the
     settings differ -- handing one agent's menu to the other would make a ranking
     comparison measure nothing.
+
+    Three orderings, not two. ``policy`` -- a model from :func:`pokeuraou.policy.load_policy`
+    -- supersedes ``rank_by_leaf`` when it is given, because both answer the same question
+    and an agent asks it once. It is a supersession rather than an error so that an agent
+    can be described by adding one setting to an existing pair rather than by rewriting it.
     """
+    if policy is not None:
+        return (
+            narrow(
+                reg, pos, 0, limit=limits[0], rank=policy_ranking(policy, pos, 0)
+            ).actions,
+            narrow(
+                reg, pos, 1, limit=limits[1], rank=policy_ranking(policy, pos, 1)
+            ).actions,
+        )
     if not rank_by_leaf:
         return (
             narrow(reg, pos, 0, limit=limits[0]).actions,
@@ -322,6 +338,7 @@ def play_game(
     selection: tuple[list[str], list[str], tuple[int, ...], tuple[int, ...]] | None = None,
     depth: int | tuple[int, int] = 1,
     rank_by_leaf: bool | tuple[bool, bool] = False,
+    policy: Any | tuple[Any, Any] = None,
     solve_sparsely: bool | tuple[bool, bool] = False,
     start: Position | None = None,
 ) -> GameRecord:
@@ -362,6 +379,7 @@ def play_game(
         if isinstance(solve_sparsely, bool)
         else solve_sparsely
     )
+    policies = policy if isinstance(policy, tuple) else (policy, policy)
     leaves = evaluate if isinstance(evaluate, tuple) else (evaluate, evaluate)
     record = GameRecord(
         own_team=[_set_json(reg, s) for s in own],
@@ -388,7 +406,9 @@ def play_game(
 
         own_leaf = leaves[0] if leaves[0] is not None else objective.batch
         foe_leaf = leaves[1] if leaves[1] is not None else objective.batch
-        ours, theirs = _menus(reg, pos, limits, own_leaf, budget, ranked[0])
+        ours, theirs = _menus(
+            reg, pos, limits, own_leaf, budget, ranked[0], policies[0]
+        )
         if not ours or not theirs:
             break
 
@@ -412,12 +432,14 @@ def play_game(
             leaves[1] is not leaves[0]
             or depths[1] != depths[0]
             or ranked[1] != ranked[0]
+            or policies[1] is not policies[0]
             or sparse[1] != sparse[0]
         ):
+            same_menu = ranked[1] == ranked[0] and policies[1] is policies[0]
             foe_ours, foe_theirs = (
                 (ours, theirs)
-                if ranked[1] == ranked[0]
-                else _menus(reg, pos, limits, foe_leaf, budget, ranked[1])
+                if same_menu
+                else _menus(reg, pos, limits, foe_leaf, budget, ranked[1], policies[1])
             )
             if not foe_ours or not foe_theirs:
                 break
@@ -758,6 +780,7 @@ def generate(
     mirror_share: float = 0.0,
     depth: int | tuple[int, int] = 1,
     rank_by_leaf: bool = False,
+    policy: Any = None,
     solve_sparsely: bool = False,
     indices: Iterable[int] | None = None,
     on_finish: Callable[[int], None] | None = None,
@@ -910,6 +933,7 @@ def generate(
                 evaluate=evaluate,
                 depth=depth,
                 rank_by_leaf=rank_by_leaf,
+                policy=policy,
                 solve_sparsely=solve_sparsely,
                 selection=(
                     [entry.species for entry in roster.sets],

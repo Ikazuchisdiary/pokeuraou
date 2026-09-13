@@ -32,159 +32,22 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from pokeuraou.actions import SideAction, side_actions, target_names  # noqa: E402
+from pokeuraou.actions import side_actions  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.encode import Encoder  # noqa: E402
 from pokeuraou.narrow import _bridged_scores, score_action  # noqa: E402
+
+# The feature layout lives in `pokeuraou.policy` because the search uses it too, and a
+# model is only correct if the rows it is shown at search time are built by the same
+# code that built the rows it was trained on.
+from pokeuraou.policy import (  # noqa: E402
+    FEATURES,
+    IDS,
+    features_for,
+    ids_for,
+)
 from pokeuraou.position import Position  # noqa: E402
 from pokeuraou.regulation import Regulation, load_regulation  # noqa: E402
-
-#: Per slot: is it a move, a switch, or nothing; which move; where it points; is it a mega.
-#: Kept deliberately small and cheap -- anything here has to be computable at search time,
-#: for every candidate, without touching the resolver.
-SLOT_FEATURES = 12
-#: Features describing the pair as a whole.
-PAIR_FEATURES = 4
-#: The damage score `narrow` already computes, plus where it ranks the action. Both are
-#: free at search time -- `_bridged_scores` runs on every narrow call whatever the ordering
-#: is -- and they are the only position-specific thing here, so a model without them can
-#: only learn which *shapes* of action tend to be played.
-SCORE_FEATURES = 4
-#: The position, summarised. Cheap counts rather than the encoder's arrays: this asks
-#: whether a small model on free features can beat the leaf ordering, not whether a large
-#: one can.
-POSITION_FEATURES = 6
-FEATURES = 2 * SLOT_FEATURES + PAIR_FEATURES + SCORE_FEATURES + POSITION_FEATURES
-
-#: Per slot: who is acting, which move, what it switches to, and what it points at -- as
-#: vocabulary indices, for the model to embed. The first attempt had only the move's *slot
-#: number*, which says nothing across different Pokemon, and lost to the leaf ordering by
-#: twenty points. Identity is the thing that was missing.
-IDS_PER_SLOT = 4
-IDS = 2 * IDS_PER_SLOT
-
-
-def _slot_features(action: SideAction, index: int, pos: Position, side: int) -> np.ndarray:
-    out = np.zeros(SLOT_FEATURES, dtype=np.float32)
-    slots = action.slots
-    if index >= len(slots):
-        out[0] = 1.0  # absent
-        return out
-    slot = slots[index]
-    kind = type(slot).__name__
-    move_index = getattr(slot, "move_index", None)
-    target = getattr(slot, "target", None)
-    out[1] = float(kind == "MoveAction")
-    out[2] = float(kind == "SwitchAction")
-    out[3] = float(getattr(slot, "mega", False))
-    if move_index is not None:
-        # Move slots are one-hot: a move's identity matters more than its number, but the
-        # number is what is free here, and the position tells the model which move it is.
-        out[4 + min(max(int(move_index) - 1, 0), 3)] = 1.0
-    if target is not None:
-        out[8] = float(int(target) > 0)      # aimed at the far side
-        out[9] = float(int(target) < 0)      # aimed at our own side
-        out[10] = float(abs(int(target)) == 2)
-    else:
-        out[11] = 1.0                        # spread, or self, or no target
-    return out
-
-
-def _pair_features(action: SideAction, pos: Position, side: int) -> np.ndarray:
-    out = np.zeros(PAIR_FEATURES, dtype=np.float32)
-    kinds = [type(s).__name__ for s in action.slots]
-    out[0] = float(kinds.count("SwitchAction"))
-    out[1] = float(any(getattr(s, "mega", False) for s in action.slots))
-    targets = [getattr(s, "target", None) for s in action.slots]
-    known = [int(t) for t in targets if t is not None]
-    # Both slots aimed at the same opponent -- focusing fire is a real doubles decision and
-    # the damage score cannot express it, because it scores the slots separately.
-    out[2] = float(len(known) == 2 and known[0] == known[1] and known[0] > 0)
-    out[3] = float(len(known) == 2 and known[0] != known[1] and min(known) > 0)
-    return out
-
-
-def _position_features(pos: Position, side: int, turn: int) -> np.ndarray:
-    out = np.zeros(POSITION_FEATURES, dtype=np.float32)
-    ours, theirs = pos.sides[side], pos.sides[1 - side]
-    out[0] = sum(1 for m in ours.pokemon if not m.fainted) / 4.0
-    out[1] = sum(1 for m in theirs.pokemon if not m.fainted) / 4.0
-    alive_ours = [m for m in ours.pokemon if not m.fainted]
-    alive_theirs = [m for m in theirs.pokemon if not m.fainted]
-    out[2] = (
-        float(np.mean([m.hp / max(m.maxhp, 1) for m in alive_ours])) if alive_ours else 0.0
-    )
-    out[3] = (
-        float(np.mean([m.hp / max(m.maxhp, 1) for m in alive_theirs]))
-        if alive_theirs
-        else 0.0
-    )
-    out[4] = min(turn, 30) / 30.0
-    out[5] = float(ours.mega_used)
-    return out
-
-
-def ids_for(
-    encoder: Encoder,
-    pos: Position,
-    side: int,
-    actions: list[SideAction],
-) -> np.ndarray:
-    """Vocabulary indices for each action: actor, move, switch target, aim."""
-    vocab = encoder.vocab
-    names = target_names(pos, side)
-    active = pos.sides[side].active_pokemon()
-    out = np.zeros((len(actions), IDS), dtype=np.int32)
-    for row, action in enumerate(actions):
-        for index, slot in enumerate(action.slots[:2]):
-            base = index * IDS_PER_SLOT
-            actor = active[index] if index < len(active) else None
-            if actor is not None:
-                out[row, base] = vocab.species.get(actor.species, 0)
-            move_id = getattr(slot, "move_id", None)
-            if move_id is not None:
-                out[row, base + 1] = vocab.moves.get(move_id, 0)
-            switch_to = getattr(slot, "species", None)
-            if switch_to is not None:
-                out[row, base + 2] = vocab.species.get(switch_to, 0)
-            target = getattr(slot, "target", None)
-            if target is not None:
-                aimed = names.species_for(int(target))
-                if aimed is not None:
-                    out[row, base + 3] = vocab.species.get(aimed, 0)
-    return out
-
-
-def features_for(
-    reg: Regulation,
-    pos: Position,
-    side: int,
-    actions: list[SideAction],
-    scores: list[float] | None = None,
-    turn: int = 0,
-):
-    rows = np.zeros((len(actions), FEATURES), dtype=np.float32)
-    position = _position_features(pos, side, turn)
-    if scores is not None:
-        values = np.asarray(scores, dtype=np.float32)
-        order = np.argsort(np.argsort(-values))          # 0 is the best-scoring action
-        spread = float(values.max() - values.min()) or 1.0
-        normalised = (values - values.min()) / spread
-    else:
-        values = np.zeros(len(actions), dtype=np.float32)
-        order = np.zeros(len(actions), dtype=np.int64)
-        normalised = values
-    base = 2 * SLOT_FEATURES + PAIR_FEATURES
-    for i, action in enumerate(actions):
-        rows[i, :SLOT_FEATURES] = _slot_features(action, 0, pos, side)
-        rows[i, SLOT_FEATURES : 2 * SLOT_FEATURES] = _slot_features(action, 1, pos, side)
-        rows[i, 2 * SLOT_FEATURES : base] = _pair_features(action, pos, side)
-        rows[i, base] = values[i]
-        rows[i, base + 1] = normalised[i]
-        rows[i, base + 2] = min(int(order[i]), 47) / 47.0
-        rows[i, base + 3] = float(order[i] == 0)
-        rows[i, base + SCORE_FEATURES :] = position
-    return rows
 
 
 def _load_trunk(path: Path, encoder: Encoder, device_name: str):
@@ -345,6 +208,11 @@ def main() -> None:
                 f"menu and must line up"
             )
         extra["position"] = stacked
+        # Which value function produced those 408 numbers. Nothing downstream can work it
+        # out -- every model in `data/models/` has the same `side_vectors` width, so a
+        # policy handed the wrong one at search time gets a well-shaped representation
+        # that means something else, and neither the loader nor the game would say so.
+        extra["value_model"] = np.array(args.value.stem)
     np.savez_compressed(
         args.out,
         features=np.concatenate(menus).astype(np.float32),

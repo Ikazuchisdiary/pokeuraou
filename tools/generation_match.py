@@ -31,6 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
 from pokeuraou.payoff import OBJECTIVES
+from pokeuraou.policy import load_policy
 from pokeuraou.priors import find_cached_chaos, load_chaos
 from pokeuraou.provenance import open_games, provenance, write_game
 from pokeuraou.selection_book import SelectionBook
@@ -93,6 +94,37 @@ def main() -> None:
         "comparison.",
     )
     ap.add_argument("--baseline-rank-leaf", action="store_true", help="same for the other arm")
+    ap.add_argument(
+        "--policy",
+        type=Path,
+        default=None,
+        help="the arm under test orders its candidates with a learned policy "
+        "(tools/policy_train.py) instead of with the leaf or the damage score. It "
+        "supersedes --rank-leaf for that arm, because both answer the same question. "
+        "Measured off the board it reaches the leaf ordering's width-24 regret at width "
+        "16 for half the time; whether that converts into games is what this flag exists "
+        "to find out, and nothing here assumes it does.",
+    )
+    ap.add_argument(
+        "--baseline-policy", type=Path, default=None, help="same for the other arm"
+    )
+    ap.add_argument(
+        "--policy-value",
+        type=Path,
+        default=None,
+        help="the value function whose frozen `side_vectors` the policy was trained "
+        "against. Required for a policy that uses a position representation, and not "
+        "inferrable: every model here has the same width, so the wrong one runs at full "
+        "speed and orders by numbers that mean something else. It is loaded separately "
+        "from the arms' leaves, which are free to be anything.",
+    )
+    ap.add_argument(
+        "--policy-device",
+        default="cpu",
+        choices=("cpu", "cuda"),
+        help="the CPU is 16x quicker on a menu-sized batch (0.14 ms against 2.25), "
+        "because a batch of thirty-five rows never reaches the card's arithmetic.",
+    )
     ap.add_argument(
         "--solve-sparsely",
         action="store_true",
@@ -199,6 +231,35 @@ def main() -> None:
         base_meta = base_metas[0]
         baseline = BatchedValue([n.to(device) for n in base_nets], encoder, device=device)
 
+    # The policy's position representation comes from its own value function, not from
+    # either arm's leaf: an arm may be an ensemble, or a generation the policy never saw,
+    # and the representation is a property of the policy rather than of the match.
+    policy_net = None
+    policy_name = ""
+    if args.policy or args.baseline_policy:
+        if args.policy_value is None:
+            raise SystemExit(
+                "--policy needs --policy-value: the position representation belongs to "
+                "one value function and nothing in the file says which."
+            )
+        policy_nets, _ = load_ensemble([args.policy_value], encoder)
+        policy_net = policy_nets[0].to(device)
+        policy_name = args.policy_value.stem
+
+    def load_ranker(path: Path | None):
+        if path is None:
+            return None
+        return load_policy(path, reg, args.policy_device, policy_net, policy_name)
+
+    policies = (load_ranker(args.policy), load_ranker(args.baseline_policy))
+    if policy_net is not None:
+        print(
+            f"policy: {args.policy.stem if args.policy else '-'} vs "
+            f"{args.baseline_policy.stem if args.baseline_policy else '-'} "
+            f"({args.policy_device}, position from {policy_name})",
+            file=sys.stderr,
+        )
+
     print(
         f"new leaf: {leaf_name(args.value)} (trained on {meta.get('games', '?')} games, "
         f"val AUC {meta.get('val_auc', float('nan')):.4f})",
@@ -245,14 +306,30 @@ def main() -> None:
         tags += "@leafrank" if args.rank_leaf else "@damagerank"
     if args.solve_sparsely != args.baseline_solve_sparsely:
         tags += "@sparse" if args.solve_sparsely else "@fullmatrix"
+    if args.policy != args.baseline_policy:
+        tags += f"@{args.policy.stem}" if args.policy else "@nopolicy"
+
+    # What each side's ordering is *called*, which is what a rating is fitted from. A
+    # policy names itself: two policies are two agents, and "policy" alone would pool them.
+    def ranking_name(path: Path | None, leaf_ranked: bool) -> str:
+        if path is not None:
+            return f"policy:{path.stem}"
+        return "leaf" if leaf_ranked else "damage"
+
+    ranking_names = (
+        ranking_name(args.policy, args.rank_leaf),
+        ranking_name(args.baseline_policy, args.baseline_rank_leaf),
+    )
     arm = f"{new_name}{tags}" if tags else new_name
     seats = (
         (f"{arm} = side 0", (value, baseline), (args.depth, args.baseline_depth),
          (args.limit, other_limit), (args.rank_leaf, args.baseline_rank_leaf),
-         (args.solve_sparsely, args.baseline_solve_sparsely)),
+         (args.solve_sparsely, args.baseline_solve_sparsely),
+         policies, ranking_names),
         (f"{arm} = side 1", (baseline, value), (args.baseline_depth, args.depth),
          (other_limit, args.limit), (args.baseline_rank_leaf, args.rank_leaf),
-         (args.baseline_solve_sparsely, args.solve_sparsely)),
+         (args.baseline_solve_sparsely, args.solve_sparsely),
+         policies[::-1], ranking_names[::-1]),
     )
     # Per-seat accumulators, indexed the same way as `seats`, because with a queue the two
     # seats are interleaved rather than run one after the other.
@@ -283,7 +360,7 @@ def main() -> None:
     for index in work():
         which = index % len(seats)
         game_index = index // len(seats)
-        seat, leaves, depths, limits, ranks, sparse = seats[which]
+        seat, leaves, depths, limits, ranks, sparse, rankers, ranknames = seats[which]
         side_leaves = (
             (new_name, old_name) if leaves[0] is value else (old_name, new_name)
         )
@@ -328,6 +405,7 @@ def main() -> None:
                 evaluate=leaves,
                 depth=depths,
                 rank_by_leaf=ranks,
+                policy=rankers,
                 solve_sparsely=sparse,
             )
             if record.outcome is None:
@@ -346,7 +424,7 @@ def main() -> None:
                     leaves=side_leaves,
                     limits=limits,
                     depths=depths,
-                    rankings=tuple("leaf" if r else "damage" for r in ranks),
+                    rankings=ranknames,
                     solvers=tuple("sparse" if x else "full" for x in sparse),
                     books=(selection_label, selection_label),
                     note=(
@@ -366,7 +444,7 @@ def main() -> None:
 
     if client is not None:
         client.close()
-    for which, (seat, _leaves, _d, _l, _r, _s) in enumerate(seats):
+    for which, (seat, _leaves, _d, _l, _r, _s, _p, _n) in enumerate(seats):
         seat_wins, seat_played, unfinished, elapsed = tally[which]
         rate = seat_wins / seat_played if seat_played else float("nan")
         half = (

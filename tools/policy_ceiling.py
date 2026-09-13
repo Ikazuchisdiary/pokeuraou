@@ -45,6 +45,7 @@ from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.equilibrium import EquilibriumError, solve  # noqa: E402
 from pokeuraou.narrow import narrow  # noqa: E402
 from pokeuraou.payoff import OBJECTIVES  # noqa: E402
+from pokeuraou.policy import load_policy  # noqa: E402
 from pokeuraou.regulation import load_regulation  # noqa: E402
 from pokeuraou.resolve import Budget, batched_payoffs  # noqa: E402
 from pokeuraou.search import leaf_ranking  # noqa: E402
@@ -110,115 +111,6 @@ def measure(
     return out
 
 
-def _load_policy(path, reg, device_name: str = "cpu", value_net=None):
-    """The learned ordering, as a function from (position, side, actions) to scores.
-
-    On the CPU, whatever the value function is using. The model is small and a menu is
-    about thirty-five rows, which on CUDA is 2.25 ms of pure launch latency -- flat from 34
-    rows to 138 -- against 0.14 ms on the CPU. Sixteen times, for the same arithmetic, and
-    it is the same fact as everything else in `rust/README.md`: a small batch never reaches
-    the card's arithmetic at all.
-    """
-    import torch
-
-    sys.path.insert(0, str(ROOT / "tools"))
-    from policy_dataset import features_for, ids_for
-
-    from pokeuraou.encode import Encoder
-
-    blob = torch.load(path, map_location="cpu", weights_only=False)
-    encoder = Encoder(reg)
-    device = torch.device(device_name)
-
-    from torch import nn
-
-    embed = 24
-    species = nn.Embedding(int(blob["species_vocab"]), embed, padding_idx=0)
-    moves = nn.Embedding(int(blob["move_vocab"]), embed, padding_idx=0)
-    width = int(blob["hidden"])
-    state = blob["state"]
-    position_dims = int(blob.get("position_dims", 0) or 0)
-    position = None
-    position_width = 0
-    if position_dims:
-        if value_net is None:
-            raise SystemExit(
-                "this policy was trained with a position representation, so it needs the "
-                "value function that produced it -- pass --value"
-            )
-        position_width = state["position.0.weight"].shape[0]
-        position = nn.Sequential(
-            nn.Linear(position_dims, position_width), nn.ReLU()
-        )
-        position.load_state_dict(
-            {k[len("position.") :]: v for k, v in state.items()
-             if k.startswith("position.")}
-        )
-    trunk = nn.Sequential(
-        nn.Linear(int(blob["features"]) + 2 * 4 * embed + position_width, width),
-        nn.ReLU(), nn.Dropout(0.0),
-        nn.Linear(width, width), nn.ReLU(), nn.Dropout(0.0),
-        nn.Linear(width, 1),
-    )
-    species.load_state_dict({"weight": state["species.weight"]})
-    moves.load_state_dict({"weight": state["moves.weight"]})
-    trunk.load_state_dict(
-        {k[len("trunk.") :]: v for k, v in state.items() if k.startswith("trunk.")}
-    )
-    for module in (species, moves, trunk):
-        module.to(device).eval()
-    if position is not None:
-        position.to(device).eval()
-
-    # The value function stays wherever it already is -- it is doing the leaf work and
-    # is not this model's to move -- so the embedding is computed there and carried over.
-    value_device = next(value_net.parameters()).device if value_net is not None else device
-
-    @torch.no_grad()
-    def embed_position(pos, side: int):
-        """The value function's own view of the position, from the acting side."""
-        encoded = encoder.encode_positions([pos])
-        batch = {
-            name: torch.from_numpy(getattr(encoded, name)).to(value_device)
-            for name in ("species", "ability", "item", "moves", "mon", "mask", "side",
-                         "field")
-        }
-        sides = value_net.side_vectors(batch)
-        return torch.cat(
-            [sides[0, side], sides[0, 1 - side], batch["field"][0]], dim=-1
-        ).unsqueeze(0).to(device)
-
-    @torch.no_grad()
-    def rank(pos, side: int, actions, scored=None):
-        # `narrow` computes the damage candidates before it calls a ranker and now hands
-        # them over, so there is no second crossing to the port for them.
-        if scored is None:
-            from pokeuraou.narrow import _bridged_scores, score_action
-
-            scored = _bridged_scores(reg, pos, side, list(actions))
-            if scored is None:
-                scored = [score_action(reg, pos, side, a, battlers=None) for a in actions]
-        by_choice = {c.action.to_choice(): c.score for c in scored}
-        scores = [by_choice.get(a.to_choice(), 0.0) for a in actions]
-        x = torch.from_numpy(
-            features_for(reg, pos, side, list(actions), scores)
-        ).to(device)
-        k = torch.from_numpy(
-            ids_for(encoder, pos, side, list(actions)).astype("int64")
-        ).to(device)
-        parts = [
-            x,
-            species(k[:, [0, 2, 3, 4, 6, 7]]).flatten(-2),
-            moves(k[:, [1, 5]]).flatten(-2),
-        ]
-        if position is not None:
-            summary = position(embed_position(pos, side))
-            parts.append(summary.expand(x.shape[0], summary.shape[-1]))
-        return trunk(torch.cat(parts, dim=-1)).squeeze(-1).cpu().numpy()
-
-    return rank
-
-
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--positions", type=int, default=100)
@@ -260,7 +152,7 @@ def main() -> None:
                                 device=torch.device(args.device))
 
     policy = (
-        _load_policy(
+        load_policy(
             args.policy, reg, args.policy_device,
             value_net=getattr(evaluate, "net", None),
         )
