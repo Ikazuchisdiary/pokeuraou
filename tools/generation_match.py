@@ -297,20 +297,12 @@ def main() -> None:
     # part of what each *is*, and a rating that cannot tell a book-selected agent from a
     # uniform one pools two different strengths under one name.
     selection_label = args.selection_book.stem if args.selection_book else "uniform"
-    tags = ""
-    if args.depth != args.baseline_depth:
-        tags += f"@d{args.depth}"
-    if other_limit != args.limit:
-        tags += f"@w{args.limit}"
-    if args.rank_leaf != args.baseline_rank_leaf:
-        tags += "@leafrank" if args.rank_leaf else "@damagerank"
-    if args.solve_sparsely != args.baseline_solve_sparsely:
-        tags += "@sparse" if args.solve_sparsely else "@fullmatrix"
-    if args.policy != args.baseline_policy:
-        tags += f"@{args.policy.stem}" if args.policy else "@nopolicy"
 
     # What each side's ordering is *called*, which is what a rating is fitted from. A
     # policy names itself: two policies are two agents, and "policy" alone would pool them.
+    # It is one name per arm rather than a flag per mechanism, because the three orderings
+    # are alternatives -- an arm ranking by policy is not also ranking by damage, and a
+    # label built by adding a tag per flag said exactly that.
     def ranking_name(path: Path | None, leaf_ranked: bool) -> str:
         if path is not None:
             return f"policy:{path.stem}"
@@ -320,6 +312,18 @@ def main() -> None:
         ranking_name(args.policy, args.rank_leaf),
         ranking_name(args.baseline_policy, args.baseline_rank_leaf),
     )
+    tags = ""
+    if args.depth != args.baseline_depth:
+        tags += f"@d{args.depth}"
+    if other_limit != args.limit:
+        tags += f"@w{args.limit}"
+    if ranking_names[0] != ranking_names[1]:
+        # The old spellings for the two orderings that already appear in recorded seats.
+        tags += {"leaf": "@leafrank", "damage": "@damagerank"}.get(
+            ranking_names[0], "@" + ranking_names[0].replace("policy:", "")
+        )
+    if args.solve_sparsely != args.baseline_solve_sparsely:
+        tags += "@sparse" if args.solve_sparsely else "@fullmatrix"
     arm = f"{new_name}{tags}" if tags else new_name
     seats = (
         (f"{arm} = side 0", (value, baseline), (args.depth, args.baseline_depth),
