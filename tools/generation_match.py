@@ -17,8 +17,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
 
 import numpy as np
@@ -35,18 +37,30 @@ from pokeuraou.selection_book import SelectionBook
 from pokeuraou.selfplay import play_game
 from pokeuraou.standings import find_cached_standings, load_standings, sample_standings_team
 from pokeuraou.teams import all_selections, load_roster
-from pokeuraou.value import BatchedValue, load_model
+from pokeuraou.value import BatchedValue, load_ensemble
+from pokeuraou.workqueue import WorkClient
 
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--roster", default="rizabanadohido")
-    ap.add_argument("--value", type=Path, default=Path("data/models/value-worlds.pt"))
+    ap.add_argument(
+        "--value",
+        type=Path,
+        nargs="+",
+        default=[Path("data/models/value-worlds.pt")],
+        help="one model, or several to average as one leaf. Several because a training "
+        "run moves more than the settings under test do: six seeds of the same data and "
+        "configuration spanned 0.024 of held-out AUC where the configurations differ by "
+        "0.004. Two single runs measure seed luck; two ensembles of three measure the "
+        "change.",
+    )
     ap.add_argument("--games", type=int, default=200, help="games per seat, so twice this in total")
     ap.add_argument("--limit", type=int, default=16)
     ap.add_argument(
         "--baseline",
         type=Path,
+        nargs="+",
         default=None,
         help="the older generation's *model*. Given, the match is model against model, "
         "which is what every generation after the second needs -- the first comparison "
@@ -106,6 +120,14 @@ def main() -> None:
         "training noise.",
     )
     ap.add_argument("--seed", type=int, default=77)
+    ap.add_argument(
+        "--queue",
+        default=None,
+        help="address of a work queue to take (seat, game) indices from, instead of "
+        "playing a fixed block. A block ends when the unluckiest worker does, and a "
+        "game's cost varies eightfold: generation 8 left 25% of the machine idle that "
+        "way. Games are seeded from their index so the work is the same whoever plays it.",
+    )
     ap.add_argument("--max-turns", type=int, default=40)
     ap.add_argument(
         "--out",
@@ -154,26 +176,37 @@ def main() -> None:
         print(f"selection: {args.selection_book.name} ({len(book)} teams), no exploration",
               file=sys.stderr)
 
+    # One name for the whole leaf. An ensemble's name has to say how many members it has,
+    # because "three seeds averaged" and "one seed" are different agents on the rating
+    # scale and the difference between them is larger than most things it measures.
+    def leaf_name(paths: list[Path]) -> str:
+        stem = paths[0].stem
+        stem = re.sub(r"-s\d+$", "", stem)
+        return stem if len(paths) == 1 else f"{stem}x{len(paths)}"
+
     encoder = Encoder(reg)
-    net, meta = load_model(args.value, encoder)
+    nets, metas = load_ensemble(args.value, encoder)
+    meta = metas[0]
     device = torch.device(args.device)
-    value = BatchedValue(net.to(device), encoder, device=device)
+    value = BatchedValue([n.to(device) for n in nets], encoder, device=device)
     objective = OBJECTIVES[args.objective]
     baseline = None
     if args.baseline is not None:
-        if not args.baseline.exists():
-            raise SystemExit(f"no baseline model at {args.baseline}")
-        base_net, base_meta = load_model(args.baseline, encoder)
-        baseline = BatchedValue(base_net.to(device), encoder, device=device)
+        missing = [p for p in args.baseline if not p.exists()]
+        if missing:
+            raise SystemExit(f"no baseline model at {missing}")
+        base_nets, base_metas = load_ensemble(args.baseline, encoder)
+        base_meta = base_metas[0]
+        baseline = BatchedValue([n.to(device) for n in base_nets], encoder, device=device)
 
     print(
-        f"new leaf: {args.value.name} (trained on {meta.get('games', '?')} games, "
+        f"new leaf: {leaf_name(args.value)} (trained on {meta.get('games', '?')} games, "
         f"val AUC {meta.get('val_auc', float('nan')):.4f})",
         file=sys.stderr,
     )
     if baseline is not None:
         print(
-            f"old leaf: {args.baseline.name} (trained on "
+            f"old leaf: {leaf_name(args.baseline)} (trained on "
             f"{base_meta.get('games', '?')} games, val AUC "
             f"{base_meta.get('val_auc', float('nan')):.4f})",
             file=sys.stderr,
@@ -192,8 +225,8 @@ def main() -> None:
     wins = played = 0
     book_misses = 0
     games_file = open_games(args.games_out)
-    new_name = args.value.name
-    old_name = args.baseline.name if args.baseline else args.objective
+    new_name = leaf_name(args.value)
+    old_name = leaf_name(args.baseline) if args.baseline else args.objective
     # The seat label names the model, not "gen2". It is stamped into every recorded
     # game's provenance, and a reader of that dataset a month from now has no way to know
     # which generation "gen2" meant on the day the match ran -- the `leaves` pair is
@@ -213,26 +246,59 @@ def main() -> None:
     if args.solve_sparsely != args.baseline_solve_sparsely:
         tags += "@sparse" if args.solve_sparsely else "@fullmatrix"
     arm = f"{new_name}{tags}" if tags else new_name
-    for seat, leaves, depths, limits, ranks, sparse in (
+    seats = (
         (f"{arm} = side 0", (value, baseline), (args.depth, args.baseline_depth),
          (args.limit, other_limit), (args.rank_leaf, args.baseline_rank_leaf),
          (args.solve_sparsely, args.baseline_solve_sparsely)),
         (f"{arm} = side 1", (baseline, value), (args.baseline_depth, args.depth),
          (other_limit, args.limit), (args.baseline_rank_leaf, args.rank_leaf),
          (args.baseline_solve_sparsely, args.solve_sparsely)),
-    ):
+    )
+    # Per-seat accumulators, indexed the same way as `seats`, because with a queue the two
+    # seats are interleaved rather than run one after the other.
+    tally = [[0, 0, 0, 0.0] for _ in seats]  # wins, played, unfinished, seconds
+    client = WorkClient(args.queue) if args.queue else None
+    if client is not None:
+        print(f"queue: {args.queue}", file=sys.stderr)
+
+    def work() -> Iterator[int]:
+        """The (seat, game) pairs this process should play, as one index each.
+
+        A queue hands out work in a race, so an index has to name the whole job: seat and
+        game together. Draining game indices per seat would let the first seat empty the
+        queue and leave the second with nothing, and the pairing between the two seats --
+        which is the entire reason for playing both -- would be gone.
+        """
+        if client is None:
+            yield from range(len(seats) * args.games)
+            return
+        while True:
+            index = client.take()
+            if index is None:
+                return
+            yield index
+
+    done = 0
+    overall_started = time.perf_counter()
+    for index in work():
+        which = index % len(seats)
+        game_index = index // len(seats)
+        seat, leaves, depths, limits, ranks, sparse = seats[which]
         side_leaves = (
             (new_name, old_name) if leaves[0] is value else (old_name, new_name)
         )
-        rng = np.random.default_rng(args.seed)
-        seat_wins = seat_played = unfinished = 0
+        # Seeded from the index, not streamed through the seat. A queue makes the order a
+        # race, and an RNG streamed through a block would make game seventeen whatever the
+        # sixteen before it left behind -- different every run, and different between the
+        # two seats that are supposed to play the same game.
+        rng = np.random.default_rng([args.seed, game_index])
         started = time.perf_counter()
-        for played_so_far in range(args.games):
-            if played_so_far and played_so_far % args.report_every == 0:
-                rate = seat_wins / seat_played * 100 if seat_played else float("nan")
+        if True:
+            done += 1
+            if done % args.report_every == 0:
                 print(
-                    f"    [{seat}] {played_so_far}/{args.games} played, "
-                    f"new {rate:.1f}%, {(time.perf_counter() - started) / played_so_far:.2f} s/game",
+                    f"    {done} played, "
+                    f"{(time.perf_counter() - overall_started) / done:.2f} s/game",
                     flush=True,
                 )
             team = pool[int(rng.integers(len(pool)))]
@@ -265,12 +331,14 @@ def main() -> None:
                 solve_sparsely=sparse,
             )
             if record.outcome is None:
-                unfinished += 1
+                tally[which][2] += 1
+                if client is not None:
+                    client.finish(index)
                 continue
             write_game(
                 games_file,
                 record,
-                objective=f"value:{args.value.stem}",
+                objective=f"value:{leaf_name(args.value)}",
                 search_limit=args.limit,
                 source=provenance(
                     "generation-match",
@@ -288,11 +356,18 @@ def main() -> None:
                     ),
                 ),
             )
-            seat_played += 1
+            tally[which][1] += 1
             # `outcome` is side 0's result, so flip it when the value function sits at 1.
             new_won = record.outcome > 0.5 if leaves[0] is value else record.outcome < 0.5
-            seat_wins += int(new_won)
-        elapsed = time.perf_counter() - started
+            tally[which][0] += int(new_won)
+            tally[which][3] += time.perf_counter() - started
+            if client is not None:
+                client.finish(index)
+
+    if client is not None:
+        client.close()
+    for which, (seat, _leaves, _d, _l, _r, _s) in enumerate(seats):
+        seat_wins, seat_played, unfinished, elapsed = tally[which]
         rate = seat_wins / seat_played if seat_played else float("nan")
         half = (
             1.96 * (rate * (1 - rate) / seat_played) ** 0.5
@@ -301,7 +376,7 @@ def main() -> None:
         )
         print(
             f"  {seat:>30}  {seat_played:>6}  {rate * 100:>7.1f}%  +-{half * 100:.1f}  "
-            f"{elapsed / args.games:>7.2f}   (打ち切り {unfinished})",
+            f"{elapsed / max(seat_played, 1):>7.2f}   (打ち切り {unfinished})",
             flush=True,
         )
         if args.out is not None:
@@ -312,9 +387,9 @@ def main() -> None:
                         {
                             "seat": seat,
                             "seed": args.seed,
-                            "model": args.value.name,
+                            "model": leaf_name(args.value),
                             "baseline": (
-                                args.baseline.name if args.baseline else args.objective
+                                leaf_name(args.baseline) if args.baseline else args.objective
                             ),
                             "objective": args.objective,
                             "limit": args.limit,
