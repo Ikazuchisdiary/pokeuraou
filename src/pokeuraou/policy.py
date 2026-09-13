@@ -293,8 +293,12 @@ def load_policy(
                 scored = [score_action(reg, pos, side, a, battlers=None) for a in actions]
         by_choice = {c.action.to_choice(): c.score for c in scored}
         scores = [by_choice.get(a.to_choice(), 0.0) for a in actions]
+        # `turn` is not optional here even though the signature gives it a default. The
+        # training rows carried the decision's real turn, normalised over thirty; a search
+        # that leaves it out sends every row through the first layer saying turn zero, and
+        # the model has never seen that except at the very start of a game.
         x = torch.from_numpy(
-            features_for(reg, pos, side, list(actions), scores)
+            features_for(reg, pos, side, list(actions), scores, turn=pos.turn)
         ).to(device)
         k = torch.from_numpy(
             ids_for(encoder, pos, side, list(actions)).astype("int64")
