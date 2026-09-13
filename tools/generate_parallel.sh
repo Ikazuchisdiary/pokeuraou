@@ -35,11 +35,33 @@ OUT_DIR="${1:-data/selfplay-gen2}"
 GAMES_PER_WORKER="${2:-1000}"
 FIRST_SEED="${3:-601}"
 WORKERS="${WORKERS:-8}"
-VALUE="${VALUE:-data/models/value-worlds.pt}"
-LIMIT="${LIMIT:-16}"
+# Named here rather than left to tools/selfplay.py's own default, because the book path is
+# derived from it below and an undefined ROSTER would silently look for a book that cannot
+# exist -- landing on the uniform fallback for the wrong reason.
+ROSTER="${ROSTER:-rizabanadohido}"
+# The current best, not the first one ever trained. `value-worlds` sat here while seven
+# generations went past it; a run launched with no environment was generating with the
+# weakest leaf in the rating table.
+VALUE="${VALUE:-data/models/value-all.pt}"
+# 48, which is what generations 7 and 8 were actually made with. Width 16 -> 24 is worth
+# +8.8 points and 24 -> 48 another +5.5, so a default of 16 described an agent about
+# fourteen points below the one anyone runs.
+LIMIT="${LIMIT:-48}"
 # Optional: draw both sides' 4-of-6 from cached selection equilibria instead of uniformly.
 # BOOK=data/selection/rizabanadohido-value-gen2.jsonl.gz bash tools/generate_parallel.sh ...
-BOOK="${BOOK:-}"
+# Derived from the leaf, because a book is one model's opinion about selection and the two
+# have to move together: the same model playing two books measured +17.5 against +22.1 for
+# the advice and -10.3 against -4.7 for its calibration. Drawing the four of six uniformly
+# instead of from a solved equilibrium costs +18.9 to +22.1 points -- about 141 Elo, which
+# is the whole distance from the parameter-free baseline to the best agent on the scale --
+# so an empty default here was the most expensive trap of the lot.
+BOOK="${BOOK:-data/selection/${ROSTER}-$(basename "$VALUE" .pt).jsonl.gz}"
+if [ ! -f "$BOOK" ]; then
+	echo "!! no book at $BOOK -- selection falls back to a uniform draw of the four of six."
+	echo "!! That is worth about -141 Elo. Solve one with tools/solve_book_parallel.sh,"
+	echo "!! or pass BOOK= explicitly if a uniform draw is what you meant."
+	BOOK=""
+fi
 EPSILON="${EPSILON:-0.25}"
 # 0.5, not 0.05: the coverage table over all 394 solved teams says the rarest of our 90
 # selections gets 0.0 games in a generation at 0.05 and 11.9 at 0.5, with three quarters of
@@ -65,7 +87,9 @@ MIRROR_SHARE="${MIRROR_SHARE:-0.1}"
 # that costs 20x when you forget it is not a default, it is a trap.
 RUST_NODE="${RUST_NODE:-1}"
 DEVICE="${DEVICE:-cuda}"
-RANK_LEAF="${RANK_LEAF:-0}"
+# On, because generations 5 through 8 all passed it and it is worth +2.9 points (+19 Elo)
+# at width 24. It costs 8.7% per decision at width 48.
+RANK_LEAF="${RANK_LEAF:-1}"
 # Prove the equilibrium from the fifth of the matrix that settles it, instead of filling
 # all of it. Not an approximation: the round ends by asking both sides for a better reply
 # over *every* action and getting none, which is a proof about the cells that were never
@@ -124,6 +148,7 @@ for i in $(seq 0 $((WORKERS - 1))); do
 		--games "$GAMES_PER_WORKER" \
 		--seed "$seed" \
 		--limit "$LIMIT" \
+		--roster "$ROSTER" \
 		--opponents worlds \
 		--value "$VALUE" \
 		--device "$DEVICE" \
