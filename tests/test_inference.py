@@ -133,7 +133,15 @@ def test_a_worker_dying_leaves_the_server_up(parts):
 
 
 def test_a_batch_too_large_for_the_buffer_refuses_rather_than_splitting(parts):
-    """Splitting would change the batch size, which changes the answer on CUDA."""
+    """A single chunk that does not fit is refused; a long batch is cut like BatchedValue.
+
+    The refusal used to be for any batch larger than the buffer, on the grounds that
+    splitting changes a batch's size and a CUDA answer depends on that. But the model
+    behind the server splits at 8,192 whatever happens, so the rule forbade work without
+    protecting anything -- a self-switch node of 1,048,576 leaves killed a worker in a real
+    match while the direct path had been evaluating that node in 128 pieces all along. What
+    is left is the case the buffer genuinely cannot serve: one chunk that does not fit.
+    """
     regulation, encoder, net = parts
     from pokeuraou.inference import served_model
 
@@ -357,3 +365,40 @@ def test_an_ensemble_arm_survives_several_workers_at_once(parts, device_name):
         assert np.array_equal(results[rows], expected), (
             f"{rows} rows changed when three other workers were asking at the same time"
         )
+
+
+@pytest.mark.parametrize("device_name", DEVICES)
+def test_a_batch_longer_than_one_chunk_is_cut_where_batchedvalue_cuts(parts, device_name):
+    """More rows than fit in one call, answered identically to the direct path.
+
+    `BatchedValue` cuts at `batch_size` and the server's client now cuts at the same
+    number, so the two make the same calls with the same row counts. That is the only
+    reason the answers can be equal on CUDA, where the count is part of the arithmetic --
+    and it is the property that lets a 1,048,576-leaf node go through at all.
+
+    A small `batch_size` here so the cut happens over a few dozen positions instead of a
+    few thousand; the boundary being small changes nothing about whether the two agree.
+    """
+    regulation, encoder, net = parts
+    device = torch.device(device_name)
+
+    from pokeuraou.inference import served_model
+
+    local = BatchedValue(net.to(device), encoder, device=device, batch_size=7)
+    positions = _positions(regulation, 45)
+    expected = local(positions)
+
+    server, address = serve({"value": served_model(local)})
+    try:
+        with RemoteValue(
+            address, "value", encoder, buffer_bytes=8 << 20, batch_size=7
+        ) as remote:
+            got = remote(positions)
+    finally:
+        server.shutdown()
+
+    assert len(got) == 45
+    assert np.array_equal(got, expected), (
+        f"max difference {np.abs(got - expected).max():.3e} -- the server cut a long batch "
+        f"somewhere BatchedValue does not"
+    )

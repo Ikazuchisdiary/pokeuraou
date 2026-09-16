@@ -78,6 +78,16 @@ def _plan(encoded: Any) -> tuple[list[dict[str, Any]], int]:
     return layout, offset
 
 
+def _slice(encoded: Any, start: int, stop: int) -> Any:
+    """Rows `start:stop` of an encoded batch, as an `Encoded`."""
+    from .encode import Encoded
+
+    return Encoded(
+        **{name: getattr(encoded, name)[start:stop] for name in ARRAYS},
+        unknown_volatiles={},
+    )
+
+
 def _views(buffer: memoryview, layout: Sequence[dict[str, Any]]) -> dict[str, np.ndarray]:
     out: dict[str, np.ndarray] = {}
     for item in layout:
@@ -212,6 +222,10 @@ class RemoteValue:
     model: str
     encoder: Any
     buffer_bytes: int = BUFFER_BYTES
+    #: Rows per request. `BatchedValue.batch_size`, and it has to stay that: a CUDA answer
+    #: depends on the number of rows in the call, so the two paths agree only while they
+    #: cut a long batch in the same places.
+    batch_size: int = 8192
 
     def __post_init__(self) -> None:
         self.evaluated = 0
@@ -268,18 +282,39 @@ class RemoteValue:
         return self.from_encoded(encoded)
 
     def from_encoded(self, encoded: Any) -> np.ndarray:
+        """Score a batch, in the same pieces `BatchedValue` would have scored it in.
+
+        Chunked at `batch_size`, which is `BatchedValue.batch_size`. The first version
+        refused to chunk at all, on the grounds that splitting changes a batch's size and
+        a CUDA answer depends on that -- but the model behind the server chunks at 8,192
+        regardless, so refusing did not preserve the answers, it only forbade the batches
+        larger than one chunk. A self-switch node produced 1,048,576 leaves in a real
+        match and killed the worker; the direct path had been evaluating that node in 128
+        pieces all along, quietly.
+
+        So the invariant is not "never split" but "split where `BatchedValue` splits", and
+        the two paths now agree by construction on batches of any size.
+        """
         rows = int(len(encoded.species))
         if rows == 0:
             return np.zeros(0, dtype=np.float64)
+        if rows > self.batch_size:
+            out = np.empty(rows, dtype=np.float64)
+            for start in range(0, rows, self.batch_size):
+                stop = min(start + self.batch_size, rows)
+                out[start:stop] = self.from_encoded(_slice(encoded, start, stop))
+            return out
         layout, used = _plan(encoded)
         result_offset = (used + 63) & ~63
         needed = result_offset + rows * 8
         if needed > self.buffer_bytes:
             raise RuntimeError(
-                f"a batch of {rows} rows needs {needed / 1e6:.0f} MB and the buffer is "
-                f"{self.buffer_bytes / 1e6:.0f} MB -- raise buffer_bytes rather than "
-                f"splitting it, because splitting changes the batch size and a CUDA "
-                f"answer depends on that"
+                f"one chunk of {rows} rows needs {needed / 1e6:.0f} MB and the buffer "
+                f"is {self.buffer_bytes / 1e6:.0f} MB. Longer batches are already cut at "
+                f"batch_size ({self.batch_size}) to match BatchedValue; this is a single "
+                f"chunk that does not fit, so raise buffer_bytes rather than cutting "
+                f"smaller -- a CUDA answer depends on the number of rows in the call, and "
+                f"the two paths agree only while they cut in the same places."
             )
         view = self._block.buf
         for item in layout:
