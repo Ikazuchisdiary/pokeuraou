@@ -311,49 +311,53 @@ class RemoteValue:
         return scores
 
 
-def local_model(net: Any, device: Any, batch_size: int = 8192):
-    """Wraps a loaded net as the server's side of a model.
+class _Arrays:
+    """The encoded batch, in the shape `BatchedValue.from_encoded` reads.
 
-    The chunking is `BatchedValue`'s, at the same boundary, because that is what decides
-    whether the answers are the ones this project was already getting: a CUDA result
-    depends on the number of rows in the call, so a server that chunked at a different size
-    would be a different leaf wearing the same name.
+    A view onto the worker's buffer, trimmed to the rows it asked about -- the buffer is
+    sized for the largest request, not this one.
     """
-    import torch
 
-    @torch.no_grad()
+    __slots__ = ARRAYS
+
+    def __init__(self, arrays: dict[str, np.ndarray], rows: int) -> None:
+        for name in ARRAYS:
+            # Contiguous because `np.frombuffer` can hand back a read-only view and
+            # `torch.from_numpy` will not take one. Same values either way.
+            setattr(self, name, np.ascontiguousarray(arrays[name][:rows]))
+
+
+def served_model(nets: Sequence[Any], encoder: Any, device: Any, batch_size: int = 8192):
+    """An arm, scored by the same object a worker would have used.
+
+    This delegates to `BatchedValue` rather than reimplementing the forward pass, and that
+    is the whole point rather than a convenience. The first version here did reimplement
+    it, carefully -- same chunk boundary, same sigmoid, same dtype -- and still gave
+    different answers, because it averaged an ensemble with
+    `torch.stack([net(batch) for net in nets]).mean(0)` while `BatchedValue` averages with
+    `stack_module_state` and `vmap`. Those two sum a float32 in different orders.
+    `value.py` says so in a comment and refuses to keep both paths for exactly this
+    reason; the server had quietly restored the second one.
+
+    Measured, through a match: menus identical, supports identical, actions drawn
+    identical, and the mixed strategies differing at 4e-08 -- which is a different
+    equilibrium, so a different agent.
+    """
+    from .value import BatchedValue
+
+    # Moved here rather than left to the caller. `BatchedValue` moves an ensemble's members
+    # when it stacks them and leaves a single net where it found it, so a one-net arm that
+    # arrived on the CPU would be indexed on the CPU with everything else on the card.
+    placed = [n.to(device).eval() for n in nets]
+    value = BatchedValue(
+        placed if len(placed) > 1 else placed[0],
+        encoder,
+        device=device,
+        batch_size=batch_size,
+    )
+
     def score(arrays: dict[str, np.ndarray], rows: int) -> np.ndarray:
-        out = np.empty(rows, dtype=np.float64)
-        for start in range(0, rows, batch_size):
-            stop = min(start + batch_size, rows)
-            batch = {
-                name: torch.from_numpy(np.ascontiguousarray(array[start:stop])).to(device)
-                for name, array in arrays.items()
-            }
-            out[start:stop] = (
-                torch.sigmoid(net(batch)).double().cpu().numpy()
-            )
-        return out
-
-    return score
-
-
-def ensemble_model(nets: Sequence[Any], device: Any, batch_size: int = 8192):
-    """Several nets averaged in logit space, which is what a match's arm is."""
-    import torch
-
-    @torch.no_grad()
-    def score(arrays: dict[str, np.ndarray], rows: int) -> np.ndarray:
-        out = np.empty(rows, dtype=np.float64)
-        for start in range(0, rows, batch_size):
-            stop = min(start + batch_size, rows)
-            batch = {
-                name: torch.from_numpy(np.ascontiguousarray(array[start:stop])).to(device)
-                for name, array in arrays.items()
-            }
-            logits = torch.stack([net(batch) for net in nets]).mean(dim=0)
-            out[start:stop] = torch.sigmoid(logits).double().cpu().numpy()
-        return out
+        return value.from_encoded(_Arrays(arrays, rows))
 
     return score
 
@@ -371,18 +375,14 @@ def load_models(paths: dict[str, Sequence[Path]], encoder: Any, device_name: str
         for path in group:
             net, _meta = load_model(path, encoder)
             nets.append(net.to(device).eval())
-        models[name] = (
-            local_model(nets[0], device) if len(nets) == 1
-            else ensemble_model(nets, device)
-        )
+        models[name] = served_model(nets, encoder, device)
     return models
 
 
 __all__ = [
     "ENV_SERVER",
     "RemoteValue",
-    "ensemble_model",
     "load_models",
-    "local_model",
     "serve",
+    "served_model",
 ]

@@ -58,9 +58,9 @@ def test_the_server_returns_exactly_what_the_local_leaf_returns(parts, device_na
     positions = _positions(regulation, 40)
     expected = local(positions)
 
-    from pokeuraou.inference import local_model
+    from pokeuraou.inference import served_model
 
-    server, address = serve({"value": local_model(net.to(device), device)})
+    server, address = serve({"value": served_model([net.to(device)], encoder, device)})
     try:
         with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20) as remote:
             got = remote(positions)
@@ -86,9 +86,9 @@ def test_two_workers_at_once_get_what_they_would_get_alone(parts, device_name):
     second = _positions(regulation, 40)
     alone = {12: local(first), 40: local(second)}
 
-    from pokeuraou.inference import local_model
+    from pokeuraou.inference import served_model
 
-    server, address = serve({"value": local_model(net.to(device), device)})
+    server, address = serve({"value": served_model([net.to(device)], encoder, device)})
     results: dict[int, np.ndarray] = {}
     try:
 
@@ -117,9 +117,9 @@ def test_two_workers_at_once_get_what_they_would_get_alone(parts, device_name):
 def test_a_worker_dying_leaves_the_server_up(parts):
     regulation, encoder, net = parts
     device = torch.device("cpu")
-    from pokeuraou.inference import local_model
+    from pokeuraou.inference import served_model
 
-    server, address = serve({"value": local_model(net.to(device), device)})
+    server, address = serve({"value": served_model([net.to(device)], encoder, device)})
     try:
         casualty = RemoteValue(address, "value", encoder, buffer_bytes=4 << 20)
         casualty(_positions(regulation, 4))
@@ -135,10 +135,11 @@ def test_a_worker_dying_leaves_the_server_up(parts):
 def test_a_batch_too_large_for_the_buffer_refuses_rather_than_splitting(parts):
     """Splitting would change the batch size, which changes the answer on CUDA."""
     regulation, encoder, net = parts
-    from pokeuraou.inference import local_model
+    from pokeuraou.inference import served_model
 
-    server, address = serve({"value": local_model(net.to(torch.device("cpu")),
-                                                  torch.device("cpu"))})
+    server, address = serve(
+        {"value": served_model([net.to(torch.device("cpu"))], encoder, torch.device("cpu"))}
+    )
     try:
         with (
             RemoteValue(address, "value", encoder, buffer_bytes=1 << 16) as remote,
@@ -151,10 +152,11 @@ def test_a_batch_too_large_for_the_buffer_refuses_rather_than_splitting(parts):
 
 def test_an_unknown_model_is_named_rather_than_guessed(parts):
     regulation, encoder, net = parts
-    from pokeuraou.inference import local_model
+    from pokeuraou.inference import served_model
 
-    server, address = serve({"value": local_model(net.to(torch.device("cpu")),
-                                                  torch.device("cpu"))})
+    server, address = serve(
+        {"value": served_model([net.to(torch.device("cpu"))], encoder, torch.device("cpu"))}
+    )
     try:
         with (
             RemoteValue(address, "baseline", encoder, buffer_bytes=4 << 20) as remote,
@@ -176,9 +178,9 @@ def test_an_arm_says_what_it_holds_rather_than_what_it_is_called(parts):
     _regulation, encoder, net = parts
     device = torch.device("cpu")
 
-    from pokeuraou.inference import local_model
+    from pokeuraou.inference import served_model
 
-    scorer = local_model(net.to(device), device)
+    scorer = served_model([net.to(device)], encoder, device)
     server, address = serve(
         {"value": scorer, "baseline": scorer},
         arms={"value": ["value-all.pt", "value-all-s1.pt"], "baseline": ["value-gen8.pt"]},
@@ -238,10 +240,10 @@ def test_a_rows_answer_does_not_depend_on_what_it_was_batched_with(parts, device
     regulation, encoder, net = parts
     device = torch.device(device_name)
 
-    from pokeuraou.inference import local_model
+    from pokeuraou.inference import served_model
 
     positions = _positions(regulation, 24)
-    server, address = serve({"value": local_model(net.to(device), device)})
+    server, address = serve({"value": served_model([net.to(device)], encoder, device)})
     try:
         with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20) as remote:
             straight = remote(positions)
@@ -253,4 +255,45 @@ def test_a_rows_answer_does_not_depend_on_what_it_was_batched_with(parts, device
     assert np.array_equal(straight, reversed_answer[::-1]), (
         f"max difference {np.abs(straight - reversed_answer[::-1]).max():.3e} -- a row's "
         f"answer moved because its neighbours changed"
+    )
+
+
+@pytest.mark.parametrize("device_name", DEVICES)
+def test_an_ensemble_arm_matches_the_ensemble_a_worker_would_have_built(parts, device_name):
+    """The path that was not covered, and the one that was wrong.
+
+    Every other test here uses a single net, and a single net has only one way to be
+    evaluated. An ensemble has two: `stack_module_state` with `vmap`, which is what
+    `BatchedValue` does, and `torch.stack([net(batch) for net in nets]).mean(0)`, which is
+    what the server did. They sum a float32 in different orders. `value.py` refuses to keep
+    both paths and says why in a comment; the server had restored the second one, and a
+    real match through it produced identical menus and identical draws with mixed
+    strategies differing at 4e-08 -- a different equilibrium, so a different agent.
+
+    So this builds the ensemble both ways and demands they agree exactly.
+    """
+    _regulation, encoder, net = parts
+    device = torch.device(device_name)
+    torch.manual_seed(11)
+    from pokeuraou.value import ValueConfig, build
+
+    second = build(encoder, ValueConfig()).eval()
+    nets = [net.to(device), second.to(device)]
+
+    from pokeuraou.inference import served_model
+
+    local = BatchedValue(nets, encoder, device=device)
+    positions = _positions(_regulation, 24)
+    expected = local(positions)
+
+    server, address = serve({"value": served_model(nets, encoder, device)})
+    try:
+        with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20) as remote:
+            got = remote(positions)
+    finally:
+        server.shutdown()
+
+    assert np.array_equal(got, expected), (
+        f"max difference {np.abs(got - expected).max():.3e} -- an ensemble served is not "
+        f"the ensemble a worker builds, and 1.9e-06 moves an equilibrium"
     )
