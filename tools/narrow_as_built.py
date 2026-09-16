@@ -34,12 +34,11 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tools"))
 
 from budget_effect import load_positions  # noqa: E402
-from policy_ceiling import _load_policy  # noqa: E402
 
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.equilibrium import EquilibriumError, solve  # noqa: E402
 from pokeuraou.narrow import narrow  # noqa: E402
-from pokeuraou.payoff import OBJECTIVES  # noqa: E402
+from pokeuraou.policy import load_policy  # noqa: E402
 from pokeuraou.regulation import load_regulation  # noqa: E402
 from pokeuraou.resolve import Budget, batched_payoffs  # noqa: E402
 from pokeuraou.search import leaf_ranking  # noqa: E402
@@ -80,7 +79,7 @@ def main() -> None:
     device = torch.device(args.device)
     evaluate = BatchedValue(net.to(device), encoder, device=device)
     policy = (
-        _load_policy(args.policy, reg, "cpu", value_net=evaluate.net)
+        load_policy(args.policy, reg, "cpu", value_net=evaluate.net)
         if args.policy
         else None
     )
@@ -96,8 +95,12 @@ def main() -> None:
             "damage": [None, None],
         }
         if policy:
+            # `at` binds the position as well as the side. These closures are rebuilt
+            # every iteration and used only within it, so a late-bound `pos` happens to
+            # be the right one -- but that is an accident of the loop's shape rather than
+            # a property of the closure, and moving one line would end it quietly.
             ranks["policy"] = [
-                (lambda pool, scored=None, side=s: policy(pos, side, pool, scored))
+                (lambda pool, scored=None, side=s, at=pos: policy(at, side, pool, scored))
                 for s in (0, 1)
             ]
         # The reference is the whole pool, ordered however -- the set is what matters.

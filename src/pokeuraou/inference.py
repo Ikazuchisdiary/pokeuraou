@@ -33,6 +33,7 @@ a socket, and this project has already lost a worker to a 64 MB pipe write.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import socket
 import socketserver
@@ -111,16 +112,26 @@ class _Handler(socketserver.StreamRequestHandler):
         finally:
             # A worker that died takes its own buffer with it and leaves the server up.
             for block in attached.values():
-                try:
+                with contextlib.suppress(OSError):
                     block.close()
-                except OSError:
-                    pass
             server.note_departure()  # type: ignore[attr-defined]
 
     def _serve(self, request: dict[str, Any], attached: dict) -> dict[str, Any]:
         server = self.server
         if request.get("op") == "ping":
             return {"ok": True, "models": sorted(server.models)}  # type: ignore[attr-defined]
+        if request.get("op") == "describe":
+            # What an arm *is*, not what the caller was told to call it. A match stamps
+            # the leaf into every game's provenance and a rating is fitted from that, so
+            # a name the worker supplies is a name that can be wrong -- the policy's
+            # position representation was exactly this mistake, and it was silent.
+            return {
+                "ok": True,
+                "arms": {
+                    name: list(group)
+                    for name, group in server.arms.items()  # type: ignore[attr-defined]
+                },
+            }
         if request.get("op") != "score":
             raise ValueError(f"unknown op {request.get('op')!r}")
 
@@ -148,9 +159,13 @@ class _Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
 
-    def __init__(self, address, handler, models: dict) -> None:
+    def __init__(self, address, handler, models: dict, arms: dict | None = None) -> None:
         super().__init__(address, handler)
         self.models = models
+        #: Each arm's model file names, for `describe`. Empty when the caller built the
+        #: models itself (a test with a stub), which `describe` then reports honestly as
+        #: empty rather than inventing something.
+        self.arms = arms or {name: [] for name in models}
         self.requests_served = 0
         self.rows_served = 0
         self.connections = 0
@@ -166,9 +181,18 @@ class _Server(socketserver.ThreadingTCPServer):
             self.connections -= 1
 
 
-def serve(models: dict, host: str = "127.0.0.1", port: int = 0) -> tuple[_Server, str]:
-    """Starts the server. `models` maps a name to a callable (arrays, rows) -> scores."""
-    server = _Server((host, port), _Handler, models)
+def serve(
+    models: dict,
+    host: str = "127.0.0.1",
+    port: int = 0,
+    arms: dict | None = None,
+) -> tuple[_Server, str]:
+    """Starts the server. `models` maps a name to a callable (arrays, rows) -> scores.
+
+    ``arms`` maps the same names to the model files behind them, which `describe` hands
+    back so a caller can record what it is really playing instead of what it was told.
+    """
+    server = _Server((host, port), _Handler, models, arms)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     shown_host, shown_port = server.server_address[:2]
     return server, f"{shown_host}:{shown_port}"
@@ -203,6 +227,28 @@ class RemoteValue:
         finally:
             self._block.close()
             self._block.unlink()
+
+    def describe(self) -> list[str]:
+        """The model files behind this arm, as the server knows them.
+
+        For provenance. A worker that names its leaf from its own command line can name
+        it wrongly -- it is told which arm to use, not what that arm is -- and the record
+        it writes is what a rating is fitted from.
+        """
+        self._file.write((json.dumps({"op": "describe"}) + "\n").encode("utf-8"))
+        self._file.flush()
+        line = self._file.readline()
+        if not line:
+            raise RuntimeError("the inference server closed the connection")
+        reply = json.loads(line)
+        if not reply.get("ok"):
+            raise RuntimeError(f"describe failed: {reply.get('error')}")
+        arms = reply.get("arms") or {}
+        if self.model not in arms:
+            raise RuntimeError(
+                f"the server has no arm named {self.model!r}; it has {sorted(arms)}"
+            )
+        return list(arms[self.model])
 
     def __enter__(self) -> RemoteValue:
         return self

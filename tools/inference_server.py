@@ -31,7 +31,6 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.inference import load_models, serve  # noqa: E402
-from pokeuraou.regulation import load_regulation  # noqa: E402
 from pokeuraou.teams import load_roster  # noqa: E402
 
 
@@ -69,7 +68,14 @@ def main() -> None:
         paths[entry[0]] = [Path(p) for p in entry[1:]]
 
     models = load_models(paths, encoder, args.device)
-    server, address = serve(models, host=args.host, port=args.port)
+    server, address = serve(
+        models,
+        host=args.host,
+        port=args.port,
+        # So a client can ask what an arm *is*, rather than recording the name it was
+        # given on its own command line.
+        arms={name: [p.name for p in group] for name, group in paths.items()},
+    )
 
     # First line of stdout, so a launcher can read it without parsing the prose.
     print(address, flush=True)

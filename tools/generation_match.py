@@ -20,7 +20,7 @@ import json
 import re
 import sys
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import numpy as np
@@ -184,6 +184,28 @@ def main() -> None:
         "paid for; the block records the leaf and width *per side*, because the two are "
         "deliberately mismatched here and a dataset must be able to say so.",
     )
+    ap.add_argument(
+        "--inference",
+        default=None,
+        metavar="HOST:PORT",
+        help="score both arms' leaves on a shared inference server instead of loading "
+        "the models here. A match worker holds two leaves, which is why it weighs 4.0 GB "
+        "of commit and 1.5 GB of VRAM against a generation worker's one -- and why eight "
+        "of them did not fit on this machine. Through the server a worker is 542 MB and "
+        "imports no torch. Answers are unchanged: the server runs each request as it "
+        "arrives and never merges one worker's batch with another's, so the batch length "
+        "is the one the worker asked for and cuda returns the same numbers it would have.",
+    )
+    ap.add_argument(
+        "--inference-arm",
+        default="value",
+        help="the server's name for the arm under test",
+    )
+    ap.add_argument(
+        "--baseline-inference-arm",
+        default=None,
+        help="the server's name for the other arm; omit for a match against --objective",
+    )
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument(
         "--torch-threads",
@@ -211,25 +233,58 @@ def main() -> None:
     # One name for the whole leaf. An ensemble's name has to say how many members it has,
     # because "three seeds averaged" and "one seed" are different agents on the rating
     # scale and the difference between them is larger than most things it measures.
-    def leaf_name(paths: list[Path]) -> str:
-        stem = paths[0].stem
+    def leaf_name(paths: Sequence[Path | str]) -> str:
+        stem = Path(paths[0]).stem
         stem = re.sub(r"-s\d+$", "", stem)
         return stem if len(paths) == 1 else f"{stem}x{len(paths)}"
 
     encoder = Encoder(reg)
-    nets, metas = load_ensemble(args.value, encoder)
-    meta = metas[0]
-    device = torch.device(args.device)
-    value = BatchedValue([n.to(device) for n in nets], encoder, device=device)
     objective = OBJECTIVES[args.objective]
-    baseline = None
-    if args.baseline is not None:
-        missing = [p for p in args.baseline if not p.exists()]
-        if missing:
-            raise SystemExit(f"no baseline model at {missing}")
-        base_nets, base_metas = load_ensemble(args.baseline, encoder)
-        base_meta = base_metas[0]
-        baseline = BatchedValue([n.to(device) for n in base_nets], encoder, device=device)
+    if args.inference is not None:
+        # Both arms live on the server, named. A match is the case that needs names: it
+        # holds two leaves, and holding two is what made a match worker twice the weight
+        # of a generation worker and put eight of them over the machine.
+        from pokeuraou.inference import RemoteValue
+
+        meta = base_meta = {}
+        value = RemoteValue(args.inference, args.inference_arm, encoder)
+        baseline = (
+            RemoteValue(args.inference, args.baseline_inference_arm, encoder)
+            if args.baseline_inference_arm
+            else None
+        )
+        # The names come back from the server, not from this command line. A worker is
+        # told which arm to play, never what that arm holds, and the name it records is
+        # what a rating is fitted from.
+        value_files = value.describe()
+        baseline_files = baseline.describe() if baseline is not None else []
+        print(
+            f"leaf: {args.inference_arm}={leaf_name(value_files)}"
+            + (
+                f" vs {args.baseline_inference_arm}={leaf_name(baseline_files)}"
+                if baseline is not None
+                else ""
+            )
+            + f" on {args.inference} (this worker holds no model)",
+            file=sys.stderr,
+        )
+    else:
+        value_files = list(args.value)
+        baseline_files = list(args.baseline) if args.baseline else []
+        nets, metas = load_ensemble(args.value, encoder)
+        meta = metas[0]
+        device = torch.device(args.device)
+        value = BatchedValue([n.to(device) for n in nets], encoder, device=device)
+        baseline = None
+        if args.baseline is not None:
+            missing = [p for p in args.baseline if not p.exists()]
+            if missing:
+                raise SystemExit(f"no baseline model at {missing}")
+            base_nets, base_metas = load_ensemble(args.baseline, encoder)
+            base_meta = base_metas[0]
+            baseline = BatchedValue(
+                [n.to(device) for n in base_nets], encoder, device=device
+            )
 
     # The policy's position representation comes from its own value function, not from
     # either arm's leaf: an arm may be an ensemble, or a generation the policy never saw,
@@ -261,13 +316,13 @@ def main() -> None:
         )
 
     print(
-        f"new leaf: {leaf_name(args.value)} (trained on {meta.get('games', '?')} games, "
+        f"new leaf: {leaf_name(value_files)} (trained on {meta.get('games', '?')} games, "
         f"val AUC {meta.get('val_auc', float('nan')):.4f})",
         file=sys.stderr,
     )
     if baseline is not None:
         print(
-            f"old leaf: {leaf_name(args.baseline)} (trained on "
+            f"old leaf: {leaf_name(baseline_files)} (trained on "
             f"{base_meta.get('games', '?')} games, val AUC "
             f"{base_meta.get('val_auc', float('nan')):.4f})",
             file=sys.stderr,
@@ -286,8 +341,8 @@ def main() -> None:
     wins = played = 0
     book_misses = 0
     games_file = open_games(args.games_out)
-    new_name = leaf_name(args.value)
-    old_name = leaf_name(args.baseline) if args.baseline else args.objective
+    new_name = leaf_name(value_files)
+    old_name = leaf_name(baseline_files) if baseline_files else args.objective
     # The seat label names the model, not "gen2". It is stamped into every recorded
     # game's provenance, and a reader of that dataset a month from now has no way to know
     # which generation "gen2" meant on the day the match ran -- the `leaves` pair is
@@ -420,7 +475,7 @@ def main() -> None:
             write_game(
                 games_file,
                 record,
-                objective=f"value:{leaf_name(args.value)}",
+                objective=f"value:{leaf_name(value_files)}",
                 search_limit=args.limit,
                 source=provenance(
                     "generation-match",
@@ -469,9 +524,9 @@ def main() -> None:
                         {
                             "seat": seat,
                             "seed": args.seed,
-                            "model": leaf_name(args.value),
+                            "model": leaf_name(value_files),
                             "baseline": (
-                                leaf_name(args.baseline) if args.baseline else args.objective
+                                leaf_name(baseline_files) if baseline_files else args.objective
                             ),
                             "objective": args.objective,
                             "limit": args.limit,

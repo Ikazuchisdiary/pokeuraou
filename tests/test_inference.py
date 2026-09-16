@@ -21,7 +21,7 @@ torch = pytest.importorskip("torch")
 
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.encode import Encoder  # noqa: E402
-from pokeuraou.inference import RemoteValue, load_models, serve  # noqa: E402
+from pokeuraou.inference import RemoteValue, serve  # noqa: E402
 from pokeuraou.value import BatchedValue, ValueConfig, build  # noqa: E402
 
 DEVICES = ["cpu"] + (["cuda"] if torch.cuda.is_available() else [])
@@ -140,9 +140,11 @@ def test_a_batch_too_large_for_the_buffer_refuses_rather_than_splitting(parts):
     server, address = serve({"value": local_model(net.to(torch.device("cpu")),
                                                   torch.device("cpu"))})
     try:
-        with RemoteValue(address, "value", encoder, buffer_bytes=1 << 16) as remote:
-            with pytest.raises(RuntimeError, match="raise buffer_bytes"):
-                remote(_positions(regulation, 40))
+        with (
+            RemoteValue(address, "value", encoder, buffer_bytes=1 << 16) as remote,
+            pytest.raises(RuntimeError, match="raise buffer_bytes"),
+        ):
+            remote(_positions(regulation, 40))
     finally:
         server.shutdown()
 
@@ -154,8 +156,101 @@ def test_an_unknown_model_is_named_rather_than_guessed(parts):
     server, address = serve({"value": local_model(net.to(torch.device("cpu")),
                                                   torch.device("cpu"))})
     try:
-        with RemoteValue(address, "baseline", encoder, buffer_bytes=4 << 20) as remote:
-            with pytest.raises(RuntimeError, match="no model named"):
-                remote(_positions(regulation, 4))
+        with (
+            RemoteValue(address, "baseline", encoder, buffer_bytes=4 << 20) as remote,
+            pytest.raises(RuntimeError, match="no model named"),
+        ):
+            remote(_positions(regulation, 4))
     finally:
         server.shutdown()
+
+
+def test_an_arm_says_what_it_holds_rather_than_what_it_is_called(parts):
+    """`describe` is how a match can record its leaf honestly.
+
+    A worker is told which arm to play and never what that arm holds, so a name taken
+    from its own command line is a name that can be wrong -- and the record it writes is
+    what a rating is fitted from. This is the same failure the policy's position
+    representation had: the file knew it wanted 408 numbers and not whose.
+    """
+    _regulation, encoder, net = parts
+    device = torch.device("cpu")
+
+    from pokeuraou.inference import local_model
+
+    scorer = local_model(net.to(device), device)
+    server, address = serve(
+        {"value": scorer, "baseline": scorer},
+        arms={"value": ["value-all.pt", "value-all-s1.pt"], "baseline": ["value-gen8.pt"]},
+    )
+    try:
+        with RemoteValue(address, "value", encoder, buffer_bytes=1 << 20) as remote:
+            assert remote.describe() == ["value-all.pt", "value-all-s1.pt"]
+        with RemoteValue(address, "baseline", encoder, buffer_bytes=1 << 20) as remote:
+            assert remote.describe() == ["value-gen8.pt"]
+        # An arm the server does not have is named, not guessed at -- the same rule the
+        # score path already follows.
+        with (
+            RemoteValue(address, "nope", encoder, buffer_bytes=1 << 20) as remote,
+            pytest.raises(RuntimeError, match="no arm named 'nope'"),
+        ):
+            remote.describe()
+    finally:
+        server.shutdown()
+
+
+def test_the_leaf_has_no_operation_that_couples_rows(parts):
+    """Nothing in the leaf lets one row of a batch change another's answer.
+
+    The design rests on this twice over. It is why the server may serve one worker's
+    batch while another's is in flight, and it is what would make padding sound if
+    batches were ever merged -- cuda's answer depends on the batch *length*, so a fixed
+    length is the fix, and a fixed length is only safe while the extra rows are inert.
+
+    A `BatchNorm` added later would break both silently: the code would run, the numbers
+    would be wrong, and no test but this one would notice.
+    """
+    _regulation, _encoder, net = parts
+    coupling = (
+        torch.nn.BatchNorm1d, torch.nn.BatchNorm2d, torch.nn.BatchNorm3d,
+        torch.nn.SyncBatchNorm, torch.nn.InstanceNorm1d, torch.nn.InstanceNorm2d,
+    )
+    found = [
+        f"{name or '<root>'}: {type(module).__name__}"
+        for name, module in net.named_modules()
+        if isinstance(module, coupling)
+    ]
+    assert not found, (
+        f"these couple rows within a batch: {found}. The inference server serves batches "
+        f"as they arrive, so a row's answer must not depend on what it was batched with."
+    )
+
+
+@pytest.mark.parametrize("device_name", DEVICES)
+def test_a_rows_answer_does_not_depend_on_what_it_was_batched_with(parts, device_name):
+    """The property above, measured rather than inferred from the module list.
+
+    Same rows, same count, different neighbours and different order: the server is
+    allowed to change none of it. Held to `array_equal` rather than a tolerance, because
+    a difference of 1.9e-06 moves an equilibrium and this is the floor every measurement
+    on the board stands on.
+    """
+    regulation, encoder, net = parts
+    device = torch.device(device_name)
+
+    from pokeuraou.inference import local_model
+
+    positions = _positions(regulation, 24)
+    server, address = serve({"value": local_model(net.to(device), device)})
+    try:
+        with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20) as remote:
+            straight = remote(positions)
+            # The same 24 positions, reversed. Row i of the answer moves with its row.
+            reversed_answer = remote(positions[::-1])
+    finally:
+        server.shutdown()
+
+    assert np.array_equal(straight, reversed_answer[::-1]), (
+        f"max difference {np.abs(straight - reversed_answer[::-1]).max():.3e} -- a row's "
+        f"answer moved because its neighbours changed"
+    )
