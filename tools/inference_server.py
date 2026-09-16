@@ -100,8 +100,18 @@ def main() -> None:
     while not stopping.wait(timeout=1.0):
         if args.report_every and time.perf_counter() - last >= args.report_every:
             now = server.requests_served
+            # Waiting and working, separately. Throughput falls as workers are added,
+            # which is a queue rather than a latency, and this says whether the queue is
+            # this lock: if waited climbs with the worker count while held stays put, it
+            # is, and if neither moves the contention is somewhere else.
+            waited = sum(getattr(m, "waited", 0.0) for m in models.values())
+            held = sum(getattr(m, "held", 0.0) for m in models.values())
+            calls = sum(getattr(m, "calls", 0) for m in models.values()) or 1
             print(f"  {now:,} requests, {server.rows_served:,} rows "
-                  f"({now - served} since the last line)", file=sys.stderr, flush=True)
+                  f"({now - served} since the last line); per call "
+                  f"{1000 * waited / calls:.2f} ms waiting for the lock, "
+                  f"{1000 * held / calls:.2f} ms holding it",
+                  file=sys.stderr, flush=True)
             served, last = now, time.perf_counter()
     server.shutdown()
     print(f"stopped after {server.requests_served:,} requests, "

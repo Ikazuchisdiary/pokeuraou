@@ -38,6 +38,7 @@ import json
 import socket
 import socketserver
 import threading
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass
 from multiprocessing import shared_memory
@@ -229,6 +230,13 @@ class RemoteValue:
 
     def __post_init__(self) -> None:
         self.evaluated = 0
+        #: Seconds, split so the server's own report can be subtracted from them. `copied`
+        #: is laying the arrays into the shared block; `waited` is from sending the control
+        #: line to having the reply; `calls` counts requests, not batches, so a long batch
+        #: cut into chunks counts once per chunk.
+        self.copied = 0.0
+        self.waited = 0.0
+        self.calls = 0
         self._block = shared_memory.SharedMemory(create=True, size=self.buffer_bytes)
         host, _, port = self.address.rpartition(":")
         self._sock = socket.create_connection((host, int(port)))
@@ -317,11 +325,14 @@ class RemoteValue:
                 f"the two paths agree only while they cut in the same places."
             )
         view = self._block.buf
+        before_copy = time.perf_counter()
         for item in layout:
             array = np.ascontiguousarray(getattr(encoded, item["name"]))
             start = int(item["offset"])
             view[start : start + array.nbytes] = array.tobytes()
+        self.copied += time.perf_counter() - before_copy
 
+        sent = time.perf_counter()
         self._file.write(
             (json.dumps({
                 "op": "score",
@@ -336,6 +347,8 @@ class RemoteValue:
         line = self._file.readline()
         if not line:
             raise RuntimeError("the inference server closed the connection")
+        self.waited += time.perf_counter() - sent
+        self.calls += 1
         reply = json.loads(line)
         if not reply.get("ok"):
             raise RuntimeError(f"inference failed: {reply.get('error')}")
@@ -372,16 +385,61 @@ def served_model(value: Any):
     shared base left holding a BatchedTensor stays broken for every later caller.
     """
     from .encode import Encoded
+    from .value import BatchedValue
 
-    lock = threading.Lock()
+    # One `BatchedValue` per serving thread, not one lock around a shared one.
+    #
+    # The lock came first, because an ensemble goes through `torch.func.functional_call`,
+    # which swaps a module's parameters in place and cannot have two threads inside it.
+    # It was kept on a measurement saying the alternative was worth 4% of a forward pass.
+    # That measurement was taken where the lock was not the bottleneck. Here it was:
+    #
+    #    6 workers    7.44 ms waiting for the lock,  5.63 ms holding it
+    #   14 workers   32.04 ms waiting for the lock,  6.36 ms holding it
+    #
+    # Holding barely moves while waiting grows four-fold, which is a saturated lock and
+    # not a slow one -- and it is why throughput *fell* as workers were added, 0.71x at
+    # six and 0.66x at fourteen against a direct run.
+    #
+    # Each thread's copy stacks the same parameter tensors and deep-copies its own base,
+    # so the arithmetic is identical and only the module being reparametrised is private.
+    # The base must be copied from a module `functional_call` has never touched: one that
+    # has holds a BatchedTensor, and copying it fails with "Cannot access storage of
+    # BatchedTensorImpl". The nets here are the real ones, so they qualify.
+    local = threading.local()
+
+    def mine() -> Any:
+        instance = getattr(local, "value", None)
+        if instance is None:
+            instance = BatchedValue(
+                value.nets if len(value.nets) > 1 else value.nets[0],
+                value.encoder,
+                device=value.device,
+                batch_size=value.batch_size,
+            )
+            local.value = instance
+        return instance
 
     def score(arrays: dict[str, np.ndarray], rows: int) -> np.ndarray:
         # The arrays are already exactly `rows` long: the client's layout was planned from
         # the batch it is asking about, and `_views` reshapes to that plan.
         encoded = Encoded(**{name: arrays[name] for name in ARRAYS}, unknown_volatiles={})
-        with lock:
-            return value.from_encoded(encoded)
+        arrived = time.perf_counter()
+        instance = mine()
+        entered = time.perf_counter()
+        out = instance.from_encoded(encoded)
+        done = time.perf_counter()
+        # Kept for the same reason they were added: they are how anyone knows whether the
+        # serving side is queueing. `waited` is now only the cost of finding this thread's
+        # copy, so it should sit near zero and its growing again would mean something new.
+        score.waited += entered - arrived
+        score.held += done - entered
+        score.calls += 1
+        return out
 
+    score.waited = 0.0
+    score.held = 0.0
+    score.calls = 0
     return score
 
 

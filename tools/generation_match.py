@@ -503,6 +503,17 @@ def main() -> None:
 
     if client is not None:
         client.close()
+    # What the worker saw, so the server's own report can be subtracted from it. The gap
+    # between `waited` here and (lock wait + lock hold) there is the transport: the socket,
+    # the JSON, and the server's own parsing before it reaches the model.
+    for arm in (value, baseline):
+        if arm is not None and hasattr(arm, "calls") and arm.calls:
+            print(
+                f"  leaf traffic: {arm.calls:,} requests, per call "
+                f"{1000 * arm.copied / arm.calls:.2f} ms filling the buffer, "
+                f"{1000 * arm.waited / arm.calls:.2f} ms awaiting the reply",
+                file=sys.stderr,
+            )
     for which, (seat, _leaves, _d, _l, _r, _s, _p, _n) in enumerate(seats):
         seat_wins, seat_played, unfinished, elapsed = tally[which]
         rate = seat_wins / seat_played if seat_played else float("nan")
