@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import sys
 import time
 from collections.abc import Iterator
@@ -190,9 +191,18 @@ def main() -> None:
         from pokeuraou.inference import RemoteValue
 
         evaluate = RemoteValue(args.inference, args.inference_arm, Encoder(reg))
-        leaf_label = f"value:{args.value.stem if args.value else args.inference_arm}"
+        # Asked of the server, not taken from this command line. A worker is told which
+        # arm to use and never what that arm holds, and this label is stamped into every
+        # game it records -- it is how a dataset says which model made it, months later.
+        # Without asking it read `value:value`, which is the arm's name and nothing about
+        # the model. The policy's position representation was the same mistake.
+        files = evaluate.describe()
+        stem = re.sub(r"-s\d+$", "", Path(files[0]).stem) if files else args.inference_arm
+        leaf_label = (
+            f"value:{stem}" if len(files) <= 1 else f"value:{stem}x{len(files)}"
+        )
         print(
-            f"leaf = the {args.inference_arm} arm on {args.inference} "
+            f"leaf = the {args.inference_arm} arm on {args.inference} = {leaf_label} "
             f"(this worker holds no model)",
             file=sys.stderr,
         )

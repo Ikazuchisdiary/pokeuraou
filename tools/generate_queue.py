@@ -45,7 +45,9 @@ def main() -> None:
     ap.add_argument("--out", type=Path, required=True, help="directory for the games")
     ap.add_argument("--games", type=int, required=True, help="games for the whole run")
     ap.add_argument("--first-game", type=int, default=0, help="first game number")
-    ap.add_argument("--workers", type=int, default=8)
+    # Resolved after parsing, because the right number depends on where the leaf
+    # lives: 8 when every worker carries one, 24 when they are served.
+    ap.add_argument("--workers", type=int, default=None)
     ap.add_argument("--seed", type=int, default=1, help="seeds the run, not a worker")
     ap.add_argument("--value", default=None)
     ap.add_argument("--device", default="cuda", choices=("cpu", "cuda"))
@@ -82,6 +84,20 @@ def main() -> None:
         help="after --, options passed to every worker unchanged",
     )
     args = ap.parse_args()
+    if args.workers is None:
+        # Swept on the board, width 16 against 48, startup discarded, one machine, back to
+        # back:
+        #
+        #   direct,      6 workers    84.0 games/min   1.00x
+        #   2 servers,  16 workers    97.4             1.16x
+        #   2 servers,  24 workers   108.8             1.30x
+        #   3 servers,  24 workers   109.4             1.30x  -- a third server buys 0.6%
+        #   4 servers,  32 workers   112.7             1.34x  -- a third more workers, 3%
+        #
+        # So 24 served workers over two servers, and no more: past that the curve
+        # flattens and the CPU is pegged. Direct stays at 8 because a direct worker is
+        # 4.0 GB and eight of them did not fit in 31.1.
+        args.workers = 24 if getattr(args, "served", False) else 8
 
     extra = args.rest[1:] if args.rest and args.rest[0] == "--" else args.rest
     out_dir: Path = args.out
