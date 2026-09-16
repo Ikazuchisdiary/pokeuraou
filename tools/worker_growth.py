@@ -129,6 +129,15 @@ def main() -> None:
                     help="load the models here instead, to compare against the served case")
     ap.add_argument("--device", default="cuda")
     ap.add_argument(
+        "--write",
+        type=Path,
+        default=None,
+        help="also write each game out the way a match worker does. The probe without it "
+        "flattens at 213 MB while a real worker reached 1,512 MB over 711 games, so what "
+        "grows is not `play_game`; a recorded game carries every decision's full position "
+        "as JSON, and that is the largest transient a worker handles.",
+    )
+    ap.add_argument(
         "--tracemalloc",
         action="store_true",
         help="also report Python's own allocator. Off by default because turning it on "
@@ -183,18 +192,27 @@ def main() -> None:
     print(f"  {'games':>6}{'working set':>13}{'committed':>11}{'numpy held':>12}"
           f"{'arrays':>8}{'tracemalloc':>13}{'gc objects':>12}")
 
+    from pokeuraou.provenance import open_games, provenance, write_game
+
+    games_file = open_games(args.write)
+    source = provenance("growth-probe", seat="probe", leaves=("probe", "probe"),
+                        limits=(args.limit, args.limit))
+
     rng = np.random.default_rng(args.seed)
     for index in range(1, args.games + 1):
         team = pool[int(rng.integers(len(pool)))]
         foe_six = sample_standings_team(rng, reg, prior, team)
         own_pick = selections[int(rng.integers(len(selections)))]
         foe_pick = selections[int(rng.integers(len(selections)))]
-        play_game(
+        record = play_game(
             reg, rng,
             [roster.sets[i] for i in own_pick], [foe_six[j] for j in foe_pick],
             "growth-probe",
             search_limit=args.limit, max_turns=40, evaluate=evaluate, rank_by_leaf=True,
         )
+        if args.write is not None and record.outcome is not None:
+            write_game(games_file, record, objective="probe",
+                       search_limit=args.limit, source=source)
         if index % args.every == 0 or index == 1:
             gc.collect()
             ws, commit = process_memory()

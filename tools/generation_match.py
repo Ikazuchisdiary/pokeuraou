@@ -24,7 +24,6 @@ from collections.abc import Iterator, Sequence
 from pathlib import Path
 
 import numpy as np
-import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -38,8 +37,11 @@ from pokeuraou.selection_book import SelectionBook
 from pokeuraou.selfplay import play_game
 from pokeuraou.standings import find_cached_standings, load_standings, sample_standings_team
 from pokeuraou.teams import all_selections, load_roster
-from pokeuraou.value import BatchedValue, load_ensemble
 from pokeuraou.workqueue import WorkClient
+
+# `pokeuraou.value` imports torch, so it is imported where it is used rather than here.
+# A worker scoring on an inference server needs neither, and torch is 816 MB of the 863
+# such a worker was measured at against the 213 it weighs without.
 
 
 def main() -> None:
@@ -206,7 +208,11 @@ def main() -> None:
         default=None,
         help="the server's name for the other arm; omit for a match against --objective",
     )
-    ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    # Resolved after parsing, not here: asking torch whether there is a card imports
+    # torch, and a worker scoring on a server has no use for it. The help above promises
+    # such a worker holds none, and this line was quietly breaking that promise -- 816 MB
+    # of it, against the 213 MB such a worker otherwise weighs.
+    ap.add_argument("--device", default=None, help="cuda or cpu; default is cuda if present")
     ap.add_argument(
         "--torch-threads",
         type=int,
@@ -215,7 +221,15 @@ def main() -> None:
         "a pool on the same cores is slower than one process. Raise it for a single run.",
     )
     args = ap.parse_args()
-    torch.set_num_threads(args.torch_threads)
+    if args.inference is None:
+        # Only the arm that scores here needs torch at all.
+        import torch
+
+        torch.set_num_threads(args.torch_threads)
+        if args.device is None:
+            args.device = "cuda" if torch.cuda.is_available() else "cpu"
+    elif args.device is None:
+        args.device = "cuda"
 
     roster = load_roster(args.roster)
     reg = roster.reg
@@ -271,6 +285,10 @@ def main() -> None:
     else:
         value_files = list(args.value)
         baseline_files = list(args.baseline) if args.baseline else []
+        import torch
+
+        from pokeuraou.value import BatchedValue, load_ensemble
+
         nets, metas = load_ensemble(args.value, encoder)
         meta = metas[0]
         device = torch.device(args.device)
@@ -297,8 +315,12 @@ def main() -> None:
                 "--policy needs --policy-value: the position representation belongs to "
                 "one value function and nothing in the file says which."
             )
+        import torch
+
+        from pokeuraou.value import load_ensemble
+
         policy_nets, _ = load_ensemble([args.policy_value], encoder)
-        policy_net = policy_nets[0].to(device)
+        policy_net = policy_nets[0].to(torch.device(args.device))
         policy_name = args.policy_value.stem
 
     def load_ranker(path: Path | None):
