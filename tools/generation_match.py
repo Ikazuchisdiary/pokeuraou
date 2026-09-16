@@ -153,6 +153,18 @@ def main() -> None:
         "generation's coverage wide, and a rating wants the strategy rather than the "
         "training noise.",
     )
+    ap.add_argument(
+        "--baseline-selection-book",
+        type=Path,
+        default=None,
+        help="a second book, so each arm draws its own selection. An agent here is a "
+        "model, a search *and* a book -- the book is worth +141 Elo and every rating so "
+        "far was measured with a uniform draw on both sides, which is an agent nobody "
+        "runs. This costs the pairing: with one book the two arms play the same teams "
+        "and the same selections and differ only in the leaf, and with two they play "
+        "their own strategies against the same field. That is the right comparison for a "
+        "rating and the wrong one for isolating a model, so both exist.",
+    )
     ap.add_argument("--seed", type=int, default=77)
     ap.add_argument(
         "--queue",
@@ -240,6 +252,14 @@ def main() -> None:
     selections = tuple(all_selections(reg.meta.team_size, reg.meta.picked_team_size))
 
     book = SelectionBook.read(args.selection_book) if args.selection_book else None
+    other_book = (
+        SelectionBook.read(args.baseline_selection_book)
+        if args.baseline_selection_book
+        else book
+    )
+    if args.baseline_selection_book:
+        print(f"selection: each arm draws its own ({args.selection_book.name} against "
+              f"{args.baseline_selection_book.name})", file=sys.stderr)
     if book is not None:
         print(f"selection: {args.selection_book.name} ({len(book)} teams), no exploration",
               file=sys.stderr)
@@ -374,6 +394,11 @@ def main() -> None:
     # part of what each *is*, and a rating that cannot tell a book-selected agent from a
     # uniform one pools two different strengths under one name.
     selection_label = args.selection_book.stem if args.selection_book else "uniform"
+    other_label = (
+        args.baseline_selection_book.stem
+        if args.baseline_selection_book
+        else selection_label
+    )
 
     # What each side's ordering is *called*, which is what a rating is fitted from. A
     # policy names itself: two policies are two agents, and "policy" alone would pool them.
@@ -460,7 +485,11 @@ def main() -> None:
                     flush=True,
                 )
             team = pool[int(rng.integers(len(pool)))]
-            entry = book.get(team) if book is not None else None
+            # The book of whichever arm is sitting at side 0, because the draw decides
+            # *our* four and side 0 is always our six. With one book this is the same
+            # object either way and nothing changes.
+            seat_book = book if leaves[0] is value else other_book
+            entry = seat_book.get(team) if seat_book is not None else None
             if entry is not None:
                 # epsilon 0: the rating asks what the strategy is worth, and exploration
                 # is a property of generation rather than of the agent.
@@ -472,7 +501,7 @@ def main() -> None:
                 foe_six = sample_standings_team(rng, reg, prior, team)
                 own_pick = selections[int(rng.integers(len(selections)))]
                 foe_pick = selections[int(rng.integers(len(selections)))]
-                if book is not None:
+                if seat_book is not None:
                     book_misses += 1
             record = play_game(
                 reg,
@@ -507,7 +536,11 @@ def main() -> None:
                     depths=depths,
                     rankings=ranknames,
                     solvers=tuple("sparse" if x else "full" for x in sparse),
-                    books=(selection_label, selection_label),
+                    books=(
+                        (selection_label, other_label)
+                        if leaves[0] is value
+                        else (other_label, selection_label)
+                    ),
                     note=(
                         f"search depth {depths[0]} vs {depths[1]} by side"
                         if depths[0] != depths[1]
