@@ -43,10 +43,20 @@ ROSTER="${ROSTER:-rizabanadohido}"
 # generations went past it; a run launched with no environment was generating with the
 # weakest leaf in the rating table.
 VALUE="${VALUE:-data/models/value-all.pt}"
-# 48, which is what generations 7 and 8 were actually made with. Width 16 -> 24 is worth
-# +8.8 points and 24 -> 48 another +5.5, so a default of 16 described an agent about
-# fourteen points below the one anyone runs.
-LIMIT="${LIMIT:-48}"
+# 24, and this is a change from 48. The board swept the widths against 48 with the same
+# model on both sides, two-member ensembles, 1,696 games each:
+#
+#   width 24   48.7% [46.3, 51.1]   a = -1.3, inside the band, and 2.03x faster
+#   width 16   44.4% [42.0, 46.8]   a = -5.6
+#   width 12   42.5% [40.2, 44.9]   a = -7.5
+#
+# Monotone, and only 24 survives. So 48 buys something no measurement can find while 24
+# buys twice the games -- and twice the games is the one thing that has reliably moved the
+# leaf. The earlier "24 -> 48 is worth +5.5" was a single-model measurement, and the floor
+# that replaced it puts the same comparison at -1.3.
+#
+# Below 24 the loss is real and large, so this is a floor rather than a direction.
+LIMIT="${LIMIT:-24}"
 # Optional: draw both sides' 4-of-6 from cached selection equilibria instead of uniformly.
 # BOOK=data/selection/rizabanadohido-value-gen2.jsonl.gz bash tools/generate_parallel.sh ...
 # Derived from the leaf, because a book is one model's opinion about selection and the two
