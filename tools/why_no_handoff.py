@@ -81,6 +81,14 @@ def main() -> None:
         had_weight = 0       # the equilibrium put something on it
         was_drawn = 0        # and the draw took it
         weights: list[float] = []
+        # And the question the three-way split leads to: when it *is* taken, does it win?
+        # Zero weight in 60% of chances says the leaf dislikes the position after the
+        # switch. Whether the leaf is wrong about that is a different claim, and the games
+        # where the draw took it anyway are the evidence for it.
+        took_it = 0
+        took_and_won = 0
+        chance_games = 0
+        chance_won = 0
         cut_when: Counter[int] = Counter()
 
         for path in sorted(directory.glob("*.jsonl")):
@@ -95,6 +103,9 @@ def main() -> None:
                     if record.get("outcome") is None:
                         continue
                     games += 1
+                    ours_won = record["outcome"] > 0.5
+                    had_chance = False
+                    handed_off = False
                     for decision in record.get("decisions", ()):
                         if decision.get("kind") != "move":
                             continue
@@ -106,6 +117,7 @@ def main() -> None:
                         if slot is None:
                             continue
                         chances += 1
+                        had_chance = True
 
                         names = decision.get("ownActions") or []
                         policy = np.asarray(
@@ -134,6 +146,13 @@ def main() -> None:
                         chosen = decision.get("ownChosen") or ""
                         if any(part.strip() == want for part in chosen.split(",")):
                             was_drawn += 1
+                            handed_off = True
+                    if had_chance:
+                        chance_games += 1
+                        chance_won += int(ours_won)
+                        if handed_off:
+                            took_it += 1
+                            took_and_won += int(ours_won)
             if games >= limit:
                 break
 
@@ -150,6 +169,13 @@ def main() -> None:
             array = np.asarray(weights)
             print(f"    mean weight when on the menu  {array.mean():.4f}, "
                   f"median {np.median(array):.4f}, max {array.max():.4f}")
+        if chance_games:
+            base = chance_won / chance_games
+            with_it = took_and_won / max(took_it, 1)
+            print(f"    games with a chance          {chance_games:>7,}  "
+                  f"won {base:>6.1%}")
+            print(f"    ...where it handed off       {took_it:>7,}  "
+                  f"won {with_it:>6.1%}  ({100 * (with_it - base):+.1f} points)")
         if cut_when:
             common = ", ".join(f"turn {t}: {n}" for t, n in cut_when.most_common(4))
             print(f"    cut by narrow, by turn: {common}")
