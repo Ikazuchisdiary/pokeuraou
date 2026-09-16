@@ -20,11 +20,18 @@ the workers, and keeps running until interrupted.
 from __future__ import annotations
 
 import argparse
+import faulthandler
 import signal
 import sys
 import threading
 import time
 from pathlib import Path
+
+# A server that dies without saying why takes every worker with it, and one did: no
+# traceback, nothing in the log, and the workers saw a reset connection. `faulthandler`
+# catches what Python's own handling cannot -- an access violation inside a native
+# library -- and writes the stack to stderr on the way down.
+faulthandler.enable()
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -100,17 +107,26 @@ def main() -> None:
     while not stopping.wait(timeout=1.0):
         if args.report_every and time.perf_counter() - last >= args.report_every:
             now = server.requests_served
-            # Waiting and working, separately. Throughput falls as workers are added,
-            # which is a queue rather than a latency, and this says whether the queue is
-            # this lock: if waited climbs with the worker count while held stays put, it
-            # is, and if neither moves the contention is somewhere else.
+            # Both halves of the same line, because they answer the two questions a
+            # server gets asked when a run goes wrong.
+            #
+            # Waiting against working says whether requests are queueing. It is how the
+            # contention was found: holding flat at 5.6 ms while waiting went 7.4 -> 32.0
+            # as workers went 6 -> 14, which is a saturated lock and not a slow one. It
+            # should now read near zero, and its climbing again would mean a new queue.
+            #
+            # What CUDA is holding says what the server had on it when it died. One died
+            # three times with no traceback and nothing from `faulthandler`, which rules
+            # out a native fault and leaves being killed from outside.
             waited = sum(getattr(m, "waited", 0.0) for m in models.values())
             held = sum(getattr(m, "held", 0.0) for m in models.values())
             calls = sum(getattr(m, "calls", 0) for m in models.values()) or 1
+            reserved = torch.cuda.memory_reserved() / 1e9 if torch.cuda.is_available() else 0.0
+            in_use = torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
             print(f"  {now:,} requests, {server.rows_served:,} rows "
                   f"({now - served} since the last line); per call "
-                  f"{1000 * waited / calls:.2f} ms waiting for the lock, "
-                  f"{1000 * held / calls:.2f} ms holding it",
+                  f"{1000 * waited / calls:.2f} ms queued, {1000 * held / calls:.2f} ms "
+                  f"working; cuda reserved {reserved:.2f} GB, in use {in_use:.2f} GB",
                   file=sys.stderr, flush=True)
             served, last = now, time.perf_counter()
     server.shutdown()
