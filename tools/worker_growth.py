@@ -5,14 +5,20 @@ games, about 0.9 MB a game, and it did so *through the inference server* -- so i
 torch, which that worker does not import. A generation of 12,000 games would add 10 GB at
 that rate, which matters more than anything the width sweep is deciding.
 
-Three quantities, because they answer different questions:
+Four quantities, because they answer different questions -- and the first version had only
+three, two of which shared a blind spot the speed owner found:
 
   working set   what the machine has to find. This is the number that killed runs.
-  tracemalloc   what Python allocated and still holds. If this stays flat while the
-                working set climbs, nothing is leaking in the ordinary sense and the
-                allocator is simply not giving blocks back to the OS.
-  gc objects    what Python is still reachable-ly holding, by type. If *this* climbs, the
-                growth has a name and the name is in the table.
+  numpy bytes   `nbytes` summed over every reachable ndarray. **The one that matters here**,
+                and the one that was missing: numpy allocates its data outside Python's
+                allocator, so `tracemalloc` cannot see an array's contents at all, and a
+                fixed number of containers can hold arrays that grow without the object
+                count moving. Two instruments, one blind spot, and it was the spot.
+  tracemalloc   what Python allocated through its own allocator and still holds. Off by
+                default: switching it on makes the same eighty games start at 239 MB of
+                working set instead of 163, so a growth measured under it is partly a
+                measurement of it.
+  gc objects    what is still reachable, by type. Names the growth when it has a name.
 
 Run it against the server so the measurement matches the case that was seen:
 
@@ -80,6 +86,29 @@ def census() -> Counter[str]:
     return Counter(type(obj).__name__ for obj in gc.get_objects())
 
 
+def numpy_bytes() -> tuple[float, int]:
+    """(MB, count) over every reachable ndarray, base arrays only.
+
+    A view shares its data with the array it was taken from, so counting both would say
+    the same bytes twice. `.base` is followed to the owner and only owners are summed.
+    """
+    seen: set[int] = set()
+    total = 0
+    count = 0
+    for obj in gc.get_objects():
+        if not isinstance(obj, np.ndarray):
+            continue
+        owner = obj
+        while getattr(owner, "base", None) is not None:
+            owner = owner.base
+        if not isinstance(owner, np.ndarray) or id(owner) in seen:
+            continue
+        seen.add(id(owner))
+        total += owner.nbytes
+        count += 1
+    return total / 1048576, count
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--games", type=int, default=60)
@@ -89,9 +118,23 @@ def main() -> None:
     ap.add_argument("--roster", default="rizabanadohido")
     ap.add_argument("--inference", default=None, metavar="HOST:PORT")
     ap.add_argument("--inference-arm", default="value")
+    ap.add_argument(
+        "--baseline-inference-arm",
+        default=None,
+        help="a second arm, so the probe holds two leaves the way a *match* worker does. "
+        "The 0.9 MB a game was measured on one of those, and a generation worker carries "
+        "one leaf, so the two are not the same process to measure.",
+    )
     ap.add_argument("--value", nargs="+", default=None,
                     help="load the models here instead, to compare against the served case")
     ap.add_argument("--device", default="cuda")
+    ap.add_argument(
+        "--tracemalloc",
+        action="store_true",
+        help="also report Python's own allocator. Off by default because turning it on "
+        "costs 26 MB and more as it meets new call sites, so a growth measured under it "
+        "is partly a measurement of it.",
+    )
     args = ap.parse_args()
 
     roster = load_roster(args.roster)
@@ -108,8 +151,17 @@ def main() -> None:
     if args.inference:
         from pokeuraou.inference import RemoteValue
 
-        evaluate = RemoteValue(args.inference, args.inference_arm, encoder)
-        where = f"served by {args.inference}"
+        own = RemoteValue(args.inference, args.inference_arm, encoder)
+        if args.baseline_inference_arm:
+            # Per side, which is what makes this a match worker rather than a generation
+            # one: two clients, two shared blocks, two leaves in play every turn.
+            evaluate = (own, RemoteValue(args.inference, args.baseline_inference_arm,
+                                         encoder))
+            where = (f"served by {args.inference}, arms {args.inference_arm} and "
+                     f"{args.baseline_inference_arm}")
+        else:
+            evaluate = own
+            where = f"served by {args.inference}, one arm"
     elif args.value:
         import torch
 
@@ -123,12 +175,13 @@ def main() -> None:
     else:
         raise SystemExit("pass --inference or --value")
 
-    tracemalloc.start()
+    if args.tracemalloc:
+        tracemalloc.start()
     gc.collect()
     base_objects = census()
     print(f"leaf {where}, width {args.limit}, {args.games} games\n")
-    print(f"  {'games':>6}{'working set':>13}{'committed':>11}{'tracemalloc':>13}"
-          f"{'gc objects':>12}")
+    print(f"  {'games':>6}{'working set':>13}{'committed':>11}{'numpy held':>12}"
+          f"{'arrays':>8}{'tracemalloc':>13}{'gc objects':>12}")
 
     rng = np.random.default_rng(args.seed)
     for index in range(1, args.games + 1):
@@ -145,10 +198,13 @@ def main() -> None:
         if index % args.every == 0 or index == 1:
             gc.collect()
             ws, commit = process_memory()
-            current, _peak = tracemalloc.get_traced_memory()
+            held, arrays = numpy_bytes()
+            current = (
+                tracemalloc.get_traced_memory()[0] / 1048576 if args.tracemalloc else 0.0
+            )
             objects = sum(census().values())
-            print(f"  {index:>6}{ws:>10.0f} MB{commit:>8.0f} MB"
-                  f"{current / 1048576:>10.0f} MB{objects:>12,}", flush=True)
+            print(f"  {index:>6}{ws:>10.0f} MB{commit:>8.0f} MB{held:>9.1f} MB"
+                  f"{arrays:>8,}{current:>10.0f} MB{objects:>12,}", flush=True)
 
     gc.collect()
     end_objects = census()
