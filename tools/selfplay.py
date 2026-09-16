@@ -87,6 +87,20 @@ def main() -> None:
         "leaf becomes a win probability instead of an HP share, so the equilibrium value "
         "at every node is a win probability too. Needs the optional learn group.",
     )
+    ap.add_argument(
+        "--inference",
+        default=None,
+        metavar="HOST:PORT",
+        help="score leaves on a shared inference server instead of loading the model "
+        "here. The worker then imports no torch and holds no CUDA context -- 4.0 GB of "
+        "commit and 1.5 GB of VRAM it does not need. Answers are unchanged: the server "
+        "runs each request as it arrives and never merges one worker's with another's.",
+    )
+    ap.add_argument(
+        "--inference-arm",
+        default="value",
+        help="which named arm on the server to score with",
+    )
     ap.add_argument("--device", default=None, help="cuda or cpu; default is cuda if present")
     ap.add_argument(
         "--torch-threads",
@@ -170,7 +184,19 @@ def main() -> None:
 
     evaluate = None
     leaf_label = args.objective
-    if args.value is not None:
+    if args.inference is not None:
+        # No torch here at all: the encoder is numpy, and the arrays go to the server.
+        from pokeuraou.encode import Encoder
+        from pokeuraou.inference import RemoteValue
+
+        evaluate = RemoteValue(args.inference, args.inference_arm, Encoder(reg))
+        leaf_label = f"value:{args.value.stem if args.value else args.inference_arm}"
+        print(
+            f"leaf = the {args.inference_arm} arm on {args.inference} "
+            f"(this worker holds no model)",
+            file=sys.stderr,
+        )
+    elif args.value is not None:
         # Imported here so a run without --value never loads torch: the resolver, the
         # differential tests and the M1 path stay installable without a CUDA wheel.
         import torch
