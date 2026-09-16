@@ -54,10 +54,16 @@ ENV_SERVER = "POKEURAOU_INFERENCE"
 #: carries `unknown_volatiles`, which is a dict of diagnostics the model never sees.
 ARRAYS = ("species", "ability", "item", "moves", "mon", "mask", "side", "field")
 
-#: Default shared buffer, per worker. A batch is at most `BatchedValue.batch_size` rows by
-#: the time the model sees it, but a *request* can be larger -- 21,520 rows was observed --
-#: and at about 3.7 KB a row that is 80 MB.
-BUFFER_BYTES = 128 * 1024 * 1024
+#: Rows in one request, matching `BatchedValue.batch_size`. Not a tunable: a CUDA answer
+#: depends on how many rows are in the call, so chunking anywhere other than where
+#: `BatchedValue` chunks would be a different leaf wearing the same name.
+CHUNK_ROWS = 8192
+
+#: Default shared buffer, per worker. One chunk of 8,192 rows is about 30 MB at 3.7 KB a
+#: row, so this is comfortable rather than tight, and 14 workers hold 0.9 GB of it. It was
+#: 128 MB while a request could be a whole node -- 21,520 rows was observed and 1,048,576
+#: was survived -- and requests are now chunks.
+BUFFER_BYTES = 64 * 1024 * 1024
 
 
 def _plan(encoded: Any) -> tuple[list[dict[str, Any]], int]:
@@ -226,7 +232,7 @@ class RemoteValue:
     #: Rows per request. `BatchedValue.batch_size`, and it has to stay that: a CUDA answer
     #: depends on the number of rows in the call, so the two paths agree only while they
     #: cut a long batch in the same places.
-    batch_size: int = 8192
+    batch_size: int = CHUNK_ROWS
 
     def __post_init__(self) -> None:
         self.evaluated = 0
@@ -282,12 +288,23 @@ class RemoteValue:
         if not positions:
             return np.zeros(0, dtype=np.float64)
         as_json = isinstance(positions[0], dict)
-        encoded = (
-            self.encoder.encode(positions)
-            if as_json
-            else self.encoder.encode_positions(positions)
-        )
-        return self.from_encoded(encoded)
+        out = np.empty(len(positions), dtype=np.float64)
+        # A chunk at a time, exactly as `BatchedValue.__call__` does -- and encoding comes
+        # *after* the cut, not before it. Encoding the whole list first is what killed a
+        # server with no message in its log: a self-switch node makes 1,048,576 leaves,
+        # which is 3.9 GB of arrays in one go, where the local path never holds more than
+        # a chunk. Chunking `from_encoded` alone fixed the half that sends and left the
+        # half that builds, and the test that covered it asserted the answers rather than
+        # the cost, so it passed.
+        for start in range(0, len(positions), self.batch_size):
+            chunk = positions[start : start + self.batch_size]
+            encoded = (
+                self.encoder.encode(chunk)
+                if as_json
+                else self.encoder.encode_positions(chunk)
+            )
+            out[start : start + len(chunk)] = self.from_encoded(encoded)
+        return out
 
     def from_encoded(self, encoded: Any) -> np.ndarray:
         """Score a batch, in the same pieces `BatchedValue` would have scored it in.
