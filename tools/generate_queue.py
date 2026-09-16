@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -49,6 +50,7 @@ def main() -> None:
     # lives: 8 when every worker carries one, 24 when they are served.
     ap.add_argument("--workers", type=int, default=None)
     ap.add_argument("--seed", type=int, default=1, help="seeds the run, not a worker")
+    ap.add_argument("--roster", default="rizabanadohido", help="also names the book")
     ap.add_argument("--value", default=None)
     ap.add_argument("--device", default="cuda", choices=("cpu", "cuda"))
     # 24, swept on the board against 48 with the same model on both sides: -1.3 [-3.7,
@@ -77,6 +79,23 @@ def main() -> None:
         "result even though the arithmetic releases the GIL. One server is the only "
         "configuration that loses to not serving at all.",
     )
+    ap.add_argument(
+        "--selection-book",
+        type=Path,
+        default=None,
+        help="the 6-of-4 selection equilibrium both sides draw from. Derived from --value "
+        "when not given, because a book is one model's opinion about selection and the two "
+        "have to move together. Drawing the four uniformly instead costs +18.9 against "
+        "+22.1 for the advice -- about 141 Elo, the whole distance from the parameter-free "
+        "baseline to the best agent on this scale -- so this is the most expensive thing "
+        "on the command line to forget.",
+    )
+    ap.add_argument(
+        "--uniform-selection",
+        action="store_true",
+        help="draw the four of six uniformly and say so out loud. Without this a missing "
+        "book is an error rather than a silent -141 Elo.",
+    )
     ap.add_argument("--no-bridge", action="store_true")
     ap.add_argument(
         "rest",
@@ -100,6 +119,35 @@ def main() -> None:
         args.workers = 24 if getattr(args, "served", False) else 8
 
     extra = args.rest[1:] if args.rest and args.rest[0] == "--" else args.rest
+
+    # The guard `generate_parallel.sh` has and this did not. A book missing from the
+    # command line looked exactly like a book that was not wanted, and the two differ by
+    # about 141 Elo in the generated games.
+    # The roster the workers will actually use, which is the tail's when the tail names
+    # one. Deriving the book from this side's default while the workers played another
+    # roster would look for a book that cannot exist, and land on the uniform draw for a
+    # reason nobody would guess.
+    roster = args.roster
+    if "--roster" in extra:
+        roster = extra[extra.index("--roster") + 1]
+
+    book = args.selection_book
+    if book is None and args.value and not args.uniform_selection:
+        stem = re.sub(r"-s\d+$", "", Path(args.value).stem)
+        book = ROOT / "data" / "selection" / f"{roster}-{stem}.jsonl.gz"
+    if args.uniform_selection:
+        book = None
+        print("  selection: uniform 4-of-6, as asked", file=sys.stderr)
+    elif book is not None and not Path(book).exists():
+        raise SystemExit(
+            f"no selection book at {book}. Solve one with tools/solve_book_parallel.sh, "
+            f"pass --selection-book, or pass --uniform-selection to mean it -- a uniform "
+            f"draw is worth about -141 Elo against the advice and is not a default."
+        )
+    if book is not None and "--selection-book" not in extra:
+        extra = ["--selection-book", str(book), *extra]
+        print(f"  selection: {Path(book).name}", file=sys.stderr)
+
     out_dir: Path = args.out
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -149,6 +197,7 @@ def main() -> None:
             "--limit", str(args.limit),
             "--device", args.device,
             "--torch-threads", "1",
+            "--roster", args.roster,
             "--out", str(out_dir / f"games-worker{worker}.jsonl"),
         ]
         if served_at:
