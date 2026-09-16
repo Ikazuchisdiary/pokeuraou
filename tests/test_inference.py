@@ -60,7 +60,7 @@ def test_the_server_returns_exactly_what_the_local_leaf_returns(parts, device_na
 
     from pokeuraou.inference import served_model
 
-    server, address = serve({"value": served_model([net.to(device)], encoder, device)})
+    server, address = serve({"value": served_model(BatchedValue(net.to(device), encoder, device=device))})
     try:
         with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20) as remote:
             got = remote(positions)
@@ -88,7 +88,7 @@ def test_two_workers_at_once_get_what_they_would_get_alone(parts, device_name):
 
     from pokeuraou.inference import served_model
 
-    server, address = serve({"value": served_model([net.to(device)], encoder, device)})
+    server, address = serve({"value": served_model(BatchedValue(net.to(device), encoder, device=device))})
     results: dict[int, np.ndarray] = {}
     try:
 
@@ -119,7 +119,7 @@ def test_a_worker_dying_leaves_the_server_up(parts):
     device = torch.device("cpu")
     from pokeuraou.inference import served_model
 
-    server, address = serve({"value": served_model([net.to(device)], encoder, device)})
+    server, address = serve({"value": served_model(BatchedValue(net.to(device), encoder, device=device))})
     try:
         casualty = RemoteValue(address, "value", encoder, buffer_bytes=4 << 20)
         casualty(_positions(regulation, 4))
@@ -138,7 +138,9 @@ def test_a_batch_too_large_for_the_buffer_refuses_rather_than_splitting(parts):
     from pokeuraou.inference import served_model
 
     server, address = serve(
-        {"value": served_model([net.to(torch.device("cpu"))], encoder, torch.device("cpu"))}
+        {"value": served_model(
+            BatchedValue(net.to(torch.device("cpu")), encoder, device=torch.device("cpu"))
+        )}
     )
     try:
         with (
@@ -155,7 +157,9 @@ def test_an_unknown_model_is_named_rather_than_guessed(parts):
     from pokeuraou.inference import served_model
 
     server, address = serve(
-        {"value": served_model([net.to(torch.device("cpu"))], encoder, torch.device("cpu"))}
+        {"value": served_model(
+            BatchedValue(net.to(torch.device("cpu")), encoder, device=torch.device("cpu"))
+        )}
     )
     try:
         with (
@@ -180,7 +184,7 @@ def test_an_arm_says_what_it_holds_rather_than_what_it_is_called(parts):
 
     from pokeuraou.inference import served_model
 
-    scorer = served_model([net.to(device)], encoder, device)
+    scorer = served_model(BatchedValue(net.to(device), encoder, device=device))
     server, address = serve(
         {"value": scorer, "baseline": scorer},
         arms={"value": ["value-all.pt", "value-all-s1.pt"], "baseline": ["value-gen8.pt"]},
@@ -243,7 +247,7 @@ def test_a_rows_answer_does_not_depend_on_what_it_was_batched_with(parts, device
     from pokeuraou.inference import served_model
 
     positions = _positions(regulation, 24)
-    server, address = serve({"value": served_model([net.to(device)], encoder, device)})
+    server, address = serve({"value": served_model(BatchedValue(net.to(device), encoder, device=device))})
     try:
         with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20) as remote:
             straight = remote(positions)
@@ -286,7 +290,7 @@ def test_an_ensemble_arm_matches_the_ensemble_a_worker_would_have_built(parts, d
     positions = _positions(_regulation, 24)
     expected = local(positions)
 
-    server, address = serve({"value": served_model(nets, encoder, device)})
+    server, address = serve({"value": served_model(BatchedValue(nets, encoder, device=device))})
     try:
         with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20) as remote:
             got = remote(positions)
@@ -327,7 +331,7 @@ def test_an_ensemble_arm_survives_several_workers_at_once(parts, device_name):
     batches = {n: _positions(regulation, n) for n in sizes}
     alone = {n: local(batches[n]) for n in sizes}
 
-    server, address = serve({"value": served_model(nets, encoder, device)})
+    server, address = serve({"value": served_model(BatchedValue(nets, encoder, device=device))})
     results: dict[int, np.ndarray] = {}
     failures: list[BaseException] = []
     try:

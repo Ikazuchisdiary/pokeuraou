@@ -311,85 +311,67 @@ class RemoteValue:
         return scores
 
 
-class _Arrays:
-    """The encoded batch, in the shape `BatchedValue.from_encoded` reads.
+def served_model(value: Any):
+    """The server's side of one arm: `BatchedValue`, called from another process.
 
-    A view onto the worker's buffer, trimmed to the rows it asked about -- the buffer is
-    sized for the largest request, not this one.
+    It delegates rather than reimplements, and that is the whole point rather than a
+    convenience. The first version wrote its own averaging --
+    `torch.stack([net(batch) for net in nets]).mean(0)` -- which is a second path to the
+    same quantity and came out 4e-08 from the first, enough to move a mixed strategy in
+    the fourth decimal. `value.py` says as much in its own comment and says not to keep
+    two paths; the server had quietly made one. Copying carefully was not the fix, because
+    the copy was already careful: same chunk boundary, same sigmoid, same dtype, and still
+    different.
+
+    A real `Encoded` is rebuilt rather than something shaped like one, so that a field
+    `from_encoded` starts reading cannot go missing here. `unknown_volatiles` is
+    diagnostics the model never sees.
+
+    One request at a time. The server answers each connection on its own thread, but an
+    ensemble goes through `torch.func.functional_call`, which swaps a module's parameters
+    in place for the duration of a call -- two threads doing that to the same module race,
+    and the loser sees the meta-device base the swap was supposed to fill in. Ten workers
+    produced exactly that, five seconds in. Per-thread bases would remove the need for the
+    lock and were measured at 419 calls/s against 403, which is 4% of a forward pass that
+    is 7.7% of a worker; and a failure without the lock is not self-limiting, because a
+    shared base left holding a BatchedTensor stays broken for every later caller.
     """
+    from .encode import Encoded
 
-    __slots__ = ARRAYS
-
-    def __init__(self, arrays: dict[str, np.ndarray], rows: int) -> None:
-        for name in ARRAYS:
-            # Contiguous because `np.frombuffer` can hand back a read-only view and
-            # `torch.from_numpy` will not take one. Same values either way.
-            setattr(self, name, np.ascontiguousarray(arrays[name][:rows]))
-
-
-def served_model(nets: Sequence[Any], encoder: Any, device: Any, batch_size: int = 8192):
-    """An arm, scored by the same object a worker would have used.
-
-    This delegates to `BatchedValue` rather than reimplementing the forward pass, and that
-    is the whole point rather than a convenience. The first version here did reimplement
-    it, carefully -- same chunk boundary, same sigmoid, same dtype -- and still gave
-    different answers, because it averaged an ensemble with
-    `torch.stack([net(batch) for net in nets]).mean(0)` while `BatchedValue` averages with
-    `stack_module_state` and `vmap`. Those two sum a float32 in different orders.
-    `value.py` says so in a comment and refuses to keep both paths for exactly this
-    reason; the server had quietly restored the second one.
-
-    Measured, through a match: menus identical, supports identical, actions drawn
-    identical, and the mixed strategies differing at 4e-08 -- which is a different
-    equilibrium, so a different agent.
-    """
-    from .value import BatchedValue
-
-    # Moved here rather than left to the caller. `BatchedValue` moves an ensemble's members
-    # when it stacks them and leaves a single net where it found it, so a one-net arm that
-    # arrived on the CPU would be indexed on the CPU with everything else on the card.
-    placed = [n.to(device).eval() for n in nets]
-    value = BatchedValue(
-        placed if len(placed) > 1 else placed[0],
-        encoder,
-        device=device,
-        batch_size=batch_size,
-    )
-    # One at a time. The server answers each connection on its own thread, but an ensemble
-    # goes through `torch.func.functional_call`, which swaps a module's parameters in
-    # place for the duration of a call -- two threads doing that to the same module race,
-    # and the loser sees the meta-device base the swap was supposed to fill in. Ten
-    # workers produced exactly that: `Tensor on device meta is not on the expected device
-    # cuda:0`, five seconds in.
-    #
-    # Nothing is lost by serialising. There is one card, so concurrent requests were
-    # queueing on it anyway; the threads were buying overlap of the socket and the copy,
-    # not of the arithmetic.
     lock = threading.Lock()
 
     def score(arrays: dict[str, np.ndarray], rows: int) -> np.ndarray:
-        # The copy out of the shared buffer happens inside the lock too: `_Arrays` reads
-        # the worker's buffer, and the worker is not writing to it while it waits.
+        # The arrays are already exactly `rows` long: the client's layout was planned from
+        # the batch it is asking about, and `_views` reshapes to that plan.
+        encoded = Encoded(**{name: arrays[name] for name in ARRAYS}, unknown_volatiles={})
         with lock:
-            return value.from_encoded(_Arrays(arrays, rows))
+            return value.from_encoded(encoded)
 
     return score
 
 
 def load_models(paths: dict[str, Sequence[Path]], encoder: Any, device_name: str) -> dict:
-    """Loads each named arm. One path is a single net, several are an ensemble."""
+    """Loads each named arm as a `BatchedValue`. Several files are an ensemble."""
     import torch
 
-    from .value import load_model
+    from .value import BatchedValue, load_model
 
     device = torch.device(device_name)
     models: dict[str, Any] = {}
     for name, group in paths.items():
-        nets = []
-        for path in group:
-            net, _meta = load_model(path, encoder)
-            nets.append(net.to(device).eval())
-        models[name] = served_model(nets, encoder, device)
+        nets = [load_model(path, encoder)[0].to(device).eval() for path in group]
+        value = BatchedValue(nets if len(nets) > 1 else nets[0], encoder, device=device)
+        # Averaging an ensemble is `BatchedValue`'s job, not this module's, and a checkout
+        # whose `BatchedValue` silently kept only one net would serve an arm that is not
+        # the arm it is named after. Asked of the object rather than of its signature,
+        # because a signature check is a string match that stops working quietly.
+        if len(getattr(value, "nets", nets)) != len(nets):
+            raise SystemExit(
+                f"arm {name!r} has {len(nets)} models and this checkout's BatchedValue "
+                f"kept {len(value.nets)}. Averaging them here instead would be a second "
+                f"path to a quantity that already has one, and the two differ by 4e-08."
+            )
+        models[name] = served_model(value)
     return models
 
 
