@@ -355,9 +355,23 @@ def served_model(nets: Sequence[Any], encoder: Any, device: Any, batch_size: int
         device=device,
         batch_size=batch_size,
     )
+    # One at a time. The server answers each connection on its own thread, but an ensemble
+    # goes through `torch.func.functional_call`, which swaps a module's parameters in
+    # place for the duration of a call -- two threads doing that to the same module race,
+    # and the loser sees the meta-device base the swap was supposed to fill in. Ten
+    # workers produced exactly that: `Tensor on device meta is not on the expected device
+    # cuda:0`, five seconds in.
+    #
+    # Nothing is lost by serialising. There is one card, so concurrent requests were
+    # queueing on it anyway; the threads were buying overlap of the socket and the copy,
+    # not of the arithmetic.
+    lock = threading.Lock()
 
     def score(arrays: dict[str, np.ndarray], rows: int) -> np.ndarray:
-        return value.from_encoded(_Arrays(arrays, rows))
+        # The copy out of the shared buffer happens inside the lock too: `_Arrays` reads
+        # the worker's buffer, and the worker is not writing to it while it waits.
+        with lock:
+            return value.from_encoded(_Arrays(arrays, rows))
 
     return score
 

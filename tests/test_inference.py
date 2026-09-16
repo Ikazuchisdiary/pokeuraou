@@ -297,3 +297,59 @@ def test_an_ensemble_arm_matches_the_ensemble_a_worker_would_have_built(parts, d
         f"max difference {np.abs(got - expected).max():.3e} -- an ensemble served is not "
         f"the ensemble a worker builds, and 1.9e-06 moves an equilibrium"
     )
+
+
+@pytest.mark.parametrize("device_name", DEVICES)
+def test_an_ensemble_arm_survives_several_workers_at_once(parts, device_name):
+    """Concurrency and ensembles, which were each covered and never together.
+
+    The two-worker test above uses a single net, so it never reaches
+    `torch.func.functional_call`; the ensemble test above uses one caller, so it never has
+    two threads in it at once. The intersection is what production is: ten workers against
+    an arm of two members. It failed five seconds in with `Tensor on device meta is not on
+    the expected device cuda:0`, because `functional_call` swaps a module's parameters in
+    place and two threads doing that to the same module race.
+
+    Four callers rather than two, and several rounds each, because a race that needs an
+    unlucky interleaving will not show up in one.
+    """
+    regulation, encoder, net = parts
+    device = torch.device(device_name)
+    torch.manual_seed(23)
+    from pokeuraou.value import ValueConfig, build
+
+    nets = [net.to(device), build(encoder, ValueConfig()).eval().to(device)]
+
+    from pokeuraou.inference import served_model
+
+    local = BatchedValue(nets, encoder, device=device)
+    sizes = [8, 20, 33, 41]
+    batches = {n: _positions(regulation, n) for n in sizes}
+    alone = {n: local(batches[n]) for n in sizes}
+
+    server, address = serve({"value": served_model(nets, encoder, device)})
+    results: dict[int, np.ndarray] = {}
+    failures: list[BaseException] = []
+    try:
+
+        def ask(rows: int) -> None:
+            try:
+                with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20) as remote:
+                    for _ in range(8):
+                        results[rows] = remote(batches[rows])
+            except BaseException as error:  # noqa: BLE001 -- reported on the main thread
+                failures.append(error)
+
+        threads = [threading.Thread(target=ask, args=(n,)) for n in sizes]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        server.shutdown()
+
+    assert not failures, f"a caller raised: {failures[0]!r}"
+    for rows, expected in alone.items():
+        assert np.array_equal(results[rows], expected), (
+            f"{rows} rows changed when three other workers were asking at the same time"
+        )
