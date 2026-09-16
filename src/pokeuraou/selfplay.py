@@ -374,6 +374,7 @@ def play_game(
     policy: Any | tuple[Any, Any] = None,
     solve_sparsely: bool | tuple[bool, bool] = False,
     start: Position | None = None,
+    first_action: str | None = None,
 ) -> GameRecord:
     """Plays one game to a result, sampling both sides from the turn's equilibrium.
 
@@ -486,8 +487,27 @@ def play_game(
             record.unmodelled.extend(foe_search.unmodelled)
             foe_equilibrium = foe_search.equilibrium
 
+        own_index = _sample_index(rng, equilibrium.row_strategy)
+        if first_action is not None and not record.decisions:
+            # Side 0's opening move, overridden once. Everything after it is the search's
+            # own, so the game measures "what happens if this is played here" rather than
+            # "what happens if this is played forever".
+            #
+            # It exists for the one hypothesis the recorded games cannot settle. The
+            # equilibrium prices the switch to the sweeper at zero in 60% of the positions
+            # where it is available, and the 14% of times it is taken are the ones where
+            # the equilibrium already liked it -- which say the leaf ranks *those*
+            # correctly and nothing about the 60%. Forcing it there and playing on is the
+            # only way to ask whether the zero is right.
+            wanted = [i for i, a in enumerate(ours) if a.to_choice() == first_action]
+            if not wanted:
+                record.unmodelled.append(
+                    f"forced opening {first_action!r} was not among this side's actions"
+                )
+            else:
+                own_index = wanted[0]
         chosen = [
-            ours[_sample_index(rng, equilibrium.row_strategy)],
+            ours[own_index],
             foe_theirs[_sample_index(rng, foe_equilibrium.col_strategy)],
         ]
         record.decisions.append(
