@@ -60,9 +60,9 @@ def main() -> None:
     #                      rather than a comfortable number -- a browser holding 3.5 GB is
     #                      enough to change the answer
     #
-    # The real fix is tools/inference_server.py: through it a worker is 542 MB and holds no
-    # CUDA context at all, and the worker count stops being a memory question. Pass
-    # --workers explicitly when running that way.
+    # With --served a worker is 224 MB and holds no CUDA context, so this number stops
+    # being a memory question and becomes a throughput one: 16 workers over 2 servers ran
+    # 116.2 games/min against 82.5 for the best direct configuration. Raise it when serving.
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--seed", type=int, default=77)
     ap.add_argument("--value", nargs="+", required=True)
@@ -70,10 +70,23 @@ def main() -> None:
     ap.add_argument(
         "--served",
         action="store_true",
-        help="start one inference server holding both arms, point every worker at it, and "
-        "shut it down at the end. --value and --baseline then say what the server loads "
-        "rather than what each worker loads, and a worker holds no torch: 542 MB instead "
-        "of 4.0 GB, and no CUDA context. The worker count stops being a memory question.",
+        help="run the leaves in inference servers instead of in every worker. --value and "
+        "--baseline then say what the servers load rather than what each worker loads, and "
+        "a worker holds no torch at all: 224 MB against 4.0 GB, and no CUDA context. See "
+        "--servers, which decides whether this is faster or slower than not using it.",
+    )
+    ap.add_argument(
+        "--servers",
+        type=int,
+        default=2,
+        help="inference server processes, with workers dealt round robin between them. "
+        "Two, not one, and it is the largest single effect measured on this: sixteen "
+        "workers through one server ran 55.5 games/min and the same sixteen through two "
+        "ran 116.2, on the same card. One Python process serialises more than the card "
+        "does -- the arithmetic releases the GIL but the JSON, the buffer views and the "
+        "result do not -- so the server has to be more than one process before it beats "
+        "a direct run at all. Answers do not depend on this: requests are never merged, "
+        "so a batch gets the same numbers wherever it is served.",
     )
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--no-bridge", action="store_true")
@@ -92,35 +105,39 @@ def main() -> None:
     env["POKEURAOU_RUST_NODE"] = "0" if args.no_bridge else "1"
     env["PYTHONPATH"] = str(ROOT / "src")
 
-    server: subprocess.Popen | None = None
-    served_at: str | None = None
+    servers: list[subprocess.Popen] = []
+    served_at: list[str] = []
     if args.served:
-        command = [
-            sys.executable, str(ROOT / "tools" / "inference_server.py"),
-            "--device", args.device, "--arm", "value", *args.value,
-        ]
-        if args.baseline:
-            command += ["--arm", "baseline", *args.baseline]
-        server_log = (out_dir / "logs")
+        server_log = out_dir / "logs"
         server_log.mkdir(parents=True, exist_ok=True)
-        errors = (server_log / "inference.log").open("w", encoding="utf-8")
-        server = subprocess.Popen(  # noqa: S603
-            command, env=env, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=errors,
-            text=True,
-        )
-        # The address is the server's first line of stdout. Read it before starting any
-        # worker: a worker that starts first has nothing to connect to, and the failure
-        # would look like the run dying for a reason of its own.
-        assert server.stdout is not None
-        served_at = server.stdout.readline().strip()
-        if not served_at:
-            server.terminate()
-            raise SystemExit(
-                f"the inference server exited before naming an address; see "
-                f"{server_log / 'inference.log'}"
+        for index in range(args.servers):
+            command = [
+                sys.executable, str(ROOT / "tools" / "inference_server.py"),
+                "--device", args.device, "--arm", "value", *args.value,
+            ]
+            if args.baseline:
+                command += ["--arm", "baseline", *args.baseline]
+            errors = (server_log / f"inference{index}.log").open("w", encoding="utf-8")
+            process = subprocess.Popen(  # noqa: S603
+                command, env=env, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=errors,
+                text=True,
             )
-        print(f"  inference: {served_at} (workers hold no model)", file=sys.stderr,
-              flush=True)
+            servers.append(process)
+            # The address is the server's first line of stdout, read before any worker
+            # starts: a worker that starts first has nothing to connect to, and that
+            # failure reads as the run dying for a reason of its own.
+            assert process.stdout is not None
+            address = process.stdout.readline().strip()
+            if not address:
+                for other in servers:
+                    other.terminate()
+                raise SystemExit(
+                    f"inference server {index} exited before naming an address; see "
+                    f"{server_log / f'inference{index}.log'}"
+                )
+            served_at.append(address)
+        print(f"  inference: {', '.join(served_at)} (workers hold no model)",
+              file=sys.stderr, flush=True)
 
     def build(worker: int, address: str) -> list[str]:
         command = [
@@ -133,8 +150,12 @@ def main() -> None:
             "--out", str(out_dir / f"worker{worker}.jsonl"),
             "--games-out", str(out_dir / f"games-worker{worker}.jsonl"),
         ]
-        if served_at is not None:
-            command += ["--inference", served_at, "--inference-arm", "value"]
+        if served_at:
+            # Round robin. Which worker lands on which server does not affect any answer
+            # -- requests are never merged, so a batch gets the same numbers wherever it
+            # is served -- only how many threads each process has to interleave.
+            command += ["--inference", served_at[worker % len(served_at)],
+                        "--inference-arm", "value"]
             if args.baseline:
                 command += ["--baseline-inference-arm", "baseline"]
         else:
@@ -168,12 +189,12 @@ def main() -> None:
         # The server outlives every worker and is ours to end, however the run ended --
         # a leftover one holds 1.5 GB of VRAM and answers the next run's questions with
         # the previous run's models.
-        if server is not None:
-            server.terminate()
+        for process in servers:
+            process.terminate()
             try:
-                server.wait(timeout=30)
+                process.wait(timeout=30)
             except subprocess.TimeoutExpired:
-                server.kill()
+                process.kill()
     raise SystemExit(status)
 
 

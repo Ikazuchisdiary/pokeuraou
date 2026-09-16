@@ -92,26 +92,35 @@ def main() -> None:
     tail = ["--limit", str(args.limit), "--baseline-limit", str(args.baseline_limit),
             "--rank-leaf", "--baseline-rank-leaf"]
 
-    def command(workers: int, served: bool) -> list[str]:
-        out = args.out / ("served" if served else "direct") / str(workers)
+    def command(workers: int, servers: int) -> list[str]:
+        out = args.out / (f"served{servers}" if servers else "direct") / str(workers)
         base = [sys.executable, str(ROOT / "tools" / "match_queue.py"),
                 "--out", str(out), "--games", "100000", "--workers", str(workers),
                 "--seed", str(args.seed), "--device", "cuda",
                 "--value", *models, "--baseline", *models]
-        if served:
-            base.append("--served")
+        if servers:
+            base += ["--served", "--servers", str(servers)]
         return base + ["--", *tail]
 
     # Flushed, all of it. The first run of this died mid-sweep and left an empty log --
     # not because nothing had been printed, but because nothing had been flushed.
     print(f"width {args.limit} against {args.baseline_limit}, "
           f"{args.warmup:.0f}s discarded then {args.seconds:.0f}s counted\n", flush=True)
-    plan = [("direct, 6 workers", 6, False), ("served, 6 workers", 6, True),
-            ("served, 10 workers", 10, True), ("served, 14 workers", 14, True)]
+    # Server processes as well as workers, because the servers turned out to matter more:
+    # sixteen workers through one server ran 55.5 games/min and the same sixteen through
+    # two ran 116.2. One server saturates on something inside one Python process, so a
+    # sweep that varies only the worker count measures that ceiling and nothing else.
+    plan = [
+        ("direct, 6 workers", 6, 0),
+        ("2 servers, 16 workers", 16, 2),
+        ("2 servers, 24 workers", 24, 2),
+        ("3 servers, 24 workers", 24, 3),
+        ("4 servers, 32 workers", 32, 4),
+    ]
     results = []
-    for label, workers, served in plan:
-        out = args.out / ("served" if served else "direct") / str(workers)
-        results.append(run(label, command(workers, served), out, args.warmup, args.seconds))
+    for label, workers, servers in plan:
+        out = args.out / (f"served{servers}" if servers else "direct") / str(workers)
+        results.append(run(label, command(workers, servers), out, args.warmup, args.seconds))
 
     best = max(results, key=lambda r: r["rate"])
     reference = results[0]["rate"]
