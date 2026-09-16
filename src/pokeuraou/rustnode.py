@@ -219,10 +219,12 @@ class EncodedNode:
                 count *= axis
             flat = np.frombuffer(body, dtype=dtype, count=count, offset=offset)
             offset += count * np.dtype(dtype).itemsize
-            # The embeddings want int64; the wire does not have to carry it.
-            arrays[name] = (
-                flat.astype(np.int64) if dtype is np.int32 else flat
-            ).reshape(shape)
+            # No widening. `nn.Embedding` takes int32 and gives the identical answer,
+            # because an index lookup does no arithmetic -- so the four index arrays stay
+            # as they came and nothing is rebuilt. Widening them cost 0.058 ms a call, and
+            # more than that once they had to be copied into a shared buffer at twice the
+            # width on the way to an inference server.
+            arrays[name] = flat.reshape(shape)
         return EncodedNode(
             encoded=Encoded(
                 species=arrays["species"],
