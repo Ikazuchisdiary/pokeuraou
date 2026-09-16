@@ -110,6 +110,16 @@ def main() -> None:
         help="threads per worker. 1 is right for a parallel run: N processes each spawning "
         "a pool on the same cores is slower than one process. Raise it for a single run.",
     )
+    ap.add_argument(
+        "--force-lead",
+        default=None,
+        help="comma-separated species that must occupy our first two slots. Everything "
+        "else is drawn as usual, so the games differ in one thing only. This is how a "
+        "plan gets into the teacher data: forcing a *move* is undone on the next turn by "
+        "a search that does not value the plan, while a Pokemon on the field stays on it. "
+        "Toxapex leads 2.5% of the book's mass and led 1.44% of generation 9 against 47% "
+        "of the human repertoire, so those positions are the ones that do not exist.",
+    )
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--report", action="store_true", help="print a summary of the output file")
     ap.add_argument(
@@ -343,6 +353,9 @@ def main() -> None:
         depth=args.depth,
         rank_by_leaf=args.rank_leaf,
         solve_sparsely=args.solve_sparsely,
+        force_lead=tuple(
+            x.strip() for x in args.force_lead.split(",") if x.strip()
+        ) if args.force_lead else None,
         max_turns=args.max_turns,
         cooc=cooc,
         archetype_share=archetype_share,

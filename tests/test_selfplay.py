@@ -136,3 +136,42 @@ def test_written_games_carry_a_real_outcome(setup, tmp_path) -> None:  # noqa: A
         assert record["targetIsRealOutcome"] is True
         assert record["searchObjective"] == HP_SHARE.name
         assert record["decisions"]
+
+
+def test_a_forced_lead_keeps_four_distinct_and_puts_them_first(reg, team_a) -> None:
+    """The lead is forced; the rest of the four is left as it was drawn.
+
+    Forcing the selection rather than a move is the point: a move that starts a slow plan
+    is undone on the next turn by a search that does not value the plan, where a Pokemon
+    on the field stays on it. So this has to produce a legal selection -- four distinct
+    party members, the wanted ones first -- whatever it was handed, including a draw that
+    already contains them and one that contains neither.
+    """
+    import numpy as np
+
+    from pokeuraou.selfplay import _with_lead
+    from pokeuraou.teams import load_roster
+
+    roster = load_roster("rizabanadohido")
+    names = [entry.species for entry in roster.sets]
+    wanted = ("toxapex", "incineroar")
+    rng = np.random.default_rng(0)
+    for drawn in ((0, 1, 2, 3), (4, 5, 0, 1), (0, 2, 3, 1), (5, 4, 3, 2)):
+        out = _with_lead(rng, roster, wanted, drawn)
+        assert len(out) == len(drawn)
+        assert len(set(out)) == len(drawn), f"{out} repeats a party member"
+        assert [names[i] for i in out[:2]] == list(wanted)
+        assert all(0 <= i < len(names) for i in out)
+
+
+def test_a_forced_lead_the_roster_cannot_field_is_named(reg, team_a) -> None:
+    """Silently ignoring it would generate ordinary games under a label saying otherwise."""
+    import numpy as np
+    import pytest
+
+    from pokeuraou.selfplay import _with_lead
+    from pokeuraou.teams import load_roster
+
+    roster = load_roster("rizabanadohido")
+    with pytest.raises(ValueError, match="pikachu"):
+        _with_lead(np.random.default_rng(0), roster, ("pikachu",), (0, 1, 2, 3))

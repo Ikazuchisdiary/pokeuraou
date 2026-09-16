@@ -96,6 +96,11 @@ def main() -> None:
         help="draw the four of six uniformly and say so out loud. Without this a missing "
         "book is an error rather than a silent -141 Elo.",
     )
+    ap.add_argument(
+        "--force-lead",
+        default=None,
+        help="passed to every worker: species that must lead. See tools/selfplay.py.",
+    )
     ap.add_argument("--no-bridge", action="store_true")
     ap.add_argument(
         "rest",
@@ -198,6 +203,7 @@ def main() -> None:
             "--device", args.device,
             "--torch-threads", "1",
             "--roster", args.roster,
+            *(["--force-lead", args.force_lead] if args.force_lead else []),
             "--out", str(out_dir / f"games-worker{worker}.jsonl"),
         ]
         if served_at:

@@ -268,6 +268,39 @@ def position_from_sets(
     return apply_lead_abilities(reg, opening).position
 
 
+def _with_lead(
+    rng: np.random.Generator,
+    roster: Roster,
+    wanted: tuple[str, ...],
+    drawn: tuple[int, ...],
+) -> tuple[int, ...]:
+    """The same four, reordered so `wanted` leads -- or a fresh four containing them.
+
+    Forcing the *selection* rather than a move is what makes this usable as teacher data.
+    A random move that starts a slow plan is undone on the next turn, because the search
+    that would have to continue it does not value it; a Pokemon that is on the field is on
+    the field. The deviation lasts the whole game, and the outcome is a real outcome of
+    having opened that way.
+
+    It exists because the lead is where the plan starts and the lead is what the book
+    stopped drawing. Toxapex is brought in 57.4% of the book's mass and leads 2.5% of it;
+    Toxapex with Incineroar led 1.44% of generation 9 -- 46 games in 3,187 -- against 47%
+    of the human repertoire.
+    """
+    names = [entry.species for entry in roster.sets]
+    missing = [n for n in wanted if n not in names]
+    if missing:
+        raise ValueError(f"the roster has no {missing}; it has {names}")
+    lead = [names.index(n) for n in wanted]
+    rest = [i for i in drawn if i not in lead]
+    while len(lead) + len(rest) < len(drawn):
+        spare = [i for i in range(len(names)) if i not in lead and i not in rest]
+        if not spare:
+            break
+        rest.append(int(spare[rng.integers(len(spare))]))
+    return tuple([*lead, *rest[: max(len(drawn) - len(lead), 0)]])
+
+
 def _sample_index(rng: np.random.Generator, weights: np.ndarray) -> int:
     total = float(weights.sum())
     if total <= 0:
@@ -782,6 +815,7 @@ def generate(
     rank_by_leaf: bool = False,
     policy: Any = None,
     solve_sparsely: bool = False,
+    force_lead: tuple[str, ...] | None = None,
     indices: Iterable[int] | None = None,
     on_finish: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
@@ -869,6 +903,7 @@ def generate(
     path = out or (selfplay_dir() / f"games-seed{seed}.jsonl")
     path.parent.mkdir(parents=True, exist_ok=True)
 
+    lead_wanted = tuple(force_lead) if force_lead else ()
     stats = {
         "games": 0,
         "book_hits": 0,
@@ -917,10 +952,17 @@ def generate(
             if drawn is not None:
                 own_pick = drawn.our_pick
                 foe_pick = drawn.foe_pick
+                if lead_wanted:
+                    # Our lead, forced; everything else left as the book drew it. The
+                    # opponent, the spreads and our other two are untouched, so the games
+                    # differ from ordinary generation in one thing only.
+                    own_pick = _with_lead(rng, roster, lead_wanted, own_pick)
             else:
                 own_pick = pick_four_indices(
                     rng, len(roster.sets), size=reg.meta.picked_team_size
                 )
+                if lead_wanted:
+                    own_pick = _with_lead(rng, roster, lead_wanted, own_pick)
                 foe_pick = pick_four_indices(
                     rng, len(foe_six), size=reg.meta.picked_team_size
                 )
