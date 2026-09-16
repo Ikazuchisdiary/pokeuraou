@@ -17,6 +17,7 @@ rate a long run would actually get.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -55,13 +56,18 @@ def run(label: str, command: list[str], out: Path, warmup: float, seconds: float
         except subprocess.TimeoutExpired:
             process.kill()
         log.close()
-    # The driver's own children can outlive it on Windows; nothing else in this script
-    # starts python, so anything still holding this directory is ours to end.
+    # The driver's own children can outlive it on Windows, so they are ended by hand --
+    # but by the whole output path, never by its last component. That was `out.name`, which
+    # is the worker count, so the pattern was `*6*` and it matched any command line with a
+    # six in it. This script's own, for one: the first run of it killed itself and left an
+    # empty log, because stdout had not been flushed either.
+    marker = str(out).replace("\\", "\\\\")
     subprocess.run(  # noqa: S603
         ["powershell", "-NoProfile", "-Command",
          f"Get-CimInstance Win32_Process -Filter \"Name='python.exe'\" | "
-         f"Where-Object {{ $_.CommandLine -like '*{out.name}*' -or "
-         f"$_.CommandLine -like '*inference_server*' }} | "
+         f"Where-Object {{ $_.ProcessId -ne {os.getpid()} -and "
+         f"($_.CommandLine -like '*{marker}*' -or "
+         f"$_.CommandLine -like '*inference_server.py*') }} | "
          f"ForEach-Object {{ Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }}"],
         check=False, capture_output=True,
     )
@@ -96,8 +102,10 @@ def main() -> None:
             base.append("--served")
         return base + ["--", *tail]
 
+    # Flushed, all of it. The first run of this died mid-sweep and left an empty log --
+    # not because nothing had been printed, but because nothing had been flushed.
     print(f"width {args.limit} against {args.baseline_limit}, "
-          f"{args.warmup:.0f}s discarded then {args.seconds:.0f}s counted\n")
+          f"{args.warmup:.0f}s discarded then {args.seconds:.0f}s counted\n", flush=True)
     plan = [("direct, 6 workers", 6, False), ("served, 6 workers", 6, True),
             ("served, 10 workers", 10, True), ("served, 14 workers", 14, True)]
     results = []
