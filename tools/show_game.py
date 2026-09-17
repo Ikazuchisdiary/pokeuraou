@@ -23,12 +23,15 @@ import io
 import json
 import re
 import sys
+from math import comb
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pokeuraou.actions import RECHARGE, STRUGGLE
+from pokeuraou.hidden import seen_slots
 from pokeuraou.names import Localiser, load_names
+from pokeuraou.position import Position
 from pokeuraou.regulation import Regulation, load_regulation, to_id
 from pokeuraou.resolve import RESIDUAL_PHASE
 from pokeuraou.teams import all_selections
@@ -622,6 +625,49 @@ def turn_events(
     return groups
 
 
+def hidden_line(loc: Localiser, record: dict, seen: list[set[str]]) -> str:
+    """What each side could not see, at the decision `seen` has been carried up to.
+
+    The board printed above is the *record*, which is the truth: it names the opponent's
+    whole four from turn one. The search was not shown that, and without a line saying so
+    a reader compares a mixture against information the mixture was never allowed. So this
+    prints, per side, the sheet members that side had not yet met and how many fours they
+    made -- C(4,2) = 6 at the opening, 3 once one more has come in, and nothing once the
+    four is out.
+
+    `seen` is accumulated by the caller across decisions, because a Pokemon that came in
+    and went back out is still known and the position alone stops saying so. What counts
+    as shown comes from `hidden.seen_slots`, the rule the search itself used -- a display
+    that decided for itself would drift from the numbers it is annotating, and the drift
+    would read as the search having been more or less certain than it was.
+    """
+    sixes = (record.get("ownSix") or [], record.get("foeSix") or [])
+    parts: list[str] = []
+    for index, label in ((0, "自"), (1, "敵")):
+        sheet = [str(name) for name in sixes[index]]
+        if len(sheet) < 6:
+            continue
+        unseen = [name for name in sheet if name not in seen[index]]
+        # They brought four, so the slots still to come are four minus what they have
+        # shown. The rest of the sheet they did not bring, and that is the whole of the
+        # uncertainty: which of the unmet ones are in those slots.
+        slots = 4 - len([name for name in sheet if name in seen[index]])
+        if slots <= 0:
+            parts.append(f"{label}の裏: なし（4体とも出た）")
+            continue
+        if len(unseen) < slots:
+            # The sheet cannot explain the board, which `hidden.completions` refuses
+            # outright. Said plainly rather than rounded down to "nothing hidden", which
+            # is the one reading that would look normal.
+            parts.append(f"{label}の裏: 不整合（{slots}枠に対し未見 {len(unseen)}体）")
+            continue
+        names = "・".join(loc.species(name) for name in unseen)
+        parts.append(
+            f"{label}の裏: {slots}枠を {names} から → {comb(len(unseen), slots)}通り"
+        )
+    return "  ｜  ".join(parts)
+
+
 def render(reg: Regulation, loc: Localiser, record: dict, top: int) -> str:
     out = io.StringIO()
     own = "・".join(loc.species(s["species"]) for s in record["ownTeam"])
@@ -629,6 +675,12 @@ def render(reg: Regulation, loc: Localiser, record: dict, top: int) -> str:
     outcome = record.get("outcome")
     verdict = "勝ち" if outcome == 1.0 else "負け" if outcome == 0.0 else "打ち切り"
     out.write(f"自陣: {own}\n相手: {foe}  [{record.get('foeArchetype', '?')}]\n")
+    if record.get("information") == "hidden-bench":
+        out.write(
+            "不完全情報: どちらの探索も相手の未公開の控えを見ていない。"
+            "下の盤面は記録された真実で、混合はそれを見ずに解かれたもの。"
+            + "\n"
+        )
     # A match game's `foeArchetype` is the seat label the tool played under -- something
     # like "value-gen234.pt = side 0" -- which on the 相手 line reads as if that model
     # were the opponent, when it is whichever side the label says. The provenance block
@@ -711,6 +763,8 @@ def render(reg: Regulation, loc: Localiser, record: dict, top: int) -> str:
     )
 
     decisions = record["decisions"]
+    # Carried across decisions: what each side has shown by now.
+    seen_species: list[set[str]] = [set(), set()]
     for position_in_game, decision in enumerate(decisions):
         sides = decision["position"]["sides"]
         out.write(f"\n─── ターン {decision['turn']}  ({decision['kind']})\n")
@@ -746,6 +800,18 @@ def render(reg: Regulation, loc: Localiser, record: dict, top: int) -> str:
                 out.write(f"   控え: {'・'.join(bench)}")
             out.write("\n")
 
+        if record.get("information") == "hidden-bench":
+            # `seen_slots` is the rule the search used, so the annotation and the mixture
+            # it annotates agree by construction. Deciding here that "active or fainted"
+            # meant shown would have under-counted every Pokemon that had been damaged,
+            # statused or Mega Evolved and put back.
+            here = Position.from_json(decision["position"])
+            for index, side in enumerate(sides):
+                for slot in seen_slots(here, index):
+                    seen_species[index].add(str(side["pokemon"][slot]["species"]))
+            line = hidden_line(loc, record, seen_species)
+            if line:
+                out.write(f"  {line}" + "\n")
         out.write(f"  探索値（自分の勝率）: {decision['searchValue']:.3f}\n")
         for index, (actions, policy) in enumerate(
             (
