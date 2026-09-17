@@ -54,7 +54,7 @@ from .resolve import (
     resume_alternatives,
     turn_leaves,
 )
-from .search import belief_search, leaf_ranking, search
+from .search import belief_solve, leaf_ranking, search
 from .selection_book import (
     DEFAULT_EPSILON,
     DEFAULT_TEMPERATURE,
@@ -365,24 +365,6 @@ def _menus(
     )
 
 
-def _spread(
-    reg: Regulation,
-    pos: Position,
-    side: int,
-    sheet: Sequence[SampledSet],
-    seen: frozenset[int],
-) -> list[tuple[Position, float]]:
-    """Positions and weights for what `side`'s unseen slots could hold.
-
-    Uniform over the completions, deliberately and temporarily. The distribution that
-    belongs here is the opponent's selection equilibrium marginalised onto their back
-    two, which the book already computes -- but a wrong prior dressed as the book's would
-    be worse than an obviously flat one, so the flat one is what is here until the book is
-    threaded through.
-    """
-    return [(item.position, item.weight) for item in completions(reg, pos, side, sheet, seen=seen)]
-
-
 def play_game(
     reg: Regulation,
     rng: np.random.Generator,
@@ -486,31 +468,34 @@ def play_game(
             break
 
         if sheets is not None:
-            # Each side solves its own game, because each is uncertain about a different
-            # bench. With open information one solve served both whenever the settings
-            # matched; here that shortcut would hand one side the other's uncertainty.
+            # Each side is uncertain about a different bench, so each gets its own answer.
+            # The node underneath them is resolved once: their hidden slots are disjoint
+            # and a cell that reaches neither resolves the same way whatever is standing
+            # on either bench.
             try:
-                own_spread = _spread(reg, pos, 1, sheets[1], shown[1])
-                foe_spread = _spread(reg, pos, 0, sheets[0], shown[0])
+                spreads = {
+                    side: completions(
+                        reg, pos, side, sheets[side], seen=shown[side]
+                    )
+                    for side in (0, 1)
+                }
             except ValueError as problem:
                 record.unmodelled.append(f"hidden bench: {problem}")
                 break
             try:
-                mine = belief_search(
-                    reg, own_spread, ours, theirs, own_leaf, budget=budget, side=0,
-                    solve_sparsely=sparse[0],
-                )
-                yours = belief_search(
-                    reg, foe_spread, ours, theirs, foe_leaf, budget=budget, side=1,
-                    solve_sparsely=sparse[1],
+                answers = belief_solve(
+                    reg, pos, ours, theirs, spreads,
+                    {0: own_leaf, 1: foe_leaf}, budget=budget,
                 )
             except EquilibriumError:
                 break
-            record.unmodelled.extend(mine.unmodelled | yours.unmodelled)
-            own_strategy = mine.strategy
-            foe_strategy = yours.strategy
+            record.unmodelled.extend(
+                answers[0].unmodelled | answers[1].unmodelled
+            )
+            own_strategy = answers[0].strategy
+            foe_strategy = answers[1].strategy
             foe_theirs = theirs
-            search_value = mine.value
+            search_value = answers[0].value
         else:
             try:
                 own_search = search(
