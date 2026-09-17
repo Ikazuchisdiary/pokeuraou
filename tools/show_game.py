@@ -28,7 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from pokeuraou.actions import RECHARGE, STRUGGLE
+from pokeuraou.actions import RECHARGE, STRUGGLE, is_struggling
 from pokeuraou.hidden import seen_slots
 from pokeuraou.names import Localiser, load_names
 from pokeuraou.position import Position
@@ -102,7 +102,12 @@ def field_line(loc: Localiser, position: dict) -> str:
 
 
 def name_action(
-    reg: Regulation, loc: Localiser, sides: list[dict], actor: int, choice: str
+    reg: Regulation,
+    loc: Localiser,
+    sides: list[dict],
+    actor: int,
+    choice: str,
+    parsed: Position | None = None,
 ) -> str:
     """Turns one side's choice string into names, using the position it was offered in.
 
@@ -141,8 +146,17 @@ def name_action(
             # closing turns after Infestation and Muddy Water, the two moves that had run
             # dry and were the reason Struggle was on offer at all -- so the log showed
             # both sides using moves they could not use, and the result made no sense.
-            struggling = bool(mon) and all(
-                (m.get("pp") or 0) <= 0 for m in mon.get("moves") or [{}]
+            #
+            # "Every move out of PP" is not the rule, though, and reading it that way put
+            # a Choice Scarf Garchomp's Struggle down as Earthquake: the lock had left one
+            # move selectable and that one was empty, so Struggle was on offer with three
+            # full move slots beside it. The rule is `_usable_move_slots`, the same
+            # function the search enumerates with, so the log and the legal set cannot
+            # disagree about what was on the menu.
+            struggling = (
+                parsed is not None
+                and party is not None
+                and is_struggling(parsed.sides[actor].pokemon[party], reg)
             )
             move_id = (
                 RECHARGE
@@ -767,6 +781,9 @@ def render(reg: Regulation, loc: Localiser, record: dict, top: int) -> str:
     seen_species: list[set[str]] = [set(), set()]
     for position_in_game, decision in enumerate(decisions):
         sides = decision["position"]["sides"]
+        # Parsed once: the legality rule wants Pokemon objects, and rebuilding one per
+        # named action would parse the same position a few dozen times a turn.
+        parsed = Position.from_json(decision["position"])
         out.write(f"\n─── ターン {decision['turn']}  ({decision['kind']})\n")
         conditions = field_line(loc, decision["position"])
         if conditions:
@@ -805,9 +822,8 @@ def render(reg: Regulation, loc: Localiser, record: dict, top: int) -> str:
             # it annotates agree by construction. Deciding here that "active or fainted"
             # meant shown would have under-counted every Pokemon that had been damaged,
             # statused or Mega Evolved and put back.
-            here = Position.from_json(decision["position"])
             for index, side in enumerate(sides):
-                for slot in seen_slots(here, index):
+                for slot in seen_slots(parsed, index):
                     seen_species[index].add(str(side["pokemon"][slot]["species"]))
             line = hidden_line(loc, record, seen_species)
             if line:
@@ -838,7 +854,7 @@ def render(reg: Regulation, loc: Localiser, record: dict, top: int) -> str:
                 mark = "☆" if played is not None and choice == played else "　"
                 out.write(
                     f"   {mark}{weight * 100:>5.1f}%  "
-                    f"{name_action(reg, loc, sides, index, choice)}\n"
+                    f"{name_action(reg, loc, sides, index, choice, parsed)}\n"
                 )
             rest = sum(w for _a, w in ranked[len(shown):])
             if rest > 0.001:
@@ -846,7 +862,7 @@ def render(reg: Regulation, loc: Localiser, record: dict, top: int) -> str:
             # A draw from outside the shown rows would otherwise vanish from the log.
             if played is not None and all(choice != played for choice, _w in shown):
                 out.write(
-                    f"   ☆  ---  {name_action(reg, loc, sides, index, played)}"
+                    f"   ☆  ---  {name_action(reg, loc, sides, index, played, parsed)}"
                     "（表示範囲の外から引かれた手）\n"
                 )
 

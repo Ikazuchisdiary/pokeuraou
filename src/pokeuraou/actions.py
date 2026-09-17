@@ -285,6 +285,17 @@ def _usable_move_slots(mon, reg: Regulation) -> list[tuple[int, str]]:  # noqa: 
     return out
 
 
+def is_struggling(mon, reg: Regulation) -> bool:  # noqa: ANN001
+    """True when nothing on the moveset can be selected, so Showdown offers Struggle.
+
+    Not "every move is out of PP": a Choice item can leave exactly one move selectable and
+    that one can be the empty one, which is Struggle with three full move slots beside it.
+    The condition is the legal set being empty, and it is named here so a reader of a game
+    log and the search enumerating that turn cannot disagree about what was on the menu.
+    """
+    return not _usable_move_slots(mon, reg)
+
+
 def _targets_for(
     reg: Regulation, move_id: str, slot: int, foe: Side, active_per_side: int
 ) -> list[int | None]:
