@@ -5,8 +5,8 @@ instructive.
 
 The equilibrium never brings Charizard, and prices the team's own signature Charizard +
 Venusaur lead at -24 points. That looked like it contradicted the self-play data, which
-says leaving Charizard behind is the *worst* thing our side can do: 55.1% against 78.5% for
-leaving Toxapex behind. It does not contradict it. The 55.1% is a **marginal** statistic --
+says leaving Charizard behind is the *worst* thing our side can do: 55.1%% against 78.5%% for
+leaving Toxapex behind. It does not contradict it. The 55.1%% is a **marginal** statistic --
 uniform selection averaged over all 394 opponents -- and the solver answers a
 **conditional** question: what to bring against one specific team. A member can be the most
 valuable on average and the wrong pick in a particular matchup, and confusing the two is a
@@ -80,7 +80,7 @@ def main() -> None:
         "Adds an arm that plays the best selection *with that lead* against the same "
         "equilibrium opponent as the equilibrium arm, which is how a claim about human "
         "practice gets tested against the solver's advice rather than argued with. The "
-        "book brings Incineroar in 71.5% of its mass and leads it in 0.0%, and the human "
+        "book brings Incineroar in 71.5%% of its mass and leads it in 0.0%%, and the human "
         "report is that leading it is the common line; Intimidate and Fake Out are both "
         "lead effects, so a value function that under-prices them would produce exactly "
         "the bring-but-bench distribution observed.",

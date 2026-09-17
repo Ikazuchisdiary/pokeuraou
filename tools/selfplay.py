@@ -115,9 +115,9 @@ def main() -> None:
         action="store_true",
         help="neither side's search is shown the other's unplayed bench. Each solves over "
         "every four the opponent's sheet still allows, as the Bayesian game it is. "
-        "Without it the search is handed the opponent's whole four, which 47.4% of "
+        "Without it the search is handed the opponent's whole four, which 47.4%% of "
         "decisions and every opening one had no right to; on 40 openings that was worth "
-        "0.96 points and moved the advice in 90% of them. Costs about 3.8x, because each "
+        "0.96 points and moved the advice in 90%% of them. Costs about 3.8x, because each "
         "side now solves its own game and there are up to six completions in each.",
     )
     ap.add_argument(
@@ -127,7 +127,7 @@ def main() -> None:
         "else is drawn as usual, so the games differ in one thing only. This is how a "
         "plan gets into the teacher data: forcing a *move* is undone on the next turn by "
         "a search that does not value the plan, while a Pokemon on the field stays on it. "
-        "Toxapex leads 2.5% of the book's mass and led 1.44% of generation 9 against 47% "
+        "Toxapex leads 2.5%% of the book's mass and led 1.44%% of generation 9 against 47%% "
         "of the human repertoire, so those positions are the ones that do not exist.",
     )
     ap.add_argument("--out", type=Path, default=None)
@@ -400,7 +400,7 @@ def main() -> None:
         verdict = "要件どおり" if abs(rate - 0.5) <= half else "ずれている（座席バイアス）"
         print(
             f"  ミラー {stats['mirror_games']} 戦の勝率 {rate * 100:.1f}% "
-            f"±{half * 100:.1f}（50% が要件 → {verdict}）"
+            f"±{half * 100:.1f}（50%% が要件 → {verdict}）"
         )
     if book is not None:
         print(

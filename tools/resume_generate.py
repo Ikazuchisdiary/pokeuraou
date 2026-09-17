@@ -1,13 +1,13 @@
 """Generates games from recorded late positions, because self-play rarely reaches them.
 
-Measured over the 53,604-game pool: games average 9.4 turns, 5.4% reach turn 15 and 0.7%
+Measured over the 53,604-game pool: games average 9.4 turns, 5.4%% reach turn 15 and 0.7%
 reach turn 20. Nothing is being truncated -- the generator discards no unfinished games --
 the play simply ends. So the phase where a slow plan finally pays is one position in
 twenty, and a value function prices patience at what it has seen.
 
 The human repertoire for this roster is built on that phase. The reported win condition
 against BIG6 is "keep Toxapex and Venusaur, face Basculegion at one and lock it out",
-which is a turn-15 game; the solved book leads Toxapex in 2.5% of its mass where the
+which is a turn-15 game; the solved book leads Toxapex in 2.5%% of its mass where the
 humans lead it in 47%.
 
 More self-play of the same shape will not fix it -- generations 2 through 8 all reach
@@ -97,7 +97,7 @@ def main() -> None:
         default=25,
         help="upper bound on the starting turn. Needed because --flat-turns spreads the "
         "budget over every band that exists, and the pool has bands out to turn 75: an "
-        "unbounded run put 27% of its games past turn 70 and only 22% in the 15-25 range "
+        "unbounded run put 27%% of its games past turn 70 and only 22%% in the 15-25 range "
         "the human plans actually live in. Turn-70 doubles is a degenerate one-on-one "
         "stall, far enough outside the deployment distribution to risk the harm measured "
         "when generation 8's narrow data was added to the pool.",

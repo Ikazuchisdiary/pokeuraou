@@ -30,7 +30,7 @@ collapsing when nothing is wrong with it.
 
 Absolute numbers are only meaningful on an idle machine; the *shape* -- where the curve
 flattens -- survives a bit of background load. On this machine (8 physical cores) the
-answer came out 5.6x at eight workers, still rising, with cuda and cpu within 8% of each
+answer came out 5.6x at eight workers, still rising, with cuda and cpu within 8%% of each
 other at every count and the sign of the difference changing between them.
 """
 
@@ -114,7 +114,7 @@ def main() -> None:
         "--rank-leaf",
         action="store_true",
         help="rank the menu by the leaf, as generation does. Nearly free at width 48 and "
-        "75% at width 24, because its cost is the pool against the matrix's limit^2.",
+        "75%% at width 24, because its cost is the pool against the matrix's limit^2.",
     )
     ap.add_argument("--device", default="cpu", choices=("cpu", "cuda"))
     ap.add_argument("--value", default=None, help="a trained value function, or hp-share")

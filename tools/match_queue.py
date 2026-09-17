@@ -90,6 +90,13 @@ def main() -> None:
         "a direct run at all. Answers do not depend on this: requests are never merged, "
         "so a batch gets the same numbers wherever it is served.",
     )
+    ap.add_argument(
+        "--hide-bench",
+        action="store_true",
+        help="pass --hide-bench to every worker. A model trained on hidden-bench games "
+        "has to be judged in that condition; judging it in the open game measures which "
+        "model suits the open game.",
+    )
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--no-bridge", action="store_true")
     ap.add_argument(
@@ -178,6 +185,8 @@ def main() -> None:
             command += ["--value", *args.value]
             if args.baseline:
                 command += ["--baseline", *args.baseline]
+        if args.hide_bench:
+            command += ["--hide-bench"]
         return command + extra
 
     def written() -> int:

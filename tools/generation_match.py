@@ -166,6 +166,16 @@ def main() -> None:
         "rating and the wrong one for isolating a model, so both exist.",
     )
     ap.add_argument(
+        "--hide-bench",
+        action="store_true",
+        help="neither side's search is shown the other's unplayed bench, which is the "
+        "condition a model trained on hidden-bench data is meant to be used in. Comparing "
+        "such a model with an open-information one *without* this measures which model "
+        "suits the open game, not which is better: the evaluation has to be the condition "
+        "the answer is for. Games say so in their provenance and the rating keeps them on "
+        "their own scale.",
+    )
+    ap.add_argument(
         "--baseline-uniform-selection",
         action="store_true",
         help="the other arm draws its four uniformly while this one uses its book. "
@@ -180,7 +190,7 @@ def main() -> None:
         default=None,
         help="address of a work queue to take (seat, game) indices from, instead of "
         "playing a fixed block. A block ends when the unluckiest worker does, and a "
-        "game's cost varies eightfold: generation 8 left 25% of the machine idle that "
+        "game's cost varies eightfold: generation 8 left 25%% of the machine idle that "
         "way. Games are seeded from their index so the work is the same whoever plays it.",
     )
     ap.add_argument("--max-turns", type=int, default=40)
@@ -575,6 +585,10 @@ def main() -> None:
                 rank_by_leaf=ranks,
                 policy=rankers,
                 solve_sparsely=sparse,
+                # Our six is the roster; theirs is the sheet the book drew them from, or
+                # the standings team when it did not. Both are public in Champions, and
+                # both are what makes the four uncertain rather than unknown.
+                sheets=(list(roster.sets), list(foe_six)) if args.hide_bench else None,
             )
             if record.outcome is None:
                 tally[which][2] += 1
@@ -600,6 +614,11 @@ def main() -> None:
                     # uniformly -- a record that disagrees with the game is worse than no
                     # record, because a rating is fitted from it.
                     books=seat_labels,
+                    information=(
+                        ("hidden-bench", "hidden-bench")
+                        if args.hide_bench
+                        else ("open", "open")
+                    ),
                     note=(
                         f"search depth {depths[0]} vs {depths[1]} by side"
                         if depths[0] != depths[1]

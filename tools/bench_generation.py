@@ -7,7 +7,7 @@ help much.
 
 Generation 2 adds a second constraint the first did not have. Each worker holds a CUDA
 context of roughly 1.1 GB, so a 12 GB card caps the run at eight or ten workers regardless
-of the CPU. But the forward pass is only 3% of the per-leaf cost (to_json 0.228 ms, encode
+of the CPU. But the forward pass is only 3%% of the per-leaf cost (to_json 0.228 ms, encode
 0.117 ms, forward 0.012 ms), so CPU inference might cost almost nothing and remove the cap
 entirely -- which is what this measures.
 
@@ -56,7 +56,7 @@ def main() -> None:
     ap.add_argument(
         "--rank-leaf",
         action="store_true",
-        help="rank the menu by the leaf, as a real generation run does. It is 75% on top "
+        help="rank the menu by the leaf, as a real generation run does. It is 75%% on top "
         "at width 24 and almost nothing at width 48, so a benchmark that leaves it out is "
         "not measuring the run it is meant to stand for.",
     )
