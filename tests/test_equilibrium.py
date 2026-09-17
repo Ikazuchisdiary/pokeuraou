@@ -315,3 +315,42 @@ def test_mismatched_row_counts_are_refused() -> None:
 def test_wrong_weight_count_is_refused() -> None:
     with pytest.raises(ValueError, match="weights"):
         solve_bayesian([np.zeros((2, 2))], np.array([0.5, 0.5]))
+
+
+def test_an_alternative_optimum_of_the_same_game_gives_up_exactly_nothing() -> None:
+    """The step that lets a cross-book EV loss mean "different game", not "different vertex".
+
+    `tools/book_seed_spread.py` prices one solved book's advice in another's game as
+    `x_other @ row_ev_loss`, and reads a positive number as the two games being different.
+    That reading is only available because this is exactly zero whenever `x_other` is
+    itself optimal in this game -- a near-pure equilibrium has many alternative optima and
+    an LP picks among them arbitrarily, so without this the 5.88 points measured between
+    two training seeds could have been the solver choosing a different vertex of one game.
+
+    Constructed so alternatives certainly exist: two identical row actions, which any
+    mixture between can carry.
+    """
+    payoff = np.array(
+        [
+            [0.6, 0.2, 0.7],
+            [0.6, 0.2, 0.7],  # a duplicate of row 0, so their mass is interchangeable
+            [0.1, 0.9, 0.3],
+            [0.0, 0.0, 0.0],  # strictly worse everywhere, so something has to lose
+        ]
+    )
+    eq = solve(payoff)
+
+    # Every way of splitting the duplicated pair's mass is another optimum.
+    total = eq.row_strategy[0] + eq.row_strategy[1]
+    assert total > TOL, "the duplicated pair has to carry mass for this to test anything"
+    for share in (0.0, 0.25, 0.5, 1.0):
+        other = eq.row_strategy.copy()
+        other[0], other[1] = total * share, total * (1.0 - share)
+        assert value_of(payoff, other, eq.col_strategy) == pytest.approx(eq.value, abs=TOL)
+        assert float(other @ eq.row_ev_loss) == pytest.approx(0.0, abs=TOL)
+
+    # And the converse, which is what a positive reading means: a strategy that is NOT
+    # optimal here gives up a strictly positive amount.
+    worst = np.zeros(4)
+    worst[int(np.argmax(eq.row_ev_loss))] = 1.0
+    assert float(worst @ eq.row_ev_loss) > TOL
