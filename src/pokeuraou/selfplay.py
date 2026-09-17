@@ -153,6 +153,15 @@ class GameRecord:
     #: A training set that mixes the two without knowing is mixing two conditionings, and
     #: the value of a position is always conditional on the play that produced it.
     information: str = "open"
+    #: Which ranking chose the candidates: "damage", "leaf" or "policy". Recorded because
+    #: it is not a detail of how a game was played but a property of the agent that played
+    #: it -- measured over 20 recorded positions at width 24, the damage ordering kept 58%
+    #: of the full game's equilibrium mass against the leaf ordering's 93%, and gave up 2.5
+    #: points on average against a best reply where the leaf ordering gave up 0.05.
+    #:
+    #: It was not recorded anywhere before, so which ranking produced generations 9 and 10
+    #: cannot be recovered from their files or their logs.
+    ranking: str = "damage"
     #: The equilibrium mixtures over the 90 ordered selections, when a book was used.
     #: These are the policy targets a selection head would learn -- the *solver's*
     #: recommendation, not the softened distribution the game was drawn from.
@@ -188,6 +197,7 @@ class GameRecord:
             "foePick": self.foe_pick,
             "selectionSource": self.selection_source,
             "information": self.information,
+            "ranking": self.ranking,
             "ownSelectionPolicy": self.own_selection_policy,
             "foeSelectionPolicy": self.foe_selection_policy,
             "ownSelectionMixture": self.own_selection_mixture,
@@ -453,6 +463,9 @@ def play_game(
         record.own_pick = list(own_pick)
         record.foe_pick = list(foe_pick)
     record.information = "open" if sheets is None else "hidden-bench"
+    record.ranking = (
+        "policy" if policies[0] is not None else "leaf" if ranked[0] else "damage"
+    )
     pos = start if start is not None else position_from_sets(reg, own, foe)
     budget = Budget.matrix()
     # Slots each side has shown, accumulated across turns. A Pokemon that came in and
