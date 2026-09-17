@@ -362,11 +362,26 @@ def _menus(
         )
 
     def views(side: int) -> list[tuple[Position, float]]:
-        """The positions side `side` could be ranking from: one per completion of the
-        bench it cannot see, or just this one when it can see everything."""
+        """The positions side `side` ranks from.
+
+        One completion, not all of them. The ranking only decides which actions reach the
+        matrix, and measured over 60 recorded positions by solving every legal pair in
+        full, ordering from a single consistent world gives up 0.55 points against a best
+        reply where averaging over all six gives up 0.58 -- the same number, and both far
+        under the damage ordering's 1.78. Six times the ordering cost bought nothing, and
+        it was the difference between 82 and 135 generated games a minute.
+
+        Leak-free either way: the completion is one the sheet allows, chosen without
+        looking at the truth. Ranking from the *true* bench scored 0.44 on the same
+        positions, which is the same number again and is the information nobody has.
+
+        Deterministic -- the first completion, not a sampled one -- so a rerun of a game
+        is the same game.
+        """
         if spreads is None:
             return [(pos, 1.0)]
-        return [(item.position, item.weight) for item in spreads[1 - side]]
+        items = spreads[1 - side]
+        return [(items[0].position, 1.0)] if items else [(pos, 1.0)]
 
     def ranker(side: int) -> Any:  # noqa: ANN401
         parts = [

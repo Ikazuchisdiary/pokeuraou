@@ -259,14 +259,18 @@ def test_hiding_the_bench_changes_the_replacement(replacement) -> None:  # noqa:
     )
 
 
-def test_the_menu_is_ranked_over_the_belief_not_the_bench(setup) -> None:  # noqa: ANN001
+def test_the_menu_is_ranked_from_a_completion_and_not_from_the_position(setup) -> None:  # noqa: ANN001
     """`narrow` decides which actions get a number at all, and the leaf ranking reads the
-    whole position to decide it.
+    whole position to decide it -- so ranking from the true position leaves that choice
+    conditioned on a bench nobody has seen. Measured over 60 recorded positions, the leaky
+    order kept 85.3% of the full equilibrium's mass and the belief order 86.4%, both far
+    over the damage order's 61.3%.
 
-    Solving the matrix over six benches and then ordering the menu with the real one leaves
-    that choice conditioned on something nobody knows. Measured over six recorded mid-game
-    positions, the leaky order agreed with the belief order on 66% of slots -- so this is
-    not a rounding difference.
+    Asserted against a spread whose first completion is deliberately *not* the true bench.
+    The obvious test -- "the belief menu differs from the leaky one" -- passes or fails on
+    which completion happens to come first: in this fixture the first one is the true bench,
+    so the two menus agree and the test would have reported success for a ranker that had
+    never been given the belief at all.
     """
     from pokeuraou.selfplay import _menus
 
@@ -275,13 +279,24 @@ def test_the_menu_is_ranked_over_the_belief_not_the_bench(setup) -> None:  # noq
     spreads = _spreads(reg, position, sheet)
     assert len(spreads[1]) > 1, "nothing is hidden here, so there is nothing to test"
 
-    leaky, _ = _menus(reg, position, (24, 24), HP_SHARE.batch, budget, True, None, None)
-    believed, _ = _menus(
-        reg, position, (24, 24), HP_SHARE.batch, budget, True, None, spreads
+    # Put a completion that is not the true bench first.
+    on_board = {position.sides[1].pokemon[i].species for i in (2, 3)}
+    elsewhere = [c for c in spreads[1] if set(c.species) != on_board]
+    assert elsewhere, "every completion is the true bench, which cannot be"
+    moved = {0: spreads[0], 1: [elsewhere[0], *[c for c in spreads[1] if c is not elsewhere[0]]]}
+
+    ours, _ = _menus(reg, position, (24, 24), HP_SHARE.batch, budget, True, None, moved)
+    direct, _ = _menus(
+        reg, elsewhere[0].position, (24, 24), HP_SHARE.batch, budget, True, None, None
     )
-    assert [a.to_choice() for a in leaky] != [a.to_choice() for a in believed], (
-        "ranking over the completions gave the same menu as ranking over the true bench; "
-        "the belief did not reach the ranker"
+    leaky, _ = _menus(reg, position, (24, 24), HP_SHARE.batch, budget, True, None, None)
+
+    assert [a.to_choice() for a in ours] == [a.to_choice() for a in direct], (
+        "the menu is not the one ranking from that completion gives; the spread did not "
+        "reach the ranker"
+    )
+    assert [a.to_choice() for a in ours] != [a.to_choice() for a in leaky], (
+        "ranking from a completion that is not the true bench gave the leaky menu anyway"
     )
 
 
