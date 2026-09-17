@@ -1,0 +1,658 @@
+{
+ "position": {
+  "format": "gen9championsvgc2026regmb",
+  "turn": 2,
+  "field": {
+   "weather": "sunnyday",
+   "terrain": null,
+   "pseudoWeather": [],
+   "weatherDuration": 4
+  },
+  "sides": [
+   {
+    "id": "p1",
+    "name": "p1",
+    "active": [
+     0,
+     1
+    ],
+    "pokemon": [
+     {
+      "slot": 0,
+      "species": "charizardmegay",
+      "baseSpecies": "Charizard",
+      "types": [
+       "Fire",
+       "Flying"
+      ],
+      "level": 50,
+      "gender": "N",
+      "ability": "drought",
+      "item": "charizarditey",
+      "baseItem": "charizarditey",
+      "nature": "Timid",
+      "sp": {
+       "atk": 0,
+       "def": 18,
+       "hp": 16,
+       "spa": 6,
+       "spd": 0,
+       "spe": 26
+      },
+      "moves": [
+       {
+        "id": "heatwave",
+        "pp": 10,
+        "maxpp": 10,
+        "disabled": false,
+        "used": false
+       },
+       {
+        "id": "weatherball",
+        "pp": 10,
+        "maxpp": 10,
+        "disabled": false,
+        "used": false
+       },
+       {
+        "id": "ancientpower",
+        "pp": 4,
+        "maxpp": 5,
+        "disabled": false,
+        "used": true
+       },
+       {
+        "id": "protect",
+        "pp": 5,
+        "maxpp": 5,
+        "disabled": false,
+        "used": false
+       }
+      ],
+      "hp": 88,
+      "maxhp": 169,
+      "fainted": false,
+      "status": null,
+      "boosts": {},
+      "volatiles": [],
+      "unmodelledVolatiles": [],
+      "isMega": true,
+      "activeIndex": 0,
+      "trapped": false,
+      "newlySwitched": false,
+      "lastMove": "ancientpower",
+      "lockedMove": null,
+      "moveLastTurnFailed": false,
+      "timesAttacked": 0,
+      "activeMoveActions": 1,
+      "abilityState": {},
+      "transformed": false
+     },
+     {
+      "slot": 1,
+      "species": "venusaur",
+      "baseSpecies": "Venusaur",
+      "types": [
+       "Grass",
+       "Poison"
+      ],
+      "level": 50,
+      "gender": "N",
+      "ability": "chlorophyll",
+      "item": "lifeorb",
+      "baseItem": "lifeorb",
+      "nature": "Modest",
+      "sp": {
+       "atk": 0,
+       "def": 0,
+       "hp": 4,
+       "spa": 30,
+       "spd": 0,
+       "spe": 32
+      },
+      "moves": [
+       {
+        "id": "solarbeam",
+        "pp": 9,
+        "maxpp": 10,
+        "disabled": false,
+        "used": true
+       },
+       {
+        "id": "sludgebomb",
+        "pp": 10,
+        "maxpp": 10,
+        "disabled": false,
+        "used": false
+       },
+       {
+        "id": "earthpower",
+        "pp": 10,
+        "maxpp": 10,
+        "disabled": false,
+        "used": false
+       },
+       {
+        "id": "protect",
+        "pp": 5,
+        "maxpp": 5,
+        "disabled": false,
+        "used": false
+       }
+      ],
+      "hp": 0,
+      "maxhp": 159,
+      "fainted": true,
+      "status": "fnt",
+      "boosts": {},
+      "volatiles": [],
+      "unmodelledVolatiles": [],
+      "isMega": false,
+      "activeIndex": 1,
+      "trapped": false,
+      "newlySwitched": false,
+      "lastMove": "solarbeam",
+      "lockedMove": null,
+      "moveLastTurnFailed": false,
+      "timesAttacked": 0,
+      "activeMoveActions": 1,
+      "abilityState": {},
+      "transformed": false
+     },
+     {
+      "slot": 2,
+      "species": "toxapex",
+      "baseSpecies": "Toxapex",
+      "types": [
+       "Poison",
+       "Water"
+      ],
+      "level": 50,
+      "gender": "N",
+      "ability": "regenerator",
+      "item": "leftovers",
+      "baseItem": "leftovers",
+      "nature": "Relaxed",
+      "sp": {
+       "atk": 0,
+       "def": 32,
+       "hp": 32,
+       "spa": 0,
+       "spd": 2,
+       "spe": 0
+      },
+      "moves": [
+       {
+        "id": "infestation",
+        "pp": 20,
+        "maxpp": 20,
+        "disabled": false,
+        "used": false
+       },
+       {
+        "id": "toxic",
+        "pp": 10,
+        "maxpp": 10,
+        "disabled": false,
+        "used": false
+       },
+       {
+        "id": "wideguard",
+        "pp": 10,
+        "maxpp": 10,
+        "disabled": false,
+        "used": false
+       },
+       {
+        "id": "banefulbunker",
+        "pp": 5,
+        "maxpp": 5,
+        "disabled": false,
+        "used": false
+       }
+      ],
+      "hp": 157,
+      "maxhp": 157,
+      "fainted": false,
+      "status": null,
+      "boosts": {},
+      "volatiles": [],
+      "unmodelledVolatiles": [],
+      "isMega": false,
+      "activeIndex": null,
+      "trapped": false,
+      "newlySwitched": false,
+      "lastMove": null,
+      "lockedMove": null,
+      "moveLastTurnFailed": false,
+      "timesAttacked": 0,
+      "activeMoveActions": 0,
+      "abilityState": {},
+      "transformed": false
+     },
+     {
+      "slot": 3,
+      "species": "incineroar",
+      "baseSpecies": "Incineroar",
+      "types": [
+       "Fire",
+       "Dark"
+      ],
+      "level": 50,
+      "gender": "N",
+      "ability": "intimidate",
+      "item": "sitrusberry",
+      "baseItem": "sitrusberry",
+      "nature": "Careful",
+      "sp": {
+       "atk": 0,
+       "def": 8,
+       "hp": 32,
+       "spa": 0,
+       "spd": 2,
+       "spe": 24
+      },
+      "moves": [
+       {
+        "id": "flareblitz",
+        "pp": 15,
+        "maxpp": 15,
+        "disabled": false,
+        "used": false
+       },
+       {
+        "id": "fakeout",
+        "pp": 10,
+        "maxpp": 10,
+        "disabled": false,
+        "used": false
+       },
+       {
+        "id": "partingshot",
+        "pp": 20,
+        "maxpp": 20,
+        "disabled": false,
+        "used": false
+       },
+       {
+        "id": "protect",
+        "pp": 5,
+        "maxpp": 5,
+        "disabled": false,
+        "used": false
+       }
+      ],
+      "hp": 202,
+      "maxhp": 202,
+      "fainted": false,
+      "status": null,
+      "boosts": {},
+      "volatiles": [],
+      "unmodelledVolatiles": [],
+      "isMega": false,
+      "activeIndex": null,
+      "trapped": false,
+      "newlySwitched": false,
+      "lastMove": null,
+      "lockedMove": null,
+      "moveLastTurnFailed": false,
+      "timesAttacked": 0,
+      "activeMoveActions": 0,
+      "abilityState": {},
+      "transformed": false
+     }
+    ],
+    "sideConditions": [],
+    "slotConditions": [
+     [],
+     []
+    ],
+    "megaUsed": true,
+    "megaCapableSlots": [
+     0
+    ]
+   },
+   {
+    "id": "p2",
+    "name": "p2",
+    "active": [
+     0,
+     1
+    ],
+    "pokemon": [
+     {
+      "slot": 0,
+      "species": "sylveon",
+      "baseSpecies": "Sylveon",
+      "types": [
+       "Fairy"
+      ],
+      "level": 50,
+      "gender": "N",
+      "ability": "pixilate",
+      "item": "fairyfeather",
+      "baseItem": "fairyfeather",
+      "nature": "Modest",
+      "sp": {
+       "atk": 0,
+       "def": 22,
+       "hp": 9,
+       "spa": 20,
+       "spd": 0,
+       "spe": 15
+      },
+      "moves": [
+       {
+        "id": "hypervoice",
+        "pp": 10,
+        "maxpp": 10,
+        "disabled": false,
+        "used": false
+       },
+       {
+        "id": "hyperbeam",
+        "pp": 4,
+        "maxpp": 5,
+        "disabled": false,
+        "used": true
+       },
+       {
+        "id": "quickattack",
+        "pp": 20,
+        "maxpp": 20,
+        "disabled": false,
+        "used": false
+       },
+       {
+        "id": "detect",
+        "pp": 5,
+        "maxpp": 5,
+        "disabled": false,
+        "used": false
+       }
+      ],
+      "hp": 179,
+      "maxhp": 179,
+      "fainted": false,
+      "status": null,
+      "boosts": {},
+      "volatiles": [
+       {
+        "id": "mustrecharge"
+       }
+      ],
+      "unmodelledVolatiles": [],
+      "isMega": false,
+      "activeIndex": 0,
+      "trapped": false,
+      "newlySwitched": false,
+      "lastMove": "hyperbeam",
+      "lockedMove": null,
+      "moveLastTurnFailed": false,
+      "timesAttacked": 0,
+      "activeMoveActions": 1,
+      "abilityState": {},
+      "transformed": false
+     },
+     {
+      "slot": 1,
+      "species": "aerodactyl",
+      "baseSpecies": "Aerodactyl",
+      "types": [
+       "Rock",
+       "Flying"
+      ],
+      "level": 50,
+      "gender": "N",
+      "ability": "unnerve",
+      "item": null,
+      "baseItem": "focussash",
+      "nature": "Jolly",
+      "sp": {
+       "atk": 32,
+       "def": 0,
+       "hp": 2,
+       "spa": 0,
+       "spd": 0,
+       "spe": 32
+      },
+      "moves": [
+       {
+        "id": "rockslide",
+        "pp": 10,
+        "maxpp": 10,
+        "disabled": false,
+        "used": false
+       },
+       {
+        "id": "dualwingbeat",
+        "pp": 9,
+        "maxpp": 10,
+        "disabled": false,
+        "used": true
+       },
+       {
+        "id": "tailwind",
+        "pp": 15,
+        "maxpp": 15,
+        "disabled": false,
+        "used": false
+       },
+       {
+        "id": "wideguard",
+        "pp": 10,
+        "maxpp": 10,
+        "disabled": false,
+        "used": false
+       }
+      ],
+      "hp": 0,
+      "maxhp": 157,
+      "fainted": true,
+      "status": "fnt",
+      "boosts": {},
+      "volatiles": [],
+      "unmodelledVolatiles": [],
+      "isMega": false,
+      "activeIndex": 1,
+      "trapped": false,
+      "newlySwitched": false,
+      "lastMove": "dualwingbeat",
+      "lockedMove": null,
+      "moveLastTurnFailed": false,
+      "timesAttacked": 0,
+      "activeMoveActions": 1,
+      "abilityState": {},
+      "transformed": false
+     },
+     {
+      "slot": 2,
+      "species": "kingambit",
+      "baseSpecies": "Kingambit",
+      "types": [
+       "Dark",
+       "Steel"
+      ],
+      "level": 50,
+      "gender": "N",
+      "ability": "defiant",
+      "item": "occaberry",
+      "baseItem": "occaberry",
+      "nature": "Adamant",
+      "sp": {
+       "atk": 32,
+       "def": 0,
+       "hp": 32,
+       "spa": 0,
+       "spd": 0,
+       "spe": 2
+      },
+      "moves": [
+       {
+        "id": "kowtowcleave",
+        "pp": 10,
+        "maxpp": 10,
+        "disabled": false,
+        "used": false
+       },
+       {
+        "id": "ironhead",
+        "pp": 15,
+        "maxpp": 15,
+        "disabled": false,
+        "used": false
+       },
+       {
+        "id": "lowkick",
+        "pp": 20,
+        "maxpp": 20,
+        "disabled": false,
+        "used": false
+       },
+       {
+        "id": "suckerpunch",
+        "pp": 5,
+        "maxpp": 5,
+        "disabled": false,
+        "used": false
+       }
+      ],
+      "hp": 207,
+      "maxhp": 207,
+      "fainted": false,
+      "status": null,
+      "boosts": {},
+      "volatiles": [],
+      "unmodelledVolatiles": [],
+      "isMega": false,
+      "activeIndex": null,
+      "trapped": false,
+      "newlySwitched": false,
+      "lastMove": null,
+      "lockedMove": null,
+      "moveLastTurnFailed": false,
+      "timesAttacked": 0,
+      "activeMoveActions": 0,
+      "abilityState": {},
+      "transformed": false
+     },
+     {
+      "slot": 3,
+      "species": "charizard",
+      "baseSpecies": "Charizard",
+      "types": [
+       "Fire",
+       "Flying"
+      ],
+      "level": 50,
+      "gender": "N",
+      "ability": "blaze",
+      "item": "charizarditey",
+      "baseItem": "charizarditey",
+      "nature": "Modest",
+      "sp": {
+       "atk": 0,
+       "def": 25,
+       "hp": 25,
+       "spa": 3,
+       "spd": 0,
+       "spe": 13
+      },
+      "moves": [
+       {
+        "id": "heatwave",
+        "pp": 10,
+        "maxpp": 10,
+        "disabled": false,
+        "used": false
+       },
+       {
+        "id": "weatherball",
+        "pp": 10,
+        "maxpp": 10,
+        "disabled": false,
+        "used": false
+       },
+       {
+        "id": "ancientpower",
+        "pp": 5,
+        "maxpp": 5,
+        "disabled": false,
+        "used": false
+       },
+       {
+        "id": "protect",
+        "pp": 5,
+        "maxpp": 5,
+        "disabled": false,
+        "used": false
+       }
+      ],
+      "hp": 178,
+      "maxhp": 178,
+      "fainted": false,
+      "status": null,
+      "boosts": {},
+      "volatiles": [],
+      "unmodelledVolatiles": [],
+      "isMega": false,
+      "activeIndex": null,
+      "trapped": false,
+      "newlySwitched": false,
+      "lastMove": null,
+      "lockedMove": null,
+      "moveLastTurnFailed": false,
+      "timesAttacked": 0,
+      "activeMoveActions": 0,
+      "abilityState": {},
+      "transformed": false
+     }
+    ],
+    "sideConditions": [],
+    "slotConditions": [
+     [],
+     []
+    ],
+    "megaUsed": false,
+    "megaCapableSlots": [
+     3
+    ]
+   }
+  ],
+  "requestState": "move",
+  "ended": false,
+  "winner": null
+ },
+ "ownActions": [
+  "pass, switch 3",
+  "pass, switch 4"
+ ],
+ "ownPolicy": [
+  0.5294300894596373,
+  0.4705699105403627
+ ],
+ "foeActions": [
+  "pass, switch 3",
+  "pass, switch 4"
+ ],
+ "foePolicy": [
+  0.5127772500266985,
+  0.4872227499733015
+ ],
+ "ownSix": [
+  "charizard",
+  "venusaur",
+  "garchomp",
+  "sylveon",
+  "toxapex",
+  "incineroar"
+ ],
+ "foeSix": [
+  "sylveon",
+  "venusaur",
+  "kingambit",
+  "farigiraf",
+  "aerodactyl",
+  "charizard"
+ ]
+}

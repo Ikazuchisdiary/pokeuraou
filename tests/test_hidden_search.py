@@ -146,3 +146,114 @@ def test_knowing_the_bench_is_never_worth_less_than_nothing(setup) -> None:  # n
         reg, position, ours, theirs, spreads, _leaves(), budget=budget
     )
     assert informed >= answers[0].value - 1e-9
+
+
+def _fixture_sheets(reg, position, data):  # noqa: ANN001, ANN202
+    """Each side's six as sets: the four on the board exactly, the two they left at home
+    from the usage prior, which is all an observer could have anyway."""
+    import numpy as np
+
+    from pokeuraou.priors import (
+        SampledSet,
+        find_cached_chaos,
+        load_chaos,
+        sample_set,
+    )
+
+    cached = find_cached_chaos(reg.meta.format_id)
+    if cached is None:
+        pytest.skip("no cached usage stats to fill the unbrought two")
+    prior = load_chaos(cached, reg)
+    rng = np.random.default_rng(0)
+    out = []
+    for side, key in ((0, "ownSix"), (1, "foeSix")):
+        board = {mon.species: mon for mon in position.sides[side].pokemon}
+        six = []
+        for name in data[key]:
+            mon = board.get(name)
+            six.append(
+                SampledSet(
+                    species=mon.species, ability=mon.ability, item=mon.item,
+                    nature=mon.nature, sp=dict(mon.sp or {}),
+                    moves=[m.id for m in mon.moves],
+                )
+                if mon is not None
+                else sample_set(rng, reg, prior.species[name])
+            )
+        out.append(six)
+    return tuple(out)
+
+
+@pytest.fixture(scope="module")
+def replacement():  # noqa: ANN201
+    """A real mid-game replacement node, taken from a recorded game.
+
+    A turn-1 position built for the occasion gives a forced or one-sided replacement, and a
+    forced choice agrees with anything -- the first version of this test compared [1.0, 0.0]
+    with [1.0, 0.0] and would have passed against a node that did nothing at all.
+    """
+    import json
+    from pathlib import Path
+
+    from pokeuraou.position import Position
+    from pokeuraou.resolve import replacements_needed
+
+    path = Path(__file__).parent / "fixtures" / "replacement-mixed.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    reg = load_regulation(data["position"]["format"])
+    register_mega_stones(reg)
+    position = Position.from_json(data["position"])
+    return reg, position, replacements_needed(position), data
+
+
+def _replace(reg, position, owed, sheets, shown):  # noqa: ANN001, ANN202
+    import numpy as np
+
+    from pokeuraou.selfplay import GameRecord, _do_replacement_node
+
+    record = GameRecord(own_team=[], foe_team=[], foe_archetype="test")
+    _do_replacement_node(
+        reg, np.random.default_rng(3), position.copy(), owed, record,
+        (HP_SHARE.batch, HP_SHARE.batch), sheets=sheets, shown=shown,
+    )
+    assert record.decisions, "the node recorded nothing"
+    return record.decisions[0], record
+
+
+def test_the_replacement_node_is_unchanged_when_nothing_is_hidden(replacement) -> None:  # noqa: ANN001
+    """The last node that was still handed the opponent's whole four.
+
+    Every slot seen must give what it always gave -- the same menus, the same mixtures and
+    the same value, exactly.
+    """
+    reg, position, owed, data = replacement
+    sheets = _fixture_sheets(reg, position, data)
+    old, _ = _replace(reg, position, owed, None, None)
+    new, _ = _replace(reg, position, owed, sheets, [SEEN_ALL, SEEN_ALL])
+    assert old.own_actions == new.own_actions
+    assert old.foe_actions == new.foe_actions
+    np.testing.assert_array_equal(old.own_policy, new.own_policy)
+    np.testing.assert_array_equal(old.foe_policy, new.foe_policy)
+    assert old.search_value == new.search_value
+
+
+def test_hiding_the_bench_changes_the_replacement(replacement) -> None:  # noqa: ANN001
+    """And with slots unseen it must not give the same answer back.
+
+    Without this the test above passes just as well against a branch that quietly falls
+    through to the open path, which is the failure worth guarding: it would leave the leak
+    in place and every test green.
+    """
+    reg, position, owed, data = replacement
+    sheets = _fixture_sheets(reg, position, data)
+    open_node, _ = _replace(reg, position, owed, None, None)
+    blind, record = _replace(
+        reg, position, owed, sheets, [frozenset({0, 1}), frozenset({0, 1})]
+    )
+    assert not record.unmodelled, record.unmodelled
+    assert sum(blind.own_policy) == pytest.approx(1.0)
+    assert sum(blind.foe_policy) == pytest.approx(1.0)
+    assert blind.search_value != open_node.search_value, (
+        "solving over six possible benches returned the open-information value; "
+        "the belief path did not run"
+    )

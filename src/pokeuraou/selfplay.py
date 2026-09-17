@@ -458,7 +458,11 @@ def play_game(
 
         owed = replacements_needed(pos)
         if any(owed[0]) or any(owed[1]):
-            pos = _do_replacement_node(reg, rng, pos, owed, record, leaves[0])
+            shown = [seen_slots(pos, i, shown[i]) for i in (0, 1)]
+            pos = _do_replacement_node(
+                reg, rng, pos, owed, record, leaves,
+                sheets=sheets, shown=shown,
+            )
             continue
 
         own_leaf = leaves[0] if leaves[0] is not None else objective.batch
@@ -762,12 +766,27 @@ def _do_replacement_node(
     pos: Position,
     owed: tuple[tuple[bool, ...], tuple[bool, ...]],
     record: GameRecord,
-    evaluate: LeafEvaluator | None = None,
+    leaves: tuple[LeafEvaluator | None, LeafEvaluator | None] = (None, None),
+    *,
+    sheets: tuple[Sequence[SampledSet], Sequence[SampledSet]] | None = None,
+    shown: list[frozenset[int]] | None = None,
 ) -> Position:
     """Solves and applies the replacement phase.
 
     It is a simultaneous-move node like any other -- neither player sees the other's
     replacement -- so it gets a matrix and an equilibrium rather than a heuristic pick.
+
+    With `sheets` it is also the node where the *reveal* happens: the Pokemon coming in is
+    the one that stops being hidden, and choosing what to send against an opponent whose
+    bench is unknown is the same Bayesian game the move nodes solve. Without them this is
+    the node it has always been, down to using only side 0's leaf -- which is a wart of its
+    own, since with different leaves the column player's replacement is chosen by the row
+    player's evaluator, but it is not today's wart and changing it would move every
+    open-information number.
+
+    The options are built once from the true position because they are the same in every
+    completion: a replacement names a *slot*, and which slots are free is public even when
+    who is standing in them is not.
     """
     options: list[list[SideAction]] = []
     for side_index in range(2):
@@ -785,30 +804,72 @@ def _do_replacement_node(
             ]
         options.append(found)
 
-    # The replacement node used `hp-share` regardless of what the move nodes used, which
-    # would leave a third of a game's decisions scored by the thing being replaced.
-    payoff = np.zeros((len(options[0]), len(options[1])), dtype=np.float64)
-    resolved = [
-        [resolve_replacements(reg, pos, [a, b]).position for b in options[1]]
-        for a in options[0]
-    ]
-    if evaluate is None:
-        for i, row in enumerate(resolved):
-            for j, after in enumerate(row):
-                payoff[i, j] = HP_SHARE(after)
-    else:
+    def matrix(at: Position, evaluate: LeafEvaluator | None) -> np.ndarray:
+        """Every pair of replacements resolved from `at` and scored.
+
+        The replacement node used `hp-share` regardless of what the move nodes used, which
+        would leave a third of a game's decisions scored by the thing being replaced.
+        """
+        resolved = [
+            [resolve_replacements(reg, at, [a, b]).position for b in options[1]]
+            for a in options[0]
+        ]
+        if evaluate is None:
+            return np.array(
+                [[HP_SHARE(after) for after in row] for row in resolved],
+                dtype=np.float64,
+            )
         flat = [after for row in resolved for after in row]
-        values = evaluate(flat)
-        payoff = values.reshape(len(options[0]), len(options[1]))
-    try:
-        equilibrium = solve(payoff)
-        own_policy = [float(x) for x in equilibrium.row_strategy]
-        foe_policy = [float(x) for x in equilibrium.col_strategy]
-        value = float(equilibrium.value)
-    except EquilibriumError:
-        own_policy = [1.0 / len(options[0])] * len(options[0])
-        foe_policy = [1.0 / len(options[1])] * len(options[1])
-        value = float(payoff.mean())
+        return np.asarray(evaluate(flat), dtype=np.float64).reshape(
+            len(options[0]), len(options[1])
+        )
+
+    if sheets is not None:
+        seen = shown or [frozenset(), frozenset()]
+        answers: dict[int, tuple[list[float], float]] = {}
+        try:
+            spreads = {
+                side: completions(reg, pos, side, sheets[side], seen=seen[side])
+                for side in (0, 1)
+            }
+        except ValueError as problem:
+            record.unmodelled.append(f"hidden bench at a replacement: {problem}")
+            spreads = {}
+        if spreads:
+            from .equilibrium import solve_bayesian
+
+            for side in (0, 1):
+                items = spreads[1 - side]
+                leaf = leaves[side]
+                built = [matrix(item.position, leaf) for item in items]
+                weights = np.asarray([item.weight for item in items], dtype=np.float64)
+                # Side 1 minimises what side 0 maximises, so its game is the transpose of
+                # the negation -- the same turn read from the other end, as in the move
+                # node, rather than a second matrix that could drift from this one.
+                solved = solve_bayesian(
+                    [m if side == 0 else -m.T for m in built], weights
+                )
+                answers[side] = (
+                    [float(x) for x in solved.row_strategy],
+                    float(solved.value),
+                )
+            own_policy, value = answers[0]
+            foe_policy = answers[1][0]
+        else:
+            own_policy = [1.0 / len(options[0])] * len(options[0])
+            foe_policy = [1.0 / len(options[1])] * len(options[1])
+            value = 0.5
+    else:
+        payoff = matrix(pos, leaves[0])
+        try:
+            equilibrium = solve(payoff)
+            own_policy = [float(x) for x in equilibrium.row_strategy]
+            foe_policy = [float(x) for x in equilibrium.col_strategy]
+            value = float(equilibrium.value)
+        except EquilibriumError:
+            own_policy = [1.0 / len(options[0])] * len(options[0])
+            foe_policy = [1.0 / len(options[1])] * len(options[1])
+            value = float(payoff.mean())
 
     chosen = [
         options[0][_sample_index(rng, np.array(own_policy))],
