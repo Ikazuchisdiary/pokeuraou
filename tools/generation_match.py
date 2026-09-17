@@ -391,6 +391,13 @@ def main() -> None:
     print(f"\n  {'seat':>30}  {'games':>6}  {'new win':>8}  {'95%':>6}  {'s/game':>7}")
     wins = played = 0
     book_misses = 0
+    # Per arm label: the ordered fours that arm drew for itself, and the ones its
+    # opponent drew. A book match is supposed to differ from a uniform one in the first
+    # of those and not the second, and the first version of `--baseline-uniform-selection`
+    # differed in both -- 330 distinct foe fours against 799 -- with nothing in the output
+    # saying so. Counted here because the number that would have exposed it is two lines.
+    drawn_ours: dict[str, set[tuple[int, ...]]] = {}
+    drawn_theirs: dict[str, set[tuple[int, ...]]] = {}
     games_file = open_games(args.games_out)
     new_name = leaf_name(value_files)
     old_name = leaf_name(baseline_files) if baseline_files else args.objective
@@ -498,19 +505,32 @@ def main() -> None:
             # *our* four and side 0 is always our six. With one book this is the same
             # object either way and nothing changes.
             seat_book = book if leaves[0] is value else other_book
-            if args.baseline_uniform_selection and leaves[0] is not value:
-                # The other arm draws uniformly. Its opponent's six still comes from the
-                # book's own sheets, so both arms face the same field and only our draw
-                # differs -- which is the thing being priced.
-                seat_book = None
+            # The other arm draws *our* four uniformly, and nothing else changes: the
+            # opponent's six and the opponent's four still come from the book, so both
+            # arms face the same field and the only difference is the draw being priced.
+            #
+            # The first version set `seat_book = None` here instead, which also moved the
+            # opponent -- in that arm the foe drew uniformly too. So the match compared
+            # `book/book` against `uniform/uniform` and reported +0.3, next to the +2.1
+            # that pair was already known to be worth, while the arm it claimed to be
+            # measuring is worth +18.9. Nothing in the record said which arm had run: the
+            # provenance labels are written from the options, not from the draw.
+            ours_uniform = args.baseline_uniform_selection and leaves[0] is not value
             # One label per *arm*, then ordered by seat. Deriving them per seat is how
             # the first version got it wrong.
             tested_label = selection_label if book is not None else "uniform"
-            others_label = (
-                "uniform"
-                if args.baseline_uniform_selection or other_book is None
-                else other_label
-            )
+            if args.baseline_uniform_selection:
+                # Not plain "uniform". That arm draws its own four uniformly, but the
+                # opponent it faces still draws from the book, and an opponent drawing
+                # its equilibrium is a harder game than an opponent drawing at random.
+                # Every other match in the corpus that names a uniform agent means
+                # "uniform on both sides", so pooling the two under one name would make
+                # this arm's harder field look like weakness and charge it to the book.
+                others_label = f"uniform-against-{selection_label}"
+            elif other_book is None:
+                others_label = "uniform"
+            else:
+                others_label = other_label
             seat_labels = (
                 (tested_label, others_label)
                 if leaves[0] is value
@@ -518,11 +538,20 @@ def main() -> None:
             )
             entry = seat_book.get(team) if seat_book is not None else None
             if entry is not None:
+                # Taken before the book draws anything, so that the uniform arm cannot
+                # see -- not even through the position in the stream -- the spread class
+                # the book is about to sample for the opponent. Same rule as
+                # `BookEntry.draw`, which is why ours comes first there too.
+                own_uniform = (
+                    selections[int(rng.integers(len(selections)))]
+                    if ours_uniform
+                    else None
+                )
                 # epsilon 0: the rating asks what the strategy is worth, and exploration
                 # is a property of generation rather than of the agent.
                 drawn = entry.draw(rng, epsilon=0.0, temperature=1.0)
                 foe_six = list(drawn.foe_six)
-                own_pick = drawn.our_pick
+                own_pick = drawn.our_pick if own_uniform is None else own_uniform
                 foe_pick = drawn.foe_pick
             else:
                 foe_six = sample_standings_team(rng, reg, prior, team)
@@ -530,6 +559,8 @@ def main() -> None:
                 foe_pick = selections[int(rng.integers(len(selections)))]
                 if seat_book is not None:
                     book_misses += 1
+            drawn_ours.setdefault(seat_labels[0], set()).add(tuple(own_pick))
+            drawn_theirs.setdefault(seat_labels[0], set()).add(tuple(foe_pick))
             record = play_game(
                 reg,
                 rng,
@@ -586,6 +617,21 @@ def main() -> None:
 
     if client is not None:
         client.close()
+    # A book that holds none of the teams played is a book that did nothing, and the
+    # match would otherwise finish quietly and report a difference of zero as a result
+    # about the book rather than about the lookup. It was counted and never printed.
+    for label in sorted(drawn_ours):
+        print(
+            f"  selection as {label}: {len(drawn_ours[label])} distinct fours drawn for "
+            f"us, {len(drawn_theirs[label])} for the opponent",
+            file=sys.stderr,
+        )
+    if book_misses:
+        print(
+            f"  selection book: {book_misses:,} of {args.games:,} games found no entry "
+            f"for their team and drew uniformly instead",
+            file=sys.stderr,
+        )
     # What the worker saw, so the server's own report can be subtracted from it. The gap
     # between `waited` here and (lock wait + lock hold) there is the transport: the socket,
     # the JSON, and the server's own parsing before it reaches the model.
