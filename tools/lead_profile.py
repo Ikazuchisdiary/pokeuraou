@@ -10,19 +10,20 @@ three numbers off `value-all` -- Incineroar led 6.6% of the time, Toxapex 2.5%, 
 35.3% -- and concluded that the model brings Toxapex but will not lead it, against a human
 article that leads it in 47% of its fifteen plans. Two other books disagree flatly:
 
-    lead mass        value-gen8  gen8-s1  value-gen9  value-all
-      Charizard           98.5%    99.9%       75.2%      77.4%
-      Venusaur            35.0%     3.2%        2.5%      35.3%
-      Garchomp             4.9%    32.5%        7.0%      46.3%
-      Sylveon             13.4%    61.3%       64.8%      31.9%
-      Toxapex             28.1%     3.1%       25.7%       2.5%
-      Incineroar          20.1%     0.0%       24.8%       6.6%
+    lead mass        value-gen8  gen8-s1  gen8-s2  value-gen9  value-all
+      Charizard           98.5%    99.9%   100.0%       75.2%      77.4%
+      Venusaur            35.0%     3.0%    25.2%        2.5%      35.3%
+      Garchomp             4.9%    32.9%    18.3%        7.0%      46.3%
+      Sylveon             13.4%    61.0%    39.9%       64.8%      31.9%
+      Toxapex             28.1%     3.1%     1.7%       25.7%       2.5%
+      Incineroar          20.1%     0.0%    14.8%       24.8%       6.6%
 
-`value-gen8` and `value-gen8-s1` differ only in the training seed -- same 690,840
-decisions, same configuration, 0.006 apart on held-out AUC -- and they disagree about
-whether Sylveon is on the team at all (14.3% against 85.7% of selection mass). Leading
-Charizard is the only line stable across all four, and that agrees with T9, which measured
-on the board that the cost of a forced Incineroar+Toxapex lead is benching Charizard.
+The first three columns differ only in the training seed -- the same 690,840 decisions,
+the same configuration, held-out AUC within 0.010 of each other. Across those three,
+Toxapex's lead mass spans 1.7% to 28.1% and Sylveon's selection mass 14.3% to 86.1%.
+Leading Charizard is the only line stable across all five, and that agrees with T9, which
+measured on the board that the cost of a forced Incineroar+Toxapex lead is benching
+Charizard.
 
 So no row here means anything without the book it came from named beside it. See
 `tools/book_seed_spread.py` for what that instability costs.
