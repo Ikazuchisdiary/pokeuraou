@@ -21,6 +21,7 @@ from typing import Any
 import pytest
 
 from pokeuraou.actions import (
+    STRUGGLE,
     MoveAction,
     PassAction,
     SideAction,
@@ -542,3 +543,64 @@ def test_an_empty_slot_falls_back_to_the_index(reg: Regulation) -> None:
     empty = TargetNames(foes=(None, None), allies=(None, None))
     move = MoveAction(slot=0, move_index=1, move_id="tackle", target=1)
     assert "foe1" in move.describe(reg, None, empty)
+
+
+def test_a_choice_item_with_its_move_out_of_pp_offers_only_struggle(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """The lock is not lifted by the move running dry -- it is what causes Struggle.
+
+    Showdown's `choicelock.onDisableMove` drops the volatile only when the item is gone or
+    the locked move is not in the moveset. An empty PP is neither, so every other move
+    stays disabled and the only thing left is Struggle.
+    """
+    from pokeuraou.position import Effect
+
+    pos = _synthetic_position(reg, team_a)
+    mon = pos.sides[0].pokemon[pos.sides[0].active[0]]
+    mon.item = next(iter(reg.choice_items))
+    locked = mon.moves[0].id
+    mon.volatiles.append(Effect(id="choicelock", move=locked))
+    mon.moves[0].pp = 0
+    ids = {
+        s.move_id
+        for a in side_actions(reg, pos, 0)
+        for s in a.slots
+        if isinstance(s, MoveAction) and s.slot == 0
+    }
+    assert ids == {STRUGGLE}, f"expected Struggle only, got {sorted(ids)}"
+
+
+def test_struggling_does_not_relock_a_choice_item_onto_struggle(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """A Choice item that stops being one after a single Struggle.
+
+    Showdown records the locked move in `onStart`, which `addVolatile` does not re-run on a
+    volatile that is already there -- so Struggling leaves the lock where it was. Writing
+    the used move every time instead pointed the lock at `struggle`, which is in nobody's
+    moveset, so the legality rule dropped it as stale and handed the whole moveset back. A
+    Choice Scarf Garchomp did exactly that in generation 11h: ten turns of Earthquake, one
+    Struggle, then Stomping Tantrum.
+    """
+    from pokeuraou.position import Effect
+    from pokeuraou.resolve import Budget, resolve_turn
+
+    pos = _synthetic_position(reg, team_a)
+    side = pos.sides[0]
+    mon = side.pokemon[side.active[0]]
+    mon.item = next(iter(reg.choice_items))
+    locked = mon.moves[0].id
+    mon.volatiles.append(Effect(id="choicelock", move=locked))
+    mon.moves[0].pp = 0
+
+    ours = side_actions(reg, pos, 0)
+    theirs = side_actions(reg, pos, 1)
+    assert ours and theirs
+    result = resolve_turn(reg, pos, [ours[0], theirs[0]], budget=Budget.deterministic(1))
+    assert result.branches, "the turn produced no position to check"
+    after = result.branches[0].position
+    them = after.sides[0].pokemon[side.active[0]]
+    still = them.volatile("choicelock")
+    assert still is not None, "the lock was dropped by Struggling"
+    assert still.move == locked, f"the lock moved to {still.move!r}"

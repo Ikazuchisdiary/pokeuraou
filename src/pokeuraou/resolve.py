@@ -1642,10 +1642,23 @@ def _use_move(
         # Any Choice item, not just the Scarf: the dump says which, so Band and Specs are
         # covered without naming them.
         if mon.item is not None and mon.item in reg.choice_items:
+            # Only the move that *started* the lock, which is what Showdown records: the
+            # item's `onModifyMove` calls `addVolatile`, and `addVolatile` on a volatile
+            # that is already there does not run `onStart` again.
+            #
+            # Overwriting it every move let a Choice item stop being one. When the locked
+            # move runs out of PP the holder Struggles, and Struggle would rewrite the
+            # lock to `struggle` -- which is not in anyone's move list, so the legality
+            # rule dropped the lock as stale and offered the whole moveset back. A Choice
+            # Scarf Garchomp spent ten turns locked into Earthquake, Struggled once on the
+            # eleventh, and picked Stomping Tantrum on the twelfth. Showdown keeps the lock
+            # on Earthquake and Struggles for the rest of the game.
+            held = mon.volatile("choicelock")
             turn.add_volatile(action.side, action.slot, "choicelock")
-            locked = mon.volatile("choicelock")
-            if locked is not None:
-                locked.move = action.move_id
+            if held is None:
+                locked = mon.volatile("choicelock")
+                if locked is not None:
+                    locked.move = action.move_id
 
     # Stance Change: Aegislash takes its Blade forme to attack and its Shield forme back
     # with King's Shield. The forme decides its stats, so leaving it alone puts every
