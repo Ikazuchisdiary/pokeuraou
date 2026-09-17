@@ -8,7 +8,7 @@ is one of the two on the floor at turn 1.
 This exists because a recorded finding turned out to be a property of one book. E4 read
 three numbers off `value-all` -- Incineroar led 6.6% of the time, Toxapex 2.5%, Venusaur
 35.3% -- and concluded that the model brings Toxapex but will not lead it, against a human
-article that leads it in 47% of its fifteen plans. Two other books disagree flatly:
+article that leads it in 47% of its fifteen plans. Other books disagree flatly:
 
     lead mass        value-gen8  gen8-s1  gen8-s2  value-gen9  value-all
       Charizard           98.5%    99.9%   100.0%       75.2%      77.4%
@@ -96,8 +96,8 @@ def main() -> None:
             )
             print(f"  {name:<12}{cells}")
     print("\n  sheets: " + "   ".join(f"{label} {len(b)}" for label, (b, _) in books.items()))
-    print("\n  No row here means anything without the book beside it: two of these differ\n"
-          "  only in the training seed and disagree about half the team.")
+    print("\n  No row here means anything without the book beside it: three of the books\n"
+          "  on disk differ only in the training seed and disagree about half the team.")
 
 
 if __name__ == "__main__":
