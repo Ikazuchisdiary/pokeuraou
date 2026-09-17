@@ -260,6 +260,37 @@ def fit(
     )
 
 
+def components(games: list[Observation]) -> dict[str, int]:
+    """Which connected group each agent belongs to, largest first.
+
+    A Bradley-Terry fit only relates agents that are joined by a chain of matches. Agents
+    in different groups have no defined difference at all, and the fit expresses that as a
+    very wide interval rather than as an error -- so the table prints them in one column
+    and a reader who skims past a +-150 compares numbers that were never comparable. The
+    group is the honest version of that warning.
+    """
+    neighbours: dict[str, set[str]] = defaultdict(set)
+    for a, b, _w, _n in games:
+        neighbours[a].add(b)
+        neighbours[b].add(a)
+    groups: list[set[str]] = []
+    seen: set[str] = set()
+    for start in neighbours:
+        if start in seen:
+            continue
+        stack, group = [start], set()
+        while stack:
+            node = stack.pop()
+            if node in group:
+                continue
+            group.add(node)
+            seen.add(node)
+            stack.extend(n for n in neighbours[node] if n not in group)
+        groups.append(group)
+    groups.sort(key=len, reverse=True)
+    return {name: index for index, group in enumerate(groups) for name in group}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
@@ -312,12 +343,26 @@ def main() -> None:
             f"anchored at {args.anchor} = 0, so a rating is what an agent is worth "
             "over the parameter-free objective"
         )
-    print(f"\n  {'agent':<34} {unit:>9}  {'+-':>6}  {'games':>6}")
+    island = components(games)
+    groups = Counter(island.values())
+    if len(groups) > 1:
+        print(
+            f"\n  ! {len(groups)} disconnected groups, sizes "
+            + ", ".join(str(n) for _g, n in groups.most_common())
+            + ".\n    A rating compares agents only within a group. Nothing has ever "
+            "played across, so a\n    difference between groups is not uncertain, it is "
+            "undefined -- the fit says so with\n    a very wide interval, which is easy to "
+            "skim past."
+        )
+    print(f"\n  {'agent':<34} {unit:>9}  {'+-':>6}  {'games':>6}  {'grp':>3}")
     for name in names:
         if played[name] < args.min_games:
             continue
         half = 1.96 * errors[name] * scale
-        print(f"  {name:<34} {rating[name] * scale:>9.1f}  {half:>6.1f}  {played[name]:>6}")
+        print(
+            f"  {name:<34} {rating[name] * scale:>9.1f}  {half:>6.1f}  "
+            f"{played[name]:>6}  {island.get(name, 0):>3}"
+        )
 
     # Where the one-number assumption is failing, if it is.
     pairs: dict[tuple[str, str], list[float]] = defaultdict(list)

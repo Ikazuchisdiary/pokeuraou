@@ -174,6 +174,14 @@ def agent_name(source: dict[str, Any], side: int) -> str:
     runs actually used.
     """
     leaf = (source.get("leaves") or ["?", "?"])[side]
+    # `value-all.pt` and `value-all` are the same leaf. Older matches recorded the file
+    # name and newer ones its stem, and the difference split one model into two agents
+    # that had never played each other -- so a match run specifically to join two halves
+    # of the rating graph joined nothing, and the table went on reporting both halves as
+    # unrelated. Normalised here rather than at each call site, because this function is
+    # what a rating is keyed on.
+    if leaf.endswith(".pt"):
+        leaf = leaf[: -len(".pt")]
     limit = (source.get("limits") or [0, 0])[side]
     depth = (source.get("depths") or [1, 1])[side]
     ranking = (source.get("rankings") or ["damage", "damage"])[side]
