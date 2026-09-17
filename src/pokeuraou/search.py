@@ -150,6 +150,43 @@ def leaf_ranking(
     return rank
 
 
+def believed_ranking(
+    parts: Sequence[tuple[Callable[..., np.ndarray], float]],
+) -> Callable[..., np.ndarray]:
+    """One ranking averaged over the completions it was built for.
+
+    `narrow` orders candidates by a score, and both scores that are not the cheap damage
+    one -- the leaf's and the policy's -- read the whole position, the opponent's unplayed
+    bench included. Solving the matrix over six possible benches and then ordering the menu
+    with the real one leaves the answer conditioned on something nobody knows, in the part
+    of the search that decides which actions get a number at all.
+
+    Averaging the scores rather than the orderings, because an average of rankings is not a
+    ranking of anything: two completions that disagree about the best action would produce
+    a third order that neither of them argued for. The scores are comparable across
+    completions -- the leaf's are win probabilities of the same cell under different
+    benches, the policy's are its logits for the same action list -- so their mean is the
+    score under the belief.
+
+    The damage score needs none of this: `score_action` reads only the active Pokemon, so
+    it never saw the bench to begin with.
+    """
+    if not parts:
+        raise ValueError("no rankings to average")
+    if len(parts) == 1:
+        return parts[0][0]
+    total = sum(weight for _rank, weight in parts) or 1.0
+
+    def bound(pool: list[SideAction], scored: object = None) -> np.ndarray:
+        out = None
+        for rank, weight in parts:
+            got = np.asarray(rank(pool, scored), dtype=np.float64) * (weight / total)
+            out = got if out is None else out + got
+        return out if out is not None else np.zeros(len(pool))
+
+    return bound
+
+
 @dataclass(slots=True)
 class SearchResult:
     """What the search decided, and what it cost to decide it."""
@@ -472,6 +509,7 @@ __all__ = [
     "BeliefResult",
     "SearchResult",
     "belief_solve",
+    "believed_ranking",
     "leaf_ranking",
     "search",
 ]

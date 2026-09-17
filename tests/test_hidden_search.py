@@ -257,3 +257,45 @@ def test_hiding_the_bench_changes_the_replacement(replacement) -> None:  # noqa:
         "solving over six possible benches returned the open-information value; "
         "the belief path did not run"
     )
+
+
+def test_the_menu_is_ranked_over_the_belief_not_the_bench(setup) -> None:  # noqa: ANN001
+    """`narrow` decides which actions get a number at all, and the leaf ranking reads the
+    whole position to decide it.
+
+    Solving the matrix over six benches and then ordering the menu with the real one leaves
+    that choice conditioned on something nobody knows. Measured over six recorded mid-game
+    positions, the leaky order agreed with the belief order on 66% of slots -- so this is
+    not a rounding difference.
+    """
+    from pokeuraou.selfplay import _menus
+
+    reg, sheet, position = setup
+    budget = Budget.matrix()
+    spreads = _spreads(reg, position, sheet)
+    assert len(spreads[1]) > 1, "nothing is hidden here, so there is nothing to test"
+
+    leaky, _ = _menus(reg, position, (24, 24), HP_SHARE.batch, budget, True, None, None)
+    believed, _ = _menus(
+        reg, position, (24, 24), HP_SHARE.batch, budget, True, None, spreads
+    )
+    assert [a.to_choice() for a in leaky] != [a.to_choice() for a in believed], (
+        "ranking over the completions gave the same menu as ranking over the true bench; "
+        "the belief did not reach the ranker"
+    )
+
+
+def test_a_menu_with_nothing_hidden_is_the_old_menu(setup) -> None:  # noqa: ANN001
+    reg, sheet, position = setup
+    budget = Budget.matrix()
+    seen = _spreads(reg, position, sheet, seen=SEEN_ALL)
+    before, before_foe = _menus_of(reg, position, budget, None)
+    after, after_foe = _menus_of(reg, position, budget, seen)
+    assert [a.to_choice() for a in before] == [a.to_choice() for a in after]
+    assert [a.to_choice() for a in before_foe] == [a.to_choice() for a in after_foe]
+
+
+def _menus_of(reg, position, budget, spreads):  # noqa: ANN001, ANN202
+    from pokeuraou.selfplay import _menus
+
+    return _menus(reg, position, (24, 24), HP_SHARE.batch, budget, True, None, spreads)

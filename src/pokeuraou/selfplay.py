@@ -54,7 +54,7 @@ from .resolve import (
     resume_alternatives,
     turn_leaves,
 )
-from .search import belief_solve, leaf_ranking, search
+from .search import belief_solve, believed_ranking, leaf_ranking, search
 from .selection_book import (
     DEFAULT_EPSILON,
     DEFAULT_TEMPERATURE,
@@ -327,6 +327,7 @@ def _menus(
     budget: Budget,
     rank_by_leaf: bool,
     policy: Any = None,
+    spreads: dict[int, list] | None = None,
 ) -> tuple[list[SideAction], list[SideAction]]:
     """Both sides' candidate menus, as one agent sees them.
 
@@ -342,29 +343,36 @@ def _menus(
     and an agent asks it once. It is a supersession rather than an error so that an agent
     can be described by adding one setting to an existing pair rather than by rewriting it.
     """
-    if policy is not None:
-        return (
-            narrow(
-                reg, pos, 0, limit=limits[0], rank=policy_ranking(policy, pos, 0)
-            ).actions,
-            narrow(
-                reg, pos, 1, limit=limits[1], rank=policy_ranking(policy, pos, 1)
-            ).actions,
-        )
-    if not rank_by_leaf:
+    if policy is None and not rank_by_leaf:
+        # The damage score reads only the active Pokemon, so it has nothing to be blind
+        # about and the true position costs nothing here.
         return (
             narrow(reg, pos, 0, limit=limits[0]).actions,
             narrow(reg, pos, 1, limit=limits[1]).actions,
         )
+
+    def views(side: int) -> list[tuple[Position, float]]:
+        """The positions side `side` could be ranking from: one per completion of the
+        bench it cannot see, or just this one when it can see everything."""
+        if spreads is None:
+            return [(pos, 1.0)]
+        return [(item.position, item.weight) for item in spreads[1 - side]]
+
+    def ranker(side: int) -> Any:  # noqa: ANN401
+        parts = [
+            (
+                policy_ranking(policy, at, side)
+                if policy is not None
+                else leaf_ranking(reg, at, side, evaluate, budget=budget),
+                weight,
+            )
+            for at, weight in views(side)
+        ]
+        return believed_ranking(parts)
+
     return (
-        narrow(
-            reg, pos, 0, limit=limits[0],
-            rank=leaf_ranking(reg, pos, 0, evaluate, budget=budget),
-        ).actions,
-        narrow(
-            reg, pos, 1, limit=limits[1],
-            rank=leaf_ranking(reg, pos, 1, evaluate, budget=budget),
-        ).actions,
+        narrow(reg, pos, 0, limit=limits[0], rank=ranker(0)).actions,
+        narrow(reg, pos, 1, limit=limits[1], rank=ranker(1)).actions,
     )
 
 
@@ -468,17 +476,12 @@ def play_game(
         own_leaf = leaves[0] if leaves[0] is not None else objective.batch
         foe_leaf = leaves[1] if leaves[1] is not None else objective.batch
         shown = [seen_slots(pos, i, shown[i]) for i in (0, 1)]
-        ours, theirs = _menus(
-            reg, pos, limits, own_leaf, budget, ranked[0], policies[0]
-        )
-        if not ours or not theirs:
-            break
-
+        # Built before the menus, because the menus are ranked from it: a leaf or a policy
+        # ordering candidates from the true position would pick *which actions get a
+        # number* using a bench nobody has seen, however carefully the matrix over them is
+        # then solved.
+        spreads = None
         if sheets is not None:
-            # Each side is uncertain about a different bench, so each gets its own answer.
-            # The node underneath them is resolved once: their hidden slots are disjoint
-            # and a cell that reaches neither resolves the same way whatever is standing
-            # on either bench.
             try:
                 spreads = {
                     side: completions(
@@ -489,6 +492,17 @@ def play_game(
             except ValueError as problem:
                 record.unmodelled.append(f"hidden bench: {problem}")
                 break
+        ours, theirs = _menus(
+            reg, pos, limits, own_leaf, budget, ranked[0], policies[0], spreads
+        )
+        if not ours or not theirs:
+            break
+
+        if spreads is not None:
+            # Each side is uncertain about a different bench, so each gets its own answer.
+            # The node underneath them is resolved once: their hidden slots are disjoint
+            # and a cell that reaches neither resolves the same way whatever is standing
+            # on either bench.
             try:
                 answers = belief_solve(
                     reg, pos, ours, theirs, spreads,
@@ -533,7 +547,8 @@ def play_game(
                     (ours, theirs)
                     if same_menu
                     else _menus(
-                        reg, pos, limits, foe_leaf, budget, ranked[1], policies[1]
+                        reg, pos, limits, foe_leaf, budget, ranked[1], policies[1],
+                        spreads,
                     )
                 )
                 if not foe_ours or not foe_theirs:
