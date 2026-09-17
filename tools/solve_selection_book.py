@@ -358,6 +358,14 @@ def main() -> None:
         for part in parts:
             book = SelectionBook.read(part)
             book.require_roster(args.roster)
+            # The header is rewritten from this process's own --model, which defaults to
+            # value-gen2. A merge that forgot the flag would relabel the book with a leaf
+            # that never touched it, and the file would still look right.
+            if book.model and book.model != model_name:
+                raise SystemExit(
+                    f"{part.name} was solved with {book.model!r} but this merge would "
+                    f"label it {model_name!r}; pass the same --model the shards used"
+                )
             for entry in book.entries.values():
                 merged.add(entry)
             print(f"  {part.name}: {len(book)} チーム", file=sys.stderr)
