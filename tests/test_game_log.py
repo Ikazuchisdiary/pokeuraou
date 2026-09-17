@@ -16,6 +16,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from pokeuraou.actions import MoveAction, PassAction, SideAction
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.narrow import narrow
 from pokeuraou.position import Effect
@@ -129,3 +130,54 @@ def test_the_countdown_matches_what_the_resolver_does(roster, log_tool, loc) -> 
     assert not pos.field.weather, (
         "and 残1 has to be the last turn: the weather is gone after it"
     )
+
+
+def test_a_branch_is_matched_on_more_than_hp(roster, log_tool, loc) -> None:  # noqa: ANN001
+    """A landed secondary costs no HP, so HP alone cannot tell the branches apart.
+
+    Ancient Power's 10% raises five of the user's stats and takes nothing off anyone; the
+    branch where it fired and the branch where it did not sit at the same distance from a
+    record that only lists HP, and the tie went to whichever came first. Read as the
+    secondary firing on almost every use -- against an engine that puts it at exactly the
+    declared 0.100.
+
+    So this builds the real fork and asks the matcher for the one the record describes.
+    """
+    reg = roster.reg
+    sets = list(roster.sets)
+    holder = next(entry for entry in sets if "ancientpower" in entry.moves)
+    others = [entry for entry in sets if entry.species != holder.species][:4]
+    pos = position_from_sets(reg, [holder, *others][:4], others)
+
+    slot = next(
+        i for i, m in enumerate(pos.sides[0].pokemon[0].moves, start=1)
+        if m.id == "ancientpower"
+    )
+    ours = SideAction(
+        slots=(
+            MoveAction(
+                slot=0, move_index=slot, move_id="ancientpower", target=1, mega=False
+            ),
+            PassAction(slot=1),
+        )
+    )
+    # A passive opponent, so the fork is the secondary and not a Protect or a faint.
+    theirs = SideAction(slots=(PassAction(slot=0), PassAction(slot=1)))
+    result = resolve_turn(reg, pos, [ours, theirs], budget=Budget.exact())
+
+    boosted = [
+        b for b in result.branches if (b.position.sides[0].pokemon[0].boosts or {}).get("spe", 0) > 0
+    ]
+    plain = [
+        b for b in result.branches if not (b.position.sides[0].pokemon[0].boosts or {}).get("spe", 0)
+    ]
+    assert boosted and plain, (
+        "the turn did not fork on the secondary, so nothing here is being tested"
+    )
+    # Both readings exist; the two must be told apart by the state, not by their order.
+    assert any(
+        [mon.hp for side in a.position.sides for mon in side.pokemon]
+        == [mon.hp for side in b.position.sides for mon in side.pokemon]
+        for a in boosted
+        for b in plain
+    ), "no pair shares an HP vector, so this position cannot exercise the tie-break"

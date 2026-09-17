@@ -584,20 +584,57 @@ def turn_events(
     branch = max(result.branches, key=lambda b: b.probability)
     note = ""
     if following is not None:
+        # HP alone does not identify a branch. A secondary effect that lands -- a burn, a
+        # Special Attack drop, Ancient Power raising five stats -- costs no HP on the turn
+        # it fires, so the branch where it fired and the branch where it did not are the
+        # same distance from the record, and `min` returns whichever came first. Read as
+        # "Ancient Power and Moonblast fire constantly", and the reader was right to
+        # disbelieve it: the engine puts them at exactly the declared 10% and 30%.
+        #
+        # So the status, the boosts and the volatiles are part of the key. They are in the
+        # recorded position too, which is what makes this a matching problem rather than a
+        # missing-information one.
+        def _key(mon: dict) -> tuple:
+            return (
+                mon.get("status"),
+                tuple(sorted((mon.get("boosts") or {}).items())),
+                tuple(sorted(v.get("id", "") for v in mon.get("volatiles") or [])),
+            )
+
+        def _key_of(mon) -> tuple:  # noqa: ANN001
+            return (
+                mon.status,
+                tuple(sorted((mon.boosts or {}).items())),
+                tuple(sorted(v.id for v in mon.volatiles)),
+            )
+
         target = [
             mon["hp"]
             for side in following["position"]["sides"]
             for mon in side["pokemon"]
         ]
+        target_state = [
+            _key(mon)
+            for side in following["position"]["sides"]
+            for mon in side["pokemon"]
+        ]
 
-        def distance(candidate) -> int:  # noqa: ANN001
-            got = [
-                mon.hp for side in candidate.position.sides for mon in side.pokemon
-            ]
-            return sum(abs(a - b) for a, b in zip(got, target, strict=False))
+        def distance(candidate) -> tuple[int, int]:  # noqa: ANN001
+            mons = [mon for side in candidate.position.sides for mon in side.pokemon]
+            hp = sum(
+                abs(mon.hp - want)
+                for mon, want in zip(mons, target, strict=False)
+            )
+            # Ordered after HP, not added to it: HP is the thing the record pins exactly,
+            # and a state mismatch must never outrank a damage roll that is simply wrong.
+            state = sum(
+                _key_of(mon) != want
+                for mon, want in zip(mons, target_state, strict=False)
+            )
+            return (hp, state)
 
         branch = min(result.branches, key=distance)
-        if distance(branch) != 0:
+        if distance(branch) != (0, 0):
             note = (
                 "⚠ 以下は記録と一致しない枝です。実際に起きたことではありません"
                 "（乱数の再現に失敗）"
