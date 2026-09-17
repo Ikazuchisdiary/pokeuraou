@@ -21,8 +21,11 @@ Three numbers come out of it, and they are different questions:
 
 - **the mixture** -- what the solver would tell a person to play. The product is a mixed
   strategy, so a change here is a change in the advice whether or not the value moves;
-- **the claimed value** -- what the solver says the position is worth. Omniscience should
-  inflate it, because knowing the bench cannot hurt;
+- **the value of knowing the bench** -- each completion solved with both sides informed,
+  averaged, minus what one strategy can hold across all six. Non-negative by
+  construction. Comparing the omniscient solve to the belief solve instead does *not*
+  measure this: those are games against different opponents, one bench against a mixture
+  of six, and the difference came out negative;
 - **the regret of playing the omniscient mixture into the belief matrix** -- how much the
   advice costs when the thing it assumed is not known. This is the one that says whether
   the leak matters, and it is zero exactly when the advice happens to be robust.
@@ -204,7 +207,21 @@ def main() -> None:
         x_true = np.asarray(omniscient.row_strategy, dtype=np.float64)
         x_belief = np.asarray(belief.row_strategy, dtype=np.float64)
         moved.append(0.5 * float(np.abs(x_true - x_belief).sum()))
-        value_gap.append(float(omniscient.value - belief.value))
+        # What knowing the bench is worth, against the *same* opponents: solve each
+        # completion with both sides informed, average those values, and subtract the
+        # value one strategy can hold across all of them. This is non-negative by
+        # construction and is the quantity "the value of information" names.
+        #
+        # `omniscient.value - belief.value` is not that quantity, and the first version
+        # of this tool printed it as though it were. The omniscient game is against the
+        # one bench they actually brought; the belief game is against a mixture of six.
+        # A team that packs a strong back two makes the true game the harder one, so the
+        # difference came out *negative* and said nothing about information.
+        informed = sum(
+            float(weight) * float(solve(part).value)
+            for weight, part in zip(weights, parts, strict=True)
+        )
+        value_gap.append(informed - float(belief.value))
         # What the omniscient advice is worth in the game an observer is actually in: the
         # opponent answers it knowing their own bench, class by class. `belief.value` is
         # the most any single strategy could have guaranteed there.
@@ -229,8 +246,12 @@ def main() -> None:
           f"{f', {skipped} skipped' if skipped else ''}, "
           f"{np.mean(fanouts):.1f} completions each\n")
     line("advice moved (total variation, 0-1)", moved)
-    line("claimed value, omniscient minus belief", value_gap)
+    line("value of knowing the bench (points)", value_gap, 100.0)
     line("regret of the omniscient advice (points)", regrets, 100.0)
+    unchanged = sum(1 for m in moved if m < 1e-6)
+    print(f"\n  advice unchanged in {unchanged} of {played} openings "
+          f"({unchanged / played:.0%}); replaced outright in "
+          f"{sum(1 for m in moved if m > 0.999)}")
     print("\n  The first says whether the product's answer changes at all. The third is\n"
           "  what it costs to follow advice that assumed the bench was known: it is the\n"
           "  value the belief game guarantees, minus what that advice actually gets\n"
