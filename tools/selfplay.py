@@ -111,6 +111,16 @@ def main() -> None:
         "a pool on the same cores is slower than one process. Raise it for a single run.",
     )
     ap.add_argument(
+        "--hide-bench",
+        action="store_true",
+        help="neither side's search is shown the other's unplayed bench. Each solves over "
+        "every four the opponent's sheet still allows, as the Bayesian game it is. "
+        "Without it the search is handed the opponent's whole four, which 47.4% of "
+        "decisions and every opening one had no right to; on 40 openings that was worth "
+        "0.96 points and moved the advice in 90% of them. Costs about 3.8x, because each "
+        "side now solves its own game and there are up to six completions in each.",
+    )
+    ap.add_argument(
         "--force-lead",
         default=None,
         help="comma-separated species that must occupy our first two slots. Everything "
@@ -353,6 +363,7 @@ def main() -> None:
         depth=args.depth,
         rank_by_leaf=args.rank_leaf,
         solve_sparsely=args.solve_sparsely,
+        hide_bench=args.hide_bench,
         force_lead=tuple(
             x.strip() for x in args.force_lead.split(",") if x.strip()
         ) if args.force_lead else None,

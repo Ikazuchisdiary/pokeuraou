@@ -375,13 +375,119 @@ def _subgame_value(
         return None, unmodelled, 1
 
 
+@dataclass
+class BeliefResult:
+    """One side's answer when it cannot see the other side's whole four.
+
+    `strategy` belongs to `side`, not to the row player. The matrices are always built
+    with side 0 as the row player because that is what `batched_payoff` produces and what
+    every recorded position means by "own"; solving for side 1 transposes and negates
+    instead of rebuilding them, so the two sides cannot drift apart in how a cell is read.
+    """
+
+    strategy: np.ndarray
+    #: What `side` guarantees against an opponent who does know their own four. Lower than
+    #: the omniscient value would claim, and that is the point.
+    value: float
+    #: One distribution per completion -- what the opponent does when their bench *is*
+    #: that one. They differ, which is why averaging the matrices instead would be a
+    #: different game.
+    replies: tuple[np.ndarray, ...]
+    ours: list[SideAction]
+    theirs: list[SideAction]
+    unmodelled: set[str] = field(default_factory=set)
+    #: Completions averaged over. One means nothing was hidden and this is the old answer.
+    classes: int = 1
+
+
+def belief_search(
+    reg: Regulation,
+    spread: Sequence[tuple[Position, float]],
+    ours: Sequence[SideAction],
+    theirs: Sequence[SideAction],
+    evaluate: LeafEvaluator,
+    *,
+    budget: Budget,
+    side: int = 0,
+    solve_sparsely: bool = False,
+) -> BeliefResult:
+    """Solve this turn for `side`, averaging over what the opponent's bench could be.
+
+    `spread` is one position per completion with its probability, from
+    :func:`pokeuraou.hidden.completions`. Every completion offers both sides the same
+    actions -- "switch to slot 3" is nameable without knowing what it brings, which is
+    exactly the abstraction an observer is stuck with -- so one pair of menus covers all
+    of them.
+
+    A single completion means nothing was hidden, and then this is `search` at depth 1,
+    down to the arithmetic. That is deliberate: a setting whose trivial case is not the
+    old behaviour makes every comparison against the old behaviour meaningless.
+
+    Depth is fixed at 1. Refinement re-solves a cell as its own matrix game, and under
+    uncertainty that cell is not one game but one per completion; pretending otherwise
+    would put depth-2 values conditioned on a known bench into a matrix that exists
+    because the bench is unknown. Depth 2 measured -1.2 anyway, so nothing is being given
+    up here that was being used.
+    """
+    from .equilibrium import solve_bayesian
+
+    row = list(ours)
+    col = list(theirs)
+    if not spread:
+        raise ValueError("no completions to solve over")
+    if len(spread) == 1:
+        result = search(
+            reg, spread[0][0], row, col, evaluate,
+            budget=budget, depth=1, solve_sparsely=solve_sparsely,
+        )
+        equilibrium = result.equilibrium
+        mine = (
+            np.asarray(equilibrium.row_strategy, dtype=np.float64)
+            if side == 0
+            else np.asarray(equilibrium.col_strategy, dtype=np.float64)
+        )
+        value = float(equilibrium.value) * (1.0 if side == 0 else -1.0)
+        other = (
+            np.asarray(equilibrium.col_strategy, dtype=np.float64)
+            if side == 0
+            else np.asarray(equilibrium.row_strategy, dtype=np.float64)
+        )
+        return BeliefResult(
+            strategy=mine, value=value, replies=(other,), ours=row, theirs=col,
+            unmodelled=result.unmodelled, classes=1,
+        )
+
+    matrices: list[np.ndarray] = []
+    unmodelled: set[str] = set()
+    for position, _weight in spread:
+        payoff, notes = batched_payoff(reg, position, row, col, evaluate, budget=budget)
+        # Side 1 minimises the matrix side 0 maximises, so its own game is the transpose
+        # of the negation. Solving that rather than reading the column strategy off side
+        # 0's solve is what makes the uncertainty sit on the side that has it.
+        matrices.append(payoff if side == 0 else -payoff.T)
+        unmodelled |= notes
+    weights = np.asarray([weight for _position, weight in spread], dtype=np.float64)
+    solved = solve_bayesian(matrices, weights)
+    return BeliefResult(
+        strategy=np.asarray(solved.row_strategy, dtype=np.float64),
+        value=float(solved.value),
+        replies=tuple(np.asarray(y, dtype=np.float64) for y in solved.col_strategies),
+        ours=row,
+        theirs=col,
+        unmodelled=unmodelled,
+        classes=len(matrices),
+    )
+
+
 __all__ = [
     "DEFAULT_PASSES",
     "DEFAULT_REFERENCES",
     "DEFAULT_REFINE",
     "DEFAULT_SUB_BRANCHES",
     "DEFAULT_SUB_LIMIT",
+    "BeliefResult",
     "SearchResult",
+    "belief_search",
     "leaf_ranking",
     "search",
 ]

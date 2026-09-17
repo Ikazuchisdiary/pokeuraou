@@ -97,6 +97,14 @@ def main() -> None:
         "book is an error rather than a silent -141 Elo.",
     )
     ap.add_argument(
+        "--hide-bench",
+        action="store_true",
+        help="pass --hide-bench to every worker: neither search sees the other side's "
+        "unplayed bench. The games are a different conditioning from every pool recorded "
+        "so far and say so in their `information` field, so a training set can keep them "
+        "apart rather than average two games together.",
+    )
+    ap.add_argument(
         "--force-lead",
         default=None,
         help="passed to every worker: species that must lead. See tools/selfplay.py.",
@@ -203,6 +211,7 @@ def main() -> None:
             "--device", args.device,
             "--torch-threads", "1",
             "--roster", args.roster,
+            *(["--hide-bench"] if args.hide_bench else []),
             *(["--force-lead", args.force_lead] if args.force_lead else []),
             "--out", str(out_dir / f"games-worker{worker}.jsonl"),
         ]

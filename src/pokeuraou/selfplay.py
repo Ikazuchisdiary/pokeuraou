@@ -26,7 +26,7 @@ represent our uncertainty would duplicate machinery that exists and is tested.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Protocol
@@ -35,6 +35,7 @@ import numpy as np
 
 from .actions import SideAction, switch_actions_after_faint
 from .equilibrium import EquilibriumError, solve
+from .hidden import completions, seen_slots
 from .narrow import narrow
 from .payoff import HP_SHARE, Objective
 from .policy import policy_ranking
@@ -53,7 +54,7 @@ from .resolve import (
     resume_alternatives,
     turn_leaves,
 )
-from .search import leaf_ranking, search
+from .search import belief_search, leaf_ranking, search
 from .selection_book import (
     DEFAULT_EPSILON,
     DEFAULT_TEMPERATURE,
@@ -143,6 +144,12 @@ class GameRecord:
     #: from the cached 6->4 equilibrium. Recorded per game because a dataset will contain
     #: both and the distributions are not the same.
     selection_source: str = "uniform"
+    #: What the search was allowed to see: "open" means it was handed the opponent's whole
+    #: four, "hidden-bench" that it solved over the fours the sheet still allowed. Every
+    #: game recorded before this field existed was open, which is what the default says.
+    #: A training set that mixes the two without knowing is mixing two conditionings, and
+    #: the value of a position is always conditional on the play that produced it.
+    information: str = "open"
     #: The equilibrium mixtures over the 90 ordered selections, when a book was used.
     #: These are the policy targets a selection head would learn -- the *solver's*
     #: recommendation, not the softened distribution the game was drawn from.
@@ -177,6 +184,7 @@ class GameRecord:
             "ownPick": self.own_pick,
             "foePick": self.foe_pick,
             "selectionSource": self.selection_source,
+            "information": self.information,
             "ownSelectionPolicy": self.own_selection_policy,
             "foeSelectionPolicy": self.foe_selection_policy,
             "ownSelectionMixture": self.own_selection_mixture,
@@ -357,6 +365,24 @@ def _menus(
     )
 
 
+def _spread(
+    reg: Regulation,
+    pos: Position,
+    side: int,
+    sheet: Sequence[SampledSet],
+    seen: frozenset[int],
+) -> list[tuple[Position, float]]:
+    """Positions and weights for what `side`'s unseen slots could hold.
+
+    Uniform over the completions, deliberately and temporarily. The distribution that
+    belongs here is the opponent's selection equilibrium marginalised onto their back
+    two, which the book already computes -- but a wrong prior dressed as the book's would
+    be worse than an obviously flat one, so the flat one is what is here until the book is
+    threaded through.
+    """
+    return [(item.position, item.weight) for item in completions(reg, pos, side, sheet, seen=seen)]
+
+
 def play_game(
     reg: Regulation,
     rng: np.random.Generator,
@@ -375,6 +401,7 @@ def play_game(
     solve_sparsely: bool | tuple[bool, bool] = False,
     start: Position | None = None,
     first_action: str | None = None,
+    sheets: tuple[Sequence[SampledSet], Sequence[SampledSet]] | None = None,
 ) -> GameRecord:
     """Plays one game to a result, sampling both sides from the turn's equilibrium.
 
@@ -393,6 +420,12 @@ def play_game(
     positions and playing them out produces real outcomes in that phase without waiting
     for self-play to arrive there on its own. The label stays sound because the game is
     still played to a win or a loss; what changes is which positions get labelled.
+
+    ``sheets`` are the two sides' *sixes*. Given them, neither search is shown the other
+    side's unplayed bench: each solves over every four the opponent's sheet still allows,
+    as the Bayesian game it is. Omitted, the search sees the opponent's whole four, which
+    is what every game recorded before this did -- and what 47.4% of decisions had no
+    right to. The two are different agents and `provenance` says which.
 
     ``solve_sparsely`` takes a pair too, and it is the one whose two values are supposed
     to be *equally correct*: both settle on an equilibrium of the same game, verified to
@@ -426,8 +459,13 @@ def play_game(
         record.foe_six = list(foe_six)
         record.own_pick = list(own_pick)
         record.foe_pick = list(foe_pick)
+    record.information = "open" if sheets is None else "hidden-bench"
     pos = start if start is not None else position_from_sets(reg, own, foe)
     budget = Budget.matrix()
+    # Slots each side has shown, accumulated across turns. A Pokemon that came in and
+    # went back out is still known, and the position alone stops saying so -- so this is
+    # carried rather than recomputed from the board each time.
+    shown: list[frozenset[int]] = [frozenset(), frozenset()]
 
     for _step in range(max_turns * 2):
         if pos.ended:
@@ -440,54 +478,88 @@ def play_game(
 
         own_leaf = leaves[0] if leaves[0] is not None else objective.batch
         foe_leaf = leaves[1] if leaves[1] is not None else objective.batch
+        shown = [seen_slots(pos, i, shown[i]) for i in (0, 1)]
         ours, theirs = _menus(
             reg, pos, limits, own_leaf, budget, ranked[0], policies[0]
         )
         if not ours or not theirs:
             break
 
-        try:
-            own_search = search(
-                reg, pos, ours, theirs, own_leaf, budget=budget, depth=depths[0],
-                solve_sparsely=sparse[0],
-            )
-        except EquilibriumError:
-            break
-        record.unmodelled.extend(own_search.unmodelled)
-        equilibrium = own_search.equilibrium
-
-        # With a different leaf, depth or ranking the two sides are no longer solving one
-        # game, so the column player's strategy has to come from *its* matrix -- over
-        # *its* menu, because a ranking that differs is a different menu. Identical
-        # settings on both sides skip all of this and behave exactly as before.
-        foe_equilibrium = equilibrium
-        foe_theirs = theirs
-        if (
-            leaves[1] is not leaves[0]
-            or depths[1] != depths[0]
-            or ranked[1] != ranked[0]
-            or policies[1] is not policies[0]
-            or sparse[1] != sparse[0]
-        ):
-            same_menu = ranked[1] == ranked[0] and policies[1] is policies[0]
-            foe_ours, foe_theirs = (
-                (ours, theirs)
-                if same_menu
-                else _menus(reg, pos, limits, foe_leaf, budget, ranked[1], policies[1])
-            )
-            if not foe_ours or not foe_theirs:
+        if sheets is not None:
+            # Each side solves its own game, because each is uncertain about a different
+            # bench. With open information one solve served both whenever the settings
+            # matched; here that shortcut would hand one side the other's uncertainty.
+            try:
+                own_spread = _spread(reg, pos, 1, sheets[1], shown[1])
+                foe_spread = _spread(reg, pos, 0, sheets[0], shown[0])
+            except ValueError as problem:
+                record.unmodelled.append(f"hidden bench: {problem}")
                 break
             try:
-                foe_search = search(
-                    reg, pos, foe_ours, foe_theirs, foe_leaf, budget=budget,
-                    depth=depths[1], solve_sparsely=sparse[1],
+                mine = belief_search(
+                    reg, own_spread, ours, theirs, own_leaf, budget=budget, side=0,
+                    solve_sparsely=sparse[0],
+                )
+                yours = belief_search(
+                    reg, foe_spread, ours, theirs, foe_leaf, budget=budget, side=1,
+                    solve_sparsely=sparse[1],
                 )
             except EquilibriumError:
                 break
-            record.unmodelled.extend(foe_search.unmodelled)
-            foe_equilibrium = foe_search.equilibrium
+            record.unmodelled.extend(mine.unmodelled | yours.unmodelled)
+            own_strategy = mine.strategy
+            foe_strategy = yours.strategy
+            foe_theirs = theirs
+            search_value = mine.value
+        else:
+            try:
+                own_search = search(
+                    reg, pos, ours, theirs, own_leaf, budget=budget, depth=depths[0],
+                    solve_sparsely=sparse[0],
+                )
+            except EquilibriumError:
+                break
+            record.unmodelled.extend(own_search.unmodelled)
+            equilibrium = own_search.equilibrium
 
-        own_index = _sample_index(rng, equilibrium.row_strategy)
+            # With a different leaf, depth or ranking the two sides are no longer solving
+            # one game, so the column player's strategy has to come from *its* matrix --
+            # over *its* menu, because a ranking that differs is a different menu.
+            # Identical settings on both sides skip all of this and behave exactly as
+            # before.
+            foe_equilibrium = equilibrium
+            foe_theirs = theirs
+            if (
+                leaves[1] is not leaves[0]
+                or depths[1] != depths[0]
+                or ranked[1] != ranked[0]
+                or policies[1] is not policies[0]
+                or sparse[1] != sparse[0]
+            ):
+                same_menu = ranked[1] == ranked[0] and policies[1] is policies[0]
+                foe_ours, foe_theirs = (
+                    (ours, theirs)
+                    if same_menu
+                    else _menus(
+                        reg, pos, limits, foe_leaf, budget, ranked[1], policies[1]
+                    )
+                )
+                if not foe_ours or not foe_theirs:
+                    break
+                try:
+                    foe_search = search(
+                        reg, pos, foe_ours, foe_theirs, foe_leaf, budget=budget,
+                        depth=depths[1], solve_sparsely=sparse[1],
+                    )
+                except EquilibriumError:
+                    break
+                record.unmodelled.extend(foe_search.unmodelled)
+                foe_equilibrium = foe_search.equilibrium
+            own_strategy = np.asarray(equilibrium.row_strategy, dtype=np.float64)
+            foe_strategy = np.asarray(foe_equilibrium.col_strategy, dtype=np.float64)
+            search_value = float(equilibrium.value)
+
+        own_index = _sample_index(rng, own_strategy)
         if first_action is not None and not record.decisions:
             # Side 0's opening move, overridden once. Everything after it is the search's
             # own, so the game measures "what happens if this is played here" rather than
@@ -508,7 +580,7 @@ def play_game(
                 own_index = wanted[0]
         chosen = [
             ours[own_index],
-            foe_theirs[_sample_index(rng, foe_equilibrium.col_strategy)],
+            foe_theirs[_sample_index(rng, foe_strategy)],
         ]
         record.decisions.append(
             Decision(
@@ -516,10 +588,10 @@ def play_game(
                 kind="move",
                 position=pos.to_json(),
                 own_actions=[a.to_choice() for a in ours],
-                own_policy=[float(x) for x in equilibrium.row_strategy],
+                own_policy=[float(x) for x in own_strategy],
                 foe_actions=[a.to_choice() for a in foe_theirs],
-                foe_policy=[float(x) for x in foe_equilibrium.col_strategy],
-                search_value=float(equilibrium.value),
+                foe_policy=[float(x) for x in foe_strategy],
+                search_value=search_value,
                 own_chosen=chosen[0].to_choice(),
                 foe_chosen=chosen[1].to_choice(),
             )
@@ -836,6 +908,7 @@ def generate(
     policy: Any = None,
     solve_sparsely: bool = False,
     force_lead: tuple[str, ...] | None = None,
+    hide_bench: bool = False,
     indices: Iterable[int] | None = None,
     on_finish: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
@@ -997,6 +1070,8 @@ def generate(
                 rank_by_leaf=rank_by_leaf,
                 policy=policy,
                 solve_sparsely=solve_sparsely,
+                # Both sixes, so neither search is shown the other's unplayed bench.
+                sheets=(list(roster.sets), list(foe_six)) if hide_bench else None,
                 selection=(
                     [entry.species for entry in roster.sets],
                     [entry.species for entry in foe_six],

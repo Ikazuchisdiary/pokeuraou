@@ -122,6 +122,7 @@ def provenance(
     rankings: tuple[str, str] = ("damage", "damage"),
     solvers: tuple[str, str] = ("full", "full"),
     books: tuple[str, str] = ("uniform", "uniform"),
+    information: tuple[str, str] = ("open", "open"),
     selection: str = "uniform",
     note: str = "",
 ) -> dict[str, Any]:
@@ -152,6 +153,7 @@ def provenance(
         "rankings": list(rankings),
         "solvers": list(solvers),
         "books": list(books),
+        "information": list(information),
         "selection": selection,
         **({"note": note} if note else {}),
     }
@@ -199,6 +201,14 @@ def agent_name(source: dict[str, Any], side: int) -> str:
     # two models on this scale. An agent that selects from a book is not the same agent.
     if book != "uniform":
         name += f"/book:{book}"
+    # What the search was allowed to see. An agent solving the opponent's true four is
+    # not a weaker or stronger version of one that solves over the six it could be -- it
+    # is playing a different game, and the advice it produces moved in 90% of openings.
+    # Every record written before this field existed was omniscient, which is what the
+    # default says.
+    information = (source.get("information") or ["open", "open"])[side]
+    if information != "open":
+        name += f"/{information}"
     return name
 
 
