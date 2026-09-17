@@ -75,6 +75,17 @@ def part_path(out: Path, shard: int) -> Path:
     return out.parent / f"{stem}.part{shard}.jsonl.gz"
 
 
+def part_files(out: Path) -> list[Path]:
+    """The shard files belonging to ``out``, which live beside it and nowhere else.
+
+    ``--merge`` used to glob :func:`selection_dir` while :func:`part_path` wrote beside
+    ``out``, so any run given an ``--out`` outside the default directory solved its eight
+    shards and then refused to merge them. The two halves now read the same directory.
+    """
+    stem = out.name.removesuffix(".jsonl.gz")
+    return sorted(out.parent.glob(f"{stem}.part*.jsonl.gz"))
+
+
 def solve_one(
     reg: object,
     roster: object,
@@ -314,7 +325,7 @@ def main() -> None:
         merged = SelectionBook(
             roster=args.roster, model=args.model.name, format_id=reg.meta.format_id
         )
-        parts = sorted(selection_dir().glob(f"{out.name.removesuffix('.jsonl.gz')}.part*.jsonl.gz"))
+        parts = part_files(out)
         if not parts:
             raise SystemExit(f"no part files next to {out}")
         for part in parts:

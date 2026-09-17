@@ -609,3 +609,29 @@ def test_a_team_the_book_does_not_cover_falls_back_to_a_uniform_draw(roster) -> 
     assert (hit, total) == (0, 1)
     with pytest.raises(ValueError, match="standings"):
         generate(reg, None, roster, [], games=1, book=book)
+
+
+def test_the_merge_reads_the_directory_the_shards_wrote_to(tmp_path) -> None:  # noqa: ANN001
+    """A book solved outside the default directory has to be mergeable.
+
+    The two halves disagreed: ``part_path`` wrote beside ``--out`` while ``--merge``
+    globbed the default ``data/selection``. A sharded solve into any other directory --
+    the seed comparison writes into ``data/selection/seedcheck`` -- therefore solved all
+    eight shards and then refused, saying it found no part files "next to" an ``out`` it
+    had never looked next to.
+    """
+    from tests._harness import load_tool
+
+    tool = load_tool("solve_selection_book")
+    out = tmp_path / "elsewhere" / "rizabanadohido-value-gen8-s2.jsonl.gz"
+    out.parent.mkdir(parents=True)
+
+    written = [tool.part_path(out, shard) for shard in range(3)]
+    for path in written:
+        path.write_bytes(b"")
+    # A decoy at the default location, and the merged book itself, are not parts of it.
+    out.write_bytes(b"")
+    (out.parent / "rizabanadohido-value-gen8-s2-other.part0.jsonl.gz").write_bytes(b"")
+
+    assert [p.parent for p in written] == [out.parent] * 3
+    assert tool.part_files(out) == written
