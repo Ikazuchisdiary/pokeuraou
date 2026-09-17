@@ -661,3 +661,42 @@ def test_an_ensemble_book_cannot_overwrite_the_single_net_book() -> None:
     # And the book records every member, so it can say what made it.
     assert tool.model_label(one) == "value-gen8.pt"
     assert tool.model_label(two) == "value-gen8.pt+value-gen8-s1.pt"
+
+
+def test_a_book_against_itself_agrees_with_itself(roster, tmp_path) -> None:  # noqa: ANN001
+    """The floor under every number `tools/book_seed_spread.py` printed tonight.
+
+    It reported that two training seeds agree on the four to bring 18.2% of the time and
+    cost each other 5.88 points. A sign slip or a transposed index would produce a large
+    number just as readily, and nothing about a large number looks wrong. So the three
+    quantities the tool is built on are checked where the answer is forced.
+    """
+    from tests._harness import load_tool
+
+    tool = load_tool("book_seed_spread")
+    ours = np.zeros(len(SELECTIONS))
+    ours[2], ours[5] = 0.7, 0.3
+    entry = _entry(ours=ours, theirs=[_point_mass(3)], sets=roster.sets)
+    # Faithful to a solved entry: the EV loss is zero exactly on the support and positive
+    # off it. A monotone ramp is not something the LP can return.
+    loss = np.full(len(SELECTIONS), 0.2)
+    loss[2] = loss[5] = 0.0
+    loss[9] = 0.4
+    entry.our_ev_loss = loss
+    book = SelectionBook(roster="rizabanadohido", model="value-gen8.pt", format_id="x")
+    book.add(entry)
+    book.write(tmp_path / "same.jsonl.gz")
+
+    # The lead distribution is a distribution, whatever the mixture over 90 selections.
+    assert sum(tool.lead_mass(entry, ours).values()) == pytest.approx(1.0)
+
+    # A book's own advice gives up nothing in its own game -- the identity the whole
+    # comparison rests on, and the reason a positive number means the games differ.
+    assert float(ours @ loss) == pytest.approx(0.0)
+    # while advice off the support does not.
+    off = np.zeros(len(SELECTIONS))
+    off[9] = 1.0
+    assert float(off @ loss) == pytest.approx(0.4)
+
+    # And a book's own four is its own first choice.
+    assert np.argsort(loss).tolist().index(int(np.argmax(ours))) + 1 == 1
