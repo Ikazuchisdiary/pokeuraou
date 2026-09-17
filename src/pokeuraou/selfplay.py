@@ -141,8 +141,11 @@ class GameRecord:
     own_pick: list[int] = field(default_factory=list)
     foe_pick: list[int] = field(default_factory=list)
     #: Where the selection came from: "uniform" for an unweighted draw, "book" for a draw
-    #: from the cached 6->4 equilibrium. Recorded per game because a dataset will contain
-    #: both and the distributions are not the same.
+    #: from the cached 6->4 equilibrium, "forced-lead" when the leads were chosen and only
+    #: the two behind them were drawn. Recorded per game because a dataset will contain
+    #: more than one and the distributions are not the same -- and because a pool built by
+    #: forcing a lead describes itself in every summary a later decision about including it
+    #: would read.
     selection_source: str = "uniform"
     #: What the search was allowed to see: "open" means it was handed the opponent's whole
     #: four, "hidden-bench" that it solved over the fours the sheet still allowed. Every
@@ -997,6 +1000,7 @@ def generate(
     with path.open("a", encoding="utf-8") as handle:
         for index, rng in scheduled():
             drawn = None
+            forced_uniform = False
             mirror = mirror_share > 0.0 and rng.random() < mirror_share
             if mirror:
                 # Our own six, the same spreads, no sampling: an approximate mirror would
@@ -1041,6 +1045,9 @@ def generate(
                 )
                 if lead_wanted:
                     own_pick = _with_lead(rng, roster, lead_wanted, own_pick)
+                    # The uniform branch defaults to "uniform", which is as wrong here as
+                    # "book" is above: two of the four were chosen, not drawn.
+                    forced_uniform = True
                 foe_pick = pick_four_indices(
                     rng, len(foe_six), size=reg.meta.picked_team_size
                 )
@@ -1065,7 +1072,13 @@ def generate(
                 ),
             )
             if drawn is not None:
-                record.selection_source = "book"
+                # "book" means the book drew this four. A forced lead overrides the two
+                # slots the book cared most about, so it did not -- and a pool built that
+                # way would otherwise describe itself as book-selected in every summary a
+                # later decision about including it would read. The mixtures below are
+                # still the book's and are still worth keeping: they say what the book
+                # would have played, which is the comparison the forcing exists to make.
+                record.selection_source = "forced-lead" if lead_wanted else "book"
                 record.own_selection_policy = [
                     float(x) for x in drawn.our_equilibrium
                 ]
@@ -1075,6 +1088,8 @@ def generate(
                 record.own_selection_mixture = [float(x) for x in drawn.our_mixture]
                 record.foe_selection_mixture = [float(x) for x in drawn.foe_mixture]
                 record.selection_value = drawn.value
+            elif forced_uniform:
+                record.selection_source = "forced-lead"
             stats["games"] += 1
             if mirror:
                 stats["mirror_games"] += 1
