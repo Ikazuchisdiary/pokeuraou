@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from collections.abc import Sequence
 from pathlib import Path
 
 import numpy as np
@@ -58,7 +59,7 @@ from pokeuraou.standings import (
     sample_standings_team,
 )
 from pokeuraou.teams import all_selections, load_roster
-from pokeuraou.value import BatchedValue, load_model
+from pokeuraou.value import BatchedValue, load_ensemble
 
 #: The exploration settings the coverage table sweeps. The pair generation will use is
 #: chosen from this table rather than by taste: a setting that leaves one of the 90
@@ -68,6 +69,20 @@ EPSILONS = (0.0, 0.25, 0.5)
 TEMPERATURES = (0.05, 0.15, 0.5, float("inf"))
 #: Games in a generation, for turning a probability into "how many games would that be".
 GENERATION_GAMES = 7000
+
+
+def book_stem(models: Sequence[Path]) -> str:
+    """The default file stem for a book solved on these nets.
+
+    Carries the member count, because an ensemble book exists to be compared against the
+    single-net book it came from and must not be able to overwrite it by default.
+    """
+    return models[0].stem if len(models) == 1 else f"{models[0].stem}-ens{len(models)}"
+
+
+def model_label(models: Sequence[Path]) -> str:
+    """What the book records as its leaf. Every member, so a book can say what made it."""
+    return "+".join(m.name for m in models)
 
 
 def part_path(out: Path, shard: int) -> Path:
@@ -243,7 +258,17 @@ def report(
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--roster", default="rizabanadohido")
-    ap.add_argument("--model", type=Path, default=Path("data/models/value-gen2.pt"))
+    ap.add_argument(
+        "--model",
+        type=Path,
+        nargs="+",
+        default=[Path("data/models/value-gen2.pt")],
+        help="one net, or several to average as one leaf. Several because a book solved\n"
+        "from one training seed is largely that seed: two seeds of one configuration, "
+        "0.006 apart on held-out AUC, name a different best selection for 91%% of the "
+        "field and each costs the other 5.9 points of the game's own value against a "
+        "15.3-point scale. Members cost 1.13x-1.19x one net, not Nx.",
+    )
     ap.add_argument("--out", type=Path, default=None, help="default data/selection/<name>.jsonl.gz")
     ap.add_argument("--pool", default="all", help="all | phase2 | cut")
     ap.add_argument(
@@ -297,7 +322,9 @@ def main() -> None:
     roster = load_roster(args.roster)
     reg = roster.reg
     register_mega_stones(reg)
-    out = args.out or (selection_dir() / f"{args.roster}-{args.model.stem}.jsonl.gz")
+    models = list(args.model)
+    stem, model_name = book_stem(models), model_label(models)
+    out = args.out or (selection_dir() / f"{args.roster}-{stem}.jsonl.gz")
     loc = localiser(reg, "ja")
 
     def namer(index: int) -> str:
@@ -323,7 +350,7 @@ def main() -> None:
 
     if args.merge:
         merged = SelectionBook(
-            roster=args.roster, model=args.model.name, format_id=reg.meta.format_id
+            roster=args.roster, model=model_name, format_id=reg.meta.format_id
         )
         parts = part_files(out)
         if not parts:
@@ -349,15 +376,17 @@ def main() -> None:
     standings = load_standings(cached, reg)
     teams = standings.pool(args.pool)
 
-    if not args.model.exists():
+    missing = [m for m in models if not m.exists()]
+    if missing:
         raise SystemExit(
-            f"no model at {args.model}; the cells of the selection game are win "
-            "probabilities and only a trained value function produces those."
+            f"no model at {', '.join(str(m) for m in missing)}; the cells of the "
+            "selection game are win probabilities and only a trained value function "
+            "produces those."
         )
     encoder = Encoder(reg)
-    net, _meta = load_model(args.model, encoder)
+    nets, _metas = load_ensemble(models, encoder)
     device = torch.device(args.device)
-    value = BatchedValue(net.to(device), encoder, device=device)
+    value = BatchedValue([n.to(device) for n in nets], encoder, device=device)
 
     target = out if args.shards == 1 else part_path(out, args.shard)
     done: set[str] = set()
@@ -367,7 +396,7 @@ def main() -> None:
         done = set(existing.entries)
         print(f"再開: {len(done)} チーム分が既にある", file=sys.stderr)
     start_book(
-        target, roster=args.roster, model=args.model.name, format_id=reg.meta.format_id
+        target, roster=args.roster, model=model_name, format_id=reg.meta.format_id
     )
 
     # Indexed before sharding, because the index is the seed: team 37 gets the same eight
@@ -394,7 +423,7 @@ def main() -> None:
             classes=args.classes,
             seed=args.seed,
             index=index,
-            model=args.model.name,
+            model=model_name,
         )
         append_entry(target, entry)
         elapsed = time.perf_counter() - started

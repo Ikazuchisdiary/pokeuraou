@@ -635,3 +635,29 @@ def test_the_merge_reads_the_directory_the_shards_wrote_to(tmp_path) -> None:  #
 
     assert [p.parent for p in written] == [out.parent] * 3
     assert tool.part_files(out) == written
+
+
+def test_an_ensemble_book_cannot_overwrite_the_single_net_book() -> None:
+    """The two exist to be compared, so their default paths have to differ.
+
+    A book solved from one training seed is largely that seed: two seeds of value-gen8,
+    0.006 apart on held-out AUC and trained on the same 690,840 decisions, name a
+    different best selection for 91% of the field, and each costs the other 5.9 points of
+    the game's own value on a scale where having no book at all costs 15.3. Averaging the
+    leaf is the measured remedy, which makes an ensemble book a thing that gets solved --
+    and a thing that must not land silently on top of the book it is evidence against.
+    """
+    from pathlib import Path
+
+    from tests._harness import load_tool
+
+    tool = load_tool("solve_selection_book")
+    one = [Path("data/models/value-gen8.pt")]
+    two = [Path("data/models/value-gen8.pt"), Path("data/models/value-gen8-s1.pt")]
+
+    assert tool.book_stem(one) == "value-gen8"
+    assert tool.book_stem(two) != tool.book_stem(one)
+    assert tool.book_stem(two) == "value-gen8-ens2"
+    # And the book records every member, so it can say what made it.
+    assert tool.model_label(one) == "value-gen8.pt"
+    assert tool.model_label(two) == "value-gen8.pt+value-gen8-s1.pt"
