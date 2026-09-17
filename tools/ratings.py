@@ -104,7 +104,14 @@ def read_games(root: Path) -> tuple[list[Observation], int]:
     """One observation per recorded game, and how many records needed repairing."""
     out: list[Observation] = []
     repaired = 0
-    for path in sorted(root.glob("**/games-seed*.jsonl")):
+    # Both layouts. A match dealt in fixed blocks names its files by seed and a queued one
+    # by worker, and this read only the first -- so every match run since the queue landed
+    # was missing from the scale, which is every measurement taken on the ensemble floor.
+    # `run_and_report.sh` had the same bug and was fixed; this copy was not.
+    paths = sorted(
+        set(root.glob("**/games-seed*.jsonl")) | set(root.glob("**/games-worker*.jsonl"))
+    )
+    for path in paths:
         with path.open(encoding="utf-8") as fh:
             for line in fh:
                 try:
