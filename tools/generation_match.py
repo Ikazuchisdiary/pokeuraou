@@ -165,6 +165,15 @@ def main() -> None:
         "their own strategies against the same field. That is the right comparison for a "
         "rating and the wrong one for isolating a model, so both exist.",
     )
+    ap.add_argument(
+        "--baseline-uniform-selection",
+        action="store_true",
+        help="the other arm draws its four uniformly while this one uses its book. "
+        "Without it `--selection-book` applies to both arms, which is right for holding "
+        "the selection fixed and cannot express the comparison the book itself is for: "
+        "the +141 Elo attributed to the advice was measured on single models against an "
+        "older book, and on the current floor it is unmeasured.",
+    )
     ap.add_argument("--seed", type=int, default=77)
     ap.add_argument(
         "--queue",
@@ -489,6 +498,24 @@ def main() -> None:
             # *our* four and side 0 is always our six. With one book this is the same
             # object either way and nothing changes.
             seat_book = book if leaves[0] is value else other_book
+            if args.baseline_uniform_selection and leaves[0] is not value:
+                # The other arm draws uniformly. Its opponent's six still comes from the
+                # book's own sheets, so both arms face the same field and only our draw
+                # differs -- which is the thing being priced.
+                seat_book = None
+            # One label per *arm*, then ordered by seat. Deriving them per seat is how
+            # the first version got it wrong.
+            tested_label = selection_label if book is not None else "uniform"
+            others_label = (
+                "uniform"
+                if args.baseline_uniform_selection or other_book is None
+                else other_label
+            )
+            seat_labels = (
+                (tested_label, others_label)
+                if leaves[0] is value
+                else (others_label, tested_label)
+            )
             entry = seat_book.get(team) if seat_book is not None else None
             if entry is not None:
                 # epsilon 0: the rating asks what the strategy is worth, and exploration
@@ -536,11 +563,12 @@ def main() -> None:
                     depths=depths,
                     rankings=ranknames,
                     solvers=tuple("sparse" if x else "full" for x in sparse),
-                    books=(
-                        (selection_label, other_label)
-                        if leaves[0] is value
-                        else (other_label, selection_label)
-                    ),
+                    # What each side's draw actually came from, not what the command
+                    # line asked for. The first version built this from the labels and
+                    # recorded `book, book` for a match where one arm was drawing
+                    # uniformly -- a record that disagrees with the game is worse than no
+                    # record, because a rating is fitted from it.
+                    books=seat_labels,
                     note=(
                         f"search depth {depths[0]} vs {depths[1]} by side"
                         if depths[0] != depths[1]
