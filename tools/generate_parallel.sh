@@ -73,10 +73,11 @@ if [ ! -f "$BOOK" ]; then
 	BOOK=""
 fi
 EPSILON="${EPSILON:-0.25}"
-# 0.5, not 0.05: the coverage table over all 394 solved teams says the rarest of our 90
-# selections gets 0.0 games in a generation at 0.05 and 11.9 at 0.5, with three quarters of
-# games still on the equilibrium either way. A setting that leaves a selection with no games
-# recreates a failure this project already had.
+# 0.5, and it is now the library's own default rather than an override here. It was an
+# override for months and bought nothing, because generation had moved to
+# tools/generate_queue.py -- which passes no exploration flags -- so generations 10, 11h
+# and 11L were all made at 0.05 while this comment explained why they were not. The
+# argument and the measurement now live at DEFAULT_TEMPERATURE in selection_book.py.
 TEMPERATURE="${TEMPERATURE:-0.5}"
 # Games played against our own six, spreads included. The mirror is the one case with
 # knowledge from outside the model (configs/knowledge/), and no generation had ever

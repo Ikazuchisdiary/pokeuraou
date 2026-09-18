@@ -37,6 +37,7 @@ from pokeuraou.selection_book import (
     BookEntry,
     SelectionBook,
     append_entry,
+    draw_across,
     draw_arm,
     explore_mixture,
     key_for_team,
@@ -741,3 +742,134 @@ def test_a_book_says_what_its_leaf_could_see(roster, tmp_path) -> None:  # noqa:
         )
         handle.write(json.dumps(entry.to_json(), ensure_ascii=False) + "\n")
     assert SelectionBook.read(old).information == {}
+
+
+def test_each_side_draws_from_its_own_book(roster) -> None:  # noqa: ANN001
+    """The defect this exists for: one book decided BOTH sides' fours.
+
+    `tools/generation_match.py` took `--baseline-selection-book`, then consulted a single
+    entry per game -- whichever arm sat at side 0 -- so the flag only swapped which book
+    governed both arms, in half the games. Two matches of the same pair, one with own
+    books and one with a shared book, returned an identical 380/848 in the seat they
+    shared, which cannot happen if the opponent's selection came from a different book.
+
+    Point masses on different indices, so a draw that consulted the wrong entry cannot
+    land on the right answer by luck.
+    """
+    ours = _entry(
+        ours=_point_mass(3), theirs=[_point_mass(4)], sets=roster.sets
+    )
+    theirs = _entry(
+        ours=_point_mass(7), theirs=[_point_mass(9)], sets=roster.sets
+    )
+    drawn = draw_across(ours, theirs, np.random.default_rng(0))
+    assert drawn.our_pick == SELECTIONS[3], "our four did not come from our book"
+    assert drawn.foe_pick == SELECTIONS[9], "their four did not come from their book"
+    # The old behaviour, stated so the test names what it rejects: one entry for both
+    # would have given 3 and 4.
+    assert drawn.foe_pick != SELECTIONS[4]
+
+
+def test_one_book_passed_twice_is_the_old_single_book_draw(roster) -> None:  # noqa: ANN001
+    """A match with one book has to keep behaving as it did, or every recorded row moves."""
+    entry = _entry(
+        ours=_point_mass(3), theirs=[_point_mass(4)], sets=roster.sets
+    )
+    across = draw_across(entry, entry, np.random.default_rng(11))
+    single = entry.draw(np.random.default_rng(11), epsilon=0.0, temperature=1.0)
+    assert across.our_pick == single.our_pick
+    assert across.foe_pick == single.foe_pick
+    assert across.class_index == single.class_index
+    assert across.foe_six == single.foe_six
+
+
+def test_the_two_book_draw_keeps_our_pick_blind_to_their_class(roster) -> None:  # noqa: ANN001
+    """Same invariant as every other draw here, and this path is where it would break.
+
+    Our index must come off the stream's first uniform against our own distribution,
+    before the class is sampled -- so it cannot move when the opponent's book changes
+    what it would do with that class.
+    """
+    ours = _entry(
+        ours=np.concatenate([np.full(6, 1 / 6), np.zeros(len(SELECTIONS) - 6)]),
+        theirs=[_point_mass(0), _point_mass(len(SELECTIONS) - 1)],
+        sets=roster.sets,
+    )
+    a = _entry(
+        ours=_point_mass(0),
+        theirs=[_point_mass(0), _point_mass(1)],
+        sets=roster.sets,
+    )
+    b = _entry(
+        ours=_point_mass(0),
+        theirs=[_point_mass(5), _point_mass(6)],
+        sets=roster.sets,
+    )
+    first = draw_across(ours, a, np.random.default_rng(4))
+    second = draw_across(ours, b, np.random.default_rng(4))
+    assert first.our_pick == second.our_pick, "their book moved our draw"
+    # The control, so the test is not passing because nothing is wired up.
+    assert first.foe_pick != second.foe_pick
+
+
+def test_books_that_disagree_about_the_opponent_are_refused(roster) -> None:  # noqa: ANN001
+    """The class is the opponent's investment, not either arm's choice.
+
+    Every book solved for one roster carries identical classes, because they come from
+    the spread prior. If two ever did not, taking the class from one book and the column
+    strategy from the other would pair a strategy with the wrong spreads -- silently, and
+    in a direction no summary would show.
+    """
+    ours = _entry(ours=_point_mass(0), theirs=[_point_mass(0)], sets=roster.sets)
+    theirs = _entry(
+        ours=_point_mass(0), theirs=[_point_mass(0)], sets=roster.sets[:-1]
+    )
+    with pytest.raises(ValueError, match="spread classes"):
+        draw_across(ours, theirs, np.random.default_rng(0))
+
+
+def test_a_side_with_no_book_draws_uniformly(roster) -> None:  # noqa: ANN001
+    """"Uniform selection" is a property of the ARM, so it has to survive the seat swap.
+
+    `--baseline-uniform-selection` replaced OUR pick, and side 0 is always our roster, so
+    the arm drew uniformly only in the seat where it sat at side 0 and took the book's
+    column strategy in the other one -- while the provenance said "uniform" for both.
+    """
+    book = _entry(
+        ours=_point_mass(3), theirs=[_point_mass(4)], sets=roster.sets
+    )
+    rng = np.random.default_rng(3)
+    seen = np.zeros(len(SELECTIONS))
+    for _ in range(6000):
+        drawn = draw_across(book, None, rng)
+        assert drawn.our_pick == SELECTIONS[3], "the side WITH a book stopped using it"
+        seen[SELECTIONS.index(drawn.foe_pick)] += 1
+    share = seen / seen.sum()
+    assert abs(share - 1.0 / len(SELECTIONS)).max() < 0.006
+    # And the mirror image, because the arm has to be uniform in either seat.
+    rng = np.random.default_rng(3)
+    seen = np.zeros(len(SELECTIONS))
+    for _ in range(6000):
+        drawn = draw_across(None, book, rng)
+        assert drawn.foe_pick == SELECTIONS[4], "the side WITH a book stopped using it"
+        seen[SELECTIONS.index(drawn.our_pick)] += 1
+    share = seen / seen.sum()
+    assert abs(share - 1.0 / len(SELECTIONS)).max() < 0.006
+
+
+def test_a_bookless_side_still_gets_the_opponent_from_the_other_book(roster) -> None:  # noqa: ANN001
+    """The field is the same for both arms; only each side's four follows its own rule."""
+    book = _entry(
+        ours=_point_mass(3), theirs=[_point_mass(4)], sets=roster.sets
+    )
+    a = draw_across(book, None, np.random.default_rng(5))
+    b = draw_across(None, book, np.random.default_rng(5))
+    assert a.foe_six == b.foe_six == book.class_sets[a.class_index]
+
+
+def test_two_bookless_sides_are_refused() -> None:
+    """Nothing names the opponent then, and a silent fallback is how a uniform draw got
+    reported as a book draw before."""
+    with pytest.raises(ValueError, match="at least one side"):
+        draw_across(None, None, np.random.default_rng(0))
+

@@ -33,7 +33,7 @@ from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.policy import load_policy
 from pokeuraou.priors import find_cached_chaos, load_chaos
 from pokeuraou.provenance import open_games, provenance, write_game
-from pokeuraou.selection_book import SelectionBook
+from pokeuraou.selection_book import SelectionBook, draw_across
 from pokeuraou.selfplay import play_game
 from pokeuraou.standings import find_cached_standings, load_standings, sample_standings_team
 from pokeuraou.teams import all_selections, load_roster
@@ -343,6 +343,38 @@ def main() -> None:
                 [n.to(device) for n in base_nets], encoder, device=device
             )
 
+    def book_matches_leaf(files, loaded, which: str) -> None:  # noqa: ANN001
+        """Whether this arm's book was solved from this arm's leaf, said out loud.
+
+        A book is the equilibrium of the selection game as one model's value function
+        defines it, so an arm drawing from another model's book selects by an evaluation
+        it does not play with. That is sometimes the right configuration -- a bridge to an
+        already recorded corpus has to be spelled like the corpus -- so this reports
+        rather than refuses. It reports in BOTH directions, because a line that appears
+        only when something is wrong is a line nobody has read when it matters.
+
+        The book header stores the model files it was solved from, so the comparison is
+        exact and catches the case a name would miss: an ensemble leaf whose book was
+        solved from one of its members. Those have the same stem and are different agents.
+        """
+        if loaded is None or not files:
+            return
+        want = "+".join(getattr(p, "name", str(p)) for p in files)
+        if loaded.model == want:
+            print(f"  {which}: leaf and book agree ({want})", file=sys.stderr)
+        else:
+            print(
+                f"  !! {which}: the leaf is {want}, and its book was solved from "
+                f"{loaded.model or '(unrecorded)'}.\n"
+                f"     That arm selects by one evaluation and plays by another. "
+                f"Deliberate for a bridge to a\n"
+                f"     recorded corpus; a mistake anywhere else.",
+                file=sys.stderr,
+            )
+
+    book_matches_leaf(value_files, book, "tested arm")
+    book_matches_leaf(baseline_files, other_book, "other arm")
+
     # The policy's position representation comes from its own value function, not from
     # either arm's leaf: an arm may be an ensemble, or a generation the policy never saw,
     # and the representation is a property of the policy rather than of the match.
@@ -511,10 +543,29 @@ def main() -> None:
                     flush=True,
                 )
             team = pool[int(rng.integers(len(pool)))]
-            # The book of whichever arm is sitting at side 0, because the draw decides
-            # *our* four and side 0 is always our six. With one book this is the same
-            # object either way and nothing changes.
-            seat_book = book if leaves[0] is value else other_book
+            # One book per SIDE, not one per game.
+            #
+            # This was `seat_book = book if leaves[0] is value else other_book`, with a
+            # comment saying the draw decides *our* four and side 0 is always our six.
+            # True as far as it goes, and it left the other side's four coming out of the
+            # same entry -- so `--baseline-selection-book` only ever swapped which single
+            # book governed BOTH arms, and only in the half of the games where the
+            # baseline sat at side 0. The provenance said each arm drew its own
+            # throughout, and so did the line this tool prints when the flag is passed.
+            #
+            # What showed it: two matches of the same pair, one with own books and one
+            # with a shared book, returned the identical 380/848 in the seat they shared.
+            # The seat's numbers cannot be identical if the opponent's selection came
+            # from a different book in the two runs.
+            # `--baseline-uniform-selection` means the baseline arm HAS NO BOOK, so the
+            # rule travels with the arm instead of with the seat. It used to replace our
+            # pick, and side 0 is always our roster, so the arm drew uniformly only where
+            # it sat at side 0 and took the book's column strategy in the other seat --
+            # while the label said "uniform" for both.
+            tested_book = book
+            baseline_book = None if args.baseline_uniform_selection else other_book
+            side0_book = tested_book if leaves[0] is value else baseline_book
+            side1_book = baseline_book if leaves[0] is value else tested_book
             # The other arm draws *our* four uniformly, and nothing else changes: the
             # opponent's six and the opponent's four still come from the book, so both
             # arms face the same field and the only difference is the draw being priced.
@@ -525,7 +576,6 @@ def main() -> None:
             # that pair was already known to be worth, while the arm it claimed to be
             # measuring is worth +18.9. Nothing in the record said which arm had run: the
             # provenance labels are written from the options, not from the draw.
-            ours_uniform = args.baseline_uniform_selection and leaves[0] is not value
             # One label per *arm*, then ordered by seat. Deriving them per seat is how
             # the first version got it wrong.
             tested_label = selection_label if book is not None else "uniform"
@@ -555,28 +605,33 @@ def main() -> None:
                 if leaves[0] is value
                 else (others_label, tested_label)
             )
-            entry = seat_book.get(team) if seat_book is not None else None
-            if entry is not None:
-                # Taken before the book draws anything, so that the uniform arm cannot
-                # see -- not even through the position in the stream -- the spread class
-                # the book is about to sample for the opponent. Same rule as
-                # `BookEntry.draw`, which is why ours comes first there too.
-                own_uniform = (
-                    selections[int(rng.integers(len(selections)))]
-                    if ours_uniform
-                    else None
-                )
+            entry0 = side0_book.get(team) if side0_book is not None else None
+            entry1 = side1_book.get(team) if side1_book is not None else None
+            # A side with no book draws uniformly; a side whose book does not hold this
+            # team is a miss, and the whole game falls back. The two are different and
+            # were one condition before.
+            missing = (side0_book is not None and entry0 is None) or (
+                side1_book is not None and entry1 is None
+            )
+            if not missing and (entry0 is not None or entry1 is not None):
                 # epsilon 0: the rating asks what the strategy is worth, and exploration
                 # is a property of generation rather than of the agent.
-                drawn = entry.draw(rng, epsilon=0.0, temperature=1.0)
+                #
+                # `draw_across` rather than `entry.draw` even when both sides read one
+                # book, so that one book, two books and a bookless arm are the same code
+                # path. A branch taken only in the unusual case is a branch nobody's runs
+                # exercise. Our pick comes off the stream before the class, so the arm
+                # drawing uniformly cannot see the opponent's private type even through
+                # its position in the stream.
+                drawn = draw_across(entry0, entry1, rng, epsilon=0.0, temperature=1.0)
                 foe_six = list(drawn.foe_six)
-                own_pick = drawn.our_pick if own_uniform is None else own_uniform
+                own_pick = drawn.our_pick
                 foe_pick = drawn.foe_pick
             else:
                 foe_six = sample_standings_team(rng, reg, prior, team)
                 own_pick = selections[int(rng.integers(len(selections)))]
                 foe_pick = selections[int(rng.integers(len(selections)))]
-                if seat_book is not None:
+                if side0_book is not None or side1_book is not None:
                     book_misses += 1
             drawn_ours.setdefault(seat_labels[0], set()).add(tuple(own_pick))
             drawn_theirs.setdefault(seat_labels[0], set()).add(tuple(foe_pick))
@@ -612,7 +667,7 @@ def main() -> None:
                 ),
             )
             record.selection_source = (
-                "book" if entry is not None else "uniform"
+                "book" if (entry0 is not None or entry1 is not None) else "uniform"
             )
             if record.outcome is None:
                 tally[which][2] += 1

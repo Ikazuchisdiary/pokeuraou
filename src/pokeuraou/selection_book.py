@@ -62,11 +62,30 @@ from .standings import TournamentTeam
 #: head (a model trained on this book against one trained on uniform selection), which is
 #: the same shape of experiment the candidate-width match used.
 DEFAULT_EPSILON = 0.25
-#: In win-probability units: a selection that gives up 0.05 (five points) gets weight
-#: e^-1 relative to the best. Chosen because the second-best selection in the first solve
-#: was 0.0026 away, which is inside the value function's own error -- calling that one
-#: "the" selection and never generating the other would be false precision.
-DEFAULT_TEMPERATURE = 0.05
+#: In win-probability units: a selection that gives up this much gets weight e^-1 relative
+#: to the best.
+#:
+#: 0.5, and it was 0.05. The smaller number was chosen for precision -- the second-best
+#: selection in the first solve was 0.0026 away, inside the value function's own error, so
+#: calling one of them "the" selection was false precision -- and it starves the tail.
+#: Expected games per selection over all 394 solved teams, weighted by the team draw, in a
+#: 24,000-game generation against `value-gen11L`'s book:
+#:
+#:      T       min    5th   median     max    selections under 30 games
+#:      0.05    3.9    6.0     40.7    6445    34 of 90
+#:      0.5    53.4   54.3     66.5    6223     0 of 90
+#:
+#: The most-played selection gives up 3.5% of its games and the rarest goes from 3.9 to
+#: 53.4, so the equilibrium is still what is mostly generated. A selection with no games
+#: is a failure this project has already had.
+#:
+#: `tools/generate_parallel.sh` has passed 0.5 with that argument for some time. It never
+#: reached anything: generation moved to `tools/generate_queue.py`, which passes no
+#: exploration flags at all, so generations 10, 11h and 11L were every one of them made at
+#: 0.05 while a comment in an unused driver explained why they were not. Fixed here, where
+#: all three consumers read it -- self-play, its CLI, and `book_check`'s `gen` arm, which
+#: exists to imitate generation and would otherwise imitate the wrong thing.
+DEFAULT_TEMPERATURE = 0.5
 
 
 def selection_dir() -> Path:
@@ -462,6 +481,96 @@ def _pick(rng: np.random.Generator, weights: np.ndarray) -> int:
     )
 
 
+def draw_across(
+    ours: BookEntry | None,
+    theirs: BookEntry | None,
+    rng: np.random.Generator,
+    *,
+    epsilon: float = 0.0,
+    temperature: float = 1.0,
+) -> SelectionDraw:
+    """One draw where the two sides consult DIFFERENT books.
+
+    :meth:`BookEntry.draw` takes both sides' selections from one entry, which is right
+    when both sides are the same agent and wrong the moment they are not: a book is the
+    equilibrium of the selection game as one model's value function defines it, so an
+    agent drawing from another model's book selects by an evaluation it does not use.
+
+    `tools/generation_match.py` accepted `--baseline-selection-book` and then consulted a
+    single book per game -- whichever arm sat at side 0 -- so the flag only ever swapped
+    which book governed BOTH sides, in half the games. Two matches run to compare own
+    books against a shared one returned the identical 380/848 in the seat they shared,
+    which is what finally showed it; the provenance said each arm used its own the whole
+    time.
+
+    The order of the three draws is the invariant, and it is spelled out again here for
+    the reason `draw_arm` gives: two sides drawn by different code paths is exactly where
+    the tempting shortcut reappears. Ours is taken first and BEFORE the class, so nothing
+    downstream of the opponent's private type -- not even the position in the stream --
+    can reach our draw.
+
+    The class is neither arm's to choose. It is the opponent's investment, and it comes
+    from the spread prior rather than from any model: every entry of every book solved
+    for this roster carries identical `class_sets`, `class_weights` and `selections`,
+    which is checked here rather than trusted, because a class drawn from the wrong book
+    would silently pair one side's column strategy with the other side's spreads.
+
+    Either side may be ``None``, meaning that arm has no book and draws its four
+    uniformly. That is what "uniform selection" is -- a property of the ARM, which travels
+    with it into whichever seat it sits in. `generation_match`'s
+    `--baseline-uniform-selection` promised "the other arm draws its four uniformly" and
+    delivered it only where that arm sat at side 0, because the uniform draw replaced our
+    pick and side 0 is always our roster; in the other seat the same arm took its four
+    from the book's column strategy. The flag was correct in half the games.
+    """
+    field = ours if ours is not None else theirs
+    if field is None:
+        raise ValueError("at least one side must have a book to name the opponent")
+    if ours is not None and theirs is not None and ours.class_sets != theirs.class_sets:
+        raise ValueError(
+            "the two books disagree about the opponent's spread classes, so there is no "
+            "single opponent for the two sides to be playing"
+        )
+    count = len(field.selections)
+    uniform = np.full(count, 1.0 / count)
+
+    our_mixture = (
+        uniform
+        if ours is None
+        else ours.our_mixture(epsilon=epsilon, temperature=temperature)
+    )
+    our_index = _pick(rng, our_mixture)
+    class_index = _pick(rng, np.asarray(field.class_weights, dtype=np.float64))
+    theirs_mixture = (
+        uniform
+        if theirs is None
+        else theirs.their_mixture(
+            class_index, epsilon=epsilon, temperature=temperature
+        )
+    )
+    their_index = _pick(rng, theirs_mixture)
+    return SelectionDraw(
+        foe_six=field.class_sets[class_index],
+        our_pick=field.selections[our_index],
+        foe_pick=field.selections[their_index],
+        our_equilibrium=(
+            uniform if ours is None
+            else np.asarray(ours.our_strategy, dtype=np.float64)
+        ),
+        foe_equilibrium=(
+            uniform if theirs is None
+            else np.asarray(theirs.their_strategies[class_index], dtype=np.float64)
+        ),
+        our_mixture=our_mixture,
+        foe_mixture=theirs_mixture,
+        # Whose value? The side that has a book, and ours when both do -- it is the
+        # reason two books give different numbers at all, each cell value being that
+        # model's estimate of the same position.
+        value=field.value,
+        class_index=class_index,
+    )
+
+
 def draw_arm(
     arm: str,
     entry: BookEntry,
@@ -563,6 +672,7 @@ __all__ = [
     "SelectionBook",
     "SelectionDraw",
     "append_entry",
+    "draw_across",
     "draw_arm",
     "explore_mixture",
     "find_cached_book",
