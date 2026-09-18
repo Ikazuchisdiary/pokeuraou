@@ -33,6 +33,33 @@ fi
 echo "=== A done ==="
 date
 
+# --------------------------------------------- A2. the same anchor, drawing its own book
+#
+# A uses value-gen9's book because that is what the 20,352 recorded games used and a bridge
+# has to be spelled like the thing it bridges. But a book is not an opening repertoire --
+# it is the equilibrium of the selection game AS THAT MODEL'S VALUE FUNCTION DEFINES IT --
+# so an agent drawing from another model's book selects by one evaluation and plays by
+# another. Not stale: incoherent. Three generations of training were all made to select
+# with generation 9's opinion.
+#
+# So the same anchor again with the ensemble's own book, which is the configuration that
+# would actually ship. The difference between A and A2 is what using someone else's book
+# has been costing.
+OUT=data/matches/anchor-gen11Lx2-ownbook-hidden-vs-hpshare
+if [ ! -f "$OUT/DONE" ]; then
+  echo "=== A2: hidden anchor, gen11Lx2 with ITS OWN book, vs hp-share ==="
+  date
+  uv run --group learn python -u tools/match_queue.py \
+    --out "$OUT" --games 848 --seed 20260919 --served --hide-bench \
+    --value data/models/value-gen11L.pt data/models/value-gen11L-s1.pt \
+    -- --objective hp-share --limit 24 --baseline-limit 24 --rank-leaf \
+       --selection-book data/selection/rizabanadohido-value-gen11L-ens2.jsonl.gz \
+       --baseline-uniform-selection 2>&1 | tail -8
+  echo "hidden anchor with the ensemble's own book, seed 20260919" > "$OUT/DONE"
+fi
+echo "=== A2 done ==="
+date
+
 # ------------------------------------------------- B. a pool played entirely in the dark
 #
 # Asked for directly: a model built purely under the hidden rule. The two hidden pools that
@@ -96,13 +123,42 @@ fi
 echo "=== C2 done ==="
 date
 
+# ------------------------------------------- C3. a book for each of the two new models
+#
+# A new model needs its own book before it plays. An agent is its model together with the
+# book it draws from, and a book is worth about 141 Elo -- the whole distance from the
+# parameter-free baseline to the best agent on the scale -- so a match between two new
+# leaves with no books measures the leaves and reports the answer as the agents'. Worse
+# here than usual: tonight's finding is that the ordering INSIDE the book is where the
+# error lives, so a comparison that removes the book removes the thing under test.
+#
+# About 35 minutes each at 8 shards.
+for M in value-hidden36 value-open31; do
+  B="data/selection/rizabanadohido-$M.jsonl.gz"
+  [ -f "$B" ] && { echo "skip book for $M"; continue; }
+  echo "=== C3: selection book for $M ==="
+  date
+  MODEL="data/models/$M.pt" LOGS="data/selection/logs-$M" \
+    bash tools/solve_book_parallel.sh 2>&1 | tail -6
+done
+echo "=== C3 done ==="
+date
+
 # ------------------------------------------------------ D. the two of them, in the dark
-echo "=== D: value-hidden36 vs value-open31, hidden bench ==="
+#
+# Each arm draws from its OWN book. That is the comparison a rating is defined to make and
+# the one every row since generation 10 failed to make: those drew both arms from
+# value-gen9's book, two generations stale, so an ordering error the arms shared cancelled
+# exactly and the rating could not see it.
+echo "=== D: value-hidden36 vs value-open31, own books, hidden bench ==="
 date
 uv run --group learn python -u tools/match_queue.py \
   --out data/matches/hidden36-vs-open31 --games 848 --seed 20260919 --served --hide-bench \
   --value data/models/value-hidden36.pt --baseline data/models/value-open31.pt \
-  -- --limit 24 --baseline-limit 24 --rank-leaf --baseline-rank-leaf 2>&1 | tail -8
+  -- --limit 24 --baseline-limit 24 --rank-leaf --baseline-rank-leaf \
+     --selection-book data/selection/rizabanadohido-value-hidden36.jsonl.gz \
+     --baseline-selection-book data/selection/rizabanadohido-value-open31.jsonl.gz \
+     2>&1 | tail -8
 echo "=== D done ==="
 date
 

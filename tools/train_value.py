@@ -116,7 +116,8 @@ def learning_curve(
     most games partially present and each remaining decision would still be a near
     duplicate of one that was kept, so the curve would flatten for the wrong reason.
     """
-    train_idx, val_idx = dataset.split_by_game(args.holdout, args.seed)
+    split_seed = args.seed if args.split_seed is None else args.split_seed
+    train_idx, val_idx = dataset.split_by_game(args.holdout, split_seed)
     train_games = np.unique(dataset.game[train_idx])
     rng = np.random.default_rng(args.seed)
     shuffled = train_games.copy()
@@ -193,6 +194,17 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=2e-3)
     ap.add_argument("--holdout", type=float, default=0.15)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--split-seed",
+        type=int,
+        default=None,
+        help="which games are held out, separately from --seed. --seed moves three "
+        "things at once -- initialisation, batch order and the held-out games -- so "
+        "two runs that differ by it were also marked against different games, which "
+        "changes what the validation number MEANS rather than adding noise to it. "
+        "Omitted, the split follows --seed, which is what every model trained before "
+        "this flag existed did. It is recorded either way.",
+    )
     ap.add_argument("--min-turn-rows", type=int, default=200)
     ap.add_argument(
         "--td-lambda",
@@ -246,13 +258,18 @@ def main() -> None:
     )
     encoder = Encoder(reg)
     config = ValueConfig(
-        epochs=args.epochs, batch_size=args.batch_size, lr=args.lr, seed=args.seed
+        epochs=args.epochs,
+        batch_size=args.batch_size,
+        lr=args.lr,
+        seed=args.seed,
+        split_seed=args.split_seed,
     )
     device = torch.device(args.device)
     net = build(encoder, config).to(device)
     parameters = sum(p.numel() for p in net.parameters())
 
-    train_idx, val_idx = dataset.split_by_game(args.holdout, args.seed)
+    split_seed = args.seed if args.split_seed is None else args.split_seed
+    train_idx, val_idx = dataset.split_by_game(args.holdout, split_seed)
     print(
         f"{len(dataset):,} decisions from {len(np.unique(dataset.game)):,} games "
         f"-> {len(train_idx):,} train / {len(val_idx):,} validation, split by game"
@@ -381,6 +398,11 @@ def main() -> None:
                 ),
                 "epochs_run": len(history),
                 "td_lambda": args.td_lambda,
+                "seed": args.seed,
+                # Separately, because --seed moves three things and only this one
+                # decides what the row above was marked against.
+                "split_seed": split_seed,
+                "holdout": args.holdout,
                 # What the games that taught this could see. A value trained on omniscient
                 # play predicts omniscient play, and the book prints that prediction into
                 # a condition where the bench is hidden: on place 109 the leaf claimed

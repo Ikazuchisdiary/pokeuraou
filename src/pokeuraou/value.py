@@ -65,6 +65,21 @@ class ValueConfig:
     #: Stop when validation loss has not improved for this many epochs.
     patience: int = 4
     seed: int = 0
+    #: Which games are held out, separately from `seed`.
+    #:
+    #: `seed` moves three things at once -- initialisation, batch order and the held-out
+    #: games -- so two runs that differ by it differ in what they learned AND in what they
+    #: were marked against, and the second is not noise a reader can average away: it
+    #: changes the meaning of the number, not just its value. None keeps the old behaviour
+    #: of taking the split from `seed`, so every model trained before this was added is
+    #: still described by what its record says.
+    #:
+    #: Not a way to decompose run-to-run variance -- that was ruled out, because the
+    #: comparisons that matter here change the pool, so no shared split exists across
+    #: them, and `tools/sweep_value.py` already computes one split and hands it to every
+    #: configuration when the pool IS shared. This exists so a record can say which split
+    #: it used.
+    split_seed: int | None = None
 
 
 class ValueNet(nn.Module):
@@ -480,7 +495,8 @@ def train(
 
     torch.manual_seed(config.seed)
     if train_index is None or val_index is None:
-        train_idx, val_idx = dataset.split_by_game(holdout, config.seed)
+        split_seed = config.seed if config.split_seed is None else config.split_seed
+        train_idx, val_idx = dataset.split_by_game(holdout, split_seed)
     else:
         # Given explicitly by the learning curve, which varies the training set while
         # holding the validation games fixed so the rows can be compared to each other.
