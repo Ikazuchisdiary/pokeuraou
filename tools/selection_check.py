@@ -33,6 +33,7 @@ against the same opponent drawing uniformly in both, with the same seed.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -96,11 +97,79 @@ def main() -> None:
         "is meaningless when the lead carries no mass; naming all four tests a line as "
         "played rather than a lead with an arbitrary bench.",
     )
+    ap.add_argument(
+        "--hide-bench",
+        action="store_true",
+        help="play the condition that actually exists: the opponent's six is public "
+        "and which four they brought is not. Without it the search is handed side 1's "
+        "whole four from turn 1, which is the assumption G2 names as the reason the "
+        "solver is optimistic about its own side -- and the assumption the recorded "
+        "-21.8 point miss on place 109 was measured under.",
+    )
+    ap.add_argument("--shard", type=int, default=0)
+    ap.add_argument(
+        "--shards",
+        type=int,
+        default=1,
+        help="split the games across n processes. Shard i plays game indices i::n, "
+        "and because each game seeds from [seed, index] the split changes nothing "
+        "about which games are played or how the arms line up.",
+    )
+    ap.add_argument(
+        "--out",
+        type=Path,
+        default=None,
+        help="write one row per game here, so shards can be merged and so a paired "
+        "interval can be taken later. Shard i writes <out>.part<i>.",
+    )
+    ap.add_argument(
+        "--merge",
+        action="store_true",
+        help="read the part files beside --out and report, playing nothing.",
+    )
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = ap.parse_args()
 
     roster = load_roster(args.roster)
     reg = roster.reg
+
+    if args.merge:
+        if args.out is None:
+            raise SystemExit("--merge needs --out to know which part files to read")
+        parts = sorted(args.out.parent.glob(f"{args.out.stem}.part*{args.out.suffix}"))
+        if not parts:
+            raise SystemExit(f"no part files beside {args.out}")
+        claimed = None
+        tally: dict[str, list[int]] = {}
+        seen: set[tuple[str, int]] = set()
+        for part in parts:
+            for line in part.read_text(encoding="utf-8").splitlines():
+                row = json.loads(line)
+                if "header" in row:
+                    claimed = row["header"]["claimed"]
+                    continue
+                key = (row["arm"], int(row["game"]))
+                if key in seen:
+                    raise SystemExit(f"{key} appears in two shards; the split overlaps")
+                seen.add(key)
+                got = tally.setdefault(row["arm"], [0, 0])
+                got[0] += int(float(row["outcome"]) > 0.5)
+                got[1] += 1
+        print(f"  {len(parts)} part files, {len(seen)} games")
+        results = {}
+        for arm, (wins, n) in tally.items():
+            rate = wins / n if n else float("nan")
+            half = 1.96 * (rate * (1 - rate) / n) ** 0.5 if n else float("nan")
+            results[arm] = rate
+            print(f"  {arm:>20}  {n:>6}  {rate * 100:6.1f}%  +-{half * 100:.1f}")
+        if claimed is None:
+            raise SystemExit("no header line in any part file; re-run the shards")
+
+        class _Claim:
+            value = claimed
+
+        report(results, _Claim(), args)
+        return
     register_mega_stones(reg)
     prior = load_chaos(find_cached_chaos(reg.meta.format_id), reg)
     standings = load_standings(find_cached_standings(), reg)
@@ -203,12 +272,16 @@ def main() -> None:
     if forced_arm:
         arms.append(forced_arm)
     arms.extend(named)
+    rows: list[dict] = []
     for arm in arms:
-        # Same seed per arm, so the opponent's spreads, selections and every roll inside
-        # the games line up and only our selection rule differs.
-        game_rng = np.random.default_rng(args.seed + 1)
         wins = finished = unfinished = 0
-        for _ in range(args.games):
+        for game_index in range(args.shard, args.games, max(args.shards, 1)):
+            # Seeded from the game's INDEX, not from a position in a shared stream: game g
+            # is then the same game in every arm and in every shard. Lining arms up by
+            # consuming one generator in step holds only while every arm draws the same
+            # number of values, and this project has already lost a paired comparison that
+            # way.
+            game_rng = np.random.default_rng([args.seed + 1, game_index])
             foe_six = (
                 list(roster.sets)
                 if args.mirror
@@ -237,12 +310,24 @@ def main() -> None:
                 objective=OBJECTIVES["hp-share"],
                 search_limit=args.limit,
                 max_turns=args.max_turns,
+                sheets=(
+                    (list(roster.sets), list(foe_six)) if args.hide_bench else None
+                ),
             )
             if record.outcome is None:
                 unfinished += 1
                 continue
             finished += 1
             wins += int(record.outcome > 0.5)
+            rows.append(
+                {
+                    "arm": arm,
+                    "game": game_index,
+                    "outcome": float(record.outcome),
+                    "ownPick": list(own_pick),
+                    "foePick": list(foe_pick),
+                }
+            )
         rate = wins / finished if finished else float("nan")
         half = 1.96 * (rate * (1 - rate) / finished) ** 0.5 if finished else float("nan")
         results[arm] = rate
@@ -251,6 +336,36 @@ def main() -> None:
             f"   (打ち切り {unfinished})"
         )
 
+    if args.out is not None:
+        target = (
+            args.out
+            if args.shards <= 1
+            else args.out.with_suffix(f".part{args.shard}{args.out.suffix}")
+        )
+        target.parent.mkdir(parents=True, exist_ok=True)
+        with target.open("w", encoding="utf-8") as handle:
+            # The claim belongs in the file: a merge that had to re-solve 8,100 cells per
+            # class to print one number would cost more than the games it is summarising.
+            handle.write(
+                json.dumps(
+                    {"header": {"claimed": float(analysis.value), "place": args.place,
+                                "hideBench": bool(args.hide_bench), "games": args.games}},
+                    ensure_ascii=False,
+                )
+                + "\n"
+            )
+            for row in rows:
+                handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        print(f"\n  → {target}（{len(rows)} 行）")
+        if args.shards > 1:
+            print("  残りのシャードと合わせて --merge で集計する")
+            return
+
+    report(results, analysis, args)
+
+
+def report(results: dict, analysis, args) -> None:  # noqa: ANN001
+    """The three lines the measurement exists for, from whatever rows are in hand."""
     gap = (results["均衡 vs 一様"] - results["一様 vs 一様"]) * 100
     print(f"\n  助言の価値: {gap:+.1f} ポイント（相手は一様のまま、自陣の選出だけ変えた差）")
     if gap <= 0:
