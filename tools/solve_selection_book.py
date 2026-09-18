@@ -349,12 +349,20 @@ def main() -> None:
         return
 
     if args.merge:
-        merged = SelectionBook(
-            roster=args.roster, model=model_name, format_id=reg.meta.format_id
-        )
         parts = part_files(out)
         if not parts:
             raise SystemExit(f"no part files next to {out}")
+        # Taken from the parts rather than from a model this process never loaded.
+        information: dict[str, int] = {}
+        for part in parts:
+            for key, count in (SelectionBook.read(part).information or {}).items():
+                information[str(key)] = information.get(str(key), 0) + int(count)
+        merged = SelectionBook(
+            roster=args.roster,
+            model=model_name,
+            format_id=reg.meta.format_id,
+            information=information,
+        )
         for part in parts:
             book = SelectionBook.read(part)
             book.require_roster(args.roster)
@@ -392,7 +400,13 @@ def main() -> None:
             "produces those."
         )
     encoder = Encoder(reg)
-    nets, _metas = load_ensemble(models, encoder)
+    nets, metas = load_ensemble(models, encoder)
+    # What the leaf's own training games could see, summed over the members. A book
+    # that cannot say this is printing a prediction about an unnamed agent.
+    information: dict[str, int] = {}
+    for meta in metas:
+        for key, count in (meta.get("information") or {}).items():
+            information[str(key)] = information.get(str(key), 0) + int(count)
     device = torch.device(args.device)
     value = BatchedValue([n.to(device) for n in nets], encoder, device=device)
 
@@ -404,7 +418,7 @@ def main() -> None:
         done = set(existing.entries)
         print(f"再開: {len(done)} チーム分が既にある", file=sys.stderr)
     start_book(
-        target, roster=args.roster, model=model_name, format_id=reg.meta.format_id
+        target, roster=args.roster, model=model_name, format_id=reg.meta.format_id, information=information
     )
 
     # Indexed before sharding, because the index is the seed: team 37 gets the same eight

@@ -368,6 +368,13 @@ class SelectionBook:
     roster: str = ""
     model: str = ""
     format_id: str = ""
+    #: What the games that trained this book's leaf could see, as
+    #: ``{"open": n, "hidden-bench": m}``. The book prints a win probability, and that is a
+    #: prediction about whoever played the games the leaf learned from -- measured on place
+    #: 109, a leaf whose pool is 83% omniscient claims 62.8% where open play returns 59.2%
+    #: and the hidden-bench play the product actually ships returns 50.0%. Empty means the
+    #: book predates this being recorded, not that the pool was open.
+    information: dict[str, int] = field(default_factory=dict)
 
     def __len__(self) -> int:
         return len(self.entries)
@@ -388,6 +395,7 @@ class SelectionBook:
                             "roster": self.roster,
                             "model": self.model,
                             "format": self.format_id,
+                            "information": self.information,
                             "entries": len(self.entries),
                         }
                     },
@@ -412,6 +420,7 @@ class SelectionBook:
                     book.roster = header.get("roster", "")
                     book.model = header.get("model", "")
                     book.format_id = header.get("format", "")
+                    book.information = dict(header.get("information") or {})
                     continue
                 book.add(BookEntry.from_json(data))
         return book
@@ -502,7 +511,14 @@ def draw_arm(
     return ours, theirs
 
 
-def start_book(path: Path, *, roster: str, model: str, format_id: str) -> None:
+def start_book(
+    path: Path,
+    *,
+    roster: str,
+    model: str,
+    format_id: str,
+    information: dict[str, int] | None = None,
+) -> None:
     """Writes the header if ``path`` is new, so entries can be appended one at a time.
 
     An 80-minute solve that only lands on disk at the end is an 80-minute solve that a
@@ -515,7 +531,14 @@ def start_book(path: Path, *, roster: str, model: str, format_id: str) -> None:
     with gzip.open(path, "wt", encoding="utf-8") as handle:
         handle.write(
             json.dumps(
-                {"header": {"roster": roster, "model": model, "format": format_id}},
+                {
+                    "header": {
+                        "roster": roster,
+                        "model": model,
+                        "format": format_id,
+                        "information": information or {},
+                    }
+                },
                 ensure_ascii=False,
             )
             + "\n"

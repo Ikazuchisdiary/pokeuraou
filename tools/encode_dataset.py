@@ -109,6 +109,7 @@ def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict
     engines: Counter[str] = Counter()
     objectives: Counter[str] = Counter()
     selections: Counter[str] = Counter()
+    information: Counter[str] = Counter()
     unknown: Counter[str] = Counter()
     game_id = 0
     started = time.perf_counter()
@@ -153,6 +154,7 @@ def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict
                 search_limits[str(record.get("searchLimit"))] += 1
                 objectives[str(record.get("searchObjective"))] += 1
                 selections[str(record.get("selectionSource", "uniform"))] += 1
+                information[str(record.get("information", "open"))] += 1
                 engine = record.get("engine") or {}
                 engines[str(engine.get("sources", "unrecorded"))] += 1
                 label = record.get("foeArchetype", "?")
@@ -222,6 +224,11 @@ def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict
         # target. The TD target refuses a pool that mixes the two, and this is how it
         # knows.
         "objectives": dict(objectives),
+        # What the search could see while these games were played. A value trained
+        # on omniscient play predicts omniscient play: on place 109 the leaf claims
+        # 62.8%, open play returns 59.2% and hidden-bench play 50.0%. The pool that
+        # taught it is the only place that answers which of those it meant.
+        "information": dict(information),
         # How the four of six were chosen. The axis that separates generation 8 from
         # every generation before it, and the one a pooled dataset would otherwise lose:
         # drawing the selection from the cached equilibrium instead of uniformly is worth
@@ -293,6 +300,7 @@ def main() -> None:
     provenances = merged("provenances")
     engines = merged("engines")
     objectives = merged("objectives")
+    information = merged("information")
     selections = merged("selections")
     unknown = Counter(dataset.encoded.unknown_volatiles)
 
@@ -302,6 +310,7 @@ def main() -> None:
     print(f"  games by provenance: {provenances}")
     print(f"  games by engine build: {engines}")
     print(f"  games by generating leaf: {objectives}")
+    print(f"  games by what the search could see: {information}")
     print(f"  games by selection rule: {selections}")
     branching = merged("branching")
     total = sum(branching.values())
@@ -336,6 +345,7 @@ def main() -> None:
                 "provenances": provenances,
                 "engines": engines,
                 "objectives": objectives,
+                "information": information,
                 "selections": selections,
             },
         )

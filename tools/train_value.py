@@ -31,6 +31,7 @@ the level matters separately.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -380,6 +381,14 @@ def main() -> None:
                 ),
                 "epochs_run": len(history),
                 "td_lambda": args.td_lambda,
+                # What the games that taught this could see. A value trained on omniscient
+                # play predicts omniscient play, and the book prints that prediction into
+                # a condition where the bench is hidden: on place 109 the leaf claimed
+                # 62.8%, open play returned 59.2% and hidden play 50.0%. Carried from the
+                # dataset so the claim can say which agent it is about.
+                "information": json.loads(
+                    str(np.load(args.data)["meta_json"])
+                ).get("information", {}),
             },
         )
         print(f"\n-> {args.out}")

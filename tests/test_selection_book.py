@@ -700,3 +700,44 @@ def test_a_book_against_itself_agrees_with_itself(roster, tmp_path) -> None:  # 
 
     # And a book's own four is its own first choice.
     assert np.argsort(loss).tolist().index(int(np.argmax(ours))) + 1 == 1
+
+
+def test_a_book_says_what_its_leaf_could_see(roster, tmp_path) -> None:  # noqa: ANN001
+    """The claim is about an agent, and the book has to name which one.
+
+    A book prints a win probability, and that is a prediction about whoever played the
+    games its leaf learned from. Measured on place 109 with a leaf whose pool is 83%
+    omniscient: the book claims 62.8%, open play returns 59.2% and the hidden-bench play
+    the product ships into returns 50.0%. The gap is the condition, not the calibration,
+    and until now nothing between the raw game files and the printed number recorded it.
+    """
+    entry = _entry(
+        ours=np.full(len(SELECTIONS), 1.0 / len(SELECTIONS)),
+        theirs=[_point_mass(3)],
+        sets=roster.sets,
+    )
+    book = SelectionBook(
+        roster="rizabanadohido",
+        model="value-gen11L.pt",
+        format_id="x",
+        information={"open": 58603, "hidden-bench": 12000},
+    )
+    book.add(entry)
+    path = tmp_path / "book.jsonl.gz"
+    book.write(path)
+
+    back = SelectionBook.read(path)
+    assert back.information == {"open": 58603, "hidden-bench": 12000}
+
+    # A book written before this existed must still load, and must not claim its pool was
+    # open -- absence of the field is absence of the answer.
+    old = tmp_path / "old.jsonl.gz"
+    import gzip
+
+    with gzip.open(old, "wt", encoding="utf-8") as handle:
+        handle.write(
+            json.dumps({"header": {"roster": "rizabanadohido", "model": "m", "format": "x"}})
+            + "\n"
+        )
+        handle.write(json.dumps(entry.to_json(), ensure_ascii=False) + "\n")
+    assert SelectionBook.read(old).information == {}
