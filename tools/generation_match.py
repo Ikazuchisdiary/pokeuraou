@@ -589,6 +589,21 @@ def main() -> None:
                 # the standings team when it did not. Both are public in Champions, and
                 # both are what makes the four uncertain rather than unknown.
                 sheets=(list(roster.sets), list(foe_six)) if args.hide_bench else None,
+                # Without this the record keeps `selectionSource: "uniform"` and an empty
+                # ownPick whatever the book did, and every rating row since generation 10
+                # says a uniform draw for games the book actually chose. `provenance.books`
+                # was right the whole time, so the two halves of the same file disagreed --
+                # which the comment beside `books=` says is worse than no record at all,
+                # because the rating is fitted from it.
+                selection=(
+                    [entry.species for entry in roster.sets],
+                    [entry.species for entry in foe_six],
+                    tuple(own_pick),
+                    tuple(foe_pick),
+                ),
+            )
+            record.selection_source = (
+                "book" if entry is not None else "uniform"
             )
             if record.outcome is None:
                 tally[which][2] += 1
