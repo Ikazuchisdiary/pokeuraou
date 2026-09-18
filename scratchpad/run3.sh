@@ -114,71 +114,91 @@ done
 echo "=== 1 done ==="
 date
 
-# -------------------------------------------- 2. hidden-only, and a control of equal size
-if [ ! -f data/models/value-hidden24.pt ]; then
-  echo "=== 2a: encode + train hidden-only ==="
+# ------------------------------------------------ 2. the twin pool: one difference
+#
+# The control was gen8 + gen9, and it differs from the hidden pool in three things:
+# temperature (0.05 against half of it at 0.5), candidate ordering (gen11L is the only
+# pool ever generated with --rank-leaf), and the bench. An experiment that wants to
+# attribute a result to the bench cannot use it.
+#
+# So: the same seed, the same leaf, the same book, the same width, the same ordering, the
+# same exploration -- and the bench open. Seed 2001 means game i draws the same team and
+# the same selection as its hidden twin, as far as the draw is concerned; whether hiding
+# the bench also consumes randomness is NOT assumed here, because the same assumption
+# about --mirror-share is what desynchronised generation 11h from generation 10.
+OUT=data/selfplay-open2
+if [ ! -f "$OUT/DONE" ]; then
+  echo "=== 2: the open twin, 12,000 games, seed 2001 ==="
+  date
+  uv run --group learn python -u tools/generate_queue.py \
+    --out "$OUT" --games 12000 --seed 2001 --served --limit 24 \
+    --value data/models/value-gen11L.pt \
+    -- --rank-leaf --explore-temperature 0.5 --explore-epsilon 0.25 2>&1 | tail -8
+  echo "ok: 12000 OPEN games, twin of selfplay-hidden2, seed 2001, --rank-leaf, e=0.25 T=0.5" \
+    > "$OUT/DONE"
+fi
+echo "=== 2 done ==="
+date
+
+# ------------------------------------------------------------------ 3. three models
+#
+# `h12` and `o12` are the experiment: twin pools, one difference, so whichever way it
+# comes out the comparison is about the bench. `hidden24` is the deliverable -- a model
+# built purely under the hidden rule, on everything hidden that exists -- and it is not
+# the control, because its pool is twice the size and mixes two exploration temperatures.
+train_one() {
+  local name="$1"; shift
+  [ -f "data/models/$name.pt" ] && { echo "skip $name"; return; }
+  echo "=== 3: encode + train $name ==="
   date
   uv run --group learn python -u tools/encode_dataset.py \
-    --dir data/selfplay-gen11L data/selfplay-hidden2 \
-    --out data/selfplay-hidden24-encoded.npz 2>&1 | tail -6
+    --dir "$@" --out "data/$name-encoded.npz" 2>&1 | tail -6
   uv run --group learn python -u tools/train_value.py \
-    --data data/selfplay-hidden24-encoded.npz \
-    --out data/models/value-hidden24.pt --split-seed 0 2>&1 | tail -14
-fi
-echo "=== 2a done ==="
-date
-
-# gen9 alone is 11,999 and gen8+gen9 is 18,999; with gen7 it is 30,982. The hidden pool is
-# about 24,000, so gen8+gen9+gen7 overshoots and gen8+gen9 undershoots. Taking the smaller
-# one states the direction: the control has FEWER games, so a hidden model that loses
-# cannot blame its pool size, and one that wins is not settled by this comparison alone.
-if [ ! -f data/models/value-open19.pt ]; then
-  echo "=== 2b: encode + train open control ==="
-  date
-  uv run --group learn python -u tools/encode_dataset.py \
-    --dir data/selfplay-gen8 data/selfplay-gen9 \
-    --out data/selfplay-open19-encoded.npz 2>&1 | tail -6
-  uv run --group learn python -u tools/train_value.py \
-    --data data/selfplay-open19-encoded.npz \
-    --out data/models/value-open19.pt --split-seed 0 2>&1 | tail -14
-fi
-echo "=== 2b done ==="
-date
-
-# ------------------------------------------------------- 3. a book each, then the match
-for M in value-hidden24 value-open19; do
-  B="data/selection/rizabanadohido-$M.jsonl.gz"
-  [ -f "$B" ] && { echo "skip book for $M"; continue; }
-  echo "=== 3a: selection book for $M ==="
-  date
-  MODEL="data/models/$M.pt" LOGS="data/selection/logs-$M" \
-    bash tools/solve_book_parallel.sh 2>&1 | tail -6
-done
-echo "=== 3a done ==="
-date
-
-run_match hidden24-vs-open19 \
-  --games 848 --seed 20261021 --served --hide-bench \
-  --value data/models/value-hidden24.pt --baseline data/models/value-open19.pt \
-  -- --limit 24 --baseline-limit 24 --rank-leaf --baseline-rank-leaf \
-     --selection-book data/selection/rizabanadohido-value-hidden24.jsonl.gz \
-     --baseline-selection-book data/selection/rizabanadohido-value-open19.jsonl.gz
-
-S=20261030
-for M in value-hidden24 value-open19; do
-  S=$((S + 1))
-  run_match "anchor-$M-hidden-vs-hpshare" \
-    --games 848 --seed "$S" --served --hide-bench \
-    --value "data/models/$M.pt" \
-    -- --objective hp-share --limit 24 --baseline-limit 24 --rank-leaf \
-       --selection-book "data/selection/rizabanadohido-$M.jsonl.gz" \
-       --baseline-uniform-selection
-done
+    --data "data/$name-encoded.npz" --out "data/models/$name.pt" \
+    --split-seed 0 2>&1 | tail -14
+}
+train_one value-h12 data/selfplay-hidden2
+train_one value-o12 data/selfplay-open2
+train_one value-hidden24 data/selfplay-gen11L data/selfplay-hidden2
 echo "=== 3 done ==="
 date
 
+# --------------------------------------- 3b. the twins, in the condition that ships
+#
+# Uniform selection on BOTH arms, acknowledged. Neither twin has a book and solving two
+# would cost seventy minutes to answer a question about the training condition, not about
+# selection; both arms are the agent (model, uniform), which is a fair pair.
+run_match h12-vs-o12-hidden \
+  --games 848 --seed 20261041 --served --hide-bench --uniform-selection \
+  --value data/models/value-h12.pt --baseline data/models/value-o12.pt \
+  -- --limit 24 --baseline-limit 24 --rank-leaf --baseline-rank-leaf
+
+# The same pair in the OPEN game, which is the other half of the question: a model taught
+# in the dark should lose less by being put in the light than one taught in the light
+# loses by being put in the dark.
+run_match h12-vs-o12-open \
+  --games 848 --seed 20261042 --served --uniform-selection \
+  --value data/models/value-h12.pt --baseline data/models/value-o12.pt \
+  -- --limit 24 --baseline-limit 24 --rank-leaf --baseline-rank-leaf
+
+# ------------------------------------------- 3c. the deliverable, on the hidden scale
+B="data/selection/rizabanadohido-value-hidden24.jsonl.gz"
+if [ ! -f "$B" ]; then
+  echo "=== 3c: selection book for value-hidden24 ==="
+  date
+  MODEL=data/models/value-hidden24.pt LOGS=data/selection/logs-value-hidden24 \
+    bash tools/solve_book_parallel.sh 2>&1 | tail -6
+fi
+run_match anchor-value-hidden24-hidden-vs-hpshare \
+  --games 848 --seed 20261043 --served --hide-bench \
+  --value data/models/value-hidden24.pt \
+  -- --objective hp-share --limit 24 --baseline-limit 24 --rank-leaf \
+     --selection-book "$B" --baseline-uniform-selection
+echo "=== 3c done ==="
+date
+
 # ---------------------------------------------------------------- 4. the ordering panel
-echo "=== 4: ordering panel, 16 opponents ==="
+echo "=== 4: ordering panel, 12 opponents ==="
 date
 bash "$ORDER"
 echo "=== 4 done ==="

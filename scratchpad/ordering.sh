@@ -1,4 +1,4 @@
-# 16 opponents with a second selection carrying >= 5%, drawn with seed 20260919
+# 12 opponents with a second selection carrying >= 5%, drawn with seed 20260919
 # each pair is paired per game: same opponent, same spread class, same index
 set -uo pipefail
 cd /c/Users/Ikazuchi/repos/pokeuraou
@@ -219,78 +219,6 @@ out="$DIR/place189.jsonl"
   done
   for pid in "${pids[@]}"; do wait "$pid" || true; done
   uv run --group learn python -u tools/selection_check.py --place 189 --merge --out "$out" 2>&1 | tail -6
-}
-
-# place 172: 72.5% vs 19.6%
-out="$DIR/place172.jsonl"
-[ -f "$out" ] || {
-  pids=()
-  for i in $(seq 0 7); do
-    uv run --group learn python -u tools/selection_check.py \
-      --place 172 --model data/models/value-gen11L.pt \
-      --games 60 --limit 16 --classes 8 --hide-bench --rank-by-leaf \
-      --force-selection "charizard,sylveon,venusaur,incineroar" --force-selection "charizard,sylveon,toxapex,incineroar" \
-      --only-arm "+" \
-      --shard "$i" --shards 8 --out "$out" \
-      > "$DIR/logs/172-$i.log" 2>&1 &
-    pids+=($!)
-  done
-  for pid in "${pids[@]}"; do wait "$pid" || true; done
-  uv run --group learn python -u tools/selection_check.py --place 172 --merge --out "$out" 2>&1 | tail -6
-}
-
-# place 392: 75.1% vs 15.5%
-out="$DIR/place392.jsonl"
-[ -f "$out" ] || {
-  pids=()
-  for i in $(seq 0 7); do
-    uv run --group learn python -u tools/selection_check.py \
-      --place 392 --model data/models/value-gen11L.pt \
-      --games 60 --limit 16 --classes 8 --hide-bench --rank-by-leaf \
-      --force-selection "charizard,garchomp,toxapex,incineroar" --force-selection "charizard,toxapex,venusaur,garchomp" \
-      --only-arm "+" \
-      --shard "$i" --shards 8 --out "$out" \
-      > "$DIR/logs/392-$i.log" 2>&1 &
-    pids+=($!)
-  done
-  for pid in "${pids[@]}"; do wait "$pid" || true; done
-  uv run --group learn python -u tools/selection_check.py --place 392 --merge --out "$out" 2>&1 | tail -6
-}
-
-# place 196: 40.7% vs 32.4%
-out="$DIR/place196.jsonl"
-[ -f "$out" ] || {
-  pids=()
-  for i in $(seq 0 7); do
-    uv run --group learn python -u tools/selection_check.py \
-      --place 196 --model data/models/value-gen11L.pt \
-      --games 60 --limit 16 --classes 8 --hide-bench --rank-by-leaf \
-      --force-selection "charizard,garchomp,venusaur,toxapex" --force-selection "charizard,sylveon,toxapex,incineroar" \
-      --only-arm "+" \
-      --shard "$i" --shards 8 --out "$out" \
-      > "$DIR/logs/196-$i.log" 2>&1 &
-    pids+=($!)
-  done
-  for pid in "${pids[@]}"; do wait "$pid" || true; done
-  uv run --group learn python -u tools/selection_check.py --place 196 --merge --out "$out" 2>&1 | tail -6
-}
-
-# place 145: 85.4% vs 13.4%
-out="$DIR/place145.jsonl"
-[ -f "$out" ] || {
-  pids=()
-  for i in $(seq 0 7); do
-    uv run --group learn python -u tools/selection_check.py \
-      --place 145 --model data/models/value-gen11L.pt \
-      --games 60 --limit 16 --classes 8 --hide-bench --rank-by-leaf \
-      --force-selection "charizard,garchomp,toxapex,incineroar" --force-selection "sylveon,incineroar,garchomp,toxapex" \
-      --only-arm "+" \
-      --shard "$i" --shards 8 --out "$out" \
-      > "$DIR/logs/145-$i.log" 2>&1 &
-    pids+=($!)
-  done
-  for pid in "${pids[@]}"; do wait "$pid" || true; done
-  uv run --group learn python -u tools/selection_check.py --place 145 --merge --out "$out" 2>&1 | tail -6
 }
 
 echo "=== ordering panel done ==="
