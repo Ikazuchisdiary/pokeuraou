@@ -264,10 +264,10 @@ def main() -> None:
         nargs="+",
         default=[Path("data/models/value-gen2.pt")],
         help="one net, or several to average as one leaf. Several because a book solved\n"
-        "from one training seed is largely that seed: two seeds of one configuration, "
-        "0.006 apart on held-out AUC, name a different best selection for 91%% of the "
-        "field and each costs the other 5.9 points of the game's own value against a "
-        "15.3-point scale. Members cost 1.13x-1.19x one net, not Nx.",
+        "from one training seed is largely that seed: three seeds of one configuration "
+        "cost each other 2.88 to 5.86 points of the game's own value, on a scale where "
+        "having no book at all costs about 15, while two disjoint two-net ensembles cost "
+        "each other 1.14. Members cost 1.13x-1.19x one net, not Nx.",
     )
     ap.add_argument("--out", type=Path, default=None, help="default data/selection/<name>.jsonl.gz")
     ap.add_argument("--pool", default="all", help="all | phase2 | cut")
