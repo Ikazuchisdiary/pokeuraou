@@ -495,6 +495,19 @@ def main() -> None:
          (args.baseline_solve_sparsely, args.solve_sparsely),
          policies[::-1], ranking_names[::-1]),
     )
+    # `seats[0]` is `(value, baseline)` and `seats[1]` is `(baseline, value)`, so the seat
+    # is `which` and nothing else. Five places used to ask `leaves[0] is value` -- the seat
+    # label, the two book assignments, the selection source and the win count -- which is
+    # the same answer only while the two leaf objects are distinct. Alias them (one line:
+    # `baseline = value` when the files match, which would save a duplicate search) and
+    # every one of those returns True in BOTH seats: the flip stops flipping, the tested
+    # arm's book governs both seats, and the win count reads side 0's result twice. Silent
+    # and total. The invariant is cheap to assert, so it is asserted.
+    assert baseline is not value, (
+        "the two arms must be distinct objects: `new_name`/`old_name` and the whole "
+        "provenance would be identical for both seats otherwise, and a match of an agent "
+        "against itself still needs two names."
+    )
     # Per-seat accumulators, indexed the same way as `seats`, because with a queue the two
     # seats are interleaved rather than run one after the other.
     tally = [[0, 0, 0, 0.0] for _ in seats]  # wins, played, unfinished, seconds
@@ -526,7 +539,7 @@ def main() -> None:
         game_index = index // len(seats)
         seat, leaves, depths, limits, ranks, sparse, rankers, ranknames = seats[which]
         side_leaves = (
-            (new_name, old_name) if leaves[0] is value else (old_name, new_name)
+            (new_name, old_name) if which == 0 else (old_name, new_name)
         )
         # Seeded from the index, not streamed through the seat. A queue makes the order a
         # race, and an RNG streamed through a block would make game seventeen whatever the
@@ -564,8 +577,8 @@ def main() -> None:
             # while the label said "uniform" for both.
             tested_book = book
             baseline_book = None if args.baseline_uniform_selection else other_book
-            side0_book = tested_book if leaves[0] is value else baseline_book
-            side1_book = baseline_book if leaves[0] is value else tested_book
+            side0_book = tested_book if which == 0 else baseline_book
+            side1_book = baseline_book if which == 0 else tested_book
             # The other arm draws *our* four uniformly, and nothing else changes: the
             # opponent's six and the opponent's four still come from the book, so both
             # arms face the same field and the only difference is the draw being priced.
@@ -602,7 +615,7 @@ def main() -> None:
                 others_label = other_label
             seat_labels = (
                 (tested_label, others_label)
-                if leaves[0] is value
+                if which == 0
                 else (others_label, tested_label)
             )
             entry0 = side0_book.get(team) if side0_book is not None else None
@@ -730,7 +743,7 @@ def main() -> None:
             )
             tally[which][1] += 1
             # `outcome` is side 0's result, so flip it when the value function sits at 1.
-            new_won = record.outcome > 0.5 if leaves[0] is value else record.outcome < 0.5
+            new_won = record.outcome > 0.5 if which == 0 else record.outcome < 0.5
             tally[which][0] += int(new_won)
             tally[which][3] += time.perf_counter() - started
             if client is not None:

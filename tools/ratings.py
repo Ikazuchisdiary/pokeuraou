@@ -213,6 +213,45 @@ def read_games(
     return out, repaired, builds, failed
 
 
+def shared_seeds(root: Path) -> list[str]:
+    """Directories whose per-seat rows name the same seed.
+
+    Games are seeded from `[seed, index]`, so two matches launched with one seed play the
+    same opponents in the same order. The fit has no way to know: it sees twice the games
+    and shrinks the interval by root two for a second look at the first look's draws.
+
+    `data/matches/hidden-gen11h-vs-gen10` and its `-fixed` rerun are the recorded case --
+    3,392 games entering as independent, and the rerun's own CMD says it exists because
+    the first predates two search fixes, which is a difference `agent_name` cannot see
+    either.
+
+    Worth naming rather than fixing: whether two runs at one seed should be pooled,
+    dropped or paired depends on why the second was run, and only a reader knows that.
+    """
+    by_seed: dict[object, set[str]] = {}
+    for path in list(root.glob("**/worker*.jsonl")) + list(root.glob("**/seed*.jsonl")):
+        if path.name.startswith("games-"):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if "seed" in row and "played" in row:
+                by_seed.setdefault(row["seed"], set()).add(path.parent.name)
+    return [
+        f"seed {seed}: {', '.join(sorted(names))}"
+        for seed, names in sorted(by_seed.items(), key=lambda kv: str(kv[0]))
+        if len(names) > 1
+    ]
+
+
 def read_summaries(root: Path) -> list[Observation]:
     """Matches that kept only their per-seat totals, which is everything before yesterday.
 
@@ -447,6 +486,11 @@ def main() -> None:
         )
     for line in failed:
         print(f"  ! a run in this fit says it FAILED -- {line}")
+    for line in shared_seeds(args.matches):
+        print(
+            f"  ! these matches shared a random stream, and the fit counts them as\n"
+            f"    independent -- {line}"
+        )
     if len(builds) > 1:
         top = ", ".join(f"{h[:8]}={n}" for h, n in builds.most_common(6))
         print(
