@@ -5,11 +5,13 @@ it has been written inline each time it was wanted -- which is how a seat label 
 as the wrong arm, and how a number ends up quoted without the condition it was measured
 in. Both have happened here.
 
-The seat split is printed and not just the total, because it is the check that costs
-nothing: the two seats of a fair match differ by the seat advantage and no more, and a gap
-much larger than that is a defect in the harness rather than a fact about the agents.
+The configuration is printed PER SEAT. Everything in a provenance block is ordered by side
+and the two arms swap sides halfway, so one sampled record prints one seat's ordering as
+if it were the arms' -- which read as "gen10's book against gen11L's" for a match whose
+tested arm held gen11L's. It is worse when both arms share a leaf name, because then
+nothing else in the line tells them apart.
 
-    uv run python tools/match_result.py data/matches/gen11L-vs-gen10-ownbooks
+    uv run python tools/match_result.py data/matches/gen11L-vs-gen10-ownbooks-fixed
     uv run python tools/match_result.py data/matches/*-vs-hpshare
 """
 
@@ -27,8 +29,8 @@ def elo(p: float) -> float:
     return -400.0 * math.log10(1.0 / p - 1.0)
 
 
-def read(directory: Path) -> tuple[dict[str, tuple[int, int]], dict, int]:
-    """Per-seat (wins, played) for the named arm, the provenance, and unfinished games."""
+def read(directory: Path) -> tuple[dict[str, tuple[int, int]], dict[str, dict], int]:
+    """Per-seat (wins, played) for the named arm, a provenance per seat, and unfinished."""
     seats: dict[str, tuple[int, int]] = {}
     unfinished = 0
     for path in sorted(directory.glob("worker*.jsonl")) + sorted(
@@ -48,16 +50,17 @@ def read(directory: Path) -> tuple[dict[str, tuple[int, int]], dict, int]:
             a, b = seats.get(seat, (0, 0))
             seats[seat] = (a + wins, b + played)
             unfinished += int(row.get("unfinished", 0))
-    provenance: dict = {}
+    provenance: dict[str, dict] = {}
     for path in sorted(directory.glob("games-worker*.jsonl")) + sorted(
         directory.glob("games-seed*.jsonl")
     ):
         with path.open(encoding="utf-8") as handle:
             for line in handle:
-                if line.strip():
-                    provenance = json.loads(line).get("provenance", {})
-                    break
-        if provenance:
+                if not line.strip():
+                    continue
+                source = json.loads(line).get("provenance", {})
+                provenance.setdefault(str(source.get("seat", "?")), source)
+        if seats and len(provenance) >= len(seats):
             break
     return seats, provenance, unfinished
 
@@ -75,19 +78,23 @@ def main() -> None:
         if not total_n:
             print("  no completed seat rows")
             continue
-        if provenance:
-            leaves = provenance.get("leaves") or ["?", "?"]
-            books = provenance.get("books") or ["?", "?"]
-            info = (provenance.get("information") or ["?", "?"])[0]
-            ranks = provenance.get("rankings") or ["?", "?"]
-            limits = provenance.get("limits") or ["?", "?"]
-            print(f"  leaf   {leaves[0]}  vs  {leaves[1]}")
-            print(f"  book   {books[0]}  vs  {books[1]}")
-            print(f"  width  {limits[0]}/{limits[1]}   order {ranks[0]}/{ranks[1]}"
-                  f"   bench {info}")
+        sample = next(iter(provenance.values()), {})
+        if sample:
+            info = (sample.get("information") or ["?", "?"])[0]
+            print(f"  bench {info}    side 0 is our roster, side 1 a tournament team")
         for seat in sorted(seats):
             wins, played = seats[seat]
-            print(f"  {seat:<40} {wins:>5}/{played:<5} = {wins / played:6.2%}")
+            source = provenance.get(seat, {})
+            leaves = source.get("leaves") or ["?", "?"]
+            books = source.get("books") or ["?", "?"]
+            ranks = source.get("rankings") or ["?", "?"]
+            limits = source.get("limits") or ["?", "?"]
+            print(f"  {seat:<38} {wins:>5}/{played:<5} = {wins / played:6.2%}")
+            for side in (0, 1):
+                print(
+                    f"      side {side}  {leaves[side]} / {books[side]}"
+                    f" / w{limits[side]} / {ranks[side]}"
+                )
         rate = total_w / total_n
         half = 1.96 * math.sqrt(max(rate * (1 - rate), 1e-9) / total_n)
         # The named arm is whichever the seat labels name; both seats report ITS wins, so
@@ -105,9 +112,15 @@ def main() -> None:
             gap = abs(rates[0] - rates[1])
             if gap > 4 * half:
                 print(
-                    f"  ! the two seats differ by {gap:.1%}, more than four times the "
-                    "interval.\n    A fair match's seats differ by the seat advantage; "
-                    "this is a harness question,\n    not a fact about the agents."
+                    f"  ! the seats differ by {gap:.1%}, over four times the interval.\n"
+                    "    Not automatically a defect. Side 0 is our roster and side 1 a\n"
+                    "    tournament team, and the roster is slightly behind that field:\n"
+                    "    gen11L's book puts our mean equilibrium value at 0.4965 and\n"
+                    "    gen10's at 0.4899, with over half the teams under 50%. Whichever\n"
+                    "    arm sits at side 0 therefore wins under half, in both seats, and\n"
+                    "    swapping the seats is what cancels it -- which the total does.\n"
+                    "    Look here for a defect when the gap survives the swap, or when a\n"
+                    "    uniform-draw match shows one (the anchor was 62.62% / 62.97%)."
                 )
 
 
