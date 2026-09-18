@@ -100,10 +100,24 @@ def recover_old_axes(source: dict) -> int:
     return 1
 
 
-def read_games(root: Path) -> tuple[list[Observation], int]:
-    """One observation per recorded game, and how many records needed repairing."""
+def read_games(root: Path) -> tuple[list[Observation], int, Counter[str]]:
+    """One observation per game, how many needed repairing, and games per build.
+
+    The build matters and the name cannot carry it. An agent here is a model together
+    with the search that ran it, and a fix to the search makes a different agent -- but
+    `agent_name` is built from the provenance's settings, and a settings block says
+    nothing about whether the code honoured them. Three did not, and were found in one
+    day: a menu handed to the wrong side, a hidden bench that dropped two arguments, a
+    replacement node solved with one leaf.
+
+    So the engine fingerprint each game already carries is counted and printed. It is
+    over-sensitive on purpose -- a docstring edit moves it -- which makes it useless as a
+    key and honest as a warning: games under different hashes were not played by the same
+    program, and the fit pools them anyway.
+    """
     out: list[Observation] = []
     repaired = 0
+    builds: Counter[str] = Counter()
     # Both layouts. A match dealt in fixed blocks names its files by seed and a queued one
     # by worker, and this read only the first -- so every match run since the queue landed
     # was missing from the scale, which is every measurement taken on the ensemble floor.
@@ -123,10 +137,12 @@ def read_games(root: Path) -> tuple[list[Observation], int]:
                 if not source or outcome is None:
                     continue
                 repaired += recover_old_axes(source)
+                engine = game.get("engine") or {}
+                builds[str(engine.get("sources", "unrecorded"))] += 1
                 out.append(
                     (agent_name(source, 0), agent_name(source, 1), float(outcome), 1)
                 )
-    return out, repaired
+    return out, repaired, builds
 
 
 def read_summaries(root: Path) -> list[Observation]:
@@ -306,7 +322,7 @@ def main() -> None:
     ap.add_argument("--min-games", type=int, default=1)
     args = ap.parse_args()
 
-    games, repaired = read_games(args.matches)
+    games, repaired, builds = read_games(args.matches)
     summaries = read_summaries(args.matches)
     games += summaries
     if not games:
@@ -333,6 +349,19 @@ def main() -> None:
         print(
             f"  {repaired} of them predate the per-side depth and ranking fields; "
             "their configuration was read back out of the seat label"
+        )
+    if len(builds) > 1:
+        top = ", ".join(f"{h[:8]}={n}" for h, n in builds.most_common(6))
+        print(
+            f"  played by {len(builds)} different builds of the engine: {top}"
+            + ("..." if len(builds) > 6 else "")
+        )
+        print(
+            "  A search fix makes a different agent and this fit cannot separate them --\n"
+            "  the name is built from the settings, and a settings block does not say\n"
+            "  whether the code honoured them. On 2026-09-19 three did not: a candidate\n"
+            "  menu handed to the opposing side, a hidden bench that dropped the depth and\n"
+            "  the ranking, and a replacement node solved with one arm's leaf for both."
         )
     print(
         f"seat advantage {seat:+.3f} logit = side 0 wins "
