@@ -123,7 +123,6 @@ def provenance(
     solvers: tuple[str, str] = ("full", "full"),
     books: tuple[str, str] = ("uniform", "uniform"),
     information: tuple[str, str] = ("open", "open"),
-    selection: str = "uniform",
     note: str = "",
 ) -> dict[str, Any]:
     """What produced this game, per side, in the order the sides appear in the record.
@@ -154,7 +153,17 @@ def provenance(
         "solvers": list(solvers),
         "books": list(books),
         "information": list(information),
-        "selection": selection,
+        # Derived, never passed. It was a free-text summary with a default of "uniform",
+        # and callers stopped passing it when `books` arrived per side -- so every match
+        # played from a solved selection recorded `"selection": "uniform"` beside a
+        # `books` field naming the two it actually drew from. Nothing reads it, which is
+        # the only reason it cost nothing; a field that contradicts the game in the same
+        # file is what the comment beside `books` exists to prevent.
+        "selection": (
+            "uniform"
+            if set(books) == {"uniform"}
+            else " vs ".join(books)
+        ),
         **({"note": note} if note else {}),
     }
 

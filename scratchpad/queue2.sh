@@ -2,6 +2,34 @@ set -uo pipefail
 cd /c/Users/Ikazuchi/repos/pokeuraou
 until grep -q "=== queue done ===" "$QOUT"; do sleep 20; done
 
+# ------------------------------------- A0. is it the leaf or the book? Leaf held fixed.
+#
+# gen11L drawing its own book lost to gen10 drawing its own: 46.64% +-2.37%, which does
+# exclude 50%. Two things differ between those arms, so the number does not say which one
+# moved -- and the answer changes what to fix.
+#
+#   step 3b   book fixed (gen11L's on both), leaf varies   -> the leaf's contribution
+#   A0 here   leaf fixed (gen11L on both), book varies     -> the book's contribution
+#
+# The arms are the same network on both sides, so anything that is not the solved
+# selection is identical between them, down to the search width and the candidate order.
+OUT=data/matches/gen11Lbook-vs-gen10book-sameleaf
+if [ ! -f "$OUT/DONE" ]; then
+  echo "=== A0: gen11L's book vs gen10's book, leaf gen11L on both ==="
+  date
+  uv run --group learn python -u tools/match_queue.py \
+    --out "$OUT" --games 848 --seed 20260918 --served \
+    --value data/models/value-gen11L.pt --baseline data/models/value-gen11L.pt \
+    -- --limit 24 --baseline-limit 24 --rank-leaf --baseline-rank-leaf \
+       --selection-book data/selection/rizabanadohido-value-gen11L.jsonl.gz \
+       --baseline-selection-book data/selection/rizabanadohido-value-gen10.jsonl.gz \
+       2>&1 | tail -8
+  echo "gen11L book vs gen10 book, leaf value-gen11L both arms, open, seed 20260918" \
+    > "$OUT/DONE"
+fi
+echo "=== A0 done ==="
+date
+
 # ---------------------------------------------------------------- A. hidden-bench anchor
 #
 # A match whose search can see the opponent's actual four is solving a game a real one does
@@ -50,14 +78,40 @@ if [ ! -f "$OUT/DONE" ]; then
   echo "=== A2: hidden anchor, gen11Lx2 with ITS OWN book, vs hp-share ==="
   date
   uv run --group learn python -u tools/match_queue.py \
-    --out "$OUT" --games 848 --seed 20260919 --served --hide-bench \
+    --out "$OUT" --games 848 --seed 20260920 --served --hide-bench \
     --value data/models/value-gen11L.pt data/models/value-gen11L-s1.pt \
     -- --objective hp-share --limit 24 --baseline-limit 24 --rank-leaf \
        --selection-book data/selection/rizabanadohido-value-gen11L-ens2.jsonl.gz \
        --baseline-uniform-selection 2>&1 | tail -8
-  echo "hidden anchor with the ensemble's own book, seed 20260919" > "$OUT/DONE"
+  echo "hidden anchor with the ensemble's own book, seed 20260920" > "$OUT/DONE"
 fi
 echo "=== A2 done ==="
+date
+
+# ------------------------------------ A3. what the borrowed book costs, measured directly
+#
+# A and A2 each place an agent on the scale and they use different seeds, so differencing
+# them carries both intervals. The question they are differenced for -- what did drawing
+# from generation 9's book cost -- is a contrast between two configurations, and a contrast
+# is measured by putting them in one match. Same leaf on both arms, same width, same
+# ordering, same hidden bench; the only difference is which solved selection each draws
+# from. Both arms then necessarily see the same games, which is what a match is, rather
+# than two runs made to agree by seed.
+OUT=data/matches/gen11Lx2-ownbook-vs-gen9book-hidden
+if [ ! -f "$OUT/DONE" ]; then
+  echo "=== A3: own book vs gen9's book, same leaf, hidden bench ==="
+  date
+  uv run --group learn python -u tools/match_queue.py \
+    --out "$OUT" --games 848 --seed 20260921 --served --hide-bench \
+    --value data/models/value-gen11L.pt data/models/value-gen11L-s1.pt \
+    --baseline data/models/value-gen11L.pt data/models/value-gen11L-s1.pt \
+    -- --limit 24 --baseline-limit 24 --rank-leaf --baseline-rank-leaf \
+       --selection-book data/selection/rizabanadohido-value-gen11L-ens2.jsonl.gz \
+       --baseline-selection-book data/selection/rizabanadohido-value-gen9.jsonl.gz \
+       2>&1 | tail -8
+  echo "own book vs gen9 book, same leaf both arms, seed 20260921" > "$OUT/DONE"
+fi
+echo "=== A3 done ==="
 date
 
 # ------------------------------------------------- B. a pool played entirely in the dark
@@ -153,7 +207,7 @@ date
 echo "=== D: value-hidden36 vs value-open31, own books, hidden bench ==="
 date
 uv run --group learn python -u tools/match_queue.py \
-  --out data/matches/hidden36-vs-open31 --games 848 --seed 20260919 --served --hide-bench \
+  --out data/matches/hidden36-vs-open31 --games 848 --seed 20260941 --served --hide-bench \
   --value data/models/value-hidden36.pt --baseline data/models/value-open31.pt \
   -- --limit 24 --baseline-limit 24 --rank-leaf --baseline-rank-leaf \
      --selection-book data/selection/rizabanadohido-value-hidden36.jsonl.gz \
@@ -170,16 +224,22 @@ date
 # same opponent, the same spread class and the same hp-share arm in every row and only our
 # leaf changes -- paired, which is worth more than more games (gen234 against gen11L
 # unpaired was +1.84% +-4.02%).
+# One seed per row, not one for the ladder. Sharing it would tighten the differences
+# between these six and buy that with a corpus that stops gaining independent opponent
+# draws as rows are added -- and the rating pools every match ever recorded, so that
+# cost lands on every future comparison rather than on this table.
+LADDER_SEED=20260930
 for M in value-gen234 value-gen2345 value-gen8 value-gen9 value-gen10 value-gen11h; do
+  LADDER_SEED=$((LADDER_SEED + 1))
   OUT="data/matches/anchor-$M-vs-hpshare"
   [ -f "$OUT/DONE" ] && { echo "skip $M"; continue; }
-  echo "=== E: ladder $M vs hp-share (open, reference) ==="
+  echo "=== E: ladder $M vs hp-share (open, reference), seed $LADDER_SEED ==="
   date
   uv run --group learn python -u tools/match_queue.py \
-    --out "$OUT" --games 848 --seed 20260919 --served \
+    --out "$OUT" --games 848 --seed "$LADDER_SEED" --served \
     --value "data/models/$M.pt" \
     -- --objective hp-share --limit 24 --baseline-limit 24 2>&1 | tail -6
-  echo "$M vs hp-share: w24, damage, uniform, OPEN bench (reference), seed 20260919" \
+  echo "$M vs hp-share: w24, damage, uniform, OPEN bench (reference), seed $LADDER_SEED" \
     > "$OUT/DONE"
 done
 echo "=== ladder done ==="
