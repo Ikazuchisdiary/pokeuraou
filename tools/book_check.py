@@ -68,7 +68,7 @@ from pokeuraou.selection_book import (
 from pokeuraou.selfplay import play_game
 from pokeuraou.standings import find_cached_standings, load_standings
 from pokeuraou.teams import all_selections, load_roster
-from pokeuraou.value import BatchedValue, load_model
+from pokeuraou.value import BatchedValue, load_ensemble
 
 
 def merge(out: Path) -> None:
@@ -155,7 +155,15 @@ def merge(out: Path) -> None:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--roster", default="rizabanadohido")
-    ap.add_argument("--model", type=Path, default=Path("data/models/value-gen2.pt"))
+    ap.add_argument(
+        "--model",
+        type=Path,
+        nargs="+",
+        default=[Path("data/models/value-gen2.pt")],
+        help="the leaf that plays. Several are averaged as one, and must be the same "
+        "several that solved the book -- this compares a book's claim with the board, "
+        "and a book played by a different leaf compares two agents instead.",
+    )
     ap.add_argument("--book", type=Path, default=None)
     ap.add_argument("--games", type=int, default=280, help="games per arm, across shards")
     ap.add_argument("--limit", type=int, default=16)
@@ -179,7 +187,11 @@ def main() -> None:
     roster = load_roster(args.roster)
     reg = roster.reg
     register_mega_stones(reg)
-    book_path = args.book or (selection_dir() / f"{args.roster}-{args.model.stem}.jsonl.gz")
+    models = list(args.model)
+    stem = (
+        models[0].stem if len(models) == 1 else f"{models[0].stem}-ens{len(models)}"
+    )
+    book_path = args.book or (selection_dir() / f"{args.roster}-{stem}.jsonl.gz")
     book = SelectionBook.read(book_path)
     book.require_roster(args.roster)
     standings = load_standings(find_cached_standings(), reg)
@@ -189,9 +201,9 @@ def main() -> None:
         raise SystemExit(f"{book_path} covers none of the {len(pool)} teams in the pool")
 
     encoder = Encoder(reg)
-    net, _meta = load_model(args.model, encoder)
+    nets, _metas = load_ensemble(models, encoder)
     device = torch.device(args.device)
-    evaluate = BatchedValue(net.to(device), encoder, device=device)
+    evaluate = BatchedValue([n.to(device) for n in nets], encoder, device=device)
     selections = tuple(all_selections(reg.meta.team_size, reg.meta.picked_team_size))
 
     target = (

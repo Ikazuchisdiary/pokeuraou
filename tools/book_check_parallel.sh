@@ -43,8 +43,11 @@ started=$(date +%s)
 
 pids=()
 for i in $(seq 0 $((WORKERS - 1))); do
+	# MODEL is deliberately unquoted: it may name several nets to average as one leaf,
+	# and that leaf has to be the one that solved the book being checked.
+	# shellcheck disable=SC2086
 	POKEURAOU_RUST_NODE="$RUST_NODE" uv run --group learn python tools/book_check.py \
-		--roster "$ROSTER" --model "$MODEL" \
+		--roster "$ROSTER" --model $MODEL \
 		"${book_args[@]}" \
 		--games "$GAMES" --limit "$LIMIT" --seed "$SEED" \
 		--epsilon "$EPSILON" --temperature "$TEMPERATURE" \
