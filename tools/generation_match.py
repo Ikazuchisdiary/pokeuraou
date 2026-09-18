@@ -530,13 +530,22 @@ def main() -> None:
             # the first version got it wrong.
             tested_label = selection_label if book is not None else "uniform"
             if args.baseline_uniform_selection:
-                # Not plain "uniform". That arm draws its own four uniformly, but the
-                # opponent it faces still draws from the book, and an opponent drawing
-                # its equilibrium is a harder game than an opponent drawing at random.
-                # Every other match in the corpus that names a uniform agent means
-                # "uniform on both sides", so pooling the two under one name would make
-                # this arm's harder field look like weakness and charge it to the book.
-                others_label = f"uniform-against-{selection_label}"
+                # Plain "uniform", because an agent is its model together with ITS OWN
+                # book and the opponent's book is the opponent's identity.
+                #
+                # This said `uniform-against-<their book>` for exactly as long as it took
+                # to fit a rating and look at the components. The argument for it was that
+                # a uniform arm facing a book arm has the harder field, so pooling would
+                # charge that difficulty to it as weakness -- but Bradley-Terry subtracts
+                # the opponent's rating, which is what "harder field" means here, so the
+                # bias it guarded against does not exist. What it did instead was make the
+                # book corpus unbridgeable: every match that put a book arm against a
+                # uniform one renamed the uniform one after the book, so no edge could
+                # ever reach the anchored component, and ~13,000 games had no zero.
+                #
+                # `agent_name` folds the old spelling back, so the records already written
+                # are joined without replaying them.
+                others_label = "uniform"
             elif other_book is None:
                 others_label = "uniform"
             else:

@@ -189,6 +189,23 @@ def agent_name(source: dict[str, Any], side: int) -> str:
     ranking = (source.get("rankings") or ["damage", "damage"])[side]
     solver = (source.get("solvers") or ["full", "full"])[side]
     book = (source.get("books") or ["uniform", "uniform"])[side]
+    # An agent is its model together with ITS OWN book. What the opponent draws from is
+    # the opponent's identity, not this side's.
+    #
+    # `generation_match` used to write `uniform-against-<their book>` here, reasoning that
+    # an arm drawing uniformly against a book-drawing opponent faces a harder field than
+    # one drawing against another uniform arm, so pooling the two would charge that
+    # difficulty to the uniform arm as weakness. Bradley-Terry already removes it: the
+    # opponent's difficulty *is* its rating, and the fit subtracts it. The split protected
+    # against a bias the model does not have, and the price was total: an arm in a book
+    # match can only ever be named after the book it faced, so every match played to
+    # connect the book corpus to the anchored one created a new node instead of an edge.
+    # Thirteen thousand games sat in a component with no zero in it and no way to get one.
+    #
+    # Same class of defect as the `.pt` normalisation above, and the same repair: fix it
+    # where the rating is keyed, so the games already recorded are joined without replay.
+    if book.startswith("uniform-against-"):
+        book = "uniform"
     name = f"{leaf}/w{limit}"
     if depth != 1:
         name += f"/d{depth}"

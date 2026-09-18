@@ -354,14 +354,33 @@ def main() -> None:
             "undefined -- the fit says so with\n    a very wide interval, which is easy to "
             "skim past."
         )
-    print(f"\n  {'agent':<34} {unit:>9}  {'+-':>6}  {'games':>6}  {'grp':>3}")
+    # The condition, printed rather than left to be inferred from a suffix.
+    #
+    # An agent with no `/hidden-bench` in its name searched a game where the opponent's
+    # four was visible to it. That is a different game and an easier one, and the game
+    # this project is solving for hides the bench -- so those rows are reference. They are
+    # the bulk of the corpus and they are not deleted, because the only measurement that
+    # survives from six generations back is in that condition and a drifting yardstick is
+    # worse than a limited one. But a reader who takes the top of this table as "the
+    # strongest agent" has read the wrong column, which is why it is a column.
+    hidden = sum(played[n] for n in names if n.endswith("/hidden-bench"))
+    print(
+        f"\n  {hidden} games hid the bench and {total - hidden} did not. The open ones are "
+        "REFERENCE:\n  their search saw the opponent's four, which is information a real "
+        "game does not give.\n  They carry their own zero, so read that scale with "
+        "--anchor hp-share/w24/hidden-bench."
+    )
+    print(
+        f"\n  {'agent':<34} {unit:>9}  {'+-':>6}  {'games':>6}  {'grp':>3}  bench"
+    )
     for name in names:
         if played[name] < args.min_games:
             continue
         half = 1.96 * errors[name] * scale
+        bench = "hidden" if name.endswith("/hidden-bench") else "open(ref)"
         print(
             f"  {name:<34} {rating[name] * scale:>9.1f}  {half:>6.1f}  "
-            f"{played[name]:>6}  {island.get(name, 0):>3}"
+            f"{played[name]:>6}  {island.get(name, 0):>3}  {bench}"
         )
 
     # Where the one-number assumption is failing, if it is.
