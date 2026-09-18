@@ -31,12 +31,24 @@ date
 run_match() {
   local name="$1"; shift
   local out="data/matches/$name"
-  if [ -f "$out/DONE" ]; then echo "skip $name"; return; fi
+  # A DONE that does not say whether the run WORKED is a DONE that makes the next attempt
+  # skip a failure. Three directories in this project carry "FAILED" markers whose games
+  # went into the rating anyway, and one of them says "0 games" over 107; the marker is
+  # the only thing that could have stopped that and it was being written unconditionally.
+  # `set -o pipefail` is on, so PIPESTATUS[0] is the queue's own exit.
+  if grep -q "^ok" "$out/DONE" 2>/dev/null; then echo "skip $name (ok)"; return; fi
   echo "=== match: $name ==="
   date
   uv run --group learn python -u tools/match_queue.py --out "$out" "$@" 2>&1 | tail -8
-  echo "$name, after the menu-ownership fix e8d5fd1" > "$out/DONE"
-  uv run --group learn python tools/match_result.py "$out" 2>&1 | tail -14
+  local status=${PIPESTATUS[0]}
+  if [ "$status" -eq 0 ]; then
+    echo "ok: $name, after the menu-ownership fix e8d5fd1" > "$out/DONE"
+  else
+    echo "FAILED (exit $status): $name" > "$out/DONE"
+    echo "!! $name exited $status -- leaving it unmarked so a rerun retries it"
+  fi
+  uv run --group learn python tools/match_result.py "$out" 2>&1 | tail -16
+  uv run --group learn python tools/paired_result.py "$out" 2>&1 | tail -8
 }
 
 # G10-b: each arm from its own book. The headline of the morning, re-measured.

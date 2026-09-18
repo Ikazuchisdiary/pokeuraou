@@ -92,14 +92,23 @@ def main() -> None:
     )
 
     games_file = open_games(args.games_out)
-    for seat, limits in (
-        ("wide = side 0", (args.wide, args.narrow)),
-        ("wide = side 1", (args.narrow, args.wide)),
+    for wide_at_side0, (seat, limits) in enumerate(
+        (
+            ("wide = side 1", (args.narrow, args.wide)),
+            ("wide = side 0", (args.wide, args.narrow)),
+        )
     ):
-        rng = np.random.default_rng(args.seed)
         seat_wins = seat_played = unfinished = 0
         started = time.perf_counter()
-        for _ in range(args.games):
+        for game_index in range(args.games):
+            # Seeded from the game's INDEX, not streamed through the seat. One generator
+            # re-seeded per seat and then streamed is only paired while the two seats draw
+            # the same number of values, and they do not: the games are different lengths,
+            # so from game two onward the seats face different teams. The docstring
+            # promises "the same teams, the same selections, the same seed" and a swap
+            # that cancels the roster's edge; `generation_match` fixed exactly this and
+            # this copy did not.
+            rng = np.random.default_rng([args.seed, game_index])
             team = pool[int(rng.integers(len(pool)))]
             foe_six = sample_standings_team(rng, reg, prior, team)
             own_pick = selections[int(rng.integers(len(selections)))]
@@ -132,7 +141,12 @@ def main() -> None:
             )
             seat_played += 1
             # `outcome` is side 0's result, so flip it when the wide side sits at 1.
-            wide_won = record.outcome > 0.5 if limits[0] == args.wide else record.outcome < 0.5
+            #
+            # Keyed on the SEAT, not on `limits[0] == args.wide`. That comparison is a
+            # value test, and with `--wide N --narrow N` -- the control run that asks what
+            # the seat alone is worth -- it is true in both seats, the flip never fires,
+            # and the tool reports side 0's raw win rate as a width effect.
+            wide_won = record.outcome > 0.5 if wide_at_side0 else record.outcome < 0.5
             seat_wins += int(wide_won)
         elapsed = time.perf_counter() - started
         rate = seat_wins / seat_played if seat_played else float("nan")

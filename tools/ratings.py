@@ -43,6 +43,7 @@ import math
 import sys
 from collections import Counter, defaultdict
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -140,23 +141,75 @@ def read_games(
     paths = sorted(
         set(root.glob("**/games-seed*.jsonl")) | set(root.glob("**/games-worker*.jsonl"))
     )
+
+    # Parsed once per file and kept, keyed on the file's size and mtime.
+    #
+    # Eight gigabytes of JSON is six minutes, every time, and a refit is the thing anyone
+    # wants to do twice in a row -- after a new match, after a naming fix, with a
+    # different anchor. A tool nobody runs because it is slow is a tool whose answer
+    # nobody has.
+    #
+    # What is cached is the AGGREGATE per matchup, not the games: `fit` consumes
+    # `(side 0, side 1, wins, played)` and a single game is that row with played 1, so
+    # summing a file's identical rows changes nothing it computes -- including the
+    # per-matchup residual table, which expands the counts back out. It also makes the
+    # cache small enough to be JSON.
+    cache_path = root / ".ratings-cache.json"
+    cache: dict[str, Any] = {}
+    if cache_path.exists():
+        try:
+            cache = json.loads(cache_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            cache = {}
+    fresh: dict[str, Any] = {}
     for path in paths:
+        stat = path.stat()
+        key = str(path.relative_to(root)).replace("\\", "/")
+        stamp = [stat.st_size, int(stat.st_mtime)]
+        hit = cache.get(key)
+        if hit and hit.get("stamp") == stamp:
+            fresh[key] = hit
+            repaired += int(hit.get("repaired", 0))
+            for name, count in hit.get("builds", {}).items():
+                builds[name] += count
+            for a, b, wins, n in hit.get("rows", []):
+                out.append((a, b, float(wins), int(n)))
+            continue
+        rows: dict[tuple[str, str], list[float]] = {}
+        here: Counter[str] = Counter()
+        needed = 0
         with path.open(encoding="utf-8") as fh:
             for line in fh:
                 try:
                     game = json.loads(line)
                 except json.JSONDecodeError:
                     continue
-                source = game.get("provenance")
+                record = game.get("provenance")
                 outcome = game.get("outcome")
-                if not source or outcome is None:
+                if not record or outcome is None:
                     continue
-                repaired += recover_old_axes(source)
+                needed += recover_old_axes(record)
                 engine = game.get("engine") or {}
-                builds[str(engine.get("sources", "unrecorded"))] += 1
-                out.append(
-                    (agent_name(source, 0), agent_name(source, 1), float(outcome), 1)
-                )
+                here[str(engine.get("sources", "unrecorded"))] += 1
+                pair = (agent_name(record, 0), agent_name(record, 1))
+                got = rows.setdefault(pair, [0.0, 0])
+                got[0] += float(outcome)
+                got[1] += 1
+        repaired += needed
+        builds.update(here)
+        listed = [[a, b, wins, n] for (a, b), (wins, n) in sorted(rows.items())]
+        for a, b, wins, n in listed:
+            out.append((a, b, float(wins), int(n)))
+        fresh[key] = {
+            "stamp": stamp,
+            "repaired": needed,
+            "builds": dict(here),
+            "rows": listed,
+        }
+    try:
+        cache_path.write_text(json.dumps(fresh), encoding="utf-8")
+    except OSError:
+        pass
     return out, repaired, builds, failed
 
 

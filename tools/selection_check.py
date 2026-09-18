@@ -169,9 +169,14 @@ def main() -> None:
                     # Printed, not merely stored. A provenance nobody reads is a
                     # provenance that does not stop the next drift.
                     seen_headers.add(
-                        f"leaf {header.get('leaf', '?')}  width {header.get('limit', '?')}"
+                        f"place {header.get('place', '?')}"
+                        f"  leaf {header.get('leaf', '?')}"
+                        f"  width {header.get('limit', '?')}"
                         f"  narrowing {header.get('ranking', '?')}"
                         f"  {header.get('information', '?')}"
+                        f"  classes {header.get('classes', '?')}"
+                        f"  seed {header.get('seed', '?')}"
+                        + ("  MIRROR" if header.get("mirror") else "")
                     )
                     continue
                 key = (row["arm"], int(row["game"]))
@@ -394,6 +399,20 @@ def main() -> None:
             f"  {arm:>20}  {finished:>6}  {rate * 100:6.1f}%  +-{half * 100:.1f}"
             f"   (打ち切り {unfinished})"
         )
+        # A mirror asserts 50.0%, exactly. Our six against our six with one leaf and one
+        # width on both sides is antisymmetric, so any deviation is the seat -- the
+        # engine, the resolver and the evaluator together -- and not a fact about the
+        # agents. This tool never swaps the seats (our roster is always side 0), so the
+        # mirror arm is the only seat diagnostic it has, and it was printed as an
+        # ordinary win rate with an interval and nothing else. A speed-tie bug worth nine
+        # points in a mirror is in this project's history.
+        if args.mirror and finished and abs(rate - 0.5) > half:
+            print(
+                f"  ! a mirror is antisymmetric, so this arm asserts 50.0% and reads "
+                f"{rate * 100:.1f}%.\n"
+                "    The gap is the seat, not the agents: this tool keeps our roster at "
+                "side 0\n    and never swaps, so nothing else here can separate them."
+            )
 
     if args.out is not None:
         target = (
@@ -421,6 +440,16 @@ def main() -> None:
                             "limit": args.limit,
                             "ranking": "leaf" if args.rank_by_leaf else "damage",
                             "information": "hidden-bench" if args.hide_bench else "open",
+                            # The rest of what decides the experiment. `claimed` is the
+                            # LP value of THIS solve, and a solve depends on how many
+                            # spread classes it drew and from which seed -- so two runs
+                            # that differ in either are two experiments whose games must
+                            # not be averaged against one claim. `mirror` replaces the
+                            # opponent with our own six, which is a different question
+                            # entirely and used to fingerprint identically to a field run.
+                            "classes": args.classes,
+                            "seed": args.seed,
+                            "mirror": bool(args.mirror),
                         }
                     },
                     ensure_ascii=False,

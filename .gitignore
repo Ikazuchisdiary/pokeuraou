@@ -30,3 +30,4 @@ bench/out/
 
 # Worktrees the tooling creates here are separate repositories, not content.
 .claude/worktrees/
+.ratings-cache.json

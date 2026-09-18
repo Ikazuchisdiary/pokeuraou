@@ -91,28 +91,32 @@ def main() -> None:
     by_place = {entry.place: entry for entry in book.entries.values()}
 
     # label -> mass, per place. The label `selection_check` writes is
-    # "front+front / back+back" over species ids, and the front pair is a set there
-    # because lead order is not a choice the game exposes, so it is a set here too.
-    def masses(place: int) -> dict[frozenset[tuple[str, ...]], float]:
+    # "front+front / back+back" over species ids. Lead order WITHIN a pair is not a choice
+    # the game exposes, so each pair is a set -- but which pair leads is the whole point,
+    # so the key is an ORDERED (front, back).
+    #
+    # It was a frozenset of the two pairs, which cannot tell a selection from the same
+    # four with the leads and the reserves swapped: that collapses the 90 selections into
+    # 45, and the two halves of a collision are the opposite decision. Nothing showed it
+    # on the first opponent checked, because that selection's swap carried no mass.
+    Key = tuple[tuple[str, ...], tuple[str, ...]]
+
+    def masses(place: int) -> dict[Key, float]:
         entry = by_place.get(place)
         if entry is None:
             return {}
-        out: dict[frozenset[tuple[str, ...]], float] = {}
+        out: dict[Key, float] = {}
         for index, sel in enumerate(entry.selections):
-            key = frozenset(
-                {
-                    tuple(sorted(species[i] for i in sel[:2])),
-                    tuple(sorted(species[i] for i in sel[2:])),
-                }
+            key = (
+                tuple(sorted(species[i] for i in sel[:2])),
+                tuple(sorted(species[i] for i in sel[2:])),
             )
             out[key] = out.get(key, 0.0) + float(entry.our_strategy[index])
         return out
 
-    def key_of(label: str) -> frozenset[tuple[str, ...]]:
+    def key_of(label: str) -> Key:
         front, _, back = label.partition(" / ")
-        return frozenset(
-            {tuple(sorted(front.split("+"))), tuple(sorted(back.split("+")))}
-        )
+        return (tuple(sorted(front.split("+"))), tuple(sorted(back.split("+"))))
 
     places = sorted(
         {int(p.name.split(".")[0].removeprefix("place")) for p in args.dir.glob("place*.jsonl")}

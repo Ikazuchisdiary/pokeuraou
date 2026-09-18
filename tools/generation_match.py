@@ -677,8 +677,25 @@ def main() -> None:
             write_game(
                 games_file,
                 record,
-                objective=f"value:{leaf_name(value_files)}",
-                search_limit=args.limit,
+                # SIDE 0's leaf and the per-side widths, not the tested arm's.
+                #
+                # `searchValue` in the body is side 0's search and nothing else, and the
+                # seats swap halfway -- so in one of them the number is the BASELINE's,
+                # which with no --baseline is the hp-share heuristic. Both halves were
+                # being stamped `value:<tested arm>`.
+                #
+                # That is what `--td-lambda` gates on. `encode_dataset` counts this string
+                # into the dataset's `objectives`, and `train_value` reads that dict as
+                # the only check that `searchValue` is a win probability -- so an anchor
+                # match folded into a training pool would pass the gate and fit half its
+                # rows against hp-share. No pool contains match games yet: a loaded gun,
+                # not a fired one.
+                objective=(
+                    side_leaves[0]
+                    if side_leaves[0] == args.objective
+                    else f"value:{side_leaves[0]}"
+                ),
+                search_limit=limits,
                 # The pair, written down. Index `i` is game `i // 2` in seat `i % 2` and
                 # every game seeds from its own index, so `gameIndex` names the two games
                 # that are the same matchup with the arms swapped. Nothing could find
