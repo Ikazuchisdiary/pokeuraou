@@ -107,6 +107,13 @@ def main() -> None:
         "solver is optimistic about its own side -- and the assumption the recorded "
         "-21.8 point miss on place 109 was measured under.",
     )
+    ap.add_argument(
+        "--only-arm",
+        default=None,
+        help="play only the arms whose name contains this, e.g. '均衡 vs 均衡'. The "
+        "calibration question needs that one arm, and the other two cost two thirds of "
+        "the run.",
+    )
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument(
         "--shards",
@@ -273,6 +280,13 @@ def main() -> None:
     if forced_arm:
         arms.append(forced_arm)
     arms.extend(named)
+    if args.only_arm:
+        # Calibration needs one arm: the claim is about equilibrium play on both sides, and
+        # the other two answer a different question at two thirds of the cost.
+        wanted = [a for a in arms if args.only_arm in a]
+        if not wanted:
+            raise SystemExit(f"--only-arm {args.only_arm!r} matches none of {arms}")
+        arms = wanted
     rows: list[dict] = []
     for arm_no, arm in enumerate(arms, start=1):
         wins = finished = unfinished = 0
@@ -382,16 +396,25 @@ def main() -> None:
 
 
 def report(results: dict, analysis, args) -> None:  # noqa: ANN001
-    """The three lines the measurement exists for, from whatever rows are in hand."""
-    gap = (results["均衡 vs 一様"] - results["一様 vs 一様"]) * 100
-    print(f"\n  助言の価値: {gap:+.1f} ポイント（相手は一様のまま、自陣の選出だけ変えた差）")
-    if gap <= 0:
-        print(
-            "  → 均衡選出が一様に勝てていない。セルの推定誤差を最適化が拾っている"
-            "（optimiser's curse）ので、この助言はまだ出せない。"
-        )
-    else:
-        print("  → 均衡選出のほうが勝っている。助言として出せる。")
+    """The lines the measurement exists for, from whatever arms are in hand.
+
+    `--only-arm` can leave the advice-value pair out, and a report that assumed all three
+    arms would raise a KeyError on the run that skipped two thirds of the cost.
+    """
+    if {"均衡 vs 一様", "一様 vs 一様"} <= set(results):
+        gap = (results["均衡 vs 一様"] - results["一様 vs 一様"]) * 100
+        print(f"\n  助言の価値: {gap:+.1f} ポイント（相手は一様のまま、自陣の選出だけ変えた差）")
+        if gap <= 0:
+            print(
+                "  → 均衡選出が一様に勝てていない。セルの推定誤差を最適化が拾っている"
+                "（optimiser's curse）ので、この助言はまだ出せない。"
+            )
+        else:
+            print("  → 均衡選出のほうが勝っている。助言として出せる。")
+
+    if "均衡 vs 均衡" not in results:
+        print("\n  （均衡 vs 均衡 の腕が無いので、主張値との突き合わせはできない）")
+        return
 
     claimed = analysis.value * 100
     measured = results["均衡 vs 均衡"] * 100
