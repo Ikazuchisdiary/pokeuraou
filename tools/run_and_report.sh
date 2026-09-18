@@ -31,7 +31,13 @@ elapsed=$(($(date +%s) - started))
 # stop an empty run being called a success.
 games=$(cat "$OUT_DIR"/games-*.jsonl 2>/dev/null | wc -l)
 games=${games:-0}
-errors=$(grep -lE "Traceback" "$OUT_DIR"/*.log 2>/dev/null | wc -l)
+# Both layouts. A run dealt in fixed blocks writes `seedN.log` beside the output; a queued
+# one writes `logs/workerN.log`, and this looked only at the first -- so the verdict has
+# been dead for every queued match and every generation run since the queue landed. The
+# `games-*` count on the line above had the same bug and was fixed; this line was not, and
+# `genmatch-value-gen8x3-vs-value-allx3` recorded "FAILED (exit 1), 0 games" over 107 games
+# that are in the rating.
+errors=$(grep -lE "Traceback" "$OUT_DIR"/*.log "$OUT_DIR"/logs/*.log 2>/dev/null | wc -l)
 errors=${errors:-0}
 
 verdict="ok"

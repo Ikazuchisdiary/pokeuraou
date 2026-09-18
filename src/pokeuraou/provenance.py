@@ -245,10 +245,22 @@ def write_game(
     objective: str,
     search_limit: int | tuple[int, int],
     source: dict[str, Any],
+    extra: dict[str, Any] | None = None,
 ) -> None:
-    """One JSONL line, in the same shape self-play writes, plus its provenance."""
+    """One JSONL line, in the same shape self-play writes, plus its provenance.
+
+    `extra` carries facts about the RUN rather than about the agents -- the game's index
+    above all. A head-to-head plays index `i` in both seats from one seed, so the two are
+    the same matchup with the arms swapped and the difference is paired; without the index
+    written down, nothing downstream can find the pair, and every interval this project has
+    reported on a queued match treated 2N paired games as 2N independent ones. Measured on
+    `gen10-vs-gen9`: 61% of the 848 pairs scored exactly 0.5, and the honest interval is
+    +-2.10 against the +-2.38 reported.
+    """
     payload = record.to_json(objective=objective, search_limit=search_limit)
     payload["provenance"] = source
+    if extra:
+        payload.update(extra)
     handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
     handle.flush()
 

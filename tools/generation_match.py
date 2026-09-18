@@ -679,6 +679,12 @@ def main() -> None:
                 record,
                 objective=f"value:{leaf_name(value_files)}",
                 search_limit=args.limit,
+                # The pair, written down. Index `i` is game `i // 2` in seat `i % 2` and
+                # every game seeds from its own index, so `gameIndex` names the two games
+                # that are the same matchup with the arms swapped. Nothing could find
+                # them before, and every interval on a queued match was computed as if
+                # 2N paired games were 2N independent ones.
+                extra={"gameIndex": game_index, "seatIndex": which},
                 source=provenance(
                     "generation-match",
                     seat=seat,

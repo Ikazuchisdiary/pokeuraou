@@ -100,7 +100,9 @@ def recover_old_axes(source: dict) -> int:
     return 1
 
 
-def read_games(root: Path) -> tuple[list[Observation], int, Counter[str]]:
+def read_games(
+    root: Path,
+) -> tuple[list[Observation], int, Counter[str], list[str]]:
     """One observation per game, how many needed repairing, and games per build.
 
     The build matters and the name cannot carry it. An agent here is a model together
@@ -118,6 +120,19 @@ def read_games(root: Path) -> tuple[list[Observation], int, Counter[str]]:
     out: list[Observation] = []
     repaired = 0
     builds: Counter[str] = Counter()
+    # Directories whose own DONE marker says the run failed. Their games are real and stay
+    # in the fit -- a crash at game 107 does not make the first 107 fictional -- but a run
+    # that stopped for a reason is not the run its command line describes, and nothing
+    # said so: `genmatch-value-gen8x3-vs-value-allx3` records "FAILED (exit 1), 0 games"
+    # over 107 games that have been on the scale ever since.
+    failed: list[str] = []
+    for marker in sorted(root.glob("**/DONE")):
+        try:
+            said = marker.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        if "FAIL" in said.upper():
+            failed.append(f"{marker.parent.name}: {said.strip().splitlines()[0]}")
     # Both layouts. A match dealt in fixed blocks names its files by seed and a queued one
     # by worker, and this read only the first -- so every match run since the queue landed
     # was missing from the scale, which is every measurement taken on the ensemble floor.
@@ -142,7 +157,7 @@ def read_games(root: Path) -> tuple[list[Observation], int, Counter[str]]:
                 out.append(
                     (agent_name(source, 0), agent_name(source, 1), float(outcome), 1)
                 )
-    return out, repaired, builds
+    return out, repaired, builds, failed
 
 
 def read_summaries(root: Path) -> list[Observation]:
@@ -163,42 +178,69 @@ def read_summaries(root: Path) -> list[Observation]:
     which side the named arm sat on in `seat`, which is the part that matters.
     """
     out: list[Observation] = []
+    # Files whose name begins with `seed`, per directory, AND the loose ones at the top.
+    #
+    # The scan was `**/seed*.jsonl`, and the two oldest matches are not named that way:
+    # `width48-vs-16.jsonl` and `gen2-vs-proxy.jsonl` sit directly under `data/matches/`
+    # and hold 336 and 480 games. The second is `value-gen2` against the hp-share
+    # objective -- an edge into the anchor's own family, which is exactly what a fit
+    # reporting disconnected groups is short of.
+    #
+    # A row without `played` is skipped below, so the per-game files that also live at the
+    # top level (`book-check*.jsonl`, `cycle-match.jsonl`) contribute nothing here and are
+    # read by `read_games` instead. Nothing is counted twice: no loose file has a
+    # `games-*` sibling naming the same games.
+    candidates: list[Path] = [
+        p for p in sorted(root.glob("*.jsonl")) if ".part" not in p.name
+    ]
     for directory in sorted({p.parent for p in root.glob("**/seed*.jsonl")}):
         if any(directory.glob("games-seed*.jsonl")):
             continue
-        for path in sorted(directory.glob("seed*.jsonl")):
-            for line in path.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
-                try:
-                    row = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                played = int(row.get("played", 0))
-                if not played:
-                    continue
-                first = str(row.get("seat", "")).endswith("side 0")
-                if "wide" in row and "narrow" in row:
-                    model = row.get("model", "?")
-                    arm = f"{model}/w{row['wide']}"
-                    other = f"{model}/w{row['narrow']}"
-                    wins = int(row.get("wide_wins", 0))
-                else:
-                    limit = row.get("limit", "?")
-                    arm = f"{row.get('model', '?')}/w{limit}"
-                    other = f"{row.get('baseline') or row.get('objective', '?')}/w{limit}"
-                    depth = int(row.get("depth", 1))
-                    other_depth = int(row.get("baselineDepth", 1))
-                    if depth != 1:
-                        arm += f"/d{depth}"
-                    if other_depth != 1:
-                        other += f"/d{other_depth}"
-                    wins = int(row.get("gen2_wins", row.get("wins", 0)))
-                # The stored count is the named arm's; the fit wants side 0's.
-                if first:
-                    out.append((arm, other, float(wins), played))
-                else:
-                    out.append((other, arm, float(played - wins), played))
+        candidates.extend(sorted(directory.glob("seed*.jsonl")))
+    for path in candidates:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            played = int(row.get("played", 0))
+            if not played:
+                continue
+            first = str(row.get("seat", "")).endswith("side 0")
+
+            def stem(name: object) -> str:
+                # The same normalisation `agent_name` does, for the same reason: these
+                # rows spell `value-gen23.pt` where a game record spells `value-gen23`,
+                # and the split makes one agent into two nodes with no edge between them
+                # -- which is what the disconnected-groups warning has been reporting.
+                text = str(name)
+                return text[: -len(".pt")] if text.endswith(".pt") else text
+
+            if "wide" in row and "narrow" in row:
+                model = stem(row.get("model", "?"))
+                arm = f"{model}/w{row['wide']}"
+                other = f"{model}/w{row['narrow']}"
+                wins = int(row.get("wide_wins", 0))
+            else:
+                limit = row.get("limit", "?")
+                arm = f"{stem(row.get('model', '?'))}/w{limit}"
+                other = (
+                    f"{stem(row.get('baseline') or row.get('objective', '?'))}/w{limit}"
+                )
+                depth = int(row.get("depth", 1))
+                other_depth = int(row.get("baselineDepth", 1))
+                if depth != 1:
+                    arm += f"/d{depth}"
+                if other_depth != 1:
+                    other += f"/d{other_depth}"
+                wins = int(row.get("gen2_wins", row.get("wins", 0)))
+            # The stored count is the named arm's; the fit wants side 0's.
+            if first:
+                out.append((arm, other, float(wins), played))
+            else:
+                out.append((other, arm, float(played - wins), played))
     return out
 
 
@@ -322,7 +364,7 @@ def main() -> None:
     ap.add_argument("--min-games", type=int, default=1)
     args = ap.parse_args()
 
-    games, repaired, builds = read_games(args.matches)
+    games, repaired, builds, failed = read_games(args.matches)
     summaries = read_summaries(args.matches)
     games += summaries
     if not games:
@@ -350,6 +392,8 @@ def main() -> None:
             f"  {repaired} of them predate the per-side depth and ranking fields; "
             "their configuration was read back out of the seat label"
         )
+    for line in failed:
+        print(f"  ! a run in this fit says it FAILED -- {line}")
     if len(builds) > 1:
         top = ", ".join(f"{h[:8]}={n}" for h, n in builds.most_common(6))
         print(

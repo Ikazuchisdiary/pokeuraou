@@ -87,7 +87,24 @@ def merge(out: Path) -> None:
     by_arm: dict[str, dict[int, float]] = {arm: {} for arm in ARMS}
     claimed: dict[int, float] = {}
     unfinished = 0
+    # An overlap is two runs, not one. `{stem}.part*.jsonl` matches whatever is beside the
+    # output, a shard's stride comes from the shard COUNT, and `by_arm[arm][game] = x`
+    # makes a collision a silent overwrite decided by lexicographic filename order --
+    # `part10` sorts before `part2`. Six leftover parts of an aborted 14-shard run sat
+    # beside an 8-shard one and ten game indices were in both: the `gen/gen` arm merged to
+    # 155/280 = 55.36% where the eight real shards alone give 154/280 = 55.00%, and
+    # GENERATIONS.md recorded 55.4%. `tools/selection_check.py` has had this guard since
+    # it was written; this copy did not.
+    seen: set[tuple[str, int]] = set()
     for row in rows:
+        key = (str(row["arm"]), int(row["game"]))
+        if key in seen:
+            raise SystemExit(
+                f"{key} appears in two of {len(parts)} part files beside {out}. That is "
+                "two runs merged, not one run's shards -- delete the stale parts (check "
+                "their mtimes and sizes) and merge again."
+            )
+        seen.add(key)
         if row["outcome"] is None:
             unfinished += 1
             continue
