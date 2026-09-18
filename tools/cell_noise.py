@@ -31,16 +31,19 @@ both be wrong -- training against the search value (`--td-lambda`) risks exactly
 because it replaces a noisy unbiased label with a quiet biased one. The held-out AUC
 against the real outcome is the guard, and the board is the judge.
 
-Calibrated against the books those same three seeds produced, the cheap number orders the
-expensive one exactly:
+**DEMOTED. It does not predict the book, and it does not order it either.** Within the
+three td=0 seeds it looked excellent -- 0.1078, 0.1016, 0.0902 against book costs of 5.86,
+3.09, 2.88 -- and a power law fitted to those three then missed low three times in a row,
+by 29% and 38%, growing with distance. Worse, across configurations the ORDER inverts:
 
-    pair            cell spread   the book's advice costs
-    gen8 ~ s1          0.1078            5.86 points
-    gen8 ~ s2          0.1016            3.09
-    s1   ~ s2          0.0902            2.88
+    configuration        cell spread   the book's advice costs
+    ensemble at td=0        0.0643           1.14 points
+    ensemble at td=0.5      0.0510           1.54
 
-Against a model's own spread of 0.162 to 0.183 at turn 1, a disagreement of 0.09 to 0.11
-is noise of about sixty per cent of the signal.
+The quieter cells produced the noisier book. So this measures something real and it is not
+what the book consumes: these are the turn-1 rows self-play actually visited, and a book
+reads all 8,100 cells of every matchup it solves. Use it to see whether a change moves the
+leaf's variance at all, in seconds. Do not use it to predict or to rank.
 
     uv run --group learn python tools/cell_noise.py data/models/value-gen8{,-s1,-s2}.pt
     uv run --group learn python tools/cell_noise.py --data data/selfplay-pool8-encoded.npz \
