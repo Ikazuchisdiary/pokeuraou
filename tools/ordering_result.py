@@ -187,9 +187,26 @@ def main() -> None:
     minus = len(signs) - plus
     print(f"\n  {rows} opponents, {plus} where the heavier four won, {minus} where it lost")
     print(f"  sign test p = {sign_test(plus, minus):.3f}  (ties dropped: {rows - len(signs)})")
-    if signs:
-        overall = sum(m for _s, m in signs) / len(signs)
-        print(f"  mean paired difference across opponents {overall:+.1%}")
+    # Two tests, because they need different things and fail differently.
+    #
+    # The sign test reads only the direction, so it survives an opponent whose difference
+    # is enormous for a reason of its own -- and it is blunt: with twelve opponents it
+    # needs ten of them one way to clear 0.05, and no number of games per opponent adds a
+    # sign. The mean across opponents uses the magnitudes, which is the sharper question
+    # and assumes they are commensurable: a 26-point difference on one opponent and a
+    # 6-point one on another are being averaged as though a point is a point.
+    if len(signs) > 1:
+        values = [m for _s, m in signs]
+        n = len(values)
+        mean = sum(values) / n
+        var = sum((v - mean) ** 2 for v in values) / (n - 1)
+        half = 1.96 * math.sqrt(var / n)
+        print(
+            f"  mean paired difference across opponents {mean:+.1%} +-{half:.1%}"
+            + ("  (excludes zero)" if abs(mean) > half else "  (includes zero)")
+        )
+    elif signs:
+        print(f"  one opponent only: {signs[0][1]:+.1%}, no interval across opponents")
     print(
         "\n  A negative difference means the book ordered the two backwards ON THAT\n"
         "  OPPONENT. It does not mean the book is worse than uniform: discarding the bad\n"
