@@ -1,0 +1,203 @@
+=== READING OF THE THREE NULLS ===
+The three results are not three failures; they are one measurement of where the pipeline's
+signal dies, and the record contains the control that localises it.  FIRST, THE LOCALISATION.
+The cleanest natural experiment in the whole record is leaf ranking, because it was applied in
+two different places. At MATCH time it is +2.9 [+0.5, +5.3] over 1,675 games — significant.
+Routed through TEACHER DATA, as a genuinely paired 12,000-game regeneration, it is +0.6 over
+1,696 games — not significant. Same intervention, same direction, same instrument, one link
+apart in the pipeline. The hidden bench has the same shape: at play time the information is
+worth 0.960 points per opening decision and changes the advice in 36 of 40 openings; routed
+through teacher data it is +0.9, then +0.8 after three leaks closed. So the pattern is not
+"correctness does not matter". It is that correctness applied at PLAY time changes a decision
+directly, while correctness applied to teacher data must survive a training step — and the
+training step is where it dies. The record already measured why: training-seed spread is 0.0240
+held-out AUC against 0.004 between settings, six times larger than the difference being judged,
+and each configuration was trained once. T1 is the worked example — the only pre-floor
+"significant" data lever (-3.5) became -1.2 once the floor was built. A better teacher position
+produces a model whose difference from its predecessor is smaller than the noise of retraining
+it. That is the binding constraint on the board pipeline, and it is upstream of the board, not
+on it.  SECOND, AND MORE IMPORTANT: the board is measuring the wrong axis, and the record
+supports saying so. Four things converge. (1) The instrument resolves +/-2.4 at 1,696 games and
+every lever judged on the floor since it was built lands inside that band except one. So most of
+the "no effect" list is a list of bounds, not of zeros — which means those levers cannot be
+ORDERED, not that they are absent. (2) The largest board number in the record is not a strength
+property. The book is +13.6/+18.9 against a uniform drawer and +2.1 against a drawer who also
+has it, intervals overlapping. Its measured value is exploitation of a straw opponent, and T7
+records that the rating scale cannot hold it at all. The biggest number the project has is a
+measure of how bad its baseline opponent is. (3) I confirmed from data/train-gen10-s0.log that
+the book — that same largest lever — is built 100% from turn-1 cells, and turn 1 is the value
+function's worst turn by a wide margin: AUC 0.681 (n=11,644) against 0.958 by turn 10. And two
+independent measurements this session say the resulting advice is close to a coin flip between
+training seeds of the same configuration: per-cell sd 6.3-6.6 points against a within-row spread
+of 0.09, mixture total variation 0.77-0.91, lead mass moving 66-86 points. The product's
+headline output is not reproducible, and no board match can see that, because both seeds play
+equally well. (4) The shipped values are miscalibrated against the population that matters by
+far more than the board can resolve: claimed 42.3% vs measured 34.0% against BIG6, claimed 54.3%
+vs measured 32.5% against Ben Madigan, a gap E2 halved (-10.3 -> -4.7) and did not close.
+Notably the by-turn table shows the model is near-calibrated ON ITS OWN self-play distribution
+at turn 1 (model mean 0.524 against an actual 53.2%), so this is off-distribution error — the
+value function has never seen tournament teams played well. The error in the shipped number is
+three to nine times the largest effect the board instrument can resolve.  SO: yes, board win
+rate is the wrong thing to be optimising, and the project's own first paragraph already says so
+— the deliverable is equilibrium mixed strategies, adoption frequencies, EV loss and an
+opponent-spread posterior, and strength is a means. The three nulls are the fourth instance of a
+pattern the record names as its own brake, and the correct response is not to find a better data
+lever or to buy more games. It is to stop spending 31-50 machine-minutes per unreadable answer
+on training changes, and to redirect onto the two questions that are in the product's own units,
+are currently failing, and are measurable off the board: whether the printed advice is
+reproducible (cheap, half-measured already, failing badly), and whether the printed values are
+true against real opponents (expensive, priced by the record itself at 2,000 games per side,
+never paid). Board matches keep one legitimate use — play-time search configuration, where the
+record's own evidence (width, match-time ranking, the learned leaf) says the board can actually
+see the effect.  One discipline note, because it cuts against my own conclusion: "the board
+cannot see it" is not "it is zero", and none of the three nulls licenses abandoning the teacher-
+side work. The narrowing fix in particular took the equilibrium mass kept from 58.1% to 93.3%
+and the sacrifice from 2.53 points to 0.05 — that is a real improvement to the object the
+project ships, and it should be recorded as such in its own units, with the conversion to Elo
+left unclaimed, since TODO.md states plainly that nobody owns that conversion.
+
+=== RANKED (10) ===
+
+1. Close the three bookkeeping failures — already measured this session, zero machine time
+   cost: 0 — the mirror recomputation took about 3 minutes and is already done; the rest is editing two files.
+
+2. Measure how much of the book's printed advice is training-seed luck, with a held-out reference
+   cost: About 1 CPU-hour, no training (value-gen8 plus -s1..-s5 are on disk) and no games. Placed above the zero-cost items below because 
+
+3. Ship the book's value against a stated (uniform) opponent — free, exact, and already board-anchored twice
+   cost: 0 — arithmetic over data/selection/*.jsonl.gz, seconds. About ten lines in tools/solve_selection_book.py's report plus the same in
+
+4. Solve the book on the 2-net ensemble — apply the rule the project already adopted, and claim nothing more
+   cost: About 0.5 — one re-solve, 27m42s recorded single-net (data/selection/solve-gen9.log), roughly 1.05x with two nets stacked since th
+
+5. Write down the book's four-versus-lead decomposition — computable from disk in seconds
+   cost: 0 — about 80 lines against data/selection/*.jsonl.gz, belongs in tools/ beside book_check.py.
+
+6. Report the paired interval beside the binomial one, behind a hard pairing-completeness gate
+   cost: 0 machine time — measured this session. About an hour of work: fix the games-seed*/games-worker* glob in tools/paired_match.py, re
+
+7. Audit whether the spread belief can represent a real player's build
+   cost: 0 — arithmetic over the prior and two config files.
+
+8. Two correctness alignments accepted by exact equality, with no board match and no strength claim
+   cost: 0 games. About a day for (a), minutes for (b). Explicitly do NOT buy the 1,696-game match for either — the predicted effects are u
+
+9. Separate the training seed from the holdout split in tools/train_value.py
+   cost: 0 — add --split-seed (default 0), thread it to dataset.split_by_game, record it in each model's provenance.
+
+10. Calibration against real tournament teams, at the price the record itself set
+   cost: Roughly 10-20, at 2,000 games per side against a small panel of real teams. Must be run at the deployed configuration — the curren
+
+=== KILLED (16) ===
+
+- Fold the post-faint replacement into the cell value (general version)
+    The mechanism requires the leaf to be pricing a fictitious, unlearned state. It is not:
+    pre-replacement positions are 22-26% of the training pool, outcome-labelled and reported
+    per kind, and the leaf reads them slightly BETTER than ordinary move positions (AUC 0.8674
+    vs 0.8660). Measured against outcome on 12,000 gen-10 games, the 0.045 gap carries 22% of
+    a move ply's predictive information (+0.0052 vs +0.0232), and
+
+- Solve the LP against the ensemble's measured spread (robust/interval game, solve_robust)
+    The product path does not run the game the measurement was taken in. cli.py loads a single
+    net via load_model, so there are no discarded member logits and the 'zero extra forward
+    passes' claim is false where the product is produced; and cli.py:428 calls solve_bayesian
+    over a weighted family of matrices, not solve, which is what the 0.081 / TV 0.44 / 0.80
+    numbers were measured on. The headline TV is further confounded
+
+- Re-price depth-2's refined cells and re-judge depth
+    Depth 2 is unreachable in the condition the agent plays. belief_solve (search.py:440)
+    takes no depth argument, and selfplay.py consults depths only when spreads is None — i.e.
+    never under --hide-bench, which is what data/selfplay-gen11h/CMD, gen11L/CMD and lead-
+    gaendohido/CMD all run and what T8 calls 'the condition actually used'. TODO.md:617
+    already decided 深さは1固定 with a stated mechanism. Separately, the 2.53-point
+
+- Point the mirror at the belief path with a ~700-game hidden mirror run
+    The asserted identity is the wrong constant — belief_solve builds side 1 as -m.T, so the
+    two sides' values sum to 0, not 1, and the check as written fails on correct code. The
+    corrected identity already holds at 1.1e-16, and on a symmetric mirror the two sides' LPs
+    collapse to the same LP shifted by a constant, so a mirror is structurally blind to the
+    failure the proposal suspects. The motivating premise is also fals
+
+- K=6 ensemble plus variance-weighted shrinkage for the book cells
+    The recorded ensemble-size curve already answers K: 0.0240 -> 0.0065 -> 0.0059, '50% more
+    cost for 7% less spread', adopted at 2 — and it falls faster than sqrt(K) at N=2 and is
+    flat by N=3, so the proposal's sqrt(K) reasoning is the thing that curve falsified. A K=3
+    pilot on the six gen-8 seeds cut cell disagreement 0.0781 -> 0.0502 but left mixture TV at
+    1.000 on 3 of 3 teams (worse on one), so quieter cells do not
+
+- Decompose the 0.0240 seed constant into training seed, split, and evaluation-set size (12 training runs)
+    The split component is irreducible for the comparisons the gate is for — all three T1
+    levers change the pool, so no shared split exists at any seed. For same-pool comparisons
+    the instrument already exists and is already used: tools/sweep_value.py computes one split
+    and passes it to every configuration, and the TD-lambda sweep was run on one shared split
+    and validation set. The claimed payoff also misattributes: the t
+
+- Keep a second checkpoint selected by the turn band the book uses
+    The claimed gain is the size of its own noise: +0.0152 turn-1 AUC against a fixed-split
+    3-seed turn-1 AUC spread of 0.0125, and 0.0019 aggregate log loss against a 0.0013 spread
+    — and sweep_value.py already prints the rule that a difference smaller than the seed
+    spread is not a result. The observed trajectory is also not the shipped one: the
+    diagnostic ran 16 epochs while every saved checkpoint is epochs=30 with OneC
+
+- Build the book's cells with the bench-hidden leaf
+    The artifact offered as the fix is not bench-blind: value-gen11h's metadata shows pool11h
+    = selfplay-all + selfplay-gen9 + selfplay-gen11h, so only 12,000 of 70,603 games were
+    played blind and 83% of the labels are in-battle omniscient. Its held-out AUC gap to the
+    open value-gen10 (0.8810 vs 0.8845) is smaller than its own seed gap (0.8843), i.e. inside
+    the floor the seed-noise section was written about. The stated d
+
+- A fifth book_check arm splitting 'which four' from 'which two lead'
+    The question is answered by files already on disk: our_ev_loss over the 90 ordered
+    selections plus the exact 15x6 factorisation gives the split in seconds — roughly one
+    third order, two thirds which-four, stable across two books (4.06 of 12.04 points; 5.07 of
+    16.19). Both decision branches close before any games: lead order is never worth zero on
+    any of the 394 sheets, killing the 225-cell / 36x-cheaper-solve payoff,
+
+- Regress measured win-rate drop on claimed EV loss to ship a correction factor
+    The x variable is not identified: row_ev_loss is exactly 0 on every support row, so every
+    forced arm except the reference is off-support, where the value is set by which optimal
+    column vertex HiGHS returned — and the record already measured the vertex changing in 6 of
+    8 nodes. The arms are then chosen BY their claimed loss, including its argmax, so
+    attenuation alone produces the predicted 0.4-0.7 slope with no miscal
+
+- A referee panel scoring advice by exploitability under an averaged-net judge
+    Exploitability under an estimated payoff matrix measures agreement with the estimator —
+    the same circularity GENERATIONS.md:761 already names ('the error moved from the menu to
+    the leaf'), and swapping one net for an average of nets moves whose opinion is
+    authoritative without moving the error out of the leaf. All three calibration items are
+    satisfied by the failure mode: at width 48 the menu already is the full lega
+
+- Report the equilibrium polytope with probability bands and a max-entropy vertex
+    Both constructions are already shipped. cli.py:491 _best_reply_sets exists and its
+    docstring states the proposal's own premise as solved ('A property of the game, unlike the
+    particular mixed strategy the LP happened to return'); EV損 is printed at both the turn and
+    selection level and exported as evLoss; and explore_mixture already does the anti-
+    concentration half with a reported perplexity. The stated motivation for
+
+- Drive the posterior from a played game and score it against the true spread (fresh 2,000-game pool)
+    The ground truth is circular: standings.py:254 fills the opponent's spread by sampling the
+    same usage prior the belief starts from, so with exact unfitted likelihoods the expected
+    log-score gain is the mutual information and non-negative by construction — the run would
+    confirm Bayes' theorem. The replay is also state-misaligned: observe.update evaluates a
+    whole observation list against one Position while damage_taken
+
+- Price the opponent model with best-reply and exploitability arms plus a fifth board arm
+    The only genuinely new quantity, v_br|q - v_eq|q, is the interaction content of the
+    selection matrix, which the record measures at 0.1-2.3% with no three-way cycle; on 24 re-
+    solved entries the best reply to uniform is already inside the equilibrium support in 18
+    of 24 and the gap is +2.71 claimed points — smaller than the ~4 points GENERATIONS.md
+    attributes to the optimiser's curse over the same 8,100 cells that prod
+
+- Stop matches on a pre-registered sequential rule (SPRT) instead of at 1,696 games
+    Every match is simultaneously a verdict, a Bradley-Terry edge and a lever-table row:
+    tools/ratings.py globs every match directory and emits one observation per game, and the
+    record prices that edge at +/-265 Elo unconnected falling to +/-41 after one 840-game
+    bridge. Games 'returned' are subtracted from the rating graph. The record also uses signed
+    magnitudes, not binary verdicts — D1 adopts width 24 on the ladder -1
+
+- Put a training-seed term into the T-series intervals and set the ensemble size from it
+    The magnitude has no source: sigma_seed = 1.6 is extracted from a 2.3-point single-to-
+    ensemble swing that binomial noise alone explains at p ~ 0.18, and the two arms shared
+    nets, so it is a mean shift from diluting a known-bad seed rather than a symmetric draw —
+    adding it to +/-2.4 double-counts. The design also cannot produce its promised curve,
+    because BatchedValue averages logits inside the search and the equilibr
