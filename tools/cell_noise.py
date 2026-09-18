@@ -64,9 +64,29 @@ from pokeuraou.regulation import load_regulation  # noqa: E402
 from pokeuraou.value import auc, load_dataset, load_model, predict  # noqa: E402
 
 
+def probabilities(members, dataset, index, device):  # noqa: ANN001, ANN201
+    """Win probability from one net, or from several averaged as one leaf.
+
+    The average is taken in logit space, which is where the model is linear and
+    where `V(x) + V(mirror x) = 1` survives it exactly -- the same choice
+    `BatchedValue._mean_logit` makes, so this screen and the solver agree about what
+    an ensemble is.
+    """
+    logits = np.mean(
+        [predict(net, dataset, index, device=device).astype(np.float64) for net in members],
+        axis=0,
+    )
+    return 1.0 / (1.0 + np.exp(-logits))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("models", nargs="+", type=Path)
+    ap.add_argument(
+        "models",
+        nargs="+",
+        help="one net per argument, or several comma-separated to average as one "
+        "leaf: value-gen8.pt,value-gen8-s1.pt is the ensemble, not two entries.",
+    )
     ap.add_argument("--data", type=Path, default=Path("data/selfplay-pool8-encoded.npz"))
     ap.add_argument("--rows", type=int, default=60_000, help="rows sampled per turn bucket")
     ap.add_argument("--seed", type=int, default=0)
@@ -82,12 +102,17 @@ def main() -> None:
     device = torch.device(args.device)
 
     nets = []
-    for path in args.models:
-        net, net_meta = load_model(path, encoder)
-        nets.append((path.stem, net.to(device), net_meta))
-        print(f"  {path.stem}: AUC {net_meta.get('val_auc', float('nan')):.4f}  "
-              f"td_lambda {net_meta.get('td_lambda', 0.0)}  "
-              f"epochs {net_meta.get('epochs_run', '?')}")
+    for spec in args.models:
+        members, aucs = [], []
+        for piece in str(spec).split(","):
+            path = Path(piece)
+            net, net_meta = load_model(path, encoder)
+            members.append(net.to(device))
+            aucs.append(float(net_meta.get("val_auc", float("nan"))))
+        label = "+".join(Path(p).stem.replace("value-", "") for p in str(spec).split(","))
+        nets.append((label, members, aucs))
+        joined = ", ".join(f"{a:.4f}" for a in aucs)
+        print(f"  {label}: {len(members)} net(s), AUC {joined}")
 
     turn = dataset.turn if hasattr(dataset, "turn") else np.load(args.data)["turn"]
     outcome = np.asarray(dataset.outcome, dtype=np.float64)
@@ -95,7 +120,7 @@ def main() -> None:
 
     header = "\n   turn        n"
     for (left, _, _), (right, _, _) in itertools.combinations(nets, 2):
-        header += f"   {left.replace('value-', '')}~{right.replace('value-', '')}"
+        header += f"   {left}~{right}"
     print(header)
 
     for bucket in (1, 2, 5, 10):
@@ -104,10 +129,8 @@ def main() -> None:
             continue
         if len(keep) > args.rows:
             keep = rng.choice(keep, args.rows, replace=False)
-        values = {}
-        for name, net, _ in nets:
-            values[name] = 1.0 / (1.0 + np.exp(-predict(net, dataset, keep, device=device)
-                                               .astype(np.float64)))
+        values = {name: probabilities(members, dataset, keep, device)
+                  for name, members, _ in nets}
         line = f"  {bucket:>5} {len(keep):>8,}"
         for (left, _, _), (right, _, _) in itertools.combinations(nets, 2):
             diff = values[left] - values[right]
@@ -118,10 +141,8 @@ def main() -> None:
     keep = np.flatnonzero(turn == 1)
     if len(keep) > args.rows:
         keep = rng.choice(keep, args.rows, replace=False)
-    values = {
-        name: 1.0 / (1.0 + np.exp(-predict(net, dataset, keep, device=device).astype(np.float64)))
-        for name, net, _ in nets
-    }
+    values = {name: probabilities(members, dataset, keep, device)
+              for name, members, _ in nets}
     print("\n  turn 1 in detail")
     print(f"    {'pair':<34} {'spread':>8} {'worst':>8} {'|mean|':>8}")
     for (left, _, _), (right, _, _) in itertools.combinations(nets, 2):
