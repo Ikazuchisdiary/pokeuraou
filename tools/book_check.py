@@ -286,6 +286,21 @@ def main() -> None:
                             "outcome": record.outcome,
                             "turns": record.turns,
                             "value": entry.value,
+                            # What actually played. generation_match records this and
+                            # stayed correct for a year; the two tools that did not both
+                            # drifted away from the generation path without anyone
+                            # noticing -- this one narrowed by damage after generation
+                            # moved to the leaf, and selection_check played hp-share
+                            # while comparing itself against the value function's claim.
+                            # A tool that writes down its agent is a tool whose agent gets
+                            # checked.
+                            "provenance": {
+                                "kind": "book-check",
+                                "leaf": "+".join(m.name for m in models),
+                                "limit": args.limit,
+                                "ranking": "leaf" if args.rank_by_leaf else "damage",
+                                "book": str(book_path.name),
+                            },
                         },
                         ensure_ascii=False,
                     )

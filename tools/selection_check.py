@@ -157,13 +157,22 @@ def main() -> None:
         if not parts:
             raise SystemExit(f"no part files beside {args.out}")
         claimed = None
+        seen_headers: set[str] = set()
         tally: dict[str, list[int]] = {}
         seen: set[tuple[str, int]] = set()
         for part in parts:
             for line in part.read_text(encoding="utf-8").splitlines():
                 row = json.loads(line)
                 if "header" in row:
-                    claimed = row["header"]["claimed"]
+                    header = row["header"]
+                    claimed = header["claimed"]
+                    # Printed, not merely stored. A provenance nobody reads is a
+                    # provenance that does not stop the next drift.
+                    seen_headers.add(
+                        f"leaf {header.get('leaf', '?')}  width {header.get('limit', '?')}"
+                        f"  narrowing {header.get('ranking', '?')}"
+                        f"  {header.get('information', '?')}"
+                    )
                     continue
                 key = (row["arm"], int(row["game"]))
                 if key in seen:
@@ -172,6 +181,10 @@ def main() -> None:
                 got = tally.setdefault(row["arm"], [0, 0])
                 got[0] += int(float(row["outcome"]) > 0.5)
                 got[1] += 1
+        for line in sorted(seen_headers):
+            print(f"  played by: {line}")
+        if len(seen_headers) > 1:
+            raise SystemExit("these parts were played by different agents")
         print(f"  {len(parts)} part files, {len(seen)} games")
         results = {}
         for arm, (wins, n) in tally.items():
@@ -394,8 +407,22 @@ def main() -> None:
             # class to print one number would cost more than the games it is summarising.
             handle.write(
                 json.dumps(
-                    {"header": {"claimed": float(analysis.value), "place": args.place,
-                                "hideBench": bool(args.hide_bench), "games": args.games}},
+                    {
+                        "header": {
+                            "claimed": float(analysis.value),
+                            "place": args.place,
+                            "games": args.games,
+                            # What actually played. This tool wrote none of it and spent a
+                            # year comparing the value function's claim against games the
+                            # hp-share heuristic played, narrowed by damage after
+                            # generation had moved to the leaf. generation_match records
+                            # its agent and stayed correct; the tools that did not, drifted.
+                            "leaf": str(args.model),
+                            "limit": args.limit,
+                            "ranking": "leaf" if args.rank_by_leaf else "damage",
+                            "information": "hidden-bench" if args.hide_bench else "open",
+                        }
+                    },
                     ensure_ascii=False,
                 )
                 + "\n"
