@@ -466,6 +466,16 @@ def play_game(
     )
     policies = policy if isinstance(policy, tuple) else (policy, policy)
     leaves = evaluate if isinstance(evaluate, tuple) else (evaluate, evaluate)
+    if sheets is not None and (depths != (1, 1) or sparse != (False, False)):
+        # `belief_solve` takes neither, so under a hidden bench these were accepted,
+        # recorded per side in the provenance, and then dropped. An argument that is
+        # silently ignored is how every measurement defect found today was built: the
+        # caller reads the flag it passed, the record repeats it, and nothing played it.
+        raise ValueError(
+            f"depth {depths} and solve_sparsely {sparse} cannot be honoured with a "
+            "hidden bench -- belief_solve has no parameter for either. Pass depth 1 and "
+            "solve_sparsely False, or drop `sheets` and measure in the open game."
+        )
     record = GameRecord(
         own_team=[_set_json(reg, s) for s in own],
         foe_team=[_set_json(reg, s) for s in foe],
@@ -526,6 +536,29 @@ def play_game(
         if not ours or not theirs:
             break
 
+        # Whether the two agents build the SAME menu, which is the only case where one
+        # construction may serve both.
+        #
+        # This read `ranked[1] == ranked[0] and policies[1] is policies[0]` and left the
+        # leaf out. Two arms both passing --rank-leaf with DIFFERENT models rank by
+        # different numbers, so they do not have one menu -- and the comment three lines
+        # below says exactly that ("a ranking that differs is a different menu") while the
+        # condition could not see it. Every model-against-model match run with
+        # `--rank-leaf --baseline-rank-leaf` had the column player choosing from a menu
+        # the row player's value function picked; about 25,000 recorded games.
+        #
+        # The leaf only reaches the menu through `leaf_ranking`, so it matters when no
+        # policy is given and the ranking is by leaf -- and not otherwise.
+        same_menu = (
+            ranked[1] == ranked[0]
+            and policies[1] is policies[0]
+            and (
+                policies[0] is not None
+                or not ranked[0]
+                or leaves[1] is leaves[0]
+            )
+        )
+
         if spreads is not None:
             # Each side is uncertain about a different bench, so each gets its own answer.
             # The node underneath them is resolved once: their hidden slots are disjoint
@@ -545,6 +578,27 @@ def play_game(
             foe_strategy = answers[1].strategy
             foe_theirs = theirs
             search_value = answers[0].value
+            if not same_menu:
+                # The open path rebuilds the column player's game when the settings
+                # differ; this one used to skip that entirely, so under a hidden bench
+                # `ranked[1]` and `policies[1]` were dead arguments -- the provenance
+                # recorded them per side and only side 0's were ever played. The anchor
+                # of the hidden-bench scale was measured this way, with the hp-share arm
+                # handed a menu ranked by the other arm's value function in one seat.
+                foe_ours, foe_theirs = _menus(
+                    reg, pos, limits, foe_leaf, budget, ranked[1], policies[1], spreads
+                )
+                if not foe_ours or not foe_theirs:
+                    break
+                try:
+                    foe_answers = belief_solve(
+                        reg, pos, foe_ours, foe_theirs, spreads,
+                        {0: own_leaf, 1: foe_leaf}, budget=budget,
+                    )
+                except EquilibriumError:
+                    break
+                record.unmodelled.extend(foe_answers[1].unmodelled)
+                foe_strategy = foe_answers[1].strategy
         else:
             try:
                 own_search = search(
@@ -570,7 +624,6 @@ def play_game(
                 or policies[1] is not policies[0]
                 or sparse[1] != sparse[0]
             ):
-                same_menu = ranked[1] == ranked[0] and policies[1] is policies[0]
                 foe_ours, foe_theirs = (
                     (ours, theirs)
                     if same_menu
@@ -821,11 +874,14 @@ def _do_replacement_node(
 
     With `sheets` it is also the node where the *reveal* happens: the Pokemon coming in is
     the one that stops being hidden, and choosing what to send against an opponent whose
-    bench is unknown is the same Bayesian game the move nodes solve. Without them this is
-    the node it has always been, down to using only side 0's leaf -- which is a wart of its
-    own, since with different leaves the column player's replacement is chosen by the row
-    player's evaluator, but it is not today's wart and changing it would move every
-    open-information number.
+    bench is unknown is the same Bayesian game the move nodes solve.
+
+    Without them each side now also gets its own matrix. It did not: both strategies came
+    off `matrix(pos, leaves[0])`, and this docstring called that a wart and left it,
+    "because changing it would move every open-information number". Every one of those
+    numbers was a comparison in which the column player's replacements were chosen by its
+    opponent's evaluator, for about a third of the decisions in a game, and the seat swap
+    moves that from one arm to the other rather than cancelling it.
 
     The options are built once from the true position because they are the same in every
     completion: a replacement names a *slot*, and which slots are free is public even when
@@ -903,6 +959,13 @@ def _do_replacement_node(
             foe_policy = [1.0 / len(options[1])] * len(options[1])
             value = 0.5
     else:
+        # One matrix per side, as the hidden-bench branch above already does. This read
+        # `matrix(pos, leaves[0])` and took BOTH strategies off it, so with different
+        # leaves the column player's replacement was chosen by the row player's
+        # evaluator. The docstring called it a wart and deferred it because changing it
+        # "would move every open-information number" -- which is the reason to change it:
+        # a replacement is about a third of a game's decisions, and the seat swap moves
+        # the corruption from one arm to the other rather than cancelling it.
         payoff = matrix(pos, leaves[0])
         try:
             equilibrium = solve(payoff)
@@ -913,6 +976,14 @@ def _do_replacement_node(
             own_policy = [1.0 / len(options[0])] * len(options[0])
             foe_policy = [1.0 / len(options[1])] * len(options[1])
             value = float(payoff.mean())
+        if leaves[1] is not leaves[0]:
+            foe_payoff = matrix(pos, leaves[1])
+            try:
+                foe_policy = [
+                    float(x) for x in solve(foe_payoff).col_strategy
+                ]
+            except EquilibriumError:
+                foe_policy = [1.0 / len(options[1])] * len(options[1])
 
     chosen = [
         options[0][_sample_index(rng, np.array(own_policy))],

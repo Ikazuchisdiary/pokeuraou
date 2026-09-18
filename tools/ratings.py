@@ -363,7 +363,16 @@ def main() -> None:
     # survives from six generations back is in that condition and a drifting yardstick is
     # worse than a limited one. But a reader who takes the top of this table as "the
     # strongest agent" has read the wrong column, which is why it is a column.
-    hidden = sum(played[n] for n in names if n.endswith("/hidden-bench"))
+    # From the observations, not from `played`. `played` adds a game's `n` to BOTH agents
+    # (it answers "how many games has this agent played"), while `total` counts each game
+    # once -- so summing `played` over the hidden-bench agents counts every hidden game
+    # twice, and the line printed 23,744 against a truth of 11,872 on the day it was
+    # written. Two counters in the same sentence, in different units.
+    hidden = sum(
+        n
+        for a, b, _w, n in games
+        if a.endswith("/hidden-bench") or b.endswith("/hidden-bench")
+    )
     print(
         f"\n  {hidden} games hid the bench and {total - hidden} did not. The open ones are "
         "REFERENCE:\n  their search saw the opponent's four, which is information a real "

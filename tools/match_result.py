@@ -29,8 +29,10 @@ def elo(p: float) -> float:
     return -400.0 * math.log10(1.0 / p - 1.0)
 
 
-def read(directory: Path) -> tuple[dict[str, tuple[int, int]], dict[str, dict], int]:
-    """Per-seat (wins, played) for the named arm, a provenance per seat, and unfinished."""
+def read(
+    directory: Path,
+) -> tuple[dict[str, tuple[int, int]], dict[str, dict], int, int]:
+    """Per-seat (wins, played), a provenance per seat, unfinished, and games on disk."""
     seats: dict[str, tuple[int, int]] = {}
     unfinished = 0
     for path in sorted(directory.glob("worker*.jsonl")) + sorted(
@@ -50,6 +52,15 @@ def read(directory: Path) -> tuple[dict[str, tuple[int, int]], dict[str, dict], 
             a, b = seats.get(seat, (0, 0))
             seats[seat] = (a + wins, b + played)
             unfinished += int(row.get("unfinished", 0))
+    # Every game record on disk, counted separately from the summary rows.
+    #
+    # A summary row is written by a worker when it FINISHES. A worker that dies has
+    # written its games and no row, so the rate divides the survivors' wins by the
+    # survivors' games and reads as a complete run: `width-12-vs-48` prints 1,489 games
+    # with 1,695 on disk, and `genmatch-value-gen9x2-vs-value-allx2` prints 1,635 with
+    # 1,695 and an interval that excludes zero. Both directories have DONE files saying
+    # FAILED, which this tool never reads either.
+    written = 0
     provenance: dict[str, dict] = {}
     for path in sorted(directory.glob("games-worker*.jsonl")) + sorted(
         directory.glob("games-seed*.jsonl")
@@ -58,11 +69,10 @@ def read(directory: Path) -> tuple[dict[str, tuple[int, int]], dict[str, dict], 
             for line in handle:
                 if not line.strip():
                     continue
+                written += 1
                 source = json.loads(line).get("provenance", {})
                 provenance.setdefault(str(source.get("seat", "?")), source)
-        if seats and len(provenance) >= len(seats):
-            break
-    return seats, provenance, unfinished
+    return seats, provenance, unfinished, written
 
 
 def main() -> None:
@@ -71,7 +81,7 @@ def main() -> None:
     args = ap.parse_args()
 
     for directory in args.dirs:
-        seats, provenance, unfinished = read(directory)
+        seats, provenance, unfinished, written = read(directory)
         total_w = sum(w for w, _n in seats.values())
         total_n = sum(n for _w, n in seats.values())
         print(f"\n{directory}")
@@ -107,6 +117,18 @@ def main() -> None:
         )
         if unfinished:
             print(f"  ! {unfinished} games did not finish and are not in the total")
+        marker = directory / "DONE"
+        said = marker.read_text(encoding="utf-8").strip() if marker.exists() else ""
+        if written and written != total_n:
+            print(
+                f"  ! {written} games are on disk and only {total_n} are in this total.\n"
+                "    A summary row is written when a worker FINISHES, so a worker that\n"
+                "    died left its games behind and no row -- and the rate then divides\n"
+                "    the survivors' wins by the survivors' games and reads as a\n"
+                "    complete run."
+            )
+        if "FAIL" in said.upper():
+            print(f"  ! this run's own DONE marker says: {said}")
         if len(seats) == 2:
             rates = [w / n for w, n in seats.values()]
             gap = abs(rates[0] - rates[1])

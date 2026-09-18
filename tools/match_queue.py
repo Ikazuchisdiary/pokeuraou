@@ -100,6 +100,17 @@ def main() -> None:
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--no-bridge", action="store_true")
     ap.add_argument(
+        "--uniform-selection",
+        action="store_true",
+        help="both arms draw their four of six uniformly, and you mean it. Required when "
+        "no book reaches the workers, because a uniform draw is worth about -141 Elo "
+        "against the advice -- the whole distance from the parameter-free baseline to the "
+        "best agent on the scale -- and an agent measured that way is an agent playing a "
+        "selection nobody would play. `tools/generate_queue.py` has refused this since "
+        "generation 9; this wrapper never did, and every width match and several "
+        "generation matches recorded `books: [uniform, uniform]` as a result.",
+    )
+    ap.add_argument(
         "rest",
         nargs=argparse.REMAINDER,
         help="after --, options passed to every worker unchanged",
@@ -120,6 +131,25 @@ def main() -> None:
         # 4.0 GB and eight of them did not fit in 31.1.
         args.workers = 24 if getattr(args, "served", False) else 6
     extra = args.rest[1:] if args.rest and args.rest[0] == "--" else args.rest
+
+    # The guard `tools/generate_queue.py` has had since generation 9, and this wrapper
+    # did not. A book reaches the workers only through the free-form tail, so leaving it
+    # out looks exactly like not wanting one -- and the two differ by about 141 Elo, the
+    # whole distance from the parameter-free baseline to the best agent on the scale.
+    # Every width match and several generation matches recorded `books: [uniform,
+    # uniform]` without anyone choosing that.
+    if "--selection-book" not in extra and not args.uniform_selection:
+        raise SystemExit(
+            "no --selection-book in the options passed after `--`, so both arms will "
+            "draw their four of six uniformly. That is worth about -141 Elo against the "
+            "advice and is not a default: pass a book, or pass --uniform-selection to "
+            "mean it (which the hp-share anchors do)."
+        )
+    if args.uniform_selection and "--selection-book" in extra:
+        raise SystemExit(
+            "--uniform-selection contradicts the --selection-book in the tail; one of "
+            "them is not what you meant."
+        )
 
     out_dir: Path = args.out
     out_dir.mkdir(parents=True, exist_ok=True)
