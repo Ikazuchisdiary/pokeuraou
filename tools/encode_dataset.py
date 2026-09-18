@@ -60,6 +60,30 @@ def sources_of(directory: Path) -> list[list[Any]]:
     return [[p.name, p.stat().st_size] for p in sorted(directory.glob("*.jsonl"))]
 
 
+#: Every key `encode_dir` puts in a shard's meta. A shard whose meta was written before a
+#: key existed is not a shard this code would write, so it is re-encoded rather than
+#: merged into a summary that silently omits it.
+META_KEYS = (
+    "sources",
+    "kinds_filter",
+    "limit",
+    "meta_keys",
+    "games",
+    "search_limits",
+    "provenances",
+    "engines",
+    "objectives",
+    "information",
+    "selections",
+    "branching",
+    "foe_names",
+    "format_id",
+    "source_dir",
+    "unknown_volatiles",
+    "vocab_fingerprint",
+)
+
+
 def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict[str, Any]]:
     """Encodes one directory of games, or reads back the cache if it is still valid."""
     cache = shard_path(directory)
@@ -71,6 +95,19 @@ def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict
         "kinds_filter": sorted(args.kinds) if args.kinds else None,
         "limit": args.limit,
     }
+    # A cache is also stale when it predates a FIELD, not only when its games changed.
+    #
+    # `information` -- what the search could see -- was added on 2026-09-18, and
+    # `data/selfplay-gen11L-encoded.npz` was written the day before. The three keys above
+    # all still matched, so it would have been reused; `merged()` skips a missing key, so
+    # a 24,000-game hidden pool would have been described as 12,000 hidden. The field the
+    # whole hidden-versus-open experiment turns on, wrong by half, in the meta of the
+    # model that experiment produces.
+    #
+    # So the cache records which keys it was written with, and any old shard is missing
+    # that and re-encodes once. Cheap: a shard is a few minutes, and the alternative is a
+    # model whose record describes a pool it was not trained on.
+    want["meta_keys"] = sorted(META_KEYS)
     # A filtered run does not get a cache, in either direction. `--limit 50` is a
     # debugging flag, and letting it write `data/selfplay-gen7-encoded.npz` would replace
     # a full generation with fifty games under a name that says otherwise -- a trap that
@@ -229,6 +266,9 @@ def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict
         # 62.8%, open play returns 59.2% and hidden-bench play 50.0%. The pool that
         # taught it is the only place that answers which of those it meant.
         "information": dict(information),
+        # What this shard's meta was written with, so a later reader can tell a shard
+        # that says `{"open": 0}` from one written before the key existed.
+        "meta_keys": sorted(META_KEYS),
         # How the four of six were chosen. The axis that separates generation 8 from
         # every generation before it, and the one a pooled dataset would otherwise lose:
         # drawing the selection from the cached equilibrium instead of uniformly is worth
