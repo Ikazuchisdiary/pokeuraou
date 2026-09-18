@@ -167,6 +167,15 @@ def main() -> None:
     ap.add_argument("--book", type=Path, default=None)
     ap.add_argument("--games", type=int, default=280, help="games per arm, across shards")
     ap.add_argument("--limit", type=int, default=16)
+    ap.add_argument(
+        "--rank-by-leaf",
+        action="store_true",
+        help="order the narrowing by the leaf rather than by expected damage. Generation "
+        "moved to this ordering and the measuring tools did not, so every board number "
+        "taken here was played by an agent narrowing worse than the one being shipped. "
+        "The record prices the difference at 61.3%% of the equilibrium's mass kept against "
+        "86.4%%, and 1.78 points given up against 0.55.",
+    )
     ap.add_argument("--max-turns", type=int, default=40)
     ap.add_argument("--seed", type=int, default=11)
     ap.add_argument("--epsilon", type=float, default=DEFAULT_EPSILON)
@@ -262,6 +271,7 @@ def main() -> None:
                     search_limit=args.limit,
                     max_turns=args.max_turns,
                     evaluate=evaluate,
+                    rank_by_leaf=args.rank_by_leaf,
                 )
                 handle.write(
                     json.dumps(

@@ -23,6 +23,9 @@ TEMPERATURE="${TEMPERATURE:-0.5}"
 # The port, which this launcher never asked for: without it every arm runs the Python
 # resolver at about fifteen times the cost.
 RUST_NODE="${RUST_NODE:-1}"
+# RANK=leaf orders the narrowing by the leaf, which is what generation does. Empty keeps
+# the damage ordering every board number in the record was taken with.
+RANK="${RANK:-}"
 DEVICE="${DEVICE:-cuda}"
 # Which book, separately from which model plays. They default together -- a book solved by
 # a model is the one that model's name finds -- and the interesting comparison breaks that
@@ -48,6 +51,7 @@ for i in $(seq 0 $((WORKERS - 1))); do
 	# shellcheck disable=SC2086
 	POKEURAOU_RUST_NODE="$RUST_NODE" uv run --group learn python tools/book_check.py \
 		--roster "$ROSTER" --model $MODEL \
+		${RANK:+--rank-by-leaf} \
 		"${book_args[@]}" \
 		--games "$GAMES" --limit "$LIMIT" --seed "$SEED" \
 		--epsilon "$EPSILON" --temperature "$TEMPERATURE" \

@@ -114,6 +114,15 @@ def main() -> None:
         "calibration question needs that one arm, and the other two cost two thirds of "
         "the run.",
     )
+    ap.add_argument(
+        "--rank-by-leaf",
+        action="store_true",
+        help="order the narrowing by the leaf instead of by expected damage. Measured on "
+        "the turn-1 node of place 305: the damage ordering keeps none of the equilibrium's "
+        "43.7%% mass on moving a slot out of a 4x Blizzard, and solves to 0.2779; the leaf "
+        "ordering keeps 61.6%% of it and solves to 0.3260, against 0.3256 for the full "
+        "110x136 legal set. Generation moved to this ordering; this tool had not.",
+    )
     ap.add_argument("--shard", type=int, default=0)
     ap.add_argument(
         "--shards",
@@ -341,6 +350,12 @@ def main() -> None:
                 objective=OBJECTIVES["hp-share"],
                 search_limit=args.limit,
                 max_turns=args.max_turns,
+                # The leaf that solved the selection has to be the leaf that plays it.
+                # Without this the games were driven by the hp-share heuristic while the
+                # claim came from the value function, so the -21.8 point miss G2 recorded
+                # and everything measured with this tool since compared two agents.
+                evaluate=value,
+                rank_by_leaf=args.rank_by_leaf,
                 sheets=(
                     (list(roster.sets), list(foe_six)) if args.hide_bench else None
                 ),
