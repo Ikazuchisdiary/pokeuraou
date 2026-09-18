@@ -92,8 +92,14 @@ def main() -> None:
     print("# each pair is paired per game: same opponent, same spread class, same index")
     print("set -uo pipefail")
     print("cd /c/Users/Ikazuchi/repos/pokeuraou")
-    # The named arms are labelled 'a+b / c+d', and none of the three standard arms
-    # contains a slash, so '/' selects exactly the two forced ones.
+    # The named arms are labelled 'a+b / c+d'. The obvious selector is '/', and it does
+    # not survive the shell: MSYS rewrites a lone slash as a Windows path, so the worker
+    # was handed --only-arm 'C:/Program Files/Git/' and refused every opponent before
+    # playing a single game. Sixteen opponents of nothing, about five hours, caught by
+    # running one of them for two games first.
+    #
+    # '+' selects the same two arms -- it is in every forced label and in none of the
+    # three standard ones -- and is not a path character.
     print("DIR=data/matches/ordering")
     print('mkdir -p "$DIR/logs"')
     for place, first, second, p1, p2 in chosen:
@@ -104,10 +110,17 @@ def main() -> None:
         print(f"  for i in $(seq 0 {args.shards - 1}); do")
         print("    uv run --group learn python -u tools/selection_check.py \\")
         print(f"      --place {place} --model {args.model.as_posix()} \\")
-        print(f"      --games {args.games} --limit 16 --classes 4 "
+        # Eight classes, not the four an earlier panel used, because `selection_check`
+        # does not read the book -- it re-solves the selection game itself -- and the book
+        # whose ordering is on trial was solved with eight. The two arms are fixed by the
+        # book either way and both face the same opponent, so four would still be a valid
+        # paired comparison; it would just be a comparison against a different opponent
+        # model than the one the book assumed. One extra solve per opponent, about a
+        # quarter of an hour over the whole panel.
+        print(f"      --games {args.games} --limit 16 --classes 8 "
               "--hide-bench --rank-by-leaf \\")
         print(f'      --force-selection "{first}" --force-selection "{second}" \\')
-        print('      --only-arm "/" \\')
+        print('      --only-arm "+" \\')
         print(f'      --shard "$i" --shards {args.shards} --out "$out" \\')
         print(f'      > "$DIR/logs/{place}-$i.log" 2>&1 &')
         print("    pids+=($!)")

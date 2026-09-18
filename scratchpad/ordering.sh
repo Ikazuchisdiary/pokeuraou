@@ -12,9 +12,9 @@ out="$DIR/place121.jsonl"
   for i in $(seq 0 7); do
     uv run --group learn python -u tools/selection_check.py \
       --place 121 --model data/models/value-gen11L.pt \
-      --games 60 --limit 16 --classes 4 --hide-bench --rank-by-leaf \
+      --games 60 --limit 16 --classes 8 --hide-bench --rank-by-leaf \
       --force-selection "charizard,garchomp,toxapex,incineroar" --force-selection "charizard,sylveon,garchomp,toxapex" \
-      --only-arm "/" \
+      --only-arm "+" \
       --shard "$i" --shards 8 --out "$out" \
       > "$DIR/logs/121-$i.log" 2>&1 &
     pids+=($!)
@@ -30,9 +30,9 @@ out="$DIR/place170.jsonl"
   for i in $(seq 0 7); do
     uv run --group learn python -u tools/selection_check.py \
       --place 170 --model data/models/value-gen11L.pt \
-      --games 60 --limit 16 --classes 4 --hide-bench --rank-by-leaf \
+      --games 60 --limit 16 --classes 8 --hide-bench --rank-by-leaf \
       --force-selection "charizard,garchomp,venusaur,toxapex" --force-selection "toxapex,incineroar,venusaur,garchomp" \
-      --only-arm "/" \
+      --only-arm "+" \
       --shard "$i" --shards 8 --out "$out" \
       > "$DIR/logs/170-$i.log" 2>&1 &
     pids+=($!)
@@ -48,9 +48,9 @@ out="$DIR/place353.jsonl"
   for i in $(seq 0 7); do
     uv run --group learn python -u tools/selection_check.py \
       --place 353 --model data/models/value-gen11L.pt \
-      --games 60 --limit 16 --classes 4 --hide-bench --rank-by-leaf \
+      --games 60 --limit 16 --classes 8 --hide-bench --rank-by-leaf \
       --force-selection "charizard,sylveon,venusaur,incineroar" --force-selection "charizard,garchomp,venusaur,toxapex" \
-      --only-arm "/" \
+      --only-arm "+" \
       --shard "$i" --shards 8 --out "$out" \
       > "$DIR/logs/353-$i.log" 2>&1 &
     pids+=($!)
@@ -66,9 +66,9 @@ out="$DIR/place173.jsonl"
   for i in $(seq 0 7); do
     uv run --group learn python -u tools/selection_check.py \
       --place 173 --model data/models/value-gen11L.pt \
-      --games 60 --limit 16 --classes 4 --hide-bench --rank-by-leaf \
+      --games 60 --limit 16 --classes 8 --hide-bench --rank-by-leaf \
       --force-selection "charizard,garchomp,toxapex,incineroar" --force-selection "charizard,toxapex,garchomp,incineroar" \
-      --only-arm "/" \
+      --only-arm "+" \
       --shard "$i" --shards 8 --out "$out" \
       > "$DIR/logs/173-$i.log" 2>&1 &
     pids+=($!)
@@ -84,9 +84,9 @@ out="$DIR/place277.jsonl"
   for i in $(seq 0 7); do
     uv run --group learn python -u tools/selection_check.py \
       --place 277 --model data/models/value-gen11L.pt \
-      --games 60 --limit 16 --classes 4 --hide-bench --rank-by-leaf \
+      --games 60 --limit 16 --classes 8 --hide-bench --rank-by-leaf \
       --force-selection "charizard,garchomp,toxapex,incineroar" --force-selection "charizard,toxapex,venusaur,garchomp" \
-      --only-arm "/" \
+      --only-arm "+" \
       --shard "$i" --shards 8 --out "$out" \
       > "$DIR/logs/277-$i.log" 2>&1 &
     pids+=($!)
@@ -102,9 +102,9 @@ out="$DIR/place284.jsonl"
   for i in $(seq 0 7); do
     uv run --group learn python -u tools/selection_check.py \
       --place 284 --model data/models/value-gen11L.pt \
-      --games 60 --limit 16 --classes 4 --hide-bench --rank-by-leaf \
+      --games 60 --limit 16 --classes 8 --hide-bench --rank-by-leaf \
       --force-selection "charizard,garchomp,toxapex,incineroar" --force-selection "charizard,toxapex,venusaur,garchomp" \
-      --only-arm "/" \
+      --only-arm "+" \
       --shard "$i" --shards 8 --out "$out" \
       > "$DIR/logs/284-$i.log" 2>&1 &
     pids+=($!)
@@ -120,9 +120,9 @@ out="$DIR/place202.jsonl"
   for i in $(seq 0 7); do
     uv run --group learn python -u tools/selection_check.py \
       --place 202 --model data/models/value-gen11L.pt \
-      --games 60 --limit 16 --classes 4 --hide-bench --rank-by-leaf \
+      --games 60 --limit 16 --classes 8 --hide-bench --rank-by-leaf \
       --force-selection "charizard,garchomp,venusaur,toxapex" --force-selection "charizard,garchomp,toxapex,incineroar" \
-      --only-arm "/" \
+      --only-arm "+" \
       --shard "$i" --shards 8 --out "$out" \
       > "$DIR/logs/202-$i.log" 2>&1 &
     pids+=($!)
@@ -138,9 +138,9 @@ out="$DIR/place361.jsonl"
   for i in $(seq 0 7); do
     uv run --group learn python -u tools/selection_check.py \
       --place 361 --model data/models/value-gen11L.pt \
-      --games 60 --limit 16 --classes 4 --hide-bench --rank-by-leaf \
+      --games 60 --limit 16 --classes 8 --hide-bench --rank-by-leaf \
       --force-selection "charizard,sylveon,venusaur,incineroar" --force-selection "charizard,venusaur,garchomp,incineroar" \
-      --only-arm "/" \
+      --only-arm "+" \
       --shard "$i" --shards 8 --out "$out" \
       > "$DIR/logs/361-$i.log" 2>&1 &
     pids+=($!)
@@ -156,9 +156,9 @@ out="$DIR/place82.jsonl"
   for i in $(seq 0 7); do
     uv run --group learn python -u tools/selection_check.py \
       --place 82 --model data/models/value-gen11L.pt \
-      --games 60 --limit 16 --classes 4 --hide-bench --rank-by-leaf \
+      --games 60 --limit 16 --classes 8 --hide-bench --rank-by-leaf \
       --force-selection "charizard,sylveon,venusaur,garchomp" --force-selection "charizard,sylveon,garchomp,toxapex" \
-      --only-arm "/" \
+      --only-arm "+" \
       --shard "$i" --shards 8 --out "$out" \
       > "$DIR/logs/82-$i.log" 2>&1 &
     pids+=($!)
@@ -174,9 +174,9 @@ out="$DIR/place137.jsonl"
   for i in $(seq 0 7); do
     uv run --group learn python -u tools/selection_check.py \
       --place 137 --model data/models/value-gen11L.pt \
-      --games 60 --limit 16 --classes 4 --hide-bench --rank-by-leaf \
+      --games 60 --limit 16 --classes 8 --hide-bench --rank-by-leaf \
       --force-selection "charizard,garchomp,venusaur,toxapex" --force-selection "charizard,garchomp,toxapex,incineroar" \
-      --only-arm "/" \
+      --only-arm "+" \
       --shard "$i" --shards 8 --out "$out" \
       > "$DIR/logs/137-$i.log" 2>&1 &
     pids+=($!)
@@ -192,9 +192,9 @@ out="$DIR/place37.jsonl"
   for i in $(seq 0 7); do
     uv run --group learn python -u tools/selection_check.py \
       --place 37 --model data/models/value-gen11L.pt \
-      --games 60 --limit 16 --classes 4 --hide-bench --rank-by-leaf \
+      --games 60 --limit 16 --classes 8 --hide-bench --rank-by-leaf \
       --force-selection "charizard,garchomp,toxapex,incineroar" --force-selection "charizard,sylveon,venusaur,garchomp" \
-      --only-arm "/" \
+      --only-arm "+" \
       --shard "$i" --shards 8 --out "$out" \
       > "$DIR/logs/37-$i.log" 2>&1 &
     pids+=($!)
@@ -210,9 +210,9 @@ out="$DIR/place189.jsonl"
   for i in $(seq 0 7); do
     uv run --group learn python -u tools/selection_check.py \
       --place 189 --model data/models/value-gen11L.pt \
-      --games 60 --limit 16 --classes 4 --hide-bench --rank-by-leaf \
+      --games 60 --limit 16 --classes 8 --hide-bench --rank-by-leaf \
       --force-selection "charizard,sylveon,venusaur,garchomp" --force-selection "charizard,sylveon,venusaur,incineroar" \
-      --only-arm "/" \
+      --only-arm "+" \
       --shard "$i" --shards 8 --out "$out" \
       > "$DIR/logs/189-$i.log" 2>&1 &
     pids+=($!)
@@ -228,9 +228,9 @@ out="$DIR/place172.jsonl"
   for i in $(seq 0 7); do
     uv run --group learn python -u tools/selection_check.py \
       --place 172 --model data/models/value-gen11L.pt \
-      --games 60 --limit 16 --classes 4 --hide-bench --rank-by-leaf \
+      --games 60 --limit 16 --classes 8 --hide-bench --rank-by-leaf \
       --force-selection "charizard,sylveon,venusaur,incineroar" --force-selection "charizard,sylveon,toxapex,incineroar" \
-      --only-arm "/" \
+      --only-arm "+" \
       --shard "$i" --shards 8 --out "$out" \
       > "$DIR/logs/172-$i.log" 2>&1 &
     pids+=($!)
@@ -246,9 +246,9 @@ out="$DIR/place392.jsonl"
   for i in $(seq 0 7); do
     uv run --group learn python -u tools/selection_check.py \
       --place 392 --model data/models/value-gen11L.pt \
-      --games 60 --limit 16 --classes 4 --hide-bench --rank-by-leaf \
+      --games 60 --limit 16 --classes 8 --hide-bench --rank-by-leaf \
       --force-selection "charizard,garchomp,toxapex,incineroar" --force-selection "charizard,toxapex,venusaur,garchomp" \
-      --only-arm "/" \
+      --only-arm "+" \
       --shard "$i" --shards 8 --out "$out" \
       > "$DIR/logs/392-$i.log" 2>&1 &
     pids+=($!)
@@ -264,9 +264,9 @@ out="$DIR/place196.jsonl"
   for i in $(seq 0 7); do
     uv run --group learn python -u tools/selection_check.py \
       --place 196 --model data/models/value-gen11L.pt \
-      --games 60 --limit 16 --classes 4 --hide-bench --rank-by-leaf \
+      --games 60 --limit 16 --classes 8 --hide-bench --rank-by-leaf \
       --force-selection "charizard,garchomp,venusaur,toxapex" --force-selection "charizard,sylveon,toxapex,incineroar" \
-      --only-arm "/" \
+      --only-arm "+" \
       --shard "$i" --shards 8 --out "$out" \
       > "$DIR/logs/196-$i.log" 2>&1 &
     pids+=($!)
@@ -282,9 +282,9 @@ out="$DIR/place145.jsonl"
   for i in $(seq 0 7); do
     uv run --group learn python -u tools/selection_check.py \
       --place 145 --model data/models/value-gen11L.pt \
-      --games 60 --limit 16 --classes 4 --hide-bench --rank-by-leaf \
+      --games 60 --limit 16 --classes 8 --hide-bench --rank-by-leaf \
       --force-selection "charizard,garchomp,toxapex,incineroar" --force-selection "sylveon,incineroar,garchomp,toxapex" \
-      --only-arm "/" \
+      --only-arm "+" \
       --shard "$i" --shards 8 --out "$out" \
       > "$DIR/logs/145-$i.log" 2>&1 &
     pids+=($!)

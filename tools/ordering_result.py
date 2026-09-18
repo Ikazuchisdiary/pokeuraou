@@ -83,11 +83,18 @@ def main() -> None:
     reg = roster.reg
     species = [reg.species[s.species].name.lower().replace(" ", "") for s in roster.sets]
 
+    # `SelectionBook.entries` is keyed by the opponent's TEAM SHEET, not by their place,
+    # so `entries.get(place)` is always None and every mass comes back 0.0 -- which then
+    # sorts the two arms arbitrarily and labels whichever it likes "heavy". That is the
+    # exact error this tool's docstring says it re-derives the masses to avoid, so it is
+    # indexed properly here and a missing place is refused rather than scored as zero.
+    by_place = {entry.place: entry for entry in book.entries.values()}
+
     # label -> mass, per place. The label `selection_check` writes is
     # "front+front / back+back" over species ids, and the front pair is a set there
     # because lead order is not a choice the game exposes, so it is a set here too.
     def masses(place: int) -> dict[frozenset[tuple[str, ...]], float]:
-        entry = book.entries.get(place)
+        entry = by_place.get(place)
         if entry is None:
             return {}
         out: dict[frozenset[tuple[str, ...]], float] = {}
@@ -138,8 +145,20 @@ def main() -> None:
             print(f"  {place:>5}  incomplete: {len(arms)} forced arms, skipped")
             continue
         weight = masses(place)
-        labelled = sorted(arms, key=lambda a: -weight.get(key_of(a), 0.0))
+        found = {a: weight.get(key_of(a)) for a in arms}
+        if any(w is None for w in found.values()):
+            missing = [a for a, w in found.items() if w is None]
+            print(
+                f"  {place:>5}  cannot find {missing} in the book, skipped.\n"
+                "         Without both masses there is no heavy arm to name, and sorting\n"
+                "         by a default of zero would name one anyway."
+            )
+            continue
+        labelled = sorted(arms, key=lambda a: -found[a])
         heavy, second = labelled
+        if found[heavy] == found[second]:
+            print(f"  {place:>5}  the two arms carry equal mass, so there is no ordering")
+            continue
         # Paired on the game index: the same opponent and the same spread class.
         shared = sorted(set(by_arm[heavy]) & set(by_arm[second]))
         if not shared:
