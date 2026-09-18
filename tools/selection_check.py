@@ -35,6 +35,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -273,9 +274,25 @@ def main() -> None:
         arms.append(forced_arm)
     arms.extend(named)
     rows: list[dict] = []
-    for arm in arms:
+    for arm_no, arm in enumerate(arms, start=1):
         wins = finished = unfinished = 0
-        for game_index in range(args.shard, args.games, max(args.shards, 1)):
+        # A shard that prints nothing until an arm ends is a shard whose remaining time
+        # cannot be estimated, and this run's was guessed wrong four times. The line goes
+        # to stderr and is flushed, because stdout is block-buffered into a log file.
+        todo = len(range(args.shard, args.games, max(args.shards, 1)))
+        started_at = time.monotonic()
+        print(f"  [{arm_no}/{len(arms)}] {arm}: {todo} games", file=sys.stderr, flush=True)
+        for done, game_index in enumerate(
+            range(args.shard, args.games, max(args.shards, 1)), start=1
+        ):
+            if done > 1 and (done - 1) % 5 == 0:
+                rate = (time.monotonic() - started_at) / (done - 1)
+                left = rate * (todo - done + 1) / 60
+                print(
+                    f"    {done - 1}/{todo}  {rate:.0f}s a game, {left:.0f} min left",
+                    file=sys.stderr,
+                    flush=True,
+                )
             # Seeded from the game's INDEX, not from a position in a shared stream: game g
             # is then the same game in every arm and in every shard. Lining arms up by
             # consuming one generator in step holds only while every arm draws the same
