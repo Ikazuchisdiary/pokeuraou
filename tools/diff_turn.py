@@ -9,7 +9,13 @@ equality test on states rather than a comparison of distributions. Divergences a
 per field and attributed to the moves, abilities and items in play, so "what to fix next"
 is a measurement.
 
+``--self-switch`` aims the random chooser at U-turn and friends. Uniform play reaches an
+interrupted turn on 4.6% of compared turns, which is enough to say the class is covered and
+thin for putting a number on it -- and F1 was a question about exactly that class. At 0.9
+the same 1,200 battles reach 14.6%, three times the sample for the same wall clock.
+
     uv run python tools/diff_turn.py --battles 40 --roll 8
+    uv run python tools/diff_turn.py --battles 400 --self-switch 0.8
 """
 
 from __future__ import annotations
@@ -189,6 +195,45 @@ class Report:
 
 def describe_actions(reg: Regulation, chosen: list[SideAction]) -> str:
     return " | ".join(a.describe(reg) for a in chosen)
+
+
+def self_switch_moves(reg: Regulation) -> frozenset[str]:
+    """Move ids that send their own user out -- U-turn, Volt Switch, Parting Shot, Flip Turn.
+
+    Read off the regulation rather than listed here: ``selfSwitch`` is the field the
+    resolver itself branches on, so a hand-written list could disagree with the thing it is
+    meant to be aiming at.
+    """
+    return frozenset(
+        move_id for move_id, move in reg.moves.items() if move.raw.get("selfSwitch")
+    )
+
+
+def pick_action(
+    reg: Regulation,
+    pos: Position,
+    side_index: int,
+    py_rng: random.Random,
+    wanted: frozenset[str],
+    bias: float,
+) -> SideAction:
+    """One side's choice, with ``bias`` probability of preferring a self-switching move.
+
+    Falls back to the uniform draw whenever no such move is available, so the bias changes
+    which turns are reached and never which turns are legal.
+    """
+    options = side_actions(reg, pos, side_index)
+    if bias <= 0 or py_rng.random() >= bias:
+        return py_rng.choice(options)
+    switching = [
+        option
+        for option in options
+        if any(
+            isinstance(slot, MoveAction) and slot.move_id in wanted
+            for slot in option.slots
+        )
+    ]
+    return py_rng.choice(switching or options)
 
 
 def showdown_paused_mid_turn(handle: Any) -> bool:
@@ -405,7 +450,12 @@ def compare_turn(
 
 
 def run(
-    battles: int, roll: int, seed: int, max_turns: int, quiet: bool = True
+    battles: int,
+    roll: int,
+    seed: int,
+    max_turns: int,
+    quiet: bool = True,
+    self_switch: float = 0.0,
 ) -> Report:
     reg = load_regulation(FORMAT_ID)
     chaos = find_cached_chaos(FORMAT_ID)
@@ -415,6 +465,7 @@ def run(
     register_mega_stones(reg)
     rng = np.random.default_rng(seed)
     py_rng = random.Random(seed)
+    wanted = self_switch_moves(reg)
     report = Report()
     policy = RandomnessPolicy(
         damage_roll=roll,
@@ -456,7 +507,9 @@ def run(
                     if not request or request.get("wait"):
                         choices.append(None)
                         continue
-                    pick = py_rng.choice(side_actions(reg, before, side_index))
+                    pick = pick_action(
+                        reg, before, side_index, py_rng, wanted, self_switch
+                    )
                     chosen.append(pick)
                     choices.append(pick.to_choice())
                 if all(c is None for c in choices):
@@ -483,8 +536,22 @@ def main() -> None:
     ap.add_argument("--roll", type=int, default=8)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--max-turns", type=int, default=10)
+    ap.add_argument(
+        "--self-switch",
+        type=float,
+        default=0.0,
+        help="probability of preferring a self-switching move when one is legal, so "
+        "interrupted turns are sampled on purpose (0 = uniform play)",
+    )
     args = ap.parse_args()
-    run(args.battles, args.roll, args.seed, args.max_turns, quiet=False)
+    run(
+        args.battles,
+        args.roll,
+        args.seed,
+        args.max_turns,
+        quiet=False,
+        self_switch=args.self_switch,
+    )
 
 
 if __name__ == "__main__":
