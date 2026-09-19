@@ -3966,21 +3966,22 @@ def batched_payoffs(
     Lives here rather than in the callers because there are now two of them -- self-play
     and the analyser -- and the fold semantics are the part that must not exist twice.
 
-    What this costs was measured end to end on 2026-09-20 (`tools/profile_stages.py`),
-    and the expensive half is the tail rather than the node. With the Rust bridge on, a
-    generation node is filled over there and about 2.7% of its cells come back refused;
-    each is then filled here by calling this function on a 1x1 node, which resolves one
-    turn and scores its handful of leaves in a forward pass of its own. Over 60 games of
-    open generation at width 24: 611,843 leaf rows in 551 whole-node calls, and 39,180
-    rows in 10,167 one-cell calls -- 6.0% of the rows in 94.9% of the calls -- and the
-    loop below accounts for about half of a generation worker's wall clock (51.3% over
-    300 games, 46-47% over 60). Two items and one ability are 88% of the refusals: White
-    Herb, Stance Change, and moves that break Protect.
+    `cells=` exists for the tail, and the tail is why it is used. With the Rust bridge
+    on, a generation node is filled over there and about 2.7% of its cells come back
+    refused; those come back here to be filled, and until 2026-09-20 each was filled by
+    calling this function on a 1x1 node -- one turn resolved and a handful of leaves
+    scored in a forward pass of its own. Measured end to end over 60 games of open
+    generation at width 24 (`tools/profile_stages.py`): 611,843 leaf rows in 551
+    whole-node calls against 39,180 rows in 10,167 one-cell calls -- 6.0% of the rows in
+    94.9% of the calls -- and that loop was about half of a generation worker's wall
+    clock (51.3% over 300 games, 46-47% over 60).
 
-    The cost of that tail depends on where the leaf is. On CUDA it is 56.6-60.4 s of a
-    60-game run and on CPU 38.6-42.9 s, with the identical 10,167 cells either way --
-    the tail is made of calls too small to amortise a kernel launch, which is the same
-    reason batching the node was worth 1.86x in the first place.
+    What made it expensive was the count of calls and not the count of rows. The same
+    10,167 cells cost 56.6-60.4 s of a 60-game run on CUDA and 38.6-42.9 s on CPU, and
+    the forward pass held the same 27% share either way -- so the charge was per call,
+    too small to amortise a kernel launch, which is the same reason batching the node was
+    worth 1.86x in the first place. The callers below therefore hand the whole refused
+    set to one call, and its leaves share one pass like any other node's.
 
     The third return value is a per-cell mask of which cells the budget resolved exactly.
     It is per cell and not per matrix because it genuinely varies: the branch budget is
@@ -4174,21 +4175,28 @@ def _rust_encoded_payoffs(
     # what the tail costs is the question and the parts are already counted where they
     # happen. `timing.BORROWED` keeps it out of any total for that reason.
     _refused_started = time.perf_counter()
+    refused_cells = [(i, j) for i, j, _why in filled.refused]
     try:
-        for i, j, _why in filled.refused:
+        if refused_cells:
+            # One call, not one per cell: `cells=` resolves exactly these turns and scores
+            # every leaf they produce in a single forward pass. `_FILLING_REFUSED` is what
+            # keeps the port from being asked again inside it.
             cell, notes, cell_exact = batched_payoffs(
-                reg, pos, [ours[i]], [theirs[j]], evaluators, budget=budget
+                reg, pos, ours, theirs, evaluators, budget=budget, cells=refused_cells
             )
-            for index in range(len(payoffs)):
-                payoffs[index][i, j] = cell[index][0, 0]
-            exact[i, j] = cell_exact[0, 0]
+            for i, j in refused_cells:
+                for index in range(len(payoffs)):
+                    payoffs[index][i, j] = cell[index][i, j]
+                exact[i, j] = cell_exact[i, j]
             unmodelled |= notes
     finally:
         _FILLING_REFUSED = False
         timing.add(
             "refused",
             time.perf_counter() - _refused_started,
-            calls=len(filled.refused),
+            # One call per node that had any refusal. The cells themselves are counted by
+            # reason below, and `leaves.refused` counts their rows.
+            calls=1 if refused_cells else 0,
         )
         if timing.ON:
             # By reason, because "refused" is not a piece of work anyone can pick up.
@@ -4241,21 +4249,28 @@ def _rust_payoffs(
     # what the tail costs is the question and the parts are already counted where they
     # happen. `timing.BORROWED` keeps it out of any total for that reason.
     _refused_started = time.perf_counter()
+    refused_cells = [(i, j) for i, j, _why in filled.refused]
     try:
-        for i, j, _why in filled.refused:
+        if refused_cells:
+            # One call, not one per cell: `cells=` resolves exactly these turns and scores
+            # every leaf they produce in a single forward pass. `_FILLING_REFUSED` is what
+            # keeps the port from being asked again inside it.
             cell, notes, cell_exact = batched_payoffs(
-                reg, pos, [ours[i]], [theirs[j]], evaluators, budget=budget
+                reg, pos, ours, theirs, evaluators, budget=budget, cells=refused_cells
             )
-            for index in range(len(payoffs)):
-                payoffs[index][i, j] = cell[index][0, 0]
-            exact[i, j] = cell_exact[0, 0]
+            for i, j in refused_cells:
+                for index in range(len(payoffs)):
+                    payoffs[index][i, j] = cell[index][i, j]
+                exact[i, j] = cell_exact[i, j]
             unmodelled |= notes
     finally:
         _FILLING_REFUSED = False
         timing.add(
             "refused",
             time.perf_counter() - _refused_started,
-            calls=len(filled.refused),
+            # One call per node that had any refusal. The cells themselves are counted by
+            # reason below, and `leaves.refused` counts their rows.
+            calls=1 if refused_cells else 0,
         )
         if timing.ON:
             # By reason, because "refused" is not a piece of work anyone can pick up.

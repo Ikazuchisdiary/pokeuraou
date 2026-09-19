@@ -17,6 +17,7 @@ from typing import Any
 import numpy as np
 import pytest
 
+from pokeuraou import resolve as resolve_module
 from pokeuraou import rustnode
 from pokeuraou.cli import _modal, build_beliefs
 from pokeuraou.damage import register_mega_stones
@@ -277,6 +278,66 @@ def test_a_node_that_dies_is_replaced_rather_than_given_up_on(bridged: None) -> 
     assert replacement is not None
     filled = replacement.fill(pos, row, col, ["hp-share"], Budget.matrix())
     assert not filled.refused
+
+
+def test_the_refused_cells_are_filled_in_one_call(
+    bridged: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A node's refused cells are filled together, not one at a time.
+
+    Measured on 2026-09-20: 6.0% of a generation's leaf rows were arriving in 94.9% of its
+    forward passes, because each cell the port declined was filled by calling
+    `batched_payoffs` on a 1x1 node of its own -- a forward pass for a handful of leaves,
+    too small to amortise a kernel launch. `cells=` was already there; only using it was
+    missing.
+
+    The guard is the count of calls rather than the time, because the time belongs to the
+    machine and the count is the property that made it slow.
+    """
+    reg, pos, row, col = _node()
+    evaluators = [OBJECTIVES["hp-share"].batch, OBJECTIVES["faints"].batch]
+
+    # Slow Start is implemented here and refused there, so every cell comes back named
+    # and the tail is the only thing that fills this node.
+    mine = pos.sides[0].active_pokemon()[0]
+    assert mine is not None
+    mine.ability = "slowstart"
+    assert not validate_position(pos, reg.meta.active_per_side)
+
+    os.environ[rustnode.ENV_ENABLE] = "0"
+    rustnode.reset()
+    expected, _notes, expected_exact = batched_payoffs(
+        reg, pos, row, col, evaluators, budget=Budget.matrix()
+    )
+
+    os.environ[rustnode.ENV_ENABLE] = "1"
+    rustnode.reset()
+    node = rustnode.node_for(reg)
+    assert node is not None
+    filled = node.fill(pos, row, col, ["hp-share", "faints"], Budget.matrix())
+    assert len(filled.refused) == len(row) * len(col), "the port was meant to refuse these"
+
+    asked: list[object] = []
+    real = resolve_module.batched_payoffs
+
+    def counting(*args: Any, **kwargs: Any):  # noqa: ANN202
+        asked.append(kwargs.get("cells"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(resolve_module, "batched_payoffs", counting)
+    rustnode.reset()
+    got, _n2, got_exact = counting(
+        reg, pos, row, col, evaluators, budget=Budget.matrix()
+    )
+
+    assert len(asked) == 2, f"{len(asked) - 1} calls filled the tail, not 1"
+    assert asked[0] is None
+    assert asked[1] is not None and len(asked[1]) == len(row) * len(col)
+    for index in range(len(evaluators)):
+        # Bit-identical here, and it has to be: these cells were resolved and scored in
+        # Python on both runs, so nothing summed anything in a different order.
+        assert np.array_equal(np.asarray(got[index]), np.asarray(expected[index]))
+    assert np.array_equal(np.asarray(got_exact), np.asarray(expected_exact))
 
 
 def test_an_impossible_position_is_refused(bridged: None) -> None:
