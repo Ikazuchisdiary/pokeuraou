@@ -183,6 +183,7 @@ def main() -> None:
 
     budget = Budget()
     failures = 0
+    contested_failures = 0
     for case in cases:
         pos, decision = position_of(case)
         print(f"\n=== {case.name}  ({name})")
@@ -221,13 +222,25 @@ def main() -> None:
               f"{'>=' if ok else '<'}  "
               f"{case.at_most} {ev[lo]:.4f} (mass {row[lo]:.1%})")
         if not ok:
-            if not case.contested:
+            if case.contested:
+                contested_failures += 1
+            else:
                 failures += 1
             print(f"    gap {ev[lo] - ev[hi]:+.4f} in win probability")
             for line in case.why.split(". "):
                 print(f"    {line.strip()}")
 
-    print(f"\n{len(cases) - failures}/{len(cases)} cases pass for {name}")
+    # Three counts, not two. A contested case that a model rejects is not a pass, and
+    # folding it into one would make the summary say "2/2" for a run where a model
+    # disagreed with half the cases -- which is the shape of reporting this project has
+    # spent a day removing.
+    passed = len(cases) - failures - contested_failures
+    parts = [f"{passed} pass"]
+    if failures:
+        parts.append(f"{failures} FAIL")
+    if contested_failures:
+        parts.append(f"{contested_failures} rejected-but-contested")
+    print(f"\n{', '.join(parts)} of {len(cases)} for {name}")
     raise SystemExit(1 if failures else 0)
 
 
