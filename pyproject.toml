@@ -12,8 +12,15 @@ dependencies = [
 pokeuraou = "pokeuraou.cli:main"
 
 [dependency-groups]
+# psutil is here for pytest-xdist, not for anything in the code: `-n auto` means the
+# physical core count when psutil is installed and `os.cpu_count()` -- the logical one --
+# when it is not. On this machine that is 8 against 16, and the suite measured 72s at 8
+# against 114s at 16. Sixteen workers on eight cores is slower than eight, so dropping
+# psutil would not fail anything; it would quietly make the tests half again as slow.
 dev = [
+    "psutil>=7.2.2",
     "pytest>=8.3",
+    "pytest-xdist>=3.8.0",
     "ruff>=0.7",
 ]
 # The value function only. Kept out of the default dependencies so the solver, the
@@ -42,7 +49,11 @@ packages = ["src/pokeuraou"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-q"
+# 451 tests, and the five slowest are 43% of the wall clock, so the suite is worth
+# distributing: 146s serially against 59-72s at `-n auto`. Debugging wants the serial
+# run back -- `-n 0` restores it, and pdb needs it, because a breakpoint in a worker
+# has no terminal to talk to.
+addopts = "-q -n auto"
 
 [tool.ruff]
 line-length = 110
