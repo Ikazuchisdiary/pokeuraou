@@ -127,8 +127,23 @@ def completions(
     if not hidden:
         return [Completion(position, (), (), 1.0, exact=True)]
 
-    on_board = {mon.species for mon in side.pokemon if mon.slot in shown}
-    candidates = [entry for entry in sheet if entry.species not in on_board]
+    # A Mega on the board is `charizardmegay` and its sheet entry is `charizard`, so
+    # matching on `species` alone leaves the base form in the candidate pool and the
+    # belief gains completions holding a second copy of a Pokemon that is already out.
+    # With one Mega and two unseen slots that was 4 of 10 completions -- 40% of the mass
+    # on worlds Species Clause forbids -- and it never tripped the check below, because
+    # an extra candidate makes the sheet look MORE able to explain the board rather than
+    # less. `baseSpecies` arrives from Showdown as a display name, so both sides of the
+    # comparison go through `to_id`.
+    from .regulation import to_id
+
+    on_board: set[str] = set()
+    for mon in side.pokemon:
+        if mon.slot not in shown:
+            continue
+        on_board.add(to_id(mon.species))
+        on_board.add(to_id(mon.base_species))
+    candidates = [entry for entry in sheet if to_id(entry.species) not in on_board]
     if len(candidates) < len(hidden):
         # The sheet cannot explain the board, so something upstream handed us the wrong
         # six. Every caller's fallback would be to carry on with the truth it already

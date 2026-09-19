@@ -60,6 +60,23 @@ class Case:
     #: What the resolver must do for the claim to make sense, checked before the leaf is
     #: blamed. `(action, species, "dead"|"alive")`.
     resolver_check: tuple[str, str, str] | None = None
+    #: The opponent slot the two actions contest. When set, `at_least` is checked against
+    #: EVERY legal opponent reply, not the modal one: it must never do worse than
+    #: `at_most` on faint probability in that slot or on damage dealt, with damage taken
+    #: equal. This is the part of a human claim a machine can own. A person reading one
+    #: game can see that an action looks wrong and can name the alternative worth
+    #: checking -- and on 2026-09-19 a person did both, and was right both times -- but
+    #: "and there is no reply that makes it right" is a statement with a quantifier over
+    #: 79 columns, and nobody should be asked to hold 79 columns in their head. The
+    #: division that survives a complicated position is: the human picks the question,
+    #: the resolver answers it.
+    #:
+    #: What it does not cover: the three statistics price damage and faints, and not
+    #: board state. A Yawn that leaves the target alive and drowsy scores zero here, so
+    #: passing this check says no reply makes the rejected action hit harder -- not that
+    #: what it does instead is worthless. That valuation belongs to the leaf, which is
+    #: what the rest of the case tests.
+    dominance_slot: int | None = None
     #: A claim two independent models have rejected. Reported, never counted -- a
     #: case is only as good as its reason, and a reason the models argue with is
     #: evidence about the case rather than about them.
@@ -75,16 +92,44 @@ CASES: tuple[Case, ...] = (
         at_least="move 1, move 1 2",
         at_most="move 3 2, move 1 2",
         why=(
-            "Venusaur is at 187/187 behind a Focus Sash. Flare Blitz alone is lethal and "
-            "the Sash holds it at 1. Hyper Voice does 25-30, which is not lethal, so the "
-            "Sash never fires and Flare Blitz then kills: the resolver confirms Venusaur "
-            "dies in 100% of the branches. The two actions have the SAME second half -- "
-            "Incineroar uses Flare Blitz either way and takes the same recoil -- so "
-            "neither the 'switch out first' nor the 'let the weather run down' reason for "
-            "declining a kill can distinguish them. The equilibrium put 65.2% on the one "
-            "that leaves Venusaur alive at 1 HP and 0.0% on the kill."
+            "REASON REPLACED 2026-09-19. The first version argued that the two actions "
+            "share a second half, so no switching reason could separate them -- and it "
+            "counted only OUR switches. The opponent's switches are the whole position, "
+            "and it never mentioned them, nor the two facts that generate them: their "
+            "Mega Charizard Y is ALREADY drowsy from turn 1's Yawn and falls asleep at "
+            "the end of this turn, and Venusaur has Chlorophyll under that Charizard's "
+            "own sun, which makes it the fast threat rather than a spare target. A "
+            "reason that omits the drowsy Pokemon on the field is not a reason. "
+            "The claim survived the correction and the correction made it stronger. "
+            "Venusaur is at 187/187 behind a Focus Sash. Flare Blitz alone would be "
+            "lethal and the Sash holds it at 1; Hyper Voice does 25-30, which is not "
+            "lethal, so the Sash never fires and Flare Blitz kills -- 100% of the branch "
+            "mass. What the first version missed is that Hyper Voice is the answer to "
+            "the switches too. Sixteen legal replies retreat Venusaur; Hyper Voice plus "
+            "Flare Blitz kills whatever replaces it in 95-100% of the mass in every one "
+            "of them, while Yawn does land on the switch-in in all sixteen and leaves it "
+            "alive at 30-77. THAT PAIR OF NUMBERS KNOWS THE BENCH AND THE PLAYERS DID "
+            "NOT -- this game ran with `information: [hidden-bench, hidden-bench]`, and "
+            "the sheet also listed Swampert, which takes Flare Blitz at 0.25x, and "
+            "Pelipper, whose Drizzle replaces the sun as it lands and halves the Fire "
+            "damage again. Over the six benches consistent with the sheet the kill lands "
+            "52.5% of the time, and 9.6% in the world where both of those are the back "
+            "two (`tools/hidden_dominance.py`). So the claim is NOT that Hyper Voice "
+            "kills what comes in; it is that Hyper Voice is never worse, which survives: "
+            "zero columns out of 79 in each of the six completions. "
+            "The opponent's real line is the other retreat -- Charizard "
+            "leaving to shed its drowsiness while Venusaur Protects, which the "
+            "equilibrium plays at 38.3% -- and neither action kills there, but Hyper "
+            "Voice still puts 105 into the Grimmsnarl that comes in and Yawn puts 0. "
+            "Over all 79 legal replies there is no column where declining the kill does "
+            "more damage or wins more faints, and the damage taken is identical because "
+            "Incineroar's half does not change. "
+            "What this does not settle is whether a second sleep is worth more than the "
+            "extra damage, because drowsiness is not damage and the dominance check "
+            "cannot see it. That is the leaf's judgement, and it is what the case tests."
         ),
         resolver_check=("move 1, move 1 2", "venusaur", "dead"),
+        dominance_slot=1,
     ),
     Case(
         name="sash-ko-detect",
@@ -124,7 +169,8 @@ def load_leaf(paths: list[Path], encoder: Encoder):  # noqa: ANN201
 
 
 def position_of(case: Case) -> tuple[Position, dict]:
-    games = [json.loads(line) for line in open(case.source, encoding="utf-8")]
+    with open(case.source, encoding="utf-8") as handle:
+        games = [json.loads(line) for line in handle]
     game = games[case.game_index]
     decision = next(
         d for d in game["decisions"] if d["kind"] == "move" and d["turn"] == case.turn
@@ -163,6 +209,55 @@ def check_resolver(case: Case, reg, pos: Position, decision: dict) -> str | None
     return None
 
 
+def check_dominance(case: Case, reg, pos: Position) -> str | None:  # noqa: ANN001
+    """Whether `at_least` ever does worse than `at_most`, over every legal reply."""
+    if case.dominance_slot is None:
+        return None
+    legal = {
+        side: {a.to_choice(): a for a in side_actions(reg, pos, side)} for side in (0, 1)
+    }
+    for choice in (case.at_least, case.at_most):
+        if choice not in legal[0]:
+            return f"{choice!r} is not legal in this position"
+
+    def score(ours: str, theirs: str) -> tuple[float, float, float]:
+        res = resolve_turn(reg, pos, [legal[0][ours], legal[1][theirs]], budget=Budget())
+        before_them = {m.species: m.hp for m in pos.sides[1].pokemon}
+        before_us = {m.species: m.hp for m in pos.sides[0].pokemon}
+        dead = total = dealt = taken = 0.0
+        for branch in res.branches:
+            total += branch.probability
+            occupant = branch.position.sides[1].active_pokemon()[case.dominance_slot]
+            if occupant is not None and occupant.fainted:
+                dead += branch.probability
+            dealt += branch.probability * sum(
+                max(0, before_them.get(m.species, m.hp) - m.hp)
+                for m in branch.position.sides[1].pokemon
+            )
+            taken += branch.probability * sum(
+                max(0, before_us.get(m.species, m.hp) - m.hp)
+                for m in branch.position.sides[0].pokemon
+            )
+        n = total or 1.0
+        return dead / n, dealt / n, taken / n
+
+    worse = []
+    for theirs in legal[1]:
+        hi, lo = score(case.at_least, theirs), score(case.at_most, theirs)
+        # A tolerance on damage, none on faints: a faint is a discrete event the resolver
+        # either produced or did not, while damage is an average over rolls and half a
+        # point of it is not a counterexample to anything.
+        if hi[0] + 1e-9 < lo[0] or hi[1] + 0.5 < lo[1] or hi[2] > lo[2] + 0.5:
+            worse.append(theirs)
+    print(f"    支配: {len(legal[1])} 列中 {len(worse)} 列で {case.at_least!r} が劣る")
+    if worse:
+        return (
+            f"{case.at_most!r} does better against {len(worse)} legal replies, "
+            f"e.g. {worse[0]!r} -- the case claims there are none"
+        )
+    return None
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--value", type=Path, nargs="+", required=True)
@@ -187,7 +282,9 @@ def main() -> None:
     for case in cases:
         pos, decision = position_of(case)
         print(f"\n=== {case.name}  ({name})")
-        complaint = check_resolver(case, reg, pos, decision)
+        complaint = check_resolver(case, reg, pos, decision) or check_dominance(
+            case, reg, pos
+        )
         if complaint:
             print(f"  ! {complaint}")
             print("    The case is about the leaf, so this is a different bug and the")

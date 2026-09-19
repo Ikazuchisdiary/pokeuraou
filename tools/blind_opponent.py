@@ -40,9 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.encode import Encoder  # noqa: E402
-from pokeuraou.equilibrium import solve_bayesian  # noqa: E402
 from pokeuraou.priors import find_cached_chaos, load_chaos  # noqa: E402
-from pokeuraou.regulation import load_regulation  # noqa: E402
 from pokeuraou.selection import SpreadClass, solve_selection  # noqa: E402
 from pokeuraou.standings import (  # noqa: E402
     find_cached_standings,
@@ -93,7 +91,7 @@ def main() -> None:
             _as_tournament_team(roster, reg),
         )
     ]
-    print(f"  our six, as they can see it (spreads redrawn from the prior):")
+    print("  our six, as they can see it (spreads redrawn from the prior):")
     for real, seen in zip(roster.sets, blind_six, strict=True):
         same = "same" if real.sp == seen.sp else "differs"
         print(
