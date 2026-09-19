@@ -163,7 +163,7 @@ pub fn fractional_priority(reg: &Reg, move_id: &str, mon: &Battler) -> Vec<(f64,
     vec![(0.0, 1.0)]
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct QueuedAction {
     pub side: usize,
     pub slot: usize,
@@ -179,7 +179,7 @@ pub struct QueuedAction {
     pub branch_probability: f64,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ActionKind {
     Switch,
     Mega,

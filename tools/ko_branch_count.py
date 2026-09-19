@@ -8,6 +8,14 @@ recoil and no secondary, so the ONLY thing that can branch is the damage roll.
 Three targets, same move: one the roll cannot save, one it cannot kill, and one where it
 decides. If the first two return one branch each, the collapse is already there; if they
 return sixteen, it is the free reduction G26 puts first.
+
+**They returned sixteen, and the merge that answers it is in** (`Budget.merge_duplicates`,
+IKA-10), so this now prints one branch for the guaranteed knock-out. It is kept as the
+measurement that opened the issue and as the check that the fold still happens:
+
+    POKEURAOU_MERGE_BRANCHES=0 uv run python tools/ko_branch_count.py
+
+prints the sixteen it used to.
 """
 
 from __future__ import annotations

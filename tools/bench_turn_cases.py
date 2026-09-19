@@ -61,6 +61,9 @@ def build_budget(raw: dict) -> Budget:
         enumerate_speed_ties=raw["enumerateSpeedTies"],
         pinned_policy=raw["pinnedPolicy"],
         max_branches=raw["maxBranches"],
+        # Defaulted, not required: fixtures recorded before the merge existed are still
+        # the turns the port is measured against, and they replay with it on.
+        merge_duplicates=raw.get("mergeDuplicates", True),
     )
 
 

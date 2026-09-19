@@ -27,8 +27,9 @@ landing reorders what has not happened yet. Each branch re-sorts against its own
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field, fields, replace
 
 import numpy as np
 
@@ -200,6 +201,21 @@ STATUS_MOVES_FULLY_MODELLED = frozenset(
 )
 
 
+#: The default for `Budget.merge_duplicates`, read once at import.
+#:
+#: An environment variable rather than only a field because the comparison that matters is
+#: a whole generation run against itself -- every worker process, both budgets, and the
+#: Rust port, which is handed the field over the bridge. A flag on one tool could not
+#: reach any of that.
+#:
+#:     POKEURAOU_MERGE_BRANCHES=0 uv run python tools/bench_generation.py --games 6
+MERGE_BRANCHES_DEFAULT = os.environ.get("POKEURAOU_MERGE_BRANCHES", "1") not in (
+    "0",
+    "false",
+    "no",
+)
+
+
 @dataclass(frozen=True, slots=True)
 class Budget:
     """How much of the randomness to enumerate.
@@ -232,6 +248,19 @@ class Budget:
     #: damaging hit in the turn, so an unbounded exact enumeration of a four-hit turn is
     #: tens of thousands of copied positions.
     max_branches: int = 512
+    #: Fold branches that reached the same state into one, summing their probabilities.
+    #:
+    #: Lossless, so this is on: the branches it merges are indistinguishable in the
+    #: position, the queue behind them and every piece of within-turn bookkeeping, and
+    #: whatever the rest of the turn would do to one it would do to the other. The 16
+    #: damage rolls of a guaranteed knock-out are the clearest case -- the roll decided
+    #: nothing -- and integer HP produces the same collapse below the threshold.
+    #:
+    #: The knob exists because "lossless" is a claim that has to be checkable: with it
+    #: off the resolver produces the unmerged tree, and `tools/branch_dedup.py` holds the
+    #: two against each other outcome by outcome. `POKEURAOU_MERGE_BRANCHES=0` turns it
+    #: off for a whole run -- see :data:`MERGE_BRANCHES_DEFAULT`.
+    merge_duplicates: bool = field(default_factory=lambda: MERGE_BRANCHES_DEFAULT)
 
     @staticmethod
     def exact() -> Budget:
@@ -475,6 +504,11 @@ class TurnResult:
     exact: bool
     #: What was reduced, and how often, when the budget bound.
     reductions: dict[str, int] = field(default_factory=dict)
+    #: How many branches were folded into an identical one. Not a reduction: the merged
+    #: branches were the same state reached twice, so nothing was approximated and
+    #: `exact` is untouched. Kept separate from `reductions` for exactly that reason --
+    #: a caller reading that dict is reading a list of losses.
+    merged: int = 0
     #: Effects encountered that the resolver does not model. Reported, never ignored.
     unmodelled: tuple[str, ...] = ()
     #: Outcomes that stopped at a mid-turn replacement request. These are *not* finished
@@ -948,6 +982,7 @@ def resolve_turn(
     unmodelled: set[str] = set()
     reductions: dict[str, int] = {}
     exact = True
+    merged = 0
 
     for queue in queues:
         if not queue:
@@ -967,8 +1002,17 @@ def resolve_turn(
                 suspended.append(pause)
             unmodelled |= set(sub.unmodelled)
             exact = exact and sub.exact
+            merged += sub.merged
             for key, value in sub.reductions.items():
                 reductions[key] = reductions.get(key, 0) + value
+
+    # Across the Speed-tie orders and the queue's fractional-priority branches, which are
+    # separate resolutions and so cannot have met inside `_run_queue`.
+    if budget.merge_duplicates:
+        branches, folded = _merge_branches(branches)
+        merged += folded
+        suspended, folded = _merge_suspended(suspended)
+        merged += folded
 
     return TurnResult(
         branches=branches,
@@ -976,6 +1020,7 @@ def resolve_turn(
         reductions=reductions,
         unmodelled=tuple(sorted(unmodelled)),
         suspended=tuple(suspended),
+        merged=merged,
     )
 
 
@@ -1015,6 +1060,186 @@ class _Live:
     remaining: list[QueuedAction]
 
 
+#: Every piece of `_Turn` that decides what the rest of the turn does, compared before two
+#: branches are folded into one. `pos` is last because it is the expensive one and the
+#: cheap flags in front of it settle most pairs.
+#:
+#: The list is checked against `_Turn.__slots__` by a test rather than trusted: a field
+#: added to the working state and forgotten here would let two branches that differ in it
+#: merge, which is the one way this optimisation can corrupt an answer rather than merely
+#: fail to save time.
+_MERGE_COMPARED_STATE = (
+    "self_switch_pending",
+    "actions_remaining",
+    "move_damage_total",
+    "move_connected",
+    "current_actor",
+    "wipe_order",
+    "acted",
+    "hurt_this_turn",
+    "move_failed",
+    "attacks",
+    "budget",
+    "pending_secondaries",
+    "pos",
+)
+
+#: Deliberately not compared. `events` and `acts` are the readable trace, and the merged
+#: branch keeps the first contributor's -- so a trace can say "dealt 31" where the roll
+#: that merged into it dealt 34. Nothing downstream of the resolver reads a damage number
+#: back out of the trace; `show_game` prints it and the tests read it. `unmodelled` is a
+#: set of reports and is unioned rather than compared, because a report is about the
+#: resolver's coverage, not about the state. `reg` is compared by identity below.
+_MERGE_IGNORED_STATE = ("events", "acts", "unmodelled")
+
+
+def _action_key(action: QueuedAction) -> tuple:
+    """A hashable, complete key for one queued action.
+
+    Field by field rather than by `==` because `speed` is an array: the belief layer puts
+    one Speed per particle in there, and comparing two actions with `==` returns an array
+    whose truth value is an error rather than an answer. Built from `fields()` so a new
+    field on `QueuedAction` is in the key without anyone remembering to add it.
+    """
+    out: list[object] = []
+    for spec in fields(action):
+        value = getattr(action, spec.name)
+        if isinstance(value, np.ndarray):
+            out.append((value.shape, value.dtype.str, value.tobytes()))
+        else:
+            out.append(value)
+    return tuple(out)
+
+
+def _position_bucket(pos: Position) -> tuple:
+    """A cheap, necessary condition for two positions being equal.
+
+    Not a decision: equal positions always land in the same bucket, and two in one bucket
+    are still compared in full. It exists so that the full comparison -- twelve Pokemon
+    with their volatiles, boosts and move slots -- runs on pairs that have a chance.
+    """
+    return (
+        pos.turn,
+        pos.ended,
+        pos.field.weather,
+        pos.field.terrain,
+        tuple(tuple(side.active) for side in pos.sides),
+        tuple(
+            (mon.hp, mon.fainted, mon.status, mon.species)
+            for side in pos.sides
+            for mon in side.pokemon
+        ),
+    )
+
+
+def _same_state(a: _Turn, b: _Turn) -> bool:
+    """Whether two working states are the same state, by everything that can differ."""
+    if a.reg is not b.reg:
+        return False
+    return all(getattr(a, name) == getattr(b, name) for name in _MERGE_COMPARED_STATE)
+
+
+def _fold(
+    items: list,
+    bucket: Callable[[object], tuple],
+    same: Callable[[object, object], bool],
+    absorb: Callable[[object, object], None],
+) -> tuple[list, int]:
+    """Folds equal items into their first occurrence, in one pass, order preserved.
+
+    First occurrence rather than most likely, and the input order rather than the bucket
+    order, because the Rust port has to produce the same list: the differential test is an
+    equality test on branches, and a tie-break on floating-point weights would be a second
+    place for the two to disagree.
+    """
+    kept: list = []
+    buckets: dict[tuple, list] = {}
+    folded = 0
+    for item in items:
+        group = buckets.setdefault(bucket(item), [])
+        for other in group:
+            if same(other, item):
+                absorb(other, item)
+                folded += 1
+                break
+        else:
+            group.append(item)
+            kept.append(item)
+    return kept, folded
+
+
+def _merge_live(items: list[_Live]) -> tuple[list[_Live], int]:
+    """Branches mid-turn that are the same state with the same queue behind them."""
+    if len(items) < 2:
+        return items, 0
+
+    def absorb(into: _Live, other: _Live) -> None:
+        into.weight += other.weight
+        into.turn.unmodelled |= other.turn.unmodelled
+
+    return _fold(
+        items,
+        # The queue behind the branch goes in the bucket rather than in the comparison:
+        # it is small, it is hashable, and putting it here means it is built once per
+        # branch instead of once per pair.
+        lambda item: (
+            tuple(_action_key(a) for a in item.remaining),
+            item.turn.self_switch_pending,
+            _position_bucket(item.turn.pos),
+        ),
+        lambda x, y: _same_state(x.turn, y.turn),
+        absorb,
+    )
+
+
+def _merge_branches(branches: list[Branch]) -> tuple[list[Branch], int]:
+    """Finished outcomes that are the same position.
+
+    Needed as well as `_merge_live` because Speed ties are resolved *above* the queue:
+    each order is a separate `_resolve_sequence` call, so two orders that end the same way
+    -- both Pokemon act, neither dies, or the faster one kills the slower either way --
+    never meet until here.
+    """
+    if len(branches) < 2:
+        return branches, 0
+
+    def absorb(into: Branch, other: Branch) -> None:
+        into.probability += other.probability
+
+    return _fold(
+        branches,
+        lambda branch: _position_bucket(branch.position),
+        lambda x, y: x.position == y.position,
+        absorb,
+    )
+
+
+def _merge_suspended(paused: list[SuspendedTurn]) -> tuple[list[SuspendedTurn], int]:
+    """Pauses that are the same pause: same state, same queue still owed.
+
+    A suspension is resumed once per candidate replacement, so folding two of them saves
+    that whole fan-out and not just a leaf.
+    """
+    if len(paused) < 2:
+        return paused, 0
+
+    def absorb(into: SuspendedTurn, other: SuspendedTurn) -> None:
+        into.probability += other.probability
+
+    def same(x: SuspendedTurn, y: SuspendedTurn) -> bool:
+        return x._turn is not None and y._turn is not None and _same_state(x._turn, y._turn)
+
+    return _fold(
+        paused,
+        lambda pause: (
+            tuple(_action_key(a) for a in pause._remaining),
+            _position_bucket(pause.position),
+        ),
+        same,
+        absorb,
+    )
+
+
 def _resolve_sequence(
     reg: Regulation,
     pos: Position,
@@ -1041,6 +1266,7 @@ def _run_queue(reg: Regulation, start: list[_Live], budget: Budget) -> TurnResul
     exact = True
 
     dropped = 0
+    merged = 0
 
     def prune(items: list[_Live]) -> list[_Live]:
         """Keeps the most likely branches, and says how many were let go."""
@@ -1050,6 +1276,22 @@ def _run_queue(reg: Regulation, start: list[_Live], budget: Budget) -> TurnResul
         items.sort(key=lambda item: -item.weight)
         kept = items[: budget.max_branches]
         dropped += len(items) - len(kept)
+        return kept
+
+    def fold(items: list[_Live]) -> list[_Live]:
+        """Merges duplicates, always *before* the cap is applied.
+
+        Order matters: the cap drops the least likely branches, and two halves of one
+        state that were about to be dropped separately may be worth keeping once they are
+        one branch carrying both weights. Merging first also gives the next generation
+        more room per branch, since the resolution each one gets is the cap divided by how
+        many are live.
+        """
+        nonlocal merged
+        if not budget.merge_duplicates:
+            return items
+        kept, folded = _merge_live(items)
+        merged += folded
         return kept
 
     while live:
@@ -1066,6 +1308,7 @@ def _run_queue(reg: Regulation, start: list[_Live], budget: Budget) -> TurnResul
             exact = False
 
         nxt: list[_Live] = []
+        finished_before, paused_before = len(finished), len(paused)
         for item in live:
             if not item.remaining:
                 finished.append(item)
@@ -1110,11 +1353,12 @@ def _run_queue(reg: Regulation, start: list[_Live], budget: Budget) -> TurnResul
             # peak at the cap times the branching factor -- a quarter of a million copied
             # positions for an exact budget, which is enough to exhaust memory.
             if len(nxt) > 2 * budget.max_branches:
-                nxt = prune(nxt)
+                nxt = prune(fold(nxt))
 
-        nxt = prune(nxt)
-        finished = prune(finished)
-        paused = prune(paused)
+        nxt = prune(fold(nxt))
+        # Only the lists this generation added to are worth walking again.
+        finished = prune(fold(finished) if len(finished) != finished_before else finished)
+        paused = prune(fold(paused) if len(paused) != paused_before else paused)
         if dropped:
             exact = False
         live = nxt
@@ -1169,6 +1413,7 @@ def _run_queue(reg: Regulation, start: list[_Live], budget: Budget) -> TurnResul
         reductions=reductions,
         unmodelled=tuple(sorted(unmodelled)),
         suspended=tuple(out_suspended),
+        merged=merged,
     )
 
 

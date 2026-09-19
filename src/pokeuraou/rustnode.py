@@ -169,6 +169,7 @@ def dump_budget(budget: Budget) -> dict[str, Any]:
         "enumerateSpeedTies": budget.enumerate_speed_ties,
         "pinnedPolicy": budget.pinned_policy,
         "maxBranches": budget.max_branches,
+        "mergeDuplicates": budget.merge_duplicates,
     }
 
 

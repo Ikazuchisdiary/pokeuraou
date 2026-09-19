@@ -47,6 +47,9 @@ pub struct Budget {
     pub enumerate_speed_ties: bool,
     pub pinned_policy: bool,
     pub max_branches: usize,
+    /// Fold branches that reached the same state into one. Lossless, so it is on; see
+    /// `Budget.merge_duplicates` in Python, which this mirrors field for field.
+    pub merge_duplicates: bool,
 }
 
 impl Budget {
@@ -62,6 +65,7 @@ impl Budget {
             enumerate_speed_ties: true,
             pinned_policy: false,
             max_branches: 16,
+            merge_duplicates: true,
         }
     }
 
@@ -78,6 +82,9 @@ impl Budget {
             enumerate_speed_ties: value["enumerateSpeedTies"].as_bool().unwrap_or(true),
             pinned_policy: value["pinnedPolicy"].as_bool().unwrap_or(false),
             max_branches: value["maxBranches"].as_u64().unwrap_or(512) as usize,
+            // Defaulted to on, as Python's field is: a fixture recorded before the merge
+            // existed replays with it rather than against it.
+            merge_duplicates: value["mergeDuplicates"].as_bool().unwrap_or(true),
         }
     }
 
@@ -1010,6 +1017,12 @@ pub fn resolve_turn<'a>(
             }
         }
     }
+    // Across the Speed-tie orders and the queue's fractional-priority branches, which are
+    // separate resolutions and so cannot have met inside `run_queue`.
+    if budget.merge_duplicates {
+        branches = merge_branches(branches);
+        suspended = merge_suspended(suspended);
+    }
     Ok(TurnResult { branches, exact, suspended, unmodelled })
 }
 
@@ -1183,6 +1196,252 @@ struct Live<'a> {
     remaining: Vec<QueuedAction>,
 }
 
+// ---------------------------------------------------------------------------
+// Lossless branch merge
+// ---------------------------------------------------------------------------
+//
+// Transcribed from `_merge_live` / `_merge_branches` / `_merge_suspended` in Python, and
+// it has to stay transcribed: the differential is an equality test on the branch list, so
+// a merge that folded a different pair, or kept a different representative, or produced
+// the same branches in a different order, would show up there as a port bug.
+
+/// The cheap half of "is this the same branch": a hash over the fields that move.
+///
+/// Necessary, not sufficient. Equal states always hash the same; two that collide are
+/// still compared in full by `same_turn`, which is what decides.
+fn state_fingerprint(pos: &Position, remaining: &[QueuedAction], self_switch_pending: bool) -> u64 {
+    // FNV-1a rather than the default hasher, and the same trade `encoded_node::leaf_key`
+    // makes: this is a bucket key, not a checksum. SipHash over the thirty-odd values
+    // below was worth measuring against the clone it is here to save.
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    let mut eat = |value: u64| {
+        hash ^= value;
+        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    eat(pos.turn as u64);
+    eat(pos.ended as u64);
+    eat(self_switch_pending as u64);
+    eat(pos.field.weather.map(|w| w.as_str().len() as u64 + 3).unwrap_or(0));
+    eat(pos.field.terrain.map(|t| t.as_str().len() as u64 + 5).unwrap_or(0));
+    // The four on the field only. Any function of the state is a valid fingerprint --
+    // equal states hash equal whatever is left out -- so this reads the part a turn
+    // changes and pays for four Pokemon rather than twelve.
+    for side in &pos.sides {
+        for slot in 0..side.active.len() {
+            eat(side.active[slot].map(|index| index as u64 + 1).unwrap_or(0));
+            if let Some(mon) = side.active_pokemon(slot) {
+                eat(mon.hp as u64);
+                eat(mon.fainted as u64);
+                eat(mon.status.map(|s| s.as_str().len() as u64 + 7).unwrap_or(0));
+                eat(mon.volatiles.len() as u64);
+            }
+        }
+    }
+    eat(remaining.len() as u64);
+    for action in remaining {
+        eat(action.side as u64);
+        eat(action.slot as u64);
+        eat(action.kind as u64);
+        eat(action.move_id.map(|m| m.as_str().len() as u64 + 11).unwrap_or(0));
+        eat(action.target.unwrap_or(-1) as u64);
+        eat(action.switch_to.map(|index| index as u64 + 1).unwrap_or(0));
+    }
+    hash
+}
+
+/// Whether two parties are the same party, taking the sharing into account.
+///
+/// A side holds its six behind `Rc`, and a turn writes to the two that are out: two
+/// branches of one turn therefore share the allocation of everything they did not touch.
+/// `Rc::ptr_eq` settles those for the price of a pointer compare, and the derived `==` --
+/// 928 bytes with move slots, boosts and volatiles inside -- runs only on the two that
+/// moved. Measured at 45.1 us a turn against 41.4 without the merge at all before this,
+/// and the gap is what it closes.
+fn same_party(a: &[Rc<Pokemon>], b: &[Rc<Pokemon>]) -> bool {
+    a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| same_mon(x, y))
+}
+
+/// Whether two Pokemon are the same Pokemon.
+///
+/// The derived `==` compares in declaration order, which puts the four move slots ahead of
+/// HP and the volatiles behind the boosts -- so two branches that differ only in the
+/// damage dealt, or only in whether a secondary landed, are the expensive comparisons
+/// rather than the cheap ones. The conditions in front are the ones branches actually
+/// differ in; each is part of `==` as well, so this rejects sooner and never accepts more.
+fn same_mon(x: &Rc<Pokemon>, y: &Rc<Pokemon>) -> bool {
+    if Rc::ptr_eq(x, y) {
+        return true;
+    }
+    x.hp == y.hp
+        && x.fainted == y.fainted
+        && x.status == y.status
+        && x.item == y.item
+        && x.boosts == y.boosts
+        && x.volatiles.len() == y.volatiles.len()
+        && x == y
+}
+
+/// Whether two sides are equal.
+///
+/// Destructured rather than written field by field from memory: a field added to `Side`
+/// and not compared here would let two branches that differ in it merge, and the `let`
+/// with no `..` makes that a compile error rather than a silent one.
+fn same_side(a: &crate::position::Side, b: &crate::position::Side) -> bool {
+    let crate::position::Side {
+        id,
+        name,
+        active,
+        pokemon,
+        side_conditions,
+        slot_conditions,
+        mega_used,
+        mega_capable_slots,
+    } = a;
+    *active == b.active
+        && *mega_used == b.mega_used
+        && *side_conditions == b.side_conditions
+        && *slot_conditions == b.slot_conditions
+        && *mega_capable_slots == b.mega_capable_slots
+        && *id == b.id
+        && *name == b.name
+        && same_party(pokemon, &b.pokemon)
+}
+
+fn same_position(a: &Position, b: &Position) -> bool {
+    let Position { format, sides, turn, field, request_state, ended, winner } = a;
+    *turn == b.turn
+        && *ended == b.ended
+        && *winner == b.winner
+        && *request_state == b.request_state
+        && *format == b.format
+        && *field == b.field
+        && same_side(&sides[0], &b.sides[0])
+        && same_side(&sides[1], &b.sides[1])
+}
+
+/// Whether two working states are the same state, by everything that can differ.
+///
+/// The field list mirrors `_MERGE_COMPARED_STATE`; Python's `events` and `acts` have no
+/// counterpart here, and `unmodelled` is unioned rather than compared because it reports
+/// on the resolver's coverage rather than on the state. Destructured for the same reason
+/// as `same_side`: a new field in `Turn` has to be dealt with here or it will not build.
+fn same_turn(a: &Turn, b: &Turn) -> bool {
+    let Turn {
+        reg,
+        pos,
+        budget,
+        attacks,
+        hurt_this_turn,
+        move_failed,
+        move_damage_total,
+        move_connected,
+        acted,
+        actions_remaining,
+        self_switch_pending,
+        pending_secondaries,
+        current_actor,
+        wipe_order,
+        unmodelled: _,
+    } = a;
+    std::ptr::eq(*reg, b.reg)
+        && *self_switch_pending == b.self_switch_pending
+        && *actions_remaining == b.actions_remaining
+        && *move_damage_total == b.move_damage_total
+        && *move_connected == b.move_connected
+        && *current_actor == b.current_actor
+        && *wipe_order == b.wipe_order
+        && *acted == b.acted
+        && *hurt_this_turn == b.hurt_this_turn
+        && *move_failed == b.move_failed
+        && *attacks == b.attacks
+        && *budget == b.budget
+        && *pending_secondaries == b.pending_secondaries
+        && same_position(pos, &b.pos)
+}
+
+/// Folds equal items into their first occurrence, in one pass, order preserved.
+fn fold_equal<T>(
+    items: Vec<T>,
+    fingerprint: impl Fn(&T) -> u64,
+    same: impl Fn(&T, &T) -> bool,
+    absorb: impl Fn(&mut T, T),
+) -> (Vec<T>, usize) {
+    let mut kept: Vec<T> = Vec::with_capacity(items.len());
+    let mut buckets: std::collections::HashMap<u64, Vec<usize>> = std::collections::HashMap::new();
+    let mut folded = 0usize;
+    for item in items {
+        let key = fingerprint(&item);
+        let group = buckets.entry(key).or_default();
+        let mut hit: Option<usize> = None;
+        for index in group.iter() {
+            if same(&kept[*index], &item) {
+                hit = Some(*index);
+                break;
+            }
+        }
+        match hit {
+            Some(index) => {
+                absorb(&mut kept[index], item);
+                folded += 1;
+            }
+            None => {
+                group.push(kept.len());
+                kept.push(item);
+            }
+        }
+    }
+    (kept, folded)
+}
+
+fn merge_live<'a>(items: Vec<Live<'a>>) -> Vec<Live<'a>> {
+    if items.len() < 2 {
+        return items;
+    }
+    fold_equal(
+        items,
+        |item| {
+            state_fingerprint(&item.turn.pos, &item.remaining, item.turn.self_switch_pending)
+        },
+        |x, y| x.remaining == y.remaining && same_turn(&x.turn, &y.turn),
+        |into, other| {
+            into.weight += other.weight;
+            into.turn.unmodelled.extend(other.turn.unmodelled);
+        },
+    )
+    .0
+}
+
+/// Finished outcomes that are the same position.
+///
+/// Needed as well as `merge_live` because Speed ties are resolved above the queue: each
+/// order is its own `run_queue`, so two orders that end the same way never meet until the
+/// results are collected.
+fn merge_branches(items: Vec<Branch>) -> Vec<Branch> {
+    if items.len() < 2 {
+        return items;
+    }
+    fold_equal(
+        items,
+        |branch| state_fingerprint(&branch.position, &[], false),
+        |x, y| same_position(&x.position, &y.position),
+        |into, other| into.probability += other.probability,
+    )
+    .0
+}
+
+fn merge_suspended<'a>(items: Vec<Suspended<'a>>) -> Vec<Suspended<'a>> {
+    if items.len() < 2 {
+        return items;
+    }
+    fold_equal(
+        items,
+        |pause| state_fingerprint(&pause.turn.pos, &pause.remaining, true),
+        |x, y| x.remaining == y.remaining && same_turn(&x.turn, &y.turn),
+        |into, other| into.probability += other.probability,
+    )
+    .0
+}
+
 fn run_queue<'a>(
     reg: &'a Reg,
     start: Vec<Live<'a>>,
@@ -1212,6 +1471,7 @@ fn run_queue<'a>(
         }
 
         let mut next: Vec<Live<'a>> = Vec::new();
+        let (finished_before, paused_before) = (finished.len(), paused.len());
         for mut item in live.into_iter() {
             if item.remaining.is_empty() {
                 finished.push(item);
@@ -1281,7 +1541,23 @@ fn run_queue<'a>(
                 }
             }
             if next.len() > 2 * budget.max_branches {
+                if budget.merge_duplicates {
+                    next = merge_live(next);
+                }
                 prune(&mut next, &mut dropped);
+            }
+        }
+        // Merging comes before the cap, always: two halves of one state that were each
+        // about to be dropped are worth keeping once they are one branch carrying both
+        // weights, and a shorter live list gives the next generation more resolution.
+        if budget.merge_duplicates {
+            next = merge_live(next);
+            // Only the lists this generation added to are worth walking again.
+            if finished.len() != finished_before {
+                finished = merge_live(finished);
+            }
+            if paused.len() != paused_before {
+                paused = merge_live(paused);
             }
         }
         prune(&mut next, &mut dropped);
