@@ -1277,15 +1277,24 @@ def generate(
                 stats["wins"] += int(record.outcome > 0.5)
                 stats["decisions"] += len(record.decisions)
                 stats["turns"] += record.turns
-                handle.write(
-                    json.dumps(
-                        record.to_json(
-                            objective=leaf or objective.name, search_limit=search_limit
-                        ),
-                        ensure_ascii=False,
-                    )
-                    + "\n"
+                payload = record.to_json(
+                    objective=leaf or objective.name, search_limit=search_limit
                 )
+                if index is not None:
+                    # The queue's index, so two pools generated at one seed can be
+                    # checked for pairing afterwards instead of assumed to pair.
+                    #
+                    # `data/selfplay-hidden2` and `data/selfplay-open2` were made at seed
+                    # 2001 with one flag between them, and whether game k is the same
+                    # matchup in both is exactly the question a twin design rests on --
+                    # and it could not be asked, because a worker takes indices from the
+                    # queue in whatever order it gets them, so file order says nothing.
+                    # The same gap was closed for matches earlier today; generation kept
+                    # it. `--mirror-share`'s short-circuit already desynchronised
+                    # generation 11h from generation 10 once, and that was found by
+                    # noticing afterwards rather than by being able to check.
+                    payload["gameIndex"] = index
+                handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
                 handle.flush()
             if index is not None and on_finish is not None:
                 # After the write, and after a discard too: a game that was played and
