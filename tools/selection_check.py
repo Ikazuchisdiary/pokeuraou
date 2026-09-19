@@ -30,6 +30,14 @@ nearly cost a conclusion on 2026-09-19: `--force-selection` and `--force-lead` b
 arms where the opponent draws from THEIR equilibrium column strategy for a sampled spread
 class, not uniformly, which is what makes those arms a test of equilibrium play.
 
+**Every matchup is played in both seats.** `--games` is therefore games per arm PER SEAT,
+the way `tools/generation_match.py` has always counted them, and the rate printed for an
+arm is the sum of the two seats. Without the swap our roster sat at side 0 in every game
+this tool ever played, and the calibration line below compared one seat's win rate against
+an LP value that has no seat term in it at all -- which is the comparison G31 priced the
+selection cache's optimism from. The pair of seats also measures the seat bias itself, and
+`tools/seats.py` says why that number is printed rather than merely cancelled.
+
     uv run --group learn python tools/selection_check.py --mirror --games 300
     uv run --group learn python tools/selection_check.py --place 1 --games 300
 """
@@ -43,9 +51,13 @@ import time
 from pathlib import Path
 
 import numpy as np
-import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+# tools/ is sys.path[0] for a script run as `python tools/selection_check.py`, and the
+# seat arithmetic is three lines that must not exist twice -- which is exactly how this
+# tool and `book_check` came to have none of it while `generation_match` had all of it.
+from seats import SEATS, SeatTally, play_paired, sides
 
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
@@ -57,7 +69,6 @@ from pokeuraou.selection import SpreadClass, solve_selection
 from pokeuraou.selfplay import play_game
 from pokeuraou.standings import find_cached_standings, load_standings, sample_standings_team
 from pokeuraou.teams import all_selections, load_roster
-from pokeuraou.value import BatchedValue, load_model
 
 
 def main() -> None:
@@ -65,7 +76,14 @@ def main() -> None:
     ap.add_argument("--roster", default="rizabanadohido")
     ap.add_argument("--model", type=Path, default=Path("data/models/value-worlds.pt"))
     ap.add_argument("--place", type=int, default=1)
-    ap.add_argument("--games", type=int, default=300, help="games per arm")
+    ap.add_argument(
+        "--games",
+        type=int,
+        default=300,
+        help="games per arm PER SEAT, so twice this in total -- the same counting "
+        "`tools/generation_match.py` uses. Every matchup is played once with our four at "
+        "side 0 and once at side 1.",
+    )
     ap.add_argument("--classes", type=int, default=4)
     ap.add_argument("--limit", type=int, default=16)
     ap.add_argument("--seed", type=int, default=9)
@@ -148,7 +166,12 @@ def main() -> None:
         action="store_true",
         help="read the part files beside --out and report, playing nothing.",
     )
-    ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    # Resolved after the --merge branch rather than here, because asking torch whether
+    # there is a CUDA device is the only thing that made reading a finished run -- pure
+    # arithmetic over a JSONL file -- need torch installed at all.
+    ap.add_argument(
+        "--device", default=None, help="cuda when one is available, otherwise cpu"
+    )
     args = ap.parse_args()
 
     roster = load_roster(args.roster)
@@ -162,8 +185,11 @@ def main() -> None:
             raise SystemExit(f"no part files beside {args.out}")
         claimed = None
         seen_headers: set[str] = set()
-        tally: dict[str, list[int]] = {}
-        seen: set[tuple[str, int]] = set()
+        tallies: dict[str, SeatTally] = {}
+        # (arm, game, seat). A row is now one SEAT of one game, so a key that named only
+        # the game would call the two halves of a pair a shard overlap and refuse to
+        # merge a perfectly good run.
+        seen: set[tuple[str, int, int]] = set()
         for part in parts:
             for line in part.read_text(encoding="utf-8").splitlines():
                 row = json.loads(line)
@@ -181,26 +207,36 @@ def main() -> None:
                         f"  classes {header.get('classes', '?')}"
                         f"  seed {header.get('seed', '?')}"
                         + ("  MIRROR" if header.get("mirror") else "")
+                        + ("  BOTH SEATS" if header.get("seats") == 2 else "  ONE SEAT")
                     )
                     continue
-                key = (row["arm"], int(row["game"]))
+                if "seat" not in row:
+                    # Rows written before the swap existed are one seat's games with no
+                    # label saying which. Averaging them with swapped rows would put the
+                    # seat term back into half the total and call the result paired.
+                    raise SystemExit(
+                        f"{part} has rows with no `seat`: it was written before the seat "
+                        "swap and its games all sat at side 0. Re-run those shards rather "
+                        "than merging them with swapped ones."
+                    )
+                seat = int(row["seat"])
+                key = (row["arm"], int(row["game"]), seat)
                 if key in seen:
                     raise SystemExit(f"{key} appears in two shards; the split overlaps")
                 seen.add(key)
-                got = tally.setdefault(row["arm"], [0, 0])
-                got[0] += int(float(row["outcome"]) > 0.5)
-                got[1] += 1
+                tallies.setdefault(row["arm"], SeatTally(row["arm"])).add(
+                    seat, None if row["outcome"] is None else float(row["outcome"])
+                )
         for line in sorted(seen_headers):
             print(f"  played by: {line}")
         if len(seen_headers) > 1:
             raise SystemExit("these parts were played by different agents")
-        print(f"  {len(parts)} part files, {len(seen)} games")
+        print(f"  {len(parts)} part files, {len(seen)} seat-games")
         results = {}
-        for arm, (wins, n) in tally.items():
-            rate = wins / n if n else float("nan")
-            half = 1.96 * (rate * (1 - rate) / n) ** 0.5 if n else float("nan")
-            results[arm] = rate
-            print(f"  {arm:>20}  {n:>6}  {rate * 100:6.1f}%  +-{half * 100:.1f}")
+        for arm, tally in tallies.items():
+            results[arm] = tally.rate
+            for line in tally.lines():
+                print(line)
         if claimed is None:
             raise SystemExit("no header line in any part file; re-run the shards")
 
@@ -209,6 +245,16 @@ def main() -> None:
 
         report(results, _Claim(), args)
         return
+
+    # Below the merge branch, so reading a finished run back does not want a 3 GB CUDA
+    # wheel. Deferring the leaf like this is what a dozen tools here already do, and it is
+    # what lets the seat aggregation above be tested at all.
+    import torch
+
+    from pokeuraou.value import BatchedValue, load_model
+
+    if args.device is None:
+        args.device = "cuda" if torch.cuda.is_available() else "cpu"
     register_mega_stones(reg)
     prior = load_chaos(find_cached_chaos(reg.meta.format_id), reg)
     standings = load_standings(find_cached_standings(), reg)
@@ -263,7 +309,10 @@ def main() -> None:
     class_weights = np.asarray(analysis.equilibrium.weights, dtype=np.float64)
     class_weights = class_weights / class_weights.sum()
 
-    print(f"\n  {'自陣 vs 相手':>20}  {'games':>6}  {'win':>7}  {'95%':>6}")
+    # `games` is seat-games: every matchup appears twice, once per seat, and the arm's row
+    # is the two added. The two seat rows under it are the breakdown, in the spelling
+    # `tools/match_result.py` reads.
+    print(f"\n  {'自陣 vs 相手':>20}  {'seat-games':>6}  {'win':>7}  {'95%':>6}")
     results: dict[str, float] = {}
     forced: list[int] = []
     forced_arm = ""
@@ -320,21 +369,26 @@ def main() -> None:
         arms = wanted
     rows: list[dict] = []
     for arm_no, arm in enumerate(arms, start=1):
-        wins = finished = unfinished = 0
+        tally = SeatTally(arm)
         # A shard that prints nothing until an arm ends is a shard whose remaining time
         # cannot be estimated, and this run's was guessed wrong four times. The line goes
         # to stderr and is flushed, because stdout is block-buffered into a log file.
         todo = len(range(args.shard, args.games, max(args.shards, 1)))
         started_at = time.monotonic()
-        print(f"  [{arm_no}/{len(arms)}] {arm}: {todo} games", file=sys.stderr, flush=True)
+        print(
+            f"  [{arm_no}/{len(arms)}] {arm}: {todo} matchups x {len(SEATS)} seats",
+            file=sys.stderr,
+            flush=True,
+        )
         for done, game_index in enumerate(
             range(args.shard, args.games, max(args.shards, 1)), start=1
         ):
             if done > 1 and (done - 1) % 5 == 0:
-                rate = (time.monotonic() - started_at) / (done - 1)
-                left = rate * (todo - done + 1) / 60
+                pace = (time.monotonic() - started_at) / (done - 1)
+                left = pace * (todo - done + 1) / 60
                 print(
-                    f"    {done - 1}/{todo}  {rate:.0f}s a game, {left:.0f} min left",
+                    f"    {done - 1}/{todo}  {pace:.0f}s a matchup (both seats), "
+                    f"{left:.0f} min left",
                     file=sys.stderr,
                     flush=True,
                 )
@@ -363,59 +417,94 @@ def main() -> None:
             else:
                 index = int(game_rng.integers(len(selections)))
             own_pick = selections[index]
-            record = play_game(
-                reg,
-                game_rng,
-                [roster.sets[i] for i in own_pick],
-                [foe_six[j] for j in foe_pick],
-                f"place{args.place}",
-                objective=OBJECTIVES["hp-share"],
-                search_limit=args.limit,
-                max_turns=args.max_turns,
-                # The leaf that solved the selection has to be the leaf that plays it.
-                # Without this the games were driven by the hp-share heuristic while the
-                # claim came from the value function, so the -21.8 point miss G2 recorded
-                # and everything measured with this tool since compared two agents.
-                evaluate=value,
-                rank_by_leaf=args.rank_by_leaf,
-                sheets=(
-                    (list(roster.sets), list(foe_six)) if args.hide_bench else None
-                ),
-            )
-            if record.outcome is None:
-                unfinished += 1
-                continue
-            finished += 1
-            wins += int(record.outcome > 0.5)
-            rows.append(
-                {
-                    "arm": arm,
-                    "game": game_index,
-                    "outcome": float(record.outcome),
-                    "ownPick": list(own_pick),
-                    "foePick": list(foe_pick),
-                }
-            )
-        rate = wins / finished if finished else float("nan")
-        half = 1.96 * (rate * (1 - rate) / finished) ** 0.5 if finished else float("nan")
-        results[arm] = rate
-        print(
-            f"  {arm:>20}  {finished:>6}  {rate * 100:6.1f}%  +-{half * 100:.1f}"
-            f"   (打ち切り {unfinished})"
-        )
-        # A mirror asserts 50.0%, exactly. Our six against our six with one leaf and one
-        # width on both sides is antisymmetric, so any deviation is the seat -- the
-        # engine, the resolver and the evaluator together -- and not a fact about the
-        # agents. This tool never swaps the seats (our roster is always side 0), so the
-        # mirror arm is the only seat diagnostic it has, and it was printed as an
-        # ordinary win rate with an interval and nothing else. A speed-tie bug worth nine
-        # points in a mirror is in this project's history.
-        if args.mirror and finished and abs(rate - 0.5) > half:
+            our_four = [roster.sets[i] for i in own_pick]
+            their_four = [foe_six[j] for j in foe_pick]
+
+            # Bound as defaults rather than captured: the closure is rebuilt every
+            # iteration and a captured loop variable would make both seats read whatever
+            # the loop had reached by the time they ran.
+            def one_seat(
+                seat: int,
+                side0: list,
+                side1: list,
+                *,
+                arm: str = arm,
+                game_index: int = game_index,
+                own_pick: tuple[int, ...] = own_pick,
+                foe_pick: tuple[int, ...] = foe_pick,
+                foe_six: list = foe_six,
+            ) -> float | None:
+                # One stream per matchup, NOT per seat, and a fresh one rather than the
+                # partly-consumed `game_rng`: the two seats are supposed to differ in the
+                # seat and in nothing else, which is `tools/cycle_match.py`'s rule for the
+                # same reason ("same seed for both seats"). It also means a matchup whose
+                # two selections are identical resolves to the same game mirrored, so its
+                # pair contributes exactly one win -- the degenerate case that must not
+                # tilt a mirror run.
+                record = play_game(
+                    reg,
+                    np.random.default_rng([args.seed + 1, game_index, 7]),
+                    side0,
+                    side1,
+                    f"place{args.place}",
+                    objective=OBJECTIVES["hp-share"],
+                    search_limit=args.limit,
+                    max_turns=args.max_turns,
+                    # The leaf that solved the selection has to be the leaf that plays it.
+                    # Without this the games were driven by the hp-share heuristic while
+                    # the claim came from the value function, so the -21.8 point miss G2
+                    # recorded and everything measured with this tool since compared two
+                    # agents.
+                    evaluate=value,
+                    rank_by_leaf=args.rank_by_leaf,
+                    # The sheets are indexed by SIDE, so they swap with the seat. Handing
+                    # side 1 our roster's four while telling the search side 1's sheet is
+                    # the opponent's six is a hidden-bench run that believes the wrong
+                    # bench, and it would have read as an ordinary win rate.
+                    sheets=(
+                        sides(list(roster.sets), list(foe_six), seat)
+                        if args.hide_bench
+                        else None
+                    ),
+                )
+                if record.outcome is not None:
+                    rows.append(
+                        {
+                            "arm": arm,
+                            "game": game_index,
+                            # Which side OUR four sat on. `outcome` stays side 0's, as it
+                            # is everywhere else in this repository, and the flip lives in
+                            # `seats.our_win` where the row is read back -- flipping here
+                            # as well is how a sign gets lost. Our win is not also stored:
+                            # two fields that must agree are two fields that can disagree,
+                            # and this pair is derivable.
+                            "seat": seat,
+                            "outcome": float(record.outcome),
+                            "ownPick": list(own_pick),
+                            "foePick": list(foe_pick),
+                        }
+                    )
+                return record.outcome
+
+            play_paired(our_four, their_four, one_seat, tally)
+        results[arm] = tally.rate
+        # A mirror asserts 50.0%, and now it is assured of it rather than asked for it.
+        # Our six against our six with one leaf and one width on both sides is
+        # antisymmetric, so before the swap any deviation was the seat -- the engine, the
+        # resolver and the evaluator together -- and this tool held one seat and could say
+        # so but not subtract it. A speed-tie bug worth nine points in a mirror is in this
+        # project's history. Both seats are played now, so the seat term cancels in the
+        # rate and appears instead as 座席差 on its own line.
+        for line in tally.lines():
+            print(line)
+        symmetric = bool(args.mirror) and arm == "一様 vs 一様"
+        if symmetric and tally.total_played and abs(tally.rate - 0.5) > tally.half:
             print(
-                f"  ! a mirror is antisymmetric, so this arm asserts 50.0% and reads "
-                f"{rate * 100:.1f}%.\n"
-                "    The gap is the seat, not the agents: this tool keeps our roster at "
-                "side 0\n    and never swaps, so nothing else here can separate them."
+                f"  ! uniform against uniform in a mirror asserts 50.0% and reads "
+                f"{tally.rate * 100:.1f}% over both seats.\n"
+                "    The seat is already out of that number, so what is left is the "
+                "selection draw:\n    play more matchups, or look at 座席差 above for the "
+                "seat itself."
             )
 
     if args.out is not None:
@@ -454,6 +543,13 @@ def main() -> None:
                             "classes": args.classes,
                             "seed": args.seed,
                             "mirror": bool(args.mirror),
+                            # How many seats each matchup was played in. Everything this
+                            # tool wrote before 2026-09-19 is one seat -- our roster at
+                            # side 0 -- and a merge that pooled the two would put the seat
+                            # term back into half its total. The rows carry `seat` and the
+                            # merge refuses the ones that do not; this says it at the top
+                            # so a reader of the file does not have to infer it.
+                            "seats": len(SEATS),
                         }
                     },
                     ensure_ascii=False,
@@ -493,9 +589,13 @@ def report(results: dict, analysis, args) -> None:  # noqa: ANN001
 
     claimed = analysis.value * 100
     measured = results["均衡 vs 均衡"] * 100
+    # This is the line the seat swap was for. The LP value has no seat term in it, and
+    # until 2026-09-19 the number it was compared against was one seat's win rate with our
+    # roster at side 0 in every game -- so whatever the seat is worth was being read as
+    # calibration error. `measured` is now both seats, and the seat term cancels in it.
     print(
         f"\n  主張した均衡値 {claimed:.1f}% に対し、両者が均衡を指した実測 {measured:.1f}%"
-        f"（差 {measured - claimed:+.1f}）"
+        f"（差 {measured - claimed:+.1f}、両席あわせた値なので席の項は入っていない）"
     )
     print(
         "  この2つが近ければ、印字している勝率は校正されている。"

@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # The selection book's advice, measured against the whole field, on every core.
 #
-# Four arms x GAMES games, paired on the opponent, at roughly 7s a game: 280 games is 1,120
-# battles, which is two hours in one process and ten minutes in fourteen.
+# Four arms x GAMES matchups x 2 seats, paired on the opponent AND on the seat, at roughly
+# 7s a game: 280 matchups is 2,240 battles, which is four hours in one process and twenty
+# minutes in fourteen. It was half that before every matchup was played in both seats; the
+# second seat is what takes the seat term out of the calibration line, and `tools/seats.py`
+# says why that line could not be read without it.
 #
 #   bash tools/book_check_parallel.sh
 #   GAMES=560 bash tools/book_check_parallel.sh
@@ -40,7 +43,7 @@ OUT="${OUT:-data/matches/book-check.jsonl}"
 LOGS="${LOGS:-data/matches/logs}"
 
 mkdir -p "$LOGS" "$(dirname "$OUT")"
-echo "book check: $WORKERS shards x $GAMES games x 4 arms, leaf $MODEL, eps=$EPSILON T=$TEMPERATURE"
+echo "book check: $WORKERS shards x $GAMES matchups x 4 arms x 2 seats, leaf $MODEL, eps=$EPSILON T=$TEMPERATURE"
 echo "  device $DEVICE, rust node $RUST_NODE, width $LIMIT"
 started=$(date +%s)
 
