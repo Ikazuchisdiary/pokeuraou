@@ -1,0 +1,215 @@
+# What this promises is not "the suite was green". It is that a named set of checks *ran*.
+#
+# Most of this file is build steps, and they are the point rather than the preamble. The
+# oracle tests are the differential against Showdown itself; `test_rust_node` is the only
+# thing standing between the Rust port and a silently different answer; both are written to
+# skip when their dependency is missing, because on a laptop that is the right behaviour.
+# On CI it would mean a green run that checked nothing, so CI builds them -- and then
+# `tools/ci_skip_audit.py` refuses the run if they skipped anyway.
+#
+# The jobs are split by what a red one would mean:
+#
+#   lint     the code as text. No submodule, no node, no data. Seconds.
+#   suite    the engine, with everything it can be given built. A red here is a bug.
+#   learn    the same suite with the value function's torch installed. Six checks skip in
+#            `suite` for want of it; here they must not. Separate because a red caused by
+#            a multi-gigabyte wheel failing to install is not a red about this codebase,
+#            and a run where those two are the same colour is a run people stop reading.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Smogon publishes monthly and keeps old months, so a pinned month is a stable URL and
+  # the cache key below is exact. Bumping it is a deliberate act: the usage data is an
+  # input to the belief layer, and "which month" is part of what a measurement means.
+  PRIORS_MONTH: "2026-08"
+  PRIORS_FORMAT: gen9championsvgc2026regmb
+  PRIORS_CUTOFF: "1760"
+
+jobs:
+  lint:
+    name: ruff and the agent-drift check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - run: uv sync --frozen
+      - run: uv run ruff check .
+      # The reason this file exists: `tools/agent_drift.py` was written to catch exactly
+      # the drift that voided a year of board numbers, and nothing called it. `--check`
+      # compares the drifted set against the one recorded in the tool and fails on any
+      # movement in either direction.
+      - name: which tools build an agent generation would not recognise
+        run: uv run python tools/agent_drift.py --check
+
+  suite:
+    name: the suite, with the oracle and the Rust node built
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # vendor/pokemon-showdown is the pinned dex the oracle and the regulation dump
+          # both read. Without it there is no oracle, and 31 differential tests skip.
+          submodules: recursive
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      # Showdown is a TypeScript source tree in the submodule; `main` points at dist/,
+      # which only exists after its own build. Installing the workspace is not enough --
+      # `require('pokemon-showdown')` fails with MODULE_NOT_FOUND until this runs.
+      - name: build the vendored Showdown
+        working-directory: vendor/pokemon-showdown
+        run: |
+          npm install --no-audit --no-fund
+          node build
+
+      - name: build the sim-bridge
+        run: |
+          npm ci
+          npm run build
+      - name: the oracle has to exist before anything claims it was tested
+        run: test -f packages/sim-bridge/dist/cli/oracle.js
+
+      - name: build the Rust node
+        run: cargo build --release --manifest-path rust/Cargo.toml
+
+      - run: uv sync --frozen
+
+      # The usage statistics. Not committed -- they are fetched, not authored, and the
+      # gitignore says so -- but `build_beliefs` refuses to invent a prior without them,
+      # so without this step 21 tests fail outright and test_rust_node cannot even build
+      # the node it exists to compare. Cached on the pinned month, so the fetch happens
+      # once per month rather than once per push.
+      - name: restore the cached Smogon usage statistics
+        uses: actions/cache@v4
+        with:
+          path: data/priors/raw
+          key: priors-${{ env.PRIORS_FORMAT }}-${{ env.PRIORS_MONTH }}-${{ env.PRIORS_CUTOFF }}
+      - name: fetch the usage statistics if the cache was cold
+        run: >
+          uv run python tools/fetch_priors.py
+          --month "$PRIORS_MONTH" --format "$PRIORS_FORMAT" --cutoff "$PRIORS_CUTOFF"
+
+      - name: pytest
+        run: uv run pytest --junitxml=reports/pytest.xml
+
+      # `--absent NAME=N` is this job saying what it did not supply, and how many tests may
+      # say so. Everything else must be built and must not skip; an unrecognised skip
+      # reason is a failure on its own. The numbers are measured, not guessed:
+      #   standings  data/standings/*.json.gz, from a small community API that the tool's
+      #              own docstring calls a manual one-off fetch. Not called on every push.
+      #   torch      four modules and two tests in test_selection_book; the `learn` job
+      #              below runs them with torch present and allows none of these.
+      - name: what the suite skipped, and whether it was allowed to
+        if: always()
+        run: >
+          uv run python tools/ci_skip_audit.py --junit reports/pytest.xml
+          --absent standings=9 --absent torch=6
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pytest-suite
+          path: reports/pytest.xml
+          # A run that died before pytest wrote a report has already failed for a reason
+          # worth reading; a second red about a missing upload only buries it.
+          if-no-files-found: ignore
+
+  learn:
+    name: the suite with the value function installed
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rust
+
+      - name: build the vendored Showdown
+        working-directory: vendor/pokemon-showdown
+        run: |
+          npm install --no-audit --no-fund
+          node build
+      - name: build the sim-bridge
+        run: |
+          npm ci
+          npm run build
+      - name: build the Rust node
+        run: cargo build --release --manifest-path rust/Cargo.toml
+
+      - run: uv sync --frozen
+
+      # The lockfile pins torch to the CUDA 12.8 index, because the box this project trains
+      # on is a Blackwell card the default wheel has no kernels for. Resolving that on a
+      # runner with no GPU drags the whole linux CUDA toolkit in -- several gigabytes of
+      # kernels nothing here would call -- so this installs the CPU build instead, outside
+      # the lockfile, and every `uv run` below passes `--no-sync` so the sync does not undo
+      # it. Say plainly what that costs: this job checks that the value function's *code*
+      # still runs, not that the training box's wheel still resolves. The second question
+      # is a real one and this does not answer it.
+      - name: install the CPU build of torch
+        run: uv pip install "torch>=2.7" --index-url https://download.pytorch.org/whl/cpu
+      - name: torch has to be importable before this job claims anything
+        run: uv run --no-sync python -c "import torch; print(torch.__version__)"
+
+      - name: restore the cached Smogon usage statistics
+        uses: actions/cache@v4
+        with:
+          path: data/priors/raw
+          key: priors-${{ env.PRIORS_FORMAT }}-${{ env.PRIORS_MONTH }}-${{ env.PRIORS_CUTOFF }}
+      - name: fetch the usage statistics if the cache was cold
+        run: >
+          uv run --no-sync python tools/fetch_priors.py
+          --month "$PRIORS_MONTH" --format "$PRIORS_FORMAT" --cutoff "$PRIORS_CUTOFF"
+
+      - name: pytest
+        run: uv run --no-sync pytest --junitxml=reports/pytest-learn.xml
+
+      # No `--absent torch`: with the learn group installed, a torch skip here means the
+      # install did not take, which is the one thing this job is for.
+      - name: what the suite skipped, and whether it was allowed to
+        if: always()
+        run: >
+          uv run --no-sync python tools/ci_skip_audit.py --junit reports/pytest-learn.xml
+          --absent standings=9
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pytest-learn
+          path: reports/pytest-learn.xml
+          if-no-files-found: ignore

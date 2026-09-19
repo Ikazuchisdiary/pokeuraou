@@ -17,13 +17,23 @@ So this reads the call sites and prints the difference, rather than trusting any
 notice. Parsed with `ast`, because a grep for keyword names finds them in docstrings and
 misses the ones spelled across a line break.
 
-    uv run python tools/agent_drift.py
+    uv run python tools/agent_drift.py            # the report
+    uv run python tools/agent_drift.py --check    # and fail if the set below moved
+
+Printing it was never enough on its own: this file existed on the day `selection_check`
+was found, and it had not been run. `--check` is what CI calls, and it compares the
+drifted set against `KNOWN_DRIFT` below rather than requiring it to be empty -- seven
+tools drift today and fixing them is not this check's job. It fails in *both* directions:
+a new tool that drifts is the thing to catch, and a tool that stopped drifting has to be
+struck off the list, or the list stops describing anything.
 """
 
 from __future__ import annotations
 
+import argparse
 import ast
 import glob
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -52,6 +62,21 @@ EXPECTED = {
     "worker_growth.py": "throughput benchmark",
     "cells_needed.py": "counts cells; plays nothing that is scored",
 }
+#: The tools that drift as of 2026-09-19, recorded so that `--check` can fail on an
+#: eighth without first demanding these seven be fixed. Not an excuse: a board number from
+#: any of them is still a number about a different player, which is what the report says.
+#: Struck off by fixing the call site, which `--check` then insists on.
+KNOWN_DRIFT = frozenset(
+    {
+        "asymmetry.py",
+        "book_check.py",
+        "cycle_match.py",
+        "forced_handoff.py",
+        "matchup.py",
+        "resume_generate.py",
+        "width_match.py",
+    }
+)
 
 
 def calls(path: Path) -> list[tuple[int, set[str]]]:
@@ -69,7 +94,15 @@ def calls(path: Path) -> list[tuple[int, set[str]]]:
     return out
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> int:
+    ap = argparse.ArgumentParser(description="which tools build a different agent")
+    ap.add_argument(
+        "--check",
+        action="store_true",
+        help="exit non-zero unless the drifted set is exactly KNOWN_DRIFT",
+    )
+    args = ap.parse_args(argv)
+
     reference: set[str] = set()
     for _, kwargs in calls(ROOT / "src/pokeuraou/selfplay.py"):
         reference |= kwargs
@@ -84,7 +117,7 @@ def main() -> None:
     print("  (depth, policy and solve_sparsely default to the shipped setting, so an\n"
           "   omission there is not a drift)\n")
 
-    drifted = 0
+    drifted: set[str] = set()
     for path in sorted(glob.glob(str(ROOT / "tools/*.py"))):
         p = Path(path)
         found = calls(p)
@@ -101,13 +134,31 @@ def main() -> None:
         if note:
             print(f"  expected  {p.name:<26} missing {', '.join(missing)}  -- {note}")
             continue
-        drifted += 1
+        drifted.add(p.name)
         print(f"  DRIFTED   {p.name:<26} missing {', '.join(missing)}")
 
-    print(f"\n  {drifted} tool(s) build an agent generation would not recognise.")
+    print(f"\n  {len(drifted)} tool(s) build an agent generation would not recognise.")
     if drifted:
         print("  A board number from one of those is a number about a different player.")
 
+    if not args.check:
+        return 0
+
+    appeared = sorted(drifted - KNOWN_DRIFT)
+    fixed = sorted(KNOWN_DRIFT - drifted)
+    if appeared:
+        print(
+            f"\n  NEW: {', '.join(appeared)} drifted since the list was written.\n"
+            "  Pass the missing arguments, or add the file to EXPECTED with the reason it\n"
+            "  drives something other than a full game."
+        )
+    if fixed:
+        print(
+            f"\n  STALE: {', '.join(fixed)} no longer drifts and is still in KNOWN_DRIFT.\n"
+            "  Strike it off, so the list keeps meaning what it says."
+        )
+    return 1 if (appeared or fixed) else 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

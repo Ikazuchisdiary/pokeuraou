@@ -4,9 +4,6 @@
 whose maximiser is side 0. Both are side-0 relative, so the mix is a plain convex
 combination and any flip in it would be a bug that a validation number could not see --
 the model would simply fit a target that means the opposite for half the rows.
-
-Skipped when torch is absent, for the same reason the rest of the value function's tests
-are: importing `td_target` imports torch, and it lives in the optional ``learn`` group.
 """
 
 from __future__ import annotations
@@ -14,7 +11,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-pytest.importorskip("torch", reason="pokeuraou.value needs the optional learn group")
+# Same as `test_concat_datasets`: a module-scope torch import used to end collection for
+# the whole suite rather than skip this file.
+pytest.importorskip("torch", reason="the TD target needs the optional learn group")
 
 from pokeuraou.value import td_target  # noqa: E402
 
