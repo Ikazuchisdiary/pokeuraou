@@ -33,6 +33,15 @@ Games are **paired across arms**: game *g* draws the same opponent and the same 
 class in every arm, so the arms differ only in the selection rule and the difference can be
 measured per game rather than between two independent averages.
 
+Games are also **played in both seats**. Every matchup runs once with our four at side 0
+and once at side 1, and our result is read from our own side in each, so ``--games`` counts
+matchups per arm and the run plays twice that. The paired differences above never needed
+it -- both arms carried the same seat term and it subtracted out -- but the calibration
+line does: it compares a measured win rate against an LP value with no seat term in it at
+all. Our four sat at side 0 in every game this tool played before 2026-09-19, so whatever
+the seat was worth went into that difference as calibration error. ``tools/seats.py`` has
+the arithmetic and the reason the seat gap is printed rather than merely cancelled.
+
 The anti-後出しジャンケン rule of :mod:`pokeuraou.selection_book` holds here too, and one
 extra care is needed because this harness mixes rules: our selection is drawn from a
 stream that never sees the opponent's spread class, and it is drawn before theirs.
@@ -46,13 +55,15 @@ import sys
 from pathlib import Path
 
 import numpy as np
-import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 # tools/ is sys.path[0] for a script run as `python tools/book_check.py`, and the Wilson
-# interval is eight lines that should not exist twice.
+# interval is eight lines that should not exist twice. Nor is the seat arithmetic, which
+# is how this tool and `selection_check` came to have none of it while `generation_match`
+# had all of it.
 from pool_matches import wilson
+from seats import SEATS, SeatTally, play_paired, seat_label
 
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
@@ -61,14 +72,14 @@ from pokeuraou.selection_book import (
     ARMS,
     DEFAULT_EPSILON,
     DEFAULT_TEMPERATURE,
+    BookEntry,
     SelectionBook,
     draw_arm,
     selection_dir,
 )
 from pokeuraou.selfplay import play_game
-from pokeuraou.standings import find_cached_standings, load_standings
+from pokeuraou.standings import TournamentTeam, find_cached_standings, load_standings
 from pokeuraou.teams import all_selections, load_roster
-from pokeuraou.value import BatchedValue, load_ensemble
 
 
 def merge(out: Path) -> None:
@@ -84,20 +95,35 @@ def merge(out: Path) -> None:
         "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8"
     )
 
-    by_arm: dict[str, dict[int, float]] = {arm: {} for arm in ARMS}
+    # Keyed by (game, SEAT) and holding OUR win, not side 0's. Two rows now share a game
+    # index -- the two seats of one matchup -- so a key that named only the game would
+    # call a perfectly good pair an overlap, and one that kept side 0's outcome would
+    # average our result in one seat with the opponent's in the other.
+    by_arm: dict[str, dict[tuple[int, int], float]] = {arm: {} for arm in ARMS}
+    tallies: dict[str, SeatTally] = {arm: SeatTally(arm) for arm in ARMS}
     claimed: dict[int, float] = {}
     unfinished = 0
     # An overlap is two runs, not one. `{stem}.part*.jsonl` matches whatever is beside the
-    # output, a shard's stride comes from the shard COUNT, and `by_arm[arm][game] = x`
+    # output, a shard's stride comes from the shard COUNT, and `by_arm[arm][key] = x`
     # makes a collision a silent overwrite decided by lexicographic filename order --
     # `part10` sorts before `part2`. Six leftover parts of an aborted 14-shard run sat
     # beside an 8-shard one and ten game indices were in both: the `gen/gen` arm merged to
     # 155/280 = 55.36% where the eight real shards alone give 154/280 = 55.00%, and
     # GENERATIONS.md recorded 55.4%. `tools/selection_check.py` has had this guard since
     # it was written; this copy did not.
-    seen: set[tuple[str, int]] = set()
+    seen: set[tuple[str, int, int]] = set()
     for row in rows:
-        key = (str(row["arm"]), int(row["game"]))
+        if "seat" not in row:
+            # Rows written before the swap are one seat's games -- our four at side 0 --
+            # with nothing saying so. Pooling them with swapped rows would leave the seat
+            # term in half the total and call the result seat-free.
+            raise SystemExit(
+                f"a row in {out.parent}/{out.stem}.part*.jsonl has no `seat`: it was "
+                "written before the seat swap and every one of its games sat at side 0. "
+                "Re-run those shards rather than merging them with swapped ones."
+            )
+        seat = int(row["seat"])
+        key = (str(row["arm"]), int(row["game"]), seat)
         if key in seen:
             raise SystemExit(
                 f"{key} appears in two of {len(parts)} part files beside {out}. That is "
@@ -105,26 +131,42 @@ def merge(out: Path) -> None:
                 "their mtimes and sizes) and merge again."
             )
         seen.add(key)
-        if row["outcome"] is None:
+        tally = tallies.setdefault(str(row["arm"]), SeatTally(str(row["arm"])))
+        won = tally.add(seat, row["outcome"])
+        if won is None:
             unfinished += 1
             continue
-        by_arm.setdefault(row["arm"], {})[row["game"]] = float(row["outcome"])
-        claimed[row["game"]] = float(row["value"])
+        by_arm.setdefault(row["arm"], {})[(int(row["game"]), seat)] = float(won)
+        claimed[int(row["game"])] = float(row["value"])
 
-    print(f"■ {len(rows)} 対戦（打ち切り {unfinished}）、{len(parts)} シャード")
-    print(f"  {'arm':>16}  {'games':>6}  {'win':>7}  {'95% Wilson':>16}")
+    print(
+        f"■ {len(rows)} 座席ゲーム（打ち切り {unfinished}）、{len(parts)} シャード、"
+        f"{len(SEATS)} 席"
+    )
+    print(f"  {'arm':>16}  {'seat-games':>6}  {'win':>7}  {'95% Wilson':>16}")
     for arm in ARMS:
         outcomes = by_arm.get(arm, {})
         if not outcomes:
             continue
+        # Our wins in both seats, which is what `by_arm` holds -- the flip happened once,
+        # in `seats.our_win`, when the row was read. `tools/match_result.py` states the
+        # same rule from the other end: both seats report the named arm's wins, so the
+        # total needs no second flip and putting one here is how a sign gets lost.
         wins = int(sum(outcomes.values()))
         rate, low, high = wilson(wins, len(outcomes))
         print(
             f"  {arm:>16}  {len(outcomes):>6}  {rate * 100:6.1f}%  "
             f"[{low * 100:5.1f}, {high * 100:5.1f}]"
         )
+        # The gap needs no mirror and no matching pair of rules to be interpretable: the
+        # two seats are the same matchups reseated, so a machine with no seat in it wins
+        # the same games in both. `SeatTally.gap` has the algebra.
+        for line in tallies[arm].seat_lines():
+            print(line)
 
     def paired(a: str, b: str) -> tuple[float, float, int] | None:
+        # Paired on (game, seat): the two arms played the same matchup from the same side,
+        # so the difference has neither the opponent nor the seat in it.
         shared = sorted(set(by_arm.get(a, {})) & set(by_arm.get(b, {})))
         if len(shared) < 2:
             return None
@@ -151,15 +193,25 @@ def merge(out: Path) -> None:
     both = by_arm.get("book/book", {})
     if both:
         measured = sum(both.values()) / len(both)
-        expected = float(np.mean([claimed[g] for g in both]))
+        expected = float(np.mean([claimed[game] for game, _seat in both]))
+        # The line the swap was for. An LP value has no seat term in it, so comparing it
+        # against a rate measured with our four at side 0 in every game charged whatever
+        # the seat is worth to the solver's calibration. `measured` is both seats now.
         print(
             f"  均衡値の校正: LP の主張 {expected * 100:.1f}% に対し実測 "
-            f"{measured * 100:.1f}%（差 {(measured - expected) * 100:+.1f} ポイント）"
+            f"{measured * 100:.1f}%（差 {(measured - expected) * 100:+.1f} ポイント、"
+            "両席あわせた値なので席の項は入っていない）"
         )
         print(
             "  実測が大きく上なら、ソルバは相手の最善を過小評価している"
             "（弱い方策で学習した価値関数が誤る向き）"
         )
+        seat_gap = tallies["book/book"].gap
+        if not np.isnan(seat_gap):
+            print(
+                f"  そのうち席の項は {seat_gap * 100:+.1f} ポイント"
+                "（side 0 のときの勝率 - side 1 のとき。上の差からは既に落ちている）"
+            )
     gen = by_arm.get("gen/gen", {})
     if gen:
         rate = sum(gen.values()) / len(gen)
@@ -182,7 +234,13 @@ def main() -> None:
         "and a book played by a different leaf compares two agents instead.",
     )
     ap.add_argument("--book", type=Path, default=None)
-    ap.add_argument("--games", type=int, default=280, help="games per arm, across shards")
+    ap.add_argument(
+        "--games",
+        type=int,
+        default=280,
+        help="matchups per arm, across shards. Each is played in BOTH seats, so an arm "
+        "plays twice this many games -- the counting `tools/generation_match.py` uses.",
+    )
     ap.add_argument("--limit", type=int, default=16)
     ap.add_argument(
         "--rank-by-leaf",
@@ -208,6 +266,14 @@ def main() -> None:
     if args.merge:
         merge(args.out)
         return
+
+    # Below the merge branch, so that reading back a finished run -- which is arithmetic
+    # over a JSONL file and nothing else -- does not want a 3 GB CUDA wheel. Deferring the
+    # leaf like this is what a dozen tools here already do, and it is what lets the seat
+    # aggregation be tested at all: everything above this line imports without torch.
+    import torch
+
+    from pokeuraou.value import BatchedValue, load_ensemble
 
     torch.set_num_threads(args.torch_threads)
     roster = load_roster(args.roster)
@@ -240,8 +306,9 @@ def main() -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     mine = list(range(args.games))[args.shard :: args.shards]
     print(
-        f"shard {args.shard}/{args.shards}: {len(mine)} ゲーム x {len(ARMS)} arm、"
-        f"{len(covered)}/{len(pool)} チームを被覆、ε={args.epsilon}, T={args.temperature}",
+        f"shard {args.shard}/{args.shards}: {len(mine)} 対戦 x {len(ARMS)} arm x "
+        f"{len(SEATS)} 席、{len(covered)}/{len(pool)} チームを被覆、"
+        f"ε={args.epsilon}, T={args.temperature}",
         file=sys.stderr,
     )
 
@@ -278,52 +345,88 @@ def main() -> None:
                 )
                 own_pick = selections[ours]
                 foe_pick = selections[theirs]
-                record = play_game(
-                    reg,
-                    np.random.default_rng([args.seed, game, arm_index, 7]),
+
+                def one_seat(
+                    seat: int,
+                    side0: list,
+                    side1: list,
+                    *,
+                    arm: str = arm,
+                    arm_index: int = arm_index,
+                    game: int = game,
+                    team: TournamentTeam = team,
+                    entry: BookEntry = entry,
+                    class_index: int = class_index,
+                    own_pick: tuple[int, ...] = own_pick,
+                    foe_pick: tuple[int, ...] = foe_pick,
+                ) -> float | None:
+                    # One stream per (game, arm), NOT per seat: the two seats are supposed
+                    # to be the same matchup mirrored and to differ in nothing else, which
+                    # is `tools/cycle_match.py`'s rule ("same seed for both seats") for the
+                    # same reason.
+                    record = play_game(
+                        reg,
+                        np.random.default_rng([args.seed, game, arm_index, 7]),
+                        side0,
+                        side1,
+                        team.player,
+                        objective=OBJECTIVES["hp-share"],
+                        search_limit=args.limit,
+                        max_turns=args.max_turns,
+                        evaluate=evaluate,
+                        rank_by_leaf=args.rank_by_leaf,
+                    )
+                    handle.write(
+                        json.dumps(
+                            {
+                                "arm": arm,
+                                "game": game,
+                                # Which side OUR four sat on. `outcome` stays SIDE 0's, as
+                                # it is everywhere else here, and the flip lives once in
+                                # `seats.our_win` where the row is read back.
+                                "seat": seat,
+                                "player": team.player,
+                                "place": team.place,
+                                "classIndex": class_index,
+                                "ownPick": list(own_pick),
+                                "foePick": list(foe_pick),
+                                "outcome": record.outcome,
+                                "turns": record.turns,
+                                "value": entry.value,
+                                # What actually played. generation_match records this and
+                                # stayed correct for a year; the two tools that did not
+                                # both drifted away from the generation path without
+                                # anyone noticing -- this one narrowed by damage after
+                                # generation moved to the leaf, and selection_check played
+                                # hp-share while comparing itself against the value
+                                # function's claim. A tool that writes down its agent is a
+                                # tool whose agent gets checked.
+                                "provenance": {
+                                    "kind": "book-check",
+                                    "leaf": "+".join(m.name for m in models),
+                                    "limit": args.limit,
+                                    "ranking": (
+                                        "leaf" if args.rank_by_leaf else "damage"
+                                    ),
+                                    "book": str(book_path.name),
+                                    # Which seat, in the spelling `tools/match_result.py`
+                                    # parses: it reads the trailing "side 0"/"side 1" and
+                                    # prints nothing rather than guess.
+                                    "seat": seat_label(arm, seat),
+                                },
+                            },
+                            ensure_ascii=False,
+                        )
+                        + "\n"
+                    )
+                    handle.flush()
+                    return record.outcome
+
+                play_paired(
                     [roster.sets[i] for i in own_pick],
                     [foe_six[j] for j in foe_pick],
-                    team.player,
-                    objective=OBJECTIVES["hp-share"],
-                    search_limit=args.limit,
-                    max_turns=args.max_turns,
-                    evaluate=evaluate,
-                    rank_by_leaf=args.rank_by_leaf,
+                    one_seat,
                 )
-                handle.write(
-                    json.dumps(
-                        {
-                            "arm": arm,
-                            "game": game,
-                            "player": team.player,
-                            "place": team.place,
-                            "classIndex": class_index,
-                            "ownPick": list(own_pick),
-                            "foePick": list(foe_pick),
-                            "outcome": record.outcome,
-                            "turns": record.turns,
-                            "value": entry.value,
-                            # What actually played. generation_match records this and
-                            # stayed correct for a year; the two tools that did not both
-                            # drifted away from the generation path without anyone
-                            # noticing -- this one narrowed by damage after generation
-                            # moved to the leaf, and selection_check played hp-share
-                            # while comparing itself against the value function's claim.
-                            # A tool that writes down its agent is a tool whose agent gets
-                            # checked.
-                            "provenance": {
-                                "kind": "book-check",
-                                "leaf": "+".join(m.name for m in models),
-                                "limit": args.limit,
-                                "ranking": "leaf" if args.rank_by_leaf else "damage",
-                                "book": str(book_path.name),
-                            },
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\n"
-                )
-                handle.flush()
             if done % 5 == 0:
                 print(f"  {done}/{len(mine)}", file=sys.stderr)
 
