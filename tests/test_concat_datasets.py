@@ -6,6 +6,11 @@ zero. If the join left those numbers alone, generation 6's game 12 and generatio
 would land together on one side of the split. That is the same failure -- near-duplicate
 labels straddling the split -- that splitting by game exists to prevent, reintroduced by
 the thing that made encoding cheap.
+
+Skipped when torch is absent, like the rest of the value function's tests: `Dataset` lives
+in a module that imports it, and the optional ``learn`` group is what keeps a 3 GB CUDA
+wheel off the solver's install. Without the skip this module raised at collection and took
+the whole suite down with it, so `uv run pytest` reported two errors and ran nothing.
 """
 
 from __future__ import annotations
@@ -13,8 +18,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pokeuraou.encode import Encoded
-from pokeuraou.value import Dataset, concat_datasets
+pytest.importorskip("torch", reason="pokeuraou.value needs the optional learn group")
+
+from pokeuraou.encode import Encoded  # noqa: E402
+from pokeuraou.value import Dataset, concat_datasets  # noqa: E402
 
 
 def shard(n: int, *, games: int, foe_names: tuple[str, ...], outcome: float) -> Dataset:

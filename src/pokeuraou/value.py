@@ -72,7 +72,13 @@ class ValueConfig:
     #: were marked against, and the second is not noise a reader can average away: it
     #: changes the meaning of the number, not just its value. None keeps the old behaviour
     #: of taking the split from `seed`, so every model trained before this was added is
-    #: still described by what its record says.
+    #: still described by what its record says -- including one read back out of a stored
+    #: config, which predates the field and so arrives at this default.
+    #:
+    #: `tools/train_value.py` defaults its flag to 0 rather than to None, because a run
+    #: that passes `--seed` and nothing else should still be marked against the games
+    #: every other run was. The two defaults agree on every run in the record: no
+    #: invocation of that tool has ever passed `--seed`, so `seed` was 0 there too.
     #:
     #: Not a way to decompose run-to-run variance -- that was ruled out, because the
     #: comparisons that matter here change the pool, so no shared split exists across
@@ -266,6 +272,25 @@ class Dataset:
             "side": torch.from_numpy(np.ascontiguousarray(e.side[index])).to(device),
             "field": torch.from_numpy(np.ascontiguousarray(e.field[index])).to(device),
         }
+
+
+def split_for(
+    dataset: Dataset, holdout: float, config: ValueConfig
+) -> tuple[np.ndarray, np.ndarray]:
+    """The held-out games a configuration asks for, resolved in exactly one place.
+
+    Which seed decides the split is a rule, and it used to be written down three times --
+    in :func:`train`, in the training tool, and again in that tool's learning curve. A
+    rule spelled three times is one that will eventually be spelled two ways, and the two
+    ways would not look different in any output: both produce a validation number, and
+    only the games behind it would have moved.
+
+    ``None`` means "follow ``seed``", which is what every model trained before
+    :attr:`ValueConfig.split_seed` existed did, so a stored config read back at its
+    default still describes its own run.
+    """
+    seed = config.seed if config.split_seed is None else config.split_seed
+    return dataset.split_by_game(holdout, seed)
 
 
 def concat_datasets(parts: Sequence[Dataset]) -> Dataset:
@@ -495,8 +520,7 @@ def train(
 
     torch.manual_seed(config.seed)
     if train_index is None or val_index is None:
-        split_seed = config.seed if config.split_seed is None else config.split_seed
-        train_idx, val_idx = dataset.split_by_game(holdout, split_seed)
+        train_idx, val_idx = split_for(dataset, holdout, config)
     else:
         # Given explicitly by the learning curve, which varies the training set while
         # holding the validation games fixed so the rows can be compared to each other.
@@ -679,6 +703,7 @@ __all__ = [
     "predict",
     "save_dataset",
     "save_model",
+    "split_for",
     "train",
 ]
 
