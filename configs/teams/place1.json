@@ -1,0 +1,123 @@
+{
+  "id": "place1",
+  "name": "Takuma Yamazaki（1位）",
+  "side": "own",
+  "regulation": "gen9championsvgc2026regmb",
+  "source": {
+    "kind": "standings six, spreads SAMPLED from the usage prior",
+    "place": 1,
+    "player": "Takuma Yamazaki",
+    "spread_seed": 0,
+    "note": "The species, abilities, items, natures and moves are the recorded sheet. The SP spreads are NOT: a standings entry has no investment, which is the hidden information the belief layer models, so they are drawn from the usage prior under `spread_seed`. This is a well-formed team, not this player's team, and nothing measured on it may be attributed to them."
+  },
+  "team": [
+    {
+      "species": "Floette-Eternal",
+      "ability": "Flower Veil",
+      "item": "Floettite",
+      "nature": "Timid",
+      "moves": [
+        "Moonblast",
+        "Dazzling Gleam",
+        "Light of Ruin",
+        "Protect"
+      ],
+      "sp": {
+        "hp": 10,
+        "def": 23,
+        "spa": 1,
+        "spe": 32
+      }
+    },
+    {
+      "species": "Basculegion",
+      "ability": "Adaptability",
+      "item": "Life Orb",
+      "nature": "Adamant",
+      "moves": [
+        "Wave Crash",
+        "Last Respects",
+        "Aqua Jet",
+        "Protect"
+      ],
+      "sp": {
+        "hp": 6,
+        "atk": 28,
+        "def": 11,
+        "spd": 10,
+        "spe": 11
+      }
+    },
+    {
+      "species": "Kingambit",
+      "ability": "Defiant",
+      "item": "Chople Berry",
+      "nature": "Adamant",
+      "moves": [
+        "Sucker Punch",
+        "Kowtow Cleave",
+        "Low Kick",
+        "Iron Head"
+      ],
+      "sp": {
+        "hp": 14,
+        "atk": 26,
+        "def": 1,
+        "spe": 25
+      }
+    },
+    {
+      "species": "Dragonite",
+      "ability": "Multiscale",
+      "item": "Dragoninite",
+      "nature": "Modest",
+      "moves": [
+        "Dragon Pulse",
+        "Heat Wave",
+        "Extreme Speed",
+        "Protect"
+      ],
+      "sp": {
+        "hp": 23,
+        "def": 1,
+        "spa": 15,
+        "spd": 1,
+        "spe": 26
+      }
+    },
+    {
+      "species": "Garchomp",
+      "ability": "Rough Skin",
+      "item": "Choice Scarf",
+      "nature": "Adamant",
+      "moves": [
+        "Dragon Claw",
+        "Stomping Tantrum",
+        "Earthquake",
+        "Rock Slide"
+      ],
+      "sp": {
+        "hp": 2,
+        "atk": 32,
+        "spe": 32
+      }
+    },
+    {
+      "species": "Sneasler",
+      "ability": "Poison Touch",
+      "item": "Focus Sash",
+      "nature": "Jolly",
+      "moves": [
+        "Close Combat",
+        "Dire Claw",
+        "Fake Out",
+        "Feint"
+      ],
+      "sp": {
+        "hp": 2,
+        "atk": 32,
+        "spe": 32
+      }
+    }
+  ]
+}
