@@ -13,7 +13,7 @@ recorded, and it is free to compare because generation already writes it down.
 
 The server is started and stopped here, so the run is self-contained.
 
-    uv run --group learn python tools/served_matches_direct.py --games 6 --device cuda
+    uv run --group learn python tools/oneshot/served_matches_direct.py --games 6 --device cuda
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 
