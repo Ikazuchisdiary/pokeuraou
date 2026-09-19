@@ -26,6 +26,8 @@ from dataclasses import dataclass
 import numpy as np
 from scipy.optimize import linprog
 
+from . import timing
+
 
 class EquilibriumError(RuntimeError):
     pass
@@ -105,6 +107,7 @@ def _maximin(payoff: np.ndarray) -> tuple[float, np.ndarray]:
     return float(res.x[m]), res.x[:m]
 
 
+@timing.timed("lp")
 def solve(payoff: np.ndarray, eps: float = 1e-9) -> Equilibrium:
     """Solves the zero-sum game with the given row-player payoff matrix.
 
@@ -249,6 +252,7 @@ def _bayesian_minimax(
     return float(res.x[-1]), strategies
 
 
+@timing.timed("lp")
 def solve_bayesian(
     matrices: list[np.ndarray], weights: np.ndarray, eps: float = 1e-9
 ) -> BayesianEquilibrium:

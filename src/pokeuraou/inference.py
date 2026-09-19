@@ -17,11 +17,16 @@ build one of these -- but the measurements say not to. A CUDA answer depends on 
 *size* (5.96e-08 between a row alone and the same row among eight; nothing from the batch's
 contents or the row's position in it), so merging makes the answer depend on who else
 happened to ask, and 1.9e-06 in a leaf is enough to move an equilibrium. It can be made
-exact by padding every batch to a fixed length, which costs 1.13x of a forward pass -- but
-the forward pass is 7.7% of a worker, so the whole prize for merging is a few percent of
-one, and the memory it is being built for does not depend on merging at all. A request goes
-through as it arrived, with the row count it arrived with, and the answers are the answers
-this project was already getting.
+exact by padding every batch to a fixed length, which costs 1.13x of a forward pass -- and
+that trade is worth restating, because the share it was weighed against has moved. The
+figure here was 7.7% of a worker; measured on 2026-09-20 over a 300-seat-game served
+match, 24 workers over two servers (`tools/profile_stages.py match`), a worker spends
+34.2% of its wall clock waiting on this server, and 94% of that wait is the server
+computing rather than queueing. So padding costs about 4.4% of a worker, not 1%. The
+decision stands on the other leg anyway -- merging makes an answer depend on who else
+happened to ask -- and the memory this was built for does not depend on merging at all.
+A request goes through as it arrived, with the row count it arrived with, and the answers
+are the answers this project was already getting.
 
 That last property is what makes the server checkable rather than plausible: the same
 games, played through the server, must produce the same decisions.
@@ -46,6 +51,8 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+from . import timing
 
 #: Environment variable carrying "host:port" to a worker.
 ENV_SERVER = "POKEURAOU_INFERENCE"
@@ -284,6 +291,7 @@ class RemoteValue:
     def __exit__(self, *_exc: object) -> None:
         self.close()
 
+    @timing.timed("forward")
     def __call__(self, positions: list[Any]) -> np.ndarray:
         if not positions:
             return np.zeros(0, dtype=np.float64)
@@ -306,6 +314,7 @@ class RemoteValue:
             out[start : start + len(chunk)] = self.from_encoded(encoded)
         return out
 
+    @timing.timed("forward")
     def from_encoded(self, encoded: Any) -> np.ndarray:
         """Score a batch, in the same pieces `BatchedValue` would have scored it in.
 
@@ -343,32 +352,34 @@ class RemoteValue:
             )
         view = self._block.buf
         before_copy = time.perf_counter()
-        for item in layout:
-            array = np.ascontiguousarray(getattr(encoded, item["name"]))
-            start = int(item["offset"])
-            # Through a view, not `tobytes()`: the latter builds the array again and the
-            # assignment then copies that, so the batch crosses memory twice. At the
-            # production mean of 2,104 rows it is 1.028 ms against 0.196, and the forward
-            # pass those rows are going to is 2.651.
-            target = np.frombuffer(
-                view, dtype=array.dtype, count=array.size, offset=start
-            ).reshape(array.shape)
-            np.copyto(target, array)
+        with timing.stage("serve.copy"):
+            for item in layout:
+                array = np.ascontiguousarray(getattr(encoded, item["name"]))
+                start = int(item["offset"])
+                # Through a view, not `tobytes()`: the latter builds the array again and
+                # the assignment then copies that, so the batch crosses memory twice. At
+                # the production mean of 2,104 rows it is 1.028 ms against 0.196, and the
+                # forward pass those rows are going to is 2.651.
+                target = np.frombuffer(
+                    view, dtype=array.dtype, count=array.size, offset=start
+                ).reshape(array.shape)
+                np.copyto(target, array)
         self.copied += time.perf_counter() - before_copy
 
         sent = time.perf_counter()
-        self._file.write(
-            (json.dumps({
-                "op": "score",
-                "model": self.model,
-                "shm": self._block.name,
-                "rows": rows,
-                "layout": layout,
-                "result_offset": result_offset,
-            }) + "\n").encode("utf-8")
-        )
-        self._file.flush()
-        line = self._file.readline()
+        with timing.stage("serve.wait"):
+            self._file.write(
+                (json.dumps({
+                    "op": "score",
+                    "model": self.model,
+                    "shm": self._block.name,
+                    "rows": rows,
+                    "layout": layout,
+                    "result_offset": result_offset,
+                }) + "\n").encode("utf-8")
+            )
+            self._file.flush()
+            line = self._file.readline()
         if not line:
             raise RuntimeError("the inference server closed the connection")
         self.waited += time.perf_counter() - sent
@@ -380,6 +391,7 @@ class RemoteValue:
             view[result_offset : result_offset + rows * 8], dtype=np.float64
         ).copy()
         self.evaluated += rows
+        timing.count("leaves", rows)
         return scores
 
 
@@ -424,6 +436,10 @@ def served_model(value: Any):
     # Holding barely moves while waiting grows four-fold, which is a saturated lock and
     # not a slow one -- and it is why throughput *fell* as workers were added, 0.71x at
     # six and 0.66x at fourteen against a direct run.
+    #
+    # The 7.7% in that last line was 2026-09-19's figure and is now 34.2% of a worker
+    # (2026-09-20, 24 served workers over two servers). It does not change the reading:
+    # the lock was saturated, not slow, and a larger share only makes that worse.
     #
     # Each thread's copy stacks the same parameter tensors and deep-copies its own base,
     # so the arithmetic is identical and only the module being reparametrised is private.

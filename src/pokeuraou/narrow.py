@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
+from . import timing
 from .actions import (
     MoveAction,
     PassAction,
@@ -389,6 +390,7 @@ def drop_dead_actions(
     return alive or pool
 
 
+@timing.timed("narrow")
 def narrow(
     reg: Regulation,
     pos: Position,
