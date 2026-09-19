@@ -118,7 +118,12 @@ def main(argv: list[str] | None = None) -> int:
           "   omission there is not a drift)\n")
 
     drifted: set[str] = set()
-    for path in sorted(glob.glob(str(ROOT / "tools/*.py"))):
+    # `tools/oneshot/` is in scope too. A tool is shelved there when its question was
+    # asked once, not because it stopped being runnable -- and a shelved tool that builds
+    # an agent the current generation would not recognise is exactly the thing someone
+    # re-runs later and reads as a board number. Scanning only `tools/*.py` would also let
+    # a drifting tool leave the check by being moved, which is how `matchup.py` fell out.
+    for path in sorted(glob.glob(str(ROOT / "tools/**/*.py"), recursive=True)):
         p = Path(path)
         found = calls(p)
         if not found:
