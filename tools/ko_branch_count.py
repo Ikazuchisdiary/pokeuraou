@@ -13,7 +13,6 @@ return sixteen, it is the free reduction G26 puts first.
 from __future__ import annotations
 
 import sys
-from dataclasses import replace
 
 sys.path.insert(0, "C:/Users/Ikazuchi/repos/pokeuraou/src")
 sys.path.insert(0, "C:/Users/Ikazuchi/repos/pokeuraou/tools")
@@ -92,4 +91,3 @@ keys = [
 ]
 print(f"    枝 {len(keys)} 本 → 相異なる局面 {len(set(keys))} 個")
 print(f"    16ロールを保ったまま {len(keys) - len(set(keys))} 本が重複")
-_ = replace  # kept: the budget above is built directly, not by replacement
