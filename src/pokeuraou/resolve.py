@@ -28,11 +28,13 @@ landing reorders what has not happened yet. Each branch re-sorts against its own
 from __future__ import annotations
 
 import os
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, fields, replace
 
 import numpy as np
 
+from . import timing
 from .actions import (
     RECHARGE,
     MoveAction,
@@ -945,6 +947,7 @@ def pending_attacks(
     return out
 
 
+@timing.timed("branch")
 def resolve_turn(
     reg: Regulation,
     pos: Position,
@@ -3963,6 +3966,22 @@ def batched_payoffs(
     Lives here rather than in the callers because there are now two of them -- self-play
     and the analyser -- and the fold semantics are the part that must not exist twice.
 
+    What this costs was measured end to end on 2026-09-20 (`tools/profile_stages.py`),
+    and the expensive half is the tail rather than the node. With the Rust bridge on, a
+    generation node is filled over there and about 2.7% of its cells come back refused;
+    each is then filled here by calling this function on a 1x1 node, which resolves one
+    turn and scores its handful of leaves in a forward pass of its own. Over 60 games of
+    open generation at width 24: 611,843 leaf rows in 551 whole-node calls, and 39,180
+    rows in 10,167 one-cell calls -- 6.0% of the rows in 94.9% of the calls -- and the
+    loop below accounts for about half of a generation worker's wall clock (51.3% over
+    300 games, 46-47% over 60). Two items and one ability are 88% of the refusals: White
+    Herb, Stance Change, and moves that break Protect.
+
+    The cost of that tail depends on where the leaf is. On CUDA it is 56.6-60.4 s of a
+    60-game run and on CPU 38.6-42.9 s, with the identical 10,167 cells either way --
+    the tail is made of calls too small to amortise a kernel launch, which is the same
+    reason batching the node was worth 1.86x in the first place.
+
     The third return value is a per-cell mask of which cells the budget resolved exactly.
     It is per cell and not per matrix because it genuinely varies: the branch budget is
     divided among the live branches as a turn unfolds, so one cell can be enumerated in
@@ -4010,6 +4029,8 @@ def batched_payoffs(
         )
         spans.append((i, j, start, len(result.branches)))
 
+    # Which of the two fills this is, so the rows can be told apart from the calls.
+    timing.count("leaves.refused" if _FILLING_REFUSED else "leaves.node", len(leaves))
     for payoff, evaluate in zip(payoffs, evaluators, strict=True):
         values = np.asarray(evaluate(leaves), dtype=np.float64) if leaves else np.zeros(0)
         for (i, j, start, count), w in zip(spans, weights, strict=True):
@@ -4132,6 +4153,7 @@ def _rust_encoded_payoffs(
     payoffs = [np.zeros((len(ours), len(theirs)), dtype=np.float64) for _ in evaluators]
     exact = np.array(filled.exact, dtype=bool)
     unmodelled = set(filled.unmodelled)
+    timing.count("leaves.node", len(filled.encoded.species))
     for index, (name, score) in enumerate(plan):
         values = (
             np.asarray(filled.leaf_values[name], dtype=np.float64)
@@ -4148,6 +4170,10 @@ def _rust_encoded_payoffs(
             payoffs[index][i, j] = fold_value(_fold_from_json(root), values)
 
     _FILLING_REFUSED = True
+    # Inclusive of the branch generation, encoding and forward pass each cell pays, since
+    # what the tail costs is the question and the parts are already counted where they
+    # happen. `timing.BORROWED` keeps it out of any total for that reason.
+    _refused_started = time.perf_counter()
     try:
         for i, j, _why in filled.refused:
             cell, notes, cell_exact = batched_payoffs(
@@ -4159,6 +4185,15 @@ def _rust_encoded_payoffs(
             unmodelled |= notes
     finally:
         _FILLING_REFUSED = False
+        timing.add(
+            "refused",
+            time.perf_counter() - _refused_started,
+            calls=len(filled.refused),
+        )
+        if timing.ON:
+            # By reason, because "refused" is not a piece of work anyone can pick up.
+            for _row, _column, why in filled.refused:
+                timing.count(f"refused: {why}")
     return payoffs, unmodelled, exact
 
 
@@ -4202,6 +4237,10 @@ def _rust_payoffs(
     exact = np.array(filled.exact, dtype=bool)
     unmodelled = set(filled.unmodelled)
     _FILLING_REFUSED = True
+    # Inclusive of the branch generation, encoding and forward pass each cell pays, since
+    # what the tail costs is the question and the parts are already counted where they
+    # happen. `timing.BORROWED` keeps it out of any total for that reason.
+    _refused_started = time.perf_counter()
     try:
         for i, j, _why in filled.refused:
             cell, notes, cell_exact = batched_payoffs(
@@ -4213,6 +4252,15 @@ def _rust_payoffs(
             unmodelled |= notes
     finally:
         _FILLING_REFUSED = False
+        timing.add(
+            "refused",
+            time.perf_counter() - _refused_started,
+            calls=len(filled.refused),
+        )
+        if timing.ON:
+            # By reason, because "refused" is not a piece of work anyone can pick up.
+            for _row, _column, why in filled.refused:
+                timing.count(f"refused: {why}")
     return payoffs, unmodelled, exact
 
 

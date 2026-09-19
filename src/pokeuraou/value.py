@@ -38,6 +38,7 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
+from . import timing
 from .encode import Encoded, Encoder, Vocabulary
 
 
@@ -718,11 +719,28 @@ class BatchedValue:
 
     Both the selection resolver and the next generation of self-play need the same thing:
     hundreds or thousands of positions scored at once. Scoring them one at a time would be
-    absurd -- measured on a 16x16 node, the forward pass is 0.8% of the cost and the
-    per-position work around it is the rest -- so the batch is the unit.
+    absurd, so the batch is the unit. That part has not changed.
 
-    The cost breakdown is worth keeping in view, because it says where optimisation
-    belongs: for 256 positions, `to_json` 58 ms, `encode` 30 ms, forward 3 ms.
+    The numbers that used to stand here have. They were `to_json` 58 ms, `encode` 30 ms
+    and forward 3 ms for 256 positions, and a 16x16 node on which the forward pass was
+    0.8% of the cost. Both are history rather than argument now: `to_json` has not been
+    on this path since positions started going straight to `encode_positions`, so the
+    largest of those three terms no longer exists, and the width is 24.
+
+    Measured again 2026-09-20 over whole generation runs rather than one node
+    (`tools/profile_stages.py generation`, 300 games, eight workers, width 24,
+    `value-gen11L`, one CUDA card), as a share of a worker's wall clock:
+
+        bridge off   branch generation 85.8%, encoding 8.1%, forward 0.4%
+        bridge on    branch generation 26.6%, encoding 2.9%, forward 32.3%
+
+    The forward pass did not get slower. The Rust bridge refuses about 2.7% of a
+    node's cells, each refused cell is filled here as a 1x1 node, and each pays a
+    forward pass of its own: 45,777 forward passes for 2,673 nodes over those 300
+    games. A 60-game run of the same configuration, which counted the rows as well as
+    the calls, puts the refused cells at 94.9% of the calls and 6.0% of the rows --
+    1,110 rows a call for a whole node against 3.9 for a refused cell. The batching
+    this class exists for is being undone one cell at a time, downstream of it.
     """
 
     def __init__(
@@ -788,6 +806,7 @@ class BatchedValue:
         # and a reference one to fall back on.
         return self._stacked(batch)
 
+    @timing.timed("forward")
     @torch.no_grad()
     def __call__(self, positions: list[Any]) -> np.ndarray:
         """(N,) probability that side 0 wins, for Position objects or their JSON form."""
@@ -819,15 +838,19 @@ class BatchedValue:
                 torch.sigmoid(self._mean_logit(batch)).double().cpu().numpy()
             )
         self.evaluated += len(positions)
+        timing.count("leaves", len(positions))
         return out
 
+    @timing.timed("forward")
     @torch.no_grad()
     def from_encoded(self, encoded: Encoded) -> np.ndarray:
         """(N,) win probability for a batch that is already encoded.
 
-        The encoding is 11% of a generation run and the forward pass is 5%, so a caller
-        that can produce the arrays some other way -- the Rust port does, from the leaves
-        it already holds -- should not have to hand back positions for this to re-encode.
+        A caller that can produce the arrays some other way -- the Rust port does, from
+        the leaves it already holds -- should not have to hand back positions for this to
+        re-encode. The 11% encoding and 5% forward pass this used to cite were measured
+        before the port encoded anything; on 2026-09-20 the same generation run is 2.9%
+        encoding here plus 3.3% in the port, against 32.3% of forward pass.
 
         The forward pass stays here on purpose. It is float32 matrix arithmetic, and a
         second implementation would sum it in a different order; a difference in the last
@@ -853,6 +876,7 @@ class BatchedValue:
             batch = {k: v.to(self.device) for k, v in batch.items()}
             out[start:stop] = torch.sigmoid(self._mean_logit(batch)).double().cpu().numpy()
         self.evaluated += n
+        timing.count("leaves", n)
         return out
 
     def objective(self, name: str = "win") -> Any:  # noqa: ANN401

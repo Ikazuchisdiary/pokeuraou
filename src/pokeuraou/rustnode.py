@@ -39,6 +39,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from . import timing
 from .actions import MoveAction, PassAction, SideAction, SwitchAction
 from .position import Position
 from .regulation import Regulation, repo_root
@@ -195,6 +196,7 @@ class EncodedNode:
     leaf_values: dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
+    @timing.timed("rust.unpack")
     def unpack(header: dict[str, Any], body: bytearray) -> EncodedNode:
         import numpy as np
 
@@ -418,6 +420,7 @@ class RustNode:
                 f"killed it. {self._stderr_text()}"
             ) from None
 
+    @timing.timed("rust.score")
     def score(
         self,
         pos: Position,
@@ -444,6 +447,7 @@ class RustNode:
             for score, parts in zip(response["scores"], response["detail"], strict=True)
         ]
 
+    @timing.timed("rust.resolve")
     def resolve(
         self,
         pos: Position,
@@ -490,6 +494,7 @@ class RustNode:
             raise RuntimeError(f"the Rust node refused the request: {response['error']}")
         return response
 
+    @timing.timed("rust.body")
     def _read_exactly(self, count: int) -> bytearray:
         """The blob that follows an encoded node's header, in full.
 
@@ -511,6 +516,7 @@ class RustNode:
             body += chunk
         return body
 
+    @timing.timed("rust.fill")
     def fill_encoded(
         self,
         pos: Position,
@@ -541,8 +547,14 @@ class RustNode:
             request["cells"] = [[int(i), int(j)] for i, j in cells]
         header = self._exchange(request)
         body = self._read_exactly(int(header["bytes"]))
-        return EncodedNode.unpack(header, body)
+        node = EncodedNode.unpack(header, body)
+        # What the child says it spent, on its own clock. From this side the two
+        # are one wait on a pipe, so there is no other honest source for the split.
+        timing.add("rust.child.resolve", node.resolve_us / 1e6)
+        timing.add("rust.child.encode", node.encode_us / 1e6)
+        return node
 
+    @timing.timed("rust.fill")
     def fill(
         self,
         pos: Position,
