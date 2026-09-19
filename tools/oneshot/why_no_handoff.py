@@ -17,7 +17,7 @@ different reasons it could be missing, which want different fixes:
 Told apart by reading the recorded decisions, which carry the menu and the mixture as well
 as the action taken. No games are played.
 
-    uv run python tools/why_no_handoff.py data/selfplay-gen9 --sweeper venusaur
+    uv run python tools/oneshot/why_no_handoff.py data/selfplay-gen9 --sweeper venusaur
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(ROOT / "src"))
 
 #: The chippers, as the roster spells them.

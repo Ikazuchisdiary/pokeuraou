@@ -11,7 +11,7 @@ is a real difference, but it is a fixed cost and it would flatter the server in 
 and vanish in a long one. Counting only what happens after `--warmup` seconds measures the
 rate a long run would actually get.
 
-    uv run --group learn python tools/served_throughput.py --seconds 240
+    uv run --group learn python tools/oneshot/served_throughput.py --seconds 240
 """
 
 from __future__ import annotations
@@ -24,7 +24,7 @@ import sys
 import time
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def count(directory: Path) -> int:
