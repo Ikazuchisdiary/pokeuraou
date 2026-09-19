@@ -23,8 +23,12 @@ solving a game takes something close to the argmax over 8,100 of those estimates
 operation most sensitive to their error. A function good enough to *evaluate* a position is
 not automatically good enough to *optimise over* a matrix of them, and only play settles it.
 
-Our side draws its selection from the equilibrium in one arm and uniformly in the other,
-against the same opponent drawing uniformly in both, with the same seed.
+In the three DEFAULT arms our side draws its selection from the equilibrium in one and
+uniformly in the other, against the same opponent drawing uniformly in both, with the same
+seed. That sentence is about those arms only, and reading it as a description of the tool
+nearly cost a conclusion on 2026-09-19: `--force-selection` and `--force-lead` build named
+arms where the opponent draws from THEIR equilibrium column strategy for a sampled spread
+class, not uniformly, which is what makes those arms a test of equilibrium play.
 
     uv run --group learn python tools/selection_check.py --mirror --games 300
     uv run --group learn python tools/selection_check.py --place 1 --games 300

@@ -149,10 +149,16 @@ def main() -> None:
     print(f"  book {args.book.name}")
     print(
         f"\n  {'place':>5}  {'heavy four':<34} {'mass':>6}  "
-        f"{'heavy':>6} {'second':>7}  {'diff':>7}  {'±':>5}  {'pred':>6}  {'n':>4}"
+        f"{'heavy':>6} {'second':>7}  {'diff':>7}  {'±':>5}  {'pred':>6}  "
+        f"{'book':>5} {'miss':>6}  {'n':>4}"
     )
     signs: list[tuple[int, float]] = []
     calibration: list[tuple[float, float]] = []
+    # The LEVEL, which the paired difference cannot see. Our forced arm is a pure
+    # selection from the support and the named arms draw the opponent from their
+    # equilibrium column strategy, so the matrix's claim is that this arm scores the game
+    # value. Comparing the board against `entry.value` needs no model and no new games.
+    levels: list[tuple[int, float, float, float]] = []
     rows = 0
     for place in places:
         by_arm: dict[str, dict[int, float]] = defaultdict(dict)
@@ -202,9 +208,13 @@ def main() -> None:
         # support makes this 0.0 by construction, which is the point the docstring makes.
         loss = losses(place)
         predicted = loss.get(key_of(second), 0.0) - loss.get(key_of(heavy), 0.0)
+        entry = by_place[place]
+        book_value = float(entry.value)
+        levels.append((place, book_value, hp, sp))
         print(
             f"  {place:>5}  {heavy:<34} {weight.get(key_of(heavy), 0.0):>5.1%}  "
-            f"{hp:>5.1%} {sp:>6.1%}  {mean:>+6.1%}  {half:>5.1%}  {predicted:>+5.1%}  {n:>4}"
+            f"{hp:>5.1%} {sp:>6.1%}  {mean:>+6.1%}  {half:>5.1%}  {predicted:>+5.1%}  "
+            f"{book_value:>4.1%} {hp - book_value:>+5.1%}  {n:>4}"
         )
         rows += 1
         if mean != 0.0:
@@ -269,6 +279,27 @@ def main() -> None:
                 "information at all, and\n  a negative slope would mean it has the "
                 "selections backwards."
             )
+    # The level, reported after the difference because it is the larger error and would
+    # otherwise be read as a footnote to it. A cell of the matrix is one leaf evaluation
+    # of the turn-1 position -- `solve_selection` says so: "No turn is resolved" -- while
+    # the board is a 16-wide search playing the game out. These are two different games
+    # and this is how far apart they are.
+    if levels:
+        gaps = [hp - v for _p, v, hp, _sp in levels] + [
+            sp - v for _p, v, _hp, sp in levels
+        ]
+        mean_gap = sum(gaps) / len(gaps)
+        worst = max(levels, key=lambda r: abs(r[2] - r[1]))
+        absmean = sum(abs(g) for g in gaps) / len(gaps)
+        print(
+            f"\n  LEVEL: over {len(levels)} opponents and both arms, the board came in "
+            f"{mean_gap:+.1%} from\n  the book's own game value, {absmean:.1%} in absolute "
+            f"terms. Worst: place {worst[0]},\n  book {worst[1]:.1%} against a board "
+            f"{worst[2]:.1%}.\n"
+            "  A cell of that matrix is one leaf evaluation of the turn-1 position and\n"
+            "  no turn is resolved, so this is the distance between what the leaf thinks\n"
+            "  a matchup is worth and what the search does with it."
+        )
     print(
         "\n  Whatever the sign, this is not a verdict on the book against uniform:\n"
         "  discarding the bad 87 of 90 and ordering the top few are different questions,\n"
