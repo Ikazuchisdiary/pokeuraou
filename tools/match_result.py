@@ -133,16 +133,51 @@ def main() -> None:
             rates = [w / n for w, n in seats.values()]
             gap = abs(rates[0] - rates[1])
             if gap > 4 * half:
+                # Side 0's own rate, computed rather than asserted. This note used to
+                # say "whichever arm sits at side 0 wins under half, in both seats" and
+                # quote the book's 0.4965 -- and on 2026-09-19 it printed that directly
+                # under a table showing side 0 at 53.1% and 56.5%. An explanation that
+                # contradicts the numbers beside it teaches the reader to skip the
+                # warning, which is worse than having no explanation at all.
+                # The key is the seat LABEL the writer chose -- "value-gen11L = side 0" --
+                # not "0". Comparing it to "0" matched neither seat and quietly took the
+                # other branch for both, printing 51.7% where the arithmetic gives 54.8%.
+                # So it is parsed, and when it cannot be parsed the line is not printed:
+                # a number nobody can derive is worse than a missing one.
+                def at_side0(label: str) -> bool | None:
+                    text = label.strip()
+                    if text.endswith("side 0"):
+                        return True
+                    if text.endswith("side 1"):
+                        return False
+                    return None
+
+                marks = {seat: at_side0(seat) for seat in seats}
+                if None in marks.values():
+                    side0_line = (
+                        "    Side 0's own rate is not shown: these seat labels do not\n"
+                        f"    end in 'side 0' or 'side 1' ({sorted(seats)}).\n"
+                    )
+                else:
+                    side0 = sum(
+                        w if marks[seat] else n - w for seat, (w, n) in seats.items()
+                    )
+                    played = sum(n for _w, n in seats.values())
+                    side0_line = (
+                        f"    Side 0 scored {side0 / played:.1%} across both seats.\n"
+                    )
                 print(
                     f"  ! the seats differ by {gap:.1%}, over four times the interval.\n"
-                    "    Not automatically a defect. Side 0 is our roster and side 1 a\n"
-                    "    tournament team, and the roster is slightly behind that field:\n"
-                    "    gen11L's book puts our mean equilibrium value at 0.4965 and\n"
-                    "    gen10's at 0.4899, with over half the teams under 50%. Whichever\n"
-                    "    arm sits at side 0 therefore wins under half, in both seats, and\n"
-                    "    swapping the seats is what cancels it -- which the total does.\n"
-                    "    Look here for a defect when the gap survives the swap, or when a\n"
-                    "    uniform-draw match shows one (the anchor was 62.62% / 62.97%)."
+                    f"{side0_line}"
+                    "    Side 0 is\n"
+                    "    our roster and side 1 a tournament team, so a gap is expected\n"
+                    "    whenever the two are not evenly matched, and swapping the seats\n"
+                    "    is what cancels it -- which the total above does.\n"
+                    "    A defect looks different: the gap survives the swap, or the\n"
+                    "    tested arm beats its own mirror. Compare side 0's rate here\n"
+                    "    against the book's mean equilibrium value for the roster\n"
+                    "    (`tools/ordering_result.py` prints that comparison per opponent);\n"
+                    "    a large disagreement is the matrix, not the harness."
                 )
 
 
