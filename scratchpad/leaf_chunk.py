@@ -11,6 +11,11 @@ arenas a freed chunk leaves behind, so a second setting measured in the same pro
 be reading the first one's high-water mark. The payoff matrix is saved, so the two runs can
 be held against each other afterwards:
 
+The case reads a recorded game under `data/`, which is gitignored and therefore absent
+from a fresh worktree; run it from the main checkout, or link `data` in and take the
+link out again afterwards -- a junction left inside a worktree is something `git clean
+-fdx` would follow into the real models and games.
+
     $env:POKEURAOU_RUST_NODE=0
     uv run python scratchpad/leaf_chunk.py --limit 24 --chunk 0 --out data/analysis/lc-0.npz
     uv run python scratchpad/leaf_chunk.py --limit 24 --chunk 32768 --out data/analysis/lc-32k.npz
