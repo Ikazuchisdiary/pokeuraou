@@ -755,7 +755,14 @@ def bench_weights(
     """
     from .regulation import to_id
 
-    want = {to_id(name) for name in seen}
+    sheet = {to_id(name) for name in species}
+    # `seen` arrives holding BOTH a revealed Pokemon's own id and its base form, because
+    # the candidate filter needs both to keep a Mega from also being offered as its base.
+    # Only one of the pair can be a sheet member, so intersecting picks it out -- and
+    # requiring the whole set instead is what made this explain nothing in 591 of 600
+    # games: Floette-Eternal is on the sheet, its base `floette` is not, and every
+    # selection was rejected for lacking a Pokemon the opponent never had.
+    want = {name for name in (to_id(name) for name in seen) if name in sheet}
     out: dict[tuple[str, ...], float] = {}
     for selection, probability in zip(selections, probabilities, strict=True):
         if probability <= 0.0:

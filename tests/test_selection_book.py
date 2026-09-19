@@ -902,6 +902,23 @@ def test_bench_weights_drop_a_selection_that_cannot_explain_the_board(roster) ->
     assert bench_weights(SELECTIONS, _point_mass(0), names, [missing]) == {}
 
 
+def test_bench_weights_survive_a_form_whose_base_is_not_on_the_sheet(roster) -> None:  # noqa: ANN001
+    """`shown_species` hands over a revealed Pokemon's own id AND its base form.
+
+    The candidate filter needs both, so that a Mega on the field does not leave its base
+    available to fill a hidden slot. Conditioning needs exactly one of them -- whichever
+    is on the sheet. Requiring both made this explain nothing in 591 of 600 games:
+    Floette-Eternal is a sheet member and `floette` is not, so every selection was thrown
+    out for missing a Pokemon the opponent never had, and the belief fell back to the
+    uniform one the whole change exists to replace.
+    """
+    names = _species(roster)
+    first = SELECTIONS[0]
+    seen = [names[first[0]], f"{names[first[0]]}megax", names[first[1]]]
+    got = bench_weights(SELECTIONS, _point_mass(0), names, seen)
+    assert got == {tuple(sorted(names[i] for i in first[2:])): 1.0}
+
+
 def test_bench_weights_are_a_distribution_over_the_pairs_that_survive(roster) -> None:  # noqa: ANN001
     names = _species(roster)
     uniform = np.full(len(SELECTIONS), 1.0 / len(SELECTIONS))
