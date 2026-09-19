@@ -104,11 +104,111 @@ def report(title: str, rows: dict[str, list[tuple[float, float, float]]], order)
         )
 
 
+def ceiling(args, paths, leaf) -> None:  # noqa: ANN001
+    """The best any function of the matchup could do, against what the leaf does."""
+    groups: dict[tuple, list[tuple[dict, float]]] = defaultdict(list)
+    for path in paths:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                game = json.loads(line)
+                if not game.get("targetIsRealOutcome") or game.get("outcome") is None:
+                    continue
+                first = next(
+                    (
+                        d
+                        for d in game["decisions"]
+                        if d["kind"] == "move" and d["turn"] == 1
+                    ),
+                    None,
+                )
+                if first is None:
+                    continue
+                key = (
+                    game.get("foeArchetype") or "?",
+                    tuple(game.get("ownPick", ())),
+                    tuple(game.get("foePick", ())),
+                )
+                groups[key].append((first, float(game["outcome"])))
+    kept = {k: v for k, v in groups.items() if len(v) >= args.ceiling}
+    items = [row for rows in kept.values() for row in rows]
+    print(
+        f"\n  ceiling: {len(kept)} matchups with >= {args.ceiling} games, "
+        f"{len(items)} games, out of {len(groups)} matchups"
+    )
+    if len(items) < 50:
+        print("    too few to say anything; lower --ceiling")
+        return
+
+    out = np.asarray([o for _d, o in items], dtype=np.float64)
+    # Leave-one-out, so the oracle never sees the game it is scored on. Without it the
+    # oracle's Brier falls by roughly 1/n per group and the ceiling comes out flattering.
+    oracle = np.empty(len(items), dtype=np.float64)
+    at = 0
+    for rows in kept.values():
+        ys = np.asarray([o for _d, o in rows], dtype=np.float64)
+        total, n = ys.sum(), len(ys)
+        oracle[at : at + n] = (total - ys) / (n - 1)
+        at += n
+
+    values = np.asarray(leaf([Position.from_json(d["position"]) for d, _o in items]))
+    base = float(np.mean((out.mean() - out) ** 2))
+    b_oracle = float(np.mean((oracle - out) ** 2))
+    b_leaf = float(np.mean((values - out) ** 2))
+
+    # The leave-one-out oracle is scored on an estimate of its own group's rate, so it
+    # carries that estimate's variance: its expected error is p(1-p)*n/(n-1) where a
+    # true oracle's is p(1-p). Left uncorrected it reported the leaf as getting 112% of
+    # the ceiling, which is not a thing. k(n-k)/(n(n-1)) is the unbiased estimator of
+    # p(1-p) per group, and pooling it by group size gives the ceiling the LOO number
+    # is a noisy floor for.
+    weighted = 0.0
+    for rows in kept.values():
+        ys = np.asarray([o for _d, o in rows], dtype=np.float64)
+        n, k = len(ys), float(ys.sum())
+        weighted += n * (k * (n - k) / (n * (n - 1)))
+    b_true = weighted / len(items)
+
+    print(f"    {'':<28} {'brier':>6} {'skill':>7}")
+    print(f"    {'base rate only':<28} {base:>6.3f} {0.0:>+7.1%}")
+    print(f"    {'leaf':<28} {b_leaf:>6.3f} {1 - b_leaf / base:>+7.1%}")
+    print(
+        f"    {'oracle, leave-one-out':<28} {b_oracle:>6.3f} "
+        f"{1 - b_oracle / base:>+7.1%}   (a floor: carries its own estimate's noise)"
+    )
+    print(
+        f"    {'oracle, unbiased':<28} {b_true:>6.3f} "
+        f"{1 - b_true / base:>+7.1%}   (the ceiling)"
+    )
+    got = 1 - b_leaf / base
+    top = 1 - b_true / base
+    if top > 1e-9:
+        print(f"    the leaf is getting {got / top:.0%} of what the matchup determines")
+    print(
+        "    The oracle is the best a turn-1 evaluation could ever be, because it knows\n"
+        "    which matchup this is and nothing else -- the same information the selection\n"
+        "    matrix has. Whatever it leaves on the table is play, not prediction."
+    )
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--value", type=Path, nargs="+", required=True)
     ap.add_argument("--dir", type=Path, default=Path("data/selfplay-gen11L"))
     ap.add_argument("--positions", type=int, default=4000)
+    ap.add_argument(
+        "--ceiling",
+        type=int,
+        default=0,
+        metavar="MIN_GAMES",
+        help="estimate how much turn-1 skill is achievable AT ALL. Groups the games by "
+        "(opponent archetype, our selection, their selection), keeps groups with at "
+        "least this many, and scores the oracle that knows each group's own win rate -- "
+        "leave-one-out, so it is not scored on the game it is predicting. A leaf cannot "
+        "beat that, and if the oracle's skill is small the matchup simply does not "
+        "determine the outcome and no amount of work on the leaf will help.",
+    )
     ap.add_argument(
         "--only-turn",
         type=int,
@@ -221,6 +321,9 @@ def main() -> None:
                 "of them is from the other seat's perspective; fix that before reading "
                 "anything below as a calibration"
             )
+
+    if args.ceiling:
+        ceiling(args, paths, leaf)
 
     report("by turn", by_turn, [name for name, _lo, _hi in TURN_BUCKETS])
     report(
