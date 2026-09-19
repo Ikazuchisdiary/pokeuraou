@@ -7,12 +7,16 @@
 //! usable rather than merely measurable.
 //!
 //! The protocol is JSONL over stdio, the same shape the sim-bridge already uses: one
-//! request per line, one response per line, and the process stays warm.
+//! request per line, one response per line, and the process stays warm. An encoded node's
+//! arrays are the exception: they are megabytes rather than kilobytes, so when the request
+//! names a block of shared memory they go there instead and only the header line crosses
+//! the pipe. The header says which road they took.
 
 use crate::objective;
 use crate::position::Position;
 use crate::reg::Reg;
 use crate::resolve::{parse_actions_list, resolve_turn, turn_value, Budget, SlotAction};
+use crate::shm;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::io::{BufRead, Write};
@@ -31,6 +35,10 @@ pub struct Request {
     /// shown not to beat the opponent's mixed strategy, and that strategy sits on a few
     /// columns -- so the caller asks for what it needs and comes back for more.
     pub cells: Option<Vec<(usize, usize)>>,
+    /// Where to put an encoded node's arrays instead of the pipe, if the caller offered a
+    /// block and this node fits in it. Absent means the pipe, which is what a caller that
+    /// has not been taught about the block sends.
+    pub shm: Option<shm::Target>,
 }
 
 impl Request {
@@ -78,9 +86,18 @@ pub fn parse_request(value: &Value) -> Result<Request, String> {
             })
             .collect()
     });
+    // A `shm` key at all means the caller will hold a block for the arrays. The name and
+    // the size come together or not at all -- a name with no size would mean writing into
+    // a block of unknown length, which is the one mistake this side must not be able to
+    // make -- and neither of them means "I hold none yet, ask me for the size you need".
+    let shm = value.get("shm").map(|block| shm::Target {
+        name: block.get("name").and_then(Value::as_str).map(String::from),
+        capacity: block.get("bytes").and_then(Value::as_u64).unwrap_or(0) as usize,
+    });
     Ok(Request {
         encode,
         cells,
+        shm,
         position,
         ours: read("ours"),
         theirs: read("theirs"),
@@ -220,12 +237,23 @@ fn score_pool(reg: &Reg, value: &Value) -> Value {
 }
 
 /// JSONL over stdio: one request per line, one response per line.
+///
+/// The lock is held across the loop rather than taken per line, because an encoded node
+/// whose body needs a bigger block than the caller holds asks for one and reads the answer
+/// -- so `answer` needs the same stdin the requests arrive on.
 pub fn serve(reg: &Reg) {
     let encoder = crate::encode::Encoder::new(reg);
+    let mut shared = shm::Cache::default();
     let stdin = std::io::stdin();
+    let mut input = stdin.lock();
     let mut stdout = std::io::stdout();
-    for line in stdin.lock().lines() {
-        let Ok(line) = line else { break };
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match input.read_line(&mut line) {
+            Ok(0) | Err(_) => break,
+            Ok(_) => {}
+        }
         if line.trim().is_empty() {
             continue;
         }
@@ -234,7 +262,7 @@ pub fn serve(reg: &Reg) {
         // Python, and the process stays up. Two generation workers lost a thousand games
         // each to a failure that took the bridge down for good.
         let answered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            answer(reg, &encoder, &line, &mut stdout)
+            answer(reg, &encoder, &mut shared, &mut input, &line, &mut stdout)
         }));
         match answered {
             Ok(Ok(())) => {}
@@ -256,14 +284,101 @@ pub fn serve(reg: &Reg) {
     }
 }
 
+/// The header as text, carrying what its own serialisation cost.
+///
+/// A number cannot be inside the object that measures it, so the object is serialised and
+/// the two timings are appended before the closing brace. `headerUs` is the serialisation
+/// alone; building the spans and folds that make it large is `foldUs`, which `fill`
+/// measures where it happens.
+fn with_timings(header: &Value, parse_us: f64) -> String {
+    let started = std::time::Instant::now();
+    let mut text = header.to_string();
+    let header_us = started.elapsed().as_secs_f64() * 1e6;
+    if !text.ends_with('}') {
+        return text;
+    }
+    text.pop();
+    let separator = if text.ends_with('{') { "" } else { "," };
+    text.push_str(&format!(
+        "{separator}\"parseUs\":{parse_us:.1},\"headerUs\":{header_us:.1}}}"
+    ));
+    text
+}
+
+/// Puts an encoded node's arrays where the caller can get at them, and says where.
+///
+/// Three outcomes, and the header names which one: into the block the request offered
+/// (`shm`), into a block the caller is asked for and then makes (`grow`, one extra line
+/// each way), or down the pipe behind the header (`pipe`). The asking is what keeps the
+/// block the right size without anybody guessing: the caller cannot know how many leaves
+/// a node has until it is resolved, and by then this side knows exactly.
+fn place_body<R: BufRead, W: Write>(
+    encoded: &crate::encode::Encoded,
+    leaf_values: &[f64],
+    body_bytes: usize,
+    target: &shm::Target,
+    shared: &mut shm::Cache,
+    input: &mut R,
+    stdout: &mut W,
+    header: &mut Value,
+    parse_us: f64,
+) -> std::io::Result<()> {
+    if shm::place(shared, target, body_bytes, |sink| {
+        crate::encoded_node::write_body(sink, encoded, leaf_values)
+    })
+    .is_some()
+    {
+        header["via"] = json!("shm");
+        writeln!(stdout, "{}", with_timings(header, parse_us))?;
+        return stdout.flush();
+    }
+    // Nothing here fits: ask, and let the caller answer with a block or with the pipe.
+    header["via"] = json!("grow");
+    writeln!(stdout, "{}", with_timings(header, parse_us))?;
+    stdout.flush()?;
+    let mut reply = String::new();
+    if input.read_line(&mut reply)? == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "the caller was asked for a block and went away",
+        ));
+    }
+    let offered: Value = serde_json::from_str(reply.trim()).unwrap_or(Value::Null);
+    let grown = shm::Target {
+        name: offered.get("name").and_then(Value::as_str).map(String::from),
+        capacity: offered.get("bytes").and_then(Value::as_u64).unwrap_or(0) as usize,
+    };
+    if shm::place(shared, &grown, body_bytes, |sink| {
+        crate::encoded_node::write_body(sink, encoded, leaf_values)
+    })
+    .is_some()
+    {
+        writeln!(stdout, "{}", json!({ "via": "shm" }))?;
+        return stdout.flush();
+    }
+    // The caller said the pipe, or made a block this could not open. Either way the body
+    // still has to arrive, and the pipe is the road that always works.
+    writeln!(stdout, "{}", json!({ "via": "pipe" }))?;
+    crate::encoded_node::write_body(stdout, encoded, leaf_values)?;
+    stdout.flush()
+}
+
 /// Answers one request onto `stdout`. `Err` means the pipe is gone and serving is over.
-fn answer<W: Write>(
+fn answer<R: BufRead, W: Write>(
     reg: &Reg,
     encoder: &crate::encode::Encoder,
+    shared: &mut shm::Cache,
+    input: &mut R,
     line: &str,
     stdout: &mut W,
 ) -> std::io::Result<()> {
-    let response = match serde_json::from_str::<Value>(line) {
+    // What reading the request costs, for the caller's table. The other candidate for
+    // this crossing's remaining cost is the header going the other way, and the two have
+    // different fixes, so they are reported apart rather than as one "JSON" row.
+    let parse_started = std::time::Instant::now();
+    let parsed = serde_json::from_str::<Value>(line);
+    let parse_us = parse_started.elapsed().as_secs_f64() * 1e6;
+    let response = match parsed {
         Err(error) => json!({ "error": error.to_string() }),
         Ok(value) if value["kind"].as_str() == Some("resolve") => resolve_one(reg, &value),
         Ok(value) if value["kind"].as_str() == Some("score") => score_pool(reg, &value),
@@ -278,12 +393,24 @@ fn answer<W: Write>(
                         )
                     })
                 } else if request.encode {
-                    // A header line, then the raw buffers on the same pipe.
-                    let (header, encoded, leaf_values) =
+                    // The arrays into the caller's block when there is one, and a header
+                    // line either way saying where they went. A block is filled *before*
+                    // its header is sent, because the header is what says to read it.
+                    let (mut header, encoded, leaf_values) =
                         crate::encoded_node::fill(reg, encoder, &request);
-                    writeln!(stdout, "{header}")?;
-                    crate::encoded_node::write_body(stdout, &encoded, &leaf_values)?;
-                    return stdout.flush();
+                    let body_bytes = header["bytes"].as_u64().unwrap_or(0) as usize;
+                    return match &request.shm {
+                        Some(target) => place_body(
+                            &encoded, &leaf_values, body_bytes, target, shared, input,
+                            stdout, &mut header, parse_us,
+                        ),
+                        None => {
+                            header["via"] = json!("pipe");
+                            writeln!(stdout, "{}", with_timings(&header, parse_us))?;
+                            crate::encoded_node::write_body(stdout, &encoded, &leaf_values)?;
+                            stdout.flush()
+                        }
+                    };
                 } else {
                     fill(reg, &request)
                 }

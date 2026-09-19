@@ -57,9 +57,11 @@ from pokeuraou.timing import BORROWED, STAGES  # noqa: E402
 #: Rows printed under a heading, so a table reads as a breakdown rather than a list.
 GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Python", ("narrow", "branch", "encode", "forward", "lp")),
-    ("bridge", ("rust.fill", "rust.body", "rust.unpack", "rust.resolve", "rust.score")),
+    ("bridge", ("rust.fill", "rust.ask", "rust.header", "rust.body", "rust.unpack",
+                "rust.resolve", "rust.score")),
     ("served", ("serve.copy", "serve.wait")),
-    ("child", ("rust.child.resolve", "rust.child.encode")),
+    ("child", ("rust.child.resolve", "rust.child.encode", "rust.child.parse",
+               "rust.child.header")),
     ("server", ("server.held", "server.queue")),
     ("inclusive", ("refused",)),
 )
@@ -282,6 +284,27 @@ def print_table(summary: dict[str, Any], tree: dict[str, Any] | None, wall: floa
         if leaves and calls:
             print(f"\n  {leaves:,} leaves over {calls:,.0f} forward passes = "
                   f"{leaves / calls:,.0f} rows a call")
+        # What the bridge actually carried, and by which road. A body's size used to be
+        # arrived at by multiplying a leaf count by a per-leaf figure out of another file,
+        # and the share that figure was quoted beside was of a measurement.
+        carried = counts.get("body.bytes", 0)
+        through = counts.get("body.shm", 0)
+        piped = counts.get("body.pipe", 0)
+        if carried:
+            nodes = through + piped
+            road = f"{through:,} through the block, {piped:,} down the pipe"
+            print(f"\n  {carried / 1e9:.2f} GB of encoded leaves over {nodes:,} nodes "
+                  f"= {carried / max(nodes, 1) / 1e6:,.1f} MB a node ({road})")
+        # And how much of a node the port's leaf sharing took off the crossing before it
+        # was carried at all. Counted at `add_leaf` rather than inferred from how large
+        # the node came out: the inference has been in the record twice and the count
+        # never was.
+        offered = counts.get("leaves.offered", 0)
+        stored = counts.get("leaves.stored", 0)
+        if offered and stored:
+            print(f"\n  {offered:,} leaves offered, {stored:,} kept = "
+                  f"{offered / stored:.2f}x, {100.0 * (offered - stored) / offered:.1f}% "
+                  f"of them a position the node already had")
         refusals = {k: v for k, v in counts.items() if k.startswith("refused: ")}
         if refusals:
             total = sum(refusals.values())

@@ -67,12 +67,16 @@ STAGES = (
     "forward",       # the net, in this process
     "lp",            # solve / solve_bayesian
     "rust.fill",     # a node asked of the Rust child, and the wait for its header
-    "rust.body",     # reading the encoded leaves off the pipe
+    "rust.ask",      # building the request's JSON, here
+    "rust.header",   # reading the answer's JSON, here
+    "rust.body",     # getting the encoded leaves: off the pipe, or out of the shared block
     "rust.unpack",   # turning the header and blob into arrays, spans and folds
     "rust.resolve",  # advancing a real turn through the child
     "rust.score",    # the damage ranking, through the child
     "rust.child.resolve",  # what the child says it spent resolving  (its own clock)
     "rust.child.encode",   # what the child says it spent encoding   (its own clock)
+    "rust.child.parse",    # ... reading the request's JSON          (its own clock)
+    "rust.child.header",   # ... building and serialising the header (its own clock)
     "serve.copy",    # laying an encoded batch into the shared block
     "serve.wait",    # from sending the control line to having the answer
     "server.held",   # the serving side, working  (its own counter)
@@ -86,8 +90,8 @@ STAGES = (
 #: `forward`. Both are worth printing -- they say what the wait was *for* -- and adding
 #: either to the rows beside it would count the same seconds twice.
 BORROWED = frozenset(
-    {"rust.child.resolve", "rust.child.encode", "server.held", "server.queue",
-     "refused"}
+    {"rust.child.resolve", "rust.child.encode", "rust.child.parse", "rust.child.header",
+     "server.held", "server.queue", "refused"}
 )
 
 
