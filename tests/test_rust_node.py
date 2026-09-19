@@ -340,6 +340,77 @@ def test_the_refused_cells_are_filled_in_one_call(
     assert np.array_equal(np.asarray(got_exact), np.asarray(expected_exact))
 
 
+def test_a_white_herb_holder_is_not_refused(bridged: None) -> None:
+    """The effect crossed with the port; only the item list was never told about it.
+
+    `check_white_herb` and its four call sites landed on 2026-09-12 and `item_handled` did
+    not list the item, so every position a holder could be involved in was refused for an
+    effect that was already implemented -- 63% of the cells generation refused.
+    """
+    reg, pos, row, col = _node()
+    mine = pos.sides[0].active_pokemon()[0]
+    assert mine is not None
+    mine.item = "whiteherb"
+    assert not validate_position(pos, reg.meta.active_per_side)
+    evaluators = [OBJECTIVES["hp-share"].batch, OBJECTIVES["faints"].batch]
+
+    node = rustnode.node_for(reg)
+    assert node is not None
+    filled = node.fill(pos, row, col, ["hp-share", "faints"], Budget.matrix())
+    assert not [why for _i, _j, why in filled.refused if "whiteherb" in why]
+
+    os.environ[rustnode.ENV_ENABLE] = "0"
+    rustnode.reset()
+    expected, _notes, _e = batched_payoffs(
+        reg, pos, row, col, evaluators, budget=Budget.matrix()
+    )
+    os.environ[rustnode.ENV_ENABLE] = "1"
+    rustnode.reset()
+    got, _n2, _e2 = batched_payoffs(reg, pos, row, col, evaluators, budget=Budget.matrix())
+    for index in range(len(evaluators)):
+        # Not bit-identical: a cell is a weighted mean and the port sums it in its own
+        # order, which is worth about 1e-16. A wrong effect is worth 1e-03.
+        assert np.allclose(
+            np.asarray(got[index]), np.asarray(expected[index]), rtol=0, atol=1e-12
+        )
+
+
+def test_stance_change_takes_the_forme_over_there_too(bridged: None) -> None:
+    """The forme decides the stats, so a port that skipped it read the wrong Pokemon.
+
+    The holder does not have to be Aegislash: neither implementation checks the species
+    before changing the forme, so pinning the ability on whoever is in front tests exactly
+    the arithmetic `change_forme` has to match -- species, types, maximum HP, and the HP
+    carried across the change.
+    """
+    reg, pos, row, col = _node()
+    mine = pos.sides[0].active_pokemon()[0]
+    assert mine is not None
+    mine.ability = "stancechange"
+    assert not validate_position(pos, reg.meta.active_per_side)
+    evaluators = [OBJECTIVES["hp-share"].batch, OBJECTIVES["faints"].batch]
+
+    node = rustnode.node_for(reg)
+    assert node is not None
+    filled = node.fill(pos, row, col, ["hp-share", "faints"], Budget.matrix())
+    assert not [why for _i, _j, why in filled.refused if "stancechange" in why]
+
+    os.environ[rustnode.ENV_ENABLE] = "0"
+    rustnode.reset()
+    expected, _notes, _e = batched_payoffs(
+        reg, pos, row, col, evaluators, budget=Budget.matrix()
+    )
+    os.environ[rustnode.ENV_ENABLE] = "1"
+    rustnode.reset()
+    got, _n2, _e2 = batched_payoffs(reg, pos, row, col, evaluators, budget=Budget.matrix())
+    for index in range(len(evaluators)):
+        # Not bit-identical: a cell is a weighted mean and the port sums it in its own
+        # order, which is worth about 1e-16. A wrong effect is worth 1e-03.
+        assert np.allclose(
+            np.asarray(got[index]), np.asarray(expected[index]), rtol=0, atol=1e-12
+        )
+
+
 def test_an_impossible_position_is_refused(bridged: None) -> None:
     """A position Python's own validator rejects must not be answered, only refused.
 
