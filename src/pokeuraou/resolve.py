@@ -217,6 +217,21 @@ MERGE_BRANCHES_DEFAULT = os.environ.get("POKEURAOU_MERGE_BRANCHES", "1") not in 
     "no",
 )
 
+#: How many of a node's leaves `batched_payoffs` holds before scoring them and letting
+#: them go. 0 holds the whole node, which is what it did until 2026-09-20.
+#:
+#: Only the Python fill pays this: the bridge off, a bridge that broke and disabled itself,
+#: and the cells the port refuses, which come back here to be filled. With the bridge on
+#: and a cell it accepts, the port resolves and encodes and what crosses is arrays, so no
+#: list of leaves is built on this side at all.
+#:
+#:     POKEURAOU_LEAF_CHUNK=0 uv run python tools/profile_stages.py analysis --no-bridge
+#:
+#: Read with `int()` and no fallback on purpose: a knob that is silently not applied is
+#: the failure mode this project has already been bitten by, and a typo here should stop
+#: the process rather than quietly measure the default.
+LEAF_CHUNK = int(os.environ.get("POKEURAOU_LEAF_CHUNK", "32768"))
+
 
 @dataclass(frozen=True, slots=True)
 class Budget:
@@ -3983,6 +3998,32 @@ def batched_payoffs(
     worth 1.86x in the first place. The callers below therefore hand the whole refused
     set to one call, and its leaves share one pass like any other node's.
 
+    The leaves are held in chunks rather than all at once, because with the bridge off
+    this list *is* the node's memory. Measured on the analyser's own 24x24 depth-1 node
+    (`scratchpad/leaf_chunk.py --case sash-ko --limit 24`, `POKEURAOU_RUST_NODE=0`,
+    `Budget()`, `value-gen11L` on CUDA):
+
+        held whole   726,167 leaves in one call   peak RSS 8.29 GB   +6.91 GB for the fill
+        LEAF_CHUNK   the same 726,167 in eleven   peak RSS 2.51 GB   +1.11 GB
+
+    9.5 KB a leaf, which is what took a machine with 31.1 GB to 0.3 GB free and made this
+    worth fixing (IKA-27). `LEAF_CHUNK` is a floor checked between cells and not a ceiling
+    enforced inside one, so a chunk is never smaller than the cell that crossed it: the
+    largest call above is 122,198 leaves, one cell of an exact budget, and that cell is
+    also the 1.11 GB. Below it is `resolve_turn`, which materialises a whole turn's
+    branches before returning them, so a node cannot cost less than its widest cell
+    without changing the resolver. What it no longer costs is every cell at once.
+
+    The batch is being protected here, not given up: 66,000 rows a call against 8,192 in a
+    forward pass is the batching this function's 1.86x was bought with, and it is intact.
+    The answers are all but unchanged -- 574 of the 576 cells identical to the bit, the two
+    others by 7.4e-08, and the equilibrium the matrix is read for did not move at all
+    (value equal to twelve places, both mixtures to zero). That residue is the forward
+    pass, not the fold: float32 matrix arithmetic depends on how many rows are in the
+    batch, which is the same effect IKA-52 measured at 2.4e-07 on CPU torch and left open
+    on CUDA. A per-position objective has no such dependence and is identical to the bit,
+    which is what `tests/test_resolve.py` asserts.
+
     The third return value is a per-cell mask of which cells the budget resolved exactly.
     It is per cell and not per matrix because it genuinely varies: the branch budget is
     divided among the live branches as a turn unfolds, so one cell can be enumerated in
@@ -4001,12 +4042,8 @@ def batched_payoffs(
     spans: list[tuple[int, int, int, int]] = []
     folded: list[tuple[int, int, Fold]] = []
 
-    wanted = (
-        [(i, j) for i in range(len(ours)) for j in range(len(theirs))]
-        if cells is None
-        else [(i, j) for i, j in cells if i < len(ours) and j < len(theirs)]
-    )
-    for i, j in wanted:
+    def fill_cell(i: int, j: int) -> None:
+        """Resolve one cell and add its leaves to the ones being held."""
         a, b = ours[i], theirs[j]
         result = resolve_turn(reg, pos, [a, b], budget=budget)
         exact[i, j] = result.exact
@@ -4016,13 +4053,13 @@ def batched_payoffs(
             if plan.positions:
                 folded.append((i, j, plan.shifted(len(leaves))))
                 leaves.extend(plan.positions)
-            continue
+            return
         unmodelled.update(result.unmodelled)
         total = result.total_probability
         if not result.branches or total <= 0:
             spans.append((i, j, len(leaves), 0))
             weights.append(np.zeros(0))
-            continue
+            return
         start = len(leaves)
         leaves.extend(branch.position for branch in result.branches)
         weights.append(
@@ -4030,15 +4067,41 @@ def batched_payoffs(
         )
         spans.append((i, j, start, len(result.branches)))
 
-    # Which of the two fills this is, so the rows can be told apart from the calls.
-    timing.count("leaves.refused" if _FILLING_REFUSED else "leaves.node", len(leaves))
-    for payoff, evaluate in zip(payoffs, evaluators, strict=True):
-        values = np.asarray(evaluate(leaves), dtype=np.float64) if leaves else np.zeros(0)
-        for (i, j, start, count), w in zip(spans, weights, strict=True):
-            if count:
-                payoff[i, j] = float(values[start : start + count] @ w)
-        for i, j, root in folded:
-            payoff[i, j] = fold_value(root, values)
+    def score_held() -> None:
+        """Score the leaves held right now, write their cells, and let them go.
+
+        Every index in `spans` and every `LeafRef` in `folded` is relative to the start of
+        the list as it stands, which is what makes releasing it possible: a cell is scored
+        by the chunk that holds it and nothing refers back across a boundary.
+        """
+        # Which of the two fills this is, so the rows can be told apart from the calls.
+        timing.count("leaves.refused" if _FILLING_REFUSED else "leaves.node", len(leaves))
+        for payoff, evaluate in zip(payoffs, evaluators, strict=True):
+            values = (
+                np.asarray(evaluate(leaves), dtype=np.float64) if leaves else np.zeros(0)
+            )
+            for (i, j, start, count), w in zip(spans, weights, strict=True):
+                if count:
+                    payoff[i, j] = float(values[start : start + count] @ w)
+            for i, j, root in folded:
+                payoff[i, j] = fold_value(root, values)
+        leaves.clear()
+        weights.clear()
+        spans.clear()
+        folded.clear()
+
+    wanted = (
+        [(i, j) for i in range(len(ours)) for j in range(len(theirs))]
+        if cells is None
+        else [(i, j) for i, j in cells if i < len(ours) and j < len(theirs)]
+    )
+    for i, j in wanted:
+        fill_cell(i, j)
+        # On a cell boundary and not inside one: a cell's leaves are contiguous, and a
+        # fold that reached across a chunk would have to be scored from two arrays.
+        if LEAF_CHUNK and len(leaves) >= LEAF_CHUNK:
+            score_held()
+    score_held()
     return payoffs, unmodelled, exact
 
 
