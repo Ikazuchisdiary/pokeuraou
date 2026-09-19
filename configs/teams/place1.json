@@ -1,14 +1,15 @@
 {
   "id": "place1",
-  "name": "Takuma Yamazaki（1位）",
+  "name": "ワトソン（2026 Worlds 1位）",
   "side": "own",
   "regulation": "gen9championsvgc2026regmb",
   "source": {
-    "kind": "standings six, spreads SAMPLED from the usage prior",
+    "kind": "standings sheet + status-screen screenshot",
     "place": 1,
-    "player": "Takuma Yamazaki",
-    "spread_seed": 0,
-    "note": "The species, abilities, items, natures and moves are the recorded sheet. The SP spreads are NOT: a standings entry has no investment, which is the hidden information the belief layer models, so they are drawn from the usage prior under `spread_seed`. This is a well-formed team, not this player's team, and nothing measured on it may be attributed to them."
+    "standingsName": "Takuma Yamazaki",
+    "trainerName": "ワトソン",
+    "teamId": "A4RBRNN9YE",
+    "note": "Species, ability, item, nature and moves are the standings record. The SP spreads and shownStats are transcribed from a screenshot of the in-game status screen supplied by the user; the standings feed carries no investment at all. Every spread totals 66 with no stat over 32, every raised and lowered stat agrees with the nature the standings record, and `verify_shown_stats` recomputes all 36 numbers from the spreads."
   },
   "team": [
     {
@@ -16,6 +17,7 @@
       "ability": "Flower Veil",
       "item": "Floettite",
       "nature": "Timid",
+      "gender": "F",
       "moves": [
         "Moonblast",
         "Dazzling Gleam",
@@ -23,10 +25,18 @@
         "Protect"
       ],
       "sp": {
-        "hp": 10,
-        "def": 23,
-        "spa": 1,
-        "spe": 32
+        "hp": 4,
+        "def": 8,
+        "spa": 32,
+        "spe": 22
+      },
+      "shownStats": {
+        "hp": 153,
+        "atk": 76,
+        "def": 95,
+        "spa": 177,
+        "spd": 148,
+        "spe": 147
       }
     },
     {
@@ -34,6 +44,7 @@
       "ability": "Adaptability",
       "item": "Life Orb",
       "nature": "Adamant",
+      "gender": "M",
       "moves": [
         "Wave Crash",
         "Last Respects",
@@ -41,11 +52,19 @@
         "Protect"
       ],
       "sp": {
-        "hp": 6,
-        "atk": 28,
-        "def": 11,
-        "spd": 10,
-        "spe": 11
+        "hp": 4,
+        "atk": 18,
+        "def": 4,
+        "spd": 15,
+        "spe": 25
+      },
+      "shownStats": {
+        "hp": 199,
+        "atk": 165,
+        "def": 89,
+        "spa": 90,
+        "spd": 110,
+        "spe": 123
       }
     },
     {
@@ -53,6 +72,7 @@
       "ability": "Defiant",
       "item": "Chople Berry",
       "nature": "Adamant",
+      "gender": "M",
       "moves": [
         "Sucker Punch",
         "Kowtow Cleave",
@@ -60,10 +80,17 @@
         "Iron Head"
       ],
       "sp": {
-        "hp": 14,
-        "atk": 26,
-        "def": 1,
-        "spe": 25
+        "hp": 32,
+        "atk": 15,
+        "spd": 19
+      },
+      "shownStats": {
+        "hp": 207,
+        "atk": 187,
+        "def": 140,
+        "spa": 72,
+        "spd": 124,
+        "spe": 70
       }
     },
     {
@@ -71,6 +98,7 @@
       "ability": "Multiscale",
       "item": "Dragoninite",
       "nature": "Modest",
+      "gender": "F",
       "moves": [
         "Dragon Pulse",
         "Heat Wave",
@@ -78,11 +106,17 @@
         "Protect"
       ],
       "sp": {
-        "hp": 23,
-        "def": 1,
-        "spa": 15,
-        "spd": 1,
-        "spe": 26
+        "hp": 2,
+        "spa": 32,
+        "spe": 32
+      },
+      "shownStats": {
+        "hp": 168,
+        "atk": 138,
+        "def": 115,
+        "spa": 167,
+        "spd": 120,
+        "spe": 132
       }
     },
     {
@@ -90,6 +124,7 @@
       "ability": "Rough Skin",
       "item": "Choice Scarf",
       "nature": "Adamant",
+      "gender": "F",
       "moves": [
         "Dragon Claw",
         "Stomping Tantrum",
@@ -97,9 +132,18 @@
         "Rock Slide"
       ],
       "sp": {
-        "hp": 2,
-        "atk": 32,
-        "spe": 32
+        "hp": 10,
+        "atk": 20,
+        "def": 9,
+        "spe": 27
+      },
+      "shownStats": {
+        "hp": 193,
+        "atk": 187,
+        "def": 124,
+        "spa": 90,
+        "spd": 105,
+        "spe": 149
       }
     },
     {
@@ -107,6 +151,7 @@
       "ability": "Poison Touch",
       "item": "Focus Sash",
       "nature": "Jolly",
+      "gender": "M",
       "moves": [
         "Close Combat",
         "Dire Claw",
@@ -117,6 +162,14 @@
         "hp": 2,
         "atk": 32,
         "spe": 32
+      },
+      "shownStats": {
+        "hp": 157,
+        "atk": 182,
+        "def": 80,
+        "spa": 54,
+        "spd": 100,
+        "spe": 189
       }
     }
   ]
