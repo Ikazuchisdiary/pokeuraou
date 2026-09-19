@@ -77,7 +77,7 @@ STAGES = (
     "serve.wait",    # from sending the control line to having the answer
     "server.held",   # the serving side, working  (its own counter)
     "server.queue",  # the serving side, queueing (its own counter)
-    "refused",       # filling the cells the port declined, one at a time
+    "refused",       # filling the cells the port declined, in one call a node
 )
 
 #: Rows that repeat time another row already holds, and so are never added into a total.

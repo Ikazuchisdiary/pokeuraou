@@ -692,6 +692,9 @@ fn ability_handled(ability: &str) -> bool {
             // Python reports these and changes nothing, so ignoring them agrees with it.
             | "static" | "flamebody" | "effectspore" | "poisonpoint" | "cutecharm"
             | "poisontouch" | "angerpoint" | "berserk" | "angershell" | "truant" | "dancer"
+            // The forme change this drives is in `use_move`, which is why it is here and
+            // no longer in `check_position_supported`'s pair.
+            | "stancechange"
     ) || crate::inert::ability_is_inert(ability)
 }
 
@@ -712,6 +715,11 @@ fn item_handled(item: &str) -> bool {
             | "terrainextender" | "damprock" | "heatrock" | "icyrock" | "smoothrock"
             | "assaultvest" | "clearamulet" | "covertcloak" | "loadeddice" | "protectivepads"
             | "ejectpack" | "boosterenergy" | "abilityshield" | "mirrorherb" | "punchingglove"
+            // `check_white_herb` and its four call sites landed with the port and this
+            // list was never told, so every position a holder could be involved in was
+            // refused for an effect that was already here -- 63% of the cells generation
+            // refused and 76% of a match's, measured 2026-09-20 (IKA-29).
+            | "whiteherb"
     ) || crate::inert::item_is_inert(item)
         // Mega stones carry no turn effect of their own; the mega action owns the forme
         // change, and `reg.mega_targets` is what says which stone belongs to whom.
@@ -869,10 +877,10 @@ fn check_position_supported(
             if mon.fainted != (mon.hp == 0) {
                 return Err(format!("fainted={} disagrees with hp={}", mon.fainted, mon.hp));
             }
-            // Two abilities change the position in ways this port does not implement.
-            // They are refused here rather than at the point of use so a turn can never
-            // get half-way through one.
-            if matches!(mon.ability.as_str(), "stancechange" | "slowstart") {
+            // Slow Start changes the position in a way this port does not implement,
+            // and is refused here rather than at the point of use so a turn can never get
+            // half-way through it. Stance Change was the other one until `change_forme`.
+            if mon.ability.as_str() == "slowstart" {
                 return Err(format!("ability: {}", mon.ability));
             }
         }
@@ -2307,6 +2315,56 @@ pub(crate) fn check_white_herb(turn: &mut Turn) {
             turn.consume_item(side, slot);
         }
     }
+}
+
+/// A Pokemon moved to another forme: the species and the types, and nothing else.
+///
+/// It reads as though it resizes the Pokemon, because Python's `_change_forme` reads that
+/// way -- recompute the battler, take `maxhp` from it, carry the HP across the difference.
+/// It does not. `view.battler` hands `maxhp` back as *the position's own* whenever the
+/// spread is known (`src/pokeuraou/view.py:132`), and a known spread is the only kind this
+/// port resolves, so over there the maximum is written back unchanged and the difference
+/// carried across is zero. Only the floor of 1 survives, and it is kept.
+///
+/// Writing the recomputed HP stat here instead -- which is what `do_mega` below does, and
+/// gets away with because no mega changes its HP base -- moved every cell of a node whose
+/// forme has a different one: a Kingambit given Stance Change became a 167-HP Aegislash
+/// here and stayed a 207-HP one over there, for 6.4e-03 across 24 of 36 cells. Aegislash's
+/// own two formes share their HP base, so only a holder that is not Aegislash shows it.
+///
+/// The stats the damage layer reads still change, because they are computed from
+/// `mon.species` every time `Battler::from_pokemon` is called. It is the *stored* maximum
+/// that stays.
+///
+/// The ability is deliberately left alone. A mega gets its target's ability and sets it
+/// itself; Aegislash keeps Stance Change across both of its formes.
+pub(crate) fn change_forme(
+    reg: &Reg,
+    turn: &mut Turn,
+    side: usize,
+    slot: usize,
+    species_id: &str,
+) -> Result<(), String> {
+    let Some(entry) = reg.species.get(species_id) else { return Ok(()) };
+    let types: Vec<Id> = entry.types.iter().map(|t| Id::new(t)).collect();
+    let maxhp_before = {
+        let Some(mon) = turn.mon_at_mut(side, slot) else { return Ok(()) };
+        let before = mon.maxhp;
+        mon.species = Id::new(species_id);
+        mon.types = Types::from_slice(&types);
+        before
+    };
+    {
+        // Built because Python builds one here, so a species this cannot construct fails
+        // at the forme change rather than somewhere later. Its stats are not read.
+        let mon = turn.mon_at(side, slot).unwrap();
+        let _refreshed = Battler::from_pokemon(reg, mon)?;
+    }
+    let mon = turn.mon_at_mut(side, slot).unwrap();
+    // `mon.maxhp` is deliberately not assigned: see above. Written as the whole expression
+    // anyway so the two implementations can be read against each other.
+    mon.hp = (mon.hp + (mon.maxhp - maxhp_before)).max(1).min(mon.maxhp);
+    Ok(())
 }
 
 fn do_mega(reg: &Reg, turn: &mut Turn, action: &QueuedAction) -> Result<(), String> {
