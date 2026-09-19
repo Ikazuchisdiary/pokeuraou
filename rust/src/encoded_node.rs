@@ -39,6 +39,11 @@ struct Collector<'a> {
     /// Leaf indices grouped by a cheap key, for finding a position already collected.
     seen: HashMap<u64, Vec<usize>>,
     notes: BTreeSet<String>,
+    /// How many leaves were handed to `add_leaf`, against how many `leaves` ended up
+    /// holding. The sharing below is the reason a node crossing this way is smaller than
+    /// the same node resolved in Python, and that reason has been read off the code and
+    /// never counted -- so it is counted here, where it happens.
+    offered: usize,
 }
 
 /// A cheap, partial hash of a position.
@@ -90,6 +95,7 @@ impl<'a> Collector<'a> {
     /// input, and a row's output does not depend on how many rows are beside it (checked
     /// directly, on both CPU and GPU, over 19,333 leaves).
     fn add_leaf(&mut self, position: Position) -> usize {
+        self.offered += 1;
         let key = leaf_key(&position);
         if let Some(candidates) = self.seen.get(&key) {
             for index in candidates {
@@ -169,6 +175,7 @@ pub fn fill(reg: &Reg, encoder: &Encoder, request: &Request) -> (Value, Encoded,
         leaves: Vec::new(),
         seen: HashMap::new(),
         notes: BTreeSet::new(),
+        offered: 0,
     };
     // Resolving and encoding are different costs with different fixes, and the split was
     // being guessed at from two benchmarks that did not add up. It goes back in the header.
@@ -233,6 +240,11 @@ pub fn fill(reg: &Reg, encoder: &Encoder, request: &Request) -> (Value, Encoded,
     }
     let body_bytes = packed_len(&encoded) + leaf_values.len() * 8;
 
+    // The fold is the header's large part -- a cell's leaf indices and weights, one entry
+    // per filled cell -- and it is built as `Value`s because the header is JSON. What that
+    // costs is measured here rather than argued about: the arrays now have a road of their
+    // own, and whether the header should get one too is the next question after that.
+    let fold_started = std::time::Instant::now();
     let mut spans: Vec<Value> = Vec::new();
     let mut folded: Vec<Value> = Vec::new();
     for (i, j, cell) in cells {
@@ -242,10 +254,15 @@ pub fn fill(reg: &Reg, encoder: &Encoder, request: &Request) -> (Value, Encoded,
             Cell::Folded(root) => folded.push(json!([i, j, root])),
         }
     }
+    let fold_us = fold_started.elapsed().as_secs_f64() * 1e6;
 
     let header = json!({
         "kind": "encoded",
         "leaves": collector.leaves.len(),
+        // Leaves handed to `add_leaf`, against the `leaves` above that were kept. The
+        // ratio is the sharing's own account of itself, for a caller that would otherwise
+        // have to infer it from how large the node was.
+        "offered": collector.offered,
         "spans": spans,
         "folded": folded,
         "exact": exact,
@@ -260,6 +277,7 @@ pub fn fill(reg: &Reg, encoder: &Encoder, request: &Request) -> (Value, Encoded,
         "bytes": body_bytes,
         "resolveUs": resolve_us,
         "encodeUs": encode_us,
+        "foldUs": fold_us,
     });
     (header, encoded, leaf_values)
 }
@@ -278,7 +296,7 @@ fn packed_len(encoded: &Encoded) -> usize {
 /// building that beside the arrays it is copied from doubled the peak for the largest
 /// thing this process ever holds -- on a machine running fourteen of these, next to
 /// fourteen Python workers holding a gigabyte each. The reusable window is 64 KB.
-pub fn write_body<W: Write>(
+pub fn write_body<W: Write + ?Sized>(
     out: &mut W,
     encoded: &Encoded,
     leaf_values: &[f64],

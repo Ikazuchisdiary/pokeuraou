@@ -252,6 +252,60 @@ def test_asking_for_some_cells_answers_those_cells(bridged: None) -> None:
                 assert some_exact[i, j] == whole_exact[i, j]
 
 
+def test_the_arrays_take_both_roads_and_are_the_same_bytes(bridged: None) -> None:
+    """An encoded node's arrays cross through shared memory, or down the pipe, unchanged.
+
+    Two things at once, and the first is why the second means anything. The header has to
+    say which road it took -- `grow` for the node that asks for a block, `shm` once there
+    is one, `pipe` for a process holding none -- because a run that quietly fell back to
+    the pipe would pass an equality check by never testing anything. Then the arrays from
+    the two roads have to be *identical*: the same function writes the same bytes in the
+    same order into a different sink, and nothing about a node's value may depend on which.
+    """
+    reg, pos, row, col = _node()
+
+    def both(blocks: bool) -> tuple[list[str], Any]:
+        rustnode.reset()
+        child = rustnode.node_for(reg)
+        assert child is not None
+        child._shm_off = not blocks  # noqa: SLF001 - the arm the test is here to pick
+        roads: list[str] = []
+        real = rustnode.EncodedNode.unpack
+
+        def watch(header: dict, body: bytearray):  # noqa: ANN202
+            roads.append(str(header.get("via")))
+            return real(header, body)
+
+        rustnode.EncodedNode.unpack = staticmethod(watch)
+        try:
+            # Twice: the first node of a process is the one that asks for a block, and
+            # the second is the one that finds it already there.
+            filled = None
+            for _ in range(2):
+                filled = child.fill_encoded(
+                    pos, row, col, Budget.matrix(), ["hp-share"], None
+                )
+            return roads, filled
+        finally:
+            rustnode.EncodedNode.unpack = staticmethod(real)
+
+    through_block, with_block = both(blocks=True)
+    through_pipe, down_pipe = both(blocks=False)
+    assert through_block == ["grow", "shm"], "the block was offered and never used"
+    assert through_pipe == ["pipe", "pipe"], "a block was used by a process holding none"
+
+    for name in ("species", "ability", "item", "moves", "mon", "mask", "side", "field"):
+        mine = getattr(with_block.encoded, name)
+        theirs = getattr(down_pipe.encoded, name)
+        assert mine.dtype == theirs.dtype and mine.shape == theirs.shape
+        assert np.array_equal(mine, theirs), f"{name} differs between the two roads"
+    assert np.array_equal(
+        with_block.leaf_values["hp-share"], down_pipe.leaf_values["hp-share"]
+    )
+    assert with_block.spans == down_pipe.spans
+    assert with_block.folded == down_pipe.folded
+
+
 def test_a_node_that_dies_is_replaced_rather_than_given_up_on(bridged: None) -> None:
     """One failure used to end the bridge for the whole process.
 
