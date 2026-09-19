@@ -31,9 +31,16 @@ def elo(p: float) -> float:
 
 def read(
     directory: Path,
-) -> tuple[dict[str, tuple[int, int]], dict[str, dict], int, int]:
-    """Per-seat (wins, played), a provenance per seat, unfinished, and games on disk."""
+) -> tuple[dict[str, tuple[int, int]], dict[str, dict], int, int, list[float]]:
+    """Per-seat (wins, played), a provenance per seat, unfinished, games, and the clock.
+
+    The clock is `[tested arm seconds, other arm seconds, move decisions]`, summed over
+    every row. It is what an "at equal wall clock" claim is made of and it is absent from
+    every row written before it existed, which is why it is summed rather than averaged:
+    a run half of whose workers predate the field would otherwise report the half.
+    """
     seats: dict[str, tuple[int, int]] = {}
+    clock = [0.0, 0.0, 0.0]
     unfinished = 0
     for path in sorted(directory.glob("worker*.jsonl")) + sorted(
         directory.glob("seed*.jsonl")
@@ -52,6 +59,9 @@ def read(
             a, b = seats.get(seat, (0, 0))
             seats[seat] = (a + wins, b + played)
             unfinished += int(row.get("unfinished", 0))
+            clock[0] += float(row.get("armSeconds", 0.0))
+            clock[1] += float(row.get("otherArmSeconds", 0.0))
+            clock[2] += float(row.get("moveDecisions", 0.0))
     # Every game record on disk, counted separately from the summary rows.
     #
     # A summary row is written by a worker when it FINISHES. A worker that dies has
@@ -72,7 +82,7 @@ def read(
                 written += 1
                 source = json.loads(line).get("provenance", {})
                 provenance.setdefault(str(source.get("seat", "?")), source)
-    return seats, provenance, unfinished, written
+    return seats, provenance, unfinished, written, clock
 
 
 def main() -> None:
@@ -81,7 +91,7 @@ def main() -> None:
     args = ap.parse_args()
 
     for directory in args.dirs:
-        seats, provenance, unfinished, written = read(directory)
+        seats, provenance, unfinished, written, clock = read(directory)
         total_w = sum(w for w, _n in seats.values())
         total_n = sum(n for _w, n in seats.values())
         print(f"\n{directory}")
@@ -115,6 +125,18 @@ def main() -> None:
             f"   Elo {elo(rate):+.1f} [{elo(max(rate - half, 1e-6)):+.1f},"
             f" {elo(min(rate + half, 1 - 1e-6)):+.1f}]"
         )
+        # What each arm spent per move decision, from inside this run. Both arms are
+        # timed on the same machine in the same minute over the same positions, which is
+        # what the previous depth-2 cost -- `s/game` from one run divided by decisions
+        # from another -- was not.
+        if clock[2]:
+            tested, other = clock[0] / clock[2], clock[1] / clock[2]
+            names = (next(iter(provenance.values()), {}).get("leaves") or ["?", "?"])[:2]
+            print(
+                f"  per move decision: tested {tested:.4f}s, other {other:.4f}s"
+                f" = {tested / other if other else float('nan'):.2f}x"
+                f"   ({int(clock[2]):,} move decisions, leaves {names[0]}/{names[1]})"
+            )
         if unfinished:
             print(f"  ! {unfinished} games did not finish and are not in the total")
         marker = directory / "DONE"
