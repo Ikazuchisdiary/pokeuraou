@@ -34,11 +34,14 @@ from pokeuraou.priors import SampledSet
 from pokeuraou.selection import SpreadClass, book_entry, solve_selection
 from pokeuraou.selection_book import (
     ARMS,
+    BenchPrior,
     BookEntry,
     SelectionBook,
     append_entry,
+    bench_weights,
     draw_across,
     draw_arm,
+    entry_bench_weights,
     explore_mixture,
     key_for_team,
     perplexity,
@@ -872,4 +875,111 @@ def test_two_bookless_sides_are_refused() -> None:
     reported as a book draw before."""
     with pytest.raises(ValueError, match="at least one side"):
         draw_across(None, None, np.random.default_rng(0))
+
+
+def _species(roster) -> list[str]:  # noqa: ANN001
+    return [entry.species for entry in roster.sets]
+
+
+def test_bench_weights_name_the_two_a_pure_selection_leaves_behind(roster) -> None:  # noqa: ANN001
+    """The whole point: what the unseen slots hold, given what is already out."""
+    names = _species(roster)
+    first = SELECTIONS[0]
+    seen = [names[i] for i in first[:2]]
+    got = bench_weights(SELECTIONS, _point_mass(0), names, seen)
+    assert got == {tuple(sorted(names[i] for i in first[2:])): 1.0}
+
+
+def test_bench_weights_drop_a_selection_that_cannot_explain_the_board(roster) -> None:  # noqa: ANN001
+    """A Pokemon on the field is one they brought, so a selection without it is out.
+
+    Uniform keeps those worlds and that is the bias: the opponent inside the belief is
+    weaker than the one across the table, because their real selections are the ones the
+    board has already ruled in.
+    """
+    names = _species(roster)
+    missing = next(name for name in names if name not in {names[i] for i in SELECTIONS[0]})
+    assert bench_weights(SELECTIONS, _point_mass(0), names, [missing]) == {}
+
+
+def test_bench_weights_are_a_distribution_over_the_pairs_that_survive(roster) -> None:  # noqa: ANN001
+    names = _species(roster)
+    uniform = np.full(len(SELECTIONS), 1.0 / len(SELECTIONS))
+    seen = [names[i] for i in SELECTIONS[0][:2]]
+    got = bench_weights(SELECTIONS, uniform, names, seen)
+    assert got, "some selection must contain the two on the board"
+    assert all(len(key) == 2 for key in got)
+    assert sum(got.values()) == pytest.approx(1.0)
+    # Renormalised over the survivors, not over all ninety: the selections that cannot
+    # explain the board are impossible, not merely unlikely.
+    assert max(got.values()) > 1.0 / len(SELECTIONS)
+
+
+def test_bench_weights_ignore_the_order_within_a_pair(roster) -> None:  # noqa: ANN001
+    """`completions` keys on a sorted species tuple because two unseen slots are
+    interchangeable until one of them is switched in."""
+    names = _species(roster)
+    got = bench_weights(
+        SELECTIONS, np.full(len(SELECTIONS), 1.0 / len(SELECTIONS)), names, []
+    )
+    assert all(list(key) == sorted(key) for key in got)
+
+
+def test_entry_bench_weights_read_our_vector_and_their_class_average(roster) -> None:  # noqa: ANN001
+    """Ours is one distribution; theirs is one per spread class and we do not know which.
+
+    Averaging theirs by `class_weights` is the same marginalisation the selection solve
+    already makes when it prices a cell, and indexing ours by class would hand us their
+    private information -- constraint 3 in this module's docstring.
+    """
+    names = _species(roster)
+    entry = _entry(ours=_point_mass(0), theirs=[_point_mass(7)], sets=roster.sets)
+    # epsilon 0: the equilibrium unsoftened, so the masses are checkable by hand.
+    ours = BenchPrior.of(entry, 0, names, epsilon=0.0).weights(
+        [names[i] for i in SELECTIONS[0][:2]]
+    )
+    theirs = BenchPrior.of(entry, 1, names, epsilon=0.0).weights(
+        [names[i] for i in SELECTIONS[7][:2]]
+    )
+    assert ours == {tuple(sorted(names[i] for i in SELECTIONS[0][2:])): 1.0}
+    assert theirs == {tuple(sorted(names[i] for i in SELECTIONS[7][2:])): 1.0}
+
+
+def test_entry_bench_weights_average_two_classes(roster) -> None:  # noqa: ANN001
+    names = _species(roster)
+    entry = _entry(
+        ours=_point_mass(0), theirs=[_point_mass(0), _point_mass(7)], sets=roster.sets
+    )
+    got = BenchPrior.of(entry, 1, names, epsilon=0.0).weights([])
+    assert sum(got.values()) == pytest.approx(1.0)
+    assert len(got) == 2, "two classes putting their mass on different fours"
+    assert sorted(got.values()) == pytest.approx([0.5, 0.5])
+
+
+def test_the_bench_prior_is_softened_like_the_draw_it_models(roster) -> None:  # noqa: ANN001
+    """`BookEntry.draw` samples the softened mixture, so the belief must too.
+
+    A belief on the raw equilibrium would be confidently wrong about the opponent this
+    very game has -- and confidently is the word, because these supports run to two or
+    three selections of ninety, chosen on cells G28 measured at +-11 points.
+    """
+    names = _species(roster)
+    entry = _entry(ours=_point_mass(0), theirs=[_point_mass(0)], sets=roster.sets)
+    seen = [names[i] for i in SELECTIONS[0][:2]]
+    sharp = BenchPrior.of(entry, 0, names, epsilon=0.0).weights(seen)
+    soft = BenchPrior.of(entry, 0, names, epsilon=0.25).weights(seen)
+    assert len(sharp) == 1
+    assert len(soft) > 1, "exploration puts mass on fours the equilibrium does not"
+    assert max(soft.values()) < 1.0
+    assert sum(soft.values()) == pytest.approx(1.0)
+
+
+def test_entry_bench_weights_is_the_same_call(roster) -> None:  # noqa: ANN001
+    """The convenience wrapper must not be a second implementation."""
+    names = _species(roster)
+    entry = _entry(ours=_point_mass(0), theirs=[_point_mass(3)], sets=roster.sets)
+    seen = [names[i] for i in SELECTIONS[0][:2]]
+    assert entry_bench_weights(entry, 0, names, seen) == BenchPrior.of(
+        entry, 0, names
+    ).weights(seen)
 

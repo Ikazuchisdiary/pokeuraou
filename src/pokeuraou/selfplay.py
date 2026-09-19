@@ -35,7 +35,7 @@ import numpy as np
 
 from .actions import SideAction, switch_actions_after_faint
 from .equilibrium import EquilibriumError, solve
-from .hidden import completions, seen_slots
+from .hidden import completions, seen_slots, shown_species
 from .narrow import narrow
 from .payoff import HP_SHARE, Objective
 from .policy import policy_ranking
@@ -58,6 +58,7 @@ from .search import belief_solve, believed_ranking, leaf_ranking, search
 from .selection_book import (
     DEFAULT_EPSILON,
     DEFAULT_TEMPERATURE,
+    BenchPrior,
     SelectionBook,
 )
 from .standings import Standings, cluster_teams, label_for, sample_standings_team
@@ -401,6 +402,37 @@ def _menus(
     )
 
 
+def _bench_weights(
+    bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None,
+    side: int,
+    pos: Position,
+    seen: frozenset[int],
+    record: GameRecord,
+) -> dict[tuple[str, ...], float] | None:
+    """How likely each way of filling that side's unseen slots is, or None for uniform.
+
+    `completions` enumerates those ways and, without weights, treats them as equally
+    likely -- so the belief holds back-two pairs the opponent would never bring at the
+    same weight as the ones they would, and the opponent inside it is weaker than the one
+    across the table. Measured, that is worth about 10 points of the search's value early
+    in a hidden-bench game, against 1 point in the open game (G27/G30).
+
+    An empty result means the distribution explains nothing on the board, which should
+    not happen and is recorded rather than passed over: the fallback is the uniform
+    belief this exists to replace, and a silent fallback to the thing being fixed is how
+    a fix becomes invisible.
+    """
+    if bench_prior is None or bench_prior[side] is None:
+        return None
+    weights = bench_prior[side].weights(shown_species(pos, side, seen))
+    if not weights:
+        note = f"bench weights: side {side}'s selection prior explains nothing on board"
+        if note not in record.unmodelled:
+            record.unmodelled.append(note)
+        return None
+    return weights
+
+
 def play_game(
     reg: Regulation,
     rng: np.random.Generator,
@@ -420,6 +452,7 @@ def play_game(
     start: Position | None = None,
     first_action: str | None = None,
     sheets: tuple[Sequence[SampledSet], Sequence[SampledSet]] | None = None,
+    bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None = None,
 ) -> GameRecord:
     """Plays one game to a result, sampling both sides from the turn's equilibrium.
 
@@ -507,7 +540,7 @@ def play_game(
             shown = [seen_slots(pos, i, shown[i]) for i in (0, 1)]
             pos = _do_replacement_node(
                 reg, rng, pos, owed, record, leaves,
-                sheets=sheets, shown=shown,
+                sheets=sheets, shown=shown, bench_prior=bench_prior,
             )
             continue
 
@@ -523,7 +556,8 @@ def play_game(
             try:
                 spreads = {
                     side: completions(
-                        reg, pos, side, sheets[side], seen=shown[side]
+                        reg, pos, side, sheets[side], seen=shown[side],
+                        weights=_bench_weights(bench_prior, side, pos, shown[side], record),
                     )
                     for side in (0, 1)
                 }
@@ -866,6 +900,7 @@ def _do_replacement_node(
     *,
     sheets: tuple[Sequence[SampledSet], Sequence[SampledSet]] | None = None,
     shown: list[frozenset[int]] | None = None,
+    bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None = None,
 ) -> Position:
     """Solves and applies the replacement phase.
 
@@ -928,7 +963,10 @@ def _do_replacement_node(
         answers: dict[int, tuple[list[float], float]] = {}
         try:
             spreads = {
-                side: completions(reg, pos, side, sheets[side], seen=seen[side])
+                side: completions(
+                    reg, pos, side, sheets[side], seen=seen[side],
+                    weights=_bench_weights(bench_prior, side, pos, seen[side], record),
+                )
                 for side in (0, 1)
             }
         except ValueError as problem:
@@ -1175,6 +1213,11 @@ def generate(
     with path.open("a", encoding="utf-8") as handle:
         for index, rng in scheduled():
             drawn = None
+            # Bound here because only the standings branch assigns it, and the bench
+            # prior below reads it. It currently survives on `drawn is not None`
+            # short-circuiting first, which is a name binding resting on the order of an
+            # `and` -- true today and not a thing to rely on.
+            entry = None
             forced_uniform = False
             mirror = mirror_share > 0.0 and rng.random() < mirror_share
             if mirror:
@@ -1239,6 +1282,27 @@ def generate(
                 solve_sparsely=solve_sparsely,
                 # Both sixes, so neither search is shown the other's unplayed bench.
                 sheets=(list(roster.sets), list(foe_six)) if hide_bench else None,
+                # And what each side would have brought, so the belief over the bench is
+                # the opponent's own selection equilibrium rather than a uniform draw
+                # over every pair the sheet allows. Only when the book named this
+                # opponent: without an entry there is nothing to condition on and
+                # uniform is the honest prior, which is what `None` selects.
+                # The same epsilon and temperature the draw above used, because the
+                # belief has to be about the opponent this game actually has.
+                bench_prior=(
+                    (
+                        BenchPrior.of(
+                            entry, 0, [s.species for s in roster.sets],
+                            epsilon=explore_epsilon, temperature=explore_temperature,
+                        ),
+                        BenchPrior.of(
+                            entry, 1, [s.species for s in foe_six],
+                            epsilon=explore_epsilon, temperature=explore_temperature,
+                        ),
+                    )
+                    if hide_bench and drawn is not None and entry is not None
+                    else None
+                ),
                 selection=(
                     [entry.species for entry in roster.sets],
                     [entry.species for entry in foe_six],

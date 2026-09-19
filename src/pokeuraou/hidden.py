@@ -94,6 +94,34 @@ def seen_slots(
     return frozenset(shown)
 
 
+def shown_species(
+    position: Position, side_index: int, seen: frozenset[int]
+) -> set[str]:
+    """Species ids that side has revealed, with each Mega's base form alongside it.
+
+    A Mega on the board is `charizardmegay` and its sheet entry is `charizard`, so
+    matching on `species` alone leaves the base form available to fill a hidden slot and
+    the belief gains completions holding a second copy of a Pokemon already out. With one
+    Mega and two unseen slots that was 4 of 10 completions -- 40% of the mass on worlds
+    Species Clause forbids -- and it never tripped `completions`' arity check, because an
+    extra candidate makes the sheet look MORE able to explain the board, not less.
+    `baseSpecies` arrives from Showdown as a display name, so both go through `to_id`.
+
+    Lives here rather than inside `completions` because the weights that price those
+    completions have to condition on the same set, and two spellings of "what has been
+    seen" is how the belief and its weights come apart.
+    """
+    from .regulation import to_id
+
+    out: set[str] = set()
+    for mon in position.sides[side_index].pokemon:
+        if mon.slot not in seen:
+            continue
+        out.add(to_id(mon.species))
+        out.add(to_id(mon.base_species))
+    return out
+
+
 def completions(
     reg: Regulation,
     position: Position,
@@ -127,22 +155,9 @@ def completions(
     if not hidden:
         return [Completion(position, (), (), 1.0, exact=True)]
 
-    # A Mega on the board is `charizardmegay` and its sheet entry is `charizard`, so
-    # matching on `species` alone leaves the base form in the candidate pool and the
-    # belief gains completions holding a second copy of a Pokemon that is already out.
-    # With one Mega and two unseen slots that was 4 of 10 completions -- 40% of the mass
-    # on worlds Species Clause forbids -- and it never tripped the check below, because
-    # an extra candidate makes the sheet look MORE able to explain the board rather than
-    # less. `baseSpecies` arrives from Showdown as a display name, so both sides of the
-    # comparison go through `to_id`.
     from .regulation import to_id
 
-    on_board: set[str] = set()
-    for mon in side.pokemon:
-        if mon.slot not in shown:
-            continue
-        on_board.add(to_id(mon.species))
-        on_board.add(to_id(mon.base_species))
+    on_board = shown_species(position, side_index, shown)
     candidates = [entry for entry in sheet if to_id(entry.species) not in on_board]
     if len(candidates) < len(hidden):
         # The sheet cannot explain the board, so something upstream handed us the wrong
