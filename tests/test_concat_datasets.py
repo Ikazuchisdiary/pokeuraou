@@ -13,8 +13,15 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pokeuraou.encode import Encoded
-from pokeuraou.value import Dataset, concat_datasets
+# `pokeuraou.value` imports torch at module scope, so without the learn group this file
+# raised at *collection* and took the whole run down with it -- a suite that cannot be
+# started says nothing about the 400 tests that need no torch. Skipping is what the two
+# other torch-dependent modules already do; this makes the four say it the same way, and
+# makes the learn job's audit able to insist the skip does not happen there.
+pytest.importorskip("torch", reason="the dataset needs the optional learn group")
+
+from pokeuraou.encode import Encoded  # noqa: E402
+from pokeuraou.value import Dataset, concat_datasets  # noqa: E402
 
 
 def shard(n: int, *, games: int, foe_names: tuple[str, ...], outcome: float) -> Dataset:

@@ -47,6 +47,15 @@ addopts = "-q"
 [tool.ruff]
 line-length = 110
 target-version = "py312"
+# `scratchpad/` is the record of one-off investigations -- each script is the exact code
+# that answered one question on one day, hardcoded absolute paths and all, and is kept so
+# a number in GENERATIONS.md can be traced back to what produced it. Reformatting those to
+# please a linter would edit the record. Lint the code that runs again; leave the record.
+#
+# `vendor/` is the pinned Showdown checkout, which is a submodule rather than an ignored
+# directory, so ruff walks into it and reports on someone else's Python. It only appears
+# once the submodule is initialised, which is why this was invisible until CI did that.
+extend-exclude = ["scratchpad", "vendor"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM", "NPY"]

@@ -38,6 +38,7 @@ Nothing here plays a game. It reads the games that were already played and recor
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import math
 import sys
@@ -206,10 +207,10 @@ def read_games(
             "builds": dict(here),
             "rows": listed,
         }
-    try:
+    # The cache is an optimisation, so a read-only checkout or a full disk must cost the
+    # rebuild rather than the answer.
+    with contextlib.suppress(OSError):
         cache_path.write_text(json.dumps(fresh), encoding="utf-8")
-    except OSError:
-        pass
     return out, repaired, builds, failed
 
 

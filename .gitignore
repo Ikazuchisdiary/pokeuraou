@@ -17,6 +17,8 @@ __pycache__/
 # staged for the first commit.
 data/
 bench/out/
+# The junit report pytest writes for `tools/ci_skip_audit.py`, locally and in CI.
+reports/
 
 # Self-play games. Generated, large, and reproducible from the seed in the filename;
 # the value function is trained from these but they are not the source of truth.

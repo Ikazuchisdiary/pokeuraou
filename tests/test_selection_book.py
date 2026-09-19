@@ -105,6 +105,20 @@ def _point_mass(index: int) -> np.ndarray:
     return out
 
 
+def _solver_tool():
+    """`tools/solve_selection_book.py`, which imports torch at module scope.
+
+    The two tests that read its path helpers therefore need the learn group, while the
+    rest of this file does not. Without the guard they failed rather than skipped, so an
+    install without torch showed two reds that were about the install -- which is the
+    difference CI has to keep visible.
+    """
+    pytest.importorskip("torch", reason="the book solver needs the optional learn group")
+    from tests._harness import load_tool
+
+    return load_tool("solve_selection_book")
+
+
 # ------------------------------------------------------------------ the key is the sheet
 
 
@@ -624,9 +638,7 @@ def test_the_merge_reads_the_directory_the_shards_wrote_to(tmp_path) -> None:  #
     eight shards and then refused, saying it found no part files "next to" an ``out`` it
     had never looked next to.
     """
-    from tests._harness import load_tool
-
-    tool = load_tool("solve_selection_book")
+    tool = _solver_tool()
     out = tmp_path / "elsewhere" / "rizabanadohido-value-gen8-s2.jsonl.gz"
     out.parent.mkdir(parents=True)
 
@@ -653,9 +665,7 @@ def test_an_ensemble_book_cannot_overwrite_the_single_net_book() -> None:
     """
     from pathlib import Path
 
-    from tests._harness import load_tool
-
-    tool = load_tool("solve_selection_book")
+    tool = _solver_tool()
     one = [Path("data/models/value-gen8.pt")]
     two = [Path("data/models/value-gen8.pt"), Path("data/models/value-gen8-s1.pt")]
 
