@@ -20,9 +20,16 @@ happened to ask, and 1.9e-06 in a leaf is enough to move an equilibrium. It can 
 exact by padding every batch to a fixed length, which costs 1.13x of a forward pass -- and
 that trade is worth restating, because the share it was weighed against has moved. The
 figure here was 7.7% of a worker; measured on 2026-09-20 over a 300-seat-game served
-match, 24 workers over two servers (`tools/profile_stages.py match`), a worker spends
-34.2% of its wall clock waiting on this server, and 94% of that wait is the server
-computing rather than queueing. So padding costs about 4.4% of a worker, not 1%. The
+match, 24 workers over two servers (`tools/profile_stages.py match`), a worker spent
+34.2% of its wall clock waiting on this server, and 94% of that wait was the server
+computing rather than queueing. So padding cost about 4.4% of a worker, not 1%.
+
+**That 34.2% was taken before IKA-52 and IKA-53 landed the same afternoon**, and those
+two remove most of what made it large: a third of that match was the refused-cell tail,
+where every refused cell asked this server to score a handful of rows on its own. In
+generation the forward passes went 10,930 to 776. **The match has not been re-measured**,
+so the honest reading of 34.2% is "an upper bound from before the tail was batched", and
+the padding cost that follows from it is an upper bound too. The
 decision stands on the other leg anyway -- merging makes an answer depend on who else
 happened to ask -- and the memory this was built for does not depend on merging at all.
 A request goes through as it arrived, with the row count it arrived with, and the answers
@@ -437,9 +444,11 @@ def served_model(value: Any):
     # not a slow one -- and it is why throughput *fell* as workers were added, 0.71x at
     # six and 0.66x at fourteen against a direct run.
     #
-    # The 7.7% in that last line was 2026-09-19's figure and is now 34.2% of a worker
-    # (2026-09-20, 24 served workers over two servers). It does not change the reading:
-    # the lock was saturated, not slow, and a larger share only makes that worse.
+    # The 7.7% in that last line was 2026-09-19's figure. A served match on 2026-09-20
+    # put it at 34.2% of a worker, and that reading is itself dated: it was taken before
+    # IKA-52 batched the refused cells, which were a third of that match. The match has
+    # not been re-measured. None of this changes the reading here either way -- the lock
+    # was saturated, not slow, and any share above a few percent makes that worse.
     #
     # Each thread's copy stacks the same parameter tensors and deep-copies its own base,
     # so the arithmetic is identical and only the module being reparametrised is private.

@@ -734,13 +734,23 @@ class BatchedValue:
         bridge off   branch generation 85.8%, encoding 8.1%, forward 0.4%
         bridge on    branch generation 26.6%, encoding 2.9%, forward 32.3%
 
-    The forward pass did not get slower. The Rust bridge refuses about 2.7% of a
-    node's cells, each refused cell is filled here as a 1x1 node, and each pays a
-    forward pass of its own: 45,777 forward passes for 2,673 nodes over those 300
-    games. A 60-game run of the same configuration, which counted the rows as well as
-    the calls, puts the refused cells at 94.9% of the calls and 6.0% of the rows --
-    1,110 rows a call for a whole node against 3.9 for a refused cell. The batching
-    this class exists for is being undone one cell at a time, downstream of it.
+    **Those two lines are from earlier the same day than the code below them**, and the
+    32.3% is the part that has since moved. The forward pass had not got slower: the
+    bridge refuses about 2.7% of a node's cells, each refused cell was filled here as a
+    1x1 node, and each paid a forward pass of its own -- 45,777 forward passes for 2,673
+    nodes over those 300 games, and on a 60-game run that counted rows as well as calls,
+    94.9% of the calls carrying 6.0% of the rows, 1,110 rows a call for a whole node
+    against 3.9 for a refused cell.
+
+    IKA-52 and IKA-53 landed that afternoon and took it away: a node's refused cells go
+    to `batched_payoffs` in one call instead of one each, and the two names behind 88% of
+    the refusals joined the port's list. On the same 60-game run the forward passes went
+    10,930 to 776 and the run 21.8s to 10.3s.
+
+    The paragraph is kept rather than deleted because it is what this class is for. The
+    batching was being undone one cell at a time downstream of here, and nothing visible
+    from inside this class could have shown it -- only a breakdown taken across the whole
+    run could, which is the reason `pokeuraou.timing` exists.
     """
 
     def __init__(
