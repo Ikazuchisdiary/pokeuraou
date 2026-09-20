@@ -1,4 +1,4 @@
-"""What the refine does to the number the search believes, on the same position.
+"""What the tested setting does to the number the search believes, on one position.
 
 A queued match plays game k twice with the arms swapped, and side 0 is our roster in both
 seats. `searchValue` is recorded for side 0 only, so at turn 1 -- where the position is
@@ -56,19 +56,19 @@ def main() -> None:
         biggest = max(shifts, key=abs)
         print(f"  {n} turn-1 positions, both depths")
         print(
-            f"  refine moves side 0's own equilibrium value by {mean:+.5f}"
-            f" +-{half:.5f} (sd {sd:.5f})"
+            f"  the tested arm's setting moves side 0's own equilibrium value by "
+            f"{mean:+.5f} +-{half:.5f} (sd {sd:.5f})"
         )
         print(
             f"  moved at all: {moved} ({moved / n:.1%}),"
             f" downward: {down} ({down / n:.1%}), largest {biggest:+.4f}"
         )
         print(
-            "  → depth 1 was optimistic about its own position"
+            "  -> the other arm was optimistic about side 0's position"
             if mean < -1e-6
-            else "  → depth 1 was pessimistic about its own position"
+            else "  -> the other arm was pessimistic about side 0's position"
             if mean > 1e-6
-            else "  → no systematic shift"
+            else "  -> no systematic shift"
         )
 
 
