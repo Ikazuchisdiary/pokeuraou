@@ -29,6 +29,7 @@ import json
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Protocol
 
 import numpy as np
@@ -174,6 +175,22 @@ class GameRecord:
     foe_selection_mixture: list[float] = field(default_factory=list)
     #: The equilibrium value of the selection game, in win probability.
     selection_value: float | None = None
+    #: Wall clock each agent spent deciding at the MOVE nodes, in seconds, indexed by
+    #: side. Its own solve, plus its share of the candidate menus: a construction that
+    #: served both agents is split in half, because charging it to whichever side the
+    #: code happened to run first is how a cost comparison between two settings gets its
+    #: answer from the order of the statements.
+    #:
+    #: Move nodes only. The replacement node is the same work for both agents -- no
+    #: depth, no width, one matrix each at most -- so putting it here would dilute the
+    #: ratio the number exists to report. What a whole game costs is the caller's
+    #: `s/game`, which has always been there.
+    #:
+    #: Recorded per side rather than per game because the question depth-2 exists to
+    #: answer -- is this worth its wall clock -- cannot be asked of a number that holds
+    #: both arms. Two runs of different machine load are not comparable, and that is how
+    #: the previous depth-2 cost was quoted.
+    search_seconds: list[float] = field(default_factory=lambda: [0.0, 0.0])
 
     def to_json(self, *, objective: str, search_limit: int | tuple[int, int]) -> dict[str, Any]:
         return {
@@ -182,6 +199,7 @@ class GameRecord:
             "foeArchetype": self.foe_archetype,
             "outcome": self.outcome,
             "turns": self.turns,
+            "searchSeconds": list(self.search_seconds),
             "foeSpecies": [m["species"] for m in self.foe_team],
             "searchObjective": objective,
             "searchLimit": list(search_limit)
@@ -564,9 +582,11 @@ def play_game(
             except ValueError as problem:
                 record.unmodelled.append(f"hidden bench: {problem}")
                 break
+        menu_started = perf_counter()
         ours, theirs = _menus(
             reg, pos, limits, own_leaf, budget, ranked[0], policies[0], spreads
         )
+        menu_seconds = perf_counter() - menu_started
         if not ours or not theirs:
             break
 
@@ -593,11 +613,15 @@ def play_game(
             )
         )
 
+        own_seconds = foe_seconds = 0.0
+        foe_solved = False
+
         if spreads is not None:
             # Each side is uncertain about a different bench, so each gets its own answer.
             # The node underneath them is resolved once: their hidden slots are disjoint
             # and a cell that reaches neither resolves the same way whatever is standing
             # on either bench.
+            solve_started = perf_counter()
             try:
                 answers = belief_solve(
                     reg, pos, ours, theirs, spreads,
@@ -605,6 +629,7 @@ def play_game(
                 )
             except EquilibriumError:
                 break
+            own_seconds = perf_counter() - solve_started
             record.unmodelled.extend(
                 answers[0].unmodelled | answers[1].unmodelled
             )
@@ -619,6 +644,7 @@ def play_game(
                 # recorded them per side and only side 0's were ever played. The anchor
                 # of the hidden-bench scale was measured this way, with the hp-share arm
                 # handed a menu ranked by the other arm's value function in one seat.
+                foe_started = perf_counter()
                 foe_ours, foe_theirs = _menus(
                     reg, pos, limits, foe_leaf, budget, ranked[1], policies[1], spreads
                 )
@@ -633,7 +659,10 @@ def play_game(
                     break
                 record.unmodelled.extend(foe_answers[1].unmodelled)
                 foe_strategy = foe_answers[1].strategy
+                foe_seconds = perf_counter() - foe_started
+                foe_solved = True
         else:
+            solve_started = perf_counter()
             try:
                 own_search = search(
                     reg, pos, ours, theirs, own_leaf, budget=budget, depth=depths[0],
@@ -641,6 +670,7 @@ def play_game(
                 )
             except EquilibriumError:
                 break
+            own_seconds = perf_counter() - solve_started
             record.unmodelled.extend(own_search.unmodelled)
             equilibrium = own_search.equilibrium
 
@@ -658,6 +688,7 @@ def play_game(
                 or policies[1] is not policies[0]
                 or sparse[1] != sparse[0]
             ):
+                foe_started = perf_counter()
                 foe_ours, foe_theirs = (
                     (ours, theirs)
                     if same_menu
@@ -677,9 +708,23 @@ def play_game(
                     break
                 record.unmodelled.extend(foe_search.unmodelled)
                 foe_equilibrium = foe_search.equilibrium
+                foe_seconds = perf_counter() - foe_started
+                foe_solved = True
             own_strategy = np.asarray(equilibrium.row_strategy, dtype=np.float64)
             foe_strategy = np.asarray(foe_equilibrium.col_strategy, dtype=np.float64)
             search_value = float(equilibrium.value)
+
+        if foe_solved:
+            # `same_menu` is the only case where one construction served both agents;
+            # otherwise side 0's menus are side 0's alone and side 1 timed its own.
+            shared = menu_seconds / 2 if same_menu else 0.0
+            record.search_seconds[0] += own_seconds + menu_seconds - shared
+            record.search_seconds[1] += foe_seconds + shared
+        else:
+            # One construction and one solve served both agents. Neither of them would
+            # have spent less alone, and neither of them spent it alone.
+            record.search_seconds[0] += (menu_seconds + own_seconds) / 2
+            record.search_seconds[1] += (menu_seconds + own_seconds) / 2
 
         own_index = _sample_index(rng, own_strategy)
         if first_action is not None and not record.decisions:
