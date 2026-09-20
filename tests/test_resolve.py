@@ -983,6 +983,110 @@ def test_the_mid_turn_replacement_is_a_choice_and_not_an_average(
     assert flipped.value(values) == pytest.approx(min(scores.values()))
 
 
+def test_a_chunked_fill_scores_the_same_node(
+    reg: Regulation, team_a: list[TeamSet], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Releasing a node's leaves part way through must not change what it is worth.
+
+    `batched_payoffs` held every leaf of every cell alive until the whole node was
+    resolved, and a 24x24 depth-1 node measured that way took this machine to 0.3 GB free
+    (IKA-27). `LEAF_CHUNK` bounds the list instead. The leaves it scores are the same
+    leaves and the folds are the same folds, so for a per-position objective the matrix has
+    to come back identical to the bit -- not close, identical, because a payoff that moves
+    is an equilibrium that moves.
+
+    The cell list includes a U-turn, so at least one cell stops for a mid-turn replacement
+    and the fold path is the one crossing a chunk boundary rather than a plain average.
+
+    A learned leaf is the case this cannot claim: its forward pass is float32 matrix
+    arithmetic whose last places depend on the number of rows in the batch, and chunking
+    changes that number. That difference is measured where it belongs, against the value
+    function, and not asserted here.
+    """
+    from pokeuraou import resolve as resolve_module
+    from pokeuraou.payoff import HP_SHARE
+
+    pos = _synthetic_position(reg, team_a)
+    mover = pos.sides[0].pokemon[pos.sides[0].active[0]]
+    mover.moves[0] = MoveSlot(id="uturn", pp=20, maxpp=20)
+    uturn = SideAction(
+        slots=(
+            MoveAction(slot=0, move_index=1, move_id="uturn", target=1),
+            PassAction(slot=1),
+        )
+    )
+    ours = [uturn, *side_actions(reg, pos, 0)[:3]]
+    theirs = side_actions(reg, pos, 1)[:4]
+    budget = Budget.matrix()
+    assert resolve_turn(reg, pos, [uturn, theirs[0]], budget=budget).suspended, (
+        "the node has to contain a suspended turn for the fold to be under test"
+    )
+
+    calls: list[int] = []
+
+    def evaluate(positions: list[Position]) -> np.ndarray:
+        calls.append(len(positions))
+        return HP_SHARE.batch(positions)
+
+    monkeypatch.setattr(resolve_module, "LEAF_CHUNK", 0)
+    whole, whole_notes, whole_exact = resolve_module.batched_payoffs(
+        reg, pos, ours, theirs, [evaluate], budget=budget
+    )
+    at_once = calls.copy()
+    calls.clear()
+
+    monkeypatch.setattr(resolve_module, "LEAF_CHUNK", 64)
+    chunked, chunked_notes, chunked_exact = resolve_module.batched_payoffs(
+        reg, pos, ours, theirs, [evaluate], budget=budget
+    )
+
+    assert len(at_once) == 1, "unchunked is one call holding the whole node"
+    assert len(calls) > 1, "chunked has to have actually split this node"
+    assert sum(calls) == at_once[0], "the same leaves were scored, not fewer"
+    assert max(calls) < at_once[0], "and never all of them at the same time"
+    assert np.array_equal(chunked[0], whole[0]), "the payoff moved when the leaves were released"
+    assert np.array_equal(chunked_exact, whole_exact)
+    assert chunked_notes == whole_notes
+
+
+def test_a_chunk_boundary_never_falls_inside_a_cell(
+    reg: Regulation, team_a: list[TeamSet], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cell's leaves are scored by one call, whatever the chunk size.
+
+    The fold of a suspended turn indexes into the array of values it was scored with, so a
+    cell split across two calls would be folded from half an array. `LEAF_CHUNK` is a
+    floor checked between cells rather than a ceiling enforced inside one, and that is the
+    reason: with the chunk set to 1 every cell flushes on its own, and each call is exactly
+    one cell's leaves.
+    """
+    from pokeuraou import resolve as resolve_module
+    from pokeuraou.payoff import HP_SHARE
+
+    pos = _synthetic_position(reg, team_a)
+    ours = side_actions(reg, pos, 0)[:3]
+    theirs = side_actions(reg, pos, 1)[:3]
+    budget = Budget.matrix()
+    def leaves_of(a: SideAction, b: SideAction) -> int:
+        result = resolve_turn(reg, pos, [a, b], budget=budget)
+        if result.suspended:
+            return len(turn_leaves(reg, result).positions)
+        return len(result.branches)
+
+    per_cell = [leaves_of(a, b) for a in ours for b in theirs]
+
+    calls: list[int] = []
+
+    def evaluate(positions: list[Position]) -> np.ndarray:
+        calls.append(len(positions))
+        return HP_SHARE.batch(positions)
+
+    monkeypatch.setattr(resolve_module, "LEAF_CHUNK", 1)
+    resolve_module.batched_payoffs(reg, pos, ours, theirs, [evaluate], budget=budget)
+
+    assert [n for n in calls if n] == [n for n in per_cell if n]
+
+
 @pytest.mark.oracle
 def test_the_replacement_takes_the_residual_and_not_the_departing_pokemon(
     reg: Regulation, oracle: Oracle
