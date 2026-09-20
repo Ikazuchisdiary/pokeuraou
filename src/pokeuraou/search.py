@@ -10,6 +10,13 @@ Two measurements say that is where the remaining strength is.
 **Breadth is saturated.** 24 candidates beat 16 by +8.8 +-2.9 points; 48 beat 24 by
 nothing at eight times the cost. There is no gain left in looking at more actions.
 
+    2026-09-20, IKA-12: the second half of that is false, and it was the reason this
+    module exists. "48 beat 24 by nothing" was a failure to reject on 1,696 games
+    (+1.3 [-1.1, +3.7]); on 12,000 it is +3.4 +-0.7, and the three older runs all had
+    the same sign. Width 48 costs 2.00x width 24 per move decision, measured alternated
+    on an idle machine. There is gain left in looking at more actions, and it is the
+    largest lever measured this year.
+
 **More data is saturating too.** Adding 5,600 self-play games to 8,013 was worth +3.6
 [+0.2, +6.9]; adding 7,000 more to 13,613 was worth +1.7 [-1.7, +5.1], which cannot be
 told from zero. Another generation of the same shape is not the lever.
@@ -58,6 +65,26 @@ Nor is it assumed to be *better*. Depth costs wall clock, and the comparison tha
 it is depth-2 against depth-1 at equal wall clock, played out. Breadth is saturated at
 24, so that comparison is not rigged in depth's favour: there is nothing else to spend
 the time on.
+
+    2026-09-20, IKA-12: played out, and it lost.
+
+        depth 2 at width 24 against depth 1 at width 24   48.28% +-0.71   16,000 games
+        width 48 against width 24, both depth 1           53.42% +-0.73   12,000 games
+        depth 2 at width 24 against depth 1 at width 48   46.62% +-1.17    6,000 games
+
+    Costs, per move decision, from inside the same runs: the refine is 5.21x a whole
+    depth-1 decision at width 24; width 48 is 2.00x. So the sentence above is wrong in
+    both halves -- there was something else to spend the time on, it is cheaper, and it
+    wins where this loses.
+
+    The numbers this produces are not the problem. On the same turn-1 positions the
+    refine moves side 0's own equilibrium value by +0.0072 +-0.0010, the direction of
+    that move predicts the outcome (r = +0.147 +-0.022 over 8,000 games), and its
+    forecast scores better on Brier than depth 1's (-0.0051 +-0.0034, confounded by each
+    arm facing the other). What loses is the *strategy*, which is read off a matrix of
+    16 refined cells and 560 unrefined ones -- the object "What it does not claim" says
+    is the equilibrium of neither game. That paragraph was right and this is what being
+    right about it costs.
 """
 
 from __future__ import annotations
