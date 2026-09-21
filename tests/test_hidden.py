@@ -60,6 +60,33 @@ def test_two_unseen_slots_from_four_candidates_make_six_completions(setup) -> No
     assert all(not (set(c.species) & leads) for c in made)
 
 
+def test_a_mega_on_the_board_is_not_also_a_candidate(setup) -> None:  # noqa: ANN001
+    """The board calls it `charizardmegay`; the sheet calls it `charizard`.
+
+    Found on 2026-09-19 while re-checking a human-baseline case under the information the
+    players had. The opponent's Charizard had Mega Evolved, so the sheet's `charizard`
+    matched nothing on the board and stayed in the candidate pool: ten completions instead
+    of six, four of them holding a second Charizard while the first was still out. Those
+    are positions Species Clause forbids, they carried 40% of the belief, and nothing
+    complained -- the arity check below only fires when candidates are too FEW, and this
+    bug makes them too many.
+    """
+    reg, roster = setup
+    sheet = _sheet(roster)
+    position, _brought = _opening(reg, sheet)
+    lead = position.sides[1].pokemon[0]
+    assert lead.species == "charizard", "the fixture's first sheet member moved"
+    lead.species = "charizardmegay"
+    # Showdown hands `baseSpecies` back as a display name, which is half the bug.
+    lead.base_species = "Charizard"
+    lead.is_mega = True
+
+    made = completions(reg, position, 1, sheet)
+    assert len(made) == 6
+    assert all("charizard" not in c.species for c in made)
+    assert all("charizardmegay" not in c.species for c in made)
+
+
 def test_the_weights_are_a_distribution(setup) -> None:  # noqa: ANN001
     reg, roster = setup
     sheet = _sheet(roster)

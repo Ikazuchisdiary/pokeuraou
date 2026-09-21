@@ -18,7 +18,7 @@ sweeps and Venusaur never does, that is a different agent from the one the artic
 describes, and the disagreement is about which Pokemon wins the game rather than about
 how long it takes.
 
-    uv run python tools/does_the_sweep_happen.py data/selfplay-gen7 data/selfplay-gen9
+    uv run python tools/oneshot/does_the_sweep_happen.py data/selfplay-gen7 data/selfplay-gen9
 """
 
 from __future__ import annotations

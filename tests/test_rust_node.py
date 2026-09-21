@@ -17,6 +17,7 @@ from typing import Any
 import numpy as np
 import pytest
 
+from pokeuraou import resolve as resolve_module
 from pokeuraou import rustnode
 from pokeuraou.cli import _modal, build_beliefs
 from pokeuraou.damage import register_mega_stones
@@ -251,6 +252,60 @@ def test_asking_for_some_cells_answers_those_cells(bridged: None) -> None:
                 assert some_exact[i, j] == whole_exact[i, j]
 
 
+def test_the_arrays_take_both_roads_and_are_the_same_bytes(bridged: None) -> None:
+    """An encoded node's arrays cross through shared memory, or down the pipe, unchanged.
+
+    Two things at once, and the first is why the second means anything. The header has to
+    say which road it took -- `grow` for the node that asks for a block, `shm` once there
+    is one, `pipe` for a process holding none -- because a run that quietly fell back to
+    the pipe would pass an equality check by never testing anything. Then the arrays from
+    the two roads have to be *identical*: the same function writes the same bytes in the
+    same order into a different sink, and nothing about a node's value may depend on which.
+    """
+    reg, pos, row, col = _node()
+
+    def both(blocks: bool) -> tuple[list[str], Any]:
+        rustnode.reset()
+        child = rustnode.node_for(reg)
+        assert child is not None
+        child._shm_off = not blocks  # noqa: SLF001 - the arm the test is here to pick
+        roads: list[str] = []
+        real = rustnode.EncodedNode.unpack
+
+        def watch(header: dict, body: bytearray):  # noqa: ANN202
+            roads.append(str(header.get("via")))
+            return real(header, body)
+
+        rustnode.EncodedNode.unpack = staticmethod(watch)
+        try:
+            # Twice: the first node of a process is the one that asks for a block, and
+            # the second is the one that finds it already there.
+            filled = None
+            for _ in range(2):
+                filled = child.fill_encoded(
+                    pos, row, col, Budget.matrix(), ["hp-share"], None
+                )
+            return roads, filled
+        finally:
+            rustnode.EncodedNode.unpack = staticmethod(real)
+
+    through_block, with_block = both(blocks=True)
+    through_pipe, down_pipe = both(blocks=False)
+    assert through_block == ["grow", "shm"], "the block was offered and never used"
+    assert through_pipe == ["pipe", "pipe"], "a block was used by a process holding none"
+
+    for name in ("species", "ability", "item", "moves", "mon", "mask", "side", "field"):
+        mine = getattr(with_block.encoded, name)
+        theirs = getattr(down_pipe.encoded, name)
+        assert mine.dtype == theirs.dtype and mine.shape == theirs.shape
+        assert np.array_equal(mine, theirs), f"{name} differs between the two roads"
+    assert np.array_equal(
+        with_block.leaf_values["hp-share"], down_pipe.leaf_values["hp-share"]
+    )
+    assert with_block.spans == down_pipe.spans
+    assert with_block.folded == down_pipe.folded
+
+
 def test_a_node_that_dies_is_replaced_rather_than_given_up_on(bridged: None) -> None:
     """One failure used to end the bridge for the whole process.
 
@@ -277,6 +332,137 @@ def test_a_node_that_dies_is_replaced_rather_than_given_up_on(bridged: None) -> 
     assert replacement is not None
     filled = replacement.fill(pos, row, col, ["hp-share"], Budget.matrix())
     assert not filled.refused
+
+
+def test_the_refused_cells_are_filled_in_one_call(
+    bridged: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A node's refused cells are filled together, not one at a time.
+
+    Measured on 2026-09-20: 6.0% of a generation's leaf rows were arriving in 94.9% of its
+    forward passes, because each cell the port declined was filled by calling
+    `batched_payoffs` on a 1x1 node of its own -- a forward pass for a handful of leaves,
+    too small to amortise a kernel launch. `cells=` was already there; only using it was
+    missing.
+
+    The guard is the count of calls rather than the time, because the time belongs to the
+    machine and the count is the property that made it slow.
+    """
+    reg, pos, row, col = _node()
+    evaluators = [OBJECTIVES["hp-share"].batch, OBJECTIVES["faints"].batch]
+
+    # Slow Start is implemented here and refused there, so every cell comes back named
+    # and the tail is the only thing that fills this node.
+    mine = pos.sides[0].active_pokemon()[0]
+    assert mine is not None
+    mine.ability = "slowstart"
+    assert not validate_position(pos, reg.meta.active_per_side)
+
+    os.environ[rustnode.ENV_ENABLE] = "0"
+    rustnode.reset()
+    expected, _notes, expected_exact = batched_payoffs(
+        reg, pos, row, col, evaluators, budget=Budget.matrix()
+    )
+
+    os.environ[rustnode.ENV_ENABLE] = "1"
+    rustnode.reset()
+    node = rustnode.node_for(reg)
+    assert node is not None
+    filled = node.fill(pos, row, col, ["hp-share", "faints"], Budget.matrix())
+    assert len(filled.refused) == len(row) * len(col), "the port was meant to refuse these"
+
+    asked: list[object] = []
+    real = resolve_module.batched_payoffs
+
+    def counting(*args: Any, **kwargs: Any):  # noqa: ANN202
+        asked.append(kwargs.get("cells"))
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(resolve_module, "batched_payoffs", counting)
+    rustnode.reset()
+    got, _n2, got_exact = counting(
+        reg, pos, row, col, evaluators, budget=Budget.matrix()
+    )
+
+    assert len(asked) == 2, f"{len(asked) - 1} calls filled the tail, not 1"
+    assert asked[0] is None
+    assert asked[1] is not None and len(asked[1]) == len(row) * len(col)
+    for index in range(len(evaluators)):
+        # Bit-identical here, and it has to be: these cells were resolved and scored in
+        # Python on both runs, so nothing summed anything in a different order.
+        assert np.array_equal(np.asarray(got[index]), np.asarray(expected[index]))
+    assert np.array_equal(np.asarray(got_exact), np.asarray(expected_exact))
+
+
+def test_a_white_herb_holder_is_not_refused(bridged: None) -> None:
+    """The effect crossed with the port; only the item list was never told about it.
+
+    `check_white_herb` and its four call sites landed on 2026-09-12 and `item_handled` did
+    not list the item, so every position a holder could be involved in was refused for an
+    effect that was already implemented -- 63% of the cells generation refused.
+    """
+    reg, pos, row, col = _node()
+    mine = pos.sides[0].active_pokemon()[0]
+    assert mine is not None
+    mine.item = "whiteherb"
+    assert not validate_position(pos, reg.meta.active_per_side)
+    evaluators = [OBJECTIVES["hp-share"].batch, OBJECTIVES["faints"].batch]
+
+    node = rustnode.node_for(reg)
+    assert node is not None
+    filled = node.fill(pos, row, col, ["hp-share", "faints"], Budget.matrix())
+    assert not [why for _i, _j, why in filled.refused if "whiteherb" in why]
+
+    os.environ[rustnode.ENV_ENABLE] = "0"
+    rustnode.reset()
+    expected, _notes, _e = batched_payoffs(
+        reg, pos, row, col, evaluators, budget=Budget.matrix()
+    )
+    os.environ[rustnode.ENV_ENABLE] = "1"
+    rustnode.reset()
+    got, _n2, _e2 = batched_payoffs(reg, pos, row, col, evaluators, budget=Budget.matrix())
+    for index in range(len(evaluators)):
+        # Not bit-identical: a cell is a weighted mean and the port sums it in its own
+        # order, which is worth about 1e-16. A wrong effect is worth 1e-03.
+        assert np.allclose(
+            np.asarray(got[index]), np.asarray(expected[index]), rtol=0, atol=1e-12
+        )
+
+
+def test_stance_change_takes_the_forme_over_there_too(bridged: None) -> None:
+    """The forme decides the stats, so a port that skipped it read the wrong Pokemon.
+
+    The holder does not have to be Aegislash: neither implementation checks the species
+    before changing the forme, so pinning the ability on whoever is in front tests exactly
+    the arithmetic `change_forme` has to match -- species, types, maximum HP, and the HP
+    carried across the change.
+    """
+    reg, pos, row, col = _node()
+    mine = pos.sides[0].active_pokemon()[0]
+    assert mine is not None
+    mine.ability = "stancechange"
+    assert not validate_position(pos, reg.meta.active_per_side)
+    evaluators = [OBJECTIVES["hp-share"].batch, OBJECTIVES["faints"].batch]
+
+    node = rustnode.node_for(reg)
+    assert node is not None
+    filled = node.fill(pos, row, col, ["hp-share", "faints"], Budget.matrix())
+    assert not [why for _i, _j, why in filled.refused if "stancechange" in why]
+
+    os.environ[rustnode.ENV_ENABLE] = "0"
+    rustnode.reset()
+    expected, _notes, _e = batched_payoffs(
+        reg, pos, row, col, evaluators, budget=Budget.matrix()
+    )
+    os.environ[rustnode.ENV_ENABLE] = "1"
+    rustnode.reset()
+    got, _n2, _e2 = batched_payoffs(reg, pos, row, col, evaluators, budget=Budget.matrix())
+    for index in range(len(evaluators)):
+        # Not bit-identical: a cell is a weighted mean and the port sums it in its own
+        # order, which is worth about 1e-16. A wrong effect is worth 1e-03.
+        assert np.allclose(
+            np.asarray(got[index]), np.asarray(expected[index]), rtol=0, atol=1e-12
+        )
 
 
 def test_an_impossible_position_is_refused(bridged: None) -> None:

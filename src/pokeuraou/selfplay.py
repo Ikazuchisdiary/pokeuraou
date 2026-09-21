@@ -29,13 +29,14 @@ import json
 from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from time import perf_counter
 from typing import Any, Protocol
 
 import numpy as np
 
 from .actions import SideAction, switch_actions_after_faint
 from .equilibrium import EquilibriumError, solve
-from .hidden import completions, seen_slots
+from .hidden import completions, seen_slots, shown_species
 from .narrow import narrow
 from .payoff import HP_SHARE, Objective
 from .policy import policy_ranking
@@ -58,6 +59,7 @@ from .search import belief_solve, believed_ranking, leaf_ranking, search
 from .selection_book import (
     DEFAULT_EPSILON,
     DEFAULT_TEMPERATURE,
+    BenchPrior,
     SelectionBook,
 )
 from .standings import Standings, cluster_teams, label_for, sample_standings_team
@@ -173,6 +175,22 @@ class GameRecord:
     foe_selection_mixture: list[float] = field(default_factory=list)
     #: The equilibrium value of the selection game, in win probability.
     selection_value: float | None = None
+    #: Wall clock each agent spent deciding at the MOVE nodes, in seconds, indexed by
+    #: side. Its own solve, plus its share of the candidate menus: a construction that
+    #: served both agents is split in half, because charging it to whichever side the
+    #: code happened to run first is how a cost comparison between two settings gets its
+    #: answer from the order of the statements.
+    #:
+    #: Move nodes only. The replacement node is the same work for both agents -- no
+    #: depth, no width, one matrix each at most -- so putting it here would dilute the
+    #: ratio the number exists to report. What a whole game costs is the caller's
+    #: `s/game`, which has always been there.
+    #:
+    #: Recorded per side rather than per game because the question depth-2 exists to
+    #: answer -- is this worth its wall clock -- cannot be asked of a number that holds
+    #: both arms. Two runs of different machine load are not comparable, and that is how
+    #: the previous depth-2 cost was quoted.
+    search_seconds: list[float] = field(default_factory=lambda: [0.0, 0.0])
 
     def to_json(self, *, objective: str, search_limit: int | tuple[int, int]) -> dict[str, Any]:
         return {
@@ -181,6 +199,7 @@ class GameRecord:
             "foeArchetype": self.foe_archetype,
             "outcome": self.outcome,
             "turns": self.turns,
+            "searchSeconds": list(self.search_seconds),
             "foeSpecies": [m["species"] for m in self.foe_team],
             "searchObjective": objective,
             "searchLimit": list(search_limit)
@@ -401,6 +420,37 @@ def _menus(
     )
 
 
+def _bench_weights(
+    bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None,
+    side: int,
+    pos: Position,
+    seen: frozenset[int],
+    record: GameRecord,
+) -> dict[tuple[str, ...], float] | None:
+    """How likely each way of filling that side's unseen slots is, or None for uniform.
+
+    `completions` enumerates those ways and, without weights, treats them as equally
+    likely -- so the belief holds back-two pairs the opponent would never bring at the
+    same weight as the ones they would, and the opponent inside it is weaker than the one
+    across the table. Measured, that is worth about 10 points of the search's value early
+    in a hidden-bench game, against 1 point in the open game (G27/G30).
+
+    An empty result means the distribution explains nothing on the board, which should
+    not happen and is recorded rather than passed over: the fallback is the uniform
+    belief this exists to replace, and a silent fallback to the thing being fixed is how
+    a fix becomes invisible.
+    """
+    if bench_prior is None or bench_prior[side] is None:
+        return None
+    weights = bench_prior[side].weights(shown_species(pos, side, seen))
+    if not weights:
+        note = f"bench weights: side {side}'s selection prior explains nothing on board"
+        if note not in record.unmodelled:
+            record.unmodelled.append(note)
+        return None
+    return weights
+
+
 def play_game(
     reg: Regulation,
     rng: np.random.Generator,
@@ -420,6 +470,7 @@ def play_game(
     start: Position | None = None,
     first_action: str | None = None,
     sheets: tuple[Sequence[SampledSet], Sequence[SampledSet]] | None = None,
+    bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None = None,
 ) -> GameRecord:
     """Plays one game to a result, sampling both sides from the turn's equilibrium.
 
@@ -507,7 +558,7 @@ def play_game(
             shown = [seen_slots(pos, i, shown[i]) for i in (0, 1)]
             pos = _do_replacement_node(
                 reg, rng, pos, owed, record, leaves,
-                sheets=sheets, shown=shown,
+                sheets=sheets, shown=shown, bench_prior=bench_prior,
             )
             continue
 
@@ -523,16 +574,19 @@ def play_game(
             try:
                 spreads = {
                     side: completions(
-                        reg, pos, side, sheets[side], seen=shown[side]
+                        reg, pos, side, sheets[side], seen=shown[side],
+                        weights=_bench_weights(bench_prior, side, pos, shown[side], record),
                     )
                     for side in (0, 1)
                 }
             except ValueError as problem:
                 record.unmodelled.append(f"hidden bench: {problem}")
                 break
+        menu_started = perf_counter()
         ours, theirs = _menus(
             reg, pos, limits, own_leaf, budget, ranked[0], policies[0], spreads
         )
+        menu_seconds = perf_counter() - menu_started
         if not ours or not theirs:
             break
 
@@ -559,11 +613,15 @@ def play_game(
             )
         )
 
+        own_seconds = foe_seconds = 0.0
+        foe_solved = False
+
         if spreads is not None:
             # Each side is uncertain about a different bench, so each gets its own answer.
             # The node underneath them is resolved once: their hidden slots are disjoint
             # and a cell that reaches neither resolves the same way whatever is standing
             # on either bench.
+            solve_started = perf_counter()
             try:
                 answers = belief_solve(
                     reg, pos, ours, theirs, spreads,
@@ -571,6 +629,7 @@ def play_game(
                 )
             except EquilibriumError:
                 break
+            own_seconds = perf_counter() - solve_started
             record.unmodelled.extend(
                 answers[0].unmodelled | answers[1].unmodelled
             )
@@ -585,6 +644,7 @@ def play_game(
                 # recorded them per side and only side 0's were ever played. The anchor
                 # of the hidden-bench scale was measured this way, with the hp-share arm
                 # handed a menu ranked by the other arm's value function in one seat.
+                foe_started = perf_counter()
                 foe_ours, foe_theirs = _menus(
                     reg, pos, limits, foe_leaf, budget, ranked[1], policies[1], spreads
                 )
@@ -599,7 +659,10 @@ def play_game(
                     break
                 record.unmodelled.extend(foe_answers[1].unmodelled)
                 foe_strategy = foe_answers[1].strategy
+                foe_seconds = perf_counter() - foe_started
+                foe_solved = True
         else:
+            solve_started = perf_counter()
             try:
                 own_search = search(
                     reg, pos, ours, theirs, own_leaf, budget=budget, depth=depths[0],
@@ -607,6 +670,7 @@ def play_game(
                 )
             except EquilibriumError:
                 break
+            own_seconds = perf_counter() - solve_started
             record.unmodelled.extend(own_search.unmodelled)
             equilibrium = own_search.equilibrium
 
@@ -624,6 +688,7 @@ def play_game(
                 or policies[1] is not policies[0]
                 or sparse[1] != sparse[0]
             ):
+                foe_started = perf_counter()
                 foe_ours, foe_theirs = (
                     (ours, theirs)
                     if same_menu
@@ -643,9 +708,23 @@ def play_game(
                     break
                 record.unmodelled.extend(foe_search.unmodelled)
                 foe_equilibrium = foe_search.equilibrium
+                foe_seconds = perf_counter() - foe_started
+                foe_solved = True
             own_strategy = np.asarray(equilibrium.row_strategy, dtype=np.float64)
             foe_strategy = np.asarray(foe_equilibrium.col_strategy, dtype=np.float64)
             search_value = float(equilibrium.value)
+
+        if foe_solved:
+            # `same_menu` is the only case where one construction served both agents;
+            # otherwise side 0's menus are side 0's alone and side 1 timed its own.
+            shared = menu_seconds / 2 if same_menu else 0.0
+            record.search_seconds[0] += own_seconds + menu_seconds - shared
+            record.search_seconds[1] += foe_seconds + shared
+        else:
+            # One construction and one solve served both agents. Neither of them would
+            # have spent less alone, and neither of them spent it alone.
+            record.search_seconds[0] += (menu_seconds + own_seconds) / 2
+            record.search_seconds[1] += (menu_seconds + own_seconds) / 2
 
         own_index = _sample_index(rng, own_strategy)
         if first_action is not None and not record.decisions:
@@ -866,6 +945,7 @@ def _do_replacement_node(
     *,
     sheets: tuple[Sequence[SampledSet], Sequence[SampledSet]] | None = None,
     shown: list[frozenset[int]] | None = None,
+    bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None = None,
 ) -> Position:
     """Solves and applies the replacement phase.
 
@@ -928,7 +1008,10 @@ def _do_replacement_node(
         answers: dict[int, tuple[list[float], float]] = {}
         try:
             spreads = {
-                side: completions(reg, pos, side, sheets[side], seen=seen[side])
+                side: completions(
+                    reg, pos, side, sheets[side], seen=seen[side],
+                    weights=_bench_weights(bench_prior, side, pos, seen[side], record),
+                )
                 for side in (0, 1)
             }
         except ValueError as problem:
@@ -1175,6 +1258,11 @@ def generate(
     with path.open("a", encoding="utf-8") as handle:
         for index, rng in scheduled():
             drawn = None
+            # Bound here because only the standings branch assigns it, and the bench
+            # prior below reads it. It currently survives on `drawn is not None`
+            # short-circuiting first, which is a name binding resting on the order of an
+            # `and` -- true today and not a thing to rely on.
+            entry = None
             forced_uniform = False
             mirror = mirror_share > 0.0 and rng.random() < mirror_share
             if mirror:
@@ -1239,6 +1327,27 @@ def generate(
                 solve_sparsely=solve_sparsely,
                 # Both sixes, so neither search is shown the other's unplayed bench.
                 sheets=(list(roster.sets), list(foe_six)) if hide_bench else None,
+                # And what each side would have brought, so the belief over the bench is
+                # the opponent's own selection equilibrium rather than a uniform draw
+                # over every pair the sheet allows. Only when the book named this
+                # opponent: without an entry there is nothing to condition on and
+                # uniform is the honest prior, which is what `None` selects.
+                # The same epsilon and temperature the draw above used, because the
+                # belief has to be about the opponent this game actually has.
+                bench_prior=(
+                    (
+                        BenchPrior.of(
+                            entry, 0, [s.species for s in roster.sets],
+                            epsilon=explore_epsilon, temperature=explore_temperature,
+                        ),
+                        BenchPrior.of(
+                            entry, 1, [s.species for s in foe_six],
+                            epsilon=explore_epsilon, temperature=explore_temperature,
+                        ),
+                    )
+                    if hide_bench and drawn is not None and entry is not None
+                    else None
+                ),
                 selection=(
                     [entry.species for entry in roster.sets],
                     [entry.species for entry in foe_six],
@@ -1277,15 +1386,24 @@ def generate(
                 stats["wins"] += int(record.outcome > 0.5)
                 stats["decisions"] += len(record.decisions)
                 stats["turns"] += record.turns
-                handle.write(
-                    json.dumps(
-                        record.to_json(
-                            objective=leaf or objective.name, search_limit=search_limit
-                        ),
-                        ensure_ascii=False,
-                    )
-                    + "\n"
+                payload = record.to_json(
+                    objective=leaf or objective.name, search_limit=search_limit
                 )
+                if index is not None:
+                    # The queue's index, so two pools generated at one seed can be
+                    # checked for pairing afterwards instead of assumed to pair.
+                    #
+                    # `data/selfplay-hidden2` and `data/selfplay-open2` were made at seed
+                    # 2001 with one flag between them, and whether game k is the same
+                    # matchup in both is exactly the question a twin design rests on --
+                    # and it could not be asked, because a worker takes indices from the
+                    # queue in whatever order it gets them, so file order says nothing.
+                    # The same gap was closed for matches earlier today; generation kept
+                    # it. `--mirror-share`'s short-circuit already desynchronised
+                    # generation 11h from generation 10 once, and that was found by
+                    # noticing afterwards rather than by being able to check.
+                    payload["gameIndex"] = index
+                handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
                 handle.flush()
             if index is not None and on_finish is not None:
                 # After the write, and after a discard too: a game that was played and

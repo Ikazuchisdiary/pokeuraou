@@ -16,7 +16,7 @@ Reports, over positions from real games:
 The last is the one that matters for play: a value that shifts by a hundredth while the
 strategy is identical cannot win a single game.
 
-    uv run --group learn python tools/depth_effect.py --value data/models/value-gen234.pt
+    uv run --group learn python tools/oneshot/depth_effect.py --value data/models/value-gen234.pt
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.narrow import narrow

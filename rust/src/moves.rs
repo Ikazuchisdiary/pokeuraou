@@ -12,7 +12,8 @@ use crate::moveinfo::MoveContext;
 use crate::position::{Effect, Position};
 use crate::reg::{Move, Reg};
 use crate::resolve::{
-    check_white_herb, grounded, stratified_rolls, Budget, Outcome, Slot, Turn,
+    change_forme, check_white_herb, grounded, stratified_rolls, Budget, Outcome, Slot,
+    Turn,
     CONFUSION_SELF_HIT_CHANCE, FREEZE_COUNTER, FULL_PARALYSIS_CHANCE, THAW_CHANCE,
     TWO_TURN_MOVES,
 };
@@ -300,6 +301,31 @@ fn use_move<'a>(
                     locked.move_id = Some(move_id);
                 }
             }
+        }
+    }
+
+    // Stance Change: Aegislash takes its Blade forme to attack and its Shield forme back
+    // with King's Shield. The forme decides its stats, so leaving it alone puts every
+    // later damage number on the wrong Pokemon.
+    {
+        let wanted = match turn.mon_at(action.side, action.slot) {
+            Some(mon) if mon.ability.as_str() == "stancechange" => {
+                if move_id.as_str() == "kingsshield" {
+                    Some("aegislash")
+                } else if mv.category != "Status" {
+                    Some("aegislashblade")
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        };
+        let changes = match (wanted, turn.mon_at(action.side, action.slot)) {
+            (Some(forme), Some(mon)) => mon.species.as_str() != forme,
+            _ => false,
+        };
+        if changes {
+            change_forme(reg, &mut turn, action.side, action.slot, wanted.unwrap())?;
         }
     }
 

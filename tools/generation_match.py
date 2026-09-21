@@ -570,6 +570,15 @@ def main() -> None:
     # Per-seat accumulators, indexed the same way as `seats`, because with a queue the two
     # seats are interleaved rather than run one after the other.
     tally = [[0, 0, 0, 0.0] for _ in seats]  # wins, played, unfinished, seconds
+    # What each ARM spent deciding, and on how many move decisions, per seat. `tally`'s
+    # seconds are the whole game's -- both agents, the resolver, the replacement nodes --
+    # and the previous depth-2 cost was quoted by comparing that number across two runs
+    # of different machine load. These two come from inside one run, so the arms are
+    # timed against each other and not against the afternoon.
+    #
+    # Index 0 is the tested arm and 1 the other, whichever side each sat on.
+    arm_seconds = [[0.0, 0.0] for _ in seats]
+    arm_moves = [0 for _ in seats]
     client = WorkClient(args.queue) if args.queue else None
     if client is not None:
         print(f"queue: {args.queue}", file=sys.stderr)
@@ -805,6 +814,11 @@ def main() -> None:
             new_won = record.outcome > 0.5 if which == 0 else record.outcome < 0.5
             tally[which][0] += int(new_won)
             tally[which][3] += time.perf_counter() - started
+            # `seats[0]` puts the tested arm at side 0 and `seats[1]` at side 1, which is
+            # the same `which` the win above is flipped by.
+            arm_seconds[which][0] += record.search_seconds[which]
+            arm_seconds[which][1] += record.search_seconds[1 - which]
+            arm_moves[which] += sum(1 for d in record.decisions if d.kind == "move")
             if client is not None:
                 client.finish(index)
 
@@ -829,11 +843,14 @@ def main() -> None:
     # between `waited` here and (lock wait + lock hold) there is the transport: the socket,
     # the JSON, and the server's own parsing before it reaches the model.
     #
-    # Once per distinct object, because the two arms may now be one: a shared leaf has one
-    # socket and one set of counters, and printing them twice would read as twice the
-    # traffic. Not `arm`, which is the agent's LABEL twenty lines above -- this loop was
-    # rebinding it, so the verdict below named `<BatchedValue object at 0x...>` instead of
-    # the agent in every run that reached it.
+    # `leaf`, not `arm`: `arm` is the tested arm's NAME and the last line of this run
+    # prints it. Under --served both leaves answer `hasattr(leaf, "calls")`, so the loop
+    # ran, and the summary the reader quotes came out as
+    # `RemoteValue(address=..., model='baseline', ...) の勝率 50.0%`.
+    #
+    # And once per distinct OBJECT, because the two arms may now be one: a shared leaf has
+    # one socket and one set of counters, and printing them twice would read as twice the
+    # traffic.
     reported: list[object] = []
     for leaf in (value, baseline):
         if leaf is None or any(leaf is seen for seen in reported):
@@ -859,6 +876,14 @@ def main() -> None:
             f"{elapsed / max(seat_played, 1):>7.2f}   (打ち切り {unfinished})",
             flush=True,
         )
+        if arm_moves[which]:
+            tested, other = (s / arm_moves[which] for s in arm_seconds[which])
+            print(
+                f"  {'':>30}  1手あたり {new_name} {tested:.4f}s / {old_name} "
+                f"{other:.4f}s = {tested / other if other else float('nan'):.2f}x "
+                f"({arm_moves[which] / max(seat_played, 1):.1f} 手/game)",
+                flush=True,
+            )
         if args.out is not None:
             args.out.parent.mkdir(parents=True, exist_ok=True)
             with args.out.open("a", encoding="utf-8") as handle:
@@ -875,10 +900,16 @@ def main() -> None:
                             "limit": args.limit,
                             "depth": args.depth,
                             "baselineDepth": args.baseline_depth,
+                            "baselineLimit": other_limit,
                             "played": seat_played,
                             "gen2_wins": seat_wins,
                             "unfinished": unfinished,
                             "seconds": elapsed,
+                            # The two numbers an equal-wall-clock comparison is made of,
+                            # and the count they are per.
+                            "armSeconds": arm_seconds[which][0],
+                            "otherArmSeconds": arm_seconds[which][1],
+                            "moveDecisions": arm_moves[which],
                         }
                     )
                     + "\n"
@@ -892,6 +923,16 @@ def main() -> None:
         f"\n  両席あわせて {played} ゲーム: {arm} の勝率 {rate * 100:.1f}% +-{half * 100:.1f}",
         flush=True,
     )
+    moves = sum(arm_moves)
+    if moves:
+        tested = sum(s[0] for s in arm_seconds) / moves
+        other = sum(s[1] for s in arm_seconds) / moves
+        print(
+            f"  1手あたりの実時間: {new_name} {tested:.4f}s、{old_name} {other:.4f}s"
+            f" = {tested / other if other else float('nan'):.2f}倍"
+            f"（{moves:,} 手、両席）",
+            flush=True,
+        )
     if rate - half > 0.5:
         print(f"  → {arm} が有意に強い。次世代のデータ生成に使える。")
     elif rate + half < 0.5:

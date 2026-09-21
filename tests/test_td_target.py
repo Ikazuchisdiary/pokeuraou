@@ -11,9 +11,13 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pokeuraou.value import td_target
+# Same as `test_concat_datasets`: a module-scope torch import used to end collection for
+# the whole suite rather than skip this file.
+pytest.importorskip("torch", reason="the TD target needs the optional learn group")
 
-from .test_concat_datasets import shard
+from pokeuraou.value import td_target  # noqa: E402
+
+from .test_concat_datasets import shard  # noqa: E402
 
 
 def dataset_with(outcome: list[float], searched: list[float]):  # noqa: ANN201

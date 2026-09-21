@@ -36,7 +36,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pokeuraou.encode import Encoder
 from pokeuraou.regulation import load_regulation
-from pokeuraou.value import ValueConfig, auc, build, load_dataset, predict, train
+from pokeuraou.value import ValueConfig, auc, build, load_dataset, predict, split_for, train
 
 
 def logloss(probabilities: np.ndarray, labels: np.ndarray) -> float:
@@ -110,6 +110,15 @@ def main() -> None:
     ap.add_argument("--data", type=Path, default=Path("data/selfplay-worlds-encoded.npz"))
     ap.add_argument("--holdout", type=float, default=0.15)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--split-seed",
+        type=int,
+        default=0,
+        help="which games are held out. Separate from --seed because the repeats below "
+        "deliberately move --seed and must not move the split: every configuration and "
+        "every repeat is judged on the same games, which is what makes a difference "
+        "between two rows attributable to the configuration.",
+    )
     ap.add_argument("--seeds", type=int, default=1, help="repeat each config with this many seeds")
     ap.add_argument("--epochs", type=int, default=30)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -125,20 +134,29 @@ def main() -> None:
     encoder = Encoder(load_regulation(meta["format_id"]))
     device = torch.device(args.device)
 
-    # One split, shared by every configuration, so differences are the configuration.
-    train_idx, val_idx = dataset.split_by_game(args.holdout, args.seed)
+    # One split, shared by every configuration, so differences are the configuration. The
+    # config carries the split seed rather than leaving it at None, because the repeats
+    # below vary `seed` while this split stays put: a row recording `seed 2` and "the
+    # split follows seed" would name games it was not marked against.
+    base = ValueConfig(epochs=args.epochs, seed=args.seed, split_seed=args.split_seed)
+    train_idx, val_idx = split_for(dataset, args.holdout, base)
     labels = dataset.outcome[val_idx]
-    proxy = dataset.proxy[val_idx]
+    # The generating search's value, which was called `proxy` while generation was driven
+    # by hp-share and the two were the same number. The attribute was renamed with the
+    # column in train_value; this line kept the old name and had been raising
+    # AttributeError ever since, so the sweep could not run at all.
+    searched = dataset.search_value[val_idx]
     turn1 = dataset.turn[val_idx] <= 1
 
-    base = ValueConfig(epochs=args.epochs, seed=args.seed)
     print(
         f"{len(dataset):,} decisions, {len(train_idx):,} train / {len(val_idx):,} "
-        f"validation (split by game, shared across configurations)"
+        f"validation (split by game at split-seed {args.split_seed}, shared across "
+        f"configurations)"
     )
     print(
-        f"  proxy baseline: log loss {logloss(proxy, labels):.4f}, "
-        f"AUC {auc(proxy, labels):.4f}, turn-1 AUC {auc(proxy[turn1], labels[turn1]):.4f}"
+        f"  generating search: log loss {logloss(searched, labels):.4f}, "
+        f"AUC {auc(searched, labels):.4f}, "
+        f"turn-1 AUC {auc(searched[turn1], labels[turn1]):.4f}"
     )
     print(
         f"\n  {'configuration':>20}  {'params':>9}  {'log loss':>9}  {'AUC':>7}  "
@@ -154,6 +172,9 @@ def main() -> None:
         started = time.perf_counter()
         params = 0
         for offset in range(args.seeds):
+            # Only the fit moves. `split_seed` rides along unchanged, and the indices are
+            # handed to `train` explicitly, so the repeats measure run-to-run spread on
+            # one set of games rather than on a different draw each time.
             cfg = replace(config, seed=args.seed + offset)
             net = build(encoder, cfg).to(device)
             params = sum(p.numel() for p in net.parameters())

@@ -45,7 +45,7 @@ from __future__ import annotations
 import gzip
 import json
 import math
-from collections.abc import Iterable, Sequence
+from collections.abc import Collection, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -664,6 +664,129 @@ def find_cached_book(name: str) -> Path | None:
     return path if path.exists() else None
 
 
+@dataclass(frozen=True)
+class BenchPrior:
+    """One side's selection distribution, carried into a game to price its hidden bench.
+
+    A plain 3-tuple would do and is the shape that gets mis-ordered: `selections` indexes
+    into `species`, and swapping two of these three arguments produces weights that are
+    wrong rather than an error.
+    """
+
+    #: Party-index selections, shared by both sides -- both bring 4 of 6.
+    selections: tuple[tuple[int, ...], ...]
+    #: A distribution over `selections` for THIS side.
+    probabilities: tuple[float, ...]
+    #: This side's six, in the order `selections` indexes.
+    species: tuple[str, ...]
+
+    @classmethod
+    def of(
+        cls,
+        entry: BookEntry,
+        side_index: int,
+        species: Sequence[str],
+        *,
+        epsilon: float = DEFAULT_EPSILON,
+        temperature: float = DEFAULT_TEMPERATURE,
+    ) -> BenchPrior:
+        """The distribution that side is actually drawn from, not the equilibrium.
+
+        `BookEntry.draw` samples from `our_mixture` and `their_mixture`, which soften the
+        equilibrium by `epsilon` and `temperature`. A belief built on the raw equilibrium
+        would be wrong about the very opponent generating the game -- confidently so,
+        since these supports run to two or three selections of ninety and G28 measured
+        the cells they are chosen on at +-11 points. **A caller must pass the same
+        epsilon and temperature it passes to `draw`**; two settings of the same knob is
+        how a belief and its world come apart.
+
+        Theirs is one mixture per spread class and we do not know the class, so they are
+        averaged by `class_weights` -- the same marginalisation the selection solve makes
+        when it prices a cell, and never an index into their private information.
+        """
+        if side_index == 0:
+            probabilities = entry.our_mixture(
+                epsilon=epsilon, temperature=temperature
+            )
+        else:
+            weights = np.asarray(entry.class_weights, dtype=np.float64)
+            columns = np.asarray(
+                [
+                    entry.their_mixture(k, epsilon=epsilon, temperature=temperature)
+                    for k in range(len(entry.their_strategies))
+                ]
+            )
+            probabilities = weights @ columns
+        return cls(
+            selections=tuple(tuple(s) for s in entry.selections),
+            probabilities=tuple(float(p) for p in probabilities),
+            species=tuple(species),
+        )
+
+    def weights(self, seen: Collection[str]) -> dict[tuple[str, ...], float]:
+        return bench_weights(self.selections, self.probabilities, self.species, seen)
+
+
+def bench_weights(
+    selections: Sequence[Sequence[int]],
+    probabilities: Sequence[float],
+    species: Sequence[str],
+    seen: Collection[str],
+) -> dict[tuple[str, ...], float]:
+    """What a side's unseen members are, given the ones already on the board.
+
+    `hidden.completions` enumerates the ways to fill the unseen slots and takes `weights`
+    to price them; its docstring has always said those should be "the opponent's selection
+    equilibrium marginalised onto their back two", and until now the only caller that
+    passed anything was a test. Uniform is not a neutral stand-in. The opponent brings the
+    back two they judge best, and a uniform belief counts their weak pairs at the same
+    weight, so the opponent inside the belief is weaker than the one across the table --
+    which is the shape of the search's 13-point optimism at turn 1 under a hidden bench,
+    measured against 1 point in the open game (G27/G30).
+
+    `probabilities` is a distribution over `selections`, which are party indices into
+    `species`. A selection that does not contain everything already seen is one they
+    cannot have brought, so it contributes nothing; what is left is renormalised onto the
+    species pairs the unseen slots could hold, which is the key `completions` wants.
+
+    An empty result means no selection in the distribution explains the board. The caller
+    gets uniform, which is what `completions` does with missing weights, and should say so
+    rather than let the disagreement pass unrecorded.
+    """
+    from .regulation import to_id
+
+    sheet = {to_id(name) for name in species}
+    # `seen` arrives holding BOTH a revealed Pokemon's own id and its base form, because
+    # the candidate filter needs both to keep a Mega from also being offered as its base.
+    # Only one of the pair can be a sheet member, so intersecting picks it out -- and
+    # requiring the whole set instead is what made this explain nothing in 591 of 600
+    # games: Floette-Eternal is on the sheet, its base `floette` is not, and every
+    # selection was rejected for lacking a Pokemon the opponent never had.
+    want = {name for name in (to_id(name) for name in seen) if name in sheet}
+    out: dict[tuple[str, ...], float] = {}
+    for selection, probability in zip(selections, probabilities, strict=True):
+        if probability <= 0.0:
+            continue
+        brought = [to_id(species[i]) for i in selection]
+        if not want.issubset(brought):
+            continue
+        key = tuple(sorted(name for name in brought if name not in want))
+        out[key] = out.get(key, 0.0) + float(probability)
+    total = sum(out.values())
+    return {key: value / total for key, value in out.items()} if total > 0 else {}
+
+
+def entry_bench_weights(
+    entry: BookEntry, side_index: int, species: Sequence[str], seen: Collection[str]
+) -> dict[tuple[str, ...], float]:
+    """`bench_weights` for one side of a solved entry, in one call.
+
+    Delegates rather than repeating `BenchPrior.of`: which side reads one vector and
+    which reads a class-weighted average is the part worth having in a single place.
+    """
+    return BenchPrior.of(entry, side_index, species).weights(seen)
+
+
 __all__ = [
     "ARMS",
     "DEFAULT_EPSILON",
@@ -672,8 +795,11 @@ __all__ = [
     "SelectionBook",
     "SelectionDraw",
     "append_entry",
+    "BenchPrior",
+    "bench_weights",
     "draw_across",
     "draw_arm",
+    "entry_bench_weights",
     "explore_mixture",
     "find_cached_book",
     "key_for_team",

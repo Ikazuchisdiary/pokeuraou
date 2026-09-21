@@ -13,7 +13,7 @@ function to separate them:
   If our rate against the 57 who reached day two is much lower, the 62.3% is diluted by
   weak opposition, which makes it a real matchup number rather than an artefact.
 
-    uv run python tools/matchup.py --games 400 --pairs roster:field,field:field,field:roster
+    uv run python tools/oneshot/matchup.py --games 400 --pairs roster:field,field:field,field:roster
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.payoff import OBJECTIVES

@@ -57,6 +57,19 @@ def main() -> None:
     # +1.1] at 2.03x the speed, while 16 is -5.6 and 12 is -7.5. Only 24 sits inside the
     # band, so it is a floor rather than a direction, and the doubling it buys is the one
     # thing that has reliably moved the leaf.
+    #
+    # 2026-09-20, IKA-12: that -1.3 was a failure to reject on 1,696 games. Replayed at
+    # 12,000 it is +3.4 +-0.7 for 48, and all four runs ever recorded had that sign; 96
+    # over 48 buys nothing (+0.5 +-0.6), so breadth saturates one step above this default.
+    # Two things stop it being a one-line change here, and IKA-66 holds both:
+    #
+    #   * that +3.4 was measured in the OPEN game, and this flag's runs hide the bench,
+    #     which is a different branch of `play_game` entirely (`belief_solve`)
+    #   * width 48 costs GENERATION 2.43x the wall clock and 2.76x the seconds per move
+    #     decision -- not the 2.00x a match pays -- measured here, alternated three times,
+    #     600 games each, at 2.8 against 6.8 minutes with no scatter. 2.43x is 1.28
+    #     doublings of data, worth -2.2 to -4.6 points on the recorded learning curve,
+    #     which the +3.4 does not clear with any room to spare.
     ap.add_argument("--limit", type=int, default=24)
     ap.add_argument(
         "--served",

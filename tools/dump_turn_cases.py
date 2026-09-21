@@ -180,6 +180,7 @@ def main() -> None:
                         "enumerateSpeedTies": budget.enumerate_speed_ties,
                         "pinnedPolicy": budget.pinned_policy,
                         "maxBranches": budget.max_branches,
+                        "mergeDuplicates": budget.merge_duplicates,
                     },
                     "expect": {
                         "suspended": bool(result.suspended),

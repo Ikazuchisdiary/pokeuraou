@@ -28,6 +28,7 @@ mod position;
 mod reg;
 mod resolve;
 mod score;
+mod shm;
 mod speed;
 
 #[cfg(feature = "count-allocations")]

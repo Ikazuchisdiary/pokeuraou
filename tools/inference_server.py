@@ -36,6 +36,7 @@ faulthandler.enable()
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from pokeuraou import timing  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.inference import load_models, serve  # noqa: E402
 from pokeuraou.teams import load_roster  # noqa: E402
@@ -104,7 +105,40 @@ def main() -> None:
 
     last = time.perf_counter()
     served = 0
+    # The launcher stops a server with `Popen.terminate()`, which on Windows is
+    # `TerminateProcess`: no signal, no `atexit`, no report. So the report is
+    # written over and over while the server lives, and what survives the kill is
+    # the last one. Cheap enough to do often -- it is one small JSON file.
+    # `count` accumulates and `note` runs every five seconds, so rows go in as a delta.
+    _reported_rows = [0]
+
+    def note() -> None:
+        if not timing.ON:
+            return
+        timing.set_total(
+            "server.held",
+            sum(getattr(m, "held", 0.0) for m in models.values()),
+            calls=sum(getattr(m, "calls", 0) for m in models.values()),
+        )
+        timing.set_total(
+            "server.queue",
+            sum(getattr(m, "waited", 0.0) for m in models.values()),
+            calls=sum(getattr(m, "calls", 0) for m in models.values()),
+        )
+        # Rows are a count, not a call count. Putting `rows_served` in the calls column
+        # made the queueing row read as 3.2 million calls of 0.03 microseconds each.
+        timing.count("server.rows", int(server.rows_served) - _reported_rows[0])
+        _reported_rows[0] = int(server.rows_served)
+        timing.write_report("inference-server")
+
+    # One on the way in, so the file exists from the first second rather than the
+    # fifth: a run shorter than the cadence produced no server report at all.
+    note()
+    noted = time.perf_counter()
     while not stopping.wait(timeout=1.0):
+        if time.perf_counter() - noted >= 5.0:
+            note()
+            noted = time.perf_counter()
         if args.report_every and time.perf_counter() - last >= args.report_every:
             now = server.requests_served
             # Both halves of the same line, because they answer the two questions a
@@ -129,6 +163,7 @@ def main() -> None:
                   f"working; cuda reserved {reserved:.2f} GB, in use {in_use:.2f} GB",
                   file=sys.stderr, flush=True)
             served, last = now, time.perf_counter()
+    note()
     server.shutdown()
     print(f"stopped after {server.requests_served:,} requests, "
           f"{server.rows_served:,} rows", file=sys.stderr)

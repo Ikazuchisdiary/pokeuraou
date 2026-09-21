@@ -8,6 +8,10 @@ because each of them is a way for a trained model to be confidently meaningless:
   game is zero-sum and the architecture is supposed to make that free rather than learned;
 - a train/validation split that never puts two decisions from the same game on both sides,
   since they share one label and the validation number would measure memorisation;
+- a split that follows `split_seed` and not `seed`, because `seed` also moves
+  initialisation and batch order, and two runs separated by it were being marked against
+  different games as well as fitted differently -- a difference in what the number is
+  about, which no number of repeats averages away;
 - weights that refuse to load against a vocabulary they were not trained on, because the
   same integer indexes a different Pokemon after a regulation rotation.
 
@@ -35,13 +39,28 @@ from pokeuraou.value import (  # noqa: E402
     load_model,
     predict,
     save_model,
+    split_for,
     train,
 )
 
+from .test_concat_datasets import shard  # noqa: E402
+
 
 @pytest.fixture(scope="module")
-def bundle():  # noqa: ANN201
-    reg = load_regulation("gen9championsvgc2026regmb")
+def encoder():  # noqa: ANN201
+    """The vocabulary alone, which needs the regulation dump and nothing from `data/`.
+
+    Apart from `bundle`, which samples real opponents and so needs usage stats on disk.
+    The things that are true of any weights -- the split, what a saved model records --
+    are true without a single real game, and a test that skipped for want of a chaos
+    file would be reporting on the fixture rather than on the code.
+    """
+    return Encoder(load_regulation("gen9championsvgc2026regmb"))
+
+
+@pytest.fixture(scope="module")
+def bundle(encoder):  # noqa: ANN001, ANN201
+    reg = encoder.reg
     roster = load_roster("rizabanadohido")
     cached = find_cached_chaos(reg.meta.format_id)
     if cached is None:
@@ -64,7 +83,6 @@ def bundle():  # noqa: ANN201
             games.append(game)
             outcomes.append(result)
 
-    encoder = Encoder(reg)
     encoded = encoder.encode(positions)
     dataset = Dataset(
         encoded=encoded,
@@ -149,6 +167,100 @@ def test_the_split_never_shares_a_game(bundle) -> None:  # noqa: ANN001
     assert len(train_idx) + len(val_idx) == len(dataset)
     assert not set(dataset.game[train_idx].tolist()) & set(dataset.game[val_idx].tolist())
     assert len(val_idx) > 0
+
+
+def pool() -> Dataset:
+    """Twenty-four games of five decisions each, with nothing real in them.
+
+    Which games a seed holds out is arithmetic over the `game` column and does not look at
+    a single position, so these tests take the synthetic shard rather than `bundle`: a
+    split test that skipped for want of a usage-stats file would be reporting on the
+    fixture.
+    """
+    return shard(120, games=24, foe_names=("worlds",), outcome=1.0)
+
+
+def held_out(dataset: Dataset, holdout: float, config: ValueConfig) -> frozenset[int]:
+    _train_idx, val_idx = split_for(dataset, holdout, config)
+    return frozenset(dataset.game[val_idx].tolist())
+
+
+def test_the_same_split_seed_holds_out_the_same_games() -> None:
+    """Two runs that differ only in how they were fitted have to be marked against the
+    same games.
+
+    `seed` moves initialisation and batch order *and* the split, so before the split had
+    its own seed, a pair of runs compared to decide something were also being asked a
+    different question each: part of the gap between their validation numbers was which
+    games happened to be easy. That part does not average away with more repeats -- it is
+    not noise around one quantity, it is two quantities.
+    """
+    dataset = pool()
+    fitted_one_way = held_out(dataset, 0.25, ValueConfig(seed=1, split_seed=3))
+    fitted_another_way = held_out(dataset, 0.25, ValueConfig(seed=2, split_seed=3))
+    assert fitted_one_way == fitted_another_way
+
+
+def test_a_different_split_seed_holds_out_different_games() -> None:
+    """The other half of the same claim: the seed has to reach the splitter.
+
+    A flag that is parsed, recorded and never read would pass the test above perfectly --
+    every split identical is exactly what "it changes nothing" looks like -- so the two
+    are only worth anything together.
+    """
+    dataset = pool()
+    by_seed = {
+        seed: held_out(dataset, 0.25, ValueConfig(split_seed=seed)) for seed in range(4)
+    }
+    assert len(set(by_seed.values())) == 4
+
+
+def test_no_split_seed_follows_the_fit_seed() -> None:
+    """`None` is what a config stored before the field existed reads back as.
+
+    Those runs took their split from `seed`, so resolving `None` to 0 instead would file a
+    model under a description of games it was never marked against. The training tool
+    defaults its flag to 0 rather than to `None`, which is a statement about new runs; this
+    is about old records, and they disagree only for a run that passed `--seed`.
+    """
+    dataset = pool()
+    followed = held_out(dataset, 0.25, ValueConfig(seed=4))
+    assert followed == frozenset(dataset.game[dataset.split_by_game(0.25, 4)[1]].tolist())
+
+
+def test_every_split_seed_still_splits_by_game() -> None:
+    """Whichever games are held out, no game may be on both sides: they share one label."""
+    dataset = pool()
+    for seed in range(4):
+        train_idx, val_idx = split_for(dataset, 0.25, ValueConfig(split_seed=seed))
+        assert len(train_idx) + len(val_idx) == len(dataset)
+        assert len(val_idx) > 0
+        assert not set(dataset.game[train_idx].tolist()) & set(
+            dataset.game[val_idx].tolist()
+        )
+
+
+def test_a_saved_model_records_both_seeds(encoder, tmp_path) -> None:  # noqa: ANN001
+    """A model's record has to name the games its validation number was measured on.
+
+    Two models reporting different AUCs are not comparable unless the record says whether
+    they were marked against the same games, and one number standing for both the fit and
+    the split cannot say it.
+    """
+    config = ValueConfig(epochs=1, batch_size=32, patience=1, seed=1, split_seed=3)
+    net = build(encoder, config)
+    path = tmp_path / "value.pt"
+    save_model(
+        path,
+        net,
+        net.state_dict(),
+        encoder.vocab,
+        config,
+        meta={"seed": config.seed, "split_seed": config.split_seed},
+    )
+    loaded, meta = load_model(path, encoder)
+    assert (meta["seed"], meta["split_seed"]) == (1, 3)
+    assert loaded.config.split_seed == 3
 
 
 def test_saving_and_loading_reproduces_the_predictions(bundle, tmp_path) -> None:  # noqa: ANN001

@@ -13,10 +13,21 @@ Only the parameter-free objectives cross. A learned value function cannot: its l
 the input, and a node's leaves are tens of megabytes of JSON. That boundary needs the
 encoder ported too, and until then a node scored by a value net stays in Python.
 
+An encoded node's arrays do not come down the pipe when they can help it. They are the
+large part of a crossing -- measured on 2026-09-20, reading them was 25.3% of an analysis
+run -- and a pipe hands them over a buffer at a time with each process waiting on the
+other. So they go through a block of shared memory instead, and only the header still
+crosses the pipe. Nobody sizes the block by guessing: a node's leaves are not counted
+until its turns are resolved, so the child asks for the size it has just found and this
+end makes one of exactly that. A platform without shared memory, a machine that will not
+spare the commit, or a binary built before any of this all fall back to the pipe, which
+is why the pipe is still here.
+
 Opt-in and off by default::
 
     POKEURAOU_RUST_NODE=1                      # use it when it is available
     POKEURAOU_RUST_NODE_BIN=/path/to/binary    # defaults to rust/target/release/
+    POKEURAOU_RUST_NODE_SHM_MB=512             # the largest block; 0 keeps the pipe
 
 Nothing imports this unless the variable is set, and `available()` answers without raising
 so a caller can fall back silently rather than fail a run that was working.
@@ -39,6 +50,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from . import timing
 from .actions import MoveAction, PassAction, SideAction, SwitchAction
 from .position import Position
 from .regulation import Regulation, repo_root
@@ -52,6 +64,27 @@ NODE_TIMEOUT = float(os.environ.get("POKEURAOU_RUST_NODE_TIMEOUT", "300"))
 
 ENV_ENABLE = "POKEURAOU_RUST_NODE"
 ENV_BINARY = "POKEURAOU_RUST_NODE_BIN"
+ENV_SHM_MB = "POKEURAOU_RUST_NODE_SHM_MB"
+
+#: The largest block a process will hold for an encoded node's arrays; zero keeps the pipe.
+#:
+#: A ceiling and not a size. Nobody chooses the size: a node's leaves are not counted until
+#: the turns are resolved, so the child asks for what this one needs and the block is made
+#: to fit it. What the ceiling is for is the other end -- on Windows a block is backed by
+#: the paging file and its whole length is charged to commit the moment it is created, and
+#: a generation run holds one of these per worker.
+SHM_MAX_BYTES = int(float(os.environ.get(ENV_SHM_MB, "512")) * 1024 * 1024)
+
+
+def _release(block: Any) -> None:
+    """Give a block back, both halves, without letting either failure end a run."""
+    if block is None:
+        return
+    with contextlib.suppress(Exception):
+        block.close()
+    with contextlib.suppress(Exception):
+        # A no-op on Windows, where the block dies with the last handle on it.
+        block.unlink()
 
 
 def binary_path() -> Path:
@@ -169,6 +202,7 @@ def dump_budget(budget: Budget) -> dict[str, Any]:
         "enumerateSpeedTies": budget.enumerate_speed_ties,
         "pinnedPolicy": budget.pinned_policy,
         "maxBranches": budget.max_branches,
+        "mergeDuplicates": budget.merge_duplicates,
     }
 
 
@@ -190,10 +224,16 @@ class EncodedNode:
     #: different costs with two different fixes, so they are reported apart.
     resolve_us: float = 0.0
     encode_us: float = 0.0
+    #: And what the crossing itself cost over there: reading this request, and building
+    #: and serialising the header that answers it. Apart for the same reason -- the fix
+    #: for one is a binary request and the fix for the other is a binary header.
+    parse_us: float = 0.0
+    header_us: float = 0.0
     #: One value per leaf for each named objective the request asked for beside the leaves.
     leaf_values: dict[str, Any] = field(default_factory=dict)
 
     @staticmethod
+    @timing.timed("rust.unpack")
     def unpack(header: dict[str, Any], body: bytearray) -> EncodedNode:
         import numpy as np
 
@@ -247,6 +287,10 @@ class EncodedNode:
             unmodelled=tuple(header["unmodelled"]),
             resolve_us=float(header.get("resolveUs", 0.0)),
             encode_us=float(header.get("encodeUs", 0.0)),
+            parse_us=float(header.get("parseUs", 0.0)),
+            # The fold and the text are both the header being JSON, and one number is what
+            # a table has room for. The split stays in the header for anyone who needs it.
+            header_us=float(header.get("foldUs", 0.0)) + float(header.get("headerUs", 0.0)),
             leaf_values={
                 name: np.frombuffer(
                     body, dtype=np.float64, count=n, offset=offset + index * n * 8
@@ -383,6 +427,11 @@ class RustNode:
         # One thread, so a read that never returns can be abandoned. Killing the child
         # closes the pipe, which is what actually unblocks it.
         self._reader = ThreadPoolExecutor(max_workers=1)
+        #: The block an encoded node's arrays are written into. None until a node asks
+        #: for one, and then as large as the node that asked.
+        self._shm: Any = None
+        #: Set when a block could not be made, so the pipe is not re-refused per node.
+        self._shm_off = SHM_MAX_BYTES <= 0
 
     def close(self) -> None:
         if self._process.poll() is None:
@@ -390,6 +439,9 @@ class RustNode:
             self._process.wait(timeout=5)
         self._reader.shutdown(wait=False)
         self._errors.close()
+        # After the child is gone, so nothing is reading it when the pages go away.
+        _release(self._shm)
+        self._shm = None
 
     def _stderr_text(self) -> str:
         """Whatever the child has written to stderr so far. Never blocks."""
@@ -417,6 +469,7 @@ class RustNode:
                 f"killed it. {self._stderr_text()}"
             ) from None
 
+    @timing.timed("rust.score")
     def score(
         self,
         pos: Position,
@@ -443,6 +496,7 @@ class RustNode:
             for score, parts in zip(response["scores"], response["detail"], strict=True)
         ]
 
+    @timing.timed("rust.resolve")
     def resolve(
         self,
         pos: Position,
@@ -478,17 +532,101 @@ class RustNode:
         )
 
     def _exchange(self, request: dict[str, Any]) -> dict[str, Any]:
-        payload = json.dumps(request, ensure_ascii=False).encode("utf-8")
+        """One request out, one header line back, with this end's JSON named.
+
+        `rust.ask` and `rust.header` are this process's share of the protocol being JSON,
+        as `rust.child.parse` and `rust.child.header` are the child's. Four rows for one
+        question -- whether a crossing should stop being text -- because the answer is
+        different at each end and the fixes are different too.
+        """
+        with timing.stage("rust.ask"):
+            payload = json.dumps(request, ensure_ascii=False).encode("utf-8")
         self._process.stdin.write(payload + b"\n")
         self._process.stdin.flush()
         line = self._with_deadline(self._process.stdout.readline, "header")
         if not line:
             raise RuntimeError(f"the Rust node process stopped: {self._stderr_text()}")
-        response = json.loads(line.decode("utf-8"))
+        with timing.stage("rust.header"):
+            response = json.loads(line.decode("utf-8"))
         if "error" in response:
             raise RuntimeError(f"the Rust node refused the request: {response['error']}")
         return response
 
+    def _grow_to(self, body_bytes: int) -> Any:
+        """A block at least `body_bytes` long, or None when one cannot be had.
+
+        Called when the child says the node it has just resolved does not fit what this
+        process holds -- which for the first node of a process is always, since it holds
+        nothing. A quarter of headroom on top, because a node's neighbours are near its
+        size and every growth costs the child a fresh attachment, which is every page of
+        the block faulted in again.
+        """
+        if self._shm_off or body_bytes > SHM_MAX_BYTES:
+            return None
+        # Imported here rather than at the top: this module is loaded by every worker and
+        # a block is only ever made by one that actually fills an encoded node.
+        from multiprocessing import shared_memory
+
+        want = min(int(body_bytes * 1.25), SHM_MAX_BYTES)
+        try:
+            fresh = shared_memory.SharedMemory(create=True, size=want)
+        except Exception as exc:  # noqa: BLE001 - the pipe is always there to fall back to
+            print(
+                f"[rustnode] a {want / 1e6:.0f} MB block was refused ({exc}); "
+                "the arrays keep the pipe",
+                file=sys.stderr,
+            )
+            # Once, not once a node: a machine that cannot spare the commit now will not
+            # spare it in a hundred milliseconds either.
+            self._shm_off = True
+            return None
+        # Only after the new one exists, so a failure leaves the old one in place.
+        _release(self._shm)
+        self._shm = fresh
+        return fresh
+
+    def _body(self, header: dict[str, Any], count: int) -> tuple[str, bytearray]:
+        """The node's arrays, by whichever road the child's header named.
+
+        Three of them. `shm` means they are already in the block this process holds and
+        only have to be copied out. `grow` means the child has them and nothing here fits:
+        it is waiting to be told where to put them, and this makes a block of the size it
+        just named. Anything else -- `pipe`, or no `via` at all from a binary built before
+        any of this -- means they are following down the pipe.
+        """
+        road = header.get("via")
+        if road == "shm" and self._shm is not None:
+            return "shm", self._copy_shared(self._shm, count)
+        if road != "grow":
+            return "pipe", self._read_exactly(count)
+        block = self._grow_to(count)
+        answer = (
+            {"name": block.name, "bytes": block.size}
+            if block is not None
+            else {"pipe": True}
+        )
+        self._process.stdin.write(json.dumps(answer).encode("utf-8") + b"\n")
+        self._process.stdin.flush()
+        line = self._with_deadline(self._process.stdout.readline, "the block's answer")
+        if not line:
+            raise RuntimeError(f"the Rust node process stopped: {self._stderr_text()}")
+        settled = json.loads(line.decode("utf-8")).get("via")
+        if settled == "shm" and block is not None:
+            return "shm", self._copy_shared(block, count)
+        return "pipe", self._read_exactly(count)
+
+    @timing.timed("rust.body")
+    def _copy_shared(self, block: Any, count: int) -> bytearray:
+        """The body out of the block, as the writable buffer the arrays are built over.
+
+        One copy at memory speed, where the pipe was a round trip per buffer. A copy and
+        not a view on purpose: the block is written again by the next node, and an array
+        still pointing into it would be read after the child had overwritten it -- a wrong
+        answer with nothing to see, which is not a trade worth one memcpy.
+        """
+        return bytearray(block.buf[:count])
+
+    @timing.timed("rust.body")
     def _read_exactly(self, count: int) -> bytearray:
         """The blob that follows an encoded node's header, in full.
 
@@ -510,6 +648,7 @@ class RustNode:
             body += chunk
         return body
 
+    @timing.timed("rust.fill")
     def fill_encoded(
         self,
         pos: Position,
@@ -538,10 +677,37 @@ class RustNode:
         # Only these cells, when the caller is solving rather than tabulating.
         if cells is not None:
             request["cells"] = [[int(i), int(j)] for i, j in cells]
+        # What this process holds, if anything. A `shm` key with no name says "I hold
+        # none, but I will make one" -- which is what the first node of every process
+        # sends, and how a block ends up the size of the node that needed it.
+        if not self._shm_off:
+            request["shm"] = (
+                {"name": self._shm.name, "bytes": self._shm.size}
+                if self._shm is not None
+                else {"name": None, "bytes": 0}
+            )
         header = self._exchange(request)
-        body = self._read_exactly(int(header["bytes"]))
-        return EncodedNode.unpack(header, body)
+        count = int(header["bytes"])
+        road, body = self._body(header, count)
+        node = EncodedNode.unpack(header, body)
+        # What the child says it spent, on its own clock. From this side the two
+        # are one wait on a pipe, so there is no other honest source for the split.
+        timing.add("rust.child.resolve", node.resolve_us / 1e6)
+        timing.add("rust.child.encode", node.encode_us / 1e6)
+        timing.add("rust.child.parse", node.parse_us / 1e6)
+        timing.add("rust.child.header", node.header_us / 1e6)
+        # What the crossing actually carried, and by which road. The size of a body used
+        # to be arrived at by multiplying a leaf count by a per-leaf figure from another
+        # file, and a conversion is not a measurement.
+        timing.count("body.bytes", count)
+        timing.count("body.shm" if road == "shm" else "body.pipe")
+        # And how much of the node the port's own leaf sharing took off the crossing. The
+        # ratio has been read off `Collector.seen` and never counted; this is the count.
+        timing.count("leaves.offered", int(header.get("offered", 0)))
+        timing.count("leaves.stored", int(header["leaves"]))
+        return node
 
+    @timing.timed("rust.fill")
     def fill(
         self,
         pos: Position,

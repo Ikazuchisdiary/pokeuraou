@@ -32,6 +32,7 @@ from typing import Any
 
 import numpy as np
 
+from . import timing
 from .position import Position
 from .regulation import STAT_IDS, Regulation
 from .stats import nature_multipliers, stats_from_sp
@@ -363,6 +364,7 @@ class Encoder:
         """
         return self.encode_positions([Position.from_json(p) for p in positions])
 
+    @timing.timed("encode")
     def encode_positions(self, positions: list[Position]) -> Encoded:
         """Encodes positions directly, which is the path the search uses.
 

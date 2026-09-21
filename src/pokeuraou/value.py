@@ -38,6 +38,7 @@ import numpy as np
 import torch
 from torch import Tensor, nn
 
+from . import timing
 from .encode import Encoded, Encoder, Vocabulary
 
 
@@ -72,7 +73,13 @@ class ValueConfig:
     #: were marked against, and the second is not noise a reader can average away: it
     #: changes the meaning of the number, not just its value. None keeps the old behaviour
     #: of taking the split from `seed`, so every model trained before this was added is
-    #: still described by what its record says.
+    #: still described by what its record says -- including one read back out of a stored
+    #: config, which predates the field and so arrives at this default.
+    #:
+    #: `tools/train_value.py` defaults its flag to 0 rather than to None, because a run
+    #: that passes `--seed` and nothing else should still be marked against the games
+    #: every other run was. The two defaults agree on every run in the record: no
+    #: invocation of that tool has ever passed `--seed`, so `seed` was 0 there too.
     #:
     #: Not a way to decompose run-to-run variance -- that was ruled out, because the
     #: comparisons that matter here change the pool, so no shared split exists across
@@ -266,6 +273,25 @@ class Dataset:
             "side": torch.from_numpy(np.ascontiguousarray(e.side[index])).to(device),
             "field": torch.from_numpy(np.ascontiguousarray(e.field[index])).to(device),
         }
+
+
+def split_for(
+    dataset: Dataset, holdout: float, config: ValueConfig
+) -> tuple[np.ndarray, np.ndarray]:
+    """The held-out games a configuration asks for, resolved in exactly one place.
+
+    Which seed decides the split is a rule, and it used to be written down three times --
+    in :func:`train`, in the training tool, and again in that tool's learning curve. A
+    rule spelled three times is one that will eventually be spelled two ways, and the two
+    ways would not look different in any output: both produce a validation number, and
+    only the games behind it would have moved.
+
+    ``None`` means "follow ``seed``", which is what every model trained before
+    :attr:`ValueConfig.split_seed` existed did, so a stored config read back at its
+    default still describes its own run.
+    """
+    seed = config.seed if config.split_seed is None else config.split_seed
+    return dataset.split_by_game(holdout, seed)
 
 
 def concat_datasets(parts: Sequence[Dataset]) -> Dataset:
@@ -495,8 +521,7 @@ def train(
 
     torch.manual_seed(config.seed)
     if train_index is None or val_index is None:
-        split_seed = config.seed if config.split_seed is None else config.split_seed
-        train_idx, val_idx = dataset.split_by_game(holdout, split_seed)
+        train_idx, val_idx = split_for(dataset, holdout, config)
     else:
         # Given explicitly by the learning curve, which varies the training set while
         # holding the validation games fixed so the rows can be compared to each other.
@@ -679,6 +704,7 @@ __all__ = [
     "predict",
     "save_dataset",
     "save_model",
+    "split_for",
     "train",
 ]
 
@@ -693,11 +719,38 @@ class BatchedValue:
 
     Both the selection resolver and the next generation of self-play need the same thing:
     hundreds or thousands of positions scored at once. Scoring them one at a time would be
-    absurd -- measured on a 16x16 node, the forward pass is 0.8% of the cost and the
-    per-position work around it is the rest -- so the batch is the unit.
+    absurd, so the batch is the unit. That part has not changed.
 
-    The cost breakdown is worth keeping in view, because it says where optimisation
-    belongs: for 256 positions, `to_json` 58 ms, `encode` 30 ms, forward 3 ms.
+    The numbers that used to stand here have. They were `to_json` 58 ms, `encode` 30 ms
+    and forward 3 ms for 256 positions, and a 16x16 node on which the forward pass was
+    0.8% of the cost. Both are history rather than argument now: `to_json` has not been
+    on this path since positions started going straight to `encode_positions`, so the
+    largest of those three terms no longer exists, and the width is 24.
+
+    Measured again 2026-09-20 over whole generation runs rather than one node
+    (`tools/profile_stages.py generation`, 300 games, eight workers, width 24,
+    `value-gen11L`, one CUDA card), as a share of a worker's wall clock:
+
+        bridge off   branch generation 85.8%, encoding 8.1%, forward 0.4%
+        bridge on    branch generation 26.6%, encoding 2.9%, forward 32.3%
+
+    **Those two lines are from earlier the same day than the code below them**, and the
+    32.3% is the part that has since moved. The forward pass had not got slower: the
+    bridge refuses about 2.7% of a node's cells, each refused cell was filled here as a
+    1x1 node, and each paid a forward pass of its own -- 45,777 forward passes for 2,673
+    nodes over those 300 games, and on a 60-game run that counted rows as well as calls,
+    94.9% of the calls carrying 6.0% of the rows, 1,110 rows a call for a whole node
+    against 3.9 for a refused cell.
+
+    IKA-52 and IKA-53 landed that afternoon and took it away: a node's refused cells go
+    to `batched_payoffs` in one call instead of one each, and the two names behind 88% of
+    the refusals joined the port's list. On the same 60-game run the forward passes went
+    10,930 to 776 and the run 21.8s to 10.3s.
+
+    The paragraph is kept rather than deleted because it is what this class is for. The
+    batching was being undone one cell at a time downstream of here, and nothing visible
+    from inside this class could have shown it -- only a breakdown taken across the whole
+    run could, which is the reason `pokeuraou.timing` exists.
     """
 
     def __init__(
@@ -763,6 +816,7 @@ class BatchedValue:
         # and a reference one to fall back on.
         return self._stacked(batch)
 
+    @timing.timed("forward")
     @torch.no_grad()
     def __call__(self, positions: list[Any]) -> np.ndarray:
         """(N,) probability that side 0 wins, for Position objects or their JSON form."""
@@ -794,15 +848,19 @@ class BatchedValue:
                 torch.sigmoid(self._mean_logit(batch)).double().cpu().numpy()
             )
         self.evaluated += len(positions)
+        timing.count("leaves", len(positions))
         return out
 
+    @timing.timed("forward")
     @torch.no_grad()
     def from_encoded(self, encoded: Encoded) -> np.ndarray:
         """(N,) win probability for a batch that is already encoded.
 
-        The encoding is 11% of a generation run and the forward pass is 5%, so a caller
-        that can produce the arrays some other way -- the Rust port does, from the leaves
-        it already holds -- should not have to hand back positions for this to re-encode.
+        A caller that can produce the arrays some other way -- the Rust port does, from
+        the leaves it already holds -- should not have to hand back positions for this to
+        re-encode. The 11% encoding and 5% forward pass this used to cite were measured
+        before the port encoded anything; on 2026-09-20 the same generation run is 2.9%
+        encoding here plus 3.3% in the port, against 32.3% of forward pass.
 
         The forward pass stays here on purpose. It is float32 matrix arithmetic, and a
         second implementation would sum it in a different order; a difference in the last
@@ -828,6 +886,7 @@ class BatchedValue:
             batch = {k: v.to(self.device) for k, v in batch.items()}
             out[start:stop] = torch.sigmoid(self._mean_logit(batch)).double().cpu().numpy()
         self.evaluated += n
+        timing.count("leaves", n)
         return out
 
     def objective(self, name: str = "win") -> Any:  # noqa: ANN401

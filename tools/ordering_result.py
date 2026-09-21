@@ -114,6 +114,27 @@ def main() -> None:
             out[key] = out.get(key, 0.0) + float(entry.our_strategy[index])
         return out
 
+    def losses(place: int) -> dict[Key, float]:
+        """The book's predicted EV loss per selection, keyed like `masses`.
+
+        Masses are summed across the selections that collapse to one key; losses are
+        minimised, because the collapsed selections differ only by the lead order within
+        a pair, which the game does not expose -- their losses should be equal and the
+        minimum says so without averaging two numbers that are meant to be one.
+        """
+        entry = by_place.get(place)
+        if entry is None:
+            return {}
+        out: dict[Key, float] = {}
+        for index, sel in enumerate(entry.selections):
+            key = (
+                tuple(sorted(species[i] for i in sel[:2])),
+                tuple(sorted(species[i] for i in sel[2:])),
+            )
+            value = float(entry.our_ev_loss[index])
+            out[key] = min(out.get(key, value), value)
+        return out
+
     def key_of(label: str) -> Key:
         front, _, back = label.partition(" / ")
         return (tuple(sorted(front.split("+"))), tuple(sorted(back.split("+"))))
@@ -128,9 +149,16 @@ def main() -> None:
     print(f"  book {args.book.name}")
     print(
         f"\n  {'place':>5}  {'heavy four':<34} {'mass':>6}  "
-        f"{'heavy':>6} {'second':>7}  {'diff':>7}  {'±':>5}  {'n':>4}"
+        f"{'heavy':>6} {'second':>7}  {'diff':>7}  {'±':>5}  {'pred':>6}  "
+        f"{'book':>5} {'miss':>6}  {'n':>4}"
     )
     signs: list[tuple[int, float]] = []
+    calibration: list[tuple[float, float]] = []
+    # The LEVEL, which the paired difference cannot see. Our forced arm is a pure
+    # selection from the support and the named arms draw the opponent from their
+    # equilibrium column strategy, so the matrix's claim is that this arm scores the game
+    # value. Comparing the board against `entry.value` needs no model and no new games.
+    levels: list[tuple[int, float, float, float]] = []
     rows = 0
     for place in places:
         by_arm: dict[str, dict[int, float]] = defaultdict(dict)
@@ -175,13 +203,23 @@ def main() -> None:
         half = 1.96 * math.sqrt(var / n)
         hp, _ = wilson(sum(by_arm[heavy][g] for g in shared), n)
         sp, _ = wilson(sum(by_arm[second][g] for g in shared), n)
+        # What the book staked. The heavy arm is in the support so its loss is zero, and
+        # the prediction for `heavy - second` is the second arm's loss. Both arms in the
+        # support makes this 0.0 by construction, which is the point the docstring makes.
+        loss = losses(place)
+        predicted = loss.get(key_of(second), 0.0) - loss.get(key_of(heavy), 0.0)
+        entry = by_place[place]
+        book_value = float(entry.value)
+        levels.append((place, book_value, hp, sp))
         print(
             f"  {place:>5}  {heavy:<34} {weight.get(key_of(heavy), 0.0):>5.1%}  "
-            f"{hp:>5.1%} {sp:>6.1%}  {mean:>+6.1%}  {half:>5.1%}  {n:>4}"
+            f"{hp:>5.1%} {sp:>6.1%}  {mean:>+6.1%}  {half:>5.1%}  {predicted:>+5.1%}  "
+            f"{book_value:>4.1%} {hp - book_value:>+5.1%}  {n:>4}"
         )
         rows += 1
         if mean != 0.0:
             signs.append((1 if mean > 0 else -1, mean))
+        calibration.append((predicted, mean))
 
     plus = sum(1 for s, _ in signs if s > 0)
     minus = len(signs) - plus
@@ -207,11 +245,65 @@ def main() -> None:
         )
     elif signs:
         print(f"  one opponent only: {signs[0][1]:+.1%}, no interval across opponents")
+    # The prediction column decides what the rest of this output is allowed to mean, so
+    # it is read before anything is concluded rather than printed as one more number.
+    staked = [p for p, _m in calibration if abs(p) > 1e-9]
+    if not staked:
+        print(
+            "\n  THE BOOK PREDICTED NOTHING HERE. Every pair has both arms in the support,\n"
+            "  where complementary slackness makes each of them worth exactly the game\n"
+            "  value against the opponent's equilibrium -- so the true difference is zero\n"
+            "  by construction and the signs above should be a coin flip. Mass inside the\n"
+            "  support is set by the OPPONENT's indifference conditions; it is not a\n"
+            "  ranking of our payoffs, and a departure from zero here is the leaf\n"
+            "  mispricing selections rather than the book ordering them backwards.\n"
+            "  For a comparison the book can lose, run `ordering_check.py --second-by\n"
+            "  evloss`, which plays the heaviest against a selection it REJECTED."
+        )
+    else:
+        pairs = [(p, m) for p, m in calibration if abs(p) > 1e-9]
+        mean_p = sum(p for p, _ in pairs) / len(pairs)
+        mean_m = sum(m for _, m in pairs) / len(pairs)
+        agree = sum(1 for p, m in pairs if (m > 0) == (p > 0))
+        print(
+            f"\n  {len(pairs)} opponents where the book staked a number: it predicted "
+            f"{mean_p:+.1%} on average and the board gave {mean_m:+.1%}, with the sign "
+            f"matching on {agree} of {len(pairs)}."
+        )
+        denom = sum(p * p for p, _ in pairs)
+        if denom > 0:
+            slope = sum(p * m for p, m in pairs) / denom
+            print(
+                f"  Through the origin the board is {slope:.2f}x what the book claimed. "
+                "One would be\n  calibrated, zero would mean its EV losses carry no board "
+                "information at all, and\n  a negative slope would mean it has the "
+                "selections backwards."
+            )
+    # The level, reported after the difference because it is the larger error and would
+    # otherwise be read as a footnote to it. A cell of the matrix is one leaf evaluation
+    # of the turn-1 position -- `solve_selection` says so: "No turn is resolved" -- while
+    # the board is a 16-wide search playing the game out. These are two different games
+    # and this is how far apart they are.
+    if levels:
+        gaps = [hp - v for _p, v, hp, _sp in levels] + [
+            sp - v for _p, v, _hp, sp in levels
+        ]
+        mean_gap = sum(gaps) / len(gaps)
+        worst = max(levels, key=lambda r: abs(r[2] - r[1]))
+        absmean = sum(abs(g) for g in gaps) / len(gaps)
+        print(
+            f"\n  LEVEL: over {len(levels)} opponents and both arms, the board came in "
+            f"{mean_gap:+.1%} from\n  the book's own game value, {absmean:.1%} in absolute "
+            f"terms. Worst: place {worst[0]},\n  book {worst[1]:.1%} against a board "
+            f"{worst[2]:.1%}.\n"
+            "  A cell of that matrix is one leaf evaluation of the turn-1 position and\n"
+            "  no turn is resolved, so this is the distance between what the leaf thinks\n"
+            "  a matchup is worth and what the search does with it."
+        )
     print(
-        "\n  A negative difference means the book ordered the two backwards ON THAT\n"
-        "  OPPONENT. It does not mean the book is worse than uniform: discarding the bad\n"
-        "  87 of 90 and ordering the top three are different questions, and the first was\n"
-        "  already measured at +18.9."
+        "\n  Whatever the sign, this is not a verdict on the book against uniform:\n"
+        "  discarding the bad 87 of 90 and ordering the top few are different questions,\n"
+        "  and the first was already measured at +18.9."
     )
 
 

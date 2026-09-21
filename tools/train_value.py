@@ -50,6 +50,7 @@ from pokeuraou.value import (
     load_dataset,
     predict,
     save_model,
+    split_for,
     td_target,
     train,
 )
@@ -116,8 +117,7 @@ def learning_curve(
     most games partially present and each remaining decision would still be a near
     duplicate of one that was kept, so the curve would flatten for the wrong reason.
     """
-    split_seed = args.seed if args.split_seed is None else args.split_seed
-    train_idx, val_idx = dataset.split_by_game(args.holdout, split_seed)
+    train_idx, val_idx = split_for(dataset, args.holdout, config)
     train_games = np.unique(dataset.game[train_idx])
     rng = np.random.default_rng(args.seed)
     shuffled = train_games.copy()
@@ -197,13 +197,15 @@ def main() -> None:
     ap.add_argument(
         "--split-seed",
         type=int,
-        default=None,
+        default=0,
         help="which games are held out, separately from --seed. --seed moves three "
         "things at once -- initialisation, batch order and the held-out games -- so "
         "two runs that differ by it were also marked against different games, which "
         "changes what the validation number MEANS rather than adding noise to it. "
-        "Omitted, the split follows --seed, which is what every model trained before "
-        "this flag existed did. It is recorded either way.",
+        "Left alone it is 0, so varying --seed now varies the fit and holds the "
+        "marking fixed. That is a change only for a run that passes --seed, which "
+        "before this default would have moved the split with it; no invocation of "
+        "this tool in the record passes one. It is written into the model either way.",
     )
     ap.add_argument("--min-turn-rows", type=int, default=200)
     ap.add_argument(
@@ -268,11 +270,11 @@ def main() -> None:
     net = build(encoder, config).to(device)
     parameters = sum(p.numel() for p in net.parameters())
 
-    split_seed = args.seed if args.split_seed is None else args.split_seed
-    train_idx, val_idx = dataset.split_by_game(args.holdout, split_seed)
+    train_idx, val_idx = split_for(dataset, args.holdout, config)
     print(
         f"{len(dataset):,} decisions from {len(np.unique(dataset.game)):,} games "
-        f"-> {len(train_idx):,} train / {len(val_idx):,} validation, split by game"
+        f"-> {len(train_idx):,} train / {len(val_idx):,} validation, split by game "
+        f"at split-seed {args.split_seed} (fit seed {args.seed})"
     )
     print(f"{parameters:,} parameters on {device}")
 
@@ -400,8 +402,10 @@ def main() -> None:
                 "td_lambda": args.td_lambda,
                 "seed": args.seed,
                 # Separately, because --seed moves three things and only this one
-                # decides what the row above was marked against.
-                "split_seed": split_seed,
+                # decides what the row above was marked against. A model whose record
+                # gives one number for both cannot say whether a rival's better AUC came
+                # from a better fit or from easier games.
+                "split_seed": args.split_seed,
                 "holdout": args.holdout,
                 # What the games that taught this could see. A value trained on omniscient
                 # play predicts omniscient play, and the book prints that prediction into

@@ -486,13 +486,59 @@ def _winner_side(pos: object) -> float | None:
     return 1.0 if pos.winner == pos.sides[0].id else 0.0
 
 
+def nearest(candidates: list, recorded: dict):  # noqa: ANN001, ANN201
+    """The candidate closest to a recorded position, and how far off it is.
+
+    HP alone does not identify an outcome. A secondary effect that lands -- a burn, a
+    Special Attack drop, Ancient Power raising five stats -- costs no HP on the turn it
+    fires, so the outcome where it fired and the one where it did not are the same distance
+    from the record. So the status, the boosts and the volatiles are part of the key. They
+    are in the recorded position too, which is what makes this a matching problem rather
+    than a missing-information one.
+
+    Returns `(candidate, gap)`; a gap of `(0, 0)` means it *is* the recorded one. Used for
+    both halves of a turn -- the branches it ends in and, on an interrupted turn, the
+    suspensions it passes through -- because a `Branch` and a `SuspendedTurn` both carry
+    the position the record can be held against.
+    """
+
+    def _recorded(mon: dict) -> tuple:
+        return (
+            mon.get("status"),
+            tuple(sorted((mon.get("boosts") or {}).items())),
+            tuple(sorted(v.get("id", "") for v in mon.get("volatiles") or [])),
+        )
+
+    def _live(mon) -> tuple:  # noqa: ANN001
+        return (
+            mon.status,
+            tuple(sorted((mon.boosts or {}).items())),
+            tuple(sorted(v.id for v in mon.volatiles)),
+        )
+
+    target = [mon["hp"] for side in recorded["sides"] for mon in side["pokemon"]]
+    target_state = [_recorded(mon) for side in recorded["sides"] for mon in side["pokemon"]]
+
+    def distance(candidate) -> tuple[int, int]:  # noqa: ANN001
+        mons = [mon for side in candidate.position.sides for mon in side.pokemon]
+        hp = sum(abs(mon.hp - want) for mon, want in zip(mons, target, strict=False))
+        # Ordered after HP, not added to it: HP is the thing the record pins exactly, and a
+        # state mismatch must never outrank a damage roll that is simply wrong.
+        state = sum(
+            _live(mon) != want for mon, want in zip(mons, target_state, strict=False)
+        )
+        return (hp, state)
+
+    best = min(candidates, key=distance)
+    return best, distance(best)
+
+
 def turn_events(
     reg: Regulation,
     loc: Localiser,
     decision: dict,
-    following: dict | None,
+    rest: list[dict],
     outcome: float | None = None,
-    after_next: dict | None = None,
 ) -> list[tuple[str | None, list[str]]]:
     """What actually happened, by re-resolving the turn that was played.
 
@@ -503,6 +549,10 @@ def turn_events(
     Which branch was played is recovered by matching the resulting HP against the next
     recorded position. Without a next position -- the last turn of the game -- the most
     likely branch is shown and said to be that.
+
+    ``rest`` is every decision after this one, not just the next: an interrupted turn eats
+    one of them per interrupt, and what the end of the turn has to be matched against is
+    whatever is left.
     """
     from pokeuraou.narrow import narrow
     from pokeuraou.position import Position
@@ -546,95 +596,68 @@ def turn_events(
     result = resolve_turn(reg, pos, lookup, budget=Budget.exact())
     prefix: list[str] = []
     resumed = False
-    if result.suspended:
-        # A self-switching move -- Parting Shot, U-turn, Volt Switch -- stops the turn for
-        # a replacement choice, and that choice is the *next* recorded decision. Bailing
-        # out here left the turn with no explanation at all while the position visibly
-        # changed, which is the one thing a log must not do.
-        paused = result.suspended[0]
+    notes: list[str] = []
+    ahead = list(rest)
+    # A self-switching move -- Parting Shot, U-turn, Volt Switch -- stops the turn for a
+    # replacement choice, and that choice is the *next* recorded decision. A turn can do it
+    # more than once, so this is a loop: two Parting Shots in one turn record two
+    # `selfswitch` nodes, and resuming only the first left the second half of the turn
+    # rendered from a position the game never stood in.
+    while result.suspended:
+        answered_by = ahead[0] if ahead else None
+        # *Which* suspension. `Budget.exact()` enumerates the damage rolls, so an attack
+        # that lands before the interrupt splits the pause into up to a thousand of them,
+        # and index 0 is the one where every roll came out maximum. Taking it was the whole
+        # of F1: the record showed Stomping Tantrum for 74 and the log printed 126, and
+        # 126 is 74's roll block read off the top of the list -- not, as it looked, the two
+        # halves of the project ordering a resumed turn differently. Measured on 200 games
+        # of `selfplay-gen11L`: 105 interrupted turns, the recorded pause present among the
+        # suspensions every time, and index 0 the wrong one in 66 of them.
+        if answered_by is not None and answered_by.get("kind") == "selfswitch":
+            paused, gap = nearest(list(result.suspended), answered_by["position"])
+        else:
+            paused, gap = max(result.suspended, key=lambda s: s.probability), (0, 0)
         prefix = list(paused.events)
         # Which side owes the replacement decides which half of the next record answers
         # it. Reading `ownChosen` either way silently lost every turn where the *opponent*
         # was the one switching out -- half of them.
         side, alternatives = resume_alternatives(reg, paused)
         key = "foeChosen" if side == 1 else "ownChosen"
-        answer = (following or {}).get(key)
+        answer = (answered_by or {}).get(key)
         picked = next(
             (r for action, r in alternatives if action.to_choice() == answer), None
         )
-        if picked is None or not picked.branches:
+        if picked is None or not (picked.branches or picked.suspended):
             return [
                 *group_events(loc, list(prefix), list(paused.acts), pos),
                 (None, [f"（中断までの表示。記録の交代手 {answer!r} が再開手と一致しない）"]),
             ]
+        if gap != (0, 0):
+            prefix_note = (
+                f"⚠ 中断時の局面が記録と一致しません（HP差 {gap[0]}、状態差 {gap[1]}）。"
+                "以下は最も近い枝です"
+            )
+            notes.append(prefix_note)
         result = picked
         # The resumed result carries the *whole* turn, the part before the interrupt
         # included, so prepending what was collected before it prints everything twice.
         prefix = []
-        # The position it lands in is not the one the next decision recorded -- that one
-        # is mid-turn, taken at the interrupt -- but the decision *after* it is the end of
+        # The position it lands in is not the one that decision recorded -- that one is
+        # mid-turn, taken at the interrupt -- but the decision *after* it is the end of
         # this turn, and that is a match target. Treating "two nodes later" as "nothing to
         # match against" is what made this branch the likeliest rather than the played
         # one, and a likeliest branch is a different damage roll: one game showed Toxapex
         # fainting to Rough Skin on a turn it ended at 66 HP.
-        following = after_next
+        ahead = ahead[1:]
         resumed = True
+    following = ahead[0] if ahead else None
     if not result.branches:
         return []
     branch = max(result.branches, key=lambda b: b.probability)
     note = ""
     if following is not None:
-        # HP alone does not identify a branch. A secondary effect that lands -- a burn, a
-        # Special Attack drop, Ancient Power raising five stats -- costs no HP on the turn
-        # it fires, so the branch where it fired and the branch where it did not are the
-        # same distance from the record, and `min` returns whichever came first. Read as
-        # "Ancient Power and Moonblast fire constantly", and the reader was right to
-        # disbelieve it: the engine puts them at exactly the declared 10% and 30%.
-        #
-        # So the status, the boosts and the volatiles are part of the key. They are in the
-        # recorded position too, which is what makes this a matching problem rather than a
-        # missing-information one.
-        def _key(mon: dict) -> tuple:
-            return (
-                mon.get("status"),
-                tuple(sorted((mon.get("boosts") or {}).items())),
-                tuple(sorted(v.get("id", "") for v in mon.get("volatiles") or [])),
-            )
-
-        def _key_of(mon) -> tuple:  # noqa: ANN001
-            return (
-                mon.status,
-                tuple(sorted((mon.boosts or {}).items())),
-                tuple(sorted(v.id for v in mon.volatiles)),
-            )
-
-        target = [
-            mon["hp"]
-            for side in following["position"]["sides"]
-            for mon in side["pokemon"]
-        ]
-        target_state = [
-            _key(mon)
-            for side in following["position"]["sides"]
-            for mon in side["pokemon"]
-        ]
-
-        def distance(candidate) -> tuple[int, int]:  # noqa: ANN001
-            mons = [mon for side in candidate.position.sides for mon in side.pokemon]
-            hp = sum(
-                abs(mon.hp - want)
-                for mon, want in zip(mons, target, strict=False)
-            )
-            # Ordered after HP, not added to it: HP is the thing the record pins exactly,
-            # and a state mismatch must never outrank a damage roll that is simply wrong.
-            state = sum(
-                _key_of(mon) != want
-                for mon, want in zip(mons, target_state, strict=False)
-            )
-            return (hp, state)
-
-        branch = min(result.branches, key=distance)
-        if distance(branch) != (0, 0):
+        branch, gap = nearest(result.branches, following["position"])
+        if gap != (0, 0):
             note = (
                 "⚠ 以下は記録と一致しない枝です。実際に起きたことではありません"
                 "（乱数の再現に失敗）"
@@ -668,11 +691,13 @@ def turn_events(
 
     groups = group_events(loc, [*prefix, *branch.events], list(branch.acts), pos)
     if note:
+        notes.append(note)
+    if notes:
         # In front of the events, not after them. A caveat about a list belongs before the
         # list: printed underneath, it was read past, and a poison tick from a branch that
         # was never played got reported as a missing-damage bug. The reader was right to
         # trust the lines -- the log was the thing that was wrong.
-        groups.insert(0, (None, [note]))
+        groups.insert(0, (None, notes))
     return groups
 
 
@@ -906,18 +931,12 @@ def render(reg: Regulation, loc: Localiser, record: dict, top: int) -> str:
         # What the chosen pair actually did, recomputed from the position: the records
         # keep the mixtures and the draw but not the resolver's log, and a mixture
         # without its consequence is only half of what a reader needs.
-        following = (
-            decisions[position_in_game + 1]
-            if position_in_game + 1 < len(decisions)
-            else None
-        )
-        after_next = (
-            decisions[position_in_game + 2]
-            if position_in_game + 2 < len(decisions)
-            else None
-        )
         happened = turn_events(
-            reg, loc, decision, following, record.get("outcome"), after_next
+            reg,
+            loc,
+            decision,
+            decisions[position_in_game + 1 :],
+            record.get("outcome"),
         )
         if happened:
             out.write("  起きたこと:\n")
