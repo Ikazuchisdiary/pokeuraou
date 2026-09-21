@@ -11,9 +11,11 @@ read from the same machine, the same minute and the same positions. Two properti
 it a measurement rather than a stopwatch reading:
 
 - **A shared construction is split, not awarded.** When one menu and one solve serve both
-  agents, each is charged half. Charging it to side 0 -- the side the code happens to run
-  first -- would make every symmetric match report a seat-shaped cost difference that no
-  setting caused.
+  sides of one agent, each is charged half. Charging it to side 0 -- the side the code
+  happens to run first -- would make every symmetric match report a seat-shaped cost
+  difference that no setting caused. Two agents that hold one leaf object are each
+  charged all of it instead, because each would have paid all of it alone and the field
+  is what one agent spends; `one_agent` is how the caller says which it has.
 - **It covers the move nodes and says so.** The replacement node has no depth and no
   width; both agents do the same work there, so folding it in would drag every ratio
   toward 1 by an amount that depends on how often somebody fainted.
@@ -127,24 +129,44 @@ def test_the_record_carries_both_numbers_out(setup) -> None:  # noqa: ANN001
     assert out["searchSeconds"] == list(record.search_seconds)
 
 
-def test_the_two_arms_stay_two_objects() -> None:
-    """One file named twice is still two leaves, and the clock is why it has to be.
+def test_two_agents_holding_one_leaf_are_each_charged_all_of_it(setup) -> None:  # noqa: ANN001
+    """The saving is the machine's; the clock still reports one agent's move.
 
-    Aliasing them is the obvious saving -- the same weights rank the same candidates to
-    the same menu twice -- and `tools/generation_match.py` already refuses it, because
-    five places used to name the tested arm by `leaves[0] is value` and an alias makes
-    all five answer True in both seats.
+    One leaf object for both sides is what a match of a configuration against itself now
+    builds, and it is worth about half the solves. But a symmetric run is the only way a
+    width or a depth can be priced -- the matrix is one, so a per-side knob grows both
+    arms at once and the in-run ratio is 0.99 by construction -- and the number it is
+    priced by is this field. Split between the two, it reads half of what the agent
+    would spend in a game it played alone, and half of every figure recorded before the
+    arms could be shared, with the ratio it is usually quoted as intact to hide it.
+    """
+    shared, _a = a_game(setup, seed=4)
+    apart, _b = a_game(setup, seed=4, one_agent=False)
+    assert shared.search_seconds[0] == shared.search_seconds[1]
+    assert apart.search_seconds[0] == apart.search_seconds[1], (
+        "two agents over one leaf do the same work as each other, whoever is charged"
+    )
+    assert [d.kind for d in apart.decisions] == [d.kind for d in shared.decisions], (
+        "the flag charges the clock and decides nothing; a different game means it did"
+    )
+    # Exactly 2x by construction -- the same seconds, halved or not -- and loosely
+    # bounded because the two numbers come from two runs of the game, not from one.
+    assert apart.search_seconds[0] > 1.5 * shared.search_seconds[0]
 
-    The clock adds a second reason, and it is the one that matters to a cost comparison.
-    Distinct objects make `same_menu` False, so each side builds the menus it searches
-    over and `search_seconds` reads what that agent alone would spend on the position:
-    the whole menu, plus its own solve. Aliased, each arm would be charged half a menu,
-    which is what neither of them would pay in a game it played by itself.
+
+def test_the_match_says_its_two_arms_are_two_agents() -> None:
+    """Sharing the arms is the caller's to do, and so is saying what it costs.
+
+    Five places used to name the tested arm by `leaves[0] is value`, and while they did,
+    one object in both arms was silent and total: the seat flip stops flipping, the
+    tested arm's book governs both seats, the win count reads side 0 twice. They ask
+    `which` now, so the arms may be shared -- and what has to stay true is that the
+    sharing is invisible to everything except the clock, which is told.
     """
     body = (TOOLS / "generation_match.py").read_text(encoding="utf-8")
-    assert "assert baseline is not value" in body, (
-        "the two arms may not be aliased: the seat flip and each arm's own wall clock "
-        "both rest on them being distinct"
+    assert "one_agent=False" in body, (
+        "a match holds two agents whether or not they hold one leaf object; left to "
+        "default, a symmetric pricing run reports half the cost it is measuring"
     )
     # Comments out: the module explains the five defects at length, in this spelling.
     code = "\n".join(
@@ -153,6 +175,11 @@ def test_the_two_arms_stay_two_objects() -> None:
     assert "leaves[0] is value" not in code, (
         "an arm identified by object identity is an arm that reads as the tested one in "
         "both seats the moment anything aliases them"
+    )
+    assert "assert baseline is not value or old_name == new_name" in body, (
+        "what is left to forbid is one object playing under two names: the sharing test "
+        "reads the model files, so the two names cannot differ unless something else "
+        "aliased the arms"
     )
 
 

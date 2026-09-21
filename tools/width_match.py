@@ -123,6 +123,12 @@ def main() -> None:
                 search_limit=limits,
                 max_turns=args.max_turns,
                 evaluate=(value, value),
+                # One leaf, deliberately -- the two sides differ in width and in
+                # nothing else -- but two agents, so each recorded `searchSeconds`
+                # is what that width spends on a move rather than half of one
+                # shared solve. This tool reads the games and not the clock; the
+                # field goes into every record it writes all the same.
+                one_agent=False,
             )
             if record.outcome is None:
                 unfinished += 1
