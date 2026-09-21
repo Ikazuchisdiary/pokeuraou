@@ -5244,3 +5244,22 @@ IKA-12 の「同一実時間は1局の中には作れない」）、**比は 1.0
   False なので `same_menu` が立たず、方策順位の対称な対戦では共有が効かない。測っていない
 * 控え隠蔽・**ダメージ順**は元から2回払っていない（`same_menu` が葉を見るのは
   「葉で順位付けする」ときだけ）。9/19 の表の真ん中の行が 27→27 だったのはそれ
+
+### 同じ日に worktree を全部見た —— 残っていたのは2つだけ
+
+`git worktree list` の9本を、master に入っているか・中身が master にあるかで仕分けた。
+
+| worktree | 状態 |
+|---|---|
+| `exciting-volhard-5bea3a` | **未コミットの葉共有**（上）。master に追いつかせて入れた |
+| `rust-spike` | 36コミット未マージだが、**ファイルは全部 master にある**（別経路。同一が3本、
+残りは master のほうが新しい）。ただ1本 `tests/test_inference_shape.py` だけがどこにも無く、
+これは移植して入れた（負の対照つき） |
+| `topk-joint-classes` | 9/12。**コードは `0da9f83` で master に入っている**（3時間後の別コミット）。
+README 節だけが未着。数字は古いので断り書きだけを移した |
+| `ika-12-equal-time` / `ika-27-chunked-payoffs` / `agent-*` ×4 | すべてマージ済み。
+`agent-a3eeb9927e44f4605` の汚れは submodule のビルド成果物（`package-lock.json` と
+`pokemon-showdown` ランチャ）だけで、ピンは master と同じ |
+
+**`rust-spike` と `topk-joint-classes` は中身が master にあるので、マージしてはいけない**
+（master のほうが新しいファイルを古い版で上書きしにいく）。消すなら worktree ごと。
