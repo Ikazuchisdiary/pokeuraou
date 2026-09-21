@@ -55,6 +55,13 @@ jobs:
       - name: which tools build an agent generation would not recognise
         run: uv run python tools/agent_drift.py --check
 
+      # The same shape one layer down: `check_white_herb` was in the port from the first
+      # day and `item_handled` was never told, so for eight days the port refused 63% of
+      # generation's cells for an effect it had implemented. Source scanning only -- no
+      # cargo, no node, no data -- which is why it belongs in this job.
+      - name: what the Rust port's gates pass, and what they refuse that it implements
+        run: uv run python tools/port_gate_audit.py --check
+
   suite:
     name: the suite, with the oracle and the Rust node built
     runs-on: ubuntu-latest
