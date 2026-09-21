@@ -301,16 +301,28 @@ def main() -> None:
 
         meta = base_meta = {}
         value = RemoteValue(args.inference, args.inference_arm, encoder)
-        baseline = (
-            RemoteValue(args.inference, args.baseline_inference_arm, encoder)
-            if args.baseline_inference_arm
-            else None
-        )
+        if not args.baseline_inference_arm:
+            baseline = None
+        elif args.baseline_inference_arm == args.inference_arm:
+            # One arm of one server named twice is one leaf, so both sides get the same
+            # object rather than a second socket and a second shared block over the same
+            # weights. See the note beside the invariant below for what that buys and why
+            # it is safe. Matched on the NAME and not on `describe()`: the name is what
+            # the worker was told to play and what the server resolves, and two arms that
+            # merely happen to hold the same files today are still two arms.
+            baseline = value
+        else:
+            baseline = RemoteValue(args.inference, args.baseline_inference_arm, encoder)
         # The names come back from the server, not from this command line. A worker is
         # told which arm to play, never what that arm holds, and the name it records is
         # what a rating is fitted from.
         value_files = value.describe()
-        baseline_files = baseline.describe() if baseline is not None else []
+        if baseline is None:
+            baseline_files = []
+        elif baseline is value:
+            baseline_files = value_files
+        else:
+            baseline_files = baseline.describe()
         print(
             f"leaf: {args.inference_arm}={leaf_name(value_files)}"
             + (
@@ -337,11 +349,25 @@ def main() -> None:
             missing = [p for p in args.baseline if not p.exists()]
             if missing:
                 raise SystemExit(f"no baseline model at {missing}")
-            base_nets, base_metas = load_ensemble(args.baseline, encoder)
-            base_meta = base_metas[0]
-            baseline = BatchedValue(
-                [n.to(device) for n in base_nets], encoder, device=device
-            )
+            if [p.resolve() for p in args.baseline] == [p.resolve() for p in args.value]:
+                # The same files in the same order are the same leaf, so both sides get
+                # one object. See the note beside the invariant below for what that buys
+                # and why it is safe.
+                #
+                # Resolved, so `data/models/x.pt` and `./data/models/x.pt` are recognised
+                # as one file; and in ORDER, because an ensemble averages its members and
+                # floating-point addition does not commute. Two orderings of the same
+                # three weights agree to about 1e-16, which is nothing and is still enough
+                # to settle a tie the other way -- and an identical pair of numbers on the
+                # two sides is exactly what sharing the object is for.
+                baseline = value
+                base_meta = meta
+            else:
+                base_nets, base_metas = load_ensemble(args.baseline, encoder)
+                base_meta = base_metas[0]
+                baseline = BatchedValue(
+                    [n.to(device) for n in base_nets], encoder, device=device
+                )
 
     def book_matches_leaf(files, loaded, which: str) -> None:  # noqa: ANN001
         """Whether this arm's book was solved from this arm's leaf, said out loud.
@@ -498,15 +524,48 @@ def main() -> None:
     # `seats[0]` is `(value, baseline)` and `seats[1]` is `(baseline, value)`, so the seat
     # is `which` and nothing else. Five places used to ask `leaves[0] is value` -- the seat
     # label, the two book assignments, the selection source and the win count -- which is
-    # the same answer only while the two leaf objects are distinct. Alias them (one line:
-    # `baseline = value` when the files match, which would save a duplicate search) and
-    # every one of those returns True in BOTH seats: the flip stops flipping, the tested
-    # arm's book governs both seats, and the win count reads side 0's result twice. Silent
-    # and total. The invariant is cheap to assert, so it is asserted.
-    assert baseline is not value, (
-        "the two arms must be distinct objects: `new_name`/`old_name` and the whole "
-        "provenance would be identical for both seats otherwise, and a match of an agent "
-        "against itself still needs two names."
+    # the same answer only while the two leaf objects are distinct. That is why sharing
+    # one object between the arms was once catastrophic: every one of those five returns
+    # True in BOTH seats, so the flip stops flipping, the tested arm's book governs both
+    # seats, and the win count reads side 0's result twice. Silent and total.
+    #
+    # None of the five asks any more, so the arms above are shared whenever the files (or
+    # the server arm name) say they are one leaf. Two objects over the same weights solve
+    # the same node twice and get the same answer twice, and `play_game` tests the leaf by
+    # identity -- correctly, since a library cannot know that two objects hold one model.
+    # Sharing is how the caller, which does know, says so. Measured here on one model
+    # against itself, a few games a seat at a fixed seed, counting the solves rather than
+    # trusting a clock on a busy machine:
+    #
+    #   open information, damage ranking, w8    `search` 62 -> 31        1.4x wall
+    #   hidden bench, damage ranking, w8        `belief_solve` 27 -> 27  unchanged
+    #   hidden bench, ranking by leaf, w10      `belief_solve` 24 -> 12  2.1x wall
+    #
+    # The games are the same games: re-running the first configuration at four a seat, and
+    # a w16-against-w8 comparison at three, every recorded field came back identical --
+    # decisions, policies and search values included -- with `search` 100 -> 50 on the
+    # second. Both sides keep their own menu size there, which is why `limits` is absent
+    # from the identity test in `play_game`: `_menus` builds the pair from the tuple in one
+    # call, and one solve of a 16x8 matrix is already both players' answer.
+    #
+    # The middle row is why the open and hidden paths have to be read separately. Open, it
+    # is the column player's whole `search` that goes, whenever the leaf and every other
+    # per-side setting agree. Hidden, the rebuild is behind `same_menu`, which consults the
+    # leaf only when the arms rank BY it -- so a damage-ordered hidden match was never
+    # paying twice, and nothing here speeds it up. The match that prompted this,
+    # `gen11Lx2-ownbook-vs-gen9book-hidden-m2`, recorded `rankings: ["leaf", "leaf"]` at
+    # width 24: the bottom row, and the ~40 minutes it took against the ~25 of the
+    # comparable match between two different models.
+    #
+    # What is left to assert is therefore not distinctness but honesty: a shared object
+    # must not be playing under two names. `new_name`/`old_name` are derived from the file
+    # lists rather than from the objects, so they agree exactly when the sharing test did,
+    # and a disagreement means the arms were shared by something that is not the leaf.
+    assert baseline is not value or old_name == new_name, (
+        f"one leaf object is playing both arms under two names, {new_name!r} and "
+        f"{old_name!r}. Sharing is decided from the model files, so the names cannot "
+        "differ unless something else aliased them -- and the seats' provenance would "
+        "record a match between two agents that was never played."
     )
     # Per-seat accumulators, indexed the same way as `seats`, because with a queue the two
     # seats are interleaved rather than run one after the other.
@@ -769,12 +828,22 @@ def main() -> None:
     # What the worker saw, so the server's own report can be subtracted from it. The gap
     # between `waited` here and (lock wait + lock hold) there is the transport: the socket,
     # the JSON, and the server's own parsing before it reaches the model.
-    for arm in (value, baseline):
-        if arm is not None and hasattr(arm, "calls") and arm.calls:
+    #
+    # Once per distinct object, because the two arms may now be one: a shared leaf has one
+    # socket and one set of counters, and printing them twice would read as twice the
+    # traffic. Not `arm`, which is the agent's LABEL twenty lines above -- this loop was
+    # rebinding it, so the verdict below named `<BatchedValue object at 0x...>` instead of
+    # the agent in every run that reached it.
+    reported: list[object] = []
+    for leaf in (value, baseline):
+        if leaf is None or any(leaf is seen for seen in reported):
+            continue
+        reported.append(leaf)
+        if getattr(leaf, "calls", 0):
             print(
-                f"  leaf traffic: {arm.calls:,} requests, per call "
-                f"{1000 * arm.copied / arm.calls:.2f} ms filling the buffer, "
-                f"{1000 * arm.waited / arm.calls:.2f} ms awaiting the reply",
+                f"  leaf traffic: {leaf.calls:,} requests, per call "
+                f"{1000 * leaf.copied / leaf.calls:.2f} ms filling the buffer, "
+                f"{1000 * leaf.waited / leaf.calls:.2f} ms awaiting the reply",
                 file=sys.stderr,
             )
     for which, (seat, _leaves, _d, _l, _r, _s, _p, _n) in enumerate(seats):
