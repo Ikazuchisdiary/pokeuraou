@@ -726,6 +726,12 @@ def main() -> None:
                 search_limit=limits,
                 max_turns=args.max_turns,
                 evaluate=leaves,
+                # Two arms are two agents even when they are one object. The clock has
+                # to keep saying what one of them spends on a move, or a symmetric run
+                # -- which is the only way a width or a depth can be priced, since the
+                # matrix is one and a per-side knob grows both arms at once -- reports
+                # half of it the moment the arms become shareable.
+                one_agent=False,
                 depth=depths,
                 rank_by_leaf=ranks,
                 policy=rankers,

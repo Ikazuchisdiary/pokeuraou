@@ -471,6 +471,7 @@ def play_game(
     first_action: str | None = None,
     sheets: tuple[Sequence[SampledSet], Sequence[SampledSet]] | None = None,
     bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None = None,
+    one_agent: bool = True,
 ) -> GameRecord:
     """Plays one game to a result, sampling both sides from the turn's equilibrium.
 
@@ -495,6 +496,16 @@ def play_game(
     as the Bayesian game it is. Omitted, the search sees the opponent's whole four, which
     is what every game recorded before this did -- and what 47.4% of decisions had no
     right to. The two are different agents and `provenance` says which.
+
+    ``one_agent`` says whether the two sides are one agent playing itself, which is what
+    self-play is and what a match is not. It changes no decision; it changes only how
+    `search_seconds` charges work that served both sides at once. One agent solving one
+    matrix gets both of its moves out of it, so each move carries half. Two agents that
+    happen to hold the same leaf each get one move out of it, and each would have paid
+    all of it in a game it played alone -- so each is charged all of it, and the field
+    keeps meaning "what this agent spends on a move" whether or not the caller was able
+    to share the object. A match that shares its arms and leaves this True reports half
+    the per-move cost of the configuration it is pricing.
 
     ``solve_sparsely`` takes a pair too, and it is the one whose two values are supposed
     to be *equally correct*: both settle on an equilibrium of the same game, verified to
@@ -720,11 +731,22 @@ def play_game(
             shared = menu_seconds / 2 if same_menu else 0.0
             record.search_seconds[0] += own_seconds + menu_seconds - shared
             record.search_seconds[1] += foe_seconds + shared
-        else:
-            # One construction and one solve served both agents. Neither of them would
-            # have spent less alone, and neither of them spent it alone.
+        elif one_agent:
+            # One construction and one solve served both sides of one agent. Neither of
+            # them would have spent less alone, and neither of them spent it alone.
             record.search_seconds[0] += (menu_seconds + own_seconds) / 2
             record.search_seconds[1] += (menu_seconds + own_seconds) / 2
+        else:
+            # Two agents, one leaf object -- a match of a configuration against itself,
+            # or against something that differs only off the board. The machine did the
+            # work once, and that is the whole point of letting the caller share the
+            # object, but neither agent would have spent less than all of it alone and
+            # this field is what one agent spends. Charging the halves here is how a
+            # pricing run would come back reading half the configuration's cost, with
+            # the ratio it is usually read as intact and the absolute silently doubled
+            # against every figure recorded before the arms could be shared.
+            record.search_seconds[0] += menu_seconds + own_seconds
+            record.search_seconds[1] += menu_seconds + own_seconds
 
         own_index = _sample_index(rng, own_strategy)
         if first_action is not None and not record.decisions:
