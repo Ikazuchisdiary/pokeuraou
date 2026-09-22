@@ -26,6 +26,17 @@ def load_tool(name: str) -> ModuleType:
     if spec is None or spec.loader is None:
         raise ImportError(f"cannot load tools/{name}.py")
     module = importlib.util.module_from_spec(spec)
+    # In `sys.modules` while it runs, as the import system does: a dataclass defined under
+    # `from __future__ import annotations` looks its module up there, and several tools
+    # have them. Out again if running it raises anything -- SystemExit included, which is
+    # what a tool that parses its arguments at import raises under pytest -- as the import
+    # system also does. Left there, it is what the check above hands the next caller: a
+    # half-run module, so the error that stopped the file reads as a missing attribute
+    # (IKA-40: `book_stem` "missing" below a failed `import torch`).
     sys.modules[module_name] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(module_name, None)
+        raise
     return module
