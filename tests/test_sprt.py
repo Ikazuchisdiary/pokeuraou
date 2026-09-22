@@ -27,6 +27,8 @@ from pokeuraou.provenance import provenance, write_game
 from pokeuraou.selfplay import Decision, GameRecord
 from pokeuraou.workqueue import WorkQueue, run_workers
 
+from ._harness import load_tool
+
 
 def _fishtest_llr(counts: list[float], elo0: float, elo1: float) -> float:
     """`LLRcalc.LLR_logistic`, transcribed: regularize, results_to_pdf, MLE_expected by
@@ -379,3 +381,39 @@ def test_a_monitor_that_fails_leaves_the_run_whole_and_says_so(tmp_path) -> None
     tail.poll()
     assert tail.records == 80  # every game played: a broken stop is no stop at all
     assert len(calls) == 1  # not called again once it had failed
+
+
+def test_match_queue_registers_its_test_before_the_first_game(tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    """`match_queue.py --sprt` without playing a game: the bounds are on disk before the
+    driver starts a worker, the driver is handed the monitor, and a second run into the same
+    directory is refused -- a test whose bounds could be rewritten after games exist is not
+    a test fixed in advance."""
+    match_queue = load_tool("match_queue")
+    seen: dict[str, object] = {}
+
+    def fake_run_workers(indices, build, *, monitor, **_kwargs) -> int:  # noqa: ANN001
+        seen["before"] = json.loads((tmp_path / "sprt.json").read_text(encoding="utf-8"))
+        seen["monitor"] = monitor
+        seen["jobs"] = len(list(indices))
+        return 0
+
+    monkeypatch.setattr(match_queue, "run_workers", fake_run_workers)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "match_queue.py", "--out", str(tmp_path), "--games", "5", "--value", "a.pt",
+            "--sprt", "-5", "15", "--sprt-beta", "0.1", "--uniform-selection", "--",
+        ],
+    )
+    with pytest.raises(SystemExit) as ended:
+        match_queue.main()
+    assert ended.value.code == 0
+    before = seen["before"]
+    assert before["decision"] is None and before["pairs"] == 0
+    assert (before["registered"]["elo0"], before["registered"]["elo1"]) == (-5, 15)
+    assert before["registered"]["bounds"] == pytest.approx(list(sprt.bounds(0.05, 0.1)))
+    assert isinstance(seen["monitor"], sprt.StopWhenDecided)
+    assert seen["jobs"] == 10  # two seats a game
+    with pytest.raises(SystemExit, match="already exists"):
+        match_queue.main()
