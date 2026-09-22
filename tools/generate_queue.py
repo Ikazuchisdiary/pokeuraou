@@ -86,11 +86,42 @@ def main() -> None:
     # does not depend on the operating point -- training on the pool alone or on the
     # cumulative pool cannot change it.
     #
-    # 24 therefore stays, but for a new reason. The old one ("48 is free, so take half")
-    # came from 1,696 games at +-2.4 and is dead. The new one is that a width-48 game
-    # teaches no better than a width-24 game, so generation has nothing to buy with the
-    # 2.4x. The match number is untouched: at 45 seconds against a human, +3.12 is real.
-    ap.add_argument("--limit", type=int, default=24)
+    # 2026-09-23, IKA-73: so the knob was turned the other way, and THAT is where the
+    # generation gain was. Width 12 runs 1.889x this default's games per hour (43,999 in
+    # 7,084s against 19,800 in 6,022s), and the same three-match design says:
+    #
+    #   12's pool against 24's, EQUAL GAME COUNT    51.00% +-0.83   <- not worse. better
+    #   12's pool against 24's, EQUAL WALL CLOCK    52.83% +-0.83
+    #
+    # The first row is the one that does not depend on the operating point, and it points
+    # the same way as the clock does: a width-12 game is at least as good a training
+    # example as a width-24 one, and you get 1.889 of them for the price. Nothing points
+    # back, so generation runs at 12.
+    #
+    # This is the opposite sign to the board, where 12 is about -6 points against 24, and
+    # that is the whole lesson of the pair of issues: THE POOL IS NOT THE AGENT. What
+    # reads a position well and what teaches a network to read positions are different
+    # questions, and this repository had been answering the second with the first.
+    #
+    # Two things this number is not:
+    #
+    #   * it is not the agent's width. An agent still searches 24 here and 48 at 45
+    #     seconds against a human (+3.12 +-0.72); only the teacher is narrow
+    #   * +2.83 is the STEADY STATE, both arms trained on their own pool alone: what a
+    #     pool that had always been generated at 12 is worth against one always generated
+    #     at 24. ONE generation added to the existing ~83,000 is a much smaller change --
+    #     37,401 against 19,800 moves the whole pool by 0.227 doublings rather than 0.918
+    #     (about +0.45), and the quality term dilutes with the same share. What does not
+    #     depend on the operating point is the DIRECTION: the games are at least as good
+    #     one for one, and there are 1.889 times as many. No term points back
+    #
+    # The old rationale for 24 is dead twice over now. "48 beat 24 by nothing, so take
+    # half" was a failure to reject on 1,696 games at +-2.4 (IKA-12 replayed it at
+    # +3.42 +-0.73), and 24 was never measured against anything narrower as a TEACHER.
+    #
+    # Untested below 12. The wall clock has about 2.7 doublings in it before the fixed
+    # cost per game dominates, and 12 has taken 0.918 of them.
+    ap.add_argument("--limit", type=int, default=12)
     ap.add_argument(
         "--served",
         action="store_true",
