@@ -411,3 +411,161 @@ def test_the_leaf_ranking_scores_what_it_says_it_scores(roster) -> None:  # noqa
         # Side 0's payoff either way, so side 1 wants it small and its score is negated.
         want = payoff.mean(axis=1) if side == 0 else -payoff.mean(axis=0)
         assert np.allclose(got, want, atol=1e-12), f"side {side}: {got} != {want}"
+
+
+def test_depth_one_ignores_the_restricted_flag(roster) -> None:  # noqa: ANN001
+    """The flag names a reading of refined cells, and depth 1 refines none.
+
+    Without this a depth-1 arm carrying the flag would be a different agent than a
+    depth-1 arm without it, and every comparison run through `--baseline` would be
+    measuring the flag on both sides of the board.
+    """
+    reg = roster.reg
+    checked = 0
+    for pos in _played(roster):
+        ours = narrow(reg, pos, 0, limit=8).actions
+        theirs = narrow(reg, pos, 1, limit=8).actions
+        if not ours or not theirs:
+            continue
+        plain = search(reg, pos, ours, theirs, LEAF, budget=Budget.matrix(), depth=1)
+        flagged = search(
+            reg, pos, ours, theirs, LEAF, budget=Budget.matrix(), depth=1,
+            solve_restricted=True,
+        )
+        assert np.array_equal(plain.payoff, flagged.payoff)
+        assert np.array_equal(
+            plain.equilibrium.row_strategy, flagged.equilibrium.row_strategy
+        )
+        assert flagged.restricted == (0, 0)
+        checked += 1
+    assert checked >= 3, f"only {checked} positions searched"
+
+
+def test_the_restricted_reading_plays_only_the_rectangle(roster) -> None:  # noqa: ANN001
+    """Every action carrying probability is one whose cells were solved a ply further.
+
+    That is the whole claim: the strategy is an equilibrium of a game that exists. An
+    action outside the rectangle has depth-1 cells against the refined columns, and
+    playing it would put the answer back in the matrix of mixed depths this exists to
+    leave.
+    """
+    reg = roster.reg
+    checked = 0
+    for pos in _played(roster):
+        ours = narrow(reg, pos, 0, limit=8).actions
+        theirs = narrow(reg, pos, 1, limit=8).actions
+        if not ours or not theirs:
+            continue
+        got = search(
+            reg, pos, ours, theirs, LEAF, budget=Budget.matrix(),
+            depth=2, refine=2, passes=2, solve_restricted=True,
+        )
+        if got.restricted == (0, 0):
+            continue  # nothing was solved; the depth-1 answer came back, as documented
+        rows, cols = got.restricted
+        assert int((got.equilibrium.row_strategy > 1e-9).sum()) <= rows
+        assert int((got.equilibrium.col_strategy > 1e-9).sum()) <= cols
+        assert abs(float(got.equilibrium.row_strategy.sum()) - 1.0) < 1e-9
+        assert abs(float(got.equilibrium.col_strategy.sum()) - 1.0) < 1e-9
+        checked += 1
+    assert checked >= 3, f"only {checked} positions searched"
+
+
+def test_the_restricted_value_is_what_the_strategy_guarantees(roster) -> None:  # noqa: ANN001
+    """The reported value is the mixture's worst column, not the restricted game's value.
+
+    The restricted game restricts the OPPONENT too, so its own value is optimistic by
+    construction -- it is the value of a game in which the opponent has been forbidden
+    twenty of their columns. Reporting that as `searchValue` would write an optimism into
+    every record the moment the reading changed, and the optimism study
+    (`leaf_calibration`) reads exactly that field.
+    """
+    reg = roster.reg
+    checked = 0
+    for pos in _played(roster):
+        ours = narrow(reg, pos, 0, limit=8).actions
+        theirs = narrow(reg, pos, 1, limit=8).actions
+        if not ours or not theirs:
+            continue
+        got = search(
+            reg, pos, ours, theirs, LEAF, budget=Budget.matrix(),
+            depth=2, refine=2, passes=2, solve_restricted=True,
+        )
+        if got.restricted == (0, 0):
+            continue
+        worst = float(np.min(got.equilibrium.row_strategy @ got.payoff))
+        assert got.equilibrium.value == pytest.approx(worst, abs=1e-12)
+        assert got.optimism >= -1e-12, "the restricted value cannot be below its guarantee"
+        if got.converged:
+            # At convergence the opponent has no column outside the rectangle worth
+            # playing, so the two values are the same number reached two ways.
+            assert got.optimism == pytest.approx(0.0, abs=1e-6)
+        checked += 1
+    assert checked >= 3, f"only {checked} positions searched"
+
+
+def test_a_converged_restricted_search_has_no_better_action_outside(roster) -> None:  # noqa: ANN001
+    """Convergence means the oracle was asked and had nothing to add.
+
+    `converged` on the shipped reading means the support stopped moving; here it means
+    something checkable from outside, which is the point of reading the strategy off a
+    game instead of off a matrix: no row beats the value against the equilibrium reply,
+    and no column beats it against the equilibrium mixture, at the prices in hand.
+    """
+    reg = roster.reg
+    checked = 0
+    for pos in _played(roster):
+        ours = narrow(reg, pos, 0, limit=8).actions
+        theirs = narrow(reg, pos, 1, limit=8).actions
+        if not ours or not theirs:
+            continue
+        got = search(
+            reg, pos, ours, theirs, LEAF, budget=Budget.matrix(),
+            depth=2, refine=2, passes=4, solve_restricted=True,
+        )
+        if got.restricted == (0, 0) or not got.converged:
+            continue
+        value = got.equilibrium.value
+        assert float(np.max(got.payoff @ got.equilibrium.col_strategy)) <= value + 1e-6
+        assert float(np.min(got.equilibrium.row_strategy @ got.payoff)) >= value - 1e-6
+        checked += 1
+    assert checked >= 2, f"only {checked} positions converged"
+
+
+def test_the_two_readings_disagree_about_what_to_play(roster) -> None:  # noqa: ANN001
+    """The positive control: a flag that changes no move is a flag no match can measure.
+
+    Both arms refine from the same depth-1 equilibrium with the same settings, so the
+    refined cells are the same cells and the difference is only how they are read. If
+    `solve_restricted` were quietly ignored -- the failure this guards, and the one that
+    has happened in this repo twice -- every position here would come back identical and
+    the win rate against it would be a clean 50% forever.
+
+    Measured outside the suite on 120 recorded mid-game positions, the two readings put
+    different probabilities on the board in 88.3% of decisions; here it only has to
+    happen once, because a fixture of five turns is not a sample.
+    """
+    reg = roster.reg
+    differed = 0
+    checked = 0
+    for pos in _played(roster):
+        ours = narrow(reg, pos, 0, limit=8).actions
+        theirs = narrow(reg, pos, 1, limit=8).actions
+        if not ours or not theirs:
+            continue
+        mixed = search(
+            reg, pos, ours, theirs, LEAF, budget=Budget.matrix(),
+            depth=2, refine=2, passes=2,
+        )
+        restricted = search(
+            reg, pos, ours, theirs, LEAF, budget=Budget.matrix(),
+            depth=2, refine=2, passes=2, solve_restricted=True,
+        )
+        assert mixed.restricted == (0, 0), "the shipped reading reads no restricted game"
+        checked += 1
+        if not np.allclose(
+            mixed.equilibrium.row_strategy, restricted.equilibrium.row_strategy, atol=1e-6
+        ):
+            differed += 1
+    assert checked >= 3, f"only {checked} positions searched"
+    assert differed >= 1, "the two readings agreed everywhere, which is what a no-op does"
