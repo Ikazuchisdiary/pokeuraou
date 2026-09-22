@@ -6182,3 +6182,93 @@ IKA-89・97（`14c9053`）と IKA-68（`6581faa`）が先に入ったので2回�
 
 取り込む前の木で優先度を下げて回した1回目は、ika-68 の24ワーカーの対局と重なってワーカーが1本落ちた
 （`test_equal_wall_clock.py`、`0xc000070a`）。そのファイルを単独で回すと7本とも通った。
+
+## 9/23 — IKA-40: `load_tool` は読み込みに失敗した道具を残し、2回目は実在する関数を「無い」と言っていた
+
+9/19、torch の無い環境の `tests/test_selection_book.py` で、原因1つに失敗が2通り出ていた（課題本文の実測）:
+
+```
+  1本目  ModuleNotFoundError: No module named 'torch'                                      ← 本当の原因
+  2本目  AttributeError: module 'pokeuraou_tool_solve_selection_book' has no attribute 'book_stem'
+                                                     ← book_stem は tools/solve_selection_book.py:74 に実在する
+```
+
+課題本文によれば、この2本目は同じ日に2件の誤診を生んだ。
+
+### 何が嘘をついていたか
+
+`tests/_harness.py:load_tool` は、import の仕組みと同じく道具を**実行する前に** `sys.modules` に登録する。
+import の仕組み（3.12 の `importlib._bootstrap._load_unlocked`）は `exec_module` が投げたら登録を消して投げ直すが、
+`load_tool` は消していなかった。同じプロセスの次の呼び出しは先頭の `if module_name in sys.modules: return` で
+**36行目（`import torch`）までしか走っていないモジュール**を返し、読んだ側は74行目の `book_stem` を「無い」と言われる。
+
+IKA-24（`086710c`）の `importorskip("torch")` で、torch が無いとこの2本は `load_tool` に届く前に skip するようになり、
+症状は見えなくなった。形は残っていた —— 読み込みで落ちる道具なら、どれでも2回目から同じ嘘をつく。
+
+### 直し方
+
+`exec_module` を `try` で包み、投げたら `sys.modules.pop(module_name, None)` してから元の例外をそのまま `raise`。
+`_load_unlocked` と同じ形。選ばなかった直し方が2つある:
+
+* **`except Exception` にしない。** 木の中に実物がある: `tools/cells_needed.py` は51行目で引数を読むので、pytest の argv の
+  下では `SystemExit(2)` を投げる（`Exception` ではない）
+* **登録を実行の後ろへ動かさない。** それでも半端なモジュールは残らなくなるが、`from __future__ import annotations` の下の
+  dataclass は定義の途中で自分のモジュールを `sys.modules` から引く。`load_tool` で読む14本を、後ろで登録する版で1本ずつ
+  読むと、dataclass を持つ6本（`port_gate_audit` と `diff_*` 5本）が6本とも
+  `AttributeError: 'NoneType' object has no attribute '__dict__'`（`dataclasses.py:749 _is_type`）で落ち、持たない8本は読めた
+
+### 正の対照 —— 直す前の木で、新しいテストが落ちることを見た
+
+`tests/test_load_tool.py`（3本）。道具は `tmp_path` に書いて `_harness._TOOLS` を差し替えるので、任意グループの有無に依らない。
+
+```
+                                        直す前（HEAD の _harness.py、blob fb5a677）             直した後
+  fails_the_same_way_twice[import]      2回目  DID NOT RAISE ModuleNotFoundError                 通る
+  fails_the_same_way_twice[exit]        2回目  DID NOT RAISE SystemExit                          通る
+  once_the_cause_is_gone_...            原因を消した後の呼び出しが AttributeError:                 通る
+                                          module 'pokeuraou_tool_ika40_fails_until_installed'
+                                          has no attribute 'defined_below'
+  except Exception に狭めた版            [exit] だけ落ちる（1 failed, 2 passed）
+```
+
+3本目の直す前の落ち方は 9/19 のメッセージと同じ形。実物の道具でも使い捨てのスクリプトで同じことを見た
+（torch は `sys.meta_path` の finder で隠した。文面は 9/19 と同じ `No module named 'torch'`）:
+
+```
+                                       直す前                                            直した後
+  solve_selection_book（torch なし）    1回目 ModuleNotFoundError、2回目は半端なモジュール   2回とも ModuleNotFoundError
+                                       → .book_stem が AttributeError（9/19 と同じ文面）
+  cells_needed（pytest の argv）        1回目 SystemExit: 2、2回目は半端なモジュール        2回とも SystemExit: 2
+                                       → .double_oracle が AttributeError
+```
+
+### 同じ形は他に無かった
+
+`tests/` `tools/` `src/` `scratchpad/` を `sys.modules|exec_module|module_from_spec|spec_from_file_location|spec_from_loader|`
+`SourceFileLoader|load_module|runpy|importlib.reload|__import__(|ModuleType(|import_module(` で grep した:
+
+* `tests/_harness.py:load_tool` —— 今回の1か所。`tests/_diff_*_entry.py` 5本はこれを通るので、直しはそのまま届く
+* `tests/test_timing.py:load` —— 自前のローダだが `sys.modules` に**登録しない**ので、残るものが無い。失敗するソースで
+  2回呼んで、2回とも `ModuleNotFoundError`、`_timing_under_test` は2回とも `sys.modules` に無いことを確かめた。直さない
+* `src/` に動的な読み込みは無い。`tools/` は `sys.path.insert` と普通の import（失敗すれば import の仕組みが掃除する）だけ
+* 失敗を覚えるキャッシュも見た: `@cache` / `lru_cache` は例外を覚えない、`encode.py:326` は計算の後で入れる
+
+別の形で、直していないもの: `load_tool` が `pokeuraou_tool_seats` として読む `tools/seats.py` を、`book_check`・`selection_check`
+は `import seats` でもう一度読む。同じファイルが2つの名前で2回実行される（`diff_turn` も `diff_replacement` 経由で同じ）。
+いまのテストは片方を差し替えて他方に効くことを期待していないので、害は出ていない。
+
+### 確かめたこと
+
+```
+  load_tool を使う11ファイル（-n 0）  直す前 184 passed / 18 skipped → 直した後 187 passed / 18 skipped
+                                      増えた3本は新しいテスト。18 skipped はすべて "oracle not built"
+                                      08:37–08:38（46秒）と 08:43–08:44（54秒）、heavy.py --cores 1。他は1分未満
+  ruff check / format --diff          変えた2ファイルとも通過
+  test_line_endings / test_no_machine_specific_paths    git add した後で通過
+```
+
+### 測っていないこと
+
+* oracle のある木での18本。ただしこの変更は読み込みの**失敗経路**だけで、その4ファイル（`test_damage_diff`・
+  `test_replacement`・`test_resolve`・`test_speed`）の `load_tool` は収集時、skip より前に成功している
+* torch が本当に入っていない環境。finder で隠しただけ
