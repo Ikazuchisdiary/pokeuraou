@@ -6182,3 +6182,111 @@ IKA-89・97（`14c9053`）と IKA-68（`6581faa`）が先に入ったので2回�
 
 取り込む前の木で優先度を下げて回した1回目は、ika-68 の24ワーカーの対局と重なってワーカーが1本落ちた
 （`test_equal_wall_clock.py`、`0xc000070a`）。そのファイルを単独で回すと7本とも通った。
+
+## 9/23 — IKA-79: M-C の大会は Reportworm に1本ある（Baltimore、1,082人・1,067本が M-C に完全適合）。一次資料は大会側、シートは配分の出典
+
+答える問い: M-C のプールの一次資料は「大会の実エントリー」か「シートの65本」か（IKA-77 の S1b）。
+
+**答え: 大会の実エントリー。** 2027 シーズン最初の大会 **Baltimore Regional**（2026-09-19〜20、形式
+`Regulation M-C`、優勝 Joseph Ugarte）が処理済みで、**1,082 エントリーのうち 1,078 に6体のチームシートが
+公開**されている。M-C ダンプに**完全適合するのは 1,067 本**（`load_standings` の検査。M-B の Worlds は 386/395）。
+シートの65本は**配分（SP）の出典**として使う —— 大会側に構造的に無い唯一の情報がそれ。
+
+### 何を問い合わせたか（GET 5回・すべて 200・間隔は最短 11秒）
+
+時刻は UTC（JST は +9時間）。User-Agent は `fetch_standings.py` のもの。2回の `fetch_standings.py` は urllib が
+TLS 検証で止まり（HTTP 要求は出ていない）、curl で取り直した（検証は切っていない）。
+
+```
+  23:37:23  standings.reportworm.com/          12.7 KB  トップ。埋め込みデータ: currentSeason 2027、完了 [baltimore]、
+                                                        進行中 []、予定 [frankfurt, brisbane, recife]
+  23:38:07  standings.reportworm.com/2027       7.1 KB  HTML の殻だけ（大会一覧は JS が API から読む）
+  23:38:18  /api/v1/2027                        9.5 KB  33大会: `Regulation M-C` 11本・`Regulation ???` 22本
+  23:38:32  /api/v1/2027/baltimore             0.37 MB  gz。1,082 エントリー（fetch_standings.py 2027 baltimore）
+  23:42:07  /api/v1/2027                        9.5 KB  足した `--list` の動作確認（同じ33大会）
+```
+
+M-C の11大会。**完了しているのは Baltimore だけ**:
+
+```
+  2026-09-19  baltimore           処理済み 1,082人
+  2026-09-26  brisbane・frankfurt  未処理（以下すべて未処理）
+  2026-10-03  recife     10-10 louisville   10-17 nice   10-24 puebla   10-31 gdansk
+  2026-11-14  buenos-aires（Special Event）   11-20 laic（International）   11-28 stuttgart
+  2026-12-05 以降の22本は `Regulation ???`（未発表）
+```
+
+2026 シーズンは問い合わせていない（最終戦の Worlds が M-B なので M-C の大会は無いはず。確かめていない）。
+再現は `tools/fetch_standings.py 2027 --list`（今回足した。ファイルは書かない）。
+
+### Baltimore のファイルの中身
+
+```
+  エントリー          1,082   phase two 155・top cut 13
+  6体そろい           1,078   0体 3・5体 1
+  欄                          特性・道具・4技・性格。SP は無い（M-B と同じく仕様）。性格の欠けは1人の6体だけ
+  M-C に完全適合      1,067   落ちた15: 技 meteorassault ×10・体数 ×4・性格なし ×1。phase two 154・cut 13
+  同じファイルを M-B で  108   対照。M-B の語彙では1割しか通らない
+  種族                  148   ゴリランダー 55.4%・オオニューラ 47.2%・ボーマンダ 37.3%・サーフゴー 31.3%・ガオガエン 29.1%
+  最大クラスタ          644   60.4%（6体中5体共有の単連結。ゴリランダー 73%・オオニューラ 59%・ボーマンダ 51%）
+```
+
+`tools/standings_report.py --regulation gen9championsvgc2026regmc --season 2027 --event baltimore` で同じ数字が出る
+（ラダーの列は M-C の使用率ファイルが無いので `--`）。
+
+⚠ **meteorassault が M-C ダンプに無い。** Baltimore では10人がネギガナイトに持たせている。vendor の
+`data/mods/champions/moves.ts` は `meteorassault: {inherit: true, basePower: 170}` で、base の
+`isNonstandard: "Past"` を上書きしていない —— Showdown の M-C 形式では過去技扱いで、ダンプはそれに従っている。
+実機のシートでは通っているので Showdown 側の漏れに見えるが、**確かめていない**。S2（IKA-80）の範囲。
+
+### シートの65本の大半は Baltimore のチームだった
+
+種族の突き合わせ。Reportworm はフォルムを書かない（`sinistcha`・`vivillon`・`meowstic`）ので、シート側の
+`sinistchamasterpiece`・`vivillonfancy`・`vivillonhighplains`・`meowsticf` はフォルムを落として比べた:
+
+```
+  6体の種族が Baltimore のどれかと一致                   45/65
+    うち道具・特性・4技が6体とも一致するエントリーがある    27（性格まで 6/6 は 19）
+  一致なし（最大の重なり 5体 13・4体 5・3体 2）           20
+```
+
+逆向きに見ると、**top cut 13人のうち10人**のチームが道具・特性・4技まで6体ともシートのどれかと一致する
+（1位 Joseph Ugarte = シートの `JoeUX9 Sand`）。phase two は 155人中34人、全体では 1,078人中68人（シート側27本）。
+シートは Baltimore の上位を厚く拾った対策リストで、**一様に引けば場ではない**:
+
+```
+                 場（1,067本）  シート（65本）
+  ゴリランダー      55.4%        44.6%
+  オオニューラ      47.2%        40.0%
+  ボーマンダ        37.3%        23.1%
+  ドドゲザン        25.9%        33.8%
+  種族数            148           65
+```
+
+⚠ 突き合わせに使ったシート側の解析はプローブのもの（本体チェックアウトの `data/pool/pastes.json`、
+`scratchpad/probe_pastes.py` の出力）。IKA-78 の取り込み器の解析がこれと一致するかは IKA-78 で確かめる。
+
+**`Wolfe's Mence + Garde`（性格が1体欠けている構築）は、Baltimore の Wolfe Glick（15位）のシートと道具・特性・
+4技が6体とも一致し、性格は他の5体が一致する。欠けているボーマンダの性格は、Baltimore のシートでは Naive。**
+推測ではなく公開シートという出典がある —— ただし2つの出典をつなぐ判断なので、IKA-78 では外してユーザに聞く。
+
+### 一次資料が大会側になると変わること（IKA-77 の計画へ）
+
+* **S5（IKA-84）の見積もりは65本前提だった。** 1,067本を両席に引くと対は 1,067×1,068/2 = **569,778**
+  （65本の 2,145 の 266倍）で、同じ「1解12秒」の前提なら**約79日**。phase two の154本に絞っても 11,935対・約40時間。
+  対を鍵にする選出キャッシュは、このままでは組めない（**見積もり**。1解の費用は測っていない）
+* 配分: 大会側に SP が無いのは M-B と同じだが、M-B では使用率から性格で条件づけて引いていた。**M-C の使用率
+  ファイルは手元に無い**（本体の `data/priors/raw` は `gen9championsvgc2026regmb-1760` だけ）。いま M-C の配分の
+  出典はシートの 390 体しか無い —— S4（IKA-83）の重みが上がる
+* S2b（IKA-81）: `find_cached_standings()` の既定は `2026`/`worlds`、`selfplay.py` は `--opponents worlds`。
+  M-C の大会を席に座らせる経路はまだ無い
+* 11月末までに M-C の大会があと10本来る。プールを大会の和にするか、大会ごとにするかはまだ決めていない
+
+### 測っていないこと
+
+* Baltimore（1,067本）と M-B の Worlds（386本）の種族分布の距離。IKA-77 の「まだ測っていないこと」の1番目は、
+  いま両方の場があるので測れる
+* `load_standings` が「メガ後の特性」として不明扱いにした3件のうち `Sneasler:Poison Point`・`Tyranitar:Sand Rush` は
+  メガの特性ではない（M-C ダンプでオオニューラにメガは無く、メガバンギラスの特性は Sand Stream）。
+  シートの誤記か API の誤りかは見ていない
+* 北米の地域大会1本の場が、M-C 全体の場か。9/26 に Frankfurt・Brisbane が来る
