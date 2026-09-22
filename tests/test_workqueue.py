@@ -100,6 +100,35 @@ def test_a_killed_worker_s_games_are_played_by_someone_else() -> None:
         server.shutdown()
 
 
+def test_a_closed_queue_hands_out_nothing_and_drops_the_rest() -> None:
+    """What a stopped match relies on: after `close`, nobody is handed anything, what a
+    worker was holding finishes normally, and a crashed worker's games are dropped rather
+    than put back where nobody will take them -- and none of it counts as work left
+    undone, which is what makes a run that stopped because it had its answer exit 0."""
+    queue = WorkQueue(range(10))
+    assert queue.take(1) == 0
+    assert queue.take(1) == 1
+    queue.finish(1, 0)
+    assert queue.close() == 8
+    assert queue.take(2) is None
+    assert queue.resolved() == {0}
+    assert queue.remaining == 1  # index 1, still held
+    assert queue.release(1) == []  # its worker died: dropped, not requeued
+    assert sorted(queue.dropped) == list(range(1, 10))
+    assert queue.remaining == 0
+
+
+def test_resolved_counts_abandoned_games_as_final() -> None:
+    """A monitor waits for every index below its position to be final. An abandoned game
+    never finishes, so if it were not final the monitor would wait forever."""
+    queue = WorkQueue([5])
+    for _ in range(MAX_ATTEMPTS):
+        assert queue.take(1) == 5
+        queue.release(1)
+    assert queue.take(1) is None
+    assert queue.resolved() == {5}
+
+
 def test_a_game_that_kills_every_worker_is_abandoned() -> None:
     """A crash fed back to the pool forever is worse than the split it replaced."""
     queue = WorkQueue([7])

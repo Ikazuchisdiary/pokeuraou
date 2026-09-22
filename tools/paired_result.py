@@ -102,6 +102,28 @@ def main() -> None:
             f"  Elo {elo(mean):+.1f} [{elo(max(mean - half, 1e-6)):+.1f},"
             f" {elo(min(mean + half, 1 - 1e-6)):+.1f}]"
         )
+        # A run under `match_queue.py --sprt` ended where its test let it, so the rate
+        # above is not a fixed-count rate either way: a run stopped on a crossing is biased
+        # away from 50%, and one the test kept going to the cap is pinned between the two
+        # hypotheses, because anywhere else it would have crossed. The decision is the
+        # result; a size needs a fixed count.
+        registered = directory / "sprt.json"
+        if registered.exists():
+            state = json.loads(registered.read_text(encoding="utf-8"))
+            test = state.get("registered", {})
+            label = f"SPRT({test.get('elo0', 0):+g}, {test.get('elo1', 0):+g})"
+            if state.get("stoppedEarly"):
+                print(
+                    f"  ! stopped by {label}: {state.get('decision')} after "
+                    f"{state.get('pairs')} pairs. Quote the decision; the rate above is"
+                    "\n    biased away from 50% by the stop, so a size needs a fixed count."
+                )
+            else:
+                print(
+                    f"  ! {label} did not decide in {state.get('pairs')} pairs: the change lies"
+                    "\n    between its two hypotheses, and the rate above is that of a run the"
+                    "\n    test kept going -- read it as 'between', not as a size."
+                )
 
 
 if __name__ == "__main__":
