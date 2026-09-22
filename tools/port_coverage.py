@@ -101,7 +101,9 @@ def write_inert(regulation: str) -> None:
         + "\n"
         + rust_predicate("item_is_inert", sorted(items), "/// Items the engine never reads.")
     )
-    (ROOT / "rust" / "src" / "inert.rs").write_text(body, encoding="utf-8")
+    # `newline`: text mode writes CRLF on Windows, and this is a tracked source that
+    # `engine_fingerprint` hashes byte for byte. See .gitattributes.
+    (ROOT / "rust" / "src" / "inert.rs").write_text(body, encoding="utf-8", newline="\n")
     print(f"inert.rs: {len(abilities)} abilities, {len(items)} items")
 
 
@@ -145,7 +147,7 @@ def write_modelled(regulation: str) -> None:
             "/// is the declarative fields, so the resolver does not report them.",
         )
     )
-    (ROOT / "rust" / "src" / "modelled.rs").write_text(body, encoding="utf-8")
+    (ROOT / "rust" / "src" / "modelled.rs").write_text(body, encoding="utf-8", newline="\n")
     print(f"modelled.rs: {len(abilities)} abilities, {len(items)} items")
 
 

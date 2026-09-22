@@ -6086,3 +6086,91 @@ branch 12.1%・順伝播 9.0%（855行/回）・LP 3.7%・exact 解決 7.9%・�
   コメントした）
 * 起動そのものを削る課題は **IKA-112**（9/23 起票）。本番の生成には効かず、効くのは試走・プロファイル・テスト・CLI。
   作業者1本が起動のたびに約 28 MB の JSON（prior 12.9 MB・選出 book 13.1 MB・standings 1.45 MB）をパースし、24本が同じものを24回読んでいる
+
+## 9/23 — IKA-114: 改行を LF に揃え、`.gitattributes` で固定する
+
+ユーザ指摘（「改行コード混在してるのだるい」）。
+
+```
+  追跡 309本          LF 217 / CRLF 87 / 1ファイル内で混在 1（tests/test_inference.py: CRLF 367行 + LF 37行）
+  作成後に変わった     51本（TODO.md は 7回、tools/ratings.py と tests/test_inference.py は 4回）
+```
+
+変わるたびにファイル全体の差分になり、その回の本当の変更が埋もれていた。パッチを書く側は、ファイルごとの
+改行を調べて合わせていた（`patch-scripts-must-write-bytes`）。
+
+### なぜ混ざったか
+
+`core.autocrlf=false` で `.gitattributes` も無く、git は**最後に書いた道具のバイトをそのまま**記録していた。
+Windows の Python のテキストモード（`write_text` / `open("w")`）は `\n` を `\r\n` にする。追跡ファイルを
+書く道具が3本あった（`port_coverage.py` → `rust/src/inert.rs` / `modelled.rs`、`names_report.py` →
+`configs/names/*-extra.json`、`roster_from_standings.py` → `configs/teams/*.json`）。
+
+### したこと
+
+```
+  .gitattributes              * text=auto eol=lf
+  88本を LF に                 バイト単位。全部「HEAD の内容の CRLF→LF」と一致、Python 62本は compile 結果も同一
+  道具3本                      newline="\n"。2本は再生成して CR 0（roster は standings が無く未実行）
+  tests/test_line_endings.py  インデックス・ディスク・属性の3点。対照つき、--fix で修復
+  merge.renormalize=true      リポジトリ設定（.git/config、全 worktree 共通）
+```
+
+### 属性だけでは塞げない穴が2つ（どちらも実測）
+
+1. **CRLF で上書きして add すると、git はクリーンと言うのにディスクは CRLF のまま。** 上書き直後は
+   `git status` が M を出すのに `git diff` は空（サイズが違うと status は中身を比べない、という読み）。
+   add したあとは status も空になる。`engine_fingerprint` はディスクのバイトを hash するので、スクラッチの
+   複製では**同じコミット・`dirty=false` で `sources` が `118e6b52…` と `6d4f52f0…` の2通り**になった
+2. **index に CRLF で入っているファイルは、`text=auto` だとその後も CRLF のまま。** index 側に CR がある
+   ファイルは変換しない、という git の安全側の規則。正規化前の枝からマージで入ってきた CRLF の新規ファイルが
+   これになる（模擬で確認、ガードが名指しした）
+
+### 正規化前の枝は、設定があれば何も付けずにマージしてよい
+
+ika-68 の作業中の変更（main のチェックアウトで未コミット）を、スクラッチの複製でコミットして模擬した:
+
+```
+  ika-68 → master（この変更なし、対照）           衝突  GENERATIONS.md TODO.md
+  ika-68 → master（この変更あり）普通の merge      衝突  上の2本 + search.py test_search.py
+                                                        generation_match.py tools/selfplay.py
+  ika-68 → master（この変更あり）-X renormalize    衝突  GENERATIONS.md TODO.md（対照と同じ）
+                                                  中身  触った10本すべて、対照の LF 版とバイトで一致
+```
+
+`merge.renormalize=true` の効く範囲も小さな複製で確かめた（CRLF の土台・正規化の枝・古い土台での編集）。
+`merge`（どちら向きも）・`cherry-pick`・`rebase` の4つとも、設定だけで衝突が消えて結果は LF。
+⚠ scratchpad のような長いパスの下では `rebase` が `Filename too long` で止まり、衝突に見える。`C:\tmp` で
+やり直すと通った。
+
+この変更自体も、古い土台（`0e84504`）から今の master へ `-X renormalize` で取り込み、
+**全パスが「master の内容の LF 版＋意図した変更5本」と一致する**ことを確かめてから入れた。作業中に
+IKA-89・97（`14c9053`）と IKA-68（`6581faa`）が先に入ったので2回取り込み、2回とも確かめた
+（315パスと317パス。2回目の TODO.md は、この節を末尾に足した以外は master の LF 版と一致）。
+
+### 取り込んだあとに要ること
+
+* Rust ソースの mtime が新しくなるので、差分検査（`diff_node.py` など4本）の前に `cargo build --release`
+* `engine_fingerprint` の `sources` はこの取り込みで一度動く（中身は同じ）
+* 古い枝で CRLF のまま足したファイルは、マージ後にガードが名指しする。
+  `uv run python tests/test_line_endings.py --fix` のあと `git add`
+
+### 見つけたが直していないもの
+
+* `tools/names_report.py --skeleton` を回すと、手で入れた訳（`moves.recharge`「反動で動けない」）が消える → **IKA-115**
+* `rust/src/inert.rs` のヘッダは手で書き直されていて、`port_coverage.py --rust` で再生成すると消える（id の一覧は同一）
+
+### 確かめたこと
+
+```
+  変換        88本すべて「HEAD の CRLF→LF」とバイト一致、Python 62本は marshal まで一致
+  ガード       実物（tools/diff_turn.py）に CRLF を植えると名指しで落ち、--fix でバイト列が元に戻る
+  取り込み     14c9053 で315パス、6581faa で317パス。どちらも master の LF 版＋意図した変更と一致、
+              最終の木は314本すべて i/lf w/lf
+  スイート     486 passed / 57 skipped、106秒（最終の木。worktree には oracle・Rust バイナリ・standings が無い）
+              1回目の取り込みの後は 481 passed / 57 skipped
+  ruff        全通過
+```
+
+取り込む前の木で優先度を下げて回した1回目は、ika-68 の24ワーカーの対局と重なってワーカーが1本落ちた
+（`test_equal_wall_clock.py`、`0xc000070a`）。そのファイルを単独で回すと7本とも通った。

@@ -120,7 +120,8 @@ def main() -> None:
             f"{path} exists. A roster file is referred to by name from recorded games, "
             "so overwriting one silently rewrites what those games were played with."
         )
-    path.write_text(text, encoding="utf-8")
+    # `newline`: a tracked file, and text mode would write it CRLF on Windows.
+    path.write_text(text, encoding="utf-8", newline="\n")
     print(f"-> {path}")
     print(f"   {team.player}, place {team.place}, spreads sampled at seed {args.seed}")
     for entry in sampled:
