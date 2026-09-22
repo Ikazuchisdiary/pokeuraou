@@ -23,11 +23,16 @@ second one written inherited none of the first one's reporting.
         --out data/matches/foo --games 848 --workers 6 \\
         --value data/models/a.pt --baseline data/models/b.pt \\
         -- --limit 48 --rank-leaf --baseline-rank-leaf
+
+A match that exists to decide something -- ship it or not -- can stop as soon as it has
+decided (`--sprt`, IKA-89); `--games` is then the most it will play. A match whose number
+is the point (a conversion rate, one side of a triangle) plays its count out.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import subprocess
 import sys
@@ -36,6 +41,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from pokeuraou.sprt import Sprt, StopWhenDecided  # noqa: E402
 from pokeuraou.workqueue import run_workers  # noqa: E402
 
 
@@ -111,6 +117,24 @@ def main() -> None:
         "generation matches recorded `books: [uniform, uniform]` as a result.",
     )
     ap.add_argument(
+        "--sprt",
+        nargs=2,
+        type=float,
+        metavar=("ELO0", "ELO1"),
+        default=None,
+        help="stop as soon as a sequential probability ratio test decides between 'the "
+        "tested arm is worth ELO0' and 'it is worth ELO1' (logistic Elo per game, over "
+        "game pairs; `pokeuraou.sprt`). --games becomes the cap: a run undecided there ends "
+        "there, and its fixed count is the answer. The test is written to sprt.json before "
+        "the first game and its outcome after the last; tools/sprt_replay.py replays it over "
+        "a finished match. For a decision only -- a run stopped early reports a win rate "
+        "biased away from 50%%, so a size needs a fixed count.",
+    )
+    ap.add_argument("--sprt-alpha", type=float, default=0.05,
+                    help="chance of passing a change worth ELO0 or less")
+    ap.add_argument("--sprt-beta", type=float, default=0.05,
+                    help="chance of failing a change worth ELO1 or more")
+    ap.add_argument(
         "rest",
         nargs=argparse.REMAINDER,
         help="after --, options passed to every worker unchanged",
@@ -153,6 +177,27 @@ def main() -> None:
 
     out_dir: Path = args.out
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    monitor = None
+    if args.sprt is not None:
+        record = out_dir / "sprt.json"
+        # One registration per run. A test whose bounds could be rewritten after games
+        # exist is not a test fixed in advance, and a leftover file from an earlier run in
+        # the same directory would be read as this run's.
+        if record.exists():
+            raise SystemExit(
+                f"{record} already exists: a registered test belongs to one run. Use a new "
+                "--out, or remove the file if that run is being discarded."
+            )
+        test = Sprt(args.sprt[0], args.sprt[1], alpha=args.sprt_alpha, beta=args.sprt_beta)
+        monitor = StopWhenDecided(out_dir, test, record=record)
+        monitor.save()
+        print(
+            f"  registered SPRT({test.elo0:+g}, {test.elo1:+g}), alpha {test.alpha}, "
+            f"beta {test.beta}: LLR bounds [{test.lower:+.3f}, {test.upper:+.3f}] -> {record}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     env = dict(os.environ)
     env["POKEURAOU_RUST_NODE"] = "0" if args.no_bridge else "1"
@@ -238,8 +283,20 @@ def main() -> None:
         status = run_workers(
             range(2 * args.games), build,
             workers=args.workers, out_dir=out_dir, env=env, cwd=str(ROOT),
-            label="match", counts=written,
+            label="match", counts=written, monitor=monitor,
         )
+        if monitor is not None:
+            monitor.save()
+            state = monitor.state()
+            print(
+                f"  SPRT: {state['decision'] or 'no decision'} after {state['pairs']} pairs, "
+                f"LLR {state['llr']:+.3f}"
+                + ("" if state["stoppedEarly"] else " -- ran to --games, so the fixed count "
+                   "is the answer")
+                + f"\n  {json.dumps(state['counts'])} -> {out_dir / 'sprt.json'}",
+                file=sys.stderr,
+                flush=True,
+            )
     finally:
         # The server outlives every worker and is ours to end, however the run ended --
         # a leftover one holds 1.5 GB of VRAM and answers the next run's questions with
