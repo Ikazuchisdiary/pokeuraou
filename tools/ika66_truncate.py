@@ -7,7 +7,7 @@
   B 対 C = 等局数（プールの「質」だけ）
   A 対 C = 等幅  （プールの「量」だけ）
 
-    uv run python run-ika66-truncate.py --src data/ika66/w24 --out data/ika66/w24trunc --games 8400
+    uv run python tools/ika66_truncate.py --src data/ika66/w24 --out data/ika66/w24trunc --games 8400
 """
 
 from __future__ import annotations

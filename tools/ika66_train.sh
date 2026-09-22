@@ -1,7 +1,7 @@
 #!/bin/sh
 # IKA-66 の2番目 —— 3腕を等時間に揃えて切り出し、符号化して、それぞれ2シードで学習させる。
 #
-#   sh run-ika66-train.sh <N_A> <N_B>
+#   sh tools/ika66_train.sh <N_A> <N_B>
 #
 #     N_A  A腕（幅24）から取る局数   = 19800 * 等時間 / A腕の実測壁時計
 #     N_B  B腕（幅48）から取る局数   =  8400 * 等時間 / B腕の実測壁時計
@@ -24,7 +24,7 @@ cd /c/Users/Ikazuchi/repos/pokeuraou
 
 N_A="$1"; N_B="$2"
 [ -n "$N_A" ] && [ -n "$N_B" ] || { echo "usage: $0 <N_A> <N_B>" >&2; exit 2; }
-TRUNC=.claude/worktrees/ika-66-width48-pool/run-ika66-truncate.py
+TRUNC=tools/ika66_truncate.py
 
 echo "=== 等時間に揃えて切り出す ==="
 uv run python "$TRUNC" --src data/ika66/w24 --out data/ika66/armA --games "$N_A"

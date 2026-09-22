@@ -1,6 +1,9 @@
 # IKA-66 の残り1項目 — 幅48 のプールで学習した世代は、幅24 のプールの世代に勝つか
 
-〔2026-09-22、worktree `ika-66-width48-pool`〕
+〔2026-09-22〕 結論と数字は `GENERATIONS.md`「幅48 のプールは世代を伸ばさない」と
+`TODO.md` 9/22 にある。**このファイルは走らせた順序と、その途中で何を確かめたかの記録**で、
+同じ形の測定（幅を狭める方向など）をやるときの雛形として置いてある。
+道具は `tools/ika66_generate.sh` / `ika66_truncate.py` / `ika66_train.sh` / `ika66_match.sh`。
 
 ## なぜこれだけが残っているか
 
@@ -106,12 +109,12 @@ B腕の局数だけ A腕のプールを**先頭から切った** C腕を作る�
 |---|---|---|---|
 | 0 | スループット確認（300局×2） | `generate_queue.py` | **済** |
 | 1 | 負の対照 200局 | `match_queue.py` | **済 —— 50.00% ±0.00 / 発火 0.0%** |
-| 2 | A腕 生成 19,800局 | `run-ika66-generate.sh` | 2.0h |
+| 2 | A腕 生成 19,800局 | `tools/ika66_generate.sh` | 2.0h |
 | 3 | B腕 生成 8,400局 | 同上（逐次） | 2.0h |
-| 4 | 壁時計を突き合わせ、添字で切って等時間に揃える | `run-ika66-truncate.py` | 5分 |
-| 5 | 符号化 A / B / C・学習 3腕 × 2シード | `run-ika66-train.sh` | 30分 |
-| 6 | B 対 A 12,000局（+ 勝率・対の区間・発火率） | `run-ika66-match.sh armB armA 6000 b-vs-a` | 1.8h |
-| 7 | （余力）B 対 C 12,000局 | `run-ika66-match.sh armB armC 6000 b-vs-c` | 1.8h |
+| 4 | 壁時計を突き合わせ、添字で切って等時間に揃える | `tools/ika66_truncate.py` | 5分 |
+| 5 | 符号化 A / B / C・学習 3腕 × 2シード | `tools/ika66_train.sh` | 30分 |
+| 6 | B 対 A 12,000局（+ 勝率・対の区間・発火率） | `tools/ika66_match.sh armB armA 6000 b-vs-a` | 1.8h |
+| 7 | （余力）B 対 C 12,000局 | `tools/ika66_match.sh armB armC 6000 b-vs-c` | 1.8h |
 
 ### 負の対照（step 1、本番の前に取った）
 

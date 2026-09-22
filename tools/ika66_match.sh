@@ -1,8 +1,8 @@
 #!/bin/sh
 # IKA-66 の2番目 —— 腕どうしを打たせる。
 #
-#   sh run-ika66-match.sh <tested arm> <baseline arm> <games per seat> <name>
-#   例: sh run-ika66-match.sh w48 w24 6000 b-vs-a
+#   sh tools/ika66_match.sh <tested arm> <baseline arm> <games per seat> <name>
+#   例: sh tools/ika66_match.sh armB armA 6000 b-vs-a
 #
 # 幅は両腕 24（現行の出荷幅）。差は葉だけ。book は1つを共有するので、両腕は同じ6匹・
 # 同じ選出・同じ種で打ち、対応が残る。プールが隠蔽生成なので判定も `--hide-bench`。
