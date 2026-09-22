@@ -86,12 +86,19 @@ def matrix_for(
     return payoff, time.perf_counter() - started, leaves
 
 
-def load_positions(games_dir: Path, min_turn: int, seed: int) -> list[Position]:
+def load_positions(
+    games_dir: Path, min_turn: int, seed: int, max_turn: int | None = None
+) -> list[Position]:
     """Mid-game positions from recorded games, shuffled.
 
     Every recorded decision carries the position it was made in, which is a far better
     sample than anything built by hand: statuses, boosts, weather and depleted benches are
     all present in the proportions the search really meets them.
+
+    ``max_turn`` bounds the other end, which is what makes "turn 1 only" askable. Several
+    recorded numbers are turn-1 numbers -- the selection cells are all turn 1, and so is
+    the +0.00715 the refinement was measured to move -- and a tool reproducing one of
+    those has to be able to stand where it was taken.
     """
     import json
     import random
@@ -107,7 +114,8 @@ def load_positions(games_dir: Path, min_turn: int, seed: int) -> list[Position]:
                 for decision in record.get("decisions", ()):
                     if decision.get("kind") != "move":
                         continue
-                    if int(decision.get("turn", 0)) < min_turn:
+                    turn = int(decision.get("turn", 0))
+                    if turn < min_turn or (max_turn is not None and turn > max_turn):
                         continue
                     out.append(Position.from_json(decision["position"]))
         if len(out) > 4000:

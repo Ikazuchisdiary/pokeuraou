@@ -47,6 +47,7 @@ AGENT_ARGS = (
     "depth",
     "policy",
     "solve_sparsely",
+    "solve_restricted",
     "sheets",
 )
 #: Tools that drive something other than a full game on purpose, so a missing argument is
@@ -107,15 +108,16 @@ def main(argv: list[str] | None = None) -> int:
     for _, kwargs in calls(ROOT / "src/pokeuraou/selfplay.py"):
         reference |= kwargs
     reference &= set(AGENT_ARGS)
-    # `depth` and `policy` and `solve_sparsely` default to what generation ships (1, None,
-    # False), so omitting them changes nothing. The three that bite are the ones whose
-    # default is NOT what ships: the leaf (None means hp-share), the narrowing order
-    # (False means damage, generation uses the leaf) and the sheets (None means the search
-    # is handed the opponent's four).
+    # `depth`, `policy`, `solve_sparsely` and `solve_restricted` default to what
+    # generation ships (1, None, False, False), so omitting them changes nothing. The four
+    # that bite are the ones whose default is NOT what ships: the leaf (None means
+    # hp-share), the narrowing order (False means damage, generation uses the leaf), the
+    # sheets (None means the search is handed the opponent's four) and the width (8,
+    # where generation plays 12).
     reference &= {"evaluate", "rank_by_leaf", "sheets", "search_limit"}
     print(f"  the arguments whose default is not what ships: {', '.join(sorted(reference))}")
-    print("  (depth, policy and solve_sparsely default to the shipped setting, so an\n"
-          "   omission there is not a drift)\n")
+    print("  (depth, policy, solve_sparsely and solve_restricted default to the shipped\n"
+          "   setting, so an omission there is not a drift)\n")
 
     drifted: set[str] = set()
     # `tools/oneshot/` is in scope too. A tool is shelved there when its question was

@@ -106,6 +106,35 @@ the time on.
     16 refined cells and 560 unrefined ones -- the object "What it does not claim" says
     is the equilibrium of neither game. That paragraph was right and this is what being
     right about it costs.
+
+    2026-09-23, IKA-68: `solve_restricted` is the other reading. The refined rectangle is
+    a game whose every cell is at depth 2, so its equilibrium is an equilibrium of
+    something; the full matrix goes back to being what double-oracle uses it for, an
+    oracle that says whether any action outside the rectangle is worth adding. Measured
+    before it was built on 120 recorded mid-game positions -- ones where depth 1 mixes on
+    both sides, since only there can the two readings differ -- they put different
+    probabilities on the board in 88.3% of them, so the difference is one a match can see.
+    On the board the two readings played the same game in 3 pairs of 783.
+
+    The same measurement removed the other suspect. The refinement was thought to shift
+    the cells it touches upward by a constant (+0.0072), which would make a refined cell
+    attractive for a reason that is about depth and not about play -- but per cell, on
+    those positions, `depth2 - depth1` is -0.00076 +-0.00656 with 48.2% of cells below
+    zero. There is no constant to subtract. The +0.00715 that IKA-12 recorded is a
+    different quantity: the equilibrium VALUE at turn 1, not a per-cell offset.
+
+    Played out, the reading is what was losing:
+
+        restricted depth 2 at width 24 against depth 1 at width 24   54.45% +-0.94
+        restricted against the mixed reading, both depth 2           SPRT(0, +10) H1
+
+    the first over 8,808 games, the second decided at 745 pairs. It costs 4.07x a depth-1
+    decision, where the mixed reading cost 5.21x (0.82x of it, head to head). The numbers
+    were never the problem: on the same turn-1 positions the restricted value sits lower
+    than depth 1's (-0.0245, because it is a guarantee and not a game value) and its
+    direction predicts the result exactly as well (r = +0.150 against +0.147). Only the
+    strategy changed. And the mixed arm is still the arm IKA-12 played: on today's tree it
+    moves the turn-1 value by +0.00775 +-0.00307, where IKA-12 recorded +0.00715.
 """
 
 from __future__ import annotations
@@ -144,6 +173,12 @@ DEFAULT_SUB_LIMIT = 8
 #: produce dozens once secondaries and accuracy are enumerated, and the tail is worth
 #: less than the sub-solves it would cost.
 DEFAULT_SUB_BRANCHES = 3
+
+
+#: How far a best response has to beat the restricted game's value before it is worth a
+#: row or a column and the cells that come with it. The LP's own residual is around
+#: 1e-12, so this is a floor on "actually better", not on arithmetic.
+ORACLE_TOLERANCE = 1e-6
 
 
 #: Opponent actions a leaf ranking resolves each candidate against. One is the cheapest
@@ -252,6 +287,14 @@ class SearchResult:
     converged: bool = True
     #: Sub-games solved, which is the cost that separates this from a depth-1 search.
     subgames: int = 0
+    #: Rows and columns of the restricted game the strategy was read from. Zero when the
+    #: strategy came from the full matrix, which is every depth-1 search and the shipped
+    #: depth-2 one.
+    restricted: tuple[int, int] = (0, 0)
+    #: The restricted game's own value minus what its strategy guarantees against every
+    #: column at the prices in hand. Zero at convergence, because then no column outside
+    #: the rectangle beats it; positive when the pass budget ran out first.
+    optimism: float = 0.0
 
 
 def search(
@@ -267,6 +310,7 @@ def search(
     passes: int = DEFAULT_PASSES,
     sub_limit: int = DEFAULT_SUB_LIMIT,
     sub_branches: int = DEFAULT_SUB_BRANCHES,
+    solve_restricted: bool = False,
     solve_sparsely: bool = False,
 ) -> SearchResult:
     """Solve this turn's matrix game, optionally refining the cells that decide it.
@@ -275,6 +319,12 @@ def search(
     `batched_payoff` call and the same `solve`. That is deliberate and tested, because a
     depth parameter whose lowest setting is not the old behaviour makes every comparison
     against it meaningless.
+
+    ``solve_restricted`` changes only how the refined cells are read into a strategy, and
+    only at depth 2 -- see `_restricted_search`. On the board it beat both depth 1 and the
+    mixed reading (IKA-68). It is still an option and not the default, because depth 2
+    itself does not run where the agent ships: a hidden bench goes through `belief_solve`,
+    which has no depth at all (IKA-111).
     """
     row = list(ours)
     col = list(theirs)
@@ -299,6 +349,23 @@ def search(
             ours=row,
             theirs=col,
             unmodelled=unmodelled,
+        )
+
+    if solve_restricted:
+        return _restricted_search(
+            reg,
+            pos,
+            row,
+            col,
+            evaluate,
+            budget=budget,
+            payoff=payoff,
+            equilibrium=equilibrium,
+            unmodelled=unmodelled,
+            refine=refine,
+            passes=passes,
+            sub_limit=sub_limit,
+            sub_branches=sub_branches,
         )
 
     #: (i, j) -> the depth-2 value, so a cell is never refined twice across passes.
@@ -355,6 +422,164 @@ def search(
         passes=used,
         converged=converged,
         subgames=subgames,
+    )
+
+
+def _restricted_search(
+    reg: Regulation,
+    pos: Position,
+    row: list[SideAction],
+    col: list[SideAction],
+    evaluate: LeafEvaluator,
+    *,
+    budget: Budget,
+    payoff: np.ndarray,
+    equilibrium: Equilibrium,
+    unmodelled: set[str],
+    refine: int,
+    passes: int,
+    sub_limit: int,
+    sub_branches: int,
+) -> SearchResult:
+    """The double-oracle's own answer: the refined rectangle solved as the game it is.
+
+    The loop in `search` refines the cells the depth-1 equilibrium weights and then
+    re-solves the *whole* matrix -- 16 cells at depth 2 sitting in 560 at depth 1. IKA-12
+    played that out and it lost 48.28% +-0.71 over 16,000 games while every number it
+    produced improved, and this module had named the suspect before the match ran.
+
+    Here the rectangle is the game. Every one of its cells has been resolved a ply
+    further, so its equilibrium is an equilibrium of something, and the full matrix is
+    demoted to what double-oracle uses it for: an oracle asked whether any action outside
+    the rectangle beats what the rectangle guarantees. Ranking is the one thing depth-1
+    values are still good at when they are wrong about the level, and ranking is all that
+    is asked of them here.
+
+    A pass adds at most one row and one column, and only when the oracle says that action
+    is better than the restricted game's value. A pass that adds neither is convergence --
+    no action outside the rectangle is worth playing at the prices in hand, which is the
+    statement the shipped reading cannot make at all. It is also cheaper than the shipped
+    second pass: that one can refine a whole second rectangle (up to 16 fresh cells),
+    while a row and a column of an enlarged rectangle is 9.
+
+    The value returned is what the strategy guarantees against *every* column at those
+    prices, not the restricted game's own value -- the restricted game restricts the
+    opponent too, so its value is optimistic by construction. The two coincide at
+    convergence and `optimism` reports the gap when they do not.
+    """
+    rows = [int(i) for i in _top(equilibrium.row_strategy, refine)]
+    cols = [int(j) for j in _top(equilibrium.col_strategy, refine)]
+    #: The best value in hand for every cell: depth 2 inside the rectangle, depth 1
+    #: outside it. Nothing is read *from* this matrix except a ranking.
+    prices = np.array(payoff, dtype=np.float64, copy=True)
+    refined: dict[tuple[int, int], float] = {}
+    unrefinable: set[tuple[int, int]] = set()
+    answer: Equilibrium | None = None
+    shape = (0, 0)
+    optimism = 0.0
+    subgames = 0
+    converged = False
+    used = 0
+    for attempt in range(1, passes + 1):
+        used = attempt
+        for i in rows:
+            for j in cols:
+                if (i, j) in refined or (i, j) in unrefinable:
+                    continue
+                value, notes, solved = _refined_value(
+                    reg,
+                    pos,
+                    row[i],
+                    col[j],
+                    evaluate,
+                    budget=budget,
+                    sub_limit=sub_limit,
+                    sub_branches=sub_branches,
+                )
+                subgames += solved
+                unmodelled.update(notes)
+                if value is None:
+                    # The cell keeps its depth-1 price, so the rectangle is that much
+                    # less consistent -- one cell of sixteen rather than 560 of 576, and
+                    # counted out loud rather than left to be inferred.
+                    unrefinable.add((i, j))
+                    continue
+                refined[(i, j)] = value
+                prices[i, j] = value
+        try:
+            restricted = solve(prices[np.ix_(rows, cols)])
+        except EquilibriumError:
+            break
+        strategy = np.zeros(len(row), dtype=np.float64)
+        strategy[rows] = restricted.row_strategy
+        reply = np.zeros(len(col), dtype=np.float64)
+        reply[cols] = restricted.col_strategy
+        row_ev = prices @ reply
+        col_ev = strategy @ prices
+        guarantee = float(col_ev.min())
+        optimism = float(restricted.value) - guarantee
+        shape = (len(rows), len(cols))
+        answer = Equilibrium(
+            value=guarantee,
+            row_strategy=strategy,
+            col_strategy=reply,
+            row_ev=row_ev,
+            col_ev=col_ev,
+            row_ev_loss=np.clip(guarantee - row_ev, 0.0, None),
+            col_ev_loss=np.clip(col_ev - guarantee, 0.0, None),
+            duality_gap=float(restricted.duality_gap),
+        )
+        best_row = int(np.argmax(row_ev))
+        best_col = int(np.argmin(col_ev))
+        grew = False
+        if (
+            best_row not in rows
+            and float(row_ev[best_row]) > float(restricted.value) + ORACLE_TOLERANCE
+        ):
+            rows.append(best_row)
+            grew = True
+        if (
+            best_col not in cols
+            and float(col_ev[best_col]) < float(restricted.value) - ORACLE_TOLERANCE
+        ):
+            cols.append(best_col)
+            grew = True
+        if not grew:
+            converged = True
+            break
+
+    if answer is None:
+        # Nothing was solved. The depth-1 answer is still an answer to a well-posed game,
+        # which is the same fallback the shipped reading takes.
+        return SearchResult(
+            equilibrium=equilibrium,
+            payoff=payoff,
+            ours=row,
+            theirs=col,
+            unmodelled=unmodelled,
+        )
+    if unrefinable:
+        unmodelled.add(
+            f"depth-2 left {len(unrefinable)} cell(s) of the restricted game at depth 1"
+        )
+    unmodelled.add(
+        f"strategy read from the restricted {shape[0]}x{shape[1]} game; "
+        f"{len(refined)} cells of it at depth 2"
+    )
+    if not converged:
+        unmodelled.add("depth-2 best responses had not run out when the passes did")
+    return SearchResult(
+        equilibrium=answer,
+        payoff=prices,
+        ours=row,
+        theirs=col,
+        unmodelled=unmodelled,
+        refined=len(refined),
+        passes=used,
+        converged=converged,
+        subgames=subgames,
+        restricted=shape,
+        optimism=optimism,
     )
 
 
@@ -554,6 +779,7 @@ __all__ = [
     "DEFAULT_REFINE",
     "DEFAULT_SUB_BRANCHES",
     "DEFAULT_SUB_LIMIT",
+    "ORACLE_TOLERANCE",
     "BeliefResult",
     "SearchResult",
     "belief_solve",

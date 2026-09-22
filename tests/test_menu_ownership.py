@@ -99,3 +99,16 @@ def test_a_hidden_bench_game_refuses_depth_and_sparse() -> None:
             solve_sparsely=(True, False),
             sheets=([], []),
         )
+    with pytest.raises(ValueError, match="hidden bench"):
+        # The depth-2 reading is the third one. It reaches `search` through the same
+        # branch the other two do, which `belief_solve` does not take at all.
+        selfplay.play_game(
+            None,
+            np.random.default_rng(0),
+            [],
+            [],
+            "probe",
+            objective=HP_SHARE,
+            solve_restricted=(True, False),
+            sheets=([], []),
+        )

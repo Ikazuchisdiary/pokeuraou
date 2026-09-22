@@ -70,6 +70,13 @@ def main() -> None:
         "[-2.1, +1.8] against 1.94x the speed.",
     )
     ap.add_argument(
+        "--solve-restricted",
+        action="store_true",
+        help="at depth 2, read the strategy off the refined rectangle solved as its own "
+        "game rather than off the full matrix with the refined cells written into it. "
+        "Does nothing at depth 1, which is the default and what generation runs.",
+    )
+    ap.add_argument(
         "--depth",
         type=int,
         default=1,
@@ -363,6 +370,7 @@ def main() -> None:
         depth=args.depth,
         rank_by_leaf=args.rank_leaf,
         solve_sparsely=args.solve_sparsely,
+        solve_restricted=args.solve_restricted,
         hide_bench=args.hide_bench,
         force_lead=tuple(
             x.strip() for x in args.force_lead.split(",") if x.strip()
