@@ -27,11 +27,13 @@ the side that is not, and if it is not, the flag did not reach the search.
 
 from __future__ import annotations
 
+import itertools
 import time
 
 import numpy as np
 import pytest
 
+from pokeuraou import selfplay
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.payoff import HP_SHARE
 from pokeuraou.selfplay import play_game
@@ -129,7 +131,7 @@ def test_the_record_carries_both_numbers_out(setup) -> None:  # noqa: ANN001
     assert out["searchSeconds"] == list(record.search_seconds)
 
 
-def test_two_agents_holding_one_leaf_are_each_charged_all_of_it(setup) -> None:  # noqa: ANN001
+def test_two_agents_holding_one_leaf_are_each_charged_all_of_it(setup, monkeypatch) -> None:  # noqa: ANN001
     """The saving is the machine's; the clock still reports one agent's move.
 
     One leaf object for both sides is what a match of a configuration against itself now
@@ -140,8 +142,33 @@ def test_two_agents_holding_one_leaf_are_each_charged_all_of_it(setup) -> None: 
     would spend in a game it played alone, and half of every figure recorded before the
     arms could be shared, with the ratio it is usually quoted as intact to hide it.
     """
+    # The flag is a division, not a measurement: the two branches add `menu + own` and
+    # `(menu + own) / 2` to the same field. Only `play_game` takes it, so the two
+    # accountings need two runs -- and two runs of a real clock is the comparison this
+    # module's own docstring calls a defect, which is what it was doing here. The earlier
+    # bound was `> 1.5x` of a ratio that is 2 by construction, and under the parallel
+    # suite it came back 1.4984 and failed three times in five (IKA-74). Holding the
+    # clock still makes the assertion the exact one the arithmetic supports.
+    def ticking() -> object:
+        ticks = itertools.count(1.0, 1.0)
+        return lambda: next(ticks)
+
+    monkeypatch.setattr(selfplay, "perf_counter", ticking())
     shared, _a = a_game(setup, seed=4)
+    monkeypatch.setattr(selfplay, "perf_counter", ticking())
     apart, _b = a_game(setup, seed=4, one_agent=False)
+    # The control for the ratio below. A held clock and a repeated game make "2.0x" cheap
+    # to assert and cheap to fake: a counter that drifted between the two runs would push
+    # the ratio around on its own, and a factor read off a harness rather than off the
+    # flag is the failure this whole module is about. The same call with the flag NOT
+    # moved has to come back at exactly 1.0x.
+    monkeypatch.setattr(selfplay, "perf_counter", ticking())
+    again, _c = a_game(setup, seed=4)
+    assert again.search_seconds == shared.search_seconds, (
+        "two runs of the same game on the same held clock disagreed, so the ratio below "
+        "would be measuring the counter rather than `one_agent`"
+    )
+
     assert shared.search_seconds[0] == shared.search_seconds[1]
     assert apart.search_seconds[0] == apart.search_seconds[1], (
         "two agents over one leaf do the same work as each other, whoever is charged"
@@ -149,9 +176,14 @@ def test_two_agents_holding_one_leaf_are_each_charged_all_of_it(setup) -> None: 
     assert [d.kind for d in apart.decisions] == [d.kind for d in shared.decisions], (
         "the flag charges the clock and decides nothing; a different game means it did"
     )
-    # Exactly 2x by construction -- the same seconds, halved or not -- and loosely
-    # bounded because the two numbers come from two runs of the game, not from one.
-    assert apart.search_seconds[0] > 1.5 * shared.search_seconds[0]
+    assert shared.search_seconds[0] > 0.0, (
+        "a stopped clock would satisfy the ratio below and measure nothing"
+    )
+    assert apart.search_seconds[0] == 2.0 * shared.search_seconds[0], (
+        "one agent is charged half of a shared construction and two agents are each "
+        "charged all of it, so with the same game on the same clock the two runs differ "
+        "by exactly two -- anything else means `one_agent` did not reach the accounting"
+    )
 
 
 def test_the_match_says_its_two_arms_are_two_agents() -> None:
