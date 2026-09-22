@@ -6367,3 +6367,108 @@ worktree に `data/` が無いので、使用率での順位づけの段は出�
 * 上の階層に表でない値（例 `"_source": "..."`）があると、直した道具は**書く前に** `ValueError` で止まる
   （ファイルは無傷、実測、同じスクリプトの E。HEAD は黙って捨てていた）。そういうキーを書くものは今は無い
 * `available locales: ja, ja-extra` —— `available_locales()` が `*-extra.json` もロケールに数える（表示だけ）
+
+## 9/23 — IKA-72: `inert.rs` が再生成で再現するようになり、`port_coverage.py --check` を CI の lint が回す
+
+問い: `tools/port_coverage.py --rust` はコミット済みの `rust/src/inert.rs` を再現するか。しないなら
+「再生成して diff が空か」を検査にできる形にする（IKA-57「ついでに見つかったが直していないこと」、
+IKA-114「見つけたが直していないもの」の2行目）。
+
+### 再現しなかった中身は 9/22 の記述どおり。id は1つも動いていない
+
+```
+  直す前の木で --rust → git diff --stat rust/src/inert.rs   15 +++++----------
+  中身                                                      ヘッダの散文、関数の doc 2か所、末尾の空行1つ
+  --rust-modelled → rust/src/modelled.rs                    差分なし
+```
+
+### 直し方 —— 散文は道具をファイルに寄せ、末尾の空行はファイルを直した
+
+* **散文**: 人が書いたほう（"Deciding that by memory is how a port acquires a silent wrong answer" /
+  "it must be regenerated when the engine learns a new effect"、関数の doc "Ids the Python engine never
+  mentions, so ignoring them cannot diverge from it"）を `port_coverage.py` の文字列にした
+* **末尾の空行**: `rust/src/*.rs` 21本のうち `}\n\n` で終わるのは `inert.rs` だけ。残り20本と、同じ道具が
+  書く `modelled.rs` は `}\n`。事故を再現する特例を生成器に足すより、ファイルの1バイトを落とした
+
+⚠ そのため `inert.rs` はこのコミットで1バイト動く。`engine_fingerprint` の `sources` は一度動き（中身は
+同じ）、`rustnode` は mtime でバイナリを古いと判定するので、**マージ後に `cargo build --release` が要る**
+（IKA-70/71 が `resolve.rs` を触るので、どのみち要る）。
+
+### `--check`
+
+両方のファイルを**書かずに**組み立て、**バイトで**比べる（`engine_fingerprint` がバイトで hash するので、
+空白だけの差も別のエンジンになる）。違えば 1 で終わり、まず**どの関数のどの id が動いたか**
+（動いていなければ `no id moved`）、そのあと diff を出す。CRLF だけの差はそうと言う（IKA-114 まで
+この道具自身が CRLF を書いていた。diff にすると全行が同じ見た目で並ぶ）。
+
+id の要約は**関数ごと**。1つの集合にまとめた最初の版は、id が別の関数へ移っても `no id moved` と言った
+（moxie を `ability_is_inert` から `item_is_inert` へ移して確かめた。関数ごとの版は両側を名指しする）。
+
+**vendor のデータは要らない。** `--rust` が読むのは `src/pokeuraou/` の8本と
+`configs/regulations/<regulation>.json`（追跡済み）。`--rust-modelled` の import を実測すると、入る第三者パッケージは numpy だけ（torch も
+scipy も入らない）、開くファイルは regulation の JSON 1本だけ。submodule の中身も `data/` も無い
+この worktree で通る。なので CI の置き場所は `lint`（`port_gate_audit --check` の隣）のまま。
+
+### 正の対照
+
+直す前の木（`--check` だけ足し、ヘッダの文字列は古いまま）で:
+
+```
+  --check                       exit 1。9/22 と同じ 15行の diff、no id moved、modelled.rs は ok
+  tests/test_port_coverage.py   5 failed / 4 passed（実物に対するテストが落ちる。このときは9本で、
+                                id を別の関数へ移す1本は後から足した）
+```
+
+直したあと、worktree の追跡ファイルそのものを書き換えて CLI を叩き、バイトで戻した:
+
+```
+  書き換えなし                                         exit 0
+  (a) inert.rs のヘッダの1文（must → should）            exit 1  no id moved
+  (a) inert.rs の id 1行（moxie）を消す                  exit 1  ability_is_inert: the tool would list, the file does not: moxie
+  (b) effects.py の末尾に _IKA72_CONTROL = "moxie"       exit 1  ability_is_inert: the file lists, the tool would not: moxie
+  (c) all_modelled_abilities に "aftermath" を足す       exit 1  modelled.rs だけ DIFFERS、inert.rs は ok
+  4本とも --check は何も書かなかった。戻したあと          exit 0
+```
+
+(c) で `inert.rs` が ok のままなのは、在庫関数の中の名前をエンジンの読みと数えない `strip_inventories` が
+効いているから。
+
+テストは `tests/test_port_coverage.py` に10本（コピーか渡した文字列の上でやる。実物を書き換えるテストは
+途中で死ぬと、自分が検査する木を汚す）: 実物が通る / コピーが通る（対照）/ 手の編集4形（ヘッダの1文・
+末尾の空行・id を消す・id を別の関数へ）/ CRLF / エンジンが id を名指しする / 名指しをやめる
+（intimidate）/ 計算器が1つ多く主張する（modelled.rs 側）。
+
+### ついでに直したもの
+
+* `--rust-modelled` が呼んでいた `register_mega_stones(reg)` を外した。`damage` のグローバルを書き換える
+  だけで、出力には効かない（石は `all_modelled_items` に引数で渡している）。`--check` はスイートの中でも
+  走るので、同じワーカーの後続テストに漏らさないため。出力は同じ（再生成して `git diff --exit-code` が 0）
+* 取り込んだ `pokeuraou` がこの木の `src` でなければ `--rust-modelled` / `--check` は止まる。worktree で
+  PYTHONPATH を忘れたテストは本体の `effects` から組み立てて worktree のファイルと比べる ——
+  `a-worktree-has-no-data-directory` の、落ちずに別の木を測る形
+* `--rust --rust-modelled` を同時に渡すと、これまでは `--rust` だけ書いて黙っていた。両方書く。
+  `--check` と書く旗を同時に渡すとエラー
+
+### 確かめたこと
+
+```
+  受け入れ 1   --rust → git diff --exit-code rust/src/inert.rs                     0（b8ad4e5 の上で）
+  受け入れ 2   --rust-modelled → git diff --exit-code rust/src/modelled.rs         0
+  lint 相当    ruff check . / agent_drift --check / port_gate_audit --check /
+              port_coverage --check                                               すべて 0
+  テスト       -n 0 test_port_coverage.py test_port_gates.py                      17 passed / 0 skipped
+              -n 0 test_line_endings.py test_no_machine_specific_paths.py        5 passed
+  --check      0.52 秒（共有機での1回、目安）
+```
+
+機械: heavy.py 経由のものは無し。すべて1コアで数秒以内（08:33〜08:55 ごろ）。
+
+### 測っていないこと
+
+* CI の上では走らせていない（push しない）。lint の条件（submodule 無し・`data/` 無し）はこの worktree で
+  満たしているが、Linux 上の `uv sync --frozen` の環境そのものではない
+* `rustfmt` が生成物を書き換えないか。この機械のツールチェインに rustfmt が入っていない。もし書き換えるなら
+  `cargo fmt` の後に `--check` が落ちる（いまの CI に fmt の工程は無い）
+* クレート全体の `cargo build`。1バイト変えた `inert.rs` 単体は `rustc --edition 2021 --crate-type lib
+  --emit metadata rust/src/inert.rs` が通る（exit 0、警告なし。rustc 1.98.1）。このファイルは他の
+  モジュールを参照せず、関数の中身も変わっていないが、クレートとしては組んでいない

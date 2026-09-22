@@ -62,6 +62,15 @@ jobs:
       - name: what the Rust port's gates pass, and what they refuse that it implements
         run: uv run python tools/port_gate_audit.py --check
 
+      # `rust/src/inert.rs` says it must be regenerated when the engine learns an effect,
+      # and nothing checked that it had been: its header was reworded by hand after it was
+      # generated, so regenerating it gave a diff with no id in it and "regenerate and diff"
+      # could not be a test (IKA-72). This builds it and `modelled.rs` as the tool would,
+      # writes neither, and fails on any byte that differs. It reads the engine's Python
+      # source and the committed regulation dump -- no submodule, no cargo, no data.
+      - name: whether the generated Rust lists are what the engine's source says
+        run: uv run python tools/port_coverage.py --check
+
   suite:
     name: the suite, with the oracle and the Rust node built
     runs-on: ubuntu-latest

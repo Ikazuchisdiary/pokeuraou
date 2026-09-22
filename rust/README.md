@@ -401,6 +401,8 @@ uv run python tools/dump_turn_cases.py --games 10 --seed 404 \
 # 白リストの再生成（エンジンが効果を覚えたら必ず）
 uv run python tools/port_coverage.py --rust
 uv run python tools/port_coverage.py --rust-modelled
+# 書かずに比べる（CI の lint が回す。1バイトでも違えば 1 で終わり、動いた id と diff を出す）
+uv run python tools/port_coverage.py --check
 ```
 
 ## このマシンに合わせる（Ryzen 7 9800X3D / Zen 5）
