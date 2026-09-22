@@ -270,4 +270,3 @@ pub fn item_is_inert(id: &str) -> bool {
             | "victreebelite"
     )
 }
-

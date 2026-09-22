@@ -1,0 +1,154 @@
+"""`tools/port_coverage.py --check`: the generated Rust lists are what the engine says.
+
+`rust/src/inert.rs` says it must be regenerated when the engine learns a new effect, and
+until 2026-09-23 nothing could tell whether it had been. Regenerating it gave a diff with
+not one id in it, because its header had been reworded by hand after it was written, so
+"regenerate and diff" was not a test (IKA-72). The tool now writes the file's own words and
+`--check` compares without writing. Like every check here it is worth nothing until it has
+been seen failing, so each shape it claims to catch is put in front of it:
+
+    the committed file edited by hand             the 9/22 shape (words, a blank line at
+                                                  the end), an id struck, an id moved
+    the engine naming an id the file calls inert  the shape it exists for
+    the engine no longer naming one it did        the same, the other way
+    the calculator claiming one more ability      the same for modelled.rs
+
+Everything is done to copies or to text handed in: a test that edited `rust/src` and died
+half-way would leave the tree it checks dirty.
+"""
+
+from __future__ import annotations
+
+import shutil
+
+import pytest
+
+from ._harness import load_tool
+
+REGULATION = "gen9championsvgc2026regmc"
+
+tool = load_tool("port_coverage")
+
+
+def test_the_committed_files_are_what_the_tool_writes(capsys):
+    """What CI runs, as a test too. It failed on the tree IKA-72 was filed against."""
+    assert tool.main(["--check", "--regulation", REGULATION]) == 0
+    out = capsys.readouterr().out
+    assert "ok       rust/src/inert.rs" in out
+    assert "ok       rust/src/modelled.rs" in out
+
+
+@pytest.fixture
+def copies(tmp_path, monkeypatch):
+    """The committed files, copied, and `--check` pointed at the copies."""
+    for name in ("inert.rs", "modelled.rs"):
+        shutil.copyfile(tool.RUST_SRC / name, tmp_path / name)
+    monkeypatch.setattr(tool, "RUST_SRC", tmp_path)
+    return tmp_path
+
+
+def test_the_copies_pass_before_anything_is_changed(copies):
+    """The null control for the edits below: a failure there is the edit, not the copy."""
+    assert tool.main(["--check", "--regulation", REGULATION]) == 0
+
+
+def _move_moxie_to_the_items(text: str) -> str:
+    arm = '            | "{}"\n'
+    text = text.replace(arm.format("moxie"), "", 1)
+    return text.replace(arm.format("metronome"), arm.format("metronome") + arm.format("moxie"), 1)
+
+
+#: The committed `inert.rs` edited by hand, and what `--check` must say about it. The first
+#: three are one line each, the edits IKA-72 names.
+EDITS = {
+    # The 9/22 shape: a sentence of the header reworded after generation.
+    "a header sentence reworded": (
+        lambda text: text.replace("it must be regenerated", "it should be regenerated", 1),
+        "no id moved",
+    ),
+    # The other half of the 9/22 diff.
+    "a blank line added at the end": (lambda text: text + "\n", "no id moved"),
+    # An id struck by hand. The port would stop ignoring it, and refuse it instead.
+    "an id struck out": (
+        lambda text: text.replace('            | "moxie"\n', "", 1),
+        "ability_is_inert: the tool would list, the file does not: moxie",
+    ),
+    # Why the summary is per function: pooled, this would read "no id moved".
+    "an id moved to the other predicate": (
+        _move_moxie_to_the_items,
+        "item_is_inert: the file lists, the tool would not: moxie",
+    ),
+}
+
+
+@pytest.mark.parametrize("edit", sorted(EDITS))
+def test_a_hand_edit_is_caught(copies, capsys, edit):
+    change, says = EDITS[edit]
+    path = copies / "inert.rs"
+    before = path.read_bytes()
+    path.write_bytes(change(before.decode("utf-8")).encode("utf-8"))
+    assert path.read_bytes() != before, "the edit changed nothing, so it tests nothing"
+
+    assert tool.main(["--check", "--regulation", REGULATION]) == 1
+    out = capsys.readouterr().out
+    assert "DIFFERS  rust/src/inert.rs" in out
+    assert "ok       rust/src/modelled.rs" in out
+    assert says in out
+
+
+def test_crlf_is_named_rather_than_shown_as_every_line(copies, capsys):
+    """This tool wrote CRLF itself until IKA-114, and a diff of that is every line of the
+    file, each looking the same as its pair."""
+    path = copies / "inert.rs"
+    path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
+    assert tool.main(["--check", "--regulation", REGULATION]) == 1
+    out = capsys.readouterr().out
+    assert "only the line endings differ" in out
+    assert "---" not in out
+
+
+def test_the_engine_naming_an_id_the_file_calls_inert_is_caught(capsys):
+    """The shape `--check` exists for: Python learns an effect, `inert.rs` is not
+    regenerated, and the port goes on ignoring an id Python now acts on -- a silently
+    different answer rather than a refused cell."""
+    committed = (tool.RUST_SRC / "inert.rs").read_text(encoding="utf-8")
+    assert '| "moxie"' in committed, "the control needs an id the file calls inert today"
+    engine = tool.engine_text()
+    assert tool.check(REGULATION, engine=engine) == 0
+    capsys.readouterr()
+
+    learned = engine + '\n\ndef _moxie(attacker):\n    return attacker.ability == "moxie"\n'
+    assert tool.check(REGULATION, engine=learned) == 1
+    out = capsys.readouterr().out
+    assert "DIFFERS  rust/src/inert.rs" in out
+    assert "ability_is_inert: the file lists, the tool would not: moxie" in out
+
+
+def test_the_engine_dropping_an_id_it_named_is_caught_too(capsys):
+    """The other direction: Python stops naming `intimidate`, and the file goes on
+    treating it as an effect Python acts on."""
+    engine = tool.engine_text()
+    assert tool.mentioned(engine, "intimidate")
+    forgot = engine.replace('"intimidate"', '"intimidat"').replace("'intimidate'", "'intimidat'")
+    assert not tool.mentioned(forgot, "intimidate")
+
+    assert tool.check(REGULATION, engine=forgot) == 1
+    out = capsys.readouterr().out
+    assert "ability_is_inert: the tool would list, the file does not: intimidate" in out
+
+
+def test_the_calculator_claiming_one_more_ability_is_caught_in_modelled_rs(capsys, monkeypatch):
+    """`modelled.rs` reproduced before IKA-72 and has to keep doing so. Without this, the
+    only test of its half of the check would be the one that passes."""
+    import pokeuraou.effects as effects
+
+    committed = (tool.RUST_SRC / "modelled.rs").read_text(encoding="utf-8")
+    assert '"aftermath"' not in committed, "the control needs an ability not modelled today"
+    real = effects.all_modelled_abilities
+    monkeypatch.setattr(effects, "all_modelled_abilities", lambda: real() | {"aftermath"})
+
+    assert tool.check(REGULATION) == 1
+    out = capsys.readouterr().out
+    assert "ok       rust/src/inert.rs" in out
+    assert "DIFFERS  rust/src/modelled.rs" in out
+    assert "ability_is_modelled: the tool would list, the file does not: aftermath" in out
