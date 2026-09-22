@@ -22,8 +22,14 @@ nothing at eight times the cost. There is no gain left in looking at more action
     against 8,400 at width 48, a rate ratio of 2.400 -- trained alone and played at
     width 24 where only the leaf differs: 46.55% +-0.82 for the width-48 pool over
     12,000 games. Cut to the SAME game count, so the quantity term is gone, it is
-    49.41% +-0.82. A width-48 game teaches no better than a width-24 one. Generation
-    therefore stays at 24; a 45-second match against a human should still use 48.
+    49.41% +-0.82. A width-48 game teaches no better than a width-24 one.
+
+    2026-09-23, IKA-73: turned the other way, it pays. Width 12 generates 1.889x the
+    games per hour, and its pool wins 51.00% +-0.83 at the SAME game count and 52.83%
+    +-0.83 at the same wall clock. On the board width 12 is about -6 against 24, so the
+    teaching sign is the opposite of the playing sign, and generation now runs at 12
+    (`tools/generate_queue.py`). The agent is untouched: 24 here, 48 at 45 seconds.
+    **The pool is not the agent.**
 
 **More data is saturating too.** Adding 5,600 self-play games to 8,013 was worth +3.6
 [+0.2, +6.9]; adding 7,000 more to 13,613 was worth +1.7 [-1.7, +5.1], which cannot be
