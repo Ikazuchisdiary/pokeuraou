@@ -37,7 +37,7 @@ def main() -> None:
         action="store_true",
         help="write configs/names/<locale>-extra.json with the untranslated ids as empty "
         "keys, ready to fill in. An empty value falls through to English, so a half-filled "
-        "file is safe.",
+        "file is safe. Names already filled in are kept, whatever kind they are in.",
     )
     args = ap.parse_args()
 
@@ -98,13 +98,25 @@ def main() -> None:
                 "根拠のない訳を入れないこと（tools/names_report.py が不足を数える）。"
             ),
         }
-        for entry in coverage:
-            if entry.kind not in ("species", "items", "moves", "abilities") or not entry.missing:
+        gaps = {
+            entry.kind: entry.missing
+            for entry in coverage
+            if entry.kind in ("species", "items", "moves", "abilities") and entry.missing
+        }
+        # Every kind already in the file is carried over, not only the ones with a gap left:
+        # a kind Showdown covers completely can still hold a name typed in by hand, for an id
+        # it has no entry for at all, and skipping such kinds dropped `moves.recharge`
+        # (IKA-115). The file's order of kinds comes first, so a rerun's diff is only what
+        # changed.
+        for kind in dict.fromkeys([*existing, *gaps]):
+            if kind == "_note":  # this tool's own text, written above
                 continue
-            previous = dict(existing.get(entry.kind) or {})
-            out[entry.kind] = {
-                key: previous.get(key, "") for key in entry.missing
-            } | {k: v for k, v in previous.items() if v}
+            previous = dict(existing.get(kind) or {})
+            table = {key: previous.get(key, "") for key in gaps.get(kind, ())} | {
+                k: v for k, v in previous.items() if v
+            }
+            if table:
+                out[kind] = table
         # `newline`: a tracked file, and text mode would write it CRLF on Windows.
         path.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
         print(f"\n-> {path} ({sum(len(v) for k, v in out.items() if isinstance(v, dict))} ids)")

@@ -19,10 +19,16 @@ So the tests are mostly about the fallbacks:
 
 from __future__ import annotations
 
+import json
+import sys
+from pathlib import Path
+
 import pytest
 
 from pokeuraou.names import load_names, localiser, names_dir
 from pokeuraou.regulation import load_regulation
+
+from ._harness import load_tool
 
 REGULATION = "gen9championsvgc2026regmb"
 
@@ -127,3 +133,73 @@ def test_an_unknown_id_is_returned_unchanged(bundle) -> None:  # noqa: ANN001
     assert loc.species("notapokemon") == "notapokemon"
     assert names.move_name("notamove") == "notamove"
     assert names.ability_name("notanability", "Fallback") == "Fallback"
+
+
+def _skeleton(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, extra: dict) -> dict:
+    """Runs ``tools/names_report.py --skeleton`` over ``extra`` and returns what it wrote.
+
+    Only the file it rewrites is moved: the regulation and the generated names are the real
+    ones, so which kinds still have gaps is what the tool itself sees.
+    """
+    tool = load_tool("names_report")
+    path = tmp_path / "ja-extra.json"
+    path.write_text(json.dumps(extra, ensure_ascii=False), encoding="utf-8")
+    monkeypatch.setattr(tool, "names_dir", lambda: tmp_path)
+    # The usage ranking reads data/, which the skeleton does not use.
+    monkeypatch.setattr(tool, "find_cached_chaos", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(sys, "argv", ["names_report.py", "--locale", "ja", "--skeleton"])
+    tool.main()
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_the_skeleton_keeps_a_name_in_a_kind_with_nothing_missing(
+    bundle,  # noqa: ANN001
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``--skeleton`` rewrites the file names are typed into, so it must not lose one.
+
+    It lost ``moves.recharge`` (IKA-115). ``recharge`` is the fake move Showdown substitutes
+    on a recharge turn: it has no dex entry, so it is in no regulation's move list and the
+    dump does not name it -- the name can only come from this file. Every move the
+    regulation does list is translated, so ``moves`` has no gap, and the rewrite skipped
+    every kind with no gap; the hand-typed name went with it.
+    """
+    reg, names, _loc = bundle
+    coverage = {c.kind: c for c in names.coverage(reg)}
+    # Without this the shape named above is not in the file, and the test would pass
+    # without having looked at it.
+    assert not coverage["moves"].missing, "moves has a gap now; move this to a kind without"
+    item = coverage["items"].missing[0]
+
+    after = _skeleton(
+        tmp_path,
+        monkeypatch,
+        {"moves": {"recharge": "反動で動けない"}, "items": {item: "（手で補った名前）"}},
+    )
+    assert after.get("moves") == {"recharge": "反動で動けない"}, list(after)
+    # A kind with gaps kept its typed names before the fix too; it has to stay that way.
+    assert after["items"][item] == "（手で補った名前）"
+
+
+def test_the_skeleton_keeps_the_files_order_of_kinds(
+    bundle,  # noqa: ANN001
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A rerun's diff should be what changed, not the kinds trading places.
+
+    The checked-in file holds ``items`` before ``species``. The coverage lists species
+    first, and rewriting in that order moved the whole species block to the top of the
+    file on a rerun with nothing new in it.
+    """
+    reg, names, _loc = bundle
+    coverage = {c.kind: c for c in names.coverage(reg)}
+    item, species = coverage["items"].missing[0], coverage["species"].missing[0]
+
+    after = _skeleton(
+        tmp_path,
+        monkeypatch,
+        {"items": {item: "（手で補った名前）"}, "species": {species: "（手で補った名前）"}},
+    )
+    assert list(after)[:3] == ["_note", "items", "species"], list(after)

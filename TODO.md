@@ -6310,3 +6310,60 @@ IKA-24（`086710c`）の `importorskip("torch")` で、torch が無いとこの2
 * oracle のある木での18本。ただしこの変更は読み込みの**失敗経路**だけで、その4ファイル（`test_damage_diff`・
   `test_replacement`・`test_resolve`・`test_speed`）の `load_tool` は収集時、skip より前に成功している
 * torch が本当に入っていない環境。finder で隠しただけ
+
+## 9/23 — IKA-115: `names_report.py --skeleton` は未訳0件の種類を丸ごと捨てていた。既存の種類はすべて引き継ぐ
+
+答える問い: `--skeleton` を回しても、`configs/names/ja-extra.json` に手で埋めた訳が残るか。
+**直す前は残らなかった**（実物で再現）。直したあとは残る。
+
+```
+  直す前の道具で実物を回す   git diff  12行足し・15行消し
+                             moves.recharge「反動で動けない」が消える（このファイルの手の値はこの1つだけ）
+                             種類の並び items, moves, species → species, items
+  直した道具で実物を回す     git diff  0行。コミット済みの中身とバイト一致（sha256 d21c5cdc…）、CR 0、
+                             mtime は進んでいる（書き直したうえでの一致）
+```
+
+原因は課題本文の読みどおり。M-B の 514 技はすべて訳されていて `moves` は未訳0件なので、ループが種類ごと
+飛ばしていた。`recharge` は Showdown が反動ターンに差し込む偽の技で、図鑑にも、M-B・M-C どちらの技一覧にも、
+`ja.json` にも無い —— 訳はこのファイルからしか来ない。消えると `Localiser.move("recharge")` は生の
+`recharge` を返す（実測）。
+
+### 直し方
+
+* 既存ファイルにある種類は、未訳の有無と関係なくすべて組み直す。種類の中の規則は元のまま
+  （未訳の id を空文字で並べ、非空の既存値を重ねる。もう未訳でない id の空文字は落とす。空になった種類は書かない）
+* **種類の並びは既存ファイルの順**、そのあとにファイルに無かった種類（coverage の順）。人が手で埋めるファイル
+  なので、再実行の差分は変わったものだけにしたい。ファイルが無いときの出力は元とバイト一致（既定の挙動は不変）
+* `_note` は道具自身の文なので従来どおり書き直す。引数は足していない
+
+### 確かめたこと
+
+```
+  テスト    tests/test_names.py に2本。-n 0 で 10 passed / 0 skipped
+              test_the_skeleton_keeps_a_name_in_a_kind_with_nothing_missing   未訳0件の moves に手の値
+              test_the_skeleton_keeps_the_files_order_of_kinds               items → species の順のファイル
+  正の対照  同じテストを、道具だけ HEAD（9ecc11a）に替えた複製で回すと2本とも落ちる
+              moves → None（出力 ['_note', 'species', 'items']）/ 並び ['_note', 'species', 'items']
+            道具を直したほうにした複製では2本とも通る
+  比較      scratchpad/ika115_skeleton.py（HEAD と直した道具に同じ入力を食わせる。記号はスクリプトの段）
+              A ファイル無し            出力バイト一致
+              C 手の値7つを散らしたもの  直したほうは7つとも残す。HEAD は4つ捨てる（未訳0件の moves の2つと
+                                        abilities の1つ、load_names が読まない natures の1つ）
+              D items だけのファイル     直したほう _note, items, species / HEAD _note, species, items
+  ruff      check・format とも通過。test_line_endings・test_no_machine_specific_paths 通過
+```
+
+機械: 08:35〜08:50、1コアで各1秒未満の実行だけ。vendor は使っていない（道具は `configs/` しか読まない。
+worktree に `data/` が無いので、使用率での順位づけの段は出ない —— `--skeleton` はそれを使わない）。
+
+### 見つけたが直していないもの
+
+* **`species` だけ、手で埋めた id が再実行で種類の末尾へ移る**（消えはしない）。alcremie を埋めると 0番目 →
+  10個中9番目、`items` の abomasite は 0番目のまま（実測、`scratchpad/ika115_skeleton.py` の F）。
+  `Names.coverage` が `species` だけ上書きを「訳済み」に数え、`moves`・`items`・`abilities` は Showdown の表だけで
+  数えるため。`overrides` の docstring（Showdown 由来と手で補ったものを coverage が区別できるように別にしている）と、
+  `species` だけ食い違う
+* 上の階層に表でない値（例 `"_source": "..."`）があると、直した道具は**書く前に** `ValueError` で止まる
+  （ファイルは無傷、実測、同じスクリプトの E。HEAD は黙って捨てていた）。そういうキーを書くものは今は無い
+* `available locales: ja, ja-extra` —— `available_locales()` が `*-extra.json` もロケールに数える（表示だけ）
