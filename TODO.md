@@ -6182,3 +6182,41 @@ IKA-89・97（`14c9053`）と IKA-68（`6581faa`）が先に入ったので2回�
 
 取り込む前の木で優先度を下げて回した1回目は、ika-68 の24ワーカーの対局と重なってワーカーが1本落ちた
 （`test_equal_wall_clock.py`、`0xc000070a`）。そのファイルを単独で回すと7本とも通った。
+
+## 9/23 — IKA-113: 本物の対戦でも `--sprt` は決着で止まった —— 恒等な腕で 67対 H0、再生と一致
+
+**答えた問い**: `tools/match_queue.py --sprt` は、本物の `generation_match.py` ワーカーと推論サーバの下で、
+決着した時点で止まり、止まった対が記録の再生と一致するか。→ **する。** IKA-89 が偽のワーカーと記録の
+再生で確かめていた配線は、実機でも同じ答えを出した。
+
+走らせたのは課題本文のコマンドそのまま（`uv run --group learn` の代わりに本体の `.venv` の python）。
+ユーザの承認のうえ、機械の鍵（`C:\tmp\pokeuraou-machine\heavy.py`、10コア）を取って
+**9/23 08:46:04〜08:47:12**。この窓に他の重い処理は無い（鍵の記録 `log.tsv`）。
+
+```
+match_queue.py --out data/matches/sprt-smoke --games 200 --served --servers 2 --workers 8 \
+    --value value-gen11L.pt value-gen11L-s1.pt --baseline value-gen11L.pt value-gen11L-s1.pt \
+    --sprt 0 15 -- --limit 24 --rank-leaf --baseline-rank-leaf \
+    --selection-book rizabanadohido-value-gen11L-ens2.jsonl.gz
+```
+
+```
+  sprt.json         decision H0、stoppedEarly true、pairs 67（134局）、LLR −2.947、counts 0 / 67 / 0
+  ログ              "SPRT(+0, +15) accepted H0 after 67 pairs"
+                    "220 not played because the run was stopped"、終了コード 0、1.1分
+  sprt_replay.py    (0,+15) H0 at pair 67 = 134 games、"agrees"。(0,+10) は 90対で未決着（LLR −2.62）
+  paired_result.py  "! stopped by SPRT(+0, +15): H0 after 67 pairs" を横に書く
+  pair_divergence   90対すべて同じ手（発火率 0%）—— 恒等な腕なので、これが正しい
+  設定の echo        worker0.log が選出キャッシュ（394構築・探索なし）と両腕の葉（value-gen11Lx2、サーバ経由）を出す
+                    局の provenance は limits [24,24]・rankings [leaf,leaf]・books 両腕 ens2・information [open,open]
+```
+
+予想（約67対で H0）どおり。
+
+### 気づいたこと（直していない）
+
+* **記録は 90対・180局で、判定は 67対目。** `sprt_replay.py` も同じ位置で止まるので、止める判定と再生は
+  同じ順で対を数えている（その順がどう決まるかはコードを読んでいない）。判定に入らなかった 46局も記録に
+  残る。捨てられてはいないが、率は引用しない（`sprt.json` の caution のとおり）
+* ワーカーのログ（`logs/worker*.log`）は **cp932** で書かれていて、UTF-8 で読むと日本語が化ける。
+  読むのは人だけなので実害は無いが、道具でログを読むなら符号化を指定すること
