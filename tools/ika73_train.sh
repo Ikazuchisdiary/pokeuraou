@@ -12,7 +12,7 @@
 #
 # 学習設定は IKA-66 の3腕と同一（既定のまま、--seed 0 と 1 だけ動かす）。
 set -e
-cd /c/Users/Ikazuchi/repos/pokeuraou
+cd "$(dirname "$0")/.."
 
 W="$1"; NT="$2"; NG="$3"
 [ -n "$W" ] && [ -n "$NT" ] && [ -n "$NG" ] || { echo "usage: $0 <width> <N equal-time> <N equal-games>" >&2; exit 2; }

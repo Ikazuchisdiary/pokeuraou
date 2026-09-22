@@ -5509,3 +5509,56 @@ IKA-66 のマージで docstring を足したので `sources` が動いていた
 全体実行を4回：**502 passed / 0 failed**（直前の基準は5回中3回失敗）。
 4回目は他の負荷で 108秒かかっている（他は41秒）——
 **落ちていた条件そのものを引いた上で通った。**
+
+## 9/23 — IKA-76: この機械の家パスが `tools/` に10本。**6本は前日に私が入れた**
+
+ユーザ指摘。直すのは10本だが、**課題の本体は再発防止のほう。**
+
+```
+  tools/       10本   ← うち6本は 9/22-23 の ika66_*.sh / ika73_*.sh
+  scratchpad/  14本   ← その日に叩いたものの記録なので触らない
+  src/ tests/   0本
+```
+
+### 移植性より、**黙って別の木を指す**ほうが怖い
+
+`sys.path.insert(0, "C:/Users/.../src")` は、別の機械では「無いパスを insert するだけ」で
+editable install に落ちて**偶然動く**。そしてこの機械の worktree では **main を指す** ——
+`src` は main、`tools` は worktree、という半々の run になり、**落ちずに間違った木を測る。**
+`PYTHONPATH` を忘れたスイートが緑で通るのと同じ形（`a-worktree-has-no-data-directory`）。
+
+### 直し方はこの木にすでにあった
+
+```python
+ROOT = Path(__file__).resolve().parents[1]     # tools/*.py の house pattern
+```
+```sh
+cd "$(dirname "$0")/.."                        # 既存の tools/*.sh は cd 自体していない
+```
+
+`narrow_as_built.py` の argparse 既定だけは**他所で即死する**もの（無いパスを掴む）。
+`ordering_check.py` が刷っていた `cd <絶対パス>` は「リポジトリ直下から実行」に置き換えた。
+
+### 再発防止 —— `tests/test_no_machine_specific_paths.py`
+
+`git ls-files` を走査して家パスを拾う。**針は組み立てて書いてある**ので、このファイル自身も
+自分の規則の対象で、自分用の例外を持たない。
+
+対照を2つ:
+
+```
+  test_the_check_would_notice_one     検出器に本物を1つ食わせて、拾うことを確かめる
+  test_the_exemptions_are_for_files_  例外に書いたパスが木に実在することを確かめる
+```
+
+さらに**実物に植えて落ちることも確認した** ——`tools/agent_drift.py` に1行足すと
+`tools\agent_drift.py:170` を名指しして落ち、戻すと通る。**空のスイートと緑のスイートは
+対照が無いと見分けがつかない。**
+
+### 確かめたこと
+
+```
+  cd の解決    tools/x.sh でも /abs/tools/x.sh でも、そのスクリプトが居る木の根に降りる
+  path insert  main から叩けば main、worktree から叩けば worktree（両方で実測）
+  ガード       実物に植えると落ち、戻すと通る
+```

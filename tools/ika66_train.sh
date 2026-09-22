@@ -20,7 +20,7 @@
 # 止まる。動かすのは `--seed` だけ（0 と 1）—— 同じ設定の6シードが保留AUC 0.024 に散り、
 # 設定差は 0.004 なので、単独1本はシード運を測ってしまう。
 set -e
-cd /c/Users/Ikazuchi/repos/pokeuraou
+cd "$(dirname "$0")/.."
 
 N_A="$1"; N_B="$2"
 [ -n "$N_A" ] && [ -n "$N_B" ] || { echo "usage: $0 <N_A> <N_B>" >&2; exit 2; }

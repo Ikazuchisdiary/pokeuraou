@@ -24,10 +24,11 @@ Three opponents, because who we are wrong against changes the answer:
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 import numpy as np
 
-sys.path.insert(0, "C:/Users/Ikazuchi/repos/pokeuraou/src")
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pokeuraou.equilibrium import solve  # noqa: E402
 
