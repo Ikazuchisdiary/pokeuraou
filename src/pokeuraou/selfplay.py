@@ -467,6 +467,7 @@ def play_game(
     rank_by_leaf: bool | tuple[bool, bool] = False,
     policy: Any | tuple[Any, Any] = None,
     solve_sparsely: bool | tuple[bool, bool] = False,
+    solve_restricted: bool | tuple[bool, bool] = False,
     start: Position | None = None,
     first_action: str | None = None,
     sheets: tuple[Sequence[SampledSet], Sequence[SampledSet]] | None = None,
@@ -507,6 +508,11 @@ def play_game(
     to share the object. A match that shares its arms and leaves this True reports half
     the per-move cost of the configuration it is pricing.
 
+    ``solve_restricted`` takes a pair and is a property of depth 2 alone: it says whether
+    the refined cells are read as the restricted game they form, or left in the full
+    matrix the way the search that IKA-12 played out did. At depth 1 it changes nothing,
+    which is what makes it safe to carry on an arm that is not deep.
+
     ``solve_sparsely`` takes a pair too, and it is the one whose two values are supposed
     to be *equally correct*: both settle on an equilibrium of the same game, verified to
     an exploitability of 7.7e-08. What differs is which vertex of a degenerate optimum
@@ -526,17 +532,25 @@ def play_game(
         if isinstance(solve_sparsely, bool)
         else solve_sparsely
     )
+    restricted = (
+        (solve_restricted, solve_restricted)
+        if isinstance(solve_restricted, bool)
+        else solve_restricted
+    )
     policies = policy if isinstance(policy, tuple) else (policy, policy)
     leaves = evaluate if isinstance(evaluate, tuple) else (evaluate, evaluate)
-    if sheets is not None and (depths != (1, 1) or sparse != (False, False)):
+    if sheets is not None and (
+        depths != (1, 1) or sparse != (False, False) or restricted != (False, False)
+    ):
         # `belief_solve` takes neither, so under a hidden bench these were accepted,
         # recorded per side in the provenance, and then dropped. An argument that is
         # silently ignored is how every measurement defect found today was built: the
         # caller reads the flag it passed, the record repeats it, and nothing played it.
         raise ValueError(
-            f"depth {depths} and solve_sparsely {sparse} cannot be honoured with a "
-            "hidden bench -- belief_solve has no parameter for either. Pass depth 1 and "
-            "solve_sparsely False, or drop `sheets` and measure in the open game."
+            f"depth {depths}, solve_sparsely {sparse} and solve_restricted "
+            f"{restricted} cannot be honoured with a hidden bench -- belief_solve has no "
+            "parameter for any of them. Pass depth 1 with both flags False, or drop "
+            "`sheets` and measure in the open game."
         )
     record = GameRecord(
         own_team=[_set_json(reg, s) for s in own],
@@ -677,7 +691,7 @@ def play_game(
             try:
                 own_search = search(
                     reg, pos, ours, theirs, own_leaf, budget=budget, depth=depths[0],
-                    solve_sparsely=sparse[0],
+                    solve_sparsely=sparse[0], solve_restricted=restricted[0],
                 )
             except EquilibriumError:
                 break
@@ -698,6 +712,7 @@ def play_game(
                 or ranked[1] != ranked[0]
                 or policies[1] is not policies[0]
                 or sparse[1] != sparse[0]
+                or restricted[1] != restricted[0]
             ):
                 foe_started = perf_counter()
                 foe_ours, foe_theirs = (
@@ -714,6 +729,7 @@ def play_game(
                     foe_search = search(
                         reg, pos, foe_ours, foe_theirs, foe_leaf, budget=budget,
                         depth=depths[1], solve_sparsely=sparse[1],
+                        solve_restricted=restricted[1],
                     )
                 except EquilibriumError:
                     break
@@ -1175,6 +1191,7 @@ def generate(
     rank_by_leaf: bool = False,
     policy: Any = None,
     solve_sparsely: bool = False,
+    solve_restricted: bool = False,
     force_lead: tuple[str, ...] | None = None,
     hide_bench: bool = False,
     indices: Iterable[int] | None = None,
@@ -1347,6 +1364,7 @@ def generate(
                 rank_by_leaf=rank_by_leaf,
                 policy=policy,
                 solve_sparsely=solve_sparsely,
+                solve_restricted=solve_restricted,
                 # Both sixes, so neither search is shown the other's unplayed bench.
                 sheets=(list(roster.sets), list(foe_six)) if hide_bench else None,
                 # And what each side would have brought, so the belief over the bench is

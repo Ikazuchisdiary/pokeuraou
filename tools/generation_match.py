@@ -141,6 +141,19 @@ def main() -> None:
         "--baseline-solve-sparsely", action="store_true", help="same for the other arm"
     )
     ap.add_argument(
+        "--solve-restricted",
+        action="store_true",
+        help="at depth 2, the arm under test reads its strategy off the refined "
+        "rectangle solved as its own game, instead of off the full matrix with the "
+        "refined cells written into it. IKA-12 played the second reading out and it lost "
+        "48.28% +-0.71 at 5.21x the cost while every number it produced improved, and "
+        "`search.py` had named the reading as the suspect before the match ran. Only "
+        "meaningful with --depth 2.",
+    )
+    ap.add_argument(
+        "--baseline-solve-restricted", action="store_true", help="same for the other arm"
+    )
+    ap.add_argument(
         "--selection-book",
         type=Path,
         default=None,
@@ -510,15 +523,19 @@ def main() -> None:
         )
     if args.solve_sparsely != args.baseline_solve_sparsely:
         tags += "@sparse" if args.solve_sparsely else "@fullmatrix"
+    if args.solve_restricted != args.baseline_solve_restricted:
+        tags += "@restricted" if args.solve_restricted else "@mixeddepth"
     arm = f"{new_name}{tags}" if tags else new_name
     seats = (
         (f"{arm} = side 0", (value, baseline), (args.depth, args.baseline_depth),
          (args.limit, other_limit), (args.rank_leaf, args.baseline_rank_leaf),
          (args.solve_sparsely, args.baseline_solve_sparsely),
+         (args.solve_restricted, args.baseline_solve_restricted),
          policies, ranking_names),
         (f"{arm} = side 1", (baseline, value), (args.baseline_depth, args.depth),
          (other_limit, args.limit), (args.baseline_rank_leaf, args.rank_leaf),
          (args.baseline_solve_sparsely, args.solve_sparsely),
+         (args.baseline_solve_restricted, args.solve_restricted),
          policies[::-1], ranking_names[::-1]),
     )
     # `seats[0]` is `(value, baseline)` and `seats[1]` is `(baseline, value)`, so the seat
@@ -605,7 +622,9 @@ def main() -> None:
     for index in work():
         which = index % len(seats)
         game_index = index // len(seats)
-        seat, leaves, depths, limits, ranks, sparse, rankers, ranknames = seats[which]
+        (
+            seat, leaves, depths, limits, ranks, sparse, restrict, rankers, ranknames
+        ) = seats[which]
         side_leaves = (
             (new_name, old_name) if which == 0 else (old_name, new_name)
         )
@@ -736,6 +755,7 @@ def main() -> None:
                 rank_by_leaf=ranks,
                 policy=rankers,
                 solve_sparsely=sparse,
+                solve_restricted=restrict,
                 # Our six is the roster; theirs is the sheet the book drew them from, or
                 # the standings team when it did not. Both are public in Champions, and
                 # both are what makes the four uncertain rather than unknown.
@@ -796,7 +816,14 @@ def main() -> None:
                     limits=limits,
                     depths=depths,
                     rankings=ranknames,
-                    solvers=tuple("sparse" if x else "full" for x in sparse),
+                    # How the equilibrium was reached, per side. One field because it
+                    # is one question -- an agent reaches its mixture one way -- and the
+                    # two flags cannot both fire: `solve_restricted` is a depth-2 reading
+                    # and `solve_sparsely` a depth-1 solver.
+                    solvers=tuple(
+                        "restricted" if r else "sparse" if s else "full"
+                        for s, r in zip(sparse, restrict, strict=True)
+                    ),
                     # What each side's draw actually came from, not what the command
                     # line asked for. The first version built this from the labels and
                     # recorded `book, book` for a match where one arm was drawing
@@ -811,7 +838,11 @@ def main() -> None:
                     note=(
                         f"search depth {depths[0]} vs {depths[1]} by side"
                         if depths[0] != depths[1]
-                        else ""
+                        else (
+                            "depth-2 strategy read from the restricted game on one side"
+                            if restrict[0] != restrict[1]
+                            else ""
+                        )
                     ),
                 ),
             )
@@ -869,7 +900,7 @@ def main() -> None:
                 f"{1000 * leaf.waited / leaf.calls:.2f} ms awaiting the reply",
                 file=sys.stderr,
             )
-    for which, (seat, _leaves, _d, _l, _r, _s, _p, _n) in enumerate(seats):
+    for which, (seat, _leaves, _d, _l, _r, _s, _x, _p, _n) in enumerate(seats):
         seat_wins, seat_played, unfinished, elapsed = tally[which]
         rate = seat_wins / seat_played if seat_played else float("nan")
         half = (
@@ -906,6 +937,8 @@ def main() -> None:
                             "limit": args.limit,
                             "depth": args.depth,
                             "baselineDepth": args.baseline_depth,
+                            "solveRestricted": args.solve_restricted,
+                            "baselineSolveRestricted": args.baseline_solve_restricted,
                             "baselineLimit": other_limit,
                             "played": seat_played,
                             "gen2_wins": seat_wins,
