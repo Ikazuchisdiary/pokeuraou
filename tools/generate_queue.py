@@ -61,15 +61,35 @@ def main() -> None:
     # 2026-09-20, IKA-12: that -1.3 was a failure to reject on 1,696 games. Replayed at
     # 12,000 it is +3.4 +-0.7 for 48, and all four runs ever recorded had that sign; 96
     # over 48 buys nothing (+0.5 +-0.6), so breadth saturates one step above this default.
-    # Two things stop it being a one-line change here, and IKA-66 holds both:
+    # Two things stopped it being a one-line change here, and IKA-66 settled both on
+    # 2026-09-22 by building the pools rather than converting between them:
     #
-    #   * that +3.4 was measured in the OPEN game, and this flag's runs hide the bench,
-    #     which is a different branch of `play_game` entirely (`belief_solve`)
-    #   * width 48 costs GENERATION 2.43x the wall clock and 2.76x the seconds per move
-    #     decision -- not the 2.00x a match pays -- measured here, alternated three times,
-    #     600 games each, at 2.8 against 6.8 minutes with no scatter. 2.43x is 1.28
-    #     doublings of data, worth -2.2 to -4.6 points on the recorded learning curve,
-    #     which the +3.4 does not clear with any room to spare.
+    #   * the +3.4 was measured in the OPEN game, and this flag's runs hide the bench.
+    #     Remeasured hidden (`belief_solve`, 12,000 games) it is +3.12 +-0.72, so the
+    #     gain is a property of the width and not of the information condition
+    #   * width 48 costs GENERATION 2.43x the wall clock -- not the 2.00x a match pays.
+    #     Confirmed a fourth time by the pools themselves: 19,800 games at 24 in 6,022s
+    #     against 8,400 at 48 in 6,131s, a rate ratio of 2.400
+    #
+    # So two pools were generated for the same wall clock, each trained alone into a
+    # two-seed ensemble, and played at width 24 where the only difference is the leaf.
+    # 12,000 games each, the setting firing on 100% of pairs:
+    #
+    #   48's pool against 24's, EQUAL WALL CLOCK    46.55% +-0.82
+    #   48's pool against 24's, EQUAL GAME COUNT    49.41% +-0.82   <- the answer
+    #   24's big pool against 24's small one        53.16% +-0.82   = +2.50 a doubling
+    #
+    # The middle row removes the quantity term by construction, and the gain is gone with
+    # it. **Playing strength is not teaching quality**: the payback arithmetic had assumed
+    # the +3.12 carried into the games as training data, and nothing had ever measured
+    # that. Because the quantity term is structurally absent from that row, the reading
+    # does not depend on the operating point -- training on the pool alone or on the
+    # cumulative pool cannot change it.
+    #
+    # 24 therefore stays, but for a new reason. The old one ("48 is free, so take half")
+    # came from 1,696 games at +-2.4 and is dead. The new one is that a width-48 game
+    # teaches no better than a width-24 game, so generation has nothing to buy with the
+    # 2.4x. The match number is untouched: at 45 seconds against a human, +3.12 is real.
     ap.add_argument("--limit", type=int, default=24)
     ap.add_argument(
         "--served",

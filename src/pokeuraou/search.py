@@ -17,9 +17,24 @@ nothing at eight times the cost. There is no gain left in looking at more action
     on an idle machine. There is gain left in looking at more actions, and it is the
     largest lever measured this year.
 
+    2026-09-22, IKA-66: that gain is a *playing* gain, and it does not follow the games
+    into training. Two pools built for the same wall clock -- 19,800 games at width 24
+    against 8,400 at width 48, a rate ratio of 2.400 -- trained alone and played at
+    width 24 where only the leaf differs: 46.55% +-0.82 for the width-48 pool over
+    12,000 games. Cut to the SAME game count, so the quantity term is gone, it is
+    49.41% +-0.82. A width-48 game teaches no better than a width-24 one. Generation
+    therefore stays at 24; a 45-second match against a human should still use 48.
+
 **More data is saturating too.** Adding 5,600 self-play games to 8,013 was worth +3.6
 [+0.2, +6.9]; adding 7,000 more to 13,613 was worth +1.7 [-1.7, +5.1], which cannot be
 told from zero. Another generation of the same shape is not the lever.
+
+    2026-09-22, IKA-66: "cannot be told from zero" was again an interval, not a finding.
+    One paired match measures the slope directly instead of differencing two ratings:
+    19,800 games against 8,250 of the same width, same generator, trained the same way,
+    is 53.16% +-0.82 for the larger pool -- 1.263 doublings, so +2.50 points a doubling,
+    inside the +1.7 to +3.6 band the two-point estimate had drawn. Data is not saturated
+    at this scale; the old reading came from a measurement that could not see the effect.
 
 Depth is the axis nothing has tried.
 
