@@ -31,19 +31,23 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# Built from pieces: spelled out, they would be the first thing this test found.
+# Built from pieces, and the comments do not spell them either. The first draft assembled
+# the needles and then wrote each one out in the comment beside it, which this test caught
+# the moment it was tracked -- it had passed until then because `git ls-files` does not
+# list a file nobody has added yet, so the run that "passed" had never read it.
 _DRIVE = "C:"
 _USERS = "Users"
+_HOME = "home"
 NEEDLES = (
-    f"{_DRIVE}\\{_USERS}",  # C:\Users   -- Windows, as Python and PowerShell write it
-    f"{_DRIVE}/{_USERS}",  # C:/Users   -- Windows, forward slashes
-    f"/c/{_USERS.lower()}",  # /c/users   -- MSYS, as bash writes it
-    "/home/",  # a Linux home
+    f"{_DRIVE}\\{_USERS}",  # the Windows spelling, as Python and PowerShell write it
+    f"{_DRIVE}/{_USERS}",  # the same with forward slashes
+    f"/c/{_USERS.lower()}",  # the MSYS spelling, as bash writes it
+    f"/{_HOME}/",  # a Linux home
 )
 
-# `/Users/` alone is the macOS root and also appears inside `C:/Users`, so it is matched
-# with a name after it rather than by itself.
-MAC_HOME = re.compile(r"(?<![A-Za-z:])/Users/[A-Za-z0-9._-]+/")
+# A macOS home. The bare prefix is also the tail of the Windows one, so it is matched with
+# a name after it rather than by itself.
+MAC_HOME = re.compile(rf"(?<![A-Za-z:])/{_USERS}/[A-Za-z0-9._-]+/")
 
 EXEMPT = (
     # The record. TODO.md and GENERATIONS.md quote commands as they were actually run, and
