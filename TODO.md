@@ -6284,5 +6284,6 @@ scipy も入らない）、開くファイルは regulation の JSON 1本だけ�
   満たしているが、Linux 上の `uv sync --frozen` の環境そのものではない
 * `rustfmt` が生成物を書き換えないか。この機械のツールチェインに rustfmt が入っていない。もし書き換えるなら
   `cargo fmt` の後に `--check` が落ちる（いまの CI に fmt の工程は無い）
-* 1バイト変えた `inert.rs` で Rust をビルドし直すこと。コメントと末尾改行だけなので中身は同じはずだが、
-  cargo は回していない
+* クレート全体の `cargo build`。1バイト変えた `inert.rs` 単体は `rustc --edition 2021 --crate-type lib
+  --emit metadata rust/src/inert.rs` が通る（exit 0、警告なし。rustc 1.98.1）。このファイルは他の
+  モジュールを参照せず、関数の中身も変わっていないが、クレートとしては組んでいない
