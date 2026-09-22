@@ -6182,3 +6182,155 @@ IKA-89・97（`14c9053`）と IKA-68（`6581faa`）が先に入ったので2回�
 
 取り込む前の木で優先度を下げて回した1回目は、ika-68 の24ワーカーの対局と重なってワーカーが1本落ちた
 （`test_equal_wall_clock.py`、`0xc000070a`）。そのファイルを単独で回すと7本とも通った。
+
+## 9/23 — IKA-50: selection_check / book_check の記録の数字は全部片席で、両席の実行はまだ0本
+
+問いは「IKA-17 が変えた3つは本当にそうなっているか。記録のどこに片席の数字があり、どこに限定を書いたか」。
+**機械は使っていない** —— コードと git の履歴と記録を読み、ディスク上の出力を数え、コピーした part ファイルを
+merge した（1回数秒）だけ。
+
+```
+  境界         両席で打つのは 8b85d50（9/19 23:10）から。master へは e7229ea（9/20 00:51、Merge IKA-17）
+  それより前    記録にある selection_check / book_check の数字はすべて片席（自陣の4体が全局 side 0）
+  それより後    両席の実行は 0本（data/matches の両ツールの出力 269ファイル・25,840行に seat が1つも無い）
+  1 --games    腕あたり席ごとの対戦数。同じ指定で局は2倍                          ✅ 両ツール
+  2 乱数       selection_check は局の乱数が新しい。同じ seed でも席0から違う       ✅
+               book_check は変わっていない（[seed, game, arm_index, 7] のまま）    ✗ 課題本文の2は当たらない
+  3 旧 JSONL   seat の無い行は merge が SystemExit                               ✅ 両ツール、実物の旧ファイルでも
+  限定         README 3か所・GENERATIONS.md 5か所（表の後に1行が3か所）、TODO.md は下の表で21の節を名指し
+```
+
+### 1. 3つの変更はコードのどこか（この枝の土台 `9ecc11a` の木で）
+
+* **`--games`**: `tools/selection_check.py:79-86` の help が "games per arm PER SEAT, so twice this in total"。
+  各 game index を `play_paired`（L489。`tools/seats.py:106-132`、SEATS = (0, 1)）が2回打つ。
+  `tools/book_check.py:237-243` は "matchups per arm ... Each is played in BOTH seats"、`play_paired` は L425。
+  変更前の help は "games per arm" / "games per arm, across shards"（`8b85d50` の差分）
+* **乱数**: `selection_check` は局に `default_rng([args.seed + 1, game_index, 7])`（L446）を渡す。変更前は選出の抽選に
+  使った `game_rng = default_rng([args.seed + 1, game_index])`（L400）の続きを渡していた。抽選の行（L400-418）は
+  `8b85d50` で動いていないので、**同じ seed なら対戦カード（相手の6体・両者の4体）は同じで、局の中の乱数だけが
+  違う**。`git log -S "game_index, 7]"` は `8b85d50` だけを返す
+* **旧 JSONL**: `selection_check` L213-221、`book_check` L116-124 が `seat` の無い行で `SystemExit`。`selection_check` は
+  ヘッダにも `"seats": 2` を書き（L552）、merge が `BOTH SEATS` / `ONE SEAT` を印字する（L210）。
+  `tests/test_seat_swap.py` の2本（`test_*_refuses_rows_from_before_the_swap`）は合成の行で確かめていて、今回は
+  **実物の旧ファイル**（`book-check-new.part*` と `calib-fixed/place305.part*` のコピー）でも拒むことを確かめた
+
+### 2. `book_check` の乱数は IKA-17 で変わっていない —— 課題本文の2は `selection_check` だけの話
+
+`book_check` の局の乱数は作成時（`6fb56e5`、9/11）から `default_rng([args.seed, game, arm_index, 7])`（今は L369）。
+`8b85d50` はこの行を `one_seat` の中へ移しただけで、`git log -S "arm_index, 7]"` は `6fb56e5` しか返さない。
+席0は `sides(ours, theirs, 0) = (ours, theirs)`（`tools/seats.py:92`）で旧来と同じ並びなので、**IKA-17 だけを見れば
+席0の半分は旧来と同じ局**。同じ seed で合計が合わないのは、半分が新しい席1の局だから。
+
+9/20 未明の「過去の数字に付いた限定」は「片席・旧 RNG ストリーム（IKA-50）」と両ツールをまとめて書いていて、
+課題本文もそう読める。**旧ストリームなのは `selection_check` だけ**で、`book_check` に付く限定は「片席」と
+「`--games` の数え方」の2つ。席0の半分が旧い数字を再現するかは確かめていない（9/13 以降のエンジンの修正と、
+`DEFAULT_TEMPERATURE` 0.05 → 0.5（`0fd6e83`、9/19 04:48）が `gen/gen` 腕の引き方を変えている）。
+
+`selection_check` の局の乱数は3代ある（GENERATIONS.md 末尾の節に表）: A（9/10〜9/18 18:21、`default_rng(seed + 1)` を
+腕ごとに作り直す）、B（〜9/20、`[seed + 1, game_index]` の抽選の続き）、C（9/20 00:51〜、`[seed + 1, game_index, 7]`）。
+局を打っていた葉も境目で、9/19 01:39（`06b3176`）までは hp-share（G9）。
+
+### 3. 旧い数字は旧い道具で読み直せる（正の対照）
+
+今の merge は旧いファイルを拒むので、`8b85d50` より前の版（`book_check` は `5b58045`、`selection_check` は `ea1c58e`）を
+作業用の一時ディレクトリに出し、`data/matches` の part ファイルのコピーを merge した:
+
+```
+  book-check.part0-7       52.5 / 71.4 / 54.6 / 55.0%   助言 +18.9 [+10.9, +27.0]   LP 63.2 対 54.6（−8.5）    = E1
+  book-check-old.part0-7   48.9 / 66.4 / 52.9 / 52.9%   助言 +17.5 [+9.2, +25.8]    LP 63.2 対 52.9（−10.3）   = E2 旧
+  book-check-new.part0-7   48.9 / 71.1 / 46.4 / 50.7%   助言 +22.1 [+14.1, +30.1]   LP 51.2 対 46.4（−4.7）    = E2 新
+  calib-fixed/place305     主張 39.9% 対 盤上 40.0% ±12.4（+0.1）                                           = G9 の place 305
+  （4腕は uniform/uniform・book/uniform・book/book・gen/gen の順。4組とも行に seat が無い）
+```
+
+**記録の数字と4組とも印字の桁まで一致し**、今の版は同じコピーを `SystemExit` で拒んだ。記録にある `book_check` の
+数字はこの片席のファイルから出ていて、読み直すには旧い版が要る。
+
+### 4. 限定を付けた場所
+
+**README.md**（本文は変えず、後に1行ずつ）:
+
+| 節 | 数字 | 付けた限定 |
+|---|---|---|
+| 選出リゾルバ（`src/pokeuraou/selection.py`） | `selection_check.py --place 1 --games 300` の例 | `--games` は席ごと。この例は1腕 600局・3腕 1,800局、時間は倍 |
+| 探索が解いていた行列はゼロサムではなかった | ミラーの 一様 vs 一様 59.1% ±5.8（276局） | A の片席。今の版では合計が期待値で 50%、同じ偏りは `座席差` に約2倍で出る |
+| 選出リゾルバの助言は実際に勝てるのか | 3腕の表、助言の価値 +16.5、44.1% 対 38.8% | A の片席・hp-share（G9）。今の版の数字と同じ表に並べない |
+
+ミラーの 59.1% の本文に道具の名前は無いが、9/10 の木で「一様 vs 一様」の腕と `--mirror` を持つのは
+`tools/selection_check.py` だけ（`git grep "一様 vs 一様" 19cdfd9 -- tools src`）。
+
+**GENERATIONS.md**: 5か所。3か所は表の後に1行、2か所（人間の定石の 5.3〜21.3% と ②の 5.3%）は末尾の節で名指し。
+一覧は同じ末尾の節「selection_check / book_check の過去の数字は片席」。
+
+**TODO.md**（過去の節は触っていない。ここで名指しする。引いている数字はすべて片席）:
+
+| 節 | 引いている数字 | 道具・代・葉 |
+|---|---|---|
+| T6 ✅ book は今の床でも +13.6 | E1 の +18.9、E1 の `book/book` 対 `uniform/uniform` +2.1 | book_check（+13.6 そのものは generation_match） |
+| E1 ✅ 選出が全エージェントで一様乱数だった | 4腕 280戦、`gen/gen` 55.4%（G16 で 55.0% に訂正）、+18.9 = +141.5 Elo | book_check、9/13 |
+| E2 ✅ 現行モデルで book を解き直した | 助言の価値 +17.5 / +22.1、較正のズレ −10.3 / −4.7 | book_check、9/13 |
+| E4. 人間の定石とモデルの選出が食い違う | 12.0 / 5.3 / 21.3% 対 31.3% | selection_check `--force-selection`、A・hp-share、9/13 |
+| G2. 相手の控え2体の不完全情報 | BIG6 42.3% 対 34.0%、Ben Madigan 54.3% 対 32.5% | selection_check、A・hp-share（G9 で無効） |
+| G3. 「終盤を厚くする」は本命ではなかった | 人間の定石 5.3〜21.3% | E4 と同じ |
+| G27 ✅ 葉はどのターンでも偏っていない | 水準誤差 9.7点、順序の差 −10.2%、+18.9 | 順位パネル9体時点（B・価値関数）、E1 |
+| G28 選出出力は、セルが持っていない精度を主張している | 9.7点、−10.2%、+18.9 | 同上 |
+| G29 ✅ 選出順位パネル 12体 完走 | 各相手の表、−7.0% ±8.7%、水準 9.5点・偏り −5.0点 | selection_check `--force-selection`（ordering_check が出したもの）、B・価値関数、9/19 |
+| 現在のキュー 〔9/19 19:15 時点〕 | `book 対 一様` +18.9 | E1 |
+| G31 ✅ book は自陣の均衡値を約5点 楽観している | 順位パネル −5.0点、水準 9.5点・偏り −5.0 | G29。もう1本の −4.9 は generation_match の side 0 の行（下の5） |
+| G33 ✅ 相手がこちらの配分を見ている代償は 0.5点 | book 対 一様 +18.9 | E1 |
+| G23 両者が book を使うと、こちらが10点損をする | 「book は +141 Elo」 | E1 |
+| G16 監査の残り | `gen/gen` 154/280 = 55.000%、155/280 = 55.357% | book_check、9/13 の走りの数え直し |
+| G15 🚨 測定器の監査 | 同じ 55.000% → 55.357% | 同上 |
+| 用語 —— 「book」は定跡ではない（同じ節が4つ） | 「book が +141 Elo」 | E1 |
+| G10-b ▸ 席の差（44.5% / 53.4%）は欠陥ではない | 物差しにした G9 の較正誤差 5.9点 | G9（44.5% そのものは generation_match） |
+| place 109 は分布の外だった | 無作為6相手 +0.2 〜 −17.3・平均 −5.8、place 109 −26.2 / −21.1 | selection_check、B・価値関数、9/19 未明 |
+| G9 🚨 selection_check は別のエージェントを打たせていた | 無効化した5件、測り直した6相手（5.9点・−5.8）、「選出の順序が逆」の表、+18.9 | 無効化分は A/B・hp-share、測り直しは B・価値関数 |
+| G8 ⚠ book は控えを知っている前提で解かれ… | −12.8 / −3.7、助言の価値 +2.5、75.8% / 73.3% | selection_check、B・hp-share（G9 で無効）、9/18 |
+| G7. Workflow が出した順位表の未処理分 | 42.3 / 34.0、54.3 / 32.5、「±5〜9点、うち約4点が optimiser's curse」 | G2・E2・GENERATIONS.md の E1 |
+
+範囲外で触っていないもの: `configs/knowledge/rizabanadohido-selection.json` の `measured`（E4 の出どころ。9/13、A・hp-share・片席）。
+
+### 5. G31 の「独立な2経路」は、席の項を共有している
+
+G31 の −4.9（G23: generation_match の side 0 の行、44.8% 対 49.65%）と −5.0（G29 の順位パネル）は、道具は別だが
+**どちらも自陣が全局 side 0**（generation_match は腕を入れ替えても盤は入れ替えない、T7）。2つの一致は席の項を
+切り分けない。**5点のうち席の項がいくらかは、IKA-17 が立てた問い（9/19 夕の表）のまま未測定**で、答えるには
+両席の実行が要る。
+
+### 6. 見つけたが直していないもの
+
+* **`tools/ordering_result.py` は両席の行を読めない。** L174 の `by_arm[row["arm"]][int(row["game"])] = float(row["outcome"])`
+  は席を見ずに side 0 の outcome を自陣の結果として読む。両席の出力では同じ game の行が2つあり、後に書かれる
+  席1の行（outcome は相手の結果）が残るので、**両腕とも相手の勝率を印字し、差の符号が反転する** —— 黙って。
+  IKA-17 は2つの merge を直したが、3つ目の読み手を直していない。ディスクの順位パネル96ファイルはすべて片席
+  （9/19）なので、記録済みの数字は影響を受けていない。コードを読んだだけで、両席の行を食わせてはいない
+* `tools/ordering_check.py` の `--games` の help（"games per arm per opponent"）と docstring の「1相手 約20分」は
+  片席の勘定。今の `selection_check` では1腕 120局・約2倍
+* **人間の定石の数字（E4、12.0 / 5.3 / 21.3% 対 31.3%）は、盤上を hp-share が打っていた。** 9/13 の
+  `selection_check`（`779c4c7`）は `play_game` に `evaluate` を渡していない（入ったのは `06b3176`、9/19）。
+  G9 の「無効になる数字」の5件に入っておらず、E4 の「対局を打っているのが同じ価値関数」という交絡の書き方も
+  コード上は成り立たない。G3 と GENERATIONS.md の2か所（5.3〜21.3%、②は 5.3%）が同じ数字を引いている
+* `data/matches/book-check-gen11L*.jsonl`（9/18、1,000対戦 × 4腕、片席）は、記録の中に引用を見つけられなかった
+
+### 7. 測っていないこと
+
+* 席の項の大きさ（G31 の5点のうちいくらか）。両席の実行が1本も無い
+* `book_check` の席0の半分が旧い局を再現するか（コードの読みだけ）
+
+### 確かめたこと
+
+```
+  git log -S "game_index, 7]" -- tools/selection_check.py                  8b85d50 のみ
+  git log -S "default_rng([args.seed + 1, game_index])" -- 同               96b6905 のみ
+  git log -S "arm_index, 7]" -- tools/book_check.py                         6fb56e5 のみ
+  git log --merges --ancestry-path 8b85d50..HEAD の最古                      e7229ea 2026-09-20 00:51:21 +0900
+  git show 19cdfd9 / 779c4c7:tools/selection_check.py                       evaluate= が無い（06b3176 で入る）
+  git grep "一様 vs 一様" 19cdfd9 -- tools src                                tools/selection_check.py だけ
+  pytest -n 0 tests/test_seat_swap.py                                       17 passed、0 skipped
+  data/matches の両ツールの出力（読むだけ）                                   269ファイル・25,840行・seat 0行、
+                                                                            ヘッダ224本に seats 0本、9/13 01:21〜9/19 17:42
+  旧い版の merge（コピー4組）                                                 記録と一致（上の3）。今の版は2組とも SystemExit
+  pytest -n 0 tests/test_line_endings.py tests/test_no_machine_specific_paths.py   5 passed、0 skipped
+  git diff --stat（3ファイル）                                                220 行の追加、削除 0（過去の行は1行も変えていない）
+```
