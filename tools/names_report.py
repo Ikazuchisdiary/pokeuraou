@@ -105,7 +105,8 @@ def main() -> None:
             out[entry.kind] = {
                 key: previous.get(key, "") for key in entry.missing
             } | {k: v for k, v in previous.items() if v}
-        path.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        # `newline`: a tracked file, and text mode would write it CRLF on Windows.
+        path.write_text(json.dumps(out, ensure_ascii=False, indent=2) + "\n", encoding="utf-8", newline="\n")
         print(f"\n-> {path} ({sum(len(v) for k, v in out.items() if isinstance(v, dict))} ids)")
 
 

@@ -1,0 +1,14 @@
+# Every text file is LF, in the repository and in every checkout, whatever the machine's
+# core.autocrlf says.
+#
+# Without this the repository stored whatever bytes the last writer produced, and on
+# Windows that depends on the writer: Python's text mode turns "\n" into "\r\n", most
+# editors and tools do not. By 2026-09-23, 87 files were CRLF, one was both, and 51 had
+# changed endings at least once after they were created -- TODO.md seven times -- each
+# flip a whole-file diff that buried the real edit and made `git blame` useless.
+#
+# With it, `git add` stores LF even when the file on disk is CRLF, and `git diff` shows
+# only the real change. It does not rewrite the file on disk, so a CRLF writer still
+# leaves the working tree different from a checkout; tests/test_line_endings.py is what
+# says so.
+* text=auto eol=lf
