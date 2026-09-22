@@ -53,7 +53,7 @@ def main() -> None:
     ap.add_argument("--positions", type=int, default=60)
     ap.add_argument("--widths", default="6,8,12,16,24,32")
     ap.add_argument("--games-dir", type=Path,
-                    default=Path(r"C:\Users\Ikazuchi\repos\pokeuraou\data\selfplay-gen8"))
+                    default=Path(__file__).resolve().parents[1] / "data" / "selfplay-gen8")
     ap.add_argument("--min-turn", type=int, default=3)
     ap.add_argument("--seed", type=int, default=1)
     ap.add_argument("--value", type=Path, required=True)

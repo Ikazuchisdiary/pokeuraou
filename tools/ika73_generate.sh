@@ -10,7 +10,7 @@
 #
 # 局数は多めに頼んで、あとで実測の壁時計から添字で切って揃える（IKA-66 と同じ手順）。
 set -e
-cd /c/Users/Ikazuchi/repos/pokeuraou
+cd "$(dirname "$0")/.."
 
 W="$1"; N="$2"
 [ -n "$W" ] && [ -n "$N" ] || { echo "usage: $0 <width> <games>" >&2; exit 2; }

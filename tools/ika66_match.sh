@@ -7,7 +7,7 @@
 # 幅は両腕 24（現行の出荷幅）。差は葉だけ。book は1つを共有するので、両腕は同じ6匹・
 # 同じ選出・同じ種で打ち、対応が残る。プールが隠蔽生成なので判定も `--hide-bench`。
 set -e
-cd /c/Users/Ikazuchi/repos/pokeuraou
+cd "$(dirname "$0")/.."
 
 TESTED="$1"; BASE="$2"; GAMES="$3"; NAME="$4"
 [ -n "$NAME" ] || { echo "usage: $0 <tested> <baseline> <games per seat> <name>" >&2; exit 2; }

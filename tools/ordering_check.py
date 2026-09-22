@@ -158,7 +158,11 @@ def main() -> None:
         print("# board can contradict.")
     print("# each pair is paired per game: same opponent, same spread class, same index")
     print("set -uo pipefail")
-    print("cd /c/Users/Ikazuchi/repos/pokeuraou")
+    # Every path below is relative, so the generated script needs the repository root as
+    # its working directory and nothing more. It used to print `cd` with this machine's
+    # checkout baked in, which is a script that runs nowhere else and, in a worktree,
+    # runs in the wrong tree without saying so.
+    print("# run this from the repository root")
     # The named arms are labelled 'a+b / c+d'. The obvious selector is '/', and it does
     # not survive the shell: MSYS rewrites a lone slash as a Windows path, so the worker
     # was handed --only-arm 'C:/Program Files/Git/' and refused every opponent before

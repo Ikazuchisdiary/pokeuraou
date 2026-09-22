@@ -7,7 +7,7 @@
 # 「等しい壁時計」という独立変数そのものが壊れる。
 # 局は添字から種を取るので、両腕とも添字 0 から始めれば局 i は同じ6匹・同じ選出になる。
 set -e
-cd /c/Users/Ikazuchi/repos/pokeuraou
+cd "$(dirname "$0")/.."
 
 A_GAMES="$1"
 B_GAMES="$2"
