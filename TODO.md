@@ -6143,8 +6143,10 @@ ika-68 の作業中の変更（main のチェックアウトで未コミット�
 ⚠ scratchpad のような長いパスの下では `rebase` が `Filename too long` で止まり、衝突に見える。`C:\tmp` で
 やり直すと通った。
 
-この変更自体も、古い土台（`0e84504`）から今の master（`14c9053`）へ `-X renormalize` で取り込み、
-**全315パスが「master の内容の LF 版＋意図した変更5本」と一致する**ことを確かめてから入れた。
+この変更自体も、古い土台（`0e84504`）から今の master へ `-X renormalize` で取り込み、
+**全パスが「master の内容の LF 版＋意図した変更5本」と一致する**ことを確かめてから入れた。作業中に
+IKA-89・97（`14c9053`）と IKA-68（`6581faa`）が先に入ったので2回取り込み、2回とも確かめた
+（315パスと317パス。2回目の TODO.md は、この節を末尾に足した以外は master の LF 版と一致）。
 
 ### 取り込んだあとに要ること
 
@@ -6163,8 +6165,10 @@ ika-68 の作業中の変更（main のチェックアウトで未コミット�
 ```
   変換        88本すべて「HEAD の CRLF→LF」とバイト一致、Python 62本は marshal まで一致
   ガード       実物（tools/diff_turn.py）に CRLF を植えると名指しで落ち、--fix でバイト列が元に戻る
-  取り込み     全315パスが master の LF 版＋意図した5本と一致、312本すべて i/lf w/lf
-  スイート     481 passed / 57 skipped、144秒（取り込み後の木。worktree には oracle・Rust バイナリ・standings が無い）
+  取り込み     14c9053 で315パス、6581faa で317パス。どちらも master の LF 版＋意図した変更と一致、
+              最終の木は314本すべて i/lf w/lf
+  スイート     486 passed / 57 skipped、106秒（最終の木。worktree には oracle・Rust バイナリ・standings が無い）
+              1回目の取り込みの後は 481 passed / 57 skipped
   ruff        全通過
 ```
 
