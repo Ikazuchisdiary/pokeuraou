@@ -58,6 +58,11 @@ class WorkQueue:
         self._held: dict[int, set[int]] = {}
         self.done: list[int] = []
         self.abandoned: list[int] = []
+        #: Indices nobody will play because the run was ended on purpose (`close`). Kept
+        #: apart from `abandoned`, which is a failure, and from `remaining`, which a run
+        #: that stopped because it had its answer must not report as work left undone.
+        self.dropped: list[int] = []
+        self._closed = False
 
     @property
     def remaining(self) -> int:
@@ -94,10 +99,37 @@ class WorkQueue:
         """Gives back whatever a departing worker was holding. Returns what came back."""
         with self._lock:
             back = sorted(self._held.pop(holder, set()))
+            if self._closed:
+                # Nobody is handed anything after `close`, so there is nothing to give it
+                # back to: it joins what the stop dropped rather than a queue no one reads.
+                self.dropped.extend(back)
+                return []
             # Front of the queue: a returned game is the oldest outstanding work, and
             # leaving it until last would put the straggler back at the end of the run.
             self._pending.extendleft(reversed(back))
             return back
+
+    def close(self) -> int:
+        """Hands out nothing more. What the workers are holding finishes and is written, as
+        it would at the end of any run; what nobody has started is dropped. Returns how
+        many were dropped."""
+        with self._lock:
+            self._closed = True
+            dropped = list(self._pending)
+            self._pending.clear()
+            self.dropped.extend(dropped)
+            return len(dropped)
+
+    def resolved(self) -> set[int]:
+        """Indices that will not change again: finished, or abandoned after `MAX_ATTEMPTS`.
+
+        A snapshot under the lock, for a monitor that has to know which results are final
+        before it reads them. A match worker reports an index finished only after writing
+        its record -- or after discarding the game at the turn cap, when there is nothing
+        to write -- so whatever this set's games left on disk is there when it is taken.
+        """
+        with self._lock:
+            return set(self.done) | set(self.abandoned)
 
 
 class _Handler(socketserver.StreamRequestHandler):
@@ -154,6 +186,8 @@ def run_workers(
     cwd: str | None = None,
     label: str = "run",
     counts: Callable[[], int] | None = None,
+    monitor: Callable[[WorkQueue], str | None] | None = None,
+    poll: float = 20.0,
 ) -> int:
     """Serves a queue, runs `workers` processes against it, and reports what happened.
 
@@ -167,11 +201,52 @@ def run_workers(
     because draining seats separately lets one of them empty the queue while the other
     starves, and the pairing between them is the whole reason for playing both.
 
+    `monitor(queue)` is called every `poll` seconds while the workers run, and once more
+    after they have all exited so the last results are seen too. Returning a reason ends
+    the run early and on purpose: the queue is closed, the games in flight finish and are
+    written, and the rest are recorded as dropped rather than as work left undone. It is
+    how a match stops the moment a sequential test has decided (`pokeuraou.sprt`).
+
     Returns a process exit code: non-zero when work was left unplayed or a worker failed,
     so an incomplete run says so rather than being discovered by counting files later.
     """
     queue = WorkQueue(indices)
     returned: list[int] = []
+    stopped: list[str] = []
+    broken: list[BaseException] = []
+    finished = threading.Event()
+
+    def look() -> str | None:
+        assert monitor is not None
+        try:
+            return monitor(queue)
+        except Exception as error:  # noqa: BLE001 - reported, and the run says so at the end
+            # A monitor that dies must not take the games with it, and must not look like
+            # one that never decided either: the run goes on to its full count, and the
+            # exit code says the stop it was asked for never happened.
+            broken.append(error)
+            print(
+                f"  the monitor failed and the run goes on to its full count: {error!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return None
+
+    def supervise() -> None:
+        while not finished.wait(poll):
+            reason = look()
+            if broken:
+                return
+            if reason:
+                stopped.append(reason)
+                dropped = queue.close()
+                print(
+                    f"  {reason}\n  stopping: {dropped} job(s) not handed out, the "
+                    f"{queue.remaining} in flight finish and are written",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return
 
     def note_return(back: list[int]) -> None:
         returned.extend(back)
@@ -219,8 +294,21 @@ def run_workers(
     threads = [threading.Thread(target=watch, args=(w, p)) for w, p, _ in running]
     for thread in threads:
         thread.start()
+    supervisor = None
+    if monitor is not None:
+        supervisor = threading.Thread(target=supervise, daemon=True)
+        supervisor.start()
     for thread in threads:
         thread.join()
+    finished.set()
+    if supervisor is not None:
+        # Joined before the last look, so the monitor is never called from two threads.
+        supervisor.join()
+        if not stopped and not broken:
+            reason = look()
+            if reason:
+                stopped.append(reason)
+                print(f"  {reason} (on the last results)", file=sys.stderr, flush=True)
     for _worker, _process, log in running:
         log.close()
     server.shutdown()
@@ -234,6 +322,7 @@ def run_workers(
         f"{len(queue.done)} jobs finished"
         + (f", {queue.remaining} left unplayed" if queue.remaining else "")
         + (f", {len(queue.abandoned)} abandoned" if queue.abandoned else "")
+        + (f", {len(queue.dropped)} not played because the run was stopped" if queue.dropped else "")
         + (f", {len(returned)} replayed after a worker went away" if returned else "")
         + (f", {failed} worker(s) failed" if failed else ""),
         file=sys.stderr,
@@ -244,7 +333,7 @@ def run_workers(
             f"{idle / (len(order) * elapsed):.1%} of the machine idle at the end",
             file=sys.stderr,
         )
-    return 1 if (queue.remaining or queue.abandoned or failed) else 0
+    return 1 if (queue.remaining or queue.abandoned or failed or broken) else 0
 
 
 class WorkClient:
