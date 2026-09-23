@@ -14062,3 +14062,84 @@ cargo release 4 回（8 コア 24・19・18 秒、1 回はコンパイルエラ�
   置く故障注入ではボタンとカードの 2 件が落ちる（ききかいひは HP が減らないので通る。跨ぎで見ているから）
 * 取り込み後: release ビルド、関係テスト 17 ファイル（test_substitute を含む）pass、diff_node w12 `--eject` 新 exe
   発火 3,967・違い 0、`--substitute` 発火 7,912・違い 0、ruff・`port_coverage --check`・`port_gate_audit --check` ok
+
+## 9/24 — IKA-202: おうごんのからだ・フラワーベール —— 両エンジンとも無く、port は断らず注記も出なかった。オラクル 24 局面で旧 Python 12 落ち・新 0、diff_node の発火（M-C g600 で GaG 675・FV 423 セル、w12 で 755・281）で新 exe 0・旧 exe 全部違い（g600 の GaG は 618/675）
+
+### 1. Showdown の定義（a5df827、champions mod は上書きしない）
+
+* おうごんのからだ: `onTryHit(target, source, move) { if (move.category === 'Status' && target !== source) return null; }`、
+  `breakable`。`hitStepTryHitEvent` で変化技の各対象に（相手の技・味方の技〔デコレーション・てだすけ〕・全体技の各対象）。
+  Protect（優先度 3）の後。`null` は失敗（`hitResults[i] || false`、じだんだが読む）。場・陣地の技（`all`・`foeSide`・
+  `allySide`・`allyTeam`）は `TryHitField`/`TryHitSide` なので通る。ほろびのうたは `onHitField` が各場のポケモンに
+  `runEvent('TryHit')` するので止まる（ぼうおんと同じ `null`、歌い手に結果あり）。かたやぶり（キノコのほうし＝変化技も）で無効、
+  とくせいガードで戻る
+* フラワーベール: `onAllyTryBoost` / `onAllySetStatus` / `onAllyTryAddVolatile`、`breakable`。`onAlly` は持ち主と味方
+  （`alliesAndSelf`）。草タイプだけ。能力低下は `source && target === source` 以外すべて（相手の技・追加効果・いかく・
+  ねばねばネット・味方の技）。状態異常は `source && target !== source` かつあくびの眠りでないもの（どくびし・トゲの守り・
+  スパイシースプレーも）。あくびはボリュームの付与で止める（source 条件なし）。自分の技の反動（リーフストーム）は通る
+
+### 2. 実装（Python と port で同じ形、小さな関数）
+
+* `_good_as_gold_blocks` / `moves::good_as_gold_blocks`: `_immune_to_move` の先頭で判定（Protect の後、失敗扱い）
+* `PERISH_SONG_TRY_HIT_ABILITIES = {soundproof, goodasgold}`（port は条件に並べた）
+* `_flower_veil` / `moves::flower_veil`: 草タイプで、場の味方（自分を含む）に `current_actor` のかたやぶりで破られない
+  フラワーベール。`apply_boosts` に `by_other`（port は `apply_boosts_by`、既定は `from_foe`。変化技の対象が味方の時だけ
+  `target != me` を渡す）、`apply_status` は `reason != "yawn"`（port はあくびの眠りだけ `apply_status_unveiled`）、
+  `add_volatile("yawn")`
+* 交代で出た時（`_on_switch_in` / `on_switch_in`）は `current_actor` を外す: Showdown は行動ごとに `clearActiveMove` するので、
+  いかく・ねばねばネット・どくびしは技の中ではない。本体は `_switched_in` / `switched_in` に改名しただけ
+  （ほえる等の引きずり出しは Showdown では技が生きたまま。見ていない）
+* port: `ability_handled` の「観測できる効果なし」からフラワーベールを外し、2 つを実装済みの行へ。`inert.rs` を再生成
+
+### 3. オラクル（`tests/test_goodasgold_flowerveil.py`、24 局面、1 手）
+
+止まる 12（GaG: おにび・あまえる・ちょうはつ・あくび・ほろびのうた・味方のデコレーション／FV: おにび・あまえる・あくび・
+バークアウトの追加効果・味方のあまえる・交代で出たいかく）と対照 12（かたやぶり 3、とくせいなしの同じポケモン 3、
+自分のリーフストーム、草でない持ち主へのおにび・いかく、ベールなし 3）。
+
+| | 旧 | 新 |
+|---|---|---|
+| Showdown の事実 | 24/24 | 24/24 |
+| Python（Showdown の局面から解く） | 12 落ち（止まる 12 全部） | 0 |
+| port（Python と分岐ごと） | 旧 exe × 新 Python: 13 落ち（いかくの持ち主側の鍵も違う） | 0 |
+
+我々のメニューは味方を狙う手を出さないので、テストは敵を狙う手の対象を `-1` に差し替えて作る。
+
+### 4. diff_node `--veils`
+
+どちらかが場に居る記録の局面の全セルを分岐ごとに比べ、`unveiled(ability)`（その特性だけ外した Python）で答えが動くセルを
+特性ごとに数える（その特性が場に居る局面のセルだけで）。M-C は `--roster` に M-C の名簿が要る（プールの 1 本目から
+C:/tmp/ika202/regmc-roster.json を作った）。各 100 ノード。
+
+| 記録 | セル | 断り | GaG 発火 | FV 発火 | 新 exe の違い | 旧 exe の違い |
+|---|---|---|---|---|---|---|
+| M-C 試走 g600 | 50,408 | 144 | 675 / 29,120 | 423 / 23,096 | 0 | 1,046（GaG 618・FV 423） |
+| M-B w12 | 51,888 | 206 | 755 / 10,880 | 281 / 41,008 | 0 | 1,036（GaG 755・FV 281） |
+
+g600 の GaG 発火のうち旧 exe と一致した 57 セルは見ていない（`differ` は中断した状態を比べ、`branch_differences` は
+中断の中身を比べない。とんぼがえり・すてゼリフが止まって中断が消えるセルと推測）。
+
+### 5. 記録で該当する決定（`kind == move`、選ばれた手が当たり得るものは上限）
+
+| 記録 | 局 | 4 体に GaG / FV | GaG が場 | FV が草の味方を守る | 選ばれた手が GaG に届く変化技 | 選ばれた手が FV の草に低下・状態異常・いかく |
+|---|---|---|---|---|---|---|
+| M-C g600 | 600 | 119 (19.8%) / 113 (18.8%) | 407 | 21 | 10 決定・8 局 | 4 決定・4 局 |
+| M-B w12 | 43,999 | 1,317 (3.0%) / 8,258 (18.8%) | 4,687 | 987 | 238・197 局 | 441・391 局 |
+| M-B gen11L | 12,000 | 347 (2.9%) / 1,390 (11.6%) | 1,394 | 184 | 114・92 局 | 84・64 局 |
+
+M-C ではフラワーベール持ち（フラエッテ永遠・フラージェス、どちらもフェアリー）の横に草が居る決定は少ない（21）。
+
+### 6. 別課題の候補
+
+* `apply_status` の他の穴: しんぴのまもりが状態異常を止めていない（混乱だけ IKA-189）、あくびもしんぴのまもり・
+  状態異常持ちで失敗しない。ぼうおんは変化技の音技（ほろびのうた以外）を止めていない
+* クリアボディ系は `from_foe` で見ているが、Showdown は `target === source` 以外（味方の技も止める）。まけんきは逆に
+  味方からの低下を無視する（`target.isAlly(source)`）のに `from_foe` の追加効果（味方を巻き込む全体技）で発動する
+* アロマセラピー・いやしのすずは GaG を飛ばす（`goodasgold` の特別扱い）が、両技とも未実装
+* g600 の 57 セル（上）の確認と、`branch_differences` が中断の中身を比べない件（IKA-191 の節と同じ）
+
+### 7. 機械
+
+cargo release 2 回（8 コア 22・18 秒）、オラクルテスト（1 コア、各数秒）、関係テスト 11 ファイル 2 回（1 コア 12 秒〔priors 無しで
+落ち〕・32 秒）、diff_node 5 回（1 コア 13・470・470・576・576 秒、g600 と w12 は新旧を並行）、記録の数え上げ 2 回（1・21 秒）。
+すべて heavy.py（--agent IKA-202）。
