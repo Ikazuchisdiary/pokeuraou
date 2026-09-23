@@ -69,7 +69,9 @@ def resolve(showdown_dir: Path) -> subprocess.CompletedProcess[str]:
     if shutil.which("node") is None:
         pytest.skip("no node on PATH")
     if not RESOLVER.exists():
-        pytest.skip("packages/sim-bridge is not built (npm run build)")
+        # "oracle not built" so ci_skip_audit counts it with the bridge: a dist that has
+        # oracle.js but not this file is a stale build, and the audit says so.
+        pytest.skip("oracle not built: packages/sim-bridge/dist has no showdown-commit.js")
     script = (
         "const s = require(process.argv[1]);"
         "try { console.log(s.showdownCommit(process.argv[2], process.argv[3])); }"
@@ -104,7 +106,7 @@ def test_a_checkout_at_another_commit_stops(tmp_path: Path) -> None:
 def test_an_initialised_submodule_gives_the_gitlink() -> None:
     vendor = ROOT / SUBMODULE
     if not (vendor / ".git").exists():
-        pytest.skip("vendor submodule not initialised in this checkout")
+        pytest.skip("vendor submodule not initialised in this checkout (a worktree)")
     out = resolve(vendor)
     assert out.returncode == 0, out
     assert out.stdout.strip() == gitlink()

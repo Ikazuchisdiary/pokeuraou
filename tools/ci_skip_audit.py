@@ -136,6 +136,14 @@ CLASSES: tuple[Class, ...] = (
         probe=_names_present,
     ),
     Class(
+        "vendor",
+        re.compile(r"vendor submodule not initialised"),
+        "vendor/pokemon-showdown as a checkout of its own; `git submodule update --init`. "
+        "A git worktree does not get one, so a worktree run declares it absent",
+        environment=True,
+        probe=lambda: (ROOT / "vendor" / "pokemon-showdown" / ".git").exists(),
+    ),
+    Class(
         "torch",
         re.compile(r"could not import 'torch'|needs the optional learn group"),
         "the optional learn group; `uv sync --group learn`",
