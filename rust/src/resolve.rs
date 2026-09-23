@@ -2371,9 +2371,9 @@ pub(crate) fn check_white_herb(turn: &mut Turn) {
 /// port resolves, so over there the maximum is written back unchanged and the difference
 /// carried across is zero. Only the floor of 1 survives, and it is kept.
 ///
-/// Writing the recomputed HP stat here instead -- which is what `do_mega` below does, and
-/// gets away with because no mega changes its HP base -- moved every cell of a node whose
-/// forme has a different one: a Kingambit given Stance Change became a 167-HP Aegislash
+/// Writing the recomputed HP stat here instead -- which is what `do_mega` below did until
+/// IKA-60, getting away with it because no mega changes its HP base -- moved every cell of
+/// a node whose forme has a different one: a Kingambit given Stance Change became a 167-HP Aegislash
 /// here and stayed a 207-HP one over there, for 6.4e-03 across 24 of 36 cells. Aegislash's
 /// own two formes share their HP base, so only a holder that is not Aegislash shows it.
 ///
@@ -2446,15 +2446,22 @@ fn do_mega(reg: &Reg, turn: &mut Turn, action: &QueuedAction) -> Result<(), Stri
         mon.is_mega = true;
         mon.ability = Id::new(&ability);
     }
-    let refreshed = {
+    {
+        // Built because Python builds one here, so a species this cannot construct fails
+        // at the mega rather than somewhere later. Its stats are not read.
         let mon = turn.mon_at(action.side, action.slot).unwrap();
-        Battler::from_pokemon(reg, mon)?
-    };
+        let _refreshed = Battler::from_pokemon(reg, mon)?;
+    }
     {
         // HP keeps its absolute value, adjusted by any change in maximum, as the Python
-        // does: `mon.hp = min(mon.maxhp, mon.hp + (mon.maxhp - maxhp_before))`.
+        // does: `mon.hp = min(mon.maxhp, mon.hp + (mon.maxhp - maxhp_before))`. As in
+        // `change_forme` above, `mon.maxhp` is deliberately not assigned: Python's
+        // `battler()` hands a known spread's position maxhp straight back, so the maximum
+        // over there never moves and the difference carried is zero. Writing the
+        // recomputed HP stat here instead was right only because every mega in both
+        // regulations shares its base form's HP base (IKA-60,
+        // `tests/test_mega_hp_base.py`).
         let mon = turn.mon_at_mut(action.side, action.slot).unwrap();
-        mon.maxhp = refreshed.stats[0];
         mon.hp = (mon.hp + (mon.maxhp - maxhp_before)).min(mon.maxhp);
     }
     turn.pos.sides[action.side].mega_used = true;
