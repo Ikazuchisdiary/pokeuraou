@@ -242,6 +242,12 @@ pub struct Turn<'a> {
     /// reports, because a caller that prints them must not see the set shrink just
     /// because the turn was resolved in Rust.
     pub(crate) unmodelled: std::collections::BTreeSet<String>,
+    /// Set by `hit_target` once a damage roll is drawn from a stratified subset, and read
+    /// and cleared by `run_queue` straight after the action that set it -- the port's form
+    /// of the "damage rolls stratified" note Python's `_hit_target` returns with every
+    /// outcome, which `_run_queue` answers with `exact = False` (IKA-151). It is never set
+    /// on a state that is stored, so merging and the fingerprint do not see it.
+    pub(crate) rolls_stratified: bool,
 }
 
 impl<'a> Turn<'a> {
@@ -262,6 +268,7 @@ impl<'a> Turn<'a> {
             current_actor: None,
             wipe_order: Vec::new(),
             unmodelled: Default::default(),
+            rolls_stratified: false,
         }
     }
 
@@ -1374,6 +1381,7 @@ fn same_turn(a: &Turn, b: &Turn) -> bool {
         current_actor,
         wipe_order,
         unmodelled: _,
+        rolls_stratified: _,
     } = a;
     std::ptr::eq(*reg, b.reg)
         && *self_switch_pending == b.self_switch_pending
@@ -1566,7 +1574,12 @@ fn run_queue<'a>(
                     }
                 }
             }
-            for (weight, turn) in outcomes {
+            for (weight, mut turn) in outcomes {
+                // Python's `_run_queue`: a note from `_execute` makes the turn inexact.
+                if turn.rolls_stratified {
+                    turn.rolls_stratified = false;
+                    exact = false;
+                }
                 let wiped = turn.pos.sides.iter().any(|s| s.pokemon.iter().all(|m| m.fainted));
                 let remaining_actions = if wiped { Vec::new() } else { rest.clone() };
                 let child =

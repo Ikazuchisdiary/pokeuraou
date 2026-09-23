@@ -433,12 +433,12 @@ def test_a_node_is_the_same_through_the_bridge_under_the_fast_budget(bridged: No
 
     objectives = [OBJECTIVES["hp-share"], OBJECTIVES["faints"]]
     evaluators = [o.batch for o in objectives]
-    through_rust, _notes, _exact = batched_payoffs(
+    through_rust, _notes, rust_exact = batched_payoffs(
         reg, pos, row, col, evaluators, budget=budget
     )
     rustnode.reset()
     os.environ[rustnode.ENV_ENABLE] = "0"
-    in_python, _python_notes, _python_exact = batched_payoffs(
+    in_python, _python_notes, python_exact = batched_payoffs(
         reg, pos, row, col, evaluators, budget=budget
     )
     for index, objective in enumerate(objectives):
@@ -446,8 +446,21 @@ def test_a_node_is_the_same_through_the_bridge_under_the_fast_budget(bridged: No
         assert float(gap.max()) < 1e-12, (
             f"{objective.name} differs by {float(gap.max())} on {int((gap > 1e-12).sum())} cells"
         )
-    # The exact mask is not compared: under a stratified roll Python marks a cell inexact
-    # for "damage rolls stratified" and the port has no such reduction (IKA-146).
+    # The exact mask as well (IKA-151). Under a stratified roll Python marks a turn inexact
+    # for "damage rolls stratified"; the port had no such reduction and called every cell
+    # of this node exact that nothing else made inexact. The comparison means something
+    # only if the node has a cell the stratified roll is the *only* reason for.
+    only_stratified = resolve_turn(reg, pos, [row[0], col[0]], budget=budget)
+    assert set(only_stratified.reductions) == {"damage rolls stratified"}, (
+        f"cell (0, 0) no longer tests the demotion alone: {only_stratified.reductions}"
+    )
+    rust_exact, python_exact = np.asarray(rust_exact), np.asarray(python_exact)
+    assert not python_exact[0, 0]
+    assert np.array_equal(rust_exact, python_exact), (
+        f"the exact mask differs on {int((rust_exact != python_exact).sum())} of "
+        f"{python_exact.size} cells ({int((rust_exact & ~python_exact).sum())} exact in "
+        "the port only)"
+    )
 
 
 def test_a_node_that_dies_is_replaced_rather_than_given_up_on(bridged: None) -> None:
