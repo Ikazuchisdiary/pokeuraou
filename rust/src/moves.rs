@@ -522,6 +522,51 @@ fn priority_blocked_by(
     None
 }
 
+/// A Choice item's `onModifyMove`: `addVolatile('choicelock')`, whose `onStart` records the
+/// move only when the lock is new -- a Struggle while locked leaves it on the locked move
+/// (IKA-179). A lock naming no move slot (a record's lock on `struggle`) is one Showdown's
+/// end of turn had dropped, so it locks afresh. Python's `_live_choice_lock`.
+fn lock_choice(turn: &mut Turn, side: usize, slot: usize, move_id: Id) {
+    let Some(mon) = turn.mon_at_mut(side, slot) else { return };
+    let stale = mon
+        .volatile_mut("choicelock")
+        .map(|held| held.move_id)
+        .is_some_and(|held| !held.is_some_and(|id| mon.moves.get(id).is_some()));
+    if stale {
+        mon.volatiles.retain(|v| v.id.as_str() != "choicelock");
+    }
+    let fresh = !mon.has_volatile("choicelock");
+    turn.add_volatile(side, slot, "choicelock", None);
+    if fresh {
+        if let Some(locked) = turn
+            .mon_at_mut(side, slot)
+            .and_then(|mon| mon.volatile_mut("choicelock"))
+        {
+            locked.move_id = Some(move_id);
+        }
+    }
+}
+
+/// `choicelock.onDisableMove`, run by `endTurn` for every active Pokemon: the lock goes when
+/// the holder's item is no Choice item or the move is in none of its slots (IKA-179).
+/// Python's `_choice_lock_ends`.
+fn choice_lock_ends(reg: &Reg, turn: &mut Turn, order: &[Slot]) {
+    for (side, slot) in order.iter().copied() {
+        let Some(mon) = turn.mon_at_mut(side, slot) else { continue };
+        if mon.fainted {
+            continue;
+        }
+        let Some(held) = mon.volatile_mut("choicelock").map(|held| held.move_id) else {
+            continue;
+        };
+        let choice = mon.item.is_some_and(|i| reg.choice_items.contains(i.as_str()));
+        let known = held.is_some_and(|id| mon.moves.get(id).is_some());
+        if !choice || !known {
+            mon.volatiles.retain(|v| v.id.as_str() != "choicelock");
+        }
+    }
+}
+
 fn use_move<'a>(
     reg: &'a Reg,
     mut turn: Turn<'a>,
@@ -546,12 +591,7 @@ fn use_move<'a>(
             mon.last_move = Some(move_id);
         }
         if locks {
-            turn.add_volatile(action.side, action.slot, "choicelock", None);
-            if let Some(mon) = turn.mon_at_mut(action.side, action.slot) {
-                if let Some(locked) = mon.volatile_mut("choicelock") {
-                    locked.move_id = Some(move_id);
-                }
-            }
+            lock_choice(&mut turn, action.side, action.slot, move_id);
         }
     }
 
@@ -2773,6 +2813,7 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
         }
     }
     rampage_residual(turn, &order);
+    choice_lock_ends(reg, turn, &order);
 
     settle_outcome(&mut turn.pos, &turn.wipe_order);
     Ok(())

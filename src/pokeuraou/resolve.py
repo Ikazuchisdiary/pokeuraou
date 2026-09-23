@@ -2183,6 +2183,42 @@ def _rampage_residual(turn: _Turn, actives: list[tuple[int, int]]) -> None:
             held.extra[RAMPAGE_LEFT] = left - 1
 
 
+def _choice_lock_is_stale(reg: Regulation, mon: Pokemon) -> bool:
+    """`choicelock.onDisableMove`'s test for dropping the lock (IKA-179)::
+
+        if (!pokemon.getItem().isChoice || !pokemon.hasMove(this.effectState.move)) {
+            pokemon.removeVolatile('choicelock');
+
+    A Struggle with no lock starts one on `struggle`, which is in no move slot; a Scarf
+    knocked off leaves a lock on nothing held.
+    """
+    held = mon.volatile("choicelock")
+    if held is None:
+        return False
+    return mon.item not in reg.choice_items or not any(m.id == held.move for m in mon.moves)
+
+
+def _live_choice_lock(mon: Pokemon) -> Effect | None:
+    """The lock a Choice item's `addVolatile` finds, dropping one that names no move slot.
+
+    Showdown's end of turn has dropped such a lock before the next move (above); a record
+    made before IKA-179 can still carry one on `struggle`, which then locks afresh.
+    """
+    held = mon.volatile("choicelock")
+    if held is not None and not any(m.id == held.move for m in mon.moves):
+        mon.volatiles = [v for v in mon.volatiles if v is not held]
+        return None
+    return held
+
+
+def _choice_lock_ends(reg: Regulation, turn: _Turn, actives: list[tuple[int, int]]) -> None:
+    """`choicelock.onDisableMove`, which `endTurn` runs for every active Pokemon."""
+    for side, slot in actives:
+        mon = turn.mon_at(side, slot)
+        if mon is not None and not mon.fainted and _choice_lock_is_stale(reg, mon):
+            mon.volatiles = [v for v in mon.volatiles if v.id != "choicelock"]
+
+
 def _confusion_damage(turn: _Turn, side: int, slot: int) -> int:
     """A confusion self-hit: 40 base power, physical, typeless, no STAB or effectiveness."""
     mon = turn.battler_at(side, slot)
@@ -2220,7 +2256,7 @@ def _use_move(
             # Scarf Garchomp spent ten turns locked into Earthquake, Struggled once on the
             # eleventh, and picked Stomping Tantrum on the twelfth. Showdown keeps the lock
             # on Earthquake and Struggles for the rest of the game.
-            held = mon.volatile("choicelock")
+            held = _live_choice_lock(mon)
             turn.add_volatile(action.side, action.slot, "choicelock")
             if held is None:
                 locked = mon.volatile("choicelock")
@@ -4051,10 +4087,19 @@ def _swap_items(turn: _Turn, a: tuple[int, int], b: tuple[int, int]) -> None:
                 return
     first.item, second.item = second.item, first.item
     turn.log(f"{turn.name(*a)} and {turn.name(*b)} swapped items")
+    _swap_ends_choice_locks(first, second)
     for side_slot, mon in ((a, first), (b, second)):
         if mon.ability == "unburden" and mon.item is None and not mon.has_volatile("unburden"):
             mon.volatiles.append(Effect(id="unburden"))
         turn.check_berry(*side_slot)
+
+
+def _swap_ends_choice_locks(*mons: Pokemon) -> None:
+    """Trick's `setItem` runs the received item's `onStart`, and a Choice item's removes
+    `choicelock`; a lock on a Choice item given away goes at the end of the turn
+    (`onDisableMove`). Either way both are gone before either moves again (IKA-179)."""
+    for mon in mons:
+        mon.volatiles = [v for v in mon.volatiles if v.id != "choicelock"]
 
 
 def _mark_self_switch(turn: _Turn, action: QueuedAction) -> None:
@@ -5530,6 +5575,7 @@ def _residuals(reg: Regulation, turn: _Turn) -> None:
         # Carry this turn's outcome forward for Stomping Tantrum and Temper Flare.
         mon.move_last_turn_failed = (side, slot) in turn.move_failed
     _rampage_residual(turn, actives())
+    _choice_lock_ends(reg, turn, actives())
 
     settle_outcome(turn.pos, turn.wipe_order)
 

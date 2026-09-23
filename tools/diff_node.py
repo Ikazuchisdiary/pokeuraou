@@ -97,6 +97,16 @@ cell branch by branch. The cells where a thaw *fired* -- a `defrost` move used f
 Fire or `thawsTarget` move into the frozen one -- are the ones Python moves with
 `_defrosts` and `_thaw_on_hit` taken out, and the run fails if there are none.
 
+Holding the port to a Choice lock (IKA-179):
+
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --choice-locked
+
+`--choice-locked` keeps the recorded positions with a Choice-locked Pokemon on the field
+that has to Struggle, whose lock Showdown would have dropped, or beside Knock Off, Trick or
+Switcheroo, and holds every cell branch by branch. The cells where the lock *fired* -- one on
+`struggle` or on a Choice item knocked off dropped, a Trick dropping both -- are the ones
+Python moves with the old rule put back (`unlocked`), and the run fails if there are none.
+
 Holding the port to a terrain no recorded game has (IKA-156):
 
     uv run python tools/diff_node.py --games-dir data/ika73/w12 --terrain psychicterrain
@@ -560,6 +570,53 @@ class unthawed:  # noqa: N801 - read as a phrase at the call site
         resolve_mod._defrosts, resolve_mod._thaw_on_hit = self.real
 
 
+class unlocked:  # noqa: N801 - read as a phrase at the call site
+    """Python's Choice lock as it was before IKA-179: the control for --choice-locked. The
+    first move is kept, but a lock naming no move slot or no Choice item is never dropped
+    -- not at the end of the turn, not by Trick, not by the next move."""
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = (
+            resolve_mod._live_choice_lock,
+            resolve_mod._choice_lock_ends,
+            resolve_mod._swap_ends_choice_locks,
+        )
+        resolve_mod._live_choice_lock = lambda mon: mon.volatile("choicelock")
+        resolve_mod._choice_lock_ends = lambda *_args: None
+        resolve_mod._swap_ends_choice_locks = lambda *_args: None
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        (
+            resolve_mod._live_choice_lock,
+            resolve_mod._choice_lock_ends,
+            resolve_mod._swap_ends_choice_locks,
+        ) = self.real
+
+
+#: Moves that take a Choice item away from a locked holder or swap it.
+ITEM_TAKING_MOVES = frozenset({"knockoff", "trick", "switcheroo"})
+
+
+def choice_locked_on_field(reg, pos: Position) -> bool:  # noqa: ANN001
+    """A Choice-locked Pokemon on the field whose lock IKA-179's rules can move: it has to
+    Struggle, its lock is one Showdown would have dropped, or a Pokemon on the field knows a
+    move that takes the item away. An ordinary lock that holds is the same in every rule."""
+    from pokeuraou.actions import is_struggling
+    from pokeuraou.resolve import _choice_lock_is_stale
+
+    field = [mon for side in pos.sides for mon in side.active_pokemon() if mon and not mon.fainted]
+    takers = any(m.id in ITEM_TAKING_MOVES for mon in field for m in mon.moves)
+    return any(
+        mon.has_volatile("choicelock")
+        and (takers or is_struggling(mon, reg) or _choice_lock_is_stale(reg, mon))
+        for mon in field
+    )
+
+
 def frozen_on_field(pos: Position) -> bool:
     return any(
         mon is not None and not mon.fainted and mon.status == "frz"
@@ -881,6 +938,7 @@ def recorded_positions(  # noqa: ANN001
     using: frozenset[str] = frozenset(),
     abilities: frozenset[str] = frozenset(),
     frozen: bool = False,
+    locked: bool = False,
 ) -> tuple[list[Position], int]:
     """Roots a search already filled a matrix at, read from recorded games.
 
@@ -893,6 +951,7 @@ def recorded_positions(  # noqa: ANN001
     keys: set[str] = set()
     other_format = 0
     wanted = holding | using | abilities | ({'"frz"'} if frozen else set())
+    wanted |= {'"choicelock"'} if locked else set()
     enough = None if wanted else 40 * args.nodes
     for directory in args.games_dir:
         for path in sorted(Path(directory).glob("*.jsonl")):
@@ -924,6 +983,8 @@ def recorded_positions(  # noqa: ANN001
                         if abilities and not ability_on_field(pos, abilities):
                             continue
                         if frozen and not frozen_on_field(pos):
+                            continue
+                        if locked and not choice_locked_on_field(reg, pos):
                             continue
                         keys.add(key)
                         found.append(pos)
@@ -1144,6 +1205,13 @@ def main() -> None:
         "branch by branch, and count where a thaw fired: the cells `unthawed` moves",
     )
     ap.add_argument(
+        "--choice-locked",
+        action="store_true",
+        help="keep positions with a Choice-locked Pokemon on the field that Struggles, "
+        "carries a stale lock or faces an item-taking move, hold every cell to the port "
+        "branch by branch, and count where IKA-179's lock fired: the cells `unlocked` moves",
+    )
+    ap.add_argument(
         "--toxic-debris",
         action="store_true",
         help="keep positions with Toxic Debris on the field, hold every cell to the port "
@@ -1263,7 +1331,8 @@ def main() -> None:
     elif args.games_dir:
         charging = charge_moves(reg) if args.charging else frozenset()
         positions, other_format = recorded_positions(
-            reg, args, holding - {args.give}, using | charging, blockers | debris, args.frozen
+            reg, args, holding - {args.give}, using | charging, blockers | debris, args.frozen,
+            locked=args.choice_locked,
         )
         print(
             f"{len(positions)} recorded positions from "
@@ -1292,7 +1361,9 @@ def main() -> None:
         positions = [pos for pos in positions if ability_on_field(pos, debris)]
     if args.frozen:
         positions = [pos for pos in positions if frozen_on_field(pos)]
-    quick = priority_moves(reg) if args.terrain or blockers else frozenset()
+    if args.choice_locked:
+        positions = [pos for pos in positions if choice_locked_on_field(reg, pos)]
+    quick =priority_moves(reg) if args.terrain or blockers else frozenset()
     if args.terrain:
         for pos in positions:
             pos.field.terrain = args.terrain
@@ -1379,6 +1450,9 @@ def main() -> None:
     # Beside a frozen Pokemon, every cell; and where a thaw moved the answer.
     icy = icy_wrong = icy_refused = thawed = thawed_wrong = 0
     thawed_worst = 0.0
+    # Beside a Choice lock, every cell; and where IKA-179's lock moved the answer.
+    lock_cells = lock_wrong = lock_refused = lock_fired = lock_fired_wrong = 0
+    lock_worst = 0.0
     # Where a hazard was used, and where laying it on the foe's side moved the answer.
     laid = laid_wrong = laid_refused = laid_fired = laid_fired_wrong = 0
     laid_fired_refused = laid_fired_paused = laid_wrong_elsewhere = 0
@@ -1747,6 +1821,36 @@ def main() -> None:
                         shown += 1
                         print(f"  cell {(i, j)} beside a frozen Pokemon: {wrong[0][:200]}")
 
+        if args.choice_locked:
+            node = rustnode.node_for(reg)
+            for i, a in enumerate(row):
+                for j, b in enumerate(col):
+                    lock_cells += 1
+                    here = resolve_turn(reg, pos, [a, b], budget=budget)
+                    with unlocked():
+                        control = resolve_turn(reg, pos, [a, b], budget=budget)
+                    wrong = (
+                        ["no warm process"]
+                        if node is None
+                        else branch_differences(node, reg, pos, a, b, here, budget)
+                    )
+                    refused_here = wrong == ["the port refused the turn"]
+                    lock_refused += refused_here
+                    if refused_here:
+                        wrong = []
+                    lock_wrong += bool(wrong)
+                    if differ(outcome(here), outcome(control)):
+                        lock_fired += 1
+                        lock_fired_wrong += bool(wrong)
+                        for index in range(len(evaluators)):
+                            lock_worst = max(
+                                lock_worst,
+                                abs(float(got[index][i, j] - expected[index][i, j])),
+                            )
+                    if wrong and shown < 5:
+                        shown += 1
+                        print(f"  cell {(i, j)} beside a Choice lock: {wrong[0][:200]}")
+
         checked += 1
         cells += len(row) * len(col)
         for index, name in enumerate(names):
@@ -1839,6 +1943,15 @@ def main() -> None:
         print(f"    {thawed} of {icy} cells")
         print(f"    cells whose branches, weights, notes or positions differ  {thawed_wrong}")
         print(f"    worst cell difference there  {thawed_worst:.3e}")
+    if args.choice_locked:
+        print("\n  beside a Choice lock, every cell -- held branch by branch")
+        print(f"    {lock_cells} of {cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {lock_wrong}")
+        print(f"    cells the port refused, filled in Python and not held  {lock_refused}")
+        print("  where IKA-179's lock fired -- the cells `unlocked` moves")
+        print(f"    {lock_fired} of {lock_cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {lock_fired_wrong}")
+        print(f"    worst cell difference there  {lock_worst:.3e}")
     if blockers:
         print("\n  beside a priority-blocking ability, cells that may use a priority move")
         print(f"    {block_used} of {cells} cells")
@@ -1912,6 +2025,10 @@ def main() -> None:
         failed.append(f"{icy_wrong} cells beside a frozen Pokemon differ by branch")
     if args.frozen and not thawed:
         failed.append("no thaw fired in any cell, so agreeing here says nothing")
+    if lock_wrong:
+        failed.append(f"{lock_wrong} cells beside a Choice lock differ by branch")
+    if args.choice_locked and not lock_fired:
+        failed.append("IKA-179's lock moved no cell, so agreeing here says nothing")
     if blockers and not blocked:
         failed.append("no blocking ability stopped anything in any cell, so agreeing here says nothing")
     if laid_wrong:
