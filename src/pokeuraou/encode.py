@@ -717,6 +717,11 @@ class Encoder:
             if holds and not side.mega_used and not mon.is_mega
             else 0.0
         )
+        # Showdown's own `trapped` verdict, true only at a root read from the oracle: the
+        # resolver drops it at the end of every turn (IKA-175), as `endTurn` does. That
+        # changed which positions carry a 1 here, not what a 1 means, and every generated
+        # position -- all the training data -- has always read 0, so ENCODING_REVISION
+        # stays where it was.
         out[base + 6] = 1.0 if mon.trapped else 0.0
         out[base + 7] = 1.0 if mon.newly_switched else 0.0
         base += 8
