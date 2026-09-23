@@ -244,6 +244,9 @@ def _usable_move_slots(mon, reg: Regulation) -> list[tuple[int, str]]:  # noqa: 
     if locked:
         for i, m in enumerate(mon.moves, start=1):
             if m.id == locked and m.usable:
+                # Choice-locked into Gigaton Hammer right after it: Struggle (IKA-176).
+                if _disabled_after_itself(reg.moves.get(m.id), mon):
+                    return []
                 return [(i, m.id)]
         # A lock naming a move that is gone leaves the normal set available.
 
@@ -294,8 +297,27 @@ def _usable_move_slots(mon, reg: Regulation) -> list[tuple[int, str]]:  # noqa: 
             continue
         if mon.active_move_actions and _disabled_once_moved(move):
             continue
+        if _disabled_after_itself(move, mon):
+            continue
         out.append((i, m.id))
     return out
+
+
+def _disabled_after_itself(move, mon) -> bool:  # noqa: ANN001
+    """Gigaton Hammer right after Gigaton Hammer (IKA-176).
+
+    `endTurn` disables a `cantusetwice` move that was the last one used
+    (vendor/pokemon-showdown/sim/battle.ts:1695)::
+
+        if (activeMove.flags['cantusetwice'] && pokemon.lastMove?.id === moveSlot.id) {
+            pokemon.disableMove(pokemon.lastMove.id);
+        }
+
+    `lastMove` is set once the move starts (`moveUsed`, after `BeforeMove`), so a turn
+    lost to flinch or sleep keeps it disabled, and switching out clears it. The dump's
+    flag decides, so a dex without it offers the move.
+    """
+    return move is not None and "cantusetwice" in move.flags and mon.last_move == move.id
 
 
 #: The moves whose champions `onDisableMove` reads the move counter
@@ -433,13 +455,18 @@ def slot_actions(
     # `getMoveRequestData` sets `trapped = true` for any `getLockedMove()`, after the
     # TrapPokemon event, so neither Shed Shell nor a Ghost type escapes it, and offers the
     # one move with no Mega (`if (!lockedMove) { if (this.canMegaEvo) ... }`). Showdown
-    # then fires at the stored target whatever the choice says; the stored target is not
-    # in the position, so each legal target stays on offer, as it did for Showdown's own
-    # positions before this.
+    # then fires at the stored target whatever the choice says, and refuses a choice that
+    # names one: the request's entry has no `target` (IKA-176). The charge stores it as
+    # `twoturnmove`'s `targetLoc`, which the queue reads (`speed.build_queue`), so the
+    # menu is the one choice with no target. A marker without it -- a record from before
+    # IKA-176 -- keeps one choice per target, as before.
     locked = locked_move(reg, mon)
     if locked is not None:
         index = next((i for i, m in enumerate(mon.moves, start=1) if m.id == locked), None)
         if index is not None:
+            charging = mon.volatile("twoturnmove")
+            if charging is not None and charging.move == locked and charge_target(mon) is not None:
+                return [MoveAction(slot=slot, move_index=index, move_id=locked, target=None)]
             return [
                 MoveAction(slot=slot, move_index=index, move_id=locked, target=target)
                 for target in _targets_for(reg, locked, slot, foe, active_per_side)
@@ -506,6 +533,20 @@ def locked_move(reg: Regulation, mon) -> str | None:  # noqa: ANN001
             if last is not None and "charge" in last.flags:
                 return last.id
     return None
+
+
+def charge_target(mon) -> int | None:  # noqa: ANN001
+    """The Showdown target loc a charging move stored on its first turn (IKA-176).
+
+    Showdown keeps it on the move's own volatile (`volatiles[move].targetLoc`); the
+    position carries it on `twoturnmove` instead, as `extra.targetLoc`, since that is the
+    volatile both resolvers model. 0 and a missing value are "none".
+    """
+    charging = mon.volatile("twoturnmove")
+    if charging is None or not charging.move:
+        return None
+    loc = charging.extra.get("targetLoc") if charging.extra else None
+    return loc if isinstance(loc, int) and not isinstance(loc, bool) and loc != 0 else None
 
 
 def _is_trapped(reg: Regulation, pos: Position, side_index: int, mon) -> bool:  # noqa: ANN001

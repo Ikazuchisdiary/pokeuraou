@@ -46,7 +46,7 @@ from dataclasses import dataclass, field, replace
 
 import numpy as np
 
-from .actions import PassAction, SideAction, SwitchAction
+from .actions import PassAction, SideAction, SwitchAction, charge_target
 from .battler import Battler, FieldState
 from .fixedpoint import Chain
 from .position import Position
@@ -440,12 +440,18 @@ def build_queue(
             # the choice instead means resolving a move that never happens and skipping
             # one that does.
             move_id = slot_action.move_id
+            target = slot_action.target
             charging = next(
                 (v for v in pos.sides[side_index].pokemon[party].volatiles if v.id == "twoturnmove"),
                 None,
             )
             if charging is not None and charging.move:
                 move_id = charging.move
+                # ...at the target it chose on the first turn (IKA-176), which the menu no
+                # longer carries: Showdown refuses a target on this turn.
+                stored = charge_target(pos.sides[side_index].pokemon[party])
+                if stored is not None:
+                    target = stored
 
             base.append(
                 (
@@ -458,7 +464,7 @@ def build_queue(
                         fractional=0.0,
                         speed=speed,
                         move_id=move_id,
-                        target=slot_action.target,
+                        target=target,
                     ),
                     fractional_priority(reg, move_id, mon),
                 )

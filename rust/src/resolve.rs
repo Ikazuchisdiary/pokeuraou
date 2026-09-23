@@ -1185,6 +1185,7 @@ fn build_queue(
                         ));
                     }
                     let mut chosen = *move_id;
+                    let mut aimed = *target;
                     if let Some(charging) = mon.volatile("twoturnmove") {
                         if let Some(stored) = charging.move_id {
                             // A Pokemon part-way through a charging move is locked into
@@ -1193,6 +1194,16 @@ fn build_queue(
                             // supported.
                             check_move_supported(reg, stored.as_str())?;
                             chosen = stored;
+                            // ...at the target it chose on the first turn (IKA-176), which
+                            // the menu no longer carries.
+                            if let Some(loc) = charging
+                                .extra
+                                .get("targetLoc")
+                                .and_then(Value::as_i64)
+                                .filter(|t| *t != 0)
+                            {
+                                aimed = Some(loc);
+                            }
                         }
                     }
                     base.push((
@@ -1205,7 +1216,7 @@ fn build_queue(
                             fractional: 0.0,
                             speed,
                             move_id: Some(chosen),
-                            target: *target,
+                            target: aimed,
                             switch_to: None,
                             switch_species: None,
                             branch_probability: 1.0,
