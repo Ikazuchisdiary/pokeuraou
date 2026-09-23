@@ -3074,3 +3074,8 @@ fn synchronize(turn: &mut Turn, holder: Slot, source: Slot, status: &str) -> Res
     }
     apply_status_from(turn, source, status, holder).map(|_| ())
 }
+
+// IKA-211: the node commands for what only Python's resolver answered. A child module,
+// so the pause's writer reaches `Turn` without widening anything here.
+#[path = "commands.rs"]
+pub mod commands;

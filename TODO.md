@@ -14663,6 +14663,95 @@ port の `resolve` は既に `select` で 1 本の局面を返せるので、口
 
 なし（grep・git log・既存の記録の読み）。
 
+
+## 9/24 — IKA-211: port に途中交代の続き・交代の段・先発・全分岐の命令を足した。pause は JSON で process の外へ出し、乱数は「重みを返して引いてから頼む」。記録 M-C・M-B の 1,187 標本（抜いた 1,191 のうち、今の規則で pause しない 4 を除く）で Python と全件一致、Showdown とも一致
+
+段 3（親 IKA-204 §6）。呼び出し元（selfplay・search・beliefnode）はまだ Python のまま。rustnode に口（メソッド）だけ足し、本番の経路には繋いでいない（段 4 = IKA-209）。
+
+### 1. 最初の決定: 途中交代の続きは process の外に出す
+
+`Suspended`（`Turn` と残りの行動の列）を JSON に書いて Python に渡し、再開のときに受け取って読み戻す。id で process の中に持つ形は採らなかった。理由:
+
+* node は要求の間に状態を持たない。`rustnode.disable` は失敗に新しい process で答える（`RESTARTS_ALLOWED` の説明のとおり、作り直しても失うものがない）が、pause を中に持つとその前提が崩れ、作り直しの時に続きが消える
+* `paused_in`（隠れた控えの完成形で pause を作り直す、IKA-120）が「位置の差し替え」で済む。id 方式だと完成形ごとに別の命令か複製が要る
+* 1 つの pause は候補の数だけ再開され、入れ子にもなる。id の寿命（いつ捨てるか）を決めずに済む
+* 既存の `resolve` の `select` も「もう一度解く」無状態の形で、それと揃う
+
+大きさは M-C の 30 個の pause で継続部分の中央値 1.0 KB（最大 1.5 KB）、横に付く位置が 8.2 KB。`f64`（確率・fractional・追加効果の確率）はビット列（16 進）で運ぶので、読み戻した turn は最後のビットまで同じ。書き手は `Turn`・`QueuedAction`・`Budget` を網羅的に分解している（`let Turn { .. } = turn` に `..` が無い）ので、`Turn` に項目が足されると compile が落ちる（黙って落とされることはない）。`draws` と `rolls_stratified` は 1 つの行動の中でだけ立つので、pause に立っていたら拒否する。
+
+乱数の順は生成と同じ「引いてから頼む」: `turn` の `select` は分岐と pause を通した番号（Python の `_advance` と同じ並び）。交代の段と先発の中の draw（トレースの相手）は、rustnode が `presets` を送り、port がそれを再生して、その先の最初の draw の重みを返す。rustnode は Python の `_draw` と同じ `rng.choice(len(w), p=[w/total])` で引いて頼み直す。seed を 3 つ変えて、生成器の状態（`bit_generator.state`）まで Python と同じになることを確かめた（§3）。
+
+### 2. 足した命令（`rust/src/commands.rs`。resolve の子 module）
+
+| kind | Python の関数 | 中身 |
+|---|---|---|
+| `turn` | `resolve_turn`・`resume_turn` | 局面と両方の行動から、または `pause` と両方の交代（`choices`）から。`full` で全分岐と全 pause（位置つき）、`select` で 1 本（pause なら `pause`） |
+| `alternatives` | `resume_alternatives`（と `paused_in`） | 選ぶ側、各 option、各 option の再開後の turn。`in: {position, side}` で完成形に作り直してから |
+| `replacements` | `resolve_replacements` | 全員を置いてから速い順に switch-in、`settle_outcome` と trapped の消去 |
+| `leads` | `apply_lead_abilities` | 先発を速い順に switch-in |
+| `needed` | `replacements_needed` | 局面だけから |
+
+(4) の「全分岐を返す resolve」は `turn` の `full` で、深さ 2（`search._refined_value`）に要るのは全分岐の位置と確率と pause の有無なので足りる。
+
+既存行の変更: `resolve.rs` は末尾に 4 行（`#[path = "commands.rs"] pub mod commands;`）、`node.rs` の `answer` に 3 行、`Cargo.toml` に feature 1 つ（`ika211-control`、正の対照用）。子 module なので `Turn`・`Draws`・`replacement_options`・`do_switch_with`・`on_switch_in` を公開範囲を広げずに使える（IKA-208 との衝突を避けるため）。
+
+rustnode: `RustNode.turn` / `resume` / `resume_alternatives` / `resolve_replacements` / `apply_lead_abilities` / `replacements_needed`、返り値は `PortTurn`・`PortPause`（`raw` をそのまま返せば再開できる）・`PortBranch`・`PortPhase`。
+
+port の交代の段は、move を渡されたら拒否する（Python は repr を注記に書いて続けるが、合法手からは来ない）。局面の入口の確かめ（`check_position_supported`）は `resolve_turn` と同じものを通す。
+
+### 3. Python との一致（`tools/diff_commands.py`）
+
+命令が実際に起きる局面だけを記録から抜く: pause は「selfswitch 決定の直前の move 決定」のターン、交代は replacement 決定、先発は各局の開局（`position_from_sets` を lead の段なしで作り直す）。Python は標本ごとに 1 回解き、`--exes` の各 exe と比べる。比べ方は diff_node と同じ（位置の `to_json` 全体・確率・注記・exact を順に）。pause のターンは `Budget.exact()` で全分岐と全 pause を比べ、そのうち 3 個（記録の pause・最尤・先頭）で全 option を再開して比べ、入れ子の pause も 1 段下まで、記録の交代は `turn`（pause から）でも再開、`select` が full の同じ番号の pause／分岐を返すことも確かめる。交代と先発は rng 無しと seed 0・1・2。
+
+```
+                     標本   port（この枝）   壊した build   master の exe
+  M-C g600  pause     187    187 一致         90 差          187 失敗（命令が無い）
+            交代      200    200 一致          7 差          200 失敗
+            先発      200    200 一致         27 差          200 失敗
+  M-B w12   pause     200    200 一致        116 差          200 失敗
+            交代      200    200 一致          5 差          200 失敗
+            先発      200    200 一致          0 差（下記）   200 失敗
+```
+
+M-C の pause で比べた数: 分岐 41,096・pause 25,626・再開した turn 855・alternatives 498・記録の交代の再開 434、確率 66,722 個がすべてビット一致（1e-12 に逃げたものは 0）。M-B は分岐 26,480・pause 16,165・確率 42,645 個がビット一致。M-C の pause 4 件は、今の規則ではそのターンが pause しない（記録より後の規則の変更）ので飛ばした。
+
+**M-B の先発は証拠が弱い。** 壊した build でも 200/200 一致した＝M-B の 200 局の開局には、トレースも、switch-in の順で答えが変わる組も出なかった（「一致」は効果が起きなかっただけ）。M-C では先発の draw が 25 局・順序の効く組が 2 局あり、壊した build はそこで落ちる。補いに Showdown のテスト（`test_the_port_runs_the_leads_fastest_first`: 遅いひでり対速いあめふらし、速い順なら晴れ）を足し、壊した build で落ちることを見た。
+
+先発の標本で、今の Python の lead の段が記録の turn 1 の位置と一致したのは M-C 99/200・M-B 199/200。M-C の差はトレース（IKA-203）とサーフ系の開局の地形で、記録（g600）がそれらより前の engine で作られたため。port と Python の比べには関係しない。
+
+null 対照: M-C 200 件を `--jobs 1` と `--jobs 8` で走らせ、集計（時間を除く）が完全に一致。壁時計は 121 s と 32 s（3 exe、Python は 1 回）。
+
+### 4. Showdown との一致（`tests/test_port_commands.py`、6 件）
+
+* U ターン→トレースのサーナイト: pause と、そこからの再開が `sample` first・last の Showdown の 2 局面にそれぞれ 1/2 ずつ。`select` が full と同じ pause（raw まで同じ）と同じ分岐を返す。Python の `resume_turn` と位置が一致。固定の budget では first と注記
+* 2 体のだいばくはつの後の交代: 両方のいかくが、両方を置いた後に出る（Showdown の攻撃ランク）
+* 先発のトレース: rng 無しは first と注記、seed 12 個で Showdown の 2 局面が両方出て、Python と位置も生成器の状態も一致
+* 先発の順（上記）
+* `paused_in`: 相手の控え（キングギル）を HP 半分・たべのこしにした完成形で、全 option の再開が Python の `paused_in` + `resume_alternatives` と位置・確率まで一致し、完成形が使われている（全葉にたべのこし）
+
+正の対照: 壊した build（`--features ika211-control`: 再開した pause の残りの列の最後の行動を落とす、交代の switch-in を置いた順にすぐ走らせる、先発は速さで並べない、再生の draw を全部最初の選択肢で答える）で 6 件中 5 件が落ちる。落ちないのは固定 budget の pause の件（落とされる行動が守るで、板に出ない）。master の exe（命令が無い）では 6 件すべて落ちる。
+
+### 5. 別課題の候補
+
+* **(5) イベントと acts は IKA-215 に切った**（調整役、9/24）。足し方の見立て:
+  * port の `Turn` に `events: Vec<String>` と `acts: Vec<(usize, String)>` を足す。`commands.rs` の書き手は `Turn` を網羅的に分解しているので、足すと compile が落ちて pause の JSON にも足すことになる（読み戻しにも）
+  * `acts` の区切りは Python では 2 か所だけ: `_run_queue` の各 variant の `execute` の直前（`base.begin(variant.label(reg))`、resolve.py 1497 行）と `_residuals` の頭（`turn.begin(RESIDUAL_PHASE)`、6653 行）。port では `run_queue` の `execute(reg, base, variant, step_budget)` の直前（2 か所、variant が 1 つのときと複数のとき）と `moves.rs` の `residuals` の頭。label は Python の `QueuedAction.label` を写す（port には無い）
+  * 行（`turn.log`）は resolve.py に 100 か所。port の `resolve.rs`・`moves.rs` の対応する場所に 1 行ずつ足すことになり、既存行の間に 100 か所近く入る。IKA-208 が同じ関数を触っている間は衝突するので、その後に
+  * `Branch`・`Suspended` に events/acts を持たせ、`commands.rs` の `result_json` と `pause_json` に `events: true` の時だけ載せる（読み物の道具だけが欲しがり、生成には要らない）。交代の段と先発は `phase_command` の `state` から
+  * 確かめ方: `tools/show_game.py` の `turn_events` を port の `turn`／`alternatives` に向け、同じ記録で読み物が行単位で同じになること。`test_event_grouping`・`test_resumed_turn_log` が今の断言
+* `tools/diff_commands.py` の pause の比べは `Budget.exact()` だけ。行列の budget（`Budget.matrix()`）の pause は `fill` の中の `turn_value` が既に使っていて diff_node が見ているが、`alternatives` の命令としては exact でしか比べていない。IKA-209 で self-switch の選択を port に寄せる時に `--budget` を足す
+* `paused_in` の「残りの列の交代を席で付け替える」部分は、途中の pause の後に交代が残る局面が無いため（交代は技より先に済む）、記録でもテストでも一度も働いていない。Python と同じ書き方に写しただけで、試されていない
+
+### 6. 機械
+
+```
+  cargo build --release（本体・壊した build、各 22〜30 s）          8 コア   約 2.5 分（4 回、うち IKA-206・208 の待ち 2 分）
+  diff_commands M-C 60 ×3 exe  jobs 1 / jobs 8                       1 / 8    46 s / 11 s
+  diff_commands M-C 200 ×3 exe jobs 8、jobs 1（null 対照）            8 / 1    32 s / 121 s
+  diff_commands M-B 200 ×2・×3 exe jobs 8                             8        22 s / 23 s
+  テスト（test_port_commands・test_rust_node・test_trace_synchronize・test_line_endings）  1 コア  13 s ほか数回
+```
+
 ## 9/24 — IKA-207: Showdown → port の鎖を作った —— diff_turn・diverge_report に port の列、オラクルのテスト 21 ファイルに port 側の断言 35 本。同じ種・同じ局数で port の乖離は Python より多くない（Python が合って port だけ外れるターンは 0）
 
 親 IKA-204 の段 1。port の規則は直していない（触ったのは tools/ と tests/ だけ）。
@@ -14747,3 +14836,87 @@ diverge_report（20 種 × 20 局）: Python 2,709 ターン中 silent 85（3.14
 ### 6. 機械
 
 heavy.py の記録（IKA-207）: cargo build --release 2 回（今の worktree 24 s・3d9dbc5 23 s、--cores 8）。1 コアの実行 34 回・計 209 s（diff_turn 400 局 × 9 回 各 10〜14 s、diverge_report 3 回、テストファイル 14 回）。
+
+## 9/24 — IKA-206: diff_node を速くする —— `--jobs N`（局面ごとにワーカー）・`--exes old,new`（Python 側は 1 回だけ解く）・`--python-cache DIR`。w12 `--veils` 100 局面で 1 コア 561 秒 → `--jobs 8` 105 秒（5.4 倍）、新旧 2 本を並べて 1,121 秒相当 → 132 秒（8.5 倍）、キャッシュが当たれば 58 秒。集計はどれも `--jobs 1` とバイト単位で同じ（時間の 2 行を除く）
+
+### 1. 何を変えたか（tools/diff_node.py だけ）
+
+* 局面ごとの本体を `examine(pos, extras, c)` に切り出し、数えは局面ごとの `Tally` に持たせて親が局面の順に足す。
+  最大値（`*worst*`）は max、Counter と特性ごとの dict はキーごとに足す。途中の行も `Tally` に貯めて局面順に出し、
+  「最初の 5 つだけ」の行（`shown < 5`）は親が全体で数える。だから `--jobs` を変えても出力の順と中身は変わらない
+* `--jobs N`: `multiprocessing` の spawn で N 本。親が局面を作り（読み込み・`--give` 等の書き換え・`--eject` の配り方などの
+  局面ごとの付帯情報まで）、局面を pickle で渡す。子はスクリプトの先頭の `sys.path.insert(<checkout>/src)` で同じ checkout の
+  src を読み、同じ引数から regulation・葉・budget を作り直す。exe は子が `POKEURAOU_RUST_NODE_BIN` から開く
+* `--exes old=A,new`（`--exe A` は 1 本）: 局面ごとに、橋を切った Python の埋め（`batched_payoffs`）と、各モードの `here`・
+  対照（`unchanged`・`unveiled(v)`・`unsubbed("use")` …）の `resolve_turn` を 1 回だけ解いて覚え（`turn(c, memo, key, …)`）、
+  exe ごとに橋を入れた埋めと `branch_differences` だけをやり直す。`here` は Python の埋めが同じ呼び出しで解いたものを拾う
+  （従来は同じセルを埋めで 1 回・`here` で 1 回解いていた）。`outcome()`（分岐の局面の JSON 化）も局面の中で覚える。
+  出力は exe ごとに今と同じ形の塊（`== binary [k] of n: path ==` の見出しの後）、最後に要約の行が違うところだけ並べる表
+* `--python-cache DIR`: 局面ごとの Python 側（埋めの行列・注記・exact・覚えた turn 全部）を zlib + pickle で 1 局面 1 ファイル
+  （w12 は 1 局面 0.3 MB、100 局面 31 MB）。鍵は src/pokeuraou の全 .py・tools/diff_node.py・configs/regulations の中身の
+  sha256、`--value` のモデルの中身、局面の JSON、付帯情報、局面の選び方以外の引数。規則を直せばどれかの中身が変わって全部外れる
+* 既存の引数・出力の形は変えていない（`--exe` 無しは今までどおり環境の `POKEURAOU_RUST_NODE_BIN` か既定の exe）
+
+### 2. null 対照（すべて時間の 2 行「python … rust …」「end to end」以外が一致）
+
+| 比べたもの | 局面 | 結果 |
+|---|---|---|
+| master の diff_node（1 コア）と新 `--jobs 8`・`--jobs 1` | w12 `--veils` 100 | 3 本ともバイト単位で一致 |
+| `--exes new,new` の 2 列 | 同 | 2 塊が一致、並べる表は「none」、`--exe` 単独の塊とも一致 |
+| master × 旧 exe（IKA-202 の old.exe）と `--exes old,new` の old 列 | 同 | 一致（途中の 5 行・差 8.935e-02・1,036 セル違い・exact 6 セルまで） |
+| master と `--jobs 3`（旧 exe で途中の行が出る） | w12 `--substitute --confusion-guard --hazards --salt-cure` 6、`--give quickclaw --hammer --charging --eject` 8 | 一致 |
+| master と `--jobs 3`・`--exes new,new` | scenario-turn5 `--budget fast --limit 0`（1 局面、Python 側だけ） | 一致 |
+| master と `--jobs 2` | `--value value-td05.pt` 3、`--holding sitrusberry,focussash` 4（`--exes new,new`） | 一致 |
+| キャッシュ無し・あり（初回・2 回目） | w12 `--veils` 100（新旧 2 本も） | 一致。2 回目は 100 / 100 局面読み戻し |
+
+正の対照: `--exes old,new` の old 列は FAIL（GaG 755・FV 281 セル違い）、new 列は OK。キャッシュは diff_node.py を 1 行直した
+後の実行で 0 / 4 局面しか当たらず（鍵に tool の中身が入っている）、resolve.py の写しに 1 行足すと指紋が変わることも確かめた。
+
+### 3. 壁時計（w12 `--veils` 100 局面、51,888 セル。heavy.py IKA-206 --cores 8 の窓 08:00:25〜08:18:07 に続けて）
+
+| 実行 | 秒 | 倍率 |
+|---|---|---|
+| master の diff_node（1 コア、新 exe） | 560.6 | 1 |
+| `--jobs 8` | 104.6 | 5.4 |
+| `--jobs 8 --exes old,new`（旧来は 1 コア 2 本） | 132.3 | 8.5（1,121 秒相当に対し） |
+| `--jobs 8 --python-cache`（初回、書き込みあり） | 111.1 | 5.0 |
+| `--jobs 8 --python-cache`（2 回目） | 58.0 | 9.7 |
+| `--jobs 8 --python-cache --exes old,new`（2 回目） | 82.2 | 13.6（1,121 秒相当に対し） |
+
+各実行の前後で python・cargo を見た（C:/tmp/ika206/runs.log）: 走っていたのは heavy.py の順番待ち（IKA-208・coord の
+cargo、錠を待つだけ）で、負荷は前後 10〜35%。同じ組を 07:41〜07:47 に回したときも 99・122・128 秒で、master の 1 コアは
+687・626・515 秒（他の担当の job と重なった時間帯）。`--jobs 8` の 105 秒のうち約 30 秒は親が w12 の 44,000 局を読んで
+局面を選ぶ時間（並列にならない）で、キャッシュが当たった 58 秒の大半もそれ。
+
+### 4. 使い方
+
+```
+python C:/tmp/pokeuraou-machine/heavy.py --agent IKA-NNN --cores 8 --why "..." -- \
+    python tools/diff_node.py --games-dir data/ika73/w12 --veils --nodes 100 --jobs 8 \
+    --exes old=C:/tmp/ikaNNN/old.exe,new
+```
+
+* `--exes` の 1 項は `パス`・`名前=パス`・素の `new`/`current`（この checkout の rust/target/release、古いビルドの検査つき）。
+  IKA-207 の `tools/diff_turn.py --exes` と同じ読み方
+
+* 規則を直したら、直す前の exe（正の対照）と直した exe を `--exes` で 1 回に。Python 側は 1 回で済む
+* `--jobs N` は heavy.py の `--cores N` と同じ数に。子 1 本が 1 コア（torch も 1 スレッド）
+* `--python-cache C:/tmp/ikaNNN/pycache` は Rust だけ直し続けるとき（Python を触らない間は 2 回目から Python 側がほぼ 0）。
+  Python か diff_node を直せば自動で外れる。読み戻した数は stderr に 1 行
+* `--exes` の出力は exe ごとの塊と、最後の「side by side」の表（違う行だけ、直前の同じ行を見出しに）
+
+### 5. 別課題の候補
+
+* 局面の読み込み（`recorded_positions`、w12 で約 30 秒）が並列にならず、`--jobs 8` の 3 割を占める。ファイルごとに分けて
+  読むか、選んだ局面の JSON を C:/tmp に残して 2 回目から読まないようにできる
+* `diff_turn`（IKA-207 の `--exes`）と `diff_node` の `--exes` は項の読み方を揃えたが、出力の形（diff_turn は列、diff_node は
+  exe ごとの塊と違う行の表）は別々。並べて読む道具が要るなら揃える
+* `tests/` に diff_node の null 対照（`--jobs 1`/`--jobs 2`、`--exes A,A`）を小さな局面で持つテストは無い（今回は手で回した）。
+  1〜2 局面・`--limit 4` 程度で数秒のテストにできる
+
+### 6. 機械
+
+cargo release 1 回（8 コア 24 秒）、diff_node: 煙 4 局面 ×4（2 コア 262 秒）・×2（2 コア 112 秒）、プロファイル 1 回（1 コア）、
+100 局面 `--jobs 8` ×3（8 コア 349 秒）、100 局面 1 コア ×3（master 687 秒・新 `--jobs 1` 515 秒・master × 旧 exe 626 秒）、
+モード別の対照（3 コア 489 秒・33 秒）、時間の組 6 本（8 コア 1,062 秒）、`--value`・`--holding`・キャッシュの対照（2 コア 351 秒）、
+メモリ・キャッシュの大きさの見積もり（1 コア 33・34 秒）。すべて heavy.py（--agent IKA-206）。
