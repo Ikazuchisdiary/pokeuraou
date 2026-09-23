@@ -323,6 +323,32 @@ def test_the_port_runs_the_leads_as_showdown_does(reg, oracle: Oracle, node) -> 
     assert seen == {boards["first"], boards["last"]}
 
 
+@pytest.mark.oracle
+def test_the_port_runs_the_leads_fastest_first(reg, oracle: Oracle, node) -> None:  # noqa: ANN001
+    """A slow Drought lead against a fast Drizzle one: the faster sets rain and the slower
+    replaces it with sun, so the order the port runs the leads in is the whole answer."""
+    ours = [TORK, WHIM, KING, CHOMP]
+    theirs = [
+        _mon("Pelipper", "Drizzle", ["scald", "protect", "hurricane", "tailwind"], FAST),
+        INCIN, KING, CHOMP,
+    ]
+    handle = oracle.create(FORMAT_ID, ours, theirs, policy=RandomnessPolicy())
+    handle.step(["team 1234", "team 1234"])
+    showdown = _unstat(Position.from_json(handle.position))
+    handle.close()
+    assert showdown.field.weather == "sunnyday", showdown.field.weather
+    fresh = showdown.copy()
+    fresh.field.weather = None
+    fresh.field.weather_duration = None
+    for side in fresh.sides:
+        for mon in side.pokemon:
+            mon.boosts = {}
+    phase = node.apply_lead_abilities(fresh)
+    assert phase is not None, "the port refused the leads"
+    assert _board(phase.position) == _board(showdown)
+    assert phase.position.to_json() == apply_lead_abilities(reg, fresh).position.to_json()
+
+
 # ---------------------------------------------------------------------------
 # `paused_in`: the pause resumed in another completion of the hidden bench
 # ---------------------------------------------------------------------------
