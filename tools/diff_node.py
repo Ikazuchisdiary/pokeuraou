@@ -40,6 +40,8 @@ them before -- and the cells where the move's effect *fired* are counted apart: 
 `breaksProtect` move (IKA-61), the same turn resolved in Python
 with `_break_protection` taken out. A Feint into a foe that did not Protect agrees
 without the break ever running, and that is not evidence the break is right (IKA-58).
+`--using doubleshock` (or `burnup`) takes the other kind of move it knows, one that spends
+its user's type (IKA-162); its control is the turn with `TYPE_SPENDING_MOVES` emptied.
 
 `--using` also takes a [2, 5] multi-hit move (IKA-160):
 
@@ -135,6 +137,7 @@ from pokeuraou.position import Effect, MoveSlot, Position  # noqa: E402
 from pokeuraou.priors import find_cached_chaos, load_chaos  # noqa: E402
 from pokeuraou.resolve import (  # noqa: E402
     PRIORITY_BLOCKING_ABILITIES,
+    TYPE_SPENDING_MOVES,
     Budget,
     batched_payoffs,
     resolve_turn,
@@ -278,6 +281,26 @@ class old_hit_counts:  # noqa: N801 - read as a phrase at the call site
         resolve_mod.multihit_counts = self.real
 
 
+class unspent:  # noqa: N801 - read as a phrase at the call site
+    """Python with `TYPE_SPENDING_MOVES` emptied: the control for Double Shock and Burn Up.
+
+    The move is then an ordinary attack -- it neither fails for want of the type nor spends
+    it -- so what differs is only what the rule did (IKA-162). A switch out and a faint still
+    put the species' types back; with nothing spent, that writes what was already there.
+    """
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = resolve_mod.TYPE_SPENDING_MOVES
+        resolve_mod.TYPE_SPENDING_MOVES = {}
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        resolve_mod.TYPE_SPENDING_MOVES = self.real
+
+
 class unchanged:  # noqa: N801 - read as a phrase at the call site
     """The control for `--using`: each kind of move named has its effect taken out."""
 
@@ -287,6 +310,8 @@ class unchanged:  # noqa: N801 - read as a phrase at the call site
             self.parts.append(unbroken())
         if any(isinstance(reg.moves[m].raw.get("multihit"), list) for m in moves):
             self.parts.append(old_hit_counts())
+        if any(m in TYPE_SPENDING_MOVES for m in moves):
+            self.parts.append(unspent())
 
     def __enter__(self) -> None:
         for part in self.parts:
@@ -780,10 +805,13 @@ def main() -> None:
     for move_id in sorted(using):
         move = reg.moves.get(move_id)
         if move is None or not (
-            move.raw.get("breaksProtect") or isinstance(move.raw.get("multihit"), list)
+            move.raw.get("breaksProtect")
+            or isinstance(move.raw.get("multihit"), list)
+            or move_id in TYPE_SPENDING_MOVES
         ):
             ap.error(
-                f"--using takes breaksProtect or ranged multi-hit moves; {move_id} is neither"
+                f"--using takes breaksProtect, ranged multi-hit or type-spending moves "
+                f"({sorted(TYPE_SPENDING_MOVES)}); {move_id} is none of them"
             )
 
     if args.value:
