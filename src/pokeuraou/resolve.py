@@ -4075,13 +4075,69 @@ def batched_payoffs(
     payoffs = [np.zeros((len(ours), len(theirs)), dtype=np.float64) for _ in evaluators]
     exact = np.zeros((len(ours), len(theirs)), dtype=bool)
     unmodelled: set[str] = set()
-    leaves: list[Position] = []
-    weights: list[np.ndarray] = []
-    spans: list[tuple[int, int, int, int]] = []
-    folded: list[tuple[int, int, Fold]] = []
+    held = HeldLeaves()
 
-    def fill_cell(i: int, j: int) -> None:
+    def score_held() -> None:
+        """Score the leaves held right now, write their cells, and let them go.
+
+        Every index in `spans` and every `LeafRef` in `folded` is relative to the start of
+        the list as it stands, which is what makes releasing it possible: a cell is scored
+        by the chunk that holds it and nothing refers back across a boundary.
+        """
+        leaves = held.leaves
+        # Which of the two fills this is, so the rows can be told apart from the calls.
+        timing.count("leaves.refused" if _FILLING_REFUSED else "leaves.node", len(leaves))
+        for payoff, evaluate in zip(payoffs, evaluators, strict=True):
+            values = (
+                np.asarray(evaluate(leaves), dtype=np.float64) if leaves else np.zeros(0)
+            )
+            held.write(values, payoff)
+        held.clear()
+
+    wanted = (
+        [(i, j) for i in range(len(ours)) for j in range(len(theirs))]
+        if cells is None
+        else [(i, j) for i, j in cells if i < len(ours) and j < len(theirs)]
+    )
+    for i, j in wanted:
+        held.resolve_cell(reg, pos, ours, theirs, i, j, budget, exact, unmodelled)
+        # On a cell boundary and not inside one: a cell's leaves are contiguous, and a
+        # fold that reached across a chunk would have to be scored from two arrays.
+        if LEAF_CHUNK and len(held.leaves) >= LEAF_CHUNK:
+            score_held()
+    score_held()
+    return payoffs, unmodelled, exact
+
+
+@dataclass
+class HeldLeaves:
+    """Cells resolved here in Python, their leaves held until someone scores them.
+
+    `batched_payoffs` scores them itself, a chunk at a time. `beliefnode.belief_payoffs`
+    holds a node's worth per completion and scores them inside one batch with everything
+    else that node needs (IKA-105) -- which is why resolving a cell and writing it back
+    are apart from scoring it: the fold is written here once, whoever holds the values.
+    """
+
+    leaves: list[Position] = field(default_factory=list)
+    weights: list[np.ndarray] = field(default_factory=list)
+    spans: list[tuple[int, int, int, int]] = field(default_factory=list)
+    folded: list[tuple[int, int, Fold]] = field(default_factory=list)
+
+    def resolve_cell(
+        self,
+        reg: Regulation,
+        pos: Position,
+        ours: Sequence[SideAction],
+        theirs: Sequence[SideAction],
+        i: int,
+        j: int,
+        budget: Budget,
+        exact: np.ndarray,
+        unmodelled: set[str],
+    ) -> None:
         """Resolve one cell and add its leaves to the ones being held."""
+        leaves, spans, weights = self.leaves, self.spans, self.weights
         a, b = ours[i], theirs[j]
         result = resolve_turn(reg, pos, [a, b], budget=budget)
         exact[i, j] = result.exact
@@ -4089,7 +4145,7 @@ def batched_payoffs(
             plan = turn_leaves(reg, result)
             unmodelled.update(plan.unmodelled)
             if plan.positions:
-                folded.append((i, j, plan.shifted(len(leaves))))
+                self.folded.append((i, j, plan.shifted(len(leaves))))
                 leaves.extend(plan.positions)
             return
         unmodelled.update(result.unmodelled)
@@ -4105,42 +4161,19 @@ def batched_payoffs(
         )
         spans.append((i, j, start, len(result.branches)))
 
-    def score_held() -> None:
-        """Score the leaves held right now, write their cells, and let them go.
+    def write(self, values: np.ndarray, payoff: np.ndarray) -> None:
+        """Every held cell into `payoff`, from one value per held leaf in held order."""
+        for (i, j, start, count), w in zip(self.spans, self.weights, strict=True):
+            if count:
+                payoff[i, j] = float(values[start : start + count] @ w)
+        for i, j, root in self.folded:
+            payoff[i, j] = fold_value(root, values)
 
-        Every index in `spans` and every `LeafRef` in `folded` is relative to the start of
-        the list as it stands, which is what makes releasing it possible: a cell is scored
-        by the chunk that holds it and nothing refers back across a boundary.
-        """
-        # Which of the two fills this is, so the rows can be told apart from the calls.
-        timing.count("leaves.refused" if _FILLING_REFUSED else "leaves.node", len(leaves))
-        for payoff, evaluate in zip(payoffs, evaluators, strict=True):
-            values = (
-                np.asarray(evaluate(leaves), dtype=np.float64) if leaves else np.zeros(0)
-            )
-            for (i, j, start, count), w in zip(spans, weights, strict=True):
-                if count:
-                    payoff[i, j] = float(values[start : start + count] @ w)
-            for i, j, root in folded:
-                payoff[i, j] = fold_value(root, values)
-        leaves.clear()
-        weights.clear()
-        spans.clear()
-        folded.clear()
-
-    wanted = (
-        [(i, j) for i in range(len(ours)) for j in range(len(theirs))]
-        if cells is None
-        else [(i, j) for i, j in cells if i < len(ours) and j < len(theirs)]
-    )
-    for i, j in wanted:
-        fill_cell(i, j)
-        # On a cell boundary and not inside one: a cell's leaves are contiguous, and a
-        # fold that reached across a chunk would have to be scored from two arrays.
-        if LEAF_CHUNK and len(leaves) >= LEAF_CHUNK:
-            score_held()
-    score_held()
-    return payoffs, unmodelled, exact
+    def clear(self) -> None:
+        self.leaves.clear()
+        self.weights.clear()
+        self.spans.clear()
+        self.folded.clear()
 
 
 def _objective_names(evaluators: Sequence[Callable]) -> list[str] | None:
