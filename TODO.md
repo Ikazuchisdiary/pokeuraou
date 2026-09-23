@@ -12130,3 +12130,11 @@ heavy を通さず直接走らせた。
 `tools/diff_node.py` の衝突は master 側を取り、`--using` の吸収技・判定される変化技と `--frozen` を足し直した（`unsung` と
 並べて `undrained`・`unjudged`）。関係テスト 21 ファイル 382 件（1 件は IKA-158 の xfail）1 コア 37 秒、
 `port_coverage --check`・`port_gate_audit --check`・ruff ok。
+
+### 9. 着地で落ちた tests/test_symmetry.py::test_a_poison_type_never_misses_toxic
+
+対象が相手側のドヒドイデ（どくタイプ）で、当たったどくどくも外れたどくどくも「失敗」の同じ局面になり、
+merge_duplicates で外れの枝が当たりの枝に畳まれていた。Showdown（a5df827）の順序は命中が先: 非どくタイプの
+ミロカロスからドヒドイデへのどくどくで、policy hit は `-immune`、miss は `|-miss|` を出し、どちらも 90/100 の
+乱数を 1 回引いて moveLastTurnFailed は true（`C:/tmp/ika161/toxic_order.py`）。Python も merge を切ると外れの枝は
+残っている。コードは正しいので、テストの対象の型を Water にした（使い手の型で必中かどうかを見るという意図は同じ）。

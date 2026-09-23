@@ -302,6 +302,13 @@ def test_a_poison_type_never_misses_toxic(roster) -> None:  # noqa: ANN001
         pos = position_from_sets(reg, sets, sets)
         if types is not None:
             pos.sides[0].pokemon[0].types = types
+        # The target is the other side's Toxapex, and a Poison type cannot be poisoned: the
+        # Toxic that hits it fails, and so does the one that misses (Showdown rolls the 90
+        # first, then `trySetStatus` fails), so the two branches are one state and merge --
+        # the miss branch would vanish for a reason that has nothing to do with the user's
+        # typing (IKA-171). A non-Poison target keeps the hit (it is badly poisoned) and
+        # the miss apart.
+        pos.sides[1].pokemon[0].types = ("Water",)
         ours = SideAction(
             slots=(
                 MoveAction(slot=0, move_index=index, move_id="toxic", target=1),
