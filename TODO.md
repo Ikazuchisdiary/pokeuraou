@@ -8686,3 +8686,80 @@ PGO の +5〜15% は**外れ**（damage は遅くなる。学習に damage の�
 1決定あたり（2本で完全に一致）: move.hidden 3,496（passes 17.74、fills@dirty 7.75）、move.exact 2,508（passes 3.02、
 fills@matrix 1.00 ＝ IKA-104 が効いている）、replacement 1,852（5.72）、selfswitch 338、between 600。
 合計 8,194 決定は games ファイルと一致。全表は `timing/out/run98-{1,2}.log`・`p98-{1,2}.json`。
+
+## 9/23 — IKA-146: 一致の検査に budget を選ばせ、分岐を狭める経路を通す —— IKA-140 の1行を戻すと fast の検査が12セルで落ちる
+
+### 答えた問い
+
+`tools/diff_node.py` と `tests/test_rust_node.py` は `Budget.matrix()` だけで回していた。matrix は
+ロールを固定するので `narrowed()` が自分を返し、分岐の予算を狭める経路と、途中交代で止まったターンを
+再開するときの budget を一度も通らない。IKA-140 の1行（`item.turn.budget = step_budget;`）はそこに
+あった。その経路を通す検査を足し、旧の1行で落ちること・今の master で通ることを確かめる。
+
+### 変えたこと
+
+* `tools/diff_node.py`
+  * `--budget matrix|fast|exact`（既定 matrix。今までの呼び方は同じ結果）
+  * `--scenario PATH`: シナリオの局面を、`test_rust_node.py` と同じ作り方（信念層の最頻値の努力値）で1ノードにする
+  * `--limit 0`: 狭めずに合法手の全部（`--scenario` のときだけ許す）
+  * `--tolerance`（既定 1e-6）: セルの差がこれを超えたら**終了コード 1**。今までは表示だけで、落ちたことが
+    状態として残らなかった
+  * 2本目の呼び方を docstring に書いた:
+    `tools/diff_node.py --scenario examples/scenario-turn5.json --budget fast --limit 0`
+    （88×52 = 4,576 セル、Python 約9秒・Rust 0.17秒）
+* `tests/test_rust_node.py::test_a_node_is_the_same_through_the_bridge_under_the_fast_budget`:
+  scenario-turn5 の狭めたメニュー（6×6）に、ガオガエンのすてゼリフが分岐のあとで止める行6本・列2本を
+  足したノード（12×8）を `Budget.fast()` で橋 ON/OFF 比べる。そのセルが「止まる」かつ「狭めた」ことを
+  先に確かめる（効かなくなったら黙って通らないように）。**0.83秒**
+
+### 陽性対照（旧の1行を戻した実験ビルド、`C:/tmp/pokeuraou-machine/ika146/`）
+
+```
+検査                                               master のバイナリ        IKA-140 の1行を戻したバイナリ
+test_..._under_the_fast_budget（12×8, fast）          通る                     落ちる: hp-share 5.29e-4、12セル
+diff_node --scenario turn5 --budget fast --limit 0    OK、最悪 3.3e-16         FAIL rc=1: 最悪 3.57e-2（faints）、
+                                                                               hp-share 5.29e-4 (22,6)
+diff_node --scenario turn5 --budget matrix --limit 0  OK                       OK（matrix は見えない、の対照）
+diff_node --games 2 --nodes 8（今までの既定、matrix）  OK、6129/7584 一致       OK、6129/7584 一致（同上）
+diff_node --scenario turn5 --budget exact --limit 12  —                        OK（下の注）
+test_a_resumed_turn_...（IKA-140 のテスト、Budget()）  通る                     落ちる（IKA-140 の記録どおり）
+```
+
+* 全メニューの fast で旧の1行が動かすセルは **12**（hp-share、最大 5.29e-4）、うち2つは faints も
+  0.0357 動く。すべて行 `move 2 1, move 2 x` / `move 2 2, …` / `move 4 2, …` × 列 `move 1 2, move 1` /
+  `move 3 2, move 1`。テストのノードはこの行・列を足したもので、12セル全部を含む
+* **狭めたメニューでは見えない。** 8×8 と 12×12 の exact、8×8・10×10 の fast は、旧の1行でも差 0
+  （止まるセルは 8×8 に12個あるが、動く12セルはメニューに入らない）。全メニューにする理由はこれ。
+  全メニューの exact は IKA-147 の数 GB なので回していない。exact の1セルは IKA-140 のテストが持つ
+
+### 見つけたこと: fast では exact マスクが Python と Rust で違う（master でも）
+
+`--budget fast` の全メニューで、**4,576 セル中 3,599 セルを Rust は exact、Python は exact でない**と言う。
+Python の `_execute` はロールを層別した（`damage_rolls < 16` かつ固定ロールでない）ダメージ技に
+`"damage rolls stratified"` を付けて `exact = False` にする。Rust の `moves.rs` にはこの減縮が無く、
+狭めた・落とした場合しか exact を下ろさない。matrix ではロール固定なので両方とも付かず、一致する
+（既定の検査の 3,792 セルで差 0）。
+
+* 利得には効かない（フラグだけ）。効くのは橋 ON の `cli analyse` の「exact なセル数」と
+  `node_solver` の `exact`。生成は matrix なので効かない
+* diff_node はこの差を数えて表示する（`cells whose exact flag differs … (exact in the port only: …)`）が、
+  fast/exact では失敗にしない。matrix ではマスクの不一致も失敗にする。テストはマスクを比べない
+* 直すのは別件（起票候補）: Rust の `Turn` に層別の印を持たせるか、`execute` が減縮を返すようにする。
+  再開したターンの exact を Python がどう数えるかも合わせる必要がある
+
+### 確かめたこと
+
+* `test_rust_node.py` 全23本・`test_line_endings`・`test_no_machine_specific_paths` 通過（28本）
+* ruff check 通過（format は両ファイルとも既存のまま未整形）
+* 既定の `diff_node --games 2 --nodes 8` は終了コード 0、表示は前と同じ（`budget matrix` の行と
+  exact フラグの行が増えただけ）
+
+### 測っていないこと
+
+* 記録局面（`--games-dir`）での fast。IKA-140 の数え（40局面で 2/5,126 セル）から、狭めたメニューでは
+  ほとんど当たらないはず
+* exact の全メニュー（IKA-147 のメモリ）
+
+機械: 14:13:52〜14:14:12 ワークツリーの release ビルド（8コア）、14:14:12〜14:14:32 実験ビルド（8コア）、
+14:16:54〜14:17:04 全メニューの fast の差のセル探し（1コア）、14:20:56〜14:21:28 exact 12×12（1コア）、
+14:21:40〜14:22:16 と 14:22:36〜14:23:28 既定の diff_node を両バイナリで（1コア）、ほか各10秒以下（1コア）。

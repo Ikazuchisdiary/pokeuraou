@@ -400,6 +400,56 @@ def test_a_resumed_turn_is_resolved_on_the_turns_own_budget(bridged: None) -> No
         assert gap < 1e-12, f"{objective.name} differs by {gap}"
 
 
+def test_a_node_is_the_same_through_the_bridge_under_the_fast_budget(bridged: None) -> None:
+    """A whole node under `Budget.fast()`, whose branch budget is divided as a turn unfolds.
+
+    `Budget.matrix()` pins the roll and never narrows, so the node test above cannot see
+    the path that narrows or the budget a paused turn resumes on (IKA-146). This node adds
+    to the narrowed menu the rows and columns where Parting Shot pauses a turn after the
+    rolls have already branched: IKA-140's line moved 12 cells of scenario-turn5's whole
+    menu under this budget, and these rows and columns carry all 12 -- cell
+    `move 2 1, move 2 1` / `move 1 2, move 1` by 5.3e-4 in hp-share and 0.036 in faints.
+    """
+    reg, pos, row, col = _node()
+    menu = {0: side_actions(reg, pos, 0), 1: side_actions(reg, pos, 1)}
+
+    def pick(side: int, choices: list[str]) -> list[Any]:
+        return [next(a for a in menu[side] if a.to_choice() == c) for c in choices]
+
+    def joined(narrowed: list[Any], added: list[Any]) -> list[Any]:
+        return list({a.to_choice(): a for a in narrowed + added}.values())
+
+    pausing_rows = ["move 2 1, move 2 1", "move 2 1, move 2 2", "move 2 2, move 2 1"]
+    pausing_rows += ["move 2 2, move 2 2", "move 4 2, move 2 1", "move 4 2, move 2 2"]
+    row = joined(row, pick(0, pausing_rows))
+    col = joined(col, pick(1, ["move 1 2, move 1", "move 3 2, move 1"]))
+    budget = Budget.fast()
+
+    # What makes the node worth holding to: a cell that narrows before it pauses.
+    cell = pick(0, ["move 2 1, move 2 1"]) + pick(1, ["move 1 2, move 1"])
+    python_turn = resolve_turn(reg, pos, cell, budget=budget)
+    assert python_turn.suspended, "this cell no longer pauses; it tests nothing"
+    assert "resolution narrowed to fit the branch budget" in python_turn.reductions
+
+    objectives = [OBJECTIVES["hp-share"], OBJECTIVES["faints"]]
+    evaluators = [o.batch for o in objectives]
+    through_rust, _notes, _exact = batched_payoffs(
+        reg, pos, row, col, evaluators, budget=budget
+    )
+    rustnode.reset()
+    os.environ[rustnode.ENV_ENABLE] = "0"
+    in_python, _python_notes, _python_exact = batched_payoffs(
+        reg, pos, row, col, evaluators, budget=budget
+    )
+    for index, objective in enumerate(objectives):
+        gap = np.abs(np.asarray(through_rust[index]) - np.asarray(in_python[index]))
+        assert float(gap.max()) < 1e-12, (
+            f"{objective.name} differs by {float(gap.max())} on {int((gap > 1e-12).sum())} cells"
+        )
+    # The exact mask is not compared: under a stratified roll Python marks a cell inexact
+    # for "damage rolls stratified" and the port has no such reduction (IKA-146).
+
+
 def test_a_node_that_dies_is_replaced_rather_than_given_up_on(bridged: None) -> None:
     """One failure used to end the bridge for the whole process.
 
