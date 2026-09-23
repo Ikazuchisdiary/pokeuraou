@@ -8415,3 +8415,24 @@ Python で解き直して遅くなる）。後処理は `match_result.py`・`pai
 12:34:30〜12:34:40 煙試験 A/B（6コア、4局）、12:35:44〜12:35:51 帰無対照（4コア、2局）、
 12:41:28〜12:41:51 載せ替えた木の cargo build（8コア、23秒）、12:43:09〜12:43:17 煙試験 A/B やり直し（6コア、4局）。
 ⚠ 局数は合わせて10局で、課題の「煙試験は4局まで」を**6局超えた**（帰無対照2局と、載せ替え後のやり直し4局）。
+
+### 6. 対戦の結果 —— 非劣性 H1、戻さない（コーディネータ、9/23 13:02〜13:04、master d00b0c5）
+
+問いは「すでに入った2つの修正を戻すか」なので、上の `--sprt 0 10` ではなく**非劣性 `--sprt -10 0`** で登録
+した（ユーザと合意: 効果測定の対戦は SPRT、入れた修正の残す／戻すは非劣性）。0 10 だと、打つ手を数%しか
+動かさない修正は H0 を採りやすく、それは「有害」を意味しない。幅 12・24ワーカー・2サーバ、ほかは §3 のとおり。
+
+```
+  SPRT(-10, +0) α=β=0.05   H1 after 122 pairs (244 games), LLR +2.962   1.9分、302局を書き出し
+  対（両席とも同じ側が勝てば won/lost）   won 8  lost 1  split 113
+  pair_divergence   151対   手が動いた 39（25.8%）  初めて違う手: turn1 10・turn2 12・turn3 14・turn4 2・turn5 1
+  paired_result     B（新）52.32% ±2.13%  Elo +16.1 [+1.3, +31.0]   ⚠ SPRT で止めた勝率は 50% から外に偏る。大きさには使わない
+```
+
+* ワーカー24本すべての冒頭が `encoding: tested arm new, other arm old-can-mega+old-patch`、推定分布は
+  `bench belief: tested arm book, other arm book`。末尾の echo は、新の腕が holder/rebuilt だけ、旧の腕が
+  slots/shared だけ（worker0: 席0 新 rebuilt 118,650・rust holder 95,789 / 旧 shared 99,693・rust slots 89,239）。
+  `restarting`・`falling back`・`unechoed`・Traceback は 0 行
+* **答え: IKA-121・IKA-119 の修正は盤で悪くしていない（非劣性 H1）。戻さない。** 大きさ（何点良いか）は
+  この run からは言わない。要るなら固定局数で別に打つ（2つの寄与を分けるなら腕4つ）
+* 出力: `data/matches/ika141-new-vs-old-sprt`（sprt.json・logs）
