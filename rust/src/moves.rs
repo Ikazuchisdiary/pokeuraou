@@ -2303,5 +2303,6 @@ const SANDSTORM_DAMAGE: (i64, i64) = (1, 16);
 const LEECH_SEED_DRAIN: (i64, i64) = (1, 8);
 const LEFTOVERS_HEAL: (i64, i64) = (1, 16);
 const PARTIAL_TRAP_DAMAGE: (i64, i64) = (1, 8);
-const SALT_CURE_DAMAGE: (i64, i64) = (1, 8);
-const SALT_CURE_DAMAGE_WEAK: (i64, i64) = (1, 4);
+// The champions mod's Salt Cure, half the base game's (IKA-159); see resolve.py.
+const SALT_CURE_DAMAGE: (i64, i64) = (1, 16);
+const SALT_CURE_DAMAGE_WEAK: (i64, i64) = (1, 8);

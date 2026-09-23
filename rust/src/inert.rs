@@ -112,7 +112,6 @@ pub fn ability_is_inert(id: &str) -> bool {
             | "receiver"
             | "ripen"
             | "rkssystem"
-            | "runaway"
             | "sandspit"
             | "schooling"
             | "screencleaner"

@@ -405,7 +405,7 @@ def slot_actions(
         for target in _targets_for(reg, STRUGGLE, slot, foe, active_per_side):
             out.append(MoveAction(slot=slot, move_index=1, move_id=STRUGGLE, target=target))
 
-    if allow_switch and not _is_trapped(mon):
+    if allow_switch and not _is_trapped(reg, mon):
         for candidate in side.pokemon:
             if candidate.fainted or candidate.is_active:
                 continue
@@ -416,16 +416,34 @@ def slot_actions(
     return out
 
 
-def _is_trapped(mon) -> bool:  # noqa: ANN001
+def _is_trapped(reg: Regulation, mon) -> bool:  # noqa: ANN001
     """Whether a Pokemon may not switch out.
 
     ``mon.trapped`` is Showdown's own verdict when the position came from the oracle, and
     is authoritative because it already accounts for Ghost types, Shed Shell and ability
-    suppression. The volatile check covers hand-written positions that omit the flag.
+    suppression. The volatile check covers hand-written positions that omit the flag, and
+    the positions the search builds, which carry a trapper's volatile and a flag nobody
+    recomputed -- so it has to know Run Away (IKA-136).
     """
     if mon.trapped:
         return True
+    if _escapes_traps(reg, mon):
+        return False
     return any(v.id in TRAPPING_VOLATILES for v in mon.volatiles)
+
+
+def _escapes_traps(reg: Regulation, mon) -> bool:  # noqa: ANN001
+    """Run Away where the regulation's dex gives it Showdown's trap immunity.
+
+    The champions mod (Showdown d849b2200) adds `onTrapPokemon` at priority -10, after
+    every trapper, and it sets `pokemon.trapped = false`. The dump records that hook, so
+    this follows the dump rather than the format name: in a dex without it Run Away does
+    nothing in battle, which is what it did here before the bump.
+    """
+    if mon.ability != "runaway":
+        return False
+    ability = reg.abilities.get("runaway")
+    return ability is not None and "onTrapPokemon" in ability.raw.get("customHooks", ())
 
 
 def side_actions(

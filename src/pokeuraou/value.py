@@ -242,6 +242,14 @@ class Dataset:
     #: Opponent pool label per decision, for per-archetype reporting.
     foe: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=np.int32))
     foe_names: tuple[str, ...] = ()
+    #: Side 1's own value at this decision, in side 0's units -- the record's
+    #: `foeSearchValue` (IKA-127) -- NaN where the decision carries none: the open game, a
+    #: self-switch, a hidden-bench record written before IKA-127. Under a hidden bench the
+    #: two sides solve different games, and `search_value` is side 0's alone. Zero-length
+    #: for a dataset encoded before it was stored. Never a target; see `td_target`.
+    foe_search_value: np.ndarray = field(
+        default_factory=lambda: np.zeros(0, dtype=np.float32)
+    )
 
     def __len__(self) -> int:
         return int(self.outcome.shape[0])
@@ -363,6 +371,21 @@ def concat_datasets(parts: Sequence[Dataset]) -> Dataset:
         kinds=kinds,
         foe=np.concatenate(foes),
         foe_names=tuple(names),
+        # A shard encoded before the column existed has none of these values, which is
+        # what NaN says; a zero-length column would misalign every shard after it. When
+        # no shard has it the join has none either, as each shard did.
+        foe_search_value=(
+            np.concatenate(
+                [
+                    p.foe_search_value.astype(np.float32)
+                    if len(p.foe_search_value) == len(p)
+                    else np.full(len(p), np.nan, dtype=np.float32)
+                    for p in parts
+                ]
+            )
+            if any(len(p.foe_search_value) == len(p) for p in parts)
+            else np.zeros(0, dtype=np.float32)
+        ),
     )
 
 
@@ -387,8 +410,31 @@ def td_target(dataset: Dataset, lam: float) -> np.ndarray:
     exceed it. The useful settings are in between, and which one is a measurement.
 
     Both arrays are side-0 relative -- all three places that record ``searchValue`` write
-    the equilibrium value of a matrix whose maximiser is side 0, the same orientation as
-    ``outcome`` -- so no flip is needed and none is applied.
+    a value in side 0's units, the same orientation as ``outcome`` -- so no flip is needed
+    and none is applied.
+
+    *Whose* value it is depends on what the search could see (IKA-127). In the open game
+    one agent's two sides solve one matrix, and side 0's equilibrium value is side 1's as
+    well. Under a hidden bench they do not: each side solves the Bayesian game over its
+    own belief about the other's back two, and ``searchValue`` is side 0's answer alone --
+    side 0's win probability as side 0 believes it, conditioned on what side 0 has seen of
+    side 1. Side 1's answer to its own game, in the same units, is recorded beside it as
+    ``foeSearchValue`` and read into :attr:`Dataset.foe_search_value`. At a self-switch
+    it is the chooser's expected score, in side 0's units, and there is no second value.
+    So on a hidden-bench pool this target is the outcome mixed with *side 0's* opinion.
+
+    That is kept as it is: changing it changes what every ``--td-lambda`` run learns, and
+    which is right is a measurement, not a docstring. The choices, for whoever makes it:
+
+    * side 0's value, what this does. The value net is asked for side 0's win probability
+      from the *true* position, and side 0's belief is one of the two opinions of it.
+    * the mean of the two, ``(searchValue + foeSearchValue) / 2``, symmetric in the
+      seats, so a pool's target does not depend on which seat the book-drawn side sat in.
+    * each side's value weighted by how much of the other it had seen -- the side that
+      saw more is the better-informed opinion of the true position.
+
+    A decision without ``foeSearchValue`` (open, self-switch, before IKA-127) has NaN
+    there, and any mixture must fall back to ``searchValue`` for it.
     """
     if not 0.0 <= lam <= 1.0:
         raise ValueError(f"lam must be in [0, 1], got {lam}")
@@ -448,6 +494,11 @@ def load_dataset(path: str | Path) -> Dataset:
         kind=data["kind"],
         foe=data["foe"],
         foe_names=tuple(meta["foe_names"]),
+        foe_search_value=(
+            data["foe_search_value"]
+            if "foe_search_value" in data
+            else np.zeros(0, np.float32)
+        ),
     )
 
 
@@ -470,6 +521,7 @@ def save_dataset(path: str | Path, dataset: Dataset, meta: dict[str, Any]) -> No
         hp_share=dataset.hp_share,
         kind=dataset.kind,
         foe=dataset.foe,
+        foe_search_value=dataset.foe_search_value,
         meta_json=json.dumps(
             {
                 **meta,

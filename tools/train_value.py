@@ -152,6 +152,7 @@ def learning_curve(
             kind=dataset.kind,
             foe=dataset.foe,
             foe_names=dataset.foe_names,
+            foe_search_value=dataset.foe_search_value,
         )
         use = np.flatnonzero(subset)
         net = build(encoder, config).to(device)
