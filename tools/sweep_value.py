@@ -81,6 +81,16 @@ def variants(base: ValueConfig) -> list[tuple[str, ValueConfig]]:
     # the climb was a bump.
     out.append(("patience 8", replace(base, patience=8, epochs=40)))
 
+    # Schedule length fitted to where training stops (IKA-86). The default stops at epoch
+    # 8-11 of a 30-epoch OneCycle, near the top of the learning rate. These run the whole
+    # (short) schedule and keep its end or an average of it; "--epochs" does not apply.
+    for epochs in (4, 6, 8):
+        out.append((f"sched {epochs} last", replace(base, epochs=epochs, keep="last")))
+    out.append(("sched 6 ema", replace(base, epochs=6, keep="last", average="ema")))
+    out.append(
+        ("sched 8 swa25", replace(base, epochs=8, keep="last", average="swa", swa_from=0.25))
+    )
+
     # Combinations of the axes that survived three seeds. Kept separate from the
     # one-at-a-time block so a combined win cannot be mistaken for an attributable one.
     out.append(("dropout 0.5", replace(base, dropout=0.5)))

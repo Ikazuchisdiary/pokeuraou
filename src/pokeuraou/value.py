@@ -87,6 +87,21 @@ class ValueConfig:
     #: configuration when the pool IS shared. This exists so a record can say which split
     #: it used.
     split_seed: int | None = None
+    #: Which weights `train` hands back (IKA-86). ``"best"`` stops after `patience`
+    #: epochs without a better validation loss and returns the best epoch's weights --
+    #: the recipe of every model up to value-gen11L, which stopped at epoch 8-11 of a
+    #: 30-epoch OneCycle and so never left the top of the learning rate. ``"last"`` runs
+    #: all `epochs` and returns the final (or averaged) weights, so the schedule's decay
+    #: is the part that is kept.
+    keep: str = "best"
+    #: ``"none"``, ``"ema"`` (a moving average of the weights after every step, decay
+    #: `ema_decay`) or ``"swa"`` (the plain mean of the end-of-epoch weights from epoch
+    #: ``ceil(swa_from * epochs)`` on). Only with ``keep="last"``.
+    average: str = "none"
+    ema_decay: float = 0.999
+    swa_from: float = 0.5
+    #: OneCycle's warm-up share. 0.2 is what every model so far used.
+    pct_start: float = 0.2
 
 
 class ValueNet(nn.Module):
@@ -557,6 +572,7 @@ def train(
     train_index: np.ndarray | None = None,
     val_index: np.ndarray | None = None,
     target: np.ndarray | None = None,
+    snapshots: dict[str, dict[str, Tensor]] | None = None,
 ) -> tuple[list[EpochReport], dict[str, Tensor]]:
     """Fits the network and returns the epoch history and the best weights.
 
@@ -568,9 +584,21 @@ def train(
         see :func:`td_target`. Validation is *always* against the real outcome, whatever
         this is, or the number stops meaning "how often does this position win" and rows
         with different targets stop being comparable to each other.
+    :param snapshots: when given, filled with the final weights (``"last"``) and both
+        averages (``"ema"``, ``"swa"``) of a ``keep="last"`` run, so one fit answers all
+        three (`tools/sweep_value.py`).
+
+    ``epochs=0`` trains nothing and returns the weights the net came in with -- the null
+    control of a warm start (`tools/train_value.py --init-from`, IKA-194).
     """
     import time
 
+    if config.keep not in ("best", "last") or config.average not in ("none", "ema", "swa"):
+        raise ValueError(f"keep={config.keep!r} average={config.average!r}")
+    if config.average != "none" and config.keep != "last":
+        raise ValueError("an average is of the weights the schedule ends on: keep='last'")
+    if config.epochs == 0:
+        return [], {k: v.detach().clone() for k, v in net.state_dict().items()}
     torch.manual_seed(config.seed)
     if train_index is None or val_index is None:
         train_idx, val_idx = split_for(dataset, holdout, config)
@@ -586,8 +614,13 @@ def train(
     )
     steps = max(1, len(train_idx) // config.batch_size)
     schedule = torch.optim.lr_scheduler.OneCycleLR(
-        optimiser, max_lr=config.lr, total_steps=config.epochs * steps, pct_start=0.2
+        optimiser,
+        max_lr=config.lr,
+        total_steps=config.epochs * steps,
+        pct_start=config.pct_start,
     )
+    averaging = config.keep == "last" and (snapshots is not None or config.average != "none")
+    ema = _Averages(net, config) if averaging else None
     loss_fn = nn.BCEWithLogitsLoss()
     rng = np.random.default_rng(config.seed)
 
@@ -613,6 +646,8 @@ def train(
             nn.utils.clip_grad_norm_(net.parameters(), 1.0)
             optimiser.step()
             schedule.step()
+            if ema is not None:
+                ema.step(net)
             total += loss.item() * len(batch_idx)
             seen += len(batch_idx)
 
@@ -634,6 +669,10 @@ def train(
         if log is not None:
             log(report)
 
+        if ema is not None:
+            ema.epoch_end(net, epoch)
+        if config.keep == "last":
+            continue
         if val_loss < best_loss - 1e-5:
             best_loss = val_loss
             best = {k: v.detach().clone() for k, v in net.state_dict().items()}
@@ -642,7 +681,60 @@ def train(
             stale += 1
             if stale >= config.patience:
                 break
+    if config.keep == "last":
+        last = {k: v.detach().clone() for k, v in net.state_dict().items()}
+        chosen = {"last": last}
+        if ema is not None:
+            chosen |= {"ema": ema.ema_weights(), "swa": ema.swa_weights()}
+        if snapshots is not None:
+            snapshots.update(chosen)
+        best = chosen["last" if config.average == "none" else config.average]
     return history, best
+
+
+class _Averages:
+    """The two weight averages of a ``keep="last"`` run (IKA-86), kept side by side.
+
+    EMA after every optimiser step; SWA as the running mean of the end-of-epoch weights
+    from epoch ``ceil(swa_from * epochs)``. Both in float32 on the net's device. The net
+    has no running statistics (LayerNorm, not BatchNorm), so averaging the state dict is
+    the whole of it -- nothing needs recomputing afterwards.
+    """
+
+    def __init__(self, net: nn.Module, config: ValueConfig) -> None:
+        import math
+
+        self.decay = config.ema_decay
+        self.swa_start = max(1, math.ceil(config.swa_from * config.epochs))
+        self.ema = {k: v.detach().clone().float() for k, v in net.state_dict().items()}
+        self.swa: dict[str, Tensor] | None = None
+        self.swa_n = 0
+
+    @torch.no_grad()
+    def step(self, net: nn.Module) -> None:
+        for k, v in net.state_dict().items():
+            self.ema[k].mul_(self.decay).add_(v.float(), alpha=1.0 - self.decay)
+
+    @torch.no_grad()
+    def epoch_end(self, net: nn.Module, epoch: int) -> None:
+        if epoch < self.swa_start:
+            return
+        state = net.state_dict()
+        if self.swa is None:
+            self.swa = {k: v.detach().clone().float() for k, v in state.items()}
+        else:
+            for k, v in state.items():
+                self.swa[k].mul_(self.swa_n / (self.swa_n + 1)).add_(
+                    v.float(), alpha=1.0 / (self.swa_n + 1)
+                )
+        self.swa_n += 1
+
+    def ema_weights(self) -> dict[str, Tensor]:
+        return {k: v.clone() for k, v in self.ema.items()}
+
+    def swa_weights(self) -> dict[str, Tensor]:
+        assert self.swa is not None
+        return {k: v.clone() for k, v in self.swa.items()}
 
 
 @torch.no_grad()
