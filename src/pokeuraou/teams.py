@@ -188,14 +188,34 @@ def load_roster(path: str | Path) -> Roster:
     if not file.exists():
         file = teams_dir() / f"{path}.json"
     data = json.loads(file.read_text(encoding="utf-8"))
-    reg = load_regulation(str(data["regulation"]))
+    return roster_from_data(data, default_id=file.stem, where=file.name)
+
+
+def roster_from_data(
+    data: dict[str, Any],
+    *,
+    default_id: str,
+    where: str | None = None,
+    reg: Regulation | None = None,
+) -> Roster:
+    """`load_roster` for a team that is not a file of its own (IKA-81).
+
+    A pool file (`data/pool/regmc-matchupweb.json`) holds 65 teams in the roster's own
+    member shape, and each has to pass the same checks a roster file does -- presence,
+    legality, Species and Item Clause, the team size. ``data`` needs ``team`` and, unless
+    ``reg`` is given, ``regulation``; ``default_id`` names the team when ``data`` has no
+    ``id``, and ``where`` is what a size error calls it.
+    """
+    if reg is None:
+        reg = load_regulation(str(data["regulation"]))
+    where = where or default_id
 
     sets: list[SampledSet] = []
     shown: list[dict[str, int] | None] = []
     items: set[str] = set()
     species_seen: set[str] = set()
     for index, entry in enumerate(data["team"]):
-        label = f"{data.get('id', file.stem)}[{index}] {entry.get('species')}"
+        label = f"{data.get('id', default_id)}[{index}] {entry.get('species')}"
         _check_present(reg, entry, label)
         _check_set(reg, entry, label)
         species_id = to_id(entry["species"])
@@ -225,12 +245,12 @@ def load_roster(path: str | Path) -> Roster:
 
     if len(sets) != reg.meta.team_size:
         raise TeamError(
-            f"{file.name}: {len(sets)} Pokemon, but this regulation brings "
+            f"{where}: {len(sets)} Pokemon, but this regulation brings "
             f"{reg.meta.team_size}"
         )
     return Roster(
-        id=str(data.get("id", file.stem)),
-        name=str(data.get("name", file.stem)),
+        id=str(data.get("id", default_id)),
+        name=str(data.get("name", default_id)),
         reg=reg,
         sets=sets,
         shown_stats=shown,
@@ -591,6 +611,7 @@ __all__ = [
     "load_archetypes",
     "load_roster",
     "pick_four",
+    "roster_from_data",
     "sample_archetype",
     "teams_dir",
     "usable_archetypes",
