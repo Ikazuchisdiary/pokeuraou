@@ -255,3 +255,26 @@ def test_old_hidden_records_read_as_the_uniform_belief() -> None:
     source["information"] = ["open", "open"]
     source["beliefs"] = ["book", "book"]
     assert agent_name(source, 0) == "a/w24/book:x"
+
+
+def test_the_rank_view_belongs_to_the_arm_in_both_seats(
+    monkeypatch, tmp_path, roster  # noqa: ANN001
+) -> None:
+    """IKA-143: the other arm told to rank from the first completion does so in both seats,
+    and only it is named for it."""
+    calls, rows = _run(monkeypatch, tmp_path, roster, "--baseline-rank-first-completion")
+    assert calls[0]["rank_view"] == ("heaviest", "first")
+    assert calls[1]["rank_view"] == ("first", "heaviest")
+    assert rows[0]["provenance"]["rankViews"] == ["heaviest", "first"]
+    assert rows[1]["provenance"]["rankViews"] == ["first", "heaviest"]
+    for row, tested_side in zip(rows, (0, 1), strict=True):
+        assert "rankview" not in agent_name(row["provenance"], tested_side)
+        assert agent_name(row["provenance"], 1 - tested_side).endswith("/rankview:first")
+
+
+def test_an_ordinary_match_ranks_from_the_heaviest_and_records_nothing_new(
+    monkeypatch, tmp_path, roster  # noqa: ANN001
+) -> None:
+    calls, rows = _run(monkeypatch, tmp_path, roster)
+    assert all(call["rank_view"] == ("heaviest", "heaviest") for call in calls)
+    assert all("rankViews" not in row["provenance"] for row in rows)

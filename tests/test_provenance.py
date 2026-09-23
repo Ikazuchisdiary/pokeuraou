@@ -97,3 +97,19 @@ def test_an_undone_fix_is_another_agent_and_only_then_recorded() -> None:
     assert at["encodings"] == ["new", "old-can-mega+old-patch"]
     assert agent_name(at, 0) == "value-a/w12"
     assert agent_name(at, 1) == "value-a/w12/enc:old-can-mega+old-patch"
+
+
+def test_the_old_rank_view_is_another_agent_and_only_then_recorded() -> None:
+    """IKA-143: an arm ranking its menu from the first completion instead of the heaviest
+    is named for it; an ordinary run writes no `rankViews` key."""
+    assert "rankViews" not in source()
+    at = provenance(
+        "generation-match",
+        seat="a = side 0",
+        leaves=("value-a", "value-a"),
+        limits=(12, 12),
+        rank_views=("first", "heaviest"),
+    )
+    assert at["rankViews"] == ["first", "heaviest"]
+    assert agent_name(at, 0) == "value-a/w12/rankview:first"
+    assert agent_name(at, 1) == "value-a/w12"

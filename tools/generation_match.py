@@ -247,6 +247,19 @@ def main() -> None:
         help="same for the other arm",
     )
     ap.add_argument(
+        "--rank-first-completion",
+        action="store_true",
+        help="under --hide-bench, the arm under test ranks its menu (--rank-leaf or "
+        "--policy) from the first-enumerated completion of the opponent's unseen slots, as "
+        "every game before IKA-143 did, instead of the heaviest under its bench belief. For "
+        "measuring that fix on the board.",
+    )
+    ap.add_argument(
+        "--baseline-rank-first-completion",
+        action="store_true",
+        help="same for the other arm",
+    )
+    ap.add_argument(
         "--can-mega-from-slots",
         action="store_true",
         help="the arm under test encodes `can_mega` and `mega_available` from "
@@ -620,6 +633,17 @@ def main() -> None:
             f"bench belief: tested arm {arm_belief[0]}, other arm {arm_belief[1]}",
             file=sys.stderr,
         )
+    # Which completion each ARM's menu ranking reads (IKA-143), ordered by seat at the
+    # call like `arm_weighted`. Echoed so a worker log says which rule each arm played.
+    arm_rank_view = (
+        "first" if args.rank_first_completion else "heaviest",
+        "first" if args.baseline_rank_first_completion else "heaviest",
+    )
+    if args.hide_bench:
+        print(
+            f"rank view: tested arm {arm_rank_view[0]}, other arm {arm_rank_view[1]}",
+            file=sys.stderr,
+        )
 
     # What each side's ordering is *called*, which is what a rating is fitted from. A
     # policy names itself: two policies are two agents, and "policy" alone would pool them.
@@ -655,6 +679,8 @@ def main() -> None:
         tags += "@uniformbelief" if args.uniform_bench_belief else "@bookbelief"
     if tested_rules != other_rules:
         tags += f"@enc:{tested_rules.label()}"
+    if args.hide_bench and arm_rank_view[0] != arm_rank_view[1]:
+        tags += f"@rankview:{arm_rank_view[0]}"
     arm = f"{new_name}{tags}" if tags else new_name
     seats = (
         (f"{arm} = side 0", (value, baseline), (args.depth, args.baseline_depth),
@@ -929,6 +955,8 @@ def main() -> None:
                 # from the one generation plays, which `agent_drift` could not see
                 # because `bench_prior` was not on its list.
                 bench_prior=bench_prior,
+                # Per arm, ordered by seat like every other per-arm setting (IKA-143).
+                rank_view=arm_rank_view if which == 0 else arm_rank_view[::-1],
                 # Without this the record keeps `selectionSource: "uniform"` and an empty
                 # ownPick whatever the book did, and every rating row since generation 10
                 # says a uniform draw for games the book actually chose. `provenance.books`
@@ -1021,6 +1049,13 @@ def main() -> None:
                     # what this game's draw happened to allow.
                     beliefs=arm_belief if which == 0 else arm_belief[::-1],
                     encodings=(rules_of(leaves[0]).label(), rules_of(leaves[1]).label()),
+                    # Per ARM, ordered by seat, as handed to `play_game` above. The
+                    # rule reads nothing in the open game, so it is not an agent there.
+                    rank_views=(
+                        (arm_rank_view if which == 0 else arm_rank_view[::-1])
+                        if args.hide_bench
+                        else ("heaviest", "heaviest")
+                    ),
                     note=(
                         f"search depth {depths[0]} vs {depths[1]} by side"
                         if depths[0] != depths[1]

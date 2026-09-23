@@ -121,6 +121,13 @@ class Decision:
     #: recorded game reads back as a game.
     own_chosen: str | None = None
     foe_chosen: str | None = None
+    #: Which completion of the opponent's unseen slots each side's menu was ranked from,
+    #: as ``[index, species]`` in `completions` order -- ``[0, []]`` when nothing of the
+    #: opponent's was hidden -- or None for a side that never read a completion (the
+    #: damage ranking, which never reads the bench). None altogether in the open game or
+    #: when neither side did. IKA-143: the rule is `rank_view`, and this is the rule's
+    #: answer at this decision.
+    rank_views: list[list[Any] | None] | None = None
 
 
 @dataclass(slots=True)
@@ -166,6 +173,10 @@ class GameRecord:
     #: It was not recorded anywhere before, so which ranking produced generations 9 and 10
     #: cannot be recovered from their files or their logs.
     ranking: str = "damage"
+    #: Which completion each side's leaf or policy ranking read under a hidden bench
+    #: (`RANK_VIEWS`): "heaviest" since IKA-143, "first" before it. Written only for a
+    #: hidden-bench game, so a record without it is either open or older than the rule.
+    rank_view: list[str] = field(default_factory=lambda: ["heaviest", "heaviest"])
     #: The equilibrium mixtures over the 90 ordered selections, when a book was used.
     #: These are the policy targets a selection head would learn -- the *solver's*
     #: recommendation, not the softened distribution the game was drawn from.
@@ -219,6 +230,7 @@ class GameRecord:
             "selectionSource": self.selection_source,
             "information": self.information,
             "ranking": self.ranking,
+            **({"rankView": list(self.rank_view)} if self.information == "hidden-bench" else {}),
             "ownSelectionPolicy": self.own_selection_policy,
             "foeSelectionPolicy": self.foe_selection_policy,
             "ownSelectionMixture": self.own_selection_mixture,
@@ -237,6 +249,7 @@ class GameRecord:
                     "searchValue": d.search_value,
                     "ownChosen": d.own_chosen,
                     "foeChosen": d.foe_chosen,
+                    **({"rankViews": d.rank_views} if d.rank_views is not None else {}),
                 }
                 for d in self.decisions
             ],
@@ -350,6 +363,11 @@ def _sample_index(rng: np.random.Generator, weights: np.ndarray) -> int:
     return int(rng.choice(len(weights), p=weights / total))
 
 
+#: Which completion of the opponent's unseen slots a leaf or policy ranking reads
+#: (`_menus.views`). "heaviest" ships; "first" is the rule before IKA-143.
+RANK_VIEWS = ("heaviest", "first")
+
+
 def _menus(
     reg: Regulation,
     pos: Position,
@@ -359,6 +377,8 @@ def _menus(
     rank_by_leaf: bool,
     policy: Any = None,
     spreads: dict[int, list] | None = None,
+    rank_view: str = "heaviest",
+    used: dict[int, tuple[int, tuple[str, ...]]] | None = None,
 ) -> tuple[list[SideAction], list[SideAction]]:
     """Both sides' candidate menus, as one agent sees them.
 
@@ -374,6 +394,8 @@ def _menus(
     and an agent asks it once. It is a supersession rather than an error so that an agent
     can be described by adding one setting to an existing pair rather than by rewriting it.
     """
+    if rank_view not in RANK_VIEWS:
+        raise ValueError(f"rank_view {rank_view!r} is not one of {RANK_VIEWS}")
     if policy is None and not rank_by_leaf:
         # The damage score reads only the active Pokemon, so it has nothing to be blind
         # about and the true position costs nothing here.
@@ -396,13 +418,36 @@ def _menus(
         looking at the truth. Ranking from the *true* bench scored 0.44 on the same
         positions, which is the same number again and is the information nobody has.
 
-        Deterministic -- the first completion, not a sampled one -- so a rerun of a game
-        is the same game.
+        Deterministic -- the heaviest completion, not a sampled one -- so a rerun of a
+        game is the same game. The heaviest, first on ties, not the first enumerated
+        (IKA-143): the "one is as good as six" measurement above was taken when the
+        weights were uniform, and every completion was then as likely as the first.
+        Under the book's bench prior they are not -- on 60 recorded mid-game positions of
+        the w12 pool (94 rankings) the first completion was the heaviest in 45, it carried
+        a mean weight of 0.36 against the heaviest's 0.72, and ranking from the heaviest
+        instead changed the width-12 menu in 33 of the 94, by 1.26 of 11.7 actions on
+        average (2.41 where the two differ). Averaging over every completion would change
+        it in 51 at 4.5 times the ranking's fills, which is the cost the paragraph above
+        declined. `rank_view="first"` is the old rule, kept so an arm can play it on the
+        board. Under uniform weights the two rules are the same completion.
+
+        `used`, when given, gets `side -> (index, species)` of the completion side
+        `side` ranked from, so the caller can record it.
         """
         if spreads is None:
             return [(pos, 1.0)]
         items = spreads[1 - side]
-        return [(items[0].position, 1.0)] if items else [(pos, 1.0)]
+        if not items:
+            return [(pos, 1.0)]
+        # `max` keeps the first of equal maxima, so uniform weights pick index 0.
+        index = (
+            0
+            if rank_view == "first"
+            else max(range(len(items)), key=lambda i: items[i].weight)
+        )
+        if used is not None:
+            used[side] = (index, tuple(items[index].species))
+        return [(items[index].position, 1.0)]
 
     def ranker(side: int) -> Any:  # noqa: ANN401
         parts = [
@@ -420,6 +465,21 @@ def _menus(
         narrow(reg, pos, 0, limit=limits[0], rank=ranker(0)).actions,
         narrow(reg, pos, 1, limit=limits[1], rank=ranker(1)).actions,
     )
+
+
+def _rank_views(
+    own_views: dict[int, tuple[int, tuple[str, ...]]],
+    foe_views: dict[int, tuple[int, tuple[str, ...]]] | None,
+) -> list[list[Any] | None] | None:
+    """`Decision.rank_views` from each agent's own construction of its own menu.
+
+    Side 0's menu is always side 0's construction; side 1's is its own when it built one
+    and otherwise the shared one.
+    """
+    got = [own_views.get(0), (foe_views if foe_views is not None else own_views).get(1)]
+    if got == [None, None]:
+        return None
+    return [None if g is None else [g[0], list(g[1])] for g in got]
 
 
 def _bench_weights(
@@ -479,6 +539,7 @@ def play_game(
     sheets: tuple[Sequence[SampledSet], Sequence[SampledSet]] | None = None,
     bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None = None,
     one_agent: bool = True,
+    rank_view: str | tuple[str, str] = "heaviest",
 ) -> GameRecord:
     """Plays one game to a result, sampling both sides from the turn's equilibrium.
 
@@ -525,6 +586,11 @@ def play_game(
     they land on, and a maximin strategy only guarantees the value -- against an opponent
     who is not playing the equilibrium, two equilibria can take different amounts. That is
     what a mismatched pair measures.
+
+    ``rank_view`` takes a pair too: which completion of the opponent's unseen slots each
+    agent's leaf or policy ranking reads under a hidden bench (`RANK_VIEWS`, IKA-143).
+    "heaviest" ships; "first" is the enumeration-order rule every game before it played.
+    It changes nothing without ``sheets`` or with the damage ranking.
     """
     # Closes the stretch since the last game's last record (IKA-98); the first one ends startup.
     timing.decided("between")
@@ -547,6 +613,10 @@ def play_game(
     )
     policies = policy if isinstance(policy, tuple) else (policy, policy)
     leaves = evaluate if isinstance(evaluate, tuple) else (evaluate, evaluate)
+    views_rule = (rank_view, rank_view) if isinstance(rank_view, str) else tuple(rank_view)
+    for rule in views_rule:
+        if rule not in RANK_VIEWS:
+            raise ValueError(f"rank_view {rule!r} is not one of {RANK_VIEWS}")
     if sheets is not None and (
         depths != (1, 1) or sparse != (False, False) or restricted != (False, False)
     ):
@@ -575,6 +645,7 @@ def play_game(
     record.ranking = (
         "policy" if policies[0] is not None else "leaf" if ranked[0] else "damage"
     )
+    record.rank_view = list(views_rule)
     pos = start if start is not None else position_from_sets(reg, own, foe)
     budget = Budget.matrix()
     # Who each side has shown, accumulated across turns. A Pokemon that came in and went
@@ -645,8 +716,13 @@ def play_game(
                 record.unmodelled.append(f"hidden bench: {problem}")
                 break
         menu_started = perf_counter()
+        # Side -> the completion that side's ranking read, per agent: `own_views` from
+        # side 0's construction, `foe_views` from side 1's when it builds its own.
+        own_views: dict[int, tuple[int, tuple[str, ...]]] = {}
+        foe_views: dict[int, tuple[int, tuple[str, ...]]] | None = None
         ours, theirs = _menus(
-            reg, pos, limits, own_leaf, budget, ranked[0], policies[0], spreads
+            reg, pos, limits, own_leaf, budget, ranked[0], policies[0], spreads,
+            rank_view=views_rule[0], used=own_views,
         )
         menu_seconds = perf_counter() - menu_started
         if not ours or not theirs:
@@ -668,6 +744,7 @@ def play_game(
         same_menu = (
             ranked[1] == ranked[0]
             and policies[1] is policies[0]
+            and views_rule[1] == views_rule[0]
             and (
                 policies[0] is not None
                 or not ranked[0]
@@ -707,8 +784,10 @@ def play_game(
                 # of the hidden-bench scale was measured this way, with the hp-share arm
                 # handed a menu ranked by the other arm's value function in one seat.
                 foe_started = perf_counter()
+                foe_views = {}
                 foe_ours, foe_theirs = _menus(
-                    reg, pos, limits, foe_leaf, budget, ranked[1], policies[1], spreads
+                    reg, pos, limits, foe_leaf, budget, ranked[1], policies[1], spreads,
+                    rank_view=views_rule[1], used=foe_views,
                 )
                 if not foe_ours or not foe_theirs:
                     break
@@ -757,7 +836,7 @@ def play_game(
                     if same_menu
                     else _menus(
                         reg, pos, limits, foe_leaf, budget, ranked[1], policies[1],
-                        spreads,
+                        spreads, rank_view=views_rule[1],
                     )
                 )
                 if not foe_ours or not foe_theirs:
@@ -836,6 +915,7 @@ def play_game(
                 search_value=search_value,
                 own_chosen=chosen[0].to_choice(),
                 foe_chosen=chosen[1].to_choice(),
+                rank_views=_rank_views(own_views, foe_views),
             )
         )
         timing.decided("move")
