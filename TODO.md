@@ -11379,3 +11379,130 @@ Python の出来事で除いて、残りを Showdown と比べる。
 関係テスト 17 ファイル 264 件（1 件は IKA-158 の宣言どおりの xfail）1コア 41 秒。機械: cargo release 2回（8コア 24・19 秒）、
 関係テスト 2回（1コア 40・41 秒）、オラクルのテスト単体 数回（各 2 秒前後）、diff_node 14回（1コア 7〜19 秒）、
 記録の rg 5回（1コア 24〜29 秒）。すべて heavy.py（--agent IKA-162）。
+
+## 9/23 — IKA-167: vendor の Showdown を d3de52a17 から a5df827 へ上げた —— ダンプは IKA-164 の予想とバイト一致、語彙・指紋は動かず value-gen11L は w12 で 4,000 局面ビット一致。だっしゅつボタン・ききかいひのとんぼがえりはオラクルで Python と一致するようになった。付随して非ゴーストの呪いを対象なしで列挙する（IKA-168）
+
+ワーカー、基点 master 28fb86c（途中で IKA-162 の 62f0126 に早送り）、ブランチ `ika-167-showdown-a5df827`。IKA-136 の手順を踏襲し、
+IKA-164 の結論（9/23 — IKA-164）どおりに上げた。一時ファイルは `C:/tmp/ika167/`。
+
+### 1. 上げたコミットと手順
+
+`d3de52a17`（9/10）→ **`a5df8274e`（9/22、"Teams: Tweak user feedback"）**、20 コミット（IKA-164 の 1 節と同じ範囲）。
+worktree で `git submodule update --init`（上流から d3de52a17 の浅いクローン。IKA-164 の worktree からのローカルクローンは
+file 転送が許されず使えなかった）→ `git fetch --depth 60 origin a5df8274e…` → checkout。main の vendor には触れていない。
+`npm ci`（vendor）・`node build decl`・ルートの `npm ci`・`tsc -p packages/sim-bridge` のあと、gitlink を stage して
+`dump-regulation`・`dump-names`。ルートの `npm ci` の後、worktree の `node_modules/pokemon-showdown` が worktree の vendor を
+指し、`require.resolve('pokemon-showdown')` も worktree の `vendor/pokemon-showdown/dist/sim/index.js` になることを確かめた。
+`regulation.ts` の DECLARATIVE_MOVE_KEYS の `nonGhostTarget` は外していない（a5df827 には無い鍵なので出ない）。
+
+### 2. ダンプの差分
+
+* null: 作り直した M-B・M-C は IKA-164 の `dumps/5-master-a5df827/` と `generatedAt` の 1 行を除いてバイト一致、ja.json は
+  全体がバイト一致。陽性対照: 同じ比較を `dumps/0-base-d3de52a/` とすると ja.json から違う（showdownCommit ほか）
+* master のダンプ対 新しいダンプ（id で突き合わせ、`C:/tmp/ika164/dumpdiff.py`、`C:/tmp/ika167/dumpdiff.txt`）:
+
+```
+  M-B  moves curse: volatileStatus 'curse' → 無し、tracksTarget 無し → true、nonGhostTarget 'self' → 無し
+       ほかの 514 技の nonGhostTarget '' → 無し、abilities の並び 306・moves の並び 127
+  M-C  上と同じ curse 3 項目と nonGhostTarget、species baxcaliburmega.abilities ['Thermal Exchange','Ice Body'] → ['Thermal Exchange']
+       items の並び 75（ejectbutton）、abilities 306・moves 129 の並び
+  ja   natures 25・types 19 のキーが小文字 id → 名前（"adamant" → "Adamant"）、genders male/female/genderless → M/F/N
+  全部 meta.showdownCommit・generatedAt
+```
+
+IKA-164 の 2 節の予想と項目・件数とも同じ（nonGhostTarget の消えた行は 2 規則 × 515 技 = 1,030）。種族・道具・特性・技の id の集合は同じ。
+
+### 3. 語彙
+
+```
+  vocab_order --check   M-B ok（species 357・abilities 316・items 148・moves 515）、M-C ok（392・316・166・515）   追記なし
+  陽性対照               M-B の順序から meteorassault を抜くと "moves missing from the order: meteorassault" で rc 1（戻してバイト一致）
+  指紋                   M-B 59d8404f70998d0c → 59d8404f70998d0c、M-C de9714ef7c6d19de → de9714ef7c6d19de（master のダンプと新しいダンプで build_vocabulary）
+```
+
+### 4. だっしゅつボタン・ききかいひ（`tests/test_eject_selfswitch.py`、8 件）
+
+M-C、Rillaboom のとんぼがえりを相手の先発へ。Python・port とも直していない（攻撃側の自分交代は前から常にする）。
+
+```
+  ケース                         Showdown a5df827（攻撃側・持ち主）   d3de52a17（陽性対照）   Python の攻撃側
+  eject-button                   交代・交代（-enditem Eject Button）   交代しない・交代         交代（中断）
+  emergency-exit（剣の舞の後）    交代・交代（-activate Emergency Exit）交代しない・交代         交代（中断）
+  control-no-item                交代・なし                            交代・なし               交代
+  control-no-emergency-exit      交代・なし                            交代・なし               交代
+```
+
+事実のテスト 4 件と、Python の攻撃側を Showdown の答えに合わせるテスト 4 件。持ち主の脱出は Python が模していないので比べない。
+**陽性対照**: worktree の vendor を d3de52a17 に戻して build decl したオラクルでは、持ち主のある 2 ケースで事実・一致が
+計 4 件落ち（"showdown asks the attacker False, python True"）、対照 4 件は通る。a5df827 に戻して 8 件 pass。
+
+### 5. 非ゴーストの呪い（IKA-168、`actions._targets_for`、`tests/test_curse_target.py` 3 件）
+
+Showdown の要求の対象は `Pokemon.getMoves` の `case 'curse': if (!this.hasType('Ghost')) target = 'self'` で、`chooseMove` は
+その対象で検証する。`_targets_for` に使い手の今のタイプ（`mon.types`、空なら種族のタイプ）を渡し、呪いでゴーストが無ければ
+`self` と読むようにした（actions.py の対象の列挙だけ。拘束・ねこだましの箇所には触れていない）。
+
+* オラクル: カビゴンの要求は `self`、隣のゲンガーは `normal`。`move 1, move 2` は受理、`move 1 1, move 2` は拒否（事実、直す前も通る）
+* `_assert_enumeration_matches`（両側、全文字列を probe）: 直す前は "Showdown rejected 18/70 … You can't choose a target for Curse" で落ちた
+* 手組み: カビゴンにゴーストを足すと対象 1・2、ゲンガーをみずにすると対象なし（直す前は落ちた）
+* 記録・プールでの数は IKA-164 の 4 節のとおり（w12・gen11L・M-C 65 に呪いの持ち主 0、Baltimore 2 本）。今のメニューは動かない
+
+### 6. port と符号化
+
+* diff_node（`--scenario C:/tmp/ika167/scenario-curse.json --limit 0`、scenario-turn5 のドドゲザンのアイアンヘッドと
+  ヤバソチャのトリックルームを呪いに。非ゴーストとゴーストの呪い、4,758 セル）
+
+```
+                          matrix        fast          陽性対照（matrix、Python だけ呪いに self.boosts +1/+1/-1）
+  port の拒否             0             0             0
+  最悪のセル差            3.3e-16       3.3e-16       9.5e-02
+  均衡の値の移動          0             0             0
+  判定                    OK            OK            FAIL
+```
+
+  IKA-162 の取り込み後に release を作り直して matrix・fast とも同じ数字。
+* `port_coverage --check`・`port_gate_audit --check`: ok（取り込み前後とも）
+* diff_encode（M-B・M-C、rust/turns.json の 3,451 局面＋持ち主 50 局面。持ち主は side 0 の先発 1 体に呪い・だっしゅつボタン・
+  ききかいひ、M-C はさらに baxcaliburmega）: 両規則とも全 8 配列一致。陽性対照: M-C の持ち主 50 局面の呪いを Python 側だけ
+  まもるに戻すと moves が DIFFERS（50 か所、python 328・rust 92）。呪いの番号は両規則 92、だっしゅつボタン 48、ききかいひ 70、
+  baxcaliburmega 51（M-C）
+
+### 7. 受け入れ
+
+```
+  value-gen11L（M-B）   読める、vocab_grown_from {"move": 515}、指紋 59d8404f70998d0c
+     null  基点の木（master 28fb86c の src と d3de52a17 のダンプ、git archive）対 この木、w12 の M-B 局面 4,000   ビット一致 4,000/4,000
+           （呪いを含む局面 0、ききかいひ 0。encode.py は 28fb86c と 62f0126 で同じ）
+     陽性  同じ局面で protect と fakeout の番号を入れ替え                                              一致 0/4,000（最大 1.75）
+  Baltimore（standings_report、M-C）  1,077/1,082（nature ×1・team size ×4）。受理・拒否の集合は基点の木と同一（増減 0）
+     受理した 1,077 本を Showdown の検証器に: a5df827（この worktree の oracle.js）と d3de52a17（本体の oracle.js を読むだけ）で
+     判定が同じ（1,069/1,077、下の 9 節）。a21fdb7 の検証器の変更は効いていない
+  プール（fetch_pastes、キャッシュから）  kept 65 / excluded 0。本体のファイルとはダンプの出典 3 行だけ違う。
+     load_roster + team_sets 65/65、Showdown の検証器 65/65
+  関係テスト 23 ファイル（新しい 2 つ、test_actions・test_runaway・test_trap_immunities・test_names・test_showdown_commit・
+     test_vocab_order・test_line_endings・test_no_machine_specific_paths・test_port_coverage・test_port_gates・test_encode・
+     test_fetch_pastes・test_standings・test_teams・test_disguise_afterhit・test_hidden_selfswitch・test_rust_node・
+     test_priority_block_per_target・test_salt_cure_champions・test_multihit_counts・test_type_spending_moves）
+     273 件 pass、skip 0、strict xfail 1（test_spikes_land_on_the_foes_side、IKA-158 が固定したもの）。1 コア 24 秒
+  ruff check ok
+```
+
+### 8. shard
+
+指紋が動かないので、符号化済みの shard はそのまま使える（作り直していない）。
+
+### 9. 見つけた別件（起票の候補）
+
+* **Baltimore の 5 本は Showdown の検証器が技を拒むのに Python が受理している**（新旧の vendor で同じ）: ムクホークの
+  じだんだ（High Horsepower）、バンギラスのローキック（Low Sweep）、ボーマンダのはたきおとす、ガブリアスのウェーブタックル、
+  グソクムシャのせいなるつるぎ。残り 3 本（バンギラス・オオニューラ・Floette-Eternal の特性空）は standings が使用率から
+  特性を補うもので、検証の入力を作ったこちらのスクリプトの都合
+* `resolve._encore_override`（resolve.py:1567）はアンコールで呪いに置き換えるとき、ダンプの `normal` を読んで相手 2 体に
+  重みを分ける。非ゴーストなら対象は自分。今の呪いは何もしないので結果は変わらない
+* 呪いの本当の効果（非ゴースト: 自分の攻撃・防御 +1、素早さ -1。ゴースト: HP 1/2 と毎ターン 1/4）は Python・port とも無い。
+  a5df827 のダンプでは volatileStatus も消えたので、両エンジンとも呪いは「何もしない技」になった（IKA-164 の 3 節）
+
+機械（すべて heavy.py、--agent IKA-167）: npm ci 2 回（4 コア 14 秒・6 秒）、build decl 3 回（4 コア 3〜4 秒）、tsc・ダンプ各 1 秒、
+cargo release 2 回（8 コア 23 秒・18 秒）、diff_node 5 回（1 コア 5〜10 秒）、diff_encode・Rust の encode 各 1 秒以下、
+null 対照 3 回（1 コア 3 秒）、standings・検証器・fetch_pastes 各 2 秒以下、関係テスト 2 回（1 コア 26 秒・24 秒）。
+オラクルの試し・新しいテストの単独実行・vocab の陽性対照（各数秒）は直接。

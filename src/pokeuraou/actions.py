@@ -297,19 +297,31 @@ def is_struggling(mon, reg: Regulation) -> bool:  # noqa: ANN001
 
 
 def _targets_for(
-    reg: Regulation, move_id: str, slot: int, foe: Side, active_per_side: int
+    reg: Regulation,
+    move_id: str,
+    slot: int,
+    foe: Side,
+    active_per_side: int,
+    user_types: tuple[str, ...] = (),
 ) -> list[int | None]:
     """Legal target indices for one move from one slot.
 
     Showdown rejects a choice that supplies a target for a move that takes none, and
     rejects one that omits a target for a single-target move, so the two cases are
     distinct rather than optional.
+
+    The target Showdown validates against is the request's, not the dex entry's
+    (`Pokemon.getMoves`), and the two differ for Curse: a user that is not Ghost now is
+    asked for no target (`if (!this.hasType('Ghost')) target = 'self'`), so "move N 1"
+    is refused (IKA-168). Before Showdown 2345119 the dump said so as `nonGhostTarget`.
     """
     move = reg.moves.get(move_id)
     if move is None:
         # Unknown move: let it through with no target rather than inventing one.
         return [None]
     target = move.target
+    if move_id == "curse" and "Ghost" not in user_types:
+        target = "self"
 
     if target in TARGETS_WITHOUT_CHOICE:
         return [None]
@@ -385,8 +397,9 @@ def slot_actions(
         mega_target = reg.mega_target(mon.species, mon.item)
 
     if usable:
+        user_types = mon.types or _species_types(reg, mon.species)
         for move_index, move_id in usable:
-            for target in _targets_for(reg, move_id, slot, foe, active_per_side):
+            for target in _targets_for(reg, move_id, slot, foe, active_per_side, user_types):
                 out.append(
                     MoveAction(slot=slot, move_index=move_index, move_id=move_id, target=target)
                 )

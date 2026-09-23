@@ -19,8 +19,8 @@
 		"maxMoveCount": 4,
 		"teraEnabled": false,
 		"megaPerSide": 1,
-		"showdownCommit": "d3de52a17868aa22e6f5af251a68b86f573b75b1",
-		"generatedAt": "2026-09-23T12:26:31.929Z"
+		"showdownCommit": "a5df8274e85b0889bf2a9b3422a08b39732374fc",
+		"generatedAt": "2026-09-23T13:44:24.687Z"
 	},
 	"natures": [
 		{
@@ -2204,8 +2204,7 @@
 				"spe": 87
 			},
 			"abilities": [
-				"Thermal Exchange",
-				"Ice Body"
+				"Thermal Exchange"
 			],
 			"weightkg": 315,
 			"genderRatio": {
@@ -12868,7 +12867,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -12909,8 +12907,7 @@
 			},
 			"volatileStatus": "banefulbunker",
 			"stallingMove": true,
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "beakblast",
@@ -12944,8 +12941,7 @@
 				"beakblast": {
 					"duration": 1
 				}
-			},
-			"nonGhostTarget": ""
+			}
 		},
 		{
 			"id": "belch",
@@ -12971,8 +12967,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onTry"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "bonerush",
@@ -12996,8 +12991,7 @@
 			"multihit": [
 				2,
 				5
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "burnup",
@@ -13021,7 +13015,6 @@
 			"customHooks": [
 				"onTryMove"
 			],
-			"nonGhostTarget": "",
 			"self": {}
 		},
 		{
@@ -13054,8 +13047,7 @@
 				"spd": 1,
 				"spe": 1
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "corrosivegas",
@@ -13080,8 +13072,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "crabhammer",
@@ -13102,8 +13093,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "crushclaw",
@@ -13126,7 +13116,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 50,
@@ -13135,6 +13124,33 @@
 					}
 				}
 			]
+		},
+		{
+			"id": "curse",
+			"name": "Curse",
+			"num": 174,
+			"type": "Ghost",
+			"category": "Status",
+			"basePower": 0,
+			"accuracy": true,
+			"pp": 10,
+			"priority": 0,
+			"target": "normal",
+			"critRatio": 1,
+			"flags": {
+				"bypasssub": 1,
+				"metronome": 1
+			},
+			"hasCustomCode": true,
+			"customHooks": [
+				"condition.onResidual",
+				"condition.onStart",
+				"onHit",
+				"onModifyMove",
+				"onTryHit"
+			],
+			"tracksTarget": true,
+			"ignoreImmunity": true
 		},
 		{
 			"id": "direclaw",
@@ -13157,7 +13173,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 30
@@ -13197,8 +13212,7 @@
 				}
 			},
 			"volatileStatus": "disable",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "doubleshock",
@@ -13222,7 +13236,6 @@
 			"customHooks": [
 				"onTryMove"
 			],
-			"nonGhostTarget": "",
 			"self": {}
 		},
 		{
@@ -13249,8 +13262,7 @@
 				"condition.onStart"
 			],
 			"volatileStatus": "dragoncheer",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "dragonclaw",
@@ -13272,8 +13284,7 @@
 				"slicing": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "electrify",
@@ -13305,8 +13316,7 @@
 				}
 			},
 			"volatileStatus": "electrify",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "encore",
@@ -13342,8 +13352,7 @@
 				}
 			},
 			"volatileStatus": "encore",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "fakeout",
@@ -13368,7 +13377,6 @@
 				"onDisableMove",
 				"onTry"
 			],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -13396,7 +13404,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -13428,8 +13435,7 @@
 			"customHooks": [
 				"onDisableMove",
 				"onTry"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "freezedry",
@@ -13451,8 +13457,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onEffectiveness"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "gravapple",
@@ -13474,7 +13479,6 @@
 			"customHooks": [
 				"onBasePower"
 			],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -13508,8 +13512,7 @@
 				"atk": 1,
 				"spa": 1
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "howl",
@@ -13534,8 +13537,7 @@
 			"boosts": {
 				"atk": 1
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "infernalparade",
@@ -13558,7 +13560,6 @@
 			"customHooks": [
 				"basePowerCallback"
 			],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 30,
@@ -13586,7 +13587,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 20,
@@ -13626,8 +13626,7 @@
 			},
 			"volatileStatus": "kingsshield",
 			"stallingMove": true,
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "lightofruin",
@@ -13650,8 +13649,7 @@
 			"recoil": [
 				1,
 				2
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "makeitrain",
@@ -13671,7 +13669,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"self": {
 				"boosts": {
 					"spa": -2
@@ -13698,7 +13695,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"self": {
 				"volatileStatus": "mustrecharge"
 			}
@@ -13726,8 +13722,7 @@
 				1,
 				2
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "moonblast",
@@ -13748,7 +13743,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -13777,7 +13771,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 30,
@@ -13804,7 +13797,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 40,
@@ -13834,8 +13826,7 @@
 				"slicing": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "octolock",
@@ -13862,8 +13853,7 @@
 				"onTryImmunity"
 			],
 			"volatileStatus": "octolock",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "powershift",
@@ -13888,8 +13878,7 @@
 				"condition.onStart"
 			],
 			"volatileStatus": "powershift",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "protect",
@@ -13921,8 +13910,7 @@
 			},
 			"volatileStatus": "protect",
 			"stallingMove": true,
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "psyshieldbash",
@@ -13944,7 +13932,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -13977,8 +13964,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"basePowerCallback"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "saltcure",
@@ -14002,7 +13988,6 @@
 				"condition.onResidual",
 				"condition.onStart"
 			],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -14039,8 +14024,7 @@
 				}
 			},
 			"weather": "Sandstorm",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "shadowclaw",
@@ -14062,8 +14046,7 @@
 				"slicing": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "slash",
@@ -14085,8 +14068,7 @@
 				"slicing": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "snaptrap",
@@ -14118,8 +14100,7 @@
 					}
 				}
 			},
-			"volatileStatus": "partiallytrapped",
-			"nonGhostTarget": ""
+			"volatileStatus": "partiallytrapped"
 		},
 		{
 			"id": "snipeshot",
@@ -14140,8 +14121,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"tracksTarget": true,
-			"nonGhostTarget": ""
+			"tracksTarget": true
 		},
 		{
 			"id": "snowscape",
@@ -14169,8 +14149,7 @@
 				}
 			},
 			"weather": "snowscape",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "spikyshield",
@@ -14203,8 +14182,7 @@
 			},
 			"volatileStatus": "spikyshield",
 			"stallingMove": true,
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "spiritshackle",
@@ -14225,7 +14203,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100
@@ -14252,8 +14229,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"willCrit": true,
-			"nonGhostTarget": ""
+			"willCrit": true
 		},
 		{
 			"id": "strengthsap",
@@ -14278,8 +14254,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "stuffcheeks",
@@ -14302,8 +14277,7 @@
 				"onHit",
 				"onTry"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "syrupbomb",
@@ -14335,7 +14309,6 @@
 					"duration": 4
 				}
 			},
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -14367,8 +14340,7 @@
 				"spe": -2
 			},
 			"status": "psn",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "trickortreat",
@@ -14393,8 +14365,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "tropkick",
@@ -14416,7 +14387,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -14450,8 +14420,7 @@
 				"condition.onStart"
 			],
 			"slotCondition": "Wish",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "accelerock",
@@ -14472,8 +14441,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "acidarmor",
@@ -14496,8 +14464,7 @@
 			"boosts": {
 				"def": 2
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "acidspray",
@@ -14519,7 +14486,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -14551,8 +14517,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"basePowerCallback"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "acupressure",
@@ -14573,8 +14538,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "aerialace",
@@ -14597,8 +14561,7 @@
 				"slicing": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "afteryou",
@@ -14620,8 +14583,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "agility",
@@ -14644,8 +14606,7 @@
 			"boosts": {
 				"spe": 2
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "aircutter",
@@ -14667,8 +14628,7 @@
 				"wind": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "airslash",
@@ -14691,7 +14651,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 30,
@@ -14720,7 +14679,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100
@@ -14754,8 +14712,7 @@
 					"duration": 2
 				}
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "amnesia",
@@ -14778,8 +14735,7 @@
 			"boosts": {
 				"spd": 2
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "ancientpower",
@@ -14800,7 +14756,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -14835,8 +14790,7 @@
 				"slicing": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "aquajet",
@@ -14857,8 +14811,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "aquaring",
@@ -14882,8 +14835,7 @@
 				"condition.onStart"
 			],
 			"volatileStatus": "aquaring",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "aquastep",
@@ -14906,7 +14858,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -14937,8 +14888,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "armorcannon",
@@ -14958,7 +14908,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"self": {
 				"boosts": {
 					"def": -1,
@@ -14987,8 +14936,7 @@
 			"boosts": {
 				"spd": 1
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "assurance",
@@ -15011,8 +14959,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"basePowerCallback"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "attract",
@@ -15042,8 +14989,7 @@
 				"onTryImmunity"
 			],
 			"volatileStatus": "attract",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "aurasphere",
@@ -15066,8 +15012,7 @@
 				"pulse": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "aurawheel",
@@ -15090,7 +15035,6 @@
 				"onModifyType",
 				"onTry"
 			],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -15137,8 +15081,7 @@
 				}
 			},
 			"sideCondition": "auroraveil",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "avalanche",
@@ -15161,8 +15104,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"basePowerCallback"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "axekick",
@@ -15186,7 +15128,6 @@
 			"customHooks": [
 				"onMoveFail"
 			],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 30,
@@ -15218,8 +15159,7 @@
 			"boosts": {
 				"atk": -1
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "barbbarrage",
@@ -15242,7 +15182,6 @@
 			"customHooks": [
 				"onBasePower"
 			],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 50,
@@ -15271,7 +15210,6 @@
 			],
 			"selfSwitch": "copyvolatile",
 			"ignoreImmunity": true,
-			"nonGhostTarget": "",
 			"self": {}
 		},
 		{
@@ -15296,8 +15234,7 @@
 			"customHooks": [
 				"basePowerCallback",
 				"onModifyMove"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "bellydrum",
@@ -15319,8 +15256,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "bind",
@@ -15353,8 +15289,7 @@
 					}
 				}
 			},
-			"volatileStatus": "partiallytrapped",
-			"nonGhostTarget": ""
+			"volatileStatus": "partiallytrapped"
 		},
 		{
 			"id": "bite",
@@ -15377,7 +15312,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 30,
@@ -15410,8 +15344,7 @@
 			"drain": [
 				1,
 				2
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "bittermalice",
@@ -15432,7 +15365,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -15462,7 +15394,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"self": {
 				"volatileStatus": "mustrecharge"
 			}
@@ -15487,7 +15418,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -15517,7 +15447,6 @@
 			"customHooks": [
 				"onModifyMove"
 			],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -15546,8 +15475,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "bodypress",
@@ -15568,8 +15496,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"overrideOffensiveStat": "def",
-			"nonGhostTarget": ""
+			"overrideOffensiveStat": "def"
 		},
 		{
 			"id": "bodyslam",
@@ -15593,7 +15520,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 30,
@@ -15621,8 +15547,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "bounce",
@@ -15659,7 +15584,6 @@
 					"duration": 2
 				}
 			},
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 30,
@@ -15691,8 +15615,7 @@
 			"recoil": [
 				33,
 				100
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "breakingswipe",
@@ -15713,7 +15636,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -15744,8 +15666,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onTryHit"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "brutalswing",
@@ -15766,8 +15687,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "bugbite",
@@ -15790,8 +15710,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onHit"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "bugbuzz",
@@ -15814,7 +15733,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -15846,8 +15764,7 @@
 				"atk": 1,
 				"def": 1
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "bulldoze",
@@ -15869,7 +15786,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -15899,8 +15815,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "bulletseed",
@@ -15925,8 +15840,7 @@
 			"multihit": [
 				2,
 				5
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "burningjealousy",
@@ -15947,7 +15861,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100
@@ -15976,8 +15889,7 @@
 				"spa": 1,
 				"spd": 1
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "ceaselessedge",
@@ -16003,7 +15915,6 @@
 				"onAfterHit",
 				"onAfterSubDamage"
 			],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{}
 			]
@@ -16037,8 +15948,7 @@
 				"spd": 1
 			},
 			"volatileStatus": "charge",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "chargebeam",
@@ -16059,7 +15969,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 70,
@@ -16095,8 +16004,7 @@
 			"boosts": {
 				"atk": -2
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "chillingwater",
@@ -16116,7 +16024,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -16159,8 +16066,7 @@
 			},
 			"weather": "snowscape",
 			"selfSwitch": true,
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "circlethrow",
@@ -16184,8 +16090,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"forceSwitch": true,
-			"nonGhostTarget": ""
+			"forceSwitch": true
 		},
 		{
 			"id": "clangingscales",
@@ -16208,7 +16113,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"selfBoost": {
 				"boosts": {
 					"def": -1
@@ -16235,8 +16139,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onHit"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "closecombat",
@@ -16258,7 +16161,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"self": {
 				"boosts": {
 					"def": -1,
@@ -16289,8 +16191,7 @@
 				"atk": 1,
 				"def": 1
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "coil",
@@ -16315,8 +16216,7 @@
 				"def": 1,
 				"accuracy": 1
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "comeuppance",
@@ -16341,8 +16241,7 @@
 				"damageCallback",
 				"onModifyTarget",
 				"onTry"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "confuseray",
@@ -16365,8 +16264,7 @@
 			"hasCustomCode": false,
 			"customHooks": [],
 			"volatileStatus": "confusion",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "copycat",
@@ -16392,8 +16290,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "cosmicpower",
@@ -16417,8 +16314,7 @@
 				"def": 1,
 				"spd": 1
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "cottonguard",
@@ -16441,8 +16337,7 @@
 			"boosts": {
 				"def": 3
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "cottonspore",
@@ -16468,8 +16363,7 @@
 			"boosts": {
 				"spe": -2
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "counter",
@@ -16503,8 +16397,7 @@
 				"counter": {
 					"duration": 1
 				}
-			},
-			"nonGhostTarget": ""
+			}
 		},
 		{
 			"id": "courtchange",
@@ -16526,8 +16419,7 @@
 			"customHooks": [
 				"onHitField"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "covet",
@@ -16552,8 +16444,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onAfterHit"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "crosschop",
@@ -16574,8 +16465,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "crosspoison",
@@ -16598,7 +16488,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -16627,7 +16516,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 20,
@@ -16636,34 +16524,6 @@
 					}
 				}
 			]
-		},
-		{
-			"id": "curse",
-			"name": "Curse",
-			"num": 174,
-			"type": "Ghost",
-			"category": "Status",
-			"basePower": 0,
-			"accuracy": true,
-			"pp": 10,
-			"priority": 0,
-			"target": "normal",
-			"critRatio": 1,
-			"flags": {
-				"bypasssub": 1,
-				"metronome": 1
-			},
-			"hasCustomCode": true,
-			"customHooks": [
-				"condition.onResidual",
-				"condition.onStart",
-				"onHit",
-				"onModifyMove",
-				"onTryHit"
-			],
-			"volatileStatus": "curse",
-			"ignoreImmunity": true,
-			"nonGhostTarget": "self"
 		},
 		{
 			"id": "darkestlariat",
@@ -16686,8 +16546,7 @@
 			"hasCustomCode": false,
 			"customHooks": [],
 			"ignoreDefensive": true,
-			"ignoreEvasion": true,
-			"nonGhostTarget": ""
+			"ignoreEvasion": true
 		},
 		{
 			"id": "darkpulse",
@@ -16710,7 +16569,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 20,
@@ -16736,8 +16594,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "decorate",
@@ -16760,8 +16617,7 @@
 				"atk": 2,
 				"spa": 2
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "defog",
@@ -16786,8 +16642,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "destinybond",
@@ -16815,8 +16670,7 @@
 				"onPrepareHit"
 			],
 			"volatileStatus": "destinybond",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "detect",
@@ -16846,8 +16700,7 @@
 			},
 			"volatileStatus": "protect",
 			"stallingMove": true,
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "dig",
@@ -16883,8 +16736,7 @@
 				"dig": {
 					"duration": 2
 				}
-			},
-			"nonGhostTarget": ""
+			}
 		},
 		{
 			"id": "discharge",
@@ -16905,7 +16757,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 30,
@@ -16948,8 +16799,7 @@
 				"dive": {
 					"duration": 2
 				}
-			},
-			"nonGhostTarget": ""
+			}
 		},
 		{
 			"id": "doubleedge",
@@ -16974,8 +16824,7 @@
 			"recoil": [
 				33,
 				100
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "doublehit",
@@ -16997,8 +16846,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"multihit": 2,
-			"nonGhostTarget": ""
+			"multihit": 2
 		},
 		{
 			"id": "doubleteam",
@@ -17021,8 +16869,7 @@
 			"boosts": {
 				"evasion": 1
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "dracometeor",
@@ -17043,7 +16890,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"self": {
 				"boosts": {
 					"spa": -2
@@ -17073,8 +16919,7 @@
 				"atk": 1,
 				"spe": 1
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "dragondarts",
@@ -17097,8 +16942,7 @@
 			"hasCustomCode": false,
 			"customHooks": [],
 			"multihit": 2,
-			"smartTarget": true,
-			"nonGhostTarget": ""
+			"smartTarget": true
 		},
 		{
 			"id": "dragonpulse",
@@ -17120,8 +16964,7 @@
 				"pulse": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "dragonrush",
@@ -17144,7 +16987,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 20,
@@ -17174,8 +17016,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"forceSwitch": true,
-			"nonGhostTarget": ""
+			"forceSwitch": true
 		},
 		{
 			"id": "drainingkiss",
@@ -17201,8 +17042,7 @@
 			"drain": [
 				3,
 				4
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "drainpunch",
@@ -17229,8 +17069,7 @@
 			"drain": [
 				1,
 				2
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "drillpeck",
@@ -17252,8 +17091,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "drillrun",
@@ -17274,8 +17112,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "drumbeating",
@@ -17295,7 +17132,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -17325,8 +17161,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"multihit": 2,
-			"nonGhostTarget": ""
+			"multihit": 2
 		},
 		{
 			"id": "dynamicpunch",
@@ -17349,7 +17184,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -17377,7 +17211,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -17406,8 +17239,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "eerieimpulse",
@@ -17432,8 +17264,7 @@
 			"boosts": {
 				"spa": -2
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "eeriespell",
@@ -17456,7 +17287,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100
@@ -17499,8 +17329,7 @@
 				}
 			},
 			"terrain": "electricterrain",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "electroball",
@@ -17523,8 +17352,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"basePowerCallback"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "electroshot",
@@ -17547,8 +17375,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onTryMove"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "electroweb",
@@ -17569,7 +17396,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -17602,8 +17428,7 @@
 			"customHooks": [
 				"damageCallback",
 				"onTryImmunity"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "endure",
@@ -17635,8 +17460,7 @@
 			},
 			"volatileStatus": "endure",
 			"stallingMove": true,
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "energyball",
@@ -17658,7 +17482,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -17692,8 +17515,7 @@
 				"onHit",
 				"onTryHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "eruption",
@@ -17715,8 +17537,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"basePowerCallback"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "expandingforce",
@@ -17739,8 +17560,7 @@
 			"customHooks": [
 				"onBasePower",
 				"onModifyMove"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "explosion",
@@ -17762,8 +17582,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"selfdestruct": "always",
-			"nonGhostTarget": ""
+			"selfdestruct": "always"
 		},
 		{
 			"id": "extrasensory",
@@ -17784,7 +17603,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -17811,8 +17629,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "facade",
@@ -17835,8 +17652,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onBasePower"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "fairylock",
@@ -17866,8 +17682,7 @@
 				}
 			},
 			"pseudoWeather": "fairylock",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "faketears",
@@ -17893,8 +17708,7 @@
 			"boosts": {
 				"spd": -2
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "featherdance",
@@ -17921,8 +17735,7 @@
 			"boosts": {
 				"atk": -2
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "feint",
@@ -17943,8 +17756,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"breaksProtect": true,
-			"nonGhostTarget": ""
+			"breaksProtect": true
 		},
 		{
 			"id": "fellstinger",
@@ -17967,8 +17779,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onAfterMoveSecondarySelf"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "ficklebeam",
@@ -17990,8 +17801,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onBasePower"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "fierydance",
@@ -18013,7 +17823,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 50,
@@ -18046,8 +17855,7 @@
 			"customHooks": [
 				"damageCallback"
 			],
-			"selfdestruct": "ifHit",
-			"nonGhostTarget": ""
+			"selfdestruct": "ifHit"
 		},
 		{
 			"id": "fireblast",
@@ -18068,7 +17876,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -18097,7 +17904,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -18130,7 +17936,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -18168,8 +17973,7 @@
 					}
 				}
 			},
-			"volatileStatus": "partiallytrapped",
-			"nonGhostTarget": ""
+			"volatileStatus": "partiallytrapped"
 		},
 		{
 			"id": "fissure",
@@ -18191,8 +17995,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"ohko": true,
-			"nonGhostTarget": ""
+			"ohko": true
 		},
 		{
 			"id": "flail",
@@ -18215,8 +18018,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"basePowerCallback"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "flamecharge",
@@ -18238,7 +18040,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -18269,7 +18070,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -18302,7 +18102,6 @@
 				33,
 				100
 			],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -18329,7 +18128,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -18364,8 +18162,7 @@
 				"spa": 1
 			},
 			"volatileStatus": "confusion",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "fling",
@@ -18390,8 +18187,7 @@
 			"customHooks": [
 				"condition.onUpdate",
 				"onPrepareHit"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "flipturn",
@@ -18413,8 +18209,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"selfSwitch": true,
-			"nonGhostTarget": ""
+			"selfSwitch": true
 		},
 		{
 			"id": "flowertrick",
@@ -18435,8 +18230,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"willCrit": true,
-			"nonGhostTarget": ""
+			"willCrit": true
 		},
 		{
 			"id": "fly",
@@ -18472,8 +18266,7 @@
 				"fly": {
 					"duration": 2
 				}
-			},
-			"nonGhostTarget": ""
+			}
 		},
 		{
 			"id": "flyingpress",
@@ -18500,8 +18293,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onEffectiveness"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "focusblast",
@@ -18523,7 +18315,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -18555,8 +18346,7 @@
 				"condition.onStart"
 			],
 			"volatileStatus": "focusenergy",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "focuspunch",
@@ -18592,8 +18382,7 @@
 				"focuspunch": {
 					"duration": 1
 				}
-			},
-			"nonGhostTarget": ""
+			}
 		},
 		{
 			"id": "followme",
@@ -18623,8 +18412,7 @@
 				}
 			},
 			"volatileStatus": "followme",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "forestscurse",
@@ -18649,8 +18437,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "foulplay",
@@ -18672,8 +18459,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"overrideOffensivePokemon": "target",
-			"nonGhostTarget": ""
+			"overrideOffensivePokemon": "target"
 		},
 		{
 			"id": "frenzyplant",
@@ -18696,7 +18482,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"self": {
 				"volatileStatus": "mustrecharge"
 			}
@@ -18720,8 +18505,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"willCrit": true,
-			"nonGhostTarget": ""
+			"willCrit": true
 		},
 		{
 			"id": "futuresight",
@@ -18744,8 +18528,7 @@
 			"customHooks": [
 				"onTry"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "gastroacid",
@@ -18773,8 +18556,7 @@
 				"onTryHit"
 			],
 			"volatileStatus": "gastroacid",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "gigadrain",
@@ -18799,8 +18581,7 @@
 			"drain": [
 				1,
 				2
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "gigaimpact",
@@ -18823,7 +18604,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"self": {
 				"volatileStatus": "mustrecharge"
 			}
@@ -18847,8 +18627,7 @@
 				"cantusetwice": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "glaiverush",
@@ -18875,7 +18654,6 @@
 				"condition.onSourceModifyDamage",
 				"condition.onStart"
 			],
-			"nonGhostTarget": "",
 			"self": {
 				"volatileStatus": "glaiverush"
 			}
@@ -18901,8 +18679,7 @@
 			"hasCustomCode": false,
 			"customHooks": [],
 			"status": "par",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "grassknot",
@@ -18927,8 +18704,7 @@
 			"customHooks": [
 				"basePowerCallback",
 				"onTryHit"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "grassyglide",
@@ -18951,8 +18727,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onModifyPriority"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "grassyterrain",
@@ -18989,8 +18764,7 @@
 				}
 			},
 			"terrain": "grassyterrain",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "gravity",
@@ -19029,8 +18803,7 @@
 				}
 			},
 			"pseudoWeather": "gravity",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "guardsplit",
@@ -19053,8 +18826,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "guardswap",
@@ -19079,8 +18851,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "guillotine",
@@ -19102,8 +18873,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"ohko": true,
-			"nonGhostTarget": ""
+			"ohko": true
 		},
 		{
 			"id": "gunkshot",
@@ -19124,7 +18894,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 30,
@@ -19154,8 +18923,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"basePowerCallback"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "hammerarm",
@@ -19178,7 +18946,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"self": {
 				"boosts": {
 					"spe": -1
@@ -19206,8 +18973,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"basePowerCallback"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "haze",
@@ -19229,8 +18995,7 @@
 			"customHooks": [
 				"onHitField"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "headlongrush",
@@ -19253,7 +19018,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"self": {
 				"boosts": {
 					"def": -1,
@@ -19284,8 +19048,7 @@
 			"recoil": [
 				1,
 				2
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "healbell",
@@ -19310,8 +19073,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "healingwish",
@@ -19338,8 +19100,7 @@
 			],
 			"slotCondition": "healingwish",
 			"selfdestruct": "ifHit",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "healpulse",
@@ -19366,8 +19127,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "heatcrash",
@@ -19393,8 +19153,7 @@
 			"customHooks": [
 				"basePowerCallback",
 				"onTryHit"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "heatwave",
@@ -19416,7 +19175,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -19448,8 +19206,7 @@
 			"customHooks": [
 				"basePowerCallback",
 				"onTryHit"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "helpinghand",
@@ -19481,8 +19238,7 @@
 				}
 			},
 			"volatileStatus": "helpinghand",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "hex",
@@ -19504,8 +19260,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"basePowerCallback"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "highhorsepower",
@@ -19526,8 +19281,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "highjumpkick",
@@ -19551,8 +19305,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onMoveFail"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "horndrill",
@@ -19574,8 +19327,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"ohko": true,
-			"nonGhostTarget": ""
+			"ohko": true
 		},
 		{
 			"id": "hornleech",
@@ -19601,8 +19353,7 @@
 			"drain": [
 				1,
 				2
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "hurricane",
@@ -19627,7 +19378,6 @@
 			"customHooks": [
 				"onModifyMove"
 			],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 30,
@@ -19655,7 +19405,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"self": {
 				"volatileStatus": "mustrecharge"
 			}
@@ -19678,8 +19427,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "hyperbeam",
@@ -19701,7 +19449,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"self": {
 				"volatileStatus": "mustrecharge"
 			}
@@ -19726,8 +19473,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "hypnosis",
@@ -19750,8 +19496,7 @@
 			"hasCustomCode": false,
 			"customHooks": [],
 			"status": "slp",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "icebeam",
@@ -19772,7 +19517,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -19801,7 +19545,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -19834,7 +19577,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"self": {
 				"boosts": {
 					"spe": -1
@@ -19862,7 +19604,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -19888,8 +19629,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "icespinner",
@@ -19913,8 +19653,7 @@
 			"customHooks": [
 				"onAfterHit",
 				"onAfterSubDamage"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "iciclecrash",
@@ -19935,7 +19674,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 30,
@@ -19965,8 +19703,7 @@
 			"multihit": [
 				2,
 				5
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "icywind",
@@ -19988,7 +19725,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -20023,8 +19759,7 @@
 				"condition.onStart"
 			],
 			"volatileStatus": "imprison",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "inferno",
@@ -20045,7 +19780,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -20084,8 +19818,7 @@
 					}
 				}
 			},
-			"volatileStatus": "partiallytrapped",
-			"nonGhostTarget": ""
+			"volatileStatus": "partiallytrapped"
 		},
 		{
 			"id": "ingrain",
@@ -20112,8 +19845,7 @@
 				"condition.onTrapPokemon"
 			],
 			"volatileStatus": "ingrain",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "instruct",
@@ -20137,8 +19869,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "irondefense",
@@ -20161,8 +19892,7 @@
 			"boosts": {
 				"def": 2
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "irontail",
@@ -20184,7 +19914,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 30,
@@ -20216,8 +19945,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onHit"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "jetpunch",
@@ -20238,8 +19966,7 @@
 				"punch": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "knockoff",
@@ -20263,8 +19990,7 @@
 			"customHooks": [
 				"onAfterHit",
 				"onBasePower"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "kowtowcleave",
@@ -20286,8 +20012,7 @@
 				"slicing": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "lashout",
@@ -20310,8 +20035,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onBasePower"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "lastresort",
@@ -20334,8 +20058,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onTry"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "lastrespects",
@@ -20357,8 +20080,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"basePowerCallback"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "lavaplume",
@@ -20379,7 +20101,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 30,
@@ -20407,8 +20128,7 @@
 				"slicing": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "leafstorm",
@@ -20429,7 +20149,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"self": {
 				"boosts": {
 					"spa": -2
@@ -20460,8 +20179,7 @@
 			"drain": [
 				1,
 				2
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "leechseed",
@@ -20488,8 +20206,7 @@
 				"onTryImmunity"
 			],
 			"volatileStatus": "leechseed",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "lifedew",
@@ -20514,8 +20231,7 @@
 				1,
 				4
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "lightscreen",
@@ -20551,8 +20267,7 @@
 				}
 			},
 			"sideCondition": "lightscreen",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "liquidation",
@@ -20574,7 +20289,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 20,
@@ -20613,8 +20327,7 @@
 					"duration": 2
 				}
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "lowkick",
@@ -20638,8 +20351,7 @@
 			"customHooks": [
 				"basePowerCallback",
 				"onTryHit"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "lowsweep",
@@ -20661,7 +20373,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -20690,7 +20401,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -20720,7 +20430,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -20750,8 +20459,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "magicpowder",
@@ -20777,8 +20485,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "magicroom",
@@ -20814,8 +20521,7 @@
 				}
 			},
 			"pseudoWeather": "magicroom",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "magneticflux",
@@ -20839,8 +20545,7 @@
 			"customHooks": [
 				"onHitSide"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "magnetrise",
@@ -20872,8 +20577,7 @@
 				}
 			},
 			"volatileStatus": "magnetrise",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "matchagotcha",
@@ -20901,7 +20605,6 @@
 				2
 			],
 			"thawsTarget": true,
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 20,
@@ -20930,8 +20633,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "megahorn",
@@ -20952,8 +20654,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "megakick",
@@ -20974,8 +20675,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "memento",
@@ -21001,8 +20701,7 @@
 				"spa": -2
 			},
 			"selfdestruct": "ifHit",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "metalburst",
@@ -21027,8 +20726,7 @@
 				"damageCallback",
 				"onModifyTarget",
 				"onTry"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "metalsound",
@@ -21056,8 +20754,7 @@
 			"boosts": {
 				"spd": -2
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "meteorbeam",
@@ -21080,8 +20777,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onTryMove"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "meteormash",
@@ -21104,7 +20800,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 20,
@@ -21142,8 +20837,7 @@
 				"evasion": 2
 			},
 			"volatileStatus": "minimize",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "mirrorcoat",
@@ -21175,8 +20869,7 @@
 				"mirrorcoat": {
 					"duration": 1
 				}
-			},
-			"nonGhostTarget": ""
+			}
 		},
 		{
 			"id": "mistyexplosion",
@@ -21199,8 +20892,7 @@
 			"customHooks": [
 				"onBasePower"
 			],
-			"selfdestruct": "always",
-			"nonGhostTarget": ""
+			"selfdestruct": "always"
 		},
 		{
 			"id": "mistyterrain",
@@ -21238,8 +20930,7 @@
 				}
 			},
 			"terrain": "mistyterrain",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "moonlight",
@@ -21262,8 +20953,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "morningsun",
@@ -21286,8 +20976,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "mortalspin",
@@ -21312,7 +21001,6 @@
 				"onAfterHit",
 				"onAfterSubDamage"
 			],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -21340,7 +21028,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 30,
@@ -21369,7 +21056,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -21398,7 +21084,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -21427,7 +21112,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -21458,8 +21142,7 @@
 			"boosts": {
 				"spa": 2
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "nightshade",
@@ -21480,8 +21163,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"damage": "level",
-			"nonGhostTarget": ""
+			"damage": "level"
 		},
 		{
 			"id": "nobleroar",
@@ -21509,8 +21191,7 @@
 				"atk": -1,
 				"spa": -1
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "noretreat",
@@ -21542,8 +21223,7 @@
 				"spe": 1
 			},
 			"volatileStatus": "noretreat",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "nuzzle",
@@ -21565,7 +21245,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -21594,7 +21273,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"self": {
 				"volatileStatus": "lockedmove"
 			}
@@ -21618,8 +21296,7 @@
 				"bypasssub": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "overheat",
@@ -21640,7 +21317,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"self": {
 				"boosts": {
 					"spa": -2
@@ -21669,8 +21345,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "paraboliccharge",
@@ -21695,8 +21370,7 @@
 			"drain": [
 				1,
 				2
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "partingshot",
@@ -21723,8 +21397,7 @@
 				"onHit"
 			],
 			"selfSwitch": true,
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "payback",
@@ -21747,8 +21420,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"basePowerCallback"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "perishsong",
@@ -21779,8 +21451,7 @@
 					"duration": 4
 				}
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "petalblizzard",
@@ -21801,8 +21472,7 @@
 				"wind": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "petaldance",
@@ -21826,7 +21496,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"self": {
 				"volatileStatus": "lockedmove"
 			}
@@ -21861,8 +21530,7 @@
 					"duration": 2
 				}
 			},
-			"breaksProtect": true,
-			"nonGhostTarget": ""
+			"breaksProtect": true
 		},
 		{
 			"id": "pinmissile",
@@ -21886,8 +21554,7 @@
 			"multihit": [
 				2,
 				5
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "playrough",
@@ -21909,7 +21576,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -21941,8 +21607,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onHit"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "poisonfang",
@@ -21965,7 +21630,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 50,
@@ -21993,7 +21657,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 30,
@@ -22023,8 +21686,7 @@
 			"hasCustomCode": false,
 			"customHooks": [],
 			"status": "psn",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "pollenpuff",
@@ -22050,8 +21712,7 @@
 				"onHit",
 				"onTryHit",
 				"onTryMove"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "poltergeist",
@@ -22074,8 +21735,7 @@
 			"customHooks": [
 				"onTry",
 				"onTryHit"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "populationbomb",
@@ -22097,8 +21757,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"multihit": 10,
-			"nonGhostTarget": ""
+			"multihit": 10
 		},
 		{
 			"id": "pounce",
@@ -22119,7 +21778,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -22148,8 +21806,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "powergem",
@@ -22169,8 +21826,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "powersplit",
@@ -22193,8 +21849,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "powerswap",
@@ -22219,8 +21874,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "powertrick",
@@ -22246,8 +21900,7 @@
 				"condition.onStart"
 			],
 			"volatileStatus": "powertrick",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "powertrip",
@@ -22270,8 +21923,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"basePowerCallback"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "powerwhip",
@@ -22292,8 +21944,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "psychic",
@@ -22314,7 +21965,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -22346,8 +21996,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onTryHit"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "psychicnoise",
@@ -22370,7 +22019,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -22413,8 +22061,7 @@
 				}
 			},
 			"terrain": "psychicterrain",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "psychocut",
@@ -22435,8 +22082,7 @@
 				"slicing": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "psychup",
@@ -22459,8 +22105,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "psyshock",
@@ -22481,8 +22126,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"overrideDefensiveStat": "def",
-			"nonGhostTarget": ""
+			"overrideDefensiveStat": "def"
 		},
 		{
 			"id": "pyroball",
@@ -22504,7 +22148,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -22532,8 +22175,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "quickattack",
@@ -22554,8 +22196,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "quickguard",
@@ -22585,8 +22226,7 @@
 				}
 			},
 			"sideCondition": "quickguard",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "quiverdance",
@@ -22612,8 +22252,7 @@
 				"spd": 1,
 				"spe": 1
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "ragepowder",
@@ -22644,8 +22283,7 @@
 				}
 			},
 			"volatileStatus": "ragepowder",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "ragingbull",
@@ -22668,8 +22306,7 @@
 			"customHooks": [
 				"onModifyType",
 				"onTryHit"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "ragingfury",
@@ -22689,7 +22326,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"self": {
 				"volatileStatus": "lockedmove"
 			}
@@ -22722,8 +22358,7 @@
 				}
 			},
 			"weather": "RainDance",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "rapidspin",
@@ -22748,7 +22383,6 @@
 				"onAfterHit",
 				"onAfterSubDamage"
 			],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -22781,7 +22415,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 50,
@@ -22814,8 +22447,7 @@
 				1,
 				2
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "recycle",
@@ -22837,8 +22469,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "reflect",
@@ -22874,8 +22505,7 @@
 				}
 			},
 			"sideCondition": "reflect",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "reflecttype",
@@ -22899,8 +22529,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "rest",
@@ -22924,8 +22553,7 @@
 				"onHit",
 				"onTry"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "reversal",
@@ -22948,8 +22576,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"basePowerCallback"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "revivalblessing",
@@ -22978,8 +22605,7 @@
 			},
 			"slotCondition": "revivalblessing",
 			"selfSwitch": true,
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "risingvoltage",
@@ -23001,8 +22627,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"basePowerCallback"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "roar",
@@ -23029,8 +22654,7 @@
 			"hasCustomCode": false,
 			"customHooks": [],
 			"forceSwitch": true,
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "rockblast",
@@ -23055,8 +22679,7 @@
 			"multihit": [
 				2,
 				5
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "rockpolish",
@@ -23079,8 +22702,7 @@
 			"boosts": {
 				"spe": 2
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "rockslide",
@@ -23101,7 +22723,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 30,
@@ -23128,7 +22749,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -23159,7 +22779,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"self": {
 				"volatileStatus": "mustrecharge"
 			}
@@ -23186,8 +22805,7 @@
 				"onHit",
 				"onTryHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "roost",
@@ -23221,7 +22839,6 @@
 				2
 			],
 			"ignoreImmunity": true,
-			"nonGhostTarget": "",
 			"self": {
 				"volatileStatus": "roost"
 			}
@@ -23249,8 +22866,7 @@
 			"customHooks": [
 				"basePowerCallback",
 				"onTry"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "sacredsword",
@@ -23274,8 +22890,7 @@
 			"hasCustomCode": false,
 			"customHooks": [],
 			"ignoreDefensive": true,
-			"ignoreEvasion": true,
-			"nonGhostTarget": ""
+			"ignoreEvasion": true
 		},
 		{
 			"id": "safeguard",
@@ -23312,8 +22927,7 @@
 				}
 			},
 			"sideCondition": "safeguard",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "sandtomb",
@@ -23345,8 +22959,7 @@
 					}
 				}
 			},
-			"volatileStatus": "partiallytrapped",
-			"nonGhostTarget": ""
+			"volatileStatus": "partiallytrapped"
 		},
 		{
 			"id": "scald",
@@ -23369,7 +22982,6 @@
 			"hasCustomCode": false,
 			"customHooks": [],
 			"thawsTarget": true,
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 30,
@@ -23400,7 +23012,6 @@
 				2,
 				5
 			],
-			"nonGhostTarget": "",
 			"selfBoost": {
 				"boosts": {
 					"def": -1,
@@ -23432,8 +23043,7 @@
 			"boosts": {
 				"spe": -2
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "scorchingsands",
@@ -23456,7 +23066,6 @@
 			"hasCustomCode": false,
 			"customHooks": [],
 			"thawsTarget": true,
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 30,
@@ -23490,8 +23099,7 @@
 			"boosts": {
 				"def": -2
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "seedbomb",
@@ -23512,8 +23120,7 @@
 				"bullet": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "seismictoss",
@@ -23536,8 +23143,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"damage": "level",
-			"nonGhostTarget": ""
+			"damage": "level"
 		},
 		{
 			"id": "selfdestruct",
@@ -23559,8 +23165,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"selfdestruct": "always",
-			"nonGhostTarget": ""
+			"selfdestruct": "always"
 		},
 		{
 			"id": "shadowball",
@@ -23582,7 +23187,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 20,
@@ -23612,8 +23216,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "shadowsneak",
@@ -23634,8 +23237,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "shedtail",
@@ -23658,7 +23260,6 @@
 			"volatileStatus": "substitute",
 			"selfSwitch": "shedtail",
 			"ignoreImmunity": true,
-			"nonGhostTarget": "",
 			"self": {}
 		},
 		{
@@ -23680,8 +23281,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"ohko": "Ice",
-			"nonGhostTarget": ""
+			"ohko": "Ice"
 		},
 		{
 			"id": "shellsidearm",
@@ -23707,7 +23307,6 @@
 				"onModifyMove",
 				"onPrepareHit"
 			],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 20,
@@ -23740,8 +23339,7 @@
 				"spa": 2,
 				"spe": 2
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "shelter",
@@ -23764,8 +23362,7 @@
 			"boosts": {
 				"def": 2
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "shiftgear",
@@ -23789,8 +23386,7 @@
 				"spe": 2,
 				"atk": 1
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "simplebeam",
@@ -23816,8 +23412,7 @@
 				"onHit",
 				"onTryHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "sing",
@@ -23842,8 +23437,7 @@
 			"hasCustomCode": false,
 			"customHooks": [],
 			"status": "slp",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "skillswap",
@@ -23868,8 +23462,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "skittersmack",
@@ -23891,7 +23484,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -23926,7 +23518,6 @@
 			"customHooks": [
 				"onTryMove"
 			],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 30,
@@ -23957,8 +23548,7 @@
 				1,
 				2
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "sleeppowder",
@@ -23982,8 +23572,7 @@
 			"hasCustomCode": false,
 			"customHooks": [],
 			"status": "slp",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "sleeptalk",
@@ -24010,8 +23599,7 @@
 				"onHit",
 				"onTry"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "sludgebomb",
@@ -24033,7 +23621,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 30,
@@ -24060,7 +23647,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -24091,8 +23677,7 @@
 				"condition.onRestart",
 				"condition.onStart"
 			],
-			"volatileStatus": "smackdown",
-			"nonGhostTarget": ""
+			"volatileStatus": "smackdown"
 		},
 		{
 			"id": "smartstrike",
@@ -24113,8 +23698,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "snarl",
@@ -24136,7 +23720,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -24168,7 +23751,6 @@
 			"customHooks": [
 				"onTry"
 			],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 30,
@@ -24199,8 +23781,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "softboiled",
@@ -24225,8 +23806,7 @@
 				1,
 				2
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "solarbeam",
@@ -24252,8 +23832,7 @@
 			"customHooks": [
 				"onBasePower",
 				"onTryMove"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "solarblade",
@@ -24281,8 +23860,7 @@
 			"customHooks": [
 				"onBasePower",
 				"onTryMove"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "sparklingaria",
@@ -24307,7 +23885,6 @@
 			"customHooks": [
 				"onAfterMove"
 			],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -24338,8 +23915,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "spicyextract",
@@ -24364,8 +23940,7 @@
 				"atk": 2,
 				"def": -2
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "spikes",
@@ -24392,8 +23967,7 @@
 				"condition.onSwitchIn"
 			],
 			"sideCondition": "spikes",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "spiritbreak",
@@ -24414,7 +23988,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -24447,8 +24020,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "spitup",
@@ -24471,8 +24043,7 @@
 				"basePowerCallback",
 				"onAfterMove",
 				"onTry"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "spore",
@@ -24496,8 +24067,7 @@
 			"hasCustomCode": false,
 			"customHooks": [],
 			"status": "slp",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "stealthrock",
@@ -24522,8 +24092,7 @@
 				"condition.onSwitchIn"
 			],
 			"sideCondition": "stealthrock",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "steelbeam",
@@ -24544,8 +24113,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onMoveFail"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "steelroller",
@@ -24570,8 +24138,7 @@
 				"onAfterSubDamage",
 				"onHit",
 				"onTry"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "steelwing",
@@ -24593,7 +24160,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -24627,8 +24193,7 @@
 				"condition.onSwitchIn"
 			],
 			"sideCondition": "stickyweb",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "stockpile",
@@ -24654,8 +24219,7 @@
 				"onTry"
 			],
 			"volatileStatus": "stockpile",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "stompingtantrum",
@@ -24678,8 +24242,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"basePowerCallback"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "stoneaxe",
@@ -24705,7 +24268,6 @@
 				"onAfterHit",
 				"onAfterSubDamage"
 			],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{}
 			]
@@ -24728,8 +24290,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "storedpower",
@@ -24751,8 +24312,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"basePowerCallback"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "stringshot",
@@ -24777,8 +24337,7 @@
 			"boosts": {
 				"spe": -2
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "struggle",
@@ -24807,8 +24366,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onModifyMove"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "strugglebug",
@@ -24829,7 +24387,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -24861,8 +24418,7 @@
 			"hasCustomCode": false,
 			"customHooks": [],
 			"status": "par",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "substitute",
@@ -24890,8 +24446,7 @@
 				"onTryHit"
 			],
 			"volatileStatus": "substitute",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "suckerpunch",
@@ -24914,8 +24469,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onTry"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "sunnyday",
@@ -24945,8 +24499,7 @@
 				}
 			},
 			"weather": "sunnyday",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "supercellslam",
@@ -24970,8 +24523,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onMoveFail"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "superfang",
@@ -24994,8 +24546,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"damageCallback"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "superpower",
@@ -25017,7 +24568,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"self": {
 				"boosts": {
 					"atk": -1,
@@ -25044,8 +24594,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "swagger",
@@ -25072,8 +24621,7 @@
 				"atk": 2
 			},
 			"volatileStatus": "confusion",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "swallow",
@@ -25097,8 +24645,7 @@
 				"onHit",
 				"onTry"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "sweetkiss",
@@ -25121,8 +24668,7 @@
 			"hasCustomCode": false,
 			"customHooks": [],
 			"volatileStatus": "confusion",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "sweetscent",
@@ -25147,8 +24693,7 @@
 			"boosts": {
 				"evasion": -2
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "switcheroo",
@@ -25174,8 +24719,7 @@
 				"onHit",
 				"onTryImmunity"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "swordsdance",
@@ -25199,8 +24743,7 @@
 			"boosts": {
 				"atk": 2
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "synthesis",
@@ -25223,8 +24766,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "tailslap",
@@ -25249,8 +24791,7 @@
 			"multihit": [
 				2,
 				5
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "tailwind",
@@ -25287,8 +24828,7 @@
 				}
 			},
 			"sideCondition": "tailwind",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "taunt",
@@ -25322,8 +24862,7 @@
 				}
 			},
 			"volatileStatus": "taunt",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "tearfullook",
@@ -25348,8 +24887,7 @@
 				"atk": -1,
 				"spa": -1
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "teatime",
@@ -25371,8 +24909,7 @@
 			"customHooks": [
 				"onHitField"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "teeterdance",
@@ -25395,8 +24932,7 @@
 			"hasCustomCode": false,
 			"customHooks": [],
 			"volatileStatus": "confusion",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "temperflare",
@@ -25419,8 +24955,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"basePowerCallback"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "terrainpulse",
@@ -25444,8 +24979,7 @@
 			"customHooks": [
 				"onModifyMove",
 				"onModifyType"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "thief",
@@ -25470,8 +25004,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onAfterHit"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "thrash",
@@ -25494,7 +25027,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"self": {
 				"volatileStatus": "lockedmove"
 			}
@@ -25530,7 +25062,6 @@
 					"duration": 2
 				}
 			},
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100
@@ -25558,7 +25089,6 @@
 			"customHooks": [
 				"onModifyMove"
 			],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 30,
@@ -25585,7 +25115,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -25614,7 +25143,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -25647,7 +25175,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -25675,8 +25202,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"status": "par",
-			"nonGhostTarget": ""
+			"status": "par"
 		},
 		{
 			"id": "tickle",
@@ -25703,8 +25229,7 @@
 				"atk": -1,
 				"def": -1
 			},
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "tidyup",
@@ -25723,8 +25248,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "topsyturvy",
@@ -25749,8 +25273,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "torchsong",
@@ -25773,7 +25296,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -25811,8 +25333,7 @@
 				"condition.onStart"
 			],
 			"volatileStatus": "torment",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "toxic",
@@ -25835,8 +25356,7 @@
 			"hasCustomCode": false,
 			"customHooks": [],
 			"status": "tox",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "toxicspikes",
@@ -25863,8 +25383,7 @@
 				"condition.onSwitchIn"
 			],
 			"sideCondition": "toxicspikes",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "trailblaze",
@@ -25885,7 +25404,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -25921,8 +25439,7 @@
 			"customHooks": [
 				"onHit"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "triattack",
@@ -25943,7 +25460,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 20
@@ -25974,8 +25490,7 @@
 				"onHit",
 				"onTryImmunity"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "trickroom",
@@ -26011,8 +25526,7 @@
 				}
 			},
 			"pseudoWeather": "trickroom",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "triplearrows",
@@ -26033,7 +25547,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 50,
@@ -26069,8 +25582,7 @@
 			"customHooks": [
 				"basePowerCallback"
 			],
-			"multihit": 3,
-			"nonGhostTarget": ""
+			"multihit": 3
 		},
 		{
 			"id": "twinbeam",
@@ -26090,8 +25602,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"multihit": 2,
-			"nonGhostTarget": ""
+			"multihit": 2
 		},
 		{
 			"id": "upperhand",
@@ -26115,7 +25626,6 @@
 			"customHooks": [
 				"onTry"
 			],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -26157,7 +25667,6 @@
 					"duration": 3
 				}
 			},
-			"nonGhostTarget": "",
 			"self": {
 				"volatileStatus": "uproar"
 			}
@@ -26182,8 +25691,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"selfSwitch": true,
-			"nonGhostTarget": ""
+			"selfSwitch": true
 		},
 		{
 			"id": "vacuumwave",
@@ -26203,8 +25711,7 @@
 				"metronome": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "venoshock",
@@ -26226,8 +25733,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onBasePower"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "voltswitch",
@@ -26248,8 +25754,7 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"selfSwitch": true,
-			"nonGhostTarget": ""
+			"selfSwitch": true
 		},
 		{
 			"id": "volttackle",
@@ -26275,7 +25780,6 @@
 				33,
 				100
 			],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 10,
@@ -26303,7 +25807,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 20,
@@ -26332,7 +25835,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 20,
@@ -26364,8 +25866,7 @@
 			"multihit": [
 				2,
 				5
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "waterspout",
@@ -26387,8 +25888,7 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"basePowerCallback"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "wavecrash",
@@ -26413,8 +25913,7 @@
 			"recoil": [
 				33,
 				100
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "weatherball",
@@ -26438,8 +25937,7 @@
 			"customHooks": [
 				"onModifyMove",
 				"onModifyType"
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "whirlpool",
@@ -26471,8 +25969,7 @@
 					}
 				}
 			},
-			"volatileStatus": "partiallytrapped",
-			"nonGhostTarget": ""
+			"volatileStatus": "partiallytrapped"
 		},
 		{
 			"id": "whirlwind",
@@ -26499,8 +25996,7 @@
 			"hasCustomCode": false,
 			"customHooks": [],
 			"forceSwitch": true,
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "wideguard",
@@ -26530,8 +26026,7 @@
 				}
 			},
 			"sideCondition": "wideguard",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "wildcharge",
@@ -26556,8 +26051,7 @@
 			"recoil": [
 				1,
 				4
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "willowisp",
@@ -26580,8 +26074,7 @@
 			"hasCustomCode": false,
 			"customHooks": [],
 			"status": "brn",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "wonderroom",
@@ -26618,8 +26111,7 @@
 				}
 			},
 			"pseudoWeather": "wonderroom",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "woodhammer",
@@ -26644,8 +26136,7 @@
 			"recoil": [
 				33,
 				100
-			],
-			"nonGhostTarget": ""
+			]
 		},
 		{
 			"id": "worryseed",
@@ -26672,8 +26163,7 @@
 				"onTryHit",
 				"onTryImmunity"
 			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "wrap",
@@ -26706,8 +26196,7 @@
 					}
 				}
 			},
-			"volatileStatus": "partiallytrapped",
-			"nonGhostTarget": ""
+			"volatileStatus": "partiallytrapped"
 		},
 		{
 			"id": "xscissor",
@@ -26729,8 +26218,7 @@
 				"slicing": 1
 			},
 			"hasCustomCode": false,
-			"customHooks": [],
-			"nonGhostTarget": ""
+			"customHooks": []
 		},
 		{
 			"id": "yawn",
@@ -26762,8 +26250,7 @@
 				}
 			},
 			"volatileStatus": "yawn",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
+			"ignoreImmunity": true
 		},
 		{
 			"id": "zapcannon",
@@ -26785,7 +26272,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 100,
@@ -26813,7 +26299,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 20,
@@ -26841,7 +26326,6 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"nonGhostTarget": "",
 			"secondaries": [
 				{
 					"chance": 30,
@@ -27381,6 +26865,19 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onTakeItem"
+			]
+		},
+		{
+			"id": "ejectbutton",
+			"name": "Eject Button",
+			"num": 547,
+			"isBerry": false,
+			"fling": {
+				"basePower": 30
+			},
+			"hasCustomCode": true,
+			"customHooks": [
+				"onAfterMoveSecondary"
 			]
 		},
 		{
@@ -28717,19 +28214,6 @@
 			]
 		},
 		{
-			"id": "ejectbutton",
-			"name": "Eject Button",
-			"num": 547,
-			"isBerry": false,
-			"fling": {
-				"basePower": 30
-			},
-			"hasCustomCode": true,
-			"customHooks": [
-				"onAfterMoveSecondary"
-			]
-		},
-		{
 			"id": "electricseed",
 			"name": "Electric Seed",
 			"num": 881,
@@ -29724,6 +29208,17 @@
 			]
 		},
 		{
+			"id": "emergencyexit",
+			"name": "Emergency Exit",
+			"num": 194,
+			"rating": 1,
+			"flags": {},
+			"hasCustomCode": true,
+			"customHooks": [
+				"onEmergencyExit"
+			]
+		},
+		{
 			"id": "firemane",
 			"name": "Fire Mane",
 			"num": 316,
@@ -29822,6 +29317,17 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onHitProtect"
+			]
+		},
+		{
+			"id": "wimpout",
+			"name": "Wimp Out",
+			"num": 193,
+			"rating": 1,
+			"flags": {},
+			"hasCustomCode": true,
+			"customHooks": [
+				"onEmergencyExit"
 			]
 		},
 		{
@@ -30657,17 +30163,6 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onStart"
-			]
-		},
-		{
-			"id": "emergencyexit",
-			"name": "Emergency Exit",
-			"num": 194,
-			"rating": 1,
-			"flags": {},
-			"hasCustomCode": true,
-			"customHooks": [
-				"onEmergencyExit"
 			]
 		},
 		{
@@ -33611,17 +33106,6 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onTryBoost"
-			]
-		},
-		{
-			"id": "wimpout",
-			"name": "Wimp Out",
-			"num": 193,
-			"rating": 1,
-			"flags": {},
-			"hasCustomCode": true,
-			"customHooks": [
-				"onEmergencyExit"
 			]
 		},
 		{
