@@ -50,11 +50,11 @@ every legal action rather than narrowing. The whole menu is the point: narrowed 
 12` (30 seconds of Python) passes the IKA-140 build. A whole menu under `exact` is IKA-147's
 gigabytes; `tests/test_rust_node.py` holds one such cell under `Budget()` instead.
 
-The run exits 1 when a cell differs by more than `--tolerance`, so a failure is a status
-and not only a line to be read. The exact mask fails it only under `matrix`: under `fast`
-Python marks a cell inexact for "damage rolls stratified" and the port has no such
-reduction, so it calls 3,599 of this node's 4,576 cells exact that Python does not. That is
-counted and printed, and left for its own issue.
+The run exits 1 when a cell differs by more than `--tolerance`, or when the exact mask
+differs on any cell, so a failure is a status and not only a line to be read. Until IKA-151
+the mask was let off under `fast` and `exact`: Python marks a turn inexact for "damage
+rolls stratified" and the port had no such reduction, so it called 3,599 of this node's
+4,576 cells exact that Python does not.
 """
 
 from __future__ import annotations
@@ -609,12 +609,10 @@ def main() -> None:
     failed = []
     if worst > args.tolerance:
         failed.append(f"worst cell difference {worst:.3e} > {args.tolerance:.0e}")
-    # Under a budget that stratifies the rolls the mask is known to differ: Python marks a
-    # turn inexact for "damage rolls stratified" and the port has no such reduction, so it
-    # calls those cells exact. That is reported above and does not fail the run; under
-    # `matrix` the roll is pinned, nothing is stratified, and the mask has to agree.
-    if masks_differ and args.budget == "matrix":
-        failed.append(f"the exact mask differs on {masks_differ} nodes")
+    # Under every budget. Until IKA-151 the port had no "damage rolls stratified"
+    # reduction and a stratifying budget was let off; it now marks the same turns inexact.
+    if masks_differ:
+        failed.append(f"the exact mask differs on {mask_cells} cells of {masks_differ} nodes")
     if failed:
         print(f"\nFAIL ({args.budget}): " + "; ".join(failed))
         sys.exit(1)

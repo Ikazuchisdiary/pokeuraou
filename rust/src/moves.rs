@@ -685,6 +685,13 @@ fn hit_target<'a>(
             vec![(1.0, crit_p >= 1.0)]
         };
     let rolls = stratified_rolls(&budget);
+    // Python's `_hit_target` returns every outcome from here on with the note "damage
+    // rolls stratified" unless the roll is pinned or all sixteen are kept, and `_run_queue`
+    // makes the turn inexact for it. Setting it on `turn` puts it on every clone below;
+    // the one outcome that is `turn` itself, the empty fallback, is cleared again (IKA-151).
+    if budget.fixed_roll().is_none() && budget.damage_rolls < 16 {
+        turn.rolls_stratified = true;
+    }
     // Does not depend on the roll, and the exact budget enumerates sixteen of them -- so
     // building this inside the loop was fifteen wasted allocations per hit on the path that
     // advances a game. Under the matrix budget the roll is fixed and it costs nothing,
@@ -815,6 +822,8 @@ fn hit_target<'a>(
         }
     }
     if outcomes.is_empty() {
+        // Python's fallback here carries no note.
+        turn.rolls_stratified = false;
         outcomes.push((1.0, turn));
     }
     Ok(outcomes)

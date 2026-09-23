@@ -9182,3 +9182,54 @@ python tools/match_queue.py --out C:/tmp/pokeuraou-machine/ika143/sprt --games 6
 
 1コア・鍵なし: 測定 14:17:18〜14:22:05（288秒）、配線確認 14:24:50〜14:25:14、テスト（-n 0）14:25〜14:28・
 14:28:53〜14:32:22、ほか数秒の試走。生成・対戦・学習はしていない。
+
+## 9/23 — IKA-151: Budget.fast() の exact マスクを Python と揃える —— Rust に「damage rolls stratified」の減縮を移し、全メニュー 3,599 → 0 セル
+
+master 9ff56f8 の上。IKA-146 の節で数えて表示するだけにしていた食い違いの起票分。
+
+**答えた問い**: `diff_node --scenario examples/scenario-turn5.json --budget fast --limit 0`（88×52 = 4,576 セル）で
+exact マスクが 3,599 セル違うのは、Python の減縮が Rust に無いからか。→ **そう。** 移したら 0 セル。利得は前後とも同じ。
+
+### 1. Python の規則
+
+`resolve._hit_target`（`src/pokeuraou/resolve.py` 2763–2766 行）: ロールを `stratified_rolls` で選んだ時点で、ロールが
+固定でなく（`fixed_roll is None`）16 未満なら、そこから先の全ての結果（外れ・無効も含む）に注記
+「damage rolls stratified」を付ける。例外は結果が一つも無いときの `[(1.0, turn, "")]` だけ。`_use_move` は目標をまたいで
+`note or n2` で運び、`_run_queue`（1349–1352 行）は注記があれば `reductions` に数えて `exact = False`。
+判定に使う budget は `step_budget`（幅に合わせて狭めたもの）なので、`Budget()` でも狭めてロールが 16 未満になれば付く。
+
+### 2. 移し方（Rust）
+
+* `Turn.rolls_stratified: bool`。`moves::hit_target` がロールを選んだところで同じ条件で立てる（以後の clone 全部に
+  乗る = Python の「以後の全結果に注記」）。結果が空の fallback では下ろす
+* `run_queue` は `execute` の結果ごとに読み、立っていれば `exact = false` にして下ろす。保存される状態には残らないので、
+  併合（`same_turn` は `_` で無視）と fingerprint は見ない
+* 再開ターン: Python も Rust も、セルの exact は `resolve_turn` の最上段の `TurnResult.exact` だけで、`resume_turn` の
+  exact はどちらも読まない（Python `batched_payoffs` 4087 行 / Rust `node.rs`・`encoded_node.rs`）。再開は同じ
+  `run_queue` を通るので、再開した側の `TurnResult.exact` も今は同じ規則で落ちる。数え方は元から揃っていた
+
+### 3. 一致の数（利得は前後とも worst 3.331e-16）
+
+```
+  diff_node fast 全メニュー（1 節点 4,576 セル）   前 exact 不一致 3,599（port だけ exact 3,599）   後 0
+  diff_node exact --limit 12（直した後だけ）                                                   後 0
+  tests/test_rust_node.py fast の節点（96 セル）   前 76 セル不一致（port だけ exact 76）          後 0
+```
+
+### 4. 変えたこと
+
+* `rust/src/resolve.rs`・`rust/src/moves.rs`: 上の通り
+* `tools/diff_node.py`: exact マスクの不一致をどの budget でも失敗にする（IKA-146 は matrix だけだった）。失敗の文に
+  セル数も出す
+* `tests/test_rust_node.py` の fast の節点テスト: exact マスクも比べる。陽性対照として、セル (0, 0) の減縮が
+  「damage rolls stratified」だけであること（狭めでも枝の切り捨てでもない）と Python がそれを inexact と言うことを先に
+  確かめる。直す前のバイナリで「the exact mask differs on 76 of 96 cells (76 exact in the port only)」で落ちる
+
+### 5. matrix は変わらない
+
+* 既定の `diff_node`（matrix、20 節点 7,416 セル）: 前後の出力は時間とバイナリ指紋の行以外バイト一致
+  （bit-identical 11934/14832、worst 3.331e-16、マスク不一致 0）。matrix はロールを固定するので旗は立たない
+* `tools/port_coverage.py --check`: ok
+
+機械: cargo release ビルド 2 回（8 コア、各 20 秒・16 秒）、diff_node 既定 43 秒 ×2・fast 10 秒 ×2・exact --limit 12
+30 秒、テスト数十秒（すべて 1 コア、heavy.py に記録）。
