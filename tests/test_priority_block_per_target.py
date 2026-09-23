@@ -34,10 +34,10 @@ stopped). A Bullet Punch into the holder from a Pokemon without Mold Breaker is 
 both -- the positive control for the Mold Breaker case -- and the old code still failed it
 on PP, as it did every case it stopped.
 
-The Spikes case compares everything but the side conditions: the resolver and the port lay
-every ``sideCondition`` on the user's own side, so a Spikes lands on the wrong side
-whether or not an ability is on the field. That is a separate defect, pinned by the strict
-xfail at the bottom.
+The Spikes case compared everything but the side conditions while the resolver and the
+port laid every ``sideCondition`` on the user's own side, a separate defect pinned by a
+strict xfail at the bottom. IKA-165 lays a foeSide one on the foe's side, so the case is
+compared whole and the test below it passes.
 """
 
 from __future__ import annotations
@@ -152,8 +152,9 @@ CASES = {
     ),
 }
 
-#: Cases whose side conditions are not compared (see the module docstring).
-HAZARD_CASES = frozenset({"prankster-foeside"})
+#: Cases whose side conditions are not compared (see the module docstring). None since
+#: IKA-165, which put Spikes on the foe's side.
+HAZARD_CASES: frozenset[str] = frozenset()
 
 BUDGET = replace(Budget.exact(), enumerate_crit=False, enumerate_secondary=False).with_fixed_roll(0)
 
@@ -265,7 +266,6 @@ def test_a_stopped_fake_out_was_still_the_first_move(reg, oracle: Oracle) -> Non
         assert after.hp == whimsicott.hp, " / ".join(branch.events)
 
 
-@pytest.mark.xfail(strict=True, reason="every sideCondition is laid on the user's own side")
 def test_spikes_land_on_the_foes_side(reg, oracle: Oracle) -> None:  # noqa: ANN001
     before, choices, theirs, _log = _play(oracle, "prankster-foeside", sides=True)
     assert theirs["p2 side"] == ("spikes",)

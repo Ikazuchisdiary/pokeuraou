@@ -1862,6 +1862,13 @@ def _do_move(
         state = turn if index == len(checks) - 1 else turn.clone()
         if blocked is not None:
             mon = state.mon_at(action.side, action.slot)
+            if blocked != "fainted" and mon is not None:
+                # `runMove` bumps `activeMoveActions` on its first line, before the
+                # `BeforeMove` event that flinch, sleep, freeze, paralysis and confusion
+                # answer (sim/battle-actions.ts:217, :255), so a Pokemon that could not
+                # move has still spent its first turn out: Showdown disables its Fake
+                # Out next turn (IKA-166).
+                mon.active_move_actions += 1
             if blocked == "flinch" and mon is not None:
                 mon.volatiles = [v for v in mon.volatiles if v.id != "flinch"]
             if blocked == "confusion":
@@ -2093,7 +2100,15 @@ def _use_move(
                     from_foe=False,
                 )
             if turn.pos.field.weather not in skip_weather:
-                turn.add_volatile(action.side, action.slot, "twoturnmove")
+                # `twoturnmove` is `duration: 2` and stores its move (`onStart`:
+                # `this.effectState.move = effect.id`), which is what `getLockedMove`
+                # returns: the next turn's menu is that move alone (IKA-169). Without the
+                # move the menu could not lock, and without the duration a charge the
+                # Pokemon never fired (asleep, flinched) kept the marker for good.
+                turn.add_volatile(action.side, action.slot, "twoturnmove", duration=2)
+                charging = mon.volatile("twoturnmove") if mon is not None else None
+                if charging is not None:
+                    charging.move = action.move_id
                 turn.log(f"{action.label(reg)} is charging")
                 return [(1.0, turn, "")]
 
@@ -2585,6 +2600,19 @@ def _immune_to_move(
     return None
 
 
+def _side_condition_side(action: QueuedAction, move: Move) -> int:
+    """The side a move's own `sideCondition` is laid on (IKA-165).
+
+    The side of the move's one target (`moveHit`: `target.side.addSideCondition(...)`),
+    and `getMoveTargets` makes that target a foe for `foeSide` -- Stealth Rock, Spikes,
+    Toxic Spikes, Sticky Web -- and the user or an ally for `allySide` and `allyTeam`:
+    Tailwind, the screens, the guards. This was always the user's side, so a Spikes user
+    spiked itself. A `self` block's `sideCondition` is the user's either way (`moveHit`
+    on the source).
+    """
+    return 1 - action.side if move.target == "foeSide" else action.side
+
+
 def _apply_status_move(
     reg: Regulation,
     turn: _Turn,
@@ -2599,8 +2627,9 @@ def _apply_status_move(
 
     if raw.get("sideCondition"):
         side_condition = str(raw["sideCondition"])
+        # The duration stays the user's: Light Clay and the rest read the source.
         turn.add_side_condition(
-            action.side,
+            _side_condition_side(action, move),
             side_condition,
             duration=_effect_duration(turn, move, side_condition, action.side, action.slot),
         )

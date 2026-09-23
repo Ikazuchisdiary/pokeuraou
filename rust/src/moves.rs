@@ -104,6 +104,13 @@ pub(crate) fn do_move<'a>(
         let mut state = turn.clone();
         match blocked {
             Some(reason) => {
+                // `runMove` bumps `activeMoveActions` before `BeforeMove`, so a Pokemon
+                // that could not move has still spent its first turn out (IKA-166).
+                if reason.as_str() != "fainted" {
+                    if let Some(mon) = state.mon_at_mut(action.side, action.slot) {
+                        mon.active_move_actions += 1;
+                    }
+                }
                 if reason.as_str() == "flinch" {
                     if let Some(mon) = state.mon_at_mut(action.side, action.slot) {
                         mon.volatiles.retain(|v| v.id.as_str() != "flinch");
@@ -445,7 +452,15 @@ fn use_move<'a>(
                 .map(|w| skip_weather.contains(&w.as_str()))
                 .unwrap_or(false);
             if !skipped {
-                turn.add_volatile(action.side, action.slot, "twoturnmove", None);
+                // `duration: 2`, and the move stored as Showdown's `effectState.move`: the
+                // next turn's menu is that move alone (IKA-169), and a charge that never
+                // fires does not keep the marker for good.
+                turn.add_volatile(action.side, action.slot, "twoturnmove", Some(2));
+                if let Some(mon) = turn.mon_at_mut(action.side, action.slot) {
+                    if let Some(charging) = mon.volatile_mut("twoturnmove") {
+                        charging.move_id = Some(move_id);
+                    }
+                }
                 return Ok(vec![(1.0, turn)]);
             }
         }
@@ -1979,7 +1994,11 @@ fn apply_status_move(
                 "{condition} duration (Showdown rolls it; pinned to the low end)"
             ));
         }
-        turn.add_side_condition(action.side, &condition, duration);
+        // The target's side (`moveHit`: `target.side.addSideCondition`), which
+        // `getMoveTargets` makes a foe's for `foeSide` -- the hazards. IKA-165: this was
+        // always the user's. The duration above stays the user's (Light Clay).
+        let condition_side = if mv.target == "foeSide" { 1 - action.side } else { action.side };
+        turn.add_side_condition(condition_side, &condition, duration);
     }
     if let Some(weather) = mv.weather.as_deref() {
         let weather = weather.to_lowercase().replace(' ', "");
