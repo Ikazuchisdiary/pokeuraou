@@ -406,3 +406,155 @@ def test_play_game_hands_the_bench_prior_the_turn_one_leads_after_a_switch(
     # The turn-2 board really is the one with a lead on the bench.
     at_two = next(pos for pos, _ in asked if pos.turn == 2)
     _assert_it_went_back_unharmed(at_two)
+
+
+# -------------------------------------------------- the self-switch node (IKA-120)
+#
+# After a U-turn the replacement is chosen by `_do_self_switch_node`, which scored every
+# option on the TRUE pause -- the rest of the turn and its leaves held the opponent's real
+# back two. The move and replacement nodes had been closed; this one was the fourth path.
+
+#: Turn 1. Our Charizard U-turns their Charizard and Venusaur Protects; their Charizard
+#: Heat Waves and Venusaur Protects. Nobody switches, so their back two stay unseen.
+UTURN_TURN = {0: "move 1 1, move 4", 1: "move 1, move 4"}
+
+
+def _uturn_start(reg, own, foe):  # noqa: ANN001, ANN202
+    from pokeuraou.position import MoveSlot
+
+    start = position_from_sets(reg, own, foe)
+    start.sides[0].pokemon[0].moves[0] = MoveSlot(id="uturn", pp=20, maxpp=20)
+    return start
+
+
+def _reads_their_back_two(positions):  # noqa: ANN001, ANN202
+    """A leaf whose best switch-in depends on who is on side 1's bench.
+
+    Garchomp in our slot 0 is worth +0.1 if side 1 brought Toxapex or Incineroar and -0.1
+    if not; Sylveon the reverse. So with their true back two Garchomp + Sylveon the right
+    answer is Sylveon, with Toxapex + Incineroar it is Garchomp, and over the six equally
+    likely completions -- five of which hold one of the two -- it is Garchomp either way.
+    """
+    import numpy as np
+
+    out = []
+    for position in positions:
+        ours = position.sides[0]
+        active = ours.active[0]
+        front = ours.pokemon[active].species if active is not None else ""
+        theirs = {mon.species for mon in position.sides[1].pokemon}
+        wants = bool(theirs & {"toxapex", "incineroar"})
+        out.append(0.5 + (0.1 if (front == "garchomp") == wants else -0.1))
+    return np.asarray(out, dtype=np.float64)
+
+
+def _self_switch_pick(reg, sheet, foe, monkeypatch, *, hidden):  # noqa: ANN001, ANN202
+    import types
+
+    import numpy as np
+
+    from pokeuraou import selfplay
+    from pokeuraou.actions import side_actions
+
+    def scripted(reg, position, side, *, limit, rank=None):  # noqa: ANN001, ANN202, ARG001
+        if position.turn == 1:
+            actions = [_action(reg, position, side, UTURN_TURN[side])]
+        else:
+            actions = side_actions(reg, position, side)[:1]
+        return types.SimpleNamespace(actions=actions)
+
+    monkeypatch.setattr(selfplay, "narrow", scripted)
+    record = selfplay.play_game(
+        reg, np.random.default_rng(0), sheet[:4], foe, "test",
+        start=_uturn_start(reg, sheet[:4], foe),
+        evaluate=_reads_their_back_two,
+        sheets=(sheet, sheet) if hidden else None,
+        max_turns=1,
+    )
+    picks = [d for d in record.decisions if d.kind == "selfswitch"]
+    assert len(picks) == 1, [d.kind for d in record.decisions]
+    pick = picks[0]
+    assert pick.own_actions == ["switch 3, pass", "switch 4, pass"], pick.own_actions
+    return pick.own_chosen
+
+
+def test_the_self_switch_does_not_read_their_true_bench(setup, monkeypatch) -> None:  # noqa: ANN001
+    """Two games identical except for side 1's unseen back two pick the same switch-in.
+
+    The open game is the positive control: there the node is SUPPOSED to read the whole
+    board, and it has to pick differently for the two benches, or the leaf above does not
+    reach the choice and the hidden-bench half would pass against a node that ignores it.
+    Before IKA-120 the hidden-bench game picked exactly as the open one did.
+    """
+    reg, roster = setup
+    sheet = _sheet(roster)
+    brought = sheet[:4]  # Garchomp and Sylveon at the back
+    other = sheet[:2] + sheet[4:6]  # Toxapex and Incineroar at the back
+    assert [s.species for s in other[2:]] == ["toxapex", "incineroar"]
+
+    open_picks = [
+        _self_switch_pick(reg, sheet, foe, monkeypatch, hidden=False)
+        for foe in (brought, other)
+    ]
+    assert open_picks == ["switch 4, pass", "switch 3, pass"], (
+        f"the open game should follow side 1's real bench: {open_picks}"
+    )
+
+    hidden_picks = [
+        _self_switch_pick(reg, sheet, foe, monkeypatch, hidden=True)
+        for foe in (brought, other)
+    ]
+    assert hidden_picks == ["switch 3, pass", "switch 3, pass"], (
+        "under a hidden bench the switch-in must come from the belief over side 1's back "
+        f"two, not from which two are really there: {hidden_picks}"
+    )
+
+
+def test_a_pause_resumed_in_a_completion_is_that_world_resolved_from_scratch(setup) -> None:  # noqa: ANN001
+    """`paused_in` against its definition: the same turn resolved from the completion.
+
+    An unseen Pokemon takes no part in a turn until it is switched in, so rebuilding the
+    pause in a completion must give exactly what resolving the turn in that completion
+    from the start gives -- every alternative, every leaf, bit for bit in JSON.
+    """
+    import json
+
+    from pokeuraou.hidden import completions
+    from pokeuraou.resolve import (
+        Budget,
+        paused_in,
+        resolve_turn,
+        resume_alternatives,
+        turn_leaves,
+    )
+
+    reg, roster = setup
+    sheet = _sheet(roster)
+    start = _uturn_start(reg, sheet[:4], sheet[:4])
+    chosen = [_action(reg, start, side, UTURN_TURN[side]) for side in (0, 1)]
+    truth = resolve_turn(reg, start, chosen, budget=Budget.deterministic(8))
+    assert truth.suspended, "the U-turn has to pause the turn"
+
+    def leaves_of(pause):  # noqa: ANN001, ANN202
+        chooser, found = resume_alternatives(reg, pause)
+        return chooser, [
+            (
+                option.to_choice(),
+                [json.dumps(p.to_json(), sort_keys=True) for p in turn_leaves(reg, r).positions],
+            )
+            for option, r in found
+        ]
+
+    worlds = completions(reg, start, 1, sheet)
+    assert len(worlds) == 6
+    for world in worlds:
+        scratch = resolve_turn(reg, world.position, chosen, budget=Budget.deterministic(8))
+        assert len(scratch.suspended) == len(truth.suspended)
+        for true_pause, their_pause in zip(truth.suspended, scratch.suspended, strict=True):
+            rebuilt = completions(
+                reg, true_pause.position, 1, sheet, seen=seen_slots(true_pause.position, 1)
+            )
+            same = next(w for w in rebuilt if w.species == world.species)
+            assert leaves_of(paused_in(true_pause, same.position, 1)) == leaves_of(
+                their_pause
+            ), world.species

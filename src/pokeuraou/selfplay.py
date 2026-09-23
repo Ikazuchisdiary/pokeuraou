@@ -50,6 +50,7 @@ from .resolve import (
     SuspendedTurn,
     TurnResult,
     apply_lead_abilities,
+    paused_in,
     replacements_needed,
     resolve_replacements,
     resolve_turn,
@@ -838,7 +839,14 @@ def play_game(
             )
         )
         timing.decided("move")
-        advanced = _advance_turn(reg, rng, pos, chosen, record, leaves, objective)
+        advanced = _advance_turn(
+            reg, rng, pos, chosen, record, leaves, objective,
+            hidden=(
+                None
+                if sheets is None
+                else _HiddenBench(sheets, list(seen), bench_prior, list(leads))
+            ),
+        )
         if advanced is None:
             break
         pos = advanced
@@ -857,6 +865,8 @@ def _advance_turn(
     record: GameRecord,
     leaves: tuple[LeafEvaluator | None, LeafEvaluator | None],
     objective: Objective,
+    *,
+    hidden: _HiddenBench | None = None,
 ) -> Position | None:
     """Resolves the chosen actions and samples one outcome.
 
@@ -892,14 +902,30 @@ def _advance_turn(
                         # random stream than one played without the bridge.
                         result = resolve_turn(reg, pos, chosen, budget=Budget.exact())
                         return _advance(
-                            reg, rng, result, record, leaves, objective, first_index=index
+                            reg, rng, result, record, leaves, objective,
+                            first_index=index, hidden=hidden,
                         )
             except Exception as exc:  # noqa: BLE001 - a broken bridge must not fail a run
                 rustnode.disable(str(exc))
 
     result = resolve_turn(reg, pos, chosen, budget=Budget.exact())
     record.unmodelled.extend(result.unmodelled)
-    return _advance(reg, rng, result, record, leaves, objective)
+    return _advance(reg, rng, result, record, leaves, objective, hidden=hidden)
+
+
+@dataclass(frozen=True)
+class _HiddenBench:
+    """What a mid-turn decision needs to price the opponent's bench it has not seen.
+
+    The same four things `_do_replacement_node` is handed, as `play_game` carries them at
+    the move node the turn started from: `seen` is identities (IKA-117) and is turned into
+    the pause's own slots there, `leads` the turn-1 pair per side (IKA-118).
+    """
+
+    sheets: tuple[Sequence[SampledSet], Sequence[SampledSet]]
+    seen: list[frozenset[str]]
+    bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None
+    leads: list[frozenset[str] | None]
 
 
 def _advance(
@@ -910,6 +936,7 @@ def _advance(
     leaves: tuple[LeafEvaluator | None, LeafEvaluator | None],
     objective: Objective,
     first_index: int | None = None,
+    hidden: _HiddenBench | None = None,
 ) -> Position | None:
     """Samples one outcome of a resolved turn, answering any mid-turn request on the way.
 
@@ -936,7 +963,9 @@ def _advance(
         if index < len(result.branches):
             return result.branches[index].position
         pause = result.suspended[index - len(result.branches)]
-        resumed = _do_self_switch_node(reg, pause, record, leaves, objective)
+        resumed = _do_self_switch_node(
+            reg, pause, record, leaves, objective, hidden=hidden
+        )
         if resumed is None:
             return None
         result = resumed
@@ -950,6 +979,8 @@ def _do_self_switch_node(
     record: GameRecord,
     leaves: tuple[LeafEvaluator | None, LeafEvaluator | None],
     objective: Objective,
+    *,
+    hidden: _HiddenBench | None = None,
 ) -> TurnResult | None:
     """Chooses the replacement a self-switching move demanded, and finishes the turn.
 
@@ -961,6 +992,16 @@ def _do_self_switch_node(
     search makes everywhere: the rest of the turn is already committed in this line, so the
     choice is made against a known continuation where a real player would only have seen
     the turn up to the interrupt. It is reported rather than papered over.
+
+    With `hidden` the opponent's unseen slots are not read (IKA-120). Every option used to
+    be scored on the true pause, so the rest of the turn and its leaves held the
+    opponent's real back two -- 52.9% of the self-switch decisions in `data/ika73/w12` had
+    an unseen Pokemon on the other side. Now each option is scored in every completion of
+    that bench, the pause rebuilt in it by `paused_in`, and the scores are averaged with
+    the belief's weights. Only one side chooses, so there is no game to solve: the choice
+    is the option with the best expected score -- by definition each completion scored
+    plainly and then weighted, with nothing faster standing in for it. The turn that is
+    then *played* is the true one, resumed with that choice.
     """
     chooser, alternatives = resume_alternatives(reg, pause)
     if chooser is None or not alternatives:
@@ -968,9 +1009,49 @@ def _do_self_switch_node(
     record.unmodelled.append(
         "mid-turn replacement chosen against the opponent's already-committed action"
     )
+    options = [option.to_choice() for option, _resumed in alternatives]
 
-    plans = [turn_leaves(reg, resumed) for _option, resumed in alternatives]
-    flat = [position for plan in plans for position in plan.positions]
+    # (weight, alternatives) per world the chooser cannot tell apart.
+    worlds: list[tuple[float, list[tuple[SideAction, TurnResult]]]] = [
+        (1.0, alternatives)
+    ]
+    if hidden is not None:
+        other = 1 - chooser
+        carried = seen_identities(pause.position, other, hidden.seen[other])
+        shown = seen_slots(pause.position, other, carried)
+        try:
+            spread = completions(
+                reg, pause.position, other, hidden.sheets[other], seen=shown,
+                weights=_bench_weights(
+                    hidden.bench_prior, other, pause.position, shown, record,
+                    hidden.leads[other],
+                ),
+            )
+        except ValueError as problem:
+            record.unmodelled.append(f"hidden bench at a self-switch: {problem}")
+            return None
+        if not (len(spread) == 1 and spread[0].exact):
+            worlds = []
+            for item in spread:
+                seen_as, found = resume_alternatives(
+                    reg, paused_in(pause, item.position, other)
+                )
+                found_options = [option.to_choice() for option, _resumed in found]
+                if seen_as != chooser or found_options != options:
+                    # The chooser's options are its own bench, which no completion of the
+                    # other side's touches. If that ever stops being true, the average
+                    # below would be over different decisions.
+                    raise AssertionError(
+                        f"a completion of side {other}'s bench changed side {chooser}'s "
+                        f"self-switch options: {options} -> {found_options}"
+                    )
+                worlds.append((item.weight, found))
+
+    plans = [
+        [turn_leaves(reg, resumed) for _option, resumed in found]
+        for _weight, found in worlds
+    ]
+    flat = [position for world in plans for plan in world for position in plan.positions]
     if not flat:
         return None
     evaluate = leaves[chooser]
@@ -979,19 +1060,19 @@ def _do_self_switch_node(
         if evaluate is not None
         else np.array([objective(position) for position in flat], dtype=np.float64)
     )
-    scores: list[float] = []
+    scores = np.zeros(len(alternatives), dtype=np.float64)
     offset = 0
-    for plan in plans:
-        count = len(plan.positions)
-        scores.append(plan.value(values[offset : offset + count]))
-        record.unmodelled.extend(plan.unmodelled)
-        offset += count
+    for (weight, _found), world in zip(worlds, plans, strict=True):
+        for k, plan in enumerate(world):
+            count = len(plan.positions)
+            scores[k] += weight * plan.value(values[offset : offset + count])
+            record.unmodelled.extend(plan.unmodelled)
+            offset += count
 
     # Side 0 is the maximiser the payoff matrices are written for.
     best = int(np.argmax(scores)) if chooser == 0 else int(np.argmin(scores))
     policy = [0.0] * len(alternatives)
     policy[best] = 1.0
-    options = [option.to_choice() for option, _resumed in alternatives]
     waiting = ["pass"]
     record.decisions.append(
         Decision(

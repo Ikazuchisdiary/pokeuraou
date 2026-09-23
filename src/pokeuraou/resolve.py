@@ -3792,6 +3792,44 @@ def resume_alternatives(
     return chooser, out
 
 
+def paused_in(paused: SuspendedTurn, position: Position, side: int) -> SuspendedTurn:
+    """The same pause with `position` in place of the state it was taken from.
+
+    For the self-switch node under a hidden bench (IKA-120): `position` is a completion of
+    the pause's own position -- `side`'s unseen slots rebuilt from the sheet, everything
+    else the pause's -- and resuming the result is resuming the turn in that world. An
+    unseen Pokemon took no part in the turn up to the interrupt, so nothing else in the
+    continuation refers to it except a queued switch into its slot, and that is re-aimed
+    by slot at whoever stands there in `position`: a queued switch names its target by
+    species first (`_find_switch_target`), and the true species would find nobody.
+    """
+    if paused._turn is None:
+        raise ValueError("this SuspendedTurn carries no continuation state")
+    turn = paused._turn.clone()
+    turn.pos = position
+    before = paused.position.sides[side]
+    after = position.sides[side]
+    remaining: list[QueuedAction] = []
+    for queued in paused._remaining:
+        if queued.side == side and queued.kind == "switch":
+            target = _find_switch_target(before, queued)
+            if target is not None:
+                standing = next(
+                    (mon for mon in after.pokemon if mon.slot == target.slot), None
+                )
+                if standing is not None and standing.species != target.species:
+                    queued = replace(queued, switch_species=standing.species)
+        remaining.append(queued)
+    return SuspendedTurn(
+        probability=paused.probability,
+        position=position,
+        events=list(paused.events),
+        acts=list(paused.acts),
+        _turn=turn,
+        _remaining=tuple(remaining),
+    )
+
+
 @dataclass
 class LeafRef:
     """One evaluated position."""
@@ -4716,6 +4754,7 @@ __all__ = [
     "apply_lead_abilities",
     "batched_payoff",
     "batched_payoffs",
+    "paused_in",
     "pending_attacks",
     "settle_outcome",
     "replacements_needed",
