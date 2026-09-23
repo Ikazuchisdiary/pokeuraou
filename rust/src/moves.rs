@@ -135,12 +135,16 @@ pub(crate) fn do_move<'a>(
                 outcomes.push((*probability, state));
             }
             None => {
-                let started = crate::resolve::phase_start();
-                let produced = use_move(reg, state, action, mv, budget)?;
-                crate::resolve::phase_end(8, started);
-                for (weight, mut sub_state) in produced {
-                    rampage_after_move(&mut sub_state, action);
-                    outcomes.push((probability * weight, sub_state));
+                for (drawn, drawn_state, drawn_action) in
+                    draw_random_target(state, action, mv, &budget)
+                {
+                    let started = crate::resolve::phase_start();
+                    let produced = use_move(reg, drawn_state, &drawn_action, mv, budget)?;
+                    crate::resolve::phase_end(8, started);
+                    for (weight, mut sub_state) in produced {
+                        rampage_after_move(&mut sub_state, &drawn_action);
+                        outcomes.push((probability * drawn * weight, sub_state));
+                    }
                 }
             }
         }
@@ -149,6 +153,50 @@ pub(crate) fn do_move<'a>(
         outcomes.push((1.0, turn));
     }
     Ok(outcomes)
+}
+
+/// The foe a `randomNormal` move is used at, as Python's `_draw_random_target` (IKA-178):
+/// `getTarget` ignores the chosen location for it and `sample`s the foes standing, every
+/// time the move is used. Each is a branch of equal weight, carried as the action's target
+/// for `resolve_targets`, which redirects it as any other. One foe standing is no draw; a
+/// budget that collapses the random ranges takes the first (with a note), and so does the
+/// pinned one.
+fn draw_random_target<'a>(
+    turn: Turn<'a>,
+    action: &QueuedAction,
+    mv: &Move,
+    budget: &Budget,
+) -> Vec<(f64, Turn<'a>, QueuedAction)> {
+    if mv.target.as_str() != "randomNormal" {
+        return vec![(1.0, turn, action.clone())];
+    }
+    let mut turn = turn;
+    let foe_side = 1 - action.side;
+    let mut standing: Vec<usize> = (0..turn.pos.sides[foe_side].active.len())
+        .filter(|s| matches!(turn.mon_at(foe_side, *s), Some(mon) if !mon.fainted))
+        .collect();
+    if standing.len() > 1 && !(budget.enumerate_secondary && !budget.pinned_policy) {
+        if !budget.pinned_policy {
+            turn.report("randomNormal target (the first foe; not branched)");
+        }
+        standing.truncate(1);
+    }
+    if standing.is_empty() {
+        let mut aimed = action.clone();
+        aimed.target = None;
+        return vec![(1.0, turn, aimed)];
+    }
+    let share = 1.0 / standing.len() as f64;
+    let aimed = |slot: usize| {
+        let mut aimed = action.clone();
+        aimed.target = Some(slot as i64 + 1);
+        aimed
+    };
+    let (&last, rest) = standing.split_last().expect("not empty");
+    let mut out: Vec<(f64, Turn<'a>, QueuedAction)> =
+        rest.iter().map(|slot| (share, turn.clone(), aimed(*slot))).collect();
+    out.push((share, turn, aimed(last)));
+    out
 }
 
 fn confusion_damage(turn: &Turn, side: usize, slot: usize) -> Result<i64, String> {
@@ -793,13 +841,8 @@ fn resolve_targets(
                 Vec::new()
             });
         }
-        "randomNormal" => {
-            return Ok(slots
-                .filter(|s| live(turn, foe_side, *s))
-                .map(|s| (foe_side, s))
-                .take(1)
-                .collect())
-        }
+        // `randomNormal` falls through: `draw_random_target` put the drawn foe in the
+        // action's target, and it is redirected as any other (IKA-178).
         _ => {}
     }
 

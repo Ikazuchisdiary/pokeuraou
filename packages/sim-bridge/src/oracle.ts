@@ -34,6 +34,11 @@ export interface RandomnessPolicy {
 	multihit: 'min' | 'max';
 	/** 'keep' leaves the tied group in queue order; 'reverse' flips it. */
 	speedTie: 'keep' | 'reverse';
+	/**
+	 * What `sample(values)` answers: `values[0]` or the last one. 'last' reaches the other
+	 * foe of a `randomNormal` move (`side.randomFoe`), which 'first' never does (IKA-178).
+	 */
+	sample: 'first' | 'last';
 }
 
 export const DEFAULT_POLICY: RandomnessPolicy = {
@@ -43,6 +48,7 @@ export const DEFAULT_POLICY: RandomnessPolicy = {
 	secondary: false,
 	multihit: 'min',
 	speedTie: 'keep',
+	sample: 'first',
 };
 
 /** Crit denominators used by Showdown, i.e. the values that identify a crit roll. */
@@ -108,7 +114,7 @@ function installPolicy(battle: AnyBattle, policy: RandomnessPolicy) {
 	// no denominator would reveal that distribution.
 	battle.sample = <T>(items: readonly T[]): T => {
 		rolls.push({ kind: 'sample', values: items.map(v => String(v)) });
-		return items[0];
+		return policy.sample === 'last' ? items[items.length - 1] : items[0];
 	};
 }
 

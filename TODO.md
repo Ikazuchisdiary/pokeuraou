@@ -12774,3 +12774,121 @@ recover の 23 はすべて注記 `residual speed tie`（port だけが出す、
 ### 7. 機械
 
 記録の数え（45 秒）、セルの比較 2 回（248 秒・98 秒）、試し走り 4 回（各 2〜11 秒）。すべて heavy.py 経由、1 コア（--agent IKA-186）。オラクルは 1 コアで 1 回（数秒）。ビルドはしていない（main の exe f1332d8c の写しを使った）。
+
+## 9/24 — IKA-178: `randomNormal` の技（げきりん・はなびらのまい・さかまくほのお・あばれる・さわぐ・わるあがき）は生きている相手から毎回等確率で引き、このゆび・いかりのこなに引き寄せられる —— resolver（両エンジン）は最初に生きている相手に固定し、リダイレクトも飛ばし、注記もなかった
+
+ワーカー。基点 master d89a6c6、ブランチ `ika-178-random-target`。
+
+### 1. Showdown（a5df827、champions の上書きなし）
+
+- `sim/battle.ts` `getTarget`: `if (move.target !== 'randomNormal' && validTargetLoc(...))` —— randomNormal は選んだ位置を
+  読まず、必ず `getRandomTarget`。ダブルでは `pokemon.side.randomFoe()` = `sample(foes())`、`foes()` は `foe.allies()` で
+  HP のある相手だけ。
+- `runMove`（battle-actions.ts）が使うたびに `getTarget` を呼ぶ。げきりんの固定中は `side.chooseMove` が
+  `lastMoveTargetLoc` を渡すが、上の分岐で読まれないので **固定中の 2・3 ターン目も毎回引き直す**（最初の対象は保たない）。
+  1 ターン目は `targetLoc` 0 なので `battle-queue.ts` でも一度 `getRandomTarget` が呼ばれるが、その結果は使われない。
+- `pokemon.ts` `getMoveTargets` の default 枝: ダブルで `RedirectTarget` を回す。このゆび・いかりのこなの
+  `validTarget(..., 'randomNormal')` は隣接なら真なので、**randomNormal も引き寄せられる**（ひらいしん・よびみずも
+  `randomNormal` を `normal` と読んで引くが、該当する型の randomNormal 技は regulation に無い）。
+- regulation の randomNormal: outrage・petaldance・ragingfury・thrash・uproar・struggle（M-B・M-C とも）。
+
+### 2. オラクル（`tests/test_random_target.py`、新規）
+
+オラクルの `sample` はいつも最初の値を返すので、2 体目に届かない。`RandomnessPolicy.sample = 'first' | 'last'`
+（oracle.ts と oracle.py、既定 first、Python は既定のとき送らない）を足した。ガブリアスのげきりん（長さ 3）を、
+カバルドン・ミロカロス（めいそうだけ、すなおこしなし）とカバルドン・ピクシー（このゆびとまれ）に。
+
+```
+  ケース                          Showdown first   Showdown last    旧 Python / 旧 exe      新 Python / 新 exe
+  1 ターン目（相手 2 体）          カバルドン       ミロカロス       カバルドンだけ（落ち）   半々で両方（一致）
+  2 ターン目（固定中）             カバルドン       ミロカロス※     カバルドンだけ（落ち）   半々で両方（一致）
+  このゆびとまれ                   ピクシー         ピクシー         カバルドン（落ち）       ピクシー（一致）
+  pinned の予算（対照）            —                —                カバルドン（通る）       カバルドン（通る）
+  相手 1 体（対照、手で倒す）       —                —                1 枝（通る）             1 枝・注記なし（通る）
+  enumerate_secondary 偽           —                —                注記なし（落ち）         最初の相手＋注記
+```
+
+※ 2 ターン目の rolls に両方の相手の `sample` がある（引き直しの証拠）。1 ターン目にカバルドンに当てた局面からの
+「2 ターン目にミロカロス」の枝は、last の 1 ターン目のミロカロスの HP と合わせて比べた。
+直す前（旧 Python・旧 exe）: 13 のうち 7 落ち、通った 6 は Showdown の事実 1、pinned の対照 4、相手 1 体の対照 1。
+新 Python・旧 exe では port の 3 つが落ちる。直した後は 13 通過。
+
+`test_outrage_lock.py`（IKA-174）はげきりんが必ずカバルドンに当たる前提だった: まもる手を相手 2 体ともに
+（`GUARD = move 2, move 2`、Showdown の答えは同じ）、port の 1 枝の比較を枝ごとに、長さの分岐のテストは
+印ごとの重みの和（0.5・0.5）に直した。
+
+### 3. 直し
+
+- `resolve._draw_random_target`（`_do_move` の `_use_move` の前、`_can_act` で動けた枝だけ）と `moves.rs`
+  `draw_random_target`: 生きている相手ごとに等確率の枝、引いた相手を QueuedAction の target に入れる。1 体なら分岐なし。
+  予算は `_roll_rampage` の流儀: `enumerate_secondary` かつ pinned でないときだけ分岐、pinned は最初の相手（オラクルの
+  `sample` と同じ）、それ以外は最初の相手と注記 `randomNormal target (the first foe; not branched)`。
+- `_resolve_targets` / `resolve_targets` の randomNormal の早道（最初の相手、リダイレクトなし）を外して通常の経路へ。
+- `tools/diff_node.py --random-target`（対照 `undrawn` = 最初の相手・リダイレクトなし）。`--rampage` と重ねると固定中も。
+
+### 4. diff_node（各 20 ノード、Budget.matrix）
+
+```
+                                  使うセル   発火セル   新 exe で枝違い   旧 exe で枝違い（最悪のセル差）
+  w12 --random-target             1,220      1,122      0                 1,122（1.4e-1）
+  w12 --random-target --rampage   1,692      1,580      0                 1,580（1.4e-1）
+  gen11L --random-target          761        633        0                 633（8.3e-2）
+  gen11L ... --rampage            1,096      938        0                 938（1.0e-1）
+```
+
+新 exe は全セルで最悪 4.4e-16、注記・exact の食い違い 0。旧 exe は exact の印も 5〜51 セルで違う（枝が増えて 16 の
+上限で切られるため）。
+
+### 5. 記録（`C:/tmp/ika178/records.py`、一時スクリプト、1 コア 387 秒）
+
+```
+                                                          w12        selfplay-gen11L
+  手番の決定                                               434,483    118,018
+  randomNormal の技を知る者が場にいる                       510        182
+    そのうち相手が 2 体立っている                           452        151
+  メニューに randomNormal の技がある                        318        120
+  選んだ手が randomNormal の技を使う                        188        68
+    相手 2 体（引きが効く）                                 161        52
+    そのうち相手がこのゆび・いかりのこなを知る              0          0
+  そういう局                                                53         19
+  メニューが相手 2 体に randomNormal を出す（全部解いた）   267        84
+```
+
+その 267・84 決定（記録のメニューが今の規則で合法でないものは外した）を記録の局面・メニューのまま、hp-share 1 手・
+`Budget.matrix()` で旧規則（`undrawn`）と新規則で解いた:
+
+```
+                                         w12              gen11L
+  値の動いたセル                          15,974/36,624    11,578/33,454
+  最も重い手が変わった（記録した側）      87/267           21/84
+  最も重い手が変わった（どちらかの側）    151/267          37/84
+  方策の TV > 0.2（どちらか）             178/267          45/84
+  TV の平均（記録した側・相手）           0.32・0.35       0.22・0.35
+  均衡値の差（平均・最大）                0.012・0.175     0.013・0.271
+  セルの差の最大                          0.38             0.30
+```
+
+旧規則では「げきりんは必ず左の相手に当たる」ので、左の相手が守るか交代するかの読みが一方に寄っていた。1 手先の
+hp-share の均衡は同点の近くで重い手が入れ替わりやすいので、「変わった」の割合は大きめに出ている見込み（余裕の
+閾値は付けていない）。
+
+### 6. 符号化
+
+入力は変わらない。ENCODING_REVISION は動かさない。
+
+### 7. 残したこと（別課題の候補）
+
+- **わるあがき・さわぐの対象**: 同じ規則で直ったが、オラクルで確かめたのはげきりんだけ。
+- **相手が 0 体のとき**: Showdown は `foe.active[0]`（倒れている）に向けて失敗するが、両エンジンは「対象なし」で失敗。
+  結果は同じはずだが確かめていない。
+- **オラクルの `sample='last'`**: ねむりの `sample([2, 3, 3])` も 3 になる。今のテストは眠りを含まない。
+- `per_action_branches` は対象の分岐を数えない（連続技と同じ）。matrix の 16 の上限で切られる枝が増える。
+
+### 8. 検査と機械
+
+test_random_target（新規）・test_outrage_lock・test_actions・test_charge_target・test_fake_out_first_turn・
+test_trap_sources・test_resolve・test_rust_node・test_port_coverage・test_port_gates・test_line_endings・
+test_after_move_oracle・test_no_machine_specific_paths を `-n 0` で通過。ruff、`port_coverage.py --check`、
+`port_gate_audit.py --check` も通る。sim-bridge は worktree で tsc し直してテストに使った（**着地時に main の dist の
+再ビルドが要る**）。機械（heavy.py、--agent IKA-178）: release ビルド 8 コア 22 秒・18 秒、テスト 1 コア 各 35 秒以内、
+diff_node 8 本 1 コア 計 270 秒ほど、記録 1 コア 387 秒（diff_node と 2 本並行）。
