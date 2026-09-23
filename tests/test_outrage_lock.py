@@ -427,3 +427,84 @@ def test_a_recorded_bare_lock_is_replaced(reg) -> None:  # noqa: ANN001
     assert len(moves) == 4 and switches
     result = resolve_turn(reg, pos, _chosen(reg, pos, RAMP), budget=Budget.matrix())
     assert {_lock(b.position, with_roll=False) for b in result.branches} == {(("outrage", 1), False)}
+
+
+# ---------------------------------------------------------------------------
+# The port against Showdown, not against Python (IKA-207).
+
+
+def _port_generated(reg, port, positions: list[dict], case: Case, budget: Budget):  # noqa: ANN001, ANN202
+    """`_generated` with the port resolving every branch."""
+    from ._port_showdown import given, port_branches
+
+    frontier = [(1.0, given(Position.from_json(positions[0])))]
+    for step in case.steps:
+        nxt = []
+        for weight, pos in frontier:
+            nxt.extend((weight * w, p) for w, p in port_branches(port, pos, _chosen(reg, pos, step), budget))
+        frontier = nxt
+    out: dict = {}
+    for weight, pos in frontier:
+        key = _lock(pos, with_roll=False)
+        out[key] = out.get(key, 0.0) + weight
+    return out
+
+
+@pytest.mark.oracle
+@pytest.mark.parametrize(("name", "roll"), PLAYED)
+def test_the_ports_turn_from_showdowns_position(reg, oracle: Oracle, port, name: str, roll: str) -> None:  # noqa: ANN001
+    """`test_our_turn_from_showdowns_position` with the port's branches, every case."""
+    from ._port_showdown import port_branches
+
+    case = CASES[name]
+    positions = _play(oracle, case, roll)
+    start = Position.from_json(positions[-2])
+    after = Position.from_json(positions[-1])
+    for side in start.sides:
+        for mon in side.pokemon:
+            mon.trapped = False
+    chosen = _chosen(reg, start, case.steps[-1])
+    branches = [p for _, p in port_branches(port, start, chosen, Budget.matrix())]
+    want = _expected(case, roll)
+    started = _rampager(start).volatile("lockedmove") is None
+    if started and want[0] is not None:
+        want = ((*want[0][:2], None), want[1])
+    locks = {_lock(p) for p in branches}
+    assert locks == {want}, (locks, want)
+    for pos in branches:
+        assert _pp(pos) == _pp(after)
+        assert _rampager(pos).item == _rampager(after).item
+        moves, switches = _menu(reg, pos)
+        if want[0] is not None:
+            assert (moves, switches) == ({"outrage"}, False)
+        else:
+            assert len(moves) == 4 and switches
+
+
+@pytest.mark.oracle
+@pytest.mark.parametrize("name", MULTI_TURN)
+def test_the_games_the_port_generates(reg, oracle: Oracle, port, name: str) -> None:  # noqa: ANN001
+    """`test_the_games_we_generate` with the port: Showdown's two games, a half each."""
+    case = CASES[name]
+    want: dict = {}
+    for roll in ROLLS:
+        positions = _play(oracle, case, roll)
+        lock, confused = _expected(case, roll)
+        key = (None if lock is None else lock[:2], confused)
+        want[key] = want.get(key, 0.0) + 0.5
+    ours = _port_generated(reg, port, positions, case, Budget.matrix())
+    assert ours.keys() == want.keys(), (ours, want)
+    for key, weight in want.items():
+        assert ours[key] == pytest.approx(weight), (key, ours, want)
+
+
+@pytest.mark.oracle
+@pytest.mark.parametrize("name", MULTI_TURN)
+def test_the_ports_pinned_budget_rolls_two(reg, oracle: Oracle, port, name: str) -> None:  # noqa: ANN001
+    """`test_the_pinned_budget_rolls_two` with the port."""
+    case = CASES[name]
+    positions = _play(oracle, case, "short")
+    lock, confused = case.short
+    want = {(None if lock is None else lock[:2], confused): 1.0}
+    pinned = dataclasses.replace(Budget.deterministic(), pinned_policy=True)
+    assert _port_generated(reg, port, positions, case, pinned) == pytest.approx(want)

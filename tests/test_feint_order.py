@@ -200,3 +200,24 @@ def test_the_port_breaks_only_what_it_reaches(
         chosen = node.resolve(before, actions, budget, select=index)
         assert chosen is not None and chosen.position is not None
         assert chosen.position.to_json() == branch.position.to_json(), (name, index)
+
+
+# ---------------------------------------------------------------------------
+# The port against Showdown, not against Python (IKA-207). Where Showdown's pins make
+# every move hit, the port's one pinned outcome is Showdown's; where Feint was pinned to
+# miss, Showdown's state has to be among the port's branches.
+
+
+@pytest.mark.oracle
+@pytest.mark.parametrize("name", sorted(CASES))
+def test_the_port_breaks_only_what_showdown_breaks(reg, oracle: Oracle, port, name: str) -> None:  # noqa: ANN001
+    from ._port_showdown import port_branches, port_turn
+
+    before, choices, theirs, log = _play(oracle, name)
+    assert CASES[name][3] in log, f"Showdown did not do what the case says: {log}"
+    actions = _actions(reg, before, choices)
+    if name != "missed":
+        assert _hp(port_turn(port, before, actions)) == theirs, name
+        return
+    states = [_hp(p) for _, p in port_branches(port, before, actions, BUDGET)]
+    assert theirs in states, f"{name}: showdown {theirs} not among the port's {states}"

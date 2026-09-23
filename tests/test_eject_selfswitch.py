@@ -157,3 +157,20 @@ def test_python_switches_the_attacker_as_showdown_does(
         assert ours == attacker, (
             f"{name}: showdown asks the attacker {attacker}, python {ours}; " + " / ".join(events)
         )
+
+
+# ---------------------------------------------------------------------------
+# The port against Showdown, not against Python (IKA-207): under Showdown's pins the
+# U-turn hits, and the port stops for the attacker's switch exactly when Showdown asks.
+
+
+@pytest.mark.parametrize("name", sorted(CASES))
+def test_the_port_switches_the_attacker_as_showdown_does(reg, oracle: Oracle, port, name: str) -> None:  # noqa: ANN001
+    from ._port_showdown import port_weights
+
+    before, (attacker, _holder), _log = _play(oracle, name)
+    actions = [
+        next(a for a in side_actions(reg, before, side) if a.to_choice() == UTURN[side]) for side in (0, 1)
+    ]
+    reply = port_weights(port, before, actions, Budget.deterministic(0))
+    assert bool(reply["suspended"]) == attacker, (name, reply)

@@ -529,3 +529,36 @@ def test_a_recorded_charge_without_its_move(reg) -> None:  # noqa: ANN001
     mon.last_move = "sludgebomb"
     switches, moves, _ = _slot_menu(reg, pos, 0, 0)
     assert switches and len(moves) == 4
+
+
+# ---------------------------------------------------------------------------
+# The port against Showdown, not against Python (IKA-207).
+
+
+@pytest.mark.oracle
+@pytest.mark.parametrize("name", GENERATION)
+def test_the_position_the_port_builds(reg, oracle: Oracle, port, name: str) -> None:  # noqa: ANN001
+    """`test_the_position_our_resolver_builds` with the port playing Showdown's last turn."""
+    from ._port_showdown import port_branches
+
+    case = CASES[name]
+    handle, before = _play(oracle, case)
+    after = Position.from_json(handle.position)
+    handle.close()
+    start = Position.from_json(before)
+    chosen = []
+    for side, choice in enumerate(case.steps[-1]):
+        menu = {a.to_choice(): a for a in side_actions(reg, start, side)}
+        assert choice in menu, (choice, sorted(menu))
+        chosen.append(menu[choice])
+    branches = port_branches(port, start, chosen, Budget.matrix())
+    assert branches
+    for _weight, child in branches:
+        assert all(not m.trapped for s in child.sides for m in s.pokemon)
+        _check(reg, child, case, name, "the port's child")
+        for marker in ("twoturnmove", "lockedmove"):
+            if name.startswith(marker + "/"):
+                ours = child.sides[0].pokemon[child.sides[0].active[0]].volatile(marker)
+                theirs = after.sides[0].pokemon[after.sides[0].active[0]].volatile(marker)
+                assert theirs is not None and ours is not None
+                assert (ours.move, ours.duration) == (theirs.move, theirs.duration), (ours, theirs)

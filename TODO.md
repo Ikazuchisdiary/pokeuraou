@@ -14751,3 +14751,88 @@ null 対照: M-C 200 件を `--jobs 1` と `--jobs 8` で走らせ、集計（�
   diff_commands M-B 200 ×2・×3 exe jobs 8                             8        22 s / 23 s
   テスト（test_port_commands・test_rust_node・test_trace_synchronize・test_line_endings）  1 コア  13 s ほか数回
 ```
+
+## 9/24 — IKA-207: Showdown → port の鎖を作った —— diff_turn・diverge_report に port の列、オラクルのテスト 21 ファイルに port 側の断言 35 本。同じ種・同じ局数で port の乖離は Python より多くない（Python が合って port だけ外れるターンは 0）
+
+親 IKA-204 の段 1。port の規則は直していない（触ったのは tools/ と tests/ だけ）。
+
+### 1. 何を足したか
+
+* `tools/diff_turn.py`: 各ターンの前の局面と選択を、Python の `resolve_turn` に加えて `RustNode.resolve`（`Budget.deterministic(roll)`・同じ乱数の固定）にも渡し、Showdown の次の局面と `canonical` で比べる。
+  * 列は `Report.ports`（exe ごとに 1 列）。Python の列の数え方は変えていない。port は Python より先に解く（Python の途中交代の処理が Showdown を先へ進めるため）。
+  * port が断ったターンは理由ごとに数える（`position carries unmodelled volatiles` は局面が持つ volatile の名前も付ける）。port と Showdown が両方とも途中交代で止まったターンは「続けられない（IKA-211）」として別に数え、比べない。止まる・止まらないが食い違ったら `mid-turn interrupt` の乖離として数える。
+  * 同じターンの Python・port の判定を並べた表（`the same turns, python / port`）を出す。
+  * `--exes old=<path>,new`: Python は 1 回だけ解き、exe ごとの列を並べる（IKA-206 の `diff_node --exes` と同じ名前）。`--no-port` で Python だけ。`--port-json` で port が外れたターンを Showdown のログ付きで書き出す。
+  * port へは 1 ターン 1 回の要求（`select=0` で重みと局面を一度に受ける。枝が無い＝途中で止まった時だけ重みを取り直す）。RustNode は 1 実行で exe ごとに 1 本を使い回す。
+  * オラクルの局面が持つ `stats_override` は、へんしん中でも能力ポイント無しでもない Pokémon からだけ外して port に渡す（両エンジンとも読むのはその 2 つの時だけ: `view.py:86`・`battler.rs:89`。port はそれ以外で持っていると断る）。
+* `tools/diverge_report.py`: 同じ順位づけを port についても出す（`port:` の節）。断りは `skipped` に理由付きで入る。`--no-port` で Python だけ。
+* テスト（Python 側は消していない）:
+  * `tests/_port_showdown.py`（`port_turn`・`port_branches`・`port_weights`・`given`）と conftest の `port` fixture（exe が無ければ skip、既存の流儀どおり）。
+  * Python の `resolve_turn` だけを Showdown と比べていた断言に port 側を写した: 21 ファイル・35 関数（charge_target 2・choice_lock 1・confusion_duration 5・confusion_immunity 3・disguise_afterhit 1・disguise_order 1・eject_items 1・eject_selfswitch 1・fake_out_first_turn 1・feint_order 1・goodasgold_flowerveil 1・leech_seed 2・multihit_counts 1・outrage_lock 3・priority_block_per_target 2・random_target 2・recharge 1・residual_speed_tie 2・switch_in_order 1・trace_synchronize 2・trap_sources 1）。どれも port の答えを Showdown の局面か Showdown が決める値と比べ、Python の答えは見ない。
+  * `tests/test_diff_turn_port.py`: `test_resolved_positions_match_showdown` の port 版（種 1・5、8 局、同じ閾値、加えて「Python が合って port だけ外れる」が 0）、port を足しても Python の数が動かない null control、Light Clay の port 版。
+  * 今の exe で断られるため `xfail(strict=True)` にしたもの: Disguise の 2 ファイル（15 件、`ability: disguise`）、charge_target の「Showdown の局面から」2 件（`unmodelled volatiles: electroshot`）、eject_items の red-card 1 件（`redcard (replacement is drawn at random)`）。IKA-208 で port が答えるようになると XPASS で落ちるので、その時に印を外す。
+  * 写していないもの: 続きの命令が要るもの（eject_items の 2 件、switch_in_order の交代の段、trace_synchronize の U-turn 後、test_resolve の Parting Shot。IKA-211 の後）。既に port を Showdown と直接比べていたもの（hazards_after_hit・hazards_foe_side・helping_hand・perish_song・taunt・psychic_terrain・salt_cure・priority_block の本体・substitute・weather_recovery・terrain_surge・type_spending・after_move_oracle）。Showdown の局面を手で書き換えて規則だけを試すもの（leech_seed の 2 件、trapped_flag_children。port 版が既にある）。
+
+### 2. 測った数（PYTHONHASHSEED=0、roll 8、max-turns 10、今の exe d24e0bb6c4edf74d）
+
+```
+                                   Python            port
+seed 1, 400 局
+  比べたターン                        2,723            2,456
+  一致                                2,567            2,329
+  乖離（比べて外れた）                  156              127
+  うち silent / flagged ※             81 / 76          64 / 63
+  乖離率（silent 率）            5.73% (2.98%)    5.17% (2.61%)
+  断った                                 —              145
+  途中交代で止まり比べない                —              126
+  同じターンの表: 両方乖離 127 / Python だけ乖離 0（port が答えた中で）/ port だけ乖離 0 / 両方一致 2,329
+                  Python 乖離・port 断り 22 / Python 乖離・port 停止 8
+
+seed 2, 400 局, --self-switch 0.8
+  比べたターン                        2,731            2,281
+  一致                                2,547            2,130
+  乖離（比べて外れた）                  184              151
+  うち silent / flagged ※            103 / 84          76 / 75
+  乖離率（silent 率）            6.74% (3.77%)    6.62% (3.33%)
+  断った                                 —              133
+  途中交代で止まり比べない                —              336
+  同じターンの表: 両方乖離 151 / port だけ乖離 0 / 両方一致 2,130
+                  Python 乖離・port 断り 12 / Python 乖離・port 停止 24
+```
+
+※ Python の列は途中交代の食い違いを「比べたターン」に入れず silent にだけ数えるので、silent + flagged が乖離より 1〜3 多い（元からの数え方）。
+
+**port の乖離が Python より多いものは無かった。** port が答えた 4,737 ターンで、Python と port の合否は 1 ターンも食い違わない。port の率が低く見えるのは、Python が外す局面の一部（22+8、12+24）を port が断るか途中で止まって比べていないため。
+
+diverge_report（20 種 × 20 局）: Python 2,709 ターン中 silent 85（3.14%）、port 2,457 ターン中 silent 66（2.69%）。port の上位（lift）: knockoff・stancechange・psn・toxicspikes・spicyspray・partingshot。
+
+**断りの内訳（seed 1 / seed 2）:** unmodelled volatiles: throatchop 57 / 19、electroshot 18 / 5、solarbeam 7、stockpile 6、flashfire 3 / 4、metronome 2。disguise 17 / 47。willCrit（flowertrick 9 / 6、frostbreath 5）。roar 6 / 13・whirlwind 4・forceSwitch 3。trick 6 / 3。lastresort 4 / 5。finalgambit 4 / 3。transformed 5 / 3。diverge_report ではほかに smartTarget: dragondarts 12。
+
+### 3. 正の対照と null control
+
+* **正の対照（port の列だけが外れる）:** IKA-201 の merge（a4ad89f）の第 1 親 3d9dbc5 を C:/tmp/ika207/old に worktree で置き build（aa9f64f8c7967937）。`diff_turn --battles 400 --seed 1 --exes old=…,new` で old の列だけ 1 ターン多く外れた: seed 1 battle 214 turn 1、Raichu のメガシンカで `terrain: port None vs showdown 'electricterrain'`。Showdown の行は `|-fieldstart|move: Electric Terrain|[from] ability: Electric Surge|[of] p2a: Raichu`（IKA-201 が直したメガシンカ時のエレキメイカー）。同じターンで Python と新しい exe は一致。old の表は「Python 一致・port 乖離 1」、new は 0。
+* **テストの正の対照:** 同じ old exe（IKA-203 より前）で `test_trace_synchronize.py` の port 版 2 関数を走らせると 14 件落ちる（トレースが `trace` のまま 4、Aura Guard を断る 2 など）。今の exe では全部通る。
+* **null control:** port の列を足しても Python の列は 1 文字も変わらない（seed 1 × 400 と seed 2 × 400 の両方で `--no-port` の出力と一致。`test_adding_the_port_changes_no_python_number` でも固定）。
+* **PYTHONHASHSEED:** 固定しないと Python の列そのものが実行ごとに 1〜2 ターン変わる（seed 1 × 400 で 2,726 と 2,727）。port の有無とは無関係に元からある揺れ。`diff_turn` は未設定なら stderr に一言出すようにした。上の数は全部 PYTHONHASHSEED=0。
+
+### 4. 壁時計（port の列を足す前と後、同じ種・同じ局数、PYTHONHASHSEED=0、1 コア）
+
+```
+  seed 1, 400 局               --no-port 10 s / 11 s（2 回）   port あり 12 s / 13 s
+  seed 2, 400 局, ss 0.8       --no-port 11 s                  port あり 13 s
+  seed 1, 400 局, --exes 2 本  14 s（Python は 1 回）
+```
+
+1 局あたり約 25 ms → 30 ms（+15〜20%）。
+
+### 5. 別課題の候補
+
+* **port の乖離が Python より多いもの: なし**（§2。4,737 ターンで port だけの乖離 0）。
+* **port の断り（IKA-208 に渡す）:** Python は扱うが port が断る unmodelled volatile。throatchop が最多（seed 1 で 57 ターン。Throat Chop を受けた Pokémon がいるターン）、次に electroshot・solarbeam（溜めの技の自分の volatile。`tests/test_charge_target.py` の xfail 2 件が再現）、stockpile・flashfire・metronome。ほかは §2 の内訳のとおり（disguise は `tests/test_disguise_*.py` の xfail 15 件が再現）。
+* **途中交代で止まったターン（IKA-211）:** seed 1 で 126、seed 2（self-switch 0.8）で 336 ターンが port の列では比べられない。Python が外すもの 8 / 24 を含む。
+* **両エンジン共通の乖離（port だけの問題ではない）:** port の上位は Knock Off で持ち物（item x8）、Stance Change の forme（species）、毒・どくびし（hp）、Spicy Spray、Parting Shot の止まる・止まらない（seed 2 battle 373 turn 1・2、port は止まり Showdown は止まらない。同じターンで Python も外す）。例: seed 1 battle 14 turn 7 の `weather: port 'raindance' vs showdown None`（Kowtow Cleave / Rain Dance / recharge / Protect）、seed 1 battle 26 turn 6 の Quick Guard が side_conditions に無い、seed 1 battle 27 turn 4 の aegislash のフォルム。規則の誤りの洗い出しは `diverge_report` の port の節で順位が出る。
+* **diff_turn が PYTHONHASHSEED に依存する:** 同じ `--seed` で打つターンが実行ごとに変わる（§3）。どこで hash 順が選択か構築に入っているかは調べていない。
+
+### 6. 機械
+
+heavy.py の記録（IKA-207）: cargo build --release 2 回（今の worktree 24 s・3d9dbc5 23 s、--cores 8）。1 コアの実行 34 回・計 209 s（diff_turn 400 局 × 9 回 各 10〜14 s、diverge_report 3 回、テストファイル 14 回）。
