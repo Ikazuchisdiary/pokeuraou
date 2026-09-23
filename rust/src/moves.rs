@@ -1576,9 +1576,11 @@ fn hit_target<'a>(
     // changes at the `Update` after that hit and costs `baseMaxhp / 8`. A doll in front
     // takes the hit instead (`_substitute_in_front`).
     let multihit = mv.raw.get("multihit").is_some_and(|v| !v.is_null());
+    // `flags: { breakable: 1 }`: not against a Mold Breaker's move.
     let mut guarded = mv.category != "Status"
         && defender.ability.as_str() == "disguise"
-        && defender.species.as_str() == "mimikyu";
+        && defender.species.as_str() == "mimikyu"
+        && !is_mold_breaker(attacker.ability.as_str());
     if subbed && guarded {
         if multihit {
             turn.report(format!("substitute: {} past a broken Substitute into a forme guard", mv.id));

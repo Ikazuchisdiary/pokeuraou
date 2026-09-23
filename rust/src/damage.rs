@@ -450,7 +450,11 @@ pub fn calculate(
     }
     // After the immunity, as in damage.py (IKA-155): the forme guards act at the damage
     // step, so a Normal move into an intact Mimikyu is immune, not absorbed.
-    if defender.ability == "disguise" && defender.species == "mimikyu" {
+    // Disguise is `breakable`: a Mold Breaker's move goes through it (IKA-208).
+    if defender.ability == "disguise"
+        && defender.species == "mimikyu"
+        && !is_mold_breaker(attacker.ability.as_str())
+    {
         return zeros;
     }
     if defender.ability == "iceface"
