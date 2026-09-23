@@ -2450,6 +2450,7 @@ def _apply_status_move(
                     turn.log(f"{action.label(reg)} failed (nothing to encore)")
                     turn.move_failed.add((action.side, action.slot))
             else:
+                already = _has_volatile_at(turn, target, volatile_id)
                 turn.add_volatile(
                     *target,
                     volatile_id,
@@ -2457,6 +2458,17 @@ def _apply_status_move(
                         turn, move, volatile_id, action.side, action.slot
                     ),
                 )
+                # Leech Seed heals whoever stands in the planter's *slot* at the end of
+                # the turn, so the slot has to be written down (IKA-56):
+                #     this.volatiles[status.id].sourceSlot = source.getSlot();
+                #       (sim/pokemon.ts:2008)
+                # Only on a fresh seed: re-seeding a seeded target fails in `addVolatile`
+                # (no `onRestart`) and leaves the first planter's slot in place.
+                seeded = turn.mon_at(*target)
+                if volatile_id == "leechseed" and not already and seeded is not None:
+                    applied = seeded.volatile("leechseed")
+                    if applied is not None:
+                        applied.source_slot = f"{me[0]}{me[1]}"
         if raw.get("heal"):
             mon = turn.mon_at(*target)
             if mon is not None:
@@ -3487,13 +3499,12 @@ def _trapper_gone(turn: _Turn, trap: Effect) -> bool:
     A trap whose source is gone ends without dealing damage, so keeping it going costs the
     trapped Pokemon an eighth of its HP a turn that it should not lose.
     """
-    if not trap.source_slot or len(trap.source_slot) < 2:
+    # The same reader as Leech Seed's, so both encodings of the slot are understood here
+    # too, as the port's `trapper_gone` does.
+    located = _slot_of(turn, trap.source_slot)
+    if located is None:
         return False
-    try:
-        side, slot = int(trap.source_slot[0]), int(trap.source_slot[1])
-    except ValueError:
-        return False
-    source = turn.mon_at(side, slot)
+    source = turn.mon_at(*located)
     return source is None or source.fainted
 
 
@@ -4481,15 +4492,30 @@ def apply_lead_abilities(reg: Regulation, pos: Position) -> ReplacementResult:
     )
 
 
+def _has_volatile_at(turn: _Turn, target: tuple[int, int], vid: str) -> bool:
+    mon = turn.mon_at(*target)
+    return mon is not None and mon.has_volatile(vid)
+
+
 def _slot_of(turn: _Turn, source_slot: str | None) -> tuple[int, int] | None:
-    """Turns a Showdown slot label like ``p2a`` into our (side, slot) pair."""
-    if not source_slot or len(source_slot) < 3:
+    """Turns a ``source_slot`` into our (side, slot) pair, in either encoding in use.
+
+    The resolver writes ``"10"`` (side digit, slot digit); a position read from Showdown
+    carries its own label, ``"p2a"``. Reading only one of the two left Leech Seed's heal
+    unreachable for every seed the resolver planted (IKA-56).
+    """
+    if not source_slot:
         return None
-    try:
-        side = int(source_slot[1]) - 1
-    except ValueError:
+    if len(source_slot) >= 3 and source_slot[0] == "p":
+        try:
+            side = int(source_slot[1]) - 1
+        except ValueError:
+            return None
+        slot = ord(source_slot[2]) - ord("a")
+    elif len(source_slot) >= 2 and source_slot[0] in "01" and source_slot[1].isdigit():
+        side, slot = int(source_slot[0]), int(source_slot[1])
+    else:
         return None
-    slot = ord(source_slot[2]) - ord("a")
     if side not in (0, 1) or not 0 <= slot < len(turn.pos.sides[side].active):
         return None
     return side, slot
@@ -4625,18 +4651,25 @@ def _residuals(reg: Regulation, turn: _Turn) -> None:
             continue
         seed = mon.volatile("leechseed")
         if seed is not None:
-            # `getAtSlot(sourceSlot)`: the HP goes to whoever planted it, and nowhere at
-            # all if that Pokemon has left or fainted. Healing the nearest foe instead is
-            # right only by coincidence.
+            # vendor/pokemon-showdown/data/moves.ts:10218-10227:
+            #     const target = this.getAtSlot(pokemon.volatiles['leechseed'].sourceSlot);
+            #     if (!target || target.fainted || target.hp <= 0) { return; }
+            #     const damage = this.damage(pokemon.baseMaxhp / 8, pokemon, target);
+            #     if (damage) { this.heal(damage, target, pokemon); }
+            # A *slot*, not a Pokemon: if the planter switched out, whoever replaced it
+            # is healed. If that slot is empty or fainted the seed does nothing at all --
+            # no damage either. (Big Root and Liquid Ooze act on the heal; neither is in
+            # any team this project plays, and neither is modelled.)
             planter = _slot_of(turn, seed.source_slot)
+            receiver = turn.mon_at(*planter) if planter is not None else None
+            if receiver is None or receiver.fainted or receiver.hp <= 0:
+                continue
             drained = turn.deal_damage(
                 side, slot, turn.fraction_of_max(side, slot, LEECH_SEED_DRAIN),
                 reason="leechseed",
             )
-            if planter is not None and drained:
-                receiver = turn.mon_at(*planter)
-                if receiver is not None and not receiver.fainted:
-                    turn.heal(*planter, drained, reason="leechseed")
+            if drained:
+                turn.heal(*planter, drained, reason="leechseed")
 
     for side, slot in actives():
         mon = turn.mon_at(side, slot)
