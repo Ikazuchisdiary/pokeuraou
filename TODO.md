@@ -10377,3 +10377,84 @@ IKA-52 の前後の差より大きい。生成のデバイスを選ぶだけで�
 
 ビルド 8コア 21秒（21:42）、保存 5回 各 2コア 36〜41秒（21:43〜21:48、GPU は1本ずつ）。
 比較は1コアで数秒。
+
+## 9/23 — IKA-157: ばけのかわが吸った当たりも当たり —— オラクルでゴツゴツメット・いのちのたま・とんぼがえり・はたきおとす・じごくづき・バークアウト・デカハンター・ダブルウイングの 7 ケースとも Python がずれていた。w12・gen11L・M-C プールにミミッキュは 0
+
+IKA-155 が残した 2 つの疑い（吸った当たりで後処理を全部飛ばす・連続技を全部吸う）を、オラクルで確かめて直した。
+
+### 1. Showdown の手順
+
+`disguise` は `onDamage` で 0 を返すだけ（`data/abilities.ts`）。`spreadDamage`（`sim/battle.ts`）は 0 を数として通し、
+`spreadMoveHit`（`sim/battle-actions.ts`）は `damage[i]` が数である限り対象を残す。だから 0 の当たりでも
+技自身の効果（`runMoveEffects`）・自分の能力低下（`selfDrops`）・追加効果（`secondaries`）・`DamagingHit`
+（ゴツゴツメット・さめはだ）・`onAfterHit`（はたきおとす・どろぼう）が全部走り、`didAnything` が 0 なので
+とんぼがえりの交代も立ち、`afterMoveSecondaryEvent` でいのちのたまも削る。止まるのはダメージから計算するもの
+（吸収技の回復は `targetDamage` が 0 で 0、反動は `totalDamage` が 0 で無し、かいがらのすず）だけ。
+フォルムが変わるのは当たりの後の `Update` なので、連続技の 2 発目からは剥がれたミミッキュに当たる。
+`onEffectiveness` が 0 を返すので吸った当たりの相性は等倍（半減実は食べない）。Champions の mod は
+`hitStepMoveHitLoop` を自前で持つ（`data/mods/champions/scripts.ts`）ので、コードの読みではなくオラクルを正にした。
+
+### 2. オラクル（`tests/test_disguise_afterhit.py`、ゴツゴツメットのミミッキュ、横のドドゲザンはまもる）
+
+```
+  ケース                       Showdown                                           旧 Python              新 Python
+  rocky-helmet-and-life-orb   ドドゲザン 195→163（メット）→144（たま）          195（どちらも無し）     一致
+  u-turn                      ガオガエン -31（メット）、交代の要求あり          -0、交代無し            一致
+  knock-off                   メット -31、ミミッキュの道具が落ちる              どちらも無し            一致
+  throat-chop                 メット -31、じごくづき状態                        どちらも無し            一致
+  snarl（範囲）               ミミッキュ 特攻 -1                                 低下無し                一致
+  make-it-rain（範囲）        サーフゴー 特攻 -2（相方はまもる）                 低下無し                一致
+  dual-wingbeat               1 発目吸収・2 発目 132→89、メット 2 回            全部吸収、メット無し    一致
+  control-rock-slide          吸収して剥がれるだけ                               一致                    一致
+  control-shadow-ball         吸収して剥がれるだけ                               一致                    一致
+```
+
+### 3. 直し（`src/pokeuraou/resolve.py`）
+
+* `_hit_target`: 吸収の別の道（剥がして return）をやめ、普通の当たりのループに入れた。1 発目（`hit_index == 0`）が
+  守られていればダメージ 0 で `_after_hit(absorbed=True, type_mod=0)` を呼び、その後で `_bust_disguise`。
+  2 発目からは剥がれた相手で計算し直す既存の道に乗る。単発の吸収は急所・乱数を 1 つに畳む（前と同じく命中の枝ごとに 1 状態）。
+  連続技の 1 発目は急所にならず、`crit` の枝は 2 発目以降に効く
+* `_after_hit`: `absorbed` を足し、接触（ゴツゴツメット・さめはだ・てつのトゲ）とじごくづきの `dealt > 0` を「当たった」に
+* `_after_move`: いのちのたまを `total > 0` から `move_connected`（当たりが 1 つでもあった）に。普通の当たりは必ず 1 以上与えるので、
+  吸収以外で答えは動かない
+* port はこの 2 特性を拒否したまま（`test_disguise_and_ice_face_are_refused_by_name` pass）。Rust は触っていない
+
+### 4. 直す前に落ちるテスト
+
+`src/pokeuraou/resolve.py` だけを master のものに戻して `tests/test_disguise_afterhit.py` を走らせると、7 ケースが FAIL、
+対照 2 つ（control-rock-slide・control-shadow-ball）は pass。直した後は 9 つとも pass。
+
+### 5. 記録とプールで該当する数
+
+```
+                                        ファイル   行       ミミッキュ   コオリッポ   対照: ガオガエン
+  data/ika73/w12                         24         43,999   0 行         0 行         43,999 行（24 ファイル）
+  data/selfplay-gen11L                   24         12,000   0 行         0 行         12,000 行（24 ファイル）
+  data/pool/regmc-matchupweb.json        65 構築              0 構築       0 構築       19 構築
+  data/pool/raw（65 本の paste）          65                   0            —            —
+  configs/teams・configs/archetypes                           0            —            2 ファイル
+```
+
+どの記録でも、実際に指した手も表のセルも動かない。M-C のプールに入っていないので、M-C でも今は効かない。
+
+### 6. 検査と機械
+
+テスト: test_disguise_afterhit・test_disguise_order・test_feint_order・test_rust_node・test_resolve・test_line_endings・
+test_no_machine_specific_paths を `-n 0` で 138 pass（33 秒、1 コア）。test_event_grouping・test_narrow も pass。
+`tools/port_coverage.py --check`・`tools/port_gate_audit.py --check`: ok。`ruff check` ok（新しいテストファイルだけ `ruff format`）。
+機械: テスト 3 回・記録の数え上げ 1 回（13 秒）はどれも 1 コアで heavy.py に記録（--agent IKA-157）。オラクルの探り（数秒、1 コア）を数回直接。
+
+### 7. 別課題の候補
+
+* **しおづけ（オラクルで確認）**: Champions の mod は残りダメージを 1/16（みず・はがねは 1/8）にしている
+  （`data/mods/champions/moves.ts` の `saltcure`）。Python（`SALT_CURE_DAMAGE = (1, 8)`・`_WEAK = (1, 4)`）と
+  Rust（`rust/src/moves.rs`）は本家の 1/8・1/4。最大 HP 150 のミミッキュで Showdown 9、Python 18
+* 2〜5 回の連続技の回数分布（コードの読みだけ）: Showdown（Champions の mod も）は `sample([2×7, 3×7, 4×3, 5×3])` で 35/35/15/15。
+  Python の `MULTIHIT_2_5` と Rust の `multihit_counts` は 1/3・1/3・1/6・1/6。追加効果を枝分けする予算でだけ効く
+* ちからずく＋いのちのたま（コードの読みだけ）: Showdown は `hasSheerForce` の技で `afterMoveSecondaryEvent` を飛ばすので反動が無い。
+  Python の `_after_move` はちからずくを見ずに削る
+* 範囲の吸収技の丸め（コードの読みだけ）: Showdown は対象ごとに `Math.round` してから回復、Python は合計を 1 回丸める
+  （まっこうちゃ など）。1 ずれうる
+* じごくづきの状態は sim-bridge の局面では `unmodelledVolatiles` に入る。Showdown から読んだ局面では Python が
+  じごくづきを知らない（対局の途中で局面を Showdown から取り直す道があれば効く。未確認）
