@@ -22,7 +22,8 @@ The remaining cells are resolved per completion, restricted with ``cells=``:
 
 - the opponent's action switches into a hidden slot;
 - our action carries a move that forces their switch;
-- the turn suspends for a replacement, whose choices include the hidden slots.
+- the turn suspends for a replacement, whose choices include the hidden slots;
+- the port refused the cell (it has no leaves to share), so Python resolves it.
 
 Both sides' games share the one resolution, because their hidden slots are disjoint and a
 shared cell's resolution depends on neither. That is what takes 6.0x to a projected 2.2x.
@@ -183,6 +184,13 @@ def belief_payoffs(
 
     dirty = reaches_bench(reg, row, col, hidden)
     for i, j, _root in filled.folded:
+        dirty[i, j] = True
+    # A refused cell has no span and no fold, so unless it is dirty nothing ever writes it
+    # and it keeps the 0.0 the matrix was made with -- in every completion (IKA-139: 3,886
+    # cells of `data/ika73/w12` games 10-209, all Feint). Resolving it per completion goes
+    # through `batched_payoffs(cells=...)`, which fills what the port refuses in Python, as
+    # `_per_completion` does.
+    for i, j, _why in filled.refused:
         dirty[i, j] = True
     reference: Encoded = filled.encoded
     unmodelled = set(filled.unmodelled)

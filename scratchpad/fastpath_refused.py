@@ -20,6 +20,13 @@ made smooth (no `% 7.0`) 1,429 cells differ again, in 44 matrices (worst 3e-06 a
 0.004) -- the count does not move with the leaf, which points at the leaves' inputs rather
 than the stand-in's arithmetic (that the cells are the same ones was not checked). Not
 IKA-104's change: the path is the same before and after it. Left for its own issue.
+
+IKA-139 (9/23): on master c1b7e4c this prints 0 of 444. The 44 / 1,429 were IKA-121 and
+IKA-119: the same run on 250a1db (before both) gives 44 / 1,429 again, on adb1e7b (IKA-121
+only) 29 / 722, and after IKA-119 none. This leaf does not read `side`, so what it saw was
+`can_mega` alone; `scratchpad/ika139_patched_vs_scratch.py` compares the inputs.
+And the defect this was written for is real, only not in games 0-9: games 10-209 hold 19
+decisions with a shared refused cell (Feint), 3,886 cells left at 0.0. Fixed in IKA-139.
 """
 
 from __future__ import annotations
