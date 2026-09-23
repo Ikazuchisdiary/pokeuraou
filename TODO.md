@@ -8436,3 +8436,22 @@ Python で解き直して遅くなる）。後処理は `match_result.py`・`pai
 * **答え: IKA-121・IKA-119 の修正は盤で悪くしていない（非劣性 H1）。戻さない。** 大きさ（何点良いか）は
   この run からは言わない。要るなら固定局数で別に打つ（2つの寄与を分けるなら腕4つ）
 * 出力: `data/matches/ika141-new-vs-old-sprt`（sprt.json・logs）
+
+## 9/23 — IKA-122 の測定: 控えの推定分布 book 対 一様は非劣性 H1、手が動いた対 90.7%（コーディネータ、13:07〜13:12、master 89e87fd）
+
+ユーザ承認（9/23）。問いは「対戦を生成と同じ重み付きの推定分布に揃えたことで、打ち手が弱くならないか」なので、
+入れた修正の残す／戻すと同じく**非劣性 SPRT(-10, 0)** で登録した。value-gen11L 単体・幅12・控え隠蔽・葉順位・
+book・24ワーカー・2サーバ。試す腕は book、基準は `--baseline-uniform-bench-belief`。
+
+```
+  SPRT(-10, +0) α=β=0.05   H1 after 453 pairs (906 games), LLR +3.005   5.6分、984局を書き出し
+  対（両席とも同じ側が勝てば won/lost）   won 83  lost 57  split 313
+  pair_divergence   492対   手が動いた 446（90.7%）  初めて違う手: turn1 163・turn2 130・turn3 82・turn4 37 ほか
+  paired_result     book 52.54% ±2.42%  Elo +17.7 [+0.8, +34.6]   ⚠ SPRT で止めた勝率は偏る。大きさには使わない
+```
+
+* ワーカーの冒頭は `bench belief: tested arm book, other arm uniform`。末尾の自己申告は worker0 で「重み付きを渡した
+  局: 試す腕 27（席0）/ 21（席1）、他腕 0」。`restarting`・`falling back`・`explains nothing`・Traceback は 0 行
+* **答え: 重み付きの推定分布は一様より悪くない（非劣性 H1）。対戦の既定は book のまま。** IKA-141（25.8%）より
+  はるかに多くの対で手が動く設定で、9/19 以降の隠蔽の対戦7本が「生成と別の打ち手」だった幅はこの程度あった
+* 出力: `data/matches/ika122-book-vs-uniform-belief-sprt`
