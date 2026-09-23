@@ -10808,3 +10808,129 @@ release ビルド 2 回（8 コア、各 25 秒・21 秒）、数え上げ 1 回
   （`STATUS_MOVES_FULLY_MODELLED` にも入っている）。記録・プールでは 0
 * いやしのこころ: mod は 1/2 で隣の味方の状態異常を治す。Python・port とも inert。w12 に 3 行・gen11L に 1 行
 * くろいヘドロ・のろい（ゴースト）の残りダメージ・回復も未実装。記録・プールでは 0
+
+## 9/23 — IKA-164: d3de52a17 より後の上流 Champions の変更を調べた —— 仕様が変わるのはだっしゅつボタンとききかいひ（M-C の 65 構築のうち 3 と 5）、記録（M-B）で効く決定は 4 つとも 0。master（a5df827）まで上げてよい。語彙は動かない
+
+ワーカー、基点 master ff82ad5、ブランチ `ika-164-upstream-champions`。調べるだけ（vendor は上げていない。gitlink は d3de52a17 のまま、
+コードは直していない）。worktree の中で submodule を初期化し、上流 master を `--shallow-since=2026-09-01` で fetch した。
+出力はすべて `C:/tmp/ika164/`（`dumps/<段>/`・`dumpdiff.txt`・`scen-base.txt`・`scen-master.txt`・`pool_counts.txt`・`counts/`）。
+
+### 1. d3de52a17..a5df827（9/10〜9/22、20 コミット）のうち data/・sim/ に触れるもの
+
+```
+  490b7fb8c  Mega Baxcalibur の特性: pokedex で H: Ice Body を削除        → ダンプ M-C 1 項目。挙動は不変（下）
+  524413e84  Champions OU: Mega Salamence を Uber                       → tier だけ。ダンプに出ない（VGC は tier を読まない）
+  d5fb7ea62  Champions OU: Lucario-Mega-Z・Alakazam-M・Baxcalibur を Uber → 同上
+  aa6d5f085  Champions: だっしゅつボタンが発動しても攻撃側の自分交代を消さない → ダンプに出ない（M-C の items の並びだけ）。Showdown の挙動が変わる
+  92f01f8f7  names の訳のキーを id → 名前（data/text/*/names.ts）           → ja.json の natures・types・genders のキー。Python は影響なし（下）
+  a21fdb7b9  検証器: type:・teratype: の禁止                               → ダンプに出ない。Champions VGC の banlist は使っていない
+  57ecb348b  Champions: ききかいひ・にげごしが他の交代を消さない（＋全世代の Eject Pack の小修正）→ ダンプに出ない（abilities の並びだけ）。Showdown の挙動が変わる
+  234511985  Champions: 呪い＋タイプ変更（mod に curse、sim/battle-queue.ts で非ゴーストの対象を自分に、nonGhostTarget を廃止）
+             → ダンプ M-B・M-C の curse 3 項目（＋全技の nonGhostTarget '' が消える）
+  他（gen2-4 の Pursuit、gen8 の Gigantamax、OM の formats.ts、random battles、rulesets の Recycle） → ダンプにもシミュにも出ない
+```
+
+依頼の 4 つ以外に Champions に効くものは 92f01f8（訳のキー）だけ。tier の 2 つは Champions OU（シングル）の禁止で、VGC の regmb・regmc には効かない
+（ダンプの `teamLegal` は全段で差分 0）。
+
+### 2. ダンプの差分（id で突き合わせた全件、`C:/tmp/ika164/dumpdiff.py`、段ごとに累積）
+
+```
+  null   本体のダンプ（d3de52a17）対 この worktree で作り直したもの     M-B・M-C・ja.json とも差分 0（generatedAt を除く）
+  490b7fb  M-C species baxcaliburmega.abilities ['Thermal Exchange','Ice Body'] → ['Thermal Exchange']
+  aa6d5f0  M-C items の配列の並び（mod で上書きした ejectbutton が前へ動く）。中身の差分 0（customHooks は同じ onAfterMoveSecondary）
+  57ecb34  M-B・M-C abilities の並び（emergencyexit・wimpout が mod に入った）。中身の差分 0
+           ja.json: natures 25・types 19 のキーが "adamant" → "Adamant"、"bug" → "Bug"、genders が male/female/genderless → M/F/N（92f01f8）
+  2345119  M-B・M-C moves curse: volatileStatus 'curse' → 無し、tracksTarget 無し → true、nonGhostTarget 'self' → 無し
+           ほかの 514 技の nonGhostTarget '' → 無し（読む所は無い）、moves の並び
+  a5df827  （master）差分 0
+```
+
+種族・道具・特性・技の **id の集合は全段で同じ**。`tools/vocab_order.py --check` は master のダンプで両規則とも ok
+（M-B 357・316・148・515、M-C 392・316・166・515）。**語彙の追記は要らず、指紋も変わらない**。
+
+### 3. 各変更が Python・port のどこに効くか
+
+| 変更 | Showdown で変わること | Python・port | 要る直し |
+|---|---|---|---|
+| Baxcalibur（490b7fb） | 無し。メガは `formeChange` の slot '0'（Thermal Exchange）を使う（champions の scripts.ts） | 両エンジンとも `abilities[0]` をメガの特性にする（`resolve._do_mega`・`resolve.rs do_mega`）。前も後も Thermal Exchange。priors・standings は基本種族の特性を読む | 無し（ダンプを作り直すだけ） |
+| だっしゅつボタン（aa6d5f0） | とんぼがえり等で持ち主が脱出しても、攻撃側も交代する（元は `source.switchFlag = false` で取り消し） | 両エンジンとも未実装。Python は effects の「ダメージに効かない道具」に入っていて **unmodelled にも出ない**、port は inert.rs。自分交代は常にする → 新しい Showdown と攻撃側は一致するようになる（持ち主の脱出は相変わらず無い） | 無し |
+| ききかいひ（57ecb34） | 半分を切っても他の交代を消さない（元は全員の switchFlag を消していた）。既に交代予定なら発動しない | 両エンジンとも未実装。Python は damage の unmodelled に `defender.ability:emergencyexit`、port は inert.rs | 無し |
+| 呪い（2345119） | 非ゴーストは選んだときに対象を自分に固定、ゴースト判定は当たるとき。プロテウスでゴーストになれば相手を呪う。ゴーストの呪いは tracksTarget（そらをとぶ中は当たらない） | 両エンジンとも汎用の経路（`volatileStatus` を対象に付け、`status move: curse` を報告）。新しいダンプでは volatileStatus が無いので**何も付けなくなる**。どちらも本当の挙動（非ゴースト: 自分に攻撃・防御 +1 素早さ -1、ゴースト: HP 1/2 と呪い、毎ターン 1/4）ではない（IKA-159 の残りにも「のろいの残りダメージ未実装」） | 上げるだけなら無し。Python と port は同じダンプを読むので一致したまま |
+| 訳のキー（92f01f8） | — | `names._table` がキーを `to_id` するので natures・types は同じ訳を引く。genders は読まない | 無し（dump-names もそのまま動いた） |
+
+Showdown 側で確かめた（`C:/tmp/ika164/scenarios.js`、gen9championsvgc2026regmc、同じ seed、d3de52a17 と a5df827 で同じ手）:
+
+```
+  とんぼがえり → だっしゅつボタンのゴリランダー      d3de52a: 交代要求 p1 なし・p2 あり   a5df827: p1・p2 とも   ← 攻撃側も交代
+  とんぼがえり → 半分を切るグソクムシャ（ききかいひ） d3de52a: p1 なし・p2 あり           a5df827: p1・p2 とも
+  ゲンガーの呪いを味方へ                              どちらも相手へ振り直して呪う（ログの行順だけ違う）
+  カビゴンの呪い                                      どちらも自分に +1/+1/-1
+```
+
+**上げる前からある不具合（別件）**: 非ゴーストの呪いに、Showdown の要求は `target: "self"` を出し、`move 1 1` を拒む
+（`choose` が false、scenarios.js #5）。Python の手の列挙はダンプの `target: "normal"` だけを見て `curse` に対象 1・2 を出し、
+対象なしの `move 1` を出さない（`C:/tmp/ika164/python_curse_menu.py`、w12 の局面のリザードンの技を curse に替えて確かめた）。
+上流が nonGhostTarget を消したので、直すなら Python で「ゴーストでなければ self」と書く（Showdown の `pokemon.ts getMoves` と同じ）。
+
+### 4. 記録・プールで効く数
+
+記録（本体の data を読むだけ、`C:/tmp/ika164/count_records.py`、8 コア 4 秒）。M-C の記録は data/ のどこにも無い（最初の jsonl の先頭で探した）:
+
+```
+                     局      Baxcalibur  だっしゅつボタン  ききかいひ・にげごし  呪い（技を持つ）
+  data/ika73/w12     43,999      0            0                 0                    0
+  selfplay-gen11L    12,000      0            0                 0                    0
+```
+
+どちらも M-B。M-B のダンプには Baxcalibur もだっしゅつボタンも無く、ききかいひ・にげごしを持てる種族も無い。呪いは M-B で合法だが、
+記録の両チームの技に 1 回も無い（部分文字列の前段で拾った cursedbody の局は解析されて数えている＝前段は効いている）。
+**記録で 4 つの変更が効く決定は 0**。
+
+プール（`C:/tmp/ika164/count_pool.py`、構築の数）:
+
+```
+                                     構築   Baxcalibur（うちメガ石）  だっしゅつボタン  ききかいひ  呪い   ダメージ技の自分交代
+  M-C 65（regmc-matchupweb）           65        0                         3                5          0          11
+  Baltimore（M-C、2027-baltimore）  1,079*      17（14）                   35              152          2（非ゴースト）  279
+  Worlds（M-B、2026-worlds）           394        0                         0                0          0          44
+  configs/teams（M-B）                  2        0                         0                0          0           0
+```
+
+* \* Baltimore は 1,082 人のうちチームが空でない 1,079 本（検証前の生の登録。standings_report の 1,077 とは別の数）
+* だっしゅつボタンの 3 本はすべてゴリランダー（とんぼがえり持ち）。65 本の順序対のうち「持ち主の側」×「相手がダメージ技の自分交代を持つ」は 33/4,225
+* ききかいひの 5 本はすべてグソクムシャで、**5 本ともメガストーン（Golisopite）**を持つ（メガ後は Tough Claws）。効くのはメガしない局か、メガする前だけ
+* 呪い＋タイプ変更: 呪いの持ち主が M-C 65 に 0、Baltimore 2（どちらも非ゴースト、同じ構築にタイプを変える技・特性は無い）。プロテウス・へんげんじざいで呪いを持つものは 0
+
+### 5. 推奨
+
+**master（a5df827）まで上げてよい。急ぐ理由は M-C のだっしゅつボタンとききかいひ**（Showdown を正解として使う検査・自己対戦で、
+攻撃側の自分交代が今の Champions の仕様になる）。記録（M-B）の決定は 1 つも変わらず、語彙も指紋も動かないので、value-gen11L は
+w12 でビット一致するはず。呪いの変更はダンプを通じて Python・port の（もともと未実装の）呪いの付け方を変えるが、プールに持ち主が 0。
+Baxcalibur と訳のキーはどちらも挙動に出ない。
+
+手順（IKA-136 と同じ形。コードの直しは要らない見込み）:
+
+1. worktree で submodule を初期化 → fetch → a5df827 を checkout、`npm ci`・`node build decl`・ルートの `npm ci`・`tsc -p packages/sim-bridge`
+   （a5df827 の型で `tsc --noEmit` は rc 0 を確かめた）、gitlink を stage
+2. `dump-regulation`・`dump-names`。差分が 2 節と同じ（null: この調査の `dumps/5-master-a5df827/` と generatedAt 以外バイト一致）ことを確かめる。
+   `regulation.ts` の DECLARATIVE_MOVE_KEYS から `nonGhostTarget` を外すかは任意（外さなくても出ない）
+3. `vocab_order.py --check`（追記なし）。指紋が変わらないこと
+4. Python・port: 直しなし。オラクルで「だっしゅつボタン・ききかいひへのとんぼがえりで攻撃側も交代」を Python と照合するテストを足す
+   （陽性対照: d3de52a17 の vendor では Showdown が交代させず、Python と食い違う）
+5. diff_node（呪いを持たせた scenario、matrix・fast）で拒否 0・最悪差が和の順序だけ。port_coverage --check・port_gate_audit --check
+6. value-gen11L: 基点の木 対 新しい木、w12 の M-B 局面 4,000 でビット一致（null）と、番号の入れ替えで一致 0（陽性）
+7. Baltimore `standings_report.py`: 1,077/1,082 のまま（a21fdb7 で検証器が変わるので確かめる）。プール `fetch_pastes.py` 65/65、Showdown の検証器 65/65
+8. 関係テスト（test_names・test_showdown_commit・test_runaway・test_line_endings など）
+
+見積もり: エージェント 2〜3 時間、機械はビルド・ダンプ 1 分未満、cargo release 2 回（8 コア 25 秒ずつ）、null コントロールと関係テストで
+1 コア数分。Linear の見積もり 2。
+
+### 6. 起票の候補（上げるかどうかと独立）
+
+* 非ゴーストの呪いの手の列挙（3 節）。Showdown が拒む `move N 1/2` を出し、合法な `move N` を出さない。M-C 65 と記録では 0、Baltimore 2 本
+* だっしゅつボタンが unmodelled に出ない（effects の「ダメージに効かない道具」集合に入っているため）。M-C 65 で 3 本、Baltimore 35 本
+* ききかいひ・にげごし・だっしゅつボタンの交代（持ち主側）を Python・port とも実装していない。Baltimore でグソクムシャ 152/1,079 本（14%）
+
+機械: submodule 初期化 5 秒・fetch 2 秒（1 コア）、npm ci 2 回（8・6 秒）、build decl 単独で 5 回（3〜5 秒）、ダンプ 6 段（各段の build decl を含む）27 秒（4 コア）、
+記録の集計 4 秒（8 コア）、tsc 2 回（1 秒）。すべて heavy.py（--agent IKA-164）。プールの集計・場面・vocab --check は各数秒（直接）。
