@@ -178,3 +178,99 @@ def test_spin_is_server_cpu_over_held(tool: Any) -> None:
     started = [{"argv": ["tools/inference_server.py"], "startup_process_cpu": 10.0},
                {"argv": ["tools/selfplay.py"], "startup_process_cpu": 99.0}]
     assert tool.spin(tree, servers, started)["ratio"] == pytest.approx(0.5)
+
+
+def lumpy_workers(tool: Any) -> list[dict[str, Any]]:
+    """The shape of IKA-98's shipping measurement, in miniature (IKA-149).
+
+    Every worker lives 100 s, as the queue makes them. Each spends a lump of untimed
+    seconds in its self-switch decisions and the rest of its clock deciding moves at
+    0.2 s a decision, all of it on a row. So the more lump, the fewer decisions: the rest
+    falls as decisions grow, and no stage is counted twice.
+    """
+    reports = []
+    for lump in (2.0, 10.0, 20.0, 40.0):
+        moves = int((100.0 - 1.0 - lump) / 0.2)
+        timed = 0.2 * moves
+        reports.append(worker(
+            tool,
+            elapsed=100.0,
+            stages={"startup": {"wall": 1.0, "cpu": 1.0, "calls": 1},
+                    "branch": {"wall": timed, "cpu": timed, "calls": moves},
+                    "rust.fill@rank": {"wall": 50.0, "cpu": 0.0, "calls": 1}},
+            decisions={
+                "move.hidden": {"n": moves, "wall": timed, "stages": {"branch": [timed, moves]},
+                                "counts": {}},
+                "selfswitch": {"n": 10, "wall": lump,
+                               "stages": {"rust.fill@rank": [50.0, 1]}, "counts": {}},
+                "between": {"n": 5, "wall": 99.0 - timed - lump, "stages": {}, "counts": {}},
+            },
+        ))
+    return reports
+
+
+def test_a_falling_rest_warns_and_is_not_called_a_double_count(
+    tool: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    found = tool.rest_fit(lumpy_workers(tool))
+    assert found["fit"]["steady"] < -tool.UNNAMED_LIMIT
+    tool.print_rest_fit(found)
+    printed = capsys.readouterr().out
+    assert "below -5%" in printed
+    assert "counted twice" not in printed
+    assert found["negative"] == 0 and found["least_rest"] > 0
+
+
+def test_a_rising_rest_still_warns_and_a_flat_one_does_not(
+    tool: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def fitted(per_decision: float) -> dict[str, Any]:
+        reports = []
+        for decisions in (100, 200, 400):
+            rest = 1.0 + per_decision * decisions
+            reports.append(worker(
+                tool, elapsed=40.0 + rest,
+                stages={"lp": {"wall": 40.0, "cpu": 40.0, "calls": 1}},
+                decisions={"move": {"n": decisions, "wall": 1.0, "stages": {}, "counts": {}}},
+            ))
+        return tool.rest_fit(reports)
+
+    tool.print_rest_fit(fitted(0.01))
+    assert "over 5%" in capsys.readouterr().out
+    tool.print_rest_fit(fitted(0.0001))
+    assert "**" not in capsys.readouterr().out
+
+
+def test_a_negative_rest_is_named_as_a_double_count(
+    tool: Any, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The control that breaks the named shape: rows adding to more than the clock."""
+    reports = []
+    for decisions in (100, 200):
+        reports.append(worker(
+            tool, elapsed=10.0,
+            stages={"lp": {"wall": 8.0, "cpu": 8.0, "calls": 1},
+                    "belief": {"wall": 3.0, "cpu": 3.0, "calls": 1}},
+            decisions={"move": {"n": decisions, "wall": 9.0, "stages": {}, "counts": {}}},
+        ))
+    found = tool.rest_fit(reports)
+    tool.print_rest_fit(found)
+    assert "counted twice" in capsys.readouterr().out
+    assert found["negative"] == 2
+    assert found["least_rest"] == pytest.approx(-1.0)
+
+
+def test_the_rest_by_kind_names_where_the_lump_is(tool: Any) -> None:
+    found = tool.rest_by_kind(lumpy_workers(tool))
+    kinds = found["kinds"]
+    # All of each worker's lump, and nothing of the moves, whose clock is all on a row.
+    assert kinds["selfswitch"]["rest"] == pytest.approx(2.0 + 10.0 + 20.0 + 40.0)
+    assert kinds["move.hidden"]["rest"] == pytest.approx(0.0)
+    assert kinds["selfswitch"]["n"] == 40
+    # Borrowed rows charged in a stretch are not taken off its rest.
+    assert found["rest"] == pytest.approx(sum(row["rest"] for row in kinds.values()))
+    assert found["outside"] == pytest.approx(0.0, abs=1e-9)
+    # A report from before IKA-98 has no stretches to split.
+    old = worker(tool)
+    del old["decisions"]
+    assert tool.rest_by_kind([old]) is None

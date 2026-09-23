@@ -31,9 +31,10 @@ the shipping command line (tools/ika73_generate.sh) goes in as it is::
 
 After the stage table it prints what IKA-98 added: the CPU of the tree by role, the
 servers' CPU over the time they held a request, what one decision of each kind costs in
-counts, the rest regressed on the decisions (with a warning when it is too large to read
-the table as a breakdown), and what each worker's own report says it ran -- its argv and
-the checkout its code came from. A worker that ran something else exits this with 3.
+counts, the rest regressed on the decisions (with a warning when its slope is too large
+either way to read the table as a breakdown), the rest of each kind of decision exactly
+(IKA-149), and what each worker's own report says it ran -- its argv and the checkout its
+code came from. A worker that ran something else exits this with 3.
 
 `pokeuraou.timing` is off unless `POKEURAOU_TIMING` is set, which this sets for the child
 and everything below it. Two numbers come back for every stage:
@@ -59,6 +60,7 @@ import json
 import os
 import subprocess
 import sys
+import textwrap
 import threading
 import time
 from pathlib import Path
@@ -94,8 +96,10 @@ ROLE_SCRIPTS = (
 #: The Rust child, by the name its executable has.
 DAMAGE_EXE = "pokeuraou-damage.exe"
 
-#: Above this share of the workers' wall clock, the work that grows with the decisions and
-#: has no row is too large for the table to be read as a breakdown (IKA-98's instrument 7).
+#: Above this share of the workers' wall clock *either way*, the rest's slope on the
+#: decisions says the untimed work is too large, or too lumpy, for the table to be read as
+#: a breakdown (IKA-98's instrument 7). It was one-sided until IKA-149: the shipping
+#: measurement's -16.1% and -23.1% printed nothing.
 UNNAMED_LIMIT = 0.05
 
 
@@ -569,6 +573,11 @@ def rest_fit(reports: list[dict[str, Any]]) -> dict[str, Any] | None:
         "recorded": sum(r["recorded"] or 0 for r in rows),
         "timed": sum(r["timed"] or 0 for r in rows) if rows[0]["timed"] is not None else None,
         "rest": sum(r["rest"] for r in rows),
+        # A worker's rest below zero is its rows adding to more than its own clock, which
+        # is the only thing that says stages were counted twice (IKA-149). A negative
+        # *slope* does not: see `print_rest_fit`.
+        "least_rest": min(r["rest"] for r in rows),
+        "negative": sum(1 for r in rows if r["rest"] < 0),
         "elapsed": elapsed,
         "fit": None,
     }
@@ -592,9 +601,97 @@ def print_rest_fit(found: dict[str, Any] | None) -> None:
         return
     print(f"   rest = {fit['intercept']:.2f} s + {1000 * fit['slope']:.2f} ms x decisions; "
           f"slope x decisions is {100 * fit['steady']:.1f}% of the workers' wall clock")
-    if fit["steady"] > UNNAMED_LIMIT:
-        print(f"   ** over {100 * UNNAMED_LIMIT:.0f}%: work that grows with the decisions has "
-              f"no row. Do not read the table as a breakdown; name it first **")
+    for line in rest_warnings(found):
+        print(textwrap.fill(f"** {line} **", width=90, initial_indent="   ",
+                            subsequent_indent="      "))
+
+
+def rest_warnings(found: dict[str, Any]) -> list[str]:
+    """What the rest regression says about reading the table, one line per problem.
+
+    Three shapes, and only the last one is a double count:
+
+    * slope above +5% of the workers' clock: work that grows with the decisions has no row
+    * slope below -5%: the rest *falls* as decisions grow. The stages are exclusive by
+      construction (a nested stage suspends the outer one), so this is not overlap. It is
+      untimed work that comes in lumps, in some workers and not others: the queue ends
+      every worker at about the same time, so the clock a worker spent in a lump is clock
+      it did not spend deciding, and it played fewer decisions. The slope is then not a
+      per-decision cost at all. IKA-149: the shipping run's lumps were the self-switch
+      node, 230 s of the 268 s
+    * a worker whose rest is below zero: its rows add to more than its own clock
+    """
+    out: list[str] = []
+    fit = found.get("fit")
+    limit = 100 * UNNAMED_LIMIT
+    if fit is not None and fit["steady"] > UNNAMED_LIMIT:
+        out.append(f"over {limit:.0f}%: work that grows with the decisions has no row. "
+                   f"Do not read the table as a breakdown; name it first")
+    elif fit is not None and fit["steady"] < -UNNAMED_LIMIT:
+        out.append(f"below -{limit:.0f}%: the rest falls as the decisions grow. That is not "
+                   f"a double count, which would put a worker's rest below zero: the "
+                   f"untimed work comes in lumps that took the place of decisions, so the "
+                   f"slope is no per-decision cost. Read the rest by decision kind below, "
+                   f"and do not read the table as a breakdown until the lump has a row")
+    if found.get("negative"):
+        out.append(f"{found['negative']} worker(s) have a negative rest (least "
+                   f"{found['least_rest']:.2f} s): their rows add to more than their "
+                   f"clock, so some stage is counted twice. Find it before reading on")
+    return out
+
+
+def rest_by_kind(reports: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The rest of every decision stretch, by kind: its wall less the rows charged in it.
+
+    Exact where `rest_fit` is a regression (IKA-149). `timing.decided` cuts a worker's
+    clock into stretches and keeps every stage's change across each, so the untimed part
+    of one kind of decision is a subtraction, not a slope -- and it names the kind the
+    untimed work is in, which a slope across 24 workers cannot. What is outside every
+    stretch is kept as `outside` and should be near zero: before the first stretch is
+    `startup`, a row of its own. Borrowed rows are left out, as everywhere.
+    """
+    kinds: dict[str, dict[str, float]] = {}
+    total = 0.0
+    seen = False
+    for report in _worker_reports(reports):
+        stages = report.get("stages") or {}
+        total += float(report.get("elapsed", 0.0)) - sum(
+            float(v.get("wall", 0.0)) for k, v in stages.items() if k not in BORROWED
+        )
+        for kind, row in (report.get("decisions") or {}).items():
+            seen = True
+            charged = sum(
+                float(pair[0]) for name, pair in (row.get("stages") or {}).items()
+                if name not in BORROWED
+            )
+            into = kinds.setdefault(kind, {"n": 0, "wall": 0.0, "rest": 0.0})
+            into["n"] += int(row.get("n", 0))
+            into["wall"] += float(row.get("wall", 0.0))
+            into["rest"] += float(row.get("wall", 0.0)) - charged
+    if not seen:
+        return None
+    return {
+        "kinds": kinds,
+        "rest": total,
+        "outside": total - sum(row["rest"] for row in kinds.values()),
+    }
+
+
+def print_rest_by_kind(found: dict[str, Any] | None) -> None:
+    if found is None:
+        return
+    rest = found["rest"]
+    print(f"\n  the rest by decision kind: each stretch's wall less its rows, "
+          f"{_seconds(rest)} s in all")
+    print(f"  {'kind':<22} {'n':>7} {'rest s':>9} {'of rest':>8} {'ms each':>8} "
+          f"{'of its wall':>11}")
+    for kind, row in sorted(found["kinds"].items(), key=lambda kv: -kv[1]["rest"]):
+        n = max(row["n"], 1)
+        of_rest = 100 * row["rest"] / rest if rest else 0.0
+        of_wall = 100 * row["rest"] / row["wall"] if row["wall"] else 0.0
+        print(f"  {kind:<22} {row['n']:>7,} {row['rest']:>9.1f} {of_rest:>7.1f}% "
+              f"{1000 * row['rest'] / n:>8.1f} {of_wall:>10.1f}%")
+    print(f"  {'outside any stretch':<22} {'':>7} {found['outside']:>9.1f}")
 
 
 def _flag(argv: list[str], flag: str) -> str | None:
@@ -809,6 +906,7 @@ def main() -> None:
             print_server(summarise(servers))
         print_decisions(per_decision(reports))
         print_rest_fit(rest_fit(reports))
+        print_rest_by_kind(rest_by_kind(reports))
         print_delivery(delivery(reports, None))
         return
 
@@ -869,6 +967,8 @@ def main() -> None:
     print_decisions(summary["decisions"])
     summary["rest_fit"] = rest_fit(reports)
     print_rest_fit(summary["rest_fit"])
+    summary["rest_by_kind"] = rest_by_kind(reports)
+    print_rest_by_kind(summary["rest_by_kind"])
     summary["delivery"] = delivery(reports, args)
     print_delivery(summary["delivery"])
     target = args.json or (timing_dir / "summary.json")
