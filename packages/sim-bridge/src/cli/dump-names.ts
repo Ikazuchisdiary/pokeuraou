@@ -18,22 +18,12 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
-import { execFileSync } from 'child_process';
+import { showdownCommit } from '../showdown-commit';
 
 const DEFAULT_LOCALES = ['ja'];
 
 function repoRoot(): string {
 	return path.resolve(__dirname, '..', '..', '..', '..');
-}
-
-function showdownCommit(root: string): string {
-	try {
-		return execFileSync('git', ['-C', path.join(root, 'vendor', 'pokemon-showdown'), 'rev-parse', 'HEAD'], {
-			encoding: 'utf8',
-		}).trim();
-	} catch {
-		return 'unknown';
-	}
 }
 
 type NameTable = { [id: string]: string };
@@ -86,7 +76,9 @@ function plain(table: { [id: string]: string | null | undefined }): NameTable {
 
 function main() {
 	const root = repoRoot();
-	const commit = showdownCommit(root);
+	// The text tables are read from vendor/ directly below, so that checkout's commit is
+	// the one recorded; it stops rather than write the parent's HEAD (IKA-152).
+	const commit = showdownCommit(root, path.join(root, 'vendor', 'pokemon-showdown'));
 	const outDir = path.join(root, 'configs', 'names');
 	fs.mkdirSync(outDir, { recursive: true });
 

@@ -9264,3 +9264,42 @@ Pokemon が中断時と違う・場に出ている、のどれか。解決器が
   差し替えれば 22 ms → 5 ms 程度だが、今は 1割台なので見送った
 
 機械時間: 1コアの再生 3本（69 s・44 s・516 s）とテスト 135 s。すべて `heavy.py --agent IKA-150 --cores 1`。
+
+## 9/23 — IKA-152: ダンプの `meta.showdownCommit` は vendor の gitlink から —— submodule が空の worktree では親の HEAD を黙って書いていた。今は止まる
+
+### 1. 何が起きていたか
+
+`dump-regulation.ts` と `dump-names.ts` の `showdownCommit()` は `git -C vendor/pokemon-showdown rev-parse HEAD`
+を信じていた。submodule を初期化していない worktree ではその場所は自前のリポジトリではなく、git は親へ上って
+親の HEAD を返す。この worktree（base 9ff56f8）で旧規則を走らせると `9ff56f8136…` が返り、gitlink の
+`cc089d36b7…` ではない。失敗時は `'unknown'` をそのまま書いていた。同じ関数が `dump-names.ts` にも写してあった
+ので、両方直した。
+
+### 2. 直したこと
+
+- 新しい `packages/sim-bridge/src/showdown-commit.ts`。`showdownGitlink(root)` は親の index の gitlink
+  （`git ls-files --stage -- vendor/pokemon-showdown`、mode 160000）を読む。index を読むので、submodule を
+  上げて `git add` した段階でもダンプを作れる。`showdownCommit(root, dir)` は `dir` が自前の git checkout の
+  最上位であること（`rev-parse --show-toplevel` が `dir` 自身）を確かめてから HEAD を読み、gitlink と違えば止まる。
+  どの失敗も例外で、ダンプは書かれない。
+- `dump-regulation` は dex を実際に読む先（`require.resolve('pokemon-showdown/package.json')` の置き場）の
+  コミットを記録し、書いた後にファイルを読み直して `meta.showdownCommit` が gitlink と一致するかを自己検査する。
+  `dump-names` は text を `vendor/pokemon-showdown` から直接読むので、その場所のコミットを記録する。
+- `tests/test_showdown_commit.py`: 追跡中の configs/ の JSON のうち `meta.showdownCommit` を持つもの全部が gitlink
+  と一致すること。組み立て済みの resolver があれば、(a) 親が答える場所（`packages/`、未初期化 submodule と同じ形）
+  で止まり親の HEAD を出さない、(b) 別コミットの自前 checkout で止まる、(c) 初期化済みの vendor では gitlink を返す
+  （この worktree は未初期化なので (c) は skip）。
+
+### 3. 確かめたこと
+
+- 陽性対照（scratch の複製で二つの検査を無効化）: (a)(b) の形でどちらも `9ff56f8…` を返す＝テストが落ちる形。
+  誤った値を入れたダンプは一致検査で落ちる。
+- 直した `dump-regulation` をこの worktree で一度走らせた（node_modules は main への junction、dex は main の
+  vendor＝cc089d36）。差分は `generatedAt` だけだったので、二つのダンプは元に戻した。`dump-names` は未初期化の
+  vendor で名指しして止まり、`ja.json` は書かれなかった。
+- 既存のダンプ: `gen9championsvgc2026regmc.json`・`gen9championsvgc2026regmb.json`・`configs/names/ja.json` の三つとも
+  `cc089d36b7717dec78ce8ab5d1745c03ad5c97e4` で gitlink と一致。書き換えていない。
+
+### 4. 機械
+
+1コア・鍵なし: `dump-regulation` の試走 14:49:26〜14:49:27（1秒）、ほかテストと数秒の試走。生成・対戦・学習はしていない。
