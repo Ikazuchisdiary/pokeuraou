@@ -59,6 +59,12 @@ def main() -> None:
         "averaged in logit space",
     )
     ap.add_argument("--roster", default="rizabanadohido")
+    ap.add_argument(
+        "--regulation",
+        default=None,
+        help="the format id the encoder is built for, instead of the roster's. M-C "
+        "generation has no roster (IKA-81), so generate_queue.py --pool names the pool's.",
+    )
     ap.add_argument("--device", default="cuda", choices=("cpu", "cuda"))
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=0, help="0 asks the OS for a free one")
@@ -70,7 +76,12 @@ def main() -> None:
     from pokeuraou.encode import Encoder
 
     torch.set_num_threads(1)
-    reg = load_roster(args.roster).reg
+    if args.regulation is not None:
+        from pokeuraou.regulation import load_regulation
+
+        reg = load_regulation(args.regulation)
+    else:
+        reg = load_roster(args.roster).reg
     register_mega_stones(reg)
     encoder = Encoder(reg)
 

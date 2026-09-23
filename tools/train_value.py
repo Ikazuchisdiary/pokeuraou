@@ -48,6 +48,7 @@ from pokeuraou.value import (
     auc,
     build,
     load_dataset,
+    load_model,
     predict,
     save_model,
     split_for,
@@ -186,6 +187,35 @@ def learning_curve(
         )
 
 
+def warm_start(
+    path: Path, encoder: Encoder, run: dict
+) -> tuple[torch.nn.Module, dict, ValueConfig]:
+    """The model at `path`, read for `encoder`, and the config to go on training it with.
+
+    Through `load_model` and nothing else, so the vocabulary is grown -- zero rows for the
+    ids the encoder appended, an M-B model onto M-C -- by the one path whose null control
+    is on record (IKA-82: bit-identical on 4,000 M-B positions), and a vocabulary that is
+    not an extension is refused the same way. The architecture and regularisation come
+    from the model (its sizes must match its weights); what this run sets -- epochs,
+    learning rate, seeds, schedule -- replaces the rest.
+    """
+    from dataclasses import replace
+
+    net, meta = load_model(path, encoder)
+    blob = torch.load(path, map_location="cpu", weights_only=False)
+    config = replace(ValueConfig(**blob["config"]), **run)
+    record = {
+        "path": str(path),
+        "format_id": blob["format_id"],
+        "vocab_fingerprint": blob["vocab_fingerprint"],
+        "vocab_grown_from": meta.get("vocab_grown_from"),
+        "vocab_extended_from": meta.get("vocab_extended_from"),
+        "data": meta.get("data"),
+        "epochs_run": meta.get("epochs_run"),
+    }
+    return net, record, config
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--data", type=Path, default=Path("data/selfplay-gen1-encoded.npz"))
@@ -220,6 +250,22 @@ def main() -> None:
         "games it beats the raw network. Validation always stays against the real "
         "outcome, whatever this is set to, or the rows stop being comparable.",
     )
+    ap.add_argument(
+        "--init-from",
+        type=Path,
+        default=None,
+        help="start from this model's weights instead of a fresh initialisation (IKA-194). "
+        "Read through load_model, so an M-B model starts an M-C run with zero rows for "
+        "the ids M-C appended, and the architecture (sizes, dropout, weight decay) is the "
+        "model's. --epochs 0 saves it unchanged: the null control.",
+    )
+    ap.add_argument("--keep", choices=("best", "last"), default=None,
+                    help="default: ValueConfig's. best = early stopping at the best epoch; "
+                    "last = the whole schedule, final or averaged weights (IKA-86)")
+    ap.add_argument("--average", choices=("none", "ema", "swa"), default=None)
+    ap.add_argument("--ema-decay", type=float, default=None)
+    ap.add_argument("--swa-from", type=float, default=None)
+    ap.add_argument("--pct-start", type=float, default=None)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--no-save", action="store_true")
     ap.add_argument(
@@ -272,15 +318,37 @@ def main() -> None:
         __import__("json").loads(str(np.load(args.data)["meta_json"]))["format_id"]
     )
     encoder = Encoder(reg)
-    config = ValueConfig(
+    schedule = {
+        name: value
+        for name, value in (
+            ("keep", args.keep),
+            ("average", args.average),
+            ("ema_decay", args.ema_decay),
+            ("swa_from", args.swa_from),
+            ("pct_start", args.pct_start),
+        )
+        if value is not None
+    }
+    run = dict(
         epochs=args.epochs,
         batch_size=args.batch_size,
         lr=args.lr,
         seed=args.seed,
         split_seed=args.split_seed,
+        **schedule,
     )
     device = torch.device(args.device)
-    net = build(encoder, config).to(device)
+    init_meta: dict = {}
+    if args.init_from is not None:
+        net, init_meta, config = warm_start(args.init_from, encoder, run)
+        net = net.to(device)
+        print(
+            f"warm start from {args.init_from} ({init_meta.get('format_id')}, grown "
+            f"{init_meta.get('vocab_grown_from') or 'none'})"
+        )
+    else:
+        config = ValueConfig(**run)
+        net = build(encoder, config).to(device)
     parameters = sum(p.numel() for p in net.parameters())
 
     train_idx, val_idx = split_for(dataset, args.holdout, config)
@@ -326,7 +394,21 @@ def main() -> None:
             f"{report.seconds:.1f}s"
         )
 
-    print("\ntraining")
+    if init_meta:
+        # Before one step: what the warm start knows from its own pool alone, on these
+        # held-out games. The point a warm-versus-scratch comparison starts from.
+        p0 = 1.0 / (1.0 + np.exp(-predict(net, dataset, val_idx, device=device)))
+        init_meta["val_auc"] = auc(p0, dataset.outcome[val_idx])
+        init_meta["val_logloss"] = logloss(p0, dataset.outcome[val_idx])
+        print(
+            f"before training: val log loss {init_meta['val_logloss']:.4f}  "
+            f"AUC {init_meta['val_auc']:.4f}"
+        )
+
+    print(
+        f"\ntraining: {config.epochs} epochs OneCycle to lr {config.lr:g} "
+        f"(warm-up {config.pct_start:g}), keep {config.keep}, average {config.average}"
+    )
     history, best = train(
         net, dataset, config, device=device, holdout=args.holdout, log=log, target=target
     )
@@ -412,6 +494,9 @@ def main() -> None:
                     {"hp_share_auc": auc(hp_share, labels)} if hp_share.size else {}
                 ),
                 "epochs_run": len(history),
+                # The model these weights started from, and what it scored here before
+                # training (IKA-194). None for a fresh initialisation.
+                "init_from": init_meta or None,
                 "td_lambda": args.td_lambda,
                 "seed": args.seed,
                 # Separately, because --seed moves three things and only this one
