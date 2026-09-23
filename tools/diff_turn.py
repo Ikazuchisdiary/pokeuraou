@@ -37,6 +37,7 @@ from pokeuraou.actions import (  # noqa: E402
     MoveAction,
     PassAction,
     SideAction,
+    SwitchAction,
     side_actions,
     switch_actions_after_faint,
 )
@@ -44,7 +45,7 @@ from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet  # noqa: E402
 from pokeuraou.position import Position  # noqa: E402
 from pokeuraou.priors import find_cached_chaos, load_chaos, sample_team  # noqa: E402
-from pokeuraou.regulation import Regulation, load_regulation  # noqa: E402
+from pokeuraou.regulation import Regulation, load_regulation, to_id  # noqa: E402
 from pokeuraou.resolve import (  # noqa: E402
     Budget,
     TurnResult,
@@ -141,6 +142,9 @@ class Report:
     ports: dict[str, PortReport] = field(default_factory=dict)
     #: Where the current battle came from, for a port example to be replayed.
     where: str = ""
+    #: Every Showdown step of the current battle, when there are port columns: a port
+    #: that stopped at a replacement is carried on with the choices Showdown was given.
+    showdown: StepTap | None = None
 
     @property
     def port(self) -> PortReport | None:
@@ -384,6 +388,10 @@ def compare_turn(
         )
         for label, node in nodes.items()
     }
+    for label in nodes:
+        pending = report.ports[label].pending
+        if pending is not None and report.showdown is not None:
+            pending.cursor = len(report.showdown.steps)
     matched = report.matched
     wrong = report.silent_divergences + report.flagged_divergences
     _compare_python(reg, before, chosen, handle, lines, roll, report, py_rng)
@@ -396,7 +404,14 @@ def compare_turn(
     else:
         python_verdict = "skip"
     for label, verdict in verdicts.items():
-        report.ports[label].joint[(python_verdict, verdict)] += 1
+        port = report.ports[label]
+        if verdict == "pending" and port.pending is not None:
+            # Stopped with Showdown at a replacement: carried on through the steps Python's
+            # column took, and through the run's own "default" steps after it (IKA-217).
+            port.pending.python = python_verdict
+            follow_port(reg, nodes[label], port, report.showdown)
+            continue
+        port.joint[(python_verdict, verdict)] += 1
 
 
 def _compare_python(
@@ -515,8 +530,9 @@ class PortReport:
     A refusal is not a divergence and not a match: it is counted by its reason, because
     until the port answers everything (IKA-208) "how often does it decline, and why" is
     half of what this column is for. A turn both the port and Showdown stopped inside, at
-    a mid-turn replacement, is counted apart too: the continuation stays in the Rust
-    process and there is no command to carry it on yet (IKA-211).
+    a mid-turn replacement, is carried on: the port's pause is resumed (`turn` from a
+    pause, IKA-211) with the replacements Showdown was given, as many times as the turn
+    stops, and the end of the turn is compared (IKA-217).
     """
 
     binary: dict[str, Any] = field(default_factory=dict)
@@ -524,7 +540,17 @@ class PortReport:
     matched: int = 0
     flagged: int = 0
     silent: int = 0
+    #: Stops at a mid-turn replacement shared with Showdown, and how the state there
+    #: compared -- Python's `paused` and `paused_matched`.
     paused: int = 0
+    paused_matched: int = 0
+    #: Compared turns that went through at least one resume, and those that diverged at
+    #: the end of the turn (Python's `paused_divergences`).
+    continued: int = 0
+    paused_divergences: int = 0
+    paused_by_field: Counter[str] = field(default_factory=Counter)
+    #: The turn being carried on, between Showdown's steps.
+    pending: PortPending | None = None
     by_field: Counter[str] = field(default_factory=Counter)
     attributed: Counter[tuple[str, ...]] = field(default_factory=Counter)
     skipped: Counter[str] = field(default_factory=Counter)
@@ -559,9 +585,16 @@ class PortReport:
             out.append(f"    {count:5d}  {reason}")
         if self.paused:
             out.append(
-                f"  stopped at a mid-turn replacement with Showdown: {self.paused} "
-                "(no command to continue it yet; not compared)"
+                f"  mid-turn replacement requests: {self.paused}, "
+                f"state at the interrupt matched {self.paused_matched}, "
+                f"turns carried on and compared {self.continued}, "
+                f"diverging after resuming {self.paused_divergences}"
             )
+            if self.paused_by_field:
+                out.append(
+                    "    on interrupted turns: "
+                    + ", ".join(f"{k} x{v}" for k, v in self.paused_by_field.most_common(8))
+                )
         if self.branch_counts:
             out.append(
                 "  branches produced: "
@@ -667,7 +700,10 @@ def compare_port_turn(
     lines: list[str],
     roll: int,
 ) -> str:
-    """One turn through the port; returns its verdict (match, diverge, refused, paused, skip).
+    """One turn through the port; returns its verdict (match, diverge, refused, pending, skip).
+
+    ``pending``: the port stopped with Showdown at a replacement; `follow_port` carries it
+    on and gives the verdict once the turn ends.
 
     ``given`` is the position before the turn; ``handle`` is Showdown after it. Called
     before Python's column, while Showdown still stands where the choices left it.
@@ -679,6 +715,7 @@ def compare_port_turn(
     stopped at a replacement -- does the port refuse the index, and only then is it asked
     again for the weights alone.
     """
+    settle_port(port, "a new turn began inside a paused one")
     if action_overriding_effects(lines, only_unmodelled=True):
         port.skipped["action overridden mid-turn"] += 1
         return "skip"
@@ -686,7 +723,16 @@ def compare_port_turn(
     budget = Budget.deterministic(roll)
     reply = port_exchange(node, before, chosen, budget, select=0)
     if reply.get("refused") == "branch index out of range":
-        reply = port_exchange(node, before, chosen, budget)
+        # No finished branch: the turn stopped. `turn` hands the pause itself back with
+        # the weights, so it can be carried on -- still two requests, as before (IKA-217).
+        reply = port_turn_exchange(
+            node,
+            {
+                "position": before.to_json(),
+                "actions": _dumped(chosen),
+                "budget": _dumped_budget(budget),
+            },
+        )
     if reply.get("refused"):
         port.refused[refusal_reason(reply, before)] += 1
         return "refused"
@@ -706,7 +752,16 @@ def compare_port_turn(
     theirs = canonical(Position.from_json(handle.position))
     if stopped and showdown_stopped:
         port.paused += 1
-        return "paused"
+        _port_at_interrupt(port, reply["pause"], handle.position)
+        port.pending = PortPending(
+            where=where,
+            before=before,
+            chosen=chosen,
+            pause=reply["pause"],
+            unmodelled=set(unmodelled),
+            log=list(handle.log),
+        )
+        return "pending"
     if bool(stopped) != showdown_stopped:
         differences = {
             "mid-turn interrupt": (
@@ -714,7 +769,7 @@ def compare_port_turn(
                 "showdown stopped" if showdown_stopped else "showdown carried on",
             )
         }
-        _port_divergence(reg, port, where, before, chosen, unmodelled, differences, handle)
+        _port_divergence(reg, port, where, before, chosen, unmodelled, differences, handle.log)
         return "diverge"
     if any(name.startswith("forceSwitch") for name in unmodelled):
         port.skipped["pending replacement (resolver defers to a choice)"] += 1
@@ -727,7 +782,7 @@ def compare_port_turn(
         port.matched += 1
         return "match"
     differences = {k: (ours[k], theirs.get(k)) for k in keys}
-    _port_divergence(reg, port, where, before, chosen, unmodelled, differences, handle)
+    _port_divergence(reg, port, where, before, chosen, unmodelled, differences, handle.log)
     return "diverge"
 
 
@@ -739,7 +794,7 @@ def _port_divergence(
     chosen: list[SideAction],
     unmodelled: tuple[str, ...],
     differences: dict[str, tuple[Any, Any]],
-    handle: Any,
+    log: list[str],
 ) -> None:
     port.compared += 1
     if unmodelled:
@@ -767,9 +822,286 @@ def _port_divergence(
             "cast": list(cast),
             "unmodelled": list(unmodelled),
             "differences": {k: [repr(a), repr(b)] for k, (a, b) in differences.items()},
-            "log": list(handle.log),
+            "log": list(log),
         }
     )
+
+
+# ---------------------------------------------------------------------------
+# Carrying a paused turn on in the port (IKA-217): Showdown's own replacements, one resume
+# per stop, the end of the turn compared as any other.
+
+
+@dataclass
+class ShowdownStep:
+    """One `handle.step`: the requests it answered, the choices, and what came back."""
+
+    requests: list[dict[str, Any] | None]
+    choices: list[str | None]
+    after: dict[str, Any]
+
+
+class StepTap:
+    """Records every step of one battle, whoever takes it.
+
+    Python's column steps Showdown through its own pauses (`resolve_pauses`), and a turn
+    Python did not carry through is finished by the run's next "default" step. The port
+    follows whichever it was, so it never steps Showdown itself and no Python number moves.
+    """
+
+    def __init__(self, handle: Any) -> None:  # noqa: ANN401 - oracle.BattleHandle
+        self.steps: list[ShowdownStep] = []
+        inner = handle.step
+
+        def step(choices: Any) -> Any:  # noqa: ANN401
+            requests = list(handle.requests)
+            out = inner(choices)
+            self.steps.append(ShowdownStep(requests, list(choices), handle.last))
+            return out
+
+        handle.step = step
+
+
+@dataclass
+class PortPending:
+    """A turn the port stopped inside with Showdown, waiting for Showdown's next step."""
+
+    where: str
+    before: Position
+    chosen: list[SideAction]
+    pause: dict[str, Any]
+    unmodelled: set[str]
+    log: list[str]
+    #: Index of the next Showdown step to answer the pause with.
+    cursor: int = 0
+    #: Python's verdict on the same turn, for the joint table.
+    python: str | None = None
+
+
+def _dumped(actions: list[SideAction]) -> list[list[dict[str, Any]]]:
+    from pokeuraou import rustnode
+
+    return [[rustnode.dump_action(a) for a in side.slots] for side in actions]
+
+
+def _dumped_budget(budget: Budget) -> dict[str, Any]:
+    from pokeuraou import rustnode
+
+    return rustnode.dump_budget(budget)
+
+
+def port_turn_exchange(node: Any, request: dict[str, Any]) -> dict[str, Any]:  # noqa: ANN401
+    """The `turn` command with `select` 0 (`RustNode.turn`/`resume`), keeping the refusal's
+    reason. A deterministic budget leaves one outcome, so index 0 is it, branch or pause."""
+    return node._exchange({"kind": "turn", "select": 0, **request})  # noqa: SLF001
+
+
+def _port_at_interrupt(port: PortReport, pause: dict[str, Any], showdown: dict[str, Any]) -> None:
+    """The state at the stop, as Python's column compares it (`resolve_pauses`)."""
+    ours = canonical(Position.from_json(pause["position"]))
+    theirs = canonical(Position.from_json(showdown))
+    keys = [k for k in ours if ours[k] != theirs.get(k)]
+    if keys:
+        port.by_field["at the interrupt"] += len(keys)
+    else:
+        port.paused_matched += 1
+
+
+def showdown_switch_ins(
+    flags: list[bool], team: list[dict[str, Any]], choice: str
+) -> dict[int, int] | str:
+    """Active slot -> index into the request's team, as Showdown reads ``choice``.
+
+    `Side.choose` reads the parts in order: a `switch N` goes to the next slot that owes a
+    switch (`getChoiceIndex` passes over the others), a `pass` takes the next slot, and
+    `default` (`autoChoose` -> `chooseSwitch()`) gives every remaining owed slot the first
+    Pokemon after the actives that is neither fainted nor already chosen.
+    """
+    width = len(flags)
+    out: dict[int, int] = {}
+    index = 0
+    for part in (p.strip() for p in choice.split(",") if p.strip()):
+        if part == "default":
+            for slot in range(index, width):
+                if not flags[slot]:
+                    continue
+                k = width
+                while k < len(team) and (
+                    k in out.values() or str(team[k].get("condition", "")).endswith(" fnt")
+                ):
+                    k += 1
+                if k < len(team):
+                    out[slot] = k
+            index = width
+        elif part == "pass":
+            index += 1
+        elif part.startswith("switch "):
+            while index < width and not flags[index]:
+                index += 1
+            if index >= width:
+                return "a replacement choice with no slot owing one"
+            out[index] = int(part.split()[1]) - 1
+            index += 1
+        else:
+            return f"unread replacement choice {part!r}"
+    return out
+
+
+def showdown_picks(pause: Position, step: ShowdownStep) -> list[SideAction] | str:
+    """The replacements Showdown was given in ``step``, as actions on the port's pause.
+
+    Read off the request (which Pokemon stood at the chosen index) rather than off the
+    port's own numbering, so the port is carried on with Showdown's choice even where the
+    two number the party differently. A reason instead when it cannot be.
+    """
+    picks: list[SideAction] = []
+    for side_index, side in enumerate(pause.sides):
+        request = step.requests[side_index] or {}
+        width = len(side.active)
+        flags = [bool(f) for f in (request.get("forceSwitch") or [])][:width]
+        flags += [False] * (width - len(flags))
+        if request.get("wait") or not any(flags):
+            picks.append(SideAction(slots=tuple(PassAction(slot=i) for i in range(width))))
+            continue
+        team = list(request["side"]["pokemon"])
+        chosen = showdown_switch_ins(flags, team, step.choices[side_index] or "default")
+        if isinstance(chosen, str):
+            return chosen
+        slots: list[Any] = []
+        for slot in range(width):
+            index = chosen.get(slot)
+            if index is None:
+                slots.append(PassAction(slot=slot))
+                continue
+            species = to_id(str(team[index]["details"]).split(",")[0])
+            mon = next(
+                (
+                    m
+                    for m in side.pokemon
+                    if not m.is_active and not m.fainted and species in (m.species, m.base_species)
+                ),
+                None,
+            )
+            if mon is None:
+                return "Showdown's replacement is not on the port's bench"
+            slots.append(SwitchAction(slot=slot, party_index=mon.slot + 1, species=mon.species))
+        picks.append(SideAction(slots=tuple(slots)))
+    return picks
+
+
+def follow_port(reg: Regulation, node: Any, port: PortReport, tap: StepTap | None) -> None:  # noqa: ANN401
+    """Answers the port's pause with each Showdown step not yet answered, until the turn
+    ends or the steps run out (the rest come on the run's next step)."""
+    pending = port.pending
+    if pending is None or tap is None:
+        return
+    while pending.cursor < len(tap.steps):
+        step = tap.steps[pending.cursor]
+        pending.cursor += 1
+        verdict = _resume_port(reg, node, port, pending, step)
+        if verdict is not None:
+            port.pending = None
+            port.joint[(pending.python or "skip", verdict)] += 1
+            return
+
+
+def settle_port(port: PortReport, reason: str) -> None:
+    """A battle that ended with the port's pause still unanswered: named, not compared."""
+    if port.pending is None:
+        return
+    port.skipped[reason] += 1
+    port.joint[(port.pending.python or "skip", "skip")] += 1
+    port.pending = None
+
+
+def _resume_port(
+    reg: Regulation, node: Any, port: PortReport, pending: PortPending, step: ShowdownStep  # noqa: ANN401
+) -> str | None:
+    """One resume; a verdict when the turn is decided, None when it stopped again."""
+    after = step.after
+    if after.get("choiceErrors"):
+        port.skipped["replacement rejected by Showdown"] += 1
+        return "skip"
+    if not any((r or {}).get("forceSwitch") for r in step.requests):
+        port.skipped["Showdown moved on without a replacement"] += 1
+        return "skip"
+    paused_at = Position.from_json(pending.pause["position"])
+    owed = self_switches_needed(paused_at)
+    theirs_owed = [
+        [bool(x) for x in ((r or {}).get("forceSwitch") or [])] for r in step.requests
+    ]
+    for side_index, flags in enumerate(owed):
+        want = theirs_owed[side_index][: len(flags)]
+        if want and list(flags) != want:
+            differences = {"mid-turn interrupt": (f"port owes {list(flags)}", f"showdown {want}")}
+            _port_divergence(
+                reg, port, pending.where, pending.before, pending.chosen,
+                tuple(sorted(pending.unmodelled)), differences, pending.log,
+            )
+            return "diverge"
+    picks = showdown_picks(paused_at, step)
+    if isinstance(picks, str):
+        port.skipped[picks] += 1
+        return "skip"
+    reply = port_turn_exchange(node, {"pause": pending.pause, "choices": _dumped(picks)})
+    if reply.get("refused"):
+        port.refused[f"resume: {reply['refused']}"] += 1
+        return "refused"
+    pending.log += list(after["log"])
+    pending.unmodelled.update(reply.get("unmodelled", []))
+    unmodelled = tuple(sorted(pending.unmodelled))
+    outcomes = len(reply.get("branches", [])) + len(reply.get("suspended", []))
+    if outcomes != 1:
+        port.skipped["resuming produced more than one branch"] += 1
+        return "skip"
+    stopped = "pause" in reply
+    showdown_stopped = showdown_paused_mid_turn(
+        _Stepped(requests=after["requests"], log=after["log"])
+    )
+    if stopped and showdown_stopped:
+        port.paused += 1
+        _port_at_interrupt(port, reply["pause"], after["position"])
+        pending.pause = reply["pause"]
+        return None
+    if stopped != showdown_stopped:
+        differences = {
+            "mid-turn interrupt": (
+                "port stopped" if stopped else "port carried on",
+                "showdown stopped" if showdown_stopped else "showdown carried on",
+            )
+        }
+        _port_divergence(
+            reg, port, pending.where, pending.before, pending.chosen, unmodelled,
+            differences, pending.log,
+        )
+        return "diverge"
+    if any(name.startswith("forceSwitch") for name in unmodelled):
+        port.skipped["pending replacement (resolver defers to a choice)"] += 1
+        return "skip"
+    port.continued += 1
+    ours = canonical(Position.from_json(reply["position"]))
+    theirs = canonical(Position.from_json(after["position"]))
+    keys = [k for k in ours if ours[k] != theirs.get(k)]
+    if not keys:
+        port.compared += 1
+        port.matched += 1
+        return "match"
+    port.paused_divergences += 1
+    for key in keys:
+        port.paused_by_field[field_kind(key)] += 1
+    _port_divergence(
+        reg, port, pending.where, pending.before, pending.chosen, unmodelled,
+        {k: (ours[k], theirs.get(k)) for k in keys}, pending.log,
+    )
+    return "diverge"
+
+
+@dataclass
+class _Stepped:
+    """What `showdown_paused_mid_turn` reads, for a step other than the handle's last."""
+
+    requests: list[dict[str, Any] | None]
+    log: list[str]
 
 
 def parse_exes(text: str) -> list[tuple[str, Path]]:
@@ -870,6 +1202,7 @@ def run(
                 policy=policy,
             )
             handle.step(["team 1,2,3,4", "team 1,2,3,4"])
+            report.showdown = StepTap(handle) if nodes else None
 
             for _ in range(max_turns):
                 before = Position.from_json(handle.position)
@@ -895,6 +1228,9 @@ def run(
                 if all(c is None for c in choices):
                     break
                 handle.step(choices)
+                for label, node in nodes.items():
+                    # A turn Python's column left at the stop goes on with this step.
+                    follow_port(reg, node, report.ports[label], report.showdown)
                 if handle.choice_errors:
                     break
                 if forced or len(chosen) != 2:
@@ -904,6 +1240,8 @@ def run(
                     reg, before, chosen, handle, handle.log, roll, report, py_rng,
                     nodes=nodes,
                 )
+            for port_column in report.ports.values():
+                settle_port(port_column, "the battle stopped inside a paused turn")
             handle.close()
     for node in nodes.values():
         node.close()

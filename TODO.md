@@ -14920,3 +14920,87 @@ cargo release 1 回（8 コア 24 秒）、diff_node: 煙 4 局面 ×4（2 コ�
 100 局面 `--jobs 8` ×3（8 コア 349 秒）、100 局面 1 コア ×3（master 687 秒・新 `--jobs 1` 515 秒・master × 旧 exe 626 秒）、
 モード別の対照（3 コア 489 秒・33 秒）、時間の組 6 本（8 コア 1,062 秒）、`--value`・`--holding`・キャッシュの対照（2 コア 351 秒）、
 メモリ・キャッシュの大きさの見積もり（1 コア 33・34 秒）。すべて heavy.py（--agent IKA-206）。
+
+## 9/24 — IKA-217: diff_turn の port の列が途中交代のターンも続けて比べる —— 止まって比べないターンは seed 1 で 126 → 0、seed 2（self-switch 0.8）で 336 → 0。新しく比べたターンで port だけ外れるものは 0。壊した build（ika211-control）は port の列だけ 52 / 134 ターン外れる
+
+親 IKA-204。触ったのは `tools/diff_turn.py` と `tests/test_diff_turn_port.py` だけ（rust/src・src・diff_node・diverge_report は触っていない）。
+
+### 1. 何をしたか
+
+* port と Showdown が両方とも途中交代で止まったターンは、IKA-211 の `turn` 命令（pause から再開、`select` 0）で続ける。最初の要求は今までどおり `resolve`（select 0）で、枝が無い（止まった）時の 2 回目を `turn` に替えて pause そのものを受け取る。要求の数は前と同じ。
+* 交代先は **Showdown が受け取った選択** から読む。Showdown の各 step を記録する `StepTap` を handle に付け（`handle.step` を包むだけ）、pause に答えるのはその記録の次の step。選択の文字列は `Side.choose` と同じ読み方で request の並びの何番目かに直し（`switch N` は交代の要る次の枠へ、`pass` は次の枠、`default` は `autoChoose` = 場に出ていない先頭の倒れていない 1 体）、その種族を port の pause の控えから探す。port 自身の番号付けには頼らない。
+* Showdown を進めるのは、Python の列（`resolve_pauses` が Python の交代で進める）か、Python が進めなかったとき（Python が止まらなかった・途中で降りた）は run の次の反復の `default` の step。port は Showdown を 1 度も進めないので、Python の列も打つターンも変わらない。
+* 1 ターンに何度止まっても続ける（止まるたびに次の step で再開）。止まった所の局面は Python と同じく `canonical` で比べ（`state at the interrupt matched`）、再開の後に止まる・止まらないが食い違えば `mid-turn interrupt` の乖離、交代の要る枠の食い違いも同じ。ターンの終わりは今までの比べと同じ。
+* 同じターンの表（`the same turns`）は、続けたターンは決着した時に入れる。続けられずに残った場合の理由は `skipped` に出る（`the battle stopped inside a paused turn`・`a new turn began inside a paused one`・`Showdown moved on without a replacement`・`replacement rejected by Showdown`・`Showdown's replacement is not on the port's bench`）。今回の 800 局ではどれも 0 回。
+* 表示: `mid-turn replacement requests: N, state at the interrupt matched M, turns carried on and compared K, diverging after resuming D`（Python の行と同じ形）。
+
+### 2. 測った数（PYTHONHASHSEED=0、roll 8、max-turns 10、exe 5bd8b6a6b1b78018 = master d7239e0 の build）
+
+IKA-207 の表（前）の隣に、この枝（後）を並べる。前は master の `diff_turn.py` を同じ exe で回し直したもので、IKA-207 の記録と 1 桁まで同じ。
+
+```
+                                   Python        port 前（IKA-207）   port 後（IKA-217）
+seed 1, 400 局
+  比べたターン                        2,723            2,456              2,582
+  一致                                2,567            2,329              2,447
+  乖離                                  156              127                135
+  うち silent / flagged                81 / 76         64 / 63            66 / 69
+  乖離率（silent 率）            5.73% (2.98%)    5.17% (2.61%)      5.23% (2.56%)
+  断った                                 —              145                145
+  途中交代で止まり比べない                —              126                  0
+  止まった回数（止まった所が一致）   136 (129)              —            129 (123)
+  続けて比べたターン / うち乖離             — / 9            —            126 / 8
+  同じターンの表（後）: 両方乖離 135 / Python 一致・port 乖離 0 / 両方一致 2,447 / Python 乖離・port 断り 22
+
+seed 2, 400 局, --self-switch 0.8
+  比べたターン                        2,731            2,281              2,617
+  一致                                2,547            2,130              2,442
+  乖離                                  184              151                175
+  うち silent / flagged               103 / 84         76 / 75            92 / 83
+  乖離率（silent 率）            6.74% (3.77%)    6.62% (3.33%)      6.69% (3.52%)
+  断った                                 —              133                133
+  途中交代で止まり比べない                —              336                  0
+  止まった回数（止まった所が一致）   370 (359)              —            354 (346)
+  続けて比べたターン / うち乖離            — / 24            —           336 / 24
+  同じターンの表（後）: 両方乖離 175 / Python 一致・port 乖離 0 / 両方一致 2,442 / Python 乖離・port 断り 12
+```
+
+* 前に止まっていたターン（seed 1: Python 一致 118・乖離 8、seed 2: 312・24）は全部比べられ、port の判定は Python と 1 ターンも食い違わない（118 → 一致、8 → 乖離。312 → 一致、24 → 乖離）。port の乖離が増えた 8 / 24 は、どれも Python も外すターン。
+* 1 ターンに 2 回以上止まったもの: 止まった回数 − 続けたターンで、seed 1 で少なくとも 3、seed 2 で 18。
+* 止まった所の局面の不一致は port で seed 1 が 6 回・11 項目、seed 2 が 8 回・11 項目。Python の列は 7 回・11 項目、11 回・11 項目（止まった回数が Python の方が多いのは、Python は止まるが port が断るターンがあるため）。項目の数は両方同じで、共通の差と見ているが、1 件ずつは突き合わせていない。
+* port の乖離率はまだ Python より低い。残る差は port が断る 145 / 133 ターン（うち Python が外すもの 22 / 12）だけ。
+
+### 3. 正の対照と null 対照
+
+* **正の対照:** IKA-211 の壊した build（`cargo build --release --features ika211-control --target-dir C:/tmp/ika217/control-target`、d2400950044b3518: 再開した pause の残りの列の最後の行動を落とす）を `--exes ctl=…,new` で並べた。
+  * この枝の diff_turn: ctl の列だけが外れる。seed 1 で「Python 一致・port 乖離」52 ターン（続けたターンの乖離 57、new は 8）、seed 2 で 134（乖離 144、new は 24）。new の列は単独で回したときと見出しの後 1 文字も同じ。
+  * 前（master の diff_turn）: ctl と new の列が見出しの sha 以外 1 文字も同じ（止まったターンを比べないので、壊れた続きが見えない）。道具の穴がこの課題のとおりだったことの確認。
+  * テスト: `test_the_port_carries_paused_turns_on_with_showdown` は ctl の exe（`POKEURAOU_RUST_NODE_BIN`）で落ちる（Python 一致・port 乖離 1）。
+* **null 対照:** Python の列（port の節より前の出力全部）は、seed 1・seed 2 とも、`--no-port`・前の道具・後の道具・`--exes` 2 本の 5 通りで 1 文字も同じ。テストでも `test_carrying_paused_turns_on_changes_no_python_number`（seed 2 × 6 局、self-switch 0.8、`render()` の全文が同じ）で固定。
+
+### 4. 壁時計（1 コア、PYTHONHASHSEED=0、heavy.py 越しの外側の時計）
+
+```
+                                  --no-port   前（port 1 本）   後（port 1 本）   前 --exes 2 本   後 --exes 2 本
+  seed 1, 400 局                    10.3 s         12.0 s           12.3 s           14.8 s           16.4 s
+  seed 2, 400 局, ss 0.8            11.2 s         12.3 s           12.8 s           15.5 s           15.7 s
+```
+
+exe は列ごとに 1 本を使い回す（今までどおり）。増えたのは再開 1 回につき 1 要求（pause の JSON 約 10 KB）で、1 本あたり +0.3〜0.5 s。
+
+### 5. テスト（`tests/test_diff_turn_port.py`、足したもの）
+
+* `test_the_port_is_given_the_replacement_showdown_read`（5 件、oracle なし）: `switch N`・`pass, switch N`・`default`（倒れた控えを飛ばす・2 枠）の読み方。
+* `test_the_port_carries_paused_turns_on_with_showdown`: seed 2 × 8 局 self-switch 0.8 で、止まったターンを続けて比べ、残りが無く、Python 一致・port 乖離が 0。
+* `test_carrying_paused_turns_on_changes_no_python_number`: 上の null 対照。
+* ファイル全体 13 件が 8 s で通る（今の exe）。
+
+### 6. 別課題の候補
+
+* **port の乖離が Python より多いもの: なし**（新しく比べた 126 + 336 ターンで、port だけ外れるものは 0）。
+* `tools/diverge_report.py` の port の節は、止まったターンをまだ「止まり比べない」として `skipped` に入れている（`_score_port`）。同じ `StepTap` と `follow_port` を使えば続けられるが、diverge_report は Python の `resolve_pauses` の後で Showdown を進めない形なので、step の記録の付け方を合わせる必要がある。今回は触っていない。
+* 止まった所の局面の不一致（§2、両エンジン共通で 6〜8 回）は、中身を見ていない。Python の列の `at the interrupt` の例と同じものかは、`--port-json` に止まった所の差も書くようにすれば見られる。
+
+### 7. 機械
+
+heavy.py の記録（IKA-217）: cargo build --release 2 回（worktree 30 s・ika211-control 27 s、--cores 8）。1 コアの実行: diff_turn 30 局の試走 1 回、400 局 × 10 回（各 10〜16 s、計 約 2.3 分）、テストファイル 2 回（8 s・ctl の exe で 2 件）。
