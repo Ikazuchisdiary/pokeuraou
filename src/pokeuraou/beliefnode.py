@@ -221,8 +221,15 @@ def _patched(
     has never been active looks the same in every leaf it was not part of -- full HP, no
     status, no boosts, nothing switched in -- so the root's row is that leaf's row, and
     the test is what says so rather than this comment.
+
+    Two things are not a row copy (IKA-119). A bench row's `can_mega` is the root's, but the
+    side may have mega evolved during the turn, so it is ANDed with the leaf's `mega_used`.
+    And the side vector reads the bench -- `mega_available` (a stone anywhere on the side),
+    `alive_fraction`, `team_hp_fraction` (the bench's max HP is in the denominator) -- so it
+    is rebuilt per leaf from the patched rows. Until then it was the true position's, and
+    every completion was scored with the true bench's side features.
     """
-    from .encode import Encoded
+    from .encode import HP_SCALE, Encoded
 
     encoder = _encoder_for(reg)
     source = encoder.encode_positions([item.position])
@@ -233,7 +240,8 @@ def _patched(
         moves=reference.moves.copy(),
         mon=reference.mon.copy(),
         mask=reference.mask.copy(),
-        side=reference.side,
+        side=reference.side.copy(),
+        # Nothing in the field vector reads a Pokemon.
         field=reference.field,
         unknown_volatiles=dict(reference.unknown_volatiles),
     )
@@ -244,6 +252,31 @@ def _patched(
         out.moves[:, side, slot] = source.moves[0, side, slot]
         out.mon[:, side, slot] = source.mon[0, side, slot]
         out.mask[:, side, slot] = source.mask[0, side, slot]
+
+    mon_k = {name: k for k, name in enumerate(encoder.mon_names)}
+    side_k = {name: k for k, name in enumerate(encoder.side_names)}
+    spent = out.side[:, side, side_k["mega_used"]] > 0  # (B,)
+    rows = out.mon[:, side]  # (B, M, F), a view
+    can = mon_k["can_mega"]
+    for slot in slots:
+        rows[spent, slot, can] = 0.0
+    # With the mega unspent no Pokemon of the side is a mega, so "holds its stone" is
+    # exactly `can_mega` on every row, patched or not.
+    present = out.mask[:, side] > 0  # (B, M)
+    holder = ((rows[:, :, can] > 0) & present).any(axis=1)
+    out.side[:, side, side_k["mega_available"]] = (holder & ~spent).astype(np.float32)
+    # Integers again, so the division is the encoder's own and the float32 is identical.
+    maxhp = np.rint(rows[:, :, mon_k["maxhp_scaled"]].astype(np.float64) * HP_SCALE)
+    hp = np.rint(rows[:, :, mon_k["hp_fraction"]].astype(np.float64) * maxhp)
+    maxhp = np.where(present, maxhp, 0.0)
+    hp = np.where(present, hp, 0.0)
+    count = present.sum(axis=1)
+    alive = (present & ~(rows[:, :, mon_k["fainted"]] > 0)).sum(axis=1)
+    out.side[:, side, side_k["alive_fraction"]] = alive / np.maximum(count, 1)
+    total = maxhp.sum(axis=1)
+    out.side[:, side, side_k["team_hp_fraction"]] = hp.sum(axis=1) / np.where(
+        total > 0, total, 1.0
+    )
     return out
 
 

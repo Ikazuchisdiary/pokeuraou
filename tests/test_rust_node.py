@@ -483,3 +483,86 @@ def test_an_impossible_position_is_refused(bridged: None) -> None:
     filled = node.fill(pos, row, col, ["hp-share"], Budget.matrix())
     assert len(filled.refused) == len(row) * len(col)
     assert all("hp" in why for _i, _j, why in filled.refused)
+
+
+def _after_the_stone_holder_switches_in():  # noqa: ANN202
+    """Charizard, the side's only stone, starts at party slot 2 and is switched in.
+
+    Resolved rather than assembled, because `_do_switch` is what renumbers the slots.
+    """
+    from pokeuraou.actions import MoveAction, SwitchAction, side_actions
+    from pokeuraou.regulation import load_regulation
+    from pokeuraou.resolve import resolve_turn
+    from pokeuraou.selfplay import position_from_sets
+    from pokeuraou.teams import load_roster
+
+    reg = load_regulation("gen9championsvgc2026regmb")
+    register_mega_stones(reg)
+    sheet = {entry.species: entry for entry in load_roster("rizabanadohido").sets}
+    own = [sheet[n] for n in ("venusaur", "sylveon", "charizard", "garchomp")]
+    foe = [sheet[n] for n in ("incineroar", "toxapex", "garchomp", "venusaur")]
+    before = position_from_sets(reg, own, foe)
+    ours = next(
+        action
+        for action in side_actions(reg, before, 0)
+        if isinstance(action.slots[0], SwitchAction)
+        and action.slots[0].species == "charizard"
+        and isinstance(action.slots[1], MoveAction)
+        and action.slots[1].move_id == "detect"
+    )
+    theirs = next(
+        action
+        for action in side_actions(reg, before, 1)
+        if all(
+            isinstance(one, MoveAction) and one.move_id in ("protect", "banefulbunker")
+            for one in action.slots
+        )
+    )
+    turn = resolve_turn(reg, before, [ours, theirs], budget=Budget.exact())
+    after = turn.branches[0].position
+    assert after.sides[0].mega_capable_slots == [2]
+    assert after.sides[0].pokemon[0].species == "charizard", "the premise: it moved"
+    return reg, after
+
+
+def test_the_port_puts_can_mega_on_the_stone_holder_after_a_switch(bridged: None) -> None:
+    """`encode.rs` read `side.mega_capable_slots` as well, and was wrong the same way.
+
+    Both implementations applied one rule, which is why `diff_encode.py` agreed with both
+    while both were wrong (IKA-121). So the port is not compared with Python here: every
+    leaf it encodes is asked whether `can_mega` stands exactly on the rows whose species
+    and item are a mega pairing, on a side that has not spent its mega -- and whether
+    `mega_available` says the same of the side. The node starts right after the holder
+    came in, so its leaves have it off the number the side kept.
+    """
+    reg, pos = _after_the_stone_holder_switches_in()
+    row = narrow(reg, pos, 0, limit=6).actions
+    col = narrow(reg, pos, 1, limit=6).actions
+    node = rustnode.node_for(reg)
+    assert node is not None
+    encoded = node.fill_encoded(pos, row, col, Budget.matrix(), [], None).encoded
+
+    encoder = Encoder(reg)
+    species_of = {index: sid for sid, index in encoder.vocab.species.items()}
+    item_of = {index: iid for iid, index in encoder.vocab.items.items()}
+    can_mega = encoder.mon_names.index("can_mega")
+    is_mega = encoder.mon_names.index("is_mega")
+    used = encoder.side_names.index("mega_used")
+    available = encoder.side_names.index("mega_available")
+    holder = encoder.vocab.species["charizard"]
+    moved = 0
+    for b in range(len(encoded)):
+        for s in range(2):
+            spent = bool(encoded.side[b, s, used])
+            any_holder = False
+            for p in range(encoder.mons_per_side):
+                if not encoded.mask[b, s, p]:
+                    continue
+                sid = species_of.get(int(encoded.species[b, s, p]), "")
+                holds = reg.mega_target(sid, item_of.get(int(encoded.item[b, s, p]))) is not None
+                any_holder |= holds
+                want = holds and not spent and not encoded.mon[b, s, p, is_mega]
+                assert encoded.mon[b, s, p, can_mega] == float(want), (b, s, p, sid)
+                moved += int(want and int(encoded.species[b, s, p]) == holder and p != 2)
+            assert encoded.side[b, s, available] == float(any_holder and not spent), (b, s)
+    assert moved, "no leaf had the holder off its old number, so nothing was tested"

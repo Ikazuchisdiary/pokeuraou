@@ -124,6 +124,17 @@ HP_SCALE = 250.0
 #: has no reason to extrapolate; the clip is reported through the feature name list.
 TURN_CLIP = 40.0
 
+#: Raised whenever a column keeps its place and width but starts to mean something else.
+#: The vocabulary fingerprint catches a renumbered species and `load_model` catches a
+#: width that moved; neither can see a column that now reads a different fact, and a
+#: cached encoding written before such a change would be trained on after it without a
+#: word -- `tools/encode_dataset.py` keys its shards on this for that reason.
+#:
+#:   1  everything before 9/23
+#:   2  IKA-121: `can_mega` and `mega_available` read the Pokemon's species and item,
+#:      not `Side.mega_capable_slots` (a slot number, stale after the first switch)
+ENCODING_REVISION = 2
+
 
 @dataclass(frozen=True, slots=True)
 class Vocabulary:
@@ -449,8 +460,12 @@ class Encoder:
         alive = sum(1 for p in mons if not p.fainted)
         out[base] = 1.0 if side.mega_used else 0.0
         # Mega is a once-per-battle side resource, so "still has it" is a real feature of
-        # the side and not of any one Pokemon.
-        out[base + 1] = 1.0 if not side.mega_used and side.mega_capable_slots else 0.0
+        # the side and not of any one Pokemon. Who holds a stone is read off the Pokemon,
+        # as `can_mega` below is, and not off `side.mega_capable_slots` (IKA-121). Its
+        # emptiness never moves, so on 3,000 recorded games this is the same number.
+        out[base + 1] = (
+            1.0 if not side.mega_used and any(self._holds_mega_stone(p) for p in mons) else 0.0
+        )
         out[base + 2] = alive / max(len(mons), 1)
         total = sum(p.maxhp for p in mons) or 1
         out[base + 3] = sum(p.hp for p in mons) / total
@@ -463,6 +478,18 @@ class Encoder:
                 out[base + i] = 1.0 if name in ids else 0.0
             base += len(SLOT_CONDITIONS)
         assert base == len(self.side_names)
+
+    def _holds_mega_stone(self, mon: Any) -> bool:  # noqa: ANN401
+        """Whether this Pokemon holds the stone that megas it: its species and its item.
+
+        The same test `actions.py` asks before it offers a mega move, so the feature and
+        the legal moves cannot disagree. It used to be `mon.slot in side.mega_capable_slots`,
+        and that list numbers party slots once, at the start of the game, while
+        `_do_switch` renumbers `Pokemon.slot` on every switch -- so after the first switch
+        involving a holder the flag stood on whoever took its old number. That was 24.9%
+        of the (decision, side) pairs with the mega unspent in `data/ika73/w12` (IKA-121).
+        """
+        return self.reg.mega_target(mon.species, mon.item) is not None
 
     def _encode_mon(
         self,
@@ -504,7 +531,7 @@ class Encoder:
         out[base + 4] = 1.0 if mon.is_mega else 0.0
         out[base + 5] = (
             1.0
-            if mon.slot in side.mega_capable_slots and not side.mega_used and not mon.is_mega
+            if self._holds_mega_stone(mon) and not side.mega_used and not mon.is_mega
             else 0.0
         )
         out[base + 6] = 1.0 if mon.trapped else 0.0
@@ -538,6 +565,7 @@ class Encoder:
 
 __all__ = [
     "BOOST_IDS",
+    "ENCODING_REVISION",
     "SIDE_CONDITIONS",
     "STATUSES",
     "VOLATILES",

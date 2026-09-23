@@ -324,7 +324,11 @@ class Side:
     slot_conditions: list[list[Effect]] = field(default_factory=list)
     #: Mega Evolution is a once-per-battle side resource.
     mega_used: bool = False
-    #: Party slots holding a mega stone that matches their species.
+    #: Party slots holding a mega stone that matches their species, *as numbered when the
+    #: side was built*. `_do_switch` renumbers `Pokemon.slot` and does not touch this, so
+    #: after a holder switches it names someone else. Not an identity: ask the Pokemon
+    #: (`reg.mega_target(mon.species, mon.item)`), as the encoder and the legal moves do
+    #: (IKA-121). Kept because every record carries it.
     mega_capable_slots: list[int] = field(default_factory=list)
 
     def active_pokemon(self) -> list[Pokemon | None]:

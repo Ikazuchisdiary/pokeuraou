@@ -37,7 +37,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from pokeuraou.encode import Encoded, Encoder
+from pokeuraou.encode import ENCODING_REVISION, Encoded, Encoder
 from pokeuraou.payoff import HP_SHARE
 from pokeuraou.position import Position
 from pokeuraou.provenance import SELF_PLAY
@@ -81,6 +81,7 @@ META_KEYS = (
     "source_dir",
     "unknown_volatiles",
     "vocab_fingerprint",
+    "encoding_revision",
 )
 
 
@@ -108,6 +109,11 @@ def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict
     # that and re-encodes once. Cheap: a shard is a few minutes, and the alternative is a
     # model whose record describes a pool it was not trained on.
     want["meta_keys"] = sorted(META_KEYS)
+    # And stale when a column changed meaning under it. The games are the same bytes and
+    # every key above still matches, but `can_mega` was read off a slot number until
+    # IKA-121 -- a shard from before it would hand the next generation the old feature
+    # beside new shards that have the new one.
+    want["encoding_revision"] = ENCODING_REVISION
     # A filtered run does not get a cache, in either direction. `--limit 50` is a
     # debugging flag, and letting it write `data/selfplay-gen7-encoded.npz` would replace
     # a full generation with fifty games under a name that says otherwise -- a trap that
@@ -379,6 +385,7 @@ def main() -> None:
             meta={
                 "format_id": metas[0]["format_id"],
                 "vocab_fingerprint": metas[0]["vocab_fingerprint"],
+                "encoding_revision": ENCODING_REVISION,
                 "source_dir": [str(d) for d in args.dir],
                 "games": total_games,
                 "search_limits": search_limits,

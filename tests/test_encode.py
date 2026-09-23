@@ -274,3 +274,69 @@ def test_both_entry_points_agree(encoder_and_positions) -> None:  # noqa: ANN001
     for name in ("species", "ability", "item", "moves", "mon", "mask", "side", "field"):
         assert np.array_equal(getattr(from_json, name), getattr(direct, name)), name
     assert from_json.unknown_volatiles == direct.unknown_volatiles
+
+
+def _after_the_stone_holder_switches_in():  # noqa: ANN202
+    """Charizard, the side's only stone, starts on the bench at party slot 2 and comes in.
+
+    The turn is resolved, not assembled: `_do_switch` is what renumbers `Pokemon.slot`, and
+    a position built by hand with Charizard already in front never goes through it.
+    Everyone else protects, so the one thing the turn does is the switch.
+    """
+    from pokeuraou.actions import MoveAction, SwitchAction, side_actions
+    from pokeuraou.resolve import Budget, resolve_turn
+
+    reg = load_regulation("gen9championsvgc2026regmb")
+    sheet = {entry.species: entry for entry in load_roster("rizabanadohido").sets}
+    own = [sheet[n] for n in ("venusaur", "sylveon", "charizard", "garchomp")]
+    foe = [sheet[n] for n in ("incineroar", "toxapex", "garchomp", "venusaur")]
+    before = position_from_sets(reg, own, foe)
+    assert before.sides[0].mega_capable_slots == [2], "the fixture's premise"
+
+    ours = next(
+        action
+        for action in side_actions(reg, before, 0)
+        if isinstance(action.slots[0], SwitchAction)
+        and action.slots[0].species == "charizard"
+        and isinstance(action.slots[1], MoveAction)
+        and action.slots[1].move_id == "detect"
+    )
+    theirs = next(
+        action
+        for action in side_actions(reg, before, 1)
+        if all(
+            isinstance(one, MoveAction) and one.move_id in ("protect", "banefulbunker")
+            for one in action.slots
+        )
+    )
+    turn = resolve_turn(reg, before, [ours, theirs], budget=Budget.exact())
+    assert not turn.suspended and turn.branches
+    return reg, [branch.position for branch in turn.branches]
+
+
+def test_can_mega_follows_the_stone_holder_through_a_switch() -> None:
+    """A party slot number is not an identity (IKA-121).
+
+    `side.mega_capable_slots` numbers the stone holders once, when the side is built, and
+    `_do_switch` renumbers `Pokemon.slot` on every switch. `can_mega` used to read the
+    number, so once the holder came in from the bench the flag stood on whoever took its
+    old number and not on the holder -- 24.9% of the (decision, side) pairs with the mega
+    unspent in `data/ika73/w12`. The legal moves were right all along; they ask the
+    Pokemon, and so does the encoder now.
+    """
+    reg, positions = _after_the_stone_holder_switches_in()
+    encoder = Encoder(reg)
+    encoded = encoder.encode_positions(positions)
+    can_mega = encoder.mon_names.index("can_mega")
+    available = encoder.side_names.index("mega_available")
+    for b, after in enumerate(positions):
+        side = after.sides[0]
+        holder = next(m for m in side.pokemon if m.species == "charizard")
+        took_its_number = next(m for m in side.pokemon if m.slot == 2)
+        # The premise: the switch really moved the holder off the number the side kept.
+        assert holder.slot == 0 and holder.active_index == 0
+        assert side.mega_capable_slots == [2] and took_its_number.species == "venusaur"
+
+        flags = {m.species: float(encoded.mon[b, 0, m.slot, can_mega]) for m in side.pokemon}
+        assert flags == {"charizard": 1.0, "sylveon": 0.0, "venusaur": 0.0, "garchomp": 0.0}
+        assert encoded.side[b, 0, available] == 1.0
