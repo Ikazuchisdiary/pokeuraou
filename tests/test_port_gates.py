@@ -114,3 +114,41 @@ def test_the_recorded_sets_are_the_ones_the_port_produces():
     until it is struck off, or the lists stop describing anything.
     """
     assert audit_tool.main(["--check", "--regulation", REGULATION]) == 0
+
+
+def unreferenced(sources: dict[str, str], regulation: str = REGULATION) -> set[str]:
+    _, found, _ = audit_tool.audit(regulation, sources=sources)
+    return {finding.identifier for finding in found}
+
+
+WEATHER_RECOVERY = {"moonlight", "synthesis", "morningsun"}
+
+
+@pytest.mark.parametrize("regulation", audit_tool.REGULATIONS)
+def test_a_custom_code_move_the_port_never_names_is_caught(sources, regulation):
+    """IKA-187. Moonlight, Synthesis and Morning Sun are fully modelled in Python, which
+    heals them by name: the dump has no `heal` field, the amount is in `onHit`. The port
+    was the state this puts back -- the gate passes them and nothing else names them --
+    and the audit set every fully-modelled arm aside, so it healed nothing and nothing
+    said so. `hasCustomCode` is what tells the two kinds of arm apart."""
+    line = 'const WEATHER_RECOVERY_MOVES: [&str; 3] = ["moonlight", "synthesis", "morningsun"];'
+    assert line in sources["moves.rs"]
+    assert not WEATHER_RECOVERY & unreferenced(sources, regulation)
+    sources["moves.rs"] = sources["moves.rs"].replace(line, "const WEATHER_RECOVERY_MOVES: [&str; 0] = [];")
+    assert WEATHER_RECOVERY.issubset(unreferenced(sources, regulation))
+
+
+def test_a_move_that_is_its_fields_is_still_set_aside(sources):
+    """The null control for the test above: Recover is fully modelled, has no custom code
+    (`heal: [1, 2]` is the whole move) and the port never names it outside the gate. It
+    has to stay set aside, or the audit would demand a name for every field-only move."""
+    gates = [audit_tool.parse_gate(g, sources["resolve.rs"], sources) for g in audit_tool.GATES]
+    assert '"recover"' not in audit_tool.behaviour_text(sources, [g.inventory for g in gates])
+    assert "recover" not in unreferenced(sources)
+
+
+def test_check_runs_both_regulations(capsys):
+    """IKA-187: the recorded games are M-B and `--check` asked only M-C."""
+    assert audit_tool.main(["--check"]) == 0
+    out = capsys.readouterr().out
+    assert "== gen9championsvgc2026regmb" in out and "== gen9championsvgc2026regmc" in out

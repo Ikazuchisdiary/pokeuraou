@@ -381,6 +381,20 @@ def universes(regulation: Path, sources: dict[str, str]) -> dict[str, list[str]]
     }
 
 
+def custom_code_moves(regulation: Path) -> set[str]:
+    """The moves the dump marks `hasCustomCode`: some of what they do is a handler, not a
+    field.
+
+    `STATUS_MOVES_FULLY_MODELLED` says Python models the move, not that the fields are all
+    of it. Moonlight, Synthesis and Morning Sun are on it, have no `heal` field (the amount
+    is in `onHit`), and Python heals them by name -- so an arm for one of these the port
+    never names is a port that does not do it. Until IKA-187 every fully-modelled arm was
+    set aside, and the port healed nothing for all three.
+    """
+    data = json.loads(regulation.read_text(encoding="utf-8"))
+    return {entry["id"] for entry in data["moves"] if entry.get("hasCustomCode")}
+
+
 @dataclass
 class Finding:
     gate: Gate
@@ -403,7 +417,11 @@ def audit(
     asked = universes(ROOT / "configs" / "regulations" / f"{regulation}.json", sources)
     named = set(LITERAL.findall(text))
     engine = port_coverage.engine_text()
-    declarative = fully_modelled_moves(sources)
+    # Fully modelled *and* nothing but fields: a move with custom code needs its name in
+    # the port like any other arm (IKA-187).
+    declarative = fully_modelled_moves(sources) - custom_code_moves(
+        ROOT / "configs" / "regulations" / f"{regulation}.json"
+    )
 
     ungated: list[Finding] = []
     unreferenced: list[Finding] = []
@@ -448,21 +466,39 @@ def where(sources: dict[str, str], identifier: str) -> str:
     return "?"
 
 
+#: What `--regulation` defaults to: M-B, which every recorded game (w12, gen11L) is played
+#: in, and M-C. Until IKA-187 only M-C was checked. The two dumps have the same moves and
+#: abilities today and M-B's items are a subset, but the gates are asked about each
+#: regulation's own ids, so both are asked.
+REGULATIONS = ("gen9championsvgc2026regmb", "gen9championsvgc2026regmc")
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--regulation", default="gen9championsvgc2026regmc")
+    ap.add_argument(
+        "--regulation",
+        action="append",
+        help="a regulation to audit (repeatable); default: " + " and ".join(REGULATIONS),
+    )
     ap.add_argument(
         "--check",
         action="store_true",
         help="fail if either set differs from the one recorded in this file",
     )
     args = ap.parse_args(argv)
+    worst = 0
+    for regulation in args.regulation or REGULATIONS:
+        print(f"== {regulation}")
+        worst = max(worst, run(regulation, args.check))
+    return worst
 
-    if not (ROOT / "configs" / "regulations" / f"{args.regulation}.json").exists():
-        print(f"  no configs/regulations/{args.regulation}.json")
+
+def run(regulation: str, check: bool) -> int:
+    if not (ROOT / "configs" / "regulations" / f"{regulation}.json").exists():
+        print(f"  no configs/regulations/{regulation}.json")
         return 2
 
-    ungated, unreferenced, explained = audit(args.regulation)
+    ungated, unreferenced, explained = audit(regulation)
 
     print("  the port names it, the gate refuses it -- the whiteherb shape")
     known = set(ACKNOWLEDGED) | KNOWN_UNGATED
@@ -485,7 +521,7 @@ def main(argv: list[str] | None = None) -> int:
     for why, count in sorted(explained.items()):
         print(f"    {count} more arm(s) the port does not name, set aside: {why}")
 
-    if not args.check:
+    if not check:
         return 0
 
     bad = 0
