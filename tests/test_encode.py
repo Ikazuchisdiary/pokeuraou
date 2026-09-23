@@ -238,8 +238,9 @@ def test_the_vocabulary_is_stable_and_regulation_specific() -> None:
 
     reg_c = load_regulation("gen9championsvgc2026regmc")
     other = build_vocabulary(reg_c)
-    # M-C added Pokemon, so the same integer means a different species. Weights trained on
-    # one regulation must not load against the other, and the fingerprint is the guard.
+    # M-C added Pokemon, so the two vocabularies differ and so do their fingerprints. Since
+    # IKA-82 M-C's order begins with M-B's, so an M-B model can load onto M-C by growing its
+    # tables -- decided by M-C cut back to M-B's sizes (tests/test_vocab_order.py), not here.
     assert other.fingerprint() != once.fingerprint()
 
 

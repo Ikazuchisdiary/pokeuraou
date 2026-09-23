@@ -141,7 +141,9 @@ TURN_CLIP = 40.0
 #: Not raised by IKA-82 (the append-only vocabulary order): the lists were written from
 #: the sorted order of that day, so no existing id changed its integer and no column its
 #: meaning. An id appended later is a new integer, which the vocabulary fingerprint --
-#: also a shard key -- already sees.
+#: also a shard key -- already sees. Nor by M-C's order being rewritten to begin with
+#: M-B's (9/24): that renumbered M-C ids, not columns, the M-C fingerprint changed with
+#: it (9616b72545058306 -> c2557340f3ed460f), and no M-C model or shard existed.
 ENCODING_REVISION = 2
 
 
@@ -262,17 +264,21 @@ class Vocabulary:
         return digest.hexdigest()[:16]
 
 
-    def prefix(self, sizes: dict[str, int]) -> Vocabulary:
+    def prefix(self, sizes: dict[str, int], format_id: str | None = None) -> Vocabulary:
         """The vocabulary as it stood when each table had `sizes` rows (index 0 included).
 
         With an append-only order this is exactly the vocabulary an older model was
         trained on, so its fingerprint is the one that model stored (`value.load_model`).
+
+        `format_id` names the vocabulary as another regulation's: M-C's order begins with
+        M-B's (`configs/vocab/`, `extends`), so M-C cut back to M-B's sizes and named M-B
+        is M-B's vocabulary, fingerprint and all, when no integer M-B knows has moved.
         """
         def cut(table: dict[str, int], rows: int) -> dict[str, int]:
             return {k: i for k, i in table.items() if i < rows}
 
         return Vocabulary(
-            format_id=self.format_id,
+            format_id=format_id or self.format_id,
             species=cut(self.species, sizes["species"]),
             abilities=cut(self.abilities, sizes["ability"]),
             items=cut(self.items, sizes["item"]),
@@ -306,6 +312,18 @@ def read_vocab_order(path: Path, format_id: str | None = None) -> dict[str, list
         if len(set(ids)) != len(ids):
             raise ValueError(f"{path}: {table} lists an id twice")
     return order
+
+
+def read_vocab_extends(path: Path) -> dict[str, Any] | None:
+    """The list's `extends` record -- the regulation it begins with, and how many ids.
+
+    Only `tools/vocab_order.py` reads it (to check the prefix still holds). What lets a
+    model trained on the base load is not this record but the fingerprint of the list cut
+    back to that model's sizes (`Vocabulary.prefix`, `value.load_model`).
+    """
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8")).get("extends")
 
 
 def dump_ids(reg: Regulation) -> dict[str, list[str]]:
@@ -767,6 +785,7 @@ __all__ = [
     "dump_ids",
     "field_feature_names",
     "mon_feature_names",
+    "read_vocab_extends",
     "read_vocab_order",
     "rules_of",
     "side_feature_names",
