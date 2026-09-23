@@ -11278,3 +11278,150 @@ master（ff82ad5、IKA-136・IKA-127・IKA-159 入り）を取り込んでビル
 test_port_gates・test_line_endings・test_no_machine_specific_paths・test_disguise_afterhit を `-n 0` で 121 pass、diff_node も
 取り込み後に同じ結果（0/1,284）。機械（heavy.py、--agent IKA-160）: release ビルド 2 回（8 コア 26 秒・18 秒）、オラクル 265 秒、
 記録 819 秒、diff_node 75・69・61 秒、テスト 20 秒（いずれも 1 コア）。
+
+## 9/23 — IKA-165: foeSide の技（ステルスロック・まきびし・どくびし・ねばねばネット）の sideCondition を相手の側に置く —— Python・port とも使い手の側に置いていた。記録・プールに撒き技の使い手は 0
+
+### 1. Showdown の置き場所と、sideCondition を持つ技
+
+`moveHit` は `target.side.addSideCondition(moveData.sideCondition, source, move)`（sim/battle-actions.ts 1241 行）。
+side の技の対象は `getMoveTargets`（sim/pokemon.ts 794 行）が決め、`foeSide` は `this.foes(true)`、`allySide`・`allyTeam`
+は `alliesAndSelf()`。`tryMoveHit` はその先頭 1 体に `moveHit` するので、置き場所は foeSide なら相手の側、
+allySide・allyTeam なら自分の側。`self.sideCondition` は `moveHit(source, ...)` なので使い手の側。持続ターン
+（ひかりのねんど等）は `durationCallback(target, source)` で使い手を読む。
+
+M-B・M-C のダンプ（各 515 技）で `sideCondition` を持つ技は同じ 11 個。`self.sideCondition`・secondary の sideCondition は 0。
+
+```
+  target     技                                                       旧 Python   旧 port   新
+  allySide   おいかぜ・リフレクター・ひかりのかべ・オーロラベール      正          正        正
+             しんぴのまもり・ワイドガード・ファストガード
+  foeSide    ステルスロック・まきびし・どくびし・ねばねばネット        誤（自分）  誤（自分） 正
+```
+
+ほかの道:
+
+```
+  道                                                      Python              port                 正誤
+  _apply_status_move の raw.sideCondition（2428 行）      action.side         apply_status_move    foeSide が誤 → 直した
+  self.sideCondition（2479 行）                           action.side         1810 行              正（使う技は 0）
+  ワイドガード・ファストガードの STALL_BUMPING の道        action.side         1894 行              正（allySide）
+  どくげしょう（toxicdebris、_on_being_hit）              攻撃側の側          1305 行              相手からの物理は正。味方の物理は Showdown が
+                                                                                                 相手の側に撒くが、両方とも何もしない（候補）
+  がんせきアックス・ひけん・ちえなみ（onAfterHit）         無し                無し                 未実装・注記も無し（候補）
+```
+
+### 2. オラクル（`tests/test_hazards_foe_side.py`）
+
+Showdown で 2 ターン。1 ターン目: キラフロル（Corrosion）が技を使い、エルフーンはてだすけ、相手（ガオガエン・
+ガブリアス）はまもる。2 ターン目: キラフロル・エルフーンはまもる、相手はガオガエンをカバルドン（接地・どく
+でもはがねでもない）に替え、ガブリアスはつるぎのまい。Python・port の 1 ターン目を Showdown の 1 ターン目後の
+side conditions に、その Python・port の局面から打った 2 ターン目を Showdown の 2 ターン目後の HP・状態・ランクに
+合わせる。テストはまず Showdown 自身が技の対象の側に置き、撒き技ならカバルドンが削られる（対照なら無傷）ことを
+確かめる（陽性対照）。
+
+```
+                     Showdown 1T 後         2T のカバルドン（Showdown）   旧 Python   旧 exe   新 Python   新 exe
+  ステルスロック     p2 側                   HP −1/16                      p1 側 FAIL  FAIL     一致        一致
+  まきびし           p2 側                   HP −1/8                       FAIL        FAIL     一致        一致
+  どくびし           p2 側                   どく（ターン終わりに −1/8）   FAIL        FAIL     一致        一致
+  ねばねばネット     p2 側                   すばやさ −1                   FAIL        FAIL     一致        一致
+  対照 おいかぜ      p1 側                   無傷                          一致        一致     一致        一致
+  対照 リフレクター  p1 側                   無傷                          一致        一致     一致        一致
+```
+
+直す前: 旧 Python で Python 側 4 FAIL・対照 2 pass、旧 exe（main の release を C:/tmp/ika165/ に複写）で port 側
+4 FAIL・対照 2 pass。直した後は 12 とも pass。IKA-158 の strict xfail `test_spikes_land_on_the_foes_side` は
+master 取り込み後に外し、`HAZARD_CASES` を空にして prankster-foeside も side conditions ごと比べる（pass）。
+
+### 3. 直し
+
+`resolve._side_condition_side(action, move)`: foeSide なら `1 - action.side`、ほかは `action.side`。
+`_apply_status_move` の raw.sideCondition はこれで置く（持続ターンは使い手のまま）。port の `apply_status_move` も同じ。
+
+### 4. diff_node（`--hazards` を足した）
+
+記録に撒き技の使い手がいないので、`--hazards` は場の全員の最後の技（ロック・アンコール・かなしばり・直前の技が
+指す技は避ける）を撒き技 4 つの順繰りに替え、撒き技を使うセルを枝ごとに port と比べる。「発火」は置き場所を
+使い手の側に戻した Python（`hazards_on_the_users_side`）と答えが動くセル。
+
+```
+                                          w12 12局面       w12 40局面                   gen11L 40局面
+                                          新 exe / 旧 exe   新 exe / 旧 exe              新 exe
+  撒き技を使うセル                         1,529            4,708                        5,185
+    枝・重み・注記・局面が違う             0 / 1,325         10 / 4,256                   0
+      うち side conditions は一致          — / 0             10 / 0                       —
+  port が断った（別に数える）              16               0                            45
+  発火                                     1,359            4,268                        4,411
+    うち違う                               0 / 1,325         10 / 4,256                   0
+    うち断った                             16               0                            36
+    うち一時停止の枝だけが違う（比べない）   18               12                           49
+  最悪のセル差（hp-share・faints）          3.3e-16 / 8.3e-2  4.4e-16 / 1.7e-2             3.3e-16
+```
+
+旧 exe の違うセルは発火 − 断った − 一時停止だけ（1,359 − 16 − 18 = 1,325、4,268 − 12 = 4,256）で、置き場所は全部違う。
+w12 40 局面の新 exe の 10 セルは撒き技と無関係: side conditions は枝ごとに一致し、違うのはほろびのうたの volatile
+（Python は付け、port は付けない）。撒き技を使わないセルでも同じ局面で同じずれが出る（別課題の候補）。
+gen11L 40 局面の最初の実行ではこだわりロックが指す技を撒き技で上書きして 184 セルがロックの技で違った。
+覚えていない技へのロックはどの局も作らない状態なので、`teach_hazards` はその技を避ける。
+
+### 5. 記録とプールで該当する数
+
+```
+                                        局・構築   撒き技 4 つを持つ   撒き技を選んだ決定   撒き技の side condition がある決定
+  data/selfplay-gen11L                  12,000 局  0                   0                    412（全部どくげしょうのどくびし、p1 側）
+  data/ika73/w12                        43,999 局  0                   0                    913（同上）
+  standings 2026-worlds（M-B）           394 構築   0
+  standings 2027-baltimore（M-C）        1,077 構築 0
+  data/pool/regmc-matchupweb.json        65 構築    0
+  configs/teams（rizabanadohido・place1）2 構築     0
+  陽性対照（同じ数え方）                 おいかぜ: worlds 221・baltimore 678・matchupweb 32 構築。
+                                         がんせきアックスの選択: gen11L 33・w12 429 決定
+```
+
+どくげしょう（キラフロル）はどくびしを攻撃側の側に撒き、相手からの物理ならそれで正しい（Python・port とも
+`attacker_side`）。今回の誤りの道ではない。
+
+### 6. 均衡の手（撒き技を教えた局面、Python のみ）
+
+記録に撒き技の局面が無いので、問いは「撒き技を持っていたら置き場所の誤りでどれだけ手が変わるか」。w12 の記録
+200 局面に `teach_hazards` で撒き技を教え、value-gen11L の葉・Budget.matrix の 1 ターン行列を新旧の置き場所で解いた。
+
+```
+  200 局面（全局面で撒き技が手の候補に入る）
+  葉の値が動いたセル                         23,507 / 86,530（197 局面）
+  どちらかの側の最頻の手が変わった局面       4 / 200（2.0%）
+  頻度の変化が 0.01 を超えた局面             7 / 200
+               0.05                          6 / 200
+               0.1                           5 / 200
+  均衡の値の変化                             平均 0.0000、最大 0.0052
+  均衡で撒き技に置かれた重み（片側平均）     新 0.0153、旧 0.0203
+```
+
+撒き技の行・列は 1 ターンの行列ではたいてい支配されるので、セルは 27% 動いても均衡はほとんど動かない。
+この数は「教えた撒き技が 1 ターンの葉の行列でどれだけ効くか」への答えで、撒き技を持つ構築が居るプールの誤りの
+大きさではない（value-gen11L は撒き技が正しい側にある局面を学習していない）。
+
+### 7. 学習データへの影響
+
+value-gen11L の学習データ（data/selfplay-gen11L、12,000 局）には撒き技を持つ構築が 0 局、選んだ決定が 0 なので、
+この誤りの上で打たれた決定は無い。ソースのプール（worlds・Baltimore・matchupweb・configs/teams）にも 0。
+記録にある撒き技の side condition 412・913 決定はどくげしょうのどくびしで、正しい側。
+
+### 8. 機械
+
+release ビルド 2 回（8 コア、23 秒・18 秒）。数え上げ（24 秒）、diff_node 9 回（1 コア、15〜86 秒）、差の中身の調べ 3 回、
+均衡の手 2 回（1 コア、431 秒・432 秒）、ほろびのうたの数え上げ 2 回（9 秒・8 秒）。すべて heavy.py に記録（--agent IKA-165）。
+
+### 9. 別課題の候補
+
+* **port がほろびのうたを付けない**: Python（`_apply_status_move` の onHitField、2621 行）は場の全員に perishsong
+  （4）を付けるが、port の `apply_status_move` にはその道が無く、`modelled.rs` は完全に扱う技に入れている。
+  w12 の 40 局面で撒き技を使わないセルでも、Python にある perishsong の volatile が port には無い。記録: gen11L は
+  ほろびのうたを持つ局 249・選んだ決定 24 に対し perishsong の volatile がある決定 0、w12 は選んだ決定 217 に対し
+  12 決定（3 局）。生成が port を通るなら、ほろびのうたのカウントが進まない局面で学習データが打たれている
+* がんせきアックス（バサギリ、Sharpness）の onAfterHit のステルスロックが Python・port とも無く、
+  注記も出ない。gen11L で 33 回・w12 で 429 回選ばれている。ひけん・ちえなみ（まきびし）も同じだがプールに 0
+* どくげしょう: 味方の物理技（じしん等）で当たったとき Showdown は相手の側にどくびしを撒くが、Python・port とも
+  何もしない
+* 撒き技が既に最大のとき（ステルスロック・ねばねばネットの 2 回目、まきびし 4 回目、どくびし 3 回目）Showdown は
+  技を失敗させるが、`add_side_condition` は黙って戻るだけで `move_failed` にならない。プールに 0
