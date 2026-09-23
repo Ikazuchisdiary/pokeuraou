@@ -19,13 +19,14 @@ import pytest
 
 from pokeuraou import resolve as resolve_module
 from pokeuraou import rustnode
+from pokeuraou.actions import side_actions
 from pokeuraou.cli import _modal, build_beliefs
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
 from pokeuraou.narrow import narrow
 from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.position import validate_position
-from pokeuraou.resolve import Budget, batched_payoffs
+from pokeuraou.resolve import Budget, batched_payoffs, resolve_turn, turn_leaves
 from pokeuraou.setup import load_scenario, with_spreads
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "scenario-turn5.json"
@@ -354,6 +355,49 @@ def test_leaf_sharing_switched_off_stores_every_leaf_and_changes_no_cell(
     assert len(shared.encoded.species) < offered, "sharing never fired on this node"
     assert len(unshared.encoded.species) == offered
     assert _cell_values(shared) == _cell_values(unshared)
+
+
+def test_a_resumed_turn_is_resolved_on_the_turns_own_budget(bridged: None) -> None:
+    """A turn paused by Parting Shot resumes at the resolution Python gives it (IKA-140).
+
+    Every other test here runs `Budget.matrix()`, whose pinned roll is never narrowed, so
+    none of them can see what budget a resumed turn gets. `Budget()` can: Kowtow Cleave's
+    and Close Combat's rolls are live branches by the time Incineroar's Parting Shot pauses
+    the turn, so that step runs on a narrowed budget. Python resumes the turn on the
+    budget it was asked for; the port used to resume it on the narrowed one, and made 110
+    leaves of this cell where Python makes 210.
+    """
+    reg, pos, _row, col = _node()
+    ours = next(
+        a for a in side_actions(reg, pos, 0) if a.to_choice() == "move 2 1, move 2 1"
+    )
+    theirs = next(a for a in col if a.to_choice() == "move 1 2, move 2")
+    budget = Budget()
+
+    python = resolve_turn(reg, pos, [ours, theirs], budget=budget)
+    assert python.suspended, "this cell no longer pauses; it tests nothing"
+    python_leaves = len(turn_leaves(reg, python).positions)
+
+    node = rustnode.node_for(reg)
+    assert node is not None
+    filled = node.fill_encoded(pos, [ours], [theirs], budget, ["hp-share"], None)
+    assert not filled.refused
+    assert [(i, j) for i, j, _root in filled.folded] == [(0, 0)]
+    assert _references(filled.folded[0][2]) == python_leaves
+
+    objectives = [OBJECTIVES["hp-share"], OBJECTIVES["faints"]]
+    evaluators = [o.batch for o in objectives]
+    through_rust, _notes, _exact = batched_payoffs(
+        reg, pos, [ours], [theirs], evaluators, budget=budget
+    )
+    rustnode.reset()
+    os.environ[rustnode.ENV_ENABLE] = "0"
+    in_python, _python_notes, _python_exact = batched_payoffs(
+        reg, pos, [ours], [theirs], evaluators, budget=budget
+    )
+    for index, objective in enumerate(objectives):
+        gap = abs(float(through_rust[index][0][0]) - float(in_python[index][0][0]))
+        assert gap < 1e-12, f"{objective.name} differs by {gap}"
 
 
 def test_a_node_that_dies_is_replaced_rather_than_given_up_on(bridged: None) -> None:

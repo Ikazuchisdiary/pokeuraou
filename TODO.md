@@ -8016,3 +8016,92 @@ damage の件数は `dump_damage_cases*.py` を今の木で作り直したもの
 * baltimore を相手プールにした対戦・生成で、ミミッキュ1本がどれだけの決定を Python に落とすか
 * 化けの皮が剥がれた後（`mimikyubusted`）の局面も拒否している。移植と Python が一致するかもしれないが、
   確かめていない
+
+## 9/23 — IKA-140: 再開ターンの budget は Python が正しく、Rust の1行を消した。本番（matrix の探索・exact の進行）は1枚も変わらない
+
+### 答えた問い
+
+IKA-62 が見つけた食い違い —— Rust の `run_queue` は `item.turn.budget = step_budget` で狭めた budget を
+ターンに書き込み、Python の `_run_queue` は `_execute` に渡すだけ —— のどちらが意図か。本番で効くか。
+19セルの利得はどれだけ動いたか。
+
+### 判定
+
+**Python が意図で、Rust の1行が事故。消した**（`rust/src/resolve.rs`、理由をコメントに残した）。
+
+* **Rust は Python の転記として書かれた。** 移植のコミット `2a49a0f`（9/12）は「a turn Rust resolves is
+  exactly Python's answer」、README の併合節は「Python の … の転記」。この行は `2a49a0f` で入り、
+  **そのときの Rust は途中交代で止まるターンを拒否していた**（同じコミット:「a self-switch that suspends
+  the turn: every one of those returns an error」）。`turn.budget` を読むのは `pinned_policy` だけで、
+  狭めても `pinned_policy` は変わらないので、当時この行は何もしていなかった。`resume_turn` が
+  `turn.budget` を読むようになったのは56分後の `cd23aab`（「The interrupt was the last refusal」）で、
+  そこで初めて効き始めた。検査は `diff_node`（`Budget.matrix()`）だけだった
+* **Python の設計は「狭めるのは今のキューの幅に対して」。** `_run_queue` の docstring は「Entered both at
+  the top of a turn and again from `resume_turn` … goes through exactly one code path」、狭める理由は
+  「Divide the remaining branch budget among the live branches」。再開は生きている分岐1本の新しい
+  キューなので、その幅で割り直すのが同じ規則。Rust は元のキューの幅で割った budget を持ち込み、
+  再開したキューで**もう一度**割っていた（二重の縮小）
+* 設計文書（README・GENERATIONS.md・TODO.md）に「再開は狭めた budget で」と書いた箇所は無い
+
+### 本番で効くか —— 効かない（修正前も修正後も）
+
+読んで:
+
+* **`Budget.matrix()`（生成の探索、`selfplay.py:571`）**: 固定ロール。`narrowed()` は
+  `fixed_roll is not None` で自分を返す（Python・Rust とも）ので `step_budget == budget`、この行は
+  同じ値を書くだけ
+* **`Budget.exact()`（= `Budget()`、生成の進行 `_advance_turn`）**: Rust の `node.resolve` は止まった
+  分岐の**重みだけ**返し、それが引かれたら Python の `resolve_turn` で解き直して Python が再開する
+  （`selfplay.py:851-859`）。Rust の再開を通らない
+* `Budget()` で Rust の再開を通るのは `why_action`・`cli analyse --budget exact` など解析だけ。
+  `Budget.fast()` も狭まる（固定ロールでない）が生成では使っていない
+
+数えて（`data/ika73/w12` の worker0 から手番2以降の40局面、12×12 が33個。Python に Rust の書き込みを
+真似させて（`_execute` の前に `turn.budget = budget`）比べた。真似が本物と同じことはテストのセルで
+確認済み: 旧 Rust 110 葉 = 真似 110 葉）:
+
+```
+budget     セル    止まるセル   葉数か値が違う   葉数 Python → Rust流   最大 |Δ| (hp-share)
+matrix     5,126      399            0            1,870 → 1,870          0
+fast       5,126      394            2            3,908 → 3,836          0.00022
+exact        24       24            2           23,574 → 6,987          0.0023   (止まるセルから抽出)
+exact 進行   40        4            0            —                       —        (記録の選択そのもの)
+```
+
+### 19セルの利得（`why_action --case sash-ko --limit 24`、`Budget()`、橋 ON、同じバイナリで旧/新を切替）
+
+旧の腕のゲーム値 0.578135561271 は IKA-62 の A と12桁一致（切替の陽性対照）。メニューは両腕で同一。
+
+* 24×24 で値が動いたのは **16セル**（IKA-62 の「葉が増えた15」とは数え方が違う —— こちらは利得の差）。
+  **最大 |Δ| 0.00515（12,21）、変わったセルの平均 |Δ| 0.00099**。行 15 `move 1, move 3 2` が13セル
+* 動いたセルの行・列は**すべて均衡の質量 0**。ゲーム値は12桁同じ、行と列の混合の TV は **0**。
+  **戦略は変わらない**
+* Python への連結: 差の大きい2セルを Python の `resolve_turn` + `turn_leaves` で解くと、新との差
+  1.4e-08（12,21、598葉。学習済み葉の float32 のバッチ差）と 1.1e-16（15,19、61,040葉）、旧との差は
+  0.00515 と 0.00283
+* 代償: 新の腕は 3.9 → **123秒**（IKA-62 の C で 7.1 GB）。解析ツールだけの代償
+
+### 確かめたこと
+
+* `tests/test_rust_node.py::test_a_resumed_turn_is_resolved_on_the_turns_own_budget`: scenario-turn5 の
+  1セル（`move 2 1, move 2 1` 対 `move 1 2, move 2`、ガオガエンのすてゼリフで止まる）を `Budget()` で、
+  葉の参照数を Python の `turn_leaves` と、hp-share・faints の値を橋 OFF と比べる。**旧の挙動のバイナリ
+  では 110 == 210 で落ち**（値も hp-share で 3.9e-4 ずれる）、修正後は通る。1秒
+* `test_rust_node.py` 全16本・`test_line_endings`・`test_no_machine_specific_paths` 通過。
+  `test_resolve*.py`・`test_resumed_turn_log.py` 通過（skip 8 は sim-bridge の無い oracle 系）
+* `tools/diff_node.py --games 2 --nodes 8 --value value-gen11L.pt`: bit-identical 6978/7584（92.01%）、
+  worst 5.364e-08、均衡 3.006e-14 —— IKA-62 の記録と1文字違わない
+* `port_coverage.py --check` 通過、ruff 通過
+
+### 測っていないこと
+
+* 修正後の橋 ON 解析のピーク RSS（IKA-62 の C の 7.1 GB を引いた。同じ変更なので同じはず）
+* 70×2・2×79 のランキングノードの利得差（メニューが同じだったことだけ見た）
+* 局面は worker0 の先頭800手からの40個だけ
+* 「Python の全予算の再開」が**良い**予算配分かは別の問い。止まった分岐それぞれが再開ごとに
+  `max_branches` を丸ごと使うので、1セルの葉は `max_branches` を大きく超えうる（sash-ko 16,21 で
+  112,792 葉）。これは設計の問いとして起票候補
+
+機械（すべて heavy.py 経由）: 12:16:54〜12:17:17 実験ビルド（8コア）、12:18:18〜12:21:14 19セルの2腕
+（8コア）、12:24:03〜12:25:08 記録局面の数え（1コア）、12:24:40〜12:25:02 コミット版ビルド（8コア）、
+12:26:01〜12:27:05 diff_node（1コア）、ほかテスト・セル探し（1コア、各10秒以下）。
