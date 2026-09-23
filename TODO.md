@@ -13746,3 +13746,100 @@ null 対照（w12 の先頭 300 局 = 4,010 決定、`encode_dataset --limit 300
 
 GPU（RTX 5070、heavy.py `--cores 2`、他の GPU ジョブとは重ねていない）: 1エポック 5.2 秒（全プール）。計測 62 秒、掃引 A/B8〜16 103+771 秒、B4〜6・swa25 391 秒、
 温間の模擬 31+135+106+90+87 秒。合計 **約 30 分**。CPU（1コア）: 符号化・null 対照・テストで約 40 秒。
+
+## 9/24 — IKA-180: みがわりが HP を払い、攻撃を肩代わりする —— 両エンジンとも印を付けるだけで、HP は減らず、攻撃は本体に当たっていた
+
+ワーカー。基点 master 713f85d、ブランチ `ika-180-substitute`、報告前に master 1ee0daf（IKA-82）を取り込み（衝突なし）。
+
+### 1. Showdown（a5df827。champions は `substitute` を上書きせず、`spreadMoveHit` を持つ）
+
+- `data/moves.ts` `substitute`: `onTryHit` は既に立っている・HP ≤ maxhp/4（maxhp 1）で `NOT_FAIL`、`onHit` が
+  `directDamage(maxhp / 4)`、`condition.onStart` で人形の HP `floor(maxhp / 4)`、`partiallytrapped` を外す。
+  `onTryPrimaryHit`: 自分の技・`bypasssub`・`move.infiltrates` 以外は `getDamage` を人形の HP で頭打ちにして引き、0 で消す。
+  反動は `applyRecoilDamage(damage)`、吸収は `Math.ceil(damage * drain)`、`AfterSubDamage`、`HIT_SUBSTITUTE`（= 0）。
+- `data/mods/champions/scripts.ts` `spreadMoveHit`: 追加効果・自分への効果・対象 `all`/`allyTeam`/`allySide`/`foeSide` では
+  調べない。`HIT_SUBSTITUTE` の対象は以後 `null`: 技の効果・追加効果・`DamagingHit`（接触特性・ゴツゴツメット・のろわれボディ）・
+  `AfterHit`（はたきおとす等）が飛ぶ。`selfDrops` と追加効果の `self` は使う側に届く。`totalDamage` には 0（反動・かいがらのすず）、
+  技としては当たり（いのちのたま・とんぼがえり）。変化技は `getDamage` が `null` で何もしない。
+- 半減の実は `hitSub` で何もしない（`data/items.ts`）。いかくは人形の後ろを `-immune`（`data/abilities.ts`）。
+- オラクルで確かめた事実: みがわりの失敗（2 枚目・[weak]）は `moveLastTurnFailed` が立つ（`NOT_FAIL` を champions の
+  `singleEvent('TryHit')` が `[false]` にする）。人形に止められたどくどく・おにび・あくびは失敗にならない。
+
+### 2. 直し（`resolve.py`・`moves.rs`・`resolve.rs`・`reg.rs`・`modelled.rs`）
+
+- 小さな関数にまとめた（`resolve.py` の「Substitute (IKA-180)」節、`moves.rs` の同名節）: `_hits_substitute`（門）、
+  `_substitute_hp`（`extra.hp`、無ければ floor(maxhp/4)）、`_use_substitute`（失敗 2 つは move_failed、払いと人形、トラップを外す、
+  オボン等の判定）、`_behind_substitute`/`_doll_damage`（半減の実を外した乱数）、`_hit_substitute`（人形の HP、反動・切り上げの吸収、
+  がんせきアックス・ひけん・ちえなみの `onAfterSubDamage` の撒菱・ステロ、追加効果の `self`）、
+  `_apply_status_move_past_substitutes`（止められた対象を外し、止められた対象がある間は「何もしなかった」判定をしない）、
+  `_intimidate_meets_substitute`。既存行の変更は `_do_status_move`・`_hit_target`（多段は一発ごとに門を見る）・いかくの呼び出しだけ。
+- port: `F_BYPASSSUB` を足し、`status_move_handled` に substitute、`modelled.rs` は `port_coverage --rust-modelled` で再生成。
+- 注記: 人形に当たった `icespinner`・`steelroller`・`rapidspin`・`mortalspin`（と reg 外の 2 つ）の `onAfterSubDamage`、
+  人形が割れた後の多段がばけのかわ・アイスフェイスに当たる場合（Python のみ。port は両特性を断る）。
+- 範囲外（注記は既存の `status move: X` が出る）: しっぽきり・おかたづけ・きりばらい（reg にある）。フリーフォールは reg に無い。
+- 符号化 `volatile_substitute` は有無のまま（ENCODING_REVISION 不変）。記録の人形は全部 `extra.hp` を持たない（我々のエンジンが
+  書いた）ので学習データに HP は無く、人形の HP を足すなら改訂と再学習が要る。今後の自己対戦の局面は `extra.hp` を持つ。
+
+### 3. オラクル（`tests/test_substitute.py`、新規 55 件 = 27 局面 × Python/port ＋ 手作りの人形 1）
+
+使う（1/4 払う、2 枚目の失敗、3 枚目の対照、[weak] の失敗、まとわりつくを外す）、当たる（フレアドライブの反動と接触なし・対照、
+ドレインパンチの切り上げ・対照、ブレイキングスワイプは隣のドヒドイデだけ下げる・対照、インファイトの自分の低下、ニトロチャージの
+自分の上昇、まとわりつく無効、ヤチェのみが残る・対照、ねっぷう、つららばりが割って本体へ）、変化技（どくどく・対照、おにび、あくび）、
+貫通（ハイパーボイス、ちょうはつ、すりぬけのおにび）、いかく（人形・対照）。
+
+```
+                           Python のテスト 27   port のテスト 27（Python は新）
+  旧（master 713f85d）      18 落ち              18 落ち（旧 exe）
+  新                        0 落ち               0 落ち（新 exe）
+```
+
+旧 Python で通る 9 と旧 exe で通る 9 は対照 6 と貫通 3（旧は何も止めないので通る）。貫通 3 といかくは、門から bypasssub・すりぬけ・
+いかくの判定を抜いた Python で落ちる（`C:/tmp/ika180/run_nobypass.py`）。
+
+### 4. diff_node（`--substitute`、新規。各 20 ノード、Budget.matrix）
+
+場の全員にみがわりを教え、各側の先頭に人形（局面ごとに順に満タン・1/8 に削れたもの）。全セルを port と枝ごとに比べる。
+対照 `unsubbed` は IKA-180 前の規則（印だけ、使うのは無料で注記）。発火は各部分（使う・人形）だけを戻した対照でも数えた。
+
+```
+                     発火セル / セル   うち使う / 人形   新 exe で枝違い   旧 exe で枝違い
+  w12                8,278 / 9,470     2,568 / 7,783     0                 8,097（最悪 3.3e-1）
+  gen11L             5,051 / 6,054     1,947 / 4,621     0                 4,958（最悪 6.7e-1）
+```
+
+取り込み後に新 exe で両方を回し直して枝違い 0（下の 6）。
+
+### 5. 記録（`C:/tmp/ika180/records.py`、一時スクリプト、1 コア 857 秒）
+
+人形が場に立つ決定（w12 210、gen11L 95。記録のメニューが今も合法なのは 152・66）全部と、みがわりを覚えていて人形の無い決定
+（w12 2,259・gen11L 1,723）から 150 ずつを、記録のメニューのまま hp-share 1 手・`Budget.matrix()` で新旧（`unsubbed`）解いた:
+
+```
+                                  w12 人形あり   w12 覚えている   gen11L 人形あり   gen11L 覚えている
+  どこかのセルが動いた            134/152        120/150          58/66             117/150
+  最も重い手が変わった            74/152         9/150            18/66             9/150
+    （人形だけを戻すと / 使うだけ）  74 / 0       4 / 12           18 / 0            6 / 13
+  方策の TV > 0.2                 75/152         9/150            19/66             12/150
+  均衡値の差（平均・最大）        0.021・0.255   0.0001・0.008    0.005・0.124      0.0015・0.154
+```
+
+部分ごとの数は足し算にならない（片方だけ戻した行列は新旧どちらとも違いうる）。
+
+### 6. 検査と機械
+
+test_substitute（新規）・test_after_move_oracle・test_resolve・test_rust_node・test_port_coverage・test_port_gates・
+test_line_endings・test_no_machine_specific_paths・test_hazards_after_hit・test_multihit_counts・test_trap_immunities・
+test_disguise_afterhit・test_disguise_order・test_leech_seed・test_helping_hand_fails・test_confusion_immunity・test_encode・
+test_actions・test_final_position を取り込み後に `-n 0` で通した。`port_coverage --check`・`port_gate_audit --check`・ruff 通過。
+機械: cargo build --release 8 コア 5 回（各 18〜21 秒、取り込み後は変更なしで 0 秒）、diff_node 1 コア 6 回（各約 2.5〜3 分）、
+記録 1 コア 857 秒、テストとオラクルは 1 コアで各 1〜61 秒。worktree に data/priors・standings・reportworm と sim-bridge の dist を
+main から写した（コミットしない）。
+
+### 7. 別課題の候補
+
+- **いのちのたま・反動とマジックガード**: Python の反動（`_after_move`）といのちのたまは `magicguard` を見ていない（Showdown は
+  `onDamage` で効果ダメージを止める）。未測定。
+- **人形の HP を符号化に**: 満タンと割れかけの人形を価値関数が区別できない。みがわりは決定の 0.05% なので今は見送り。
+- **しっぽきり**: 人形を控えに渡す技。reg にあり、今は注記だけ（交代は起きる）。
+- **アイススピナー・アイアンローラー・こうそくスピン・キラースピン**: フィールド消しと撒菱外しが通常の当たりでも未実装か確かめる
+  （人形に当たったときは今回注記を出す）。

@@ -828,6 +828,8 @@ pub(crate) fn status_move_handled(move_id: &str) -> bool {
             | "milkdrink" | "confuseray" | "yawn" | "hypnosis" | "spore" | "sleeppowder"
             | "encore" | "shellsmash" | "roost" | "moonlight" | "synthesis" | "morningsun"
             | "perishsong" | "knockoff" | "thief" | "covet"
+            // `moves::use_substitute` (IKA-180).
+            | "substitute"
     )
 }
 
@@ -2395,6 +2397,10 @@ fn switch_in_ability(turn: &mut Turn, side: usize, slot: usize) {
                 }
             };
             if skip {
+                continue;
+            }
+            // Python's `_intimidate_meets_substitute` (IKA-180).
+            if crate::moves::intimidate_meets_substitute(turn, (1 - side, foe_slot)) {
                 continue;
             }
             turn.apply_boosts(1 - side, foe_slot, &[("atk", -1)], true);
