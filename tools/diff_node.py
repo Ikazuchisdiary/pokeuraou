@@ -50,6 +50,10 @@ its user's type (IKA-162); its control is the turn with `TYPE_SPENDING_MOVES` em
 The control is the hit count as it was before IKA-160 -- 1/3, 1/3, 1/6, 1/6 and Skill Link
 not read -- so the cells it moves are the ones where the count's distribution mattered.
 
+`--using perishsong` holds the port to Perish Song (IKA-172), which it listed as fully
+modelled without ever giving anyone the counter. The control is the turn with
+`_perish_song` taken out, so the cells it moves are the ones where somebody was given one.
+
 `--using stoneaxe` (or `ceaselessedge`) takes a move that lays a hazard from its own
 `onAfterHit` (IKA-173); its control is the turn with `AFTER_HIT_HAZARDS` emptied, the
 hit laying nothing as before.
@@ -316,6 +320,25 @@ class unspent:  # noqa: N801 - read as a phrase at the call site
         resolve_mod.TYPE_SPENDING_MOVES = self.real
 
 
+class unsung:  # noqa: N801 - read as a phrase at the call site
+    """Python with `_perish_song` taken out: the control for Perish Song (IKA-172).
+
+    The move is still used -- its PP spent, its `lastMove` written -- and gives nobody a
+    counter, which is what the port did before it learned the move.
+    """
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = resolve_mod._perish_song
+        resolve_mod._perish_song = lambda *_args: None
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        resolve_mod._perish_song = self.real
+
+
 class unlaid:  # noqa: N801 - read as a phrase at the call site
     """Python with Stone Axe's and Ceaseless Edge's `onAfterHit` taken out, as before
     IKA-173: the control for `--using stoneaxe`. The hit still lands."""
@@ -372,6 +395,8 @@ class unchanged:  # noqa: N801 - read as a phrase at the call site
             self.parts.append(unspent())
         if any(m in AFTER_HIT_HAZARDS for m in moves):
             self.parts.append(unlaid())
+        if "perishsong" in moves:
+            self.parts.append(unsung())
 
     def __enter__(self) -> None:
         for part in self.parts:
@@ -877,11 +902,12 @@ def main() -> None:
             or isinstance(move.raw.get("multihit"), list)
             or move_id in TYPE_SPENDING_MOVES
             or move_id in AFTER_HIT_HAZARDS
+            or move_id == "perishsong"
         ):
             ap.error(
                 f"--using takes breaksProtect, ranged multi-hit, type-spending "
                 f"({sorted(TYPE_SPENDING_MOVES)}) or hazard-laying "
-                f"({sorted(AFTER_HIT_HAZARDS)}) moves; {move_id} is none of them"
+                f"({sorted(AFTER_HIT_HAZARDS)}) moves, or perishsong; {move_id} is none of them"
             )
 
     if args.value:

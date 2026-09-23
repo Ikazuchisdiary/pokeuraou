@@ -73,8 +73,18 @@ def target_names(pos: Position, side_index: int) -> TargetNames:
         allies=species_of(pos.sides[side_index]),
     )
 
-#: Volatiles that prevent switching outright.
-TRAPPING_VOLATILES = frozenset({"partiallytrapped", "octolock", "trapped"})
+#: The two trapping volatiles that are conditions in Showdown's `data/conditions.ts`
+#: rather than a move's own condition, so the dump does not carry their hooks: Mean Look's
+#: `trapped` and the binding moves' `partiallytrapped`. Each `onTrapPokemon` calls
+#: `pokemon.tryTrap()`. The traps a move's condition sets -- Octolock, Ingrain, No Retreat,
+#: Fairy Lock -- are read from the dump (`Regulation.trapping_volatiles` and
+#: `trapping_pseudo_weather`, IKA-169).
+TRAPPING_CONDITIONS = frozenset({"partiallytrapped", "trapped"})
+
+#: The volatiles Showdown's `LockMove` event reads (`getLockedMove`), besides the recharge
+#: turn: a charging move's second turn and Outrage's rampage. Each stores its move in
+#: `effectState.move`, which is `Effect.move` here.
+LOCKING_VOLATILES = ("twoturnmove", "lockedmove")
 
 #: The fake move a Pokemon spends its recharge turn on. There is no `recharge` move in
 #: the dex -- Showdown builds the request entry by hand:
@@ -87,8 +97,9 @@ TRAPPING_VOLATILES = frozenset({"partiallytrapped", "octolock", "trapped"})
 #: not have.
 RECHARGE = "recharge"
 
-#: Abilities on an adjacent foe that trap; each also has an escape condition, so this is
-#: only consulted when the position does not already carry Showdown's `trapped` flag.
+#: Abilities on an adjacent foe that trap (`onFoeTrapPokemon`), each with its own
+#: condition on the Pokemon it traps. Only Mega Gengar's Shadow Tag has a holder in the
+#: champions dex; the dump names the hook but not the condition, which is code.
 TRAPPING_ABILITIES = frozenset({"shadowtag", "arenatrap", "magnetpull"})
 
 
@@ -281,8 +292,37 @@ def _usable_move_slots(mon, reg: Regulation) -> list[tuple[int, str]]:  # noqa: 
             continue
         if tormented and mon.last_move == m.id:
             continue
+        if mon.active_move_actions and _disabled_once_moved(move):
+            continue
         out.append((i, m.id))
     return out
+
+
+#: The moves whose champions `onDisableMove` reads the move counter
+#: (vendor/pokemon-showdown/data/mods/champions/moves.ts, fakeout and firstimpression):
+#:
+#:     onDisableMove(pokemon) {
+#:         if (pokemon.activeMoveActions) pokemon.disableMove('fakeout');
+#:     },
+#:
+#: `endTurn` runs every `DisableMove` handler before each request (sim/battle.ts:1691), so
+#: once the Pokemon has made one move action since coming in, the request marks the move
+#: disabled and Showdown refuses the choice ("Fake Out is disabled"). Mat Block has the
+#: same `onTry` but no such hook, and is not in the champions dex.
+DISABLED_ONCE_MOVED = frozenset({"fakeout", "firstimpression"})
+
+
+def _disabled_once_moved(move) -> bool:  # noqa: ANN001
+    """Whether the dex disables this move after its user's first move action (IKA-166).
+
+    The dump's `customHooks` decides, so a dex without the champions hook -- the base
+    game, where Fake Out stays selectable and fails in `onTry` -- keeps offering it.
+    """
+    return (
+        move is not None
+        and move.id in DISABLED_ONCE_MOVED
+        and "onDisableMove" in move.custom_hooks
+    )
 
 
 def is_struggling(mon, reg: Regulation) -> bool:  # noqa: ANN001
@@ -389,6 +429,22 @@ def slot_actions(
     if mon.has_volatile("mustrecharge"):
         return [MoveAction(slot=slot, move_index=1, move_id=RECHARGE, target=None)]
 
+    # The same shape for a charging move's second turn and Outrage's rampage (IKA-169):
+    # `getMoveRequestData` sets `trapped = true` for any `getLockedMove()`, after the
+    # TrapPokemon event, so neither Shed Shell nor a Ghost type escapes it, and offers the
+    # one move with no Mega (`if (!lockedMove) { if (this.canMegaEvo) ... }`). Showdown
+    # then fires at the stored target whatever the choice says; the stored target is not
+    # in the position, so each legal target stays on offer, as it did for Showdown's own
+    # positions before this.
+    locked = locked_move(reg, mon)
+    if locked is not None:
+        index = next((i for i, m in enumerate(mon.moves, start=1) if m.id == locked), None)
+        if index is not None:
+            return [
+                MoveAction(slot=slot, move_index=index, move_id=locked, target=target)
+                for target in _targets_for(reg, locked, slot, foe, active_per_side)
+            ]
+
     out: list[SlotAction] = []
 
     usable = _usable_move_slots(mon, reg)
@@ -418,7 +474,7 @@ def slot_actions(
         for target in _targets_for(reg, STRUGGLE, slot, foe, active_per_side):
             out.append(MoveAction(slot=slot, move_index=1, move_id=STRUGGLE, target=target))
 
-    if allow_switch and not _is_trapped(reg, mon):
+    if allow_switch and not _is_trapped(reg, pos, side_index, mon):
         for candidate in side.pokemon:
             if candidate.fainted or candidate.is_active:
                 continue
@@ -429,29 +485,132 @@ def slot_actions(
     return out
 
 
-def _is_trapped(reg: Regulation, mon) -> bool:  # noqa: ANN001
+def locked_move(reg: Regulation, mon) -> str | None:  # noqa: ANN001
+    """The move Showdown's `getLockedMove` names for this Pokemon, recharge aside.
+
+    A position straight from Showdown, and one our resolver built since IKA-169, carries
+    the move on the volatile. A recorded position from before carries a bare
+    `twoturnmove` that the resolver never removed when the Pokemon chose another move, so
+    there the lock is read off the last move, and only if that move charges (the dump's
+    `charge` flag): a charge turn's last move is the charging move, and a leaked marker
+    sits beside some other one.
+    """
+    for vid in LOCKING_VOLATILES:
+        effect = mon.volatile(vid)
+        if effect is None:
+            continue
+        if effect.move:
+            return effect.move
+        if vid == "twoturnmove" and mon.last_move:
+            last = reg.moves.get(mon.last_move)
+            if last is not None and "charge" in last.flags:
+                return last.id
+    return None
+
+
+def _is_trapped(reg: Regulation, pos: Position, side_index: int, mon) -> bool:  # noqa: ANN001
     """Whether a Pokemon may not switch out.
 
     ``mon.trapped`` is Showdown's own verdict when the position came from the oracle, and
     is authoritative because it already accounts for Ghost types, Shed Shell and ability
-    suppression. The volatile check covers hand-written positions that omit the flag, and
+    suppression. Everything after it covers hand-written positions that omit the flag, and
     the positions our resolver builds -- the search's children, and every position of a
-    generated game -- which carry a trapper's volatile and a flag nobody
-    recomputed -- so it has to know Run Away (IKA-136), Ghost types and Shed Shell
-    (IKA-163).
+    generated game -- which carry the trap's source and a flag nobody computes, so it has
+    to know each source and each escape: Run Away (IKA-136), Ghost types and Shed Shell
+    (IKA-163), and since IKA-169 the move locks, Ingrain, No Retreat, Fairy Lock and the
+    foe's Shadow Tag.
     """
     if mon.trapped:
         return True
+    if locked_move(reg, mon) is not None:
+        # `getMoveRequestData` traps after every escape has run (IKA-169).
+        return True
     if _escapes_traps(reg, mon):
         return False
-    return any(v.id in TRAPPING_VOLATILES for v in mon.volatiles)
+    if any(v.id in TRAPPING_CONDITIONS or v.id in reg.trapping_volatiles for v in mon.volatiles):
+        return True
+    if any(e.id in reg.trapping_pseudo_weather for e in pos.field.pseudo_weather):
+        return True
+    return _trapped_by_foe_ability(reg, pos, side_index, mon)
+
+
+def _trapped_by_foe_ability(reg: Regulation, pos: Position, side_index: int, mon) -> bool:  # noqa: ANN001
+    """Showdown's `onFoeTrapPokemon` for each ability in `TRAPPING_ABILITIES`
+    (`data/abilities.ts`), from every active foe adjacent to this Pokemon::
+
+        shadowtag:  if (!pokemon.hasAbility('shadowtag') && pokemon.isAdjacent(holder))
+        arenatrap:  if (!pokemon.isAdjacent(holder)) return; if (pokemon.isGrounded())
+        magnetpull: if (pokemon.hasType('Steel') && pokemon.isAdjacent(holder))
+
+    each then `pokemon.tryTrap(true)`, so the escapes in `_escapes_traps` apply and the
+    caller has already run them. `isAdjacent` is false when either side has fainted.
+
+    Showdown computes this once, in `endTurn`, and our menus are built from the position
+    at the start of a turn, which is the same moment: a Gengar that Mega Evolves traps from
+    the next turn, and one that has fainted traps nobody.
+    """
+    own = pos.sides[side_index]
+    foe = pos.sides[1 - side_index]
+    if mon.active_index is None:
+        return False
+    types: tuple[str, ...] | None = None
+    for position, party in enumerate(foe.active):
+        if party is None:
+            continue
+        holder = foe.pokemon[party]
+        if holder.fainted or holder.ability not in TRAPPING_ABILITIES:
+            continue
+        if not _adjacent_foes(len(own.active), mon.active_index, position):
+            continue
+        if holder.ability == "shadowtag":
+            if mon.ability != "shadowtag":
+                return True
+            continue
+        if types is None:
+            types = mon.types or _species_types(reg, mon.species)
+        if holder.ability == "magnetpull" and "Steel" in types:
+            return True
+        if holder.ability == "arenatrap" and _grounded(pos, mon, types):
+            return True
+    return False
+
+
+def _adjacent_foes(active_per_side: int, mine: int, theirs: int) -> bool:
+    """`Pokemon.isAdjacent` across the field (`sim/pokemon.ts`)::
+
+        if (this.battle.activePerHalf <= 2) return this !== pokemon2;
+        return Math.abs(this.position + pokemon2.position + 1 - this.side.active.length) <= 1;
+    """
+    if active_per_side <= 2:
+        return True
+    return abs(mine + theirs + 1 - active_per_side) <= 1
+
+
+def _grounded(pos: Position, mon, types: tuple[str, ...]) -> bool:  # noqa: ANN001
+    """Showdown's `isGrounded` for Arena Trap, which has no holder in the champions dex.
+
+    Gravity, Ingrain, Smack Down and Iron Ball ground; a Flying type, Levitate, Magnet
+    Rise, Telekinesis and Air Balloon do not. The resolver's own `_grounded` is the same
+    list without Gravity, which it does not model.
+    """
+    if any(e.id == "gravity" for e in pos.field.pseudo_weather):
+        return True
+    if mon.has_volatile("ingrain") or mon.has_volatile("smackdown") or mon.item == "ironball":
+        return True
+    if "Flying" in types or mon.ability == "levitate":
+        return False
+    if mon.has_volatile("magnetrise") or mon.has_volatile("telekinesis"):
+        return False
+    return mon.item != "airballoon"
 
 
 def _escapes_traps(reg: Regulation, mon) -> bool:  # noqa: ANN001
-    """Whether Showdown frees this Pokemon from every trap in `TRAPPING_VOLATILES`.
+    """Whether Showdown frees this Pokemon from every trap that goes through `tryTrap`.
 
-    Each of those volatiles traps by calling `pokemon.tryTrap()`, so each escape below
-    beats all three. All three follow the dump rather than a list written here:
+    That is every volatile in `TRAPPING_CONDITIONS` and `Regulation.trapping_volatiles`,
+    Fairy Lock, and the foe's trapping abilities (IKA-169) -- all but the move locks,
+    which `getMoveRequestData` sets afterwards. All three escapes follow the dump rather
+    than a list written here:
 
     - **Ghost types** (IKA-163). `tryTrap` begins
       `if (!this.runStatusImmunity('trapped')) return false;`, which is the type chart's
@@ -464,8 +623,9 @@ def _escapes_traps(reg: Regulation, mon) -> bool:  # noqa: ANN001
       hook as Shed Shell; in a dex without the hook Run Away does nothing in battle,
       which is what it did here before the bump.
 
-    Embargo, Magic Room and Klutz would silence Shed Shell and Gastro Acid Run Away; the
-    resolver models none of them, so neither does this.
+    Embargo, Magic Room and Klutz would silence Shed Shell, and Gastro Acid or Neutralizing
+    Gas Run Away and a foe's Shadow Tag; the resolver models none of them, so neither does
+    this.
     """
     types = mon.types or _species_types(reg, mon.species)
     if reg.immune_to_effect("trapped", types):

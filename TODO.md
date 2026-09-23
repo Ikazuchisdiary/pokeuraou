@@ -11654,6 +11654,346 @@ release ビルド 2 回（8 コア、23 秒・18 秒）。数え上げ（24 秒�
 * 撒き技が既に最大のとき（ステルスロック・ねばねばネットの 2 回目、まきびし 4 回目、どくびし 3 回目）Showdown は
   技を失敗させるが、`add_side_condition` は黙って戻るだけで `move_failed` にならない。プールに 0
 
+## 9/23 — IKA-169: かげふみ・ため技の 2 ターン目・ねをはる・はいすいのじん・フェアリーロックも拘束する —— 生成では一度も拘束していなかった。w12 の 4,558 決定・gen11L の 889 決定で記録のメニューに今は選べない手があり、解き直すと 7 割で均衡の最も重い手が変わる
+
+### 1. 何が抜けていたか
+
+IKA-163 のとおり、生成（`selfplay.play_game`）は自前の resolver で局を進めるので Showdown の `trapped` の旗は常に偽で、
+拘束は `actions._is_trapped` が局面から読むものだけだった。読んでいたのは `partiallytrapped`・`octolock`・`trapped` の
+3 つの volatile だけ。Showdown（d3de52a17）の拘束の出どころで抜けていたもの:
+
+- **かげふみ**（`data/abilities.ts:4156` `shadowtag.onFoeTrapPokemon`）: `!pokemon.hasAbility('shadowtag') &&
+  pokemon.isAdjacent(holder)` なら `tryTrap(true)`。持ち主はメガゲンガーだけ（ダンプの特性で確かめた。ありじごく
+  `:196`・じりょく `:2516` の持ち主は居ない）。`tryTrap`（`sim/pokemon.ts:1607`）の頭でゴーストが抜け、きれいなぬけがら・
+  にげあし（優先度 -10）が後から外す。`TRAPPING_ABILITIES` は定義されているだけで読まれていなかった。
+- **技の固定**（`sim/pokemon.ts:1083` `getMoveRequestData`）: `getLockedMove()` があれば `this.trapped = true`。
+  `twoturnmove`（`data/conditions.ts:317`）・`lockedmove`（`:282`）・`mustrecharge`（`:377`）。TrapPokemon の後なので
+  どの抜け道も効かず、要求はその 1 技だけでメガもない（`if (!lockedMove) { if (this.canMegaEvo) ... }`）。
+  反動（はかいこうせん）だけは既に 1 手のメニューだった。
+- **ねをはる・はいすいのじん・フェアリーロック**（`data/moves.ts:9628`・`:12808`・`:5066`）: どれも条件の
+  `onTrapPokemon` が `tryTrap()`。フェアリーロックは場（pseudoWeather、duration 2）で、使った次のターンだけ両側を縛る。
+  resolver は 3 つとも付けている（汎用の volatileStatus / pseudoWeather の道）。
+
+記録を見ると、ため技はメニューの穴だけでなく resolver にも穴があった。`twoturnmove` を技も持続もなしで付けていたので、
+次のターンに別の技を選ぶと印が残り続け、後のため技が溜めずに出た（w12 の `twoturnmove` を持つ場の枠 8,371 のうち
+4,681 は最後の技がため技でない＝漏れた印）。
+
+### 2. オラクルで見たこと（`tests/test_trap_sources.py`）
+
+Showdown の内側の `trapped`（ダンプの旗、隠れた拘束も真）と、直す前・直した後の我々のメニュー（旗を消した Showdown の
+局面／Showdown の前のターンを我々の resolver で進めた子）:
+
+```
+  ケース                         Showdown          直す前（旗なし）       直した後
+  かげふみ / 普通の相手           拘束 (s0, s1)     交代あり               拘束
+  かげふみ / ゴースト             s0 自由・s1 拘束  s1 に交代あり          一致
+  かげふみ / ぬけがら             s0 自由・s1 拘束  s1 に交代あり          一致
+  かげふみ / にげあし             s0 自由・s1 拘束  s1 に交代あり          一致
+  かげふみ / トレースで持った相手 s0 自由・s1 拘束  s1 に交代あり          一致（Showdown の局面のみ）
+  メガ前のゲンガー（対照）        自由              自由                   自由
+  エレクトロビーム 2 ターン目     拘束・1 技        交代あり・4 技         拘束・1 技
+  ソーラービーム＋石 2 ターン目   拘束・1 技・メガ無 交代あり・メガあり      拘束・1 技・メガ無
+  げきりん 2 ターン目             拘束・1 技        交代あり・4 技         Showdown の局面は一致、生成の形は xfail
+  はかいこうせんの反動（対照）    拘束・recharge    一致                   一致
+  ねをはる                        拘束              交代あり               拘束
+  はいすいのじん                  拘束              交代あり               拘束（生成の形のみ）
+  フェアリーロック次のターン      両側拘束・ゴースト自由  交代あり         一致
+  その次のターン（対照）          全員自由          自由                   自由
+```
+
+s1（最後の場のポケモン）へのかげふみは要求では `maybeTrapped` としか出ない（隠れた拘束を漏らさないため）が、
+`chooseSwitch` は断る（`test_the_hidden_trap_is_a_trap`、隣のゴーストの交代は通る対照つき）。
+はいすいのじんの volatile は sim-bridge の `MODELLED_VOLATILES` に無く Showdown の局面に載らないので、旗を消す形は外した。
+直す前: この課題のテスト 54（port の 2 つを足す前）のうち 31 落ち（Showdown の事実 15 と対照は全部通る）、直した後は port の 2 つを足した 56 のうち 55 通過・1 xfail。
+
+### 3. 直し
+
+- `Regulation.trapping_volatiles` / `trapping_pseudo_weather`: 技の条件に `onTrapPokemon` がある volatile（octolock・
+  ingrain・noretreat）と場（fairylock）をダンプから。`data/conditions.ts` の `trapped`・`partiallytrapped` は
+  `actions.TRAPPING_CONDITIONS`（`TRAPPING_VOLATILES` は消した）。
+- `actions._is_trapped(reg, pos, side, mon)`: 旗 → 技の固定 → 抜け道（ゴースト・ぬけがら・にげあし）→ volatile → 場 →
+  隣の相手の特性（`_trapped_by_foe_ability`: かげふみ・じりょく・ありじごく、Showdown の条件どおり。倒れた持ち主・味方は縛らない）。
+- `actions.locked_move` と `slot_actions`: `twoturnmove`/`lockedmove` の技があれば、その技（対象ごと）だけのメニュー、
+  交代なし・メガなし。技を持たない古い記録の `twoturnmove` は最後の技がため技（ダンプの `charge`）のときだけ固定。
+  対象は Showdown が覚えた場所に撃つが局面に無いので、従来どおり対象を選ばせたまま（下の候補）。
+- resolver（Python `resolve.py` と port `moves.rs`）: `twoturnmove` を duration 2・技つきで付ける。子の印は Showdown の
+  局面と (技, 残り 1) で一致（テスト）。port の変更を入れない master のバイナリは (None, None) を返し、
+  `test_the_port_charges_the_same_way` が落ちる（陽性対照）。port は手を列挙しない（メニューは Python のもの）。
+
+### 4. 符号化
+
+`trapped` の旗の意味は変えていない（生成では常に偽のまま、Showdown の局面では Showdown の値）。`encode.py:720` と
+`rust/src/encode.rs:402` は同じ JSON の `trapped` を読む。volatile は有無だけ符号化されるので、`twoturnmove` に技と持続が
+付いても入力は変わらない（ただし漏れた印が消えるので、生成の局面の分布は変わる）。ENCODING_REVISION は動かさない。
+
+### 5. 記録（`C:/tmp/ika169/records.py`、一時スクリプト、1 コア 335 秒）
+
+```
+                                               w12         selfplay-gen11L
+  手番の決定                                    434,483     118,018
+  合法のメニューが変わる決定                     4,576       890
+    記録のメニューに今は選べない手がある          4,558       889
+    記録の均衡がその手に確率を置く                3,938       733
+    実際に指した手が今は選べない                  3,295       566
+  場の枠: かげふみで交代を失う                   1,810       688
+  場の枠: ため技の 2 ターン目で交代を失う         2,047       318
+  場の枠: ため技で技だけ固定（控えなし）          1,643       228
+  ねをはる・はいすいのじん・フェアリーロック      0           0
+```
+
+（0 の 3 つは、同じ走査がかげふみとため技を数えているのが陽性対照。IKA-163 の走査もこれらの印の行を読んで 0 だった。）
+
+今は選べない手がある決定から 300 ずつ、記録のメニューのまま `Budget.matrix()`・hp-share 1 手で、全体の行列と新しい規則が残す
+部分行列を解いた（残るセルの値は変わらない）:
+
+```
+                                   w12              gen11L
+  古い均衡が今は選べない手を指す    217/300          197/300
+  その手の確率（行・列の平均）      0.23・0.35       0.34・0.18
+  方策の TV > 0.2                   233/300          226/300
+  最も重い手が変わった              219/300          209/300
+  均衡値の差（平均・最大）          0.029・0.47      0.029・0.75
+```
+
+記録全体では w12 で 4,558 × 219/300 ≈ 3,300 決定、gen11L で 889 × 209/300 ≈ 620 決定の見込み（手番の決定の 0.8%・0.5%）。
+IKA-163（ゴースト・ぬけがらの交代が落ちていた）と逆向きで、今度は選べない手が入っていた。
+
+### 6. 残したこと（別課題の候補）
+
+- **げきりん**: resolver は `lockedmove` を技も持続もなしで付け、外さず、技も固定せず混乱もさせない。メニューは
+  技のない `lockedmove` を固定しない（生成は今までどおり）。直すなら 2〜3 ターンの分岐と終わりの混乱ごと。
+  符号化の `volatile_lockedmove` は生成では一度使うと場を離れるまで立ちっぱなし。
+- **子の局面の `trapped`**: `position.py:225` は親の旗を写すので、Showdown の局面から始めた探索では拘束の主が倒れた子でも
+  旗が残る。メニューは今は出どころから全部読めるので、子で旗を落とせば済むが、そうすると Showdown 起点の葉の符号化が 1→0 に
+  変わる。選択肢: (a) ターン終わりで両エンジンとも旗を落とす（生成の分布に揃う）、(b) そのまま、(c) 学習で常に 0 だった入力なので
+  `trapped` を符号化から外す（ENCODING_REVISION）。生成には効かないので止めて報告に留めた。
+- **ため技の対象**: Showdown は 1 ターン目の対象に撃つ（`side.ts:677` `lastMoveTargetLoc` / 技名の volatile の `targetLoc`）。
+  我々は 2 ターン目にも対象を選ばせる。
+- はいすいのじんの volatile を sim-bridge の `MODELLED_VOLATILES` に入れるか。
+
+### 7. 検査と機械
+
+test_trap_sources（新規）・test_trap_immunities・test_runaway・test_actions・test_recharge・test_priority_block_per_target・
+test_port_coverage・test_port_gates・test_rust_node・test_resolve・test_line_endings・test_no_machine_specific_paths を `-n 0` で通過
+（xfail 1 はげきりんの生成の形）。ruff、`port_coverage.py --check`、`port_gate_audit.py --check`（かげふみの注記を更新）も通る。
+機械（heavy.py、--agent IKA-169）: release ビルド 8 コア 23 秒、port と resolve のテスト 26 秒、記録 335 秒、試し 2 秒（1 コア）。
+
+## 9/23 — IKA-166: ねこだまし・であいがしらは場に出て最初の行動でしか選べない —— メニューから落とし、怯み・ねむり等で動けなかった手でもカウンタを進める（Python と port）。w12 で 2,553 決定、ねこだまし合戦に負けた側が次の手番に選べて当たっていた
+
+ワーカー、基点 master 28fb86c（途中で 62f0126 = IKA-162 を取り込み）、ブランチ `ika-166-fake-out-first-turn`。
+
+### 1. Showdown（d3de52a17）
+
+* `data/mods/champions/moves.ts:322`（fakeout）・`:354`（firstimpression）:
+  `onDisableMove(pokemon) { if (pokemon.activeMoveActions) pokemon.disableMove('fakeout'); }`
+* `sim/battle.ts:1691` endTurn が要求の前に毎ターン `runEvent('DisableMove')` と各技の `singleEvent('DisableMove')` を走らせる
+  （1 手番目の要求も同じ）。disabled の技を選ぶと "Fake Out is disabled" で拒否。
+* 本家 `data/moves.ts` の `onTry`（`activeMoveActions > 1` で失敗、fakeout 5097・firstimpression 5483・matblock 10996）は残るが、
+  champions では選べないので届かない。たたみがえしは champions では `isNonstandard: "Past"`（ダンプに無い）。
+* カウンタ: `sim/battle-actions.ts:217` `runMove` の最初の行で `activeMoveActions++`、ひるみ・ねむり・こおり・まひ・こんらんの
+  `BeforeMove` はその後（`:255`）。交代で出ると 0（`:138`, `pokemon.ts:475`）。倒れていれば runMove に来ない。
+  ダンプで `onDisableMove` を持つのは両規則とも fakeout・firstimpression の 2 つだけ。
+* Python の `active_move_actions` は `_use_move`（技が始まった後）でだけ進み、`_can_act` で止まった手（ひるみ等）では進まなかった。
+  port（`moves.rs` の `use_move`）も同じ。IKA-158 は特性の先制封じを `_use_move` の中へ移したので、そちらは既に進む。
+
+### 2. オラクル（`tests/test_fake_out_first_turn.py`、M-C）
+
+Python の局面は resolver 自身の子（ブリッジはカウンタを出さない）。
+
+```
+  ケース           最後の要求（Showdown の disabled）           直す前 side_actions    直す前 narrow 後      直した後（両方）
+  moved            ガオガエン fakeout / バサギリ firstimpression   両方出る（×）           両方出る（×、カウンタ 1）  一致
+  flinched         同上（ミミロップのねこだましで怯んだ）             両方出る（×）           ねこだましが出る（×、カウンタ 0）  一致
+  switched-back    ガオガエン なし / バサギリ firstimpression       firstimpression が出る（×）  一致（カウンタ 3 > 1）   一致
+  （対照）1 手番目   両方選べる                                      一致                    一致                  一致
+```
+
+直す前に落ちたもの: `test_our_menu_is_showdowns` 6 本中 5 本、`test_the_counter_decides_the_menu`、
+`test_a_dex_without_the_hook_still_offers_it`（narrow の `> 1`）。Showdown の事実 3 本と switched-back の narrow 後は直す前も通る。
+`test_the_port_counts_the_flinched_move` は旧 port（本体の release exe を `POKEURAOU_RUST_NODE_BIN`）でカウンタ 0 で落ち、新 port で通る。
+
+### 3. 直し
+
+* `actions._usable_move_slots`: カウンタが 0 でなく、`DISABLED_ONCE_MOVED`（fakeout・firstimpression）で、ダンプの
+  `customHooks` に `onDisableMove` がある技を出さない。こだわりでねこだましに固定されていればわるあがき（Showdown と同じ）。
+  フックの無い dex（本家）では従来どおり出す。
+* `resolve._do_move` と port の `moves::do_move`: `_can_act` / `can_act` が止めた手（倒れていた場合を除く）でもカウンタを 1 進める。
+* `narrow.drop_dead_actions`: 決定時のカウンタは `onTry` の前に 1 増えるので `> 0` で死ぬ（`> 1` だった）。docstring を直した。
+* port は手を列挙しない（`rust/src` に side_actions に当たるものは無い）。`tools/blunders.py` の docstring を直した。
+* test_narrow の Fake Out のテストを新しい規則に（「合法手にはまだある」を外し、プールに残ったものを落とす形に）。
+
+### 4. 記録（`C:/tmp/ika166/records.py`、1 コア、heavy.py）
+
+「選べない」の判定は記録のカウンタ ≥ 1（recorded）か、記録のカウンタが 0 で、前の手番にも場に居てカウンタ 0 で、
+交代しない技を指示されていた（blocked、旧 resolver が止まった手を数えなかった分。ひるみ・ねむり等、IKA-158 前の特性封じ）。
+
+```
+                                                     w12        selfplay-gen11L
+  手番の決定                                          434,483    118,018      （IKA-160 と同じ数、陽性対照）
+  選べないねこだましを知る 場のポケモン×決定  recorded   148,630    40,156
+                                           blocked    2,553      735
+  それがメニューにあった 側×決定             recorded   66,920     17,895
+                                           blocked    2,553      735
+  実際に選んだ                               recorded   1,908      333      （旧 resolver でも必ず失敗）
+                                           blocked    1,094      382      （旧 resolver では当たっていた）
+  であいがしら                                         0          0        （記録の構築に使い手が居ない）
+```
+
+各層 150 決定を、記録のメニューのまま（旧）と、カウンタを直して選べない手をメニューから抜いたもの（新）で
+`Budget.matrix()`・hp-share 1 手で解いた（学習済みの葉ではない。narrow が空いた枠を別の手で埋める分は入っていない）:
+
+```
+                                            w12 recorded   w12 blocked   gen11L recorded   gen11L blocked
+  抜いた手（平均）                              2.4            4.2           4.2               8.4
+  旧の均衡が抜いた手に重みを置く                  10/150         79/150        3/150             94/150
+  旧の最大の手が抜いた手                          6              57            3                 83
+  均衡値が動く（> 1e-9 / > 0.01）                 7 / 3          75 / 50       2 / 1             83 / 56
+  均衡値の差 平均・最大                            0.0007・0.046  0.013・0.181  0.0005・0.069     0.015・0.228
+  最大の手が変わる（重みあり / LP の退化）          7 / 24         71 / 11       3 / 22            92 / 13
+```
+
+recorded の層（旧 resolver でも失敗する手）は「何もしない」手が消えるだけで、均衡が変わるのは 2〜7%。blocked の層は
+当たるねこだましが消えるので 53〜63%。記録全体の見込みは w12 で約 4,500（recorded）+ 1,350（blocked）、
+gen11L で約 360 + 460 の決定で均衡が抜いた手に重みを置いていた。
+
+### 5. 検査と機械
+
+関係するテスト 24 ファイル（新規・test_narrow・test_priority_block_per_target・test_runaway・test_type_spending_moves・
+test_resolve・test_actions・test_rust_node・test_port_coverage・test_port_gates・test_line_endings ほか）を master 取り込み後に
+`-n 0` で 321 pass・1 xfail。ruff check ok、`port_coverage --check`・`port_gate_audit --check` ok。
+機械（heavy.py、--agent IKA-166）: release ビルド 2 回（8 コア 22 秒・19 秒）、テスト 66 秒、記録 721 秒（1 回目は指標を足すため
+途中で止めた）。ほかに 30 秒を超えるテスト 1 回（55 秒、1 コア）を heavy.py を通さずに走らせた。
+
+### 6. 残り（別課題の候補）
+
+* **デカハンマー（gigatonhammer、`cantusetwice`）が 2 回続けて選べる**。`battle.ts:1695` が `lastMove` と同じなら disable するが、
+  `_usable_move_slots` は `cantusetwice` を読まない（両規則のダンプに有る）。
+* **ブリッジが `activeMoveActions` を出さない**ので、オラクルの局面から始めた探索は 2 手番目以降でもカウンタ 0 で、ねこだましを出す。
+* 反動（`_do_recharge`）もカウンタを進めない（Showdown は runMove を通る）。既に 1 以上なので効かない。
+
+## 9/23 — IKA-172: port がほろびのうたを誰にも付けていなかった —— 生成は port で局を進めるので、selfplay-gen11L では使われたほろびのうた 14 回がすべて消えていた。Python はかたやぶりと「全員が既にカウント中」の失敗が抜けていた。オラクル 7 ケース 4 ターンで Python・port とも Showdown と一致
+
+### 1. 扱いの違い
+
+- Python（`resolve.py` `_apply_status_move` の `if move.id == "perishsong"`）: 場の全員に `perishsong`（duration 4）。
+  ぼうおんは使い手以外を外す。ターン終わりの residual 24 で数え、0 で倒す。交代で volatile は消える。
+- port（`rust/src/moves.rs` `apply_status_move`）: **付与の道が無かった**。residual（`moves.rs` の「Residual order 24」）と
+  ターン終わりの数え直しの除外、アーマーテールの `all` の例外は持っていた。`modelled.rs` の
+  `status_move_is_fully_modelled` に `perishsong` があり、`resolve.rs:805` の `status_move_handled` も通すので、断りも注記も
+  出ずに「誰も数えていない」子を返していた。
+- `port_gate_audit.py` が拾えなかったのは、`perishsong` の文字列が port の中で residual とアーマーテールの腕に出てくるので
+  「port が名前を扱っている」と数えたため（道が 1 本あっても別の道が無いことは分からない）。
+
+### 2. 生成の経路と、記録で volatile が消えた理由
+
+`selfplay._advance_turn`: 橋が有効なら `node.resolve(pos, chosen, Budget.exact())` で重みを取り、引いた枝の局面を
+port から受け取る（`select=index`）。port の子が次の決定の局面になる。Python の `resolve_turn` に落ちるのは (a) 引いたのが
+途中交代で止まった枝のとき、(b) 橋が壊れて無効になったとき、だけ。
+
+`C:/tmp/ika172/perish_trace.py`（一時スクリプト）で、ほろびのうたを選んだ決定の次の手番の局面を読んだ:
+
+```
+                                  gen11L   gen9   selfplay-all   w12
+  選んだ回数                         24      39        83         217
+  使い手が次の局面で lastMove=perishsong で、
+    誰にも volatile が無い（消えた）  14      24        29         109
+    誰かに volatile がある            0       0        13           3
+  使わなかった（ねむり等）・倒れた・局が終わった   10      15        41         105
+```
+
+「使わなかった」はねむり（lastMove=hypnosis のままのニョロトノは状態 slp、手で確かめた）と先に倒れたもの。
+w12 の 3 つは同じターンに誰かが倒れて途中交代の枝を引いた局（`games-worker7.jsonl` 538 行: イッカネズミが倒れたターンで
+全員に perishsong 3、次のターンから port が 3→2 と正しく数える）で、(a) の経路で Python が付けた。selfplay-all の 13 は
+橋が入る前（engine 未記録）の局を含む。gen11L の 0 は、その 14 回が全部 (a) 以外だったから。消えた例
+（gen11L `games-worker0.jsonl` 439 行）: ターン 6 のゲンガーのほろびのうたの後、ドヒドイデ・ゲンガーはターン 9 の終わりにも
+場に居て、倒れていない。
+
+### 3. オラクルで見たこと（`tests/test_perish_song.py`、新規）
+
+どのケースも Showdown で 4 ターン。1 ターン目に side 0 の a が歌い、相棒と相手はまもる（ほろびのうたに protect の旗は
+無いので通る）。2〜4 ターン目はてだすけ。Python と port は自分の前のターンの局面から進め、毎ターン HP・ひんし・カウントを
+Showdown と比べる（port は Python の局面ともバイトで一致させる）。
+
+```
+  ケース                  Showdown（1 ターン後のカウント 3 / 4 ターン後にひんし）         旧 Python   旧 port   直した後
+  all-four                全員 3 / 全員ひんし                                              一致        不一致    一致
+  soundproof-foe          ジャラランガに無し・生き残る                                     一致        不一致    一致
+  soundproof-ally         使い手の相棒のジャラランガに無し                                 一致        不一致    一致
+  soundproof-singer       使い手自身がぼうおんなら付く（target !== source）                一致        不一致    一致
+  mold-breaker            かたやぶりの使い手ならぼうおんにも付く                           不一致      不一致    一致
+  switch-out              2 ターン目に下がったガオガエンは消える・出てきたカバルドンは無し・生存  一致        不一致    一致
+  sung-twice              2 ターン目の 2 回目は失敗（moveLastTurnFailed）、カウントはそのまま  不一致      不一致    一致
+```
+
+Showdown 側の事実（誰にカウントが付き、誰が倒れ、失敗の旗）はテストの中で先に確かめる（陽性対照）。直す前: 旧 Python
+（master の src）＋旧 exe（main の `rust/target/release/pokeuraou-damage.exe` の写し、dc357226）で 14 のうち 9 落ち
+（Python 2・port 7）、新 Python＋旧 exe で port の 7 が落ち、新 Python＋新 exe で 14 通過。
+
+テストを組む途中で見つけたこと: てだすけは相棒が既に動いていると失敗する（`if (!target.newlySwitched &&
+!this.queue.willMove(target)) return false`）が、Python・port はそれを失敗にしない。ひんしのポケモンの失敗の旗は
+Showdown の `clearVolatile` が消す。どちらもこの課題の問いではないので、失敗の旗は 2 回目を歌う使い手の生きているときだけ比べる。
+
+### 4. 直し
+
+- Python: 付与を `_perish_song(reg, turn, action)` に出した（diff_node の対照が抜けるように）。かたやぶり系（`MOLD_BREAKER_ABILITIES`、
+  きのこのほうしは変化技なので含む）はとくせいガードの無いぼうおんを抜ける。誰にも付かず、ぼうおんで止まった者も居なければ失敗
+  （`move_failed`）。
+- port: `moves.rs` に同じ `perish_song` を足し、`apply_status_move` から呼ぶ。
+- `tools/diff_node.py --using perishsong`: 対照は `_perish_song` を抜いた Python（`unsung`）。
+
+### 5. diff_node（`--games-dir … --using perishsong`、1 コア）
+
+```
+                                  w12 40 局面        gen11L 40 局面       w12 12 局面 --value value-gen11L
+                                  新 exe   旧 exe    新 exe   旧 exe      新 exe      旧 exe
+  ほろびのうたを使うセル            2,139             1,963                641
+  うち効果が出た（対照が動く）      1,812             1,649                481
+  枝ごとに違うセル                 0        1,803    0        1,633       0           479
+  最悪のセルの差（葉）              4e-16    4e-16    3e-16    3e-16       3.0e-08     0.79
+  均衡の頻度の最大の動き            5e-15    5e-15                          2e-15       1.0
+```
+
+hp-share と faints の葉は volatile を読まないので行列は旧 exe でも一致し、違いは枝の局面にだけ出る。学習した葉は perishsong を
+入力に持つので、旧 exe では 12 局面でセルが最大 0.79 動き、ある局面ではある手の均衡の確率が 1.0 動いた（値の動きは最大 2.7e-4）。
+効果が出たのに違わないセル（w12 9・gen11L 16）は、途中交代で止まった枝を持つセル（w12 11・gen11L 18、その局面は比べない）の数に収まる。
+gen11L の 40 局面には「ノードの注記が違う」が 1 つあり（Python だけ `residual speed tie`）、旧 exe でも同じなのでこの変更ではない。
+
+### 6. 学習データへの影響（`C:/tmp/ika172/perish_impact.py`）
+
+value-gen11L の学習局は selfplay-all 46,604・selfplay-gen9 11,999・selfplay-gen11L 12,000 = 70,603 局（npz の meta）。
+
+```
+                                        gen11L   gen9   selfplay-all   計（70,603 局）   w12（参考）
+  ほろびのうたを持つ局                    249     268       1,188          1,705           1,030
+  選んだ局                                 21      28          66            115（0.16%）    167
+  port が消した局                          13      21          24             58（0.08%）     87
+  消えた後の決定                           34      61          80            175（決定の 0.02%）  294
+  4 ターン後まで続いた消えた回              3       4           6             13              37
+    倒れるべきだったのに場に残ったポケモン   5       7          12             24              73
+  perishsong の volatile がある決定          0       4         176            180              12
+```
+
+消えた回の多く（gen11L 14 中 11）は 4 ターン以内に局が終わっている。学習局 70,603 のうち 58 局・175 決定という小ささで、
+value-gen11L の重みを疑う大きさではない。ただし value-gen11L が perishsong の入力を見たのは selfplay-all の 176 決定がほぼ全部で、
+gen11L・gen9 では 4 決定だけ。探索の側は別で、port が埋めるセルではほろびのうたは何もしない技だったので、ほろびのうたの
+使い手が居る局面の均衡は 5 節のとおり動く（ほろびのうたが gen11L で 249 局中 24 回しか選ばれていないことの一因の見込み）。
+
+### 7. 検査と機械
+
+test_perish_song（新規）・test_resolve・test_priority_block_per_target・test_port_coverage・test_port_gates・test_rust_node・
+test_hazards_foe_side を `-n 0` で通過（175）。ruff、`port_coverage.py --check`、`port_gate_audit.py --check` も通る
+（`inert.rs`・`modelled.rs` は変わらない）。release ビルド 1 回（8 コア 23 秒）、記録の走査 2 回（29 秒・21 秒）、
+diff_node 6 回（25〜48 秒）、テスト 2 回（12 秒・33 秒）、すべて heavy.py（--agent IKA-172）。オラクルのテストの初めの数回は
+heavy.py を通さずに 1 コアで走らせた。
+
+### 8. 別課題の候補
+
+- **てだすけの失敗**: 相棒が既に動いたあとのてだすけを Showdown は失敗にする（`onTryHit` の `willMove`）。Python・port は
+  volatile を付けて成功のまま。次のターンの `moveLastTurnFailed`（じだんだ）が違う。
+- **port_gate_audit の盲点**: 「id が port のどこかに出てくる」ことを「port が扱う」と数えるので、同じ技の別の道（ここでは
+  付与）が抜けていても通る。完全に扱う変化技については、`apply_status_move` か宣言的な欄のどちらかに届くかで見るべき。
+- **ノードの注記**: gen11L の記録局面 1 つで Python だけが `residual speed tie` を出す（旧 exe でも同じ）。
+
 ## 9/23 — IKA-173: がんせきアックス・ひけん・ちえなみの撒き技、どくげしょうの味方の物理技と瀕死、撒き技・場の技が既にあるときの失敗 —— Python・port とも Showdown と違っていた。オラクル 15 例で両方一致、diff_node は陽性対照つきで 0 件
 
 ### 1. Showdown の定義（vendor a5df827。champions mod に上書きは無い）

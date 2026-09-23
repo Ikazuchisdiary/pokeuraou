@@ -1872,6 +1872,13 @@ def _do_move(
         state = turn if index == len(checks) - 1 else turn.clone()
         if blocked is not None:
             mon = state.mon_at(action.side, action.slot)
+            if blocked != "fainted" and mon is not None:
+                # `runMove` bumps `activeMoveActions` on its first line, before the
+                # `BeforeMove` event that flinch, sleep, freeze, paralysis and confusion
+                # answer (sim/battle-actions.ts:217, :255), so a Pokemon that could not
+                # move has still spent its first turn out: Showdown disables its Fake
+                # Out next turn (IKA-166).
+                mon.active_move_actions += 1
             if blocked == "flinch" and mon is not None:
                 mon.volatiles = [v for v in mon.volatiles if v.id != "flinch"]
             if blocked == "confusion":
@@ -2088,7 +2095,15 @@ def _use_move(
                     from_foe=False,
                 )
             if turn.pos.field.weather not in skip_weather:
-                turn.add_volatile(action.side, action.slot, "twoturnmove")
+                # `twoturnmove` is `duration: 2` and stores its move (`onStart`:
+                # `this.effectState.move = effect.id`), which is what `getLockedMove`
+                # returns: the next turn's menu is that move alone (IKA-169). Without the
+                # move the menu could not lock, and without the duration a charge the
+                # Pokemon never fired (asleep, flinched) kept the marker for good.
+                turn.add_volatile(action.side, action.slot, "twoturnmove", duration=2)
+                charging = mon.volatile("twoturnmove") if mon is not None else None
+                if charging is not None:
+                    charging.move = action.move_id
                 turn.log(f"{action.label(reg)} is charging")
                 return [(1.0, turn, "")]
 
@@ -2673,19 +2688,7 @@ def _apply_status_move(
         _bump_stall(turn, action.side, action.slot)
 
     if move.id == "perishsong":
-        # onHitField: everything active on both sides, the user's own side included.
-        # Duration 4 counts down at the end of this same turn, so the faint lands three
-        # turns later.
-        for side in range(2):
-            for slot in range(len(turn.pos.sides[side].active)):
-                mon = turn.mon_at(side, slot)
-                if mon is None or mon.fainted or mon.has_volatile("perishsong"):
-                    continue
-                if mon.ability == "soundproof" and (side, slot) != me:
-                    turn.log(f"{turn.name(side, slot)} immune (soundproof)")
-                    continue
-                mon.volatiles.append(Effect(id="perishsong", duration=4))
-                turn.log(f"{turn.name(side, slot)} perish3")
+        _perish_song(reg, turn, action)
 
     if move.raw.get("selfSwitch") and not suppress_self_switch:
         _mark_self_switch(turn, action)
@@ -2695,6 +2698,55 @@ def _apply_status_move(
 
     if move.has_custom_code and move.id not in STATUS_MOVES_FULLY_MODELLED:
         turn.unmodelled.add(f"status move: {move.id}")
+
+
+def _perish_song(reg: Regulation, turn: _Turn, action: QueuedAction) -> None:
+    """Perish Song's `onHitField` (vendor/pokemon-showdown/data/moves.ts, perishsong):
+
+        for (const pokemon of this.getAllActive()) {
+            if (this.runEvent('Invulnerability', pokemon, source, move) === false) { ...
+            } else if (this.runEvent('TryHit', pokemon, source, move) === null) {
+                result = true;
+            } else if (!pokemon.volatiles['perishsong']) {
+                pokemon.addVolatile('perishsong');
+        ...
+        if (!result) return false;
+
+    Everything active on both sides, the singer included. Duration 4 counts down at the end
+    of this same turn, so the faint lands three turns later. Nothing is ever
+    semi-invulnerable here. Soundproof's `onTryHit` (`target !== source`) is the `null` that
+    still counts as a result, and it is `breakable`: a Mold Breaker singer (Mycelium Might
+    too, this being a status move) reaches it unless the holder has an Ability Shield.
+    Nobody reached and nobody Soundproof -- everyone already counting -- is a failure.
+
+    Its own function so `tools/diff_node.py --using perishsong` can take it out for the
+    control (IKA-172: the port had no such path while listing the move as fully modelled).
+    """
+    me = (action.side, action.slot)
+    singer = turn.mon_at(*me)
+    ignores_ability = singer is not None and singer.ability in MOLD_BREAKER_ABILITIES
+    result = False
+    for side in range(2):
+        for slot in range(len(turn.pos.sides[side].active)):
+            mon = turn.mon_at(side, slot)
+            if mon is None or mon.fainted:
+                continue
+            if (
+                mon.ability == "soundproof"
+                and (side, slot) != me
+                and not (ignores_ability and mon.item != "abilityshield")
+            ):
+                turn.log(f"{turn.name(side, slot)} immune (soundproof)")
+                result = True
+                continue
+            if mon.has_volatile("perishsong"):
+                continue
+            mon.volatiles.append(Effect(id="perishsong", duration=4))
+            turn.log(f"{turn.name(side, slot)} perish3")
+            result = True
+    if not result:
+        turn.log(f"{action.label(reg)} failed (everyone is already counting)")
+        turn.move_failed.add(me)
 
 
 def _duration(move: Move, effect_id: str | None = None) -> int | None:

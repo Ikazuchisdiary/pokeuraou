@@ -132,8 +132,10 @@ KNOWN_UNGATED: frozenset[str] = frozenset()
 #: quotation rather than behaviour -- which is the same trap as on the port's side, and the
 #: reason this question lists candidates instead of declaring bugs:
 #:
-#:    shadowtag, arenatrap, magnetpull   actions.TRAPPING_ABILITIES, which nothing reads.
-#:                                       Neither engine traps, so they agree.
+#:    shadowtag, arenatrap, magnetpull   actions._trapped_by_foe_ability (IKA-169): the
+#:                                       foe's ability decides whether a switch is
+#:                                       *offered*, the same shape as Run Away below,
+#:                                       and only the menu reads it.
 #:    dancer                             speed.ACTION_OVERRIDING_EFFECTS, read by a
 #:                                       helper that scans protocol lines for a
 #:                                       differential, not by the resolver.
