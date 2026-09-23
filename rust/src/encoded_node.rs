@@ -97,7 +97,14 @@ impl<'a> Collector<'a> {
     fn add_leaf(&mut self, position: Position) -> usize {
         self.offered += 1;
         let key = leaf_key(&position);
-        if let Some(candidates) = self.seen.get(&key) {
+        // IKA-62's positive control: `POKEURAOU_RUST_LEAF_SHARING=0` stores every leaf it
+        // is offered, so what sharing takes off a node can be put back and seen to come
+        // back. Read once per process; unset or any other value is the default, sharing on.
+        static SHARING: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let sharing = *SHARING.get_or_init(|| {
+            std::env::var("POKEURAOU_RUST_LEAF_SHARING").map_or(true, |value| value != "0")
+        });
+        if let Some(candidates) = self.seen.get(&key).filter(|_| sharing) {
             for index in candidates {
                 if self.leaves[*index] == position {
                     return *index;

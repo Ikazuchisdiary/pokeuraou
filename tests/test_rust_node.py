@@ -306,6 +306,56 @@ def test_the_arrays_take_both_roads_and_are_the_same_bytes(bridged: None) -> Non
     assert with_block.folded == down_pipe.folded
 
 
+def _references(tree: dict) -> int:
+    """How many leaf references a fold tree holds -- one per `add_leaf` call that built it."""
+    if "leaf" in tree:
+        return 1
+    if "best" in tree:
+        return sum(_references(option) for option in tree["options"])
+    return sum(_references(part) for _weight, part in tree["avg"])
+
+
+def _cell_values(filled: Any) -> dict[tuple[int, int], float]:
+    values = np.asarray(filled.leaf_values["hp-share"], dtype=np.float64)
+    out = {
+        (i, j): float(values[indices] @ np.asarray(weights))
+        for i, j, indices, weights in filled.spans
+        if weights
+    }
+    for i, j, root in filled.folded:
+        out[(i, j)] = resolve_module.fold_value(resolve_module._fold_from_json(root), values)  # noqa: SLF001
+    return out
+
+
+def test_leaf_sharing_switched_off_stores_every_leaf_and_changes_no_cell(
+    bridged: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`POKEURAOU_RUST_LEAF_SHARING=0` is IKA-62's positive control, so it has to be one.
+
+    With sharing on, the node must keep fewer leaves than it was offered -- otherwise the
+    switch below compares two identical runs and proves nothing. With it off, every offer
+    is kept, and every cell folds to the same value: sharing is a storage decision only.
+    """
+    reg, pos, row, col = _node()
+
+    def fill() -> Any:
+        rustnode.reset()
+        child = rustnode.node_for(reg)
+        assert child is not None
+        return child.fill_encoded(pos, row, col, Budget.matrix(), ["hp-share"], None)
+
+    shared = fill()
+    monkeypatch.setenv("POKEURAOU_RUST_LEAF_SHARING", "0")
+    unshared = fill()
+
+    offered = sum(len(indices) for _i, _j, indices, _w in shared.spans) + sum(
+        _references(root) for _i, _j, root in shared.folded
+    )
+    assert len(shared.encoded.species) < offered, "sharing never fired on this node"
+    assert len(unshared.encoded.species) == offered
+    assert _cell_values(shared) == _cell_values(unshared)
+
+
 def test_a_node_that_dies_is_replaced_rather_than_given_up_on(bridged: None) -> None:
     """One failure used to end the bridge for the whole process.
 
