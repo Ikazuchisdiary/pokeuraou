@@ -23,7 +23,7 @@ from pathlib import Path
 
 import pytest
 
-from pokeuraou import rustnode
+from pokeuraou import rustnode, view
 from pokeuraou.actions import MoveAction, side_actions
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.regulation import Regulation, regulation_dir
@@ -96,6 +96,11 @@ def synthetic_node(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     target.write_bytes(json.dumps(data).encode("utf-8"))
     monkeypatch.setenv(rustnode.ENV_BINARY, str(binary))
     monkeypatch.setattr(rustnode, "repo_root", lambda: tmp_path)
+    # `view._cached_stats` keys on the format id, which this regulation shares with the
+    # real one: a test that ran earlier in the same process leaves the real 169 there, and
+    # the control below would read it. A private memo for this regulation, and none of its
+    # stats leak out to the tests after.
+    monkeypatch.setattr(view, "_STATS_MEMO", {})
     reg = Regulation(data, source=target)
     register_mega_stones(reg)
     node = rustnode.RustNode(reg)
