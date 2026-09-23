@@ -8731,3 +8731,115 @@ fills@matrix 1.00 ＝ IKA-104 が効いている）、replacement 1,852（5.72�
 IKA-45 の判断（2: 名前で区別する）に残る。
 
 機械時間: 無し（道具の読み戻しを2回、各1秒未満）。
+
+## 9/23 — IKA-136: ダンプは Showdown の検証器と全件一致していた —— meteorassault を拒むのは vendor の Showdown 自身。ダンプ作成器は直さず、vendor の更新待ち
+
+答える問い: M-C ダンプに `meteorassault` が無いのは、ダンプの読み方の誤りか、vendor の Showdown の側の状態か。
+
+**答え: vendor の側。ダンプ作成器（`packages/sim-bridge/src/regulation.ts`）は、固定した Showdown
+（`cc089d36`）の検証器と1件も食い違わない。** その Showdown は M-C で meteorassault を2つの理由で拒む。
+だからダンプを作り直しても何も変わらず（バイト一致）、Baltimore の10構築は通らない。課題の条件
+（「技を手で足さない」「ネットに出ない」）の中では直せないので、作成器もダンプも変えていない。
+
+### Showdown 自身の規則（固定コミットの vendor）
+
+```
+  config/formats.ts:289-294               [Gen 9 Champions] VGC 2026 Reg M-C: mod champions、ruleset Flat Rules …
+  data/rulesets.ts:41                     Flat Rules の ruleset に Obtainable
+  data/rulesets.ts:170-171                Obtainable の banlist に Nonexistent
+  sim/team-validator.ts:1931-1932         Past / Future の技は「does not exist in Gen 9」で拒む
+  data/moves.ts:11729                     meteorassault: isNonstandard: "Past"
+  data/mods/champions/moves.ts:599-602    meteorassault: { inherit: true, basePower: 170 } —— isNonstandard を書かない
+  data/mods/champions/learnsets.ts:14311  sirfetchd の習得表に meteorassault が無い
+```
+
+検証器に直接聞いた答え（`checkMove` / `checkCanLearn`）: 「Meteor Assault does not exist in Gen 9.」と
+「can't learn Meteor Assault.」。**技の存在と習得の2か所で落ちる**ので、`isNonstandard` だけ上書きしても
+Showdown の検証器は通らない。M-C の mod が威力を 150 → 170 に変えているのは、作者が Champions の技として
+扱うつもりだった跡に見える —— が、確かめていない（上流の現在の状態は見ていない。ネットに出ていない）。
+
+### ダンプと検証器の全件照合（`scratchpad/ika136_dump_vs_validator.js`）
+
+format の dex が知るすべてを検証器の `checkSpecies` / `checkMove` / `checkItem` / `checkAbility` にかけ、
+ダンプに入っているかと比べた:
+
+```
+               一致    検証器は通すがダンプに無い   ダンプにあるが検証器は拒む
+  種族（素）   1,387   0                          0      （teamLegal と比べた。メガ・battleOnly は除く）
+  技             867   0                          0
+  道具           583   0                          0
+  特性           321   0                          0
+```
+
+作り直しも確かめた: 本体の `packages/sim-bridge/dist/regulation.js`（ソースは worktree と同一）で M-C・M-B を
+組み直すと、`generatedAt` を除いて**コミット済みのダンプとバイト一致**（557,041 B・535,813 B）。
+だからダンプの差分は 0 件（追加も削除も無い）で、コミットしていない。
+
+### 同じ形の技はほかに8つあるが、M-C で効くのは meteorassault だけ
+
+champions mod で欄を変えながら `isNonstandard` を base から引き継いでいる項目（mod の表を dex が読む前に取った）:
+
+```
+  技    anchorshot・boltbeak・fishiousrend・geargrind・obstruct・purify・shelltrap（Past）、nihillight（Future）、meteorassault（Past）
+        覚える種族はどれも M-C で team-legal でない（dhelmise・dracozolt・klinklang・obstagoon・pyukumuku・turtonator …）
+        meteorassault は覚える種族が0（ネギガナイトの習得表にも無い）で、ネギガナイトは team-legal
+  道具・特性  0
+```
+
+Baltimore の 1,078 シートでダンプに無い技を数えると **`meteorassault` on `sirfetchd` ×10 の1種類だけ**。
+道具・特性で落ちた構築は無い（IKA-79 の内訳: 技 ×10・体数 ×4・性格なし ×1）。
+
+### 直し方（決めていない —— ユーザに聞く）
+
+* **vendor を更新する**（推す）。ダンプはそのまま「Showdown の検証器と一致」を保つ。上流が meteorassault を
+  直しているかは見ていない（ネットに出る作業なので、この課題の外）。更新すればダンプ全体・Rust の入力・
+  `port_coverage` が動くので、別の課題にする
+* ダンプ側に出典つきの上書きを持つ。Baltimore の10シートが出典になるが、上書きは技の存在だけで、
+  Showdown の検証器（IKA-80）はその構築を拒み続ける —— ダンプと検証器が食い違う状態を自分で作ることになる
+
+### port の検査
+
+ダンプが変わらないので Rust の入力も変わらない。`port_coverage.py --check` と損傷・ターンの diff は回していない。
+
+### 見つけた別の欠陥（起票の候補）
+
+`dump-regulation.ts` の `showdownCommit()` は `git -C vendor/pokemon-showdown rev-parse HEAD`。submodule を
+初期化していない worktree では親リポジトリの HEAD（この worktree で `67f4bdc…`）を返し、そのまま
+`meta.showdownCommit` に書かれる。worktree でダンプを作り直すと、出典のコミットが黙って違うものになる。
+
+機械時間: node の照合が数回（各1秒未満）。
+
+## 9/23 — IKA-137: `teams.load_roster` が欠けた欄を入口で名指しして止める —— 性格の無い個体はもう `nature='None'` で通らない
+
+答える問い: `load_roster` は欠けた欄のある構築を読み込みの入口で止めるか。
+
+**止めるようにした。** `_check_present` を `_check_set` の前に置き、欠けた欄を
+`<構築 id>[<個体番号>] <種族>: field '<欄>' is missing -- a recorded team has to state the <欄>` で止める。
+
+```
+  値が要る欄      species・ability・nature・moves     null・""・[] を欠けとする
+  キーが要る欄    item（null は「持たない」という記述）・sp（{} は 0 SP。null は欠け）
+  moves           リストで、1〜maxMoveCount 本
+```
+
+特性の欠けは前から止まっていた（`state the ability`）が、同じ文言の中に入れたので既存のテストはそのまま通る。
+
+### 直す前に見たこと
+
+* 性格を `null` にした個体（rizabanadohido の3体目）は**読めてしまい** `nature='None'`、後の
+  `verify_shown_stats` → `nature_multipliers` で `KeyError: "Unknown nature: 'None'"`
+* 性格のキーを消すと入口の `entry["nature"]` で `KeyError: 'nature'`（名前はあるが、構築も個体も言わない）
+* 足したテスト11通り（性格 null・""・キー無し、特性・道具・種族のキー無し、技 null・[]・キー無し、SP null・キー無し）は
+  直す前に11本とも落ち、直した後に通る。`"item": null` が読めることも1本で押さえた
+
+### 変わらないこと
+
+* `tools/fetch_pastes.py` は `load_roster` を呼ばない（自前の `normalise` で欠けを除外する）ので、振る舞いは変わらない。
+  `tests/test_fetch_pastes.py` は通過
+* 本体の `data/pool/regmc-matchupweb.json`（IKA-138 後、65 kept）を1構築ずつ roster の形にして `load_roster` +
+  `team_sets()`: **65/65**。IKA-138 の補いを外した Wolfe's Mence + Garde は
+  `9de5ee0a9fd58d26[0] Salamence: field 'nature' is missing …` で止まる
+* `tests/test_teams.py` 23本（usage のキャッシュを worktree にコピーして skip 0）、`load_roster` を使う6ファイル
+  （encode・selection・cooccurrence・inference・event_grouping・actions、64 passed・3 skipped。skip の理由は見ていない）、改行・機械固有パスの検査
+
+機械時間: pytest 1コア 65秒（14:29:32〜14:30:38、heavy.py 経由）、ほかは各数秒。
