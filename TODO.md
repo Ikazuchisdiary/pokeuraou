@@ -13567,6 +13567,91 @@ seed 6601、--served --servers 2 --workers 24 --limit 12 --hide-bench -- --rank-
   release の写し（`timing/exe106.exe`、md5 47eafd5f…）を POKEURAOU_RUST_NODE_BIN で。各本の前に python 0 本、
   heavy.py 16 コア専有（02:57:59–03:03:07）。横で走っていた仕事は無し（監視の powershell が 5 分おきに 1 回だけ）
 
+## 9/24 — IKA-87: 局の記録に最終局面と終わった理由を足す（補助ターゲットの学習側はまだ）
+
+決定の記録は最終ターンの前で止まるので、「最後に誰が何 HP で残ったか」はどの局にも無かった。
+`GameRecord` に `final_position`（`Position.to_json` の形）と `end_reason` を足し、`to_json` は
+`finalPosition`・`endReason` を書く（`play_game` を通らない記録は両方とも書かない）。
+
+* 理由は4つ（`END_REASONS`）: `wipeout`（片側が空、または両側が空で最後に空いた側の負け。outcome あり）、
+  `draw`（両側が空で順が分からない）、`turn-cap`（`max_turns * 2` 決定ステップを使い切った）、
+  `unresolved`（重みのある枝が無い・途中交代が5回を超えた。最終局面はその手番を選んだ盤）。
+  自己対戦に投了は無いので理由も無い。生成は outcome が None の局を捨てるので、プールに残るのは `wipeout` だけ
+* 記録に版の欄は無い。読む側はキーの有無で判定する（`selfplay.final_position(record)` は旧記録で None）。
+  `encode_dataset`・`refusal_replay`・`replay_shown` はトップのキーを `get`／名指しで読むだけで、旧記録も新記録も同じに読む。
+  `refusal_replay --holding` は行の部分文字列で絞るので、最終局面の分だけ一致の機会が増える（持ち物は決定の局面と同じなので実害は無い見込み）
+* 大きさ（`C:/tmp/ika87/size.py`、`data/ika73/w12` 43,999局を読むだけ、1コア 55秒）: 1局 127,253 B、決定 13.46個、
+  決定の局面 1個 平均 8,197 B。最終局面は最後の決定の局面と同じ形なので増分の見込みは **1局 8,238 B（+6.5%）、
+  w12 の局数で +362 MB（5.60 GB → 5.96 GB）**。試走の実測は 8,204 B・8,127 B
+* テスト `tests/test_final_position.py`（8本、18秒）: 決着した隠蔽局で endReason=wipeout・HP 0 の側が負けた側・
+  最終局面は最後の手番の決定から記録された手で解いた枝の1つ（HP・瀕死・手番・winner で比較）。ターン上限の開示局でも同じ。
+  陰性対照: 最後の決定そのものの盤・その1つ前の手番の盤は枝に入らない。draw／unresolved は `_close_record` で直接。
+  旧形式（2キーを外した同じ局）で `final_position` は None、`replay_shown` と `encode_dir` の outcome・turn・game は同じ
+* 試走（heavy.py 1コア 04:45:12–04:46:28、`tools/selfplay.py --games 2 --hide-bench --limit 12 --seed 8701`、hp-share 葉）:
+  2局とも wipeout、final.turn = turns（11・13）、負けた側は4体とも 0 HP、勝った側は 3体・2体が残り、
+  最終局面は2局とも最後の決定（move）の枝の1つ
+
+## 9/24 — IKA-82: M-C の語彙を M-B の延長にした。value-gen11L は M-C の Encoder でそのまま読め、M-B の局面ではビット一致、M-C にしかない種族・道具の局面では新しい行が読まれる
+
+ワーカー、基点 master 713f85d、ブランチ `ika-82-vocab-prefix`。9/23 の着地（追記式の順序）の残り 1〜4。
+5（温間始動 対 ゼロからの学習と対戦）は**やっていない**。M-C の gen-0 の生成の後、同じプールでやる（IKA-77 のユーザーの判断）。手順は下に書いた。
+
+* **M-C の順序を M-B の延長にした。** `configs/vocab/gen9championsvgc2026regmc.json` を「M-B の順序そのまま → M-C で増えた id（今までの順＝名前順）」に書き換えた。
+  `tools/vocab_order.py --extend gen9championsvgc2026regmb gen9championsvgc2026regmc`。ファイルに
+  `"extends": {"formatId": "gen9championsvgc2026regmb", "sizes": {"species": 357, "abilities": 316, "items": 148, "moves": 515}}` を残し、
+  `--check` が「M-C の各表の先頭がこの数だけ M-B と同じ」を確かめる（M-B も追記式なので、この先ずっと成り立つ）。`--append` は `extends` を保つ
+  * 番号が変わったのは M-C の種族 388 / 392、道具 164 / 166（特性・技は元から M-B と同じ並びで 0）。M-B にあって M-C に無い id は 0 個（枠を残す仕組みは使っていない）
+  * 増えたのは種族 35（M-B 358 行 → M-C 393 行）、道具 18（149 → 167）。特性・技は増えていない（技は両方 516 行）。**M-C にしかない技は無い**ので、陽性対照は種族と道具で取った
+  * M-C の指紋 9616b72545058306 → **c2557340f3ed460f**。M-C のモデル・shard は $M/data に 0 個（`data/models/*.pt` 60 本のうち 59 本が M-B、1 本は format_id を持たない。`data/*.npz` はすべて M-B）なので、捨てたものは無い
+  * types は両規則とも同じ 18 種、widths も同じ（mon 91 / side 27 / field 24）
+* **M-B の重みを M-C で読む。** `value.load_model` は format_id が違っても、今の語彙をモデルの行数まで切り戻し、**モデルの規則の名前で**取った指紋
+  （`Vocabulary.prefix(sizes, format_id)`）がモデルの指紋と一致すれば読む。埋め込みに0の行を足すのは同じ規則のときと同じ `_grown`。
+  `meta["vocab_extended_from"]` にモデルの規則名、`vocab_grown_from` に元の行数。一致しなければ（名前順の M-C、他の組）今までどおり「trained on」で拒否する
+  * M-C を M-B の行数まで切り戻して M-B の名で取った指紋 = 59d8404f70998d0c（今の M-B）、9/23 の大きさなら 848731f359e4b3a6（value-gen11L）
+* **ENCODING_REVISION は 2 のまま。** 動いたのは M-C の id の番号で、列の意味ではない。番号は指紋（shard の鍵）が見ている
+* Rust は変えていない。`Reg::load` は順序ファイルを実行時に読み、`extends` の鍵は読み飛ばす
+
+### 対照（CPU・1コア、value-gen11L、`data/ika73/w12` の M-B 局面 4,000、`C:/tmp/ika82/mc_controls.py`）
+
+```
+  直す前   master の src（名前順の M-C）で M-C の Encoder に読む          拒否（trained on gen9championsvgc2026regmb）
+  基点     M-B の Encoder、master の src 対 この木                        ビット一致 4,000 / 4,000
+  null     M-B の Encoder（基点） 対 M-C の Encoder（伸ばした重み）         ビット一致 4,000 / 4,000（新しい行を読む局面 0）
+  null     同上、新しい種族・道具の行に乱数（seed 82、既存行と同じ標準偏差）を書く   ビット一致 4,000 / 4,000
+  陽性     side 0 の先頭を M-C にしかない種族＋道具に替えた 4,000 局面
+             0 の行 対 乱数を書いた行                                  一致 0 / 4,000（最大 |logit 差| 3.07）。4,000 局面すべてが新しい行を読む
+             （参考）替える前 対 替えた後（0 の行）                      一致 0 / 4,000（最大 2.95）
+```
+
+port: master の exe（`rust/target/release/pokeuraou-damage.exe` の写し、Rust は無変更）で、この木の M-C ダンプを渡して `encode`、`tools/diff_encode.py --regulation`
+（M-B 局面 400 ＋ 上の替えた局面 400）で全8配列一致。陽性対照: 同じ exe に master の M-C ダンプ（名前順の順序）を渡すと species・item が違う。
+
+### 検査
+
+* `tests/test_vocab_order.py`: M-C の固定値を c2557340f3ed460f（9/24 の大きさ）へ替え、4 件足した —— M-C が M-B の全 id を M-B と同じ番号にし、切り戻した指紋が
+  M-B（今・9/23）と一致、延長の検査が通り、M-B の種族2つを入れ替えると検出（陽性対照）、M-B のモデルを M-C に読むと M-B 局面でビット一致・新しい行は0・
+  M-C にしかない種族と道具は新しい行で読まれ、行を書くと値が動き M-B 局面は動かない、名前順の M-C は拒否（直す前）。port の検査に M-C の species・item を足した
+* `tests/test_value.py::test_loading_refuses_another_regulation`: 拒否は名前順の M-C で示し、今の M-C では読めることを足した
+* master の src で走らせると、足した・替えたテスト 6 件が落ちる（直す前）。この木では関係テスト 53 件 pass（port も master の exe で）、語彙に触る他の 13 ファイル 146 件 pass（skip 2 = オラクル未構築）
+* ruff ok、`vocab_order.py --check` ok、`port_coverage.py --check` ok、`port_gate_audit.py --check` ok
+
+### 温間始動 対 ゼロから（まだやらない。M-C の gen-0 の生成の後）
+
+答える問い: 同じ M-C の記録と同じ学習レシピで、value-gen11L から始めたネットはゼロからのネットより盤上で強いか。
+
+1. 前提: M-C の gen-0 が生成済み（プールはシートの 65 本、IKA-77 のユーザーの判断）、IKA-86 の学習レシピが決まっている。
+   `encode_dataset.py` で gen-0 を M-C の Encoder で1つの shard にする（両腕が同じファイルを読む）
+2. `tools/train_value.py` に温間始動の口が要る（今は無い）: `--init-from data/models/value-gen11L.pt` で `load_model(path, Encoder(M-C))` の重みから学習を始める。
+   保存するモデルは M-C の指紋（c2557340f3ed460f）を持ち、`meta` に `vocab_extended_from` と元の行数を残す
+3. 腕 W（温間）と腕 S（ゼロから）を、同じ shard・同じ `--split-seed 0`・同じレシピで、`--seed` 0 と 1 の2本ずつ学習する（アンサンブル葉2本）。
+   シード間の雑音の床（held-out AUC で 0.024）より小さい差は、学習の数字だけでは言わない
+4. 学習の段で見るもの: 各腕の held-out AUC・対数損失（同じ held-out の対局）。温間始動の epoch 0 の値（学習前）も記録する —— それが「M-B の知識だけ」の点
+5. 盤: W の2本アンサンブル 対 S の2本アンサンブルを、同じ M-C のプールから両席を引いて `match_queue.py --sprt 0 10`（出荷の判断の形、IKA-89）。
+   各腕の設定が両席に届いていることを worker の echo で確かめる（a-menu-belongs-to-the-agent-that-built-it）。同じ腕どうしの null の対戦を1本先に回す
+6. 記録: TODO の新しい節と GENERATIONS.md。M-B の重み・記録は残す
+
+機械: 形式の確認 2 秒、対照 25 秒、関係テスト 5・3・5・5 秒、他の 13 ファイル 41 秒（すべて 1 コア、heavy.py に --agent IKA-82 で記録）。cargo build はしていない。
+
 ## 9/24 — IKA-191: だっしゅつボタン・レッドカード・ききかいひ・にげごしが交代を起こす —— オラクル 10 局面で Python・port とも Showdown と一致、diff_node の発火 3,967 セルで新 exe 0・旧 exe 3,967 違い。記録（M-B）には 0
 
 ワーカー、基点 master 713f85d、ブランチ `ika-191-eject-items`。一時ファイルは `C:/tmp/ika191/`。

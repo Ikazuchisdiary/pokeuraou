@@ -50,16 +50,22 @@ NEW_MOVE = "ika82testmove"
 
 #: Fingerprints and table sizes (index 0 included) on 9/23, before the order was committed.
 #: `value-gen11L` stores the M-B one.
+#:
+#: M-C's 9/23 fingerprint was 9616b72545058306 at these sizes. On 9/24 its order was
+#: rewritten to begin with M-B's (`vocab_order.py --extend`, IKA-82), with no M-C model yet
+#: trained, and the pin below is the rewritten order at its sizes that day -- from which it
+#: is append-only like any other.
 PINNED = {
     "gen9championsvgc2026regmb": (
         "848731f359e4b3a6",
         {"species": 358, "ability": 317, "item": 149, "move": 515},
     ),
     "gen9championsvgc2026regmc": (
-        "9616b72545058306",
-        {"species": 393, "ability": 317, "item": 167, "move": 515},
+        "c2557340f3ed460f",
+        {"species": 393, "ability": 317, "item": 167, "move": 516},
     ),
 }
+MC = "gen9championsvgc2026regmc"
 
 
 def _write_order(path: Path, order: dict[str, list[str]]) -> None:
@@ -253,6 +259,102 @@ def test_a_vocabulary_smaller_than_the_model_is_refused(saved, tmp_path: Path) -
         load_model(path, encoder)
 
 
+# -- M-C extends M-B -------------------------------------------------------------------
+
+
+def _vocab_order_tool():  # noqa: ANN202
+    import importlib.util
+
+    path = repo_root() / "tools" / "vocab_order.py"
+    spec = importlib.util.spec_from_file_location("vocab_order_tool", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_mc_numbers_every_mb_id_as_mb_does() -> None:
+    mb = build_vocabulary(load_regulation(FORMAT))
+    mc = build_vocabulary(load_regulation(MC))
+    for table in ("species", "abilities", "items", "moves"):
+        assert {k: getattr(mc, table)[k] for k in getattr(mb, table)} == getattr(mb, table)
+    # Cut back to M-B's sizes and named M-B, M-C is M-B: today's, and value-gen11L's of 9/23.
+    assert mc.prefix(mb.sizes, FORMAT).fingerprint() == mb.fingerprint()
+    fingerprint, sizes = PINNED[FORMAT]
+    assert mc.prefix(sizes, FORMAT).fingerprint() == fingerprint
+    # Under its own name it is not M-B's vocabulary: the name is part of the fingerprint.
+    assert mc.prefix(mb.sizes).fingerprint() != mb.fingerprint()
+
+
+def test_the_extension_check_passes_and_can_fail() -> None:
+    tool = _vocab_order_tool()
+    path = vocab_order_path(regulation_dir() / f"{MC}.json")
+    order = read_vocab_order(path, MC)
+    extends = json.loads(path.read_text(encoding="utf-8"))["extends"]
+    assert extends["formatId"] == FORMAT
+    assert tool.extension_problems(MC, order, extends) == []
+    # Positive control: two M-B species swapped in M-C's list is reported, at the first.
+    broken = {t: list(v) for t, v in order.items()}
+    broken["species"][3], broken["species"][9] = broken["species"][9], broken["species"][3]
+    problems = tool.extension_problems(MC, broken, extends)
+    assert len(problems) == 1 and "species" in problems[0] and "index 4" in problems[0]
+
+
+def _mc_only_carrier(position):  # noqa: ANN001, ANN202
+    from pokeuraou.position import Position
+
+    doc = position.to_json()
+    doc["sides"][0]["pokemon"][0]["species"] = "salamence"
+    doc["sides"][0]["pokemon"][0]["item"] = "salamencite"
+    return Position.from_json(doc)
+
+
+def test_an_mb_model_loads_onto_mc_and_scores_mb_positions_bit_for_bit(saved) -> None:  # noqa: ANN001
+    path, mb_encoder, mb_net = saved
+    encoder = Encoder(load_regulation(MC))
+    net, meta = load_model(path, encoder)
+    assert meta["vocab_extended_from"] == FORMAT
+    have, want = mb_encoder.vocab.sizes, encoder.vocab.sizes
+    assert meta["vocab_grown_from"] == {k: have[k] for k in want if have[k] != want[k]}
+    assert set(meta["vocab_grown_from"]) == {"species", "item"}
+    for table in ("species", "item"):
+        rows = getattr(net, table).weight[have[table]:]
+        assert rows.shape[0] == want[table] - have[table] and torch.count_nonzero(rows) == 0
+
+    positions = _positions(mb_encoder.reg)
+    before = _scores(mb_net, mb_encoder, positions)
+    assert before.tobytes() == _scores(net, encoder, positions).tobytes()
+
+    # Positive control: an M-C-only species and item are read from the new rows. Writing
+    # those rows moves the carrier's score and leaves every M-B position where it was.
+    carrier = [_mc_only_carrier(positions[0])]
+    e = encoder.encode_positions(carrier)
+    assert e.species[0, 0, 0] == encoder.vocab.species["salamence"] >= have["species"]
+    assert e.item[0, 0, 0] == encoder.vocab.items["salamencite"] >= have["item"]
+    zero_rows = _scores(net, encoder, carrier)
+    with torch.no_grad():
+        net.species.weight[have["species"]:] = 1.0
+        net.item.weight[have["item"]:] = 1.0
+    assert zero_rows.tobytes() != _scores(net, encoder, carrier).tobytes()
+    assert before.tobytes() == _scores(net, encoder, positions).tobytes()
+
+
+def test_an_mb_model_is_refused_by_mc_in_its_old_sorted_order(saved, tmp_path: Path) -> None:  # noqa: ANN001
+    # Fail-before: M-C numbered by sorting its ids -- its order until 9/24 -- is not an
+    # extension of M-B, and the load refuses it rather than growing.
+    path, _encoder, _net = saved
+    src = regulation_dir() / f"{MC}.json"
+    dump = tmp_path / "configs" / "regulations" / src.name
+    dump.parent.mkdir(parents=True)
+    dump.write_bytes(src.read_bytes())
+    order = read_vocab_order(vocab_order_path(src), MC)
+    vocab_order_path(dump).parent.mkdir(parents=True)
+    vocab_order_path(dump).write_bytes(json.dumps(
+        {"formatId": MC, **{t: sorted(order[t]) for t in VOCAB_TABLES}}
+    ).encode("utf-8"))
+    with pytest.raises(ValueError, match="does not begin with"):
+        load_model(path, Encoder(load_regulation(MC, str(dump))))
+
+
 # -- the port --------------------------------------------------------------------------
 
 
@@ -287,6 +389,27 @@ def test_the_port_reads_the_same_order(tmp_path: Path) -> None:
     want = encoder.encode_positions(positions).moves
     assert np.array_equal(got.reshape(want.shape), want)
     assert (want[-1] == encoder.vocab.moves[NEW_MOVE]).any()
+
+    # M-C's committed order, which extends M-B's and carries an `extends` record, is read
+    # the same by the port: species and item of M-B positions and of an M-C-only carrier.
+    mc_dump = str(regulation_dir() / f"{MC}.json")
+    mc_encoder = Encoder(load_regulation(MC))
+    mc_positions = _positions(reg) + [_mc_only_carrier(positions[0])]
+    mc_fixture = tmp_path / "turns-mc.json"
+    mc_fixture.write_bytes(json.dumps(
+        {"format_id": MC, "positions": [p.to_json() for p in mc_positions]}
+    ).encode("utf-8"))
+    done = _rust_encode(mc_dump, mc_fixture, tmp_path / "encoded-mc.bin")
+    assert done.returncode == 0, done.stderr
+    raw = (tmp_path / "encoded-mc.bin").read_bytes()
+    newline = raw.index(b"\n")
+    n = json.loads(raw[:newline])["positions"]
+    want = mc_encoder.encode_positions(mc_positions)
+    for k, name in ((0, "species"), (2, "item")):
+        got = np.frombuffer(raw[newline + 1 :], dtype=np.int32, count=n * 2 * m,
+                            offset=k * n * 2 * m * 4)
+        assert np.array_equal(got.reshape(n, 2, m), getattr(want, name)), name
+    assert want.species[-1, 0, 0] == mc_encoder.vocab.species["salamence"] > 357
 
     stale = tmp_path / "stale"
     stale_dump = _scratch(stale, order="stale")
