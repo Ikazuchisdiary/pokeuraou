@@ -295,24 +295,7 @@ GENERATION = sorted(n for n, c in CASES.items() if c.generation)
 
 
 @pytest.mark.oracle
-@pytest.mark.parametrize(
-    "name",
-    [
-        pytest.param(
-            n,
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason=(
-                    "our resolver adds Outrage's `lockedmove` with no move and no duration "
-                    "and never locks the move (IKA-169's report); the menu cannot know"
-                ),
-            ),
-        )
-        if n == "lockedmove/outrage"
-        else n
-        for n in GENERATION
-    ],
-)
+@pytest.mark.parametrize("name", GENERATION)
 def test_the_position_our_resolver_builds(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
     """The generation form: our resolver plays Showdown's last turn, then we build the menu."""
     case = CASES[name]
@@ -336,6 +319,13 @@ def test_the_position_our_resolver_builds(reg, oracle: Oracle, name: str) -> Non
             # The marker itself is Showdown's: the move, and one turn left of its two.
             ours = child.sides[0].pokemon[child.sides[0].active[0]].volatile("twoturnmove")
             theirs = after.sides[0].pokemon[after.sides[0].active[0]].volatile("twoturnmove")
+            assert theirs is not None and ours is not None
+            assert (ours.move, ours.duration) == (theirs.move, theirs.duration), (ours, theirs)
+        if name.startswith("lockedmove/"):
+            # Outrage's rampage since IKA-174: the move and one turn left, as Showdown has
+            # it. The length is rolled on the second turn (`tests/test_outrage_lock.py`).
+            ours = child.sides[0].pokemon[child.sides[0].active[0]].volatile("lockedmove")
+            theirs = after.sides[0].pokemon[after.sides[0].active[0]].volatile("lockedmove")
             assert theirs is not None and ours is not None
             assert (ours.move, ours.duration) == (theirs.move, theirs.duration), (ours, theirs)
 

@@ -238,7 +238,6 @@ pub fn item_is_inert(id: &str) -> bool {
             | "metronome"
             | "mistyseed"
             | "pechaberry"
-            | "persimberry"
             | "pidgeotite"
             | "pinsirite"
             | "psychicseed"

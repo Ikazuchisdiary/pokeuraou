@@ -926,6 +926,9 @@ class _Turn:
         return True
 
     def add_volatile(self, side: int, slot: int, vid: str, *, duration: int | None = None) -> None:
+        if vid == "lockedmove":
+            _start_rampage(self, side, slot)
+            return
         mon = self.mon_at(side, slot)
         if mon is None or mon.fainted or mon.has_volatile(vid):
             return
@@ -1864,6 +1867,13 @@ def _do_move(
     if action.move_id == RECHARGE:
         return _do_recharge(turn, action)
     move = reg.moves[action.move_id]
+    rolled = _roll_rampage(turn, action, budget)
+    if rolled is not None:
+        return [
+            (weight * inner, state, note)
+            for weight, rolled_turn in rolled
+            for inner, state, note in _do_move(reg, rolled_turn, action, budget)
+        ]
     outcomes: list[Outcome] = []
     checks = _can_act(turn, action, budget)
 
@@ -1893,6 +1903,7 @@ def _do_move(
             outcomes.append((act_probability, state, ""))
             continue
         for weight, sub_state, note in _use_move(reg, state, action, move, budget):
+            _rampage_after_move(sub_state, action)
             outcomes.append((act_probability * weight, sub_state, note))
 
     return outcomes or [(1.0, turn, "")]
@@ -1981,6 +1992,177 @@ def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[fl
             expanded.append((weight * CONFUSION_SELF_HIT_CHANCE, "confusion"))
         outcomes = expanded
     return outcomes
+
+
+#: Where `lockedmove` keeps the rampage's length: Showdown's own `effectState` key, which
+#: is what a position from the oracle carries in the volatile's `extra`.
+RAMPAGE_LEFT = "trueDuration"
+
+
+def _rampage_move(mon: Pokemon) -> str | None:
+    """The move a rampage (`lockedmove`) holds, or None. A bare one -- recorded before
+    IKA-174, with no move -- holds nothing, as `actions.locked_move` reads it."""
+    held = mon.volatile("lockedmove")
+    return held.move if held is not None and held.move else None
+
+
+def _start_rampage(turn: _Turn, side: int, slot: int) -> None:
+    """`self: {volatileStatus: 'lockedmove'}` landing: Outrage, Petal Dance, Raging Fury,
+    Thrash (IKA-174). `_after_move` calls it only once the move reached a target, which is
+    `selfDrops`.
+
+    The first time is `onStart` -- `duration: 2`, the move, and `trueDuration =
+    random(2, 4)` -- and every later turn is `onRestart`, which keeps the rampage going
+    only while `trueDuration >= 2`. The roll is not made here: nothing reads it until the
+    second turn, so `_roll_rampage` branches it there, where the two lengths first differ
+    (continue, or stop and be confused) -- rather than doubling every first turn's leaves
+    into pairs no one-ply payoff or encoding can tell apart.
+    """
+    mon = turn.mon_at(side, slot)
+    if mon is None or mon.fainted:
+        return
+    held = mon.volatile("lockedmove")
+    if held is not None and held.move:
+        left = held.extra.get(RAMPAGE_LEFT)
+        if isinstance(left, int) and left >= 2:
+            held.duration = 2
+        return
+    # A bare recorded one is replaced, not restarted: it never had a move or a length.
+    mon.volatiles = [v for v in mon.volatiles if v.id != "lockedmove"]
+    mon.volatiles.append(Effect(id="lockedmove", duration=2, move=mon.last_move))
+    turn.log(f"{turn.name(side, slot)} is rampaging ({mon.last_move})")
+
+
+def _roll_rampage(
+    turn: _Turn, action: QueuedAction, budget: Budget
+) -> list[tuple[float, _Turn]] | None:
+    """The rampage's length, on its second turn, when the position does not have it.
+
+    `random(2, 4)` at the start, one taken off by the first turn's residual: 1 left is a
+    two-turn rampage, 2 a three-turn one, a half each. Showdown's own positions carry it
+    and never branch here. A budget that collapses the random ranges takes the short one,
+    which is also what the oracle's pinned `random(a, b)` answers (as `multihit_counts`).
+    """
+    mon = turn.mon_at(action.side, action.slot)
+    if mon is None or mon.fainted:
+        return None
+    held = mon.volatile("lockedmove")
+    if held is None or not held.move or held.duration != 1:
+        return None
+    if isinstance(held.extra.get(RAMPAGE_LEFT), int):
+        return None
+    if budget.enumerate_secondary and not budget.pinned_policy:
+        options = [(0.5, 1), (0.5, 2)]
+    else:
+        options = [(1.0, 1)]
+        if not budget.pinned_policy:
+            turn.unmodelled.add("rampage length (the two-turn one of 2-or-3; not branched)")
+    out: list[tuple[float, _Turn]] = []
+    for index, (weight, left) in enumerate(options):
+        state = turn if index == len(options) - 1 else turn.clone()
+        rolled = state.mon_at(action.side, action.slot)
+        assert rolled is not None
+        lock = rolled.volatile("lockedmove")
+        assert lock is not None
+        lock.extra[RAMPAGE_LEFT] = left
+        out.append((weight, state))
+    return out
+
+
+def _rampage_last_turn(turn: _Turn, held: Effect) -> bool:
+    """`onEnd`'s test, `trueDuration > 1` returning early: whether the rampage ran its
+    full length, which is when it confuses."""
+    left = held.extra.get(RAMPAGE_LEFT)
+    if isinstance(left, int):
+        return left <= 1
+    # Only a rampage that ends without having moved on its second turn gets here.
+    turn.unmodelled.add("rampage length (not on the position; read as its last turn)")
+    return True
+
+
+def _end_rampage(turn: _Turn, side: int, slot: int, held: Effect) -> None:
+    mon = turn.mon_at(side, slot)
+    assert mon is not None
+    mon.volatiles = [v for v in mon.volatiles if v is not held]
+    turn.log(f"{turn.name(side, slot)}'s rampage ended")
+    if _rampage_last_turn(turn, held):
+        _confused_by_fatigue(turn, side, slot)
+
+
+def _rampage_after_move(turn: _Turn, action: QueuedAction) -> None:
+    """`onAfterMove`: `if (duration === 1) removeVolatile('lockedmove')`.
+
+    It runs after every move the Pokemon made, hit or not -- a Protect on the second turn
+    skipped the restart, so the rampage ends there. A Pokemon that could not move (flinch,
+    sleep, paralysis, its own confusion) never gets here; its rampage runs out at the
+    residual instead (`_rampage_runs_out`).
+    """
+    mon = turn.mon_at(action.side, action.slot)
+    if mon is None:
+        return
+    held = mon.volatile("lockedmove")
+    if held is not None and held.move and held.duration == 1:
+        _end_rampage(turn, action.side, action.slot, held)
+
+
+def _confused_by_fatigue(turn: _Turn, side: int, slot: int) -> None:
+    """`target.addVolatile('confusion')` from the rampage's `onEnd`.
+
+    Own Tempo and a grounded Pokemon under Misty Terrain refuse it (`onTryAddVolatile`);
+    Safeguard does not, since the rampage has no source. A Persim or Lum Berry is eaten at
+    once (`onUpdate`) unless a foe's Unnerve forbids it. Confusion's own length (`random(2,
+    6)`) is not modelled anywhere in the resolver: once confused, a Pokemon stays confused
+    until it leaves the field.
+    """
+    mon = turn.mon_at(side, slot)
+    if mon is None or mon.fainted or mon.has_volatile("confusion"):
+        return
+    if mon.ability == "owntempo":
+        turn.log(f"{turn.name(side, slot)} is not confused (owntempo)")
+        return
+    if turn.pos.field.terrain == "mistyterrain" and _grounded(turn, mon):
+        turn.log(f"{turn.name(side, slot)} is not confused (mistyterrain)")
+        return
+    turn.add_volatile(side, slot, "confusion")
+    turn.log(f"{turn.name(side, slot)} became confused (fatigue)")
+    if mon.item in ("persimberry", "lumberry") and not turn.berries_blocked(side):
+        turn.consume_item(side, slot, reason=mon.item)
+        mon.volatiles = [v for v in mon.volatiles if v.id != "confusion"]
+
+
+def _rampage_runs_out(turn: _Turn, actives: list[tuple[int, int]]) -> None:
+    """The residual's `duration--` reaching zero, which ends the volatile (`onEnd`) and
+    skips its `onResidual`. The generic loop takes the volatile off; this is its `onEnd`,
+    which has to see the length before anything else does."""
+    for side, slot in actives:
+        mon = turn.mon_at(side, slot)
+        if mon is None or mon.fainted:
+            continue
+        held = mon.volatile("lockedmove")
+        if held is not None and held.move and held.duration == 1:
+            turn.log(f"{turn.name(side, slot)}'s rampage ran out")
+            if _rampage_last_turn(turn, held):
+                _confused_by_fatigue(turn, side, slot)
+
+
+def _rampage_residual(turn: _Turn, actives: list[tuple[int, int]]) -> None:
+    """`onResidual` for a rampage that goes on: asleep, it stops with no confusion ("don't
+    lock, and bypass confusion for calming"); awake, `trueDuration--`. After the generic
+    loop, because Yawn's sleep (order 23) lands before the lock's residual (no order)."""
+    for side, slot in actives:
+        mon = turn.mon_at(side, slot)
+        if mon is None or mon.fainted:
+            continue
+        held = mon.volatile("lockedmove")
+        if held is None or not held.move:
+            continue
+        if mon.status == "slp":
+            mon.volatiles = [v for v in mon.volatiles if v is not held]
+            turn.log(f"{turn.name(side, slot)}'s rampage ended (asleep)")
+            continue
+        left = held.extra.get(RAMPAGE_LEFT)
+        if isinstance(left, int):
+            held.extra[RAMPAGE_LEFT] = left - 1
 
 
 def _confusion_damage(turn: _Turn, side: int, slot: int) -> int:
@@ -2220,7 +2402,8 @@ def _spend_pp(turn: _Turn, action: QueuedAction) -> None:
         return
     slot = mon.move_slot(action.move_id)
     if slot is not None:
-        if slot.pp > 0:
+        # `if (!lockedMove) deductPP(...)`: a rampage's later turns are free (IKA-174).
+        if slot.pp > 0 and _rampage_move(mon) != action.move_id:
             slot.pp -= 1
         slot.used = True
 
@@ -5151,6 +5334,7 @@ def _residuals(reg: Regulation, turn: _Turn) -> None:
     # Perish Song already counted down at its own residual order above; decrementing it
     # again here would kill a Pokemon a turn and a half early.
     handled_earlier = {"perishsong"}
+    _rampage_runs_out(turn, actives())
     for side, slot in actives():
         mon = turn.mon_at(side, slot)
         if mon is None:
@@ -5188,6 +5372,7 @@ def _residuals(reg: Regulation, turn: _Turn) -> None:
         mon.newly_switched = False
         # Carry this turn's outcome forward for Stomping Tantrum and Temper Flare.
         mon.move_last_turn_failed = (side, slot) in turn.move_failed
+    _rampage_residual(turn, actives())
 
     settle_outcome(turn.pos, turn.wipe_order)
 

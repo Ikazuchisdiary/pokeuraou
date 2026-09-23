@@ -90,6 +90,17 @@ pub(crate) fn do_move<'a>(
     }
     let mv = reg.moves.get(move_id.as_str()).ok_or("move not in the regulation")?;
 
+    // `_roll_rampage`: a rampage's length, branched on its second turn (IKA-174).
+    if let Some(rolled) = roll_rampage(&mut turn, action, &budget) {
+        let mut outcomes: Vec<Outcome<'a>> = Vec::new();
+        for (weight, state) in rolled {
+            for (inner, sub_state) in do_move(reg, state, action, budget)? {
+                outcomes.push((weight * inner, sub_state));
+            }
+        }
+        return Ok(outcomes);
+    }
+
     let started = crate::resolve::phase_start();
     let checks = can_act(&mut turn, action, &budget)?;
     crate::resolve::phase_end(7, started);
@@ -127,7 +138,8 @@ pub(crate) fn do_move<'a>(
                 let started = crate::resolve::phase_start();
                 let produced = use_move(reg, state, action, mv, budget)?;
                 crate::resolve::phase_end(8, started);
-                for (weight, sub_state) in produced {
+                for (weight, mut sub_state) in produced {
+                    rampage_after_move(&mut sub_state, action);
                     outcomes.push((probability * weight, sub_state));
                 }
             }
@@ -147,6 +159,182 @@ fn confusion_damage(turn: &Turn, side: usize, slot: usize) -> Result<i64, String
     let inner = (level_term * 40 * attack) as f64;
     let base = ((inner.trunc() / defence as f64).trunc() / 50.0).trunc() as i64;
     Ok(base + 2)
+}
+
+// ---------------------------------------------------------------------------
+// Outrage's rampage (`lockedmove`), as Python's `_start_rampage` and the rest (IKA-174)
+// ---------------------------------------------------------------------------
+
+/// Showdown's own `effectState` key for the rampage's length, carried in `extra`.
+const RAMPAGE_LEFT: &str = "trueDuration";
+
+fn rampage_left(effect: &Effect) -> Option<i64> {
+    effect.extra.get(RAMPAGE_LEFT).and_then(Value::as_i64)
+}
+
+fn set_rampage_left(effect: &mut Effect, left: i64) {
+    let mut extra = (*effect.extra).clone();
+    extra.insert(RAMPAGE_LEFT.into(), json!(left));
+    effect.extra = std::rc::Rc::new(extra);
+}
+
+/// The move a rampage holds; a bare recorded `lockedmove` holds none.
+pub(crate) fn rampage_move(mon: &crate::position::Pokemon) -> Option<Id> {
+    mon.volatile("lockedmove").and_then(|held| held.move_id)
+}
+
+/// `onStart` (duration 2, the move; the roll waits for `roll_rampage`) or `onRestart`
+/// (duration back to 2 while `trueDuration >= 2`).
+pub(crate) fn start_rampage(turn: &mut Turn, side: usize, slot: usize) {
+    let Some(mon) = turn.mon_at_mut(side, slot) else { return };
+    if mon.fainted {
+        return;
+    }
+    if let Some(held) = mon.volatile_mut("lockedmove") {
+        if held.move_id.is_some() {
+            if matches!(rampage_left(held), Some(left) if left >= 2) {
+                held.duration = Some(2);
+            }
+            return;
+        }
+    }
+    mon.volatiles.retain(|v| v.id.as_str() != "lockedmove");
+    let mut effect = Effect::new(Id::new("lockedmove"));
+    effect.duration = Some(2);
+    effect.move_id = mon.last_move;
+    mon.volatiles.push(effect);
+}
+
+/// The length on the second turn when the position lacks it: 1 or 2 left, a half each.
+fn roll_rampage<'a>(
+    turn: &mut Turn<'a>,
+    action: &QueuedAction,
+    budget: &Budget,
+) -> Option<Vec<(f64, Turn<'a>)>> {
+    let unrolled = match turn.mon_at(action.side, action.slot) {
+        Some(mon) if !mon.fainted => matches!(
+            mon.volatile("lockedmove"),
+            Some(held) if held.move_id.is_some()
+                && held.duration == Some(1)
+                && rampage_left(held).is_none()
+        ),
+        _ => false,
+    };
+    if !unrolled {
+        return None;
+    }
+    let options: Vec<(f64, i64)> = if budget.enumerate_secondary && !budget.pinned_policy {
+        vec![(0.5, 1), (0.5, 2)]
+    } else {
+        if !budget.pinned_policy {
+            turn.report("rampage length (the two-turn one of 2-or-3; not branched)");
+        }
+        vec![(1.0, 1)]
+    };
+    let mut out = Vec::new();
+    for (weight, left) in options {
+        let mut state = turn.clone();
+        if let Some(lock) = state
+            .mon_at_mut(action.side, action.slot)
+            .and_then(|m| m.volatile_mut("lockedmove"))
+        {
+            set_rampage_left(lock, left);
+        }
+        out.push((weight, state));
+    }
+    Some(out)
+}
+
+fn rampage_last_turn(turn: &mut Turn, left: Option<i64>) -> bool {
+    match left {
+        Some(left) => left <= 1,
+        None => {
+            turn.report("rampage length (not on the position; read as its last turn)");
+            true
+        }
+    }
+}
+
+/// `onAfterMove`: `if (duration === 1) removeVolatile('lockedmove')`, then `onEnd`.
+fn rampage_after_move(turn: &mut Turn, action: &QueuedAction) {
+    let left = match turn.mon_at(action.side, action.slot).and_then(|m| m.volatile("lockedmove")) {
+        Some(held) if held.move_id.is_some() && held.duration == Some(1) => rampage_left(held),
+        _ => return,
+    };
+    if let Some(mon) = turn.mon_at_mut(action.side, action.slot) {
+        mon.volatiles.retain(|v| v.id.as_str() != "lockedmove");
+    }
+    if rampage_last_turn(turn, left) {
+        confused_by_fatigue(turn, action.side, action.slot);
+    }
+}
+
+/// The rampage's `onEnd` confusion: Own Tempo and grounded under Misty Terrain refuse it,
+/// a Persim or Lum Berry eats it unless a foe's Unnerve forbids.
+fn confused_by_fatigue(turn: &mut Turn, side: usize, slot: usize) {
+    let (refused, berry) = {
+        let Some(mon) = turn.mon_at(side, slot) else { return };
+        if mon.fainted || mon.has_volatile("confusion") {
+            return;
+        }
+        let misty = is(turn.pos.field.terrain, "mistyterrain")
+            && crate::resolve::grounded(turn, mon);
+        (
+            mon.ability == "owntempo" || misty,
+            is(mon.item, "persimberry") || is(mon.item, "lumberry"),
+        )
+    };
+    if refused {
+        return;
+    }
+    turn.add_volatile(side, slot, "confusion", None);
+    if berry && !turn.berries_blocked(side) {
+        turn.consume_item(side, slot);
+        if let Some(mon) = turn.mon_at_mut(side, slot) {
+            mon.volatiles.retain(|v| v.id.as_str() != "confusion");
+        }
+    }
+}
+
+/// The residual's `duration--` reaching zero: `onEnd` before the loop takes it off.
+fn rampage_runs_out(turn: &mut Turn, order: &[Slot]) {
+    for (side, slot) in order.iter().copied() {
+        let left = match turn.mon_at(side, slot) {
+            Some(mon) if !mon.fainted => match mon.volatile("lockedmove") {
+                Some(held) if held.move_id.is_some() && held.duration == Some(1) => {
+                    rampage_left(held)
+                }
+                _ => continue,
+            },
+            _ => continue,
+        };
+        if rampage_last_turn(turn, left) {
+            confused_by_fatigue(turn, side, slot);
+        }
+    }
+}
+
+/// `onResidual` for a rampage that goes on: asleep it stops unconfused, else
+/// `trueDuration--`. After the loop, so Yawn's sleep has landed.
+fn rampage_residual(turn: &mut Turn, order: &[Slot]) {
+    for (side, slot) in order.iter().copied() {
+        let Some(mon) = turn.mon_at_mut(side, slot) else { continue };
+        if mon.fainted {
+            continue;
+        }
+        let asleep = is(mon.status, "slp");
+        let Some(held) = mon.volatile_mut("lockedmove") else { continue };
+        if held.move_id.is_none() {
+            continue;
+        }
+        if asleep {
+            mon.volatiles.retain(|v| v.id.as_str() != "lockedmove");
+            continue;
+        }
+        if let Some(left) = rampage_left(held) {
+            set_rampage_left(held, left - 1);
+        }
+    }
 }
 
 /// (probability, reason it could not act) for the pre-move checks.
@@ -529,8 +717,10 @@ fn use_move<'a>(
 fn spend_pp(turn: &mut Turn, action: &QueuedAction) {
     let Some(move_id) = action.move_id else { return };
     let Some(mon) = turn.mon_at_mut(action.side, action.slot) else { return };
+    // `if (!lockedMove) deductPP(...)`: a rampage's later turns are free (IKA-174).
+    let rampaging = rampage_move(mon) == Some(move_id);
     if let Some(slot) = mon.moves.get_mut(move_id) {
-        if slot.pp > 0 {
+        if slot.pp > 0 && !rampaging {
             slot.pp -= 1;
         }
         slot.used = true;
@@ -2376,6 +2566,7 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
     }
     turn.pos.field.pseudo_weather = kept_pseudo;
 
+    rampage_runs_out(turn, &order);
     for (side, slot) in order.iter().copied() {
         let failed = turn.move_failed[side][slot];
         let Some(mon) = turn.mon_at_mut(side, slot) else { continue };
@@ -2433,6 +2624,7 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
             turn.apply_status(side, slot, "slp")?;
         }
     }
+    rampage_residual(turn, &order);
 
     settle_outcome(&mut turn.pos, &turn.wipe_order);
     Ok(())
