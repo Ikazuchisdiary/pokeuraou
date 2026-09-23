@@ -1831,7 +1831,11 @@ fn apply_status_move(
                 "{condition} duration (Showdown rolls it; pinned to the low end)"
             ));
         }
-        turn.add_side_condition(action.side, &condition, duration);
+        // The target's side (`moveHit`: `target.side.addSideCondition`), which
+        // `getMoveTargets` makes a foe's for `foeSide` -- the hazards. IKA-165: this was
+        // always the user's. The duration above stays the user's (Light Clay).
+        let condition_side = if mv.target == "foeSide" { 1 - action.side } else { action.side };
+        turn.add_side_condition(condition_side, &condition, duration);
     }
     if let Some(weather) = mv.weather.as_deref() {
         let weather = weather.to_lowercase().replace(' ', "");
