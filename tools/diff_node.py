@@ -37,9 +37,16 @@ Holding the port to a move, which is what taking a refusal out of the port asks 
 `--using` keeps the positions with a Pokemon on the field that knows the move. Every cell
 where an action uses it is held to the port branch by branch -- the port refused all of
 them before -- and the cells where the move's effect *fired* are counted apart: for a
-`breaksProtect` move (the only kind this takes, IKA-61), the same turn resolved in Python
+`breaksProtect` move (IKA-61), the same turn resolved in Python
 with `_break_protection` taken out. A Feint into a foe that did not Protect agrees
 without the break ever running, and that is not evidence the break is right (IKA-58).
+
+`--using` also takes a [2, 5] multi-hit move (IKA-160):
+
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --using bulletseed,rockblast
+
+The control is the hit count as it was before IKA-160 -- 1/3, 1/3, 1/6, 1/6 and Skill Link
+not read -- so the cells it moves are the ones where the count's distribution mattered.
 
 Holding the port to a terrain no recorded game has (IKA-156):
 
@@ -210,6 +217,53 @@ class unbroken:  # noqa: N801 - read as a phrase at the call site
         import pokeuraou.resolve as resolve_mod
 
         resolve_mod._break_protection = self.real
+
+
+class old_hit_counts:  # noqa: N801 - read as a phrase at the call site
+    """Python with the hit count as it was before IKA-160: the control for a multi-hit move.
+
+    A [2, 5] move is 1/3, 1/3, 1/6, 1/6 -- the older `sample([2, 2, 3, 3, 4, 5])` -- and the
+    user's Skill Link is not read. Everything else about the move stays, so what differs is
+    only what the count's distribution did.
+    """
+
+    OLD_2_5 = [(2, 1 / 3), (3, 1 / 3), (4, 1 / 6), (5, 1 / 6)]
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = real = resolve_mod.multihit_counts
+        now_2_5 = list(resolve_mod.MULTIHIT_2_5)
+
+        def before(move, budget, ability=None):  # noqa: ANN001, ANN202, ARG001
+            counts = real(move, budget)
+            return list(self.OLD_2_5) if counts == now_2_5 else counts
+
+        resolve_mod.multihit_counts = before
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        resolve_mod.multihit_counts = self.real
+
+
+class unchanged:  # noqa: N801 - read as a phrase at the call site
+    """The control for `--using`: each kind of move named has its effect taken out."""
+
+    def __init__(self, reg, moves: frozenset[str]) -> None:  # noqa: ANN001
+        self.parts = []
+        if any(reg.moves[m].raw.get("breaksProtect") for m in moves):
+            self.parts.append(unbroken())
+        if any(isinstance(reg.moves[m].raw.get("multihit"), list) for m in moves):
+            self.parts.append(old_hit_counts())
+
+    def __enter__(self) -> None:
+        for part in self.parts:
+            part.__enter__()
+
+    def __exit__(self, *exc) -> None:  # noqa: ANN002
+        for part in reversed(self.parts):
+            part.__exit__(*exc)
 
 
 class unstopped:  # noqa: N801 - read as a phrase at the call site
@@ -518,9 +572,9 @@ def main() -> None:
     ap.add_argument(
         "--using",
         default=None,
-        help="comma-separated breaksProtect move ids: keep positions where a Pokemon on "
-        "the field knows one, hold every cell that uses one to the port branch by branch, "
-        "and count where the break fired",
+        help="comma-separated breaksProtect or [2, 5] multi-hit move ids: keep positions "
+        "where a Pokemon on the field knows one, hold every cell that uses one to the port "
+        "branch by branch, and count where the break or the hit count fired",
     )
     ap.add_argument(
         "--terrain",
@@ -547,8 +601,12 @@ def main() -> None:
     using = frozenset(m for m in (args.using or "").split(",") if m)
     for move_id in sorted(using):
         move = reg.moves.get(move_id)
-        if move is None or not move.raw.get("breaksProtect"):
-            ap.error(f"--using takes breaksProtect moves; {move_id} is not one here")
+        if move is None or not (
+            move.raw.get("breaksProtect") or isinstance(move.raw.get("multihit"), list)
+        ):
+            ap.error(
+                f"--using takes breaksProtect or ranged multi-hit moves; {move_id} is neither"
+            )
 
     if args.value:
         import torch
@@ -708,7 +766,7 @@ def main() -> None:
                         continue
                     used += 1
                     here = resolve_turn(reg, pos, [a, b], budget=budget)
-                    with unbroken():
+                    with unchanged(reg, using):
                         control = resolve_turn(reg, pos, [a, b], budget=budget)
                     fired_here = differ(outcome(here), outcome(control))
                     wrong = (
@@ -824,7 +882,7 @@ def main() -> None:
         print(f"\n  where {', '.join(sorted(using))} was used -- every one held branch by branch")
         print(f"    {used} of {cells} cells")
         print(f"    cells whose branches, weights, notes or positions differ  {used_wrong}")
-        print("  where the break fired -- the cells `_break_protection` taken out moves")
+        print("  where the effect fired -- the cells the control (`unchanged`) moves")
         print(f"    {broke} of {used} cells")
         print(f"    cells whose branches, weights, notes or positions differ  {broke_wrong}")
         print(f"    cells with a paused branch, whose position is not compared  {broke_paused}")
@@ -850,7 +908,7 @@ def main() -> None:
     if used_wrong:
         failed.append(f"{used_wrong} cells using {', '.join(sorted(using))} differ by branch")
     if using and not broke:
-        failed.append("the break fired in no cell, so agreeing here says nothing")
+        failed.append("the effect fired in no cell, so agreeing here says nothing")
     if quick_wrong:
         failed.append(f"{quick_wrong} cells under {args.terrain} differ by branch")
     if args.terrain and not stopped:

@@ -122,7 +122,6 @@ pub fn ability_is_inert(id: &str) -> bool {
             | "shielddust"
             | "shieldsdown"
             | "simple"
-            | "skilllink"
             | "sniper"
             | "snowcloak"
             | "soulheart"

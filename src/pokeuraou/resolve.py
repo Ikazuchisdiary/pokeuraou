@@ -2749,16 +2749,30 @@ def _blocked_by_protect(
 
 
 #: Showdown's hit-count distribution for a [2, 5] multi-hit move in generation 5 and
-#: later: `sample([2, 2, 3, 3, 4, 5])`.
-MULTIHIT_2_5 = ((2, 1 / 3), (3, 1 / 3), (4, 1 / 6), (5, 1 / 6))
+#: later, 35-35-15-15: `hitStepMoveHitLoop` samples
+#: `[2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 5, 5, 5]`
+#: (vendor/pokemon-showdown/sim/battle-actions.ts:869-870, and the champions mod's copy in
+#: data/mods/champions/scripts.ts:440-441). This was 1/3, 1/3, 1/6, 1/6 -- the older
+#: `[2, 2, 3, 3, 4, 5]` -- until IKA-160; 200,000 real turns of Bullet Seed in the Champions
+#: format came out 35.0 / 35.1 / 14.9 / 14.9 (and a Skill Link user's 200,000 all 5).
+MULTIHIT_2_5 = ((2, 7 / 20), (3, 7 / 20), (4, 3 / 20), (5, 3 / 20))
 
 
-def multihit_counts(move: Move, budget: Budget) -> list[tuple[int, float]]:
+def multihit_counts(
+    move: Move, budget: Budget, ability: str | None = None
+) -> list[tuple[int, float]]:
     """(hit count, probability) for a move, or [(1, 1.0)] when it hits once.
 
     Under a pinned budget the count is the minimum, which is what Showdown's
     ``multihit='min'`` policy produces -- ``sample`` returns the first element and
     ``random(a, b)`` returns ``a``.
+
+    ``ability`` is the user's. Skill Link's ``onModifyMove`` replaces a ranged
+    ``multihit`` with its upper end before the loop draws anything
+    (vendor/pokemon-showdown/data/abilities.ts, ``skilllink``), so the count is the
+    maximum whatever the budget -- the pinned oracle included, since no draw is left to
+    pin (IKA-160). Loaded Dice is ``isNonstandard: "Past"`` in both Champions mods and is
+    not modelled.
     """
     multihit = move.raw.get("multihit")
     if not multihit:
@@ -2766,6 +2780,8 @@ def multihit_counts(move: Move, budget: Budget) -> list[tuple[int, float]]:
     if isinstance(multihit, int):
         return [(multihit, 1.0)]
     low, high = int(multihit[0]), int(multihit[-1])
+    if ability == "skilllink":
+        return [(high, 1.0)]
     if not budget.enumerate_secondary:
         return [(low, 1.0)]
     if (low, high) == (2, 5):
@@ -2887,7 +2903,7 @@ def _hit_target(
             # target's HP *and* the Focus Sash / Sturdy consumption that goes with it.
             # Capping here as well would leave the item on the field.
             for roll, roll_weight in rolls:
-                for hits, hit_weight in multihit_counts(move, budget):
+                for hits, hit_weight in multihit_counts(move, budget, attacker.ability):
                     state = turn.clone()
                     if breaks:
                         _break_protection(state, action, move, [target])

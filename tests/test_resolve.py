@@ -146,16 +146,17 @@ def test_multihit_distribution(reg: Regulation) -> None:
     if "dualwingbeat" in reg.moves:
         assert multihit_counts(reg.moves["dualwingbeat"], exact) == [(2, 1.0)]
 
-    # A [2, 5] move is not uniform: Showdown samples [2, 2, 3, 3, 4, 5].
+    # A [2, 5] move is not uniform: Showdown samples [2 x7, 3 x7, 4 x3, 5 x3], 35-35-15-15
+    # (IKA-160; tests/test_multihit_counts.py reads the array off the simulator).
     two_to_five = next(
         (m for m in reg.moves.values() if m.raw.get("multihit") == [2, 5]), None
     )
     if two_to_five is not None:
         spread = dict(multihit_counts(two_to_five, exact))
-        assert spread[2] == pytest.approx(1 / 3)
-        assert spread[3] == pytest.approx(1 / 3)
-        assert spread[4] == pytest.approx(1 / 6)
-        assert spread[5] == pytest.approx(1 / 6)
+        assert spread[2] == pytest.approx(0.35)
+        assert spread[3] == pytest.approx(0.35)
+        assert spread[4] == pytest.approx(0.15)
+        assert spread[5] == pytest.approx(0.15)
         assert sum(spread.values()) == pytest.approx(1.0)
         # A pinned budget takes the minimum, which is what Showdown's policy forces.
         assert multihit_counts(two_to_five, fixed) == [(2, 1.0)]

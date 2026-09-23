@@ -629,6 +629,8 @@ def all_modelled_abilities() -> frozenset[str]:
             "vesselofruin", "supremeoverlord", "costar", "guarddog", "cudchew",
             "wellbakedbody", "eartheater", "myceliummight", "toxicchain", "supersweetsyrup",
             "embodyaspect", "spicyspray",
+            # The hit count, in `resolve.multihit_counts` (IKA-160).
+            "skilllink",
         }
     )
 

@@ -692,6 +692,8 @@ fn ability_handled(ability: &str) -> bool {
             | "icescales" | "fluffy" | "immunity" | "limber" | "waterveil" | "insomnia"
             | "vitalspirit" | "thermalexchange" | "innerfocus" | "oblivious" | "owntempo"
             | "guarddog" | "hypercutter" | "bigpecks" | "keeneye" | "rockhead"
+            // The hit count, in `moves::multihit_counts` (IKA-160).
+            | "skilllink"
             // Weather setters, applied on switch-in and mega.
             | "drought" | "drizzle" | "sandstream" | "snowwarning"
             // Type immunities and absorbers, applied by `absorb`.
