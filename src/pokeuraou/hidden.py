@@ -36,7 +36,7 @@ is another. This module only makes the set, and says what each member is worth.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Collection, Sequence
 from dataclasses import dataclass
 from itertools import combinations
 from typing import TYPE_CHECKING
@@ -63,35 +63,91 @@ class Completion:
     exact: bool = False
 
 
-def seen_slots(
-    position: Position, side_index: int, so_far: frozenset[int] = frozenset()
-) -> frozenset[int]:
-    """Slots the opponent has shown by the time this position is on the board.
+def identity(mon: Pokemon) -> str:
+    """Which Pokemon this is, in a form that outlives everything a battle does to it.
 
-    `so_far` carries what earlier turns revealed, because a Pokemon that came in and went
-    back out is still known and the position alone no longer says so. A caller that has
-    not been tracking passes nothing and gets the conservative answer: everything the
-    position itself gives away.
+    Anything carried from one decision to the next is keyed on this, never on `slot`. The
+    slot is a *party position*: `_do_switch` swaps the incoming and outgoing Pokemon's
+    indices, as Showdown does, so a number written down on one turn names whoever is
+    standing there on the next. Carried as numbers, a lead that went back to the bench at
+    full HP sat under an index nobody had marked, and the belief forgot it had ever been
+    out -- 15.8% of the move decisions and 23.6% of the replacements in `data/ika73/w12`,
+    and the forgetting only ever ran one way, towards worlds without a Pokemon the
+    opponent had already shown (IKA-117).
+
+    Not `species` either: Mega Evolution, Stance Change, Disguise and Ice Face rewrite it
+    mid-battle. The base species is fixed for the whole battle, and Species Clause -- one
+    Pokemon per National Dex number, formes included -- makes it unique within a team.
+    """
+    from .regulation import to_id
+
+    return to_id(mon.base_species)
+
+
+def _shows_itself(mon: Pokemon) -> bool:
+    """Whether the position alone says this Pokemon has been out."""
+    return bool(
+        mon.active_index is not None
+        or mon.fainted
+        or mon.hp != mon.maxhp
+        or mon.status is not None
+        or any(mon.boosts.values())
+        or mon.volatiles
+        or mon.is_mega
+    )
+
+
+def _identities_only(carried: Collection[str], name: str) -> None:
+    """Refuses a carried set of party slots, the shape IKA-117 removed.
+
+    The two are both small sets and a set of numbers is accepted by every operation a set
+    of names is, so nothing downstream would notice the mix-up: it would simply forget
+    again.
+    """
+    stray = [value for value in carried if not isinstance(value, str)]
+    if stray:
+        raise TypeError(
+            f"`{name}` carries identities (see `identity`), not party slots: {stray!r}. "
+            "`_do_switch` renumbers slots, so a slot carried across a turn names "
+            "whoever stands there now."
+        )
+
+
+def seen_identities(
+    position: Position, side_index: int, so_far: Collection[str] = frozenset()
+) -> frozenset[str]:
+    """Who that side has shown by the time this position is on the board.
+
+    `so_far` is what the earlier decisions of the same game returned, because a Pokemon
+    that came in and went back out is still known and the position alone no longer says
+    so. This is the thing to carry across turns; turn it into this position's slots with
+    :func:`seen_slots` at each decision.
+    """
+    _identities_only(so_far, "so_far")
+    side = position.sides[side_index]
+    return frozenset(so_far) | {identity(mon) for mon in side.pokemon if _shows_itself(mon)}
+
+
+def seen_slots(
+    position: Position, side_index: int, seen: Collection[str] = frozenset()
+) -> frozenset[int]:
+    """This position's slots holding a Pokemon that side has shown.
+
+    `seen` is the carried :func:`seen_identities`; a caller that has not been tracking
+    passes nothing and gets the conservative answer: everything the position itself gives
+    away. The result is numbers in *this* position and is not to be carried to the next
+    one -- that is what `seen` is for.
 
     Conservative means *over*-revealing. Treating a hidden Pokemon as seen costs only the
     thing this module exists to remove, and treating a seen one as hidden would have the
     search reason about a Pokemon the opponent has already shown -- a mistake that reads
     as a bad evaluation rather than as a bookkeeping bug.
     """
+    _identities_only(seen, "seen")
     side = position.sides[side_index]
-    shown = set(so_far)
-    for mon in side.pokemon:
-        if (
-            mon.active_index is not None
-            or mon.fainted
-            or mon.hp != mon.maxhp
-            or mon.status is not None
-            or any(mon.boosts.values())
-            or mon.volatiles
-            or mon.is_mega
-        ):
-            shown.add(mon.slot)
-    return frozenset(shown)
+    return frozenset(
+        mon.slot for mon in side.pokemon if _shows_itself(mon) or identity(mon) in seen
+    )
 
 
 def shown_species(
@@ -138,6 +194,9 @@ def completions(
     from them in every combination. The order within a combination is not a degree of
     freedom worth spending: two unseen bench slots are interchangeable until one of them
     is switched in, and the positions they produce differ only by a relabelling.
+
+    `seen` is slots of *this* position, as :func:`seen_slots` gives them for the carried
+    identities. Omitted, it is what the position alone reveals.
 
     `weights` prices the combinations, keyed by the sorted species tuple -- the opponent's
     selection equilibrium marginalised onto their back two is what should fill it. Missing
@@ -231,4 +290,12 @@ def substitute(
     return swapped
 
 
-__all__ = ["Completion", "completions", "seen_slots", "substitute"]
+__all__ = [
+    "Completion",
+    "completions",
+    "identity",
+    "seen_identities",
+    "seen_slots",
+    "shown_species",
+    "substitute",
+]

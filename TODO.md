@@ -7105,3 +7105,96 @@ rho_S は「1つの game index の、両席の得点の和」の2本間の相関
   ものは無い（直下の2本を含めて確認）
 * 同じビルドの再走が同一にならない組が出たら（非決定性）、そのときは 1/(1+rho) の問いが本物になる。
   いまの3組には無い
+
+## 9/23 — IKA-117: 見た控えを同一性（基底種族 id）で運ぶ —— 番号で運ぶと交代で付け替わり、move 決定の16%で一度出たポケモンを忘れていた
+
+中断した前任の worktree（`agent-a2172ead5df06d189`、9ecc11a の上・未コミット）の差分を取り込み、
+読み直して、テストと再生を回し直した。3ファイルとも 9ecc11a → be3b896 で変わっていないので、差分は
+そのまま当たった。
+
+### 1. 何を直したか
+
+* `play_game` が手番をまたいで運ぶものを、スロット番号の集合から**同一性の集合**にした
+  （`hidden.identity` = `to_id(base_species)`。メガ・フォルムチェンジで `species` は変わるが基底形は
+  変わらず、Species Clause でチーム内一意）。決定ごとに `seen_identities` で足し、`seen_slots(pos, side,
+  seen)` で**その局面の番号**に直してから `completions(seen=...)`・`_bench_weights`（→ `shown_species`）・
+  交代ノードに渡す。番号は運ばない
+* `seen_slots` / `seen_identities` は、運ばれた集合に `str` 以外が入っていると `TypeError` を投げる。
+  番号の集合は名前の集合と同じ演算を全部通るので、型で止めないと黙って元に戻る
+* 番号は引き続き `seen_slots` の戻り値（その局面限り）。`_do_replacement_node` の docstring にそう書いた
+
+### 2. テスト（`tests/test_hidden.py` に3本、交代を挟む）
+
+局面を手で組まず、2つ目の局面を**本物の resolver**（`resolve_turn`・`_do_switch`）で作る: side 1 の
+リザードンがガブリアスと交代し、他は全員まもる → リザードンは満タン・状態なしで控えに戻り、ガブリアスの
+空けた番号に座る（前提をアサートで確かめる）。
+
+```
+  正の対照（修正前の src 一式を一時ディレクトリに作り、同じテストを流した）
+    test_play_game_keeps_a_lead_that_went_back_in_every_world
+        修正前: 落ちる「3 of 6 worlds have no Charizard, which led turn 1」
+        修正後: 通る（信念は3通り、全部 slot 2 にリザードン）
+    test_a_seen_pokemon_is_followed_through_a_switch_not_its_old_number
+    test_a_carried_set_of_slot_numbers_is_refused
+        修正前: ImportError（seen_identities が無い）。新しい API のテストなので前は落ちるしかない
+  修正後   tests/test_hidden.py 15 passed。play_game を通す test_hidden_search・test_menu_ownership・
+           test_selfplay、test_selection_book・test_resign_headroom も通過（-n 0）。
+           test_hidden_search の2本は data/priors が無いと skip するので、本体の data/priors を
+           worktree にコピーして skip 0 で回した
+```
+
+1本目は `play_game` そのものを回し、`completions` を spy で包んで turn 2 の side 1 の信念を読む（手は
+`narrow` を差し替えて固定、運び・resolver・`_do_switch` は本物）。Rust の子も oracle も使わない。
+
+### 3. 受け入れ: 再生で「忘れた決定」が 0 ✅
+
+`scratchpad/ika117_forgotten.py <tree> data/ika73/w12`（前任の受け入れ用。`play_game` と同じく move と
+replacement の決定でだけ運びを更新し、別に種族で追った「見た」と突き合わせる）:
+
+```
+                               修正前（番号で運ぶ）            修正後（同一性で運ぶ）
+  忘れた move 決定              4,698 / 29,379  16.0%            0 / 29,379
+  忘れた replacement 決定       2,158 /  9,098  23.7%            0 /  9,098
+  それがあった局                1,610 /  3,000  53.7%            0 /  3,000
+  move 決定の内訳（両側見えている / 片側隠れ / 両側隠れ）
+                                37.4 / 21.4 / 41.2%              41.2 / 22.5 / 36.3%
+  1側あたりの完成形              2.85 / 2.95                      2.57 / 2.77
+```
+
+* 修正前の 16.0% は Linear 本文の 15.8%（4,645）とわずかに違う。本文は `seen_slot_drift.py`（判定を
+  狭く取った追跡）で数えたもので、こちらは `seen_slots` と同じ判定に広げた追跡。忘れた側の数え方の違いで、
+  修正後はどちらの参照でも 0（自己交代の途中を含む `all` 参照でも 0）
+* 検算: `scratchpad/hidden_share_by_identity.py`（全決定で番号を更新する別の道）は修正前 37.5 / 21.3 /
+  41.2%・2.84 / 2.94、「同一性で追う」側は 41.2 / 22.5 / 36.3%・2.57 / 2.77 で、修正後のコードの再生と一致
+
+### 4. 記録済みの数字（元の記述は変えない）
+
+* **IKA-104 の「両側とも見えている 37%」**（IKA-97 の節の 37.0%、IKA-88 の節の 37.5%）: 番号で運んだ再生の
+  数字。**同一性では 41.2%**（`data/ika73/w12` 3,000局、move 29,379 決定）
+* **`beliefnode.py` 冒頭の「完成形 2.84 / 3.16」**: 番号で運んだ数字。同じ再生で番号 2.84〜2.85 / 2.94〜2.95、
+  **同一性では 2.57 / 2.77**。3.16 はこの再生の 2.94 と合わないので、別のプールか別の数え方（未確認）。
+  docstring は直していない —— `beliefnode.py` は IKA-104・IKA-119 が並行して触っているので、衝突を避けて
+  この節に置く
+* **`hidden.py` 冒頭の 47.4%（と completions の 52.6%）**: G2 の gen-9・3,100局・31,311 判断の数字で、
+  この再生ではない。どう数えたかは記録から分からず、**測り直していない**
+
+### 5. 走らせていない較正（IKA-5 と同じ、修正前後）
+
+生成の挙動が変わる（turn 2 以降の信念から不可能な世界が消える）ので、本来は IKA-5 と同じ較正で
+turn 別の srch-act を並べる。**走らせていない。** 見積もり:
+
+* 形: `tools/generate_queue.py --games 600 --hide-bench --limit 24 --value data/models/value-gen11L.pt
+  -- --rank-leaf`（run7 の形）に IKA-5 の選出事前分布の指定を足したものを修正前・修正後の2本、
+  それぞれ `tools/leaf_calibration.py --value data/models/value-gen11L.pt --dir <out> --positions 6000`。
+  IKA-5 のプール `data/selfplay-hidden-weighted` を作ったコマンドの全文は記録から見つけていない
+  （ワーカーログは設定をエコーしていない）。走らせる前に確定させること
+* 所要: `selfplay-hidden-weighted` は 600局を8ワーカー（葉は cuda）で 21:32:45〜21:41:12（8分半）。
+  2本で約17分＋較正 数分。8コア＋GPU の鍵
+* 検出力: n=600 は turn 別に約 ±4点、予想の効果は turn 2 以降で 1〜2点 —— **600局では見分けられない
+  見込みが高い**。効果が 1.5点なら ±1点程度が要り、局数でおよそ 16倍（約1万局）
+* turn 1 は交代の前なので、この修正では動かないはず（IKA-118 が turn 1 に効く）
+
+### 6. 機械
+
+1コア・鍵なし: 再生 11:47:53〜11:48:01（修正前後 各4秒）、11:52 頃に検算 数秒。テスト（-n 0）
+11:48:37〜11:51:12 ほか、合わせて約7分。生成・対戦・学習はしていない。

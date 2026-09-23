@@ -36,7 +36,7 @@ import numpy as np
 
 from .actions import SideAction, switch_actions_after_faint
 from .equilibrium import EquilibriumError, solve
-from .hidden import completions, seen_slots, shown_species
+from .hidden import completions, seen_identities, seen_slots, shown_species
 from .narrow import narrow
 from .payoff import HP_SHARE, Objective
 from .policy import policy_ranking
@@ -569,18 +569,25 @@ def play_game(
     )
     pos = start if start is not None else position_from_sets(reg, own, foe)
     budget = Budget.matrix()
-    # Slots each side has shown, accumulated across turns. A Pokemon that came in and
-    # went back out is still known, and the position alone stops saying so -- so this is
+    # Who each side has shown, accumulated across turns. A Pokemon that came in and went
+    # back out is still known, and the position alone stops saying so -- so this is
     # carried rather than recomputed from the board each time.
-    shown: list[frozenset[int]] = [frozenset(), frozenset()]
+    #
+    # Carried as identities, and turned into this position's slots at every decision.
+    # It used to carry the slots themselves, and `_do_switch` renumbers those: a lead that
+    # went back to the bench unharmed took the index of whoever came in, which nobody had
+    # marked, and the next decision's belief offered worlds without it -- 15.8% of the
+    # move decisions and 23.6% of the replacements in the shipping pool (IKA-117).
+    seen: list[frozenset[str]] = [frozenset(), frozenset()]
 
     for _step in range(max_turns * 2):
         if pos.ended:
             break
 
+        seen = [seen_identities(pos, i, seen[i]) for i in (0, 1)]
+        shown = [seen_slots(pos, i, seen[i]) for i in (0, 1)]
         owed = replacements_needed(pos)
         if any(owed[0]) or any(owed[1]):
-            shown = [seen_slots(pos, i, shown[i]) for i in (0, 1)]
             pos = _do_replacement_node(
                 reg, rng, pos, owed, record, leaves,
                 sheets=sheets, shown=shown, bench_prior=bench_prior,
@@ -589,7 +596,6 @@ def play_game(
 
         own_leaf = leaves[0] if leaves[0] is not None else objective.batch
         foe_leaf = leaves[1] if leaves[1] is not None else objective.batch
-        shown = [seen_slots(pos, i, shown[i]) for i in (0, 1)]
         # Built before the menus, because the menus are ranked from it: a leaf or a policy
         # ordering candidates from the true position would pick *which actions get a
         # number* using a bench nobody has seen, however carefully the matrix over them is
@@ -992,7 +998,9 @@ def _do_replacement_node(
 
     With `sheets` it is also the node where the *reveal* happens: the Pokemon coming in is
     the one that stops being hidden, and choosing what to send against an opponent whose
-    bench is unknown is the same Bayesian game the move nodes solve.
+    bench is unknown is the same Bayesian game the move nodes solve. `shown` is each
+    side's seen slots in *this* position -- `seen_slots` of the identities `play_game`
+    carries -- and never a set of numbers carried from an earlier one (IKA-117).
 
     Without them each side now also gets its own matrix. It did not: both strategies came
     off `matrix(pos, leaves[0])`, and this docstring called that a wart and left it,
