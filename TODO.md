@@ -13111,3 +13111,242 @@ test_no_machine_specific_paths・test_actions は `-n 0` で通過。`port_cover
 機械: cargo build --release 8 コア 23 秒 + 20 秒、テスト 1 コア計 約 1 分、diff_node 1 コア 697 秒、記録 1 コア 345 秒。
 worktree に data/priors・standings・reportworm と sim-bridge の dist を main から写し、node_modules は main への junction
 （コミットしない）。
+
+## 9/24 — IKA-187: つきのひかり・こうごうせい・あさのひざしの回復を port に入れ、丸めを Showdown の modify に揃えた。port_gate_audit の (a) は hasCustomCode が false の腕だけを外し、`--check` は M-B と M-C の両方を回す
+
+### 1. Showdown の定義
+
+- `data/moves.ts` の 3 技の `onHit`: `this.heal(this.modify(pokemon.maxhp, factor))`。factor は天気なし 0.5、晴れ・大日照り 0.667、雨・大雨・砂・あられ・雪 0.25（`pokemon.effectiveWeather`）。
+- `sim/battle.ts` の `modify(value, n, d)`: `modifier = tr(n * 4096 / d)`、`tr((tr(value * modifier) + 2048 - 1) / 4096)`。倍率は 2048・2732・1024 で、端数の .5 は切り捨て。
+- `_round_fraction` の他の呼び出し元 3 つは、どれも Showdown では `Math.round`（.5 は切り上げ）で、`modify` ではない。
+  - 変化技の `heal` 欄（じこさいせい・はねやすめ・いのちのしずく等）: `battle-actions.ts` の `Math.round(baseMaxhp * heal[0] / heal[1])`。
+  - 吸収: `battle.ts` の `spreadDamage` の `Math.round(targetDamage * drain[0] / drain[1])`。
+  - 反動: `calcRecoilDamage` の `clampIntRange(Math.round(damageDealt * recoil[0] / recoil[1]), 1)`。
+  このため `_round_fraction` は変えていない。天気回復だけを新しい `_modify` に移した。
+
+### 2. 変更
+
+- `resolve.py`: `_weather_recovery`（回復）、`_weather_recovery_modifier`（4096 分率）、`_modify` を足した。`_apply_status_move` からの呼び出しは 1 行。
+- `rust/src/moves.rs`: `WEATHER_RECOVERY_MOVES`・`weather_recovery_modifier`・`weather_recovery`・`modify` を同じ形で足し、`apply_status_move` の heal 欄の後で呼ぶ。
+- `tools/port_gate_audit.py`: `custom_code_moves` を足した。(a) で外すのは、`STATUS_MOVES_FULLY_MODELLED` にあって、dump の `hasCustomCode` が false の腕だけになった。`--regulation` は繰り返して指定でき、既定は M-B と M-C の両方（CI の `--check` もそのまま両方を回す）。
+- `port_coverage` は M-B で回す必要がない。inert かどうかは engine の文字列だけで決まる。modelled.rs は計算機の集合と M-C の石の一覧。M-B の特性と技は M-C と同じで、持ち物（148 ⊂ 166）とメガの表も M-C に含まれる。だから M-C から作ったファイルは、M-B の id に M-B で作った場合と同じ答えを返す。これが崩れたら落ちるテストを `test_port_coverage.py` に足した。
+- テスト: `tests/test_weather_recovery.py`（オラクル 18 ケース × Python・port）、`test_port_gates.py` に 4 つ（M-B・M-C で moves.rs の定数を消すと 3 技が捕まる、null 対照のじこさいせいは外されたまま、`--check` の既定は両方）、`test_port_coverage.py` に 1 つ。
+
+### 3. オラクル（`tests/test_weather_recovery.py`、Clefable が 30/170 から使う）
+
+```
+                                    Showdown   旧 Python  旧 exe   新 Python  新 exe
+  3 技 × なし（maxhp 170）            +85        +85        0        +85        +85
+  3 技 × 晴れ                         +113       +113       0        +113       +113
+  3 技 × 雨・砂・雪（9 ケース）         +42        +43        0        +42        +42
+  つきのひかり なし・maxhp 171         +85        +86        0        +85        +85
+  対照 じこさいせい maxhp 171          +86        +86        +86      +86        +86
+  対照 じこさいせい 雨                  +85        +85        +85      +85        +85
+```
+
+旧 Python・旧 exe では 36 件中 26 件が落ちた（Python 10、port 16）。新しいほうでは 36 件すべて通る。`test_after_move_oracle.py` も通る。
+
+### 4. 監査の陽性対照（`C:/tmp/ika187/audit_control.py`）
+
+```
+                           master の port      新しい port
+  旧 audit  M-B・M-C        新しい腕 0（宣言的 29）  0（宣言的 26）
+  新 audit  M-B・M-C        moonlight・morningsun・synthesis   0（宣言的 26）
+```
+
+新しく捕まる腕はこの 3 つだけ。fully modelled で hasCustomCode が true の技は 38 あるが、残り 35 は port に名前がある。
+
+### 5. diff_node（`C:/tmp/ika186/cells.py --teach`、40 局面、matrix 予算）
+
+```
+                       w12 セル / 効果あり  新 exe 違い  旧 exe 違い   gen11L セル / 効果あり  新 exe  旧 exe
+  moonlight             4,855 / 3,161       23          3,148         4,258 / 2,813           0       2,766
+  synthesis             4,855 / 3,161       23          —             4,258 / 2,813           0       —
+  recover（null 対照）  4,855 / 2,578       23          —             4,258 / 2,028           0       —
+```
+
+新 exe の w12 の 23 件は、すべて注記 `residual speed tie`（port だけが出す既知の件で、IKA-186 の recover の 23 件と同じもの）。master 取り込み後の exe でも moonlight・recover は同じ数になった。
+
+### 6. 記録（`C:/tmp/ika187/heals.py`、M-B dump の heal 欄）
+
+- 天気回復 3 技が選ばれた決定: w12 434,483 決定・gen11L 118,018 決定のどちらでも 0。**今回の変更で値が変わる決定は 0。**
+- heal 欄の技が選ばれた決定（変えていない）: w12 はねやすめ 2,712・いのちのしずく 364・じこさいせい 271、gen11L は 374・74・43。仮に `_round_fraction` まで `modify` に変えていたら、w12 で 2,081（はねやすめ 1,782・いのちのしずく 299）、gen11L で 318 の決定の回復量が Showdown からずれていた（いのちのしずくは使い手の maxhp で数えた）。
+
+### 7. 別課題
+
+- 天気回復が見る天気は `field.weather` そのまま。Showdown の `pokemon.effectiveWeather` は、ノーてんき・エアロック（場全体）、使い手のばんのうがさ（晴れ・雨を無視）、メガソル（晴れ扱い）を考える。両エンジンとも同じように見ていない。
+- 天気回復を満タンで使っても、Showdown は `NOT_FAIL`（失敗の旗は立たない）。両エンジンも旗を立てないので一致しているが、テストはない。
+
+### 8. 機械
+
+リリースビルド 3 回（22 秒・17 秒・17 秒、--cores 8）。以下はすべて 1 コア: オラクルとテスト（各 1〜7 秒）、記録の数え（59 秒）、セルの比較（223 秒と 94 秒）。すべて heavy.py 経由（--agent IKA-187）。
+
+## 9/24 — IKA-188: ちょうはつは同じターンに選ばれた変化技を `onBeforeMove` で止め、既に動いた相手には 4 ターン —— 両エンジンとも止めず（PP を使い、こだわりなら固定も付いた）、長さは誰にでも 3 だった
+
+### 1. Showdown の定義
+
+`data/moves.ts` の taunt（champions mod は上書きしない）。`condition.duration: 3`、`onStart` で
+`if (target.activeTurns && !this.queue.willMove(target)) duration++`、`onDisableMove` で変化技（わるあがきの Me First 以外）を
+次の要求から外し、`onBeforeMovePriority: 5` の `onBeforeMove` で変化技を `cant … move: Taunt` にして `false` を返す。
+5 はねむり・こおり（10）・ひるみ（8）より後、こんらん（3）・まひ（1）より前。`runMove` は `BeforeMove` が偽なら PP を引かず、
+こだわりの `onModifyMove` にも届かず、`moveThisTurnResult = false`（じだんだの失敗扱い）。
+
+オラクルで確かめた事実（C:/tmp/ika188/probe.py）: プランクスターのちょうはつの後のおいかぜは `cant`、おいかぜ無し、PP 16 のまま、
+スカーフでも choicelock 無し。遅いちょうはつで既に動いたエルフーンは残り 3（= 4 − 1）、1 ターン目でも（`activeTurns` は 1）。
+このターン交代で出たガオガエンは 2（= 3 − 1）。混乱中に止められた変化技は `time` 2 のまま（試行を使わない）。
+
+効かない側（regulation にあるが両エンジンとも未実装）: どんかん（マンムー・ヤドラン・ヤドキング・エンニュート）の `onTryHit`、
+アロマベール（マホイップ系・フレフワン）の `onAllyTryAddVolatile`、メンタルハーブの `onUpdate`。記録で選ばれたちょうはつ
+34 回のうち、この 3 つに向いたものは 0 回。既にちょうはつ済みの相手へのちょうはつ（`addVolatile` が偽 → 失敗の旗）も 0 回。
+
+### 2. 直したこと
+
+Python `resolve.py`: `_taunt_stops`（変化技かつ mefirst でない）、`_taunt_stage`（`_can_act` の 4 か所で混乱の段の前に挟む）、
+`_confusion_reached` がちょうはつで止まる変化技を混乱の試行に入れない、汎用の volatile 道で新しいちょうはつに
+`_taunt_lasts_longer`（`turn.acted` にあり `newly_switched` でなければ +1）。port `moves.rs` に同名の 3 関数を同じ場所で。
+`tools/diff_node.py` に `--using taunt`（対照 `untaunted`: 2 関数を無効にする）。
+
+### 3. オラクル（tests/test_taunt_before_move.py、6 ケース × Python・port）
+
+```
+                         旧 Python  新 Python  |  旧 exe  新 exe
+status-after-taunt         落ち       通過     |  落ち    通過
+scarf-status-after-taunt   落ち       通過     |  落ち    通過
+confused-status-after-     落ち       通過     |  落ち    通過
+taunt-after-moved          落ち       通過     |  落ち    通過
+attack-after-taunt（対照） 通過       通過     |  通過    通過
+taunt-on-switched-in（対照）通過      通過     |  通過    通過
+```
+
+### 4. diff_node `--using taunt`（60 局面、Budget.matrix）
+
+```
+                          w12 新 exe   w12 旧 exe   gen11L 新 exe  gen11L 旧 exe
+taunt を使うセル           7,086        7,086        5,878          5,878
+  うち発火（対照が動かす）  2,727        2,727        1,624          1,624
+  枝で違うセル              0            2,688        0              1,599
+最悪のセル差               4.4e-16      0.167        5.6e-16        0.069
+```
+
+「equilibrium frequency moved at most 1.0」は新 exe でも出る（master の IKA-179 の実行と同じ、同値の均衡の選び方）。
+
+### 5. 記録
+
+```
+                                        w12              gen11L
+手番の決定                              434,483          118,018
+ちょうはつを知る者が場にいる決定        2,179 (0.50%)    463 (0.39%)
+  記録された選択がちょうはつを使う      24（全部 foe 側） 10（全部 foe 側）
+ちょうはつ中のポケモンがいる枠-決定     26               1
+  こだわり・アンコールで変化技に固定    0                0
+解き直し（知る者が場にいる決定から 200）
+  どこかのセルが動いた                  65/200           60/200
+  記録で選ばれたセルが動いた            0                0
+  最も重い手が変わった                  4/200            10/200
+  方策の TV > 0.2                       4                16
+  均衡値の差（最大）                    < 5e-5           < 5e-5
+```
+
+ちょうはつは記録ではまれ（場にいる決定 0.4〜0.5%、選ばれたのは 34 回）。最も重い手が変わった決定も均衡値は動かず、
+同値の手の入れ替わり。生成で効くのは、ちょうはつを持つ構築が増えたときの先制ちょうはつと、4 ターンの長さ。
+
+### 6. position.ts の `lockedMove`（調べただけ）
+
+`packages/sim-bridge/src/position.ts` は `lockedMove` に `twoturnmove` → `choicelock` → `encore` の move を畳む。
+`actions._usable_move_slots` は `locked_move` があるとその技だけを返し、ちょうはつを見ない。Showdown ではこだわり（または
+アンコール）で変化技に固定されたままちょうはつされると、両方の `onDisableMove` で全部外れてわるあがき。Showdown の局面
+から読む道（diff 系ツール・オラクルのテスト）だけで、固定の変化技がメニューに出る。resolver は `locked_move` を立てない
+ので生成・記録には出ない（記録の該当 0）。直すなら position.ts から choicelock・encore を畳むのをやめる（sim-bridge の
+dist を再ビルド）か、`_usable_move_slots` の `locked` の道でちょうはつの変化技を外すか。
+
+### 7. 検査と機械
+
+test_taunt_before_move（新規）・test_weather_recovery・test_resolve・test_confusion_duration・test_choice_lock・
+test_helping_hand_fails・test_rust_node・test_port_gates・test_port_coverage・test_actions・test_line_endings・
+test_no_machine_specific_paths・test_outrage_lock・test_speed は master 取り込み後に `-n 0` で通過。
+`port_coverage --check`・`port_gate_audit --check`・ruff 通過。
+機械: cargo build --release 8 コア 21 秒・18 秒・18 秒、diff_node 4 コア 105 秒（+ 煙 11 秒）、記録 1 コア 412 秒 + 10 秒、
+テスト 1 コア 計約 1.5 分。worktree に data/priors・standings・reportworm と sim-bridge の dist を main から写した（コミットしない）。
+
+## 9/24 — IKA-190: 残差の順番は天気が終わる前の素早さで並べる —— Python は天気が終わった後に並べていて、晴れ最後のターンのようりょくそを 2 倍なしで数え、Showdown が振らない同速を注記していた（port は前から正しい）
+
+ワーカー。基点 master a2c9bc6、ブランチ `ika-190-residual-tie-note`（報告前に master 47fd204 = IKA-187 を取り込み）。
+
+### 1. 何が違ったか
+
+diff_node で注記だけが違うセルの正体は 2 つとも同じ。晴れの残りが 1 のターンに、ようりょくその素早さが 2 倍かどうかで割れていた。
+
+- gen11L の node 2（seed 31、20 ノード）: フシギバナ（ようりょくそ、132、晴れで 264）とカイリュー（132）。メガゲンガーはひんしで、ひんしの枠は関係ない。晴れは `weather_duration` 1。
+- w12 の recover を教えた node 20 は逆向き。晴れの間は同速、終わった後は同速でないので、port だけが注記を出していた。
+
+Python の `_residuals` は `residual_order` を必要になったときに初めて計算していた。最初に呼ぶのは天気の段より後なので、天気を減らして終わらせてから並べていた。port の `residuals` は段の先頭で並べる。
+
+### 2. Showdown の定義（vendor/pokemon-showdown/sim/battle.ts）
+
+`runAction` の `case 'residual'` は `this.updateSpeed()` のあとに `this.fieldEvent('Residual')` を呼ぶ。`fieldEvent` は全部のハンドラを集め（それぞれ持ち主の `speed` を持つ）、`this.speedSort(handlers)` を 1 回だけ呼んでから順に回す。天気のハンドラは order 1 なので最初に回り、そこで `duration--` して終わる。そのため、晴れが終わるターンの残差（やけど・たべのこし など）は晴れの素早さで並ぶ。同速のシャッフルは、その素早さが同じときだけ起きる。port が正しく、Python だけを直した。
+
+### 3. 変更
+
+- `resolve.py` `_residuals`: 天気の段の前で `actives()` を 1 回呼ぶ（1 行と注釈だけ）。キャッシュはそのまま使う。
+- port は変えていない（`residual_order` はもともと段の先頭で並べる）。
+- 新しいテスト `tests/test_residual_speed_tie.py`（オラクル）: こちらはようりょくそのフシギバナ（素早さ 100、晴れで 200）とひでりのコータス、相手はフシギバナ（素早さ 100 = 同速、または 110 = 晴れがなければこちらより速い）とヤミラミ。1 ターン目に両方のフシギバナをやけどにし、晴れが終わる 5 ターン目の前後（4・5・6）を見る。Showdown は speed tie を keep と reverse の 2 回ずつ打つ。同速かどうかは、やけどの順番が 2 回で入れ替わるかどうかで判定する。
+
+### 4. オラクル（6 ケース = 2 相手 × 3 ターン、各ターン Showdown の局面から）
+
+```
+                                                     旧 Python   新 Python   port（旧・新とも）
+  注記が Showdown のシャッフルと一致（6 ケース）       5/6         6/6         6/6
+  やけどの順番が Showdown と一致（シャッフルなし 5）   4/5         5/5         ―（順は出さない）
+  port の注記・重み・局面が Python と一致（6）         5/6         6/6         ―
+```
+
+Showdown の事実: 5 ターン目は keep と reverse のどちらでもこちら（晴れで 200）が先。6 ターン目は、同速の相手なら 2 回で順番が入れ替わり、110 の相手なら相手が先。
+旧 Python が外したのは、同速の相手の 5 ターン目の注記と、110 の相手の 5 ターン目の順番（相手を先にした）。
+
+直す前の Python で落ちたテストは 3 つ（tie の注記、faster の順番、tie の port 一致）。事実のテスト 2 つは直す前から通る。
+
+### 5. diff_node（`--nodes 20`、Budget.matrix、exe は同じもの＝ master 47fd204 のビルド）
+
+```
+                                      旧 Python（master）              新 Python
+  gen11L --confused                   FAIL 67（注記だけ、1 ノード）    OK 0
+  gen11L（オプションなし）            OK、注記の違うノード 1           OK、0
+  w12 --confused                      OK 0                             OK 0
+  w12（オプションなし）               OK 0                             OK 0
+  cells.py --teach recover（w12 40 局面、4,855 セル）   違う 23（全部注記）   0
+```
+
+すべてのセルで Python の答えを旧と新で比べた（`C:/tmp/ika190/sig.py`、枝の重みと局面のハッシュ）:
+
+```
+                          セル     注記が動いた   値が動いた   同速の注記（旧 → 新、port）
+  gen11L                  6,187    37             0            150 → 113、113
+  gen11L --confused       6,187    67             0            180 → 113、113
+  w12                     9,518    0              0            1,667 → 1,667、1,667
+  w12 --confused          9,518    0              0            1,920 → 1,920、1,920
+  w12 recover 教え        4,855    23             0            328 → 351、351
+  gen11L recover 教え     4,258    0              0            324 → 324、324
+```
+
+同速以外の注記は 1 つも動いていない。port の答えは旧と新で同じ（exe が同じなので当然）。
+
+### 6. 記録で該当する数（`C:/tmp/ika190/records.py`、全局の move 決定）
+
+```
+                                                   w12        gen11L
+  move 決定                                        434,483    118,018
+  天気がこのターンで終わる（weatherDuration 1）      42,314     11,470
+    うち天気で素早さが変わる特性（ようりょくそ・すいすい・すなかき・ゆきかき）が立っている   10,902（2.5%）   3,031（2.6%）
+```
+
+残差の順番が変わりうるのはこの決定だけ。順番で値が変わるのは、同じ order の残差どうしが干渉するとき（ひんしの順番など）に限られる。上の 6 つの対照では値が動いたセルは 0 だった。
+
+### 7. 別課題の候補
+
+- 同速の注記は、残差を持たない者どうしの同速でも出る（「どこかの 2 体の素早さが同じ」で判定している）。Showdown のシャッフルは、同じ order・priority・speed・subOrder のハンドラの間だけで起きる。注記を「順番が結果を変えうる同速」に絞れば、w12 の 1,667 セルの多くは消える（両エンジンで同時に直す）。
+- ひんしの枠: Showdown の `side.active` にはひんしの者も残り、ハンドラは集められたうえで `fainted` のところで飛ばされる。両エンジンとも並びの最後に回して飛ばすので、結果は同じ。
+
+### 8. 検査と機械
+
+test_residual_speed_tie（新規）・test_weather_recovery・test_resolve・test_rust_node・test_speed・test_outrage_lock・test_confusion_duration・test_choice_lock・test_line_endings・test_port_coverage・test_port_gates・test_observe・test_no_machine_specific_paths を取り込み後に `-n 0` で通した（skip なし）。`port_coverage --check`・`port_gate_audit --check`・ruff も通過。
+cargo build --release 2 回（21 秒・18 秒、8 コア）。ほかはすべて 1 コアで、heavy.py 経由（--agent IKA-190）: 旧新の署名 363 秒、diff_node と cells.py は旧 420 秒・新 411 秒、記録の数え 38 秒、局面探し・オラクル・テストは各 1〜40 秒。

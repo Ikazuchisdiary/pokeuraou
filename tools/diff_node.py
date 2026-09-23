@@ -68,6 +68,11 @@ modelled without ever giving anyone the counter. The control is the turn with
 already moved (IKA-184). The control is the turn with `_helping_hand_fails` answering no,
 so the cells it moves are the ones where a help failed.
 
+`--using taunt` holds the port to Taunt's `onBeforeMove` and its `duration++` (IKA-188): a
+status move chosen the turn a faster Taunt lands is stopped, and a Taunt on a Pokemon that
+has already moved is 4 long. The control is the turn with `_taunt_stops` answering no and
+`_taunt_lasts_longer` doing nothing, so the cells it moves are the ones where either fired.
+
 `--using stoneaxe` (or `ceaselessedge`) takes a move that lays a hazard from its own
 `onAfterHit` (IKA-173); its control is the turn with `AFTER_HIT_HAZARDS` emptied, the
 hit laying nothing as before.
@@ -504,6 +509,23 @@ class unhelped:  # noqa: N801 - read as a phrase at the call site
         resolve_mod._helping_hand_fails = self.real
 
 
+class untaunted:  # noqa: N801 - read as a phrase at the call site
+    """Python's Taunt as it was before IKA-188: the control for `--using taunt`. It still
+    lands and shapes the next menu, but stops nothing this turn and is 3 long for everyone."""
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = (resolve_mod._taunt_stops, resolve_mod._taunt_lasts_longer)
+        resolve_mod._taunt_stops = lambda *_args: False
+        resolve_mod._taunt_lasts_longer = lambda *_args: None
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        resolve_mod._taunt_stops, resolve_mod._taunt_lasts_longer = self.real
+
+
 class unlaid:  # noqa: N801 - read as a phrase at the call site
     """Python with Stone Axe's and Ceaseless Edge's `onAfterHit` taken out, as before
     IKA-173: the control for `--using stoneaxe`. The hit still lands."""
@@ -836,6 +858,8 @@ class unchanged:  # noqa: N801 - read as a phrase at the call site
             self.parts.append(unsung())
         if "helpinghand" in moves:
             self.parts.append(unhelped())
+        if "taunt" in moves:
+            self.parts.append(untaunted())
         if any(reg.moves[m].raw.get("drain") for m in moves):
             self.parts.append(undrained(reg, moves))
         if any(judged(reg.moves[m]) for m in moves):
@@ -1422,7 +1446,7 @@ def main() -> None:
         "--using",
         default=None,
         help="comma-separated breaksProtect, [2, 5] multi-hit, type-spending, "
-        "hazard-laying (Stone Axe), drain or judged status move ids: keep positions where "
+        "hazard-laying (Stone Axe), drain or judged status move ids, or taunt: keep positions where "
         "a Pokemon on the field knows one, hold every cell that uses one to the port branch "
         "by branch, and count where the effect fired",
     )
@@ -1548,6 +1572,7 @@ def main() -> None:
             or move_id in rampage_moves(reg)
             or move_id == "perishsong"
             or move_id == "helpinghand"
+            or move_id == "taunt"
             or move.raw.get("drain")
             or judged(move)
         ):
@@ -1556,7 +1581,7 @@ def main() -> None:
                 f"({sorted(TYPE_SPENDING_MOVES)}), hazard-laying "
                 f"({sorted(AFTER_HIT_HAZARDS)}), rampage "
                 f"({sorted(rampage_moves(reg))}), drain or judged status moves, "
-                f"perishsong or helpinghand; {move_id} is none of them"
+                f"perishsong, helpinghand or taunt; {move_id} is none of them"
             )
 
     if args.value:

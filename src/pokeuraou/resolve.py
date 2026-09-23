@@ -1959,6 +1959,43 @@ def _defrosts(turn: _Turn, mon: Pokemon, move: Move) -> bool:
     return "defrost" in move.flags and not (move.id == "burnup" and "Fire" not in turn.types_of(mon))
 
 
+def _taunt_stops(mon: Pokemon, move: Move) -> bool:
+    """Taunt's `onBeforeMove`, priority 5 (IKA-188):
+
+        if (!(move.isZ && move.isZOrMaxPowered) && move.category === 'Status' && move.id !== 'mefirst') {
+            this.add('cant', attacker, 'move: Taunt', move);
+            return false;
+        }
+
+    `onDisableMove` only shapes the next request, so this is what stops a status move chosen
+    before the Taunt landed -- a Prankster Taunt, then the Tailwind. No PP is spent and no
+    Choice lock is set: both come after `BeforeMove`.
+    """
+    return mon.has_volatile("taunt") and move.category == "Status" and move.id != "mefirst"
+
+
+def _taunt_stage(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[float, str | None]]:
+    """Taunt's check, then confusion's: 5 is below sleep and freeze (10) and flinch (8), and
+    above confusion (3) and paralysis (1), so a taunted status move spends no confused try."""
+    mon = turn.mon_at(action.side, action.slot)
+    move = turn.reg.moves.get(action.move_id or "")
+    if mon is not None and move is not None and _taunt_stops(mon, move):
+        return [(1.0, "taunt")]
+    return _confusion_stage(turn, action, budget)
+
+
+def _taunt_lasts_longer(turn: _Turn, target: tuple[int, int]) -> None:
+    """Taunt's `onStart`: `if (target.activeTurns && !this.queue.willMove(target))
+    duration++` (IKA-188). On a Pokemon that has already used its move this turn the Taunt
+    is 4 long, so three whole turns remain after this one's residual. One that came in this
+    turn has no move queued either, but `activeTurns` is 0 and it stays 3."""
+    mon = turn.mon_at(*target)
+    held = mon.volatile("taunt") if mon is not None else None
+    if held is None or held.duration is None or mon.newly_switched or target not in turn.acted:
+        return
+    held.duration += 1
+
+
 def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[float, str | None]]:
     """(probability, reason it could not act) for the pre-move checks."""
     mon = turn.mon_at(action.side, action.slot)
@@ -1978,7 +2015,7 @@ def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[fl
             mon.status = None
             mon.status_counter = None
             turn.log(f"{turn.name(action.side, action.slot)} woke up")
-            return _confusion_stage(turn, action, budget)
+            return _taunt_stage(turn, action, budget)
         return [(1.0, "slp")]
     if mon.status == "frz":
         # A move with the `defrost` flag -- Scald, Flare Blitz, Matcha Gotcha -- is used
@@ -1990,7 +2027,7 @@ def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[fl
             mon.status = None
             mon.status_counter = None
             turn.log(f"{turn.name(action.side, action.slot)} thawed ({move.id})")
-            return _confusion_stage(turn, action, budget)
+            return _taunt_stage(turn, action, budget)
         # `time--; if (time <= 0 || randomChance(1, 4))` -- the counter is spent on the
         # attempt to move, and reaching zero thaws regardless of the roll.
         mon.status_counter = (mon.status_counter or FREEZE_COUNTER) - 1
@@ -1998,7 +2035,7 @@ def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[fl
             mon.status = None
             mon.status_counter = None
             turn.log(f"{turn.name(action.side, action.slot)} thawed (counter)")
-            return _confusion_stage(turn, action, budget)
+            return _taunt_stage(turn, action, budget)
         if not budget.enumerate_status_checks:
             return [(1.0, "frz")]
         # The two outcomes differ in more than "did it act": one of them is no longer
@@ -2011,7 +2048,7 @@ def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[fl
     # the move has started, so PP is spent (`_priority_blocked_by`, IKA-158, and
     # `_stopped_by_psychic_terrain`, IKA-156).
     # Confusion's priority 3 is above paralysis's 1: the self-hit is rolled first (IKA-177).
-    outcomes = _confusion_stage(turn, action, budget)
+    outcomes = _taunt_stage(turn, action, budget)
     if mon.status == "par" and budget.enumerate_status_checks:
         expanded: list[tuple[float, str | None]] = []
         for weight, reason in outcomes:
@@ -2072,7 +2109,7 @@ def _confusion_reached(turn: _Turn, mon: Pokemon, move: Move) -> bool:
     """Whether this try gets as far as confusion's `onBeforeMove` (priority 3): past a
     flinch (8), a sleep (10) and a freeze (10) only when it wakes or thaws. A freeze left
     to its 1-in-4 is not, as `_can_act` does not look at confusion there."""
-    if mon.fainted or mon.has_volatile("flinch"):
+    if mon.fainted or mon.has_volatile("flinch") or _taunt_stops(mon, move):
         return False
     if mon.status == "slp":
         return (mon.status_counter or 0) - (2 if mon.ability == "earlybird" else 1) <= 0
@@ -3271,6 +3308,8 @@ def _apply_status_move(
                 #       (sim/pokemon.ts:2008)
                 # Only on a fresh seed: re-seeding a seeded target fails in `addVolatile`
                 # (no `onRestart`) and leaves the first planter's slot in place.
+                if volatile_id == "taunt" and not already:
+                    _taunt_lasts_longer(turn, target)
                 seeded = turn.mon_at(*target)
                 if volatile_id == "leechseed" and not already and seeded is not None:
                     applied = seeded.volatile("leechseed")
@@ -3284,10 +3323,7 @@ def _apply_status_move(
                 turn.heal(*target, _round_fraction(mon.maxhp, raw["heal"]), reason=move.id)
 
     if move.id in WEATHER_RECOVERY_MOVES:
-        ratio = _weather_recovery_fraction(turn.pos.field.weather)
-        mon = turn.mon_at(*me)
-        if mon is not None:
-            turn.heal(*me, _round_fraction(mon.maxhp, ratio), reason=move.id)
+        _weather_recovery(turn, me, move)
 
     if move.id in ("trick", "switcheroo"):
         for target in targets:
@@ -4369,12 +4405,31 @@ def _on_being_hit(
 WEATHER_RECOVERY_MOVES = frozenset({"moonlight", "synthesis", "morningsun"})
 
 
-def _weather_recovery_fraction(weather: str | None) -> tuple[int, int]:
+def _weather_recovery_modifier(weather: str | None) -> int:
+    """The factor of Moonlight's `onHit`, in 4096ths: `0.667` in sun, `0.25` in any
+    other weather, `0.5` without one -- `tr(factor * 4096)` in `modify`."""
     if weather in ("sunnyday", "desolateland"):
-        return (2, 3)
+        return 2732
     if weather is None:
-        return (1, 2)
-    return (1, 4)
+        return 2048
+    return 1024
+
+
+def _weather_recovery(turn: _Turn, me: tuple[int, int], move: Move) -> None:
+    """Moonlight, Synthesis and Morning Sun: `this.heal(this.modify(pokemon.maxhp,
+    factor))` (data/moves.ts). `modify` rounds a half *down*, where Recover's `heal` field
+    is `Math.round` (battle-actions.ts) and `_round_fraction` -- so a quarter of 170 is 42
+    here and not 43 (IKA-187)."""
+    mon = turn.mon_at(*me)
+    if mon is not None:
+        modifier = _weather_recovery_modifier(turn.pos.field.weather)
+        turn.heal(*me, _modify(mon.maxhp, modifier), reason=move.id)
+
+
+def _modify(value: int, modifier: int) -> int:
+    """Showdown's `battle.modify(value, modifier / 4096)`: `tr((tr(value * modifier) +
+    2048 - 1) / 4096)` (sim/battle.ts), a half rounded down."""
+    return (value * modifier + 2047) // 4096
 
 
 def _swap_items(turn: _Turn, a: tuple[int, int], b: tuple[int, int]) -> None:
@@ -5669,6 +5724,13 @@ def _residuals(reg: Regulation, turn: _Turn) -> None:
         if order is None:
             order = residual_order(reg, turn)
         return order
+
+    # Sorted before anything ends, as Showdown's `updateSpeed()` and `fieldEvent`'s one
+    # `speedSort` run before the weather's handler decrements it: on the turn the sun runs
+    # out, Chlorophyll's doubled Speed still orders the phase (IKA-190). Sorting at the first
+    # residual that asked, after the weather ended, sorted at the undoubled Speed and noted
+    # ties Showdown does not roll -- the port sorted here already.
+    actives()
 
     # Residual order 1: weather. Its duration is decremented *before* its handler runs and
     # the handler is skipped when it expires, so the last turn of a sandstorm deals no
