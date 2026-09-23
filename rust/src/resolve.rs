@@ -892,6 +892,17 @@ pub(crate) fn status_move_handled(move_id: &str) -> bool {
             | "perishsong" | "knockoff" | "thief" | "covet"
             // `moves::use_substitute` (IKA-180).
             | "substitute"
+            // `moves::swap_items` (IKA-208).
+            | "trick" | "switcheroo"
+    )
+}
+
+/// The moves one of `UNHANDLED_MOVE_FIELDS` is implemented for, by name (IKA-208).
+fn move_field_is_ported(field: &str, move_id: &str) -> bool {
+    matches!(
+        (field, move_id),
+        // `moves::hit_target`: the user faints in `damageCallback`, before its HP hits.
+        ("selfdestruct", "finalgambit")
     )
 }
 
@@ -907,7 +918,9 @@ fn check_move_supported(reg: &Reg, move_id: &str) -> Result<(), String> {
     };
     // The first of UNHANDLED_MOVE_FIELDS the entry has non-null, found once at load.
     if let Some(field) = mv.unhandled_field {
-        return Err(format!("move field {field}: {move_id}"));
+        if !move_field_is_ported(field, move_id) {
+            return Err(format!("move field {field}: {move_id}"));
+        }
     }
     // A status move Python does not fully model gets the declarative fields and a report,
     // and nothing else -- which is exactly what this port does with one too. So refusing is
@@ -919,9 +932,9 @@ fn check_move_supported(reg: &Reg, move_id: &str) -> Result<(), String> {
     {
         return Err(format!("status move: {move_id}"));
     }
-    // Trick and Switcheroo swap items, which this port does not implement; Last Resort
-    // reads which of its user's other moves have been used.
-    if matches!(move_id, "lastresort" | "trick" | "switcheroo") {
+    // Last Resort reads which of its user's other moves have been used. Trick and
+    // Switcheroo are `moves::swap_items` (IKA-208).
+    if matches!(move_id, "lastresort") {
         return Err(format!("item-swapping or history move: {move_id}"));
     }
     Ok(())

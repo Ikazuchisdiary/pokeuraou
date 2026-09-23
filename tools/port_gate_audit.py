@@ -96,8 +96,7 @@ ACKNOWLEDGED: dict[str, str] = {
         "the only mention is the refusal itself: check_position_supported refuses it by "
         "name, so a turn can never get half-way through it"
     ),
-    "trick": "named only by check_move_supported's refusal -- this port swaps no items",
-    "switcheroo": "named only by check_move_supported's refusal -- likewise",
+    # `trick` and `switcheroo` were here until IKA-208 ported them (`moves::swap_items`).
     # Moved here from KNOWN_UNGATED on 2026-09-23 (IKA-71). The damage layer names them too,
     # which is why they are findings at all; the refusal is what keeps that half-port unused.
     "disguise": (

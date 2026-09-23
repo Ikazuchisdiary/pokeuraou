@@ -1571,6 +1571,14 @@ fn hit_target<'a>(
                         }
                         again.rolls[*roll]
                     };
+                    // Final Gambit (IKA-208): `damageCallback(pokemon) { const damage =
+                    // pokemon.hp; pokemon.faint(); return damage; }` runs in `getDamage`,
+                    // after the immunity, on a doll as on the Pokemon, so the user is in
+                    // the faint queue before the target (`selfdestruct: "ifHit"` then
+                    // finds it fainted already).
+                    if hit_index == 0 && mv.id == "finalgambit" {
+                        state.faint(action.side, action.slot);
+                    }
                     if on_doll {
                         hit_substitute(&mut state, action, mv, target, amount, &budget)?;
                         continue;
@@ -2846,6 +2854,11 @@ fn immune_to_move(
     if good_as_gold_blocks(turn, action, mv, target) {
         return Some("goodasgold".into());
     }
+    // Trick and Switcheroo: `onTryImmunity(target) { return !target.hasAbility('stickyhold'); }`
+    // (data/moves.ts, IKA-208).
+    if matches!(mv.id.as_str(), "trick" | "switcheroo") && defender.ability == "stickyhold" {
+        return Some("stickyhold".into());
+    }
     let self_targeted = target == (action.side, action.slot);
     let types = turn.types_of(defender);
 
@@ -3244,6 +3257,13 @@ fn apply_status_move(
     if mv.id == "perishsong" {
         perish_song(turn, me);
     }
+    if matches!(mv.id.as_str(), "trick" | "switcheroo") {
+        for target in targets {
+            if !swap_items(reg, turn, me, *target) {
+                turn.move_failed[me.0][me.1] = true;
+            }
+        }
+    }
 
     if mv.raw.get("hasCustomCode").and_then(Value::as_bool).unwrap_or(false)
         && !crate::modelled::status_move_is_fully_modelled(&mv.id)
@@ -3269,6 +3289,108 @@ fn apply_status_move(
 /// Soundproof -- everyone already counting -- is `return false`, a failure. IKA-172: the
 /// port had no such path while `modelled.rs` listed the move, so its turn left nobody
 /// counting down and reported nothing.
+/// `takeItem` (sim/pokemon.ts): the `TakeItem` event on the holder, which the item's own
+/// `onTakeItem` answers -- in Reg M-C only the mega stones have one -- and Unburden's
+/// `onTakeItem(item, pokemon) { pokemon.addVolatile('unburden'); }` hears. `None` is
+/// `takeItem`'s `undefined` (nothing held), `Some(None)` its `false`.
+fn take_item(reg: &Reg, turn: &mut Turn, holder: Slot) -> Option<Option<Id>> {
+    let mon = turn.mon_at_mut(holder.0, holder.1)?;
+    let item = mon.item?;
+    if reg.mega_stone_stays(mon.species.as_str(), item.as_str()) {
+        return Some(None);
+    }
+    mon.item = None;
+    if mon.ability == "unburden" && !mon.has_volatile("unburden") {
+        mon.volatiles.push(Effect::new(Id::new("unburden")));
+    }
+    Some(Some(item))
+}
+
+/// Trick and Switcheroo's `onHit` (data/moves.ts, IKA-208):
+///
+///     const yourItem = target.takeItem(source);
+///     const myItem = source.takeItem();
+///     if (yourItem === false || myItem === false || (!yourItem && !myItem)) { ...restore; return false; }
+///     if ((myItem && !this.singleEvent('TakeItem', myItem, ..., target, source, move, myItem)) ||
+///         (yourItem && !this.singleEvent('TakeItem', yourItem, ..., source, target, move, yourItem))) {
+///         ...restore; return false;
+///     }
+///     if (myItem) target.setItem(myItem); ...  if (yourItem) source.setItem(yourItem); ...
+///
+/// The second test asks each item's `onTakeItem` about its *receiver*, so a mega stone cannot
+/// be handed to its own species either. `setItem` then runs the new item's `onStart`: a
+/// Choice item drops `choicelock`, a terrain seed on its terrain is used at once, a White
+/// Herb clears lowered stats. A berry is eaten at the next `Update`, which comes before
+/// anything else moves. The giver of a Choice item keeps `choicelock` until
+/// `onDisableMove` at the end of the turn (`choice_lock_ends`). Returns false for a failure.
+fn swap_items(reg: &Reg, turn: &mut Turn, me: Slot, target: Slot) -> bool {
+    let alive = |turn: &Turn, at: Slot| matches!(turn.mon_at(at.0, at.1), Some(m) if !m.fainted);
+    if !alive(turn, me) || !alive(turn, target) {
+        return false;
+    }
+    let yours = take_item(reg, turn, target);
+    let mine = take_item(reg, turn, me);
+    let restore = |turn: &mut Turn, yours: Option<Option<Id>>, mine: Option<Option<Id>>| {
+        if let Some(Some(item)) = yours {
+            turn.mon_at_mut(target.0, target.1).unwrap().item = Some(item);
+        }
+        if let Some(Some(item)) = mine {
+            turn.mon_at_mut(me.0, me.1).unwrap().item = Some(item);
+        }
+    };
+    if matches!(yours, Some(None)) || matches!(mine, Some(None)) || (yours.is_none() && mine.is_none()) {
+        restore(turn, yours, mine);
+        return false;
+    }
+    let (yours, mine) = (yours.flatten(), mine.flatten());
+    let receiver_species = |turn: &Turn, at: Slot| turn.mon_at(at.0, at.1).unwrap().species;
+    let refused = mine.is_some_and(|i| reg.mega_stone_stays(receiver_species(turn, target).as_str(), i.as_str()))
+        || yours.is_some_and(|i| reg.mega_stone_stays(receiver_species(turn, me).as_str(), i.as_str()));
+    if refused {
+        restore(turn, yours.map(Some), mine.map(Some));
+        return false;
+    }
+    for (at, item) in [(target, mine), (me, yours)] {
+        let Some(item) = item else { continue };
+        turn.mon_at_mut(at.0, at.1).unwrap().item = Some(item);
+        if reg.choice_items.contains(item.as_str()) {
+            let mon = turn.mon_at_mut(at.0, at.1).unwrap();
+            mon.volatiles.retain(|v| v.id.as_str() != "choicelock");
+        }
+        crate::terrain::use_terrain_seed(turn, at.0, at.1);
+    }
+    crate::resolve::check_white_herb(turn);
+    for at in [target, me] {
+        eat_received_berry(turn, at);
+    }
+    true
+}
+
+/// The `onUpdate` of a berry just received: Sitrus and Oran below half, Lum on any status or
+/// confusion, Persim on confusion -- the berries this port eats elsewhere (IKA-208).
+fn eat_received_berry(turn: &mut Turn, at: Slot) {
+    turn.check_berry(at.0, at.1);
+    let cures = match turn.mon_at(at.0, at.1) {
+        Some(mon) if !mon.fainted => {
+            let confused = mon.has_volatile("confusion");
+            (is(mon.item, "lumberry") && (mon.status.is_some() || confused))
+                || (is(mon.item, "persimberry") && confused)
+        }
+        _ => false,
+    };
+    if !cures || turn.berries_blocked(at.0) {
+        return;
+    }
+    let lum = is(turn.mon_at(at.0, at.1).unwrap().item, "lumberry");
+    turn.consume_item(at.0, at.1);
+    let mon = turn.mon_at_mut(at.0, at.1).unwrap();
+    mon.volatiles.retain(|v| v.id.as_str() != "confusion");
+    if lum {
+        mon.status = None;
+        mon.status_counter = None;
+    }
+}
+
 fn perish_song(turn: &mut Turn, me: Slot) {
     let ignores_ability = turn
         .mon_at(me.0, me.1)
