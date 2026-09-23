@@ -11278,3 +11278,127 @@ master（ff82ad5、IKA-136・IKA-127・IKA-159 入り）を取り込んでビル
 test_port_gates・test_line_endings・test_no_machine_specific_paths・test_disguise_afterhit を `-n 0` で 121 pass、diff_node も
 取り込み後に同じ結果（0/1,284）。機械（heavy.py、--agent IKA-160）: release ビルド 2 回（8 コア 26 秒・18 秒）、オラクル 265 秒、
 記録 819 秒、diff_node 75・69・61 秒、テスト 20 秒（いずれも 1 コア）。
+
+## 9/23 — IKA-169: かげふみ・ため技の 2 ターン目・ねをはる・はいすいのじん・フェアリーロックも拘束する —— 生成では一度も拘束していなかった。w12 の 4,558 決定・gen11L の 889 決定で記録のメニューに今は選べない手があり、解き直すと 7 割で均衡の最も重い手が変わる
+
+### 1. 何が抜けていたか
+
+IKA-163 のとおり、生成（`selfplay.play_game`）は自前の resolver で局を進めるので Showdown の `trapped` の旗は常に偽で、
+拘束は `actions._is_trapped` が局面から読むものだけだった。読んでいたのは `partiallytrapped`・`octolock`・`trapped` の
+3 つの volatile だけ。Showdown（d3de52a17）の拘束の出どころで抜けていたもの:
+
+- **かげふみ**（`data/abilities.ts:4156` `shadowtag.onFoeTrapPokemon`）: `!pokemon.hasAbility('shadowtag') &&
+  pokemon.isAdjacent(holder)` なら `tryTrap(true)`。持ち主はメガゲンガーだけ（ダンプの特性で確かめた。ありじごく
+  `:196`・じりょく `:2516` の持ち主は居ない）。`tryTrap`（`sim/pokemon.ts:1607`）の頭でゴーストが抜け、きれいなぬけがら・
+  にげあし（優先度 -10）が後から外す。`TRAPPING_ABILITIES` は定義されているだけで読まれていなかった。
+- **技の固定**（`sim/pokemon.ts:1083` `getMoveRequestData`）: `getLockedMove()` があれば `this.trapped = true`。
+  `twoturnmove`（`data/conditions.ts:317`）・`lockedmove`（`:282`）・`mustrecharge`（`:377`）。TrapPokemon の後なので
+  どの抜け道も効かず、要求はその 1 技だけでメガもない（`if (!lockedMove) { if (this.canMegaEvo) ... }`）。
+  反動（はかいこうせん）だけは既に 1 手のメニューだった。
+- **ねをはる・はいすいのじん・フェアリーロック**（`data/moves.ts:9628`・`:12808`・`:5066`）: どれも条件の
+  `onTrapPokemon` が `tryTrap()`。フェアリーロックは場（pseudoWeather、duration 2）で、使った次のターンだけ両側を縛る。
+  resolver は 3 つとも付けている（汎用の volatileStatus / pseudoWeather の道）。
+
+記録を見ると、ため技はメニューの穴だけでなく resolver にも穴があった。`twoturnmove` を技も持続もなしで付けていたので、
+次のターンに別の技を選ぶと印が残り続け、後のため技が溜めずに出た（w12 の `twoturnmove` を持つ場の枠 8,371 のうち
+4,681 は最後の技がため技でない＝漏れた印）。
+
+### 2. オラクルで見たこと（`tests/test_trap_sources.py`）
+
+Showdown の内側の `trapped`（ダンプの旗、隠れた拘束も真）と、直す前・直した後の我々のメニュー（旗を消した Showdown の
+局面／Showdown の前のターンを我々の resolver で進めた子）:
+
+```
+  ケース                         Showdown          直す前（旗なし）       直した後
+  かげふみ / 普通の相手           拘束 (s0, s1)     交代あり               拘束
+  かげふみ / ゴースト             s0 自由・s1 拘束  s1 に交代あり          一致
+  かげふみ / ぬけがら             s0 自由・s1 拘束  s1 に交代あり          一致
+  かげふみ / にげあし             s0 自由・s1 拘束  s1 に交代あり          一致
+  かげふみ / トレースで持った相手 s0 自由・s1 拘束  s1 に交代あり          一致（Showdown の局面のみ）
+  メガ前のゲンガー（対照）        自由              自由                   自由
+  エレクトロビーム 2 ターン目     拘束・1 技        交代あり・4 技         拘束・1 技
+  ソーラービーム＋石 2 ターン目   拘束・1 技・メガ無 交代あり・メガあり      拘束・1 技・メガ無
+  げきりん 2 ターン目             拘束・1 技        交代あり・4 技         Showdown の局面は一致、生成の形は xfail
+  はかいこうせんの反動（対照）    拘束・recharge    一致                   一致
+  ねをはる                        拘束              交代あり               拘束
+  はいすいのじん                  拘束              交代あり               拘束（生成の形のみ）
+  フェアリーロック次のターン      両側拘束・ゴースト自由  交代あり         一致
+  その次のターン（対照）          全員自由          自由                   自由
+```
+
+s1（最後の場のポケモン）へのかげふみは要求では `maybeTrapped` としか出ない（隠れた拘束を漏らさないため）が、
+`chooseSwitch` は断る（`test_the_hidden_trap_is_a_trap`、隣のゴーストの交代は通る対照つき）。
+はいすいのじんの volatile は sim-bridge の `MODELLED_VOLATILES` に無く Showdown の局面に載らないので、旗を消す形は外した。
+直す前: この課題のテスト 54（port の 2 つを足す前）のうち 31 落ち（Showdown の事実 15 と対照は全部通る）、直した後は port の 2 つを足した 56 のうち 55 通過・1 xfail。
+
+### 3. 直し
+
+- `Regulation.trapping_volatiles` / `trapping_pseudo_weather`: 技の条件に `onTrapPokemon` がある volatile（octolock・
+  ingrain・noretreat）と場（fairylock）をダンプから。`data/conditions.ts` の `trapped`・`partiallytrapped` は
+  `actions.TRAPPING_CONDITIONS`（`TRAPPING_VOLATILES` は消した）。
+- `actions._is_trapped(reg, pos, side, mon)`: 旗 → 技の固定 → 抜け道（ゴースト・ぬけがら・にげあし）→ volatile → 場 →
+  隣の相手の特性（`_trapped_by_foe_ability`: かげふみ・じりょく・ありじごく、Showdown の条件どおり。倒れた持ち主・味方は縛らない）。
+- `actions.locked_move` と `slot_actions`: `twoturnmove`/`lockedmove` の技があれば、その技（対象ごと）だけのメニュー、
+  交代なし・メガなし。技を持たない古い記録の `twoturnmove` は最後の技がため技（ダンプの `charge`）のときだけ固定。
+  対象は Showdown が覚えた場所に撃つが局面に無いので、従来どおり対象を選ばせたまま（下の候補）。
+- resolver（Python `resolve.py` と port `moves.rs`）: `twoturnmove` を duration 2・技つきで付ける。子の印は Showdown の
+  局面と (技, 残り 1) で一致（テスト）。port の変更を入れない master のバイナリは (None, None) を返し、
+  `test_the_port_charges_the_same_way` が落ちる（陽性対照）。port は手を列挙しない（メニューは Python のもの）。
+
+### 4. 符号化
+
+`trapped` の旗の意味は変えていない（生成では常に偽のまま、Showdown の局面では Showdown の値）。`encode.py:720` と
+`rust/src/encode.rs:402` は同じ JSON の `trapped` を読む。volatile は有無だけ符号化されるので、`twoturnmove` に技と持続が
+付いても入力は変わらない（ただし漏れた印が消えるので、生成の局面の分布は変わる）。ENCODING_REVISION は動かさない。
+
+### 5. 記録（`C:/tmp/ika169/records.py`、一時スクリプト、1 コア 335 秒）
+
+```
+                                               w12         selfplay-gen11L
+  手番の決定                                    434,483     118,018
+  合法のメニューが変わる決定                     4,576       890
+    記録のメニューに今は選べない手がある          4,558       889
+    記録の均衡がその手に確率を置く                3,938       733
+    実際に指した手が今は選べない                  3,295       566
+  場の枠: かげふみで交代を失う                   1,810       688
+  場の枠: ため技の 2 ターン目で交代を失う         2,047       318
+  場の枠: ため技で技だけ固定（控えなし）          1,643       228
+  ねをはる・はいすいのじん・フェアリーロック      0           0
+```
+
+（0 の 3 つは、同じ走査がかげふみとため技を数えているのが陽性対照。IKA-163 の走査もこれらの印の行を読んで 0 だった。）
+
+今は選べない手がある決定から 300 ずつ、記録のメニューのまま `Budget.matrix()`・hp-share 1 手で、全体の行列と新しい規則が残す
+部分行列を解いた（残るセルの値は変わらない）:
+
+```
+                                   w12              gen11L
+  古い均衡が今は選べない手を指す    217/300          197/300
+  その手の確率（行・列の平均）      0.23・0.35       0.34・0.18
+  方策の TV > 0.2                   233/300          226/300
+  最も重い手が変わった              219/300          209/300
+  均衡値の差（平均・最大）          0.029・0.47      0.029・0.75
+```
+
+記録全体では w12 で 4,558 × 219/300 ≈ 3,300 決定、gen11L で 889 × 209/300 ≈ 620 決定の見込み（手番の決定の 0.8%・0.5%）。
+IKA-163（ゴースト・ぬけがらの交代が落ちていた）と逆向きで、今度は選べない手が入っていた。
+
+### 6. 残したこと（別課題の候補）
+
+- **げきりん**: resolver は `lockedmove` を技も持続もなしで付け、外さず、技も固定せず混乱もさせない。メニューは
+  技のない `lockedmove` を固定しない（生成は今までどおり）。直すなら 2〜3 ターンの分岐と終わりの混乱ごと。
+  符号化の `volatile_lockedmove` は生成では一度使うと場を離れるまで立ちっぱなし。
+- **子の局面の `trapped`**: `position.py:225` は親の旗を写すので、Showdown の局面から始めた探索では拘束の主が倒れた子でも
+  旗が残る。メニューは今は出どころから全部読めるので、子で旗を落とせば済むが、そうすると Showdown 起点の葉の符号化が 1→0 に
+  変わる。選択肢: (a) ターン終わりで両エンジンとも旗を落とす（生成の分布に揃う）、(b) そのまま、(c) 学習で常に 0 だった入力なので
+  `trapped` を符号化から外す（ENCODING_REVISION）。生成には効かないので止めて報告に留めた。
+- **ため技の対象**: Showdown は 1 ターン目の対象に撃つ（`side.ts:677` `lastMoveTargetLoc` / 技名の volatile の `targetLoc`）。
+  我々は 2 ターン目にも対象を選ばせる。
+- はいすいのじんの volatile を sim-bridge の `MODELLED_VOLATILES` に入れるか。
+
+### 7. 検査と機械
+
+test_trap_sources（新規）・test_trap_immunities・test_runaway・test_actions・test_recharge・test_priority_block_per_target・
+test_port_coverage・test_port_gates・test_rust_node・test_resolve・test_line_endings・test_no_machine_specific_paths を `-n 0` で通過
+（xfail 1 はげきりんの生成の形）。ruff、`port_coverage.py --check`、`port_gate_audit.py --check`（かげふみの注記を更新）も通る。
+機械（heavy.py、--agent IKA-169）: release ビルド 8 コア 23 秒、port と resolve のテスト 26 秒、記録 335 秒、試し 2 秒（1 コア）。

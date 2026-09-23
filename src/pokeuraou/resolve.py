@@ -2061,7 +2061,15 @@ def _use_move(
                     from_foe=False,
                 )
             if turn.pos.field.weather not in skip_weather:
-                turn.add_volatile(action.side, action.slot, "twoturnmove")
+                # `twoturnmove` is `duration: 2` and stores its move (`onStart`:
+                # `this.effectState.move = effect.id`), which is what `getLockedMove`
+                # returns: the next turn's menu is that move alone (IKA-169). Without the
+                # move the menu could not lock, and without the duration a charge the
+                # Pokemon never fired (asleep, flinched) kept the marker for good.
+                turn.add_volatile(action.side, action.slot, "twoturnmove", duration=2)
+                charging = mon.volatile("twoturnmove") if mon is not None else None
+                if charging is not None:
+                    charging.move = action.move_id
                 turn.log(f"{action.label(reg)} is charging")
                 return [(1.0, turn, "")]
 
