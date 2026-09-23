@@ -5,6 +5,10 @@ book weights most and the four it weights second. Both play the same equilibrium
 and both arms seed game i from the same `[seed, i]`, so a game index means the same
 opponent team and the same spread class in both. This reads those files back.
 
+Since IKA-17 each game is played in both seats, one row per seat, and `outcome` is side
+0's. Our result is read from the side our four held (`read_place`, IKA-134); the rows on
+disk from 9/19 have no `seat` and are one seat with our four at side 0.
+
 The question is the book's ordering, not its win rate. A rating cannot see this -- both
 arms of `generation_match` draw from the same book, so an ordering error they share
 cancels exactly -- and `book vs uniform` was +18.9 points because discarding the bad 87 of
@@ -38,16 +42,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+# The flip from side 0's outcome to ours, shared with `selection_check` (tools/ is on the
+# path when this runs as a script, and `tests/_harness.load_tool` puts it there).
+from seats import our_win  # noqa: E402
+
 from pokeuraou.selection_book import SelectionBook  # noqa: E402
 from pokeuraou.teams import load_roster  # noqa: E402
-
-
-def wilson(wins: float, n: int) -> tuple[float, float]:
-    """A proportion and its half-width. Normal approximation, as everywhere else here."""
-    if n == 0:
-        return 0.0, 0.0
-    p = wins / n
-    return p, 1.96 * math.sqrt(max(p * (1 - p), 1e-9) / n)
 
 
 def sign_test(plus: int, minus: int) -> float:
@@ -64,6 +64,66 @@ def sign_test(plus: int, minus: int) -> float:
     extreme = min(plus, minus)
     tail = sum(comb(k) for k in range(extreme + 1))
     return min(1.0, 2.0 * tail / (2.0**n))
+
+
+def read_place(paths: list[Path]) -> dict[str, dict[tuple[int, int], float]]:
+    """Per arm, OUR result keyed by `(game, seat)`: 1.0 when the tested four won.
+
+    `outcome` is side 0's, always, and since IKA-17 `selection_check` plays each matchup
+    in both seats and says in `seat` which side our four held. Reading `outcome` as ours
+    whatever the seat printed the opponent's rate for every seat-1 row and, where the
+    seat-1 half dominated, the opposite sign (IKA-134). The flip is `seats.our_win`, the
+    one `selection_check --merge` uses, so this reader and that merge cannot disagree.
+
+    A row with no `seat` was written before the swap: one seat, our four at side 0. It is
+    read as seat 0 -- that is what it is, and it is every ordering run on disk -- but a
+    place whose files mix seatless and seated rows is refused, as the merge refuses it,
+    because pooling them puts the seat term back into half the total.
+    """
+    by_arm: dict[str, dict[tuple[int, int], float]] = defaultdict(dict)
+    kinds: set[bool] = set()
+    for path in paths:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            if "header" in row or "arm" not in row:
+                continue
+            kinds.add("seat" in row)
+            if len(kinds) > 1:
+                raise SystemExit(
+                    f"{path} mixes rows with and without `seat`: the seatless ones sat at "
+                    "side 0 before the seat swap and cannot be pooled with swapped ones."
+                )
+            seat = int(row.get("seat", 0))
+            key = (int(row["game"]), seat)
+            if key in by_arm[row["arm"]]:
+                raise SystemExit(
+                    f"{(row['arm'], *key)} appears in two rows; the shard split overlaps"
+                )
+            by_arm[row["arm"]][key] = float(our_win(float(row["outcome"]), seat))
+    return by_arm
+
+
+def paired(
+    by_arm: dict[str, dict[tuple[int, int], float]], heavy: str, second: str
+) -> tuple[list[float], float, float, int]:
+    """Per-matchup differences heavy - second, and each arm's rate over the seat-games.
+
+    Paired on `(game, seat)`: the same opponent four in the same seat. The two seats of
+    one game are the same matchup mirrored, so they are averaged into ONE difference
+    rather than counted as two independent ones (`tools/paired_result.py` says why). On a
+    one-seat run each game has one seat and this is the difference it always was.
+    """
+    shared = sorted(set(by_arm[heavy]) & set(by_arm[second]))
+    per_game: dict[int, list[float]] = defaultdict(list)
+    for key in shared:
+        per_game[key[0]].append(by_arm[heavy][key] - by_arm[second][key])
+    diffs = [sum(v) / len(v) for _g, v in sorted(per_game.items())]
+    n = len(shared)
+    hp = sum(by_arm[heavy][k] for k in shared) / n if n else 0.0
+    sp = sum(by_arm[second][k] for k in shared) / n if n else 0.0
+    return diffs, hp, sp, n
 
 
 def main() -> None:
@@ -159,19 +219,14 @@ def main() -> None:
     # equilibrium column strategy, so the matrix's claim is that this arm scores the game
     # value. Comparing the board against `entry.value` needs no model and no new games.
     levels: list[tuple[int, float, float, float]] = []
+    seats_seen: set[int] = set()
     rows = 0
     for place in places:
-        by_arm: dict[str, dict[int, float]] = defaultdict(dict)
-        for path in sorted(args.dir.glob(f"place{place}.part*.jsonl")) or sorted(
-            args.dir.glob(f"place{place}.jsonl")
-        ):
-            for line in path.read_text(encoding="utf-8").splitlines():
-                if not line.strip():
-                    continue
-                row = json.loads(line)
-                if "header" in row or "arm" not in row:
-                    continue
-                by_arm[row["arm"]][int(row["game"])] = float(row["outcome"])
+        by_arm = read_place(
+            sorted(args.dir.glob(f"place{place}.part*.jsonl"))
+            or sorted(args.dir.glob(f"place{place}.jsonl"))
+        )
+        seats_seen.update(seat for games in by_arm.values() for _g, seat in games)
         arms = [a for a in by_arm if "/" in a]
         if len(arms) != 2:
             print(f"  {place:>5}  incomplete: {len(arms)} forced arms, skipped")
@@ -191,18 +246,16 @@ def main() -> None:
         if found[heavy] == found[second]:
             print(f"  {place:>5}  the two arms carry equal mass, so there is no ordering")
             continue
-        # Paired on the game index: the same opponent and the same spread class.
-        shared = sorted(set(by_arm[heavy]) & set(by_arm[second]))
-        if not shared:
+        # Paired on the game index and the seat: the same opponent and the same spread
+        # class, with our result read from our own side (`read_place`).
+        diffs, hp, sp, n = paired(by_arm, heavy, second)
+        if not n:
             print(f"  {place:>5}  no shared game indices, skipped")
             continue
-        diffs = [by_arm[heavy][g] - by_arm[second][g] for g in shared]
-        n = len(diffs)
-        mean = sum(diffs) / n
-        var = sum((d - mean) ** 2 for d in diffs) / max(n - 1, 1)
-        half = 1.96 * math.sqrt(var / n)
-        hp, _ = wilson(sum(by_arm[heavy][g] for g in shared), n)
-        sp, _ = wilson(sum(by_arm[second][g] for g in shared), n)
+        pairs_n = len(diffs)
+        mean = sum(diffs) / pairs_n
+        var = sum((d - mean) ** 2 for d in diffs) / max(pairs_n - 1, 1)
+        half = 1.96 * math.sqrt(var / pairs_n)
         # What the book staked. The heavy arm is in the support so its loss is zero, and
         # the prediction for `heavy - second` is the second arm's loss. Both arms in the
         # support makes this 0.0 by construction, which is the point the docstring makes.
@@ -221,6 +274,15 @@ def main() -> None:
             signs.append((1 if mean > 0 else -1, mean))
         calibration.append((predicted, mean))
 
+    # Which seats the rates above are over. `n` is seat-games and the interval is over
+    # matchups, so on a two-seat run n is twice the number of pairs the interval counts.
+    if seats_seen == {0, 1}:
+        print("\n  both seats: rates are the tested four's own, read from its side; n is seat-games")
+    else:
+        print(
+            f"\n  one seat only ({sorted(seats_seen)}): our four at side "
+            f"{next(iter(seats_seen), '?')} in every game, so the LEVEL below has the seat term in it"
+        )
     plus = sum(1 for s, _ in signs if s > 0)
     minus = len(signs) - plus
     print(f"\n  {rows} opponents, {plus} where the heavier four won, {minus} where it lost")
