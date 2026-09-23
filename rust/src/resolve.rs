@@ -577,7 +577,8 @@ impl<'a> Turn<'a> {
             return;
         }
         if vid == "confusion" {
-            crate::moves::start_confusion(self, side, slot);
+            let source = self.current_actor;
+            crate::moves::confuse(self, side, slot, source);
             return;
         }
         let Some(mon) = self.mon_at_mut(side, slot) else { return };
@@ -716,6 +717,9 @@ fn ability_handled(ability: &str) -> bool {
             | "guarddog" | "hypercutter" | "bigpecks" | "keeneye" | "rockhead"
             // The hit count, in `moves::multihit_counts` (IKA-160).
             | "skilllink"
+            // Past a foe's Safeguard, in `moves::confusion_refused` (IKA-189). Its screens
+            // and Substitute are Python's to model first (the damage notes name it).
+            | "infiltrator"
             // Weather setters, applied on switch-in and mega.
             | "drought" | "drizzle" | "sandstream" | "snowwarning"
             // Type immunities and absorbers, applied by `absorb`.

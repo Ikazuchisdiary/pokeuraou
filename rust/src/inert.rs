@@ -66,7 +66,6 @@ pub fn ability_is_inert(id: &str) -> bool {
             | "illuminate"
             | "illusion"
             | "imposter"
-            | "infiltrator"
             | "innardsout"
             | "intrepidsword"
             | "keeneye"

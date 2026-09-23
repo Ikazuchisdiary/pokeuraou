@@ -176,6 +176,14 @@ field and holds every cell that uses it. On every other position the taught Poke
 move is the hammer, so the menu -- Python's, the port builds none -- drops it; those
 slots are counted against the menu with the `cantusetwice` rule taken out.
 
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --confusion-guard
+
+`--confusion-guard` (IKA-189) teaches Confuse Ray to every Pokemon on the field, confuses
+the first on each side with Showdown's own `time` 3, and puts Own Tempo, Misty Terrain or
+Safeguard on the rest by position in turn -- no recorded team carries any of the three.
+Every cell is held branch by branch; the cells `unguarded` (the refusals only for the
+fatigue, the self-hit at the highest roll) moves are counted, and each part alone.
+
 The budget, and the second invocation that goes with it (IKA-146):
 
     uv run python tools/diff_node.py --scenario examples/scenario-turn5.json --budget fast --limit 0
@@ -737,6 +745,76 @@ def confused_on_field(pos: Position) -> bool:
         for side in pos.sides
         for mon in side.active_pokemon()
     )
+
+
+#: What --confusion-guard puts on, by position in turn (IKA-189).
+CONFUSION_GUARDS = ("owntempo", "mistyterrain", "safeguard")
+
+
+def guard_confusion(reg, pos: Position, index: int) -> str:  # noqa: ANN001
+    """For --confusion-guard: Confuse Ray in the last free move slot of every Pokemon on
+    the field (as `teach_hazards` picks it), the first Pokemon on each side confused with
+    Showdown's own `time` 3 -- so the self-hit's roll is the only chance in it -- and one of
+    `CONFUSION_GUARDS`, by position in turn: Own Tempo on every other Pokemon on the field,
+    Misty Terrain, or Safeguard on both sides. Returns the guard."""
+    guard = CONFUSION_GUARDS[index % len(CONFUSION_GUARDS)]
+    pp = reg.moves["confuseray"].pp
+    for side in pos.sides:
+        first = True
+        for mon in side.active_pokemon():
+            if mon is None or mon.fainted:
+                continue
+            if mon.moves and not any(s.id == "confuseray" for s in mon.moves):
+                held = {v.move for v in mon.volatiles if v.move} | {mon.last_move}
+                free = [i for i, s in enumerate(mon.moves) if s.id not in held]
+                if free:
+                    mon.moves[free[-1]] = MoveSlot(id="confuseray", pp=pp, maxpp=pp)
+            if first:
+                mon.volatiles = [v for v in mon.volatiles if v.id != "confusion"]
+                mon.volatiles.append(Effect(id="confusion", extra={"time": 3}))
+                first = False
+            elif guard == "owntempo":
+                # A confused Own Tempo Pokemon is a state no game reaches (`onUpdate`).
+                mon.ability = "owntempo"
+                mon.volatiles = [v for v in mon.volatiles if v.id != "confusion"]
+        if guard == "safeguard" and side.side_condition("safeguard") is None:
+            side.side_conditions.append(Effect(id="safeguard", duration=5))
+    if guard == "mistyterrain":
+        pos.field.terrain = "mistyterrain"
+        pos.field.terrain_duration = 5
+    return guard
+
+
+class unguarded:  # noqa: N801 - read as a phrase at the call site
+    """Python with confusion refused and dealt as before IKA-189: the control for
+    --confusion-guard. Only the rampage's fatigue (its own source) meets Own Tempo and
+    Misty Terrain, and the self-hit is the highest roll whatever the budget's. `part`
+    takes out only the refusals or only the roll, so each can be counted on its own."""
+
+    def __init__(self, part: str = "both") -> None:
+        assert part in ("both", "refusals", "roll")
+        self.part = part
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = (resolve_mod._confusion_refused, resolve_mod._confusion_damage)
+        refused, damage = self.real
+
+        def old_refused(turn, side, slot, source):  # noqa: ANN001, ANN202
+            return refused(turn, side, slot, source) if source == (side, slot) else None
+
+        if self.part != "roll":
+            resolve_mod._confusion_refused = old_refused
+        if self.part != "refusals":
+            resolve_mod._confusion_damage = lambda turn, side, slot, roll=0: damage(
+                turn, side, slot, 0
+            )
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        resolve_mod._confusion_refused, resolve_mod._confusion_damage = self.real
 
 
 class unchanged:  # noqa: N801 - read as a phrase at the call site
@@ -1370,6 +1448,14 @@ def main() -> None:
         "`unconfused` moves",
     )
     ap.add_argument(
+        "--confusion-guard",
+        action="store_true",
+        help="teach Confuse Ray to every Pokemon on the field, confuse the first on each "
+        "side (Showdown's `time` 3) and put Own Tempo, Misty Terrain or Safeguard on the "
+        "rest by position in turn, hold every cell to the port branch by branch, and count "
+        "where IKA-189's refusals or self-hit roll fired: the cells `unguarded` moves",
+    )
+    ap.add_argument(
         "--toxic-debris",
         action="store_true",
         help="keep positions with Toxic Debris on the field, hold every cell to the port "
@@ -1548,6 +1634,9 @@ def main() -> None:
     if args.confused:
         dazed = sum(confuse(pos, index) for index, pos in enumerate(positions))
         print(f"a confusion put on {dazed} Pokemon on the field")
+    if args.confusion_guard:
+        guards = Counter(guard_confusion(reg, pos, index) for index, pos in enumerate(positions))
+        print(f"Confuse Ray taught and a confusion guard put on: {dict(guards)}")
     if args.salt_cure:
         salted = sum(salt(pos) for pos in positions)
         print(f"Salt Cure put on {salted} Pokemon on the field")
@@ -1628,6 +1717,10 @@ def main() -> None:
     # Beside a confused Pokemon, every cell; and where IKA-177's rule moved the answer.
     dazed_cells = dazed_wrong = dazed_refused = dazed_fired = dazed_fired_wrong = 0
     dazed_worst = 0.0
+    # Under a confusion guard, every cell; and where IKA-189's rule moved the answer.
+    guard_cells = guard_wrong = guard_refused = guard_fired = guard_fired_wrong = 0
+    guard_by_refusal = guard_by_roll = 0
+    guard_worst = 0.0
     # Beside a frozen Pokemon, every cell; and where a thaw moved the answer.
     icy = icy_wrong = icy_refused = thawed = thawed_wrong = 0
     thawed_worst = 0.0
@@ -2034,6 +2127,42 @@ def main() -> None:
                         shown += 1
                         print(f"  cell {(i, j)} beside a confused Pokemon: {wrong[0][:200]}")
 
+        if args.confusion_guard:
+            node = rustnode.node_for(reg)
+            for i, a in enumerate(row):
+                for j, b in enumerate(col):
+                    guard_cells += 1
+                    here = resolve_turn(reg, pos, [a, b], budget=budget)
+                    with unguarded():
+                        control = resolve_turn(reg, pos, [a, b], budget=budget)
+                    wrong = (
+                        ["no warm process"]
+                        if node is None
+                        else branch_differences(node, reg, pos, a, b, here, budget)
+                    )
+                    refused_here = wrong == ["the port refused the turn"]
+                    guard_refused += refused_here
+                    if refused_here:
+                        wrong = []
+                    guard_wrong += bool(wrong)
+                    if differ(outcome(here), outcome(control)):
+                        with unguarded("refusals"):
+                            unrefused = resolve_turn(reg, pos, [a, b], budget=budget)
+                        with unguarded("roll"):
+                            unrolled = resolve_turn(reg, pos, [a, b], budget=budget)
+                        guard_by_refusal += differ(outcome(here), outcome(unrefused))
+                        guard_by_roll += differ(outcome(here), outcome(unrolled))
+                        guard_fired += 1
+                        guard_fired_wrong += bool(wrong)
+                        for index in range(len(evaluators)):
+                            guard_worst = max(
+                                guard_worst,
+                                abs(float(got[index][i, j] - expected[index][i, j])),
+                            )
+                    if wrong and shown < 5:
+                        shown += 1
+                        print(f"  cell {(i, j)} under a confusion guard: {wrong[0][:200]}")
+
         if args.frozen:
             node = rustnode.node_for(reg)
             for i, a in enumerate(row):
@@ -2186,6 +2315,16 @@ def main() -> None:
         print(f"    {dazed_fired} of {dazed_cells} cells")
         print(f"    cells whose branches, weights, notes or positions differ  {dazed_fired_wrong}")
         print(f"    worst cell difference there  {dazed_worst:.3e}")
+    if args.confusion_guard:
+        print("\n  under a confusion guard, every cell -- held branch by branch")
+        print(f"    {guard_cells} of {cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {guard_wrong}")
+        print(f"    cells the port refused, filled in Python and not held  {guard_refused}")
+        print("  where a refusal or the self-hit's roll fired -- the cells `unguarded` moves")
+        print(f"    {guard_fired} of {guard_cells} cells")
+        print(f"      a refusal alone moves  {guard_by_refusal}; the roll alone  {guard_by_roll}")
+        print(f"    cells whose branches, weights, notes or positions differ  {guard_fired_wrong}")
+        print(f"    worst cell difference there  {guard_worst:.3e}")
     if args.frozen:
         print("\n  beside a frozen Pokemon, every cell -- held branch by branch")
         print(f"    {icy} of {cells} cells")
@@ -2286,6 +2425,10 @@ def main() -> None:
         failed.append(f"{dazed_wrong} cells beside a confused Pokemon differ by branch")
     if args.confused and not dazed_fired:
         failed.append("IKA-177's confusion moved no cell, so agreeing here says nothing")
+    if guard_wrong:
+        failed.append(f"{guard_wrong} cells under a confusion guard differ by branch")
+    if args.confusion_guard and not guard_fired:
+        failed.append("IKA-189's confusion guard moved no cell, so agreeing here says nothing")
     if icy_wrong:
         failed.append(f"{icy_wrong} cells beside a frozen Pokemon differ by branch")
     if args.frozen and not thawed:
