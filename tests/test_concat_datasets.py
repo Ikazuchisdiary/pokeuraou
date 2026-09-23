@@ -99,3 +99,24 @@ def test_a_shard_without_hp_share_is_refused() -> None:
 def test_one_shard_is_returned_unchanged() -> None:
     a = shard(4, games=2, foe_names=("worlds",), outcome=1.0)
     assert concat_datasets([a]) is a
+
+
+def test_side_ones_value_is_nan_where_a_shard_predates_it(tmp_path) -> None:  # noqa: ANN001
+    """IKA-127: a shard encoded before `foe_search_value` is none, not zero, and not
+    shifted onto its neighbour's rows; and the column survives a save and a load."""
+    from pokeuraou.value import load_dataset, save_dataset
+
+    old = shard(3, games=1, foe_names=("worlds",), outcome=1.0)
+    new = shard(2, games=1, foe_names=("worlds",), outcome=0.0)
+    new.foe_search_value = np.array([0.25, np.nan], np.float32)
+    joined = concat_datasets([old, new])
+    assert np.isnan(joined.foe_search_value[:3]).all()
+    assert joined.foe_search_value[3] == np.float32(0.25)
+    assert np.isnan(joined.foe_search_value[4])
+    # Neither shard has it: the join has none either, as each shard did.
+    assert len(concat_datasets([old, old]).foe_search_value) == 0
+
+    path = tmp_path / "shard.npz"
+    save_dataset(path, joined, meta={})
+    back = load_dataset(path)
+    assert np.array_equal(back.foe_search_value, joined.foe_search_value, equal_nan=True)
