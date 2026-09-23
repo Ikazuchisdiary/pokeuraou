@@ -422,8 +422,10 @@ def _is_trapped(reg: Regulation, mon) -> bool:  # noqa: ANN001
     ``mon.trapped`` is Showdown's own verdict when the position came from the oracle, and
     is authoritative because it already accounts for Ghost types, Shed Shell and ability
     suppression. The volatile check covers hand-written positions that omit the flag, and
-    the positions the search builds, which carry a trapper's volatile and a flag nobody
-    recomputed -- so it has to know Run Away (IKA-136).
+    the positions our resolver builds -- the search's children, and every position of a
+    generated game -- which carry a trapper's volatile and a flag nobody
+    recomputed -- so it has to know Run Away (IKA-136), Ghost types and Shed Shell
+    (IKA-163).
     """
     if mon.trapped:
         return True
@@ -433,17 +435,41 @@ def _is_trapped(reg: Regulation, mon) -> bool:  # noqa: ANN001
 
 
 def _escapes_traps(reg: Regulation, mon) -> bool:  # noqa: ANN001
-    """Run Away where the regulation's dex gives it Showdown's trap immunity.
+    """Whether Showdown frees this Pokemon from every trap in `TRAPPING_VOLATILES`.
 
-    The champions mod (Showdown d849b2200) adds `onTrapPokemon` at priority -10, after
-    every trapper, and it sets `pokemon.trapped = false`. The dump records that hook, so
-    this follows the dump rather than the format name: in a dex without it Run Away does
-    nothing in battle, which is what it did here before the bump.
+    Each of those volatiles traps by calling `pokemon.tryTrap()`, so each escape below
+    beats all three. All three follow the dump rather than a list written here:
+
+    - **Ghost types** (IKA-163). `tryTrap` begins
+      `if (!this.runStatusImmunity('trapped')) return false;`, which is the type chart's
+      `ghost: { damageTaken: { trapped: 3 } }` -- the dump's `effectImmunities.trapped`.
+      Mean Look and Octolock never land on a Ghost, but Infestation and the other binding
+      moves do: `partiallytrapped` has no immunity of its own, only its trap does.
+    - **Shed Shell** (IKA-163). `onTrapPokemonPriority: -10` sets `pokemon.trapped = false`
+      after every trapper has run.
+    - **Run Away** (IKA-136). The champions mod (Showdown d849b2200) gives it the same
+      hook as Shed Shell; in a dex without the hook Run Away does nothing in battle,
+      which is what it did here before the bump.
+
+    Embargo, Magic Room and Klutz would silence Shed Shell and Gastro Acid Run Away; the
+    resolver models none of them, so neither does this.
     """
-    if mon.ability != "runaway":
-        return False
-    ability = reg.abilities.get("runaway")
-    return ability is not None and "onTrapPokemon" in ability.raw.get("customHooks", ())
+    types = mon.types or _species_types(reg, mon.species)
+    if reg.immune_to_effect("trapped", types):
+        return True
+    if mon.item == "shedshell" and _frees_holder(reg.items.get("shedshell")):
+        return True
+    return mon.ability == "runaway" and _frees_holder(reg.abilities.get("runaway"))
+
+
+def _species_types(reg: Regulation, species: str) -> tuple[str, ...]:
+    entry = reg.species.get(species)
+    return () if entry is None else entry.types
+
+
+def _frees_holder(entry) -> bool:  # noqa: ANN001
+    """Whether the dump gives this item or ability its own `onTrapPokemon` hook."""
+    return entry is not None and "onTrapPokemon" in entry.raw.get("customHooks", ())
 
 
 def side_actions(

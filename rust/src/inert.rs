@@ -256,7 +256,6 @@ pub fn item_is_inert(id: &str) -> bool {
             | "scovillainite"
             | "scraftinite"
             | "sharpedonite"
-            | "shedshell"
             | "skarmorite"
             | "slowbronite"
             | "staraptite"
