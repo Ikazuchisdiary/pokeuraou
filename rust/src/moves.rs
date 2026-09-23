@@ -1754,13 +1754,13 @@ fn after_hit(
         }
         if let Some(status) = mv.status.as_deref() {
             let status = status.to_string();
-            turn.apply_status(target.0, target.1, &status)?;
+            crate::resolve::apply_status_from(turn, target, &status, me)?;
         }
     }
 
     let defender_ability = turn.mon_at(target.0, target.1).map(|m| m.ability);
     if landed && matches!(defender_ability, Some(a) if a.as_str() == "spicyspray") {
-        turn.apply_status(me.0, me.1, "brn")?;
+        crate::resolve::apply_status_from(turn, me, "brn", target)?;
     }
 
     // Throat Chop adds its own condition from a 100%-chance `secondary.onHit`, so there is
@@ -1943,7 +1943,7 @@ fn apply_secondary(
     }
     if let Some(status) = secondary.get("status").and_then(Value::as_str) {
         let status = status.to_string();
-        turn.apply_status(target.0, target.1, &status)?;
+        crate::resolve::apply_status_from(turn, target, &status, (action.side, action.slot))?;
     }
     if let Some(vid) = secondary.get("volatileStatus").and_then(Value::as_str) {
         let vid = vid.to_string();
@@ -3127,7 +3127,7 @@ fn apply_status_move(
         }
         if let Some(status) = mv.status.as_deref() {
             let status = status.to_string();
-            turn.apply_status(target.0, target.1, &status)?;
+            crate::resolve::apply_status_from(turn, *target, &status, me)?;
         }
         if let Some(vid) = mv.volatile_status.as_deref() {
             let vid = vid.to_string();

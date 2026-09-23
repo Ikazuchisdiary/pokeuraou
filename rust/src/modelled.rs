@@ -16,6 +16,7 @@ pub fn ability_is_modelled(id: &str) -> bool {
             | "armortail"
             | "aromaveil"
             | "aurabreak"
+            | "auraguard"
             | "battlearmor"
             | "beadsofruin"
             | "bigpecks"

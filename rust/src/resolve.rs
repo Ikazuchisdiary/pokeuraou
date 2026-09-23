@@ -253,6 +253,9 @@ pub struct Turn<'a> {
     /// and Emergency Exit read once the hits are over (IKA-191). Never read across actions.
     pub(crate) move_start_hp: Option<[[i64; 2]; 2]>,
     pub(crate) move_hit: [[bool; 2]; 2],
+    /// Python's `_Turn.draws`: how a draw inside one switch-in is answered (IKA-203). Set
+    /// only by `switch_in_with_draws`, for the length of the switch-in.
+    pub(crate) draws: Option<Draws>,
 }
 
 impl<'a> Turn<'a> {
@@ -276,6 +279,7 @@ impl<'a> Turn<'a> {
             rolls_stratified: false,
             move_start_hp: None,
             move_hit: [[false; 2]; 2],
+            draws: None,
         }
     }
 
@@ -732,6 +736,9 @@ fn ability_handled(ability: &str) -> bool {
             | "infiltrator"
             // Weather setters, applied on switch-in and mega.
             | "drought" | "drizzle" | "sandstream" | "snowwarning"
+            // `trace` in `switch_in_ability`, `synchronize` in `apply_status_from`, and
+            // Aura Guard's contact half in the damage layer (IKA-203).
+            | "trace" | "synchronize" | "auraguard"
             // Type immunities and absorbers, applied by `absorb`.
             | "flashfire" | "waterabsorb" | "dryskin" | "voltabsorb" | "lightningrod"
             | "motordrive" | "stormdrain" | "sapsipper" | "eartheater" | "wellbakedbody"
@@ -1454,6 +1461,8 @@ fn same_turn(a: &Turn, b: &Turn) -> bool {
         // The move resolving now's; stale between actions, where branches merge (IKA-191).
         move_start_hp: _,
         move_hit: _,
+        // Set only inside one switch-in, None wherever branches merge (IKA-203).
+        draws: _,
     } = a;
     std::ptr::eq(*reg, b.reg)
         && *self_switch_pending == b.self_switch_pending
@@ -1919,18 +1928,18 @@ pub(crate) type Outcome<'a> = (f64, Turn<'a>);
 
 fn execute<'a>(
     reg: &'a Reg,
-    mut turn: Turn<'a>,
+    turn: Turn<'a>,
     action: &QueuedAction,
     budget: Budget,
 ) -> Result<Vec<Outcome<'a>>, String> {
     match action.kind {
         ActionKind::Switch => {
-            do_switch(reg, &mut turn, action)?;
-            Ok(vec![(1.0, turn)])
+            let may = switch_may_trace(&turn, action);
+            switch_in_with_draws(turn, &budget, may, |state| do_switch(reg, state, action))
         }
         ActionKind::Mega => {
-            do_mega(reg, &mut turn, action)?;
-            Ok(vec![(1.0, turn)])
+            let may = mega_may_trace(reg, &turn, action);
+            switch_in_with_draws(turn, &budget, may, |state| do_mega(reg, state, action))
         }
         ActionKind::Move => {
             let mut outcomes = do_move(reg, turn, action, budget)?;
@@ -2199,14 +2208,17 @@ pub fn resume_turn<'a>(
     // the hazards and fires its ability before a slow one.
     placed.sort_by_key(|(speed, side, slot)| (-speed, *side, *slot));
     let gone: Vec<(usize, usize)> = placed.iter().map(|(_, side, slot)| (*side, *slot)).collect();
-    for (_speed, side_index, slot) in placed {
-        on_switch_in(reg, &mut turn, side_index, slot)?;
-    }
-
-    turn.self_switch_pending = self_switches_needed(&turn.pos)
-        .iter()
-        .any(|side| side.iter().any(|flag| *flag));
+    let may_trace = placed.iter().any(|(_, side_index, slot)| {
+        matches!(turn.mon_at(*side_index, *slot), Some(mon) if mon.ability == "trace")
+    });
     let budget = turn.budget;
+    let forks = switch_in_with_draws(turn, &budget, may_trace, |state| {
+        for (_speed, side_index, slot) in &placed {
+            on_switch_in(reg, state, *side_index, *slot)?;
+        }
+        Ok(())
+    })?;
+
     // Python's `_without_replaced`: an action queued for the Pokemon that left goes with it.
     let remaining: Vec<QueuedAction> = paused
         .remaining
@@ -2214,18 +2226,7 @@ pub fn resume_turn<'a>(
         .filter(|queued| !gone.contains(&(queued.side, queued.slot)))
         .cloned()
         .collect();
-    if turn.self_switch_pending {
-        // Python's `_suspended_again`: the other side is asked before the queue runs on.
-        let mut unmodelled = turn.unmodelled.clone();
-        unmodelled.extend(notes);
-        return Ok(TurnResult {
-            branches: Vec::new(),
-            exact: true,
-            suspended: vec![Suspended { probability: paused.probability, turn, remaining }],
-            unmodelled,
-        });
-    }
-    let mut result = run_queue(reg, vec![Live { weight: 1.0, turn, remaining }], budget)?;
+    let mut result = resume_forks(reg, forks, &remaining)?;
     result.unmodelled.extend(notes);
     for branch in result.branches.iter_mut() {
         branch.probability *= paused.probability;
@@ -2388,6 +2389,8 @@ fn on_switch_in(reg: &Reg, turn: &mut Turn, side: usize, slot: usize) -> Result<
 }
 
 fn switch_in_ability(turn: &mut Turn, side: usize, slot: usize) {
+    // First, so that the ability it copies starts here too, as Python's (IKA-203).
+    trace(turn, side, slot);
     let (ability, item, maxhp) = {
         let Some(mon) = turn.mon_at(side, slot) else { return };
         if mon.fainted {
@@ -2598,4 +2601,239 @@ fn do_mega(reg: &Reg, turn: &mut Turn, action: &QueuedAction) -> Result<(), Stri
     switch_in_ability(turn, action.side, action.slot);
     check_white_herb(turn);
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Trace and Synchronize (IKA-203)
+// ---------------------------------------------------------------------------
+
+/// Python's `_Draws`, without the generator: a phase that samples a real game is
+/// Python's alone.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Draws {
+    replay: bool,
+    presets: Vec<usize>,
+    cursor: usize,
+    opened: Vec<Vec<f64>>,
+    report: bool,
+}
+
+/// Python's `_draw`: Showdown's `sample` inside a switch-in.
+fn draw(turn: &mut Turn, weights: &[f64], what: &str) -> usize {
+    if weights.len() < 2 {
+        return 0;
+    }
+    if let Some(draws) = turn.draws.as_mut() {
+        if draws.replay {
+            draws.cursor += 1;
+            if draws.cursor <= draws.presets.len() {
+                return draws.presets[draws.cursor - 1];
+            }
+            draws.opened.push(weights.to_vec());
+            return 0;
+        }
+    }
+    let report = turn.draws.as_ref().map(|d| d.report).unwrap_or(false);
+    if !turn.budget.pinned_policy || report {
+        turn.report(format!("{what} (the first; not branched)"));
+    }
+    0
+}
+
+/// Python's `_traceable`: no `flags.notrace`, not `noability`; an id the dump leaves out
+/// (Aura Guard) has no flags.
+fn traceable(reg: &Reg, ability: &str) -> bool {
+    !ability.is_empty() && ability != "noability" && !reg.untraceable.contains(ability)
+}
+
+/// Python's `_trace`: the ability of a foe standing, drawn uniformly over the foes, and
+/// nothing with an Ability Shield or a `noability` foe.
+fn trace(turn: &mut Turn, side: usize, slot: usize) {
+    let shielded = match turn.mon_at(side, slot) {
+        Some(mon) if !mon.fainted && mon.ability == "trace" => {
+            matches!(mon.item, Some(i) if i.as_str() == "abilityshield")
+        }
+        _ => return,
+    };
+    let foe_side = 1 - side;
+    let foes: Vec<Id> = (0..turn.pos.sides[foe_side].active.len())
+        .filter_map(|foe_slot| match turn.mon_at(foe_side, foe_slot) {
+            Some(foe) if !foe.fainted => Some(foe.ability),
+            _ => None,
+        })
+        .collect();
+    if shielded || foes.iter().any(|a| a.as_str() == "noability") {
+        return;
+    }
+    let mut abilities: Vec<Id> = Vec::new();
+    let mut weights: Vec<f64> = Vec::new();
+    for ability in foes {
+        if !traceable(turn.reg, ability.as_str()) {
+            continue;
+        }
+        match abilities.iter().position(|a| *a == ability) {
+            Some(index) => weights[index] += 1.0,
+            None => {
+                abilities.push(ability);
+                weights.push(1.0);
+            }
+        }
+    }
+    if abilities.is_empty() {
+        turn.report("trace found nothing to copy (it keeps seeking; not modelled)");
+        return;
+    }
+    let copied = abilities[draw(turn, &weights, "trace target")];
+    if let Some(mon) = turn.mon_at_mut(side, slot) {
+        mon.ability = copied;
+    }
+}
+
+/// Python's `_switch_may_trace`.
+fn switch_may_trace(turn: &Turn, action: &QueuedAction) -> bool {
+    if action.switch_to.is_none() && action.switch_species.is_none() {
+        return false;
+    }
+    let side = &turn.pos.sides[action.side];
+    let found = action
+        .switch_species
+        .and_then(|species| {
+            side.pokemon.iter().find(|mon| mon.species == species || mon.base_species == species)
+        })
+        .or_else(|| action.switch_to.and_then(|index| side.pokemon.get(index)));
+    matches!(found, Some(mon) if mon.ability == "trace")
+}
+
+/// Python's `_mega_may_trace`.
+fn mega_may_trace(reg: &Reg, turn: &Turn, action: &QueuedAction) -> bool {
+    let Some(mon) = turn.mon_at(action.side, action.slot) else { return false };
+    let Some(item) = mon.item else { return false };
+    let Some(target) = reg
+        .mega_targets
+        .get(&(mon.species.as_str().to_string(), item.as_str().to_string()))
+    else {
+        return false;
+    };
+    let target_id = crate::reg::to_id(target);
+    match reg.species.get(target_id.as_str()) {
+        Some(entry) => entry.abilities.first().map(|a| crate::reg::to_id(a) == "trace").unwrap_or(false),
+        None => false,
+    }
+}
+
+/// Python's `_switch_in_with_draws`: the switch-in once per outcome of its draws, the
+/// first on `turn` itself, the others on copies of the state from before, breadth first.
+fn switch_in_with_draws<'a>(
+    mut turn: Turn<'a>,
+    budget: &Budget,
+    may_draw: bool,
+    mut run: impl FnMut(&mut Turn<'a>) -> Result<(), String>,
+) -> Result<Vec<(f64, Turn<'a>)>, String> {
+    if !may_draw || !(budget.enumerate_secondary && !budget.pinned_policy) {
+        run(&mut turn)?;
+        return Ok(vec![(1.0, turn)]);
+    }
+    let base = turn.clone();
+    let mut first = Some(turn);
+    let mut out: Vec<(f64, Turn<'a>)> = Vec::new();
+    let mut pending: std::collections::VecDeque<(Vec<usize>, f64)> =
+        std::collections::VecDeque::new();
+    pending.push_back((Vec::new(), 1.0));
+    while let Some((presets, mut weight)) = pending.pop_front() {
+        let mut state = match first.take() {
+            Some(state) => state,
+            None => base.clone(),
+        };
+        state.draws = Some(Draws { replay: true, presets: presets.clone(), ..Default::default() });
+        run(&mut state)?;
+        let opened = state.draws.take().map(|d| d.opened).unwrap_or_default();
+        let mut prefix = presets;
+        for weights in opened {
+            let total: f64 = weights.iter().sum();
+            for option in 1..weights.len() {
+                let mut chosen = prefix.clone();
+                chosen.push(option);
+                pending.push_back((chosen, weight * weights[option] / total));
+            }
+            weight *= weights[0] / total;
+            prefix.push(0);
+        }
+        out.push((weight, state));
+    }
+    Ok(out)
+}
+
+/// Python's `_resume_forks`: `resume_turn`'s tail for each outcome, joined.
+fn resume_forks<'a>(
+    reg: &'a Reg,
+    forks: Vec<(f64, Turn<'a>)>,
+    remaining: &[QueuedAction],
+) -> Result<TurnResult<'a>, String> {
+    let single = forks.len() == 1 && forks[0].0 == 1.0;
+    let mut parts: Vec<(f64, TurnResult<'a>)> = Vec::with_capacity(forks.len());
+    for (weight, mut state) in forks {
+        state.self_switch_pending =
+            self_switches_needed(&state.pos).iter().any(|side| side.iter().any(|flag| *flag));
+        let part = if state.self_switch_pending {
+            // Python's `_suspended_again`: the other side is asked before the queue runs on.
+            let unmodelled = state.unmodelled.clone();
+            TurnResult {
+                branches: Vec::new(),
+                exact: true,
+                suspended: vec![Suspended { probability: 1.0, turn: state, remaining: remaining.to_vec() }],
+                unmodelled,
+            }
+        } else {
+            let budget = state.budget;
+            run_queue(reg, vec![Live { weight: 1.0, turn: state, remaining: remaining.to_vec() }], budget)?
+        };
+        parts.push((weight, part));
+    }
+    if single {
+        return Ok(parts.pop().expect("one part").1);
+    }
+    let mut joined = TurnResult {
+        branches: Vec::new(),
+        exact: true,
+        suspended: Vec::new(),
+        unmodelled: Default::default(),
+    };
+    for (weight, part) in parts {
+        for mut branch in part.branches {
+            branch.probability *= weight;
+            joined.branches.push(branch);
+        }
+        for mut pause in part.suspended {
+            pause.probability *= weight;
+            joined.suspended.push(pause);
+        }
+        joined.exact &= part.exact;
+        joined.unmodelled.extend(part.unmodelled);
+    }
+    Ok(joined)
+}
+
+/// Python's `_apply_status_from`: `apply_status` with the Pokemon that caused it.
+pub(crate) fn apply_status_from(
+    turn: &mut Turn,
+    target: Slot,
+    status: &str,
+    source: Slot,
+) -> Result<bool, String> {
+    let applied = turn.apply_status(target.0, target.1, status)?;
+    if applied {
+        synchronize(turn, target, source, status)?;
+    }
+    Ok(applied)
+}
+
+/// Python's `_synchronize`: a poison, burn or paralysis from another Pokemon is passed back.
+fn synchronize(turn: &mut Turn, holder: Slot, source: Slot, status: &str) -> Result<(), String> {
+    if source == holder || status == "slp" || status == "frz" {
+        return Ok(());
+    }
+    if !matches!(turn.mon_at(holder.0, holder.1), Some(mon) if mon.ability == "synchronize") {
+        return Ok(());
+    }
+    apply_status_from(turn, source, status, holder).map(|_| ())
 }

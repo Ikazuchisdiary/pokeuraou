@@ -611,7 +611,7 @@ class _Turn:
                  "hurt_this_turn", "move_failed", "move_damage_total", "move_connected",
                  "acted", "actions_remaining", "self_switch_pending",
                  "pending_secondaries", "current_actor", "wipe_order", "acts",
-                 "move_start_hp", "move_hit")
+                 "move_start_hp", "move_hit", "draws")
 
     def __init__(
         self,
@@ -668,6 +668,10 @@ class _Turn:
         #: hits are over (IKA-191). Never read across actions.
         self.move_start_hp: dict[tuple[int, int], int] | None = None
         self.move_hit: set[tuple[int, int]] = set()
+        #: How a draw inside a switch-in (Trace's target, IKA-203) is answered. Set only
+        #: for the length of one switch-in by `_switch_in_with_draws`, or by a phase that
+        #: is handed a generator; a clone never carries it.
+        self.draws: _Draws | None = None
 
     def clone(self) -> _Turn:
         fresh = _Turn(self.reg, self.pos.copy(), self.budget, self.attacks)
@@ -1236,7 +1240,8 @@ _MERGE_COMPARED_STATE = (
 #: resolver's coverage, not about the state. `reg` is compared by identity below.
 #: `move_start_hp` and `move_hit` belong to the move resolving now and are set afresh by
 #: the next one, so between actions, where branches merge, they are stale (IKA-191).
-_MERGE_IGNORED_STATE = ("events", "acts", "unmodelled", "move_start_hp", "move_hit")
+#: `draws` is set only inside one switch-in and is None wherever branches merge (IKA-203).
+_MERGE_IGNORED_STATE = ("events", "acts", "unmodelled", "move_start_hp", "move_hit", "draws")
 
 
 def _action_key(action: QueuedAction) -> tuple:
@@ -1662,11 +1667,13 @@ def _execute(
     reg: Regulation, turn: _Turn, action: QueuedAction, budget: Budget
 ) -> list[Outcome]:
     if action.kind == "switch":
-        _do_switch(reg, turn, action)
-        return [(1.0, turn, "")]
+        return _switch_in_outcomes(
+            turn, budget, _switch_may_trace(turn, action), lambda s: _do_switch(reg, s, action)
+        )
     if action.kind == "mega":
-        _do_mega(reg, turn, action)
-        return [(1.0, turn, "")]
+        return _switch_in_outcomes(
+            turn, budget, _mega_may_trace(reg, turn, action), lambda s: _do_mega(reg, s, action)
+        )
     outcomes = _do_move(reg, turn, action, budget)
     for _weight, state, _note in outcomes:
         state.acted.add((action.side, action.slot))
@@ -1828,6 +1835,8 @@ def _switch_in_ability(turn: _Turn, side: int, slot: int) -> None:
     mon = turn.mon_at(side, slot)
     if mon is None or mon.fainted:
         return
+    # First, so that the ability it copies starts here too (`setAbility` runs its Start).
+    _trace(turn, side, slot)
 
     weather = WEATHER_ABILITIES.get(mon.ability)
     if weather is not None and turn.pos.field.weather != weather:
@@ -1880,6 +1889,247 @@ def _do_mega(reg: Regulation, turn: _Turn, action: QueuedAction) -> None:
     _switch_in_ability(turn, action.side, action.slot)
     # `onAnyAfterMega`: a drop the mega's own Intimidate just caused is undone at once.
     _check_white_herb(turn)
+
+
+# ---------------------------------------------------------------------------
+# Trace and Synchronize (IKA-203)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _Draws:
+    """How the draws of one switch-in are answered.
+
+    `replay`: the choices already made (`presets`, in the order the draws are met), and
+    the weights of every draw met past them, each answered with its first option --
+    `_switch_in_with_draws` runs the switch-in again for the others. `rng`: sampled, for
+    a phase that plays a real game. Neither: the first option, and `report` says whether
+    to note it even under the pinned policy (a phase with no branches to hand back).
+    """
+
+    replay: bool = False
+    presets: list[int] = field(default_factory=list)
+    cursor: int = 0
+    opened: list[list[float]] = field(default_factory=list)
+    rng: np.random.Generator | None = None
+    report: bool = False
+
+
+def _draw(turn: _Turn, weights: list[float], what: str) -> int:
+    """Showdown's `sample` inside a switch-in, answered as `turn.draws` says."""
+    if len(weights) < 2:
+        return 0
+    draws = turn.draws
+    if draws is not None and draws.rng is not None:
+        total = float(sum(weights))
+        return int(draws.rng.choice(len(weights), p=[w / total for w in weights]))
+    if draws is not None and draws.replay:
+        draws.cursor += 1
+        if draws.cursor <= len(draws.presets):
+            return draws.presets[draws.cursor - 1]
+        draws.opened.append(list(weights))
+        return 0
+    if not turn.budget.pinned_policy or (draws is not None and draws.report):
+        turn.unmodelled.add(f"{what} (the first; not branched)")
+    return 0
+
+
+def _traceable(reg: Regulation, ability: str) -> bool:
+    """`!target.getAbility().flags['notrace'] && target.ability !== 'noability'`. An
+    ability the dump leaves out (Aura Guard is `isNonstandard` outside the mod) has no
+    such flag."""
+    if not ability or ability == "noability":
+        return False
+    entry = reg.abilities.get(ability)
+    return entry is None or "notrace" not in entry.flags
+
+
+def _trace(turn: _Turn, side: int, slot: int) -> None:
+    """Trace (data/abilities.ts; the champions mod leaves it alone)::
+
+        onStart(pokemon) {
+            this.effectState.seek = true;
+            if (pokemon.adjacentFoes().some(foeActive => foeActive.ability === 'noability'))
+                this.effectState.seek = false;
+            if (pokemon.hasItem('Ability Shield')) { ...; this.effectState.seek = false; }
+            if (this.effectState.seek) this.singleEvent('Update', ...);
+        },
+        onUpdate(pokemon) {
+            const possibleTargets = pokemon.adjacentFoes().filter(
+                target => !target.getAbility().flags['notrace'] && target.ability !== 'noability');
+            if (!possibleTargets.length) return;
+            const target = this.sample(possibleTargets);
+            pokemon.setAbility(target.getAbility(), target);
+        },
+
+    `adjacentFoes` is the foes standing, in slot order, and `sample` is uniform over them,
+    so two foes with the same ability are one outcome of twice the weight. `setAbility`
+    ends in `singleEvent('Start', ability)`: a traced Intimidate or weather starts at once,
+    which is why this runs at the top of `_switch_in_ability`. With nothing to copy the
+    ability goes on seeking at every `Update`, which is not modelled (noted).
+    """
+    mon = turn.mon_at(side, slot)
+    if mon is None or mon.fainted or mon.ability != "trace":
+        return
+    foes = [
+        foe
+        for foe_slot in range(len(turn.pos.sides[1 - side].active))
+        if (foe := turn.mon_at(1 - side, foe_slot)) is not None and not foe.fainted
+    ]
+    if mon.item == "abilityshield" or any(foe.ability == "noability" for foe in foes):
+        return
+    abilities: list[str] = []
+    weights: list[float] = []
+    for foe in foes:
+        if not _traceable(turn.reg, foe.ability):
+            continue
+        if foe.ability in abilities:
+            weights[abilities.index(foe.ability)] += 1.0
+        else:
+            abilities.append(foe.ability)
+            weights.append(1.0)
+    if not abilities:
+        turn.unmodelled.add("trace found nothing to copy (it keeps seeking; not modelled)")
+        return
+    copied = abilities[_draw(turn, weights, "trace target")]
+    mon.ability = copied
+    turn.log(f"{turn.name(side, slot)} traced {copied}")
+
+
+def _switch_may_trace(turn: _Turn, action: QueuedAction) -> bool:
+    incoming = _find_switch_target(turn.pos.sides[action.side], action)
+    return incoming is not None and incoming.ability == "trace"
+
+
+def _mega_may_trace(reg: Regulation, turn: _Turn, action: QueuedAction) -> bool:
+    """Mega Alakazam and the Mega Meowstics trace on the mega (`setAbility` from the
+    forme change runs Start too)."""
+    mon = turn.mon_at(action.side, action.slot)
+    if mon is None:
+        return False
+    target = reg.mega_target(mon.species, mon.item)
+    if target is None or target not in reg.species:
+        return False
+    abilities = reg.species[target].abilities
+    return bool(abilities) and abilities[0].lower().replace(" ", "") == "trace"
+
+
+def _switch_in_with_draws(
+    turn: _Turn, budget: Budget, may_draw: bool, run: Callable[[_Turn], object]
+) -> list[tuple[float, _Turn]]:
+    """Runs a switch-in, once per outcome of the draws inside it (IKA-203).
+
+    The switch-in is run with each draw it meets answered by its first option; for every
+    other option a copy of the state from before is run again with the choices up to that
+    draw fixed. The first run is on `turn` itself, and nothing is copied when no Pokemon
+    that could draw is coming in. A budget that collapses the random ranges takes the
+    first with a note, and the pinned one takes it silently, as `_draw_random_target`.
+    """
+    if not may_draw or not (budget.enumerate_secondary and not budget.pinned_policy):
+        run(turn)
+        return [(1.0, turn)]
+    base = turn.clone()
+    out: list[tuple[float, _Turn]] = []
+    pending: list[tuple[list[int], float]] = [([], 1.0)]
+    while pending:
+        presets, weight = pending.pop(0)
+        state = turn if not out else base.clone()
+        state.draws = _Draws(replay=True, presets=list(presets))
+        run(state)
+        opened = state.draws.opened
+        state.draws = None
+        prefix = list(presets)
+        for weights in opened:
+            total = float(sum(weights))
+            for option in range(1, len(weights)):
+                pending.append(([*prefix, option], weight * weights[option] / total))
+            weight *= weights[0] / total
+            prefix.append(0)
+        out.append((weight, state))
+    return out
+
+
+def _switch_in_outcomes(
+    turn: _Turn, budget: Budget, may_draw: bool, run: Callable[[_Turn], object]
+) -> list[Outcome]:
+    return [
+        (weight, state, "") for weight, state in _switch_in_with_draws(turn, budget, may_draw, run)
+    ]
+
+
+def _resume_forks(
+    reg: Regulation, forks: list[tuple[float, _Turn]], remaining: list[QueuedAction]
+) -> TurnResult:
+    """`resume_turn`'s tail for each outcome of its switch-ins' draws, joined."""
+    parts: list[tuple[float, TurnResult]] = []
+    for weight, state in forks:
+        state.self_switch_pending = any(any(f) for f in self_switches_needed(state.pos))
+        part = (
+            _suspended_again(state, remaining)
+            if state.self_switch_pending
+            else _run_queue(reg, [_Live(1.0, state, list(remaining))], state.budget)
+        )
+        parts.append((weight, part))
+    if len(parts) == 1 and parts[0][0] == 1.0:
+        return parts[0][1]
+    branches: list[Branch] = []
+    suspended: list[SuspendedTurn] = []
+    reductions: dict[str, int] = {}
+    unmodelled: set[str] = set()
+    for weight, part in parts:
+        for branch in part.branches:
+            branch.probability *= weight
+            branches.append(branch)
+        for pause in part.suspended:
+            pause.probability *= weight
+            suspended.append(pause)
+        for key, count in part.reductions.items():
+            reductions[key] = reductions.get(key, 0) + count
+        unmodelled |= set(part.unmodelled)
+    return TurnResult(
+        branches=branches,
+        exact=all(part.exact for _w, part in parts),
+        reductions=reductions,
+        merged=sum(part.merged for _w, part in parts),
+        unmodelled=tuple(sorted(unmodelled)),
+        suspended=tuple(suspended),
+    )
+
+
+def _apply_status_from(
+    turn: _Turn, target: tuple[int, int], status: str, source: tuple[int, int], *, reason: str
+) -> bool:
+    """`apply_status` with the Pokemon that caused it, so Synchronize can answer."""
+    applied = turn.apply_status(*target, status, reason=reason)
+    if applied:
+        _synchronize(turn, target, source, status)
+    return applied
+
+
+def _synchronize(
+    turn: _Turn, holder: tuple[int, int], source: tuple[int, int], status: str
+) -> None:
+    """Synchronize (data/abilities.ts; the champions mod leaves it alone)::
+
+        onAfterSetStatus(status, target, source, effect) {
+            if (!source || source === target) return;
+            if (effect && effect.id === 'toxicspikes') return;
+            if (status.id === 'slp' || status.id === 'frz') return;
+            source.trySetStatus(status, target, {status: status.id, id: 'synchronize'});
+        },
+
+    `AfterSetStatus` runs when the status is set, before a Lum Berry's `Update` cures it,
+    so a Lum holder passes it on too. `trySetStatus` fails on a Pokemon that already has a
+    status and goes through the same immunities as any other (`apply_status`). Toxic
+    Spikes passes no source here, and neither does anything else without one.
+    """
+    if source == holder or status in ("slp", "frz"):
+        return
+    mon = turn.mon_at(*holder)
+    if mon is None or mon.ability != "synchronize":
+        return
+    turn.log(f"{turn.name(*holder)} passes {status} on (synchronize)")
+    _apply_status_from(turn, source, status, holder, reason="synchronize")
 
 
 def _do_move(
@@ -3300,7 +3550,7 @@ def _apply_status_move(
                 *target, dict(raw["boosts"]), reason=move.id, from_foe=not own_side
             )
         if raw.get("status"):
-            turn.apply_status(*target, str(raw["status"]), reason=move.id)
+            _apply_status_from(turn, target, str(raw["status"]), me, reason=move.id)
         if raw.get("volatileStatus"):
             volatile_id = str(raw["volatileStatus"])
             if volatile_id == "disable":
@@ -4394,7 +4644,7 @@ def _after_hit(
             if applied is not None and vid == "partiallytrapped":
                 applied.source_slot = f"{me[0]}{me[1]}"
         if raw.get("status"):
-            turn.apply_status(*target, str(raw["status"]), reason=move.id)
+            _apply_status_from(turn, target, str(raw["status"]), me, reason=move.id)
 
     # Spicy Spray (Mega Scovillain) is an `onDamagingHit` handler too, but it is *not*
     # contact-gated and it does not roll:
@@ -4410,7 +4660,7 @@ def _after_hit(
         and landed
         and defender.ability == "spicyspray"
     ):
-        turn.apply_status(*me, "brn", reason="spicyspray")
+        _apply_status_from(turn, me, "brn", target, reason="spicyspray")
 
     # Throat Chop adds its own condition from a 100%-chance `secondary.onHit`, so there is
     # nothing declarative in the dump to drive it. Two turns, which the dump now carries
@@ -5084,7 +5334,9 @@ def _apply_secondary(
         _apply_disable(turn, *target)
         return
     if secondary.get("status"):
-        turn.apply_status(*target, str(secondary["status"]), reason="secondary")
+        _apply_status_from(
+            turn, target, str(secondary["status"]), (action.side, action.slot), reason="secondary"
+        )
     if secondary.get("volatileStatus"):
         fresh = not _has_volatile_at(turn, target, "confusion")
         turn.add_volatile(*target, str(secondary["volatileStatus"]))
@@ -5222,16 +5474,18 @@ def resume_turn(
     # `runSwitch` is order 101 sorted on speed, fastest first, so a fast replacement takes
     # the hazards and fires its ability before a slow one. Same rule as the post-turn phase.
     placed.sort(key=lambda entry: (-int(entry[2][0]), entry[0], entry[1]))
-    for side_index, slot, _speed in placed:
-        _on_switch_in(reg, turn, side_index, slot)
 
-    turn.self_switch_pending = any(any(f) for f in self_switches_needed(turn.pos))
-    remaining = _without_replaced(paused._remaining, placed)
-    result = (
-        _suspended_again(turn, remaining)
-        if turn.self_switch_pending
-        else _run_queue(reg, [_Live(1.0, turn, remaining)], turn.budget)
+    def switch_ins(state: _Turn) -> None:
+        for side_index, slot, _speed in placed:
+            _on_switch_in(reg, state, side_index, slot)
+
+    may_trace = any(
+        (mon := turn.mon_at(side_index, slot)) is not None and mon.ability == "trace"
+        for side_index, slot, _speed in placed
     )
+    forks = _switch_in_with_draws(turn, turn.budget, may_trace, switch_ins)
+    remaining = _without_replaced(paused._remaining, placed)
+    result = _resume_forks(reg, forks, remaining)
     if unmodelled:
         result.unmodelled = tuple(sorted(set(result.unmodelled) | unmodelled))
     for branch in result.branches:
@@ -5274,7 +5528,11 @@ def replacements_needed(pos: Position) -> tuple[tuple[bool, ...], tuple[bool, ..
 
 
 def resolve_replacements(
-    reg: Regulation, pos: Position, choices: list[SideAction]
+    reg: Regulation,
+    pos: Position,
+    choices: list[SideAction],
+    *,
+    rng: np.random.Generator | None = None,
 ) -> ReplacementResult:
     """Applies both sides' replacement choices.
 
@@ -5283,8 +5541,13 @@ def resolve_replacements(
     ``PassAction``. A slot that owes a replacement and is given a pass is left alone and
     reported, because silently choosing for the player is the thing this module exists not
     to do.
+
+    One position comes back, so a draw inside a switch-in (Trace's target) is sampled from
+    ``rng`` when one is given -- the game being played -- and is otherwise the first
+    option, noted (IKA-203).
     """
     state = _Turn(reg, pos.copy(), Budget.deterministic(0), {})
+    state.draws = _Draws(rng=rng, report=True)
     needed = replacements_needed(state.pos)
     unmodelled: set[str] = set()
 
@@ -6086,7 +6349,9 @@ def _rust_payoffs(
     return payoffs, unmodelled, exact
 
 
-def apply_lead_abilities(reg: Regulation, pos: Position) -> ReplacementResult:
+def apply_lead_abilities(
+    reg: Regulation, pos: Position, *, rng: np.random.Generator | None = None
+) -> ReplacementResult:
     """Runs the leads' switch-in effects, as Showdown does before `|turn|1`.
 
     A freshly built turn-1 position has had nothing applied to it: no Intimidate, no
@@ -6097,8 +6362,12 @@ def apply_lead_abilities(reg: Regulation, pos: Position) -> ReplacementResult:
     Speed-ordered, fastest first, like the replacement phase -- and via the same
     `_on_switch_in`, so hazards and White Herb behave identically should a caller ever hand
     this a position that has them.
+
+    A draw (a lead's Trace between two foes) is sampled from ``rng`` or else the first
+    option, noted, as in `resolve_replacements` (IKA-203).
     """
     state = _Turn(reg, pos.copy(), Budget.deterministic(0), {})
+    state.draws = _Draws(rng=rng, report=True)
     placed: list[tuple[int, int, np.ndarray]] = []
     for side_index, side in enumerate(state.pos.sides):
         for slot, party in enumerate(side.active):

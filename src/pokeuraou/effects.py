@@ -382,6 +382,13 @@ ABILITY_MODIFIERS: dict[str, tuple[Modifier, ...]] = {
         Modifier("fluffy", "damage", 0.5, from_defender=True, when=_has("contact")),
         Modifier("fluffy", "damage", 2.0, from_defender=True, when=_move_type("Fire")),
     ),
+    # Mega Lucario Z (IKA-203): `onSourceModifyDamage(damage, source, target, move) { if
+    # (move.flags['contact']) return this.chainModify(0.5); }`, `breakable` -- Fluffy's
+    # first half. `isNonstandard: "Future"` keeps it out of the dump; the mod's species
+    # carries it.
+    "auraguard": (
+        Modifier("auraguard", "damage", 0.5, from_defender=True, when=_has("contact")),
+    ),
     # -- STAB --------------------------------------------------------------
     "adaptability": (
         Modifier(

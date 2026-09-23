@@ -205,6 +205,15 @@ Every cell is held branch by branch; the cells `uneject` (none of the four doing
 moves are counted by what was handed out. A Red Card that fires is refused by the port, as
 a forceSwitch move is, so those cells count as refused and are filled in Python.
 
+    uv run python tools/diff_node.py --roster <an M-C roster> \
+        --games-dir C:/tmp/ika77/out/g600 --trace-sync
+
+`--trace-sync` (IKA-203) keeps the recorded positions with a Trace holder on the bench (it
+traces as it comes in, by a switch or a mid-turn replacement) or a Synchronize holder on
+the field, and holds every cell branch by branch. The cells `untraced` (Trace copying
+nothing) and `unsynced` (Synchronize passing nothing back) move are counted apart, and the
+run fails if neither moved any.
+
 The budget, and the second invocation that goes with it (IKA-146):
 
     uv run python tools/diff_node.py --scenario examples/scenario-turn5.json --budget fast --limit 0
@@ -970,6 +979,50 @@ class uneject:  # noqa: N801 - read as a phrase at the call site
         ) = self.real
 
 
+def trace_sync_on_board(pos: Position) -> bool:
+    """For --trace-sync: a Trace holder on the bench, or a Synchronize holder on the field
+    (IKA-203). A Trace already on the field traced as it came in, or found nothing."""
+    for side in pos.sides:
+        for mon in side.pokemon:
+            if mon.fainted:
+                continue
+            if mon.ability == "trace" and not mon.is_active:
+                return True
+            if mon.ability == "synchronize" and mon.is_active:
+                return True
+    return False
+
+
+class untraced:  # noqa: N801 - read as a phrase at the call site
+    """Python as before IKA-203 for Trace, the first control for --trace-sync."""
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = resolve_mod._trace
+        resolve_mod._trace = lambda turn, side, slot: None
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        resolve_mod._trace = self.real
+
+
+class unsynced:  # noqa: N801 - read as a phrase at the call site
+    """Python as before IKA-203 for Synchronize, the second control for --trace-sync."""
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = resolve_mod._synchronize
+        resolve_mod._synchronize = lambda turn, holder, source, status: None
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        resolve_mod._synchronize = self.real
+
+
 class unchanged:  # noqa: N801 - read as a phrase at the call site
     """The control for `--using`: each kind of move named has its effect taken out."""
 
@@ -1322,6 +1375,8 @@ def recorded_positions(  # noqa: ANN001
     abilities: frozenset[str] = frozenset(),
     frozen: bool = False,
     locked: bool = False,
+    texts: frozenset[str] = frozenset(),
+    keep=None,  # noqa: ANN001 - a predicate on the position (--trace-sync)
 ) -> tuple[list[Position], int]:
     """Roots a search already filled a matrix at, read from recorded games.
 
@@ -1335,6 +1390,7 @@ def recorded_positions(  # noqa: ANN001
     other_format = 0
     wanted = holding | using | abilities | ({'"frz"'} if frozen else set())
     wanted |= {'"choicelock"'} if locked else set()
+    wanted |= texts
     enough = None if wanted else 40 * args.nodes
     for directory in args.games_dir:
         for path in sorted(Path(directory).glob("*.jsonl")):
@@ -1368,6 +1424,8 @@ def recorded_positions(  # noqa: ANN001
                         if frozen and not frozen_on_field(pos):
                             continue
                         if locked and not choice_locked_on_field(reg, pos):
+                            continue
+                        if keep is not None and not keep(pos):
                             continue
                         keys.add(key)
                         found.append(pos)
@@ -1626,6 +1684,13 @@ def main() -> None:
         "count where IKA-191's switches fired: the cells `uneject` moves",
     )
     ap.add_argument(
+        "--trace-sync",
+        action="store_true",
+        help="keep positions with a Trace holder on the bench or a Synchronize holder on "
+        "the field, hold every cell to the port branch by branch, and count where IKA-203's "
+        "Trace or Synchronize fired: the cells `untraced` or `unsynced` moves",
+    )
+    ap.add_argument(
         "--toxic-debris",
         action="store_true",
         help="keep positions with Toxic Debris on the field, hold every cell to the port "
@@ -1762,6 +1827,11 @@ def main() -> None:
             blockers | debris,
             args.frozen,
             locked=args.choice_locked,
+            **(
+                {"texts": frozenset({'"trace"', '"synchronize"'}), "keep": trace_sync_on_board}
+                if args.trace_sync
+                else {}
+            ),
         )
         print(
             f"{len(positions)} recorded positions from "
@@ -1793,6 +1863,8 @@ def main() -> None:
         positions = [pos for pos in positions if ability_on_field(pos, debris)]
     if args.frozen:
         positions = [pos for pos in positions if frozen_on_field(pos)]
+    if args.trace_sync:
+        positions = [pos for pos in positions if trace_sync_on_board(pos)]
     if args.choice_locked:
         positions = [pos for pos in positions if choice_locked_on_field(reg, pos)]
     quick =priority_moves(reg) if args.terrain or blockers else frozenset()
@@ -1902,6 +1974,10 @@ def main() -> None:
     eject_fired_by: Counter = Counter()
     eject_refused_by: Counter = Counter()
     eject_worst = 0.0
+    # Beside Trace or Synchronize, every cell; and where IKA-203's rules moved the answer.
+    ts_cells = ts_wrong = ts_refused = ts_fired = ts_fired_wrong = 0
+    ts_traced = ts_synced = 0
+    ts_worst = 0.0
     guard_by_refusal = guard_by_roll = 0
     guard_worst = 0.0
     # Beside a doll, every cell; and where IKA-180's Substitute moved the answer.
@@ -2419,6 +2495,42 @@ def main() -> None:
                         shown += 1
                         print(f"  cell {(i, j)} with {handed} on the field: {wrong[0][:200]}")
 
+        if args.trace_sync:
+            node = rustnode.node_for(reg)
+            for i, a in enumerate(row):
+                for j, b in enumerate(col):
+                    ts_cells += 1
+                    here = resolve_turn(reg, pos, [a, b], budget=budget)
+                    with untraced():
+                        no_trace = resolve_turn(reg, pos, [a, b], budget=budget)
+                    with unsynced():
+                        no_sync = resolve_turn(reg, pos, [a, b], budget=budget)
+                    wrong = (
+                        ["no warm process"]
+                        if node is None
+                        else branch_differences(node, reg, pos, a, b, here, budget)
+                    )
+                    refused_here = wrong == ["the port refused the turn"]
+                    ts_refused += refused_here
+                    if refused_here:
+                        wrong = []
+                    ts_wrong += bool(wrong)
+                    traced = differ(outcome(here), outcome(no_trace))
+                    synced = differ(outcome(here), outcome(no_sync))
+                    ts_traced += traced
+                    ts_synced += synced
+                    if traced or synced:
+                        ts_fired += 1
+                        ts_fired_wrong += bool(wrong)
+                        for index in range(len(evaluators)):
+                            ts_worst = max(
+                                ts_worst,
+                                abs(float(got[index][i, j] - expected[index][i, j])),
+                            )
+                    if wrong and shown < 5:
+                        shown += 1
+                        print(f"  cell {(i, j)} beside Trace or Synchronize: {wrong[0][:200]}")
+
         if args.frozen:
             node = rustnode.node_for(reg)
             for i, a in enumerate(row):
@@ -2603,6 +2715,15 @@ def main() -> None:
         print(f"    {eject_fired} of {eject_cells} cells  {dict(eject_fired_by)}")
         print(f"    cells whose branches, weights, notes or positions differ  {eject_fired_wrong}")
         print(f"    worst cell difference there  {eject_worst:.3e}")
+    if args.trace_sync:
+        print("\n  with a Trace holder on the bench or a Synchronize holder on the field")
+        print(f"    {ts_cells} of {cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {ts_wrong}")
+        print(f"    cells the port refused, filled in Python and not held  {ts_refused}")
+        print("  where Trace or Synchronize fired -- the cells `untraced` or `unsynced` moves")
+        print(f"    {ts_fired} of {ts_cells} cells (Trace {ts_traced}, Synchronize {ts_synced})")
+        print(f"    cells whose branches, weights, notes or positions differ  {ts_fired_wrong}")
+        print(f"    worst cell difference there  {ts_worst:.3e}")
     if args.frozen:
         print("\n  beside a frozen Pokemon, every cell -- held branch by branch")
         print(f"    {icy} of {cells} cells")
@@ -2715,6 +2836,10 @@ def main() -> None:
         failed.append(f"{eject_wrong} cells with an ejecting holder differ by branch")
     if args.eject and not eject_fired:
         failed.append("IKA-191's switches moved no cell, so agreeing here says nothing")
+    if ts_wrong:
+        failed.append(f"{ts_wrong} cells beside Trace or Synchronize differ by branch")
+    if args.trace_sync and not ts_fired:
+        failed.append("IKA-203's Trace and Synchronize moved no cell, so agreeing here says nothing")
     if icy_wrong:
         failed.append(f"{icy_wrong} cells beside a frozen Pokemon differ by branch")
     if args.frozen and not thawed:

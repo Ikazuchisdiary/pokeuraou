@@ -327,6 +327,8 @@ pub fn ability_modifiers(ability: &str) -> &'static [ModDef] {
             m("fluffy", Slot::Damage, 0.5, 1.0, 0, true, has_contact),
             m("fluffy", Slot::Damage, 2.0, 1.0, 0, true, type_fire),
         ],
+        // Python's `auraguard` (IKA-203): Fluffy's contact half, nothing else.
+        "auraguard" => table![m("auraguard", Slot::Damage, 0.5, 1.0, 0, true, has_contact)],
         _ => table![],
     }
 }
