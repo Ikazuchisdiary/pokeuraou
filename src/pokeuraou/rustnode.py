@@ -664,6 +664,7 @@ class RustNode:
         the encoder's arrays rather than as positions, which is 3.7 KB each instead of
         15 KB of JSON to parse and then encode anyway.
         """
+        started = timing.clock()
         request = {
             "position": pos.to_json(),
             "ours": [[dump_action(a) for a in side.slots] for side in ours],
@@ -705,6 +706,18 @@ class RustNode:
         # ratio has been read off `Collector.seen` and never counted; this is the count.
         timing.count("leaves.offered", int(header.get("offered", 0)))
         timing.count("leaves.stored", int(header["leaves"]))
+        if timing.ON:
+            # The same call cut by what it was for (IKA-98): its whole wall clock here,
+            # nestings included, and the child's four clocks together.
+            used = timing.current_purpose()
+            timing.add(f"rust.fill@{used}", timing.clock() - started)
+            timing.add(
+                f"rust.child@{used}",
+                (node.resolve_us + node.encode_us + node.parse_us + node.header_us) / 1e6,
+            )
+            timing.count("fills")
+            timing.count("fill.cells", len(cells) if cells is not None else len(ours) * len(theirs))
+            timing.count("fill.leaves", int(header["leaves"]))
         return node
 
     @timing.timed("rust.fill")
@@ -717,6 +730,7 @@ class RustNode:
         budget: Budget,
         cells: Sequence[tuple[int, int]] | None = None,
     ) -> NodeResult:
+        started = timing.clock()
         request = {
             "position": pos.to_json(),
             "ours": [[dump_action(a) for a in side.slots] for side in ours],
@@ -727,6 +741,12 @@ class RustNode:
         if cells is not None:
             request["cells"] = [[int(i), int(j)] for i, j in cells]
         response = self._exchange(request)
+        if timing.ON:
+            # By purpose, as `fill_encoded`. This answer carries no clocks of the child's,
+            # so it adds to `rust.fill@` and not to `rust.child@`, nor to `fill.leaves`.
+            timing.add(f"rust.fill@{timing.current_purpose()}", timing.clock() - started)
+            timing.count("fills")
+            timing.count("fill.cells", len(cells) if cells is not None else len(ours) * len(theirs))
         return NodeResult(
             payoffs=response["payoffs"],
             exact=response["exact"],

@@ -38,6 +38,22 @@ Two clocks, and they are not the same measurement:
 The process totals come from `psutil` instead, which reads the kernel's own cumulative
 counters and does not have that problem. Children are counted separately, because the Rust
 node is a child and its CPU is not this process's.
+
+Three things were added for IKA-98, each because a table had been read for something it
+could not say, and each off by the same rule as the rest -- a decorator hands the function
+back, a context manager is the shared no-op, a call is a module-global check:
+
+    purpose     what a stage's work was *for*, when one stage serves several callers.
+                `rust.fill` is one row for the leaf ranking, a node's matrix and a hidden
+                bench's dirty cells, and those are three different fixes (IKA-108, -105)
+    decision    which decision the work belongs to, so a count can be read per decision
+                (forward passes, completions, fills, LPs). Counts do not move with how
+                busy the machine is, which is why they are the part of a shared-machine
+                run that can be quoted
+    startup     the wall clock from this module's import to the first game, as a row
+                of its own. It was inside "the rest", and IKA-97 named 28.8% of a 40-game
+                run "startup" without having measured it; it was, and it would not have
+                been in a two-hour run, and the table could not tell the two apart
 """
 
 from __future__ import annotations
@@ -56,16 +72,22 @@ from typing import Any
 #: Directory each process drops its report into. Unset means every timer here is a no-op.
 ENV_DIR = "POKEURAOU_TIMING"
 
+#: What a fill of the Rust node can be for. `other` is everything no caller named, so the
+#: purposes always add up to the whole: the replacement and self-switch nodes, the analyser.
+PURPOSES = ("rank", "matrix", "dirty", "other")
+
 #: The stages, in the order a report prints them. Named here rather than created on first
 #: use so that a report always has every row -- a stage missing because it never ran and a
 #: stage missing because nobody instrumented it look identical otherwise, and the second
 #: one is the mistake this module exists to avoid.
 STAGES = (
+    "startup",       # this module's import to the first game (see `decided`)
     "narrow",        # building the candidate menus, minus any leaf call inside them
     "branch",        # resolve_turn, in Python
     "encode",        # Encoder.encode_positions / Encoder.encode, in Python
     "forward",       # the net, in this process
     "lp",            # solve / solve_bayesian
+    "belief",        # belief_payoffs' own Python: the per-completion copies, spans, folds
     "rust.fill",     # a node asked of the Rust child, and the wait for its header
     "rust.ask",      # building the request's JSON, here
     "rust.header",   # reading the answer's JSON, here
@@ -82,17 +104,29 @@ STAGES = (
     "server.held",   # the serving side, working  (its own counter)
     "server.queue",  # the serving side, queueing (its own counter)
     "refused",       # filling the cells the port declined, in one call a node
+    # One fill's whole call here (header, body, unpack and the wait), by what it was for...
+    *(f"rust.fill@{name}" for name in PURPOSES),
+    # ...and what the child says that fill cost it, all four of its clocks together.
+    *(f"rust.child@{name}" for name in PURPOSES),
 )
+
+#: The purpose rows, which split `rust.fill` and the `rust.child.*` rows by caller.
+PURPOSE_ROWS = tuple(name for name in STAGES if "@" in name)
 
 #: Rows that repeat time another row already holds, and so are never added into a total.
 #: `rust.child.*` is the child's own account of a span this process spent inside
 #: `rust.fill`, and `server.*` is the serving thread's own account of what it spent inside
 #: `forward`. Both are worth printing -- they say what the wait was *for* -- and adding
-#: either to the rows beside it would count the same seconds twice.
+#: either to the rows beside it would count the same seconds twice. The purpose rows are
+#: `rust.fill` and its nestings cut the other way, so they are borrowed for the same reason.
 BORROWED = frozenset(
     {"rust.child.resolve", "rust.child.encode", "rust.child.parse", "rust.child.header",
-     "server.held", "server.queue", "refused"}
+     "server.held", "server.queue", "refused", *PURPOSE_ROWS}
 )
+
+#: Counts that are also kept per purpose, as `name@purpose`: the rows the net scored and
+#: the passes it took to score them, and the fills of the Rust node with their size.
+PURPOSED = frozenset({"leaves", "forward.passes", "fills", "fill.cells", "fill.leaves"})
 
 
 class _Off:
@@ -165,11 +199,45 @@ class _Stage:
         return False
 
 
+class _Purpose:
+    """One named purpose, as a context manager. Per-entry state lives on the thread's stack."""
+
+    __slots__ = ("name",)
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __enter__(self) -> _Purpose:
+        _purposes().append(self.name)
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        _purposes().pop()
+        return False
+
+
+def _purposes() -> list[str]:
+    found = getattr(_LOCAL, "purposes", None)
+    if found is None:
+        found = _LOCAL.purposes = []
+    return found
+
+
 ON = bool(os.environ.get(ENV_DIR))
 
 _STAGES: dict[str, _Stage] = {name: _Stage(name) for name in STAGES} if ON else {}
 _COUNTS: dict[str, int] = {}
+_PURPOSE_OBJECTS: dict[str, _Purpose] = {}
 _STARTED = time.perf_counter()
+_STARTED_CPU = time.thread_time()
+
+#: The decision now being charged: [kind, details, wall it opened at, the stage totals and
+#: the counts as they stood then]. None before the first one and between none at all.
+_OPEN: list[Any] = [None]
+#: Closed decisions, summed by kind: {"n", "wall", "stages": {name: [wall, calls]}, "counts"}.
+_DECISIONS: dict[str, dict[str, Any]] = {}
+#: The process's CPU seconds (every thread, from the kernel) when startup ended.
+_STARTUP_CPU: list[float] = []
 
 
 def stage(name: str) -> Any:
@@ -180,6 +248,55 @@ def stage(name: str) -> Any:
     if found is None:
         found = _STAGES[name] = _Stage(name)
     return found
+
+
+def purpose(name: str) -> Any:
+    """A context manager naming what the work inside it is for, or a no-op when off.
+
+    Nothing is timed by this. A stage that serves several callers reads the innermost
+    purpose in force when it charges a purpose row (`rust.fill@rank`) or a purposed count
+    (`leaves@rank`), so the stage keeps one row and the split sits beside it. Innermost
+    wins: the dirty cells of a hidden bench are filled from inside a node's matrix, and
+    they are the dirty cells.
+    """
+    if not ON:
+        return _OFF
+    found = _PURPOSE_OBJECTS.get(name)
+    if found is None:
+        found = _PURPOSE_OBJECTS[name] = _Purpose(name)
+    return found
+
+
+def labelled(name: str) -> Callable[[Callable], Callable]:
+    """`purpose` for a whole function; the function itself, untouched, when timing is off."""
+
+    def wrap(function: Callable) -> Callable:
+        if not ON:
+            return function
+        here = purpose(name)
+
+        @functools.wraps(function)
+        def inner(*args: Any, **kwargs: Any) -> Any:
+            with here:
+                return function(*args, **kwargs)
+
+        return inner
+
+    return wrap
+
+
+def current_purpose() -> str:
+    """The innermost purpose in force on this thread, as one of `PURPOSES`."""
+    found = getattr(_LOCAL, "purposes", None)
+    if not found:
+        return "other"
+    name = found[-1]
+    return name if name in PURPOSES else "other"
+
+
+def clock() -> float:
+    """`perf_counter` when timing is on, 0.0 when it is off -- for a caller's own span."""
+    return time.perf_counter() if ON else 0.0
 
 
 def timed(name: str) -> Callable[[Callable], Callable]:
@@ -231,10 +348,149 @@ def count(name: str, n: int = 1) -> None:
     Kept apart from the stages so that nothing here can end up in a column of
     seconds. A share of the clock and a count of events answer different
     questions, and the table prints them under different headings.
+
+    A name in `PURPOSED` is also kept as `name@purpose`, under the purpose in force.
     """
     if not ON:
         return
     _COUNTS[name] = _COUNTS.get(name, 0) + n
+    if name in PURPOSED:
+        key = f"{name}@{current_purpose()}"
+        _COUNTS[key] = _COUNTS.get(key, 0) + n
+
+
+def decided(kind: str) -> None:
+    """Close the stretch since the last call as one decision of `kind`, and open the next.
+
+    Called right after a decision is recorded, when its kind is known -- `move`,
+    `selfswitch`, `replacement` -- and at the start of each game as `between`, which is
+    what the end of the last game, its record and the next game's set-up cost. Every
+    second and every count between two calls therefore belongs to exactly one stretch.
+    A move's stretch begins where the previous record ended, so it holds advancing the
+    game to this decision as well as searching it. What is kept per kind is the change in
+    every stage's clock and every count across the stretch, so a table can say "8
+    forward passes a hidden decision" without any site having to know which it is in.
+
+    Callers close one at a point where no stage is running; a stage still open would have
+    its time since it last resumed charged to the next stretch instead.
+
+    The first call only ends `startup`: the wall clock from this module's import to here,
+    less any stage that ran in between, becomes that row. It is not part of "the rest".
+    """
+    if not ON:
+        return
+    now = time.perf_counter()
+    if not _STARTUP_CPU:
+        _end_startup(now)
+    else:
+        _close(now, kind)
+    _OPEN[0] = [
+        set(),
+        now,
+        {name: (s.wall, s.calls) for name, s in _STAGES.items()},
+        dict(_COUNTS),
+    ]
+
+
+def ready() -> None:
+    """End `startup` without opening a decision, for a process that makes none.
+
+    The inference server: its CPU over the time it held a request is read as whether it
+    spins (IKA-106), and the seconds it spent importing torch and building a CUDA context
+    are in its CPU and not in its holding. With this the reader can take them out.
+    """
+    if not ON or _STARTUP_CPU:
+        return
+    _end_startup(time.perf_counter())
+
+
+def refine(detail: str) -> None:
+    """Qualify the open stretch's kind: `move` becomes `move.hidden` or `move.exact`.
+
+    A set rather than a replacement, because two nodes of one decision can disagree -- a
+    match whose arms hold different leaves solves each side's game over the other's bench
+    alone -- and `move.exact+hidden` says so where a last-write would not.
+    """
+    if not ON or _OPEN[0] is None:
+        return
+    _OPEN[0][0].add(detail)
+
+
+def _kind(kind: str, opened: list[Any]) -> str:
+    details = opened[0]
+    return kind if not details else f"{kind}.{'+'.join(sorted(details))}"
+
+
+def _delta(opened: list[Any], now: float) -> dict[str, Any]:
+    """What the open stretch has cost so far: its wall clock, stage clocks and counts."""
+    _details, started, stages, counts = opened
+    moved: dict[str, list[float]] = {}
+    for name, found in _STAGES.items():
+        wall, calls = stages.get(name, (0.0, 0))
+        if found.wall != wall or found.calls != calls:
+            moved[name] = [found.wall - wall, found.calls - calls]
+    tallied = {
+        name: value - counts.get(name, 0)
+        for name, value in _COUNTS.items()
+        if value != counts.get(name, 0)
+    }
+    return {"wall": now - started, "stages": moved, "counts": tallied}
+
+
+def _merge(into: dict[str, Any], delta: dict[str, Any]) -> None:
+    into["n"] += 1
+    into["wall"] += delta["wall"]
+    for name, (wall, calls) in delta["stages"].items():
+        row = into["stages"].setdefault(name, [0.0, 0])
+        row[0] += wall
+        row[1] += calls
+    for name, value in delta["counts"].items():
+        into["counts"][name] = into["counts"].get(name, 0) + value
+
+
+def _empty() -> dict[str, Any]:
+    return {"n": 0, "wall": 0.0, "stages": {}, "counts": {}}
+
+
+def _close(now: float, kind: str) -> None:
+    opened = _OPEN[0]
+    if opened is None:
+        return
+    _merge(_DECISIONS.setdefault(_kind(kind, opened), _empty()), _delta(opened, now))
+    _OPEN[0] = None
+
+
+def _end_startup(now: float) -> None:
+    """Turn the stretch before the first decision into the `startup` row."""
+    own_wall = sum(s.wall for name, s in _STAGES.items() if name not in BORROWED)
+    own_cpu = sum(s.cpu for name, s in _STAGES.items() if name not in BORROWED)
+    row = _STAGES["startup"]
+    row.wall = max(now - _STARTED - own_wall, 0.0)
+    row.cpu = max(time.thread_time() - _STARTED_CPU - own_cpu, 0.0)
+    row.calls = 1
+    _STARTUP_CPU.append(time.process_time())
+
+
+def _decisions() -> dict[str, dict[str, Any]]:
+    """The closed stretches by kind, with the open one's cost so far as `between`.
+
+    The stretch still open when a report is written is the one after the last record --
+    the last game's end and the process's exit -- which is what `between` holds.
+    """
+    out = {
+        kind: {
+            "n": row["n"],
+            "wall": row["wall"],
+            "stages": {name: list(pair) for name, pair in row["stages"].items()},
+            "counts": dict(row["counts"]),
+        }
+        for kind, row in _DECISIONS.items()
+    }
+    opened = _OPEN[0]
+    if opened is not None:
+        trailing = _kind("between", opened)
+        _merge(out.setdefault(trailing, _empty()), _delta(opened, time.perf_counter()))
+    return out
 
 
 def set_total(name: str, seconds: float, *, calls: int = 0) -> None:
@@ -259,6 +515,9 @@ def snapshot() -> dict[str, Any]:
     return {
         "pid": os.getpid(),
         "argv": list(sys.argv),
+        # Which checkout's code this process ran. A worktree run without PYTHONPATH does
+        # not fail -- it runs the main checkout's src and reports it as the worktree's.
+        "source": str(Path(__file__).resolve().parent),
         "elapsed": time.perf_counter() - _STARTED,
         "rust_node": os.environ.get("POKEURAOU_RUST_NODE", ""),
         "served": bool(os.environ.get("POKEURAOU_INFERENCE")),
@@ -267,6 +526,8 @@ def snapshot() -> dict[str, Any]:
             for name, s in _STAGES.items()
         },
         "counts": dict(_COUNTS),
+        "decisions": _decisions() if ON else {},
+        "startup_process_cpu": _STARTUP_CPU[0] if _STARTUP_CPU else None,
         "process": _process_times(),
     }
 
@@ -340,9 +601,19 @@ __all__ = [
     "BORROWED",
     "ENV_DIR",
     "ON",
+    "PURPOSED",
+    "PURPOSES",
+    "PURPOSE_ROWS",
     "STAGES",
     "add",
+    "clock",
     "count",
+    "current_purpose",
+    "decided",
+    "labelled",
+    "purpose",
+    "ready",
+    "refine",
     "set_total",
     "snapshot",
     "stage",

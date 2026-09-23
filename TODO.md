@@ -7666,3 +7666,107 @@ IKA-117 の節の5と同じ形（600局×2本＋`leaf_calibration.py`）で、�
 
 1コア・鍵なし: 比較 12:08:16〜12:08:27（4本で11秒）、テスト（-n 0）12:06〜12:11 のうち約3分半。
 生成・対戦・学習はしていない。
+
+## 9/23 — IKA-98（前半）: 測る道具が出荷の生成に追いつき、足した計器7つは決定を1ビットも動かさない
+
+答えた問いは **「`tools/profile_stages.py generation` が出荷と同じ引数で回り、計器 on と off で同じ局が打たれるか」まで**。
+内訳そのもの（どの段に CPU 秒が行っているか）は答えていない —— それは本測定（600局×2・専有、下の 5）の問い。
+下の煙テストの秒・割合は **小さく混んだ機械で2本回しただけの数字なので、内訳としても予想の当否としても使わない**。
+回数と行数だけは言ってよい（2本で一致した、下の 3）。
+
+### 1. 道具を出荷に追いつかせた
+
+* `generation` は `generate_queue.py` の引数を全部受け取り、**与えられたものだけ渡す**: `--limit`・`--workers`・
+  `--seed`・`--first-game`・`--roster`・`--selection-book`・`--uniform-selection`・`--force-lead`（既定は None）。
+  前は `--limit 24`・`--workers 8` を自前の既定で渡し、book と seed を渡す口が無かった。`--` の後ろはワーカーへ素通し
+  （前と同じ）。`match`/`analysis` にこれらを渡すと止まる（受け取って捨てない）。`analysis` の `--limit` は 24 のまま
+* 走らせた後、**各ワーカーのレポート自身の `argv` と `source`**（`timing` を読み込んだチェックアウト）で、頼んだ設定と
+  コードが届いたかを突き合わせる。届いていなければ一覧を出して終了コード 3。ワーカーが実際に回した値も並べる
+* 出荷のコマンドをそのまま入れる例を docstring に置いた
+
+### 2. 計器（どれも off なら無料: 飾りは関数をそのまま返し、文脈は共有の no-op、呼び出しはモジュール変数の確認1回）
+
+```
+  1 用途ラベル      rust.fill@{rank,matrix,dirty,other}（その充填の呼び出し全体の壁時計、入れ子込み）と
+                    rust.child@…（子の4つの時計の合計）。rank = search.leaf_ranking、matrix = search() と
+                    belief_payoffs、dirty = 汚れセルの batched_payoffs（内側が勝つ）。fills・fill.cells・fill.leaves
+                    も用途別に数える。どれも BORROWED（rust.fill を別の向きに切ったもの）なので合計に入れない
+  2 belief 段       belief_payoffs の Python（@timed("belief")、呼ぶ先は呼ぶ先の段に入る）、完成形の数
+  3 役割別の CPU    tree_cpu が PID ごとに cmdline() を1回読み、by_role（inference_server.py・selfplay.py・
+                    generate_queue.py・pokeuraou-damage.exe）を足す。by_name は残した。venv の python は起動役なので
+                    1本が2 PID に見える（起動役の CPU はほぼ0）
+  4 スピンの比      (サーバの CPU 秒 − 各サーバの timing.ready() 時点の CPU 秒) ÷ server.held。サーバに
+                    timing.ready() を1行足した（torch の import・CUDA・モデルの読み込みを分けるため）。残りには
+                    保持の外のサーバの仕事（制御行の読み取り、accept、5秒ごとのレポート）が入るので上限側の数
+  5 1決定あたり     timing.decided(kind) を記録の直後3か所（move・selfswitch・replacement）と play_game の冒頭
+                    （between。最初の1回は startup を閉じるだけ）に。区間ごとに全段の時計と全カウントの差分を
+                    種類別に足す。belief_payoffs が refine("hidden"/"exact") で move を move.hidden / move.exact に
+                    分ける。forward.passes は value.py（塊の数）と inference.py（往復1回で1）
+  6 startup 段      timing の import から最初の局まで（その間に走った段を除く）。「残り」に入らない
+  7 残りの回帰      ワーカーごとの 残り = 切片 + 傾き × 決定数（scratchpad/rest_split.py と同じ最小二乗）。
+                    x は timing 自身の決定数、無い古いレポートでは games ファイル。両方あれば並べる。
+                    傾き × 決定数 ÷ ワーカーの壁時計 > 5% なら「表を内訳として読まない」と印字
+```
+
+`selfplay.py` に足したのは `timing.decided(...)` の4行と import だけで、IKA-117 の `shown` の行には触れていない。
+サーバの待ち方（IKA-106 の直し）は変えていない。
+
+### 3. 確かめたこと
+
+```
+  負の対照   同じ 24局（seed 6601・添字0〜23、出荷の引数、ワーカー6＋サーバ2）を POKEURAOU_TIMING あり／なしで。
+             gameIndex で突き合わせ、engine と searchSeconds（壁時計）以外を丸ごと比較:
+               on（最終コード）× off   24/24 局が同一、322 決定
+               on（ready 前のコード）× off   24/24 局が同一、322 決定
+             正の対照: 同じ比較で局 i と局 i+1 は 23/23 組で違う（比較が差を見られる）。
+             scratchpad/ika98_same_games.py
+  煙テスト   上の on の2本（どちらも 24局・ワーカー6本・サーバ2本、出荷と同じ引数）。3つの表と傾き・スピンの比・
+             届いたかの一覧が全部出た。ワーカーのログの echo は「search 12x12 / leaf value:value-gen11L」、
+             局の記録は 24/24 局が hidden-bench・leaf・searchLimit 12・book、レポートの source は 8/8 が
+             この worktree の src。届いたかの一覧に問題なし（--limit 12 x6、--seed 6601 x6、--hide-bench x6、
+             --rank-leaf x6、book x6）
+             回数（2本で完全に一致）: move.hidden 139 決定・move.exact 96・replacement 74・selfswitch 13・
+             between 24。timing が数えた決定 322 = games ファイルの 322
+  読み手     profile_stages.py --report を本体の data/timing/generation-0920-044352（IKA-54、読み取り専用）と
+             match-served に: 前と同じ表に続けて「per decision: … before IKA-98」、残りの回帰（generation 側は
+             IKA-98 本文と同じ 2.24 s + 1.61 ms）、source (not recorded) が出る。scratchpad/rest_split.py は
+             古い記録（同じ 2.24 s + 1.61 ms）と新しい記録の両方で動く
+  tests      tests/test_timing.py（off で無料・内側の用途が勝つ・区間が閉じた種類に入る・startup が段を除く・
+             ready）と tests/test_profile_stages.py（未指定は渡さない・出荷の行が通る・役割・届いたかの対照5種と
+             別チェックアウト・回帰・スピン）29 passed。beliefnode・belief・hidden_search・search・selfplay・
+             inference・value・rust_node も -n 0 で通過。test_line_endings・test_no_machine_specific_paths・ruff 通過
+```
+
+* 煙テストの傾きは1本目 +8.00 ms、2本目 −17.41 ms。**ワーカーあたり3〜5局では決定数の幅が狭すぎて傾きは雑音**。
+  5% の判定は本測定（ワーカーあたり約25局）で読む
+* scratchpad/rest_split.py はサーバ経由の run を「direct」と印字する。レポートの `served` はワーカーの環境変数
+  `POKEURAOU_INFERENCE` を見ているが、generate_queue のワーカーは `--inference` で受け取るので、サーバ経由の
+  生成では常に False（既存の欠陥、この課題では直していない）
+
+### 4. 機械（9/23、heavy.py 経由、ほかのセッションの1コア仕事と同時）
+
+```
+  12:05:00–12:05:21  cargo build --release（8コア）
+  12:05:33–12:06:25  関係する tests（1コア、2回）
+  12:10:46–12:10:59  煙テスト兼 対照 on（8コア、20秒待ってから）
+  12:11:33–12:11:46  対照 off（8コア）
+  12:16:13–12:16:27  煙テスト 最終コード（8コア、2分以上待ってから）
+```
+
+### 5. 本測定（まだやっていない。専有で）
+
+```
+  uv run --group learn python tools/profile_stages.py generation --out <dir> --games 600 --seed 6601 \
+    --served --servers 2 --workers 24 --limit 12 --value data/models/value-gen11L.pt \
+    --selection-book data/selection/rizabanadohido-value-gen11L.jsonl.gz --hide-bench -- --rank-leaf
+```
+
+を2回。見積もり（測っていない）: 出荷の 43,999局/7,084秒から1本 約100秒＋起動。読み方と、IKA-105〜108 の前提:
+
+* **IKA-106**: スピンの比（起動を除いた値）。0.7 以上なら直す、0 に近ければ数字を書いて閉じる
+* **IKA-107**: 役割別 CPU の inference_server.py が木の 10% 未満なら止める
+* **IKA-105**: (作業者の belief と serve.* の CPU 秒 ＋ サーバの CPU 秒) ÷ 木の CPU が 10% 未満なら止める。
+  move.hidden と move.exact の passes/決定、fills@dirty/決定が回数の裏付け
+* **IKA-108**: rust.child@rank ÷ rust.child@* の合計（子の時間のうち順位付けの充填の割合）。節約できるのは
+  行列側（rust.child@matrix）の最大3割で、rust.child@rank を超えない。それが子の CPU の 10% に届かなければ止める
+* どれも「残りの回帰」の警告が出ていないことが先。出たら内訳として読まず、名前の無い部分を先に計器にする

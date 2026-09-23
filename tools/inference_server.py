@@ -131,6 +131,8 @@ def main() -> None:
         _reported_rows[0] = int(server.rows_served)
         timing.write_report("inference-server")
 
+    # Serving from here: what came before is startup, and IKA-98's spin ratio leaves it out.
+    timing.ready()
     # One on the way in, so the file exists from the first second rather than the
     # fifth: a run shorter than the cadence produced no server report at all.
     note()

@@ -399,6 +399,8 @@ class RemoteValue:
         ).copy()
         self.evaluated += rows
         timing.count("leaves", rows)
+        # One round trip is one pass on the server; a longer batch came through here in pieces.
+        timing.count("forward.passes")
         return scores
 
 

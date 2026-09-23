@@ -20,6 +20,21 @@ the processes wrote about themselves::
     uv run --group learn python tools/profile_stages.py match --games 60 --served
     uv run --group learn python tools/profile_stages.py analysis --limit 16
 
+Generation takes `generate_queue.py`'s own options and passes on only the ones given, so
+the shipping command line (tools/ika73_generate.sh) goes in as it is::
+
+    uv run --group learn python tools/profile_stages.py generation --games 600 \\
+        --seed 6601 --served --servers 2 --workers 24 --limit 12 \\
+        --value data/models/value-gen11L.pt \\
+        --selection-book data/selection/rizabanadohido-value-gen11L.jsonl.gz \\
+        --hide-bench -- --rank-leaf
+
+After the stage table it prints what IKA-98 added: the CPU of the tree by role, the
+servers' CPU over the time they held a request, what one decision of each kind costs in
+counts, the rest regressed on the decisions (with a warning when it is too large to read
+the table as a breakdown), and what each worker's own report says it ran -- its argv and
+the checkout its code came from. A worker that ran something else exits this with 3.
+
 `pokeuraou.timing` is off unless `POKEURAOU_TIMING` is set, which this sets for the child
 and everything below it. Two numbers come back for every stage:
 
@@ -52,11 +67,12 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from pokeuraou.timing import BORROWED, STAGES  # noqa: E402
+from pokeuraou.timing import BORROWED, PURPOSE_ROWS, PURPOSES, STAGES  # noqa: E402
 
 #: Rows printed under a heading, so a table reads as a breakdown rather than a list.
 GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("Python", ("narrow", "branch", "encode", "forward", "lp")),
+    ("once a process", ("startup",)),
+    ("Python", ("narrow", "branch", "encode", "forward", "lp", "belief")),
     ("bridge", ("rust.fill", "rust.ask", "rust.header", "rust.body", "rust.unpack",
                 "rust.resolve", "rust.score")),
     ("served", ("serve.copy", "serve.wait")),
@@ -64,7 +80,38 @@ GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
                "rust.child.header")),
     ("server", ("server.held", "server.queue")),
     ("inclusive", ("refused",)),
+    # `rust.fill` and the child's clocks again, cut by what the fill was for (IKA-98).
+    ("by purpose", PURPOSE_ROWS),
 )
+
+#: The scripts a process of a run can be, by what its command line names. `tree_cpu` reads
+#: them off each PID's command line, because by name every one of them is `python.exe`.
+ROLE_SCRIPTS = (
+    "inference_server.py", "selfplay.py", "generate_queue.py", "match_queue.py",
+    "why_action.py", "profile_stages.py",
+)
+
+#: The Rust child, by the name its executable has.
+DAMAGE_EXE = "pokeuraou-damage.exe"
+
+#: Above this share of the workers' wall clock, the work that grows with the decisions and
+#: has no row is too large for the table to be read as a breakdown (IKA-98's instrument 7).
+UNNAMED_LIMIT = 0.05
+
+
+def process_role(name: str, cmdline: list[str]) -> str:
+    """What a process was in the run: the script its command line names, or its own name.
+
+    The venv's `python.exe` is a launcher that starts the real interpreter with the same
+    command line, so a script shows up as two PIDs; the launcher's CPU is next to nothing.
+    """
+    for item in cmdline:
+        base = str(item).replace("\\", "/").rsplit("/", 1)[-1]
+        if base in ROLE_SCRIPTS:
+            return base
+    if name.lower().startswith("pokeuraou-damage"):
+        return DAMAGE_EXE
+    return name
 
 #: A stage added to `timing.STAGES` and not to a group above still prints, under the
 #: extras at the bottom of the table -- but with no heading and in no particular order.
@@ -90,6 +137,7 @@ def tree_cpu(
     import psutil
 
     totals: dict[int, tuple[str, float]] = {}
+    roles: dict[int, str] = {}
     peak_rss = 0
     samples = 0
     low_water = float("inf")
@@ -109,6 +157,13 @@ def tree_cpu(
                 known = totals.get(process.pid)
                 if known is None or spent > known[1]:
                     totals[process.pid] = (name, spent)
+                if process.pid not in roles:
+                    # Once a PID: a command line does not change, and reading it is not free.
+                    try:
+                        line = process.cmdline()
+                    except psutil.Error:
+                        line = []
+                    roles[process.pid] = process_role(name, line)
                 rss += int(process.memory_info().rss)
             except psutil.Error:
                 continue
@@ -129,8 +184,17 @@ def tree_cpu(
     by_name: dict[str, float] = {}
     for name, spent in totals.values():
         by_name[name] = by_name.get(name, 0.0) + spent
+    # The same seconds by role, so the servers and the workers are not one `python.exe`.
+    by_role: dict[str, float] = {}
+    role_processes: dict[str, int] = {}
+    for pid, (name, spent) in totals.items():
+        role = roles.get(pid, name)
+        by_role[role] = by_role.get(role, 0.0) + spent
+        role_processes[role] = role_processes.get(role, 0) + 1
     return {
         "by_name": by_name,
+        "by_role": by_role,
+        "role_processes": role_processes,
         "total": sum(by_name.values()),
         "peak_rss": peak_rss,
         "free_low_water": 0.0 if low_water == float("inf") else low_water,
@@ -269,8 +333,11 @@ def print_table(summary: dict[str, Any], tree: dict[str, Any] | None, wall: floa
                   f"{_seconds(row['cpu']):>10} {row['calls']:>12,.0f}")
     print(f"  {'-' * 20} {'-' * 10} {'-' * 7} {'-' * 10} {'-' * 12}")
     print(f"   {'measured':<19} {_seconds(accounted):>10} {share(accounted):>7}")
+    # A report from before IKA-98 has no startup row, and its rest still holds startup.
+    held_apart = stages.get("startup", {}).get("calls", 0)
+    what = "no timer: bridge, I/O, interpreter" + ("" if held_apart else ", startup")
     print(f"   {'the rest':<19} {_seconds(elapsed - accounted):>10} "
-          f"{share(elapsed - accounted):>7}   simulator bridge, I/O, startup, interpreter")
+          f"{share(elapsed - accounted):>7}   {what}")
     print("\n  * time another row already holds, so never added into a total: the Rust\n"
           "    child's own clock inside rust.fill, the serving thread's inside forward,\n"
           "    and the refused-cell tail across branch, encode and forward at once.")
@@ -321,6 +388,14 @@ def print_table(summary: dict[str, Any], tree: dict[str, Any] | None, wall: floa
             portion = 100.0 * spent / tree["total"] if tree["total"] else 0.0
             print(f"   {name:<28} {_seconds(spent):>10} {portion:5.1f}%")
         print(f"   {'total':<28} {_seconds(tree['total']):>10}")
+        by_role = tree.get("by_role") or {}
+        if by_role:
+            print("  the same seconds by role, from each process's command line")
+            processes = tree.get("role_processes") or {}
+            for role, spent in sorted(by_role.items(), key=lambda kv: -kv[1]):
+                portion = 100.0 * spent / tree["total"] if tree["total"] else 0.0
+                label = f"{role} x{processes.get(role, 0)}"
+                print(f"   {label:<28} {_seconds(spent):>10} {portion:5.1f}%")
         print(f"   peak RSS of the tree: {tree['peak_rss'] / 1e9:.1f} GB; "
               f"free memory fell to {tree.get('free_low_water', 0.0):.1f} GB")
         if tree.get("stopped_for_memory"):
@@ -328,6 +403,278 @@ def print_table(summary: dict[str, Any], tree: dict[str, Any] | None, wall: floa
                   "what it managed first **")
         if wall > 0:
             print(f"   busy cores: {tree['total'] / wall:.1f}")
+
+
+def spin(
+    tree: dict[str, Any] | None,
+    servers: dict[str, Any] | None,
+    reports: list[dict[str, Any]] | None = None,
+) -> dict[str, Any] | None:
+    """The servers' CPU seconds over the seconds they held a request (instrument 4).
+
+    Near 1 means a serving thread burns a core while it waits for the GPU (IKA-106); near
+    0 means it sleeps. The tree's CPU is the whole process life, so each server's CPU at
+    `timing.ready()` -- torch's import, the CUDA context, the model -- is taken out when
+    its report has it. What is left still holds the serving work outside a request's hold
+    (reading the control line, the accept loop, the five-second report), so the ratio is
+    an upper bound on the waiting's share, not the waiting itself.
+    """
+    if not tree or not servers:
+        return None
+    cpu = (tree.get("by_role") or {}).get(SERVER)
+    held = (servers.get("stages") or {}).get("server.held", {}).get("wall", 0.0)
+    if cpu is None or not held:
+        return None
+    started = [
+        float(r["startup_process_cpu"])
+        for r in (reports or [])
+        if _role(r) == SERVER and r.get("startup_process_cpu") is not None
+    ]
+    serving = cpu - sum(started)
+    return {"cpu": cpu, "startup_cpu": sum(started), "servers_with_startup": len(started),
+            "held": held, "ratio": serving / held}
+
+
+def print_spin(found: dict[str, Any] | None) -> None:
+    if found is None:
+        return
+    print(f"\n  server CPU over server.held: ({_seconds(found['cpu'])} s less "
+          f"{_seconds(found['startup_cpu'])} s of start in {found['servers_with_startup']} "
+          f"server(s)) / {_seconds(found['held'])} s = {found['ratio']:.2f}   "
+          f"(near 1: waits by spinning)")
+
+
+def _worker_reports(reports: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Every process that played games: a generation's selfplay.py, a match's worker."""
+    return _split(reports)[0]
+
+
+def per_decision(reports: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Every worker's decision stretches, summed by kind (from `timing.decided`)."""
+    out: dict[str, dict[str, Any]] = {}
+    for report in _worker_reports(reports):
+        for kind, row in (report.get("decisions") or {}).items():
+            into = out.setdefault(kind, {"n": 0, "wall": 0.0, "stages": {}, "counts": {}})
+            into["n"] += int(row.get("n", 0))
+            into["wall"] += float(row.get("wall", 0.0))
+            for name, (wall, calls) in (row.get("stages") or {}).items():
+                stage = into["stages"].setdefault(name, [0.0, 0])
+                stage[0] += float(wall)
+                stage[1] += int(calls)
+            for name, value in (row.get("counts") or {}).items():
+                into["counts"][name] = into["counts"].get(name, 0) + int(value)
+    return out
+
+
+#: Per-decision columns: (heading, where it comes from). A count, or a stage's calls.
+DECISION_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("passes", "count:forward.passes"),
+    ("leaves", "count:leaves"),
+    ("complet.", "count:completions"),
+    *((f"fills@{p}", f"count:fills@{p}") for p in PURPOSES),
+    ("cells", "count:fill.cells"),
+    ("LPs", "calls:lp"),
+)
+
+
+def print_decisions(found: dict[str, dict[str, Any]]) -> None:
+    """Table 3: what one decision of each kind costs, in counts and in wall clock."""
+    if not found:
+        print("\n  per decision: no worker reported any (a report from before IKA-98)")
+        return
+    heads = [h for h, _source in DECISION_COLUMNS]
+    print("\n  per decision, over every worker (counts are the part a busy machine cannot move)")
+    print(f"  {'kind':<22} {'n':>7} {'wall ms':>8} " + " ".join(f"{h:>10}" for h in heads))
+    for kind, row in sorted(found.items(), key=lambda kv: -kv[1]["n"]):
+        n = max(row["n"], 1)
+        cells = []
+        for _head, source in DECISION_COLUMNS:
+            what, name = source.split(":", 1)
+            counted = row["counts"].get(name, 0)
+            value = counted if what == "count" else row["stages"].get(name, [0.0, 0])[1]
+            cells.append(f"{value / n:>10.2f}")
+        print(f"  {kind:<22} {row['n']:>7,} {1000 * row['wall'] / n:>8.1f} " + " ".join(cells))
+    print("  `between` is a game's end, its record and the next game's set-up; a move's row\n"
+          "  holds advancing the game to it as well as searching it.")
+
+
+def _fit(xs: list[float], ys: list[float]) -> tuple[float, float] | None:
+    """Least squares y = a + b x; None when x does not vary. As scratchpad/rest_split.py."""
+    n = len(xs)
+    if n < 2:
+        return None
+    mx, my = sum(xs) / n, sum(ys) / n
+    sxx = sum((x - mx) ** 2 for x in xs)
+    if sxx == 0:
+        return None
+    b = sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=True)) / sxx
+    return my - b * mx, b
+
+
+def _games_decisions(report: dict[str, Any]) -> int | None:
+    """Decisions recorded in the games file a worker's argv names, or None without one."""
+    argv = [str(item) for item in report.get("argv") or []]
+    if "--out" not in argv[:-1]:
+        return None
+    path = Path(argv[argv.index("--out") + 1])
+    if not path.is_absolute():
+        path = ROOT / path
+    if not path.exists():
+        return None
+    decisions = 0
+    with path.open(encoding="utf-8") as handle:
+        for line in handle:
+            if line.strip():
+                decisions += len(json.loads(line).get("decisions") or [])
+    return decisions
+
+
+def rest_fit(reports: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Instrument 7: each worker's rest against its decisions, and whether it is too large.
+
+    The same regression as scratchpad/rest_split.py. Workers start together and the queue
+    decides how many games each plays, so the intercept is the per-process fixed part and
+    the slope the untimed work per decision. The decisions are `timing.decided`'s own
+    count when the report has one -- it also sees the games a worker lost or discarded --
+    and the games file's otherwise; both are kept, so a gap between them shows.
+    """
+    rows = []
+    for report in _worker_reports(reports):
+        stages = report.get("stages") or {}
+        measured = sum(v["wall"] for k, v in stages.items() if k not in BORROWED)
+        timed = sum(
+            int(row.get("n", 0))
+            for kind, row in (report.get("decisions") or {}).items()
+            if not kind.startswith("between")
+        )
+        recorded = _games_decisions(report)
+        x = timed if report.get("decisions") else recorded
+        if x is None:
+            continue
+        rows.append({
+            "elapsed": float(report.get("elapsed", 0.0)),
+            "rest": float(report.get("elapsed", 0.0)) - measured,
+            "decisions": x,
+            "timed": timed if report.get("decisions") else None,
+            "recorded": recorded,
+        })
+    if not rows:
+        return None
+    line = _fit([r["decisions"] for r in rows], [r["rest"] for r in rows])
+    elapsed = sum(r["elapsed"] for r in rows)
+    decisions = sum(r["decisions"] for r in rows)
+    out: dict[str, Any] = {
+        "workers": len(rows),
+        "decisions": decisions,
+        "recorded": sum(r["recorded"] or 0 for r in rows),
+        "timed": sum(r["timed"] or 0 for r in rows) if rows[0]["timed"] is not None else None,
+        "rest": sum(r["rest"] for r in rows),
+        "elapsed": elapsed,
+        "fit": None,
+    }
+    if line is not None and elapsed > 0:
+        a, b = line
+        out["fit"] = {"intercept": a, "slope": b, "steady": b * decisions / elapsed}
+    return out
+
+
+def print_rest_fit(found: dict[str, Any] | None) -> None:
+    if found is None:
+        return
+    print(f"\n  the rest against decisions, {found['workers']} workers, "
+          f"{found['decisions']:,} decisions")
+    if found["timed"] is not None:
+        print(f"   decisions timing counted {found['timed']:,}; the games files hold "
+              f"{found['recorded']:,}")
+    fit = found["fit"]
+    if fit is None:
+        print("   no fit: every worker played the same number of decisions")
+        return
+    print(f"   rest = {fit['intercept']:.2f} s + {1000 * fit['slope']:.2f} ms x decisions; "
+          f"slope x decisions is {100 * fit['steady']:.1f}% of the workers' wall clock")
+    if fit["steady"] > UNNAMED_LIMIT:
+        print(f"   ** over {100 * UNNAMED_LIMIT:.0f}%: work that grows with the decisions has "
+              f"no row. Do not read the table as a breakdown; name it first **")
+
+
+def _flag(argv: list[str], flag: str) -> str | None:
+    return argv[argv.index(flag) + 1] if flag in argv[:-1] else None
+
+
+def _same_path(a: str, b: str) -> bool:
+    return os.path.normcase(os.path.abspath(a)) == os.path.normcase(os.path.abspath(b))
+
+
+def delivery(
+    reports: list[dict[str, Any]], args: argparse.Namespace | None
+) -> dict[str, Any]:
+    """Did the settings and the code this tool asked for reach the processes that ran?
+
+    Read off each worker's report -- its own `argv` and the `source` of the `timing` it
+    imported -- rather than off the command line written here, because a flag the driver
+    dropped and a worktree run that imported the main checkout's src both run to the end
+    and report as if they had not. `args` is None when only reading a directory.
+    """
+    here = str(ROOT / "src" / "pokeuraou")
+    problems: list[str] = []
+    sources: dict[str, int] = {}
+    for report in reports:
+        source = report.get("source")
+        key = source or "(not recorded)"
+        sources[key] = sources.get(key, 0) + 1
+        if source and args is not None and not _same_path(source, here):
+            problems.append(f"pid {report.get('pid')} ran {source}, not {here}")
+    workers = [[str(item) for item in r.get("argv") or []] for r in _worker_reports(reports)]
+    seen: dict[str, dict[str, int]] = {}
+    for argv in workers:
+        for flag in ("--limit", "--seed", "--roster", "--selection-book", "--force-lead",
+                     "--inference-arm", "--value"):
+            value = _flag(argv, flag)
+            seen.setdefault(flag, {})
+            seen[flag][str(value)] = seen[flag].get(str(value), 0) + 1
+        for flag in ("--hide-bench", "--rank-leaf", "--no-bridge"):
+            seen.setdefault(flag, {})
+            present = "yes" if flag in argv else "no"
+            seen[flag][present] = seen[flag].get(present, 0) + 1
+    if args is not None and args.workload == "generation":
+        wanted = {
+            "--limit": args.limit, "--seed": args.seed, "--roster": args.roster,
+            "--force-lead": args.force_lead,
+        }
+        for argv in workers:
+            for flag, value in wanted.items():
+                if value is not None and _flag(argv, flag) != str(value):
+                    problems.append(f"a worker ran {flag} {_flag(argv, flag)}, asked {value}")
+            if args.selection_book is not None:
+                got = _flag(argv, "--selection-book")
+                if got is None or not _same_path(got, str(args.selection_book)):
+                    problems.append(f"a worker ran --selection-book {got}, "
+                                    f"asked {args.selection_book}")
+            if args.uniform_selection and "--selection-book" in argv:
+                problems.append("a worker drew from a book under --uniform-selection")
+            if args.hide_bench != ("--hide-bench" in argv):
+                problems.append(f"a worker's --hide-bench is {'--hide-bench' in argv}, "
+                                f"asked {args.hide_bench}")
+    if args is not None:
+        for argv in workers:
+            missing = [item for item in args.rest if item not in argv]
+            if missing:
+                problems.append(f"a worker's argv lacks {missing} from the tail")
+    return {"sources": sources, "workers": len(workers), "seen": seen,
+            "problems": sorted(set(problems))}
+
+
+def print_delivery(found: dict[str, Any]) -> None:
+    print(f"\n  what the {found['workers']} workers ran, from their own reports")
+    for source, n in sorted(found["sources"].items()):
+        print(f"   source {source}  x{n}")
+    for flag, values in found["seen"].items():
+        shown = ", ".join(f"{value} x{n}" for value, n in sorted(values.items()))
+        print(f"   {flag:<18} {shown}")
+    if found["problems"]:
+        print("  ** the run is not the one asked for **")
+        for problem in found["problems"]:
+            print(f"   {problem}")
 
 
 def build(args: argparse.Namespace) -> list[str]:
@@ -340,14 +687,28 @@ def build(args: argparse.Namespace) -> list[str]:
     """
     tail = list(args.rest)
     python = sys.executable
+
+    def given(flag: str, value: Any) -> list[str]:  # noqa: ANN401
+        return [flag, str(value)] if value is not None else []
+
     if args.workload == "generation":
+        # Every option `generate_queue.py` takes, and none of them defaulted here: an
+        # option left unset is left off, so the driver's own default is what runs. This
+        # tool had its own defaults for two of them (width 24, 8 workers) while shipping
+        # ran 12 and 24, and no way to pass a book or a seed (IKA-98).
         return [
             python, str(ROOT / "tools" / "generate_queue.py"),
             "--out", str(args.out),
             "--games", str(args.games),
-            "--workers", str(args.workers or 8),
+            *given("--first-game", args.first_game),
+            *given("--workers", args.workers),
+            *given("--seed", args.seed),
+            *given("--roster", args.roster),
             "--value", str(args.value),
-            "--limit", str(args.limit),
+            *given("--limit", args.limit),
+            *given("--selection-book", args.selection_book),
+            *(["--uniform-selection"] if args.uniform_selection else []),
+            *given("--force-lead", args.force_lead),
             "--device", args.device,
             *(["--no-bridge"] if args.no_bridge else []),
             *(["--served", "--servers", str(args.servers)] if args.served else []),
@@ -372,7 +733,7 @@ def build(args: argparse.Namespace) -> list[str]:
         python, str(ROOT / "tools" / "why_action.py"),
         "--value", str(args.value),
         "--case", args.case,
-        "--limit", str(args.limit),
+        "--limit", str(args.limit if args.limit is not None else 24),
         *tail,
     ]
 
@@ -382,8 +743,16 @@ def main() -> None:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("workload", choices=("generation", "match", "analysis"))
     ap.add_argument("--games", type=int, default=200)
+    # For generation, these are generate_queue.py's own options, passed only when given, so
+    # an unset one runs the driver's default rather than one of this tool's.
     ap.add_argument("--workers", type=int, default=None)
-    ap.add_argument("--limit", type=int, default=24)
+    ap.add_argument("--limit", type=int, default=None, help="analysis: 24 when unset")
+    ap.add_argument("--seed", type=int, default=None)
+    ap.add_argument("--first-game", type=int, default=None)
+    ap.add_argument("--roster", default=None)
+    ap.add_argument("--selection-book", type=Path, default=None)
+    ap.add_argument("--uniform-selection", action="store_true")
+    ap.add_argument("--force-lead", default=None)
     ap.add_argument("--value", default="data/models/value-gen11L.pt")
     ap.add_argument("--baseline", default="data/models/value-gen10.pt")
     ap.add_argument("--case", default="sash-ko", help="analysis: a human_baseline case")
@@ -418,6 +787,16 @@ def main() -> None:
         argv, tail = argv[:cut], argv[cut + 1 :]
     args = ap.parse_args(argv)
     args.rest = tail
+    generation_only = {
+        "--seed": args.seed, "--first-game": args.first_game, "--roster": args.roster,
+        "--selection-book": args.selection_book, "--force-lead": args.force_lead,
+        "--uniform-selection": args.uniform_selection or None,
+    }
+    stray = [flag for flag, value in generation_only.items() if value is not None]
+    if args.workload != "generation" and stray and args.report is None:
+        # Accepted and then not passed on is how a run measures an agent nobody asked for.
+        raise SystemExit(f"{', '.join(stray)} are generate_queue.py's; the {args.workload} "
+                         f"workload takes them after --, if its driver has them")
 
     if args.report is not None:
         reports = collect(args.report)
@@ -428,6 +807,9 @@ def main() -> None:
         print_table(summary, None, max(float(r.get("elapsed", 0.0)) for r in reports))
         if servers:
             print_server(summarise(servers))
+        print_decisions(per_decision(reports))
+        print_rest_fit(rest_fit(reports))
+        print_delivery(delivery(reports, None))
         return
 
     stamp = time.strftime("%m%d-%H%M%S")
@@ -481,9 +863,19 @@ def main() -> None:
         server_summary = summarise(servers)
         summary["server"] = server_summary
         print_server(server_summary)
+        summary["spin"] = spin(tree, server_summary, reports)
+        print_spin(summary["spin"])
+    summary["decisions"] = per_decision(reports)
+    print_decisions(summary["decisions"])
+    summary["rest_fit"] = rest_fit(reports)
+    print_rest_fit(summary["rest_fit"])
+    summary["delivery"] = delivery(reports, args)
+    print_delivery(summary["delivery"])
     target = args.json or (timing_dir / "summary.json")
     target.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n  {target}")
+    if summary["delivery"]["problems"]:
+        raise SystemExit(3)
 
 
 if __name__ == "__main__":

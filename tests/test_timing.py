@@ -193,3 +193,159 @@ def test_the_report_names_every_stage(
     assert report["stages"]["lp"]["calls"] == 1
     assert report["tag"] == "a tag"
     assert report["process"]["wall"] > 0
+
+
+# IKA-98: purposes, decision stretches, startup. Each is off by the same rule as a stage.
+
+
+def test_off_the_ika98_additions_are_free(monkeypatch: pytest.MonkeyPatch) -> None:
+    timing = load(monkeypatch, None)
+
+    def work(x: int) -> int:
+        return x + 1
+
+    assert timing.labelled("matrix")(work) is work
+    # The same shared no-op a stage hands back, not a purpose object per call.
+    assert timing.purpose("rank") is timing.stage("lp")
+    with timing.purpose("rank"):
+        timing.count("leaves", 3)
+        timing.decided("move")
+        timing.refine("hidden")
+        timing.ready()
+    assert timing.clock() == 0.0
+    report = timing.snapshot()
+    assert report["stages"] == {}
+    assert report["counts"] == {}
+    assert report["decisions"] == {}
+    assert report["startup_process_cpu"] is None
+
+
+def test_a_purposed_count_goes_to_the_innermost_purpose(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The dirty cells of a hidden bench are filled from inside a node's matrix."""
+    timing = load(monkeypatch, tmp_path)
+    timing.count("leaves", 1)
+    with timing.purpose("matrix"):
+        timing.count("leaves", 10)
+        with timing.purpose("dirty"):
+            timing.count("leaves", 100)
+            timing.count("lp.rows", 7)  # not in PURPOSED: kept once, with no split
+        timing.count("leaves", 1000)
+    with timing.purpose("not-a-purpose"):
+        timing.count("fills")
+
+    counts = timing.snapshot()["counts"]
+    assert counts["leaves"] == 1111
+    assert counts["leaves@other"] == 1
+    assert counts["leaves@matrix"] == 1010
+    assert counts["leaves@dirty"] == 100
+    # The split adds up to the whole, because a name outside PURPOSES is `other`.
+    assert sum(counts[f"leaves@{p}"] for p in timing.PURPOSES if f"leaves@{p}" in counts) == 1111
+    assert counts["fills@other"] == 1
+    assert "lp.rows@dirty" not in counts
+    assert timing.current_purpose() == "other"
+
+
+def test_labelled_names_a_whole_function(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    timing = load(monkeypatch, tmp_path)
+
+    @timing.labelled("rank")
+    def rank() -> str:
+        return timing.current_purpose()
+
+    assert rank() == "rank"
+    assert timing.current_purpose() == "other"
+
+
+def test_purpose_rows_are_borrowed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """`rust.fill@rank` is `rust.fill` and its nestings again, so it is never in a total."""
+    timing = load(monkeypatch, tmp_path)
+    assert set(timing.PURPOSE_ROWS) <= timing.BORROWED
+    assert {f"rust.fill@{p}" for p in timing.PURPOSES} <= set(timing.PURPOSE_ROWS)
+    assert "startup" not in timing.BORROWED
+    assert "belief" not in timing.BORROWED
+
+
+def test_decision_stretches_are_charged_to_the_kind_that_closes_them(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    timing = load(monkeypatch, tmp_path)
+    with timing.stage("narrow"):  # before the first game: not startup, and no decision's
+        burn(0.03)
+    timing.decided("between")  # the first game starts: startup ends, nothing is closed
+    with timing.stage("lp"):
+        pass
+    timing.count("forward.passes", 4)
+    timing.refine("hidden")
+    timing.decided("move")
+    with timing.stage("lp"):
+        pass
+    with timing.stage("lp"):
+        pass
+    timing.count("forward.passes", 1)
+    timing.decided("move")
+    timing.count("fills", 2)
+    timing.decided("replacement")
+    timing.decided("between")  # the next game
+    timing.count("leaves", 5)  # after the last record: the open stretch, reported as between
+
+    report = timing.snapshot()
+    found = report["decisions"]
+    assert set(found) == {"move.hidden", "move", "replacement", "between"}
+    assert found["move.hidden"]["n"] == 1
+    assert found["move.hidden"]["stages"]["lp"][1] == 1
+    assert found["move.hidden"]["counts"]["forward.passes"] == 4
+    assert found["move"]["stages"]["lp"][1] == 2
+    assert found["move"]["counts"]["forward.passes"] == 1
+    assert found["replacement"]["counts"]["fills"] == 2
+    assert "lp" not in found["replacement"]["stages"]
+    # One closed between (game 1 -> 2) and the open one after it.
+    assert found["between"]["n"] == 2
+    assert found["between"]["counts"]["leaves"] == 5
+    # The narrowing before the first game is in no stretch.
+    assert all("narrow" not in row["stages"] for row in found.values())
+
+    startup = report["stages"]["startup"]
+    assert startup["calls"] == 1
+    # Its own time, less the stage that ran inside it: well under the 0.03 s burned there.
+    assert startup["wall"] < 0.03
+    assert report["startup_process_cpu"] is not None
+    stretches = sum(row["wall"] for row in found.values())
+    assert stretches + startup["wall"] + report["stages"]["narrow"]["wall"] == pytest.approx(
+        report["elapsed"], abs=0.01
+    )
+
+
+def test_decided_twice_at_once_is_an_empty_stretch_not_an_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    timing = load(monkeypatch, tmp_path)
+    timing.decided("between")
+    timing.decided("move")
+    timing.decided("move")
+    found = timing.snapshot()["decisions"]
+    assert found["move"]["n"] == 2
+    assert found["move"]["counts"] == {}
+
+
+def test_ready_ends_startup_once_and_opens_no_decision(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    timing = load(monkeypatch, tmp_path)
+    timing.ready()
+    first = timing.snapshot()
+    timing.ready()
+    timing.decided("between")  # startup is already over: this opens the first stretch
+    second = timing.snapshot()
+    assert first["stages"]["startup"]["calls"] == 1
+    assert first["decisions"] == {}
+    assert second["startup_process_cpu"] == first["startup_process_cpu"]
+    assert second["stages"]["startup"]["wall"] == first["stages"]["startup"]["wall"]
+
+
+def test_the_report_says_which_checkout_ran(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    timing = load(monkeypatch, tmp_path)
+    assert Path(timing.snapshot()["source"]) == SOURCE.parent

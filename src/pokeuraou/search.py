@@ -144,6 +144,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from . import timing
 from .actions import SideAction
 from .equilibrium import Equilibrium, EquilibriumError, solve
 from .narrow import narrow
@@ -226,7 +227,10 @@ def leaf_ranking(
         # One matrix, pool x references, through the same batching the search uses: the
         # leaves of every candidate against every reference go out in a single call.
         ours, theirs = (pool, replies) if side == 0 else (replies, pool)
-        payoff, _notes = batched_payoff(reg, pos, ours, theirs, evaluate, budget=budget)
+        # Its own purpose, because the fill and the forward pass it pays for are the same
+        # stages a node's matrix pays for, and IKA-108 asks how the two compare.
+        with timing.purpose("rank"):
+            payoff, _notes = batched_payoff(reg, pos, ours, theirs, evaluate, budget=budget)
         # `payoff` is always side 0's win probability, so the column player wants it low.
         return payoff.mean(axis=1) if side == 0 else -payoff.mean(axis=0)
 
@@ -297,6 +301,7 @@ class SearchResult:
     optimism: float = 0.0
 
 
+@timing.labelled("matrix")
 def search(
     reg: Regulation,
     pos: Position,
