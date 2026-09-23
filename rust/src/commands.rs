@@ -27,17 +27,21 @@
 //! generator as one played in Python.
 
 use super::*;
+use crate::moves::settle_outcome;
 use serde_json::json;
 
 /// The kinds this module answers.
 pub fn handles(kind: Option<&str>) -> bool {
-    matches!(kind, Some("turn" | "alternatives"))
+    matches!(kind, Some("turn" | "alternatives" | "replacements" | "leads" | "needed"))
 }
 
 pub fn answer(reg: &Reg, value: &Value) -> Value {
     let outcome = match value["kind"].as_str() {
         Some("turn") => turn_command(reg, value),
         Some("alternatives") => alternatives_command(reg, value),
+        Some("replacements") => phase_command(reg, value, Phase::Replacements),
+        Some("leads") => phase_command(reg, value, Phase::Leads),
+        Some("needed") => needed_command(reg, value),
         _ => Err("unknown command".to_string()),
     };
     outcome.unwrap_or_else(|reason| json!({ "refused": reason }))
@@ -468,4 +472,187 @@ fn alternatives_command(reg: &Reg, value: &Value) -> Result<Value, String> {
         results.push(result_json(&resumed, full)?);
     }
     Ok(json!({ "chooser": chooser, "options": options, "results": results }))
+}
+
+// ---------------------------------------------------------------------------
+// The replacement phase and the leads
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq)]
+enum Phase {
+    Replacements,
+    Leads,
+}
+
+/// `PENDING_REPLACEMENT_VOLATILES`.
+const PENDING_REPLACEMENT: [&str; 2] = ["pendingselfswitch", "pendingforceswitch"];
+
+/// Python's `replacements_needed`: per side, per active slot, whether the player owes a
+/// replacement -- a faint, a self-switch or a forced switch, and something on the bench.
+pub fn replacements_needed(pos: &Position) -> Vec<Vec<bool>> {
+    pos.sides
+        .iter()
+        .map(|side| {
+            let bench = side.pokemon.iter().filter(|m| !m.fainted && !m.is_active()).count();
+            (0..side.active.len())
+                .map(|slot| match side.active_pokemon(slot) {
+                    None => bench > 0,
+                    Some(mon) => {
+                        let pending = PENDING_REPLACEMENT.iter().any(|v| mon.has_volatile(v));
+                        bench > 0 && (mon.fainted || pending)
+                    }
+                })
+                .collect()
+        })
+        .collect()
+}
+
+fn needed_command(reg: &Reg, value: &Value) -> Result<Value, String> {
+    let position = Position::from_json(&value["position"]);
+    if &*position.format != reg.format_id.as_str() {
+        return Err("position is for another regulation".into());
+    }
+    Ok(json!({ "needed": replacements_needed(&position) }))
+}
+
+/// `Budget.deterministic(0)`, which both phases run under in Python.
+fn deterministic() -> Budget {
+    Budget {
+        damage_rolls: -1,
+        enumerate_crit: false,
+        enumerate_accuracy: false,
+        enumerate_status_checks: false,
+        enumerate_secondary: false,
+        enumerate_speed_ties: false,
+        pinned_policy: true,
+        max_branches: 1,
+        merge_duplicates: true,
+    }
+}
+
+/// `resolve_replacements` and `apply_lead_abilities`: one position, from Python's same
+/// steps -- place every incoming Pokemon, then run the switch-ins fastest first.
+///
+/// `presets` absent: a draw takes its first option and is noted, as Python's with no
+/// generator. `presets` a list: those are the choices already drawn, and the first draw
+/// past them comes back as `draw` (its weights) for the caller to sample and ask again.
+fn phase_command(reg: &Reg, value: &Value, phase: Phase) -> Result<Value, String> {
+    let position = Position::from_json(&value["position"]);
+    if &*position.format != reg.format_id.as_str() {
+        return Err("position is for another regulation".into());
+    }
+    let choices = if phase == Phase::Replacements { two_sides(&value["choices"]) } else { [Vec::new(), Vec::new()] };
+    check_position_supported(&position, &choices)?;
+    let mut state = Turn::new(reg, position, deterministic(), [[false; 2]; 2]);
+    state.draws = Some(match value.get("presets").and_then(Value::as_array) {
+        None => Draws { report: true, ..Default::default() },
+        Some(listed) => Draws {
+            replay: true,
+            // The positive control answers every draw with its first option.
+            presets: if cfg!(feature = "ika211-control") {
+                vec![0; listed.len()]
+            } else {
+                listed.iter().filter_map(Value::as_u64).map(|v| v as usize).collect()
+            },
+            report: true,
+            ..Default::default()
+        },
+    });
+    let mut notes: std::collections::BTreeSet<String> = Default::default();
+    let mut placed: Vec<(i64, usize, usize)> = Vec::new();
+    match phase {
+        Phase::Replacements => {
+            let needed = replacements_needed(&state.pos);
+            for (side_index, actions) in choices.iter().enumerate() {
+                for action in actions {
+                    match action {
+                        SlotAction::Pass { slot } => {
+                            if needed[side_index].get(*slot).copied().unwrap_or(false) {
+                                notes.insert(format!(
+                                    "replacement owed at p{}[{}] but none was chosen",
+                                    side_index + 1,
+                                    slot
+                                ));
+                            }
+                        }
+                        SlotAction::Move { .. } => {
+                            return Err("a replacement phase only takes switches".into());
+                        }
+                        SlotAction::Switch { slot, party_index, species } => {
+                            if let Some(outgoing) = state.mon_at_mut(side_index, *slot) {
+                                outgoing
+                                    .volatiles
+                                    .retain(|v| !PENDING_REPLACEMENT.contains(&v.id.as_str()));
+                            }
+                            let queued = QueuedAction {
+                                side: side_index,
+                                slot: *slot,
+                                kind: ActionKind::Switch,
+                                order: ORDER_SWITCH,
+                                priority: 0,
+                                fractional: 0.0,
+                                speed: 0,
+                                move_id: None,
+                                target: None,
+                                switch_to: Some(party_index - 1),
+                                switch_species: Some(*species),
+                                branch_probability: 1.0,
+                            };
+                            // The positive control runs each switch-in as it is placed.
+                            if cfg!(feature = "ika211-control") {
+                                do_switch_with(reg, &mut state, &queued, true)?;
+                                continue;
+                            }
+                            do_switch_with(reg, &mut state, &queued, false)?;
+                            placed.push((phase_speed(&state, side_index, *slot)?, side_index, *slot));
+                        }
+                    }
+                }
+            }
+        }
+        Phase::Leads => {
+            for side_index in 0..state.pos.sides.len() {
+                for slot in 0..state.pos.sides[side_index].active.len() {
+                    if state.pos.sides[side_index].active[slot].is_none() {
+                        continue;
+                    }
+                    placed.push((phase_speed(&state, side_index, slot)?, side_index, slot));
+                }
+            }
+        }
+    }
+    // The positive control leaves the switch-ins in the order they were placed.
+    #[cfg(not(feature = "ika211-control"))]
+    placed.sort_by_key(|(speed, side, slot)| (-speed, *side, *slot));
+    for (_speed, side_index, slot) in &placed {
+        on_switch_in(reg, &mut state, *side_index, *slot)?;
+    }
+    let opened = state.draws.take().map(|d| d.opened).unwrap_or_default();
+    if phase == Phase::Replacements {
+        let wipe_order = state.wipe_order.clone();
+        settle_outcome(&mut state.pos, &wipe_order);
+        for side in state.pos.sides.iter_mut() {
+            for mon in side.pokemon.iter_mut() {
+                if mon.trapped {
+                    std::rc::Rc::make_mut(mon).trapped = false;
+                }
+            }
+        }
+    }
+    notes.extend(state.unmodelled.iter().cloned());
+    Ok(json!({
+        "position": state.pos.to_json(),
+        "unmodelled": notes.into_iter().collect::<Vec<_>>(),
+        "draw": opened.first(),
+    }))
+}
+
+fn phase_speed(state: &Turn, side: usize, slot: usize) -> Result<i64, String> {
+    Ok(match state.battler_at(side, slot)? {
+        None => 0,
+        Some(incoming) => {
+            let field = state.field();
+            effective_speed(&incoming, &field, &state.pos.sides[side].side_conditions)
+        }
+    })
 }

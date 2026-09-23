@@ -859,6 +859,55 @@ class RustNode:
             ],
         )
 
+    @timing.timed("rust.replacements")
+    def resolve_replacements(
+        self,
+        pos: Position,
+        choices: list[SideAction],
+        *,
+        rng: Any = None,  # noqa: ANN401 - numpy.random.Generator
+    ) -> PortPhase | None:
+        """`resolve_replacements`. A draw inside a switch-in is sampled from `rng` exactly as
+        Python's `_draw` samples it -- same call, same order -- or is the first, noted."""
+        return self._phase(
+            {
+                "kind": "replacements",
+                "position": pos.to_json(),
+                "choices": [[dump_action(a) for a in side.slots] for side in choices],
+            },
+            rng,
+        )
+
+    @timing.timed("rust.leads")
+    def apply_lead_abilities(
+        self, pos: Position, *, rng: Any = None  # noqa: ANN401 - numpy.random.Generator
+    ) -> PortPhase | None:
+        """`apply_lead_abilities`, with its draws answered as `resolve_replacements`'."""
+        return self._phase({"kind": "leads", "position": pos.to_json()}, rng)
+
+    def replacements_needed(self, pos: Position) -> tuple[tuple[bool, ...], ...] | None:
+        response = self._ask({"kind": "needed", "position": pos.to_json()})
+        if response is None:
+            return None
+        return tuple(tuple(bool(flag) for flag in side) for side in response["needed"])
+
+    def _phase(self, request: dict[str, Any], rng: Any) -> PortPhase | None:  # noqa: ANN401
+        """Asks for a phase, and once more per draw: the port replays the choices made so far
+        and hands back the weights of the next one, which is sampled here."""
+        if rng is None:
+            response = self._ask(request)
+            return None if response is None else PortPhase.read(response)
+        presets: list[int] = []
+        while True:
+            response = self._ask({**request, "presets": presets})
+            if response is None:
+                return None
+            weights = response.get("draw")
+            if not weights:
+                return PortPhase.read(response)
+            total = float(sum(weights))
+            presets.append(int(rng.choice(len(weights), p=[w / total for w in weights])))
+
 
 def _world(world: tuple[Position, int] | None) -> dict[str, Any] | None:
     if world is None:
@@ -957,4 +1006,21 @@ class PortTurn:
             unmodelled=tuple(response["unmodelled"]),
             position=Position.from_json(chosen) if chosen else None,
             pause=PortPause.read(paused) if paused else None,
+        )
+
+
+@dataclass
+class PortPhase:
+    """A replacement phase or the leads' switch-ins: Python's `ReplacementResult`, without
+    the event log (the port keeps none)."""
+
+    position: Position
+    unmodelled: tuple[str, ...] = ()
+    events: list[str] = field(default_factory=list)
+
+    @staticmethod
+    def read(response: dict[str, Any]) -> PortPhase:
+        return PortPhase(
+            position=Position.from_json(response["position"]),
+            unmodelled=tuple(response["unmodelled"]),
         )
