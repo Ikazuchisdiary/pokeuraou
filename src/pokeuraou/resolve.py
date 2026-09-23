@@ -43,7 +43,7 @@ from .actions import (
     SwitchAction,
     switch_actions_after_faint,
 )
-from .battler import Battler, FieldState
+from .battler import Battler, DamageResult, FieldState
 from .damage import calculate, crit_probability
 from .effects import (
     MOLD_BREAKER_ABILITIES,
@@ -220,6 +220,8 @@ STATUS_MOVES_FULLY_MODELLED = frozenset(
         "partingshot", "trick", "switcheroo", "roar", "whirlwind", "lifedew",
         "moonlight", "synthesis", "morningsun", "recover", "softboiled", "slackoff",
         "milkdrink", "roost", "yawn", "knockoff", "thief", "covet", "perishsong",
+        # Its HP, its failures and the doll it leaves: `_use_substitute` (IKA-180).
+        "substitute",
     }
 )
 
@@ -1830,6 +1832,8 @@ def _switch_in_ability(turn: _Turn, side: int, slot: int) -> None:
             foe = turn.mon_at(1 - side, foe_slot)
             if foe is None or foe.fainted or foe.ability in INTIMIDATE_PROOF_ABILITIES:
                 continue
+            if _intimidate_meets_substitute(turn, (1 - side, foe_slot)):
+                continue
             turn.apply_boosts(1 - side, foe_slot, {"atk": -1}, reason="intimidate")
 
     if mon.ability == "hospitality":
@@ -2914,6 +2918,8 @@ def _do_status_move(
             failed_any = True
             continue
         reachable.append(target)
+    # Rolled for like the rest, then met by the doll (IKA-180).
+    subbed = [t for t in reachable if _hits_substitute(turn, action, move, t)]
 
     if not reachable and targets:
         # Protect's `onTryHit` returns `NOT_FAIL`, which `hitStepTryHitEvent` keeps, so a
@@ -2946,16 +2952,20 @@ def _do_status_move(
         turn.move_failed.add((action.side, action.slot))
         return [(1.0, turn, "")]
 
+    if move.id == "substitute":
+        _use_substitute(reg, turn, action)
+        return [(1.0, turn, "")]
+
     if not budget.enumerate_accuracy or accuracy >= 1.0 or accuracy <= 0.0:
         if accuracy <= 0.0:
             turn.log(f"{action.label(reg)} missed")
             turn.move_failed.add((action.side, action.slot))
             return [(1.0, turn, "")]
-        _apply_status_move_and_judge(reg, turn, action, move, reachable)
+        _apply_status_move_past_substitutes(reg, turn, action, move, reachable, subbed)
         return [(1.0, turn, "")]
 
     hit_state = turn.clone()
-    _apply_status_move_and_judge(reg, hit_state, action, move, reachable)
+    _apply_status_move_past_substitutes(reg, hit_state, action, move, reachable, subbed)
     miss_state = turn
     miss_state.log(f"{action.label(reg)} missed")
     miss_state.move_failed.add((action.side, action.slot))
@@ -3669,6 +3679,11 @@ def _hit_target(
     # guarded hit has one state per accuracy branch.
     guarded = _forme_guard(turn, move, target) is not None
     multihit = bool(move.raw.get("multihit"))
+    # A doll in front takes the first hit whole, so the guard is not what meets it
+    # (IKA-180); `_substitute_in_front` says what that leaves unmodelled.
+    subbed = _hits_substitute(turn, action, move, target)
+    if subbed:
+        guarded = _substitute_in_front(turn, move, target, guarded, multihit)
 
     accuracy = _accuracy(turn, move, attacker, defender)
     crit_p = crit_probability(reg, attacker, defender, action.move_id)
@@ -3733,6 +3748,11 @@ def _hit_target(
                 state = _immune_state(turn, action, move, target)
                 outcomes.append((acc_weight * crit_weight, state, note))
                 continue
+            doll_result = (
+                _doll_damage(reg, attacker, defender, action, turn.field(), target, spread,
+                             crit, move_ctx, result)
+                if subbed else result
+            )
             # The raw roll, not effective_damage: `deal_damage` owns the cap at the
             # target's HP *and* the Focus Sash / Sturdy consumption that goes with it.
             # Capping here as well would leave the item on the field.
@@ -3747,8 +3767,10 @@ def _hit_target(
                         mon = state.mon_at(*target)
                         if mon is None or mon.fainted:
                             break
+                        # Each hit meets the doll while it stands (IKA-180).
+                        on_doll = subbed and _hits_substitute(state, action, move, target)
                         if hit_index == 0:
-                            amount = int(result.rolls[0, roll])
+                            amount = int((doll_result if on_doll else result).rolls[0, roll])
                         else:
                             # Between the hits of a multi-hit move the defender's state has
                             # moved on -- Stamina has raised its Defence, a berry has
@@ -3758,6 +3780,8 @@ def _hit_target(
                             live_defender = state.battler_at(*target)
                             if live_attacker is None or live_defender is None:
                                 break
+                            if on_doll:
+                                live_defender = _behind_substitute(live_defender)
                             again = calculate(
                                 reg, live_attacker, live_defender, action.move_id,
                                 state.field(), defender_side=target[0], spread=spread,
@@ -3767,6 +3791,9 @@ def _hit_target(
                             if again.immune:
                                 break
                             amount = int(again.rolls[0, roll])
+                        if on_doll:
+                            _hit_substitute(state, action, move, target, amount, budget)
+                            continue
                         absorbed = guarded and hit_index == 0
                         if absorbed:
                             # `result` is the intact forme's, whose rolls are all zero.
@@ -3822,6 +3849,243 @@ def _thaw_on_hit(
         mon.status = None
         mon.status_counter = None
         turn.log(f"{turn.name(*target)} thawed ({move.id})")
+
+
+# ---------------------------------------------------------------------------
+# Substitute (IKA-180)
+#
+# vendor/pokemon-showdown data/moves.ts, substitute (the champions mod keeps it):
+#
+#     onTryHit(source) {
+#         if (source.volatiles['substitute']) { ...; return this.NOT_FAIL; }
+#         if (source.hp <= source.maxhp / 4 || source.maxhp === 1) { ...; return this.NOT_FAIL; }
+#     },
+#     onHit(target) { this.directDamage(target.maxhp / 4); },
+#     condition: {
+#         onStart(target) {
+#             this.effectState.hp = Math.floor(target.maxhp / 4);
+#             if (target.volatiles['partiallytrapped']) { ...; delete target.volatiles['partiallytrapped']; }
+#         },
+#         onTryPrimaryHit(target, source, move) {
+#             if (target === source || move.flags['bypasssub'] || move.infiltrates) return;
+#             let damage = this.actions.getDamage(source, target, move);
+#             if (!damage && damage !== 0) { ...; return null; }
+#             if (damage > target.volatiles['substitute'].hp) damage = target.volatiles['substitute'].hp;
+#             target.volatiles['substitute'].hp -= damage;
+#             if (target.volatiles['substitute'].hp <= 0) target.removeVolatile('substitute');
+#             if (damage) this.actions.applyRecoilDamage(damage, move, source);
+#             if (move.drain) this.heal(Math.ceil(damage * move.drain[0] / move.drain[1]), ...);
+#             this.singleEvent('AfterSubDamage', ...); this.runEvent('AfterSubDamage', ...);
+#             return this.HIT_SUBSTITUTE;
+#         },
+#     },
+#
+# and data/mods/champions/scripts.ts `spreadMoveHit`: the check runs for neither a
+# secondary nor a self hit, nor a move whose target is `all`, `allyTeam`, `allySide` or
+# `foeSide`; a HIT_SUBSTITUTE target is `null` from there on, so its damage, the move's own
+# effects, its secondaries, `DamagingHit` (the contact abilities, Rocky Helmet, Cursed Body)
+# and `AfterHit` (Knock Off, Stone Axe) skip it, while `selfDrops` and a secondary's `self`
+# still reach the user. `hitStepMoveHitLoop` counts it 0 towards `totalDamage` (recoil,
+# Shell Bell) and still as a hit (Life Orb, U-turn). A status move gets `null` from
+# `getDamage` and does nothing to that target, and the move is not a failure. The resist
+# berries return early for a hit the doll takes (`hitSub`), and Intimidate skips a Pokemon
+# behind one.
+# ---------------------------------------------------------------------------
+
+SUBSTITUTE = "substitute"
+#: The targets `spreadMoveHit` never checks for a doll.
+SUBSTITUTE_UNCHECKED_TARGETS = frozenset({"all", "allyTeam", "allySide", "foeSide"})
+#: Damaging moves with an `onAfterSubDamage` this resolver does not run. Stone Axe's and
+#: Ceaseless Edge's hazards are the ones it does.
+AFTER_SUB_DAMAGE_UNMODELLED = frozenset(
+    {"icespinner", "steelroller", "rapidspin", "mortalspin", "coreenforcer", "flameburst"}
+)
+
+
+def _hits_substitute(
+    turn: _Turn, action: QueuedAction, move: Move, target: tuple[int, int]
+) -> bool:
+    """Whether `target`'s doll takes this move instead of it: the gate of `onTryPrimaryHit`
+    and the one `spreadMoveHit` puts around it."""
+    if target == (action.side, action.slot) or move.target in SUBSTITUTE_UNCHECKED_TARGETS:
+        return False
+    if "bypasssub" in move.flags:
+        return False
+    attacker = turn.mon_at(action.side, action.slot)
+    if attacker is not None and attacker.ability == "infiltrator":
+        return False
+    mon = turn.mon_at(*target)
+    return mon is not None and not mon.fainted and mon.has_volatile(SUBSTITUTE)
+
+
+def _substitute_hp(mon: Pokemon) -> int:
+    """The doll's HP: Showdown's `effectState.hp` as the position carries it (`extra.hp`),
+    or the `floor(maxhp / 4)` it starts with when a hand-built position leaves it out."""
+    doll = mon.volatile(SUBSTITUTE)
+    if doll is None:
+        return 0
+    hp = doll.extra.get("hp") if doll.extra else None
+    return int(hp) if isinstance(hp, int | float) else mon.maxhp // 4
+
+
+def _intimidate_meets_substitute(turn: _Turn, target: tuple[int, int]) -> bool:
+    """Intimidate's `if (target.volatiles['substitute']) { this.add('-immune', target); }`."""
+    mon = turn.mon_at(*target)
+    return mon is not None and mon.has_volatile(SUBSTITUTE)
+
+
+def _use_substitute(reg: Regulation, turn: _Turn, action: QueuedAction) -> None:
+    """Substitute itself: its two refusals, then the doll at `floor(maxhp / 4)` and the same
+    HP paid by `directDamage`, which no Endure, Sash or Magic Guard meets and which marks no
+    hurt.
+
+    A refusal is `NOT_FAIL` from `onTryHit`, which the champions mod's `spreadMoveHit` meets
+    first as the move's own `singleEvent('TryHit')` and turns into `[false]`: a failure
+    Stomping Tantrum reads. Showdown's position after a second Substitute, or one at a
+    quarter of the HP, carries `moveLastTurnFailed` (tests/test_substitute.py)."""
+    me = (action.side, action.slot)
+    mon = turn.mon_at(*me)
+    if mon is None or mon.fainted:
+        return
+    if mon.has_volatile(SUBSTITUTE):
+        turn.log(f"{action.label(reg)} failed (a Substitute is already up)")
+        turn.move_failed.add(me)
+        return
+    if mon.hp * 4 <= mon.maxhp or mon.maxhp == 1:
+        turn.log(f"{action.label(reg)} failed (too weak)")
+        turn.move_failed.add(me)
+        return
+    cost = max(1, mon.maxhp // 4)
+    mon.volatiles = [v for v in mon.volatiles if v.id != "partiallytrapped"]
+    mon.volatiles.append(Effect(id=SUBSTITUTE, extra={"hp": cost}))
+    mon.hp -= cost
+    turn.log(f"{turn.name(*me)} -{cost} (substitute)")
+    turn.check_berry(*me)
+
+
+def _behind_substitute(defender: Battler) -> Battler:
+    """The defender as `getDamage` meets it behind a doll: a resist berry's
+    `onSourceModifyDamage` returns before halving anything when the hit is the doll's."""
+    if defender.item in RESIST_BERRIES:
+        return replace(defender, item=None)
+    return defender
+
+
+def _doll_damage(
+    reg: Regulation,
+    attacker: Battler,
+    defender: Battler,
+    action: QueuedAction,
+    field: FieldState,
+    target: tuple[int, int],
+    spread: bool,
+    crit: bool,
+    move_ctx: MoveContext,
+    result: DamageResult,
+) -> DamageResult:
+    """The first hit's damage to the doll: `result` itself unless a resist berry is held."""
+    behind = _behind_substitute(defender)
+    if behind is defender:
+        return result
+    assert action.move_id is not None
+    return calculate(
+        reg, attacker, behind, action.move_id, field, defender_side=target[0],
+        spread=spread, crit=crit, move_ctx=move_ctx,
+    )
+
+
+def _substitute_in_front(
+    turn: _Turn, move: Move, target: tuple[int, int], guarded: bool, multihit: bool
+) -> bool:
+    """What a Disguise or Ice Face behind a doll becomes: not the first hit's guard. A
+    multi-hit move that breaks the doll would meet the guard on a later hit, which the
+    hit loop does not follow, so that is said."""
+    del target
+    if guarded and multihit:
+        turn.unmodelled.add(
+            f"substitute: {move.id} past a broken Substitute into a forme guard"
+        )
+    return False
+
+
+def _hit_substitute(
+    turn: _Turn,
+    action: QueuedAction,
+    move: Move,
+    target: tuple[int, int],
+    amount: int,
+    budget: Budget,
+) -> None:
+    """One hit the doll takes (`onTryPrimaryHit`): its HP, the recoil and drain from what
+    it took, Stone Axe's and Ceaseless Edge's `onAfterSubDamage`, and a secondary's `self`
+    -- and nothing that reaches the target."""
+    mon = turn.mon_at(*target)
+    if mon is None:
+        return
+    held = _substitute_hp(mon)
+    dealt = min(max(0, amount), held)
+    left = held - dealt
+    if left <= 0:
+        mon.volatiles = [v for v in mon.volatiles if v.id != SUBSTITUTE]
+        turn.log(f"{turn.name(*target)}'s Substitute broke ({move.id})")
+    else:
+        doll = mon.volatile(SUBSTITUTE)
+        if doll is not None:
+            doll.extra = {**doll.extra, "hp": left}
+        turn.log(f"{turn.name(*target)}'s Substitute -{dealt} ({move.id})")
+    # A hit to Life Orb, U-turn and the move's `self`; 0 to the move's total.
+    turn.move_connected = True
+
+    raw = move.raw
+    me = (action.side, action.slot)
+    attacker = turn.mon_at(*me)
+    if dealt and raw.get("recoil") and attacker is not None and attacker.ability != "rockhead":
+        turn.deal_damage(*me, _round_fraction(dealt, raw["recoil"]), reason="recoil")
+    if raw.get("drain") and dealt:
+        numerator, denominator = int(raw["drain"][0]), int(raw["drain"][1])
+        turn.heal(*me, -(-dealt * numerator // denominator), reason="drain")
+
+    if move.id in AFTER_HIT_HAZARDS:
+        _lay_hazard_after_hit(turn, action, move, True)
+    elif move.id in AFTER_SUB_DAMAGE_UNMODELLED:
+        turn.unmodelled.add(f"substitute: {move.id} onAfterSubDamage")
+
+    attacker = turn.mon_at(*me)
+    if attacker is not None and attacker.ability == "sheerforce":
+        return
+    for secondary in raw.get("secondaries") or []:
+        own = secondary.get("self")
+        if not own:
+            continue
+        chance = float(secondary.get("chance", 100)) / 100.0
+        kept = {"self": own}
+        if chance >= 1.0:
+            _apply_secondary(turn, action, kept, target)
+        elif budget.enumerate_secondary:
+            turn.pending_secondaries.append((chance, kept, target))
+        elif not budget.pinned_policy:
+            turn.unmodelled.add(f"secondary {int(chance * 100)}%: {move.id} (not branched)")
+
+
+def _apply_status_move_past_substitutes(
+    reg: Regulation,
+    turn: _Turn,
+    action: QueuedAction,
+    move: Move,
+    reachable: list[tuple[int, int]],
+    subbed: list[tuple[int, int]],
+) -> None:
+    """A status move on the targets no doll stopped. A target behind one is `null` from
+    `getDamage`, which `hitStepMoveHitLoop` turns into a 0 that keeps the move a success;
+    so the "did nothing" judgement is not made while any target was a doll's."""
+    if not subbed:
+        _apply_status_move_and_judge(reg, turn, action, move, reachable)
+        return
+    for target in subbed:
+        turn.log(f"{turn.name(*target)}'s Substitute blocked {move.id}")
+    applied = [t for t in reachable if t not in subbed]
+    if applied:
+        _apply_status_move(reg, turn, action, move, applied)
 
 
 #: How many sub-100% secondaries one hit will branch before the rest are collapsed. Each
