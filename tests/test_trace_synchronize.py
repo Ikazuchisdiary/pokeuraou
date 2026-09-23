@@ -37,17 +37,15 @@ import pytest
 from pokeuraou import rustnode
 from pokeuraou.actions import SideAction, side_actions, switch_actions_after_faint
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
-from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.position import Position
-from pokeuraou.resolve import (
+
+from ._port import (
     Budget,
     apply_lead_abilities,
-    batched_payoffs,
     resolve_turn,
     resume_alternatives,
     resume_turn,
 )
-
 from .conftest import FORMAT_ID
 
 pytestmark = pytest.mark.oracle
@@ -232,47 +230,17 @@ def test_showdown_does_what_the_case_is_named_for(oracle: Oracle, name: str) -> 
     del before
 
 
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_python_does_what_showdown_does(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
-    before, after, _log = _play(oracle, name)
-    choices = CASES[name][3]
-    result = resolve_turn(reg, before, _actions(reg, before, choices), budget=BUDGET)
-    assert len(result.branches) == 1 and not result.suspended
-    branch = result.branches[0]
-    if name.endswith("-last"):
-        # The collapsed budget takes the first foe; the branching one has the second.
-        result = resolve_turn(reg, before, _actions(reg, before, choices), budget=BRANCHING)
-        boards = [_board(b.position) for b in result.branches]
-        assert _board(after) in boards, (boards, _board(after))
-        return
-    assert _board(branch.position) == _board(after), " / ".join(branch.events)
-
-
-@pytest.mark.parametrize("name", sorted(n for n in CASES if CASES[n][5]))
-def test_a_trace_between_two_abilities_is_two_halves(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
-    """Under a branching budget both foes' abilities are outcomes of one half each; the
-    collapsed one takes the first and says so."""
-    before, after, _log = _play(oracle, name)
-    choices = CASES[name][3]
-    actions = _actions(reg, before, choices)
-    result = resolve_turn(reg, before, actions, budget=BRANCHING)
-    abilities = sorted(
-        (b.probability, b.position.sides[0].pokemon[b.position.sides[0].active[0]].ability)
-        for b in result.branches
-    )
-    assert [a for _p, a in abilities] == ["drought", "intimidate"], abilities
-    assert [p for p, _a in abilities] == pytest.approx([0.5, 0.5])
-    assert not any("trace target" in u for u in result.unmodelled)
-    collapsed = resolve_turn(reg, before, actions, budget=BUDGET)
-    assert "trace target (the first; not branched)" in collapsed.unmodelled
-    del after
-
-
-def test_the_leads_trace_the_first_foe_or_a_drawn_one(reg, oracle: Oracle) -> None:  # noqa: ANN001
+def test_the_leads_trace_the_first_foe_or_a_drawn_one(
+    reg, oracle: Oracle, monkeypatch: pytest.MonkeyPatch  # noqa: ANN001
+) -> None:
     """`apply_lead_abilities` hands back one position: the first foe with a note, or a draw
-    from the generator it is given, which lands on one of Showdown's two answers."""
+    from the generator it is given, which lands on one of Showdown's two answers. The port
+    runs the leads, `position_from_sets` included (IKA-210)."""
+    from pokeuraou import selfplay
     from pokeuraou.priors import SampledSet
     from pokeuraou.regulation import to_id
+
+    monkeypatch.setattr(selfplay, "apply_lead_abilities", apply_lead_abilities)
 
     ours = [GARDE, WHIM, KING, CHOMP]
     boards = {}
@@ -371,72 +339,15 @@ def bridged(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
     os.environ.pop(rustnode.ENV_ENABLE, None)
 
 
-@pytest.mark.parametrize("budget_name", ["collapsed", "branching"])
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_the_port_resolves_the_case_as_python_does(
-    reg, oracle: Oracle, bridged: None, name: str, budget_name: str  # noqa: ANN001
+def test_the_port_keeps_light_clay_screens_eight_turns(
+    reg, bridged: None, monkeypatch: pytest.MonkeyPatch  # noqa: ANN001
 ) -> None:
-    before, _after, _log = _play(oracle, name)
-    before = _unstat(before)
-    budget = BUDGET if budget_name == "collapsed" else BRANCHING
-    actions = _actions(reg, before, CASES[name][3])
-    node = rustnode.node_for(reg)
-    assert node is not None
-    there = node.resolve(before, actions, budget)
-    assert there is not None, "the port refused the turn"
-    here = resolve_turn(reg, before, actions, budget=budget)
-    assert there.branches == pytest.approx([b.probability for b in here.branches], abs=1e-12)
-    assert there.suspended == pytest.approx([s.probability for s in here.suspended], abs=1e-12)
-    # The notes this change adds. The calculator's item notes differ between the two
-    # already (Python names an unused mega stone the port knows from the regulation).
-    assert {u for u in there.unmodelled if "trace" in u} == {
-        u for u in here.unmodelled if "trace" in u
-    }
-    for index, branch in enumerate(here.branches):
-        chosen = node.resolve(before, actions, budget, select=index)
-        assert chosen is not None and chosen.position is not None
-        assert _board(chosen.position) == _board(branch.position)
-
-
-def test_the_port_folds_a_traced_replacement_as_python_does(
-    reg, oracle: Oracle, bridged: None  # noqa: ANN001
-) -> None:
-    """The node's matrix through the port and without it, where a U-turn brings Gardevoir
-    in to trace mid-turn (the draw inside `resume_turn`), where Gardevoir switches in, and
-    the moves beside them."""
-    ours = [RILLA, WHIM, GARDE, CHOMP]
-    handle = oracle.create(FORMAT_ID, ours, INTIMIDATE_AND_DROUGHT, policy=RandomnessPolicy())
-    handle.step(["team 1234", "team 1234"])
-    before = _unstat(Position.from_json(handle.position))
-    handle.close()
-    wanted = {
-        0: ["move 1 2, move 1", "move 1 1, move 2 1", "switch 3, move 1", "move 3 1, move 1"],
-        1: ["move 3 2, move 1", "move 1, move 1", "move 4 1, move 3"],
-    }
-    menus = {
-        side: [a for a in side_actions(reg, before, side) if a.to_choice() in wanted[side]]
-        for side in (0, 1)
-    }
-    assert [len(menus[0]), len(menus[1])] == [4, 3]
-    budget = Budget.matrix()
-    evaluators = [OBJECTIVES["hp-share"].batch, OBJECTIVES["faints"].batch]
-    os.environ.pop(rustnode.ENV_ENABLE, None)
-    rustnode.reset()
-    python, notes, _exact = batched_payoffs(reg, before, menus[0], menus[1], evaluators, budget=budget)
-    os.environ[rustnode.ENV_ENABLE] = "1"
-    rustnode.reset()
-    port, port_notes, _port_exact = batched_payoffs(
-        reg, before, menus[0], menus[1], evaluators, budget=budget
-    )
-    for mine, theirs in zip(python, port, strict=True):
-        assert abs(mine - theirs).max() < 1e-12, (mine, theirs)
-    assert not any("trace target" in n for n in notes)
-
-
-def test_the_port_keeps_light_clay_screens_eight_turns(reg, bridged: None) -> None:  # noqa: ANN001
-    """Light Clay is `inert` to the name scan but read from the dump by both engines."""
+    """Light Clay is `inert` to the name scan but read from the dump by the port."""
+    from pokeuraou import selfplay
     from pokeuraou.priors import SampledSet
     from pokeuraou.selfplay import position_from_sets
+
+    monkeypatch.setattr(selfplay, "apply_lead_abilities", apply_lead_abilities)
 
     grimm = SampledSet(species="grimmsnarl", ability="prankster", item="lightclay", nature="Careful",
                        moves=["lightscreen", "reflect", "protect", "spiritbreak"], sp={"hp": 32})
@@ -453,16 +364,16 @@ def test_the_port_keeps_light_clay_screens_eight_turns(reg, bridged: None) -> No
     node = rustnode.node_for(reg)
     assert node is not None
     there = node.resolve(pos, actions, BUDGET, select=0)
-    here = resolve_turn(reg, pos, actions, budget=BUDGET).branches[0].position
     assert there is not None and there.position is not None
     screen = there.position.sides[0].side_condition("lightscreen")
-    assert screen is not None and screen.duration == here.sides[0].side_condition("lightscreen").duration
+    assert screen is not None
     assert screen.duration == 7, screen  # 8, one counted down at the end of this turn
 
 
 # ---------------------------------------------------------------------------
 # The port against Showdown, not against Python (IKA-207). The replacement after U-turn
-# needs the continuation command (IKA-211) and is not here.
+# is `test_a_replacement_after_u_turn_traces_in_each_outcome`, through the port's `turn`
+# command (IKA-211, IKA-210).
 
 
 @pytest.mark.parametrize("name", sorted(CASES))

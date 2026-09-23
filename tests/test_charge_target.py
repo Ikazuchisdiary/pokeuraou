@@ -50,8 +50,8 @@ from pokeuraou import rustnode
 from pokeuraou.actions import MoveAction, side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Effect, Position
-from pokeuraou.resolve import Budget, resolve_turn
 
+from ._port import Budget
 from .conftest import FORMAT_ID
 
 SP = {"hp": 20, "atk": 20, "def": 10, "spa": 20, "spd": 10, "spe": 20}
@@ -99,13 +99,6 @@ def _find(reg, pos: Position, side: int, choice: str):  # noqa: ANN001, ANN202
     found = [a for a in side_actions(reg, pos, side) if a.to_choice() == choice]
     assert found, (side, choice, [a.to_choice() for a in side_actions(reg, pos, side)])
     return found[0]
-
-
-def _python_turn(reg, pos: Position, choices: list[str]) -> Position:  # noqa: ANN001
-    actions = [_find(reg, pos, side, choices[side]) for side in (0, 1)]
-    result = resolve_turn(reg, pos, actions, budget=BUDGET)
-    assert len(result.branches) == 1, [b.events for b in result.branches]
-    return result.branches[0].position
 
 
 def _slot0_choices(reg, pos: Position) -> set[str]:  # noqa: ANN001
@@ -167,28 +160,15 @@ def test_the_bridge_exports_the_target(oracle: Oracle, target: int) -> None:
 
 
 @pytest.mark.oracle
-@pytest.mark.parametrize("form", ["showdown position", "our resolver's child"])
 @pytest.mark.parametrize("target", [1, 2])
-def test_our_second_turn_is_showdowns(reg, oracle: Oracle, target: int, form: str) -> None:  # noqa: ANN001
-    """One choice on the menu, Showdown takes it, and both hit the same foe."""
+def test_our_second_turn_menu_is_showdowns(reg, oracle: Oracle, target: int) -> None:  # noqa: ANN001
+    """One choice on the menu of Showdown's charging position (no engine involved)."""
     handle = _start(oracle, ARCHALUDON)
-    start = Position.from_json(handle.position)
     handle.step(_charge_turn(target))
-    if form == "showdown position":
-        pos = Position.from_json(handle.position)
-        pos.sides[0].pokemon[pos.sides[0].active[0]].trapped = False
-    else:
-        pos = _python_turn(reg, start, _charge_turn(target))
-        charging = pos.sides[0].pokemon[0].volatile("twoturnmove")
-        assert charging is not None and charging.extra.get("targetLoc") == target
-    assert _slot0_choices(reg, pos) == {"move 1"}
-    before = handle.position
-    handle.step([side_actions(reg, pos, 0)[0].slots[0].to_choice() + ", move 1", FOES_QUIET])
-    assert handle.choice_errors == [], handle.choice_errors
-    theirs = _hurt(before, handle.position)
+    pos = Position.from_json(handle.position)
     handle.close()
-    after = _python_turn(reg, pos, ["move 1, move 1", FOES_QUIET])
-    assert _hurt(pos, after) == theirs == {target}
+    pos.sides[0].pokemon[pos.sides[0].active[0]].trapped = False
+    assert _slot0_choices(reg, pos) == {"move 1"}
 
 
 def test_a_charge_without_a_stored_target_keeps_every_target(reg) -> None:  # noqa: ANN001
@@ -265,20 +245,15 @@ def test_showdown_disables_the_hammer_after_the_hammer(oracle: Oracle, name: str
 
 
 @pytest.mark.oracle
-@pytest.mark.parametrize("form", ["showdown position", "our resolver's child"])
 @pytest.mark.parametrize("name", sorted(HAMMER))
-def test_our_hammer_menu_is_showdowns(reg, oracle: Oracle, name: str, form: str) -> None:  # noqa: ANN001
-    handle, first = _hammer(oracle, name)
+def test_our_hammer_menu_is_showdowns(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
+    """The menu on Showdown's own position; on the port's child it is
+    `test_the_ports_hammer_child_has_showdowns_menu`."""
+    handle, _first = _hammer(oracle, name)
     theirs = _showdown_moves(handle)
     last = handle.position
     handle.close()
-    if form == "showdown position":
-        pos = Position.from_json(last)
-    else:
-        pos = Position.from_json(first)
-        for step in HAMMER[name][1]:
-            pos = _python_turn(reg, pos, step)
-    assert _our_moves(reg, pos) == theirs
+    assert _our_moves(reg, Position.from_json(last)) == theirs
 
 
 def test_the_flag_comes_from_the_dump(reg) -> None:  # noqa: ANN001
@@ -355,7 +330,7 @@ def bridged(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
 @pytest.mark.oracle
 @pytest.mark.parametrize("target", [1, 2])
 def test_the_port_stores_and_fires_the_target(reg, oracle: Oracle, bridged: None, target: int) -> None:  # noqa: ANN001
-    """Both turns in the port give Python's position, the stored target included."""
+    """Both turns in the port: the stored target is the one the second turn hits."""
     handle = _start(oracle, ARCHALUDON)
     start = Position.from_json(handle.position)
     handle.close()
@@ -369,9 +344,8 @@ def test_the_port_stores_and_fires_the_target(reg, oracle: Oracle, bridged: None
         actions = [_find(reg, pos, side, choices[side]) for side in (0, 1)]
         there = node.resolve(pos, actions, BUDGET, select=0)
         assert there is not None and there.position is not None, "the port refused the turn"
-        here = resolve_turn(reg, pos, actions, budget=BUDGET)
-        assert there.position.to_json() == here.branches[0].position.to_json()
-        pos = here.branches[0].position
+        assert len(there.branches) == 1, there.branches
+        pos = there.position
     assert _hurt(start, pos) == {target}
 
 
@@ -414,6 +388,7 @@ def test_the_ports_second_turn_is_showdowns(reg, oracle: Oracle, port, target: i
         pos = _port_turn(reg, port, start, _charge_turn(target))
         charging = pos.sides[0].pokemon[0].volatile("twoturnmove")
         assert charging is not None and charging.extra.get("targetLoc") == target
+    assert _slot0_choices(reg, pos) == {"move 1"}
     before = handle.position
     handle.step([side_actions(reg, pos, 0)[0].slots[0].to_choice() + ", move 1", FOES_QUIET])
     assert handle.choice_errors == [], handle.choice_errors

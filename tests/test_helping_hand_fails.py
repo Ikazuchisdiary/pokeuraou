@@ -33,8 +33,8 @@ from pokeuraou import rustnode
 from pokeuraou.actions import side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Position
-from pokeuraou.resolve import Budget, resolve_turn
 
+from ._port import Budget
 from .conftest import FORMAT_ID
 
 pytestmark = pytest.mark.oracle
@@ -139,11 +139,6 @@ def _actions(reg, pos: Position, choices: tuple[str, str]) -> list:  # noqa: ANN
     ]
 
 
-def _only(result) -> Position:  # noqa: ANN001
-    assert len(result.branches) == 1, [b.events for b in result.branches]
-    return result.branches[0].position
-
-
 def test_the_boost_is_in_the_control(oracle: Oracle) -> None:
     """Positive control for the damage: the helped Hyper Voice does more than an unhelped one."""
     helped = _play(oracle, "partner-attacks")
@@ -152,18 +147,6 @@ def test_the_boost_is_in_the_control(oracle: Oracle) -> None:
         lost_helped = _state(helped[0])[key][0] - _state(helped[1])[key][0]
         lost_alone = _state(alone[0])[key][0] - _state(alone[1])[key][0]
         assert lost_helped > lost_alone > 0, (key, lost_helped, lost_alone)
-
-
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_helping_hand_against_showdown(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
-    positions = _play(oracle, name)
-    _check_showdown(name, positions)
-    mine = positions[0]
-    for turn, choices in enumerate(CASES[name][1], start=1):
-        mine = _only(resolve_turn(reg, mine, _actions(reg, mine, choices), budget=BUDGET))
-        assert _state(mine) == _state(positions[turn]), (
-            name, turn, _state(mine), _state(positions[turn]),
-        )
 
 
 @pytest.fixture()
@@ -188,8 +171,9 @@ def _clear_stats(pos: Position) -> Position:
 
 @pytest.mark.parametrize("name", sorted(CASES))
 def test_the_port_fails_it_too(reg, oracle: Oracle, bridged: None, name: str) -> None:  # noqa: ANN001
-    """The port plays Showdown's turns, and matches Python's position turn by turn."""
+    """The port plays Showdown's turns, and matches Showdown's position turn by turn."""
     positions = _play(oracle, name)
+    _check_showdown(name, positions)
     node = rustnode.node_for(reg)
     assert node is not None
     mine = _clear_stats(positions[0])
@@ -197,17 +181,8 @@ def test_the_port_fails_it_too(reg, oracle: Oracle, bridged: None, name: str) ->
         actions = _actions(reg, mine, choices)
         there = node.resolve(mine, actions, BUDGET, select=0)
         assert there is not None and there.position is not None, f"the port refused turn {turn}"
-
-        os.environ[rustnode.ENV_ENABLE] = "0"
-        rustnode.reset()
-        here = _only(resolve_turn(reg, mine, actions, budget=BUDGET))
-        os.environ[rustnode.ENV_ENABLE] = "1"
-        rustnode.reset()
-        node = rustnode.node_for(reg)
-        assert node is not None
-
+        assert len(there.branches) == 1, there.branches
         assert _state(there.position) == _state(positions[turn]), (
             name, turn, _state(there.position), _state(positions[turn]),
         )
-        assert here.to_json() == there.position.to_json(), (name, turn)
         mine = there.position

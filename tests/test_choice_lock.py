@@ -48,8 +48,8 @@ from pokeuraou import rustnode
 from pokeuraou.actions import MoveAction, side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Effect, Position
-from pokeuraou.resolve import Budget, resolve_turn
 
+from ._port import Budget, resolve_turn
 from .conftest import FORMAT_ID
 
 SP = {"hp": 20, "atk": 20, "def": 10, "spa": 20, "spd": 10, "spe": 20}
@@ -139,6 +139,15 @@ CASES: dict[str, Case] = {
 STEPS = [(name, i) for name, case in sorted(CASES.items()) for i in range(len(case.steps))]
 
 
+def _unported(name: str, step: int = 0) -> tuple:
+    """A case the port refuses (Trick, IKA-208) is held as a strict xfail, so the day the
+    port answers it the mark has to come off (IKA-210). Its Trick is the first step; the
+    step after it the port answers."""
+    if CASES[name].ported or step > 0:
+        return ()
+    return (pytest.mark.xfail(strict=True, reason="the port refuses Trick (IKA-208)"),)
+
+
 def _play(oracle: Oracle, case: Case) -> tuple[list[dict], list[set[str]]]:
     """Showdown's positions before the first step and after each, and p1a's menu then."""
     handle = oracle.create(FORMAT_ID, case.ours, case.theirs, policy=RandomnessPolicy())
@@ -215,36 +224,8 @@ def test_showdown(oracle: Oracle, name: str) -> None:
 
 
 @pytest.mark.oracle
-@pytest.mark.parametrize(("name", "step"), STEPS)
-def test_our_turn_from_showdowns_position(reg, oracle: Oracle, name: str, step: int) -> None:  # noqa: ANN001
-    """Each turn resolved by us from Showdown's position: the lock, and the menu after."""
-    case = CASES[name]
-    positions, menus = _play(oracle, case)
-    start = _start(positions, step)
-    result = resolve_turn(reg, start, _chosen(reg, start, case.steps[step]), budget=Budget.matrix())
-    assert not result.suspended
-    assert {_lock(b.position) for b in result.branches} == {case.locks[step]}
-    for branch in result.branches:
-        assert _menu(reg, branch.position) == menus[step + 1]
-
-
-@pytest.mark.oracle
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_the_games_we_generate(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
-    """Every turn resolved by us from Showdown's first position, one branch followed."""
-    case = CASES[name]
-    positions, menus = _play(oracle, case)
-    pos = _start(positions, 0)
-    for step, want in enumerate(case.locks[: case.generated]):
-        result = resolve_turn(reg, pos, _chosen(reg, pos, case.steps[step]), budget=Budget.matrix())
-        assert not result.suspended
-        pos = result.branches[0].position
-        assert (_lock(pos), _menu(reg, pos)) == (want, menus[step + 1]), step
-
-
-@pytest.mark.oracle
 @pytest.mark.parametrize(
-    ("name", "step"), [(n, i) for n, i in STEPS if CASES[n].ported]
+    ("name", "step"), [pytest.param(n, i, marks=_unported(n, i)) for n, i in STEPS]
 )
 def test_the_port_agrees(
     reg,  # noqa: ANN001
@@ -253,7 +234,8 @@ def test_the_port_agrees(
     name: str,
     step: int,
 ) -> None:
-    """The port resolves each turn from Showdown's position to Showdown's lock.
+    """The port resolves each turn from Showdown's position to Showdown's lock, and every
+    branch has Showdown's lock and the menu Showdown offers after it.
 
     The binary built from master before IKA-179 locks `struggle` in the first two cases and
     keeps a knocked-off lock.
@@ -280,6 +262,11 @@ def test_the_port_agrees(
     assert ported is not None and ported.position is not None, "the port refused the turn"
     assert _lock(ported.position) == case.locks[step]
     assert _menu(reg, ported.position) == menus[step + 1]
+    result = resolve_turn(reg, start, chosen, budget=Budget.matrix())
+    assert not result.suspended
+    assert {_lock(b.position) for b in result.branches} == {case.locks[step]}
+    for branch in result.branches:
+        assert _menu(reg, branch.position) == menus[step + 1]
 
 
 # ---------------------------------------------------------------------------
@@ -310,7 +297,7 @@ def test_a_recorded_lock_on_struggle_does_not_hold(reg) -> None:  # noqa: ANN001
 
 
 @pytest.mark.oracle
-@pytest.mark.parametrize("name", sorted(n for n in CASES if CASES[n].ported))
+@pytest.mark.parametrize("name", [pytest.param(n, marks=_unported(n)) for n in sorted(CASES)])
 def test_the_games_the_port_generates(reg, oracle: Oracle, port, name: str) -> None:  # noqa: ANN001
     """`test_the_games_we_generate` with the port playing every turn, branch 0 followed."""
     from ._port_showdown import port_branch

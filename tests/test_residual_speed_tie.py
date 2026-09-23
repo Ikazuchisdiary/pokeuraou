@@ -27,12 +27,14 @@ from __future__ import annotations
 
 import pytest
 
-from pokeuraou import rustnode
 from pokeuraou.actions import side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Position
-from pokeuraou.resolve import Budget, resolve_turn
 
+# Python's resolver only for the one test that reads the event log (IKA-215).
+from pokeuraou.resolve import resolve_turn as python_resolve_turn
+
+from ._port import Budget
 from .conftest import FORMAT_ID
 
 TIE_NOTE = "residual speed tie (Showdown breaks it at random)"
@@ -104,7 +106,7 @@ def _chosen(reg, pos: Position, step: list[str]):  # noqa: ANN001, ANN202
 def _resolved(reg, positions: list[dict], turn: int):  # noqa: ANN001, ANN202
     start = _loaded(positions[turn - 1])
     chosen = _chosen(reg, start, STEPS[turn - 1])
-    return start, chosen, resolve_turn(reg, start, chosen, budget=Budget.matrix())
+    return start, chosen, python_resolve_turn(reg, start, chosen, budget=Budget.matrix())
 
 
 @pytest.mark.oracle
@@ -125,19 +127,12 @@ def test_showdown_sorts_before_the_sun_ends(oracle: Oracle, case: str) -> None:
 
 @pytest.mark.oracle
 @pytest.mark.parametrize("case", sorted(FOES))
-def test_python_notes_the_ties_showdown_rolls(reg, oracle: Oracle, case: str) -> None:  # noqa: ANN001
-    """Each turn resolved by us from Showdown's position before it: the tie note exactly on
-    the turns Showdown shuffles, and no other note."""
-    positions, _ = _play(oracle, case)
-    for turn in TURNS:
-        _, _, result = _resolved(reg, positions, turn)
-        assert set(result.unmodelled) == ({TIE_NOTE} if TIED[case][turn] else set()), turn
-
-
-@pytest.mark.oracle
-@pytest.mark.parametrize("case", sorted(FOES))
 def test_python_orders_the_residuals_as_showdown(reg, oracle: Oracle, case: str) -> None:  # noqa: ANN001
-    """On every turn Showdown does not shuffle, our burn events come in its order."""
+    """On every turn Showdown does not shuffle, our burn events come in its order.
+
+    Still Python's: the port keeps no events (IKA-215). Its HP after the residual is held
+    to Showdown's in `test_the_port_ends_the_residual_where_showdown_does`.
+    """
     positions, kept = _play(oracle, case)
     for turn in TURNS:
         if TIED[case][turn]:
@@ -147,37 +142,6 @@ def test_python_orders_the_residuals_as_showdown(reg, oracle: Oracle, case: str)
         for branch in result.branches:
             burns = [event.split()[0] for event in branch.events if event.endswith("(brn)")]
             assert burns == kept[turn - 1], (turn, branch.events)
-
-
-def _port(reg, monkeypatch: pytest.MonkeyPatch):  # noqa: ANN001, ANN202
-    if not rustnode.binary_path().exists():
-        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
-    monkeypatch.setenv(rustnode.ENV_ENABLE, "1")
-    rustnode.reset()
-    node = rustnode.node_for(reg)
-    assert node is not None
-    return node
-
-
-@pytest.mark.oracle
-@pytest.mark.parametrize("case", sorted(FOES))
-def test_the_port_agrees_with_python(
-    reg, oracle: Oracle, monkeypatch: pytest.MonkeyPatch, case: str  # noqa: ANN001
-) -> None:
-    """The port's notes, weights and positions against Python's on each turn."""
-    node = _port(reg, monkeypatch)
-    positions, _ = _play(oracle, case)
-    for turn in TURNS:
-        start, chosen, python = _resolved(reg, positions, turn)
-        there = node.resolve(start, chosen, Budget.matrix())
-        assert there is not None, "the port refused the turn"
-        assert sorted(there.unmodelled) == sorted(python.unmodelled), turn
-        assert (TIE_NOTE in there.unmodelled) == TIED[case][turn], turn
-        assert there.branches == pytest.approx([b.probability for b in python.branches])
-        for index, branch in enumerate(python.branches):
-            picked = node.resolve(start, chosen, Budget.matrix(), select=index)
-            assert picked is not None and picked.position is not None
-            assert picked.position.to_json() == branch.position.to_json(), (turn, index)
 
 
 # ---------------------------------------------------------------------------

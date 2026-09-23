@@ -35,8 +35,8 @@ from pokeuraou import rustnode
 from pokeuraou.actions import side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Position
-from pokeuraou.resolve import Budget, resolve_turn
 
+from ._port import Budget
 from .conftest import FORMAT_ID
 
 pytestmark = pytest.mark.oracle
@@ -140,26 +140,6 @@ def _actions(reg, pos: Position, choices: list[str]) -> list:  # noqa: ANN001
     ]
 
 
-def _only(result) -> Position:  # noqa: ANN001
-    assert len(result.branches) == 1, [b.events for b in result.branches]
-    return result.branches[0].position
-
-
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_side_condition_lands_on_the_targets_side(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
-    before, middle, after = _play(oracle, name)
-    _check_showdown(name, middle, after)
-    choice = CASES[name][1]
-
-    mine = _only(resolve_turn(reg, before, _actions(reg, before, [choice, TURN1_B]), budget=BUDGET))
-    assert _conditions(mine) == _conditions(middle), (name, _conditions(mine), _conditions(middle))
-
-    turn2 = [_turn2_a(name), TURN2_B]
-    played_on = _only(resolve_turn(reg, mine, _actions(reg, mine, turn2), budget=BUDGET))
-    assert _state(played_on) == _state(after), (name, _state(played_on), _state(after))
-    assert _conditions(played_on) == _conditions(after), name
-
-
 @pytest.fixture()
 def bridged(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
     if not rustnode.binary_path().exists():
@@ -182,8 +162,9 @@ def _clear_stats(pos: Position) -> Position:
 
 @pytest.mark.parametrize("name", sorted(CASES))
 def test_the_port_lays_it_on_the_targets_side(reg, oracle: Oracle, bridged: None, name: str) -> None:  # noqa: ANN001
-    """The port plays Showdown's two turns too, and matches Python's positions."""
+    """The port plays Showdown's two turns, and lays the condition where Showdown does."""
     before, middle, after = _play(oracle, name)
+    _check_showdown(name, middle, after)
     before = _clear_stats(before)
     choice = CASES[name][1]
     node = rustnode.node_for(reg)
@@ -192,17 +173,13 @@ def test_the_port_lays_it_on_the_targets_side(reg, oracle: Oracle, bridged: None
     actions = _actions(reg, before, [choice, TURN1_B])
     there = node.resolve(before, actions, BUDGET, select=0)
     assert there is not None and there.position is not None, "the port refused turn 1"
+    assert len(there.branches) == 1, there.branches
     mine = there.position
     assert _conditions(mine) == _conditions(middle), (name, _conditions(mine), _conditions(middle))
 
     turn2 = [_turn2_a(name), TURN2_B]
     played = node.resolve(mine, _actions(reg, mine, turn2), BUDGET, select=0)
     assert played is not None and played.position is not None, "the port refused turn 2"
+    assert len(played.branches) == 1, played.branches
     assert _state(played.position) == _state(after), (name, _state(played.position), _state(after))
-
-    os.environ[rustnode.ENV_ENABLE] = "0"
-    rustnode.reset()
-    here = _only(resolve_turn(reg, before, actions, budget=BUDGET))
-    os.environ[rustnode.ENV_ENABLE] = "1"
-    rustnode.reset()
-    assert here.to_json() == mine.to_json(), name
+    assert _conditions(played.position) == _conditions(after), name

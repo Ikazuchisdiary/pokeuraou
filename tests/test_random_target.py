@@ -35,8 +35,8 @@ from pokeuraou import rustnode
 from pokeuraou.actions import side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Position
-from pokeuraou.resolve import Budget, resolve_turn
 
+from ._port import Budget
 from .conftest import FORMAT_ID
 
 SP = {"hp": 20, "atk": 20, "def": 10, "spa": 20, "spd": 10, "spe": 20}
@@ -117,16 +117,6 @@ def _actions(reg, pos: Position) -> list:  # noqa: ANN001
     return chosen
 
 
-def _python(reg, start: Position, budget: Budget) -> dict[tuple, float]:  # noqa: ANN001
-    result = resolve_turn(reg, start, _actions(reg, start), budget=budget)
-    assert not result.suspended
-    out: dict[tuple, float] = {}
-    for branch in result.branches:
-        key = _key(_state(branch.position))
-        out[key] = out.get(key, 0.0) + branch.probability
-    return out
-
-
 def _port(reg, start: Position, budget: Budget) -> dict[tuple, float]:  # noqa: ANN001
     start = Position.from_json(start.to_json())
     # Showdown's stats ride along as an override, which the port reads as a Transform.
@@ -202,16 +192,6 @@ def test_showdown_hits_each_foe(cases) -> None:  # noqa: ANN001
         assert len(want) == 2, name
 
 
-@pytest.mark.oracle
-@pytest.mark.parametrize("name", NAMES)
-def test_python_branches_the_foe(reg, cases, name: str) -> None:  # noqa: ANN001
-    start, want = cases[name]
-    ours = _python(reg, start, BUDGET)
-    assert ours.keys() == want.keys(), (name, ours, want)
-    for key, weight in want.items():
-        assert ours[key] == pytest.approx(weight), name
-
-
 @pytest.fixture()
 def bridged(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
     if not rustnode.binary_path().exists():
@@ -246,14 +226,6 @@ def _pinned_want(oracle: Oracle, name: str) -> tuple[Position, dict[tuple, float
 
 @pytest.mark.oracle
 @pytest.mark.parametrize("name", ["turn 1", "turn 2 (locked)"])
-def test_the_pinned_budget_takes_the_first_foe(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
-    """The oracle's `sample` answers the first foe standing, and so does the pinned budget."""
-    start, want = _pinned_want(oracle, name)
-    assert _python(reg, start, PINNED) == pytest.approx(want)
-
-
-@pytest.mark.oracle
-@pytest.mark.parametrize("name", ["turn 1", "turn 2 (locked)"])
 def test_the_port_pinned_takes_the_first_foe(reg, oracle: Oracle, bridged: None, name: str) -> None:  # noqa: ANN001
     start, want = _pinned_want(oracle, name)
     assert _port(reg, start, PINNED) == pytest.approx(want)
@@ -266,34 +238,6 @@ def _one_foe(oracle: Oracle) -> Position:
     milotic = pos.sides[1].pokemon[pos.sides[1].active[1]]
     milotic.hp, milotic.fainted, milotic.status = 0, True, "fnt"
     return pos
-
-
-@pytest.mark.oracle
-def test_one_foe_standing_is_not_a_draw(reg, oracle: Oracle, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: ANN001
-    """Python and the port: one outcome, no note, and Hippowdon takes it."""
-    pos = _one_foe(oracle)
-    result = resolve_turn(reg, pos, _actions(reg, pos), budget=BUDGET)
-    assert len(result.branches) == 1
-    assert not any("randomNormal" in note for note in result.unmodelled)
-    hippowdon = result.branches[0].position.sides[1].pokemon[pos.sides[1].active[0]]
-    assert hippowdon.hp < hippowdon.maxhp
-    if rustnode.binary_path().exists():
-        monkeypatch.setenv(rustnode.ENV_ENABLE, "1")
-        rustnode.reset()
-        try:
-            assert _port(reg, pos, BUDGET) == pytest.approx(_python(reg, pos, BUDGET))
-        finally:
-            rustnode.reset()
-
-
-@pytest.mark.oracle
-def test_a_collapsed_budget_notes_the_draw(reg, oracle: Oracle) -> None:  # noqa: ANN001
-    """`enumerate_secondary` off and not pinned: the first foe, with the note."""
-    first, _ = _play(oracle, FOES, "first", 1)
-    collapsed = replace(BUDGET, enumerate_secondary=False)
-    result = resolve_turn(reg, first[0], _actions(reg, first[0]), budget=collapsed)
-    assert {_key(_state(b.position)) for b in result.branches} == {_key(_state(first[1]))}
-    assert any("randomNormal" in note for note in result.unmodelled), result.unmodelled
 
 
 # ---------------------------------------------------------------------------

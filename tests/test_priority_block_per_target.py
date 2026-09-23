@@ -51,8 +51,8 @@ from pokeuraou import rustnode
 from pokeuraou.actions import MoveAction, SideAction, side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Position
-from pokeuraou.resolve import Budget, resolve_turn
 
+from ._port import Budget
 from .conftest import FORMAT_ID
 
 pytestmark = pytest.mark.oracle
@@ -213,65 +213,10 @@ def _actions(reg, pos: Position, choices: list[str]) -> list:  # noqa: ANN001
     return out
 
 
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_priority_blocking_ability_stops_moves_at_its_side(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
-    before, choices, theirs, log = _play(oracle, name)
-    assert any(line.startswith(CASES[name][2]) for line in log), (
-        f"Showdown did not do what the case says: {log}"
-    )
-
-    sides = name not in HAZARD_CASES
-    result = resolve_turn(reg, before, _actions(reg, before, choices), budget=BUDGET)
-    assert result.branches
-    for branch in result.branches:
-        mine = _state(branch.position, sides=sides)
-        assert mine == theirs, f"{name}: showdown {theirs} != python {mine}; " + " / ".join(branch.events)
-
-
 #: Turn 2 after "fakeout-into-holders-partner": Incineroar Fake Outs its own partner
 #: Whimsicott, which uses Tailwind.
 SECOND_TURN = ["move 1 -2, move 3", "move 1, move 1"]
 SECOND_TURN_ACTION = SideAction(slots=(MoveAction(0, 1, "fakeout", -2), MoveAction(1, 3, "tailwind", None)))
-
-
-def test_a_stopped_fake_out_was_still_the_first_move(reg, oracle: Oracle) -> None:  # noqa: ANN001
-    """The stopped Fake Out counted: Showdown will not take a second one.
-
-    The champions mod disables Fake Out once `activeMoveActions` is non-zero
-    (data/mods/champions/moves.ts), so the second turn's choice is refused outright. The
-    old resolver never reached `_use_move`, left the counter at 0, and let the same Fake
-    Out land on turn 2. The new one counts it and fails the second Fake Out.
-    """
-    orders, choices, _line = CASES["fakeout-into-holders-partner"]
-    handle = oracle.create(FORMAT_ID, TEAM_A, TEAM_B, policy=RandomnessPolicy())
-    handle.step(orders)
-    before = Position.from_json(handle.position)
-    handle.step(choices)
-    handle.step(SECOND_TURN)
-    refused = list(handle.choice_errors)
-    handle.close()
-    assert any("Fake Out is disabled" in error for error in refused), refused
-
-    first = resolve_turn(reg, before, _actions(reg, before, choices), budget=BUDGET)
-    assert len(first.branches) == 1
-    middle = first.branches[0].position
-    incineroar = next(mon for mon in middle.sides[0].pokemon if mon.species == "incineroar")
-    assert incineroar.active_move_actions == 1
-    foe = next(a for a in side_actions(reg, middle, 1) if a.to_choice() == SECOND_TURN[1])
-    second = resolve_turn(reg, middle, [SECOND_TURN_ACTION, foe], budget=BUDGET)
-    assert second.branches
-    whimsicott = next(mon for mon in middle.sides[0].pokemon if mon.species == "whimsicott")
-    for branch in second.branches:
-        after = next(mon for mon in branch.position.sides[0].pokemon if mon.species == "whimsicott")
-        assert after.hp == whimsicott.hp, " / ".join(branch.events)
-
-
-def test_spikes_land_on_the_foes_side(reg, oracle: Oracle) -> None:  # noqa: ANN001
-    before, choices, theirs, _log = _play(oracle, "prankster-foeside", sides=True)
-    assert theirs["p2 side"] == ("spikes",)
-    result = resolve_turn(reg, before, _actions(reg, before, choices), budget=BUDGET)
-    for branch in result.branches:
-        assert _state(branch.position) == theirs
 
 
 @pytest.fixture()
@@ -292,8 +237,11 @@ def test_the_port_stops_moves_at_the_holders_side(
     bridged: None,
     name: str,  # noqa: ANN001
 ) -> None:
-    """The port plays Showdown's turn too, and matches Python branch for branch."""
-    before, choices, theirs, _log = _play(oracle, name)
+    """The port plays Showdown's turn, and every branch it has is Showdown's position."""
+    before, choices, theirs, log = _play(oracle, name)
+    assert any(line.startswith(CASES[name][2]) for line in log), (
+        f"Showdown did not do what the case says: {log}"
+    )
     # Showdown's positions carry its final stats, which the port refuses as it would a
     # transformed Pokemon's. Nobody here is transformed, so they follow from the spreads.
     for side in before.sides:
@@ -304,28 +252,11 @@ def test_the_port_stops_moves_at_the_holders_side(
     assert node is not None
     there = node.resolve(before, actions, BUDGET)
     assert there is not None, "the port refused the turn"
+    assert there.branches
     for index in range(len(there.branches)):
         chosen = node.resolve(before, actions, BUDGET, select=index)
         assert chosen is not None and chosen.position is not None
         assert _state(chosen.position, sides=name not in HAZARD_CASES) == theirs, (name, index)
-
-    budget = replace(Budget.matrix(), enumerate_accuracy=True)
-    os.environ[rustnode.ENV_ENABLE] = "0"
-    rustnode.reset()
-    here = resolve_turn(reg, before, actions, budget=budget)
-    os.environ[rustnode.ENV_ENABLE] = "1"
-    rustnode.reset()
-    node = rustnode.node_for(reg)
-    assert node is not None
-    there = node.resolve(before, actions, budget)
-    assert there is not None, "the port refused the turn"
-    mine = [b.probability for b in here.branches]
-    assert len(mine) == len(there.branches)
-    assert all(abs(x - y) < 1e-12 for x, y in zip(mine, there.branches, strict=True))
-    for index, branch in enumerate(here.branches):
-        chosen = node.resolve(before, actions, budget, select=index)
-        assert chosen is not None and chosen.position is not None
-        assert chosen.position.to_json() == branch.position.to_json(), (name, index)
 
 
 # ---------------------------------------------------------------------------

@@ -41,18 +41,16 @@ from pokeuraou import rustnode
 from pokeuraou.actions import SideAction, side_actions, switch_actions_after_faint
 from pokeuraou.beliefnode import reaches_bench
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
-from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.position import Position
-from pokeuraou.resolve import (
+
+from ._port import (
     Budget,
-    batched_payoffs,
     replacements_needed,
     resolve_turn,
     resume_alternatives,
     resume_turn,
     self_switches_needed,
 )
-
 from .conftest import FORMAT_ID
 
 pytestmark = pytest.mark.oracle
@@ -188,7 +186,7 @@ def _lead_item(pos: Position, side: int) -> str | None:
     return pos.sides[side].pokemon[pos.sides[side].active[0]].item
 
 
-def _what_python_does(pos: Position, suspended: bool) -> str | None:
+def _what_happens(pos: Position, suspended: bool) -> str | None:
     lead0 = pos.sides[0].pokemon[pos.sides[0].active[0]]
     if lead0.has_volatile("pendingforceswitch"):
         return "drag"
@@ -222,21 +220,6 @@ def test_showdown_switches_the_holder(oracle: Oracle, name: str) -> None:
         assert _lead_item(after, 1) == _lead_item(before, 1)
 
 
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_python_switches_the_holder_as_showdown_does(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
-    handle, before, after, _asked, _log = _play(oracle, name)
-    handle.close()
-    choices, what = CASES[name][3], CASES[name][4]
-    result = resolve_turn(reg, before, _actions(reg, before, choices), budget=BUDGET)
-    outcomes = [(b.position, False, b.events) for b in result.branches]
-    outcomes += [(s.position, True, s.events) for s in result.suspended]
-    assert outcomes
-    for pos, suspended, events in outcomes:
-        ours = _what_python_does(pos, suspended)
-        assert ours == what, f"{name}: showdown {what}, python {ours}; " + " / ".join(events)
-        assert _lead_item(pos, 1) == _lead_item(after, 1), (name, _lead_item(pos, 1))
-
-
 def test_the_ejected_holders_move_goes_with_it(reg, oracle: Oracle) -> None:  # noqa: ANN001
     """The slower holder had chosen Swords Dance. Its replacement does not use it."""
     handle, before, _after, _asked, _log = _play(oracle, "eject-button")
@@ -260,7 +243,7 @@ def test_the_ejected_holders_move_goes_with_it(reg, oracle: Oracle) -> None:  # 
         resumed = resume_turn(reg, pause, [passes, option])
         for branch in resumed.branches:
             mon = branch.position.sides[1].pokemon[branch.position.sides[1].active[0]]
-            assert mon.species == "kingambit" and not mon.boosts, (mon.boosts, branch.events)
+            assert mon.species == "kingambit" and not mon.boosts, mon.boosts
 
 
 def _passes(reg, pos: Position, side: int):  # noqa: ANN001, ANN202
@@ -307,74 +290,6 @@ def bridged(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
     os.environ.pop(rustnode.ENV_ENABLE, None)
 
 
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_the_port_switches_the_holder_as_python_does(
-    reg, oracle: Oracle, bridged: None, name: str  # noqa: ANN001
-) -> None:
-    handle, before, _after, _asked, _log = _play(oracle, name)
-    handle.close()
-    # The port declines a position with a stats override (it reads that as a Transform);
-    # both engines compute the same stats from the spreads.
-    for side in before.sides:
-        for party in side.pokemon:
-            party.stats_override = None
-    choices, what = CASES[name][3], CASES[name][4]
-    actions = _actions(reg, before, choices)
-    node = rustnode.node_for(reg)
-    assert node is not None
-    there = node.resolve(before, actions, BUDGET)
-    if what == "drag":
-        # Dragon Tail's shape: a replacement drawn at random, which the port refuses.
-        assert there is None
-        return
-    assert there is not None, "the port refused the turn"
-    here = resolve_turn(reg, before, actions, budget=BUDGET)
-    assert there.branches == pytest.approx([b.probability for b in here.branches], abs=1e-12)
-    assert there.suspended == pytest.approx([s.probability for s in here.suspended], abs=1e-12)
-    for index, branch in enumerate(here.branches):
-        chosen = node.resolve(before, actions, BUDGET, select=index)
-        assert chosen is not None and chosen.position is not None
-        assert _what_python_does(chosen.position, False) == _what_python_does(branch.position, False)
-
-
-def test_the_port_folds_a_node_where_both_sides_owe_as_python_does(
-    reg, oracle: Oracle, bridged: None  # noqa: ANN001
-) -> None:
-    """The node's matrix, through the port and without it, where a U-turn meets an Eject
-    Button (both sides owe, one after the other), where Wood Hammer ejects the holder (one
-    side), and the controls beside them. The folds through both suspensions are the port's
-    own; a port that never ejects gives other numbers (the old binary, in the record)."""
-    ours = [RILLABOOM, INCINEROAR, *BENCH]
-    handle = oracle.create(FORMAT_ID, ours, _team_b(EJECT), policy=RandomnessPolicy())
-    handle.step(["team 1234", "team 1234"])
-    before = Position.from_json(handle.position)
-    handle.close()
-    for side in before.sides:
-        for party in side.pokemon:
-            party.stats_override = None
-    wanted = {
-        0: ["move 1 1, move 1", "move 4 1, move 1", "move 1 1, move 3 1", "move 2, move 1"],
-        1: ["move 2, move 1", "move 1, move 2", "move 2, move 3"],
-    }
-    menus = {
-        side: [a for a in side_actions(reg, before, side) if a.to_choice() in wanted[side]]
-        for side in (0, 1)
-    }
-    assert [len(menus[0]), len(menus[1])] == [4, 3]
-    budget = Budget.matrix()
-    evaluators = [OBJECTIVES["hp-share"].batch, OBJECTIVES["faints"].batch]
-    os.environ.pop(rustnode.ENV_ENABLE, None)
-    rustnode.reset()
-    python, _notes, _exact = batched_payoffs(reg, before, menus[0], menus[1], evaluators, budget=budget)
-    os.environ[rustnode.ENV_ENABLE] = "1"
-    rustnode.reset()
-    port, _port_notes, _port_exact = batched_payoffs(
-        reg, before, menus[0], menus[1], evaluators, budget=budget
-    )
-    for mine, theirs in zip(python, port, strict=True):
-        assert abs(mine - theirs).max() < 1e-12, (mine, theirs)
-
-
 def test_a_red_card_reaches_the_attackers_hidden_bench(reg, oracle: Oracle) -> None:  # noqa: ANN001
     """IKA-128's mask with the item's path: a damaging move into a Red Card holder can drag
     the attacker's unseen Pokemon in, a Protect cannot, and without the card nothing does.
@@ -405,9 +320,9 @@ def test_a_red_card_reaches_the_attackers_hidden_bench(reg, oracle: Oracle) -> N
 
 
 # ---------------------------------------------------------------------------
-# The port against Showdown, not against Python (IKA-207). A mid-turn eject is a
-# suspended outcome whose position stays in the port's process, so for those cases only
-# the fact of stopping is compared; the resumed turn waits for the command (IKA-211).
+# The port against Showdown, not against Python (IKA-207). A mid-turn eject is a paused
+# outcome, and its position is held to Showdown's like a finished one (IKA-210, with the
+# `turn` command of IKA-211).
 
 
 def _drag_refused(name: str):  # noqa: ANN202
@@ -422,18 +337,17 @@ def _drag_refused(name: str):  # noqa: ANN202
 
 
 @pytest.mark.parametrize("name", [_drag_refused(n) for n in sorted(CASES)])
-def test_the_port_switches_the_holder_as_showdown_does(reg, oracle: Oracle, port, name: str) -> None:  # noqa: ANN001
-    from ._port_showdown import port_branches, port_weights
-
+def test_the_port_switches_the_holder_as_showdown_does(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
     handle, before, after, _asked, _log = _play(oracle, name)
     handle.close()
     choices, what = CASES[name][3], CASES[name][4]
-    actions = _actions(reg, before, choices)
-    reply = port_weights(port, before, actions, BUDGET)
+    result = resolve_turn(reg, before, _actions(reg, before, choices), budget=BUDGET)
+    outcomes = [(b.position, False) for b in result.branches]
+    outcomes += [(s.position, True) for s in result.suspended]
+    assert outcomes
     if what == "eject":
-        assert reply["suspended"] and not reply["branches"], reply
-        return
-    for _weight, pos in port_branches(port, before, actions, BUDGET):
-        ours = _what_python_does(pos, False)
+        assert result.suspended and not result.branches, result
+    for pos, suspended in outcomes:
+        ours = _what_happens(pos, suspended)
         assert ours == what, f"{name}: showdown {what}, port {ours}"
         assert _lead_item(pos, 1) == _lead_item(after, 1), (name, _lead_item(pos, 1))

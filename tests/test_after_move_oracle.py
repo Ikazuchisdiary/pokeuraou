@@ -48,8 +48,8 @@ from pokeuraou import rustnode
 from pokeuraou.actions import side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Position
-from pokeuraou.resolve import Budget, resolve_turn
 
+from ._port import Budget
 from .conftest import FORMAT_ID
 
 pytestmark = pytest.mark.oracle
@@ -290,30 +290,8 @@ def _actions(reg, pos: Position, choices: list[str]) -> list:  # noqa: ANN001
     ]
 
 
-def _compared(name: str, branches: list) -> list[int]:  # noqa: ANN001
-    """The branches the oracle's policy picks: every move hit, and under the chance policy
-    every chance secondary happened."""
-    hit = [i for i, b in enumerate(branches) if not any(e.endswith("missed") for e in b.events)]
-    if CASES[name][3] is CHANCE and hit:
-        fired = {i: sum("(secondary)" in e for e in branches[i].events) for i in hit}
-        hit = [i for i in hit if fired[i] == max(fired.values())]
-    return hit
-
-
 def _budget(name: str) -> Budget:
     return CHANCE_BUDGET if CASES[name][3] is CHANCE else BUDGET
-
-
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_python_matches_showdown(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
-    before, choices, theirs, _log = _play(oracle, name)
-    result = resolve_turn(reg, before, _actions(reg, before, choices), budget=_budget(name))
-    chosen = _compared(name, result.branches)
-    assert chosen, "no Python outcome where every move hit"
-    for index in chosen:
-        branch = result.branches[index]
-        ours = _state(branch.position)
-        assert ours == theirs, f"{name}: showdown {theirs} != python {ours}; " + " / ".join(branch.events)
 
 
 @pytest.fixture()
@@ -338,17 +316,21 @@ def test_the_port_matches_showdown(reg, oracle: Oracle, bridged: None, name: str
     actions = _actions(reg, before, choices)
     node = rustnode.node_for(reg)
     assert node is not None
-    budget = _budget(name)
+    # Every move hits, as the policy has it. The rest stays enumerated: without the chance
+    # policy every branch has to be Showdown's; with it, the one where the chances Showdown
+    # took all happened has to be among them (IKA-210: the branch used to be picked by
+    # Python's events, which the port does not keep).
+    budget = replace(_budget(name), enumerate_accuracy=False)
     there = node.resolve(before, actions, budget)
     assert there is not None, "the port refused the turn"
-    # The branches come back in Python's order, so Python's events say which ones the
-    # policy picks; the state each of those holds is compared with Showdown's.
-    here = resolve_turn(reg, before, actions, budget=budget)
-    assert [b.probability for b in here.branches] == pytest.approx(there.branches, abs=1e-12)
-    chosen = _compared(name, here.branches)
-    assert chosen, "no outcome where every move hit"
-    for index in chosen:
+    assert there.branches, "no finished outcome"
+    states = []
+    for index in range(len(there.branches)):
         picked = node.resolve(before, actions, budget, select=index)
         assert picked is not None and picked.position is not None
-        rust_now = _state(picked.position)
-        assert rust_now == theirs, f"{name}, branch {index}: showdown {theirs} != rust {rust_now}"
+        states.append(_state(picked.position))
+    if CASES[name][3] is CHANCE:
+        assert theirs in states, f"{name}: showdown {theirs} not among the port's {states}"
+    else:
+        for index, rust_now in enumerate(states):
+            assert rust_now == theirs, f"{name}, branch {index}: showdown {theirs} != rust {rust_now}"

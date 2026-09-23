@@ -50,8 +50,8 @@ from pokeuraou import rustnode
 from pokeuraou.actions import MoveAction, SideAction, side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Position
-from pokeuraou.resolve import Budget, resolve_turn
 
+from ._port import Budget
 from .conftest import FORMAT_ID
 
 pytestmark = pytest.mark.oracle
@@ -279,30 +279,6 @@ def _budget_and_branch(name: str, turn: int) -> tuple[Budget, int, int]:
     return BUDGET, 0, 1
 
 
-def _python_turns(reg, name: str, before: Position) -> list[Position]:  # noqa: ANN001
-    out = [before]
-    for turn, choices in enumerate(CASES[name].turns):
-        budget, branch, count = _budget_and_branch(name, turn)
-        result = resolve_turn(reg, out[-1], _actions(reg, out[-1], choices), budget=budget)
-        assert len(result.branches) == count, (name, turn, [b.events for b in result.branches])
-        out.append(result.branches[branch].position)
-    return out
-
-
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_python_plays_showdowns_turns(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
-    showdown = _play(oracle, name)
-    _check_showdown(name, showdown)
-    mine = _python_turns(reg, name, showdown[0])
-    for turn in range(1, len(showdown)):
-        assert _conditions(mine[turn]) == _conditions(showdown[turn]), (
-            name, turn, _conditions(mine[turn]), _conditions(showdown[turn])
-        )
-        assert _state(mine[turn]) == _state(showdown[turn]), (
-            name, turn, _state(mine[turn]), _state(showdown[turn])
-        )
-
-
 @pytest.fixture()
 def bridged(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
     if not rustnode.binary_path().exists():
@@ -325,7 +301,7 @@ def _clear_stats(pos: Position) -> Position:
 
 @pytest.mark.parametrize("name", sorted(CASES))
 def test_the_port_plays_showdowns_turns(reg, oracle: Oracle, bridged: None, name: str) -> None:  # noqa: ANN001
-    """The port plays the same turns, matches Showdown, and matches Python's positions."""
+    """The port plays the same turns and matches Showdown."""
     showdown = _play(oracle, name)
     node = rustnode.node_for(reg)
     assert node is not None
@@ -342,11 +318,3 @@ def test_the_port_plays_showdowns_turns(reg, oracle: Oracle, bridged: None, name
         assert _state(mine[-1]) == _state(showdown[turn + 1]), (
             name, turn, _state(mine[-1]), _state(showdown[turn + 1])
         )
-
-    os.environ[rustnode.ENV_ENABLE] = "0"
-    rustnode.reset()
-    here = _python_turns(reg, name, _clear_stats(_play(oracle, name)[0]))
-    os.environ[rustnode.ENV_ENABLE] = "1"
-    rustnode.reset()
-    for turn in range(1, len(mine)):
-        assert here[turn].to_json() == mine[turn].to_json(), (name, turn)

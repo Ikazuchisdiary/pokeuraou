@@ -35,8 +35,8 @@ from pokeuraou import rustnode
 from pokeuraou.actions import MoveAction, SideAction, side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Position
-from pokeuraou.resolve import Budget, resolve_turn
 
+from ._port import Budget
 from .conftest import FORMAT_ID
 
 pytestmark = pytest.mark.oracle
@@ -161,19 +161,6 @@ def _actions(reg, pos: Position, choices: list[str]) -> list:  # noqa: ANN001
 ALLY_FAKE_OUT = SideAction(slots=(MoveAction(0, 2, "calmmind", None), MoveAction(1, 1, "fakeout", -1)))
 
 
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_psychic_terrain_stops_each_grounded_target(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
-    before, choices, theirs, log = _play(oracle, name)
-    assert CASES[name][2] in log, f"Showdown did not do what the case says: {log}"
-
-    result = resolve_turn(reg, before, _actions(reg, before, choices), budget=BUDGET)
-    assert result.branches
-    for branch in result.branches:
-        assert _state(branch.position) == theirs, (
-            f"{name}: showdown {theirs} != python {_state(branch.position)}; " + " / ".join(branch.events)
-        )
-
-
 @pytest.fixture()
 def bridged(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
     if not rustnode.binary_path().exists():
@@ -192,8 +179,9 @@ def test_the_port_stops_each_grounded_target(
     bridged: None,
     name: str,  # noqa: ANN001
 ) -> None:
-    """The port plays Showdown's turn too, and matches Python branch for branch."""
-    before, choices, theirs, _log = _play(oracle, name)
+    """The port plays Showdown's turn, and every branch it has is Showdown's position."""
+    before, choices, theirs, log = _play(oracle, name)
+    assert CASES[name][2] in log, f"Showdown did not do what the case says: {log}"
     # Showdown's positions carry its final stats, which the port refuses as it would a
     # transformed Pokemon's. Nobody here is transformed, so they follow from the spreads.
     for side in before.sides:
@@ -204,25 +192,8 @@ def test_the_port_stops_each_grounded_target(
     assert node is not None
     there = node.resolve(before, actions, BUDGET)
     assert there is not None, "the port refused the turn"
+    assert there.branches
     for index in range(len(there.branches)):
         chosen = node.resolve(before, actions, BUDGET, select=index)
         assert chosen is not None and chosen.position is not None
         assert _state(chosen.position) == theirs, (name, index)
-
-    budget = replace(Budget.matrix(), enumerate_accuracy=True)
-    os.environ[rustnode.ENV_ENABLE] = "0"
-    rustnode.reset()
-    here = resolve_turn(reg, before, actions, budget=budget)
-    os.environ[rustnode.ENV_ENABLE] = "1"
-    rustnode.reset()
-    node = rustnode.node_for(reg)
-    assert node is not None
-    there = node.resolve(before, actions, budget)
-    assert there is not None, "the port refused the turn"
-    mine = [b.probability for b in here.branches]
-    assert len(mine) == len(there.branches)
-    assert all(abs(x - y) < 1e-12 for x, y in zip(mine, there.branches, strict=True))
-    for index, branch in enumerate(here.branches):
-        chosen = node.resolve(before, actions, budget, select=index)
-        assert chosen is not None and chosen.position is not None
-        assert chosen.position.to_json() == branch.position.to_json(), (name, index)

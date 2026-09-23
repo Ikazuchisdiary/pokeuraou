@@ -38,8 +38,8 @@ from pokeuraou import rustnode
 from pokeuraou.actions import side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Effect, Position
-from pokeuraou.resolve import Budget, resolve_turn
 
+from ._port import Budget, resolve_turn
 from .conftest import FORMAT_ID
 
 pytestmark = pytest.mark.oracle
@@ -280,23 +280,6 @@ def _actions(reg, pos: Position, choices: list[str]) -> list:  # noqa: ANN001
     ]
 
 
-def _compared(branches: list) -> list[int]:  # noqa: ANN001
-    """The branches the oracle's policy picks: every move hit."""
-    return [i for i, b in enumerate(branches) if not any(e.endswith("missed") for e in b.events)]
-
-
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_python_matches_showdown(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
-    before, choices, theirs, _log = _play(oracle, name)
-    result = resolve_turn(reg, before, _actions(reg, before, choices), budget=BUDGET)
-    chosen = _compared(result.branches)
-    assert chosen, "no Python outcome where every move hit"
-    for index in chosen:
-        branch = result.branches[index]
-        ours = _state(branch.position)
-        assert ours == theirs, f"{name}: showdown {theirs} != python {ours}; " + " / ".join(branch.events)
-
-
 @pytest.fixture()
 def bridged(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
     if not rustnode.binary_path().exists():
@@ -317,14 +300,14 @@ def test_the_port_matches_showdown(reg, oracle: Oracle, bridged: None, name: str
     actions = _actions(reg, before, choices)
     node = rustnode.node_for(reg)
     assert node is not None
-    there = node.resolve(before, actions, BUDGET)
+    # Every move hits, as the policy has it; every other branch has to be Showdown's
+    # (IKA-210: the branches used to be picked by Python's events).
+    budget = replace(BUDGET, enumerate_accuracy=False)
+    there = node.resolve(before, actions, budget)
     assert there is not None, "the port refused the turn"
-    here = resolve_turn(reg, before, actions, budget=BUDGET)
-    assert [b.probability for b in here.branches] == pytest.approx(there.branches, abs=1e-12)
-    chosen = _compared(here.branches)
-    assert chosen, "no outcome where every move hit"
-    for index in chosen:
-        picked = node.resolve(before, actions, BUDGET, select=index)
+    assert there.branches, "no finished outcome"
+    for index in range(len(there.branches)):
+        picked = node.resolve(before, actions, budget, select=index)
         assert picked is not None and picked.position is not None
         rust_now = _state(picked.position)
         assert rust_now == theirs, f"{name}, branch {index}: showdown {theirs} != rust {rust_now}"

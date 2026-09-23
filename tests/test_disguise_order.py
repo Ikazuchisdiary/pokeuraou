@@ -27,8 +27,8 @@ import pytest
 from pokeuraou.actions import side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Position
-from pokeuraou.resolve import Budget, resolve_turn
 
+from ._port import Budget
 from .conftest import FORMAT_ID
 
 pytestmark = pytest.mark.oracle
@@ -116,31 +116,6 @@ def _play(oracle: Oracle, name: str) -> tuple[Position, list[str], dict, list[st
     log = list(handle.log)
     handle.close()
     return before, choices, theirs, log
-
-
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_disguise_takes_only_a_hit_that_lands(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
-    before, choices, theirs, log = _play(oracle, name)
-    assert CASES[name][3] in log, f"Showdown did not do what the case says: {log}"
-
-    actions = [
-        next(a for a in side_actions(reg, before, side) if a.to_choice() == choices[side])
-        for side in (0, 1)
-    ]
-    result = resolve_turn(reg, before, actions, budget=BUDGET)
-    # Showdown's policy pins one accuracy outcome; the Python branches that match it are
-    # the ones where every move did the same.
-    missed = name == "missed"
-    ours = [
-        b for b in result.branches
-        if any(e.endswith("missed") for e in b.events) == missed
-    ]
-    assert ours, "no Python branch plays the same accuracy outcomes"
-    for branch in ours:
-        assert _state(branch.position) == theirs, (
-            f"{name}: showdown {theirs} != python {_state(branch.position)}; "
-            + " / ".join(branch.events)
-        )
 
 
 # ---------------------------------------------------------------------------

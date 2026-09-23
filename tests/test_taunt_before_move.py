@@ -47,8 +47,8 @@ from pokeuraou import rustnode
 from pokeuraou.actions import side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Position
-from pokeuraou.resolve import Budget, resolve_turn
 
+from ._port import Budget
 from .conftest import FORMAT_ID
 
 pytestmark = pytest.mark.oracle
@@ -183,25 +183,6 @@ def _actions(reg, pos: Position, choices: tuple[str, str]) -> list:  # noqa: ANN
     ]
 
 
-def _only(result) -> Position:  # noqa: ANN001
-    assert len(result.branches) == 1, [b.events for b in result.branches]
-    return result.branches[0].position
-
-
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_taunt_against_showdown(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
-    positions, log = _play(oracle, name)
-    _check_showdown(name, positions, log)
-    for turn, choices in enumerate(CASES[name][2], start=1):
-        if turn <= SETUP_TURNS.get(name, 0):
-            continue
-        start = positions[turn - 1]
-        mine = _only(resolve_turn(reg, start, _actions(reg, start, choices), budget=BUDGET))
-        assert _state(mine) == _state(positions[turn]), (
-            name, turn, _state(mine), _state(positions[turn]),
-        )
-
-
 @pytest.fixture()
 def bridged(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
     if not rustnode.binary_path().exists():
@@ -224,8 +205,9 @@ def _clear_stats(pos: Position) -> Position:
 
 @pytest.mark.parametrize("name", sorted(CASES))
 def test_the_port_stops_it_too(reg, oracle: Oracle, bridged: None, name: str) -> None:  # noqa: ANN001
-    """The port plays Showdown's turns, and matches Python's position turn by turn."""
-    positions, _log = _play(oracle, name)
+    """The port plays Showdown's turns, and matches Showdown's position turn by turn."""
+    positions, log = _play(oracle, name)
+    _check_showdown(name, positions, log)
     for turn, choices in enumerate(CASES[name][2], start=1):
         if turn <= SETUP_TURNS.get(name, 0):
             continue
@@ -235,14 +217,7 @@ def test_the_port_stops_it_too(reg, oracle: Oracle, bridged: None, name: str) ->
         actions = _actions(reg, start, choices)
         there = node.resolve(start, actions, BUDGET, select=0)
         assert there is not None and there.position is not None, f"the port refused turn {turn}"
-
-        os.environ[rustnode.ENV_ENABLE] = "0"
-        rustnode.reset()
-        here = _only(resolve_turn(reg, start, actions, budget=BUDGET))
-        os.environ[rustnode.ENV_ENABLE] = "1"
-        rustnode.reset()
-
+        assert len(there.branches) == 1, there.branches
         assert _state(there.position) == _state(positions[turn]), (
             name, turn, _state(there.position), _state(positions[turn]),
         )
-        assert here.to_json() == there.position.to_json(), (name, turn)
