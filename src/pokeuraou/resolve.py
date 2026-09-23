@@ -2805,9 +2805,18 @@ def _hit_target(
     # Disguise and Ice Face take the hit at the damage step, step 7 -- after the type
     # immunity and the accuracy, and after the break. So a Normal move into Mimikyu is
     # immune and a move that misses it misses, and neither busts the forme (IKA-155).
-    # Disguise also makes the hit uncrittable (`onCriticalHit` returns false), so a guarded
-    # hit has one state per accuracy branch. The port refuses both abilities.
+    # The port refuses both abilities.
+    #
+    # What they take is the *first hit's damage* and nothing else (IKA-157). `onDamage`
+    # returns 0, and 0 is still a number: `spreadMoveHit` carries the target on through
+    # the move's own effects, the self drops, the secondaries and `DamagingHit`, and the
+    # move `didAnything`, so Rocky Helmet, Salt Cure, Snarl's drop, Make It Rain's own drop,
+    # Knock Off, U-turn's switch and Life Orb all happen. The forme changes at the `Update`
+    # after that hit, so a multi-hit move's later hits land on the busted forme. Disguise
+    # also makes the first hit uncrittable (`onCriticalHit` returns false), so a single
+    # guarded hit has one state per accuracy branch.
     guarded = _forme_guard(turn, move, target) is not None
+    multihit = bool(move.raw.get("multihit"))
 
     accuracy = _accuracy(turn, move, attacker, defender)
     crit_p = crit_probability(reg, attacker, defender, action.move_id)
@@ -2826,6 +2835,10 @@ def _hit_target(
         else [(1.0, crit_p >= 1.0)]
     )
     rolls = stratified_rolls(budget)
+    if guarded and not multihit:
+        # The one hit is absorbed: neither a crit nor a roll changes anything.
+        crit_branches = [(1.0, False)]
+        rolls = [(rolls[0][0], 1.0)]
     note = "" if (budget.fixed_roll is not None or budget.damage_rolls >= 16) else (
         "damage rolls stratified"
     )
@@ -2854,29 +2867,14 @@ def _hit_target(
             state.move_failed.add((action.side, action.slot))
             outcomes.append((acc_weight, state, note))
             continue
-        if guarded:
-            result = calculate(
-                reg, attacker, defender, action.move_id, turn.field(),
-                defender_side=target[0], spread=spread, crit=False, move_ctx=move_ctx,
-            )
-            turn.unmodelled |= set(result.unmodelled)
-            if result.immune:
-                outcomes.append((acc_weight, _immune_state(turn, action, move, target), note))
-                continue
-            state = turn.clone()
-            if breaks:
-                _break_protection(state, action, move, [target])
-            busted = _bust_disguise(state, move, target)
-            # The hit is absorbed entirely, and the forme change means the next one is not.
-            state.log(f"{action.label(reg)} absorbed by {busted}")
-            outcomes.append((acc_weight, state, note))
-            continue
         for crit_weight, crit in crit_branches:
             if crit_weight <= 0:
                 continue
+            # A guarded first hit never crits; `crit` then speaks for the later hits only.
             result = calculate(
                 reg, attacker, defender, action.move_id, turn.field(),
-                defender_side=target[0], spread=spread, crit=crit, move_ctx=move_ctx,
+                defender_side=target[0], spread=spread, crit=crit and not guarded,
+                move_ctx=move_ctx,
             )
             turn.unmodelled |= set(result.unmodelled)
             if result.immune:
@@ -2916,14 +2914,25 @@ def _hit_target(
                             if again.immune:
                                 break
                             amount = int(again.rolls[0, roll])
-                        dealt_now = state.deal_damage(
-                            *target, amount, reason=action.move_id, from_move=True
-                        )
+                        absorbed = guarded and hit_index == 0
+                        if absorbed:
+                            # `result` is the intact forme's, whose rolls are all zero.
+                            dealt_now = 0
+                        else:
+                            dealt_now = state.deal_damage(
+                                *target, amount, reason=action.move_id, from_move=True
+                            )
                         total += dealt_now
                         _after_hit(
                             state, action, move, target, dealt_now, budget,
-                            type_mod=result.type_mod,
+                            # Disguise's `onEffectiveness` makes the absorbed hit neutral,
+                            # so no resist berry is eaten for it.
+                            type_mod=0 if absorbed else result.type_mod,
+                            absorbed=absorbed,
                         )
+                        if absorbed:
+                            busted = _bust_disguise(state, move, target)
+                            state.log(f"{action.label(reg)} absorbed by {busted}")
                     if hits > 1:
                         state.log(f"{action.label(reg)} hit {hit_index + 1}x for {total}")
                     weight = acc_weight * crit_weight * roll_weight * hit_weight
@@ -3179,12 +3188,19 @@ def _after_hit(
     dealt: int,
     budget: Budget,
     type_mod: int = 0,
+    absorbed: bool = False,
 ) -> None:
-    """Drain, recoil, item reactions, contact effects and secondaries."""
+    """Drain, recoil, item reactions, contact effects and secondaries.
+
+    `absorbed` is a hit Disguise or Ice Face took: it dealt 0, and 0 is still a damaging
+    hit to Showdown -- `DamagingHit` runs for any numeric damage, 0 included -- so the
+    handlers gated on `dealt > 0` below fire for it too (IKA-157).
+    """
     raw = move.raw
     me = (action.side, action.slot)
     attacker = turn.mon_at(*me)
     defender = turn.mon_at(*target)
+    landed = dealt > 0 or absorbed
 
     # Showdown rounds these rather than truncating:
     #   clampIntRange(Math.round(damageDealt * recoil[0] / recoil[1]), 1)
@@ -3231,7 +3247,7 @@ def _after_hit(
     # Throat Chop adds its own condition from a 100%-chance `secondary.onHit`, so there is
     # nothing declarative in the dump to drive it. Two turns, which the dump now carries
     # because the duration collector reads a condition named after the move itself.
-    if move.id == "throatchop" and defender is not None and not defender.fainted and dealt > 0:
+    if move.id == "throatchop" and defender is not None and not defender.fainted and landed:
         turn.add_volatile(*target, "throatchop", duration=_duration(move, "throatchop"))
         turn.log(f"{turn.name(*target)} cannot use sound moves (throatchop)")
 
@@ -3256,7 +3272,7 @@ def _after_hit(
             # is answered with no, so not applying it is exact rather than approximate.
             turn.unmodelled.add("cursedbody (30% disable, not branched)")
 
-    if defender is not None and "contact" in move.flags and dealt > 0:
+    if defender is not None and "contact" in move.flags and landed:
         if defender.ability in ("roughskin", "ironbarbs") and attacker is not None:
             turn.deal_damage(*me, max(1, attacker.maxhp // 8), reason=defender.ability)
         if defender.item == "rockyhelmet" and attacker is not None:
@@ -3339,7 +3355,9 @@ def _after_move(turn: _Turn, action: QueuedAction, move: Move) -> None:
         turn.heal(*me, _round_fraction(total, raw["drain"]), reason="drain")
     if raw.get("recoil") and total > 0 and attacker is not None and attacker.ability != "rockhead":
         turn.deal_damage(*me, _round_fraction(total, raw["recoil"]), reason="recoil")
-    if attacker is not None and attacker.item == "lifeorb" and total > 0:
+    # Life Orb is `onAfterMoveSecondarySelf`, which runs whenever a hit landed -- a hit
+    # Disguise took for 0 included (IKA-157) -- not only when damage was dealt.
+    if attacker is not None and attacker.item == "lifeorb" and turn.move_connected:
         turn.deal_damage(*me, max(1, attacker.maxhp // 10), reason="lifeorb")
     # Shell Bell heals an eighth of the move's *total* damage, once, and truncates -- so a
     # move dealing under eight damage heals nothing.
