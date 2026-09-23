@@ -349,3 +349,30 @@ def test_the_report_says_which_checkout_ran(
 ) -> None:
     timing = load(monkeypatch, tmp_path)
     assert Path(timing.snapshot()["source"]) == SOURCE.parent
+
+
+def test_served_is_the_leaf_this_process_built(monkeypatch: pytest.MonkeyPatch) -> None:
+    """IKA-144: `served` follows the leaf, not an environment variable nobody sets.
+
+    generate_queue.py and match_queue.py hand a worker the server as `--inference`, and
+    the worker builds a `RemoteValue` from it; `POKEURAOU_INFERENCE` is never set. The
+    report read the variable, so every served run said `served: false`. The real module is
+    used here, because the flag is set by `inference.py` on the module it imported.
+    """
+    import socket
+
+    from pokeuraou import timing as real
+    from pokeuraou.inference import RemoteValue
+
+    monkeypatch.setattr(real, "_SERVED", [False], raising=False)
+    # The variable alone is not a served leaf: nothing was built from it.
+    monkeypatch.setenv("POKEURAOU_INFERENCE", "127.0.0.1:1")
+    assert real.snapshot()["served"] is False
+    monkeypatch.delenv("POKEURAOU_INFERENCE")
+
+    # A listening socket is all `RemoteValue` needs to be built; nothing is asked of it.
+    with socket.create_server(("127.0.0.1", 0)) as listener:
+        port = listener.getsockname()[1]
+        with RemoteValue(f"127.0.0.1:{port}", "value", encoder=None, buffer_bytes=1 << 12):
+            pass
+    assert real.snapshot()["served"] is True

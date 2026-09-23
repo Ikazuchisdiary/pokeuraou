@@ -261,6 +261,8 @@ class RemoteValue:
         host, _, port = self.address.rpartition(":")
         self._sock = socket.create_connection((host, int(port)))
         self._file = self._sock.makefile("rwb")
+        # The report's `served` comes from here: this process's leaf is a server's.
+        timing.serving()
 
     def close(self) -> None:
         try:
