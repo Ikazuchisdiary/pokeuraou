@@ -12602,3 +12602,98 @@ merge_duplicates で外れの枝が当たりの枝に畳まれていた。Showdo
 ### 10. master（61433f2 IKA-175・IKA-173、0cbb30e IKA-176）取り込み
 
 `tools/diff_node.py` は master 側を取り、`unlaid`・`--toxic-debris`・`--charging`・`--hammer` の横に `undrained`・`unjudged`・`--frozen` を足し直した。
+
+## 9/24 — IKA-184: てだすけは相棒が既に動いていれば失敗する —— Python・port とも成功のままだった。直した後はオラクル 7 ケースで一致、ずれは失敗の旗だけで行列は動かない
+
+### 1. Showdown の定義（vendor a5df827、champions mod は上書きしない）
+
+`data/moves.ts` helpinghand: 優先度 +5、`volatileStatus: 'helpinghand'`、
+`onTryHit(target) { if (!target.newlySwitched && !this.queue.willMove(target)) return false; }`、
+condition は duration 1・`onStart` で 1.5 倍・`onRestart` で `*= 1.5`。`battle-actions.ts` の `hitStepInvulnerabilityEvent` は
+helpinghand を素通しにする。`newlySwitched` は champions の `clearVolatile`（switchIn）で立ち、`endTurn` で落ちる。
+
+- 相棒が既に技を使った（`willMove` が無い）なら失敗（`-fail`、じだんだが読む `false`）。+5 でそうなるのは、2 体が互いに
+  てだすけした遅い方と、いたずらごころのまもる（+4+1）が同じ枠で先に動いたとき。
+- 相棒がこのターン交代で出てきたなら、技の予約が無くても成功（`newlySwitched`）。
+- 対象が倒れている: 相棒が居なければ対象なしで、これは既に Python・port とも「had no target」の失敗。
+- 重ねがけ（`onRestart`）: ダブルでは味方は 1 体なので、2 体が同じ味方にてだすけすることは起きない（おうえん・さいはい無し）。
+
+### 2. オラクル（`tests/test_helping_hand_fails.py`、新規）
+
+どのケースも 1 ターン。side 1 は TEAM_B（遅い）。全員の HP・ひんし・失敗の旗を Showdown と比べ、port は Python の局面とも
+バイトで一致させる。Showdown 側の失敗の旗はテストの中で先に確かめる（陽性対照）。
+
+```
+  ケース              side 0 の手                     Showdown で失敗したもの            旧 Py  旧 exe  新 Py  新 exe
+  mutual              互いにてだすけ                   p1 ニョロトノ（遅い方）・p2 ガオガエン  不一致  不一致  一致   一致
+  mutual-swapped      互いに（相棒がカバルドン、遅い）   p1 カバルドン・p2 ガオガエン(まもる)   不一致  不一致  一致   一致
+  prankster-protect   てだすけ→いたずらごころのまもる   p1 ニョロトノ・p2 ガオガエン(まもる)   不一致  不一致  一致   一致
+  partner-attacks     てだすけ→ハイパーボイス（対照）   p2 ガオガエン（side 1 の互いに）       不一致  不一致  一致   一致
+  unhelped-attack     まもる・ハイパーボイス            p2 ガオガエン（side 1 の互いに）       不一致  不一致  一致   一致
+  fast-helper         速い方が遅い方に（対照）           無し                                  一致    一致    一致   一致
+  partner-switched    相棒が交代（対照、newlySwitched）  p2 ガオガエン(まもる)                  一致    一致    一致   一致
+```
+
+HP はどのケースも直す前から一致（1.5 倍は正しい）。違ったのは失敗の旗だけ。`test_the_boost_is_in_the_control` は
+partner-attacks と unhelped-attack の Showdown の減り方で、てだすけが効いたことを確かめる。直す前（旧 Python＋旧 exe）で
+15 のうち 10 落ち（Python 5・port 5）、新 Python＋旧 exe で port の 5 が落ち、新 Python＋新 exe で 15 通過。
+`test_perish_song.py` の FLAG_OF の注記（「resolver と port は付けない」）をこのテストへの参照に書き換えた。
+
+### 3. 直し
+
+- Python: `resolve.py` に `_helping_hand_fails(turn, targets)`。対象が `newly_switched` か `turn.acted` に無ければ成功。
+  `_do_status_move` のワイドガードの「nothing left to act」の門の直後で、失敗なら `move_failed` を立てて返す（volatile は付かない）。
+- port: `moves.rs` に同じ `helping_hand_fails`、`do_status_move` の同じ場所。
+- `tools/diff_node.py --using helpinghand`: 対照は `_helping_hand_fails` が常に「失敗しない」と答える Python（`unhelped`）。
+
+### 4. diff_node（`--using helpinghand`、1 コア）
+
+記録そのままの 40 局面（w12）では効果が 0 セルで、道具は「発火なし」で FAIL にする。そこで、場の片側にてだすけを知る者と、
+相棒がてだすけを知る（互いのセル）かいたずらごころ＋まもる系を持つ決定だけを抜いた games-dir を作った（`C:/tmp/ika184/hh_filter.py`、
+w12 229 決定・gen11L 169 決定）。
+
+```
+                                   fire-w12 40 局面     fire-gen11L 40 局面   fire-w12 12 局面 --value value-gen11L
+                                   新 exe   旧 exe      新 exe   旧 exe       新 exe   旧 exe
+  てだすけを使うセル                 2,606               2,840                 658
+  うち効果が出た（対照が動く）         194                 127                  29
+  枝ごとに違うセル                   0        190        0        125         0        27
+  途中交代で止まった枝のセル           4                   2                    2
+  最悪のセルの差                     2.2e-16  2.2e-16    1.1e-16  1.1e-16     1.1e-07  1.1e-07
+```
+
+旧 exe で違うのは枝の局面（失敗の旗）だけで、行列は新旧で同じ。hp-share・faints の葉も学習した葉も失敗の旗を読まず、
+helpinghand の volatile はターン終わりに消えるので、葉には届かない。効果が出たのに違わないセルは途中交代で止まった枝のセルの数と一致。
+記録そのままの w12 40 局面（新 exe）はてだすけのセル 2,264・違い 0・発火 0。
+w12 の 2 回（記録そのままと fire-w12）で「均衡の頻度の最大の動き」が 1.0 と出るが、値の動きは 7e-15 で新旧 exe で同じ。
+新旧で同じなのでこの変更ではない（同じ値の手が並んで均衡が一意でない局面と見込むが、確かめていない）。
+
+### 5. 記録で数えたこと（`C:/tmp/ika184/hh_count.py`、新 Python で両方の選んだ手を解き、`_helping_hand_fails` を見張る）
+
+```
+                                        w12          gen11L
+  局                                   43,999        12,000
+  てだすけを知る者が居る局              7,893         1,325
+  てだすけを選んだ決定                   4,493           912
+    相棒が先に動いて失敗する              1             0
+    相棒が居ない（pass）・門に届かない    265            29
+    手の文字列が選択肢に無い              32             2
+```
+
+1 件は w12 `games-worker4.jsonl` 836 行のターン 10: 相手側のいたずらごころエルフーンのまもると、ガオガエンのてだすけ。
+互いにてだすけを選んだ決定は 0（てだすけの決定は片側 1 回ずつ）。相棒の手で多いのはインファイト・サイコキネシス・ねっぷう。
+選ばれた手としてはほぼ起きないが、探索の行列には互いのセルといたずらごころのまもるのセルが毎回ある（4 節）。影響は次のターンの
+`moveLastTurnFailed` だけなので、じだんだの威力が変わるのはその後にじだんだを選んだときだけ。
+
+### 6. 検査と機械
+
+test_helping_hand_fails（新規）・test_perish_song・test_resolve・test_rust_node・test_port_coverage・test_port_gates・
+test_line_endings・test_after_move_oracle・test_hazards_after_hit・test_hazards_foe_side を `-n 0` で通過（246）。ruff check、
+`port_coverage.py --check`、`port_gate_audit.py --check` も通る。release ビルド 2 回（8 コア 22 秒・19 秒）、diff_node 7 回
+（57〜77 秒 4 回・25 秒 2 回・68 秒 1 回）、記録の走査 1 回（20 秒）、テスト 5 回（2〜49 秒）は heavy.py（--agent IKA-184）。
+旧 exe での port のテスト 1 回・Showdown と Python の状態の書き出し 1 回・決定の抜き出し 2 回は heavy.py を通さず 1 コアで数秒ずつ。
+worktree の data/ には $M の priors・standings・reportworm を写し、packages/sim-bridge/dist は main のものを写した（TS は触らない）。
+
+### 7. 別課題の候補
+
+- 無し（このずれは失敗の旗だけで、行列の値は動かない）。
