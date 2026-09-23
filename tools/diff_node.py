@@ -50,6 +50,14 @@ priority-raising ability) on the field, and holds every cell that may use one br
 branch. The cells where the terrain's per-target stop *fired* are the ones Python moves
 with `_stopped_by_psychic_terrain` taken out, and the run fails if there are none.
 
+Holding the port to Salt Cure, which no recorded team uses (IKA-159):
+
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --salt-cure
+
+`--salt-cure` puts the volatile on every Pokemon on the field and holds every cell branch
+by branch. The cells where the champions mod's 1/16 and 1/8 *fired* are the ones Python
+moves when the base game's 1/8 and 1/4 are put back, and the run fails if there are none.
+
 The budget, and the second invocation that goes with it (IKA-146):
 
     uv run python tools/diff_node.py --scenario examples/scenario-turn5.json --budget fast --limit 0
@@ -98,7 +106,7 @@ from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.equilibrium import solve  # noqa: E402
 from pokeuraou.narrow import narrow  # noqa: E402
 from pokeuraou.payoff import OBJECTIVES  # noqa: E402
-from pokeuraou.position import Position  # noqa: E402
+from pokeuraou.position import Effect, Position  # noqa: E402
 from pokeuraou.priors import find_cached_chaos, load_chaos  # noqa: E402
 from pokeuraou.resolve import Budget, batched_payoffs, resolve_turn  # noqa: E402
 from pokeuraou.selfplay import play_game  # noqa: E402
@@ -229,6 +237,37 @@ class unstopped:  # noqa: N801 - read as a phrase at the call site
         import pokeuraou.resolve as resolve_mod
 
         resolve_mod._stopped_by_psychic_terrain = self.real
+
+
+class base_game_salt_cure:  # noqa: N801 - read as a phrase at the call site
+    """Python with the base game's Salt Cure, 1/8 and 1/4: the control for --salt-cure.
+
+    The volatile stays and its residual still runs, so what differs is only the champions
+    mod's fraction (IKA-159) -- where 1/16 and 1/8 come out the same, nothing moves.
+    """
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = (resolve_mod.SALT_CURE_DAMAGE, resolve_mod.SALT_CURE_DAMAGE_WEAK)
+        resolve_mod.SALT_CURE_DAMAGE, resolve_mod.SALT_CURE_DAMAGE_WEAK = (1, 8), (1, 4)
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        resolve_mod.SALT_CURE_DAMAGE, resolve_mod.SALT_CURE_DAMAGE_WEAK = self.real
+
+
+def salt(pos: Position) -> int:
+    """Puts Salt Cure on every Pokemon on the field, and says how many took it."""
+    salted = 0
+    for side in pos.sides:
+        for mon in side.active_pokemon():
+            if mon is None or mon.fainted or mon.has_volatile("saltcure"):
+                continue
+            mon.volatiles.append(Effect(id="saltcure"))
+            salted += 1
+    return salted
 
 
 #: Abilities that raise a move's priority, and the moves they raise (`speed.move_priority`).
@@ -531,6 +570,13 @@ def main() -> None:
         "cell that may use one to the port branch by branch, and count where the "
         "terrain's per-target stop fired",
     )
+    ap.add_argument(
+        "--salt-cure",
+        action="store_true",
+        help="put Salt Cure on every Pokemon on the field first -- no recorded team has "
+        "it -- hold every cell to the port branch by branch, and count where the champions "
+        "mod's fraction fired: the cells the base game's 1/8 and 1/4 move",
+    )
     args = ap.parse_args()
 
     if args.limit == 0 and not args.scenario:
@@ -600,6 +646,9 @@ def main() -> None:
             pos.field.terrain_duration = 5
         positions = [pos for pos in positions if priority_on_field(pos, quick)]
         print(f"{args.terrain} laid on {len(positions)} positions with a priority move on the field")
+    if args.salt_cure:
+        salted = sum(salt(pos) for pos in positions)
+        print(f"Salt Cure put on {salted} Pokemon on the field")
     build = rustnode.require_current_binary()
     print(f"binary {build['sha256']} built {build['built']}")
 
@@ -637,6 +686,9 @@ def main() -> None:
     # Where a priority move may go under the terrain, and where the terrain stopped it.
     quick_used = quick_wrong = stopped = stopped_wrong = 0
     stopped_worst = 0.0
+    # Under Salt Cure, every cell; and where the mod's fraction moved the answer.
+    cured = cured_wrong = cured_refused = cured_fired = cured_fired_wrong = 0
+    cured_worst = 0.0
 
     for pos in positions:
         row = menu(reg, pos, 0, args.limit)
@@ -763,6 +815,38 @@ def main() -> None:
                         shown += 1
                         print(f"  cell {(i, j)} under {args.terrain}: {wrong[0][:200]}")
 
+        if args.salt_cure:
+            node = rustnode.node_for(reg)
+            for i, a in enumerate(row):
+                for j, b in enumerate(col):
+                    cured += 1
+                    here = resolve_turn(reg, pos, [a, b], budget=budget)
+                    with base_game_salt_cure():
+                        control = resolve_turn(reg, pos, [a, b], budget=budget)
+                    wrong = (
+                        ["no warm process"]
+                        if node is None
+                        else branch_differences(node, reg, pos, a, b, here, budget)
+                    )
+                    # A cell the port refuses (a gate that is not Salt Cure's -- Flower
+                    # Trick's willCrit, say) is filled in Python and is counted apart.
+                    refused_here = wrong == ["the port refused the turn"]
+                    cured_refused += refused_here
+                    if refused_here:
+                        wrong = []
+                    cured_wrong += bool(wrong)
+                    if differ(outcome(here), outcome(control)):
+                        cured_fired += 1
+                        cured_fired_wrong += bool(wrong)
+                        for index in range(len(evaluators)):
+                            cured_worst = max(
+                                cured_worst,
+                                abs(float(got[index][i, j] - expected[index][i, j])),
+                            )
+                    if wrong and shown < 5:
+                        shown += 1
+                        print(f"  cell {(i, j)} under Salt Cure: {wrong[0][:200]}")
+
         checked += 1
         cells += len(row) * len(col)
         for index, name in enumerate(names):
@@ -837,6 +921,15 @@ def main() -> None:
         print(f"    {stopped} of {quick_used} cells")
         print(f"    cells whose branches, weights, notes or positions differ  {stopped_wrong}")
         print(f"    worst cell difference there  {stopped_worst:.3e}")
+    if args.salt_cure:
+        print("\n  under Salt Cure, every cell -- held branch by branch")
+        print(f"    {cured} of {cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {cured_wrong}")
+        print(f"    cells the port refused, filled in Python and not held  {cured_refused}")
+        print("  where the mod's fraction fired -- the cells the base game's 1/8 and 1/4 move")
+        print(f"    {cured_fired} of {cured} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {cured_fired_wrong}")
+        print(f"    worst cell difference there  {cured_worst:.3e}")
     print(f"  python {python_seconds:.2f} s   rust {rust_seconds:.2f} s")
     if rust_seconds > 0:
         print(f"  end to end {python_seconds / rust_seconds:.1f}x")
@@ -855,6 +948,10 @@ def main() -> None:
         failed.append(f"{quick_wrong} cells under {args.terrain} differ by branch")
     if args.terrain and not stopped:
         failed.append(f"{args.terrain} stopped nothing in any cell, so agreeing here says nothing")
+    if cured_wrong:
+        failed.append(f"{cured_wrong} cells under Salt Cure differ by branch")
+    if args.salt_cure and not cured_fired:
+        failed.append("the mod's Salt Cure fraction moved no cell, so agreeing here says nothing")
     if failed:
         print(f"\nFAIL ({args.budget}): " + "; ".join(failed))
         sys.exit(1)
