@@ -10525,3 +10525,119 @@ HP の持ち越し式（`min(maxhp, hp + (maxhp - maxhp_before))`、差は 0）�
 test_resolve・test_line_endings・test_no_machine_specific_paths・test_port_gates・test_port_coverage を `-n 0` で 128 pass・8 skip
 （skip は全部 oracle 未ビルド、メガとは無関係）。機械: cargo release ビルド 1 回（8 コア 22 秒）、diff_node 29 秒・メガセル比較 18 秒 + 21 秒・
 テスト 27 秒（いずれも 1 コア）を heavy.py に記録（--agent IKA-60）。
+
+## 9/23 — IKA-136: vendor の Showdown を d3de52a17 へ上げた —— Baltimore の10構築が通り（1,067 → 1,077）、value-gen11L は M-B で読めて 4,000 局面ビット一致。付随の Run Away の拘束無効を Python の手の列挙に入れた
+
+ワーカー、基点 master 058f180（IKA-82 の上）、ブランチ `ika-136-showdown-bump-r`（`ika-136-showdown-bump` は前任の worktree が
+掴んでいて使えない）。ユーザーの決定「A: Showdown を更新」の実施。前任の worktree は参照だけ（ダンプは `generatedAt` を
+除いてバイト一致だった）。
+
+### 1. 上げたコミット
+
+`cc089d36`（9/9）→ **`d3de52a17`（9/10、"Fix Champions Learnsets #12305"）**。meteorassault が M-C で合法になる最初のコミット。
+その後の上流（a5df8274e、9/22 まで）には Champions の仕様変更が他にもある（Mega Baxcalibur の特性、Emergency Exit、
+Eject Button と自分交代、呪い＋タイプ変更）ので、ここでは混ぜない。submodule は worktree の中で `git submodule update --init`
+→ `git fetch --depth 60` → checkout。main の vendor には触れていない。`npm ci`・`node build decl`・ルートの `npm ci`・
+`tsc -p packages/sim-bridge` のあと `dump-regulation`・`dump-names`（IKA-152 の検査のため gitlink を先に stage）。
+
+cc089d3..d3de52a17 の 7 コミットのうち、ダンプかシミュに効くもの:
+
+```
+  bc4eb07b4  Champions: Double Shock を punch に           → ダンプ（M-B・M-C）
+  d849b2200  Champions: Run Away の拘束無効                → ダンプ（customHooks）＋ Python の手の列挙
+  d3de52a17  learnsets に meteorassault、mod で isNonstandard: null。championsregmb/moves.ts（strengthsap・wish の PP 10）
+  sim/pokemon.ts  溜め技の RedirectTarget の条件を削除、Sky Drop に tracksTarget → 観測できる違いなし（下）
+  7e34f637f  aliases・BSS の searchShow                  → ダンプに出ない
+  他（gen4・DexText・unseenfist の並べ替え）              → 出ない（ja.json は showdownCommit 以外バイト一致）
+```
+
+### 2. ダンプの差分（id で突き合わせた全件、`C:/tmp/ika136/dumpdiff.py`）
+
+```
+  M-B  moves + meteorassault（覚える種族は無い。ネギガナイトは M-B に無い）
+       doubleshock.flags.punch  - → 1
+       strengthsap.pp 5 → 10、wish.pp 5 → 10
+       abilities runaway.hasCustomCode false → true、customHooks [] → [onMaybeTrapPokemon, onTrapPokemon]
+  M-C  moves + meteorassault（basePower 170、recharge、self.volatileStatus mustrecharge）
+       doubleshock.flags.punch  - → 1
+       abilities runaway（同上）
+  両方 meta.showdownCommit・generatedAt。配列の並びは mod で上書きされた項目が前へ動いた（id の集合と中身は上のとおり）
+```
+
+上の付随変更以外に動いたものは無い。種族・道具・性格・タイプ表は差分 0。
+
+### 3. 語彙（`tools/vocab_order.py`）
+
+```
+  --check（追記前）   両規則とも "moves missing from the order: meteorassault" で rc 1   ← 陽性対照
+  --append            両規則とも moves + meteorassault at index 515（末尾、既存の番号は1つも動かない: diff は1行の追記だけ）
+  --check（追記後）   ok（M-B species 357・abilities 316・items 148・moves 515、M-C 392・316・166・515）
+  指紋  M-B 848731f359e4b3a6 → 59d8404f70998d0c（move 515 行に切り戻すと 848731f359e4b3a6）
+        M-C 9616b72545058306 → de9714ef7c6d19de（切り戻すと 9616b72545058306）
+```
+
+### 4. 付随変更の扱い（Python と port）
+
+* **Double Shock の punch**: 両エンジンともダンプの flags を読む（Python `effects._has("punch")`、Rust `reg.rs` の F_PUNCH）。
+  M-C で効くのはパーモット（鉄の拳）。オラクルで確かめた（`C:/tmp/ika136/turn_check.py`、ロール固定）:
+  鉄の拳のダブルショック → ドヒドイデ 55 ダメージ、Python（新しいダンプ）55 で一致。**旧ダンプの Python は 31 と予測して外れる**
+  （陽性対照）。電気吸収の対照は新旧とも 31 で一致
+* **meteorassault**: 同じ検査でネギガナイトのスターアサルトのダメージと `mustrecharge` が Showdown と一致、次の手番は
+  Showdown もこちらも「反動のみ」。diff_node（`--scenario`、パーモット鉄の拳＋ネギガナイトを先発にした scenario-turn5、
+  メニュー全部 4,108 セル）: matrix・fast とも拒否 0、最悪差 1.7e-16（和の順序）、均衡の値の移動 0。
+  **陽性対照**: Python 側だけダブルショックの punch を外すと最悪差 7.1e-2 で FAIL
+* **Run Away**: champions mod で `onTrapPokemon`（優先度 -10、全拘束の後に `trapped = false`）。オラクルの局面は Showdown の
+  `trapped` を持つので正しいが、探索が作る子の局面は拘束の揮発状態を持ち、`actions._is_trapped` がそれを拘束と読んでいた。
+  → `_escapes_traps`（ダンプの runaway に onTrapPokemon があるときだけ）を足した。`tests/test_runaway.py`（10件）:
+  オラクルで「まとわりつくを受けたフォクスライは、にげあしなら trapped でない、かるわざなら trapped」、
+  その局面から Showdown の判定を消すと直す前は交代が出なかった（1件落ち）、手作りの局面で 3 種の揮発状態（直す前 3件落ち）。
+  port は手を列挙しない（Python が作ったメニューを解くだけ）ので影響なし。`port_coverage` の inert.rs から runaway が外れ
+  （Python が触るようになった）、ゲートは resolve.rs の明示のリストで通すので port の振る舞いは同じ。`port_gate_audit` の
+  KNOWN_UNREFERENCED に理由つきで足した
+* **strengthsap・wish の PP（M-B）**: 自己対戦の技の枠は `pp=maxpp=ダンプの pp` なので、これからの M-B の局は 10 から減る。
+  符号化の特徴は pp/maxpp（1回使って 0.8 → 0.9）。記録済みの局面は記録時の値のまま（下の null コントロールで M-B 局面 16 に
+  strengthsap があり、出力はビット一致）
+* **溜め技の誘導（sim/pokemon.ts）**: 旧コードは「溜めの手番」だけ誘導しなかった。溜めの手番の狙いは `lastMoveTargetLoc`
+  （誘導前の元の狙い）から取るので、当たる手番の結果は新旧で同じ。Python は当たる手番にだけ `_resolve_targets` を通すので
+  どちらとも同じ。Sky Drop は M-B・M-C に無い
+
+### 5. 受け入れ
+
+```
+  Baltimore（tools/standings_report.py、M-C）  旧 1,067/1,082（move ×10・nature ×1・team size ×4）
+                                               新 1,077/1,082（nature ×1・team size ×4 —— 残り5本は元の理由のまま）
+     増えた10本はすべて「move: meteorassault」で落ちていたもの、減った本は 0
+     その10本を Showdown 自身の検証器に: d3de52a17 は 10/10 ok、cc089d3（本体の sim-bridge）は 10/10 とも
+     "Meteor Assault does not exist in Gen 9" と "can't learn Meteor Assault"（陽性対照）
+  プール（tools/fetch_pastes.py、キャッシュから）  kept 65 / excluded 0。出力は本体のものとダンプの出典3行
+     （showdownCommit・generatedAt・sha256）だけ違う。load_roster + team_sets 65/65、Showdown の検証器 65/65
+  value-gen11L（M-B）  読める、vocab_grown_from == {"move": 515}
+     null  基点の木（master の src・cc089d3 のダンプと語彙）対 この木、w12 の M-B 局面 4,000   ビット一致 4,000/4,000
+           （meteorassault を含む局面 0）
+     陽性  同じ局面で protect と fakeout の番号を入れ替え                                   一致 0/4,000（最大 1.75）
+  data/models の 60 ファイル   58 読める（すべて grown {"move": 515}）。value-gen0（156e8e…、前から読めない）と policy-gen7
+     （形式が違う）は基点の木でも同じ2つが落ちる
+  diff_encode（M-B・M-C とも rust/turns.json の 3,451 局面＋meteorassault/doubleshock を持たせた 50 局面）  全8配列一致
+     carrier 50/50 が Python・Rust とも 515。Rust の出力の1値を 514 に変えると moves が DIFFERS（陽性対照）
+  port_coverage --check・port_gate_audit --check  ok
+  関係テスト 20 ファイル 220 件  pass・skip 0（1コア 74 秒）
+```
+
+### 6. shard（作り直していない）
+
+`data/` の `*-encoded.npz` は 41: 旧 M-B の指紋 848731f359e4b3a6 が **35（1.11 GB）**、156e8e…（gen0）1、指紋の無い
+analysis の小さいもの 5。M-C の shard は無い。指紋が変わるので 35 本は新しく符号化した shard と連結できない
+（`encode_dataset` の「different vocabularies」）。ただし 35 本とも meta に `sources`・`meta_keys`・`encoding_revision`
+が無く、今の `encode_dataset` はこの更新が無くても次に使うときに作り直す。既存 id の番号は同じなので中身は変わらない。
+
+### 7. 見つけた別件（起票の候補）
+
+* ダブルショックの「電気タイプを失う」「電気でなければ失敗」を Python も port もやっていない（`resolve.py` に doubleshock の
+  名前が無い）。オラクルでパーモットのタイプが Showdown は `???/Fighting`、こちらは `Electric/Fighting`。unmodelled にも出ない
+* `_is_trapped` の揮発状態の判定はゴースト（拘束されない）ときれいなぬけがらを見ていない。子の局面でゴーストが
+  まとわりつくを受けると交代が消える（Run Away と同じ形）。確かめていない
+* 上流の d3de52a17 より後の Champions の変更（Mega Baxcalibur の特性 490b7fb8c、Eject Button aa6d5f085、Emergency Exit
+  57ecb348b、呪い 234511985）
+
+機械: npm ci 2回（14 秒・6 秒）、build decl 4 秒、cargo release 2回（8コア 24 秒ずつ）、diff_node 3回（1コア 6・7・13 秒）、
+関係テスト 4回（1コア 58・75・120・74 秒）、ほかは各数秒。すべて heavy.py（--agent IKA-136）。

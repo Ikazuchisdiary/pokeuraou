@@ -139,11 +139,16 @@ KNOWN_UNGATED: frozenset[str] = frozenset()
 #:                                       differential, not by the resolver.
 #:    truant                             resolve.py:1788, inside a docstring quoting
 #:                                       Showdown's own TypeScript.
+#:    runaway                            actions._escapes_traps (IKA-136): the champions
+#:                                       mod frees Run Away from traps, which decides
+#:                                       whether a switch is *offered*. Menus are built
+#:                                       in Python and handed to the port, which only
+#:                                       resolves them, so no turn it resolves differs.
 #:
 #: Recorded rather than required to be empty so that `--check` can fail on the next one
-#: without first demanding these five be re-argued.
+#: without first demanding these six be re-argued.
 KNOWN_UNREFERENCED: frozenset[str] = frozenset(
-    {"shadowtag", "arenatrap", "magnetpull", "dancer", "truant"}
+    {"shadowtag", "arenatrap", "magnetpull", "dancer", "truant", "runaway"}
 )
 
 

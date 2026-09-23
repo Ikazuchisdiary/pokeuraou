@@ -2,7 +2,7 @@
 	"meta": {
 		"locale": "ja",
 		"source": "vendor/pokemon-showdown/dist/data/text/ja",
-		"showdownCommit": "cc089d36b7717dec78ce8ab5d1745c03ad5c97e4",
+		"showdownCommit": "d3de52a17868aa22e6f5af251a68b86f573b75b1",
 		"generatedBy": "packages/sim-bridge/src/cli/dump-names.ts",
 		"note": "Showdown が name: null と書いた項目は落としている。訳が無いことを 英語名で埋めると「訳せている」と見分けがつかなくなるため、Python 側で不足を数えて報告する。",
 		"untranslated": {
