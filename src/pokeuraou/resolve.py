@@ -2413,6 +2413,19 @@ def _immune_to_move(
     return None
 
 
+def _side_condition_side(action: QueuedAction, move: Move) -> int:
+    """The side a move's own `sideCondition` is laid on (IKA-165).
+
+    The side of the move's one target (`moveHit`: `target.side.addSideCondition(...)`),
+    and `getMoveTargets` makes that target a foe for `foeSide` -- Stealth Rock, Spikes,
+    Toxic Spikes, Sticky Web -- and the user or an ally for `allySide` and `allyTeam`:
+    Tailwind, the screens, the guards. This was always the user's side, so a Spikes user
+    spiked itself. A `self` block's `sideCondition` is the user's either way (`moveHit`
+    on the source).
+    """
+    return 1 - action.side if move.target == "foeSide" else action.side
+
+
 def _apply_status_move(
     reg: Regulation,
     turn: _Turn,
@@ -2427,8 +2440,9 @@ def _apply_status_move(
 
     if raw.get("sideCondition"):
         side_condition = str(raw["sideCondition"])
+        # The duration stays the user's: Light Clay and the rest read the source.
         turn.add_side_condition(
-            action.side,
+            _side_condition_side(action, move),
             side_condition,
             duration=_effect_duration(turn, move, side_condition, action.side, action.slot),
         )

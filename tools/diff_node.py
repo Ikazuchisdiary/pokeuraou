@@ -58,6 +58,15 @@ Holding the port to Salt Cure, which no recorded team uses (IKA-159):
 by branch. The cells where the champions mod's 1/16 and 1/8 *fired* are the ones Python
 moves when the base game's 1/8 and 1/4 are put back, and the run fails if there are none.
 
+Holding the port to the hazards, which no recorded team carries (IKA-165):
+
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --hazards
+
+`--hazards` teaches every Pokemon on the field a foeSide hazard in its last move slot --
+Stealth Rock, Spikes, Toxic Spikes and Sticky Web in turn -- and holds every cell that uses
+one branch by branch. The cells where the placement *fired* are the ones Python moves when
+the condition is put back on the user's side, and the run fails if there are none.
+
 The budget, and the second invocation that goes with it (IKA-146):
 
     uv run python tools/diff_node.py --scenario examples/scenario-turn5.json --budget fast --limit 0
@@ -106,7 +115,7 @@ from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.equilibrium import solve  # noqa: E402
 from pokeuraou.narrow import narrow  # noqa: E402
 from pokeuraou.payoff import OBJECTIVES  # noqa: E402
-from pokeuraou.position import Effect, Position  # noqa: E402
+from pokeuraou.position import Effect, MoveSlot, Position  # noqa: E402
 from pokeuraou.priors import find_cached_chaos, load_chaos  # noqa: E402
 from pokeuraou.resolve import Budget, batched_payoffs, resolve_turn  # noqa: E402
 from pokeuraou.selfplay import play_game  # noqa: E402
@@ -268,6 +277,45 @@ def salt(pos: Position) -> int:
             mon.volatiles.append(Effect(id="saltcure"))
             salted += 1
     return salted
+
+
+#: The foeSide moves with a `sideCondition` in both dumps, in the order `teach_hazards` deals.
+HAZARD_MOVES = ("stealthrock", "spikes", "toxicspikes", "stickyweb")
+
+
+class hazards_on_the_users_side:  # noqa: N801 - read as a phrase at the call site
+    """Python with every side condition laid on the user's side, as before IKA-165: the
+    control for --hazards. The move still runs and the condition still goes down, so what
+    differs is only whose side it lands on."""
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = resolve_mod._side_condition_side
+        resolve_mod._side_condition_side = lambda action, _move: action.side
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        resolve_mod._side_condition_side = self.real
+
+
+def teach_hazards(reg, pos: Position, dealt: list[int]) -> int:  # noqa: ANN001
+    """Puts a hazard in the last move slot of every Pokemon on the field that knows none,
+    dealing them in turn, and says how many were taught."""
+    taught = 0
+    for side in pos.sides:
+        for mon in side.active_pokemon():
+            if mon is None or mon.fainted or not mon.moves:
+                continue
+            if any(slot.id in HAZARD_MOVES for slot in mon.moves):
+                continue
+            move_id = HAZARD_MOVES[dealt[0] % len(HAZARD_MOVES)]
+            dealt[0] += 1
+            pp = reg.moves[move_id].pp
+            mon.moves[-1] = MoveSlot(id=move_id, pp=pp, maxpp=pp)
+            taught += 1
+    return taught
 
 
 #: Abilities that raise a move's priority, and the moves they raise (`speed.move_priority`).
@@ -577,6 +625,13 @@ def main() -> None:
         "it -- hold every cell to the port branch by branch, and count where the champions "
         "mod's fraction fired: the cells the base game's 1/8 and 1/4 move",
     )
+    ap.add_argument(
+        "--hazards",
+        action="store_true",
+        help="teach every Pokemon on the field a foeSide hazard first -- no recorded team "
+        "has one -- hold every cell that uses one to the port branch by branch, and count "
+        "where the placement fired: the cells the user's side would move",
+    )
     args = ap.parse_args()
 
     if args.limit == 0 and not args.scenario:
@@ -649,7 +704,11 @@ def main() -> None:
     if args.salt_cure:
         salted = sum(salt(pos) for pos in positions)
         print(f"Salt Cure put on {salted} Pokemon on the field")
-    build = rustnode.require_current_binary()
+    if args.hazards:
+        dealt = [0]
+        taught = sum(teach_hazards(reg, pos, dealt) for pos in positions)
+        print(f"a hazard taught to {taught} Pokemon on the field")
+    build =rustnode.require_current_binary()
     print(f"binary {build['sha256']} built {build['built']}")
 
     # A refused cell is filled by Python, and for a learned leaf that means its leaves are
@@ -689,6 +748,11 @@ def main() -> None:
     # Under Salt Cure, every cell; and where the mod's fraction moved the answer.
     cured = cured_wrong = cured_refused = cured_fired = cured_fired_wrong = 0
     cured_worst = 0.0
+    # Where a hazard was used, and where laying it on the foe's side moved the answer.
+    laid = laid_wrong = laid_refused = laid_fired = laid_fired_wrong = 0
+    laid_fired_refused = laid_fired_paused = 0
+    laid_worst = 0.0
+    hazard_moves = frozenset(HAZARD_MOVES)
 
     for pos in positions:
         row = menu(reg, pos, 0, args.limit)
@@ -847,6 +911,47 @@ def main() -> None:
                         shown += 1
                         print(f"  cell {(i, j)} under Salt Cure: {wrong[0][:200]}")
 
+        if args.hazards:
+            node = rustnode.node_for(reg)
+            for i, a in enumerate(row):
+                for j, b in enumerate(col):
+                    if not (uses(a, hazard_moves) or uses(b, hazard_moves)):
+                        continue
+                    laid += 1
+                    here = resolve_turn(reg, pos, [a, b], budget=budget)
+                    with hazards_on_the_users_side():
+                        control = resolve_turn(reg, pos, [a, b], budget=budget)
+                    wrong = (
+                        ["no warm process"]
+                        if node is None
+                        else branch_differences(node, reg, pos, a, b, here, budget)
+                    )
+                    # A cell the port refuses for a gate that is not the hazard's is filled
+                    # in Python and is counted apart.
+                    refused_here = wrong == ["the port refused the turn"]
+                    laid_refused += refused_here
+                    if refused_here:
+                        wrong = []
+                    laid_wrong += bool(wrong)
+                    mine, theirs = outcome(here), outcome(control)
+                    if differ(mine, theirs):
+                        laid_fired += 1
+                        laid_fired_wrong += bool(wrong)
+                        laid_fired_refused += refused_here
+                        # `branch_differences` holds a paused turn's weight, not its
+                        # position, so a placement that shows only there is not held.
+                        laid_fired_paused += not differ(
+                            (mine[0], {}, mine[2]), (theirs[0], {}, theirs[2])
+                        )
+                        for index in range(len(evaluators)):
+                            laid_worst = max(
+                                laid_worst,
+                                abs(float(got[index][i, j] - expected[index][i, j])),
+                            )
+                    if wrong and shown < 5:
+                        shown += 1
+                        print(f"  cell {(i, j)} using a hazard: {wrong[0][:200]}")
+
         checked += 1
         cells += len(row) * len(col)
         for index, name in enumerate(names):
@@ -930,6 +1035,17 @@ def main() -> None:
         print(f"    {cured_fired} of {cured} cells")
         print(f"    cells whose branches, weights, notes or positions differ  {cured_fired_wrong}")
         print(f"    worst cell difference there  {cured_worst:.3e}")
+    if args.hazards:
+        print("\n  where a hazard was used -- every one held branch by branch")
+        print(f"    {laid} of {cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {laid_wrong}")
+        print(f"    cells the port refused, filled in Python and not held  {laid_refused}")
+        print("  where the placement fired -- the cells the user's side would move")
+        print(f"    {laid_fired} of {laid} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {laid_fired_wrong}")
+        print(f"    cells the port refused, not held  {laid_fired_refused}")
+        print(f"    cells that differ only in a paused branch, not compared  {laid_fired_paused}")
+        print(f"    worst cell difference there  {laid_worst:.3e}")
     print(f"  python {python_seconds:.2f} s   rust {rust_seconds:.2f} s")
     if rust_seconds > 0:
         print(f"  end to end {python_seconds / rust_seconds:.1f}x")
@@ -952,6 +1068,10 @@ def main() -> None:
         failed.append(f"{cured_wrong} cells under Salt Cure differ by branch")
     if args.salt_cure and not cured_fired:
         failed.append("the mod's Salt Cure fraction moved no cell, so agreeing here says nothing")
+    if laid_wrong:
+        failed.append(f"{laid_wrong} cells using a hazard differ by branch")
+    if args.hazards and not laid_fired:
+        failed.append("laying a hazard on the foe's side moved no cell, so agreeing here says nothing")
     if failed:
         print(f"\nFAIL ({args.budget}): " + "; ".join(failed))
         sys.exit(1)
