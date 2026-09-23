@@ -87,6 +87,16 @@ every cell branch by branch. The cells where the new rule *fired* are the ones P
 moves when `_toxic_debris` is put back to a foe's hit on a Glimmora that survives, and the
 run fails if there are none.
 
+Holding the port to Good as Gold and Flower Veil (IKA-202):
+
+    uv run python tools/diff_node.py --games-dir C:/tmp/ika77/out/g600 \
+        --regulation gen9championsvgc2026regmc --veils
+
+`--veils` keeps the recorded positions with either on the field and holds every cell
+branch by branch. The cells where one *fired* are the ones Python moves with it taken out
+(`unveiled`: `_good_as_gold_blocks`, `_flower_veil` and Perish Song's Good as Gold), each
+ability counted on the positions it stands in, and the run fails if neither fired.
+
 `--using` takes a rampage move too (IKA-174), and `--rampage` holds the rest of it:
 
     uv run python tools/diff_node.py --games-dir data/ika73/w12 --using outrage,petaldance
@@ -556,6 +566,42 @@ class unlaid:  # noqa: N801 - read as a phrase at the call site
         import pokeuraou.resolve as resolve_mod
 
         resolve_mod.AFTER_HIT_HAZARDS = self.real
+
+
+#: The abilities --veils holds (IKA-202).
+VEILS = frozenset({"goodasgold", "flowerveil"})
+
+
+class unveiled:  # noqa: N801 - read as a phrase at the call site
+    """Python without Good as Gold or Flower Veil, as before IKA-202: the control for
+    --veils. `ability` takes out the one named, so each is counted on its own."""
+
+    def __init__(self, ability: str) -> None:
+        assert ability in VEILS
+        self.ability = ability
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = (
+            resolve_mod._good_as_gold_blocks,
+            resolve_mod._flower_veil,
+            resolve_mod.PERISH_SONG_TRY_HIT_ABILITIES,
+        )
+        if self.ability == "goodasgold":
+            resolve_mod._good_as_gold_blocks = lambda *_args: False
+            resolve_mod.PERISH_SONG_TRY_HIT_ABILITIES = frozenset({"soundproof"})
+        else:
+            resolve_mod._flower_veil = lambda *_args: None
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        (
+            resolve_mod._good_as_gold_blocks,
+            resolve_mod._flower_veil,
+            resolve_mod.PERISH_SONG_TRY_HIT_ABILITIES,
+        ) = self.real
 
 
 def _old_toxic_debris(turn, move, target, attacker_side) -> None:  # noqa: ANN001
@@ -1626,6 +1672,12 @@ def main() -> None:
         "count where IKA-191's switches fired: the cells `uneject` moves",
     )
     ap.add_argument(
+        "--veils",
+        action="store_true",
+        help="keep positions with Good as Gold or Flower Veil on the field, hold every cell "
+        "to the port branch by branch, and count where each fired: the cells `unveiled` moves",
+    )
+    ap.add_argument(
         "--toxic-debris",
         action="store_true",
         help="keep positions with Toxic Debris on the field, hold every cell to the port "
@@ -1708,6 +1760,7 @@ def main() -> None:
         using |= rampage_moves(reg)
     blockers = PRIORITY_BLOCKING_ABILITIES if args.priority_block else frozenset()
     debris = frozenset({"toxicdebris"}) if args.toxic_debris else frozenset()
+    veils = VEILS if args.veils else frozenset()
     for move_id in sorted(using):
         move = reg.moves.get(move_id)
         if move is None or not (
@@ -1759,7 +1812,7 @@ def main() -> None:
             args,
             holding - {args.give},
             using | charging | randomers,
-            blockers | debris,
+            blockers | debris | veils,
             args.frozen,
             locked=args.choice_locked,
         )
@@ -1791,6 +1844,8 @@ def main() -> None:
         positions = [pos for pos in positions if ability_on_field(pos, blockers)]
     if debris:
         positions = [pos for pos in positions if ability_on_field(pos, debris)]
+    if veils:
+        positions = [pos for pos in positions if ability_on_field(pos, veils)]
     if args.frozen:
         positions = [pos for pos in positions if frozen_on_field(pos)]
     if args.choice_locked:
@@ -1922,6 +1977,12 @@ def main() -> None:
     # Beside Toxic Debris, every cell; and where IKA-173's rule moved the answer.
     debris_cells = debris_wrong = debris_refused = debris_fired = debris_fired_wrong = 0
     debris_worst = 0.0
+    # Beside Good as Gold or Flower Veil, every cell; and where each moved the answer.
+    veil_cells = veil_wrong = veil_refused = 0
+    veil_fired = dict.fromkeys(sorted(VEILS), 0)
+    veil_fired_wrong = dict.fromkeys(sorted(VEILS), 0)
+    veil_stands = dict.fromkeys(sorted(VEILS), 0)
+    veil_worst = 0.0
     # Where a charging move was used or fired, and where its stored target moved the answer.
     charged = charged_wrong = aimed = aimed_wrong = aimed_paused = 0
     aimed_worst = 0.0
@@ -2284,6 +2345,40 @@ def main() -> None:
                         shown += 1
                         print(f"  cell {(i, j)} beside Toxic Debris: {wrong[0][:200]}")
 
+        if veils:
+            node = rustnode.node_for(reg)
+            standing = [v for v in sorted(VEILS) if ability_on_field(pos, frozenset({v}))]
+            for v in standing:
+                veil_stands[v] += len(row) * len(col)
+            for i, a in enumerate(row):
+                for j, b in enumerate(col):
+                    veil_cells += 1
+                    here = resolve_turn(reg, pos, [a, b], budget=budget)
+                    wrong = (
+                        ["no warm process"]
+                        if node is None
+                        else branch_differences(node, reg, pos, a, b, here, budget)
+                    )
+                    refused_here = wrong == ["the port refused the turn"]
+                    veil_refused += refused_here
+                    if refused_here:
+                        wrong = []
+                    veil_wrong += bool(wrong)
+                    for v in standing:
+                        with unveiled(v):
+                            control = resolve_turn(reg, pos, [a, b], budget=budget)
+                        if differ(outcome(here), outcome(control)):
+                            veil_fired[v] += 1
+                            veil_fired_wrong[v] += bool(wrong)
+                            for index in range(len(evaluators)):
+                                veil_worst = max(
+                                    veil_worst,
+                                    abs(float(got[index][i, j] - expected[index][i, j])),
+                                )
+                    if wrong and shown < 5:
+                        shown += 1
+                        print(f"  cell {(i, j)} beside {'/'.join(standing)}: {wrong[0][:200]}")
+
         if args.confused and confused_on_field(pos):
             node = rustnode.node_for(reg)
             for i, a in enumerate(row):
@@ -2641,6 +2736,17 @@ def main() -> None:
         print(f"    cells the port refused, not held  {laid_fired_refused}")
         print(f"    cells that differ only in a paused branch, not compared  {laid_fired_paused}")
         print(f"    worst cell difference there  {laid_worst:.3e}")
+    if veils:
+        print("\n  beside Good as Gold or Flower Veil, every cell -- held branch by branch")
+        print(f"    {veil_cells} of {cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {veil_wrong}")
+        print(f"    cells the port refused, filled in Python and not held  {veil_refused}")
+        for v in sorted(VEILS):
+            print(f"  where {v} fired -- the cells `unveiled('{v}')` moves")
+            print(f"    {veil_fired[v]} of {veil_stands[v]} cells beside it")
+            print(f"    cells whose branches, weights, notes or positions differ  "
+                  f"{veil_fired_wrong[v]}")
+        print(f"    worst cell difference there  {veil_worst:.3e}")
     if debris:
         print("\n  beside Toxic Debris, every cell -- held branch by branch")
         print(f"    {debris_cells} of {cells} cells")
@@ -2745,6 +2851,10 @@ def main() -> None:
         failed.append(f"{debris_wrong} cells beside Toxic Debris differ by branch")
     if debris and not debris_fired:
         failed.append("the new Toxic Debris rule moved no cell, so agreeing here says nothing")
+    if veil_wrong:
+        failed.append(f"{veil_wrong} cells beside Good as Gold or Flower Veil differ by branch")
+    if veils and not any(veil_fired.values()):
+        failed.append("neither Good as Gold nor Flower Veil moved a cell, so agreeing here says nothing")
     if failed:
         print(f"\nFAIL ({args.budget}): " + "; ".join(failed))
         sys.exit(1)

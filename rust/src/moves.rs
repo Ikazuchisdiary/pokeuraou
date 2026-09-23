@@ -423,6 +423,34 @@ fn confusion_refused(turn: &Turn, side: usize, slot: usize, source: Option<Slot>
     }
 }
 
+/// Good as Gold's `onTryHit` for another Pokemon's status move, unless a Mold Breaker
+/// move: Python's `_good_as_gold_blocks` (IKA-202).
+pub(crate) fn good_as_gold_blocks(turn: &Turn, action: &QueuedAction, mv: &Move, target: Slot) -> bool {
+    let me = (action.side, action.slot);
+    if mv.category != "Status" || target == me {
+        return false;
+    }
+    turn.mon_at(target.0, target.1).is_some_and(|mon| {
+        mon.ability == "goodasgold" && !ability_broken_by(turn, mon, Some(me))
+    })
+}
+
+/// A Grass type beside (or holding) a Flower Veil no `current_actor` Mold Breaker move
+/// passes: Python's `_flower_veil` (IKA-202). The callers check the source.
+pub(crate) fn flower_veil(turn: &Turn, side: usize, slot: usize) -> bool {
+    let Some(mon) = turn.mon_at(side, slot) else { return false };
+    if mon.fainted || !turn.types_of(mon).contains("Grass") {
+        return false;
+    }
+    (0..turn.pos.sides[side].active.len()).any(|ally| {
+        turn.mon_at(side, ally).is_some_and(|holder| {
+            !holder.fainted
+                && holder.ability == "flowerveil"
+                && !ability_broken_by(turn, holder, turn.current_actor)
+        })
+    })
+}
+
 /// The residual's `duration--` reaching zero: `onEnd` before the loop takes it off.
 fn rampage_runs_out(turn: &mut Turn, order: &[Slot]) {
     for (side, slot) in order.iter().copied() {
@@ -2815,6 +2843,9 @@ fn immune_to_move(
     if defender.fainted {
         return None;
     }
+    if good_as_gold_blocks(turn, action, mv, target) {
+        return Some("goodasgold".into());
+    }
     let self_targeted = target == (action.side, action.slot);
     let types = turn.types_of(defender);
 
@@ -3123,7 +3154,13 @@ fn apply_status_move(
                 .iter()
                 .map(|(stat, value)| (stat.as_str(), value.as_i64().unwrap_or(0)))
                 .collect();
-            turn.apply_boosts(target.0, target.1, &table, !own_side);
+            turn.apply_boosts_by(
+                target.0,
+                target.1,
+                &table,
+                !own_side,
+                (target.0, target.1) != me,
+            );
         }
         if let Some(status) = mv.status.as_deref() {
             let status = status.to_string();
@@ -3244,7 +3281,7 @@ fn perish_song(turn: &mut Turn, me: Slot) {
                 continue;
             }
             let shielded = matches!(mon.item, Some(i) if i.as_str() == "abilityshield");
-            if mon.ability == "soundproof"
+            if (mon.ability == "soundproof" || mon.ability == "goodasgold")
                 && (side, slot) != me
                 && !(ignores_ability && !shielded)
             {
@@ -3617,7 +3654,7 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
         mon.newly_switched = false;
         mon.move_last_turn_failed = failed;
         if yawn_expired {
-            turn.apply_status(side, slot, "slp")?;
+            turn.apply_status_unveiled(side, slot, "slp")?;
         }
     }
     rampage_residual(turn, &order);
