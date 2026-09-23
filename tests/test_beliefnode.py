@@ -717,8 +717,8 @@ def test_a_midgame_shared_node_equals_a_matrix_per_completion(midgame) -> None: 
 
 
 def _side_from_the_true_position(real):  # noqa: ANN001, ANN202
-    def patch(reference, side, slots, item, reg, position):  # noqa: ANN001, ANN202
-        out = real(reference, side, slots, item, reg, position)
+    def patch(reference, side, slots, item, reg, position, *rest):  # noqa: ANN001, ANN002, ANN202
+        out = real(reference, side, slots, item, reg, position, *rest)
         out.side = reference.side.copy()
         return out
 
@@ -726,8 +726,9 @@ def _side_from_the_true_position(real):  # noqa: ANN001, ANN202
 
 
 def _bench_can_mega_from_the_root(real):  # noqa: ANN001, ANN202
-    def patch(reference, side, slots, item, reg, position):  # noqa: ANN001, ANN202
-        out = real(reference, side, slots, item, reg, position)
+    def patch(reference, side, slots, item, reg, position, *rest):  # noqa: ANN001, ANN002, ANN202
+        # `*rest` is the leaf's encoder and rules, which `_patched` takes since IKA-141.
+        out = real(reference, side, slots, item, reg, position, *rest)
         encoder = beliefnode._encoder_for(reg)
         source = encoder.encode_positions([item.position])
         k = encoder.mon_names.index("can_mega")
