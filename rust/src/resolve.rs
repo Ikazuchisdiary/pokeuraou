@@ -1940,6 +1940,8 @@ fn do_switch_with(
             restore_types(reg, leaving);
             leaving.last_move = None;
             leaving.locked_move = None;
+            // `clearVolatile` also clears `moveLastTurnResult` (IKA-171).
+            leaving.move_last_turn_failed = false;
             for move_slot in leaving.moves.iter_mut() {
                 move_slot.disabled = false;
             }

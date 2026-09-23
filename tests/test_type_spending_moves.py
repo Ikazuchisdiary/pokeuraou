@@ -138,7 +138,8 @@ BUDGET = replace(Budget.exact(), enumerate_crit=False, enumerate_secondary=False
 def _state(pos: Position) -> dict[str, tuple]:
     # Whether last turn's move failed is read on side 0 only, where the two users are: a
     # Double Shock that fails returns `null`, which Stomping Tantrum does not count. Side
-    # 1's Recover at full HP is a `false` the resolver does not record, and not this issue.
+    # 1's Recover at full HP is a `false`, recorded since IKA-171 and held to Showdown in
+    # tests/test_after_move_oracle.py, not here.
     return {
         f"p{index + 1}.{mon.species}": (
             tuple(mon.types),

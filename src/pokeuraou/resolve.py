@@ -1680,6 +1680,9 @@ def _do_switch(
         _restore_types(reg, leaving)
         leaving.last_move = None
         leaving.locked_move = None
+        # `clearVolatile` also sets `moveLastTurnResult = undefined`: a Pokemon that failed
+        # and then left comes back with nothing for Stomping Tantrum to read (IKA-171).
+        leaving.move_last_turn_failed = False
         # Volatiles do not survive a switch, and Disable's flag lives on the move slot
         # rather than in the volatile, so it has to be cleared alongside them.
         for move_slot in leaving.moves:
@@ -1906,6 +1909,11 @@ def _do_recharge(turn: _Turn, action: QueuedAction) -> list[Outcome]:
     return [(1.0, turn, "")]
 
 
+def _defrosts(turn: _Turn, mon: Pokemon, move: Move) -> bool:
+    """`move.flags['defrost'] && !(move.id === 'burnup' && !pokemon.hasType('Fire'))`."""
+    return "defrost" in move.flags and not (move.id == "burnup" and "Fire" not in turn.types_of(mon))
+
+
 def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[float, str | None]]:
     """(probability, reason it could not act) for the pre-move checks."""
     mon = turn.mon_at(action.side, action.slot)
@@ -1928,6 +1936,16 @@ def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[fl
             return [(1.0, None)]
         return [(1.0, "slp")]
     if mon.status == "frz":
+        # A move with the `defrost` flag -- Scald, Flare Blitz, Matcha Gotcha -- is used
+        # frozen or not: `onBeforeMove` returns before the counter or the roll, and the
+        # move's `onModifyMove` then clears the status (IKA-171). Burn Up only thaws a Fire
+        # type, which is the `!(move.id === 'burnup' && !pokemon.hasType('Fire'))`.
+        move = turn.reg.moves.get(action.move_id or "")
+        if move is not None and _defrosts(turn, mon, move):
+            mon.status = None
+            mon.status_counter = None
+            turn.log(f"{turn.name(action.side, action.slot)} thawed ({move.id})")
+            return [(1.0, None)]
         # `time--; if (time <= 0 || randomChance(1, 4))` -- the counter is spent on the
         # attempt to move, and reaching zero thaws regardless of the roll.
         mon.status_counter = (mon.status_counter or FREEZE_COUNTER) - 1
@@ -2302,10 +2320,12 @@ def _do_status_move(
         return [(1.0, turn, "")]
 
     reachable: list[tuple[int, int]] = []
+    failed_any = False
     for target in targets:
         # Psychic Terrain before Protect, as on the damaging path (IKA-156).
         if _stopped_by_psychic_terrain(turn, action, move, target):
             turn.log(f"{turn.name(*target)} protected by psychicterrain")
+            failed_any = True
             continue
         if target != (action.side, action.slot):
             blocked = _blocked_by_protect(turn, action, move, target)
@@ -2315,11 +2335,18 @@ def _do_status_move(
         immunity = _immune_to_move(reg, turn, action, move, target)
         if immunity is not None:
             turn.log(f"{turn.name(*target)} immune ({immunity})")
+            failed_any = True
             continue
         reachable.append(target)
 
     if not reachable and targets:
-        turn.move_failed.add((action.side, action.slot))
+        # Protect's `onTryHit` returns `NOT_FAIL`, which `hitStepTryHitEvent` keeps, so a
+        # move every target of which Protected ends with `moveThisTurnResult` null -- not
+        # the `false` Stomping Tantrum reads. Psychic Terrain's `null` is turned into
+        # `false` there (`hitResults[i] || false`), and an immunity is `false` from the
+        # start, so either one makes it a failure (IKA-171).
+        if failed_any:
+            turn.move_failed.add((action.side, action.slot))
         return [(1.0, turn, "")]
 
     accuracy = 1.0
@@ -2343,15 +2370,86 @@ def _do_status_move(
             turn.log(f"{action.label(reg)} missed")
             turn.move_failed.add((action.side, action.slot))
             return [(1.0, turn, "")]
-        _apply_status_move(reg, turn, action, move, reachable)
+        _apply_status_move_and_judge(reg, turn, action, move, reachable)
         return [(1.0, turn, "")]
 
     hit_state = turn.clone()
-    _apply_status_move(reg, hit_state, action, move, reachable)
+    _apply_status_move_and_judge(reg, hit_state, action, move, reachable)
     miss_state = turn
     miss_state.log(f"{action.label(reg)} missed")
     miss_state.move_failed.add((action.side, action.slot))
     return [(accuracy, hit_state, ""), (1 - accuracy, miss_state, "")]
+
+
+#: The declarative effects `runMoveEffects` scores for a status move. A move made of these
+#: alone, with no custom code, fails -- `false`, which Stomping Tantrum counts -- when none
+#: of them did anything to any target (IKA-171).
+JUDGED_STATUS_EFFECTS = frozenset({"boosts", "heal", "status", "weather", "terrain"})
+#: The effects that make a status move one this judgement leaves alone.
+UNJUDGED_STATUS_EFFECTS = (
+    "sideCondition", "volatileStatus", "pseudoWeather", "self", "selfSwitch", "forceSwitch",
+    "slotCondition", "selfBoost", "selfdestruct",
+)
+
+
+def _apply_status_move_and_judge(
+    reg: Regulation,
+    turn: _Turn,
+    action: QueuedAction,
+    move: Move,
+    reachable: list[tuple[int, int]],
+) -> None:
+    """`_apply_status_move`, then `move_failed` when it did nothing (IKA-171).
+
+    `runMoveEffects` combines each effect's result per target: a heal on a target at full
+    HP is `false` outright, a status that did not take is `false` (`if (!hitResult &&
+    move.status)`), a boost that moved nothing is `null`, and `null` becomes `false` at
+    the end; a weather or terrain already in place returns `false` from `setWeather` /
+    `setTerrain`. The move's result is `false` when every target's is, which is a failure
+    for Stomping Tantrum -- a Recover at full HP, a Toxic into a Poison type, a second
+    Sunny Day. Only the moves made entirely of those declarative effects are judged; a
+    move with a side condition, a volatile or custom code keeps the old reading.
+    """
+    raw = move.raw
+    declared = {key for key in JUDGED_STATUS_EFFECTS if raw.get(key)}
+    judged = (
+        bool(declared)
+        and not move.has_custom_code
+        and not any(raw.get(key) for key in UNJUDGED_STATUS_EFFECTS)
+    )
+    if not judged:
+        _apply_status_move(reg, turn, action, move, reachable)
+        return
+    field_before = (turn.pos.field.weather, turn.pos.field.terrain)
+    before = []
+    for target in reachable:
+        mon = turn.mon_at(*target)
+        if mon is not None:
+            before.append((target, mon.hp, mon.maxhp, mon.status, dict(mon.boosts)))
+    _apply_status_move(reg, turn, action, move, reachable)
+
+    did = False
+    if raw.get("weather") and turn.pos.field.weather != field_before[0]:
+        did = True
+    if raw.get("terrain") and turn.pos.field.terrain != field_before[1]:
+        did = True
+    for target, hp, maxhp, status, boosts in before:
+        mon = turn.mon_at(*target)
+        if mon is None:
+            continue
+        if raw.get("heal") and hp >= maxhp:
+            continue  # `-fail heal`, and the target's other effects are skipped
+        if raw.get("heal"):
+            did = True
+        if raw.get("status") and mon.status != status:
+            did = True
+        if raw.get("boosts") and {k: v for k, v in mon.boosts.items() if v} != {
+            k: v for k, v in boosts.items() if v
+        }:
+            did = True
+    if not did:
+        turn.log(f"{action.label(reg)} failed (did nothing)")
+        turn.move_failed.add((action.side, action.slot))
 
 
 def stall_success_chance(counter: int) -> float:
@@ -2987,6 +3085,7 @@ def _hit_target(
                     if breaks:
                         _break_protection(state, action, move, [target])
                     total = 0
+                    reached = False
                     for hit_index in range(hits):
                         mon = state.mon_at(*target)
                         if mon is None or mon.fainted:
@@ -3020,12 +3119,15 @@ def _hit_target(
                                 *target, amount, reason=action.move_id, from_move=True
                             )
                         total += dealt_now
+                        reached = True
                         _after_hit(
                             state, action, move, target, dealt_now, budget,
                             # Disguise's `onEffectiveness` makes the absorbed hit neutral,
                             # so no resist berry is eaten for it.
                             type_mod=0 if absorbed else result.type_mod,
                             absorbed=absorbed,
+                            # A hit into Endure at 1 HP deals 0 and is still a hit.
+                            landed=absorbed or amount > 0,
                         )
                         if absorbed:
                             busted = _bust_disguise(state, move, target)
@@ -3034,8 +3136,35 @@ def _hit_target(
                         state.log(f"{action.label(reg)} hit {hit_index + 1}x for {total}")
                     weight = acc_weight * crit_weight * roll_weight * hit_weight
                     for extra, expanded in _spread_secondaries(state, action, hits > 1):
+                        if reached:
+                            _thaw_on_hit(expanded, action, move, target)
                         outcomes.append((weight * extra, expanded, note))
     return outcomes or [(1.0, turn, "")]
+
+
+def _thaw_on_hit(
+    turn: _Turn, action: QueuedAction, move: Move, target: tuple[int, int]
+) -> None:
+    """A frozen target thaws when a Fire move or a `thawsTarget` move hits it (IKA-171).
+
+    Both are handlers of the `frz` condition, which the champions mod inherits:
+    `onDamagingHit` cures it for a damaging Fire move other than Polar Flare, and
+    `onAfterMoveSecondary` for `move.thawsTarget` (Scald, Scorching Sands, Matcha
+    Gotcha) -- the second skipped by Sheer Force like the rest of `AfterMoveSecondary`.
+    Both run after the move's secondaries, so a Scald's burn roll meets a frozen target
+    and fails; that is why this runs after the secondaries are fanned out.
+    """
+    mon = turn.mon_at(*target)
+    if mon is None or mon.fainted or mon.status != "frz":
+        return
+    fire = move.type == "Fire" and move.category != "Status" and move.id != "polarflare"
+    thaws = bool(move.raw.get("thawsTarget")) and not _sheer_forced(
+        turn.mon_at(action.side, action.slot), move
+    )
+    if fire or thaws:
+        mon.status = None
+        mon.status_counter = None
+        turn.log(f"{turn.name(*target)} thawed ({move.id})")
 
 
 #: How many sub-100% secondaries one hit will branch before the rest are collapsed. Each
@@ -3286,23 +3415,32 @@ def _after_hit(
     budget: Budget,
     type_mod: int = 0,
     absorbed: bool = False,
+    landed: bool | None = None,
 ) -> None:
-    """Drain, recoil, item reactions, contact effects and secondaries.
+    """Drain, item reactions, contact effects and secondaries.
 
     `absorbed` is a hit Disguise or Ice Face took: it dealt 0, and 0 is still a damaging
     hit to Showdown -- `DamagingHit` runs for any numeric damage, 0 included -- so the
-    handlers gated on `dealt > 0` below fire for it too (IKA-157).
+    handlers gated on `landed` below fire for it too (IKA-157). `landed` says the same of
+    any hit that reached the target; the other one that deals 0 is a hit into Endure at
+    1 HP (IKA-171). Left out, it is `dealt > 0 or absorbed`.
     """
     raw = move.raw
     me = (action.side, action.slot)
     attacker = turn.mon_at(*me)
     defender = turn.mon_at(*target)
-    landed = dealt > 0 or absorbed
+    if landed is None:
+        landed = dealt > 0 or absorbed
 
-    # Showdown rounds these rather than truncating:
-    #   clampIntRange(Math.round(damageDealt * recoil[0] / recoil[1]), 1)
     turn.move_damage_total += dealt
     turn.move_connected = True
+
+    # Drain heals inside `spreadDamage`, per target and rounded per target --
+    # `this.heal(Math.round(targetDamage * drain[0] / drain[1]), source, target, 'drain')`
+    # -- and before any `DamagingHit` handler: a full-HP Drain Punch into Rocky Helmet
+    # heals nothing and then takes the helmet (IKA-161).
+    if raw.get("drain") and dealt > 0:
+        turn.heal(*me, _round_fraction(dealt, raw["drain"]), reason="drain")
 
     # A damaging move can carry a volatile or a status outright, not only as a chance-based
     # secondary: Infestation's trap, Salt Cure, Nuzzle's paralysis.
@@ -3336,7 +3474,7 @@ def _after_hit(
     if (
         defender is not None
         and attacker is not None
-        and dealt > 0
+        and landed
         and defender.ability == "spicyspray"
     ):
         turn.apply_status(*me, "brn", reason="spicyspray")
@@ -3359,7 +3497,7 @@ def _after_hit(
         defender is not None
         and defender.ability == "cursedbody"
         and attacker is not None
-        and dealt > 0
+        and landed
         and not attacker.has_volatile("disable")
     ):
         if budget.enumerate_secondary:
@@ -3436,6 +3574,22 @@ def _after_hit(
     _on_being_hit(turn, move, target, action.side)
 
 
+def _sheer_forced(attacker: Pokemon | None, move: Move) -> bool:
+    """`move.hasSheerForce && pokemon.hasAbility('sheerforce')`.
+
+    Sheer Force's `onModifyMove` sets `hasSheerForce` only on a move that has secondaries
+    (`if (move.secondaries && !move.hasSheerForceBoost)`), and deletes them; the flag is
+    what `useMoveInner` and `afterMoveSecondaryEvent` read to skip `AfterMoveSecondarySelf`
+    (Life Orb, Shell Bell) and `AfterMoveSecondary` (Scald's thaw).
+    """
+    return (
+        attacker is not None
+        and attacker.ability == "sheerforce"
+        and bool(move.raw.get("secondaries"))
+        and not move.raw.get("hasSheerForceBoost")
+    )
+
+
 def _after_move(turn: _Turn, action: QueuedAction, move: Move) -> None:
     """Effects that fire once per move use, not once per target.
 
@@ -3447,21 +3601,24 @@ def _after_move(turn: _Turn, action: QueuedAction, move: Move) -> None:
     me = (action.side, action.slot)
     attacker = turn.mon_at(*me)
     total = turn.move_damage_total
-
-    if raw.get("drain") and total > 0:
-        turn.heal(*me, _round_fraction(total, raw["drain"]), reason="drain")
+    # Drain is not here: Showdown heals it per target, rounded per target, inside the
+    # damage step itself -- before Rocky Helmet (IKA-161). See `_after_hit`.
     if raw.get("recoil") and total > 0 and attacker is not None and attacker.ability != "rockhead":
         turn.deal_damage(*me, _round_fraction(total, raw["recoil"]), reason="recoil")
+    # A move Sheer Force stripped of its secondaries skips `AfterMoveSecondarySelf` as a
+    # whole (`useMoveInner`, `!(move.hasSheerForce && pokemon.hasAbility('sheerforce'))`),
+    # so no Life Orb recoil and no Shell Bell; `onModifyMove` also deletes `move.self`.
+    sheer = _sheer_forced(attacker, move)
     # Life Orb is `onAfterMoveSecondarySelf`, which runs whenever a hit landed -- a hit
     # Disguise took for 0 included (IKA-157) -- not only when damage was dealt.
-    if attacker is not None and attacker.item == "lifeorb" and turn.move_connected:
+    if attacker is not None and attacker.item == "lifeorb" and turn.move_connected and not sheer:
         turn.deal_damage(*me, max(1, attacker.maxhp // 10), reason="lifeorb")
     # Shell Bell heals an eighth of the move's *total* damage, once, and truncates -- so a
     # move dealing under eight damage heals nothing.
-    if attacker is not None and attacker.item == "shellbell" and total >= 8:
+    if attacker is not None and attacker.item == "shellbell" and total >= 8 and not sheer:
         turn.heal(*me, total // 8, reason="shellbell")
 
-    self_effect = raw.get("self") or {}
+    self_effect = {} if sheer else (raw.get("self") or {})
     if attacker is not None and not attacker.fainted and turn.move_connected:
         if self_effect.get("boosts"):
             turn.apply_boosts(*me, dict(self_effect["boosts"]), reason=move.id, from_foe=False)

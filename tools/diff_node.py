@@ -43,12 +43,31 @@ without the break ever running, and that is not evidence the break is right (IKA
 `--using doubleshock` (or `burnup`) takes the other kind of move it knows, one that spends
 its user's type (IKA-162); its control is the turn with `TYPE_SPENDING_MOVES` emptied.
 
+`--using` also takes a drain move (IKA-161) and a status move made only of the effects
+`JUDGED_STATUS_EFFECTS` scores (IKA-171):
+
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --using drainpunch,matchagotcha
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --using recover,toxic,sunnyday
+
+The control for a drain move is the move with its `drain` taken off; for a judged status
+move, `_apply_status_move` without the judgement, so the cells it moves are the ones where
+"it did nothing" set `move_failed`.
+
 `--using` also takes a [2, 5] multi-hit move (IKA-160):
 
     uv run python tools/diff_node.py --games-dir data/ika73/w12 --using bulletseed,rockblast
 
 The control is the hit count as it was before IKA-160 -- 1/3, 1/3, 1/6, 1/6 and Skill Link
 not read -- so the cells it moves are the ones where the count's distribution mattered.
+
+Holding the port to a frozen Pokemon (IKA-171):
+
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --frozen
+
+`--frozen` keeps the recorded positions with a frozen Pokemon on the field and holds every
+cell branch by branch. The cells where a thaw *fired* -- a `defrost` move used frozen, or a
+Fire or `thawsTarget` move into the frozen one -- are the ones Python moves with
+`_defrosts` and `_thaw_on_hit` taken out, and the run fails if there are none.
 
 Holding the port to a terrain no recorded game has (IKA-156):
 
@@ -127,8 +146,10 @@ from pokeuraou.payoff import OBJECTIVES  # noqa: E402
 from pokeuraou.position import Effect, Position  # noqa: E402
 from pokeuraou.priors import find_cached_chaos, load_chaos  # noqa: E402
 from pokeuraou.resolve import (  # noqa: E402
+    JUDGED_STATUS_EFFECTS,
     PRIORITY_BLOCKING_ABILITIES,
     TYPE_SPENDING_MOVES,
+    UNJUDGED_STATUS_EFFECTS,
     Budget,
     batched_payoffs,
     resolve_turn,
@@ -292,6 +313,76 @@ class unspent:  # noqa: N801 - read as a phrase at the call site
         resolve_mod.TYPE_SPENDING_MOVES = self.real
 
 
+class undrained:  # noqa: N801 - read as a phrase at the call site
+    """Python with these moves' `drain` taken off: the control for a drain move (IKA-161).
+
+    The move still hits for the same damage, so what differs is only what the heal did.
+    """
+
+    def __init__(self, reg, moves: frozenset[str]) -> None:  # noqa: ANN001
+        self.moves = [reg.moves[m] for m in sorted(moves) if reg.moves[m].raw.get("drain")]
+
+    def __enter__(self) -> None:
+        self.kept = [move.raw.pop("drain") for move in self.moves]
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        for move, drain in zip(self.moves, self.kept, strict=True):
+            move.raw["drain"] = drain
+
+
+class unjudged:  # noqa: N801 - read as a phrase at the call site
+    """Python's status moves without the "did nothing" judgement: the control for a judged
+    status move. The move's effects are applied the same, so what differs is only whether
+    `move_failed` is set (IKA-171)."""
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = resolve_mod._apply_status_move_and_judge
+        resolve_mod._apply_status_move_and_judge = resolve_mod._apply_status_move
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        resolve_mod._apply_status_move_and_judge = self.real
+
+
+def judged(move) -> bool:  # noqa: ANN001
+    """A status move `_apply_status_move_and_judge` judges."""
+    raw = move.raw
+    return (
+        move.category == "Status"
+        and any(raw.get(key) for key in JUDGED_STATUS_EFFECTS)
+        and not move.has_custom_code
+        and not any(raw.get(key) for key in UNJUDGED_STATUS_EFFECTS)
+    )
+
+
+class unthawed:  # noqa: N801 - read as a phrase at the call site
+    """Python without the thaws: the control for --frozen. A `defrost` move is rolled for
+    like any other, and a Fire or `thawsTarget` hit leaves the target frozen (IKA-171)."""
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = (resolve_mod._defrosts, resolve_mod._thaw_on_hit)
+        resolve_mod._defrosts = lambda *_args: False
+        resolve_mod._thaw_on_hit = lambda *_args: None
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        resolve_mod._defrosts, resolve_mod._thaw_on_hit = self.real
+
+
+def frozen_on_field(pos: Position) -> bool:
+    return any(
+        mon is not None and not mon.fainted and mon.status == "frz"
+        for side in pos.sides
+        for mon in side.active_pokemon()
+    )
+
+
 class unchanged:  # noqa: N801 - read as a phrase at the call site
     """The control for `--using`: each kind of move named has its effect taken out."""
 
@@ -303,6 +394,10 @@ class unchanged:  # noqa: N801 - read as a phrase at the call site
             self.parts.append(old_hit_counts())
         if any(m in TYPE_SPENDING_MOVES for m in moves):
             self.parts.append(unspent())
+        if any(reg.moves[m].raw.get("drain") for m in moves):
+            self.parts.append(undrained(reg, moves))
+        if any(judged(reg.moves[m]) for m in moves):
+            self.parts.append(unjudged())
 
     def __enter__(self) -> None:
         for part in self.parts:
@@ -432,6 +527,7 @@ def recorded_positions(  # noqa: ANN001
     holding: frozenset[str],
     using: frozenset[str] = frozenset(),
     abilities: frozenset[str] = frozenset(),
+    frozen: bool = False,
 ) -> tuple[list[Position], int]:
     """Roots a search already filled a matrix at, read from recorded games.
 
@@ -443,7 +539,7 @@ def recorded_positions(  # noqa: ANN001
     found: list[Position] = []
     keys: set[str] = set()
     other_format = 0
-    wanted = holding | using | abilities
+    wanted = holding | using | abilities | ({'"frz"'} if frozen else set())
     enough = None if wanted else 40 * args.nodes
     for directory in args.games_dir:
         for path in sorted(Path(directory).glob("*.jsonl")):
@@ -473,6 +569,8 @@ def recorded_positions(  # noqa: ANN001
                         if using and not knows_on_field(pos, using):
                             continue
                         if abilities and not ability_on_field(pos, abilities):
+                            continue
+                        if frozen and not frozen_on_field(pos):
                             continue
                         keys.add(key)
                         found.append(pos)
@@ -681,9 +779,16 @@ def main() -> None:
     ap.add_argument(
         "--using",
         default=None,
-        help="comma-separated breaksProtect or [2, 5] multi-hit move ids: keep positions "
-        "where a Pokemon on the field knows one, hold every cell that uses one to the port "
-        "branch by branch, and count where the break or the hit count fired",
+        help="comma-separated breaksProtect, [2, 5] multi-hit, type-spending, drain or "
+        "judged status move ids: keep positions where a Pokemon on the field knows one, hold "
+        "every cell that uses one to the port branch by branch, and count where the effect "
+        "fired",
+    )
+    ap.add_argument(
+        "--frozen",
+        action="store_true",
+        help="keep positions with a frozen Pokemon on the field, hold every cell to the port "
+        "branch by branch, and count where a thaw fired: the cells `unthawed` moves",
     )
     ap.add_argument(
         "--terrain",
@@ -729,10 +834,13 @@ def main() -> None:
             move.raw.get("breaksProtect")
             or isinstance(move.raw.get("multihit"), list)
             or move_id in TYPE_SPENDING_MOVES
+            or move.raw.get("drain")
+            or judged(move)
         ):
             ap.error(
-                f"--using takes breaksProtect, ranged multi-hit or type-spending moves "
-                f"({sorted(TYPE_SPENDING_MOVES)}); {move_id} is none of them"
+                f"--using takes breaksProtect, ranged multi-hit, type-spending "
+                f"({sorted(TYPE_SPENDING_MOVES)}), drain or judged status moves; "
+                f"{move_id} is none of them"
             )
 
     if args.value:
@@ -758,7 +866,7 @@ def main() -> None:
         print(f"the node of {args.scenario}")
     elif args.games_dir:
         positions, other_format = recorded_positions(
-            reg, args, holding - {args.give}, using, blockers
+            reg, args, holding - {args.give}, using, blockers, args.frozen
         )
         print(
             f"{len(positions)} recorded positions from "
@@ -780,6 +888,8 @@ def main() -> None:
         positions = [pos for pos in positions if knows_on_field(pos, using)]
     if blockers:
         positions = [pos for pos in positions if ability_on_field(pos, blockers)]
+    if args.frozen:
+        positions = [pos for pos in positions if frozen_on_field(pos)]
     quick = priority_moves(reg) if args.terrain or blockers else frozenset()
     if args.terrain:
         for pos in positions:
@@ -833,6 +943,9 @@ def main() -> None:
     # Under Salt Cure, every cell; and where the mod's fraction moved the answer.
     cured = cured_wrong = cured_refused = cured_fired = cured_fired_wrong = 0
     cured_worst = 0.0
+    # Beside a frozen Pokemon, every cell; and where a thaw moved the answer.
+    icy = icy_wrong = icy_refused = thawed = thawed_wrong = 0
+    thawed_worst = 0.0
 
     for pos in positions:
         row = menu(reg, pos, 0, args.limit)
@@ -1021,6 +1134,36 @@ def main() -> None:
                         shown += 1
                         print(f"  cell {(i, j)} under Salt Cure: {wrong[0][:200]}")
 
+        if args.frozen:
+            node = rustnode.node_for(reg)
+            for i, a in enumerate(row):
+                for j, b in enumerate(col):
+                    icy += 1
+                    here = resolve_turn(reg, pos, [a, b], budget=budget)
+                    with unthawed():
+                        control = resolve_turn(reg, pos, [a, b], budget=budget)
+                    wrong = (
+                        ["no warm process"]
+                        if node is None
+                        else branch_differences(node, reg, pos, a, b, here, budget)
+                    )
+                    refused_here = wrong == ["the port refused the turn"]
+                    icy_refused += refused_here
+                    if refused_here:
+                        wrong = []
+                    icy_wrong += bool(wrong)
+                    if differ(outcome(here), outcome(control)):
+                        thawed += 1
+                        thawed_wrong += bool(wrong)
+                        for index in range(len(evaluators)):
+                            thawed_worst = max(
+                                thawed_worst,
+                                abs(float(got[index][i, j] - expected[index][i, j])),
+                            )
+                    if wrong and shown < 5:
+                        shown += 1
+                        print(f"  cell {(i, j)} beside a frozen Pokemon: {wrong[0][:200]}")
+
         checked += 1
         cells += len(row) * len(col)
         for index, name in enumerate(names):
@@ -1104,6 +1247,15 @@ def main() -> None:
         print(f"    {cured_fired} of {cured} cells")
         print(f"    cells whose branches, weights, notes or positions differ  {cured_fired_wrong}")
         print(f"    worst cell difference there  {cured_worst:.3e}")
+    if args.frozen:
+        print("\n  beside a frozen Pokemon, every cell -- held branch by branch")
+        print(f"    {icy} of {cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {icy_wrong}")
+        print(f"    cells the port refused, filled in Python and not held  {icy_refused}")
+        print("  where a thaw fired -- the cells `unthawed` moves")
+        print(f"    {thawed} of {icy} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {thawed_wrong}")
+        print(f"    worst cell difference there  {thawed_worst:.3e}")
     if blockers:
         print("\n  beside a priority-blocking ability, cells that may use a priority move")
         print(f"    {block_used} of {cells} cells")
@@ -1136,6 +1288,10 @@ def main() -> None:
         failed.append("the mod's Salt Cure fraction moved no cell, so agreeing here says nothing")
     if block_wrong:
         failed.append(f"{block_wrong} cells beside a blocking ability differ by branch")
+    if icy_wrong:
+        failed.append(f"{icy_wrong} cells beside a frozen Pokemon differ by branch")
+    if args.frozen and not thawed:
+        failed.append("no thaw fired in any cell, so agreeing here says nothing")
     if blockers and not blocked:
         failed.append("no blocking ability stopped anything in any cell, so agreeing here says nothing")
     if failed:

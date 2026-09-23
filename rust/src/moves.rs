@@ -10,7 +10,7 @@ use crate::effects::{is_mold_breaker, resist_berry};
 use crate::id::Id;
 use crate::moveinfo::MoveContext;
 use crate::position::{Effect, Position, Types};
-use crate::reg::{Move, Reg, F_CONTACT, F_FAILENCORE, F_POWDER, F_PROTECT};
+use crate::reg::{Move, Reg, F_CONTACT, F_DEFROST, F_FAILENCORE, F_POWDER, F_PROTECT};
 use crate::resolve::{
     change_forme, check_white_herb, grounded_ignoring, stratified_rolls, Budget, Outcome, Slot,
     Turn,
@@ -91,7 +91,7 @@ pub(crate) fn do_move<'a>(
     let mv = reg.moves.get(move_id.as_str()).ok_or("move not in the regulation")?;
 
     let started = crate::resolve::phase_start();
-    let checks = can_act(&mut turn, action, &budget)?;
+    let checks = can_act(&mut turn, action, mv, &budget)?;
     crate::resolve::phase_end(7, started);
     let mut outcomes: Vec<Outcome<'a>> = Vec::new();
     // The last check cannot hand `turn` over instead of copying it, however tempting: the
@@ -146,6 +146,7 @@ fn confusion_damage(turn: &Turn, side: usize, slot: usize) -> Result<i64, String
 fn can_act(
     turn: &mut Turn,
     action: &QueuedAction,
+    mv: &Move,
     budget: &Budget,
 ) -> Result<Vec<(f64, Option<String>)>, String> {
     let (fainted, has_flinch, status, has_confusion) = {
@@ -190,6 +191,20 @@ fn can_act(
     }
 
     if is(status, "frz") {
+        // Python's `_can_act`: a `defrost` move skips the counter and the roll, and its
+        // `onModifyMove` clears the status; Burn Up only for a Fire type (IKA-171).
+        let defrosts = mv.has_flag(F_DEFROST)
+            && !(mv.id == "burnup"
+                && !turn
+                    .mon_at(action.side, action.slot)
+                    .is_some_and(|mon| turn.types_of(mon).contains("Fire")));
+        if defrosts {
+            if let Some(mon) = turn.mon_at_mut(action.side, action.slot) {
+                mon.status = None;
+                mon.status_counter = None;
+            }
+            return Ok(vec![(1.0, None)]);
+        }
         let thawed = {
             let mon = turn.mon_at_mut(action.side, action.slot).unwrap();
             let counter = mon.status_counter.unwrap_or(FREEZE_COUNTER) - 1;
@@ -897,6 +912,7 @@ fn hit_target<'a>(
                 if mv.breaks_protect {
                     break_protection(&mut state, &[target]);
                 }
+                let mut reached = false;
                 for hit_index in 0..hits {
                     let gone = match state.mon_at(target.0, target.1) {
                         None => true,
@@ -938,12 +954,27 @@ fn hit_target<'a>(
                         again.rolls[*roll]
                     };
                     let dealt = state.deal_damage(target.0, target.1, amount, true)?;
+                    reached = true;
                     let after_started = crate::resolve::phase_start();
-                    after_hit(&mut state, action, mv, target, dealt, &budget, result.type_mod)?;
+                    // A hit into Endure at 1 HP deals 0 and is still a hit (IKA-171).
+                    let landed = amount > 0;
+                    after_hit(
+                        &mut state,
+                        action,
+                        mv,
+                        target,
+                        dealt,
+                        landed,
+                        &budget,
+                        result.type_mod,
+                    )?;
                     crate::resolve::phase_end(11, after_started);
                 }
                 let weight = acc_weight * crit_weight * roll_weight * hit_weight;
-                for (extra, expanded) in spread_secondaries(state, action, hits > 1)? {
+                for (extra, mut expanded) in spread_secondaries(state, action, hits > 1)? {
+                    if reached {
+                        thaw_on_hit(&mut expanded, action, mv, target);
+                    }
                     outcomes.push((weight * extra, expanded));
                 }
             }
@@ -1086,12 +1117,22 @@ fn after_hit(
     mv: &Move,
     target: Slot,
     dealt: i64,
+    landed: bool,
     budget: &Budget,
     type_mod: i64,
 ) -> Result<(), String> {
     let me = (action.side, action.slot);
     turn.move_damage_total += dealt;
     turn.move_connected = true;
+
+    // Drain heals inside `spreadDamage`, per target and rounded per target, before any
+    // `DamagingHit` handler (IKA-161): Python's `_after_hit`.
+    if let Some(drain) = mv.drain.as_ref() {
+        if dealt > 0 {
+            let amount = round_fraction(dealt, drain);
+            turn.heal(me.0, me.1, amount);
+        }
+    }
 
     let defender_alive = matches!(turn.mon_at(target.0, target.1), Some(m) if !m.fainted);
 
@@ -1123,13 +1164,13 @@ fn after_hit(
     }
 
     let defender_ability = turn.mon_at(target.0, target.1).map(|m| m.ability);
-    if dealt > 0 && matches!(defender_ability, Some(a) if a.as_str() == "spicyspray") {
+    if landed && matches!(defender_ability, Some(a) if a.as_str() == "spicyspray") {
         turn.apply_status(me.0, me.1, "brn")?;
     }
 
     // Throat Chop adds its own condition from a 100%-chance `secondary.onHit`, so there is
     // nothing declarative in the dump to drive it.
-    if mv.id == "throatchop" && dealt > 0 && defender_alive {
+    if mv.id == "throatchop" && landed && defender_alive {
         let duration = effect_duration(turn, mv, "throatchop", action.side, action.slot);
         turn.add_volatile(target.0, target.1, "throatchop", duration);
     }
@@ -1137,7 +1178,7 @@ fn after_hit(
     // Cursed Body: `onDamagingHit` with `randomChance(3, 10)`, gated on neither contact
     // nor the target surviving -- the handler runs from `damage()`, before the faint is
     // processed. 43 of the 394 tournament teams carry it.
-    if dealt > 0 && matches!(defender_ability, Some(a) if a.as_str() == "cursedbody") {
+    if landed && matches!(defender_ability, Some(a) if a.as_str() == "cursedbody") {
         let attacker_free = turn
             .mon_at(me.0, me.1)
             .map(|mon| !mon.has_volatile("disable"))
@@ -1153,7 +1194,7 @@ fn after_hit(
         }
     }
 
-    if mv.has_flag(F_CONTACT) && dealt > 0 {
+    if mv.has_flag(F_CONTACT) && landed {
         let (ability, item) = match turn.mon_at(target.0, target.1) {
             None => (None, None),
             Some(mon) => (Some(mon.ability), mon.item),
@@ -1425,16 +1466,37 @@ fn round_fraction(amount: i64, ratio: &Value) -> i64 {
     ((scaled * 2 + denominator) / (2 * denominator)).max(1)
 }
 
+/// Python's `_sheer_forced`: `move.hasSheerForce && pokemon.hasAbility('sheerforce')`.
+fn sheer_forced(turn: &Turn, me: Slot, mv: &Move) -> bool {
+    mv.has_secondaries
+        && !mv.raw.get("hasSheerForceBoost").and_then(Value::as_bool).unwrap_or(false)
+        && matches!(turn.mon_at(me.0, me.1), Some(m) if m.ability == "sheerforce")
+}
+
+/// Python's `_thaw_on_hit`: the `frz` condition's `onDamagingHit` (a damaging Fire move
+/// other than Polar Flare) and `onAfterMoveSecondary` (`thawsTarget`, skipped by Sheer
+/// Force), after the move's secondaries (IKA-171).
+fn thaw_on_hit(turn: &mut Turn, action: &QueuedAction, mv: &Move, target: Slot) {
+    let frozen = matches!(turn.mon_at(target.0, target.1), Some(m) if !m.fainted && is(m.status, "frz"));
+    if !frozen {
+        return;
+    }
+    let fire = mv.mtype == "Fire" && mv.category != "Status" && mv.id != "polarflare";
+    let thaws = mv.raw.get("thawsTarget").and_then(Value::as_bool).unwrap_or(false)
+        && !sheer_forced(turn, (action.side, action.slot), mv);
+    if fire || thaws {
+        if let Some(mon) = turn.mon_at_mut(target.0, target.1) {
+            mon.status = None;
+            mon.status_counter = None;
+        }
+    }
+}
+
 fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), String> {
     let me = (action.side, action.slot);
     let total = turn.move_damage_total;
 
-    if let Some(drain) = mv.drain.as_ref() {
-        if total > 0 {
-            let amount = round_fraction(total, drain);
-            turn.heal(me.0, me.1, amount);
-        }
-    }
+    // Drain is in `after_hit`, per target (IKA-161).
     let rockhead = matches!(turn.mon_at(me.0, me.1), Some(m) if m.ability == "rockhead");
     if let Some(recoil) = mv.recoil.as_ref() {
         if total > 0 && !rockhead {
@@ -1446,17 +1508,21 @@ fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), S
         None => (None, 0),
         Some(mon) => (mon.item, mon.maxhp),
     };
-    if is(item, "lifeorb") && total > 0 {
+    // Sheer Force skips `AfterMoveSecondarySelf` and deletes `move.self` (IKA-161), and
+    // Life Orb runs for any hit that reached a target, a 0-damage one included -- Python's
+    // `move_connected`, not the total (IKA-171).
+    let sheer = sheer_forced(turn, me, mv);
+    if is(item, "lifeorb") && turn.move_connected && !sheer {
         turn.deal_damage(me.0, me.1, (maxhp / 10).max(1), false)?;
     }
-    if is(item, "shellbell") && total >= 8 {
+    if is(item, "shellbell") && total >= 8 && !sheer {
         turn.heal(me.0, me.1, total / 8);
     }
 
     let connected = turn.move_connected;
     let alive = matches!(turn.mon_at(me.0, me.1), Some(m) if !m.fainted);
     if alive && connected {
-        if let Some(self_effect) = mv.self_effect.as_ref() {
+        if let Some(self_effect) = mv.self_effect.as_ref().filter(|_| !sheer) {
             if let Some(boosts) = self_effect.get("boosts").and_then(Value::as_object) {
                 let table: Vec<(&str, i64)> = boosts
                     .iter()
@@ -1523,8 +1589,10 @@ fn do_status_move<'a>(
     };
 
     let mut reachable: Vec<Slot> = Vec::new();
+    let mut failed_any = false;
     for target in targets {
         if stopped_by_psychic_terrain(&turn, action, mv, *target) {
+            failed_any = true;
             continue;
         }
         if *target != (action.side, action.slot)
@@ -1533,13 +1601,18 @@ fn do_status_move<'a>(
             continue;
         }
         if immune_to_move(reg, &turn, action, mv, *target).is_some() {
+            failed_any = true;
             continue;
         }
         reachable.push(*target);
     }
 
+    // Python's `_do_status_move`: a move every target of which Protected is `null`, not a
+    // failure; the terrain and an immunity are `false` (IKA-171).
     if reachable.is_empty() && !targets.is_empty() {
-        turn.move_failed[action.side][action.slot] = true;
+        if failed_any {
+            turn.move_failed[action.side][action.slot] = true;
+        }
         return Ok(vec![(1.0, turn)]);
     }
 
@@ -1567,14 +1640,89 @@ fn do_status_move<'a>(
             turn.move_failed[action.side][action.slot] = true;
             return Ok(vec![(1.0, turn)]);
         }
-        apply_status_move(turn.reg, &mut turn, action, mv, &reachable)?;
+        apply_status_move_and_judge(turn.reg, &mut turn, action, mv, &reachable)?;
         return Ok(vec![(1.0, turn)]);
     }
 
     let mut hit_state = turn.clone();
-    apply_status_move(reg, &mut hit_state, action, mv, &reachable)?;
+    apply_status_move_and_judge(reg, &mut hit_state, action, mv, &reachable)?;
     turn.move_failed[action.side][action.slot] = true;
     Ok(vec![(accuracy, hit_state), (1.0 - accuracy, turn)])
+}
+
+/// Python's `JUDGED_STATUS_EFFECTS` and `UNJUDGED_STATUS_EFFECTS`.
+const JUDGED_STATUS_EFFECTS: [&str; 5] = ["boosts", "heal", "status", "weather", "terrain"];
+const UNJUDGED_STATUS_EFFECTS: [&str; 9] = [
+    "sideCondition",
+    "volatileStatus",
+    "pseudoWeather",
+    "self",
+    "selfSwitch",
+    "forceSwitch",
+    "slotCondition",
+    "selfBoost",
+    "selfdestruct",
+];
+
+/// Python's `_apply_status_move_and_judge`: `move_failed` for a status move made only of
+/// declarative effects when none of them did anything to any target (IKA-171).
+fn apply_status_move_and_judge(
+    reg: &Reg,
+    turn: &mut Turn,
+    action: &QueuedAction,
+    mv: &Move,
+    reachable: &[Slot],
+) -> Result<(), String> {
+    let truthy = |key: &str| match mv.raw.get(key) {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Array(a)) => !a.is_empty(),
+        Some(Value::Object(o)) => !o.is_empty(),
+        Some(Value::Number(n)) => n.as_f64().unwrap_or(0.0) != 0.0,
+        Some(Value::String(s)) => !s.is_empty(),
+    };
+    let judged = JUDGED_STATUS_EFFECTS.iter().any(|key| truthy(key))
+        && !truthy("hasCustomCode")
+        && !UNJUDGED_STATUS_EFFECTS.iter().any(|key| truthy(key));
+    if !judged {
+        return apply_status_move(reg, turn, action, mv, reachable);
+    }
+    let weather_before = turn.pos.field.weather;
+    let terrain_before = turn.pos.field.terrain;
+    let mut before = Vec::new();
+    for target in reachable {
+        if let Some(mon) = turn.mon_at(target.0, target.1) {
+            before.push((*target, mon.hp, mon.maxhp, mon.status, mon.boosts));
+        }
+    }
+    apply_status_move(reg, turn, action, mv, reachable)?;
+
+    let mut did = false;
+    if truthy("weather") && turn.pos.field.weather != weather_before {
+        did = true;
+    }
+    if truthy("terrain") && turn.pos.field.terrain != terrain_before {
+        did = true;
+    }
+    for (target, hp, maxhp, status, boosts) in before {
+        let Some(mon) = turn.mon_at(target.0, target.1) else { continue };
+        if truthy("heal") && hp >= maxhp {
+            continue;
+        }
+        if truthy("heal") {
+            did = true;
+        }
+        if truthy("status") && mon.status != status {
+            did = true;
+        }
+        if truthy("boosts") && mon.boosts != boosts {
+            did = true;
+        }
+    }
+    if !did {
+        turn.move_failed[action.side][action.slot] = true;
+    }
+    Ok(())
 }
 
 fn immune_to_move(
