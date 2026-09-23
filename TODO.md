@@ -11993,3 +11993,127 @@ heavy.py を通さずに 1 コアで走らせた。
 - **port_gate_audit の盲点**: 「id が port のどこかに出てくる」ことを「port が扱う」と数えるので、同じ技の別の道（ここでは
   付与）が抜けていても通る。完全に扱う変化技については、`apply_status_move` か宣言的な欄のどちらかに届くかで見るべき。
 - **ノードの注記**: gen11L の記録局面 1 つで Python だけが `residual speed tie` を出す（旧 exe でも同じ）。
+
+## 9/23 — IKA-174: げきりん系の `lockedmove` を Showdown どおりにした —— resolver は技も持続もなしで付けて外さず、生成ではメニューが固定されず、混乱もしなかった。記録で使われたのは w12 で 54 局・gen11L で 19 局と少ない
+
+ワーカー。基点 master 50ab618、途中で 363b973（IKA-172）を取り込んだ。ブランチ `ika-174-outrage-lock`。
+
+### 1. Showdown（a5df827、champions の上書きなし）
+
+`data/conditions.ts:253` `lockedmove`: `duration: 2`。`onStart` で `trueDuration = random(2, 4)`・`move = effect.id`。
+`onRestart` は `trueDuration >= 2` のときだけ duration を 2 に戻す。`onAfterMove` は duration 1 なら外す。`onEnd` は
+`trueDuration > 1` なら何もせず、それ以外は `addVolatile('confusion')`。`onResidual` は眠っていれば混乱なしで消し
+（「calming」）、`trueDuration--`。`onLockMove` がその技を返す。げきりん・はなびらのまい・さかまくほのお・あばれる
+（`data/moves.ts:13082` ほか。M-C にあるのはこの 4 つ）は `self: {volatileStatus: 'lockedmove'}` で、`selfDrops` が当たった
+ときだけ付ける。`sim/battle-actions.ts:280` 固定中は `deductPP` しない。混乱はマイペース・ミストフィールドの接地で
+付かず、キーのみ・ラムのみは食べる。
+
+### 2. オラクル（`tests/test_outrage_lock.py`、新規）
+
+`multihit='min'`（長さ 2）と `'max'`（3）で Showdown を回し、我々の resolver と port を合わせた。
+
+```
+  ケース                     長さ 2 の後                 長さ 3 の後
+  1 ターン目                  固定（残り 1）              固定（残り 1）
+  2 ターン目                  解除・混乱                  固定（残り 1）
+  3 ターン目                  —                           解除・混乱
+  1 ターン目にまもられた      何も付かない                何も付かない（対照）
+  2 ターン目にまもられた      解除・混乱                  解除・混乱なし
+  3 ターン目にまもられた      —                           解除・混乱
+  2 ターン目の終わりに眠る    解除・混乱                  解除・混乱なし（あくび）
+  マイペース / キー / ラム    混乱なし（実は食べる）、    混乱なし
+                              3 ターン目にまた暴れ始める
+  固定中のターンの PP         減らない                    減らない
+```
+
+「—」は、混乱したターン自身の乱数（自傷）が入るので比べていない。テストは Showdown の事実、Showdown の局面から
+我々が解いた最後のターン、Showdown の最初の局面から我々が全部解いた木（葉が Showdown の 2 局に半々で一致）、
+pinned の予算（長さ 2 だけ）、port の最後のターンと分岐、手で作った局面（怯んで動けない 2 ターン目・古い記録の
+裸の印）。直す前（旧 Python・旧 exe）: 63 のうち 38 落ち、通った 25 は Showdown の事実 18、1 ターン目に
+まもられた 2、旧 exe がたまたま合う対照 4（長さ 3 で解除・混乱なしのもの）、手の対照 1。直した後は 63 通過。
+`test_trap_sources.py::test_the_position_our_resolver_builds[lockedmove/outrage]` の strict xfail は XPASS に
+なったので外し、印の (技, 残り) を Showdown と比べる行を足した。新 Python と旧 exe では port のテスト 12 が全部落ちる。
+
+### 3. 直し（`resolve.py`・`moves.rs`）
+
+- `add_volatile("lockedmove")` を `_start_rampage` に回す: 初回は duration 2・技（`last_move`）、既にあれば onRestart。
+  技のない古い記録の印は置き換える。
+- 長さの乱数は **2 ターン目の頭で分岐**（`_roll_rampage`、`_do_move` の冒頭、残り 1 か 2 を半々）。Showdown は
+  1 ターン目に振るが、長さが局面に効くのは 2 ターン目の終わりから（続くか、解けて混乱するか）で、1 ターン目に
+  振ると 1 手先の葉が見分けのつかない対に倍になるだけ。`max_branches=16` の matrix でそれは枝の切り捨てを増やす。
+  固定（unmodelled の注記）にしなかったのは、生成が一つの枝をたどるので、どちらかに固定すると全局が同じ長さに
+  なり学習データが偏るから。IKA-169 の twoturnmove と同じく技と持続は Showdown の形で持ち、長さは Showdown と同じ
+  `extra.trueDuration` に入れる（Showdown の局面では既にあるので分岐しない）。pinned・`enumerate_secondary` 偽の
+  予算は短い方（`multihit_counts` と同じ。pinned でないときは注記）。
+- `_rampage_after_move`（`_use_move` の後）、`_rampage_runs_out`（残差の汎用ループの前: 残り 1 が切れる onEnd）、
+  `_rampage_residual`（ループの後: あくびの眠りの後で眠りなら外す、`trueDuration--`）。混乱は `_confused_by_fatigue`。
+- `_spend_pp`: 固定中の技は PP を減らさない。
+- port も同じ。`persimberry` は `inert.rs` から外れたのでゲートに足した。
+- `tools/diff_node.py`: `--using` が暴れる技を取る（対照 `unraged` = IKA-174 前の裸の印）。記録には裸の印しか
+  無いので、`--rampage` で知っている者に 2 ターン目の固定（技・残り 1・長さなし）を載せて分岐・解除・混乱を比べる。
+
+### 4. diff_node（各 20 ノード、Budget.matrix）
+
+```
+                           発火セル / 使うセル   新 exe で枝違い   旧 exe で枝違い
+  gen11L --using            651 / 761            0                 649
+  gen11L --rampage          1,004 / 1,096        0                 1,004（最悪 2.4e-3）
+  w12 --using               1,039 / 1,220        0                 997
+  w12 --rampage             1,522 / 1,692        0                 1,483（最悪 8.1e-3）
+```
+
+最初の `--rampage` は 958 セルで食い違った: `enrage` がこだわりで別の技に縛られた者にも固定を載せ、port が
+`choicelock` の技を毎回書き換える（Python は最初の技を保つ）差が出た。こだわりで別の技に縛られた者は暴れ始め
+られないので載せないようにした（port の書き換えは別課題の候補）。
+
+### 5. 記録（`C:/tmp/ika174/records.py`、一時スクリプト、1 コア 30 秒）
+
+```
+                                               w12         selfplay-gen11L
+  手番の決定                                    434,483     118,018
+  暴れる技を知る者が場にいる                    510         182
+  メニューに暴れる技がある                      317         120
+  選んだ手が暴れる技を使う                      196         76
+  そういう局                                    54          19
+  lockedmove が場にある（符号化の入力 = 1）     130         50
+  新しい規則で 2 ターン目（固定される）         27          8
+  新しい規則で 3 ターン目の候補（半分が固定）   28          11
+```
+
+2 ターン目の決定を全部（w12 26、gen11L 8。w12 の 1 は記録のメニューが今の規則で合法でないので外した）、記録のまま
+（裸の印・全メニュー）と、裸の印を 2 ターン目の固定にして新しい規則のメニュー（部分行列）で、hp-share 1 手・
+`Budget.matrix()` で解いた:
+
+```
+                                   w12              gen11L
+  古い均衡が今は選べない手を指す    6/26             3/8
+  方策の TV > 0.2                   9/26             3/8
+  最も重い手が変わった              8/26             3/8
+  均衡値の差（平均・最大）          0.003・0.026     0.003・0.012
+```
+
+残るセルの値は gen11L で動かず、w12 では最大 0.0043 動いた（確かめていないが、長さの分岐で枝が増えて 16 の上限で
+切られたものと見ている）。1 手先の hp-share は印そのものを読まないので、動くのはメニューだけ。
+
+### 6. 符号化
+
+`volatile_lockedmove` は有無だけ。記録では一度暴れると場を離れるまで 1 で、w12 で場の枠 130、gen11L で 50。
+新しい規則では固定中だけ 1 なので、2 ターン目 27・8 と 3 ターン目の半分でおよそ 41・14 に減る見込み（手番の決定の
+0.01%）。混乱（`volatile_confusion`）は新たに付く。ENCODING_REVISION は動かさない。
+
+### 7. 残したこと（別課題の候補）
+
+- **混乱の長さ**: Showdown は `random(2, 6)` の `time` で解けるが、resolver（両エンジン）の混乱は場を離れるまで続く。
+  げきりんで混乱が付くようになったので、前より多く効く。キーのみ・ラムのみも、げきりん以外の混乱は治さない。
+- **port の `choicelock`**: `use_move` が技を毎回書き換える。Python は最初の技を保つ（わるあがきの件）。
+- **ため技の 2 ターン目の PP**: `getLockedMove` は twoturnmove でも PP を減らさないが、両エンジンとも 2 回減らす。
+- **`randomNormal`**: 暴れる技の対象は相手のうちの乱択（`sample`）だが、resolver は最初の生きている相手に固定し、注記もない。
+- 相手の暴れる長さ（`extra.trueDuration`）は本当の対戦では見えない情報だが、Showdown の局面からの探索は読める。
+
+### 8. 検査と機械
+
+test_outrage_lock（新規）・test_trap_sources・test_perish_song・test_trap_immunities・test_recharge・test_actions・
+test_resolve・test_rust_node・test_port_coverage・test_port_gates・test_line_endings・test_no_machine_specific_paths・
+test_type_spending_moves を master 取り込み後に `-n 0` で 331 通過。ruff、`port_coverage.py --check`、
+`port_gate_audit.py --check` も通る。機械（heavy.py、--agent IKA-174）: release ビルド 8 コア 24 秒・19 秒、
+テスト 1 コア 2〜34 秒、diff_node 8 本と記録 1 コア 268 秒、試し数回（1 コア、各 20 秒以内）。
