@@ -13181,6 +13181,93 @@ worktree に data/priors・standings・reportworm と sim-bridge の dist を ma
 
 リリースビルド 3 回（22 秒・17 秒・17 秒、--cores 8）。以下はすべて 1 コア: オラクルとテスト（各 1〜7 秒）、記録の数え（59 秒）、セルの比較（223 秒と 94 秒）。すべて heavy.py 経由（--agent IKA-187）。
 
+## 9/24 — IKA-188: ちょうはつは同じターンに選ばれた変化技を `onBeforeMove` で止め、既に動いた相手には 4 ターン —— 両エンジンとも止めず（PP を使い、こだわりなら固定も付いた）、長さは誰にでも 3 だった
+
+### 1. Showdown の定義
+
+`data/moves.ts` の taunt（champions mod は上書きしない）。`condition.duration: 3`、`onStart` で
+`if (target.activeTurns && !this.queue.willMove(target)) duration++`、`onDisableMove` で変化技（わるあがきの Me First 以外）を
+次の要求から外し、`onBeforeMovePriority: 5` の `onBeforeMove` で変化技を `cant … move: Taunt` にして `false` を返す。
+5 はねむり・こおり（10）・ひるみ（8）より後、こんらん（3）・まひ（1）より前。`runMove` は `BeforeMove` が偽なら PP を引かず、
+こだわりの `onModifyMove` にも届かず、`moveThisTurnResult = false`（じだんだの失敗扱い）。
+
+オラクルで確かめた事実（C:/tmp/ika188/probe.py）: プランクスターのちょうはつの後のおいかぜは `cant`、おいかぜ無し、PP 16 のまま、
+スカーフでも choicelock 無し。遅いちょうはつで既に動いたエルフーンは残り 3（= 4 − 1）、1 ターン目でも（`activeTurns` は 1）。
+このターン交代で出たガオガエンは 2（= 3 − 1）。混乱中に止められた変化技は `time` 2 のまま（試行を使わない）。
+
+効かない側（regulation にあるが両エンジンとも未実装）: どんかん（マンムー・ヤドラン・ヤドキング・エンニュート）の `onTryHit`、
+アロマベール（マホイップ系・フレフワン）の `onAllyTryAddVolatile`、メンタルハーブの `onUpdate`。記録で選ばれたちょうはつ
+34 回のうち、この 3 つに向いたものは 0 回。既にちょうはつ済みの相手へのちょうはつ（`addVolatile` が偽 → 失敗の旗）も 0 回。
+
+### 2. 直したこと
+
+Python `resolve.py`: `_taunt_stops`（変化技かつ mefirst でない）、`_taunt_stage`（`_can_act` の 4 か所で混乱の段の前に挟む）、
+`_confusion_reached` がちょうはつで止まる変化技を混乱の試行に入れない、汎用の volatile 道で新しいちょうはつに
+`_taunt_lasts_longer`（`turn.acted` にあり `newly_switched` でなければ +1）。port `moves.rs` に同名の 3 関数を同じ場所で。
+`tools/diff_node.py` に `--using taunt`（対照 `untaunted`: 2 関数を無効にする）。
+
+### 3. オラクル（tests/test_taunt_before_move.py、6 ケース × Python・port）
+
+```
+                         旧 Python  新 Python  |  旧 exe  新 exe
+status-after-taunt         落ち       通過     |  落ち    通過
+scarf-status-after-taunt   落ち       通過     |  落ち    通過
+confused-status-after-     落ち       通過     |  落ち    通過
+taunt-after-moved          落ち       通過     |  落ち    通過
+attack-after-taunt（対照） 通過       通過     |  通過    通過
+taunt-on-switched-in（対照）通過      通過     |  通過    通過
+```
+
+### 4. diff_node `--using taunt`（60 局面、Budget.matrix）
+
+```
+                          w12 新 exe   w12 旧 exe   gen11L 新 exe  gen11L 旧 exe
+taunt を使うセル           7,086        7,086        5,878          5,878
+  うち発火（対照が動かす）  2,727        2,727        1,624          1,624
+  枝で違うセル              0            2,688        0              1,599
+最悪のセル差               4.4e-16      0.167        5.6e-16        0.069
+```
+
+「equilibrium frequency moved at most 1.0」は新 exe でも出る（master の IKA-179 の実行と同じ、同値の均衡の選び方）。
+
+### 5. 記録
+
+```
+                                        w12              gen11L
+手番の決定                              434,483          118,018
+ちょうはつを知る者が場にいる決定        2,179 (0.50%)    463 (0.39%)
+  記録された選択がちょうはつを使う      24（全部 foe 側） 10（全部 foe 側）
+ちょうはつ中のポケモンがいる枠-決定     26               1
+  こだわり・アンコールで変化技に固定    0                0
+解き直し（知る者が場にいる決定から 200）
+  どこかのセルが動いた                  65/200           60/200
+  記録で選ばれたセルが動いた            0                0
+  最も重い手が変わった                  4/200            10/200
+  方策の TV > 0.2                       4                16
+  均衡値の差（最大）                    < 5e-5           < 5e-5
+```
+
+ちょうはつは記録ではまれ（場にいる決定 0.4〜0.5%、選ばれたのは 34 回）。最も重い手が変わった決定も均衡値は動かず、
+同値の手の入れ替わり。生成で効くのは、ちょうはつを持つ構築が増えたときの先制ちょうはつと、4 ターンの長さ。
+
+### 6. position.ts の `lockedMove`（調べただけ）
+
+`packages/sim-bridge/src/position.ts` は `lockedMove` に `twoturnmove` → `choicelock` → `encore` の move を畳む。
+`actions._usable_move_slots` は `locked_move` があるとその技だけを返し、ちょうはつを見ない。Showdown ではこだわり（または
+アンコール）で変化技に固定されたままちょうはつされると、両方の `onDisableMove` で全部外れてわるあがき。Showdown の局面
+から読む道（diff 系ツール・オラクルのテスト）だけで、固定の変化技がメニューに出る。resolver は `locked_move` を立てない
+ので生成・記録には出ない（記録の該当 0）。直すなら position.ts から choicelock・encore を畳むのをやめる（sim-bridge の
+dist を再ビルド）か、`_usable_move_slots` の `locked` の道でちょうはつの変化技を外すか。
+
+### 7. 検査と機械
+
+test_taunt_before_move（新規）・test_weather_recovery・test_resolve・test_confusion_duration・test_choice_lock・
+test_helping_hand_fails・test_rust_node・test_port_gates・test_port_coverage・test_actions・test_line_endings・
+test_no_machine_specific_paths・test_outrage_lock・test_speed は master 取り込み後に `-n 0` で通過。
+`port_coverage --check`・`port_gate_audit --check`・ruff 通過。
+機械: cargo build --release 8 コア 21 秒・18 秒・18 秒、diff_node 4 コア 105 秒（+ 煙 11 秒）、記録 1 コア 412 秒 + 10 秒、
+テスト 1 コア 計約 1.5 分。worktree に data/priors・standings・reportworm と sim-bridge の dist を main から写した（コミットしない）。
+
 ## 9/24 — IKA-190: 残差の順番は天気が終わる前の素早さで並べる —— Python は天気が終わった後に並べていて、晴れ最後のターンのようりょくそを 2 倍なしで数え、Showdown が振らない同速を注記していた（port は前から正しい）
 
 ワーカー。基点 master a2c9bc6、ブランチ `ika-190-residual-tie-note`（報告前に master 47fd204 = IKA-187 を取り込み）。
