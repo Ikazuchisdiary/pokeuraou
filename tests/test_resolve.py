@@ -243,6 +243,84 @@ def test_a_priority_roll_weighs_the_same_whoever_is_queued_first(
     assert result.total_probability == pytest.approx(1.0)
 
 
+#: Showdown's own answer, measured by running `vendor/pokemon-showdown/dist/sim` on 2,000
+#: seeds per row (IKA-145): the share of turns with `-activate|item: Quick Claw` and with
+#: `-activate|ability: Quick Draw`, and the fractional value each leaves.
+#: calmmind is status at priority 0, protect status at +4, quickattack physical at +1,
+#: earthquake physical at 0. Quick Claw fired 401/2000 on every one of the four.
+_SHOWDOWN_FRACTIONAL = [
+    # item, ability, move -> {fractional value: probability}
+    ("quickclaw", "owntempo", "calmmind", {0.1: 0.2, 0.0: 0.8}),
+    ("quickclaw", "owntempo", "protect", {0.1: 0.2, 0.0: 0.8}),
+    ("quickclaw", "owntempo", "quickattack", {0.1: 0.2, 0.0: 0.8}),
+    ("quickclaw", "owntempo", "earthquake", {0.1: 0.2, 0.0: 0.8}),
+    # Quick Draw runs first (handler priority -1 before -2); the claw rolls only when the
+    # value it sees is still <= 0: draw 601/2000, claw 283/2000 (0.7 x 0.2).
+    ("quickclaw", "quickdraw", "earthquake", {0.1: 0.3 + 0.7 * 0.2, 0.0: 0.7 * 0.8}),
+    ("quickclaw", "quickdraw", "calmmind", {0.1: 0.2, 0.0: 0.8}),
+    # The -0.1 constants run first and the later handlers replace them: 601/2000, 401/2000.
+    ("laggingtail", "quickdraw", "earthquake", {0.1: 0.3, -0.1: 0.7}),
+    ("quickclaw", "stall", "earthquake", {0.1: 0.2, -0.1: 0.8}),
+    # The claw's own guard: 0/2000 on a status move under Mycelium Might, 401 otherwise.
+    ("quickclaw", "myceliummight", "calmmind", {-0.1: 1.0}),
+    ("quickclaw", "myceliummight", "earthquake", {0.1: 0.2, 0.0: 0.8}),
+]
+
+
+@pytest.mark.parametrize(("item", "ability", "move_id", "expected"), _SHOWDOWN_FRACTIONAL)
+def test_fractional_priority_is_showdowns_event(
+    reg: Regulation,
+    team_a: list[TeamSet],
+    item: str,
+    ability: str,
+    move_id: str,
+    expected: dict[float, float],
+) -> None:
+    """Quick Claw's `priority <= 0` is the event's relay value, not the move's priority.
+
+    Both engines skipped the claw on every status move and let Quick Draw, Stall and the
+    -0.1 items shut it out, so a claw holder's Parting Shot never went first (IKA-145).
+    """
+    from pokeuraou.speed import fractional_priority
+    from pokeuraou.view import battler
+
+    mon = _synthetic_position(reg, team_a).sides[0].active_pokemon()[0]
+    assert mon is not None
+    mon.item = mon.base_item = item
+    mon.ability = ability
+    got = fractional_priority(reg, move_id, battler(reg, mon))
+    assert sum(p for _v, p in got) == pytest.approx(1.0)
+    assert len({v for v, _p in got}) == len(got)
+    assert {round(v, 1): p for v, p in got} == pytest.approx(expected)
+
+
+def test_a_claw_holders_status_move_splits_the_queue(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """A status move rolls the claw in the queue too, not only in `fractional_priority`."""
+    from pokeuraou.speed import build_queue
+    from pokeuraou.view import battler, field_state
+
+    pos = _synthetic_position(reg, team_a)
+    mon = pos.sides[0].active_pokemon()[0]
+    assert mon is not None
+    mon.item = mon.base_item = "quickclaw"
+    status = next(
+        c
+        for c in side_actions(reg, pos, 0)
+        if isinstance(c.slots[0], MoveAction)
+        and not c.slots[0].mega
+        and reg.moves[c.slots[0].move_id].category == "Status"
+    )
+    actions = [status, _everyone_attacks(reg, pos, 1)]
+    fighters = [
+        [battler(reg, m) if m is not None and not m.fainted else None for m in s.active_pokemon()]
+        for s in pos.sides
+    ]
+    queues = build_queue(reg, pos, actions, fighters, field_state(pos, reg))
+    assert sorted(q[0].branch_probability for q in queues) == pytest.approx([0.2, 0.8])
+
+
 def test_a_deterministic_budget_gives_one_branch(reg: Regulation, team_a: list[TeamSet]) -> None:
     pos = _synthetic_position(reg, team_a)
     both = [side_actions(reg, pos, 0)[0], side_actions(reg, pos, 1)[0]]

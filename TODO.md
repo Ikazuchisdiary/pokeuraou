@@ -8883,3 +8883,95 @@ Python の `_execute` はロールを層別した（`damage_rolls < 16` かつ�
 機械: 14:13:52〜14:14:12 ワークツリーの release ビルド（8コア）、14:14:12〜14:14:32 実験ビルド（8コア）、
 14:16:54〜14:17:04 全メニューの fast の差のセル探し（1コア）、14:20:56〜14:21:28 exact 12×12（1コア）、
 14:21:40〜14:22:16 と 14:22:36〜14:23:28 既定の diff_node を両バイナリで（1コア）、ほか各10秒以下（1コア）。
+
+## 9/23 — IKA-145: せんせいのツメは変化技でも振る。「優先度1以上では発火しない」は誤読で、`priority` はイベントの中継値
+
+### 1. Showdown の条件（vendor の原文）
+
+* `data/items.ts:4986-4993` quickclaw: `onFractionalPriorityPriority: -2`、
+  `if (move.category === 'Status' && pokemon.hasAbility('myceliummight')) return;`
+  `if (priority <= 0 && this.randomChance(1, 5)) { ... return 0.1; }`
+* `data/abilities.ts:3735-3742` quickdraw: `onFractionalPriorityPriority: -1`、
+  `if (move.category !== "Status" && this.randomChance(3, 10)) { ... return 0.1; }`
+* `data/abilities.ts:2794-2800` myceliummight: priority -1、変化技なら `return -0.1`。
+  `data/items.ts:2347`・`3245`（fullincense・laggingtail）と `abilities.ts:4497`（stall）は定数 `-0.1`（priority 0）。
+  `items.ts:1243-1256` custapberry も `priority <= 0` だが、いまの規則（regmb・regmc）に無い
+* 呼び出し元 `sim/battle-queue.ts:249`: `this.battle.runEvent('FractionalPriority', action.pokemon, null, action.move, 0)`。
+  `sim/battle.ts:758-936` の runEvent は中継値 0 を先頭の引数にし、ハンドラを優先度の高い順に呼び、戻り値が
+  undefined でなければ中継値を置き換える。**つまり `priority` は技の優先度ではなく、ここまでの小数優先度**
+* したがって: ツメは変化技でも振る（きんしのちからの変化技だけ除外）、技の優先度（+1 でも +4 でも）とは無関係、
+  振らないのは先に動くはやてがえしがすでに 0.1 を返したときだけ。しっぽ・おこう・あとだしの -0.1 のあとでも
+  ツメ・はやてがえしは振り、当たれば 0.1 に置き換える
+* **Issue の2点目（「優先度 +1 以上では発火しない」）は誤り**。IKA-70 の記録（§7）が `priority` を技の優先度と
+  読んだもの。技の優先度についての Python・移植の扱い（見ない）はもとから正しい
+
+### 2. Showdown で数えた（vendor の dist/sim を直接、2,000 シードずつ）
+
+```
+  持ち物 / 特性 / 技                          ツメ発火        はやてがえし発火
+  quickclaw / owntempo / calmmind（変化・0）     401/2000        —
+  quickclaw / owntempo / protect（変化・+4）     401/2000        —
+  quickclaw / owntempo / quickattack（物理・+1） 401/2000        —
+  quickclaw / owntempo / tackle（物理・0）       401/2000        —
+  quickclaw / quickdraw / tackle                 283/2000（0.7×0.2）  601/2000
+  quickclaw / quickdraw / calmmind               401/2000        0
+  laggingtail / quickdraw / tackle               —               601/2000
+  quickclaw / stall / tackle                     401/2000        —
+  quickclaw / myceliummight / calmmind             0/2000        —
+  quickclaw / myceliummight / tackle             401/2000        —
+```
+
+### 3. 何を変えたか
+
+* `src/pokeuraou/speed.py` と `rust/src/speed.rs` の `fractional_priority` を、上のイベントを順に畳み込む形に
+  書き直した（2つは同じ手順・同じ足し算の順）。出力は値ごとにまとめた (値, 確率) —— ツメ単独は従来どおり
+  [(0.1, 0.2), (0.0, 0.8)] で、ビットも同じ
+* 変わるのは: ツメ持ちの変化技（主）、ツメ＋はやてがえし（0.44 / 0.56。従来 0.3 / 0.7）、ツメ＋あとだし・
+  はやてがえし＋しっぽ／おこう（従来は -0.1 固定）。後ろ3つはいまの規則・記録では組めても出ていない
+
+### 4. テスト（直す前に落ちることを確かめた）
+
+* `tests/test_resolve.py` `test_fractional_priority_is_showdowns_event`（§2 の10行をそのまま期待値に）と
+  `test_a_claw_holders_status_move_splits_the_queue`。修正前の src（HEAD を scratch に展開）では 11 本中 7 本が
+  落ちる: 変化技2・ツメ＋はやてがえし2・しっぽ＋はやてがえし・あとだし＋ツメ・キュー。通る4本は変わらない行
+  （+1 の物理・0 の物理・きんしのちから2つ）
+* `tests/test_rust_node.py` `test_a_claw_holders_status_move_rolls_over_there_too`: 例の局面のガオガエンにツメ、
+  すてゼリフの手の行だけで、まずツメを外して Python の答えが動くセルを取り（対照）、そこを移植と枝ごとに比べる。
+  修正後の Python ＋修正前の移植（`POKEURAOU_RUST_NODE_BIN` で前のビルド）で落ちる:
+  `suspended weights: python [0.2, 0.72, 0.08], rust [0.9, 0.1]`。修正前の Python では対照が落ちる（ツメが変化技の
+  セルを1つも動かさない）
+* `-n 0 tests/test_resolve.py tests/test_rust_node.py tests/test_speed.py tests/test_switch_in_order.py
+  tests/test_line_endings.py tests/test_no_machine_specific_paths.py` 136 通過、skip 0。ruff 通過
+
+### 5. diff_node・移植の検査（1コア）
+
+```
+  data/selfplay のツメ持ち20ノード --holding quickclaw   セル   拒否  最悪のセル差  発火セル  枝ごとに違う（外しても違う）
+    修正前（HEAD の src ＋前のビルド）                    6,280   0    3.3e-16      1,009      69（69）
+    修正後                                                6,280   0    3.3e-16      1,409      84（84）
+```
+
+* 発火セルが 400 増えた（すてゼリフ・まもる等の変化技のセル）。違うものは全部ツメを外しても違う ——
+  IKA-70 §4 の「枝の束ね方の違い（Python [0.2, 0.8]、移植 [1.0]）」と同じもので、ツメ由来の不一致は0
+* `tools/port_coverage.py --check`・`tools/port_gate_audit.py --check` 通過（生成物の更新は不要）
+
+### 6. 記録への影響（数えた、1コア）
+
+* `data/selfplay` 10,858局中ツメ／はやてがえし持ちは7局（IKA-70 と同じ）。持ち主が場に居た (決定, 側) 62 のうち
+  34 で、変化技＋ツメの手がメニューに 137、方策が正の手 30、方策の質量の合計 17.6（その34で平均 0.52）。
+  探索はそれらの手を「ツメが振られない」として評価していた
+* `data/ika73/w12` は 0。組み合わせ（ツメ＋はやてがえし等）で変わる手は記録に 0
+* GENERATIONS.md の既知の欠陥の表に1行
+
+### 7. 機械
+
+* release ビルド2回（heavy.py、8コア）: 14:18:41〜14:19:01（修正前の speed.rs、回帰テストの確認用。
+  バイナリは scratch に退避）、14:21:44〜14:22:01（修正後。coordinator の全件テストの後ろで2分半待った）
+* 1コア: テスト 14:22:49〜14:23:25、diff_node 14:24:10〜14:24:43 と 14:25:13〜14:25:40（修正前）、
+  記録の計数 14:27:57〜14:28:07、diff_node の要約の読み直し（heavy.py 無し、1コア約25秒、14:26 ごろ）。Showdown の計数（node、1コア、数秒）。本体の data/・rust/target には書いていない
+
+### 8. 残り
+
+* Custap Berry（イバンのみ）も同じ `priority <= 0` だが、いまの規則に無く未実装
+* ぶきよう・さしおさえ・マジックルーム（持ち物無効）と かがくへんかガス・いえき（特性無効）で小数優先度が消える
+  ことは、Python・移植とも見ていない（Showdown の runEvent は `ignoringItem`・`ignoringAbility` で飛ばす）

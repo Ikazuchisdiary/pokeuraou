@@ -651,6 +651,50 @@ def test_a_quick_claw_holder_is_resolved_over_there_and_rolls_the_same(bridged: 
         assert not _turn_differences(node, reg, pos, row[i], col[j]), (int(i), int(j))
 
 
+def test_a_claw_holders_status_move_rolls_over_there_too(bridged: None) -> None:
+    """Quick Claw fires on a status move in Showdown, and so in both engines (IKA-145).
+
+    Both skipped the claw on every status move, so `tools/diff_node.py` agreed while both
+    were wrong. The cells held here are Incineroar's Parting Shot with the claw, and the
+    control comes first: the Python answer on them must move when the claw is taken away,
+    or agreeing would say nothing -- before the fix neither engine rolled it there.
+    """
+    reg, pos, _row, col = _node()
+    mine = pos.sides[0].active_pokemon()[1]
+    assert mine is not None and mine.species == "incineroar"
+    mine.item = "quickclaw"
+    assert not validate_position(pos, reg.meta.active_per_side)
+    row = [
+        choice
+        for choice in side_actions(reg, pos, 0)
+        if getattr(choice.slots[1], "move_id", None) == "partingshot"
+        and not getattr(choice.slots[0], "mega", False)
+    ][:4]
+    assert row, "no Parting Shot choice for the holder"
+    evaluators = [OBJECTIVES["hp-share"].batch, OBJECTIVES["faints"].batch]
+
+    os.environ[rustnode.ENV_ENABLE] = "0"
+    rustnode.reset()
+    expected, _notes, _e = batched_payoffs(reg, pos, row, col, evaluators, budget=Budget.matrix())
+    bare = pos.copy()
+    bare.sides[0].active_pokemon()[1].item = None
+    without, _n0, _e0 = batched_payoffs(reg, bare, row, col, evaluators, budget=Budget.matrix())
+    moved = np.argwhere(np.abs(np.asarray(expected[0]) - np.asarray(without[0])) > 1e-12)
+    assert len(moved), "the claw moved no Parting Shot cell, so agreeing would say nothing"
+
+    os.environ[rustnode.ENV_ENABLE] = "1"
+    rustnode.reset()
+    node = rustnode.node_for(reg)
+    assert node is not None
+    for i, j in moved:
+        assert not _turn_differences(node, reg, pos, row[i], col[j]), (int(i), int(j))
+    got, _n2, _e2 = batched_payoffs(reg, pos, row, col, evaluators, budget=Budget.matrix())
+    for index in range(len(evaluators)):
+        assert np.allclose(
+            np.asarray(got[index]), np.asarray(expected[index]), rtol=0, atol=1e-12
+        )
+
+
 def test_a_focus_band_holder_falls_the_same_way_over_there(bridged: None) -> None:
     """Neither engine branches the band's 1-in-10: both let the hit land and say so.
 
