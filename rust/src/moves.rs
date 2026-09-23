@@ -201,41 +201,9 @@ fn can_act(
         return Ok(vec![(THAW_CHANCE, None), (1.0 - THAW_CHANCE, Some("frz".into()))]);
     }
 
-    // Priority-blocking abilities. Psychic Terrain is per target, after the move has
-    // started (`stopped_by_psychic_terrain`, IKA-156).
-    let move_id = action.move_id.ok_or("a move action with no move")?;
-    let aimed_at_foes = turn
-        .reg
-        .moves
-        .get(move_id.as_str())
-        .map(|mv| {
-            !matches!(
-                mv.target.as_str(),
-                "self"
-                    | "allySide"
-                    | "allyTeam"
-                    | "allies"
-                    | "adjacentAlly"
-                    | "adjacentAllyOrSelf"
-                    | "all"
-            )
-        })
-        .unwrap_or(false);
-    if action.priority > 0 && aimed_at_foes {
-        let foe_side = 1 - action.side;
-        for slot in 0..turn.pos.sides[foe_side].active.len() {
-            if let Some(foe) = turn.mon_at(foe_side, slot) {
-                if !foe.fainted
-                    && matches!(
-                        foe.ability.as_str(),
-                        "armortail" | "queenlymajesty" | "dazzling"
-                    )
-                {
-                    return Ok(vec![(1.0, Some(format!("ability: {}", foe.ability)))]);
-                }
-            }
-        }
-    }
+    // Neither the priority-blocking abilities nor Psychic Terrain are here: both act after
+    // the move has started, so PP is spent (`priority_blocked_by`, IKA-158, and
+    // `stopped_by_psychic_terrain`, IKA-156).
 
     let mut outcomes: Vec<(f64, Option<String>)> = vec![(1.0, None)];
     if is(status, "par") && budget.enumerate_status_checks {
@@ -282,6 +250,52 @@ fn stopped_by_psychic_terrain(turn: &Turn, action: &QueuedAction, mv: &Move, tar
         .is_some_and(|attacker| is_mold_breaker(attacker.ability.as_str()))
         && !matches!(defender.item, Some(i) if i.as_str() == "abilityshield");
     grounded_ignoring(turn, defender, ignore_ability)
+}
+
+/// `_priority_blocked_by`: Armor Tail / Queenly Majesty / Dazzling's `onFoeTryMove`
+/// (`data/abilities.ts`, armortail), after the PP. Stops a positive-priority move whose
+/// target is on the holder's side, never a `foeSide` one, and of the `all` moves only
+/// Perish Song, Flower Shield and Rototiller. `breakable`: Mold Breaker passes (Mycelium
+/// Might only with a status move) unless the holder has an Ability Shield (IKA-158).
+fn priority_blocked_by(
+    turn: &Turn,
+    action: &QueuedAction,
+    mv: &Move,
+    targets: &[Slot],
+) -> Option<Slot> {
+    if action.priority <= 0 || mv.target.as_str() == "foeSide" {
+        return None;
+    }
+    if mv.target.as_str() == "all" {
+        if !matches!(mv.id.as_str(), "perishsong" | "flowershield" | "rototiller") {
+            return None;
+        }
+    } else if !targets.iter().any(|t| t.0 != action.side) {
+        return None;
+    }
+    let ignores_ability = turn.mon_at(action.side, action.slot).is_some_and(|attacker| {
+        let ability = attacker.ability.as_str();
+        is_mold_breaker(ability) && (ability != "myceliummight" || mv.category == "Status")
+    });
+    let foe_side = 1 - action.side;
+    for slot in 0..turn.pos.sides[foe_side].active.len() {
+        let Some(foe) = turn.mon_at(foe_side, slot) else {
+            continue;
+        };
+        if foe.fainted
+            || !matches!(
+                foe.ability.as_str(),
+                "armortail" | "queenlymajesty" | "dazzling"
+            )
+        {
+            continue;
+        }
+        if ignores_ability && !matches!(foe.item, Some(i) if i.as_str() == "abilityshield") {
+            continue;
+        }
+        return Some((foe_side, slot));
+    }
+    None
 }
 
 fn use_move<'a>(
@@ -414,6 +428,12 @@ fn use_move<'a>(
         "self" | "allySide" | "allyTeam" | "all" | "foeSide"
     );
     if targets.is_empty() && !no_target_needed {
+        turn.move_failed[action.side][action.slot] = true;
+        return Ok(vec![(1.0, turn)]);
+    }
+
+    // `TryMove`: after the PP, the target and the charge turn, before any hit step.
+    if priority_blocked_by(&turn, action, mv, &targets).is_some() {
         turn.move_failed[action.side][action.slot] = true;
         return Ok(vec![(1.0, turn)]);
     }
