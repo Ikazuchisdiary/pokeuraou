@@ -37,9 +37,11 @@ class RandomnessPolicy:
     secondary: bool = False
     multihit: str = "min"  # 'min' | 'max'
     speed_tie: str = "keep"  # 'keep' | 'reverse'
+    #: What `sample(values)` answers: 'first' or 'last' (IKA-178, a `randomNormal` foe).
+    sample: str = "first"
 
     def to_json(self) -> dict[str, Any]:
-        return {
+        out: dict[str, Any] = {
             "damageRoll": self.damage_roll,
             "accuracy": self.accuracy,
             "crit": self.crit,
@@ -47,6 +49,10 @@ class RandomnessPolicy:
             "multihit": self.multihit,
             "speedTie": self.speed_tie,
         }
+        # Only when asked for, so the request every other caller sends is unchanged.
+        if self.sample != "first":
+            out["sample"] = self.sample
+        return out
 
 
 @dataclass

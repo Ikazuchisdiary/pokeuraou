@@ -1905,9 +1905,10 @@ def _do_move(
             state.move_failed.add((action.side, action.slot))
             outcomes.append((act_probability, state, ""))
             continue
-        for weight, sub_state, note in _use_move(reg, state, action, move, budget):
-            _rampage_after_move(sub_state, action)
-            outcomes.append((act_probability * weight, sub_state, note))
+        for drawn, drawn_state, drawn_action in _draw_random_target(state, action, move, budget):
+            for weight, sub_state, note in _use_move(reg, drawn_state, drawn_action, move, budget):
+                _rampage_after_move(sub_state, drawn_action)
+                outcomes.append((act_probability * drawn * weight, sub_state, note))
 
     return outcomes or [(1.0, turn, "")]
 
@@ -2181,6 +2182,42 @@ def _rampage_residual(turn: _Turn, actives: list[tuple[int, int]]) -> None:
         left = held.extra.get(RAMPAGE_LEFT)
         if isinstance(left, int):
             held.extra[RAMPAGE_LEFT] = left - 1
+
+
+def _draw_random_target(
+    turn: _Turn, action: QueuedAction, move: Move, budget: Budget
+) -> list[tuple[float, _Turn, QueuedAction]]:
+    """The foe a `randomNormal` move is used at: Outrage and its kin, Uproar, Struggle
+    (IKA-178).
+
+    `getTarget` skips the chosen location for this target type and calls
+    `getRandomTarget`, which in doubles is `side.randomFoe()` -- `sample` over the foes
+    still standing (sim/battle.ts, sim/side.ts). `runMove` does it every time the move is
+    used, so a rampage's locked turns draw again. Each foe standing is a branch of equal
+    weight, carried as the action's target for `_resolve_targets`, which then redirects it
+    as any other (Follow Me, Rage Powder). One foe standing is no draw. A budget that
+    collapses the random ranges takes the first, with a note, and so does the pinned one,
+    whose `sample` answers the first -- as `multihit_counts` and `_roll_rampage` do.
+    """
+    if move.target != "randomNormal":
+        return [(1.0, turn, action)]
+    foe_side = 1 - action.side
+    standing = [
+        slot
+        for slot in range(len(turn.pos.sides[foe_side].active))
+        if (mon := turn.mon_at(foe_side, slot)) is not None and not mon.fainted
+    ]
+    if len(standing) > 1 and not (budget.enumerate_secondary and not budget.pinned_policy):
+        if not budget.pinned_policy:
+            turn.unmodelled.add("randomNormal target (the first foe; not branched)")
+        standing = standing[:1]
+    if not standing:
+        return [(1.0, turn, replace(action, target=None))]
+    out: list[tuple[float, _Turn, QueuedAction]] = []
+    for index, slot in enumerate(standing):
+        state = turn if index == len(standing) - 1 else turn.clone()
+        out.append((1.0 / len(standing), state, replace(action, target=slot + 1)))
+    return out
 
 
 def _confusion_damage(turn: _Turn, side: int, slot: int) -> int:
@@ -2460,9 +2497,8 @@ def _resolve_targets(
             return [me]
         slot = -action.target - 1
         return [(action.side, slot)] if live(action.side, slot) else []
-    if kind == "randomNormal":
-        candidates = [(foe_side, s) for s in slots if live(foe_side, s)]
-        return candidates[:1]
+    # `randomNormal` falls through: `_draw_random_target` put the drawn foe in the action's
+    # target, and the redirection below applies to it as to any other (IKA-178).
 
     if action.target is None:
         chosen = next(((foe_side, s) for s in slots if live(foe_side, s)), None)

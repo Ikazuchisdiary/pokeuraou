@@ -74,6 +74,7 @@ PARTNERS = [
     _mon("Sylveon", "Pixilate", ["hypervoice", "protect", "moonblast", "wish"]),
 ]
 #: Outrage's `randomNormal` target is `sample(foes)`, the pinned policy's first: Hippowdon.
+#: Our resolver draws either foe, a half each (IKA-178).
 FOES = [
     _mon("Hippowdon", "Sand Stream", ["slackoff", "protect", "earthquake", "yawn"]),
     _mon("Milotic", "Marvel Scale", ["recover", "protect", "scald", "toxic"]),
@@ -81,8 +82,8 @@ FOES = [
     _mon("Charizard", "Blaze", ["heatwave", "airslash", "protect", "solarbeam"]),
 ]
 RAMP = ["move 1, move 1", "move 1, move 1"]
-#: Hippowdon Protects.
-GUARD = ["move 1, move 1", "move 2, move 1"]
+#: Both foes Protect, so the Outrage is stopped whichever foe it draws (IKA-178).
+GUARD = ["move 1, move 1", "move 2, move 2"]
 #: Hippowdon's Yawn at Garchomp: asleep at the end of the next turn.
 YAWN = ["move 1, move 1", "move 4 1, move 1"]
 
@@ -326,12 +327,21 @@ def test_the_port_agrees(
         rustnode.reset()
     assert ported is not None and ported.position is not None, "the port refused the turn"
     ours = resolve_turn(reg, start, chosen, budget=Budget.matrix())
-    assert len(ours.branches) == len(ported.branches) == 1
+    # One branch per foe the Outrage draws (IKA-178), each held to Showdown's lock.
+    assert len(ours.branches) == len(ported.branches) >= 1
     want = _expected(case, roll)
     if _rampager(start).volatile("lockedmove") is None and want[0] is not None:
         want = ((*want[0][:2], None), want[1])
-    assert _lock(ported.position) == _lock(ours.branches[0].position) == want
-    assert _pp(ported.position) == _pp(ours.branches[0].position)
+    try:
+        node = rustnode.node_for(reg)
+        assert node is not None
+        for index, branch in enumerate(ours.branches):
+            picked = node.resolve(start, chosen, Budget.matrix(), select=index)
+            assert picked is not None and picked.position is not None
+            assert _lock(picked.position) == _lock(branch.position) == want
+            assert _pp(picked.position) == _pp(branch.position)
+    finally:
+        rustnode.reset()
 
 
 @pytest.mark.oracle
@@ -347,7 +357,8 @@ def test_the_port_branches_the_roll(reg, oracle: Oracle, monkeypatch: pytest.Mon
         for mon in side.pokemon:
             mon.stats_override = None
     ours = resolve_turn(reg, first, _chosen(reg, first, RAMP), budget=Budget.matrix())
-    assert len(ours.branches) == 1
+    # Hippowdon or Milotic took the first Outrage (IKA-178); either starts the rampage.
+    assert len(ours.branches) == 2
     start = ours.branches[0].position
     chosen = _chosen(reg, start, RAMP)
     try:
@@ -361,12 +372,16 @@ def test_the_port_branches_the_roll(reg, oracle: Oracle, monkeypatch: pytest.Mon
     finally:
         rustnode.reset()
     python = resolve_turn(reg, start, chosen, budget=Budget.matrix())
-    want = sorted(((b.probability, _lock(b.position)) for b in python.branches), key=repr)
-    got = sorted(((w, _lock(p)) for w, p in zip(weights, picked, strict=True)), key=repr)
-    assert [w for w, _ in want] == pytest.approx([0.5, 0.5])
-    assert {lock for _, lock in want} == {(None, True), (("outrage", 1, 1), False)}
+    # The length's half and half, each split again by the foe drawn (IKA-178).
+    want = [(b.probability, _lock(b.position)) for b in python.branches]
+    got = [(w, _lock(p)) for w, p in zip(weights, picked, strict=True)]
     assert [lock for _, lock in got] == [lock for _, lock in want]
     assert [w for w, _ in got] == pytest.approx([w for w, _ in want])
+    by_lock: dict = {}
+    for weight, lock in want:
+        by_lock[lock] = by_lock.get(lock, 0.0) + weight
+    assert by_lock.keys() == {(None, True), (("outrage", 1, 1), False)}
+    assert list(by_lock.values()) == pytest.approx([0.5, 0.5])
 
 
 # ---------------------------------------------------------------------------

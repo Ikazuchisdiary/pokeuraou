@@ -88,6 +88,17 @@ recorded game carries only that bare marker, so `--using` reaches the rampage's 
 `--rampage` puts a second turn's lock -- the move, one turn left, no length -- on each
 knower first, which is where the length branches, the lock ends and the confusion lands.
 
+Holding the port to a `randomNormal` move's foe (IKA-178):
+
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --random-target
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --random-target --rampage
+
+`--random-target` keeps the recorded positions with a Pokemon on the field that knows a
+`randomNormal` move (Outrage and its kin, Uproar, Struggle) and holds every cell that uses
+one branch by branch. The cells where the draw *fired* are the ones Python moves with the
+foe undrawn (`undrawn`): the first foe standing and no redirection, as before. With
+`--rampage` the knowers are mid-rampage first, so the locked turn draws too.
+
 Holding the port to a frozen Pokemon (IKA-171):
 
     uv run python tools/diff_node.py --games-dir data/ika73/w12 --frozen
@@ -723,6 +734,40 @@ def teach_hazards(reg, pos: Position, dealt: list[int]) -> int:  # noqa: ANN001
     return taught
 
 
+def random_target_moves(reg) -> frozenset[str]:  # noqa: ANN001
+    """The moves Showdown aims at a foe drawn at random: the `randomNormal` target."""
+    return frozenset(m.id for m in reg.moves.values() if m.target == "randomNormal")
+
+
+class undrawn:  # noqa: N801 - read as a phrase at the call site
+    """Python with a `randomNormal` move's foe as it was before IKA-178: the control for
+    --random-target. The first foe standing, never drawn and never redirected."""
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = (resolve_mod._draw_random_target, resolve_mod._redirection_target)
+        real_redirect = self.real[1]
+
+        def first(turn, action, move, budget):  # noqa: ANN001, ANN202, ARG001
+            from dataclasses import replace
+
+            if move.target == "randomNormal":
+                action = replace(action, target=None)
+            return [(1.0, turn, action)]
+
+        def unredirected(turn, action, move, chosen):  # noqa: ANN001, ANN202
+            return None if move.target == "randomNormal" else real_redirect(turn, action, move, chosen)
+
+        resolve_mod._draw_random_target = first
+        resolve_mod._redirection_target = unredirected
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        resolve_mod._draw_random_target, resolve_mod._redirection_target = self.real
+
+
 def charge_moves(reg) -> frozenset[str]:  # noqa: ANN001
     """The moves that spend a turn charging: the dump's `charge` flag."""
     return frozenset(m.id for m in reg.moves.values() if "charge" in m.flags)
@@ -1158,6 +1203,13 @@ def main() -> None:
         "the end and the confusion are held to the port",
     )
     ap.add_argument(
+        "--random-target",
+        action="store_true",
+        help="keep positions with a randomNormal move (Outrage, Uproar, Struggle...) on the "
+        "field, hold every cell that uses one to the port branch by branch, and count where "
+        "the draw of the foe fired: the cells `undrawn` moves (IKA-178)",
+    )
+    ap.add_argument(
         "--terrain",
         choices=["psychicterrain"],
         default=None,
@@ -1262,8 +1314,14 @@ def main() -> None:
         print(f"the node of {args.scenario}")
     elif args.games_dir:
         charging = charge_moves(reg) if args.charging else frozenset()
+        randomers = random_target_moves(reg) if args.random_target else frozenset()
         positions, other_format = recorded_positions(
-            reg, args, holding - {args.give}, using | charging, blockers | debris, args.frozen
+            reg,
+            args,
+            holding - {args.give},
+            using | charging | randomers,
+            blockers | debris,
+            args.frozen,
         )
         print(
             f"{len(positions)} recorded positions from "
@@ -1283,6 +1341,9 @@ def main() -> None:
         positions = [pos for pos in positions if on_field(pos, holding)]
     if using:
         positions = [pos for pos in positions if knows_on_field(pos, using)]
+    randomers = random_target_moves(reg) if args.random_target else frozenset()
+    if randomers:
+        positions = [pos for pos in positions if knows_on_field(pos, randomers)]
     if args.rampage:
         raged = sum(enrage(pos, rampage_moves(reg)) for pos in positions)
         print(f"a rampage on its second turn put on {raged} Pokemon on the field")
@@ -1390,6 +1451,9 @@ def main() -> None:
     # Where a charging move was used or fired, and where its stored target moved the answer.
     charged = charged_wrong = aimed = aimed_wrong = aimed_paused = 0
     aimed_worst = 0.0
+    # Where a randomNormal move was used, and where drawing its foe moved the answer.
+    drew = drew_wrong = drew_fired = drew_fired_wrong = drew_paused = 0
+    drew_worst = 0.0
     # Where the hammer was used, and the remembered slots whose menu dropped it.
     hammered = hammered_wrong = dropped = dropped_control = 0
 
@@ -1517,6 +1581,35 @@ def main() -> None:
                     if wrong and shown < 5:
                         shown += 1
                         print(f"  cell {(i, j)} with a charge: {wrong[0][:200]}")
+
+        if randomers:
+            node = rustnode.node_for(reg)
+            for i, a in enumerate(row):
+                for j, b in enumerate(col):
+                    if not (uses(a, randomers) or uses(b, randomers)):
+                        continue
+                    drew += 1
+                    here = resolve_turn(reg, pos, [a, b], budget=budget)
+                    with undrawn():
+                        control = resolve_turn(reg, pos, [a, b], budget=budget)
+                    wrong = (
+                        ["no warm process"]
+                        if node is None
+                        else branch_differences(node, reg, pos, a, b, here, budget)
+                    )
+                    drew_wrong += bool(wrong)
+                    if differ(outcome(here), outcome(control)):
+                        drew_fired += 1
+                        drew_fired_wrong += bool(wrong)
+                        drew_paused += bool(here.suspended)
+                        for index in range(len(evaluators)):
+                            drew_worst = max(
+                                drew_worst,
+                                abs(float(got[index][i, j] - expected[index][i, j])),
+                            )
+                    if wrong and shown < 5:
+                        shown += 1
+                        print(f"  cell {(i, j)} using a randomNormal move: {wrong[0][:200]}")
 
         if args.hammer:
             node = rustnode.node_for(reg)
@@ -1877,6 +1970,15 @@ def main() -> None:
         print(f"    cells whose branches, weights, notes or positions differ  {aimed_wrong}")
         print(f"    cells with a paused branch, whose position is not compared  {aimed_paused}")
         print(f"    worst cell difference there  {aimed_worst:.3e}")
+    if randomers:
+        print("\n  where a randomNormal move was used -- every one held branch by branch")
+        print(f"    {drew} of {cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {drew_wrong}")
+        print("  where the draw of the foe fired -- the cells `undrawn` moves")
+        print(f"    {drew_fired} of {drew} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {drew_fired_wrong}")
+        print(f"    cells with a paused branch, whose position is not compared  {drew_paused}")
+        print(f"    worst cell difference there  {drew_worst:.3e}")
     if args.hammer:
         print("\n  where Gigaton Hammer was used -- every one held branch by branch")
         print(f"    {hammered} of {cells} cells")
@@ -1920,6 +2022,10 @@ def main() -> None:
         failed.append(f"{charged_wrong} cells with a charge differ by branch")
     if args.charging and not aimed:
         failed.append("the stored target moved no cell, so agreeing here says nothing")
+    if drew_wrong:
+        failed.append(f"{drew_wrong} cells using a randomNormal move differ by branch")
+    if randomers and not drew_fired:
+        failed.append("drawing the foe moved no cell, so agreeing here says nothing")
     if hammered_wrong:
         failed.append(f"{hammered_wrong} cells using the hammer differ by branch")
     if args.hammer and not (hammered and dropped):
