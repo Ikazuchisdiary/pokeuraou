@@ -50,6 +50,16 @@ its user's type (IKA-162); its control is the turn with `TYPE_SPENDING_MOVES` em
 The control is the hit count as it was before IKA-160 -- 1/3, 1/3, 1/6, 1/6 and Skill Link
 not read -- so the cells it moves are the ones where the count's distribution mattered.
 
+`--using` takes a rampage move too (IKA-174), and `--rampage` holds the rest of it:
+
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --using outrage,petaldance
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --rampage
+
+The control is `lockedmove` as it was before IKA-174, bare and never ended (`unraged`). A
+recorded game carries only that bare marker, so `--using` reaches the rampage's first turn;
+`--rampage` puts a second turn's lock -- the move, one turn left, no length -- on each
+knower first, which is where the length branches, the lock ends and the confusion lands.
+
 Holding the port to a terrain no recorded game has (IKA-156):
 
     uv run python tools/diff_node.py --games-dir data/ika73/w12 --terrain psychicterrain
@@ -301,6 +311,72 @@ class unspent:  # noqa: N801 - read as a phrase at the call site
         resolve_mod.TYPE_SPENDING_MOVES = self.real
 
 
+def rampage_moves(reg) -> frozenset[str]:  # noqa: ANN001
+    """Outrage and the rest: the moves whose `self` puts `lockedmove` on their user."""
+    return frozenset(
+        m.id for m in reg.moves.values()
+        if (m.raw.get("self") or {}).get("volatileStatus") == "lockedmove"
+    )
+
+
+class unraged:  # noqa: N801 - read as a phrase at the call site
+    """Python with the rampage as it was before IKA-174: the control for a rampage move.
+
+    `lockedmove` goes on bare -- no move, no duration, no length -- and nothing ends it,
+    rolls it, confuses or spares the PP; a lock already on the position just counts down
+    and falls off. What differs is only what the rampage did.
+    """
+
+    NAMES = (
+        "_start_rampage", "_roll_rampage", "_rampage_after_move", "_rampage_runs_out",
+        "_rampage_residual", "_rampage_move",
+    )
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = {name: getattr(resolve_mod, name) for name in self.NAMES}
+
+        def bare(turn, side, slot):  # noqa: ANN001, ANN202
+            mon = turn.mon_at(side, slot)
+            if mon is not None and not mon.fainted and not mon.has_volatile("lockedmove"):
+                mon.volatiles.append(Effect(id="lockedmove"))
+
+        resolve_mod._start_rampage = bare
+        resolve_mod._roll_rampage = lambda *_args: None
+        resolve_mod._rampage_after_move = lambda *_args: None
+        resolve_mod._rampage_runs_out = lambda *_args: None
+        resolve_mod._rampage_residual = lambda *_args: None
+        resolve_mod._rampage_move = lambda *_args: None
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        for name, real in self.real.items():
+            setattr(resolve_mod, name, real)
+
+
+def enrage(pos: Position, moves: frozenset[str]) -> int:
+    """Puts a rampage on its second turn on every Pokemon on the field that knows one --
+    its move, one turn left, no length yet: what a generated game carries -- and says how
+    many took it."""
+    raged = 0
+    for side in pos.sides:
+        for mon in side.active_pokemon():
+            if mon is None or mon.fainted or mon.has_volatile("lockedmove"):
+                continue
+            known = next((slot.id for slot in mon.moves if slot.id in moves), None)
+            if known is None:
+                continue
+            # A Choice item locked into another move could not have started the rampage.
+            choice = mon.volatile("choicelock")
+            if choice is not None and choice.move not in (None, known):
+                continue
+            mon.volatiles.append(Effect(id="lockedmove", duration=1, move=known))
+            raged += 1
+    return raged
+
+
 class unchanged:  # noqa: N801 - read as a phrase at the call site
     """The control for `--using`: each kind of move named has its effect taken out."""
 
@@ -312,6 +388,8 @@ class unchanged:  # noqa: N801 - read as a phrase at the call site
             self.parts.append(old_hit_counts())
         if any(m in TYPE_SPENDING_MOVES for m in moves):
             self.parts.append(unspent())
+        if moves & rampage_moves(reg):
+            self.parts.append(unraged())
 
     def __enter__(self) -> None:
         for part in self.parts:
@@ -758,6 +836,14 @@ def main() -> None:
         "branch by branch, and count where the break or the hit count fired",
     )
     ap.add_argument(
+        "--rampage",
+        action="store_true",
+        help="--using every rampage move (Outrage, Petal Dance, Raging Fury, Thrash), with "
+        "a rampage on its second turn put on each knower on the field first -- recorded "
+        "games carry only the bare marker from before IKA-174 -- so the length's branch, "
+        "the end and the confusion are held to the port",
+    )
+    ap.add_argument(
         "--terrain",
         choices=["psychicterrain"],
         default=None,
@@ -801,6 +887,8 @@ def main() -> None:
     if args.give:
         holding |= {args.give}
     using = frozenset(m for m in (args.using or "").split(",") if m)
+    if args.rampage:
+        using |= rampage_moves(reg)
     blockers = PRIORITY_BLOCKING_ABILITIES if args.priority_block else frozenset()
     for move_id in sorted(using):
         move = reg.moves.get(move_id)
@@ -808,10 +896,12 @@ def main() -> None:
             move.raw.get("breaksProtect")
             or isinstance(move.raw.get("multihit"), list)
             or move_id in TYPE_SPENDING_MOVES
+            or move_id in rampage_moves(reg)
         ):
             ap.error(
-                f"--using takes breaksProtect, ranged multi-hit or type-spending moves "
-                f"({sorted(TYPE_SPENDING_MOVES)}); {move_id} is none of them"
+                f"--using takes breaksProtect, ranged multi-hit, type-spending moves "
+                f"({sorted(TYPE_SPENDING_MOVES)}) or rampage moves "
+                f"({sorted(rampage_moves(reg))}); {move_id} is none of them"
             )
 
     if args.value:
@@ -857,6 +947,9 @@ def main() -> None:
         positions = [pos for pos in positions if on_field(pos, holding)]
     if using:
         positions = [pos for pos in positions if knows_on_field(pos, using)]
+    if args.rampage:
+        raged = sum(enrage(pos, rampage_moves(reg)) for pos in positions)
+        print(f"a rampage on its second turn put on {raged} Pokemon on the field")
     if blockers:
         positions = [pos for pos in positions if ability_on_field(pos, blockers)]
     quick = priority_moves(reg) if args.terrain or blockers else frozenset()

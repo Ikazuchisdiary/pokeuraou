@@ -572,6 +572,10 @@ impl<'a> Turn<'a> {
     }
 
     pub(crate) fn add_volatile(&mut self, side: usize, slot: usize, vid: &str, duration: Option<i64>) {
+        if vid == "lockedmove" {
+            crate::moves::start_rampage(self, side, slot);
+            return;
+        }
         let Some(mon) = self.mon_at_mut(side, slot) else { return };
         if mon.fainted || mon.has_volatile(vid) {
             return;
@@ -760,6 +764,9 @@ fn item_handled(item: &str) -> bool {
             // decides whether a switch is *offered*, and the menu is Python's (IKA-163).
             // It left `inert.rs` when `actions._escapes_traps` learned it.
             | "shedshell"
+            // Eaten at once for a rampage's fatigue confusion, the only confusion either
+            // engine lets it cure (`confused_by_fatigue`, IKA-174). It left `inert.rs` then.
+            | "persimberry"
     ) || crate::inert::item_is_inert(item)
         // Mega stones carry no turn effect of their own; the mega action owns the forme
         // change, and `reg.mega_targets` is what says which stone belongs to whom.
