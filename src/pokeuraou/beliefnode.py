@@ -130,7 +130,9 @@ def belief_payoffs(
 
     `spreads[s]` completes side `s`'s own unseen slots, so side `1 - s`'s game is solved
     over it. A side with nothing hidden contributes a single exact completion and costs
-    nothing extra.
+    nothing extra -- which was true of one such side and not of two until IKA-104: with
+    both exact the two completions are the same position, and `_per_completion` resolved
+    it once per side. It resolves it once now.
 
     Falls back to a matrix per completion when the port is not available, because the fast
     path is defined as "equal to that" and there is nothing to be equal to without it.
@@ -269,21 +271,44 @@ def _per_completion(
     budget: Budget,
     spreads: dict[int, list],
 ) -> BeliefNode:
-    """A matrix per completion, resolved from scratch. The definition of the answer."""
+    """A matrix per completion, resolved from scratch. The definition of the answer.
+
+    Per position rather than per entry: a position both sides' lists hold is resolved once,
+    and the second side gets a copy of that matrix -- a copy so that the two lists still
+    hold two arrays, as they did when each was resolved on its own. Nothing hidden on
+    either side is exactly that case, since `completions` then hands each side the
+    position itself, and until IKA-104 it was resolved once per side: the port's fill, the
+    forward pass and the fold twice over for the same numbers, on 37% of the move
+    decisions of IKA-73's width-12 pool (`scratchpad/both_exact.py`).
+
+    Nothing is turned round for side 1. Every matrix here is side 0's payoff, whichever
+    list it comes from, and `belief_solve` is what makes side 1's its own game.
+
+    Identity and not equality, because the same object is the only thing known to be the
+    same node. A completion with anything in it is a fresh `substitute`, so two of those
+    are never one object and nothing else here is shared.
+    """
     matrices: dict[int, list[np.ndarray]] = {}
     unmodelled: set[str] = set()
-    redone = 0
+    resolved: dict[int, np.ndarray] = {}
+    shared = redone = 0
     for side, items in spreads.items():
         built: list[np.ndarray] = []
         for item in items:
-            payoff, notes = batched_payoff(
-                reg, item.position, ours, theirs, evaluate, budget=budget
-            )
+            payoff = resolved.get(id(item.position))
+            if payoff is None:
+                payoff, notes = batched_payoff(
+                    reg, item.position, ours, theirs, evaluate, budget=budget
+                )
+                resolved[id(item.position)] = payoff
+                unmodelled |= notes
+                redone += len(ours) * len(theirs)
+            else:
+                payoff = payoff.copy()
+                shared += len(ours) * len(theirs)
             built.append(payoff)
-            unmodelled |= notes
-            redone += len(ours) * len(theirs)
         matrices[1 - side] = built
-    return BeliefNode(matrices, unmodelled, 0, redone)
+    return BeliefNode(matrices, unmodelled, shared, redone)
 
 
 __all__ = ["PHAZING_MOVES", "BeliefNode", "belief_payoffs", "reaches_bench"]
