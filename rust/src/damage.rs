@@ -552,9 +552,11 @@ pub fn calculate(
         bp_chain.add(num, den, label);
     }
     if let Some((label, num, den)) = terrain_modifiers(
+        move_id,
         move_type.as_str(),
         is_grounded(attacker),
         field.terrain.as_ref().map(|t| t.as_str()),
+        is_grounded(defender),
     ) {
         bp_chain.add(num, den, label);
     }

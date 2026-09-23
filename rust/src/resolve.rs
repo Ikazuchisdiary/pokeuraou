@@ -461,6 +461,19 @@ impl<'a> Turn<'a> {
         boosts: &[(&str, i64)],
         from_foe: bool,
     ) -> bool {
+        self.apply_boosts_by(side, slot, boosts, from_foe, from_foe)
+    }
+
+    /// `apply_boosts` with whether another Pokemon caused it said apart from `from_foe`:
+    /// a partner's status move. Flower Veil reads it (IKA-202); Python's `by_other`.
+    pub(crate) fn apply_boosts_by(
+        &mut self,
+        side: usize,
+        slot: usize,
+        boosts: &[(&str, i64)],
+        from_foe: bool,
+        by_other: bool,
+    ) -> bool {
         let Some(mon) = self.mon_at(side, slot) else { return false };
         if mon.fainted {
             return false;
@@ -478,6 +491,9 @@ impl<'a> Turn<'a> {
                 continue;
             };
             if delta < 0 && from_foe && blocks_drops {
+                continue;
+            }
+            if delta < 0 && by_other && crate::moves::flower_veil(self, side, slot) {
                 continue;
             }
             let mon = self.mon_at_mut(side, slot).unwrap();
@@ -507,7 +523,23 @@ impl<'a> Turn<'a> {
         }
     }
 
+    /// Flower Veil's `onAllySetStatus` first (IKA-202): every caller's source is another
+    /// Pokemon but Yawn's sleep, which calls `apply_status_unveiled`. Python's
+    /// `_flower_veil_refuses_status`.
     pub(crate) fn apply_status(&mut self, side: usize, slot: usize, status: &str) -> Result<bool, String> {
+        let alive = self.mon_at(side, slot).is_some_and(|m| !m.fainted && m.status.is_none());
+        if alive && crate::moves::flower_veil(self, side, slot) {
+            return Ok(false);
+        }
+        self.apply_status_unveiled(side, slot, status)
+    }
+
+    pub(crate) fn apply_status_unveiled(
+        &mut self,
+        side: usize,
+        slot: usize,
+        status: &str,
+    ) -> Result<bool, String> {
         let (types, ability, grounded) = {
             let Some(mon) = self.mon_at(side, slot) else { return Ok(false) };
             if mon.fainted || mon.status.is_some() {
@@ -590,6 +622,10 @@ impl<'a> Turn<'a> {
         if vid == "confusion" {
             let source = self.current_actor;
             crate::moves::confuse(self, side, slot, source);
+            return;
+        }
+        // Flower Veil's `onAllyTryAddVolatile` (IKA-202).
+        if vid == "yawn" && crate::moves::flower_veil(self, side, slot) {
             return;
         }
         let Some(mon) = self.mon_at_mut(side, slot) else { return };
@@ -734,6 +770,8 @@ fn ability_handled(ability: &str) -> bool {
             // Past a foe's Safeguard, in `moves::confusion_refused` (IKA-189). Its screens
             // and Substitute are Python's to model first (the damage notes name it).
             | "infiltrator"
+            // `moves::good_as_gold_blocks` and `moves::flower_veil` (IKA-202).
+            | "goodasgold" | "flowerveil"
             // Weather setters, applied on switch-in and mega.
             | "drought" | "drizzle" | "sandstream" | "snowwarning"
             // `trace` in `switch_in_ability`, `synchronize` in `apply_status_from`, and
@@ -745,10 +783,12 @@ fn ability_handled(ability: &str) -> bool {
             | "windrider"
             // No effect a turn can observe.
             | "pressure" | "shadowtag" | "arenatrap" | "magnetpull" | "runaway" | "telepathy"
-            | "healer" | "symbiosis" | "sweetveil" | "flowerveil" | "aromaveil" | "damp"
+            | "healer" | "symbiosis" | "sweetveil" | "aromaveil" | "damp"
             | "lightmetal" | "heavymetal" | "sandveil" | "snowcloak" | "stall"
             // Weather setters this port applies on switch-in and mega.
             | "desolateland" | "primordialsea" | "deltastream"
+            // Terrain setters, `terrain::surge` on switch-in and mega (IKA-201).
+            | "electricsurge" | "grassysurge" | "mistysurge" | "psychicsurge"
             // Type changers and retypers: the damage layer owns them, and the resolver
             // never rewrites the Pokemon's types for them -- nor does Python.
             | "aerilate" | "pixilate" | "galvanize" | "refrigerate" | "normalize"
@@ -805,6 +845,8 @@ fn item_handled(item: &str) -> bool {
             // `moves::after_move_secondary_switches` (IKA-191). A Red Card that fires is
             // refused there, as a forceSwitch move is: its replacement is drawn at random.
             | "ejectbutton" | "redcard"
+            // `terrain::use_terrain_seed` (IKA-201).
+            | "electricseed" | "grassyseed" | "mistyseed" | "psychicseed"
     ) || crate::inert::item_is_inert(item)
         // Mega stones carry no turn effect of their own; the mega action owns the forme
         // change, and `reg.mega_targets` is what says which stone belongs to whom.
@@ -2335,7 +2377,17 @@ pub fn turn_value(
     Ok(accumulated / total)
 }
 
+/// `switched_in` with no move active: Showdown's `clearActiveMove` after each action, so
+/// no Mold Breaker passes a Flower Veil for hazards or Intimidate (IKA-202). Python's
+/// `_on_switch_in`.
 fn on_switch_in(reg: &Reg, turn: &mut Turn, side: usize, slot: usize) -> Result<(), String> {
+    let actor = turn.current_actor.take();
+    let result = switched_in(reg, turn, side, slot);
+    turn.current_actor = actor;
+    result
+}
+
+fn switched_in(reg: &Reg, turn: &mut Turn, side: usize, slot: usize) -> Result<(), String> {
     let (types, is_grounded) = {
         let Some(mon) = turn.mon_at(side, slot) else { return Ok(()) };
         (turn.types_of(mon), grounded(turn, mon))
@@ -2384,6 +2436,8 @@ fn on_switch_in(reg: &Reg, turn: &mut Turn, side: usize, slot: usize) -> Result<
         return Ok(());
     }
     switch_in_ability(turn, side, slot);
+    // A Seed's `onStart`, under a terrain already up (IKA-201).
+    crate::terrain::use_terrain_seed(turn, side, slot);
     check_white_herb(turn);
     Ok(())
 }
@@ -2425,6 +2479,8 @@ fn switch_in_ability(turn: &mut Turn, side: usize, slot: usize) {
             turn.pos.field.weather_duration = Some(if extended { 8 } else { 5 });
         }
     }
+
+    crate::terrain::surge(turn, side, slot);
 
     if ability == "intimidate" {
         for foe_slot in 0..turn.pos.sides[1 - side].active.len() {

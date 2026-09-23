@@ -399,11 +399,26 @@ def base_power_modifiers(
     return tuple(out)
 
 
+#: Grassy Terrain's `weakenedMoves`, halved into a grounded target.
+GRASSY_WEAKENED_MOVES = frozenset({"earthquake", "bulldoze", "magnitude"})
+
+
 def terrain_modifiers(
-    reg: Regulation, move_id: str, move_type: str, attacker_grounded: bool, terrain: str | None
+    reg: Regulation,
+    move_id: str,
+    move_type: str,
+    attacker_grounded: bool,
+    terrain: str | None,
+    defender_grounded: bool = True,
 ) -> tuple[tuple[str, float, float], ...]:
-    """Terrain's ``onBasePower``, which applies to a grounded user's matching type."""
-    del reg, move_id
+    """Terrain's ``onBasePower``: a grounded user's matching type is boosted; Misty Terrain's
+    Dragon moves and Grassy Terrain's Earthquake, Bulldoze and Magnitude are halved into a
+    grounded *target*, whatever the user stands on (IKA-201)."""
+    del reg
+    if terrain == "mistyterrain":
+        return (("mistyterrain", 2048, 4096),) if move_type == "Dragon" and defender_grounded else ()
+    if terrain == "grassyterrain" and move_id in GRASSY_WEAKENED_MOVES:
+        return (("grassyterrain", 2048, 4096),) if defender_grounded else ()
     if terrain is None or not attacker_grounded:
         return ()
     if terrain == "electricterrain" and move_type == "Electric":
@@ -412,6 +427,4 @@ def terrain_modifiers(
         return (("grassyterrain", 5325, 4096),)
     if terrain == "psychicterrain" and move_type == "Psychic":
         return (("psychicterrain", 5325, 4096),)
-    if terrain == "mistyterrain" and move_type == "Dragon":
-        return (("mistyterrain", 2048, 4096),)
     return ()

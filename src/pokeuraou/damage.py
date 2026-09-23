@@ -425,7 +425,7 @@ def calculate(
     for label, num, den in base_power_modifiers(reg, move_id, attacker, defender, ctx_move):
         bp_chain.add(num, den, label=label)
     for label, num, den in terrain_modifiers(
-        reg, move_id, move_type, _is_grounded(attacker), field_state.terrain
+        reg, move_id, move_type, _is_grounded(attacker), field_state.terrain, _is_grounded(defender)
     ):
         bp_chain.add(num, den, label=label)
     if type_change_fp != 4096:

@@ -452,6 +452,22 @@ WEATHER_ABILITIES: dict[str, str] = {
     "deltastream": "deltastream",
 }
 
+#: The Surges, whose `onStart` is `this.field.setTerrain(...)` (IKA-201).
+TERRAIN_ABILITIES: dict[str, str] = {
+    "electricsurge": "electricterrain",
+    "grassysurge": "grassyterrain",
+    "mistysurge": "mistyterrain",
+    "psychicsurge": "psychicterrain",
+}
+
+#: The Seeds: the terrain each is used under and the boost `useItem` applies (IKA-201).
+TERRAIN_SEEDS: dict[str, tuple[str, str]] = {
+    "electricseed": ("electricterrain", "def"),
+    "grassyseed": ("grassyterrain", "def"),
+    "mistyseed": ("mistyterrain", "spd"),
+    "psychicseed": ("psychicterrain", "spd"),
+}
+
 #: Abilities that suppress weather effects entirely.
 WEATHER_SUPPRESSING_ABILITIES = frozenset({"cloudnine", "airlock"})
 
@@ -601,6 +617,7 @@ def all_modelled_abilities() -> frozenset[str]:
         | set(TYPE_CHANGING_ABILITIES)
         | set(TYPE_IMMUNITY_ABILITIES)
         | set(WEATHER_ABILITIES)
+        | set(TERRAIN_ABILITIES)
         | MOLD_BREAKER_ABILITIES
         | WEATHER_SUPPRESSING_ABILITIES
         | RETYPING_ABILITIES

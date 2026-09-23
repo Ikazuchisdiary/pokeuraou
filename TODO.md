@@ -14062,3 +14062,349 @@ cargo release 4 回（8 コア 24・19・18 秒、1 回はコンパイルエラ�
   置く故障注入ではボタンとカードの 2 件が落ちる（ききかいひは HP が減らないので通る。跨ぎで見ているから）
 * 取り込み後: release ビルド、関係テスト 17 ファイル（test_substitute を含む）pass、diff_node w12 `--eject` 新 exe
   発火 3,967・違い 0、`--substitute` 発火 7,912・違い 0、ruff・`port_coverage --check`・`port_gate_audit --check` ok
+
+## 9/24 — IKA-77: M-C gen-0 の生成の手順 —— 出荷条件の 600 局は 3.8 分（選出が作業者の時間の 71%）、全対が解けた後は 554 局/分。40,000 局は約 1 時間 20 分。ただしメイカー（グラス・サイコ）がフィールドを張らず、本番の前に直す候補
+
+ワーカー、基点 master 4dd5f46、ブランチ `ika-77-mc-gen0-plan`。一時ファイルは `C:/tmp/ika77/`。本番の 40,000 局は回していない。
+
+答えた問いは次の 3 つ。
+「IKA-81 の経路は served・24 ワーカー・出荷条件で M-C の局を正しく作るか」
+「40,000 局に何分かかるか」
+「記録に、本番の前に直すべき規則の穴が見えるか」
+
+### 1. 走らせたもの（本体の tree、4dd5f46、exe は 05:47 のビルド、出力はすべて C:/tmp/ika77/out）
+
+コマンドは `tools/generate_queue.py --pool regmc-matchupweb --served --servers 2 --limit 12 --value data/models/value-gen11L.pt -- --rank-leaf`
+（控えは `--pool` の既定で隠蔽）。各本の前に python は 0 本。16 コアを使う本の窓では、他の担当の仕事は log.tsv に無い。
+
+```
+  本     局    ワーカー  seed  store             壁時計    局/分   解く   読む   解の秒（作業者）   作業者の時間の和
+  s48    48    4        7700  空                47.3 s    61      48     0     133.5 s（2.78 s/解）  170.6 s（選出 78%）
+  g600   600   24       7700  空                227.7 s   158     522    77    3,751 s（7.19 s/解）  5,266 s（選出 71%）
+  r600   600   24       7700  g600 の解を写した  65.0 s    554     0      596   0                   1,352 s（2.25 s/局）
+```
+
+* **局の同一性**: g600（解きながら）と r600（store から読む）は 600/600 局・6,855 決定が同一（searchSeconds・engine を除く）。
+  対照の局 i と i+1 は 0/599。共有した解は局を変えない（IKA-81 の 12 局の確認を 600 局で）
+* g600 の 522 解は異なる対 520 個（2 対を別々のワーカーが同時に解いた）。store は 520 ファイル・4.3 MB
+* 1 解は単独なら 2.8 s（s48、IKA-81 の 3.1 s と同じ桁）、24 ワーカーが 16 論理コアを取り合うと 7.2 s
+* 推論サーバ: ログは 2 本とも `cuda waits: blocking sync`、`arm value: value-gen11L.pt`。起動に M-C の規則を渡して読めた
+  （IKA-82 の読み込み。M-C の語彙で失敗なし）。1 呼び出し 3.4〜3.6 ms、待ち 0.00 ms（キューは詰まっていない）
+* 作業者への届き（delivery）: 24 本すべての worker log の echo が
+  `pool vs pool / gen9championsvgc2026regmc / search 12x12 / leaf value:value-gen11L / selection solved (eps=0.25, T=0.5) / bench hidden`。
+  記録の欄も 600/600 が `searchLimit 12`・`ranking leaf`・`rankView heaviest`・`information hidden-bench`・`searchObjective value:value-gen11L`。
+  `tools/agent_drift.py --check` は rc 0（`poolplay.py` は ok。DRIFTED の 8 本は KNOWN_DRIFT のまま）
+* ワーカーの log の日本語（プールの character）は cp932 で化けている。表示だけの問題
+
+### 2. 記録の中身（g600、`C:/tmp/ika77/read_games.py`）
+
+```
+  selectionSource solved 600 / benchPrior (solved, solved) 600 / information hidden-bench 600
+  endReason wipeout 600、finalPosition.turn == turns 600（最終局面は全局にある）。捨てた未決着 0
+  ミラー 14 局 = 2.33%（期待 3.03% = 18.2 局。二項の sd 4.2 の内側）、ミラーの結果 8 勝 6 敗（席0 から）
+  異なる対 520 / 2,145、2 回以上出た対 71
+  席0 の勝ち 310/600 = 51.7%、selectionValue 平均 0.504（0.23〜0.80）
+  平均 9.18 ターン、11.43 決定（M-B の w12 は 13.46 決定）
+  大きさ 1 局 119,310 B → 40,000 局で約 4.8 GB
+  engine.dirty = true が 600/600（本体に未追跡の scratchpad/probe_pastes.py があるため。コミットは 4dd5f46）
+```
+
+**unmodelled の注記**（局単位、600 局中。M-B の 12,000 局の標本 —— w12 と gen11L の各ファイルの先頭 250 局 —— に無い注記に ★）
+
+```
+  434 72.3%  defender.ability:grassysurge ★        140 23.3%  mid-turn replacement chosen against ...
+  427 71.2%  residual speed tie                     116 19.3%  sleep duration (2 turns ...)
+  299 49.8%  defender.ability:psychicsurge ★         89 14.8%  encore override changed ... Sucker Punch
+  248 41.3%  attacker.ability:grassysurge ★          80 13.3%  attacker/defender.ability:noguard
+  213 35.5%  thaw roll (1 in 4 ...)                  44  7.3%  defender.ability:infiltrator ★
+  190 31.7%  attacker.ability:psychicsurge ★         44  7.3%  defender.ability:magicbounce
+  152 25.3%  on-hit ability / defender: cursedbody   42  7.0%  status move: clangoroussoul
+```
+
+M-B に無かった注記は 18 種。上の 5 つのほかに、status move の psychup 14・skillswap 11・revivalblessing 9 局、auraguard 13 局、
+`simultaneous mid-turn replacements` 7 局（IKA-200）、`self-switch replacement owed ... but none was chosen` 6+5 局、
+`secondary on a multi-hit move` 5 局。
+
+**refused**（`tools/refusal_replay.py --decisions 2000 --per-game 4`、本体の exe）: 2,000 決定・284,680 セルのうち 3,083 セル（1.08%）。
+理由は 3 つだけ: `move field selfdestruct: finalgambit` 1,308（26 ノード）、`status move: trick` 948（34）、`ability: auraguard` 827（12）。
+断ったセルは Python が埋めるので値は出るが、auraguard は Python も扱っていない（上の注記）。
+
+### 3. 規則の穴（本番の前に直すべきか）
+
+**(a) グラスメイカー・サイコメイカーがフィールドを張らない。直してから回すことを勧める。**
+
+Showdown（vendor a5df827 `data/abilities.ts:1707`）は `grassysurge: onStart(source) { this.field.setTerrain('grassyterrain') }`
+（サイコメイカーも同じ形）。Python はこの 2 つを damage の「ダメージに関係しない特性」に入れているだけで、resolver のどこにも無い。
+port は `rust/src/inert.rs` で「Python が一度も触れない」ものとして無視している。生成は port で局を進めるので、実局でも張られない。
+
+```
+  g600（C:/tmp/ika77/terrain.py）       メイカー持ちが場に居た局   その決定   そのうち場にフィールドがあった
+    グラスメイカー（ゴリランダー）       249 局                    1,250      0
+    サイコメイカー（イエッサン）         190 局                    704        0
+  全 6,855 決定の field.terrain         すべて null（天候は張られている。例: 局 33 の raindance）
+```
+
+* プールの 65 構築のうち、グラスメイカー 29 体（29 構築、**29 体すべてグラススライダー持ち**）、サイコメイカー 19 体（19 構築）。
+  選ばれた 4 体に入るのは 600 局中 257 局（42.8%）と 193 局（32.2%）
+* 連鎖して死んでいるもの: グラススライダーの先制 +1（`speed.py:192`、フィールドが無いので一度も発火しない）、サイコフィールドの
+  先制技封じ（IKA-156 で直したもの。イエッサンの役目そのもの）、グラス・サイコの技の 1.3 倍、グラスフィールドの地震半減
+  （`effects.py:343`）、サイコシード（175 局）・グラスシード（119 局）
+* グラスフィールドのターン終わりの 1/16 回復は、Python の resolver に無い（技のグラスフィールドでも同じ）。直すなら一緒に
+* M-B の記録には該当が無い（w12・gen11L の field.terrain はすべて null、IKA-156 の数え）。**M-C で初めて出る穴で、局の 4 割に効く**
+
+**(b) 注記の出ない未実装（`inert.rs` に載っている = Python が名前を一度も読まない）。** 選ばれた 4 体に居た局の割合:
+
+```
+  おうごんのからだ 19.8%（変化技を受けない。Showdown data/abilities.ts:1630）   フラワーベール 18.8%   トレース 16.5%
+  シンクロ 7.2%   ひかりのねんど 6.0%   ゆきがくれ 3.0%   マジックミラー 1.0%（こちらは注記あり）   ムラっけ 0.7%（宣言済み）
+```
+
+おうごんのからだは、キノコのほうし・アンコール・ちょうはつ等がサーフゴーに通ってしまう。(a) の次に大きい。
+注記が出ないので `unmodelled` の数えには現れない。
+
+**(c) 注記つきの M-C の新顔**: psychup・skillswap・revivalblessing（変化技）、auraguard（Python も port も未実装）、infiltrator の注記。どれも 2% 前後の局。
+
+判断はコーディネータ（とユーザー）に。(a) を直さずに回すと、ゴリランダー・イエッサンの居る局（4 割）の教師が「フィールドの無い
+ゲーム」になり、IKA-77 の 9/24 の判断（規則の修正を生成より前に入れる）の趣旨から外れる。
+
+### 4. 40,000 局の見積もり
+
+```
+  局そのもの   r600 の 554 局/分 → 40,000 局で 72 分（作業者の和 2.25 s/局 ÷ 24 なら 63 分。r600 は起動と尾を含む）
+  選出         2,145 対をすべて解く（期待される未解の対は 40,000 局後に 2,145·e^(−40000/2145) ≈ 0）
+               2,145 × 7.19 s ÷ 24 ワーカー ≈ 11 分（g600 の取り合いの値。最初の 1 万局に集中する）
+  合計         約 75〜85 分（1 時間 20 分前後）。9/24 の見積もり 1.5〜2.5 時間の下側
+  出力         約 4.8 GB ＋ selection-solved 約 18 MB。C: の空きは 2.7 TB
+```
+
+M-B の 475 局/分より局は速い（決定が 11.4 対 13.5）。遅いのは最初の数千局で、g600 と同じく選出が作業者の 7 割になる。
+g600 の 520 解を先に store に写せば約 2.6 分縮むが、手順を増やすほどではない。
+
+### 5. 本番のコマンド（Bash ツールから、`run_in_background` で）
+
+前提: 本体の tree が master（`git -C $M log -1`）で、`rust/target/release` の exe と `packages/sim-bridge/dist` がその master のもの。
+python が 0 本（`Get-CimInstance Win32_Process -Filter "Name='python.exe'"`）。(a) を直すなら、その着地・ビルドの後。
+
+```bash
+M=C:/Users/Ikazuchi/repos/pokeuraou; OUT=$M/data/selfplay-mc0
+mkdir -p $OUT && printf '%s\n' \
+  "# M-C gen-0 (IKA-77): both seats from the 65 teams of regmc-matchupweb, SP as written," \
+  "# the bench hidden, the selection solved per pair with the leaf and shared in selection-solved/." \
+  "# Leaf value-gen11L read through IKA-82's extended vocabulary. Shipping settings: width 12," \
+  "# leaf ranking, 24 served workers over 2 servers. Commit: $(git -C $M rev-parse HEAD)" \
+  "$M/.venv/Scripts/python.exe tools/generate_queue.py --out data/selfplay-mc0 --games 40000 --seed 7701 --served --servers 2 --workers 24 --limit 12 --value data/models/value-gen11L.pt --pool regmc-matchupweb -- --rank-leaf" \
+  > $OUT/CMD
+$M/.venv/Scripts/python.exe C:/tmp/pokeuraou-machine/heavy.py --agent IKA-77 --cores 16 --why "M-C gen-0 40,000局（専有）" -- \
+  $M/.venv/Scripts/python.exe $M/tools/generate_queue.py --out $OUT --games 40000 --seed 7701 \
+  --served --servers 2 --workers 24 --limit 12 --value $M/data/models/value-gen11L.pt \
+  --pool regmc-matchupweb -- --rank-leaf > $M/data/selfplay-mc0.out 2>&1
+```
+
+* この形そのもの（出力先だけ C:/tmp/ika77/smoke、`--games 48`）を 06:01 に回した: 48/48、echo は上と同じ、store 47 ファイル
+* seed 7701 は試走（7700）と別。値に意味はない。控えの旗は書かない（`--pool` の既定が隠蔽。書くなら `--hide-bench`）
+* 見るもの: `data/selfplay-mc0.out` の最後の 2 行（`generation done ... 40000 written` と idle）、`$OUT/logs/inference0.log`
+  の `cuda waits: blocking sync`、`ls $OUT/selection-solved | wc -l` が最後に 2,145、終わった後に
+  `C:/tmp/ika77/read_games.py`（数えの道具。無ければこの節の 2 の項目）と `tools/refusal_replay.py --games-dir data/selfplay-mc0`
+* 途中の進み: `cat $OUT/games-worker*.jsonl | wc -l`（数分ごとで十分。CPU の張り付きも見る）
+
+### 6. 途中で止まったとき
+
+局は (seed, gameIndex) で決まり、同じ番号をもう一度打てば同じ局になる（上の 600/600）。キューは番号を小さい順に配るので、
+書かれた局は「先頭から K 未満すべて」と「K 以上に高々ワーカー数くらい」になる。だから **別の出力先に K から打ち直し、重なった
+番号を落として戻す**。同じ `--out` にもう一度流すと、各ワーカーのファイルに追記され、0 番から全部打ち直して重複になる。
+
+1. 止める: `generate_queue.py` と子（selfplay.py・inference_server.py）を PowerShell で CommandLine に合わせて止める
+   （pkill は無い）。`Get-CimInstance Win32_Process -Filter "Name='python.exe'" | ? CommandLine -match 'selfplay-mc0' | % { Stop-Process -Id $_.ProcessId -Force }`
+2. 位置: `$M/.venv/Scripts/python.exe $M/tools/queue_restart.py where $OUT 40000`
+   —— 切れた最後の行を `<名前>.jsonl.torn` へ退け（読む側は `*.jsonl` しか見ない）、`first missing K` と `--first-game K --games 40000−K` を出す
+3. 打ち直す: 5 のコマンドの `--out` を `$M/data/selfplay-mc0-r1`、`--games` を `40000−K` にし、`--first-game K` を足し、
+   `--` の後ろに `--selection-store $OUT/selection-solved` を足す（解いた対を読み直す。無いと r1 の中に新しい store を作って全部解き直す）。
+   seed は 7701 のまま
+4. 戻す: `$M/.venv/Scripts/python.exe $M/tools/queue_restart.py merge $OUT $M/data/selfplay-mc0-r1 r1`
+   —— r1 の局を `games-r1-workerN.jsonl` として $OUT へ移し、$OUT に既にある番号は `selfplay-mc0-r1/dropped-duplicates.jsonl` に退ける。
+   もう一度 `where` で `written 40000 distinct` を確かめる
+5. `encode_dataset.py` は $OUT の `*.jsonl` を全部読むので、戻した後はそのまま符号化できる
+
+試し（C:/tmp/ika77）: 48 局の smoke に対して `--first-game 40 --games 16 --selection-store smoke/selection-solved` で 16 局を打つと、
+8 対を store から読み（8 対は新しく解いて smoke の store に書いた）、重なった 40〜47 の 8 局は 8/8 同一。
+`queue_restart.py` は g600 の写しを各ファイル 10 局に切って最後に切れた行を足したもので、where → K=202、r600 の 600 局を merge →
+600 局・重複 240 を落とし、g600 と同一。テスト `tests/test_queue_restart.py`（4 本、1 秒）。
+
+### 7. 機械（heavy.py、--agent IKA-77）
+
+```
+  05:50:10–05:50:58  s48   6 コア     05:52:46–05:56:34  g600  16 コア（専有）   05:57:06–05:58:11  r600  16 コア（専有）
+  05:58–06:00        集計・同一性・拒否の再生・agent_drift（1 コア、各 0〜9 秒）
+  06:01:21           テスト 1 コア 1 秒     06:01:39–06:02:03  本番の形の smoke 48 局 16 コア     06:02:11–06:02:21  再開の smoke 16 コア
+```
+
+GPU は推論サーバ 2 本（各 1 GB 弱）。cargo build はしていない。
+
+## 9/24 — IKA-202: おうごんのからだ・フラワーベール —— 両エンジンとも無く、port は断らず注記も出なかった。オラクル 24 局面で旧 Python 12 落ち・新 0、diff_node の発火（M-C g600 で GaG 675・FV 423 セル、w12 で 755・281）で新 exe 0・旧 exe 全部違い（g600 の GaG は 618/675）
+
+### 1. Showdown の定義（a5df827、champions mod は上書きしない）
+
+* おうごんのからだ: `onTryHit(target, source, move) { if (move.category === 'Status' && target !== source) return null; }`、
+  `breakable`。`hitStepTryHitEvent` で変化技の各対象に（相手の技・味方の技〔デコレーション・てだすけ〕・全体技の各対象）。
+  Protect（優先度 3）の後。`null` は失敗（`hitResults[i] || false`、じだんだが読む）。場・陣地の技（`all`・`foeSide`・
+  `allySide`・`allyTeam`）は `TryHitField`/`TryHitSide` なので通る。ほろびのうたは `onHitField` が各場のポケモンに
+  `runEvent('TryHit')` するので止まる（ぼうおんと同じ `null`、歌い手に結果あり）。かたやぶり（キノコのほうし＝変化技も）で無効、
+  とくせいガードで戻る
+* フラワーベール: `onAllyTryBoost` / `onAllySetStatus` / `onAllyTryAddVolatile`、`breakable`。`onAlly` は持ち主と味方
+  （`alliesAndSelf`）。草タイプだけ。能力低下は `source && target === source` 以外すべて（相手の技・追加効果・いかく・
+  ねばねばネット・味方の技）。状態異常は `source && target !== source` かつあくびの眠りでないもの（どくびし・トゲの守り・
+  スパイシースプレーも）。あくびはボリュームの付与で止める（source 条件なし）。自分の技の反動（リーフストーム）は通る
+
+### 2. 実装（Python と port で同じ形、小さな関数）
+
+* `_good_as_gold_blocks` / `moves::good_as_gold_blocks`: `_immune_to_move` の先頭で判定（Protect の後、失敗扱い）
+* `PERISH_SONG_TRY_HIT_ABILITIES = {soundproof, goodasgold}`（port は条件に並べた）
+* `_flower_veil` / `moves::flower_veil`: 草タイプで、場の味方（自分を含む）に `current_actor` のかたやぶりで破られない
+  フラワーベール。`apply_boosts` に `by_other`（port は `apply_boosts_by`、既定は `from_foe`。変化技の対象が味方の時だけ
+  `target != me` を渡す）、`apply_status` は `reason != "yawn"`（port はあくびの眠りだけ `apply_status_unveiled`）、
+  `add_volatile("yawn")`
+* 交代で出た時（`_on_switch_in` / `on_switch_in`）は `current_actor` を外す: Showdown は行動ごとに `clearActiveMove` するので、
+  いかく・ねばねばネット・どくびしは技の中ではない。本体は `_switched_in` / `switched_in` に改名しただけ
+  （ほえる等の引きずり出しは Showdown では技が生きたまま。見ていない）
+* port: `ability_handled` の「観測できる効果なし」からフラワーベールを外し、2 つを実装済みの行へ。`inert.rs` を再生成
+
+### 3. オラクル（`tests/test_goodasgold_flowerveil.py`、24 局面、1 手）
+
+止まる 12（GaG: おにび・あまえる・ちょうはつ・あくび・ほろびのうた・味方のデコレーション／FV: おにび・あまえる・あくび・
+バークアウトの追加効果・味方のあまえる・交代で出たいかく）と対照 12（かたやぶり 3、とくせいなしの同じポケモン 3、
+自分のリーフストーム、草でない持ち主へのおにび・いかく、ベールなし 3）。
+
+| | 旧 | 新 |
+|---|---|---|
+| Showdown の事実 | 24/24 | 24/24 |
+| Python（Showdown の局面から解く） | 12 落ち（止まる 12 全部） | 0 |
+| port（Python と分岐ごと） | 旧 exe × 新 Python: 13 落ち（いかくの持ち主側の鍵も違う） | 0 |
+
+我々のメニューは味方を狙う手を出さないので、テストは敵を狙う手の対象を `-1` に差し替えて作る。
+
+### 4. diff_node `--veils`
+
+どちらかが場に居る記録の局面の全セルを分岐ごとに比べ、`unveiled(ability)`（その特性だけ外した Python）で答えが動くセルを
+特性ごとに数える（その特性が場に居る局面のセルだけで）。M-C は `--roster` に M-C の名簿が要る（プールの 1 本目から
+C:/tmp/ika202/regmc-roster.json を作った）。各 100 ノード。
+
+| 記録 | セル | 断り | GaG 発火 | FV 発火 | 新 exe の違い | 旧 exe の違い |
+|---|---|---|---|---|---|---|
+| M-C 試走 g600 | 50,408 | 144 | 675 / 29,120 | 423 / 23,096 | 0 | 1,046（GaG 618・FV 423） |
+| M-B w12 | 51,888 | 206 | 755 / 10,880 | 281 / 41,008 | 0 | 1,036（GaG 755・FV 281） |
+
+g600 の GaG 発火のうち旧 exe と一致した 57 セルは見ていない（`differ` は中断した状態を比べ、`branch_differences` は
+中断の中身を比べない。とんぼがえり・すてゼリフが止まって中断が消えるセルと推測）。
+
+### 5. 記録で該当する決定（`kind == move`、選ばれた手が当たり得るものは上限）
+
+| 記録 | 局 | 4 体に GaG / FV | GaG が場 | FV が草の味方を守る | 選ばれた手が GaG に届く変化技 | 選ばれた手が FV の草に低下・状態異常・いかく |
+|---|---|---|---|---|---|---|
+| M-C g600 | 600 | 119 (19.8%) / 113 (18.8%) | 407 | 21 | 10 決定・8 局 | 4 決定・4 局 |
+| M-B w12 | 43,999 | 1,317 (3.0%) / 8,258 (18.8%) | 4,687 | 987 | 238・197 局 | 441・391 局 |
+| M-B gen11L | 12,000 | 347 (2.9%) / 1,390 (11.6%) | 1,394 | 184 | 114・92 局 | 84・64 局 |
+
+M-C ではフラワーベール持ち（フラエッテ永遠・フラージェス、どちらもフェアリー）の横に草が居る決定は少ない（21）。
+
+### 6. 別課題の候補
+
+* `apply_status` の他の穴: しんぴのまもりが状態異常を止めていない（混乱だけ IKA-189）、あくびもしんぴのまもり・
+  状態異常持ちで失敗しない。ぼうおんは変化技の音技（ほろびのうた以外）を止めていない
+* クリアボディ系は `from_foe` で見ているが、Showdown は `target === source` 以外（味方の技も止める）。まけんきは逆に
+  味方からの低下を無視する（`target.isAlly(source)`）のに `from_foe` の追加効果（味方を巻き込む全体技）で発動する
+* アロマセラピー・いやしのすずは GaG を飛ばす（`goodasgold` の特別扱い）が、両技とも未実装
+* g600 の 57 セル（上）の確認と、`branch_differences` が中断の中身を比べない件（IKA-191 の節と同じ）
+
+### 7. 機械
+
+cargo release 2 回（8 コア 22・18 秒）、オラクルテスト（1 コア、各数秒）、関係テスト 11 ファイル 2 回（1 コア 12 秒〔priors 無しで
+落ち〕・32 秒）、diff_node 5 回（1 コア 13・470・470・576・576 秒、g600 と w12 は新旧を並行）、記録の数え上げ 2 回（1・21 秒）。
+すべて heavy.py（--agent IKA-202）。
+
+## 9/24 — IKA-201: メイカーがフィールドを張る —— グラス・サイコ・エレキ・ミストメイカーが登場・交代・メガシンカ（先発も）でフィールドを張り、シードが使われ、グラスフィールドの回復とじしん半減が入る。オラクル 34 件で Python・port とも Showdown と一致、diff_node の発火 4,831 セルで新 exe 0・旧 exe 4,831 違い。記録（M-B）には 0
+
+### 1. Showdown（a5df827、champions mod は触らない）
+
+* メイカー（data/abilities.ts）: `onStart(source) { this.field.setTerrain('…terrain') }`。`onStart` は `SwitchIn` の場の
+  イベントで走る（sim/battle.ts `getCallback`）ので、先発（`|turn|1` の前）・交代で出た時・メガシンカで得た時（メガライチュウX の
+  エレキメイカー）に張る。天候（`WEATHER_ABILITIES`）と同じ `_switch_in_ability` に置いたので、順番も天候と同じ（素早さ順）
+* `Field#setTerrain`（sim/field.ts:130）: 同じフィールドなら `false` で持続は変えない。違えば持続は `durationCallback(source)`
+  （テラインエクステンダーで 8、ほかは 5）で、その場で `eachEvent('TerrainChange')`
+* シード（data/items.ts）: `onTerrainChange` と `onStart`（`onSwitchInPriority: -1`）で、合うフィールドなら `useItem()`。
+  `useItem` は持ち主自身から `boosts` を掛けてから道具を消す（エレキ・グラスは防御 +1、ミスト・サイコは特防 +1）
+* グラスフィールド: `onResidual`（order 5・subOrder 2、たべのこしより前）で接地したポケモンが `baseMaxhp / 16` 回復。
+  `onBasePower` で じしん・じならし・マグニチュードが接地した**受け手**に半減
+* ミストフィールドのドラゴン半減は接地した**受け手**で判定（使い手の接地は関係ない）。旧コードは使い手の接地で見ていた
+* グラススライダーの +1 は `source.isGrounded()` も要る（ふうせんのゴリランダーは先制しない）
+* サイコフィールドの先制技封じ（IKA-156）はすでに対象ごとに実装済み。張られるようになったので効き始める
+
+### 2. 変更（小さな関数にまとめた）
+
+* Python resolve.py: `_surge`・`_set_terrain`・`_use_terrain_seed`・`_grassy_terrain_heal` を `_do_mega` の前に。呼び出しは
+  `_switch_in_ability`（天候の直後に 1 行）・`_on_switch_in`（特性の直後にシード 1 行）・技のフィールド（`_set_terrain` に置き換え）・
+  残りの効果（たべのこしの前に 1 行）。effects.py に `TERRAIN_ABILITIES`・`TERRAIN_SEEDS`。moveinfo.py の `terrain_modifiers` に
+  受け手の接地（引数を 1 つ足した、既定 True）、speed.py のグラススライダーに接地
+* port: 新しいファイル `rust/src/terrain.rs`（同じ 4 関数）。resolve.rs・moves.rs は呼び出しの 1〜3 行ずつ。ゲートにメイカー 4 つと
+  シード 4 つを足し、`port_coverage.py --rust`・`--rust-modelled` で inert.rs・modelled.rs を作り直した（メイカー・シード・
+  テラインエクステンダーが inert から外れた）
+* 先発は Python だけ（`apply_lead_abilities` → `_on_switch_in`）。`position_from_sets` はこれを通るので、生成の最初の局面にも張られる
+
+### 3. オラクル（tests/test_terrain_surge.py、34 件）
+
+先発 6 局面（Showdown の `|turn|1` の局面と `position_from_sets` を比べる）、ターン 12 局面（Python と port を Showdown と比べる）。
+
+                                        旧 Python   新 Python   旧 exe   新 exe
+  先発（陽性 5・対照 1）                 5 落ち      通る        —        —
+  ターン（陽性 10・対照 2）              10 落ち     通る        10 落ち   通る
+  対照（メイカー無し・地面同士のミスト）  通る        通る        通る      通る
+
+陽性: グラスメイカー先発、エクステンダーで 8、メイカー 2 体（遅い方が残る、両方のシードが使われる、逆向きも）、別のフィールドの
+シードは残る、交代で出て張る（相手のシードが使われる）、張られた後に出たシード持ち、メガライチュウX、グラスフィールドの回復
+（ひこうは回復しない）、じしん半減、ミストは受け手（カイリューのドラゴンクローが地面のガブリアスに半減、ガブリアスのが
+アーマーガアに半減しない）、同じフィールドの技は持続を変えない（4 → 3）、ふうせんのグラススライダーは先制しない、地面なら先制する。
+ルールを 1 つずつ Python から抜く故障注入でも、それぞれの局面が落ちる（じしん 1、回復 3、シード 4、張り直し 1、接地 1）。
+
+### 4. diff_node（`--surge`、M-C の試走 C:/tmp/ika77/out/g600、`--roster` は M-C プールの 1 構築目を写した一時ファイル、30 ノード）
+
+メイカー持ちが場に居る局面、半分にフィールドを張った（グラス 9、サイコ 6、残り 15 は張らない）。対照 `before_ika201` は IKA-201 の
+規則を全部抜いた Python。
+
+                                   新 exe       旧 exe（master 4dd5f46）
+  セル                              16,392       16,392
+  分岐単位で違うセル                0            14,236
+  発火セル（対照が動かす）          4,831        4,831
+  発火セルのうち違う                0            4,831
+  最悪のセル差                      5.6e-16      9.5e-02
+  notes が違うノード                0            30（旧 modelled.rs にメイカーが無い）
+  port が断ったセル                 144（トリック、既存）
+
+旧 exe は mtime を新しくした複写で走らせた（`require_current_binary` が古い exe を断るため、意図してのこと）。
+「equilibrium frequency moved at most 1.0」は新 exe でも出る（同値の均衡の選び方、既知）。
+
+### 5. 試走の最初の局面を作り直す（生成し直しはしていない）
+
+600 局の `ownTeam`・`foeTeam` から `position_from_sets` を新しいコードで作り直した（先発は 600 局とも記録と同じ）。
+C:/tmp/ika77/terrain.py で数えると、最初の局面のフィールドは 記録 None 600 → 作り直し グラス 104・サイコ 109・なし 387。
+メイカーが先発に居る 213 局はすべて張られ、居ない 387 局は張られない。メイカー 2 体の対面 10 局は遅い方のフィールド。
+最初の局面でシードが使われたのは 43 体。
+
+### 6. 記録（M-B）
+
+w12（43,999 局）・gen11L（12,000 局）とも、フィールドがあった決定 0（技のフィールドも使われていない）、メガライチュウX 0、
+シードは M-B の道具に無い。今回の変更で答えが動く決定は記録に無い。M-C（g600）は上の通り、ゴリランダー 42.8%・イエッサン 32.2%。
+
+### 7. 別課題の候補
+
+* **ワイドフォース**（M-C g600 で 600 局中 227 局に居る）: サイコフィールドで使い手が接地していると相手 2 体への範囲技
+  （`onModifyMove` で `allAdjacentFoes`、範囲の 0.75 倍、ワイドガードに止まる）になる。どちらのエンジンにも無い。1.5 倍にも接地が要るが
+  今は見ていない。フィールドが張られるようになったので、本番の前に直すかの判断が要る
+* **ふうせんが割れない**（両エンジン）: 攻撃が当たっても `airballoon` が残る。オラクルの局面で見つけた（ふうせんに当てない形に変えた）
+* ぎたい（ガラルマッギョ）・たねまき（オリーヴァ）: M-C に居るがフィールドとの関わりは未実装
+* ワイドフォース以外の接地の読み: だいちのはどう（フィールドパルス）の型と威力も使い手の接地が要る（g600 で 6 局）
+* いえき・スキルスワップ等で特性を得た時の `onStart`（トレースは IKA-203）は見ていない
+
+### 8. 機械
+
+cargo release 1 回（8 コア 22 秒）＋取り込み後 1 回、オラクルのテスト単体 6 回（1 コア 各 1〜2 秒）、関係テスト 14 ファイル 1 回
+（1 コア 90 秒）、diff_node 3 回（1 コア 4・141・116 秒）、記録の数え 1 回（1 コア 11 秒）、作り直し 2 回（各数秒）。すべて heavy.py
+（--agent IKA-201）。
