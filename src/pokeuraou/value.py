@@ -742,6 +742,27 @@ def _grown(
     return out
 
 
+def _refuse_unless_extended(blob: dict[str, Any], encoder: Encoder) -> None:
+    """A model from another regulation loads only onto a vocabulary that extends its own.
+
+    M-C's committed order begins with M-B's (`configs/vocab/`, IKA-82), so the M-C
+    vocabulary cut back to an M-B model's table sizes, and named M-B, is the vocabulary
+    that model was trained on -- its fingerprint is the one the model stored. Any other
+    pair of regulations, or M-C in the id-sorted order it had before, gives another
+    fingerprint and is refused: there the same integer is a different Pokemon.
+    """
+    have, want = _model_vocab_sizes(blob), encoder.vocab.sizes
+    if all(have[k] <= want[k] for k in want):
+        cut = encoder.vocab.prefix(have, blob["format_id"]).fingerprint()
+        if cut == blob["vocab_fingerprint"]:
+            return
+    raise ValueError(
+        f"model was trained on {blob['format_id']}, encoder is for "
+        f"{encoder.vocab.format_id}, and the encoder's vocabulary does not begin with the "
+        "model's: the same integer would mean a different Pokemon"
+    )
+
+
 def load_model(path: str | Path, encoder: Encoder) -> tuple[ValueNet, dict[str, Any]]:
     """Loads weights, refusing a vocabulary they were not trained against.
 
@@ -755,18 +776,18 @@ def load_model(path: str | Path, encoder: Encoder) -> tuple[ValueNet, dict[str, 
     one the model stored. Then the embedding tables get zero rows for the appended ids
     (`_grown`) and every other weight loads as it is. Anything else -- an index that moved,
     a table that shrank -- still fails the fingerprint and is refused.
+
+    The same holds across regulations whose order extends another's: an M-B model loads
+    onto M-C (`_refuse_unless_extended`) and `meta["vocab_extended_from"]` names M-B.
     """
     blob = torch.load(Path(path), map_location="cpu", weights_only=False)
-    if blob["format_id"] != encoder.vocab.format_id:
-        raise ValueError(
-            f"model was trained on {blob['format_id']}, encoder is for "
-            f"{encoder.vocab.format_id}"
-        )
     weights = blob["weights"]
+    if blob["format_id"] != encoder.vocab.format_id:
+        _refuse_unless_extended(blob, encoder)
     if blob["vocab_fingerprint"] != encoder.vocab.fingerprint():
         have, want = _model_vocab_sizes(blob), encoder.vocab.sizes
         shrank = [k for k in want if have[k] > want[k]]
-        prefix = None if shrank else encoder.vocab.prefix(have).fingerprint()
+        prefix = None if shrank else encoder.vocab.prefix(have, blob["format_id"]).fingerprint()
         if prefix != blob["vocab_fingerprint"]:
             detail = (
                 f"its tables are larger ({', '.join(shrank)})"
@@ -784,6 +805,8 @@ def load_model(path: str | Path, encoder: Encoder) -> tuple[ValueNet, dict[str, 
             **(blob.get("meta") or {}),
             "vocab_grown_from": {k: have[k] for k in want if have[k] != want[k]},
         }
+        if blob["format_id"] != encoder.vocab.format_id:
+            blob["meta"]["vocab_extended_from"] = blob["format_id"]
     # The fingerprint covers the vocabulary -- which species is which integer -- and not
     # the numeric feature blocks beside it. Adding a side feature shifts every feature
     # after it, and a model loaded across that change would read boosts where it expects
