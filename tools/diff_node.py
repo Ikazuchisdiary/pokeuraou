@@ -64,6 +64,10 @@ not read -- so the cells it moves are the ones where the count's distribution ma
 modelled without ever giving anyone the counter. The control is the turn with
 `_perish_song` taken out, so the cells it moves are the ones where somebody was given one.
 
+`--using helpinghand` holds the port to Helping Hand's failure on a partner that has
+already moved (IKA-184). The control is the turn with `_helping_hand_fails` answering no,
+so the cells it moves are the ones where a help failed.
+
 `--using stoneaxe` (or `ceaselessedge`) takes a move that lays a hazard from its own
 `onAfterHit` (IKA-173); its control is the turn with `AFTER_HIT_HAZARDS` emptied, the
 hit laying nothing as before.
@@ -465,6 +469,22 @@ class unsung:  # noqa: N801 - read as a phrase at the call site
         resolve_mod._perish_song = self.real
 
 
+class unhelped:  # noqa: N801 - read as a phrase at the call site
+    """Python with `_helping_hand_fails` answering no: the control for Helping Hand
+    (IKA-184). A help on a partner that has already moved lands, as before."""
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = resolve_mod._helping_hand_fails
+        resolve_mod._helping_hand_fails = lambda *_args: False
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        resolve_mod._helping_hand_fails = self.real
+
+
 class unlaid:  # noqa: N801 - read as a phrase at the call site
     """Python with Stone Axe's and Ceaseless Edge's `onAfterHit` taken out, as before
     IKA-173: the control for `--using stoneaxe`. The hit still lands."""
@@ -642,6 +662,8 @@ class unchanged:  # noqa: N801 - read as a phrase at the call site
             self.parts.append(unraged())
         if "perishsong" in moves:
             self.parts.append(unsung())
+        if "helpinghand" in moves:
+            self.parts.append(unhelped())
         if any(reg.moves[m].raw.get("drain") for m in moves):
             self.parts.append(undrained(reg, moves))
         if any(judged(reg.moves[m]) for m in moves):
@@ -1296,6 +1318,7 @@ def main() -> None:
             or move_id in AFTER_HIT_HAZARDS
             or move_id in rampage_moves(reg)
             or move_id == "perishsong"
+            or move_id == "helpinghand"
             or move.raw.get("drain")
             or judged(move)
         ):
@@ -1304,7 +1327,7 @@ def main() -> None:
                 f"({sorted(TYPE_SPENDING_MOVES)}), hazard-laying "
                 f"({sorted(AFTER_HIT_HAZARDS)}), rampage "
                 f"({sorted(rampage_moves(reg))}), drain or judged status moves, "
-                f"or perishsong; {move_id} is none of them"
+                f"perishsong or helpinghand; {move_id} is none of them"
             )
 
     if args.value:
