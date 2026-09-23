@@ -9981,3 +9981,75 @@ M-C（両方の席をプールから取る）ではゴースト同士・フェ�
 
 機械: cargo release ビルド 1 回（8 コア 25 秒）、diff_node 52 秒・110 秒（1 コア）、記録の集計 3〜12 秒 ×5（1 コア）、
 テスト 82 秒（1 コア）は heavy.py に記録（--agent IKA-153）。ほかに数十秒の短いテスト・調べ（オラクル 1 本、1 コア）を数回、直接走らせた。
+
+## 9/23 — IKA-155: ばけのかわを命中・無効の後に —— オラクルでミミッキュへの無効技 2 つ・外れた技・まもるミミッキュへのフェイントの 4 ケースとも Python がずれていた。w12・gen11L にミミッキュは 0 局
+
+### 1. 何がずれていたか
+
+Showdown のばけのかわは `onDamage`（`data/abilities.ts` の `disguise`）で、`trySpreadMoveHit` の手順 7（ヒットのループ）の中で効く。
+手順 2（タイプ無効）・手順 4（命中）が先に走り、各手順の後に通った対象だけが残る（`sim/battle-actions.ts:553-578`・`:605`）。
+Python は `_hit_target` の頭（命中の分岐と `calculate` より前）で `_bust_disguise` を呼んでいて、無効でも外れでも剥がして 1/8 を削っていた。
+しかも `damage.py` の `calculate` は、ばけのかわの判定を無効の判定より前に置いていて、無事なミミッキュには無効技でも `immune=False` を返していた。
+
+### 2. オラクル（`tests/test_disguise_order.py`、方針は急所なし・追加効果なし・最大乱数）
+
+```
+  ケース                   Showdown のミミッキュ            旧 Python                    新 Python
+  immune-normal  ねこだまし  mimikyu 150/150（-immune）       mimikyubusted 132/150         mimikyu 150/150
+  immune-dragon  ドラゴンクロー mimikyu 150/150（-immune）    mimikyubusted 132/150         mimikyu 150/150
+  missed         いわなだれ外れ mimikyu 150/150（-miss）      mimikyubusted 132/150（外れの枝が無い） 外れ 0.1: 150/150、当たり 0.9: 132/150
+  feint-immune   フェイント→まもる、いわなだれ後 150/150（まもるが残る） 剥がれ・まもる破り・いわなだれが通る  150/150
+  control-rock-slide 当たる   mimikyubusted 132/150           132/150                       132/150
+  control-knock-off  当たる   mimikyubusted 132/150           132/150                       132/150
+```
+
+テストは両陣営 8 体の種族と HP を Showdown と突き合わせる。control の 2 つは陽性対照（剥がしを全部やめた実装はここで落ちる）。
+アイスフェイスは試せない: M-B・M-C のどちらの regulation にも `eiscue`（無事な形）が無く、`eiscuenoice` だけがある。
+
+### 3. 直し
+
+* `src/pokeuraou/damage.py`: 変化技・無効の早期 return を、ばけのかわ・アイスフェイスの吸収より前へ。無事なミミッキュへの無効技は `immune=True`
+* `src/pokeuraou/resolve.py`: `_hit_target` の頭の `_bust_disguise` を外し、命中の枝で `calculate` が無効でないときだけ、
+  その枝の状態で（IKA-153 のまもる破り → 剥がし の順に）行う。ばけのかわは急所を消す（`onCriticalHit` が false）ので、守られた当たりは命中の枝ごとに 1 状態。
+  判定だけの `_forme_guard` と、無効の枝の状態を作る `_immune_state` を切り出した。IKA-153 で残した「この道は命中も無効も見ないので吸ったときに破る」も、これで命中・無効の後になった
+* `rust/src/damage.rs`: `damage.py` と同じ並べ替え。port は `check_position_supported` と `hit_target` でこの 2 特性を拒否したまま
+  （`test_disguise_and_ice_face_are_refused_by_name` が pass）なので、答えが動く道は無い。damage 層を Python と同じにしておくためだけ
+
+### 4. 直す前に落ちるテスト
+
+```
+  tests/test_disguise_order.py               旧 resolve + 旧 damage   新 resolve + 旧 damage   新 + 新
+  [immune-normal]                            FAIL                     FAIL                     pass
+  [immune-dragon]                            FAIL                     FAIL                     pass
+  [missed]                                   FAIL                     pass                     pass
+  [feint-immune]                             FAIL                     FAIL                     pass
+  [control-rock-slide]                       pass                     pass                     pass
+  [control-knock-off]                        pass                     pass                     pass
+```
+
+中の列が示すように、`resolve.py` だけ直しても無効の 3 ケースは `damage.py` の順序で落ちる。両方が要る。
+
+### 5. 記録で該当する決定
+
+```
+                              ファイル   ミミッキュを含むファイル   コオリッポ   対照: ガオガエンを含むファイル
+  data/ika73/w12              24         0                          0            24
+  data/selfplay-gen11L        24         0                          0            24
+```
+
+どちらの記録にもミミッキュ（とコオリッポ）が 1 局も出ない（`grep -il` で全 jsonl を見た）。だから表のセルも実際に指した手も 0。
+M-C（両方の席をプールから取る）でプールにミミッキュが入れば効く。
+
+### 6. 検査と機械
+
+`tools/port_coverage.py --check`・`tools/port_gate_audit.py --check`: ok。`ruff check` ok（`ruff format` はこのリポジトリの既存ファイルに
+もともと適用されていないので、触った行だけ周りに合わせた）。テスト: test_disguise_order・test_feint_order・test_rust_node・test_resolve・
+test_damage_diff・test_line_endings・test_no_machine_specific_paths・test_port_gates・test_port_coverage を `-n 0` で 151 pass（61 秒）。
+機械: cargo release ビルド 1 回（8 コア 24 秒）・テスト 61 秒（1 コア）は heavy.py に記録（--agent IKA-155）。
+ほかにオラクル 1 本（数秒〜十数秒、1 コア）を数回と、記録の grep（1 コア、数十秒）を直接走らせた。
+
+### 7. 残り（別課題の候補、オラクルでは未確認）
+
+* ばけのかわが吸った当たりで、Python は追加効果・`_after_hit`（接触・技の後の効果）を全部飛ばす。Showdown はダメージ 0 の当たりとして
+  その後の手順を続けるはず（`onDamage` が 0 を返すだけ）
+* 連続技: Showdown は 1 発目だけ吸って 2 発目からは化けの皮の剥がれた相手に当たるはず。Python は技全体を吸う

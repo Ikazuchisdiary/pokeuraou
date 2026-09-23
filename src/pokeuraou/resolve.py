@@ -2755,16 +2755,12 @@ def _hit_target(
     # state where the hit lands and before its damage.
     breaks = bool(move.raw.get("breaksProtect"))
 
-    busted = _bust_disguise(turn, move, target)
-    if busted:
-        # The forme guards absorb the hit at the damage step (step 7), after the break.
-        # This path does not branch on accuracy or check immunity, and neither does the
-        # break here; the port refuses both abilities.
-        if breaks:
-            _break_protection(turn, action, move, [target])
-        # The hit is absorbed entirely, and the forme change means the next one is not.
-        turn.log(f"{action.label(reg)} absorbed by {busted}")
-        return [(1.0, turn, "")]
+    # Disguise and Ice Face take the hit at the damage step, step 7 -- after the type
+    # immunity and the accuracy, and after the break. So a Normal move into Mimikyu is
+    # immune and a move that misses it misses, and neither busts the forme (IKA-155).
+    # Disguise also makes the hit uncrittable (`onCriticalHit` returns false), so a guarded
+    # hit has one state per accuracy branch. The port refuses both abilities.
+    guarded = _forme_guard(turn, move, target) is not None
 
     accuracy = _accuracy(turn, move, attacker, defender)
     crit_p = crit_probability(reg, attacker, defender, action.move_id)
@@ -2811,6 +2807,23 @@ def _hit_target(
             state.move_failed.add((action.side, action.slot))
             outcomes.append((acc_weight, state, note))
             continue
+        if guarded:
+            result = calculate(
+                reg, attacker, defender, action.move_id, turn.field(),
+                defender_side=target[0], spread=spread, crit=False, move_ctx=move_ctx,
+            )
+            turn.unmodelled |= set(result.unmodelled)
+            if result.immune:
+                outcomes.append((acc_weight, _immune_state(turn, action, move, target), note))
+                continue
+            state = turn.clone()
+            if breaks:
+                _break_protection(state, action, move, [target])
+            busted = _bust_disguise(state, move, target)
+            # The hit is absorbed entirely, and the forme change means the next one is not.
+            state.log(f"{action.label(reg)} absorbed by {busted}")
+            outcomes.append((acc_weight, state, note))
+            continue
         for crit_weight, crit in crit_branches:
             if crit_weight <= 0:
                 continue
@@ -2820,10 +2833,7 @@ def _hit_target(
             )
             turn.unmodelled |= set(result.unmodelled)
             if result.immune:
-                state = turn.clone()
-                state.log(f"{action.label(reg)} had no effect")
-                state.move_failed.add((action.side, action.slot))
-                _absorb(state, move, target)
+                state = _immune_state(turn, action, move, target)
                 outcomes.append((acc_weight * crit_weight, state, note))
                 continue
             # The raw roll, not effective_damage: `deal_damage` owns the cap at the
@@ -2973,23 +2983,48 @@ FORME_GUARDS: dict[str, tuple[str, str, bool]] = {
 }
 
 
-def _bust_disguise(turn: _Turn, move: Move, target: tuple[int, int]) -> str | None:
-    """Absorbs one hit with Disguise or Ice Face, and busts the forme.
+def _immune_state(
+    turn: _Turn, action: QueuedAction, move: Move, target: tuple[int, int]
+) -> _Turn:
+    """The state after a hit the target is immune to: the move fails, and absorbers gain."""
+    state = turn.clone()
+    state.log(f"{action.label(turn.reg)} had no effect")
+    state.move_failed.add((action.side, action.slot))
+    _absorb(state, move, target)
+    return state
 
-    Absorbing without busting would swallow every hit for the rest of the battle. From
-    generation 8 Disguise also costs its holder an eighth of its maximum HP.
-    """
+
+def _forme_guard(
+    turn: _Turn, move: Move, target: tuple[int, int]
+) -> tuple[str, str, bool] | None:
+    """The intact Disguise or Ice Face that would take this hit, without touching it."""
     mon = turn.mon_at(*target)
     if mon is None or mon.fainted or move.category == "Status":
         return None
     entry = FORME_GUARDS.get(mon.ability)
     if entry is None:
         return None
-    intact_species, busted_species, physical_only = entry
+    intact_species, _busted_species, physical_only = entry
     if mon.species != intact_species:
         return None
     if physical_only and move.category != "Physical":
         return None
+    return entry
+
+
+def _bust_disguise(turn: _Turn, move: Move, target: tuple[int, int]) -> str | None:
+    """Absorbs one hit with Disguise or Ice Face, and busts the forme.
+
+    Absorbing without busting would swallow every hit for the rest of the battle. From
+    generation 8 Disguise also costs its holder an eighth of its maximum HP. The caller has
+    already let the hit land: it is not immune and did not miss (IKA-155).
+    """
+    entry = _forme_guard(turn, move, target)
+    if entry is None:
+        return None
+    mon = turn.mon_at(*target)
+    assert mon is not None
+    busted_species = entry[1]
     mon.species = busted_species
     species = turn.reg.species.get(busted_species)
     if species is not None:

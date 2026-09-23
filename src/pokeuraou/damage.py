@@ -328,8 +328,16 @@ def calculate(
     zeros = np.zeros((n, N_ROLLS), dtype=np.int64)
     unmodelled = _unmodelled(attacker, defender)
 
+    if move.category == "Status" or immune:
+        return DamageResult(
+            rolls=zeros, effectiveness=eff, type_mod=type_mod, immune=immune,
+            unmodelled=unmodelled,
+        )
+
     # Disguise and Ice Face absorb one hit completely while intact. Showdown records that
-    # the bust has happened by changing the forme, so an intact one is identifiable.
+    # the bust has happened by changing the forme, so an intact one is identifiable. They
+    # act at the damage step, after the type immunity (IKA-155): a Normal move into an
+    # intact Mimikyu is still immune, not absorbed.
     if defender.ability == "disguise" and defender.species == "mimikyu":
         return DamageResult(
             rolls=zeros, effectiveness=eff, type_mod=type_mod, immune=False,
@@ -343,12 +351,6 @@ def calculate(
         return DamageResult(
             rolls=zeros, effectiveness=eff, type_mod=type_mod, immune=False,
             applied={"absorbed": (("iceface", 0),)}, unmodelled=unmodelled,
-        )
-
-    if move.category == "Status" or immune:
-        return DamageResult(
-            rolls=zeros, effectiveness=eff, type_mod=type_mod, immune=immune,
-            unmodelled=unmodelled,
         )
 
     fixed = move_fixed_damage(move_id, attacker, defender)
