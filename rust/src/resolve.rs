@@ -308,13 +308,14 @@ impl<'a> Turn<'a> {
         amount: i64,
         from_move: bool,
     ) -> Result<i64, String> {
-        let (mut dealt, uses_sash) = {
+        let (mut dealt, uses_sash, unbranched) = {
             let Some(mon) = self.mon_at(side, slot) else { return Ok(0) };
             if mon.fainted || amount <= 0 {
                 return Ok(0);
             }
             let mut dealt = amount.min(mon.hp);
             let mut uses_sash = false;
+            let mut unbranched = None;
             if from_move && dealt >= mon.hp {
                 if mon.has_volatile("endure") {
                     dealt = mon.hp - 1;
@@ -324,13 +325,21 @@ impl<'a> Turn<'a> {
                 {
                     dealt = mon.hp - 1;
                     uses_sash = mon.item.map(|i| i.as_str() == "focussash").unwrap_or(false);
-                } else if mon.item.map(|i| survive_chance_item(i.as_str()).is_some()).unwrap_or(false)
+                } else if let Some(item) =
+                    mon.item.filter(|i| survive_chance_item(i.as_str()).is_some())
                 {
-                    return Err("survival chance item (focusband) is not branched".into());
+                    // Python does not branch the 1-in-10 either: it reports it, and the
+                    // hit lands. This used to refuse the turn instead, which nothing could
+                    // reach while `item_handled` refused every holder -- and listing the
+                    // item made it the answer for exactly the cells the band is about.
+                    unbranched = Some(format!("survival chance not branched:{item}"));
                 }
             }
-            (dealt, uses_sash)
+            (dealt, uses_sash, unbranched)
         };
+        if let Some(note) = unbranched {
+            self.report(note);
+        }
         if uses_sash {
             self.consume_item(side, slot);
         }
@@ -720,6 +729,12 @@ fn item_handled(item: &str) -> bool {
             // refused for an effect that was already here -- 63% of the cells generation
             // refused and 76% of a match's, measured 2026-09-20 (IKA-29).
             | "whiteherb"
+            // The same shape twice more, found by `tools/port_gate_audit.py` (IKA-57):
+            // Quick Claw's roll is `fractional_priority`'s, beside Quick Draw's, and Focus
+            // Band's 1-in-10 is reported and not branched in `deal_damage` -- which is
+            // what Python does with it too. Neither id was listed, so a holder anywhere a
+            // turn could reach refused the whole node (IKA-70).
+            | "quickclaw" | "focusband"
     ) || crate::inert::item_is_inert(item)
         // Mega stones carry no turn effect of their own; the mega action owns the forme
         // change, and `reg.mega_targets` is what says which stone belongs to whom.

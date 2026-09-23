@@ -461,7 +461,12 @@ def build_queue(
 
     for branch, weight in zip(branches, weights, strict=True):
         if branch:
-            branch[0].branch_probability = weight
+            # A copy, not a write. Every action queued before a split is one object shared
+            # by the branches after it, so writing the weight into `branch[0]` left all of
+            # them holding the last branch's: a Quick Claw anywhere but the first queued
+            # action weighed 0.8 and 0.8, a turn of mass 1.6, and the claw fired half the
+            # time. The port clones its queues and never had this (IKA-70).
+            branch[0] = replace(branch[0], branch_probability=weight)
     return branches
 
 

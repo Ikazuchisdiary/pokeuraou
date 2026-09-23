@@ -88,28 +88,30 @@ GATES = (
 #: Candidates for the first question that a person has looked at and kept, because the
 #: name being in the port is not the port acting on it. The reason is the point: without
 #: it the next reader cannot tell a decided case from an unnoticed one.
+#: The places are named by function rather than by line: the lines moved under IKA-70's
+#: first edit to `resolve.rs`, and a reason that points at the wrong line is a reason
+#: nobody can check.
 ACKNOWLEDGED: dict[str, str] = {
     "slowstart": (
-        "the only mention is the refusal itself: check_position_supported refuses it at "
-        "resolve.rs:883, so a turn can never get half-way through it"
+        "the only mention is the refusal itself: check_position_supported refuses it by "
+        "name, so a turn can never get half-way through it"
     ),
-    "trick": "named only by the refusal at resolve.rs:796 -- this port swaps no items",
-    "switcheroo": "named only by the refusal at resolve.rs:796 -- likewise",
+    "trick": "named only by check_move_supported's refusal -- this port swaps no items",
+    "switcheroo": "named only by check_move_supported's refusal -- likewise",
 }
 
 #: Effects the port implements and its gate refuses, as of 2026-09-22. Every one of them
 #: is a bill rather than a wrong answer, and taking one off the list is not a one-line
 #: change: it makes the port answer positions it used to hand back, so it needs
 #: `tools/diff_node.py` to say the two engines agree on them first. Recorded so `--check`
-#: can fail on a fifth without first demanding these four be settled.
+#: can fail on the next one without first demanding these be settled.
+#:
+#: `quickclaw` and `focusband` were here too, and were struck on 2026-09-23 (IKA-70): the
+#: gate lists them now. The band was the case the warning above is about -- listing it
+#: made reachable a refusal in `deal_damage` that nothing could reach before, so that had
+#: to become Python's own report first.
 KNOWN_UNGATED: frozenset[str] = frozenset(
     {
-        # speed.rs:160 branches the priority roll for it, beside `quickdraw`, which is in
-        # the gate. Python does the same at speed.py:222.
-        "quickclaw",
-        # effects.rs:463 gives it the 1-in-10, read at resolve.rs:327, beside `focussash`,
-        # which is in the gate. Python has it at effects.py:552.
-        "focusband",
         # damage.rs:379-382 zeroes the hit for both. Not the same thing as Python, which
         # also busts the forme and takes Mimikyu's 1/8 (resolve.py:2952) -- so this pair
         # is a question about the port's damage layer, not a line for the gate.
