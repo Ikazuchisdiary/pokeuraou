@@ -21,6 +21,8 @@ and the differential tests stay installable without a CUDA wheel.
 
 from __future__ import annotations
 
+import json
+
 import numpy as np
 import pytest
 
@@ -286,9 +288,31 @@ def test_loading_refuses_another_regulation(bundle, tmp_path) -> None:  # noqa: 
     path = tmp_path / "value.pt"
     save_model(path, net, net.state_dict(), encoder.vocab, config, meta={})
 
-    other = Encoder(load_regulation("gen9championsvgc2026regmc"))
+    # M-C's committed order extends M-B's (IKA-82), so the refusal is shown on M-C as it was
+    # numbered before: its ids sorted, where the same integer is a different Pokemon.
+    other = Encoder(load_regulation("gen9championsvgc2026regmc", _sorted_mc(tmp_path)))
     with pytest.raises(ValueError, match="trained on"):
         load_model(path, other)
+    # And the committed M-C order is the one that loads it (tests/test_vocab_order.py).
+    _net, meta = load_model(path, Encoder(load_regulation("gen9championsvgc2026regmc")))
+    assert meta["vocab_extended_from"] == "gen9championsvgc2026regmb"
+
+
+def _sorted_mc(tmp_path) -> str:  # noqa: ANN001
+    """A copy of the M-C dump beside an order that is its ids sorted (the pre-IKA-82 one)."""
+    from pokeuraou.encode import VOCAB_TABLES, dump_ids
+    from pokeuraou.regulation import regulation_dir
+
+    fmt = "gen9championsvgc2026regmc"
+    src = regulation_dir() / f"{fmt}.json"
+    dump = tmp_path / "configs" / "regulations" / src.name
+    dump.parent.mkdir(parents=True)
+    dump.write_bytes(src.read_bytes())
+    ids = dump_ids(load_regulation(fmt))
+    order = {"formatId": fmt, **{t: sorted(ids[t]) for t in VOCAB_TABLES}}
+    (tmp_path / "configs" / "vocab").mkdir()
+    (tmp_path / "configs" / "vocab" / src.name).write_bytes(json.dumps(order).encode("utf-8"))
+    return str(dump)
 
 
 def test_loading_refuses_a_changed_vocabulary(bundle, tmp_path) -> None:  # noqa: ANN001
