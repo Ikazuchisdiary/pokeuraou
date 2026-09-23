@@ -12602,3 +12602,512 @@ merge_duplicates で外れの枝が当たりの枝に畳まれていた。Showdo
 ### 10. master（61433f2 IKA-175・IKA-173、0cbb30e IKA-176）取り込み
 
 `tools/diff_node.py` は master 側を取り、`unlaid`・`--toxic-debris`・`--charging`・`--hammer` の横に `undrained`・`unjudged`・`--frozen` を足し直した。
+
+## 9/24 — IKA-184: てだすけは相棒が既に動いていれば失敗する —— Python・port とも成功のままだった。直した後はオラクル 7 ケースで一致、ずれは失敗の旗だけで行列は動かない
+
+### 1. Showdown の定義（vendor a5df827、champions mod は上書きしない）
+
+`data/moves.ts` helpinghand: 優先度 +5、`volatileStatus: 'helpinghand'`、
+`onTryHit(target) { if (!target.newlySwitched && !this.queue.willMove(target)) return false; }`、
+condition は duration 1・`onStart` で 1.5 倍・`onRestart` で `*= 1.5`。`battle-actions.ts` の `hitStepInvulnerabilityEvent` は
+helpinghand を素通しにする。`newlySwitched` は champions の `clearVolatile`（switchIn）で立ち、`endTurn` で落ちる。
+
+- 相棒が既に技を使った（`willMove` が無い）なら失敗（`-fail`、じだんだが読む `false`）。+5 でそうなるのは、2 体が互いに
+  てだすけした遅い方と、いたずらごころのまもる（+4+1）が同じ枠で先に動いたとき。
+- 相棒がこのターン交代で出てきたなら、技の予約が無くても成功（`newlySwitched`）。
+- 対象が倒れている: 相棒が居なければ対象なしで、これは既に Python・port とも「had no target」の失敗。
+- 重ねがけ（`onRestart`）: ダブルでは味方は 1 体なので、2 体が同じ味方にてだすけすることは起きない（おうえん・さいはい無し）。
+
+### 2. オラクル（`tests/test_helping_hand_fails.py`、新規）
+
+どのケースも 1 ターン。side 1 は TEAM_B（遅い）。全員の HP・ひんし・失敗の旗を Showdown と比べ、port は Python の局面とも
+バイトで一致させる。Showdown 側の失敗の旗はテストの中で先に確かめる（陽性対照）。
+
+```
+  ケース              side 0 の手                     Showdown で失敗したもの            旧 Py  旧 exe  新 Py  新 exe
+  mutual              互いにてだすけ                   p1 ニョロトノ（遅い方）・p2 ガオガエン  不一致  不一致  一致   一致
+  mutual-swapped      互いに（相棒がカバルドン、遅い）   p1 カバルドン・p2 ガオガエン(まもる)   不一致  不一致  一致   一致
+  prankster-protect   てだすけ→いたずらごころのまもる   p1 ニョロトノ・p2 ガオガエン(まもる)   不一致  不一致  一致   一致
+  partner-attacks     てだすけ→ハイパーボイス（対照）   p2 ガオガエン（side 1 の互いに）       不一致  不一致  一致   一致
+  unhelped-attack     まもる・ハイパーボイス            p2 ガオガエン（side 1 の互いに）       不一致  不一致  一致   一致
+  fast-helper         速い方が遅い方に（対照）           無し                                  一致    一致    一致   一致
+  partner-switched    相棒が交代（対照、newlySwitched）  p2 ガオガエン(まもる)                  一致    一致    一致   一致
+```
+
+HP はどのケースも直す前から一致（1.5 倍は正しい）。違ったのは失敗の旗だけ。`test_the_boost_is_in_the_control` は
+partner-attacks と unhelped-attack の Showdown の減り方で、てだすけが効いたことを確かめる。直す前（旧 Python＋旧 exe）で
+15 のうち 10 落ち（Python 5・port 5）、新 Python＋旧 exe で port の 5 が落ち、新 Python＋新 exe で 15 通過。
+`test_perish_song.py` の FLAG_OF の注記（「resolver と port は付けない」）をこのテストへの参照に書き換えた。
+
+### 3. 直し
+
+- Python: `resolve.py` に `_helping_hand_fails(turn, targets)`。対象が `newly_switched` か `turn.acted` に無ければ成功。
+  `_do_status_move` のワイドガードの「nothing left to act」の門の直後で、失敗なら `move_failed` を立てて返す（volatile は付かない）。
+- port: `moves.rs` に同じ `helping_hand_fails`、`do_status_move` の同じ場所。
+- `tools/diff_node.py --using helpinghand`: 対照は `_helping_hand_fails` が常に「失敗しない」と答える Python（`unhelped`）。
+
+### 4. diff_node（`--using helpinghand`、1 コア）
+
+記録そのままの 40 局面（w12）では効果が 0 セルで、道具は「発火なし」で FAIL にする。そこで、場の片側にてだすけを知る者と、
+相棒がてだすけを知る（互いのセル）かいたずらごころ＋まもる系を持つ決定だけを抜いた games-dir を作った（`C:/tmp/ika184/hh_filter.py`、
+w12 229 決定・gen11L 169 決定）。
+
+```
+                                   fire-w12 40 局面     fire-gen11L 40 局面   fire-w12 12 局面 --value value-gen11L
+                                   新 exe   旧 exe      新 exe   旧 exe       新 exe   旧 exe
+  てだすけを使うセル                 2,606               2,840                 658
+  うち効果が出た（対照が動く）         194                 127                  29
+  枝ごとに違うセル                   0        190        0        125         0        27
+  途中交代で止まった枝のセル           4                   2                    2
+  最悪のセルの差                     2.2e-16  2.2e-16    1.1e-16  1.1e-16     1.1e-07  1.1e-07
+```
+
+旧 exe で違うのは枝の局面（失敗の旗）だけで、行列は新旧で同じ。hp-share・faints の葉も学習した葉も失敗の旗を読まず、
+helpinghand の volatile はターン終わりに消えるので、葉には届かない。効果が出たのに違わないセルは途中交代で止まった枝のセルの数と一致。
+記録そのままの w12 40 局面（新 exe）はてだすけのセル 2,264・違い 0・発火 0。
+w12 の 2 回（記録そのままと fire-w12）で「均衡の頻度の最大の動き」が 1.0 と出るが、値の動きは 7e-15 で新旧 exe で同じ。
+新旧で同じなのでこの変更ではない（同じ値の手が並んで均衡が一意でない局面と見込むが、確かめていない）。
+
+### 5. 記録で数えたこと（`C:/tmp/ika184/hh_count.py`、新 Python で両方の選んだ手を解き、`_helping_hand_fails` を見張る）
+
+```
+                                        w12          gen11L
+  局                                   43,999        12,000
+  てだすけを知る者が居る局              7,893         1,325
+  てだすけを選んだ決定                   4,493           912
+    相棒が先に動いて失敗する              1             0
+    相棒が居ない（pass）・門に届かない    265            29
+    手の文字列が選択肢に無い              32             2
+```
+
+1 件は w12 `games-worker4.jsonl` 836 行のターン 10: 相手側のいたずらごころエルフーンのまもると、ガオガエンのてだすけ。
+互いにてだすけを選んだ決定は 0（てだすけの決定は片側 1 回ずつ）。相棒の手で多いのはインファイト・サイコキネシス・ねっぷう。
+選ばれた手としてはほぼ起きないが、探索の行列には互いのセルといたずらごころのまもるのセルが毎回ある（4 節）。影響は次のターンの
+`moveLastTurnFailed` だけなので、じだんだの威力が変わるのはその後にじだんだを選んだときだけ。
+
+### 6. 検査と機械
+
+test_helping_hand_fails（新規）・test_perish_song・test_resolve・test_rust_node・test_port_coverage・test_port_gates・
+test_line_endings・test_after_move_oracle・test_hazards_after_hit・test_hazards_foe_side を `-n 0` で通過（246）。ruff check、
+`port_coverage.py --check`、`port_gate_audit.py --check` も通る。release ビルド 2 回（8 コア 22 秒・19 秒）、diff_node 7 回
+（57〜77 秒 4 回・25 秒 2 回・68 秒 1 回）、記録の走査 1 回（20 秒）、テスト 5 回（2〜49 秒）は heavy.py（--agent IKA-184）。
+旧 exe での port のテスト 1 回・Showdown と Python の状態の書き出し 1 回・決定の抜き出し 2 回は heavy.py を通さず 1 コアで数秒ずつ。
+worktree の data/ には $M の priors・standings・reportworm を写し、packages/sim-bridge/dist は main のものを写した（TS は触らない）。
+
+### 7. 別課題の候補
+
+- 無し（このずれは失敗の旗だけで、行列の値は動かない）。
+
+## 9/24 — IKA-186: port_gate_audit の「名前が出る＝扱う」の盲点を調べた —— 監査が「宣言的な欄だけの技」として外す 29 腕に、Python が名前で効果を書く つきのひかり・こうごうせい・あさのひざし が入っていた。port は回復を一切しない（オラクル 15 ケースで port だけ回復 0）。記録では 0 回選ばれ、M-B の事前分布とバルティモアに少し出る
+
+### 1. 監査が何を「扱った」とみなすか
+
+- `port_coverage.py`: Python の `ENGINE_FILES` 8 本（`all_modelled_*` の中身を除く）に id が文字列リテラルで出るか（`mentioned`）。出なければ `inert.rs` に入り、port は無視してよい。regmc のみから生成。
+- `port_gate_audit.py`: 3 つの門（`ability_handled`・`item_handled`・`status_move_handled`）の腕を読み、port の本文（`inert.rs`・`modelled.rs` と門の中身を除く全 .rs）に同じ id のリテラルがどこか 1 か所でもあれば「port が扱う」。無い腕は (a) 変化技で `STATUS_MOVES_FULLY_MODELLED` にあれば「宣言的な欄が技のすべて」、(b) Python も名前を出さなければ「Python も黙る」として外し、残りを `KNOWN_UNREFERENCED` と突き合わせる。
+  場所（どの関数か）、比較か書き込みか、否定の `!matches!` か、encode の表かは見ない。攻撃技は門を通らないので問われない。`--regulation` の既定は regmc で、記録（w12・gen11L）は M-B。
+
+### 2. 候補（`C:/tmp/ika186/scan.py`・`setaside.py`・`custom.py`）
+
+門の腕 abilities 180・items 45・変化技 75 について、Rust での出現箇所（関数）と Python の出現箇所を並べ、一つずつ読んだ。
+
+```
+  id                              Showdown                                       Python                                 port
+  moonlight/synthesis/morningsun  onHit: heal(modify(maxhp, 0.5 / 晴 0.667 /      _apply_status_move の                   出現 0（門の腕だけ）。(a) で外されていた。
+                                  他の天気 0.25))。dump に heal 欄なし、            WEATHER_RECOVERY_MOVES                  回復しない・注記もなし
+                                  hasCustomCode true
+  perishsong（IKA-172 で直った）  onHitField で全員に付与                          _perish_song                           直す前は residual・priority_blocked_by・encode だけ
+```
+
+(a) で外される 29 腕のうち hasCustomCode が true なのはこの 3 つだけ。名前が出るので通る 43 腕（taunt・roost・yawn・tailwind・auroraveil など）は、効果を書く道が宣言的な欄（volatileStatus・sideCondition・self）で両方にあることを確かめた。特性・持ち物は Python の効果の関数と port の対応する関数がそろっていた（magicguard・mirrorarmor・keeneye などは両方とも Showdown より狭いが、両方同じ）。
+
+### 3. 記録で選ばれた回数（`usage.py`、w12 43,999 局・gen11L 12,000 局）
+
+```
+                     w12 選択 / 持参     gen11L 選択 / 持参
+  moonlight 他 2 つ    0 / 0               0 / 0
+  （参考）perishsong  217 / 1,106          24 / 253
+  yawn               17,206 / 24,136       7,917 / 9,353
+  tailwind           10,966 / 17,333       3,668 / 5,570
+  roost               2,712 / 1,705          374 / 494
+  auroraveil             31 / 1,096            6 / 277
+  taunt                  34 / 567             10 / 112
+```
+
+3 つとも M-B・M-C 両方に居る。M-B の事前分布（1760）には synthesis 19・moonlight 6・morningsun 5 回出てくる。バルティモアの standings に morningsun が 1 回。
+
+### 4. ずれるかどうか
+
+オラクル（`weather_heal.py`、Clefable が HP 30/170 から使う、main の exe f1332d8c）:
+
+```
+  天気            Showdown  Python  port
+  なし            +85       +85     0
+  晴れ            +113      +113    0
+  雨・砂・雪      +42       +43     0      ← Python も 1 ずれる（下記）
+```
+
+3 技 × 5 天気の 15 ケースすべてで port は回復 0。
+
+記録の局面で教えて比べた（`cells.py --teach`、最後の技の枠を置き換える。ロックが指す枠は置き換えない、matrix 予算、40 局面、diff_node の `branch_differences`）:
+
+```
+                                     w12 セル  違う    うち効果あり   gen11L セル  違う   うち効果あり
+  moonlight（対照は回復抜きの Python） 4,855     3,148   3,141          4,258        2,766  2,766
+  recover（null 対照）                 4,855        23       15          4,258            0      0
+```
+
+recover の 23 はすべて注記 `residual speed tie`（port だけが出す、IKA-172 にも出た既知の件）。名前だけで通っている技の対照（w12 の 2 ファイル、12 局面）: yawn 899 セル・tailwind 480・roost 365・taunt 1,272・auroraveil 838 で違いは 0（効果ありはそれぞれ 633・360・170・1,037・739）。lifedew は 704 セルで 0（陽性対照の数え方が無い）。
+
+### 5. 別課題
+
+- **port の天気回復**: `moves.rs` `apply_status_move` に `WEATHER_RECOVERY_MOVES` 相当が無い。記録には出ないので今の数字は動かない。
+- **Python の天気回復の丸め**: Showdown は `this.modify(maxhp, factor)`（0.5 は 2048/4096、0.25 は 1024/4096、端数の .5 は切り捨て）。Python は `_round_fraction`（四捨五入）。maxhp 100〜300 で 1/2 は 100 個・1/4 は 50 個の maxhp で 1 多い。2/3（0.667 = 2732/4096）はこの範囲で一致。
+- **監査の既定の regulation**: 記録は M-B、`--check` は M-C。M-B で回しても今日の結果は同じ。
+- 教えた局面だけに出た形: 覚えていない技にロックされた（choicelock / encore の move が枠に無い）局面では、Python と port のロックの move が違う。ゲームでは起きない局面なので、ここでは調べていない。
+
+### 6. 監査を強くする案
+
+1. **(a) を狭める**（安い）: 「宣言的な欄が技のすべて」は、dump の `hasCustomCode` が false の腕だけに使う。true なら port に名前があることを求める。10 行くらいで、今日なら 3 つが見つかる。IKA-172 の形（port に名前はあるが道の一部が無い）は見つからない。
+2. **効果の道を宣言する表**（中くらい）: 門の腕ごとに、効果を書く port の関数と Python の関数の組（例 `perishsong: apply_status_move ↔ _apply_status_move`、`moonlight: 同`、`intimidate: switch_in_ability ↔ _switch_in_ability`）を書く。監査はその関数の本文（そこから引く定数表も含む）に id があるかを見る。Python 側も同じ関数表で読み、Python がある関数で名前を出すのに port の対応する関数に無ければ知らせる。IKA-172 と今回の両方を捕まえる。書き始めは約 300 腕。関数名の対応が 25 組ほど要り、定数を通した間接参照を読むのが手間。
+3. **発火の陽性対照を要求する**（高い、夜間向き）: 各腕について、記録の局面に教える（技）・持たせる（持ち物）・付け替える（特性）ようにし、Python で効果を抜いた対照と答えが違うセル（発火）が N 個以上あり、その全部で port と Python が枝ごとに一致することを求める。名前ではなく答えを比べるので、道が抜けたときも道が違うときも見つかる。今日の cells.py で技 1 つに 20〜30 秒（1 コア）なので、300 腕なら 2〜3 時間。効果の抜き方（技・特性・持ち物ごと）の表が要る。
+
+### 7. 機械
+
+記録の数え（45 秒）、セルの比較 2 回（248 秒・98 秒）、試し走り 4 回（各 2〜11 秒）。すべて heavy.py 経由、1 コア（--agent IKA-186）。オラクルは 1 コアで 1 回（数秒）。ビルドはしていない（main の exe f1332d8c の写しを使った）。
+
+## 9/24 — IKA-178: `randomNormal` の技（げきりん・はなびらのまい・さかまくほのお・あばれる・さわぐ・わるあがき）は生きている相手から毎回等確率で引き、このゆび・いかりのこなに引き寄せられる —— resolver（両エンジン）は最初に生きている相手に固定し、リダイレクトも飛ばし、注記もなかった
+
+ワーカー。基点 master d89a6c6、ブランチ `ika-178-random-target`。
+
+### 1. Showdown（a5df827、champions の上書きなし）
+
+- `sim/battle.ts` `getTarget`: `if (move.target !== 'randomNormal' && validTargetLoc(...))` —— randomNormal は選んだ位置を
+  読まず、必ず `getRandomTarget`。ダブルでは `pokemon.side.randomFoe()` = `sample(foes())`、`foes()` は `foe.allies()` で
+  HP のある相手だけ。
+- `runMove`（battle-actions.ts）が使うたびに `getTarget` を呼ぶ。げきりんの固定中は `side.chooseMove` が
+  `lastMoveTargetLoc` を渡すが、上の分岐で読まれないので **固定中の 2・3 ターン目も毎回引き直す**（最初の対象は保たない）。
+  1 ターン目は `targetLoc` 0 なので `battle-queue.ts` でも一度 `getRandomTarget` が呼ばれるが、その結果は使われない。
+- `pokemon.ts` `getMoveTargets` の default 枝: ダブルで `RedirectTarget` を回す。このゆび・いかりのこなの
+  `validTarget(..., 'randomNormal')` は隣接なら真なので、**randomNormal も引き寄せられる**（ひらいしん・よびみずも
+  `randomNormal` を `normal` と読んで引くが、該当する型の randomNormal 技は regulation に無い）。
+- regulation の randomNormal: outrage・petaldance・ragingfury・thrash・uproar・struggle（M-B・M-C とも）。
+
+### 2. オラクル（`tests/test_random_target.py`、新規）
+
+オラクルの `sample` はいつも最初の値を返すので、2 体目に届かない。`RandomnessPolicy.sample = 'first' | 'last'`
+（oracle.ts と oracle.py、既定 first、Python は既定のとき送らない）を足した。ガブリアスのげきりん（長さ 3）を、
+カバルドン・ミロカロス（めいそうだけ、すなおこしなし）とカバルドン・ピクシー（このゆびとまれ）に。
+
+```
+  ケース                          Showdown first   Showdown last    旧 Python / 旧 exe      新 Python / 新 exe
+  1 ターン目（相手 2 体）          カバルドン       ミロカロス       カバルドンだけ（落ち）   半々で両方（一致）
+  2 ターン目（固定中）             カバルドン       ミロカロス※     カバルドンだけ（落ち）   半々で両方（一致）
+  このゆびとまれ                   ピクシー         ピクシー         カバルドン（落ち）       ピクシー（一致）
+  pinned の予算（対照）            —                —                カバルドン（通る）       カバルドン（通る）
+  相手 1 体（対照、手で倒す）       —                —                1 枝（通る）             1 枝・注記なし（通る）
+  enumerate_secondary 偽           —                —                注記なし（落ち）         最初の相手＋注記
+```
+
+※ 2 ターン目の rolls に両方の相手の `sample` がある（引き直しの証拠）。1 ターン目にカバルドンに当てた局面からの
+「2 ターン目にミロカロス」の枝は、last の 1 ターン目のミロカロスの HP と合わせて比べた。
+直す前（旧 Python・旧 exe）: 13 のうち 7 落ち、通った 6 は Showdown の事実 1、pinned の対照 4、相手 1 体の対照 1。
+新 Python・旧 exe では port の 3 つが落ちる。直した後は 13 通過。
+
+`test_outrage_lock.py`（IKA-174）はげきりんが必ずカバルドンに当たる前提だった: まもる手を相手 2 体ともに
+（`GUARD = move 2, move 2`、Showdown の答えは同じ）、port の 1 枝の比較を枝ごとに、長さの分岐のテストは
+印ごとの重みの和（0.5・0.5）に直した。
+
+### 3. 直し
+
+- `resolve._draw_random_target`（`_do_move` の `_use_move` の前、`_can_act` で動けた枝だけ）と `moves.rs`
+  `draw_random_target`: 生きている相手ごとに等確率の枝、引いた相手を QueuedAction の target に入れる。1 体なら分岐なし。
+  予算は `_roll_rampage` の流儀: `enumerate_secondary` かつ pinned でないときだけ分岐、pinned は最初の相手（オラクルの
+  `sample` と同じ）、それ以外は最初の相手と注記 `randomNormal target (the first foe; not branched)`。
+- `_resolve_targets` / `resolve_targets` の randomNormal の早道（最初の相手、リダイレクトなし）を外して通常の経路へ。
+- `tools/diff_node.py --random-target`（対照 `undrawn` = 最初の相手・リダイレクトなし）。`--rampage` と重ねると固定中も。
+
+### 4. diff_node（各 20 ノード、Budget.matrix）
+
+```
+                                  使うセル   発火セル   新 exe で枝違い   旧 exe で枝違い（最悪のセル差）
+  w12 --random-target             1,220      1,122      0                 1,122（1.4e-1）
+  w12 --random-target --rampage   1,692      1,580      0                 1,580（1.4e-1）
+  gen11L --random-target          761        633        0                 633（8.3e-2）
+  gen11L ... --rampage            1,096      938        0                 938（1.0e-1）
+```
+
+新 exe は全セルで最悪 4.4e-16、注記・exact の食い違い 0。旧 exe は exact の印も 5〜51 セルで違う（枝が増えて 16 の
+上限で切られるため）。
+
+### 5. 記録（`C:/tmp/ika178/records.py`、一時スクリプト、1 コア 387 秒）
+
+```
+                                                          w12        selfplay-gen11L
+  手番の決定                                               434,483    118,018
+  randomNormal の技を知る者が場にいる                       510        182
+    そのうち相手が 2 体立っている                           452        151
+  メニューに randomNormal の技がある                        318        120
+  選んだ手が randomNormal の技を使う                        188        68
+    相手 2 体（引きが効く）                                 161        52
+    そのうち相手がこのゆび・いかりのこなを知る              0          0
+  そういう局                                                53         19
+  メニューが相手 2 体に randomNormal を出す（全部解いた）   267        84
+```
+
+その 267・84 決定（記録のメニューが今の規則で合法でないものは外した）を記録の局面・メニューのまま、hp-share 1 手・
+`Budget.matrix()` で旧規則（`undrawn`）と新規則で解いた:
+
+```
+                                         w12              gen11L
+  値の動いたセル                          15,974/36,624    11,578/33,454
+  最も重い手が変わった（記録した側）      87/267           21/84
+  最も重い手が変わった（どちらかの側）    151/267          37/84
+  方策の TV > 0.2（どちらか）             178/267          45/84
+  TV の平均（記録した側・相手）           0.32・0.35       0.22・0.35
+  均衡値の差（平均・最大）                0.012・0.175     0.013・0.271
+  セルの差の最大                          0.38             0.30
+```
+
+旧規則では「げきりんは必ず左の相手に当たる」ので、左の相手が守るか交代するかの読みが一方に寄っていた。1 手先の
+hp-share の均衡は同点の近くで重い手が入れ替わりやすいので、「変わった」の割合は大きめに出ている見込み（余裕の
+閾値は付けていない）。
+
+### 6. 符号化
+
+入力は変わらない。ENCODING_REVISION は動かさない。
+
+### 7. 残したこと（別課題の候補）
+
+- **わるあがき・さわぐの対象**: 同じ規則で直ったが、オラクルで確かめたのはげきりんだけ。
+- **相手が 0 体のとき**: Showdown は `foe.active[0]`（倒れている）に向けて失敗するが、両エンジンは「対象なし」で失敗。
+  結果は同じはずだが確かめていない。
+- **オラクルの `sample='last'`**: ねむりの `sample([2, 3, 3])` も 3 になる。今のテストは眠りを含まない。
+- `per_action_branches` は対象の分岐を数えない（連続技と同じ）。matrix の 16 の上限で切られる枝が増える。
+
+### 8. 検査と機械
+
+test_random_target（新規）・test_outrage_lock・test_actions・test_charge_target・test_fake_out_first_turn・
+test_trap_sources・test_resolve・test_rust_node・test_port_coverage・test_port_gates・test_line_endings・
+test_after_move_oracle・test_no_machine_specific_paths を `-n 0` で通過。ruff、`port_coverage.py --check`、
+`port_gate_audit.py --check` も通る。sim-bridge は worktree で tsc し直してテストに使った（**着地時に main の dist の
+再ビルドが要る**）。機械（heavy.py、--agent IKA-178）: release ビルド 8 コア 22 秒・18 秒、テスト 1 コア 各 35 秒以内、
+diff_node 8 本 1 コア 計 270 秒ほど、記録 1 コア 387 秒（diff_node と 2 本並行）。
+
+## 9/24 — IKA-179: こだわりの固定はわるあがきでも最初の技のまま（port）、struggle・道具なし・トリックの固定はターン終わりに外れる（両エンジン）
+
+ワーカー、基点 master d89a6c6、ブランチ `ika-179-choicelock`。IKA-171・IKA-174 の diff_node の残りのずれ。
+
+### 1. Showdown の定義（vendor a5df827、champions mod に上書きなし）
+
+`data/conditions.ts` の `choicelock`: `onStart` が `effectState.move = activeMove.id`（`hasBounced`・snatch なら付けない）、
+`onBeforeMove` は道具がこだわりでなければ外し、固定の技でも `struggle` でもない技を失敗させる、`onDisableMove`
+（`endTurn` が場の全員に走らせる）は **道具がこだわりでないか、固定の技が技欄に無ければ外す**。`data/items.ts` の
+`choicescarf`（champions の choice_items はこれだけ）は `onModifyMove` で `addVolatile('choicelock')`、`onStart`（持った時。
+トリックの `setItem` もここを通る）で外す。`addVolatile` は既にある volatile に `onStart` を走らせないので、
+**固定は始めた技のまま**。よって:
+
+* 固定中のわるあがき（固定の技の PP 切れ・ちょうはつ）: 固定は元の技のまま。
+* 固定なしのわるあがき（技を出す前にちょうはつ、全部変化技）: `struggle` に固定 → ターン終わりに外れ → 次の技で固定。
+* はたきおとされた: ターン終わりに外れる。スカーフ同士のトリック: 両方外れ、次の技で固定し直す。
+* アンコール: 固定中は lastMove が固定の技なので変わらない（対照）。ねごと・いびきはどちらのエンジンも未実装。
+
+### 2. 直す前
+
+* port の `use_move` は技を使うたびに固定を書き換えた（固定中のわるあがきで `struggle` → メニューが古い固定として全部開く）。
+* Python は最初の技を保つが、固定を**一度も外さなかった**。固定なしのわるあがきの後は `struggle` の固定が残り、
+  legality はそれを無視するが次の技でも書き換えないので、そのポケモンは場を離れるまで二度と固定されない。
+  はたきおとされた・トリックした固定も残る（メニューは道具を見るので正しいが、符号化の `volatile_choicelock` は 1 のまま）。
+
+### 3. 直したこと（小さな関数だけ）
+
+* Python `resolve.py`: `_choice_lock_is_stale`（`onDisableMove` の条件）、`_live_choice_lock`（使う時に技欄に無い固定は
+  捨てて固定し直す。記録の `struggle` の固定用）、`_choice_lock_ends`（`_residuals` の最後、`_rampage_residual` の後）、
+  `_swap_ends_choice_locks`（`_swap_items` の後）。
+* port `moves.rs`: `lock_choice`（新しい固定の時だけ技を書く、技欄に無い固定は捨てる）、`choice_lock_ends`（`residuals` の
+  最後）。port はトリックを拒否する（Python へ回る）ので swap 側は Python のみ。
+
+### 4. オラクル（`tests/test_choice_lock.py`、5 ケース 15 手、ロール固定）
+
+```
+                                 旧 Py・旧 exe   旧 Py・新 exe   新 Py・旧 exe   新 Py・新 exe
+  Showdown の事実（5）            0 落ち          0               0               0
+  Showdown の局面から 1 手（15）  4 落ち          4               0               0
+  生成の形で連続（5）             3 落ち          3               0               0
+  port の 1 手（13、トリック除く） 5 落ち          0               5               0
+  記録の struggle 固定（1）       1 落ち          1               0               0
+```
+
+落ちるのは「固定なしのわるあがき」（Python・port）、「固定中のわるあがき」（port）、「はたきおとし」「スカーフ同士の
+トリック」（Python）。対照「アンコール」と普通の固定は旧でも通る。テストでは Showdown の局面の `lockedMove`（position.ts が
+こだわりの固定を畳み込む）と move slot の `disabled`（前の request のもの）を消してから解く（生成の局面には無い）。
+
+### 5. diff_node（matrix、60 局面、新 Python）
+
+```
+                                          セル     発火（`unlocked` が動かす）  新 exe で違う  旧 exe で違う（発火で）
+  w12 --frozen                            28,155   —                           0              132
+  w12 --choice-locked                     22,237   2,291                       0              2,482（2,291）
+  gen11L --choice-locked                  13,821   1,487                       0              1,484（1,475）
+  w12 普通の固定（絞り込み前の --choice-locked） 21,075   0                           0              0
+  gen11L 普通の固定（同）                 15,493   0                           0              0
+```
+
+IKA-171 の `--frozen` のわるあがき固定のずれ（130 セル、今の master で 132）は新 exe で 0。値の最悪差 5.6e-16 以下。
+`--choice-locked` を足した: こだわり固定の者が場にいて、わるあがきするか、固定が古いか、場にはたきおとす・トリック・
+すりかえを知る者がいる記録局面。対照は `unlocked`（直す前の Python の規則）。
+
+### 6. 記録（`C:/tmp/ika179/records.py`、1 コア 65 秒）
+
+```
+                                                      w12        gen11L
+  move 決定                                           434,483    118,018
+  choicelock が場にある決定                           99,631     25,216
+  固定を持つ枠（符号化の入力 = 1）                    104,197    26,239
+    struggle に固定（port の書き換え）                92         26
+      直前の固定に戻すとメニューが変わる              92         26
+      選ばれた手が Showdown のメニューに無い          80         24
+    こだわりでない道具に固定（Showdown は外す）       473        89
+```
+
+struggle 固定の 92・26 は全部「固定中のわるあがきの次の手」で、Showdown ならわるあがき（か固定の技）しか選べない所で
+別の技を選んでいる（80・24）。道具なしの固定は手には効かず、符号化の入力だけが Showdown と違う。
+
+### 7. 別課題の候補（調べて見つけたこと）
+
+* **ちょうはつの `onBeforeMove` が無い**: 同じターンに先にちょうはつされた変化技が Showdown では失敗するが、両エンジンとも出す
+  （プランクスター・ちょうはつの後のおいかぜで確かめた。こだわりなら固定まで付く）。
+* **ちょうはつの長さ**: 既に動いた相手へのちょうはつは `duration++`（4 ターン）だが、resolver は 3 のまま。
+* position.ts の `lockedMove` がこだわり固定を含むので、Showdown の局面から読むとちょうはつ中でも固定の技がメニューに出る
+  （diff 系の道だけ）。
+
+### 8. 検査と機械
+
+`port_coverage --check`・`port_gate_audit --check`・ruff ok。機械: cargo release 2 回（8 コア 22・17 秒）、オラクルのテスト
+4 通り×3 回（1 コア 各 5 秒）、diff_node 60 局面 6 本（6 コア 327 秒）と 4 本（4 コア 280 秒）、2 局面 2 本（1 コア 192 秒）、
+記録 1 回（1 コア 65 秒）、関係テスト 6 ファイル（1 コア 29 秒）。すべて heavy.py（--agent IKA-179）。
+
+## 9/24 — IKA-177: 混乱が `random(2, 6)` 回の行動で解けるようにした —— resolver（両エンジン）の混乱は場を離れるまで続き、自傷は 1/3 でまひより後、キーのみ・ラムのみはげきりんの混乱にしか効かなかった
+
+ワーカー。基点 master d89a6c6、ブランチ `ika-177-confusion-duration`。
+
+### 1. Showdown（a5df827。champions に `confusion`・`persimberry`・`lumberry` の上書きなし）
+
+`data/conditions.ts:162` `confusion`: `onStart` で `time = random(min, 6)`、`min` はかかと落とし（axekick）なら 3、ほかは 2。
+つまり 2〜5。`onBeforeMovePriority: 3` の `onBeforeMove` で `time--`、0 なら解けてそのまま動く。解けなければ
+`randomChance(33, 100)` で自傷（`getConfusionDamage(pokemon, 40)`）。優先度はねむり・こおり 10、ひるみ 8 より下で、
+まひ 1 より上: 眠っている・凍っている・ひるんだ行動では `time` は減らず、まひとの組では自傷が先に振られる。
+`data/items.ts:4518` `persimberry`・`:3537` `lumberry` は `onUpdate` で `volatiles['confusion']` があれば食べる（混乱の元を問わない）。
+オラクルの乱数記録で `random(2, 6)`（かかと落としは `random(3, 6)`）と `chance 33/100` を確かめた。
+regulation（M-C・M-B とも）の混乱源: あやしいひかり・いばる・おだてる・てんしのキス・フラフラダンス（技そのもの）、
+ぼうふう 30%・みずのはどう 20%・ばくれつパンチ 100%・かかと落とし 30%（追加効果）、げきりん系の疲れ。
+
+### 2. オラクル（`tests/test_confusion_duration.py`、新規 43 件）
+
+`multihit='min'`（`random` の最小）と `'max'`（最大）で Showdown を回した。各ステップ後の相手の `time`（0 = 混乱なし）:
+
+```
+  ケース                   最小の乱数              最大の乱数
+  あやしいひかり           1,0,0,0,0,0             4,3,2,1,0,0
+  かかと落とし（min 3）    2,1,0,0,0,0             4,3,2,1,0,0
+  キーのみ / ラムのみ      0,0（すぐ食べる）        0,0
+```
+
+テスト: Showdown の事実（長さ・乱数の引数・33/100・実が消える）、Showdown の各局面から我々が解いた 1 ターン、
+Showdown の最初の局面から我々が全部解いた木（k 回目の後に混乱が残る確率 1, 3/4, 1/2, 1/4, 0）、かかと落としの木
+（1, 2/3, 1/3, 0）、pinned の予算（最短）、まひとの順（Showdown はまひを振らない。我々の重み 0.33 / 0.67×1/8 / 0.67×7/8）、
+port の各ステップと分岐、手で作った局面（`time`・`tries`・`min`・古い記録の空の混乱、ひるみで試行が減らない、
+とくせいきんちょうかんで実を食べない＝実の対照）。
+
+```
+                     旧 exe    新 exe
+  旧 Python          24/43     14/43
+  新 Python          33/43     43/43
+```
+
+旧 Python・旧 exe で通る 24 は Showdown の事実 8、port が旧 Python と一致する 10、手の対照 6（`time` 2・`tries` 0・
+`tries` 1 + min 3・空の混乱で「今回は解けない」、ひるみ、きんちょうかん）。新 Python・旧 exe で落ちる 10 は port の
+テスト全部と pinned のかかと落とし（旧 exe は関係しない。pinned の予算がかかと落としの追加効果を振らない件は下）。
+
+### 3. 直し（`resolve.py`・`moves.rs`・`resolve.rs`）
+
+- `add_volatile("confusion")` を `_start_confusion` に回す: `extra.tries = 0` で付け、キーのみ・ラムのみはその場で食べる
+  （きんちょうかんで食べない）。げきりんの疲れ（`_confused_by_fatigue`）は付けるだけになった。かかと落としの追加効果で
+  新しく付いた混乱には `extra.min = 3`。
+- 持続の乱数は **効く試行の頭で分岐**（`_roll_confusion`、`_do_move` の冒頭で `_roll_rampage` の次）。長さを一度に振ると
+  最初に解けうる試行で 4 つ（うち 3 つは局面で見分けられない）に割れるので、試行ごとに「今解ける／続く」の 2 つにした。
+  `time` が 2〜5 の一様なら、k 回目の試行で解ける条件付き確率は k≥min のとき 1/(6−k)（1/4, 1/3, 1/2, 1）。解ける枝は
+  `extra.time = 1` を置いて `_can_act` がそれを 0 にし、続く枝は `goesOn` を置いて同じ試行を振り直さない。分岐の数は
+  試行ごとに最大 2 倍で、爆発しない。
+- Showdown の局面は `extra.time` を持つので分岐せず、そのまま減らす。IKA-177 前の記録の混乱（extra なし）は新しいもの
+  （`tries` 0）として読む。
+- `_can_act`: 混乱の段（`_confusion_stage`: 試行、33/100）をまひの前に。起きた・溶けた行動も混乱の段を通る
+  （旧コードは起きた・溶けたらそのまま動いた）。ひるみ・眠り続け・凍り続けは試行を使わない。
+- `CONFUSION_SELF_HIT_CHANCE` 1/3 → 0.33。
+- pinned・`enumerate_status_checks` 偽の予算は最短の長さ（解ける試行で必ず解ける。pinned でないときは注記）。
+- port も同じ（`start_confusion`・`roll_confusion`・`confusion_try`・`confusion_stage`、`resolve.rs` の定数と add_volatile）。
+- `tools/diff_node.py --confused`: 各局面の各側の先頭に混乱を載せ（`tries` 1〜3、かかと落としの `tries` 2 + min 3、
+  Showdown の `time` 1・3、空）、全セルを port と枝ごとに比べる。対照 `unconfused` は IKA-177 前の規則（解けない・1/3・
+  実は疲れだけ。まひとの順は新しいまま）。
+
+### 4. diff_node（`--confused`、各 20 ノード、Budget.matrix）
+
+```
+                        発火セル / セル     新 exe で枝違い   旧 exe で枝違い
+  gen11L                6,049 / 6,187       67（注記だけ）    6,049（最悪 1.1e-1）
+  w12                   9,112 / 9,518       0                 9,112（最悪 1.1e-1）
+```
+
+gen11L の 67 は 1 ノードの「residual speed tie」の注記が Python にだけ出るもの。混乱を載せない局面・master の Python と
+exe でも同じく出るので、この変更とは別（下の候補）。数値は新 exe で最悪 4.4e-16。
+
+### 5. 記録（`C:/tmp/ika177/records.py`、一時スクリプト、1 コア 345 秒）
+
+試行の数は、同じ局の前の決定で同じ者が混乱して場にいた回数（その間に動いたとみなす近似）。
+
+```
+                                                     w12         selfplay-gen11L
+  手番の決定                                         434,483     118,018
+  混乱が場にある決定                                 814         113
+  混乱した場の枠（符号化の入力 = 1）                 820         115
+    うち試行 0 / 1 / 2 / 3 / 4 / 5 / 6+              395/205/100/51/27/15/27    61/32/9/7/4/1/1
+  新しい規則での入力 = 1 の期待値                    707.2       104.2
+  混乱技を選んだ決定                                 5,446       1,128
+    （ぼうふう / いばる、枠）                         5,460 / 15  1,128 / 9
+  混乱が場にある局                                   374         57
+```
+
+混乱が場にある決定を w12 200・gen11L 98（全部。メニューが今の規則で合法でない 15 を除く）、記録のメニューのまま、
+旧規則（`unconfused`）と新規則（試行数を載せ、5 以上は解けたとして外す）で hp-share 1 手・`Budget.matrix()` で解いた:
+
+```
+                                         w12          gen11L
+  どこかのセルが動いた                    194/200      95/98
+  最も重い手が変わった                    9/200        10/98
+    うち 33/100 と順だけ（解けない）      1            2
+  方策の TV > 0.2                         9/200        11/98
+  均衡値の差（平均・最大）                0.006・0.087  0.009・0.204
+```
+
+### 6. 符号化
+
+`volatile_confusion` は有無だけ。記録では混乱したら場を離れるまで 1 で、新しい規則では解ければ 0: 期待値で w12 820 → 707、
+gen11L 115 → 104（手番の決定の 0.2%・0.1%）。`extra` の `tries`・`time` は符号化されない。ENCODING_REVISION は動かさない。
+
+### 7. 別課題の候補
+
+- **残差のすばやさ同点の注記**: gen11L の 1 局面（ひんしのメガゲンガーの枠がある）で Python だけが「residual speed tie」を
+  出す。master でも同じ。port の `residual_order` がひんしの枠の扱いか同点判定で Python と違う。
+- **混乱の自傷ダメージ**: Showdown は `randomizer`（85〜100% の乱数）を掛けるが、両エンジンとも最大の値だけ。
+- **混乱のかかりにくさ**: あやしいひかりなどの混乱にマイペース・ミストフィールド・しんぴのまもりが効かない（疲れだけ見る）。
+- **pinned の予算と 100% でない追加効果**: `Budget.deterministic()` は追加効果を振らないので、かかと落としの pinned の木は
+  追加効果の後から始めた。
+- 相手の混乱の残り（`extra.time`）は本当の対戦では見えないが、Showdown の局面からの探索は読める（げきりんの長さと同じ）。
+
+### 8. 検査と機械
+
+test_confusion_duration（新規）・test_outrage_lock・test_resolve・test_speed・test_resign_headroom・test_rust_node・
+test_port_coverage・test_port_gates・test_trap_sources・test_trap_immunities・test_trapped_flag_children・test_line_endings・
+test_no_machine_specific_paths・test_actions は `-n 0` で通過。`port_coverage --check`・`port_gate_audit --check`・ruff 通過。
+機械: cargo build --release 8 コア 23 秒 + 20 秒、テスト 1 コア計 約 1 分、diff_node 1 コア 697 秒、記録 1 コア 345 秒。
+worktree に data/priors・standings・reportworm と sim-bridge の dist を main から写し、node_modules は main への junction
+（コミットしない）。

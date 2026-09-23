@@ -64,6 +64,10 @@ not read -- so the cells it moves are the ones where the count's distribution ma
 modelled without ever giving anyone the counter. The control is the turn with
 `_perish_song` taken out, so the cells it moves are the ones where somebody was given one.
 
+`--using helpinghand` holds the port to Helping Hand's failure on a partner that has
+already moved (IKA-184). The control is the turn with `_helping_hand_fails` answering no,
+so the cells it moves are the ones where a help failed.
+
 `--using stoneaxe` (or `ceaselessedge`) takes a move that lays a hazard from its own
 `onAfterHit` (IKA-173); its control is the turn with `AFTER_HIT_HAZARDS` emptied, the
 hit laying nothing as before.
@@ -88,6 +92,17 @@ recorded game carries only that bare marker, so `--using` reaches the rampage's 
 `--rampage` puts a second turn's lock -- the move, one turn left, no length -- on each
 knower first, which is where the length branches, the lock ends and the confusion lands.
 
+Holding the port to a `randomNormal` move's foe (IKA-178):
+
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --random-target
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --random-target --rampage
+
+`--random-target` keeps the recorded positions with a Pokemon on the field that knows a
+`randomNormal` move (Outrage and its kin, Uproar, Struggle) and holds every cell that uses
+one branch by branch. The cells where the draw *fired* are the ones Python moves with the
+foe undrawn (`undrawn`): the first foe standing and no redirection, as before. With
+`--rampage` the knowers are mid-rampage first, so the locked turn draws too.
+
 Holding the port to a frozen Pokemon (IKA-171):
 
     uv run python tools/diff_node.py --games-dir data/ika73/w12 --frozen
@@ -96,6 +111,16 @@ Holding the port to a frozen Pokemon (IKA-171):
 cell branch by branch. The cells where a thaw *fired* -- a `defrost` move used frozen, or a
 Fire or `thawsTarget` move into the frozen one -- are the ones Python moves with
 `_defrosts` and `_thaw_on_hit` taken out, and the run fails if there are none.
+
+Holding the port to a Choice lock (IKA-179):
+
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --choice-locked
+
+`--choice-locked` keeps the recorded positions with a Choice-locked Pokemon on the field
+that has to Struggle, whose lock Showdown would have dropped, or beside Knock Off, Trick or
+Switcheroo, and holds every cell branch by branch. The cells where the lock *fired* -- one on
+`struggle` or on a Choice item knocked off dropped, a Trick dropping both -- are the ones
+Python moves with the old rule put back (`unlocked`), and the run fails if there are none.
 
 Holding the port to a terrain no recorded game has (IKA-156):
 
@@ -455,6 +480,22 @@ class unsung:  # noqa: N801 - read as a phrase at the call site
         resolve_mod._perish_song = self.real
 
 
+class unhelped:  # noqa: N801 - read as a phrase at the call site
+    """Python with `_helping_hand_fails` answering no: the control for Helping Hand
+    (IKA-184). A help on a partner that has already moved lands, as before."""
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = resolve_mod._helping_hand_fails
+        resolve_mod._helping_hand_fails = lambda *_args: False
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        resolve_mod._helping_hand_fails = self.real
+
+
 class unlaid:  # noqa: N801 - read as a phrase at the call site
     """Python with Stone Axe's and Ceaseless Edge's `onAfterHit` taken out, as before
     IKA-173: the control for `--using stoneaxe`. The hit still lands."""
@@ -560,9 +601,139 @@ class unthawed:  # noqa: N801 - read as a phrase at the call site
         resolve_mod._defrosts, resolve_mod._thaw_on_hit = self.real
 
 
+class unlocked:  # noqa: N801 - read as a phrase at the call site
+    """Python's Choice lock as it was before IKA-179: the control for --choice-locked. The
+    first move is kept, but a lock naming no move slot or no Choice item is never dropped
+    -- not at the end of the turn, not by Trick, not by the next move."""
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = (
+            resolve_mod._live_choice_lock,
+            resolve_mod._choice_lock_ends,
+            resolve_mod._swap_ends_choice_locks,
+        )
+        resolve_mod._live_choice_lock = lambda mon: mon.volatile("choicelock")
+        resolve_mod._choice_lock_ends = lambda *_args: None
+        resolve_mod._swap_ends_choice_locks = lambda *_args: None
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        (
+            resolve_mod._live_choice_lock,
+            resolve_mod._choice_lock_ends,
+            resolve_mod._swap_ends_choice_locks,
+        ) = self.real
+
+
+#: Moves that take a Choice item away from a locked holder or swap it.
+ITEM_TAKING_MOVES = frozenset({"knockoff", "trick", "switcheroo"})
+
+
+def choice_locked_on_field(reg, pos: Position) -> bool:  # noqa: ANN001
+    """A Choice-locked Pokemon on the field whose lock IKA-179's rules can move: it has to
+    Struggle, its lock is one Showdown would have dropped, or a Pokemon on the field knows a
+    move that takes the item away. An ordinary lock that holds is the same in every rule."""
+    from pokeuraou.actions import is_struggling
+    from pokeuraou.resolve import _choice_lock_is_stale
+
+    field = [mon for side in pos.sides for mon in side.active_pokemon() if mon and not mon.fainted]
+    takers = any(m.id in ITEM_TAKING_MOVES for mon in field for m in mon.moves)
+    return any(
+        mon.has_volatile("choicelock")
+        and (takers or is_struggling(mon, reg) or _choice_lock_is_stale(reg, mon))
+        for mon in field
+    )
+
+
 def frozen_on_field(pos: Position) -> bool:
     return any(
         mon is not None and not mon.fainted and mon.status == "frz"
+        for side in pos.sides
+        for mon in side.active_pokemon()
+    )
+
+
+class unconfused:  # noqa: N801 - read as a phrase at the call site
+    """Python with confusion as it was before IKA-177: the control for --confused.
+
+    Nothing ends it or counts its tries, the self-hit is 1/3, and only the rampage's
+    fatigue meets a Persim or Lum Berry. Paralysis still comes after the self-hit, so a
+    cell whose only change is that order is not counted as fired.
+    """
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = (
+            resolve_mod._roll_confusion, resolve_mod._confusion_try,
+            resolve_mod._start_confusion, resolve_mod._confused_by_fatigue,
+            resolve_mod.CONFUSION_SELF_HIT_CHANCE,
+        )
+        real_fatigue = resolve_mod._confused_by_fatigue
+
+        def start(turn, side, slot) -> None:  # noqa: ANN001
+            mon = turn.mon_at(side, slot)
+            if mon is not None and not mon.fainted and not mon.has_volatile("confusion"):
+                mon.volatiles.append(Effect(id="confusion"))
+
+        def fatigue(turn, side, slot) -> None:  # noqa: ANN001
+            real_fatigue(turn, side, slot)
+            mon = turn.mon_at(side, slot)
+            if (
+                mon is not None and mon.has_volatile("confusion")
+                and mon.item in ("persimberry", "lumberry") and not turn.berries_blocked(side)
+            ):
+                turn.consume_item(side, slot, reason=mon.item)
+                mon.volatiles = [v for v in mon.volatiles if v.id != "confusion"]
+
+        resolve_mod._roll_confusion = lambda *_args: None
+        resolve_mod._confusion_try = lambda turn, side, slot: bool(
+            turn.mon_at(side, slot) is not None and turn.mon_at(side, slot).has_volatile("confusion")
+        )
+        resolve_mod._start_confusion = start
+        resolve_mod._confused_by_fatigue = fatigue
+        resolve_mod.CONFUSION_SELF_HIT_CHANCE = 1.0 / 3.0
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        (
+            resolve_mod._roll_confusion, resolve_mod._confusion_try,
+            resolve_mod._start_confusion, resolve_mod._confused_by_fatigue,
+            resolve_mod.CONFUSION_SELF_HIT_CHANCE,
+        ) = self.real
+
+
+#: The confusions --confused puts on, by position in turn: tries our resolver counted
+#: (1 to 3, and Axe Kick's), Showdown's own `time` (1 cures at the next try), and the bare
+#: one a record made before IKA-177 carries (read as fresh).
+CONFUSIONS = (
+    {"tries": 1}, {"tries": 2}, {"time": 1}, {"tries": 3}, {"tries": 2, "min": 3},
+    {"time": 3}, {},
+)
+
+
+def confuse(pos: Position, index: int) -> int:
+    """Confuses the first Pokemon on the field on each side -- the one a record already
+    had included -- with one of `CONFUSIONS`, and says how many took it."""
+    put = 0
+    for side_index, side in enumerate(pos.sides):
+        mon = next((m for m in side.active_pokemon() if m is not None and not m.fainted), None)
+        if mon is None:
+            continue
+        extra = dict(CONFUSIONS[(index * 2 + side_index) % len(CONFUSIONS)])
+        mon.volatiles = [v for v in mon.volatiles if v.id != "confusion"]
+        mon.volatiles.append(Effect(id="confusion", extra=extra))
+        put += 1
+    return put
+
+
+def confused_on_field(pos: Position) -> bool:
+    return any(
+        mon is not None and not mon.fainted and mon.has_volatile("confusion")
         for side in pos.sides
         for mon in side.active_pokemon()
     )
@@ -585,6 +756,8 @@ class unchanged:  # noqa: N801 - read as a phrase at the call site
             self.parts.append(unraged())
         if "perishsong" in moves:
             self.parts.append(unsung())
+        if "helpinghand" in moves:
+            self.parts.append(unhelped())
         if any(reg.moves[m].raw.get("drain") for m in moves):
             self.parts.append(undrained(reg, moves))
         if any(judged(reg.moves[m]) for m in moves):
@@ -721,6 +894,40 @@ def teach_hazards(reg, pos: Position, dealt: list[int]) -> int:  # noqa: ANN001
             mon.moves[free[-1]] = MoveSlot(id=move_id, pp=pp, maxpp=pp)
             taught += 1
     return taught
+
+
+def random_target_moves(reg) -> frozenset[str]:  # noqa: ANN001
+    """The moves Showdown aims at a foe drawn at random: the `randomNormal` target."""
+    return frozenset(m.id for m in reg.moves.values() if m.target == "randomNormal")
+
+
+class undrawn:  # noqa: N801 - read as a phrase at the call site
+    """Python with a `randomNormal` move's foe as it was before IKA-178: the control for
+    --random-target. The first foe standing, never drawn and never redirected."""
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = (resolve_mod._draw_random_target, resolve_mod._redirection_target)
+        real_redirect = self.real[1]
+
+        def first(turn, action, move, budget):  # noqa: ANN001, ANN202, ARG001
+            from dataclasses import replace
+
+            if move.target == "randomNormal":
+                action = replace(action, target=None)
+            return [(1.0, turn, action)]
+
+        def unredirected(turn, action, move, chosen):  # noqa: ANN001, ANN202
+            return None if move.target == "randomNormal" else real_redirect(turn, action, move, chosen)
+
+        resolve_mod._draw_random_target = first
+        resolve_mod._redirection_target = unredirected
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        resolve_mod._draw_random_target, resolve_mod._redirection_target = self.real
 
 
 def charge_moves(reg) -> frozenset[str]:  # noqa: ANN001
@@ -881,6 +1088,7 @@ def recorded_positions(  # noqa: ANN001
     using: frozenset[str] = frozenset(),
     abilities: frozenset[str] = frozenset(),
     frozen: bool = False,
+    locked: bool = False,
 ) -> tuple[list[Position], int]:
     """Roots a search already filled a matrix at, read from recorded games.
 
@@ -893,6 +1101,7 @@ def recorded_positions(  # noqa: ANN001
     keys: set[str] = set()
     other_format = 0
     wanted = holding | using | abilities | ({'"frz"'} if frozen else set())
+    wanted |= {'"choicelock"'} if locked else set()
     enough = None if wanted else 40 * args.nodes
     for directory in args.games_dir:
         for path in sorted(Path(directory).glob("*.jsonl")):
@@ -924,6 +1133,8 @@ def recorded_positions(  # noqa: ANN001
                         if abilities and not ability_on_field(pos, abilities):
                             continue
                         if frozen and not frozen_on_field(pos):
+                            continue
+                        if locked and not choice_locked_on_field(reg, pos):
                             continue
                         keys.add(key)
                         found.append(pos)
@@ -1144,6 +1355,21 @@ def main() -> None:
         "branch by branch, and count where a thaw fired: the cells `unthawed` moves",
     )
     ap.add_argument(
+        "--choice-locked",
+        action="store_true",
+        help="keep positions with a Choice-locked Pokemon on the field that Struggles, "
+        "carries a stale lock or faces an item-taking move, hold every cell to the port "
+        "branch by branch, and count where IKA-179's lock fired: the cells `unlocked` moves",
+    )
+    ap.add_argument(
+        "--confused",
+        action="store_true",
+        help="confuse the first Pokemon on the field on each side first (a length our "
+        "resolver counted, Showdown's own, or a record's bare one), hold every cell to the "
+        "port branch by branch, and count where IKA-177's rule fired: the cells "
+        "`unconfused` moves",
+    )
+    ap.add_argument(
         "--toxic-debris",
         action="store_true",
         help="keep positions with Toxic Debris on the field, hold every cell to the port "
@@ -1156,6 +1382,13 @@ def main() -> None:
         "a rampage on its second turn put on each knower on the field first -- recorded "
         "games carry only the bare marker from before IKA-174 -- so the length's branch, "
         "the end and the confusion are held to the port",
+    )
+    ap.add_argument(
+        "--random-target",
+        action="store_true",
+        help="keep positions with a randomNormal move (Outrage, Uproar, Struggle...) on the "
+        "field, hold every cell that uses one to the port branch by branch, and count where "
+        "the draw of the foe fired: the cells `undrawn` moves (IKA-178)",
     )
     ap.add_argument(
         "--terrain",
@@ -1228,6 +1461,7 @@ def main() -> None:
             or move_id in AFTER_HIT_HAZARDS
             or move_id in rampage_moves(reg)
             or move_id == "perishsong"
+            or move_id == "helpinghand"
             or move.raw.get("drain")
             or judged(move)
         ):
@@ -1236,7 +1470,7 @@ def main() -> None:
                 f"({sorted(TYPE_SPENDING_MOVES)}), hazard-laying "
                 f"({sorted(AFTER_HIT_HAZARDS)}), rampage "
                 f"({sorted(rampage_moves(reg))}), drain or judged status moves, "
-                f"or perishsong; {move_id} is none of them"
+                f"perishsong or helpinghand; {move_id} is none of them"
             )
 
     if args.value:
@@ -1262,8 +1496,15 @@ def main() -> None:
         print(f"the node of {args.scenario}")
     elif args.games_dir:
         charging = charge_moves(reg) if args.charging else frozenset()
+        randomers = random_target_moves(reg) if args.random_target else frozenset()
         positions, other_format = recorded_positions(
-            reg, args, holding - {args.give}, using | charging, blockers | debris, args.frozen
+            reg,
+            args,
+            holding - {args.give},
+            using | charging | randomers,
+            blockers | debris,
+            args.frozen,
+            locked=args.choice_locked,
         )
         print(
             f"{len(positions)} recorded positions from "
@@ -1283,6 +1524,9 @@ def main() -> None:
         positions = [pos for pos in positions if on_field(pos, holding)]
     if using:
         positions = [pos for pos in positions if knows_on_field(pos, using)]
+    randomers = random_target_moves(reg) if args.random_target else frozenset()
+    if randomers:
+        positions = [pos for pos in positions if knows_on_field(pos, randomers)]
     if args.rampage:
         raged = sum(enrage(pos, rampage_moves(reg)) for pos in positions)
         print(f"a rampage on its second turn put on {raged} Pokemon on the field")
@@ -1292,13 +1536,18 @@ def main() -> None:
         positions = [pos for pos in positions if ability_on_field(pos, debris)]
     if args.frozen:
         positions = [pos for pos in positions if frozen_on_field(pos)]
-    quick = priority_moves(reg) if args.terrain or blockers else frozenset()
+    if args.choice_locked:
+        positions = [pos for pos in positions if choice_locked_on_field(reg, pos)]
+    quick =priority_moves(reg) if args.terrain or blockers else frozenset()
     if args.terrain:
         for pos in positions:
             pos.field.terrain = args.terrain
             pos.field.terrain_duration = 5
         positions = [pos for pos in positions if priority_on_field(pos, quick)]
         print(f"{args.terrain} laid on {len(positions)} positions with a priority move on the field")
+    if args.confused:
+        dazed = sum(confuse(pos, index) for index, pos in enumerate(positions))
+        print(f"a confusion put on {dazed} Pokemon on the field")
     if args.salt_cure:
         salted = sum(salt(pos) for pos in positions)
         print(f"Salt Cure put on {salted} Pokemon on the field")
@@ -1376,9 +1625,15 @@ def main() -> None:
     # Under Salt Cure, every cell; and where the mod's fraction moved the answer.
     cured = cured_wrong = cured_refused = cured_fired = cured_fired_wrong = 0
     cured_worst = 0.0
+    # Beside a confused Pokemon, every cell; and where IKA-177's rule moved the answer.
+    dazed_cells = dazed_wrong = dazed_refused = dazed_fired = dazed_fired_wrong = 0
+    dazed_worst = 0.0
     # Beside a frozen Pokemon, every cell; and where a thaw moved the answer.
     icy = icy_wrong = icy_refused = thawed = thawed_wrong = 0
     thawed_worst = 0.0
+    # Beside a Choice lock, every cell; and where IKA-179's lock moved the answer.
+    lock_cells = lock_wrong = lock_refused = lock_fired = lock_fired_wrong = 0
+    lock_worst = 0.0
     # Where a hazard was used, and where laying it on the foe's side moved the answer.
     laid = laid_wrong = laid_refused = laid_fired = laid_fired_wrong = 0
     laid_fired_refused = laid_fired_paused = laid_wrong_elsewhere = 0
@@ -1390,6 +1645,9 @@ def main() -> None:
     # Where a charging move was used or fired, and where its stored target moved the answer.
     charged = charged_wrong = aimed = aimed_wrong = aimed_paused = 0
     aimed_worst = 0.0
+    # Where a randomNormal move was used, and where drawing its foe moved the answer.
+    drew = drew_wrong = drew_fired = drew_fired_wrong = drew_paused = 0
+    drew_worst = 0.0
     # Where the hammer was used, and the remembered slots whose menu dropped it.
     hammered = hammered_wrong = dropped = dropped_control = 0
 
@@ -1517,6 +1775,35 @@ def main() -> None:
                     if wrong and shown < 5:
                         shown += 1
                         print(f"  cell {(i, j)} with a charge: {wrong[0][:200]}")
+
+        if randomers:
+            node = rustnode.node_for(reg)
+            for i, a in enumerate(row):
+                for j, b in enumerate(col):
+                    if not (uses(a, randomers) or uses(b, randomers)):
+                        continue
+                    drew += 1
+                    here = resolve_turn(reg, pos, [a, b], budget=budget)
+                    with undrawn():
+                        control = resolve_turn(reg, pos, [a, b], budget=budget)
+                    wrong = (
+                        ["no warm process"]
+                        if node is None
+                        else branch_differences(node, reg, pos, a, b, here, budget)
+                    )
+                    drew_wrong += bool(wrong)
+                    if differ(outcome(here), outcome(control)):
+                        drew_fired += 1
+                        drew_fired_wrong += bool(wrong)
+                        drew_paused += bool(here.suspended)
+                        for index in range(len(evaluators)):
+                            drew_worst = max(
+                                drew_worst,
+                                abs(float(got[index][i, j] - expected[index][i, j])),
+                            )
+                    if wrong and shown < 5:
+                        shown += 1
+                        print(f"  cell {(i, j)} using a randomNormal move: {wrong[0][:200]}")
 
         if args.hammer:
             node = rustnode.node_for(reg)
@@ -1717,6 +2004,36 @@ def main() -> None:
                         shown += 1
                         print(f"  cell {(i, j)} beside Toxic Debris: {wrong[0][:200]}")
 
+        if args.confused and confused_on_field(pos):
+            node = rustnode.node_for(reg)
+            for i, a in enumerate(row):
+                for j, b in enumerate(col):
+                    dazed_cells += 1
+                    here = resolve_turn(reg, pos, [a, b], budget=budget)
+                    with unconfused():
+                        control = resolve_turn(reg, pos, [a, b], budget=budget)
+                    wrong = (
+                        ["no warm process"]
+                        if node is None
+                        else branch_differences(node, reg, pos, a, b, here, budget)
+                    )
+                    refused_here = wrong == ["the port refused the turn"]
+                    dazed_refused += refused_here
+                    if refused_here:
+                        wrong = []
+                    dazed_wrong += bool(wrong)
+                    if differ(outcome(here), outcome(control)):
+                        dazed_fired += 1
+                        dazed_fired_wrong += bool(wrong)
+                        for index in range(len(evaluators)):
+                            dazed_worst = max(
+                                dazed_worst,
+                                abs(float(got[index][i, j] - expected[index][i, j])),
+                            )
+                    if wrong and shown < 5:
+                        shown += 1
+                        print(f"  cell {(i, j)} beside a confused Pokemon: {wrong[0][:200]}")
+
         if args.frozen:
             node = rustnode.node_for(reg)
             for i, a in enumerate(row):
@@ -1746,6 +2063,36 @@ def main() -> None:
                     if wrong and shown < 5:
                         shown += 1
                         print(f"  cell {(i, j)} beside a frozen Pokemon: {wrong[0][:200]}")
+
+        if args.choice_locked:
+            node = rustnode.node_for(reg)
+            for i, a in enumerate(row):
+                for j, b in enumerate(col):
+                    lock_cells += 1
+                    here = resolve_turn(reg, pos, [a, b], budget=budget)
+                    with unlocked():
+                        control = resolve_turn(reg, pos, [a, b], budget=budget)
+                    wrong = (
+                        ["no warm process"]
+                        if node is None
+                        else branch_differences(node, reg, pos, a, b, here, budget)
+                    )
+                    refused_here = wrong == ["the port refused the turn"]
+                    lock_refused += refused_here
+                    if refused_here:
+                        wrong = []
+                    lock_wrong += bool(wrong)
+                    if differ(outcome(here), outcome(control)):
+                        lock_fired += 1
+                        lock_fired_wrong += bool(wrong)
+                        for index in range(len(evaluators)):
+                            lock_worst = max(
+                                lock_worst,
+                                abs(float(got[index][i, j] - expected[index][i, j])),
+                            )
+                    if wrong and shown < 5:
+                        shown += 1
+                        print(f"  cell {(i, j)} beside a Choice lock: {wrong[0][:200]}")
 
         checked += 1
         cells += len(row) * len(col)
@@ -1830,6 +2177,15 @@ def main() -> None:
         print(f"    {cured_fired} of {cured} cells")
         print(f"    cells whose branches, weights, notes or positions differ  {cured_fired_wrong}")
         print(f"    worst cell difference there  {cured_worst:.3e}")
+    if args.confused:
+        print("\n  beside a confused Pokemon, every cell -- held branch by branch")
+        print(f"    {dazed_cells} of {cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {dazed_wrong}")
+        print(f"    cells the port refused, filled in Python and not held  {dazed_refused}")
+        print("  where the length, the odds or the berry fired -- the cells `unconfused` moves")
+        print(f"    {dazed_fired} of {dazed_cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {dazed_fired_wrong}")
+        print(f"    worst cell difference there  {dazed_worst:.3e}")
     if args.frozen:
         print("\n  beside a frozen Pokemon, every cell -- held branch by branch")
         print(f"    {icy} of {cells} cells")
@@ -1839,6 +2195,15 @@ def main() -> None:
         print(f"    {thawed} of {icy} cells")
         print(f"    cells whose branches, weights, notes or positions differ  {thawed_wrong}")
         print(f"    worst cell difference there  {thawed_worst:.3e}")
+    if args.choice_locked:
+        print("\n  beside a Choice lock, every cell -- held branch by branch")
+        print(f"    {lock_cells} of {cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {lock_wrong}")
+        print(f"    cells the port refused, filled in Python and not held  {lock_refused}")
+        print("  where IKA-179's lock fired -- the cells `unlocked` moves")
+        print(f"    {lock_fired} of {lock_cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {lock_fired_wrong}")
+        print(f"    worst cell difference there  {lock_worst:.3e}")
     if blockers:
         print("\n  beside a priority-blocking ability, cells that may use a priority move")
         print(f"    {block_used} of {cells} cells")
@@ -1877,6 +2242,15 @@ def main() -> None:
         print(f"    cells whose branches, weights, notes or positions differ  {aimed_wrong}")
         print(f"    cells with a paused branch, whose position is not compared  {aimed_paused}")
         print(f"    worst cell difference there  {aimed_worst:.3e}")
+    if randomers:
+        print("\n  where a randomNormal move was used -- every one held branch by branch")
+        print(f"    {drew} of {cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {drew_wrong}")
+        print("  where the draw of the foe fired -- the cells `undrawn` moves")
+        print(f"    {drew_fired} of {drew} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {drew_fired_wrong}")
+        print(f"    cells with a paused branch, whose position is not compared  {drew_paused}")
+        print(f"    worst cell difference there  {drew_worst:.3e}")
     if args.hammer:
         print("\n  where Gigaton Hammer was used -- every one held branch by branch")
         print(f"    {hammered} of {cells} cells")
@@ -1908,10 +2282,18 @@ def main() -> None:
         failed.append("the mod's Salt Cure fraction moved no cell, so agreeing here says nothing")
     if block_wrong:
         failed.append(f"{block_wrong} cells beside a blocking ability differ by branch")
+    if dazed_wrong:
+        failed.append(f"{dazed_wrong} cells beside a confused Pokemon differ by branch")
+    if args.confused and not dazed_fired:
+        failed.append("IKA-177's confusion moved no cell, so agreeing here says nothing")
     if icy_wrong:
         failed.append(f"{icy_wrong} cells beside a frozen Pokemon differ by branch")
     if args.frozen and not thawed:
         failed.append("no thaw fired in any cell, so agreeing here says nothing")
+    if lock_wrong:
+        failed.append(f"{lock_wrong} cells beside a Choice lock differ by branch")
+    if args.choice_locked and not lock_fired:
+        failed.append("IKA-179's lock moved no cell, so agreeing here says nothing")
     if blockers and not blocked:
         failed.append("no blocking ability stopped anything in any cell, so agreeing here says nothing")
     if laid_wrong:
@@ -1920,6 +2302,10 @@ def main() -> None:
         failed.append(f"{charged_wrong} cells with a charge differ by branch")
     if args.charging and not aimed:
         failed.append("the stored target moved no cell, so agreeing here says nothing")
+    if drew_wrong:
+        failed.append(f"{drew_wrong} cells using a randomNormal move differ by branch")
+    if randomers and not drew_fired:
+        failed.append("drawing the foe moved no cell, so agreeing here says nothing")
     if hammered_wrong:
         failed.append(f"{hammered_wrong} cells using the hammer differ by branch")
     if args.hammer and not (hammered and dropped):

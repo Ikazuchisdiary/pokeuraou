@@ -100,6 +100,16 @@ pub(crate) fn do_move<'a>(
         }
         return Ok(outcomes);
     }
+    // `_roll_confusion`: whether this try ends an unrolled confusion (IKA-177).
+    if let Some(tried) = roll_confusion(&mut turn, action, mv, &budget) {
+        let mut outcomes: Vec<Outcome<'a>> = Vec::new();
+        for (weight, state) in tried {
+            for (inner, sub_state) in do_move(reg, state, action, budget)? {
+                outcomes.push((weight * inner, sub_state));
+            }
+        }
+        return Ok(outcomes);
+    }
 
     let started = crate::resolve::phase_start();
     let checks = can_act(&mut turn, action, mv, &budget)?;
@@ -135,12 +145,16 @@ pub(crate) fn do_move<'a>(
                 outcomes.push((*probability, state));
             }
             None => {
-                let started = crate::resolve::phase_start();
-                let produced = use_move(reg, state, action, mv, budget)?;
-                crate::resolve::phase_end(8, started);
-                for (weight, mut sub_state) in produced {
-                    rampage_after_move(&mut sub_state, action);
-                    outcomes.push((probability * weight, sub_state));
+                for (drawn, drawn_state, drawn_action) in
+                    draw_random_target(state, action, mv, &budget)
+                {
+                    let started = crate::resolve::phase_start();
+                    let produced = use_move(reg, drawn_state, &drawn_action, mv, budget)?;
+                    crate::resolve::phase_end(8, started);
+                    for (weight, mut sub_state) in produced {
+                        rampage_after_move(&mut sub_state, &drawn_action);
+                        outcomes.push((probability * drawn * weight, sub_state));
+                    }
                 }
             }
         }
@@ -149,6 +163,50 @@ pub(crate) fn do_move<'a>(
         outcomes.push((1.0, turn));
     }
     Ok(outcomes)
+}
+
+/// The foe a `randomNormal` move is used at, as Python's `_draw_random_target` (IKA-178):
+/// `getTarget` ignores the chosen location for it and `sample`s the foes standing, every
+/// time the move is used. Each is a branch of equal weight, carried as the action's target
+/// for `resolve_targets`, which redirects it as any other. One foe standing is no draw; a
+/// budget that collapses the random ranges takes the first (with a note), and so does the
+/// pinned one.
+fn draw_random_target<'a>(
+    turn: Turn<'a>,
+    action: &QueuedAction,
+    mv: &Move,
+    budget: &Budget,
+) -> Vec<(f64, Turn<'a>, QueuedAction)> {
+    if mv.target.as_str() != "randomNormal" {
+        return vec![(1.0, turn, action.clone())];
+    }
+    let mut turn = turn;
+    let foe_side = 1 - action.side;
+    let mut standing: Vec<usize> = (0..turn.pos.sides[foe_side].active.len())
+        .filter(|s| matches!(turn.mon_at(foe_side, *s), Some(mon) if !mon.fainted))
+        .collect();
+    if standing.len() > 1 && !(budget.enumerate_secondary && !budget.pinned_policy) {
+        if !budget.pinned_policy {
+            turn.report("randomNormal target (the first foe; not branched)");
+        }
+        standing.truncate(1);
+    }
+    if standing.is_empty() {
+        let mut aimed = action.clone();
+        aimed.target = None;
+        return vec![(1.0, turn, aimed)];
+    }
+    let share = 1.0 / standing.len() as f64;
+    let aimed = |slot: usize| {
+        let mut aimed = action.clone();
+        aimed.target = Some(slot as i64 + 1);
+        aimed
+    };
+    let (&last, rest) = standing.split_last().expect("not empty");
+    let mut out: Vec<(f64, Turn<'a>, QueuedAction)> =
+        rest.iter().map(|slot| (share, turn.clone(), aimed(*slot))).collect();
+    out.push((share, turn, aimed(last)));
+    out
 }
 
 fn confusion_damage(turn: &Turn, side: usize, slot: usize) -> Result<i64, String> {
@@ -269,31 +327,22 @@ fn rampage_after_move(turn: &mut Turn, action: &QueuedAction) {
     }
 }
 
-/// The rampage's `onEnd` confusion: Own Tempo and grounded under Misty Terrain refuse it,
-/// a Persim or Lum Berry eats it unless a foe's Unnerve forbids.
+/// The rampage's `onEnd` confusion: Own Tempo and grounded under Misty Terrain refuse it;
+/// the berries are every confusion's, in `start_confusion` (IKA-177).
 fn confused_by_fatigue(turn: &mut Turn, side: usize, slot: usize) {
-    let (refused, berry) = {
+    let refused = {
         let Some(mon) = turn.mon_at(side, slot) else { return };
         if mon.fainted || mon.has_volatile("confusion") {
             return;
         }
         let misty = is(turn.pos.field.terrain, "mistyterrain")
             && crate::resolve::grounded(turn, mon);
-        (
-            mon.ability == "owntempo" || misty,
-            is(mon.item, "persimberry") || is(mon.item, "lumberry"),
-        )
+        mon.ability == "owntempo" || misty
     };
     if refused {
         return;
     }
     turn.add_volatile(side, slot, "confusion", None);
-    if berry && !turn.berries_blocked(side) {
-        turn.consume_item(side, slot);
-        if let Some(mon) = turn.mon_at_mut(side, slot) {
-            mon.volatiles.retain(|v| v.id.as_str() != "confusion");
-        }
-    }
 }
 
 /// The residual's `duration--` reaching zero: `onEnd` before the loop takes it off.
@@ -337,6 +386,186 @@ fn rampage_residual(turn: &mut Turn, order: &[Slot]) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Confusion's length and the berries, as Python's `_start_confusion` and the rest (IKA-177)
+// ---------------------------------------------------------------------------
+
+/// Showdown's own `effectState.time`: the tries left, cured at zero.
+const CONFUSION_LEFT: &str = "time";
+/// Ours while the length is not rolled: the tries so far, and Axe Kick's `min = 3`.
+const CONFUSION_TRIES: &str = "tries";
+const CONFUSION_MIN: &str = "min";
+/// `roll_confusion`'s branch where this try does not cure; `confusion_try` takes it off.
+const CONFUSION_GOES_ON: &str = "goesOn";
+/// `random(min, 6)` is at most 5.
+const CONFUSION_LONGEST: i64 = 5;
+
+fn extra_int(effect: &Effect, key: &str) -> Option<i64> {
+    effect.extra.get(key).and_then(Value::as_i64)
+}
+
+fn set_extra(effect: &mut Effect, key: &str, value: Option<Value>) {
+    let mut extra = (*effect.extra).clone();
+    match value {
+        Some(value) => {
+            extra.insert(key.into(), value);
+        }
+        None => {
+            extra.remove(key);
+        }
+    }
+    effect.extra = std::rc::Rc::new(extra);
+}
+
+/// `addVolatile('confusion')`: `onStart` (the roll waits for `roll_confusion`; tries are
+/// counted meanwhile), then a Persim or Lum Berry's `onUpdate` unless Unnerve forbids.
+pub(crate) fn start_confusion(turn: &mut Turn, side: usize, slot: usize) {
+    let berry = {
+        let Some(mon) = turn.mon_at_mut(side, slot) else { return };
+        if mon.fainted || mon.has_volatile("confusion") {
+            return;
+        }
+        let mut effect = Effect::new(Id::new("confusion"));
+        set_extra(&mut effect, CONFUSION_TRIES, Some(json!(0)));
+        mon.volatiles.push(effect);
+        is(mon.item, "persimberry") || is(mon.item, "lumberry")
+    };
+    if berry && !turn.berries_blocked(side) {
+        turn.consume_item(side, slot);
+        if let Some(mon) = turn.mon_at_mut(side, slot) {
+            mon.volatiles.retain(|v| v.id.as_str() != "confusion");
+        }
+    }
+}
+
+/// `const min = sourceEffect?.id === 'axekick' ? 3 : 2`.
+fn confused_by_axe_kick(turn: &mut Turn, target: Slot) {
+    if let Some(held) = turn
+        .mon_at_mut(target.0, target.1)
+        .and_then(|m| m.volatile_mut("confusion"))
+    {
+        set_extra(held, CONFUSION_MIN, Some(json!(3)));
+    }
+}
+
+fn defrosts(turn: &Turn, mon: &crate::position::Pokemon, mv: &Move) -> bool {
+    mv.has_flag(F_DEFROST) && !(mv.id == "burnup" && !turn.types_of(mon).contains("Fire"))
+}
+
+/// Whether this try gets as far as confusion's `onBeforeMove`: past a flinch, and past a
+/// sleep or a freeze only when it wakes or thaws for certain.
+fn confusion_reached(turn: &Turn, mon: &crate::position::Pokemon, mv: &Move) -> bool {
+    if mon.fainted || mon.has_volatile("flinch") {
+        return false;
+    }
+    if is(mon.status, "slp") {
+        let step = if mon.ability == "earlybird" { 2 } else { 1 };
+        return mon.status_counter.unwrap_or(0) - step <= 0;
+    }
+    if is(mon.status, "frz") {
+        return defrosts(turn, mon, mv) || mon.status_counter.unwrap_or(FREEZE_COUNTER) - 1 <= 0;
+    }
+    true
+}
+
+/// The chance this try ends the confusion given the ones before did not: 0 before `min`,
+/// then one in `6 - k` at try k; the shortest length when the checks are collapsed.
+fn confusion_cure_chance(held: &Effect, budget: &Budget) -> f64 {
+    let tries = extra_int(held, CONFUSION_TRIES).unwrap_or(0) + 1;
+    let low = extra_int(held, CONFUSION_MIN).unwrap_or(2);
+    if tries < low {
+        return 0.0;
+    }
+    if !budget.enumerate_status_checks || budget.pinned_policy {
+        return 1.0;
+    }
+    1.0 / ((CONFUSION_LONGEST + 1 - tries).max(1) as f64)
+}
+
+/// Python's `_roll_confusion`: cured now (`time` 1) or one more try, when the position
+/// does not carry the length.
+fn roll_confusion<'a>(
+    turn: &mut Turn<'a>,
+    action: &QueuedAction,
+    mv: &Move,
+    budget: &Budget,
+) -> Option<Vec<(f64, Turn<'a>)>> {
+    let chance = {
+        let mon = turn.mon_at(action.side, action.slot)?;
+        let held = mon.volatile("confusion")?;
+        let goes_on = held.extra.get(CONFUSION_GOES_ON).and_then(Value::as_bool).unwrap_or(false);
+        if extra_int(held, CONFUSION_LEFT).is_some() || goes_on || !confusion_reached(turn, mon, mv) {
+            return None;
+        }
+        confusion_cure_chance(held, budget)
+    };
+    if chance >= 1.0 && !budget.enumerate_status_checks && !budget.pinned_policy {
+        turn.report("confusion length (the shortest of 2-to-5; not branched)");
+    }
+    if chance <= 0.0 {
+        return None;
+    }
+    let options: Vec<(f64, bool)> = if chance >= 1.0 {
+        vec![(chance, true)]
+    } else {
+        vec![(chance, true), (1.0 - chance, false)]
+    };
+    let mut out = Vec::new();
+    for (weight, cures) in options {
+        let mut state = turn.clone();
+        if let Some(held) = state
+            .mon_at_mut(action.side, action.slot)
+            .and_then(|m| m.volatile_mut("confusion"))
+        {
+            if cures {
+                set_extra(held, CONFUSION_LEFT, Some(json!(1)));
+            } else {
+                set_extra(held, CONFUSION_GOES_ON, Some(json!(true)));
+            }
+        }
+        out.push((weight, state));
+    }
+    Some(out)
+}
+
+/// `time--`, cured at zero; whether the Pokemon is still confused for this try.
+fn confusion_try(turn: &mut Turn, side: usize, slot: usize) -> bool {
+    let Some(mon) = turn.mon_at_mut(side, slot) else { return false };
+    let left = match mon.volatile("confusion") {
+        Some(held) => extra_int(held, CONFUSION_LEFT),
+        None => return false,
+    };
+    if matches!(left, Some(left) if left - 1 <= 0) {
+        mon.volatiles.retain(|v| v.id.as_str() != "confusion");
+        return false;
+    }
+    let Some(held) = mon.volatile_mut("confusion") else { return false };
+    match left {
+        Some(left) => set_extra(held, CONFUSION_LEFT, Some(json!(left - 1))),
+        None => {
+            let tries = extra_int(held, CONFUSION_TRIES).unwrap_or(0) + 1;
+            set_extra(held, CONFUSION_GOES_ON, None);
+            set_extra(held, CONFUSION_TRIES, Some(json!(tries)));
+        }
+    }
+    true
+}
+
+/// Confusion's `onBeforeMove` in `can_act`: the try, then `randomChance(33, 100)`.
+fn confusion_stage(
+    turn: &mut Turn,
+    action: &QueuedAction,
+    budget: &Budget,
+) -> Vec<(f64, Option<String>)> {
+    if confusion_try(turn, action.side, action.slot) && budget.enumerate_status_checks {
+        return vec![
+            (1.0 - CONFUSION_SELF_HIT_CHANCE, None),
+            (CONFUSION_SELF_HIT_CHANCE, Some("confusion".into())),
+        ];
+    }
+    vec![(1.0, None)]
+}
+
 /// (probability, reason it could not act) for the pre-move checks.
 fn can_act(
     turn: &mut Turn,
@@ -344,16 +573,11 @@ fn can_act(
     mv: &Move,
     budget: &Budget,
 ) -> Result<Vec<(f64, Option<String>)>, String> {
-    let (fainted, has_flinch, status, has_confusion) = {
+    let (fainted, has_flinch, status) = {
         let Some(mon) = turn.mon_at(action.side, action.slot) else {
             return Ok(vec![(1.0, Some("fainted".into()))]);
         };
-        (
-            mon.fainted,
-            mon.has_volatile("flinch"),
-            mon.status,
-            mon.has_volatile("confusion"),
-        )
+        (mon.fainted, mon.has_volatile("flinch"), mon.status)
     };
     if fainted {
         return Ok(vec![(1.0, Some("fainted".into()))]);
@@ -379,7 +603,7 @@ fn can_act(
             }
         };
         return Ok(if woke {
-            vec![(1.0, None)]
+            confusion_stage(turn, action, budget)
         } else {
             vec![(1.0, Some("slp".into()))]
         });
@@ -388,17 +612,15 @@ fn can_act(
     if is(status, "frz") {
         // Python's `_can_act`: a `defrost` move skips the counter and the roll, and its
         // `onModifyMove` clears the status; Burn Up only for a Fire type (IKA-171).
-        let defrosts = mv.has_flag(F_DEFROST)
-            && !(mv.id == "burnup"
-                && !turn
-                    .mon_at(action.side, action.slot)
-                    .is_some_and(|mon| turn.types_of(mon).contains("Fire")));
+        let defrosts = turn
+            .mon_at(action.side, action.slot)
+            .is_some_and(|mon| defrosts(turn, mon, mv));
         if defrosts {
             if let Some(mon) = turn.mon_at_mut(action.side, action.slot) {
                 mon.status = None;
                 mon.status_counter = None;
             }
-            return Ok(vec![(1.0, None)]);
+            return Ok(confusion_stage(turn, action, budget));
         }
         let thawed = {
             let mon = turn.mon_at_mut(action.side, action.slot).unwrap();
@@ -413,7 +635,7 @@ fn can_act(
             }
         };
         if thawed {
-            return Ok(vec![(1.0, None)]);
+            return Ok(confusion_stage(turn, action, budget));
         }
         if !budget.enumerate_status_checks {
             return Ok(vec![(1.0, Some("frz".into()))]);
@@ -429,22 +651,16 @@ fn can_act(
     // the move has started, so PP is spent (`priority_blocked_by`, IKA-158, and
     // `stopped_by_psychic_terrain`, IKA-156).
 
-    let mut outcomes: Vec<(f64, Option<String>)> = vec![(1.0, None)];
+    // Confusion's priority 3 is above paralysis's 1: the self-hit first (IKA-177).
+    let mut outcomes = confusion_stage(turn, action, budget);
     if is(status, "par") && budget.enumerate_status_checks {
-        outcomes = vec![
-            (1.0 - FULL_PARALYSIS_CHANCE, None),
-            (FULL_PARALYSIS_CHANCE, Some("par".into())),
-        ];
-    }
-    if has_confusion && budget.enumerate_status_checks {
         let mut expanded = Vec::new();
         for (weight, reason) in outcomes {
             match reason {
                 Some(reason) => expanded.push((weight, Some(reason))),
                 None => {
-                    expanded.push((weight * (1.0 - CONFUSION_SELF_HIT_CHANCE), None));
-                    expanded
-                        .push((weight * CONFUSION_SELF_HIT_CHANCE, Some("confusion".into())));
+                    expanded.push((weight * (1.0 - FULL_PARALYSIS_CHANCE), None));
+                    expanded.push((weight * FULL_PARALYSIS_CHANCE, Some("par".into())));
                 }
             }
         }
@@ -522,6 +738,51 @@ fn priority_blocked_by(
     None
 }
 
+/// A Choice item's `onModifyMove`: `addVolatile('choicelock')`, whose `onStart` records the
+/// move only when the lock is new -- a Struggle while locked leaves it on the locked move
+/// (IKA-179). A lock naming no move slot (a record's lock on `struggle`) is one Showdown's
+/// end of turn had dropped, so it locks afresh. Python's `_live_choice_lock`.
+fn lock_choice(turn: &mut Turn, side: usize, slot: usize, move_id: Id) {
+    let Some(mon) = turn.mon_at_mut(side, slot) else { return };
+    let stale = mon
+        .volatile_mut("choicelock")
+        .map(|held| held.move_id)
+        .is_some_and(|held| !held.is_some_and(|id| mon.moves.get(id).is_some()));
+    if stale {
+        mon.volatiles.retain(|v| v.id.as_str() != "choicelock");
+    }
+    let fresh = !mon.has_volatile("choicelock");
+    turn.add_volatile(side, slot, "choicelock", None);
+    if fresh {
+        if let Some(locked) = turn
+            .mon_at_mut(side, slot)
+            .and_then(|mon| mon.volatile_mut("choicelock"))
+        {
+            locked.move_id = Some(move_id);
+        }
+    }
+}
+
+/// `choicelock.onDisableMove`, run by `endTurn` for every active Pokemon: the lock goes when
+/// the holder's item is no Choice item or the move is in none of its slots (IKA-179).
+/// Python's `_choice_lock_ends`.
+fn choice_lock_ends(reg: &Reg, turn: &mut Turn, order: &[Slot]) {
+    for (side, slot) in order.iter().copied() {
+        let Some(mon) = turn.mon_at_mut(side, slot) else { continue };
+        if mon.fainted {
+            continue;
+        }
+        let Some(held) = mon.volatile_mut("choicelock").map(|held| held.move_id) else {
+            continue;
+        };
+        let choice = mon.item.is_some_and(|i| reg.choice_items.contains(i.as_str()));
+        let known = held.is_some_and(|id| mon.moves.get(id).is_some());
+        if !choice || !known {
+            mon.volatiles.retain(|v| v.id.as_str() != "choicelock");
+        }
+    }
+}
+
 fn use_move<'a>(
     reg: &'a Reg,
     mut turn: Turn<'a>,
@@ -546,12 +807,7 @@ fn use_move<'a>(
             mon.last_move = Some(move_id);
         }
         if locks {
-            turn.add_volatile(action.side, action.slot, "choicelock", None);
-            if let Some(mon) = turn.mon_at_mut(action.side, action.slot) {
-                if let Some(locked) = mon.volatile_mut("choicelock") {
-                    locked.move_id = Some(move_id);
-                }
-            }
+            lock_choice(&mut turn, action.side, action.slot, move_id);
         }
     }
 
@@ -793,13 +1049,8 @@ fn resolve_targets(
                 Vec::new()
             });
         }
-        "randomNormal" => {
-            return Ok(slots
-                .filter(|s| live(turn, foe_side, *s))
-                .map(|s| (foe_side, s))
-                .take(1)
-                .collect())
-        }
+        // `randomNormal` falls through: `draw_random_target` put the drawn foe in the
+        // action's target, and it is redirected as any other (IKA-178).
         _ => {}
     }
 
@@ -1565,7 +1816,13 @@ fn apply_secondary(
         if !crate::resolve::volatile_is_handled(&vid) {
             return Err(format!("secondary volatile: {vid}"));
         }
+        let fresh = !turn
+            .mon_at(target.0, target.1)
+            .is_some_and(|m| m.has_volatile("confusion"));
         turn.add_volatile(target.0, target.1, &vid, None);
+        if is(action.move_id, "axekick") && fresh {
+            confused_by_axe_kick(turn, target);
+        }
     }
     if let Some(boosts) = secondary.get("boosts").and_then(Value::as_object) {
         let table: Vec<(&str, i64)> = boosts
@@ -1843,6 +2100,19 @@ fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), S
 // Status moves
 // ---------------------------------------------------------------------------
 
+/// Python's `_helping_hand_fails` (IKA-184): Helping Hand's `onTryHit`,
+/// `if (!target.newlySwitched && !this.queue.willMove(target)) return false`. A partner that
+/// has already moved this turn is not helped, unless it came in this turn.
+fn helping_hand_fails(turn: &Turn, targets: &[Slot]) -> bool {
+    for target in targets {
+        let Some(mon) = turn.mon_at(target.0, target.1) else { continue };
+        if mon.newly_switched || !turn.acted[target.0][target.1] {
+            return false;
+        }
+    }
+    true
+}
+
 fn do_status_move<'a>(
     reg: &'a Reg,
     mut turn: Turn<'a>,
@@ -1898,6 +2168,11 @@ fn do_status_move<'a>(
     }
 
     if STALL_BUMPING_MOVES.contains(&mv.id.as_str()) && turn.actions_remaining == 0 {
+        turn.move_failed[action.side][action.slot] = true;
+        return Ok(vec![(1.0, turn)]);
+    }
+
+    if mv.id == "helpinghand" && helping_hand_fails(&turn, &reachable) {
         turn.move_failed[action.side][action.slot] = true;
         return Ok(vec![(1.0, turn)]);
     }
@@ -2806,6 +3081,7 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
         }
     }
     rampage_residual(turn, &order);
+    choice_lock_ends(reg, turn, &order);
 
     settle_outcome(&mut turn.pos, &turn.wipe_order);
     Ok(())
