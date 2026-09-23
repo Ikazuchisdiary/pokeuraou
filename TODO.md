@@ -8208,3 +8208,137 @@ hidden-gen11h-vs-gen10*、leafrank-* など）も一様だが、当時は生成�
 
 煙試験 12:29:29〜12:29:49（2コア・鍵つき、20秒、4局）。テスト・ruff・agent_drift は1コアで数分。
 worktree に data/priors・data/standings・rust の release バイナリ・sim-bridge の dist を main から写した（コミットしない）。
+
+## 9/23 — IKA-141: IKA-121 と IKA-119 を腕ごとに戻す口。旧規則の腕は直す前の符号化とビット一致し、両席でワーカー自身が規則を名乗る
+
+**答えた問い**: 同じネット（`value-gen11L`、旧規則で学習）で「直す前の符号化」対「直した符号化」を盤で打つための
+口を、腕ごと・両席で作れたか。→ **作れた。** 本番の対戦は打っていない（コマンドと所要は下。コーディネータが回す）。
+
+### 1. 口の形 —— 規則は葉と一緒に動く。環境変数ではない
+
+`generation_match.py` の1プロセスが**両腕・両席**を打つ（`seats[which]` で葉の組を入れ替えるだけ）ので、
+プロセス単位の設定では片方の規則しか選べない。だから規則は**葉の符号化器**に持たせた。
+
+```
+  encode.EncodingRules(mega_from_slots, patch_shares_side)   既定は両方 False（今の規則）
+    mega_from_slots     IKA-121 を戻す: can_mega = mon.slot in side.mega_capable_slots、
+                        mega_available = そのリストが空でない（be3b896 の2式そのまま）
+    patch_shares_side   IKA-119 を戻す: _patched が真の局面の side を参照のまま渡し、
+                        控えの行の can_mega を根から写すだけ（4524ec4^ の本体そのまま）
+  Encoder(reg, rules=...)            葉（BatchedValue / RemoteValue / テストの代役）が持つ
+  encode.rules_of(leaf)              葉・束縛された from_encoded・_Objective のどれからでも規則を引く
+  Rust                               要求ごとに "encoding": {"megaFromSlots": true}。旧規則の葉のときだけ
+                                     送る（今の規則の要求は1バイトも変わらない）。ヘッダが適用した規則を
+                                     返し、頼んだのに返さない古いバイナリは拒否（Python で解き直す）
+  resolve._rust_encoded_payoffs      葉の規則で fill_encoded。規則の違う葉の混合は1回の充填を共有できない
+                                     ので Rust に頼まない
+  beliefnode.belief_payoffs          葉の符号化器で _patched の行を作り、葉の規則で side を組み直すか決める
+  generation_match.py                --can-mega-from-slots / --baseline-can-mega-from-slots、
+                                     --patch-shares-side / --baseline-patch-shares-side（--rank-leaf と同じ形）。
+                                     腕ごとに Encoder を作り、同じファイルでも規則が違えば葉オブジェクトを分ける
+                                     （served でも direct でも）。match_queue.py は `--` 以降を全ワーカーに渡すだけ
+  provenance                          encodings: [側0, 側1]（どちらかが new でないときだけ書く）。
+                                     agent_name に /enc:old-can-mega+old-patch
+```
+
+### 2. 確かめたこと
+
+```
+  符号化器（rust/turns.json 3,451局面、古い番号の (局面, 側) が 593）
+    Python 旧規則 対 be3b896 の encode.py（git show で読み込み）   全8配列一致
+    Python 今の規則 対 be3b896（正の対照）                      mon の 1,186要素が違う（IKA-121 の記録と同じ数）
+    diff_encode   Python 旧 / Rust 旧   全8配列一致      Python 新 / Rust 新   全8配列一致
+                  片側だけ旧            ヘッダの規則が食い違うので比べる前に止まる
+                  Rust 旧 対 Rust 新     本体 3,002,370語のうち 1,186語が違う
+  単体（-n 0、worktree の src と自前ビルドのバイナリ）
+    test_encode      旧規則 = be3b896 の2式（交代直後の局面。旗はフシギバナ = IKA-121 が記録した失敗そのもの）、
+                     動くのは can_mega の列だけ。rules_of が葉・束縛メソッド・包みの3通りで引ける
+    test_rust_node   同じノードを1プロセスから旧・新で2回: 旧はヘッダが true を返し、can_mega は番号の行に立つ。
+                     2つの代役の葉を batched_payoffs に通すと、各葉の符号化器が「Rust が名乗った規則」だけを記帳し、
+                     利得が違う。規則の違う混合は Rust に頼まない
+    test_beliefnode  旧規則の _patched = 4524ec4^ の本体（2局面 × 完成形 × can_mega 規則2通り、side は参照そのもの）。
+                     2つの葉を1プロセスで belief_payoffs に: 新は完成形ごとの行列と完全一致のまま、旧は行列が動き、
+                     記帳は各自の規則だけ
+    test_provenance  encodings は通常の run では書かれない。書かれたら agent_name が分かれる
+    関係 13 ファイル（上の4本・test_hidden_search・test_hidden・test_menu_ownership・test_line_endings・
+    test_no_machine_specific_paths・test_equal_wall_clock・test_inference_shape・test_selection_book・test_sprt）
+    すべて通過・0 skipped。ruff 通過、port_coverage --check 通過
+```
+
+席ごとの確認は**ワーカー自身の記帳**で見た。各腕の符号化器が「Python で符号化した局面数（規則別）」「Rust が
+ヘッダで名乗った規則ごとの葉数」「_patched の side の扱い別の呼び出し数」を数え、ワーカーは局の前後の差分を
+（席, 側）ごとに足して最後に出す。
+
+```
+  煙試験 A/B（C:/tmp/pokeuraou-machine/ika141/smoke-ab、2局/席、SPRT(0,+10) 登録。c1b7e4c の上）
+    全4ワーカー  "encoding: tested arm new, other arm old-can-mega+old-patch (two leaf objects)"
+    席0（新が側0） 側0 新: patched side=rebuilt 36,018, python can_mega=holder 69, rust can_mega=holder 23,550
+                  側1 旧: patched side=shared 31,734, python can_mega=slots 51, rust can_mega=slots 23,579
+    席1（新が側1） 側0 旧: patched side=shared 36,018, python can_mega=slots 69, rust can_mega=slots 23,550
+                  側1 新: patched side=rebuilt 31,734, python can_mega=holder 51, rust can_mega=holder 23,579
+    （game 0 の2席。game 1 も規則の出方は同じで、手が動いたので数は違う）逆の規則の記帳は4ワーカーとも0
+    provenance    encodings が席ごとに [new, old…] / [old…, new]、limits [12,12]・rankings [leaf,leaf]・hidden-bench
+    pair_divergence  2対のうち1対で手が動いた（1ターン目から）。sprt.json 未決着 2対 LLR −0.054
+  帰無対照 旧 対 旧（…/ika141/null-aa、1局/席）
+    両席とも "(both sides)" で patched side=shared 67,668・rust can_mega=slots 46,780 —— 2席で1語違わない
+    pair_divergence  1対・同じ手 100%
+```
+
+煙試験の 1対目は規則が1手も動かさなかった（2席の記帳が左右入れ替えで一致）。2対目は動いた。
+
+作業中に master が IKA-140・IKA-70/71・IKA-122 まで進んだので、ブランチを master（da9b7b3）に載せ替えた
+（元のコミットは `ika-141-old-rule-arms-on-c1b7e4c` に残した）。衝突は `generation_match.py`・`provenance.py`・
+TODO.md の3つで、IKA-122 の推定分布の口（`--uniform-bench-belief`、`beliefs`）と並べただけ。載せ替えた木で
+Rust を作り直し、上の突き合わせ（be3b896・diff_encode 2×2・1,186語）と関係 14 ファイル（test_match_bench_prior を
+足した）をやり直して同じ結果、そして煙試験をもう一度:
+
+```
+  煙試験 A/B（…/ika141/smoke-ab-rebased、2局/席、SPRT(0,+10) 登録。da9b7b3 の上）
+    全4ワーカー  "encoding: tested arm new, other arm old-can-mega+old-patch (two leaf objects)"
+                 "bench belief: tested arm book, other arm book"（IKA-122 の既定。両腕同じ）
+    席0 側0 新: patched side=rebuilt 51,912, python can_mega=holder 92, rust can_mega=holder 35,445
+        側1 旧: patched side=shared 51,912, python can_mega=slots 88, rust can_mega=slots 38,250
+    席1 は左右入れ替えで同じ数。game 1 も規則の出方は同じ。逆の規則の記帳は0
+    provenance  encodings [new, old…] / [old…, new]、beliefs [book, book]
+    pair_divergence  2対とも同じ手（この2局では規則が手を動かさなかった。Rust の葉数は腕で違う = 別の献立・別のノード）
+```
+
+### 3. 本番の対戦（未実行。このブランチ（master da9b7b3 の上）を着地させ、Rust を作り直してから）
+
+腕は B（今の規則）を試す腕、A（両方戻す = value-gen11L が学習した規則 = 9/23 以前）を基準に。
+条件は出荷の生成（幅12・控え隠蔽・葉順位・book・2サーバ。控えの推定分布は IKA-122 の既定で両腕 book）。
+止め方は登録どおり SPRT(0,+10)、α=β=0.05、
+LLR 境界 ±2.944、上限 6,000局/席。
+
+```
+python tools/match_queue.py --out C:/tmp/pokeuraou-machine/ika141/ab-sprt --games 6000 \
+    --served --servers 2 \
+    --value data/models/value-gen11L.pt --baseline data/models/value-gen11L.pt \
+    --hide-bench --sprt 0 10 -- --limit 12 --rank-leaf --baseline-rank-leaf \
+    --selection-book data/selection/rizabanadohido-value-gen11L.jsonl.gz \
+    --baseline-can-mega-from-slots --baseline-patch-shares-side
+```
+
+⚠ 幅は課題の指定どおり 12（生成の出荷幅）。**エージェントとしての対戦幅は 24**（IKA-73 §2）なので、
+「出荷エージェントでの差」を問うなら `--limit 24` に替える。所要は幅12 で**見積もり**約200局/分
+（煙試験の 1局 2.9〜4.7 秒/ワーカーから。24ワーカーは測っていない）→ 上限 12,000局で約60分、
+SPRT なら効果 ±20 級で 1,100〜2,500局（10分前後）、無差別域（0〜+10）の中だと 7,000局級（35分前後）。
+
+見るもの: 各 `logs/worker*.log` の冒頭 "encoding: tested arm new, other arm old-can-mega+old-patch (two leaf objects)"
+と末尾の "encoding echo" 4行（新の側に slots/shared、旧の側に holder/rebuilt が**出ないこと**、`unechoed` が
+出ないこと）、`[rustnode] restarting` / `falling back` が出ないこと（古いバイナリなら旧規則の要求が拒否され、
+Python で解き直して遅くなる）。後処理は `match_result.py`・`paired_result.py`・`pair_divergence.py`
+（発火率が 0 なら何も測っていない）。
+
+### 4. 測っていないこと
+
+* 盤の上の効果そのもの（上の対戦）。2つの修正を分けた寄与（腕を4つにすれば口はある）
+* 24ワーカーでの局/分（上の所要は見積もり）
+* 生成・学習では使わない口。`generate_queue.py` には渡していない
+
+### 5. 機械（heavy.py 経由）
+
+12:25:52〜12:26:16 cargo build（8コア、25秒。鍵待ち約6分）、12:28 be3b896 との突き合わせ（1コア、2秒）、
+12:34:30〜12:34:40 煙試験 A/B（6コア、4局）、12:35:44〜12:35:51 帰無対照（4コア、2局）、
+12:41:28〜12:41:51 載せ替えた木の cargo build（8コア、23秒）、12:43:09〜12:43:17 煙試験 A/B やり直し（6コア、4局）。
+⚠ 局数は合わせて10局で、課題の「煙試験は4局まで」を**6局超えた**（帰無対照2局と、載せ替え後のやり直し4局）。

@@ -4179,6 +4179,19 @@ def _encoded_leaf_plan(
     return plan
 
 
+def _note_port_rule(scorers: Sequence[Callable], filled: object) -> None:
+    """Book the rule the port says it encoded with against each asking leaf's encoder."""
+    echo = filled.mega_from_slots
+    what = "rust can_mega=" + {True: "slots", False: "holder", None: "unechoed"}[echo]
+    booked: list[object] = []
+    for scorer in scorers:
+        encoder = getattr(getattr(scorer, "__self__", None), "encoder", None)
+        if encoder is None or not hasattr(encoder, "note") or any(encoder is e for e in booked):
+            continue
+        booked.append(encoder)
+        encoder.note(what, len(filled.encoded.species))
+
+
 def _rust_encoded_payoffs(
     reg: Regulation,
     pos: Position,
@@ -4204,15 +4217,28 @@ def _rust_encoded_payoffs(
     if plan is None or not any(scorer is not None for _name, scorer in plan):
         # Nothing here needs the leaves themselves; the cheaper crossing already refused it.
         return None
+    # One node is encoded once, so every learned leaf asking for it must want the same
+    # rules. They always do outside a match measuring a fix, and inside one each search
+    # asks with its own leaf; a mixture that disagrees is encoded per leaf in Python.
+    from .encode import rules_of
+
+    learned = [scorer for _name, scorer in plan if scorer is not None]
+    wanted_rules = {rules_of(scorer) for scorer in learned}
+    if len(wanted_rules) != 1:
+        return None
+    (rules,) = wanted_rules
     node = rustnode.node_for(reg)
     if node is None:
         return None
     named = [name for name, _scorer in plan if name is not None]
     try:
-        filled = node.fill_encoded(pos, list(ours), list(theirs), budget, named, cells)
+        filled = node.fill_encoded(
+            pos, list(ours), list(theirs), budget, named, cells, rules=rules
+        )
     except Exception as exc:  # noqa: BLE001 - a broken bridge must not fail the run
         rustnode.disable(str(exc))
         return None
+    _note_port_rule(learned, filled)
 
     payoffs = [np.zeros((len(ours), len(theirs)), dtype=np.float64) for _ in evaluators]
     exact = np.array(filled.exact, dtype=bool)

@@ -81,3 +81,19 @@ def test_the_opponents_book_is_not_in_the_name() -> None:
     assert agent_name(faced_a_book, 0) == agent_name(plain, 0) == "value-a/w24"
     # The arm that actually used the book keeps it.
     assert agent_name(faced_a_book, 1) == "value-b/w24/book:riza-value-all"
+
+
+def test_an_undone_fix_is_another_agent_and_only_then_recorded() -> None:
+    """IKA-141: a leaf scored with a fix undone is named for it; an ordinary run is not
+    touched -- no `encodings` key at all, so its records stay byte for byte as they were."""
+    assert "encodings" not in source()
+    at = provenance(
+        "generation-match",
+        seat="a = side 0",
+        leaves=("value-a", "value-a"),
+        limits=(12, 12),
+        encodings=("new", "old-can-mega+old-patch"),
+    )
+    assert at["encodings"] == ["new", "old-can-mega+old-patch"]
+    assert agent_name(at, 0) == "value-a/w12"
+    assert agent_name(at, 1) == "value-a/w12/enc:old-can-mega+old-patch"

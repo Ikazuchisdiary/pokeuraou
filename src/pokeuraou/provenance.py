@@ -124,6 +124,7 @@ def provenance(
     books: tuple[str, str] = ("uniform", "uniform"),
     information: tuple[str, str] = ("open", "open"),
     beliefs: tuple[str, str] = ("uniform", "uniform"),
+    encodings: tuple[str, str] = ("new", "new"),
     note: str = "",
 ) -> dict[str, Any]:
     """What produced this game, per side, in the order the sides appear in the record.
@@ -171,6 +172,10 @@ def provenance(
             if set(books) == {"uniform"}
             else " vs ".join(books)
         ),
+        # Which encoding rules each side's leaf was scored under (`EncodingRules.label`).
+        # Written only when a side ran an undone fix, so every record from an ordinary run
+        # stays byte for byte what it was (IKA-141).
+        **({"encodings": list(encodings)} if set(encodings) != {"new"} else {}),
         **({"note": note} if note else {}),
     }
 
@@ -250,6 +255,12 @@ def agent_name(source: dict[str, Any], side: int) -> str:
         belief = (source.get("beliefs") or ["uniform", "uniform"])[side]
         if belief != "uniform":
             name += f"/belief:{belief}"
+    # A leaf scored with a fix undone is another agent, for as long as such matches exist
+    # (IKA-141). A record without the field ran its own tree's rules and keeps its old key
+    # -- which for anything before 9/23 means revision 1, unnamed.
+    encoding = (source.get("encodings") or ["new", "new"])[side]
+    if encoding != "new":
+        name += f"/enc:{encoding}"
     return name
 
 

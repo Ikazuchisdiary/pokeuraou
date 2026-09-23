@@ -145,6 +145,17 @@ pub struct Encoded {
     pub unknown_volatiles: HashMap<String, usize>,
 }
 
+/// `EncodingRules` in `encode.py`, the half of it the port applies: which `can_mega` rule.
+///
+/// Per request and not per process, because one worker plays both arms of a match through
+/// one node process (IKA-141). `mega_from_slots` is revision 1 -- `mon.slot in
+/// side.mega_capable_slots`, and "that list is non-empty" for `mega_available` -- kept only
+/// to be played against the fix. The default is the current rule.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct EncodeRules {
+    pub mega_from_slots: bool,
+}
+
 pub struct Encoder<'a> {
     reg: &'a Reg,
     pub vocab: Vocabulary,
@@ -192,6 +203,10 @@ impl<'a> Encoder<'a> {
     }
 
     pub fn encode_positions(&self, positions: &[&Position]) -> Encoded {
+        self.encode_positions_with(positions, EncodeRules::default())
+    }
+
+    pub fn encode_positions_with(&self, positions: &[&Position], rules: EncodeRules) -> Encoded {
         let n = positions.len();
         let m = self.widths.mons_per_side;
         let mut out = Encoded {
@@ -211,7 +226,11 @@ impl<'a> Encoder<'a> {
             self.encode_field(&mut out.field[field_at..field_at + self.widths.field], position);
             for (s, one_side) in position.sides.iter().enumerate() {
                 let side_at = (b * 2 + s) * self.widths.side;
-                self.encode_side(&mut out.side[side_at..side_at + self.widths.side], one_side);
+                self.encode_side(
+                    &mut out.side[side_at..side_at + self.widths.side],
+                    one_side,
+                    rules,
+                );
                 for (p, one_mon) in one_side.pokemon.iter().take(m).enumerate() {
                     let flat = (b * 2 + s) * m + p;
                     out.mask[flat] = 1.0;
@@ -240,6 +259,7 @@ impl<'a> Encoder<'a> {
                         &mut out.mon[mon_at..mon_at + self.widths.mon],
                         one_mon,
                         one_side,
+                        rules,
                         &mut out.unknown_volatiles,
                     );
                 }
@@ -280,7 +300,7 @@ impl<'a> Encoder<'a> {
         out[base + 1] = if turn <= 1.0 { 1.0 } else { 0.0 };
     }
 
-    fn encode_side(&self, out: &mut [f32], side: &Side) {
+    fn encode_side(&self, out: &mut [f32], side: &Side, rules: EncodeRules) {
         let mut base = 0;
         for (i, name) in SIDE_CONDITIONS.iter().enumerate() {
             out[base + i] = if side.has_side_condition(name) { 1.0 } else { 0.0 };
@@ -290,8 +310,13 @@ impl<'a> Encoder<'a> {
         let mons = &side.pokemon;
         let alive = mons.iter().filter(|p| !p.fainted).count();
         out[base] = if side.mega_used { 1.0 } else { 0.0 };
-        // Read off the Pokemon, as `can_mega` is, not off `mega_capable_slots` (IKA-121).
-        let holder = mons.iter().any(|p| self.reg.holds_mega_stone(p.species, p.item));
+        // Read off the Pokemon, as `can_mega` is, not off `mega_capable_slots` (IKA-121),
+        // unless the request asked for revision 1 (IKA-141).
+        let holder = if rules.mega_from_slots {
+            !side.mega_capable_slots.is_empty()
+        } else {
+            mons.iter().any(|p| self.reg.holds_mega_stone(p.species, p.item))
+        };
         out[base + 1] = if !side.mega_used && holder { 1.0 } else { 0.0 };
         out[base + 2] = (alive as f64 / mons.len().max(1) as f64) as f32;
         let total: i64 = mons.iter().map(|p| p.maxhp).sum();
@@ -318,6 +343,7 @@ impl<'a> Encoder<'a> {
         out: &mut [f32],
         mon: &Pokemon,
         side: &Side,
+        rules: EncodeRules,
         unknown: &mut HashMap<String, usize>,
     ) {
         let maxhp = if mon.maxhp == 0 { 1.0 } else { mon.maxhp as f64 };
@@ -359,7 +385,12 @@ impl<'a> Encoder<'a> {
         // The Pokemon's own species and stone, as `_holds_mega_stone` asks. Its party slot
         // is not an identity: resolve renumbers it on every switch, and
         // `side.mega_capable_slots` keeps the numbers from the start of the game (IKA-121).
-        out[base + 5] = if self.reg.holds_mega_stone(mon.species, mon.item)
+        let holds = if rules.mega_from_slots {
+            side.mega_capable_slots.contains(&mon.slot) // revision 1 (IKA-141)
+        } else {
+            self.reg.holds_mega_stone(mon.species, mon.item)
+        };
+        out[base + 5] = if holds
             && !side.mega_used
             && !mon.is_mega
         {

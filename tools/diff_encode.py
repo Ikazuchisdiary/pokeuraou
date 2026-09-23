@@ -8,6 +8,10 @@ tolerance.
     cd rust && cargo run --release -- encode \\
         ../configs/regulations/gen9championsvgc2026regmc.json turns.json encoded.bin
     uv run python tools/diff_encode.py rust/turns.json rust/encoded.bin
+
+`--mega-from-slots` compares revision 1's `can_mega` rule on both sides (IKA-141): pass it
+here and to the Rust `encode` subcommand together. The Rust header says which rule it
+applied, and a disagreement with this flag is refused before any array is read.
 """
 
 from __future__ import annotations
@@ -22,7 +26,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from pokeuraou.encode import Encoder  # noqa: E402
+from pokeuraou.encode import Encoder, EncodingRules  # noqa: E402
 from pokeuraou.position import Position  # noqa: E402
 from pokeuraou.regulation import load_regulation  # noqa: E402
 
@@ -32,6 +36,11 @@ def main() -> None:
     ap.add_argument("fixture", help="a turns.json, for its positions")
     ap.add_argument("encoded", help="the binary the Rust `encode` subcommand wrote")
     ap.add_argument("--limit", type=int, default=0, help="compare only this many positions")
+    ap.add_argument(
+        "--mega-from-slots",
+        action="store_true",
+        help="encode with revision 1's can_mega rule (EncodingRules, IKA-141)",
+    )
     args = ap.parse_args()
 
     doc = json.loads(Path(args.fixture).read_text(encoding="utf-8"))
@@ -49,7 +58,13 @@ def main() -> None:
     m = header["monsPerSide"]
     if args.limit:
         assert n >= len(positions)
-    encoder = Encoder(reg)
+    rust_rule = bool((header.get("encoding") or {}).get("megaFromSlots", False))
+    if rust_rule != args.mega_from_slots:
+        raise SystemExit(
+            f"the Rust binary encoded with megaFromSlots={rust_rule} and this comparison "
+            f"asks for {args.mega_from_slots}; pass --mega-from-slots to both or to neither"
+        )
+    encoder = Encoder(reg, rules=EncodingRules(mega_from_slots=args.mega_from_slots))
     started = time.perf_counter()
     expected = encoder.encode_positions(positions)
     python_seconds = time.perf_counter() - started

@@ -811,3 +811,88 @@ def test_the_port_puts_can_mega_on_the_stone_holder_after_a_switch(bridged: None
                 moved += int(want and int(encoded.species[b, s, p]) == holder and p != 2)
             assert encoded.side[b, s, available] == float(any_holder and not spent), (b, s)
     assert moved, "no leaf had the holder off its old number, so nothing was tested"
+
+
+def test_the_port_applies_the_old_can_mega_rule_only_when_asked(bridged: None) -> None:
+    """`rules=` travels per request, so one node process serves both arms (IKA-141).
+
+    The same node, asked twice from one process: under revision 1's rule `can_mega` stands
+    on whatever row holds the side's recorded slot numbers, and the header says the rule was
+    applied; asked without it, the current rule, as the IKA-121 test above checks in full.
+    The positive control is that the two answers differ on this node at all.
+    """
+    from pokeuraou.encode import EncodingRules
+
+    reg, pos = _after_the_stone_holder_switches_in()
+    row = narrow(reg, pos, 0, limit=6).actions
+    col = narrow(reg, pos, 1, limit=6).actions
+    node = rustnode.node_for(reg)
+    assert node is not None
+    old = node.fill_encoded(
+        pos, row, col, Budget.matrix(), [], None, rules=EncodingRules(mega_from_slots=True)
+    )
+    new = node.fill_encoded(pos, row, col, Budget.matrix(), [], None, rules=EncodingRules())
+    plain = node.fill_encoded(pos, row, col, Budget.matrix(), [], None)
+    assert old.mega_from_slots is True
+    assert new.mega_from_slots is False and plain.mega_from_slots is False
+
+    encoder = Encoder(reg)
+    can_mega = encoder.mon_names.index("can_mega")
+    is_mega = encoder.mon_names.index("is_mega")
+    used = encoder.side_names.index("mega_used")
+    available = encoder.side_names.index("mega_available")
+    numbered = [list(side.mega_capable_slots) for side in pos.sides]
+    for b in range(len(old.encoded)):
+        for s in range(2):
+            spent = bool(old.encoded.side[b, s, used])
+            assert old.encoded.side[b, s, available] == float(bool(numbered[s]) and not spent)
+            for p in range(encoder.mons_per_side):
+                if not old.encoded.mask[b, s, p]:
+                    continue
+                want = p in numbered[s] and not spent and not old.encoded.mon[b, s, p, is_mega]
+                assert old.encoded.mon[b, s, p, can_mega] == float(want), (b, s, p)
+    assert not np.array_equal(old.encoded.mon, new.encoded.mon), "the rules agree here"
+    np.testing.assert_array_equal(new.encoded.mon, plain.encoded.mon)
+    moved = np.argwhere(old.encoded.mon != new.encoded.mon)
+    assert set(moved[:, -1].tolist()) == {can_mega}
+
+
+def test_two_leaves_in_one_process_each_get_their_own_rule(bridged: None) -> None:
+    """The per-arm switch through `batched_payoffs`, as a match worker calls it (IKA-141).
+
+    Two stand-in leaves in one process, one per rule, fill the same node. Each leaf's
+    encoder books the rule the port *says* it applied, and the payoffs differ -- so the
+    rule reached the port per leaf, and not once for the process.
+    """
+    from pokeuraou.encode import EncodingRules
+
+    reg, pos = _after_the_stone_holder_switches_in()
+    row = narrow(reg, pos, 0, limit=6).actions
+    col = narrow(reg, pos, 1, limit=6).actions
+
+    class Leaf:
+        def __init__(self, encoder: Encoder) -> None:
+            self.encoder = encoder
+
+        def from_encoded(self, encoded: Any) -> np.ndarray:  # noqa: ANN401
+            n = len(encoded)
+            weights = np.linspace(0.1, 1.9, encoded.mon[0].size)
+            raw = encoded.mon.reshape(n, -1).astype(np.float64) @ weights
+            return 1.0 / (1.0 + np.exp(-(raw % 5.0) + 2.5))
+
+        def __call__(self, positions: list) -> np.ndarray:
+            return self.from_encoded(self.encoder.encode_positions(positions))
+
+    old = Leaf(Encoder(reg, rules=EncodingRules(mega_from_slots=True)))
+    new = Leaf(Encoder(reg))
+    old_payoff, _notes, _exact = batched_payoffs(reg, pos, row, col, [old], budget=Budget.matrix())
+    new_payoff, _notes, _exact = batched_payoffs(reg, pos, row, col, [new], budget=Budget.matrix())
+    assert "rust can_mega=slots" in old.encoder.used, old.encoder.used
+    assert "rust can_mega=holder" not in old.encoder.used, old.encoder.used
+    assert "rust can_mega=holder" in new.encoder.used, new.encoder.used
+    assert "rust can_mega=slots" not in new.encoder.used, new.encoder.used
+    assert not np.array_equal(old_payoff[0], new_payoff[0])
+    # A mixture that disagrees cannot share one fill, so the port is not asked for it.
+    assert resolve_module._rust_encoded_payoffs(
+        reg, pos, row, col, [old, new], Budget.matrix()
+    ) is None

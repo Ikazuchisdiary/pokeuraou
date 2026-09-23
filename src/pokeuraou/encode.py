@@ -137,6 +137,76 @@ ENCODING_REVISION = 2
 
 
 @dataclass(frozen=True, slots=True)
+class EncodingRules:
+    """Which of two fixed defects an arm's leaf still carries, for measuring the fixes.
+
+    Both default to the current rule. They exist so a match can put the rule a model was
+    trained under against the rule the tree now uses, per arm (IKA-141): every model up to
+    and including `value-gen11L` was trained on revision 1, and the only way to see what
+    the two fixes do on the board is to play the old rule against the new one with the
+    same net. They are not options anyone should generate or train with.
+
+    The rules travel with the leaf, not with the process. A match worker plays both seats
+    and both arms, so an environment variable could only ever set one rule for both.
+
+    * `mega_from_slots` -- IKA-121 undone. `can_mega` reads `mon.slot in
+      side.mega_capable_slots` and `mega_available` reads "that list is non-empty", as
+      revision 1 did. The Rust encoder applies the same rule when the node request asks
+      (`rustnode.fill_encoded(..., rules=...)`).
+    * `patch_shares_side` -- IKA-119 undone. `beliefnode._patched` hands every completion
+      the true position's side vector and copies the bench rows' `can_mega` from the
+      completion's root without ANDing the leaf's `mega_used`.
+    """
+
+    mega_from_slots: bool = False
+    patch_shares_side: bool = False
+
+    @property
+    def is_current(self) -> bool:
+        return not (self.mega_from_slots or self.patch_shares_side)
+
+    def label(self) -> str:
+        """`new`, or which fixes are undone -- what a worker echoes and a record stores."""
+        if self.is_current:
+            return "new"
+        parts = []
+        if self.mega_from_slots:
+            parts.append("old-can-mega")
+        if self.patch_shares_side:
+            parts.append("old-patch")
+        return "+".join(parts)
+
+    def to_request(self) -> dict[str, bool]:
+        """The part of a node request the Rust encoder reads (`rust/src/node.rs`)."""
+        return {"megaFromSlots": self.mega_from_slots}
+
+
+#: The rules a leaf with no encoder of its own is scored under.
+CURRENT_RULES = EncodingRules()
+
+
+def rules_of(leaf: Any) -> EncodingRules:  # noqa: ANN401
+    """The encoding rules a leaf's encoder applies, however the leaf was handed over.
+
+    What arrives at the search is a leaf object, a bound `from_encoded`, or an
+    `_Objective` wrapping one; all three lead to an object with an `encoder`. Anything
+    without one -- hp-share, a test's stand-in -- is scored under the current rules.
+    """
+    # `kept` holds every candidate alive, so a bound method's id cannot be reused mid-walk.
+    pending, kept = [leaf], []
+    while pending:
+        candidate = pending.pop(0)
+        if candidate is None or any(candidate is k for k in kept) or len(kept) > 8:
+            continue
+        kept.append(candidate)
+        rules = getattr(getattr(candidate, "encoder", None), "rules", None)
+        if isinstance(rules, EncodingRules):
+            return rules
+        pending += [getattr(candidate, "__self__", None), getattr(candidate, "from_encoded", None)]
+    return CURRENT_RULES
+
+
+@dataclass(frozen=True, slots=True)
 class Vocabulary:
     """The integer meaning of every categorical feature, pinned to one regulation.
 
@@ -341,13 +411,25 @@ class _StatCache:
 class Encoder:
     """Encodes positions, in the JSON form the self-play records carry."""
 
-    def __init__(self, reg: Regulation, vocab: Vocabulary | None = None) -> None:
+    def __init__(
+        self,
+        reg: Regulation,
+        vocab: Vocabulary | None = None,
+        rules: EncodingRules = CURRENT_RULES,
+    ) -> None:
         if vocab is not None and vocab.format_id != reg.meta.format_id:
             raise ValueError(
                 f"vocabulary is for {vocab.format_id} but the regulation is "
                 f"{reg.meta.format_id}; the same integer would mean a different Pokemon"
             )
         self.reg = reg
+        #: Current unless a match is measuring a fix (`EncodingRules`, IKA-141).
+        self.rules = rules
+        #: What this encoder's leaf was actually scored with, by road and rule: positions
+        #: encoded here, leaves the port says it encoded under which `can_mega` rule, and
+        #: completions patched with which side vector. A match worker prints it per arm,
+        #: so the echo of a rule comes from where it was applied, not from a command line.
+        self.used: dict[str, int] = {}
         self.vocab = vocab or build_vocabulary(reg)
         self.mons_per_side = reg.meta.picked_team_size
         self.mon_names = mon_feature_names(self.vocab)
@@ -375,6 +457,10 @@ class Encoder:
         """
         return self.encode_positions([Position.from_json(p) for p in positions])
 
+    def note(self, what: str, count: int = 1) -> None:
+        """Count one use of a rule under `what` (see `used`)."""
+        self.used[what] = self.used.get(what, 0) + count
+
     @timing.timed("encode")
     def encode_positions(self, positions: list[Position]) -> Encoded:
         """Encodes positions directly, which is the path the search uses.
@@ -384,6 +470,9 @@ class Encoder:
         forward pass.
         """
         n = len(positions)
+        self.note(
+            "python can_mega=" + ("slots" if self.rules.mega_from_slots else "holder"), n
+        )
         m = self.mons_per_side
         species = np.zeros((n, 2, m), dtype=np.int64)
         ability = np.zeros((n, 2, m), dtype=np.int64)
@@ -463,9 +552,12 @@ class Encoder:
         # the side and not of any one Pokemon. Who holds a stone is read off the Pokemon,
         # as `can_mega` below is, and not off `side.mega_capable_slots` (IKA-121). Its
         # emptiness never moves, so on 3,000 recorded games this is the same number.
-        out[base + 1] = (
-            1.0 if not side.mega_used and any(self._holds_mega_stone(p) for p in mons) else 0.0
-        )
+        if self.rules.mega_from_slots:
+            # Revision 1, kept only to be played against the fix (IKA-141).
+            holder = bool(side.mega_capable_slots)
+        else:
+            holder = any(self._holds_mega_stone(p) for p in mons)
+        out[base + 1] = 1.0 if not side.mega_used and holder else 0.0
         out[base + 2] = alive / max(len(mons), 1)
         total = sum(p.maxhp for p in mons) or 1
         out[base + 3] = sum(p.hp for p in mons) / total
@@ -529,9 +621,14 @@ class Encoder:
         out[base + 2] = 1.0 if active_index == 1 else 0.0
         out[base + 3] = 1.0 if mon.fainted else 0.0
         out[base + 4] = 1.0 if mon.is_mega else 0.0
+        holds = (
+            mon.slot in side.mega_capable_slots  # revision 1 (IKA-141 measures it)
+            if self.rules.mega_from_slots
+            else self._holds_mega_stone(mon)
+        )
         out[base + 5] = (
             1.0
-            if self._holds_mega_stone(mon) and not side.mega_used and not mon.is_mega
+            if holds and not side.mega_used and not mon.is_mega
             else 0.0
         )
         out[base + 6] = 1.0 if mon.trapped else 0.0
@@ -565,15 +662,18 @@ class Encoder:
 
 __all__ = [
     "BOOST_IDS",
+    "CURRENT_RULES",
     "ENCODING_REVISION",
     "SIDE_CONDITIONS",
     "STATUSES",
     "VOLATILES",
     "Encoded",
     "Encoder",
+    "EncodingRules",
     "Vocabulary",
     "build_vocabulary",
     "field_feature_names",
     "mon_feature_names",
     "side_feature_names",
+    "rules_of",
 ]

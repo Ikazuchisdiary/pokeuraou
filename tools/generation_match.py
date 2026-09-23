@@ -28,7 +28,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pokeuraou.damage import register_mega_stones
-from pokeuraou.encode import Encoder
+from pokeuraou.encode import Encoder, EncodingRules, rules_of
 from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.policy import load_policy
 from pokeuraou.priors import find_cached_chaos, load_chaos
@@ -246,6 +246,28 @@ def main() -> None:
         action="store_true",
         help="same for the other arm",
     )
+    ap.add_argument(
+        "--can-mega-from-slots",
+        action="store_true",
+        help="the arm under test encodes `can_mega` and `mega_available` from "
+        "`side.mega_capable_slots`, as encoding revision 1 did: IKA-121 undone. Every model "
+        "up to value-gen11L was trained that way. For measuring the fix on the board and "
+        "nothing else; it reaches the Python encoder of this arm's leaf and the Rust "
+        "encoder through that leaf's node requests (IKA-141).",
+    )
+    ap.add_argument(
+        "--baseline-can-mega-from-slots", action="store_true", help="same for the other arm"
+    )
+    ap.add_argument(
+        "--patch-shares-side",
+        action="store_true",
+        help="the arm under test patches a hidden-bench completion's leaves with the true "
+        "position's side vector and the root's can_mega, as before IKA-119. Only matters "
+        "with --hide-bench. For measuring the fix (IKA-141).",
+    )
+    ap.add_argument(
+        "--baseline-patch-shares-side", action="store_true", help="same for the other arm"
+    )
     ap.add_argument("--seed", type=int, default=77)
     ap.add_argument(
         "--queue",
@@ -353,7 +375,21 @@ def main() -> None:
         stem = re.sub(r"-s\d+$", "", stem)
         return stem if len(paths) == 1 else f"{stem}x{len(paths)}"
 
-    encoder = Encoder(reg)
+    # One encoder per ARM, because the encoding rules travel with the leaf (IKA-141): this
+    # process plays both arms in both seats, so nothing process-wide could tell them apart.
+    tested_rules = EncodingRules(
+        mega_from_slots=args.can_mega_from_slots, patch_shares_side=args.patch_shares_side
+    )
+    other_rules = EncodingRules(
+        mega_from_slots=args.baseline_can_mega_from_slots,
+        patch_shares_side=args.baseline_patch_shares_side,
+    )
+    encoder = Encoder(reg, rules=tested_rules)
+    other_encoder = (
+        encoder
+        if other_rules == tested_rules
+        else Encoder(reg, vocab=encoder.vocab, rules=other_rules)
+    )
     objective = OBJECTIVES[args.objective]
     if args.inference is not None:
         # Both arms live on the server, named. A match is the case that needs names: it
@@ -365,7 +401,7 @@ def main() -> None:
         value = RemoteValue(args.inference, args.inference_arm, encoder)
         if not args.baseline_inference_arm:
             baseline = None
-        elif args.baseline_inference_arm == args.inference_arm:
+        elif args.baseline_inference_arm == args.inference_arm and other_encoder is encoder:
             # One arm of one server named twice is one leaf, so both sides get the same
             # object rather than a second socket and a second shared block over the same
             # weights. See the note beside the invariant below for what that buys and why
@@ -374,7 +410,8 @@ def main() -> None:
             # merely happen to hold the same files today are still two arms.
             baseline = value
         else:
-            baseline = RemoteValue(args.inference, args.baseline_inference_arm, encoder)
+            # Its own encoder: the same arm name with other rules is another agent.
+            baseline = RemoteValue(args.inference, args.baseline_inference_arm, other_encoder)
         # The names come back from the server, not from this command line. A worker is
         # told which arm to play, never what that arm holds, and the name it records is
         # what a rating is fitted from.
@@ -411,7 +448,15 @@ def main() -> None:
             missing = [p for p in args.baseline if not p.exists()]
             if missing:
                 raise SystemExit(f"no baseline model at {missing}")
-            if [p.resolve() for p in args.baseline] == [p.resolve() for p in args.value]:
+            same_files = [p.resolve() for p in args.baseline] == [
+                p.resolve() for p in args.value
+            ]
+            if same_files and other_encoder is not encoder:
+                # The same weights scored under other rules is another agent: a second
+                # leaf over the same nets, so each arm's encoder is its own (IKA-141).
+                baseline = BatchedValue(value.nets, other_encoder, device=device)
+                base_meta = meta
+            elif same_files:
                 # The same files in the same order are the same leaf, so both sides get
                 # one object. See the note beside the invariant below for what that buys
                 # and why it is safe.
@@ -460,6 +505,18 @@ def main() -> None:
                 file=sys.stderr,
             )
 
+    # From the leaf objects themselves, which is what `play_game` is handed -- not from the
+    # flags -- so a leaf built with the wrong encoder shows here (IKA-141).
+    print(
+        f"encoding: tested arm {rules_of(value).label()}"
+        + (
+            f", other arm {rules_of(baseline).label()}"
+            + (" (one leaf object for both)" if baseline is value else " (two leaf objects)")
+            if baseline is not None
+            else ""
+        ),
+        file=sys.stderr,
+    )
     book_matches_leaf(value_files, book, "tested arm")
     book_matches_leaf(baseline_files, other_book, "other arm")
 
@@ -596,7 +653,9 @@ def main() -> None:
     # its book, and renaming those seats would move labels that recorded runs key on.
     if args.hide_bench and args.uniform_bench_belief != args.baseline_uniform_bench_belief:
         tags += "@uniformbelief" if args.uniform_bench_belief else "@bookbelief"
-    arm =f"{new_name}{tags}" if tags else new_name
+    if tested_rules != other_rules:
+        tags += f"@enc:{tested_rules.label()}"
+    arm = f"{new_name}{tags}" if tags else new_name
     seats = (
         (f"{arm} = side 0", (value, baseline), (args.depth, args.baseline_depth),
          (args.limit, other_limit), (args.rank_leaf, args.baseline_rank_leaf),
@@ -671,7 +730,11 @@ def main() -> None:
     # weighted belief over its opponent's bench. Printed at the end as the worker's own
     # account, because the line at the top says what was asked and this says what ran.
     belief_games = [[0, 0] for _ in seats]
-    client =WorkClient(args.queue) if args.queue else None
+    # What each side's leaf encoder booked, per seat: the worker's own echo of which rule
+    # each arm applied where it sat (IKA-141). Read off the encoders' counters around each
+    # game, so a rule that never reached a seat shows as a count that is not there.
+    seat_uses: list[list[dict[str, int]]] = [[{}, {}] for _ in seats]
+    client = WorkClient(args.queue) if args.queue else None
     if client is not None:
         print(f"queue: {args.queue}", file=sys.stderr)
 
@@ -833,6 +896,8 @@ def main() -> None:
                 # sits at `which` and reads `bench_prior[1 - which]`.
                 belief_games[which][0] += bench_prior[1 - which] is not None
                 belief_games[which][1] += bench_prior[which] is not None
+            side_encoders = [getattr(leaf, "encoder", None) for leaf in leaves]
+            before_uses = [dict(getattr(e, "used", {})) for e in side_encoders]
             record = play_game(
                 reg,
                 rng,
@@ -880,6 +945,19 @@ def main() -> None:
             record.selection_source = (
                 "book" if (entry0 is not None or entry1 is not None) else "uniform"
             )
+            shared_encoder = side_encoders[0] is side_encoders[1]
+            for side_index, enc in enumerate(side_encoders):
+                if enc is None:
+                    continue
+                bucket = seat_uses[which][side_index]
+                for key, count in getattr(enc, "used", {}).items():
+                    delta = count - before_uses[side_index].get(key, 0)
+                    if delta:
+                        # One encoder for both sides cannot be split between them.
+                        name = f"{key} (both sides)" if shared_encoder else key
+                        bucket[name] = bucket.get(name, 0) + delta
+                if shared_encoder:
+                    break
             if record.outcome is None:
                 tally[which][2] += 1
                 if client is not None:
@@ -942,6 +1020,7 @@ def main() -> None:
                     # Per ARM, ordered by seat, like `books`: what the agent is, not
                     # what this game's draw happened to allow.
                     beliefs=arm_belief if which == 0 else arm_belief[::-1],
+                    encodings=(rules_of(leaves[0]).label(), rules_of(leaves[1]).label()),
                     note=(
                         f"search depth {depths[0]} vs {depths[1]} by side"
                         if depths[0] != depths[1]
@@ -1013,6 +1092,17 @@ def main() -> None:
                 f"  leaf traffic: {leaf.calls:,} requests, per call "
                 f"{1000 * leaf.copied / leaf.calls:.2f} ms filling the buffer, "
                 f"{1000 * leaf.waited / leaf.calls:.2f} ms awaiting the reply",
+                file=sys.stderr,
+            )
+    for which, (seat, seat_leaves, *_rest) in enumerate(seats):
+        for side_index, leaf in enumerate(seat_leaves):
+            if leaf is None:
+                continue
+            uses = seat_uses[which][side_index]
+            print(
+                f"  encoding echo, {seat}: side {side_index} leaf "
+                f"{rules_of(leaf).label()} used "
+                + (", ".join(f"{k} {v:,}" for k, v in sorted(uses.items())) or "nothing"),
                 file=sys.stderr,
             )
     for which, (seat, _leaves, _d, _l, _r, _s, _x, _p, _n) in enumerate(seats):

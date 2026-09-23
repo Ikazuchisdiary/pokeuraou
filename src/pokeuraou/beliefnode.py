@@ -157,16 +157,29 @@ def belief_payoffs(
     if node is None or not any(hidden.values()):
         return _per_completion(reg, row, col, evaluate, budget, spreads)
 
-    from .encode import Encoded
+    from .encode import Encoded, rules_of
 
-    scorer = getattr(getattr(evaluate, "__self__", evaluate), "from_encoded", None)
+    owner = getattr(evaluate, "__self__", evaluate)
+    scorer = getattr(owner, "from_encoded", None)
     if scorer is None:
         return _per_completion(reg, row, col, evaluate, budget, spreads)
+    # The leaf's own encoder and rules, for the port's arrays and for the patched rows alike:
+    # a match plays two arms in one process, and each arm is scored the way its leaf says
+    # (IKA-141). A leaf without an encoder is scored under the current rules.
+    encoder = getattr(owner, "encoder", None) or _encoder_for(reg)
+    rules = rules_of(evaluate)
 
     try:
-        filled = node.fill_encoded(position, row, col, budget, [], None)
+        filled = node.fill_encoded(position, row, col, budget, [], None, rules=rules)
     except Exception:  # noqa: BLE001 - a broken bridge must not fail the run
         return _per_completion(reg, row, col, evaluate, budget, spreads)
+    if rules.mega_from_slots and filled.mega_from_slots is not True:
+        # A binary that predates the field encoded with the current rule. The fill cannot
+        # be used for this leaf; the per-completion path encodes in Python.
+        return _per_completion(reg, row, col, evaluate, budget, spreads)
+    from .resolve import _note_port_rule
+
+    _note_port_rule([scorer], filled)
 
     dirty = reaches_bench(reg, row, col, hidden)
     for i, j, _root in filled.folded:
@@ -185,7 +198,9 @@ def belief_payoffs(
                 values = np.asarray(scorer(reference), dtype=np.float64)
             else:
                 values = np.asarray(
-                    scorer(_patched(reference, side, slots, item, reg, position)),
+                    scorer(
+                        _patched(reference, side, slots, item, reg, position, encoder, rules)
+                    ),
                     dtype=np.float64,
                 )
             payoff = np.zeros((len(row), len(col)), dtype=np.float64)
@@ -224,6 +239,8 @@ def _patched(
     item,  # noqa: ANN001 - Completion
     reg: Regulation,
     position: Position,
+    encoder=None,  # noqa: ANN001 - Encoder, imported lazily
+    rules=None,  # noqa: ANN001 - EncodingRules
 ):  # noqa: ANN202
     """The reference leaves with `side`'s hidden slots replaced by this completion's.
 
@@ -238,11 +255,41 @@ def _patched(
     `alive_fraction`, `team_hp_fraction` (the bench's max HP is in the denominator) -- so it
     is rebuilt per leaf from the patched rows. Until then it was the true position's, and
     every completion was scored with the true bench's side features.
-    """
-    from .encode import HP_SCALE, Encoded
 
-    encoder = _encoder_for(reg)
+    `rules.patch_shares_side` puts that back -- the true position's side vector, and the
+    root's `can_mega` copied as it is -- for a match that measures the fix (IKA-141). It is
+    the pre-IKA-119 body, line for line, and nothing else should ask for it.
+    """
+    from .encode import CURRENT_RULES, HP_SCALE, Encoded
+
+    encoder = encoder or _encoder_for(reg)
+    rules = rules or CURRENT_RULES
     source = encoder.encode_positions([item.position])
+    if hasattr(encoder, "note"):
+        encoder.note(
+            "patched side=" + ("shared" if rules.patch_shares_side else "rebuilt"),
+            len(reference.species),
+        )
+    if rules.patch_shares_side:
+        old = Encoded(
+            species=reference.species.copy(),
+            ability=reference.ability.copy(),
+            item=reference.item.copy(),
+            moves=reference.moves.copy(),
+            mon=reference.mon.copy(),
+            mask=reference.mask.copy(),
+            side=reference.side,
+            field=reference.field,
+            unknown_volatiles=dict(reference.unknown_volatiles),
+        )
+        for slot in slots:
+            old.species[:, side, slot] = source.species[0, side, slot]
+            old.ability[:, side, slot] = source.ability[0, side, slot]
+            old.item[:, side, slot] = source.item[0, side, slot]
+            old.moves[:, side, slot] = source.moves[0, side, slot]
+            old.mon[:, side, slot] = source.mon[0, side, slot]
+            old.mask[:, side, slot] = source.mask[0, side, slot]
+        return old
     out = Encoded(
         species=reference.species.copy(),
         ability=reference.ability.copy(),

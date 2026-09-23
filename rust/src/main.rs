@@ -4,7 +4,7 @@
 //!     cargo run --release -- roundtrip <turns.json>
 //!     cargo run --release -- turns     <regulation.json> <turns.json> [repeats]
 //!     cargo run --release -- node      <regulation.json>          # JSONL over stdio
-//!     cargo run --release -- encode    <regulation.json> <turns.json> <out.bin>
+//!     cargo run --release -- encode    <regulation.json> <turns.json> <out.bin> [--mega-from-slots]
 //!
 //! Python stays the oracle for Rust, and Showdown stays the oracle for Python
 //! (`tools/diff_*.py`), so the chain of verification is not broken by the port.
@@ -82,8 +82,12 @@ fn encode_main(args: &[String]) {
     let borrowed: Vec<&position::Position> = positions.iter().collect();
 
     let encoder = encode::Encoder::new(&reg);
+    // Revision 1's `can_mega` rule, for comparing an arm that plays it (IKA-141).
+    let rules = encode::EncodeRules {
+        mega_from_slots: args.iter().skip(3).any(|a| a == "--mega-from-slots"),
+    };
     let started = Instant::now();
-    let encoded = encoder.encode_positions(&borrowed);
+    let encoded = encoder.encode_positions_with(&borrowed, rules);
     let elapsed = started.elapsed().as_secs_f64();
     eprintln!(
         "encoded {} positions in {:.3} s = {:.1} us each",
@@ -101,6 +105,7 @@ fn encode_main(args: &[String]) {
         "fieldWidth": encoder.widths.field,
         "types": encoder.vocab.types,
         "unknownVolatiles": encoded.unknown_volatiles,
+        "encoding": { "megaFromSlots": rules.mega_from_slots },
     });
     writeln!(out, "{header}").expect("header");
     for value in &encoded.species {
