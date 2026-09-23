@@ -41,6 +41,15 @@ them before -- and the cells where the move's effect *fired* are counted apart: 
 with `_break_protection` taken out. A Feint into a foe that did not Protect agrees
 without the break ever running, and that is not evidence the break is right (IKA-58).
 
+Holding the port to a terrain no recorded game has (IKA-156):
+
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --terrain psychicterrain
+
+`--terrain` lays Psychic Terrain on each position, keeps those with a priority move (or a
+priority-raising ability) on the field, and holds every cell that may use one branch by
+branch. The cells where the terrain's per-target stop *fired* are the ones Python moves
+with `_stopped_by_psychic_terrain` taken out, and the run fails if there are none.
+
 The budget, and the second invocation that goes with it (IKA-146):
 
     uv run python tools/diff_node.py --scenario examples/scenario-turn5.json --budget fast --limit 0
@@ -201,6 +210,63 @@ class unbroken:  # noqa: N801 - read as a phrase at the call site
         import pokeuraou.resolve as resolve_mod
 
         resolve_mod._break_protection = self.real
+
+
+class unstopped:  # noqa: N801 - read as a phrase at the call site
+    """Python with Psychic Terrain's per-target stop taken out: the control for --terrain.
+
+    The terrain stays -- its Psychic boost and the Speed-order effects with it -- so what
+    differs is only what the stop did (IKA-156).
+    """
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = resolve_mod._stopped_by_psychic_terrain
+        resolve_mod._stopped_by_psychic_terrain = lambda *_args: False
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        resolve_mod._stopped_by_psychic_terrain = self.real
+
+
+#: Abilities that raise a move's priority, and the moves they raise (`speed.move_priority`).
+PRIORITY_ABILITIES = {"prankster", "galewings", "triage"}
+
+
+def priority_moves(reg) -> frozenset[str]:  # noqa: ANN001
+    """Moves with a priority of their own that reach another Pokemon."""
+    return frozenset(
+        move.id
+        for move in reg.moves.values()
+        if move.priority > 0
+        and move.target not in ("self", "allySide", "allyTeam", "adjacentAlly", "all")
+    )
+
+
+def uses_priority(reg, pos: Position, side: int, action, own: frozenset[str]) -> bool:  # noqa: ANN001
+    """Whether a slot uses a move that may go at positive priority: one of `own`, or any
+    move of a Pokemon whose ability can raise it -- `move_priority` decides which."""
+    for slot in action.slots:
+        move_id = getattr(slot, "move_id", None)
+        if move_id is None:
+            continue
+        if move_id in own:
+            return True
+        index = pos.sides[side].active[slot.slot]
+        mon = pos.sides[side].pokemon[index] if index is not None else None
+        if mon is not None and mon.ability in PRIORITY_ABILITIES:
+            return True
+    return False
+
+
+def priority_on_field(pos: Position, own: frozenset[str]) -> bool:
+    return knows_on_field(pos, own) or any(
+        mon is not None and not mon.fainted and mon.ability in PRIORITY_ABILITIES
+        for side in pos.sides
+        for mon in side.active_pokemon()
+    )
 
 
 def recorded_positions(  # noqa: ANN001
@@ -456,6 +522,15 @@ def main() -> None:
         "the field knows one, hold every cell that uses one to the port branch by branch, "
         "and count where the break fired",
     )
+    ap.add_argument(
+        "--terrain",
+        choices=["psychicterrain"],
+        default=None,
+        help="lay this terrain on every position first -- no recorded game has one -- keep "
+        "those with a priority move or a priority-raising ability on the field, hold every "
+        "cell that may use one to the port branch by branch, and count where the "
+        "terrain's per-target stop fired",
+    )
     args = ap.parse_args()
 
     if args.limit == 0 and not args.scenario:
@@ -518,6 +593,13 @@ def main() -> None:
         positions = [pos for pos in positions if on_field(pos, holding)]
     if using:
         positions = [pos for pos in positions if knows_on_field(pos, using)]
+    quick = priority_moves(reg) if args.terrain else frozenset()
+    if args.terrain:
+        for pos in positions:
+            pos.field.terrain = args.terrain
+            pos.field.terrain_duration = 5
+        positions = [pos for pos in positions if priority_on_field(pos, quick)]
+        print(f"{args.terrain} laid on {len(positions)} positions with a priority move on the field")
     build = rustnode.require_current_binary()
     print(f"binary {build['sha256']} built {build['built']}")
 
@@ -552,6 +634,9 @@ def main() -> None:
     # Where the move was used, where its break fired, and what the port did there.
     used = used_wrong = broke = broke_wrong = broke_paused = 0
     broke_worst = 0.0
+    # Where a priority move may go under the terrain, and where the terrain stopped it.
+    quick_used = quick_wrong = stopped = stopped_wrong = 0
+    stopped_worst = 0.0
 
     for pos in positions:
         row = menu(reg, pos, 0, args.limit)
@@ -648,6 +733,36 @@ def main() -> None:
                         shown += 1
                         print(f"  cell {(i, j)} using {sorted(using)}: {wrong[0][:200]}")
 
+        if args.terrain:
+            node = rustnode.node_for(reg)
+            for i, a in enumerate(row):
+                for j, b in enumerate(col):
+                    if not (
+                        uses_priority(reg, pos, 0, a, quick) or uses_priority(reg, pos, 1, b, quick)
+                    ):
+                        continue
+                    quick_used += 1
+                    here = resolve_turn(reg, pos, [a, b], budget=budget)
+                    with unstopped():
+                        control = resolve_turn(reg, pos, [a, b], budget=budget)
+                    wrong = (
+                        ["no warm process"]
+                        if node is None
+                        else branch_differences(node, reg, pos, a, b, here, budget)
+                    )
+                    quick_wrong += bool(wrong)
+                    if differ(outcome(here), outcome(control)):
+                        stopped += 1
+                        stopped_wrong += bool(wrong)
+                        for index in range(len(evaluators)):
+                            stopped_worst = max(
+                                stopped_worst,
+                                abs(float(got[index][i, j] - expected[index][i, j])),
+                            )
+                    if wrong and shown < 5:
+                        shown += 1
+                        print(f"  cell {(i, j)} under {args.terrain}: {wrong[0][:200]}")
+
         checked += 1
         cells += len(row) * len(col)
         for index, name in enumerate(names):
@@ -714,6 +829,14 @@ def main() -> None:
         print(f"    cells whose branches, weights, notes or positions differ  {broke_wrong}")
         print(f"    cells with a paused branch, whose position is not compared  {broke_paused}")
         print(f"    worst cell difference there  {broke_worst:.3e}")
+    if args.terrain:
+        print(f"\n  under {args.terrain}, cells that may use a priority move -- held branch by branch")
+        print(f"    {quick_used} of {cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {quick_wrong}")
+        print("  where the terrain stopped one -- the cells `unstopped` moves")
+        print(f"    {stopped} of {quick_used} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {stopped_wrong}")
+        print(f"    worst cell difference there  {stopped_worst:.3e}")
     print(f"  python {python_seconds:.2f} s   rust {rust_seconds:.2f} s")
     if rust_seconds > 0:
         print(f"  end to end {python_seconds / rust_seconds:.1f}x")
@@ -728,6 +851,10 @@ def main() -> None:
         failed.append(f"{used_wrong} cells using {', '.join(sorted(using))} differ by branch")
     if using and not broke:
         failed.append("the break fired in no cell, so agreeing here says nothing")
+    if quick_wrong:
+        failed.append(f"{quick_wrong} cells under {args.terrain} differ by branch")
+    if args.terrain and not stopped:
+        failed.append(f"{args.terrain} stopped nothing in any cell, so agreeing here says nothing")
     if failed:
         print(f"\nFAIL ({args.budget}): " + "; ".join(failed))
         sys.exit(1)
