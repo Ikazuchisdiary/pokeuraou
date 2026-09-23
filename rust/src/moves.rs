@@ -455,7 +455,7 @@ fn defrosts(turn: &Turn, mon: &crate::position::Pokemon, mv: &Move) -> bool {
 /// Whether this try gets as far as confusion's `onBeforeMove`: past a flinch, and past a
 /// sleep or a freeze only when it wakes or thaws for certain.
 fn confusion_reached(turn: &Turn, mon: &crate::position::Pokemon, mv: &Move) -> bool {
-    if mon.fainted || mon.has_volatile("flinch") {
+    if mon.fainted || mon.has_volatile("flinch") || taunt_stops(mon, mv) {
         return false;
     }
     if is(mon.status, "slp") {
@@ -566,6 +566,42 @@ fn confusion_stage(
     vec![(1.0, None)]
 }
 
+/// Python's `_taunt_stops`: Taunt's `onBeforeMove` (priority 5) stops a status move but
+/// Me First, before PP or a Choice lock (IKA-188).
+fn taunt_stops(mon: &crate::position::Pokemon, mv: &Move) -> bool {
+    mon.has_volatile("taunt") && mv.category == "Status" && mv.id.as_str() != "mefirst"
+}
+
+/// Python's `_taunt_stage`: Taunt's check, then confusion's (5 is above confusion's 3).
+fn taunt_stage(
+    turn: &mut Turn,
+    action: &QueuedAction,
+    mv: &Move,
+    budget: &Budget,
+) -> Vec<(f64, Option<String>)> {
+    if turn.mon_at(action.side, action.slot).is_some_and(|mon| taunt_stops(mon, mv)) {
+        return vec![(1.0, Some("taunt".into()))];
+    }
+    confusion_stage(turn, action, budget)
+}
+
+/// Python's `_taunt_lasts_longer`: `if (target.activeTurns && !this.queue.willMove(target))
+/// duration++` -- 4 on a Pokemon that has already moved, 3 on one that came in this turn.
+fn taunt_lasts_longer(turn: &mut Turn, side: usize, slot: usize) {
+    if !turn.acted[side][slot] {
+        return;
+    }
+    let Some(mon) = turn.mon_at_mut(side, slot) else { return };
+    if mon.newly_switched {
+        return;
+    }
+    if let Some(held) = mon.volatile_mut("taunt") {
+        if let Some(duration) = held.duration {
+            held.duration = Some(duration + 1);
+        }
+    }
+}
+
 /// (probability, reason it could not act) for the pre-move checks.
 fn can_act(
     turn: &mut Turn,
@@ -603,7 +639,7 @@ fn can_act(
             }
         };
         return Ok(if woke {
-            confusion_stage(turn, action, budget)
+            taunt_stage(turn, action, mv, budget)
         } else {
             vec![(1.0, Some("slp".into()))]
         });
@@ -620,7 +656,7 @@ fn can_act(
                 mon.status = None;
                 mon.status_counter = None;
             }
-            return Ok(confusion_stage(turn, action, budget));
+            return Ok(taunt_stage(turn, action, mv, budget));
         }
         let thawed = {
             let mon = turn.mon_at_mut(action.side, action.slot).unwrap();
@@ -635,7 +671,7 @@ fn can_act(
             }
         };
         if thawed {
-            return Ok(confusion_stage(turn, action, budget));
+            return Ok(taunt_stage(turn, action, mv, budget));
         }
         if !budget.enumerate_status_checks {
             return Ok(vec![(1.0, Some("frz".into()))]);
@@ -652,7 +688,7 @@ fn can_act(
     // `stopped_by_psychic_terrain`, IKA-156).
 
     // Confusion's priority 3 is above paralysis's 1: the self-hit first (IKA-177).
-    let mut outcomes = confusion_stage(turn, action, budget);
+    let mut outcomes = taunt_stage(turn, action, mv, budget);
     if is(status, "par") && budget.enumerate_status_checks {
         let mut expanded = Vec::new();
         for (weight, reason) in outcomes {
@@ -2616,6 +2652,9 @@ fn apply_status_move(
             // the first planter's slot (IKA-56).
             let already = turn.mon_at(target.0, target.1).is_some_and(|m| m.has_volatile(&vid));
             turn.add_volatile(target.0, target.1, &vid, duration);
+            if vid == "taunt" && !already {
+                taunt_lasts_longer(turn, target.0, target.1);
+            }
             if vid == "leechseed" && !already {
                 if let Some(mon) = turn.mon_at_mut(target.0, target.1) {
                     if let Some(applied) = mon.volatile_mut("leechseed") {

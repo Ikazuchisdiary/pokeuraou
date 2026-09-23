@@ -1959,6 +1959,43 @@ def _defrosts(turn: _Turn, mon: Pokemon, move: Move) -> bool:
     return "defrost" in move.flags and not (move.id == "burnup" and "Fire" not in turn.types_of(mon))
 
 
+def _taunt_stops(mon: Pokemon, move: Move) -> bool:
+    """Taunt's `onBeforeMove`, priority 5 (IKA-188):
+
+        if (!(move.isZ && move.isZOrMaxPowered) && move.category === 'Status' && move.id !== 'mefirst') {
+            this.add('cant', attacker, 'move: Taunt', move);
+            return false;
+        }
+
+    `onDisableMove` only shapes the next request, so this is what stops a status move chosen
+    before the Taunt landed -- a Prankster Taunt, then the Tailwind. No PP is spent and no
+    Choice lock is set: both come after `BeforeMove`.
+    """
+    return mon.has_volatile("taunt") and move.category == "Status" and move.id != "mefirst"
+
+
+def _taunt_stage(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[float, str | None]]:
+    """Taunt's check, then confusion's: 5 is below sleep and freeze (10) and flinch (8), and
+    above confusion (3) and paralysis (1), so a taunted status move spends no confused try."""
+    mon = turn.mon_at(action.side, action.slot)
+    move = turn.reg.moves.get(action.move_id or "")
+    if mon is not None and move is not None and _taunt_stops(mon, move):
+        return [(1.0, "taunt")]
+    return _confusion_stage(turn, action, budget)
+
+
+def _taunt_lasts_longer(turn: _Turn, target: tuple[int, int]) -> None:
+    """Taunt's `onStart`: `if (target.activeTurns && !this.queue.willMove(target))
+    duration++` (IKA-188). On a Pokemon that has already used its move this turn the Taunt
+    is 4 long, so three whole turns remain after this one's residual. One that came in this
+    turn has no move queued either, but `activeTurns` is 0 and it stays 3."""
+    mon = turn.mon_at(*target)
+    held = mon.volatile("taunt") if mon is not None else None
+    if held is None or held.duration is None or mon.newly_switched or target not in turn.acted:
+        return
+    held.duration += 1
+
+
 def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[float, str | None]]:
     """(probability, reason it could not act) for the pre-move checks."""
     mon = turn.mon_at(action.side, action.slot)
@@ -1978,7 +2015,7 @@ def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[fl
             mon.status = None
             mon.status_counter = None
             turn.log(f"{turn.name(action.side, action.slot)} woke up")
-            return _confusion_stage(turn, action, budget)
+            return _taunt_stage(turn, action, budget)
         return [(1.0, "slp")]
     if mon.status == "frz":
         # A move with the `defrost` flag -- Scald, Flare Blitz, Matcha Gotcha -- is used
@@ -1990,7 +2027,7 @@ def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[fl
             mon.status = None
             mon.status_counter = None
             turn.log(f"{turn.name(action.side, action.slot)} thawed ({move.id})")
-            return _confusion_stage(turn, action, budget)
+            return _taunt_stage(turn, action, budget)
         # `time--; if (time <= 0 || randomChance(1, 4))` -- the counter is spent on the
         # attempt to move, and reaching zero thaws regardless of the roll.
         mon.status_counter = (mon.status_counter or FREEZE_COUNTER) - 1
@@ -1998,7 +2035,7 @@ def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[fl
             mon.status = None
             mon.status_counter = None
             turn.log(f"{turn.name(action.side, action.slot)} thawed (counter)")
-            return _confusion_stage(turn, action, budget)
+            return _taunt_stage(turn, action, budget)
         if not budget.enumerate_status_checks:
             return [(1.0, "frz")]
         # The two outcomes differ in more than "did it act": one of them is no longer
@@ -2011,7 +2048,7 @@ def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[fl
     # the move has started, so PP is spent (`_priority_blocked_by`, IKA-158, and
     # `_stopped_by_psychic_terrain`, IKA-156).
     # Confusion's priority 3 is above paralysis's 1: the self-hit is rolled first (IKA-177).
-    outcomes = _confusion_stage(turn, action, budget)
+    outcomes = _taunt_stage(turn, action, budget)
     if mon.status == "par" and budget.enumerate_status_checks:
         expanded: list[tuple[float, str | None]] = []
         for weight, reason in outcomes:
@@ -2072,7 +2109,7 @@ def _confusion_reached(turn: _Turn, mon: Pokemon, move: Move) -> bool:
     """Whether this try gets as far as confusion's `onBeforeMove` (priority 3): past a
     flinch (8), a sleep (10) and a freeze (10) only when it wakes or thaws. A freeze left
     to its 1-in-4 is not, as `_can_act` does not look at confusion there."""
-    if mon.fainted or mon.has_volatile("flinch"):
+    if mon.fainted or mon.has_volatile("flinch") or _taunt_stops(mon, move):
         return False
     if mon.status == "slp":
         return (mon.status_counter or 0) - (2 if mon.ability == "earlybird" else 1) <= 0
@@ -3172,6 +3209,8 @@ def _apply_status_move(
                 #       (sim/pokemon.ts:2008)
                 # Only on a fresh seed: re-seeding a seeded target fails in `addVolatile`
                 # (no `onRestart`) and leaves the first planter's slot in place.
+                if volatile_id == "taunt" and not already:
+                    _taunt_lasts_longer(turn, target)
                 seeded = turn.mon_at(*target)
                 if volatile_id == "leechseed" and not already and seeded is not None:
                     applied = seeded.volatile("leechseed")
