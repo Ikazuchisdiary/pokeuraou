@@ -11777,3 +11777,126 @@ test_trap_sources（新規）・test_trap_immunities・test_runaway・test_actio
 test_port_coverage・test_port_gates・test_rust_node・test_resolve・test_line_endings・test_no_machine_specific_paths を `-n 0` で通過
 （xfail 1 はげきりんの生成の形）。ruff、`port_coverage.py --check`、`port_gate_audit.py --check`（かげふみの注記を更新）も通る。
 機械（heavy.py、--agent IKA-169）: release ビルド 8 コア 23 秒、port と resolve のテスト 26 秒、記録 335 秒、試し 2 秒（1 コア）。
+
+## 9/23 — IKA-172: port がほろびのうたを誰にも付けていなかった —— 生成は port で局を進めるので、selfplay-gen11L では使われたほろびのうた 14 回がすべて消えていた。Python はかたやぶりと「全員が既にカウント中」の失敗が抜けていた。オラクル 7 ケース 4 ターンで Python・port とも Showdown と一致
+
+### 1. 扱いの違い
+
+- Python（`resolve.py` `_apply_status_move` の `if move.id == "perishsong"`）: 場の全員に `perishsong`（duration 4）。
+  ぼうおんは使い手以外を外す。ターン終わりの residual 24 で数え、0 で倒す。交代で volatile は消える。
+- port（`rust/src/moves.rs` `apply_status_move`）: **付与の道が無かった**。residual（`moves.rs` の「Residual order 24」）と
+  ターン終わりの数え直しの除外、アーマーテールの `all` の例外は持っていた。`modelled.rs` の
+  `status_move_is_fully_modelled` に `perishsong` があり、`resolve.rs:805` の `status_move_handled` も通すので、断りも注記も
+  出ずに「誰も数えていない」子を返していた。
+- `port_gate_audit.py` が拾えなかったのは、`perishsong` の文字列が port の中で residual とアーマーテールの腕に出てくるので
+  「port が名前を扱っている」と数えたため（道が 1 本あっても別の道が無いことは分からない）。
+
+### 2. 生成の経路と、記録で volatile が消えた理由
+
+`selfplay._advance_turn`: 橋が有効なら `node.resolve(pos, chosen, Budget.exact())` で重みを取り、引いた枝の局面を
+port から受け取る（`select=index`）。port の子が次の決定の局面になる。Python の `resolve_turn` に落ちるのは (a) 引いたのが
+途中交代で止まった枝のとき、(b) 橋が壊れて無効になったとき、だけ。
+
+`C:/tmp/ika172/perish_trace.py`（一時スクリプト）で、ほろびのうたを選んだ決定の次の手番の局面を読んだ:
+
+```
+                                  gen11L   gen9   selfplay-all   w12
+  選んだ回数                         24      39        83         217
+  使い手が次の局面で lastMove=perishsong で、
+    誰にも volatile が無い（消えた）  14      24        29         109
+    誰かに volatile がある            0       0        13           3
+  使わなかった（ねむり等）・倒れた・局が終わった   10      15        41         105
+```
+
+「使わなかった」はねむり（lastMove=hypnosis のままのニョロトノは状態 slp、手で確かめた）と先に倒れたもの。
+w12 の 3 つは同じターンに誰かが倒れて途中交代の枝を引いた局（`games-worker7.jsonl` 538 行: イッカネズミが倒れたターンで
+全員に perishsong 3、次のターンから port が 3→2 と正しく数える）で、(a) の経路で Python が付けた。selfplay-all の 13 は
+橋が入る前（engine 未記録）の局を含む。gen11L の 0 は、その 14 回が全部 (a) 以外だったから。消えた例
+（gen11L `games-worker0.jsonl` 439 行）: ターン 6 のゲンガーのほろびのうたの後、ドヒドイデ・ゲンガーはターン 9 の終わりにも
+場に居て、倒れていない。
+
+### 3. オラクルで見たこと（`tests/test_perish_song.py`、新規）
+
+どのケースも Showdown で 4 ターン。1 ターン目に side 0 の a が歌い、相棒と相手はまもる（ほろびのうたに protect の旗は
+無いので通る）。2〜4 ターン目はてだすけ。Python と port は自分の前のターンの局面から進め、毎ターン HP・ひんし・カウントを
+Showdown と比べる（port は Python の局面ともバイトで一致させる）。
+
+```
+  ケース                  Showdown（1 ターン後のカウント 3 / 4 ターン後にひんし）         旧 Python   旧 port   直した後
+  all-four                全員 3 / 全員ひんし                                              一致        不一致    一致
+  soundproof-foe          ジャラランガに無し・生き残る                                     一致        不一致    一致
+  soundproof-ally         使い手の相棒のジャラランガに無し                                 一致        不一致    一致
+  soundproof-singer       使い手自身がぼうおんなら付く（target !== source）                一致        不一致    一致
+  mold-breaker            かたやぶりの使い手ならぼうおんにも付く                           不一致      不一致    一致
+  switch-out              2 ターン目に下がったガオガエンは消える・出てきたカバルドンは無し・生存  一致        不一致    一致
+  sung-twice              2 ターン目の 2 回目は失敗（moveLastTurnFailed）、カウントはそのまま  不一致      不一致    一致
+```
+
+Showdown 側の事実（誰にカウントが付き、誰が倒れ、失敗の旗）はテストの中で先に確かめる（陽性対照）。直す前: 旧 Python
+（master の src）＋旧 exe（main の `rust/target/release/pokeuraou-damage.exe` の写し、dc357226）で 14 のうち 9 落ち
+（Python 2・port 7）、新 Python＋旧 exe で port の 7 が落ち、新 Python＋新 exe で 14 通過。
+
+テストを組む途中で見つけたこと: てだすけは相棒が既に動いていると失敗する（`if (!target.newlySwitched &&
+!this.queue.willMove(target)) return false`）が、Python・port はそれを失敗にしない。ひんしのポケモンの失敗の旗は
+Showdown の `clearVolatile` が消す。どちらもこの課題の問いではないので、失敗の旗は 2 回目を歌う使い手の生きているときだけ比べる。
+
+### 4. 直し
+
+- Python: 付与を `_perish_song(reg, turn, action)` に出した（diff_node の対照が抜けるように）。かたやぶり系（`MOLD_BREAKER_ABILITIES`、
+  きのこのほうしは変化技なので含む）はとくせいガードの無いぼうおんを抜ける。誰にも付かず、ぼうおんで止まった者も居なければ失敗
+  （`move_failed`）。
+- port: `moves.rs` に同じ `perish_song` を足し、`apply_status_move` から呼ぶ。
+- `tools/diff_node.py --using perishsong`: 対照は `_perish_song` を抜いた Python（`unsung`）。
+
+### 5. diff_node（`--games-dir … --using perishsong`、1 コア）
+
+```
+                                  w12 40 局面        gen11L 40 局面       w12 12 局面 --value value-gen11L
+                                  新 exe   旧 exe    新 exe   旧 exe      新 exe      旧 exe
+  ほろびのうたを使うセル            2,139             1,963                641
+  うち効果が出た（対照が動く）      1,812             1,649                481
+  枝ごとに違うセル                 0        1,803    0        1,633       0           479
+  最悪のセルの差（葉）              4e-16    4e-16    3e-16    3e-16       3.0e-08     0.79
+  均衡の頻度の最大の動き            5e-15    5e-15                          2e-15       1.0
+```
+
+hp-share と faints の葉は volatile を読まないので行列は旧 exe でも一致し、違いは枝の局面にだけ出る。学習した葉は perishsong を
+入力に持つので、旧 exe では 12 局面でセルが最大 0.79 動き、ある局面ではある手の均衡の確率が 1.0 動いた（値の動きは最大 2.7e-4）。
+効果が出たのに違わないセル（w12 9・gen11L 16）は、途中交代で止まった枝を持つセル（w12 11・gen11L 18、その局面は比べない）の数に収まる。
+gen11L の 40 局面には「ノードの注記が違う」が 1 つあり（Python だけ `residual speed tie`）、旧 exe でも同じなのでこの変更ではない。
+
+### 6. 学習データへの影響（`C:/tmp/ika172/perish_impact.py`）
+
+value-gen11L の学習局は selfplay-all 46,604・selfplay-gen9 11,999・selfplay-gen11L 12,000 = 70,603 局（npz の meta）。
+
+```
+                                        gen11L   gen9   selfplay-all   計（70,603 局）   w12（参考）
+  ほろびのうたを持つ局                    249     268       1,188          1,705           1,030
+  選んだ局                                 21      28          66            115（0.16%）    167
+  port が消した局                          13      21          24             58（0.08%）     87
+  消えた後の決定                           34      61          80            175（決定の 0.02%）  294
+  4 ターン後まで続いた消えた回              3       4           6             13              37
+    倒れるべきだったのに場に残ったポケモン   5       7          12             24              73
+  perishsong の volatile がある決定          0       4         176            180              12
+```
+
+消えた回の多く（gen11L 14 中 11）は 4 ターン以内に局が終わっている。学習局 70,603 のうち 58 局・175 決定という小ささで、
+value-gen11L の重みを疑う大きさではない。ただし value-gen11L が perishsong の入力を見たのは selfplay-all の 176 決定がほぼ全部で、
+gen11L・gen9 では 4 決定だけ。探索の側は別で、port が埋めるセルではほろびのうたは何もしない技だったので、ほろびのうたの
+使い手が居る局面の均衡は 5 節のとおり動く（ほろびのうたが gen11L で 249 局中 24 回しか選ばれていないことの一因の見込み）。
+
+### 7. 検査と機械
+
+test_perish_song（新規）・test_resolve・test_priority_block_per_target・test_port_coverage・test_port_gates・test_rust_node・
+test_hazards_foe_side を `-n 0` で通過（175）。ruff、`port_coverage.py --check`、`port_gate_audit.py --check` も通る
+（`inert.rs`・`modelled.rs` は変わらない）。release ビルド 1 回（8 コア 23 秒）、記録の走査 2 回（29 秒・21 秒）、
+diff_node 6 回（25〜48 秒）、テスト 2 回（12 秒・33 秒）、すべて heavy.py（--agent IKA-172）。オラクルのテストの初めの数回は
+heavy.py を通さずに 1 コアで走らせた。
+
+### 8. 別課題の候補
+
+- **てだすけの失敗**: 相棒が既に動いたあとのてだすけを Showdown は失敗にする（`onTryHit` の `willMove`）。Python・port は
+  volatile を付けて成功のまま。次のターンの `moveLastTurnFailed`（じだんだ）が違う。
+- **port_gate_audit の盲点**: 「id が port のどこかに出てくる」ことを「port が扱う」と数えるので、同じ技の別の道（ここでは
+  付与）が抜けていても通る。完全に扱う変化技については、`apply_status_move` か宣言的な欄のどちらかに届くかで見るべき。
+- **ノードの注記**: gen11L の記録局面 1 つで Python だけが `residual speed tie` を出す（旧 exe でも同じ）。
