@@ -181,6 +181,42 @@ def replay_shown(record: dict[str, Any]) -> list[list[list[str]]]:
     return out
 
 
+#: Why a game stopped (IKA-87). "wipeout": one side has nothing left, or both do and
+#: the last to empty lost (`outcome` is set). "draw": both emptied and the order could
+#: not be told (`outcome` None). "turn-cap": `max_turns` ran out first (`outcome` None).
+#: "unresolved": a turn had no outcome to continue from -- no branch with weight, or more
+#: than five mid-turn replacements (`outcome` None; the final position is the board the
+#: turn was chosen at). There is no resignation in self-play, so no reason for one.
+END_REASONS = ("wipeout", "draw", "turn-cap", "unresolved")
+
+
+def _close_record(record: GameRecord, pos: Position) -> None:
+    """Writes the final position and the reason the game stopped, as `play_game` ends.
+
+    `record.end_reason` already says "unresolved" when the loop broke on a turn with
+    nothing to continue from; otherwise the board says which of the other three it was.
+    """
+    if record.end_reason is None:
+        if pos.ended:
+            record.end_reason = "wipeout" if pos.winner is not None else "draw"
+        else:
+            record.end_reason = "turn-cap"
+    record.final_position = pos.to_json()
+
+
+def _final_json(record: GameRecord) -> dict[str, Any]:
+    """The record's `finalPosition` and `endReason`, or nothing when it has neither."""
+    if record.final_position is None:
+        return {}
+    return {"finalPosition": record.final_position, "endReason": record.end_reason}
+
+
+def final_position(record: dict[str, Any]) -> Position | None:
+    """A written record's final position, or None for one from before IKA-87."""
+    final = record.get("finalPosition")
+    return None if final is None else Position.from_json(final)
+
+
 @dataclass(slots=True)
 class GameRecord:
     own_team: list[dict[str, Any]]
@@ -261,6 +297,13 @@ class GameRecord:
     #: it cannot change within one (IKA-127). None altogether on a record not made by
     #: `play_game`.
     leads: list[list[str] | None] | None = None
+    #: The position the game stopped at, as `Position.to_json` (IKA-87): the true board
+    #: after the last turn was resolved -- who is left and on what HP. The decisions stop
+    #: before the last turn, so without this nothing in the record says who survived.
+    #: None on a record not made by `play_game`, and absent from every record before it.
+    final_position: dict[str, Any] | None = None
+    #: Why it stopped (`END_REASONS`), set with `final_position`.
+    end_reason: str | None = None
 
     def to_json(self, *, objective: str, search_limit: int | tuple[int, int]) -> dict[str, Any]:
         return {
@@ -295,6 +338,7 @@ class GameRecord:
             "selectionValue": self.selection_value,
             "unmodelled": sorted(set(self.unmodelled)),
             **({"leads": self.leads} if self.leads is not None else {}),
+            **_final_json(self),
             "decisions": [
                 {
                     "turn": d.turn,
@@ -1031,12 +1075,14 @@ def play_game(
             ),
         )
         if advanced is None:
+            record.end_reason = "unresolved"
             break
         pos = advanced
         record.turns = pos.turn
 
     if pos.ended and pos.winner is not None:
         record.outcome = 1.0 if pos.winner == pos.sides[0].id else 0.0
+    _close_record(record, pos)
     return record
 
 
@@ -1927,8 +1973,10 @@ def generate(
 __all__ = [
     "MAX_TURNS",
     "SEARCH_LIMIT",
+    "END_REASONS",
     "Decision",
     "GameRecord",
+    "final_position",
     "generate",
     "play_game",
     "position_from_sets",
