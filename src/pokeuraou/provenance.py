@@ -125,6 +125,7 @@ def provenance(
     information: tuple[str, str] = ("open", "open"),
     beliefs: tuple[str, str] = ("uniform", "uniform"),
     encodings: tuple[str, str] = ("new", "new"),
+    rank_views: tuple[str, str] = ("heaviest", "heaviest"),
     note: str = "",
 ) -> dict[str, Any]:
     """What produced this game, per side, in the order the sides appear in the record.
@@ -176,6 +177,10 @@ def provenance(
         # Written only when a side ran an undone fix, so every record from an ordinary run
         # stays byte for byte what it was (IKA-141).
         **({"encodings": list(encodings)} if set(encodings) != {"new"} else {}),
+        # Which completion each side's menu ranking read under a hidden bench
+        # (`selfplay.RANK_VIEWS`). Written only when a side played the pre-IKA-143 rule,
+        # like `encodings`, so an ordinary record stays what it was.
+        **({"rankViews": list(rank_views)} if set(rank_views) != {"heaviest"} else {}),
         **({"note": note} if note else {}),
     }
 
@@ -261,6 +266,11 @@ def agent_name(source: dict[str, Any], side: int) -> str:
     encoding = (source.get("encodings") or ["new", "new"])[side]
     if encoding != "new":
         name += f"/enc:{encoding}"
+    # The menu ranked from the first-enumerated completion instead of the heaviest
+    # (IKA-143). Absent means the record's own tree's rule, as for `encodings`.
+    rank_view = (source.get("rankViews") or ["heaviest", "heaviest"])[side]
+    if rank_view != "heaviest":
+        name += f"/rankview:{rank_view}"
     return name
 
 

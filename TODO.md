@@ -8686,3 +8686,98 @@ PGO の +5〜15% は**外れ**（damage は遅くなる。学習に damage の�
 1決定あたり（2本で完全に一致）: move.hidden 3,496（passes 17.74、fills@dirty 7.75）、move.exact 2,508（passes 3.02、
 fills@matrix 1.00 ＝ IKA-104 が効いている）、replacement 1,852（5.72）、selfswitch 338、between 600。
 合計 8,194 決定は games ファイルと一致。全表は `timing/out/run98-{1,2}.log`・`p98-{1,2}.json`。
+
+## 9/23 — IKA-143: 葉順位は最も重い完成形から —— 先頭の完成形は重みの最大と 94 中 45 でしか一致せず、幅12の献立が 35% で変わる
+
+master ab9390f の上。IKA-118 の節の5（「ついでに見つけたもの」）の起票分。
+
+**答えた問い**: 控え隠蔽の手番で `_menus.views` が順位付けに使う完成形を、列挙順の先頭から (b) 最も重い完成形、
+(c) 重み付きの混合に替えると、幅12の献立（候補の集合）はどれだけ変わるか。→ **変わる。** (b) を入れた。
+
+### 1. 測定（`scratchpad/ika143_rank_completion.py`、1コア、value-gen11L を CPU で）
+
+`data/ika73/w12` の先頭3,000局の move 決定（turn ≥ 2、26,379）から seed 143 で並べ替え、どちらかの側に未公開が
+あって完成形が2つ以上の局面を先頭から60（その前に「両側とも何も隠れていない」34を飛ばした）。推定分布は生成と
+同じ組み方: 相手の standings チームの book 項目（`rizabanadohido-value-gen11L`）から `BenchPrior.of(entry, side,
+species, ε 0.25, T 0.5)`、種族はシートの順（自陣は名簿、相手は `class_sets[0]`）、`seen` は同一性で運んだもの
+（IKA-117）、`leads` は turn 1 の先発ペア（IKA-118）。空の推定分布（→一様）は 0 件、book に無い相手は 0 件。
+生成との違い: 相手の持ってこなかった2匹の型は `class_sets[0]`（種族は同じなので重みも同じ）。
+
+「順位付け」1回 = (局面, 側)。側 s は相手 1−s の完成形から順位付けるので、相手の完成形が2つ以上の側だけ数えた（94）。
+
+```
+                                        献立が変わった      入れ替わった手（幅 11.7 のうち）
+  null 対照 (a) 対 (a)                     0 / 94   0.0%     平均 0.00  最大 0
+  (a) 先頭 対 (b) 最も重い                33 / 94  35.1%     平均 1.26  最大 9   分布 [61,3,10,2,8,6,3,0,0,1]
+  (a) 先頭 対 (c) 重みの混合              51 / 94  54.3%     平均 1.62  最大 9
+  (b) 対 (c)                              34 / 94            平均 1.05
+  うち先頭が最も重くない 49 件
+    (a) 対 (b)                            33 / 49  67.3%     平均 2.41
+    (a) 対 (c)                            31 / 49  63.3%     平均 1.98
+  先頭が最も重い 45 / 94（重みが一様 10 を含む）。重みの平均: 先頭 0.362、最も重い 0.721
+  費用（順位付けの充填セル、batched_payoff に渡った ours×theirs）
+    (a)/(b) 平均 102 セル・0.40 秒     (c) 平均 472 セル・1.83 秒     比 4.48 倍 = 完成形の数の平均 4.48
+```
+
+(b) と (a) は先頭が最も重いとき同じ完成形なので、差はすべて残り49件から来る。(c) は 4.5 倍の順位付けの費用で、
+`views` の docstring が「6倍の順位付けの費用で何も買えず、生成が毎分 135 局から 82 局に落ちた」と退けたものと
+同じ形。だから (b)。(c) が (b) より良い献立かどうかは、この測定は答えていない（どれだけ変わるかだけ）。
+
+### 2. 変えたこと
+
+* `selfplay._menus` に `rank_view`（`RANK_VIEWS = ("heaviest", "first")`、既定 heaviest）と `used`。heaviest は
+  重みの argmax（同点は先頭 = 一様の重みでは従来と同じ完成形）。first は直す前の規則そのまま
+* `play_game(rank_view=...)` は他の腕ごとの設定と同じく対を取る。`same_menu` に `views_rule` の一致を足した
+  （規則の違う2つの腕は別の献立なので、相手側は自分で作り直す）
+* ログ: 決定ごとに `rankViews` = 各側の献立を順位付けた完成形 `[index, species]`（側1は自分で作り直したときは
+  その答え）。控え隠蔽の局に `rankView`（各側の規則）。開いた局の記録は1バイトも変わらない
+* `generation_match.py` に `--rank-first-completion` / `--baseline-rank-first-completion`（控え隠蔽のときだけ意味を
+  持つ）。起動時に `rank view: tested arm …, other arm …` を出し、腕名に `@rankview:<試す腕の規則>`、provenance に
+  `rankViews`（heaviest 以外のときだけ）、`agent_name` に `/rankview:first`。`agent_drift` の AGENT_ARGS に `rank_view`
+  （既定が出荷なので省略しても drift ではない）
+
+### 3. テスト
+
+```
+  tests/test_hidden.py 3本
+    先頭が最も重くない fixture（先頭 0.5、index 4 に 5.0）で、側0は最も重い完成形から順位付ける。代役の葉順位は
+      その完成形でだけ逆順を返すので、献立そのものが先頭から作ったものと違う
+      直す前の selfplay.py: AssertionError「side 0 ranked from a completion other than the heaviest」（振る舞いで落ちる）
+    rank_view="first" は先頭、一様の重みでは heaviest も先頭、used が (index, species) を返す、未知の規則は ValueError
+    play_game(rank_view=("heaviest","first")) の決定に [[5, …], [0, …]]、JSON に rankView と rankViews
+      （この2本は直す前は TypeError —— 新しい引数のテスト）
+  tests/test_provenance.py 1本  rankViews は旧規則のときだけ、agent_name に /rankview:first
+  tests/test_match_bench_prior.py 2本  --baseline-rank-first-completion が両席で相手の腕に届く
+    （席0 (heaviest, first)、席1 (first, heaviest)）、provenance と腕名も席で入れ替わる。普段の対戦は両側 heaviest で
+    rankViews を書かない
+  test_hidden・test_selfplay・test_hidden_search・test_menu_ownership・test_provenance・test_match_bench_prior・
+  test_equal_wall_clock・test_inference_shape・test_selection_book・test_line_endings・test_no_machine_specific_paths
+  116 passed・0 skipped（-n 0）。ruff 通過、agent_drift --check 通過
+```
+
+配線は本物の `generation_match.main` でも確かめた（`scratchpad/ika143_seat_plumbing.py`: `play_game` を包んで
+2局・2ターン・幅4）: 席0 は `('heaviest', 'first')`・記録 `rankViews` の側0 が index 3・側1 が index 0、席1 は
+`('first', 'heaviest')`。ワーカーの出力に `rank view: tested arm heaviest, other arm first`。
+
+### 4. 盤（回していない）
+
+正しさの修正（重みを読む）なので非劣性。条件は出荷の生成（幅12・控え隠蔽・葉順位・book）。このブランチを着地
+させてから:
+
+```
+python tools/match_queue.py --out C:/tmp/pokeuraou-machine/ika143/sprt --games 6000 \
+    --served --servers 2 \
+    --value data/models/value-gen11L.pt --baseline data/models/value-gen11L.pt \
+    --hide-bench --sprt -10 0 -- --limit 12 --rank-leaf --baseline-rank-leaf \
+    --selection-book data/selection/rizabanadohido-value-gen11L.jsonl.gz \
+    --baseline-rank-first-completion
+```
+
+所要は IKA-141 の見積もり（幅12 で約200局/分、未測定）を借りて、SPRT で決着するなら 1,100〜2,500局（10分前後）、
+上限 12,000局で約60分。見るもの: 各 `logs/worker*.log` の `rank view: tested arm heaviest, other arm first`、
+記録の `rankViews`（旧の腕の側は index 0 だけ）、`pair_divergence.py`（手が動いた対の率が 0 なら何も測っていない）。
+
+### 5. 機械
+
+1コア・鍵なし: 測定 14:17:18〜14:22:05（288秒）、配線確認 14:24:50〜14:25:14、テスト（-n 0）14:25〜14:28・
+14:28:53〜14:32:22、ほか数秒の試走。生成・対戦・学習はしていない。

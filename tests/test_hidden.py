@@ -558,3 +558,159 @@ def test_a_pause_resumed_in_a_completion_is_that_world_resolved_from_scratch(set
             assert leaves_of(paused_in(true_pause, same.position, 1)) == leaves_of(
                 their_pause
             ), world.species
+
+
+# ------------------------------------------ which completion ranks the menu (IKA-143)
+#
+# `_menus.views` ranked every hidden-bench menu from the FIRST completion `completions`
+# enumerates, whatever the bench prior said of it. Under the book's weights the first is
+# usually not the likeliest bench, so the fixtures below make it the lightest.
+
+
+def _weighted_worlds(reg, sheet, position, side, heavy):  # noqa: ANN001, ANN202
+    """`side`'s completions with the one at index `heavy` the heaviest, the first lightest."""
+    plain = completions(reg, position, side, sheet)
+    keys = [tuple(sorted(c.species)) for c in plain]
+    weights = {key: 1.0 for key in keys}
+    weights[keys[0]] = 0.5
+    weights[keys[heavy]] = 5.0
+    made = completions(reg, position, side, sheet, weights=weights)
+    assert max(range(len(made)), key=lambda i: made[i].weight) == heavy
+    assert made[0].weight < made[heavy].weight
+    return made
+
+
+def _ranking_by_world(monkeypatch, favoured):  # noqa: ANN001, ANN202
+    """Stub `leaf_ranking`: records the position it ranks from, and orders the pool one
+    way on `favoured` and the opposite way on anything else, so the menu shows which."""
+    import numpy as np
+
+    from pokeuraou import selfplay
+
+    asked: list[tuple[int, object]] = []
+
+    def stub(reg, at, side, evaluate, *, budget):  # noqa: ANN001, ANN202, ARG001
+        asked.append((side, at))
+        sign = 1.0 if at is favoured else -1.0
+
+        def rank(pool, _scored=None):  # noqa: ANN001, ANN202
+            return sign * np.arange(len(pool), dtype=np.float64)
+
+        return rank
+
+    monkeypatch.setattr(selfplay, "leaf_ranking", stub)
+    return asked
+
+
+def test_the_menu_is_ranked_from_the_heaviest_completion_not_the_first(
+    setup,  # noqa: ANN001
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    import numpy as np
+
+    from pokeuraou import selfplay
+    from pokeuraou.narrow import narrow
+    from pokeuraou.resolve import Budget
+
+    reg, roster = setup
+    sheet = _sheet(roster)
+    position, _brought = _opening(reg, sheet)
+    theirs = _weighted_worlds(reg, sheet, position, 1, heavy=4)
+    spreads = {0: completions(reg, position, 0, sheet), 1: theirs}
+    asked = _ranking_by_world(monkeypatch, theirs[4].position)
+
+    ours, _ = selfplay._menus(
+        reg, position, (6, 6), None, Budget.matrix(), True, None, spreads
+    )
+
+    side0 = [at for side, at in asked if side == 0]
+    assert len(side0) == 1
+    assert side0[0] is theirs[4].position, "side 0 ranked from a completion other than the heaviest"
+    # And the choice reaches the menu: the stub's order on the first completion (or on any
+    # other) gives a different one.
+    first = narrow(
+        reg, position, 0, limit=6,
+        rank=lambda pool, _scored=None: -np.arange(len(pool), dtype=np.float64),
+    ).actions
+    assert [a.to_choice() for a in ours] != [a.to_choice() for a in first]
+
+
+def test_the_old_rule_is_kept_and_uniform_weights_pick_the_first(
+    setup,  # noqa: ANN001
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    from pokeuraou import selfplay
+    from pokeuraou.resolve import Budget
+
+    reg, roster = setup
+    sheet = _sheet(roster)
+    position, _brought = _opening(reg, sheet)
+    theirs = _weighted_worlds(reg, sheet, position, 1, heavy=4)
+    uniform = completions(reg, position, 0, sheet)
+    spreads = {0: uniform, 1: theirs}
+    asked = _ranking_by_world(monkeypatch, theirs[4].position)
+
+    used: dict = {}
+    selfplay._menus(
+        reg, position, (6, 6), None, Budget.matrix(), True, None, spreads,
+        rank_view="first", used=used,
+    )
+    assert [at for side, at in asked if side == 0] == [theirs[0].position]
+    assert used[0] == (0, theirs[0].species)
+
+    asked.clear()
+    used = {}
+    selfplay._menus(
+        reg, position, (6, 6), None, Budget.matrix(), True, None, spreads, used=used,
+    )
+    assert used[0] == (4, theirs[4].species)
+    # Side 1 ranks from side 0's completions, which are uniform: the first, as before.
+    assert used[1] == (0, uniform[0].species)
+    assert [at for side, at in asked if side == 1] == [uniform[0].position]
+
+    with pytest.raises(ValueError, match="rank_view"):
+        selfplay._menus(
+            reg, position, (6, 6), None, Budget.matrix(), True, None, spreads,
+            rank_view="sampled",
+        )
+
+
+def test_play_game_records_which_completion_each_side_ranked_from(
+    setup,  # noqa: ANN001
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    """The decision says which completion ranked each side's menu, per agent: side 1
+    playing the old rule builds its own menu from the first completion."""
+    import numpy as np
+
+    from pokeuraou import selfplay
+
+    reg, roster = setup
+    sheet = _sheet(roster)
+    position, _brought = _opening(reg, sheet)
+    theirs = _weighted_worlds(reg, sheet, position, 1, heavy=5)
+    heavy_key = tuple(sorted(theirs[5].species))
+    first_key = tuple(sorted(theirs[0].species))
+
+    class Favouring:
+        """Stands in for a `BenchPrior`: the last pair is the likeliest, the first least."""
+
+        def weights(self, seen, leads=None):  # noqa: ANN001, ANN202, ARG002
+            return {heavy_key: 0.9, first_key: 0.1}
+
+    def stub(reg, at, side, evaluate, *, budget):  # noqa: ANN001, ANN202, ARG001
+        return lambda pool, _scored=None: np.zeros(len(pool))
+
+    monkeypatch.setattr(selfplay, "leaf_ranking", stub)
+    record = selfplay.play_game(
+        reg, np.random.default_rng(0), sheet[:4], sheet[:4], "test",
+        search_limit=2, max_turns=1, rank_by_leaf=True,
+        sheets=(sheet, sheet), bench_prior=(Favouring(), Favouring()),
+        rank_view=("heaviest", "first"),
+    )
+    first = record.decisions[0]
+    assert first.kind == "move" and first.turn == 1
+    assert first.rank_views == [[5, list(theirs[5].species)], [0, list(theirs[0].species)]]
+    payload = record.to_json(objective="hp-share", search_limit=2)
+    assert payload["rankView"] == ["heaviest", "first"]
+    assert payload["decisions"][0]["rankViews"] == first.rank_views

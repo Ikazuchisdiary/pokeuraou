@@ -54,6 +54,9 @@ AGENT_ARGS = (
     # played the uniform belief -- a different agent -- while this list, lacking the name,
     # reported the match as the agent that ships.
     "bench_prior",
+    # Which completion a hidden-bench menu is ranked from (IKA-143). Its default is what
+    # ships, so omitting it drifts nothing; a tool that passes "first" plays the old rule.
+    "rank_view",
 )
 #: One argument a tool may omit for a reason, where excusing the whole file in `EXPECTED`
 #: would also excuse every other argument it might stop passing later.
