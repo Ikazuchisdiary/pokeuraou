@@ -1981,6 +1981,9 @@ fn apply_status_move(
         turn.add_side_condition(action.side, &mv.id, Some(1));
         bump_stall(turn, action.side, action.slot);
     }
+    if mv.id == "perishsong" {
+        perish_song(turn, me);
+    }
 
     if mv.raw.get("hasCustomCode").and_then(Value::as_bool).unwrap_or(false)
         && !crate::modelled::status_move_is_fully_modelled(&mv.id)
@@ -1995,6 +1998,46 @@ fn apply_status_move(
     }
     let _ = reg;
     Ok(())
+}
+
+/// Perish Song's `onHitField` (`data/moves.ts`): every active Pokemon on both sides, the
+/// singer's included, gets `perishsong` at duration 4, which the residual below counts
+/// down from the end of this same turn, so the faint lands three turns later. Soundproof's
+/// `onTryHit` (`target !== source`) is the `null` that still counts as a result, and it is
+/// `breakable`: a Mold Breaker singer (Mycelium Might too, this being a status move)
+/// reaches it unless the holder has an Ability Shield. Nobody reached and nobody
+/// Soundproof -- everyone already counting -- is `return false`, a failure. IKA-172: the
+/// port had no such path while `modelled.rs` listed the move, so its turn left nobody
+/// counting down and reported nothing.
+fn perish_song(turn: &mut Turn, me: Slot) {
+    let ignores_ability = turn
+        .mon_at(me.0, me.1)
+        .is_some_and(|singer| is_mold_breaker(singer.ability.as_str()));
+    let mut result = false;
+    for side in 0..2 {
+        for slot in 0..turn.pos.sides[side].active.len() {
+            let Some(mon) = turn.mon_at(side, slot) else { continue };
+            if mon.fainted {
+                continue;
+            }
+            let shielded = matches!(mon.item, Some(i) if i.as_str() == "abilityshield");
+            if mon.ability == "soundproof"
+                && (side, slot) != me
+                && !(ignores_ability && !shielded)
+            {
+                result = true;
+                continue;
+            }
+            if mon.has_volatile("perishsong") {
+                continue;
+            }
+            turn.add_volatile(side, slot, "perishsong", Some(4));
+            result = true;
+        }
+    }
+    if !result {
+        turn.move_failed[me.0][me.1] = true;
+    }
 }
 
 // ---------------------------------------------------------------------------
