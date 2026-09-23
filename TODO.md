@@ -12453,3 +12453,152 @@ test_resolve・test_rust_node・test_port_coverage・test_port_gates・test_line
 test_type_spending_moves を master 取り込み後に `-n 0` で 331 通過。ruff、`port_coverage.py --check`、
 `port_gate_audit.py --check` も通る。機械（heavy.py、--agent IKA-174）: release ビルド 8 コア 24 秒・19 秒、
 テスト 1 コア 2〜34 秒、diff_node 8 本と記録 1 コア 268 秒、試し数回（1 コア、各 20 秒以内）。
+
+## 9/23 — IKA-161・IKA-171: ちからずく＋いのちのたま、吸収技の回復（対象ごと・ゴツゴツメットより先）、こおりの解凍、false の失敗と null の失敗、0 ダメージの当たり —— オラクル 23 局面（うち対照 9）で旧 Python・旧 exe とも 14 局面ずれ、直した Python・port は全部一致
+
+`_after_move`・`_after_hit`・`_can_act` 周りの疑い 6 つ（IKA-157・IKA-162 の担当がコードの読みで見つけたもの）を
+Showdown（d3de52a17、champions mod）で確かめて、Python と port を同時に直した。テストは
+`tests/test_after_move_oracle.py`（Python と port をそれぞれ Showdown に比べる、23 局面 × 2）。
+
+### 1. Showdown の定義と regulation での該当
+
+```
+  疑い                      Showdown                                                    M-B・M-C での該当
+  ちからずく＋いのちのたま  sheerforce.onModifyMove が secondaries を消し hasSheerForce、   ちからずくの種 11（M-C）。持ち物いのちのたまと
+                            useMoveInner が AfterMoveSecondarySelf ごと飛ばす（たま・       の組は Worlds・Baltimore とも 0、記録の場にも 0
+                            かいがらのすず）。move.self も消す
+  吸収技の丸め              spreadDamage 内で対象ごとに round(damage*drain) を回復。        まっこうちゃ（allAdjacentFoes）とパラボラチャージ
+                            DamagingHit（ゴツゴツメット等）より先                           （allAdjacent）。ほか 6 つは単体
+  じごくづき（調べるだけ）  bridge は MODELLED_VOLATILES に無いので unmodelledVolatiles へ  下の 5 を参照
+  こおりの解凍              frz.onBeforeMove は defrost の技なら即 return（カウンタも       defrost 6（ねっとう・フレアドライブ・まっこうちゃ・
+                            乱数も使わない）、onModifyMove で治る。やけどころは炎の時だけ。 かえんボール・ねっさのだいち・やけどころ）、
+                            onDamagingHit（炎の攻撃技、フリーズボルト以外）と               thawsTarget 3。こおりにする技 4（れいとうビーム・
+                            onAfterMoveSecondary（thawsTarget、ちからずくで無し）でも治る   ふぶき・れいとうパンチ・こおりのキバ）
+  false の失敗              runMoveEffects: 満タンの heal、かからない status、動かない      判定する変化技 57（じこさいせい・どくどく・にほんばれ・
+                            boosts、同じ天気・フィールドは false。まもるの NOT_FAIL は       つるぎのまいなど）。じだんだの使い手はガブリアスと
+                            null のまま、サイコフィールドの null は hitStepTryHitEvent で    メタグロス（Worlds・Baltimore）
+                            false になる。clearVolatile は moveLastTurnResult を消す
+  いのちのたまの条件        moveResult（当たった対象がある）で判定。こらえる 1 HP への      こらえる は M-C にある。みがわりはどちらの engine も
+                            当たりは 0 ダメージでも DamagingHit・たまが出る                  未実装（別の gate）
+```
+
+### 2. オラクル（`tests/test_after_move_oracle.py`、HP・状態異常・moveLastTurnFailed を全ポケモンで比べる）
+
+```
+  局面                                         Showdown                       旧 Python  旧 exe  新 Python  新 exe
+  ちからずく たきのぼり＋たま                  たまの反動なし                 ずれ       ずれ    一致       一致
+  ちからずく れいとうパンチ＋たま              たまの反動なし                 ずれ       ずれ    一致       一致
+  対照 ちからずく アクアジェット（追加効果無し） 反動あり                     一致       一致    一致       一致
+  満タンのドレインパンチ→ゴツゴツメット        回復 0 の後にメット            ずれ(+14)  ずれ    一致       一致
+  対照 メット無しのドレインパンチ              —                              一致       一致    一致       一致
+  まっこうちゃ 55・37                          28+19=47                       ずれ(46)   ずれ    一致       一致
+  対照 まっこうちゃ 54・36                     27+18                          一致       一致    一致       一致
+  満タンのじこさいせい                         失敗 true                      ずれ       ずれ    一致       一致
+  どく型へのどくどく                           失敗 true                      ずれ       ずれ    一致       一致
+  2 度目のにほんばれ                           失敗 true                      ずれ       ずれ    一致       一致
+  まもるへのどくどく                           失敗 false（null）             ずれ       ずれ    一致       一致
+  交代で引っ込んだ失敗の旗                     消える                         ずれ       ずれ    一致       一致
+  対照 サイコフィールドに止まる先制技          失敗 true                      一致       一致    一致       一致
+  対照 まもるへの攻撃・傷ついてのじこさいせい・どくどくが入る・最初のにほんばれ  一致  一致  一致  一致
+  こおりでねっとう                             治って撃つ                     ずれ       ずれ    一致       一致
+  こおりでフレアドライブ                       治って撃つ                     ずれ       ずれ    一致       一致
+  こおりにフレアドライブ                       治る                           ずれ       ずれ    一致       一致
+  こおりにねっとう                             治る                           ずれ       ずれ    一致       一致
+  こらえる 1 HP にどげざつき＋たま             さめはだ・たまとも出る         ずれ(さめはだ無し) ずれ(両方無し) 一致 一致
+  対照 満タンからこらえる                      —                              一致       一致    一致       一致
+```
+
+旧 Python は master の src（`C:/tmp/ika161/old`、`NODE_PATH` で main の node_modules）、旧 exe は main の release の複写。
+旧で落ちるのは非対照の 14 局面ちょうど（Python 14・port 14）、対照 9 × 2 は旧でも通る。こおりの局面は「偶然はすべて起きる」
+方針で（れいとうビームのこおりが偶然なので）、その方針では凍った本人の解凍の乱数も必ず当たる。ドヒドイデを凍らせる
+ユキノオーより速くして、次の手番が凍って初めて動く手番になるようにした。
+
+### 3. 直し（Python と port で同じ形）
+
+* `_sheer_forced`（`sheer_forced`）: ちからずく かつ secondaries がある技。`_after_move` のたま・かいがらのすず・`self` を飛ばす
+* 吸収技: `_after_move` の合計からの回復をやめ、`_after_hit` の先頭で対象ごとに `round(dealt*drain)`
+* `_can_act`: 凍っていて `_defrosts`（defrost、やけどころは炎タイプの時だけ）なら治して動く。`_thaw_on_hit`（`thaw_on_hit`）:
+  当たった対象が凍っていて、炎の攻撃技（フリーズボルト以外）か thawsTarget（ちからずくでない）なら治す。追加効果の
+  枝分けの後に呼ぶ（ねっとうのやけどは凍った相手に入らない）。`reg.rs` に `F_DEFROST`
+* `_apply_status_move_and_judge`: 宣言だけ（boosts・heal・status・weather・terrain のみ、custom code 無し）の変化技で、
+  どの対象にも何も起きなければ `move_failed`。`_apply_status_move` そのもの（IKA-165 の撒き技）には触れていない
+* 変化技の対象が全部止まった時: まもるだけなら失敗にしない、サイコフィールドか無効（ぼうじん・いたずらごころ）が一つでも
+  あれば失敗。攻撃技の「全部サイコフィールド」は失敗のまま（Showdown も false）
+* 交代で引っ込むとき `move_last_turn_failed` を消す（`clearVolatile`）
+* `_after_hit` の `landed`: 0 ダメージでも当たり（こらえる 1 HP）。さめはだ・メット・じごくづき・のろわれボディ・
+  スパイシーエキス。port のいのちのたまは `total > 0` から `move_connected` に
+* `tools/diff_node.py`: `--using` が吸収技（対照: drain を外した技、`undrained`）と判定される変化技（対照: 判定なし、
+  `unjudged`）も取る。`--frozen`（場に凍ったポケモンがいる記録局面、対照: `_defrosts`・`_thaw_on_hit` を外す、`unthawed`）
+
+### 4. diff_node（`--games-dir data/ika73/w12`、matrix）
+
+```
+                     局面  セル     対象セル  発火   新 exe で違う（発火で）  旧 exe で違う（発火で）  最悪差 新 / 旧
+  --using 吸収技 8   20    9,470    2,909     1,263  6（5）                   851（586）               4.4e-16 / 1.7e-01
+  --using 判定 57    20    8,883    1,952     584    33（22）                 751（584）               3.3e-16 / 1.1e-02
+  --frozen           60    28,275   28,275    1,963  169（52）                6,296（1,963）           5.6e-16 / 3.3e-01
+```
+
+新 exe で残る違いは全部既存の 2 つで、この変更と無関係（`C:/tmp/ika161/debug_cell*.py` で全セルの理由を数えた）:
+port がほろびのうたの volatile を付けない（判定 33・こおり 39。IKA-172 で master に入った）、わるあがきのこだわり固定（port は struggle、
+Python は元の技のまま。吸収 6・こおり 130）。吸収の 6 と判定の 33 は master の Python・旧 exe でも同じセルが同じ理由で違う。
+値の最悪差は新 exe で 5.6e-16 以下、拒否 0。`port_coverage --check`・`port_gate_audit --check` ok、ruff ok。
+
+### 5. 記録で該当する数（w12 434,483 手・gen11L 118,018 手の move 決定、選ばれた手）
+
+```
+                                                   w12      gen11L
+  ちからずく＋いのちのたまが場に                   0        0        （ちからずくは 2,046・504）
+  吸収技を選んだ                                   7,129    1,293
+    範囲の吸収技で相手 2 体                        2,092    363      （丸めは両方奇数の時だけ 1 ずれる）
+    接触の吸収技をメット・さめはだ・てつのトゲへ   833      94       （順序は使い手が満タン近くの時だけ効く）
+  凍ったポケモンが場に                             1,393    288
+    凍った本人の defrost 技                        85       21
+    凍った相手へ炎・thawsTarget                    41       12
+  判定される変化技を選んだ                         86,890   22,691
+  じだんだ・やけっぱちを選んだ                     34,521   8,128
+    失敗の旗を読む                                 4,679    964
+      控えから持ち越した旗（Showdown では消える）  821      129
+  控えで旗が立ったまま（延べ）                     32,307   7,722
+```
+
+控えから持ち越した旗が、失敗の旗を読むじだんだの 18%（821/4,679）・13%（129/964）。
+
+### 6. じごくづき（調べるだけ）
+
+Showdown の局面を読み直すのは `tools/diff_*.py`・`diverge_report.py` とテストだけで、生成（局面を進めるのは
+Python の resolver か port で、Showdown ではない）にも対戦にも道は無い。その道では、読んだ局面のじごくづきが `unmodelled_volatiles` に入り、
+Python は音技を封じない。`diverge_report` は `unmodelled-volatile:throatchop` として帰属させるので黙ったずれではない。
+Python も port もじごくづきを実装済みなので、`position.ts` の `MODELLED_VOLATILES` に足す（と dist の再ビルド）だけで済む。
+
+### 7. 別件（起票の候補）
+
+* わるあがきのこだわり固定: port は `struggle` を固定し、Python は元の技のまま。w12 で 136 セル
+* 撒き技（sideCondition）・volatile の「既にある」失敗（おいかぜ中のおいかぜ、ちょうはつ中のちょうはつ）は判定していない。
+  IKA-165 の後に `_apply_status_move_and_judge` を広げる
+* `move_failed` は場の枠で持つので、失敗の後にだっしゅつボタン等で入れ替わった後続が旗を継ぐ（party slot is not identity）
+* ビッグルート・ヘドロえきが未実装（drain の回復量・向き）
+* じごくづきを `MODELLED_VOLATILES` へ（上の 6）
+
+機械: cargo release 1 回（8 コア 23 秒）、記録の集計 3 回（8 コア 各 9 秒）、diff_node 6 回（heavy 1 本、2 コア 1,165 秒）、
+ずれるセルの調べ 6 回（1 コア 各 42 秒前後）、master（363b973）取り込み後の release ビルド 2 回（8 コア 21 秒前後）と
+関係テスト（下の 8）。ここまで heavy.py（--agent IKA-161）。途中の関係テスト 12 ファイル（1 コア 20 秒）とオラクルのテスト単体 3 回は
+heavy を通さず直接走らせた。
+
+### 8. master（363b973、IKA-165・IKA-169・IKA-166・IKA-172）取り込み後
+
+`tools/diff_node.py` の衝突は master 側を取り、`--using` の吸収技・判定される変化技と `--frozen` を足し直した（`unsung` と
+並べて `undrained`・`unjudged`）。関係テスト 21 ファイル 382 件（1 件は IKA-158 の xfail）1 コア 37 秒、
+`port_coverage --check`・`port_gate_audit --check`・ruff ok。
+
+### 9. 着地で落ちた tests/test_symmetry.py::test_a_poison_type_never_misses_toxic
+
+対象が相手側のドヒドイデ（どくタイプ）で、当たったどくどくも外れたどくどくも「失敗」の同じ局面になり、
+merge_duplicates で外れの枝が当たりの枝に畳まれていた。Showdown（a5df827）の順序は命中が先: 非どくタイプの
+ミロカロスからドヒドイデへのどくどくで、policy hit は `-immune`、miss は `|-miss|` を出し、どちらも 90/100 の
+乱数を 1 回引いて moveLastTurnFailed は true（`C:/tmp/ika161/toxic_order.py`）。Python も merge を切ると外れの枝は
+残っている。コードは正しいので、テストの対象の型を Water にした（使い手の型で必中かどうかを見るという意図は同じ）。
+
+### 10. master（61433f2 IKA-175・IKA-173、0cbb30e IKA-176）取り込み
+
+`tools/diff_node.py` は master 側を取り、`unlaid`・`--toxic-debris`・`--charging`・`--hammer` の横に `undrained`・`unjudged`・`--frozen` を足し直した。

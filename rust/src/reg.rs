@@ -79,8 +79,9 @@ pub const F_PULSE: u32 = 1 << 8;
 pub const F_PUNCH: u32 = 1 << 9;
 pub const F_SLICING: u32 = 1 << 10;
 pub const F_SOUND: u32 = 1 << 11;
+pub const F_DEFROST: u32 = 1 << 12;
 
-const FLAG_NAMES: [(&str, u32); 12] = [
+const FLAG_NAMES: [(&str, u32); 13] = [
     ("bite", F_BITE),
     ("bullet", F_BULLET),
     ("contact", F_CONTACT),
@@ -93,6 +94,7 @@ const FLAG_NAMES: [(&str, u32); 12] = [
     ("punch", F_PUNCH),
     ("slicing", F_SLICING),
     ("sound", F_SOUND),
+    ("defrost", F_DEFROST),
 ];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
