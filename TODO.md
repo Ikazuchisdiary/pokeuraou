@@ -14747,3 +14747,87 @@ diverge_report（20 種 × 20 局）: Python 2,709 ターン中 silent 85（3.14
 ### 6. 機械
 
 heavy.py の記録（IKA-207）: cargo build --release 2 回（今の worktree 24 s・3d9dbc5 23 s、--cores 8）。1 コアの実行 34 回・計 209 s（diff_turn 400 局 × 9 回 各 10〜14 s、diverge_report 3 回、テストファイル 14 回）。
+
+## 9/24 — IKA-206: diff_node を速くする —— `--jobs N`（局面ごとにワーカー）・`--exes old,new`（Python 側は 1 回だけ解く）・`--python-cache DIR`。w12 `--veils` 100 局面で 1 コア 561 秒 → `--jobs 8` 105 秒（5.4 倍）、新旧 2 本を並べて 1,121 秒相当 → 132 秒（8.5 倍）、キャッシュが当たれば 58 秒。集計はどれも `--jobs 1` とバイト単位で同じ（時間の 2 行を除く）
+
+### 1. 何を変えたか（tools/diff_node.py だけ）
+
+* 局面ごとの本体を `examine(pos, extras, c)` に切り出し、数えは局面ごとの `Tally` に持たせて親が局面の順に足す。
+  最大値（`*worst*`）は max、Counter と特性ごとの dict はキーごとに足す。途中の行も `Tally` に貯めて局面順に出し、
+  「最初の 5 つだけ」の行（`shown < 5`）は親が全体で数える。だから `--jobs` を変えても出力の順と中身は変わらない
+* `--jobs N`: `multiprocessing` の spawn で N 本。親が局面を作り（読み込み・`--give` 等の書き換え・`--eject` の配り方などの
+  局面ごとの付帯情報まで）、局面を pickle で渡す。子はスクリプトの先頭の `sys.path.insert(<checkout>/src)` で同じ checkout の
+  src を読み、同じ引数から regulation・葉・budget を作り直す。exe は子が `POKEURAOU_RUST_NODE_BIN` から開く
+* `--exes old=A,new`（`--exe A` は 1 本）: 局面ごとに、橋を切った Python の埋め（`batched_payoffs`）と、各モードの `here`・
+  対照（`unchanged`・`unveiled(v)`・`unsubbed("use")` …）の `resolve_turn` を 1 回だけ解いて覚え（`turn(c, memo, key, …)`）、
+  exe ごとに橋を入れた埋めと `branch_differences` だけをやり直す。`here` は Python の埋めが同じ呼び出しで解いたものを拾う
+  （従来は同じセルを埋めで 1 回・`here` で 1 回解いていた）。`outcome()`（分岐の局面の JSON 化）も局面の中で覚える。
+  出力は exe ごとに今と同じ形の塊（`== binary [k] of n: path ==` の見出しの後）、最後に要約の行が違うところだけ並べる表
+* `--python-cache DIR`: 局面ごとの Python 側（埋めの行列・注記・exact・覚えた turn 全部）を zlib + pickle で 1 局面 1 ファイル
+  （w12 は 1 局面 0.3 MB、100 局面 31 MB）。鍵は src/pokeuraou の全 .py・tools/diff_node.py・configs/regulations の中身の
+  sha256、`--value` のモデルの中身、局面の JSON、付帯情報、局面の選び方以外の引数。規則を直せばどれかの中身が変わって全部外れる
+* 既存の引数・出力の形は変えていない（`--exe` 無しは今までどおり環境の `POKEURAOU_RUST_NODE_BIN` か既定の exe）
+
+### 2. null 対照（すべて時間の 2 行「python … rust …」「end to end」以外が一致）
+
+| 比べたもの | 局面 | 結果 |
+|---|---|---|
+| master の diff_node（1 コア）と新 `--jobs 8`・`--jobs 1` | w12 `--veils` 100 | 3 本ともバイト単位で一致 |
+| `--exes new,new` の 2 列 | 同 | 2 塊が一致、並べる表は「none」、`--exe` 単独の塊とも一致 |
+| master × 旧 exe（IKA-202 の old.exe）と `--exes old,new` の old 列 | 同 | 一致（途中の 5 行・差 8.935e-02・1,036 セル違い・exact 6 セルまで） |
+| master と `--jobs 3`（旧 exe で途中の行が出る） | w12 `--substitute --confusion-guard --hazards --salt-cure` 6、`--give quickclaw --hammer --charging --eject` 8 | 一致 |
+| master と `--jobs 3`・`--exes new,new` | scenario-turn5 `--budget fast --limit 0`（1 局面、Python 側だけ） | 一致 |
+| master と `--jobs 2` | `--value value-td05.pt` 3、`--holding sitrusberry,focussash` 4（`--exes new,new`） | 一致 |
+| キャッシュ無し・あり（初回・2 回目） | w12 `--veils` 100（新旧 2 本も） | 一致。2 回目は 100 / 100 局面読み戻し |
+
+正の対照: `--exes old,new` の old 列は FAIL（GaG 755・FV 281 セル違い）、new 列は OK。キャッシュは diff_node.py を 1 行直した
+後の実行で 0 / 4 局面しか当たらず（鍵に tool の中身が入っている）、resolve.py の写しに 1 行足すと指紋が変わることも確かめた。
+
+### 3. 壁時計（w12 `--veils` 100 局面、51,888 セル。heavy.py IKA-206 --cores 8 の窓 08:00:25〜08:18:07 に続けて）
+
+| 実行 | 秒 | 倍率 |
+|---|---|---|
+| master の diff_node（1 コア、新 exe） | 560.6 | 1 |
+| `--jobs 8` | 104.6 | 5.4 |
+| `--jobs 8 --exes old,new`（旧来は 1 コア 2 本） | 132.3 | 8.5（1,121 秒相当に対し） |
+| `--jobs 8 --python-cache`（初回、書き込みあり） | 111.1 | 5.0 |
+| `--jobs 8 --python-cache`（2 回目） | 58.0 | 9.7 |
+| `--jobs 8 --python-cache --exes old,new`（2 回目） | 82.2 | 13.6（1,121 秒相当に対し） |
+
+各実行の前後で python・cargo を見た（C:/tmp/ika206/runs.log）: 走っていたのは heavy.py の順番待ち（IKA-208・coord の
+cargo、錠を待つだけ）で、負荷は前後 10〜35%。同じ組を 07:41〜07:47 に回したときも 99・122・128 秒で、master の 1 コアは
+687・626・515 秒（他の担当の job と重なった時間帯）。`--jobs 8` の 105 秒のうち約 30 秒は親が w12 の 44,000 局を読んで
+局面を選ぶ時間（並列にならない）で、キャッシュが当たった 58 秒の大半もそれ。
+
+### 4. 使い方
+
+```
+python C:/tmp/pokeuraou-machine/heavy.py --agent IKA-NNN --cores 8 --why "..." -- \
+    python tools/diff_node.py --games-dir data/ika73/w12 --veils --nodes 100 --jobs 8 \
+    --exes old=C:/tmp/ikaNNN/old.exe,new
+```
+
+* `--exes` の 1 項は `パス`・`名前=パス`・素の `new`/`current`（この checkout の rust/target/release、古いビルドの検査つき）。
+  IKA-207 の `tools/diff_turn.py --exes` と同じ読み方
+
+* 規則を直したら、直す前の exe（正の対照）と直した exe を `--exes` で 1 回に。Python 側は 1 回で済む
+* `--jobs N` は heavy.py の `--cores N` と同じ数に。子 1 本が 1 コア（torch も 1 スレッド）
+* `--python-cache C:/tmp/ikaNNN/pycache` は Rust だけ直し続けるとき（Python を触らない間は 2 回目から Python 側がほぼ 0）。
+  Python か diff_node を直せば自動で外れる。読み戻した数は stderr に 1 行
+* `--exes` の出力は exe ごとの塊と、最後の「side by side」の表（違う行だけ、直前の同じ行を見出しに）
+
+### 5. 別課題の候補
+
+* 局面の読み込み（`recorded_positions`、w12 で約 30 秒）が並列にならず、`--jobs 8` の 3 割を占める。ファイルごとに分けて
+  読むか、選んだ局面の JSON を C:/tmp に残して 2 回目から読まないようにできる
+* `diff_turn`（IKA-207 の `--exes`）と `diff_node` の `--exes` は項の読み方を揃えたが、出力の形（diff_turn は列、diff_node は
+  exe ごとの塊と違う行の表）は別々。並べて読む道具が要るなら揃える
+* `tests/` に diff_node の null 対照（`--jobs 1`/`--jobs 2`、`--exes A,A`）を小さな局面で持つテストは無い（今回は手で回した）。
+  1〜2 局面・`--limit 4` 程度で数秒のテストにできる
+
+### 6. 機械
+
+cargo release 1 回（8 コア 24 秒）、diff_node: 煙 4 局面 ×4（2 コア 262 秒）・×2（2 コア 112 秒）、プロファイル 1 回（1 コア）、
+100 局面 `--jobs 8` ×3（8 コア 349 秒）、100 局面 1 コア ×3（master 687 秒・新 `--jobs 1` 515 秒・master × 旧 exe 626 秒）、
+モード別の対照（3 コア 489 秒・33 秒）、時間の組 6 本（8 コア 1,062 秒）、`--value`・`--holding`・キャッシュの対照（2 コア 351 秒）、
+メモリ・キャッシュの大きさの見積もり（1 コア 33・34 秒）。すべて heavy.py（--agent IKA-206）。

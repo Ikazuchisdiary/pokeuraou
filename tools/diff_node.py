@@ -263,14 +263,19 @@ rolls stratified" and the port had no such reduction, so it called 3,599 of this
 
 Two ways to make a run cheaper (IKA-206). `--jobs N` examines the nodes in N spawned
 workers -- run it under `heavy.py --cores N` -- and prints what `--jobs 1` prints, line
-for line. `--exes old.exe,new.exe` holds one run's nodes to several binaries: Python's
+for line. `--exes old=C:/x.exe,new` holds one run's nodes to several binaries: Python's
 side of a node (its fill, every turn the checks resolve, every control) is resolved
 once, each binary gets the summary `--exe` alone would give it, and the lines they
-part on are printed side by side at the end:
+part on are printed side by side at the end. An entry is a path, `label=path`, or a bare
+`new` (this tree's build), as `tools/diff_turn.py --exes` reads them:
 
     python heavy.py --agent IKA-NNN --cores 8 -- python tools/diff_node.py \
         --games-dir data/ika73/w12 --veils --nodes 100 --jobs 8 \
-        --exes C:/tmp/ikaNNN/old.exe,rust/target/release/pokeuraou-damage.exe
+        --exes old=C:/tmp/ikaNNN/old.exe,new
+
+`--python-cache DIR` keeps each node's Python side on disk, keyed by the node, the
+arguments and the content of src/pokeuraou, this tool and the regulation configs, so a
+second run while only the port changes resolves nothing in Python.
 """
 
 from __future__ import annotations
@@ -1970,15 +1975,31 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
-def exes_of(ap: argparse.ArgumentParser, args: argparse.Namespace) -> list[str | None]:
-    """The binaries a run holds to Python; `[None]` is whatever the environment names."""
+def exes_of(
+    ap: argparse.ArgumentParser, args: argparse.Namespace
+) -> tuple[list[str | None], list[str]]:
+    """The binaries a run holds to Python, and what each is called in the output.
+
+    An entry is a path, `label=path`, or a bare `new`/`current` -- `tools/diff_turn.py
+    --exes` (IKA-207) reads the same list the same way. None, the bare one or no `--exe` at
+    all, is whatever `POKEURAOU_RUST_NODE_BIN` or this tree's rust/target/release names,
+    and keeps its check that the build is not older than the sources.
+    """
     if args.exe and args.exes:
         ap.error("--exe or --exes, not both")
-    named = [e for e in (args.exes or args.exe or "").split(",") if e]
-    for exe in named:
-        if not Path(exe).exists():
-            ap.error(f"no binary at {exe}")
-    return named or [None]
+    paths: list[str | None] = []
+    labels: list[str] = []
+    for entry in (e.strip() for e in (args.exes or args.exe or "").split(",")):
+        if not entry:
+            continue
+        label, _, path = entry.partition("=")
+        if not path:
+            label, path = (entry, "") if entry in ("new", "current") else (entry, entry)
+        if path and not Path(path).exists():
+            ap.error(f"no binary at {path}")
+        paths.append(path or None)
+        labels.append(label if label == path else f"{label} ({path or 'this tree'})")
+    return (paths, labels) if paths else ([None], ["the binary"])
 
 
 def setup(ap: argparse.ArgumentParser, args: argparse.Namespace) -> SimpleNamespace:
@@ -2063,7 +2084,10 @@ def setup(ap: argparse.ArgumentParser, args: argparse.Namespace) -> SimpleNamesp
         charging=charge_moves(reg) if args.charging else frozenset(),
         quick=priority_moves(reg) if args.terrain or blockers else frozenset(),
         hazard_moves=frozenset(HAZARD_MOVES),
-        exes=exes_of(ap, args),
+        exes=exes_of(ap, args)[0],
+        labels=exes_of(ap, args)[1],
+        # What the environment named before a binary was set in it, for a None entry.
+        env_binary=os.environ.get(rustnode.ENV_BINARY),
         remembered={},
     )
 
@@ -2202,6 +2226,15 @@ def emit(lines: list[tuple[bool, str]], state: dict[str, int]) -> None:
                 continue
             state["shown"] += 1
         print(text)
+
+
+def use_binary(c, exe: str | None) -> None:  # noqa: ANN001
+    """Point the bridge at `exe`, or back at what the environment named for None."""
+    value = exe if exe is not None else c.env_binary
+    if value is None:
+        os.environ.pop(rustnode.ENV_BINARY, None)
+    else:
+        os.environ[rustnode.ENV_BINARY] = value
 
 
 def turn(c, memo: dict, key: tuple, pos: Position, a, b, patch=None):  # noqa: ANN001, ANN201
@@ -2350,13 +2383,12 @@ def against_every_binary(  # noqa: ANN001, ANN201, PLR0913
     c, pos, extras, row, col, expected, notes, python_exact, python_seconds, memo
 ):
     """The node's Python side, held to each binary in turn."""
-    global _OUTCOMES
+    global _OUTCOMES  # noqa: PLW0603
     _OUTCOMES = {}
     tallies = []
     try:
         for exe in c.exes:
-            if exe is not None:
-                os.environ[rustnode.ENV_BINARY] = exe
+            use_binary(c, exe)
             t = Tally()
             t.python_seconds = python_seconds
             REFUSED.clear()
@@ -3320,14 +3352,17 @@ def examined(c, positions: list[Position], extras: list[dict]):  # noqa: ANN001,
         for pos, extra in zip(positions, extras, strict=True):
             yield examine(pos, extra, c)
         return
-    tasks = [(index, pos, extra) for index, (pos, extra) in enumerate(zip(positions, extras, strict=True))]
+    tasks = [
+        (index, pos, extra)
+        for index, (pos, extra) in enumerate(zip(positions, extras, strict=True))
+    ]
     spawn = multiprocessing.get_context("spawn")
     with spawn.Pool(jobs, initializer=_start_worker, initargs=(sys.argv[1:],)) as pool:
         for _index, tallies in pool.imap(_work, tasks, chunksize=1):
             yield tallies
 
 
-def side_by_side(exes: list[str | None], outcomes: list[tuple[list[str], list[str]]]) -> None:
+def side_by_side(exes: list[str], outcomes: list[tuple[list[str], list[str]]]) -> None:
     """The summary lines on which the binaries part, the timings left out."""
     timing = ("  python ", "  end to end ")
     kept = [[line for line in lines if not line.startswith(timing)] for lines, _ in outcomes]
@@ -3488,15 +3523,16 @@ def main() -> None:
         }
         for pos in positions
     ]
-    exes = c.exes
-    for number, exe in enumerate(exes, 1):
-        if exe is not None:
-            os.environ[rustnode.ENV_BINARY] = exe
+    exes, labels = c.exes, c.labels
+    for number, (exe, label) in enumerate(zip(exes, labels, strict=True), 1):
+        use_binary(c, exe)
         build = rustnode.require_current_binary()
         if len(exes) == 1:
             print(f"binary {build['sha256']} built {build['built']}")
         else:
-            print(f"binary [{number}] {exe}: {build['sha256']} built {build['built']}")
+            print(f"binary [{number}] {label}: {build['sha256']} built {build['built']}")
+    # Back to what the environment named: a spawned worker inherits it.
+    use_binary(c, None)
     print(f"budget {args.budget}: {c.budget}")
 
     merged = [Tally() for _ in exes]
@@ -3522,9 +3558,9 @@ def main() -> None:
             file=sys.stderr,
         )
     outcomes = []
-    for number, (exe, tally) in enumerate(zip(exes, merged, strict=True)):
+    for number, (label, tally) in enumerate(zip(labels, merged, strict=True)):
         if len(exes) > 1:
-            print(f"\n== binary [{number + 1}] of {len(exes)}: {exe} ==")
+            print(f"\n== binary [{number + 1}] of {len(exes)}: {label} ==")
             emit(held[number], state[number])
         lines, failed = summarize(tally, c)
         for line in lines:
@@ -3535,7 +3571,7 @@ def main() -> None:
             print(f"\nOK ({args.budget})")
         outcomes.append((lines, failed))
     if len(exes) > 1:
-        side_by_side(exes, outcomes)
+        side_by_side(labels, outcomes)
     if any(failed for _lines, failed in outcomes):
         sys.exit(1)
 
