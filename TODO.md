@@ -7797,3 +7797,70 @@ IKA-117 の節の5と同じ形（600局×2本＋`leaf_calibration.py`）で、�
 * **IKA-108**: rust.child@rank ÷ rust.child@* の合計（子の時間のうち順位付けの充填の割合）。節約できるのは
   行列側（rust.child@matrix）の最大3割で、rust.child@rank を超えない。それが子の CPU の 10% に届かなければ止める
 * どれも「残りの回帰」の警告が出ていないことが先。出たら内訳として読まず、名前の無い部分を先に計器にする
+
+## 9/23 — IKA-99/100: target-cpu・整数ロール・PGO の腕を今の木で作り、答えは 6 腕とも同一（時間は未測定）
+
+問いは IKA-99「AVX2 / AVX-512 は今の木の解決器・符号化・ノード充填に何かを買うか」と IKA-100
+「PGO は windows-gnu で作れるか」。**この回は作ることと答えの同一性だけ**。時間の表は調整役が
+空いた窓で `rust/experiments/ika99_bench.sh` を走らせて取る。
+
+### 作った腕（`C:/tmp/pokeuraou-machine/ika99/`、コミットしない）
+
+```
+  基準     既定の release（x86-64）                       ika99_build.sh
+  v3       -C target-cpu=x86-64-v3                         ika99_build.sh
+  native   -C target-cpu=native（znver5, AVX-512）          ika99_build.sh
+  整数ロール --features int-rolls（16ロールを wrap32(x)/100）  ika99_build.sh
+  llvm     x86_64-pc-windows-gnullvm、PGO なし（PGO の対照）  rust/pgo.sh
+  pgo      gnullvm + -Cprofile-use                          rust/pgo.sh
+  正の対照  整数ロールを (x+50)/100 に壊した腕                scratchpad のみ
+```
+
+### 答えの同一性（`tools/bench_ika99.py check`、基準と比べて）
+
+```
+  damage   1,018 + 8,590 + 23,630 = 33,238 件   6腕とも全一致・出力同一   対照は 94〜96% 乖離
+  turns    rust/turns.json 955 件               6腕とも 955 exact・出力同一（計数器を含む）  対照は 502 wrong
+  ノード    data/ika73/w12 の記録局面 24（学習用 36 の後ろ）、幅12、Budget.matrix()、fill_encoded
+           2,732 セル・9,036 葉、配列のバイト列・span・fold・exact・refused が 6腕とも同一   対照は違う
+  diff_node --games 2 --nodes 20、腕ごとに POKEURAOU_RUST_NODE_BIN
+           6腕とも 11,934/14,832 ビット一致・最大 3.3e-16・拒否 0、時間以外の出力は同じハッシュ
+```
+
+damage の件数は `dump_damage_cases*.py` を今の木で作り直したもの（README の 30,640 は旧い版）。
+整数ロールが同じ数になるのは算術で言える（積 < 2^39 なので f64 の往復は正確）。
+
+### PGO（IKA-100）: windows-gnu の道では作れない、gnullvm の道なら作れる
+
+* `-gnu` の std に `profiler_builtins` が無い（`-Cprofile-generate` で E0463）。C コンパイラも無く、
+  rust-mingw の gcc はリンク専用（`GCC-WARNING.txt`）なので自前でも作れない
+* `x86_64-pc-windows-gnullvm` の rust-std には入っている。リンカ（llvm-mingw の clang 想定）は無いので、
+  `rust/experiments/pgo-link/gnullvm_link.rs` が rust-mingw の gcc を立てる: `-nolibc` `--unwindlib=none` を
+  落とし、`-lunwind` を `-lgcc_eh -l:libpthread.a` に、crt2.o と mingw/libgcc を `-gnu` と同じ行で。
+  `catch_unwind` は計装あり・なしとも効いた（node.rs が使う）
+* `llvm-profdata` は `rustup component add llvm-tools`（LLVM 22、rustc と同じ）。profraw 1 本 → profdata 510 KB、
+  `encoded_node` の関数に計数が入っていることを確認
+* 学習 = turns.json 全件 1 回 + 記録局面の先頭 36 を幅12で。測るのはその後ろ（`--train-positions 36`）。
+  **turns の行は学習と同じ fixture なので in-sample**（表に * が付く）
+* 既定は OFF。何も pgo の腕を参照しない
+
+### 待っているもの
+
+* 時間の表: `PYTHON=<python> rust/experiments/ika99_bench.sh C:/tmp/pokeuraou-machine/ika99
+  <main>/rust/turns.json <main>/data/ika73/w12 5 48 <ika99>/cases/cases.json <ika99>/cases/cases-field.json
+  <ika99>/cases/cases-synthetic.json`（1 回・2 局面の試運転は 22 秒。全体の見積り 3〜5 分、1コアだが
+  計時なので鍵の中で）
+* 前もって書いた予想: ノード充填 ±2% 以内、exact の turns < 3%、整数ロールは差なし
+* llvm の腕は target を変えただけの対照。pgo の効果は llvm と比べて読む（基準と比べると target の差が混ざる）
+
+### 入れたもの（戻すとき）
+
+```
+  rustup component add llvm-tools          stable-x86_64-pc-windows-gnu に llvm-tools-preview（14 ファイル、約 785 MB）
+                                           戻す: rustup component remove llvm-tools-preview
+  rustup target add x86_64-pc-windows-gnullvm   同じ toolchain の lib/rustlib/x86_64-pc-windows-gnullvm（137 MB）
+                                           戻す: rustup target remove x86_64-pc-windows-gnullvm
+  ビルド物                                 C:/tmp/pokeuraou-machine/ika99（208 MB、消してよい）
+```
+
+既定の toolchain・PATH・環境変数は触っていない。VS Build Tools などの大物は要らなかった。

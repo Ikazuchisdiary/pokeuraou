@@ -424,6 +424,49 @@ L3 96 MB の 3D V-Cache）** です。狙う場所が変わるので先に書い
 **エンドツーエンドで測れる差がないので、設定は入れていません**——
 可搬性を捨てる代わりに何も得られないのは割に合いません。
 
+#### 9/23 IKA-99 / IKA-100: 今の木で腕を作り直した（答えは全腕で同一、時間は未測定）
+
+上の表は旧い木の数字です。今の木（`be3b896`）で腕を 6 本作り、**答えが 1 ビットも動かないこと**を
+先に確かめました。時間はまだ測っていません（下の計時スクリプトを、機械が空いた窓で走らせる）。
+
+| 腕 | 作り方 | damage 33,238 | turns 955 | 幅12ノード 24 | `diff_node` 20 ノード |
+|---|---|---|---|---|---|
+| 基準 | 既定（x86-64） | 全一致 | 955 exact | — | 11,934/14,832・最大 3.3e-16 |
+| v3 | `-C target-cpu=x86-64-v3` | 同一 | 同一 | 同一 | 同一 |
+| native | `-C target-cpu=native`（znver5） | 同一 | 同一 | 同一 | 同一 |
+| 整数ロール | `--features int-rolls` | 同一 | 同一 | 同一 | 同一 |
+| llvm | `x86_64-pc-windows-gnullvm`、PGO なし | 同一 | 同一 | 同一 | 同一 |
+| pgo | gnullvm + `-Cprofile-use` | 同一 | 同一 | 同一 | 同一 |
+| 正の対照 | 整数ロールを四捨五入に壊した腕 | **39/1,018 など 94〜96% 乖離** | **502 wrong** | **違う** | — |
+
+「同一」は基準の腕と比べて。damage と turns は時計の行以外の出力全部、ノードは符号化配列のバイト列と
+span・fold・exact・refused。`diff_node` は Python との比較で、80.46% がビット一致・残りが和の順序の
+3.3e-16 なのは基準から同じで、6 腕の出力（時間の行を除く）は同じハッシュ。damage の件数は
+`dump_damage_cases*.py` を今の木で作り直したもの（1,018 + 8,590 + 23,630。上の 30,640 は旧い版）。
+
+* **整数ロール**は `damage.rs` の 16 ロールを `trunc(trunc(x as f64) as f64 / 100.0)` から
+  `wrap32(x) / 100` にしたもの。`x < 2^39` なので f64 の往復は正確で、同じ数になるのは算術で言えます。
+  既定 OFF の機能フラグ（`int-rolls`）。
+* **PGO は windows-gnu の道では作れず、gnullvm の道なら作れます**（IKA-100）。`-gnu` の std には
+  `profiler_builtins` が無く（`E0463`）、C コンパイラも無いので自前で作れない。ところが
+  `rustup target add x86_64-pc-windows-gnullvm` の std には入っている。そのターゲットのリンカは
+  llvm-mingw の clang の想定ですが、`experiments/pgo-link/gnullvm_link.rs` が rust-mingw の
+  リンク専用 gcc を代わりに立てます（clang だけの 2 旗を落とし、`-lunwind` を libgcc の巻き戻しに、
+  スタートファイルと mingw ライブラリを `-gnu` と同じ行で）。`catch_unwind` が効くことは確かめた。
+  `llvm-profdata` は `rustup component add llvm-tools`（rustc と同じ LLVM 22）。手順は `rust/pgo.sh`、
+  学習は turns.json 全件 + 記録局面 36（`data/ika73/w12`、幅12、`Budget.matrix()`）、
+  測るのはその後ろの局面。**既定は OFF**（何も参照しない）。
+
+```bash
+rust/experiments/ika99_build.sh <out>                      # 基準・v3・native・整数ロール
+PYTHON=<python> rust/pgo.sh <out>/pgo <turns.json> <games-dir>
+PYTHON=<python> rust/experiments/ika99_bench.sh <out> <turns.json> <games-dir> 5 48 <cases.json ...>
+```
+
+`ika99_bench.sh` は腕を交互に・各 5 回・最小値で、damage（us/call）・turns（us/turn）・
+ノードの `resolveUs` / `encodeUs` / 壁時計を表にし、答えの同一性も毎回確かめます。
+前もって書いた予想: ノード充填は ±2% 以内、exact の turns は 3% 未満、整数ロールは差なし。
+
 ### dlshogi から持ってこられたもの / こられなかったもの
 
 [DeepLearningShogi](https://github.com/TadaoYamaoka/DeepLearningShogi) の `UctSearch.cpp` は、
@@ -1999,3 +2042,6 @@ stderr に理由が載るので、そのログを見せてください。
 解決しています。**この道では PyO3 拡張は作れません**——CPython は MSVC ビルドなので、
 拡張も MSVC で作るのが筋です。だから境界はプロセス（JSONL over stdio）で、
 これは既存の sim-bridge と同じ形でもあります。
+
+`-gnu` の std には `profiler_builtins` が無いので、PGO は `x86_64-pc-windows-gnullvm` で作ります
+（`rust/pgo.sh`、上の「target-cpu=native」の IKA-100 の段）。
