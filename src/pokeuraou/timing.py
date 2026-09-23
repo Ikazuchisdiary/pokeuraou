@@ -88,6 +88,11 @@ STAGES = (
     "forward",       # the net, in this process
     "lp",            # solve / solve_bayesian
     "belief",        # belief_payoffs' own Python: the per-completion copies, spans, folds
+    # The self-switch node's own Python (IKA-150), minus the encode/forward inside it:
+    "selfswitch.resume",    # resume_alternatives: every option's rest of the turn, per world
+    "selfswitch.complete",  # the opponent's completions, and the pause rebuilt in each
+    "selfswitch.leaves",    # turn_leaves (a nested pause's options included), fast-path copies
+    "selfswitch.fold",      # folding the leaf values into scores, the argmax, the record
     "rust.fill",     # a node asked of the Rust child, and the wait for its header
     "rust.ask",      # building the request's JSON, here
     "rust.header",   # reading the answer's JSON, here
