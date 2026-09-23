@@ -383,6 +383,19 @@ pub(crate) fn confuse(turn: &mut Turn, side: usize, slot: usize, source: Option<
     }
 }
 
+/// Damp's `onAnyTryMove`: any active Pokemon with it stops Explosion, Self-Destruct,
+/// Misty Explosion (and Mind Blown) -- `breakable`, so not against a Mold Breaker's own
+/// blast (IKA-208).
+fn damp_stops(turn: &Turn, action: &QueuedAction) -> bool {
+    let source = Some((action.side, action.slot));
+    (0..turn.pos.sides.len()).any(|side| {
+        (0..turn.pos.sides[side].active.len()).any(|slot| {
+            matches!(turn.mon_at(side, slot), Some(mon)
+                if !mon.fainted && mon.ability == "damp" && !ability_broken_by(turn, mon, source))
+        })
+    })
+}
+
 /// `suppressingAbility(mon)` under `source`'s move: Python's `_ability_broken_by`.
 fn ability_broken_by(turn: &Turn, mon: &crate::position::Pokemon, source: Option<Slot>) -> bool {
     let Some((side, slot)) = source else { return false };
@@ -990,6 +1003,10 @@ fn use_move<'a>(
         turn.move_failed[action.side][action.slot] = true;
         return Ok(vec![(1.0, turn)]);
     }
+    if move_id.as_str() == "lastresort" && last_resort_fails(&turn, action) {
+        turn.move_failed[action.side][action.slot] = true;
+        return Ok(vec![(1.0, turn)]);
+    }
 
     if move_id.as_str() == "suckerpunch" {
         let candidates = resolve_targets(reg, &mut turn, action, mv)?;
@@ -1058,6 +1075,22 @@ fn use_move<'a>(
     }
 
     let targets = resolve_targets(reg, &mut turn, action, mv)?;
+    // Explosion, Self-Destruct, Misty Explosion (IKA-208): `useMoveInner` faints the user
+    // right after `TryMove` -- Damp's `onAnyTryMove` -- and before it looks at the targets,
+    // so it goes whatever the blast meets. The hits are then computed from the user as it
+    // was: Showdown's `faint()` only zeroes the HP, and the boosts and volatiles stay until
+    // `faintMessages`.
+    let exploded = if mv.raw.get("selfdestruct").and_then(Value::as_str) == Some("always") {
+        if damp_stops(&turn, action) {
+            turn.move_failed[action.side][action.slot] = true;
+            return Ok(vec![(1.0, turn)]);
+        }
+        let as_used = turn.mon_at(action.side, action.slot).cloned();
+        turn.faint(action.side, action.slot);
+        as_used
+    } else {
+        None
+    };
     let no_target_needed = matches!(
         mv.target.as_str(),
         "self" | "allySide" | "allyTeam" | "all" | "foeSide"
@@ -1114,7 +1147,7 @@ fn use_move<'a>(
         let mut expanded: Vec<Outcome<'a>> = Vec::new();
         for (weight, state) in branches.into_iter() {
             let started = crate::resolve::phase_start();
-            let hit = hit_target(reg, state, action, mv, *target, spread, budget)?;
+            let hit = hit_target(reg, state, action, mv, *target, spread, budget, exploded.as_ref())?;
             crate::resolve::phase_end(9, started);
             for (inner_weight, inner_state) in hit {
                 expanded.push((weight * inner_weight, inner_state));
@@ -1126,6 +1159,16 @@ fn use_move<'a>(
         after_move(state, action, mv)?;
     }
     Ok(branches)
+}
+
+/// Last Resort's `onTry` (data/moves.ts, IKA-208): `false` with fewer than two moves, or
+/// while any other move slot is not `used` -- which `moveUsed` sets and a switch clears.
+fn last_resort_fails(turn: &Turn, action: &QueuedAction) -> bool {
+    let Some(mon) = turn.mon_at(action.side, action.slot) else { return true };
+    let slots: Vec<_> = mon.moves.iter().collect();
+    slots.len() < 2
+        || !slots.iter().any(|slot| slot.id.as_str() == "lastresort")
+        || slots.iter().any(|slot| slot.id.as_str() != "lastresort" && !slot.used)
 }
 
 fn spend_pp(turn: &mut Turn, action: &QueuedAction) {
@@ -1393,6 +1436,7 @@ fn hit_target<'a>(
     target: Slot,
     spread: bool,
     budget: Budget,
+    exploded: Option<&crate::position::Pokemon>,
 ) -> Result<Vec<Outcome<'a>>, String> {
     let move_id = action.move_id.unwrap();
     if let Some(blocked) = blocked_by_protect(&turn, action, mv, target) {
@@ -1400,8 +1444,12 @@ fn hit_target<'a>(
         return Ok(vec![(1.0, turn)]);
     }
 
-    let Some(attacker) = turn.battler_at(action.side, action.slot)? else {
-        return Ok(vec![(1.0, turn)]);
+    let attacker = match exploded {
+        Some(mon) => Battler::from_pokemon(reg, mon)?,
+        None => match turn.battler_at(action.side, action.slot)? {
+            Some(attacker) => attacker,
+            None => return Ok(vec![(1.0, turn)]),
+        },
     };
     let Some(defender) = turn.battler_at(target.0, target.1)? else {
         return Ok(vec![(1.0, turn)]);
@@ -3094,6 +3142,12 @@ fn apply_status_move(
     let me = (action.side, action.slot);
     let mut suppress_self_switch = false;
 
+    // Healing Wish's `onTryHit`: `if (!this.canSwitch(source.side)) { ...; return
+    // this.NOT_FAIL; }` -- nothing happens and the user stays (IKA-208).
+    if mv.id == "healingwish" && !can_switch(turn, me.0) {
+        return Ok(());
+    }
+
     if let Some(condition) = mv.side_condition.as_deref() {
         let condition = condition.to_string();
         let duration = effect_duration(turn, mv, &condition, action.side, action.slot);
@@ -3257,6 +3311,19 @@ fn apply_status_move(
     if mv.id == "perishsong" {
         perish_song(turn, me);
     }
+    // `runMoveEffects`: `target.side.addSlotCondition(target, moveData.slotCondition)` --
+    // Healing Wish's, which heals whoever comes into the slot next (IKA-208).
+    if let Some(cid) = mv.raw.get("slotCondition").and_then(Value::as_str) {
+        for target in targets {
+            let conditions = &mut turn.pos.sides[target.0].slot_conditions;
+            if conditions.len() <= target.1 {
+                conditions.resize_with(target.1 + 1, Vec::new);
+            }
+            if !conditions[target.1].iter().any(|c| c.id.as_str() == cid) {
+                conditions[target.1].push(Effect::new(Id::new(cid)));
+            }
+        }
+    }
     if matches!(mv.id.as_str(), "trick" | "switcheroo") {
         for target in targets {
             if !swap_items(reg, turn, me, *target) {
@@ -3272,6 +3339,13 @@ fn apply_status_move(
     }
     if mv.self_switch && !suppress_self_switch {
         mark_self_switch(turn, action);
+    }
+    // Memento, Healing Wish: `if (moveData.selfdestruct === 'ifHit' && damage[i] !== false)
+    // this.faint(source)` -- a status move's `damage[i]` is `undefined` once it reached a
+    // target, so a Memento into -6 or Clear Body still faints its user; Protect, a miss,
+    // an immunity or a doll keep the target out of `targets` (IKA-208).
+    if mv.raw.get("selfdestruct").and_then(Value::as_str) == Some("ifHit") && !targets.is_empty() {
+        turn.faint(me.0, me.1);
     }
     if mv.force_switch {
         return Err("forceSwitch status move".into());

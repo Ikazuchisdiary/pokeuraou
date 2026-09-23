@@ -903,6 +903,14 @@ fn move_field_is_ported(field: &str, move_id: &str) -> bool {
         (field, move_id),
         // `moves::hit_target`: the user faints in `damageCallback`, before its HP hits.
         ("selfdestruct", "finalgambit")
+        // `moves::self_destruct`: `selfdestruct: "always"`, after `TryMove` (Damp).
+            | ("selfdestruct", "explosion" | "selfdestruct" | "mistyexplosion")
+        // `apply_status_move`: `selfdestruct: "ifHit"` on a status move that reached.
+            | ("selfdestruct", "memento" | "healingwish")
+        // `damage::crit_stage` returns 4 for it, and Battle Armor / Shell Armor stop it
+        // in `crit_probability` (`runEvent('CriticalHit')`): Storm Throw, Flower Trick,
+        // Frost Breath.
+            | ("willCrit", _)
     )
 }
 
@@ -932,11 +940,8 @@ fn check_move_supported(reg: &Reg, move_id: &str) -> Result<(), String> {
     {
         return Err(format!("status move: {move_id}"));
     }
-    // Last Resort reads which of its user's other moves have been used. Trick and
-    // Switcheroo are `moves::swap_items` (IKA-208).
-    if matches!(move_id, "lastresort") {
-        return Err(format!("item-swapping or history move: {move_id}"));
-    }
+    // Trick and Switcheroo are `moves::swap_items`, Last Resort `moves::last_resort_fails`
+    // (IKA-208).
     Ok(())
 }
 
@@ -1014,7 +1019,11 @@ fn check_position_supported(
                     return Err(format!("volatile: {}", volatile.id));
                 }
             }
-            if mon.transformed || mon.stats_override.is_some() {
+            // A stats override by itself is Showdown's `storedStats` riding along with a
+            // known spread, and `Battler::from_pokemon` reads it only for a transformed
+            // Pokemon or one without a spread -- Python's `view.battler` rule. What stays
+            // refused is the Transform itself (IKA-208: neither engine performs one).
+            if mon.transformed {
                 return Err("transformed Pokemon".into());
             }
             // A position the game could not reach is not a thing to hold two

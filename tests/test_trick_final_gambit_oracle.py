@@ -229,7 +229,7 @@ def _state(pos: Position) -> dict[str, tuple]:
     }
 
 
-def _play(oracle: Oracle, name: str) -> tuple[Position, list[str], dict]:
+def _play(oracle: Oracle, name: str, strip: bool = True) -> tuple[Position, list[str], dict]:
     (mine, theirs), setup, choices, shown = CASES[name]
     handle = oracle.create(FORMAT_ID, mine, theirs, policy=RandomnessPolicy())
     handle.step(["team 12", "team 12"])
@@ -245,9 +245,10 @@ def _play(oracle: Oracle, name: str) -> tuple[Position, list[str], dict]:
     assert any(line.startswith(shown) for line in log), f"Showdown did not do what {name} says: {log}"
     for side in before.sides:
         for party in side.pokemon:
-            # The port declines a position with a stats override (it reads it as a
-            # Transform); both engines compute the stats from the set.
-            party.stats_override = None
+            # Until IKA-208 the port declined a position with a stats override (it read
+            # it as a Transform); both engines compute the stats from the set.
+            if strip:
+                party.stats_override = None
     return before, choices, after
 
 
@@ -279,3 +280,18 @@ def test_the_port_matches_showdown(reg, oracle: Oracle, bridged: None, name: str
     assert picked is not None and picked.position is not None
     rust_now = _state(picked.position)
     assert rust_now == theirs, f"{name}: showdown {theirs} != rust {rust_now}"
+
+
+@pytest.mark.parametrize("name", ["control-no-trick", "trick-swaps-scarf-and-leftovers"])
+def test_a_stats_override_is_not_a_transform(reg, oracle: Oracle, bridged: None, name: str) -> None:  # noqa: ANN001
+    """Showdown's position carries every Pokemon's `storedStats` as `statsOverride`; with the
+    spread known both engines read the spread (`view.battler`, `Battler::from_pokemon`), so
+    the override alone is answered, where the port used to refuse it as "transformed"."""
+    before, choices, theirs = _play(oracle, name, strip=False)
+    assert all(p.stats_override is not None for side in before.sides for p in side.pokemon)
+    node = rustnode.node_for(reg)
+    assert node is not None
+    actions = _actions(reg, before, choices)
+    picked = node.resolve(before, actions, BUDGET, select=0)
+    assert picked is not None and picked.position is not None, "the port refused the turn"
+    assert _state(picked.position) == theirs

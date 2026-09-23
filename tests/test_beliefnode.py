@@ -803,10 +803,11 @@ def test_a_cell_the_port_refuses_is_resolved_per_completion(midgame) -> None:  #
     games 10-209 that was 3,886 cells in 179 of 10,158 completion matrices, 19 decisions,
     every one `breaksProtect move` (Feint). The turn-1 fixtures and games 0-9 had none.
 
-    The port answers Feint since IKA-61, so the refused move here is Flower Trick
-    (`move field willCrit`), which it still refuses. It is given to side 1's Toxapex
-    (Garchomp is locked into Earthquake by its Scarf), so the port refuses the cells where
-    it is used. Not Roar: phazing marks the cell dirty, so the fast path never shares it.
+    The port answers Feint since IKA-61 and Flower Trick since IKA-208, so the refused move
+    here is Dragon Darts (`move field smartTarget`), which it still refuses. It is given to
+    side 1's Toxapex (Garchomp is locked into Earthquake by its Scarf), so the port refuses
+    the cells where it is used. Not Roar: phazing marks the cell dirty, so the fast path
+    never shares it.
     """
     reg, position, ours, theirs, spreads = _with_feint(midgame)
     wrong = _node_mismatches(reg, position, ours, theirs, spreads, _SlotLeaf(Encoder(reg)))
@@ -814,18 +815,18 @@ def test_a_cell_the_port_refuses_is_resolved_per_completion(midgame) -> None:  #
 
 
 def _with_feint(midgame):  # noqa: ANN001, ANN202
-    """The mid-game node with Feint on Toxapex: shared refused cells, and dirty ones."""
+    """The mid-game node with Dragon Darts on Toxapex: shared refused cells, and dirty ones."""
     from pokeuraou.position import MoveSlot
 
     reg, position, ours, _theirs, _spreads, sheet, seen = midgame
     position = position.copy()
     toxapex = next(m for m in position.sides[1].pokemon if to_id(m.species) == "toxapex")
-    toxapex.moves[0] = MoveSlot(id="flowertrick", pp=16, maxpp=16)
+    toxapex.moves[0] = MoveSlot(id="dragondarts", pp=16, maxpp=16)
     # The completions have to be of this position, not of the fixture's.
     spreads = {s: completions(reg, position, s, sheet, seen=seen[s]) for s in (0, 1)}
     theirs = [
         action for action in side_actions(reg, position, 1)
-        if any(getattr(slot, "move_id", None) == "flowertrick" for slot in action.slots)
+        if any(getattr(slot, "move_id", None) == "dragondarts" for slot in action.slots)
     ][:4] + narrow(reg, position, 1, limit=6).actions
 
     port = rustnode.node_for(reg)
