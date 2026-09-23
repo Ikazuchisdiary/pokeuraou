@@ -8731,3 +8731,85 @@ fills@matrix 1.00 ＝ IKA-104 が効いている）、replacement 1,852（5.72�
 IKA-45 の判断（2: 名前で区別する）に残る。
 
 機械時間: 無し（道具の読み戻しを2回、各1秒未満）。
+
+## 9/23 — IKA-150: 途中交代ノードの時間は完成形ごとの再開（resume_alternatives）にある —— 控えに届かない選択肢は真の中断で1回だけ解き、定義と1ビット一致のまま 1決定 588 → 128 ms
+
+**答えた問い**: IKA-120 が足した完成形ごとの解き直しで、途中交代の1決定の時間はどこに行っているか（生成を回さず、
+記録局面の再生で）。そして、定義（完成形ごとに素直に解く）と1ビット一致する速い経路で、それをどこまで削れるか。
+
+### 1. 段を足した（`src/pokeuraou/timing.py`・`selfplay.py`）
+
+`STAGES` に `selfswitch.resume`（`resume_alternatives`、真の中断と完成形ごと）・`selfswitch.complete`（完成形と
+`paused_in`）・`selfswitch.leaves`（`turn_leaves` と速い経路の写し）・`selfswitch.fold`（採点・argmax・記録）。
+数は `selfswitch.options / completions / leaves / resumed / shared`。計時が off なら `stage` は共有の no-op、
+`count` はモジュール変数の確認だけ（timing.py の規則どおり）。`profile_stages.py` は触っていない（群に無い段は
+「not in any group」として印字される）。
+
+### 2. どこに行っているか（`scratchpad/ika150_selfswitch_replay.py`、`data/ika73/w12` 先頭3,000局、value-gen11L を CPU・1スレッド・1コア）
+
+相手に未公開が居た途中交代 898 件から抽出（再構成は IKA-120 の道具の関数をそのまま使う。重みは一様）。
+
+```
+                          300件（seed 151）          50件（seed 150）
+                          定義      速い経路         定義      速い経路
+  1決定 平均              588.5     127.5 ms         235.6     68.9 ms      （4.6倍 / 3.4倍）
+  中央値 / 最大           3.9 / 15,800   2.5 / 3,070     3.7 / 8,314   2.5 / 2,110
+  selfswitch.resume       551.8      90.9            211.4     49.6
+  encode                   22.9      22.2             12.6     11.7
+  forward                  10.6      10.8              6.2      6.1
+  selfswitch.leaves         0.2       2.7              3.6      0.6
+  complete + fold           0.6       0.4              0.5      0.4
+  1決定あたり: 選択肢 1.78、完成形 4.29、葉 358.9、完成形ごとの再開 7.80 → 0.19（共有できた選択肢 1.73 / 1.78）
+```
+
+* **時間は再開（`resume_turn` の残りのキュー、exact 予算）で、9割以上**。IKA-150 本文の見立て（段の無い
+  `resume_alternatives`）は当たり。符号化・順伝播は1割未満
+* 重い尾: 300件の平均の 33% は上位5件、1秒超が 33 件。中央値は 4 ms。生成の 680 ms（338件の平均）も
+  この尾で決まっていると読むのが自然（300件の定義の平均 588 ms と桁が合う）
+* 時計は共有機械の粗い CPU の数（同じ50件が1本目 318 ms、2本目 236 ms）。決定の順は定義と速い経路で交互
+
+### 3. 速い経路（`_self_switch_plans` / `_shared_self_switch_plans` / `_with_bench`）
+
+真の中断で各選択肢を1回再開し（打つ手のためにもともと要る）、残りのターンが相手の未公開の枠に届かない選択肢は、
+その葉の未公開の枠の Pokemon と `mega_capable_slots` を完成形のものに差し替えるだけにする。届くかは選択肢ごとに:
+相手に交代がキューに残っている（→ 全選択肢）、残りのターンがもう一度中断する、どこかの葉で未公開の枠の
+Pokemon が中断時と違う・場に出ている、のどれか。解決器が場に出ない控えから読むのは生存数と枝の併合キー
+（`_position_bucket`）の種族だけで、どちらも完成形によらない（Beat Up・Illusion は解決器に無い）。
+届く選択肢だけ完成形ごとに定義どおり再開する。`_do_self_switch_node(definition=True)` で全部を定義の経路にできる。
+
+**1ビット一致の証拠**（上の再生 350 件）:
+
+* 代わりの葉（符号化の全配列の全要素に固有の重み、`_SlotLeaf` と同じ形）: 葉に渡った位置の列が JSON で
+  350/350 一致（117,451 葉）、`search_value` が 350/350 でビット一致、交代先 350/350 一致
+* value-gen11L: 交代先 350/350・`search_value` 350/350 ビット一致・`unmodelled` 350/350 一致
+* 届くと判定された選択肢は 300件中 9 決定・15 選択肢（完成形ごとに解き直された）
+
+**テスト**（`tests/test_hidden_selfswitch.py`、2件）:
+
+* `test_the_shared_self_switch_is_the_definition`: とんぼがえりの中断で両選択肢が共有されていること（そうで
+  なければ定義同士の比較になる）を先に確かめ、6完成形で葉の JSON・値・記録が定義と一致
+* 正の対照 `test_an_option_that_reaches_their_bench_is_resolved_per_completion`: 相手も後でとんぼがえりする
+  ターン。相手の交代先に未公開の枠が入るので両選択肢とも共有されず、定義と一致。**検査を外した版
+  （`_share_everything`、全選択肢を真の中断の葉で共有）では葉も値も定義と違って落ちる**。同じ置き換えは
+  ふつうのとんぼがえりでは一致のまま（届くことを検査が捕まえている）
+* 故障注入（コミットしない、一時の pytest）: `_with_bench` が差し替えをしない（完成形を飛ばす）版、2つ目
+  以降の完成形に1つ目の控えを入れる版、どちらも1件目の `assert fast == definition` で落ちた
+
+`test_hidden.py`・`test_hidden_search.py`・`test_selfplay.py`・`test_timing.py`・`test_line_endings.py`・
+`test_no_machine_specific_paths.py` は通る（-n 0、56件）。IKA-120 の正の対照（公開局は真の控えで選ぶ）も速い
+経路で通る。
+
+### 4. 残り
+
+* 生成の局/分は測っていない。専有の時間帯で、変更前（このブランチの親）と後を交互に
+  `profile_stages.py generation`（出荷条件 600局）で取り、selfswitch の1決定と局/分を比べる。答えは変わらない
+  はずなので、2腕の games が局ごとに一致することが null 対照（`same_games.py`）
+* 見込み: 削れるのは完成形ごとの再開（定義の再開の約 8割）。IKA-98 の 230 s から概算で 150〜180 s、ワーカー
+  壁時計の 6〜8%、生成で **1.07〜1.08倍**（課題の予想 1.1〜1.2 より下。自己交代の 19% のうち真の中断の再開は
+  IKA-120 の前からある）
+* 残る時間は真の中断の再開そのもの（1決定 91 ms、尾は数秒）。exact 予算の残りのキューの展開で、IKA-120 とは
+  無関係。Rust の node に再開を持たせるか予算を見直すかは別の課題
+* 符号化は完成形ぶん（C×葉）のまま。`belief_payoffs` の `_patched` と同じく真の葉を1回符号化して控えの行を
+  差し替えれば 22 ms → 5 ms 程度だが、今は 1割台なので見送った
+
+機械時間: 1コアの再生 3本（69 s・44 s・516 s）とテスト 135 s。すべて `heavy.py --agent IKA-150 --cores 1`。

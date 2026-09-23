@@ -27,7 +27,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Iterable, Iterator, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Protocol
@@ -48,6 +48,7 @@ from .regulation import STAT_IDS, Regulation, repo_root
 from .resolve import (
     Budget,
     SuspendedTurn,
+    TurnLeaves,
     TurnResult,
     apply_lead_abilities,
     paused_in,
@@ -981,6 +982,7 @@ def _do_self_switch_node(
     objective: Objective,
     *,
     hidden: _HiddenBench | None = None,
+    definition: bool = False,
 ) -> TurnResult | None:
     """Chooses the replacement a self-switching move demanded, and finishes the turn.
 
@@ -1000,96 +1002,228 @@ def _do_self_switch_node(
     that bench, the pause rebuilt in it by `paused_in`, and the scores are averaged with
     the belief's weights. Only one side chooses, so there is no game to solve: the choice
     is the option with the best expected score -- by definition each completion scored
-    plainly and then weighted, with nothing faster standing in for it. The turn that is
-    then *played* is the true one, resumed with that choice.
+    plainly and then weighted. The turn that is then *played* is the true one, resumed
+    with that choice.
+
+    The definition is still what is computed, but not by resolving every completion
+    (IKA-150: 680 ms a decision, 19% of generation's worker wall clock at 4% of its
+    decisions). An option whose rest of the turn never reaches the opponent's unseen slots
+    resolves to the same branches in every completion, and its leaves there are the true
+    leaves with those slots' Pokemon swapped in -- see `_shared_self_switch_plans`, which
+    also says what "never reaches" is checked against. Only the options that do reach them
+    are resolved per completion. `definition=True` takes the per-completion path for every
+    option; the tests and `scratchpad/ika150_selfswitch_replay.py` hold the two equal.
     """
-    chooser, alternatives = resume_alternatives(reg, pause)
+    with timing.stage("selfswitch.resume"):
+        chooser, alternatives = resume_alternatives(reg, pause)
     if chooser is None or not alternatives:
         return None
     record.unmodelled.append(
         "mid-turn replacement chosen against the opponent's already-committed action"
     )
     options = [option.to_choice() for option, _resumed in alternatives]
+    timing.count("selfswitch.options", len(options))
 
-    # (weight, alternatives) per world the chooser cannot tell apart.
-    worlds: list[tuple[float, list[tuple[SideAction, TurnResult]]]] = [
-        (1.0, alternatives)
-    ]
+    spread = None
     if hidden is not None:
         other = 1 - chooser
-        carried = seen_identities(pause.position, other, hidden.seen[other])
-        shown = seen_slots(pause.position, other, carried)
-        try:
-            spread = completions(
-                reg, pause.position, other, hidden.sheets[other], seen=shown,
-                weights=_bench_weights(
-                    hidden.bench_prior, other, pause.position, shown, record,
-                    hidden.leads[other],
-                ),
-            )
-        except ValueError as problem:
-            record.unmodelled.append(f"hidden bench at a self-switch: {problem}")
-            return None
-        if not (len(spread) == 1 and spread[0].exact):
-            worlds = []
-            for item in spread:
-                seen_as, found = resume_alternatives(
-                    reg, paused_in(pause, item.position, other)
+        with timing.stage("selfswitch.complete"):
+            carried = seen_identities(pause.position, other, hidden.seen[other])
+            shown = seen_slots(pause.position, other, carried)
+            try:
+                spread = completions(
+                    reg, pause.position, other, hidden.sheets[other], seen=shown,
+                    weights=_bench_weights(
+                        hidden.bench_prior, other, pause.position, shown, record,
+                        hidden.leads[other],
+                    ),
                 )
-                found_options = [option.to_choice() for option, _resumed in found]
-                if seen_as != chooser or found_options != options:
-                    # The chooser's options are its own bench, which no completion of the
-                    # other side's touches. If that ever stops being true, the average
-                    # below would be over different decisions.
-                    raise AssertionError(
-                        f"a completion of side {other}'s bench changed side {chooser}'s "
-                        f"self-switch options: {options} -> {found_options}"
-                    )
-                worlds.append((item.weight, found))
+            except ValueError as problem:
+                record.unmodelled.append(f"hidden bench at a self-switch: {problem}")
+                return None
+        if len(spread) == 1 and spread[0].exact:
+            spread = None
 
-    plans = [
-        [turn_leaves(reg, resumed) for _option, resumed in found]
-        for _weight, found in worlds
-    ]
+    # One list of plans per world the chooser cannot tell apart, and that world's weight.
+    if spread is None:
+        weights = [1.0]
+        with timing.stage("selfswitch.leaves"):
+            plans = [[turn_leaves(reg, resumed) for _option, resumed in alternatives]]
+    else:
+        timing.count("selfswitch.completions", len(spread))
+        weights = [item.weight for item in spread]
+        plans = _self_switch_plans(
+            reg, pause, chooser, options, alternatives, spread, definition=definition
+        )
     flat = [position for world in plans for plan in world for position in plan.positions]
     if not flat:
         return None
+    timing.count("selfswitch.leaves", len(flat))
     evaluate = leaves[chooser]
     values = (
         evaluate(flat)
         if evaluate is not None
         else np.array([objective(position) for position in flat], dtype=np.float64)
     )
-    scores = np.zeros(len(alternatives), dtype=np.float64)
-    offset = 0
-    for (weight, _found), world in zip(worlds, plans, strict=True):
-        for k, plan in enumerate(world):
-            count = len(plan.positions)
-            scores[k] += weight * plan.value(values[offset : offset + count])
-            record.unmodelled.extend(plan.unmodelled)
-            offset += count
+    with timing.stage("selfswitch.fold"):
+        scores = np.zeros(len(alternatives), dtype=np.float64)
+        offset = 0
+        for weight, world in zip(weights, plans, strict=True):
+            for k, plan in enumerate(world):
+                count = len(plan.positions)
+                scores[k] += weight * plan.value(values[offset : offset + count])
+                record.unmodelled.extend(plan.unmodelled)
+                offset += count
 
-    # Side 0 is the maximiser the payoff matrices are written for.
-    best = int(np.argmax(scores)) if chooser == 0 else int(np.argmin(scores))
-    policy = [0.0] * len(alternatives)
-    policy[best] = 1.0
-    waiting = ["pass"]
-    record.decisions.append(
-        Decision(
-            turn=pause.position.turn,
-            kind="selfswitch",
-            position=pause.position.to_json(),
-            own_actions=options if chooser == 0 else waiting,
-            own_policy=policy if chooser == 0 else [1.0],
-            foe_actions=waiting if chooser == 0 else options,
-            foe_policy=[1.0] if chooser == 0 else policy,
-            search_value=float(scores[best]),
-            own_chosen=options[best] if chooser == 0 else waiting[0],
-            foe_chosen=waiting[0] if chooser == 0 else options[best],
+        # Side 0 is the maximiser the payoff matrices are written for.
+        best = int(np.argmax(scores)) if chooser == 0 else int(np.argmin(scores))
+        policy = [0.0] * len(alternatives)
+        policy[best] = 1.0
+        waiting = ["pass"]
+        record.decisions.append(
+            Decision(
+                turn=pause.position.turn,
+                kind="selfswitch",
+                position=pause.position.to_json(),
+                own_actions=options if chooser == 0 else waiting,
+                own_policy=policy if chooser == 0 else [1.0],
+                foe_actions=waiting if chooser == 0 else options,
+                foe_policy=[1.0] if chooser == 0 else policy,
+                search_value=float(scores[best]),
+                own_chosen=options[best] if chooser == 0 else waiting[0],
+                foe_chosen=waiting[0] if chooser == 0 else options[best],
+            )
         )
-    )
     timing.decided("selfswitch")
     return alternatives[best][1]
+
+
+def _self_switch_plans(
+    reg: Regulation,
+    pause: SuspendedTurn,
+    chooser: int,
+    options: list[str],
+    alternatives: list[tuple[SideAction, TurnResult]],
+    spread: Sequence[Any],
+    *,
+    definition: bool = False,
+) -> list[list[TurnLeaves]]:
+    """Every completion's plan per option: `[completion][option]`, in `spread`'s order.
+
+    By definition each completion's pause is rebuilt (`paused_in`), every option resumed in
+    it and flattened (`turn_leaves`). That is still done for an option the shared path
+    cannot vouch for; the others are the true pause's plan with the bench swapped in.
+    """
+    other = 1 - chooser
+    shared: list[TurnLeaves | None] = [None] * len(alternatives)
+    if not definition:
+        with timing.stage("selfswitch.leaves"):
+            shared = _shared_self_switch_plans(
+                reg, pause, other, alternatives, spread[0].slots
+            )
+    timing.count("selfswitch.shared", sum(plan is not None for plan in shared))
+    per_world: list[list[TurnLeaves]] = []
+    for item in spread:
+        found: list[tuple[SideAction, TurnResult]] | None = None
+        if any(plan is None for plan in shared):
+            with timing.stage("selfswitch.complete"):
+                rebuilt = paused_in(pause, item.position, other)
+            with timing.stage("selfswitch.resume"):
+                seen_as, found = resume_alternatives(reg, rebuilt)
+            timing.count("selfswitch.resumed", len(found))
+            found_options = [option.to_choice() for option, _resumed in found]
+            if seen_as != chooser or found_options != options:
+                # The chooser's options are its own bench, which no completion of the
+                # other side's touches. If that ever stops being true, the average
+                # would be over different decisions.
+                raise AssertionError(
+                    f"a completion of side {other}'s bench changed side {chooser}'s "
+                    f"self-switch options: {options} -> {found_options}"
+                )
+        world: list[TurnLeaves] = []
+        with timing.stage("selfswitch.leaves"):
+            for k, plan in enumerate(shared):
+                if plan is not None:
+                    world.append(_with_bench(plan, other, item))
+                else:
+                    assert found is not None
+                    world.append(turn_leaves(reg, found[k][1]))
+        per_world.append(world)
+    return per_world
+
+
+def _shared_self_switch_plans(
+    reg: Regulation,
+    pause: SuspendedTurn,
+    other: int,
+    alternatives: list[tuple[SideAction, TurnResult]],
+    slots: tuple[int, ...],
+) -> list[TurnLeaves | None]:
+    """Each option's true plan where it holds in every completion, else None.
+
+    An option's rest of the turn is the same in every completion of `other`'s unseen
+    `slots` when none of those Pokemon is put on the field before the turn ends. Checked,
+    per option, against what can put one there:
+
+    * `other` has a switch still queued (`paused_in` re-aims it by slot, and it may be
+      aimed at one of them) -- then no option is shared;
+    * the rest of the turn pauses again (the next chooser's options are a bench; a nested
+      `other` pause would offer the unseen slots themselves);
+    * in some leaf an unseen slot's Pokemon is not the one the pause held, at the same
+      party index, off the field -- anything the turn did to one of them.
+
+    What the resolver reads of a bench it does not field is how many are left standing
+    and their species in the branch-merge bucket (`_position_bucket`). An unseen Pokemon
+    is healthy and unrevealed in every completion, and within one completion every branch
+    carries the same pair, so neither reading depends on which pair it is. A mechanic that read more of
+    a benched Pokemon (Beat Up, Illusion) would have to be added to the checks above; the
+    resolver models none. `tests/test_hidden_selfswitch.py` holds this to the definition.
+    """
+    before = pause.position.sides[other].pokemon
+    held = {index: mon for index, mon in enumerate(before) if mon.slot in slots}
+    if any(queued.side == other and queued.kind == "switch" for queued in pause._remaining):
+        return [None] * len(alternatives)
+    out: list[TurnLeaves | None] = []
+    for _option, resumed in alternatives:
+        if resumed.suspended:
+            out.append(None)
+            continue
+        plan = turn_leaves(reg, resumed)
+        untouched = all(
+            leaf.sides[other].pokemon[index] == mon
+            and leaf.sides[other].pokemon[index].active_index is None
+            for leaf in plan.positions
+            for index, mon in held.items()
+        )
+        out.append(plan if untouched else None)
+    return out
+
+
+def _with_bench(plan: TurnLeaves, other: int, item: Any) -> TurnLeaves:
+    """`plan` in the completion `item`: its unseen slots' Pokemon and mega list swapped in.
+
+    What resolving the turn in `item` would have left there: the completion's own Pokemon,
+    untouched (they took no part), and its side's `mega_capable_slots` (`substitute`
+    recomputes it and the resolver never writes it).
+
+    Shallow: everything but the new side and its list is the true leaf's own objects, and
+    the completion's Pokemon are shared between leaves. These positions only ever go to the
+    leaf evaluator, which reads them, and are dropped when the node returns; a full copy
+    was 0.2 ms a leaf, 0.6 s on a 3,072-leaf decision.
+    """
+    completed = item.position.sides[other]
+    fresh = {mon.slot: mon for mon in completed.pokemon if mon.slot in item.slots}
+    capable = list(completed.mega_capable_slots)
+    positions = []
+    for leaf in plan.positions:
+        sides = list(leaf.sides)
+        sides[other] = replace(
+            sides[other],
+            pokemon=[fresh.get(mon.slot, mon) for mon in sides[other].pokemon],
+            mega_capable_slots=capable,
+        )
+        positions.append(replace(leaf, sides=sides))
+    return TurnLeaves(positions=positions, root=plan.root, unmodelled=plan.unmodelled)
 
 
 def _do_replacement_node(
