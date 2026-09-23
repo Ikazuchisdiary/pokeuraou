@@ -13652,6 +13652,197 @@ port: master の exe（`rust/target/release/pokeuraou-damage.exe` の写し、Ru
 
 機械: 形式の確認 2 秒、対照 25 秒、関係テスト 5・3・5・5 秒、他の 13 ファイル 41 秒（すべて 1 コア、heavy.py に --agent IKA-82 で記録）。cargo build はしていない。
 
+## 9/24 — IKA-180: みがわりが HP を払い、攻撃を肩代わりする —— 両エンジンとも印を付けるだけで、HP は減らず、攻撃は本体に当たっていた
+
+ワーカー。基点 master 713f85d、ブランチ `ika-180-substitute`、報告前に master 1ee0daf（IKA-82）を取り込み（衝突なし）。
+
+### 1. Showdown（a5df827。champions は `substitute` を上書きせず、`spreadMoveHit` を持つ）
+
+- `data/moves.ts` `substitute`: `onTryHit` は既に立っている・HP ≤ maxhp/4（maxhp 1）で `NOT_FAIL`、`onHit` が
+  `directDamage(maxhp / 4)`、`condition.onStart` で人形の HP `floor(maxhp / 4)`、`partiallytrapped` を外す。
+  `onTryPrimaryHit`: 自分の技・`bypasssub`・`move.infiltrates` 以外は `getDamage` を人形の HP で頭打ちにして引き、0 で消す。
+  反動は `applyRecoilDamage(damage)`、吸収は `Math.ceil(damage * drain)`、`AfterSubDamage`、`HIT_SUBSTITUTE`（= 0）。
+- `data/mods/champions/scripts.ts` `spreadMoveHit`: 追加効果・自分への効果・対象 `all`/`allyTeam`/`allySide`/`foeSide` では
+  調べない。`HIT_SUBSTITUTE` の対象は以後 `null`: 技の効果・追加効果・`DamagingHit`（接触特性・ゴツゴツメット・のろわれボディ）・
+  `AfterHit`（はたきおとす等）が飛ぶ。`selfDrops` と追加効果の `self` は使う側に届く。`totalDamage` には 0（反動・かいがらのすず）、
+  技としては当たり（いのちのたま・とんぼがえり）。変化技は `getDamage` が `null` で何もしない。
+- 半減の実は `hitSub` で何もしない（`data/items.ts`）。いかくは人形の後ろを `-immune`（`data/abilities.ts`）。
+- オラクルで確かめた事実: みがわりの失敗（2 枚目・[weak]）は `moveLastTurnFailed` が立つ（`NOT_FAIL` を champions の
+  `singleEvent('TryHit')` が `[false]` にする）。人形に止められたどくどく・おにび・あくびは失敗にならない。
+
+### 2. 直し（`resolve.py`・`moves.rs`・`resolve.rs`・`reg.rs`・`modelled.rs`）
+
+- 小さな関数にまとめた（`resolve.py` の「Substitute (IKA-180)」節、`moves.rs` の同名節）: `_hits_substitute`（門）、
+  `_substitute_hp`（`extra.hp`、無ければ floor(maxhp/4)）、`_use_substitute`（失敗 2 つは move_failed、払いと人形、トラップを外す、
+  オボン等の判定）、`_behind_substitute`/`_doll_damage`（半減の実を外した乱数）、`_hit_substitute`（人形の HP、反動・切り上げの吸収、
+  がんせきアックス・ひけん・ちえなみの `onAfterSubDamage` の撒菱・ステロ、追加効果の `self`）、
+  `_apply_status_move_past_substitutes`（止められた対象を外し、止められた対象がある間は「何もしなかった」判定をしない）、
+  `_intimidate_meets_substitute`。既存行の変更は `_do_status_move`・`_hit_target`（多段は一発ごとに門を見る）・いかくの呼び出しだけ。
+- port: `F_BYPASSSUB` を足し、`status_move_handled` に substitute、`modelled.rs` は `port_coverage --rust-modelled` で再生成。
+- 注記: 人形に当たった `icespinner`・`steelroller`・`rapidspin`・`mortalspin`（と reg 外の 2 つ）の `onAfterSubDamage`、
+  人形が割れた後の多段がばけのかわ・アイスフェイスに当たる場合（Python のみ。port は両特性を断る）。
+- 範囲外（注記は既存の `status move: X` が出る）: しっぽきり・おかたづけ・きりばらい（reg にある）。フリーフォールは reg に無い。
+- 符号化 `volatile_substitute` は有無のまま（ENCODING_REVISION 不変）。記録の人形は全部 `extra.hp` を持たない（我々のエンジンが
+  書いた）ので学習データに HP は無く、人形の HP を足すなら改訂と再学習が要る。今後の自己対戦の局面は `extra.hp` を持つ。
+
+### 3. オラクル（`tests/test_substitute.py`、新規 55 件 = 27 局面 × Python/port ＋ 手作りの人形 1）
+
+使う（1/4 払う、2 枚目の失敗、3 枚目の対照、[weak] の失敗、まとわりつくを外す）、当たる（フレアドライブの反動と接触なし・対照、
+ドレインパンチの切り上げ・対照、ブレイキングスワイプは隣のドヒドイデだけ下げる・対照、インファイトの自分の低下、ニトロチャージの
+自分の上昇、まとわりつく無効、ヤチェのみが残る・対照、ねっぷう、つららばりが割って本体へ）、変化技（どくどく・対照、おにび、あくび）、
+貫通（ハイパーボイス、ちょうはつ、すりぬけのおにび）、いかく（人形・対照）。
+
+```
+                           Python のテスト 27   port のテスト 27（Python は新）
+  旧（master 713f85d）      18 落ち              18 落ち（旧 exe）
+  新                        0 落ち               0 落ち（新 exe）
+```
+
+旧 Python で通る 9 と旧 exe で通る 9 は対照 6 と貫通 3（旧は何も止めないので通る）。貫通 3 といかくは、門から bypasssub・すりぬけ・
+いかくの判定を抜いた Python で落ちる（`C:/tmp/ika180/run_nobypass.py`）。
+
+### 4. diff_node（`--substitute`、新規。各 20 ノード、Budget.matrix）
+
+場の全員にみがわりを教え、各側の先頭に人形（局面ごとに順に満タン・1/8 に削れたもの）。全セルを port と枝ごとに比べる。
+対照 `unsubbed` は IKA-180 前の規則（印だけ、使うのは無料で注記）。発火は各部分（使う・人形）だけを戻した対照でも数えた。
+
+```
+                     発火セル / セル   うち使う / 人形   新 exe で枝違い   旧 exe で枝違い
+  w12                8,278 / 9,470     2,568 / 7,783     0                 8,097（最悪 3.3e-1）
+  gen11L             5,051 / 6,054     1,947 / 4,621     0                 4,958（最悪 6.7e-1）
+```
+
+取り込み後に新 exe で両方を回し直して枝違い 0（下の 6）。
+
+### 5. 記録（`C:/tmp/ika180/records.py`、一時スクリプト、1 コア 857 秒）
+
+人形が場に立つ決定（w12 210、gen11L 95。記録のメニューが今も合法なのは 152・66）全部と、みがわりを覚えていて人形の無い決定
+（w12 2,259・gen11L 1,723）から 150 ずつを、記録のメニューのまま hp-share 1 手・`Budget.matrix()` で新旧（`unsubbed`）解いた:
+
+```
+                                  w12 人形あり   w12 覚えている   gen11L 人形あり   gen11L 覚えている
+  どこかのセルが動いた            134/152        120/150          58/66             117/150
+  最も重い手が変わった            74/152         9/150            18/66             9/150
+    （人形だけを戻すと / 使うだけ）  74 / 0       4 / 12           18 / 0            6 / 13
+  方策の TV > 0.2                 75/152         9/150            19/66             12/150
+  均衡値の差（平均・最大）        0.021・0.255   0.0001・0.008    0.005・0.124      0.0015・0.154
+```
+
+部分ごとの数は足し算にならない（片方だけ戻した行列は新旧どちらとも違いうる）。
+
+### 6. 検査と機械
+
+test_substitute（新規）・test_after_move_oracle・test_resolve・test_rust_node・test_port_coverage・test_port_gates・
+test_line_endings・test_no_machine_specific_paths・test_hazards_after_hit・test_multihit_counts・test_trap_immunities・
+test_disguise_afterhit・test_disguise_order・test_leech_seed・test_helping_hand_fails・test_confusion_immunity・test_encode・
+test_actions・test_final_position を取り込み後に `-n 0` で通した。`port_coverage --check`・`port_gate_audit --check`・ruff 通過。
+機械: cargo build --release 8 コア 5 回（各 18〜21 秒、取り込み後は変更なしで 0 秒）、diff_node 1 コア 6 回（各約 2.5〜3 分）、
+記録 1 コア 857 秒、テストとオラクルは 1 コアで各 1〜61 秒。worktree に data/priors・standings・reportworm と sim-bridge の dist を
+main から写した（コミットしない）。
+
+### 7. 別課題の候補
+
+- **いのちのたま・反動とマジックガード**: Python の反動（`_after_move`）といのちのたまは `magicguard` を見ていない（Showdown は
+  `onDamage` で効果ダメージを止める）。未測定。
+- **人形の HP を符号化に**: 満タンと割れかけの人形を価値関数が区別できない。みがわりは決定の 0.05% なので今は見送り。
+- **しっぽきり**: 人形を控えに渡す技。reg にあり、今は注記だけ（交代は起きる）。
+- **アイススピナー・アイアンローラー・こうそくスピン・キラースピン**: フィールド消しと撒菱外しが通常の当たりでも未実装か確かめる
+  （人形に当たったときは今回注記を出す）。
+
+## 9/24 — IKA-81: プール対プールの生成経路 —— 両席を 65 本から対で引き、選出は各局の始めにその場の葉で解いて対ごとに覚える（`selectionSource: "solved"`）。1 解 3.1 秒（CPU、うち 2.1 秒は 8,100 局面の組み立て）で、48 局の試走では時間の 68% が選出だった → 解はワーカー間でディスク共有にした
+
+ブランチ `ika-81-pool-pairs`。IKA-77 の 9/24「ユーザーの判断」2（選出はその場で考える）と IKA-128 の前提（控え隠蔽だけで始める）を入れた。
+
+### 1. 何を足したか
+
+* `src/pokeuraou/pool.py`: `data/pool/<id>.json`（`tools/fetch_pastes.py` の出力。IKA-138 の後で 65/65）を読み、各構築を
+  roster と同じ検査に通す（`teams.roster_from_data`、`load_roster` の本体を切り出した）。ファイルの sha256 を持つ
+* **対の引き方**: 重複ありの順序なし対 `n(n+1)/2` から一様に1つ（65 本で 2,145、うちミラー 65 = 3.03%）、続けて席を公平な硬貨で。
+  乱数は対にかかわらず2つ（ミラーでも硬貨を引く）ので、その後の流れが対に依存しない。数え上げで各構築の席0と席1の回数は厳密に等しい。
+  独立に2本引く（順序つき）とミラーは 1/65 = 1.54% になり、課題の 65/2,145 と合わない
+* `src/pokeuraou/poolplay.py`: `generate_pool`。各局: 対 → 席 → 選出 → `play_game`。乱数は `generate` と同じく queue の番号から `[seed, index]`
+* **その場の選出**（`SolvedSelections`）: その対の 90×90 を今の葉で `solve_selection`（SP は隠さない判断なので型は1つ = 普通の行列ゲーム）。
+  席0は行戦略、席1は列戦略から ε=0.25・T=0.5 で引く（book と同じ `BookEntry.draw`）。両席の控えの推定分布も同じ解から
+  （`BenchPrior.of(entry, 0/1)`、IKA-128 の「bench_prior は両側とも対鍵の選出から」）
+  * 行は常にプールの番号の小さい方。逆の席は同じ解の転置（行・列の戦略を入れ替え、値は 1−v）。行列ゲームでは厳密で、これでメモが
+    局を変えない（席ごとに別の LP を解くと退化した最適の別の頂点に落ちうる）
+  * **ミラーは行戦略を両席に使う。** 同じ6体・同じ SP の行列は反対称なので行戦略は列側にも最適。LP の列戦略は別の頂点になることがあり、
+    実際にスタブの葉でなった（下の対照 2）。両席に同じ戦略を与えると両席が交換可能になり、真のミラーは値だけでなく対称性で 50%
+  * メモ: ワーカー内の辞書に加え、`--selection-store`（既定は `--out` の隣の `selection-solved/`、generate_queue では全ワーカー共通）に
+    対ごとの JSON を一度だけ書き（一時ファイル＋rename）、他のワーカーは読む。ファイルは tag（プールの sha256 と葉のラベル）を持ち、
+    違う tag なら止まる。JSON の浮動小数は往復で厳密なので、読んだ解は解いた解とビット一致
+* 記録: `selectionSource: "solved"`、`ownSelectionPolicy` などは book と同じ欄。新しく `pool`（プール id・sha256・席順の構築 id と名前・
+  対の番号・ミラーか・`benchPrior: ["solved","solved"]`）。`foeArchetype` は "pool" / "mirror"。IKA-87 の `finalPosition` / `endReason` はそのまま入る
+* CLI: `tools/selfplay.py --pool regmc-matchupweb`（`--roster` などの自分側の旗とは併用不可）。**控えの旗が無ければ隠蔽**（IKA-128。
+  新しい経路なので「旗なし＝公開」だった古い記録コマンドは存在しない）。`--open-bench` は名指しの参考として残る。`--uniform-selection`
+  は一様の参考。`tools/generate_queue.py --pool …` も同じ（book を導かず、`--roster` を渡さず、推論サーバには `--regulation` でプールの規則を
+  渡す。`tools/inference_server.py --regulation` を足した）
+* `tools/agent_drift.py`: `poolplay` の `play_game` 呼び出しを M-B 生成の必須引数の組と比べ、欠ければ `--check` が落ちる（今は ok）
+* M-B の経路（`--roster`）は変えていない。`tools/selfplay.py` の葉の組み立てを `build_leaf` に切り出しただけ
+
+### 2. 回帰テスト `tests/test_poolplay.py`（19 本、M-B の名簿を3通りに書いたテスト用プール、選出の葉は反対称スタブ）
+
+```
+  対              65 → 2,145 対・ミラー 65 / 数え上げで席0と席1が各構築で等しい / 対の引きは常に乱数2つ / 引いたミラー率 ≈ 65/2,145
+  真のミラー       値 0.5（|誤差| < 1e-9）、両席の戦略と控えの推定分布が同一、記録の ownSelectionMixture == foeSelectionMixture
+  転置             逆の席は同じ解の転置で値 1−v、逆の席を直接解いた LP の値とも一致
+  seed            同じ seed・番号で実際に 2 局打って記録が一致（searchSeconds 以外）/ 入力と乱数の状態が一致、別 seed は不一致、
+                  番号を逆順に配っても各局は同じ
+  メモ             メモ有り（10 局で再利用あり）と無し（10 回解く）で同じ局 / ディスク共有: 2 本目のワーカーは 0 回解いて全部読み、
+                  メモ無しと同じ局 / 別の葉の store は止まる
+  IKA-128          旗なしで hide_bench=True、両席に BenchPrior / --open-bench で公開 / 自分側の旗は拒否
+```
+
+**陽性対照**（壊すと名指しのテストが落ちる、`C:/tmp/ika81/faults.py`）: 転置を外す・ミラーで LP の列戦略を残す・ミラーで硬貨を引かない・
+順序つき対にする・片席の推定分布を落とす・メモから向きを誤って返す —— 6 通りとも該当テストが落ちた。
+
+関係テスト（master 取り込み後）: test_poolplay・final_position・teams・selfplay・selection_book・selection・bench_default・
+match_bench_prior・profile_stages・fetch_pastes・inference・line_endings・no_machine_specific_paths で 202 passed / 0 skipped
+（worktree の data/ に本体の priors・standings を複写）。ruff・`port_coverage --check`・`port_gate_audit --check`・`agent_drift --check` 通過。
+
+### 3. 試走（M-C、gen9championsvgc2026regmc、value-gen11L を IKA-82 の load_model で M-C の語彙に伸ばして読んだもの）
+
+取り込み前の master では `load_model` が規則違いで拒否した（IKA-82 の残りが未着地）。取り込み後は読める（`vocab_grown_from`:
+species 358・item 149・move 515）。
+
+```
+  --games 2（1 コア・CPU）          2/2 終局、選出 2 解 3.18 s/解
+  generate_queue --workers 1 48 局  221.8 s（4.62 s/局）、48/48 終局（endReason 全部 wipeout）、隠蔽 48、benchPrior 両席 solved 48
+                                    選出 48 解 150.5 s = 3.14 s/解 → 時間の 68%。局だけなら 71 s = 1.48 s/局
+                                    異なる対 48（ミラー 0）、席0の勝ち 19/48、selectionValue 0.26〜0.73（平均 0.475）
+  store の再生                       同じ 12 局を store から読んで（解 0 回・読み 12）打ち直し、記録 12/12 一致
+```
+
+### 4. 選出を解く費用（`C:/tmp/ika81/solve_cost.py`、1 コア）
+
+```
+  8,100 局面の組み立て（position_from_sets）  2.13 s     ← ワーカーの CPU。GPU では減らない
+  符号化                                       0.51 s
+  1 解（組み立て＋符号化＋順伝播＋LP）         CPU 3.05 s / CUDA 2.81 s（5 対の平均）
+```
+
+GPU が買うのは 8% だけで、費用はワーカーの CPU。24 ワーカー × 24,000 局で数えると:
+
+```
+  ワーカー内メモだけ   1 ワーカー 1,000 局で異なる対 ≈ 2,145(1−e^(−1000/2145)) ≈ 800 → 計 ≈ 19,200 解 ≈ 16.7 CPU 時間
+  ディスク共有          2,145 解 ≈ 1.9 CPU 時間（競合で同じ対を二重に解くのは、同じ未解の対に 3 秒以内に2ワーカーが当たるときだけ）
+  局そのもの（参考）    24,000 × 1.48 s ≈ 9.9 CPU 時間（1 コア直の値。served 24 本の本番の比ではない）
+```
+
+→ **ワーカー間で共有する**（既定で有効）。共有しても 1 回目の run では選出が局の約 2 割の CPU になる。
+「その場で考える」の 9/24 の見積もり（1 解 12 秒、計 7.2 時間）より 1 解は 4 倍安いが、局も gen11L 当時より安い。
+
+### 5. 測っていないこと・別課題の候補
+
+* **8,100 局面の組み立ての重複**: 90×90 の各セルは同じ 12 体から4体ずつ選ぶだけなのに、毎回 `position_from_sets` で Pokemon を作り直している
+  （1 解の 2/3）。12 体を一度作って並べ替えるだけなら 1 解 ~1 秒になるはず
+* served（推論サーバ経由）・24 ワーカーでの本番の比。IKA-86 が GPU を専有していたので served の試走は回していない（CPU 直だけ）
+* ミラーは 48 局で 0 回（期待 1.45 回）。ミラーの 50% はテストの対称性で押さえたが、実局での確認は大きな生成で
+* 「場 対 場」と「1 チーム 対 場」の向き（IKA-81 本文の ⚠）は未測定のまま
+
+機械時間: pytest 1 コア（83 s・76 s・109 s・47 s・194 s ほか）、対照 62 s、cargo build --release 8 コア 22 s、試走 1 コア（11 s・12 s・224 s・21 s）、
+費用の測定 1 コア 35 s。すべて heavy.py（--agent IKA-81）。GPU は 35 s の費用測定で CUDA 側を 1 回使っただけ。
+
 ## 9/24 — IKA-191: だっしゅつボタン・レッドカード・ききかいひ・にげごしが交代を起こす —— オラクル 10 局面で Python・port とも Showdown と一致、diff_node の発火 3,967 セルで新 exe 0・旧 exe 3,967 違い。記録（M-B）には 0
 
 ワーカー、基点 master 713f85d、ブランチ `ika-191-eject-items`。一時ファイルは `C:/tmp/ika191/`。
@@ -13762,3 +13953,17 @@ port: master の exe（`rust/target/release/pokeuraou-damage.exe` の写し、Ru
 cargo release 4 回（8 コア 24・19・18 秒、1 回はコンパイルエラー 2 秒）、diff_node 8 回（1 コア 19〜120 秒）、関係テスト 2 回
 （1 コア 45・65 秒、1 回目は data/priors が無く落ちた）、オラクルの試し・新しいテスト単体（各数十秒、直接）、記録の rg 1 回（2 秒）。
 すべて heavy.py（--agent IKA-191）。
+
+### 8. IKA-180（みがわり）の取り込み（master 983ea47）
+
+* 同時手番の近似（側 0 → 側 1）はコーディネータの判断でこのまま、同時手番のノードは別課題
+* `tools/diff_node.py` は 8 か所で衝突した。master の版に IKA-191 の 8 つの差し込みを当て直し、`--substitute`/`unsubbed` と
+  `--eject`/`uneject` の両方（選択肢・対照・集計・失敗条件）を残した。TODO.md は master の末尾（IKA-81）の後にこの節
+* みがわり × だっしゅつボタン: Showdown では人形に当たった対象は `spreadMoveHit` で `null`（`HIT_SUBSTITUTE`）になり、
+  `afterMoveSecondaryEvent` に渡らず、人形へのダメージは `totalDamage` に入らない。両エンジンとも人形の分岐は
+  `move_hit` の前で `continue` するので、ボタン・カード・ききかいひは発動しない。`test_eject_items.py` に 3 局面
+  （持ち主がみがわりを張り、ウッドハンマーが人形を壊すだけ。Showdown のログに `-end … Substitute` があることも確かめる）:
+  事実・新 Python・新 exe とも通る。IKA-180 の前の木（700ef7d）では Python の 3 件が落ちる。`move_hit` を人形の分岐の前に
+  置く故障注入ではボタンとカードの 2 件が落ちる（ききかいひは HP が減らないので通る。跨ぎで見ているから）
+* 取り込み後: release ビルド、関係テスト 17 ファイル（test_substitute を含む）pass、diff_node w12 `--eject` 新 exe
+  発火 3,967・違い 0、`--substitute` 発火 7,912・違い 0、ruff・`port_coverage --check`・`port_gate_audit --check` ok

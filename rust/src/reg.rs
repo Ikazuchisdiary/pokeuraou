@@ -80,8 +80,10 @@ pub const F_PUNCH: u32 = 1 << 9;
 pub const F_SLICING: u32 = 1 << 10;
 pub const F_SOUND: u32 = 1 << 11;
 pub const F_DEFROST: u32 = 1 << 12;
+/// Past a Substitute (IKA-180): the sound moves and the rest of Showdown's `bypasssub`.
+pub const F_BYPASSSUB: u32 = 1 << 13;
 
-const FLAG_NAMES: [(&str, u32); 13] = [
+const FLAG_NAMES: [(&str, u32); 14] = [
     ("bite", F_BITE),
     ("bullet", F_BULLET),
     ("contact", F_CONTACT),
@@ -95,6 +97,7 @@ const FLAG_NAMES: [(&str, u32); 13] = [
     ("slicing", F_SLICING),
     ("sound", F_SOUND),
     ("defrost", F_DEFROST),
+    ("bypasssub", F_BYPASSSUB),
 ];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]

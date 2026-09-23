@@ -23,6 +23,11 @@ resolver does not draw -- and the port refuses it as it refuses Dragon Tail.
 
 Each case is played by Showdown first; the controls are the hits that do not cross half
 and the Sheer Force move with secondaries.
+
+A hit that a Substitute takes (IKA-180) sets none of them off: `spreadMoveHit` turns the
+target it met into `null` (`HIT_SUBSTITUTE`), `afterMoveSecondaryEvent` is given only the
+targets left, and the doll's damage is not `totalDamage` -- so no Eject Button, no Red
+Card and no Emergency Exit. Both engines reach `move_hit` only for a hit on the Pokemon.
 """
 
 from __future__ import annotations
@@ -76,6 +81,11 @@ EJECT = _mon("Rillaboom", "Overgrow", ["protect", "swordsdance"], BULKY, item="E
 RED = _mon("Rillaboom", "Overgrow", ["protect", "swordsdance"], BULKY, item="Red Card")
 GOLISOPOD = _mon("Golisopod", "Emergency Exit", ["protect", "swordsdance", "liquidation"], MID)
 TYRANITAR = _mon("Tyranitar", "Sand Stream", ["protect", "rockslide", "crunch"], SLOW)
+#: The same holders with a Substitute to put up first (IKA-180).
+DOLL_MOVES = ["protect", "swordsdance", "substitute"]
+EJECT_DOLL = _mon("Rillaboom", "Overgrow", DOLL_MOVES, BULKY, item="Eject Button")
+RED_DOLL = _mon("Rillaboom", "Overgrow", DOLL_MOVES, BULKY, item="Red Card")
+GOLISOPOD_DOLL = _mon("Golisopod", "Emergency Exit", ["protect", "swordsdance", "substitute"], MID)
 
 
 def _team_b(lead: TeamSet, partner: TeamSet | None = None) -> list[TeamSet]:
@@ -92,6 +102,8 @@ def _team_b(lead: TeamSet, partner: TeamSet | None = None) -> list[TeamSet]:
 WOOD_HAMMER = ["move 4 1, move 1", "move 2, move 1"]
 KNOCK_OFF = ["move 2, move 3 1", "move 2, move 1"]
 SAND_TURN = ["move 3, move 2", "move 2, move 1"]
+#: The holder puts up a Substitute while everyone else Protects.
+DOLL_UP = ["move 2, move 1", "move 3, move 1"]
 
 #: name -> (our team, their team, turns played first, the turn compared, what Showdown
 #: does: "eject" p2a owes a switch mid-turn, "drag" p1a is dragged out, "residual" p2a owes
@@ -129,6 +141,16 @@ CASES: dict[str, tuple] = {
     ),
     "control-sand-above-half": (
         [RILLABOOM, INCINEROAR, *BENCH], _team_b(GOLISOPOD, TYRANITAR), [KNOCK_OFF], SAND_TURN, None,
+    ),
+    # The Wood Hammer breaks the doll and nothing else (IKA-180 x IKA-191).
+    "doll-takes-the-hit-eject-button": (
+        [RILLABOOM, INCINEROAR, *BENCH], _team_b(EJECT_DOLL), [DOLL_UP], WOOD_HAMMER, None,
+    ),
+    "doll-takes-the-hit-red-card": (
+        [RILLABOOM, INCINEROAR, *BENCH], _team_b(RED_DOLL), [DOLL_UP], WOOD_HAMMER, None,
+    ),
+    "doll-takes-the-hit-emergency-exit": (
+        [RILLABOOM, INCINEROAR, *BENCH], _team_b(GOLISOPOD_DOLL), [DOLL_UP], WOOD_HAMMER, None,
     ),
 }
 
@@ -184,6 +206,11 @@ def test_showdown_switches_the_holder(oracle: Oracle, name: str) -> None:
     handle.close()
     what = CASES[name][4]
     dragged = any(line.startswith("|drag|p1a:") for line in log)
+    if name.startswith("doll-"):
+        # The case is only a case if the doll is what the Wood Hammer met.
+        assert any(
+            line.startswith("|-end|p2a:") and "Substitute" in line for line in log
+        ), log[-12:]
     if what == "drag":
         assert dragged and asked == ((), ()), (asked, log[-12:])
         assert _lead_item(after, 1) is None

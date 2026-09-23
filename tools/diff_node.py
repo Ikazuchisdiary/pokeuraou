@@ -189,6 +189,14 @@ Safeguard on the rest by position in turn -- no recorded team carries any of the
 Every cell is held branch by branch; the cells `unguarded` (the refusals only for the
 fatigue, the self-hit at the highest roll) moves are counted, and each part alone.
 
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --substitute
+
+`--substitute` (IKA-180) teaches Substitute to every Pokemon on the field and puts a doll in
+front of the first on each side -- a whole one (`floor(maxhp / 4)`) or a worn one (an
+eighth) by position in turn. Every cell is held branch by branch; the cells `unsubbed` (the
+doll a mark and Substitute free, as before IKA-180) moves are counted, and each part alone:
+the use (the HP, the refusals) and the doll (the hits, the status moves, Intimidate).
+
     uv run python tools/diff_node.py --games-dir data/ika73/w12 --eject
 
 `--eject` (IKA-191) hands out, by position in turn, Eject Button, Emergency Exit, Wimp Out
@@ -845,6 +853,71 @@ class unguarded:  # noqa: N801 - read as a phrase at the call site
         import pokeuraou.resolve as resolve_mod
 
         resolve_mod._confusion_refused, resolve_mod._confusion_damage = self.real
+
+
+def substitute_on_field(reg, pos: Position, index: int) -> int:  # noqa: ANN001
+    """For --substitute: Substitute in the last free move slot of every Pokemon on the field
+    (as `guard_confusion` picks it), and a doll in front of the first on each side -- a
+    whole one, or by position in turn a worn one at an eighth of the HP. Returns how many
+    dolls were put up."""
+    pp = reg.moves["substitute"].pp
+    dolls = 0
+    for side in pos.sides:
+        first = True
+        for mon in side.active_pokemon():
+            if mon is None or mon.fainted:
+                continue
+            if mon.moves and not any(s.id == "substitute" for s in mon.moves):
+                held = {v.move for v in mon.volatiles if v.move} | {mon.last_move}
+                free = [i for i, s in enumerate(mon.moves) if s.id not in held]
+                if free:
+                    mon.moves[free[-1]] = MoveSlot(id="substitute", pp=pp, maxpp=pp)
+            if first:
+                mon.volatiles = [v for v in mon.volatiles if v.id != "substitute"]
+                hp = mon.maxhp // 4 if index % 2 == 0 else max(1, mon.maxhp // 8)
+                mon.volatiles.append(Effect(id="substitute", extra={"hp": hp}))
+                dolls += 1
+                first = False
+    return dolls
+
+
+class unsubbed:  # noqa: N801 - read as a phrase at the call site
+    """Python with Substitute as before IKA-180: the control for --substitute. The doll is a
+    mark that nothing meets, and Substitute puts it up for free and says it is not
+    modelled. `part` takes out only the use or only the doll, so each is counted alone."""
+
+    def __init__(self, part: str = "both") -> None:
+        assert part in ("both", "use", "doll")
+        self.part = part
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = (
+            resolve_mod._use_substitute,
+            resolve_mod._hits_substitute,
+            resolve_mod._intimidate_meets_substitute,
+        )
+
+        def free(reg, turn, action) -> None:  # noqa: ANN001
+            del reg
+            turn.add_volatile(action.side, action.slot, "substitute")
+            turn.unmodelled.add("status move: substitute")
+
+        if self.part != "doll":
+            resolve_mod._use_substitute = free
+        if self.part != "use":
+            resolve_mod._hits_substitute = lambda turn, action, move, target: False
+            resolve_mod._intimidate_meets_substitute = lambda turn, target: False
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        (
+            resolve_mod._use_substitute,
+            resolve_mod._hits_substitute,
+            resolve_mod._intimidate_meets_substitute,
+        ) = self.real
 
 
 #: What --eject hands out, by position in turn (IKA-191): (kind, id).
@@ -1538,6 +1611,14 @@ def main() -> None:
         "where IKA-189's refusals or self-hit roll fired: the cells `unguarded` moves",
     )
     ap.add_argument(
+        "--substitute",
+        action="store_true",
+        help="teach Substitute to every Pokemon on the field, put a doll (whole, or worn to "
+        "an eighth by position in turn) in front of the first on each side, hold every cell "
+        "to the port branch by branch, and count where IKA-180's Substitute fired: the cells "
+        "`unsubbed` moves",
+    )
+    ap.add_argument(
         "--eject",
         action="store_true",
         help="hand Eject Button, Emergency Exit, Wimp Out or Red Card to every Pokemon on "
@@ -1724,6 +1805,9 @@ def main() -> None:
     if args.confused:
         dazed = sum(confuse(pos, index) for index, pos in enumerate(positions))
         print(f"a confusion put on {dazed} Pokemon on the field")
+    if args.substitute:
+        dolls = sum(substitute_on_field(reg, pos, index) for index, pos in enumerate(positions))
+        print(f"Substitute taught and {dolls} dolls put up on the field")
     if args.confusion_guard:
         guards = Counter(guard_confusion(reg, pos, index) for index, pos in enumerate(positions))
         print(f"Confuse Ray taught and a confusion guard put on: {dict(guards)}")
@@ -1820,6 +1904,10 @@ def main() -> None:
     eject_worst = 0.0
     guard_by_refusal = guard_by_roll = 0
     guard_worst = 0.0
+    # Beside a doll, every cell; and where IKA-180's Substitute moved the answer.
+    doll_cells = doll_wrong = doll_refused = doll_fired = doll_fired_wrong = 0
+    doll_by_use = doll_by_doll = 0
+    doll_worst = 0.0
     # Beside a frozen Pokemon, every cell; and where a thaw moved the answer.
     icy = icy_wrong = icy_refused = thawed = thawed_wrong = 0
     thawed_worst = 0.0
@@ -2262,6 +2350,42 @@ def main() -> None:
                         shown += 1
                         print(f"  cell {(i, j)} under a confusion guard: {wrong[0][:200]}")
 
+        if args.substitute:
+            node = rustnode.node_for(reg)
+            for i, a in enumerate(row):
+                for j, b in enumerate(col):
+                    doll_cells += 1
+                    here = resolve_turn(reg, pos, [a, b], budget=budget)
+                    with unsubbed():
+                        control = resolve_turn(reg, pos, [a, b], budget=budget)
+                    wrong = (
+                        ["no warm process"]
+                        if node is None
+                        else branch_differences(node, reg, pos, a, b, here, budget)
+                    )
+                    refused_here = wrong == ["the port refused the turn"]
+                    doll_refused += refused_here
+                    if refused_here:
+                        wrong = []
+                    doll_wrong += bool(wrong)
+                    if differ(outcome(here), outcome(control)):
+                        with unsubbed("use"):
+                            unused = resolve_turn(reg, pos, [a, b], budget=budget)
+                        with unsubbed("doll"):
+                            undolled = resolve_turn(reg, pos, [a, b], budget=budget)
+                        doll_by_use += differ(outcome(here), outcome(unused))
+                        doll_by_doll += differ(outcome(here), outcome(undolled))
+                        doll_fired += 1
+                        doll_fired_wrong += bool(wrong)
+                        for index in range(len(evaluators)):
+                            doll_worst = max(
+                                doll_worst,
+                                abs(float(got[index][i, j] - expected[index][i, j])),
+                            )
+                    if wrong and shown < 5:
+                        shown += 1
+                        print(f"  cell {(i, j)} beside a doll: {wrong[0][:200]}")
+
         if args.eject:
             node = rustnode.node_for(reg)
             handed = ejected_by.get(id(pos), "?")
@@ -2447,6 +2571,16 @@ def main() -> None:
         print(f"    {dazed_fired} of {dazed_cells} cells")
         print(f"    cells whose branches, weights, notes or positions differ  {dazed_fired_wrong}")
         print(f"    worst cell difference there  {dazed_worst:.3e}")
+    if args.substitute:
+        print("\n  beside a doll, every cell -- held branch by branch")
+        print(f"    {doll_cells} of {cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {doll_wrong}")
+        print(f"    cells the port refused, filled in Python and not held  {doll_refused}")
+        print("  where Substitute fired -- the cells `unsubbed` moves")
+        print(f"    {doll_fired} of {doll_cells} cells")
+        print(f"      the use alone moves  {doll_by_use}; the doll alone  {doll_by_doll}")
+        print(f"    cells whose branches, weights, notes or positions differ  {doll_fired_wrong}")
+        print(f"    worst cell difference there  {doll_worst:.3e}")
     if args.confusion_guard:
         print("\n  under a confusion guard, every cell -- held branch by branch")
         print(f"    {guard_cells} of {cells} cells")
@@ -2569,6 +2703,10 @@ def main() -> None:
         failed.append(f"{dazed_wrong} cells beside a confused Pokemon differ by branch")
     if args.confused and not dazed_fired:
         failed.append("IKA-177's confusion moved no cell, so agreeing here says nothing")
+    if doll_wrong:
+        failed.append(f"{doll_wrong} cells beside a doll differ by branch")
+    if args.substitute and not doll_fired:
+        failed.append("IKA-180's Substitute moved no cell, so agreeing here says nothing")
     if guard_wrong:
         failed.append(f"{guard_wrong} cells under a confusion guard differ by branch")
     if args.confusion_guard and not guard_fired:

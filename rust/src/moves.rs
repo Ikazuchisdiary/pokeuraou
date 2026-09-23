@@ -10,7 +10,9 @@ use crate::effects::{is_mold_breaker, resist_berry};
 use crate::id::Id;
 use crate::moveinfo::MoveContext;
 use crate::position::{Effect, Position, Types};
-use crate::reg::{Move, Reg, F_CONTACT, F_DEFROST, F_FAILENCORE, F_POWDER, F_PROTECT};
+use crate::reg::{
+    Move, Reg, F_BYPASSSUB, F_CONTACT, F_DEFROST, F_FAILENCORE, F_POWDER, F_PROTECT,
+};
 use crate::resolve::{
     change_forme, check_white_herb, grounded_ignoring, stratified_rolls, Budget, Outcome, Slot,
     Turn,
@@ -1379,6 +1381,8 @@ fn hit_target<'a>(
     if matches!(defender.ability.as_str(), "disguise" | "iceface") {
         return Err(format!("forme guard: {}", defender.ability));
     }
+    // Python's `_hit_target`: a doll in front takes each hit while it stands (IKA-180).
+    let subbed = hits_substitute(&turn, action, mv, target);
 
     let accuracy = accuracy_of(&turn, mv, &attacker, &defender);
     let crit_p = crit_probability(reg, &attacker, &defender, move_id.as_str());
@@ -1476,6 +1480,11 @@ fn hit_target<'a>(
             outcomes.push((acc_weight * crit_weight, state));
             continue;
         }
+        let doll_rolls = if subbed {
+            doll_damage(reg, &attacker, &defender, move_id.as_str(), &field, target, spread, crit, &move_ctx)
+        } else {
+            None
+        };
         for (roll, roll_weight) in &rolls {
             for (hits, hit_weight) in hit_counts.iter().copied() {
                 let mut state = turn.clone();
@@ -1495,17 +1504,24 @@ fn hit_target<'a>(
                     if gone {
                         break;
                     }
+                    let on_doll = subbed && hits_substitute(&state, action, mv, target);
                     let amount = if hit_index == 0 {
-                        result.rolls[*roll]
+                        match (&doll_rolls, on_doll) {
+                            (Some(rolls), true) => rolls[*roll],
+                            _ => result.rolls[*roll],
+                        }
                     } else {
                         let Some(live_attacker) =
                             state.battler_at(action.side, action.slot)?
                         else {
                             break;
                         };
-                        let Some(live_defender) = state.battler_at(target.0, target.1)? else {
+                        let Some(mut live_defender) = state.battler_at(target.0, target.1)? else {
                             break;
                         };
+                        if on_doll {
+                            live_defender = behind_substitute(live_defender);
+                        }
                         let mut again_ctx = move_ctx.clone();
                         again_ctx.hit_index = hit_index as i64 + 1;
                         let field = state.field();
@@ -1527,6 +1543,10 @@ fn hit_target<'a>(
                         }
                         again.rolls[*roll]
                     };
+                    if on_doll {
+                        hit_substitute(&mut state, action, mv, target, amount, &budget)?;
+                        continue;
+                    }
                     let dealt = state.deal_damage(target.0, target.1, amount, true)?;
                     reached = true;
                     state.move_hit[target.0][target.1] = true;
@@ -2330,6 +2350,196 @@ fn thaw_on_hit(turn: &mut Turn, action: &QueuedAction, mv: &Move, target: Slot) 
     }
 }
 
+// ---------------------------------------------------------------------------
+// Substitute (IKA-180): Python's section of the same name, which quotes Showdown.
+// ---------------------------------------------------------------------------
+
+const SUBSTITUTE: &str = "substitute";
+
+/// Python's `AFTER_SUB_DAMAGE_UNMODELLED`.
+fn after_sub_damage_unmodelled(move_id: &str) -> bool {
+    matches!(
+        move_id,
+        "icespinner" | "steelroller" | "rapidspin" | "mortalspin" | "coreenforcer" | "flameburst"
+    )
+}
+
+/// Python's `_hits_substitute`: the gate of `onTryPrimaryHit` and the one `spreadMoveHit`
+/// puts around it.
+fn hits_substitute(turn: &Turn, action: &QueuedAction, mv: &Move, target: Slot) -> bool {
+    if target == (action.side, action.slot)
+        || matches!(mv.target.as_str(), "all" | "allyTeam" | "allySide" | "foeSide")
+    {
+        return false;
+    }
+    if mv.has_flag(F_BYPASSSUB) {
+        return false;
+    }
+    if turn.mon_at(action.side, action.slot).is_some_and(|m| m.ability == "infiltrator") {
+        return false;
+    }
+    matches!(turn.mon_at(target.0, target.1), Some(m) if !m.fainted && m.has_volatile(SUBSTITUTE))
+}
+
+/// Python's `_substitute_hp`: `extra.hp`, or the `floor(maxhp / 4)` a doll starts with.
+fn substitute_hp(mon: &crate::position::Pokemon) -> i64 {
+    match mon.volatile(SUBSTITUTE) {
+        None => 0,
+        Some(doll) => match doll.extra.get("hp") {
+            Some(Value::Number(n)) => n.as_i64().unwrap_or_else(|| n.as_f64().unwrap_or(0.0) as i64),
+            _ => mon.maxhp / 4,
+        },
+    }
+}
+
+/// Python's `_intimidate_meets_substitute`.
+pub(crate) fn intimidate_meets_substitute(turn: &Turn, target: Slot) -> bool {
+    turn.mon_at(target.0, target.1).is_some_and(|m| m.has_volatile(SUBSTITUTE))
+}
+
+/// Python's `_use_substitute`: the two refusals (a failure for Stomping Tantrum), then the
+/// doll at `floor(maxhp / 4)` and the same HP paid by `directDamage`.
+fn use_substitute(turn: &mut Turn, action: &QueuedAction) {
+    let me = (action.side, action.slot);
+    let Some(mon) = turn.mon_at_mut(me.0, me.1) else { return };
+    if mon.fainted {
+        return;
+    }
+    if mon.has_volatile(SUBSTITUTE) || mon.hp * 4 <= mon.maxhp || mon.maxhp == 1 {
+        turn.move_failed[me.0][me.1] = true;
+        return;
+    }
+    let cost = (mon.maxhp / 4).max(1);
+    mon.volatiles.retain(|v| v.id.as_str() != "partiallytrapped");
+    let mut doll = Effect::new(Id::new(SUBSTITUTE));
+    set_extra(&mut doll, "hp", Some(json!(cost)));
+    mon.volatiles.push(doll);
+    mon.hp -= cost;
+    turn.check_berry(me.0, me.1);
+}
+
+/// Python's `_behind_substitute`: a resist berry halves nothing the doll takes.
+fn behind_substitute(defender: Battler) -> Battler {
+    match defender.item {
+        Some(item) if resist_berry(item.as_str()).is_some() => Battler { item: None, ..defender },
+        _ => defender,
+    }
+}
+
+/// Python's `_doll_damage`: the first hit's rolls against the doll, when a resist berry
+/// makes them differ from the target's own.
+#[allow(clippy::too_many_arguments)]
+fn doll_damage(
+    reg: &Reg,
+    attacker: &Battler,
+    defender: &Battler,
+    move_id: &str,
+    field: &crate::battler::FieldState,
+    target: Slot,
+    spread: bool,
+    crit: bool,
+    move_ctx: &MoveContext,
+) -> Option<[i64; crate::battler::N_ROLLS]> {
+    let behind = behind_substitute(*defender);
+    if behind.item == defender.item {
+        return None;
+    }
+    let result = calculate(
+        reg, attacker, &behind, move_id, field, target.0, spread, crit, Some(move_ctx), None, false,
+    );
+    Some(result.rolls)
+}
+
+/// Python's `_hit_substitute`: one hit the doll takes -- its HP, the recoil and the
+/// (rounded-up) drain from what it took, Stone Axe's and Ceaseless Edge's
+/// `onAfterSubDamage`, a secondary's `self`, and nothing that reaches the target.
+fn hit_substitute(
+    turn: &mut Turn,
+    action: &QueuedAction,
+    mv: &Move,
+    target: Slot,
+    amount: i64,
+    budget: &Budget,
+) -> Result<(), String> {
+    let Some(mon) = turn.mon_at_mut(target.0, target.1) else { return Ok(()) };
+    let held = substitute_hp(mon);
+    let dealt = amount.max(0).min(held);
+    let left = held - dealt;
+    if left <= 0 {
+        mon.volatiles.retain(|v| v.id.as_str() != SUBSTITUTE);
+    } else if let Some(doll) = mon.volatile_mut(SUBSTITUTE) {
+        set_extra(doll, "hp", Some(json!(left)));
+    }
+    turn.move_connected = true;
+
+    let me = (action.side, action.slot);
+    let rockhead = matches!(turn.mon_at(me.0, me.1), Some(m) if m.ability == "rockhead");
+    if let Some(recoil) = mv.recoil.as_ref() {
+        if dealt > 0 && !rockhead && turn.mon_at(me.0, me.1).is_some() {
+            let amount = round_fraction(dealt, recoil);
+            turn.deal_damage(me.0, me.1, amount, false)?;
+        }
+    }
+    if let Some(drain) = mv.drain.as_ref().and_then(Value::as_array) {
+        if dealt > 0 && drain.len() >= 2 {
+            let numerator = drain[0].as_i64().unwrap_or(1);
+            let denominator = drain[1].as_i64().unwrap_or(1);
+            turn.heal(me.0, me.1, (dealt * numerator + denominator - 1) / denominator);
+        }
+    }
+
+    if matches!(mv.id.as_str(), "stoneaxe" | "ceaselessedge") {
+        lay_hazard_after_hit(turn, action, mv, true);
+    } else if after_sub_damage_unmodelled(mv.id.as_str()) {
+        turn.report(format!("substitute: {} onAfterSubDamage", mv.id));
+    }
+
+    if matches!(turn.mon_at(me.0, me.1), Some(m) if m.ability == "sheerforce") {
+        return Ok(());
+    }
+    for secondary in &mv.secondaries {
+        let Some(own) = secondary.get("self") else { continue };
+        if own.as_object().is_none_or(|o| o.is_empty()) {
+            continue;
+        }
+        let chance =
+            secondary.get("chance").and_then(Value::as_f64).unwrap_or(100.0) / 100.0;
+        let kept = json!({ "self": own });
+        if chance >= 1.0 {
+            apply_secondary(turn, action, &kept, target)?;
+        } else if budget.enumerate_secondary {
+            turn.pending_secondaries.push((chance, kept, target));
+        } else if !budget.pinned_policy {
+            turn.report(format!(
+                "secondary {}%: {} (not branched)",
+                (chance * 100.0) as i64,
+                mv.id
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Python's `_apply_status_move_past_substitutes`: a status move on the targets no doll
+/// stopped, and no "did nothing" judgement while any target was a doll's.
+fn apply_status_move_past_substitutes(
+    reg: &Reg,
+    turn: &mut Turn,
+    action: &QueuedAction,
+    mv: &Move,
+    reachable: &[Slot],
+    subbed: &[Slot],
+) -> Result<(), String> {
+    if subbed.is_empty() {
+        return apply_status_move_and_judge(reg, turn, action, mv, reachable);
+    }
+    let applied: Vec<Slot> = reachable.iter().copied().filter(|t| !subbed.contains(t)).collect();
+    if applied.is_empty() {
+        return Ok(());
+    }
+    apply_status_move(reg, turn, action, mv, &applied)
+}
+
 fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), String> {
     let me = (action.side, action.slot);
     let total = turn.move_damage_total;
@@ -2462,6 +2672,9 @@ fn do_status_move<'a>(
         }
         reachable.push(*target);
     }
+    // Rolled for like the rest, then met by the doll (IKA-180).
+    let subbed: Vec<Slot> =
+        reachable.iter().copied().filter(|t| hits_substitute(&turn, action, mv, *t)).collect();
 
     // Python's `_do_status_move`: a move every target of which Protected is `null`, not a
     // failure; the terrain and an immunity are `false` (IKA-171).
@@ -2496,17 +2709,22 @@ fn do_status_move<'a>(
         return Ok(vec![(1.0, turn)]);
     }
 
+    if mv.id == "substitute" {
+        use_substitute(&mut turn, action);
+        return Ok(vec![(1.0, turn)]);
+    }
+
     if !budget.enumerate_accuracy || accuracy >= 1.0 || accuracy <= 0.0 {
         if accuracy <= 0.0 {
             turn.move_failed[action.side][action.slot] = true;
             return Ok(vec![(1.0, turn)]);
         }
-        apply_status_move_and_judge(turn.reg, &mut turn, action, mv, &reachable)?;
+        apply_status_move_past_substitutes(turn.reg, &mut turn, action, mv, &reachable, &subbed)?;
         return Ok(vec![(1.0, turn)]);
     }
 
     let mut hit_state = turn.clone();
-    apply_status_move_and_judge(reg, &mut hit_state, action, mv, &reachable)?;
+    apply_status_move_past_substitutes(reg, &mut hit_state, action, mv, &reachable, &subbed)?;
     turn.move_failed[action.side][action.slot] = true;
     Ok(vec![(accuracy, hit_state), (1.0 - accuracy, turn)])
 }
