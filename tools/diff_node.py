@@ -50,6 +50,10 @@ its user's type (IKA-162); its control is the turn with `TYPE_SPENDING_MOVES` em
 The control is the hit count as it was before IKA-160 -- 1/3, 1/3, 1/6, 1/6 and Skill Link
 not read -- so the cells it moves are the ones where the count's distribution mattered.
 
+`--using perishsong` holds the port to Perish Song (IKA-172), which it listed as fully
+modelled without ever giving anyone the counter. The control is the turn with
+`_perish_song` taken out, so the cells it moves are the ones where somebody was given one.
+
 Holding the port to a terrain no recorded game has (IKA-156):
 
     uv run python tools/diff_node.py --games-dir data/ika73/w12 --terrain psychicterrain
@@ -320,6 +324,25 @@ class unspent:  # noqa: N801 - read as a phrase at the call site
         resolve_mod.TYPE_SPENDING_MOVES = self.real
 
 
+class unsung:  # noqa: N801 - read as a phrase at the call site
+    """Python with `_perish_song` taken out: the control for Perish Song (IKA-172).
+
+    The move is still used -- its PP spent, its `lastMove` written -- and gives nobody a
+    counter, which is what the port did before it learned the move.
+    """
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = resolve_mod._perish_song
+        resolve_mod._perish_song = lambda *_args: None
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        resolve_mod._perish_song = self.real
+
+
 class unchanged:  # noqa: N801 - read as a phrase at the call site
     """The control for `--using`: each kind of move named has its effect taken out."""
 
@@ -331,6 +354,8 @@ class unchanged:  # noqa: N801 - read as a phrase at the call site
             self.parts.append(old_hit_counts())
         if any(m in TYPE_SPENDING_MOVES for m in moves):
             self.parts.append(unspent())
+        if "perishsong" in moves:
+            self.parts.append(unsung())
 
     def __enter__(self) -> None:
         for part in self.parts:
@@ -940,10 +965,11 @@ def main() -> None:
             move.raw.get("breaksProtect")
             or isinstance(move.raw.get("multihit"), list)
             or move_id in TYPE_SPENDING_MOVES
+            or move_id == "perishsong"
         ):
             ap.error(
                 f"--using takes breaksProtect, ranged multi-hit or type-spending moves "
-                f"({sorted(TYPE_SPENDING_MOVES)}); {move_id} is none of them"
+                f"({sorted(TYPE_SPENDING_MOVES)}), or perishsong; {move_id} is none of them"
             )
 
     if args.value:
