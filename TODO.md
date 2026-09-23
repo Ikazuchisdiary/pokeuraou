@@ -11993,3 +11993,68 @@ heavy.py を通さずに 1 コアで走らせた。
 - **port_gate_audit の盲点**: 「id が port のどこかに出てくる」ことを「port が扱う」と数えるので、同じ技の別の道（ここでは
   付与）が抜けていても通る。完全に扱う変化技については、`apply_status_move` か宣言的な欄のどちらかに届くかで見るべき。
 - **ノードの注記**: gen11L の記録局面 1 つで Python だけが `residual speed tie` を出す（旧 exe でも同じ）。
+
+## 9/23 — IKA-175: 子の局面では Showdown の trapped の旗を落とす（方針 (a)、Python と port）
+
+ワーカー、基点 master 50ab618 → 363b973（IKA-172）を取り込み、ブランチ `ika-175-trapped-flag-children`。
+
+* **何が起きていたか。** `Pokemon.copy` が `trapped` を写すので、オラクルの局面から始めた探索（検討ツール・オラクル局面）では
+  拘束の主（メガゲンガーのかげふみ）が倒れた子でも `_is_trapped` の最初の判定が真のままで、交代が出なかった。
+  生成は旗が常に偽なので効かない。
+* **どこで落とすか。** Showdown の `endTurn`（`battle.ts:1726`）が `pokemon.trapped = pokemon.maybeTrapped = false` のあと
+  `TrapPokemon` を回し直す。控えは `clearVolatile`（`pokemon.ts:432`）で落ちている。それに合わせて:
+  - Python: `_run_queue` で `_residuals` の後、`turn += 1` の前に `_clear_trapped`（全員、控えも）。
+    `resolve_replacements` の終わりでも落とす（ひんし交代は endTurn の前なので、その後が次のターンの頭）。
+  - port: `run_queue` の同じ所。旗の立った Pokemon だけ `Rc::make_mut`（共有の控えは複写しない）。port に交代解決は無い。
+  - 中断したターン（とんぼがえり・だっしゅつボタン等）は Showdown のターン途中と同じで旗を残し、`resume_turn` がそのターンを
+    終えたときに落ちる（どちらのエンジンも `run_queue` を通る）。途中の旗は選択肢の生成に読まれない（交代の要求は拘束を見ない）。
+  - `maybe_trapped` に当たる旗は位置に無い。根（オラクルの局面）の旗は Showdown の値のまま `_is_trapped` の最初に効く。
+* **ENCODING_REVISION は上げない（2 のまま）。** 入力 1 の意味（Showdown の判定で拘束）は変わらず、変わるのは子の局面で 1 が
+  立たなくなることだけ。生成の局面（学習データ全部）はずっと 0。`encode.py` の該当行にコメント。
+
+### 検査（`tests/test_trapped_flag_children.py`、8 件）
+
+```
+  根の旗が根を決める（陽性: 旗を消すと交代 {3,4} が出る）        新 pass / 旧 pass（根は変えていない）
+  子は旗を継がない（控えに立てた旗も落ちる）                      新 pass / 旧 FAIL（交代 set() ≠ {3,4}）
+  対照: ねをはるが残る子は拘束のまま、隣は自由                    新 pass / 旧は旗の検査だけで FAIL（拘束は同じ）
+  ひんし交代の後も落ちる                                          新 pass / 旧 FAIL（set() ≠ {3,4}）
+  オラクル: かげふみのメガゲンガーを倒した子で両方交代できる      新 pass / 旧 FAIL
+  オラクル対照: ゲンガーが残る子は局面から両方拘束                新 pass / 旧は旗の検査だけで FAIL
+  port: 子の旗が Python と同じ偽（倒す・まもる の 2 通り）        新 exe pass / 旧 exe（main の release）FAIL
+```
+
+旧 Python は `_clear_trapped` を何もしない関数に差し替えて再現（変更はこの 2 か所だけ）。関係テスト 11 ファイル 255 pass・1 xfail
+（既存の Outrage）、ruff ok、`port_coverage --check`・`port_gate_audit --check` ok。
+
+### Python と port の一致（w12 の記録局面 40 に、場の全員へ旗を書き込み、8×8 に narrow、Budget.matrix）
+
+```
+                       新 Python と違うセル     旧 Python と違うセル
+  新 exe（取り込み後）   0 / 2,296                2,224 / 2,296
+  旧 exe                 2,224                    18（旗なしでも違う = IKA-172 のほろびのうた、取り込み前の port）
+  旗の落としが効いた（新旧 Python が違う）セル 2,224。残り 72 は中断した枝だけのセル（旗を残す）
+```
+
+`tools/diff_node.py`（無改造、`recorded_positions` に旗を書き込む包み、`--value value-gen11L --nodes 20`）:
+新 exe で旗あり 9,008 セル・旗なし 9,518 セルとも OK（最大差 5.96e-8 = float32 の和の順、均衡値 ≤ 1e-15、拒否 0）。
+陽性: 旧 exe は旗ありで FAIL（最大差 3.3e-2、均衡値 1.4e-2 動く、20 ノードすべて）。
+
+`tools/diff_encode.py`: 旗を書いた根 150・同じ根の旗なし 150・その子 539 の 839 局面、新旧 exe とも全 8 配列一致
+（旗の立った Pokemon 561）。陽性: Rust 側だけ旗を消した入力では mon 配列の 561 要素が違う。
+
+### 影響
+
+* **生成には効かない。** 記録の局面で旗が立つ決定は 0: w12 43,999 局の `"trapped": true` 0 バイト（`false` 4,737,600）、
+  gen11L 12,000 局 0（`false` 1,283,960）、読んだ決定 11,952・3,199 に旗 0。陽性: 同じ書式で旗を立てた局面は数えられる。
+* **value-gen11L（w12 の 4,000 局面、各局面で乱択の 1 セルを解いた子の値、IKA-82 の null 対照の形）**:
+  ```
+    null   旗なしの根: 子の値が新旧でビット一致                       4,000 / 4,000
+    陽性   旗を書いた根: 新旧で違う 3,751（最大 |値の差| 0.039）、同じ 249
+           旗を書いた根の新の子 = 旗なしの根の新の子（ビット一致）   3,709 / 4,000
+  ```
+  残りの 291 と「同じ 249」は中断した子（582 回の解決で出た）が旗を残すため・倒れた者の旗が値に効かないため。
+
+機械（heavy.py、--agent IKA-175）: release ビルド 2 回（8 コア 23 秒・20 秒、1 回目は IKA-161 のロック待ち約 14 分）、記録の数え 11 秒、
+枝ごと照合 3 回（32〜49 秒）、diff_node --value 5 回（39〜50 秒）、value の null 対照 43 秒、テスト 26・45 秒（1 コア）。
+ほかに 30 秒を超えるテスト 1 回（58 秒、1 コア）を heavy.py を通さずに走らせた。

@@ -1657,6 +1657,17 @@ fn run_queue<'a>(
         let started = phase_start();
         residuals(reg, &mut item.turn)?;
         phase_end(3, started);
+        // `endTurn` clears Showdown's `trapped` flag (a benched Pokemon lost it in
+        // `clearVolatile`), so a child never inherits the root's verdict; the trap is
+        // read off the position from here on, as `resolve._clear_trapped` (IKA-175).
+        // Only a flagged one is written, so a shared bench Pokemon is not copied.
+        for side in item.turn.pos.sides.iter_mut() {
+            for mon in side.pokemon.iter_mut() {
+                if mon.trapped {
+                    std::rc::Rc::make_mut(mon).trapped = false;
+                }
+            }
+        }
         item.turn.pos.turn += 1;
         unmodelled.extend(item.turn.unmodelled.iter().cloned());
         branches.push(Branch { probability: item.weight, position: item.turn.pos });

@@ -1493,6 +1493,7 @@ def _run_queue(reg: Regulation, start: list[_Live], budget: Budget) -> TurnResul
     unmodelled: set[str] = set()
     for item in finished:
         _residuals(reg, item.turn)
+        _clear_trapped(item.turn.pos)
         item.turn.pos.turn += 1
         out_branches.append(
             Branch(
@@ -4010,12 +4011,32 @@ def resolve_replacements(
         _on_switch_in(reg, state, side_index, slot)
 
     settle_outcome(state.pos, state.wipe_order)
+    _clear_trapped(state.pos)
 
     return ReplacementResult(
         position=state.pos,
         events=list(state.events),
         unmodelled=tuple(sorted(unmodelled | state.unmodelled)),
     )
+
+
+def _clear_trapped(pos: Position) -> None:
+    """Drops Showdown's ``trapped`` flag from every Pokemon, as its ``endTurn`` does (IKA-175).
+
+    ``endTurn`` sets ``pokemon.trapped = pokemon.maybeTrapped = false`` for each active
+    Pokemon and then reruns ``TrapPokemon``; a benched one lost it in ``clearVolatile`` on
+    the way out. The flag is only ever Showdown's verdict on the position it was computed
+    for, so a position this resolver builds -- a finished turn, or the start of the next
+    turn after the faint replacements -- must not inherit the root's: a trapper that
+    fainted or left this turn would otherwise keep its target trapped in every child.
+    `actions._is_trapped` reads the trap off the position for these (IKA-163, IKA-169),
+    which is what generation has always done, since a generated position never has the
+    flag. A paused turn keeps it, as Showdown's mid-turn state does, and it is dropped
+    when `resume_turn` finishes that turn.
+    """
+    for side in pos.sides:
+        for mon in side.pokemon:
+            mon.trapped = False
 
 
 def settle_outcome(pos: Position, wipe_order: Sequence[int] = ()) -> None:
