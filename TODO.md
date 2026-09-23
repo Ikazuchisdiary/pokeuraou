@@ -10042,6 +10042,423 @@ Rust が同じ順序を読み、足していない順序を拒否する）。関
 
 機械: cargo release ビルド 2 回（8 コア 25 秒・18 秒）、null・陽性・模擬の採点 各 3 秒（1 コア）、関係テスト 29 秒、全テスト 202 秒（1 コア）。すべて heavy.py に記録（--agent IKA-82）。
 
+## 9/23 — IKA-155: ばけのかわを命中・無効の後に —— オラクルでミミッキュへの無効技 2 つ・外れた技・まもるミミッキュへのフェイントの 4 ケースとも Python がずれていた。w12・gen11L にミミッキュは 0 局
+
+### 1. 何がずれていたか
+
+Showdown のばけのかわは `onDamage`（`data/abilities.ts` の `disguise`）で、`trySpreadMoveHit` の手順 7（ヒットのループ）の中で効く。
+手順 2（タイプ無効）・手順 4（命中）が先に走り、各手順の後に通った対象だけが残る（`sim/battle-actions.ts:553-578`・`:605`）。
+Python は `_hit_target` の頭（命中の分岐と `calculate` より前）で `_bust_disguise` を呼んでいて、無効でも外れでも剥がして 1/8 を削っていた。
+しかも `damage.py` の `calculate` は、ばけのかわの判定を無効の判定より前に置いていて、無事なミミッキュには無効技でも `immune=False` を返していた。
+
+### 2. オラクル（`tests/test_disguise_order.py`、方針は急所なし・追加効果なし・最大乱数）
+
+```
+  ケース                   Showdown のミミッキュ            旧 Python                    新 Python
+  immune-normal  ねこだまし  mimikyu 150/150（-immune）       mimikyubusted 132/150         mimikyu 150/150
+  immune-dragon  ドラゴンクロー mimikyu 150/150（-immune）    mimikyubusted 132/150         mimikyu 150/150
+  missed         いわなだれ外れ mimikyu 150/150（-miss）      mimikyubusted 132/150（外れの枝が無い） 外れ 0.1: 150/150、当たり 0.9: 132/150
+  feint-immune   フェイント→まもる、いわなだれ後 150/150（まもるが残る） 剥がれ・まもる破り・いわなだれが通る  150/150
+  control-rock-slide 当たる   mimikyubusted 132/150           132/150                       132/150
+  control-knock-off  当たる   mimikyubusted 132/150           132/150                       132/150
+```
+
+テストは両陣営 8 体の種族と HP を Showdown と突き合わせる。control の 2 つは陽性対照（剥がしを全部やめた実装はここで落ちる）。
+アイスフェイスは試せない: M-B・M-C のどちらの regulation にも `eiscue`（無事な形）が無く、`eiscuenoice` だけがある。
+
+### 3. 直し
+
+* `src/pokeuraou/damage.py`: 変化技・無効の早期 return を、ばけのかわ・アイスフェイスの吸収より前へ。無事なミミッキュへの無効技は `immune=True`
+* `src/pokeuraou/resolve.py`: `_hit_target` の頭の `_bust_disguise` を外し、命中の枝で `calculate` が無効でないときだけ、
+  その枝の状態で（IKA-153 のまもる破り → 剥がし の順に）行う。ばけのかわは急所を消す（`onCriticalHit` が false）ので、守られた当たりは命中の枝ごとに 1 状態。
+  判定だけの `_forme_guard` と、無効の枝の状態を作る `_immune_state` を切り出した。IKA-153 で残した「この道は命中も無効も見ないので吸ったときに破る」も、これで命中・無効の後になった
+* `rust/src/damage.rs`: `damage.py` と同じ並べ替え。port は `check_position_supported` と `hit_target` でこの 2 特性を拒否したまま
+  （`test_disguise_and_ice_face_are_refused_by_name` が pass）なので、答えが動く道は無い。damage 層を Python と同じにしておくためだけ
+
+### 4. 直す前に落ちるテスト
+
+```
+  tests/test_disguise_order.py               旧 resolve + 旧 damage   新 resolve + 旧 damage   新 + 新
+  [immune-normal]                            FAIL                     FAIL                     pass
+  [immune-dragon]                            FAIL                     FAIL                     pass
+  [missed]                                   FAIL                     pass                     pass
+  [feint-immune]                             FAIL                     FAIL                     pass
+  [control-rock-slide]                       pass                     pass                     pass
+  [control-knock-off]                        pass                     pass                     pass
+```
+
+中の列が示すように、`resolve.py` だけ直しても無効の 3 ケースは `damage.py` の順序で落ちる。両方が要る。
+
+### 5. 記録で該当する決定
+
+```
+                              ファイル   ミミッキュを含むファイル   コオリッポ   対照: ガオガエンを含むファイル
+  data/ika73/w12              24         0                          0            24
+  data/selfplay-gen11L        24         0                          0            24
+```
+
+どちらの記録にもミミッキュ（とコオリッポ）が 1 局も出ない（`grep -il` で全 jsonl を見た）。だから表のセルも実際に指した手も 0。
+M-C（両方の席をプールから取る）でプールにミミッキュが入れば効く。
+
+### 6. 検査と機械
+
+`tools/port_coverage.py --check`・`tools/port_gate_audit.py --check`: ok。`ruff check` ok（`ruff format` はこのリポジトリの既存ファイルに
+もともと適用されていないので、触った行だけ周りに合わせた）。テスト: test_disguise_order・test_feint_order・test_rust_node・test_resolve・
+test_damage_diff・test_line_endings・test_no_machine_specific_paths・test_port_gates・test_port_coverage を `-n 0` で 151 pass（61 秒）。
+機械: cargo release ビルド 1 回（8 コア 24 秒）・テスト 61 秒（1 コア）は heavy.py に記録（--agent IKA-155）。
+ほかにオラクル 1 本（数秒〜十数秒、1 コア）を数回と、記録の grep（1 コア、数十秒）を直接走らせた。
+
+### 7. 残り（別課題の候補、オラクルでは未確認）
+
+* ばけのかわが吸った当たりで、Python は追加効果・`_after_hit`（接触・技の後の効果）を全部飛ばす。Showdown はダメージ 0 の当たりとして
+  その後の手順を続けるはず（`onDamage` が 0 を返すだけ）
+* 連続技: Showdown は 1 発目だけ吸って 2 発目からは化けの皮の剥がれた相手に当たるはず。Python は技全体を吸う
+
+## 9/23 — IKA-156: サイコフィールドの先制技封じを、技全体から対象ごとへ —— オラクルで 6 ケースずれていた（浮いている相手への単体の先制技・片方だけ地面の範囲技・味方への先制技・かたやぶり対ふゆう・止まる時の PP）。Python と port を同時に直した。w12・gen11L にサイコフィールドの局面は 0
+
+### 1. Showdown の規則
+
+`vendor/pokemon-showdown/data/moves.ts:14116`（psychicterrain の condition の `onTryHit`、優先度 4）:
+
+```
+  if (effect && (effect.priority <= 0.1 || effect.target === 'self')) return;
+  if (target.isSemiInvulnerable() || target.isAlly(source)) return;
+  if (!target.isGrounded()) return;          // 浮いている対象には当たる
+  return null;                               // 地面にいる相手の対象だけ外れる
+```
+
+`trySpreadMoveHit` の手順 1（`hitStepTryHitEvent`）で対象ごと。技は始まった後なので PP は減り、Fake Out の
+`activeMoveActions` も進む。まもる（`onTryHit` 優先度 3）より先なので、止まった対象ではまもる・トーチカ等は働かない。
+`move.spreadHit` は手順の前（battle-actions.ts:551）に全対象で決まる。`isGrounded` はふゆうを
+`!this.battle.suppressingAbility(this)` で読むので、かたやぶりの技にはふゆうが無い。
+
+旧 Python・旧 port は `_can_act` / `can_act` で「先制技で、生きている相手に 1 体でも地面にいるものが居れば、技そのものを
+始めずに止める」だった。PP を減らさず、対象を見ず、味方への技も相手の足元で止め、かたやぶりを見ない。
+
+### 2. オラクル（`tests/test_psychic_terrain_per_target.py`）
+
+イエッサン（サイコメイカー）先発でフィールドを張り、Showdown の 1 ターンの HP・ランク・PP に Python を合わせる。
+
+```
+  ケース                        手                                         Showdown                 旧 Python        新
+  flying-beside-grounded        ねこだまし → アーマーガア（隣はガブリアス）  当たる・ひるむ            止まる           一致
+  control-grounded              ねこだまし → ガブリアス                     止まる・PP 1 減る         止まる・PP 減らず 一致
+  control-no-foe-grounded       ねこだまし → アーマーガア（隣はロトム）      当たる                    当たる（一致）    一致
+  levitate-beside-grounded      バレットパンチ（ルカリオ）→ ウォッシュロトム  当たる                    止まる           一致
+  mold-breaker-levitate         バレットパンチ（かたやぶりゴロンダ）→ ロトム  止まる・PP 1 減る         止まる・PP 減らず 一致
+  spread-one-grounded           いたずらごころ わたほうし → 両方             アーマーガアだけ S-2      両方止まる        一致
+  into-own-ally                 ねこだまし → 味方のイエッサン                当たる                    止まる           一致
+```
+
+対照は 2 つ: 地面の相手には止まる（旧も HP は一致、PP だけずれた）・浮いている相手だけなら当たる（旧も一致）。
+かたやぶりのケースは対象ごとの足元判定の陽性対照（攻撃側を見ない判定ならロトムに当たってしまう）。
+味方へのねこだましは `side_actions` が `normal` 技を味方へ向けないので探索は選ばない（テストは手で作った行動で打つ）。
+
+### 3. 直し
+
+* Python: `_can_act` からサイコフィールドを抜き、`_stopped_by_psychic_terrain(turn, action, move, target)` を新設。
+  `_use_move` の攻撃技の経路で `spread` を決めた後・`_hit_target` の前に対象から除く（全部除かれたら move_failed）。
+  変化技は `_do_status_move` の対象ループの先頭（まもるの前）。`_grounded` に `ignore_ability`（かたやぶり系で
+  ふゆうを無視、とくせいガードは除く）。`_hit_target` / `_bust_disguise`（IKA-155 が触っている）には触れていない。
+* port: `rust/src/moves.rs` の `can_act` から同じ部分を抜き、`stopped_by_psychic_terrain` を `use_move` と
+  `do_status_move` の同じ場所に。`rust/src/resolve.rs` に `grounded_ignoring`。
+* 優先度は行動の `priority`（いたずらごころ等の後）。半侵入は場の技に無いので読まない。
+* とくせいの先制封じ（じょおうのいげん等）は `_can_act` のまま（下の 6 節）。
+
+### 4. 直す前に落ちるテスト
+
+```
+  tests/test_psychic_terrain_per_target.py            旧 Python   新 Python   旧 port（main の exe）   新 port
+  ..._stops_each_grounded_target[control-grounded]      FAIL(PP)    pass
+  ..._stops_each_grounded_target[control-no-foe-...]    pass        pass
+  ..._stops_each_grounded_target[flying-beside-...]     FAIL        pass
+  ..._stops_each_grounded_target[into-own-ally]         FAIL        pass
+  ..._stops_each_grounded_target[levitate-beside-...]   FAIL        pass
+  ..._stops_each_grounded_target[mold-breaker-...]      FAIL(PP)    pass
+  ..._stops_each_grounded_target[spread-one-grounded]   FAIL        pass
+  test_the_port_stops_each_grounded_target[7 ケース]                            6 FAIL・1 pass           7 pass
+```
+
+旧 port は main の `rust/target/release/pokeuraou-damage.exe` を scratch に複写して `POKEURAOU_RUST_NODE_BIN` で指した。
+落ちた 6 つはどれも Showdown の状態との比較で（旧 Python と同じ所）、通った 1 つは control-no-foe-grounded。
+
+### 5. 一致（`tools/diff_node.py --terrain psychicterrain`、今回足した）
+
+記録にサイコフィールドの局面が無いので、w12 の局面にフィールドを敷き（`--give` と同じ考え）、先制技か
+先制を上げる特性が場にある局面だけ残す。先制技を使いうるセルを全部 branch ごとに比べ、`_stopped_by_psychic_terrain`
+を外した Python で動くセルを「止めが発火したセル」として数える。発火 0 なら失敗にする。
+
+```
+  --games-dir data/ika73/w12 --terrain psychicterrain --nodes 30 --limit 24     matrix        fast
+    局面 / セル                                                                  23 / 8,520    23 / 8,520
+    先制技を使いうるセル（branch ごとに比較）                                     1,874（不一致 0）  1,874（不一致 0）
+    止めが発火したセル                                                            1,056（不一致 0）  1,056（不一致 0）
+    セルの差の最大                                                                3.3e-16       1.1e-15
+    port の拒否 / exact の差                                                      0 / 0         0 / 0
+  陽性対照: 同じ matrix を main の旧 exe で                                        1,710 セル不一致、差の最大 0.42、FAIL
+```
+
+`tools/port_coverage.py --check`・`tools/port_gate_audit.py --check`: ok。ruff check ok（新しいテストは ruff format 済み。
+resolve.py・diff_node.py は元から ruff format の形ではないので全体は整形していない）。
+テスト: test_psychic_terrain_per_target・test_feint_order・test_resolve・test_rust_node・test_beliefnode・
+test_damage_diff・test_line_endings・test_no_machine_specific_paths を `-n 0` で 160 pass（57 秒）。
+
+### 6. 記録で該当する決定
+
+```
+                          ゲーム    サイコフィールド下の手番決定   該当セル   実際に指した手
+  data/ika73/w12          43,999   0                              0          0
+  data/selfplay-gen11L    12,000   0                              0          0
+```
+
+全局面の `field.terrain` を正規表現で数えると w12 592,200・gen11L 160,495 個がすべて null。サイコメイカーも
+サイコフィールドの技もどのゲームにも出ない。陽性対照: w12 の 1 局の最初の手番に psychicterrain を書き込んだ
+ファイルでは同じ集計が 1 決定を見つけた。だからこの 2 つのデータでは直しは何も動かさない。イエッサンの居る
+プール（M-C・別の構築）では、浮いている相手へのねこだましが止まっていたはず。
+
+### 7. 残り（別課題の候補）
+
+* とくせいの先制封じ（じょおうのいげん・ビビッドボディ・テイルアーマー）も `_can_act` で「技を始めずに止める」ので
+  PP が減らない。Showdown は `onFoeTryMove`（useMoveInner、PP を減らした後）で、`source.isAlly(holder)`、
+  つまり技の対象が持ち主の側のときだけ止める（味方へ向けた先制技は止まらない）。オラクル未確認
+* `_grounded` は じゅうりょく と「はねやすめ中の ??? 」を見ない（場の技に無ければ実害なし）
+
+機械: cargo release ビルド 1 回（8 コア 26 秒）、diff_node 1 秒・33 秒・60 秒・32 秒（1 コア）、記録の集計 11 秒・21 秒、
+テスト 15 秒・14 秒・57 秒（1 コア）は heavy.py に記録（--agent IKA-156）。ほかにオラクルのテスト 1 本（数十秒以内、1 コア）を
+旧・新コードで数回、直接走らせた。
+
+## 9/23 — IKA-135: E4 の人間の定石（12.0 / 5.3 / 21.3% 対 31.3%）は hp-share どうしが盤上を打った数字 —— G9 の「無効になる数字」の6件目。「同じ価値関数が打っている」という交絡の書き方は前提が違う
+
+**答えた問い**: E4 の 9/13 の数字は、どの打ち手が盤上を打った数字か。**両側とも hp-share**（材料ヒューリスティック）で、
+絞りはダメージ順・幅48。`value-all` は選出ゲームを解いて自陣の4体と順序（と相手の均衡選出）を決めただけで、
+**盤上には一度も出ていない**。確度は高い（コードと時刻の対応を読んだだけで、再実行はしていない）。
+IKA-50 の節の「6. 見つけたが直していないもの」3点目を確かめ直したもの。E4・G9 の節は触らず、ここで限定を足す。
+
+### 確かめたこと
+
+```
+  779c4c7:tools/selection_check.py
+    L110-112   net = load_model(args.model) → value = BatchedValue(...)
+    L131       solve_selection(reg, roster.sets, classes, value)   ← value の使い道はここだけ
+    L231-240   play_game(..., objective=OBJECTIVES["hp-share"], search_limit=args.limit,
+               max_turns=args.max_turns)                          ← evaluate も rank_by_leaf も無い
+  779c4c7:src/pokeuraou/selfplay.py
+    L320       evaluate: ... = None
+    L376-377   own_leaf / foe_leaf = leaves[i] if leaves[i] is not None else objective.batch
+                                                                  ← 両側とも hp-share の葉
+  git log -S "evaluate=" -- tools/selection_check.py             06b3176（9/19 01:39）のみ
+  779c4c7 の次に selection_check を変えたコミット                  4d436ea（9/17 16:11）
+```
+
+時刻の対応（`git log` の時刻）:
+
+```
+  c0a9cc8  9/13 03:58:59   selection_check に --force-selection が無い（grep で 0件）
+  779c4c7  9/13 04:14:17   --force-selection を足す。E4 の ①②③ の腕はこれが無いと打てない
+  3b39358  9/13 04:17:40   記事の3相手が場にいる、の記録
+  437003a  9/13 04:25:25   configs/knowledge/rizabanadohido-selection.json に "measured" を足す
+                           setup: "tools/selection_check.py --place 2 --model value-all --limit 48 --games 150"
+```
+
+実行は 779c4c7 の道具（またはコミット直前の同じ作業木）で、終わりは 04:25:25 より前。始まりは分からない ——
+当時の `selection_check` は標準出力に印字するだけで `--out` が無く（入ったのは 9/18）、`data/` の深さ2までで 9/13 04:00〜04:40
+に更新されたものは `data/matches/book-check-old*`（`book_check`、E2）と `width24-vs-48-value-all` だけ。
+記録で否定できないのは「コミットしていない作業木で `evaluate` を渡していた」可能性だけで、`evaluate=` を持つ版は
+06b3176 より前に1つも無い。437003a の本文（"the same value function plays the games"）は、G9 が見つけた取り違えを
+そのまま書いている。
+
+### G9 の「無効になる数字」への追記
+
+```
+  E4  place 2（BIG6）、幅48、各150戦、9/13
+      人間の定石 ①12.0 / ②5.3 / ③21.3% 対 book の選出（均衡 vs 均衡）31.3%       selection_check 779c4c7、A・hp-share・片席
+      同じ実行の 均衡 vs 一様 56.0% / 一様 vs 一様 44.0%（助言の価値 +12.0）      同じ。configs/knowledge の "measured" にだけある
+```
+
+無効になるのは **「価値関数（モデル）にとって」「このリポジトリのエージェントにとって」と読むこと**。数字が答えて
+いるのは「`value-all` が選んだ4体と順序を、hp-share どうし・ダメージ順・幅48 の探索が打ったら」という問いで、
+②の「同じ4体の表裏を入れ替えると 31.3% → 5.3%」も hp-share の打ち手についての差。
+
+もう1つ、同じ版の乱数は A（腕ごとに `default_rng(seed + 1)` を作り直す）で、①②③の腕は自陣の抽選を引かないが
+`均衡 vs 均衡` の腕は1局ごとに1つ多く引く（L226-227）。**①②③どうしは同じ局の列、31.3% の腕とは1局目から
+局の中の乱数がずれる**。対にした差として読めるのは ①②③ の間だけ。
+
+### 交絡の書き方の訂正
+
+E4 の L507「交絡: **対局を打っているのが同じ価値関数**で、人間の計画を実行できない」と、
+`configs/knowledge/rizabanadohido-selection.json` の `"confound"` は、コード上は成り立たない。正しくは:
+
+```
+  選出を決めた    value-all の選出ゲームの均衡（価値関数が「価値関数どうしが打ったら」と予測した値で解いた）
+  盤上を打った    hp-share どうし（ダメージ順の絞り・幅48）。book の腕も人間の定石の腕も、相手側も
+```
+
+交絡は書いてあったより大きい。「このエージェントは人間の計画を実行できない」の「このエージェント」は hp-share で、
+**モデルの選出と人間の定石のどちらが価値関数にとって良いかは、この測定では何も言えていない**。
+
+引いている場所への影響:
+
+* **E6（L572）**「E4 の交絡に対する、より強い形の答え」—— E6 の `tools/forced_handoff.py`（6cd59a0、L165-166）は
+  `evaluate=value, rank_by_leaf=True` を渡していて、価値関数の打ち手の測定としては立つ。ただし E4 とは打ち手が
+  違うので、**E4 の交絡への答えにはなっていない**（E4 の側が hp-share だった）
+* **G3（L1149）**「深さ2が −1.2、人間の定石が 5.3〜21.3%、終盤の評価が 0.97 — 3つとも同じ方向」—— 真ん中の1つは
+  hp-share の打ち手の数字で、価値関数の「計画の問題」の証拠にならない。残るのは2つ。GENERATIONS.md の2か所
+  （「そして終盤は…」の 5.3〜21.3%、「正しい指標は…」の ②は 5.3%）は IKA-50 が末尾の節で「A・hp-share」と名指し済み
+* **L3514**「E4 の実測が open 59.2% / hidden 50.0% なのはそれ」（6ecbf3f、9/19 03:49）—— この2つは E4 ではなく
+  **G8 の place 109 の数字**（L3919-3920）。B・hp-share で、G9 の一覧の「G8 place 109 の −12.8 / −3.7」として
+  すでに無効。名前の取り違えで、E4 の数字が別にあるわけではない
+
+### 同じ版（779c4c7、9/13 04:14 〜 9/17 16:11）で打たれた他の数字
+
+TODO.md / GENERATIONS.md / README.md を `selection_check`・`均衡 vs`・`一様 vs`・`BIG6`・`42.3`・`31.3` で
+grep した範囲で、上の E4 の6つ以外に見つかったのは G2 の BIG6（主張 42.3% 対 実測 34.0%、
+幅48。初出は 87eaa80、9/13 10:03）だけで、これは G9 の一覧にある。9/13 04:26〜9/19 01:39 のコミット本文で
+`selection_check` の盤上の数字を出しているのは G8（d03e60b、B 版）と G9 自身で、どちらも一覧にある。
+
+### 測っていないこと
+
+* 価値関数の打ち手で人間の定石3本と book の選出を並べた数字。今の `selection_check` は `--force-selection` を
+  持ち、`evaluate=value`（L463）を渡すので、`--rank-by-leaf` と `--hide-bench` / `--open-bench` を名指しすれば
+  同じ問いに答えられる（両席・C の乱数なので、9/13 の数字とは並べない）
+* `configs/knowledge/rizabanadohido-selection.json` の `"confound"` と `"verdict"` は書き換えていない（範囲外）
+
+## 9/23 — IKA-59: IKA-52 の答えのずれを CUDA で測り直した —— 最大 3.338e-07、1.2e-7 と同じ桁
+
+IKA-52（fada22c、拒否セルを `cells=` の1回の順伝播にまとめた）の受け入れの数字 2.384e-07 は
+CPU torch のもので、生成が走る `--device cuda` では測っていなかった（上の「IKA-52 の結果」の ⚠）。
+同じ手順を CUDA でやり直した。**コードは変えていない。**
+
+### 手順
+
+* 木: `fada22c^`（0e30595、1セルずつ埋める）と `fada22c` を C:/tmp/ika59/ に detached worktree で作り、
+  PYTHONPATH をそれぞれの src に。測り終えて `git worktree remove` 済み
+* exe: fada22c の木で `cargo build --release`（heavy.py、8コア 21秒）。**fada22c は Python だけの変更**
+  （rust/ に差分なし）なので、同じ exe（sha256 先頭 `8ff955358aa4d864`）を
+  `POKEURAOU_RUST_NODE_BIN` で両方の木に渡した
+* 道具: 当時の `dump_node.py` は残っていなかったので、fada22c の `tools/diff_node.py` と同じ局面の集め方
+  （橋 OFF・hp-share の自己対戦で resolve_turn 137回に1回）で、橋 ON の `batched_payoffs` を
+  [value-gen11L, hp-share] で1回ずつ呼んで npz に保存する短いスクリプトを書いた（C:/tmp/ika59/dump.py・
+  compare.py、コミットしない）。data/ は main のものを読む
+* `--seed 43 --games 3 --nodes 24`、`Budget.matrix()`、幅 24、value-gen11L（main の data/models）、
+  torch 2.11.0+cu128、RTX 5070。**5回とも 23ノード・10,724セル・拒否セル 1,104**
+
+### 結果（シード 43・value-gen11L・橋 ON の行列、学習した葉の列だけ）
+
+| 比べたもの | 同一セル | 最大のセル差 | 均衡値 | 均衡頻度 | 動いたノード |
+|---|---|---|---|---|---|
+| **CUDA: fada22c^ 対 fada22c**（この課題の問い） | 9,886/10,724（92.19%） | **3.338e-07** | 4.610e-08 | 3.708e-07 | 2/23 |
+| CUDA: fada22c 対 fada22c（2回目、床） | 10,724/10,724（100%） | 0 | 0 | 0 | 0/23 |
+| CPU: fada22c^ 対 fada22c（当時の再現） | 10,101/10,724（94.19%） | **2.384e-07** | **1.394e-08** | **2.015e-07** | 2/23 |
+| 参考: 同じ木の CPU 対 CUDA（fada22c） | 3,332/10,724（31.07%） | 5.960e-07 | 7.794e-08 | 4.216e-06 | 21/23 |
+
+hp-share の列はどの比較でも 10,724/10,724 がビット一致、exact マスクも全比較で一致。
+
+* **CPU は当時の3つの数字がそのまま出た**ので、手順は当時と同じと言える。当時の「97.10% 同一」は
+  学習した葉と hp-share の**2列を合わせた**割合だった: (10,101 + 10,724) / 21,448 = 97.10%。
+  学習した葉だけなら 94.19%。CUDA の同じ数え方は (9,886 + 10,724) / 21,448 = **96.09%**
+* **CUDA の床は 0**: 同じ木を2回回すとビット一致。したがって前後の 3.338e-07 は非決定性ではなく、
+  バッチの行数が変わったことの効果そのもの
+* 動いたのは 23 ノード中 2 ノードだけ（CPU・CUDA とも）。拒否セルのないノードは前後で同じ呼び出しになるが、
+  1,104 の拒否セルが何ノードに分かれているかは数えていない（動かなかったノードに拒否セルがあったかは未確認）
+
+### 判断
+
+受け入れ条件は「既存のノード一括評価が受け入れた 1.2e-7 と同じ桁か」。**CUDA でも同じ桁**
+（最大セル差 3.338e-07、均衡値 4.610e-08、頻度 3.708e-07。CPU の 2.384e-07 の 1.4 倍）。
+**「安くなったが別の均衡」ではない**ので、IKA-52 の採用の判断は変わらない。
+
+⚠ 比べる尺度として: 同じ木を CPU と CUDA で回した差（5.960e-07、頻度 4.216e-06）のほうが、
+IKA-52 の前後の差より大きい。生成のデバイスを選ぶだけでこの変更より大きく動く。
+
+⚠ **この数字は「シード 43・23ノード・value-gen11L・fada22c 時点の木と exe」の問いの答え。**
+今の master（IKA-54 以降の橋、IKA-82 の語彙、後続のチャンク化）での前後差ではない。
+
+### 機械時間
+
+ビルド 8コア 21秒（21:42）、保存 5回 各 2コア 36〜41秒（21:43〜21:48、GPU は1本ずつ）。
+比較は1コアで数秒。
+
+## 9/23 — IKA-157: ばけのかわが吸った当たりも当たり —— オラクルでゴツゴツメット・いのちのたま・とんぼがえり・はたきおとす・じごくづき・バークアウト・デカハンター・ダブルウイングの 7 ケースとも Python がずれていた。w12・gen11L・M-C プールにミミッキュは 0
+
+IKA-155 が残した 2 つの疑い（吸った当たりで後処理を全部飛ばす・連続技を全部吸う）を、オラクルで確かめて直した。
+
+### 1. Showdown の手順
+
+`disguise` は `onDamage` で 0 を返すだけ（`data/abilities.ts`）。`spreadDamage`（`sim/battle.ts`）は 0 を数として通し、
+`spreadMoveHit`（`sim/battle-actions.ts`）は `damage[i]` が数である限り対象を残す。だから 0 の当たりでも
+技自身の効果（`runMoveEffects`）・自分の能力低下（`selfDrops`）・追加効果（`secondaries`）・`DamagingHit`
+（ゴツゴツメット・さめはだ）・`onAfterHit`（はたきおとす・どろぼう）が全部走り、`didAnything` が 0 なので
+とんぼがえりの交代も立ち、`afterMoveSecondaryEvent` でいのちのたまも削る。止まるのはダメージから計算するもの
+（吸収技の回復は `targetDamage` が 0 で 0、反動は `totalDamage` が 0 で無し、かいがらのすず）だけ。
+フォルムが変わるのは当たりの後の `Update` なので、連続技の 2 発目からは剥がれたミミッキュに当たる。
+`onEffectiveness` が 0 を返すので吸った当たりの相性は等倍（半減実は食べない）。Champions の mod は
+`hitStepMoveHitLoop` を自前で持つ（`data/mods/champions/scripts.ts`）ので、コードの読みではなくオラクルを正にした。
+
+### 2. オラクル（`tests/test_disguise_afterhit.py`、ゴツゴツメットのミミッキュ、横のドドゲザンはまもる）
+
+```
+  ケース                       Showdown                                           旧 Python              新 Python
+  rocky-helmet-and-life-orb   ドドゲザン 195→163（メット）→144（たま）          195（どちらも無し）     一致
+  u-turn                      ガオガエン -31（メット）、交代の要求あり          -0、交代無し            一致
+  knock-off                   メット -31、ミミッキュの道具が落ちる              どちらも無し            一致
+  throat-chop                 メット -31、じごくづき状態                        どちらも無し            一致
+  snarl（範囲）               ミミッキュ 特攻 -1                                 低下無し                一致
+  make-it-rain（範囲）        サーフゴー 特攻 -2（相方はまもる）                 低下無し                一致
+  dual-wingbeat               1 発目吸収・2 発目 132→89、メット 2 回            全部吸収、メット無し    一致
+  control-rock-slide          吸収して剥がれるだけ                               一致                    一致
+  control-shadow-ball         吸収して剥がれるだけ                               一致                    一致
+```
+
+### 3. 直し（`src/pokeuraou/resolve.py`）
+
+* `_hit_target`: 吸収の別の道（剥がして return）をやめ、普通の当たりのループに入れた。1 発目（`hit_index == 0`）が
+  守られていればダメージ 0 で `_after_hit(absorbed=True, type_mod=0)` を呼び、その後で `_bust_disguise`。
+  2 発目からは剥がれた相手で計算し直す既存の道に乗る。単発の吸収は急所・乱数を 1 つに畳む（前と同じく命中の枝ごとに 1 状態）。
+  連続技の 1 発目は急所にならず、`crit` の枝は 2 発目以降に効く
+* `_after_hit`: `absorbed` を足し、接触（ゴツゴツメット・さめはだ・てつのトゲ）とじごくづきの `dealt > 0` を「当たった」に
+* `_after_move`: いのちのたまを `total > 0` から `move_connected`（当たりが 1 つでもあった）に。普通の当たりは必ず 1 以上与えるので、
+  吸収以外で答えは動かない
+* port はこの 2 特性を拒否したまま（`test_disguise_and_ice_face_are_refused_by_name` pass）。Rust は触っていない
+
+### 4. 直す前に落ちるテスト
+
+`src/pokeuraou/resolve.py` だけを master のものに戻して `tests/test_disguise_afterhit.py` を走らせると、7 ケースが FAIL、
+対照 2 つ（control-rock-slide・control-shadow-ball）は pass。直した後は 9 つとも pass。
+
+### 5. 記録とプールで該当する数
+
+```
+                                        ファイル   行       ミミッキュ   コオリッポ   対照: ガオガエン
+  data/ika73/w12                         24         43,999   0 行         0 行         43,999 行（24 ファイル）
+  data/selfplay-gen11L                   24         12,000   0 行         0 行         12,000 行（24 ファイル）
+  data/pool/regmc-matchupweb.json        65 構築              0 構築       0 構築       19 構築
+  data/pool/raw（65 本の paste）          65                   0            —            —
+  configs/teams・configs/archetypes                           0            —            2 ファイル
+```
+
+どの記録でも、実際に指した手も表のセルも動かない。M-C のプールに入っていないので、M-C でも今は効かない。
+
+### 6. 検査と機械
+
+テスト: test_disguise_afterhit・test_disguise_order・test_feint_order・test_rust_node・test_resolve・test_line_endings・
+test_no_machine_specific_paths を `-n 0` で 138 pass（33 秒、1 コア）。test_event_grouping・test_narrow も pass。
+`tools/port_coverage.py --check`・`tools/port_gate_audit.py --check`: ok。`ruff check` ok（新しいテストファイルだけ `ruff format`）。
+機械: テスト 3 回・記録の数え上げ 1 回（13 秒）はどれも 1 コアで heavy.py に記録（--agent IKA-157）。オラクルの探り（数秒、1 コア）を数回直接。
+
+### 7. 別課題の候補
+
+* **しおづけ（オラクルで確認）**: Champions の mod は残りダメージを 1/16（みず・はがねは 1/8）にしている
+  （`data/mods/champions/moves.ts` の `saltcure`）。Python（`SALT_CURE_DAMAGE = (1, 8)`・`_WEAK = (1, 4)`）と
+  Rust（`rust/src/moves.rs`）は本家の 1/8・1/4。最大 HP 150 のミミッキュで Showdown 9、Python 18
+* 2〜5 回の連続技の回数分布（コードの読みだけ）: Showdown（Champions の mod も）は `sample([2×7, 3×7, 4×3, 5×3])` で 35/35/15/15。
+  Python の `MULTIHIT_2_5` と Rust の `multihit_counts` は 1/3・1/3・1/6・1/6。追加効果を枝分けする予算でだけ効く
+* ちからずく＋いのちのたま（コードの読みだけ）: Showdown は `hasSheerForce` の技で `afterMoveSecondaryEvent` を飛ばすので反動が無い。
+  Python の `_after_move` はちからずくを見ずに削る
+* 範囲の吸収技の丸め（コードの読みだけ）: Showdown は対象ごとに `Math.round` してから回復、Python は合計を 1 回丸める
+  （まっこうちゃ など）。1 ずれうる
+* じごくづきの状態は sim-bridge の局面では `unmodelledVolatiles` に入る。Showdown から読んだ局面では Python が
+  じごくづきを知らない（対局の途中で局面を Showdown から取り直す道があれば効く。未確認）
+
 ## 9/23 — IKA-136: vendor の Showdown を d3de52a17 へ上げた —— Baltimore の10構築が通り（1,067 → 1,077）、value-gen11L は M-B で読めて 4,000 局面ビット一致。付随の Run Away の拘束無効を Python の手の列挙に入れた
 
 ワーカー、基点 master 058f180（IKA-82 の上）、ブランチ `ika-136-showdown-bump-r`（`ika-136-showdown-bump` は前任の worktree が

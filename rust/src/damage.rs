@@ -439,15 +439,6 @@ pub fn calculate(
         unmodelled: unmodelled.clone(),
     };
 
-    if defender.ability == "disguise" && defender.species == "mimikyu" {
-        return zeros;
-    }
-    if defender.ability == "iceface"
-        && defender.species == "eiscue"
-        && mv.category == Category::Physical
-    {
-        return zeros;
-    }
     if mv.category == Category::Status || immune {
         return DamageResult {
             rolls: [0; N_ROLLS],
@@ -456,6 +447,17 @@ pub fn calculate(
             immune,
             unmodelled,
         };
+    }
+    // After the immunity, as in damage.py (IKA-155): the forme guards act at the damage
+    // step, so a Normal move into an intact Mimikyu is immune, not absorbed.
+    if defender.ability == "disguise" && defender.species == "mimikyu" {
+        return zeros;
+    }
+    if defender.ability == "iceface"
+        && defender.species == "eiscue"
+        && mv.category == Category::Physical
+    {
+        return zeros;
     }
 
     if let Some(fixed) = fixed_damage(move_id, attacker, defender) {

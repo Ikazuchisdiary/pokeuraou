@@ -46,6 +46,7 @@ from .actions import (
 from .battler import Battler, FieldState
 from .damage import calculate, crit_probability
 from .effects import (
+    MOLD_BREAKER_ABILITIES,
     RESIST_BERRIES,
     SURVIVE_AT_ONE_ABILITIES,
     SURVIVE_AT_ONE_ITEMS,
@@ -923,14 +924,48 @@ class _Turn:
         self.log(f"p{side + 1} side +{cid}")
 
 
-def _grounded(turn: _Turn, mon: Pokemon) -> bool:
+def _grounded(turn: _Turn, mon: Pokemon, *, ignore_ability: bool = False) -> bool:
+    """Showdown's `isGrounded`. `ignore_ability` is a Mold Breaker move's view of it:
+    `hasAbility('levitate') && !this.battle.suppressingAbility(this)`."""
     if mon.has_volatile("smackdown") or mon.has_volatile("ingrain") or mon.item == "ironball":
         return True
     if mon.has_volatile("magnetrise") or mon.has_volatile("telekinesis"):
         return False
-    if mon.ability == "levitate" or mon.item == "airballoon":
+    if (mon.ability == "levitate" and not ignore_ability) or mon.item == "airballoon":
         return False
     return "Flying" not in turn.types_of(mon)
+
+
+def _stopped_by_psychic_terrain(
+    turn: _Turn, action: QueuedAction, move: Move, target: tuple[int, int]
+) -> bool:
+    """Psychic Terrain's `onTryHit` for one target (vendor/pokemon-showdown/data/moves.ts
+    :14116, IKA-156):
+
+        if (effect && (effect.priority <= 0.1 || effect.target === 'self')) return;
+        if (target.isSemiInvulnerable() || target.isAlly(source)) return;
+        if (!target.isGrounded()) { ...; return; }
+        return null;
+
+    It is step 1 of `trySpreadMoveHit`, per target and after the move has started, so PP
+    is spent and a Fake Out into a Flying type beside a grounded partner still lands. The
+    priority is the move's own after `ModifyPriority` (Prankster), which is the action's.
+    No move in the field makes its user semi-invulnerable, so that exemption is not read.
+    """
+    if turn.pos.field.terrain != "psychicterrain" or action.priority <= 0:
+        return False
+    if move.target == "self" or target[0] == action.side:
+        return False
+    defender = turn.mon_at(*target)
+    if defender is None or defender.fainted:
+        return False
+    attacker = turn.mon_at(action.side, action.slot)
+    ignore_ability = (
+        attacker is not None
+        and attacker.ability in MOLD_BREAKER_ABILITIES
+        and defender.item != "abilityshield"
+    )
+    return _grounded(turn, defender, ignore_ability=ignore_ability)
 
 
 # ---------------------------------------------------------------------------
@@ -1845,9 +1880,10 @@ def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[fl
         turn.unmodelled.add("thaw roll (1 in 4; the cured state is not branched)")
         return [(THAW_CHANCE, None), (1 - THAW_CHANCE, "frz")]
 
-    # Priority-blocking abilities and Psychic Terrain stop the move before it starts --
-    # but only a move aimed at the protected side. A self-targeting priority move such as
-    # Follow Me is unaffected.
+    # Priority-blocking abilities stop the move before it starts -- but only a move aimed
+    # at the protected side. A self-targeting priority move such as Follow Me is
+    # unaffected. Psychic Terrain is not here: it is per target, after the move has
+    # started (`_stopped_by_psychic_terrain`, IKA-156).
     move = turn.reg.moves[action.move_id] if action.move_id else None
     aimed_at_foes = move is not None and move.target not in (
         "self", "allySide", "allyTeam", "allies", "adjacentAlly", "adjacentAllyOrSelf", "all"
@@ -1858,11 +1894,6 @@ def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[fl
             foe = turn.mon_at(foe_side, slot)
             if foe is not None and not foe.fainted and foe.ability in PRIORITY_BLOCKING_ABILITIES:
                 return [(1.0, f"ability: {foe.ability}")]
-        if turn.pos.field.terrain == "psychicterrain":
-            for slot in range(len(turn.pos.sides[foe_side].active)):
-                foe = turn.mon_at(foe_side, slot)
-                if foe is not None and not foe.fainted and _grounded(turn, foe):
-                    return [(1.0, "psychicterrain")]
 
     outcomes: list[tuple[float, str | None]] = [(1.0, None)]
     if mon.status == "par" and budget.enumerate_status_checks:
@@ -2009,7 +2040,19 @@ def _use_move(
     if move.category == "Status":
         return _do_status_move(reg, turn, action, move, targets, budget)
 
+    # `move.spreadHit` is decided from every target before the hit steps run
+    # (battle-actions.ts:551), so a spread move that Psychic Terrain stops on one target
+    # still hits the other at the spread modifier.
     spread = move_hits_multiple(reg, action.move_id, len(targets))
+    # Psychic Terrain is step 1, ahead of Protect's own `onTryHit` (priority 4 over 3): a
+    # target it stops does not reach the protection check, so no Spiky Shield either.
+    stopped = [t for t in targets if _stopped_by_psychic_terrain(turn, action, move, t)]
+    for target in stopped:
+        turn.log(f"{turn.name(*target)} protected by psychicterrain")
+    targets = [t for t in targets if t not in stopped]
+    if not targets:
+        turn.move_failed.add((action.side, action.slot))
+        return [(1.0, turn, "")]
     turn.move_damage_total = 0
     turn.move_connected = False
     branches: list[Outcome] = [(1.0, turn, "")]
@@ -2179,6 +2222,10 @@ def _do_status_move(
 
     reachable: list[tuple[int, int]] = []
     for target in targets:
+        # Psychic Terrain before Protect, as on the damaging path (IKA-156).
+        if _stopped_by_psychic_terrain(turn, action, move, target):
+            turn.log(f"{turn.name(*target)} protected by psychicterrain")
+            continue
         if target != (action.side, action.slot):
             blocked = _blocked_by_protect(turn, action, move, target)
             if blocked is not None:
@@ -2755,16 +2802,21 @@ def _hit_target(
     # state where the hit lands and before its damage.
     breaks = bool(move.raw.get("breaksProtect"))
 
-    busted = _bust_disguise(turn, move, target)
-    if busted:
-        # The forme guards absorb the hit at the damage step (step 7), after the break.
-        # This path does not branch on accuracy or check immunity, and neither does the
-        # break here; the port refuses both abilities.
-        if breaks:
-            _break_protection(turn, action, move, [target])
-        # The hit is absorbed entirely, and the forme change means the next one is not.
-        turn.log(f"{action.label(reg)} absorbed by {busted}")
-        return [(1.0, turn, "")]
+    # Disguise and Ice Face take the hit at the damage step, step 7 -- after the type
+    # immunity and the accuracy, and after the break. So a Normal move into Mimikyu is
+    # immune and a move that misses it misses, and neither busts the forme (IKA-155).
+    # The port refuses both abilities.
+    #
+    # What they take is the *first hit's damage* and nothing else (IKA-157). `onDamage`
+    # returns 0, and 0 is still a number: `spreadMoveHit` carries the target on through
+    # the move's own effects, the self drops, the secondaries and `DamagingHit`, and the
+    # move `didAnything`, so Rocky Helmet, Salt Cure, Snarl's drop, Make It Rain's own drop,
+    # Knock Off, U-turn's switch and Life Orb all happen. The forme changes at the `Update`
+    # after that hit, so a multi-hit move's later hits land on the busted forme. Disguise
+    # also makes the first hit uncrittable (`onCriticalHit` returns false), so a single
+    # guarded hit has one state per accuracy branch.
+    guarded = _forme_guard(turn, move, target) is not None
+    multihit = bool(move.raw.get("multihit"))
 
     accuracy = _accuracy(turn, move, attacker, defender)
     crit_p = crit_probability(reg, attacker, defender, action.move_id)
@@ -2783,6 +2835,10 @@ def _hit_target(
         else [(1.0, crit_p >= 1.0)]
     )
     rolls = stratified_rolls(budget)
+    if guarded and not multihit:
+        # The one hit is absorbed: neither a crit nor a roll changes anything.
+        crit_branches = [(1.0, False)]
+        rolls = [(rolls[0][0], 1.0)]
     note = "" if (budget.fixed_roll is not None or budget.damage_rolls >= 16) else (
         "damage rolls stratified"
     )
@@ -2814,16 +2870,15 @@ def _hit_target(
         for crit_weight, crit in crit_branches:
             if crit_weight <= 0:
                 continue
+            # A guarded first hit never crits; `crit` then speaks for the later hits only.
             result = calculate(
                 reg, attacker, defender, action.move_id, turn.field(),
-                defender_side=target[0], spread=spread, crit=crit, move_ctx=move_ctx,
+                defender_side=target[0], spread=spread, crit=crit and not guarded,
+                move_ctx=move_ctx,
             )
             turn.unmodelled |= set(result.unmodelled)
             if result.immune:
-                state = turn.clone()
-                state.log(f"{action.label(reg)} had no effect")
-                state.move_failed.add((action.side, action.slot))
-                _absorb(state, move, target)
+                state = _immune_state(turn, action, move, target)
                 outcomes.append((acc_weight * crit_weight, state, note))
                 continue
             # The raw roll, not effective_damage: `deal_damage` owns the cap at the
@@ -2859,14 +2914,25 @@ def _hit_target(
                             if again.immune:
                                 break
                             amount = int(again.rolls[0, roll])
-                        dealt_now = state.deal_damage(
-                            *target, amount, reason=action.move_id, from_move=True
-                        )
+                        absorbed = guarded and hit_index == 0
+                        if absorbed:
+                            # `result` is the intact forme's, whose rolls are all zero.
+                            dealt_now = 0
+                        else:
+                            dealt_now = state.deal_damage(
+                                *target, amount, reason=action.move_id, from_move=True
+                            )
                         total += dealt_now
                         _after_hit(
                             state, action, move, target, dealt_now, budget,
-                            type_mod=result.type_mod,
+                            # Disguise's `onEffectiveness` makes the absorbed hit neutral,
+                            # so no resist berry is eaten for it.
+                            type_mod=0 if absorbed else result.type_mod,
+                            absorbed=absorbed,
                         )
+                        if absorbed:
+                            busted = _bust_disguise(state, move, target)
+                            state.log(f"{action.label(reg)} absorbed by {busted}")
                     if hits > 1:
                         state.log(f"{action.label(reg)} hit {hit_index + 1}x for {total}")
                     weight = acc_weight * crit_weight * roll_weight * hit_weight
@@ -2973,23 +3039,48 @@ FORME_GUARDS: dict[str, tuple[str, str, bool]] = {
 }
 
 
-def _bust_disguise(turn: _Turn, move: Move, target: tuple[int, int]) -> str | None:
-    """Absorbs one hit with Disguise or Ice Face, and busts the forme.
+def _immune_state(
+    turn: _Turn, action: QueuedAction, move: Move, target: tuple[int, int]
+) -> _Turn:
+    """The state after a hit the target is immune to: the move fails, and absorbers gain."""
+    state = turn.clone()
+    state.log(f"{action.label(turn.reg)} had no effect")
+    state.move_failed.add((action.side, action.slot))
+    _absorb(state, move, target)
+    return state
 
-    Absorbing without busting would swallow every hit for the rest of the battle. From
-    generation 8 Disguise also costs its holder an eighth of its maximum HP.
-    """
+
+def _forme_guard(
+    turn: _Turn, move: Move, target: tuple[int, int]
+) -> tuple[str, str, bool] | None:
+    """The intact Disguise or Ice Face that would take this hit, without touching it."""
     mon = turn.mon_at(*target)
     if mon is None or mon.fainted or move.category == "Status":
         return None
     entry = FORME_GUARDS.get(mon.ability)
     if entry is None:
         return None
-    intact_species, busted_species, physical_only = entry
+    intact_species, _busted_species, physical_only = entry
     if mon.species != intact_species:
         return None
     if physical_only and move.category != "Physical":
         return None
+    return entry
+
+
+def _bust_disguise(turn: _Turn, move: Move, target: tuple[int, int]) -> str | None:
+    """Absorbs one hit with Disguise or Ice Face, and busts the forme.
+
+    Absorbing without busting would swallow every hit for the rest of the battle. From
+    generation 8 Disguise also costs its holder an eighth of its maximum HP. The caller has
+    already let the hit land: it is not immune and did not miss (IKA-155).
+    """
+    entry = _forme_guard(turn, move, target)
+    if entry is None:
+        return None
+    mon = turn.mon_at(*target)
+    assert mon is not None
+    busted_species = entry[1]
     mon.species = busted_species
     species = turn.reg.species.get(busted_species)
     if species is not None:
@@ -3097,12 +3188,19 @@ def _after_hit(
     dealt: int,
     budget: Budget,
     type_mod: int = 0,
+    absorbed: bool = False,
 ) -> None:
-    """Drain, recoil, item reactions, contact effects and secondaries."""
+    """Drain, recoil, item reactions, contact effects and secondaries.
+
+    `absorbed` is a hit Disguise or Ice Face took: it dealt 0, and 0 is still a damaging
+    hit to Showdown -- `DamagingHit` runs for any numeric damage, 0 included -- so the
+    handlers gated on `dealt > 0` below fire for it too (IKA-157).
+    """
     raw = move.raw
     me = (action.side, action.slot)
     attacker = turn.mon_at(*me)
     defender = turn.mon_at(*target)
+    landed = dealt > 0 or absorbed
 
     # Showdown rounds these rather than truncating:
     #   clampIntRange(Math.round(damageDealt * recoil[0] / recoil[1]), 1)
@@ -3149,7 +3247,7 @@ def _after_hit(
     # Throat Chop adds its own condition from a 100%-chance `secondary.onHit`, so there is
     # nothing declarative in the dump to drive it. Two turns, which the dump now carries
     # because the duration collector reads a condition named after the move itself.
-    if move.id == "throatchop" and defender is not None and not defender.fainted and dealt > 0:
+    if move.id == "throatchop" and defender is not None and not defender.fainted and landed:
         turn.add_volatile(*target, "throatchop", duration=_duration(move, "throatchop"))
         turn.log(f"{turn.name(*target)} cannot use sound moves (throatchop)")
 
@@ -3174,7 +3272,7 @@ def _after_hit(
             # is answered with no, so not applying it is exact rather than approximate.
             turn.unmodelled.add("cursedbody (30% disable, not branched)")
 
-    if defender is not None and "contact" in move.flags and dealt > 0:
+    if defender is not None and "contact" in move.flags and landed:
         if defender.ability in ("roughskin", "ironbarbs") and attacker is not None:
             turn.deal_damage(*me, max(1, attacker.maxhp // 8), reason=defender.ability)
         if defender.item == "rockyhelmet" and attacker is not None:
@@ -3257,7 +3355,9 @@ def _after_move(turn: _Turn, action: QueuedAction, move: Move) -> None:
         turn.heal(*me, _round_fraction(total, raw["drain"]), reason="drain")
     if raw.get("recoil") and total > 0 and attacker is not None and attacker.ability != "rockhead":
         turn.deal_damage(*me, _round_fraction(total, raw["recoil"]), reason="recoil")
-    if attacker is not None and attacker.item == "lifeorb" and total > 0:
+    # Life Orb is `onAfterMoveSecondarySelf`, which runs whenever a hit landed -- a hit
+    # Disguise took for 0 included (IKA-157) -- not only when damage was dealt.
+    if attacker is not None and attacker.item == "lifeorb" and turn.move_connected:
         turn.deal_damage(*me, max(1, attacker.maxhp // 10), reason="lifeorb")
     # Shell Bell heals an eighth of the move's *total* damage, once, and truncates -- so a
     # move dealing under eight damage heals nothing.
