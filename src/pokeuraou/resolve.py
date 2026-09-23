@@ -831,12 +831,17 @@ class _Turn:
             self.heal(side, slot, amount, reason="berry")
 
     def apply_boosts(
-        self, side: int, slot: int, boosts: dict[str, int], *, reason: str, from_foe: bool = True
+        self, side: int, slot: int, boosts: dict[str, int], *, reason: str, from_foe: bool = True,
+        by_other: bool | None = None,
     ) -> bool:
         """Applies a boost table, and says whether any stat actually moved.
 
         The return value is Showdown's `success` from `Battle#boost`, which Parting Shot
         reads to decide whether it switches out at all.
+
+        `by_other` is whether another Pokemon caused it -- `from_foe` unless said, and said
+        where a partner can be the cause (a status move aimed at it): Flower Veil's
+        `target === source` (IKA-202).
         """
         mon = self.mon_at(side, slot)
         if mon is None or mon.fainted:
@@ -861,6 +866,11 @@ class _Turn:
             ):
                 self.log(f"{self.name(side, slot)} {mon.ability} blocked the drop")
                 continue
+            if delta < 0 and (from_foe if by_other is None else by_other):
+                veil = _flower_veil(self, side, slot)
+                if veil is not None:
+                    self.log(f"{self.name(side, slot)} flowerveil ({veil}) blocked the drop")
+                    continue
             before = mon.boosts.get(stat, 0)
             after = max(-6, min(6, before + delta))
             if after == before:
@@ -906,6 +916,8 @@ class _Turn:
         if mon.ability in ("immunity", "limber", "waterveil", "insomnia", "vitalspirit",
                            "comatose", "purifyingsalt", "thermalexchange"):
             return False
+        if _flower_veil_refuses_status(self, side, slot, reason):
+            return False
         if self.pos.field.terrain == "mistyterrain" and _grounded(self, mon):
             return False
         if status == "slp" and self.pos.field.terrain == "electricterrain" and _grounded(self, mon):
@@ -943,6 +955,8 @@ class _Turn:
             return
         if vid == "confusion":
             _confuse(self, side, slot, self.current_actor)
+            return
+        if vid == "yawn" and _flower_veil_refuses_yawn(self, side, slot):
             return
         mon = self.mon_at(side, slot)
         if mon is None or mon.fainted or mon.has_volatile(vid):
@@ -1786,6 +1800,21 @@ def _check_white_herb(turn: _Turn) -> None:
 
 
 def _on_switch_in(reg: Regulation, turn: _Turn, side: int, slot: int) -> None:
+    """`_switched_in`, with no move active (IKA-202).
+
+    Showdown clears the active move after each action (`clearActiveMove`), so the hazards
+    and Intimidate a switch-in meets are no move's, and no Mold Breaker passes a Flower
+    Veil for them. `current_actor` is the last mover until the next one, so it is put
+    aside here. (A phazing move's drag-in keeps its move active in Showdown; not modelled.)
+    """
+    actor, turn.current_actor = turn.current_actor, None
+    try:
+        _switched_in(reg, turn, side, slot)
+    finally:
+        turn.current_actor = actor
+
+
+def _switched_in(reg: Regulation, turn: _Turn, side: int, slot: int) -> None:
     """Entry hazards, then the switch-in ability."""
     mon = turn.mon_at(side, slot)
     if mon is None:
@@ -2418,6 +2447,82 @@ def _confusion_refused(
         if not infiltrates:
             return "safeguard"
     return None
+
+
+def _good_as_gold_blocks(
+    turn: _Turn, action: QueuedAction, move: Move, target: tuple[int, int]
+) -> bool:
+    """Good as Gold's `onTryHit` (IKA-202):
+
+        if (move.category === 'Status' && target !== source) { ...; return null; }
+        flags: { breakable: 1 }
+
+    `hitStepTryHitEvent` runs it for every target of a status move -- a foe's, a partner's,
+    each one of a spread move -- after Protect's (priority 3). Side and field moves go
+    through `TryHitSide` / `TryHitField` and pass; here their one target is the user. A
+    Mold Breaker move passes it (Mycelium Might's, a status move, too).
+    """
+    me = (action.side, action.slot)
+    if move.category != "Status" or target == me:
+        return False
+    mon = turn.mon_at(*target)
+    return (
+        mon is not None and mon.ability == "goodasgold" and not _ability_broken_by(turn, mon, me)
+    )
+
+
+def _flower_veil(turn: _Turn, side: int, slot: int) -> str | None:
+    """Who guards a Grass type with Flower Veil, if anyone (IKA-202).
+
+        onAllyTryBoost / onAllySetStatus / onAllyTryAddVolatile ... target.hasType('Grass')
+        flags: { breakable: 1 }
+
+    `onAlly` handlers are the holder's and its partner's (`alliesAndSelf`). A Mold Breaker
+    move -- `current_actor`'s, as for Own Tempo -- passes it unless the holder has an Ability
+    Shield. The callers check the source.
+    """
+    mon = turn.mon_at(side, slot)
+    if mon is None or mon.fainted or "Grass" not in turn.types_of(mon):
+        return None
+    for ally in range(len(turn.pos.sides[side].active)):
+        holder = turn.mon_at(side, ally)
+        if holder is None or holder.fainted or holder.ability != "flowerveil":
+            continue
+        if _ability_broken_by(turn, holder, turn.current_actor):
+            continue
+        return turn.name(side, ally)
+    return None
+
+
+def _flower_veil_refuses_status(turn: _Turn, side: int, slot: int, reason: str) -> bool:
+    """Flower Veil's `onAllySetStatus` (IKA-202):
+
+        if (target.hasType('Grass') && source && target !== source && effect
+            && effect.id !== 'yawn') { ...; return null; }
+
+    Every `apply_status` caller's source is another Pokemon (a move's user, a spiky guard,
+    Spicy Spray, Toxic Spikes' foe), except Yawn's sleep, which is its own exception: the
+    veil stops Yawn as the volatile instead (`_flower_veil_refuses_yawn`).
+    """
+    if reason == "yawn":
+        return False
+    veil = _flower_veil(turn, side, slot)
+    if veil is None:
+        return False
+    turn.log(f"{turn.name(side, slot)} flowerveil ({veil}) blocked the status")
+    return True
+
+
+def _flower_veil_refuses_yawn(turn: _Turn, side: int, slot: int) -> bool:
+    """Flower Veil's `onAllyTryAddVolatile` (IKA-202):
+
+        if (target.hasType('Grass') && status.id === 'yawn') { ...; return null; }
+    """
+    veil = _flower_veil(turn, side, slot)
+    if veil is None:
+        return False
+    turn.log(f"{turn.name(side, slot)} flowerveil ({veil}) blocked yawn")
+    return True
 
 
 def _rampage_runs_out(turn: _Turn, actives: list[tuple[int, int]]) -> None:
@@ -3185,6 +3290,8 @@ def _immune_to_move(
     defender = turn.mon_at(*target)
     if defender is None or defender.fainted:
         return None
+    if _good_as_gold_blocks(turn, action, move, target):
+        return "goodasgold"
     self_targeted = target == (action.side, action.slot)
 
     if "powder" in move.flags and not self_targeted:
@@ -3297,7 +3404,8 @@ def _apply_status_move(
         own_side = target[0] == action.side
         if raw.get("boosts"):
             turn.apply_boosts(
-                *target, dict(raw["boosts"]), reason=move.id, from_foe=not own_side
+                *target, dict(raw["boosts"]), reason=move.id, from_foe=not own_side,
+                by_other=target != me,
             )
         if raw.get("status"):
             turn.apply_status(*target, str(raw["status"]), reason=move.id)
@@ -3391,6 +3499,11 @@ def _apply_status_move(
         turn.unmodelled.add(f"status move: {move.id}")
 
 
+#: The abilities whose `onTryHit` is Perish Song's `null` for another's song: Soundproof
+#: (`move.flags['sound']`) and Good as Gold (a status move, IKA-202). Both `breakable`.
+PERISH_SONG_TRY_HIT_ABILITIES = frozenset({"soundproof", "goodasgold"})
+
+
 def _perish_song(reg: Regulation, turn: _Turn, action: QueuedAction) -> None:
     """Perish Song's `onHitField` (vendor/pokemon-showdown/data/moves.ts, perishsong):
 
@@ -3423,11 +3536,11 @@ def _perish_song(reg: Regulation, turn: _Turn, action: QueuedAction) -> None:
             if mon is None or mon.fainted:
                 continue
             if (
-                mon.ability == "soundproof"
+                mon.ability in PERISH_SONG_TRY_HIT_ABILITIES
                 and (side, slot) != me
                 and not (ignores_ability and mon.item != "abilityshield")
             ):
-                turn.log(f"{turn.name(side, slot)} immune (soundproof)")
+                turn.log(f"{turn.name(side, slot)} immune ({mon.ability})")
                 result = True
                 continue
             if mon.has_volatile("perishsong"):
