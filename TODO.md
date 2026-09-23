@@ -10915,3 +10915,10 @@ Python の `MULTIHIT_2_5` と port の `multihit_counts` は 1/3・1/3・1/6・1
 TV と最大の手の変化には LP の退化（同値の手の入れ替わり）も入る（diff_node でも 5e-16 の差で頻度が 1.0 動く）。値の差は
 平均 1e-4 で、記録全体で手が変わるのは w12 で 944 × 2/300 ≈ 6 決定、gen11L で 395 × 5/300 ≈ 7 決定の見込み。
 直しは正しいが記録の結論を動かす大きさではない。
+
+### 7. 検査と機械
+
+master（ff82ad5、IKA-136・IKA-127・IKA-159 入り）を取り込んでビルドし直し、test_multihit_counts・test_resolve・test_port_coverage・
+test_port_gates・test_line_endings・test_no_machine_specific_paths・test_disguise_afterhit を `-n 0` で 121 pass、diff_node も
+取り込み後に同じ結果（0/1,284）。機械（heavy.py、--agent IKA-160）: release ビルド 2 回（8 コア 26 秒・18 秒）、オラクル 265 秒、
+記録 819 秒、diff_node 75・69・61 秒、テスト 20 秒（いずれも 1 コア）。
