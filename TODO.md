@@ -7740,6 +7740,133 @@ IKA-117 の節の5と同じ形（600局×2本＋`leaf_calibration.py`）で、�
 `selfplay.py` に足したのは `timing.decided(...)` の4行と import だけで、IKA-117 の `shown` の行には触れていない。
 サーバの待ち方（IKA-106 の直し）は変えていない。
 
+### 3. 確かめたこと
+
+```
+  負の対照   同じ 24局（seed 6601・添字0〜23、出荷の引数、ワーカー6＋サーバ2）を POKEURAOU_TIMING あり／なしで。
+             gameIndex で突き合わせ、engine と searchSeconds（壁時計）以外を丸ごと比較:
+               on（最終コード）× off   24/24 局が同一、322 決定
+               on（ready 前のコード）× off   24/24 局が同一、322 決定
+             正の対照: 同じ比較で局 i と局 i+1 は 23/23 組で違う（比較が差を見られる）。
+             scratchpad/ika98_same_games.py
+  煙テスト   上の on の2本（どちらも 24局・ワーカー6本・サーバ2本、出荷と同じ引数）。3つの表と傾き・スピンの比・
+             届いたかの一覧が全部出た。ワーカーのログの echo は「search 12x12 / leaf value:value-gen11L」、
+             局の記録は 24/24 局が hidden-bench・leaf・searchLimit 12・book、レポートの source は 8/8 が
+             この worktree の src。届いたかの一覧に問題なし（--limit 12 x6、--seed 6601 x6、--hide-bench x6、
+             --rank-leaf x6、book x6）
+             回数（2本で完全に一致）: move.hidden 139 決定・move.exact 96・replacement 74・selfswitch 13・
+             between 24。timing が数えた決定 322 = games ファイルの 322
+  読み手     profile_stages.py --report を本体の data/timing/generation-0920-044352（IKA-54、読み取り専用）と
+             match-served に: 前と同じ表に続けて「per decision: … before IKA-98」、残りの回帰（generation 側は
+             IKA-98 本文と同じ 2.24 s + 1.61 ms）、source (not recorded) が出る。scratchpad/rest_split.py は
+             古い記録（同じ 2.24 s + 1.61 ms）と新しい記録の両方で動く
+  tests      tests/test_timing.py（off で無料・内側の用途が勝つ・区間が閉じた種類に入る・startup が段を除く・
+             ready）と tests/test_profile_stages.py（未指定は渡さない・出荷の行が通る・役割・届いたかの対照5種と
+             別チェックアウト・回帰・スピン）29 passed。beliefnode・belief・hidden_search・search・selfplay・
+             inference・value・rust_node も -n 0 で通過。test_line_endings・test_no_machine_specific_paths・ruff 通過
+```
+
+* 煙テストの傾きは1本目 +8.00 ms、2本目 −17.41 ms。**ワーカーあたり3〜5局では決定数の幅が狭すぎて傾きは雑音**。
+  5% の判定は本測定（ワーカーあたり約25局）で読む
+* scratchpad/rest_split.py はサーバ経由の run を「direct」と印字する。レポートの `served` はワーカーの環境変数
+  `POKEURAOU_INFERENCE` を見ているが、generate_queue のワーカーは `--inference` で受け取るので、サーバ経由の
+  生成では常に False（既存の欠陥、この課題では直していない）
+
+### 4. 機械（9/23、heavy.py 経由、ほかのセッションの1コア仕事と同時）
+
+```
+  12:05:00–12:05:21  cargo build --release（8コア）
+  12:05:33–12:06:25  関係する tests（1コア、2回）
+  12:10:46–12:10:59  煙テスト兼 対照 on（8コア、20秒待ってから）
+  12:11:33–12:11:46  対照 off（8コア）
+  12:16:13–12:16:27  煙テスト 最終コード（8コア、2分以上待ってから）
+```
+
+### 5. 本測定（まだやっていない。専有で）
+
+```
+  uv run --group learn python tools/profile_stages.py generation --out <dir> --games 600 --seed 6601 \
+    --served --servers 2 --workers 24 --limit 12 --value data/models/value-gen11L.pt \
+    --selection-book data/selection/rizabanadohido-value-gen11L.jsonl.gz --hide-bench -- --rank-leaf
+```
+
+を2回。見積もり（測っていない）: 出荷の 43,999局/7,084秒から1本 約100秒＋起動。読み方と、IKA-105〜108 の前提:
+
+* **IKA-106**: スピンの比（起動を除いた値）。0.7 以上なら直す、0 に近ければ数字を書いて閉じる
+* **IKA-107**: 役割別 CPU の inference_server.py が木の 10% 未満なら止める
+* **IKA-105**: (作業者の belief と serve.* の CPU 秒 ＋ サーバの CPU 秒) ÷ 木の CPU が 10% 未満なら止める。
+  move.hidden と move.exact の passes/決定、fills@dirty/決定が回数の裏付け
+* **IKA-108**: rust.child@rank ÷ rust.child@* の合計（子の時間のうち順位付けの充填の割合）。節約できるのは
+  行列側（rust.child@matrix）の最大3割で、rust.child@rank を超えない。それが子の CPU の 10% に届かなければ止める
+* どれも「残りの回帰」の警告が出ていないことが先。出たら内訳として読まず、名前の無い部分を先に計器にする
+
+## 9/23 — IKA-99/100: target-cpu・整数ロール・PGO の腕を今の木で作り、答えは 6 腕とも同一（時間は未測定）
+
+問いは IKA-99「AVX2 / AVX-512 は今の木の解決器・符号化・ノード充填に何かを買うか」と IKA-100
+「PGO は windows-gnu で作れるか」。**この回は作ることと答えの同一性だけ**。時間の表は調整役が
+空いた窓で `rust/experiments/ika99_bench.sh` を走らせて取る。
+
+### 作った腕（`C:/tmp/pokeuraou-machine/ika99/`、コミットしない）
+
+```
+  基準     既定の release（x86-64）                       ika99_build.sh
+  v3       -C target-cpu=x86-64-v3                         ika99_build.sh
+  native   -C target-cpu=native（znver5, AVX-512）          ika99_build.sh
+  整数ロール --features int-rolls（16ロールを wrap32(x)/100）  ika99_build.sh
+  llvm     x86_64-pc-windows-gnullvm、PGO なし（PGO の対照）  rust/pgo.sh
+  pgo      gnullvm + -Cprofile-use                          rust/pgo.sh
+  正の対照  整数ロールを (x+50)/100 に壊した腕                scratchpad のみ
+```
+
+### 答えの同一性（`tools/bench_ika99.py check`、基準と比べて）
+
+```
+  damage   1,018 + 8,590 + 23,630 = 33,238 件   6腕とも全一致・出力同一   対照は 94〜96% 乖離
+  turns    rust/turns.json 955 件               6腕とも 955 exact・出力同一（計数器を含む）  対照は 502 wrong
+  ノード    data/ika73/w12 の記録局面 24（学習用 36 の後ろ）、幅12、Budget.matrix()、fill_encoded
+           2,732 セル・9,036 葉、配列のバイト列・span・fold・exact・refused が 6腕とも同一   対照は違う
+  diff_node --games 2 --nodes 20、腕ごとに POKEURAOU_RUST_NODE_BIN
+           6腕とも 11,934/14,832 ビット一致・最大 3.3e-16・拒否 0、時間以外の出力は同じハッシュ
+```
+
+damage の件数は `dump_damage_cases*.py` を今の木で作り直したもの（README の 30,640 は旧い版）。
+整数ロールが同じ数になるのは算術で言える（積 < 2^39 なので f64 の往復は正確）。
+
+### PGO（IKA-100）: windows-gnu の道では作れない、gnullvm の道なら作れる
+
+* `-gnu` の std に `profiler_builtins` が無い（`-Cprofile-generate` で E0463）。C コンパイラも無く、
+  rust-mingw の gcc はリンク専用（`GCC-WARNING.txt`）なので自前でも作れない
+* `x86_64-pc-windows-gnullvm` の rust-std には入っている。リンカ（llvm-mingw の clang 想定）は無いので、
+  `rust/experiments/pgo-link/gnullvm_link.rs` が rust-mingw の gcc を立てる: `-nolibc` `--unwindlib=none` を
+  落とし、`-lunwind` を `-lgcc_eh -l:libpthread.a` に、crt2.o と mingw/libgcc を `-gnu` と同じ行で。
+  `catch_unwind` は計装あり・なしとも効いた（node.rs が使う）
+* `llvm-profdata` は `rustup component add llvm-tools`（LLVM 22、rustc と同じ）。profraw 1 本 → profdata 510 KB、
+  `encoded_node` の関数に計数が入っていることを確認
+* 学習 = turns.json 全件 1 回 + 記録局面の先頭 36 を幅12で。測るのはその後ろ（`--train-positions 36`）。
+  **turns の行は学習と同じ fixture なので in-sample**（表に * が付く）
+* 既定は OFF。何も pgo の腕を参照しない
+
+### 待っているもの
+
+* 時間の表: `PYTHON=<python> rust/experiments/ika99_bench.sh C:/tmp/pokeuraou-machine/ika99
+  <main>/rust/turns.json <main>/data/ika73/w12 5 48 <ika99>/cases/cases.json <ika99>/cases/cases-field.json
+  <ika99>/cases/cases-synthetic.json`（1 回・2 局面の試運転は 22 秒。全体の見積り 3〜5 分、1コアだが
+  計時なので鍵の中で）
+* 前もって書いた予想: ノード充填 ±2% 以内、exact の turns < 3%、整数ロールは差なし
+* llvm の腕は target を変えただけの対照。pgo の効果は llvm と比べて読む（基準と比べると target の差が混ざる）
+
+### 入れたもの（戻すとき）
+
+```
+  rustup component add llvm-tools          stable-x86_64-pc-windows-gnu に llvm-tools-preview（14 ファイル、約 785 MB）
+                                           戻す: rustup component remove llvm-tools-preview
+  rustup target add x86_64-pc-windows-gnullvm   同じ toolchain の lib/rustlib/x86_64-pc-windows-gnullvm（137 MB）
+                                           戻す: rustup target remove x86_64-pc-windows-gnullvm
+  ビルド物                                 C:/tmp/pokeuraou-machine/ika99（208 MB、消してよい）
+```
+
+既定の toolchain・PATH・環境変数は触っていない。VS Build Tools などの大物は要らなかった。
+
 ## 9/23 — IKA-70: せんせいのツメ・きあいのハチマキを移植のゲートに通した。ついでに Python のツメが半分の確率で発火していたのを直した
 
 前任（worktree agent-a3fe592…、9ecc11a の上・未コミット）の差分を取り込み、数を全部取り直した。
@@ -7880,129 +8007,6 @@ IKA-117 の節の5と同じ形（600局×2本＋`leaf_calibration.py`）で、�
 ### 3. 確かめたこと
 
 ```
-  負の対照   同じ 24局（seed 6601・添字0〜23、出荷の引数、ワーカー6＋サーバ2）を POKEURAOU_TIMING あり／なしで。
-             gameIndex で突き合わせ、engine と searchSeconds（壁時計）以外を丸ごと比較:
-               on（最終コード）× off   24/24 局が同一、322 決定
-               on（ready 前のコード）× off   24/24 局が同一、322 決定
-             正の対照: 同じ比較で局 i と局 i+1 は 23/23 組で違う（比較が差を見られる）。
-             scratchpad/ika98_same_games.py
-  煙テスト   上の on の2本（どちらも 24局・ワーカー6本・サーバ2本、出荷と同じ引数）。3つの表と傾き・スピンの比・
-             届いたかの一覧が全部出た。ワーカーのログの echo は「search 12x12 / leaf value:value-gen11L」、
-             局の記録は 24/24 局が hidden-bench・leaf・searchLimit 12・book、レポートの source は 8/8 が
-             この worktree の src。届いたかの一覧に問題なし（--limit 12 x6、--seed 6601 x6、--hide-bench x6、
-             --rank-leaf x6、book x6）
-             回数（2本で完全に一致）: move.hidden 139 決定・move.exact 96・replacement 74・selfswitch 13・
-             between 24。timing が数えた決定 322 = games ファイルの 322
-  読み手     profile_stages.py --report を本体の data/timing/generation-0920-044352（IKA-54、読み取り専用）と
-             match-served に: 前と同じ表に続けて「per decision: … before IKA-98」、残りの回帰（generation 側は
-             IKA-98 本文と同じ 2.24 s + 1.61 ms）、source (not recorded) が出る。scratchpad/rest_split.py は
-             古い記録（同じ 2.24 s + 1.61 ms）と新しい記録の両方で動く
-  tests      tests/test_timing.py（off で無料・内側の用途が勝つ・区間が閉じた種類に入る・startup が段を除く・
-             ready）と tests/test_profile_stages.py（未指定は渡さない・出荷の行が通る・役割・届いたかの対照5種と
-             別チェックアウト・回帰・スピン）29 passed。beliefnode・belief・hidden_search・search・selfplay・
-             inference・value・rust_node も -n 0 で通過。test_line_endings・test_no_machine_specific_paths・ruff 通過
-```
-
-* 煙テストの傾きは1本目 +8.00 ms、2本目 −17.41 ms。**ワーカーあたり3〜5局では決定数の幅が狭すぎて傾きは雑音**。
-  5% の判定は本測定（ワーカーあたり約25局）で読む
-* scratchpad/rest_split.py はサーバ経由の run を「direct」と印字する。レポートの `served` はワーカーの環境変数
-  `POKEURAOU_INFERENCE` を見ているが、generate_queue のワーカーは `--inference` で受け取るので、サーバ経由の
-  生成では常に False（既存の欠陥、この課題では直していない）
-
-### 4. 機械（9/23、heavy.py 経由、ほかのセッションの1コア仕事と同時）
-
-```
-  12:05:00–12:05:21  cargo build --release（8コア）
-  12:05:33–12:06:25  関係する tests（1コア、2回）
-  12:10:46–12:10:59  煙テスト兼 対照 on（8コア、20秒待ってから）
-  12:11:33–12:11:46  対照 off（8コア）
-  12:16:13–12:16:27  煙テスト 最終コード（8コア、2分以上待ってから）
-```
-
-### 5. 本測定（まだやっていない。専有で）
-
-```
-  uv run --group learn python tools/profile_stages.py generation --out <dir> --games 600 --seed 6601 \
-    --served --servers 2 --workers 24 --limit 12 --value data/models/value-gen11L.pt \
-    --selection-book data/selection/rizabanadohido-value-gen11L.jsonl.gz --hide-bench -- --rank-leaf
-```
-
-を2回。見積もり（測っていない）: 出荷の 43,999局/7,084秒から1本 約100秒＋起動。読み方と、IKA-105〜108 の前提:
-
-* **IKA-106**: スピンの比（起動を除いた値）。0.7 以上なら直す、0 に近ければ数字を書いて閉じる
-* **IKA-107**: 役割別 CPU の inference_server.py が木の 10% 未満なら止める
-* **IKA-105**: (作業者の belief と serve.* の CPU 秒 ＋ サーバの CPU 秒) ÷ 木の CPU が 10% 未満なら止める。
-  move.hidden と move.exact の passes/決定、fills@dirty/決定が回数の裏付け
-* **IKA-108**: rust.child@rank ÷ rust.child@* の合計（子の時間のうち順位付けの充填の割合）。節約できるのは
-  行列側（rust.child@matrix）の最大3割で、rust.child@rank を超えない。それが子の CPU の 10% に届かなければ止める
-* どれも「残りの回帰」の警告が出ていないことが先。出たら内訳として読まず、名前の無い部分を先に計器にする
-
-## 9/23 — IKA-99/100: target-cpu・整数ロール・PGO の腕を今の木で作り、答えは 6 腕とも同一（時間は未測定）
-
-問いは IKA-99「AVX2 / AVX-512 は今の木の解決器・符号化・ノード充填に何かを買うか」と IKA-100
-「PGO は windows-gnu で作れるか」。**この回は作ることと答えの同一性だけ**。時間の表は調整役が
-空いた窓で `rust/experiments/ika99_bench.sh` を走らせて取る。
-
-### 作った腕（`C:/tmp/pokeuraou-machine/ika99/`、コミットしない）
-
-```
-  基準     既定の release（x86-64）                       ika99_build.sh
-  v3       -C target-cpu=x86-64-v3                         ika99_build.sh
-  native   -C target-cpu=native（znver5, AVX-512）          ika99_build.sh
-  整数ロール --features int-rolls（16ロールを wrap32(x)/100）  ika99_build.sh
-  llvm     x86_64-pc-windows-gnullvm、PGO なし（PGO の対照）  rust/pgo.sh
-  pgo      gnullvm + -Cprofile-use                          rust/pgo.sh
-  正の対照  整数ロールを (x+50)/100 に壊した腕                scratchpad のみ
-```
-
-### 答えの同一性（`tools/bench_ika99.py check`、基準と比べて）
-
-```
-  damage   1,018 + 8,590 + 23,630 = 33,238 件   6腕とも全一致・出力同一   対照は 94〜96% 乖離
-  turns    rust/turns.json 955 件               6腕とも 955 exact・出力同一（計数器を含む）  対照は 502 wrong
-  ノード    data/ika73/w12 の記録局面 24（学習用 36 の後ろ）、幅12、Budget.matrix()、fill_encoded
-           2,732 セル・9,036 葉、配列のバイト列・span・fold・exact・refused が 6腕とも同一   対照は違う
-  diff_node --games 2 --nodes 20、腕ごとに POKEURAOU_RUST_NODE_BIN
-           6腕とも 11,934/14,832 ビット一致・最大 3.3e-16・拒否 0、時間以外の出力は同じハッシュ
-```
-
-damage の件数は `dump_damage_cases*.py` を今の木で作り直したもの（README の 30,640 は旧い版）。
-整数ロールが同じ数になるのは算術で言える（積 < 2^39 なので f64 の往復は正確）。
-
-### PGO（IKA-100）: windows-gnu の道では作れない、gnullvm の道なら作れる
-
-* `-gnu` の std に `profiler_builtins` が無い（`-Cprofile-generate` で E0463）。C コンパイラも無く、
-  rust-mingw の gcc はリンク専用（`GCC-WARNING.txt`）なので自前でも作れない
-* `x86_64-pc-windows-gnullvm` の rust-std には入っている。リンカ（llvm-mingw の clang 想定）は無いので、
-  `rust/experiments/pgo-link/gnullvm_link.rs` が rust-mingw の gcc を立てる: `-nolibc` `--unwindlib=none` を
-  落とし、`-lunwind` を `-lgcc_eh -l:libpthread.a` に、crt2.o と mingw/libgcc を `-gnu` と同じ行で。
-  `catch_unwind` は計装あり・なしとも効いた（node.rs が使う）
-* `llvm-profdata` は `rustup component add llvm-tools`（LLVM 22、rustc と同じ）。profraw 1 本 → profdata 510 KB、
-  `encoded_node` の関数に計数が入っていることを確認
-* 学習 = turns.json 全件 1 回 + 記録局面の先頭 36 を幅12で。測るのはその後ろ（`--train-positions 36`）。
-  **turns の行は学習と同じ fixture なので in-sample**（表に * が付く）
-* 既定は OFF。何も pgo の腕を参照しない
-
-### 待っているもの
-
-* 時間の表: `PYTHON=<python> rust/experiments/ika99_bench.sh C:/tmp/pokeuraou-machine/ika99
-  <main>/rust/turns.json <main>/data/ika73/w12 5 48 <ika99>/cases/cases.json <ika99>/cases/cases-field.json
-  <ika99>/cases/cases-synthetic.json`（1 回・2 局面の試運転は 22 秒。全体の見積り 3〜5 分、1コアだが
-  計時なので鍵の中で）
-* 前もって書いた予想: ノード充填 ±2% 以内、exact の turns < 3%、整数ロールは差なし
-* llvm の腕は target を変えただけの対照。pgo の効果は llvm と比べて読む（基準と比べると target の差が混ざる）
-
-### 入れたもの（戻すとき）
-
-```
-  rustup component add llvm-tools          stable-x86_64-pc-windows-gnu に llvm-tools-preview（14 ファイル、約 785 MB）
-                                           戻す: rustup component remove llvm-tools-preview
-  rustup target add x86_64-pc-windows-gnullvm   同じ toolchain の lib/rustlib/x86_64-pc-windows-gnullvm（137 MB）
-                                           戻す: rustup target remove x86_64-pc-windows-gnullvm
-  ビルド物                                 C:/tmp/pokeuraou-machine/ika99（208 MB、消してよい）
-```
-
-既定の toolchain・PATH・環境変数は触っていない。VS Build Tools などの大物は要らなかった。
   テスト    test_rust_node の新テスト2本（disguise・iceface）: 全セルが拒否され、理由がちょうどその文字列
   正の対照  名指しの拒否を `if false &&` で殺してビルド → 2本とも落ちる（理由がゲートの「ability: iceface」
             になる）。戻してビルドし直した
@@ -8569,3 +8573,116 @@ test_beliefnode / test_hidden_search / test_line_endings / test_no_machine_speci
 12:13 cargo build（worktree、`heavy.py` 8コア、23秒）、12:25 旧ツリー2本のビルド（8コア、24秒・23秒）。
 以降すべて1コア: 記録局面の比較 13秒〜39秒 × 9回、games 10〜209 が 622秒・584秒、修正後の games 0〜209 が
 749秒、value-gen11L の 200 局面が 246秒・95秒・111秒、ネットのバッチ確認 2秒。テストは `-n 0`。
+
+## 9/23 — IKA-120: 途中交代ノードも相手の控えを推定分布で評価する —— 相手に未公開が居た決定の 6.0% で交代先が変わる
+
+〔コーディネータが担当の報告から書き起こした節。担当のコミット d6b73d3 が TODO.md の末尾に付けたのは IKA-139 の節で、
+この節は入っていなかった（同じ文面の IKA-139 の節は、マージで1つにまとまっている）。〕
+
+`_do_self_switch_node`（とんぼがえり・すてゼリフの後の交代先を選ぶ所）は、真の中断局面で各選択肢を採点して
+いて、相手の本当の控え2体が葉に入っていた。控え隠蔽の4本目の経路（G2 の「経路は3つ」への追記、上）。
+
+### 1. 変えたこと（`src/pokeuraou/selfplay.py`・`resolve.py`）
+
+* `play_game` → `_advance_turn` → `_advance` → `_do_self_switch_node` に `hidden=_HiddenBench(sheets, seen, bench_prior, leads)`
+  を渡す。中身は move ノードと同じ（`seen` は同一性 IKA-117、`leads` は1ターン目の先発ペア IKA-118）。公開局では None
+* ノードの中では交代ノードと同じ呼び方で、相手側の `seen_identities` → `seen_slots` → `completions`（重みは
+  `_bench_weights`）。完成形ごとに中断を作り直し（新しい `resolve.paused_in`）、各選択肢を選ぶ側の葉で採点、
+  重み付き平均の argmax（side 1 は argmin）。選ぶのは片側だけなので解くゲームは無い。定義は「完成形ごとに素直に
+  解いたもの」そのままで、速い経路は作っていない。打つのは真の中断を選んだ手で再開したもの
+* `paused_in` は、相手がその枠に交代する手がキューに残っていれば交代先の種族も付け替える（念のため、テスト無し）。
+  完成形で選ぶ側の選択肢が変わったら `AssertionError`
+
+### 2. テスト（`tests/test_hidden.py`）
+
+* 正の対照 `test_the_self_switch_does_not_read_their_true_bench`: 相手の控えだけが違う2局（ガブリアス+ニンフィア と
+  ドヒドイデ+ガオガエン）でとんぼがえりさせる。公開局は真の控えに従って `switch 4` / `switch 3` と違う手（葉が選択に
+  届いている）、控え隠蔽は2局とも `switch 3`。直す前の `selfplay.py` では `['switch 4, pass', 'switch 3, pass']` で落ちる
+* `test_a_pause_resumed_in_a_completion_is_that_world_resolved_from_scratch`: 作り直した中断の再開と、完成形の局面から
+  最初に解いたターンが、6完成形×全中断で全選択肢の全葉の JSON まで一致
+
+### 3. 記録局面での変化率（`data/ika73/w12` の先頭3,000局、1コア、value-gen11L を CPU で）
+
+```
+                                   件数   選択肢2つ以上   交代先が変わった           |Δ値| 平均 / 最大
+  相手に未公開あり                  898      698          54（6.0%、2つ以上の中で 7.7%）   0.081 / 0.435
+  相手に未公開なし（出荷と同じ経路）  799      357           0                          0.0000 / 0.0000
+  null 対照（出荷の経路を2回）      1,697     —             0                          0.0000
+```
+
+途中交代の決定は 1,698（全決定の 4.2%）、うち相手に未公開が居たのは 898（52.9%、課題本文の数と一致）。再生できたのは
+1,697（1件は記録の中断が今の解決器で見つからない）。再構成の確認: 出荷の経路が記録どおりの手を選ぶ率 99.5%。
+生成との違い: 完成形の重みは一様（生成は book の bench prior）、持ってこなかった2匹の SP は seed 0 で引いた。
+
+### 4. 残り
+
+* 盤の対戦は回していない。交代先が変わるのは全決定の約 0.13% なので、差はまず見えない。漏れを塞ぐ正しさの修正なので、
+  測るなら非劣性 SPRT(-10, 0) を1本
+* book の重みでの変化率は未測定。IKA-69（審判と思考の分離）が入れば、この種の漏れは構造的に起きない
+
+## 9/23 — 専有の時間帯の計時: IKA-99/100・101・104・98 —— 環境変数の長さだけで turns が 30.5 と 36.5 に割れる
+
+master a710aa5、機械は 13:33:28〜14:04:37 を専有（`heavy.py --agent timing`、ほかの記録なし、各計時の前の
+`Get-Process` も空）。ユーザ承認（9/23）。道具と出力は `C:/tmp/pokeuraou-machine/timing/`（コミットしない）。
+
+### 0. 測り方の偏り: 環境変数の長さで turns が +19% 動く
+
+同じバイナリ・同じ引数で、使われていない環境変数の長さを 0〜248 バイトの 32 通りに変えた（`diag_align.py`）。
+`turns 20` は native 以外の7本で約 30.5 と約 36.5 の2つの値に割れる。damage は割れない（±2% ほど）。
+**turns の数%の差は、配置を揃えるか、配置を掃いて最小どうしで比べないと言えない。** IKA-99 の6腕は偶然すべて
+速い側、IKA-101 は変更後だけが遅い側に入った。IKA-104 の変更前の木は、本体と同じ長さのパスに置いた。
+
+### 1. IKA-99/100（今の木で6腕を作り直し、答えは全腕同一。交互・5回・最小）
+
+```
+  腕         dmg:cases  dmg:field  dmg:synth  turns   node.resolve  node.encode  node.wall
+  基準        0.453 µs   0.508      0.425      30.3    227.5 ms      40.02        324.9
+  v3          -11.0%     -10.2%     -7.3%      -1.3%   -1.7%         -0.1%        -1.2%
+  native      -19.6%     -16.5%     -17.4%     -2.3%   -1.6%         +4.5%        -0.2%
+  整数ロール   -11.5%     -9.3%      -8.9%      -1.0%   -1.2%         -0.5%        -0.7%
+  pgo/llvm    +10.8%     +9.6%      +8.6%      -1.3%*  -0.9%         -4.8%        -1.8%      * in-sample
+```
+
+予想: ノード ±2% と exact の turns <3% は**当たり**。整数ロールの「差なし」は **damage で外れ**（-9〜11.5%）。
+PGO の +5〜15% は**外れ**（damage は遅くなる。学習に damage の件数ファイルが入っていない）。
+**解決器では SIMD も target-cpu も PGO も買えない**（ノードの壁時計で ±2% 以内）。既定は変えない。
+
+### 2. IKA-101（変更前 = d6939bc を戻した木。衝突は TODO.md だけで master の版を採った。diff 11 ファイル +248/-662）
+
+```
+  damage 200   0.881 → 0.509 µs   1.73倍（32 配置でも 0.878 → 0.506）
+  turns 20     39.9 → 36.4 µs     1.10倍（同じ配置、変更後は遅い側）／ 32 配置の最小どうし 39.9 → 30.5 = 1.31倍
+  diff_node    rust 0.22-0.23 → 0.21-0.22 s（分解能より下）。出力は6本同一（13 ノード・1,716 セル）
+```
+
+答えは turns・damage とも時計の行を除いて同一。
+
+### 3. IKA-104（変更前 = `_per_completion` だけを 3e464ef^ の版に。beliefnode.py +8/-31）
+
+```
+  変更前   113.05 s / 113.60 s   318.4 / 316.9 局/分
+  変更後   111.74 s / 111.41 s   322.2 / 323.1 局/分    1.016倍（探索秒の合計 -2.6%）
+  答え     600/600 局が同一（8,194 決定）。対照: 局 i と i+1 は 599/599 で違う
+```
+
+予想の 1.05〜1.15 は**外れ**。両側 exact の決定は 2,508 あるが1決定 86.8 ms と軽く、節約は fill@matrix 1回（約 11 ms）
+×2,508 ≒ ワーカー時間の 1.2%（下の IKA-98 の数からの推定）。答えは変わらないので入れたまま。
+
+### 4. IKA-98 本測定（出荷条件 600局×2、届いたかの確認 rc=0）
+
+```
+                                  1本目        2本目
+  壁時計                          109.8 s      106.7 s
+  木の CPU                        1,370.4 s    1,365.3 s
+  selfplay / 子の Rust / サーバ    45.7/27.5/26.7%   45.9/27.6/26.4%
+  スピンの比 (IKA-106)             0.47         0.49       0.7 未満。直す基準には届かず、0 でもない
+  サーバ ÷ 木 (IKA-107)            26.7%        26.4%      10% 以上 → 進める
+  belief+serve+サーバ (IKA-105)    33.3%        33.0%      10% 以上 → 進める
+  child@rank ÷ child@* (IKA-108)   37.6%        37.5%      節約の上限 14.8 s = 子の CPU の 3.9% → 止める
+  残りの回帰                       -16.1%       -23.1%     警告は出ない（判定が「> 5%」の片側だけ。負の傾きの扱いは要検討）
+  serve.wait                       35.5%        34.0%      ワーカー壁時計で最大の段
+```
+
+1決定あたり（2本で完全に一致）: move.hidden 3,496（passes 17.74、fills@dirty 7.75）、move.exact 2,508（passes 3.02、
+fills@matrix 1.00 ＝ IKA-104 が効いている）、replacement 1,852（5.72）、selfswitch 338、between 600。
+合計 8,194 決定は games ファイルと一致。全表は `timing/out/run98-{1,2}.log`・`p98-{1,2}.json`。
