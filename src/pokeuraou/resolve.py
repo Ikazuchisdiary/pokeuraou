@@ -2003,12 +2003,9 @@ def _use_move(
         turn.move_failed.add((action.side, action.slot))
         return [(1.0, turn, "")]
 
-    # `hitStepBreakProtect` runs before the hits and for every target, so a Feint that
-    # breaks one Pokemon's Protect also strips its side's Wide Guard for the rest of the
-    # turn -- which is what the partner's move needs.
-    if move.raw.get("breaksProtect"):
-        _break_protection(turn, action, move, targets)
-
+    # The protection a `breaksProtect` move tears down is torn down per target, inside
+    # `_hit_target`, once the hit is known to land (IKA-153). Every such move is damaging
+    # (Feint, Phantom Force), so the status path never needs it.
     if move.category == "Status":
         return _do_status_move(reg, turn, action, move, targets, budget)
 
@@ -2750,8 +2747,21 @@ def _hit_target(
     if attacker is None or defender is None:
         return [(1.0, turn, "")]
 
+    # `hitStepBreakProtect` is step 5 of `trySpreadMoveHit`
+    # (vendor/pokemon-showdown/sim/battle-actions.ts:557-571), after the type immunity of
+    # step 2 and the accuracy of step 4, and it only sees the targets those left (`604`).
+    # So a Feint into a Protecting Ghost, or one that misses, breaks nothing and the
+    # partner's move is still blocked (IKA-153). Below, the break is applied to each
+    # state where the hit lands and before its damage.
+    breaks = bool(move.raw.get("breaksProtect"))
+
     busted = _bust_disguise(turn, move, target)
     if busted:
+        # The forme guards absorb the hit at the damage step (step 7), after the break.
+        # This path does not branch on accuracy or check immunity, and neither does the
+        # break here; the port refuses both abilities.
+        if breaks:
+            _break_protection(turn, action, move, [target])
         # The hit is absorbed entirely, and the forme change means the next one is not.
         turn.log(f"{action.label(reg)} absorbed by {busted}")
         return [(1.0, turn, "")]
@@ -2822,6 +2832,8 @@ def _hit_target(
             for roll, roll_weight in rolls:
                 for hits, hit_weight in multihit_counts(move, budget):
                     state = turn.clone()
+                    if breaks:
+                        _break_protection(state, action, move, [target])
                     total = 0
                     for hit_index in range(hits):
                         mon = state.mon_at(*target)

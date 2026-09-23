@@ -405,12 +405,9 @@ fn use_move<'a>(
         return Ok(vec![(1.0, turn)]);
     }
 
-    // `hitStepBreakProtect` runs before the hits and for every target, so a Feint that
-    // breaks one Pokemon's Protect also strips its side's Wide Guard for the rest of the
-    // turn -- which is what the partner's move needs. Python's `_break_protection`.
-    if mv.breaks_protect {
-        break_protection(&mut turn, &targets);
-    }
+    // The protection a `breaksProtect` move tears down is torn down per target, inside
+    // `hit_target`, once the hit is known to land (IKA-153). Every such move is damaging
+    // (Feint, Phantom Force), so the status path never needs it.
 
     if mv.category == "Status" {
         return do_status_move(reg, turn, action, mv, &targets, budget);
@@ -816,6 +813,13 @@ fn hit_target<'a>(
         for (roll, roll_weight) in &rolls {
             for (hits, hit_weight) in hit_counts.iter().copied() {
                 let mut state = turn.clone();
+                // `hitStepBreakProtect` is step 5 of `trySpreadMoveHit`, after the type
+                // immunity (2) and the accuracy (4), and only for the targets they left: a
+                // Feint into a Protecting Ghost, or one that misses, breaks nothing
+                // (IKA-153). Python's `_hit_target`, at the same place.
+                if mv.breaks_protect {
+                    break_protection(&mut state, &[target]);
+                }
                 for hit_index in 0..hits {
                     let gone = match state.mon_at(target.0, target.1) {
                         None => true,
