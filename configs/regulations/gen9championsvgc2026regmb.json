@@ -19,8 +19,8 @@
 		"maxMoveCount": 4,
 		"teraEnabled": false,
 		"megaPerSide": 1,
-		"showdownCommit": "cc089d36b7717dec78ce8ab5d1745c03ad5c97e4",
-		"generatedAt": "2026-09-10T15:31:23.242Z"
+		"showdownCommit": "d3de52a17868aa22e6f5af251a68b86f573b75b1",
+		"generatedAt": "2026-09-23T12:26:32.282Z"
 	},
 	"natures": [
 		{
@@ -11771,6 +11771,59 @@
 	],
 	"moves": [
 		{
+			"id": "strengthsap",
+			"name": "Strength Sap",
+			"num": 668,
+			"type": "Grass",
+			"category": "Status",
+			"basePower": 0,
+			"accuracy": 100,
+			"pp": 10,
+			"priority": 0,
+			"target": "normal",
+			"critRatio": 1,
+			"flags": {
+				"protect": 1,
+				"reflectable": 1,
+				"mirror": 1,
+				"heal": 1,
+				"metronome": 1
+			},
+			"hasCustomCode": true,
+			"customHooks": [
+				"onHit"
+			],
+			"ignoreImmunity": true,
+			"nonGhostTarget": ""
+		},
+		{
+			"id": "wish",
+			"name": "Wish",
+			"num": 273,
+			"type": "Normal",
+			"category": "Status",
+			"basePower": 0,
+			"accuracy": true,
+			"pp": 10,
+			"priority": 0,
+			"target": "self",
+			"critRatio": 1,
+			"flags": {
+				"snatch": 1,
+				"heal": 1,
+				"metronome": 1
+			},
+			"hasCustomCode": true,
+			"customHooks": [
+				"condition.onEnd",
+				"condition.onResidual",
+				"condition.onStart"
+			],
+			"slotCondition": "Wish",
+			"ignoreImmunity": true,
+			"nonGhostTarget": ""
+		},
+		{
 			"id": "appleacid",
 			"name": "Apple Acid",
 			"num": 787,
@@ -12119,6 +12172,31 @@
 			"volatileStatus": "disable",
 			"ignoreImmunity": true,
 			"nonGhostTarget": ""
+		},
+		{
+			"id": "doubleshock",
+			"name": "Double Shock",
+			"num": 892,
+			"type": "Electric",
+			"category": "Physical",
+			"basePower": 120,
+			"accuracy": 100,
+			"pp": 5,
+			"priority": 0,
+			"target": "normal",
+			"critRatio": 1,
+			"flags": {
+				"contact": 1,
+				"protect": 1,
+				"mirror": 1,
+				"punch": 1
+			},
+			"hasCustomCode": true,
+			"customHooks": [
+				"onTryMove"
+			],
+			"nonGhostTarget": "",
+			"self": {}
 		},
 		{
 			"id": "dragoncheer",
@@ -12571,6 +12649,31 @@
 				"boosts": {
 					"spa": -2
 				}
+			}
+		},
+		{
+			"id": "meteorassault",
+			"name": "Meteor Assault",
+			"num": 794,
+			"type": "Fighting",
+			"category": "Physical",
+			"basePower": 170,
+			"accuracy": 100,
+			"pp": 5,
+			"priority": 0,
+			"target": "normal",
+			"critRatio": 1,
+			"flags": {
+				"recharge": 1,
+				"protect": 1,
+				"mirror": 1,
+				"failinstruct": 1
+			},
+			"hasCustomCode": false,
+			"customHooks": [],
+			"nonGhostTarget": "",
+			"self": {
+				"volatileStatus": "mustrecharge"
 			}
 		},
 		{
@@ -13126,32 +13229,6 @@
 			"nonGhostTarget": ""
 		},
 		{
-			"id": "strengthsap",
-			"name": "Strength Sap",
-			"num": 668,
-			"type": "Grass",
-			"category": "Status",
-			"basePower": 0,
-			"accuracy": 100,
-			"pp": 5,
-			"priority": 0,
-			"target": "normal",
-			"critRatio": 1,
-			"flags": {
-				"protect": 1,
-				"reflectable": 1,
-				"mirror": 1,
-				"heal": 1,
-				"metronome": 1
-			},
-			"hasCustomCode": true,
-			"customHooks": [
-				"onHit"
-			],
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
-		},
-		{
 			"id": "stuffcheeks",
 			"name": "Stuff Cheeks",
 			"num": 747,
@@ -13295,33 +13372,6 @@
 					}
 				}
 			]
-		},
-		{
-			"id": "wish",
-			"name": "Wish",
-			"num": 273,
-			"type": "Normal",
-			"category": "Status",
-			"basePower": 0,
-			"accuracy": true,
-			"pp": 5,
-			"priority": 0,
-			"target": "self",
-			"critRatio": 1,
-			"flags": {
-				"snatch": 1,
-				"heal": 1,
-				"metronome": 1
-			},
-			"hasCustomCode": true,
-			"customHooks": [
-				"condition.onEnd",
-				"condition.onResidual",
-				"condition.onStart"
-			],
-			"slotCondition": "Wish",
-			"ignoreImmunity": true,
-			"nonGhostTarget": ""
 		},
 		{
 			"id": "accelerock",
@@ -15869,30 +15919,6 @@
 			"customHooks": [],
 			"multihit": 2,
 			"nonGhostTarget": ""
-		},
-		{
-			"id": "doubleshock",
-			"name": "Double Shock",
-			"num": 892,
-			"type": "Electric",
-			"category": "Physical",
-			"basePower": 120,
-			"accuracy": 100,
-			"pp": 5,
-			"priority": 0,
-			"target": "normal",
-			"critRatio": 1,
-			"flags": {
-				"contact": 1,
-				"protect": 1,
-				"mirror": 1
-			},
-			"hasCustomCode": true,
-			"customHooks": [
-				"onTryMove"
-			],
-			"nonGhostTarget": "",
-			"self": {}
 		},
 		{
 			"id": "doubleteam",
@@ -28411,6 +28437,18 @@
 			]
 		},
 		{
+			"id": "runaway",
+			"name": "Run Away",
+			"num": 50,
+			"rating": 0,
+			"flags": {},
+			"hasCustomCode": true,
+			"customHooks": [
+				"onMaybeTrapPokemon",
+				"onTrapPokemon"
+			]
+		},
+		{
 			"id": "spicyspray",
 			"name": "Spicy Spray",
 			"num": 318,
@@ -31044,15 +31082,6 @@
 			"customHooks": [
 				"onDamagingHit"
 			]
-		},
-		{
-			"id": "runaway",
-			"name": "Run Away",
-			"num": 50,
-			"rating": 0,
-			"flags": {},
-			"hasCustomCode": false,
-			"customHooks": []
 		},
 		{
 			"id": "sandforce",
