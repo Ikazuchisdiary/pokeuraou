@@ -3185,10 +3185,7 @@ def _apply_status_move(
                 turn.heal(*target, _round_fraction(mon.maxhp, raw["heal"]), reason=move.id)
 
     if move.id in WEATHER_RECOVERY_MOVES:
-        ratio = _weather_recovery_fraction(turn.pos.field.weather)
-        mon = turn.mon_at(*me)
-        if mon is not None:
-            turn.heal(*me, _round_fraction(mon.maxhp, ratio), reason=move.id)
+        _weather_recovery(turn, me, move)
 
     if move.id in ("trick", "switcheroo"):
         for target in targets:
@@ -4270,12 +4267,31 @@ def _on_being_hit(
 WEATHER_RECOVERY_MOVES = frozenset({"moonlight", "synthesis", "morningsun"})
 
 
-def _weather_recovery_fraction(weather: str | None) -> tuple[int, int]:
+def _weather_recovery_modifier(weather: str | None) -> int:
+    """The factor of Moonlight's `onHit`, in 4096ths: `0.667` in sun, `0.25` in any
+    other weather, `0.5` without one -- `tr(factor * 4096)` in `modify`."""
     if weather in ("sunnyday", "desolateland"):
-        return (2, 3)
+        return 2732
     if weather is None:
-        return (1, 2)
-    return (1, 4)
+        return 2048
+    return 1024
+
+
+def _weather_recovery(turn: _Turn, me: tuple[int, int], move: Move) -> None:
+    """Moonlight, Synthesis and Morning Sun: `this.heal(this.modify(pokemon.maxhp,
+    factor))` (data/moves.ts). `modify` rounds a half *down*, where Recover's `heal` field
+    is `Math.round` (battle-actions.ts) and `_round_fraction` -- so a quarter of 170 is 42
+    here and not 43 (IKA-187)."""
+    mon = turn.mon_at(*me)
+    if mon is not None:
+        modifier = _weather_recovery_modifier(turn.pos.field.weather)
+        turn.heal(*me, _modify(mon.maxhp, modifier), reason=move.id)
+
+
+def _modify(value: int, modifier: int) -> int:
+    """Showdown's `battle.modify(value, modifier / 4096)`: `tr((tr(value * modifier) +
+    2048 - 1) / 4096)` (sim/battle.ts), a half rounded down."""
+    return (value * modifier + 2047) // 4096
 
 
 def _swap_items(turn: _Turn, a: tuple[int, int], b: tuple[int, int]) -> None:

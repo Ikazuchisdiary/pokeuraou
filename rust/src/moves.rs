@@ -1948,6 +1948,35 @@ fn mark_self_switch(turn: &mut Turn, action: &QueuedAction) {
     turn.self_switch_pending = true;
 }
 
+/// `resolve.WEATHER_RECOVERY_MOVES`: the recovery moves whose amount is in `onHit`, so the
+/// dump has no `heal` field for them (IKA-187).
+const WEATHER_RECOVERY_MOVES: [&str; 3] = ["moonlight", "synthesis", "morningsun"];
+
+/// The factor of Moonlight's `onHit` in 4096ths (`resolve._weather_recovery_modifier`):
+/// `0.667` in sun, `0.25` in any other weather, `0.5` without one.
+fn weather_recovery_modifier(weather: Option<&str>) -> i64 {
+    match weather {
+        Some("sunnyday" | "desolateland") => 2732,
+        None => 2048,
+        Some(_) => 1024,
+    }
+}
+
+/// `this.heal(this.modify(pokemon.maxhp, factor))` (`resolve._weather_recovery`). `modify`
+/// rounds a half down, where Recover's `heal` field is `Math.round` (`round_fraction`).
+fn weather_recovery(turn: &mut Turn, me: Slot) {
+    let Some(maxhp) = turn.mon_at(me.0, me.1).map(|m| m.maxhp) else { return };
+    let modifier =
+        weather_recovery_modifier(turn.pos.field.weather.as_ref().map(|w| w.as_str()));
+    turn.heal(me.0, me.1, modify(maxhp, modifier));
+}
+
+/// Showdown's `battle.modify(value, modifier / 4096)`: `tr((tr(value * modifier) + 2048 - 1)
+/// / 4096)` (sim/battle.ts), a half rounded down (`resolve._modify`).
+fn modify(value: i64, modifier: i64) -> i64 {
+    (value * modifier + 2047) / 4096
+}
+
 fn round_fraction(amount: i64, ratio: &Value) -> i64 {
     let list = ratio.as_array();
     let (numerator, denominator) = match list {
@@ -2602,6 +2631,10 @@ fn apply_status_move(
                 turn.heal(target.0, target.1, amount);
             }
         }
+    }
+
+    if WEATHER_RECOVERY_MOVES.contains(&mv.id.as_str()) {
+        weather_recovery(turn, me);
     }
 
     if mv.id == "partingshot" {
