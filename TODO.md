@@ -10226,3 +10226,98 @@ test_damage_diff・test_line_endings・test_no_machine_specific_paths を `-n 0`
 機械: cargo release ビルド 1 回（8 コア 26 秒）、diff_node 1 秒・33 秒・60 秒・32 秒（1 コア）、記録の集計 11 秒・21 秒、
 テスト 15 秒・14 秒・57 秒（1 コア）は heavy.py に記録（--agent IKA-156）。ほかにオラクルのテスト 1 本（数十秒以内、1 コア）を
 旧・新コードで数回、直接走らせた。
+
+## 9/23 — IKA-135: E4 の人間の定石（12.0 / 5.3 / 21.3% 対 31.3%）は hp-share どうしが盤上を打った数字 —— G9 の「無効になる数字」の6件目。「同じ価値関数が打っている」という交絡の書き方は前提が違う
+
+**答えた問い**: E4 の 9/13 の数字は、どの打ち手が盤上を打った数字か。**両側とも hp-share**（材料ヒューリスティック）で、
+絞りはダメージ順・幅48。`value-all` は選出ゲームを解いて自陣の4体と順序（と相手の均衡選出）を決めただけで、
+**盤上には一度も出ていない**。確度は高い（コードと時刻の対応を読んだだけで、再実行はしていない）。
+IKA-50 の節の「6. 見つけたが直していないもの」3点目を確かめ直したもの。E4・G9 の節は触らず、ここで限定を足す。
+
+### 確かめたこと
+
+```
+  779c4c7:tools/selection_check.py
+    L110-112   net = load_model(args.model) → value = BatchedValue(...)
+    L131       solve_selection(reg, roster.sets, classes, value)   ← value の使い道はここだけ
+    L231-240   play_game(..., objective=OBJECTIVES["hp-share"], search_limit=args.limit,
+               max_turns=args.max_turns)                          ← evaluate も rank_by_leaf も無い
+  779c4c7:src/pokeuraou/selfplay.py
+    L320       evaluate: ... = None
+    L376-377   own_leaf / foe_leaf = leaves[i] if leaves[i] is not None else objective.batch
+                                                                  ← 両側とも hp-share の葉
+  git log -S "evaluate=" -- tools/selection_check.py             06b3176（9/19 01:39）のみ
+  779c4c7 の次に selection_check を変えたコミット                  4d436ea（9/17 16:11）
+```
+
+時刻の対応（`git log` の時刻）:
+
+```
+  c0a9cc8  9/13 03:58:59   selection_check に --force-selection が無い（grep で 0件）
+  779c4c7  9/13 04:14:17   --force-selection を足す。E4 の ①②③ の腕はこれが無いと打てない
+  3b39358  9/13 04:17:40   記事の3相手が場にいる、の記録
+  437003a  9/13 04:25:25   configs/knowledge/rizabanadohido-selection.json に "measured" を足す
+                           setup: "tools/selection_check.py --place 2 --model value-all --limit 48 --games 150"
+```
+
+実行は 779c4c7 の道具（またはコミット直前の同じ作業木）で、終わりは 04:25:25 より前。始まりは分からない ——
+当時の `selection_check` は標準出力に印字するだけで `--out` が無く（入ったのは 9/18）、`data/` の深さ2までで 9/13 04:00〜04:40
+に更新されたものは `data/matches/book-check-old*`（`book_check`、E2）と `width24-vs-48-value-all` だけ。
+記録で否定できないのは「コミットしていない作業木で `evaluate` を渡していた」可能性だけで、`evaluate=` を持つ版は
+06b3176 より前に1つも無い。437003a の本文（"the same value function plays the games"）は、G9 が見つけた取り違えを
+そのまま書いている。
+
+### G9 の「無効になる数字」への追記
+
+```
+  E4  place 2（BIG6）、幅48、各150戦、9/13
+      人間の定石 ①12.0 / ②5.3 / ③21.3% 対 book の選出（均衡 vs 均衡）31.3%       selection_check 779c4c7、A・hp-share・片席
+      同じ実行の 均衡 vs 一様 56.0% / 一様 vs 一様 44.0%（助言の価値 +12.0）      同じ。configs/knowledge の "measured" にだけある
+```
+
+無効になるのは **「価値関数（モデル）にとって」「このリポジトリのエージェントにとって」と読むこと**。数字が答えて
+いるのは「`value-all` が選んだ4体と順序を、hp-share どうし・ダメージ順・幅48 の探索が打ったら」という問いで、
+②の「同じ4体の表裏を入れ替えると 31.3% → 5.3%」も hp-share の打ち手についての差。
+
+もう1つ、同じ版の乱数は A（腕ごとに `default_rng(seed + 1)` を作り直す）で、①②③の腕は自陣の抽選を引かないが
+`均衡 vs 均衡` の腕は1局ごとに1つ多く引く（L226-227）。**①②③どうしは同じ局の列、31.3% の腕とは1局目から
+局の中の乱数がずれる**。対にした差として読めるのは ①②③ の間だけ。
+
+### 交絡の書き方の訂正
+
+E4 の L507「交絡: **対局を打っているのが同じ価値関数**で、人間の計画を実行できない」と、
+`configs/knowledge/rizabanadohido-selection.json` の `"confound"` は、コード上は成り立たない。正しくは:
+
+```
+  選出を決めた    value-all の選出ゲームの均衡（価値関数が「価値関数どうしが打ったら」と予測した値で解いた）
+  盤上を打った    hp-share どうし（ダメージ順の絞り・幅48）。book の腕も人間の定石の腕も、相手側も
+```
+
+交絡は書いてあったより大きい。「このエージェントは人間の計画を実行できない」の「このエージェント」は hp-share で、
+**モデルの選出と人間の定石のどちらが価値関数にとって良いかは、この測定では何も言えていない**。
+
+引いている場所への影響:
+
+* **E6（L572）**「E4 の交絡に対する、より強い形の答え」—— E6 の `tools/forced_handoff.py`（6cd59a0、L165-166）は
+  `evaluate=value, rank_by_leaf=True` を渡していて、価値関数の打ち手の測定としては立つ。ただし E4 とは打ち手が
+  違うので、**E4 の交絡への答えにはなっていない**（E4 の側が hp-share だった）
+* **G3（L1149）**「深さ2が −1.2、人間の定石が 5.3〜21.3%、終盤の評価が 0.97 — 3つとも同じ方向」—— 真ん中の1つは
+  hp-share の打ち手の数字で、価値関数の「計画の問題」の証拠にならない。残るのは2つ。GENERATIONS.md の2か所
+  （「そして終盤は…」の 5.3〜21.3%、「正しい指標は…」の ②は 5.3%）は IKA-50 が末尾の節で「A・hp-share」と名指し済み
+* **L3514**「E4 の実測が open 59.2% / hidden 50.0% なのはそれ」（6ecbf3f、9/19 03:49）—— この2つは E4 ではなく
+  **G8 の place 109 の数字**（L3919-3920）。B・hp-share で、G9 の一覧の「G8 place 109 の −12.8 / −3.7」として
+  すでに無効。名前の取り違えで、E4 の数字が別にあるわけではない
+
+### 同じ版（779c4c7、9/13 04:14 〜 9/17 16:11）で打たれた他の数字
+
+TODO.md / GENERATIONS.md / README.md を `selection_check`・`均衡 vs`・`一様 vs`・`BIG6`・`42.3`・`31.3` で
+grep した範囲で、上の E4 の6つ以外に見つかったのは G2 の BIG6（主張 42.3% 対 実測 34.0%、
+幅48。初出は 87eaa80、9/13 10:03）だけで、これは G9 の一覧にある。9/13 04:26〜9/19 01:39 のコミット本文で
+`selection_check` の盤上の数字を出しているのは G8（d03e60b、B 版）と G9 自身で、どちらも一覧にある。
+
+### 測っていないこと
+
+* 価値関数の打ち手で人間の定石3本と book の選出を並べた数字。今の `selection_check` は `--force-selection` を
+  持ち、`evaluate=value`（L463）を渡すので、`--rank-by-leaf` と `--hide-bench` / `--open-bench` を名指しすれば
+  同じ問いに答えられる（両席・C の乱数なので、9/13 の数字とは並べない）
+* `configs/knowledge/rizabanadohido-selection.json` の `"confound"` と `"verdict"` は書き換えていない（範囲外）
