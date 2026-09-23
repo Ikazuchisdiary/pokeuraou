@@ -11164,3 +11164,117 @@ test_runaway・test_actions・test_port_gates・test_port_coverage・test_line_e
 * **子の局面は親の `trapped` を写すだけ**（`position.py:225`、resolver は誰も戻さない）。オラクルから始めた探索では、
   根で拘束されていたポケモンが、拘束の主が倒れた後や反動の後の子でも拘束のまま。Showdown は `battle.ts:1726` で毎ターン
   計算し直す。直すなら resolver のターン終わり（IKA-158〜162 が触っている `resolve.py`）。生成には影響しない（旗が常に偽）。
+
+## 9/23 — IKA-160: 2〜5回の連続技は 35-35-15-15、スキルリンクは常に 5 回（Python と port を同時に直した）
+
+### 1. Showdown と mod
+
+`vendor/pokemon-showdown/sim/battle-actions.ts:869-870` と `data/mods/champions/scripts.ts:440-441`（championsregmb は
+champions を継ぐ）は同じ:
+
+```
+// 35-35-15-15 out of 100 for 2-3-4-5 hits
+targetHits = this.battle.sample([2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 5, 5, 5]);
+if (targetHits < 4 && pokemon.hasItem('loadeddice')) targetHits = 5 - this.battle.random(2);
+```
+
+Python の `MULTIHIT_2_5` と port の `multihit_counts` は 1/3・1/3・1/6・1/6（古い `[2, 2, 3, 3, 4, 5]`）だった。
+スキルリンク（`data/abilities.ts` の `skilllink.onModifyMove`）は抽選の前に `move.multihit = move.multihit[1]` にするので
+予算にかかわらず 5 回。Python はスキルリンクを一度も読んでいなかった（`rust/src/inert.rs` に「Python が触らない特性」として
+載っていた）。M-B・M-C でスキルリンクを持てるのは Heracross-Mega と Toucannon。いかさまダイスは両 mod とも
+`isNonstandard: "Past"` で使えないので直していない（port の `item_handled` に名前があるが、どちらも何もしないので一致する）。
+
+### 2. オラクル（`C:/tmp/ika160/oracle_freq.js`、一時スクリプト）
+
+本体の node_modules の Showdown（d3de52a17 に切り替えた後）で、Champions M-C の実ターンを方策を固定せずに 20 万回
+（ターンごとに的の HP と PP を戻す）。
+
+```
+                          2 回     3 回     4 回     5 回
+  PRNG.sample（配列そのもの）  35.17%   34.90%   15.04%   14.89%    n=200,000
+  実ターン（するどいめ）       35.05%   35.14%   14.87%   14.93%    n=200,000
+  実ターン（スキルリンク）       0        0        0      100%      n=200,000
+  直す前の Python             33.33%   33.33%   16.67%   16.67%
+  直した後                     35%      35%      15%      15%
+```
+
+2 回の割合の差 +1.7 点は標準誤差 0.11 点の 16 倍。
+
+### 3. Budget での枝
+
+`multihit_counts(move, budget)` は `budget.enumerate_secondary` が真なら 4 本に分ける。`Budget.matrix()` も `exact()` も真
+なので探索の行列は回数を列挙している（`max_branches=16` が効くと軽い枝から落ちる）。`deterministic()`（オラクルとの差分）は
+最小の 2。スキルリンクはその前に 5 を返す（オラクルの固定方策の下でも Showdown は 5 回当てる）。
+
+### 4. 直し
+
+- `resolve.MULTIHIT_2_5 = 7/20, 7/20, 3/20, 3/20`、`multihit_counts(move, budget, ability)` がスキルリンクで上限を返す。呼ぶ
+  側（`_hit_target`）は攻撃側の特性を渡す。`effects.all_modelled_abilities` に skilllink。
+- port の `moves::multihit_counts` も同じ（7.0/20.0 は Python の 7/20 と同じ double）。`ability_handled` に skilllink。
+  `tools/port_coverage.py --rust`・`--rust-modelled` で inert.rs から skilllink が消え modelled.rs に入った（直す前の
+  `--check` は両方 DIFFERS で落ちた）。`--check`・`tools/port_gate_audit.py --check` ok。
+- `tools/diff_node.py --using` が [2, 5] の連続技も取る。対照（`old_hit_counts`）は IKA-160 前の回数分布でスキルリンクを
+  読まない Python。
+- テスト `tests/test_multihit_counts.py`（5 件、うち 3 件オラクル）と `tests/test_resolve.py::test_multihit_distribution` の
+  数字。オラクルの `sample` の記録から配列を読み、定数を Showdown の配列に合わせる。
+
+直す前に落ちること:
+
+```
+                                        新 Python + 新 exe   旧 Python（master）   旧 exe（main の release）
+  test_a_two_to_five_move_is_35_35_15_15      pass              FAIL
+  test_skill_link_hits_the_upper_end...        pass              FAIL（引数なし）
+  test_the_constant_is_the_array...            pass              FAIL（1/3 と 7/20）
+  test_skill_link_agrees_with_the_simulator    pass              FAIL（HP 165 と 183）
+  test_the_port_counts_the_hits_as_python...   pass                                   FAIL（枝 5 本と 16 本）
+```
+
+スキルリンクのオラクル比較で、同じターンのガブリアスのスケイルショット（固定方策で 2 回）は旧 Python でも一致していた（対照）。
+
+### 5. diff_node（selfplay-gen11L、20 局面、matrix）
+
+```
+                               セル    連続技を使う  効いたセル（対照が動く）  枝ごとに違う  最悪差
+  新 exe（このブランチ）          9,042   2,223        1,284                    0            5.6e-16   OK
+  旧 exe（main の release、陽性対照） 9,042   2,223        1,284                    1,284        8.7e-3    FAIL
+```
+
+記録の局面にスキルリンク持ちはいない（下の 6）ので、port のスキルリンクはテストの合成チームでだけ確かめた。
+
+### 6. 記録（`C:/tmp/ika160/records.py`、一時スクリプト、1 コア 14 分）
+
+```
+                                         w12        selfplay-gen11L
+  手番の決定                              434,483    118,018
+  場に [2,5] の技を持つ決定               944        395
+    そのうちスキルリンク                   0          0
+  記録のセル（その決定）                   121,902    161,698
+    [2,5] の技を使うセル                   32,769     44,972
+  記録の均衡がその技に確率を置く決定       424        164
+  使い手                                   メガガブリアス 477・ガブリアス 467（全部スケイルショット、全部 foe 側）
+```
+
+同じ決定から 300 ずつ（無作為）を、記録のメニューのまま `Budget.matrix()`・hp-share 1 手で新旧の回数分布について解き直した
+（学習済みの葉ではないので、記録の手そのものの再現ではない）:
+
+```
+                               w12        gen11L
+  セルが動いた決定              287/300    276/300
+  動いたセル                    6,808/39,416   22,425/121,362
+  最悪のセル差                  0.030      0.030
+  均衡値の差（平均・最大）      9.3e-5・3.9e-3   1.6e-4・6.6e-3
+  方策の TV（行・列の平均）     0.009・0.003     0.005・0.015
+  TV > 0.2 の決定               4          6
+  最も重い手が変わった決定      2          5
+```
+
+TV と最大の手の変化には LP の退化（同値の手の入れ替わり）も入る（diff_node でも 5e-16 の差で頻度が 1.0 動く）。値の差は
+平均 1e-4 で、記録全体で手が変わるのは w12 で 944 × 2/300 ≈ 6 決定、gen11L で 395 × 5/300 ≈ 7 決定の見込み。
+直しは正しいが記録の結論を動かす大きさではない。
+
+### 7. 検査と機械
+
+master（ff82ad5、IKA-136・IKA-127・IKA-159 入り）を取り込んでビルドし直し、test_multihit_counts・test_resolve・test_port_coverage・
+test_port_gates・test_line_endings・test_no_machine_specific_paths・test_disguise_afterhit を `-n 0` で 121 pass、diff_node も
+取り込み後に同じ結果（0/1,284）。機械（heavy.py、--agent IKA-160）: release ビルド 2 回（8 コア 26 秒・18 秒）、オラクル 265 秒、
+記録 819 秒、diff_node 75・69・61 秒、テスト 20 秒（いずれも 1 コア）。

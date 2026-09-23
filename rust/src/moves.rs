@@ -709,7 +709,10 @@ fn blocked_by_protect(
     None
 }
 
-fn multihit_counts(mv: &Move, budget: &Budget) -> Vec<(usize, f64)> {
+/// Python's `multihit_counts`. A [2, 5] move is 35-35-15-15, Showdown's
+/// `sample([2 x7, 3 x7, 4 x3, 5 x3])`, and Skill Link takes the upper end before anything
+/// is drawn, under every budget (IKA-160).
+fn multihit_counts(mv: &Move, budget: &Budget, ability: &str) -> Vec<(usize, f64)> {
     let Some(multihit) = mv.multihit.as_ref() else { return vec![(1, 1.0)] };
     if let Some(fixed) = multihit.as_u64() {
         return vec![(fixed as usize, 1.0)];
@@ -717,15 +720,18 @@ fn multihit_counts(mv: &Move, budget: &Budget) -> Vec<(usize, f64)> {
     let Some(list) = multihit.as_array() else { return vec![(1, 1.0)] };
     let low = list.first().and_then(Value::as_u64).unwrap_or(1) as usize;
     let high = list.last().and_then(Value::as_u64).unwrap_or(low as u64) as usize;
+    if ability == "skilllink" {
+        return vec![(high, 1.0)];
+    }
     if !budget.enumerate_secondary {
         return vec![(low, 1.0)];
     }
     if (low, high) == (2, 5) {
         return vec![
-            (2, 1.0 / 3.0),
-            (3, 1.0 / 3.0),
-            (4, 1.0 / 6.0),
-            (5, 1.0 / 6.0),
+            (2, 7.0 / 20.0),
+            (3, 7.0 / 20.0),
+            (4, 3.0 / 20.0),
+            (5, 3.0 / 20.0),
         ];
     }
     let span = high - low + 1;
@@ -785,7 +791,7 @@ fn hit_target<'a>(
     // building this inside the loop was fifteen wasted allocations per hit on the path that
     // advances a game. Under the matrix budget the roll is fixed and it costs nothing,
     // which is why the allocation count barely moved and the clock did.
-    let hit_counts = multihit_counts(mv, &budget);
+    let hit_counts = multihit_counts(mv, &budget, attacker.ability.as_str());
 
     let ctx_started = crate::resolve::phase_start();
     let move_ctx = MoveContext {
