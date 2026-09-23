@@ -152,3 +152,20 @@ def test_the_calculator_claiming_one_more_ability_is_caught_in_modelled_rs(capsy
     assert "ok       rust/src/inert.rs" in out
     assert "DIFFERS  rust/src/modelled.rs" in out
     assert "ability_is_modelled: the tool would list, the file does not: aftermath" in out
+
+
+def test_the_files_generated_from_m_c_cover_m_b():
+    """IKA-187: the recorded games are M-B, and the files are generated from M-C only.
+
+    Whether an id is inert depends on the engine's text alone, and modelled.rs lists the
+    calculator's sets and M-C's stones -- so the M-C files answer every M-B id exactly as
+    M-B's own would, as long as M-B has no id M-C lacks. Today its abilities and moves
+    are M-C's and its items a subset. An M-B-only id would be missing from both files:
+    refused by the gate (a bill), or reported by the port and not by Python (a note).
+    """
+    mb = tool.regulation_dump("gen9championsvgc2026regmb")
+    mc = tool.regulation_dump(REGULATION)
+    for kind in ("abilities", "items", "moves"):
+        extra = {e["id"] for e in mb[kind]} - {e["id"] for e in mc[kind]}
+        assert not extra, f"M-B {kind} that M-C lacks: {sorted(extra)}"
+    assert set(mb["megaMap"]) <= set(mc["megaMap"])
