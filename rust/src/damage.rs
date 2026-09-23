@@ -19,7 +19,51 @@ use crate::moveinfo::{
     terrain_modifiers, MoveContext,
 };
 use crate::position::Types;
-use crate::reg::Reg;
+use crate::reg::{Category, Move, Reg, TypeSlots, F_BULLET, F_INFILTRATES, F_POWDER, F_SOUND};
+
+/// A short list kept on the stack, spilling to the heap only past `N`. The damage path
+/// builds four modifier lists and two ability lists per call, each almost always under
+/// four long; as `Vec`s they were an allocation apiece whenever they were not empty
+/// (IKA-101).
+struct Small<T: Copy, const N: usize> {
+    buf: [T; N],
+    len: usize,
+    spill: Vec<T>,
+}
+
+impl<T: Copy, const N: usize> Small<T, N> {
+    fn new(fill: T) -> Self {
+        Small { buf: [fill; N], len: 0, spill: Vec::new() }
+    }
+
+    fn push(&mut self, value: T) {
+        if self.spill.is_empty() && self.len < N {
+            self.buf[self.len] = value;
+            self.len += 1;
+            return;
+        }
+        if self.spill.is_empty() {
+            self.spill.extend_from_slice(&self.buf[..self.len]);
+        }
+        self.spill.push(value);
+    }
+
+    fn as_slice(&self) -> &[T] {
+        if self.spill.is_empty() {
+            &self.buf[..self.len]
+        } else {
+            &self.spill
+        }
+    }
+
+    fn as_mut_slice(&mut self) -> &mut [T] {
+        if self.spill.is_empty() {
+            &mut self.buf[..self.len]
+        } else {
+            &mut self.spill
+        }
+    }
+}
 
 /// `damage._unmodelled`: the abilities and items on this hit that the calculator does
 /// not account for, named so the caller can report them.
@@ -43,18 +87,17 @@ fn same(value: Option<Id>, name: &str) -> bool {
     matches!(value, Some(v) if v.as_str() == name)
 }
 
-fn effective_move_type(reg: &Reg, move_id: &str, attacker: &Battler) -> (Id, i64) {
-    let mv = &reg.moves[move_id];
-    let declared = Id::new(&mv.mtype);
+fn effective_move_type(mv: &Move, attacker: &Battler) -> (Id, i64) {
+    let declared = mv.mtype;
     let changed = match type_changing_ability(attacker.ability.as_str()) {
         None => return (declared, 4096),
         Some(t) => t,
     };
-    if mv.category == "Status" {
+    if mv.category == Category::Status {
         return (declared, 4096);
     }
     if attacker.ability == "liquidvoice" {
-        if !mv.has_flag("sound") {
+        if !mv.has_flag(F_SOUND) {
             return (declared, 4096);
         }
         return (Id::new(changed), 4096);
@@ -68,43 +111,45 @@ fn effective_move_type(reg: &Reg, move_id: &str, attacker: &Battler) -> (Id, i64
     (Id::new(changed), TYPE_CHANGE_BOOST_FP)
 }
 
-fn type_effectiveness(reg: &Reg, move_type: &str, defender: &Battler) -> (f64, i64) {
-    let mult = reg.type_effectiveness(move_type, &defender.types);
+/// `mult` is `reg.effectiveness_of(move_slot, defender_slots)`, computed once by the
+/// caller; the steps read the same chart row.
+fn type_effectiveness(
+    reg: &Reg,
+    move_slot: usize,
+    defender_slots: &TypeSlots,
+    mult: f64,
+) -> (f64, i64) {
     if mult == 0.0 {
         return (0.0, 0);
     }
     let mut steps = 0i64;
-    if let Some(row) = reg.typechart.get(move_type) {
-        for t in defender.types.as_slice() {
-            match row.get(t.as_str()).copied().unwrap_or(1.0) {
-                v if v == 2.0 => steps += 1,
-                v if v == 0.5 => steps -= 1,
-                _ => {}
-            }
+    let row = &reg.type_chart[move_slot];
+    for d in defender_slots.as_slice() {
+        match row[*d] {
+            v if v == 2.0 => steps += 1,
+            v if v == 0.5 => steps -= 1,
+            _ => {}
         }
     }
     (mult, steps.clamp(-6, 6))
 }
 
-pub fn is_immune(
-    reg: &Reg,
-    move_id: &str,
+/// `is_immune`, with the move already looked up and the effectiveness already computed
+/// (`calculate` was its only caller, and computed both again inside it).
+fn immune_given(
+    mv: &Move,
     move_type: &str,
+    mult: f64,
     defender: &Battler,
     attacker_ability: &str,
     attacker_is_defender: bool,
 ) -> bool {
-    let mv = &reg.moves[move_id];
-    match mv.raw.get("ignoreImmunity") {
-        Some(serde_json::Value::Bool(true)) => return false,
-        Some(serde_json::Value::Object(o)) => {
-            if o.get(move_type).map(|v| v != &serde_json::Value::Bool(false)).unwrap_or(false) {
-                return false;
-            }
-        }
-        _ => {}
+    if mv.ignore_immunity_all {
+        return false;
     }
-    let mult = reg.type_effectiveness(move_type, &defender.types);
+    if mv.ignore_immunity_types.iter().any(|t| t.as_str() == move_type) {
+        return false;
+    }
     if mult == 0.0 {
         let pierced = pierces_ghost(attacker_ability)
             && matches!(move_type, "Normal" | "Fighting")
@@ -120,23 +165,34 @@ pub fn is_immune(
     if defender.ability == "wonderguard" && mult <= 1.0 {
         return true;
     }
-    if defender.ability == "bulletproof" && mv.has_flag("bullet") {
+    if defender.ability == "bulletproof" && mv.has_flag(F_BULLET) {
         return true;
     }
-    if defender.ability == "soundproof" && mv.has_flag("sound") && !attacker_is_defender {
+    if defender.ability == "soundproof" && mv.has_flag(F_SOUND) && !attacker_is_defender {
         return true;
     }
-    if defender.ability == "overcoat" && mv.has_flag("powder") {
+    if defender.ability == "overcoat" && mv.has_flag(F_POWDER) {
         return true;
     }
-    defender.types.contains("Grass") && mv.has_flag("powder")
+    defender.types.contains("Grass") && mv.has_flag(F_POWDER)
 }
+
+/// Fills `Small`'s unused slots in `collect`; never read, never pushed.
+static NO_MOD: ModDef = ModDef {
+    id: "",
+    slot: Slot::Stab,
+    num: 1.0,
+    den: 1.0,
+    priority: 0,
+    from_defender: false,
+    when: |_| false,
+};
 
 /// One event's modifier chain, in Showdown's handler order.
 fn collect(slot: Slot, ctx: &Ctx, a: &Battler, d: &Battler, field: &FieldState) -> Chain {
-    let mut mods: Vec<&'static ModDef> = Vec::new();
+    let mut mods: Small<&'static ModDef, 8> = Small::new(&NO_MOD);
 
-    let mut consider = |ability: &str, from_defender: bool, out: &mut Vec<&'static ModDef>| {
+    let mut consider = |ability: &str, from_defender: bool, out: &mut Small<&'static ModDef, 8>| {
         for md in ability_modifiers(ability) {
             if md.slot != slot || md.from_defender != from_defender {
                 continue;
@@ -181,10 +237,12 @@ fn collect(slot: Slot, ctx: &Ctx, a: &Battler, d: &Battler, field: &FieldState) 
         }
     }
 
-    mods.sort_by_key(|md| -md.priority);
+    // `sort_by_key` is stable on a slice as it was on the `Vec`, so equal priorities keep
+    // the order they were collected in.
+    mods.as_mut_slice().sort_by_key(|md| -md.priority);
 
     let mut chain = Chain::new();
-    for md in mods {
+    for md in mods.as_slice() {
         chain.add(md.num, md.den, md.id);
     }
     if let Some(fp) = aura_fp {
@@ -204,7 +262,7 @@ fn collect(slot: Slot, ctx: &Ctx, a: &Battler, d: &Battler, field: &FieldState) 
             chain.add(2.0, 1.0, "charge");
         }
     } else if slot == Slot::Damage {
-        if !ctx.is_crit && !ctx.move_flags.contains("infiltrates") {
+        if !ctx.is_crit && !ctx.move_flags.has(F_INFILTRATES) {
             let screen_fp = if field.active_per_half > 1 {
                 SCREEN_FP_DOUBLES
             } else {
@@ -282,14 +340,14 @@ pub fn effective_weather(
 }
 
 fn apply_weather_damage(base: i64, weather: Option<Id>, move_type: &str) -> i64 {
-    let name = weather.map(|w| w.as_str().to_string());
-    match name.as_deref() {
+    let name = weather.as_ref().map(|w| w.as_str());
+    match name {
         Some("sunnyday") | Some("desolateland") => {
             if move_type == "Fire" {
                 return modify(base, 1.5, 1.0);
             }
             if move_type == "Water" {
-                if name.as_deref() == Some("desolateland") {
+                if name == Some("desolateland") {
                     return 0;
                 }
                 return modify(base, 0.5, 1.0);
@@ -300,7 +358,7 @@ fn apply_weather_damage(base: i64, weather: Option<Id>, move_type: &str) -> i64 
                 return modify(base, 1.5, 1.0);
             }
             if move_type == "Fire" {
-                if name.as_deref() == Some("primordialsea") {
+                if name == Some("primordialsea") {
                     return 0;
                 }
                 return modify(base, 0.5, 1.0);
@@ -336,8 +394,8 @@ pub fn calculate(
         Some(c) => c,
         None => {
             owned_ctx = MoveContext {
-                weather: field.weather.map(|w| w.as_str().to_string()),
-                terrain: field.terrain.map(|t| t.as_str().to_string()),
+                weather: field.weather,
+                terrain: field.terrain,
                 hit_index: 1,
                 ..Default::default()
             };
@@ -345,14 +403,19 @@ pub fn calculate(
         }
     };
 
-    let (mut move_type, type_change_fp) = effective_move_type(reg, move_id, attacker);
+    let (mut move_type, type_change_fp) = effective_move_type(mv, attacker);
     if let Some(own) = effective_type(move_id, attacker, ctx_move) {
-        move_type = Id::new(&own);
+        move_type = Id::new(own);
     }
-    let mut immune = is_immune(
-        reg,
-        move_id,
+    // The chart is read by slot; the move's and the defender's are looked up once here and
+    // shared by the immunity check and the effectiveness, which each computed them anew.
+    let move_slot = reg.type_slot_of(move_type.as_str());
+    let defender_slots = reg.type_slots(&defender.types);
+    let mult = reg.effectiveness_of(move_slot, &defender_slots);
+    let mut immune = immune_given(
+        mv,
         move_type.as_str(),
+        mult,
         defender,
         attacker.ability.as_str(),
         attacker_is_defender,
@@ -364,7 +427,7 @@ pub fn calculate(
                 immune = mult == 0.0;
                 (mult, tm)
             }
-            None => type_effectiveness(reg, move_type.as_str(), defender),
+            None => type_effectiveness(reg, move_slot, &defender_slots, mult),
         };
 
     let unmodelled = unmodelled_effects(attacker, defender);
@@ -379,10 +442,13 @@ pub fn calculate(
     if defender.ability == "disguise" && defender.species == "mimikyu" {
         return zeros;
     }
-    if defender.ability == "iceface" && defender.species == "eiscue" && mv.category == "Physical" {
+    if defender.ability == "iceface"
+        && defender.species == "eiscue"
+        && mv.category == Category::Physical
+    {
         return zeros;
     }
-    if mv.category == "Status" || immune {
+    if mv.category == Category::Status || immune {
         return DamageResult {
             rolls: [0; N_ROLLS],
             effectiveness: eff,
@@ -421,28 +487,36 @@ pub fn calculate(
         unmodelled.push(format!("move.basePowerCallback (approximated):{move_id}"));
     }
 
-    let mut ally_abilities: Vec<Id> = field.active_abilities[defender_side].clone();
-    if let Some(index) = ally_abilities.iter().position(|a| *a == defender.ability) {
-        ally_abilities.remove(index);
+    // The defender's side without the defender's own ability (the first one equal to it,
+    // as `Vec::remove(position)` took), and both sides together -- on the stack.
+    let mut ally_abilities: Small<Id, 4> = Small::new(Id::EMPTY);
+    let mut skipped_self = false;
+    for ability in &field.active_abilities[defender_side] {
+        if !skipped_self && *ability == defender.ability {
+            skipped_self = true;
+            continue;
+        }
+        ally_abilities.push(*ability);
     }
-    let mut field_abilities: Vec<Id> = Vec::with_capacity(4);
-    field_abilities.extend_from_slice(&field.active_abilities[0]);
-    field_abilities.extend_from_slice(&field.active_abilities[1]);
+    let mut field_abilities: Small<Id, 4> = Small::new(Id::EMPTY);
+    for ability in field.active_abilities[0].iter().chain(&field.active_abilities[1]) {
+        field_abilities.push(*ability);
+    }
     let weather = effective_weather(field, attacker, defender);
 
     let ctx = Ctx {
         move_id,
         move_type,
-        move_category: &mv.category,
+        move_category: mv.category.as_str(),
         move_base_power: base_power_value,
-        move_flags: &mv.flags,
+        move_flags: mv.flags,
         move_priority: mv.priority,
         effectiveness: eff,
         type_mod,
         is_crit: crit,
         is_spread: spread,
-        has_secondary: mv.raw_bool("secondaries"),
-        has_recoil: mv.raw_bool("recoil") || mv.raw_bool("hasCrashDamage"),
+        has_secondary: mv.has_secondaries,
+        has_recoil: mv.has_recoil || mv.has_crash_damage,
         attacker_species: attacker.species,
         attacker_types: attacker.types,
         attacker_ability: attacker.ability,
@@ -463,20 +537,22 @@ pub fn calculate(
         weather,
         terrain: field.terrain,
         defender_side_conditions: &field.side_conditions[defender_side],
-        defender_ally_abilities: &ally_abilities,
-        field_abilities: &field_abilities,
+        defender_ally_abilities: ally_abilities.as_slice(),
+        field_abilities: field_abilities.as_slice(),
         active_per_half: field.active_per_half,
     };
 
     // -- base power --------------------------------------------------------
     let mut bp_chain = collect(Slot::BasePower, &ctx, attacker, defender, field);
-    for (label, num, den) in base_power_modifiers(reg, move_id, attacker, defender, ctx_move) {
+    if let Some((label, num, den)) =
+        base_power_modifiers(reg, move_id, attacker, defender, ctx_move)
+    {
         bp_chain.add(num, den, label);
     }
-    for (label, num, den) in terrain_modifiers(
+    if let Some((label, num, den)) = terrain_modifiers(
         move_type.as_str(),
         is_grounded(attacker),
-        field.terrain.map(|t| t.as_str().to_string()).as_deref(),
+        field.terrain.as_ref().map(|t| t.as_str()),
     ) {
         bp_chain.add(num, den, label);
     }
@@ -486,23 +562,23 @@ pub fn calculate(
     let base_power_final = bp_chain.apply(base_power_value).max(1);
 
     // -- attack and defence ------------------------------------------------
-    let is_physical = mv.category == "Physical";
+    let is_physical = mv.category == Category::Physical;
     let atk_key = mv
-        .raw_str("overrideOffensiveStat")
+        .override_offensive_stat
+        .as_deref()
         .unwrap_or(if is_physical { "atk" } else { "spa" });
     let def_key = mv
-        .raw_str("overrideDefensiveStat")
+        .override_defensive_stat
+        .as_deref()
         .unwrap_or(if is_physical { "def" } else { "spd" });
 
-    let stat_owner_atk =
-        if mv.raw_str("overrideOffensivePokemon") == Some("target") { defender } else { attacker };
-    let stat_owner_def =
-        if mv.raw_str("overrideDefensivePokemon") == Some("source") { attacker } else { defender };
+    let stat_owner_atk = if mv.offensive_stat_from_target { defender } else { attacker };
+    let stat_owner_def = if mv.defensive_stat_from_source { attacker } else { defender };
 
     let atk_stage = stat_owner_atk.boost(atk_key);
     let def_stage = stat_owner_def.boost(def_key);
-    let ignore_atk_boost = mv.raw_bool("ignoreOffensive") || (crit && atk_stage < 0);
-    let ignore_def_boost = mv.raw_bool("ignoreDefensive") || (crit && def_stage > 0);
+    let ignore_atk_boost = mv.ignore_offensive || (crit && atk_stage < 0);
+    let ignore_def_boost = mv.ignore_defensive || (crit && def_stage > 0);
 
     let attack = stat_owner_atk.stat(atk_key, ignore_atk_boost);
     let defence = stat_owner_def.stat(def_key, ignore_def_boost);
@@ -535,13 +611,13 @@ pub fn calculate(
     }
     base = apply_weather_damage(base, weather, move_type.as_str());
     if crit {
-        let crit_mod = mv.raw_f64("critModifier", 1.5);
+        let crit_mod = mv.crit_modifier;
         base = trunc(base as f64 * crit_mod);
     }
 
     // -- the 16 rolls ------------------------------------------------------
     let mut dmg = [0i64; N_ROLLS];
-    if mv.raw_bool("noDamageVariance") {
+    if mv.no_damage_variance {
         dmg = [base; N_ROLLS];
     } else {
         for (r, slot) in dmg.iter_mut().enumerate() {
@@ -562,7 +638,7 @@ pub fn calculate(
     // -- STAB --------------------------------------------------------------
     if move_type.as_str() != "???" {
         let will_retype = is_retyping(attacker.ability.as_str()) && !attacker.protean_fired;
-        let is_stab = mv.raw_bool("forceSTAB")
+        let is_stab = mv.force_stab
             || will_retype
             || attacker.types.contains(move_type.as_str());
         if is_stab {
@@ -616,7 +692,7 @@ pub fn crit_stage(reg: &Reg, attacker: &Battler, move_id: &str) -> i64 {
     use crate::battler::{V_DRAGON_CHEER, V_FOCUS_ENERGY};
     let mv = &reg.moves[move_id];
     let mut stage = if mv.crit_ratio != 0 { mv.crit_ratio - 1 } else { 0 };
-    if mv.raw_bool("willCrit") {
+    if mv.will_crit {
         return 4;
     }
     if attacker.volatiles.has(V_FOCUS_ENERGY) {
@@ -679,9 +755,6 @@ pub fn types_or_species(reg: &Reg, species: &str, live: Types) -> Types {
     }
     match reg.species.get(species) {
         None => live,
-        Some(entry) => {
-            let ids: Vec<Id> = entry.types.iter().map(|t| Id::new(t)).collect();
-            Types::from_slice(&ids)
-        }
+        Some(entry) => entry.type_ids,
     }
 }
