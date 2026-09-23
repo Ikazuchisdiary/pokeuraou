@@ -7666,3 +7666,106 @@ IKA-117 の節の5と同じ形（600局×2本＋`leaf_calibration.py`）で、�
 
 1コア・鍵なし: 比較 12:08:16〜12:08:27（4本で11秒）、テスト（-n 0）12:06〜12:11 のうち約3分半。
 生成・対戦・学習はしていない。
+
+## 9/23 — IKA-122: 控え隠蔽の対戦に推定分布を腕ごとに渡す —— 対戦は生成と別の打ち手（一様の推定分布）を測っていた
+
+master 508aae2（IKA-117 + IKA-118 の後）の上。
+
+### 1. 何を直したか
+
+* `tools/generation_match.py` が `play_game` に `bench_prior` を渡す。**腕ごとの持ち物**: `bench_prior[s]` は
+  side s の控えを値付けし、それを読むのは side 1−s の探索なので、各半分は**読む側の腕の選出キャッシュ**から作る
+  （side 0 が読むのは entry0 の相手の混合＝クラス平均の列戦略、side 1 が読むのは entry1 の自陣の混合）。
+  相手が実際に引いた entry を読むのは漏れなので読まない。ε 0・T 1（この対戦の引きと同じ）。
+  選出キャッシュを持たない腕（`--baseline-uniform-selection`）と、book が相手を持たず一様に引いた局
+  （生成の `drawn is None` と同じ）は一様。関数は `seat_bench_prior`
+* 腕ごとのフラグ `--uniform-bench-belief` / `--baseline-uniform-bench-belief`: 一様の推定分布を明示的に選ぶ
+  （既定は生成と同じ重み付き）。フラグが両腕で違うときだけ席ラベルに `@bookbelief` / `@uniformbelief`
+* `provenance(..., beliefs=)` を足した（側ごと、`"book"` / `"uniform"`、腕の設定を席順に）。`agent_name` は
+  隠蔽のときだけ `/belief:book` を付ける。**フィールドの無い既存の隠蔽記録は一様として読み、名前は変わらない**
+  （それが事実）。open の対局には付かない
+* worker の自己申告を2行足した: 起動時 `bench belief: tested arm book, other arm uniform`、終了時に席ごと
+  「重み付きの推定分布を実際に渡した局数」を `play_game` に渡したオブジェクトから数えて出す
+* `tools/agent_drift.py`: `AGENT_ARGS` と「既定値が出荷と違う引数」に `bench_prior` を足した（5つ目）。
+  引数ひとつだけを理由つきで免除する `EXCUSED_ARGS` を足し、`branch_dedup.py` の `bench_prior` を免除
+  （book を持たず両側の4匹を一様に引くので、一様の推定分布が正しい）。`selection_check.py` は新しく漂流に
+  加わったので `KNOWN_DRIFT` に入れた（名前付きの腕は相手の4匹を book の列戦略で引き、一様の推定分布で探索する。
+  起票候補）
+
+### 2. テスト（`tests/test_match_bench_prior.py`、6本）
+
+`main` を通して打つ（ローダと `play_game` を差し替え、book は2冊・選出は点質量 3/4/7/9 で、別の本・別の側・
+別の席から読むと必ず違う番号になる）:
+
+```
+  両席で各腕が自分の book から推定分布を作る   席0 (試験腕, 他腕) = (4, 7)  席1 = (3, 9)
+  --uniform-bench-belief の腕は両席で一様       席0 (None, 7)  席1 (None, 9)
+  book を持たない腕は両席で一様                 席0 (4, None)  席1 (3, None)
+  open の対局は推定分布なし・名前に belief なし
+  agent_drift: bench_prior が出荷引数に入り、generation_match が渡し、--check が 0
+  既存の隠蔽記録は一様として読む（名前が変わらない）
+
+  正の対照（修正前の generation_match）: 3本が落ちる
+            assert (None, None) == (4, 7) / (None, None) == (4, None)、フラグの1本は argparse で落ちる
+  故障の注入（形を壊す対照）:
+            返す組の順を入れ替える（読む側でなく読まれる側の腕の本）→ 3本落ちる  (7, 4) == (4, 7) など
+            席の入れ替えを忘れる（arm_weighted を席で反転しない）→ 2本落ちる  (3, None) == (None, 9) など
+  agent_drift --check（修正前の generation_match に対して）: rc=1
+            "NEW: generation_match.py drifted since the list was written."  missing bench_prior
+  修正後    上の6本と test_provenance・test_equal_wall_clock・test_selection_book・test_seat_swap・
+            test_ratings_shared_seed・test_load_tool・test_menu_ownership・test_line_endings・
+            test_no_machine_specific_paths が通る（-n 0）。ruff check . 通過。agent_drift --check rc=0
+```
+
+### 3. 両席に届いた証拠（worker 自身のログ）
+
+煙試験 `match_queue.py --games 2 --workers 2 --device cpu`、value-gen11L 同士・gen11L の book・`--hide-bench`・
+`--limit 24 --rank-leaf --baseline-rank-leaf --baseline-uniform-bench-belief`（4局、20秒）:
+
+```
+  worker0（席1 を2局）  bench belief: tested arm book, other arm uniform
+                        bench belief in ...side 1: weighted for the tested arm in 2 games, for the other arm in 0
+  worker1（席0 を2局）  bench belief in ...side 0: weighted for the tested arm in 2 games, for the other arm in 0
+  記録の provenance     席0 beliefs ['book','uniform']、席1 ['uniform','book']
+                        試験腕の名前は両席で .../hidden-bench/belief:book、他腕は .../hidden-bench
+  "explains nothing on board" の注記 0件
+  pair_divergence      2対とも turn 1 で手が分かれた（発火率 100%、4局なので目安だけ）
+```
+
+### 4. 影響を受けた記録（書き換えていない）
+
+**生成が重み付きになった 9/19 21:22（f84355f）以降の `--hide-bench` の対戦は、すべて両腕とも一様の推定分布で
+打っていた**。両腕が同じ一様なので比較としては公平で向きが変わる理由は無いが、出荷する打ち手の数字ではない:
+
+```
+  data/matches/ika66-w48-vs-w24-hidden   12,000局（9/20）   IKA-66「隠蔽での幅」
+  data/matches/ika66-null-control           200局（9/22）
+  data/matches/ika66-b-vs-a / b-vs-c / a-vs-c   各12,000局（9/22）  IKA-66 の腕どうし
+  data/matches/ika73-dg-vs-a / d-vs-a    各12,000局（9/23）  IKA-73 の腕どうし
+```
+
+それ以前の隠蔽の対戦（anchor-*-hidden-*、gen11Lx2-ownbook-vs-gen9book-hidden-m2、h12-vs-o12-hidden、
+hidden-gen11h-vs-gen10*、leafrank-* など）も一様だが、当時は生成も一様だったので生成と同じ打ち手。
+新しい名前の規則ではどれも `/belief:book` を持たず、一様の打ち手として正しく読まれる。
+
+### 5. 走らせていない測定（コーディネータへ）
+
+同じ葉・同じ選出キャッシュ・控え隠蔽で「重み付き 対 一様」を1回だけ（本文の4）:
+
+```
+  uv run --group learn python tools/match_queue.py \
+    --out data/matches/ika122-bookbelief-vs-uniform --games 6000 --served --servers 2 --workers 24 \
+    --value data/models/value-gen11L.pt --baseline data/models/value-gen11L.pt --hide-bench \
+    -- --limit 24 --rank-leaf --baseline-rank-leaf --baseline-uniform-bench-belief \
+    --selection-book data/selection/rizabanadohido-value-gen11L.jsonl.gz
+  uv run python tools/pair_divergence.py data/matches/ika122-bookbelief-vs-uniform   # 発火率を先に
+```
+
+12,000局。見積もり 約2時間（ika73 の 12,000局と同じ幅・同じ隠蔽。煙試験は CPU 1 worker あたり約8秒/局）。
+葉と book は gen11L で一致（`leaf and book agree`）。出荷の葉に合わせるなら `--value`/`--baseline` と book を
+そろえて差し替える。
+
+### 6. 機械
+
+煙試験 12:29:29〜12:29:49（2コア・鍵つき、20秒、4局）。テスト・ruff・agent_drift は1コアで数分。
+worktree に data/priors・data/standings・rust の release バイナリ・sim-bridge の dist を main から写した（コミットしない）。
