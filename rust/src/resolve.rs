@@ -614,6 +614,12 @@ const SALT_CURE_DAMAGE: (i64, i64) = (1, 8);
 const SALT_CURE_DAMAGE_WEAK: (i64, i64) = (1, 4);
 
 pub(crate) fn grounded(turn: &Turn, mon: &Pokemon) -> bool {
+    grounded_ignoring(turn, mon, false)
+}
+
+/// `_grounded(..., ignore_ability=...)`: a Mold Breaker move's view of `isGrounded`, which
+/// reads Levitate through `!this.battle.suppressingAbility(this)`.
+pub(crate) fn grounded_ignoring(turn: &Turn, mon: &Pokemon, ignore_ability: bool) -> bool {
     if mon.has_volatile("smackdown")
         || mon.has_volatile("ingrain")
         || matches!(mon.item, Some(i) if i.as_str() == "ironball")
@@ -623,7 +629,9 @@ pub(crate) fn grounded(turn: &Turn, mon: &Pokemon) -> bool {
     if mon.has_volatile("magnetrise") || mon.has_volatile("telekinesis") {
         return false;
     }
-    if mon.ability == "levitate" || matches!(mon.item, Some(i) if i.as_str() == "airballoon") {
+    if (mon.ability == "levitate" && !ignore_ability)
+        || matches!(mon.item, Some(i) if i.as_str() == "airballoon")
+    {
         return false;
     }
     !turn.types_of(mon).contains("Flying")

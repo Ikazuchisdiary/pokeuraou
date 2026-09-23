@@ -46,6 +46,7 @@ from .actions import (
 from .battler import Battler, FieldState
 from .damage import calculate, crit_probability
 from .effects import (
+    MOLD_BREAKER_ABILITIES,
     RESIST_BERRIES,
     SURVIVE_AT_ONE_ABILITIES,
     SURVIVE_AT_ONE_ITEMS,
@@ -923,14 +924,48 @@ class _Turn:
         self.log(f"p{side + 1} side +{cid}")
 
 
-def _grounded(turn: _Turn, mon: Pokemon) -> bool:
+def _grounded(turn: _Turn, mon: Pokemon, *, ignore_ability: bool = False) -> bool:
+    """Showdown's `isGrounded`. `ignore_ability` is a Mold Breaker move's view of it:
+    `hasAbility('levitate') && !this.battle.suppressingAbility(this)`."""
     if mon.has_volatile("smackdown") or mon.has_volatile("ingrain") or mon.item == "ironball":
         return True
     if mon.has_volatile("magnetrise") or mon.has_volatile("telekinesis"):
         return False
-    if mon.ability == "levitate" or mon.item == "airballoon":
+    if (mon.ability == "levitate" and not ignore_ability) or mon.item == "airballoon":
         return False
     return "Flying" not in turn.types_of(mon)
+
+
+def _stopped_by_psychic_terrain(
+    turn: _Turn, action: QueuedAction, move: Move, target: tuple[int, int]
+) -> bool:
+    """Psychic Terrain's `onTryHit` for one target (vendor/pokemon-showdown/data/moves.ts
+    :14116, IKA-156):
+
+        if (effect && (effect.priority <= 0.1 || effect.target === 'self')) return;
+        if (target.isSemiInvulnerable() || target.isAlly(source)) return;
+        if (!target.isGrounded()) { ...; return; }
+        return null;
+
+    It is step 1 of `trySpreadMoveHit`, per target and after the move has started, so PP
+    is spent and a Fake Out into a Flying type beside a grounded partner still lands. The
+    priority is the move's own after `ModifyPriority` (Prankster), which is the action's.
+    No move in the field makes its user semi-invulnerable, so that exemption is not read.
+    """
+    if turn.pos.field.terrain != "psychicterrain" or action.priority <= 0:
+        return False
+    if move.target == "self" or target[0] == action.side:
+        return False
+    defender = turn.mon_at(*target)
+    if defender is None or defender.fainted:
+        return False
+    attacker = turn.mon_at(action.side, action.slot)
+    ignore_ability = (
+        attacker is not None
+        and attacker.ability in MOLD_BREAKER_ABILITIES
+        and defender.item != "abilityshield"
+    )
+    return _grounded(turn, defender, ignore_ability=ignore_ability)
 
 
 # ---------------------------------------------------------------------------
@@ -1845,9 +1880,10 @@ def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[fl
         turn.unmodelled.add("thaw roll (1 in 4; the cured state is not branched)")
         return [(THAW_CHANCE, None), (1 - THAW_CHANCE, "frz")]
 
-    # Priority-blocking abilities and Psychic Terrain stop the move before it starts --
-    # but only a move aimed at the protected side. A self-targeting priority move such as
-    # Follow Me is unaffected.
+    # Priority-blocking abilities stop the move before it starts -- but only a move aimed
+    # at the protected side. A self-targeting priority move such as Follow Me is
+    # unaffected. Psychic Terrain is not here: it is per target, after the move has
+    # started (`_stopped_by_psychic_terrain`, IKA-156).
     move = turn.reg.moves[action.move_id] if action.move_id else None
     aimed_at_foes = move is not None and move.target not in (
         "self", "allySide", "allyTeam", "allies", "adjacentAlly", "adjacentAllyOrSelf", "all"
@@ -1858,11 +1894,6 @@ def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[fl
             foe = turn.mon_at(foe_side, slot)
             if foe is not None and not foe.fainted and foe.ability in PRIORITY_BLOCKING_ABILITIES:
                 return [(1.0, f"ability: {foe.ability}")]
-        if turn.pos.field.terrain == "psychicterrain":
-            for slot in range(len(turn.pos.sides[foe_side].active)):
-                foe = turn.mon_at(foe_side, slot)
-                if foe is not None and not foe.fainted and _grounded(turn, foe):
-                    return [(1.0, "psychicterrain")]
 
     outcomes: list[tuple[float, str | None]] = [(1.0, None)]
     if mon.status == "par" and budget.enumerate_status_checks:
@@ -2009,7 +2040,19 @@ def _use_move(
     if move.category == "Status":
         return _do_status_move(reg, turn, action, move, targets, budget)
 
+    # `move.spreadHit` is decided from every target before the hit steps run
+    # (battle-actions.ts:551), so a spread move that Psychic Terrain stops on one target
+    # still hits the other at the spread modifier.
     spread = move_hits_multiple(reg, action.move_id, len(targets))
+    # Psychic Terrain is step 1, ahead of Protect's own `onTryHit` (priority 4 over 3): a
+    # target it stops does not reach the protection check, so no Spiky Shield either.
+    stopped = [t for t in targets if _stopped_by_psychic_terrain(turn, action, move, t)]
+    for target in stopped:
+        turn.log(f"{turn.name(*target)} protected by psychicterrain")
+    targets = [t for t in targets if t not in stopped]
+    if not targets:
+        turn.move_failed.add((action.side, action.slot))
+        return [(1.0, turn, "")]
     turn.move_damage_total = 0
     turn.move_connected = False
     branches: list[Outcome] = [(1.0, turn, "")]
@@ -2179,6 +2222,10 @@ def _do_status_move(
 
     reachable: list[tuple[int, int]] = []
     for target in targets:
+        # Psychic Terrain before Protect, as on the damaging path (IKA-156).
+        if _stopped_by_psychic_terrain(turn, action, move, target):
+            turn.log(f"{turn.name(*target)} protected by psychicterrain")
+            continue
         if target != (action.side, action.slot):
             blocked = _blocked_by_protect(turn, action, move, target)
             if blocked is not None:

@@ -9981,3 +9981,116 @@ M-C（両方の席をプールから取る）ではゴースト同士・フェ�
 
 機械: cargo release ビルド 1 回（8 コア 25 秒）、diff_node 52 秒・110 秒（1 コア）、記録の集計 3〜12 秒 ×5（1 コア）、
 テスト 82 秒（1 コア）は heavy.py に記録（--agent IKA-153）。ほかに数十秒の短いテスト・調べ（オラクル 1 本、1 コア）を数回、直接走らせた。
+
+## 9/23 — IKA-156: サイコフィールドの先制技封じを、技全体から対象ごとへ —— オラクルで 6 ケースずれていた（浮いている相手への単体の先制技・片方だけ地面の範囲技・味方への先制技・かたやぶり対ふゆう・止まる時の PP）。Python と port を同時に直した。w12・gen11L にサイコフィールドの局面は 0
+
+### 1. Showdown の規則
+
+`vendor/pokemon-showdown/data/moves.ts:14116`（psychicterrain の condition の `onTryHit`、優先度 4）:
+
+```
+  if (effect && (effect.priority <= 0.1 || effect.target === 'self')) return;
+  if (target.isSemiInvulnerable() || target.isAlly(source)) return;
+  if (!target.isGrounded()) return;          // 浮いている対象には当たる
+  return null;                               // 地面にいる相手の対象だけ外れる
+```
+
+`trySpreadMoveHit` の手順 1（`hitStepTryHitEvent`）で対象ごと。技は始まった後なので PP は減り、Fake Out の
+`activeMoveActions` も進む。まもる（`onTryHit` 優先度 3）より先なので、止まった対象ではまもる・トーチカ等は働かない。
+`move.spreadHit` は手順の前（battle-actions.ts:551）に全対象で決まる。`isGrounded` はふゆうを
+`!this.battle.suppressingAbility(this)` で読むので、かたやぶりの技にはふゆうが無い。
+
+旧 Python・旧 port は `_can_act` / `can_act` で「先制技で、生きている相手に 1 体でも地面にいるものが居れば、技そのものを
+始めずに止める」だった。PP を減らさず、対象を見ず、味方への技も相手の足元で止め、かたやぶりを見ない。
+
+### 2. オラクル（`tests/test_psychic_terrain_per_target.py`）
+
+イエッサン（サイコメイカー）先発でフィールドを張り、Showdown の 1 ターンの HP・ランク・PP に Python を合わせる。
+
+```
+  ケース                        手                                         Showdown                 旧 Python        新
+  flying-beside-grounded        ねこだまし → アーマーガア（隣はガブリアス）  当たる・ひるむ            止まる           一致
+  control-grounded              ねこだまし → ガブリアス                     止まる・PP 1 減る         止まる・PP 減らず 一致
+  control-no-foe-grounded       ねこだまし → アーマーガア（隣はロトム）      当たる                    当たる（一致）    一致
+  levitate-beside-grounded      バレットパンチ（ルカリオ）→ ウォッシュロトム  当たる                    止まる           一致
+  mold-breaker-levitate         バレットパンチ（かたやぶりゴロンダ）→ ロトム  止まる・PP 1 減る         止まる・PP 減らず 一致
+  spread-one-grounded           いたずらごころ わたほうし → 両方             アーマーガアだけ S-2      両方止まる        一致
+  into-own-ally                 ねこだまし → 味方のイエッサン                当たる                    止まる           一致
+```
+
+対照は 2 つ: 地面の相手には止まる（旧も HP は一致、PP だけずれた）・浮いている相手だけなら当たる（旧も一致）。
+かたやぶりのケースは対象ごとの足元判定の陽性対照（攻撃側を見ない判定ならロトムに当たってしまう）。
+味方へのねこだましは `side_actions` が `normal` 技を味方へ向けないので探索は選ばない（テストは手で作った行動で打つ）。
+
+### 3. 直し
+
+* Python: `_can_act` からサイコフィールドを抜き、`_stopped_by_psychic_terrain(turn, action, move, target)` を新設。
+  `_use_move` の攻撃技の経路で `spread` を決めた後・`_hit_target` の前に対象から除く（全部除かれたら move_failed）。
+  変化技は `_do_status_move` の対象ループの先頭（まもるの前）。`_grounded` に `ignore_ability`（かたやぶり系で
+  ふゆうを無視、とくせいガードは除く）。`_hit_target` / `_bust_disguise`（IKA-155 が触っている）には触れていない。
+* port: `rust/src/moves.rs` の `can_act` から同じ部分を抜き、`stopped_by_psychic_terrain` を `use_move` と
+  `do_status_move` の同じ場所に。`rust/src/resolve.rs` に `grounded_ignoring`。
+* 優先度は行動の `priority`（いたずらごころ等の後）。半侵入は場の技に無いので読まない。
+* とくせいの先制封じ（じょおうのいげん等）は `_can_act` のまま（下の 6 節）。
+
+### 4. 直す前に落ちるテスト
+
+```
+  tests/test_psychic_terrain_per_target.py            旧 Python   新 Python   旧 port（main の exe）   新 port
+  ..._stops_each_grounded_target[control-grounded]      FAIL(PP)    pass
+  ..._stops_each_grounded_target[control-no-foe-...]    pass        pass
+  ..._stops_each_grounded_target[flying-beside-...]     FAIL        pass
+  ..._stops_each_grounded_target[into-own-ally]         FAIL        pass
+  ..._stops_each_grounded_target[levitate-beside-...]   FAIL        pass
+  ..._stops_each_grounded_target[mold-breaker-...]      FAIL(PP)    pass
+  ..._stops_each_grounded_target[spread-one-grounded]   FAIL        pass
+  test_the_port_stops_each_grounded_target[7 ケース]                            6 FAIL・1 pass           7 pass
+```
+
+旧 port は main の `rust/target/release/pokeuraou-damage.exe` を scratch に複写して `POKEURAOU_RUST_NODE_BIN` で指した。
+落ちた 6 つはどれも Showdown の状態との比較で（旧 Python と同じ所）、通った 1 つは control-no-foe-grounded。
+
+### 5. 一致（`tools/diff_node.py --terrain psychicterrain`、今回足した）
+
+記録にサイコフィールドの局面が無いので、w12 の局面にフィールドを敷き（`--give` と同じ考え）、先制技か
+先制を上げる特性が場にある局面だけ残す。先制技を使いうるセルを全部 branch ごとに比べ、`_stopped_by_psychic_terrain`
+を外した Python で動くセルを「止めが発火したセル」として数える。発火 0 なら失敗にする。
+
+```
+  --games-dir data/ika73/w12 --terrain psychicterrain --nodes 30 --limit 24     matrix        fast
+    局面 / セル                                                                  23 / 8,520    23 / 8,520
+    先制技を使いうるセル（branch ごとに比較）                                     1,874（不一致 0）  1,874（不一致 0）
+    止めが発火したセル                                                            1,056（不一致 0）  1,056（不一致 0）
+    セルの差の最大                                                                3.3e-16       1.1e-15
+    port の拒否 / exact の差                                                      0 / 0         0 / 0
+  陽性対照: 同じ matrix を main の旧 exe で                                        1,710 セル不一致、差の最大 0.42、FAIL
+```
+
+`tools/port_coverage.py --check`・`tools/port_gate_audit.py --check`: ok。ruff check ok（新しいテストは ruff format 済み。
+resolve.py・diff_node.py は元から ruff format の形ではないので全体は整形していない）。
+テスト: test_psychic_terrain_per_target・test_feint_order・test_resolve・test_rust_node・test_beliefnode・
+test_damage_diff・test_line_endings・test_no_machine_specific_paths を `-n 0` で 160 pass（57 秒）。
+
+### 6. 記録で該当する決定
+
+```
+                          ゲーム    サイコフィールド下の手番決定   該当セル   実際に指した手
+  data/ika73/w12          43,999   0                              0          0
+  data/selfplay-gen11L    12,000   0                              0          0
+```
+
+全局面の `field.terrain` を正規表現で数えると w12 592,200・gen11L 160,495 個がすべて null。サイコメイカーも
+サイコフィールドの技もどのゲームにも出ない。陽性対照: w12 の 1 局の最初の手番に psychicterrain を書き込んだ
+ファイルでは同じ集計が 1 決定を見つけた。だからこの 2 つのデータでは直しは何も動かさない。イエッサンの居る
+プール（M-C・別の構築）では、浮いている相手へのねこだましが止まっていたはず。
+
+### 7. 残り（別課題の候補）
+
+* とくせいの先制封じ（じょおうのいげん・ビビッドボディ・テイルアーマー）も `_can_act` で「技を始めずに止める」ので
+  PP が減らない。Showdown は `onFoeTryMove`（useMoveInner、PP を減らした後）で、`source.isAlly(holder)`、
+  つまり技の対象が持ち主の側のときだけ止める（味方へ向けた先制技は止まらない）。オラクル未確認
+* `_grounded` は じゅうりょく と「はねやすめ中の ??? 」を見ない（場の技に無ければ実害なし）
+
+機械: cargo release ビルド 1 回（8 コア 26 秒）、diff_node 1 秒・33 秒・60 秒・32 秒（1 コア）、記録の集計 11 秒・21 秒、
+テスト 15 秒・14 秒・57 秒（1 コア）は heavy.py に記録（--agent IKA-156）。ほかにオラクルのテスト 1 本（数十秒以内、1 コア）を
+旧・新コードで数回、直接走らせた。

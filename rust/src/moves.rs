@@ -6,13 +6,13 @@
 
 use crate::battler::Battler;
 use crate::damage::{calculate, crit_probability};
-use crate::effects::resist_berry;
+use crate::effects::{is_mold_breaker, resist_berry};
 use crate::id::Id;
 use crate::moveinfo::MoveContext;
 use crate::position::{Effect, Position};
 use crate::reg::{Move, Reg, F_CONTACT, F_FAILENCORE, F_POWDER, F_PROTECT};
 use crate::resolve::{
-    change_forme, check_white_herb, grounded, stratified_rolls, Budget, Outcome, Slot,
+    change_forme, check_white_herb, grounded_ignoring, stratified_rolls, Budget, Outcome, Slot,
     Turn,
     CONFUSION_SELF_HIT_CHANCE, FREEZE_COUNTER, FULL_PARALYSIS_CHANCE, THAW_CHANCE,
     TWO_TURN_MOVES,
@@ -201,7 +201,8 @@ fn can_act(
         return Ok(vec![(THAW_CHANCE, None), (1.0 - THAW_CHANCE, Some("frz".into()))]);
     }
 
-    // Priority-blocking abilities and Psychic Terrain.
+    // Priority-blocking abilities. Psychic Terrain is per target, after the move has
+    // started (`stopped_by_psychic_terrain`, IKA-156).
     let move_id = action.move_id.ok_or("a move action with no move")?;
     let aimed_at_foes = turn
         .reg
@@ -234,17 +235,6 @@ fn can_act(
                 }
             }
         }
-        if is(turn.pos.field.terrain, "psychicterrain") {
-            for slot in 0..turn.pos.sides[foe_side].active.len() {
-                let blocked = match turn.mon_at(foe_side, slot) {
-                    None => false,
-                    Some(foe) => !foe.fainted && grounded(turn, foe),
-                };
-                if blocked {
-                    return Ok(vec![(1.0, Some("psychicterrain".into()))]);
-                }
-            }
-        }
     }
 
     let mut outcomes: Vec<(f64, Option<String>)> = vec![(1.0, None)];
@@ -269,6 +259,29 @@ fn can_act(
         outcomes = expanded;
     }
     Ok(outcomes)
+}
+
+/// `_stopped_by_psychic_terrain`: the terrain's `onTryHit` for one target
+/// (`data/moves.ts:14116`). Only a positive-priority move, not a self-targeting one, into
+/// a grounded foe; Mold Breaker reads Levitate as absent (IKA-156).
+fn stopped_by_psychic_terrain(turn: &Turn, action: &QueuedAction, mv: &Move, target: Slot) -> bool {
+    if !is(turn.pos.field.terrain, "psychicterrain") || action.priority <= 0 {
+        return false;
+    }
+    if mv.target.as_str() == "self" || target.0 == action.side {
+        return false;
+    }
+    let Some(defender) = turn.mon_at(target.0, target.1) else {
+        return false;
+    };
+    if defender.fainted {
+        return false;
+    }
+    let ignore_ability = turn
+        .mon_at(action.side, action.slot)
+        .is_some_and(|attacker| is_mold_breaker(attacker.ability.as_str()))
+        && !matches!(defender.item, Some(i) if i.as_str() == "abilityshield");
+    grounded_ignoring(turn, defender, ignore_ability)
 }
 
 fn use_move<'a>(
@@ -413,7 +426,18 @@ fn use_move<'a>(
         return do_status_move(reg, turn, action, mv, &targets, budget);
     }
 
+    // `move.spreadHit` is decided from every target before the hit steps run, and Psychic
+    // Terrain (step 1, ahead of Protect) then drops the grounded ones.
     let spread = move_hits_multiple(reg, move_id.as_str(), targets.len());
+    let targets: Vec<Slot> = targets
+        .iter()
+        .copied()
+        .filter(|t| !stopped_by_psychic_terrain(&turn, action, mv, *t))
+        .collect();
+    if targets.is_empty() {
+        turn.move_failed[action.side][action.slot] = true;
+        return Ok(vec![(1.0, turn)]);
+    }
     turn.move_damage_total = 0;
     turn.move_connected = false;
     let mut branches: Vec<Outcome<'a>> = vec![(1.0, turn)];
@@ -1432,6 +1456,9 @@ fn do_status_move<'a>(
 
     let mut reachable: Vec<Slot> = Vec::new();
     for target in targets {
+        if stopped_by_psychic_terrain(&turn, action, mv, *target) {
+            continue;
+        }
         if *target != (action.side, action.slot)
             && blocked_by_protect(&turn, action, mv, *target).is_some()
         {
