@@ -181,19 +181,27 @@ CLASSES: tuple[Class, ...] = (
 )
 
 
-def parse(junit: Path) -> tuple[list[tuple[str, str]], dict[str, int]]:
-    """(test id, skip reason) per skip, plus the run's own totals.
+def parse(
+    junit: Path,
+) -> tuple[list[tuple[str, str]], dict[str, int], list[tuple[str, str]]]:
+    """(test id, skip reason) per skip, the run's own totals, and the xfails apart.
 
     A `pytest.skip` inside a test puts its reason in ``message``. A module-scope
     `importorskip` does not: the whole module is one synthetic case whose message is the
     constant "collection skipped", and the reason is in the element's text. Both are read,
     or the four modules that need torch would be four skips of unknown cause -- which is
     the failure this file exists to refuse.
+
+    An xfail is written the same way, as ``<skipped type="pytest.xfail">``, but it is not a
+    check that stopped running: the test ran and failed as declared, and a strict one fails
+    the suite the day the defect it holds is fixed (IKA-158 holds the hazards on the wrong
+    side this way). So it is kept out of the skips, and listed on its own.
     """
     root = ET.parse(junit).getroot()
     suites = [root] if root.tag == "testsuite" else list(root.iter("testsuite"))
     totals = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0}
     skips: list[tuple[str, str]] = []
+    xfails: list[tuple[str, str]] = []
     for suite in suites:
         for key in totals:
             totals[key] += int(suite.get(key, 0) or 0)
@@ -203,8 +211,11 @@ def parse(junit: Path) -> tuple[list[tuple[str, str]], dict[str, int]]:
                 message = (skipped.get("message") or "").strip()
                 body = " ".join((skipped.text or "").split())
                 reason = f"{message} {body}".strip() if body else message
-                skips.append((where, reason))
-    return skips, totals
+                if skipped.get("type") == "pytest.xfail":
+                    xfails.append((where, reason))
+                else:
+                    skips.append((where, reason))
+    return skips, totals, xfails
 
 
 def classify(reason: str) -> Class | None:
@@ -239,11 +250,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  no report at {args.junit}; pytest did not get far enough to write one")
         return 2
 
-    skips, totals = parse(args.junit)
+    skips, totals, xfails = parse(args.junit)
     print(
         f"  {totals['tests']} tests, {totals['failures']} failed, "
         f"{totals['errors']} errored, {len(skips)} skipped"
+        + (f", {len(xfails)} xfailed" if xfails else "")
     )
+    for where, reason in xfails:
+        print(f"    xfail (ran, a known defect held): {where}: {reason}")
     if totals["tests"] == 0:
         print("  no tests ran, so 'nothing skipped' means nothing")
         return 1

@@ -152,6 +152,7 @@ pub fn ability_is_modelled(id: &str) -> bool {
             | "shedskin"
             | "sheerforce"
             | "shellarmor"
+            | "skilllink"
             | "slushrush"
             | "sniper"
             | "snowcloak"

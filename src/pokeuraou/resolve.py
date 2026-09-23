@@ -98,8 +98,11 @@ PROTECT_MOVES = frozenset(PROTECT_VOLATILES)
 #: change.
 STALL_BUMPING_MOVES = frozenset({"wideguard", "quickguard"})
 
-#: Abilities that block priority moves aimed at the holder's side.
+#: Abilities that block priority moves aimed at the holder's side (`onFoeTryMove`).
 PRIORITY_BLOCKING_ABILITIES = frozenset({"armortail", "queenlymajesty", "dazzling"})
+
+#: `targetAllExceptions` in those abilities: the only `all` moves they stop.
+PRIORITY_BLOCKED_ALL_MOVES = frozenset({"perishsong", "flowershield", "rototiller"})
 
 #: Volatiles that redirect single-target moves to their holder.
 REDIRECTION_VOLATILES = ("followme", "ragepowder", "spotlight")
@@ -971,6 +974,46 @@ def _stopped_by_psychic_terrain(
         and defender.item != "abilityshield"
     )
     return _grounded(turn, defender, ignore_ability=ignore_ability)
+
+
+def _priority_blocked_by(
+    turn: _Turn, action: QueuedAction, move: Move, targets: list[tuple[int, int]]
+) -> tuple[int, int] | None:
+    """The foe whose Armor Tail / Queenly Majesty / Dazzling stops this move, if any
+    (vendor/pokemon-showdown/data/abilities.ts, armortail; IKA-158):
+
+        if (move.target === 'foeSide' || (move.target === 'all' && !exceptions.includes(move.id))) return;
+        if ((source.isAlly(holder) || move.target === 'all') && move.priority > 0.1) return false;
+
+    It is an `onFoeTryMove`, run by `useMoveInner` after `runMove` has spent the PP, with
+    the move's target -- the last of `getMoveTargets` -- as `source`. So a priority move
+    aimed at the user's own ally is not stopped, Prankster Spikes (`foeSide`) and Sunny
+    Day (`all`) are not, and a spread move is (its last target is a foe). The ability is
+    `breakable`: a move that ignores abilities (Mold Breaker; Mycelium Might only for a
+    status move) passes, unless the holder has an Ability Shield.
+    """
+    if action.priority <= 0 or move.target == "foeSide":
+        return None
+    if move.target == "all":
+        if move.id not in PRIORITY_BLOCKED_ALL_MOVES:
+            return None
+    elif not any(side != action.side for side, _slot in targets):
+        return None
+    attacker = turn.mon_at(action.side, action.slot)
+    ignores_ability = (
+        attacker is not None
+        and attacker.ability in MOLD_BREAKER_ABILITIES
+        and (attacker.ability != "myceliummight" or move.category == "Status")
+    )
+    foe_side = 1 - action.side
+    for slot in range(len(turn.pos.sides[foe_side].active)):
+        foe = turn.mon_at(foe_side, slot)
+        if foe is None or foe.fainted or foe.ability not in PRIORITY_BLOCKING_ABILITIES:
+            continue
+        if ignores_ability and foe.item != "abilityshield":
+            continue
+        return (foe_side, slot)
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -1887,21 +1930,9 @@ def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[fl
         turn.unmodelled.add("thaw roll (1 in 4; the cured state is not branched)")
         return [(THAW_CHANCE, None), (1 - THAW_CHANCE, "frz")]
 
-    # Priority-blocking abilities stop the move before it starts -- but only a move aimed
-    # at the protected side. A self-targeting priority move such as Follow Me is
-    # unaffected. Psychic Terrain is not here: it is per target, after the move has
-    # started (`_stopped_by_psychic_terrain`, IKA-156).
-    move = turn.reg.moves[action.move_id] if action.move_id else None
-    aimed_at_foes = move is not None and move.target not in (
-        "self", "allySide", "allyTeam", "allies", "adjacentAlly", "adjacentAllyOrSelf", "all"
-    )
-    if action.priority > 0 and aimed_at_foes:
-        foe_side = 1 - action.side
-        for slot in range(len(turn.pos.sides[foe_side].active)):
-            foe = turn.mon_at(foe_side, slot)
-            if foe is not None and not foe.fainted and foe.ability in PRIORITY_BLOCKING_ABILITIES:
-                return [(1.0, f"ability: {foe.ability}")]
-
+    # Neither the priority-blocking abilities nor Psychic Terrain are here: both act after
+    # the move has started, so PP is spent (`_priority_blocked_by`, IKA-158, and
+    # `_stopped_by_psychic_terrain`, IKA-156).
     outcomes: list[tuple[float, str | None]] = [(1.0, None)]
     if mon.status == "par" and budget.enumerate_status_checks:
         outcomes = [(1 - FULL_PARALYSIS_CHANCE, None), (FULL_PARALYSIS_CHANCE, "par")]
@@ -2038,6 +2069,14 @@ def _use_move(
     no_target_needed = move.target in ("self", "allySide", "allyTeam", "all", "foeSide")
     if not targets and not no_target_needed:
         turn.log(f"{action.label(reg)} had no target")
+        turn.move_failed.add((action.side, action.slot))
+        return [(1.0, turn, "")]
+
+    # `TryMove`: after the PP, the target and the charge turn, before any hit step.
+    holder = _priority_blocked_by(turn, action, move, targets)
+    if holder is not None:
+        blocker = turn.mon_at(*holder)
+        turn.log(f"{action.label(reg)} did not happen (ability: {blocker.ability if blocker else '?'})")
         turn.move_failed.add((action.side, action.slot))
         return [(1.0, turn, "")]
 
@@ -2768,16 +2807,30 @@ def _blocked_by_protect(
 
 
 #: Showdown's hit-count distribution for a [2, 5] multi-hit move in generation 5 and
-#: later: `sample([2, 2, 3, 3, 4, 5])`.
-MULTIHIT_2_5 = ((2, 1 / 3), (3, 1 / 3), (4, 1 / 6), (5, 1 / 6))
+#: later, 35-35-15-15: `hitStepMoveHitLoop` samples
+#: `[2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 5, 5, 5]`
+#: (vendor/pokemon-showdown/sim/battle-actions.ts:869-870, and the champions mod's copy in
+#: data/mods/champions/scripts.ts:440-441). This was 1/3, 1/3, 1/6, 1/6 -- the older
+#: `[2, 2, 3, 3, 4, 5]` -- until IKA-160; 200,000 real turns of Bullet Seed in the Champions
+#: format came out 35.0 / 35.1 / 14.9 / 14.9 (and a Skill Link user's 200,000 all 5).
+MULTIHIT_2_5 = ((2, 7 / 20), (3, 7 / 20), (4, 3 / 20), (5, 3 / 20))
 
 
-def multihit_counts(move: Move, budget: Budget) -> list[tuple[int, float]]:
+def multihit_counts(
+    move: Move, budget: Budget, ability: str | None = None
+) -> list[tuple[int, float]]:
     """(hit count, probability) for a move, or [(1, 1.0)] when it hits once.
 
     Under a pinned budget the count is the minimum, which is what Showdown's
     ``multihit='min'`` policy produces -- ``sample`` returns the first element and
     ``random(a, b)`` returns ``a``.
+
+    ``ability`` is the user's. Skill Link's ``onModifyMove`` replaces a ranged
+    ``multihit`` with its upper end before the loop draws anything
+    (vendor/pokemon-showdown/data/abilities.ts, ``skilllink``), so the count is the
+    maximum whatever the budget -- the pinned oracle included, since no draw is left to
+    pin (IKA-160). Loaded Dice is ``isNonstandard: "Past"`` in both Champions mods and is
+    not modelled.
     """
     multihit = move.raw.get("multihit")
     if not multihit:
@@ -2785,6 +2838,8 @@ def multihit_counts(move: Move, budget: Budget) -> list[tuple[int, float]]:
     if isinstance(multihit, int):
         return [(multihit, 1.0)]
     low, high = int(multihit[0]), int(multihit[-1])
+    if ability == "skilllink":
+        return [(high, 1.0)]
     if not budget.enumerate_secondary:
         return [(low, 1.0)]
     if (low, high) == (2, 5):
@@ -2906,7 +2961,7 @@ def _hit_target(
             # target's HP *and* the Focus Sash / Sturdy consumption that goes with it.
             # Capping here as well would leave the item on the field.
             for roll, roll_weight in rolls:
-                for hits, hit_weight in multihit_counts(move, budget):
+                for hits, hit_weight in multihit_counts(move, budget, attacker.ability):
                     state = turn.clone()
                     if breaks:
                         _break_protection(state, action, move, [target])

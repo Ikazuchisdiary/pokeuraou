@@ -37,9 +37,16 @@ Holding the port to a move, which is what taking a refusal out of the port asks 
 `--using` keeps the positions with a Pokemon on the field that knows the move. Every cell
 where an action uses it is held to the port branch by branch -- the port refused all of
 them before -- and the cells where the move's effect *fired* are counted apart: for a
-`breaksProtect` move (the only kind this takes, IKA-61), the same turn resolved in Python
+`breaksProtect` move (IKA-61), the same turn resolved in Python
 with `_break_protection` taken out. A Feint into a foe that did not Protect agrees
 without the break ever running, and that is not evidence the break is right (IKA-58).
+
+`--using` also takes a [2, 5] multi-hit move (IKA-160):
+
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --using bulletseed,rockblast
+
+The control is the hit count as it was before IKA-160 -- 1/3, 1/3, 1/6, 1/6 and Skill Link
+not read -- so the cells it moves are the ones where the count's distribution mattered.
 
 Holding the port to a terrain no recorded game has (IKA-156):
 
@@ -49,6 +56,15 @@ Holding the port to a terrain no recorded game has (IKA-156):
 priority-raising ability) on the field, and holds every cell that may use one branch by
 branch. The cells where the terrain's per-target stop *fired* are the ones Python moves
 with `_stopped_by_psychic_terrain` taken out, and the run fails if there are none.
+
+Holding the port to the priority-blocking abilities (IKA-158):
+
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --priority-block
+
+`--priority-block` keeps the recorded positions with Armor Tail, Queenly Majesty or
+Dazzling on the field and holds every cell that may use a priority move branch by branch.
+The cells where the stop *fired* are the ones Python moves with `_priority_blocked_by`
+taken out, and the run fails if there are none.
 
 Holding the port to Salt Cure, which no recorded team uses (IKA-159):
 
@@ -117,7 +133,12 @@ from pokeuraou.narrow import narrow  # noqa: E402
 from pokeuraou.payoff import OBJECTIVES  # noqa: E402
 from pokeuraou.position import Effect, MoveSlot, Position  # noqa: E402
 from pokeuraou.priors import find_cached_chaos, load_chaos  # noqa: E402
-from pokeuraou.resolve import Budget, batched_payoffs, resolve_turn  # noqa: E402
+from pokeuraou.resolve import (  # noqa: E402
+    PRIORITY_BLOCKING_ABILITIES,
+    Budget,
+    batched_payoffs,
+    resolve_turn,
+)
 from pokeuraou.selfplay import play_game  # noqa: E402
 from pokeuraou.standings import (  # noqa: E402
     find_cached_standings,
@@ -229,6 +250,53 @@ class unbroken:  # noqa: N801 - read as a phrase at the call site
         resolve_mod._break_protection = self.real
 
 
+class old_hit_counts:  # noqa: N801 - read as a phrase at the call site
+    """Python with the hit count as it was before IKA-160: the control for a multi-hit move.
+
+    A [2, 5] move is 1/3, 1/3, 1/6, 1/6 -- the older `sample([2, 2, 3, 3, 4, 5])` -- and the
+    user's Skill Link is not read. Everything else about the move stays, so what differs is
+    only what the count's distribution did.
+    """
+
+    OLD_2_5 = [(2, 1 / 3), (3, 1 / 3), (4, 1 / 6), (5, 1 / 6)]
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = real = resolve_mod.multihit_counts
+        now_2_5 = list(resolve_mod.MULTIHIT_2_5)
+
+        def before(move, budget, ability=None):  # noqa: ANN001, ANN202, ARG001
+            counts = real(move, budget)
+            return list(self.OLD_2_5) if counts == now_2_5 else counts
+
+        resolve_mod.multihit_counts = before
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        resolve_mod.multihit_counts = self.real
+
+
+class unchanged:  # noqa: N801 - read as a phrase at the call site
+    """The control for `--using`: each kind of move named has its effect taken out."""
+
+    def __init__(self, reg, moves: frozenset[str]) -> None:  # noqa: ANN001
+        self.parts = []
+        if any(reg.moves[m].raw.get("breaksProtect") for m in moves):
+            self.parts.append(unbroken())
+        if any(isinstance(reg.moves[m].raw.get("multihit"), list) for m in moves):
+            self.parts.append(old_hit_counts())
+
+    def __enter__(self) -> None:
+        for part in self.parts:
+            part.__enter__()
+
+    def __exit__(self, *exc) -> None:  # noqa: ANN002
+        for part in reversed(self.parts):
+            part.__exit__(*exc)
+
+
 class unstopped:  # noqa: N801 - read as a phrase at the call site
     """Python with Psychic Terrain's per-target stop taken out: the control for --terrain.
 
@@ -279,6 +347,31 @@ def salt(pos: Position) -> int:
     return salted
 
 
+class unblocked:  # noqa: N801 - read as a phrase at the call site
+    """Python with the priority-blocking abilities' stop taken out: the control for
+    --priority-block. The move still starts and spends its PP (IKA-158)."""
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = resolve_mod._priority_blocked_by
+        resolve_mod._priority_blocked_by = lambda *_args: None
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        resolve_mod._priority_blocked_by = self.real
+
+
+def ability_on_field(pos: Position, abilities: frozenset[str]) -> bool:
+    """Whether a Pokemon on the field, still standing, has one of these abilities."""
+    return any(
+        mon is not None and not mon.fainted and mon.ability in abilities
+        for side in pos.sides
+        for mon in side.active_pokemon()
+    )
+
+
 #: The foeSide moves with a `sideCondition` in both dumps, in the order `teach_hazards` deals.
 HAZARD_MOVES = ("stealthrock", "spikes", "toxicspikes", "stickyweb")
 
@@ -302,7 +395,13 @@ class hazards_on_the_users_side:  # noqa: N801 - read as a phrase at the call si
 
 def teach_hazards(reg, pos: Position, dealt: list[int]) -> int:  # noqa: ANN001
     """Puts a hazard in the last move slot of every Pokemon on the field that knows none,
-    dealing them in turn, and says how many were taught."""
+    dealing them in turn, and says how many were taught.
+
+    Not over a move the position still points at -- a Choice lock's, an Encore's, a
+    Disable's, the last one used: a lock on a move the Pokemon no longer knows is a state
+    no game reaches, and the two engines part on it (the port rewrites the lock, Python
+    keeps it) for reasons that are not the hazard's.
+    """
     taught = 0
     for side in pos.sides:
         for mon in side.active_pokemon():
@@ -310,12 +409,30 @@ def teach_hazards(reg, pos: Position, dealt: list[int]) -> int:  # noqa: ANN001
                 continue
             if any(slot.id in HAZARD_MOVES for slot in mon.moves):
                 continue
+            held = {v.move for v in mon.volatiles if v.move} | {mon.last_move}
+            free = [index for index, slot in enumerate(mon.moves) if slot.id not in held]
+            if not free:
+                continue
             move_id = HAZARD_MOVES[dealt[0] % len(HAZARD_MOVES)]
             dealt[0] += 1
             pp = reg.moves[move_id].pp
-            mon.moves[-1] = MoveSlot(id=move_id, pp=pp, maxpp=pp)
+            mon.moves[free[-1]] = MoveSlot(id=move_id, pp=pp, maxpp=pp)
             taught += 1
     return taught
+
+
+def sides_agree(node, pos: Position, a, b, here, budget) -> bool:  # noqa: ANN001
+    """Whether every branch the port gives lays the same side conditions as Python's."""
+    for index, branch in enumerate(here.branches):
+        chosen = node.resolve(pos, [a, b], budget, select=index)
+        if chosen is None or chosen.position is None:
+            return False
+        for mine, theirs in zip(branch.position.sides, chosen.position.sides, strict=True):
+            if [c.to_json() for c in mine.side_conditions] != [
+                c.to_json() for c in theirs.side_conditions
+            ]:
+                return False
+    return True
 
 
 #: Abilities that raise a move's priority, and the moves they raise (`speed.move_priority`).
@@ -357,7 +474,11 @@ def priority_on_field(pos: Position, own: frozenset[str]) -> bool:
 
 
 def recorded_positions(  # noqa: ANN001
-    reg, args, holding: frozenset[str], using: frozenset[str] = frozenset()
+    reg,
+    args,
+    holding: frozenset[str],
+    using: frozenset[str] = frozenset(),
+    abilities: frozenset[str] = frozenset(),
 ) -> tuple[list[Position], int]:
     """Roots a search already filled a matrix at, read from recorded games.
 
@@ -369,7 +490,7 @@ def recorded_positions(  # noqa: ANN001
     found: list[Position] = []
     keys: set[str] = set()
     other_format = 0
-    wanted = holding | using
+    wanted = holding | using | abilities
     enough = None if wanted else 40 * args.nodes
     for directory in args.games_dir:
         for path in sorted(Path(directory).glob("*.jsonl")):
@@ -397,6 +518,8 @@ def recorded_positions(  # noqa: ANN001
                         if holding and not on_field(pos, holding):
                             continue
                         if using and not knows_on_field(pos, using):
+                            continue
+                        if abilities and not ability_on_field(pos, abilities):
                             continue
                         keys.add(key)
                         found.append(pos)
@@ -605,9 +728,9 @@ def main() -> None:
     ap.add_argument(
         "--using",
         default=None,
-        help="comma-separated breaksProtect move ids: keep positions where a Pokemon on "
-        "the field knows one, hold every cell that uses one to the port branch by branch, "
-        "and count where the break fired",
+        help="comma-separated breaksProtect or [2, 5] multi-hit move ids: keep positions "
+        "where a Pokemon on the field knows one, hold every cell that uses one to the port "
+        "branch by branch, and count where the break or the hit count fired",
     )
     ap.add_argument(
         "--terrain",
@@ -624,6 +747,13 @@ def main() -> None:
         help="put Salt Cure on every Pokemon on the field first -- no recorded team has "
         "it -- hold every cell to the port branch by branch, and count where the champions "
         "mod's fraction fired: the cells the base game's 1/8 and 1/4 move",
+    )
+    ap.add_argument(
+        "--priority-block",
+        action="store_true",
+        help="keep positions with Armor Tail, Queenly Majesty or Dazzling on the field, "
+        "hold every cell that may use a priority move to the port branch by branch, and "
+        "count where the ability's stop fired",
     )
     ap.add_argument(
         "--hazards",
@@ -646,10 +776,15 @@ def main() -> None:
     if args.give:
         holding |= {args.give}
     using = frozenset(m for m in (args.using or "").split(",") if m)
+    blockers = PRIORITY_BLOCKING_ABILITIES if args.priority_block else frozenset()
     for move_id in sorted(using):
         move = reg.moves.get(move_id)
-        if move is None or not move.raw.get("breaksProtect"):
-            ap.error(f"--using takes breaksProtect moves; {move_id} is not one here")
+        if move is None or not (
+            move.raw.get("breaksProtect") or isinstance(move.raw.get("multihit"), list)
+        ):
+            ap.error(
+                f"--using takes breaksProtect or ranged multi-hit moves; {move_id} is neither"
+            )
 
     if args.value:
         import torch
@@ -674,7 +809,7 @@ def main() -> None:
         print(f"the node of {args.scenario}")
     elif args.games_dir:
         positions, other_format = recorded_positions(
-            reg, args, holding - {args.give}, using
+            reg, args, holding - {args.give}, using, blockers
         )
         print(
             f"{len(positions)} recorded positions from "
@@ -694,7 +829,9 @@ def main() -> None:
         positions = [pos for pos in positions if on_field(pos, holding)]
     if using:
         positions = [pos for pos in positions if knows_on_field(pos, using)]
-    quick = priority_moves(reg) if args.terrain else frozenset()
+    if blockers:
+        positions = [pos for pos in positions if ability_on_field(pos, blockers)]
+    quick = priority_moves(reg) if args.terrain or blockers else frozenset()
     if args.terrain:
         for pos in positions:
             pos.field.terrain = args.terrain
@@ -708,7 +845,7 @@ def main() -> None:
         dealt = [0]
         taught = sum(teach_hazards(reg, pos, dealt) for pos in positions)
         print(f"a hazard taught to {taught} Pokemon on the field")
-    build =rustnode.require_current_binary()
+    build = rustnode.require_current_binary()
     print(f"binary {build['sha256']} built {build['built']}")
 
     # A refused cell is filled by Python, and for a learned leaf that means its leaves are
@@ -745,12 +882,15 @@ def main() -> None:
     # Where a priority move may go under the terrain, and where the terrain stopped it.
     quick_used = quick_wrong = stopped = stopped_wrong = 0
     stopped_worst = 0.0
+    # Where a priority move may go beside a blocking ability, and where the ability stopped it.
+    block_used = block_wrong = blocked = blocked_wrong = 0
+    blocked_worst = 0.0
     # Under Salt Cure, every cell; and where the mod's fraction moved the answer.
     cured = cured_wrong = cured_refused = cured_fired = cured_fired_wrong = 0
     cured_worst = 0.0
     # Where a hazard was used, and where laying it on the foe's side moved the answer.
     laid = laid_wrong = laid_refused = laid_fired = laid_fired_wrong = 0
-    laid_fired_refused = laid_fired_paused = 0
+    laid_fired_refused = laid_fired_paused = laid_wrong_elsewhere = 0
     laid_worst = 0.0
     hazard_moves = frozenset(HAZARD_MOVES)
 
@@ -824,7 +964,7 @@ def main() -> None:
                         continue
                     used += 1
                     here = resolve_turn(reg, pos, [a, b], budget=budget)
-                    with unbroken():
+                    with unchanged(reg, using):
                         control = resolve_turn(reg, pos, [a, b], budget=budget)
                     fired_here = differ(outcome(here), outcome(control))
                     wrong = (
@@ -878,6 +1018,36 @@ def main() -> None:
                     if wrong and shown < 5:
                         shown += 1
                         print(f"  cell {(i, j)} under {args.terrain}: {wrong[0][:200]}")
+
+        if blockers:
+            node = rustnode.node_for(reg)
+            for i, a in enumerate(row):
+                for j, b in enumerate(col):
+                    if not (
+                        uses_priority(reg, pos, 0, a, quick) or uses_priority(reg, pos, 1, b, quick)
+                    ):
+                        continue
+                    block_used += 1
+                    here = resolve_turn(reg, pos, [a, b], budget=budget)
+                    with unblocked():
+                        control = resolve_turn(reg, pos, [a, b], budget=budget)
+                    wrong = (
+                        ["no warm process"]
+                        if node is None
+                        else branch_differences(node, reg, pos, a, b, here, budget)
+                    )
+                    block_wrong += bool(wrong)
+                    if differ(outcome(here), outcome(control)):
+                        blocked += 1
+                        blocked_wrong += bool(wrong)
+                        for index in range(len(evaluators)):
+                            blocked_worst = max(
+                                blocked_worst,
+                                abs(float(got[index][i, j] - expected[index][i, j])),
+                            )
+                    if wrong and shown < 5:
+                        shown += 1
+                        print(f"  cell {(i, j)} beside a blocking ability: {wrong[0][:200]}")
 
         if args.salt_cure:
             node = rustnode.node_for(reg)
@@ -933,6 +1103,11 @@ def main() -> None:
                     if refused_here:
                         wrong = []
                     laid_wrong += bool(wrong)
+                    if wrong and node is not None:
+                        # Whether the two engines at least lay the same side conditions: a
+                        # cell they part on elsewhere is a disagreement the hazard only
+                        # led the tool to (IKA-165 met the port's missing Perish Song so).
+                        laid_wrong_elsewhere += sides_agree(node, pos, a, b, here, budget)
                     mine, theirs = outcome(here), outcome(control)
                     if differ(mine, theirs):
                         laid_fired += 1
@@ -1013,7 +1188,7 @@ def main() -> None:
         print(f"\n  where {', '.join(sorted(using))} was used -- every one held branch by branch")
         print(f"    {used} of {cells} cells")
         print(f"    cells whose branches, weights, notes or positions differ  {used_wrong}")
-        print("  where the break fired -- the cells `_break_protection` taken out moves")
+        print("  where the effect fired -- the cells the control (`unchanged`) moves")
         print(f"    {broke} of {used} cells")
         print(f"    cells whose branches, weights, notes or positions differ  {broke_wrong}")
         print(f"    cells with a paused branch, whose position is not compared  {broke_paused}")
@@ -1035,10 +1210,19 @@ def main() -> None:
         print(f"    {cured_fired} of {cured} cells")
         print(f"    cells whose branches, weights, notes or positions differ  {cured_fired_wrong}")
         print(f"    worst cell difference there  {cured_worst:.3e}")
+    if blockers:
+        print("\n  beside a priority-blocking ability, cells that may use a priority move")
+        print(f"    {block_used} of {cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {block_wrong}")
+        print("  where the ability stopped one -- the cells `unblocked` moves")
+        print(f"    {blocked} of {block_used} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {blocked_wrong}")
+        print(f"    worst cell difference there  {blocked_worst:.3e}")
     if args.hazards:
         print("\n  where a hazard was used -- every one held branch by branch")
         print(f"    {laid} of {cells} cells")
         print(f"    cells whose branches, weights, notes or positions differ  {laid_wrong}")
+        print(f"      of which the side conditions agree, branch by branch  {laid_wrong_elsewhere}")
         print(f"    cells the port refused, filled in Python and not held  {laid_refused}")
         print("  where the placement fired -- the cells the user's side would move")
         print(f"    {laid_fired} of {laid} cells")
@@ -1059,7 +1243,7 @@ def main() -> None:
     if used_wrong:
         failed.append(f"{used_wrong} cells using {', '.join(sorted(using))} differ by branch")
     if using and not broke:
-        failed.append("the break fired in no cell, so agreeing here says nothing")
+        failed.append("the effect fired in no cell, so agreeing here says nothing")
     if quick_wrong:
         failed.append(f"{quick_wrong} cells under {args.terrain} differ by branch")
     if args.terrain and not stopped:
@@ -1068,6 +1252,10 @@ def main() -> None:
         failed.append(f"{cured_wrong} cells under Salt Cure differ by branch")
     if args.salt_cure and not cured_fired:
         failed.append("the mod's Salt Cure fraction moved no cell, so agreeing here says nothing")
+    if block_wrong:
+        failed.append(f"{block_wrong} cells beside a blocking ability differ by branch")
+    if blockers and not blocked:
+        failed.append("no blocking ability stopped anything in any cell, so agreeing here says nothing")
     if laid_wrong:
         failed.append(f"{laid_wrong} cells using a hazard differ by branch")
     if args.hazards and not laid_fired:
