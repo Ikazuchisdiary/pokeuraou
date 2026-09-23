@@ -13,6 +13,11 @@ Same handling as the Smogon usage data: fetched manually, cached locally, identi
 explicit User-Agent, and not redistributed -- the raw file is gitignored.
 
     uv run python tools/fetch_standings.py 2026 worlds
+    uv run python tools/fetch_standings.py 2027 --list    # the season's events and formats
+
+``--list`` is how a regulation's events are found: the season endpoint names every event
+with its format ("Regulation M-C") and whether it has been processed. It writes nothing.
+Whether an event's entries carry team lists is only visible in the event file itself.
 """
 
 from __future__ import annotations
@@ -84,7 +89,31 @@ def main() -> None:
     ap.add_argument("event", nargs="?", default="worlds")
     ap.add_argument("--usage", action="store_true", help="also fetch the event's own usage")
     ap.add_argument("--force", action="store_true")
+    ap.add_argument(
+        "--list",
+        action="store_true",
+        help="print the season's events (dates, code, format, processed, players); no file",
+    )
     args = ap.parse_args()
+
+    if args.list:
+        url = f"{BASE}/{args.season}"
+        print(f"fetching {url}")
+        try:
+            events = json.loads(fetch(url))
+        except urllib.error.HTTPError as error:
+            raise SystemExit(f"{url}: HTTP {error.code}") from error
+        for ev in sorted(events, key=lambda e: (str(e.get("start")), str(e.get("code")))):
+            print(
+                f"  {ev.get('start')}  {str(ev.get('code')):<15} {str(ev.get('format')):<17}"
+                f" processed={str(bool(ev.get('processed'))):<5} "
+                f"players={ev.get('playerCount', '-')!s:<5} {ev.get('name')}"
+            )
+        formats: dict[str, int] = {}
+        for ev in events:
+            formats[str(ev.get("format"))] = formats.get(str(ev.get("format")), 0) + 1
+        print(f"{len(events)} events: " + ", ".join(f"{k} x{v}" for k, v in sorted(formats.items())))
+        return
 
     out_dir = standings_dir()
     out_dir.mkdir(parents=True, exist_ok=True)
