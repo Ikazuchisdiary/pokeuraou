@@ -12892,3 +12892,96 @@ test_after_move_oracle・test_no_machine_specific_paths を `-n 0` で通過。r
 `port_gate_audit.py --check` も通る。sim-bridge は worktree で tsc し直してテストに使った（**着地時に main の dist の
 再ビルドが要る**）。機械（heavy.py、--agent IKA-178）: release ビルド 8 コア 22 秒・18 秒、テスト 1 コア 各 35 秒以内、
 diff_node 8 本 1 コア 計 270 秒ほど、記録 1 コア 387 秒（diff_node と 2 本並行）。
+
+## 9/24 — IKA-179: こだわりの固定はわるあがきでも最初の技のまま（port）、struggle・道具なし・トリックの固定はターン終わりに外れる（両エンジン）
+
+ワーカー、基点 master d89a6c6、ブランチ `ika-179-choicelock`。IKA-171・IKA-174 の diff_node の残りのずれ。
+
+### 1. Showdown の定義（vendor a5df827、champions mod に上書きなし）
+
+`data/conditions.ts` の `choicelock`: `onStart` が `effectState.move = activeMove.id`（`hasBounced`・snatch なら付けない）、
+`onBeforeMove` は道具がこだわりでなければ外し、固定の技でも `struggle` でもない技を失敗させる、`onDisableMove`
+（`endTurn` が場の全員に走らせる）は **道具がこだわりでないか、固定の技が技欄に無ければ外す**。`data/items.ts` の
+`choicescarf`（champions の choice_items はこれだけ）は `onModifyMove` で `addVolatile('choicelock')`、`onStart`（持った時。
+トリックの `setItem` もここを通る）で外す。`addVolatile` は既にある volatile に `onStart` を走らせないので、
+**固定は始めた技のまま**。よって:
+
+* 固定中のわるあがき（固定の技の PP 切れ・ちょうはつ）: 固定は元の技のまま。
+* 固定なしのわるあがき（技を出す前にちょうはつ、全部変化技）: `struggle` に固定 → ターン終わりに外れ → 次の技で固定。
+* はたきおとされた: ターン終わりに外れる。スカーフ同士のトリック: 両方外れ、次の技で固定し直す。
+* アンコール: 固定中は lastMove が固定の技なので変わらない（対照）。ねごと・いびきはどちらのエンジンも未実装。
+
+### 2. 直す前
+
+* port の `use_move` は技を使うたびに固定を書き換えた（固定中のわるあがきで `struggle` → メニューが古い固定として全部開く）。
+* Python は最初の技を保つが、固定を**一度も外さなかった**。固定なしのわるあがきの後は `struggle` の固定が残り、
+  legality はそれを無視するが次の技でも書き換えないので、そのポケモンは場を離れるまで二度と固定されない。
+  はたきおとされた・トリックした固定も残る（メニューは道具を見るので正しいが、符号化の `volatile_choicelock` は 1 のまま）。
+
+### 3. 直したこと（小さな関数だけ）
+
+* Python `resolve.py`: `_choice_lock_is_stale`（`onDisableMove` の条件）、`_live_choice_lock`（使う時に技欄に無い固定は
+  捨てて固定し直す。記録の `struggle` の固定用）、`_choice_lock_ends`（`_residuals` の最後、`_rampage_residual` の後）、
+  `_swap_ends_choice_locks`（`_swap_items` の後）。
+* port `moves.rs`: `lock_choice`（新しい固定の時だけ技を書く、技欄に無い固定は捨てる）、`choice_lock_ends`（`residuals` の
+  最後）。port はトリックを拒否する（Python へ回る）ので swap 側は Python のみ。
+
+### 4. オラクル（`tests/test_choice_lock.py`、5 ケース 15 手、ロール固定）
+
+```
+                                 旧 Py・旧 exe   旧 Py・新 exe   新 Py・旧 exe   新 Py・新 exe
+  Showdown の事実（5）            0 落ち          0               0               0
+  Showdown の局面から 1 手（15）  4 落ち          4               0               0
+  生成の形で連続（5）             3 落ち          3               0               0
+  port の 1 手（13、トリック除く） 5 落ち          0               5               0
+  記録の struggle 固定（1）       1 落ち          1               0               0
+```
+
+落ちるのは「固定なしのわるあがき」（Python・port）、「固定中のわるあがき」（port）、「はたきおとし」「スカーフ同士の
+トリック」（Python）。対照「アンコール」と普通の固定は旧でも通る。テストでは Showdown の局面の `lockedMove`（position.ts が
+こだわりの固定を畳み込む）と move slot の `disabled`（前の request のもの）を消してから解く（生成の局面には無い）。
+
+### 5. diff_node（matrix、60 局面、新 Python）
+
+```
+                                          セル     発火（`unlocked` が動かす）  新 exe で違う  旧 exe で違う（発火で）
+  w12 --frozen                            28,155   —                           0              132
+  w12 --choice-locked                     22,237   2,291                       0              2,482（2,291）
+  gen11L --choice-locked                  13,821   1,487                       0              1,484（1,475）
+  w12 普通の固定（絞り込み前の --choice-locked） 21,075   0                           0              0
+  gen11L 普通の固定（同）                 15,493   0                           0              0
+```
+
+IKA-171 の `--frozen` のわるあがき固定のずれ（130 セル、今の master で 132）は新 exe で 0。値の最悪差 5.6e-16 以下。
+`--choice-locked` を足した: こだわり固定の者が場にいて、わるあがきするか、固定が古いか、場にはたきおとす・トリック・
+すりかえを知る者がいる記録局面。対照は `unlocked`（直す前の Python の規則）。
+
+### 6. 記録（`C:/tmp/ika179/records.py`、1 コア 65 秒）
+
+```
+                                                      w12        gen11L
+  move 決定                                           434,483    118,018
+  choicelock が場にある決定                           99,631     25,216
+  固定を持つ枠（符号化の入力 = 1）                    104,197    26,239
+    struggle に固定（port の書き換え）                92         26
+      直前の固定に戻すとメニューが変わる              92         26
+      選ばれた手が Showdown のメニューに無い          80         24
+    こだわりでない道具に固定（Showdown は外す）       473        89
+```
+
+struggle 固定の 92・26 は全部「固定中のわるあがきの次の手」で、Showdown ならわるあがき（か固定の技）しか選べない所で
+別の技を選んでいる（80・24）。道具なしの固定は手には効かず、符号化の入力だけが Showdown と違う。
+
+### 7. 別課題の候補（調べて見つけたこと）
+
+* **ちょうはつの `onBeforeMove` が無い**: 同じターンに先にちょうはつされた変化技が Showdown では失敗するが、両エンジンとも出す
+  （プランクスター・ちょうはつの後のおいかぜで確かめた。こだわりなら固定まで付く）。
+* **ちょうはつの長さ**: 既に動いた相手へのちょうはつは `duration++`（4 ターン）だが、resolver は 3 のまま。
+* position.ts の `lockedMove` がこだわり固定を含むので、Showdown の局面から読むとちょうはつ中でも固定の技がメニューに出る
+  （diff 系の道だけ）。
+
+### 8. 検査と機械
+
+`port_coverage --check`・`port_gate_audit --check`・ruff ok。機械: cargo release 2 回（8 コア 22・17 秒）、オラクルのテスト
+4 通り×3 回（1 コア 各 5 秒）、diff_node 60 局面 6 本（6 コア 327 秒）と 4 本（4 コア 280 秒）、2 局面 2 本（1 コア 192 秒）、
+記録 1 回（1 コア 65 秒）、関係テスト 6 ファイル（1 コア 29 秒）。すべて heavy.py（--agent IKA-179）。
