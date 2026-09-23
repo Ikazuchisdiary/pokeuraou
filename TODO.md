@@ -13111,3 +13111,72 @@ test_no_machine_specific_paths・test_actions は `-n 0` で通過。`port_cover
 機械: cargo build --release 8 コア 23 秒 + 20 秒、テスト 1 コア計 約 1 分、diff_node 1 コア 697 秒、記録 1 コア 345 秒。
 worktree に data/priors・standings・reportworm と sim-bridge の dist を main から写し、node_modules は main への junction
 （コミットしない）。
+
+## 9/24 — IKA-187: つきのひかり・こうごうせい・あさのひざしの回復を port に入れ、丸めを Showdown の modify に揃えた。port_gate_audit の (a) は hasCustomCode が false の腕だけを外し、`--check` は M-B と M-C の両方を回す
+
+### 1. Showdown の定義
+
+- `data/moves.ts` の 3 技の `onHit`: `this.heal(this.modify(pokemon.maxhp, factor))`。factor は天気なし 0.5、晴れ・大日照り 0.667、雨・大雨・砂・あられ・雪 0.25（`pokemon.effectiveWeather`）。
+- `sim/battle.ts` の `modify(value, n, d)`: `modifier = tr(n * 4096 / d)`、`tr((tr(value * modifier) + 2048 - 1) / 4096)`。倍率は 2048・2732・1024 で、端数の .5 は切り捨て。
+- `_round_fraction` の他の呼び出し元 3 つは、どれも Showdown では `Math.round`（.5 は切り上げ）で、`modify` ではない。
+  - 変化技の `heal` 欄（じこさいせい・はねやすめ・いのちのしずく等）: `battle-actions.ts` の `Math.round(baseMaxhp * heal[0] / heal[1])`。
+  - 吸収: `battle.ts` の `spreadDamage` の `Math.round(targetDamage * drain[0] / drain[1])`。
+  - 反動: `calcRecoilDamage` の `clampIntRange(Math.round(damageDealt * recoil[0] / recoil[1]), 1)`。
+  このため `_round_fraction` は変えていない。天気回復だけを新しい `_modify` に移した。
+
+### 2. 変更
+
+- `resolve.py`: `_weather_recovery`（回復）、`_weather_recovery_modifier`（4096 分率）、`_modify` を足した。`_apply_status_move` からの呼び出しは 1 行。
+- `rust/src/moves.rs`: `WEATHER_RECOVERY_MOVES`・`weather_recovery_modifier`・`weather_recovery`・`modify` を同じ形で足し、`apply_status_move` の heal 欄の後で呼ぶ。
+- `tools/port_gate_audit.py`: `custom_code_moves` を足した。(a) で外すのは、`STATUS_MOVES_FULLY_MODELLED` にあって、dump の `hasCustomCode` が false の腕だけになった。`--regulation` は繰り返して指定でき、既定は M-B と M-C の両方（CI の `--check` もそのまま両方を回す）。
+- `port_coverage` は M-B で回す必要がない。inert かどうかは engine の文字列だけで決まる。modelled.rs は計算機の集合と M-C の石の一覧。M-B の特性と技は M-C と同じで、持ち物（148 ⊂ 166）とメガの表も M-C に含まれる。だから M-C から作ったファイルは、M-B の id に M-B で作った場合と同じ答えを返す。これが崩れたら落ちるテストを `test_port_coverage.py` に足した。
+- テスト: `tests/test_weather_recovery.py`（オラクル 18 ケース × Python・port）、`test_port_gates.py` に 4 つ（M-B・M-C で moves.rs の定数を消すと 3 技が捕まる、null 対照のじこさいせいは外されたまま、`--check` の既定は両方）、`test_port_coverage.py` に 1 つ。
+
+### 3. オラクル（`tests/test_weather_recovery.py`、Clefable が 30/170 から使う）
+
+```
+                                    Showdown   旧 Python  旧 exe   新 Python  新 exe
+  3 技 × なし（maxhp 170）            +85        +85        0        +85        +85
+  3 技 × 晴れ                         +113       +113       0        +113       +113
+  3 技 × 雨・砂・雪（9 ケース）         +42        +43        0        +42        +42
+  つきのひかり なし・maxhp 171         +85        +86        0        +85        +85
+  対照 じこさいせい maxhp 171          +86        +86        +86      +86        +86
+  対照 じこさいせい 雨                  +85        +85        +85      +85        +85
+```
+
+旧 Python・旧 exe では 36 件中 26 件が落ちた（Python 10、port 16）。新しいほうでは 36 件すべて通る。`test_after_move_oracle.py` も通る。
+
+### 4. 監査の陽性対照（`C:/tmp/ika187/audit_control.py`）
+
+```
+                           master の port      新しい port
+  旧 audit  M-B・M-C        新しい腕 0（宣言的 29）  0（宣言的 26）
+  新 audit  M-B・M-C        moonlight・morningsun・synthesis   0（宣言的 26）
+```
+
+新しく捕まる腕はこの 3 つだけ。fully modelled で hasCustomCode が true の技は 38 あるが、残り 35 は port に名前がある。
+
+### 5. diff_node（`C:/tmp/ika186/cells.py --teach`、40 局面、matrix 予算）
+
+```
+                       w12 セル / 効果あり  新 exe 違い  旧 exe 違い   gen11L セル / 効果あり  新 exe  旧 exe
+  moonlight             4,855 / 3,161       23          3,148         4,258 / 2,813           0       2,766
+  synthesis             4,855 / 3,161       23          —             4,258 / 2,813           0       —
+  recover（null 対照）  4,855 / 2,578       23          —             4,258 / 2,028           0       —
+```
+
+新 exe の w12 の 23 件は、すべて注記 `residual speed tie`（port だけが出す既知の件で、IKA-186 の recover の 23 件と同じもの）。master 取り込み後の exe でも moonlight・recover は同じ数になった。
+
+### 6. 記録（`C:/tmp/ika187/heals.py`、M-B dump の heal 欄）
+
+- 天気回復 3 技が選ばれた決定: w12 434,483 決定・gen11L 118,018 決定のどちらでも 0。**今回の変更で値が変わる決定は 0。**
+- heal 欄の技が選ばれた決定（変えていない）: w12 はねやすめ 2,712・いのちのしずく 364・じこさいせい 271、gen11L は 374・74・43。仮に `_round_fraction` まで `modify` に変えていたら、w12 で 2,081（はねやすめ 1,782・いのちのしずく 299）、gen11L で 318 の決定の回復量が Showdown からずれていた（いのちのしずくは使い手の maxhp で数えた）。
+
+### 7. 別課題
+
+- 天気回復が見る天気は `field.weather` そのまま。Showdown の `pokemon.effectiveWeather` は、ノーてんき・エアロック（場全体）、使い手のばんのうがさ（晴れ・雨を無視）、メガソル（晴れ扱い）を考える。両エンジンとも同じように見ていない。
+- 天気回復を満タンで使っても、Showdown は `NOT_FAIL`（失敗の旗は立たない）。両エンジンも旗を立てないので一致しているが、テストはない。
+
+### 8. 機械
+
+リリースビルド 3 回（22 秒・17 秒・17 秒、--cores 8）。以下はすべて 1 コア: オラクルとテスト（各 1〜7 秒）、記録の数え（59 秒）、セルの比較（223 秒と 94 秒）。すべて heavy.py 経由（--agent IKA-187）。
