@@ -545,7 +545,17 @@ pub fn calculate(
         dmg = [base; N_ROLLS];
     } else {
         for (r, slot) in dmg.iter_mut().enumerate() {
-            *slot = trunc(trunc((base * (100 - r as i64)) as f64) as f64 / 100.0);
+            // IKA-99's integer arm. The f64 round trip is exact while the product is below
+            // 2^53 (`base` is at most 2^32 after `trunc`, times 100), so wrapping to 32 bits
+            // and dividing as integers is the same number; the arm exists to measure that.
+            #[cfg(feature = "int-rolls")]
+            {
+                *slot = crate::fixedpoint::wrap32(base * (100 - r as i64)) / 100;
+            }
+            #[cfg(not(feature = "int-rolls"))]
+            {
+                *slot = trunc(trunc((base * (100 - r as i64)) as f64) as f64 / 100.0);
+            }
         }
     }
 

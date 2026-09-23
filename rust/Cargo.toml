@@ -10,6 +10,9 @@ count-allocations = ["profile"]
 # Phase timers inside a turn. Off by default: a clock read is 25 ns and the innermost
 # phase runs ten times a turn.
 profile = []
+# IKA-99: the 16 damage rolls in integer arithmetic instead of through f64. Same numbers
+# (the product is far below 2^53); off by default until it is shown to buy anything.
+int-rolls = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

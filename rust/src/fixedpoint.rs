@@ -15,6 +15,13 @@ pub fn trunc(x: f64) -> i64 {
     (x.trunc() as i64).rem_euclid(UINT32)
 }
 
+/// `trunc` of a value that is already an integer, without the f64 round trip.
+#[cfg(feature = "int-rolls")]
+#[inline]
+pub fn wrap32(x: i64) -> i64 {
+    x.rem_euclid(UINT32)
+}
+
 /// The final truncation in `modifyDamage`, which can wrap a huge value to 0.
 #[inline]
 pub fn trunc16(x: i64) -> i64 {
