@@ -60,6 +60,10 @@ move, `_apply_status_move` without the judgement, so the cells it moves are the 
 The control is the hit count as it was before IKA-160 -- 1/3, 1/3, 1/6, 1/6 and Skill Link
 not read -- so the cells it moves are the ones where the count's distribution mattered.
 
+`--using perishsong` holds the port to Perish Song (IKA-172), which it listed as fully
+modelled without ever giving anyone the counter. The control is the turn with
+`_perish_song` taken out, so the cells it moves are the ones where somebody was given one.
+
 Holding the port to a frozen Pokemon (IKA-171):
 
     uv run python tools/diff_node.py --games-dir data/ika73/w12 --frozen
@@ -322,6 +326,25 @@ class unspent:  # noqa: N801 - read as a phrase at the call site
         resolve_mod.TYPE_SPENDING_MOVES = self.real
 
 
+class unsung:  # noqa: N801 - read as a phrase at the call site
+    """Python with `_perish_song` taken out: the control for Perish Song (IKA-172).
+
+    The move is still used -- its PP spent, its `lastMove` written -- and gives nobody a
+    counter, which is what the port did before it learned the move.
+    """
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = resolve_mod._perish_song
+        resolve_mod._perish_song = lambda *_args: None
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        resolve_mod._perish_song = self.real
+
+
 class undrained:  # noqa: N801 - read as a phrase at the call site
     """Python with these moves' `drain` taken off: the control for a drain move (IKA-161).
 
@@ -403,6 +426,8 @@ class unchanged:  # noqa: N801 - read as a phrase at the call site
             self.parts.append(old_hit_counts())
         if any(m in TYPE_SPENDING_MOVES for m in moves):
             self.parts.append(unspent())
+        if "perishsong" in moves:
+            self.parts.append(unsung())
         if any(reg.moves[m].raw.get("drain") for m in moves):
             self.parts.append(undrained(reg, moves))
         if any(judged(reg.moves[m]) for m in moves):
@@ -913,12 +938,13 @@ def main() -> None:
             move.raw.get("breaksProtect")
             or isinstance(move.raw.get("multihit"), list)
             or move_id in TYPE_SPENDING_MOVES
+            or move_id == "perishsong"
             or move.raw.get("drain")
             or judged(move)
         ):
             ap.error(
                 f"--using takes breaksProtect, ranged multi-hit, type-spending "
-                f"({sorted(TYPE_SPENDING_MOVES)}), drain or judged status moves; "
+                f"({sorted(TYPE_SPENDING_MOVES)}), drain or judged status moves, or perishsong; "
                 f"{move_id} is none of them"
             )
 
