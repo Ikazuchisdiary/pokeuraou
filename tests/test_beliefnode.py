@@ -480,3 +480,124 @@ def test_the_shared_node_equals_a_matrix_per_completion_with_a_mega_and_damage(
                 built[index], expected, rtol=0, atol=0,
                 err_msg=f"side {side} completion {index} ({', '.join(item.species)})",
             )
+
+
+def _patched_before_ika119(reference, side, slots, item, encoder):  # noqa: ANN001, ANN202
+    """`_patched` as it was at 4524ec4^, verbatim but for taking the encoder as an argument."""
+    from pokeuraou.encode import Encoded
+
+    source = encoder.encode_positions([item.position])
+    out = Encoded(
+        species=reference.species.copy(),
+        ability=reference.ability.copy(),
+        item=reference.item.copy(),
+        moves=reference.moves.copy(),
+        mon=reference.mon.copy(),
+        mask=reference.mask.copy(),
+        side=reference.side,
+        field=reference.field,
+        unknown_volatiles=dict(reference.unknown_volatiles),
+    )
+    for slot in slots:
+        out.species[:, side, slot] = source.species[0, side, slot]
+        out.ability[:, side, slot] = source.ability[0, side, slot]
+        out.item[:, side, slot] = source.item[0, side, slot]
+        out.moves[:, side, slot] = source.moves[0, side, slot]
+        out.mon[:, side, slot] = source.mon[0, side, slot]
+        out.mask[:, side, slot] = source.mask[0, side, slot]
+    return out
+
+
+def test_the_old_patch_rule_is_the_pre_ika119_body(setup) -> None:  # noqa: ANN001
+    """`EncodingRules(patch_shares_side=True)` is the old `_patched`, array for array (IKA-141).
+
+    On the two positions the IKA-119 tests were built on, where the old body is wrong -- so
+    the current body differs from it there, which is the control that this equality could
+    have failed.
+    """
+    from pokeuraou.encode import EncodingRules
+
+    reg, sheet, _position = setup
+    old_rules = EncodingRules(patch_shares_side=True)
+    stoned = _with_stone(reg, sheet, "venusaur", "venusaurite")
+    damaged = position_from_sets(
+        reg,
+        _pick(sheet, "incineroar", "sylveon", "garchomp", "venusaur"),
+        _pick(sheet, "venusaur", "garchomp", "charizard", "toxapex"),
+    )
+    lead = damaged.sides[1].pokemon[damaged.sides[1].active[0]]
+    lead.hp = lead.maxhp // 2
+    mega = position_from_sets(
+        reg,
+        _pick(stoned, "incineroar", "sylveon", "garchomp", "toxapex"),
+        _pick(stoned, "charizard", "garchomp", "sylveon", "venusaur"),
+    )
+    megad = mega.copy()
+    megad.sides[1].mega_used = True
+    megad.sides[1].pokemon[megad.sides[1].active[0]].is_mega = True
+
+    cases = [(damaged, damaged, sheet), (mega, megad, stoned)]
+    differed = 0
+    for root, leaf, used_sheet in cases:
+        for rules in (EncodingRules(), EncodingRules(mega_from_slots=True)):
+            encoder = Encoder(reg, rules=rules)
+            reference = encoder.encode_positions([leaf])
+            for item in completions(reg, root, 1, used_sheet, seen=frozenset({0, 1})):
+                old = _patched(
+                    reference, 1, item.slots, item, reg, root, encoder, dataclasses.replace(
+                        rules, patch_shares_side=True
+                    )
+                )
+                want = _patched_before_ika119(reference, 1, item.slots, item, encoder)
+                assert not _differences(old, want), (rules, item.species)
+                assert old.side is reference.side, "the old body shared the side vector"
+                new = _patched(reference, 1, item.slots, item, reg, root, encoder, rules)
+                differed += bool(_differences(new, want))
+    assert old_rules.patch_shares_side
+    assert differed, "the old and new bodies agree on every case; nothing was compared"
+
+
+def test_each_leaf_patches_by_its_own_rule_in_one_process(setup) -> None:  # noqa: ANN001
+    """Two leaves through `belief_payoffs`, one per rule, as the two arms of a match are.
+
+    The leaf under the current rule still equals a matrix per completion; the leaf under
+    the old one does not, on the position where IKA-119 moved an answer; and each leaf's
+    encoder booked only its own rule.
+    """
+    from pokeuraou.encode import EncodingRules
+
+    reg, sheet, _position = setup
+    sheet = _with_stone(reg, sheet, "venusaur", "venusaurite")
+    position = position_from_sets(
+        reg,
+        _pick(sheet, "incineroar", "sylveon", "garchomp", "toxapex"),
+        _pick(sheet, "charizard", "garchomp", "sylveon", "venusaur"),
+    )
+    lead = position.sides[1].pokemon[position.sides[1].active[1]]
+    lead.hp = lead.maxhp // 2
+    ours, theirs = _menus(reg, position, 10)
+    budget = Budget.matrix()
+    spreads = {
+        0: completions(reg, position, 0, sheet),
+        1: completions(reg, position, 1, sheet),
+    }
+    old = _Leaf(Encoder(reg, rules=EncodingRules(patch_shares_side=True)))
+    new = _Leaf(Encoder(reg))
+    old_node = belief_payoffs(reg, position, ours, theirs, old, budget=budget, spreads=spreads)
+    new_node = belief_payoffs(reg, position, ours, theirs, new, budget=budget, spreads=spreads)
+    assert old_node.shared > 0 and new_node.shared > 0
+
+    assert "patched side=shared" in old.encoder.used, old.encoder.used
+    assert "patched side=rebuilt" not in old.encoder.used, old.encoder.used
+    assert "patched side=rebuilt" in new.encoder.used, new.encoder.used
+    assert "patched side=shared" not in new.encoder.used, new.encoder.used
+
+    moved = 0
+    for side, items in spreads.items():
+        for index, item in enumerate(items):
+            expected, _notes = batched_payoff(
+                reg, item.position, ours, theirs, new, budget=budget
+            )
+            np.testing.assert_array_equal(new_node.matrices[1 - side][index], expected)
+            moved += int(not np.array_equal(old_node.matrices[1 - side][index], expected))
+    assert moved, "the old rule moved no matrix here; the switch was not exercised"

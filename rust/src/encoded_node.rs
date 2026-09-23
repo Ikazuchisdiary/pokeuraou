@@ -233,7 +233,7 @@ pub fn fill(reg: &Reg, encoder: &Encoder, request: &Request) -> (Value, Encoded,
     let resolve_us = resolve_started.elapsed().as_secs_f64() * 1e6;
     let encode_started = std::time::Instant::now();
     let borrowed: Vec<&Position> = collector.leaves.iter().collect();
-    let encoded = encoder.encode_positions(&borrowed);
+    let encoded = encoder.encode_positions_with(&borrowed, request.encoding);
     let encode_us = encode_started.elapsed().as_secs_f64() * 1e6;
 
     // A node can want both: the learned leaf, and a parameter-free objective beside it as
@@ -277,6 +277,9 @@ pub fn fill(reg: &Reg, encoder: &Encoder, request: &Request) -> (Value, Encoded,
         "unmodelled": collector.notes.into_iter().collect::<Vec<_>>(),
         "unknownVolatiles": encoded.unknown_volatiles,
         "leafObjectives": request.objectives,
+        // The rule these arrays were encoded under, echoed so the caller can tell a binary
+        // that applied it from one that never heard of it (IKA-141).
+        "encoding": { "megaFromSlots": request.encoding.mega_from_slots },
         "monsPerSide": encoder.widths.mons_per_side,
         "monWidth": encoder.widths.mon,
         "sideWidth": encoder.widths.side,

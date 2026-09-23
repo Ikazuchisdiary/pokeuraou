@@ -340,3 +340,88 @@ def test_can_mega_follows_the_stone_holder_through_a_switch() -> None:
         flags = {m.species: float(encoded.mon[b, 0, m.slot, can_mega]) for m in side.pokemon}
         assert flags == {"charizard": 1.0, "sylveon": 0.0, "venusaur": 0.0, "garchomp": 0.0}
         assert encoded.side[b, 0, available] == 1.0
+
+
+def _revision_one(reg, positions):  # noqa: ANN001, ANN202
+    """`can_mega` and `mega_available` exactly as encode.py wrote them at be3b896.
+
+    Copied from that tree's two expressions rather than derived from the switch under test,
+    so the comparison below is with the old code and not with the new code's idea of it.
+    """
+    encoder = Encoder(reg)
+    encoded = encoder.encode_positions(positions)
+    can_mega = encoder.mon_names.index("can_mega")
+    available = encoder.side_names.index("mega_available")
+    for b, position in enumerate(positions):
+        for s, side in enumerate(position.sides):
+            encoded.side[b, s, available] = (
+                1.0 if not side.mega_used and side.mega_capable_slots else 0.0
+            )
+            for p, mon in enumerate(side.pokemon[: encoder.mons_per_side]):
+                encoded.mon[b, s, p, can_mega] = (
+                    1.0
+                    if mon.slot in side.mega_capable_slots
+                    and not side.mega_used
+                    and not mon.is_mega
+                    else 0.0
+                )
+    return encoded
+
+
+def test_the_old_can_mega_switch_is_revision_one() -> None:
+    """`EncodingRules(mega_from_slots=True)` is the pre-IKA-121 encoder, bit for bit (IKA-141).
+
+    On the position where the holder has just switched in, so the two rules disagree -- the
+    flag lands on Venusaur, which took Charizard's old number, exactly the failure IKA-121
+    recorded -- and the current rule is shown to differ on the same arrays, so equality is
+    not a comparison that cannot fail.
+    """
+    from pokeuraou.encode import EncodingRules
+
+    reg, positions = _after_the_stone_holder_switches_in()
+    old = Encoder(reg, rules=EncodingRules(mega_from_slots=True)).encode_positions(positions)
+    want = _revision_one(reg, positions)
+    for name in ("species", "ability", "item", "moves", "mon", "mask", "side", "field"):
+        assert np.array_equal(getattr(old, name), getattr(want, name)), name
+
+    encoder = Encoder(reg)
+    can_mega = encoder.mon_names.index("can_mega")
+    for b, after in enumerate(positions):
+        side = after.sides[0]
+        flags = {m.species: float(old.mon[b, 0, m.slot, can_mega]) for m in side.pokemon}
+        assert flags == {"charizard": 0.0, "sylveon": 0.0, "venusaur": 1.0, "garchomp": 0.0}
+
+    new = encoder.encode_positions(positions)
+    assert not np.array_equal(new.mon, old.mon), "the two rules agree here; nothing tested"
+    # Only the can_mega column moves between the rules.
+    moved = np.argwhere(new.mon != old.mon)
+    assert set(moved[:, -1].tolist()) == {can_mega}
+    assert np.array_equal(new.side, old.side)
+
+
+def test_the_rules_default_to_the_current_encoding() -> None:
+    from pokeuraou.encode import CURRENT_RULES, EncodingRules, rules_of
+
+    reg, positions = _after_the_stone_holder_switches_in()
+    assert Encoder(reg).rules == EncodingRules() == CURRENT_RULES
+    assert CURRENT_RULES.label() == "new"
+    both = EncodingRules(mega_from_slots=True, patch_shares_side=True)
+    assert both.label() == "old-can-mega+old-patch"
+
+    class Leaf:
+        def __init__(self, encoder: Encoder) -> None:
+            self.encoder = encoder
+
+        def from_encoded(self, encoded):  # noqa: ANN001, ANN202
+            return encoded
+
+    leaf = Leaf(Encoder(reg, rules=both))
+    # However the leaf is handed over: itself, its bound scorer, or a wrapper around that.
+    assert rules_of(leaf) == both
+    assert rules_of(leaf.from_encoded) == both
+
+    class Wrapper:
+        from_encoded = leaf.from_encoded
+
+    assert rules_of(Wrapper()) == both
+    assert rules_of(object()) == CURRENT_RULES

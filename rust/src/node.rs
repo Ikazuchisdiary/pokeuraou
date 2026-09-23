@@ -39,6 +39,9 @@ pub struct Request {
     /// block and this node fits in it. Absent means the pipe, which is what a caller that
     /// has not been taught about the block sends.
     pub shm: Option<shm::Target>,
+    /// Which encoding rule the asking leaf wants (`EncodingRules`, IKA-141). Absent means
+    /// the current one, which is what every caller but a fix-measuring match sends.
+    pub encoding: crate::encode::EncodeRules,
 }
 
 impl Request {
@@ -94,7 +97,15 @@ pub fn parse_request(value: &Value) -> Result<Request, String> {
         name: block.get("name").and_then(Value::as_str).map(String::from),
         capacity: block.get("bytes").and_then(Value::as_u64).unwrap_or(0) as usize,
     });
+    let encoding = crate::encode::EncodeRules {
+        mega_from_slots: value
+            .get("encoding")
+            .and_then(|e| e.get("megaFromSlots"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    };
     Ok(Request {
+        encoding,
         encode,
         cells,
         shm,

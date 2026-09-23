@@ -231,6 +231,10 @@ class EncodedNode:
     header_us: float = 0.0
     #: One value per leaf for each named objective the request asked for beside the leaves.
     leaf_values: dict[str, Any] = field(default_factory=dict)
+    #: The encoding rule the child says it applied (`megaFromSlots`), read off its own
+    #: header rather than off the request -- what a worker echoes per arm (IKA-141). None
+    #: from a binary that predates the field.
+    mega_from_slots: bool | None = None
 
     @staticmethod
     @timing.timed("rust.unpack")
@@ -297,6 +301,12 @@ class EncodedNode:
                 )
                 for index, name in enumerate(header.get("leafObjectives", []))
             },
+            mega_from_slots=(
+                bool(header["encoding"]["megaFromSlots"])
+                if isinstance(header.get("encoding"), dict)
+                and "megaFromSlots" in header["encoding"]
+                else None
+            ),
         )
 
 
@@ -657,12 +667,20 @@ class RustNode:
         budget: Budget,
         objectives: list[str] | None = None,
         cells: Sequence[tuple[int, int]] | None = None,
+        *,
+        rules: Any = None,  # noqa: ANN401 - EncodingRules; encode imports numpy
     ) -> EncodedNode:
         """The node's leaves, already encoded, and how to fold their values.
 
         For a learned leaf: its input is the leaves, so the leaves have to cross -- but as
         the encoder's arrays rather than as positions, which is 3.7 KB each instead of
         15 KB of JSON to parse and then encode anyway.
+
+        `rules` is the asking leaf's `EncodingRules`. Per request, not per process: one
+        worker plays both arms of a match through this one child (IKA-141). A child that
+        does not echo the rule it was asked for is refused -- a binary built before the
+        field exists would otherwise encode an old-rule arm with the new rule and say
+        nothing.
         """
         started = timing.clock()
         request = {
@@ -678,6 +696,11 @@ class RustNode:
         # Only these cells, when the caller is solving rather than tabulating.
         if cells is not None:
             request["cells"] = [[int(i), int(j)] for i, j in cells]
+        # Sent only for a leaf that asks for an undone fix, so every other request is the
+        # bytes it always was.
+        wants_old = bool(rules is not None and rules.mega_from_slots)
+        if wants_old:
+            request["encoding"] = rules.to_request()
         # What this process holds, if anything. A `shm` key with no name says "I hold
         # none, but I will make one" -- which is what the first node of every process
         # sends, and how a block ends up the size of the node that needed it.
@@ -691,6 +714,12 @@ class RustNode:
         count = int(header["bytes"])
         road, body = self._body(header, count)
         node = EncodedNode.unpack(header, body)
+        if wants_old and node.mega_from_slots is not True:
+            raise RuntimeError(
+                "the Rust node was asked for the revision-1 can_mega rule and did not say "
+                f"it applied it (echo {node.mega_from_slots!r}); the binary predates "
+                "IKA-141 -- rebuild it"
+            )
         # What the child says it spent, on its own clock. From this side the two
         # are one wait on a pipe, so there is no other honest source for the split.
         timing.add("rust.child.resolve", node.resolve_us / 1e6)
