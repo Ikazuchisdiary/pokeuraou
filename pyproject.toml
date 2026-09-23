@@ -53,7 +53,15 @@ testpaths = ["tests"]
 # distributing: 146s serially against 59-72s at `-n auto`. Debugging wants the serial
 # run back -- `-n 0` restores it, and pdb needs it, because a breakpoint in a worker
 # has no terminal to talk to.
-addopts = "-q -n auto"
+#
+# `--dist worksteal`, not the default `--dist load` (IKA-55). `load` hands each worker a
+# run of *consecutive* tests and never takes one back, so the six heavy tests of
+# `test_hidden_search.py` (13-30s each; the file is 125 of 431 test-seconds) arrived on
+# one worker together: seven workers finished by 61s and the eighth ran alone to 142s. Whether the
+# file lands in one chunk or two depends on integer chunk sizes computed from the test
+# count, which is the 479-vs-480 step. `worksteal` lets an idle worker take half of a busy
+# worker's queue, so the file spreads out whatever the count is.
+addopts = "-q -n auto --dist worksteal"
 
 [tool.ruff]
 line-length = 110
