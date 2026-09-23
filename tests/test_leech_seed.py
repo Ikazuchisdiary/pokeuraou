@@ -242,3 +242,49 @@ def test_the_port_drains_and_heals_as_python_does(
             f"branch {index}: rust {_hp(chosen.position)} != python {_hp(branch.position)}"
         )
         assert chosen.position.to_json() == branch.position.to_json(), f"branch {index}"
+
+
+# ---------------------------------------------------------------------------
+# The port against Showdown, not against Python (IKA-207).
+
+
+def _port_resolve(reg, port, pos: Position, choices: list[str]) -> list[Position]:  # noqa: ANN001
+    from ._port_showdown import port_branches
+
+    actions = [
+        next(a for a in side_actions(reg, pos, side) if a.to_choice() == choices[side])
+        for side in (0, 1)
+    ]
+    out = [p for _, p in port_branches(port, pos, actions, Budget.exact())]
+    assert out, "the turn has to resolve"
+    return out
+
+
+@pytest.mark.oracle
+def test_the_port_heals_the_planter_by_what_was_drained(reg, oracle: Oracle, port) -> None:  # noqa: ANN001
+    """`test_the_planter_is_healed_by_what_was_drained` with the port."""
+    handle = _battle(oracle)
+    before = Position.from_json(handle.position)
+    handle.step(PLANT)
+    assert handle.choice_errors == [], handle.choice_errors
+    theirs = _hp(Position.from_json(handle.position))
+    handle.close()
+    hit = [p for p in _port_resolve(reg, port, before, PLANT) if _seeded(p)]
+    assert hit, "some branch has the seed landing"
+    for pos in hit:
+        assert _hp(pos) == theirs, f"showdown {theirs} != port {_hp(pos)}"
+
+
+@pytest.mark.oracle
+def test_the_port_heals_from_a_seed_read_from_showdown(reg, oracle: Oracle, port) -> None:  # noqa: ANN001
+    """`test_a_seed_read_from_showdown_heals_too` with the port."""
+    handle = _battle(oracle)
+    handle.step(PLANT)
+    before = Position.from_json(handle.position)
+    assert _seeded(before)
+    handle.step(QUIET)
+    assert handle.choice_errors == [], handle.choice_errors
+    theirs = _hp(Position.from_json(handle.position))
+    handle.close()
+    for pos in _port_resolve(reg, port, before, QUIET):
+        assert _hp(pos) == theirs, f"showdown {theirs} != port {_hp(pos)}"

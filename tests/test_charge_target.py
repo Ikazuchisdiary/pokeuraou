@@ -373,3 +373,64 @@ def test_the_port_stores_and_fires_the_target(reg, oracle: Oracle, bridged: None
         assert there.position.to_json() == here.branches[0].position.to_json()
         pos = here.branches[0].position
     assert _hurt(start, pos) == {target}
+
+
+# ---------------------------------------------------------------------------
+# The port against Showdown, not against Python (IKA-207).
+
+
+def _port_turn(reg, port, pos: Position, choices: list[str]) -> Position:  # noqa: ANN001
+    from ._port_showdown import port_turn
+
+    actions = [_find(reg, pos, side, choices[side]) for side in (0, 1)]
+    return port_turn(port, pos, actions, BUDGET)
+
+
+@pytest.mark.oracle
+@pytest.mark.parametrize(
+    "form",
+    [
+        # Showdown's charging Pokemon carries the move's own `electroshot` volatile, which
+        # Python ignores and the port refuses (IKA-207 found it; the refusal is IKA-208's).
+        pytest.param(
+            "showdown position",
+            marks=pytest.mark.xfail(
+                strict=True, reason="the port refuses the unmodelled `electroshot` volatile"
+            ),
+        ),
+        "the port's child",
+    ],
+)
+@pytest.mark.parametrize("target", [1, 2])
+def test_the_ports_second_turn_is_showdowns(reg, oracle: Oracle, port, target: int, form: str) -> None:  # noqa: ANN001
+    """`test_our_second_turn_is_showdowns` with the port resolving both turns."""
+    handle = _start(oracle, ARCHALUDON)
+    start = Position.from_json(handle.position)
+    handle.step(_charge_turn(target))
+    if form == "showdown position":
+        pos = Position.from_json(handle.position)
+        pos.sides[0].pokemon[pos.sides[0].active[0]].trapped = False
+    else:
+        pos = _port_turn(reg, port, start, _charge_turn(target))
+        charging = pos.sides[0].pokemon[0].volatile("twoturnmove")
+        assert charging is not None and charging.extra.get("targetLoc") == target
+    before = handle.position
+    handle.step([side_actions(reg, pos, 0)[0].slots[0].to_choice() + ", move 1", FOES_QUIET])
+    assert handle.choice_errors == [], handle.choice_errors
+    theirs = _hurt(before, handle.position)
+    handle.close()
+    after = _port_turn(reg, port, pos, ["move 1, move 1", FOES_QUIET])
+    assert _hurt(pos, after) == theirs == {target}
+
+
+@pytest.mark.oracle
+@pytest.mark.parametrize("name", sorted(HAMMER))
+def test_the_ports_hammer_child_has_showdowns_menu(reg, oracle: Oracle, port, name: str) -> None:  # noqa: ANN001
+    """`test_our_hammer_menu_is_showdowns` on the position the port's turns build."""
+    handle, first = _hammer(oracle, name)
+    theirs = _showdown_moves(handle)
+    handle.close()
+    pos = Position.from_json(first)
+    for step in HAMMER[name][1]:
+        pos = _port_turn(reg, port, pos, step)
+    assert _our_moves(reg, pos) == theirs

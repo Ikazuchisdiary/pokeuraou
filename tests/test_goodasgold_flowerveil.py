@@ -293,3 +293,26 @@ def test_the_port_agrees(reg, oracle: Oracle, monkeypatch: pytest.MonkeyPatch, n
     got = sorted(((w, _key(p)) for w, p in zip(weights.branches, picked, strict=True)), key=order)
     assert [k for _, k in got] == [k for _, k in want]
     assert [w for w, _ in got] == pytest.approx([w for w, _ in want])
+
+
+# ---------------------------------------------------------------------------
+# The port against Showdown, not against Python (IKA-207).
+
+
+@pytest.mark.oracle
+@pytest.mark.parametrize("name", sorted(CASES))
+def test_the_ports_turn_from_showdowns_position(reg, oracle: Oracle, port, name: str) -> None:  # noqa: ANN001
+    """`test_our_turn_from_showdowns_position` with the port's branches, and the pinned
+    outcome held to Showdown's own after-state."""
+    from ._port_showdown import port_branches, port_turn
+
+    case = CASES[name]
+    before, after = _play(oracle, case)
+    start = _loaded(before)
+    chosen = _chosen(reg, start, case.step)
+    landed = {case.landed(p) for _, p in port_branches(port, start, chosen, Budget.matrix())}
+    assert (True in landed) == case.want, landed
+    if case.secondary:
+        return  # Showdown's policy fires the chance secondary; the pinned budget never does
+    pinned = port_turn(port, start, chosen)
+    assert case.landed(pinned) == case.landed(Position.from_json(after)), name

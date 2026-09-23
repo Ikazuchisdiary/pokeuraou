@@ -326,3 +326,47 @@ def test_the_port_stops_moves_at_the_holders_side(
         chosen = node.resolve(before, actions, budget, select=index)
         assert chosen is not None and chosen.position is not None
         assert chosen.position.to_json() == branch.position.to_json(), (name, index)
+
+
+# ---------------------------------------------------------------------------
+# The port against Showdown, not against Python (IKA-207).
+
+
+@pytest.mark.oracle
+def test_the_port_counts_a_stopped_fake_out_as_the_first_move(reg, oracle: Oracle, port) -> None:  # noqa: ANN001
+    """`test_a_stopped_fake_out_was_still_the_first_move` with the port on both turns."""
+    from ._port_showdown import port_branches, port_turn
+
+    orders, choices, _line = CASES["fakeout-into-holders-partner"]
+    handle = oracle.create(FORMAT_ID, TEAM_A, TEAM_B, policy=RandomnessPolicy())
+    handle.step(orders)
+    before = Position.from_json(handle.position)
+    handle.step(choices)
+    handle.step(SECOND_TURN)
+    refused = list(handle.choice_errors)
+    handle.close()
+    assert any("Fake Out is disabled" in error for error in refused), refused
+
+    middle = port_turn(port, before, _actions(reg, before, choices), BUDGET)
+    incineroar = next(mon for mon in middle.sides[0].pokemon if mon.species == "incineroar")
+    assert incineroar.active_move_actions == 1
+    foe = next(a for a in side_actions(reg, middle, 1) if a.to_choice() == SECOND_TURN[1])
+    second = port_branches(port, middle, [SECOND_TURN_ACTION, foe], BUDGET)
+    assert second
+    whimsicott = next(mon for mon in middle.sides[0].pokemon if mon.species == "whimsicott")
+    for _weight, pos in second:
+        after = next(mon for mon in pos.sides[0].pokemon if mon.species == "whimsicott")
+        assert after.hp == whimsicott.hp
+
+
+@pytest.mark.oracle
+def test_the_port_lays_spikes_on_the_foes_side(reg, oracle: Oracle, port) -> None:  # noqa: ANN001
+    """`test_spikes_land_on_the_foes_side` with the port."""
+    from ._port_showdown import port_branches
+
+    before, choices, theirs, _log = _play(oracle, "prankster-foeside", sides=True)
+    assert theirs["p2 side"] == ("spikes",)
+    branches = port_branches(port, before, _actions(reg, before, choices), BUDGET)
+    assert branches
+    for _weight, pos in branches:
+        assert _state(pos) == theirs

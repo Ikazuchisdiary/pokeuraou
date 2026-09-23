@@ -302,3 +302,21 @@ def test_a_recorded_lock_on_struggle_does_not_hold(reg) -> None:  # noqa: ANN001
         reg, pos, _chosen(reg, pos, ["move 1 2, move 2", "move 3, move 2"]), budget=Budget.matrix()
     )
     assert {_lock(b.position) for b in result.branches} == {"dragonclaw"}
+
+
+# ---------------------------------------------------------------------------
+# The port against Showdown, not against Python (IKA-207).
+
+
+@pytest.mark.oracle
+@pytest.mark.parametrize("name", sorted(n for n in CASES if CASES[n].ported))
+def test_the_games_the_port_generates(reg, oracle: Oracle, port, name: str) -> None:  # noqa: ANN001
+    """`test_the_games_we_generate` with the port playing every turn, branch 0 followed."""
+    from ._port_showdown import port_branch
+
+    case = CASES[name]
+    positions, menus = _play(oracle, case)
+    pos = _start(positions, 0)
+    for step, want in enumerate(case.locks[: case.generated]):
+        pos = port_branch(port, pos, _chosen(reg, pos, case.steps[step]), Budget.matrix(), 0)
+        assert (_lock(pos), _menu(reg, pos)) == (want, menus[step + 1]), step

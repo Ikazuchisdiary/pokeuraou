@@ -199,3 +199,43 @@ def test_a_replacement_phase_places_both_before_either_ability(reg, oracle: Orac
     assert sorted(newcomers.values()) == [-1, -1], (
         f"both newcomers are on the field when the other's Intimidate fires: {newcomers}"
     )
+
+
+# ---------------------------------------------------------------------------
+# The port against Showdown, not against Python (IKA-207). The replacement phase has no
+# port command yet (`resolve_replacements`, IKA-211), so only the in-turn case is here.
+
+
+@pytest.mark.oracle
+def test_the_port_interleaves_an_in_turn_double_switch(reg, oracle: Oracle, port) -> None:  # noqa: ANN001
+    """`test_an_in_turn_double_switch_is_interleaved` with the port: one newcomer escapes."""
+    from ._port_showdown import port_turn
+
+    team_a = [
+        _mon("Milotic", "Marvel Scale", ["recover", "protect", "scald", "toxic"], 20),
+        _mon("Toxapex", "Regenerator", ["recover", "protect", "scald", "toxic"], 20),
+        INTIMIDATE_A,
+        _mon("Garchomp", "Rough Skin", ["earthquake", "dragonclaw", "protect", "rockslide"], 20),
+    ]
+    team_b = [
+        _mon("Venusaur", "Chlorophyll", ["sludgebomb", "gigadrain", "protect", "leechseed"], 20),
+        _mon("Sylveon", "Pixilate", ["hypervoice", "protect", "moonblast", "wish"], 20),
+        INTIMIDATE_B,
+        _mon("Charizard", "Blaze", ["heatwave", "airslash", "protect", "solarbeam"], 20),
+    ]
+    choices = ["switch 3, move 2", "switch 3, move 2"]
+    handle = oracle.create(FORMAT_ID, team_a, team_b, policy=RandomnessPolicy())
+    handle.step(["team 1234", "team 1234"])
+    before = Position.from_json(handle.position)
+    handle.step(choices)
+    assert handle.choice_errors == [], handle.choice_errors
+    theirs_answer = _attack_boosts(Position.from_json(handle.position))
+    handle.close()
+    actions = [
+        next(a for a in side_actions(reg, before, side) if a.to_choice() == choices[side])
+        for side in (0, 1)
+    ]
+    mine = _attack_boosts(port_turn(port, before, actions))
+    assert mine == theirs_answer, f"showdown {theirs_answer} != port {mine}"
+    newcomers = {k: v for k, v in mine.items() if "incineroar" in k or "arcanine" in k}
+    assert sorted(newcomers.values()) == [-1, 0], newcomers
