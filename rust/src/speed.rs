@@ -134,7 +134,11 @@ pub fn move_priority(reg: &Reg, move_id: &str, mon: &Battler, field: &FieldState
     } else if mon.ability == "triage" && mv.has_flag(crate::reg::F_HEAL) {
         priority += 3;
     }
-    if move_id == "grassyglide" && is(field.terrain, "grassyterrain") {
+    // `source.isGrounded()` too (IKA-201).
+    if move_id == "grassyglide"
+        && is(field.terrain, "grassyterrain")
+        && crate::damage::is_grounded(mon)
+    {
         priority += 1;
     }
     priority

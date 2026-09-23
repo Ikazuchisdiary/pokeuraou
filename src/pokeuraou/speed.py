@@ -48,6 +48,7 @@ import numpy as np
 
 from .actions import PassAction, SideAction, SwitchAction, charge_target
 from .battler import Battler, FieldState
+from .damage import _is_grounded
 from .fixedpoint import Chain
 from .position import Position
 from .regulation import Regulation
@@ -189,7 +190,8 @@ def move_priority(
     elif mon.ability == "triage":
         priority += 3 if "heal" in move.flags else 0
 
-    if move_id == "grassyglide" and field_state.terrain == "grassyterrain":
+    # `source.isGrounded()` too: an Air Balloon Rillaboom gets nothing (IKA-201).
+    if move_id == "grassyglide" and field_state.terrain == "grassyterrain" and _is_grounded(mon):
         priority += 1
 
     return priority

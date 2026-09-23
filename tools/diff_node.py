@@ -153,6 +153,17 @@ Holding the port to Salt Cure, which no recorded team uses (IKA-159):
 by branch. The cells where the champions mod's 1/16 and 1/8 *fired* are the ones Python
 moves when the base game's 1/8 and 1/4 are put back, and the run fails if there are none.
 
+Holding the port to the Surges and their terrain (IKA-201), which M-C's trial run never saw:
+
+    uv run python tools/diff_node.py --games-dir <M-C games> --roster <an M-C roster> --surge
+
+`--surge` keeps the recorded positions with a Surge holder on the field, puts the terrain
+the holder would have put up on every other one (Seeds used; the rest are left bare, where
+a benched holder's switch-in is what sets it), and holds every cell branch by branch. The
+cells where IKA-201 *fired* are the ones Python moves with its rules taken back out -- no
+Surge, no Seed, no Grassy heal or Earthquake halving, Misty Terrain read from the
+attacker, Grassy Glide without the ground -- and the run fails if there are none.
+
 Holding the port to the hazards, which no recorded team carries (IKA-165):
 
     uv run python tools/diff_node.py --games-dir data/ika73/w12 --hazards
@@ -250,6 +261,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from pokeuraou import rustnode  # noqa: E402
 from pokeuraou.actions import side_actions  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
+from pokeuraou.effects import TERRAIN_ABILITIES  # noqa: E402
 from pokeuraou.equilibrium import solve  # noqa: E402
 from pokeuraou.narrow import narrow  # noqa: E402
 from pokeuraou.payoff import OBJECTIVES  # noqa: E402
@@ -1080,6 +1092,64 @@ def ability_on_field(pos: Position, abilities: frozenset[str]) -> bool:
     )
 
 
+def lay_surge_terrain(reg, pos: Position) -> str:  # noqa: ANN001
+    """The terrain an active Surge holder would have put up, as `_surge` puts it -- Seeds
+    used -- for a recorded position that has none. Returns the terrain, or "none"."""
+    from pokeuraou.resolve import _surge, _Turn
+
+    state = _Turn(reg, pos, Budget.deterministic(0), {})
+    for side in range(len(pos.sides)):
+        for slot in range(len(pos.sides[side].active)):
+            _surge(state, side, slot)
+    return pos.field.terrain or "none"
+
+
+class before_ika201:  # noqa: N801 - read as a phrase at the call site
+    """Python with IKA-201's rules taken out: the control for --surge. No Surge, no Seed, no
+    Grassy Terrain heal or Earthquake halving, a terrain move that resets its own terrain,
+    Misty Terrain read from the attacker's footing, Grassy Glide without the ground."""
+
+    def __enter__(self) -> None:
+        import pokeuraou.damage as damage_mod
+        import pokeuraou.resolve as resolve_mod
+        import pokeuraou.speed as speed_mod
+
+        def old_set_terrain(turn, terrain, duration):  # noqa: ANN001, ANN202
+            turn.pos.field.terrain, turn.pos.field.terrain_duration = terrain, duration
+            return True
+
+        def old_terrain_modifiers(reg, move_id, move_type, attacker_grounded, terrain, _d=True):  # noqa: ANN001, ANN202
+            if terrain is None or not attacker_grounded:
+                return ()
+            boosted = {"electricterrain": "Electric", "grassyterrain": "Grass", "psychicterrain": "Psychic"}
+            if boosted.get(terrain) == move_type:
+                return ((terrain, 5325, 4096),)
+            if terrain == "mistyterrain" and move_type == "Dragon":
+                return (("mistyterrain", 2048, 4096),)
+            return ()
+
+        self.real = (
+            resolve_mod._surge, resolve_mod._use_terrain_seed, resolve_mod._grassy_terrain_heal,
+            resolve_mod._set_terrain, damage_mod.terrain_modifiers, speed_mod._is_grounded,
+        )
+        resolve_mod._surge = lambda *_args: None
+        resolve_mod._use_terrain_seed = lambda *_args: None
+        resolve_mod._grassy_terrain_heal = lambda *_args: None
+        resolve_mod._set_terrain = old_set_terrain
+        damage_mod.terrain_modifiers = old_terrain_modifiers
+        speed_mod._is_grounded = lambda _mon: True
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.damage as damage_mod
+        import pokeuraou.resolve as resolve_mod
+        import pokeuraou.speed as speed_mod
+
+        (
+            resolve_mod._surge, resolve_mod._use_terrain_seed, resolve_mod._grassy_terrain_heal,
+            resolve_mod._set_terrain, damage_mod.terrain_modifiers, speed_mod._is_grounded,
+        ) = self.real
+
+
 #: The foeSide moves with a `sideCondition` in both dumps, in the order `teach_hazards` deals.
 HAZARD_MOVES = ("stealthrock", "spikes", "toxicspikes", "stickyweb")
 
@@ -1663,6 +1733,13 @@ def main() -> None:
         "mod's fraction fired: the cells the base game's 1/8 and 1/4 move",
     )
     ap.add_argument(
+        "--surge",
+        action="store_true",
+        help="keep positions with a Surge holder on the field, put the terrain it would have "
+        "put up on every other one, hold every cell to the port branch by branch, and count "
+        "where IKA-201's rules fired: the cells `before_ika201` moves",
+    )
+    ap.add_argument(
         "--priority-block",
         action="store_true",
         help="keep positions with Armor Tail, Queenly Majesty or Dazzling on the field, "
@@ -1708,6 +1785,7 @@ def main() -> None:
         using |= rampage_moves(reg)
     blockers = PRIORITY_BLOCKING_ABILITIES if args.priority_block else frozenset()
     debris = frozenset({"toxicdebris"}) if args.toxic_debris else frozenset()
+    surges = frozenset(TERRAIN_ABILITIES) if args.surge else frozenset()
     for move_id in sorted(using):
         move = reg.moves.get(move_id)
         if move is None or not (
@@ -1759,7 +1837,7 @@ def main() -> None:
             args,
             holding - {args.give},
             using | charging | randomers,
-            blockers | debris,
+            blockers | debris | surges,
             args.frozen,
             locked=args.choice_locked,
         )
@@ -1819,6 +1897,13 @@ def main() -> None:
     if args.salt_cure:
         salted = sum(salt(pos) for pos in positions)
         print(f"Salt Cure put on {salted} Pokemon on the field")
+    if args.surge:
+        positions = [pos for pos in positions if ability_on_field(pos, surges)]
+        laid = Counter(
+            lay_surge_terrain(reg, pos) if index % 2 == 0 else "left bare"
+            for index, pos in enumerate(positions)
+        )
+        print(f"{len(positions)} positions with a Surge holder on the field; terrain: {dict(laid)}")
     if args.hazards:
         dealt = [0]
         taught = sum(teach_hazards(reg, pos, dealt) for pos in positions)
@@ -1893,6 +1978,9 @@ def main() -> None:
     # Under Salt Cure, every cell; and where the mod's fraction moved the answer.
     cured = cured_wrong = cured_refused = cured_fired = cured_fired_wrong = 0
     cured_worst = 0.0
+    # Beside a Surge holder, every cell; and where IKA-201's rules moved the answer.
+    surged = surged_wrong = surged_refused = surged_fired = surged_fired_wrong = 0
+    surged_worst = 0.0
     # Beside a confused Pokemon, every cell; and where IKA-177's rule moved the answer.
     dazed_cells = dazed_wrong = dazed_refused = dazed_fired = dazed_fired_wrong = 0
     dazed_worst = 0.0
@@ -2207,6 +2295,36 @@ def main() -> None:
                     if wrong and shown < 5:
                         shown += 1
                         print(f"  cell {(i, j)} under Salt Cure: {wrong[0][:200]}")
+
+        if args.surge:
+            node = rustnode.node_for(reg)
+            for i, a in enumerate(row):
+                for j, b in enumerate(col):
+                    surged += 1
+                    here = resolve_turn(reg, pos, [a, b], budget=budget)
+                    with before_ika201():
+                        control = resolve_turn(reg, pos, [a, b], budget=budget)
+                    wrong = (
+                        ["no warm process"]
+                        if node is None
+                        else branch_differences(node, reg, pos, a, b, here, budget)
+                    )
+                    refused_here = wrong == ["the port refused the turn"]
+                    surged_refused += refused_here
+                    if refused_here:
+                        wrong = []
+                    surged_wrong += bool(wrong)
+                    if differ(outcome(here), outcome(control)):
+                        surged_fired += 1
+                        surged_fired_wrong += bool(wrong)
+                        for index in range(len(evaluators)):
+                            surged_worst = max(
+                                surged_worst,
+                                abs(float(got[index][i, j] - expected[index][i, j])),
+                            )
+                    if wrong and shown < 5:
+                        shown += 1
+                        print(f"  cell {(i, j)} beside a Surge: {wrong[0][:200]}")
 
         if args.hazards:
             node = rustnode.node_for(reg)
@@ -2562,6 +2680,15 @@ def main() -> None:
         print(f"    {cured_fired} of {cured} cells")
         print(f"    cells whose branches, weights, notes or positions differ  {cured_fired_wrong}")
         print(f"    worst cell difference there  {cured_worst:.3e}")
+    if args.surge:
+        print("\n  beside a Surge holder, every cell -- held branch by branch")
+        print(f"    {surged} of {cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {surged_wrong}")
+        print(f"    cells the port refused, filled in Python and not held  {surged_refused}")
+        print("  where IKA-201's rules fired -- the cells `before_ika201` moves")
+        print(f"    {surged_fired} of {surged} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {surged_fired_wrong}")
+        print(f"    worst cell difference there  {surged_worst:.3e}")
     if args.confused:
         print("\n  beside a confused Pokemon, every cell -- held branch by branch")
         print(f"    {dazed_cells} of {cells} cells")
@@ -2697,6 +2824,10 @@ def main() -> None:
         failed.append(f"{cured_wrong} cells under Salt Cure differ by branch")
     if args.salt_cure and not cured_fired:
         failed.append("the mod's Salt Cure fraction moved no cell, so agreeing here says nothing")
+    if surged_wrong:
+        failed.append(f"{surged_wrong} cells beside a Surge holder differ by branch")
+    if args.surge and not surged_fired:
+        failed.append("IKA-201's rules moved no cell, so agreeing here says nothing")
     if block_wrong:
         failed.append(f"{block_wrong} cells beside a blocking ability differ by branch")
     if dazed_wrong:

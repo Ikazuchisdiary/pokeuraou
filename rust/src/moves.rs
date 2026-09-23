@@ -3076,9 +3076,9 @@ fn apply_status_move(
     }
     if let Some(terrain) = mv.terrain.as_deref() {
         let terrain = terrain.to_lowercase().replace(' ', "");
-        turn.pos.field.terrain = Some(Id::new(&terrain));
-        turn.pos.field.terrain_duration =
-            Some(effect_duration(turn, mv, &terrain, action.side, action.slot).unwrap_or(5));
+        // The same terrain again changes nothing (IKA-201).
+        let duration = effect_duration(turn, mv, &terrain, action.side, action.slot).unwrap_or(5);
+        crate::terrain::set_terrain(turn, &terrain, duration);
     }
     if let Some(pseudo) = mv.pseudo_weather.as_deref() {
         let pid = pseudo.to_lowercase().replace(' ', "");
@@ -3411,6 +3411,8 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
             }
         }
     }
+
+    crate::terrain::grassy_terrain_heal(turn, &order);
 
     for (side, slot) in order.iter().copied() {
         let leftovers = matches!(turn.mon_at(side, slot), Some(mon)
