@@ -29,6 +29,7 @@ import json
 import random
 import sys
 from collections import Counter
+from collections.abc import Iterator
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -41,17 +42,17 @@ from pokeuraou.regulation import load_regulation  # noqa: E402
 from pokeuraou.resolve import Budget  # noqa: E402
 
 
-def sample(args: argparse.Namespace) -> list[dict]:
-    """Move decisions spread over the files and over games within them.
+def candidates(args: argparse.Namespace) -> Iterator[dict]:
+    """Every decision the sample may draw from, one game in memory at a time.
 
-    At most `--per-game` from one game, so a few hundred decisions come from about a
-    hundred games rather than from the first ten.
+    Move decisions spread over the files and over games within them: at most `--per-game`
+    from one game, so a few hundred decisions come from about a hundred games rather than
+    from the first ten, and at most ceil(`--decisions` / files) from one file.
     """
     files = [p for d in args.games_dir for p in sorted(Path(d).glob("*.jsonl"))]
     if not files:
         raise SystemExit(f"no *.jsonl under {', '.join(map(str, args.games_dir))}")
     per_file = -(-args.decisions // len(files))
-    taken: list[dict] = []
     for path in files:
         here = 0
         with path.open(encoding="utf-8") as handle:
@@ -70,13 +71,40 @@ def sample(args: argparse.Namespace) -> list[dict]:
                         continue
                     if int(decision.get("turn", 0)) < args.min_turn:
                         continue
-                    taken.append(decision)
+                    yield decision
                     here += 1
                     from_game += 1
                     if from_game >= args.per_game or here >= per_file:
                         break
-    random.Random(args.seed).shuffle(taken)
-    return taken[: args.decisions]
+                del record
+
+
+def sample(args: argparse.Namespace) -> Iterator[dict]:
+    """`--decisions` of the candidates, streamed: never more than one game in memory.
+
+    The draw is the one this tool always made -- `Random(seed).shuffle` over the candidate
+    list, first `--decisions` kept -- but a shuffle's permutation depends only on the
+    list's length, so it is taken over indices: one pass counts the candidates, the
+    permutation picks which indices survive, and a second pass yields those, in file order.
+    Until IKA-154 the candidates themselves were held and shuffled, which on a whole pool
+    (`--decisions 1000000` over data/ika73/w12) reached 13 GB. The set is the same; only
+    the order differs, and nothing downstream depends on order.
+    """
+    total = sum(1 for _ in candidates(args))
+    if total <= args.decisions:
+        yield from candidates(args)
+        return
+    order = list(range(total))
+    random.Random(args.seed).shuffle(order)
+    keep = bytearray(total)
+    for index in order[: args.decisions]:
+        keep[index] = 1
+    del order
+    # A file still being written can have grown between the passes; what it grew by was
+    # not counted, so it is not drawn.
+    for index, decision in zip(range(total), candidates(args), strict=False):
+        if keep[index]:
+            yield decision
 
 
 def menu(reg, pos: Position, side: int, choices: list[str]) -> list | None:  # noqa: ANN001
