@@ -32,6 +32,7 @@ Everything after `--` goes to the workers untouched, for options this does not n
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import subprocess
@@ -183,11 +184,21 @@ def main() -> None:
     )
     ap.add_argument("--no-bridge", action="store_true")
     ap.add_argument(
+        "--pool",
+        default=None,
+        help="M-C generation (IKA-81): both seats from this pool (data/pool/<id>.json), "
+        "no --roster and no book -- each worker solves a pair's selection with the leaf "
+        "the first time it meets it. Hidden bench unless --open-bench (IKA-128). "
+        "--uniform-selection draws the fours uniformly instead.",
+    )
+    ap.add_argument(
         "rest",
         nargs=argparse.REMAINDER,
         help="after --, options passed to every worker unchanged",
     )
     args = ap.parse_args()
+    if args.pool is not None and args.hide_bench is None:
+        args.hide_bench = True
     require_bench(args)
     if args.workers is None:
         # Swept on the board, width 16 against 48, startup discarded, one machine, back to
@@ -218,7 +229,21 @@ def main() -> None:
         roster = extra[extra.index("--roster") + 1]
 
     book = args.selection_book
-    if book is None and args.value and not args.uniform_selection:
+    # The servers build their encoder from this; without a roster it has to be the pool's.
+    pool_regulation = None
+    if args.pool is not None:
+        from pokeuraou.pool import find_pool
+
+        pool_regulation = json.loads(
+            find_pool(args.pool).read_bytes().decode("utf-8")
+        )["regulation"]
+    if args.pool is not None:
+        if book is not None or "--roster" in extra or "--selection-book" in extra:
+            raise SystemExit("--pool has no own side: no --roster and no --selection-book")
+        if not args.uniform_selection:
+            print("  selection: solved per pair with the leaf, in each worker",
+                  file=sys.stderr)
+    elif book is None and args.value and not args.uniform_selection:
         stem = re.sub(r"-s\d+$", "", Path(args.value).stem)
         book = ROOT / "data" / "selection" / f"{roster}-{stem}.jsonl.gz"
     if args.uniform_selection:
@@ -252,7 +277,9 @@ def main() -> None:
             errors = (server_log / f"inference{index}.log").open("w", encoding="utf-8")
             process = subprocess.Popen(  # noqa: S603
                 [sys.executable, str(ROOT / "tools" / "inference_server.py"),
-                 "--device", args.device, "--arm", "value", args.value],
+                 "--device", args.device,
+                 *(["--regulation", pool_regulation] if pool_regulation else []),
+                 "--arm", "value", args.value],
                 env=env, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=errors, text=True,
             )
             servers.append(process)
@@ -283,7 +310,12 @@ def main() -> None:
             "--limit", str(args.limit),
             "--device", args.device,
             "--torch-threads", "1",
-            "--roster", args.roster,
+            *(
+                ["--pool", args.pool,
+                 *(["--uniform-selection"] if args.uniform_selection else [])]
+                if args.pool is not None
+                else ["--roster", args.roster]
+            ),
             *bench_argv(args.hide_bench),
             *(["--force-lead", args.force_lead] if args.force_lead else []),
             "--out", str(out_dir / f"games-worker{worker}.jsonl"),

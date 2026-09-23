@@ -14,6 +14,16 @@ generate open teacher data without a word.
 With `--queue host:port` the games come from `tools/generate_queue.py` one at a time
 instead of being dealt in advance, which is how a run stops ending when its unluckiest
 worker does.
+
+`--pool regmc-matchupweb` is M-C generation (IKA-81): no own side, both seats drawn from
+the pool's 65 teams as a uniform pair of the 2,145 (mirrors included) with a coin for the
+seats, and each game's selection solved with the leaf where it starts (`pokeuraou.poolplay`).
+The bench is hidden unless `--open-bench` names the reference (IKA-128), so
+
+    uv run --group learn python tools/selfplay.py --pool regmc-matchupweb --games 2 \\
+        --value <an M-C model>
+
+plays what M-C ships.
 """
 
 from __future__ import annotations
@@ -25,6 +35,7 @@ import sys
 import time
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
@@ -32,14 +43,159 @@ from pokeuraou.benchflags import add_bench_flags, require_bench
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.priors import build_cooccurrence, find_cached_chaos, load_chaos
+from pokeuraou.regulation import Regulation
 from pokeuraou.selection_book import (
     DEFAULT_EPSILON,
     DEFAULT_TEMPERATURE,
     SelectionBook,
 )
-from pokeuraou.selfplay import MAX_TURNS, SEARCH_LIMIT, generate
+from pokeuraou.selfplay import MAX_TURNS, SEARCH_LIMIT, generate, selfplay_dir
 from pokeuraou.standings import find_cached_standings, load_standings
 from pokeuraou.teams import load_archetypes, load_roster, usable_archetypes
+
+DEFAULT_ROSTER = "rizabanadohido"
+
+
+def add_pool_flags(ap: argparse.ArgumentParser) -> None:
+    """The pool-against-pool path's own flags (IKA-81)."""
+    ap.add_argument(
+        "--pool",
+        default=None,
+        help="draw BOTH seats from this pool (a data/pool/<id>.json, e.g. "
+        "regmc-matchupweb) instead of fixing --roster at seat 0. The regulation is the "
+        "pool's. Hidden bench unless --open-bench is given.",
+    )
+    ap.add_argument(
+        "--uniform-selection",
+        action="store_true",
+        help="with --pool: draw both fours uniformly (a reference) instead of solving the "
+        "pair's selection game with the leaf at the start of each game",
+    )
+    ap.add_argument(
+        "--no-selection-memo",
+        action="store_true",
+        help="with --pool: solve the selection game at every game instead of once per "
+        "pair. Changes no game; it exists to show that.",
+    )
+    ap.add_argument(
+        "--selection-store",
+        type=Path,
+        default=None,
+        help="with --pool: the directory the pair solves are shared through, so a pair is "
+        "solved once for the whole run rather than once per worker. Default: "
+        "selection-solved/ beside --out, which is every worker's directory under "
+        "tools/generate_queue.py.",
+    )
+
+
+#: Flags of the roster path that mean nothing without an own side, with their defaults.
+_ROSTER_ONLY = {
+    "roster": None,
+    "selection_book": None,
+    "mirror_share": 0.0,
+    "force_lead": None,
+    "opponents": "worlds",
+    "depth": 1,
+    "solve_sparsely": False,
+    "solve_restricted": False,
+}
+
+
+def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
+    """`--pool`: both seats from the pool, the selection solved per game (IKA-81)."""
+    from pokeuraou.pool import load_pool
+    from pokeuraou.poolplay import SOLVED, generate_pool
+
+    given = [
+        "--" + name.replace("_", "-")
+        for name, default in _ROSTER_ONLY.items()
+        if getattr(args, name) != default
+    ]
+    if given:
+        ap.error(f"{', '.join(given)} belong to the roster path; --pool has no own side")
+    # IKA-128: M-C starts hidden. The pool path is new, so no recorded command without a
+    # flag ever meant open here, and the reason `require_bench` stops does not apply.
+    hide_bench = True if args.hide_bench is None else bool(args.hide_bench)
+
+    pool = load_pool(args.pool)
+    reg = pool.reg
+    register_mega_stones(reg)
+    evaluate, leaf_label = build_leaf(args, reg)
+    selection = "uniform" if args.uniform_selection else SOLVED
+    print(pool.summary(), file=sys.stderr)
+    if pool.character:
+        print(f"  {pool.character}", file=sys.stderr)
+    print(
+        f"pool vs pool / {reg.meta.format_id} / search {args.limit}x{args.limit} / "
+        f"leaf {leaf_label} / selection {selection}"
+        f"{'' if selection == 'uniform' else f' (eps={args.explore_epsilon}, T={args.explore_temperature})'}"
+        f" / bench {'hidden' if hide_bench else 'OPEN (reference)'}",
+        file=sys.stderr,
+    )
+    client = None
+    drawn: Iterator[int] | None = None
+    if args.queue:
+        from pokeuraou.workqueue import WorkClient
+
+        client = WorkClient(args.queue)
+
+        def from_queue(source: WorkClient) -> Iterator[int]:
+            while (index := source.take()) is not None:
+                yield index
+
+        drawn = from_queue(client)
+    out = args.out or selfplay_dir() / f"pool-{pool.id}-seed{args.seed}.jsonl"
+    store = args.selection_store or out.parent / "selection-solved"
+    started = time.perf_counter()
+    stats = generate_pool(
+        reg,
+        pool,
+        games=args.games,
+        hide_bench=hide_bench,
+        seed=args.seed,
+        out=out,
+        selection=selection,
+        evaluate=evaluate,
+        memo=not args.no_selection_memo,
+        store=None if args.no_selection_memo else store,
+        objective=OBJECTIVES[args.objective],
+        search_limit=args.limit,
+        max_turns=args.max_turns,
+        leaf=leaf_label,
+        explore_epsilon=args.explore_epsilon,
+        explore_temperature=args.explore_temperature,
+        rank_by_leaf=args.rank_leaf,
+        indices=drawn,
+        on_finish=client.finish if client is not None else None,
+    )
+    if client is not None:
+        client.close()
+    elapsed = time.perf_counter() - started
+    finished = stats["finished"] or 1
+    print(
+        f"{stats['games']} games in {elapsed:.1f}s "
+        f"({elapsed / max(stats['games'], 1):.2f}s each)\n"
+        f"  finished {stats['finished']}, discarded unfinished "
+        f"{stats['discarded_unfinished']}\n"
+        f"  seat-0 win rate {stats['wins'] / finished * 100:.1f}%\n"
+        f"  decisions {stats['decisions']} "
+        f"({stats['decisions'] / finished:.1f} per game), "
+        f"turns {stats['turns'] / finished:.1f} per game\n"
+        f"  mirrors {stats['mirror_games']} (wins {stats['mirror_wins']}, "
+        f"draws {stats['mirror_draws']})\n"
+        f"  -> {stats['path']}"
+    )
+    if "solves" in stats:
+        solves = stats["solves"] or 1
+        print(
+            f"  selection: {stats['solves']} solves ({stats['solves_reused']} reused, "
+            f"{stats['solves_loaded']} read from {store}), "
+            f"{stats['solve_seconds']:.1f}s = {stats['solve_seconds'] / solves:.2f}s a "
+            f"solve, {stats['solve_positions']} positions, worst antisymmetry "
+            f"{stats['solve_worst_antisymmetry']:.2e}"
+        )
+    if args.report:
+        report(Path(stats["path"]))
 
 
 def main() -> None:
@@ -53,7 +209,12 @@ def main() -> None:
         "the games before it, so it is the same game whichever worker draws it.",
     )
     ap.add_argument("--seed", type=int, default=1)
-    ap.add_argument("--roster", default="rizabanadohido")
+    ap.add_argument(
+        "--roster",
+        default=None,
+        help=f"our six at seat 0 (default {DEFAULT_ROSTER}). Not with --pool, which has "
+        "no own side.",
+    )
     ap.add_argument("--archetypes", default="wcs2026-regmb")
     ap.add_argument("--limit", type=int, default=SEARCH_LIMIT)
     ap.add_argument(
@@ -205,7 +366,13 @@ def main() -> None:
         "antisymmetric, so its win rate must come out at 50%%: a free calibration check on "
         "search, resolver and evaluator together.",
     )
+    add_pool_flags(ap)
     args = ap.parse_args()
+    if args.pool is not None:
+        run_pool(args, ap)
+        return
+    if args.roster is None:
+        args.roster = DEFAULT_ROSTER
     require_bench(args)
 
     roster = load_roster(args.roster)
@@ -218,58 +385,7 @@ def main() -> None:
         )
     register_mega_stones(reg)
 
-    evaluate = None
-    leaf_label = args.objective
-    if args.inference is not None:
-        # No torch here at all: the encoder is numpy, and the arrays go to the server.
-        from pokeuraou.encode import Encoder
-        from pokeuraou.inference import RemoteValue
-
-        evaluate = RemoteValue(args.inference, args.inference_arm, Encoder(reg))
-        # Asked of the server, not taken from this command line. A worker is told which
-        # arm to use and never what that arm holds, and this label is stamped into every
-        # game it records -- it is how a dataset says which model made it, months later.
-        # Without asking it read `value:value`, which is the arm's name and nothing about
-        # the model. The policy's position representation was the same mistake.
-        files = evaluate.describe()
-        stem = re.sub(r"-s\d+$", "", Path(files[0]).stem) if files else args.inference_arm
-        leaf_label = (
-            f"value:{stem}" if len(files) <= 1 else f"value:{stem}x{len(files)}"
-        )
-        print(
-            f"leaf = the {args.inference_arm} arm on {args.inference} = {leaf_label} "
-            f"(this worker holds no model)",
-            file=sys.stderr,
-        )
-    elif args.value is not None:
-        # Imported here so a run without --value never loads torch: the resolver, the
-        # differential tests and the M1 path stay installable without a CUDA wheel.
-        import torch
-
-        torch.set_num_threads(args.torch_threads)
-
-        from pokeuraou.encode import Encoder
-        from pokeuraou.value import BatchedValue, load_model
-
-        if not args.value.exists():
-            raise SystemExit(f"no model at {args.value}; train one with tools/train_value.py")
-        encoder = Encoder(reg)
-        net, meta = load_model(args.value, encoder)
-        device = torch.device(
-            args.device or ("cuda" if torch.cuda.is_available() else "cpu")
-        )
-        evaluate = BatchedValue(net.to(device), encoder, device=device)
-        leaf_label = f"value:{args.value.stem}"
-        print(
-            f"leaf = {args.value.name} on {device}  "
-            f"(trained on {meta.get('games', '?')} games, "
-            f"val AUC {meta.get('val_auc', float('nan')):.4f})",
-            file=sys.stderr,
-        )
-        print(
-            "  そして葉が勝率になったので、各ノードの均衡値も勝率です",
-            file=sys.stderr,
-        )
+    evaluate, leaf_label = build_leaf(args, reg)
 
     chaos = find_cached_chaos(reg.meta.format_id)
     if chaos is None:
@@ -427,6 +543,63 @@ def main() -> None:
 
     if args.report:
         report(Path(stats["path"]))
+
+
+def build_leaf(args: argparse.Namespace, reg: Regulation) -> tuple[Any, str]:
+    """The leaf the flags name, and the label every record carries for it."""
+    evaluate = None
+    leaf_label = args.objective
+    if args.inference is not None:
+        # No torch here at all: the encoder is numpy, and the arrays go to the server.
+        from pokeuraou.encode import Encoder
+        from pokeuraou.inference import RemoteValue
+
+        evaluate = RemoteValue(args.inference, args.inference_arm, Encoder(reg))
+        # Asked of the server, not taken from this command line. A worker is told which
+        # arm to use and never what that arm holds, and this label is stamped into every
+        # game it records -- it is how a dataset says which model made it, months later.
+        # Without asking it read `value:value`, which is the arm's name and nothing about
+        # the model. The policy's position representation was the same mistake.
+        files = evaluate.describe()
+        stem = re.sub(r"-s\d+$", "", Path(files[0]).stem) if files else args.inference_arm
+        leaf_label = (
+            f"value:{stem}" if len(files) <= 1 else f"value:{stem}x{len(files)}"
+        )
+        print(
+            f"leaf = the {args.inference_arm} arm on {args.inference} = {leaf_label} "
+            f"(this worker holds no model)",
+            file=sys.stderr,
+        )
+    elif args.value is not None:
+        # Imported here so a run without --value never loads torch: the resolver, the
+        # differential tests and the M1 path stay installable without a CUDA wheel.
+        import torch
+
+        torch.set_num_threads(args.torch_threads)
+
+        from pokeuraou.encode import Encoder
+        from pokeuraou.value import BatchedValue, load_model
+
+        if not args.value.exists():
+            raise SystemExit(f"no model at {args.value}; train one with tools/train_value.py")
+        encoder = Encoder(reg)
+        net, meta = load_model(args.value, encoder)
+        device = torch.device(
+            args.device or ("cuda" if torch.cuda.is_available() else "cpu")
+        )
+        evaluate = BatchedValue(net.to(device), encoder, device=device)
+        leaf_label = f"value:{args.value.stem}"
+        print(
+            f"leaf = {args.value.name} on {device}  "
+            f"(trained on {meta.get('games', '?')} games, "
+            f"val AUC {meta.get('val_auc', float('nan')):.4f})",
+            file=sys.stderr,
+        )
+        print(
+            "  そして葉が勝率になったので、各ノードの均衡値も勝率です",
+            file=sys.stderr,
+        )
+    return evaluate, leaf_label
 
 
 def report(path: Path) -> None:
