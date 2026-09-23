@@ -1,6 +1,6 @@
 """Ghost types and Shed Shell holders are not trapped (IKA-163).
 
-Every volatile in `actions.TRAPPING_VOLATILES` traps through `pokemon.tryTrap()`
+Every volatile in `TRAPPING_VOLATILES` below traps through `pokemon.tryTrap()`
 (`trapped.onTrapPokemon`, `partiallytrapped.onTrapPokemon`, `octolock`'s condition), and
 `tryTrap` begins
 
@@ -29,11 +29,15 @@ import dataclasses
 
 import pytest
 
-from pokeuraou.actions import TRAPPING_VOLATILES, SwitchAction, side_actions
+from pokeuraou.actions import TRAPPING_CONDITIONS, SwitchAction, side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Effect, Position
 
 from .conftest import FORMAT_ID
+
+#: Every trapping volatile: the two conditions, and the three a move's condition sets
+#: (IKA-169; `test_trap_sources.test_the_trap_sources_come_from_the_dump` pins them).
+TRAPPING_VOLATILES = TRAPPING_CONDITIONS | {"ingrain", "noretreat", "octolock"}
 
 SP = {"hp": 20, "atk": 20, "def": 10, "spa": 20, "spd": 10, "spe": 20}
 

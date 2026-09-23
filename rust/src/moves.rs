@@ -430,7 +430,15 @@ fn use_move<'a>(
                 .map(|w| skip_weather.contains(&w.as_str()))
                 .unwrap_or(false);
             if !skipped {
-                turn.add_volatile(action.side, action.slot, "twoturnmove", None);
+                // `duration: 2`, and the move stored as Showdown's `effectState.move`: the
+                // next turn's menu is that move alone (IKA-169), and a charge that never
+                // fires does not keep the marker for good.
+                turn.add_volatile(action.side, action.slot, "twoturnmove", Some(2));
+                if let Some(mon) = turn.mon_at_mut(action.side, action.slot) {
+                    if let Some(charging) = mon.volatile_mut("twoturnmove") {
+                        charging.move_id = Some(move_id);
+                    }
+                }
                 return Ok(vec![(1.0, turn)]);
             }
         }

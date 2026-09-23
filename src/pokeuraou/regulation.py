@@ -236,6 +236,22 @@ class Regulation:
             )
             self.moves[move.id] = move
 
+        # The traps a move's own condition sets: Ingrain, No Retreat and Octolock leave a
+        # volatile, Fairy Lock a pseudo-weather, and each condition's `onTrapPokemon` calls
+        # `pokemon.tryTrap()` (IKA-169). From the dump for the same reason as the Choice
+        # items; the two traps that live in `data/conditions.ts` rather than on a move
+        # (`trapped`, `partiallytrapped`) are `actions.TRAPPING_CONDITIONS`.
+        trap_hooked = [
+            m.raw for m in self.moves.values()
+            if "condition.onTrapPokemon" in m.raw.get("customHooks", ())
+        ]
+        self.trapping_volatiles: frozenset[str] = frozenset(
+            str(raw["volatileStatus"]) for raw in trap_hooked if raw.get("volatileStatus")
+        )
+        self.trapping_pseudo_weather: frozenset[str] = frozenset(
+            str(raw["pseudoWeather"]) for raw in trap_hooked if raw.get("pseudoWeather")
+        )
+
         self.items: dict[str, Item] = {}
         for it in data["items"]:
             item = Item(
