@@ -393,6 +393,9 @@ fn answer<R: BufRead, W: Write>(
         Err(error) => json!({ "error": error.to_string() }),
         Ok(value) if value["kind"].as_str() == Some("resolve") => resolve_one(reg, &value),
         Ok(value) if value["kind"].as_str() == Some("score") => score_pool(reg, &value),
+        Ok(value) if crate::resolve::commands::handles(value["kind"].as_str()) => {
+            crate::resolve::commands::answer(reg, &value)
+        }
         Ok(value) => match parse_request(&value) {
             Err(reason) => json!({ "error": reason }),
             Ok(request) => {

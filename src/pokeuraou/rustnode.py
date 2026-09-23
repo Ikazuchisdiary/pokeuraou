@@ -782,3 +782,245 @@ class RustNode:
             refused=[(int(i), int(j), str(why)) for i, j, why in response["refused"]],
             unmodelled=tuple(response["unmodelled"]),
         )
+
+    # -- What only Python's resolver answered (IKA-211). Not on any production road yet:
+    # -- selfplay, search and beliefnode still call `resolve` in Python (IKA-209 moves them).
+
+    def _ask(self, request: dict[str, Any]) -> dict[str, Any] | None:
+        response = self._exchange(request)
+        return None if response.get("refused") else response
+
+    @timing.timed("rust.turn")
+    def turn(
+        self,
+        pos: Position,
+        actions: list[SideAction],
+        budget: Budget,
+        *,
+        full: bool = False,
+        select: int | None = None,
+    ) -> PortTurn | None:
+        """`resolve_turn` through the port: every branch with `full`, and with `select` the
+        outcome at that index of the branches followed by the pauses -- a pause included,
+        which `resolve` could only give the weight of. None when the port declines."""
+        response = self._ask(
+            {
+                "kind": "turn",
+                "position": pos.to_json(),
+                "actions": [[dump_action(a) for a in side.slots] for side in actions],
+                "budget": dump_budget(budget),
+                "full": full,
+                "select": select,
+            }
+        )
+        return None if response is None else PortTurn.read(response)
+
+    @timing.timed("rust.resume")
+    def resume(
+        self,
+        pause: PortPause,
+        choices: list[SideAction],
+        *,
+        full: bool = False,
+        select: int | None = None,
+        world: tuple[Position, int] | None = None,
+    ) -> PortTurn | None:
+        """`resume_turn`: the rest of a paused turn with both sides' replacement choices.
+        `world` is `paused_in`'s position and side: the pause resumed in that completion."""
+        response = self._ask(
+            {
+                "kind": "turn",
+                "pause": pause.raw,
+                "choices": [[dump_action(a) for a in side.slots] for side in choices],
+                "full": full,
+                "select": select,
+                "in": _world(world),
+            }
+        )
+        return None if response is None else PortTurn.read(response)
+
+    @timing.timed("rust.alternatives")
+    def resume_alternatives(
+        self, pause: PortPause, *, world: tuple[Position, int] | None = None, full: bool = True
+    ) -> tuple[int | None, list[tuple[SideAction, PortTurn]]] | None:
+        """`resume_alternatives` (and, with `world`, of `paused_in`'s pause): who chooses, and
+        every replacement with the turn it produces, in Python's order."""
+        response = self._ask(
+            {"kind": "alternatives", "pause": pause.raw, "in": _world(world), "full": full}
+        )
+        if response is None:
+            return None
+        chooser = response["chooser"]
+        return (
+            None if chooser is None else int(chooser),
+            [
+                (_side_action(option), PortTurn.read(result))
+                for option, result in zip(response["options"], response["results"], strict=True)
+            ],
+        )
+
+    @timing.timed("rust.replacements")
+    def resolve_replacements(
+        self,
+        pos: Position,
+        choices: list[SideAction],
+        *,
+        rng: Any = None,  # noqa: ANN401 - numpy.random.Generator
+    ) -> PortPhase | None:
+        """`resolve_replacements`. A draw inside a switch-in is sampled from `rng` exactly as
+        Python's `_draw` samples it -- same call, same order -- or is the first, noted."""
+        return self._phase(
+            {
+                "kind": "replacements",
+                "position": pos.to_json(),
+                "choices": [[dump_action(a) for a in side.slots] for side in choices],
+            },
+            rng,
+        )
+
+    @timing.timed("rust.leads")
+    def apply_lead_abilities(
+        self, pos: Position, *, rng: Any = None  # noqa: ANN401 - numpy.random.Generator
+    ) -> PortPhase | None:
+        """`apply_lead_abilities`, with its draws answered as `resolve_replacements`'."""
+        return self._phase({"kind": "leads", "position": pos.to_json()}, rng)
+
+    def replacements_needed(self, pos: Position) -> tuple[tuple[bool, ...], ...] | None:
+        response = self._ask({"kind": "needed", "position": pos.to_json()})
+        if response is None:
+            return None
+        return tuple(tuple(bool(flag) for flag in side) for side in response["needed"])
+
+    def _phase(self, request: dict[str, Any], rng: Any) -> PortPhase | None:  # noqa: ANN401
+        """Asks for a phase, and once more per draw: the port replays the choices made so far
+        and hands back the weights of the next one, which is sampled here."""
+        if rng is None:
+            response = self._ask(request)
+            return None if response is None else PortPhase.read(response)
+        presets: list[int] = []
+        while True:
+            response = self._ask({**request, "presets": presets})
+            if response is None:
+                return None
+            weights = response.get("draw")
+            if not weights:
+                return PortPhase.read(response)
+            total = float(sum(weights))
+            presets.append(int(rng.choice(len(weights), p=[w / total for w in weights])))
+
+
+def _world(world: tuple[Position, int] | None) -> dict[str, Any] | None:
+    if world is None:
+        return None
+    position, side = world
+    return {"position": position.to_json(), "side": int(side)}
+
+
+def _side_action(slots: list[dict[str, Any]]) -> SideAction:
+    out: list[Any] = []
+    for entry in slots:
+        if entry["kind"] == "switch":
+            out.append(
+                SwitchAction(
+                    slot=int(entry["slot"]),
+                    party_index=int(entry["partyIndex"]),
+                    species=str(entry["species"]),
+                )
+            )
+        else:
+            out.append(PassAction(slot=int(entry["slot"])))
+    return SideAction(slots=tuple(out))
+
+
+@dataclass
+class PortPause:
+    """A turn the port stopped for a mid-turn replacement: Python's `SuspendedTurn`.
+
+    `raw` is what the port wrote -- the position and the continuation -- and is handed back
+    whole to resume it. The node keeps nothing between requests, so the pause is data here
+    rather than an id into the process.
+    """
+
+    probability: float
+    position: Position
+    raw: dict[str, Any]
+
+    @staticmethod
+    def read(raw: dict[str, Any]) -> PortPause:
+        return PortPause(
+            probability=float(raw["probability"]),
+            position=Position.from_json(raw["position"]),
+            raw=raw,
+        )
+
+
+@dataclass
+class PortBranch:
+    probability: float
+    position: Position
+
+
+@dataclass
+class PortTurn:
+    """One turn's answer. `branches`/`suspended` are the weights; with `full` the outcomes
+    themselves are in `outcomes`/`pauses`, and a `select` is in `position` or `pause`."""
+
+    branches: list[float]
+    suspended: list[float]
+    exact: bool
+    unmodelled: tuple[str, ...]
+    outcomes: list[PortBranch] | None = None
+    pauses: list[PortPause] | None = None
+    position: Position | None = None
+    pause: PortPause | None = None
+
+    @staticmethod
+    def read(response: dict[str, Any]) -> PortTurn:
+        branches = response["branches"]
+        suspended = response["suspended"]
+        full = bool(branches and isinstance(branches[0], dict)) or bool(
+            suspended and isinstance(suspended[0], dict)
+        )
+        chosen = response.get("position")
+        paused = response.get("pause")
+        if full or (not branches and not suspended):
+            outcomes = [
+                PortBranch(float(b["probability"]), Position.from_json(b["position"]))
+                for b in branches
+            ]
+            pauses = [PortPause.read(p) for p in suspended]
+            return PortTurn(
+                branches=[b.probability for b in outcomes],
+                suspended=[p.probability for p in pauses],
+                exact=bool(response["exact"]),
+                unmodelled=tuple(response["unmodelled"]),
+                outcomes=outcomes,
+                pauses=pauses,
+                position=Position.from_json(chosen) if chosen else None,
+                pause=PortPause.read(paused) if paused else None,
+            )
+        return PortTurn(
+            branches=[float(w) for w in branches],
+            suspended=[float(w) for w in suspended],
+            exact=bool(response["exact"]),
+            unmodelled=tuple(response["unmodelled"]),
+            position=Position.from_json(chosen) if chosen else None,
+            pause=PortPause.read(paused) if paused else None,
+        )
+
+
+@dataclass
+class PortPhase:
+    """A replacement phase or the leads' switch-ins: Python's `ReplacementResult`, without
+    the event log (the port keeps none)."""
+
+    position: Position
+    unmodelled: tuple[str, ...] = ()
+    events: list[str] = field(default_factory=list)
+
+    @staticmethod
+    def read(response: dict[str, Any]) -> PortPhase:
+        return PortPhase(
+            position=Position.from_json(response["position"]),
+            unmodelled=tuple(response["unmodelled"]),
+        )

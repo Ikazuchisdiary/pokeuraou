@@ -13,6 +13,11 @@ profile = []
 # IKA-99: the 16 damage rolls in integer arithmetic instead of through f64. Same numbers
 # (the product is far below 2^53); off by default until it is shown to buy anything.
 int-rolls = []
+# IKA-211's positive control: the node commands broken on purpose -- a resumed pause loses
+# the last action of its queue, a replacement's switch-in runs as it is placed, the leads'
+# skip the speed order, and a replayed draw is answered with its first option. Never for use; `tools/diff_commands.py` has to
+# tell a build with it from one without.
+ika211-control = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
