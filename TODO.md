@@ -13180,3 +13180,86 @@ worktree に data/priors・standings・reportworm と sim-bridge の dist を ma
 ### 8. 機械
 
 リリースビルド 3 回（22 秒・17 秒・17 秒、--cores 8）。以下はすべて 1 コア: オラクルとテスト（各 1〜7 秒）、記録の数え（59 秒）、セルの比較（223 秒と 94 秒）。すべて heavy.py 経由（--agent IKA-187）。
+
+## 9/24 — IKA-190: 残差の順番は天気が終わる前の素早さで並べる —— Python は天気が終わった後に並べていて、晴れ最後のターンのようりょくそを 2 倍なしで数え、Showdown が振らない同速を注記していた（port は前から正しい）
+
+ワーカー。基点 master a2c9bc6、ブランチ `ika-190-residual-tie-note`（報告前に master 47fd204 = IKA-187 を取り込み）。
+
+### 1. 何が違ったか
+
+diff_node で注記だけが違うセルの正体は 2 つとも同じ。晴れの残りが 1 のターンに、ようりょくその素早さが 2 倍かどうかで割れていた。
+
+- gen11L の node 2（seed 31、20 ノード）: フシギバナ（ようりょくそ、132、晴れで 264）とカイリュー（132）。メガゲンガーはひんしで、ひんしの枠は関係ない。晴れは `weather_duration` 1。
+- w12 の recover を教えた node 20 は逆向き。晴れの間は同速、終わった後は同速でないので、port だけが注記を出していた。
+
+Python の `_residuals` は `residual_order` を必要になったときに初めて計算していた。最初に呼ぶのは天気の段より後なので、天気を減らして終わらせてから並べていた。port の `residuals` は段の先頭で並べる。
+
+### 2. Showdown の定義（vendor/pokemon-showdown/sim/battle.ts）
+
+`runAction` の `case 'residual'` は `this.updateSpeed()` のあとに `this.fieldEvent('Residual')` を呼ぶ。`fieldEvent` は全部のハンドラを集め（それぞれ持ち主の `speed` を持つ）、`this.speedSort(handlers)` を 1 回だけ呼んでから順に回す。天気のハンドラは order 1 なので最初に回り、そこで `duration--` して終わる。そのため、晴れが終わるターンの残差（やけど・たべのこし など）は晴れの素早さで並ぶ。同速のシャッフルは、その素早さが同じときだけ起きる。port が正しく、Python だけを直した。
+
+### 3. 変更
+
+- `resolve.py` `_residuals`: 天気の段の前で `actives()` を 1 回呼ぶ（1 行と注釈だけ）。キャッシュはそのまま使う。
+- port は変えていない（`residual_order` はもともと段の先頭で並べる）。
+- 新しいテスト `tests/test_residual_speed_tie.py`（オラクル）: こちらはようりょくそのフシギバナ（素早さ 100、晴れで 200）とひでりのコータス、相手はフシギバナ（素早さ 100 = 同速、または 110 = 晴れがなければこちらより速い）とヤミラミ。1 ターン目に両方のフシギバナをやけどにし、晴れが終わる 5 ターン目の前後（4・5・6）を見る。Showdown は speed tie を keep と reverse の 2 回ずつ打つ。同速かどうかは、やけどの順番が 2 回で入れ替わるかどうかで判定する。
+
+### 4. オラクル（6 ケース = 2 相手 × 3 ターン、各ターン Showdown の局面から）
+
+```
+                                                     旧 Python   新 Python   port（旧・新とも）
+  注記が Showdown のシャッフルと一致（6 ケース）       5/6         6/6         6/6
+  やけどの順番が Showdown と一致（シャッフルなし 5）   4/5         5/5         ―（順は出さない）
+  port の注記・重み・局面が Python と一致（6）         5/6         6/6         ―
+```
+
+Showdown の事実: 5 ターン目は keep と reverse のどちらでもこちら（晴れで 200）が先。6 ターン目は、同速の相手なら 2 回で順番が入れ替わり、110 の相手なら相手が先。
+旧 Python が外したのは、同速の相手の 5 ターン目の注記と、110 の相手の 5 ターン目の順番（相手を先にした）。
+
+直す前の Python で落ちたテストは 3 つ（tie の注記、faster の順番、tie の port 一致）。事実のテスト 2 つは直す前から通る。
+
+### 5. diff_node（`--nodes 20`、Budget.matrix、exe は同じもの＝ master 47fd204 のビルド）
+
+```
+                                      旧 Python（master）              新 Python
+  gen11L --confused                   FAIL 67（注記だけ、1 ノード）    OK 0
+  gen11L（オプションなし）            OK、注記の違うノード 1           OK、0
+  w12 --confused                      OK 0                             OK 0
+  w12（オプションなし）               OK 0                             OK 0
+  cells.py --teach recover（w12 40 局面、4,855 セル）   違う 23（全部注記）   0
+```
+
+すべてのセルで Python の答えを旧と新で比べた（`C:/tmp/ika190/sig.py`、枝の重みと局面のハッシュ）:
+
+```
+                          セル     注記が動いた   値が動いた   同速の注記（旧 → 新、port）
+  gen11L                  6,187    37             0            150 → 113、113
+  gen11L --confused       6,187    67             0            180 → 113、113
+  w12                     9,518    0              0            1,667 → 1,667、1,667
+  w12 --confused          9,518    0              0            1,920 → 1,920、1,920
+  w12 recover 教え        4,855    23             0            328 → 351、351
+  gen11L recover 教え     4,258    0              0            324 → 324、324
+```
+
+同速以外の注記は 1 つも動いていない。port の答えは旧と新で同じ（exe が同じなので当然）。
+
+### 6. 記録で該当する数（`C:/tmp/ika190/records.py`、全局の move 決定）
+
+```
+                                                   w12        gen11L
+  move 決定                                        434,483    118,018
+  天気がこのターンで終わる（weatherDuration 1）      42,314     11,470
+    うち天気で素早さが変わる特性（ようりょくそ・すいすい・すなかき・ゆきかき）が立っている   10,902（2.5%）   3,031（2.6%）
+```
+
+残差の順番が変わりうるのはこの決定だけ。順番で値が変わるのは、同じ order の残差どうしが干渉するとき（ひんしの順番など）に限られる。上の 6 つの対照では値が動いたセルは 0 だった。
+
+### 7. 別課題の候補
+
+- 同速の注記は、残差を持たない者どうしの同速でも出る（「どこかの 2 体の素早さが同じ」で判定している）。Showdown のシャッフルは、同じ order・priority・speed・subOrder のハンドラの間だけで起きる。注記を「順番が結果を変えうる同速」に絞れば、w12 の 1,667 セルの多くは消える（両エンジンで同時に直す）。
+- ひんしの枠: Showdown の `side.active` にはひんしの者も残り、ハンドラは集められたうえで `fainted` のところで飛ばされる。両エンジンとも並びの最後に回して飛ばすので、結果は同じ。
+
+### 8. 検査と機械
+
+test_residual_speed_tie（新規）・test_weather_recovery・test_resolve・test_rust_node・test_speed・test_outrage_lock・test_confusion_duration・test_choice_lock・test_line_endings・test_port_coverage・test_port_gates・test_observe・test_no_machine_specific_paths を取り込み後に `-n 0` で通した（skip なし）。`port_coverage --check`・`port_gate_audit --check`・ruff も通過。
+cargo build --release 2 回（21 秒・18 秒、8 コア）。ほかはすべて 1 コアで、heavy.py 経由（--agent IKA-190）: 旧新の署名 363 秒、diff_node と cells.py は旧 420 秒・新 411 秒、記録の数え 38 秒、局面探し・オラクル・テストは各 1〜40 秒。
