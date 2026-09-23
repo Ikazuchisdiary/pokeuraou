@@ -1491,7 +1491,15 @@ fn run_queue<'a>(
             let action = ordered[0].clone();
             let rest: Vec<QueuedAction> = ordered[1..].to_vec();
             item.turn.actions_remaining = rest.len();
-            item.turn.budget = step_budget;
+            // `step_budget` goes to `execute` and nowhere else: `turn.budget` stays the
+            // budget the turn was asked for, as `_Turn.budget` does in Python. A turn that
+            // pauses for a mid-turn replacement is resumed by `resume_turn` on
+            // `turn.budget`, in a queue of its own where it is the only live branch, so
+            // the resolution it gets is divided by *that* queue's width. Writing the
+            // narrowed budget in here carried this generation's division into the resumed
+            // one and narrowed it a second time -- 4 leaves per replacement where Python
+            // made 272 (IKA-62, IKA-140). Under `Budget.matrix()` the two are the same
+            // value, because a pinned roll is never narrowed.
             // An Encore that landed earlier this turn rewrites the action, and Showdown
             // re-picks its target at random -- so this is a list, not a single action.
             let started = phase_start();
