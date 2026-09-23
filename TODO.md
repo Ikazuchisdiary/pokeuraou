@@ -14664,7 +14664,7 @@ port の `resolve` は既に `select` で 1 本の局面を返せるので、口
 なし（grep・git log・既存の記録の読み）。
 
 
-## 9/24 — IKA-211: port に途中交代の続き・交代の段・先発・全分岐の命令を足した。pause は JSON で process の外へ出し、乱数は「重みを返して引いてから頼む」。記録 M-C・M-B の 1,191 標本で Python と全件一致、Showdown とも一致
+## 9/24 — IKA-211: port に途中交代の続き・交代の段・先発・全分岐の命令を足した。pause は JSON で process の外へ出し、乱数は「重みを返して引いてから頼む」。記録 M-C・M-B の 1,187 標本（抜いた 1,191 のうち、今の規則で pause しない 4 を除く）で Python と全件一致、Showdown とも一致
 
 段 3（親 IKA-204 §6）。呼び出し元（selfplay・search・beliefnode）はまだ Python のまま。rustnode に口（メソッド）だけ足し、本番の経路には繋いでいない（段 4 = IKA-209）。
 
