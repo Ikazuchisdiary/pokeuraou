@@ -145,8 +145,45 @@ def _check_set(reg: Regulation, entry: dict[str, Any], label: str) -> None:
             raise TeamError(f"{label}: move {move!r} is not legal in {reg.meta.format_id}")
 
 
+#: The fields a recorded member has to state. ``item`` has to be *present*, but ``null``
+#: is a statement (holds nothing); every other one has to carry a value. ``sp`` may be
+#: ``{}`` -- a 0-SP spread is a spread -- but not absent or null, which would be unrecorded.
+_REQUIRED_VALUE = ("species", "ability", "nature", "moves")
+_REQUIRED_KEY = ("item", "sp")
+
+
+def _check_present(reg: Regulation, entry: dict[str, Any], label: str) -> None:
+    """Stops on a missing field, naming it, before anything reads the member.
+
+    A member with no nature used to load as ``nature='None'`` (``str(None)``) and fail only
+    in ``nature_multipliers``, far from the file (IKA-137). Filling it in is not an option
+    either: that would be the fourth source the module docstring rules out.
+    """
+    for name in _REQUIRED_VALUE:
+        value = entry.get(name)
+        if value is None or value == "" or value == []:
+            raise TeamError(
+                f"{label}: field {name!r} is missing -- a recorded team has to state the {name}"
+            )
+    for name in _REQUIRED_KEY:
+        if name not in entry or (name == "sp" and entry[name] is None):
+            raise TeamError(
+                f"{label}: field {name!r} is missing -- a recorded team has to state the {name}"
+                + (" (null means no item)" if name == "item" else " ({} means 0 SP)")
+            )
+    moves = entry["moves"]
+    if not isinstance(moves, list) or len(moves) > reg.meta.max_move_count:
+        raise TeamError(
+            f"{label}: field 'moves' has to be a list of 1 to {reg.meta.max_move_count} moves"
+        )
+
+
 def load_roster(path: str | Path) -> Roster:
-    """Reads an exactly recorded team, validating every field against the regulation."""
+    """Reads an exactly recorded team, validating every field against the regulation.
+
+    Every field of every member is checked for presence first (:func:`_check_present`), so
+    an incomplete member stops here with its team, index and field named.
+    """
     file = Path(path)
     if not file.exists():
         file = teams_dir() / f"{path}.json"
@@ -159,9 +196,8 @@ def load_roster(path: str | Path) -> Roster:
     species_seen: set[str] = set()
     for index, entry in enumerate(data["team"]):
         label = f"{data.get('id', file.stem)}[{index}] {entry.get('species')}"
+        _check_present(reg, entry, label)
         _check_set(reg, entry, label)
-        if entry.get("ability") is None:
-            raise TeamError(f"{label}: a recorded team has to state the ability")
         species_id = to_id(entry["species"])
         base = reg.species[species_id].base_species
         if base in species_seen:

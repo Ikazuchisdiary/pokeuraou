@@ -96,6 +96,49 @@ def test_a_recorded_team_must_state_its_abilities(tmp_path) -> None:  # noqa: AN
         load_roster(path)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("nature", None),
+        ("nature", ""),
+        ("nature", "<absent>"),
+        ("ability", "<absent>"),
+        ("item", "<absent>"),
+        ("moves", None),
+        ("moves", []),
+        ("moves", "<absent>"),
+        ("sp", None),
+        ("sp", "<absent>"),
+        ("species", "<absent>"),
+    ],
+)
+def test_a_missing_field_stops_the_load_and_names_itself(tmp_path, field, value) -> None:  # noqa: ANN001
+    """IKA-137: a member with no nature used to load as ``nature='None'`` and fail only
+    later, in ``nature_multipliers`` (``KeyError: Unknown nature: 'None'``), which points at
+    the stats and not at the file. The entry is where the missing field is known."""
+    data = json.loads((teams_dir() / f"{ROSTER}.json").read_text(encoding="utf-8"))
+    data["id"] = "broken-team"
+    member = data["team"][2]
+    if value == "<absent>":
+        del member[field]
+    else:
+        member[field] = value
+    path = tmp_path / "broken.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(TeamError, match=rf"broken-team\[2\].*'{field}'"):
+        load_roster(path)
+
+
+def test_no_item_is_a_statement_not_a_missing_field(tmp_path) -> None:  # noqa: ANN001
+    """``"item": null`` says the Pokemon holds nothing, which a sheet can show; only an
+    absent key is unrecorded."""
+    data = json.loads((teams_dir() / f"{ROSTER}.json").read_text(encoding="utf-8"))
+    data["team"][2]["item"] = None
+    path = tmp_path / "noitem.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+    assert load_roster(path).sets[2].item is None
+
+
 def test_an_illegal_item_is_refused(tmp_path) -> None:  # noqa: ANN001
     data = json.loads((teams_dir() / f"{ROSTER}.json").read_text(encoding="utf-8"))
     data["team"][0]["item"] = "Choice Specs Of Nowhere"
