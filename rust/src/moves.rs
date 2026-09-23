@@ -383,6 +383,19 @@ pub(crate) fn confuse(turn: &mut Turn, side: usize, slot: usize, source: Option<
     }
 }
 
+/// Disguise's `onUpdate` after the hit it took: `formeChange('Mimikyu-Busted', ..., true)`
+/// and `this.damage(pokemon.baseMaxhp / 8, ...)` (data/abilities.ts; Python's
+/// `_bust_disguise`, IKA-208).
+fn bust_disguise(reg: &Reg, turn: &mut Turn, target: Slot) -> Result<(), String> {
+    let maxhp = match turn.mon_at(target.0, target.1) {
+        Some(mon) if !mon.fainted && mon.species.as_str() == "mimikyu" => mon.maxhp,
+        _ => return Ok(()),
+    };
+    change_forme(reg, turn, target.0, target.1, "mimikyubusted")?;
+    turn.deal_damage(target.0, target.1, (maxhp / 8).max(1), false)?;
+    Ok(())
+}
+
 /// Damp's `onAnyTryMove`: any active Pokemon with it stops Explosion, Self-Destruct,
 /// Misty Explosion (and Mind Blown) -- `breakable`, so not against a Mold Breaker's own
 /// blast (IKA-208).
@@ -1454,11 +1467,27 @@ fn hit_target<'a>(
     let Some(defender) = turn.battler_at(target.0, target.1)? else {
         return Ok(vec![(1.0, turn)]);
     };
-    if matches!(defender.ability.as_str(), "disguise" | "iceface") {
+    if defender.ability.as_str() == "iceface" {
         return Err(format!("forme guard: {}", defender.ability));
     }
     // Python's `_hit_target`: a doll in front takes each hit while it stands (IKA-180).
     let subbed = hits_substitute(&turn, action, mv, target);
+    // Disguise (IKA-208), Python's `_forme_guard` / `_bust_disguise` (IKA-155, IKA-157):
+    // `onDamage` returns 0 for the first hit's damage, at the damage step -- after the
+    // immunity, the accuracy and the break -- and 0 is still a hit, so everything the hit
+    // carries happens; `onCriticalHit` is false and `onEffectiveness` 0 for it; the forme
+    // changes at the `Update` after that hit and costs `baseMaxhp / 8`. A doll in front
+    // takes the hit instead (`_substitute_in_front`).
+    let multihit = mv.raw.get("multihit").is_some_and(|v| !v.is_null());
+    let mut guarded = mv.category != "Status"
+        && defender.ability.as_str() == "disguise"
+        && defender.species.as_str() == "mimikyu";
+    if subbed && guarded {
+        if multihit {
+            turn.report(format!("substitute: {} past a broken Substitute into a forme guard", mv.id));
+        }
+        guarded = false;
+    }
 
     let accuracy = accuracy_of(&turn, mv, &attacker, &defender);
     let crit_p = crit_probability(reg, &attacker, &defender, move_id.as_str());
@@ -1469,13 +1498,18 @@ fn hit_target<'a>(
         } else {
             vec![(1.0, accuracy > 0.0)]
         };
-    let crit_branches: Vec<(f64, bool)> =
+    let mut crit_branches: Vec<(f64, bool)> =
         if budget.enumerate_crit && crit_p > 0.0 && crit_p < 1.0 {
             vec![(crit_p, true), (1.0 - crit_p, false)]
         } else {
             vec![(1.0, crit_p >= 1.0)]
         };
-    let rolls = stratified_rolls(&budget);
+    let mut rolls = stratified_rolls(&budget);
+    if guarded && !multihit {
+        // The one hit is absorbed: neither a crit nor a roll changes anything.
+        crit_branches = vec![(1.0, false)];
+        rolls = vec![(rolls[0].0, 1.0)];
+    }
     // Python's `_hit_target` returns every outcome from here on with the note "damage
     // rolls stratified" unless the roll is pinned or all sixteen are kept, and `_run_queue`
     // makes the turn inexact for it. Setting it on `turn` puts it on every clone below;
@@ -1532,6 +1566,7 @@ fn hit_target<'a>(
             continue;
         }
         let started = crate::resolve::phase_start();
+        // A guarded first hit never crits; `crit` then speaks for the later hits only.
         let result = calculate(
             reg,
             &attacker,
@@ -1540,7 +1575,7 @@ fn hit_target<'a>(
             &field,
             target.0,
             spread,
-            crit,
+            crit && !guarded,
             Some(&move_ctx),
             None,
             false,
@@ -1631,12 +1666,18 @@ fn hit_target<'a>(
                         hit_substitute(&mut state, action, mv, target, amount, &budget)?;
                         continue;
                     }
-                    let dealt = state.deal_damage(target.0, target.1, amount, true)?;
+                    let absorbed = guarded && hit_index == 0;
+                    let dealt = if absorbed {
+                        0
+                    } else {
+                        state.deal_damage(target.0, target.1, amount, true)?
+                    };
                     reached = true;
                     state.move_hit[target.0][target.1] = true;
                     let after_started = crate::resolve::phase_start();
-                    // A hit into Endure at 1 HP deals 0 and is still a hit (IKA-171).
-                    let landed = amount > 0;
+                    // A hit into Endure at 1 HP deals 0 and is still a hit (IKA-171), and
+                    // so is one Disguise took, which is neutral (no resist berry).
+                    let landed = absorbed || amount > 0;
                     after_hit(
                         &mut state,
                         action,
@@ -1645,9 +1686,12 @@ fn hit_target<'a>(
                         dealt,
                         landed,
                         &budget,
-                        result.type_mod,
+                        if absorbed { 0 } else { result.type_mod },
                     )?;
                     crate::resolve::phase_end(11, after_started);
+                    if absorbed {
+                        bust_disguise(reg, &mut state, target)?;
+                    }
                 }
                 let weight = acc_weight * crit_weight * roll_weight * hit_weight;
                 for (extra, mut expanded) in spread_secondaries(state, action, hits > 1)? {

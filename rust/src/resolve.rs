@@ -804,6 +804,8 @@ fn ability_handled(ability: &str) -> bool {
             // The forme change this drives is in `use_move`, which is why it is here and
             // no longer in `check_position_supported`'s pair.
             | "stancechange"
+            // `moves::hit_target`'s forme guard and `moves::bust_disguise` (IKA-208).
+            | "disguise"
     ) || crate::inert::ability_is_inert(ability)
 }
 
@@ -1000,8 +1002,12 @@ fn check_position_supported(
             // `_bust_disguise`, so answering here would be a wrong answer, not a refusal.
             // Refusing costs little: Eiscue is not in Reg M-C at all, and Mimikyu is on 1
             // of Baltimore's 1,067 teams and none of 2026 Worlds' 394 (IKA-71).
-            if matches!(mon.ability.as_str(), "disguise" | "iceface") {
-                return Err(format!("ability: {} (forme change and 1/8 not ported)", mon.ability));
+            // Disguise is `moves::hit_target`'s forme guard since IKA-208. Ice Face stays
+            // refused, and cannot be met: its intact forme `eiscue` is in neither Reg M-B
+            // nor M-C (only the battle-only `eiscuenoice` is, which no team can bring), so
+            // nothing can turn into it.
+            if mon.ability.as_str() == "iceface" {
+                return Err(format!("ability: {} (its intact forme is not in the regulation)", mon.ability));
             }
             if !ability_handled(mon.ability.as_str()) {
                 return Err(format!("ability: {}", mon.ability));
@@ -1011,9 +1017,7 @@ fn check_position_supported(
                     return Err(format!("item: {}", item));
                 }
             }
-            if !mon.unmodelled_volatiles.is_empty() {
-                return Err("position carries unmodelled volatiles".into());
-            }
+            // `unmodelledVolatiles` is read by `showdown_volatiles` instead (IKA-208).
             for volatile in &mon.volatiles {
                 if !volatile_handled(volatile.id.as_str()) {
                     return Err(format!("volatile: {}", volatile.id));
@@ -1046,6 +1050,58 @@ fn check_position_supported(
         }
     }
     Ok(())
+}
+
+/// The volatiles a position read from Showdown carries in `unmodelledVolatiles` -- the
+/// bridge files there whatever is not on its `MODELLED_VOLATILES` list, and only a
+/// Showdown position has any (IKA-208; a position this port or Python made never does).
+/// The port refused all of them; Python ignores them. Now:
+///
+/// * the charging move's own volatile (`electroshot`, `solarbeam`, ...) beside
+///   `twoturnmove`, which already carries its move and target, is dropped;
+/// * `flashfire` is this port's own volatile under the same id (`absorb`), and is moved
+///   into `volatiles`;
+/// * the volatile of an item this port ignores (Metronome's) is dropped with it;
+/// * anything else stays where it is and the turn names it, as an effect it does not model
+///   (Throat Chop, Stockpile).
+///
+/// A copy is made only when there is something to move.
+fn showdown_volatiles(pos: &Position) -> (Option<Position>, Vec<String>) {
+    let carries = pos.sides.iter().any(|side| side.pokemon.iter().any(|m| !m.unmodelled_volatiles.is_empty()));
+    if !carries {
+        return (None, Vec::new());
+    }
+    let mut own = pos.clone();
+    let mut notes = Vec::new();
+    for side in own.sides.iter_mut() {
+        for mon in side.pokemon.iter_mut() {
+            if mon.unmodelled_volatiles.is_empty() {
+                continue;
+            }
+            let mon = std::rc::Rc::make_mut(mon);
+            let charging = mon.volatile("twoturnmove").and_then(|v| v.move_id);
+            let held = mon.item;
+            let mut kept = Vec::new();
+            for vid in std::mem::take(&mut mon.unmodelled_volatiles) {
+                if charging == Some(vid) {
+                    continue;
+                }
+                if vid.as_str() == "flashfire" {
+                    if !mon.has_volatile("flashfire") {
+                        mon.volatiles.push(Effect::new(vid));
+                    }
+                    continue;
+                }
+                if held == Some(vid) && crate::inert::item_is_inert(vid.as_str()) {
+                    continue;
+                }
+                notes.push(format!("volatile not modelled: {vid}"));
+                kept.push(vid);
+            }
+            mon.unmodelled_volatiles = kept;
+        }
+    }
+    (Some(own), notes)
 }
 
 pub(crate) fn volatile_is_handled(vid: &str) -> bool {
@@ -1122,6 +1178,8 @@ pub fn resolve_turn<'a>(
     budget: Budget,
 ) -> Result<TurnResult<'a>, String> {
     let started = phase_start();
+    let (adopted, notes) = showdown_volatiles(pos);
+    let pos = adopted.as_ref().unwrap_or(pos);
     check_position_supported(pos, side_actions)?;
     phase_end(0, started);
     if pos.sides.len() != 2 || pos.sides.iter().any(|s| s.active.len() != 2) {
@@ -1155,7 +1213,7 @@ pub fn resolve_turn<'a>(
     let mut branches: Vec<Branch> = Vec::new();
     let mut suspended: Vec<Suspended<'a>> = Vec::new();
     let mut exact = true;
-    let mut unmodelled: std::collections::BTreeSet<String> = Default::default();
+    let mut unmodelled: std::collections::BTreeSet<String> = notes.into_iter().collect();
     for queue in queues {
         if queue.is_empty() {
             continue;
