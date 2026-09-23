@@ -88,35 +88,44 @@ GATES = (
 #: Candidates for the first question that a person has looked at and kept, because the
 #: name being in the port is not the port acting on it. The reason is the point: without
 #: it the next reader cannot tell a decided case from an unnoticed one.
+#: The places are named by function rather than by line: the lines moved under IKA-70's
+#: first edit to `resolve.rs`, and a reason that points at the wrong line is a reason
+#: nobody can check.
 ACKNOWLEDGED: dict[str, str] = {
     "slowstart": (
-        "the only mention is the refusal itself: check_position_supported refuses it at "
-        "resolve.rs:883, so a turn can never get half-way through it"
+        "the only mention is the refusal itself: check_position_supported refuses it by "
+        "name, so a turn can never get half-way through it"
     ),
-    "trick": "named only by the refusal at resolve.rs:796 -- this port swaps no items",
-    "switcheroo": "named only by the refusal at resolve.rs:796 -- likewise",
+    "trick": "named only by check_move_supported's refusal -- this port swaps no items",
+    "switcheroo": "named only by check_move_supported's refusal -- likewise",
+    # Moved here from KNOWN_UNGATED on 2026-09-23 (IKA-71). The damage layer names them too,
+    # which is why they are findings at all; the refusal is what keeps that half-port unused.
+    "disguise": (
+        "refused by name in check_position_supported, ahead of the gate: damage.rs only "
+        "zeroes the hit, while Python also busts the forme and takes Mimikyu's 1/8 "
+        "(_bust_disguise). Mimikyu is on 1 of 1,067 Baltimore teams, none of 2026 Worlds'"
+    ),
+    "iceface": (
+        "refused by name in check_position_supported, beside disguise: damage.rs only "
+        "zeroes the hit, Python also turns eiscue into eiscuenoice. Eiscue is not in Reg M-C"
+    ),
 }
 
 #: Effects the port implements and its gate refuses, as of 2026-09-22. Every one of them
 #: is a bill rather than a wrong answer, and taking one off the list is not a one-line
 #: change: it makes the port answer positions it used to hand back, so it needs
 #: `tools/diff_node.py` to say the two engines agree on them first. Recorded so `--check`
-#: can fail on a fifth without first demanding these four be settled.
-KNOWN_UNGATED: frozenset[str] = frozenset(
-    {
-        # speed.rs:160 branches the priority roll for it, beside `quickdraw`, which is in
-        # the gate. Python does the same at speed.py:222.
-        "quickclaw",
-        # effects.rs:463 gives it the 1-in-10, read at resolve.rs:327, beside `focussash`,
-        # which is in the gate. Python has it at effects.py:552.
-        "focusband",
-        # damage.rs:379-382 zeroes the hit for both. Not the same thing as Python, which
-        # also busts the forme and takes Mimikyu's 1/8 (resolve.py:2952) -- so this pair
-        # is a question about the port's damage layer, not a line for the gate.
-        "disguise",
-        "iceface",
-    }
-)
+#: can fail on the next one without first demanding these be settled.
+#:
+#: `quickclaw` and `focusband` were here too, and were struck on 2026-09-23 (IKA-70): the
+#: gate lists them now. The band was the case the warning above is about -- listing it
+#: made reachable a refusal in `deal_damage` that nothing could reach before, so that had
+#: to become Python's own report first.
+#:
+#: `disguise` and `iceface` were the last two, and moved to ACKNOWLEDGED on 2026-09-23
+#: (IKA-71): the port zeroes the hit and does nothing else, so they are refused by name
+#: rather than listed. The list is empty; `--check` fails on the next one.
+KNOWN_UNGATED: frozenset[str] = frozenset()
 
 #: Names the gate passes that the port never mentions while Python does, as of
 #: 2026-09-22. Read one by one, Python's mention of each turns out to be an inventory or a

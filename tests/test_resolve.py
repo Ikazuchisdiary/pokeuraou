@@ -184,6 +184,65 @@ def test_probabilities_sum_to_one(reg: Regulation, team_a: list[TeamSet]) -> Non
         assert result.total_probability == pytest.approx(1.0), budget
 
 
+def _everyone_attacks(reg: Regulation, pos: Position, side: int) -> SideAction:
+    """A choice in which both of the side's Pokemon use a damaging move, no mega."""
+    for choice in side_actions(reg, pos, side):
+        if all(
+            isinstance(a, MoveAction)
+            and not a.mega
+            and reg.moves[a.move_id].category != "Status"
+            for a in choice.slots
+        ):
+            return choice
+    raise AssertionError(f"side {side} has no all-damaging choice")
+
+
+@pytest.mark.parametrize("holder", [(0, 0), (0, 1), (1, 0), (1, 1)])
+@pytest.mark.parametrize(("kind", "name", "chance"), [
+    ("item", "quickclaw", 0.2),
+    ("ability", "quickdraw", 0.3),
+])
+def test_a_priority_roll_weighs_the_same_whoever_is_queued_first(
+    reg: Regulation,
+    team_a: list[TeamSet],
+    holder: tuple[int, int],
+    kind: str,
+    name: str,
+    chance: float,
+) -> None:
+    """Quick Claw's two queue branches weigh 0.2 and 0.8 wherever its holder is queued.
+
+    They weighed 0.8 and 0.8 unless the holder's action was the first one queued. The
+    weight is written onto each branch's first action, and the branches shared that object
+    whenever it was queued before the split -- so the second write replaced the first. A
+    turn with a claw anywhere but p1a carried a total probability of 1.6 and the claw fired
+    half the time; Quick Draw's 0.3 became 1.4 the same way. The port clones its queues
+    and rolled one in five all along, which is how `tools/diff_node.py` found it (IKA-70).
+    """
+    from pokeuraou.speed import build_queue
+    from pokeuraou.view import battler, field_state
+
+    pos = _synthetic_position(reg, team_a)
+    side, slot = holder
+    mon = pos.sides[side].active_pokemon()[slot]
+    assert mon is not None
+    if kind == "item":
+        mon.item = mon.base_item = name
+    else:
+        mon.ability = name
+    actions = [_everyone_attacks(reg, pos, 0), _everyone_attacks(reg, pos, 1)]
+    fighters = [
+        [battler(reg, m) if m is not None and not m.fainted else None for m in s.active_pokemon()]
+        for s in pos.sides
+    ]
+    queues = build_queue(reg, pos, actions, fighters, field_state(pos, reg))
+    assert sorted(q[0].branch_probability for q in queues) == pytest.approx(
+        [chance, 1 - chance]
+    )
+    result = resolve_turn(reg, pos, actions, budget=Budget.matrix())
+    assert result.total_probability == pytest.approx(1.0)
+
+
 def test_a_deterministic_budget_gives_one_branch(reg: Regulation, team_a: list[TeamSet]) -> None:
     pos = _synthetic_position(reg, team_a)
     both = [side_actions(reg, pos, 0)[0], side_actions(reg, pos, 1)[0]]

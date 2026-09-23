@@ -479,6 +479,157 @@ def test_a_white_herb_holder_is_not_refused(bridged: None) -> None:
         )
 
 
+def _turn_differences(node: Any, reg: Any, pos: Any, a: Any, b: Any) -> list[str]:
+    """One cell resolved by both engines, compared branch by branch.
+
+    The matrix is a weighted mean, so a branch weight that is wrong and a branch weight
+    that is right can give the same cell whenever the branches score alike. This compares
+    the thing itself: every weight, every suspended weight, the notes, and every branch's
+    position -- the same equality `pokeuraou-damage turns` holds a fixture to.
+    """
+    budget = Budget.matrix()
+    here = resolve_module.resolve_turn(reg, pos, [a, b], budget=budget)
+    there = node.resolve(pos, [a, b], budget)
+    if there is None:
+        return ["the port refused the turn"]
+    wrong: list[str] = []
+    mine = [branch.probability for branch in here.branches]
+    if len(mine) != len(there.branches) or any(
+        abs(x - y) > 1e-12 for x, y in zip(mine, there.branches, strict=False)
+    ):
+        wrong.append(f"branch weights: python {mine}, rust {there.branches}")
+    paused = [s.probability for s in here.suspended]
+    if len(paused) != len(there.suspended) or any(
+        abs(x - y) > 1e-12 for x, y in zip(paused, there.suspended, strict=False)
+    ):
+        wrong.append(f"suspended weights: python {paused}, rust {there.suspended}")
+    if sorted(here.unmodelled) != sorted(there.unmodelled):
+        wrong.append(f"notes: python {sorted(here.unmodelled)}, rust {sorted(there.unmodelled)}")
+    if not wrong:
+        for index, branch in enumerate(here.branches):
+            chosen = node.resolve(pos, [a, b], budget, select=index)
+            assert chosen is not None and chosen.position is not None
+            if chosen.position.to_json() != branch.position.to_json():
+                wrong.append(f"branch {index} position differs")
+    return wrong
+
+
+def test_a_quick_claw_holder_is_resolved_over_there_and_rolls_the_same(bridged: None) -> None:
+    """The claw is `fractional_priority`'s, in both engines; only the gate was never told.
+
+    A cell the claw does not move is no evidence -- its two queue branches reach the same
+    states and merge back into one -- so the control comes first: the cells whose Python
+    answer changes when the claw is taken away again. Those are held to the port branch by
+    branch, because a wrong 20% can still average to the right cell (IKA-70).
+
+    The holder is Incineroar at p1b and not Kingambit at p1a on purpose. The first action
+    queued was the one place Python weighed the claw right, and the first version of this
+    test sat there and passed while every other slot rolled it half the time.
+    """
+    reg, pos, row, col = _node()
+    mine = pos.sides[0].active_pokemon()[1]
+    assert mine is not None and mine.species == "incineroar"
+    mine.item = "quickclaw"
+    assert not validate_position(pos, reg.meta.active_per_side)
+    evaluators = [OBJECTIVES["hp-share"].batch, OBJECTIVES["faints"].batch]
+
+    os.environ[rustnode.ENV_ENABLE] = "0"
+    rustnode.reset()
+    expected, _notes, _e = batched_payoffs(reg, pos, row, col, evaluators, budget=Budget.matrix())
+    bare = pos.copy()
+    bare.sides[0].active_pokemon()[1].item = None
+    without, _n0, _e0 = batched_payoffs(reg, bare, row, col, evaluators, budget=Budget.matrix())
+    moved = np.argwhere(np.abs(np.asarray(expected[0]) - np.asarray(without[0])) > 1e-12)
+    assert len(moved), "the claw changed no cell, so agreeing here would say nothing"
+
+    os.environ[rustnode.ENV_ENABLE] = "1"
+    rustnode.reset()
+    node = rustnode.node_for(reg)
+    assert node is not None
+    filled = node.fill(pos, row, col, ["hp-share", "faints"], Budget.matrix())
+    assert not filled.refused, f"refused: {sorted({why for _i, _j, why in filled.refused})}"
+    got, _n2, _e2 = batched_payoffs(reg, pos, row, col, evaluators, budget=Budget.matrix())
+    for index in range(len(evaluators)):
+        assert np.allclose(
+            np.asarray(got[index]), np.asarray(expected[index]), rtol=0, atol=1e-12
+        )
+    for i, j in moved:
+        assert not _turn_differences(node, reg, pos, row[i], col[j]), (int(i), int(j))
+
+
+def test_a_focus_band_holder_falls_the_same_way_over_there(bridged: None) -> None:
+    """Neither engine branches the band's 1-in-10: both let the hit land and say so.
+
+    Python reports `survival chance not branched:focusband` and faints the holder. The
+    port used to refuse the turn at that point instead, which was a line nobody could reach
+    while the gate refused every holder -- and the first thing listing the item would have
+    made reachable. So the cells held to the port here are the ones that take that path:
+    a lethal hit on the holder, which is what Close Combat into a Kingambit on 120 HP is.
+    """
+    reg, pos, row, col = _node()
+    mine = pos.sides[0].active_pokemon()[0]
+    assert mine is not None and mine.species == "kingambit"
+    mine.item = "focusband"
+    assert not validate_position(pos, reg.meta.active_per_side)
+    evaluators = [OBJECTIVES["hp-share"].batch, OBJECTIVES["faints"].batch]
+    note = "survival chance not branched:focusband"
+
+    os.environ[rustnode.ENV_ENABLE] = "0"
+    rustnode.reset()
+    expected, notes, _e = batched_payoffs(reg, pos, row, col, evaluators, budget=Budget.matrix())
+    fired = [
+        (i, j)
+        for i in range(len(row))
+        for j in range(len(col))
+        if note
+        in resolve_module.resolve_turn(reg, pos, [row[i], col[j]], budget=Budget.matrix()).unmodelled
+    ]
+    assert note in notes and fired, "no cell reached the band, so agreeing would say nothing"
+
+    os.environ[rustnode.ENV_ENABLE] = "1"
+    rustnode.reset()
+    node = rustnode.node_for(reg)
+    assert node is not None
+    filled = node.fill(pos, row, col, ["hp-share", "faints"], Budget.matrix())
+    assert not filled.refused, f"refused: {sorted({why for _i, _j, why in filled.refused})}"
+    assert note in filled.unmodelled
+    got, rust_notes, _e2 = batched_payoffs(reg, pos, row, col, evaluators, budget=Budget.matrix())
+    assert rust_notes == notes
+    for index in range(len(evaluators)):
+        assert np.allclose(
+            np.asarray(got[index]), np.asarray(expected[index]), rtol=0, atol=1e-12
+        )
+    for i, j in fired:
+        assert not _turn_differences(node, reg, pos, row[i], col[j]), (i, j)
+
+
+@pytest.mark.parametrize("ability", ["disguise", "iceface"])
+def test_disguise_and_ice_face_are_refused_by_name(bridged: None, ability: str) -> None:
+    """The port zeroes the hit and nothing else, so a holder is refused, and says why.
+
+    Python also busts the forme and takes Mimikyu's 1/8. An answer from the port would be
+    a wrong one, which is worse than a refused cell -- Python fills those. The reason is
+    held exactly: the gate's own refusal reads `ability: disguise`, so a test that only
+    counted refusals would pass with the named check deleted, and would keep passing the
+    day someone lists the ability in `ability_handled` (IKA-71).
+    """
+    reg, pos, row, col = _node()
+    mine = pos.sides[0].active_pokemon()[0]
+    assert mine is not None
+    mine.ability = ability
+    assert not validate_position(pos, reg.meta.active_per_side)
+
+    os.environ[rustnode.ENV_ENABLE] = "1"
+    rustnode.reset()
+    node = rustnode.node_for(reg)
+    assert node is not None
+    filled = node.fill(pos, row, col, ["hp-share"], Budget.matrix())
+    assert len(filled.refused) == len(row) * len(col)
+    assert {why for _i, _j, why in filled.refused} == {
+        f"ability: {ability} (forme change and 1/8 not ported)"
+    }
+
+
 def test_stance_change_takes_the_forme_over_there_too(bridged: None) -> None:
     """The forme decides the stats, so a port that skipped it read the wrong Pokemon.
 

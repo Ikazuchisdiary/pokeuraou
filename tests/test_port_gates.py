@@ -53,7 +53,8 @@ def test_an_effect_the_gate_never_knew_is_caught_the_same_way(sources):
 
     Striking a line that exists tests the diff; an effect the gate has never listed is
     the shape the next one will have. `focussash` is implemented in `effects.rs` beside
-    `focusband`, which is a finding today precisely because it is absent from the gate.
+    `focusband`, which was a finding until 2026-09-23 for exactly that reason -- absent
+    from the gate while its neighbour was listed (IKA-70).
     """
     sources["resolve.rs"] = sources["resolve.rs"].replace('"focussash" | ', "", 1)
     assert "focussash" in ungated(sources)
