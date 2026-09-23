@@ -238,6 +238,8 @@ _OPEN: list[Any] = [None]
 _DECISIONS: dict[str, dict[str, Any]] = {}
 #: The process's CPU seconds (every thread, from the kernel) when startup ended.
 _STARTUP_CPU: list[float] = []
+#: Whether this process's leaf is a server's: set by `RemoteValue` when one is built.
+_SERVED: list[bool] = [False]
 
 
 def stage(name: str) -> Any:
@@ -493,6 +495,18 @@ def _decisions() -> dict[str, dict[str, Any]]:
     return out
 
 
+def serving() -> None:
+    """Record that this process scores its leaves on an inference server.
+
+    Called by `RemoteValue` when one is built, so a report's `served` says which leaf the
+    process actually held. It used to be read off `POKEURAOU_INFERENCE`, which nothing
+    sets: generate_queue.py and match_queue.py hand the address over as `--inference`, so
+    every served run reported `served: false` and read as direct (IKA-144). Set whether or
+    not timing is on -- it is one assignment, made once a process.
+    """
+    _SERVED[0] = True
+
+
 def set_total(name: str, seconds: float, *, calls: int = 0) -> None:
     """Set a borrowed row to a running total, rather than adding to it.
 
@@ -520,7 +534,8 @@ def snapshot() -> dict[str, Any]:
         "source": str(Path(__file__).resolve().parent),
         "elapsed": time.perf_counter() - _STARTED,
         "rust_node": os.environ.get("POKEURAOU_RUST_NODE", ""),
-        "served": bool(os.environ.get("POKEURAOU_INFERENCE")),
+        # From the leaf this process built, not from the environment (IKA-144).
+        "served": _SERVED[0],
         "stages": {
             name: {"wall": s.wall, "cpu": s.cpu, "calls": s.calls}
             for name, s in _STAGES.items()
@@ -614,6 +629,7 @@ __all__ = [
     "purpose",
     "ready",
     "refine",
+    "serving",
     "set_total",
     "snapshot",
     "stage",
