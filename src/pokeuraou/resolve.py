@@ -1845,6 +1845,13 @@ def _do_move(
         state = turn if index == len(checks) - 1 else turn.clone()
         if blocked is not None:
             mon = state.mon_at(action.side, action.slot)
+            if blocked != "fainted" and mon is not None:
+                # `runMove` bumps `activeMoveActions` on its first line, before the
+                # `BeforeMove` event that flinch, sleep, freeze, paralysis and confusion
+                # answer (sim/battle-actions.ts:217, :255), so a Pokemon that could not
+                # move has still spent its first turn out: Showdown disables its Fake
+                # Out next turn (IKA-166).
+                mon.active_move_actions += 1
             if blocked == "flinch" and mon is not None:
                 mon.volatiles = [v for v in mon.volatiles if v.id != "flinch"]
             if blocked == "confusion":

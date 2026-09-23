@@ -114,15 +114,15 @@ def test_switches_and_protect_are_not_ranked_out(
 
 
 def test_a_fake_out_that_cannot_work_is_not_offered_as_a_candidate() -> None:
-    """Legal, and still not worth a candidate slot.
+    """Not worth a candidate slot where it is legal, and not legal in champions.
 
-    Showdown lets a player pick Fake Out on any turn and fails it at execution -- there is
-    no `disabled` flag for it -- so `side_actions` is right to enumerate it and the
-    differential harness keeps checking that we fail it the same way. But a move that
-    provably does nothing is dominated by every other move, and the search was not merely
-    spending one of its 24 slots on one: in a recorded game the equilibrium put 41.6% of a
-    node's weight on a Fake Out that could not fire, because the value function's cells
-    do not know the move is dead.
+    In the champions dex Fake Out's `onDisableMove` takes it off the request once its user
+    has moved (IKA-166), so `side_actions` no longer offers it; `drop_dead_actions` is the
+    guard for a pool that still holds one (a dex without the hook, where Showdown fails it
+    at execution). A move that provably does nothing is dominated by every other move, and
+    the search was not merely spending one of its 24 slots on one: in a recorded game the
+    equilibrium put 41.6% of a node's weight on a Fake Out that could not fire, because the
+    value function's cells do not know the move is dead.
     """
     from pokeuraou.actions import side_actions
     from pokeuraou.damage import register_mega_stones
@@ -152,24 +152,24 @@ def test_a_fake_out_that_cannot_work_is_not_offered_as_a_candidate() -> None:
     assert pos.sides[0].pokemon[0].active_move_actions == 0
     assert fake_outs(pos) > 0
 
-    # After it has already acted twice, Showdown's `onTry` fails it every time.
-    pos.sides[0].pokemon[0].active_move_actions = 2
-    assert fake_outs(pos) == 0
-    # ...and the legal set still has it, because that is what Showdown offers.
-    assert any(
-        getattr(slot_action, "move_id", None) == "fakeout"
-        for action in side_actions(reg, pos, 0)
-        for slot_action in action.slots
-    )
-
-    # The last action is never dropped: an empty list becomes Struggle, which is a
-    # different and illegal action.
+    # The Fake Out combinations of the first turn out, kept for the pool checks below.
+    pool = side_actions(reg, pos, 0)
     only = [
         action
-        for action in side_actions(reg, pos, 0)
+        for action in pool
         if any(getattr(s, "move_id", None) == "fakeout" for s in action.slots)
     ]
     assert only, "the position must offer at least one Fake Out combination"
+
+    # After one move action the champions request disables it (IKA-166), and a pool that
+    # still holds it drops it: `onTry` would fail it, since the counter is bumped first.
+    pos.sides[0].pokemon[0].active_move_actions = 1
+    assert fake_outs(pos) == 0
+    kept = drop_dead_actions(reg, pos, 0, pool)
+    assert kept and not any(action in only for action in kept)
+
+    # The last action is never dropped: an empty list becomes Struggle, which is a
+    # different and illegal action.
     assert drop_dead_actions(reg, pos, 0, only) == only
 
 

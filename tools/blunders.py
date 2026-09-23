@@ -19,7 +19,11 @@ cannot tell "never blundered" from "never could".
 
     fake out late     Fake Out fails unless the user has not acted since switching in.
                       Showdown gates it on `activeMoveActions`, which the recorded position
-                      carries, so the opportunity and the choice are both exact.
+                      carries, so the opportunity and the choice are both exact. In the
+                      champions dex it is not merely doomed but disabled, and since IKA-166
+                      `side_actions` no longer offers it, so both lines should read 0 on
+                      games generated after that -- and a record from before it counted a
+                      Pokemon that could not move (flinch, sleep) as not having acted.
     switch read       a status move fired at a field where every active already has a
                       major status. **Not a blunder.** A move targets a slot, so if the
                       opponent switches it lands on whoever arrives -- this is a bet on a

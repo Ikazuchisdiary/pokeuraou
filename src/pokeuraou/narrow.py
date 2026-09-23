@@ -352,12 +352,19 @@ def drop_dead_actions(
     """Removes actions that cannot do anything, before the candidate budget is spent.
 
     Fake Out, First Impression and Mat Block fail outright unless their user came in this
-    turn -- Showdown lets a player pick one anyway and fails it at execution, so they are
-    *legal* and `side_actions` is right to offer them. They are not worth a candidate
-    slot: a move that provably does nothing is dominated by every other move, and the
-    solver was not merely wasting a slot on one, it was putting 41.6% of a node's
-    equilibrium weight on it, because a value function's noisy cells do not know the move
-    is dead.
+    turn. In the champions dex Fake Out and First Impression never get that far: their
+    `onDisableMove` takes them off the request once the user has made a move action, so
+    `side_actions` does not offer them (IKA-166). What reaches this is a dex without that
+    hook -- the base game's Fake Out, and Mat Block everywhere -- where Showdown lets a
+    player pick one and fails it at execution, so it is *legal* and `side_actions` is
+    right to offer it. It is not worth a candidate slot: a move that provably does
+    nothing is dominated by every other move, and the solver was not merely wasting a slot
+    on one, it was putting 41.6% of a node's equilibrium weight on it, because a value
+    function's noisy cells do not know the move is dead.
+
+    The counter here is the one at decision time. `runMove` bumps it before `onTry` reads
+    `activeMoveActions > 1`, so the move is dead from a counter of 1, not 2 -- the test
+    was `> 1` until IKA-166 and kept the second turn's Fake Out.
 
     This is deliberately narrower than the legal set, and only here -- `side_actions`
     still enumerates them, so the differential harness keeps checking that Showdown fails
@@ -384,7 +391,7 @@ def drop_dead_actions(
                 slots.append(False)
                 continue
             mon = pos.sides[side].active_pokemon()[slot_action.slot]
-            slots.append(mon is not None and mon.active_move_actions > 1)
+            slots.append(mon is not None and mon.active_move_actions > 0)
         dead.append(any(slots))
     alive = [action for action, is_dead in zip(pool, dead, strict=True) if not is_dead]
     return alive or pool
