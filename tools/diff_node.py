@@ -122,6 +122,25 @@ Stealth Rock, Spikes, Toxic Spikes and Sticky Web in turn -- and holds every cel
 one branch by branch. The cells where the placement *fired* are the ones Python moves when
 the condition is put back on the user's side, and the run fails if there are none.
 
+Holding the port to a charge's stored target (IKA-176):
+
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --charging
+
+`--charging` keeps the recorded positions with a Pokemon on the field that knows a charging
+move (the dump's `charge` flag), and puts every other one mid-charge -- `twoturnmove` with
+its move and a stored target, the second foe where it stands, so the stored target is not
+the one an untargeted choice falls back on. On the others every cell that uses a charging
+move is held branch by branch, on the mid-charge ones every cell. The cells where the
+target *fired* are the ones Python moves with the target neither stored nor read
+(`untargeted`), and the run fails if there are none.
+
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --hammer
+
+`--hammer` teaches Gigaton Hammer, which no recorded team carries, to every Pokemon on the
+field and holds every cell that uses it. On every other position the taught Pokemon's last
+move is the hammer, so the menu -- Python's, the port builds none -- drops it; those
+slots are counted against the menu with the `cantusetwice` rule taken out.
+
 The budget, and the second invocation that goes with it (IKA-146):
 
     uv run python tools/diff_node.py --scenario examples/scenario-turn5.json --budget fast --limit 0
@@ -626,6 +645,105 @@ def teach_hazards(reg, pos: Position, dealt: list[int]) -> int:  # noqa: ANN001
     return taught
 
 
+def charge_moves(reg) -> frozenset[str]:  # noqa: ANN001
+    """The moves that spend a turn charging: the dump's `charge` flag."""
+    return frozenset(m.id for m in reg.moves.values() if "charge" in m.flags)
+
+
+class untargeted:  # noqa: N801 - read as a phrase at the call site
+    """Python with a charge's target neither stored nor read: the control for --charging.
+
+    The charge still happens and the second turn still fires the move, at whatever the
+    choice names -- none, now, so the first live foe -- which is IKA-169's resolver.
+    """
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+        import pokeuraou.speed as speed_mod
+
+        self.real = (resolve_mod._store_charge_target, speed_mod.charge_target)
+        resolve_mod._store_charge_target = lambda *_args: None
+        speed_mod.charge_target = lambda *_args: None
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+        import pokeuraou.speed as speed_mod
+
+        resolve_mod._store_charge_target, speed_mod.charge_target = self.real
+
+
+def charge_mid_turn(reg, pos: Position, moves: frozenset[str]) -> int:  # noqa: ANN001
+    """Puts every Pokemon on the field that knows a charging move mid-charge, and says how
+    many: `twoturnmove` with the move, one turn left and a stored target -- the second foe
+    if it stands, else the first. A recorded marker without them gets them."""
+    from pokeuraou.actions import locked_move
+
+    put = 0
+    for side_index, side in enumerate(pos.sides):
+        foe = pos.sides[1 - side_index]
+        standing = [
+            i + 1 for i, p in enumerate(foe.active) if p is not None and not foe.pokemon[p].fainted
+        ]
+        if not standing:
+            continue
+        for mon in side.active_pokemon():
+            if mon is None or mon.fainted:
+                continue
+            if mon.has_volatile("mustrecharge") or mon.has_volatile("lockedmove"):
+                continue
+            move_id = locked_move(reg, mon)
+            if move_id not in moves:
+                move_id = next((s.id for s in mon.moves if s.id in moves), None)
+            if move_id is None:
+                continue
+            mon.volatiles = [v for v in mon.volatiles if v.id != "twoturnmove"]
+            mon.volatiles.append(
+                Effect(id="twoturnmove", duration=1, move=move_id, extra={"targetLoc": standing[-1]})
+            )
+            mon.last_move = move_id
+            put += 1
+    return put
+
+
+def teach_hammer(reg, pos: Position, remember: bool) -> list[tuple[int, int]]:  # noqa: ANN001
+    """Puts Gigaton Hammer in the last free move slot of every Pokemon on the field (as
+    `teach_hazards` picks it), and with `remember` makes it their last move. Returns the
+    (side, slot) of each Pokemon taught."""
+    taught = []
+    for side_index, side in enumerate(pos.sides):
+        for slot, party in enumerate(side.active):
+            mon = side.pokemon[party] if party is not None else None
+            if mon is None or mon.fainted or not mon.moves:
+                continue
+            if any(s.id == "gigatonhammer" for s in mon.moves):
+                continue
+            held = {v.move for v in mon.volatiles if v.move} | {mon.last_move}
+            free = [index for index, s in enumerate(mon.moves) if s.id not in held]
+            if not free:
+                continue
+            pp = reg.moves["gigatonhammer"].pp
+            mon.moves[free[-1]] = MoveSlot(id="gigatonhammer", pp=pp, maxpp=pp)
+            if remember:
+                mon.last_move = "gigatonhammer"
+            taught.append((side_index, slot))
+    return taught
+
+
+class hammer_twice:  # noqa: N801 - read as a phrase at the call site
+    """The menu with the `cantusetwice` rule taken out: the control for --hammer."""
+
+    def __enter__(self) -> None:
+        import pokeuraou.actions as actions_mod
+
+        self.real = actions_mod._disabled_after_itself
+        actions_mod._disabled_after_itself = lambda *_args: False
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.actions as actions_mod
+
+        actions_mod._disabled_after_itself = self.real
+
+
 def sides_agree(node, pos: Position, a, b, here, budget) -> bool:  # noqa: ANN001
     """Whether every branch the port gives lays the same side conditions as Python's."""
     for index, branch in enumerate(here.branches):
@@ -983,6 +1101,20 @@ def main() -> None:
         "has one -- hold every cell that uses one to the port branch by branch, and count "
         "where the placement fired: the cells the user's side would move",
     )
+    ap.add_argument(
+        "--charging",
+        action="store_true",
+        help="keep positions with a charging move on the field, put every other one "
+        "mid-charge with a stored target, hold the cells that use one (every cell mid-charge) "
+        "to the port branch by branch, and count where the stored target fired",
+    )
+    ap.add_argument(
+        "--hammer",
+        action="store_true",
+        help="teach Gigaton Hammer to every Pokemon on the field first -- no recorded team "
+        "has it -- hold every cell that uses it to the port branch by branch, and on every "
+        "other position make it the last move and count the slots whose menu drops it",
+    )
     args = ap.parse_args()
 
     if args.limit == 0 and not args.scenario:
@@ -1038,8 +1170,9 @@ def main() -> None:
         positions = [scenario_pos]
         print(f"the node of {args.scenario}")
     elif args.games_dir:
+        charging = charge_moves(reg) if args.charging else frozenset()
         positions, other_format = recorded_positions(
-            reg, args, holding - {args.give}, using, blockers | debris, args.frozen
+            reg, args, holding - {args.give}, using | charging, blockers | debris, args.frozen
         )
         print(
             f"{len(positions)} recorded positions from "
@@ -1079,6 +1212,33 @@ def main() -> None:
         dealt = [0]
         taught = sum(teach_hazards(reg, pos, dealt) for pos in positions)
         print(f"a hazard taught to {taught} Pokemon on the field")
+    charging = charge_moves(reg) if args.charging else frozenset()
+    mid_charge: set[int] = set()
+    if args.charging:
+        positions = [pos for pos in positions if knows_on_field(pos, charging)]
+        put = 0
+        for index, pos in enumerate(positions):
+            if index % 2:
+                count = charge_mid_turn(reg, pos, charging)
+                if count:
+                    mid_charge.add(id(pos))
+                    put += count
+        print(
+            f"{len(positions)} positions with a charging move on the field; "
+            f"{put} Pokemon put mid-charge on {len(mid_charge)} of them"
+        )
+    remembered: dict[int, list[tuple[int, int]]] = {}
+    if args.hammer:
+        taught_hammer = 0
+        for index, pos in enumerate(positions):
+            taught_here = teach_hammer(reg, pos, remember=bool(index % 2))
+            taught_hammer += len(taught_here)
+            if index % 2 and taught_here:
+                remembered[id(pos)] = taught_here
+        print(
+            f"Gigaton Hammer taught to {taught_hammer} Pokemon on the field; the last move "
+            f"on {len(remembered)} positions"
+        )
     build = rustnode.require_current_binary()
     print(f"binary {build['sha256']} built {build['built']}")
 
@@ -1133,6 +1293,11 @@ def main() -> None:
     # Beside Toxic Debris, every cell; and where IKA-173's rule moved the answer.
     debris_cells = debris_wrong = debris_refused = debris_fired = debris_fired_wrong = 0
     debris_worst = 0.0
+    # Where a charging move was used or fired, and where its stored target moved the answer.
+    charged = charged_wrong = aimed = aimed_wrong = aimed_paused = 0
+    aimed_worst = 0.0
+    # Where the hammer was used, and the remembered slots whose menu dropped it.
+    hammered = hammered_wrong = dropped = dropped_control = 0
 
     for pos in positions:
         row = menu(reg, pos, 0, args.limit)
@@ -1228,6 +1393,67 @@ def main() -> None:
                     if wrong and shown < 5:
                         shown += 1
                         print(f"  cell {(i, j)} using {sorted(using)}: {wrong[0][:200]}")
+
+        if args.charging:
+            node = rustnode.node_for(reg)
+            every = id(pos) in mid_charge
+            for i, a in enumerate(row):
+                for j, b in enumerate(col):
+                    if not (every or uses(a, charging) or uses(b, charging)):
+                        continue
+                    charged += 1
+                    here = resolve_turn(reg, pos, [a, b], budget=budget)
+                    with untargeted():
+                        control = resolve_turn(reg, pos, [a, b], budget=budget)
+                    wrong = (
+                        ["no warm process"]
+                        if node is None
+                        else branch_differences(node, reg, pos, a, b, here, budget)
+                    )
+                    charged_wrong += bool(wrong)
+                    if differ(outcome(here), outcome(control)):
+                        aimed += 1
+                        aimed_wrong += bool(wrong)
+                        aimed_paused += bool(here.suspended)
+                        for index in range(len(evaluators)):
+                            aimed_worst = max(
+                                aimed_worst,
+                                abs(float(got[index][i, j] - expected[index][i, j])),
+                            )
+                    if wrong and shown < 5:
+                        shown += 1
+                        print(f"  cell {(i, j)} with a charge: {wrong[0][:200]}")
+
+        if args.hammer:
+            node = rustnode.node_for(reg)
+            for side_index, slot in remembered.get(id(pos), ()):
+                offered = {
+                    getattr(act.slots[slot], "move_id", None)
+                    for act in side_actions(reg, pos, side_index)
+                }
+                with hammer_twice():
+                    control_offered = {
+                        getattr(act.slots[slot], "move_id", None)
+                        for act in side_actions(reg, pos, side_index)
+                    }
+                dropped += "gigatonhammer" not in offered
+                dropped_control += "gigatonhammer" in control_offered
+            hammer = frozenset({"gigatonhammer"})
+            for i, a in enumerate(row):
+                for j, b in enumerate(col):
+                    if not (uses(a, hammer) or uses(b, hammer)):
+                        continue
+                    hammered += 1
+                    here = resolve_turn(reg, pos, [a, b], budget=budget)
+                    wrong = (
+                        ["no warm process"]
+                        if node is None
+                        else branch_differences(node, reg, pos, a, b, here, budget)
+                    )
+                    hammered_wrong += bool(wrong)
+                    if wrong and shown < 5:
+                        shown += 1
+                        print(f"  cell {(i, j)} using the hammer: {wrong[0][:200]}")
 
         if args.terrain:
             node = rustnode.node_for(reg)
@@ -1548,6 +1774,22 @@ def main() -> None:
         print(f"    {debris_fired} of {debris_cells} cells")
         print(f"    cells whose branches, weights, notes or positions differ  {debris_fired_wrong}")
         print(f"    worst cell difference there  {debris_worst:.3e}")
+    if args.charging:
+        print("\n  with a charge -- every cell mid-charge, and the ones using a charging move")
+        print(f"    {charged} of {cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {charged_wrong}")
+        print("  where the stored target fired -- the cells `untargeted` moves")
+        print(f"    {aimed} of {charged} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {aimed_wrong}")
+        print(f"    cells with a paused branch, whose position is not compared  {aimed_paused}")
+        print(f"    worst cell difference there  {aimed_worst:.3e}")
+    if args.hammer:
+        print("\n  where Gigaton Hammer was used -- every one held branch by branch")
+        print(f"    {hammered} of {cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {hammered_wrong}")
+        print("  slots whose last move was the hammer (the menu is Python's)")
+        print(f"    {sum(len(v) for v in remembered.values())} slots, the menu drops it on {dropped}")
+        print(f"    offered there with `cantusetwice` taken out  {dropped_control}")
     print(f"  python {python_seconds:.2f} s   rust {rust_seconds:.2f} s")
     if rust_seconds > 0:
         print(f"  end to end {python_seconds / rust_seconds:.1f}x")
@@ -1580,6 +1822,14 @@ def main() -> None:
         failed.append("no blocking ability stopped anything in any cell, so agreeing here says nothing")
     if laid_wrong:
         failed.append(f"{laid_wrong} cells using a hazard differ by branch")
+    if charged_wrong:
+        failed.append(f"{charged_wrong} cells with a charge differ by branch")
+    if args.charging and not aimed:
+        failed.append("the stored target moved no cell, so agreeing here says nothing")
+    if hammered_wrong:
+        failed.append(f"{hammered_wrong} cells using the hammer differ by branch")
+    if args.hammer and not (hammered and dropped):
+        failed.append("the hammer was used in no cell or dropped from no menu")
     if args.hazards and not laid_fired:
         failed.append("laying a hazard on the foe's side moved no cell, so agreeing here says nothing")
     if debris_wrong:

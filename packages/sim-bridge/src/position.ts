@@ -98,6 +98,11 @@ export interface PokemonSnapshot {
 	newlySwitched: boolean;
 	/** How many times this Pokemon has been hit, which is Rage Fist's base power. */
 	timesAttacked: number;
+	/**
+	 * Move actions since coming in (`runMove`'s first line, so a flinched turn counts).
+	 * The champions Fake Out and First Impression are disabled once it is non-zero.
+	 */
+	activeMoveActions: number;
 	/** Last move used, needed for Torment / Encore / Choice lock reasoning. */
 	lastMove: string | null;
 	/**
@@ -178,6 +183,8 @@ export const MODELLED_VOLATILES = new Set([
 	'roost', 'stall', 'sparklingaria', 'saltcure', 'curse', 'nightmare', 'perishsong',
 	'imprison', 'miracleeye', 'foresight', 'gastroacid', 'healblock', 'embargo', 'powertrick',
 	'defensecurl', 'minimize', 'smackdown', 'octolock', 'syrupbomb', 'glaiverush', 'dragoncheer',
+	// No Retreat traps its user (IKA-169); the resolver reads it off the position (IKA-176).
+	'noretreat',
 	// Marks that Protean/Libero has already fired this switch-in, so it will not fire again.
 	'protean',
 	// Unburden's doubled Speed lives on a volatile added when the item is lost, so the
@@ -254,8 +261,20 @@ export function positionFromBattle(battle: AnyBattle, megaUsedBySide: boolean[])
 			const modelled: EffectSnapshot[] = [];
 			const unmodelled: string[] = [];
 			for (const [id, state] of Object.entries(p.volatiles as Record<string, Record<string, unknown>>)) {
-				if (MODELLED_VOLATILES.has(id)) modelled.push(snapshotEffect({ ...state, id }));
-				else unmodelled.push(id);
+				if (!MODELLED_VOLATILES.has(id)) {
+					unmodelled.push(id);
+					continue;
+				}
+				const snap = snapshotEffect({ ...state, id });
+				if (id === 'twoturnmove') {
+					// The charge's target lives on the move's own volatile, which is not
+					// modelled; `chooseMove` fires the second turn at it (sim/side.ts:677).
+					// Carried on `twoturnmove` as `extra.targetLoc` (IKA-176).
+					const charged = typeof state.move === 'string' ? p.volatiles[state.move] : undefined;
+					const loc = charged?.targetLoc ?? p.lastMoveTargetLoc;
+					if (typeof loc === 'number' && loc !== 0) snap.extra = { ...snap.extra, targetLoc: loc };
+				}
+				modelled.push(snap);
 			}
 			modelled.sort((a, b) => a.id.localeCompare(b.id));
 			unmodelled.sort();
@@ -298,6 +317,7 @@ export function positionFromBattle(battle: AnyBattle, megaUsedBySide: boolean[])
 				trapped: !!p.trapped,
 				newlySwitched: !!p.newlySwitched,
 				timesAttacked: p.timesAttacked ?? 0,
+				activeMoveActions: p.activeMoveActions ?? 0,
 				lastMove: p.lastMove?.id ?? null,
 				moveLastTurnFailed: p.moveLastTurnResult === false,
 				// A Pokemon part-way through a charging move has no choice: Showdown fires the

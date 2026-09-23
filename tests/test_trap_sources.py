@@ -201,10 +201,9 @@ LOCKS = {
     "mustrecharge/hyperbeam": "recharge",
 }
 
-#: Showdown's position does not carry No Retreat's volatile: it is not in the bridge's
-#: `MODELLED_VOLATILES`, so it lands in `unmodelledVolatiles`, and only Showdown's own
-#: flag says the root is trapped. The generation form has it.
-NOT_IN_THE_DUMP = {"noretreat"}
+#: Cases whose trap Showdown's position does not carry. No Retreat was one until IKA-176
+#: put its volatile in the bridge's `MODELLED_VOLATILES`.
+NOT_IN_THE_DUMP: set[str] = set()
 
 
 def _play(oracle: Oracle, case: Case):  # noqa: ANN202

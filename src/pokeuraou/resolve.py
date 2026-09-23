@@ -2123,6 +2123,7 @@ def _use_move(
                 charging = mon.volatile("twoturnmove") if mon is not None else None
                 if charging is not None:
                     charging.move = action.move_id
+                    _store_charge_target(charging, action)
                 turn.log(f"{action.label(reg)} is charging")
                 return [(1.0, turn, "")]
 
@@ -2184,6 +2185,14 @@ def _use_move(
     for _weight, state, _note in branches:
         _after_move(state, action, move)
     return branches
+
+
+def _store_charge_target(charging: Effect, action: QueuedAction) -> None:
+    """The target the second turn fires at, as Showdown's `twoturnmove.onStart` keeps it
+    (`attacker.volatiles[effect.id].targetLoc = attacker.lastMoveTargetLoc`) -- the loc
+    chosen, before any redirection. On `twoturnmove`, as `extra.targetLoc` (IKA-176)."""
+    if action.target:
+        charging.extra = {**charging.extra, "targetLoc": action.target}
 
 
 def mon_charged(turn: _Turn, action: QueuedAction) -> bool:
