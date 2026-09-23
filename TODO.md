@@ -9354,3 +9354,98 @@ exact マスクが 3,599 セル違うのは、Python の減縮が Rust に無い
 
 機械: cargo release ビルド 2 回（8 コア、各 20 秒・16 秒）、diff_node 既定 43 秒 ×2・fast 10 秒 ×2・exact --limit 12
 30 秒、テスト数十秒（すべて 1 コア、heavy.py に記録）。
+
+## 9/23 — IKA-105: 控え隠蔽ノードの順伝播を1回に —— 記録局面 9,523 行列が master と1ビット一致、1ノードの順伝播 15.5 → 1.0 回（出荷ネットでは 16.52 → 1.29）
+
+問いは「`belief_payoffs` の高速経路で、全完成形の差し替え行と汚れセルの葉を1回の `from_encoded` にまとめても
+答えが変わらないか、順伝播が何回になるか」。時間（局/分）は測っていない（下の 5）。
+
+### 1. 変えたこと
+
+* `beliefnode.belief_payoffs`: 葉を先に全部集めてから1回だけ採点し、ブロックの開始位置で完成形に返す。ブロックは
+  (a) 完成形ごとの差し替え（`_patched` の出力、参照と同じ行数）、exact 側は参照そのものを1回だけ、
+  (b) 完成形ごとの汚れセルの port の充填（`fill_encoded(item.position, cells=wanted)`、採点はしない）、
+  (c) その充填で port が断ったセルを Python で解いた葉（葉の符号化器 `encoder.encode_positions` で符号化）。
+  `_stacked` が1本の配列を先に確保して1ブロックずつ書き込む（全完成形の複製を同時に持たない）
+* exact の完成形は真の局面そのもの（`item.position is position`）なので、汚れセルは参照の充填の span・fold を読む。
+  定義（`_per_completion`）がその完成形に対して読むのと同じ葉。汚れセルの充填が1ノードあたり 0.3〜0.4 回減る
+* `resolve.batched_payoffs` の Python のセル解決と書き戻しを `resolve.HeldLeaves` に出した（中身は1行も変えず移しただけ。
+  畳み込みの書き方は1か所のまま）。高速経路の断られたセルもこれを使う
+* 規則（IKA-141）は変えていない: 参照・汚れセルの充填は葉の `rules`、差し替えは葉の符号化器、断られたセルの
+  Python の葉は `evaluate` が使うはずの符号化器（葉の `encoder`、無ければ `from_encoded.__self__.encoder`）。
+  符号化器が見つからない葉では、断られたセルの葉だけ従来どおり `evaluate` で別に採点する（その分1回増える）
+* port の汚れセルの充填が例外を出したら、従来どおり `rustnode.disable` して `batched_payoffs(cells=wanted)`
+* 計器は従来と同じ名前で数える: `fills@dirty`、`leaves.node`、`leaves.refused`、`refused`（秒）、`refused: <理由>`
+
+### 2. 受け入れ
+
+```
+(1) 代わりの葉（行ごとに縮約する _SlotLeaf、全配列の全要素に別々の重み）で master の belief_payoffs と比較
+    tests/test_beliefnode.py 18 本（既存 16 + 新 2）通過、0 skipped
+    data/ika73/w12 games 0〜49   266 決定・2,071 行列   master と違う行列 0、定義（完成形ごと）と違う行列 0
+                                  断られたセルを Python で解いた決定 8（1,498 セル解決）
+    data/ika73/w12 games 0〜209  1,234 決定・9,523 行列 master と違う行列 0、定義と違う行列 0
+                                  断られたセルを Python で解いた決定 19（4,682 セル解決。IKA-139 の 19 決定と同数）
+    shared/redone/unmodelled も全決定で master と同じ（assert）
+(2) 順伝播の回数（同じ記録局面、1ノード＝1 belief_solve）
+    代わりの葉（games 0〜209、from_encoded と __call__ の回数）  master 15.53 → 1.00（最小 1・最大 1）
+                                                                port の充填 8.69 → 8.29
+    出荷ネット（下の 200 局面、timing の forward.passes）        master 16.52 → 1.29（最大 4 = 26,012 行を 8,192 行ずつ）
+                                                                fills 9.11 → 8.79、fills@dirty 8.11 → 7.79
+    IKA-98 の 17.74 は move.hidden 決定全体（葉順位などの順伝播も含む）の数。ノードの分を差し引くと
+    17.74 − (16.52 − 1.29) ≈ 2.5 回/決定の見込み（標本と重みが違うので見込み。生成では測っていない）
+(3) value-gen11L・CPU・torch 1スレッド・1プロセス、IKA-119/139 と同じ 200 局面（一様の完成形の重み）で belief_solve
+                               side 0                 side 1
+    master → 新               1ビットでも違う 7.5%    16.0%
+                               |Δ値| 最大 1.7e-09      3.1e-10
+                               戦略の全変動 最大 7.2e-08  3.0e-08
+                               最頻手が変わる 0.0%、打つ手が変わる確率（共通の一様乱数）0.000%（両側とも）
+    null 対照（新 → 新）       すべて 0
+    違いは IKA-148 のバッチ依存（float32 の和の順）の桁で、代わりの葉では 0
+(4) tests/test_beliefnode.py に2本
+    test_a_hidden_node_is_scored_in_one_forward_pass      フェイント入りの途中局面（共有される断られたセル・汚れセル・
+                                                           Python で解くセルが全部ある）で from_encoded 1回・__call__ 0回、
+                                                           かつ定義と1ビット一致
+    test_rows_scattered_to_the_wrong_completion_are_caught 陽性の対照: _stacked の開始位置を参照サイズのブロックの間で
+                                                           1つずつずらすと、全完成形の行列が定義と違う
+```
+
+### 3. 注意
+
+* 1回の `from_encoded` に積む行数はノード全体（出荷ネットの 200 局面で平均 5,582 行・最大 26,012 行）。
+  1行 約3.7 KB（`inference.py`）なので最大 約96 MB を1本で持つ。前は参照＋完成形1つ分。24ワーカーが同時に
+  最大に当たると数 GB の一時確保になり得る（測っていない）。`BatchedValue` とサーバは 8,192 行ずつ切るので
+  順伝播の回数は ceil(行数/8,192)
+* 行が完成形ごとの順伝播より大きなバッチになるので、CUDA では答えが最後の桁で動く種類の変化（IKA-52/59/148）。
+  CPU では上の (3)。CUDA では測っていない
+* 真の控えの完成形を「参照と同じ配列なら参照の値を使う」は入れていない（IKA-119 の注記どおり控え2枠の並びが
+  入れ替わるので、枠番号の一致では拾えない。行数は減るが順伝播の回数は減らない）
+
+### 4. 生成の計時（コーディネータ、専有の時間帯で）
+
+IKA-98 §5 と同じ出荷の引数で、master とこのブランチを交互に2回ずつ（計4本）:
+
+```
+# master（本体のチェックアウトで）
+uv run --group learn python tools/profile_stages.py generation --out <dir>/master-1 --games 600 --seed 6601 \
+  --served --servers 2 --workers 24 --limit 12 --value data/models/value-gen11L.pt \
+  --selection-book data/selection/rizabanadohido-value-gen11L.jsonl.gz --hide-bench -- --rank-leaf
+
+# このブランチ（worktree で。data/ は本体のものを絶対パスで、PYTHONPATH は worktree の src）
+PYTHONPATH=<worktree>/src uv run --group learn python tools/profile_stages.py generation --out <dir>/ika105-1 \
+  --games 600 --seed 6601 --served --servers 2 --workers 24 --limit 12 \
+  --value <main>/data/models/value-gen11L.pt \
+  --selection-book <main>/data/selection/rizabanadohido-value-gen11L.jsonl.gz --hide-bench -- --rank-leaf
+```
+
+を master-1 → ika105-1 → master-2 → ika105-2 の順に。worktree には本体の `rust/target/release/pokeuraou-damage.exe`
+を写してある（rust/src は同一）。見るもの: 届いたかの一覧（`source` がそれぞれのチェックアウト）、move.hidden の
+passes/決定（予想 17.74 → 約 2.5）、fills@dirty/決定（7.75 → 約 7.4）、belief＋serve.*＋サーバの CPU の割合（33%）、
+局/分。課題本文の予想は生成全体で 1.05〜1.15倍。
+
+### 5. 機械（9/23、すべて heavy.py 1コア・鍵なし）
+
+14:51〜14:53 テスト（-n 0）、14:55〜15:00 記録局面の比較（games 0〜49 が 54秒、0〜209 が 240秒）、
+15:01〜15:04 出荷ネット 200 局面（91秒 × 2）、15:05〜15:07 最終テスト（47秒）と games 0〜49 の再実行（55秒）。
+生成・対戦・計時はしていない。スクリプトは session の scratchpad（`ika105/replay_slot.py`・`replay_net.py`、
+本体の `scratchpad/ika119_patched_side_fire_rate.py` と `fastpath_refused.py` の組み立てを借りた）。

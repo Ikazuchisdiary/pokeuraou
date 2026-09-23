@@ -806,6 +806,13 @@ def test_a_cell_the_port_refuses_is_resolved_per_completion(midgame) -> None:  #
     Feint is given to side 1's Toxapex here (Garchomp is locked into Earthquake by its
     Scarf), so the port refuses the cells where it is used.
     """
+    reg, position, ours, theirs, spreads = _with_feint(midgame)
+    wrong = _node_mismatches(reg, position, ours, theirs, spreads, _SlotLeaf(Encoder(reg)))
+    assert not wrong, f"cells not equal to the bit: {wrong}"
+
+
+def _with_feint(midgame):  # noqa: ANN001, ANN202
+    """The mid-game node with Feint on Toxapex: shared refused cells, and dirty ones."""
     from pokeuraou.position import MoveSlot
 
     reg, position, ours, _theirs, _spreads, sheet, seen = midgame
@@ -825,6 +832,93 @@ def test_a_cell_the_port_refuses_is_resolved_per_completion(midgame) -> None:  #
     dirty = reaches_bench(reg, ours, theirs, hidden)
     shared_refusals = [(i, j) for i, j, _why in filled.refused if not dirty[i, j]]
     assert shared_refusals, "no refused cell that the fast path would share; nothing to test"
+    return reg, position, ours, theirs, spreads
 
+
+# ------------------------------------------------------------------- IKA-105 --
+#
+# The node's leaves used to be scored a forward pass per completion for the shared cells,
+# and per completion again for the dirty ones -- the port's leaves in one and the cells it
+# refused, resolved in Python, in another: 17.74 passes a `move.hidden` decision in
+# shipping generation (IKA-98). They are one batch now, and each completion reads its own
+# rows back by where its block starts. A block read from the wrong start is a payoff that
+# is some other completion's and still looks like a payoff.
+
+
+class _CountedSlotLeaf(_SlotLeaf):
+    def __init__(self, encoder: Encoder) -> None:
+        super().__init__(encoder)
+        self.passes = 0
+        self.calls = 0
+
+    def from_encoded(self, encoded) -> np.ndarray:  # noqa: ANN001
+        self.passes += 1
+        return super().from_encoded(encoded)
+
+    def __call__(self, positions: list) -> np.ndarray:
+        self.calls += 1
+        return super().__call__(positions)
+
+
+def test_a_hidden_node_is_scored_in_one_forward_pass(midgame, monkeypatch) -> None:  # noqa: ANN001
+    """Every completion's shared rows, its dirty cells from the port and the cells the port
+    refused all go through one `from_encoded`, and the node still equals the definition."""
+    reg, position, ours, theirs, spreads = _with_feint(midgame)
+    shapes: list[list[int]] = []
+    real = beliefnode._stacked
+
+    def recorded(parts, like):  # noqa: ANN001, ANN202
+        shapes.append([rows for rows, _make in parts])
+        return real(parts, like)
+
+    monkeypatch.setattr(beliefnode, "_stacked", recorded)
+    leaf = _CountedSlotLeaf(Encoder(reg))
+    node = belief_payoffs(
+        reg, position, ours, theirs, leaf, budget=Budget.matrix(), spreads=spreads
+    )
+    assert node.shared > 0 and node.redone > 0, "no shared or no dirty cell; nothing batched"
+    assert leaf.passes == 1 and leaf.calls == 0, (leaf.passes, leaf.calls)
+    (blocks,) = shapes
+    completions_total = sum(len(items) for items in spreads.values())
+    # A shared block per completion (the reference once for the exact side), a dirty block
+    # per completion, and the refused cells' Python leaves per completion.
+    assert len(blocks) > completions_total + 1, blocks
+
+    monkeypatch.setattr(beliefnode, "_stacked", real)
     wrong = _node_mismatches(reg, position, ours, theirs, spreads, _SlotLeaf(Encoder(reg)))
     assert not wrong, f"cells not equal to the bit: {wrong}"
+
+
+def _rotated(real):  # noqa: ANN001, ANN202
+    """`_stacked`, with the starts of the reference-sized blocks handed round by one.
+
+    The rows are where they were and every read is in bounds, so nothing fails but the
+    answer: each block's owner reads the next block's values. Those blocks are every
+    completion's shared rows (a patched copy of the reference, or the reference), which
+    is the swap a wrong offset would make."""
+
+    def stacked(parts, like):  # noqa: ANN001, ANN202
+        out, starts = real(parts, like)
+        group = [index for index, (rows, _make) in enumerate(parts) if rows == len(like)]
+        moved = list(starts)
+        for a, b in zip(group, group[1:] + group[:1], strict=True):
+            moved[a] = starts[b]
+        return out, moved
+
+    return stacked
+
+
+def test_rows_scattered_to_the_wrong_completion_are_caught(midgame, monkeypatch) -> None:  # noqa: ANN001
+    """The positive control for the equality tests: hand each completion's shared rows to
+    the next completion and the node must differ from the definition. Otherwise the tests
+    that say it equals the definition could not see a scatter that went wrong."""
+    reg, position, ours, theirs, spreads = _with_feint(midgame)
+    monkeypatch.setattr(
+        beliefnode, "_stacked", _rotated(beliefnode._stacked)
+    )
+    wrong = _node_mismatches(reg, position, ours, theirs, spreads, _SlotLeaf(Encoder(reg)))
+    assert wrong, "the completions' rows were swapped and no cell moved"
+    completions_total = sum(len(items) for items in spreads.values())
+    assert len(wrong) == completions_total, (
+        f"only {len(wrong)} of {completions_total} completion matrices moved: {wrong}"
+    )
