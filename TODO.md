@@ -7209,3 +7209,55 @@ rho_S は「1つの game index の、両席の得点の和」の2本間の相関
   → 起票候補
 * ハチマキの 1/10 は両方とも分岐させない（報告だけ）。分岐させたときの答えの差は測っていない
 * 修正前の Python が `data/selfplay` のツメ7局で打った手が、どれだけ違っていたかは測っていない
+
+## 9/23 — IKA-71: ばけのかわ・アイスフェイスは移植せず、名指しで拒否する —— ミミッキュは 1,461本中1本、コオリッポは M-C に居ない
+
+### 1. 選んだのは (a) 明示的な拒否。理由はロスターに出ないこと（数えた、9/23 12:10、読み取り専用）
+
+```
+  相手プール                                 構築    ミミッキュ  コオリッポ
+  data/standings/2026-worlds（生成の既定）      394       0          0
+  data/standings/2027-baltimore               1,067       1          0
+  data/pool/regmc-matchupweb                     65       0          0
+  configs/teams・configs/archetypes              3       0          0
+  data/selection の選出キャッシュ 69本         （行）      0          —
+```
+
+* 構築数は `load_standings` が M-C に適合として残した数（素の JSON は 395・1,082本。baltimore の素の
+  JSON で "mimikyu" の文字列が出る構築は2本で、適合として残るのは1本）。キャッシュは行の文字列に "mimikyu" が出る数
+* Reg M-C（`gen9championsvgc2026regmc`、M-B も同じ）: ミミッキュは `team_legal`。**コオリッポは種族表に
+  いない**（`eiscuenoice` がフォルムとしてあるだけで `team_legal=False`）。アイスフェイスは Showdown の flags が
+  notrace・failskillswap・failroleplay・noentrain・noreceiver で、ほかのポケモンに写らないので、M-C の対戦には出てこない
+* 生成の CMD（`selfplay-gen11L`・`gen11h` など6本）はどれも既定の 2026-worlds を引いている
+* (b) の移植（`_bust_disguise` のフォルム変化と 1/8、アイスフェイスの復活まで）は、1本の構築のために
+  ダメージ層に分岐を足すことになる。拒否されたセルは Python が埋めるので、答えは正しいまま
+
+### 2. 変えたこと
+
+* `rust/src/resolve.rs` `check_position_supported`: `disguise`・`iceface` の保持者が関わる局面を、
+  **ゲート（`ability_handled`）より前で**名指しで拒否する。理由は `ability: disguise (forme change and 1/8
+  not ported)`。前に置いたのは、いつか誰かが `ability_handled` に足しても拒否が残るように
+  （`slowstart` の拒否はゲートの後ろにあり、いまはゲートが先に拒否するので届かない）
+* `tools/port_gate_audit.py`: 2つを `KNOWN_UNGATED` から `ACKNOWLEDGED` へ理由つきで。`KNOWN_UNGATED` は空に
+  なった —— 次の1本で `--check` が落ちる
+* `damage.rs` のゼロにする2行は残した（届かないが、消すのは (b) を選ぶときの話）
+* 拒否率は変わらない: ばけのかわ持ちのノードはもともとゲートが丸ごと拒否していた。理由の文字列が変わるだけ
+
+### 3. 確かめたこと
+
+```
+  テスト    test_rust_node の新テスト2本（disguise・iceface）: 全セルが拒否され、理由がちょうどその文字列
+  正の対照  名指しの拒否を `if false &&` で殺してビルド → 2本とも落ちる（理由がゲートの「ability: iceface」
+            になる）。戻してビルドし直した
+  tests     -n 0 tests/test_port_gates.py tests/test_rust_node.py tests/test_resolve.py
+            tests/test_port_coverage.py tests/test_line_endings.py tests/test_no_machine_specific_paths.py 通過
+            port_gate_audit.py --check・port_coverage.py --check 通過。ruff 通過
+  機械      release ビルド3回（heavy.py、8コア）: 12:16:29〜12:16:48、12:17:46〜12:18:04（対照）、
+            12:24:18〜12:24:39。数えるのは1コアで数秒
+```
+
+### 4. 測っていないこと
+
+* baltimore を相手プールにした対戦・生成で、ミミッキュ1本がどれだけの決定を Python に落とすか
+* 化けの皮が剥がれた後（`mimikyubusted`）の局面も拒否している。移植と Python が一致するかもしれないが、
+  確かめていない

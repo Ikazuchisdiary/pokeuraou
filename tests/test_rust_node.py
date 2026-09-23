@@ -553,6 +553,33 @@ def test_a_focus_band_holder_falls_the_same_way_over_there(bridged: None) -> Non
         assert not _turn_differences(node, reg, pos, row[i], col[j]), (i, j)
 
 
+@pytest.mark.parametrize("ability", ["disguise", "iceface"])
+def test_disguise_and_ice_face_are_refused_by_name(bridged: None, ability: str) -> None:
+    """The port zeroes the hit and nothing else, so a holder is refused, and says why.
+
+    Python also busts the forme and takes Mimikyu's 1/8. An answer from the port would be
+    a wrong one, which is worse than a refused cell -- Python fills those. The reason is
+    held exactly: the gate's own refusal reads `ability: disguise`, so a test that only
+    counted refusals would pass with the named check deleted, and would keep passing the
+    day someone lists the ability in `ability_handled` (IKA-71).
+    """
+    reg, pos, row, col = _node()
+    mine = pos.sides[0].active_pokemon()[0]
+    assert mine is not None
+    mine.ability = ability
+    assert not validate_position(pos, reg.meta.active_per_side)
+
+    os.environ[rustnode.ENV_ENABLE] = "1"
+    rustnode.reset()
+    node = rustnode.node_for(reg)
+    assert node is not None
+    filled = node.fill(pos, row, col, ["hp-share"], Budget.matrix())
+    assert len(filled.refused) == len(row) * len(col)
+    assert {why for _i, _j, why in filled.refused} == {
+        f"ability: {ability} (forme change and 1/8 not ported)"
+    }
+
+
 def test_stance_change_takes_the_forme_over_there_too(bridged: None) -> None:
     """The forme decides the stats, so a port that skipped it read the wrong Pokemon.
 

@@ -862,6 +862,16 @@ fn check_position_supported(
 ) -> Result<(), String> {
     {
         for mon in involved(pos, side_actions) {
+            // Disguise and Ice Face are refused by name, and before the gate, so that
+            // listing them in `ability_handled` cannot make them answered. The damage layer
+            // zeroes the hit for both and does nothing else; Python also changes the forme
+            // (mimikyu -> mimikyubusted, eiscue -> eiscuenoice) and takes Mimikyu's 1/8 in
+            // `_bust_disguise`, so answering here would be a wrong answer, not a refusal.
+            // Refusing costs little: Eiscue is not in Reg M-C at all, and Mimikyu is on 1
+            // of Baltimore's 1,067 teams and none of 2026 Worlds' 394 (IKA-71).
+            if matches!(mon.ability.as_str(), "disguise" | "iceface") {
+                return Err(format!("ability: {} (forme change and 1/8 not ported)", mon.ability));
+            }
             if !ability_handled(mon.ability.as_str()) {
                 return Err(format!("ability: {}", mon.ability));
             }
