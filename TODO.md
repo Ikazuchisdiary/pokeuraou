@@ -12154,3 +12154,19 @@ release ビルド 2 回（8 コア、22 秒・19 秒）、diff_node 6 回（1 �
 * 瀕死のポケモンの move_last_turn_failed を Showdown は faint で忘れる（clearVolatile）が Python・port は残す。
   読む者はいないが局面の JSON が Showdown と違う
 * Python の行動一覧は単体技で味方を狙えない。Showdown は許す（味方への がんせきアックス・てだすけ後の味方殴り等）
+
+### 10. master（IKA-172、363b973）取り込み後にもう一度
+
+release ビルド（8 コア、19 秒）の後、関係テスト（test_hazards_after_hit・test_hazards_foe_side・test_perish_song・
+test_resolve・test_rust_node ほか）は全部 pass、port_coverage・port_gate_audit の --check も通る。diff_node:
+
+```
+                                        w12 新 exe   w12 旧 exe   gen11L 新 exe
+  --using stoneaxe  使うセル / 違う     3,302 / 0    3,302 / 2,854   5,702 / 0
+                    発火 / 違う         2,833 / 0    2,833 / 2,739   4,171 / 0
+  --toxic-debris    全セル / 違う       5,108 / 0    5,108 / 1,021   6,336 / 0
+                    発火 / 違う         420 / 0      420 / 420       206 / 0
+```
+
+局面の数え方は同じでも取り込んだ変更（IKA-166 のねこだましの絞り込み等）でメニューが少し変わり、セル数が動いた。
+旧 exe（d8e70cb）は発火しないセルでも違う（IKA-166・169・172 の分）ので、陽性対照として読むのは発火の行。
