@@ -12985,3 +12985,129 @@ struggle 固定の 92・26 は全部「固定中のわるあがきの次の手�
 `port_coverage --check`・`port_gate_audit --check`・ruff ok。機械: cargo release 2 回（8 コア 22・17 秒）、オラクルのテスト
 4 通り×3 回（1 コア 各 5 秒）、diff_node 60 局面 6 本（6 コア 327 秒）と 4 本（4 コア 280 秒）、2 局面 2 本（1 コア 192 秒）、
 記録 1 回（1 コア 65 秒）、関係テスト 6 ファイル（1 コア 29 秒）。すべて heavy.py（--agent IKA-179）。
+
+## 9/24 — IKA-177: 混乱が `random(2, 6)` 回の行動で解けるようにした —— resolver（両エンジン）の混乱は場を離れるまで続き、自傷は 1/3 でまひより後、キーのみ・ラムのみはげきりんの混乱にしか効かなかった
+
+ワーカー。基点 master d89a6c6、ブランチ `ika-177-confusion-duration`。
+
+### 1. Showdown（a5df827。champions に `confusion`・`persimberry`・`lumberry` の上書きなし）
+
+`data/conditions.ts:162` `confusion`: `onStart` で `time = random(min, 6)`、`min` はかかと落とし（axekick）なら 3、ほかは 2。
+つまり 2〜5。`onBeforeMovePriority: 3` の `onBeforeMove` で `time--`、0 なら解けてそのまま動く。解けなければ
+`randomChance(33, 100)` で自傷（`getConfusionDamage(pokemon, 40)`）。優先度はねむり・こおり 10、ひるみ 8 より下で、
+まひ 1 より上: 眠っている・凍っている・ひるんだ行動では `time` は減らず、まひとの組では自傷が先に振られる。
+`data/items.ts:4518` `persimberry`・`:3537` `lumberry` は `onUpdate` で `volatiles['confusion']` があれば食べる（混乱の元を問わない）。
+オラクルの乱数記録で `random(2, 6)`（かかと落としは `random(3, 6)`）と `chance 33/100` を確かめた。
+regulation（M-C・M-B とも）の混乱源: あやしいひかり・いばる・おだてる・てんしのキス・フラフラダンス（技そのもの）、
+ぼうふう 30%・みずのはどう 20%・ばくれつパンチ 100%・かかと落とし 30%（追加効果）、げきりん系の疲れ。
+
+### 2. オラクル（`tests/test_confusion_duration.py`、新規 43 件）
+
+`multihit='min'`（`random` の最小）と `'max'`（最大）で Showdown を回した。各ステップ後の相手の `time`（0 = 混乱なし）:
+
+```
+  ケース                   最小の乱数              最大の乱数
+  あやしいひかり           1,0,0,0,0,0             4,3,2,1,0,0
+  かかと落とし（min 3）    2,1,0,0,0,0             4,3,2,1,0,0
+  キーのみ / ラムのみ      0,0（すぐ食べる）        0,0
+```
+
+テスト: Showdown の事実（長さ・乱数の引数・33/100・実が消える）、Showdown の各局面から我々が解いた 1 ターン、
+Showdown の最初の局面から我々が全部解いた木（k 回目の後に混乱が残る確率 1, 3/4, 1/2, 1/4, 0）、かかと落としの木
+（1, 2/3, 1/3, 0）、pinned の予算（最短）、まひとの順（Showdown はまひを振らない。我々の重み 0.33 / 0.67×1/8 / 0.67×7/8）、
+port の各ステップと分岐、手で作った局面（`time`・`tries`・`min`・古い記録の空の混乱、ひるみで試行が減らない、
+とくせいきんちょうかんで実を食べない＝実の対照）。
+
+```
+                     旧 exe    新 exe
+  旧 Python          24/43     14/43
+  新 Python          33/43     43/43
+```
+
+旧 Python・旧 exe で通る 24 は Showdown の事実 8、port が旧 Python と一致する 10、手の対照 6（`time` 2・`tries` 0・
+`tries` 1 + min 3・空の混乱で「今回は解けない」、ひるみ、きんちょうかん）。新 Python・旧 exe で落ちる 10 は port の
+テスト全部と pinned のかかと落とし（旧 exe は関係しない。pinned の予算がかかと落としの追加効果を振らない件は下）。
+
+### 3. 直し（`resolve.py`・`moves.rs`・`resolve.rs`）
+
+- `add_volatile("confusion")` を `_start_confusion` に回す: `extra.tries = 0` で付け、キーのみ・ラムのみはその場で食べる
+  （きんちょうかんで食べない）。げきりんの疲れ（`_confused_by_fatigue`）は付けるだけになった。かかと落としの追加効果で
+  新しく付いた混乱には `extra.min = 3`。
+- 持続の乱数は **効く試行の頭で分岐**（`_roll_confusion`、`_do_move` の冒頭で `_roll_rampage` の次）。長さを一度に振ると
+  最初に解けうる試行で 4 つ（うち 3 つは局面で見分けられない）に割れるので、試行ごとに「今解ける／続く」の 2 つにした。
+  `time` が 2〜5 の一様なら、k 回目の試行で解ける条件付き確率は k≥min のとき 1/(6−k)（1/4, 1/3, 1/2, 1）。解ける枝は
+  `extra.time = 1` を置いて `_can_act` がそれを 0 にし、続く枝は `goesOn` を置いて同じ試行を振り直さない。分岐の数は
+  試行ごとに最大 2 倍で、爆発しない。
+- Showdown の局面は `extra.time` を持つので分岐せず、そのまま減らす。IKA-177 前の記録の混乱（extra なし）は新しいもの
+  （`tries` 0）として読む。
+- `_can_act`: 混乱の段（`_confusion_stage`: 試行、33/100）をまひの前に。起きた・溶けた行動も混乱の段を通る
+  （旧コードは起きた・溶けたらそのまま動いた）。ひるみ・眠り続け・凍り続けは試行を使わない。
+- `CONFUSION_SELF_HIT_CHANCE` 1/3 → 0.33。
+- pinned・`enumerate_status_checks` 偽の予算は最短の長さ（解ける試行で必ず解ける。pinned でないときは注記）。
+- port も同じ（`start_confusion`・`roll_confusion`・`confusion_try`・`confusion_stage`、`resolve.rs` の定数と add_volatile）。
+- `tools/diff_node.py --confused`: 各局面の各側の先頭に混乱を載せ（`tries` 1〜3、かかと落としの `tries` 2 + min 3、
+  Showdown の `time` 1・3、空）、全セルを port と枝ごとに比べる。対照 `unconfused` は IKA-177 前の規則（解けない・1/3・
+  実は疲れだけ。まひとの順は新しいまま）。
+
+### 4. diff_node（`--confused`、各 20 ノード、Budget.matrix）
+
+```
+                        発火セル / セル     新 exe で枝違い   旧 exe で枝違い
+  gen11L                6,049 / 6,187       67（注記だけ）    6,049（最悪 1.1e-1）
+  w12                   9,112 / 9,518       0                 9,112（最悪 1.1e-1）
+```
+
+gen11L の 67 は 1 ノードの「residual speed tie」の注記が Python にだけ出るもの。混乱を載せない局面・master の Python と
+exe でも同じく出るので、この変更とは別（下の候補）。数値は新 exe で最悪 4.4e-16。
+
+### 5. 記録（`C:/tmp/ika177/records.py`、一時スクリプト、1 コア 345 秒）
+
+試行の数は、同じ局の前の決定で同じ者が混乱して場にいた回数（その間に動いたとみなす近似）。
+
+```
+                                                     w12         selfplay-gen11L
+  手番の決定                                         434,483     118,018
+  混乱が場にある決定                                 814         113
+  混乱した場の枠（符号化の入力 = 1）                 820         115
+    うち試行 0 / 1 / 2 / 3 / 4 / 5 / 6+              395/205/100/51/27/15/27    61/32/9/7/4/1/1
+  新しい規則での入力 = 1 の期待値                    707.2       104.2
+  混乱技を選んだ決定                                 5,446       1,128
+    （ぼうふう / いばる、枠）                         5,460 / 15  1,128 / 9
+  混乱が場にある局                                   374         57
+```
+
+混乱が場にある決定を w12 200・gen11L 98（全部。メニューが今の規則で合法でない 15 を除く）、記録のメニューのまま、
+旧規則（`unconfused`）と新規則（試行数を載せ、5 以上は解けたとして外す）で hp-share 1 手・`Budget.matrix()` で解いた:
+
+```
+                                         w12          gen11L
+  どこかのセルが動いた                    194/200      95/98
+  最も重い手が変わった                    9/200        10/98
+    うち 33/100 と順だけ（解けない）      1            2
+  方策の TV > 0.2                         9/200        11/98
+  均衡値の差（平均・最大）                0.006・0.087  0.009・0.204
+```
+
+### 6. 符号化
+
+`volatile_confusion` は有無だけ。記録では混乱したら場を離れるまで 1 で、新しい規則では解ければ 0: 期待値で w12 820 → 707、
+gen11L 115 → 104（手番の決定の 0.2%・0.1%）。`extra` の `tries`・`time` は符号化されない。ENCODING_REVISION は動かさない。
+
+### 7. 別課題の候補
+
+- **残差のすばやさ同点の注記**: gen11L の 1 局面（ひんしのメガゲンガーの枠がある）で Python だけが「residual speed tie」を
+  出す。master でも同じ。port の `residual_order` がひんしの枠の扱いか同点判定で Python と違う。
+- **混乱の自傷ダメージ**: Showdown は `randomizer`（85〜100% の乱数）を掛けるが、両エンジンとも最大の値だけ。
+- **混乱のかかりにくさ**: あやしいひかりなどの混乱にマイペース・ミストフィールド・しんぴのまもりが効かない（疲れだけ見る）。
+- **pinned の予算と 100% でない追加効果**: `Budget.deterministic()` は追加効果を振らないので、かかと落としの pinned の木は
+  追加効果の後から始めた。
+- 相手の混乱の残り（`extra.time`）は本当の対戦では見えないが、Showdown の局面からの探索は読める（げきりんの長さと同じ）。
+
+### 8. 検査と機械
+
+test_confusion_duration（新規）・test_outrage_lock・test_resolve・test_speed・test_resign_headroom・test_rust_node・
+test_port_coverage・test_port_gates・test_trap_sources・test_trap_immunities・test_trapped_flag_children・test_line_endings・
+test_no_machine_specific_paths・test_actions は `-n 0` で通過。`port_coverage --check`・`port_gate_audit --check`・ruff 通過。
+機械: cargo build --release 8 コア 23 秒 + 20 秒、テスト 1 コア計 約 1 分、diff_node 1 コア 697 秒、記録 1 コア 345 秒。
+worktree に data/priors・standings・reportworm と sim-bridge の dist を main から写し、node_modules は main への junction
+（コミットしない）。

@@ -140,7 +140,9 @@ INTIMIDATE_PROOF_ABILITIES = frozenset(
 #: search multiplied it through every branch.
 FULL_PARALYSIS_CHANCE = 1.0 / 8.0
 
-CONFUSION_SELF_HIT_CHANCE = 1.0 / 3.0
+#: `randomChance(33, 100)` in `confusion.onBeforeMove` (no Champions override), which the
+#: oracle's roll record shows. It was 1/3 (IKA-177).
+CONFUSION_SELF_HIT_CHANCE = 0.33
 
 #: Thawing. The champions mod rewrites `frz.onBeforeMove` to `randomChance(1, 4)` with a
 #: hard three-turn cap, where the base game uses 1/5 and no cap. Taken from the mod's source
@@ -928,6 +930,9 @@ class _Turn:
     def add_volatile(self, side: int, slot: int, vid: str, *, duration: int | None = None) -> None:
         if vid == "lockedmove":
             _start_rampage(self, side, slot)
+            return
+        if vid == "confusion":
+            _start_confusion(self, side, slot)
             return
         mon = self.mon_at(side, slot)
         if mon is None or mon.fainted or mon.has_volatile(vid):
@@ -1877,6 +1882,13 @@ def _do_move(
             for weight, rolled_turn in rolled
             for inner, state, note in _do_move(reg, rolled_turn, action, budget)
         ]
+    tried = _roll_confusion(turn, action, move, budget)
+    if tried is not None:
+        return [
+            (weight * inner, state, note)
+            for weight, tried_turn in tried
+            for inner, state, note in _do_move(reg, tried_turn, action, budget)
+        ]
     outcomes: list[Outcome] = []
     checks = _can_act(turn, action, budget)
 
@@ -1966,7 +1978,7 @@ def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[fl
             mon.status = None
             mon.status_counter = None
             turn.log(f"{turn.name(action.side, action.slot)} woke up")
-            return [(1.0, None)]
+            return _confusion_stage(turn, action, budget)
         return [(1.0, "slp")]
     if mon.status == "frz":
         # A move with the `defrost` flag -- Scald, Flare Blitz, Matcha Gotcha -- is used
@@ -1978,7 +1990,7 @@ def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[fl
             mon.status = None
             mon.status_counter = None
             turn.log(f"{turn.name(action.side, action.slot)} thawed ({move.id})")
-            return [(1.0, None)]
+            return _confusion_stage(turn, action, budget)
         # `time--; if (time <= 0 || randomChance(1, 4))` -- the counter is spent on the
         # attempt to move, and reaching zero thaws regardless of the roll.
         mon.status_counter = (mon.status_counter or FREEZE_COUNTER) - 1
@@ -1986,7 +1998,7 @@ def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[fl
             mon.status = None
             mon.status_counter = None
             turn.log(f"{turn.name(action.side, action.slot)} thawed (counter)")
-            return [(1.0, None)]
+            return _confusion_stage(turn, action, budget)
         if not budget.enumerate_status_checks:
             return [(1.0, "frz")]
         # The two outcomes differ in more than "did it act": one of them is no longer
@@ -1998,19 +2010,159 @@ def _can_act(turn: _Turn, action: QueuedAction, budget: Budget) -> list[tuple[fl
     # Neither the priority-blocking abilities nor Psychic Terrain are here: both act after
     # the move has started, so PP is spent (`_priority_blocked_by`, IKA-158, and
     # `_stopped_by_psychic_terrain`, IKA-156).
-    outcomes: list[tuple[float, str | None]] = [(1.0, None)]
+    # Confusion's priority 3 is above paralysis's 1: the self-hit is rolled first (IKA-177).
+    outcomes = _confusion_stage(turn, action, budget)
     if mon.status == "par" and budget.enumerate_status_checks:
-        outcomes = [(1 - FULL_PARALYSIS_CHANCE, None), (FULL_PARALYSIS_CHANCE, "par")]
-    if mon.has_volatile("confusion") and budget.enumerate_status_checks:
         expanded: list[tuple[float, str | None]] = []
         for weight, reason in outcomes:
             if reason is not None:
                 expanded.append((weight, reason))
                 continue
-            expanded.append((weight * (1 - CONFUSION_SELF_HIT_CHANCE), None))
-            expanded.append((weight * CONFUSION_SELF_HIT_CHANCE, "confusion"))
+            expanded.append((weight * (1 - FULL_PARALYSIS_CHANCE), None))
+            expanded.append((weight * FULL_PARALYSIS_CHANCE, "par"))
         outcomes = expanded
     return outcomes
+
+
+#: Where confusion keeps its length: Showdown's own `effectState.time`, the tries left --
+#: `random(2, 6)` at the start, one spent on each try, cured when it reaches zero. A
+#: position from the oracle carries it (IKA-177).
+CONFUSION_LEFT = "time"
+#: Ours while the length is not rolled: the tries the confusion has had, and Axe Kick's
+#: `min = 3` when it came from one. A record made before IKA-177 has neither and is read
+#: as fresh.
+CONFUSION_TRIES = "tries"
+CONFUSION_MIN = "min"
+#: Set by `_roll_confusion` on the branch where this try does not cure, so the move it
+#: goes on to make does not roll the same try again. `_confusion_try` takes it off.
+CONFUSION_GOES_ON = "goesOn"
+#: `random(min, 6)` is at most 5.
+CONFUSION_LONGEST = 5
+
+
+def _start_confusion(turn: _Turn, side: int, slot: int) -> None:
+    """`addVolatile('confusion')`: `onStart`, then the berries' `onUpdate`.
+
+    `onStart` rolls `time = random(2, 6)`, but nothing reads it before a try where the
+    lengths first differ, so the roll waits for `_roll_confusion` and the volatile counts
+    tries meanwhile -- as the rampage's length waits for its second turn (IKA-174). A
+    Persim or Lum Berry is eaten at once unless a foe's Unnerve forbids it: their
+    `onUpdate` eats whenever `volatiles['confusion']`, whatever confused the holder. The
+    resolver ate them only for a rampage's fatigue.
+    """
+    mon = turn.mon_at(side, slot)
+    if mon is None or mon.fainted or mon.has_volatile("confusion"):
+        return
+    mon.volatiles.append(Effect(id="confusion", extra={CONFUSION_TRIES: 0}))
+    turn.log(f"{turn.name(side, slot)} became confused")
+    if mon.item in ("persimberry", "lumberry") and not turn.berries_blocked(side):
+        turn.consume_item(side, slot, reason=mon.item)
+        mon.volatiles = [v for v in mon.volatiles if v.id != "confusion"]
+
+
+def _confused_by_axe_kick(turn: _Turn, target: tuple[int, int]) -> None:
+    """`const min = sourceEffect?.id === 'axekick' ? 3 : 2`: two confused tries at least."""
+    mon = turn.mon_at(*target)
+    held = mon.volatile("confusion") if mon is not None else None
+    if held is not None:
+        held.extra[CONFUSION_MIN] = 3
+
+
+def _confusion_reached(turn: _Turn, mon: Pokemon, move: Move) -> bool:
+    """Whether this try gets as far as confusion's `onBeforeMove` (priority 3): past a
+    flinch (8), a sleep (10) and a freeze (10) only when it wakes or thaws. A freeze left
+    to its 1-in-4 is not, as `_can_act` does not look at confusion there."""
+    if mon.fainted or mon.has_volatile("flinch"):
+        return False
+    if mon.status == "slp":
+        return (mon.status_counter or 0) - (2 if mon.ability == "earlybird" else 1) <= 0
+    if mon.status == "frz":
+        return _defrosts(turn, mon, move) or (mon.status_counter or FREEZE_COUNTER) - 1 <= 0
+    return True
+
+
+def _confusion_cure_chance(held: Effect, budget: Budget) -> float:
+    """The chance this try ends the confusion, given the tries before it did not.
+
+    `time` is uniform on min..5 and try k cures when `time == k`, so after k - 1 tries it is
+    uniform on max(min, k)..5, and try k cures one time in `6 - k` once `k >= min`: 0, 1/4,
+    1/3, 1/2, 1 for the plain confusion. A budget that does not enumerate the status checks
+    takes the shortest length, which is also the oracle's pinned `random(a, b)`, `a`.
+    """
+    tries = held.extra.get(CONFUSION_TRIES, 0) + 1
+    low = held.extra.get(CONFUSION_MIN, 2)
+    if tries < low:
+        return 0.0
+    if not budget.enumerate_status_checks or budget.pinned_policy:
+        return 1.0
+    return 1.0 / max(CONFUSION_LONGEST + 1 - tries, 1)
+
+
+def _roll_confusion(
+    turn: _Turn, action: QueuedAction, move: Move, budget: Budget
+) -> list[tuple[float, _Turn]] | None:
+    """Whether this try cures the confusion, when the position does not have its length.
+
+    At the head of the move, as `_roll_rampage`, because the two outcomes are different
+    states and `_can_act` answers weights: cured now (`time` 1, which the try spends to
+    zero), or one more try spent. Branching per try rather than rolling the whole length
+    once keeps the leaves to two a try; a length rolled at the first try that can end would
+    split the rest into three or four states no encoding tells apart. Showdown's own
+    positions carry `time` and never branch.
+    """
+    mon = turn.mon_at(action.side, action.slot)
+    held = mon.volatile("confusion") if mon is not None else None
+    if mon is None or held is None or isinstance(held.extra.get(CONFUSION_LEFT), int):
+        return None
+    if held.extra.get(CONFUSION_GOES_ON) or not _confusion_reached(turn, mon, move):
+        return None
+    chance = _confusion_cure_chance(held, budget)
+    if chance >= 1.0 and not budget.enumerate_status_checks and not budget.pinned_policy:
+        turn.unmodelled.add("confusion length (the shortest of 2-to-5; not branched)")
+    if chance <= 0.0:
+        return None
+    options = [(chance, True)] if chance >= 1.0 else [(chance, True), (1.0 - chance, False)]
+    out: list[tuple[float, _Turn]] = []
+    for index, (weight, cures) in enumerate(options):
+        state = turn if index == len(options) - 1 else turn.clone()
+        rolled = state.mon_at(action.side, action.slot)
+        assert rolled is not None
+        confused = rolled.volatile("confusion")
+        assert confused is not None
+        if cures:
+            confused.extra[CONFUSION_LEFT] = 1
+        else:
+            confused.extra[CONFUSION_GOES_ON] = True
+        out.append((weight, state))
+    return out
+
+
+def _confusion_try(turn: _Turn, side: int, slot: int) -> bool:
+    """`time--`, cured at zero; whether the Pokemon is still confused for this try."""
+    mon = turn.mon_at(side, slot)
+    held = mon.volatile("confusion") if mon is not None else None
+    if mon is None or held is None:
+        return False
+    left = held.extra.get(CONFUSION_LEFT)
+    if isinstance(left, int):
+        if left - 1 <= 0:
+            mon.volatiles = [v for v in mon.volatiles if v is not held]
+            turn.log(f"{turn.name(side, slot)} snapped out of its confusion")
+            return False
+        held.extra[CONFUSION_LEFT] = left - 1
+        return True
+    held.extra.pop(CONFUSION_GOES_ON, None)
+    held.extra[CONFUSION_TRIES] = held.extra.get(CONFUSION_TRIES, 0) + 1
+    return True
+
+
+def _confusion_stage(
+    turn: _Turn, action: QueuedAction, budget: Budget
+) -> list[tuple[float, str | None]]:
+    """Confusion's `onBeforeMove` in `_can_act`: the try, then `randomChance(33, 100)`."""
+    if _confusion_try(turn, action.side, action.slot) and budget.enumerate_status_checks:
+        return [(1 - CONFUSION_SELF_HIT_CHANCE, None), (CONFUSION_SELF_HIT_CHANCE, "confusion")]
+    return [(1.0, None)]
 
 
 #: Where `lockedmove` keeps the rampage's length: Showdown's own `effectState` key, which
@@ -2128,10 +2280,8 @@ def _confused_by_fatigue(turn: _Turn, side: int, slot: int) -> None:
     """`target.addVolatile('confusion')` from the rampage's `onEnd`.
 
     Own Tempo and a grounded Pokemon under Misty Terrain refuse it (`onTryAddVolatile`);
-    Safeguard does not, since the rampage has no source. A Persim or Lum Berry is eaten at
-    once (`onUpdate`) unless a foe's Unnerve forbids it. Confusion's own length (`random(2,
-    6)`) is not modelled anywhere in the resolver: once confused, a Pokemon stays confused
-    until it leaves the field.
+    Safeguard does not, since the rampage has no source. The berries and the length are
+    every confusion's, in `_start_confusion` (IKA-177).
     """
     mon = turn.mon_at(side, slot)
     if mon is None or mon.fainted or mon.has_volatile("confusion"):
@@ -2142,11 +2292,8 @@ def _confused_by_fatigue(turn: _Turn, side: int, slot: int) -> None:
     if turn.pos.field.terrain == "mistyterrain" and _grounded(turn, mon):
         turn.log(f"{turn.name(side, slot)} is not confused (mistyterrain)")
         return
+    turn.log(f"{turn.name(side, slot)} becomes confused (fatigue)")
     turn.add_volatile(side, slot, "confusion")
-    turn.log(f"{turn.name(side, slot)} became confused (fatigue)")
-    if mon.item in ("persimberry", "lumberry") and not turn.berries_blocked(side):
-        turn.consume_item(side, slot, reason=mon.item)
-        mon.volatiles = [v for v in mon.volatiles if v.id != "confusion"]
 
 
 def _rampage_runs_out(turn: _Turn, actives: list[tuple[int, int]]) -> None:
@@ -4286,7 +4433,10 @@ def _apply_secondary(
     if secondary.get("status"):
         turn.apply_status(*target, str(secondary["status"]), reason="secondary")
     if secondary.get("volatileStatus"):
+        fresh = not _has_volatile_at(turn, target, "confusion")
         turn.add_volatile(*target, str(secondary["volatileStatus"]))
+        if action.move_id == "axekick" and fresh:
+            _confused_by_axe_kick(turn, target)
     if secondary.get("boosts"):
         turn.apply_boosts(*target, dict(secondary["boosts"]), reason="secondary")
     self_boosts = (secondary.get("self") or {}).get("boosts")
