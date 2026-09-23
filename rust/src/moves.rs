@@ -1988,6 +1988,19 @@ fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), S
 // Status moves
 // ---------------------------------------------------------------------------
 
+/// Python's `_helping_hand_fails` (IKA-184): Helping Hand's `onTryHit`,
+/// `if (!target.newlySwitched && !this.queue.willMove(target)) return false`. A partner that
+/// has already moved this turn is not helped, unless it came in this turn.
+fn helping_hand_fails(turn: &Turn, targets: &[Slot]) -> bool {
+    for target in targets {
+        let Some(mon) = turn.mon_at(target.0, target.1) else { continue };
+        if mon.newly_switched || !turn.acted[target.0][target.1] {
+            return false;
+        }
+    }
+    true
+}
+
 fn do_status_move<'a>(
     reg: &'a Reg,
     mut turn: Turn<'a>,
@@ -2043,6 +2056,11 @@ fn do_status_move<'a>(
     }
 
     if STALL_BUMPING_MOVES.contains(&mv.id.as_str()) && turn.actions_remaining == 0 {
+        turn.move_failed[action.side][action.slot] = true;
+        return Ok(vec![(1.0, turn)]);
+    }
+
+    if mv.id == "helpinghand" && helping_hand_fails(&turn, &reachable) {
         turn.move_failed[action.side][action.slot] = true;
         return Ok(vec![(1.0, turn)]);
     }
