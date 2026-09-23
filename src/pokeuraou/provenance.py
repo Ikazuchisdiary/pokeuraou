@@ -123,6 +123,7 @@ def provenance(
     solvers: tuple[str, str] = ("full", "full"),
     books: tuple[str, str] = ("uniform", "uniform"),
     information: tuple[str, str] = ("open", "open"),
+    beliefs: tuple[str, str] = ("uniform", "uniform"),
     note: str = "",
 ) -> dict[str, Any]:
     """What produced this game, per side, in the order the sides appear in the record.
@@ -142,6 +143,11 @@ def provenance(
     differed only in the candidate ranking recorded identical `leaves` and identical
     `limits`, and the only thing separating them was a substring of a human-readable
     string -- fine to read, impossible to fit a rating from.
+
+    `beliefs` is what each side's search believed the opponent's hidden bench holds:
+    ``"book"`` weighted by that side's own selection cache, ``"uniform"`` every pair the
+    sheet allows at one weight. It means something only under a hidden bench, and every
+    hidden match recorded before the field existed (IKA-122) played the uniform one.
     """
     return {
         "kind": kind,
@@ -153,6 +159,7 @@ def provenance(
         "solvers": list(solvers),
         "books": list(books),
         "information": list(information),
+        "beliefs": list(beliefs),
         # Derived, never passed. It was a free-text summary with a default of "uniform",
         # and callers stopped passing it when `books` arrived per side -- so every match
         # played from a solved selection recorded `"selection": "uniform"` beside a
@@ -235,6 +242,14 @@ def agent_name(source: dict[str, Any], side: int) -> str:
     information = (source.get("information") or ["open", "open"])[side]
     if information != "open":
         name += f"/{information}"
+        # What it believed that bench holds. The uniform belief and the one weighted by
+        # the agent's own book are two agents -- IKA-5 measured +12.9% srch-act between
+        # them at turn 1 -- and until IKA-122 every hidden match played the uniform one
+        # under the name generation's agent would get. Absent means uniform, because
+        # that is what those records played; the name they already carry is kept.
+        belief = (source.get("beliefs") or ["uniform", "uniform"])[side]
+        if belief != "uniform":
+            name += f"/belief:{belief}"
     return name
 
 

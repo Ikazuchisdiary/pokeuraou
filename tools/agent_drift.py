@@ -49,7 +49,20 @@ AGENT_ARGS = (
     "solve_sparsely",
     "solve_restricted",
     "sheets",
+    # What the search believes the hidden bench holds. Generation has passed it since
+    # IKA-5 and `generation_match` did not, so every hidden-bench match until IKA-122
+    # played the uniform belief -- a different agent -- while this list, lacking the name,
+    # reported the match as the agent that ships.
+    "bench_prior",
 )
+#: One argument a tool may omit for a reason, where excusing the whole file in `EXPECTED`
+#: would also excuse every other argument it might stop passing later.
+EXCUSED_ARGS = {
+    "branch_dedup.py": {
+        "bench_prior": "draws both fours uniformly with no book, and against a uniform "
+        "draw the uniform belief is the true one -- what generation holds on a book miss",
+    },
+}
 #: Tools that drive something other than a full game on purpose, so a missing argument is
 #: a choice rather than a drift. Each one says why.
 EXPECTED = {
@@ -75,6 +88,9 @@ KNOWN_DRIFT = frozenset(
         "forced_handoff.py",
         "matchup.py",
         "resume_generate.py",
+        # Since IKA-122 lists `bench_prior`: its named arms draw the opponent's four from
+        # the book's column strategy and then search over a uniform belief.
+        "selection_check.py",
         "width_match.py",
     }
 )
@@ -95,6 +111,22 @@ def calls(path: Path) -> list[tuple[int, set[str]]]:
     return out
 
 
+def shipping_args() -> set[str]:
+    """The arguments generation passes whose default is not what ships."""
+    reference: set[str] = set()
+    for _, kwargs in calls(ROOT / "src/pokeuraou/selfplay.py"):
+        reference |= kwargs
+    reference &= set(AGENT_ARGS)
+    # `depth`, `policy`, `solve_sparsely` and `solve_restricted` default to what
+    # generation ships (1, None, False, False), so omitting them changes nothing. The five
+    # that bite are the ones whose default is NOT what ships: the leaf (None means
+    # hp-share), the narrowing order (False means damage, generation uses the leaf), the
+    # sheets (None means the search is handed the opponent's four), the width (8, where
+    # generation plays 12) and the bench prior (None means the uniform belief, where
+    # generation weights the bench by the opponent's selection equilibrium).
+    return reference & {"evaluate", "rank_by_leaf", "sheets", "search_limit", "bench_prior"}
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="which tools build a different agent")
     ap.add_argument(
@@ -104,17 +136,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = ap.parse_args(argv)
 
-    reference: set[str] = set()
-    for _, kwargs in calls(ROOT / "src/pokeuraou/selfplay.py"):
-        reference |= kwargs
-    reference &= set(AGENT_ARGS)
-    # `depth`, `policy`, `solve_sparsely` and `solve_restricted` default to what
-    # generation ships (1, None, False, False), so omitting them changes nothing. The four
-    # that bite are the ones whose default is NOT what ships: the leaf (None means
-    # hp-share), the narrowing order (False means damage, generation uses the leaf), the
-    # sheets (None means the search is handed the opponent's four) and the width (8,
-    # where generation plays 12).
-    reference &= {"evaluate", "rank_by_leaf", "sheets", "search_limit"}
+    reference = shipping_args()
     print(f"  the arguments whose default is not what ships: {', '.join(sorted(reference))}")
     print("  (depth, policy, solve_sparsely and solve_restricted default to the shipped\n"
           "   setting, so an omission there is not a drift)\n")
@@ -133,7 +155,10 @@ def main(argv: list[str] | None = None) -> int:
         passed: set[str] = set()
         for _, kwargs in found:
             passed |= kwargs
-        missing = sorted(reference - passed)
+        excused = EXCUSED_ARGS.get(p.name, {})
+        for name in sorted((reference - passed) & set(excused)):
+            print(f"  excused   {p.name:<26} omits {name}  -- {excused[name]}")
+        missing = sorted(reference - passed - set(excused))
         note = EXPECTED.get(p.name)
         if not missing:
             print(f"  ok        {p.name}")

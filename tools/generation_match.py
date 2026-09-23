@@ -33,7 +33,7 @@ from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.policy import load_policy
 from pokeuraou.priors import find_cached_chaos, load_chaos
 from pokeuraou.provenance import open_games, provenance, write_game
-from pokeuraou.selection_book import SelectionBook, draw_across
+from pokeuraou.selection_book import BenchPrior, BookEntry, SelectionBook, draw_across
 from pokeuraou.selfplay import play_game
 from pokeuraou.standings import find_cached_standings, load_standings, sample_standings_team
 from pokeuraou.teams import all_selections, load_roster
@@ -42,6 +42,41 @@ from pokeuraou.workqueue import WorkClient
 # `pokeuraou.value` imports torch, so it is imported where it is used rather than here.
 # A worker scoring on an inference server needs neither, and torch is 816 MB of the 863
 # such a worker was measured at against the 213 it weighs without.
+
+
+def seat_bench_prior(
+    entry0: BookEntry | None,
+    entry1: BookEntry | None,
+    weighted: tuple[bool, bool],
+    species: tuple[Sequence[str], Sequence[str]],
+) -> tuple[BenchPrior | None, BenchPrior | None] | None:
+    """The `bench_prior` pair for one game, each half from the arm that READS it (IKA-122).
+
+    `bench_prior[s]` prices side `s`'s hidden bench, so side `1 - s`'s search is the one
+    that consults it -- and it is that arm's belief, built from that arm's own selection
+    cache: side 0 reads `entry0`'s class-averaged column strategy for side 1, side 1 reads
+    `entry1`'s row strategy for side 0. Reading the book side `s` actually drew from would
+    hand the searcher the opponent's private strategy, which is a leak.
+
+    `entry0`/`entry1` are the entries the two sides drew from, per side, so they already
+    follow the arm through the seat swap. `weighted[s]` is whether side `s`'s arm uses its
+    book for the belief at all; an arm with no book (`entry` None) holds the uniform one,
+    which is what `None` selects. Epsilon 0 and temperature 1, the same as this match's
+    draw -- `BenchPrior.of` requires the belief and the draw to agree.
+    """
+    believed_by_0 = (
+        BenchPrior.of(entry0, 1, species[1], epsilon=0.0, temperature=1.0)
+        if weighted[0] and entry0 is not None
+        else None
+    )
+    believed_by_1 = (
+        BenchPrior.of(entry1, 0, species[0], epsilon=0.0, temperature=1.0)
+        if weighted[1] and entry1 is not None
+        else None
+    )
+    if believed_by_0 is None and believed_by_1 is None:
+        return None
+    return (believed_by_1, believed_by_0)
 
 
 def main() -> None:
@@ -196,6 +231,20 @@ def main() -> None:
         "the selection fixed and cannot express the comparison the book itself is for: "
         "the +141 Elo attributed to the advice was measured on single models against an "
         "older book, and on the current floor it is unmeasured.",
+    )
+    ap.add_argument(
+        "--uniform-bench-belief",
+        action="store_true",
+        help="under --hide-bench, the arm under test believes every bench its opponent's "
+        "sheet allows is equally likely, instead of weighting it by its own book's model "
+        "of the opponent's selection. Generation weights it (IKA-5), and every hidden "
+        "match before IKA-122 played this uniform belief whether asked or not; the flag "
+        "is how the two are measured against each other.",
+    )
+    ap.add_argument(
+        "--baseline-uniform-bench-belief",
+        action="store_true",
+        help="same for the other arm",
     )
     ap.add_argument("--seed", type=int, default=77)
     ap.add_argument(
@@ -496,6 +545,24 @@ def main() -> None:
         if args.baseline_selection_book
         else selection_label
     )
+    # Whether each ARM (tested, other) weights the hidden bench by its own book (IKA-122).
+    # It needs a hidden bench to have anything to believe about, a book to take the
+    # belief from, and not to have been told to keep the uniform one. Per arm, then
+    # ordered by seat below, like every other per-arm setting here.
+    arm_has_book = (
+        book is not None,
+        other_book is not None and not args.baseline_uniform_selection,
+    )
+    arm_weighted = (
+        args.hide_bench and arm_has_book[0] and not args.uniform_bench_belief,
+        args.hide_bench and arm_has_book[1] and not args.baseline_uniform_bench_belief,
+    )
+    arm_belief = tuple("book" if w else "uniform" for w in arm_weighted)
+    if args.hide_bench:
+        print(
+            f"bench belief: tested arm {arm_belief[0]}, other arm {arm_belief[1]}",
+            file=sys.stderr,
+        )
 
     # What each side's ordering is *called*, which is what a rating is fitted from. A
     # policy names itself: two policies are two agents, and "policy" alone would pool them.
@@ -525,7 +592,11 @@ def main() -> None:
         tags += "@sparse" if args.solve_sparsely else "@fullmatrix"
     if args.solve_restricted != args.baseline_solve_restricted:
         tags += "@restricted" if args.solve_restricted else "@mixeddepth"
-    arm = f"{new_name}{tags}" if tags else new_name
+    # Only when the flags differ: a book arm against a bookless one already differs in
+    # its book, and renaming those seats would move labels that recorded runs key on.
+    if args.hide_bench and args.uniform_bench_belief != args.baseline_uniform_bench_belief:
+        tags += "@uniformbelief" if args.uniform_bench_belief else "@bookbelief"
+    arm =f"{new_name}{tags}" if tags else new_name
     seats = (
         (f"{arm} = side 0", (value, baseline), (args.depth, args.baseline_depth),
          (args.limit, other_limit), (args.rank_leaf, args.baseline_rank_leaf),
@@ -596,7 +667,11 @@ def main() -> None:
     # Index 0 is the tested arm and 1 the other, whichever side each sat on.
     arm_seconds = [[0.0, 0.0] for _ in seats]
     arm_moves = [0 for _ in seats]
-    client = WorkClient(args.queue) if args.queue else None
+    # Per seat, (tested arm, other arm): games in which that arm's search was handed a
+    # weighted belief over its opponent's bench. Printed at the end as the worker's own
+    # account, because the line at the top says what was asked and this says what ran.
+    belief_games = [[0, 0] for _ in seats]
+    client =WorkClient(args.queue) if args.queue else None
     if client is not None:
         print(f"queue: {args.queue}", file=sys.stderr)
 
@@ -713,7 +788,8 @@ def main() -> None:
             missing = (side0_book is not None and entry0 is None) or (
                 side1_book is not None and entry1 is None
             )
-            if not missing and (entry0 is not None or entry1 is not None):
+            from_book = not missing and (entry0 is not None or entry1 is not None)
+            if from_book:
                 # epsilon 0: the rating asks what the strategy is worth, and exploration
                 # is a property of generation rather than of the agent.
                 #
@@ -735,6 +811,28 @@ def main() -> None:
                     book_misses += 1
             drawn_ours.setdefault(seat_labels[0], set()).add(tuple(own_pick))
             drawn_theirs.setdefault(seat_labels[0], set()).add(tuple(foe_pick))
+            # Each side's belief over the other's bench, from the arm sitting there. Only
+            # when the books drew this game: on a miss both fours were uniform, which is
+            # what generation assumes too (`drawn is None` there), and the uniform belief
+            # is then the true one.
+            bench_prior = (
+                seat_bench_prior(
+                    entry0,
+                    entry1,
+                    arm_weighted if which == 0 else arm_weighted[::-1],
+                    (
+                        [s.species for s in roster.sets],
+                        [s.species for s in foe_six],
+                    ),
+                )
+                if args.hide_bench and from_book
+                else None
+            )
+            if bench_prior is not None:
+                # Counted from the objects handed to `play_game`, per ARM: the tested arm
+                # sits at `which` and reads `bench_prior[1 - which]`.
+                belief_games[which][0] += bench_prior[1 - which] is not None
+                belief_games[which][1] += bench_prior[which] is not None
             record = play_game(
                 reg,
                 rng,
@@ -760,6 +858,12 @@ def main() -> None:
                 # the standings team when it did not. Both are public in Champions, and
                 # both are what makes the four uncertain rather than unknown.
                 sheets=(list(roster.sets), list(foe_six)) if args.hide_bench else None,
+                # What each side believes the other's bench holds. Generation has passed
+                # this since IKA-5 and this call did not until IKA-122, so every hidden
+                # match before it searched over a uniform belief -- a different agent
+                # from the one generation plays, which `agent_drift` could not see
+                # because `bench_prior` was not on its list.
+                bench_prior=bench_prior,
                 # Without this the record keeps `selectionSource: "uniform"` and an empty
                 # ownPick whatever the book did, and every rating row since generation 10
                 # says a uniform draw for games the book actually chose. `provenance.books`
@@ -835,6 +939,9 @@ def main() -> None:
                         if args.hide_bench
                         else ("open", "open")
                     ),
+                    # Per ARM, ordered by seat, like `books`: what the agent is, not
+                    # what this game's draw happened to allow.
+                    beliefs=arm_belief if which == 0 else arm_belief[::-1],
                     note=(
                         f"search depth {depths[0]} vs {depths[1]} by side"
                         if depths[0] != depths[1]
@@ -870,6 +977,14 @@ def main() -> None:
             f"us, {len(drawn_theirs[label])} for the opponent",
             file=sys.stderr,
         )
+    if args.hide_bench:
+        for which, (seat, *_rest) in enumerate(seats):
+            print(
+                f"  bench belief in {seat}: weighted for the tested arm in "
+                f"{belief_games[which][0]} games, for the other arm in "
+                f"{belief_games[which][1]}",
+                file=sys.stderr,
+            )
     if book_misses:
         print(
             f"  selection book: {book_misses:,} of {args.games:,} games found no entry "
