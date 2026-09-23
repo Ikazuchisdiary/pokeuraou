@@ -11653,3 +11653,164 @@ release ビルド 2 回（8 コア、23 秒・18 秒）。数え上げ（24 秒�
   何もしない
 * 撒き技が既に最大のとき（ステルスロック・ねばねばネットの 2 回目、まきびし 4 回目、どくびし 3 回目）Showdown は
   技を失敗させるが、`add_side_condition` は黙って戻るだけで `move_failed` にならない。プールに 0
+
+## 9/23 — IKA-173: がんせきアックス・ひけん・ちえなみの撒き技、どくげしょうの味方の物理技と瀕死、撒き技・場の技が既にあるときの失敗 —— Python・port とも Showdown と違っていた。オラクル 15 例で両方一致、diff_node は陽性対照つきで 0 件
+
+### 1. Showdown の定義（vendor a5df827。champions mod に上書きは無い）
+
+```
+  data/moves.ts stoneaxe（18069 行）・ceaselessedge（2220 行）
+    onAfterHit(target, source, move) { if (!move.hasSheerForce) {
+        for (const side of source.side.foeSidesWithConditions()) side.addSideCondition('stealthrock' | 'spikes');
+    onAfterSubDamage: 同じ（source.hp のときだけ）。secondary: {} はちからずくが食う印
+  sim/battle-actions.ts 1119-1127（spreadMoveHit）
+    DamagingHit の後、if (moveData.onAfterHit && pokemon.hp) 数値のダメージを受けた対象ごとに AfterHit
+  data/abilities.ts toxicdebris（5104 行）onDamagingHit
+    const side = source.isAlly(target) ? source.side.foe : source.side;  物理で、どくびし 2 層未満なら置く
+  sim/side.ts addSideCondition（413 行）
+    既にあれば onSideRestart が無いと false。まきびし（3 層）・どくびし（2 層）の onSideRestart は上限で false
+  sim/battle-actions.ts 1240-1306: sideCondition の false が didSomething に入り、何もしなければ '-fail'
+```
+
+置く側は使い手の相手の側（当てた相手が味方でも）。倒した相手でも置く。外れ・まもる・ちからずくでは置かない。
+使い手がゴツゴツメット等で倒れたら置かない。どくげしょうはキラフロルの向かいの側（相手の物理なら攻撃側、
+味方の物理ならその相手の側）で、DamagingHit は瀕死の処理より前なので倒されても置く。
+
+### 2. オラクル（`tests/test_hazards_after_hit.py`、IKA-165 の形を N ターンに）
+
+Showdown で打ったターンを Python・port が自分の前のターンの局面から打ち、毎ターン後の side conditions・HP・
+状態・ランク・moveLastTurnFailed を合わせる。撒く例は最後に相手のガオガエンをカバルドンに替え、交代で削られる
+ことを Showdown 側で確かめる（陽性対照）。
+
+```
+  例                               Showdown（最後のターン後）       旧 Python   旧 exe   新 Python   新 exe
+  がんせきアックス→ガブリアス      p2 ステルスロック、交代で -1/16   FAIL        FAIL     一致        一致
+  がんせきアックスで倒す           p2 ステルスロック                 FAIL        FAIL     一致        一致
+  がんせきアックス→味方            p2 ステルスロック                 FAIL        FAIL     一致        一致
+  ひけん・ちえなみ                 p2 まきびし、交代で -1/8          FAIL        FAIL     一致        一致
+  対照 外れ（accuracy miss）       なし                              一致        一致     一致        一致
+  対照 まもる                      なし                              一致        一致     一致        一致
+  対照 ちからずく                  なし                              一致        一致     一致        一致
+  どくげしょう 味方のシザークロス  p2 どくびし、交代でどく           FAIL        FAIL     一致        一致
+  どくげしょう 味方のじしん（瀕死）p2 どくびし                       FAIL        FAIL     一致        一致
+  どくげしょう 相手のじしんで瀕死  p2 どくびし                       FAIL        FAIL     一致        一致
+  対照 どくげしょう 相手のはたく   p2 どくびし                       一致        一致     一致        一致
+  ステルスロック 2 回目            キラフロル失敗                    FAIL        FAIL     一致        一致
+  どくびし 3 回目                  2 層、失敗                        FAIL        FAIL     一致        一致
+  まきびし 4 回目                  3 層、失敗                        FAIL        FAIL     一致        一致
+  おいかぜ 2 回目                  エルフーン失敗                    FAIL        FAIL     一致        一致
+```
+
+直す前: 旧 Python（master の resolve.py）・旧 exe（master の release を C:/tmp/ika173/ に複写）で 30 件中 8 pass（対照 4×2）・
+22 FAIL。port の FAIL は全部 port 対 Showdown の比較で落ちる。直した後は 30 件と IKA-165 の 12 件が pass。
+みがわり: Showdown はみがわりに当てても置く（onAfterSubDamage）が、Python はみがわりを扱わないのでテストに無い。
+使い手がゴツゴツメットで倒れる例は HP を作れず見ていない（コードは使い手の fainted で止める）。
+瀕死のポケモンの moveLastTurnFailed は Showdown が clearVolatile で忘れ、Python は残す。倒れた者は読まないので
+比べない（テストの `_state`）。
+
+Python の行動一覧は単体技で味方を狙う手を出さない（actions._targets_for）ので、味方へのがんせきアックスは
+探索には現れない。テストは一覧の手の対象を差し替えて作る。
+
+### 3. 直し
+
+```
+  Python                                                  port
+  _Turn.add_side_condition が bool を返す                 Turn::add_side_condition -> bool
+  _apply_status_move: false なら move_failed               apply_status_move: false なら move_failed
+  _after_hit の末尾に _lay_hazard_after_hit（1 行）        after_hit の末尾に lay_hazard_after_hit
+    AFTER_HIT_HAZARDS = {stoneaxe: stealthrock,              使い手が立っていて sheerforce でなく、当たったとき
+    ceaselessedge: spikes}、置く側は 1 - action.side         1 - action.side
+  _on_being_hit: どくげしょうを fainted の判定の前に、     on_being_hit: 同じ
+    _toxic_debris（向かいの側 = 1 - target[0]）
+```
+
+ワイドガード・ファストガードも raw.sideCondition の道を通るので、同じターンの 2 回目は失敗になる（STALL_BUMPING の 2 回目の add は戻り値を読まない）。オラクルでは見ていない。
+
+### 4. diff_node（`--using stoneaxe` を足し、`--toxic-debris` を足した）
+
+`--using stoneaxe` の対照 `unlaid` は AFTER_HIT_HAZARDS を空にした Python。`--toxic-debris` はどくげしょうが場にいる
+記録の局面の全セルを枝ごとに比べ、対照 `old_toxic_debris` は前の規則（相手の物理で生き残ったときだけ）。
+
+```
+                                        w12 新 exe   w12 旧 exe   gen11L 新 exe
+  --using stoneaxe（20 局面）
+    がんせきアックスを使うセル          3,312        3,312        5,702
+      違う                              0            2,746        0
+    発火（unlaid が動かすセル）         2,840        2,840        4,174
+      違う                              0            2,746        0
+      一時停止の枝あり（位置は比べない）214          214          243
+    最悪のセル差                        3.3e-16      6.4e-2       6.7e-16
+  --toxic-debris（12 局面）
+    全セル                              5,108        5,108        6,456
+      違う                              0            420          0
+    発火                                420          420          206
+      違う                              0            420          0
+    最悪のセル差                        1.1e-16      1.1e-16      2.2e-16
+```
+
+旧 exe で違うセル 2,746 = 発火 2,840 − 一時停止の枝だけで動く 94。port が断ったセルは全部 0。
+がんせきアックスの実行で「均衡の頻度が最大 0.09（w12）・0.29（gen11L）動いた」はセル差 1e-16 の縮退した均衡の
+解き分けで、今回の直しの前からある種類のもの。
+
+### 5. 記録で該当する数
+
+```
+                                                    data/ika73/w12        data/selfplay-gen11L
+  局 / 手番の決定                                   43,999 / 434,483      12,000 / 118,018
+  がんせきアックスが場にある決定                    1,352                 91
+    記録の均衡が打つ決定                            713                   63
+    選ばれた（側×決定）                             429                   33
+    選ばれた局                                      273（0.62%）          18（0.15%）
+    最初のがんせきアックスから後の決定              1,419（0.33%）        89（0.075%）
+  ひけん・ちえなみが場にある決定                    0                     0
+  どくげしょうが場にある決定                        3,328                 1,189
+    味方が物理の全体技を選んだ（側×決定）           42（33 局）           7（7 局）
+  場に既にあるのに選んだ（Showdown では失敗）
+    おいかぜ / リフレクター / ひかりのかべ / オーロラベール
+                                                    871 / 173 / 99 / 0    100 / 14 / 10 / 1
+    その局                                          835                   92
+  撒き技が上限のときの撒き技                        0                     0
+```
+
+standings の文字列の出現数（構築数ではない）: がんせきアックス worlds 4・Baltimore 12、どくげしょう 9・40、
+matchupweb はがんせきアックス 0・どくげしょう 3。ひけん・ちえなみはどこにも 0。
+
+### 6. 均衡の手（新旧 Python、Budget.matrix の 1 ターン行列、記録のメニュー）
+
+```
+                              w12 アックス   gen11L アックス（全数）   w12 どくげしょう   gen11L どくげしょう
+  決定                        150            91                       150                150
+  value-gen11L の葉
+    セルが動いた決定          145            88                       48                 33
+    均衡の値の変化 平均/最大   1.3e-4/5.3e-3  1.7e-4/5.3e-3            2.5e-4/1.1e-2      1.1e-4/6.6e-3
+    TV > 0.05 の決定          3              5                        0                  0
+    最頻の手が変わった決定    2（1.3%）      2（2.2%）                0                  0
+  hp-share
+    セルが動いた決定          23             26                       1                  2
+    均衡の値の変化 最大       2e-16          1e-16                    0                  0
+```
+
+hp-share の 1 手先は撒き技を見ない（同じターンに交代で入る枝だけが動く）ので、値はどれも動かない。hp-share の
+TV・最頻の手の変化（w12 2、gen11L 5）は値が同じ縮退した均衡の解き分けで、数に入れない。value-gen11L の葉は
+side conditions を読むので動き、陽性対照にもなっている。
+失敗の直し（move_failed）はどちらの葉も読まない（encoder は move_last_turn_failed を持たない）ので 0。
+
+### 7. 学習データへの影響
+
+value-gen11L の学習局（data/selfplay-gen11L、12,000 局）でがんせきアックスを選んだ局は 18（0.15%）、最初の
+がんせきアックスから後の決定は 89（118,018 の 0.075%）。これらは当たっていればステルスロックがあるはずの局面を
+無い局面として学習している。どくげしょうの味方の全体技は 7 局。瀕死の場合は記録から数えられない（diff_node の
+発火で見る）。おいかぜ等の 2 回目は 92 局で、次のターンのじだんだ・やけっぱちの威力だけに効く。
+
+### 8. 機械
+
+release ビルド 2 回（8 コア、22 秒・19 秒）、diff_node 6 回（1 コア、43〜62 秒）、記録の数え上げと解き直し 1 回
+（1 コア、724 秒）。すべて heavy.py に記録（--agent IKA-173）。
+
+### 9. 別課題の候補
+
+* みがわり: Python・port ともみがわりの volatile を付けるだけで、ダメージを肩代わりしない
+  （resolve.py に substitute の道が無い）。がんせきアックスの onAfterSubDamage もその下にある
+* 瀕死のポケモンの move_last_turn_failed を Showdown は faint で忘れる（clearVolatile）が Python・port は残す。
+  読む者はいないが局面の JSON が Showdown と違う
+* Python の行動一覧は単体技で味方を狙えない。Showdown は許す（味方への がんせきアックス・てだすけ後の味方殴り等）

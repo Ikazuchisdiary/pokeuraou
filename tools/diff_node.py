@@ -50,6 +50,20 @@ its user's type (IKA-162); its control is the turn with `TYPE_SPENDING_MOVES` em
 The control is the hit count as it was before IKA-160 -- 1/3, 1/3, 1/6, 1/6 and Skill Link
 not read -- so the cells it moves are the ones where the count's distribution mattered.
 
+`--using stoneaxe` (or `ceaselessedge`) takes a move that lays a hazard from its own
+`onAfterHit` (IKA-173); its control is the turn with `AFTER_HIT_HAZARDS` emptied, the
+hit laying nothing as before.
+
+Holding the port to Toxic Debris, whose Toxic Spikes a partner's hit and a knock-out now
+lay (IKA-173):
+
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --toxic-debris
+
+`--toxic-debris` keeps the recorded positions with Toxic Debris on the field and holds
+every cell branch by branch. The cells where the new rule *fired* are the ones Python
+moves when `_toxic_debris` is put back to a foe's hit on a Glimmora that survives, and the
+run fails if there are none.
+
 Holding the port to a terrain no recorded game has (IKA-156):
 
     uv run python tools/diff_node.py --games-dir data/ika73/w12 --terrain psychicterrain
@@ -136,6 +150,7 @@ from pokeuraou.payoff import OBJECTIVES  # noqa: E402
 from pokeuraou.position import Effect, MoveSlot, Position  # noqa: E402
 from pokeuraou.priors import find_cached_chaos, load_chaos  # noqa: E402
 from pokeuraou.resolve import (  # noqa: E402
+    AFTER_HIT_HAZARDS,
     PRIORITY_BLOCKING_ABILITIES,
     TYPE_SPENDING_MOVES,
     Budget,
@@ -301,6 +316,49 @@ class unspent:  # noqa: N801 - read as a phrase at the call site
         resolve_mod.TYPE_SPENDING_MOVES = self.real
 
 
+class unlaid:  # noqa: N801 - read as a phrase at the call site
+    """Python with Stone Axe's and Ceaseless Edge's `onAfterHit` taken out, as before
+    IKA-173: the control for `--using stoneaxe`. The hit still lands."""
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = resolve_mod.AFTER_HIT_HAZARDS
+        resolve_mod.AFTER_HIT_HAZARDS = {}
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        resolve_mod.AFTER_HIT_HAZARDS = self.real
+
+
+def _old_toxic_debris(turn, move, target, attacker_side) -> None:  # noqa: ANN001
+    """Toxic Debris as it was before IKA-173: a foe's physical hit on a Glimmora that
+    survived, and nothing else."""
+    defender = turn.mon_at(*target)
+    if defender is None or defender.fainted:
+        return
+    if move.category == "Physical" and target[0] != attacker_side:
+        existing = turn.pos.sides[attacker_side].side_condition("toxicspikes")
+        if existing is None or (existing.layers or 1) < 2:
+            turn.add_side_condition(attacker_side, "toxicspikes")
+
+
+class old_toxic_debris:  # noqa: N801 - read as a phrase at the call site
+    """Python with Toxic Debris put back as it was: the control for --toxic-debris."""
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = resolve_mod._toxic_debris
+        resolve_mod._toxic_debris = _old_toxic_debris
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        resolve_mod._toxic_debris = self.real
+
+
 class unchanged:  # noqa: N801 - read as a phrase at the call site
     """The control for `--using`: each kind of move named has its effect taken out."""
 
@@ -312,6 +370,8 @@ class unchanged:  # noqa: N801 - read as a phrase at the call site
             self.parts.append(old_hit_counts())
         if any(m in TYPE_SPENDING_MOVES for m in moves):
             self.parts.append(unspent())
+        if any(m in AFTER_HIT_HAZARDS for m in moves):
+            self.parts.append(unlaid())
 
     def __enter__(self) -> None:
         for part in self.parts:
@@ -753,9 +813,16 @@ def main() -> None:
     ap.add_argument(
         "--using",
         default=None,
-        help="comma-separated breaksProtect or [2, 5] multi-hit move ids: keep positions "
-        "where a Pokemon on the field knows one, hold every cell that uses one to the port "
-        "branch by branch, and count where the break or the hit count fired",
+        help="comma-separated breaksProtect, [2, 5] multi-hit, type-spending or "
+        "hazard-laying (Stone Axe) move ids: keep positions where a Pokemon on the field "
+        "knows one, hold every cell that uses one to the port branch by branch, and count "
+        "where the move's effect fired",
+    )
+    ap.add_argument(
+        "--toxic-debris",
+        action="store_true",
+        help="keep positions with Toxic Debris on the field, hold every cell to the port "
+        "branch by branch, and count where IKA-173's rule fired: the cells the old one moves",
     )
     ap.add_argument(
         "--terrain",
@@ -802,16 +869,19 @@ def main() -> None:
         holding |= {args.give}
     using = frozenset(m for m in (args.using or "").split(",") if m)
     blockers = PRIORITY_BLOCKING_ABILITIES if args.priority_block else frozenset()
+    debris = frozenset({"toxicdebris"}) if args.toxic_debris else frozenset()
     for move_id in sorted(using):
         move = reg.moves.get(move_id)
         if move is None or not (
             move.raw.get("breaksProtect")
             or isinstance(move.raw.get("multihit"), list)
             or move_id in TYPE_SPENDING_MOVES
+            or move_id in AFTER_HIT_HAZARDS
         ):
             ap.error(
-                f"--using takes breaksProtect, ranged multi-hit or type-spending moves "
-                f"({sorted(TYPE_SPENDING_MOVES)}); {move_id} is none of them"
+                f"--using takes breaksProtect, ranged multi-hit, type-spending "
+                f"({sorted(TYPE_SPENDING_MOVES)}) or hazard-laying "
+                f"({sorted(AFTER_HIT_HAZARDS)}) moves; {move_id} is none of them"
             )
 
     if args.value:
@@ -837,7 +907,7 @@ def main() -> None:
         print(f"the node of {args.scenario}")
     elif args.games_dir:
         positions, other_format = recorded_positions(
-            reg, args, holding - {args.give}, using, blockers
+            reg, args, holding - {args.give}, using, blockers | debris
         )
         print(
             f"{len(positions)} recorded positions from "
@@ -859,6 +929,8 @@ def main() -> None:
         positions = [pos for pos in positions if knows_on_field(pos, using)]
     if blockers:
         positions = [pos for pos in positions if ability_on_field(pos, blockers)]
+    if debris:
+        positions = [pos for pos in positions if ability_on_field(pos, debris)]
     quick = priority_moves(reg) if args.terrain or blockers else frozenset()
     if args.terrain:
         for pos in positions:
@@ -921,6 +993,9 @@ def main() -> None:
     laid_fired_refused = laid_fired_paused = laid_wrong_elsewhere = 0
     laid_worst = 0.0
     hazard_moves = frozenset(HAZARD_MOVES)
+    # Beside Toxic Debris, every cell; and where IKA-173's rule moved the answer.
+    debris_cells = debris_wrong = debris_refused = debris_fired = debris_fired_wrong = 0
+    debris_worst = 0.0
 
     for pos in positions:
         row = menu(reg, pos, 0, args.limit)
@@ -1155,6 +1230,36 @@ def main() -> None:
                         shown += 1
                         print(f"  cell {(i, j)} using a hazard: {wrong[0][:200]}")
 
+        if debris:
+            node = rustnode.node_for(reg)
+            for i, a in enumerate(row):
+                for j, b in enumerate(col):
+                    debris_cells += 1
+                    here = resolve_turn(reg, pos, [a, b], budget=budget)
+                    with old_toxic_debris():
+                        control = resolve_turn(reg, pos, [a, b], budget=budget)
+                    wrong = (
+                        ["no warm process"]
+                        if node is None
+                        else branch_differences(node, reg, pos, a, b, here, budget)
+                    )
+                    refused_here = wrong == ["the port refused the turn"]
+                    debris_refused += refused_here
+                    if refused_here:
+                        wrong = []
+                    debris_wrong += bool(wrong)
+                    if differ(outcome(here), outcome(control)):
+                        debris_fired += 1
+                        debris_fired_wrong += bool(wrong)
+                        for index in range(len(evaluators)):
+                            debris_worst = max(
+                                debris_worst,
+                                abs(float(got[index][i, j] - expected[index][i, j])),
+                            )
+                    if wrong and shown < 5:
+                        shown += 1
+                        print(f"  cell {(i, j)} beside Toxic Debris: {wrong[0][:200]}")
+
         checked += 1
         cells += len(row) * len(col)
         for index, name in enumerate(names):
@@ -1258,6 +1363,15 @@ def main() -> None:
         print(f"    cells the port refused, not held  {laid_fired_refused}")
         print(f"    cells that differ only in a paused branch, not compared  {laid_fired_paused}")
         print(f"    worst cell difference there  {laid_worst:.3e}")
+    if debris:
+        print("\n  beside Toxic Debris, every cell -- held branch by branch")
+        print(f"    {debris_cells} of {cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {debris_wrong}")
+        print(f"    cells the port refused, filled in Python and not held  {debris_refused}")
+        print("  where IKA-173's rule fired -- the cells the old Toxic Debris moves")
+        print(f"    {debris_fired} of {debris_cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {debris_fired_wrong}")
+        print(f"    worst cell difference there  {debris_worst:.3e}")
     print(f"  python {python_seconds:.2f} s   rust {rust_seconds:.2f} s")
     if rust_seconds > 0:
         print(f"  end to end {python_seconds / rust_seconds:.1f}x")
@@ -1288,6 +1402,10 @@ def main() -> None:
         failed.append(f"{laid_wrong} cells using a hazard differ by branch")
     if args.hazards and not laid_fired:
         failed.append("laying a hazard on the foe's side moved no cell, so agreeing here says nothing")
+    if debris_wrong:
+        failed.append(f"{debris_wrong} cells beside Toxic Debris differ by branch")
+    if debris and not debris_fired:
+        failed.append("the new Toxic Debris rule moved no cell, so agreeing here says nothing")
     if failed:
         print(f"\nFAIL ({args.budget}): " + "; ".join(failed))
         sys.exit(1)
