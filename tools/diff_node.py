@@ -29,6 +29,32 @@ never touched is no evidence (IKA-58), so each cell is also resolved in Python w
 item taken off again: the cells whose answer that moves are the ones the item *fired* in,
 and those are held to the port branch by branch -- every weight, every note, every
 branch's position -- because a wrong 20% can still average to the right cell.
+
+The budget, and the second invocation that goes with it (IKA-146):
+
+    uv run python tools/diff_node.py --scenario examples/scenario-turn5.json --budget fast --limit 0
+
+`Budget.matrix()` pins the roll, so its `narrowed()` returns itself and a run under it never
+takes the path that divides the branch budget among live branches -- nor sees what budget
+a turn paused for a mid-turn switch is resumed on. IKA-140's line (the port writing the
+narrowed budget into the turn) was on that path from cd23aab until IKA-62 counted leaves,
+and this tool, run only under `matrix`, could not see it. `--budget fast` and `--budget
+exact` take that path.
+The invocation above is the one that does: scenario-turn5's whole menu, 88x52 cells, with
+Incineroar's Parting Shot pausing turns after rolls have already branched. Under fast it
+takes about ten seconds, nearly all of it Python; the IKA-140 build fails it on 12 cells
+(worst 5.3e-4 in hp-share, 0.036 in faints). `--scenario` builds the node the way
+`tests/test_rust_node.py` does -- the belief layer's modal spreads -- and `--limit 0` keeps
+every legal action rather than narrowing. The whole menu is the point: narrowed to 8 or
+12 a side, none of the 12 cells the old line moves is on it, and `--budget exact --limit
+12` (30 seconds of Python) passes the IKA-140 build. A whole menu under `exact` is IKA-147's
+gigabytes; `tests/test_rust_node.py` holds one such cell under `Budget()` instead.
+
+The run exits 1 when a cell differs by more than `--tolerance`, so a failure is a status
+and not only a line to be read. The exact mask fails it only under `matrix`: under `fast`
+Python marks a cell inexact for "damage rolls stratified" and the port has no such
+reduction, so it calls 3,599 of this node's 4,576 cells exact that Python does not. That is
+counted and printed, and left for its own issue.
 """
 
 from __future__ import annotations
@@ -47,6 +73,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pokeuraou import rustnode  # noqa: E402
+from pokeuraou.actions import side_actions  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.equilibrium import solve  # noqa: E402
 from pokeuraou.narrow import narrow  # noqa: E402
@@ -282,11 +309,64 @@ def branch_differences(node, reg, pos, a, b, here, budget) -> list[str]:  # noqa
     return wrong
 
 
+BUDGETS = {"matrix": Budget.matrix, "fast": Budget.fast, "exact": Budget.exact}
+
+
+def scenario_position(path: Path):  # noqa: ANN201
+    """A scenario file's node, with the belief layer's modal spreads filled in.
+
+    The node `tests/test_rust_node.py` holds the port to, built the same way: fabricated
+    spreads leave HP and maximum HP inconsistent, and a position that could not occur is
+    not a thing to hold two implementations to.
+    """
+    from pokeuraou.cli import _modal, build_beliefs
+    from pokeuraou.setup import load_scenario, with_spreads
+
+    scenario = load_scenario(path)
+    beliefs = build_beliefs(scenario)
+    pos = with_spreads(scenario, {key: _modal(b) for key, b in beliefs.items()})
+    return scenario.reg, pos
+
+
+def menu(reg, pos: Position, side: int, limit: int) -> list:  # noqa: ANN001
+    """The actions a side is compared on: narrowed to `limit`, or every legal one at 0."""
+    if limit == 0:
+        return list(side_actions(reg, pos, side))
+    return narrow(reg, pos, side, limit=limit).actions
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--games", type=int, default=2)
     ap.add_argument("--seed", type=int, default=31)
-    ap.add_argument("--limit", type=int, default=24)
+    ap.add_argument(
+        "--limit",
+        type=int,
+        default=24,
+        help="actions per side (the search's narrowing). 0 keeps every legal action, "
+        "which only a --scenario node can afford.",
+    )
+    ap.add_argument(
+        "--budget",
+        choices=sorted(BUDGETS),
+        default="matrix",
+        help="the budget each cell is resolved under. matrix pins the roll and never "
+        "narrows; fast and exact narrow, which is where a resumed turn's budget is read.",
+    )
+    ap.add_argument(
+        "--scenario",
+        type=Path,
+        default=None,
+        help="compare this scenario file's node (modal spreads) instead of positions "
+        "from games",
+    )
+    ap.add_argument(
+        "--tolerance",
+        type=float,
+        default=1e-6,
+        help="exit 1 if a cell differs by more than this. A learned leaf's float32 "
+        "batches differ by ~5e-8; a named objective by a few ulps.",
+    )
     ap.add_argument("--max-turns", type=int, default=40)
     ap.add_argument("--nodes", type=int, default=20, help="stop after this many nodes")
     ap.add_argument("--roster", default="rizabanadohido")
@@ -321,8 +401,13 @@ def main() -> None:
     )
     args = ap.parse_args()
 
+    if args.limit == 0 and not args.scenario:
+        ap.error("--limit 0 (the whole menu) is for a --scenario node")
     roster = load_roster(args.roster)
     reg = roster.reg
+    scenario_pos = None
+    if args.scenario:
+        reg, scenario_pos = scenario_position(args.scenario)
     register_mega_stones(reg)
     holding = frozenset(i for i in (args.holding or "").split(",") if i)
     if args.give:
@@ -346,7 +431,10 @@ def main() -> None:
         names = ["hp-share", "faints"]
         evaluators = [OBJECTIVES[name].batch for name in names]
 
-    if args.games_dir:
+    if scenario_pos is not None:
+        positions = [scenario_pos]
+        print(f"the node of {args.scenario}")
+    elif args.games_dir:
         positions, other_format = recorded_positions(reg, args, holding - {args.give})
         print(
             f"{len(positions)} recorded positions from "
@@ -384,11 +472,12 @@ def main() -> None:
         # On the class, so the count survives the `reset()` between the two runs.
         setattr(rustnode.RustNode, name, counting)
 
-    budget = Budget.matrix()
+    budget = BUDGETS[args.budget]()
+    print(f"budget {args.budget}: {budget}")
     checked = cells = identical = differing = 0
     worst = worst_value = worst_strategy = 0.0
     rust_seconds = python_seconds = 0.0
-    notes_differ = 0
+    notes_differ = masks_differ = mask_cells = mask_rust_only = 0
     # Where the held item fired, and what the port did there.
     fired = fired_wrong = fired_wrong_anyway = 0
     fired_worst = 0.0
@@ -396,8 +485,8 @@ def main() -> None:
     shown = 0
 
     for pos in positions:
-        row = narrow(reg, pos, 0, limit=args.limit).actions
-        col = narrow(reg, pos, 1, limit=args.limit).actions
+        row = menu(reg, pos, 0, args.limit)
+        col = menu(reg, pos, 1, args.limit)
         if not row or not col:
             continue
 
@@ -478,8 +567,12 @@ def main() -> None:
                 float(np.abs(python_eq.row_strategy - rust_eq.row_strategy).max()),
                 float(np.abs(python_eq.col_strategy - rust_eq.col_strategy).max()),
             )
-        if not np.array_equal(np.asarray(rust_exact), np.asarray(python_exact)):
-            print("  the exact mask differs")
+        mask_gap = np.asarray(rust_exact) != np.asarray(python_exact)
+        if mask_gap.any():
+            masks_differ += 1
+            mask_cells += int(mask_gap.sum())
+            mask_rust_only += int((mask_gap & np.asarray(rust_exact)).sum())
+            print(f"  the exact mask differs on {int(mask_gap.sum())} cells")
 
     rustnode.reset()
     scored = identical + differing
@@ -498,6 +591,10 @@ def main() -> None:
     print(f"  equilibrium value moved at most {worst_value:.3e}")
     print(f"  equilibrium frequency moved at most {worst_strategy:.3e}")
     print(f"  nodes whose notes differ {notes_differ}")
+    print(
+        f"  cells whose exact flag differs {mask_cells} "
+        f"(exact in the port only: {mask_rust_only})"
+    )
     if holding:
         print(f"\n  where {', '.join(sorted(holding))} fired -- the cells the control moves")
         print(f"    {fired} of {cells} cells")
@@ -509,6 +606,19 @@ def main() -> None:
     print(f"  python {python_seconds:.2f} s   rust {rust_seconds:.2f} s")
     if rust_seconds > 0:
         print(f"  end to end {python_seconds / rust_seconds:.1f}x")
+    failed = []
+    if worst > args.tolerance:
+        failed.append(f"worst cell difference {worst:.3e} > {args.tolerance:.0e}")
+    # Under a budget that stratifies the rolls the mask is known to differ: Python marks a
+    # turn inexact for "damage rolls stratified" and the port has no such reduction, so it
+    # calls those cells exact. That is reported above and does not fail the run; under
+    # `matrix` the roll is pinned, nothing is stratified, and the mask has to agree.
+    if masks_differ and args.budget == "matrix":
+        failed.append(f"the exact mask differs on {masks_differ} nodes")
+    if failed:
+        print(f"\nFAIL ({args.budget}): " + "; ".join(failed))
+        sys.exit(1)
+    print(f"\nOK ({args.budget})")
 
 
 if __name__ == "__main__":
