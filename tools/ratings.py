@@ -29,20 +29,33 @@ its own residuals per pair so a reader can see where the assumption fails rather
 learn it later; a pair whose observed win rate sits far from the fitted one is a cycle
 showing through, not noise.
 
+## A seed played twice
+
+Games are dealt from `[seed, index]`, so a pairing run twice at one seed -- a crash and its
+rerun, a run and its fixed rerun -- is dealt the same games twice, and counting both would
+halve the variance behind its interval for nothing. Such a replay is counted once, from the
+newest run that did not fail (`repeated_draws` has the measurements behind that choice).
+Which convention made a table is printed on it, and `--shared-seed independent` reproduces
+the count from before IKA-44.
+
 Nothing here plays a game. It reads the games that were already played and recorded.
 
     uv run python tools/ratings.py
     uv run python tools/ratings.py --anchor value-gen2345.pt/w24 --logit
+    uv run python tools/ratings.py --shared-seed independent   # the count before IKA-44
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
+import hashlib
+import itertools
 import json
 import math
 import sys
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +79,20 @@ ELO_PER_LOGIT = 400.0 / math.log(10.0)
 #: whichever model happens to be current does not. It also reads as the quantity that
 #: matters: what the learned machinery is worth over having none of it.
 ANCHOR = "hp-share/w24"
+
+#: How a pairing played twice on one seed's draws is counted (IKA-44). `newest` counts the
+#: draws once, from the newest run that did not fail; `independent` counts every run, which
+#: is what this tool did before. Printed above every table, because the choice moves the
+#: intervals and a number can only be reused together with the convention it came from.
+SHARED_SEED = ("newest", "independent")
+
+#: Two runs of one pairing at one seed replay each other when at least this share of the
+#: smaller run's draws are also the other's. Measured on 2026-09-23: 100% in each of the
+#: three replays on disk (1,696 of 1,696), against 13.9% and 15.6% for two pairings each run
+#: twice at DIFFERENT seeds, where the same team and fours come up again by chance, and 0%
+#: for runs sharing seed 20260919 while drawing their fours another way. Half is in the empty
+#: middle, so nothing on disk depends on its exact value.
+REPLAY_SHARE = 0.5
 
 
 def recover_old_axes(source: dict) -> int:
@@ -102,10 +129,34 @@ def recover_old_axes(source: dict) -> int:
     return 1
 
 
+def draw_key(pair: tuple[str, str], game: dict[str, Any]) -> str:
+    """What the seed dealt one game, as a short digest -- empty when the record cannot say.
+
+    The two agents in their seats and the two fours they played. A match deals a game's
+    team and both selections off `default_rng([seed, index])` before either side moves, so
+    two runs of one pairing at one seed deal the same keys, which is what makes the second
+    one a replay; a run that shares the seed but draws its fours from another book, another
+    roster or uniformly deals other keys. The index is deliberately left out: records
+    written before 9/19 do not carry it, and a replay of one of those by a run that does
+    must still be found.
+    """
+    own, foe = game.get("ownTeam"), game.get("foeTeam")
+    if not own or not foe:
+        return ""
+    text = json.dumps([pair[0], pair[1], own, foe], sort_keys=True, separators=(",", ":"))
+    return hashlib.blake2b(text.encode("utf-8"), digest_size=6).hexdigest()
+
+
 def read_games(
     root: Path,
-) -> tuple[list[Observation], int, Counter[str], list[str]]:
-    """One observation per game, how many needed repairing, and games per build.
+    cache_path: Path | None = None,
+) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+    """Every games file as the fit sees it, and the runs whose DONE marker says FAILED.
+
+    A file comes back as a dict: `rows`, one observation per matchup with its games summed;
+    `repaired` and `builds`, below; `stamp`, its size and mtime; and `draws`, one
+    `draw_key` per game, which is what lets `repeated_draws` recognise a replay. Which
+    files the fit then counts is the caller's decision, and `main` makes it.
 
     The build matters and the name cannot carry it. An agent here is a model together
     with the search that ran it, and a fix to the search makes a different agent -- but
@@ -119,22 +170,24 @@ def read_games(
     key and honest as a warning: games under different hashes were not played by the same
     program, and the fit pools them anyway.
     """
-    out: list[Observation] = []
-    repaired = 0
-    builds: Counter[str] = Counter()
+    files: dict[str, dict[str, Any]] = {}
     # Directories whose own DONE marker says the run failed. Their games are real and stay
     # in the fit -- a crash at game 107 does not make the first 107 fictional -- but a run
     # that stopped for a reason is not the run its command line describes, and nothing
     # said so: `genmatch-value-gen8x3-vs-value-allx3` records "FAILED (exit 1), 0 games"
     # over 107 games that have been on the scale ever since.
-    failed: list[str] = []
+    #
+    # Keyed by the directory relative to `root`, because a replay's two runs are told
+    # apart by it: the one that failed is not the one kept.
+    failed: dict[str, str] = {}
     for marker in sorted(root.glob("**/DONE")):
         try:
             said = marker.read_text(encoding="utf-8")
         except OSError:
             continue
         if "FAIL" in said.upper():
-            failed.append(f"{marker.parent.name}: {said.strip().splitlines()[0]}")
+            where = str(marker.parent.relative_to(root)).replace("\\", "/")
+            failed[where] = f"{marker.parent.name}: {said.strip().splitlines()[0]}"
     # Both layouts. A match dealt in fixed blocks names its files by seed and a queued one
     # by worker, and this read only the first -- so every match run since the queue landed
     # was missing from the scale, which is every measurement taken on the ensemble floor.
@@ -155,7 +208,13 @@ def read_games(
     # summing a file's identical rows changes nothing it computes -- including the
     # per-matchup residual table, which expands the counts back out. It also makes the
     # cache small enough to be JSON.
-    cache_path = root / ".ratings-cache.json"
+    #
+    # The draws are the exception, one short key per game, because a replay is a fact about
+    # games and not about totals. An entry written before they were kept is read again:
+    # trusting it would find no replay anywhere and quietly restore the count this tool
+    # made before IKA-44.
+    if cache_path is None:
+        cache_path = root / ".ratings-cache.json"
     cache: dict[str, Any] = {}
     if cache_path.exists():
         try:
@@ -168,16 +227,12 @@ def read_games(
         key = str(path.relative_to(root)).replace("\\", "/")
         stamp = [stat.st_size, int(stat.st_mtime)]
         hit = cache.get(key)
-        if hit and hit.get("stamp") == stamp:
-            fresh[key] = hit
-            repaired += int(hit.get("repaired", 0))
-            for name, count in hit.get("builds", {}).items():
-                builds[name] += count
-            for a, b, wins, n in hit.get("rows", []):
-                out.append((a, b, float(wins), int(n)))
+        if hit and hit.get("stamp") == stamp and "draws" in hit:
+            fresh[key] = files[key] = hit
             continue
         rows: dict[tuple[str, str], list[float]] = {}
         here: Counter[str] = Counter()
+        draws: list[str] = []
         needed = 0
         with path.open(encoding="utf-8") as fh:
             for line in fh:
@@ -196,61 +251,218 @@ def read_games(
                 got = rows.setdefault(pair, [0.0, 0])
                 got[0] += float(outcome)
                 got[1] += 1
-        repaired += needed
-        builds.update(here)
+                draws.append(draw_key(pair, game))
         listed = [[a, b, wins, n] for (a, b), (wins, n) in sorted(rows.items())]
-        for a, b, wins, n in listed:
-            out.append((a, b, float(wins), int(n)))
-        fresh[key] = {
+        fresh[key] = files[key] = {
             "stamp": stamp,
             "repaired": needed,
             "builds": dict(here),
             "rows": listed,
+            "draws": draws,
         }
     # The cache is an optimisation, so a read-only checkout or a full disk must cost the
     # rebuild rather than the answer.
     with contextlib.suppress(OSError):
         cache_path.write_text(json.dumps(fresh), encoding="utf-8")
-    return out, repaired, builds, failed
+    return files, failed
 
 
-def shared_seeds(root: Path) -> list[str]:
-    """Directories whose per-seat rows name the same seed.
-
-    Games are seeded from `[seed, index]`, so two matches launched with one seed play the
-    same opponents in the same order. The fit has no way to know: it sees twice the games
-    and shrinks the interval by root two for a second look at the first look's draws.
-
-    `data/matches/hidden-gen11h-vs-gen10` and its `-fixed` rerun are the recorded case --
-    3,392 games entering as independent, and the rerun's own CMD says it exists because
-    the first predates two search fixes, which is a difference `agent_name` cannot see
-    either.
-
-    Worth naming rather than fixing: whether two runs at one seed should be pooled,
-    dropped or paired depends on why the second was run, and only a reader knows that.
-    """
-    by_seed: dict[object, set[str]] = {}
-    for path in list(root.glob("**/worker*.jsonl")) + list(root.glob("**/seed*.jsonl")):
-        if path.name.startswith("games-"):
+def _row_seeds(path: Path) -> set[object]:
+    """The seeds a per-seat row file names -- empty if it names none or cannot be read."""
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return set()
+    seeds: set[object] = set()
+    for line in text.splitlines():
+        if not line.strip():
             continue
         try:
-            text = path.read_text(encoding="utf-8")
-        except OSError:
+            row = json.loads(line)
+        except json.JSONDecodeError:
             continue
-        for line in text.splitlines():
-            if not line.strip():
+        if isinstance(row, dict) and "seed" in row and "played" in row:
+            seeds.add(row["seed"])
+    return seeds
+
+
+def run_seeds(root: Path, keys: Iterable[str]) -> dict[str, object]:
+    """The seed each games file was dealt from, read off the per-seat rows beside it.
+
+    A game record does not carry its seed; the rows do, one per seat, so `games-X.jsonl`
+    takes the seed its `X.jsonl` names. A worker that died wrote games and no row -- and a
+    crashed run is the likeliest replay there is -- so a file with no row of its own takes
+    its directory's seed when every row there names the same one, which a queued run's
+    always do: one `--seed` goes to every worker. Anything else maps to None, and a file
+    without a seed is never taken for a replay; `main` says how many games that leaves
+    unchecked rather than guessing.
+    """
+    by_directory: dict[str, dict[str, set[object]]] = {}
+    out: dict[str, object] = {}
+    for key in keys:
+        directory, _, name = key.rpartition("/")
+        rows = by_directory.get(directory)
+        if rows is None:
+            base = root / directory if directory else root
+            rows = {
+                path.name: _row_seeds(path)
+                for pattern in ("worker*.jsonl", "seed*.jsonl")
+                for path in base.glob(pattern)
+            }
+            by_directory[directory] = rows
+        own = rows.get(name.removeprefix("games-"), set())
+        everywhere: set[object] = set().union(*rows.values()) if rows else set()
+        if len(own) == 1:
+            out[key] = next(iter(own))
+        elif not own and len(everywhere) == 1:
+            out[key] = next(iter(everywhere))
+        else:
+            out[key] = None
+    return out
+
+
+def _root(parent: list[int], i: int) -> int:
+    """Union-find: the representative of `i`'s group, halving the path on the way."""
+    while parent[i] != i:
+        parent[i] = parent[parent[i]]
+        i = parent[i]
+    return i
+
+
+def repeated_draws(
+    files: dict[str, dict[str, Any]],
+    seeds: dict[str, object],
+    failed: dict[str, str],
+    *,
+    convention: str = "newest",
+) -> tuple[set[str], list[str]]:
+    """The games files a replay keeps out of the fit, and a line for every shared seed.
+
+    A run is one directory's games at one seed. Two runs *replay* each other when they
+    share the seed, field the same pairings, and at least `REPLAY_SHARE` of the smaller
+    one's draws (`draw_key`) are the other's too: the same agents dealt the same games.
+    Games are seeded from `[seed, index]`, so such a second run is a second look at the
+    first one's draws, and a fit that counts both reads twice the games -- an interval of
+    about 1/root 2 -- for information it does not have.
+
+    What the second look was worth, measured on the three replays on disk on 2026-09-23,
+    every game matched to its twin, both seats:
+
+        seed 20261052  gen11L-vs-gen10-ownroster-uniform + crashed twin   100% identical
+        seed 20261041  h12-vs-o12-hidden + crashed twin      64% identical, rho 0.79
+        seed 31337     hidden-gen11h-vs-gen10 + -fixed        11% identical, rho 0.19
+
+    where rho is the correlation, between the two runs, of one game's score summed over
+    both seats -- the quantity the rating's variance is made of. The first is a duplicate.
+    The other two are a later build replaying an earlier build's draws: the h12 rerun has
+    a fix to the bench belief (a Mega's base form stayed in the candidate pool,
+    `hidden.py`) and `-fixed` two fixes to the blind search, which its own CMD names.
+
+    So under `newest` a replay is counted once, from the newest run that did not fail.
+    That is exact for the duplicate, and in the other two it is the only choice that keeps
+    a search nobody runs any more out of the agents' ratings. Weighting both runs by
+    1/(1 + rho) would be the honest way to pool them if the two runs were one agent; here
+    they are not, and records before 9/19 carry no game index to pair them by. `independent`
+    counts every run, which is what this tool did before IKA-44, and is kept so that the
+    old numbers can be reproduced.
+
+    A seed shared by runs of different pairings is not a replay -- no pairing is dealt the
+    same games twice -- and neither is one pairing at one seed with other draws (another
+    roster, another book, a uniform draw). A shared seed does not by itself share a draw:
+    `anchor-gen11L-vs-hpshare` shares seed 20260919 with two book matches and not one of
+    its 1,696 draws, because it draws its fours uniformly and they draw theirs from a book.
+    """
+    if convention not in SHARED_SEED:
+        raise ValueError(f"no shared-seed convention {convention!r}; one of {SHARED_SEED}")
+    runs: dict[tuple[str, object], dict[str, Any]] = {}
+    for key, entry in files.items():
+        seed = seeds.get(key)
+        if seed is None:
+            continue
+        directory = key.rpartition("/")[0] or "."
+        run = runs.setdefault(
+            (directory, seed),
+            {"files": [], "pairings": set(), "draws": Counter(), "games": 0, "newest": 0},
+        )
+        run["files"].append(key)
+        for a, b, _wins, n in entry["rows"]:
+            run["pairings"].add(tuple(sorted((a, b))))
+            run["games"] += int(n)
+        run["draws"].update(d for d in entry["draws"] if d)
+        run["newest"] = max(run["newest"], int(entry["stamp"][1]))
+
+    by_seed: dict[object, list[tuple[str, dict[str, Any]]]] = defaultdict(list)
+    for (directory, seed), run in sorted(runs.items(), key=lambda kv: (str(kv[0][1]), kv[0][0])):
+        by_seed[seed].append((directory, run))
+
+    skip: set[str] = set()
+    lines: list[str] = []
+    for seed, members in by_seed.items():
+        if len(members) < 2:
+            continue
+        parent = list(range(len(members)))
+        near: list[tuple[int, int, float]] = []
+        for i, j in itertools.combinations(range(len(members)), 2):
+            a, b = members[i][1], members[j][1]
+            if a["pairings"] != b["pairings"]:
                 continue
-            try:
-                row = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if "seed" in row and "played" in row:
-                by_seed.setdefault(row["seed"], set()).add(path.parent.name)
-    return [
-        f"seed {seed}: {', '.join(sorted(names))}"
-        for seed, names in sorted(by_seed.items(), key=lambda kv: str(kv[0]))
-        if len(names) > 1
-    ]
+            smaller = min(a["draws"].total(), b["draws"].total())
+            common = (a["draws"] & b["draws"]).total()
+            if smaller and common >= REPLAY_SHARE * smaller:
+                parent[_root(parent, j)] = _root(parent, i)
+            else:
+                near.append((i, j, common / max(smaller, 1)))
+        components: dict[int, list[int]] = defaultdict(list)
+        for i in range(len(members)):
+            components[_root(parent, i)].append(i)
+        replays = [c for c in components.values() if len(c) > 1]
+        # One pairing at one seed that nonetheless drew mostly other games: independent, and
+        # said so with the share, because "the same seed" was the whole of the old warning.
+        # Only across groups -- two runs joined through a third are one replay, not this.
+        unlike = [
+            f"seed {seed}: {members[i][0]} and {members[j][0]} are one pairing, but only "
+            f"{share:.0%} of the smaller one's draws are the other's -- both counted"
+            for i, j, share in near
+            if _root(parent, i) != _root(parent, j)
+        ]
+        # The newest run that did not fail is the one counted. The files' modification time
+        # is the only order the record carries -- a copy that resets it changes the choice,
+        # which is why the choice is printed.
+        order = [(d in failed, -r["newest"], d) for d, r in members]
+        for component in replays:
+            ranked = sorted(component, key=order.__getitem__)
+            kept_dir, kept = members[ranked[0]]
+            others: list[str] = []
+            for i in ranked[1:]:
+                directory, run = members[i]
+                share = (kept["draws"] & run["draws"]).total() / max(run["draws"].total(), 1)
+                tag = ", FAILED" if directory in failed else ""
+                others.append(
+                    f"{directory} ({run['games']:,} games{tag}, {share:.0%} of its draws "
+                    f"also in {kept_dir})"
+                )
+                if convention == "newest":
+                    skip.update(run["files"])
+            if convention == "newest":
+                lines.append(
+                    f"seed {seed}: counted {kept_dir} ({kept['games']:,} games); "
+                    f"not counted: {'; '.join(others)}"
+                )
+            else:
+                lines.append(
+                    f"seed {seed}: {'; '.join(others)} replaying {kept_dir} "
+                    f"({kept['games']:,} games) -- all counted, as independent"
+                )
+        lines.extend(unlike)
+        rest = len(members) - sum(len(c) for c in replays)
+        if rest == len(members) and not unlike:
+            lines.append(
+                f"seed {seed}: shared by {rest} runs of {rest} different pairings, so no "
+                "pairing is dealt the same draws twice -- all counted"
+            )
+        elif rest and not unlike:
+            lines.append(f"seed {seed}: also {rest} run(s) of other pairings -- counted")
+    return skip, lines
 
 
 def read_summaries(root: Path) -> list[Observation]:
@@ -455,9 +667,40 @@ def main() -> None:
     )
     ap.add_argument("--logit", action="store_true", help="print logits instead of Elo")
     ap.add_argument("--min-games", type=int, default=1)
+    ap.add_argument(
+        "--shared-seed",
+        choices=SHARED_SEED,
+        default="newest",
+        help="how a pairing dealt one seed's draws twice is counted: once, from its newest "
+        "run that did not fail (newest, since IKA-44), or once per run (independent, the "
+        "count before). Printed with the table, because it moves the intervals.",
+    )
+    ap.add_argument(
+        "--cache",
+        type=Path,
+        default=None,
+        help="the parsed-games cache; default <matches>/.ratings-cache.json. Point it "
+        "elsewhere to fit a corpus this process may not write to.",
+    )
     args = ap.parse_args()
 
-    games, repaired, builds, failed = read_games(args.matches)
+    files, failed = read_games(args.matches, args.cache)
+    seeds = run_seeds(args.matches, files)
+    skip, replays = repeated_draws(files, seeds, failed, convention=args.shared_seed)
+    games: list[Observation] = []
+    repaired = 0
+    builds: Counter[str] = Counter()
+    for key, entry in files.items():
+        if key in skip:
+            continue
+        games.extend((a, b, float(w), int(n)) for a, b, w, n in entry["rows"])
+        repaired += int(entry.get("repaired", 0))
+        builds.update(entry.get("builds", {}))
+    skipped = sum(int(n) for key in skip for _a, _b, _w, n in files[key]["rows"])
+    unseeded = [key for key in files if seeds.get(key) is None]
+    # A run none of whose games are counted is not "in this fit", whatever its DONE says.
+    counted = {key.rpartition("/")[0] or "." for key in files if key not in skip}
+    gone = {key.rpartition("/")[0] or "." for key in skip} - counted
     summaries = read_summaries(args.matches)
     games += summaries
     if not games:
@@ -485,13 +728,31 @@ def main() -> None:
             f"  {repaired} of them predate the per-side depth and ranking fields; "
             "their configuration was read back out of the seat label"
         )
-    for line in failed:
-        print(f"  ! a run in this fit says it FAILED -- {line}")
-    for line in shared_seeds(args.matches):
+    # Which convention made this table, on every table: the intervals depend on it, and a
+    # number copied out without it cannot be reproduced (IKA-44).
+    if args.shared_seed == "newest":
         print(
-            f"  ! these matches shared a random stream, and the fit counts them as\n"
-            f"    independent -- {line}"
+            '  shared seeds: convention "newest" (IKA-44) -- a pairing dealt one seed\'s '
+            "draws twice counts them once, from its newest run that did not fail; "
+            f"{skipped:,} games not counted"
         )
+    else:
+        print(
+            '  shared seeds: convention "independent" (before IKA-44) -- every run counts '
+            "as its own draws, replays included"
+        )
+    for line in replays:
+        print(f"    {line}")
+    if unseeded:
+        lost = sum(int(n) for key in unseeded for _a, _b, _w, n in files[key]["rows"])
+        unchecked = sorted({key.rpartition("/")[0] or "." for key in unseeded})
+        print(
+            f"    {lost:,} games in {len(unchecked)} run(s) name no seed in their per-seat "
+            f"rows, so whether they replay another run is not checked: {', '.join(unchecked)}"
+        )
+    for where, line in failed.items():
+        if where not in gone:
+            print(f"  ! a run in this fit says it FAILED -- {line}")
     if len(builds) > 1:
         top = ", ".join(f"{h[:8]}={n}" for h, n in builds.most_common(6))
         print(
