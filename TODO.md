@@ -9840,3 +9840,113 @@ resume と leaves の外の部分。
   決着に 2,906 対かかったのは、差がほぼ 0 だから（-10 と 0 のあいだの真ん中寄りの真値は判定に局数が要る）
 * worker のログに `restarting`・`falling back`・Traceback は 0 行
 * 出力: `data/matches/ika143-heaviest-vs-first-sprt`
+
+## 9/23 — IKA-153: フェイントのまもる破りを、無効・命中の後に対象ごとへ —— オラクルで 3 ケースとも Python がずれていた（ゴーストへのフェイント・外れたフェイント・ゴースト側のワイドガード）。Python と port を同時に直した。w12 と gen11L で該当する決定は 0
+
+master dbec5eb から。IKA-61 の 7 節の「残り」の 1 つ目。
+
+### 1. 規則（Showdown `cc089d36`、vendor）
+
+* `sim/battle-actions.ts:553-578` `trySpreadMoveHit` の手順: 0 `hitStepInvulnerabilityEvent`、1 `hitStepTryHitEvent`、
+  2 `hitStepTypeImmunity`（654-665）、3 `hitStepTryImmunity`、4 `hitStepAccuracy`（690-754、外れは 738）、
+  5 `hitStepBreakProtect`（755-780）、…、7 `hitStepMoveHitLoop`。gen 9 では入れ替えなし（579-586 は gen≤6 と gen 4）
+* `:602-612` 各手順の後に `targets = targets.filter(...)`（605 行）で通った対象だけを残す。だから手順 2 で無効、
+  手順 4 で外れた対象に手順 5 は届かない
+* Python は `_use_move` で命中処理の前に全対象で `_break_protection` を呼んでいた（旧 `resolve.py:2006-2010`）。
+  port（`rust/src/moves.rs` の `do_move`）も同じ場所
+
+### 2. オラクルで確かめた（`tests/test_feint_order.py`、main の `packages/sim-bridge/dist` を複写）
+
+ルカリオのフェイント、相方ガブリアスが同じ対象へ。Showdown の方針は 16 乱数の最大・急所なし・追加効果なし。
+Python は同じ局面（Showdown の `position`）を急所・追加効果を切り命中を列挙した予算で解き、同じ命中の結果の枝を比べる。
+
+```
+  ケース              Showdown のログ（相方の技）                 Showdown HP        直す前の Python
+  ghost-protect       Feint → -immune ヤバソチャ、                ヤバソチャ 166     97（ドラゴンクローが通る、確率 1）
+                      Dragon Claw → -activate Protect
+  ghost-wide-guard    Feint → -immune、Rock Slide →              ヤバソチャ 166     134 / 181（ワイドガードが外れて
+                      -activate Wide Guard                        ドドゲザン 195     いわなだれが 2 体に当たる）
+  missed              Feint [miss]（ひかりのこな、accuracy=miss）、 ドドゲザン 195     フェイントが外れた枝で 165
+                      Dragon Claw → -activate Protect                                （外れたのにまもるが破れていた）
+  control-lands       Feint → -activate move: Feint、             ドドゲザン 158     158（一致、直した後も）
+                      Dragon Claw が当たる
+```
+
+control-lands は陽性対照: 当たったフェイントは Showdown でも破る。破りを全部やめた実装はここで落ちる。
+対象は単体（`feint` の `target: normal`）なので、範囲技の「一部だけ当たる」ケースはフェイント自身には無い。
+いわなだれ（相方の範囲技）の側は ghost-wide-guard で見た。
+
+### 3. 直し
+
+* `src/pokeuraou/resolve.py`: `_use_move` から `_break_protection` を外し、`_hit_target` で「当たって、無効でない」
+  枝の状態（ダメージの前、`turn.clone()` の直後）に対象 1 つだけで呼ぶ。外れの枝・`result.immune` の枝では呼ばない。
+  変化技の `breaksProtect` は無い（ダンプでは feint と phantomforce だけ、どちらも攻撃技）ので変化技の道には置かない
+* ばけのかわ・アイスフェイスの道（`_bust_disguise`）は手順 7 で吸うので、Showdown では破りはその前に起きる。
+  この道はもともと命中も無効も見ないので、破りも吸ったときにそのまま行う（port はこの 2 特性を拒否する）
+* `rust/src/moves.rs`: 同じく `do_move` から外し、`hit_target` の同じ場所（`turn.clone()` の直後）で
+  `break_protection(&mut state, &[target])`
+* `tests/test_rust_node.py::_feint_node`: IKA-61 のテストで「破りが利得を動かしたセル」は全部ヤバソチャ（ゴースト）への
+  フェイントだった（列がヤバソチャのまもる・ワイドガードだけだったため）。直した後は 1 セルも動かず、テストの前提
+  「moved > 0」で落ちた。列の先頭 4 つをオオニューラのまもるにして（前はヤバソチャのまもる・ワイドガードの 8 つだけ）、破りが効く相手を入れた
+
+### 4. 直す前に落ちるテスト
+
+```
+  tests/test_feint_order.py                                   旧 Python + 旧 port   新 Python + 旧 port   新 + 新
+  test_feint_breaks_only_what_it_reaches[ghost-protect]       FAIL                  pass                  pass
+  test_feint_breaks_only_what_it_reaches[ghost-wide-guard]    FAIL                  pass                  pass
+  test_feint_breaks_only_what_it_reaches[missed]              FAIL                  pass                  pass
+  test_feint_breaks_only_what_it_reaches[control-lands]       pass                  pass                  pass
+  test_the_port_breaks_only_what_it_reaches[ghost-protect]    pass                  FAIL                  pass
+  test_the_port_breaks_only_what_it_reaches[ghost-wide-guard] pass                  FAIL                  pass
+  test_the_port_breaks_only_what_it_reaches[missed]           pass                  FAIL                  pass
+  test_the_port_breaks_only_what_it_reaches[control-lands]    pass                  pass                  pass
+  test_rust_node::test_feint_breaks_the_guard_the_same_way…   —                     FAIL（利得が違う）     pass
+```
+
+旧 port は main の `rust/target/release/pokeuraou-damage.exe`（IKA-61 入り）を scratch に複写して
+`POKEURAOU_RUST_NODE_BIN` で指した。port のテストは Showdown の局面の `stats_override` を消す（port は変身扱いで拒否する。
+誰も変身していないので能力値は sp から同じに出る）。
+
+### 5. 一致と検査
+
+```
+  tools/diff_node.py --games-dir data/ika73/w12 --using feint --nodes 30 --limit 24
+                                   matrix            fast
+    フェイントを使うセル           3,341（不一致 0）  3,341（不一致 0）
+    破りが発火したセル               343（不一致 0）    320（不一致 0）
+    セルの差の最大                 5.6e-16           1.0e-15
+    port の拒否                    0                 0
+```
+
+発火の数は IKA-61 と同じ。w12 ではフェイントがゴーストにも外れうる相手にも向かない（次節）ので当然で、
+diff_node はこの直しの効き目を見ていない。効き目はオラクルのテストで見た。
+`tools/port_coverage.py --check`・`tools/port_gate_audit.py --check`: ok。ruff ok。
+テスト: test_resolve・test_rust_node・test_beliefnode・test_feint_order・test_damage_diff・test_line_endings・
+test_no_machine_specific_paths を `-n 0` で全部 pass（82 秒）。
+
+### 6. 記録で該当する決定
+
+探索の表（`ownActions` × `foeActions`）で「フェイント（またはゴーストダイブ）の対象がゴースト（ノーマル）、または外れうる
+（ひかりのこな・回避上昇・命中低下）」かつ「同じセルで対象がまもる系か、対象の側がワイドガード等を張る」セルを数えた。
+
+```
+                              ゲーム    フェイント局の手番決定   表にフェイント   該当セル   実際に指した手
+  data/ika73/w12              43,999   16,385                   6,332            0          0
+  data/selfplay-gen11L        12,000    3,602                   1,256            0          0
+```
+
+どちらも自分側（side 0、固定の構築）にゴーストもフェイント持ちも居ない（side 0 のゴースト在場 0、フェイント持ち 0）。
+フェイントは相手側の技で、狙うのは自分側だけ。だからこの 2 つのデータでは直しは何も動かさない。
+M-C（両方の席をプールから取る）ではゴースト同士・フェイント持ち同士が当たりうる。
+
+### 7. 残り（別課題の候補、オラクルでは未確認）
+
+* `_bust_disguise` は命中も無効も見ない。ノーマル技をミミッキュ（ゴースト）に撃つと、Showdown では手順 2 で無効なのに
+  Python はばけのかわを剥がして 1/8 を削るはず。port は 2 特性を拒否しているので Python だけの話
+* サイコフィールドの先制技封じ: Showdown は `data/moves.ts:14116` の `onTryHit` で対象ごと（地面にいない対象には
+  当たる）。Python は `_can_act`（`resolve.py` の `PRIORITY_BLOCKING_ABILITIES` の下）で「地面にいる相手が 1 体でも居れば
+  技全体が止まる」。単体技を浮いている相手に撃った場合がずれるはず
+
+機械: cargo release ビルド 1 回（8 コア 25 秒）、diff_node 52 秒・110 秒（1 コア）、記録の集計 3〜12 秒 ×5（1 コア）、
+テスト 82 秒（1 コア）は heavy.py に記録（--agent IKA-153）。ほかに数十秒の短いテスト・調べ（オラクル 1 本、1 コア）を数回、直接走らせた。

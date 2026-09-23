@@ -759,7 +759,7 @@ def _feint_node() -> tuple[Any, Any, list, list]:
 
     The recorded menus have no Protect in the column, so a Feint there would break
     nothing and agreeing on it would say nothing (IKA-58). The row is every Feint choice
-    of Kingambit's, the column every Protect or Wide Guard choice of the foe's.
+    of Kingambit's, the column Protect or Wide Guard choices of the foe's.
     """
     from pokeuraou.position import MoveSlot
 
@@ -782,13 +782,20 @@ def _feint_node() -> tuple[Any, Any, list, list]:
     row = [c for c in feints if c.slots[0].target == c.slots[1].target][:5] + [
         c for c in feints if c.slots[0].target != c.slots[1].target
     ][:1]
-    col = [
+    guards = [
         choice
         for choice in side_actions(reg, pos, 1)
         if any(
             getattr(slot, "move_id", None) in ("protect", "wideguard") for slot in choice.slots
         )
-    ][:8]
+    ]
+    # Sneasler's Protect first. The other guard is Sinistcha's, a Ghost that Feint cannot
+    # touch, so since IKA-153 a Feint into it breaks nothing: until then every cell where
+    # the break moved a payoff here was one of those, and Showdown moves none of them.
+    sneasler_protects = [
+        c for c in guards if getattr(c.slots[0], "move_id", None) == "protect"
+    ]
+    col = sneasler_protects[:4] + [c for c in guards if c not in sneasler_protects][:4]
     assert row and col
     return reg, pos, row, col
 
