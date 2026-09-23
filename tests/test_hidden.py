@@ -337,3 +337,72 @@ def test_play_game_keeps_a_lead_that_went_back_in_every_world(setup, monkeypatch
     for world in made:
         assert world.slots == (3,)
         assert world.position.sides[1].pokemon[2].species == "charizard"
+
+
+def test_play_game_hands_the_bench_prior_the_turn_one_leads_after_a_switch(
+    setup,  # noqa: ANN001
+    monkeypatch,  # noqa: ANN001
+) -> None:
+    """IKA-118: the lead pair reaches the bench prior, and is still the lead pair after
+    one of the leads has gone back to the bench.
+
+    Side 1 led Charizard and Venusaur; by turn 2 Garchomp stands where Charizard did and
+    Charizard sits at another index. What the prior must be told is who LED -- read once
+    at turn 1 and carried as names -- not who is active now, and not whatever stands at
+    the indices that led.
+    """
+    import types
+
+    import numpy as np
+
+    from pokeuraou import selfplay
+    from pokeuraou.actions import side_actions
+    from pokeuraou.regulation import to_id
+
+    reg, roster = setup
+    sheet = _sheet(roster)
+
+    def scripted(reg, position, side, *, limit, rank=None):  # noqa: ANN001, ANN202, ARG001
+        if position.turn == 1:
+            actions = [_action(reg, position, side, TURN_ONE[side])]
+        else:
+            actions = side_actions(reg, position, side)[:1]
+        return types.SimpleNamespace(actions=actions)
+
+    class Recording:
+        """Stands in for a `BenchPrior`: records what it is asked, answers uniform."""
+
+        def __init__(self) -> None:
+            self.leads: list[frozenset[str] | None] = []
+
+        def weights(self, seen, leads=None):  # noqa: ANN001, ANN202, ARG002
+            self.leads.append(leads)
+            return {}
+
+    priors = (Recording(), Recording())
+    positions = []
+    real = selfplay._bench_weights
+
+    def spy(bench_prior, side, pos, seen, record, leads=None):  # noqa: ANN001, ANN202
+        if side == 1:
+            positions.append(pos)
+        return real(bench_prior, side, pos, seen, record, leads)
+
+    monkeypatch.setattr(selfplay, "narrow", scripted)
+    monkeypatch.setattr(selfplay, "_bench_weights", spy)
+    selfplay.play_game(
+        reg, np.random.default_rng(0), sheet[:4], sheet[:4], "test",
+        sheets=(sheet, sheet), bench_prior=priors, max_turns=1,
+    )
+
+    asked = list(zip(positions, priors[1].leads, strict=True))
+    assert any(pos.turn == 2 for pos, _ in asked), "never reached turn 2's belief"
+    names = {to_id(s.species) for s in sheet}
+    led = {to_id(sheet[0].species), to_id(sheet[1].species)}
+    assert led == {"charizard", "venusaur"}
+    for pos, leads in asked:
+        assert leads is not None, f"turn {pos.turn}: the prior was not told who led"
+        assert {name for name in leads if name in names} == led, (pos.turn, leads)
+    # The turn-2 board really is the one with a lead on the bench.
+    at_two = next(pos for pos, _ in asked if pos.turn == 2)
+    _assert_it_went_back_unharmed(at_two)

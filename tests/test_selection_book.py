@@ -1010,3 +1010,75 @@ def test_entry_bench_weights_is_the_same_call(roster) -> None:  # noqa: ANN001
         entry, 0, names
     ).weights(seen)
 
+
+# ------------------------------------------------------ the lead pair (IKA-118)
+#
+# A selection is ordered: its first two lead. At turn 1 the seen species are exactly the
+# two leads, so "the four contain what was seen" also keeps selections that brought a
+# lead but planned it for the back -- and led something that is not on the field.
+
+
+def _same_four_other_leads(names):  # noqa: ANN001, ANN202
+    """Two selections of the same four that differ only in which two lead."""
+    first = SELECTIONS[0]
+    swapped = (first[0], first[2], first[1], first[3])
+    assert swapped in SELECTIONS and sorted(swapped) == sorted(first)
+    return first, SELECTIONS.index(swapped)
+
+
+def test_two_selections_that_differ_only_in_their_leads_are_different_beliefs(
+    roster,  # noqa: ANN001
+) -> None:
+    """Fails before IKA-118: both returned the same belief for the same board."""
+    names = _species(roster)
+    first, other = _same_four_other_leads(names)
+    leads = [names[i] for i in first[:2]]
+    led_it = bench_weights(SELECTIONS, _point_mass(0), names, leads, leads=leads)
+    brought_it = bench_weights(SELECTIONS, _point_mass(other), names, leads, leads=leads)
+    assert led_it == {tuple(sorted(names[i] for i in first[2:])): 1.0}
+    # The same four, but it would have led names[first[2]] alongside names[first[0]]:
+    # it is not what this side played, and nothing else explains the board.
+    assert brought_it == {}
+    assert led_it != brought_it
+
+
+def test_a_selection_that_benched_a_lead_loses_its_back_pair(roster) -> None:  # noqa: ANN001
+    """The shape of the measured bias: the mixture's mass on a selection that holds one of
+    the leads in the back used to land on that selection's back pair."""
+    names = _species(roster)
+    first = SELECTIONS[0]
+    leads = [names[i] for i in first[:2]]
+    elsewhere = next(
+        index
+        for index, selection in enumerate(SELECTIONS)
+        if set(first[:2]) <= set(selection) and set(selection[:2]) != set(first[:2])
+        and set(selection) != set(first)
+    )
+    half = (_point_mass(0) + _point_mass(elsewhere)) / 2
+    before = bench_weights(SELECTIONS, half, names, leads)
+    after = bench_weights(SELECTIONS, half, names, leads, leads=leads)
+    assert len(before) == 2, "the unconditioned belief keeps both back pairs"
+    assert after == {tuple(sorted(names[i] for i in first[2:])): 1.0}
+
+
+def test_leads_are_read_like_seen_so_a_mega_or_forme_id_still_matches(roster) -> None:  # noqa: ANN001
+    names = _species(roster)
+    first = SELECTIONS[0]
+    leads = [names[first[0]], f"{names[first[0]]}megax", names[first[1]]]
+    got = BenchPrior.of(
+        _entry(ours=_point_mass(0), theirs=[_point_mass(0)], sets=roster.sets),
+        0,
+        names,
+        epsilon=0.0,
+    ).weights(leads, leads)
+    assert got == {tuple(sorted(names[i] for i in first[2:])): 1.0}
+
+
+def test_leads_that_are_not_two_sheet_members_are_refused(roster) -> None:  # noqa: ANN001
+    """A lead pair the sheet cannot name is a caller bug, not an empty belief."""
+    names = _species(roster)
+    with pytest.raises(ValueError, match="not the 2 that led"):
+        bench_weights(SELECTIONS, _point_mass(0), names, [], leads=[names[0]])
+    with pytest.raises(ValueError, match="not the 2 that led"):
+        bench_weights(SELECTIONS, _point_mass(0), names, [], leads=["mew", "mewtwo"])
+
