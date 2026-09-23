@@ -292,8 +292,37 @@ def _usable_move_slots(mon, reg: Regulation) -> list[tuple[int, str]]:  # noqa: 
             continue
         if tormented and mon.last_move == m.id:
             continue
+        if mon.active_move_actions and _disabled_once_moved(move):
+            continue
         out.append((i, m.id))
     return out
+
+
+#: The moves whose champions `onDisableMove` reads the move counter
+#: (vendor/pokemon-showdown/data/mods/champions/moves.ts, fakeout and firstimpression):
+#:
+#:     onDisableMove(pokemon) {
+#:         if (pokemon.activeMoveActions) pokemon.disableMove('fakeout');
+#:     },
+#:
+#: `endTurn` runs every `DisableMove` handler before each request (sim/battle.ts:1691), so
+#: once the Pokemon has made one move action since coming in, the request marks the move
+#: disabled and Showdown refuses the choice ("Fake Out is disabled"). Mat Block has the
+#: same `onTry` but no such hook, and is not in the champions dex.
+DISABLED_ONCE_MOVED = frozenset({"fakeout", "firstimpression"})
+
+
+def _disabled_once_moved(move) -> bool:  # noqa: ANN001
+    """Whether the dex disables this move after its user's first move action (IKA-166).
+
+    The dump's `customHooks` decides, so a dex without the champions hook -- the base
+    game, where Fake Out stays selectable and fails in `onTry` -- keeps offering it.
+    """
+    return (
+        move is not None
+        and move.id in DISABLED_ONCE_MOVED
+        and "onDisableMove" in move.custom_hooks
+    )
 
 
 def is_struggling(mon, reg: Regulation) -> bool:  # noqa: ANN001

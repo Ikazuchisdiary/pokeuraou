@@ -11778,6 +11778,99 @@ test_port_coverage・test_port_gates・test_rust_node・test_resolve・test_line
 （xfail 1 はげきりんの生成の形）。ruff、`port_coverage.py --check`、`port_gate_audit.py --check`（かげふみの注記を更新）も通る。
 機械（heavy.py、--agent IKA-169）: release ビルド 8 コア 23 秒、port と resolve のテスト 26 秒、記録 335 秒、試し 2 秒（1 コア）。
 
+## 9/23 — IKA-166: ねこだまし・であいがしらは場に出て最初の行動でしか選べない —— メニューから落とし、怯み・ねむり等で動けなかった手でもカウンタを進める（Python と port）。w12 で 2,553 決定、ねこだまし合戦に負けた側が次の手番に選べて当たっていた
+
+ワーカー、基点 master 28fb86c（途中で 62f0126 = IKA-162 を取り込み）、ブランチ `ika-166-fake-out-first-turn`。
+
+### 1. Showdown（d3de52a17）
+
+* `data/mods/champions/moves.ts:322`（fakeout）・`:354`（firstimpression）:
+  `onDisableMove(pokemon) { if (pokemon.activeMoveActions) pokemon.disableMove('fakeout'); }`
+* `sim/battle.ts:1691` endTurn が要求の前に毎ターン `runEvent('DisableMove')` と各技の `singleEvent('DisableMove')` を走らせる
+  （1 手番目の要求も同じ）。disabled の技を選ぶと "Fake Out is disabled" で拒否。
+* 本家 `data/moves.ts` の `onTry`（`activeMoveActions > 1` で失敗、fakeout 5097・firstimpression 5483・matblock 10996）は残るが、
+  champions では選べないので届かない。たたみがえしは champions では `isNonstandard: "Past"`（ダンプに無い）。
+* カウンタ: `sim/battle-actions.ts:217` `runMove` の最初の行で `activeMoveActions++`、ひるみ・ねむり・こおり・まひ・こんらんの
+  `BeforeMove` はその後（`:255`）。交代で出ると 0（`:138`, `pokemon.ts:475`）。倒れていれば runMove に来ない。
+  ダンプで `onDisableMove` を持つのは両規則とも fakeout・firstimpression の 2 つだけ。
+* Python の `active_move_actions` は `_use_move`（技が始まった後）でだけ進み、`_can_act` で止まった手（ひるみ等）では進まなかった。
+  port（`moves.rs` の `use_move`）も同じ。IKA-158 は特性の先制封じを `_use_move` の中へ移したので、そちらは既に進む。
+
+### 2. オラクル（`tests/test_fake_out_first_turn.py`、M-C）
+
+Python の局面は resolver 自身の子（ブリッジはカウンタを出さない）。
+
+```
+  ケース           最後の要求（Showdown の disabled）           直す前 side_actions    直す前 narrow 後      直した後（両方）
+  moved            ガオガエン fakeout / バサギリ firstimpression   両方出る（×）           両方出る（×、カウンタ 1）  一致
+  flinched         同上（ミミロップのねこだましで怯んだ）             両方出る（×）           ねこだましが出る（×、カウンタ 0）  一致
+  switched-back    ガオガエン なし / バサギリ firstimpression       firstimpression が出る（×）  一致（カウンタ 3 > 1）   一致
+  （対照）1 手番目   両方選べる                                      一致                    一致                  一致
+```
+
+直す前に落ちたもの: `test_our_menu_is_showdowns` 6 本中 5 本、`test_the_counter_decides_the_menu`、
+`test_a_dex_without_the_hook_still_offers_it`（narrow の `> 1`）。Showdown の事実 3 本と switched-back の narrow 後は直す前も通る。
+`test_the_port_counts_the_flinched_move` は旧 port（本体の release exe を `POKEURAOU_RUST_NODE_BIN`）でカウンタ 0 で落ち、新 port で通る。
+
+### 3. 直し
+
+* `actions._usable_move_slots`: カウンタが 0 でなく、`DISABLED_ONCE_MOVED`（fakeout・firstimpression）で、ダンプの
+  `customHooks` に `onDisableMove` がある技を出さない。こだわりでねこだましに固定されていればわるあがき（Showdown と同じ）。
+  フックの無い dex（本家）では従来どおり出す。
+* `resolve._do_move` と port の `moves::do_move`: `_can_act` / `can_act` が止めた手（倒れていた場合を除く）でもカウンタを 1 進める。
+* `narrow.drop_dead_actions`: 決定時のカウンタは `onTry` の前に 1 増えるので `> 0` で死ぬ（`> 1` だった）。docstring を直した。
+* port は手を列挙しない（`rust/src` に side_actions に当たるものは無い）。`tools/blunders.py` の docstring を直した。
+* test_narrow の Fake Out のテストを新しい規則に（「合法手にはまだある」を外し、プールに残ったものを落とす形に）。
+
+### 4. 記録（`C:/tmp/ika166/records.py`、1 コア、heavy.py）
+
+「選べない」の判定は記録のカウンタ ≥ 1（recorded）か、記録のカウンタが 0 で、前の手番にも場に居てカウンタ 0 で、
+交代しない技を指示されていた（blocked、旧 resolver が止まった手を数えなかった分。ひるみ・ねむり等、IKA-158 前の特性封じ）。
+
+```
+                                                     w12        selfplay-gen11L
+  手番の決定                                          434,483    118,018      （IKA-160 と同じ数、陽性対照）
+  選べないねこだましを知る 場のポケモン×決定  recorded   148,630    40,156
+                                           blocked    2,553      735
+  それがメニューにあった 側×決定             recorded   66,920     17,895
+                                           blocked    2,553      735
+  実際に選んだ                               recorded   1,908      333      （旧 resolver でも必ず失敗）
+                                           blocked    1,094      382      （旧 resolver では当たっていた）
+  であいがしら                                         0          0        （記録の構築に使い手が居ない）
+```
+
+各層 150 決定を、記録のメニューのまま（旧）と、カウンタを直して選べない手をメニューから抜いたもの（新）で
+`Budget.matrix()`・hp-share 1 手で解いた（学習済みの葉ではない。narrow が空いた枠を別の手で埋める分は入っていない）:
+
+```
+                                            w12 recorded   w12 blocked   gen11L recorded   gen11L blocked
+  抜いた手（平均）                              2.4            4.2           4.2               8.4
+  旧の均衡が抜いた手に重みを置く                  10/150         79/150        3/150             94/150
+  旧の最大の手が抜いた手                          6              57            3                 83
+  均衡値が動く（> 1e-9 / > 0.01）                 7 / 3          75 / 50       2 / 1             83 / 56
+  均衡値の差 平均・最大                            0.0007・0.046  0.013・0.181  0.0005・0.069     0.015・0.228
+  最大の手が変わる（重みあり / LP の退化）          7 / 24         71 / 11       3 / 22            92 / 13
+```
+
+recorded の層（旧 resolver でも失敗する手）は「何もしない」手が消えるだけで、均衡が変わるのは 2〜7%。blocked の層は
+当たるねこだましが消えるので 53〜63%。記録全体の見込みは w12 で約 4,500（recorded）+ 1,350（blocked）、
+gen11L で約 360 + 460 の決定で均衡が抜いた手に重みを置いていた。
+
+### 5. 検査と機械
+
+関係するテスト 24 ファイル（新規・test_narrow・test_priority_block_per_target・test_runaway・test_type_spending_moves・
+test_resolve・test_actions・test_rust_node・test_port_coverage・test_port_gates・test_line_endings ほか）を master 取り込み後に
+`-n 0` で 321 pass・1 xfail。ruff check ok、`port_coverage --check`・`port_gate_audit --check` ok。
+機械（heavy.py、--agent IKA-166）: release ビルド 2 回（8 コア 22 秒・19 秒）、テスト 66 秒、記録 721 秒（1 回目は指標を足すため
+途中で止めた）。ほかに 30 秒を超えるテスト 1 回（55 秒、1 コア）を heavy.py を通さずに走らせた。
+
+### 6. 残り（別課題の候補）
+
+* **デカハンマー（gigatonhammer、`cantusetwice`）が 2 回続けて選べる**。`battle.ts:1695` が `lastMove` と同じなら disable するが、
+  `_usable_move_slots` は `cantusetwice` を読まない（両規則のダンプに有る）。
+* **ブリッジが `activeMoveActions` を出さない**ので、オラクルの局面から始めた探索は 2 手番目以降でもカウンタ 0 で、ねこだましを出す。
+* 反動（`_do_recharge`）もカウンタを進めない（Showdown は runMove を通る）。既に 1 以上なので効かない。
+
 ## 9/23 — IKA-172: port がほろびのうたを誰にも付けていなかった —— 生成は port で局を進めるので、selfplay-gen11L では使われたほろびのうた 14 回がすべて消えていた。Python はかたやぶりと「全員が既にカウント中」の失敗が抜けていた。オラクル 7 ケース 4 ターンで Python・port とも Showdown と一致
 
 ### 1. 扱いの違い

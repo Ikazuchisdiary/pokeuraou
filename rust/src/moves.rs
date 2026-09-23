@@ -104,6 +104,13 @@ pub(crate) fn do_move<'a>(
         let mut state = turn.clone();
         match blocked {
             Some(reason) => {
+                // `runMove` bumps `activeMoveActions` before `BeforeMove`, so a Pokemon
+                // that could not move has still spent its first turn out (IKA-166).
+                if reason.as_str() != "fainted" {
+                    if let Some(mon) = state.mon_at_mut(action.side, action.slot) {
+                        mon.active_move_actions += 1;
+                    }
+                }
                 if reason.as_str() == "flinch" {
                     if let Some(mon) = state.mon_at_mut(action.side, action.slot) {
                         mon.volatiles.retain(|v| v.id.as_str() != "flinch");
