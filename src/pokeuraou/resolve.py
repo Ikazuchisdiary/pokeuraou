@@ -75,6 +75,16 @@ from .view import battler, field_state, move_hits_multiple
 #: move -- and it worked on every turn until this existed.
 FIRST_TURN_OUT_MOVES = frozenset({"fakeout", "firstimpression", "matblock"})
 
+#: Moves that need a type and spend it, with the type (IKA-162). `onTryMove` fails the move
+#: unless its user has the type, and `self.onHit` rewrites that type to "???" once the move
+#: has hit: a Pawmot is `???/Fighting` after one Double Shock and its next one fails. The
+#: dump keeps `self` as `{}` and names only `onTryMove`, so nothing else says so.
+TYPE_SPENDING_MOVES: dict[str, str] = {"doubleshock": "Electric", "burnup": "Fire"}
+
+#: The type Showdown writes in place of a spent one. The type chart has no row or column
+#: for it, so it is neutral to everything, as it is in Showdown.
+SPENT_TYPE = "???"
+
 PROTECT_VOLATILES: dict[str, str] = {
     "protect": "all",
     "detect": "all",
@@ -762,6 +772,8 @@ class _Turn:
         mon.fainted = True
         mon.boosts = {}
         mon.volatiles = []
+        # `faintMessages` calls `clearVolatile`, which puts the species' types back.
+        _restore_types(self.reg, mon)
         # Showdown records a fainted Pokemon's status as 'fnt'.
         mon.status = "fnt"
         mon.status_counter = None
@@ -1664,6 +1676,8 @@ def _do_switch(
         # Volatiles do not survive a switch out. Unburden's marker goes with them; the
         # ability re-arms only when an item is lost again.
         leaving.volatiles = []
+        # `clearVolatile` ends in `setSpecies(this.baseSpecies)`: a spent type comes back.
+        _restore_types(reg, leaving)
         leaving.last_move = None
         leaving.locked_move = None
         # Volatiles do not survive a switch, and Disable's flag lives on the move slot
@@ -2072,6 +2086,15 @@ def _use_move(
         turn.move_failed.add((action.side, action.slot))
         return [(1.0, turn, "")]
 
+    # Double Shock and Burn Up: the move's own `onTryMove`, after the target is chosen and
+    # the PP spent -- `singleEvent('TryMove', move)`, which runs before the `runEvent` the
+    # priority block below answers. It returns `null`, not `false`, so the move is not a
+    # failure Stomping Tantrum counts and `move_failed` is left alone.
+    spent = TYPE_SPENDING_MOVES.get(action.move_id)
+    if spent is not None and mon is not None and spent not in turn.types_of(mon):
+        turn.log(f"{action.label(reg)} failed (no {spent} type)")
+        return [(1.0, turn, "")]
+
     # `TryMove`: after the PP, the target and the charge turn, before any hit step.
     holder = _priority_blocked_by(turn, action, move, targets)
     if holder is not None:
@@ -2120,6 +2143,18 @@ def mon_charged(turn: _Turn, action: QueuedAction) -> bool:
     """Whether the user already spent a turn charging this move."""
     mon = turn.mon_at(action.side, action.slot)
     return mon is not None and mon.has_volatile("twoturnmove")
+
+
+def _restore_types(reg: Regulation, mon: Pokemon) -> None:
+    """The species' own types, as `clearVolatile`'s `setSpecies` leaves them (IKA-162).
+
+    Showdown clears a Pokemon's volatiles when it switches out and when it faints, and
+    `setSpecies(this.baseSpecies)` at the end resets `types`. A mega or a busted Disguise is
+    a permanent forme change, so `baseSpecies` is the forme and `mon.species` is the same id.
+    """
+    species = reg.species.get(mon.species)
+    if species is not None:
+        mon.types = species.types
 
 
 def _change_forme(turn: _Turn, side: int, slot: int, species_id: str) -> None:
@@ -3432,6 +3467,15 @@ def _after_move(turn: _Turn, action: QueuedAction, move: Move) -> None:
             turn.apply_boosts(*me, dict(self_effect["boosts"]), reason=move.id, from_foe=False)
         if self_effect.get("volatileStatus"):
             turn.add_volatile(*me, str(self_effect["volatileStatus"]))
+        # Double Shock's and Burn Up's `self.onHit`, which the dump cannot carry: `setType`
+        # of the types with the spent one replaced. `selfDrops` runs it only for a target
+        # the move reached, which is `move_connected`. `setType` also drops an added type
+        # (Trick-or-Treat, Forest's Curse); the position cannot tell one apart, and neither
+        # move is fully modelled here, so the types are rewritten as they stand.
+        spent = TYPE_SPENDING_MOVES.get(move.id)
+        if spent is not None:
+            attacker.types = tuple(SPENT_TYPE if t == spent else t for t in turn.types_of(attacker))
+            turn.log(f"{turn.name(*me)} is {'/'.join(attacker.types)} ({move.id})")
         # `selfBoost` is a separate field from `self`, applied once after the move
         # succeeds: Clanging Scales, Clangorous Soul and Scale Shot use it.
         self_boost = raw.get("selfBoost") or {}

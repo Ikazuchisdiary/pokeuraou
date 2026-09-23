@@ -378,6 +378,7 @@ impl<'a> Turn<'a> {
     }
 
     pub(crate) fn faint(&mut self, side: usize, slot: usize) {
+        let reg = self.reg;
         let Some(mon) = self.mon_at_mut(side, slot) else { return };
         if mon.fainted {
             return;
@@ -386,6 +387,8 @@ impl<'a> Turn<'a> {
         mon.fainted = true;
         mon.boosts = [0; 7];
         mon.volatiles.clear();
+        // `faintMessages` calls `clearVolatile`, which puts the species' types back.
+        restore_types(reg, mon);
         mon.status = Some(Id::new("fnt"));
         mon.status_counter = None;
         let wiped = self.pos.sides[side].pokemon.iter().all(|m| m.fainted);
@@ -1874,6 +1877,14 @@ fn execute<'a>(
     }
 }
 
+/// Python's `_restore_types` (IKA-162): the species' own types, as `clearVolatile`'s
+/// `setSpecies` leaves them on a switch out and on a faint.
+fn restore_types(reg: &Reg, mon: &mut Pokemon) {
+    if let Some(entry) = reg.species.get(mon.species.as_str()) {
+        mon.types = entry.type_ids;
+    }
+}
+
 fn do_switch(reg: &Reg, turn: &mut Turn, action: &QueuedAction) -> Result<(), String> {
     do_switch_with(reg, turn, action, true)
 }
@@ -1925,6 +1936,8 @@ fn do_switch_with(
             leaving.active_index = None;
             leaving.boosts = [0; 7];
             leaving.volatiles.clear();
+            // `clearVolatile` ends in `setSpecies(this.baseSpecies)`: a spent type comes back.
+            restore_types(reg, leaving);
             leaving.last_move = None;
             leaving.locked_move = None;
             for move_slot in leaving.moves.iter_mut() {

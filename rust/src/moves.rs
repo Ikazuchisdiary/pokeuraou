@@ -9,7 +9,7 @@ use crate::damage::{calculate, crit_probability};
 use crate::effects::{is_mold_breaker, resist_berry};
 use crate::id::Id;
 use crate::moveinfo::MoveContext;
-use crate::position::{Effect, Position};
+use crate::position::{Effect, Position, Types};
 use crate::reg::{Move, Reg, F_CONTACT, F_FAILENCORE, F_POWDER, F_PROTECT};
 use crate::resolve::{
     change_forme, check_white_herb, grounded_ignoring, stratified_rolls, Budget, Outcome, Slot,
@@ -36,6 +36,20 @@ const PROTECT_VOLATILES: [(&str, &str); 9] = [
 ];
 
 const FIRST_TURN_OUT_MOVES: [&str; 3] = ["fakeout", "firstimpression", "matblock"];
+
+/// Python's `TYPE_SPENDING_MOVES` (IKA-162): the move fails unless its user has the type,
+/// and once it has hit, the type is rewritten to `SPENT_TYPE`.
+fn spent_type(move_id: &str) -> Option<&'static str> {
+    match move_id {
+        "doubleshock" => Some("Electric"),
+        "burnup" => Some("Fire"),
+        _ => None,
+    }
+}
+
+/// What Showdown writes in place of a spent type. The type chart has no slot for it, so
+/// `type_slot_of` makes it neutral, as it is in Showdown.
+const SPENT_TYPE: &str = "???";
 const STALL_BUMPING_MOVES: [&str; 2] = ["wideguard", "quickguard"];
 const MAX_BRANCHED_SECONDARIES: usize = 2;
 
@@ -430,6 +444,19 @@ fn use_move<'a>(
     if targets.is_empty() && !no_target_needed {
         turn.move_failed[action.side][action.slot] = true;
         return Ok(vec![(1.0, turn)]);
+    }
+
+    // Double Shock and Burn Up: the move's own `onTryMove`, after the target and the PP,
+    // and before the `runEvent('TryMove')` the priority block answers. It returns `null`,
+    // so the move is not one `move_failed` records.
+    if let Some(spent) = spent_type(move_id.as_str()) {
+        let lacks = match turn.mon_at(action.side, action.slot) {
+            Some(mon) => !turn.types_of(mon).contains(spent),
+            None => false,
+        };
+        if lacks {
+            return Ok(vec![(1.0, turn)]);
+        }
     }
 
     // `TryMove`: after the PP, the target and the charge turn, before any hit step.
@@ -1443,6 +1470,21 @@ fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), S
                     return Err(format!("self volatile: {vid}"));
                 }
                 turn.add_volatile(me.0, me.1, &vid, None);
+            }
+        }
+        // Double Shock's and Burn Up's `self.onHit`: the spent type becomes `SPENT_TYPE`.
+        if let Some(spent) = spent_type(mv.id.as_str()) {
+            let current = match turn.mon_at(me.0, me.1) {
+                Some(mon) => turn.types_of(mon),
+                None => Types::default(),
+            };
+            let replaced: Vec<Id> = current
+                .as_slice()
+                .iter()
+                .map(|t| if t.as_str() == spent { Id::new(SPENT_TYPE) } else { *t })
+                .collect();
+            if let Some(mon) = turn.mon_at_mut(me.0, me.1) {
+                mon.types = Types::from_slice(&replaced);
             }
         }
         if let Some(boosts) = mv.self_boost_boosts.as_ref() {
