@@ -444,6 +444,11 @@ fn use_move<'a>(
                 if let Some(mon) = turn.mon_at_mut(action.side, action.slot) {
                     if let Some(charging) = mon.volatile_mut("twoturnmove") {
                         charging.move_id = Some(move_id);
+                        // ...and the target, which the next turn fires at (IKA-176).
+                        if let Some(loc) = action.target.filter(|t| *t != 0) {
+                            std::rc::Rc::make_mut(&mut charging.extra)
+                                .insert("targetLoc".into(), json!(loc));
+                        }
                     }
                 }
                 return Ok(vec![(1.0, turn)]);
