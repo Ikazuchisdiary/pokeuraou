@@ -1767,8 +1767,11 @@ fn apply_status_move(
                 return Err(format!("status move volatile: {vid}"));
             }
             let duration = effect_duration(turn, mv, &vid, action.side, action.slot);
+            // Re-seeding a seeded target fails in `addVolatile` (no `onRestart`) and keeps
+            // the first planter's slot (IKA-56).
+            let already = turn.mon_at(target.0, target.1).is_some_and(|m| m.has_volatile(&vid));
             turn.add_volatile(target.0, target.1, &vid, duration);
-            if vid == "leechseed" {
+            if vid == "leechseed" && !already {
                 if let Some(mon) = turn.mon_at_mut(target.0, target.1) {
                     if let Some(applied) = mon.volatile_mut("leechseed") {
                         applied.source_slot = Some(Id::new(&format!("{}{}", me.0, me.1)));
@@ -1836,11 +1839,19 @@ fn slot_of(turn: &Turn, source_slot: Option<Id>) -> Option<Slot> {
     let source = source_slot?;
     let text = source.as_str();
     let bytes = text.as_bytes();
-    if bytes.len() < 2 {
+    // Two encodings are in use: the resolver writes "10" (side digit, slot digit), a
+    // position read from Showdown carries its own label "p2a" (IKA-56).
+    let (side, slot) = if bytes.len() >= 3 && bytes[0] == b'p' {
+        let side = ((bytes[1] as char).to_digit(10)? as usize).checked_sub(1)?;
+        let slot = (bytes[2] as usize).checked_sub(b'a' as usize)?;
+        (side, slot)
+    } else if bytes.len() >= 2 {
+        let side = (bytes[0] as char).to_digit(10)? as usize;
+        let slot = (bytes[1] as char).to_digit(10)? as usize;
+        (side, slot)
+    } else {
         return None;
-    }
-    let side = (bytes[0] as char).to_digit(10)? as usize;
-    let slot = (bytes[1] as char).to_digit(10)? as usize;
+    };
     if side > 1 || slot >= turn.pos.sides[side].active.len() {
         return None;
     }
@@ -1985,16 +1996,18 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
             Some(mon) => mon.volatile("leechseed").map(|s| s.source_slot),
         };
         let Some(source_slot) = seed_source else { continue };
+        // data/moves.ts:10218-10227: `getAtSlot(sourceSlot)`, and when that slot is empty
+        // or fainted the seed returns before `this.damage` -- no drain at all (IKA-56).
+        let Some(planter) = slot_of(turn, source_slot) else { continue };
+        let alive =
+            matches!(turn.mon_at(planter.0, planter.1), Some(m) if !m.fainted && m.hp > 0);
+        if !alive {
+            continue;
+        }
         let amount = turn.fraction_of_max(side, slot, LEECH_SEED_DRAIN);
         let drained = turn.deal_damage(side, slot, amount, false)?;
         if drained > 0 {
-            if let Some(planter) = slot_of(turn, source_slot) {
-                let alive =
-                    matches!(turn.mon_at(planter.0, planter.1), Some(m) if !m.fainted);
-                if alive {
-                    turn.heal(planter.0, planter.1, drained);
-                }
-            }
+            turn.heal(planter.0, planter.1, drained);
         }
     }
 

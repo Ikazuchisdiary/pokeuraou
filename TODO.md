@@ -9354,3 +9354,87 @@ exact マスクが 3,599 セル違うのは、Python の減縮が Rust に無い
 
 機械: cargo release ビルド 2 回（8 コア、各 20 秒・16 秒）、diff_node 既定 43 秒 ×2・fast 10 秒 ×2・exact --limit 12
 30 秒、テスト数十秒（すべて 1 コア、heavy.py に記録）。
+
+## 9/23 — IKA-56: やどりぎのタネは植え手のスロットに居る者を回復させる —— Python は植えた側を記録せず、吸った HP がどこにも行っていなかった
+
+### 1. Showdown の規則
+
+```
+// vendor/pokemon-showdown/data/moves.ts:10218-10227
+onResidual(pokemon) {
+  const target = this.getAtSlot(pokemon.volatiles['leechseed'].sourceSlot);
+  if (!target || target.fainted || target.hp <= 0) { return; }
+  const damage = this.damage(pokemon.baseMaxhp / 8, pokemon, target);
+  if (damage) { this.heal(damage, target, pokemon); }
+}
+// sim/pokemon.ts:2008   this.volatiles[status.id].sourceSlot = source.getSlot();
+// sim/battle.ts:1611-1617  getAtSlot は side と位置の文字から *今そこに居る* active を返す
+```
+
+* 記録されるのは Pokemon ではなく**スロット**。植え手が交代したら、そのスロットに来た者が回復する
+* そのスロットが空か瀕死なら `return` —— **吸いもしない**（ダメージより前に返る）
+* 回復量は実際に減った分。付いている相手に重ねて撃っても `addVolatile` は `onRestart` が無いので失敗し、
+  最初の植え手のスロットが残る
+* おおきなねっこ（`data/items.ts:488-492` の `onTryHeal`、×5324/4096）とヘドロえき（`data/abilities.ts:2402-2410`、
+  回復の代わりに植え手が同じだけ受ける）は回復に掛かる。**どちらもプール・大会データのどのチームにも無く、
+  吸収技にも実装していない**ので今回も入れていない（下の後続）
+
+### 2. 何が違っていたか
+
+* Python: 状態技の汎用経路（`resolve.py` `_apply_status_move`）が `leechseed` の `source_slot` を書かず、
+  残差の `_slot_of` は `p2a` 形式しか読まなかった。植え手は常に None で、回復は一度も起きない。しかも
+  植え手が居なくても吸っていた
+* Rust ポート: `"10"` を書いて回復させていたが、(a) 植え手のスロットが瀕死でも吸い、(b) `slot_of` が `p2a` を
+  読めず Showdown 由来の種では回復を落とし、(c) 付いている相手への重ね撃ちで sourceSlot を上書きしていた
+
+### 3. 直したこと
+
+* `src/pokeuraou/resolve.py`: 新しく付いた `leechseed` に `f"{side}{slot}"` を記録する（`partiallytrapped` と
+  同じ形）。`_slot_of` は2形式とも読む。残差は植え手のスロットが空・瀕死なら吸わずに次へ。`_trapper_gone` も
+  同じ `_slot_of` を使う（ポートの `trapper_gone` は元から `slot_of` 経由なので、ポート側の2形式対応と揃う）
+* `rust/src/moves.rs`: 上の (a)(b)(c) を同じ規則に
+* `tests/test_leech_seed.py`（oracle とポート）:
+  * 植え手が回復する —— Python が植えたターンを Showdown の同じターンと HP で比べる。**直す前に落ちる**
+    （Venusaur 146 対 Showdown 169）
+  * Showdown 由来の `p2a` の種でも同じ（直す前から通る: この形式は読めていた）
+  * 植え手が瀕死なら吸わない（`p2a`・`10` の2形式）。**直す前は2つとも落ちる**（Milotic 144 対 167）
+  * 交代して来た者が回復する（直す前から通る）
+  * ポートが Python と枝ごとに同じ（植え手 生存/瀕死 × `10`/`p2a` の4通り、陽性対照として各セルの HP が
+    規則で動くことを先に確かめる）。**直す前のバイナリで 4 中 3 が落ちる**（生存・`10` だけ通る）
+
+### 4. diff_node（`--seed 43 --games 3 --nodes 24`、matrix、Linear の再現と同じ）
+
+```
+  直す前の Python ＋ main のバイナリ   23 節点 10,724 セル  worst 3.011e-02  FAIL（Linear の 1.310e-02 / 1.344e-02 / 3.011e-02 がそのまま出る）
+  直した Python ＋ main のバイナリ     24 節点 10,857 セル  worst 5.551e-16  OK
+  直した Python ＋ 直したバイナリ      24 節点 10,857 セル  worst 5.551e-16  OK（上とバイト一致の要約）
+```
+
+節点数が変わるのは、自己対戦の局が Python で進むので回復がつけば局面が変わるから。この種では植え手の瀕死が
+residual まで残る局面に当たらず、ポート側の (a) は diff_node には出ない —— それを見るのは上のポートのテスト。
+
+### 5. 記録への影響（`data/ika73/w12`、1 コア 12 秒）
+
+```
+  局 43,999   決定 592,200
+  やどりぎを覚えた Pokemon を連れた局            31（すべてスコヴィラン）
+  覚えている Pokemon が場に居た決定               168（30 局）
+  やどりぎを選んだ決定                             47（20 局）
+  種が付いた局面の決定                             66（18 局）  種 71 個の sourceSlot: "10" 33, "11" 31, None 7
+```
+
+sourceSlot が数字の種はポートが植えたもの（Python は一度も書かなかった）なので、w12 の局の進行は大半が
+正しい回復で進んだ。欠けていたのは Python が解いたターン（None の 7 個）と、探索のうちポートが断って Python が
+埋めたセル（推定、未測定）。決定の 0.03%、局の 0.07%。**橋 OFF で生成した世代（ポート以前）は全部の種で回復が
+欠けている**が、スコヴィランの出る局の割合は同程度に小さいはず（未測定）。
+
+### 6. 後続
+
+* おおきなねっこ・ヘドロえき: やどりぎと吸収技の両方で未実装。今どのチームにも無いので宣言だけで足りるが、
+  `effects.py` の「ダメージに関係しない」集合に bigroot が入っていて、未実装として報告されない
+* `tools/diff_turn.py` は毎ターン Showdown の局面から始めるので、2ターン目以降の種は常に `p2a`（読めていた形式）。
+  Python が植えた種の回復が見えるのは植えたそのターンだけで、しかも植え手が既に削れているときだけ —— 事前分布から
+  引くチームではめったに起きず、この欠陥が oracle 差分に出なかった理由と思われる（未確認）
+
+機械: cargo release ビルド 1 回（8 コア、20 秒）、diff_node 47 秒 ×3・テスト 22 秒・記録の走査 7 秒 + 5 秒
+（すべて 1 コア、heavy.py に記録）。
