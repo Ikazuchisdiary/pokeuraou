@@ -290,8 +290,9 @@ impl<'a> Encoder<'a> {
         let mons = &side.pokemon;
         let alive = mons.iter().filter(|p| !p.fainted).count();
         out[base] = if side.mega_used { 1.0 } else { 0.0 };
-        out[base + 1] =
-            if !side.mega_used && !side.mega_capable_slots.is_empty() { 1.0 } else { 0.0 };
+        // Read off the Pokemon, as `can_mega` is, not off `mega_capable_slots` (IKA-121).
+        let holder = mons.iter().any(|p| self.reg.holds_mega_stone(p.species, p.item));
+        out[base + 1] = if !side.mega_used && holder { 1.0 } else { 0.0 };
         out[base + 2] = (alive as f64 / mons.len().max(1) as f64) as f32;
         let total: i64 = mons.iter().map(|p| p.maxhp).sum();
         let total = if total == 0 { 1 } else { total };
@@ -355,7 +356,10 @@ impl<'a> Encoder<'a> {
         out[base + 2] = if mon.active_index == Some(1) { 1.0 } else { 0.0 };
         out[base + 3] = if mon.fainted { 1.0 } else { 0.0 };
         out[base + 4] = if mon.is_mega { 1.0 } else { 0.0 };
-        out[base + 5] = if side.mega_capable_slots.contains(&mon.slot)
+        // The Pokemon's own species and stone, as `_holds_mega_stone` asks. Its party slot
+        // is not an identity: resolve renumbers it on every switch, and
+        // `side.mega_capable_slots` keeps the numbers from the start of the game (IKA-121).
+        out[base + 5] = if self.reg.holds_mega_stone(mon.species, mon.item)
             && !side.mega_used
             && !mon.is_mega
         {

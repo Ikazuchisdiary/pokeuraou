@@ -3,6 +3,7 @@
 //! This is the part that makes a port cheap: the dex was already extracted into a plain
 //! JSON document for the Python side, so nothing here has to touch Showdown's TypeScript.
 
+use crate::id::{FnvBuild, Id, ID_CAPACITY};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
@@ -77,6 +78,9 @@ pub struct Reg {
     pub choice_items: HashSet<String>,
     /// (speciesId, itemId) -> the mega forme it becomes.
     pub mega_targets: HashMap<(String, String), String>,
+    /// The same pairs as inline ids, so the encoder can ask of every Pokemon of every leaf
+    /// whether it holds its own stone without building two `String`s to look it up.
+    pub mega_holders: HashSet<(Id, Id), FnvBuild>,
     /// Effect name -> the types immune to it, from the dump's `effectImmunities`.
     pub effect_immunities: HashMap<String, HashSet<String>>,
     /// Every id in the dump, sorted -- the encoder's vocabulary is an offset into these,
@@ -163,10 +167,16 @@ impl Reg {
 
         let mut mega_by_species = HashSet::new();
         let mut mega_targets = HashMap::new();
+        let mut mega_holders: HashSet<(Id, Id), FnvBuild> = HashSet::default();
         if let Some(map) = doc["megaMap"].as_object() {
             for (item_id, table) in map {
                 if let Some(obj) = table.as_object() {
                     for (from_species, to_species) in obj {
+                        // An id too long for `Id` cannot be on any Pokemon, so it cannot be
+                        // asked about either; skipping it keeps `Id::new` from panicking.
+                        if from_species.len() <= ID_CAPACITY && item_id.len() <= ID_CAPACITY {
+                            mega_holders.insert((Id::new(from_species), Id::new(item_id)));
+                        }
                         mega_by_species.insert((from_species.clone(), item_id.clone()));
                         mega_targets.insert(
                             (from_species.clone(), item_id.clone()),
@@ -279,6 +289,7 @@ impl Reg {
             typechart,
             mega_by_species,
             mega_targets,
+            mega_holders,
             choice_items,
             effect_immunities,
         })
@@ -315,6 +326,17 @@ impl Reg {
                 .iter()
                 .map(|t| row.get(t.as_str()).copied().unwrap_or(1.0))
                 .product(),
+        }
+    }
+
+    /// `Regulation.mega_target(species, item) is not None`: this Pokemon holds the stone
+    /// that megas it. What the encoder's `can_mega` and `mega_available` read, instead of
+    /// `Side.mega_capable_slots` -- a party slot number is not an identity, and resolve
+    /// renumbers slots on every switch (IKA-121).
+    pub fn holds_mega_stone(&self, species: Id, item: Option<Id>) -> bool {
+        match item {
+            None => false,
+            Some(item) => self.mega_holders.contains(&(species, item)),
         }
     }
 

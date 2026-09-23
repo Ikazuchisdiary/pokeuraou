@@ -452,6 +452,9 @@ pub struct Side {
     pub side_conditions: Vec<Effect>,
     pub slot_conditions: Vec<Vec<Effect>>,
     pub mega_used: bool,
+    /// Party slots holding their own mega stone *as numbered when the side was built*.
+    /// Resolve renumbers `Pokemon.slot` on a switch and does not touch this, so it is not
+    /// an identity; `Reg::holds_mega_stone` is what the encoder asks (IKA-121).
     pub mega_capable_slots: Vec<usize>,
 }
 

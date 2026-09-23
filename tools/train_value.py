@@ -40,7 +40,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from pokeuraou.encode import Encoder
+from pokeuraou.encode import ENCODING_REVISION, Encoder
 from pokeuraou.regulation import load_regulation
 from pokeuraou.value import (
     Dataset,
@@ -230,6 +230,18 @@ def main() -> None:
     )
     args = ap.parse_args()
 
+    # A model is trained on the arrays in the file and then searched with the encoder in
+    # this tree. If a column changed meaning between the two, the model learns one feature
+    # and is asked about another, and nothing downstream can see it (IKA-121: `can_mega`
+    # stood on the wrong Pokemon in 24.9% of unspent-mega pairs until 9/23). A file from
+    # before the revision was recorded is revision 1.
+    revision = json.loads(str(np.load(args.data)["meta_json"])).get("encoding_revision", 1)
+    if revision != ENCODING_REVISION:
+        raise SystemExit(
+            f"{args.data} was encoded at revision {revision} and this tree encodes at "
+            f"{ENCODING_REVISION}; re-run tools/encode_dataset.py, which rebuilds the stale "
+            "shards itself"
+        )
     dataset = load_dataset(args.data)
     target = None
     if args.td_lambda:
@@ -407,6 +419,7 @@ def main() -> None:
                 # from a better fit or from easier games.
                 "split_seed": args.split_seed,
                 "holdout": args.holdout,
+                "encoding_revision": ENCODING_REVISION,
                 # What the games that taught this could see. A value trained on omniscient
                 # play predicts omniscient play, and the book prints that prediction into
                 # a condition where the bench is hidden: on place 109 the leaf claimed
