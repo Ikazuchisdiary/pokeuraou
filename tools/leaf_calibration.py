@@ -72,6 +72,20 @@ def bucket_of(value: int, buckets) -> str:  # noqa: ANN001
     return buckets[-1][0]
 
 
+def unseen_of_foe(game: dict, decision: dict) -> int | None:
+    """How many of side 1's four side 0's search had not seen at this decision.
+
+    Read off `shownIdentities` (IKA-127), which in the open game is the whole four and so
+    gives 0. None for a record written before the field, where the answer would have to
+    be replayed -- `pokeuraou.selfplay.replay_shown` does that, at a position parse per
+    decision, which this tool does not spend.
+    """
+    shown = decision.get("shownIdentities")
+    if shown is None:
+        return None
+    return len(game["foeTeam"]) - len(shown[1])
+
+
 def report(title: str, rows: dict[str, list[tuple[float, float, float]]], order) -> None:  # noqa: ANN001
     """One line per bucket: n, the three comparisons, and the leaf's Brier score."""
     print(f"\n  {title}")
@@ -249,7 +263,7 @@ def main() -> None:
     # fixed stride keeps the sample reproducible and spread over every file.
     rng = np.random.default_rng(args.seed)
     wanted = args.positions
-    picked: list[tuple[dict, float, int, int]] = []
+    picked: list[tuple[dict, float, int, int, int | None]] = []
     seen = 0
     for path in paths:
         with open(path, encoding="utf-8") as handle:
@@ -272,6 +286,7 @@ def main() -> None:
                         float(game["outcome"]),
                         int(decision["turn"]),
                         company,
+                        unseen_of_foe(game, decision),
                     )
                     if len(picked) < wanted:
                         picked.append(item)
@@ -294,17 +309,27 @@ def main() -> None:
     device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     leaf = BatchedValue([n.to(device) for n in nets], encoder, device=device)
 
-    positions = [Position.from_json(d["position"]) for d, _o, _t, _c in picked]
+    positions = [Position.from_json(d["position"]) for d, _o, _t, _c, _u in picked]
     values = np.asarray(leaf(positions), dtype=np.float64)
 
     by_turn: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
     by_pair: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
-    for (decision, outcome, turn, company), predicted in zip(picked, values, strict=True):
+    by_unseen: dict[str, list[tuple[float, float, float]]] = defaultdict(list)
+    # (searchValue, foeSearchValue, outcome) where the decision carries both.
+    seats: list[tuple[float, float, float]] = []
+    for (decision, outcome, turn, company, unseen), predicted in zip(
+        picked, values, strict=True
+    ):
         search = decision.get("searchValue")
         row = (float(predicted), float(search) if search is not None else float("nan"), outcome)
         by_turn[bucket_of(turn, TURN_BUCKETS)].append(row)
         if turn == 1:
             by_pair[bucket_of(company, PAIR_BUCKETS)].append(row)
+        if unseen is not None:
+            by_unseen[f"{unseen} unseen"].append(row)
+        foe_value = decision.get("foeSearchValue")
+        if foe_value is not None and search is not None:
+            seats.append((float(search), float(foe_value), outcome))
 
     # A sign error here would read as a broken model, so it is checked rather than
     # assumed: the search's own estimate must correlate positively with the outcome.
@@ -331,6 +356,30 @@ def main() -> None:
         by_pair,
         [name for name, _lo, _hi in PAIR_BUCKETS],
     )
+    if by_unseen:
+        # The leaf reads the true position and `searchValue` is side 0's belief about
+        # it, so leaf-srch mixes "what searching adds" with "what side 0 did not know".
+        # At "0 unseen" only the first is left (IKA-127: from `shownIdentities`).
+        report(
+            "by how many of side 1's four side 0 had not seen",
+            by_unseen,
+            sorted(by_unseen),
+        )
+    else:
+        print("\n  (no `shownIdentities` in these records -- written before IKA-127)")
+    if seats:
+        own = np.asarray([s for s, _f, _o in seats], dtype=np.float64)
+        foe = np.asarray([f for _s, f, _o in seats], dtype=np.float64)
+        out = np.asarray([o for _s, _f, o in seats], dtype=np.float64)
+        print(
+            f"\n  hidden bench, both seats' own values (side 0's units), n={len(seats)}:\n"
+            f"    side 0 {own.mean():.1%}  side 1 {foe.mean():.1%}  actual {out.mean():.1%}"
+            f"   side 0 - side 1 {(own - foe).mean():+.1%} (mean |gap| "
+            f"{np.abs(own - foe).mean():.1%})\n"
+            f"    brier: side 0 {np.mean((own - out) ** 2):.3f}  side 1 "
+            f"{np.mean((foe - out) ** 2):.3f}  their mean "
+            f"{np.mean(((own + foe) / 2 - out) ** 2):.3f}"
+        )
     print(
         "\n  leaf-srch is what a cell of the selection matrix gives up by not searching.\n"
         "  If it is flat across the pair buckets the leaf's trouble is not coverage and\n"

@@ -10113,3 +10113,81 @@ test_damage_diff・test_line_endings・test_no_machine_specific_paths・test_por
 * ばけのかわが吸った当たりで、Python は追加効果・`_after_hit`（接触・技の後の効果）を全部飛ばす。Showdown はダメージ 0 の当たりとして
   その後の手順を続けるはず（`onDamage` が 0 を返すだけ）
 * 連続技: Showdown は 1 発目だけ吸って 2 発目からは化けの皮の剥がれた相手に当たるはず。Python は技全体を吸う
+
+## 9/23 — IKA-127: 決定ごとに両側の「見た」と side 1 自身の値を記録する。既存フィールドは同じ seed でビット一致、記録は 1 局 +1.6%
+
+### 1. 何が足りなかったか
+
+隠蔽では両側が別々のゲームを解いているのに、記録は side 0 の探索値（`searchValue`）と真の局面だけだった。side 1 が自分の信念で
+解いた値は捨てられ、「各側が相手の何を見ていたか」「先発ペア」は `seen_slots` を再生して作るしかなかった（IKA-117 のとおり
+スロット番号は交代で付け替わるので、同一性で再生する必要がある）。
+
+### 2. 足したフィールド（既存の意味は変えない。`searchValue` は side 0 のまま）
+
+* 決定ごと `shownIdentities`: `[[side 0 の同一性...], [side 1 の同一性...]]`。`shownIdentities[i]` は **side i の**ポケモンのうち、
+  相手（side 1-i）の探索が見えていたもの。同一性は `hidden.identity`（基本種族の id）、整列済み。隠蔽では信念を作るのに使った
+  持ち越しの `seen_identities` そのもの。公開では探索に 4 匹全部が渡されるので 4 匹全部（陽性対照にもなる）。
+  自己交代の決定は中断局面をその場で読むが、持ち越しには足さない（`play_game` の持ち越しも中断局面を見ない）。
+* 決定ごと `foeSearchValue`: side 1 が自分のゲームを解いた均衡値を **side 0 の単位**（side 0 の勝率）で。`belief_solve` の
+  `answers[1].value` は負の転置のゲームの値なので符号を戻す。side 1 が自分のメニューで解き直したとき（`same_menu` でない）は
+  その解の値。交代ノードも同様（`-answers[1][1]`）。**隠蔽の手番・交代ノードだけ書き、公開では書かない**: 公開で 1 エージェントの
+  両側は同じ行列を解くので `searchValue` と同じ数の重複になる。自己交代も書かない（選ぶのは片側だけ）。完成形が作れず一様に
+  落ちた交代ノードも書かない。
+* 局ごと `leads`: 各側の 1 ターン目の先発ペア（同一性、`active` 順）。`start` から再開した局は `[null, null]`。
+  1 局の中で変わらないので決定ごとではなく局ごとにした（決定ごとだと 1 局で 15 回同じものを書く）。
+* 推定分布の重みは入れていない。完成形は片側最大 15 個で決定ごとに種族の組と重みを書くことになり、しかも
+  `shownIdentities`・`leads`・選出解（`BenchPrior`）から作り直せる。
+* 記録の形式のバージョン番号はリポジトリに無い（`engine` の指紋と `ENCODING_REVISION` だけ）。新しいフィールドは「無ければ無い」で
+  読めるので、どちらも動かしていない。
+
+### 3. `td_target`
+
+挙動は変えていない。docstring を直した: 隠蔽では `searchValue` は side 0 の信念での値で、`foeSearchValue` が隣にある。選択肢として
+(a) 今のまま side 0 の値、(b) 両者の平均（席について対称）、(c) 相手をどれだけ見ていたかで重み付け、を書いた。変えると
+`--td-lambda` の学習目標が変わるので、どれにするかは測定で決める（提案のみ）。
+
+### 4. 読み手
+
+* `value.Dataset.foe_search_value`（無い決定は NaN）。`save_dataset`/`load_dataset` が読み書きし、古いファイルは長さ 0。
+  `concat_datasets` は列を持たない shard を NaN で埋める（全部持たなければ長さ 0 のまま）。まだ何も学習に使わない。
+* `tools/encode_dataset.py`: `foeSearchValue` を読んで列にし、要約に「side 1 の値を持つ決定数と searchValue との差」を出す。
+  キャッシュは、列を持たない shard のうち**ファイルの 1 行目に `shownIdentities` がある**ものだけ古いとみなす（IKA-127 前の記録には
+  読む値が無いので、全 shard を作り直すことはしない）。旧コードで作った shard を新コードが「古い」と判定し、2 回目は
+  キャッシュから読むことを確かめた。
+* `tools/leaf_calibration.py`: `shownIdentities` があれば「side 0 が side 1 の 4 匹のうち何匹を見ていなかったか」の表を足す
+  （葉は真の局面を読み、`searchValue` は side 0 の信念なので、leaf-srch には「探索の分」と「知らなかった分」が混ざる。
+  0 unseen の行は前者だけ）。`foeSearchValue` があれば両席の値・Brier・平均の Brier を出す。無い記録はそう書いて今までどおり。
+* `selfplay.replay_shown(record)`: 記録の局面だけから `shownIdentities` を作り直す関数（古い記録の読み手用、新しい記録の検査用）。
+
+### 5. 受け入れ（1 コア、heavy.py 経由、`C:/tmp/ika127/`）
+
+master の木（`git archive`）と新しい木で同じ seed を順に回した。hp-share 隠蔽 20 局（seed 11）、公開 6 局（seed 12）、
+value-gen11L＋`--rank-leaf` 隠蔽 4 局（seed 13）。いずれも選出解 `rizabanadohido-value-all` あり。
+
+| 組 | 局 | 決定 | 新フィールドを除いて一致 | 記録＝再生 | 何か隠れていた決定 | 盤面だけだと違う | foeSearchValue | 1 局あたり増分 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 隠蔽 hp-share | 20 | 218 | 20/20 | 218/218 | 155 | 26 | 218/218, 平均 |差| 0.0013 | +1,631 B (+1.59%) |
+| 公開 | 6 | 70 | 6/6 | 70/70（4 匹全部 70/70） | 0 | 0 | 書かない | +1,561 B (+1.43%) |
+| 隠蔽 value | 4 | 54 | 4/4 | 54/54（自己交代 3） | 32 | 20 | 51/54, 平均 |差| 0.0139 | +2,070 B (+1.64%) |
+
+* 「一致」は `engine`・`searchSeconds`・新フィールドを除いた JSON の比較。陰性対照: 旧記録の `searchValue` を 1e-12 ずらすと
+  一致しない（3 組とも False）。消えたキーは 0。
+* 「盤面だけだと違う」は持ち越し無しの `seen_identities` が記録と違った決定数 —— 再生が持ち越しを本当に使っていることの
+  陽性対照（26 と 20）。テストでは IKA-117 の形（無傷で引っ込んだリザードン）で、ターン 2 の記録にリザードンが残り、
+  ターン 2 から始めた再生では落ちることも確かめた。
+* 隠蔽のミラー（同じ 4 匹・同じシート）の 1 ターン目では `searchValue + foeSearchValue = 1`（テスト）。符号・単位を誤ると崩れる。
+* value 葉の 4 局で `foeSearchValue` が無い 3 決定は自己交代。
+
+### 6. 検査と機械
+
+テスト `tests/test_record_both_sides.py`（6 本）と `test_concat_datasets` に 1 本。関係するファイル
+（test_record_both_sides・test_selfplay・test_hidden_search・test_menu_ownership・test_hidden_selfswitch・test_td_target・
+test_concat_datasets・test_value・test_hidden・test_sprt・test_line_endings・test_no_machine_specific_paths）を `-n 0` で
+全部 pass（219 秒）。ruff ok。機械: 自己対局の対 458 秒（1 コア）、テスト 219 秒（1 コア）、見積もりの 1 局 9 秒、
+いずれも heavy.py に記録（--agent IKA-127）。encode_dataset・leaf_calibration の試走は数秒〜十数秒（1 コア、直接）。
+
+### 7. 残り
+
+* `play_game` の `seen` の持ち越しは自己交代の中断局面を見ない。とんぼがえりで出たポケモンが同じターンのうちに無傷で
+  引っ込めば、次の決定の信念から落ちる（IKA-117 と同じ向きの忘れ方）。今回の 30 局では再生と記録が一致しており件数は未測定。
+* `td_target` で両席の値をどう混ぜるか（3 節）は測定待ち。
