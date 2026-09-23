@@ -36,7 +36,7 @@ import numpy as np
 
 from .actions import SideAction, switch_actions_after_faint
 from .equilibrium import EquilibriumError, solve
-from .hidden import completions, seen_slots, shown_species
+from .hidden import completions, seen_identities, seen_slots, shown_species
 from .narrow import narrow
 from .payoff import HP_SHARE, Objective
 from .policy import policy_ranking
@@ -426,6 +426,7 @@ def _bench_weights(
     pos: Position,
     seen: frozenset[int],
     record: GameRecord,
+    leads: frozenset[str] | None = None,
 ) -> dict[tuple[str, ...], float] | None:
     """How likely each way of filling that side's unseen slots is, or None for uniform.
 
@@ -439,10 +440,13 @@ def _bench_weights(
     not happen and is recorded rather than passed over: the fallback is the uniform
     belief this exists to replace, and a silent fallback to the thing being fixed is how
     a fix becomes invisible.
+
+    `leads` is the pair that side led turn 1 with, as `play_game` recorded it; a
+    selection counts only if it led that pair, not merely brought it (IKA-118).
     """
     if bench_prior is None or bench_prior[side] is None:
         return None
-    weights = bench_prior[side].weights(shown_species(pos, side, seen))
+    weights = bench_prior[side].weights(shown_species(pos, side, seen), leads)
     if not weights:
         note = f"bench weights: side {side}'s selection prior explains nothing on board"
         if note not in record.unmodelled:
@@ -569,27 +573,54 @@ def play_game(
     )
     pos = start if start is not None else position_from_sets(reg, own, foe)
     budget = Budget.matrix()
-    # Slots each side has shown, accumulated across turns. A Pokemon that came in and
-    # went back out is still known, and the position alone stops saying so -- so this is
+    # Who each side has shown, accumulated across turns. A Pokemon that came in and went
+    # back out is still known, and the position alone stops saying so -- so this is
     # carried rather than recomputed from the board each time.
-    shown: list[frozenset[int]] = [frozenset(), frozenset()]
+    #
+    # Carried as identities, and turned into this position's slots at every decision.
+    # It used to carry the slots themselves, and `_do_switch` renumbers those: a lead that
+    # went back to the bench unharmed took the index of whoever came in, which nobody had
+    # marked, and the next decision's belief offered worlds without it -- 15.8% of the
+    # move decisions and 23.6% of the replacements in the shipping pool (IKA-117).
+    seen: list[frozenset[str]] = [frozenset(), frozenset()]
+    # Which two each side led with, read off the turn-1 position and carried as names for
+    # the same reason `seen` is (IKA-118). The bench belief conditions on it: a selection
+    # is ordered, and one that brought a lead but planned it for the back is not what this
+    # side played. A game resumed from a later `start` has no turn 1 to read, and stays
+    # None -- conditioned on `seen` alone, as before.
+    leads: list[frozenset[str] | None] = [None, None]
+    if pos.turn == 1:
+        leads = [
+            frozenset(
+                shown_species(
+                    pos,
+                    i,
+                    frozenset(
+                        mon.slot
+                        for mon in pos.sides[i].pokemon
+                        if mon.active_index is not None
+                    ),
+                )
+            )
+            for i in (0, 1)
+        ]
 
     for _step in range(max_turns * 2):
         if pos.ended:
             break
 
+        seen = [seen_identities(pos, i, seen[i]) for i in (0, 1)]
+        shown = [seen_slots(pos, i, seen[i]) for i in (0, 1)]
         owed = replacements_needed(pos)
         if any(owed[0]) or any(owed[1]):
-            shown = [seen_slots(pos, i, shown[i]) for i in (0, 1)]
             pos = _do_replacement_node(
                 reg, rng, pos, owed, record, leaves,
-                sheets=sheets, shown=shown, bench_prior=bench_prior,
+                sheets=sheets, shown=shown, bench_prior=bench_prior, leads=leads,
             )
             continue
 
         own_leaf = leaves[0] if leaves[0] is not None else objective.batch
         foe_leaf = leaves[1] if leaves[1] is not None else objective.batch
-        shown = [seen_slots(pos, i, shown[i]) for i in (0, 1)]
         # Built before the menus, because the menus are ranked from it: a leaf or a policy
         # ordering candidates from the true position would pick *which actions get a
         # number* using a bench nobody has seen, however carefully the matrix over them is
@@ -600,7 +631,9 @@ def play_game(
                 spreads = {
                     side: completions(
                         reg, pos, side, sheets[side], seen=shown[side],
-                        weights=_bench_weights(bench_prior, side, pos, shown[side], record),
+                        weights=_bench_weights(
+                            bench_prior, side, pos, shown[side], record, leads[side]
+                        ),
                     )
                     for side in (0, 1)
                 }
@@ -984,6 +1017,7 @@ def _do_replacement_node(
     sheets: tuple[Sequence[SampledSet], Sequence[SampledSet]] | None = None,
     shown: list[frozenset[int]] | None = None,
     bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None = None,
+    leads: list[frozenset[str] | None] | None = None,
 ) -> Position:
     """Solves and applies the replacement phase.
 
@@ -992,7 +1026,10 @@ def _do_replacement_node(
 
     With `sheets` it is also the node where the *reveal* happens: the Pokemon coming in is
     the one that stops being hidden, and choosing what to send against an opponent whose
-    bench is unknown is the same Bayesian game the move nodes solve.
+    bench is unknown is the same Bayesian game the move nodes solve. `shown` is each
+    side's seen slots in *this* position -- `seen_slots` of the identities `play_game`
+    carries -- and never a set of numbers carried from an earlier one (IKA-117). `leads`
+    is the turn-1 lead pair per side, as `play_game` carries it (IKA-118).
 
     Without them each side now also gets its own matrix. It did not: both strategies came
     off `matrix(pos, leaves[0])`, and this docstring called that a wart and left it,
@@ -1048,7 +1085,10 @@ def _do_replacement_node(
             spreads = {
                 side: completions(
                     reg, pos, side, sheets[side], seen=seen[side],
-                    weights=_bench_weights(bench_prior, side, pos, seen[side], record),
+                    weights=_bench_weights(
+                        bench_prior, side, pos, seen[side], record,
+                        (leads or [None, None])[side],
+                    ),
                 )
                 for side in (0, 1)
             }

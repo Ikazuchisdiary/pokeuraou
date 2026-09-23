@@ -723,8 +723,12 @@ class BenchPrior:
             species=tuple(species),
         )
 
-    def weights(self, seen: Collection[str]) -> dict[tuple[str, ...], float]:
-        return bench_weights(self.selections, self.probabilities, self.species, seen)
+    def weights(
+        self, seen: Collection[str], leads: Collection[str] | None = None
+    ) -> dict[tuple[str, ...], float]:
+        return bench_weights(
+            self.selections, self.probabilities, self.species, seen, leads=leads
+        )
 
 
 def bench_weights(
@@ -732,6 +736,8 @@ def bench_weights(
     probabilities: Sequence[float],
     species: Sequence[str],
     seen: Collection[str],
+    *,
+    leads: Collection[str] | None = None,
 ) -> dict[tuple[str, ...], float]:
     """What a side's unseen members are, given the ones already on the board.
 
@@ -749,6 +755,17 @@ def bench_weights(
     cannot have brought, so it contributes nothing; what is left is renormalised onto the
     species pairs the unseen slots could hold, which is the key `completions` wants.
 
+    `leads` is the pair that led turn 1, spelled like `seen` (a Pokemon's own id and its
+    base form both welcome; the sheet member is picked out). Given, only selections that
+    *led* that pair count. A selection is ordered -- its first two lead, which is why
+    there are ninety and not fifteen -- and containing the leads is not the same as
+    leading them: at turn 1 the seen species are exactly the two leads, so without this a
+    selection that planned one of them for the back, and led something that is not on
+    the field, kept its back pair in the belief. Measured on the gen11L book that was a
+    total variation of about 0.19 under the generation mixture (IKA-118). The lead pair is
+    public from turn 1 and never changes, so it holds for the whole game. Omitted (a game
+    resumed mid-way has no turn 1 to read it from), only `seen` conditions.
+
     An empty result means no selection in the distribution explains the board. The caller
     gets uniform, which is what `completions` does with missing weights, and should say so
     rather than let the disagreement pass unrecorded.
@@ -756,6 +773,14 @@ def bench_weights(
     from .regulation import to_id
 
     sheet = {to_id(name) for name in species}
+    led: frozenset[str] | None = None
+    if leads is not None:
+        led = frozenset(name for name in (to_id(name) for name in leads) if name in sheet)
+        if len(led) != 2:
+            raise ValueError(
+                f"leads {sorted(leads)!r} name {len(led)} sheet members, not the 2 that "
+                f"led; the sheet is {sorted(sheet)!r}"
+            )
     # `seen` arrives holding BOTH a revealed Pokemon's own id and its base form, because
     # the candidate filter needs both to keep a Mega from also being offered as its base.
     # Only one of the pair can be a sheet member, so intersecting picks it out -- and
@@ -770,6 +795,8 @@ def bench_weights(
         brought = [to_id(species[i]) for i in selection]
         if not want.issubset(brought):
             continue
+        if led is not None and frozenset(brought[:2]) != led:
+            continue
         key = tuple(sorted(name for name in brought if name not in want))
         out[key] = out.get(key, 0.0) + float(probability)
     total = sum(out.values())
@@ -777,14 +804,18 @@ def bench_weights(
 
 
 def entry_bench_weights(
-    entry: BookEntry, side_index: int, species: Sequence[str], seen: Collection[str]
+    entry: BookEntry,
+    side_index: int,
+    species: Sequence[str],
+    seen: Collection[str],
+    leads: Collection[str] | None = None,
 ) -> dict[tuple[str, ...], float]:
     """`bench_weights` for one side of a solved entry, in one call.
 
     Delegates rather than repeating `BenchPrior.of`: which side reads one vector and
     which reads a class-weighted average is the part worth having in a single place.
     """
-    return BenchPrior.of(entry, side_index, species).weights(seen)
+    return BenchPrior.of(entry, side_index, species).weights(seen, leads)
 
 
 __all__ = [
