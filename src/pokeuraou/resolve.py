@@ -931,17 +931,30 @@ class _Turn:
             return
         mon.volatiles.append(Effect(id=vid, duration=duration))
 
-    def add_side_condition(self, side: int, cid: str, *, duration: int | None = None) -> None:
+    def add_side_condition(self, side: int, cid: str, *, duration: int | None = None) -> bool:
+        """Showdown's `addSideCondition`, and what it returns (IKA-173).
+
+        A condition that is already up fails unless it has an `onSideRestart`, and only
+        Spikes and Toxic Spikes do -- which fails again at three layers and at two
+        (vendor/pokemon-showdown/sim/side.ts `addSideCondition`, data/moves.ts). So a
+        second Stealth Rock, Sticky Web or Tailwind returns False, and a move whose one
+        effect this was fails with it.
+        """
         existing = self.pos.sides[side].side_condition(cid)
         if existing is not None:
             if cid in ("spikes", "toxicspikes"):
                 cap = 3 if cid == "spikes" else 2
-                existing.layers = min((existing.layers or 1) + 1, cap)
-            return
+                layers = existing.layers or 1
+                if layers >= cap:
+                    return False
+                existing.layers = layers + 1
+                return True
+            return False
         self.pos.sides[side].side_conditions.append(
             Effect(id=cid, duration=duration, layers=1)
         )
         self.log(f"p{side + 1} side +{cid}")
+        return True
 
 
 def _grounded(turn: _Turn, mon: Pokemon, *, ignore_ability: bool = False) -> bool:
@@ -2531,11 +2544,17 @@ def _apply_status_move(
     if raw.get("sideCondition"):
         side_condition = str(raw["sideCondition"])
         # The duration stays the user's: Light Clay and the rest read the source.
-        turn.add_side_condition(
+        laid = turn.add_side_condition(
             _side_condition_side(action, move),
             side_condition,
             duration=_effect_duration(turn, move, side_condition, action.side, action.slot),
         )
+        if not laid:
+            # `moveHit` combines `addSideCondition`'s false into `didSomething`, and none
+            # of these moves does anything else, so the move fails (IKA-173): a second
+            # Stealth Rock or Tailwind, a fourth Spikes. Stomping Tantrum reads it.
+            turn.log(f"{action.label(reg)} failed ({side_condition} already up)")
+            turn.move_failed.add(me)
         if _duration_is_random(move, side_condition):
             turn.unmodelled.add(
                 f"{side_condition} duration (Showdown rolls it; pinned to the low end)"
@@ -3501,6 +3520,35 @@ def _after_hit(
         _mark_force_switch(turn, target)
 
     _on_being_hit(turn, move, target, action.side)
+    _lay_hazard_after_hit(turn, action, move, landed)
+
+
+#: Damaging moves that lay a hazard from their own `onAfterHit` (IKA-173).
+AFTER_HIT_HAZARDS: dict[str, str] = {"stoneaxe": "stealthrock", "ceaselessedge": "spikes"}
+
+
+def _lay_hazard_after_hit(turn: _Turn, action: QueuedAction, move: Move, landed: bool) -> None:
+    """Stone Axe's Stealth Rock and Ceaseless Edge's Spikes (IKA-173).
+
+        onAfterHit(target, source, move) {
+            if (!move.hasSheerForce) {
+                for (const side of source.side.foeSidesWithConditions()) {
+                    side.addSideCondition('stealthrock');
+
+    `spreadMoveHit` runs it for each target that took numeric damage, after `DamagingHit`
+    and only `if (moveData.onAfterHit && pokemon.hp)` (sim/battle-actions.ts). So the
+    user's foe's side -- whoever was hit, a partner included, and a target the hit knocked
+    out -- and not after a miss, a Protect, Sheer Force (the empty secondary is what it
+    boosts), or Rough Skin or a Rocky Helmet that knocked the user out. The hit laid
+    nothing before.
+    """
+    cid = AFTER_HIT_HAZARDS.get(move.id)
+    if cid is None or not landed:
+        return
+    attacker = turn.mon_at(action.side, action.slot)
+    if attacker is None or attacker.fainted or attacker.ability == "sheerforce":
+        return
+    turn.add_side_condition(1 - action.side, cid)
 
 
 def _after_move(turn: _Turn, action: QueuedAction, move: Move) -> None:
@@ -3578,21 +3626,41 @@ ON_HIT_ABILITIES: dict[str, tuple[dict[str, int], tuple[str, ...]]] = {
 ON_HIT_ABILITIES_UNMODELLED = frozenset({"angerpoint", "berserk", "angershell", "cursedbody"})
 
 
+def _toxic_debris(
+    turn: _Turn, move: Move, target: tuple[int, int], attacker_side: int
+) -> None:
+    """Toxic Debris's Toxic Spikes, for a hit on its holder at `target` (IKA-173).
+
+        onDamagingHit(damage, target, source, move) {
+            const side = source.isAlly(target) ? source.side.foe : source.side;
+            const toxicSpikes = side.sideConditions['toxicspikes'];
+            if (move.category === 'Physical' && (!toxicSpikes || toxicSpikes.layers < 2)) {
+
+    The attacker's side, or its foe's for a partner's hit: the side across from Glimmora
+    either way, so `attacker_side` is not read. `onDamagingHit` runs before the faint is
+    processed, so a Glimmora knocked out by the hit lays them too. Before, only a foe's
+    hit on a Glimmora that survived did: a partner's Earthquake laid nothing.
+    """
+    del attacker_side
+    if move.category != "Physical":
+        return
+    across = 1 - target[0]
+    existing = turn.pos.sides[across].side_condition("toxicspikes")
+    if existing is None or (existing.layers or 1) < 2:
+        turn.add_side_condition(across, "toxicspikes")
+
+
 def _on_being_hit(
     turn: _Turn, move: Move, target: tuple[int, int], attacker_side: int
 ) -> None:
     """Abilities that trigger on the defender taking a hit."""
     defender = turn.mon_at(*target)
-    if defender is None or defender.fainted:
+    if defender is None:
         return
-    if (
-        defender.ability == "toxicdebris"
-        and move.category == "Physical"
-        and target[0] != attacker_side
-    ):
-        existing = turn.pos.sides[attacker_side].side_condition("toxicspikes")
-        if existing is None or (existing.layers or 1) < 2:
-            turn.add_side_condition(attacker_side, "toxicspikes")
+    if defender.ability == "toxicdebris":
+        _toxic_debris(turn, move, target, attacker_side)
+    if defender.fainted:
+        return
 
     entry = ON_HIT_ABILITIES.get(defender.ability)
     if entry is not None:

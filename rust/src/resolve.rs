@@ -581,7 +581,10 @@ impl<'a> Turn<'a> {
         mon.volatiles.push(effect);
     }
 
-    pub(crate) fn add_side_condition(&mut self, side: usize, cid: &str, duration: Option<i64>) {
+    /// Showdown's `addSideCondition`, and what it returns (IKA-173): a condition already
+    /// up fails unless it has an `onSideRestart`, and only Spikes and Toxic Spikes do,
+    /// which fail again at three layers and at two. Python's `_Turn.add_side_condition`.
+    pub(crate) fn add_side_condition(&mut self, side: usize, cid: &str, duration: Option<i64>) -> bool {
         if let Some(existing) = self.pos.sides[side]
             .side_conditions
             .iter_mut()
@@ -589,14 +592,20 @@ impl<'a> Turn<'a> {
         {
             if cid == "spikes" || cid == "toxicspikes" {
                 let cap = if cid == "spikes" { 3 } else { 2 };
-                existing.layers = Some((existing.layers.unwrap_or(1) + 1).min(cap));
+                let layers = existing.layers.unwrap_or(1);
+                if layers >= cap {
+                    return false;
+                }
+                existing.layers = Some(layers + 1);
+                return true;
             }
-            return;
+            return false;
         }
         let mut effect = Effect::new(Id::new(cid));
         effect.duration = duration;
         effect.layers = Some(1);
         self.pos.sides[side].side_conditions.push(effect);
+        true
     }
 }
 
