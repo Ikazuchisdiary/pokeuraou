@@ -5,13 +5,16 @@
 //! the caller reports that rather than printing a number with no basis.
 
 use crate::battler::Battler;
+use crate::id::Id;
 use crate::position::Types;
 use crate::reg::Reg;
 
+/// Weather and terrain are inline ids, as on the field they are copied from: as `String`s
+/// they were two allocations per hit and per damage call without one (IKA-101).
 #[derive(Debug, Clone, Default, serde::Deserialize)]
 pub struct MoveContext {
-    pub weather: Option<String>,
-    pub terrain: Option<String>,
+    pub weather: Option<Id>,
+    pub terrain: Option<Id>,
     pub side_total_fainted: i64,
     pub times_attacked: i64,
     pub target_hurt_this_turn: bool,
@@ -20,6 +23,18 @@ pub struct MoveContext {
     pub hit_index: i64,
     pub moving_last: bool,
     pub ally_used_same_move: bool,
+}
+
+impl MoveContext {
+    #[inline]
+    pub fn weather_name(&self) -> Option<&str> {
+        self.weather.as_ref().map(|w| w.as_str())
+    }
+
+    #[inline]
+    pub fn terrain_name(&self) -> Option<&str> {
+        self.terrain.as_ref().map(|t| t.as_str())
+    }
 }
 
 const WEIGHT_BP: [(f64, i64); 5] =
@@ -89,21 +104,25 @@ pub fn fixed_damage(move_id: &str, attacker: &Battler, defender: &Battler) -> Op
 }
 
 /// A move's own `onModifyType`, or None when the declared type stands.
-pub fn effective_type(move_id: &str, attacker: &Battler, ctx: &MoveContext) -> Option<String> {
+pub fn effective_type(
+    move_id: &str,
+    attacker: &Battler,
+    ctx: &MoveContext,
+) -> Option<&'static str> {
     match move_id {
-        "weatherball" => weather_ball_type(ctx.weather.as_deref()).map(String::from),
-        "terrainpulse" => terrain_pulse_type(ctx.terrain.as_deref()).map(String::from),
+        "weatherball" => weather_ball_type(ctx.weather_name()),
+        "terrainpulse" => terrain_pulse_type(ctx.terrain_name()),
         "aurawheel" => {
             if attacker.species.as_str() == "morpekohangry" {
-                Some("Dark".to_string())
+                Some("Dark")
             } else {
                 None
             }
         }
         "ragingbull" => match attacker.species.as_str() {
-            "taurospaldeacombat" => Some("Fighting".to_string()),
-            "taurospaldeablaze" => Some("Fire".to_string()),
-            "taurospaldeaaqua" => Some("Water".to_string()),
+            "taurospaldeacombat" => Some("Fighting"),
+            "taurospaldeablaze" => Some("Fire"),
+            "taurospaldeaaqua" => Some("Water"),
             _ => None,
         },
         _ => None,
@@ -128,7 +147,7 @@ pub fn effectiveness_override(
     };
     match move_id {
         "freezedry" => {
-            let row = reg.typechart.get(move_type);
+            let row = &reg.type_chart[reg.type_slot_of(move_type)];
             let mut mult = 1.0;
             let mut steps = 0i64;
             for t in defender_types.as_slice() {
@@ -137,7 +156,7 @@ pub fn effectiveness_override(
                     steps += 1;
                     continue;
                 }
-                let value = row.and_then(|r| r.get(t.as_str())).copied().unwrap_or(1.0);
+                let value = row[reg.type_slot_of(t.as_str())];
                 mult *= value;
                 steps += step(value);
             }
@@ -148,12 +167,8 @@ pub fn effectiveness_override(
             let mut steps = 0i64;
             for t in defender_types.as_slice() {
                 for name in ["Fighting", "Flying"] {
-                    let value = reg
-                        .typechart
-                        .get(name)
-                        .and_then(|r| r.get(t.as_str()))
-                        .copied()
-                        .unwrap_or(1.0);
+                    let value =
+                        reg.type_chart[reg.type_slot_of(name)][reg.type_slot_of(t.as_str())];
                     mult *= value;
                     steps += step(value);
                 }
@@ -263,15 +278,15 @@ pub fn base_power(
             return Some(20 + 20 * positive);
         }
         "weatherball" => {
-            let doubled = weather_ball_type(ctx.weather.as_deref()).is_some();
+            let doubled = weather_ball_type(ctx.weather_name()).is_some();
             return Some(if doubled { declared * 2 } else { declared });
         }
         "terrainpulse" => {
-            let doubled = terrain_pulse_type(ctx.terrain.as_deref()).is_some();
+            let doubled = terrain_pulse_type(ctx.terrain_name()).is_some();
             return Some(if doubled { declared * 2 } else { declared });
         }
         "risingvoltage" => {
-            return Some(if ctx.terrain.as_deref() == Some("electricterrain") {
+            return Some(if ctx.terrain_name() == Some("electricterrain") {
                 declared * 2
             } else {
                 declared
@@ -295,7 +310,7 @@ pub fn base_power(
 
     if matches!(move_id, "hex" | "infernalparade" | "barbbarrage" | "venoshock") {
         let statused = if move_id == "venoshock" {
-            matches!(defender.status.map(|s| s.as_str().to_string()).as_deref(), Some("psn") | Some("tox"))
+            matches!(defender.status.as_ref().map(|s| s.as_str()), Some("psn") | Some("tox"))
         } else {
             defender.status.is_some()
         };
@@ -308,48 +323,52 @@ pub fn base_power(
     None
 }
 
-/// A move's own `onBasePower` chain entries, as (label, numerator, denominator).
+/// A move's own `onBasePower` chain entry, as (label, numerator, denominator). At most
+/// one ever applies, so it is an `Option` rather than a `Vec` (IKA-101).
 pub fn base_power_modifiers(
     reg: &Reg,
     move_id: &str,
     attacker: &Battler,
     defender: &Battler,
     ctx: &MoveContext,
-) -> Vec<(&'static str, f64, f64)> {
+) -> Option<(&'static str, f64, f64)> {
     if move_id == "facade"
         && attacker.status.is_some()
         && attacker.status.map(|s| s.as_str() != "slp").unwrap_or(false)
     {
-        return vec![("facade", 2.0, 1.0)];
+        return Some(("facade", 2.0, 1.0));
     }
     if move_id == "knockoff"
-        && reg.item_is_removable(defender.species.as_str(), defender.item.map(|i| i.as_str().to_string()).as_deref())
+        && reg.item_is_removable(
+            defender.species.as_str(),
+            defender.item.as_ref().map(|i| i.as_str()),
+        )
     {
-        return vec![("knockoff", 1.5, 1.0)];
+        return Some(("knockoff", 1.5, 1.0));
     }
-    if matches!(move_id, "solarbeam" | "solarblade") && solar_weak(ctx.weather.as_deref()) {
-        return vec![("solar", 0.5, 1.0)];
+    if matches!(move_id, "solarbeam" | "solarblade") && solar_weak(ctx.weather_name()) {
+        return Some(("solar", 0.5, 1.0));
     }
-    if move_id == "expandingforce" && ctx.terrain.as_deref() == Some("psychicterrain") {
-        return vec![("expandingforce", 1.5, 1.0)];
+    if move_id == "expandingforce" && ctx.terrain_name() == Some("psychicterrain") {
+        return Some(("expandingforce", 1.5, 1.0));
     }
-    Vec::new()
+    None
 }
 
-/// Terrain's `onBasePower`, for a grounded user's matching type.
+/// Terrain's `onBasePower`, for a grounded user's matching type. At most one.
 pub fn terrain_modifiers(
     move_type: &str,
     attacker_grounded: bool,
     terrain: Option<&str>,
-) -> Vec<(&'static str, f64, f64)> {
+) -> Option<(&'static str, f64, f64)> {
     if !attacker_grounded {
-        return Vec::new();
+        return None;
     }
     match (terrain, move_type) {
-        (Some("electricterrain"), "Electric") => vec![("electricterrain", 5325.0, 4096.0)],
-        (Some("grassyterrain"), "Grass") => vec![("grassyterrain", 5325.0, 4096.0)],
-        (Some("psychicterrain"), "Psychic") => vec![("psychicterrain", 5325.0, 4096.0)],
-        (Some("mistyterrain"), "Dragon") => vec![("mistyterrain", 2048.0, 4096.0)],
-        _ => Vec::new(),
+        (Some("electricterrain"), "Electric") => Some(("electricterrain", 5325.0, 4096.0)),
+        (Some("grassyterrain"), "Grass") => Some(("grassyterrain", 5325.0, 4096.0)),
+        (Some("psychicterrain"), "Psychic") => Some(("psychicterrain", 5325.0, 4096.0)),
+        (Some("mistyterrain"), "Dragon") => Some(("mistyterrain", 2048.0, 4096.0)),
+        _ => None,
     }
 }

@@ -131,7 +131,7 @@ pub fn move_priority(reg: &Reg, move_id: &str, mon: &Battler, field: &FieldState
         if mv.mtype == "Flying" && mon.at_full_hp() {
             priority += 1;
         }
-    } else if mon.ability == "triage" && mv.has_flag("heal") {
+    } else if mon.ability == "triage" && mv.has_flag(crate::reg::F_HEAL) {
         priority += 3;
     }
     if move_id == "grassyglide" && is(field.terrain, "grassyterrain") {

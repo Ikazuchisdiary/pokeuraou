@@ -729,7 +729,7 @@ fn item_handled(item: &str) -> bool {
 }
 
 /// Move fields this port does not implement. A move carrying one is refused.
-const UNHANDLED_MOVE_FIELDS: [&str; 10] = [
+pub(crate) const UNHANDLED_MOVE_FIELDS: [&str; 10] = [
     "damageCallback",
     "multiaccuracy",
     "selfdestruct",
@@ -776,10 +776,9 @@ fn check_move_supported(reg: &Reg, move_id: &str) -> Result<(), String> {
     let Some(mv) = reg.moves.get(move_id) else {
         return Err(format!("move not in the regulation: {move_id}"));
     };
-    for field in UNHANDLED_MOVE_FIELDS {
-        if mv.raw.get(field).map(|v| !v.is_null()).unwrap_or(false) {
-            return Err(format!("move field {field}: {move_id}"));
-        }
+    // The first of UNHANDLED_MOVE_FIELDS the entry has non-null, found once at load.
+    if let Some(field) = mv.unhandled_field {
+        return Err(format!("move field {field}: {move_id}"));
     }
     // A status move Python does not fully model gets the declarative fields and a report,
     // and nothing else -- which is exactly what this port does with one too. So refusing is
@@ -2237,8 +2236,8 @@ fn switch_in_ability(turn: &mut Turn, side: usize, slot: usize) {
         _ => None,
     };
     if let Some(weather) = weather {
-        let current = turn.pos.field.weather.map(|w| w.as_str().to_string());
-        if current.as_deref() != Some(weather) {
+        let current = turn.pos.field.weather;
+        if current.as_ref().map(|w| w.as_str()) != Some(weather) {
             turn.pos.field.weather = Some(Id::new(weather));
             let rock = match weather {
                 "sunnyday" => Some("heatrock"),
@@ -2346,12 +2345,12 @@ pub(crate) fn change_forme(
     species_id: &str,
 ) -> Result<(), String> {
     let Some(entry) = reg.species.get(species_id) else { return Ok(()) };
-    let types: Vec<Id> = entry.types.iter().map(|t| Id::new(t)).collect();
+    let types = entry.type_ids;
     let maxhp_before = {
         let Some(mon) = turn.mon_at_mut(side, slot) else { return Ok(()) };
         let before = mon.maxhp;
         mon.species = Id::new(species_id);
-        mon.types = Types::from_slice(&types);
+        mon.types = types;
         before
     };
     {
@@ -2384,20 +2383,20 @@ fn do_mega(reg: &Reg, turn: &mut Turn, action: &QueuedAction) -> Result<(), Stri
         return Ok(());
     };
     let target_id = crate::reg::to_id(&target);
-    let Some(entry) = reg.species.get(&target_id) else {
+    let Some(entry) = reg.species.get(target_id.as_str()) else {
         return Err(format!("mega target not in the regulation: {target}"));
     };
     let ability = crate::reg::to_id(&entry.abilities[0]);
     if !ability_handled(&ability) {
         return Err(format!("ability: {ability}"));
     }
-    let types: Vec<Id> = entry.types.iter().map(|t| Id::new(t)).collect();
+    let types = entry.type_ids;
     let maxhp_before;
     {
         let mon = turn.mon_at_mut(action.side, action.slot).unwrap();
         maxhp_before = mon.maxhp;
         mon.species = Id::new(&target_id);
-        mon.types = Types::from_slice(&types);
+        mon.types = types;
         mon.is_mega = true;
         mon.ability = Id::new(&ability);
     }

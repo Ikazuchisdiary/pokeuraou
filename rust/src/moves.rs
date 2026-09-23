@@ -10,7 +10,7 @@ use crate::effects::resist_berry;
 use crate::id::Id;
 use crate::moveinfo::MoveContext;
 use crate::position::{Effect, Position};
-use crate::reg::{Move, Reg};
+use crate::reg::{Move, Reg, F_CONTACT, F_FAILENCORE, F_POWDER, F_PROTECT};
 use crate::resolve::{
     change_forme, check_white_herb, grounded, stratified_rolls, Budget, Outcome, Slot,
     Turn,
@@ -405,7 +405,7 @@ fn use_move<'a>(
         return Ok(vec![(1.0, turn)]);
     }
 
-    if mv.raw_bool("breaksProtect") {
+    if mv.breaks_protect {
         return Err("breaksProtect move".into());
     }
 
@@ -593,7 +593,7 @@ fn blocked_by_protect(
     mv: &Move,
     target: Slot,
 ) -> Option<String> {
-    if !mv.has_flag("protect") || mv.raw_bool("breaksProtect") {
+    if !mv.has_flag(F_PROTECT) || mv.breaks_protect {
         return None;
     }
     let side = &turn.pos.sides[target.0];
@@ -621,7 +621,7 @@ fn blocked_by_protect(
 }
 
 fn multihit_counts(mv: &Move, budget: &Budget) -> Vec<(usize, f64)> {
-    let Some(multihit) = mv.raw.get("multihit") else { return vec![(1, 1.0)] };
+    let Some(multihit) = mv.multihit.as_ref() else { return vec![(1, 1.0)] };
     if let Some(fixed) = multihit.as_u64() {
         return vec![(fixed as usize, 1.0)];
     }
@@ -693,8 +693,8 @@ fn hit_target<'a>(
 
     let ctx_started = crate::resolve::phase_start();
     let move_ctx = MoveContext {
-        weather: turn.pos.field.weather.map(|w| w.as_str().to_string()),
-        terrain: turn.pos.field.terrain.map(|t| t.as_str().to_string()),
+        weather: turn.pos.field.weather,
+        terrain: turn.pos.field.terrain,
         side_total_fainted: turn.pos.sides[action.side]
             .pokemon
             .iter()
@@ -821,7 +821,7 @@ fn hit_target<'a>(
 }
 
 fn accuracy_of(turn: &Turn, mv: &Move, attacker: &Battler, defender: &Battler) -> f64 {
-    if mv.accuracy.is_none() || mv.raw_bool("alwaysHit") {
+    if mv.accuracy.is_none() || mv.always_hit {
         return 1.0;
     }
     if attacker.ability == "noguard" || defender.ability == "noguard" {
@@ -831,15 +831,15 @@ fn accuracy_of(turn: &Turn, mv: &Move, attacker: &Battler, defender: &Battler) -
         return 1.0;
     }
     let mut accuracy = mv.accuracy.unwrap() as f64;
-    let weather = turn.pos.field.weather.map(|w| w.as_str().to_string());
-    if mv.id == "blizzard" && matches!(weather.as_deref(), Some("hail" | "snowscape" | "snow")) {
+    let weather = turn.pos.field.weather.as_ref().map(|w| w.as_str());
+    if mv.id == "blizzard" && matches!(weather, Some("hail" | "snowscape" | "snow")) {
         return 1.0;
     }
     if mv.id == "thunder" || mv.id == "hurricane" {
-        if matches!(weather.as_deref(), Some("raindance" | "primordialsea")) {
+        if matches!(weather, Some("raindance" | "primordialsea")) {
             return 1.0;
         }
-        if matches!(weather.as_deref(), Some("sunnyday" | "desolateland")) {
+        if matches!(weather, Some("sunnyday" | "desolateland")) {
             accuracy = 50.0;
         }
     }
@@ -855,7 +855,7 @@ fn accuracy_of(turn: &Turn, mv: &Move, attacker: &Battler, defender: &Battler) -
     if is(defender.item, "brightpowder") {
         accuracy *= 0.9;
     }
-    if !mv.raw_bool("ignoreEvasion") {
+    if !mv.ignore_evasion {
         let stages = (attacker.boost("accuracy") - defender.boost("evasion")).clamp(-6, 6);
         let ratio = if stages >= 0 {
             (3.0 + stages as f64) / 3.0
@@ -873,7 +873,7 @@ fn protect_punish(
     mv: &Move,
     blocked: &str,
 ) -> Result<(), String> {
-    if !mv.has_flag("contact") {
+    if !mv.has_flag(F_CONTACT) {
         return Ok(());
     }
     let me = (action.side, action.slot);
@@ -958,7 +958,7 @@ fn after_hit(
     let defender_alive = matches!(turn.mon_at(target.0, target.1), Some(m) if !m.fainted);
 
     if defender_alive {
-        if let Some(vid) = mv.raw_str("volatileStatus") {
+        if let Some(vid) = mv.volatile_status.as_deref() {
             let vid = vid.to_string();
             if !crate::resolve::volatile_is_handled(&vid) {
                 return Err(format!("move volatile: {vid}"));
@@ -978,7 +978,7 @@ fn after_hit(
                 }
             }
         }
-        if let Some(status) = mv.raw_str("status") {
+        if let Some(status) = mv.status.as_deref() {
             let status = status.to_string();
             turn.apply_status(target.0, target.1, &status)?;
         }
@@ -1015,7 +1015,7 @@ fn after_hit(
         }
     }
 
-    if mv.has_flag("contact") && dealt > 0 {
+    if mv.has_flag(F_CONTACT) && dealt > 0 {
         let (ability, item) = match turn.mon_at(target.0, target.1) {
             None => (None, None),
             Some(mon) => (Some(mon.ability), mon.item),
@@ -1038,7 +1038,7 @@ fn after_hit(
     }
 
     if matches!(attacker_ability_of(turn, me), Some(a) if a.as_str() == "poisontouch")
-        && mv.has_flag("contact")
+        && mv.has_flag(F_CONTACT)
     {
         turn.report("ability: poisontouch (30% poison not branched)");
     }
@@ -1086,8 +1086,8 @@ fn after_hit(
     }
 
     let attacker_ability = turn.mon_at(me.0, me.1).map(|m| m.ability);
-    if let Some(list) = mv.raw.get("secondaries").and_then(Value::as_array) {
-        for secondary in list {
+    if !mv.secondaries.is_empty() {
+        for secondary in &mv.secondaries {
             if matches!(attacker_ability, Some(a) if a.as_str() == "sheerforce") {
                 continue;
             }
@@ -1115,7 +1115,7 @@ fn after_hit(
         }
     }
 
-    if mv.raw_bool("forceSwitch") {
+    if mv.force_switch {
         return Err("forceSwitch move".into());
     }
 
@@ -1291,14 +1291,14 @@ fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), S
     let me = (action.side, action.slot);
     let total = turn.move_damage_total;
 
-    if let Some(drain) = mv.raw.get("drain") {
+    if let Some(drain) = mv.drain.as_ref() {
         if total > 0 {
             let amount = round_fraction(total, drain);
             turn.heal(me.0, me.1, amount);
         }
     }
     let rockhead = matches!(turn.mon_at(me.0, me.1), Some(m) if m.ability == "rockhead");
-    if let Some(recoil) = mv.raw.get("recoil") {
+    if let Some(recoil) = mv.recoil.as_ref() {
         if total > 0 && !rockhead {
             let amount = round_fraction(total, recoil);
             turn.deal_damage(me.0, me.1, amount, false)?;
@@ -1318,7 +1318,7 @@ fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), S
     let connected = turn.move_connected;
     let alive = matches!(turn.mon_at(me.0, me.1), Some(m) if !m.fainted);
     if alive && connected {
-        if let Some(self_effect) = mv.raw.get("self") {
+        if let Some(self_effect) = mv.self_effect.as_ref() {
             if let Some(boosts) = self_effect.get("boosts").and_then(Value::as_object) {
                 let table: Vec<(&str, i64)> = boosts
                     .iter()
@@ -1334,12 +1334,7 @@ fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), S
                 turn.add_volatile(me.0, me.1, &vid, None);
             }
         }
-        if let Some(boosts) = mv
-            .raw
-            .get("selfBoost")
-            .and_then(|s| s.get("boosts"))
-            .and_then(Value::as_object)
-        {
+        if let Some(boosts) = mv.self_boost_boosts.as_ref() {
             let table: Vec<(&str, i64)> = boosts
                 .iter()
                 .map(|(stat, value)| (stat.as_str(), value.as_i64().unwrap_or(0)))
@@ -1348,7 +1343,7 @@ fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), S
         }
     }
 
-    if mv.raw_bool("selfSwitch") && turn.move_connected {
+    if mv.self_switch && turn.move_connected {
         mark_self_switch(turn, action);
     }
 
@@ -1402,7 +1397,7 @@ fn do_status_move<'a>(
         }
     }
 
-    if mv.raw_bool("stallingMove") {
+    if mv.stalling_move {
         return do_protect(turn, action, mv, &budget);
     }
 
@@ -1440,7 +1435,7 @@ fn immune_to_move(
     let self_targeted = target == (action.side, action.slot);
     let types = turn.types_of(defender);
 
-    if mv.has_flag("powder") && !self_targeted {
+    if mv.has_flag(F_POWDER) && !self_targeted {
         let immune = reg
             .effect_immunities
             .get("powder")
@@ -1537,7 +1532,7 @@ fn apply_encore(turn: &mut Turn, side: usize, slot: usize, mv: &Move) -> bool {
     }
     match turn.reg.moves.get(last_move.as_str()) {
         None => return false,
-        Some(last) if last.has_flag("failencore") => return false,
+        Some(last) if last.has_flag(F_FAILENCORE) => return false,
         Some(_) => {}
     }
     let has_pp = match turn.mon_at(side, slot) {
@@ -1672,7 +1667,7 @@ fn apply_status_move(
     let me = (action.side, action.slot);
     let mut suppress_self_switch = false;
 
-    if let Some(condition) = mv.raw_str("sideCondition") {
+    if let Some(condition) = mv.side_condition.as_deref() {
         let condition = condition.to_string();
         let duration = effect_duration(turn, mv, &condition, action.side, action.slot);
         if duration_is_rolled(mv, &condition) {
@@ -1682,19 +1677,19 @@ fn apply_status_move(
         }
         turn.add_side_condition(action.side, &condition, duration);
     }
-    if let Some(weather) = mv.raw_str("weather") {
+    if let Some(weather) = mv.weather.as_deref() {
         let weather = weather.to_lowercase().replace(' ', "");
         turn.pos.field.weather = Some(Id::new(&weather));
         turn.pos.field.weather_duration =
             Some(effect_duration(turn, mv, &weather, action.side, action.slot).unwrap_or(5));
     }
-    if let Some(terrain) = mv.raw_str("terrain") {
+    if let Some(terrain) = mv.terrain.as_deref() {
         let terrain = terrain.to_lowercase().replace(' ', "");
         turn.pos.field.terrain = Some(Id::new(&terrain));
         turn.pos.field.terrain_duration =
             Some(effect_duration(turn, mv, &terrain, action.side, action.slot).unwrap_or(5));
     }
-    if let Some(pseudo) = mv.raw_str("pseudoWeather") {
+    if let Some(pseudo) = mv.pseudo_weather.as_deref() {
         let pid = pseudo.to_lowercase().replace(' ', "");
         let already = turn.pos.field.has_pseudo_weather(&pid);
         let toggling = matches!(pid.as_str(), "trickroom" | "magicroom" | "wonderroom");
@@ -1709,7 +1704,7 @@ fn apply_status_move(
         }
     }
 
-    if let Some(self_effect) = mv.raw.get("self") {
+    if let Some(self_effect) = mv.self_effect.as_ref() {
         if let Some(boosts) = self_effect.get("boosts").and_then(Value::as_object) {
             let table: Vec<(&str, i64)> = boosts
                 .iter()
@@ -1739,11 +1734,11 @@ fn apply_status_move(
                 .collect();
             turn.apply_boosts(target.0, target.1, &table, !own_side);
         }
-        if let Some(status) = mv.raw_str("status") {
+        if let Some(status) = mv.status.as_deref() {
             let status = status.to_string();
             turn.apply_status(target.0, target.1, &status)?;
         }
-        if let Some(vid) = mv.raw_str("volatileStatus") {
+        if let Some(vid) = mv.volatile_status.as_deref() {
             let vid = vid.to_string();
             if vid == "encore" {
                 if !apply_encore(turn, target.0, target.1, mv) {
@@ -1814,10 +1809,10 @@ fn apply_status_move(
     {
         turn.report(format!("status move: {}", mv.id));
     }
-    if mv.raw_bool("selfSwitch") && !suppress_self_switch {
+    if mv.self_switch && !suppress_self_switch {
         mark_self_switch(turn, action);
     }
-    if mv.raw_bool("forceSwitch") {
+    if mv.force_switch {
         return Err("forceSwitch status move".into());
     }
     let _ = reg;

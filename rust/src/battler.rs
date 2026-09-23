@@ -143,8 +143,7 @@ impl Battler {
 }
 
 fn species_types(species: &crate::reg::Species) -> Types {
-    let ids: Vec<Id> = species.types.iter().map(|t| Id::new(t)).collect();
-    Types::from_slice(&ids)
+    species.type_ids
 }
 
 /// The field as the calculator sees it. Owned ids, because the resolver rebuilds it

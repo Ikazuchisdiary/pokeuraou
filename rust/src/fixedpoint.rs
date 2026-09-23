@@ -44,24 +44,27 @@ pub fn modify(value: i64, num: f64, den: f64) -> i64 {
 }
 
 /// One event's modifier accumulator. Chaining rounds at each step, so order matters.
+///
+/// The label names the entry for a reader of the call site and is not kept: the list of
+/// applied labels this used to push to was read by nothing, and it was an allocation on
+/// every chain with an entry (IKA-101). A report that wants it back should collect it
+/// behind the `profile` feature rather than on every hit.
 #[derive(Debug, Clone)]
 pub struct Chain {
     pub modifier: i64,
-    pub applied: Vec<(&'static str, i64)>,
 }
 
 impl Chain {
     pub fn new() -> Self {
-        Chain { modifier: ONE, applied: Vec::new() }
+        Chain { modifier: ONE }
     }
 
     pub fn add(&mut self, num: f64, den: f64, label: &'static str) {
         self.add_fp(to_fp(num, den), label);
     }
 
-    pub fn add_fp(&mut self, next: i64, label: &'static str) {
+    pub fn add_fp(&mut self, next: i64, _label: &'static str) {
         self.modifier = (self.modifier * next + 2048) >> 12;
-        self.applied.push((label, next));
     }
 
     #[inline]

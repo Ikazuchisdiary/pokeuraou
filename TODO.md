@@ -7105,3 +7105,76 @@ rho_S は「1つの game index の、両席の得点の和」の2本間の相関
   ものは無い（直下の2本を含めて確認）
 * 同じビルドの再走が同一にならない組が出たら（非決定性）、そのときは 1/(1+rho) の問いが本物になる。
   いまの3組には無い
+
+## 9/23 — IKA-101: damage.calculate の検索と確保を型付きの表に —— 答えは1ビットも動かず、calculate の確保は 25.5 → 0 回/ターン
+
+### 1. 答えた問い
+
+「ダメージ計算から検索と確保を抜くと、ビット単位で同じ答えのまま何が減るか」のうち、**回数**の半分。
+速さ（1ターン・ノード充填）は測っていない（下の 5）。
+
+### 2. 何を変えたか
+
+* `Reg::load` で技の `raw`（serde_json の BTreeMap）から読んでいたキーを型付きのフィールドに:
+  `raw_bool` 14本（真偽判定そのまま）、`raw_str` 10本（空文字は None のまま。`override*Pokemon` の2本は
+  比較済みの bool）、`critModifier`
+  （既定 1.5）、`ignoreImmunity`（true／型の一覧）、`multihit`・`secondaries`・`drain`・`recoil`・`self`・
+  `selfBoost.boosts`、`resolve` の未対応フィールドの最初の1つ。`raw_bool`/`raw_str`/`raw_f64` は消した
+  （読み残しがあればコンパイルが落ちる）。`raw` は状態技の `boosts`・`heal`・`durations`・`hasCustomCode` 用に残す
+* `category` は enum、`mtype` は `Id`、`flags` はビット集合（コードが読む12個。`has_flag` はビットしか取らない）
+* 相性表は `[[f64; 32]; 32]`（最後の添字が「表に無い型」で行・列とも 1.0 ＝ 旧 `unwrap_or(1.0)` 2つ）。
+  `calculate` は技の型と防御側の型の添字を1回だけ引き、免疫と相性で共有する（前は同じ積を2回）
+* 技と種族の表を FNV（`Id` 鍵、`&str` で引ける）。種族に `type_ids: Types` を持たせ、`Vec` を集めない
+* 確保: `MoveContext` の天候・地形を `Option<Id>`（IKA-103 と重なる分。先にやったのでここで消した）、
+  `calculate` の修飾子一覧4本・場の特性2本をスタック上の小さな配列に、技・地形補正と `effective_type` を
+  `Option`、`Chain.applied`（読む箇所が無かった）を削除、`venoshock`・命中・天候特性の `to_string()`
+* 触った外周: `effects.rs`（`Ctx.move_flags` の型）、`score.rs`・`speed.rs`（1行ずつ、コンパイルのため）、
+  `battler.rs`（`species_types`）、`fixedpoint.rs`（`Chain`）
+
+### 3. 結果と確かめたこと
+
+```
+  damage 差分（Python の答えと）  合成 23,630 / 実戦 8,590 / 場面 1,018 = 33,238件   0 乖離
+  turns（Python と、1e-12）       955/955 一致、roundtrip 3,451/3,451
+  turns（変更前バイナリとバイト比較、node の resolve）
+                                  955 ケースの重み・3,713 分岐の局面すべて同じ行
+  ノード充填（変更前とバイト比較、diff_node と同じ集め方）
+                                  21 ノード × 7,560 セル、matrix・exact とも 21/21 ノードがビット一致
+  diff_node.py（Python と）        前後とも bit-identical 11934/14832、最大差 3.331e-16 —— 同じ数字
+  生成リプレイ w12 局0〜23        変更前の木 24/24、変更後 24/24、幅16 0/24
+  tests                           test_rust_node 13 passed、test_damage_diff 5 passed（-n 0）
+```
+
+**正の対照**（コミットしない1本）: 相性表から Fire→Grass だけを落としたバイナリで、damage 差分
+1,018件中134・8,590件中90が乖離（合成は0 —— その組が無い）、turns 12誤り、バイト比較で 12ケース・
+141分岐が別の行、ノード 11/21 が不一致、リプレイ 6/24（18局が動く）。検査は表の中身を見ている。
+
+**確保の回数**（`--features count-allocations`、`turns rust/turns.json 3`、回/ターン）:
+
+```
+                変更前   変更後
+  全体          568.6    529.2   (-39.4)
+  hit_target    261.7    224.6
+  calculate      25.5      0.0
+  clone+ctx       5.9      0.0
+  after_hit      27.5     27.5
+```
+
+複製 23.3・ダメージ 7.5・強制コピー 24.6・Battler 48.1 回/ターンは前後で同じ（仕事は同じ）。
+fixture は README の `turns-wide.json` ではなく本体の `rust/turns.json`（955件）なので 429 とは比べない。
+
+### 4. 機械（heavy.py、すべて 9/23）
+
+ビルド 20秒前後 × 8回（11:50〜12:35）、リプレイ 9コア 13秒 × 5回（11:54・12:17・12:18・12:21・12:39、
+12:36〜12:38 はコーディネータの suite 待ち）、1コアの diff_node 2回（12:21〜12:24）とノードのバイト比較
+3回（12:25〜12:41）、fixture の生成（11:52、13秒）。
+
+### 5. 測っていないこと・残り
+
+* **速さ**。`calculate` 0.92 → 0.4〜0.5 µs・1ターン −8〜12% の予想はそのまま。上の count-allocations の
+  µs は共有機の上なので数字として使わない
+* 残した検索と確保: 状態技の `raw`（`boosts`・`heal`・`durations`・`hasCustomCode`）、
+  `item_is_removable`（knockoff、`(String, String)` を2本作る —— master の `mega_holders` で置き換えられる）、
+  `do_mega` の `mega_targets` の鍵、`after_hit`・状態技の `to_string()`（volatile / status を `&str` で渡す
+  口が無い）。`hit_target` の小さな `Vec` は IKA-103 のまま
+* `Move.target` は `String` のまま（比較は短い文字列の一致だけ）

@@ -7,7 +7,7 @@
 use crate::battler::VolatileFlags;
 use crate::id::Id;
 use crate::position::Types;
-use std::collections::HashSet;
+use crate::reg::{MoveFlags, F_BITE, F_CONTACT, F_PULSE, F_PUNCH, F_SLICING, F_SOUND};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Slot {
@@ -26,7 +26,7 @@ pub struct Ctx<'a> {
     pub move_type: Id,
     pub move_category: &'a str,
     pub move_base_power: i64,
-    pub move_flags: &'a HashSet<String>,
+    pub move_flags: MoveFlags,
     pub move_priority: i64,
     pub effectiveness: f64,
     pub type_mod: i64,
@@ -113,22 +113,22 @@ fn sun(c: &Ctx) -> bool {
     is(c.weather, "sunnyday") || is(c.weather, "desolateland")
 }
 fn has_contact(c: &Ctx) -> bool {
-    c.move_flags.contains("contact")
+    c.move_flags.has(F_CONTACT)
 }
 fn has_slicing(c: &Ctx) -> bool {
-    c.move_flags.contains("slicing")
+    c.move_flags.has(F_SLICING)
 }
 fn has_bite(c: &Ctx) -> bool {
-    c.move_flags.contains("bite")
+    c.move_flags.has(F_BITE)
 }
 fn has_pulse(c: &Ctx) -> bool {
-    c.move_flags.contains("pulse")
+    c.move_flags.has(F_PULSE)
 }
 fn has_punch(c: &Ctx) -> bool {
-    c.move_flags.contains("punch")
+    c.move_flags.has(F_PUNCH)
 }
 fn has_sound(c: &Ctx) -> bool {
-    c.move_flags.contains("sound")
+    c.move_flags.has(F_SOUND)
 }
 
 fn technician(c: &Ctx) -> bool {

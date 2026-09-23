@@ -111,8 +111,8 @@ fn expected_fraction(
 fn move_context(pos: &Position, side: usize, slot: usize) -> MoveContext {
     let mon = pos.mon_at(side, slot);
     MoveContext {
-        weather: pos.field.weather.map(|w| w.as_str().to_string()),
-        terrain: pos.field.terrain.map(|t| t.as_str().to_string()),
+        weather: pos.field.weather,
+        terrain: pos.field.terrain,
         side_total_fainted: pos.sides[side].pokemon.iter().filter(|m| m.fainted).count() as i64,
         times_attacked: mon.map(|m| m.times_attacked).unwrap_or(0),
         previous_move_failed: mon.map(|m| m.move_last_turn_failed).unwrap_or(false),
