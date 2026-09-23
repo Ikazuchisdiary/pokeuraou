@@ -11994,6 +11994,248 @@ heavy.py を通さずに 1 コアで走らせた。
   付与）が抜けていても通る。完全に扱う変化技については、`apply_status_move` か宣言的な欄のどちらかに届くかで見るべき。
 - **ノードの注記**: gen11L の記録局面 1 つで Python だけが `residual speed tie` を出す（旧 exe でも同じ）。
 
+## 9/23 — IKA-175: 子の局面では Showdown の trapped の旗を落とす（方針 (a)、Python と port）
+
+ワーカー、基点 master 50ab618 → 363b973（IKA-172）を取り込み、ブランチ `ika-175-trapped-flag-children`。
+
+* **何が起きていたか。** `Pokemon.copy` が `trapped` を写すので、オラクルの局面から始めた探索（検討ツール・オラクル局面）では
+  拘束の主（メガゲンガーのかげふみ）が倒れた子でも `_is_trapped` の最初の判定が真のままで、交代が出なかった。
+  生成は旗が常に偽なので効かない。
+* **どこで落とすか。** Showdown の `endTurn`（`battle.ts:1726`）が `pokemon.trapped = pokemon.maybeTrapped = false` のあと
+  `TrapPokemon` を回し直す。控えは `clearVolatile`（`pokemon.ts:432`）で落ちている。それに合わせて:
+  - Python: `_run_queue` で `_residuals` の後、`turn += 1` の前に `_clear_trapped`（全員、控えも）。
+    `resolve_replacements` の終わりでも落とす（ひんし交代は endTurn の前なので、その後が次のターンの頭）。
+  - port: `run_queue` の同じ所。旗の立った Pokemon だけ `Rc::make_mut`（共有の控えは複写しない）。port に交代解決は無い。
+  - 中断したターン（とんぼがえり・だっしゅつボタン等）は Showdown のターン途中と同じで旗を残し、`resume_turn` がそのターンを
+    終えたときに落ちる（どちらのエンジンも `run_queue` を通る）。途中の旗は選択肢の生成に読まれない（交代の要求は拘束を見ない）。
+  - `maybe_trapped` に当たる旗は位置に無い。根（オラクルの局面）の旗は Showdown の値のまま `_is_trapped` の最初に効く。
+* **ENCODING_REVISION は上げない（2 のまま）。** 入力 1 の意味（Showdown の判定で拘束）は変わらず、変わるのは子の局面で 1 が
+  立たなくなることだけ。生成の局面（学習データ全部）はずっと 0。`encode.py` の該当行にコメント。
+
+### 検査（`tests/test_trapped_flag_children.py`、8 件）
+
+```
+  根の旗が根を決める（陽性: 旗を消すと交代 {3,4} が出る）        新 pass / 旧 pass（根は変えていない）
+  子は旗を継がない（控えに立てた旗も落ちる）                      新 pass / 旧 FAIL（交代 set() ≠ {3,4}）
+  対照: ねをはるが残る子は拘束のまま、隣は自由                    新 pass / 旧は旗の検査だけで FAIL（拘束は同じ）
+  ひんし交代の後も落ちる                                          新 pass / 旧 FAIL（set() ≠ {3,4}）
+  オラクル: かげふみのメガゲンガーを倒した子で両方交代できる      新 pass / 旧 FAIL
+  オラクル対照: ゲンガーが残る子は局面から両方拘束                新 pass / 旧は旗の検査だけで FAIL
+  port: 子の旗が Python と同じ偽（倒す・まもる の 2 通り）        新 exe pass / 旧 exe（main の release）FAIL
+```
+
+旧 Python は `_clear_trapped` を何もしない関数に差し替えて再現（変更はこの 2 か所だけ）。関係テスト 11 ファイル 255 pass・1 xfail
+（既存の Outrage）、ruff ok、`port_coverage --check`・`port_gate_audit --check` ok。
+
+### Python と port の一致（w12 の記録局面 40 に、場の全員へ旗を書き込み、8×8 に narrow、Budget.matrix）
+
+```
+                       新 Python と違うセル     旧 Python と違うセル
+  新 exe（取り込み後）   0 / 2,296                2,224 / 2,296
+  旧 exe                 2,224                    18（旗なしでも違う = IKA-172 のほろびのうた、取り込み前の port）
+  旗の落としが効いた（新旧 Python が違う）セル 2,224。残り 72 は中断した枝だけのセル（旗を残す）
+```
+
+`tools/diff_node.py`（無改造、`recorded_positions` に旗を書き込む包み、`--value value-gen11L --nodes 20`）:
+新 exe で旗あり 9,008 セル・旗なし 9,518 セルとも OK（最大差 5.96e-8 = float32 の和の順、均衡値 ≤ 1e-15、拒否 0）。
+陽性: 旧 exe は旗ありで FAIL（最大差 3.3e-2、均衡値 1.4e-2 動く、20 ノードすべて）。
+
+`tools/diff_encode.py`: 旗を書いた根 150・同じ根の旗なし 150・その子 539 の 839 局面、新旧 exe とも全 8 配列一致
+（旗の立った Pokemon 561）。陽性: Rust 側だけ旗を消した入力では mon 配列の 561 要素が違う。
+
+### 影響
+
+* **生成には効かない。** 記録の局面で旗が立つ決定は 0: w12 43,999 局の `"trapped": true` 0 バイト（`false` 4,737,600）、
+  gen11L 12,000 局 0（`false` 1,283,960）、読んだ決定 11,952・3,199 に旗 0。陽性: 同じ書式で旗を立てた局面は数えられる。
+* **value-gen11L（w12 の 4,000 局面、各局面で乱択の 1 セルを解いた子の値、IKA-82 の null 対照の形）**:
+  ```
+    null   旗なしの根: 子の値が新旧でビット一致                       4,000 / 4,000
+    陽性   旗を書いた根: 新旧で違う 3,751（最大 |値の差| 0.039）、同じ 249
+           旗を書いた根の新の子 = 旗なしの根の新の子（ビット一致）   3,709 / 4,000
+  ```
+  残りの 291 と「同じ 249」は中断した子（582 回の解決で出た）が旗を残すため・倒れた者の旗が値に効かないため。
+
+機械（heavy.py、--agent IKA-175）: release ビルド 2 回（8 コア 23 秒・20 秒、1 回目は IKA-161 のロック待ち約 14 分）、記録の数え 11 秒、
+枝ごと照合 3 回（32〜49 秒）、diff_node --value 5 回（39〜50 秒）、value の null 対照 43 秒、テスト 26・45 秒（1 コア）。
+ほかに 30 秒を超えるテスト 1 回（58 秒、1 コア）を heavy.py を通さずに走らせた。
+
+## 9/23 — IKA-173: がんせきアックス・ひけん・ちえなみの撒き技、どくげしょうの味方の物理技と瀕死、撒き技・場の技が既にあるときの失敗 —— Python・port とも Showdown と違っていた。オラクル 15 例で両方一致、diff_node は陽性対照つきで 0 件
+
+### 1. Showdown の定義（vendor a5df827。champions mod に上書きは無い）
+
+```
+  data/moves.ts stoneaxe（18069 行）・ceaselessedge（2220 行）
+    onAfterHit(target, source, move) { if (!move.hasSheerForce) {
+        for (const side of source.side.foeSidesWithConditions()) side.addSideCondition('stealthrock' | 'spikes');
+    onAfterSubDamage: 同じ（source.hp のときだけ）。secondary: {} はちからずくが食う印
+  sim/battle-actions.ts 1119-1127（spreadMoveHit）
+    DamagingHit の後、if (moveData.onAfterHit && pokemon.hp) 数値のダメージを受けた対象ごとに AfterHit
+  data/abilities.ts toxicdebris（5104 行）onDamagingHit
+    const side = source.isAlly(target) ? source.side.foe : source.side;  物理で、どくびし 2 層未満なら置く
+  sim/side.ts addSideCondition（413 行）
+    既にあれば onSideRestart が無いと false。まきびし（3 層）・どくびし（2 層）の onSideRestart は上限で false
+  sim/battle-actions.ts 1240-1306: sideCondition の false が didSomething に入り、何もしなければ '-fail'
+```
+
+置く側は使い手の相手の側（当てた相手が味方でも）。倒した相手でも置く。外れ・まもる・ちからずくでは置かない。
+使い手がゴツゴツメット等で倒れたら置かない。どくげしょうはキラフロルの向かいの側（相手の物理なら攻撃側、
+味方の物理ならその相手の側）で、DamagingHit は瀕死の処理より前なので倒されても置く。
+
+### 2. オラクル（`tests/test_hazards_after_hit.py`、IKA-165 の形を N ターンに）
+
+Showdown で打ったターンを Python・port が自分の前のターンの局面から打ち、毎ターン後の side conditions・HP・
+状態・ランク・moveLastTurnFailed を合わせる。撒く例は最後に相手のガオガエンをカバルドンに替え、交代で削られる
+ことを Showdown 側で確かめる（陽性対照）。
+
+```
+  例                               Showdown（最後のターン後）       旧 Python   旧 exe   新 Python   新 exe
+  がんせきアックス→ガブリアス      p2 ステルスロック、交代で -1/16   FAIL        FAIL     一致        一致
+  がんせきアックスで倒す           p2 ステルスロック                 FAIL        FAIL     一致        一致
+  がんせきアックス→味方            p2 ステルスロック                 FAIL        FAIL     一致        一致
+  ひけん・ちえなみ                 p2 まきびし、交代で -1/8          FAIL        FAIL     一致        一致
+  対照 外れ（accuracy miss）       なし                              一致        一致     一致        一致
+  対照 まもる                      なし                              一致        一致     一致        一致
+  対照 ちからずく                  なし                              一致        一致     一致        一致
+  どくげしょう 味方のシザークロス  p2 どくびし、交代でどく           FAIL        FAIL     一致        一致
+  どくげしょう 味方のじしん（瀕死）p2 どくびし                       FAIL        FAIL     一致        一致
+  どくげしょう 相手のじしんで瀕死  p2 どくびし                       FAIL        FAIL     一致        一致
+  対照 どくげしょう 相手のはたく   p2 どくびし                       一致        一致     一致        一致
+  ステルスロック 2 回目            キラフロル失敗                    FAIL        FAIL     一致        一致
+  どくびし 3 回目                  2 層、失敗                        FAIL        FAIL     一致        一致
+  まきびし 4 回目                  3 層、失敗                        FAIL        FAIL     一致        一致
+  おいかぜ 2 回目                  エルフーン失敗                    FAIL        FAIL     一致        一致
+```
+
+直す前: 旧 Python（master の resolve.py）・旧 exe（master の release を C:/tmp/ika173/ に複写）で 30 件中 8 pass（対照 4×2）・
+22 FAIL。port の FAIL は全部 port 対 Showdown の比較で落ちる。直した後は 30 件と IKA-165 の 12 件が pass。
+みがわり: Showdown はみがわりに当てても置く（onAfterSubDamage）が、Python はみがわりを扱わないのでテストに無い。
+使い手がゴツゴツメットで倒れる例は HP を作れず見ていない（コードは使い手の fainted で止める）。
+瀕死のポケモンの moveLastTurnFailed は Showdown が clearVolatile で忘れ、Python は残す。倒れた者は読まないので
+比べない（テストの `_state`）。
+
+Python の行動一覧は単体技で味方を狙う手を出さない（actions._targets_for）ので、味方へのがんせきアックスは
+探索には現れない。テストは一覧の手の対象を差し替えて作る。
+
+### 3. 直し
+
+```
+  Python                                                  port
+  _Turn.add_side_condition が bool を返す                 Turn::add_side_condition -> bool
+  _apply_status_move: false なら move_failed               apply_status_move: false なら move_failed
+  _after_hit の末尾に _lay_hazard_after_hit（1 行）        after_hit の末尾に lay_hazard_after_hit
+    AFTER_HIT_HAZARDS = {stoneaxe: stealthrock,              使い手が立っていて sheerforce でなく、当たったとき
+    ceaselessedge: spikes}、置く側は 1 - action.side         1 - action.side
+  _on_being_hit: どくげしょうを fainted の判定の前に、     on_being_hit: 同じ
+    _toxic_debris（向かいの側 = 1 - target[0]）
+```
+
+ワイドガード・ファストガードも raw.sideCondition の道を通るので、同じターンの 2 回目は失敗になる（STALL_BUMPING の 2 回目の add は戻り値を読まない）。オラクルでは見ていない。
+
+### 4. diff_node（`--using stoneaxe` を足し、`--toxic-debris` を足した）
+
+`--using stoneaxe` の対照 `unlaid` は AFTER_HIT_HAZARDS を空にした Python。`--toxic-debris` はどくげしょうが場にいる
+記録の局面の全セルを枝ごとに比べ、対照 `old_toxic_debris` は前の規則（相手の物理で生き残ったときだけ）。
+
+```
+                                        w12 新 exe   w12 旧 exe   gen11L 新 exe
+  --using stoneaxe（20 局面）
+    がんせきアックスを使うセル          3,312        3,312        5,702
+      違う                              0            2,746        0
+    発火（unlaid が動かすセル）         2,840        2,840        4,174
+      違う                              0            2,746        0
+      一時停止の枝あり（位置は比べない）214          214          243
+    最悪のセル差                        3.3e-16      6.4e-2       6.7e-16
+  --toxic-debris（12 局面）
+    全セル                              5,108        5,108        6,456
+      違う                              0            420          0
+    発火                                420          420          206
+      違う                              0            420          0
+    最悪のセル差                        1.1e-16      1.1e-16      2.2e-16
+```
+
+旧 exe で違うセル 2,746 = 発火 2,840 − 一時停止の枝だけで動く 94。port が断ったセルは全部 0。
+がんせきアックスの実行で「均衡の頻度が最大 0.09（w12）・0.29（gen11L）動いた」はセル差 1e-16 の縮退した均衡の
+解き分けで、今回の直しの前からある種類のもの。
+
+### 5. 記録で該当する数
+
+```
+                                                    data/ika73/w12        data/selfplay-gen11L
+  局 / 手番の決定                                   43,999 / 434,483      12,000 / 118,018
+  がんせきアックスが場にある決定                    1,352                 91
+    記録の均衡が打つ決定                            713                   63
+    選ばれた（側×決定）                             429                   33
+    選ばれた局                                      273（0.62%）          18（0.15%）
+    最初のがんせきアックスから後の決定              1,419（0.33%）        89（0.075%）
+  ひけん・ちえなみが場にある決定                    0                     0
+  どくげしょうが場にある決定                        3,328                 1,189
+    味方が物理の全体技を選んだ（側×決定）           42（33 局）           7（7 局）
+  場に既にあるのに選んだ（Showdown では失敗）
+    おいかぜ / リフレクター / ひかりのかべ / オーロラベール
+                                                    871 / 173 / 99 / 0    100 / 14 / 10 / 1
+    その局                                          835                   92
+  撒き技が上限のときの撒き技                        0                     0
+```
+
+standings の文字列の出現数（構築数ではない）: がんせきアックス worlds 4・Baltimore 12、どくげしょう 9・40、
+matchupweb はがんせきアックス 0・どくげしょう 3。ひけん・ちえなみはどこにも 0。
+
+### 6. 均衡の手（新旧 Python、Budget.matrix の 1 ターン行列、記録のメニュー）
+
+```
+                              w12 アックス   gen11L アックス（全数）   w12 どくげしょう   gen11L どくげしょう
+  決定                        150            91                       150                150
+  value-gen11L の葉
+    セルが動いた決定          145            88                       48                 33
+    均衡の値の変化 平均/最大   1.3e-4/5.3e-3  1.7e-4/5.3e-3            2.5e-4/1.1e-2      1.1e-4/6.6e-3
+    TV > 0.05 の決定          3              5                        0                  0
+    最頻の手が変わった決定    2（1.3%）      2（2.2%）                0                  0
+  hp-share
+    セルが動いた決定          23             26                       1                  2
+    均衡の値の変化 最大       2e-16          1e-16                    0                  0
+```
+
+hp-share の 1 手先は撒き技を見ない（同じターンに交代で入る枝だけが動く）ので、値はどれも動かない。hp-share の
+TV・最頻の手の変化（w12 2、gen11L 5）は値が同じ縮退した均衡の解き分けで、数に入れない。value-gen11L の葉は
+side conditions を読むので動き、陽性対照にもなっている。
+失敗の直し（move_failed）はどちらの葉も読まない（encoder は move_last_turn_failed を持たない）ので 0。
+
+### 7. 学習データへの影響
+
+value-gen11L の学習局（data/selfplay-gen11L、12,000 局）でがんせきアックスを選んだ局は 18（0.15%）、最初の
+がんせきアックスから後の決定は 89（118,018 の 0.075%）。これらは当たっていればステルスロックがあるはずの局面を
+無い局面として学習している。どくげしょうの味方の全体技は 7 局。瀕死の場合は記録から数えられない（diff_node の
+発火で見る）。おいかぜ等の 2 回目は 92 局で、次のターンのじだんだ・やけっぱちの威力だけに効く。
+
+### 8. 機械
+
+release ビルド 2 回（8 コア、22 秒・19 秒）、diff_node 6 回（1 コア、43〜62 秒）、記録の数え上げと解き直し 1 回
+（1 コア、724 秒）。すべて heavy.py に記録（--agent IKA-173）。
+
+### 9. 別課題の候補
+
+* みがわり: Python・port ともみがわりの volatile を付けるだけで、ダメージを肩代わりしない
+  （resolve.py に substitute の道が無い）。がんせきアックスの onAfterSubDamage もその下にある
+* 瀕死のポケモンの move_last_turn_failed を Showdown は faint で忘れる（clearVolatile）が Python・port は残す。
+  読む者はいないが局面の JSON が Showdown と違う
+* Python の行動一覧は単体技で味方を狙えない。Showdown は許す（味方への がんせきアックス・てだすけ後の味方殴り等）
+
+### 10. master（IKA-172、363b973）取り込み後にもう一度
+
+release ビルド（8 コア、19 秒）の後、関係テスト（test_hazards_after_hit・test_hazards_foe_side・test_perish_song・
+test_resolve・test_rust_node ほか）は全部 pass、port_coverage・port_gate_audit の --check も通る。diff_node:
+
+```
+                                        w12 新 exe   w12 旧 exe   gen11L 新 exe
+  --using stoneaxe  使うセル / 違う     3,302 / 0    3,302 / 2,854   5,702 / 0
+                    発火 / 違う         2,833 / 0    2,833 / 2,739   4,171 / 0
+  --toxic-debris    全セル / 違う       5,108 / 0    5,108 / 1,021   6,336 / 0
+                    発火 / 違う         420 / 0      420 / 420       206 / 0
+```
+
+局面の数え方は同じでも取り込んだ変更（IKA-166 のねこだましの絞り込み等）でメニューが少し変わり、セル数が動いた。
+旧 exe（d8e70cb）は発火しないセルでも違う（IKA-166・169・172 の分）ので、陽性対照として読むのは発火の行。
+
 ## 9/23 — IKA-161・IKA-171: ちからずく＋いのちのたま、吸収技の回復（対象ごと・ゴツゴツメットより先）、こおりの解凍、false の失敗と null の失敗、0 ダメージの当たり —— オラクル 23 局面（うち対照 9）で旧 Python・旧 exe とも 14 局面ずれ、直した Python・port は全部一致
 
 `_after_move`・`_after_hit`・`_can_act` 周りの疑い 6 つ（IKA-157・IKA-162 の担当がコードの読みで見つけたもの）を
@@ -12138,3 +12380,7 @@ merge_duplicates で外れの枝が当たりの枝に畳まれていた。Showdo
 ミロカロスからドヒドイデへのどくどくで、policy hit は `-immune`、miss は `|-miss|` を出し、どちらも 90/100 の
 乱数を 1 回引いて moveLastTurnFailed は true（`C:/tmp/ika161/toxic_order.py`）。Python も merge を切ると外れの枝は
 残っている。コードは正しいので、テストの対象の型を Water にした（使い手の型で必中かどうかを見るという意図は同じ）。
+
+### 10. master（61433f2、IKA-175・IKA-173）取り込み
+
+`tools/diff_node.py` は master 側を取り、`unlaid`・`--toxic-debris` の横に `undrained`・`unjudged`・`--frozen` を足し直した。

@@ -581,7 +581,10 @@ impl<'a> Turn<'a> {
         mon.volatiles.push(effect);
     }
 
-    pub(crate) fn add_side_condition(&mut self, side: usize, cid: &str, duration: Option<i64>) {
+    /// Showdown's `addSideCondition`, and what it returns (IKA-173): a condition already
+    /// up fails unless it has an `onSideRestart`, and only Spikes and Toxic Spikes do,
+    /// which fail again at three layers and at two. Python's `_Turn.add_side_condition`.
+    pub(crate) fn add_side_condition(&mut self, side: usize, cid: &str, duration: Option<i64>) -> bool {
         if let Some(existing) = self.pos.sides[side]
             .side_conditions
             .iter_mut()
@@ -589,14 +592,20 @@ impl<'a> Turn<'a> {
         {
             if cid == "spikes" || cid == "toxicspikes" {
                 let cap = if cid == "spikes" { 3 } else { 2 };
-                existing.layers = Some((existing.layers.unwrap_or(1) + 1).min(cap));
+                let layers = existing.layers.unwrap_or(1);
+                if layers >= cap {
+                    return false;
+                }
+                existing.layers = Some(layers + 1);
+                return true;
             }
-            return;
+            return false;
         }
         let mut effect = Effect::new(Id::new(cid));
         effect.duration = duration;
         effect.layers = Some(1);
         self.pos.sides[side].side_conditions.push(effect);
+        true
     }
 }
 
@@ -1657,6 +1666,17 @@ fn run_queue<'a>(
         let started = phase_start();
         residuals(reg, &mut item.turn)?;
         phase_end(3, started);
+        // `endTurn` clears Showdown's `trapped` flag (a benched Pokemon lost it in
+        // `clearVolatile`), so a child never inherits the root's verdict; the trap is
+        // read off the position from here on, as `resolve._clear_trapped` (IKA-175).
+        // Only a flagged one is written, so a shared bench Pokemon is not copied.
+        for side in item.turn.pos.sides.iter_mut() {
+            for mon in side.pokemon.iter_mut() {
+                if mon.trapped {
+                    std::rc::Rc::make_mut(mon).trapped = false;
+                }
+            }
+        }
         item.turn.pos.turn += 1;
         unmodelled.extend(item.turn.unmodelled.iter().cloned());
         branches.push(Branch { probability: item.weight, position: item.turn.pos });

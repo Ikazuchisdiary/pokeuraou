@@ -1313,7 +1313,30 @@ fn after_hit(
         return Err("forceSwitch move".into());
     }
 
-    on_being_hit(turn, mv, target, action.side)
+    on_being_hit(turn, mv, target, action.side)?;
+    lay_hazard_after_hit(turn, action, mv, dealt > 0);
+    Ok(())
+}
+
+/// Stone Axe's Stealth Rock and Ceaseless Edge's Spikes, from the move's own `onAfterHit`
+/// (IKA-173): on the user's foe's side, whoever was hit, after `DamagingHit` and only while
+/// the user stands, and not under Sheer Force. Python's `_lay_hazard_after_hit`.
+fn lay_hazard_after_hit(turn: &mut Turn, action: &QueuedAction, mv: &Move, landed: bool) {
+    let cid = match mv.id.as_str() {
+        "stoneaxe" => "stealthrock",
+        "ceaselessedge" => "spikes",
+        _ => return,
+    };
+    if !landed {
+        return;
+    }
+    let stands = matches!(
+        turn.mon_at(action.side, action.slot),
+        Some(mon) if !mon.fainted && mon.ability.as_str() != "sheerforce"
+    );
+    if stands {
+        turn.add_side_condition(1 - action.side, cid, None);
+    }
 }
 
 fn check_secondary_supported(secondary: &Value) -> Result<(), String> {
@@ -1404,21 +1427,26 @@ fn on_being_hit(
     turn: &mut Turn,
     mv: &Move,
     target: Slot,
-    attacker_side: usize,
+    _attacker_side: usize,
 ) -> Result<(), String> {
-    let ability = match turn.mon_at(target.0, target.1) {
+    let (ability, fainted) = match turn.mon_at(target.0, target.1) {
         None => return Ok(()),
-        Some(mon) if mon.fainted => return Ok(()),
-        Some(mon) => mon.ability,
+        Some(mon) => (mon.ability, mon.fainted),
     };
-    if ability == "toxicdebris" && mv.category == "Physical" && target.0 != attacker_side {
-        let layers = turn.pos.sides[attacker_side]
+    // Toxic Debris runs from `onDamagingHit`, before the faint, and lays them across from
+    // Glimmora: the attacker's side, or its foe's for a partner's hit (IKA-173).
+    if ability == "toxicdebris" && mv.category == "Physical" {
+        let across = 1 - target.0;
+        let layers = turn.pos.sides[across]
             .side_condition("toxicspikes")
             .and_then(|c| c.layers)
             .unwrap_or(0);
         if layers < 2 {
-            turn.add_side_condition(attacker_side, "toxicspikes", None);
+            turn.add_side_condition(across, "toxicspikes", None);
         }
+    }
+    if fainted {
+        return Ok(());
     }
     let entry: Option<(&[(&str, i64)], &[&str])> = match ability.as_str() {
         "stamina" => Some((&[("def", 1)], &[])),
@@ -1998,7 +2026,11 @@ fn apply_status_move(
         // `getMoveTargets` makes a foe's for `foeSide` -- the hazards. IKA-165: this was
         // always the user's. The duration above stays the user's (Light Clay).
         let condition_side = if mv.target == "foeSide" { 1 - action.side } else { action.side };
-        turn.add_side_condition(condition_side, &condition, duration);
+        if !turn.add_side_condition(condition_side, &condition, duration) {
+            // Nothing else in these moves does anything, so `didSomething` is false and
+            // the move fails (IKA-173): a second Stealth Rock or Tailwind, a fourth Spikes.
+            turn.move_failed[me.0][me.1] = true;
+        }
     }
     if let Some(weather) = mv.weather.as_deref() {
         let weather = weather.to_lowercase().replace(' ', "");
