@@ -113,6 +113,7 @@ def main() -> None:
             objective=playing,
             search_limit=args.limit,
             max_turns=40,
+            open_information=True,
         )
         if len(seen) >= args.nodes:
             break

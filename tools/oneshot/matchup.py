@@ -14,6 +14,10 @@ function to separate them:
   weak opposition, which makes it a real matchup number rather than an artefact.
 
     uv run python tools/oneshot/matchup.py --games 400 --pairs roster:field,field:field,field:roster
+
+**Open game only: a reference** (IKA-123). This tool has no hidden-bench path, so its
+search is shown the opponent's four -- not the game that ships. It says so on stderr
+when it runs, and `tools/agent_drift.py` lists it under KNOWN_DRIFT.
 """
 
 from __future__ import annotations
@@ -27,6 +31,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
+from pokeuraou.benchflags import say_open_reference
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.priors import find_cached_chaos, load_chaos
@@ -47,6 +52,7 @@ def main() -> None:
     ap.add_argument("--roster", default="rizabanadohido")
     ap.add_argument("--objective", default="hp-share")
     args = ap.parse_args()
+    say_open_reference()
 
     roster = load_roster(args.roster)
     reg = roster.reg
@@ -98,6 +104,7 @@ def main() -> None:
                 objective=objective,
                 search_limit=args.limit,
                 max_turns=args.max_turns,
+                open_information=True,
             )
             if record.outcome is None:
                 unfinished += 1

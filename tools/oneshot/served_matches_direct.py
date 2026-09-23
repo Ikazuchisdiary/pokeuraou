@@ -85,6 +85,8 @@ def main() -> None:
         "--seed", str(args.seed), "--games", str(args.games), "--device", args.device,
         "--torch-threads", "1", "--limit", str(args.limit),
         "--rank-leaf", "--baseline-rank-leaf",
+        # What this comparison played before IKA-123 made the condition explicit.
+        "--open-bench",
     ]
 
     print(f"direct: both leaves in the worker ({args.device})", flush=True)

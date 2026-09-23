@@ -30,6 +30,10 @@ being attributed to a selection.
 
     bash tools/cycle_match_parallel.sh
     uv run --group learn python tools/cycle_match.py --merge --text /c/tmp/cycle.txt
+
+**Open game only: a reference** (IKA-123). This tool has no hidden-bench path, so its
+search is shown the opponent's four -- not the game that ships. It says so on stderr
+when it runs, and `tools/agent_drift.py` lists it under KNOWN_DRIFT.
 """
 
 from __future__ import annotations
@@ -47,6 +51,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from mirror_cycle import knowledge_dir, selection_index
 from pool_matches import wilson
 
+from pokeuraou.benchflags import say_open_reference
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
 from pokeuraou.names import localiser
@@ -181,6 +186,7 @@ def main() -> None:
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--torch-threads", type=int, default=1)
     args = ap.parse_args()
+    say_open_reference()
 
     if args.merge:
         merge(args.out, args.text)
@@ -260,6 +266,7 @@ def main() -> None:
                         search_limit=args.limit,
                         max_turns=args.max_turns,
                         evaluate=evaluate,
+                        open_information=True,
                     )
                     handle.write(
                         json.dumps(

@@ -9354,3 +9354,87 @@ exact マスクが 3,599 セル違うのは、Python の減縮が Rust に無い
 
 機械: cargo release ビルド 2 回（8 コア、各 20 秒・16 秒）、diff_node 既定 43 秒 ×2・fast 10 秒 ×2・exact --limit 12
 30 秒、テスト数十秒（すべて 1 コア、heavy.py に記録）。
+
+## 9/23 — IKA-123: 控えの公開・隠蔽はどちらも既定ではない —— 公開は `--open-bench` / `open_information=True` で名指しし、付けなければ止まる。錨は隠蔽の `hp-share/w24/hidden-bench`
+
+IKA-116 の棚卸しの B。隠蔽は後から足した枝で、無印のコマンド・`play_game(sheets=None)`・`provenance(information=...)`
+・レーティングの錨がみな公開のままだった。出荷の生成・判定（`ika73_generate.sh` / `ika73_match.sh`）は `--hide-bench`
+を毎回手で付けていた。
+
+### 1. 何を既定から外したか
+
+| 場所 | 前 | 後 |
+| -- | -- | -- |
+| `play_game` | `sheets=None` で公開 | `sheets` か `open_information=True` のどちらか。無ければ `ValueError`、両方も `ValueError` |
+| `selfplay.generate(hide_bench=)` | 既定 False（公開） | 既定なし（`None` で `ValueError`） |
+| `tools/selfplay.py` / `generate_queue.py` / `match_queue.py` / `generation_match.py` / `selection_check.py` / `branch_dedup.py` / `profile_stages.py`（generation・match） | `--hide-bench` を付けたときだけ隠蔽 | `--hide-bench` か `--open-bench` のどちらかが必須。無ければ止まる（`pokeuraou.benchflags`）。両方は argparse が断る |
+| `resume_generate.py`（教師データを作る。隠蔽の経路は無い） | 黙って公開 | `--open-bench` が無いと止まる。stderr に「公開＝参考」、provenance に `information: open` を明示 |
+| `provenance(information=)` | 既定 `("open", "open")` | 既定なし（`TypeError`） |
+| `tools/ratings.py` の `ANCHOR` | `hp-share/w24`（公開のゼロ） | `hp-share/w24/hidden-bench`。公開の尺度は `--anchor hp-share/w24`（`OPEN_ANCHOR`）。表は隠蔽の行が先 |
+
+**隠蔽を既定にせず「止める」にした理由**: IKA-123 より前に記録したコマンドで両方のフラグが無いものは公開で打っている。
+隠蔽を既定にすると、その古いコマンドを打ち直したとき**同じコマンド行で別の測定が返る**。止めれば、古いコマンドは
+意味を保つ（`--hide-bench` 付きはそのまま隠蔽）か、「`--open-bench` を足せ」と言って止まるかのどちらかになる。
+`generate_queue.py` の `--uniform-selection` と同じ形（公開でないほう＝出荷でないほうを名指しさせる）。
+
+### 2. 呼び出し側（全部）
+
+* `--open-bench` を足して意味を保った committed スクリプト: `tools/generate_parallel.sh`（selfplay.py）、
+  `tools/genmatch_parallel.sh`（generation_match.py）、`tools/ika68_match.sh`（match_queue.py。IKA-68 は公開で打った）、
+  `tools/resume_parallel.sh`（resume_generate.py）、`tools/oneshot/served_matches_direct.py`・`served_throughput.py`
+* そのまま意味が保たれる: `tools/ika66_generate.sh`・`ika66_match.sh`・`ika73_generate.sh`・`ika73_match.sh`（`--hide-bench` 付き）。
+  `generate_queue.py` → workers、`match_queue.py` → `generation_match.py`、`profile_stages.py` → 両ドライバは
+  フラグを**必ず明示して**渡す（`bench_argv`）。`profile_stages` の配達検査は `--open-bench` も数え、`--report` で
+  読むときは条件を問わない
+* `play_game` に `open_information=True` を足した（公開で打つ道具。どれも元から公開）: asymmetry / bench_generation /
+  book_check / cells_needed / cycle_match / diff_generation / diff_narrow / diff_node / diff_solve_node / dump_turn_cases /
+  forced_handoff / oneshot/matchup / profile_generation / resume_generate / width_match / worker_growth。
+  隠蔽の切替がある道具（generation_match / selection_check / branch_dedup、`generate`）は `open_information=not hide_bench`
+* 隠蔽できない KNOWN_DRIFT の6本（asymmetry / book_check / cycle_match / forced_handoff / oneshot/matchup / width_match）は
+  docstring に「公開のみ＝参考」、起動時に stderr へ `information: OPEN (reference)`。`resume_generate` も同じ
+* `generate()` を直接呼ぶ `tools/dump_damage_cases_selfplay.py` は `hide_bench=False`（元の意味）
+* `provenance()` を呼ぶ width_match / worker_growth / resume_generate は `information=("open", "open")` を明示
+* `tools/agent_drift.py`: `play_game` の呼び出しが `sheets` も `open_information` も名指ししなければ `UNSTATED` として
+  `--check` を落とす（`**kwargs` は読めないので数えない）。KNOWN_DRIFT は変わらず8本
+* `selection_check.py --merge` は打たないので条件を問わない（ヘッダに `information` が残っている）
+* 記録（TODO.md・GENERATIONS.md）のコマンドで両フラグが無いものは、打ち直すと止まって `--open-bench` を足せと言う。
+  書き換えていない（記録は当時の文面のまま）。追跡されている `scratchpad/*.sh` も同じ
+
+### 3. 名前と古い記録
+
+`agent_name` は1文字も変えていない。**公開が無印、隠蔽に `/hidden-bench`** のまま —— 出荷する側に接尾辞が付く逆向きの
+名前だが、レーティングはこの文字列で束ねるので、公開の名前を変えると記録済みの全エージェントが自分の対局から
+切り離される（`.pt` と `uniform-against-` のときと同じ形）。直したのは書く側の既定だけ。フィールドの無い古い記録は
+今まで通り公開として読む（当時それで打っていた）。`tests/test_bench_default.py` に代表の名前4つを固定した。
+
+`ratings.py` は `endswith("/hidden-bench")` で隠蔽を判定していて、`.../hidden-bench/belief:book`（IKA-122 以後の本の
+信念の腕）を**公開(ref)と表示していた**（隠蔽の局数も、両側がそういう名前の対局は落とす形だった）。名前の成分で判定する `is_hidden` に直した。
+
+新しい既定で記録済みの対戦（`data/matches`、キャッシュは scratchpad に複製して読むだけ、166 秒）を当てはめた:
+186,380局・72エージェント、隠蔽 94,038局 / 公開 92,342局。錨 `hp-share/w24/hidden-bench` は 6,784局で群 1（隠蔽の
+主な群）にあり、公開のエージェントは群 0 なので隠蔽の錨からは ±142 前後の幅になる —— 公開の行は `--anchor hp-share/w24`
+で読む、と表の上に出る。
+
+### 4. 記述
+
+README「重要な事実」（シートが隠すのは SP だけだが、対戦中は控え2匹と % の内側の正確な HP も隠れている。控え隠蔽が
+出荷の条件）、`belief.py` と `selection.py` の docstring、`tools/selfplay.py` の `--hide-bench` の help（「約3.8倍」→
+3.8倍、のち 2.9倍、幅で動く）、GENERATIONS.md「レーティング」の規約の見出しと、9/12 の表・それ以前の数字が公開の
+ゼロだという注記。各道具の docstring の使用例にフラグを足した。**IKA-35 の本文（「隠れているのは配分だけ」）は Linear
+なので直していない。**
+
+### 5. テスト
+
+`tests/test_bench_default.py`（新規）: `play_game` / `generate` / `provenance` が名指し無しで止まること、フラグの組、
+7つの道具（受け入れ条件の `generate_queue.py` / `match_queue.py` を含む）が引数を足さずに起動すると
+`MISSING` の文で止まること、`resume_generate` が `--open-bench` 無しで止まり有りなら先へ進むこと、`agent_drift.unstated`
+が名指し無しの呼び出しを拾い木には無いこと、錨と `is_hidden`、記録済みの名前が動かないこと。
+
+直す前（main の src と tools）で同じことを確かめると: `play_game` は止まらずに先へ進んで別の所で落ち、`generate` は
+`hide_bench` を問わず、`provenance` は `['open', 'open']` を書き、錨は `hp-share/w24`、`generate_queue.py` は
+フラグ無しで `hide_bench = False` に解釈した。
+
+既存テストの呼び出し（test_selfplay / test_selection_book / test_hidden / test_equal_wall_clock / test_provenance / test_sprt /
+test_match_bench_prior）は意味を変えずに条件を明示した。`agent_drift --check` は通る。
+
+機械: テスト（1 コア）と `ratings.py` の読み取り 166 秒（1 コア）、すべて heavy.py に記録。生成も対戦も打っていない。

@@ -15,9 +15,10 @@ narrowing never touches the leaf. Both move the balance this is trying to report
 So nothing here plays a game. It runs the real driver, with the real flags, and reads what
 the processes wrote about themselves::
 
-    uv run --group learn python tools/profile_stages.py generation --games 200
-    uv run --group learn python tools/profile_stages.py generation --games 200 --no-bridge
-    uv run --group learn python tools/profile_stages.py match --games 60 --served
+    uv run --group learn python tools/profile_stages.py generation --games 200 --hide-bench
+    uv run --group learn python tools/profile_stages.py generation --games 200 --hide-bench \\
+        --no-bridge
+    uv run --group learn python tools/profile_stages.py match --games 60 --served --hide-bench
     uv run --group learn python tools/profile_stages.py analysis --limit 16
 
 Generation takes `generate_queue.py`'s own options and passes on only the ones given, so
@@ -69,6 +70,7 @@ from typing import Any
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from pokeuraou.benchflags import add_bench_flags, bench_argv, require_bench  # noqa: E402
 from pokeuraou.timing import BORROWED, PURPOSE_ROWS, PURPOSES, STAGES  # noqa: E402
 
 #: Rows printed under a heading, so a table reads as a breakdown rather than a list.
@@ -729,7 +731,7 @@ def delivery(
             value = _flag(argv, flag)
             seen.setdefault(flag, {})
             seen[flag][str(value)] = seen[flag].get(str(value), 0) + 1
-        for flag in ("--hide-bench", "--rank-leaf", "--no-bridge"):
+        for flag in ("--hide-bench", "--open-bench", "--rank-leaf", "--no-bridge"):
             seen.setdefault(flag, {})
             present = "yes" if flag in argv else "no"
             seen[flag][present] = seen[flag].get(present, 0) + 1
@@ -749,7 +751,7 @@ def delivery(
                                     f"asked {args.selection_book}")
             if args.uniform_selection and "--selection-book" in argv:
                 problems.append("a worker drew from a book under --uniform-selection")
-            if args.hide_bench != ("--hide-bench" in argv):
+            if args.hide_bench is not None and args.hide_bench != ("--hide-bench" in argv):
                 problems.append(f"a worker's --hide-bench is {'--hide-bench' in argv}, "
                                 f"asked {args.hide_bench}")
     if args is not None:
@@ -809,7 +811,7 @@ def build(args: argparse.Namespace) -> list[str]:
             "--device", args.device,
             *(["--no-bridge"] if args.no_bridge else []),
             *(["--served", "--servers", str(args.servers)] if args.served else []),
-            *(["--hide-bench"] if args.hide_bench else []),
+            *bench_argv(args.hide_bench),
             *(["--", *tail] if tail else []),
         ]
     if args.workload == "match":
@@ -823,7 +825,7 @@ def build(args: argparse.Namespace) -> list[str]:
             "--device", args.device,
             *(["--no-bridge"] if args.no_bridge else []),
             *(["--served", "--servers", str(args.servers)] if args.served else []),
-            *(["--hide-bench"] if args.hide_bench else []),
+            *bench_argv(args.hide_bench),
             *(["--", *tail] if tail else []),
         ]
     return [
@@ -856,7 +858,8 @@ def main() -> None:
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--served", action="store_true")
     ap.add_argument("--servers", type=int, default=2)
-    ap.add_argument("--hide-bench", action="store_true")
+    # For generation and match, passed on explicitly; one of the two is required there.
+    add_bench_flags(ap)
     ap.add_argument("--no-bridge", action="store_true", help="POKEURAOU_RUST_NODE=0")
     ap.add_argument("--out", type=Path, default=None, help="where the run writes its games")
     ap.add_argument("--timing-dir", type=Path, default=None)
@@ -894,6 +897,10 @@ def main() -> None:
         # Accepted and then not passed on is how a run measures an agent nobody asked for.
         raise SystemExit(f"{', '.join(stray)} are generate_queue.py's; the {args.workload} "
                          f"workload takes them after --, if its driver has them")
+    if args.workload != "analysis" and args.report is None:
+        # The driver stops without one of the two anyway; stopping here says so before a
+        # timing directory is made.
+        require_bench(args)
 
     if args.report is not None:
         reports = collect(args.report)

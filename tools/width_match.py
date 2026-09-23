@@ -21,6 +21,10 @@ below separates them and R doubles as the setup's self-check: it has been measur
 independently at 60.9-62.1%.
 
     uv run --group learn python tools/width_match.py --wide 48 --narrow 16 --games 40
+
+**Open game only: a reference** (IKA-123). This tool has no hidden-bench path, so its
+search is shown the opponent's four -- not the game that ships. It says so on stderr
+when it runs, and `tools/agent_drift.py` lists it under KNOWN_DRIFT.
 """
 
 from __future__ import annotations
@@ -36,6 +40,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from pokeuraou.benchflags import say_open_reference
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
 from pokeuraou.payoff import OBJECTIVES
@@ -69,6 +74,7 @@ def main() -> None:
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--torch-threads", type=int, default=1)
     args = ap.parse_args()
+    say_open_reference()
     torch.set_num_threads(args.torch_threads)
 
     roster = load_roster(args.roster)
@@ -129,6 +135,7 @@ def main() -> None:
                 # shared solve. This tool reads the games and not the clock; the
                 # field goes into every record it writes all the same.
                 one_agent=False,
+                open_information=True,
             )
             if record.outcome is None:
                 unfinished += 1
@@ -143,6 +150,7 @@ def main() -> None:
                     seat=seat,
                     leaves=(args.value.name, args.value.name),
                     limits=limits,
+                    information=("open", "open"),
                 ),
             )
             seat_played += 1

@@ -173,6 +173,7 @@ for _ in range(3):
         objective=playing,
         search_limit=limit,
         max_turns=40,
+        open_information=True,
     )
     if len(seen) >= wanted:
         break

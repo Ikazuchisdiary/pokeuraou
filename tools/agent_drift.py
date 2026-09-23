@@ -100,7 +100,11 @@ KNOWN_DRIFT = frozenset(
 
 
 def calls(path: Path) -> list[tuple[int, set[str]]]:
-    """(line, keyword names) for every `play_game(...)` in this file."""
+    """(line, keyword names) for every `play_game(...)` in this file.
+
+    A `**kwargs` splat is recorded as the name `**`, because what it passes cannot be read
+    from here.
+    """
     tree = ast.parse(path.read_text(encoding="utf-8"))
     out: list[tuple[int, set[str]]] = []
     for node in ast.walk(tree):
@@ -110,8 +114,24 @@ def calls(path: Path) -> list[tuple[int, set[str]]]:
         name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
         if name != "play_game":
             continue
-        out.append((node.lineno, {k.arg for k in node.keywords if k.arg}))
+        out.append((node.lineno, {k.arg or "**" for k in node.keywords}))
     return out
+
+
+def unstated(path: Path) -> list[int]:
+    """Lines of the `play_game` calls here that name neither `sheets` nor
+    `open_information` (IKA-123).
+
+    `play_game` stops at run time on such a call, but a tool nobody runs finds out late,
+    so it is read here too. Every tool is in scope, the excused ones included: a harness
+    that plays the open game on purpose says so with `open_information=True`, which costs
+    one argument and leaves nothing to infer.
+    """
+    return [
+        line
+        for line, kwargs in calls(path)
+        if not kwargs & {"sheets", "open_information", "**"}
+    ]
 
 
 def shipping_args() -> set[str]:
@@ -145,6 +165,7 @@ def main(argv: list[str] | None = None) -> int:
           "   setting, so an omission there is not a drift)\n")
 
     drifted: set[str] = set()
+    silent: list[str] = []
     # `tools/oneshot/` is in scope too. A tool is shelved there when its question was
     # asked once, not because it stopped being runnable -- and a shelved tool that builds
     # an agent the current generation would not recognise is exactly the thing someone
@@ -155,6 +176,9 @@ def main(argv: list[str] | None = None) -> int:
         found = calls(p)
         if not found:
             continue
+        for line in unstated(p):
+            silent.append(f"{p.relative_to(ROOT).as_posix()}:{line}")
+            print(f"  UNSTATED  {p.name}:{line} names neither sheets nor open_information")
         passed: set[str] = set()
         for _, kwargs in found:
             passed |= kwargs
@@ -192,7 +216,12 @@ def main(argv: list[str] | None = None) -> int:
             f"\n  STALE: {', '.join(fixed)} no longer drifts and is still in KNOWN_DRIFT.\n"
             "  Strike it off, so the list keeps meaning what it says."
         )
-    return 1 if (appeared or fixed) else 0
+    if silent:
+        print(
+            f"\n  UNSTATED: {', '.join(silent)} call play_game without saying which game.\n"
+            "  Pass the sixes as `sheets`, or `open_information=True` for the open game."
+        )
+    return 1 if (appeared or fixed or silent) else 0
 
 
 if __name__ == "__main__":

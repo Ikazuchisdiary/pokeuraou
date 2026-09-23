@@ -18,6 +18,10 @@ Only the opening move is forced. After it the search plays its own game, so this
 "was that move worth playing here", not "is a policy that always switches any good".
 
     uv run --group learn python tools/forced_handoff.py --games 300
+
+**Open game only: a reference** (IKA-123). This tool has no hidden-bench path, so its
+search is shown the opponent's four -- not the game that ships. It says so on stderr
+when it runs, and `tools/agent_drift.py` lists it under KNOWN_DRIFT.
 """
 
 from __future__ import annotations
@@ -33,6 +37,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from pokeuraou.benchflags import say_open_reference  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.payoff import OBJECTIVES  # noqa: E402
 from pokeuraou.position import Position  # noqa: E402
@@ -125,6 +130,7 @@ def main() -> None:
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--out", type=Path, default=None)
     args = ap.parse_args()
+    say_open_reference()
 
     starts = collect(list(args.dir), args.sweeper, args.games * 3)
     if not starts:
@@ -166,6 +172,7 @@ def main() -> None:
                 max_turns=args.max_turns, evaluate=value, rank_by_leaf=True,
                 start=Position.from_json(pick["position"]),
                 first_action=forced,
+                open_information=True,
             )
             results[label] = record.outcome
         pairs += 1

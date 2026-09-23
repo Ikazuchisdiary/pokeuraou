@@ -73,6 +73,7 @@ def collect_positions(reg, roster, prior, pool, selections, args) -> list:  # no
             objective=OBJECTIVES["hp-share"],
             search_limit=args.limit,
             max_turns=args.max_turns,
+            open_information=True,
         )
         if len(seen) >= args.pools:
             break

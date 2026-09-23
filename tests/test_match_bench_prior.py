@@ -142,7 +142,7 @@ def _run(monkeypatch, tmp_path, roster, *extra: str, hide: bool = True):  # noqa
         "--selection-book", "tested.jsonl.gz",
         "--games", "1",
         "--games-out", str(games),
-        *(["--hide-bench"] if hide else []),
+        "--hide-bench" if hide else "--open-bench",
         *extra,
     ]
     if "--baseline-uniform-selection" not in extra:

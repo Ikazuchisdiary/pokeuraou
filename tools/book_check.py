@@ -45,6 +45,10 @@ the arithmetic and the reason the seat gap is printed rather than merely cancell
 The anti-後出しジャンケン rule of :mod:`pokeuraou.selection_book` holds here too, and one
 extra care is needed because this harness mixes rules: our selection is drawn from a
 stream that never sees the opponent's spread class, and it is drawn before theirs.
+
+**Open game only: a reference** (IKA-123). This tool has no hidden-bench path, so its
+search is shown the opponent's four -- not the game that ships. It says so on stderr
+when it runs, and `tools/agent_drift.py` lists it under KNOWN_DRIFT.
 """
 
 from __future__ import annotations
@@ -65,6 +69,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from pool_matches import wilson
 from seats import SEATS, SeatTally, play_paired, seat_label
 
+from pokeuraou.benchflags import say_open_reference
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
 from pokeuraou.payoff import OBJECTIVES
@@ -262,6 +267,7 @@ def main() -> None:
     ap.add_argument("--device", default="cpu")
     ap.add_argument("--torch-threads", type=int, default=1)
     args = ap.parse_args()
+    say_open_reference()
 
     if args.merge:
         merge(args.out)
@@ -375,6 +381,7 @@ def main() -> None:
                         max_turns=args.max_turns,
                         evaluate=evaluate,
                         rank_by_leaf=args.rank_by_leaf,
+                        open_information=True,
                     )
                     handle.write(
                         json.dumps(

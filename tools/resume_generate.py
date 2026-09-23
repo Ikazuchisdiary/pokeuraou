@@ -20,7 +20,14 @@ What it does *not* do is find positions self-play never visits. The starts come 
 same lineage, so this oversamples a thin tail rather than inventing a new one. That is the
 intended trade: the tail is real and there is not enough of it.
 
-    uv run --group learn python tools/resume_generate.py \
+**The games are OPEN** (IKA-123). A resumed start is a recorded position with no record of
+which of the opponent's Pokemon each side had seen by then, so there is nothing to hand
+`play_game` as `sheets` and both searches are shown the opponent's four -- teacher data from
+the easier game, not the one that ships. It says so: the run stops unless `--open-bench` is
+on the command line, and every game records `information: open`. Before IKA-123 it made
+such games without a word.
+
+    uv run --group learn python tools/resume_generate.py --open-bench \
         --dir data/selfplay-gen8 --from-turn 12 --games 2000 \
         --value data/models/value-all.pt --limit 48 --rank-leaf \
         --out data/selfplay-resume8/games-seed1.jsonl --seed 1
@@ -39,6 +46,7 @@ import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from pokeuraou.benchflags import say_open_reference
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
 from pokeuraou.payoff import OBJECTIVES
@@ -128,7 +136,23 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=None)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--torch-threads", type=int, default=1)
+    ap.add_argument(
+        "--open-bench",
+        action="store_true",
+        help="required: the resumed games show both searches the opponent's four, because "
+        "a recorded position does not say which of them each side had seen. There is no "
+        "--hide-bench here; this flag is the statement that open teacher data is meant.",
+    )
     args = ap.parse_args()
+    if not args.open_bench:
+        raise SystemExit(
+            "resume_generate.py can only play the open game -- a recorded start does not "
+            "say which of the opponent's Pokemon each side had seen -- so its games are "
+            "open teacher data, not the hidden-bench condition generation ships. Pass "
+            "--open-bench to mean that. Before IKA-123 it was the silent default, so a "
+            "recorded command without the flag replays with it."
+        )
+    say_open_reference()
     torch.set_num_threads(args.torch_threads)
 
     paths = sorted(p for d in args.dir for p in d.glob("games-seed*.jsonl"))
@@ -193,6 +217,7 @@ def main() -> None:
             rank_by_leaf=args.rank_leaf,
             solve_sparsely=args.solve_sparsely,
             start=position,
+            open_information=True,
         )
         if record.outcome is None:
             unfinished += 1
@@ -213,6 +238,7 @@ def main() -> None:
                 limits=(args.limit, args.limit),
                 rankings=tuple("leaf" if args.rank_leaf else "damage" for _ in range(2)),
                 solvers=tuple("sparse" if args.solve_sparsely else "full" for _ in range(2)),
+                information=("open", "open"),
                 note=f"start turn {pick['turn']}, from-turn {args.from_turn}",
             ),
         )

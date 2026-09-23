@@ -5,8 +5,11 @@ spreads sampled from usage rather than pinned -- the same composition is played 
 and a value function trained against one published spread would learn that the opponent's
 investment is knowable.
 
-    uv run python tools/selfplay.py --games 200 --seed 1
-    uv run python tools/selfplay.py --games 20 --report   # what a short run looks like
+    uv run python tools/selfplay.py --games 200 --seed 1 --hide-bench
+    uv run python tools/selfplay.py --games 20 --hide-bench --report   # a short run
+
+`--hide-bench` or `--open-bench` is required (IKA-123): leaving both off used to
+generate open teacher data without a word.
 
 With `--queue host:port` the games come from `tools/generate_queue.py` one at a time
 instead of being dealt in advance, which is how a run stops ending when its unluckiest
@@ -25,6 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from pokeuraou.benchflags import add_bench_flags, require_bench
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.priors import build_cooccurrence, find_cached_chaos, load_chaos
@@ -117,15 +121,18 @@ def main() -> None:
         help="threads per worker. 1 is right for a parallel run: N processes each spawning "
         "a pool on the same cores is slower than one process. Raise it for a single run.",
     )
-    ap.add_argument(
-        "--hide-bench",
-        action="store_true",
-        help="neither side's search is shown the other's unplayed bench. Each solves over "
-        "every four the opponent's sheet still allows, as the Bayesian game it is. "
-        "Without it the search is handed the opponent's whole four, which 47.4%% of "
+    add_bench_flags(
+        ap,
+        hidden_help="neither side's search is shown the other's unplayed bench. Each "
+        "solves over every four the opponent's sheet still allows, as the Bayesian game it "
+        "is. The open game hands the search the opponent's whole four, which 47.4%% of "
         "decisions and every opening one had no right to; on 40 openings that was worth "
-        "0.96 points and moved the advice in 90%% of them. Costs about 3.8x, because each "
-        "side now solves its own game and there are up to six completions in each.",
+        "0.96 points and moved the advice in 90%% of them. Costs more per game than the "
+        "open game, because each side solves its own game with up to six completions in "
+        "it: 3.8x when first measured, 2.9x later, and the ratio moves with the width. "
+        "One of this or --open-bench is required (IKA-123).",
+        open_help="the open game: the search is handed the opponent's four. A reference, "
+        "and what omitting both flags meant before IKA-123.",
     )
     ap.add_argument(
         "--force-lead",
@@ -199,6 +206,7 @@ def main() -> None:
         "search, resolver and evaluator together.",
     )
     args = ap.parse_args()
+    require_bench(args)
 
     roster = load_roster(args.roster)
     reg, archetypes = load_archetypes(args.archetypes)

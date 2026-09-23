@@ -78,6 +78,7 @@ def a_game(setup, seed: int, **kwargs):  # noqa: ANN001, ANN003, ANN201
         usable[0].id,
         objective=HP_SHARE,
         search_limit=4,
+        open_information=True,
         **kwargs,
     )
     return record, time.perf_counter() - started
