@@ -10719,3 +10719,140 @@ test_concat_datasets・test_value・test_hidden・test_sprt・test_line_endings�
 * `play_game` の `seen` の持ち越しは自己交代の中断局面を見ない。とんぼがえりで出たポケモンが同じターンのうちに無傷で
   引っ込めば、次の決定の信念から落ちる（IKA-117 と同じ向きの忘れ方）。今回の 30 局では再生と記録が一致しており件数は未測定。
 * `td_target` で両席の値をどう混ぜるか（3 節）は測定待ち。
+
+## 9/23 — IKA-158: テイルアーマー・じょおうのいげんの先制技封じを、技を始める前から TryMove（PP の後・対象を見る）へ —— オラクルで 8 ケース Python・port ともずれていた（止まる時の PP・味方への先制技・いたずらごころのまきびし・かたやぶり・範囲技・ほろびのうた・2 手番目のねこだまし）。値は動かず、w12 の 130 手・gen11L の 7 手で PP とカウンタだけが変わる
+
+### 1. Showdown の規則
+
+`vendor/pokemon-showdown/data/abilities.ts` の armortail / dazzling / queenlymajesty は同じ `onFoeTryMove`:
+
+```
+  const targetAllExceptions = ['perishsong', 'flowershield', 'rototiller'];
+  if (move.target === 'foeSide' || (move.target === 'all' && !targetAllExceptions.includes(move.id))) return;
+  if ((source.isAlly(holder) || move.target === 'all') && move.priority > 0.1) { ...; return false; }
+  flags: { breakable: 1 }
+```
+
+`useMoveInner` の `runEvent('TryMove', pokemon, target, move)`（sim/battle-actions.ts:486）なので、ハンドラの `source` は
+技の対象（`getMoveTargets` の最後、L469）。`runMove` が PP を減らし `activeMoveActions++`（L217）・`lastMove` を
+入れた後、こだわりのロック（`onModifyMove`）の後。`breakable` なので `suppressingAbility`（かたやぶり系、
+きんしのちからは変化技だけ、とくせいガードの持ち主は除く）で無視される（sim/battle.ts:836）。
+
+旧 Python・旧 port は `_can_act` / `can_act` で「先制技で、対象の種類が自分・味方側・`all` 以外で、相手の場に
+持ち主が生きていれば、技を始めずに止める」だった。PP・`last_move`・`active_move_actions`・こだわりのロックが
+進まず、味方へ向けた単体の先制技も止め、`foeSide`（いたずらごころのまきびし等）も止め、ほろびのうたは止めず、
+かたやぶりを見ない。
+
+### 2. オラクル（`tests/test_priority_block_per_target.py`、Showdown d3de52a17）
+
+HP・ランク・PP・揮発状態・`last_move`・場の状態・天候を Showdown の 1 ターンと比べる。持ち主は
+リキキリン（テイルアーマー）とアマージョ（じょおうのいげん）。
+
+```
+  ケース                         手                                           Showdown                     旧 Python          新
+  fakeout-into-holders-partner   ねこだまし → リキキリンの隣のガブリアス        止まる・PP 1 減る             止まる・PP 減らず    一致
+  fakeout-into-own-ally          ねこだまし → 味方のゴロンダ                   当たる                        止まる              一致
+  mold-breaker                   かたやぶりゴロンダのバレットパンチ → リキキリン  当たる                        止まる              一致
+  no-mold-breaker（陽性対照）     ルカリオのバレットパンチ → リキキリン           止まる・PP 1 減る             止まる・PP 減らず    一致
+  prankster-spread               いたずらごころ わたほうし（allAdjacentFoes）    技ごと止まる・PP 1 減る       止まる・PP 減らず    一致
+  prankster-foeside              いたずらごころ まきびし（foeSide）              まかれる                      止まる              一致（場の状態は除く、下）
+  prankster-perish-song          いたずらごころ ほろびのうた（all の例外）※     止まる                        通る                一致
+  queenly-majesty                ねこだまし → アマージョの隣のガブリアス         止まる・PP 1 減る             止まる・PP 減らず    一致
+  control-prankster-all          いたずらごころ にほんばれ（all）               通る                          通る（一致）         一致
+  control-prankster-allyside     いたずらごころ おいかぜ（allySide）             通る                          通る（一致）         一致
+  2 手番（test_a_stopped_fake_out_was_still_the_first_move）
+                                 1 手番目に止まったねこだましの次の手番に、もう一度ねこだまし
+                                 Showdown: 選べない（champions mod の onDisableMove、"Fake Out is disabled"）
+                                 旧 Python: カウンタ 0 のまま（テストはこの assert で落ちる。味方へ向けた 2 回目は
+                                 特性に止められず初回扱いで当たる） / 新: カウンタ 1、2 回目は失敗
+  ※ M-B・M-C にいたずらごころでほろびのうたを覚えるポケモンは居ない（validate_team で 7 種とも不可）。
+    分岐を通すためだけの不正な型（ニャオニクス）で打った
+```
+
+ビビッドボディは M-B・M-C のどのポケモンにも無い。テイルアーマーはリキキリン、じょおうのいげんはアマージョ（両規則）。
+まきびしのケースは場の状態だけ比べていない: Python・port とも `sideCondition` を持つ技を **すべて使い手の側に**
+置く（`_apply_status_move`、`moves.rs` の `add_side_condition(action.side, ...)`）ので、まきびし・ステルスロック・
+どくびし・ねばねばネットが自分の側に撒かれる。特性とは別の欠陥で、strict xfail（`test_spikes_land_on_the_foes_side`）
+で固定した（下の 7 節）。
+
+### 3. 直し
+
+* Python: `_can_act` から特性の先制封じを抜き、`_priority_blocked_by(turn, action, move, targets)` を新設。
+  `_use_move` の対象解決と「対象なし」の後、状態技・攻撃技に分かれる前で呼び、止まれば move_failed。
+  規則は Showdown のまま: 優先度 > 0、`foeSide` は止めない、`all` は例外 3 つだけ止める、それ以外は解決した対象に
+  相手側が 1 つでもあれば止める（allAdjacent の Showdown の最後の対象は相手なので同じ）。使い手が
+  `MOLD_BREAKER_ABILITIES`（きんしのちからは変化技だけ）なら、とくせいガードを持たない持ち主は無視。
+  `PRIORITY_BLOCKED_ALL_MOVES` を足した。
+* port: `rust/src/moves.rs` の `can_act` から同じ部分を抜き、`priority_blocked_by` を `use_move` の同じ場所に。
+* 順序の違い（記録だけ）: Showdown ではねこだましの初回判定・ふいうちの条件（`onTry`）は TryMove の後だが、Python・port は
+  その前にある。どちらも技が失敗するだけで状態は同じ（ログの行が違うだけ）。
+* `tools/diff_node.py --priority-block` を足した（`unblocked` で `_priority_blocked_by` を外した Python を対照に）。
+
+### 4. 直す前に落ちるテスト
+
+```
+  tests/test_priority_block_per_target.py         旧 Python（master c385e6c）   新 Python   旧 port（本体の exe）   新 port
+  ..._stops_moves_at_its_side[8 ケース]            8 FAIL                        pass
+  ..._stops_moves_at_its_side[control ×2]          pass                          pass
+  test_a_stopped_fake_out_was_still_the_first_move FAIL（カウンタ 0）            pass
+  test_the_port_stops_..._side[8 ケース]                                                     8 FAIL                  pass
+  test_the_port_stops_..._side[control ×2]                                                   pass                    pass
+  test_spikes_land_on_the_foes_side                xfail                         xfail
+```
+
+旧 port は本体の `rust/target/release/pokeuraou-damage.exe`（22:01 のビルド）を C:/tmp/ika158/ に複写して
+`POKEURAOU_RUST_NODE_BIN` で指した。新: この 2 ファイルと test_psychic_terrain_per_target で 35 pass・1 xfail。
+
+### 5. 一致（`tools/diff_node.py --games-dir data/ika73/w12 --priority-block --nodes 30 --limit 24`）
+
+```
+                                                          matrix             fast               旧 exe（matrix、陽性対照）
+  局面 / セル                                              30 / 10,502        30 / 10,502        30 / 10,502
+  先制技を使いうるセル（branch ごとに比較）                  2,208（不一致 0）  2,208（不一致 0）  2,208（不一致 1,506）
+  止めが発火したセル（`unblocked` で動くセル）              1,302（不一致 0）  1,302（不一致 0）  1,302（不一致 1,302）
+  セルの差の最大                                            6.7e-16            1.3e-15            6.7e-16
+  port の拒否 / exact の差                                  0 / 0              0 / 0              0 / 0
+  判定                                                      OK                 OK                 FAIL
+```
+
+旧 exe でもセルの値（hp-share・faints）は 6.7e-16 しか違わない: 変わるのは PP・`last_move`・カウンタで、
+その 1 ターンの葉はそれを読まない。branch の局面は 1,302 セルすべてでずれる。均衡の頻度の差の最大（0.44・1.0）は
+旧 exe でも同じ値で、セルが ulp しか違わない退化した均衡の取り方の差（この直しとは無関係）。
+
+`tools/port_coverage.py --check`・`tools/port_gate_audit.py --check`: ok。ruff check ok、新しいテストは ruff format 済み。
+
+### 6. 記録で該当する決定
+
+相手の場に持ち主が居る決定の、先制技を使うメニューの枠を旧規則・新規則で分類（C:/tmp/ika158/count.py）。
+
+```
+                          ゲーム   持ち主が場に居る手番決定   セル        両方で止まる枠のあるセル   旧だけ止まる   新だけ止まる   実際に指した手（両方で止まる）
+  data/ika73/w12          43,999   21,663                    2,469,717   206,932                    0              0              ねこだまし 130・でんこうせっか 62
+  data/selfplay-gen11L    12,000   2,355                     955,487     113,116                    0              0              ねこだまし 7・でんこうせっか 7
+```
+
+旧だけ止まる枠（味方への先制技・いたずらごころの foeSide・かたやぶりの先制技）と新だけ止まる枠（ほろびのうた）は
+0: 探索は `normal` 技を味方へ向けず、記録の型にいたずらごころのまきびし・かたやぶりの先制技・ほろびのうたが無い。
+だから記録上の差は「止まる時に PP・`last_move`・カウンタが進むか」だけ。止まったねこだまし 130 回（w12）のうち
+43 回は、次の手番に同じポケモンが再びねこだましを選んでいた（gen11L は 7 回中 0 回）。旧エンジンではカウンタが
+0 のままなのでその 2 回目は「初回」扱い（持ち主の側へ向ければまた特性で止まるだけ、そうでなければ当たる）、
+Showdown では選べない、新エンジンでは必ず失敗する。
+陽性対照: w12 の 1 局（持ち主なし）の最初の手番で両側の先発 1 体をテイルアーマーにしたファイルでは、同じ集計が
+48 セル・指した手 1（ねこだまし）を見つけた。
+
+### 7. 残り（別課題の候補）
+
+* **`sideCondition` を持つ技はすべて使い手の側に置かれる**（Python `_apply_status_move` の `turn.add_side_condition(action.side, ...)`、
+  port `moves.rs:1786`）。まきびし・ステルスロック・どくびし・ねばねばネット（`foeSide`）が自分の側に撒かれ、
+  自分の交代で自分が削られる。`STATUS_MOVES_FULLY_MODELLED` には 4 つとも入っている。特性と無関係に、撒くたびにずれる
+* **champions mod ではねこだまし・であいがしらは `activeMoveActions` が 0 のときしか選べない**（data/mods/champions/moves.ts の
+  `onDisableMove`）。`side_actions` はいつでも出し、`narrow.drop_dead_actions` は `active_move_actions > 1` で落とすので、
+  2 手番目（カウンタ 1）のねこだましは探索のメニューに残る（`drop_dead_actions` の docstring の「Showdown lets a player
+  pick one anyway」は champions では成り立たない）
+* はねやすめ: `roost` の揮発状態は付くが `types_of` が読まないので、そのターンの残りでひこうが外れない（`_grounded` だけで
+  なく、じめん技の相性も）。じゅうりょく（`gravity`、M-C の技表にある）も `_grounded` は見ない
+* IKA-156 の `_stopped_by_psychic_terrain` はきんしのちからを攻撃技でもかたやぶり扱いする（Showdown は変化技だけ）。
+  M-B・M-C にきんしのちからの持ち主は居ない
+
+機械: cargo release ビルド 2 回（8 コア 22 秒・20 秒）、記録の集計 24 秒・27 秒、diff_node 105 秒・117 秒・91 秒（1 コア）は
+heavy.py に記録（--agent IKA-158）。ほかにオラクルのテスト（各 数十秒以内、1 コア）を旧・新コードで数回、直接走らせた。

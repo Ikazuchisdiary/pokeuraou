@@ -50,6 +50,15 @@ priority-raising ability) on the field, and holds every cell that may use one br
 branch. The cells where the terrain's per-target stop *fired* are the ones Python moves
 with `_stopped_by_psychic_terrain` taken out, and the run fails if there are none.
 
+Holding the port to the priority-blocking abilities (IKA-158):
+
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --priority-block
+
+`--priority-block` keeps the recorded positions with Armor Tail, Queenly Majesty or
+Dazzling on the field and holds every cell that may use a priority move branch by branch.
+The cells where the stop *fired* are the ones Python moves with `_priority_blocked_by`
+taken out, and the run fails if there are none.
+
 The budget, and the second invocation that goes with it (IKA-146):
 
     uv run python tools/diff_node.py --scenario examples/scenario-turn5.json --budget fast --limit 0
@@ -100,7 +109,12 @@ from pokeuraou.narrow import narrow  # noqa: E402
 from pokeuraou.payoff import OBJECTIVES  # noqa: E402
 from pokeuraou.position import Position  # noqa: E402
 from pokeuraou.priors import find_cached_chaos, load_chaos  # noqa: E402
-from pokeuraou.resolve import Budget, batched_payoffs, resolve_turn  # noqa: E402
+from pokeuraou.resolve import (  # noqa: E402
+    PRIORITY_BLOCKING_ABILITIES,
+    Budget,
+    batched_payoffs,
+    resolve_turn,
+)
 from pokeuraou.selfplay import play_game  # noqa: E402
 from pokeuraou.standings import (  # noqa: E402
     find_cached_standings,
@@ -231,6 +245,31 @@ class unstopped:  # noqa: N801 - read as a phrase at the call site
         resolve_mod._stopped_by_psychic_terrain = self.real
 
 
+class unblocked:  # noqa: N801 - read as a phrase at the call site
+    """Python with the priority-blocking abilities' stop taken out: the control for
+    --priority-block. The move still starts and spends its PP (IKA-158)."""
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = resolve_mod._priority_blocked_by
+        resolve_mod._priority_blocked_by = lambda *_args: None
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        resolve_mod._priority_blocked_by = self.real
+
+
+def ability_on_field(pos: Position, abilities: frozenset[str]) -> bool:
+    """Whether a Pokemon on the field, still standing, has one of these abilities."""
+    return any(
+        mon is not None and not mon.fainted and mon.ability in abilities
+        for side in pos.sides
+        for mon in side.active_pokemon()
+    )
+
+
 #: Abilities that raise a move's priority, and the moves they raise (`speed.move_priority`).
 PRIORITY_ABILITIES = {"prankster", "galewings", "triage"}
 
@@ -270,7 +309,11 @@ def priority_on_field(pos: Position, own: frozenset[str]) -> bool:
 
 
 def recorded_positions(  # noqa: ANN001
-    reg, args, holding: frozenset[str], using: frozenset[str] = frozenset()
+    reg,
+    args,
+    holding: frozenset[str],
+    using: frozenset[str] = frozenset(),
+    abilities: frozenset[str] = frozenset(),
 ) -> tuple[list[Position], int]:
     """Roots a search already filled a matrix at, read from recorded games.
 
@@ -282,7 +325,7 @@ def recorded_positions(  # noqa: ANN001
     found: list[Position] = []
     keys: set[str] = set()
     other_format = 0
-    wanted = holding | using
+    wanted = holding | using | abilities
     enough = None if wanted else 40 * args.nodes
     for directory in args.games_dir:
         for path in sorted(Path(directory).glob("*.jsonl")):
@@ -310,6 +353,8 @@ def recorded_positions(  # noqa: ANN001
                         if holding and not on_field(pos, holding):
                             continue
                         if using and not knows_on_field(pos, using):
+                            continue
+                        if abilities and not ability_on_field(pos, abilities):
                             continue
                         keys.add(key)
                         found.append(pos)
@@ -531,6 +576,13 @@ def main() -> None:
         "cell that may use one to the port branch by branch, and count where the "
         "terrain's per-target stop fired",
     )
+    ap.add_argument(
+        "--priority-block",
+        action="store_true",
+        help="keep positions with Armor Tail, Queenly Majesty or Dazzling on the field, "
+        "hold every cell that may use a priority move to the port branch by branch, and "
+        "count where the ability's stop fired",
+    )
     args = ap.parse_args()
 
     if args.limit == 0 and not args.scenario:
@@ -545,6 +597,7 @@ def main() -> None:
     if args.give:
         holding |= {args.give}
     using = frozenset(m for m in (args.using or "").split(",") if m)
+    blockers = PRIORITY_BLOCKING_ABILITIES if args.priority_block else frozenset()
     for move_id in sorted(using):
         move = reg.moves.get(move_id)
         if move is None or not move.raw.get("breaksProtect"):
@@ -573,7 +626,7 @@ def main() -> None:
         print(f"the node of {args.scenario}")
     elif args.games_dir:
         positions, other_format = recorded_positions(
-            reg, args, holding - {args.give}, using
+            reg, args, holding - {args.give}, using, blockers
         )
         print(
             f"{len(positions)} recorded positions from "
@@ -593,7 +646,9 @@ def main() -> None:
         positions = [pos for pos in positions if on_field(pos, holding)]
     if using:
         positions = [pos for pos in positions if knows_on_field(pos, using)]
-    quick = priority_moves(reg) if args.terrain else frozenset()
+    if blockers:
+        positions = [pos for pos in positions if ability_on_field(pos, blockers)]
+    quick = priority_moves(reg) if args.terrain or blockers else frozenset()
     if args.terrain:
         for pos in positions:
             pos.field.terrain = args.terrain
@@ -637,6 +692,9 @@ def main() -> None:
     # Where a priority move may go under the terrain, and where the terrain stopped it.
     quick_used = quick_wrong = stopped = stopped_wrong = 0
     stopped_worst = 0.0
+    # Where a priority move may go beside a blocking ability, and where the ability stopped it.
+    block_used = block_wrong = blocked = blocked_wrong = 0
+    blocked_worst = 0.0
 
     for pos in positions:
         row = menu(reg, pos, 0, args.limit)
@@ -763,6 +821,36 @@ def main() -> None:
                         shown += 1
                         print(f"  cell {(i, j)} under {args.terrain}: {wrong[0][:200]}")
 
+        if blockers:
+            node = rustnode.node_for(reg)
+            for i, a in enumerate(row):
+                for j, b in enumerate(col):
+                    if not (
+                        uses_priority(reg, pos, 0, a, quick) or uses_priority(reg, pos, 1, b, quick)
+                    ):
+                        continue
+                    block_used += 1
+                    here = resolve_turn(reg, pos, [a, b], budget=budget)
+                    with unblocked():
+                        control = resolve_turn(reg, pos, [a, b], budget=budget)
+                    wrong = (
+                        ["no warm process"]
+                        if node is None
+                        else branch_differences(node, reg, pos, a, b, here, budget)
+                    )
+                    block_wrong += bool(wrong)
+                    if differ(outcome(here), outcome(control)):
+                        blocked += 1
+                        blocked_wrong += bool(wrong)
+                        for index in range(len(evaluators)):
+                            blocked_worst = max(
+                                blocked_worst,
+                                abs(float(got[index][i, j] - expected[index][i, j])),
+                            )
+                    if wrong and shown < 5:
+                        shown += 1
+                        print(f"  cell {(i, j)} beside a blocking ability: {wrong[0][:200]}")
+
         checked += 1
         cells += len(row) * len(col)
         for index, name in enumerate(names):
@@ -837,6 +925,14 @@ def main() -> None:
         print(f"    {stopped} of {quick_used} cells")
         print(f"    cells whose branches, weights, notes or positions differ  {stopped_wrong}")
         print(f"    worst cell difference there  {stopped_worst:.3e}")
+    if blockers:
+        print("\n  beside a priority-blocking ability, cells that may use a priority move")
+        print(f"    {block_used} of {cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {block_wrong}")
+        print("  where the ability stopped one -- the cells `unblocked` moves")
+        print(f"    {blocked} of {block_used} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {blocked_wrong}")
+        print(f"    worst cell difference there  {blocked_worst:.3e}")
     print(f"  python {python_seconds:.2f} s   rust {rust_seconds:.2f} s")
     if rust_seconds > 0:
         print(f"  end to end {python_seconds / rust_seconds:.1f}x")
@@ -855,6 +951,10 @@ def main() -> None:
         failed.append(f"{quick_wrong} cells under {args.terrain} differ by branch")
     if args.terrain and not stopped:
         failed.append(f"{args.terrain} stopped nothing in any cell, so agreeing here says nothing")
+    if block_wrong:
+        failed.append(f"{block_wrong} cells beside a blocking ability differ by branch")
+    if blockers and not blocked:
+        failed.append("no blocking ability stopped anything in any cell, so agreeing here says nothing")
     if failed:
         print(f"\nFAIL ({args.budget}): " + "; ".join(failed))
         sys.exit(1)
