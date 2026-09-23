@@ -19,8 +19,8 @@
 		"maxMoveCount": 4,
 		"teraEnabled": false,
 		"megaPerSide": 1,
-		"showdownCommit": "cc089d36b7717dec78ce8ab5d1745c03ad5c97e4",
-		"generatedAt": "2026-09-10T15:31:22.955Z"
+		"showdownCommit": "d3de52a17868aa22e6f5af251a68b86f573b75b1",
+		"generatedAt": "2026-09-23T12:26:31.929Z"
 	},
 	"natures": [
 		{
@@ -13201,6 +13201,31 @@
 			"nonGhostTarget": ""
 		},
 		{
+			"id": "doubleshock",
+			"name": "Double Shock",
+			"num": 892,
+			"type": "Electric",
+			"category": "Physical",
+			"basePower": 120,
+			"accuracy": 100,
+			"pp": 5,
+			"priority": 0,
+			"target": "normal",
+			"critRatio": 1,
+			"flags": {
+				"contact": 1,
+				"protect": 1,
+				"mirror": 1,
+				"punch": 1
+			},
+			"hasCustomCode": true,
+			"customHooks": [
+				"onTryMove"
+			],
+			"nonGhostTarget": "",
+			"self": {}
+		},
+		{
 			"id": "dragoncheer",
 			"name": "Dragon Cheer",
 			"num": 913,
@@ -13651,6 +13676,31 @@
 				"boosts": {
 					"spa": -2
 				}
+			}
+		},
+		{
+			"id": "meteorassault",
+			"name": "Meteor Assault",
+			"num": 794,
+			"type": "Fighting",
+			"category": "Physical",
+			"basePower": 170,
+			"accuracy": 100,
+			"pp": 5,
+			"priority": 0,
+			"target": "normal",
+			"critRatio": 1,
+			"flags": {
+				"recharge": 1,
+				"protect": 1,
+				"mirror": 1,
+				"failinstruct": 1
+			},
+			"hasCustomCode": false,
+			"customHooks": [],
+			"nonGhostTarget": "",
+			"self": {
+				"volatileStatus": "mustrecharge"
 			}
 		},
 		{
@@ -16949,30 +16999,6 @@
 			"customHooks": [],
 			"multihit": 2,
 			"nonGhostTarget": ""
-		},
-		{
-			"id": "doubleshock",
-			"name": "Double Shock",
-			"num": 892,
-			"type": "Electric",
-			"category": "Physical",
-			"basePower": 120,
-			"accuracy": 100,
-			"pp": 5,
-			"priority": 0,
-			"target": "normal",
-			"critRatio": 1,
-			"flags": {
-				"contact": 1,
-				"protect": 1,
-				"mirror": 1
-			},
-			"hasCustomCode": true,
-			"customHooks": [
-				"onTryMove"
-			],
-			"nonGhostTarget": "",
-			"self": {}
 		},
 		{
 			"id": "doubleteam",
@@ -29765,6 +29791,18 @@
 			]
 		},
 		{
+			"id": "runaway",
+			"name": "Run Away",
+			"num": 50,
+			"rating": 0,
+			"flags": {},
+			"hasCustomCode": true,
+			"customHooks": [
+				"onMaybeTrapPokemon",
+				"onTrapPokemon"
+			]
+		},
+		{
 			"id": "spicyspray",
 			"name": "Spicy Spray",
 			"num": 318,
@@ -32398,15 +32436,6 @@
 			"customHooks": [
 				"onDamagingHit"
 			]
-		},
-		{
-			"id": "runaway",
-			"name": "Run Away",
-			"num": 50,
-			"rating": 0,
-			"flags": {},
-			"hasCustomCode": false,
-			"customHooks": []
 		},
 		{
 			"id": "sandforce",

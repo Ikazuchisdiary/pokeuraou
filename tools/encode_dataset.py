@@ -85,6 +85,26 @@ META_KEYS = (
 )
 
 
+def _lacks_foe_values(cache: Path, directory: Path, sources: list[list[Any]]) -> bool:
+    """A shard without `foe_search_value` over games that record `foeSearchValue`.
+
+    Only such a shard is stale for the column: every game before IKA-127 has no value to
+    read, so re-encoding one would write NaN where the cache already means "none". The
+    first line of each file is enough -- a file is written by one build.
+    """
+    try:
+        with np.load(cache, allow_pickle=False) as data:
+            if "foe_search_value" in data.files:
+                return False
+    except (ValueError, OSError):
+        return True
+    for name, _size in sources:
+        with (directory / name).open(encoding="utf-8") as handle:
+            if '"shownIdentities"' in handle.readline():
+                return True
+    return False
+
+
 def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict[str, Any]]:
     """Encodes one directory of games, or reads back the cache if it is still valid."""
     cache = shard_path(directory)
@@ -124,7 +144,9 @@ def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict
             have = json.loads(str(np.load(cache, allow_pickle=False)["meta_json"]))
         except (KeyError, ValueError, OSError):
             have = {}
-        if all(have.get(k) == v for k, v in want.items()):
+        if all(have.get(k) == v for k, v in want.items()) and not _lacks_foe_values(
+            cache, directory, sources
+        ):
             dataset = load_dataset(cache)
             print(f"  {directory.name}: {len(dataset):,} decisions from cache")
             return dataset, have
@@ -139,6 +161,10 @@ def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict
     #: The value the generating search reported. Named `proxies` when that was hp-share;
     #: it has been the previous model's searched value since generation 2.
     proxies: list[float] = []
+    #: Side 1's own value in side 0's units (`foeSearchValue`, IKA-127), NaN where the
+    #: decision carries none. Kept beside `proxies` so a target that mixes both seats'
+    #: opinions can be tried without re-reading the JSON; nothing trains on it yet.
+    foe_values: list[float] = []
     #: The parameter-free hp-share of the position, which is what "is a learned value
     #: function worth having" is measured against.
     hp_shares: list[float] = []
@@ -214,6 +240,8 @@ def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict
                     games.append(game_id)
                     turns.append(int(decision["turn"]))
                     proxies.append(float(decision["searchValue"]))
+                    foe_value = decision.get("foeSearchValue")
+                    foe_values.append(float("nan") if foe_value is None else float(foe_value))
                     hp_shares.append(float(HP_SHARE(position)))
                     kinds.append(0 if decision["kind"] == "move" else 1)
                     foes.append(foe_index[label])
@@ -249,6 +277,7 @@ def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict
         kind=np.array(kinds, dtype=np.int8),
         foe=np.array(foes, dtype=np.int32),
         foe_names=tuple(foe_names),
+        foe_search_value=np.array(foe_values, dtype=np.float32),
     )
     meta = {
         **want,
@@ -358,6 +387,18 @@ def main() -> None:
     print(f"  games by generating leaf: {objectives}")
     print(f"  games by what the search could see: {information}")
     print(f"  games by selection rule: {selections}")
+    if len(dataset.foe_search_value) == len(dataset):
+        # The two seats' opinions of the same decision under a hidden bench (IKA-127).
+        # Their gap is how different the two games each side solved were; zero-width
+        # would mean the belief changed nothing.
+        both = ~np.isnan(dataset.foe_search_value)
+        if both.any():
+            gap = dataset.search_value[both] - dataset.foe_search_value[both]
+            print(
+                f"  decisions carrying side 1's own value: {int(both.sum()):,} of "
+                f"{len(dataset):,}; searchValue - foeSearchValue mean {gap.mean():+.4f}, "
+                f"mean |gap| {np.abs(gap).mean():.4f}"
+            )
     branching = merged("branching")
     total = sum(branching.values())
     if total:

@@ -8,7 +8,7 @@ Pokémon Champions (VGC 2026 Reg M-C) ダブルバトル検討ソルバ。
 ## 層構成
 
 ```
-vendor/pokemon-showdown/        pinned submodule (cc089d36, 2026-09-09)
+vendor/pokemon-showdown/        pinned submodule (d3de52a1, 2026-09-10)
 packages/sim-bridge/            TypeScript。Showdown を使う4つの責務だけ
   src/regulation.ts             レギュレーション設定を dex から抽出
   src/position.ts               局面の正規表現（TS/Python 共通のインタフェース）
@@ -767,7 +767,7 @@ uv run python tools/names_report.py                  # 被覆率と未訳の一�
 
 | | 被覆 | 備考 |
 |---|---|---|
-| 技 | **514/514 (100%)** | |
+| 技 | **515/515 (100%)** | スターアサルト（meteorassault）は d3de52a1 で M-B にも入った（覚える種族は無い） |
 | 特性 | **316/316 (100%)** | とびだすハバネロ含む |
 | 性格 | **50/50 (100%)** | まじめ = 唯一の無補正 |
 | 能力値 | **6/6 (100%)** | ＨＰ/攻撃/防御/特攻/特防/素早さ、Ｈ/Ａ/Ｂ/Ｃ/Ｄ/Ｓ |

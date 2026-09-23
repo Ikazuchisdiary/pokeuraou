@@ -26,7 +26,7 @@ represent our uncertainty would duplicate machinery that exists and is tested.
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Iterable, Iterator, Sequence
+from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from time import perf_counter
@@ -37,7 +37,7 @@ import numpy as np
 from . import timing
 from .actions import SideAction, switch_actions_after_faint
 from .equilibrium import EquilibriumError, solve
-from .hidden import completions, seen_identities, seen_slots, shown_species
+from .hidden import completions, identity, seen_identities, seen_slots, shown_species
 from .narrow import narrow
 from .payoff import HP_SHARE, Objective
 from .policy import policy_ranking
@@ -129,6 +129,56 @@ class Decision:
     #: when neither side did. IKA-143: the rule is `rank_view`, and this is the rule's
     #: answer at this decision.
     rank_views: list[list[Any] | None] | None = None
+    #: What each side's opponent was allowed to know of it here, indexed by the side that
+    #: owns the Pokemon: ``shown[i]`` is side ``i``'s identities (`hidden.identity`, the
+    #: base species id -- never a party slot, which `_do_switch` renumbers; IKA-117),
+    #: sorted, that side ``1 - i``'s search conditioned on. Under a hidden bench it is the
+    #: carried `seen_identities` the belief was built from; in the open game it is the
+    #: whole four, because the open search is handed the whole four. IKA-127: before it
+    #: a reader had to replay `seen_identities` over the recorded positions
+    #: (`replay_shown`) to learn what the belief was conditioned on.
+    shown: list[list[str]] | None = None
+    #: Side 1's own value of this decision, in side 0's units (side 0's win probability,
+    #: the orientation of `search_value`) -- the equilibrium of the game side 1 solved
+    #: over *its* belief about side 0's bench. Under a hidden bench the two sides solve
+    #: different games, and `search_value` is side 0's alone. Written only where side 1
+    #: solved a game of its own under a hidden bench (move and replacement nodes); None
+    #: in the open game, where one agent's both sides solve the same matrix and this would
+    #: repeat `search_value`, and at a self-switch, where only one side chooses.
+    foe_search_value: float | None = None
+
+
+def _shown_record(
+    pos: Position, hidden_seen: Sequence[Collection[str]] | None
+) -> list[list[str]]:
+    """`Decision.shown` at `pos`: the carried identities, or the whole four when open."""
+    if hidden_seen is None:
+        return [sorted(identity(mon) for mon in pos.sides[i].pokemon) for i in (0, 1)]
+    return [sorted(hidden_seen[i]) for i in (0, 1)]
+
+
+def replay_shown(record: dict[str, Any]) -> list[list[list[str]]]:
+    """Each recorded decision's `shownIdentities`, rebuilt from the positions alone.
+
+    What a reader of a record written before IKA-127 has to do, and the check on the
+    field for one written after it: `seen_identities` carried over the move and
+    replacement positions in order, as `play_game` carries it. A self-switch reads its
+    own pause on top of the carried set without adding to it, because `play_game`'s
+    carry never sees a pause. The open game is the whole four at every decision.
+    """
+    open_game = record.get("information", "open") != "hidden-bench"
+    carried: list[frozenset[str]] = [frozenset(), frozenset()]
+    out: list[list[list[str]]] = []
+    for decision in record["decisions"]:
+        pos = Position.from_json(decision["position"])
+        if open_game:
+            out.append(_shown_record(pos, None))
+            continue
+        here = [seen_identities(pos, i, carried[i]) for i in (0, 1)]
+        if decision["kind"] != "selfswitch":
+            carried = here
+        out.append(_shown_record(pos, here))
+    return out
 
 
 @dataclass(slots=True)
@@ -205,6 +255,12 @@ class GameRecord:
     #: both arms. Two runs of different machine load are not comparable, and that is how
     #: the previous depth-2 cost was quoted.
     search_seconds: list[float] = field(default_factory=lambda: [0.0, 0.0])
+    #: The pair each side led turn 1 with, as identities in `active` order -- what the
+    #: bench belief conditions on (IKA-118) -- or None for a side whose turn 1 this game
+    #: never saw (a game resumed from `start`). Per game rather than per decision because
+    #: it cannot change within one (IKA-127). None altogether on a record not made by
+    #: `play_game`.
+    leads: list[list[str] | None] | None = None
 
     def to_json(self, *, objective: str, search_limit: int | tuple[int, int]) -> dict[str, Any]:
         return {
@@ -238,6 +294,7 @@ class GameRecord:
             "foeSelectionMixture": self.foe_selection_mixture,
             "selectionValue": self.selection_value,
             "unmodelled": sorted(set(self.unmodelled)),
+            **({"leads": self.leads} if self.leads is not None else {}),
             "decisions": [
                 {
                     "turn": d.turn,
@@ -251,6 +308,12 @@ class GameRecord:
                     "ownChosen": d.own_chosen,
                     "foeChosen": d.foe_chosen,
                     **({"rankViews": d.rank_views} if d.rank_views is not None else {}),
+                    **({"shownIdentities": d.shown} if d.shown is not None else {}),
+                    **(
+                        {"foeSearchValue": d.foe_search_value}
+                        if d.foe_search_value is not None
+                        else {}
+                    ),
                 }
                 for d in self.decisions
             ],
@@ -696,6 +759,19 @@ def play_game(
             )
             for i in (0, 1)
         ]
+        # The same pair as identities, for the record only (IKA-127).
+        record.leads = [
+            [
+                identity(mon)
+                for mon in sorted(
+                    (m for m in pos.sides[i].pokemon if m.active_index is not None),
+                    key=lambda m: m.active_index,
+                )
+            ]
+            for i in (0, 1)
+        ]
+    else:
+        record.leads = [None, None]
 
     for _step in range(max_turns * 2):
         if pos.ended:
@@ -703,11 +779,13 @@ def play_game(
 
         seen = [seen_identities(pos, i, seen[i]) for i in (0, 1)]
         shown = [seen_slots(pos, i, seen[i]) for i in (0, 1)]
+        recorded_shown = _shown_record(pos, None if sheets is None else seen)
         owed = replacements_needed(pos)
         if any(owed[0]) or any(owed[1]):
             pos = _do_replacement_node(
                 reg, rng, pos, owed, record, leaves,
                 sheets=sheets, shown=shown, bench_prior=bench_prior, leads=leads,
+                recorded_shown=recorded_shown,
             )
             continue
 
@@ -771,6 +849,7 @@ def play_game(
 
         own_seconds = foe_seconds = 0.0
         foe_solved = False
+        foe_search_value: float | None = None
 
         if spreads is not None:
             # Each side is uncertain about a different bench, so each gets its own answer.
@@ -793,6 +872,9 @@ def play_game(
             foe_strategy = answers[1].strategy
             foe_theirs = theirs
             search_value = answers[0].value
+            # Side 1 solved the negated transpose, so its value is minus side 0's win
+            # probability as side 1 believes it; negated back into side 0's units.
+            foe_search_value = -answers[1].value
             if not same_menu:
                 # The open path rebuilds the column player's game when the settings
                 # differ; this one used to skip that entirely, so under a hidden bench
@@ -817,6 +899,8 @@ def play_game(
                     break
                 record.unmodelled.extend(foe_answers[1].unmodelled)
                 foe_strategy = foe_answers[1].strategy
+                # Side 1 played off this solve, over its own menu, so its value is this one.
+                foe_search_value = -foe_answers[1].value
                 foe_seconds = perf_counter() - foe_started
                 foe_solved = True
         else:
@@ -933,6 +1017,8 @@ def play_game(
                 own_chosen=chosen[0].to_choice(),
                 foe_chosen=chosen[1].to_choice(),
                 rank_views=_rank_views(own_views, foe_views),
+                shown=recorded_shown,
+                foe_search_value=foe_search_value,
             )
         )
         timing.decided("move")
@@ -1188,6 +1274,15 @@ def _do_self_switch_node(
                 search_value=float(scores[best]),
                 own_chosen=options[best] if chooser == 0 else waiting[0],
                 foe_chosen=waiting[0] if chooser == 0 else options[best],
+                # Read for the record alone: the choice above used only `other`'s.
+                shown=_shown_record(
+                    pause.position,
+                    None
+                    if hidden is None
+                    else [
+                        seen_identities(pause.position, i, hidden.seen[i]) for i in (0, 1)
+                    ],
+                ),
             )
         )
     timing.decided("selfswitch")
@@ -1334,6 +1429,7 @@ def _do_replacement_node(
     shown: list[frozenset[int]] | None = None,
     bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None = None,
     leads: list[frozenset[str] | None] | None = None,
+    recorded_shown: list[list[str]] | None = None,
 ) -> Position:
     """Solves and applies the replacement phase.
 
@@ -1346,6 +1442,7 @@ def _do_replacement_node(
     side's seen slots in *this* position -- `seen_slots` of the identities `play_game`
     carries -- and never a set of numbers carried from an earlier one (IKA-117). `leads`
     is the turn-1 lead pair per side, as `play_game` carries it (IKA-118).
+    `recorded_shown` is `Decision.shown`, written as given and read by nothing here.
 
     Without them each side now also gets its own matrix. It did not: both strategies came
     off `matrix(pos, leaves[0])`, and this docstring called that a wart and left it,
@@ -1394,6 +1491,7 @@ def _do_replacement_node(
             len(options[0]), len(options[1])
         )
 
+    foe_value: float | None = None
     if sheets is not None:
         seen = shown or [frozenset(), frozenset()]
         answers: dict[int, tuple[list[float], float]] = {}
@@ -1431,6 +1529,8 @@ def _do_replacement_node(
                 )
             own_policy, value = answers[0]
             foe_policy = answers[1][0]
+            # Side 1's game is the negated transpose: back into side 0's units.
+            foe_value = -answers[1][1]
         else:
             own_policy = [1.0 / len(options[0])] * len(options[0])
             foe_policy = [1.0 / len(options[1])] * len(options[1])
@@ -1478,6 +1578,8 @@ def _do_replacement_node(
             search_value=value,
             own_chosen=chosen[0].to_choice(),
             foe_chosen=chosen[1].to_choice(),
+            shown=recorded_shown,
+            foe_search_value=foe_value,
         )
     )
     timing.decided("replacement")

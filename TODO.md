@@ -10525,3 +10525,197 @@ HP の持ち越し式（`min(maxhp, hp + (maxhp - maxhp_before))`、差は 0）�
 test_resolve・test_line_endings・test_no_machine_specific_paths・test_port_gates・test_port_coverage を `-n 0` で 128 pass・8 skip
 （skip は全部 oracle 未ビルド、メガとは無関係）。機械: cargo release ビルド 1 回（8 コア 22 秒）、diff_node 29 秒・メガセル比較 18 秒 + 21 秒・
 テスト 27 秒（いずれも 1 コア）を heavy.py に記録（--agent IKA-60）。
+
+## 9/23 — IKA-136: vendor の Showdown を d3de52a17 へ上げた —— Baltimore の10構築が通り（1,067 → 1,077）、value-gen11L は M-B で読めて 4,000 局面ビット一致。付随の Run Away の拘束無効を Python の手の列挙に入れた
+
+ワーカー、基点 master 058f180（IKA-82 の上）、ブランチ `ika-136-showdown-bump-r`（`ika-136-showdown-bump` は前任の worktree が
+掴んでいて使えない）。ユーザーの決定「A: Showdown を更新」の実施。前任の worktree は参照だけ（ダンプは `generatedAt` を
+除いてバイト一致だった）。
+
+### 1. 上げたコミット
+
+`cc089d36`（9/9）→ **`d3de52a17`（9/10、"Fix Champions Learnsets #12305"）**。meteorassault が M-C で合法になる最初のコミット。
+その後の上流（a5df8274e、9/22 まで）には Champions の仕様変更が他にもある（Mega Baxcalibur の特性、Emergency Exit、
+Eject Button と自分交代、呪い＋タイプ変更）ので、ここでは混ぜない。submodule は worktree の中で `git submodule update --init`
+→ `git fetch --depth 60` → checkout。main の vendor には触れていない。`npm ci`・`node build decl`・ルートの `npm ci`・
+`tsc -p packages/sim-bridge` のあと `dump-regulation`・`dump-names`（IKA-152 の検査のため gitlink を先に stage）。
+
+cc089d3..d3de52a17 の 7 コミットのうち、ダンプかシミュに効くもの:
+
+```
+  bc4eb07b4  Champions: Double Shock を punch に           → ダンプ（M-B・M-C）
+  d849b2200  Champions: Run Away の拘束無効                → ダンプ（customHooks）＋ Python の手の列挙
+  d3de52a17  learnsets に meteorassault、mod で isNonstandard: null。championsregmb/moves.ts（strengthsap・wish の PP 10）
+  sim/pokemon.ts  溜め技の RedirectTarget の条件を削除、Sky Drop に tracksTarget → 観測できる違いなし（下）
+  7e34f637f  aliases・BSS の searchShow                  → ダンプに出ない
+  他（gen4・DexText・unseenfist の並べ替え）              → 出ない（ja.json は showdownCommit 以外バイト一致）
+```
+
+### 2. ダンプの差分（id で突き合わせた全件、`C:/tmp/ika136/dumpdiff.py`）
+
+```
+  M-B  moves + meteorassault（覚える種族は無い。ネギガナイトは M-B に無い）
+       doubleshock.flags.punch  - → 1
+       strengthsap.pp 5 → 10、wish.pp 5 → 10
+       abilities runaway.hasCustomCode false → true、customHooks [] → [onMaybeTrapPokemon, onTrapPokemon]
+  M-C  moves + meteorassault（basePower 170、recharge、self.volatileStatus mustrecharge）
+       doubleshock.flags.punch  - → 1
+       abilities runaway（同上）
+  両方 meta.showdownCommit・generatedAt。配列の並びは mod で上書きされた項目が前へ動いた（id の集合と中身は上のとおり）
+```
+
+上の付随変更以外に動いたものは無い。種族・道具・性格・タイプ表は差分 0。
+
+### 3. 語彙（`tools/vocab_order.py`）
+
+```
+  --check（追記前）   両規則とも "moves missing from the order: meteorassault" で rc 1   ← 陽性対照
+  --append            両規則とも moves + meteorassault at index 515（末尾、既存の番号は1つも動かない: diff は1行の追記だけ）
+  --check（追記後）   ok（M-B species 357・abilities 316・items 148・moves 515、M-C 392・316・166・515）
+  指紋  M-B 848731f359e4b3a6 → 59d8404f70998d0c（move 515 行に切り戻すと 848731f359e4b3a6）
+        M-C 9616b72545058306 → de9714ef7c6d19de（切り戻すと 9616b72545058306）
+```
+
+### 4. 付随変更の扱い（Python と port）
+
+* **Double Shock の punch**: 両エンジンともダンプの flags を読む（Python `effects._has("punch")`、Rust `reg.rs` の F_PUNCH）。
+  M-C で効くのはパーモット（鉄の拳）。オラクルで確かめた（`C:/tmp/ika136/turn_check.py`、ロール固定）:
+  鉄の拳のダブルショック → ドヒドイデ 55 ダメージ、Python（新しいダンプ）55 で一致。**旧ダンプの Python は 31 と予測して外れる**
+  （陽性対照）。電気吸収の対照は新旧とも 31 で一致
+* **meteorassault**: 同じ検査でネギガナイトのスターアサルトのダメージと `mustrecharge` が Showdown と一致、次の手番は
+  Showdown もこちらも「反動のみ」。diff_node（`--scenario`、パーモット鉄の拳＋ネギガナイトを先発にした scenario-turn5、
+  メニュー全部 4,108 セル）: matrix・fast とも拒否 0、最悪差 1.7e-16（和の順序）、均衡の値の移動 0。
+  **陽性対照**: Python 側だけダブルショックの punch を外すと最悪差 7.1e-2 で FAIL
+* **Run Away**: champions mod で `onTrapPokemon`（優先度 -10、全拘束の後に `trapped = false`）。オラクルの局面は Showdown の
+  `trapped` を持つので正しいが、探索が作る子の局面は拘束の揮発状態を持ち、`actions._is_trapped` がそれを拘束と読んでいた。
+  → `_escapes_traps`（ダンプの runaway に onTrapPokemon があるときだけ）を足した。`tests/test_runaway.py`（10件）:
+  オラクルで「まとわりつくを受けたフォクスライは、にげあしなら trapped でない、かるわざなら trapped」、
+  その局面から Showdown の判定を消すと直す前は交代が出なかった（1件落ち）、手作りの局面で 3 種の揮発状態（直す前 3件落ち）。
+  port は手を列挙しない（Python が作ったメニューを解くだけ）ので影響なし。`port_coverage` の inert.rs から runaway が外れ
+  （Python が触るようになった）、ゲートは resolve.rs の明示のリストで通すので port の振る舞いは同じ。`port_gate_audit` の
+  KNOWN_UNREFERENCED に理由つきで足した
+* **strengthsap・wish の PP（M-B）**: 自己対戦の技の枠は `pp=maxpp=ダンプの pp` なので、これからの M-B の局は 10 から減る。
+  符号化の特徴は pp/maxpp（1回使って 0.8 → 0.9）。記録済みの局面は記録時の値のまま（下の null コントロールで M-B 局面 16 に
+  strengthsap があり、出力はビット一致）
+* **溜め技の誘導（sim/pokemon.ts）**: 旧コードは「溜めの手番」だけ誘導しなかった。溜めの手番の狙いは `lastMoveTargetLoc`
+  （誘導前の元の狙い）から取るので、当たる手番の結果は新旧で同じ。Python は当たる手番にだけ `_resolve_targets` を通すので
+  どちらとも同じ。Sky Drop は M-B・M-C に無い
+
+### 5. 受け入れ
+
+```
+  Baltimore（tools/standings_report.py、M-C）  旧 1,067/1,082（move ×10・nature ×1・team size ×4）
+                                               新 1,077/1,082（nature ×1・team size ×4 —— 残り5本は元の理由のまま）
+     増えた10本はすべて「move: meteorassault」で落ちていたもの、減った本は 0
+     その10本を Showdown 自身の検証器に: d3de52a17 は 10/10 ok、cc089d3（本体の sim-bridge）は 10/10 とも
+     "Meteor Assault does not exist in Gen 9" と "can't learn Meteor Assault"（陽性対照）
+  プール（tools/fetch_pastes.py、キャッシュから）  kept 65 / excluded 0。出力は本体のものとダンプの出典3行
+     （showdownCommit・generatedAt・sha256）だけ違う。load_roster + team_sets 65/65、Showdown の検証器 65/65
+  value-gen11L（M-B）  読める、vocab_grown_from == {"move": 515}
+     null  基点の木（master の src・cc089d3 のダンプと語彙）対 この木、w12 の M-B 局面 4,000   ビット一致 4,000/4,000
+           （meteorassault を含む局面 0）
+     陽性  同じ局面で protect と fakeout の番号を入れ替え                                   一致 0/4,000（最大 1.75）
+  data/models の 60 ファイル   58 読める（すべて grown {"move": 515}）。value-gen0（156e8e…、前から読めない）と policy-gen7
+     （形式が違う）は基点の木でも同じ2つが落ちる
+  diff_encode（M-B・M-C とも rust/turns.json の 3,451 局面＋meteorassault/doubleshock を持たせた 50 局面）  全8配列一致
+     carrier 50/50 が Python・Rust とも 515。Rust の出力の1値を 514 に変えると moves が DIFFERS（陽性対照）
+  port_coverage --check・port_gate_audit --check  ok
+  関係テスト 20 ファイル 220 件  pass・skip 0（1コア 74 秒）
+```
+
+### 6. shard（作り直していない）
+
+`data/` の `*-encoded.npz` は 41: 旧 M-B の指紋 848731f359e4b3a6 が **35（1.11 GB）**、156e8e…（gen0）1、指紋の無い
+analysis の小さいもの 5。M-C の shard は無い。指紋が変わるので 35 本は新しく符号化した shard と連結できない
+（`encode_dataset` の「different vocabularies」）。ただし 35 本とも meta に `sources`・`meta_keys`・`encoding_revision`
+が無く、今の `encode_dataset` はこの更新が無くても次に使うときに作り直す。既存 id の番号は同じなので中身は変わらない。
+
+### 7. 見つけた別件（起票の候補）
+
+* ダブルショックの「電気タイプを失う」「電気でなければ失敗」を Python も port もやっていない（`resolve.py` に doubleshock の
+  名前が無い）。オラクルでパーモットのタイプが Showdown は `???/Fighting`、こちらは `Electric/Fighting`。unmodelled にも出ない
+* `_is_trapped` の揮発状態の判定はゴースト（拘束されない）ときれいなぬけがらを見ていない。子の局面でゴーストが
+  まとわりつくを受けると交代が消える（Run Away と同じ形）。確かめていない
+* 上流の d3de52a17 より後の Champions の変更（Mega Baxcalibur の特性 490b7fb8c、Eject Button aa6d5f085、Emergency Exit
+  57ecb348b、呪い 234511985）
+
+機械: npm ci 2回（14 秒・6 秒）、build decl 4 秒、cargo release 2回（8コア 24 秒ずつ）、diff_node 3回（1コア 6・7・13 秒）、
+関係テスト 4回（1コア 58・75・120・74 秒）、ほかは各数秒。すべて heavy.py（--agent IKA-136）。
+
+## 9/23 — IKA-127: 決定ごとに両側の「見た」と side 1 自身の値を記録する。既存フィールドは同じ seed でビット一致、記録は 1 局 +1.6%
+
+### 1. 何が足りなかったか
+
+隠蔽では両側が別々のゲームを解いているのに、記録は side 0 の探索値（`searchValue`）と真の局面だけだった。side 1 が自分の信念で
+解いた値は捨てられ、「各側が相手の何を見ていたか」「先発ペア」は `seen_slots` を再生して作るしかなかった（IKA-117 のとおり
+スロット番号は交代で付け替わるので、同一性で再生する必要がある）。
+
+### 2. 足したフィールド（既存の意味は変えない。`searchValue` は side 0 のまま）
+
+* 決定ごと `shownIdentities`: `[[side 0 の同一性...], [side 1 の同一性...]]`。`shownIdentities[i]` は **side i の**ポケモンのうち、
+  相手（side 1-i）の探索が見えていたもの。同一性は `hidden.identity`（基本種族の id）、整列済み。隠蔽では信念を作るのに使った
+  持ち越しの `seen_identities` そのもの。公開では探索に 4 匹全部が渡されるので 4 匹全部（陽性対照にもなる）。
+  自己交代の決定は中断局面をその場で読むが、持ち越しには足さない（`play_game` の持ち越しも中断局面を見ない）。
+* 決定ごと `foeSearchValue`: side 1 が自分のゲームを解いた均衡値を **side 0 の単位**（side 0 の勝率）で。`belief_solve` の
+  `answers[1].value` は負の転置のゲームの値なので符号を戻す。side 1 が自分のメニューで解き直したとき（`same_menu` でない）は
+  その解の値。交代ノードも同様（`-answers[1][1]`）。**隠蔽の手番・交代ノードだけ書き、公開では書かない**: 公開で 1 エージェントの
+  両側は同じ行列を解くので `searchValue` と同じ数の重複になる。自己交代も書かない（選ぶのは片側だけ）。完成形が作れず一様に
+  落ちた交代ノードも書かない。
+* 局ごと `leads`: 各側の 1 ターン目の先発ペア（同一性、`active` 順）。`start` から再開した局は `[null, null]`。
+  1 局の中で変わらないので決定ごとではなく局ごとにした（決定ごとだと 1 局で 15 回同じものを書く）。
+* 推定分布の重みは入れていない。完成形は片側最大 15 個で決定ごとに種族の組と重みを書くことになり、しかも
+  `shownIdentities`・`leads`・選出解（`BenchPrior`）から作り直せる。
+* 記録の形式のバージョン番号はリポジトリに無い（`engine` の指紋と `ENCODING_REVISION` だけ）。新しいフィールドは「無ければ無い」で
+  読めるので、どちらも動かしていない。
+
+### 3. `td_target`
+
+挙動は変えていない。docstring を直した: 隠蔽では `searchValue` は side 0 の信念での値で、`foeSearchValue` が隣にある。選択肢として
+(a) 今のまま side 0 の値、(b) 両者の平均（席について対称）、(c) 相手をどれだけ見ていたかで重み付け、を書いた。変えると
+`--td-lambda` の学習目標が変わるので、どれにするかは測定で決める（提案のみ）。
+
+### 4. 読み手
+
+* `value.Dataset.foe_search_value`（無い決定は NaN）。`save_dataset`/`load_dataset` が読み書きし、古いファイルは長さ 0。
+  `concat_datasets` は列を持たない shard を NaN で埋める（全部持たなければ長さ 0 のまま）。まだ何も学習に使わない。
+* `tools/encode_dataset.py`: `foeSearchValue` を読んで列にし、要約に「side 1 の値を持つ決定数と searchValue との差」を出す。
+  キャッシュは、列を持たない shard のうち**ファイルの 1 行目に `shownIdentities` がある**ものだけ古いとみなす（IKA-127 前の記録には
+  読む値が無いので、全 shard を作り直すことはしない）。旧コードで作った shard を新コードが「古い」と判定し、2 回目は
+  キャッシュから読むことを確かめた。
+* `tools/leaf_calibration.py`: `shownIdentities` があれば「side 0 が side 1 の 4 匹のうち何匹を見ていなかったか」の表を足す
+  （葉は真の局面を読み、`searchValue` は side 0 の信念なので、leaf-srch には「探索の分」と「知らなかった分」が混ざる。
+  0 unseen の行は前者だけ）。`foeSearchValue` があれば両席の値・Brier・平均の Brier を出す。無い記録はそう書いて今までどおり。
+* `selfplay.replay_shown(record)`: 記録の局面だけから `shownIdentities` を作り直す関数（古い記録の読み手用、新しい記録の検査用）。
+
+### 5. 受け入れ（1 コア、heavy.py 経由、`C:/tmp/ika127/`）
+
+master の木（`git archive`）と新しい木で同じ seed を順に回した。hp-share 隠蔽 20 局（seed 11）、公開 6 局（seed 12）、
+value-gen11L＋`--rank-leaf` 隠蔽 4 局（seed 13）。いずれも選出解 `rizabanadohido-value-all` あり。
+
+| 組 | 局 | 決定 | 新フィールドを除いて一致 | 記録＝再生 | 何か隠れていた決定 | 盤面だけだと違う | foeSearchValue | 1 局あたり増分 |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 隠蔽 hp-share | 20 | 218 | 20/20 | 218/218 | 155 | 26 | 218/218, 平均 |差| 0.0013 | +1,631 B (+1.59%) |
+| 公開 | 6 | 70 | 6/6 | 70/70（4 匹全部 70/70） | 0 | 0 | 書かない | +1,561 B (+1.43%) |
+| 隠蔽 value | 4 | 54 | 4/4 | 54/54（自己交代 3） | 32 | 20 | 51/54, 平均 |差| 0.0139 | +2,070 B (+1.64%) |
+
+* 「一致」は `engine`・`searchSeconds`・新フィールドを除いた JSON の比較。陰性対照: 旧記録の `searchValue` を 1e-12 ずらすと
+  一致しない（3 組とも False）。消えたキーは 0。
+* 「盤面だけだと違う」は持ち越し無しの `seen_identities` が記録と違った決定数 —— 再生が持ち越しを本当に使っていることの
+  陽性対照（26 と 20）。テストでは IKA-117 の形（無傷で引っ込んだリザードン）で、ターン 2 の記録にリザードンが残り、
+  ターン 2 から始めた再生では落ちることも確かめた。
+* 隠蔽のミラー（同じ 4 匹・同じシート）の 1 ターン目では `searchValue + foeSearchValue = 1`（テスト）。符号・単位を誤ると崩れる。
+* value 葉の 4 局で `foeSearchValue` が無い 3 決定は自己交代。
+
+### 6. 検査と機械
+
+テスト `tests/test_record_both_sides.py`（6 本）と `test_concat_datasets` に 1 本。関係するファイル
+（test_record_both_sides・test_selfplay・test_hidden_search・test_menu_ownership・test_hidden_selfswitch・test_td_target・
+test_concat_datasets・test_value・test_hidden・test_sprt・test_line_endings・test_no_machine_specific_paths）を `-n 0` で
+全部 pass（219 秒）。ruff ok。機械: 自己対局の対 458 秒（1 コア）、テスト 219 秒（1 コア）、見積もりの 1 局 9 秒、
+いずれも heavy.py に記録（--agent IKA-127）。encode_dataset・leaf_calibration の試走は数秒〜十数秒（1 コア、直接）。
+
+### 7. 残り
+
+* `play_game` の `seen` の持ち越しは自己交代の中断局面を見ない。とんぼがえりで出たポケモンが同じターンのうちに無傷で
+  引っ込めば、次の決定の信念から落ちる（IKA-117 と同じ向きの忘れ方）。今回の 30 局では再生と記録が一致しており件数は未測定。
+* `td_target` で両席の値をどう混ぜるか（3 節）は測定待ち。
