@@ -263,6 +263,8 @@ pub struct Reg {
     pub picked_team_size: usize,
     /// Items that lock their holder into one move, from the dump's `isChoice`.
     pub choice_items: HashSet<String>,
+    /// Abilities with `flags.notrace`, which Trace does not copy (IKA-203).
+    pub untraceable: HashSet<String>,
     /// (speciesId, itemId) -> the mega forme it becomes.
     pub mega_targets: HashMap<(String, String), String>,
     /// The same pairs as inline ids, so the encoder can ask of every Pokemon of every leaf
@@ -543,6 +545,16 @@ impl Reg {
                 }
             }
         }
+        // Abilities Trace passes over, from the dump's `flags.notrace` (IKA-203).
+        let untraceable: HashSet<String> = doc["abilities"]
+            .as_array()
+            .map(|list| {
+                list.iter()
+                    .filter(|e| e["flags"]["notrace"].as_i64().unwrap_or(0) != 0)
+                    .filter_map(|e| e["id"].as_str().map(String::from))
+                    .collect()
+            })
+            .unwrap_or_default();
 
         let mut effect_immunities = HashMap::new();
         if let Some(map) = doc["effectImmunities"].as_object() {
@@ -647,6 +659,7 @@ impl Reg {
             mega_targets,
             mega_holders,
             choice_items,
+            untraceable,
             effect_immunities,
         })
     }

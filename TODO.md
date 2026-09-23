@@ -14408,3 +14408,111 @@ w12（43,999 局）・gen11L（12,000 局）とも、フィールドがあった
 cargo release 1 回（8 コア 22 秒）＋取り込み後 1 回、オラクルのテスト単体 6 回（1 コア 各 1〜2 秒）、関係テスト 14 ファイル 1 回
 （1 コア 90 秒）、diff_node 3 回（1 コア 4・141・116 秒）、記録の数え 1 回（1 コア 11 秒）、作り直し 2 回（各数秒）。すべて heavy.py
 （--agent IKA-201）。
+
+## 9/24 — IKA-203: トレース・シンクロ・オーラガードを Python と port に入れた（ひかりのねんどは既に正しかった）—— オラクル 13 局面、diff_node --trace-sync 新 exe 0・旧 exe 6,013 セル違い
+
+ブランチ `ika-203-trace-synchronize-lightclay`。M-C の試走（IKA-77、C:/tmp/ika77/out/g600）で「注記も出ない未実装」とされた 3 つと、
+M-C で初めて出る注記つきの 4 つ。
+
+### 1. Showdown の定義（a5df827。champions mod はどれも上書きしない）
+
+* **トレース** `data/abilities.ts:5118`: `onStart` で `seek`（相手に `noability` が居るか、とくせいガードを持てば探さない）、
+  `onUpdate` で立っている相手のうち `flags.notrace` の無い特性から `this.sample` で 1 体、`setAbility(ability, target)`。
+  `setAbility`（`sim/pokemon.ts:1908`）は最後に `singleEvent('Start', ability)` を走らせるので、写したいかく・ひでり・
+  メイカーはその場で発動する（オラクルで確認: 写したいかくが相手 2 体を下げ、写したひでりが晴れにする）。登場の順は
+  トレース持ちの素早さの順。先頭・交代・途中交代・メガシンカ（メガニャオニクス等、特性がトレースになるメガ）で走る。
+  写すものが無ければ `Update` のたびに探し続ける（未実装、注記）。notrace は 34 個（トレース自身、バトルスイッチ等）
+* **シンクロ** `data/abilities.ts:4857`: `onAfterSetStatus` で、自分以外が原因の、どくびし以外の、ねむり・こおり以外の
+  状態異常を `source.trySetStatus` で返す。味方のどくどくにも返す。ラムのみが治す（`Update`）より前なので、ラム持ちも返す。
+  電気タイプへのまひ等は相手側の免疫で止まる
+* **ひかりのねんど**: `reflect`/`lightscreen`/`auroraveil` の `durationCallback` が 8。**両エンジンとも既に 8**（ダンプの
+  `durations.byItem` から読む。`test_resolve` の既存のオラクル試験）。`inert.rs` に載っていたのは名前で読んでいないから
+  で、未実装ではなかった（IKA-77 の (b) の誤検出）
+* **オーラガード**（メガルカリオZ）`data/abilities.ts:310`: `onSourceModifyDamage` で接触技を 0.5 倍、breakable。
+  `isNonstandard: "Future"` なのでダンプの特性表には無い（種族の特性としてだけ出る）。もふもふの前半と同じ
+
+### 2. 実装（小さな関数にまとめた）
+
+* Python `resolve.py`: `_trace`（`_switch_in_ability` の先頭で 1 行呼ぶ。写した後の特性で天候・`_surge`・いかく・
+  おもてなしが続く）、乱択は `_draw` と `_switch_in_with_draws`（登場を相手の特性ごとに走らせ直す再生。1 回目は `turn`
+  そのもの、トレース持ちが入らない時は複製しない）。分岐は IKA-178 の流儀: `enumerate_secondary` かつ固定方針でない
+  予算で分岐、それ以外は最初の相手（固定方針でなければ注記 `trace target (the first; not branched)`）。同じ特性の相手 2 体は
+  重み 1 の 1 結果。`resume_turn` は `_resume_forks` で結果ごとに続きを回して足す。`_execute` の交代とメガも同じ口
+* `resolve_replacements`・`apply_lead_abilities` は 1 局面しか返さないので、`rng=` を渡すとそこから引き（selfplay の実局:
+  `position_from_sets(..., rng=rng)` と途中の入れ替え）、渡さなければ最初の相手と注記。**実局の乱数列は、トレースが 2 つの
+  違う特性から引く局だけ変わる**
+* シンクロ: `_apply_status_from`（状態異常を与えた相手付きの `apply_status`）と `_synchronize`。呼ぶのは変化技・技自身の
+  状態異常・追加効果・スパイシースプレーの 4 か所。`apply_status` 本体は触っていない（フラワーベールの判定は中にあるので
+  シンクロの返しにも効く）。トーチカ系（`_protect_punish`）は相手の位置を持たないので渡していない（プールに該当なし）
+* オーラガード: `effects.py` と `effects.rs` の表に 1 行
+* port: 同じ形（`trace`・`draw`・`switch_in_with_draws`・`resume_forks`・`apply_status_from`・`synchronize`、
+  `Reg.untraceable` はダンプの `flags.notrace`）。`ability_handled` に trace・synchronize・auraguard。`inert.rs`・
+  `modelled.rs` は `port_coverage.py` で作り直した
+* メイカー（IKA-201）との順: IKA-201 は取り込み済み。`_surge`/`terrain::surge` は `_trace`/`trace` の後に
+  `mon.ability` を読むので、写したグラスメイカーはその場でフィールドを張る
+
+### 3. オラクル（`tests/test_trace_synchronize.py`、60 件）
+
+```
+                                        旧 Python（master a4ad89f）  新 Python   旧 exe（a4ad89f）  新 exe
+  Showdown と同じ盤面 13 局面                10 落ち（対照 3 通過）       0          —                 —
+  2 つの特性の半々 4・先頭 1・途中交代 1       6 落ち                        0          —                 —
+  port = Python（13 局面 × 予算 2、行列 1、ねんど 1）  —                     —          23 落ち（5 通過）   0
+```
+
+局面: 交代で入るトレース（sample first/last）、メガニャオニクスのトレース（first/last）、対照（バトルスイッチを飛ばす・
+いかく 2 体は 1 結果）、シンクロ（でんじは・どくどく・ラムのみ、対照: 電気タイプからのでんじは・ねむりごな）、
+オーラガード（アイアンヘッド、対照: じしん）。旧 exe で通る 5 件は対照のシンクロ 4 件とねんど。
+
+### 4. diff_node `--trace-sync`（M-C 試走の局面、`--games-dir C:/tmp/ika77/out/g600`、M-C の roster、150 ノード）
+
+```
+                                   新 exe       旧 exe（master a4ad89f）
+  セル                               83,302       83,302
+  違うセル                           0            6,013
+  断ったセル                         168（finalgambit）  2,664（auraguard 2,496・finalgambit 168）
+  発火（untraced / unsynced が動かす）  6,205（トレース 6,000・シンクロ 205）
+  発火セルの違い                     0            6,013
+  最悪のセル差                       4.4e-16      7.9e-02
+```
+
+### 5. 記録で該当する決定（`C:/tmp/ika203/count.py`）
+
+```
+                                    g600（600 局、4,909 決定）  w12（43,999 局）   gen11L（12,000 局）
+  トレースが選ばれた局               99（16.5%）                 265（0.60%）       82（0.68%）
+    うち先頭                          61（10.2%）                 242                76
+  トレース持ちが場に居る決定（写していない）  233（4.7%）           475                199
+  トレース持ちが控えに居る決定         131（2.7%）                 61                 30
+  トレース持ちへの交代を選んだ決定     22                          13                 3
+  シンクロが選ばれた局 / 場に居る決定  43（7.2%）/ 105（2.1%）     0                  0
+  ひかりのねんどが選ばれた局           36（6.0%）                  2,899（6.6%）      383（3.2%）
+  オーラガードが場に居る決定           19（0.39%）                 0                  0
+```
+
+M-C ではトレース・シンクロの持ち主は全部サーナイト（サーナイトナイト）で、メガシンカで特性はフェアリースキンになる。
+効くのは先頭の登場（相手のいかく・ひでり・メイカーを写してその場で発動）とメガ前の数ターン、控えからの登場。
+
+### 6. psychup・skillswap・revivalblessing（注記のまま、の案）
+
+g600 で場に居て覚えている決定 51・21・35、選ばれた決定 1・2・4（4,909 中）。自己暗示は相手の能力変化とクリティカル系の
+揮発を写すだけで小さいが、選ばれるのが 1 回なので後回し。スキルスワップは特性の入れ替えと両方の Start（トレースの口を
+使える）で中くらい。さいきのいのりは瀕死の味方を選ぶ要求が途中に入り、途中交代ノードと同じ形が要るので大きい。
+どれも注記は出ている。
+
+### 7. 残り（別課題の候補）
+
+* トレースが写すものを見つけられなかった時の「探し続ける」（`Update` のたび）。今は注記
+* 選出（`selection.py` の `position_from_sets`）と入れ替えノードの行列は先頭・入れ替えのトレースを最初の相手で読む
+  （注記は捨てられる）。期待値にするなら `ReplacementResult` に分岐を持たせる
+* シンクロの返しに攻撃側のかたやぶりが効いてしまう（フラワーベールの判定が `current_actor` を読む。Showdown では
+  シンクロは技ではない）。トーチカ系にシンクロの原因を渡していない
+* `damage._unmodelled` は使っていないメガストーン（`lucarionitez` 等）を Python だけが注記する（port は黙る）
+
+### 8. 機械
+
+cargo release 5 回（8 コア 各 20〜24 秒。新 2・旧 master 2・取り込み後 1、1 回はコンパイルエラー 5 秒）、
+diff_node 2 本並行（1 コア 各 約 15 分）＋試し 1 回（8 秒）＋取り込みで止めた 2 本（途中）、関係テスト 3 回（1 コア 44・40・82 秒）、
+新しいテストの単体・旧 Python・旧 exe（1 コア 各 数十秒、直接）、記録の数え 1 回（1 コア 61 秒）。
+worktree に data/priors・standings・reportworm と sim-bridge の dist を main から写し、node_modules は junction（コミットしない）。
+旧の木は `git archive master` を C:/tmp/ika203/base に展開してビルドした。

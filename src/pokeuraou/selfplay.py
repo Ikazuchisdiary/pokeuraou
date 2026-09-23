@@ -395,7 +395,11 @@ def _make_pokemon(reg: Regulation, index: int, entry: SampledSet, active: int | 
 
 
 def position_from_sets(
-    reg: Regulation, own: list[SampledSet], foe: list[SampledSet]
+    reg: Regulation,
+    own: list[SampledSet],
+    foe: list[SampledSet],
+    *,
+    rng: np.random.Generator | None = None,
 ) -> Position:
     """A turn-1 position from two picked teams, both spreads known.
 
@@ -428,7 +432,9 @@ def position_from_sets(
             )
         )
     opening = Position(format=reg.meta.format_id, sides=sides, turn=1, field=Field())
-    return apply_lead_abilities(reg, opening).position
+    # A lead's Trace between two foes is drawn from `rng` for the game being played, and is
+    # the first foe (noted and dropped) for a caller that only wants a position (IKA-203).
+    return apply_lead_abilities(reg, opening, rng=rng).position
 
 
 def _with_lead(
@@ -770,7 +776,7 @@ def play_game(
         "policy" if policies[0] is not None else "leaf" if ranked[0] else "damage"
     )
     record.rank_view = list(views_rule)
-    pos = start if start is not None else position_from_sets(reg, own, foe)
+    pos = start if start is not None else position_from_sets(reg, own, foe, rng=rng)
     budget = Budget.matrix()
     # Who each side has shown, accumulated across turns. A Pokemon that came in and went
     # back out is still known, and the position alone stops saying so -- so this is
@@ -1629,7 +1635,7 @@ def _do_replacement_node(
         )
     )
     timing.decided("replacement")
-    outcome = resolve_replacements(reg, pos, chosen)
+    outcome = resolve_replacements(reg, pos, chosen, rng=rng)
     record.unmodelled.extend(outcome.unmodelled)
     return outcome.position
 
