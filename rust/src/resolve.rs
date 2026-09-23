@@ -576,6 +576,10 @@ impl<'a> Turn<'a> {
             crate::moves::start_rampage(self, side, slot);
             return;
         }
+        if vid == "confusion" {
+            crate::moves::start_confusion(self, side, slot);
+            return;
+        }
         let Some(mon) = self.mon_at_mut(side, slot) else { return };
         if mon.fainted || mon.has_volatile(vid) {
             return;
@@ -617,7 +621,8 @@ pub const FREEZE_COUNTER: i64 = 3;
 pub const SLEEP_COUNTER_PINNED: i64 = 2;
 pub const SLEEP_COUNTER_MODAL: i64 = 3;
 pub const FULL_PARALYSIS_CHANCE: f64 = 1.0 / 8.0;
-pub const CONFUSION_SELF_HIT_CHANCE: f64 = 1.0 / 3.0;
+/// `randomChance(33, 100)` (IKA-177; it was 1/3).
+pub const CONFUSION_SELF_HIT_CHANCE: f64 = 0.33;
 pub const THAW_CHANCE: f64 = 0.25;
 
 const BURN_DAMAGE: (i64, i64) = (1, 16);
@@ -773,8 +778,8 @@ fn item_handled(item: &str) -> bool {
             // decides whether a switch is *offered*, and the menu is Python's (IKA-163).
             // It left `inert.rs` when `actions._escapes_traps` learned it.
             | "shedshell"
-            // Eaten at once for a rampage's fatigue confusion, the only confusion either
-            // engine lets it cure (`confused_by_fatigue`, IKA-174). It left `inert.rs` then.
+            // Eaten at once for any confusion (`start_confusion`, IKA-177; only a
+            // rampage's fatigue from IKA-174). It left `inert.rs` with IKA-174.
             | "persimberry"
     ) || crate::inert::item_is_inert(item)
         // Mega stones carry no turn effect of their own; the mega action owns the forme

@@ -568,6 +568,89 @@ def frozen_on_field(pos: Position) -> bool:
     )
 
 
+class unconfused:  # noqa: N801 - read as a phrase at the call site
+    """Python with confusion as it was before IKA-177: the control for --confused.
+
+    Nothing ends it or counts its tries, the self-hit is 1/3, and only the rampage's
+    fatigue meets a Persim or Lum Berry. Paralysis still comes after the self-hit, so a
+    cell whose only change is that order is not counted as fired.
+    """
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = (
+            resolve_mod._roll_confusion, resolve_mod._confusion_try,
+            resolve_mod._start_confusion, resolve_mod._confused_by_fatigue,
+            resolve_mod.CONFUSION_SELF_HIT_CHANCE,
+        )
+        real_fatigue = resolve_mod._confused_by_fatigue
+
+        def start(turn, side, slot) -> None:  # noqa: ANN001
+            mon = turn.mon_at(side, slot)
+            if mon is not None and not mon.fainted and not mon.has_volatile("confusion"):
+                mon.volatiles.append(Effect(id="confusion"))
+
+        def fatigue(turn, side, slot) -> None:  # noqa: ANN001
+            real_fatigue(turn, side, slot)
+            mon = turn.mon_at(side, slot)
+            if (
+                mon is not None and mon.has_volatile("confusion")
+                and mon.item in ("persimberry", "lumberry") and not turn.berries_blocked(side)
+            ):
+                turn.consume_item(side, slot, reason=mon.item)
+                mon.volatiles = [v for v in mon.volatiles if v.id != "confusion"]
+
+        resolve_mod._roll_confusion = lambda *_args: None
+        resolve_mod._confusion_try = lambda turn, side, slot: bool(
+            turn.mon_at(side, slot) is not None and turn.mon_at(side, slot).has_volatile("confusion")
+        )
+        resolve_mod._start_confusion = start
+        resolve_mod._confused_by_fatigue = fatigue
+        resolve_mod.CONFUSION_SELF_HIT_CHANCE = 1.0 / 3.0
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        (
+            resolve_mod._roll_confusion, resolve_mod._confusion_try,
+            resolve_mod._start_confusion, resolve_mod._confused_by_fatigue,
+            resolve_mod.CONFUSION_SELF_HIT_CHANCE,
+        ) = self.real
+
+
+#: The confusions --confused puts on, by position in turn: tries our resolver counted
+#: (1 to 3, and Axe Kick's), Showdown's own `time` (1 cures at the next try), and the bare
+#: one a record made before IKA-177 carries (read as fresh).
+CONFUSIONS = (
+    {"tries": 1}, {"tries": 2}, {"time": 1}, {"tries": 3}, {"tries": 2, "min": 3},
+    {"time": 3}, {},
+)
+
+
+def confuse(pos: Position, index: int) -> int:
+    """Confuses the first Pokemon on the field on each side -- the one a record already
+    had included -- with one of `CONFUSIONS`, and says how many took it."""
+    put = 0
+    for side_index, side in enumerate(pos.sides):
+        mon = next((m for m in side.active_pokemon() if m is not None and not m.fainted), None)
+        if mon is None:
+            continue
+        extra = dict(CONFUSIONS[(index * 2 + side_index) % len(CONFUSIONS)])
+        mon.volatiles = [v for v in mon.volatiles if v.id != "confusion"]
+        mon.volatiles.append(Effect(id="confusion", extra=extra))
+        put += 1
+    return put
+
+
+def confused_on_field(pos: Position) -> bool:
+    return any(
+        mon is not None and not mon.fainted and mon.has_volatile("confusion")
+        for side in pos.sides
+        for mon in side.active_pokemon()
+    )
+
+
 class unchanged:  # noqa: N801 - read as a phrase at the call site
     """The control for `--using`: each kind of move named has its effect taken out."""
 
@@ -1144,6 +1227,14 @@ def main() -> None:
         "branch by branch, and count where a thaw fired: the cells `unthawed` moves",
     )
     ap.add_argument(
+        "--confused",
+        action="store_true",
+        help="confuse the first Pokemon on the field on each side first (a length our "
+        "resolver counted, Showdown's own, or a record's bare one), hold every cell to the "
+        "port branch by branch, and count where IKA-177's rule fired: the cells "
+        "`unconfused` moves",
+    )
+    ap.add_argument(
         "--toxic-debris",
         action="store_true",
         help="keep positions with Toxic Debris on the field, hold every cell to the port "
@@ -1299,6 +1390,9 @@ def main() -> None:
             pos.field.terrain_duration = 5
         positions = [pos for pos in positions if priority_on_field(pos, quick)]
         print(f"{args.terrain} laid on {len(positions)} positions with a priority move on the field")
+    if args.confused:
+        dazed = sum(confuse(pos, index) for index, pos in enumerate(positions))
+        print(f"a confusion put on {dazed} Pokemon on the field")
     if args.salt_cure:
         salted = sum(salt(pos) for pos in positions)
         print(f"Salt Cure put on {salted} Pokemon on the field")
@@ -1376,6 +1470,9 @@ def main() -> None:
     # Under Salt Cure, every cell; and where the mod's fraction moved the answer.
     cured = cured_wrong = cured_refused = cured_fired = cured_fired_wrong = 0
     cured_worst = 0.0
+    # Beside a confused Pokemon, every cell; and where IKA-177's rule moved the answer.
+    dazed_cells = dazed_wrong = dazed_refused = dazed_fired = dazed_fired_wrong = 0
+    dazed_worst = 0.0
     # Beside a frozen Pokemon, every cell; and where a thaw moved the answer.
     icy = icy_wrong = icy_refused = thawed = thawed_wrong = 0
     thawed_worst = 0.0
@@ -1717,6 +1814,36 @@ def main() -> None:
                         shown += 1
                         print(f"  cell {(i, j)} beside Toxic Debris: {wrong[0][:200]}")
 
+        if args.confused and confused_on_field(pos):
+            node = rustnode.node_for(reg)
+            for i, a in enumerate(row):
+                for j, b in enumerate(col):
+                    dazed_cells += 1
+                    here = resolve_turn(reg, pos, [a, b], budget=budget)
+                    with unconfused():
+                        control = resolve_turn(reg, pos, [a, b], budget=budget)
+                    wrong = (
+                        ["no warm process"]
+                        if node is None
+                        else branch_differences(node, reg, pos, a, b, here, budget)
+                    )
+                    refused_here = wrong == ["the port refused the turn"]
+                    dazed_refused += refused_here
+                    if refused_here:
+                        wrong = []
+                    dazed_wrong += bool(wrong)
+                    if differ(outcome(here), outcome(control)):
+                        dazed_fired += 1
+                        dazed_fired_wrong += bool(wrong)
+                        for index in range(len(evaluators)):
+                            dazed_worst = max(
+                                dazed_worst,
+                                abs(float(got[index][i, j] - expected[index][i, j])),
+                            )
+                    if wrong and shown < 5:
+                        shown += 1
+                        print(f"  cell {(i, j)} beside a confused Pokemon: {wrong[0][:200]}")
+
         if args.frozen:
             node = rustnode.node_for(reg)
             for i, a in enumerate(row):
@@ -1830,6 +1957,15 @@ def main() -> None:
         print(f"    {cured_fired} of {cured} cells")
         print(f"    cells whose branches, weights, notes or positions differ  {cured_fired_wrong}")
         print(f"    worst cell difference there  {cured_worst:.3e}")
+    if args.confused:
+        print("\n  beside a confused Pokemon, every cell -- held branch by branch")
+        print(f"    {dazed_cells} of {cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {dazed_wrong}")
+        print(f"    cells the port refused, filled in Python and not held  {dazed_refused}")
+        print("  where the length, the odds or the berry fired -- the cells `unconfused` moves")
+        print(f"    {dazed_fired} of {dazed_cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {dazed_fired_wrong}")
+        print(f"    worst cell difference there  {dazed_worst:.3e}")
     if args.frozen:
         print("\n  beside a frozen Pokemon, every cell -- held branch by branch")
         print(f"    {icy} of {cells} cells")
@@ -1908,6 +2044,10 @@ def main() -> None:
         failed.append("the mod's Salt Cure fraction moved no cell, so agreeing here says nothing")
     if block_wrong:
         failed.append(f"{block_wrong} cells beside a blocking ability differ by branch")
+    if dazed_wrong:
+        failed.append(f"{dazed_wrong} cells beside a confused Pokemon differ by branch")
+    if args.confused and not dazed_fired:
+        failed.append("IKA-177's confusion moved no cell, so agreeing here says nothing")
     if icy_wrong:
         failed.append(f"{icy_wrong} cells beside a frozen Pokemon differ by branch")
     if args.frozen and not thawed:
