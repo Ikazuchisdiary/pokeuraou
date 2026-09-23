@@ -207,21 +207,43 @@ def fractional_priority(
     roll. Showdown would consult Quick Claw against an empty move object, but the turn
     does nothing either way and a fractional-priority branch on it would double the
     branch count of every recharge turn to move a no-op earlier or later.
+
+    Showdown runs this as one ``FractionalPriority`` event (``battle-queue.ts``: relay
+    value 0), its handlers in ``onFractionalPriorityPriority`` order, each seeing the value
+    the previous ones left (IKA-145):
+
+    * priority 0: Stall, Lagging Tail and Full Incense set -0.1 (constants);
+    * priority -1: Mycelium Might sets -0.1 on a status move; Quick Draw, on a move that
+      is not a status move, rolls 3/10 for 0.1;
+    * priority -2: Quick Claw returns at once on a status move under Mycelium Might, and
+      otherwise rolls 1/5 for 0.1 **if the value so far is <= 0**.
+
+    That ``priority`` is the relay value, not the move's priority: Quick Claw fires on a
+    status move and on a +1 move alike, and only a Quick Draw that already fired stops it.
     """
     move = reg.moves.get(move_id)
     if move is None:
         return [(0.0, 1.0)]
-    if mon.ability == "stall":
-        return [(-0.1, 1.0)]
-    if mon.ability == "myceliummight" and move.category == "Status":
-        return [(-0.1, 1.0)]
-    if mon.item in ("laggingtail", "fullincense"):
-        return [(-0.1, 1.0)]
-    if mon.ability == "quickdraw" and move.category != "Status":
-        return [(0.1, QUICK_DRAW_CHANCE), (0.0, 1.0 - QUICK_DRAW_CHANCE)]
-    if mon.item == "quickclaw" and move.category != "Status":
-        return [(0.1, QUICK_CLAW_CHANCE), (0.0, 1.0 - QUICK_CLAW_CHANCE)]
-    return [(0.0, 1.0)]
+    status = move.category == "Status"
+    base = 0.0
+    if mon.ability == "stall" or mon.item in ("laggingtail", "fullincense"):
+        base = -0.1
+    if mon.ability == "myceliummight" and status:
+        base = -0.1
+    # (value, probability) after the priority -1 handlers.
+    outcomes = [(base, 1.0)]
+    if mon.ability == "quickdraw" and not status:
+        outcomes = [(0.1, QUICK_DRAW_CHANCE), (base, 1.0 - QUICK_DRAW_CHANCE)]
+    if mon.item == "quickclaw" and not (status and mon.ability == "myceliummight"):
+        rolled: dict[float, float] = {}
+        for value, chance in outcomes:
+            if value <= 0:
+                rolled[0.1] = rolled.get(0.1, 0.0) + chance * QUICK_CLAW_CHANCE
+                rolled[value] = rolled.get(value, 0.0) + chance * (1.0 - QUICK_CLAW_CHANCE)
+            else:
+                rolled[value] = rolled.get(value, 0.0) + chance
+        outcomes = list(rolled.items())
+    return outcomes
 
 
 @dataclass(slots=True)

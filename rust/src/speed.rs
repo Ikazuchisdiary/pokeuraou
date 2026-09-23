@@ -141,26 +141,50 @@ pub fn move_priority(reg: &Reg, move_id: &str, mon: &Battler, field: &FieldState
 }
 
 /// Fractional priority outcomes as (value, probability).
+///
+/// Showdown's `FractionalPriority` event with relay value 0, handlers in
+/// `onFractionalPriorityPriority` order, each seeing the value the previous ones left
+/// (IKA-145): Stall / Lagging Tail / Full Incense set -0.1; Mycelium Might sets -0.1 on a
+/// status move; Quick Draw rolls 3/10 for 0.1 on a move that is not a status move; Quick
+/// Claw (skipped on a status move under Mycelium Might) rolls 1/5 for 0.1 if the value so
+/// far is <= 0. That `priority` is the relay value, not the move's priority.
 pub fn fractional_priority(reg: &Reg, move_id: &str, mon: &Battler) -> Vec<(f64, f64)> {
     let Some(mv) = reg.moves.get(move_id) else {
         return vec![(0.0, 1.0)];
     };
-    if mon.ability == "stall" {
-        return vec![(-0.1, 1.0)];
+    let status = mv.category == "Status";
+    let mut base = 0.0;
+    if mon.ability == "stall" || is(mon.item, "laggingtail") || is(mon.item, "fullincense") {
+        base = -0.1;
     }
-    if mon.ability == "myceliummight" && mv.category == "Status" {
-        return vec![(-0.1, 1.0)];
+    if mon.ability == "myceliummight" && status {
+        base = -0.1;
     }
-    if is(mon.item, "laggingtail") || is(mon.item, "fullincense") {
-        return vec![(-0.1, 1.0)];
+    let mut outcomes = vec![(base, 1.0)];
+    if mon.ability == "quickdraw" && !status {
+        outcomes = vec![(0.1, QUICK_DRAW_CHANCE), (base, 1.0 - QUICK_DRAW_CHANCE)];
     }
-    if mon.ability == "quickdraw" && mv.category != "Status" {
-        return vec![(0.1, QUICK_DRAW_CHANCE), (0.0, 1.0 - QUICK_DRAW_CHANCE)];
+    if is(mon.item, "quickclaw") && !(status && mon.ability == "myceliummight") {
+        // Merged by value in first-seen order, as the Python dict does.
+        let mut rolled: Vec<(f64, f64)> = Vec::with_capacity(3);
+        fn add(rolled: &mut Vec<(f64, f64)>, value: f64, chance: f64) {
+            if let Some(entry) = rolled.iter_mut().find(|(v, _)| *v == value) {
+                entry.1 += chance;
+            } else {
+                rolled.push((value, chance));
+            }
+        }
+        for (value, chance) in outcomes {
+            if value <= 0.0 {
+                add(&mut rolled, 0.1, chance * QUICK_CLAW_CHANCE);
+                add(&mut rolled, value, chance * (1.0 - QUICK_CLAW_CHANCE));
+            } else {
+                add(&mut rolled, value, chance);
+            }
+        }
+        outcomes = rolled;
     }
-    if is(mon.item, "quickclaw") && mv.category != "Status" {
-        return vec![(0.1, QUICK_CLAW_CHANCE), (0.0, 1.0 - QUICK_CLAW_CHANCE)];
-    }
-    vec![(0.0, 1.0)]
+    outcomes
 }
 
 #[derive(Clone, Debug, PartialEq)]
