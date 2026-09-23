@@ -38,7 +38,12 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from pokeuraou import timing  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
-from pokeuraou.inference import load_models, serve  # noqa: E402
+from pokeuraou.inference import (  # noqa: E402
+    load_models,
+    scheduling,
+    serve,
+    wait_by_sleeping,
+)
 from pokeuraou.teams import load_roster  # noqa: E402
 
 
@@ -75,6 +80,10 @@ def main() -> None:
             raise SystemExit(f"--arm needs a name and at least one model: {entry}")
         paths[entry[0]] = [Path(p) for p in entry[1:]]
 
+    if args.device == "cuda":
+        # Before the first CUDA call, or the context already exists with the default
+        # (spinning) wait. IKA-106.
+        wait_by_sleeping()
     models = load_models(paths, encoder, args.device)
     server, address = serve(
         models,
@@ -91,6 +100,8 @@ def main() -> None:
         print(f"  arm {name}: {', '.join(p.name for p in group)}"
               + (" (ensemble, logits averaged)" if len(group) > 1 else ""),
               file=sys.stderr)
+    if args.device == "cuda":
+        print(f"  cuda waits: {scheduling()}", file=sys.stderr)
     print(f"  on {args.device}; requests are served as they arrive and are never merged "
           f"across workers, so every answer is the one a worker would have computed itself",
           file=sys.stderr, flush=True)
