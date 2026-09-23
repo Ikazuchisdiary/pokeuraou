@@ -14408,3 +14408,149 @@ w12（43,999 局）・gen11L（12,000 局）とも、フィールドがあった
 cargo release 1 回（8 コア 22 秒）＋取り込み後 1 回、オラクルのテスト単体 6 回（1 コア 各 1〜2 秒）、関係テスト 14 ファイル 1 回
 （1 コア 90 秒）、diff_node 3 回（1 コア 4・141・116 秒）、記録の数え 1 回（1 コア 11 秒）、作り直し 2 回（各数秒）。すべて heavy.py
 （--agent IKA-201）。
+
+## 9/24 — IKA-204: Python の resolver を消して port を唯一の実装にできるか —— できる。ただし port は今「セルを埋める」だけで、途中交代の続き・ターン終わりの交代・先発の登場・イベントの記録・深さ 2 は Python にしかない。先に鎖を「Showdown → port」に直す
+
+洗い出しだけ（機械なし）。数字は git・grep と、既存の記録（IKA-77 の refusal_replay）から取った。
+
+### 1. 結論
+
+**廃止はできる。** ただし「port が断るセルを 0 にする」だけでは足りない。port が受けるのは `resolve`（1 ターンの分岐の重みと、選んだ 1 本の局面）・
+node の充填（`fill` / `fill_encoded`）・`score`（narrow）の 3 つで、次の 5 つの役目は Python の resolver にしかない（§3）。
+
+1. 途中交代の続き（`SuspendedTurn` は process を越えられない）
+2. ターン終わりの交代（`resolve_replacements`）と先発の登場（`apply_lead_abilities`）
+3. イベントとその区切り（`Branch.events` / `acts`）。`tools/show_game.py` の読み物と、テストの断言が使う
+4. 探索の深さ 2（`search._refined_value` が Python の `resolve_turn` を直接呼ぶ）
+5. port 自身の仕様の出所（`rust/src/inert.rs`・`modelled.rs` は `tools/port_coverage.py` が **Python のソースを走査して** 作る）
+
+**順番の提案:** 最初に検証の鎖を「Showdown → Python → port」から「Showdown → port」に替える（§6 の段 1）。
+二重管理が今どれだけ働いているかを見ると、規則の誤りを見つけたのは Showdown との突き合わせで、Python と port の一致ではない。
+少なくとも IKA-180・189・201・202 は、見出しに書いたとおり **両エンジンが同時に同じ誤り** をしていた（2 実装の一致では原理的に見つからない）。
+Python と port を比べて見つかったのは、注記の差（IKA-190）・高速経路の拒否セル（IKA-139）・申告漏れ（`noguard`）のような、
+比べる仕組みそのものの穴が中心だった。
+
+### 2. 二重管理の費用（9/20 以降、merge を除く）
+
+```
+  Python の対戦処理（resolve.py・speed.py・effects.py・damage.py）   37 コミット   +7,011 / −4,999 行
+  rust/src                                                         45 コミット   +12,266 / −9,846 行
+  両方に触れたコミット                                              33
+  tools/diff_node.py                                               2,996 行（9/20 以降 +2,806）。resolve の private 関数 約 40 個に差し込む
+  tests/（参考: 全部）                                             +21,276 行
+```
+
+Python の `resolve.py` は 6,658 行、`rust/src/resolve.rs` + `moves.rs` は 6,354 行。
+
+### 3. Python の resolver にだけ依存しているもの（src/）
+
+| 呼び出し元 | 使うもの | port で足りるか |
+|---|---|---|
+| `resolve.batched_payoffs`（cli・node_solver・beliefnode・探索の深さ 1） | `_rust_payoffs` → port。断られたセルは `_FILLING_REFUSED` で Python が埋める | **拒否分だけ Python**。ほかに Python に落ちる道: `POKEURAOU_RUST_NODE` が未設定（**既定は off**。生成と一部の道具だけが 1 にする）、目的が hp-share・faints 以外の手書きの callable、1 ノードに規則の違う葉が 2 つ（`len(wanted_rules) != 1`）、橋が壊れた時の `rustnode.disable` |
+| `beliefnode`（控え隠蔽の速い経路） | port の `fill_encoded`。dirty と refused のセルは `HeldLeaves.resolve_cell`（Python）で完成形ごとに解く | 拒否分だけ Python。port が無ければ `_per_completion`（全部 Python） |
+| `selfplay._advance_turn`（局を進める） | port の `resolve`（重み → 選んだ 1 本） | **途中交代が引かれた時は Python の `resolve_turn` で解き直す**（続きは Rust の process の中にしか無いため） |
+| `selfplay` の自交代の選択（IKA-120・150） | `resume_alternatives`・`paused_in`・`turn_leaves`（すべて Python） | **無い**。port は `resume_turn` / `resume_alternatives` を内部に持つ（`resolve.rs:2183`・`2282`）が、命令として出していない |
+| `selfplay` のターン終わりの交代 | `replacements_needed`・`resolve_replacements` | **無い**（port には `on_switch_in` はあるが交代の段の命令が無い） |
+| `selfplay` の開局 | `apply_lead_abilities` | **無い** |
+| `search._refined_value`（深さ 2） | `resolve_turn` を直接 | 局を進める `resolve` と同じ形で足りるが、分岐を全部返す口が要る（今は重みと 1 本だけ） |
+| `tools/show_game.py`・`test_game_log` 等 | `Branch.events` / `acts` | **無い**。port はイベントを作らない |
+| `narrow` | `FIRST_TURN_OUT_MOVES`（定数）と port の `score`。port が無ければ Python の `damage.calculate` | 足りる（定数は移す） |
+
+**消せないもの:** `damage.py`・`speed.py`・`effects.py`・`battler.py`・`view.py` は resolver だけのものではない。
+`observe.py`（`damage.calculate`・`move_priority`）・`belief.py`（`effective_speed`）・`narrow.py` が推論と候補の採点に使う。
+消せるのは `resolve.py` と、この 5 つのうち resolver だけが読む部分。全部を消すなら port に `damage` と `speed` の命令を足して推論も port に寄せることになり、
+それは別の課題（推論は 1 局面の小さな呼び出しが多く、process を越える費用が見合うかは測っていない）。
+
+**budget は全部渡る。** `rustnode.dump_budget` は `Budget` の 9 項目をそのまま送り、Rust の `Budget` も同じ 9 項目なので、matrix・pinned・exact・fast・
+deterministic・narrowed はどれも port で解ける。unmodelled の注記も port が返す（IKA-190 で残差の同速の注記を揃えた後）。
+
+### 4. port が断る道
+
+**実測（IKA-77、M-C g600、`refusal_replay --decisions 2000 --per-game 4`）:** 284,680 セルのうち 3,083（1.08%）。理由は 3 つだけ:
+`move field selfdestruct: finalgambit` 1,308、`status move: trick` 948、`ability: auraguard` 827（auraguard は Python も扱わず注記だけ）。
+この数えは IKA-201・202 より前の exe で、その後の拒否は測っていない。
+
+**コードに残る拒否の道（`rust/src/resolve.rs:891-1020`・`moves.rs`）:** 標本に出なかったものも、Python を消せば全部 port で答える必要がある。
+
+* 技: `UNHANDLED_MOVE_FIELDS` の 10 項目（damageCallback・multiaccuracy・selfdestruct・struggleRecoil・mindBlownRecoil・smartTarget・stealsBoosts・sleepUsable ほか）、
+  trick・switcheroo・lastresort、forceSwitch の技（ほえる・ドラゴンテール等。攻撃技と変化技の 2 か所）、Python が完全にモデル化していて port に無い変化技
+* 追加効果: 連続技の追加効果、1 回に分岐できる数より多い追加効果、未実装の field / volatile
+* 特性・持ち物: `ability_handled`・`item_handled` の外、ばけのかわ・アイスフェイス（名指しで拒否）、スロースタート、レッドカード（交代先が乱数）
+* 局面: unmodelled volatiles、へんしん、`stats_override`、hp の範囲外（ここは拒否のままでよい。到達しない局面）
+
+**「断る」の基準も Python に依存している。** `inert.rs`（Python が一度も名前を読まない＝無視しても食い違わない id）と
+`modelled.rs`（Python の damage が注記を出さない id）は `tools/port_coverage.py` が Python のソースと
+`effects.all_modelled_*`・`resolve.STATUS_MOVES_FULLY_MODELLED` を走査して生成する。Python を消すなら、この 2 表は port 自身が持つ表にして、
+「注記を出すか」を Showdown の dex（その id が `onXxx` を持つか）と port の実装の差で決め直す必要がある。
+
+### 5. テストと道具
+
+**テスト**（`from pokeuraou.resolve import` のある 52 ファイル、`def test_` 約 373）:
+
+```
+  Python と port を比べる                  約 22 ファイル   port の試験 約 65
+    うち port を Showdown と直接比べるだけ   7 ファイル（after_move_oracle・hazards_after_hit・substitute・terrain_surge・
+                                                        type_spending_moves・weather_recovery・charge_target）→ Python 無しで残る
+  Python だけの規則の試験                  約 20 ファイル   110〜130（test_resolve.py だけで約 60）→ port に向け直す
+  Showdown のオラクル                      約 33 ファイル   70〜100。ほぼ全部が Python の resolve_turn も呼ぶ → 向け直す
+  resolver は道具として使うだけ            13 ファイル      約 115（探索・信念・自交代・記録）
+  内部を直接試す（消す）                   test_branch_merge（_Live・_Turn・_MERGE_*）、test_resolve の _apply_disable 等、
+                                           test_trapped_flag_children の _clear_trapped、test_beliefnode の _rust_encoded_payoffs
+```
+
+port の命令に無いものを使うテスト: `resume_turn`・`resume_alternatives`（test_resolve・test_eject_items・test_hidden・test_hidden_selfswitch・
+test_resumed_turn_log）、`resolve_replacements`（test_replacement・test_switch_in_order・test_trapped_flag_children）、`turn_leaves`、イベント。
+30 ファイルは Rust の exe が無いと port の試験を skip する。Python を消すと、exe の無い環境ではこれらの規則が 1 つも試されなくなる。
+
+**道具**（resolve・speed・effects・damage を import する 71 本）:
+
+* Python と Showdown を比べる: `diff_turn`・`diff_replacement`・`diverge_report`・`diff_damage`・`diff_speed`・`diff_order`。
+  **port と Showdown を直接比べる道具は無い**（直接の比較はテストの 7 ファイルだけ）
+* Python と port を比べる: `diff_node`・`diff_solve_node`・`diff_generation`・`diff_narrow`（`diff_encode` も）。Python を消せば役目ごと無くなる
+* port の試験用の fixture を Python で書き出す: `dump_turn_cases`・`dump_damage_cases*`（`rust/src/main.rs` の自己試験が読む）
+* Python の `resolve_turn` / `turn_expectation` を直接呼ぶ分析: 15 本（budget_effect・depth2_cost・hidden_dominance・human_baseline・
+  ko_branch_count・merge_effect・narrow_effect・roll_headroom・seat_bias・selfplay_budget・profile_resolve・oneshot/depth_effect・
+  why_action・regret_playout・show_game）。`resolve_turn` を差し替えて数える 2 本（branch_dedup・cells_needed）
+* `batched_payoff(s)` を呼ぶ 8 本は、橋が on なら既に port を通る
+* `damage.register_mega_stones` だけを使う 23 本（選出・生成・推論サーバ等）。関数を damage.py の外に移せば影響なし
+
+TODO.md の最後の 2,000 行で名前が出るのは diff_node（31 回）・bench・refusal_replay・diverge_report・selfplay・selection・inference_server・
+coverage・port_coverage だけ。分析の 15 本はどれも 0 回で、向け直すより消すか、使う時に向け直すのでよい。
+
+**Showdown のオラクルは任意の局面から始められない。** `oracle.ts` の `create` は 2 構築と種と乱数の固定（ダメージ乱数の番号・命中・急所・追加効果・
+連続技の回数・同速・`sample`）だけを取り、局面はターンを打って作る。だから「port 対 Showdown」の比較は、今の `diff_turn` と同じく
+「Showdown で局を打ち、各ターンの前の局面と選択を port の `resolve`（deterministic budget・同じ固定）に渡し、Showdown の次の局面と比べる」形になる。
+port の `resolve` は既に `select` で 1 本の局面を返せるので、口は足りている。
+
+### 6. 段取り（見積もり）
+
+| 段 | 中身 | 見積もり |
+|---|---|---|
+| 1 | 鎖を替える: `diff_turn`・`diverge_report` を port に向ける（Python と並べて出し、しばらく両方。`diff_replacement` は交代の命令ができる段 3 の後）。オラクルのテストの Python 側の断言を port 側に写す | 半日 |
+| 2 | 拒否を 0 に: finalgambit（damageCallback）・trick/switcheroo・auraguard（Python にも無い）を先に、forceSwitch・レッドカード・ばけのかわ／アイスフェイス・スロースタート・へんしん・残りの move field を後に。refusal_replay で M-C の拒否 0 を確かめる | 半日 ×2 |
+| 3 | port の命令を足す: 途中交代の続き（`resume_alternatives` と、選んだ交代で続けた分岐）、`resolve_replacements`、`apply_lead_abilities`、分岐を全部返す `resolve`（深さ 2 用）、イベントと `acts` | 1〜2 日。続きを process の外に出すか（`Turn` と残りの行動の列を JSON にする）、process の中で持って id で引くかを最初に決める |
+| 4 | 呼び出し元を寄せる: selfplay・search・cli（橋を既定 on に）・node_solver・beliefnode の `HeldLeaves`。橋が壊れたら今は Python に落ちるが、落ち先が無くなるので止まるようにする | 半日 |
+| 5 | テスト: Python だけの規則の試験 110〜130 を port に向け直し、内部の試験を消す。exe をテスト一式の前提にする。`inert.rs`・`modelled.rs` を port 自身の表にする | 半日 ×2 |
+| 6 | 消す: resolve.py、diff_node 等の Python 対 port の道具、dump_* の fixture（Showdown の記録に置き換える）、分析 15 本は消すか向け直す | 半日 |
+
+合計 **4〜6 日の作業**。機械はほぼ要らない（拒否の数え・diff_turn の試走・テスト一式くらい）。
+
+**得るもの:** 規則の修正が 1 回で済む（9/20 以降の 33 コミットは両方を触った）。diff_node の保守（約 3,000 行・private 関数約 40 個）と、
+「port が断る」「注記がずれる」「枝の比べ方に穴」の類の課題が無くなる。拒否された時の Python の遅さ（port の 40 倍）が生成から消える。
+
+**失うもの:**
+
+* 独立した 2 つ目の実装による突き合わせ。ただし §1 のとおり、ここ数日の規則の誤りは両エンジン同時で、見つけたのは Showdown だった
+* 読みやすい仕様の写し。Python の docstring は IKA 番号と Showdown の行を引いて規則を説明している。Rust のコメントも同じ書き方をしているので、
+  消す前に Python にしか無い説明を Rust 側へ移す（段 6 の前に 1 回読む）
+* exe の無い環境での試験（§5）。テスト一式が cargo build を前提にすれば済む
+* 手元で局面を 1 つ解いて中を見る手軽さ（`_Turn` を pdb で覗く等）。port 側に「イベント付きで 1 ターン」の命令（段 3）があれば代わりになる
+
+### 7. 別課題の候補
+
+* 段 1〜6 をそれぞれ課題にする（段 1 と段 2 は独立に始められる。段 3 が一番大きく、段 4〜6 は段 3 の後）
+* 拒否の数えを今の exe で取り直す（IKA-201・202 の後。1 コア数秒〜十数秒）
+
+### 8. 機械
+
+なし（grep・git log・既存の記録の読み）。
