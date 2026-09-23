@@ -13445,3 +13445,99 @@ test_no_machine_specific_paths を取り込み後に `-n 0` で通した。`port
 機械: cargo build --release 8 コア 5 回（各 17〜21 秒、1 回は diff_node が exe を使用中で失敗）、diff_node 1 コア 計約 26 分
 （中断した 1 回を含む）、記録 1 コア 361 秒、テストとオラクルは 1 コアで各 1〜40 秒。worktree に data/priors・standings・reportworm と
 sim-bridge の dist を main から写し、node_modules は main への junction（コミットしない）。
+
+## 9/23 — IKA-106: 推論サーバの CUDA の待ちを blocking sync に —— スピンの比 0.68/0.70 → 0.48/0.49、240局×2組が master と同一。局/分はまだ測っていない
+
+答えた問いは **「今の master（934daa1、IKA-105 後）でサーバは GPU を待つあいだ CPU を回しているか、止めると局は変わるか、サーバの CPU は減るか」まで**。
+生成の速さ（局/分）には答えていない —— それは専有の時間帯の 600局×交互2回（下の 4）の問い。
+
+### 1. 測った比（出荷条件の `profile_stages.py generation … --served --servers 2 --workers 24 --limit 12 --hide-bench -- --rank-leaf`、seed 6601、240局）
+
+```
+  本     腕      壁時計   サーバの CPU（起動除き）  server.held   比     serve.wait（ワーカー側）  木の CPU
+  base240 master  49.8 s   58.9 − 2.8 s              82.1 s        0.68   97.5 s                  453.8 s
+  new240  直し    47.1 s   45.6 − 2.5 s              90.3 s        0.48   106.1 s                 433.5 s
+  old2    master  45.7 s   54.8 − 2.5 s              74.7 s        0.70   90.0 s                  439.3 s
+  new2    直し    45.8 s   45.5 − 2.5 s              88.1 s        0.49   101.9 s                 436.2 s
+```
+
+* 96局の master（base1）では 0.63（壁時計 22.2 s のうち起動が大きい。比は 240局の値で読む）
+* **予想「比は 0.7 以上」は境目**（0.68 / 0.70）。IKA-98 本測定（IKA-105 前）の 0.47/0.49 より上がったのは、IKA-105 で
+  サーバの仕事（順伝播の回数）が減り、残りの保持の中で待ちの割合が増えたため、と読める（分けて測ってはいない）
+* 止めても比は 0 にならない（0.48）。残りはサーバの本当の仕事（`from_encoded` の Python・torch の起動・コピー）と、
+  保持の外の仕事（accept・5秒ごとのレポート）。サーバの CPU は 240局あたり −9〜−13 s（木の CPU の 2〜3%）
+* **1リクエストの保持は 6.93/6.31 → 7.64/7.44 ms に伸び、ワーカーの serve.wait も +9〜13%**。眠った糸を起こす遅れが
+  そのまま待ちに乗る。壁時計は 49.8/45.7 → 47.1/45.8 s で、この大きさでは差は見えない。busy cores は 9.1〜9.6（16 のうち）
+  で、240局の走りは起動と尾が大きく機械が張り付いていない。**だから予想の 1.03〜1.10倍は 600局で確かめるまで言えない**。
+  CPU が張り付く 600局で、サーバの浮いた CPU が作業者に回る分と、待ちの伸びのどちらが勝つかがその問い
+* サーバのレポートは 5 秒ごとの書き直しで、終わりの `TerminateProcess` の前の最後の分が落ちる。requests 11,838 と 11,821 の
+  違いはそれ（局は同一）。比の分母はその分だけ小さい側に出る
+
+### 2. 直し方: `cuDevicePrimaryCtxSetFlags(CU_CTX_SCHED_BLOCKING_SYNC)` をサーバの CUDA より前に
+
+`src/pokeuraou/inference.py` の `wait_by_sleeping()`（ドライバ API を ctypes で。全デバイスの主コンテキストに 0x04）を
+`tools/inference_server.py` が `--device cuda` のとき `load_models` の前に呼ぶ。起動の行に `cuda waits: blocking sync` を
+ドライバから読み戻して出す（`scheduling()`）。失敗は黙らず RuntimeError。
+
+* 2案を1プロセス（4096² の行列積 20回、`C:/tmp/ika106/flagcheck.py`）で比べた: CPU ÷ 壁時計は 旧 0.97、旗 0.21、
+  `torch.cuda.Event(blocking=True)` を `.cpu()` の前に synchronize 0.21。壁時計は 3つとも 0.22 s
+* **旗を選んだ理由**: 全部の待ちに効くから。サーバの糸は全部同じ既定ストリームに積むので、ある糸のページ可能メモリからの
+  H2D コピーが他の糸のカーネルの後ろで待つことがあり、その待ちもスピンする。`.cpu()` の前の Event はそこに届かない。
+  ドライバ API なのは、主コンテキスト（torch が使うもの）の旗はコンテキストができる前に決める必要があり、torch に口が無いから。
+  cudart の `cudaSetDeviceFlags` を torch の DLL 越しに呼ぶより、nvcuda（システムの DLL）を直接呼ぶほうが torch の同梱の
+  場所に依存しない
+* 作業者の直接（served でない）BatchedValue は変えていない（1プロセス1糸で、待っているあいだ他にやることがない）
+
+### 3. 確かめたこと
+
+```
+  局の同一性   searchSeconds・engine・timing を除き gameIndex で対応（C:/tmp/ika106/same.py、same150.py と同じ比べ方）
+                 base240 × new240   240/240 局が同一、3,276 決定
+                 old2    × new2     240/240、3,276 決定
+                 base240 × old2     240/240（master 同士）
+                 base1（96局）× new240 の先頭96   96/96
+               対照: 同じ比較で局 i と i+1 は 0/239 組が同一（比較が差を見られる）
+  届いたか     new の2本ともサーバのログに「cuda waits: blocking sync」。旧は旗 0（auto）。exe は2腕とも
+               C:/tmp/ika106/pokeuraou-damage.exe（本体の 21:31 の release の写し、md5 edb6e9d8…）を POKEURAOU_RUST_NODE_BIN で
+  tests        tests/test_cuda_waits.py（偽のドライバで: init の後に全デバイスへ 0x04・どの段の失敗も例外・下位3ビットの読み戻し）、
+               test_inference・test_inference_shape・test_profile_stages・test_line_endings・test_no_machine_specific_paths を
+               -n 0 で 54 passed。ruff 通過
+```
+
+### 4. 600局の計時の手順（まだやっていない。コーディネータが専有の時間帯に）
+
+腕は本体と同じ長さのパス（33文字）の detached worktree。data/priors・data/standings は本体から複写（生成が repo_root() から読む）。
+exe は2腕とも本体の同じもの。
+
+```
+  M=C:/Users/Ikazuchi/repos/pokeuraou; T=C:/tmp/pokeuraou-machine/timing
+  git -C $M worktree add --detach $T/a <master>                 # A = master（旧）
+  git -C $M worktree add --detach $T/b <ika-106-blocking-sync>  # B = 直し
+  for r in a b; do mkdir -p $T/$r/data; cp -r $M/data/priors $M/data/standings $T/$r/data/; done
+  # 各本の前に Get-Process python が 0 件なこと。A1 B1 A2 B2 の順に、1本ずつ:
+  $M/.venv/Scripts/python.exe C:/tmp/pokeuraou-machine/heavy.py --agent timing --cores 16 \
+    --why "IKA-106 600局 <腕><回>" -- /usr/bin/bash.exe $T/run150.sh <a|b> <1|2> 600
+  # run150.sh はそのまま使える（腕の worktree で profile_stages.py generation を出荷の引数で回す）
+  # 読むもの: 局/分（壁時計）、サーバの CPU ÷ server.held、serve.wait、木の CPU、終わりの遊び
+  #          B のサーバのログ（out/g150-b-*/logs/inference0.log）に「cuda waits: blocking sync」
+  #          same150.py の要領で A と B の 600局が同一なこと
+  git -C $M worktree remove $T/a; git -C $M worktree remove $T/b
+```
+
+判定: B/A の局/分が 1.00 を下回る（serve.wait の伸びが勝つ）なら入れない。予想は 1.03〜1.10倍（先に置かれたもの）。
+上の 240局の結果からは、1.00 前後もありうる。
+
+### 5. 機械（9/23、heavy.py 経由）
+
+```
+  21:42:51–21:43:14  base1   96局 master（16コア専有）
+  21:44:43–21:44:57  flagcheck 3本（2コア、GPU 数秒）
+  21:45:02–21:45:53  base240 master（16コア）
+  21:48:36–21:49:23  new240  直し（16コア）
+  21:50:06–21:50:53  old2    master（C:/tmp/ika106/old の detached worktree、16コア）
+  21:50:53–21:51:39  new2    直し（16コア）
+  21:52:27–21:52:40  関係するテスト（2コア、test_inference が CUDA を使う）
+```
+
+どの本も専有の鍵の中。ただし鍵を取らない1コアの仕事（IKA-136・IKA-157・IKA-127・IKA-60 のテストや diff_node）が
+1〜2本ずつ横で走っていた。比は CPU 秒どうしなので影響は小さいはずだが、壁時計は計時に使わない。

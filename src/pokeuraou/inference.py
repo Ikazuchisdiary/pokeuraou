@@ -521,10 +521,94 @@ def load_models(paths: dict[str, Sequence[Path]], encoder: Any, device_name: str
     return models
 
 
+#: `CU_CTX_SCHED_BLOCKING_SYNC`: a host thread that waits on the GPU sleeps on an OS
+#: primitive instead of polling. The runtime's `cudaDeviceScheduleBlockingSync` is the
+#: same bit.
+BLOCKING_SYNC = 0x04
+#: The low three bits of a context's flags are its scheduling mode.
+SCHEDULE_MASK = 0x07
+
+
+def _cuda_driver() -> Any:
+    import ctypes
+    import sys
+
+    return ctypes.CDLL("nvcuda.dll" if sys.platform == "win32" else "libcuda.so.1")
+
+
+def wait_by_sleeping(driver: Any = None) -> int:
+    """Make every serving thread sleep, not spin, while it waits for the GPU (IKA-106).
+
+    CUDA's default is `cudaDeviceScheduleAuto`, which spins when the process has no more
+    contexts than logical cores -- one context against sixteen here. The server answers
+    each connection on its own thread, and the card is saturated by one of them (381
+    calls/s at one thread, 403-419 at ten), so the rest are waiting; spinning, each one
+    holds a core the whole time. On 2026-09-23, 240 shipping-condition games put the
+    servers' CPU at 0.68 of the seconds they held a request.
+
+    Two ways were tried in one process doing twenty 4096-square matmuls (CPU over wall:
+    0.97 as it was, 0.21 with either): a blocking `torch.cuda.Event` synchronised before
+    each `.cpu()`, or this. This one was kept because it covers every wait, not the one
+    before the copy back. Every serving thread issues onto the same default stream, so a
+    thread's host-to-device copy from pageable memory can wait behind another thread's
+    kernels, and that wait spins too; an event before `.cpu()` does not reach it.
+
+    It goes through the driver API because the flags of the primary context -- the one
+    torch uses -- must be set before that context exists, and torch has no call for it.
+    Call it before anything touches CUDA. It sets every device, since which one the
+    server lands on is `CUDA_VISIBLE_DEVICES`'s business, and returns how many it set.
+    Only the waiting changes: the same kernels run on the same inputs.
+    """
+    import ctypes
+
+    cuda = driver if driver is not None else _cuda_driver()
+    if (rc := cuda.cuInit(0)) != 0:
+        raise RuntimeError(f"cuInit failed ({rc})")
+    count = ctypes.c_int()
+    if (rc := cuda.cuDeviceGetCount(ctypes.byref(count))) != 0:
+        raise RuntimeError(f"cuDeviceGetCount failed ({rc})")
+    for index in range(count.value):
+        device = ctypes.c_int()
+        if (rc := cuda.cuDeviceGet(ctypes.byref(device), index)) != 0:
+            raise RuntimeError(f"cuDeviceGet({index}) failed ({rc})")
+        # `cuDevicePrimaryCtxSetFlags` is a macro for `_v2` in cuda.h since CUDA 11.
+        if (rc := cuda.cuDevicePrimaryCtxSetFlags_v2(device, BLOCKING_SYNC)) != 0:
+            raise RuntimeError(
+                f"cuDevicePrimaryCtxSetFlags({index}, blocking sync) failed ({rc}); "
+                f"was CUDA already in use in this process?"
+            )
+    return count.value
+
+
+def scheduling(index: int = 0, driver: Any = None) -> str:
+    """How device `index`'s primary context waits, read back from the driver.
+
+    For the server's startup lines: a flag set and then silently replaced would look
+    exactly like one that worked, until someone measured the CPU again.
+    """
+    import ctypes
+
+    cuda = driver if driver is not None else _cuda_driver()
+    device = ctypes.c_int()
+    flags = ctypes.c_uint()
+    active = ctypes.c_int()
+    if cuda.cuDeviceGet(ctypes.byref(device), index) != 0 or cuda.cuDevicePrimaryCtxGetState(
+        device, ctypes.byref(flags), ctypes.byref(active)
+    ) != 0:
+        return "unknown"
+    mode = {0: "auto", 1: "spin", 2: "yield", BLOCKING_SYNC: "blocking sync"}.get(
+        flags.value & SCHEDULE_MASK, f"flags {flags.value:#x}"
+    )
+    return f"{mode}{'' if active.value else ' (context not yet created)'}"
+
+
 __all__ = [
+    "BLOCKING_SYNC",
     "ENV_SERVER",
     "RemoteValue",
     "load_models",
+    "scheduling",
     "serve",
     "served_model",
+    "wait_by_sleeping",
 ]
