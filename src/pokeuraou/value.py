@@ -849,6 +849,7 @@ class BatchedValue:
             )
         self.evaluated += len(positions)
         timing.count("leaves", len(positions))
+        timing.count("forward.passes", -(-len(positions) // self.batch_size))
         return out
 
     @timing.timed("forward")
@@ -887,6 +888,7 @@ class BatchedValue:
             out[start:stop] = torch.sigmoid(self._mean_logit(batch)).double().cpu().numpy()
         self.evaluated += n
         timing.count("leaves", n)
+        timing.count("forward.passes", -(-n // self.batch_size))
         return out
 
     def objective(self, name: str = "win") -> Any:  # noqa: ANN401

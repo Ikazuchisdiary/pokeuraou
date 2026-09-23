@@ -43,6 +43,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from . import timing
 from .actions import SideAction
 from .position import Position
 from .regulation import Regulation
@@ -116,6 +117,10 @@ def _phazes(reg: Regulation, action: SideAction) -> bool:
     return any(part in PHAZING_MOVES for part in choice.replace(",", " ").split())
 
 
+# Its own Python -- the copies per completion, the span loop, the folds -- had no stage and
+# sat in "the rest" (IKA-98); what it calls is still charged to the stages it calls.
+@timing.timed("belief")
+@timing.labelled("matrix")
 def belief_payoffs(
     reg: Regulation,
     position: Position,
@@ -142,6 +147,10 @@ def belief_payoffs(
         side: (items[0].slots if items and not items[0].exact else ())
         for side, items in spreads.items()
     }
+    if timing.ON:
+        # Per decision, by whether any bench here is hidden (IKA-98's per-decision table).
+        timing.refine("hidden" if any(hidden.values()) else "exact")
+        timing.count("completions", sum(len(items) for items in spreads.values()))
     node = rustnode.node_for(reg) if rustnode.available() else None
     if node is None or not any(hidden.values()):
         return _per_completion(reg, row, col, evaluate, budget, spreads)
@@ -193,9 +202,10 @@ def belief_payoffs(
                 if dirty[i, j]
             ]
             if wanted:
-                part, notes, _exact = batched_payoffs(
-                    reg, item.position, row, col, [evaluate], budget=budget, cells=wanted
-                )
+                with timing.purpose("dirty"):
+                    part, notes, _exact = batched_payoffs(
+                        reg, item.position, row, col, [evaluate], budget=budget, cells=wanted
+                    )
                 for i, j in wanted:
                     payoff[i, j] = part[0][i, j]
                 unmodelled |= notes

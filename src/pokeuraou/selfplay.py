@@ -34,6 +34,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
+from . import timing
 from .actions import SideAction, switch_actions_after_faint
 from .equilibrium import EquilibriumError, solve
 from .hidden import completions, seen_slots, shown_species
@@ -520,6 +521,8 @@ def play_game(
     who is not playing the equilibrium, two equilibria can take different amounts. That is
     what a mismatched pair measures.
     """
+    # Closes the stretch since the last game's last record (IKA-98); the first one ends startup.
+    timing.decided("between")
     limits = (search_limit, search_limit) if isinstance(search_limit, int) else search_limit
     depths = (depth, depth) if isinstance(depth, int) else depth
     ranked = (
@@ -801,6 +804,7 @@ def play_game(
                 foe_chosen=chosen[1].to_choice(),
             )
         )
+        timing.decided("move")
         advanced = _advance_turn(reg, rng, pos, chosen, record, leaves, objective)
         if advanced is None:
             break
@@ -970,6 +974,7 @@ def _do_self_switch_node(
             foe_chosen=waiting[0] if chooser == 0 else options[best],
         )
     )
+    timing.decided("selfswitch")
     return alternatives[best][1]
 
 
@@ -1124,6 +1129,7 @@ def _do_replacement_node(
             foe_chosen=chosen[1].to_choice(),
         )
     )
+    timing.decided("replacement")
     outcome = resolve_replacements(reg, pos, chosen)
     record.unmodelled.extend(outcome.unmodelled)
     return outcome.position
