@@ -6266,6 +6266,25 @@ CreateProcess が見つけられず、IKA-113 の1回目は1局も打たずに0�
 壁時計の比較は共有の機械では交絡する（「another session lands in your timing」）ので、サブエージェントが
 落ち着いてから鍵を16コアで押さえて順に回す。
 
+### 11:30 の中断 —— 利用制限で8本が同時に止まった。再開の手がかり
+
+9:17 ごろ、サブエージェント8本が利用制限（リセット 11:30）で途中終了した。master に入ったのは
+IKA-40・115・72・113・50・79・78・88。IKA-44 はコーディネータのブランチ（`6d23c1f`）まで。以後の
+サブエージェントは **effort medium**（ユーザ指示、`~/.claude/agents/worker-medium.md`）。
+
+```
+  課題          worktree（.claude/worktrees/…）       状態
+  IKA-104       agent-a373a8719fce62c57             実装はコミット済み 58c3aeb。引き直し 24/24・幅16・1ulp の対照を回した直後。
+                                                    ⚠ 1ulp の改変が戻っているかを最初に確かめる
+  IKA-121→119   agent-ae9c7164c0eacf5f0             121 はコミット済み 7d2b559（TODO の節も）。119 は未着手（ブランチだけ）
+  IKA-117→118   agent-a2172ead5df06d189             117 は未コミット（hidden.py・selfplay.py・テスト書きかけ）
+  IKA-70→71     agent-a3fe592aff9133fe5             70 は未コミット（speed.py の Python 修正・diff_node・refusal_replay.py）。
+                                                    ⚠ 「Python 修正を一時的に戻した対照」の途中で止まった
+  IKA-98        agent-a7c9018756622a488             未コミット（timing.py 書きかけ・計器）
+  IKA-62・101・99/100                               worktree 無し（着手直後に止まった）。最初から
+  IKA-138                                           未着手（Naive の出典つき補い、ユーザ承認）
+```
+
 ## 9/23 — IKA-40: `load_tool` は読み込みに失敗した道具を残し、2回目は実在する関数を「無い」と言っていた
 
 9/19、torch の無い環境の `tests/test_selection_book.py` で、原因1つに失敗が2通り出ていた（課題本文の実測）:
