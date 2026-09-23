@@ -260,18 +260,36 @@ differs on any cell, so a failure is a status and not only a line to be read. Un
 the mask was let off under `fast` and `exact`: Python marks a turn inexact for "damage
 rolls stratified" and the port had no such reduction, so it called 3,599 of this node's
 4,576 cells exact that Python does not.
+
+Two ways to make a run cheaper (IKA-206). `--jobs N` examines the nodes in N spawned
+workers -- run it under `heavy.py --cores N` -- and prints what `--jobs 1` prints, line
+for line. `--exes old.exe,new.exe` holds one run's nodes to several binaries: Python's
+side of a node (its fill, every turn the checks resolve, every control) is resolved
+once, each binary gets the summary `--exe` alone would give it, and the lines they
+part on are printed side by side at the end:
+
+    python heavy.py --agent IKA-NNN --cores 8 -- python tools/diff_node.py \
+        --games-dir data/ika73/w12 --veils --nodes 100 --jobs 8 \
+        --exes C:/tmp/ikaNNN/old.exe,rust/target/release/pokeuraou-damage.exe
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
+import functools
+import hashlib
 import json
+import multiprocessing
 import os
+import pickle
 import random
 import sys
 import time
+import zlib
 from collections import Counter
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -1591,7 +1609,14 @@ def outcome(result, taken: list[tuple] | None = None) -> tuple:  # noqa: ANN001
     Each distinct state with its total weight, the paused ones apart, and the notes. With
     `taken`, the items the control took off are put back on each state first, so what is
     left to differ is only what the item *did*.
+
+    Kept per node while `examine` holds the node's turns (IKA-206), so a second binary does
+    not write every state out again. The result is held beside its answer, so its id is not
+    handed to another object while the entry stands.
     """
+    remembered = (id(result), tuple(taken or ()))
+    if _OUTCOMES is not None and remembered in _OUTCOMES:
+        return _OUTCOMES[remembered][1]
 
     def key(pos: Position) -> str:
         if taken:
@@ -1610,7 +1635,14 @@ def outcome(result, taken: list[tuple] | None = None) -> tuple:  # noqa: ANN001
     for pause in result.suspended:
         state = key(pause.position)
         paused[state] = paused.get(state, 0.0) + pause.probability
-    return finished, paused, tuple(sorted(result.unmodelled))
+    answer = finished, paused, tuple(sorted(result.unmodelled))
+    if _OUTCOMES is not None:
+        _OUTCOMES[remembered] = (result, answer)
+    return answer
+
+
+#: `outcome`'s answers for the node `examine` is on; None outside one (IKA-206).
+_OUTCOMES: dict[tuple, tuple] | None = None
 
 
 def differ(a: tuple, b: tuple) -> bool:
@@ -1683,7 +1715,33 @@ def menu(reg, pos: Position, side: int, limit: int) -> list:  # noqa: ANN001
     return narrow(reg, pos, side, limit=limit).actions
 
 
-def main() -> None:
+#: The port's refusals since the last `clear()`, by reason. Module-level so a node's own are
+#: read back per binary, in this process or a worker's (IKA-206).
+REFUSED: Counter = Counter()
+
+
+def install_counting() -> None:
+    # A refused cell is filled by Python, and for a learned leaf that means its leaves are
+    # scored in a forward pass of their own rather than with the rest of the node. float32
+    # matrix arithmetic is not shape-independent, so that alone can move a cell -- which is
+    # why the count is reported next to the worst difference rather than left implicit.
+    # By reason, because "refused" is not a piece of work anyone can pick up.
+    if getattr(rustnode.RustNode, "_counting_refusals", False):
+        return
+    for name in ("fill", "fill_encoded"):
+        original = getattr(rustnode.RustNode, name)
+
+        def counting(self, *args, _original=original, **kwargs):  # noqa: ANN001
+            filled = _original(self, *args, **kwargs)
+            REFUSED.update(why for _i, _j, why in filled.refused)
+            return filled
+
+        # On the class, so the count survives the `reset()` between the two runs.
+        setattr(rustnode.RustNode, name, counting)
+    rustnode.RustNode._counting_refusals = True
+
+
+def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--games", type=int, default=2)
     ap.add_argument("--seed", type=int, default=31)
@@ -1884,8 +1942,51 @@ def main() -> None:
         "has it -- hold every cell that uses it to the port branch by branch, and on every "
         "other position make it the last move and count the slots whose menu drops it",
     )
-    args = ap.parse_args()
+    ap.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="examine the nodes in this many worker processes (IKA-206). The lines and the "
+        "summary are --jobs 1's; run it under heavy.py --cores of the same number",
+    )
+    ap.add_argument(
+        "--exe",
+        default=None,
+        help="the port binary to hold to Python (POKEURAOU_RUST_NODE_BIN for this run)",
+    )
+    ap.add_argument(
+        "--exes",
+        default=None,
+        help="comma-separated port binaries, old.exe,new.exe: Python's side of each node "
+        "is resolved once and held to every one, and each gets the summary --exe would",
+    )
+    ap.add_argument(
+        "--python-cache",
+        default=None,
+        help="a directory (under C:/tmp) to keep each node's Python side in, keyed by the "
+        "node, the arguments and a hash of src/pokeuraou, this tool and the regulation "
+        "configs: a second run on the same nodes and the same Python resolves nothing",
+    )
+    return ap
 
+
+def exes_of(ap: argparse.ArgumentParser, args: argparse.Namespace) -> list[str | None]:
+    """The binaries a run holds to Python; `[None]` is whatever the environment names."""
+    if args.exe and args.exes:
+        ap.error("--exe or --exes, not both")
+    named = [e for e in (args.exes or args.exe or "").split(",") if e]
+    for exe in named:
+        if not Path(exe).exists():
+            ap.error(f"no binary at {exe}")
+    return named or [None]
+
+
+def setup(ap: argparse.ArgumentParser, args: argparse.Namespace) -> SimpleNamespace:
+    """Everything a node is examined with but the node itself: the parent's and a worker's.
+
+    A worker under `--jobs` builds it again from the same arguments -- the regulation, the
+    leaf, the budget -- and is handed only the positions, already prepared.
+    """
     if args.limit == 0 and not args.scenario:
         ap.error("--limit 0 (the whole menu) is for a --scenario node")
     roster = load_roster(args.roster)
@@ -1943,6 +2044,1322 @@ def main() -> None:
     else:
         names = ["hp-share", "faints"]
         evaluators = [OBJECTIVES[name].batch for name in names]
+    install_counting()
+    return SimpleNamespace(
+        args=args,
+        roster=roster,
+        reg=reg,
+        scenario_pos=scenario_pos,
+        holding=holding,
+        using=using,
+        blockers=blockers,
+        debris=debris,
+        veils=veils,
+        surges=surges,
+        names=names,
+        evaluators=evaluators,
+        budget=BUDGETS[args.budget](),
+        randomers=random_target_moves(reg) if args.random_target else frozenset(),
+        charging=charge_moves(reg) if args.charging else frozenset(),
+        quick=priority_moves(reg) if args.terrain or blockers else frozenset(),
+        hazard_moves=frozenset(HAZARD_MOVES),
+        exes=exes_of(ap, args),
+        remembered={},
+    )
+
+
+class Tally:
+    """One binary's counts over some nodes, and the lines those nodes printed (IKA-206).
+
+    A node is examined whole in one process -- this one, or a worker's under `--jobs` --
+    and hands back one of these per binary. They are merged in node order, so the lines
+    come out as the sequential run printed them; a line held to the first five (`show`)
+    is limited when it is printed, over the whole run.
+    """
+
+    def __init__(self) -> None:
+        self.checked = self.cells = self.identical = self.differing = 0
+        self.worst = self.worst_value = self.worst_strategy = 0.0
+        self.rust_seconds = self.python_seconds = 0.0
+        self.notes_differ = self.masks_differ = self.mask_cells = self.mask_rust_only = 0
+        # Where the held item fired, and what the port did there.
+        self.fired = self.fired_wrong = self.fired_wrong_anyway = 0
+        self.fired_worst = 0.0
+        self.fired_notes: Counter = Counter()
+        self.shown = 0
+        # Where the move was used, where its break fired, and what the port did there.
+        self.used = self.used_wrong = self.broke = self.broke_wrong = self.broke_paused = 0
+        self.broke_worst = 0.0
+        # Where a priority move may go under the terrain, and where the terrain stopped it.
+        self.quick_used = self.quick_wrong = self.stopped = self.stopped_wrong = 0
+        self.stopped_worst = 0.0
+        # Where a priority move may go beside a blocking ability, and where the ability stopped it.
+        self.block_used = self.block_wrong = self.blocked = self.blocked_wrong = 0
+        self.blocked_worst = 0.0
+        # Under Salt Cure, every cell; and where the mod's fraction moved the answer.
+        self.cured = self.cured_wrong = self.cured_refused = self.cured_fired = self.cured_fired_wrong = 0
+        self.cured_worst = 0.0
+        # Beside a Surge holder, every cell; and where IKA-201's rules moved the answer.
+        self.surged = 0
+        self.surged_wrong = 0
+        self.surged_refused = 0
+        self.surged_fired = 0
+        self.surged_fired_wrong = 0
+        self.surged_worst = 0.0
+        # Beside a confused Pokemon, every cell; and where IKA-177's rule moved the answer.
+        self.dazed_cells = 0
+        self.dazed_wrong = 0
+        self.dazed_refused = 0
+        self.dazed_fired = 0
+        self.dazed_fired_wrong = 0
+        self.dazed_worst = 0.0
+        # Under a confusion guard, every cell; and where IKA-189's rule moved the answer.
+        self.guard_cells = 0
+        self.guard_wrong = 0
+        self.guard_refused = 0
+        self.guard_fired = 0
+        self.guard_fired_wrong = 0
+        self.eject_cells = 0
+        self.eject_wrong = 0
+        self.eject_refused = 0
+        self.eject_fired = 0
+        self.eject_fired_wrong = 0
+        self.eject_fired_by: Counter = Counter()
+        self.eject_refused_by: Counter = Counter()
+        self.eject_worst = 0.0
+        # Beside Trace or Synchronize, every cell; and where IKA-203's rules moved the answer.
+        self.ts_cells = self.ts_wrong = self.ts_refused = self.ts_fired = self.ts_fired_wrong = 0
+        self.ts_traced = self.ts_synced = 0
+        self.ts_worst = 0.0
+        self.guard_by_refusal = self.guard_by_roll = 0
+        self.guard_worst = 0.0
+        # Beside a doll, every cell; and where IKA-180's Substitute moved the answer.
+        self.doll_cells = self.doll_wrong = self.doll_refused = self.doll_fired = self.doll_fired_wrong = 0
+        self.doll_by_use = self.doll_by_doll = 0
+        self.doll_worst = 0.0
+        # Beside a frozen Pokemon, every cell; and where a thaw moved the answer.
+        self.icy = self.icy_wrong = self.icy_refused = self.thawed = self.thawed_wrong = 0
+        self.thawed_worst = 0.0
+        # Beside a Choice lock, every cell; and where IKA-179's lock moved the answer.
+        self.lock_cells = self.lock_wrong = self.lock_refused = self.lock_fired = self.lock_fired_wrong = 0
+        self.lock_worst = 0.0
+        # Where a hazard was used, and where laying it on the foe's side moved the answer.
+        self.laid = self.laid_wrong = self.laid_refused = self.laid_fired = self.laid_fired_wrong = 0
+        self.laid_fired_refused = self.laid_fired_paused = self.laid_wrong_elsewhere = 0
+        self.laid_worst = 0.0
+        # Beside Toxic Debris, every cell; and where IKA-173's rule moved the answer.
+        self.debris_cells = 0
+        self.debris_wrong = 0
+        self.debris_refused = 0
+        self.debris_fired = 0
+        self.debris_fired_wrong = 0
+        self.debris_worst = 0.0
+        # Beside Good as Gold or Flower Veil, every cell; and where each moved the answer.
+        self.veil_cells = self.veil_wrong = self.veil_refused = 0
+        self.veil_fired = dict.fromkeys(sorted(VEILS), 0)
+        self.veil_fired_wrong = dict.fromkeys(sorted(VEILS), 0)
+        self.veil_stands = dict.fromkeys(sorted(VEILS), 0)
+        self.veil_worst = 0.0
+        # Where a charging move was used or fired, and where its stored target moved the answer.
+        self.charged = self.charged_wrong = self.aimed = self.aimed_wrong = self.aimed_paused = 0
+        self.aimed_worst = 0.0
+        # Where a randomNormal move was used, and where drawing its foe moved the answer.
+        self.drew = self.drew_wrong = self.drew_fired = self.drew_fired_wrong = self.drew_paused = 0
+        self.drew_worst = 0.0
+        # Where the hammer was used, and the remembered slots whose menu dropped it.
+        self.hammered = self.hammered_wrong = self.dropped = self.dropped_control = 0
+        self.refused: Counter = Counter()
+        self.lines: list[tuple[bool, str]] = []
+        #: Nodes whose Python side `--python-cache` read back rather than resolved.
+        self.cached_nodes = 0
+
+    def say(self, text: str) -> None:
+        self.lines.append((False, text))
+
+    def show(self, text: str) -> None:
+        self.lines.append((True, text))
+
+    def merge(self, other: Tally) -> None:
+        """Add another node's counts: sums, the worst differences by max, lines in order."""
+        for name, value in other.__dict__.items():
+            mine = getattr(self, name)
+            if name == "lines":
+                mine.extend(value)
+            elif isinstance(value, dict):  # the Counters and the per-ability dicts
+                for key, count in value.items():
+                    mine[key] = mine.get(key, 0) + count
+            elif "worst" in name:
+                setattr(self, name, max(mine, value))
+            else:
+                setattr(self, name, mine + value)
+
+
+def emit(lines: list[tuple[bool, str]], state: dict[str, int]) -> None:
+    """Print a node's lines, the held-to-five ones counted over the run."""
+    for limited, text in lines:
+        if limited:
+            if state["shown"] >= 5:
+                continue
+            state["shown"] += 1
+        print(text)
+
+
+def turn(c, memo: dict, key: tuple, pos: Position, a, b, patch=None):  # noqa: ANN001, ANN201
+    """One cell's turn in Python, resolved once per node however many binaries it meets.
+
+    `patch` makes the control: a callable giving the context manager the turn is resolved
+    under (`unchanged`, `unveiled`...). `key` names the control and the cell.
+    """
+    if key not in memo:
+        with patch() if patch is not None else contextlib.nullcontext():
+            memo[key] = resolve_turn(c.reg, pos, [a, b], budget=c.budget)
+    return memo[key]
+
+
+def examine(pos: Position, extras: dict, c) -> list[Tally] | None:  # noqa: ANN001
+    """One node held to every binary, Python's side of it resolved once (IKA-206).
+
+    None when a side has no action, as the loop used to pass over it.
+    """
+    import pokeuraou.resolve as resolve_mod
+
+    reg, budget = c.reg, c.budget
+    os.environ[rustnode.ENV_ENABLE] = "0"
+    rustnode.reset()
+    # The menu is Python's own narrowing, the bridge off. With it on the port scores the
+    # pool, and a menu that moved with the binary would give each binary other cells.
+    row = menu(reg, pos, 0, c.args.limit)
+    col = menu(reg, pos, 1, c.args.limit)
+    if not row or not col:
+        return None
+
+    cache = python_cache_path(c, pos, extras) if c.args.python_cache else None
+    payload = None
+    if cache is not None and cache.exists():
+        # A file that does not read back (a run killed mid-write, a class since renamed)
+        # is a miss, resolved again and written over.
+        started = time.perf_counter()
+        with contextlib.suppress(Exception):
+            payload = pickle.loads(zlib.decompress(cache.read_bytes()))
+        read = time.perf_counter() - started
+    if payload is not None:
+        # "python N s" is the time this run spent on Python's side: here, the read.
+        expected, notes, python_exact, _resolved_in, memo = payload
+        tallies = against_every_binary(
+            c, pos, extras, row, col, expected, notes, python_exact, read, memo
+        )
+        for t in tallies:
+            t.cached_nodes = 1
+        return tallies
+
+    # The bridge-off fill resolves every cell with the same call the checks below make, so
+    # its turns are kept rather than resolved a second time.
+    memo: dict = {}
+    real = resolve_mod.resolve_turn
+    rows = {id(a): i for i, a in enumerate(row)}
+    cols = {id(b): j for j, b in enumerate(col)}
+    keep = len(rows) == len(row) and len(cols) == len(col)
+
+    def recording(*call, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        result = real(*call, **kwargs)
+        if keep and len(call) == 3 and call[1] is pos and kwargs.get("budget") is budget:
+            i, j = rows.get(id(call[2][0])), cols.get(id(call[2][1]))
+            if len(call[2]) == 2 and i is not None and j is not None:
+                memo.setdefault(("here", i, j), result)
+        return result
+
+    resolve_mod.resolve_turn = recording
+    try:
+        started = time.perf_counter()
+        expected, notes, python_exact = batched_payoffs(
+            reg, pos, row, col, c.evaluators, budget=budget
+        )
+        python_seconds = time.perf_counter() - started
+    finally:
+        resolve_mod.resolve_turn = real
+
+    tallies = against_every_binary(
+        c, pos, extras, row, col, expected, notes, python_exact, python_seconds, memo
+    )
+    if cache is not None:
+        # After the binaries, so every control they asked for is in the memo. Written
+        # aside and moved, so a worker never reads another's half-written file.
+        payload = (expected, notes, python_exact, python_seconds, memo)
+        aside = cache.with_suffix(f".{os.getpid()}.part")
+        aside.write_bytes(zlib.compress(pickle.dumps(payload, pickle.HIGHEST_PROTOCOL), 6))
+        os.replace(aside, cache)
+    return tallies
+
+
+#: Bumped when what `--python-cache` holds changes shape.
+PYTHON_CACHE_VERSION = 1
+
+
+#: The checkout this tool is in: its `src` is the one imported above.
+ROOT = Path(__file__).resolve().parents[1]
+
+
+@functools.cache
+def python_fingerprint(root: Path = ROOT) -> str:
+    """Everything Python's side of a node is resolved from: its source and the regulation.
+
+    Every `src/pokeuraou` module, this tool (the controls live here) and the regulation
+    configs, by content. Edit a rule and every cached node is a miss.
+    """
+    digest = hashlib.sha256()
+    files = sorted(
+        [*(root / "src" / "pokeuraou").rglob("*.py"), root / "tools" / Path(__file__).name]
+        + sorted((root / "configs" / "regulations").glob("*.json"))
+    )
+    for path in files:
+        digest.update(path.relative_to(root).as_posix().encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
+#: Arguments that only choose which nodes are read, or how the run is spread and judged:
+#: the node itself is in the key, so none of them is.
+NOT_IN_THE_KEY = frozenset(
+    {"jobs", "exe", "exes", "python_cache", "tolerance", "nodes", "games", "games_dir",
+     "min_turn", "seed", "max_turns"}
+)
+
+
+def python_cache_path(c, pos: Position, extras: dict) -> Path:  # noqa: ANN001
+    """Where `--python-cache` keeps this node's Python side (IKA-206)."""
+    settings = {k: str(v) for k, v in sorted(vars(c.args).items()) if k not in NOT_IN_THE_KEY}
+    digest = hashlib.sha256()
+    for part in (
+        str(PYTHON_CACHE_VERSION),
+        python_fingerprint(),
+        hashlib.sha256(Path(c.args.value).read_bytes()).hexdigest() if c.args.value else "",
+        json.dumps(settings, sort_keys=True),
+        json.dumps(pos.to_json(), sort_keys=True),
+        json.dumps(extras, sort_keys=True, default=str),
+    ):
+        digest.update(part.encode())
+        digest.update(b"\0")
+    directory = Path(c.args.python_cache)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory / f"{digest.hexdigest()[:32]}.pkl.z"
+
+
+def against_every_binary(  # noqa: ANN001, ANN201, PLR0913
+    c, pos, extras, row, col, expected, notes, python_exact, python_seconds, memo
+):
+    """The node's Python side, held to each binary in turn."""
+    global _OUTCOMES
+    _OUTCOMES = {}
+    tallies = []
+    try:
+        for exe in c.exes:
+            if exe is not None:
+                os.environ[rustnode.ENV_BINARY] = exe
+            t = Tally()
+            t.python_seconds = python_seconds
+            REFUSED.clear()
+            compare(t, c, pos, extras, row, col, expected, notes, python_exact, memo)
+            t.refused = Counter(REFUSED)
+            tallies.append(t)
+    finally:
+        _OUTCOMES = None
+    return tallies
+
+
+def compare(  # noqa: ANN001, C901, PLR0912, PLR0913, PLR0915
+    t: Tally, c, pos: Position, extras: dict, row, col, expected, notes, python_exact, memo
+) -> None:
+    """One node through the binary the environment names, counted into `t`."""
+    reg, args, budget, evaluators, names = c.reg, c.args, c.budget, c.evaluators, c.names
+    holding, using, randomers, charging = c.holding, c.using, c.randomers, c.charging
+    blockers, debris, veils, quick, hazard_moves = (
+        c.blockers, c.debris, c.veils, c.quick, c.hazard_moves
+    )
+    os.environ[rustnode.ENV_ENABLE] = "1"
+    rustnode.reset()
+    started = time.perf_counter()
+    got, rust_notes, rust_exact = batched_payoffs(
+        reg, pos, row, col, evaluators, budget=budget
+    )
+    t.rust_seconds += time.perf_counter() - started
+    if set(notes) != set(rust_notes):
+        t.notes_differ += 1
+        t.say(
+            f"  the notes differ: python only {sorted(set(notes) - set(rust_notes))}, "
+            f"rust only {sorted(set(rust_notes) - set(notes))}"
+        )
+
+    if holding:
+        # The control, cell by cell and in Python: the same turn with the item off.
+        bare, taken = without(pos, holding)
+        node = rustnode.node_for(reg)
+        for i, a in enumerate(row):
+            for j, b in enumerate(col):
+                here = turn(c, memo, ("here", i, j), pos, a, b)
+                control = turn(c, memo, ("bare", i, j), bare, a, b)
+                if not differ(outcome(here), outcome(control, taken)):
+                    continue
+                t.fired += 1
+                t.fired_notes.update(set(here.unmodelled) - set(control.unmodelled))
+                for index in range(len(evaluators)):
+                    t.fired_worst = max(
+                        t.fired_worst, abs(float(got[index][i, j] - expected[index][i, j]))
+                    )
+                wrong = (
+                    ["no warm process"]
+                    if node is None
+                    else branch_differences(node, reg, pos, a, b, here, budget)
+                )
+                if wrong:
+                    t.fired_wrong += 1
+                    # And whether it is the item's at all: a cell the engines disagree
+                    # on with the item taken off is a disagreement this item only led
+                    # the control to.
+                    if node is not None and branch_differences(
+                        node, reg, bare, a, b, control, budget
+                    ):
+                        t.fired_wrong_anyway += 1
+                    t.show(f"  cell {(i, j)} where the item fired: {wrong[0][:200]}")
+
+    if using:
+        node = rustnode.node_for(reg)
+        for i, a in enumerate(row):
+            for j, b in enumerate(col):
+                if not (uses(a, using) or uses(b, using)):
+                    continue
+                t.used += 1
+                here = turn(c, memo, ("here", i, j), pos, a, b)
+                control = turn(
+                    c, memo, ("unchanged", i, j), pos, a, b, functools.partial(unchanged, reg, using)
+                )
+                fired_here = differ(outcome(here), outcome(control))
+                wrong = (
+                    ["no warm process"]
+                    if node is None
+                    else branch_differences(node, reg, pos, a, b, here, budget)
+                )
+                t.used_wrong += bool(wrong)
+                if fired_here:
+                    t.broke += 1
+                    t.broke_wrong += bool(wrong)
+                    # `branch_differences` compares a paused turn's weight but not its
+                    # position -- the port hands back only a finished branch's -- so a
+                    # break that shows only in a paused state is not held here.
+                    t.broke_paused += bool(here.suspended)
+                    for index in range(len(evaluators)):
+                        t.broke_worst = max(
+                            t.broke_worst,
+                            abs(float(got[index][i, j] - expected[index][i, j])),
+                        )
+                if wrong:
+                    t.show(f"  cell {(i, j)} using {sorted(using)}: {wrong[0][:200]}")
+
+    if args.charging:
+        node = rustnode.node_for(reg)
+        every = extras["every"]
+        for i, a in enumerate(row):
+            for j, b in enumerate(col):
+                if not (every or uses(a, charging) or uses(b, charging)):
+                    continue
+                t.charged += 1
+                here = turn(c, memo, ("here", i, j), pos, a, b)
+                control = turn(c, memo, ("untargeted", i, j), pos, a, b, untargeted)
+                wrong = (
+                    ["no warm process"]
+                    if node is None
+                    else branch_differences(node, reg, pos, a, b, here, budget)
+                )
+                t.charged_wrong += bool(wrong)
+                if differ(outcome(here), outcome(control)):
+                    t.aimed += 1
+                    t.aimed_wrong += bool(wrong)
+                    t.aimed_paused += bool(here.suspended)
+                    for index in range(len(evaluators)):
+                        t.aimed_worst = max(
+                            t.aimed_worst,
+                            abs(float(got[index][i, j] - expected[index][i, j])),
+                        )
+                if wrong:
+                    t.show(f"  cell {(i, j)} with a charge: {wrong[0][:200]}")
+
+    if randomers:
+        node = rustnode.node_for(reg)
+        for i, a in enumerate(row):
+            for j, b in enumerate(col):
+                if not (uses(a, randomers) or uses(b, randomers)):
+                    continue
+                t.drew += 1
+                here = turn(c, memo, ("here", i, j), pos, a, b)
+                control = turn(c, memo, ("undrawn", i, j), pos, a, b, undrawn)
+                wrong = (
+                    ["no warm process"]
+                    if node is None
+                    else branch_differences(node, reg, pos, a, b, here, budget)
+                )
+                t.drew_wrong += bool(wrong)
+                if differ(outcome(here), outcome(control)):
+                    t.drew_fired += 1
+                    t.drew_fired_wrong += bool(wrong)
+                    t.drew_paused += bool(here.suspended)
+                    for index in range(len(evaluators)):
+                        t.drew_worst = max(
+                            t.drew_worst,
+                            abs(float(got[index][i, j] - expected[index][i, j])),
+                        )
+                if wrong:
+                    t.show(f"  cell {(i, j)} using a randomNormal move: {wrong[0][:200]}")
+
+    if args.hammer:
+        node = rustnode.node_for(reg)
+        for side_index, slot in extras["remembered"]:
+            offered = {
+                getattr(act.slots[slot], "move_id", None)
+                for act in side_actions(reg, pos, side_index)
+            }
+            with hammer_twice():
+                control_offered = {
+                    getattr(act.slots[slot], "move_id", None)
+                    for act in side_actions(reg, pos, side_index)
+                }
+            t.dropped += "gigatonhammer" not in offered
+            t.dropped_control += "gigatonhammer" in control_offered
+        hammer = frozenset({"gigatonhammer"})
+        for i, a in enumerate(row):
+            for j, b in enumerate(col):
+                if not (uses(a, hammer) or uses(b, hammer)):
+                    continue
+                t.hammered += 1
+                here = turn(c, memo, ("here", i, j), pos, a, b)
+                wrong = (
+                    ["no warm process"]
+                    if node is None
+                    else branch_differences(node, reg, pos, a, b, here, budget)
+                )
+                t.hammered_wrong += bool(wrong)
+                if wrong:
+                    t.show(f"  cell {(i, j)} using the hammer: {wrong[0][:200]}")
+
+    if args.terrain:
+        node = rustnode.node_for(reg)
+        for i, a in enumerate(row):
+            for j, b in enumerate(col):
+                if not (
+                    uses_priority(reg, pos, 0, a, quick) or uses_priority(reg, pos, 1, b, quick)
+                ):
+                    continue
+                t.quick_used += 1
+                here = turn(c, memo, ("here", i, j), pos, a, b)
+                control = turn(c, memo, ("unstopped", i, j), pos, a, b, unstopped)
+                wrong = (
+                    ["no warm process"]
+                    if node is None
+                    else branch_differences(node, reg, pos, a, b, here, budget)
+                )
+                t.quick_wrong += bool(wrong)
+                if differ(outcome(here), outcome(control)):
+                    t.stopped += 1
+                    t.stopped_wrong += bool(wrong)
+                    for index in range(len(evaluators)):
+                        t.stopped_worst = max(
+                            t.stopped_worst,
+                            abs(float(got[index][i, j] - expected[index][i, j])),
+                        )
+                if wrong:
+                    t.show(f"  cell {(i, j)} under {args.terrain}: {wrong[0][:200]}")
+
+    if blockers:
+        node = rustnode.node_for(reg)
+        for i, a in enumerate(row):
+            for j, b in enumerate(col):
+                if not (
+                    uses_priority(reg, pos, 0, a, quick) or uses_priority(reg, pos, 1, b, quick)
+                ):
+                    continue
+                t.block_used += 1
+                here = turn(c, memo, ("here", i, j), pos, a, b)
+                control = turn(c, memo, ("unblocked", i, j), pos, a, b, unblocked)
+                wrong = (
+                    ["no warm process"]
+                    if node is None
+                    else branch_differences(node, reg, pos, a, b, here, budget)
+                )
+                t.block_wrong += bool(wrong)
+                if differ(outcome(here), outcome(control)):
+                    t.blocked += 1
+                    t.blocked_wrong += bool(wrong)
+                    for index in range(len(evaluators)):
+                        t.blocked_worst = max(
+                            t.blocked_worst,
+                            abs(float(got[index][i, j] - expected[index][i, j])),
+                        )
+                if wrong:
+                    t.show(f"  cell {(i, j)} beside a blocking ability: {wrong[0][:200]}")
+
+    if args.salt_cure:
+        node = rustnode.node_for(reg)
+        for i, a in enumerate(row):
+            for j, b in enumerate(col):
+                t.cured += 1
+                here = turn(c, memo, ("here", i, j), pos, a, b)
+                control = turn(c, memo, ("base_game_salt_cure", i, j), pos, a, b, base_game_salt_cure)
+                wrong = (
+                    ["no warm process"]
+                    if node is None
+                    else branch_differences(node, reg, pos, a, b, here, budget)
+                )
+                # A cell the port refuses (a gate that is not Salt Cure's -- Flower
+                # Trick's willCrit, say) is filled in Python and is counted apart.
+                refused_here = wrong == ["the port refused the turn"]
+                t.cured_refused += refused_here
+                if refused_here:
+                    wrong = []
+                t.cured_wrong += bool(wrong)
+                if differ(outcome(here), outcome(control)):
+                    t.cured_fired += 1
+                    t.cured_fired_wrong += bool(wrong)
+                    for index in range(len(evaluators)):
+                        t.cured_worst = max(
+                            t.cured_worst,
+                            abs(float(got[index][i, j] - expected[index][i, j])),
+                        )
+                if wrong:
+                    t.show(f"  cell {(i, j)} under Salt Cure: {wrong[0][:200]}")
+
+    if args.surge:
+        node = rustnode.node_for(reg)
+        for i, a in enumerate(row):
+            for j, b in enumerate(col):
+                t.surged += 1
+                here = turn(c, memo, ("here", i, j), pos, a, b)
+                control = turn(c, memo, ("before_ika201", i, j), pos, a, b, before_ika201)
+                wrong = (
+                    ["no warm process"]
+                    if node is None
+                    else branch_differences(node, reg, pos, a, b, here, budget)
+                )
+                refused_here = wrong == ["the port refused the turn"]
+                t.surged_refused += refused_here
+                if refused_here:
+                    wrong = []
+                t.surged_wrong += bool(wrong)
+                if differ(outcome(here), outcome(control)):
+                    t.surged_fired += 1
+                    t.surged_fired_wrong += bool(wrong)
+                    for index in range(len(evaluators)):
+                        t.surged_worst = max(
+                            t.surged_worst,
+                            abs(float(got[index][i, j] - expected[index][i, j])),
+                        )
+                if wrong:
+                    t.show(f"  cell {(i, j)} beside a Surge: {wrong[0][:200]}")
+
+    if args.hazards:
+        node = rustnode.node_for(reg)
+        for i, a in enumerate(row):
+            for j, b in enumerate(col):
+                if not (uses(a, hazard_moves) or uses(b, hazard_moves)):
+                    continue
+                t.laid += 1
+                here = turn(c, memo, ("here", i, j), pos, a, b)
+                control = turn(
+                    c, memo, ("hazards_on_the_users_side", i, j), pos, a, b, hazards_on_the_users_side
+                )
+                wrong = (
+                    ["no warm process"]
+                    if node is None
+                    else branch_differences(node, reg, pos, a, b, here, budget)
+                )
+                # A cell the port refuses for a gate that is not the hazard's is filled
+                # in Python and is counted apart.
+                refused_here = wrong == ["the port refused the turn"]
+                t.laid_refused += refused_here
+                if refused_here:
+                    wrong = []
+                t.laid_wrong += bool(wrong)
+                if wrong and node is not None:
+                    # Whether the two engines at least lay the same side conditions: a
+                    # cell they part on elsewhere is a disagreement the hazard only
+                    # led the tool to (IKA-165 met the port's missing Perish Song so).
+                    t.laid_wrong_elsewhere += sides_agree(node, pos, a, b, here, budget)
+                mine, theirs = outcome(here), outcome(control)
+                if differ(mine, theirs):
+                    t.laid_fired += 1
+                    t.laid_fired_wrong += bool(wrong)
+                    t.laid_fired_refused += refused_here
+                    # `branch_differences` holds a paused turn's weight, not its
+                    # position, so a placement that shows only there is not held.
+                    t.laid_fired_paused += not differ(
+                        (mine[0], {}, mine[2]), (theirs[0], {}, theirs[2])
+                    )
+                    for index in range(len(evaluators)):
+                        t.laid_worst = max(
+                            t.laid_worst,
+                            abs(float(got[index][i, j] - expected[index][i, j])),
+                        )
+                if wrong:
+                    t.show(f"  cell {(i, j)} using a hazard: {wrong[0][:200]}")
+
+    if debris:
+        node = rustnode.node_for(reg)
+        for i, a in enumerate(row):
+            for j, b in enumerate(col):
+                t.debris_cells += 1
+                here = turn(c, memo, ("here", i, j), pos, a, b)
+                control = turn(c, memo, ("old_toxic_debris", i, j), pos, a, b, old_toxic_debris)
+                wrong = (
+                    ["no warm process"]
+                    if node is None
+                    else branch_differences(node, reg, pos, a, b, here, budget)
+                )
+                refused_here = wrong == ["the port refused the turn"]
+                t.debris_refused += refused_here
+                if refused_here:
+                    wrong = []
+                t.debris_wrong += bool(wrong)
+                if differ(outcome(here), outcome(control)):
+                    t.debris_fired += 1
+                    t.debris_fired_wrong += bool(wrong)
+                    for index in range(len(evaluators)):
+                        t.debris_worst = max(
+                            t.debris_worst,
+                            abs(float(got[index][i, j] - expected[index][i, j])),
+                        )
+                if wrong:
+                    t.show(f"  cell {(i, j)} beside Toxic Debris: {wrong[0][:200]}")
+
+    if veils:
+        node = rustnode.node_for(reg)
+        standing = [v for v in sorted(VEILS) if ability_on_field(pos, frozenset({v}))]
+        for v in standing:
+            t.veil_stands[v] += len(row) * len(col)
+        for i, a in enumerate(row):
+            for j, b in enumerate(col):
+                t.veil_cells += 1
+                here = turn(c, memo, ("here", i, j), pos, a, b)
+                wrong = (
+                    ["no warm process"]
+                    if node is None
+                    else branch_differences(node, reg, pos, a, b, here, budget)
+                )
+                refused_here = wrong == ["the port refused the turn"]
+                t.veil_refused += refused_here
+                if refused_here:
+                    wrong = []
+                t.veil_wrong += bool(wrong)
+                for v in standing:
+                    control = turn(c, memo, ("unveiled", v, i, j), pos, a, b, functools.partial(unveiled, v))
+                    if differ(outcome(here), outcome(control)):
+                        t.veil_fired[v] += 1
+                        t.veil_fired_wrong[v] += bool(wrong)
+                        for index in range(len(evaluators)):
+                            t.veil_worst = max(
+                                t.veil_worst,
+                                abs(float(got[index][i, j] - expected[index][i, j])),
+                            )
+                if wrong:
+                    t.show(f"  cell {(i, j)} beside {'/'.join(standing)}: {wrong[0][:200]}")
+
+    if args.confused and confused_on_field(pos):
+        node = rustnode.node_for(reg)
+        for i, a in enumerate(row):
+            for j, b in enumerate(col):
+                t.dazed_cells += 1
+                here = turn(c, memo, ("here", i, j), pos, a, b)
+                control = turn(c, memo, ("unconfused", i, j), pos, a, b, unconfused)
+                wrong = (
+                    ["no warm process"]
+                    if node is None
+                    else branch_differences(node, reg, pos, a, b, here, budget)
+                )
+                refused_here = wrong == ["the port refused the turn"]
+                t.dazed_refused += refused_here
+                if refused_here:
+                    wrong = []
+                t.dazed_wrong += bool(wrong)
+                if differ(outcome(here), outcome(control)):
+                    t.dazed_fired += 1
+                    t.dazed_fired_wrong += bool(wrong)
+                    for index in range(len(evaluators)):
+                        t.dazed_worst = max(
+                            t.dazed_worst,
+                            abs(float(got[index][i, j] - expected[index][i, j])),
+                        )
+                if wrong:
+                    t.show(f"  cell {(i, j)} beside a confused Pokemon: {wrong[0][:200]}")
+
+    if args.confusion_guard:
+        node = rustnode.node_for(reg)
+        for i, a in enumerate(row):
+            for j, b in enumerate(col):
+                t.guard_cells += 1
+                here = turn(c, memo, ("here", i, j), pos, a, b)
+                control = turn(c, memo, ("unguarded", i, j), pos, a, b, unguarded)
+                wrong = (
+                    ["no warm process"]
+                    if node is None
+                    else branch_differences(node, reg, pos, a, b, here, budget)
+                )
+                refused_here = wrong == ["the port refused the turn"]
+                t.guard_refused += refused_here
+                if refused_here:
+                    wrong = []
+                t.guard_wrong += bool(wrong)
+                if differ(outcome(here), outcome(control)):
+                    unrefused = turn(
+                        c, memo, ("unguarded", "refusals", i, j), pos, a, b,
+                        functools.partial(unguarded, "refusals"),
+                    )
+                    unrolled = turn(
+                        c, memo, ("unguarded", "roll", i, j), pos, a, b, functools.partial(unguarded, "roll")
+                    )
+                    t.guard_by_refusal += differ(outcome(here), outcome(unrefused))
+                    t.guard_by_roll += differ(outcome(here), outcome(unrolled))
+                    t.guard_fired += 1
+                    t.guard_fired_wrong += bool(wrong)
+                    for index in range(len(evaluators)):
+                        t.guard_worst = max(
+                            t.guard_worst,
+                            abs(float(got[index][i, j] - expected[index][i, j])),
+                        )
+                if wrong:
+                    t.show(f"  cell {(i, j)} under a confusion guard: {wrong[0][:200]}")
+
+    if args.substitute:
+        node = rustnode.node_for(reg)
+        for i, a in enumerate(row):
+            for j, b in enumerate(col):
+                t.doll_cells += 1
+                here = turn(c, memo, ("here", i, j), pos, a, b)
+                control = turn(c, memo, ("unsubbed", i, j), pos, a, b, unsubbed)
+                wrong = (
+                    ["no warm process"]
+                    if node is None
+                    else branch_differences(node, reg, pos, a, b, here, budget)
+                )
+                refused_here = wrong == ["the port refused the turn"]
+                t.doll_refused += refused_here
+                if refused_here:
+                    wrong = []
+                t.doll_wrong += bool(wrong)
+                if differ(outcome(here), outcome(control)):
+                    unused = turn(
+                        c, memo, ("unsubbed", "use", i, j), pos, a, b, functools.partial(unsubbed, "use")
+                    )
+                    undolled = turn(
+                        c, memo, ("unsubbed", "doll", i, j), pos, a, b, functools.partial(unsubbed, "doll")
+                    )
+                    t.doll_by_use += differ(outcome(here), outcome(unused))
+                    t.doll_by_doll += differ(outcome(here), outcome(undolled))
+                    t.doll_fired += 1
+                    t.doll_fired_wrong += bool(wrong)
+                    for index in range(len(evaluators)):
+                        t.doll_worst = max(
+                            t.doll_worst,
+                            abs(float(got[index][i, j] - expected[index][i, j])),
+                        )
+                if wrong:
+                    t.show(f"  cell {(i, j)} beside a doll: {wrong[0][:200]}")
+
+    if args.eject:
+        node = rustnode.node_for(reg)
+        handed = extras["handed"]
+        for i, a in enumerate(row):
+            for j, b in enumerate(col):
+                t.eject_cells += 1
+                here = turn(c, memo, ("here", i, j), pos, a, b)
+                control = turn(c, memo, ("uneject", i, j), pos, a, b, uneject)
+                wrong = (
+                    ["no warm process"]
+                    if node is None
+                    else branch_differences(node, reg, pos, a, b, here, budget)
+                )
+                refused_here = wrong == ["the port refused the turn"]
+                t.eject_refused += refused_here
+                t.eject_refused_by[handed] += refused_here
+                if refused_here:
+                    wrong = []
+                t.eject_wrong += bool(wrong)
+                if differ(outcome(here), outcome(control)):
+                    t.eject_fired += 1
+                    t.eject_fired_by[handed] += 1
+                    t.eject_fired_wrong += bool(wrong)
+                    for index in range(len(evaluators)):
+                        t.eject_worst = max(
+                            t.eject_worst,
+                            abs(float(got[index][i, j] - expected[index][i, j])),
+                        )
+                if wrong:
+                    t.show(f"  cell {(i, j)} with {handed} on the field: {wrong[0][:200]}")
+
+    if args.trace_sync:
+        node = rustnode.node_for(reg)
+        for i, a in enumerate(row):
+            for j, b in enumerate(col):
+                t.ts_cells += 1
+                here = turn(c, memo, ("here", i, j), pos, a, b)
+                no_trace = turn(c, memo, ("untraced", i, j), pos, a, b, untraced)
+                no_sync = turn(c, memo, ("unsynced", i, j), pos, a, b, unsynced)
+                wrong = (
+                    ["no warm process"]
+                    if node is None
+                    else branch_differences(node, reg, pos, a, b, here, budget)
+                )
+                refused_here = wrong == ["the port refused the turn"]
+                t.ts_refused += refused_here
+                if refused_here:
+                    wrong = []
+                t.ts_wrong += bool(wrong)
+                traced = differ(outcome(here), outcome(no_trace))
+                synced = differ(outcome(here), outcome(no_sync))
+                t.ts_traced += traced
+                t.ts_synced += synced
+                if traced or synced:
+                    t.ts_fired += 1
+                    t.ts_fired_wrong += bool(wrong)
+                    for index in range(len(evaluators)):
+                        t.ts_worst = max(
+                            t.ts_worst,
+                            abs(float(got[index][i, j] - expected[index][i, j])),
+                        )
+                if wrong:
+                    t.show(f"  cell {(i, j)} beside Trace or Synchronize: {wrong[0][:200]}")
+
+    if args.frozen:
+        node = rustnode.node_for(reg)
+        for i, a in enumerate(row):
+            for j, b in enumerate(col):
+                t.icy += 1
+                here = turn(c, memo, ("here", i, j), pos, a, b)
+                control = turn(c, memo, ("unthawed", i, j), pos, a, b, unthawed)
+                wrong = (
+                    ["no warm process"]
+                    if node is None
+                    else branch_differences(node, reg, pos, a, b, here, budget)
+                )
+                refused_here = wrong == ["the port refused the turn"]
+                t.icy_refused += refused_here
+                if refused_here:
+                    wrong = []
+                t.icy_wrong += bool(wrong)
+                if differ(outcome(here), outcome(control)):
+                    t.thawed += 1
+                    t.thawed_wrong += bool(wrong)
+                    for index in range(len(evaluators)):
+                        t.thawed_worst = max(
+                            t.thawed_worst,
+                            abs(float(got[index][i, j] - expected[index][i, j])),
+                        )
+                if wrong:
+                    t.show(f"  cell {(i, j)} beside a frozen Pokemon: {wrong[0][:200]}")
+
+    if args.choice_locked:
+        node = rustnode.node_for(reg)
+        for i, a in enumerate(row):
+            for j, b in enumerate(col):
+                t.lock_cells += 1
+                here = turn(c, memo, ("here", i, j), pos, a, b)
+                control = turn(c, memo, ("unlocked", i, j), pos, a, b, unlocked)
+                wrong = (
+                    ["no warm process"]
+                    if node is None
+                    else branch_differences(node, reg, pos, a, b, here, budget)
+                )
+                refused_here = wrong == ["the port refused the turn"]
+                t.lock_refused += refused_here
+                if refused_here:
+                    wrong = []
+                t.lock_wrong += bool(wrong)
+                if differ(outcome(here), outcome(control)):
+                    t.lock_fired += 1
+                    t.lock_fired_wrong += bool(wrong)
+                    for index in range(len(evaluators)):
+                        t.lock_worst = max(
+                            t.lock_worst,
+                            abs(float(got[index][i, j] - expected[index][i, j])),
+                        )
+                if wrong:
+                    t.show(f"  cell {(i, j)} beside a Choice lock: {wrong[0][:200]}")
+
+    t.checked += 1
+    t.cells += len(row) * len(col)
+    for index, name in enumerate(names):
+        gap = np.abs(np.asarray(got[index]) - np.asarray(expected[index]))
+        t.worst = max(t.worst, float(gap.max()))
+        t.identical += int((gap == 0).sum())
+        t.differing += int((gap > 0).sum())
+        if gap.max() > 1e-9:
+            where = np.unravel_index(int(np.argmax(gap)), gap.shape)
+            t.say(
+                f"  {name} differs by {gap.max():.3e} at cell {where}: "
+                f"python {expected[index][where]!r} rust {got[index][where]!r}"
+            )
+        python_eq = solve(np.asarray(expected[index]))
+        rust_eq = solve(np.asarray(got[index]))
+        t.worst_value = max(t.worst_value, abs(python_eq.value - rust_eq.value))
+        t.worst_strategy = max(
+            t.worst_strategy,
+            float(np.abs(python_eq.row_strategy - rust_eq.row_strategy).max()),
+            float(np.abs(python_eq.col_strategy - rust_eq.col_strategy).max()),
+        )
+    mask_gap = np.asarray(rust_exact) != np.asarray(python_exact)
+    if mask_gap.any():
+        t.masks_differ += 1
+        t.mask_cells += int(mask_gap.sum())
+        t.mask_rust_only += int((mask_gap & np.asarray(rust_exact)).sum())
+        t.say(f"  the exact mask differs on {int(mask_gap.sum())} cells")
+
+
+def summarize(t: Tally, c) -> tuple[list[str], list[str]]:  # noqa: ANN001, C901, PLR0912, PLR0915
+    """The summary lines of one binary's run, and what failed it."""
+    args, holding, using, randomers = c.args, c.holding, c.using, c.randomers
+    blockers, debris, veils, remembered = c.blockers, c.debris, c.veils, c.remembered
+    lines: list[str] = []
+    say = lines.append
+    scored = t.identical + t.differing
+    leaf_kind = "a learned leaf and hp-share" if args.value else "hp-share and faints"
+    say(f"\n{t.checked} nodes, {t.cells} cells, scored by {leaf_kind}")
+    say(
+        f"  bit-identical {t.identical}/{scored} scored cells "
+        f"({t.identical / max(scored, 1) * 100:.2f}%)"
+    )
+    # Both runs fill through the counting wrapper, but only the bridged one reaches the
+    # port, so this is the bridged run's refusals and nothing is counted twice.
+    say(f"  cells the port refused {sum(t.refused.values())}")
+    for why, times in t.refused.most_common(8):
+        say(f"    {times:>7}  {why}")
+    say(f"  worst cell difference {t.worst:.3e}")
+    say(f"  equilibrium value moved at most {t.worst_value:.3e}")
+    say(f"  equilibrium frequency moved at most {t.worst_strategy:.3e}")
+    say(f"  nodes whose notes differ {t.notes_differ}")
+    say(
+        f"  cells whose exact flag differs {t.mask_cells} "
+        f"(exact in the port only: {t.mask_rust_only})"
+    )
+    if holding:
+        say(f"\n  where {', '.join(sorted(holding))} fired -- the cells the control moves")
+        say(f"    {t.fired} of {t.cells} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.fired_wrong}")
+        say(f"      of which differ the same way with the item taken off  {t.fired_wrong_anyway}")
+        say(f"    worst cell difference there  {t.fired_worst:.3e}")
+        for note, times in t.fired_notes.most_common(4):
+            say(f"    note only the item's turn carries, {times} cells: {note}")
+    if using:
+        say(f"\n  where {', '.join(sorted(using))} was used -- every one held branch by branch")
+        say(f"    {t.used} of {t.cells} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.used_wrong}")
+        say("  where the effect fired -- the cells the control (`unchanged`) moves")
+        say(f"    {t.broke} of {t.used} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.broke_wrong}")
+        say(f"    cells with a paused branch, whose position is not compared  {t.broke_paused}")
+        say(f"    worst cell difference there  {t.broke_worst:.3e}")
+    if args.terrain:
+        say(f"\n  under {args.terrain}, cells that may use a priority move -- held branch by branch")
+        say(f"    {t.quick_used} of {t.cells} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.quick_wrong}")
+        say("  where the terrain stopped one -- the cells `unstopped` moves")
+        say(f"    {t.stopped} of {t.quick_used} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.stopped_wrong}")
+        say(f"    worst cell difference there  {t.stopped_worst:.3e}")
+    if args.salt_cure:
+        say("\n  under Salt Cure, every cell -- held branch by branch")
+        say(f"    {t.cured} of {t.cells} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.cured_wrong}")
+        say(f"    cells the port refused, filled in Python and not held  {t.cured_refused}")
+        say("  where the mod's fraction fired -- the cells the base game's 1/8 and 1/4 move")
+        say(f"    {t.cured_fired} of {t.cured} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.cured_fired_wrong}")
+        say(f"    worst cell difference there  {t.cured_worst:.3e}")
+    if args.surge:
+        say("\n  beside a Surge holder, every cell -- held branch by branch")
+        say(f"    {t.surged} of {t.cells} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.surged_wrong}")
+        say(f"    cells the port refused, filled in Python and not held  {t.surged_refused}")
+        say("  where IKA-201's rules fired -- the cells `before_ika201` moves")
+        say(f"    {t.surged_fired} of {t.surged} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.surged_fired_wrong}")
+        say(f"    worst cell difference there  {t.surged_worst:.3e}")
+    if args.confused:
+        say("\n  beside a confused Pokemon, every cell -- held branch by branch")
+        say(f"    {t.dazed_cells} of {t.cells} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.dazed_wrong}")
+        say(f"    cells the port refused, filled in Python and not held  {t.dazed_refused}")
+        say("  where the length, the odds or the berry fired -- the cells `unconfused` moves")
+        say(f"    {t.dazed_fired} of {t.dazed_cells} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.dazed_fired_wrong}")
+        say(f"    worst cell difference there  {t.dazed_worst:.3e}")
+    if args.substitute:
+        say("\n  beside a doll, every cell -- held branch by branch")
+        say(f"    {t.doll_cells} of {t.cells} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.doll_wrong}")
+        say(f"    cells the port refused, filled in Python and not held  {t.doll_refused}")
+        say("  where Substitute fired -- the cells `unsubbed` moves")
+        say(f"    {t.doll_fired} of {t.doll_cells} cells")
+        say(f"      the use alone moves  {t.doll_by_use}; the doll alone  {t.doll_by_doll}")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.doll_fired_wrong}")
+        say(f"    worst cell difference there  {t.doll_worst:.3e}")
+    if args.confusion_guard:
+        say("\n  under a confusion guard, every cell -- held branch by branch")
+        say(f"    {t.guard_cells} of {t.cells} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.guard_wrong}")
+        say(f"    cells the port refused, filled in Python and not held  {t.guard_refused}")
+        say("  where a refusal or the self-hit's roll fired -- the cells `unguarded` moves")
+        say(f"    {t.guard_fired} of {t.guard_cells} cells")
+        say(f"      a refusal alone moves  {t.guard_by_refusal}; the roll alone  {t.guard_by_roll}")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.guard_fired_wrong}")
+        say(f"    worst cell difference there  {t.guard_worst:.3e}")
+    if args.eject:
+        say("\n  with an Eject Button, Emergency Exit, Wimp Out or Red Card on the field")
+        say(f"    {t.eject_cells} of {t.cells} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.eject_wrong}")
+        say(
+            f"    cells the port refused, filled in Python and not held  {t.eject_refused}  "
+            f"{dict(t.eject_refused_by)}"
+        )
+        say("  where a switch fired -- the cells `uneject` moves")
+        say(f"    {t.eject_fired} of {t.eject_cells} cells  {dict(t.eject_fired_by)}")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.eject_fired_wrong}")
+        say(f"    worst cell difference there  {t.eject_worst:.3e}")
+    if args.trace_sync:
+        say("\n  with a Trace holder on the bench or a Synchronize holder on the field")
+        say(f"    {t.ts_cells} of {t.cells} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.ts_wrong}")
+        say(f"    cells the port refused, filled in Python and not held  {t.ts_refused}")
+        say("  where Trace or Synchronize fired -- the cells `untraced` or `unsynced` moves")
+        say(f"    {t.ts_fired} of {t.ts_cells} cells (Trace {t.ts_traced}, Synchronize {t.ts_synced})")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.ts_fired_wrong}")
+        say(f"    worst cell difference there  {t.ts_worst:.3e}")
+    if args.frozen:
+        say("\n  beside a frozen Pokemon, every cell -- held branch by branch")
+        say(f"    {t.icy} of {t.cells} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.icy_wrong}")
+        say(f"    cells the port refused, filled in Python and not held  {t.icy_refused}")
+        say("  where a thaw fired -- the cells `unthawed` moves")
+        say(f"    {t.thawed} of {t.icy} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.thawed_wrong}")
+        say(f"    worst cell difference there  {t.thawed_worst:.3e}")
+    if args.choice_locked:
+        say("\n  beside a Choice lock, every cell -- held branch by branch")
+        say(f"    {t.lock_cells} of {t.cells} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.lock_wrong}")
+        say(f"    cells the port refused, filled in Python and not held  {t.lock_refused}")
+        say("  where IKA-179's lock fired -- the cells `unlocked` moves")
+        say(f"    {t.lock_fired} of {t.lock_cells} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.lock_fired_wrong}")
+        say(f"    worst cell difference there  {t.lock_worst:.3e}")
+    if blockers:
+        say("\n  beside a priority-blocking ability, cells that may use a priority move")
+        say(f"    {t.block_used} of {t.cells} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.block_wrong}")
+        say("  where the ability stopped one -- the cells `unblocked` moves")
+        say(f"    {t.blocked} of {t.block_used} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.blocked_wrong}")
+        say(f"    worst cell difference there  {t.blocked_worst:.3e}")
+    if args.hazards:
+        say("\n  where a hazard was used -- every one held branch by branch")
+        say(f"    {t.laid} of {t.cells} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.laid_wrong}")
+        say(f"      of which the side conditions agree, branch by branch  {t.laid_wrong_elsewhere}")
+        say(f"    cells the port refused, filled in Python and not held  {t.laid_refused}")
+        say("  where the placement fired -- the cells the user's side would move")
+        say(f"    {t.laid_fired} of {t.laid} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.laid_fired_wrong}")
+        say(f"    cells the port refused, not held  {t.laid_fired_refused}")
+        say(f"    cells that differ only in a paused branch, not compared  {t.laid_fired_paused}")
+        say(f"    worst cell difference there  {t.laid_worst:.3e}")
+    if veils:
+        say("\n  beside Good as Gold or Flower Veil, every cell -- held branch by branch")
+        say(f"    {t.veil_cells} of {t.cells} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.veil_wrong}")
+        say(f"    cells the port refused, filled in Python and not held  {t.veil_refused}")
+        for v in sorted(VEILS):
+            say(f"  where {v} fired -- the cells `unveiled('{v}')` moves")
+            say(f"    {t.veil_fired[v]} of {t.veil_stands[v]} cells beside it")
+            say(f"    cells whose branches, weights, notes or positions differ  "
+                  f"{t.veil_fired_wrong[v]}")
+        say(f"    worst cell difference there  {t.veil_worst:.3e}")
+    if debris:
+        say("\n  beside Toxic Debris, every cell -- held branch by branch")
+        say(f"    {t.debris_cells} of {t.cells} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.debris_wrong}")
+        say(f"    cells the port refused, filled in Python and not held  {t.debris_refused}")
+        say("  where IKA-173's rule fired -- the cells the old Toxic Debris moves")
+        say(f"    {t.debris_fired} of {t.debris_cells} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.debris_fired_wrong}")
+        say(f"    worst cell difference there  {t.debris_worst:.3e}")
+    if args.charging:
+        say("\n  with a charge -- every cell mid-charge, and the ones using a charging move")
+        say(f"    {t.charged} of {t.cells} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.charged_wrong}")
+        say("  where the stored target fired -- the cells `untargeted` moves")
+        say(f"    {t.aimed} of {t.charged} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.aimed_wrong}")
+        say(f"    cells with a paused branch, whose position is not compared  {t.aimed_paused}")
+        say(f"    worst cell difference there  {t.aimed_worst:.3e}")
+    if randomers:
+        say("\n  where a randomNormal move was used -- every one held branch by branch")
+        say(f"    {t.drew} of {t.cells} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.drew_wrong}")
+        say("  where the draw of the foe fired -- the cells `undrawn` moves")
+        say(f"    {t.drew_fired} of {t.drew} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.drew_fired_wrong}")
+        say(f"    cells with a paused branch, whose position is not compared  {t.drew_paused}")
+        say(f"    worst cell difference there  {t.drew_worst:.3e}")
+    if args.hammer:
+        say("\n  where Gigaton Hammer was used -- every one held branch by branch")
+        say(f"    {t.hammered} of {t.cells} cells")
+        say(f"    cells whose branches, weights, notes or positions differ  {t.hammered_wrong}")
+        say("  slots whose last move was the hammer (the menu is Python's)")
+        say(f"    {sum(len(v) for v in remembered.values())} slots, the menu drops it on {t.dropped}")
+        say(f"    offered there with `cantusetwice` taken out  {t.dropped_control}")
+    say(f"  python {t.python_seconds:.2f} s   rust {t.rust_seconds:.2f} s")
+    if t.rust_seconds > 0:
+        say(f"  end to end {t.python_seconds / t.rust_seconds:.1f}x")
+    failed = []
+    if t.worst > args.tolerance:
+        failed.append(f"worst cell difference {t.worst:.3e} > {args.tolerance:.0e}")
+    # Under every budget. Until IKA-151 the port had no "damage rolls stratified"
+    # reduction and a stratifying budget was let off; it now marks the same turns inexact.
+    if t.masks_differ:
+        failed.append(f"the exact mask differs on {t.mask_cells} cells of {t.masks_differ} nodes")
+    if t.used_wrong:
+        failed.append(f"{t.used_wrong} cells using {', '.join(sorted(using))} differ by branch")
+    if using and not t.broke:
+        failed.append("the effect fired in no cell, so agreeing here says nothing")
+    if t.quick_wrong:
+        failed.append(f"{t.quick_wrong} cells under {args.terrain} differ by branch")
+    if args.terrain and not t.stopped:
+        failed.append(f"{args.terrain} stopped nothing in any cell, so agreeing here says nothing")
+    if t.cured_wrong:
+        failed.append(f"{t.cured_wrong} cells under Salt Cure differ by branch")
+    if args.salt_cure and not t.cured_fired:
+        failed.append("the mod's Salt Cure fraction moved no cell, so agreeing here says nothing")
+    if t.surged_wrong:
+        failed.append(f"{t.surged_wrong} cells beside a Surge holder differ by branch")
+    if args.surge and not t.surged_fired:
+        failed.append("IKA-201's rules moved no cell, so agreeing here says nothing")
+    if t.block_wrong:
+        failed.append(f"{t.block_wrong} cells beside a blocking ability differ by branch")
+    if t.dazed_wrong:
+        failed.append(f"{t.dazed_wrong} cells beside a confused Pokemon differ by branch")
+    if args.confused and not t.dazed_fired:
+        failed.append("IKA-177's confusion moved no cell, so agreeing here says nothing")
+    if t.doll_wrong:
+        failed.append(f"{t.doll_wrong} cells beside a doll differ by branch")
+    if args.substitute and not t.doll_fired:
+        failed.append("IKA-180's Substitute moved no cell, so agreeing here says nothing")
+    if t.guard_wrong:
+        failed.append(f"{t.guard_wrong} cells under a confusion guard differ by branch")
+    if args.confusion_guard and not t.guard_fired:
+        failed.append("IKA-189's confusion guard moved no cell, so agreeing here says nothing")
+    if t.eject_wrong:
+        failed.append(f"{t.eject_wrong} cells with an ejecting holder differ by branch")
+    if args.eject and not t.eject_fired:
+        failed.append("IKA-191's switches moved no cell, so agreeing here says nothing")
+    if t.ts_wrong:
+        failed.append(f"{t.ts_wrong} cells beside Trace or Synchronize differ by branch")
+    if args.trace_sync and not t.ts_fired:
+        failed.append("IKA-203's Trace and Synchronize moved no cell, so agreeing here says nothing")
+    if t.icy_wrong:
+        failed.append(f"{t.icy_wrong} cells beside a frozen Pokemon differ by branch")
+    if args.frozen and not t.thawed:
+        failed.append("no thaw fired in any cell, so agreeing here says nothing")
+    if t.lock_wrong:
+        failed.append(f"{t.lock_wrong} cells beside a Choice lock differ by branch")
+    if args.choice_locked and not t.lock_fired:
+        failed.append("IKA-179's lock moved no cell, so agreeing here says nothing")
+    if blockers and not t.blocked:
+        failed.append("no blocking ability stopped anything in any cell, so agreeing here says nothing")
+    if t.laid_wrong:
+        failed.append(f"{t.laid_wrong} cells using a hazard differ by branch")
+    if t.charged_wrong:
+        failed.append(f"{t.charged_wrong} cells with a charge differ by branch")
+    if args.charging and not t.aimed:
+        failed.append("the stored target moved no cell, so agreeing here says nothing")
+    if t.drew_wrong:
+        failed.append(f"{t.drew_wrong} cells using a randomNormal move differ by branch")
+    if randomers and not t.drew_fired:
+        failed.append("drawing the foe moved no cell, so agreeing here says nothing")
+    if t.hammered_wrong:
+        failed.append(f"{t.hammered_wrong} cells using the hammer differ by branch")
+    if args.hammer and not (t.hammered and t.dropped):
+        failed.append("the hammer was used in no cell or dropped from no menu")
+    if args.hazards and not t.laid_fired:
+        failed.append("laying a hazard on the foe's side moved no cell, so agreeing here says nothing")
+    if t.debris_wrong:
+        failed.append(f"{t.debris_wrong} cells beside Toxic Debris differ by branch")
+    if debris and not t.debris_fired:
+        failed.append("the new Toxic Debris rule moved no cell, so agreeing here says nothing")
+    if t.veil_wrong:
+        failed.append(f"{t.veil_wrong} cells beside Good as Gold or Flower Veil differ by branch")
+    if veils and not any(t.veil_fired.values()):
+        failed.append("neither Good as Gold nor Flower Veil moved a cell, so agreeing here says nothing")
+    return lines, failed
+
+
+#: A worker's context under `--jobs`, built once by `_start_worker`.
+_WORKER: SimpleNamespace | None = None
+
+
+def _start_worker(argv: list[str]) -> None:
+    global _WORKER
+    ap = build_parser()
+    _WORKER = setup(ap, ap.parse_args(argv))
+
+
+def _work(task: tuple) -> tuple[int, list[Tally] | None]:
+    index, pos, extras = task
+    return index, examine(pos, extras, _WORKER)
+
+
+def examined(c, positions: list[Position], extras: list[dict]):  # noqa: ANN001, ANN201
+    """Each node's tallies, in node order, from this process or `--jobs` spawned workers."""
+    jobs = min(c.args.jobs, len(positions))
+    if jobs <= 1:
+        for pos, extra in zip(positions, extras, strict=True):
+            yield examine(pos, extra, c)
+        return
+    tasks = [(index, pos, extra) for index, (pos, extra) in enumerate(zip(positions, extras, strict=True))]
+    spawn = multiprocessing.get_context("spawn")
+    with spawn.Pool(jobs, initializer=_start_worker, initargs=(sys.argv[1:],)) as pool:
+        for _index, tallies in pool.imap(_work, tasks, chunksize=1):
+            yield tallies
+
+
+def side_by_side(exes: list[str | None], outcomes: list[tuple[list[str], list[str]]]) -> None:
+    """The summary lines on which the binaries part, the timings left out."""
+    timing = ("  python ", "  end to end ")
+    kept = [[line for line in lines if not line.startswith(timing)] for lines, _ in outcomes]
+    print(f"\nthe {len(exes)} binaries side by side, the summary lines they part on:")
+    parted = 0
+    context = shown_context = None
+    for index in range(max(len(k) for k in kept)):
+        column = [k[index] if index < len(k) else "" for k in kept]
+        if len(set(column)) == 1:
+            context = column[0]
+            continue
+        parted += 1
+        if context is not None and context is not shown_context:
+            # The last line they agree on, so a count is read under its heading.
+            print(f"  under: {context.strip()}")
+            shown_context = context
+        for number, line in enumerate(column, 1):
+            print(f"  [{number}] {line.strip()}")
+    if not parted:
+        print("  none: every summary line is the same")
+    for number, (exe, (_lines, failed)) in enumerate(zip(exes, outcomes, strict=True), 1):
+        print(f"  [{number}] {exe}: {'FAIL' if failed else 'OK'}")
+
+
+def main() -> None:
+    ap = build_parser()
+    args = ap.parse_args()
+    c = setup(ap, args)
+    roster, reg, scenario_pos = c.roster, c.reg, c.scenario_pos
+    holding, using, blockers, debris, veils, surges = (
+        c.holding, c.using, c.blockers, c.debris, c.veils, c.surges
+    )
 
     if scenario_pos is not None:
         positions = [scenario_pos]
@@ -2062,1059 +3479,65 @@ def main() -> None:
             f"Gigaton Hammer taught to {taught_hammer} Pokemon on the field; the last move "
             f"on {len(remembered)} positions"
         )
-    build = rustnode.require_current_binary()
-    print(f"binary {build['sha256']} built {build['built']}")
+    c.remembered = remembered
+    extras = [
+        {
+            "handed": ejected_by.get(id(pos), "?"),
+            "every": id(pos) in mid_charge,
+            "remembered": remembered.get(id(pos), ()),
+        }
+        for pos in positions
+    ]
+    exes = c.exes
+    for number, exe in enumerate(exes, 1):
+        if exe is not None:
+            os.environ[rustnode.ENV_BINARY] = exe
+        build = rustnode.require_current_binary()
+        if len(exes) == 1:
+            print(f"binary {build['sha256']} built {build['built']}")
+        else:
+            print(f"binary [{number}] {exe}: {build['sha256']} built {build['built']}")
+    print(f"budget {args.budget}: {c.budget}")
 
-    # A refused cell is filled by Python, and for a learned leaf that means its leaves are
-    # scored in a forward pass of their own rather than with the rest of the node. float32
-    # matrix arithmetic is not shape-independent, so that alone can move a cell -- which is
-    # why the count is reported next to the worst difference rather than left implicit.
-    # By reason, because "refused" is not a piece of work anyone can pick up.
-    refused: Counter = Counter()
-    for name in ("fill", "fill_encoded"):
-        original = getattr(rustnode.RustNode, name)
-
-        def counting(self, *args, _original=original, **kwargs):  # noqa: ANN001
-            filled = _original(self, *args, **kwargs)
-            refused.update(why for _i, _j, why in filled.refused)
-            return filled
-
-        # On the class, so the count survives the `reset()` between the two runs.
-        setattr(rustnode.RustNode, name, counting)
-
-    budget = BUDGETS[args.budget]()
-    print(f"budget {args.budget}: {budget}")
-    checked = cells = identical = differing = 0
-    worst = worst_value = worst_strategy = 0.0
-    rust_seconds = python_seconds = 0.0
-    notes_differ = masks_differ = mask_cells = mask_rust_only = 0
-    # Where the held item fired, and what the port did there.
-    fired = fired_wrong = fired_wrong_anyway = 0
-    fired_worst = 0.0
-    fired_notes: Counter = Counter()
-    shown = 0
-    # Where the move was used, where its break fired, and what the port did there.
-    used = used_wrong = broke = broke_wrong = broke_paused = 0
-    broke_worst = 0.0
-    # Where a priority move may go under the terrain, and where the terrain stopped it.
-    quick_used = quick_wrong = stopped = stopped_wrong = 0
-    stopped_worst = 0.0
-    # Where a priority move may go beside a blocking ability, and where the ability stopped it.
-    block_used = block_wrong = blocked = blocked_wrong = 0
-    blocked_worst = 0.0
-    # Under Salt Cure, every cell; and where the mod's fraction moved the answer.
-    cured = cured_wrong = cured_refused = cured_fired = cured_fired_wrong = 0
-    cured_worst = 0.0
-    # Beside a Surge holder, every cell; and where IKA-201's rules moved the answer.
-    surged = surged_wrong = surged_refused = surged_fired = surged_fired_wrong = 0
-    surged_worst = 0.0
-    # Beside a confused Pokemon, every cell; and where IKA-177's rule moved the answer.
-    dazed_cells = dazed_wrong = dazed_refused = dazed_fired = dazed_fired_wrong = 0
-    dazed_worst = 0.0
-    # Under a confusion guard, every cell; and where IKA-189's rule moved the answer.
-    guard_cells = guard_wrong = guard_refused = guard_fired = guard_fired_wrong = 0
-    eject_cells = eject_wrong = eject_refused = eject_fired = eject_fired_wrong = 0
-    eject_fired_by: Counter = Counter()
-    eject_refused_by: Counter = Counter()
-    eject_worst = 0.0
-    # Beside Trace or Synchronize, every cell; and where IKA-203's rules moved the answer.
-    ts_cells = ts_wrong = ts_refused = ts_fired = ts_fired_wrong = 0
-    ts_traced = ts_synced = 0
-    ts_worst = 0.0
-    guard_by_refusal = guard_by_roll = 0
-    guard_worst = 0.0
-    # Beside a doll, every cell; and where IKA-180's Substitute moved the answer.
-    doll_cells = doll_wrong = doll_refused = doll_fired = doll_fired_wrong = 0
-    doll_by_use = doll_by_doll = 0
-    doll_worst = 0.0
-    # Beside a frozen Pokemon, every cell; and where a thaw moved the answer.
-    icy = icy_wrong = icy_refused = thawed = thawed_wrong = 0
-    thawed_worst = 0.0
-    # Beside a Choice lock, every cell; and where IKA-179's lock moved the answer.
-    lock_cells = lock_wrong = lock_refused = lock_fired = lock_fired_wrong = 0
-    lock_worst = 0.0
-    # Where a hazard was used, and where laying it on the foe's side moved the answer.
-    laid = laid_wrong = laid_refused = laid_fired = laid_fired_wrong = 0
-    laid_fired_refused = laid_fired_paused = laid_wrong_elsewhere = 0
-    laid_worst = 0.0
-    hazard_moves = frozenset(HAZARD_MOVES)
-    # Beside Toxic Debris, every cell; and where IKA-173's rule moved the answer.
-    debris_cells = debris_wrong = debris_refused = debris_fired = debris_fired_wrong = 0
-    debris_worst = 0.0
-    # Beside Good as Gold or Flower Veil, every cell; and where each moved the answer.
-    veil_cells = veil_wrong = veil_refused = 0
-    veil_fired = dict.fromkeys(sorted(VEILS), 0)
-    veil_fired_wrong = dict.fromkeys(sorted(VEILS), 0)
-    veil_stands = dict.fromkeys(sorted(VEILS), 0)
-    veil_worst = 0.0
-    # Where a charging move was used or fired, and where its stored target moved the answer.
-    charged = charged_wrong = aimed = aimed_wrong = aimed_paused = 0
-    aimed_worst = 0.0
-    # Where a randomNormal move was used, and where drawing its foe moved the answer.
-    drew = drew_wrong = drew_fired = drew_fired_wrong = drew_paused = 0
-    drew_worst = 0.0
-    # Where the hammer was used, and the remembered slots whose menu dropped it.
-    hammered = hammered_wrong = dropped = dropped_control = 0
-
-    for pos in positions:
-        row = menu(reg, pos, 0, args.limit)
-        col = menu(reg, pos, 1, args.limit)
-        if not row or not col:
+    merged = [Tally() for _ in exes]
+    held: list[list[tuple[bool, str]]] = [[] for _ in exes]
+    state = [{"shown": 0} for _ in exes]
+    for tallies in examined(c, positions, extras):
+        if tallies is None:
             continue
-
-        os.environ[rustnode.ENV_ENABLE] = "0"
-        rustnode.reset()
-        started = time.perf_counter()
-        expected, notes, python_exact = batched_payoffs(
-            reg, pos, row, col, evaluators, budget=budget
-        )
-        python_seconds += time.perf_counter() - started
-
-        os.environ[rustnode.ENV_ENABLE] = "1"
-        rustnode.reset()
-        started = time.perf_counter()
-        got, rust_notes, rust_exact = batched_payoffs(
-            reg, pos, row, col, evaluators, budget=budget
-        )
-        rust_seconds += time.perf_counter() - started
-        if set(notes) != set(rust_notes):
-            notes_differ += 1
-            print(
-                f"  the notes differ: python only {sorted(set(notes) - set(rust_notes))}, "
-                f"rust only {sorted(set(rust_notes) - set(notes))}"
-            )
-
-        if holding:
-            # The control, cell by cell and in Python: the same turn with the item off.
-            bare, taken = without(pos, holding)
-            node = rustnode.node_for(reg)
-            for i, a in enumerate(row):
-                for j, b in enumerate(col):
-                    here = resolve_turn(reg, pos, [a, b], budget=budget)
-                    control = resolve_turn(reg, bare, [a, b], budget=budget)
-                    if not differ(outcome(here), outcome(control, taken)):
-                        continue
-                    fired += 1
-                    fired_notes.update(set(here.unmodelled) - set(control.unmodelled))
-                    for index in range(len(evaluators)):
-                        fired_worst = max(
-                            fired_worst, abs(float(got[index][i, j] - expected[index][i, j]))
-                        )
-                    wrong = (
-                        ["no warm process"]
-                        if node is None
-                        else branch_differences(node, reg, pos, a, b, here, budget)
-                    )
-                    if wrong:
-                        fired_wrong += 1
-                        # And whether it is the item's at all: a cell the engines disagree
-                        # on with the item taken off is a disagreement this item only led
-                        # the control to.
-                        if node is not None and branch_differences(
-                            node, reg, bare, a, b, control, budget
-                        ):
-                            fired_wrong_anyway += 1
-                        if shown < 5:
-                            shown += 1
-                            print(f"  cell {(i, j)} where the item fired: {wrong[0][:200]}")
-
-        if using:
-            node = rustnode.node_for(reg)
-            for i, a in enumerate(row):
-                for j, b in enumerate(col):
-                    if not (uses(a, using) or uses(b, using)):
-                        continue
-                    used += 1
-                    here = resolve_turn(reg, pos, [a, b], budget=budget)
-                    with unchanged(reg, using):
-                        control = resolve_turn(reg, pos, [a, b], budget=budget)
-                    fired_here = differ(outcome(here), outcome(control))
-                    wrong = (
-                        ["no warm process"]
-                        if node is None
-                        else branch_differences(node, reg, pos, a, b, here, budget)
-                    )
-                    used_wrong += bool(wrong)
-                    if fired_here:
-                        broke += 1
-                        broke_wrong += bool(wrong)
-                        # `branch_differences` compares a paused turn's weight but not its
-                        # position -- the port hands back only a finished branch's -- so a
-                        # break that shows only in a paused state is not held here.
-                        broke_paused += bool(here.suspended)
-                        for index in range(len(evaluators)):
-                            broke_worst = max(
-                                broke_worst,
-                                abs(float(got[index][i, j] - expected[index][i, j])),
-                            )
-                    if wrong and shown < 5:
-                        shown += 1
-                        print(f"  cell {(i, j)} using {sorted(using)}: {wrong[0][:200]}")
-
-        if args.charging:
-            node = rustnode.node_for(reg)
-            every = id(pos) in mid_charge
-            for i, a in enumerate(row):
-                for j, b in enumerate(col):
-                    if not (every or uses(a, charging) or uses(b, charging)):
-                        continue
-                    charged += 1
-                    here = resolve_turn(reg, pos, [a, b], budget=budget)
-                    with untargeted():
-                        control = resolve_turn(reg, pos, [a, b], budget=budget)
-                    wrong = (
-                        ["no warm process"]
-                        if node is None
-                        else branch_differences(node, reg, pos, a, b, here, budget)
-                    )
-                    charged_wrong += bool(wrong)
-                    if differ(outcome(here), outcome(control)):
-                        aimed += 1
-                        aimed_wrong += bool(wrong)
-                        aimed_paused += bool(here.suspended)
-                        for index in range(len(evaluators)):
-                            aimed_worst = max(
-                                aimed_worst,
-                                abs(float(got[index][i, j] - expected[index][i, j])),
-                            )
-                    if wrong and shown < 5:
-                        shown += 1
-                        print(f"  cell {(i, j)} with a charge: {wrong[0][:200]}")
-
-        if randomers:
-            node = rustnode.node_for(reg)
-            for i, a in enumerate(row):
-                for j, b in enumerate(col):
-                    if not (uses(a, randomers) or uses(b, randomers)):
-                        continue
-                    drew += 1
-                    here = resolve_turn(reg, pos, [a, b], budget=budget)
-                    with undrawn():
-                        control = resolve_turn(reg, pos, [a, b], budget=budget)
-                    wrong = (
-                        ["no warm process"]
-                        if node is None
-                        else branch_differences(node, reg, pos, a, b, here, budget)
-                    )
-                    drew_wrong += bool(wrong)
-                    if differ(outcome(here), outcome(control)):
-                        drew_fired += 1
-                        drew_fired_wrong += bool(wrong)
-                        drew_paused += bool(here.suspended)
-                        for index in range(len(evaluators)):
-                            drew_worst = max(
-                                drew_worst,
-                                abs(float(got[index][i, j] - expected[index][i, j])),
-                            )
-                    if wrong and shown < 5:
-                        shown += 1
-                        print(f"  cell {(i, j)} using a randomNormal move: {wrong[0][:200]}")
-
-        if args.hammer:
-            node = rustnode.node_for(reg)
-            for side_index, slot in remembered.get(id(pos), ()):
-                offered = {
-                    getattr(act.slots[slot], "move_id", None)
-                    for act in side_actions(reg, pos, side_index)
-                }
-                with hammer_twice():
-                    control_offered = {
-                        getattr(act.slots[slot], "move_id", None)
-                        for act in side_actions(reg, pos, side_index)
-                    }
-                dropped += "gigatonhammer" not in offered
-                dropped_control += "gigatonhammer" in control_offered
-            hammer = frozenset({"gigatonhammer"})
-            for i, a in enumerate(row):
-                for j, b in enumerate(col):
-                    if not (uses(a, hammer) or uses(b, hammer)):
-                        continue
-                    hammered += 1
-                    here = resolve_turn(reg, pos, [a, b], budget=budget)
-                    wrong = (
-                        ["no warm process"]
-                        if node is None
-                        else branch_differences(node, reg, pos, a, b, here, budget)
-                    )
-                    hammered_wrong += bool(wrong)
-                    if wrong and shown < 5:
-                        shown += 1
-                        print(f"  cell {(i, j)} using the hammer: {wrong[0][:200]}")
-
-        if args.terrain:
-            node = rustnode.node_for(reg)
-            for i, a in enumerate(row):
-                for j, b in enumerate(col):
-                    if not (
-                        uses_priority(reg, pos, 0, a, quick) or uses_priority(reg, pos, 1, b, quick)
-                    ):
-                        continue
-                    quick_used += 1
-                    here = resolve_turn(reg, pos, [a, b], budget=budget)
-                    with unstopped():
-                        control = resolve_turn(reg, pos, [a, b], budget=budget)
-                    wrong = (
-                        ["no warm process"]
-                        if node is None
-                        else branch_differences(node, reg, pos, a, b, here, budget)
-                    )
-                    quick_wrong += bool(wrong)
-                    if differ(outcome(here), outcome(control)):
-                        stopped += 1
-                        stopped_wrong += bool(wrong)
-                        for index in range(len(evaluators)):
-                            stopped_worst = max(
-                                stopped_worst,
-                                abs(float(got[index][i, j] - expected[index][i, j])),
-                            )
-                    if wrong and shown < 5:
-                        shown += 1
-                        print(f"  cell {(i, j)} under {args.terrain}: {wrong[0][:200]}")
-
-        if blockers:
-            node = rustnode.node_for(reg)
-            for i, a in enumerate(row):
-                for j, b in enumerate(col):
-                    if not (
-                        uses_priority(reg, pos, 0, a, quick) or uses_priority(reg, pos, 1, b, quick)
-                    ):
-                        continue
-                    block_used += 1
-                    here = resolve_turn(reg, pos, [a, b], budget=budget)
-                    with unblocked():
-                        control = resolve_turn(reg, pos, [a, b], budget=budget)
-                    wrong = (
-                        ["no warm process"]
-                        if node is None
-                        else branch_differences(node, reg, pos, a, b, here, budget)
-                    )
-                    block_wrong += bool(wrong)
-                    if differ(outcome(here), outcome(control)):
-                        blocked += 1
-                        blocked_wrong += bool(wrong)
-                        for index in range(len(evaluators)):
-                            blocked_worst = max(
-                                blocked_worst,
-                                abs(float(got[index][i, j] - expected[index][i, j])),
-                            )
-                    if wrong and shown < 5:
-                        shown += 1
-                        print(f"  cell {(i, j)} beside a blocking ability: {wrong[0][:200]}")
-
-        if args.salt_cure:
-            node = rustnode.node_for(reg)
-            for i, a in enumerate(row):
-                for j, b in enumerate(col):
-                    cured += 1
-                    here = resolve_turn(reg, pos, [a, b], budget=budget)
-                    with base_game_salt_cure():
-                        control = resolve_turn(reg, pos, [a, b], budget=budget)
-                    wrong = (
-                        ["no warm process"]
-                        if node is None
-                        else branch_differences(node, reg, pos, a, b, here, budget)
-                    )
-                    # A cell the port refuses (a gate that is not Salt Cure's -- Flower
-                    # Trick's willCrit, say) is filled in Python and is counted apart.
-                    refused_here = wrong == ["the port refused the turn"]
-                    cured_refused += refused_here
-                    if refused_here:
-                        wrong = []
-                    cured_wrong += bool(wrong)
-                    if differ(outcome(here), outcome(control)):
-                        cured_fired += 1
-                        cured_fired_wrong += bool(wrong)
-                        for index in range(len(evaluators)):
-                            cured_worst = max(
-                                cured_worst,
-                                abs(float(got[index][i, j] - expected[index][i, j])),
-                            )
-                    if wrong and shown < 5:
-                        shown += 1
-                        print(f"  cell {(i, j)} under Salt Cure: {wrong[0][:200]}")
-
-        if args.surge:
-            node = rustnode.node_for(reg)
-            for i, a in enumerate(row):
-                for j, b in enumerate(col):
-                    surged += 1
-                    here = resolve_turn(reg, pos, [a, b], budget=budget)
-                    with before_ika201():
-                        control = resolve_turn(reg, pos, [a, b], budget=budget)
-                    wrong = (
-                        ["no warm process"]
-                        if node is None
-                        else branch_differences(node, reg, pos, a, b, here, budget)
-                    )
-                    refused_here = wrong == ["the port refused the turn"]
-                    surged_refused += refused_here
-                    if refused_here:
-                        wrong = []
-                    surged_wrong += bool(wrong)
-                    if differ(outcome(here), outcome(control)):
-                        surged_fired += 1
-                        surged_fired_wrong += bool(wrong)
-                        for index in range(len(evaluators)):
-                            surged_worst = max(
-                                surged_worst,
-                                abs(float(got[index][i, j] - expected[index][i, j])),
-                            )
-                    if wrong and shown < 5:
-                        shown += 1
-                        print(f"  cell {(i, j)} beside a Surge: {wrong[0][:200]}")
-
-        if args.hazards:
-            node = rustnode.node_for(reg)
-            for i, a in enumerate(row):
-                for j, b in enumerate(col):
-                    if not (uses(a, hazard_moves) or uses(b, hazard_moves)):
-                        continue
-                    laid += 1
-                    here = resolve_turn(reg, pos, [a, b], budget=budget)
-                    with hazards_on_the_users_side():
-                        control = resolve_turn(reg, pos, [a, b], budget=budget)
-                    wrong = (
-                        ["no warm process"]
-                        if node is None
-                        else branch_differences(node, reg, pos, a, b, here, budget)
-                    )
-                    # A cell the port refuses for a gate that is not the hazard's is filled
-                    # in Python and is counted apart.
-                    refused_here = wrong == ["the port refused the turn"]
-                    laid_refused += refused_here
-                    if refused_here:
-                        wrong = []
-                    laid_wrong += bool(wrong)
-                    if wrong and node is not None:
-                        # Whether the two engines at least lay the same side conditions: a
-                        # cell they part on elsewhere is a disagreement the hazard only
-                        # led the tool to (IKA-165 met the port's missing Perish Song so).
-                        laid_wrong_elsewhere += sides_agree(node, pos, a, b, here, budget)
-                    mine, theirs = outcome(here), outcome(control)
-                    if differ(mine, theirs):
-                        laid_fired += 1
-                        laid_fired_wrong += bool(wrong)
-                        laid_fired_refused += refused_here
-                        # `branch_differences` holds a paused turn's weight, not its
-                        # position, so a placement that shows only there is not held.
-                        laid_fired_paused += not differ(
-                            (mine[0], {}, mine[2]), (theirs[0], {}, theirs[2])
-                        )
-                        for index in range(len(evaluators)):
-                            laid_worst = max(
-                                laid_worst,
-                                abs(float(got[index][i, j] - expected[index][i, j])),
-                            )
-                    if wrong and shown < 5:
-                        shown += 1
-                        print(f"  cell {(i, j)} using a hazard: {wrong[0][:200]}")
-
-        if debris:
-            node = rustnode.node_for(reg)
-            for i, a in enumerate(row):
-                for j, b in enumerate(col):
-                    debris_cells += 1
-                    here = resolve_turn(reg, pos, [a, b], budget=budget)
-                    with old_toxic_debris():
-                        control = resolve_turn(reg, pos, [a, b], budget=budget)
-                    wrong = (
-                        ["no warm process"]
-                        if node is None
-                        else branch_differences(node, reg, pos, a, b, here, budget)
-                    )
-                    refused_here = wrong == ["the port refused the turn"]
-                    debris_refused += refused_here
-                    if refused_here:
-                        wrong = []
-                    debris_wrong += bool(wrong)
-                    if differ(outcome(here), outcome(control)):
-                        debris_fired += 1
-                        debris_fired_wrong += bool(wrong)
-                        for index in range(len(evaluators)):
-                            debris_worst = max(
-                                debris_worst,
-                                abs(float(got[index][i, j] - expected[index][i, j])),
-                            )
-                    if wrong and shown < 5:
-                        shown += 1
-                        print(f"  cell {(i, j)} beside Toxic Debris: {wrong[0][:200]}")
-
-        if veils:
-            node = rustnode.node_for(reg)
-            standing = [v for v in sorted(VEILS) if ability_on_field(pos, frozenset({v}))]
-            for v in standing:
-                veil_stands[v] += len(row) * len(col)
-            for i, a in enumerate(row):
-                for j, b in enumerate(col):
-                    veil_cells += 1
-                    here = resolve_turn(reg, pos, [a, b], budget=budget)
-                    wrong = (
-                        ["no warm process"]
-                        if node is None
-                        else branch_differences(node, reg, pos, a, b, here, budget)
-                    )
-                    refused_here = wrong == ["the port refused the turn"]
-                    veil_refused += refused_here
-                    if refused_here:
-                        wrong = []
-                    veil_wrong += bool(wrong)
-                    for v in standing:
-                        with unveiled(v):
-                            control = resolve_turn(reg, pos, [a, b], budget=budget)
-                        if differ(outcome(here), outcome(control)):
-                            veil_fired[v] += 1
-                            veil_fired_wrong[v] += bool(wrong)
-                            for index in range(len(evaluators)):
-                                veil_worst = max(
-                                    veil_worst,
-                                    abs(float(got[index][i, j] - expected[index][i, j])),
-                                )
-                    if wrong and shown < 5:
-                        shown += 1
-                        print(f"  cell {(i, j)} beside {'/'.join(standing)}: {wrong[0][:200]}")
-
-        if args.confused and confused_on_field(pos):
-            node = rustnode.node_for(reg)
-            for i, a in enumerate(row):
-                for j, b in enumerate(col):
-                    dazed_cells += 1
-                    here = resolve_turn(reg, pos, [a, b], budget=budget)
-                    with unconfused():
-                        control = resolve_turn(reg, pos, [a, b], budget=budget)
-                    wrong = (
-                        ["no warm process"]
-                        if node is None
-                        else branch_differences(node, reg, pos, a, b, here, budget)
-                    )
-                    refused_here = wrong == ["the port refused the turn"]
-                    dazed_refused += refused_here
-                    if refused_here:
-                        wrong = []
-                    dazed_wrong += bool(wrong)
-                    if differ(outcome(here), outcome(control)):
-                        dazed_fired += 1
-                        dazed_fired_wrong += bool(wrong)
-                        for index in range(len(evaluators)):
-                            dazed_worst = max(
-                                dazed_worst,
-                                abs(float(got[index][i, j] - expected[index][i, j])),
-                            )
-                    if wrong and shown < 5:
-                        shown += 1
-                        print(f"  cell {(i, j)} beside a confused Pokemon: {wrong[0][:200]}")
-
-        if args.confusion_guard:
-            node = rustnode.node_for(reg)
-            for i, a in enumerate(row):
-                for j, b in enumerate(col):
-                    guard_cells += 1
-                    here = resolve_turn(reg, pos, [a, b], budget=budget)
-                    with unguarded():
-                        control = resolve_turn(reg, pos, [a, b], budget=budget)
-                    wrong = (
-                        ["no warm process"]
-                        if node is None
-                        else branch_differences(node, reg, pos, a, b, here, budget)
-                    )
-                    refused_here = wrong == ["the port refused the turn"]
-                    guard_refused += refused_here
-                    if refused_here:
-                        wrong = []
-                    guard_wrong += bool(wrong)
-                    if differ(outcome(here), outcome(control)):
-                        with unguarded("refusals"):
-                            unrefused = resolve_turn(reg, pos, [a, b], budget=budget)
-                        with unguarded("roll"):
-                            unrolled = resolve_turn(reg, pos, [a, b], budget=budget)
-                        guard_by_refusal += differ(outcome(here), outcome(unrefused))
-                        guard_by_roll += differ(outcome(here), outcome(unrolled))
-                        guard_fired += 1
-                        guard_fired_wrong += bool(wrong)
-                        for index in range(len(evaluators)):
-                            guard_worst = max(
-                                guard_worst,
-                                abs(float(got[index][i, j] - expected[index][i, j])),
-                            )
-                    if wrong and shown < 5:
-                        shown += 1
-                        print(f"  cell {(i, j)} under a confusion guard: {wrong[0][:200]}")
-
-        if args.substitute:
-            node = rustnode.node_for(reg)
-            for i, a in enumerate(row):
-                for j, b in enumerate(col):
-                    doll_cells += 1
-                    here = resolve_turn(reg, pos, [a, b], budget=budget)
-                    with unsubbed():
-                        control = resolve_turn(reg, pos, [a, b], budget=budget)
-                    wrong = (
-                        ["no warm process"]
-                        if node is None
-                        else branch_differences(node, reg, pos, a, b, here, budget)
-                    )
-                    refused_here = wrong == ["the port refused the turn"]
-                    doll_refused += refused_here
-                    if refused_here:
-                        wrong = []
-                    doll_wrong += bool(wrong)
-                    if differ(outcome(here), outcome(control)):
-                        with unsubbed("use"):
-                            unused = resolve_turn(reg, pos, [a, b], budget=budget)
-                        with unsubbed("doll"):
-                            undolled = resolve_turn(reg, pos, [a, b], budget=budget)
-                        doll_by_use += differ(outcome(here), outcome(unused))
-                        doll_by_doll += differ(outcome(here), outcome(undolled))
-                        doll_fired += 1
-                        doll_fired_wrong += bool(wrong)
-                        for index in range(len(evaluators)):
-                            doll_worst = max(
-                                doll_worst,
-                                abs(float(got[index][i, j] - expected[index][i, j])),
-                            )
-                    if wrong and shown < 5:
-                        shown += 1
-                        print(f"  cell {(i, j)} beside a doll: {wrong[0][:200]}")
-
-        if args.eject:
-            node = rustnode.node_for(reg)
-            handed = ejected_by.get(id(pos), "?")
-            for i, a in enumerate(row):
-                for j, b in enumerate(col):
-                    eject_cells += 1
-                    here = resolve_turn(reg, pos, [a, b], budget=budget)
-                    with uneject():
-                        control = resolve_turn(reg, pos, [a, b], budget=budget)
-                    wrong = (
-                        ["no warm process"]
-                        if node is None
-                        else branch_differences(node, reg, pos, a, b, here, budget)
-                    )
-                    refused_here = wrong == ["the port refused the turn"]
-                    eject_refused += refused_here
-                    eject_refused_by[handed] += refused_here
-                    if refused_here:
-                        wrong = []
-                    eject_wrong += bool(wrong)
-                    if differ(outcome(here), outcome(control)):
-                        eject_fired += 1
-                        eject_fired_by[handed] += 1
-                        eject_fired_wrong += bool(wrong)
-                        for index in range(len(evaluators)):
-                            eject_worst = max(
-                                eject_worst,
-                                abs(float(got[index][i, j] - expected[index][i, j])),
-                            )
-                    if wrong and shown < 5:
-                        shown += 1
-                        print(f"  cell {(i, j)} with {handed} on the field: {wrong[0][:200]}")
-
-        if args.trace_sync:
-            node = rustnode.node_for(reg)
-            for i, a in enumerate(row):
-                for j, b in enumerate(col):
-                    ts_cells += 1
-                    here = resolve_turn(reg, pos, [a, b], budget=budget)
-                    with untraced():
-                        no_trace = resolve_turn(reg, pos, [a, b], budget=budget)
-                    with unsynced():
-                        no_sync = resolve_turn(reg, pos, [a, b], budget=budget)
-                    wrong = (
-                        ["no warm process"]
-                        if node is None
-                        else branch_differences(node, reg, pos, a, b, here, budget)
-                    )
-                    refused_here = wrong == ["the port refused the turn"]
-                    ts_refused += refused_here
-                    if refused_here:
-                        wrong = []
-                    ts_wrong += bool(wrong)
-                    traced = differ(outcome(here), outcome(no_trace))
-                    synced = differ(outcome(here), outcome(no_sync))
-                    ts_traced += traced
-                    ts_synced += synced
-                    if traced or synced:
-                        ts_fired += 1
-                        ts_fired_wrong += bool(wrong)
-                        for index in range(len(evaluators)):
-                            ts_worst = max(
-                                ts_worst,
-                                abs(float(got[index][i, j] - expected[index][i, j])),
-                            )
-                    if wrong and shown < 5:
-                        shown += 1
-                        print(f"  cell {(i, j)} beside Trace or Synchronize: {wrong[0][:200]}")
-
-        if args.frozen:
-            node = rustnode.node_for(reg)
-            for i, a in enumerate(row):
-                for j, b in enumerate(col):
-                    icy += 1
-                    here = resolve_turn(reg, pos, [a, b], budget=budget)
-                    with unthawed():
-                        control = resolve_turn(reg, pos, [a, b], budget=budget)
-                    wrong = (
-                        ["no warm process"]
-                        if node is None
-                        else branch_differences(node, reg, pos, a, b, here, budget)
-                    )
-                    refused_here = wrong == ["the port refused the turn"]
-                    icy_refused += refused_here
-                    if refused_here:
-                        wrong = []
-                    icy_wrong += bool(wrong)
-                    if differ(outcome(here), outcome(control)):
-                        thawed += 1
-                        thawed_wrong += bool(wrong)
-                        for index in range(len(evaluators)):
-                            thawed_worst = max(
-                                thawed_worst,
-                                abs(float(got[index][i, j] - expected[index][i, j])),
-                            )
-                    if wrong and shown < 5:
-                        shown += 1
-                        print(f"  cell {(i, j)} beside a frozen Pokemon: {wrong[0][:200]}")
-
-        if args.choice_locked:
-            node = rustnode.node_for(reg)
-            for i, a in enumerate(row):
-                for j, b in enumerate(col):
-                    lock_cells += 1
-                    here = resolve_turn(reg, pos, [a, b], budget=budget)
-                    with unlocked():
-                        control = resolve_turn(reg, pos, [a, b], budget=budget)
-                    wrong = (
-                        ["no warm process"]
-                        if node is None
-                        else branch_differences(node, reg, pos, a, b, here, budget)
-                    )
-                    refused_here = wrong == ["the port refused the turn"]
-                    lock_refused += refused_here
-                    if refused_here:
-                        wrong = []
-                    lock_wrong += bool(wrong)
-                    if differ(outcome(here), outcome(control)):
-                        lock_fired += 1
-                        lock_fired_wrong += bool(wrong)
-                        for index in range(len(evaluators)):
-                            lock_worst = max(
-                                lock_worst,
-                                abs(float(got[index][i, j] - expected[index][i, j])),
-                            )
-                    if wrong and shown < 5:
-                        shown += 1
-                        print(f"  cell {(i, j)} beside a Choice lock: {wrong[0][:200]}")
-
-        checked += 1
-        cells += len(row) * len(col)
-        for index, name in enumerate(names):
-            gap = np.abs(np.asarray(got[index]) - np.asarray(expected[index]))
-            worst = max(worst, float(gap.max()))
-            identical += int((gap == 0).sum())
-            differing += int((gap > 0).sum())
-            if gap.max() > 1e-9:
-                where = np.unravel_index(int(np.argmax(gap)), gap.shape)
-                print(
-                    f"  {name} differs by {gap.max():.3e} at cell {where}: "
-                    f"python {expected[index][where]!r} rust {got[index][where]!r}"
-                )
-            python_eq = solve(np.asarray(expected[index]))
-            rust_eq = solve(np.asarray(got[index]))
-            worst_value = max(worst_value, abs(python_eq.value - rust_eq.value))
-            worst_strategy = max(
-                worst_strategy,
-                float(np.abs(python_eq.row_strategy - rust_eq.row_strategy).max()),
-                float(np.abs(python_eq.col_strategy - rust_eq.col_strategy).max()),
-            )
-        mask_gap = np.asarray(rust_exact) != np.asarray(python_exact)
-        if mask_gap.any():
-            masks_differ += 1
-            mask_cells += int(mask_gap.sum())
-            mask_rust_only += int((mask_gap & np.asarray(rust_exact)).sum())
-            print(f"  the exact mask differs on {int(mask_gap.sum())} cells")
+        for number, tally in enumerate(tallies):
+            if len(exes) == 1:
+                emit(tally.lines, state[number])
+            else:
+                held[number].extend(tally.lines)
+            tally.lines = []
+            merged[number].merge(tally)
 
     rustnode.reset()
-    scored = identical + differing
-    leaf_kind = "a learned leaf and hp-share" if args.value else "hp-share and faints"
-    print(f"\n{checked} nodes, {cells} cells, scored by {leaf_kind}")
-    print(
-        f"  bit-identical {identical}/{scored} scored cells "
-        f"({identical / max(scored, 1) * 100:.2f}%)"
-    )
-    # Both runs fill through the counting wrapper, but only the bridged one reaches the
-    # port, so this is the bridged run's refusals and nothing is counted twice.
-    print(f"  cells the port refused {sum(refused.values())}")
-    for why, times in refused.most_common(8):
-        print(f"    {times:>7}  {why}")
-    print(f"  worst cell difference {worst:.3e}")
-    print(f"  equilibrium value moved at most {worst_value:.3e}")
-    print(f"  equilibrium frequency moved at most {worst_strategy:.3e}")
-    print(f"  nodes whose notes differ {notes_differ}")
-    print(
-        f"  cells whose exact flag differs {mask_cells} "
-        f"(exact in the port only: {mask_rust_only})"
-    )
-    if holding:
-        print(f"\n  where {', '.join(sorted(holding))} fired -- the cells the control moves")
-        print(f"    {fired} of {cells} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {fired_wrong}")
-        print(f"      of which differ the same way with the item taken off  {fired_wrong_anyway}")
-        print(f"    worst cell difference there  {fired_worst:.3e}")
-        for note, times in fired_notes.most_common(4):
-            print(f"    note only the item's turn carries, {times} cells: {note}")
-    if using:
-        print(f"\n  where {', '.join(sorted(using))} was used -- every one held branch by branch")
-        print(f"    {used} of {cells} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {used_wrong}")
-        print("  where the effect fired -- the cells the control (`unchanged`) moves")
-        print(f"    {broke} of {used} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {broke_wrong}")
-        print(f"    cells with a paused branch, whose position is not compared  {broke_paused}")
-        print(f"    worst cell difference there  {broke_worst:.3e}")
-    if args.terrain:
-        print(f"\n  under {args.terrain}, cells that may use a priority move -- held branch by branch")
-        print(f"    {quick_used} of {cells} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {quick_wrong}")
-        print("  where the terrain stopped one -- the cells `unstopped` moves")
-        print(f"    {stopped} of {quick_used} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {stopped_wrong}")
-        print(f"    worst cell difference there  {stopped_worst:.3e}")
-    if args.salt_cure:
-        print("\n  under Salt Cure, every cell -- held branch by branch")
-        print(f"    {cured} of {cells} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {cured_wrong}")
-        print(f"    cells the port refused, filled in Python and not held  {cured_refused}")
-        print("  where the mod's fraction fired -- the cells the base game's 1/8 and 1/4 move")
-        print(f"    {cured_fired} of {cured} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {cured_fired_wrong}")
-        print(f"    worst cell difference there  {cured_worst:.3e}")
-    if args.surge:
-        print("\n  beside a Surge holder, every cell -- held branch by branch")
-        print(f"    {surged} of {cells} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {surged_wrong}")
-        print(f"    cells the port refused, filled in Python and not held  {surged_refused}")
-        print("  where IKA-201's rules fired -- the cells `before_ika201` moves")
-        print(f"    {surged_fired} of {surged} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {surged_fired_wrong}")
-        print(f"    worst cell difference there  {surged_worst:.3e}")
-    if args.confused:
-        print("\n  beside a confused Pokemon, every cell -- held branch by branch")
-        print(f"    {dazed_cells} of {cells} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {dazed_wrong}")
-        print(f"    cells the port refused, filled in Python and not held  {dazed_refused}")
-        print("  where the length, the odds or the berry fired -- the cells `unconfused` moves")
-        print(f"    {dazed_fired} of {dazed_cells} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {dazed_fired_wrong}")
-        print(f"    worst cell difference there  {dazed_worst:.3e}")
-    if args.substitute:
-        print("\n  beside a doll, every cell -- held branch by branch")
-        print(f"    {doll_cells} of {cells} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {doll_wrong}")
-        print(f"    cells the port refused, filled in Python and not held  {doll_refused}")
-        print("  where Substitute fired -- the cells `unsubbed` moves")
-        print(f"    {doll_fired} of {doll_cells} cells")
-        print(f"      the use alone moves  {doll_by_use}; the doll alone  {doll_by_doll}")
-        print(f"    cells whose branches, weights, notes or positions differ  {doll_fired_wrong}")
-        print(f"    worst cell difference there  {doll_worst:.3e}")
-    if args.confusion_guard:
-        print("\n  under a confusion guard, every cell -- held branch by branch")
-        print(f"    {guard_cells} of {cells} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {guard_wrong}")
-        print(f"    cells the port refused, filled in Python and not held  {guard_refused}")
-        print("  where a refusal or the self-hit's roll fired -- the cells `unguarded` moves")
-        print(f"    {guard_fired} of {guard_cells} cells")
-        print(f"      a refusal alone moves  {guard_by_refusal}; the roll alone  {guard_by_roll}")
-        print(f"    cells whose branches, weights, notes or positions differ  {guard_fired_wrong}")
-        print(f"    worst cell difference there  {guard_worst:.3e}")
-    if args.eject:
-        print("\n  with an Eject Button, Emergency Exit, Wimp Out or Red Card on the field")
-        print(f"    {eject_cells} of {cells} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {eject_wrong}")
+    if args.python_cache:
+        # On stderr, so a cached run's stdout is the uncached run's.
         print(
-            f"    cells the port refused, filled in Python and not held  {eject_refused}  "
-            f"{dict(eject_refused_by)}"
+            f"python-cache {args.python_cache}: {merged[0].cached_nodes} of "
+            f"{merged[0].checked} nodes read back",
+            file=sys.stderr,
         )
-        print("  where a switch fired -- the cells `uneject` moves")
-        print(f"    {eject_fired} of {eject_cells} cells  {dict(eject_fired_by)}")
-        print(f"    cells whose branches, weights, notes or positions differ  {eject_fired_wrong}")
-        print(f"    worst cell difference there  {eject_worst:.3e}")
-    if args.trace_sync:
-        print("\n  with a Trace holder on the bench or a Synchronize holder on the field")
-        print(f"    {ts_cells} of {cells} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {ts_wrong}")
-        print(f"    cells the port refused, filled in Python and not held  {ts_refused}")
-        print("  where Trace or Synchronize fired -- the cells `untraced` or `unsynced` moves")
-        print(f"    {ts_fired} of {ts_cells} cells (Trace {ts_traced}, Synchronize {ts_synced})")
-        print(f"    cells whose branches, weights, notes or positions differ  {ts_fired_wrong}")
-        print(f"    worst cell difference there  {ts_worst:.3e}")
-    if args.frozen:
-        print("\n  beside a frozen Pokemon, every cell -- held branch by branch")
-        print(f"    {icy} of {cells} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {icy_wrong}")
-        print(f"    cells the port refused, filled in Python and not held  {icy_refused}")
-        print("  where a thaw fired -- the cells `unthawed` moves")
-        print(f"    {thawed} of {icy} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {thawed_wrong}")
-        print(f"    worst cell difference there  {thawed_worst:.3e}")
-    if args.choice_locked:
-        print("\n  beside a Choice lock, every cell -- held branch by branch")
-        print(f"    {lock_cells} of {cells} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {lock_wrong}")
-        print(f"    cells the port refused, filled in Python and not held  {lock_refused}")
-        print("  where IKA-179's lock fired -- the cells `unlocked` moves")
-        print(f"    {lock_fired} of {lock_cells} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {lock_fired_wrong}")
-        print(f"    worst cell difference there  {lock_worst:.3e}")
-    if blockers:
-        print("\n  beside a priority-blocking ability, cells that may use a priority move")
-        print(f"    {block_used} of {cells} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {block_wrong}")
-        print("  where the ability stopped one -- the cells `unblocked` moves")
-        print(f"    {blocked} of {block_used} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {blocked_wrong}")
-        print(f"    worst cell difference there  {blocked_worst:.3e}")
-    if args.hazards:
-        print("\n  where a hazard was used -- every one held branch by branch")
-        print(f"    {laid} of {cells} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {laid_wrong}")
-        print(f"      of which the side conditions agree, branch by branch  {laid_wrong_elsewhere}")
-        print(f"    cells the port refused, filled in Python and not held  {laid_refused}")
-        print("  where the placement fired -- the cells the user's side would move")
-        print(f"    {laid_fired} of {laid} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {laid_fired_wrong}")
-        print(f"    cells the port refused, not held  {laid_fired_refused}")
-        print(f"    cells that differ only in a paused branch, not compared  {laid_fired_paused}")
-        print(f"    worst cell difference there  {laid_worst:.3e}")
-    if veils:
-        print("\n  beside Good as Gold or Flower Veil, every cell -- held branch by branch")
-        print(f"    {veil_cells} of {cells} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {veil_wrong}")
-        print(f"    cells the port refused, filled in Python and not held  {veil_refused}")
-        for v in sorted(VEILS):
-            print(f"  where {v} fired -- the cells `unveiled('{v}')` moves")
-            print(f"    {veil_fired[v]} of {veil_stands[v]} cells beside it")
-            print(f"    cells whose branches, weights, notes or positions differ  "
-                  f"{veil_fired_wrong[v]}")
-        print(f"    worst cell difference there  {veil_worst:.3e}")
-    if debris:
-        print("\n  beside Toxic Debris, every cell -- held branch by branch")
-        print(f"    {debris_cells} of {cells} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {debris_wrong}")
-        print(f"    cells the port refused, filled in Python and not held  {debris_refused}")
-        print("  where IKA-173's rule fired -- the cells the old Toxic Debris moves")
-        print(f"    {debris_fired} of {debris_cells} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {debris_fired_wrong}")
-        print(f"    worst cell difference there  {debris_worst:.3e}")
-    if args.charging:
-        print("\n  with a charge -- every cell mid-charge, and the ones using a charging move")
-        print(f"    {charged} of {cells} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {charged_wrong}")
-        print("  where the stored target fired -- the cells `untargeted` moves")
-        print(f"    {aimed} of {charged} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {aimed_wrong}")
-        print(f"    cells with a paused branch, whose position is not compared  {aimed_paused}")
-        print(f"    worst cell difference there  {aimed_worst:.3e}")
-    if randomers:
-        print("\n  where a randomNormal move was used -- every one held branch by branch")
-        print(f"    {drew} of {cells} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {drew_wrong}")
-        print("  where the draw of the foe fired -- the cells `undrawn` moves")
-        print(f"    {drew_fired} of {drew} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {drew_fired_wrong}")
-        print(f"    cells with a paused branch, whose position is not compared  {drew_paused}")
-        print(f"    worst cell difference there  {drew_worst:.3e}")
-    if args.hammer:
-        print("\n  where Gigaton Hammer was used -- every one held branch by branch")
-        print(f"    {hammered} of {cells} cells")
-        print(f"    cells whose branches, weights, notes or positions differ  {hammered_wrong}")
-        print("  slots whose last move was the hammer (the menu is Python's)")
-        print(f"    {sum(len(v) for v in remembered.values())} slots, the menu drops it on {dropped}")
-        print(f"    offered there with `cantusetwice` taken out  {dropped_control}")
-    print(f"  python {python_seconds:.2f} s   rust {rust_seconds:.2f} s")
-    if rust_seconds > 0:
-        print(f"  end to end {python_seconds / rust_seconds:.1f}x")
-    failed = []
-    if worst > args.tolerance:
-        failed.append(f"worst cell difference {worst:.3e} > {args.tolerance:.0e}")
-    # Under every budget. Until IKA-151 the port had no "damage rolls stratified"
-    # reduction and a stratifying budget was let off; it now marks the same turns inexact.
-    if masks_differ:
-        failed.append(f"the exact mask differs on {mask_cells} cells of {masks_differ} nodes")
-    if used_wrong:
-        failed.append(f"{used_wrong} cells using {', '.join(sorted(using))} differ by branch")
-    if using and not broke:
-        failed.append("the effect fired in no cell, so agreeing here says nothing")
-    if quick_wrong:
-        failed.append(f"{quick_wrong} cells under {args.terrain} differ by branch")
-    if args.terrain and not stopped:
-        failed.append(f"{args.terrain} stopped nothing in any cell, so agreeing here says nothing")
-    if cured_wrong:
-        failed.append(f"{cured_wrong} cells under Salt Cure differ by branch")
-    if args.salt_cure and not cured_fired:
-        failed.append("the mod's Salt Cure fraction moved no cell, so agreeing here says nothing")
-    if surged_wrong:
-        failed.append(f"{surged_wrong} cells beside a Surge holder differ by branch")
-    if args.surge and not surged_fired:
-        failed.append("IKA-201's rules moved no cell, so agreeing here says nothing")
-    if block_wrong:
-        failed.append(f"{block_wrong} cells beside a blocking ability differ by branch")
-    if dazed_wrong:
-        failed.append(f"{dazed_wrong} cells beside a confused Pokemon differ by branch")
-    if args.confused and not dazed_fired:
-        failed.append("IKA-177's confusion moved no cell, so agreeing here says nothing")
-    if doll_wrong:
-        failed.append(f"{doll_wrong} cells beside a doll differ by branch")
-    if args.substitute and not doll_fired:
-        failed.append("IKA-180's Substitute moved no cell, so agreeing here says nothing")
-    if guard_wrong:
-        failed.append(f"{guard_wrong} cells under a confusion guard differ by branch")
-    if args.confusion_guard and not guard_fired:
-        failed.append("IKA-189's confusion guard moved no cell, so agreeing here says nothing")
-    if eject_wrong:
-        failed.append(f"{eject_wrong} cells with an ejecting holder differ by branch")
-    if args.eject and not eject_fired:
-        failed.append("IKA-191's switches moved no cell, so agreeing here says nothing")
-    if ts_wrong:
-        failed.append(f"{ts_wrong} cells beside Trace or Synchronize differ by branch")
-    if args.trace_sync and not ts_fired:
-        failed.append("IKA-203's Trace and Synchronize moved no cell, so agreeing here says nothing")
-    if icy_wrong:
-        failed.append(f"{icy_wrong} cells beside a frozen Pokemon differ by branch")
-    if args.frozen and not thawed:
-        failed.append("no thaw fired in any cell, so agreeing here says nothing")
-    if lock_wrong:
-        failed.append(f"{lock_wrong} cells beside a Choice lock differ by branch")
-    if args.choice_locked and not lock_fired:
-        failed.append("IKA-179's lock moved no cell, so agreeing here says nothing")
-    if blockers and not blocked:
-        failed.append("no blocking ability stopped anything in any cell, so agreeing here says nothing")
-    if laid_wrong:
-        failed.append(f"{laid_wrong} cells using a hazard differ by branch")
-    if charged_wrong:
-        failed.append(f"{charged_wrong} cells with a charge differ by branch")
-    if args.charging and not aimed:
-        failed.append("the stored target moved no cell, so agreeing here says nothing")
-    if drew_wrong:
-        failed.append(f"{drew_wrong} cells using a randomNormal move differ by branch")
-    if randomers and not drew_fired:
-        failed.append("drawing the foe moved no cell, so agreeing here says nothing")
-    if hammered_wrong:
-        failed.append(f"{hammered_wrong} cells using the hammer differ by branch")
-    if args.hammer and not (hammered and dropped):
-        failed.append("the hammer was used in no cell or dropped from no menu")
-    if args.hazards and not laid_fired:
-        failed.append("laying a hazard on the foe's side moved no cell, so agreeing here says nothing")
-    if debris_wrong:
-        failed.append(f"{debris_wrong} cells beside Toxic Debris differ by branch")
-    if debris and not debris_fired:
-        failed.append("the new Toxic Debris rule moved no cell, so agreeing here says nothing")
-    if veil_wrong:
-        failed.append(f"{veil_wrong} cells beside Good as Gold or Flower Veil differ by branch")
-    if veils and not any(veil_fired.values()):
-        failed.append("neither Good as Gold nor Flower Veil moved a cell, so agreeing here says nothing")
-    if failed:
-        print(f"\nFAIL ({args.budget}): " + "; ".join(failed))
+    outcomes = []
+    for number, (exe, tally) in enumerate(zip(exes, merged, strict=True)):
+        if len(exes) > 1:
+            print(f"\n== binary [{number + 1}] of {len(exes)}: {exe} ==")
+            emit(held[number], state[number])
+        lines, failed = summarize(tally, c)
+        for line in lines:
+            print(line)
+        if failed:
+            print(f"\nFAIL ({args.budget}): " + "; ".join(failed))
+        else:
+            print(f"\nOK ({args.budget})")
+        outcomes.append((lines, failed))
+    if len(exes) > 1:
+        side_by_side(exes, outcomes)
+    if any(failed for _lines, failed in outcomes):
         sys.exit(1)
-    print(f"\nOK ({args.budget})")
 
 
 if __name__ == "__main__":
