@@ -610,7 +610,8 @@ class _Turn:
     __slots__ = ("reg", "pos", "budget", "attacks", "events", "unmodelled",
                  "hurt_this_turn", "move_failed", "move_damage_total", "move_connected",
                  "acted", "actions_remaining", "self_switch_pending",
-                 "pending_secondaries", "current_actor", "wipe_order", "acts")
+                 "pending_secondaries", "current_actor", "wipe_order", "acts",
+                 "move_start_hp", "move_hit")
 
     def __init__(
         self,
@@ -662,6 +663,11 @@ class _Turn:
         #: Where each action's events begin: `(index into events, label)`. See
         #: :attr:`Branch.acts`, which is where this ends up.
         self.acts: list[tuple[int, str]] = []
+        #: The damaging move resolving now: every active Pokemon's HP before it, and the
+        #: targets it reached. What Eject Button, Red Card and Emergency Exit read once the
+        #: hits are over (IKA-191). Never read across actions.
+        self.move_start_hp: dict[tuple[int, int], int] | None = None
+        self.move_hit: set[tuple[int, int]] = set()
 
     def clone(self) -> _Turn:
         fresh = _Turn(self.reg, self.pos.copy(), self.budget, self.attacks)
@@ -678,6 +684,8 @@ class _Turn:
         fresh.pending_secondaries = list(self.pending_secondaries)
         fresh.current_actor = self.current_actor
         fresh.acts = list(self.acts)
+        fresh.move_start_hp = self.move_start_hp
+        fresh.move_hit = set(self.move_hit)
         return fresh
 
     # -- lookups ------------------------------------------------------------
@@ -1226,7 +1234,9 @@ _MERGE_COMPARED_STATE = (
 #: back out of the trace; `show_game` prints it and the tests read it. `unmodelled` is a
 #: set of reports and is unioned rather than compared, because a report is about the
 #: resolver's coverage, not about the state. `reg` is compared by identity below.
-_MERGE_IGNORED_STATE = ("events", "acts", "unmodelled")
+#: `move_start_hp` and `move_hit` belong to the move resolving now and are set afresh by
+#: the next one, so between actions, where branches merge, they are stale (IKA-191).
+_MERGE_IGNORED_STATE = ("events", "acts", "unmodelled", "move_start_hp", "move_hit")
 
 
 def _action_key(action: QueuedAction) -> tuple:
@@ -1515,7 +1525,7 @@ def _run_queue(reg: Regulation, start: list[_Live], budget: Budget) -> TurnResul
     out_branches: list[Branch] = []
     unmodelled: set[str] = set()
     for item in finished:
-        _residuals(reg, item.turn)
+        _residuals_then_emergency_exit(reg, item.turn)
         _clear_trapped(item.turn.pos)
         item.turn.pos.turn += 1
         out_branches.append(
@@ -2714,6 +2724,7 @@ def _use_move(
         return [(1.0, turn, "")]
     turn.move_damage_total = 0
     turn.move_connected = False
+    _begin_move_watch(turn)
     branches: list[Outcome] = [(1.0, turn, "")]
     for target in targets:
         expanded: list[Outcome] = []
@@ -3804,6 +3815,7 @@ def _hit_target(
                             )
                         total += dealt_now
                         reached = True
+                        state.move_hit.add(target)
                         _after_hit(
                             state, action, move, target, dealt_now, budget,
                             # Disguise's `onEffectiveness` makes the absorbed hit neutral,
@@ -4555,6 +4567,7 @@ def _after_move(turn: _Turn, action: QueuedAction, move: Move) -> None:
     # damage step itself -- before Rocky Helmet (IKA-161). See `_after_hit`.
     if raw.get("recoil") and total > 0 and attacker is not None and attacker.ability != "rockhead":
         turn.deal_damage(*me, _round_fraction(total, raw["recoil"]), reason="recoil")
+    _after_move_secondary_switches(turn, action, move)
     # A move Sheer Force stripped of its secondaries skips `AfterMoveSecondarySelf` as a
     # whole (`useMoveInner`, `!(move.hasSheerForce && pokemon.hasAbility('sheerforce'))`),
     # so no Life Orb recoil and no Shell Bell; `onModifyMove` also deletes `move.self`.
@@ -4567,6 +4580,8 @@ def _after_move(turn: _Turn, action: QueuedAction, move: Move) -> None:
     # move dealing under eight damage heals nothing.
     if attacker is not None and attacker.item == "shellbell" and total >= 8 and not sheer:
         turn.heal(*me, total // 8, reason="shellbell")
+    if not sheer:
+        _user_exits_if_crossed(turn, action, move)
 
     self_effect = {} if sheer else (raw.get("self") or {})
     if attacker is not None and not attacker.fainted and turn.move_connected:
@@ -4741,6 +4756,10 @@ def _mark_self_switch(turn: _Turn, action: QueuedAction) -> None:
     mon = turn.mon_at(action.side, action.slot)
     if mon is None or mon.fainted:
         return
+    # Red Card's drag runs first and `clearVolatile` drops the U-turn's `switchFlag` with
+    # the Pokemon it belonged to (IKA-191).
+    if mon.has_volatile("pendingforceswitch"):
+        return
     bench = [p for p in turn.pos.sides[action.side].pokemon if not p.fainted and not p.is_active]
     if not bench:
         return
@@ -4764,6 +4783,222 @@ def _mark_force_switch(turn: _Turn, target: tuple[int, int]) -> None:
     turn.add_volatile(*target, "pendingforceswitch")
     turn.log(f"{turn.name(*target)} is forced out")
     turn.unmodelled.add("forceSwitch (replacement is drawn at random)")
+
+
+# ---------------------------------------------------------------------------
+# Eject Button, Red Card, Emergency Exit and Wimp Out (IKA-191)
+# ---------------------------------------------------------------------------
+
+#: Abilities that switch their holder out when it drops to half its HP or below. The
+#: champions mod gives both the same `onEmergencyExit` (data/mods/champions/abilities.ts),
+#: which no longer clears anyone else's `switchFlag` (57ecb348b, IKA-164).
+EMERGENCY_EXIT_ABILITIES = frozenset({"emergencyexit", "wimpout"})
+
+
+def _active_hp(turn: _Turn) -> dict[tuple[int, int], int]:
+    """Every conscious active Pokemon's HP, by slot."""
+    out: dict[tuple[int, int], int] = {}
+    for side in range(2):
+        for slot in range(len(turn.pos.sides[side].active)):
+            mon = turn.mon_at(side, slot)
+            if mon is not None and not mon.fainted:
+                out[(side, slot)] = mon.hp
+    return out
+
+
+def _begin_move_watch(turn: _Turn) -> None:
+    """What a damaging move starts from: the HP Emergency Exit compares against."""
+    turn.move_start_hp = _active_hp(turn)
+    turn.move_hit = set()
+
+
+def _can_switch(turn: _Turn, side: int) -> bool:
+    """`battle.canSwitch(side)`: a conscious Pokemon on the bench."""
+    return any(not p.fainted and not p.is_active for p in turn.pos.sides[side].pokemon)
+
+
+def _crossed_half(mon: Pokemon, before: int) -> bool:
+    """`hp && hp <= maxhp / 2 && before > maxhp / 2`, in Showdown's real division."""
+    return mon.hp > 0 and 2 * mon.hp <= mon.maxhp and 2 * before > mon.maxhp
+
+
+def _switch_flagged(mon: Pokemon) -> bool:
+    """Whether the Pokemon's `switchFlag` or `forceSwitchFlag` is up."""
+    return mon.has_volatile("pendingselfswitch") or mon.has_volatile("pendingforceswitch")
+
+
+def _emergency_exit(turn: _Turn, slot: tuple[int, int], *, mid_turn: bool = True) -> None:
+    """The champions mod's `onEmergencyExit`, for a holder that has just crossed half.
+
+        if (!this.canSwitch(target.side) || target.forceSwitchFlag || target.switchFlag) return;
+        target.switchFlag = true;
+
+    The flag is the same one U-turn sets, so it is answered the same way: mid-turn it
+    suspends the turn for the holder's player to choose; after the residual phase it is
+    owed with the faint replacements, which is the one request Showdown makes there.
+    """
+    mon = turn.mon_at(*slot)
+    if mon is None or mon.fainted or mon.ability not in EMERGENCY_EXIT_ABILITIES:
+        return
+    if not _can_switch(turn, slot[0]) or _switch_flagged(mon):
+        return
+    turn.add_volatile(*slot, "pendingselfswitch")
+    if mid_turn:
+        turn.self_switch_pending = True
+    turn.log(f"{turn.name(*slot)} must switch out ({mon.ability})")
+
+
+def _exits_if_crossed(turn: _Turn, slot: tuple[int, int], *, flagged: bool = False) -> None:
+    """Emergency Exit for a slot whose HP crossed half since the move began."""
+    before = (turn.move_start_hp or {}).get(slot)
+    mon = turn.mon_at(*slot)
+    if before is None or mon is None or flagged or not _crossed_half(mon, before):
+        return
+    _emergency_exit(turn, slot)
+
+
+def _user_self_switches(turn: _Turn, move: Move) -> bool:
+    """U-turn's `switchFlag`: set in `moveHit` when the move did anything, before any of
+    the checks below run. `_mark_self_switch` writes it later, at the end of the move."""
+    return bool(move.raw.get("selfSwitch")) and turn.move_connected
+
+
+def _by_speed(turn: _Turn, slots: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Holders in the order `runEvent` sorts their handlers: fastest first (Trick Room
+    reversed), a tie broken as `residual_order` breaks one and reported."""
+    if len(slots) < 2:
+        return slots
+    state = turn.field()
+    keyed: list[tuple[int, str, int, int]] = []
+    for side, slot in slots:
+        fighter = turn.battler_at(side, slot)
+        conditions = frozenset(c.id for c in turn.pos.sides[side].side_conditions)
+        speed = int(effective_speed(turn.reg, fighter, state, conditions)[0]) if fighter else 0
+        if turn.pos.field.trick_room:
+            speed = 10000 - speed
+        mon = turn.mon_at(side, slot)
+        keyed.append((-speed, mon.species if mon else "", slot, side))
+    if len({k[0] for k in keyed}) != len(keyed):
+        turn.unmodelled.add("item speed tie (Showdown breaks it at random)")
+    keyed.sort()
+    return [(side, slot) for _speed, _species, slot, side in keyed]
+
+
+def _after_move_secondary_switches(turn: _Turn, action: QueuedAction, move: Move) -> None:
+    """Everything between a damaging move's recoil and its Life Orb that switches a
+    Pokemon out (vendor/pokemon-showdown/data/mods/champions/scripts.ts
+    `hitStepMoveHitLoop`, data/mods/champions/items.ts, data/items.ts):
+
+    1. The user's Emergency Exit, for Rough Skin, Rocky Helmet (`DamagingHit`) or recoil
+       taking it across half. A U-turn user's flag is already up, so it never fires.
+    2. `afterMoveSecondaryEvent`, which Sheer Force skips: Eject Button (priority 2) on a
+       target the move reached, unless any active Pokemon's `switchFlag === true` -- U-turn's
+       is the move id, so a U-turn does not stop it, and the champions mod no longer clears
+       the attacker's flag (aa6d5f085). Then Red Card (priority 0), which drags the
+       attacker out at random: the forced-switch mark Dragon Tail leaves (IKA-191).
+    3. Each target's Emergency Exit, also skipped by Sheer Force.
+    """
+    if turn.move_start_hp is None:
+        return
+    me = (action.side, action.slot)
+    attacker = turn.mon_at(*me)
+    _exits_if_crossed(turn, me, flagged=_user_self_switches(turn, move))
+    if move.category == "Status" or _sheer_forced(attacker, move):
+        return
+    hit = sorted(t for t in turn.move_hit if t != me)
+
+    def holding(item: str) -> list[tuple[int, int]]:
+        return [
+            t for t in hit
+            if (m := turn.mon_at(*t)) is not None and not m.fainted and m.item == item
+        ]
+
+    for target in _by_speed(turn, holding("ejectbutton")):
+        if any(
+            (m := turn.mon_at(side, slot)) is not None and m.has_volatile("pendingselfswitch")
+            for side in range(2)
+            for slot in range(len(turn.pos.sides[side].active))
+        ):
+            break
+        holder = turn.mon_at(*target)
+        if not _can_switch(turn, target[0]) or holder.has_volatile("pendingforceswitch"):
+            continue
+        turn.consume_item(*target, reason="ejectbutton")
+        turn.add_volatile(*target, "pendingselfswitch")
+        turn.self_switch_pending = True
+        turn.log(f"{turn.name(*target)} must switch out (ejectbutton)")
+
+    for target in _by_speed(turn, holding("redcard")):
+        user = turn.mon_at(*me)
+        if user is None or user.fainted or not user.is_active:
+            break
+        if not _can_switch(turn, me[0]) or user.has_volatile("pendingforceswitch"):
+            break
+        if turn.mon_at(*target).has_volatile("pendingforceswitch"):
+            continue
+        turn.consume_item(*target, reason="redcard")
+        _mark_force_switch(turn, me)
+        # The drag replaces the user before any switch request is made, so an Emergency
+        # Exit it took above is answered by the drag, not by its player.
+        user.volatiles = [v for v in user.volatiles if v.id != "pendingselfswitch"]
+        turn.self_switch_pending = any(any(f) for f in self_switches_needed(turn.pos))
+
+    for target in hit:
+        _exits_if_crossed(turn, target)
+
+
+def _user_exits_if_crossed(turn: _Turn, action: QueuedAction, move: Move) -> None:
+    """The user's Emergency Exit after `AfterMoveSecondarySelf` (Life Orb), which
+    `useMoveInner` checks again; the caller skips it under Sheer Force, as Showdown does."""
+    if turn.move_start_hp is None or move.category == "Status":
+        return
+    _exits_if_crossed(
+        turn, (action.side, action.slot), flagged=_user_self_switches(turn, move)
+    )
+
+
+def _residuals_then_emergency_exit(reg: Regulation, turn: _Turn) -> None:
+    """The residual phase, then `runAction`'s check on every Pokemon that was active at its
+    start (`residualPokemon`): one that crossed half in it has its `switchFlag` set, and
+    the request after the turn carries it with the faint replacements (IKA-191)."""
+    before = _active_hp(turn)
+    _residuals(reg, turn)
+    for slot, hp in before.items():
+        mon = turn.mon_at(*slot)
+        if mon is not None and _crossed_half(mon, hp):
+            _emergency_exit(turn, slot, mid_turn=False)
+
+
+def _without_replaced(
+    remaining: Sequence[QueuedAction], placed: list[tuple[int, int, np.ndarray]]
+) -> list[QueuedAction]:
+    """The queue after a mid-turn replacement: an action queued for the Pokemon that left
+    goes with it (`runAction` skips a Pokemon that is no longer active), so an Eject Button
+    holder that had not moved yet does not move, and neither does its replacement."""
+    gone = {(side, slot) for side, slot, _speed in placed}
+    return [q for q in remaining if (q.side, q.slot) not in gone]
+
+
+def _suspended_again(turn: _Turn, remaining: list[QueuedAction]) -> TurnResult:
+    """A resumed turn in which the other side still owes a replacement: it is asked before
+    the rest of the queue runs. Showdown asks both at once (a U-turn into an Eject Button);
+    one after the other is the nearest shape the self-switch node has, and
+    `resume_alternatives` reports it."""
+    return TurnResult(
+        branches=[],
+        exact=True,
+        unmodelled=tuple(sorted(turn.unmodelled)),
+        suspended=(
+            SuspendedTurn(
+                probability=1.0,
+                position=turn.pos,
+                events=list(turn.events),
+                acts=list(turn.acts),
+                _turn=turn,
+                _remaining=tuple(remaining),
+            ),
+        ),
+    )
 
 
 def _round_fraction(amount: int, ratio: list[int] | tuple[int, int]) -> int:
@@ -4991,7 +5226,12 @@ def resume_turn(
         _on_switch_in(reg, turn, side_index, slot)
 
     turn.self_switch_pending = any(any(f) for f in self_switches_needed(turn.pos))
-    result = _run_queue(reg, [_Live(1.0, turn, list(paused._remaining))], turn.budget)
+    remaining = _without_replaced(paused._remaining, placed)
+    result = (
+        _suspended_again(turn, remaining)
+        if turn.self_switch_pending
+        else _run_queue(reg, [_Live(1.0, turn, remaining)], turn.budget)
+    )
     if unmodelled:
         result.unmodelled = tuple(sorted(set(result.unmodelled) | unmodelled))
     for branch in result.branches:

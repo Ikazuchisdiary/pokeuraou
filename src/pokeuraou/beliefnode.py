@@ -55,7 +55,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from . import timing
-from .actions import SideAction
+from .actions import MoveAction, SideAction
 from .position import Position
 from .regulation import Regulation
 from .resolve import (
@@ -92,11 +92,18 @@ def reaches_bench(
     ours: Sequence[SideAction],
     theirs: Sequence[SideAction],
     hidden: dict[int, tuple[int, ...]],
+    position: Position | None = None,
 ) -> np.ndarray:
     """(rows, cols) mask: cells where a hidden Pokemon could be put on the field.
 
     Conservative in the direction that costs time rather than correctness -- a cell wrongly
     marked here is resolved per completion, which is what every cell used to do.
+
+    With `position`, a held item's path too (IKA-191): a damaging move into a Red Card drags
+    the *user's* side in, so a side with a holder on the field spoils every cell where the
+    other side attacks, for the attacker's hidden slots. Eject Button and Emergency Exit
+    put the holder's own bench in through a mid-turn replacement, and a cell that suspends
+    is already dirty (`filled.folded`), so they need no row here.
     """
     rows, cols = len(ours), len(theirs)
     mask = np.zeros((rows, cols), dtype=bool)
@@ -104,6 +111,9 @@ def reaches_bench(
     theirs_hidden = set(hidden.get(1, ()))
     row_phazes = [_phazes(reg, action) for action in ours]
     col_phazes = [_phazes(reg, action) for action in theirs]
+    carded = [_red_card_on_field(position, side) for side in (0, 1)]
+    row_carded = [carded[1] and _attacks(reg, action) for action in ours]
+    col_carded = [carded[0] and _attacks(reg, action) for action in theirs]
     # `switch_indices` is 1-based, matching the choice string Showdown reads; `Pokemon.slot`
     # and therefore every hidden slot is 0-based. Comparing them directly marked the wrong
     # column dirty and shared the right one, which the equality test caught as nine cells
@@ -125,13 +135,35 @@ def reaches_bench(
                 # the cell whichever side played it.
                 or (row_phazes[i] and theirs_hidden)
                 or (col_phazes[j] and ours_hidden)
+                or (row_carded[i] and ours_hidden)
+                or (col_carded[j] and theirs_hidden)
             )
     return mask
 
 
 def _phazes(reg: Regulation, action: SideAction) -> bool:
-    choice = action.to_choice()
-    return any(part in PHAZING_MOVES for part in choice.replace(",", " ").split())
+    # By the move's id: the choice string names a move by its index ("move 2 1"), so
+    # reading PHAZING_MOVES off it never matched anything (IKA-191).
+    return any(isinstance(s, MoveAction) and s.move_id in PHAZING_MOVES for s in action.slots)
+
+
+def _attacks(reg: Regulation, action: SideAction) -> bool:
+    """Whether the action uses a damaging move -- what a Red Card answers."""
+    return any(
+        isinstance(s, MoveAction)
+        and (move := reg.moves.get(s.move_id)) is not None
+        and move.category != "Status"
+        for s in action.slots
+    )
+
+
+def _red_card_on_field(position: Position | None, side: int) -> bool:
+    if position is None:
+        return False
+    return any(
+        mon is not None and not mon.fainted and mon.item == "redcard"
+        for mon in position.sides[side].active_pokemon()
+    )
 
 
 # Its own Python -- the copies per completion, the span loop, the folds -- had no stage and
@@ -198,7 +230,7 @@ def belief_payoffs(
 
     _note_port_rule([scorer], filled)
 
-    dirty = reaches_bench(reg, row, col, hidden)
+    dirty = reaches_bench(reg, row, col, hidden, position)
     for i, j, _root in filled.folded:
         dirty[i, j] = True
     # A refused cell has no span and no fold, so unless it is dirty nothing ever writes it

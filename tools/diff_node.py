@@ -197,6 +197,14 @@ eighth) by position in turn. Every cell is held branch by branch; the cells `uns
 doll a mark and Substitute free, as before IKA-180) moves are counted, and each part alone:
 the use (the HP, the refusals) and the doll (the hits, the status moves, Intimidate).
 
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --eject
+
+`--eject` (IKA-191) hands out, by position in turn, Eject Button, Emergency Exit, Wimp Out
+or Red Card to every Pokemon on the field -- the recorded M-B games have none of them.
+Every cell is held branch by branch; the cells `uneject` (none of the four doing anything)
+moves are counted by what was handed out. A Red Card that fires is refused by the port, as
+a forceSwitch move is, so those cells count as refused and are filled in Python.
+
 The budget, and the second invocation that goes with it (IKA-146):
 
     uv run python tools/diff_node.py --scenario examples/scenario-turn5.json --budget fast --limit 0
@@ -912,6 +920,56 @@ class unsubbed:  # noqa: N801 - read as a phrase at the call site
         ) = self.real
 
 
+#: What --eject hands out, by position in turn (IKA-191): (kind, id).
+EJECT_KINDS = (
+    ("item", "ejectbutton"),
+    ("ability", "emergencyexit"),
+    ("ability", "wimpout"),
+    ("item", "redcard"),
+)
+
+
+def hand_out_eject(reg, pos: Position, index: int) -> str:  # noqa: ANN001
+    """For --eject: one of `EJECT_KINDS`, by position in turn, on every Pokemon on the
+    field -- an item not over a mega stone (as `give`), an ability on anyone. Returns it."""
+    kind, eid = EJECT_KINDS[index % len(EJECT_KINDS)]
+    for side in pos.sides:
+        for mon in side.active_pokemon():
+            if mon is None or mon.fainted:
+                continue
+            if kind == "ability":
+                mon.ability = eid
+            elif (mon.item or "") not in reg.mega_map:
+                mon.item = mon.base_item = eid
+    return eid
+
+
+class uneject:  # noqa: N801 - read as a phrase at the call site
+    """Python as before IKA-191, the control for --eject: nothing after the hits switches
+    anyone out, and the residual phase is only the residual phase."""
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = (
+            resolve_mod._after_move_secondary_switches,
+            resolve_mod._user_exits_if_crossed,
+            resolve_mod._residuals_then_emergency_exit,
+        )
+        resolve_mod._after_move_secondary_switches = lambda turn, action, move: None
+        resolve_mod._user_exits_if_crossed = lambda turn, action, move: None
+        resolve_mod._residuals_then_emergency_exit = resolve_mod._residuals
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        (
+            resolve_mod._after_move_secondary_switches,
+            resolve_mod._user_exits_if_crossed,
+            resolve_mod._residuals_then_emergency_exit,
+        ) = self.real
+
+
 class unchanged:  # noqa: N801 - read as a phrase at the call site
     """The control for `--using`: each kind of move named has its effect taken out."""
 
@@ -1561,6 +1619,13 @@ def main() -> None:
         "`unsubbed` moves",
     )
     ap.add_argument(
+        "--eject",
+        action="store_true",
+        help="hand Eject Button, Emergency Exit, Wimp Out or Red Card to every Pokemon on "
+        "the field, by position in turn, hold every cell to the port branch by branch, and "
+        "count where IKA-191's switches fired: the cells `uneject` moves",
+    )
+    ap.add_argument(
         "--toxic-debris",
         action="store_true",
         help="keep positions with Toxic Debris on the field, hold every cell to the port "
@@ -1746,6 +1811,11 @@ def main() -> None:
     if args.confusion_guard:
         guards = Counter(guard_confusion(reg, pos, index) for index, pos in enumerate(positions))
         print(f"Confuse Ray taught and a confusion guard put on: {dict(guards)}")
+    ejected_by: dict[int, str] = {}
+    if args.eject:
+        for index, pos in enumerate(positions):
+            ejected_by[id(pos)] = hand_out_eject(reg, pos, index)
+        print(f"handed out on the field, by position: {dict(Counter(ejected_by.values()))}")
     if args.salt_cure:
         salted = sum(salt(pos) for pos in positions)
         print(f"Salt Cure put on {salted} Pokemon on the field")
@@ -1828,6 +1898,10 @@ def main() -> None:
     dazed_worst = 0.0
     # Under a confusion guard, every cell; and where IKA-189's rule moved the answer.
     guard_cells = guard_wrong = guard_refused = guard_fired = guard_fired_wrong = 0
+    eject_cells = eject_wrong = eject_refused = eject_fired = eject_fired_wrong = 0
+    eject_fired_by: Counter = Counter()
+    eject_refused_by: Counter = Counter()
+    eject_worst = 0.0
     guard_by_refusal = guard_by_roll = 0
     guard_worst = 0.0
     # Beside a doll, every cell; and where IKA-180's Substitute moved the answer.
@@ -2312,6 +2386,39 @@ def main() -> None:
                         shown += 1
                         print(f"  cell {(i, j)} beside a doll: {wrong[0][:200]}")
 
+        if args.eject:
+            node = rustnode.node_for(reg)
+            handed = ejected_by.get(id(pos), "?")
+            for i, a in enumerate(row):
+                for j, b in enumerate(col):
+                    eject_cells += 1
+                    here = resolve_turn(reg, pos, [a, b], budget=budget)
+                    with uneject():
+                        control = resolve_turn(reg, pos, [a, b], budget=budget)
+                    wrong = (
+                        ["no warm process"]
+                        if node is None
+                        else branch_differences(node, reg, pos, a, b, here, budget)
+                    )
+                    refused_here = wrong == ["the port refused the turn"]
+                    eject_refused += refused_here
+                    eject_refused_by[handed] += refused_here
+                    if refused_here:
+                        wrong = []
+                    eject_wrong += bool(wrong)
+                    if differ(outcome(here), outcome(control)):
+                        eject_fired += 1
+                        eject_fired_by[handed] += 1
+                        eject_fired_wrong += bool(wrong)
+                        for index in range(len(evaluators)):
+                            eject_worst = max(
+                                eject_worst,
+                                abs(float(got[index][i, j] - expected[index][i, j])),
+                            )
+                    if wrong and shown < 5:
+                        shown += 1
+                        print(f"  cell {(i, j)} with {handed} on the field: {wrong[0][:200]}")
+
         if args.frozen:
             node = rustnode.node_for(reg)
             for i, a in enumerate(row):
@@ -2484,6 +2591,18 @@ def main() -> None:
         print(f"      a refusal alone moves  {guard_by_refusal}; the roll alone  {guard_by_roll}")
         print(f"    cells whose branches, weights, notes or positions differ  {guard_fired_wrong}")
         print(f"    worst cell difference there  {guard_worst:.3e}")
+    if args.eject:
+        print("\n  with an Eject Button, Emergency Exit, Wimp Out or Red Card on the field")
+        print(f"    {eject_cells} of {cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {eject_wrong}")
+        print(
+            f"    cells the port refused, filled in Python and not held  {eject_refused}  "
+            f"{dict(eject_refused_by)}"
+        )
+        print("  where a switch fired -- the cells `uneject` moves")
+        print(f"    {eject_fired} of {eject_cells} cells  {dict(eject_fired_by)}")
+        print(f"    cells whose branches, weights, notes or positions differ  {eject_fired_wrong}")
+        print(f"    worst cell difference there  {eject_worst:.3e}")
     if args.frozen:
         print("\n  beside a frozen Pokemon, every cell -- held branch by branch")
         print(f"    {icy} of {cells} cells")
@@ -2592,6 +2711,10 @@ def main() -> None:
         failed.append(f"{guard_wrong} cells under a confusion guard differ by branch")
     if args.confusion_guard and not guard_fired:
         failed.append("IKA-189's confusion guard moved no cell, so agreeing here says nothing")
+    if eject_wrong:
+        failed.append(f"{eject_wrong} cells with an ejecting holder differ by branch")
+    if args.eject and not eject_fired:
+        failed.append("IKA-191's switches moved no cell, so agreeing here says nothing")
     if icy_wrong:
         failed.append(f"{icy_wrong} cells beside a frozen Pokemon differ by branch")
     if args.frozen and not thawed:

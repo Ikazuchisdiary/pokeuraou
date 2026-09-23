@@ -13937,3 +13937,128 @@ GPU が買うのは 8% だけで、費用はワーカーの CPU。24 ワーカ�
 
 機械時間: pytest 1 コア（83 s・76 s・109 s・47 s・194 s ほか）、対照 62 s、cargo build --release 8 コア 22 s、試走 1 コア（11 s・12 s・224 s・21 s）、
 費用の測定 1 コア 35 s。すべて heavy.py（--agent IKA-81）。GPU は 35 s の費用測定で CUDA 側を 1 回使っただけ。
+
+## 9/24 — IKA-191: だっしゅつボタン・レッドカード・ききかいひ・にげごしが交代を起こす —— オラクル 10 局面で Python・port とも Showdown と一致、diff_node の発火 3,967 セルで新 exe 0・旧 exe 3,967 違い。記録（M-B）には 0
+
+ワーカー、基点 master 713f85d、ブランチ `ika-191-eject-items`。一時ファイルは `C:/tmp/ika191/`。
+
+### 1. Showdown の定義（a5df827、champions mod）
+
+* だっしゅつボタン（`mods/champions/items.ts`、優先度 2 は基本の `data/items.ts` から）: `onAfterMoveSecondary`。
+  他のポケモンの変化技でない技が届いた持ち主が立っていて、`canSwitch`・強制交代の旗なし・場の誰の `switchFlag === true` も
+  なし → 道具を使い持ち主の `switchFlag = true`。mod は基本の `source.switchFlag = false`（攻撃側の交代の取り消し）を消した
+  （aa6d5f0、IKA-164）。とんぼがえりの旗は技の id で `true` ではないので止めない
+* レッドカード（`data/items.ts`、mod の上書きなし、優先度 0）: 攻撃側が立っていて場にいて交代でき、どちらにも強制交代の
+  旗がない → カードを使い、`DragOut` が通れば攻撃側の `forceSwitchFlag`。行動の終わりに `dragIn` で控えから乱択（要求なし）
+* ききかいひ・にげごし（`mods/champions/abilities.ts`、同じ本体）: `canSwitch` で、強制交代・交代の旗が無ければ
+  `switchFlag = true`。他の旗は消さない（57ecb34）。呼ぶ所（`mods/champions/scripts.ts` ほか）: 対象は
+  `afterMoveSecondaryEvent` の後（技の総ダメージで半分を跨いだとき）、攻撃側は `DamagingHit`（さめはだ・ゴツゴツメット）の後・
+  反動の後・`AfterMoveSecondarySelf`（いのちのたま）の後、全員は残りの段（`residualPokemon`）の後、`runSwitch`（設置技）の後
+* ちからずく: 追加効果を消した技は `afterMoveSecondaryEvent`（ボタン・カード）と対象のききかいひ、自分のいのちのたまの後の
+  確かめを飛ばす。追加効果の無い技（アクアジェット）は飛ばさない
+* 途中の `switchFlag` は `runAction` の終わりで交代の要求になる。交代で下がったポケモンの残りの行動は捨てられ、交代先は動かない
+* とんぼがえり → だっしゅつボタンは両方の側に同時に要求（IKA-167 の `test_eject_selfswitch.py`）
+
+### 2. 直し（Python と port で同じ形、既存行の書き換えは呼び出し 1 行ずつ）
+
+* `resolve.py` / `moves.rs` に新しい塊（`_after_move_secondary_switches`・`_user_exits_if_crossed`・`_emergency_exit`・
+  `_residuals_then_emergency_exit`・`_without_replaced`・`_suspended_again` と同名の Rust）。`_Turn`/`Turn` に技の間だけの
+  `move_start_hp`・`move_hit`（併合では比べない。`_MERGE_IGNORED_STATE`・`same_turn` に理由つき）
+* 呼ぶ所: `_use_move` の対象ループ前、`_hit_target` の `reached = True`、`_after_move` の反動の直後といのちのたま・
+  かいがらのすずの後、`_run_queue` の残りの段の呼び出し
+* 交代の要求は既存の `pendingselfswitch`（とんぼがえりと同じ中断）。残りの段のききかいひは終わった枝に付き、ひんしの交代と
+  一緒に払う。レッドカードはドラゴンテールと同じ `_mark_force_switch`（控えは引かない、unmodelled に書く）で、port は
+  フォースチェンジの技と同じく拒否する（`redcard (replacement is drawn at random)`）
+* `_mark_self_switch`: 強制交代の印がある使い手には付けない（カードの引き出しがとんぼがえりの旗を持っていく）
+* `resume_turn`: 交代した枠のキューの残りを捨てる（遅い持ち主の剣の舞を交代先が使っていた）。まだ別の側が交代を払う
+  なら、キューを進めずにもう一度中断する（とんぼがえり＋ボタン）。`resume_alternatives` は従来どおり側 0 を先に選ばせ、
+  `simultaneous mid-turn replacements` を書く。**同時の要求を順番に聞く近似**（側 1 が側 0 の選択を見てから選ぶ）
+* `effects.all_modelled_abilities` に emergencyexit・wimpout。`port_coverage --rust`・`--rust-modelled` で inert.rs から 4 id
+  が消え modelled.rs に 2 つ。`item_handled` に ejectbutton・redcard、`ability_handled` に emergencyexit・wimpout
+* port の `resume_turn` に Python と同じ「払うべき枠に pass」の注を足した（同時の要求でだけ出る）
+* `beliefnode.reaches_bench(…, position)`: レッドカードの持ち主がいる側を攻撃する行動は、攻撃側の未公開の控えに届く。
+  ボタン・ききかいひは中断するので `filled.folded` で既に汚れる（行は足さない）。**ついでに見つけた**: `_phazes` は選択の
+  文字列（`move 2 1`）を技の id と比べていて一度も真にならなかった。`move_id` で読むように直した（ほえる等は port が拒否
+  するので汚れていて、答えは変わらない）
+
+### 3. オラクル（`tests/test_eject_items.py`、M-C、固定方策）
+
+```
+  局面                                     Showdown                 旧 Python  新 Python  旧 exe  新 exe
+  eject-button（ウッドハンマー）            p2a に交代要求・道具なし   落ち       通る       落ち    通る
+  red-card                                 p1a が drag・要求なし      落ち       通る       落ち    通る（拒否）
+  emergency-exit（207→45%）                p2a に交代要求             落ち       通る       落ち    通る
+  emergency-exit-second-hit（71→43%）      p2a に交代要求             落ち       通る       落ち    通る
+  sheer-force-without-secondaries（アクアジェット）p2a に交代要求      落ち       通る       落ち    通る
+  emergency-exit-in-the-residual（すなあらし 98→87/182）ターン後に p2a  落ち       通る       落ち    通る
+  control-first-hit-stays-above-half（71%）なし                      通る       通る       通る    通る
+  control-sheer-force-crunch-into-eject-button  なし（道具は残る）     通る       通る       通る    通る
+  control-sheer-force-crunch-into-emergency-exit なし                  通る       通る       通る    通る
+  control-sand-above-half                   なし                      通る       通る       通る    通る
+  持ち主の剣の舞は交代先が使わない           p2a の技なし・ドドゲザン無補正  落ち     通る
+  とんぼがえり→ボタン: 側 0、続けて側 1       両側に要求                落ち       通る
+  その局面の 4×3 の行列（port と Python）                                               落ち    通る（1e-12）
+  reaches_bench のカード・ドラゴンテール                                 （新しい引数）   通る
+```
+
+旧 Python は master の src（`git archive`）、旧 exe は基点の release（sha256 88b3ccde…）。事実のテスト 10 本は直す前も通る。
+
+### 4. diff_node（`--eject`、持ち主を位置ごとに ejectbutton / emergencyexit / wimpout / redcard、対照 `uneject`）
+
+```
+                                    セル    発火（uneject が動かす）           枝ごとに違う  最悪差     拒否
+  w12 20 局面 matrix  新 exe         8,760   3,967（ボタン 1,525・EE 1,027・にげごし 1,311・カード 104）  0   3.3e-16   104（全部カード）
+  w12 20 局面 matrix  旧 exe         8,760   3,967                              5,844（発火 3,967 全部） 4.2e-01  0     FAIL
+  w12 20 局面 fast    新 exe         8,760   4,175                              0             3.3e-16    104
+  gen11L 20 局面 matrix 新 exe       9,778   5,231                              0             6.7e-16    2,100（全部カード）
+  M-C scenario-turn5 --limit 0 新    4,576   2,576（ボタン）                    0             2.2e-16    0
+  同・両先発にとんぼがえり 新        4,576   2,723                              0             2.2e-16    0
+  同・両先発にとんぼがえり 旧        4,576   2,723                              1,533         1.0e-01    0     FAIL
+  null（w12、--eject なし）          8,670   —                                  —             3.3e-16    0     OK
+```
+
+旧 exe のとんぼがえり局面で枝ごとの違いが発火の 1,533/2,723 なのは、`branch_differences` が中断の重みしか比べず、中断の
+中身（誰が払うか）を比べないから。その差は行列の値（最悪 0.10）に出る。
+
+### 5. 記録とプールで該当する数
+
+```
+  記録 w12（25 ファイル）・gen11L（24）   ejectbutton・redcard・emergencyexit・wimpout とも 0 行（陽性対照 garchomp 24・24 ファイル）
+  M-B のダンプ                           ejectbutton・redcard は items に無く、ききかいひ・にげごしを持てる種族も無い
+  M-C プール 65（pastes.json）            だっしゅつボタン 3（ゴリランダー）、ききかいひ 5（グソクムシャ、5 本ともメガストーン）、レッドカード 0、にげごし 0
+  Baltimore（IKA-164 の数）              ききかいひ 152/1,079、だっしゅつボタン 35、レッドカード 1
+```
+
+記録（M-B）の決定は 1 つも変わらない（null の diff_node も 0）。効くのはこれからの M-C の生成から: 65 本の順序対で
+ボタンの側が居る局は約 9%（1-(62/65)^2）、ききかいひは約 15%。グソクムシャはメガすればかたいツメになるので、ききかいひは
+メガ前だけ。とんぼがえり等の使い手との対（IKA-164 の 33/4,225）で同時の要求が出る。
+
+### 6. 残り（別課題の候補）
+
+* **同時の途中交代**（とんぼがえり＋ボタン／ききかいひ）を順番に聞いている。正しくは両側同時の小さな行列（交代先 × 交代先）で、
+  fold に同時手番のノード（Python の `Fold`・`fold_value`・`_fold_from_json`、port の fold、`_do_self_switch_node` の両側の
+  サンプル、控え隠蔽の速い経路）が要る。途中交代ノードの形を変えるので今回はしていない
+* ききかいひの `runSwitch`（ステルスロック等で半分を跨ぐ）、とびひざげりの自爆、わるあがきの反動は見ていない
+* レッドカードの `DragOut`（きゅうばん・ねをはる・番犬）と、ドラゴンテールの同じ穴（既存）
+* `branch_differences` は中断の中身を比べない（上の 1,533/2,723）
+* 対象のききかいひは技の前の HP で跨ぎを見る。Showdown は `hurtThisTurn + 総ダメージ` で、多段技の途中できのみが回復した時だけ違う
+
+### 7. 機械
+
+cargo release 4 回（8 コア 24・19・18 秒、1 回はコンパイルエラー 2 秒）、diff_node 8 回（1 コア 19〜120 秒）、関係テスト 2 回
+（1 コア 45・65 秒、1 回目は data/priors が無く落ちた）、オラクルの試し・新しいテスト単体（各数十秒、直接）、記録の rg 1 回（2 秒）。
+すべて heavy.py（--agent IKA-191）。
+
+### 8. IKA-180（みがわり）の取り込み（master 983ea47）
+
+* 同時手番の近似（側 0 → 側 1）はコーディネータの判断でこのまま、同時手番のノードは別課題
+* `tools/diff_node.py` は 8 か所で衝突した。master の版に IKA-191 の 8 つの差し込みを当て直し、`--substitute`/`unsubbed` と
+  `--eject`/`uneject` の両方（選択肢・対照・集計・失敗条件）を残した。TODO.md は master の末尾（IKA-81）の後にこの節
+* みがわり × だっしゅつボタン: Showdown では人形に当たった対象は `spreadMoveHit` で `null`（`HIT_SUBSTITUTE`）になり、
+  `afterMoveSecondaryEvent` に渡らず、人形へのダメージは `totalDamage` に入らない。両エンジンとも人形の分岐は
+  `move_hit` の前で `continue` するので、ボタン・カード・ききかいひは発動しない。`test_eject_items.py` に 3 局面
+  （持ち主がみがわりを張り、ウッドハンマーが人形を壊すだけ。Showdown のログに `-end … Substitute` があることも確かめる）:
+  事実・新 Python・新 exe とも通る。IKA-180 の前の木（700ef7d）では Python の 3 件が落ちる。`move_hit` を人形の分岐の前に
+  置く故障注入ではボタンとカードの 2 件が落ちる（ききかいひは HP が減らないので通る。跨ぎで見ているから）
+* 取り込み後: release ビルド、関係テスト 17 ファイル（test_substitute を含む）pass、diff_node w12 `--eject` 新 exe
+  発火 3,967・違い 0、`--substitute` 発火 7,912・違い 0、ruff・`port_coverage --check`・`port_gate_audit --check` ok
