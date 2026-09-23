@@ -9840,3 +9840,63 @@ resume と leaves の外の部分。
   決着に 2,906 対かかったのは、差がほぼ 0 だから（-10 と 0 のあいだの真ん中寄りの真値は判定に局数が要る）
 * worker のログに `restarting`・`falling back`・Traceback は 0 行
 * 出力: `data/matches/ika143-heaviest-vs-first-sprt`
+
+## 9/23 — IKA-82: 語彙を追記式にした。value-gen11L は技が1つ増えたダンプでもそのまま読め、増えた技の無い局面では出力がビット単位で同じ
+
+ワーカー、基点 master dbec5eb、ブランチ `ika-82-append-only-vocab`。IKA-136（vendor の Showdown を d3de52a17 へ上げると
+M-C・M-B とも技が 514 → 515 になり、`meteorassault` より後ろの 240 技の番号がずれて value-gen11L が読めなくなる）の前段。
+
+* **語彙の番号はコミット済みの順序から振る。** `configs/vocab/<format_id>.json` に種族・特性・道具・技の id を番号順に並べる
+  （先頭が 1、0 は「無い・不明」のまま）。9/23 の id 順で書いたので、今ある id の番号は1つも動いていない。
+  Python の `build_vocabulary` と Rust の `Reg::load` の両方が、ダンプの隣（`<ダンプのフォルダ>/../vocab/<同じ名前>`）から同じ
+  ファイルを読む。順序ファイルが無い規則（テストの手作りの規則など）は、これまでどおり id 順
+* **追記だけ。** ダンプに新しい id が入ったら `tools/vocab_order.py --append` で末尾に足す（同じ回に複数あれば id 順で並べる）。
+  ダンプから消えた id も枠は残す。**どちらの符号化器もメモリ上では足さない**: 順序に無い id がダンプにあれば読み込みを拒否する。
+  メモリで足すと、その日の他の新しい id と一緒に並べ替わり、次の回に別の番号になりうるため。`--check` で確かめられる
+* **指紋の算法は変えていない**（id:番号の組の sha256）。M-B は 848731f359e4b3a6、M-C は 9616b72545058306 のまま。
+  語彙が伸びると指紋も変わるが、**今の語彙をモデルの行数まで切り戻した指紋**（`Vocabulary.prefix`）がモデルの保存した指紋と
+  一致すれば接頭辞とみなす。一致すれば埋め込み表に0の行を足して読み（`meta["vocab_grown_from"]` に元の行数）、
+  一致しなければ（番号が動いた、表が縮んだ）拒否する。
+  新しく保存するモデルは `vocab_sizes` も持つ。value-gen11L のように持たないものは埋め込みの形から行数を読む
+* **新しい行は0。** 決定的で、種族・特性・道具では0の行は番号0（不明）と同じ寄与になる = 追記前の語彙がその id を符号化した
+  のと同じ。技だけは違う: 技の平均は番号が0でない技の数で割るので、新しい技は「平均に何も足さない1枠」になる
+* **ENCODING_REVISION は上げない（2 のまま）。** 既存の id の番号も列の意味も変わっていない。追記した id は新しい番号になるが、
+  それは語彙の指紋が見ている（`tools/encode_dataset.py` の shard の鍵にも入っている）
+* `tools/diff_encode.py` に `--regulation`（ダンプの場所。Rust の `encode` にも同じものを渡す）
+
+### 対照（CPU・1コア、value-gen11L、`data/ika73/w12` の M-B 局面 4,000）
+
+```
+  null      基点の木（dbec5eb、id 順の語彙） 対 この木（順序ファイル）   ビット一致 4,000 / 4,000
+  陽性      同じ局面で protect と fakeout の番号を入れ替える             一致 0 / 4,000（最大 |logit 差| 1.75）
+```
+
+### IKA-136 の模擬（コミットしない、`C:/tmp/ika82/sim`）
+
+コミット済みの M-B ダンプに `meteorassault`（id 順で 275 番の位置）を入れ、順序ファイルの末尾に足した。
+
+```
+  基点の木   指紋 626cdf93b4185711（IKA-136 のコメントの数と同じ）→ value-gen11L を拒否
+  この木     指紋 59d8404f70998d0c、技 516 行 → 読める（move 515 → 516 行、足した行は0）
+             meteorassault を含まない 4,000 局面で基点とビット一致 4,000 / 4,000
+             meteorassault を持たせた局面は技の番号 515（Python・Rust とも）。diff_encode（401局面）全8配列一致
+             その局面の勝率 0.912336、元の技のままなら 0.898974（0の行でも平均の分母が変わるので動く）
+```
+
+### 検査
+
+`tests/test_vocab_order.py`（14件: 9/23 の大きさへ切り戻した指紋の固定、挿入した id が末尾に付き既存が動かない、id 順の番号が
+同じ検査に落ちる = 直す前、順序に無い id の拒否、消えた id の枠、ビット一致と陽性対照、接頭辞でない語彙と縮んだ語彙の拒否、
+Rust が同じ順序を読み、足していない順序を拒否する）。関係するテスト 86 件 pass、全テスト 768 件（skip 1 = vendor、`ci_skip_audit --absent vendor=1` ok）、ruff ok、
+`tools/port_coverage.py --check` ok、`tools/diff_encode.py`（rust/turns.json 3,451局面）全8配列一致、
+`tools/agent_drift.py --check`（master と同じ出力、rc 0）。
+
+### IKA-136 がこの上でやること
+
+1. Showdown を上げてダンプを作り直す
+2. `python tools/vocab_order.py --append` → 両規則の技の末尾に `meteorassault`（516 行目 = 番号 515）。`--check` が ok
+3. Rust を作り直して diff_encode。value-gen11L は読めるはず（`meta["vocab_grown_from"] == {"move": 515}`）
+4. ⚠ `tools/encode_dataset.py` の shard は語彙の指紋が鍵なので、M-B の shard は作り直しになる（既存 id の番号は同じなので
+   中身は変わらない。鍵を接頭辞で許すのは別の課題）
+
+機械: cargo release ビルド 2 回（8 コア 25 秒・18 秒）、null・陽性・模擬の採点 各 3 秒（1 コア）、関係テスト 29 秒、全テスト 202 秒（1 コア）。すべて heavy.py に記録（--agent IKA-82）。

@@ -142,7 +142,10 @@ TARGETS_WITHOUT_CHOICE = frozenset(
 class Regulation:
     """Indexed view over one regulation config file."""
 
-    def __init__(self, data: dict[str, Any]) -> None:
+    def __init__(self, data: dict[str, Any], source: Path | None = None) -> None:
+        #: The dump this was read from. The committed vocabulary order sits beside it
+        #: (`encode.vocab_order_path`), found the same way `rust/src/reg.rs` finds it.
+        self.source = source
         m = data["meta"]
         self.meta = Meta(
             format_id=m["formatId"],
@@ -315,4 +318,4 @@ def load_regulation(format_id: str, path: str | None = None) -> Regulation:
             "Generate with: node packages/sim-bridge/dist/cli/dump-regulation.js"
         )
     with p.open(encoding="utf-8") as fh:
-        return Regulation(json.load(fh))
+        return Regulation(json.load(fh), source=p)

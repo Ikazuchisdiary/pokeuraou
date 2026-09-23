@@ -41,10 +41,16 @@ def main() -> None:
         action="store_true",
         help="encode with revision 1's can_mega rule (EncodingRules, IKA-141)",
     )
+    ap.add_argument(
+        "--regulation",
+        help="read the dump from this path instead of configs/regulations -- pass the same "
+        "one to the Rust `encode`; the vocabulary order is found beside it in both "
+        "(`encode.vocab_order_path`, IKA-82)",
+    )
     args = ap.parse_args()
 
     doc = json.loads(Path(args.fixture).read_text(encoding="utf-8"))
-    reg = load_regulation(doc["format_id"])
+    reg = load_regulation(doc["format_id"], args.regulation)
     positions = [Position.from_json(p) for p in doc["positions"]]
     if args.limit:
         positions = positions[: args.limit]
