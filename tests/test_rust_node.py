@@ -754,6 +754,102 @@ def test_a_focus_band_holder_falls_the_same_way_over_there(bridged: None) -> Non
         assert not _turn_differences(node, reg, pos, row[i], col[j]), (i, j)
 
 
+def _feint_node() -> tuple[Any, Any, list, list]:
+    """Kingambit with Feint into a side that Protects, and one that puts up Wide Guard.
+
+    The recorded menus have no Protect in the column, so a Feint there would break
+    nothing and agreeing on it would say nothing (IKA-58). The row is every Feint choice
+    of Kingambit's, the column every Protect or Wide Guard choice of the foe's.
+    """
+    from pokeuraou.position import MoveSlot
+
+    reg, pos, _row, _col = _node()
+    mine = pos.sides[0].active_pokemon()[0]
+    assert mine is not None and mine.species == "kingambit"
+    mine.moves[0] = MoveSlot(id="feint", pp=16, maxpp=16)
+    foe = pos.sides[1].active_pokemon()[1]
+    assert foe is not None
+    foe.moves[1] = MoveSlot(id="wideguard", pp=16, maxpp=16)
+    assert not validate_position(pos, reg.meta.active_per_side)
+    # Incineroar's hit has to follow Feint into the same foe, or the break exposes nothing
+    # a payoff can see; one choice with a different target keeps the other kind of cell.
+    feints = [
+        choice
+        for choice in side_actions(reg, pos, 0)
+        if getattr(choice.slots[0], "move_id", None) == "feint"
+        and getattr(choice.slots[1], "move_id", None) in ("flareblitz", "throatchop")
+    ]
+    row = [c for c in feints if c.slots[0].target == c.slots[1].target][:5] + [
+        c for c in feints if c.slots[0].target != c.slots[1].target
+    ][:1]
+    col = [
+        choice
+        for choice in side_actions(reg, pos, 1)
+        if any(
+            getattr(slot, "move_id", None) in ("protect", "wideguard") for slot in choice.slots
+        )
+    ][:8]
+    assert row and col
+    return reg, pos, row, col
+
+
+def _turn_json(reg: Any, pos: Any, a: Any, b: Any) -> list[tuple[float, str]]:
+    turn = resolve_module.resolve_turn(reg, pos, [a, b], budget=Budget.matrix())
+    return [(branch.probability, str(branch.position.to_json())) for branch in turn.branches]
+
+
+def test_feint_breaks_the_guard_the_same_way_over_there(
+    bridged: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`breaksProtect` in the port is Python's `_break_protection` (IKA-61).
+
+    The port refused every Feint turn until IKA-61 -- 74% of what it still refused, and
+    since IKA-139 each of those cells is filled per completion on the hidden-bench path.
+    The control comes first: the cells whose Python turn changes when the break is taken
+    out of Python -- some in the payoff (a Protect broken, the hit lands), some only in the
+    position (Wide Guard gone, `stall` reset), which no payoff sees. Every one is held to
+    the port branch by branch, since a wrong break can still average to the right cell.
+    """
+    reg, pos, row, col = _feint_node()
+    evaluators = [OBJECTIVES["hp-share"].batch, OBJECTIVES["faints"].batch]
+
+    os.environ[rustnode.ENV_ENABLE] = "0"
+    rustnode.reset()
+    expected, _notes, _e = batched_payoffs(reg, pos, row, col, evaluators, budget=Budget.matrix())
+    with monkeypatch.context() as patched:
+        patched.setattr(resolve_module, "_break_protection", lambda *_args: None)
+        without, _n0, _e0 = batched_payoffs(
+            reg, pos, row, col, evaluators, budget=Budget.matrix()
+        )
+        unbroken = {
+            (i, j): _turn_json(reg, pos, row[i], col[j])
+            for i in range(len(row))
+            for j in range(len(col))
+        }
+    fired = [
+        (i, j)
+        for (i, j), turn in unbroken.items()
+        if _turn_json(reg, pos, row[i], col[j]) != turn
+    ]
+    moved = np.argwhere(np.abs(np.asarray(expected[0]) - np.asarray(without[0])) > 1e-12)
+    assert len(moved), "breaking the guard changed no payoff, so agreeing would say nothing"
+    assert len(fired) > len(moved), "no cell where only the position shows the break"
+
+    os.environ[rustnode.ENV_ENABLE] = "1"
+    rustnode.reset()
+    node = rustnode.node_for(reg)
+    assert node is not None
+    filled = node.fill(pos, row, col, ["hp-share", "faints"], Budget.matrix())
+    assert not filled.refused, f"refused: {sorted({why for _i, _j, why in filled.refused})}"
+    got, _n2, _e2 = batched_payoffs(reg, pos, row, col, evaluators, budget=Budget.matrix())
+    for index in range(len(evaluators)):
+        assert np.allclose(
+            np.asarray(got[index]), np.asarray(expected[index]), rtol=0, atol=1e-12
+        )
+    for i, j in fired:
+        assert not _turn_differences(node, reg, pos, row[i], col[j]), (i, j)
+
+
 @pytest.mark.parametrize("ability", ["disguise", "iceface"])
 def test_disguise_and_ice_face_are_refused_by_name(bridged: None, ability: str) -> None:
     """The port zeroes the hit and nothing else, so a holder is refused, and says why.
