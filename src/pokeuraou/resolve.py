@@ -932,7 +932,7 @@ class _Turn:
             _start_rampage(self, side, slot)
             return
         if vid == "confusion":
-            _start_confusion(self, side, slot)
+            _confuse(self, side, slot, self.current_actor)
             return
         mon = self.mon_at(side, slot)
         if mon is None or mon.fainted or mon.has_volatile(vid):
@@ -1907,15 +1907,15 @@ def _do_move(
                 mon.active_move_actions += 1
             if blocked == "flinch" and mon is not None:
                 mon.volatiles = [v for v in mon.volatiles if v.id != "flinch"]
-            if blocked == "confusion":
-                state.deal_damage(
-                    action.side, action.slot,
-                    _confusion_damage(state, action.side, action.slot),
-                    reason="confusion",
-                )
-            state.log(f"{action.label(reg)} did not happen ({blocked})")
-            state.move_failed.add((action.side, action.slot))
-            outcomes.append((act_probability, state, ""))
+            hits = (
+                _confusion_self_hits(state, action, budget)
+                if blocked == "confusion"
+                else [(1.0, state)]
+            )
+            for hit_weight, hit_state in hits:
+                hit_state.log(f"{action.label(reg)} did not happen ({blocked})")
+                hit_state.move_failed.add((action.side, action.slot))
+                outcomes.append((act_probability * hit_weight, hit_state, ""))
             continue
         for drawn, drawn_state, drawn_action in _draw_random_target(state, action, move, budget):
             for weight, sub_state, note in _use_move(reg, drawn_state, drawn_action, move, budget):
@@ -2318,19 +2318,92 @@ def _confused_by_fatigue(turn: _Turn, side: int, slot: int) -> None:
 
     Own Tempo and a grounded Pokemon under Misty Terrain refuse it (`onTryAddVolatile`);
     Safeguard does not, since the rampage has no source. The berries and the length are
-    every confusion's, in `_start_confusion` (IKA-177).
+    every confusion's, in `_start_confusion` (IKA-177), and the refusals every confusion's,
+    in `_confuse` (IKA-189).
     """
     mon = turn.mon_at(side, slot)
     if mon is None or mon.fainted or mon.has_volatile("confusion"):
         return
-    if mon.ability == "owntempo":
-        turn.log(f"{turn.name(side, slot)} is not confused (owntempo)")
+    turn.log(f"{turn.name(side, slot)} tires (fatigue)")
+    # `addVolatile` fills in `source = this`: the rampager is its own source (IKA-189).
+    _confuse(turn, side, slot, (side, slot))
+
+
+def _confuse(turn: _Turn, side: int, slot: int, source: tuple[int, int] | None) -> None:
+    """`addVolatile('confusion', source)`: `TryAddVolatile` (`_confusion_refused`), then
+    `_start_confusion`, then Own Tempo's `onUpdate` (IKA-189).
+
+    Every confusion goes through here -- a status move's, a secondary's, the fatigue's.
+    Only a Mold Breaker move gets past Own Tempo's `onTryAddVolatile`: the confusion then
+    starts, a Persim or Lum Berry eats it, and otherwise `onUpdate` cures it at once
+    (vendor/pokemon-showdown/data/abilities.ts `owntempo`; the oracle eats the berry).
+    """
+    mon = turn.mon_at(side, slot)
+    if mon is None or mon.fainted or mon.has_volatile("confusion"):
         return
-    if turn.pos.field.terrain == "mistyterrain" and _grounded(turn, mon):
-        turn.log(f"{turn.name(side, slot)} is not confused (mistyterrain)")
+    refused = _confusion_refused(turn, side, slot, source)
+    if refused is not None:
+        turn.log(f"{turn.name(side, slot)} is not confused ({refused})")
         return
-    turn.log(f"{turn.name(side, slot)} becomes confused (fatigue)")
-    turn.add_volatile(side, slot, "confusion")
+    _start_confusion(turn, side, slot)
+    if mon.ability == "owntempo" and mon.has_volatile("confusion"):
+        mon.volatiles = [v for v in mon.volatiles if v.id != "confusion"]
+        turn.log(f"{turn.name(side, slot)} snapped out of its confusion (owntempo)")
+
+
+def _ability_broken_by(turn: _Turn, mon: Pokemon, source: tuple[int, int] | None) -> bool:
+    """`suppressingAbility(mon)` while `source`'s move is the active one: a Mold Breaker
+    user's move (Mycelium Might's only for a status move), unless `mon` holds an Ability
+    Shield. The move is the user's `last_move`, which `_use_move` has just set."""
+    if source is None:
+        return False
+    user = turn.mon_at(*source)
+    if user is None or user is mon or user.ability not in MOLD_BREAKER_ABILITIES:
+        return False
+    if mon.item == "abilityshield":
+        return False
+    if user.ability == "myceliummight":
+        move = turn.reg.moves.get(user.last_move or "")
+        return move is not None and move.category == "Status"
+    return True
+
+
+def _confusion_refused(
+    turn: _Turn, side: int, slot: int, source: tuple[int, int] | None
+) -> str | None:
+    """Who returns `null` from `TryAddVolatile` for a confusion, if anyone (IKA-189).
+
+        owntempo:     if (status.id === 'confusion') return null;          // breakable
+        mistyterrain: if (!target.isGrounded() || target.isSemiInvulnerable()) return;
+                      if (status.id === 'confusion') ... return null;
+        safeguard:    if (!effect || !source) return;
+                      if (effect.effectType === 'Move' && effect.infiltrates
+                          && !target.isAlly(source)) return;
+                      if ((status.id === 'confusion' || ...) && target !== source)
+                          ... return null;
+
+    `isGrounded` reads Levitate through `suppressingAbility` too, so a Mold Breaker move
+    finds a Levitate Pokemon grounded. Nothing in the field is semi-invulnerable when hit
+    (see `_stopped_by_psychic_terrain`). `infiltrates` is Infiltrator's `onModifyMove`.
+    """
+    mon = turn.mon_at(side, slot)
+    if mon is None:
+        return None
+    broken = _ability_broken_by(turn, mon, source)
+    if mon.ability == "owntempo" and not broken:
+        return "owntempo"
+    if turn.pos.field.terrain == "mistyterrain" and _grounded(turn, mon, ignore_ability=broken):
+        return "mistyterrain"
+    if (
+        source is not None
+        and source != (side, slot)
+        and turn.pos.sides[side].side_condition("safeguard") is not None
+    ):
+        user = turn.mon_at(*source)
+        infiltrates = user is not None and user.ability == "infiltrator" and source[0] != side
+        if not infiltrates:
+            return "safeguard"
+    return None
 
 
 def _rampage_runs_out(turn: _Turn, actives: list[tuple[int, int]]) -> None:
@@ -2440,8 +2513,12 @@ def _choice_lock_ends(reg: Regulation, turn: _Turn, actives: list[tuple[int, int
             mon.volatiles = [v for v in mon.volatiles if v.id != "choicelock"]
 
 
-def _confusion_damage(turn: _Turn, side: int, slot: int) -> int:
-    """A confusion self-hit: 40 base power, physical, typeless, no STAB or effectiveness."""
+def _confusion_damage(turn: _Turn, side: int, slot: int, roll: int = 0) -> int:
+    """A confusion self-hit: 40 base power, physical, typeless, no STAB or effectiveness.
+
+    `getConfusionDamage` then takes `trunc(baseDamage, 16)` and `randomizer` -- roll `r`
+    is `100 - r` percent, the damage calculator's indexing -- and at least 1 (IKA-189;
+    the resolver used the highest roll, `r` = 0, whatever the budget's)."""
     mon = turn.battler_at(side, slot)
     if mon is None:
         return 0
@@ -2450,7 +2527,29 @@ def _confusion_damage(turn: _Turn, side: int, slot: int) -> int:
     base = np.trunc(
         np.trunc(np.trunc(np.trunc(2 * mon.level / 5 + 2) * 40 * attack) / defence) / 50
     ).astype(np.int64) + 2
-    return int(base[0])
+    damage = int(base[0]) % 65536
+    # `stratified_rolls` hands back numpy integers; the position keeps Python ones.
+    return max(1, (damage * (100 - int(roll))) // 100)
+
+
+def _confusion_self_hits(
+    turn: _Turn, action: QueuedAction, budget: Budget
+) -> list[tuple[float, _Turn]]:
+    """The self-hit dealt once per damage roll the budget keeps, as a move's hit is
+    (`stratified_rolls`): all sixteen for `Budget.exact()`, the pinned one for
+    `Budget.matrix()` and the differential test. Rolls that deal the same damage are
+    folded by the branch merge like any other (IKA-189)."""
+    rolls = stratified_rolls(budget)
+    out: list[tuple[float, _Turn]] = []
+    for index, (roll, weight) in enumerate(rolls):
+        state = turn if index == len(rolls) - 1 else turn.clone()
+        state.deal_damage(
+            action.side, action.slot,
+            _confusion_damage(state, action.side, action.slot, roll),
+            reason="confusion",
+        )
+        out.append((weight, state))
+    return out
 
 
 def _use_move(

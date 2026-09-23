@@ -13350,3 +13350,98 @@ Showdown の事実: 5 ターン目は keep と reverse のどちらでもこち�
 
 test_residual_speed_tie（新規）・test_weather_recovery・test_resolve・test_rust_node・test_speed・test_outrage_lock・test_confusion_duration・test_choice_lock・test_line_endings・test_port_coverage・test_port_gates・test_observe・test_no_machine_specific_paths を取り込み後に `-n 0` で通した（skip なし）。`port_coverage --check`・`port_gate_audit --check`・ruff も通過。
 cargo build --release 2 回（21 秒・18 秒、8 コア）。ほかはすべて 1 コアで、heavy.py 経由（--agent IKA-190）: 旧新の署名 363 秒、diff_node と cells.py は旧 420 秒・新 411 秒、記録の数え 38 秒、局面探し・オラクル・テストは各 1〜40 秒。
+
+## 9/24 — IKA-189: マイペース・ミストフィールド・しんぴのまもりがすべての混乱を止め、自傷は予算のダメージ乱数を使う —— 両エンジンとも、止めるのはげきりんの疲れだけ（しんぴのまもりは一度も見ず）、自傷は常に最大の乱数だった
+
+ワーカー。基点 master a2c9bc6、ブランチ `ika-189-confusion-immunity`、報告前に master 126d1a8（IKA-188・IKA-190）を取り込み（衝突なし）。
+
+### 1. Showdown（a5df827。champions に `owntempo`・`mistyterrain`・`safeguard`・`getConfusionDamage` の上書きなし）
+
+- `data/abilities.ts` `owntempo`: `onTryAddVolatile` で confusion に `null`（`breakable`）、`onUpdate` で混乱していれば治す。
+- `data/moves.ts` `mistyterrain.condition.onTryAddVolatile`: 接地して半無敵でないなら confusion に `null`。
+- `data/moves.ts` `safeguard.condition.onTryAddVolatile`: `!effect || !source` なら素通り、`effect.infiltrates && !target.isAlly(source)`
+  （すりぬけ）なら素通り、`target !== source` なら confusion に `null`。
+- `sim/pokemon.ts` `addVolatile`: `source` が無ければ `this`。だからげきりんの疲れ（`lockedmove.onEnd`）はしんぴのまもりに止められない。
+- `sim/battle-actions.ts` `getConfusionDamage`: 能力ランク込みの A・B で基礎ダメージ、`trunc(·, 16)`、`randomizer`（85〜100%）、最低 1。
+- オラクルで確かめた事実: あやしいひかり・いばる（こうげき +2 は入る）・ぼうふうの追加効果の 3 つとも、マイペース・接地した
+  ミストフィールド・しんぴのまもりで混乱しない。飛んでいるリザードン（ミストの対照）とすりぬけ（しんぴの対照）は混乱する。
+  かたやぶりのあやしいひかりはマイペースの `onTryAddVolatile` を越えて混乱が付き、ラムのみが食べる（実が消える）。実が無ければ
+  `onUpdate` が治す。かたやぶりでなければ実は残る。自傷はダメージ乱数 0・8・15 で 22・20・18（キリキザン）。
+
+### 2. 直し（`resolve.py`・`moves.rs`・`resolve.rs`・`inert.rs`）
+
+- `add_volatile("confusion")` を `_confuse(turn, side, slot, source=current_actor)` に回す: `_confusion_refused`（マイペース、
+  接地したミスト、しんぴのまもり）で断り、通れば `_start_confusion`（IKA-177 の実と長さ）、そのあと混乱が残るマイペースは治す
+  （かたやぶりで越えた場合だけ起きる）。かたやぶりの判定は `_ability_broken_by`（キノコのほうしは変化技だけ、とくせいガードで無効）。
+  ミストの接地判定もかたやぶりならふゆうを見ない（`isGrounded` が `suppressingAbility` を読む）。
+- げきりんの疲れ（`_confused_by_fatigue`）は `source = 自分` で `_confuse` を通る（しんぴのまもりは効かない、は前と同じ）。
+- 自傷: `_confusion_damage(turn, side, slot, roll)` が `trunc(·,16)`・`randomizer`・最低 1 を足した。分岐は `_confusion_self_hits` で
+  **技のダメージ乱数と同じ `stratified_rolls(budget)`**: `Budget.matrix()`（固定の 8）と差分テストの pinned は 1 本のまま、
+  `Budget.exact()` は 16 本、`fast` は自傷の分岐そのものが無い（状態チェックを振らない）。分岐は増えない予算では増えない。
+- port も同じ（`confuse`・`confusion_refused`・`ability_broken_by`・`confusion_self_hits`、`resolve.rs` の add_volatile）。
+  すりぬけは Python が言及するようになったので `inert.rs` から外れ（`port_coverage --rust` で再生成）、port の `ability_handled` に
+  入れた（壁・みがわりのすりぬけは Python も見ていない。下の候補）。
+
+### 3. オラクル（`tests/test_confusion_immunity.py`、新規 60 件）
+
+ガード 16 局面（3 技 × マイペース・ミスト・しんぴ、ミストの飛行の対照 3、すりぬけ、かたやぶり＋ラム、マイペース＋ラム、ガードなし）の
+Showdown の事実・我々の 1 ターン・port 一致、自傷の乱数（通常・いばる後 × 乱数 0/5/8/15、exact の 16 本 = Showdown の 16 局の
+ダメージ分布）、port の自傷（matrix 15・exact）、手の対照（しんぴのまもりの下の疲れは混乱する）。
+
+```
+                     旧 exe    新 exe
+  旧 Python          43/60     26/60
+  新 Python          43/60     60/60
+```
+
+旧 Python で落ちる 17: ガードの 1 ターン 10（マイペース 4・ミスト 3・しんぴ 3）、自傷の乱数 7（乱数 0 の 2 件は旧でも通る = 対照）。
+旧 Python で通る 43 は Showdown の事実 16、対照（飛行・すりぬけ・ガードなし・かたやぶり＋ラム＝旧でも実が食べて混乱なし）、
+port が旧 Python と一致するもの。新 Python・旧 exe で落ちる 17 は port のテスト全部。
+
+### 4. diff_node（`--confusion-guard`、新規。各 20 ノード、Budget.matrix）
+
+各局面の場の全員にあやしいひかりを教え、各側の先頭に混乱（Showdown の `time` 3）、残りにマイペース・ミスト・しんぴを局面ごとに
+順に載せる（記録のチームは 3 つとも持たない）。全セルを port と枝ごとに比べる。対照 `unguarded` は IKA-189 前の規則（断るのは疲れ
+だけ、自傷は最大の乱数）。発火は各部分だけを戻した対照でも数えた。
+
+```
+                     発火セル / セル   うち断り / 乱数   新 exe で枝違い   旧 exe で枝違い
+  w12                9,298 / 9,575     1,618 / 9,286     0                 9,212（最悪 6.1e-2）
+  gen11L             6,187 / 6,403     1,135 / 6,142     0                 6,107（最悪 5.5e-2）
+```
+
+gen11L は取り込み前に新 exe で 72 セルが「residual speed tie」の注記だけ違った（IKA-177 の 67 と同じ 1 ノード）。IKA-190 を
+取り込んだ後は 0。
+
+### 5. 記録（`C:/tmp/ika189/records.py`、一時スクリプト、1 コア 361 秒）
+
+w12・gen11L の記録にはマイペース・ミストフィールド・しんぴのまもりの文字列が一行も無い: ガードで答えが変わる決定は **0**。
+自傷の乱数が読まれうるのは混乱が場にある決定（w12 814、gen11L 113。IKA-177 の数と同じ問い）。そのうち w12 200・gen11L 98
+（全部）を記録のメニューのまま hp-share 1 手・`Budget.matrix()` で新旧（`unguarded`）解いた:
+
+```
+                                  w12         gen11L
+  どこかのセルが動いた            177/200     88/98      （すべて乱数だけ。断りだけは 0）
+  最も重い手が変わった            4/200       1/98
+  方策の TV > 0.2                 1/200       2/98
+  均衡値の差（平均・最大）        0.0003・0.007  0.0004・0.0064
+```
+
+### 6. 別課題の候補
+
+- **すりぬけの壁・みがわり**: Showdown の `infiltrates` はリフレクター・ひかりのかべ・オーロラベール・みがわり（としんぴのまもり・
+  しろいきり）を越えるが、Python は壁もみがわりもすりぬけを見ない（ダメージの注記には出る）。ドラパルトが Reg M-C にいる。
+- **しんぴのまもりの状態異常**: `onSetStatus` で他者からの状態異常も止めるが、`apply_status` は見ていない（技は
+  STATUS_MOVES_FULLY_MODELLED の外なので注記は出る）。
+- **混乱を付けられなかった変化技の失敗**: あやしいひかりが止められた・既に混乱していたときに Showdown は技を失敗にする
+  （じだんだ等が読む）が、我々の `move_failed` は立たない。
+- **マイペースの `onUpdate`**: トレース・スキルスワップで後から得たマイペースは既存の混乱を治すが、我々は付けた直後しか見ない。
+
+### 7. 検査と機械
+
+test_confusion_immunity（新規）・test_confusion_duration・test_outrage_lock・test_taunt_before_move・test_residual_speed_tie・
+test_weather_recovery・test_resolve・test_rust_node・test_port_coverage・test_port_gates・test_line_endings・
+test_no_machine_specific_paths を取り込み後に `-n 0` で通した。`port_coverage --check`・`port_gate_audit --check`・ruff 通過。
+機械: cargo build --release 8 コア 5 回（各 17〜21 秒、1 回は diff_node が exe を使用中で失敗）、diff_node 1 コア 計約 26 分
+（中断した 1 回を含む）、記録 1 コア 361 秒、テストとオラクルは 1 コアで各 1〜40 秒。worktree に data/priors・standings・reportworm と
+sim-bridge の dist を main から写し、node_modules は main への junction（コミットしない）。

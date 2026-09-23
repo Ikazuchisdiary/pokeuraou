@@ -137,12 +137,15 @@ pub(crate) fn do_move<'a>(
                         mon.volatiles.retain(|v| v.id.as_str() != "flinch");
                     }
                 }
-                if reason.as_str() == "confusion" {
-                    let amount = confusion_damage(&state, action.side, action.slot)?;
-                    state.deal_damage(action.side, action.slot, amount, false)?;
+                let hits = if reason.as_str() == "confusion" {
+                    confusion_self_hits(state, action, &budget)?
+                } else {
+                    vec![(1.0, state)]
+                };
+                for (hit_weight, mut hit_state) in hits {
+                    hit_state.move_failed[action.side][action.slot] = true;
+                    outcomes.push((*probability * hit_weight, hit_state));
                 }
-                state.move_failed[action.side][action.slot] = true;
-                outcomes.push((*probability, state));
             }
             None => {
                 for (drawn, drawn_state, drawn_action) in
@@ -209,14 +212,40 @@ fn draw_random_target<'a>(
     out
 }
 
-fn confusion_damage(turn: &Turn, side: usize, slot: usize) -> Result<i64, String> {
+/// `getConfusionDamage`: then `trunc(baseDamage, 16)`, `randomizer` at roll `r` (`100 - r`
+/// percent) and at least 1, as Python's `_confusion_damage` (IKA-189).
+fn confusion_damage(turn: &Turn, side: usize, slot: usize, roll: usize) -> Result<i64, String> {
     let Some(mon) = turn.battler_at(side, slot)? else { return Ok(0) };
     let attack = mon.stat("atk", false);
     let defence = mon.stat("def", false).max(1);
     let level_term = (2.0 * mon.level as f64 / 5.0 + 2.0).trunc() as i64;
     let inner = (level_term * 40 * attack) as f64;
     let base = ((inner.trunc() / defence as f64).trunc() / 50.0).trunc() as i64;
-    Ok(base + 2)
+    let damage = (base + 2).rem_euclid(65536);
+    Ok((damage * (100 - roll as i64) / 100).max(1))
+}
+
+/// The self-hit once per damage roll the budget keeps (`stratified_rolls`), as Python's
+/// `_confusion_self_hits` (IKA-189).
+fn confusion_self_hits<'a>(
+    turn: Turn<'a>,
+    action: &QueuedAction,
+    budget: &Budget,
+) -> Result<Vec<(f64, Turn<'a>)>, String> {
+    let rolls = stratified_rolls(budget);
+    let mut out = Vec::with_capacity(rolls.len());
+    let mut last = Some(turn);
+    for (index, (roll, weight)) in rolls.iter().enumerate() {
+        let mut state = if index + 1 == rolls.len() {
+            last.take().expect("the last roll takes the turn")
+        } else {
+            last.as_ref().expect("taken only at the last roll").clone()
+        };
+        let amount = confusion_damage(&state, action.side, action.slot, *roll)?;
+        state.deal_damage(action.side, action.slot, amount, false)?;
+        out.push((*weight, state));
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -330,19 +359,66 @@ fn rampage_after_move(turn: &mut Turn, action: &QueuedAction) {
 /// The rampage's `onEnd` confusion: Own Tempo and grounded under Misty Terrain refuse it;
 /// the berries are every confusion's, in `start_confusion` (IKA-177).
 fn confused_by_fatigue(turn: &mut Turn, side: usize, slot: usize) {
-    let refused = {
-        let Some(mon) = turn.mon_at(side, slot) else { return };
-        if mon.fainted || mon.has_volatile("confusion") {
-            return;
-        }
-        let misty = is(turn.pos.field.terrain, "mistyterrain")
-            && crate::resolve::grounded(turn, mon);
-        mon.ability == "owntempo" || misty
-    };
-    if refused {
+    // `addVolatile` fills in `source = this`: the rampager is its own source (IKA-189).
+    confuse(turn, side, slot, Some((side, slot)));
+}
+
+/// `addVolatile('confusion', source)`: `TryAddVolatile`, `start_confusion`, then Own
+/// Tempo's `onUpdate` for a Mold Breaker move that got past it -- Python's `_confuse`.
+pub(crate) fn confuse(turn: &mut Turn, side: usize, slot: usize, source: Option<Slot>) {
+    match turn.mon_at(side, slot) {
+        Some(mon) if !mon.fainted && !mon.has_volatile("confusion") => {}
+        _ => return,
+    }
+    if confusion_refused(turn, side, slot, source) {
         return;
     }
-    turn.add_volatile(side, slot, "confusion", None);
+    start_confusion(turn, side, slot);
+    if let Some(mon) = turn.mon_at_mut(side, slot) {
+        if mon.ability == "owntempo" {
+            mon.volatiles.retain(|v| v.id.as_str() != "confusion");
+        }
+    }
+}
+
+/// `suppressingAbility(mon)` under `source`'s move: Python's `_ability_broken_by`.
+fn ability_broken_by(turn: &Turn, mon: &crate::position::Pokemon, source: Option<Slot>) -> bool {
+    let Some((side, slot)) = source else { return false };
+    let Some(user) = turn.mon_at(side, slot) else { return false };
+    if std::ptr::eq(user, mon) || !is_mold_breaker(user.ability.as_str()) {
+        return false;
+    }
+    if is(mon.item, "abilityshield") {
+        return false;
+    }
+    if user.ability == "myceliummight" {
+        return user
+            .last_move
+            .and_then(|m| turn.reg.moves.get(m.as_str()))
+            .is_some_and(|mv| mv.category == "Status");
+    }
+    true
+}
+
+/// Own Tempo, Misty Terrain on the grounded, Safeguard against another's move unless it
+/// infiltrates: Python's `_confusion_refused` (IKA-189).
+fn confusion_refused(turn: &Turn, side: usize, slot: usize, source: Option<Slot>) -> bool {
+    let Some(mon) = turn.mon_at(side, slot) else { return false };
+    let broken = ability_broken_by(turn, mon, source);
+    if mon.ability == "owntempo" && !broken {
+        return true;
+    }
+    if is(turn.pos.field.terrain, "mistyterrain") && grounded_ignoring(turn, mon, broken) {
+        return true;
+    }
+    match source {
+        Some(from) if from != (side, slot) && turn.pos.sides[side].has_side_condition("safeguard") => {
+            let infiltrates = from.0 != side
+                && turn.mon_at(from.0, from.1).is_some_and(|user| user.ability == "infiltrator");
+            !infiltrates
+        }
+        _ => false,
+    }
 }
 
 /// The residual's `duration--` reaching zero: `onEnd` before the loop takes it off.
