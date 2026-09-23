@@ -37,8 +37,11 @@ same opponent in the same game index because each game seeds from `[seed, index]
 difference is then paired per game and the only thing that differs is which four we
 brought.
 
-Printing the commands rather than running them, because each opponent is about twenty
-minutes of eight-way sharded play and the caller should decide how many to buy.
+Printing the commands rather than running them, because each opponent is about forty
+minutes of eight-way sharded play and the caller should decide how many to buy. It was
+about twenty on 9/19, when `selection_check` played one seat; since IKA-17 it plays every
+matchup in both seats, so the same `--games` is twice the games (IKA-134). The forty is
+that doubling, not a new timing. `tools/ordering_result.py` reads the two seats back.
 
     uv run python tools/ordering_check.py --opponents 20
     uv run python tools/ordering_check.py --opponents 20 --games 60 > run.sh
@@ -67,7 +70,14 @@ def main() -> None:
     )
     ap.add_argument("--model", type=Path, default=Path("data/models/value-gen11L.pt"))
     ap.add_argument("--opponents", type=int, default=20)
-    ap.add_argument("--games", type=int, default=60, help="games per arm per opponent")
+    ap.add_argument(
+        "--games",
+        type=int,
+        default=60,
+        help="matchups per arm per opponent. Each is played in BOTH seats, so an arm plays "
+        "twice this many games (120 at the default); passed to selection_check's --games, "
+        "which counts per seat",
+    )
     ap.add_argument("--shards", type=int, default=8)
     ap.add_argument("--seed", type=int, default=20260919)
     ap.add_argument(
