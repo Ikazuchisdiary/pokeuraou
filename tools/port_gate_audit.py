@@ -144,11 +144,16 @@ KNOWN_UNGATED: frozenset[str] = frozenset()
 #:                                       whether a switch is *offered*. Menus are built
 #:                                       in Python and handed to the port, which only
 #:                                       resolves them, so no turn it resolves differs.
+#:    shedshell                          actions._escapes_traps (IKA-163), the same shape
+#:                                       as Run Away: the item's own `onTrapPokemon`
+#:                                       frees its holder, and only the menu reads it.
+#:                                       The gate lists it in `item_handled` now that
+#:                                       `inert.rs` no longer does.
 #:
 #: Recorded rather than required to be empty so that `--check` can fail on the next one
-#: without first demanding these six be re-argued.
+#: without first demanding these seven be re-argued.
 KNOWN_UNREFERENCED: frozenset[str] = frozenset(
-    {"shadowtag", "arenatrap", "magnetpull", "dancer", "truant", "runaway"}
+    {"shadowtag", "arenatrap", "magnetpull", "dancer", "truant", "runaway", "shedshell"}
 )
 
 

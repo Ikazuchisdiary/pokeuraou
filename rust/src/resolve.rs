@@ -751,6 +751,10 @@ fn item_handled(item: &str) -> bool {
             // what Python does with it too. Neither id was listed, so a holder anywhere a
             // turn could reach refused the whole node (IKA-70).
             | "quickclaw" | "focusband"
+            // No effect a turn can observe: Shed Shell frees its holder from traps, which
+            // decides whether a switch is *offered*, and the menu is Python's (IKA-163).
+            // It left `inert.rs` when `actions._escapes_traps` learned it.
+            | "shedshell"
     ) || crate::inert::item_is_inert(item)
         // Mega stones carry no turn effect of their own; the mega action owns the forme
         // change, and `reg.mega_targets` is what says which stone belongs to whom.

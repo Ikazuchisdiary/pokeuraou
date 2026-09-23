@@ -11071,3 +11071,96 @@ Baxcalibur と訳のキーはどちらも挙動に出ない。
 
 機械: submodule 初期化 5 秒・fetch 2 秒（1 コア）、npm ci 2 回（8・6 秒）、build decl 単独で 5 回（3〜5 秒）、ダンプ 6 段（各段の build decl を含む）27 秒（4 コア）、
 記録の集計 4 秒（8 コア）、tsc 2 回（1 秒）。すべて heavy.py（--agent IKA-164）。プールの集計・場面・vocab --check は各数秒（直接）。
+
+## 9/23 — IKA-163: ゴーストときれいなぬけがらの持ち主は拘束されない —— 生成の局面では `trapped` の旗が常に偽で、w12 の 2,676 決定・gen11L の 929 決定で交代がメニューから落ちていた
+
+IKA-136 の担当が見つけた疑い（`_is_trapped` は旗が無いと拘束の揮発状態だけを見る）をオラクルで確かめて直した。
+**疑いより広かった**: 探索の子だけではない。生成（`selfplay.play_game`）は `position_from_sets` から始めて
+自前の resolver で局を進めるので、**生成の局面はすべて「旗を誰も計算しない局面」**で、記録の `trapped` は
+w12・gen11L の 752,695 決定で一度も真にならない（陽性対照: オラクルの局面では対照のガブリアスに `trapped: true` が乗る）。
+だから探索の根のメニューからも交代が消えていた。
+
+### 1. Showdown の拘束（d3de52a17）
+
+`battle.ts:1726` がターンごとに `pokemon.trapped = maybeTrapped = false` にしてから `runEvent('TrapPokemon')` を走らせる。
+拘束する側の多くは `pokemon.tryTrap()`（`pokemon.ts:1607`）を呼び、その先頭が
+`if (!this.runStatusImmunity('trapped')) return false;`。
+
+| 拘束 | 付け方（該当行） | 無効になる条件 | M-B | M-C |
+|---|---|---|---|---|
+| `trapped`（くろいまなざし・とおせんぼう・ジョーロック） | `addVolatile('trapped')`（`moves.ts:1521, 11503, 9800`）→ `conditions.ts:211` `tryTrap()` | ゴーストには**乗らない**（`addVolatile` が同じ免疫を見る, `pokemon.ts:1987`）。きれいなぬけがら・にげあし（champions）で外れる | 有 | 有 |
+| `partiallytrapped`（まきつく・しめつける・ほのおのうず・うずしお・すなじごく・まとわりつく・トラバサミ） | `volatileStatus`、`conditions.ts:248` `if (source.isActive) tryTrap()` | 揮発状態は**ゴーストにも乗る**（ダメージも受ける）が、`tryTrap` が偽を返す。ぬけがら・にげあしで外れる。使い手が場にいなければ拘束しない | 有 | 有 |
+| `octolock`（たこがため） | `moves.ts:12972` `onTryImmunity: getImmunity('trapped')`、`12990` `tryTrap()` | ゴーストには乗らない。ぬけがら・にげあしで外れる | 技はダンプに有、使い手オトスパスは不可 | 有（オトスパス） |
+| `ingrain`（ねをはる） | `moves.ts:9628` 自分に `tryTrap()` | ゴースト・ぬけがら・にげあし | 有 | 有 |
+| `noretreat`（はいすいのじん） | `moves.ts:12808` 自分に `tryTrap()` | 同上 | 有 | 有 |
+| `fairylock`（フェアリーロック、場） | `moves.ts:5066` 全員に `tryTrap()` | 同上 | 有 | 有 |
+| かげふみ | `abilities.ts:4157` `tryTrap(true)` | かげふみ同士・ゴースト・ぬけがら・にげあし、隣接のみ | メガゲンガー | メガゲンガー |
+| ありじごく | `abilities.ts:197` 接地のみ | ひこう・ふゆう・ふうせん等の非接地、ゴースト・ぬけがら・にげあし | 持ち主なし | 持ち主なし |
+| じりょく | `abilities.ts:2517` はがねのみ | はがね以外、ゴースト・ぬけがら・にげあし | 持ち主なし | 持ち主なし |
+| 技の固定（げきりん・ため技・反動） | `pokemon.ts:1087` `getMoveRequestData` が直接 `trapped = true` | **ゴーストでもぬけがらでも外れない**（イベントの後で立てる） | 有 | 有 |
+| フリーフォール・シャリタツ/ヘイラッシャ | `moves.ts:16736`（−15）、`conditions.ts:820/834`（−11）が直接 `trapped = true` | ぬけがら（−10）より後なので外れない | 不在 | 不在 |
+
+* ゴーストの免疫は型表の `ghost: { damageTaken: { trapped: 3 } }`（`typechart.ts:204`）＝ダンプの `effectImmunities.trapped: ["Ghost"]`。
+* きれいなぬけがらは `items.ts:5635` `onTrapPokemonPriority: -10` で `trapped = false`（全拘束の後）。ダンプの `customHooks` に `onTrapPokemon`。
+* champions の mod の上書きは Run Away（`mods/champions/abilities.ts:65`）だけ。拘束技・ぬけがら・かげふみ等の上書きは無い。
+* `TRAPPING_VOLATILES` = `partiallytrapped` / `octolock` / `trapped`。3 つとも `tryTrap` 経由なので、ゴースト・ぬけがら・にげあしは 3 つ全部から外れる。
+* ダンプ（M-B 40 種・M-C 41 種がゴースト。きれいなぬけがらは両規則とも合法）。
+
+### 2. オラクル（M-C、`tests/test_trap_immunities.py`、探索の子と同じく旗を消して比べる）
+
+| 対象 | 拘束 | 揮発状態 | Showdown の要求 | 直す前（旗なし） | 直した後 |
+|---|---|---|---|---|---|
+| ドラパルト / ゲンガー（ゴースト） | まとわりつく・うずしお | partiallytrapped | 拘束なし | **拘束** | 拘束なし |
+| 同 | くろいまなざし・とおせんぼう・たこがため | 乗らない | 拘束なし | 拘束なし | 拘束なし |
+| ガブリアス / フォクスライ（きれいなぬけがら） | 5 技すべて | 乗る | 拘束なし | **拘束** | 拘束なし |
+| 対照: 持ち物なしのガブリアス / フォクスライ | 5 技すべて | 乗る | **拘束** | 拘束 | 拘束 |
+
+（試し `C:/tmp/ika163/probe.py` は 5 対象 × 5 技 = 25 通り。テストに入れたのはドラパルト・ぬけがらのガブリアス・対照のガブリアス × 3 揮発状態 = 9 通り × 2 本。）
+
+### 3. 直し
+
+`actions._escapes_traps`（IKA-136 と同じ場所）を 3 つの逃げ道にした。どれもダンプに従う:
+ゴーストは `reg.immune_to_effect("trapped", 今のタイプ)`、ぬけがらは持ち物 `shedshell` の `customHooks` に
+`onTrapPokemon` があるとき、にげあしは従来どおり。`mon.trapped`（オラクルの判定）が真なら従来どおり最優先。
+さしおさえ・マジックルーム・ぶきよう・いえきは resolver がどれも模していないので見ない（docstring に書いた）。
+
+port は手を列挙しない（`node.rs` にも `encoded_node.rs` にも交代の生成は無い。Python の作ったメニューを解くだけ）。
+port が拘束を読むのは `encode.rs:402` の `mon.trapped`（値の入力、Python の `encode.py:720` と同じ旗）だけで、振る舞いは変わらない。
+ただし Python が `shedshell` を読むようになったので `port_coverage --rust` で `inert.rs` から外れ、そのままでは
+`item_handled` が偽になって**ぬけがら持ちの局面を port が拒否する**ようになる。`rust/src/resolve.rs` の `item_handled` に
+理由つきで `shedshell` を足し（runaway が能力の門にいるのと同じ形）、`port_gate_audit` の `KNOWN_UNREFERENCED` にも足した。
+release ビルド通過（heavy.py 8 コア 25 秒）。
+
+### 4. テスト
+
+`tests/test_trap_immunities.py` 26 本。オラクルの事実 9 本（陽性対照の 3 本は Showdown が拘束と言う）、旗を消した一致 9 本、
+手組みでゴースト／ぬけがらが 3 揮発状態すべてから外れ、**タイプを失う／持ち物を失うと拘束に戻る**こと、
+ダンプの免疫・フックを消すと逃げ道も消えること、オラクルの旗が勝つこと。**直す前は 11 本落ちた**
+（一致 4・手組み 6・ダンプ 1。事実 9 本と、ゴーストに乗らない 2 件・対照 3 件の一致は直す前も通る）。
+test_runaway・test_actions・test_port_gates・test_port_coverage・test_line_endings と合わせて 66 本 pass（`-n 0`）。ruff ok、
+`port_coverage --check`・`port_gate_audit --check` ok。
+
+### 5. 記録で数えた（1 コア、heavy.py、56 秒）
+
+| | 局 | 決定 | 拘束の揮発状態を持つ場のポケモン×決定 | うちゴースト（すべて partiallytrapped） | うち move の決定 | そのうち控えが生きていて交代が増える | その局 |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| w12 | 43,999 | 592,200 | 108,395 | 6,807 | 5,545 | **2,676** | 1,180 |
+| gen11L | 12,000 | 160,495 | 30,012 | 2,279 | 1,750 | **929** | 426 |
+
+* 6,807・2,279 件すべてで旧 `_is_trapped` は真、新は偽。記録のメニューには交代が一つも無かった（2,676・929 件とも）。
+* 控えが生きているのに直した後も交代が出ない 2 件（w12）は反動（`mustrecharge`）で、正しい。
+* きれいなぬけがらは記録の構築に **0**（陽性対照: 同じ走査でこだわりスカーフは w12 34,443 局・gen11L 10,255 局）。
+  例に出たゴーストはイダイトウ・ユキメノコ（種ごとには数えていない）。
+* 対照（ゴーストでもぬけがらでもない）の拘束は w12 101,588・gen11L 27,733 件で、これは変わらない。
+
+### 6. 直していないこと（別課題の候補）
+
+* **かげふみが生成で一度も拘束しない。** メガゲンガーが場にいる相手側の場のポケモン×決定が w12 2,393・gen11L 981。
+  `TRAPPING_ABILITIES` は定義だけで誰も読まない（IKA-57 の記録どおり）。
+* **技の固定（げきりん・ため技）が交代を止めない。** `lockedmove` を持つ場のポケモンで旧判定が拘束なしの move の決定が
+  w12 111・gen11L 49、`twoturnmove` が w12 1,862・gen11L 77。Showdown は `getMoveRequestData` で `trapped = true`。
+  記録のメニューに交代が実際に入っていたかは未確認。
+* **ねをはる・はいすいのじん・フェアリーロック**は `TRAPPING_VOLATILES` に無い（記録の move の決定では 0 件。同じ数え方で `lockedmove` は出ている。resolver が付けるかは未確認）。
+* **子の局面は親の `trapped` を写すだけ**（`position.py:225`、resolver は誰も戻さない）。オラクルから始めた探索では、
+  根で拘束されていたポケモンが、拘束の主が倒れた後や反動の後の子でも拘束のまま。Showdown は `battle.ts:1726` で毎ターン
+  計算し直す。直すなら resolver のターン終わり（IKA-158〜162 が触っている `resolve.py`）。生成には影響しない（旗が常に偽）。
