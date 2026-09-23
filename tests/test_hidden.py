@@ -469,6 +469,7 @@ def _self_switch_pick(reg, sheet, foe, monkeypatch, *, hidden):  # noqa: ANN001,
         start=_uturn_start(reg, sheet[:4], foe),
         evaluate=_reads_their_back_two,
         sheets=(sheet, sheet) if hidden else None,
+        open_information=not hidden,
         max_turns=1,
     )
     picks = [d for d in record.decisions if d.kind == "selfswitch"]

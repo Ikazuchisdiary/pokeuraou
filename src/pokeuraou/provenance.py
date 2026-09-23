@@ -122,7 +122,7 @@ def provenance(
     rankings: tuple[str, str] = ("damage", "damage"),
     solvers: tuple[str, str] = ("full", "full"),
     books: tuple[str, str] = ("uniform", "uniform"),
-    information: tuple[str, str] = ("open", "open"),
+    information: tuple[str, str],
     beliefs: tuple[str, str] = ("uniform", "uniform"),
     encodings: tuple[str, str] = ("new", "new"),
     rank_views: tuple[str, str] = ("heaviest", "heaviest"),
@@ -150,6 +150,10 @@ def provenance(
     ``"book"`` weighted by that side's own selection cache, ``"uniform"`` every pair the
     sheet allows at one weight. It means something only under a hidden bench, and every
     hidden match recorded before the field existed (IKA-122) played the uniform one.
+
+    `information` has no default (IKA-123). It defaulted to ``("open", "open")``, so a
+    caller that hid the bench and forgot to say so recorded an open game -- and the rating
+    put it on the open scale. `"hidden-bench"` is what ships; `"open"` is the reference.
     """
     return {
         "kind": kind,
@@ -249,7 +253,15 @@ def agent_name(source: dict[str, Any], side: int) -> str:
     # is playing a different game, and the advice it produces moved in 90% of openings.
     # Every record written before this field existed was omniscient, which is what the
     # default says.
-    information = (source.get("information") or ["open", "open"])[side]
+    #
+    # So the OPEN game is the unmarked name and the one that ships carries the suffix --
+    # backwards for what the project now plays (IKA-123), and kept that way on purpose:
+    # a rating is keyed on these strings, and renaming the open agents would split every
+    # recorded one from its own games, the way `.pt` and `uniform-against-` once did.
+    # The write side stopped defaulting instead: `provenance` takes `information` with no
+    # default, `play_game` wants `sheets` or `open_information=True`, and `ratings.py`
+    # anchors on `hp-share/w24/hidden-bench`.
+    information =(source.get("information") or ["open", "open"])[side]
     if information != "open":
         name += f"/{information}"
         # What it believed that bench holds. The uniform belief and the one weighted by

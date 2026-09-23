@@ -16,7 +16,10 @@ anything inside a turn.
 
 **Uncertainty has the same shape as everywhere else.** The sheet reveals the opponent's
 species, ability, item, nature and moves, and hides the SP spread -- so the opponent knows
-which spread they brought and we do not. That is the Bayesian game
+which spread they brought and we do not. (The sheet hides only the spread; which four
+come out of the six is the decision being solved here, and after it the two that did not
+lead stay hidden in play until they come in -- `pokeuraou.hidden`, IKA-123.) That is the
+Bayesian game
 :func:`~pokeuraou.equilibrium.solve_bayesian` already solves: one matrix per spread class,
 the opponent free to select differently per class, us with one strategy. Averaging the
 matrices first would answer a different question and overstate our value.

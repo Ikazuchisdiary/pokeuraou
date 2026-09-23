@@ -210,7 +210,8 @@ def _record_line(*, game: int, seat: int, outcome: float, nested: bool = False) 
         record,
         objective="value:arm",
         search_limit=(24, 24),
-        source=provenance("generation-match", seat=f"arm = side {seat}", leaves=("a", "b"), limits=(24, 24)),
+        source=provenance("generation-match", seat=f"arm = side {seat}", leaves=("a", "b"), limits=(24, 24),
+                          information=("open", "open")),
         extra={"gameIndex": game, "seatIndex": seat},
     )
     return handle.getvalue().encode("utf-8")
@@ -403,7 +404,8 @@ def test_match_queue_registers_its_test_before_the_first_game(tmp_path, monkeypa
         "argv",
         [
             "match_queue.py", "--out", str(tmp_path), "--games", "5", "--value", "a.pt",
-            "--sprt", "-5", "15", "--sprt-beta", "0.1", "--uniform-selection", "--",
+            "--sprt", "-5", "15", "--sprt-beta", "0.1", "--uniform-selection",
+            "--hide-bench", "--",
         ],
     )
     with pytest.raises(SystemExit) as ended:

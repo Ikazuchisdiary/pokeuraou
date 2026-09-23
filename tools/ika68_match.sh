@@ -32,7 +32,7 @@ START=$(date +%s)
 # shellcheck disable=SC2086
 uv run --group learn python tools/match_queue.py \
   --out "$OUT" --games "$GAMES" --served --servers 2 --workers 24 \
-  --value $MODEL --baseline $MODEL \
+  --value $MODEL --baseline $MODEL --open-bench \
   -- --limit 24 --rank-leaf --baseline-rank-leaf $ARM \
   --selection-book data/selection/rizabanadohido-value-gen11L-ens2.jsonl.gz 2>&1
 END=$(date +%s)

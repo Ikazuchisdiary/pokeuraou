@@ -21,7 +21,7 @@ second one written inherited none of the first one's reporting.
 
     uv run --group learn python tools/match_queue.py \\
         --out data/matches/foo --games 848 --workers 6 \\
-        --value data/models/a.pt --baseline data/models/b.pt \\
+        --value data/models/a.pt --baseline data/models/b.pt --hide-bench \\
         -- --limit 48 --rank-leaf --baseline-rank-leaf
 
 A match that exists to decide something -- ship it or not -- can stop as soon as it has
@@ -41,6 +41,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from pokeuraou.benchflags import add_bench_flags, bench_argv, require_bench  # noqa: E402
 from pokeuraou.sprt import Sprt, StopWhenDecided  # noqa: E402
 from pokeuraou.workqueue import run_workers  # noqa: E402
 
@@ -96,12 +97,13 @@ def main() -> None:
         "a direct run at all. Answers do not depend on this: requests are never merged, "
         "so a batch gets the same numbers wherever it is served.",
     )
-    ap.add_argument(
-        "--hide-bench",
-        action="store_true",
-        help="pass --hide-bench to every worker. A model trained on hidden-bench games "
-        "has to be judged in that condition; judging it in the open game measures which "
-        "model suits the open game.",
+    add_bench_flags(
+        ap,
+        hidden_help="pass --hide-bench to every worker: the condition that ships "
+        "(tools/ika73_match.sh). One of this or --open-bench is required.",
+        open_help="pass --open-bench to every worker. A model trained on hidden-bench "
+        "games judged in the open game measures which model suits the open game, so this "
+        "is a reference; before IKA-123 it was what omitting both flags meant.",
     )
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--no-bridge", action="store_true")
@@ -140,6 +142,7 @@ def main() -> None:
         help="after --, options passed to every worker unchanged",
     )
     args = ap.parse_args()
+    require_bench(args)
     if args.workers is None:
         # Swept on the board, width 16 against 48, startup discarded, one machine, back to
         # back:
@@ -260,8 +263,7 @@ def main() -> None:
             command += ["--value", *args.value]
             if args.baseline:
                 command += ["--baseline", *args.baseline]
-        if args.hide_bench:
-            command += ["--hide-bench"]
+        command += bench_argv(args.hide_bench)
         return command + extra
 
     def written() -> int:

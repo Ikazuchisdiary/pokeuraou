@@ -97,7 +97,9 @@ def main() -> None:
         base = [sys.executable, str(ROOT / "tools" / "match_queue.py"),
                 "--out", str(out), "--games", "100000", "--workers", str(workers),
                 "--seed", str(args.seed), "--device", "cuda",
-                "--value", *models, "--baseline", *models]
+                "--value", *models, "--baseline", *models,
+                # What this sweep played before IKA-123 made the condition explicit.
+                "--open-bench"]
         if servers:
             base += ["--served", "--servers", str(servers)]
         return base + ["--", *tail]

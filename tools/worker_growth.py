@@ -196,7 +196,7 @@ def main() -> None:
 
     games_file = open_games(args.write)
     source = provenance("growth-probe", seat="probe", leaves=("probe", "probe"),
-                        limits=(args.limit, args.limit))
+                        limits=(args.limit, args.limit), information=("open", "open"))
 
     rng = np.random.default_rng(args.seed)
     for index in range(1, args.games + 1):
@@ -209,6 +209,7 @@ def main() -> None:
             [roster.sets[i] for i in own_pick], [foe_six[j] for j in foe_pick],
             "growth-probe",
             search_limit=args.limit, max_turns=40, evaluate=evaluate, rank_by_leaf=True,
+            open_information=True,
         )
         if args.write is not None and record.outcome is not None:
             write_game(games_file, record, objective="probe",

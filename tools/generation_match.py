@@ -10,7 +10,10 @@ evaluation differs. Sides are swapped halfway, because a residual seat advantage
 otherwise be credited to whichever generation sat in the better seat -- the speed-tie bug
 was exactly that, and it was worth 9 points in a mirror.
 
-    uv run --group learn python tools/generation_match.py --value data/models/value-worlds.pt
+    uv run --group learn python tools/generation_match.py --value data/models/value-worlds.pt \\
+        --hide-bench
+
+`--hide-bench` (what ships) or `--open-bench` (reference) is required (IKA-123).
 """
 
 from __future__ import annotations
@@ -27,6 +30,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from pokeuraou.benchflags import add_bench_flags, require_bench
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder, EncodingRules, rules_of
 from pokeuraou.payoff import OBJECTIVES
@@ -213,15 +217,15 @@ def main() -> None:
         "their own strategies against the same field. That is the right comparison for a "
         "rating and the wrong one for isolating a model, so both exist.",
     )
-    ap.add_argument(
-        "--hide-bench",
-        action="store_true",
-        help="neither side's search is shown the other's unplayed bench, which is the "
-        "condition a model trained on hidden-bench data is meant to be used in. Comparing "
-        "such a model with an open-information one *without* this measures which model "
-        "suits the open game, not which is better: the evaluation has to be the condition "
-        "the answer is for. Games say so in their provenance and the rating keeps them on "
-        "their own scale.",
+    add_bench_flags(
+        ap,
+        hidden_help="neither side's search is shown the other's unplayed bench, which is "
+        "the condition that ships. One of this or --open-bench is required (IKA-123).",
+        open_help="the open game: both searches are handed the opponent's four. Comparing "
+        "a model trained on hidden-bench data with another here measures which model suits "
+        "the open game, not which is better. Games say so in their provenance and the "
+        "rating keeps them on their own scale. What omitting both flags meant before "
+        "IKA-123.",
     )
     ap.add_argument(
         "--baseline-uniform-selection",
@@ -349,6 +353,11 @@ def main() -> None:
         "a pool on the same cores is slower than one process. Raise it for a single run.",
     )
     args = ap.parse_args()
+    require_bench(args)
+    print(
+        f"information: {'hidden-bench' if args.hide_bench else 'OPEN (reference)'}",
+        file=sys.stderr,
+    )
     if args.inference is None:
         # Only the arm that scores here needs torch at all.
         import torch
@@ -949,6 +958,7 @@ def main() -> None:
                 # the standings team when it did not. Both are public in Champions, and
                 # both are what makes the four uncertain rather than unknown.
                 sheets=(list(roster.sets), list(foe_six)) if args.hide_bench else None,
+                open_information=not args.hide_bench,
                 # What each side believes the other's bench holds. Generation has passed
                 # this since IKA-5 and this call did not until IKA-122, so every hidden
                 # match before it searched over a uniform belief -- a different agent

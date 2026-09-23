@@ -40,7 +40,8 @@ the count from before IKA-44.
 
 Nothing here plays a game. It reads the games that were already played and recorded.
 
-    uv run python tools/ratings.py
+    uv run python tools/ratings.py                         # hidden-bench zero (IKA-123)
+    uv run python tools/ratings.py --anchor hp-share/w24   # the open reference's zero
     uv run python tools/ratings.py --anchor value-gen2345.pt/w24 --logit
     uv run python tools/ratings.py --shared-seed independent   # the count before IKA-44
 """
@@ -78,7 +79,21 @@ ELO_PER_LOGIT = 400.0 / math.log(10.0)
 #: it means the same thing next month as it does today -- which a rating anchored on
 #: whichever model happens to be current does not. It also reads as the quantity that
 #: matters: what the learned machinery is worth over having none of it.
-ANCHOR = "hp-share/w24"
+#:
+#: And in the game that ships, which hides the opponent's bench (IKA-123). The zero was the
+#: open `hp-share/w24` until then, so the default table was scaled on the easier game and
+#: the hidden agents read off a zero that played another one. Both zeros exist in the
+#: corpus; the open one is still there as `--anchor hp-share/w24` (`OPEN_ANCHOR`). Names
+#: are unchanged -- open is still the unmarked one -- so no recorded agent moved.
+ANCHOR = "hp-share/w24/hidden-bench"
+OPEN_ANCHOR = "hp-share/w24"
+
+
+def is_hidden(name: str) -> bool:
+    """Whether an agent name hid the bench. A component, not a suffix: a hidden agent that
+    weights the bench by its book is `.../hidden-bench/belief:book`, and `endswith` called
+    it open (IKA-123)."""
+    return "hidden-bench" in name.split("/")
 
 #: How a pairing played twice on one seed's draws is counted (IKA-44). `newest` counts the
 #: draws once, from the newest run that did not fail; `independent` counts every run, which
@@ -800,25 +815,23 @@ def main() -> None:
     # once -- so summing `played` over the hidden-bench agents counts every hidden game
     # twice, and the line printed 23,744 against a truth of 11,872 on the day it was
     # written. Two counters in the same sentence, in different units.
-    hidden = sum(
-        n
-        for a, b, _w, n in games
-        if a.endswith("/hidden-bench") or b.endswith("/hidden-bench")
-    )
+    hidden = sum(n for a, b, _w, n in games if is_hidden(a) or is_hidden(b))
     print(
         f"\n  {hidden} games hid the bench and {total - hidden} did not. The open ones are "
         "REFERENCE:\n  their search saw the opponent's four, which is information a real "
         "game does not give.\n  They carry their own zero, so read that scale with "
-        "--anchor hp-share/w24/hidden-bench."
+        f"--anchor {OPEN_ANCHOR}. Hidden rows first."
     )
     print(
         f"\n  {'agent':<34} {unit:>9}  {'+-':>6}  {'games':>6}  {'grp':>3}  bench"
     )
-    for name in names:
+    # The hidden rows lead, because that is the game being solved; the open ones follow
+    # as reference, each block by rating.
+    for name in sorted(names, key=lambda n: not is_hidden(n)):
         if played[name] < args.min_games:
             continue
         half = 1.96 * errors[name] * scale
-        bench = "hidden" if name.endswith("/hidden-bench") else "open(ref)"
+        bench = "hidden" if is_hidden(name) else "open(ref)"
         print(
             f"  {name:<34} {rating[name] * scale:>9.1f}  {half:>6.1f}  "
             f"{played[name]:>6}  {island.get(name, 0):>3}  {bench}"

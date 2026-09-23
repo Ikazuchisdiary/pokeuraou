@@ -24,7 +24,7 @@ the games are played here, through `play_game`, with the agent generation ships.
 `--value` the player is the hp-share heuristic and the positions are a different player's
 -- the run says so in its header.
 
-    uv run python tools/branch_dedup.py --games 2 --value data/models/value-gen11L.pt
+    uv run python tools/branch_dedup.py --games 2 --value data/models/value-gen11L.pt --hide-bench
 """
 
 from __future__ import annotations
@@ -43,6 +43,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from pokeuraou import rustnode  # noqa: E402
+from pokeuraou.benchflags import add_bench_flags, require_bench  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.payoff import OBJECTIVES  # noqa: E402
 from pokeuraou.priors import find_cached_chaos, load_chaos  # noqa: E402
@@ -131,12 +132,13 @@ def main() -> None:
     ap.add_argument("--roster", default="rizabanadohido")
     ap.add_argument("--value", default=None, help="data/models/*.pt; the agent that ships")
     ap.add_argument("--device", default="cpu")
-    ap.add_argument(
-        "--hide-bench",
-        action="store_true",
-        help="hand the search the sheets rather than the opponent's four, as generation does",
+    add_bench_flags(
+        ap,
+        hidden_help="hand the search the sheets rather than the opponent's four, as "
+        "generation does. One of this or --open-bench is required (IKA-123).",
     )
     args = ap.parse_args()
+    require_bench(args)
 
     roster = load_roster(args.roster)
     reg = roster.reg
@@ -251,6 +253,7 @@ def main() -> None:
                 evaluate=leaf,
                 rank_by_leaf=bool(leaf),
                 sheets=(list(roster.sets), list(foe_six)) if args.hide_bench else None,
+                open_information=not args.hide_bench,
             )
     finally:
         resolve_mod.resolve_turn = real

@@ -141,6 +141,7 @@ def main() -> None:
                 search_limit=args.limit,
                 max_turns=args.max_turns,
                 solve_sparsely=args.solve_sparsely,
+                open_information=True,
             )
             turns += record.turns
             # The decisions are what a difference would show up in first.

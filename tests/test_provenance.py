@@ -21,6 +21,7 @@ def source(**over: object) -> dict[str, object]:
         seat="a = side 0",
         leaves=("value-a", "value-b"),
         limits=(24, 24),
+        information=("open", "open"),
     )
     base.update(over)
     return base
@@ -92,6 +93,7 @@ def test_an_undone_fix_is_another_agent_and_only_then_recorded() -> None:
         seat="a = side 0",
         leaves=("value-a", "value-a"),
         limits=(12, 12),
+        information=("open", "open"),
         encodings=("new", "old-can-mega+old-patch"),
     )
     assert at["encodings"] == ["new", "old-can-mega+old-patch"]
@@ -108,6 +110,7 @@ def test_the_old_rank_view_is_another_agent_and_only_then_recorded() -> None:
         seat="a = side 0",
         leaves=("value-a", "value-a"),
         limits=(12, 12),
+        information=("open", "open"),
         rank_views=("first", "heaviest"),
     )
     assert at["rankViews"] == ["first", "heaviest"]

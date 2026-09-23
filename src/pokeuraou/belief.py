@@ -1,8 +1,15 @@
 """What we do not know about the opponent, and how much of it actually matters.
 
 Champions shows open team sheets, and Showdown's implementation reveals nature there but
-blanks the spread. So the hidden state is exactly six numbers per opposing Pokemon: its
-SP allocation. Everything else -- species, ability, item, moves, nature -- is public.
+blanks the spread. So what a SHEET hides is six numbers per opposing Pokemon: its SP
+allocation. Species, ability, item, moves and nature are public.
+
+That is this module's part of the hidden state, not all of it (IKA-123, IKA-130). The
+opponent brings four of the six, and the two that did not lead stay unknown until they
+come in -- `pokeuraou.hidden` carries that belief. And the exact HP inside the displayed
+percentage follows from the spread, so it is hidden with it (`pokeuraou.hpdisplay`).
+Self-play's search is still shown the opponent's spreads and exact HP; only the bench is
+hidden from it today.
 
 The obvious representation is a handful of "archetypes" per species. Measured against the
 usage data, that does not work: Incineroar alone appears with 10,154 distinct spreads, and

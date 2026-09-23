@@ -123,6 +123,7 @@ def main() -> None:
             depth=args.depth,
             max_turns=40,
             evaluate=evaluate,
+            open_information=True,
         )
         turns += record.turns
         decisions += len(record.decisions)

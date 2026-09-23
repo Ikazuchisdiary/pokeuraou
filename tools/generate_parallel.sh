@@ -165,6 +165,7 @@ for i in $(seq 0 $((WORKERS - 1))); do
 		--device "$DEVICE" \
 		--torch-threads 1 \
 		--mirror-share "$MIRROR_SHARE" \
+		--open-bench \
 		"${rank_args[@]}" \
 		"${book_args[@]}" \
 		--out "$OUT_DIR/games-seed$seed.jsonl" \

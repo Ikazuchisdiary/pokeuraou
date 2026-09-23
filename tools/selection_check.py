@@ -38,8 +38,8 @@ an LP value that has no seat term in it at all -- which is the comparison G31 pr
 selection cache's optimism from. The pair of seats also measures the seat bias itself, and
 `tools/seats.py` says why that number is printed rather than merely cancelled.
 
-    uv run --group learn python tools/selection_check.py --mirror --games 300
-    uv run --group learn python tools/selection_check.py --place 1 --games 300
+    uv run --group learn python tools/selection_check.py --mirror --games 300 --hide-bench
+    uv run --group learn python tools/selection_check.py --place 1 --games 300 --hide-bench
 """
 
 from __future__ import annotations
@@ -59,6 +59,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 # tool and `book_check` came to have none of it while `generation_match` had all of it.
 from seats import SEATS, SeatTally, play_paired, sides
 
+from pokeuraou.benchflags import add_bench_flags, require_bench
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
 from pokeuraou.names import localiser
@@ -120,14 +121,15 @@ def main() -> None:
         "is meaningless when the lead carries no mass; naming all four tests a line as "
         "played rather than a lead with an arbitrary bench.",
     )
-    ap.add_argument(
-        "--hide-bench",
-        action="store_true",
-        help="play the condition that actually exists: the opponent's six is public "
-        "and which four they brought is not. Without it the search is handed side 1's "
-        "whole four from turn 1, which is the assumption G2 names as the reason the "
-        "solver is optimistic about its own side -- and the assumption the recorded "
-        "-21.8 point miss on place 109 was measured under.",
+    add_bench_flags(
+        ap,
+        hidden_help="play the condition that actually exists: the opponent's six is "
+        "public and which four they brought is not. One of this or --open-bench is "
+        "required (IKA-123).",
+        open_help="hand the search side 1's whole four from turn 1, which is the "
+        "assumption G2 names as the reason the solver is optimistic about its own side -- "
+        "and the assumption the recorded -21.8 point miss on place 109 was measured under. "
+        "What omitting both flags meant before IKA-123.",
     )
     ap.add_argument(
         "--only-arm",
@@ -173,6 +175,9 @@ def main() -> None:
         "--device", default=None, help="cuda when one is available, otherwise cpu"
     )
     args = ap.parse_args()
+    if not args.merge:
+        # A merge reads what the shards played; the condition is in their headers.
+        require_bench(args)
 
     roster = load_roster(args.roster)
     reg = roster.reg
@@ -466,6 +471,7 @@ def main() -> None:
                         if args.hide_bench
                         else None
                     ),
+                    open_information=not args.hide_bench,
                 )
                 if record.outcome is not None:
                     rows.append(

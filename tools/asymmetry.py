@@ -12,6 +12,10 @@ opponent being searched twice as widely, it is the matchup. If it does not, the 
 number was measuring our own search.
 
     uv run python tools/asymmetry.py --games 150 --pairs 8x8,8x16,8x24,16x8
+
+**Open game only: a reference** (IKA-123). This tool has no hidden-bench path, so its
+search is shown the opponent's four -- not the game that ships. It says so on stderr
+when it runs, and `tools/agent_drift.py` lists it under KNOWN_DRIFT.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from pokeuraou.benchflags import say_open_reference
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.priors import find_cached_chaos, load_chaos
@@ -42,6 +47,7 @@ def main() -> None:
     ap.add_argument("--archetypes", default="wcs2026-regmb")
     ap.add_argument("--objective", default="hp-share")
     args = ap.parse_args()
+    say_open_reference()
 
     roster = load_roster(args.roster)
     reg, archetypes = load_archetypes(args.archetypes)
@@ -78,6 +84,7 @@ def main() -> None:
                 objective=objective,
                 search_limit=(ours_limit, foe_limit),
                 max_turns=args.max_turns,
+                open_information=True,
             )
             if record.outcome is None:
                 unfinished += 1

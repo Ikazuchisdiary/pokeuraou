@@ -102,6 +102,9 @@ def main() -> None:
         search_limit=args.limit,
         max_turns=args.max_turns,
         standings=standings,
+        # The open game, as this dump has always played: the cases are damage calls, and
+        # which of them a hidden bench would reach is not what it records (IKA-123).
+        hide_bench=False,
     )
 
     out = Path(args.out)

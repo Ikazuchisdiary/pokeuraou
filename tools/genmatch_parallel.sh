@@ -67,6 +67,7 @@ for i in $(seq 0 $((WORKERS - 1))); do
 		--roster "$ROSTER" --value "$NEW" --baseline "$OLD" \
 		--games "$GAMES" --limit "$LIMIT" --seed "$seed" \
 		"${rank_args[@]}" \
+		--open-bench \
 		--out "$OUT_DIR/seed$seed.jsonl" \
 		--games-out "$OUT_DIR/games-seed$seed.jsonl" \
 		--device "$DEVICE" --torch-threads 1 \

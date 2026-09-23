@@ -538,6 +538,7 @@ def play_game(
     start: Position | None = None,
     first_action: str | None = None,
     sheets: tuple[Sequence[SampledSet], Sequence[SampledSet]] | None = None,
+    open_information: bool = False,
     bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None = None,
     one_agent: bool = True,
     rank_view: str | tuple[str, str] = "heaviest",
@@ -565,6 +566,12 @@ def play_game(
     as the Bayesian game it is. Omitted, the search sees the opponent's whole four, which
     is what every game recorded before this did -- and what 47.4% of decisions had no
     right to. The two are different agents and `provenance` says which.
+
+    Omitting ``sheets`` is not enough to get the open game: it also takes
+    ``open_information=True``, and without either the call stops (IKA-123). The open game
+    was the silent default for as long as the hidden bench was an afterthought, and a
+    caller that forgot the sheets got an easier game under the same call. Passing both is
+    a contradiction and stops too.
 
     ``one_agent`` says whether the two sides are one agent playing itself, which is what
     self-play is and what a match is not. It changes no decision; it changes only how
@@ -618,6 +625,15 @@ def play_game(
     for rule in views_rule:
         if rule not in RANK_VIEWS:
             raise ValueError(f"rank_view {rule!r} is not one of {RANK_VIEWS}")
+    if sheets is None and not open_information:
+        raise ValueError(
+            "no `sheets`, so the search would be shown the opponent's four -- the open "
+            "game. Pass both sixes as `sheets` to hide the bench (what ships), or "
+            "`open_information=True` to mean the open game (a reference). Since IKA-123 "
+            "it is not a default."
+        )
+    if sheets is not None and open_information:
+        raise ValueError("`sheets` hides the bench and `open_information=True` shows it")
     if sheets is not None and (
         depths != (1, 1) or sparse != (False, False) or restricted != (False, False)
     ):
@@ -1534,7 +1550,7 @@ def generate(
     solve_sparsely: bool = False,
     solve_restricted: bool = False,
     force_lead: tuple[str, ...] | None = None,
-    hide_bench: bool = False,
+    hide_bench: bool | None = None,
     indices: Iterable[int] | None = None,
     on_finish: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
@@ -1592,6 +1608,11 @@ def generate(
     ``on_finish`` is called with an index once its game has been *written*, not once it has
     been played. The gap is the point: a worker that dies in between should have that game
     handed to somebody else.
+
+    ``hide_bench`` has no default (IKA-123). True is what ships: both searches solve over
+    the sixes, never the opponent's four. False is the open game, which is what every pool
+    before the hidden bench was generated in and what this argument silently meant when
+    left out -- so leaving it out now stops instead of making open teacher data.
     """
     if not 0.0 <= mirror_share <= 1.0:
         raise ValueError(f"mirror_share must be a probability, got {mirror_share}")
@@ -1599,6 +1620,11 @@ def generate(
         raise ValueError(
             "a selection book is keyed on tournament team sheets, so it needs the "
             "standings pool it was solved against"
+        )
+    if hide_bench is None:
+        raise ValueError(
+            "hide_bench must be given: True hides the opponent's bench (what ships), False "
+            "plays the open game (reference). It defaulted to False before IKA-123."
         )
     if standings is not None:
         field = cluster_labels(reg, standings, standings_pool)
@@ -1708,6 +1734,7 @@ def generate(
                 solve_restricted=solve_restricted,
                 # Both sixes, so neither search is shown the other's unplayed bench.
                 sheets=(list(roster.sets), list(foe_six)) if hide_bench else None,
+                open_information=not hide_bench,
                 # And what each side would have brought, so the belief over the bench is
                 # the opponent's own selection equilibrium rather than a uniform draw
                 # over every pair the sheet allows. Only when the book named this

@@ -494,7 +494,11 @@ override 経路で memo を通らない）ので、近似ではなく厳密な�
   `evLimit = 66`、1ステ上限 32 は validator が強制し、`32/32/2`（合計66）も合法。
 - Champions のオープンチームシートは **性格も公開する**
   (`sim/battle.ts` の `showOpenTeamSheets` が champions を特別扱い)。
-  隠れ情報は **SP 配分 6 次元のみ**。
+  シートが隠すのは **SP 配分 6 次元のみ**。ただし対戦中の隠れ情報はそれだけではない:
+  持ってきた4匹のうち先発しなかった2匹は、場に出るまで分からない（控え。`pokeuraou.hidden`、
+  CLI では `--hide-bench`）。% 表示の内側の正確な HP も配分から決まるので、配分と一緒に隠れている。
+  **控え隠蔽が出荷の条件**で、控え公開（`--open-bench`）は参考。IKA-123 からどちらも既定ではなく、
+  片方を明示しないと止まる。
 - Showdown には中立性格が5つ残っている（Hardy/Docile/Bashful/Quirky/Serious）。
   本家に無い4つを弾くのは**我々の責務**。0SP セットは Hardy に差し替えて渡す。
 - テラスタルは `canTerastallize() → null` で無効。ギミックはメガのみ、1試合1回/陣営。

@@ -220,6 +220,7 @@ def main() -> None:
             objective=objective,
             search_limit=args.limit,
             max_turns=args.max_turns,
+            open_information=True,
         )
 
     out = Path(args.out)

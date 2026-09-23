@@ -91,6 +91,7 @@ def main() -> None:
                 search_limit=args.limit,
                 max_turns=40,
                 evaluate=evaluate,
+                open_information=True,
             )
             turns += record.turns
             decisions += len(record.decisions)

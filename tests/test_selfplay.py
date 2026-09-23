@@ -70,6 +70,7 @@ def test_a_game_reaches_a_result(setup) -> None:  # noqa: ANN001
         usable[0].id,
         objective=HP_SHARE,
         search_limit=4,
+        open_information=True,
     )
     assert record.decisions, "a game with no decision point is not a game"
     assert record.outcome in (0.0, 1.0, None)
@@ -94,6 +95,7 @@ def test_every_recorded_position_can_be_read_back(setup) -> None:  # noqa: ANN00
         usable[0].id,
         objective=HP_SHARE,
         search_limit=4,
+        open_information=True,
     )
     for decision in record.decisions:
         restored = Position.from_json(json.loads(json.dumps(decision.position)))
@@ -112,6 +114,7 @@ def test_an_unfinished_game_is_discarded_not_labelled(setup, tmp_path) -> None: 
     stats = generate(
         reg, prior, roster, usable,
         games=3, seed=1, out=out, objective=HP_SHARE, search_limit=4, max_turns=1,
+        hide_bench=False,
     )
     assert stats["games"] == 3
     assert stats["finished"] == 0
@@ -124,7 +127,7 @@ def test_written_games_carry_a_real_outcome(setup, tmp_path) -> None:  # noqa: A
     out = tmp_path / "games.jsonl"
     stats = generate(
         reg, prior, roster, usable,
-        games=4, seed=2, out=out, objective=HP_SHARE, search_limit=4,
+        games=4, seed=2, out=out, objective=HP_SHARE, search_limit=4, hide_bench=False,
     )
     if stats["finished"] == 0:
         pytest.skip("no game finished in this small sample")

@@ -47,6 +47,7 @@ for i in $(seq 0 $((WORKERS - 1))); do
 		--games "$GAMES" \
 		--value "$VALUE" \
 		--limit "$LIMIT" \
+		--open-bench \
 		"${rank_args[@]}" \
 		--seed "$seed" \
 		--device "$DEVICE" \

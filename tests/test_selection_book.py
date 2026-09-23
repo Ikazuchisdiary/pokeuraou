@@ -546,6 +546,7 @@ def test_generation_draws_both_sides_from_the_book(roster, tmp_path) -> None:  #
         standings=_standings(team),
         book=book,
         explore_epsilon=0.0,
+        hide_bench=False,
     )
     assert stats["book_hits"] == 2
     assert stats["book_misses"] == 0
@@ -590,6 +591,7 @@ def test_a_mirror_game_is_our_own_six_with_our_own_spreads(roster, tmp_path) -> 
         # be skipped over an empty file.
         max_turns=25,
         mirror_share=1.0,
+        hide_bench=False,
     )
     assert stats["mirror_games"] == 2
     assert stats["book_hits"] == 0

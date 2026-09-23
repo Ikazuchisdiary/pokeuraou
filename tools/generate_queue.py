@@ -19,7 +19,10 @@ and makes a retry after a death a retry of the game that was lost.
 The driver itself lives in `pokeuraou.workqueue`, shared with `tools/match_queue.py`.
 
     uv run --group learn python tools/generate_queue.py --out data/selfplay-gen9 \\
-        --games 12000 --workers 8 --value data/models/value-all.pt --limit 48
+        --games 12000 --workers 8 --value data/models/value-all.pt --limit 48 --hide-bench
+
+`--hide-bench` or `--open-bench` is required, as `--uniform-selection` is for a missing
+book: the condition that does not ship has to be asked for by name (IKA-123).
 
 Everything after `--` goes to the workers untouched, for options this does not name:
 
@@ -38,6 +41,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from pokeuraou.benchflags import add_bench_flags, bench_argv, require_bench  # noqa: E402
 from pokeuraou.workqueue import run_workers  # noqa: E402
 
 
@@ -160,13 +164,17 @@ def main() -> None:
         help="draw the four of six uniformly and say so out loud. Without this a missing "
         "book is an error rather than a silent -141 Elo.",
     )
-    ap.add_argument(
-        "--hide-bench",
-        action="store_true",
-        help="pass --hide-bench to every worker: neither search sees the other side's "
-        "unplayed bench. The games are a different conditioning from every pool recorded "
-        "so far and say so in their `information` field, so a training set can keep them "
-        "apart rather than average two games together.",
+    # Like --uniform-selection above: the condition that does not ship has to be named.
+    # Before IKA-123 a run without --hide-bench generated open teacher data and said so
+    # only in each game's `information` field.
+    add_bench_flags(
+        ap,
+        hidden_help="pass --hide-bench to every worker: neither search sees the other "
+        "side's unplayed bench. What ships (tools/ika73_generate.sh). One of this or "
+        "--open-bench is required.",
+        open_help="pass --open-bench to every worker: open teacher data, which the pools "
+        "before the hidden bench are and which a training set keeps apart by its "
+        "`information` field. What omitting both flags meant before IKA-123.",
     )
     ap.add_argument(
         "--force-lead",
@@ -180,6 +188,7 @@ def main() -> None:
         help="after --, options passed to every worker unchanged",
     )
     args = ap.parse_args()
+    require_bench(args)
     if args.workers is None:
         # Swept on the board, width 16 against 48, startup discarded, one machine, back to
         # back:
@@ -275,7 +284,7 @@ def main() -> None:
             "--device", args.device,
             "--torch-threads", "1",
             "--roster", args.roster,
-            *(["--hide-bench"] if args.hide_bench else []),
+            *bench_argv(args.hide_bench),
             *(["--force-lead", args.force_lead] if args.force_lead else []),
             "--out", str(out_dir / f"games-worker{worker}.jsonl"),
         ]
@@ -300,7 +309,8 @@ def main() -> None:
         f"generation: {args.workers} workers sharing {args.games} games "
         f"({numbers.start}..{numbers.stop - 1}) -> {out_dir}\n"
         f"  run seed {args.seed}, search {args.limit}, "
-        f"leaf {args.value or 'hp-share'} on {args.device}",
+        f"leaf {args.value or 'hp-share'} on {args.device}, "
+        f"bench {'hidden' if args.hide_bench else 'OPEN (reference)'}",
         file=sys.stderr,
         flush=True,
     )
