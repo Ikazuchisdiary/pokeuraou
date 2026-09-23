@@ -11278,3 +11278,104 @@ master（ff82ad5、IKA-136・IKA-127・IKA-159 入り）を取り込んでビル
 test_port_gates・test_line_endings・test_no_machine_specific_paths・test_disguise_afterhit を `-n 0` で 121 pass、diff_node も
 取り込み後に同じ結果（0/1,284）。機械（heavy.py、--agent IKA-160）: release ビルド 2 回（8 コア 26 秒・18 秒）、オラクル 265 秒、
 記録 819 秒、diff_node 75・69・61 秒、テスト 20 秒（いずれも 1 コア）。
+
+## 9/23 — IKA-162: ダブルショックとやけどころで使い手のタイプを消費する —— Python も port も普通の攻撃として扱い、unmodelled にも出ていなかった。オラクル 9 局面で Python・port とも Showdown と一致
+
+ワーカー、基点 master 28fb86c（d69afd0 で始め、IKA-158・159・160・163・164 が入ったので載せ直した）、ブランチ
+`ika-162-double-shock-type`。IKA-136 の 7 節の別件の実施。
+
+### 1. Showdown の定義
+
+`data/moves.ts` の `doubleshock`（電気）と `burnup`（炎）は同じ形:
+
+```
+  onTryMove   使い手が hasType(そのタイプ) でなければ '-fail'、attrLastMove('[still]')、return null
+  self.onHit  setType(getTypes(true) のそのタイプを "???" に置き換えたもの)、'-start typechange'
+```
+
+* champions mod はダブルショックに punch を足すだけ（IKA-136）、やけどころは `isNonstandard: null`（合法）
+* `onTryMove` は `useMoveInner` の中、対象の決定と PP の後、`runEvent('TryMove')`（IKA-158 の先制技封じ）の前。
+  `null` なので `moveThisTurnResult` は null で、じだんだ・やけっぱちが見る `=== false` にならない
+* `self` は `selfDrops` から、技が届いた対象があるときだけ。まもる・無効（地面タイプ）なら型はそのまま
+* 交代で引っ込むときとひんしのときは `clearVolatile` の最後の `setSpecies(this.baseSpecies)` が型を種族に戻す
+* ダンプは `self: {}`、`customHooks: ["onTryMove"]`。関数はダンプに出ないので、名前で持つしかない
+* 覚える種族（champions の learnsets）: ダブルショックはパーモットだけ（M-C のみ）。やけどころはウインディ・
+  ヒスイウインディ・バクフーン・ヒスイバクフーン・エンブオー・ラウドボーン・グレンアルマ・ソウブレイズ（M-B・M-C とも）。
+  型の "???" はタイプ表に行も列も無いので、両エンジンとも中立（Showdown も同じ）。符号化はどの型の列も立てない
+
+### 2. オラクル（`tests/test_type_spending_moves.py`、Showdown d3de52a17、ロール固定・急所なし・追加効果なし）
+
+```
+  局面                                Showdown の結果（当たった枝）                          旧 Python  旧 exe  新
+  double-shock-spends-electric        パーモット ???/Fighting、後攻のドリルライナーは等倍 98/177   落ち      落ち    通る
+  burn-up-spends-fire                 ウインディ ???、後攻のねっとうは等倍 146/197              落ち      落ち    通る
+  a-second-double-shock-fails         '-fail'、PP は 7→6、ドヒドイデは無傷、前ターン失敗は偽      落ち      落ち    通る
+  a-second-burn-up-fails              '-fail'、PP 7→6                                          落ち      落ち    通る
+  switching-out-restores-the-type     控えのパーモットは Electric/Fighting                      落ち      落ち    通る
+  fainting-restores-the-type          ひんしのパーモットは Electric/Fighting                    落ち      落ち    通る
+  control-protected-target            まもるに止められて型はそのまま                            通る      通る    通る
+  control-immune-target               地面タイプに無効で型はそのまま                            通る      通る    通る
+  control-ground-into-electric        電気のままのパーモットへの地面技は抜群                    通る      通る    通る
+```
+
+旧 Python は master 28fb86c の resolve.py、旧 exe は main の `rust/target/release/pokeuraou-damage.exe`（sha256
+2c1b1201…）。比べるのは各ポケモンの型・HP・PP と、side 0 の「前ターンの技が失敗」（side 1 のドヒドイデの満タンの
+じこさいせいは `false` だが Python は記録しない。別件）。port の枝は Python の枝の順で、ドリルライナーが外れた枝を
+Python の出来事で除いて、残りを Showdown と比べる。
+
+### 3. 直し（Python と port で同じ形）
+
+* `resolve.py`・`moves.rs`: `TYPE_SPENDING_MOVES`（`spent_type`）。対象の確認の直後、先制技封じの前で型を見て、
+  無ければ失敗（`move_failed` にしない）。`_after_move` の `self` の塊（`move_connected` かつ使い手が立っている）で
+  型を `???` に置き換える
+* `_restore_types`（`restore_types`）: 交代で引っ込むときと `faint` で種族の型に戻す。これまで型を変えるのは
+  メガ・フォルムチェンジ（どちらも種族の型を書く）だけだったので、この 2 か所は技を使わない局面では何も変えない
+* `setType` は追加の型（ハロウィン・もりののろい）も消すが、局面の型の並びでは区別できない。どちらの技も
+  fully modelled でなく、M-B・M-C の記録にも無いので、並びをそのまま書き換える
+* `tools/diff_node.py`: `--using` が型を消費する技も取る。対照は `TYPE_SPENDING_MOVES` を空にした Python（`unspent`、
+  master の `unchanged` の一部として）
+
+### 4. diff_node（`--scenario`、scenario-turn5 の p1 をパーモット鉄の拳＋ガブリアス（じしん）先発に、メニュー全部 3,172 セル）
+
+`C:/tmp/ika162/make_scenario.py` で作った局面。じしんは味方にも当たるので、先にダブルショックを撃てば同じ手番の
+じしんが 2 倍から等倍になる。「消費済み」はその局面のパーモットを `???/Fighting` にしたもの（`diff_node_spent.py`、
+シナリオの形式に型の欄が無いので包んだ）。
+
+```
+                          budget  exe  拒否  最悪差      ダブルショックのセル  発火  発火で違う
+  新鮮                    matrix  新   0     3.3e-16     728                   531   0
+  新鮮                    fast    新   0     8.9e-16     728                   531   0
+  消費済み                matrix  新   0     3.3e-16     728                   533   0
+  消費済み                fast    新   0     7.8e-16     728                   533   0
+  新鮮（陽性対照）        matrix  旧   0     1.5e-02     728                   531   531   FAIL
+  消費済み（陽性対照）    matrix  旧   0     1.4e-01     728                   533   533（ほか交代・ひんしの型で 27）FAIL
+```
+
+均衡の値の移動は新 exe で 2.2e-16 以下。記録局面の null コントロール（`--games-dir data/ika73/w12 --nodes 20
+--min-turn 3`、8,670 セル）: 拒否 0、最悪差 3.3e-16、OK。`port_coverage --check`・`port_gate_audit --check` ok。
+
+### 5. 記録とプールで該当する数
+
+```
+  記録（data/ 以下の *.jsonl 4,416 ファイル）  doubleshock 0 行・burnup 0 行
+     陽性対照（同じ走査）  arcanine 46,956 行（2,299 ファイル）、M-C の局 6 行（data/selfplay/games-seed7.jsonl）、pawmot 0 行
+  プール（data/pool、M-C 65 構築）             ダブルショック 1（パーモット @ きあいのタスキ、9b5f8ea803d76ff4）、やけどころ 0
+  Baltimore（M-C、1,082 構築）                  パーモット 19、うちダブルショック 18。やけどころ 0
+  Worlds（M-B）                                 どちらも 0
+```
+
+記録は M-B がほとんどで、パーモットは M-B に居ない。やけどころを持つウインディは記録に多いが、M-B の出典に
+やけどころが無い。直しが効くのはこれからの M-C の局（プールの 1 構築）から。
+
+### 6. 別件（起票の候補）
+
+* こおりの `defrost`（champions mod の `frz.onBeforeMove` は defrost の技なら動ける。やけどころは炎タイプのときだけ）を
+  Python も port も見ていない（resolve.py・rust に defrost の語が無い）
+* 満タンのじこさいせいなど、`false` を返す失敗を Python が `move_failed` に数えていない局面がある（上の side 1）。
+  じだんだ・やけっぱちの威力が変わる
+* port の `after_move` はいのちのたまを `total > 0` で見ているが、Python は IKA-157 から `move_connected`（ばけのかわで
+  0 ダメージの当たりも含む）。確かめていない
+
+関係テスト 17 ファイル 264 件（1 件は IKA-158 の宣言どおりの xfail）1コア 41 秒。機械: cargo release 2回（8コア 24・19 秒）、
+関係テスト 2回（1コア 40・41 秒）、オラクルのテスト単体 数回（各 2 秒前後）、diff_node 14回（1コア 7〜19 秒）、
+記録の rg 5回（1コア 24〜29 秒）。すべて heavy.py（--agent IKA-162）。
