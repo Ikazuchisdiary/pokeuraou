@@ -396,6 +396,70 @@ fn bust_disguise(reg: &Reg, turn: &mut Turn, target: Slot) -> Result<(), String>
     Ok(())
 }
 
+/// What Dragon Darts does with its target (IKA-208).
+enum SmartHits {
+    /// The ordinary two-hit move at these targets: one foe, or none that it can reach.
+    Ordinary(Vec<Slot>),
+    /// A hit on each of two foes, or -- where one of them fails a hit step -- both hits on
+    /// the other, one plan per accuracy outcome with its weight.
+    Split(Vec<(f64, Vec<(Slot, usize)>)>),
+}
+
+/// `smartTarget` (sim/pokemon.ts `getSmartTargets`, sim/battle-actions.ts): the target and
+/// its adjacent ally, when that ally stands and is not the user; the hit steps run on both,
+/// and any failure among them -- Protect, an immunity, a miss -- turns `smartTarget` off,
+/// leaving the move's two hits to whoever is left. With both still there, hit 1 goes to
+/// the first and hit 2 to the second, each a single-target hit (no spread).
+fn smart_hits(
+    reg: &Reg,
+    turn: &Turn,
+    action: &QueuedAction,
+    mv: &Move,
+    targets: &[Slot],
+    budget: &Budget,
+) -> Result<SmartHits, String> {
+    let ordinary = || Ok(SmartHits::Ordinary(targets.to_vec()));
+    let [first] = targets else { return ordinary() };
+    let first = *first;
+    let second = (first.0, 1 - first.1);
+    let standing = |at: Slot| matches!(turn.mon_at(at.0, at.1), Some(m) if !m.fainted && m.hp > 0);
+    if second == (action.side, action.slot) || !standing(second) || !standing(first) {
+        return ordinary();
+    }
+    let Some(attacker) = turn.battler_at(action.side, action.slot)? else { return ordinary() };
+    // Protect (step 3) and the type immunity (step 2), per target.
+    let mut reached: Vec<(Slot, f64)> = Vec::new();
+    for at in [first, second] {
+        if blocked_by_protect(turn, action, mv, at).is_some() {
+            continue;
+        }
+        let Some(defender) = turn.battler_at(at.0, at.1)? else { continue };
+        let field = turn.field();
+        let probe = calculate(reg, &attacker, &defender, mv.id.as_str(), &field, at.0, false, false, None, None, false);
+        if probe.immune {
+            continue;
+        }
+        let accuracy = accuracy_of(turn, mv, &attacker, &defender);
+        let accuracy = if budget.enumerate_accuracy { accuracy } else if accuracy > 0.0 { 1.0 } else { 0.0 };
+        reached.push((at, accuracy));
+    }
+    match reached.as_slice() {
+        [(a, pa), (b, pb)] => {
+            let (a, b, pa, pb) = (*a, *b, *pa, *pb);
+            let plans = vec![
+                (pa * pb, vec![(a, 1), (b, 1)]),
+                (pa * (1.0 - pb), vec![(a, 2)]),
+                ((1.0 - pa) * pb, vec![(b, 2)]),
+                ((1.0 - pa) * (1.0 - pb), vec![]),
+            ];
+            Ok(SmartHits::Split(plans.into_iter().filter(|(w, _)| *w > 0.0).collect()))
+        }
+        // One left: the ordinary move at it, whose accuracy `hit_target` rolls.
+        [(only, _)] => Ok(SmartHits::Ordinary(vec![*only])),
+        _ => ordinary(),
+    }
+}
+
 /// Damp's `onAnyTryMove`: any active Pokemon with it stops Explosion, Self-Destruct,
 /// Misty Explosion (and Mind Blown) -- `breakable`, so not against a Mold Breaker's own
 /// blast (IKA-208).
@@ -1155,12 +1219,44 @@ fn use_move<'a>(
     turn.move_damage_total = 0;
     turn.move_connected = false;
     begin_move_watch(&mut turn);
+    let targets = if mv.raw.get("smartTarget").and_then(Value::as_bool) == Some(true) {
+        match smart_hits(reg, &turn, action, mv, &targets, &budget)? {
+            SmartHits::Split(splits) => {
+                let mut branches: Vec<Outcome<'a>> = Vec::new();
+                for (weight, plan) in splits {
+                    let mut here: Vec<Outcome<'a>> = vec![(weight, turn.clone())];
+                    if plan.is_empty() {
+                        here[0].1.move_failed[action.side][action.slot] = true;
+                    }
+                    for (target, hits) in plan {
+                        let mut expanded: Vec<Outcome<'a>> = Vec::new();
+                        for (w, state) in here {
+                            for (inner, next) in
+                                hit_target(reg, state, action, mv, target, false, budget, None, Some(hits))?
+                            {
+                                expanded.push((w * inner, next));
+                            }
+                        }
+                        here = expanded;
+                    }
+                    branches.extend(here);
+                }
+                for (_weight, state) in branches.iter_mut() {
+                    after_move(state, action, mv)?;
+                }
+                return Ok(branches);
+            }
+            SmartHits::Ordinary(targets) => targets,
+        }
+    } else {
+        targets
+    };
     let mut branches: Vec<Outcome<'a>> = vec![(1.0, turn)];
     for target in &targets {
         let mut expanded: Vec<Outcome<'a>> = Vec::new();
         for (weight, state) in branches.into_iter() {
             let started = crate::resolve::phase_start();
-            let hit = hit_target(reg, state, action, mv, *target, spread, budget, exploded.as_ref())?;
+            let hit = hit_target(reg, state, action, mv, *target, spread, budget, exploded.as_ref(), None)?;
             crate::resolve::phase_end(9, started);
             for (inner_weight, inner_state) in hit {
                 expanded.push((weight * inner_weight, inner_state));
@@ -1450,6 +1546,7 @@ fn hit_target<'a>(
     spread: bool,
     budget: Budget,
     exploded: Option<&crate::position::Pokemon>,
+    forced_hits: Option<usize>,
 ) -> Result<Vec<Outcome<'a>>, String> {
     let move_id = action.move_id.unwrap();
     if let Some(blocked) = blocked_by_protect(&turn, action, mv, target) {
@@ -1492,8 +1589,10 @@ fn hit_target<'a>(
     let accuracy = accuracy_of(&turn, mv, &attacker, &defender);
     let crit_p = crit_probability(reg, &attacker, &defender, move_id.as_str());
 
-    let accuracy_branches: Vec<(f64, bool)> =
-        if budget.enumerate_accuracy && accuracy > 0.0 && accuracy < 1.0 {
+    let accuracy_branches: Vec<(f64, bool)> = if forced_hits.is_some() {
+        // `smart_hits` has rolled it already.
+        vec![(1.0, true)]
+    } else if budget.enumerate_accuracy && accuracy > 0.0 && accuracy < 1.0 {
             vec![(accuracy, true), (1.0 - accuracy, false)]
         } else {
             vec![(1.0, accuracy > 0.0)]
@@ -1521,7 +1620,10 @@ fn hit_target<'a>(
     // building this inside the loop was fifteen wasted allocations per hit on the path that
     // advances a game. Under the matrix budget the roll is fixed and it costs nothing,
     // which is why the allocation count barely moved and the clock did.
-    let hit_counts = multihit_counts(mv, &budget, attacker.ability.as_str());
+    let hit_counts = match forced_hits {
+        Some(hits) => vec![(hits, 1.0)],
+        None => multihit_counts(mv, &budget, attacker.ability.as_str()),
+    };
 
     let ctx_started = crate::resolve::phase_start();
     let move_ctx = MoveContext {
@@ -2116,12 +2218,39 @@ fn spread_secondaries<'a>(
     if state.pending_secondaries.is_empty() {
         return Ok(vec![(1.0, state)]);
     }
-    let pending = std::mem::take(&mut state.pending_secondaries);
-    if pending.len() > MAX_BRANCHED_SECONDARIES {
-        return Err("more secondaries on one hit than this port branches".into());
-    }
+    let mut pending = std::mem::take(&mut state.pending_secondaries);
     if multihit {
-        return Err("secondary on a multi-hit move".into());
+        // Cursed Body is pushed once per hit, and `if (source.volatiles['disable']) return;`
+        // makes every try after the one that lands a no-op: n tries of p are one chance of
+        // 1 - (1 - p)^n, and what it does does not depend on which hit it was (IKA-208).
+        let mut kept: Vec<(f64, Value, Slot)> = Vec::new();
+        for (chance, secondary, target) in pending {
+            let disable = secondary.get("disable").and_then(Value::as_bool) == Some(true);
+            let merged = kept.iter_mut().find(|(_, s, t)| {
+                disable && *t == target && s.get("disable").and_then(Value::as_bool) == Some(true)
+            });
+            match merged {
+                Some(entry) => entry.0 = 1.0 - (1.0 - entry.0) * (1.0 - chance),
+                None => {
+                    if !disable {
+                        // No move in either regulation has one; Python's answer and note.
+                        state.report("secondary on a multi-hit move (applied after the last hit)");
+                    }
+                    kept.push((chance, secondary, target));
+                }
+            }
+        }
+        pending = kept;
+    }
+    if pending.len() > MAX_BRANCHED_SECONDARIES {
+        // Python's `_spread_secondaries`: the tail past the cap did not happen, and says so.
+        // No move in either regulation reaches it (IKA-208).
+        for (chance, _secondary, _target) in pending.drain(MAX_BRANCHED_SECONDARIES..) {
+            state.report(format!(
+                "secondary {}%: beyond the {MAX_BRANCHED_SECONDARIES} branched on one hit (not branched)",
+                (chance * 100.0) as i64
+            ));
+        }
     }
     let mut out: Vec<(f64, Turn<'a>)> = vec![(1.0, state)];
     for (chance, secondary, target) in pending {

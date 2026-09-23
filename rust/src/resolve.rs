@@ -915,6 +915,8 @@ fn move_field_is_ported(field: &str, move_id: &str) -> bool {
         // in `crit_probability` (`runEvent('CriticalHit')`): Storm Throw, Flower Trick,
         // Frost Breath.
             | ("willCrit", _)
+        // `moves::smart_hits`: Dragon Darts, a hit on each foe or both on one.
+            | ("smartTarget", "dragondarts")
     )
 }
 
