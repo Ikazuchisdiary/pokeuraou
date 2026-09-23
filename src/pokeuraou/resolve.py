@@ -5571,6 +5571,13 @@ def _residuals(reg: Regulation, turn: _Turn) -> None:
             order = residual_order(reg, turn)
         return order
 
+    # Sorted before anything ends, as Showdown's `updateSpeed()` and `fieldEvent`'s one
+    # `speedSort` run before the weather's handler decrements it: on the turn the sun runs
+    # out, Chlorophyll's doubled Speed still orders the phase (IKA-190). Sorting at the first
+    # residual that asked, after the weather ended, sorted at the undoubled Speed and noted
+    # ties Showdown does not roll -- the port sorted here already.
+    actives()
+
     # Residual order 1: weather. Its duration is decremented *before* its handler runs and
     # the handler is skipped when it expires, so the last turn of a sandstorm deals no
     # damage at all.
