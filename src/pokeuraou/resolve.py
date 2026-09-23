@@ -2586,6 +2586,11 @@ def _do_status_move(
         turn.move_failed.add((action.side, action.slot))
         return [(1.0, turn, "")]
 
+    if move.id == "helpinghand" and _helping_hand_fails(turn, reachable):
+        turn.log(f"{action.label(reg)} failed (partner already moved)")
+        turn.move_failed.add((action.side, action.slot))
+        return [(1.0, turn, "")]
+
     if not budget.enumerate_accuracy or accuracy >= 1.0 or accuracy <= 0.0:
         if accuracy <= 0.0:
             turn.log(f"{action.label(reg)} missed")
@@ -2671,6 +2676,26 @@ def _apply_status_move_and_judge(
     if not did:
         turn.log(f"{action.label(reg)} failed (did nothing)")
         turn.move_failed.add((action.side, action.slot))
+
+
+def _helping_hand_fails(turn: _Turn, targets: list[tuple[int, int]]) -> bool:
+    """Helping Hand's `onTryHit` (IKA-184):
+
+        if (!target.newlySwitched && !this.queue.willMove(target)) return false;
+
+    The help fails on a partner that has already used its move this turn -- the faster of
+    two partners helping each other, or a Prankster Protect in the same +5 bracket -- unless
+    that partner came in this turn: a Pokemon switched in has no move queued and is still
+    helped. Every slot that has not acted still has its move queued: a switch has already
+    happened by the time anything at +5 moves, and brought in a `newly_switched` Pokemon.
+    """
+    for target in targets:
+        mon = turn.mon_at(*target)
+        if mon is None:
+            continue
+        if mon.newly_switched or target not in turn.acted:
+            return False
+    return True
 
 
 def stall_success_chance(counter: int) -> float:

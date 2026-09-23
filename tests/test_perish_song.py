@@ -128,8 +128,8 @@ BUDGET = replace(Budget.exact(), enumerate_crit=False, enumerate_secondary=False
 
 #: Whose failed-move flag is compared. Only the singer's, in the one case about it: the
 #: Helping Hand filler fails in Showdown when its partner has already moved
-#: (`if (!target.newlySwitched && !this.queue.willMove(target)) return false`), which the
-#: resolver and the port do not mark, and that is not this test's question.
+#: (`if (!target.newlySwitched && !this.queue.willMove(target)) return false`), which
+#: tests/test_helping_hand_fails.py holds to Showdown (IKA-184); it is not this test's question.
 FLAG_OF = {"sung-twice": "p1 politoed"}
 
 
