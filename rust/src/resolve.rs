@@ -780,6 +780,8 @@ fn ability_handled(ability: &str) -> bool {
             | "lightmetal" | "heavymetal" | "sandveil" | "snowcloak" | "stall"
             // Weather setters this port applies on switch-in and mega.
             | "desolateland" | "primordialsea" | "deltastream"
+            // Terrain setters, `terrain::surge` on switch-in and mega (IKA-201).
+            | "electricsurge" | "grassysurge" | "mistysurge" | "psychicsurge"
             // Type changers and retypers: the damage layer owns them, and the resolver
             // never rewrites the Pokemon's types for them -- nor does Python.
             | "aerilate" | "pixilate" | "galvanize" | "refrigerate" | "normalize"
@@ -836,6 +838,8 @@ fn item_handled(item: &str) -> bool {
             // `moves::after_move_secondary_switches` (IKA-191). A Red Card that fires is
             // refused there, as a forceSwitch move is: its replacement is drawn at random.
             | "ejectbutton" | "redcard"
+            // `terrain::use_terrain_seed` (IKA-201).
+            | "electricseed" | "grassyseed" | "mistyseed" | "psychicseed"
     ) || crate::inert::item_is_inert(item)
         // Mega stones carry no turn effect of their own; the mega action owns the forme
         // change, and `reg.mega_targets` is what says which stone belongs to whom.
@@ -2431,6 +2435,8 @@ fn switched_in(reg: &Reg, turn: &mut Turn, side: usize, slot: usize) -> Result<(
         return Ok(());
     }
     switch_in_ability(turn, side, slot);
+    // A Seed's `onStart`, under a terrain already up (IKA-201).
+    crate::terrain::use_terrain_seed(turn, side, slot);
     check_white_herb(turn);
     Ok(())
 }
@@ -2470,6 +2476,8 @@ fn switch_in_ability(turn: &mut Turn, side: usize, slot: usize) {
             turn.pos.field.weather_duration = Some(if extended { 8 } else { 5 });
         }
     }
+
+    crate::terrain::surge(turn, side, slot);
 
     if ability == "intimidate" {
         for foe_slot in 0..turn.pos.sides[1 - side].active.len() {

@@ -51,6 +51,8 @@ from .effects import (
     SURVIVE_AT_ONE_ABILITIES,
     SURVIVE_AT_ONE_ITEMS,
     SURVIVE_CHANCE_ITEMS,
+    TERRAIN_ABILITIES,
+    TERRAIN_SEEDS,
     WEATHER_ABILITIES,
     item_is_removable,
 )
@@ -1848,6 +1850,8 @@ def _switched_in(reg: Regulation, turn: _Turn, side: int, slot: int) -> None:
     if mon.fainted:
         return
     _switch_in_ability(turn, side, slot)
+    # A Seed's `onStart` (`onSwitchInPriority: -1`), under a terrain already up (IKA-201).
+    _use_terrain_seed(turn, side, slot)
     # `onAnySwitchInPriority: -2`, so this runs after the switch-in abilities: an
     # Intimidate drop is undone before anything else reads the stat.
     _check_white_herb(turn)
@@ -1866,6 +1870,8 @@ def _switch_in_ability(turn: _Turn, side: int, slot: int) -> None:
         turn.pos.field.weather_duration = 8 if rock and mon.item == rock else 5
         turn.log(f"{turn.name(side, slot)} set {weather}")
 
+    _surge(turn, side, slot)
+
     if mon.ability == "intimidate":
         for foe_slot in range(len(turn.pos.sides[1 - side].active)):
             foe = turn.mon_at(1 - side, foe_slot)
@@ -1880,6 +1886,64 @@ def _switch_in_ability(turn: _Turn, side: int, slot: int) -> None:
         ally = turn.mon_at(side, ally_slot)
         if ally is not None and not ally.fainted:
             turn.heal(side, ally_slot, max(1, ally.maxhp // 4), reason="hospitality")
+
+
+def _surge(turn: _Turn, side: int, slot: int) -> None:
+    """A Surge's `onStart`: `this.field.setTerrain(...)`, the holder the source (IKA-201).
+
+    The terrain's `durationCallback(source)` is 8 for a Terrain Extender holder, else 5.
+    """
+    mon = turn.mon_at(side, slot)
+    terrain = TERRAIN_ABILITIES.get(mon.ability) if mon is not None else None
+    if mon is None or terrain is None:
+        return
+    if _set_terrain(turn, terrain, 8 if mon.item == "terrainextender" else 5):
+        turn.log(f"{turn.name(side, slot)} set {terrain}")
+
+
+def _set_terrain(turn: _Turn, terrain: str, duration: int) -> bool:
+    """`Field#setTerrain` (sim/field.ts:130), IKA-201.
+
+    A terrain already up returns `false` and keeps its duration. Otherwise the terrain and
+    its duration are set and `eachEvent('TerrainChange')` runs at once, which is where every
+    active Seed holder uses a matching Seed.
+    """
+    field_ = turn.pos.field
+    if field_.terrain == terrain:
+        return False
+    field_.terrain = terrain
+    field_.terrain_duration = duration
+    turn.log(f"terrain -> {terrain}")
+    for side in range(len(turn.pos.sides)):
+        for slot in range(len(turn.pos.sides[side].active)):
+            _use_terrain_seed(turn, side, slot)
+    return True
+
+
+def _use_terrain_seed(turn: _Turn, side: int, slot: int) -> None:
+    """A Seed's `onStart` / `onTerrainChange`: `useItem()` under its terrain, which applies
+    the item's `boosts` from the holder itself and then drops the item (IKA-201)."""
+    mon = turn.mon_at(side, slot)
+    if mon is None or mon.fainted or mon.item not in TERRAIN_SEEDS:
+        return
+    item = mon.item
+    terrain, stat = TERRAIN_SEEDS[item]
+    if turn.pos.field.terrain != terrain:
+        return
+    turn.apply_boosts(side, slot, {stat: 1}, reason=item, from_foe=False)
+    turn.consume_item(side, slot, reason=item)
+
+
+def _grassy_terrain_heal(turn: _Turn, order: list[tuple[int, int]]) -> None:
+    """Grassy Terrain's `onResidual` (order 5, sub-order 2, ahead of Leftovers): a grounded
+    Pokemon heals `baseMaxhp / 16` (IKA-201). Nothing in the field is semi-invulnerable."""
+    if turn.pos.field.terrain != "grassyterrain":
+        return
+    for side, slot in order:
+        mon = turn.mon_at(side, slot)
+        if mon is None or mon.fainted or not _grounded(turn, mon):
+            continue
+        turn.heal(side, slot, turn.fraction_of_max(side, slot, (1, 16)), reason="grassyterrain")
 
 
 def _do_mega(reg: Regulation, turn: _Turn, action: QueuedAction) -> None:
@@ -3368,12 +3432,10 @@ def _apply_status_move(
         turn.log(f"weather -> {weather}")
     if raw.get("terrain"):
         terrain = str(raw["terrain"]).lower().replace(" ", "")
-        turn.pos.field.terrain = terrain
-        # Terrain Extender makes it 8.
-        turn.pos.field.terrain_duration = _effect_duration(
-            turn, move, terrain, action.side, action.slot
-        ) or 5
-        turn.log(f"terrain -> {terrain}")
+        # Terrain Extender makes it 8. The same terrain again changes nothing (IKA-201).
+        _set_terrain(
+            turn, terrain, _effect_duration(turn, move, terrain, action.side, action.slot) or 5
+        )
     if raw.get("pseudoWeather"):
         pid = str(raw["pseudoWeather"]).lower().replace(" ", "")
         already = turn.pos.field.has_pseudo_weather(pid)
@@ -6393,6 +6455,8 @@ def _residuals(reg: Regulation, turn: _Turn) -> None:
                 turn.deal_damage(side, slot, amount, reason=mon.ability)
             else:
                 turn.heal(side, slot, amount, reason=mon.ability)
+
+    _grassy_terrain_heal(turn, actives())
 
     for side, slot in actives():
         mon = turn.mon_at(side, slot)

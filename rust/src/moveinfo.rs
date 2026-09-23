@@ -356,11 +356,25 @@ pub fn base_power_modifiers(
 }
 
 /// Terrain's `onBasePower`, for a grounded user's matching type. At most one.
+///
+/// Misty Terrain's Dragon moves and Grassy Terrain's Earthquake, Bulldoze and Magnitude
+/// are halved into a grounded *target*, whatever the user stands on (IKA-201).
 pub fn terrain_modifiers(
+    move_id: &str,
     move_type: &str,
     attacker_grounded: bool,
     terrain: Option<&str>,
+    defender_grounded: bool,
 ) -> Option<(&'static str, f64, f64)> {
+    if terrain == Some("mistyterrain") {
+        return (move_type == "Dragon" && defender_grounded)
+            .then_some(("mistyterrain", 2048.0, 4096.0));
+    }
+    if terrain == Some("grassyterrain")
+        && matches!(move_id, "earthquake" | "bulldoze" | "magnitude")
+    {
+        return defender_grounded.then_some(("grassyterrain", 2048.0, 4096.0));
+    }
     if !attacker_grounded {
         return None;
     }
@@ -368,7 +382,6 @@ pub fn terrain_modifiers(
         (Some("electricterrain"), "Electric") => Some(("electricterrain", 5325.0, 4096.0)),
         (Some("grassyterrain"), "Grass") => Some(("grassyterrain", 5325.0, 4096.0)),
         (Some("psychicterrain"), "Psychic") => Some(("psychicterrain", 5325.0, 4096.0)),
-        (Some("mistyterrain"), "Dragon") => Some(("mistyterrain", 2048.0, 4096.0)),
         _ => None,
     }
 }
