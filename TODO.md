@@ -11993,3 +11993,97 @@ heavy.py を通さずに 1 コアで走らせた。
 - **port_gate_audit の盲点**: 「id が port のどこかに出てくる」ことを「port が扱う」と数えるので、同じ技の別の道（ここでは
   付与）が抜けていても通る。完全に扱う変化技については、`apply_status_move` か宣言的な欄のどちらかに届くかで見るべき。
 - **ノードの注記**: gen11L の記録局面 1 つで Python だけが `residual speed tie` を出す（旧 exe でも同じ）。
+
+## 9/23 — IKA-176: ため技は 1 ターン目の対象に撃ち、2 ターン目は対象なしの 1 手だけ。デカハンマーは続けて選べない。ブリッジは `activeMoveActions` とはいすいのじんを出す —— w12 の 662 決定・gen11L の 67 決定で、ため技が Showdown と別の相手に当たっていた。デカハンマーの使い手は記録に 0
+
+ワーカー、基点 master 50ab618、途中で 363b973（IKA-172）を取り込み。ブランチ `ika-176-charge-target`。
+
+### 1. Showdown（a5df827）
+
+* ため技の対象: `data/conditions.ts:287` `twoturnmove.onStart` が技名の volatile に
+  `attacker.volatiles[effect.id].targetLoc = attacker.lastMoveTargetLoc` を置く（`twoturnmove` 自身には無い）。
+  2 ターン目は `sim/side.ts:675` `chooseMove` が `lastMoveTargetLoc`、あれば `volatiles[lockedMoveID].targetLoc` に撃つ。
+  要求の技（`pokemon.ts:964` `getMoves(lockedMove)`）に `target` が無いので、`side.ts:669` が対象を付けた選択を
+  "You can't choose a target for Electro Shot" で断る。IKA-169 のメニューは対象ごとの手を出していて、その全部が断られる手だった。
+* デカハンマー: `sim/battle.ts:1695` `if (activeMove.flags['cantusetwice'] && pokemon.lastMove?.id === moveSlot.id) disableMove`。
+  `lastMove` は `moveUsed`（BeforeMove の後）で入るので、怯んだターンの後も disable のまま、交代で消える。
+  ダンプで `cantusetwice` を持つのは両規則とも gigatonhammer だけ（bloodmoon はダンプに無い）。使い手はデカヌチャン（team_legal）。
+* ブリッジ: `activeMoveActions` を書き出さず、`noretreat` は `MODELLED_VOLATILES` に無く `unmodelledVolatiles` に落ちていた。
+
+### 2. オラクル（`tests/test_charge_target.py`、M-C）
+
+```
+  ケース                              Showdown                               直す前                         直した後
+  エレクトロビーム 対象 1/2、2 ターン目  "move 1" だけ通る。"move 1 1/2" は拒否    メニュー "move 1 1","move 1 2"   "move 1" の 1 手、Showdown が通す
+                                       1 ターン目の対象に当たる                  resolver は選んだ対象に撃つ      Python・port とも 1 ターン目の対象
+  Showdown の局面の twoturnmove          targetLoc なし（技名の volatile にある）    —                              extra.targetLoc = 1/2
+  対象の無い古い印（対照）               —                                      対象ごと                         対象ごと（変えない）
+  デカハンマーの次の手番                 hammer disabled                          resolver の子で出る（×）         出ない
+  こだわりスカーフ＋デカハンマー          わるあがき                               3 技が出る（×）                  わるあがき
+  間にまもる／交代して戻る（対照）         hammer 選べる                            一致                            一致
+  Showdown の局面の hammer               moves[].disabled で既に一致               一致                            一致
+  ねこだましの後の Showdown の局面        activeMoveActions 1                      0（ブリッジが出さない）          1、メニューからねこだまし落ち
+  はいすいのじん                         volatile                                 unmodelled                      volatiles に載る
+```
+
+直す前: 新規ファイルの 12 本が落ち（Showdown の事実 6 本・Showdown 局面の hammer 4 本・resolver の子の対照 2 本は通る）、
+port の 2 本は旧 exe（master の release を `POKEURAOU_RUST_NODE_BIN`）で落ち、新 exe で通る。
+`test_trap_sources.py` は `NOT_IN_THE_DUMP` を空にし、はいすいのじんも「旗を消した Showdown の局面」の形で通る。
+
+### 3. 直し
+
+* `actions.charge_target(mon)`: `twoturnmove` の `extra.targetLoc`（Showdown の名前）。`slot_actions` は技の固定のとき、
+  対象を覚えていれば対象なしの 1 手（`to_choice` は "move N"、Showdown が通す形）、無ければ従来どおり対象ごと。
+* `speed.build_queue`（Python）と `resolve.rs` の同じ所（port）: ため技の 2 ターン目は覚えた対象を QueuedAction の対象にする。
+* `resolve._store_charge_target` と `moves.rs`: 溜めるターンに選んだ対象（リダイレクト前）を `extra.targetLoc` に置く。
+* `actions._disabled_after_itself`: ダンプの `cantusetwice` と `last_move` が同じなら出さない（固定の早道にも）。
+  resolver・port の `last_move` は既に Showdown と同じ所で入り、交代で消える。port は手を列挙しない。
+* sim-bridge `position.ts`: `activeMoveActions`、`noretreat` を MODELLED_VOLATILES に、`twoturnmove` の snapshot に
+  技名の volatile の `targetLoc`（無ければ `lastMoveTargetLoc`）を `extra.targetLoc` として。`Position.from_json` と
+  `position.rs` は `activeMoveActions` を既に読む。tsc 通過。dist は worktree で作り直してテストに使った
+  （worktree の dist から `require.resolve('pokemon-showdown')` は main の vendor を指す）。**着地時に main の dist の再ビルドが要る。**
+* 符号化: volatile は有無だけなので入力は変わらない。ENCODING_REVISION は動かさない。
+
+### 4. diff_node（`--charging`・`--hammer` を足した、w12 20 局面、matrix）
+
+```
+                                      新 exe                    旧 exe（master、陽性対照）
+  --charging  ため技のセル               2,497 / 5,774、不一致 0    不一致 985、最悪 0.587
+              覚えた対象が効いたセル       1,087（`untargeted` が動かす）  不一致 985
+  --hammer    デカハンマーのセル          3,724 / 9,299、不一致 0    不一致 86（全部ソーラービームの子の targetLoc）
+              最後の手がハンマーの枠       37 枠、メニューが落とす 37（規則を外すと 36 で出る）
+```
+
+`--charging` は局面の半分を溜めの途中にし（2 番目の相手を対象に）、残りは記録のまま。
+
+### 5. 記録（`C:/tmp/ika176/records.py`、1 コア 18 秒）
+
+```
+                                                  w12        selfplay-gen11L
+  手番の決定                                       434,483    118,018     （IKA-166 と同じ数、陽性対照）
+  ため技の 2 ターン目の枠×決定                      3,690      546         （全部対象を取る技）
+    記録のメニューが対象を付けている（Showdown は拒否）  3,688      546
+    前の手番がそのため技だった                        2,644      380
+      1 ターン目と同じ対象を指した                    1,482      228
+      別の対象を指した                                576        49
+      対象なしの技を指した（先頭の相手）              586        103
+      交代を指した（IKA-169 前のメニュー）            130        13
+      付け替え後、実際に当たる相手が違う              662        67
+  デカハンマーを知る場のポケモン                     0          0
+```
+
+デカハンマーの 0 は、同じ走査がため技を数えているのと、standings・pool にエレクトロビームは有ってデカハンマー・デカヌチャンが
+0 なのが対照。オラクル起点の探索（ブリッジの 2 つ）は記録（生成の局面）には効かない。
+
+### 6. 検査と機械
+
+test_charge_target（新規）・test_trap_sources・test_fake_out_first_turn・test_perish_song・test_actions・test_recharge・
+test_rust_node・test_port_coverage・test_port_gates・test_line_endings・test_no_machine_specific_paths・test_narrow・test_resolve を
+取り込み後に `-n 0` で通過（xfail 1 はげきりん）。ruff、`port_coverage --check`・`port_gate_audit --check` ok。
+機械（heavy.py、--agent IKA-176）: release ビルド 2 回（8 コア 23 秒・18 秒）、記録 2 回（16・18 秒）、diff_node 試し 95 秒と
+4 本 350 秒（1 コア）、テスト 47 秒。
+
+### 7. 残り（別課題の候補）
+
+* アンコールでデカハンマーに縛られたとき（Showdown は `onOverrideAction` で撃たせる、`battle-actions.ts:267` の hint）は確かめていない。
+* ため技の 1 ターン目がリダイレクトされたとき、Showdown は元の場所を覚える（同じにした）が、オラクルでは見ていない。
