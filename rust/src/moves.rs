@@ -1078,6 +1078,7 @@ fn use_move<'a>(
     }
     turn.move_damage_total = 0;
     turn.move_connected = false;
+    begin_move_watch(&mut turn);
     let mut branches: Vec<Outcome<'a>> = vec![(1.0, turn)];
     for target in &targets {
         let mut expanded: Vec<Outcome<'a>> = Vec::new();
@@ -1528,6 +1529,7 @@ fn hit_target<'a>(
                     };
                     let dealt = state.deal_damage(target.0, target.1, amount, true)?;
                     reached = true;
+                    state.move_hit[target.0][target.1] = true;
                     let after_started = crate::resolve::phase_start();
                     // A hit into Endure at 1 HP deals 0 and is still a hit (IKA-171).
                     let landed = amount > 0;
@@ -2048,6 +2050,10 @@ fn mark_self_switch(turn: &mut Turn, action: &QueuedAction) {
     if !alive {
         return;
     }
+    // Red Card's drag runs first and takes the U-turn's flag with it (IKA-191).
+    if matches!(turn.mon_at(action.side, action.slot), Some(mon) if mon.has_volatile("pendingforceswitch")) {
+        return;
+    }
     let bench = turn.pos.sides[action.side]
         .pokemon
         .iter()
@@ -2058,6 +2064,202 @@ fn mark_self_switch(turn: &mut Turn, action: &QueuedAction) {
     }
     turn.add_volatile(action.side, action.slot, "pendingselfswitch", None);
     turn.self_switch_pending = true;
+}
+
+// ---------------------------------------------------------------------------
+// Eject Button, Red Card, Emergency Exit and Wimp Out (IKA-191)
+// ---------------------------------------------------------------------------
+
+/// `resolve.EMERGENCY_EXIT_ABILITIES`: the champions mod's one `onEmergencyExit`.
+fn is_emergency_exit(ability: &str) -> bool {
+    matches!(ability, "emergencyexit" | "wimpout")
+}
+
+/// Python's `_active_hp`: every conscious active Pokemon's HP, -1 elsewhere.
+fn active_hp(turn: &Turn) -> [[i64; 2]; 2] {
+    let mut out = [[-1; 2]; 2];
+    for (side, row) in out.iter_mut().enumerate() {
+        for (slot, hp) in row.iter_mut().enumerate().take(turn.pos.sides[side].active.len()) {
+            if let Some(mon) = turn.mon_at(side, slot) {
+                if !mon.fainted {
+                    *hp = mon.hp;
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Python's `_begin_move_watch`.
+fn begin_move_watch(turn: &mut Turn) {
+    turn.move_start_hp = Some(active_hp(turn));
+    turn.move_hit = [[false; 2]; 2];
+}
+
+/// `battle.canSwitch(side)` (Python's `_can_switch`).
+fn can_switch(turn: &Turn, side: usize) -> bool {
+    turn.pos.sides[side].pokemon.iter().any(|mon| !mon.fainted && !mon.is_active())
+}
+
+/// `hp && hp <= maxhp / 2 && before > maxhp / 2` (Python's `_crossed_half`).
+fn crossed_half(hp: i64, maxhp: i64, before: i64) -> bool {
+    hp > 0 && 2 * hp <= maxhp && 2 * before > maxhp
+}
+
+fn switch_flagged(mon: &crate::position::Pokemon) -> bool {
+    mon.has_volatile("pendingselfswitch") || mon.has_volatile("pendingforceswitch")
+}
+
+/// Python's `_emergency_exit`: the holder's `switchFlag`, answered mid-turn like U-turn's
+/// and after the residual phase with the faint replacements.
+fn emergency_exit(turn: &mut Turn, slot: Slot, mid_turn: bool) {
+    let fires = matches!(turn.mon_at(slot.0, slot.1), Some(mon)
+        if !mon.fainted && is_emergency_exit(mon.ability.as_str()) && !switch_flagged(mon));
+    if !fires || !can_switch(turn, slot.0) {
+        return;
+    }
+    turn.add_volatile(slot.0, slot.1, "pendingselfswitch", None);
+    if mid_turn {
+        turn.self_switch_pending = true;
+    }
+}
+
+/// Python's `_exits_if_crossed`.
+fn exits_if_crossed(turn: &mut Turn, slot: Slot, flagged: bool) {
+    let Some(start) = turn.move_start_hp else { return };
+    let before = start[slot.0][slot.1];
+    if before < 0 || flagged {
+        return;
+    }
+    let crossed = matches!(turn.mon_at(slot.0, slot.1), Some(mon) if crossed_half(mon.hp, mon.maxhp, before));
+    if crossed {
+        emergency_exit(turn, slot, true);
+    }
+}
+
+/// Python's `_user_self_switches`: U-turn's flag, up before any of these checks run.
+fn user_self_switches(turn: &Turn, mv: &Move) -> bool {
+    mv.self_switch && turn.move_connected
+}
+
+/// Python's `_by_speed`: fastest first (Trick Room reversed), a tie reported.
+fn by_speed(turn: &mut Turn, slots: Vec<Slot>) -> Result<Vec<Slot>, String> {
+    if slots.len() < 2 {
+        return Ok(slots);
+    }
+    let trick_room = turn.pos.field.trick_room();
+    let field = turn.field();
+    let mut keyed: Vec<(i64, String, usize, usize)> = Vec::new();
+    for (side, slot) in slots {
+        let mut speed = match turn.battler_at(side, slot)? {
+            Some(fighter) => {
+                let conditions = turn.pos.sides[side].side_conditions.clone();
+                crate::speed::effective_speed(&fighter, &field, &conditions)
+            }
+            None => 0,
+        };
+        if trick_room {
+            speed = 10000 - speed;
+        }
+        let species = turn
+            .mon_at(side, slot)
+            .map(|mon| mon.species.as_str().to_string())
+            .unwrap_or_default();
+        keyed.push((-speed, species, slot, side));
+    }
+    let mut speeds: Vec<i64> = keyed.iter().map(|k| k.0).collect();
+    speeds.sort_unstable();
+    speeds.dedup();
+    if speeds.len() != keyed.len() {
+        turn.report("item speed tie (Showdown breaks it at random)");
+    }
+    keyed.sort();
+    Ok(keyed.into_iter().map(|(_, _, slot, side)| (side, slot)).collect())
+}
+
+/// Python's `_after_move_secondary_switches`: the user's Emergency Exit from `DamagingHit`
+/// and recoil, then (not under Sheer Force) Eject Button, Red Card and the targets'
+/// Emergency Exit.
+fn after_move_secondary_switches(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), String> {
+    if turn.move_start_hp.is_none() {
+        return Ok(());
+    }
+    let me = (action.side, action.slot);
+    let flagged = user_self_switches(turn, mv);
+    exits_if_crossed(turn, me, flagged);
+    if mv.category == "Status" || sheer_forced(turn, me, mv) {
+        return Ok(());
+    }
+    let mut hit: Vec<Slot> = Vec::new();
+    for side in 0..2 {
+        for slot in 0..2 {
+            if turn.move_hit[side][slot] && (side, slot) != me {
+                hit.push((side, slot));
+            }
+        }
+    }
+    let holding = |turn: &Turn, item: &str| -> Vec<Slot> {
+        hit.iter()
+            .copied()
+            .filter(|t| matches!(turn.mon_at(t.0, t.1), Some(mon) if !mon.fainted && is(mon.item, item)))
+            .collect()
+    };
+
+    let ejecting = holding(turn, "ejectbutton");
+    for target in by_speed(turn, ejecting)? {
+        let flag_up = (0..2).any(|side| {
+            (0..turn.pos.sides[side].active.len()).any(|slot| {
+                matches!(turn.mon_at(side, slot), Some(mon) if mon.has_volatile("pendingselfswitch"))
+            })
+        });
+        if flag_up {
+            break;
+        }
+        let forced = matches!(turn.mon_at(target.0, target.1), Some(mon) if mon.has_volatile("pendingforceswitch"));
+        if !can_switch(turn, target.0) || forced {
+            continue;
+        }
+        turn.consume_item(target.0, target.1);
+        turn.add_volatile(target.0, target.1, "pendingselfswitch", None);
+        turn.self_switch_pending = true;
+    }
+
+    let carding = holding(turn, "redcard");
+    for target in by_speed(turn, carding)? {
+        let user_can_go = matches!(turn.mon_at(me.0, me.1), Some(mon)
+            if !mon.fainted && mon.is_active() && !mon.has_volatile("pendingforceswitch"));
+        if !user_can_go || !can_switch(turn, me.0) {
+            break;
+        }
+        if matches!(turn.mon_at(target.0, target.1), Some(mon) if mon.has_volatile("pendingforceswitch")) {
+            continue;
+        }
+        return Err("redcard (replacement is drawn at random)".into());
+    }
+
+    for target in hit {
+        exits_if_crossed(turn, target, false);
+    }
+    Ok(())
+}
+
+/// Python's `_residuals_then_emergency_exit`: the residual phase, then Emergency Exit for
+/// every Pokemon active at its start that crossed half in it (`residualPokemon`).
+pub(crate) fn residuals_then_emergency_exit(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
+    let before = active_hp(turn);
+    residuals(reg, turn)?;
+    for (side, row) in before.iter().enumerate() {
+        for (slot, hp) in row.iter().enumerate() {
+            if *hp < 0 {
+                continue;
+            }
+            let crossed = matches!(turn.mon_at(side, slot), Some(mon) if crossed_half(mon.hp, mon.maxhp, *hp));
+            if crossed {
+                emergency_exit(turn, (side, slot), false);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `resolve.WEATHER_RECOVERY_MOVES`: the recovery moves whose amount is in `onHit`, so the
@@ -2140,6 +2342,7 @@ fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), S
             turn.deal_damage(me.0, me.1, amount, false)?;
         }
     }
+    after_move_secondary_switches(turn, action, mv)?;
     let (item, maxhp) = match turn.mon_at(me.0, me.1) {
         None => (None, 0),
         Some(mon) => (mon.item, mon.maxhp),
@@ -2153,6 +2356,10 @@ fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), S
     }
     if is(item, "shellbell") && total >= 8 && !sheer {
         turn.heal(me.0, me.1, total / 8);
+    }
+    if !sheer && mv.category != "Status" && turn.move_start_hp.is_some() {
+        let flagged = user_self_switches(turn, mv);
+        exits_if_crossed(turn, me, flagged);
     }
 
     let connected = turn.move_connected;

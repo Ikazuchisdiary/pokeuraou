@@ -631,6 +631,8 @@ def all_modelled_abilities() -> frozenset[str]:
             "embodyaspect", "spicyspray",
             # The hit count, in `resolve.multihit_counts` (IKA-160).
             "skilllink",
+            # A switch after the hit, in `resolve._emergency_exit` (IKA-191).
+            "emergencyexit", "wimpout",
         }
     )
 

@@ -28,7 +28,7 @@ use crate::speed::{
     effective_speed, fractional_priority, move_priority, order_actions, ActionKind, QueuedAction,
     ORDER_MEGA, ORDER_MOVE, ORDER_SWITCH,
 };
-use crate::moves::{do_move, residuals};
+use crate::moves::{do_move, residuals_then_emergency_exit};
 use serde_json::Value;
 
 pub type Slot = (usize, usize);
@@ -248,6 +248,11 @@ pub struct Turn<'a> {
     /// outcome, which `_run_queue` answers with `exact = False` (IKA-151). It is never set
     /// on a state that is stored, so merging and the fingerprint do not see it.
     pub(crate) rolls_stratified: bool,
+    /// The damaging move resolving now: every active Pokemon's HP before it (-1 for an
+    /// empty or fainted slot), and the targets it reached -- what Eject Button, Red Card
+    /// and Emergency Exit read once the hits are over (IKA-191). Never read across actions.
+    pub(crate) move_start_hp: Option<[[i64; 2]; 2]>,
+    pub(crate) move_hit: [[bool; 2]; 2],
 }
 
 impl<'a> Turn<'a> {
@@ -269,6 +274,8 @@ impl<'a> Turn<'a> {
             wipe_order: Vec::new(),
             unmodelled: Default::default(),
             rolls_stratified: false,
+            move_start_hp: None,
+            move_hit: [[false; 2]; 2],
         }
     }
 
@@ -717,6 +724,9 @@ fn ability_handled(ability: &str) -> bool {
             | "guarddog" | "hypercutter" | "bigpecks" | "keeneye" | "rockhead"
             // The hit count, in `moves::multihit_counts` (IKA-160).
             | "skilllink"
+            // A switch after the hit or the residual phase, in `moves::emergency_exit`
+            // (IKA-191).
+            | "emergencyexit" | "wimpout"
             // Past a foe's Safeguard, in `moves::confusion_refused` (IKA-189). Its screens
             // and Substitute are Python's to model first (the damage notes name it).
             | "infiltrator"
@@ -785,6 +795,9 @@ fn item_handled(item: &str) -> bool {
             // Eaten at once for any confusion (`start_confusion`, IKA-177; only a
             // rampage's fatigue from IKA-174). It left `inert.rs` with IKA-174.
             | "persimberry"
+            // `moves::after_move_secondary_switches` (IKA-191). A Red Card that fires is
+            // refused there, as a forceSwitch move is: its replacement is drawn at random.
+            | "ejectbutton" | "redcard"
     ) || crate::inert::item_is_inert(item)
         // Mega stones carry no turn effect of their own; the mega action owns the forme
         // change, and `reg.mega_targets` is what says which stone belongs to whom.
@@ -1436,6 +1449,9 @@ fn same_turn(a: &Turn, b: &Turn) -> bool {
         wipe_order,
         unmodelled: _,
         rolls_stratified: _,
+        // The move resolving now's; stale between actions, where branches merge (IKA-191).
+        move_start_hp: _,
+        move_hit: _,
     } = a;
     std::ptr::eq(*reg, b.reg)
         && *self_switch_pending == b.self_switch_pending
@@ -1691,7 +1707,7 @@ fn run_queue<'a>(
     let mut unmodelled: std::collections::BTreeSet<String> = Default::default();
     for mut item in finished {
         let started = phase_start();
-        residuals(reg, &mut item.turn)?;
+        residuals_then_emergency_exit(reg, &mut item.turn)?;
         phase_end(3, started);
         // `endTurn` clears Showdown's `trapped` flag (a benched Pokemon lost it in
         // `clearVolatile`), so a child never inherits the root's verdict; the trap is
@@ -2128,9 +2144,21 @@ pub fn resume_turn<'a>(
     let mut turn = paused.turn.clone();
     let owed = self_switches_needed(&turn.pos);
     let mut placed: Vec<(i64, usize, usize)> = Vec::new();
+    let mut notes: std::collections::BTreeSet<String> = Default::default();
 
     for (side_index, actions) in choices.iter().enumerate() {
         for action in actions {
+            if let SlotAction::Pass { slot } = action {
+                // Python's note for a slot left owing, which only both sides owing at once
+                // produces (IKA-191).
+                if owed[side_index].get(*slot).copied().unwrap_or(false) {
+                    notes.insert(format!(
+                        "self-switch replacement owed at p{}[{}] but none was chosen",
+                        side_index + 1,
+                        slot
+                    ));
+                }
+            }
             let SlotAction::Switch { slot, party_index, species } = action else { continue };
             if !owed[side_index][*slot] {
                 continue;
@@ -2168,6 +2196,7 @@ pub fn resume_turn<'a>(
     // `runSwitch` is order 101 sorted on speed, fastest first, so a fast replacement takes
     // the hazards and fires its ability before a slow one.
     placed.sort_by_key(|(speed, side, slot)| (-speed, *side, *slot));
+    let gone: Vec<(usize, usize)> = placed.iter().map(|(_, side, slot)| (*side, *slot)).collect();
     for (_speed, side_index, slot) in placed {
         on_switch_in(reg, &mut turn, side_index, slot)?;
     }
@@ -2176,8 +2205,26 @@ pub fn resume_turn<'a>(
         .iter()
         .any(|side| side.iter().any(|flag| *flag));
     let budget = turn.budget;
-    let remaining = paused.remaining.clone();
+    // Python's `_without_replaced`: an action queued for the Pokemon that left goes with it.
+    let remaining: Vec<QueuedAction> = paused
+        .remaining
+        .iter()
+        .filter(|queued| !gone.contains(&(queued.side, queued.slot)))
+        .cloned()
+        .collect();
+    if turn.self_switch_pending {
+        // Python's `_suspended_again`: the other side is asked before the queue runs on.
+        let mut unmodelled = turn.unmodelled.clone();
+        unmodelled.extend(notes);
+        return Ok(TurnResult {
+            branches: Vec::new(),
+            exact: true,
+            suspended: vec![Suspended { probability: paused.probability, turn, remaining }],
+            unmodelled,
+        });
+    }
     let mut result = run_queue(reg, vec![Live { weight: 1.0, turn, remaining }], budget)?;
+    result.unmodelled.extend(notes);
     for branch in result.branches.iter_mut() {
         branch.probability *= paused.probability;
     }
