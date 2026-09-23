@@ -164,8 +164,13 @@ SANDSTORM_DAMAGE = (1, 16)
 LEECH_SEED_DRAIN = (1, 8)
 LEFTOVERS_HEAL = (1, 16)
 PARTIAL_TRAP_DAMAGE = (1, 8)
-SALT_CURE_DAMAGE = (1, 8)
-SALT_CURE_DAMAGE_WEAK = (1, 4)
+#: Salt Cure is the champions mod's, half the base game's 1/8 and 1/4 (IKA-159):
+#:     saltcure: { condition: { onResidual(pokemon) {
+#:         this.damage(pokemon.baseMaxhp / (pokemon.hasType(['Water', 'Steel']) ? 8 : 16));
+#: (vendor/pokemon-showdown/data/mods/champions/moves.ts). No other residual fraction is
+#: changed by the mod.
+SALT_CURE_DAMAGE = (1, 16)
+SALT_CURE_DAMAGE_WEAK = (1, 8)
 
 #: Abilities that trade HP with the weather, as ability -> weather -> (numerator,
 #: denominator) of max HP. A negative numerator is damage. All of them are `onWeather`
