@@ -43,3 +43,18 @@ def team_a() -> list[TeamSet]:
 @pytest.fixture(scope="session")
 def team_b() -> list[TeamSet]:
     return load_team(FIXTURES / "team_b.json")
+
+
+@pytest.fixture()
+def port(reg: Regulation) -> Iterator[object]:
+    """A warm port process for an oracle test's port twin (IKA-207; `_port_showdown`).
+
+    Skips when there is no release binary, as the port tests always have.
+    """
+    from pokeuraou import rustnode
+
+    if not rustnode.binary_path().exists():
+        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
+    node = rustnode.RustNode(reg)
+    yield node
+    node.close()

@@ -366,3 +366,69 @@ def test_safeguard_does_not_stop_the_fatigue(reg) -> None:  # noqa: ANN001
     step = ["move 4, move 1", "move 1, move 3"]
     result = resolve_turn(reg, pos, _chosen(reg, pos, step), budget=Budget.matrix())
     assert all(_target(b.position).has_volatile("confusion") for b in result.branches)
+
+
+# ---------------------------------------------------------------------------
+# The port against Showdown, not against Python (IKA-207).
+
+
+def _port_self_hits(reg, port, start: Position, step: list[str], budget: Budget) -> dict[int, float]:  # noqa: ANN001
+    """`_self_hits` with the port's branches."""
+    from ._port_showdown import port_branches
+
+    before = _target(start)
+    out: dict[int, float] = {}
+    for weight, pos in port_branches(port, start, _chosen(reg, start, step), budget):
+        mon = _target(pos)
+        if mon.hp < before.hp:
+            out[mon.hp] = out.get(mon.hp, 0.0) + weight
+    return out
+
+
+@pytest.mark.oracle
+@pytest.mark.parametrize("name", sorted(CASES))
+def test_the_ports_turn_from_showdowns_position(reg, oracle: Oracle, port, name: str) -> None:  # noqa: ANN001
+    """`test_our_turn_from_showdowns_position` with the port's branches."""
+    from ._port_showdown import port_branches
+
+    case = CASES[name]
+    positions = _play(oracle, case.p1, case.p2, case.steps, _policy(case))
+    start = _loaded(positions[1])
+    branches = [p for _, p in port_branches(port, start, _chosen(reg, start, case.steps[1]), Budget.matrix())]
+    confused = {_target(p).has_volatile("confusion") for p in branches}
+    assert (True in confused) == case.confused, confused
+    if case.move == "swagger":
+        assert any(_target(p).boosts.get("atk", 0) == 2 for p in branches)
+    if name.startswith("own tempo, ") and case.p2.item:
+        eaten = name == "own tempo, mold breaker"
+        assert {_target(p).item for p in branches} == {None if eaten else "lumberry"}
+
+
+@pytest.mark.oracle
+@pytest.mark.parametrize("roll", [0, 5, 8, 15])
+@pytest.mark.parametrize("steps", ["plain", "boosted"])
+def test_the_ports_self_hit_takes_the_budgets_roll(reg, oracle: Oracle, port, roll: int, steps: str) -> None:  # noqa: ANN001
+    """`test_the_self_hit_takes_the_budgets_roll` with the port."""
+    played = HURT if steps == "plain" else HURT_BOOSTED
+    positions = _hurt(oracle, roll, played)
+    start = _loaded(positions[1])
+    want = _target(Position.from_json(positions[2])).hp
+    assert want < _target(start).hp
+    got = _port_self_hits(reg, port, start, played[1], Budget.matrix(roll))
+    assert got == pytest.approx({want: CONFUSION_SELF_HIT_CHANCE})
+
+
+@pytest.mark.oracle
+def test_the_ports_exact_budget_branches_every_roll(reg, oracle: Oracle, port) -> None:  # noqa: ANN001
+    """`test_the_exact_budget_branches_every_roll` with the port."""
+    want: dict[int, float] = {}
+    for roll in range(16):
+        positions = _hurt(oracle, roll, HURT)
+        dealt = _target(Position.from_json(positions[1])).hp - _target(
+            Position.from_json(positions[2])
+        ).hp
+        want[dealt] = want.get(dealt, 0.0) + CONFUSION_SELF_HIT_CHANCE / 16
+    assert len(want) > 1
+    start = _loaded(_hurt(oracle, 0, HURT)[1])
+    got = _port_self_hits(reg, port, start, HURT[1], Budget.exact())
+    assert {_target(start).hp - hp: p for hp, p in got.items()} == pytest.approx(want)

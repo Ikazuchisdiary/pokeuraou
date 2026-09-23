@@ -11,6 +11,10 @@ An effect with high lift and a decent count is a cause. An effect with lift near
 merely popular. That turns "what to fix next" into a ranking rather than a guess.
 
     uv run python tools/diverge_report.py --seeds 12 --battles 10
+
+The port (`RustNode.resolve`, the same pins) is ranked beside Python on the same turns
+(IKA-207); a turn it refuses is counted under `skipped` by its reason. `--no-port` for
+Python alone; `POKEURAOU_RUST_NODE_BIN` names another binary.
 """
 
 from __future__ import annotations
@@ -95,6 +99,8 @@ class Aggregate:
     #: effect -> the fields that diverged alongside it, for reading the mechanism off.
     fields_with: dict[str, Counter[str]] = field(default_factory=dict)
     examples: dict[str, list[str]] = field(default_factory=dict)
+    #: The same ranking for the port, on the same turns (IKA-207).
+    port: Aggregate | None = None
 
     @property
     def compared(self) -> int:
@@ -156,10 +162,16 @@ class Aggregate:
             out.append(f"  -- {effect}")
             for line in lines[:2]:
                 out.append(f"     {line}")
+        if self.port is not None:
+            out.append("")
+            out.append("port:")
+            out.append(self.port.render(top, min_count))
         return "\n".join(out)
 
 
-def run(seeds: int, battles: int, roll: int, max_turns: int) -> Aggregate:
+def run(
+    seeds: int, battles: int, roll: int, max_turns: int, port: bool = False
+) -> Aggregate:
     reg = load_regulation(FORMAT_ID)
     chaos = find_cached_chaos(FORMAT_ID)
     if chaos is None:
@@ -172,6 +184,13 @@ def run(seeds: int, battles: int, roll: int, max_turns: int) -> Aggregate:
         multihit="min", speed_tie="keep",
     )
     budget = Budget.deterministic(roll)
+    node = None
+    if port:
+        from pokeuraou import rustnode
+
+        rustnode.require_current_binary()
+        node = rustnode.RustNode(reg)
+        agg.port = Aggregate()
 
     with Oracle() as oracle:
         for seed in range(1, seeds + 1):
@@ -218,8 +237,13 @@ def run(seeds: int, battles: int, roll: int, max_turns: int) -> Aggregate:
                     if forced or len(chosen) != 2:
                         agg.skipped["replacement turn"] += 1
                         continue
+                    if node is not None and agg.port is not None:
+                        # First: Python's mid-turn replacement steps Showdown on.
+                        _score_port(reg, node, before, chosen, handle, roll, agg.port)
                     _score(reg, before, chosen, handle, budget, agg, py_rng)
                 handle.close()
+    if node is not None:
+        node.close()
     return agg
 
 
@@ -257,9 +281,22 @@ def _score(
         agg.skipped["pending replacement"] += 1
         return
 
-    effects = effects_in_play(reg, before, chosen)
     ours = canonical(result.branches[0].position)
     theirs = canonical(Position.from_json(handle.position))
+    _tally(reg, before, chosen, ours, theirs, bool(result.unmodelled), agg)
+
+
+def _tally(
+    reg: Regulation,
+    before: Position,
+    chosen: list[SideAction],
+    ours: dict[str, Any],
+    theirs: dict[str, Any],
+    flagged: bool,
+    agg: Aggregate,
+) -> None:
+    """One scored turn into the ranking, for either engine."""
+    effects = effects_in_play(reg, before, chosen)
     differences = [k for k in ours if ours[k] != theirs.get(k)]
 
     if not differences:
@@ -267,7 +304,7 @@ def _score(
         for effect in effects:
             agg.in_matched[effect] += 1
         return
-    if result.unmodelled:
+    if flagged:
         agg.flagged += 1
         return
 
@@ -287,6 +324,56 @@ def _score(
             bucket.append(
                 f"turn {before.turn} [{' | '.join(a.describe(reg) for a in chosen)}] {detail}"
             )
+
+
+def _score_port(
+    reg: Regulation,
+    node: Any,
+    before: Position,
+    chosen: list[SideAction],
+    handle: Any,
+    roll: int,
+    agg: Aggregate,
+) -> None:
+    """The port on the turn `_score` gives Python, before Showdown is stepped past it.
+
+    `diff_turn.compare_port_turn`'s rules: one request with branch 0, a refusal counted by
+    its reason, a turn both stopped inside at a replacement set aside (the port has no
+    command to continue it), and a disagreement about stopping scored as a divergence on
+    the field ``mid-turn interrupt``.
+    """
+    if action_overriding_effects(handle.log, only_unmodelled=True):
+        agg.skipped["action overridden mid-turn"] += 1
+        return
+    given = diff_turn.port_position(before.to_json())
+    budget = Budget.deterministic(roll)
+    reply = diff_turn.port_exchange(node, given, chosen, budget, select=0)
+    if reply.get("refused") == "branch index out of range":
+        reply = diff_turn.port_exchange(node, given, chosen, budget)
+    if reply.get("refused"):
+        agg.skipped[f"refused: {diff_turn.refusal_reason(reply, given)}"] += 1
+        return
+    stopped = bool(reply.get("suspended"))
+    if len(reply.get("branches", [])) + len(reply.get("suspended", [])) != 1:
+        agg.skipped["not a single branch"] += 1
+        return
+    unmodelled = tuple(reply.get("unmodelled", []))
+    showdown_stopped = diff_turn.showdown_paused_mid_turn(handle)
+    if stopped and showdown_stopped:
+        agg.skipped["stopped at a mid-turn replacement (no command to continue it)"] += 1
+        return
+    theirs = canonical(Position.from_json(handle.position))
+    if stopped != showdown_stopped:
+        ours = dict(theirs)
+        ours["mid-turn interrupt"] = "port stopped" if stopped else "port carried on"
+        theirs["mid-turn interrupt"] = "showdown carried on" if stopped else "showdown stopped"
+        _tally(reg, given, chosen, ours, theirs, bool(unmodelled), agg)
+        return
+    if any(n.startswith("forceSwitch") for n in unmodelled):
+        agg.skipped["pending replacement"] += 1
+        return
+    ours = canonical(Position.from_json(reply["position"]))
+    _tally(reg, given, chosen, ours, theirs, bool(unmodelled), agg)
 
 
 #: Ratios worth naming, and the modifier each implies is missing.
@@ -342,8 +429,9 @@ def main() -> None:
     ap.add_argument("--max-turns", type=int, default=10)
     ap.add_argument("--top", type=int, default=25)
     ap.add_argument("--min-count", type=int, default=3)
+    ap.add_argument("--no-port", action="store_true", help="Python's ranking only")
     args = ap.parse_args()
-    agg = run(args.seeds, args.battles, args.roll, args.max_turns)
+    agg = run(args.seeds, args.battles, args.roll, args.max_turns, port=not args.no_port)
     print(agg.render(args.top, args.min_count))
 
 

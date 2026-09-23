@@ -402,3 +402,38 @@ def test_a_red_card_reaches_the_attackers_hidden_bench(reg, oracle: Oracle) -> N
         slots=(MoveAction(slot=0, move_index=1, move_id="dragontail", target=1), PassAction(slot=1))
     )
     assert reaches_bench(reg, [tail], col, {0: (), 1: (2, 3)})[0, 0]
+
+
+# ---------------------------------------------------------------------------
+# The port against Showdown, not against Python (IKA-207). A mid-turn eject is a
+# suspended outcome whose position stays in the port's process, so for those cases only
+# the fact of stopping is compared; the resumed turn waits for the command (IKA-211).
+
+
+def _drag_refused(name: str):  # noqa: ANN202
+    if CASES[name][4] != "drag":
+        return name
+    return pytest.param(
+        name,
+        marks=pytest.mark.xfail(
+            strict=True, reason="Red Card drags in a random replacement, which the port refuses"
+        ),
+    )
+
+
+@pytest.mark.parametrize("name", [_drag_refused(n) for n in sorted(CASES)])
+def test_the_port_switches_the_holder_as_showdown_does(reg, oracle: Oracle, port, name: str) -> None:  # noqa: ANN001
+    from ._port_showdown import port_branches, port_weights
+
+    handle, before, after, _asked, _log = _play(oracle, name)
+    handle.close()
+    choices, what = CASES[name][3], CASES[name][4]
+    actions = _actions(reg, before, choices)
+    reply = port_weights(port, before, actions, BUDGET)
+    if what == "eject":
+        assert reply["suspended"] and not reply["branches"], reply
+        return
+    for _weight, pos in port_branches(port, before, actions, BUDGET):
+        ours = _what_python_does(pos, False)
+        assert ours == what, f"{name}: showdown {what}, port {ours}"
+        assert _lead_item(pos, 1) == _lead_item(after, 1), (name, _lead_item(pos, 1))

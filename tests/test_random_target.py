@@ -294,3 +294,34 @@ def test_a_collapsed_budget_notes_the_draw(reg, oracle: Oracle) -> None:  # noqa
     result = resolve_turn(reg, first[0], _actions(reg, first[0]), budget=collapsed)
     assert {_key(_state(b.position)) for b in result.branches} == {_key(_state(first[1]))}
     assert any("randomNormal" in note for note in result.unmodelled), result.unmodelled
+
+
+# ---------------------------------------------------------------------------
+# The port against Showdown, not against Python (IKA-207).
+
+
+@pytest.mark.oracle
+def test_the_ports_collapsed_budget_notes_the_draw(reg, oracle: Oracle, port) -> None:  # noqa: ANN001
+    """`test_a_collapsed_budget_notes_the_draw` with the port: Showdown's first foe, noted."""
+    from ._port_showdown import port_branches, port_weights
+
+    first, _ = _play(oracle, FOES, "first", 1)
+    collapsed = replace(BUDGET, enumerate_secondary=False)
+    actions = _actions(reg, first[0])
+    branches = port_branches(port, first[0], actions, collapsed)
+    assert {_key(_state(p)) for _, p in branches} == {_key(_state(first[1]))}
+    notes = port_weights(port, first[0], actions, collapsed)["unmodelled"]
+    assert any("randomNormal" in note for note in notes), notes
+
+
+@pytest.mark.oracle
+def test_one_foe_standing_is_not_a_draw_in_the_port(reg, oracle: Oracle, port) -> None:  # noqa: ANN001
+    """`test_one_foe_standing_is_not_a_draw` without Python: one outcome, no note, a hit."""
+    from ._port_showdown import port_turn, port_weights
+
+    pos = _one_foe(oracle)
+    actions = _actions(reg, pos)
+    assert not any("randomNormal" in n for n in port_weights(port, pos, actions, BUDGET)["unmodelled"])
+    after = port_turn(port, pos, actions, BUDGET)
+    hippowdon = after.sides[1].pokemon[pos.sides[1].active[0]]
+    assert hippowdon.hp < hippowdon.maxhp
