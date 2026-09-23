@@ -458,3 +458,40 @@ def test_the_port_keeps_light_clay_screens_eight_turns(reg, bridged: None) -> No
     screen = there.position.sides[0].side_condition("lightscreen")
     assert screen is not None and screen.duration == here.sides[0].side_condition("lightscreen").duration
     assert screen.duration == 7, screen  # 8, one counted down at the end of this turn
+
+
+# ---------------------------------------------------------------------------
+# The port against Showdown, not against Python (IKA-207). The replacement after U-turn
+# needs the continuation command (IKA-211) and is not here.
+
+
+@pytest.mark.parametrize("name", sorted(CASES))
+def test_the_port_does_what_showdown_does(reg, oracle: Oracle, port, name: str) -> None:  # noqa: ANN001
+    """`test_python_does_what_showdown_does` with the port."""
+    from ._port_showdown import port_branches, port_turn
+
+    before, after, _log = _play(oracle, name)
+    actions = _actions(reg, before, CASES[name][3])
+    if name.endswith("-last"):
+        boards = [_board(p) for _, p in port_branches(port, before, actions, BRANCHING)]
+        assert _board(after) in boards, (boards, _board(after))
+        return
+    assert _board(port_turn(port, before, actions, BUDGET)) == _board(after)
+
+
+@pytest.mark.parametrize("name", sorted(n for n in CASES if CASES[n][5]))
+def test_the_ports_trace_between_two_abilities_is_two_halves(reg, oracle: Oracle, port, name: str) -> None:  # noqa: ANN001
+    """`test_a_trace_between_two_abilities_is_two_halves` with the port."""
+    from ._port_showdown import port_branches, port_weights
+
+    before, _after, _log = _play(oracle, name)
+    actions = _actions(reg, before, CASES[name][3])
+    abilities = sorted(
+        (w, p.sides[0].pokemon[p.sides[0].active[0]].ability)
+        for w, p in port_branches(port, before, actions, BRANCHING)
+    )
+    assert [a for _p, a in abilities] == ["drought", "intimidate"], abilities
+    assert [p for p, _a in abilities] == pytest.approx([0.5, 0.5])
+    assert not any("trace target" in u for u in port_weights(port, before, actions, BRANCHING)["unmodelled"])
+    collapsed = port_weights(port, before, actions, BUDGET)["unmodelled"]
+    assert "trace target (the first; not branched)" in collapsed

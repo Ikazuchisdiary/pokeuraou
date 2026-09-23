@@ -136,6 +136,16 @@ class Report:
     #: to be skipped: a change in the headline rate says nothing without this.
     paused_divergences: int = 0
     paused_by_field: Counter[str] = field(default_factory=Counter)
+    #: The port's columns, one per binary, when the run was given any (IKA-207). The
+    #: fields above stay Python's, so every caller that reads them reads what it always did.
+    ports: dict[str, PortReport] = field(default_factory=dict)
+    #: Where the current battle came from, for a port example to be replayed.
+    where: str = ""
+
+    @property
+    def port(self) -> PortReport | None:
+        """The first port column: the only one unless `--exes` named several."""
+        return next(iter(self.ports.values()), None)
 
     @property
     def divergence_rate(self) -> float:
@@ -190,6 +200,9 @@ class Report:
                 out.append(f"    {count:5d}  {name}")
         for line in self.examples[:10]:
             out.append("  " + line)
+        for label, port in self.ports.items():
+            out.append("")
+            out.append(port.render(label))
         return "\n".join(out)
 
 
@@ -353,6 +366,48 @@ def compare_turn(
     roll: int,
     report: Report,
     py_rng: random.Random,
+    nodes: dict[str, Any] | None = None,
+) -> None:
+    """Python's column, and one port column per binary in ``nodes`` beside it.
+
+    The ports go first: Python's mid-turn replacement steps Showdown on, and a port has to
+    be held to the position Showdown reached at the end of the choices it was given.
+    Python is solved once however many binaries are compared.
+    """
+    if not nodes:
+        _compare_python(reg, before, chosen, handle, lines, roll, report, py_rng)
+        return
+    given = before.to_json()
+    verdicts = {
+        label: compare_port_turn(
+            reg, node, report.ports[label], report.where, given, chosen, handle, lines, roll
+        )
+        for label, node in nodes.items()
+    }
+    matched = report.matched
+    wrong = report.silent_divergences + report.flagged_divergences
+    _compare_python(reg, before, chosen, handle, lines, roll, report, py_rng)
+    # Python's interrupt checks count a divergence without counting a compared turn, so
+    # the verdict is read off the divergence counters rather than off `compared`.
+    if report.matched > matched:
+        python_verdict = "match"
+    elif report.silent_divergences + report.flagged_divergences > wrong:
+        python_verdict = "diverge"
+    else:
+        python_verdict = "skip"
+    for label, verdict in verdicts.items():
+        report.ports[label].joint[(python_verdict, verdict)] += 1
+
+
+def _compare_python(
+    reg: Regulation,
+    before: Position,
+    chosen: list[SideAction],
+    handle: Any,
+    lines: list[str],
+    roll: int,
+    report: Report,
+    py_rng: random.Random,
 ) -> None:
     # An Encore-style action override replaces a queued action after the turn starts,
     # which the resolver does not model; those turns are named rather than scored.
@@ -449,6 +504,327 @@ def compare_turn(
         )
 
 
+# ---------------------------------------------------------------------------
+# The port's column (IKA-207): the same turn, the same pins, `RustNode.resolve`.
+
+
+@dataclass
+class PortReport:
+    """The port held to Showdown on the turns Python is held to, counted apart.
+
+    A refusal is not a divergence and not a match: it is counted by its reason, because
+    until the port answers everything (IKA-208) "how often does it decline, and why" is
+    half of what this column is for. A turn both the port and Showdown stopped inside, at
+    a mid-turn replacement, is counted apart too: the continuation stays in the Rust
+    process and there is no command to carry it on yet (IKA-211).
+    """
+
+    binary: dict[str, Any] = field(default_factory=dict)
+    compared: int = 0
+    matched: int = 0
+    flagged: int = 0
+    silent: int = 0
+    paused: int = 0
+    by_field: Counter[str] = field(default_factory=Counter)
+    attributed: Counter[tuple[str, ...]] = field(default_factory=Counter)
+    skipped: Counter[str] = field(default_factory=Counter)
+    refused: Counter[str] = field(default_factory=Counter)
+    unmodelled: Counter[str] = field(default_factory=Counter)
+    branch_counts: Counter[int] = field(default_factory=Counter)
+    #: (Python's verdict, the port's verdict) per turn both were asked about.
+    joint: Counter[tuple[str, str]] = field(default_factory=Counter)
+    examples: list[str] = field(default_factory=list)
+    #: Every divergent turn, with Showdown's log, for `--port-json`.
+    records: list[dict[str, Any]] = field(default_factory=list)
+
+    @property
+    def divergence_rate(self) -> float:
+        return 0.0 if not self.compared else 1 - self.matched / self.compared
+
+    @property
+    def silent_rate(self) -> float:
+        return 0.0 if not self.compared else self.silent / self.compared
+
+    def render(self, label: str = "port") -> str:
+        sha = self.binary.get("sha256", "?")
+        out = [
+            f"{label} ({sha}, built {self.binary.get('built', '?')}): "
+            f"compared {self.compared} turns, matched {self.matched}, "
+            f"divergence rate {self.divergence_rate * 100:.3f}% "
+            f"(silent {self.silent_rate * 100:.3f}%, flagged {self.flagged})"
+        ]
+        refused = sum(self.refused.values())
+        out.append(f"  refused {refused} turns")
+        for reason, count in self.refused.most_common(12):
+            out.append(f"    {count:5d}  {reason}")
+        if self.paused:
+            out.append(
+                f"  stopped at a mid-turn replacement with Showdown: {self.paused} "
+                "(no command to continue it yet; not compared)"
+            )
+        if self.branch_counts:
+            out.append(
+                "  branches produced: "
+                + ", ".join(f"{k}x{v}" for k, v in sorted(self.branch_counts.items()))
+            )
+        if self.by_field:
+            out.append(
+                "  divergent fields: "
+                + ", ".join(f"{k} x{v}" for k, v in self.by_field.most_common(12))
+            )
+        if self.attributed:
+            out.append("  attributed (field / move / ability / item):")
+            for key, count in self.attributed.most_common(18):
+                out.append(f"    {count:5d}  {' / '.join(k or '-' for k in key)}")
+        if self.skipped:
+            out.append(
+                "  skipped: " + ", ".join(f"{k} x{v}" for k, v in self.skipped.most_common(8))
+            )
+        if self.unmodelled:
+            out.append("  port reported unmodelled:")
+            for name, count in self.unmodelled.most_common(15):
+                out.append(f"    {count:5d}  {name}")
+        if self.joint:
+            out.append("  the same turns, python / port:")
+            for (python, port), count in sorted(self.joint.items()):
+                out.append(f"    {count:5d}  python {python:<8} port {port}")
+        for line in self.examples[:10]:
+            out.append("  " + line)
+        return "\n".join(out)
+
+
+def port_position(raw: dict[str, Any]) -> Position:
+    """Showdown's position as the port is given it.
+
+    The oracle writes Showdown's own stats onto every Pokemon, and the port declines a
+    position that carries them. Both engines read `stats_override` only for a transformed
+    Pokemon or one with no stat points (`view.py`, `battler.rs`), so dropping it anywhere
+    else changes no number -- which is what the port tests do too.
+    """
+    pos = Position.from_json(raw)
+    for side in pos.sides:
+        for mon in side.pokemon:
+            if not mon.transformed and mon.sp is not None:
+                mon.stats_override = None
+    return pos
+
+
+def port_exchange(
+    node: Any,
+    pos: Position,
+    actions: list[SideAction],
+    budget: Budget,
+    select: int | None = None,
+) -> dict[str, Any]:
+    """`RustNode.resolve`'s request, returning the reply itself so a refusal keeps its reason."""
+    from pokeuraou import rustnode
+
+    return node._exchange(  # noqa: SLF001 -- `resolve` drops the reason; this tool counts it
+        {
+            "kind": "resolve",
+            "position": pos.to_json(),
+            "actions": [[rustnode.dump_action(a) for a in side.slots] for side in actions],
+            "budget": rustnode.dump_budget(budget),
+            "select": select,
+        }
+    )
+
+
+def refusal_reason(reply: dict[str, Any], before: Position) -> str:
+    """The port's reason, with the volatiles named when it is "unmodelled volatiles".
+
+    The port says only that there are some; which ones is what the fix needs, and the
+    position that was sent has them.
+    """
+    reason = str(reply["refused"])
+    if reason == "position carries unmodelled volatiles":
+        names = sorted(
+            {v for side in before.sides for m in side.pokemon for v in m.unmodelled_volatiles}
+        )
+        reason += ": " + ",".join(names)
+    return reason
+
+
+def in_play(before: Position, chosen: list[SideAction]) -> tuple[str, str, str]:
+    """The moves, abilities and items a divergence is attributed to."""
+    moves = sorted(s.move_id for a in chosen for s in a.slots if isinstance(s, MoveAction))
+    active = [m for side in before.sides for m in side.active_pokemon() if m is not None]
+    return (
+        ",".join(moves),
+        ",".join(sorted({m.ability for m in active})),
+        ",".join(sorted({m.item or "" for m in active})),
+    )
+
+
+def compare_port_turn(
+    reg: Regulation,
+    node: Any,
+    port: PortReport,
+    where: str,
+    given: dict[str, Any],
+    chosen: list[SideAction],
+    handle: Any,
+    lines: list[str],
+    roll: int,
+) -> str:
+    """One turn through the port; returns its verdict (match, diverge, refused, paused, skip).
+
+    ``given`` is the position before the turn; ``handle`` is Showdown after it. Called
+    before Python's column, while Showdown still stands where the choices left it.
+    A turn where the port and Showdown disagree about stopping for a mid-turn replacement
+    is a compared, divergent turn with the field ``mid-turn interrupt``.
+
+    One request a turn: a deterministic budget leaves one outcome, so branch 0 is asked
+    for together with the weights. Only when there is no finished branch -- the turn
+    stopped at a replacement -- does the port refuse the index, and only then is it asked
+    again for the weights alone.
+    """
+    if action_overriding_effects(lines, only_unmodelled=True):
+        port.skipped["action overridden mid-turn"] += 1
+        return "skip"
+    before = port_position(given)
+    budget = Budget.deterministic(roll)
+    reply = port_exchange(node, before, chosen, budget, select=0)
+    if reply.get("refused") == "branch index out of range":
+        reply = port_exchange(node, before, chosen, budget)
+    if reply.get("refused"):
+        port.refused[refusal_reason(reply, before)] += 1
+        return "refused"
+    weights = list(reply.get("branches", []))
+    stopped = list(reply.get("suspended", []))
+    port.branch_counts[len(weights) + len(stopped)] += 1
+    unmodelled = tuple(reply.get("unmodelled", []))
+    for name in unmodelled:
+        port.unmodelled[name] += 1
+    if len(weights) + len(stopped) != 1:
+        port.skipped[
+            f"{len(weights) + len(stopped)} branches under a deterministic budget"
+        ] += 1
+        return "skip"
+
+    showdown_stopped = showdown_paused_mid_turn(handle)
+    theirs = canonical(Position.from_json(handle.position))
+    if stopped and showdown_stopped:
+        port.paused += 1
+        return "paused"
+    if bool(stopped) != showdown_stopped:
+        differences = {
+            "mid-turn interrupt": (
+                "port stopped" if stopped else "port carried on",
+                "showdown stopped" if showdown_stopped else "showdown carried on",
+            )
+        }
+        _port_divergence(reg, port, where, before, chosen, unmodelled, differences, handle)
+        return "diverge"
+    if any(name.startswith("forceSwitch") for name in unmodelled):
+        port.skipped["pending replacement (resolver defers to a choice)"] += 1
+        return "skip"
+
+    ours = canonical(Position.from_json(reply["position"]))
+    keys = [k for k in ours if ours[k] != theirs.get(k)]
+    if not keys:
+        port.compared += 1
+        port.matched += 1
+        return "match"
+    differences = {k: (ours[k], theirs.get(k)) for k in keys}
+    _port_divergence(reg, port, where, before, chosen, unmodelled, differences, handle)
+    return "diverge"
+
+
+def _port_divergence(
+    reg: Regulation,
+    port: PortReport,
+    where: str,
+    before: Position,
+    chosen: list[SideAction],
+    unmodelled: tuple[str, ...],
+    differences: dict[str, tuple[Any, Any]],
+    handle: Any,
+) -> None:
+    port.compared += 1
+    if unmodelled:
+        port.flagged += 1
+    else:
+        port.silent += 1
+    cast = in_play(before, chosen)
+    for key in differences:
+        kind = field_kind(key)
+        port.by_field[kind] += 1
+        port.attributed[(kind, *cast)] += 1
+    detail = "; ".join(
+        f"{k}: port {ours!r} vs showdown {theirs!r}"
+        for k, (ours, theirs) in list(differences.items())[:5]
+    )
+    if not unmodelled and len(port.examples) < 10:
+        port.examples.append(
+            f"{where} turn {before.turn} [{describe_actions(reg, chosen)}] -> {detail}"
+        )
+    port.records.append(
+        {
+            "where": where,
+            "turn": before.turn,
+            "actions": describe_actions(reg, chosen),
+            "cast": list(cast),
+            "unmodelled": list(unmodelled),
+            "differences": {k: [repr(a), repr(b)] for k, (a, b) in differences.items()},
+            "log": list(handle.log),
+        }
+    )
+
+
+def parse_exes(text: str) -> list[tuple[str, Path]]:
+    """`--exes old=C:/x.exe,new` -> labelled binaries; a bare `new`/`current` is this tree's.
+
+    Named as `tools/diff_node.py --exes` names them (IKA-206), so one list of binaries
+    reads the same in both tools.
+    """
+    from pokeuraou import rustnode
+
+    out: list[tuple[str, Path]] = []
+    for index, entry in enumerate(e.strip() for e in text.split(",") if e.strip()):
+        label, _, path = entry.partition("=")
+        if not path:
+            label, path = (entry, "") if entry in ("new", "current") else (f"exe{index}", entry)
+        out.append((label, Path(path) if path else rustnode.binary_path()))
+    return out
+
+
+def fingerprint(path: Path) -> dict[str, Any]:
+    """What a binary is, so a column means the code that ran (`rustnode.binary_fingerprint`)."""
+    import hashlib
+    from datetime import datetime
+
+    if not path.exists():
+        raise SystemExit(f"no Rust binary at {path}; `cd rust && cargo build --release`")
+    raw = path.read_bytes()
+    return {
+        "path": str(path),
+        "bytes": len(raw),
+        "sha256": hashlib.sha256(raw).hexdigest()[:16],
+        "built": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
+    }
+
+
+def open_ports(
+    reg: Regulation, report: Report, exes: list[tuple[str, Path]] | None
+) -> dict[str, Any]:
+    """One warm process per binary for the whole run.
+
+    With no list, this tree's binary, refused if it is older than the sources: a column
+    against a stale build says nothing about the code on disk.
+    """
+    from pokeuraou import rustnode
+
+    if not exes:
+        report.ports["port"] = PortReport(binary=rustnode.require_current_binary())
+        return {"port": rustnode.RustNode(reg)}
+    nodes: dict[str, Any] = {}
+    for label, path in exes:
+        report.ports[label] = PortReport(binary=fingerprint(path))
+        nodes[label] = rustnode.RustNode(reg, binary=path)
+    return nodes
+
+
 def run(
     battles: int,
     roll: int,
@@ -456,6 +832,8 @@ def run(
     max_turns: int,
     quiet: bool = True,
     self_switch: float = 0.0,
+    port: bool = False,
+    exes: list[tuple[str, Path]] | None = None,
 ) -> Report:
     reg = load_regulation(FORMAT_ID)
     chaos = find_cached_chaos(FORMAT_ID)
@@ -475,9 +853,11 @@ def run(
         multihit="min",
         speed_tie="keep",
     )
+    nodes = open_ports(reg, report, exes) if port or exes else {}
 
     with Oracle() as oracle:
-        for _ in range(battles):
+        for battle in range(battles):
+            report.where = f"seed {seed} battle {battle}"
             teams = [
                 [TeamSet.from_json(s.to_team_set_json(reg)) for s in sample_team(rng, reg, prior)]
                 for _ in range(2)
@@ -521,9 +901,12 @@ def run(
                     report.skipped["replacement turn"] += 1
                     continue
                 compare_turn(
-                    reg, before, chosen, handle, handle.log, roll, report, py_rng
+                    reg, before, chosen, handle, handle.log, roll, report, py_rng,
+                    nodes=nodes,
                 )
             handle.close()
+    for node in nodes.values():
+        node.close()
 
     if not quiet:
         print(report.render())
@@ -543,15 +926,49 @@ def main() -> None:
         help="probability of preferring a self-switching move when one is legal, so "
         "interrupted turns are sampled on purpose (0 = uniform play)",
     )
+    ap.add_argument(
+        "--no-port",
+        action="store_true",
+        help="Python's column only (the port's needs rust/target/release; "
+        "POKEURAOU_RUST_NODE_BIN names another binary)",
+    )
+    ap.add_argument(
+        "--port-json",
+        help="write every turn the port diverged on, with Showdown's log, to this file",
+    )
+    ap.add_argument(
+        "--exes",
+        help="several port columns in one run, Python solved once: "
+        "`old=C:/tmp/old.exe,new` (a bare `new` is this tree's rust/target/release)",
+    )
     args = ap.parse_args()
-    run(
+    if not os.environ.get("PYTHONHASHSEED"):
+        # Two runs of the same seed differ by a turn or two without it (IKA-207 measured
+        # 2,726 and 2,727 compared turns at 400 battles), so a pair of runs is not a pair.
+        print("[diff_turn] PYTHONHASHSEED is unset: the same --seed can play other turns",
+              file=sys.stderr)
+    report = run(
         args.battles,
         args.roll,
         args.seed,
         args.max_turns,
         quiet=False,
         self_switch=args.self_switch,
+        port=not args.no_port,
+        exes=parse_exes(args.exes) if args.exes else None,
     )
+    if args.port_json and report.ports:
+        import json
+
+        Path(args.port_json).write_bytes(
+            json.dumps(
+                {
+                    label: {"binary": port.binary, "divergences": port.records}
+                    for label, port in report.ports.items()
+                },
+                indent=1,
+            ).encode("utf-8")
+        )
 
 
 if __name__ == "__main__":

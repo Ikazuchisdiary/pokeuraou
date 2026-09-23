@@ -245,3 +245,39 @@ def test_the_port_counts_the_flinched_move(reg, oracle: Oracle, bridged: None) -
     rustnode.reset()
     here = resolve_turn(reg, before, actions, budget=BUDGET)
     assert there.position.to_json() == here.branches[0].position.to_json()
+
+
+# ---------------------------------------------------------------------------
+# The port against Showdown, not against Python (IKA-207).
+
+
+def _port_play(reg, oracle: Oracle, port, name: str):  # noqa: ANN001, ANN202
+    """`_play` with the port's child: Showdown's last request, and the port's position."""
+    from ._port_showdown import port_branches
+
+    handle = oracle.create(FORMAT_ID, TEAM_A, TEAM_B, policy=RandomnessPolicy())
+    handle.step(["team 1234", "team 1234"])
+    pos = Position.from_json(handle.position)
+    for choices in CASES[name]:
+        handle.step(choices)
+        assert handle.choice_errors == [], handle.choice_errors
+        actions = [_find(reg, pos, side, choices[side]) for side in (0, 1)]
+        branches = [p for _, p in port_branches(port, pos, actions, BUDGET)]
+        counters = {
+            tuple(mon.active_move_actions for side in p.sides for mon in side.pokemon)
+            for p in branches
+        }
+        assert len(counters) == 1, counters
+        pos = branches[0]
+    request = handle.requests[0]
+    handle.close()
+    return request, pos
+
+
+@pytest.mark.oracle
+@pytest.mark.parametrize("narrowed", [False, True], ids=["side_actions", "narrowed"])
+@pytest.mark.parametrize("name", sorted(CASES))
+def test_the_ports_child_has_showdowns_menu(reg, oracle: Oracle, port, name: str, narrowed: bool) -> None:  # noqa: ANN001
+    """`test_our_menu_is_showdowns` at the port's own child."""
+    request, pos = _port_play(reg, oracle, port, name)
+    assert _python_menu(reg, pos, 0, narrowed=narrowed) == _showdown_menu(request)
