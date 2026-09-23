@@ -6290,3 +6290,84 @@ M-C の11大会。**完了しているのは Baltimore だけ**:
   メガの特性ではない（M-C ダンプでオオニューラにメガは無く、メガバンギラスの特性は Sand Stream）。
   シートの誤記か API の誤りかは見ていない
 * 北米の地域大会1本の場が、M-C 全体の場か。9/26 に Frankfurt・Brisbane が来る
+
+## 9/23 — IKA-78: 65構築を取り込んだ —— 64本が M-C ダンプに通り、性格の無い1本は理由つきで除外。キャッシュからの再実行はバイト一致
+
+答える問い: 65本を再現可能に取り込めるか（IKA-77 の S1）。
+
+**答え: 取り込める。** `tools/fetch_pastes.py` が、シートの CSV → 65 URL → raw → 解析 → メガ形を「素の種族＋石」に
+正規化 → M-C ダンプで検証 → `data/pool/regmc-matchupweb.json`。**64本が通り、1本を除外**（`Wolfe's Mence + Garde`、
+ボーマンダに性格の行が無い）。プローブの 64/65 と一致し、390体の7欄（種族・表記・道具・特性・性格・技・SP）は
+プローブの解析と**差 0件**。検査はプローブより強い（特性はメガ前の種族のもの・種族は team-legal・種族節と道具節）が、
+それでも落ちる構築は増えなかった。
+
+ファイルの冒頭に IKA-79 の答えを書いた: `character`「prep list であって field ではない」、`role`「配分（SP）の出典。
+一次資料は大会の実エントリー」。
+
+### 置き場所
+
+```
+  data/pool/regmc-matchupweb.json             出力（207,013 B）                                   コミットしない
+  data/pool/regmc-matchupweb/sheet.csv        シートの CSV、取得したバイトのまま                     〃
+  data/pool/regmc-matchupweb/pastes/<id>.txt  paste の raw 65本（CRLF のまま）                       〃
+  data/pool/regmc-matchupweb/fetch-log.json   URL・取得時刻・バイト数・sha256。取得日はここに持たせ、  〃
+                                              出力はここから写す。読むたびに sha256 を照合する
+  tools/fetch_pastes.py                       取得器とシート参照（URL・gid）                         コミットする
+```
+
+構築1本ごとの出典: シート URL・gid・シートの行・paste URL と id・取得時刻・raw の sha256。ファイル全体には、読んだシートの
+sha256 と取得時刻、検証に使ったダンプ（`formatId`・`showdownCommit`・`generatedAt`・sha256）。
+
+### 確かめたこと
+
+```
+  取得            GET 66回（シート1 + paste 65）、curl（検証は切っていない）、間隔 1秒以上
+                  23:55:33〜23:57:29 UTC の116秒、計 74,911 B
+  再実行          キャッシュから5回: どれも「0 fetched now, 66 from the cache」で、出力の sha256 は5回とも 3518680e…
+                  （207,013 B）、fetch-log.json も不変。途中で出力に欄を1つ足した（ownRowsSkipped）ので、足す前の版
+                  d7b91657… も取得直後の1回とキャッシュからの2回で一致
+  プローブとの差  paste 65本の raw はプローブの取得（本体 data/pool/raw、ファイル時刻 05:47）と sha256 で全部一致
+                  390体 × 7欄の差 0（本体 data/pool/pastes.json と paste id で突き合わせ）
+  除外            1本: Wolfe's Mence + Garde（行31）、member 0 = Salamence-Mega、field nature
+  数              メンバー 390（残 384）、メガ形の表記 114（残 112）、SP の合計 63〜66
+  注記            Shiny 7体・Tera Type 1体（形式が持たない欄）、Level: 51 が1体（HTR のイエッサン♀。形式は 50 固定）
+  テスト          tests/test_fetch_pastes.py 15本（ネットに出ない。固定文字列と作ったチーム1つ）。15 passed / 0 skipped
+  対照            5つの壊し方 —— メガの逆引きを空に・SpA と SpD を入れ替え・性格の欠けを見逃す・出力に連番を足す・
+                  自分側の行を相手に数える —— がそれぞれ名指しのテストで落ちる
+  ruff / 改行      通過 / test_line_endings・test_no_machine_specific_paths 通過
+```
+
+### シートは、プローブと今回の間に編集されていた
+
+プローブの版（6,786 B）と今回（6,900 B）で、先頭に「Your Team / Your PokePaste」の行が入り、**行番号が4つずれた**
+（3→7 … 131→135）。名前が1本変わった（`Jap Balance` → `Japan Balance`）。paste の集合と中身は同じ。
+→ 出力の行番号は「その sha256 のシートの行番号」として持たせた。自分側の行（`Your Team`）は、今は URL が無いが、
+入っても相手には数えず `ownRowsSkipped` に出す（作者自身の構築なので）。
+
+### 既存の読み込み口で読めるか —— ファイルはそのままでは読めない。中身は読める
+
+```
+  teams.load_roster(このファイル)          KeyError 'team'    1ファイル1構築の口。これは64構築
+  standings.load_standings(このファイル)   StandingsError     Reportworm の形の口
+  1構築ずつ roster の形に書き出して load_roster + team_sets()   64/64（384体）
+```
+
+メンバーの辞書は `load_roster` の欄名とダンプの表記そのまま。**要るのは「複数構築のファイルから Roster の列を返す口」**
+（`load_roster` の検査を dict から呼べる形に切り出す）で、配線は IKA-81（プール対プール）の範囲。SP が入っているので、
+大会エントリーのように配分を事前分布から引く必要は無い。
+
+⚠ **`teams.load_roster` は性格の無い個体を通す。** `_check_set` は性格が空なら検査を飛ばし、`SampledSet` は
+`str(None)` で `nature='None'` を持つ。落ちるのは後の `nature_multipliers`（`KeyError: Unknown nature: 'None'`）。
+除外した1本を roster の形で読ませたら**読めてしまった**ことで見つけた。取り込み器は自分で性格を必須にしている。
+
+### ユーザに聞くこと
+
+`Wolfe's Mence + Garde` のボーマンダの性格。paste には無い。IKA-79 のとおり、Baltimore の Wolfe Glick（15位）の
+オープンシートと道具・特性・4技が6体とも一致し、そこでは **Naive**。これを使ってよいか（2つの出典をつなぐ判断）。
+
+### 測っていないこと
+
+* Showdown 自身のチーム検証器（S2・IKA-80）。ダンプに習得表は無いので、見たのは「その技が形式にある」まで。
+  その種族が覚えるかは見ていない
+* 390体の配分を大会エントリーにつなぐこと。IKA-79 の突き合わせ（道具・特性・4技まで一致が27本）が手がかりで、S4（IKA-83）の範囲
+* 読んだのは gid 919829702 の1タブだけ。相手一覧が3タブで同一というのはプローブの記録（IKA-77）で、今回は見ていない
