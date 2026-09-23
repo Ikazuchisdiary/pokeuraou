@@ -13,8 +13,9 @@
 //!   array (most features) and where it divides in float32 throughout (the SP block). The
 //!   two round differently and the differential compares the arrays bit for bit.
 //!
-//! The vocabulary is an offset into the regulation's sorted ids, with 0 reserved for
-//! "absent or unknown", exactly as `build_vocabulary` does.
+//! The vocabulary is an offset into the regulation's committed id order (`configs/vocab/`,
+//! read by `Reg::load`), with 0 reserved for "absent or unknown", exactly as
+//! `build_vocabulary` does.
 
 use crate::position::{Pokemon, Position, Side, BOOST_IDS};
 use crate::reg::Reg;

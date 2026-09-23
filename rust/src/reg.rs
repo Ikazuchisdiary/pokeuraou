@@ -265,15 +265,70 @@ pub struct Reg {
     pub mega_holders: HashSet<(Id, Id), FnvBuild>,
     /// Effect name -> the types immune to it, from the dump's `effectImmunities`.
     pub effect_immunities: HashMap<String, HashSet<String>>,
-    /// Every id in the dump, sorted -- the encoder's vocabulary is an offset into these,
-    /// and `encode.build_vocabulary` sorts for exactly the reason this does: a model's
-    /// weights are meaningless the moment the same integer means a different Pokemon.
+    /// Every id of the vocabulary, in index order -- the encoder's vocabulary is an offset
+    /// into these. The order is the committed, append-only one in `configs/vocab/`
+    /// (IKA-82, `vocab_order`), read exactly as `encode.build_vocabulary` reads it: a
+    /// model's weights are meaningless the moment the same integer means a different
+    /// Pokemon. A retired id keeps its slot, so these can list ids the dump no longer has.
     pub species_ids: Vec<String>,
     pub ability_ids: Vec<String>,
     pub item_ids: Vec<String>,
     pub move_ids: Vec<String>,
     /// The types any species has, sorted. Index into this, not into `types`.
     pub species_types: Vec<String>,
+}
+
+fn format_id_of(doc: &Value) -> String {
+    doc["meta"]["formatId"].as_str().unwrap_or_default().to_string()
+}
+
+/// `configs/vocab/<name>` for `configs/regulations/<name>`: `encode.vocab_order_path`.
+/// None when there is no such file, and then the ids stay sorted, as they were before
+/// the order was committed -- which is also what the Python does.
+fn vocab_order(path: &str, format_id: &str) -> Result<Option<Value>, String> {
+    let dump = std::path::Path::new(path);
+    let (Some(dir), Some(name)) = (dump.parent().and_then(|d| d.parent()), dump.file_name())
+    else {
+        return Ok(None);
+    };
+    let order_path = dir.join("vocab").join(name);
+    let text = match std::fs::read_to_string(&order_path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(format!("{}: {e}", order_path.display())),
+    };
+    let doc: Value = serde_json::from_str(&text)
+        .map_err(|e| format!("{}: {e}", order_path.display()))?;
+    if doc["formatId"].as_str() != Some(format_id) {
+        return Err(format!("{} is not the order for {format_id}", order_path.display()));
+    }
+    Ok(Some(doc))
+}
+
+/// The committed order of one table, refusing a dump id it does not list: an append made
+/// here would be sorted among that day's other new ids and could move the next time, so
+/// `tools/vocab_order.py --append` is the only way an id joins (as in `build_vocabulary`).
+fn ordered(table: &str, sorted_ids: Vec<String>, order: &Value) -> Result<Vec<String>, String> {
+    let listed: Vec<String> = order[table]
+        .as_array()
+        .ok_or_else(|| format!("vocabulary order has no {table} list"))?
+        .iter()
+        .map(|v| v.as_str().map(String::from).ok_or_else(|| format!("{table}: not an id")))
+        .collect::<Result<_, _>>()?;
+    let known: HashSet<&str> = listed.iter().map(String::as_str).collect();
+    if known.len() != listed.len() {
+        return Err(format!("vocabulary order lists a {table} id twice"));
+    }
+    let missing: Vec<&str> =
+        sorted_ids.iter().map(String::as_str).filter(|id| !known.contains(id)).collect();
+    if !missing.is_empty() {
+        return Err(format!(
+            "the dump has {table} the committed vocabulary order does not ({}); run \
+             `python tools/vocab_order.py --append`",
+            missing.join(", ")
+        ));
+    }
+    Ok(listed)
 }
 
 impl Reg {
@@ -554,6 +609,13 @@ impl Reg {
             seen.into_iter().collect()
         };
         species_types.sort();
+
+        if let Some(order) = vocab_order(path, &format_id_of(&doc))? {
+            species_ids = ordered("species", species_ids, &order)?;
+            ability_ids = ordered("abilities", ability_ids, &order)?;
+            item_ids = ordered("items", item_ids, &order)?;
+            move_ids = ordered("moves", move_ids, &order)?;
+        }
 
         Ok(Reg {
             species_ids,

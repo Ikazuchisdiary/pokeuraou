@@ -15,7 +15,9 @@ it testable.
 **The encoding is regulation-pinned.** Every categorical index is an offset into a
 vocabulary built from the regulation dump, and the vocabulary's fingerprint is stored with
 the weights. A model trained on M-B loaded against M-C is a silent disaster -- the same
-integer means a different Pokemon -- so :class:`Vocabulary` refuses instead.
+integer means a different Pokemon -- so :class:`Vocabulary` refuses instead. The integers
+come from a committed, append-only order (`configs/vocab/`, IKA-82), so a re-dump that adds
+an id grows the tables at the end and a model trained before it still loads.
 
 What is deliberately *not* here: anything the player could not see at decision time. The
 recorded position carries both sides' spreads because self-play generated them, and that
@@ -27,14 +29,16 @@ and there is no access to the record that contains it.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 
 from . import timing
 from .position import Position
-from .regulation import STAT_IDS, Regulation
+from .regulation import STAT_IDS, Regulation, regulation_dir
 from .stats import nature_multipliers, stats_from_sp
 
 #: Volatiles the resolver can set, as an ordered vocabulary. Derived from the volatile ids
@@ -133,6 +137,11 @@ TURN_CLIP = 40.0
 #:   1  everything before 9/23
 #:   2  IKA-121: `can_mega` and `mega_available` read the Pokemon's species and item,
 #:      not `Side.mega_capable_slots` (a slot number, stale after the first switch)
+#:
+#: Not raised by IKA-82 (the append-only vocabulary order): the lists were written from
+#: the sorted order of that day, so no existing id changed its integer and no column its
+#: meaning. An id appended later is a new integer, which the vocabulary fingerprint --
+#: also a shard key -- already sees.
 ENCODING_REVISION = 2
 
 
@@ -253,17 +262,94 @@ class Vocabulary:
         return digest.hexdigest()[:16]
 
 
-def build_vocabulary(reg: Regulation) -> Vocabulary:
-    """Vocabularies straight from the regulation dump, in a stable order.
+    def prefix(self, sizes: dict[str, int]) -> Vocabulary:
+        """The vocabulary as it stood when each table had `sizes` rows (index 0 included).
 
-    Sorted by id, not by usage or by dump order, so rebuilding it from the same dump gives
-    the same integers -- a model's weights are meaningless the moment that stops being
-    true.
+        With an append-only order this is exactly the vocabulary an older model was
+        trained on, so its fingerprint is the one that model stored (`value.load_model`).
+        """
+        def cut(table: dict[str, int], rows: int) -> dict[str, int]:
+            return {k: i for k, i in table.items() if i < rows}
+
+        return Vocabulary(
+            format_id=self.format_id,
+            species=cut(self.species, sizes["species"]),
+            abilities=cut(self.abilities, sizes["ability"]),
+            items=cut(self.items, sizes["item"]),
+            moves=cut(self.moves, sizes["move"]),
+            types=self.types,
+        )
+
+
+#: The tables with a committed order, as named in `configs/vocab/*.json`.
+VOCAB_TABLES = ("species", "abilities", "items", "moves")
+
+
+def vocab_order_path(dump: Path) -> Path:
+    """`configs/vocab/<name>` for `configs/regulations/<name>` -- beside the dump's folder.
+
+    Derived from the dump's own path, and `rust/src/reg.rs` derives it the same way, so a
+    dump read from a scratch folder takes the order from that folder in both encoders.
     """
-    species = {sid: i + 1 for i, sid in enumerate(sorted(reg.species))}
-    abilities = {aid: i + 1 for i, aid in enumerate(sorted(reg.abilities))}
-    items = {iid: i + 1 for i, iid in enumerate(sorted(reg.items))}
-    moves = {mid: i + 1 for i, mid in enumerate(sorted(reg.moves))}
+    return dump.parent.parent / "vocab" / dump.name
+
+
+def read_vocab_order(path: Path, format_id: str | None = None) -> dict[str, list[str]] | None:
+    """The committed order, or None when there is no file (see `build_vocabulary`)."""
+    if not path.exists():
+        return None
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    if format_id is not None and doc.get("formatId") != format_id:
+        raise ValueError(f"{path} is the order for {doc.get('formatId')}, not {format_id}")
+    order = {t: list(doc[t]) for t in VOCAB_TABLES}
+    for table, ids in order.items():
+        if len(set(ids)) != len(ids):
+            raise ValueError(f"{path}: {table} lists an id twice")
+    return order
+
+
+def dump_ids(reg: Regulation) -> dict[str, list[str]]:
+    return {
+        "species": list(reg.species),
+        "abilities": list(reg.abilities),
+        "items": list(reg.items),
+        "moves": list(reg.moves),
+    }
+
+
+def build_vocabulary(reg: Regulation) -> Vocabulary:
+    """Vocabularies from the regulation dump, numbered by the committed order.
+
+    The integer an id encodes as comes from `configs/vocab/<format_id>.json`, which is
+    append-only (IKA-82, `tools/vocab_order.py`): a re-dump that adds an id adds a row at
+    the end and moves no existing index, so a trained model still reads every id it knew.
+    The lists were written from the ids sorted as they stood on 9/23, so every index and
+    every fingerprint up to then is what sorting gave.
+
+    Until then the integers came from sorting the dump's ids, and one new move renumbered
+    the 240 that sort after it (IKA-136's `meteorassault`). An id the dump has and the
+    order does not is refused rather than appended here, because an append in memory
+    would be sorted among that day's other new ids and could land elsewhere the next time.
+    A regulation with no committed order at all -- a test's hand-built one -- is numbered
+    by sorting, as before.
+    """
+    source = reg.source or regulation_dir() / f"{reg.meta.format_id}.json"
+    order = read_vocab_order(vocab_order_path(source), reg.meta.format_id)
+    ids = dump_ids(reg)
+    if order is None:
+        order = {t: sorted(ids[t]) for t in VOCAB_TABLES}
+    missing = {t: sorted(set(ids[t]) - set(order[t])) for t in VOCAB_TABLES}
+    if any(missing.values()):
+        named = "; ".join(f"{t}: {', '.join(v)}" for t, v in missing.items() if v)
+        raise ValueError(
+            f"{reg.meta.format_id}: the dump has ids the committed vocabulary order does "
+            f"not ({named}); run `python tools/vocab_order.py --append` so they go at the "
+            "end and no existing index moves"
+        )
+    species = {sid: i + 1 for i, sid in enumerate(order["species"])}
+    abilities = {aid: i + 1 for i, aid in enumerate(order["abilities"])}
+    items = {iid: i + 1 for i, iid in enumerate(order["items"])}
+    moves = {mid: i + 1 for i, mid in enumerate(order["moves"])}
     types = tuple(sorted({t for sp in reg.species.values() for t in sp.types}))
     return Vocabulary(
         format_id=reg.meta.format_id,
@@ -666,14 +752,18 @@ __all__ = [
     "ENCODING_REVISION",
     "SIDE_CONDITIONS",
     "STATUSES",
+    "VOCAB_TABLES",
     "VOLATILES",
     "Encoded",
     "Encoder",
     "EncodingRules",
     "Vocabulary",
     "build_vocabulary",
+    "dump_ids",
     "field_feature_names",
     "mon_feature_names",
-    "side_feature_names",
+    "read_vocab_order",
     "rules_of",
+    "side_feature_names",
+    "vocab_order_path",
 ]

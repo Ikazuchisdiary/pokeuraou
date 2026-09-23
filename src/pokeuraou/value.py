@@ -643,6 +643,10 @@ def save_model(
             "config": asdict(config),
             "format_id": vocab.format_id,
             "vocab_fingerprint": vocab.fingerprint(),
+            # Rows per table, index 0 included -- what `load_model` cuts the current
+            # vocabulary back to before comparing fingerprints (IKA-82). A model saved
+            # before this key existed is read from its embedding shapes instead.
+            "vocab_sizes": dict(vocab.sizes),
             "active_feature": net._active_feature,
             "widths": dict(widths or {}),
             "meta": meta,
@@ -651,12 +655,54 @@ def save_model(
     )
 
 
+#: Embedding table of each vocabulary, as `ValueNet` names them.
+_EMBEDDINGS = {"species": "species", "ability": "ability", "item": "item", "move": "move"}
+
+
+def _model_vocab_sizes(blob: dict[str, Any]) -> dict[str, int]:
+    """Rows per table the model was trained with: stored, or read off its embeddings."""
+    stored = blob.get("vocab_sizes")
+    if stored:
+        return {k: int(v) for k, v in stored.items()}
+    weights = blob["weights"]
+    return {kind: int(weights[f"{name}.weight"].shape[0]) for kind, name in _EMBEDDINGS.items()}
+
+
+def _grown(
+    weights: dict[str, Tensor], have: dict[str, int], want: dict[str, int]
+) -> dict[str, Tensor]:
+    """The weights with each embedding table given zero rows up to the current size.
+
+    Zero, not the mean of the trained rows and not random: deterministic, and for species,
+    ability and item a zero row is exactly what index 0 ("absent or unknown") contributes,
+    so a new id reads as the unknown id did before it was appended -- which is how the old
+    vocabulary encoded it. For moves it is not quite that, because the move pool divides
+    by the number of nonzero indices; a new move is "a move that adds nothing to the
+    average". Either way no existing row moves, so a position without a new id scores
+    bit for bit as before (tests/test_value.py, IKA-82).
+    """
+    out = dict(weights)
+    for kind, name in _EMBEDDINGS.items():
+        extra = want[kind] - have[kind]
+        if extra:
+            table = weights[f"{name}.weight"]
+            out[f"{name}.weight"] = torch.cat([table, table.new_zeros(extra, table.shape[1])])
+    return out
+
+
 def load_model(path: str | Path, encoder: Encoder) -> tuple[ValueNet, dict[str, Any]]:
     """Loads weights, refusing a vocabulary they were not trained against.
 
     The refusal is the point. A model trained on M-B and loaded against M-C would run
     perfectly and answer about the wrong Pokemon, since the same integer indexes a
     different species.
+
+    One change is not a refusal: a vocabulary that has only grown at the end (IKA-82).
+    The order is append-only (`configs/vocab/`), so the current vocabulary cut back to
+    the model's table sizes is the one it was trained on, and its fingerprint must be the
+    one the model stored. Then the embedding tables get zero rows for the appended ids
+    (`_grown`) and every other weight loads as it is. Anything else -- an index that moved,
+    a table that shrank -- still fails the fingerprint and is refused.
     """
     blob = torch.load(Path(path), map_location="cpu", weights_only=False)
     if blob["format_id"] != encoder.vocab.format_id:
@@ -664,12 +710,28 @@ def load_model(path: str | Path, encoder: Encoder) -> tuple[ValueNet, dict[str, 
             f"model was trained on {blob['format_id']}, encoder is for "
             f"{encoder.vocab.format_id}"
         )
+    weights = blob["weights"]
     if blob["vocab_fingerprint"] != encoder.vocab.fingerprint():
-        raise ValueError(
-            f"vocabulary fingerprint {encoder.vocab.fingerprint()} does not match the "
-            f"model's {blob['vocab_fingerprint']}; the regulation dump changed under it, "
-            "so the same integer no longer means the same Pokemon"
-        )
+        have, want = _model_vocab_sizes(blob), encoder.vocab.sizes
+        shrank = [k for k in want if have[k] > want[k]]
+        prefix = None if shrank else encoder.vocab.prefix(have).fingerprint()
+        if prefix != blob["vocab_fingerprint"]:
+            detail = (
+                f"its tables are larger ({', '.join(shrank)})"
+                if shrank
+                else f"the current one cut back to its sizes is {prefix}, so it is not a "
+                "prefix: an existing id changed its integer"
+            )
+            raise ValueError(
+                f"vocabulary fingerprint {encoder.vocab.fingerprint()} does not match the "
+                f"model's {blob['vocab_fingerprint']} and {detail}; the same integer no "
+                "longer means the same Pokemon"
+            )
+        weights = _grown(weights, have, want)
+        blob["meta"] = {
+            **(blob.get("meta") or {}),
+            "vocab_grown_from": {k: have[k] for k in want if have[k] != want[k]},
+        }
     # The fingerprint covers the vocabulary -- which species is which integer -- and not
     # the numeric feature blocks beside it. Adding a side feature shifts every feature
     # after it, and a model loaded across that change would read boosts where it expects
@@ -686,7 +748,7 @@ def load_model(path: str | Path, encoder: Encoder) -> tuple[ValueNet, dict[str, 
     config = ValueConfig(**blob["config"])
     net = build(encoder, config)
     net._active_feature = int(blob["active_feature"])
-    net.load_state_dict(blob["weights"])
+    net.load_state_dict(weights)
     net.eval()
     return net, blob.get("meta", {})
 
