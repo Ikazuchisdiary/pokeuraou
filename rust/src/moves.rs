@@ -2017,8 +2017,9 @@ fn after_hit(
         }
     }
 
+    // Dragon Tail, Circle Throw: `spreadMoveHit`'s step 6, `forceSwitch` (IKA-208).
     if mv.force_switch {
-        return Err("forceSwitch move".into());
+        let _ = raise_force_switch(turn, (action.side, action.slot), target);
     }
 
     on_being_hit(turn, mv, target, action.side)?;
@@ -2254,6 +2255,34 @@ fn crossed_half(hp: i64, maxhp: i64, before: i64) -> bool {
     hp > 0 && 2 * hp <= maxhp && 2 * before > maxhp
 }
 
+/// `runEvent('DragOut', target, source)`: Guard Dog and Suction Cups (both `breakable`)
+/// and Ingrain's volatile answer `null` -- the Pokemon stays, and nothing fails (IKA-208).
+fn drag_out_stopped(turn: &Turn, at: Slot, source: Option<Slot>) -> bool {
+    let Some(mon) = turn.mon_at(at.0, at.1) else { return true };
+    if mon.has_volatile("ingrain") {
+        return true;
+    }
+    matches!(mon.ability.as_str(), "guarddog" | "suctioncups") && !ability_broken_by(turn, mon, source)
+}
+
+/// `forceSwitch` in `spreadMoveHit` (sim/battle-actions.ts): `if (target.hp > 0 &&
+/// source.hp > 0 && this.battle.canSwitch(target.side))` and `DragOut` lets it, the target's
+/// `forceSwitchFlag` -- here `pendingforceswitch`, which `resolve::drag_in` answers at the
+/// end of the action. Says whether it was raised (IKA-208).
+fn raise_force_switch(turn: &mut Turn, source: Slot, target: Slot) -> bool {
+    let standing = |turn: &Turn, at: Slot| matches!(turn.mon_at(at.0, at.1), Some(m) if !m.fainted && m.hp > 0);
+    if !standing(turn, target) || !standing(turn, source) || !can_switch(turn, target.0) {
+        return false;
+    }
+    if drag_out_stopped(turn, target, Some(source)) {
+        return false;
+    }
+    if !turn.mon_at(target.0, target.1).is_some_and(|m| m.has_volatile("pendingforceswitch")) {
+        turn.add_volatile(target.0, target.1, "pendingforceswitch", None);
+    }
+    true
+}
+
 fn switch_flagged(mon: &crate::position::Pokemon) -> bool {
     mon.has_volatile("pendingselfswitch") || mon.has_volatile("pendingforceswitch")
 }
@@ -2382,7 +2411,13 @@ fn after_move_secondary_switches(turn: &mut Turn, action: &QueuedAction, mv: &Mo
         if matches!(turn.mon_at(target.0, target.1), Some(mon) if mon.has_volatile("pendingforceswitch")) {
             continue;
         }
-        return Err("redcard (replacement is drawn at random)".into());
+        // `if (target.useItem(source)) { if (this.runEvent('DragOut', source, target, move))
+        // source.forceSwitchFlag = true; }` -- the card goes even when the drag is stopped
+        // (IKA-208). The drag itself is `resolve::drag_in`, at the end of the action.
+        turn.consume_item(target.0, target.1);
+        if !drag_out_stopped(turn, me, None) {
+            turn.add_volatile(me.0, me.1, "pendingforceswitch", None);
+        }
     }
 
     for target in hit {
@@ -3391,8 +3426,18 @@ fn apply_status_move(
     if mv.raw.get("selfdestruct").and_then(Value::as_str) == Some("ifHit") && !targets.is_empty() {
         turn.faint(me.0, me.1);
     }
+    // Roar, Whirlwind (IKA-208): `runMoveEffects` answers `forceSwitch` with
+    // `canSwitch(target.side)` -- no one to come in is a failure -- and `forceSwitch` then
+    // raises the flag unless `DragOut` stops it (which, for a status move, is a failure
+    // only on `false`; Guard Dog, Suction Cups and Ingrain all answer `null`).
     if mv.force_switch {
-        return Err("forceSwitch status move".into());
+        for target in targets {
+            if !can_switch(turn, target.0) {
+                turn.move_failed[me.0][me.1] = true;
+                continue;
+            }
+            let _ = raise_force_switch(turn, me, *target);
+        }
     }
     let _ = reg;
     Ok(())

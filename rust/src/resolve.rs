@@ -896,6 +896,8 @@ pub(crate) fn status_move_handled(move_id: &str) -> bool {
             | "substitute"
             // `moves::swap_items` (IKA-208).
             | "trick" | "switcheroo"
+            // `moves::raise_force_switch` and `drag_in` (IKA-208).
+            | "roar" | "whirlwind"
     )
 }
 
@@ -2064,17 +2066,114 @@ fn execute<'a>(
             switch_in_with_draws(turn, &budget, may, |state| do_mega(reg, state, action))
         }
         ActionKind::Move => {
+            // A Pokemon dragged in this turn has no action, and the one it replaced took
+            // its own with it: `runAction` skips a move whose Pokemon is not active.
+            // `drag_in` marks the slot acted, which is also what Sucker Punch reads.
+            if turn.acted[action.side][action.slot] {
+                return Ok(vec![(1.0, turn)]);
+            }
             let mut outcomes = do_move(reg, turn, action, budget)?;
             for (_weight, state) in outcomes.iter_mut() {
                 state.acted[action.side][action.slot] = true;
             }
-            Ok(outcomes)
+            let mut dragged = Vec::with_capacity(outcomes.len());
+            for (weight, state) in outcomes {
+                for (inner, next) in drag_in(reg, state, &budget)? {
+                    dragged.push((weight * inner, next));
+                }
+            }
+            Ok(dragged)
         }
     }
 }
 
 /// Python's `_restore_types` (IKA-162): the species' own types, as `clearVolatile`'s
 /// `setSpecies` leaves them on a switch out and on a faint.
+/// Phazing, at the end of `runAction` (sim/battle.ts): for each side and each active
+/// position in order, a Pokemon with `forceSwitchFlag` and HP is dragged out by
+/// `dragIn` -- `getRandomSwitchable`, a `sample` over the bench in party order -- and the
+/// newcomer's switch-in runs at once (`switchIn(..., isDrag)`). One branch per bench
+/// Pokemon, of equal weight; a budget that does not branch chance takes the first, as the
+/// oracle's pinned `sample` does (IKA-208). The newcomer does not act: its slot is marked
+/// acted, and the move queued for the Pokemon it replaced is skipped.
+fn drag_in<'a>(reg: &'a Reg, turn: Turn<'a>, budget: &Budget) -> Result<Vec<Outcome<'a>>, String> {
+    let flagged: Vec<(usize, usize)> = (0..turn.pos.sides.len())
+        .flat_map(|side| (0..turn.pos.sides[side].active.len()).map(move |slot| (side, slot)))
+        .filter(|&(side, slot)| {
+            matches!(turn.mon_at(side, slot), Some(mon) if mon.has_volatile("pendingforceswitch"))
+        })
+        .collect();
+    if flagged.is_empty() {
+        return Ok(vec![(1.0, turn)]);
+    }
+    let branches = budget.enumerate_secondary && !budget.pinned_policy;
+    let mut out: Vec<Outcome<'a>> = vec![(1.0, turn)];
+    for (side, slot) in flagged {
+        let mut next: Vec<Outcome<'a>> = Vec::new();
+        for (weight, mut state) in out {
+            let standing = match state.mon_at_mut(side, slot) {
+                Some(mon) => {
+                    mon.volatiles.retain(|v| v.id.as_str() != "pendingforceswitch");
+                    !mon.fainted && mon.hp > 0
+                }
+                None => false,
+            };
+            let mut bench: Vec<usize> = state.pos.sides[side]
+                .pokemon
+                .iter()
+                .enumerate()
+                .filter(|(_, mon)| !mon.fainted && !mon.is_active())
+                .map(|(index, _)| index)
+                .collect();
+            if !standing || bench.is_empty() {
+                next.push((weight, state));
+                continue;
+            }
+            if bench.len() > 1 && !branches {
+                if !budget.pinned_policy {
+                    state.report("forced switch (the first on the bench; not branched)");
+                }
+                bench.truncate(1);
+            }
+            let share = 1.0 / bench.len() as f64;
+            for index in bench {
+                let mut drawn = state.clone();
+                let species = drawn.pos.sides[side].pokemon[index].species;
+                let action = QueuedAction {
+                    side,
+                    slot,
+                    kind: ActionKind::Switch,
+                    order: ORDER_SWITCH,
+                    priority: 0,
+                    fractional: 0.0,
+                    speed: 0,
+                    move_id: None,
+                    target: None,
+                    switch_to: Some(index),
+                    switch_species: Some(species),
+                    branch_probability: 1.0,
+                };
+                drawn.acted[side][slot] = true;
+                let may = switch_may_trace(&drawn, &action);
+                for (inner, forked) in switch_in_with_draws(drawn, budget, may, |s| do_switch(reg, s, &action))? {
+                    next.push((weight * share * inner, forked));
+                }
+            }
+        }
+        out = next;
+    }
+    // A U-turn's own flag leaves with its Pokemon (`clearVolatile`), so the turn no longer
+    // waits for its replacement.
+    for (_weight, state) in out.iter_mut() {
+        state.self_switch_pending = (0..state.pos.sides.len()).any(|side| {
+            (0..state.pos.sides[side].active.len()).any(|slot| {
+                matches!(state.mon_at(side, slot), Some(mon) if mon.has_volatile("pendingselfswitch"))
+            })
+        });
+    }
+    Ok(out)
+}
+
 fn restore_types(reg: &Reg, mon: &mut Pokemon) {
     if let Some(entry) = reg.species.get(mon.species.as_str()) {
         mon.types = entry.type_ids;
