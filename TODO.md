@@ -10458,3 +10458,70 @@ test_no_machine_specific_paths を `-n 0` で 138 pass（33 秒、1 コア）。
   （まっこうちゃ など）。1 ずれうる
 * じごくづきの状態は sim-bridge の局面では `unmodelledVolatiles` に入る。Showdown から読んだ局面では Python が
   じごくづきを知らない（対局の途中で局面を Showdown から取り直す道があれば効く。未確認）
+
+## 9/23 — IKA-60: port の do_mega も局面の maxhp を読む（偶然の一致をデータとテストで固定）
+
+### 1. 検査: メガ先の HP 種族値
+
+`reg.mega_by_species` の全ペアについて、もとの種族とメガ先の HP 種族値を比べた。
+
+```
+                               ペア   HP 種族値が同じ   違う   種族表に無い
+  gen9championsvgc2026regmb    76     76                0      0
+  gen9championsvgc2026regmc    82     82                0      0
+```
+
+違うものは 0 なので、今この瞬間のバグではない。旧 `do_mega` が正しかったのは、この表が全部「同じ」だったからにすぎない。
+
+### 2. 直し
+
+Python の `_do_mega` は `battler()` の `maxhp` を書き戻すが、既知のスプレッドでは `view.battler` が局面の `maxhp` をそのまま
+返すので、最大 HP は動かない。Rust の `do_mega` は計算し直した HP 実数値 `refreshed.stats[0]` を書いていた。IKA-53 で直した
+`change_forme` と同じ形にした: `Battler::from_pokemon` は（作れない種族をここで落とすために）作るが読まず、`mon.maxhp` は代入しない。
+HP の持ち越し式（`min(maxhp, hp + (maxhp - maxhp_before))`、差は 0）はそのまま。Python 側は `_do_mega` の注釈を実際の挙動に
+合わせただけ（コードは変えていない）。
+
+### 3. テスト（`tests/test_mega_hp_base.py`）と陽性対照
+
+* `test_every_mega_keeps_its_base_forms_hp_base[regmb / regmc]`: 上の表をテストにしたもの。HP 種族値の違うメガが入れば落ちる。
+* `test_the_check_sees_a_mega_that_changes_its_hp_base`: その陽性対照。メガリザードン Y の HP 種族値を 108 にした複写で、
+  検査が `("charizard", "charizarditey", "charizardmegay", 78, 108)` の 1 件を返す。
+* `test_a_mega_that_changes_its_hp_base_keeps_its_maximum_over_there_too`: 同じ合成 regulation を port にも読ませ
+  （`rustnode.repo_root` を tmp に向ける）、リザードンのメガ行動 6 つ × 相手の守る 2 つの枝を位置ごとに Python と比べる。
+
+```
+  合成メガ（リザードン Y の HP 種族値 78 → 108）、枝 6 本
+                                         一致   不一致   Python (hp/maxhp)   port (hp/maxhp)
+  新 exe（このブランチ）                  6      0        169/169             169/169
+  旧 exe（main の release、21:40 ビルド）  0      6        169/169             199/199
+```
+
+旧 exe ではこのテストが落ち、新 exe で通る。
+
+### 4. diff_node（実データ、答えは変わらない）
+
+`data/selfplay-gen11L/games-worker0.jsonl`（M-B）を複写し、`--holding` にメガストーン 10 種を渡した（`--using` は
+`breaksProtect` の技専用なので使えない）。石を外した対照で答えが動くセル = メガ（または石）が効いたセル。
+
+```
+  diff_node --holding <メガストーン 10 種> --nodes 12    12 局面 4,232 セル、refused 0、最悪差 3.3e-16、OK
+    石が効いたセル                                    528
+    そのうち枝・重み・注記・位置のどれかが違う          0
+```
+
+別に、同じ記録の局面でメガ行動を含むセルを全部枝ごとに比べた（`C:/tmp/ika60/mega_cells.py`、一時スクリプト）:
+
+```
+                    局面   セル    メガ行動を含むセル   新しくメガした枝   枝ごとに違うセル
+  新 exe            12     5,192   2,087                12,362             0
+  旧 exe            12     5,192   2,087                12,362             0
+```
+
+実データでは新旧とも Python と一致する（HP 種族値の違うメガが無いので当然）。分かれるのは 3 の合成メガだけ。
+
+### 5. 検査と機械
+
+`tools/port_coverage.py --check`・`tools/port_gate_audit.py --check`: ok。`ruff check` ok。テスト: test_mega_hp_base・test_rust_node・
+test_resolve・test_line_endings・test_no_machine_specific_paths・test_port_gates・test_port_coverage を `-n 0` で 128 pass・8 skip
+（skip は全部 oracle 未ビルド、メガとは無関係）。機械: cargo release ビルド 1 回（8 コア 22 秒）、diff_node 29 秒・メガセル比較 18 秒 + 21 秒・
+テスト 27 秒（いずれも 1 コア）を heavy.py に記録（--agent IKA-60）。

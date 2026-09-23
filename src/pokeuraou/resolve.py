@@ -1765,9 +1765,11 @@ def _do_mega(reg: Regulation, turn: _Turn, action: QueuedAction) -> None:
     mon.types = species.types
     mon.is_mega = True
     mon.ability = species.abilities[0].lower().replace(" ", "")
-    # Stats are recomputed from the new base stats. HP keeps its absolute value, adjusted
-    # by any change in maximum -- no mega changes the HP base stat, so this is a no-op in
-    # practice and correct if one ever does.
+    # Stats are recomputed from the new base stats. The maximum HP is not: for a known
+    # spread `battler` hands the position's own `maxhp` back, so the line below writes back
+    # what was there and the difference carried into `hp` is zero. No mega in either
+    # regulation changes its HP base (IKA-60, `tests/test_mega_hp_base.py`), and the
+    # port's `do_mega` keeps the maximum the same way.
     refreshed = battler(reg, mon)
     mon.maxhp = int(refreshed.maxhp[0])
     mon.hp = min(mon.maxhp, mon.hp + (mon.maxhp - maxhp_before))
