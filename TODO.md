@@ -6958,3 +6958,45 @@ scratchpad に書いた）:
 
 `heavy.py --cores 1` で3本（鍵なし、時刻だけ記録）。armD 08:51:46〜08:53:23（98秒）、w12 08:56:00〜
 08:58:24（144秒）、w24 08:58:49〜08:59:37（49秒）。ほかは1コア1分未満の試走と、保存した配列の読み直し。
+
+## 9/23 — IKA-138: 除外していた1本（Wolfe's Mence + Garde）に、Baltimore の公開シートの性格 Naive を出典つきで転記 —— 65/65、ほかの64本はバイト一致
+
+### 1. 答えた問い
+
+IKA-78 で性格の欄が無いために除外した `Wolfe's Mence + Garde`（paste 9de5ee0a9fd58d26）を、推測ではなく
+別の一次資料からの転記で通せるか。通せる。ユーザ承認 9/23（「Naive でおｋ」）。
+
+### 2. やったこと
+
+* `tools/fetch_pastes.py` に `SUPPLEMENTS`（`Supplement`: paste・個体番号・paste の種族表記・欄・値・大会・
+  プレイヤー・順位・standings のファイル名・その中の位置・承認）を足した。今あるのは1件だけ:
+  ボーマンダ（paste の1体目、`Salamence-Mega`）の nature = Naive、Baltimore Regional の Wolfe Glick（15位）、
+  `data/standings/2027-baltimore.json.gz` の `standings.wolfe-glick.team[3].nature`
+* 補いは信じずに確かめる。standings のファイルが手元にあれば、大会名・プレイヤー名・順位・その位置の値が一致し、
+  シートのその個体が paste の個体と種族（メガは石から素に戻して）・道具・特性・技（順不同）で一致しなければ
+  止まる。paste が書いている欄への補い、シートが見せない欄（SP など）への補い、個体番号の種族違いも止まる
+* 出力: 構築に `supplied`（個体・欄・値・出典と `checkedAgainst`: ファイルの sha256 と一致した欄）、個体に
+  `supplied: ["nature"]`、`counts.suppliedFields`、`notes.supplied`。ファイルが無いときは補いは入り、
+  `checkedAgainst: null` と実行ログの「file absent, NOT checked」で分かる。`--standings` で置き場所を変えられる
+* `teams.py` の「4つめの出典を作らない」とは衝突しない: 値を選んでいない（プレイヤーが登録した値）、
+  名指しの記録に辿れる。その理由を docstring に書いた
+
+### 3. 確かめたこと（worktree にキャッシュをコピーして、ネットに出ずに）
+
+* 直す前の tool でキャッシュから回すと、本体の `regmc-matchupweb.json` とバイト一致（sha256 3518680e…）——
+  比べる基準が正しい
+* 直した後: 65 listed / 65 kept / 0 excluded、390体すべて kept、メガ表記 114/114。0 fetched
+* 前の kept 64本は、構築ごとの JSON がバイト一致で順番も同じ。新しく入った1本（13番目）は、前の excluded と
+  比べて違うのは構築の `supplied` と、ボーマンダの `nature: null → "Naive"` と `supplied` だけ
+* その1本は `teams.load_roster` を通る（salamence Naive、19 Atk / 15 SpA / 32 Spe）
+* 2回回して同じバイト（sha256 c8554a75…、208,196 bytes）。standings の gz の sha256 は fb412817…
+* テスト（`tests/test_fetch_pastes.py`、作った standings の gz で）: 補いが無ければ従来どおり除外、確かめた補いは
+  効いて出典が残る、ファイルが無ければ入って `checkedAgainst: null`、合わない補い6通りは止まる
+
+### 4. 本体の data
+
+作り直していない（マージ後に本体で `uv run python tools/fetch_pastes.py`、キャッシュから）。
+
+### 5. 機械
+
+1コアで1秒未満の実行が数回。

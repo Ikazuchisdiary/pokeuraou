@@ -26,6 +26,20 @@ A team with any problem is excluded whole and listed with its reasons, never rep
 missing field is not filled in: ``teams.py`` keeps "making a set up" out as a fourth
 source, and a plausible nature invented here would come back out as a win probability.
 
+The one exception is a **transcription**, not a repair (IKA-138). A field a paste leaves
+out may be taken from the same team's *published team sheet* -- a tournament's open sheet
+for the same player's same six -- when the user has approved that one field, and it is
+listed in ``SUPPLEMENTS`` with the event, player, placing, standings file and the position
+of that value in it. That does not reopen the fourth source: nothing is chosen as
+plausible, the value is the one the player registered, and it is traceable to a named
+record. So each supplement is checked, not trusted: when the standings file is on disk
+the value at its position must be the one written here, the event and player must be the
+ones named, and the sheet's individual must be the paste's (species, item, ability,
+moves), or the run stops. The team then carries ``supplied`` -- which member, which field,
+which value, from where -- and the member names the field in its own ``supplied``, so a
+reader can tell a paste field from a transcribed one. A supplement for a field the paste
+does write stops the run: it would be overriding the export, not filling it.
+
 The sheet is live. Between the sizing probe and the first import its author put a
 "Your Team" row above the opponents, moving every row down four and renaming one team, with
 the 65 pastes unchanged. So the output names the sheet bytes it read (hash and fetch time)
@@ -54,6 +68,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 import hashlib
 import io
 import json
@@ -111,7 +126,128 @@ NOTES = {
         "（teams.py: 4つめの出典を作らない）"
     ),
     "names": "種族・特性・道具・技は M-C ダンプの表記（to_id で paste の表記と一致したもの）",
+    "supplied": (
+        "paste に無い欄を、同じ構築の公開シート（大会のオープンシート）から転記したものは、構築の "
+        "supplied に個体・欄・値・出典（大会・プレイヤー・順位・standings のファイルとその中の位置）を、"
+        "個体の supplied に欄名を残す。推測ではなく転記で、ユーザが欄ごとに承認したものだけ（IKA-138）"
+    ),
 }
+
+
+# -- transcriptions from a published team sheet (IKA-138) -------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class Supplement:
+    """One field a paste leaves out, transcribed from the same team's open team sheet.
+
+    ``player_code`` and ``team_index`` locate the value in a Reportworm standings file
+    (``tools/fetch_standings.py``): ``standings[player_code].team[team_index][field]``.
+    """
+
+    paste_id: str
+    member: int  # index in the paste
+    written_as: str  # the paste's species, so a reordered paste cannot shift the target
+    field: str  # a PasteMon field the paste left empty
+    value: str
+    event: str  # the standings file's event name
+    player: str
+    place: int
+    standings_file: str  # under data/standings/
+    player_code: str
+    team_index: int
+    approved: str
+
+    @property
+    def pointer(self) -> str:
+        return f"standings.{self.player_code}.team[{self.team_index}].{self.field}"
+
+    def record(self, checked: dict[str, Any] | None) -> dict[str, Any]:
+        return {
+            "member": self.member,
+            "writtenAs": self.written_as,
+            "field": self.field,
+            "value": self.value,
+            "source": {
+                "kind": "open team sheet",
+                "event": self.event,
+                "player": self.player,
+                "place": self.place,
+                "standings": f"data/standings/{self.standings_file}",
+                "pointer": self.pointer,
+                "tool": "tools/fetch_standings.py",
+                "approved": self.approved,
+                "checkedAgainst": checked,
+            },
+        }
+
+
+#: The fields a supplement may fill: the ones an open team sheet shows. SP is not one of
+#: them -- the sheet blanks it, which is why this pool exists.
+SUPPLIABLE = frozenset({"nature", "ability", "item"})
+
+SUPPLEMENTS: tuple[Supplement, ...] = (
+    # "Wolfe's Mence + Garde": the paste's Salamence (19 Atk / 15 SpA / 32 Spe) has no
+    # nature line. Wolfe Glick's Baltimore sheet has the same six with every other field
+    # equal, and its Salamence is Naive. Approved by the user on 9/23 ("Naive でおｋ").
+    Supplement(
+        paste_id="9de5ee0a9fd58d26",
+        member=0,
+        written_as="Salamence-Mega",
+        field="nature",
+        value="Naive",
+        event="Baltimore Regional",
+        player="Wolfe Glick",
+        place=15,
+        standings_file="2027-baltimore.json.gz",
+        player_code="wolfe-glick",
+        team_index=3,
+        approved="ユーザ承認 2026-09-23（IKA-138）",
+    ),
+)
+
+
+def check_supplement(
+    reg: Regulation, supplement: Supplement, mon: PasteMon, standings_dir: Path | None
+) -> dict[str, Any] | None:
+    """Stop the run unless the supplement fills an empty field of the individual its sheet
+    shows. Returns what it was checked against, or ``None`` when the file is not on disk."""
+    where = f"supplement {supplement.paste_id}[{supplement.member}] {supplement.field}"
+    if supplement.field not in SUPPLIABLE:
+        raise SystemExit(f"{where}: {supplement.field!r} is not a field an open sheet shows")
+    if to_id(mon.species) != to_id(supplement.written_as):
+        raise SystemExit(f"{where}: the paste has {mon.species!r} there, not {supplement.written_as!r}")
+    if getattr(mon, supplement.field) is not None:
+        raise SystemExit(f"{where}: the paste writes {getattr(mon, supplement.field)!r}; not overriding it")
+    if standings_dir is None:
+        return None
+    path = standings_dir / supplement.standings_file
+    if not path.exists():
+        return None
+    packed = path.read_bytes()
+    raw = gzip.decompress(packed)
+    doc = json.loads(raw)
+    if doc["event"]["name"] != supplement.event:
+        raise SystemExit(f"{where}: {path.name} is {doc['event']['name']!r}, not {supplement.event!r}")
+    entry = doc["standings"].get(supplement.player_code)
+    if entry is None or entry["name"] != supplement.player or entry["place"] != supplement.place:
+        raise SystemExit(
+            f"{where}: {supplement.player_code} is not {supplement.player} at {supplement.place}"
+        )
+    shown = entry["team"][supplement.team_index]
+    if shown.get(supplement.field) != supplement.value:
+        raise SystemExit(f"{where}: the sheet has {shown.get(supplement.field)!r}, not {supplement.value!r}")
+    base = base_of_mega(reg).get((to_id(mon.species), to_id(mon.item or "")), to_id(mon.species))
+    same = {
+        "species": (to_id(shown["name"]), base),
+        "item": (to_id(shown["item"]), to_id(mon.item or "")),
+        "ability": (to_id(shown["ability"]), to_id(mon.ability or "")),
+        "moves": (sorted(to_id(m["name"]) for m in shown["moves"]), sorted(map(to_id, mon.moves))),
+    }
+    differ = [name for name, (a, b) in same.items() if name != supplement.field and a != b]
+    if differ:
+        raise SystemExit(f"{where}: the sheet's individual differs from the paste's in {', '.join(differ)}")
+    return {"sha256": sha256(packed), "matched": sorted(n for n in same if n != supplement.field)}
 
 
 # -- the sheet -------------------------------------------------------------------------
@@ -357,12 +493,35 @@ def check_team(reg: Regulation, members: list[dict[str, Any]]) -> list[str]:
     return problems
 
 
-def build_team(reg: Regulation, text: str) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """A paste's members, and its problems as ``{member, writtenAs, field, reason}``."""
+def build_team(
+    reg: Regulation,
+    text: str,
+    supplements: tuple[Supplement, ...] = (),
+    standings_dir: Path | None = None,
+    supplied: list[dict[str, Any]] | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """A paste's members, and its problems as ``{member, writtenAs, field, reason}``.
+
+    ``supplements`` are this paste's transcriptions; each is checked, applied to the empty
+    field, and appended as its record to ``supplied``.
+    """
     members: list[dict[str, Any]] = []
     problems: list[dict[str, Any]] = []
-    for index, mon in enumerate(parse_paste(text)):
+    mons = parse_paste(text)
+    for supplement in supplements:
+        if not 0 <= supplement.member < len(mons):
+            raise SystemExit(f"supplement {supplement.paste_id}: no member {supplement.member}")
+    for index, mon in enumerate(mons):
+        filled: list[str] = []
+        for supplement in (s for s in supplements if s.member == index):
+            checked = check_supplement(reg, supplement, mon, standings_dir)
+            setattr(mon, supplement.field, supplement.value)
+            filled.append(supplement.field)
+            if supplied is not None:
+                supplied.append(supplement.record(checked))
         member, bad = normalise(reg, mon)
+        if filled:
+            member["supplied"] = filled
         members.append(member)
         problems += [{"member": index, "writtenAs": mon.species, "field": f, "reason": r} for f, r in bad]
     problems += [
@@ -450,8 +609,14 @@ def build_pool(
     sheet: tuple[bytes, dict[str, Any]],
     pastes: list[tuple[SheetEntry, bytes, dict[str, Any]]],
     own_rows: list[SheetEntry] | None = None,
+    supplements: tuple[Supplement, ...] = SUPPLEMENTS,
+    standings_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """The output document. A pure function of its inputs, so the cache reproduces it."""
+    """The output document. A pure function of its inputs, so the cache reproduces it.
+
+    ``standings_dir`` is where the supplements' standings files are checked; each record
+    says whether its file was read (``checkedAgainst``) or absent (``null``).
+    """
     dump_path = regulation_dir() / f"{reg.meta.format_id}.json"
     dump_bytes = dump_path.read_bytes()
     dump_meta = json.loads(dump_bytes)["meta"]
@@ -465,7 +630,9 @@ def build_pool(
     excluded: list[dict[str, Any]] = []
     for entry, raw, record in pastes:
         text = raw.decode("utf-8")
-        members, problems = build_team(reg, text)
+        supplied: list[dict[str, Any]] = []
+        mine = tuple(s for s in supplements if s.paste_id == entry.paste_id)
+        members, problems = build_team(reg, text, mine, standings_dir, supplied)
         source = {
             "sheet": SHEET_URL,
             "gid": SHEET_GID,
@@ -475,7 +642,10 @@ def build_pool(
             "fetchedAt": record["fetchedAt"],
             "sha256": record["sha256"],
         }
-        team = {"id": entry.paste_id, "name": entry.name, "source": source, "team": members}
+        team: dict[str, Any] = {"id": entry.paste_id, "name": entry.name, "source": source}
+        if supplied:
+            team["supplied"] = supplied
+        team["team"] = members
         if problems:
             excluded.append({**team, "problems": problems})
         else:
@@ -513,6 +683,7 @@ def build_pool(
                 "kept": sum(map(written_as_mega, kept)),
             },
             "spTotalKept": [min(totals), max(totals)] if totals else None,
+            "suppliedFields": sum(len(t.get("supplied", [])) for t in teams + excluded),
         },
         "teams": teams,
         "excluded": excluded,
@@ -535,6 +706,12 @@ def main() -> None:
     ap.add_argument("--cache", type=Path, default=ROOT / "data" / "pool" / POOL_ID)
     ap.add_argument("--out", type=Path, default=ROOT / "data" / "pool" / f"{POOL_ID}.json")
     ap.add_argument("--delay", type=float, default=1.0, help="seconds between network requests")
+    ap.add_argument(
+        "--standings",
+        type=Path,
+        default=ROOT / "data" / "standings",
+        help="where the supplements' standings files are read to check them (never fetched here)",
+    )
     args = ap.parse_args()
 
     reg = load_regulation(REGULATION)
@@ -546,7 +723,7 @@ def main() -> None:
         raw, record = cache.get(f"pastes/{entry.paste_id}.txt", f"https://pokepast.es/{entry.paste_id}/raw")
         pastes.append((entry, raw, record))
 
-    pool = build_pool(reg, sheet, pastes, own_rows)
+    pool = build_pool(reg, sheet, pastes, own_rows, SUPPLEMENTS, args.standings)
     body = encode(pool)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_bytes(body)
@@ -562,6 +739,19 @@ def main() -> None:
         f"listed, {members['kept']} kept; written as the mega forme {mega['listed']} listed, "
         f"{mega['kept']} kept; SP totals of the kept {counts['spTotalKept']}"
     )
+    for team in pool["teams"] + pool["excluded"]:
+        for s in team.get("supplied", []):
+            src = s["source"]
+            checked = src["checkedAgainst"]
+            print(
+                f"  supplied {team['name']!r} {s['writtenAs']} {s['field']} = {s['value']!r} from "
+                f"{src['event']} {src['player']} (#{src['place']}) {src['standings']} {src['pointer']}; "
+                + (f"checked, file sha256 {checked['sha256']}" if checked else "file absent, NOT checked")
+            )
+    listed_ids = {e.paste_id for e in entries}
+    for s in SUPPLEMENTS:
+        if s.paste_id not in listed_ids:
+            print(f"  supplement for paste {s.paste_id} matches no listed team: unused")
     for team in pool["excluded"]:
         reasons = "; ".join(
             f"{p['writtenAs'] or 'team'} {p['field']}: {p['reason']}" for p in team["problems"]

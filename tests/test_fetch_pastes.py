@@ -10,7 +10,10 @@ here, each against the failure it prevents:
   written as the mega forme; the stone held is what names the base, and a forme the stone
   does not make is reported rather than resolved some other way.
 - **a missing field excludes the team and is not filled in.** One real paste leaves out a
-  nature; guessing it is the fourth source `teams.py` keeps out.
+  nature; guessing it is the fourth source `teams.py` keeps out. The one way in is a
+  transcription (IKA-138): a user-approved field from the same team's open team sheet,
+  checked against the standings file and recorded as `supplied`; one that does not match
+  the sheet or the paste stops the run.
 - **the output is a function of the cached bytes.** Rerunning from the cache has to write
   the same file, or "reproducible" means nothing.
 
@@ -20,6 +23,7 @@ paste is copied here, since the fetched ones are not redistributed.
 
 from __future__ import annotations
 
+import gzip
 import json
 from pathlib import Path
 
@@ -238,6 +242,131 @@ def test_the_pool_file_is_a_function_of_the_cached_bytes(reg: Regulation) -> Non
     assert pool["ownRowsSkipped"] == [
         {"sheetRow": 3, "name": "Your Team", "paste": "https://pokepast.es/00000000aaaaaaaa"}
     ]
+
+
+# -- transcriptions from an open team sheet (IKA-138) ---------------------------------------
+
+MISSING = "fedcba9876543210"  # the fixture paste without a nature (see _pool)
+
+
+def _supplement(**change: object) -> object:
+    base = {
+        "paste_id": MISSING,
+        "member": 0,
+        "written_as": "Salamence-Mega",
+        "field": "nature",
+        "value": "Adamant",
+        "event": "Test Regional",
+        "player": "Test Player",
+        "place": 7,
+        "standings_file": "test-event.json.gz",
+        "player_code": "test-player",
+        "team_index": 1,
+        "approved": "test",
+    }
+    return fp.Supplement(**{**base, **change})
+
+
+def _standings(tmp_path: Path, nature: str = "Adamant", moves: tuple[str, ...] = ()) -> Path:
+    """A made-up standings file whose second sheet member is the fixture Salamence."""
+    salamence = {
+        "name": "Salamence",
+        "ability": "Intimidate",
+        "nature": nature,
+        "item": "Salamencite",
+        "moves": [{"name": m} for m in moves or ("Protect", "Dragon Claw", "Double-Edge", "Tailwind")],
+    }
+    other = {"name": "Incineroar", "ability": "Intimidate", "nature": "Careful", "item": "", "moves": []}
+    doc = {
+        "event": {"name": "Test Regional"},
+        "standings": {"test-player": {"name": "Test Player", "place": 7, "team": [other, salamence]}},
+    }
+    (tmp_path / "test-event.json.gz").write_bytes(gzip.compress(json.dumps(doc).encode("utf-8")))
+    return tmp_path
+
+
+def _pool_with(reg: Regulation, supplements: tuple, standings_dir: Path | None) -> dict:
+    entries, own = fp.parse_sheet(SHEET)
+    record = {"fetchedAt": "2026-09-23T00:00:00Z"}
+    raw = {
+        "0123456789abcdef": TEAM.encode(),
+        MISSING: TEAM.replace("Adamant Nature\n", "", 1).encode(),
+    }
+    pastes = [(e, raw[e.paste_id], {**record, "sha256": fp.sha256(raw[e.paste_id])}) for e in entries]
+    sheet = SHEET.encode()
+    return fp.build_pool(
+        reg, (sheet, {**record, "sha256": fp.sha256(sheet)}), pastes, own, supplements, standings_dir
+    )
+
+
+def test_without_a_supplement_the_team_is_still_excluded(reg: Regulation) -> None:
+    pool = _pool_with(reg, (), None)
+    assert pool["counts"]["teams"] == {"listed": 2, "kept": 1, "excluded": 1}
+    assert pool["excluded"][0]["id"] == MISSING
+    assert pool["counts"]["suppliedFields"] == 0
+    assert all("supplied" not in t for t in pool["teams"] + pool["excluded"])
+    # The shipped supplements name real pastes only, so the fixtures are untouched by them.
+    assert fp.encode(_pool(reg)) == fp.encode(_pool_with(reg, (), None))
+
+
+def test_a_checked_supplement_fills_the_field_and_says_where_from(reg: Regulation, tmp_path: Path) -> None:
+    pool = _pool_with(reg, (_supplement(),), _standings(tmp_path))
+    assert pool["counts"]["teams"] == {"listed": 2, "kept": 2, "excluded": 0}
+    team = next(t for t in pool["teams"] if t["id"] == MISSING)
+    salamence = team["team"][0]
+    assert (salamence["nature"], salamence["supplied"]) == ("Adamant", ["nature"])
+    assert all("supplied" not in m for m in team["team"][1:])
+    (record,) = team["supplied"]
+    assert (record["member"], record["field"], record["value"]) == (0, "nature", "Adamant")
+    source = record["source"]
+    assert (source["event"], source["player"], source["place"]) == ("Test Regional", "Test Player", 7)
+    assert source["standings"] == "data/standings/test-event.json.gz"
+    assert source["pointer"] == "standings.test-player.team[1].nature"
+    assert source["checkedAgainst"]["matched"] == ["ability", "item", "moves", "species"]
+    assert pool["counts"]["suppliedFields"] == 1
+
+
+def test_a_supplement_without_its_file_is_applied_but_marked_unchecked(
+    reg: Regulation, tmp_path: Path
+) -> None:
+    pool = _pool_with(reg, (_supplement(),), tmp_path)  # the directory has no standings file
+    team = next(t for t in pool["teams"] if t["id"] == MISSING)
+    assert team["supplied"][0]["source"]["checkedAgainst"] is None
+
+
+@pytest.mark.parametrize(
+    ("supplement", "standings"),
+    [
+        ({"value": "Jolly"}, {}),  # the sheet says Adamant
+        ({}, {"moves": ("Protect", "Draco Meteor", "Double-Edge", "Tailwind")}),  # another individual
+        ({"player": "Someone Else"}, {}),
+        ({"written_as": "Floette-Mega"}, {}),  # the paste has Salamence there
+        ({"member": 1, "written_as": "Floette-Mega"}, {}),  # the paste writes Timid: no override
+        ({"field": "sp"}, {}),  # the sheet blanks SP
+    ],
+)
+def test_a_supplement_that_does_not_match_stops_the_run(
+    reg: Regulation, tmp_path: Path, supplement: dict, standings: dict
+) -> None:
+    with pytest.raises(SystemExit):
+        _pool_with(reg, (_supplement(**supplement),), _standings(tmp_path, **standings))
+
+
+def test_the_shipped_supplement_is_the_approved_one() -> None:
+    (s,) = fp.SUPPLEMENTS
+    assert (s.paste_id, s.member, s.written_as, s.field, s.value) == (
+        "9de5ee0a9fd58d26",
+        0,
+        "Salamence-Mega",
+        "nature",
+        "Naive",
+    )
+    assert (s.event, s.player, s.place, s.standings_file) == (
+        "Baltimore Regional",
+        "Wolfe Glick",
+        15,
+        "2027-baltimore.json.gz",
+    )
 
 
 def test_a_kept_team_reads_through_the_roster_loader(reg: Regulation, tmp_path: Path) -> None:
