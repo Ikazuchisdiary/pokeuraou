@@ -179,3 +179,30 @@ def test_the_port_counts_the_hits_as_python_does(reg: Regulation, oracle: Oracle
         assert len(resolve_turn(reg, pos, actions, budget=Budget.matrix()).branches) > 1
     finally:
         node.close()
+
+
+# ---------------------------------------------------------------------------
+# The port against Showdown, not against Python (IKA-207).
+
+
+@pytest.mark.oracle
+def test_the_ports_skill_link_agrees_with_the_simulator(reg: Regulation, oracle: Oracle, port) -> None:  # noqa: ANN001
+    """`test_skill_link_agrees_with_the_simulator` with the port's pinned outcome."""
+    from ._port_showdown import port_turn
+
+    handle = oracle.create(FORMAT_ID, TEAM_A, TEAM_B, policy=RandomnessPolicy())
+    handle.step(["team 1234", "team 1234"])
+    before = Position.from_json(handle.position)
+    handle.step(CHOICES)
+    assert handle.choice_errors == [], handle.choice_errors
+    after = Position.from_json(handle.position)
+    log = list(handle.log)
+    handle.close()
+    assert "|-hitcount|p2b: Kingambit|5" in log, log
+    theirs = [m.hp for m in after.sides[1].pokemon]
+    actions = [
+        next(a for a in side_actions(reg, before, side) if a.to_choice() == CHOICES[side])
+        for side in (0, 1)
+    ]
+    ours = port_turn(port, before, actions)
+    assert [m.hp for m in ours.sides[1].pokemon] == theirs

@@ -442,3 +442,114 @@ def test_unnerve_keeps_the_berry(reg) -> None:  # noqa: ANN001
     for branch in result.branches:
         assert _target(branch.position).item == "persimberry"
         assert _target(branch.position).has_volatile("confusion")
+
+
+# ---------------------------------------------------------------------------
+# The port against Showdown, not against Python (IKA-207).
+
+
+def _port_tree(reg, port, start: Position, steps: list[list[str]], budget: Budget) -> list[float]:  # noqa: ANN001
+    """`_tree` with the port resolving every branch."""
+    from ._port_showdown import port_branches
+
+    frontier = [(1.0, start)]
+    out = []
+    for step in steps:
+        nxt = []
+        for weight, pos in frontier:
+            nxt.extend(
+                (weight * w, p) for w, p in port_branches(port, pos, _chosen(reg, pos, step), budget)
+            )
+        frontier = nxt
+        confused = sum(w for w, p in frontier if _target(p).has_volatile("confusion"))
+        out.append(confused / sum(w for w, _ in frontier))
+    return out
+
+
+@pytest.mark.oracle
+@pytest.mark.parametrize(("name", "roll"), PLAYED)
+def test_the_ports_turn_from_showdowns_position(reg, oracle: Oracle, port, name: str, roll: str) -> None:  # noqa: ANN001
+    """`test_our_turn_from_showdowns_position` with the port's branches."""
+    from ._port_showdown import port_branches
+
+    case = CASES[name]
+    positions, _ = _play(oracle, case, roll)
+    for index, step in enumerate(case.steps):
+        start = _loaded(positions[index])
+        after = Position.from_json(positions[index + 1])
+        branches = port_branches(port, start, _chosen(reg, start, step), Budget.matrix())
+        want = _time(after)
+        got = {_time(p) for _, p in branches}
+        items = {_target(p).item for _, p in branches}
+        if want and _time(start) == 0:
+            assert None in got, (index, got)
+            assert _target(after).item in items
+            continue
+        assert got == {want}, (index, got, want)
+        assert items == {_target(after).item}
+
+
+@pytest.mark.oracle
+def test_the_games_the_port_generates(reg, oracle: Oracle, port) -> None:  # noqa: ANN001
+    """`test_the_games_we_generate` with the port: P(time > k) = (5 - k) / 4."""
+    case = CASES["confuse ray"]
+    positions, _ = _play(oracle, case, "short")
+    ours = _port_tree(reg, port, _loaded(positions[0]), case.steps, Budget.matrix())
+    assert ours == pytest.approx([1.0, 0.75, 0.5, 0.25, 0.0, 0.0])
+
+
+@pytest.mark.oracle
+def test_the_port_axe_kicks_confusion_from_its_own_position(reg, oracle: Oracle, port) -> None:  # noqa: ANN001
+    """`test_axe_kicks_confusion_from_our_own_position` with the port."""
+    case = CASES["axe kick"]
+    positions, _ = _play(oracle, case, "short")
+    start = _loaded(positions[1])
+    held = _target(start).volatile("confusion")
+    assert held is not None
+    held.extra = {"tries": 1, "min": 3}
+    ours = _port_tree(reg, port, start, case.steps[1:], Budget.matrix())
+    assert ours == pytest.approx([1.0, 2 / 3, 1 / 3, 0.0, 0.0])
+
+
+@pytest.mark.oracle
+@pytest.mark.parametrize("name", ["confuse ray", "axe kick"])
+def test_the_ports_pinned_budget_rolls_the_lowest(reg, oracle: Oracle, port, name: str) -> None:  # noqa: ANN001
+    """`test_the_pinned_budget_rolls_the_lowest` with the port."""
+    case = CASES[name]
+    positions, _ = _play(oracle, case, "short")
+    pinned = dataclasses.replace(Budget.deterministic(), pinned_policy=True)
+    first = 0 if name == "confuse ray" else 1
+    start = _loaded(positions[first])
+    if first:
+        held = _target(start).volatile("confusion")
+        assert held is not None
+        held.extra = {"tries": 1, "min": 3}
+    ours = _port_tree(reg, port, start, case.steps[first:], pinned)
+    assert ours == [1.0 if t else 0.0 for t in case.short[first:]]
+
+
+@pytest.mark.oracle
+def test_the_port_rolls_confusion_before_paralysis(reg, oracle: Oracle, port) -> None:  # noqa: ANN001
+    """`test_confusion_is_rolled_before_paralysis` with the port's weights."""
+    from ._port_showdown import port_branches
+
+    case = CASES["confuse ray"]
+    positions, rolls = _play(oracle, case, "long", [PARALYSE, CONFUSE, SET_UP])
+    asked = [(r["kind"], r.get("numerator"), r.get("denominator")) for r in rolls[2]]
+    assert ("chance", 33, 100) in asked and ("chance", 1, 8) not in asked, asked
+    start = _loaded(positions[2])
+    assert _target(start).status == "par" and _time(start) == 4
+    before = _target(start)
+    by_kind: dict[str, float] = {}
+    for weight, pos in port_branches(port, start, _chosen(reg, start, SET_UP), Budget.matrix()):
+        mon = _target(pos)
+        kind = ("self-hit" if mon.hp < before.hp
+                else "acted" if mon.boosts.get("atk", 0) > before.boosts.get("atk", 0)
+                else "paralysed")
+        by_kind[kind] = by_kind.get(kind, 0.0) + weight
+    hit = CONFUSION_SELF_HIT_CHANCE
+    assert by_kind == pytest.approx({
+        "self-hit": hit,
+        "paralysed": (1 - hit) * FULL_PARALYSIS_CHANCE,
+        "acted": (1 - hit) * (1 - FULL_PARALYSIS_CHANCE),
+    })

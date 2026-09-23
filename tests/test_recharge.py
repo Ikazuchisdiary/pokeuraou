@@ -187,3 +187,42 @@ def test_the_recharge_turn_lifts_the_lock_and_spends_no_pp(reg, oracle: Oracle) 
         f"Showdown logs the spent turn: {handle.log}"
     )
     handle.close()
+
+
+# ---------------------------------------------------------------------------
+# The port against Showdown, not against Python (IKA-207).
+
+
+@pytest.mark.oracle
+def test_the_ports_recharge_turn_lifts_the_lock_and_spends_no_pp(reg, oracle: Oracle, port) -> None:  # noqa: ANN001
+    """`test_the_recharge_turn_lifts_the_lock_and_spends_no_pp` with the port, and the
+    port's pinned outcome held to Showdown's own position after the recharge."""
+    from ._port_showdown import port_branches, port_turn
+
+    handle = _battle(oracle)
+    handle.step(CONNECTS)
+    pos = Position.from_json(handle.position)
+    before = [(m.id, m.pp) for m in pos.sides[0].pokemon[pos.sides[0].active[0]].moves]
+    ours = next(
+        a for a in side_actions(reg, pos, 0) if any(
+            isinstance(p, MoveAction) and p.move_id == "recharge" for p in a.slots
+        )
+    )
+    theirs = side_actions(reg, pos, 1)[0]
+    branches = port_branches(port, pos, [ours, theirs], Budget.exact())
+    assert branches, "the recharge turn has to resolve"
+    after_pos = max(branches, key=lambda b: b[0])[1]
+    mon = after_pos.sides[0].pokemon[after_pos.sides[0].active[0]]
+    assert not mon.has_volatile("mustrecharge"), mon.volatiles
+    assert [(m.id, m.pp) for m in mon.moves] == before
+
+    handle.step([ours.to_choice(), theirs.to_choice()])
+    assert handle.choice_errors == [], handle.choice_errors
+    showdown = Position.from_json(handle.position)
+    handle.close()
+    pinned = port_turn(port, pos, [ours, theirs])
+    for side, theirs_side in zip(pinned.sides, showdown.sides, strict=True):
+        for a, b in zip(side.pokemon, theirs_side.pokemon, strict=True):
+            assert (a.species, a.hp, a.has_volatile("mustrecharge"), [(m.id, m.pp) for m in a.moves]) == (
+                b.species, b.hp, b.has_volatile("mustrecharge"), [(m.id, m.pp) for m in b.moves]
+            )

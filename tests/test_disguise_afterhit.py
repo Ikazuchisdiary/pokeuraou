@@ -156,3 +156,24 @@ def test_an_absorbed_hit_keeps_everything_but_its_damage(
         )
         # U-turn's switch: Showdown asks for it, Python suspends on it.
         assert self_switches_needed(pos)[0][0] == switch, (name, switch)
+
+
+# ---------------------------------------------------------------------------
+# The port against Showdown, not against Python (IKA-207). The port refuses Disguise
+# ("forme change and 1/8 not ported"), so every case is an expected failure until it
+# does; `strict` makes the first one that passes say so. U-turn also stops at the
+# replacement, whose position the port does not return (the continuation is IKA-211).
+
+
+@pytest.mark.xfail(strict=True, reason="the port refuses Disguise (IKA-208)")
+@pytest.mark.parametrize("name", sorted(CASES))
+def test_the_port_keeps_everything_but_the_absorbed_damage(reg, oracle: Oracle, port, name: str) -> None:  # noqa: ANN001
+    from ._port_showdown import port_turn
+
+    before, choices, theirs, log, _switch = _play(oracle, name)
+    assert CASES[name][2] in log, f"Showdown did not do what the case says: {log}"
+    actions = [
+        next(a for a in side_actions(reg, before, side) if a.to_choice() == choices[side]) for side in (0, 1)
+    ]
+    ours = port_turn(port, before, actions)
+    assert _state(ours) == theirs, f"{name}: showdown {theirs} != port {_state(ours)}"

@@ -178,3 +178,39 @@ def test_the_port_agrees_with_python(
             picked = node.resolve(start, chosen, Budget.matrix(), select=index)
             assert picked is not None and picked.position is not None
             assert picked.position.to_json() == branch.position.to_json(), (turn, index)
+
+
+# ---------------------------------------------------------------------------
+# The port against Showdown, not against Python (IKA-207). The port keeps no events, so
+# the order is held through what it decides: every Pokemon's HP after the residual, on the
+# turns Showdown does not shuffle.
+
+
+@pytest.mark.oracle
+@pytest.mark.parametrize("case", sorted(FOES))
+def test_the_port_notes_the_ties_showdown_rolls(reg, oracle: Oracle, port, case: str) -> None:  # noqa: ANN001
+    """`test_python_notes_the_ties_showdown_rolls` with the port's notes."""
+    from ._port_showdown import port_weights
+
+    positions, _ = _play(oracle, case)
+    for turn in TURNS:
+        start = _loaded(positions[turn - 1])
+        chosen = _chosen(reg, start, STEPS[turn - 1])
+        notes = set(port_weights(port, start, chosen, Budget.matrix())["unmodelled"])
+        assert notes == ({TIE_NOTE} if TIED[case][turn] else set()), turn
+
+
+@pytest.mark.oracle
+@pytest.mark.parametrize("case", sorted(FOES))
+def test_the_port_ends_the_residual_where_showdown_does(reg, oracle: Oracle, port, case: str) -> None:  # noqa: ANN001
+    from ._port_showdown import port_turn
+
+    positions, _ = _play(oracle, case)
+    for turn in TURNS:
+        if TIED[case][turn]:
+            continue
+        start = _loaded(positions[turn - 1])
+        after = port_turn(port, start, _chosen(reg, start, STEPS[turn - 1]))
+        theirs = Position.from_json(positions[turn])
+        hp = [[m.hp for m in side.pokemon] for side in after.sides]
+        assert hp == [[m.hp for m in side.pokemon] for side in theirs.sides], turn
