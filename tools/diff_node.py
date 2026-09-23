@@ -30,6 +30,17 @@ item taken off again: the cells whose answer that moves are the ones the item *f
 and those are held to the port branch by branch -- every weight, every note, every
 branch's position -- because a wrong 20% can still average to the right cell.
 
+Holding the port to a move, which is what taking a refusal out of the port asks for:
+
+    uv run python tools/diff_node.py --games-dir data/ika73/w12 --using feint
+
+`--using` keeps the positions with a Pokemon on the field that knows the move. Every cell
+where an action uses it is held to the port branch by branch -- the port refused all of
+them before -- and the cells where the move's effect *fired* are counted apart: for a
+`breaksProtect` move (the only kind this takes, IKA-61), the same turn resolved in Python
+with `_break_protection` taken out. A Feint into a foe that did not Protect agrees
+without the break ever running, and that is not evidence the break is right (IKA-58).
+
 The budget, and the second invocation that goes with it (IKA-146):
 
     uv run python tools/diff_node.py --scenario examples/scenario-turn5.json --budget fast --limit 0
@@ -158,7 +169,42 @@ def on_field(pos: Position, items: frozenset[str]) -> bool:
     )
 
 
-def recorded_positions(reg, args, holding: frozenset[str]) -> tuple[list[Position], int]:  # noqa: ANN001
+def knows_on_field(pos: Position, moves: frozenset[str]) -> bool:
+    """Whether a Pokemon on the field, still standing, knows one of these moves."""
+    return any(
+        mon is not None and not mon.fainted and any(slot.id in moves for slot in mon.moves)
+        for side in pos.sides
+        for mon in side.active_pokemon()
+    )
+
+
+def uses(action, moves: frozenset[str]) -> bool:  # noqa: ANN001
+    """Whether a side's action has one of its slots use one of these moves."""
+    return any(getattr(slot, "move_id", None) in moves for slot in action.slots)
+
+
+class unbroken:  # noqa: N801 - read as a phrase at the call site
+    """Python with `_break_protection` taken out: the control for a `breaksProtect` move.
+
+    Everything else about the move stays -- it still passes the Protect it no longer
+    breaks -- so what differs is only what the break did.
+    """
+
+    def __enter__(self) -> None:
+        import pokeuraou.resolve as resolve_mod
+
+        self.real = resolve_mod._break_protection
+        resolve_mod._break_protection = lambda *_args: None
+
+    def __exit__(self, *_exc) -> None:  # noqa: ANN002
+        import pokeuraou.resolve as resolve_mod
+
+        resolve_mod._break_protection = self.real
+
+
+def recorded_positions(  # noqa: ANN001
+    reg, args, holding: frozenset[str], using: frozenset[str] = frozenset()
+) -> tuple[list[Position], int]:
     """Roots a search already filled a matrix at, read from recorded games.
 
     No game is played, so nothing here is generation. With `holding` every game is read,
@@ -169,12 +215,13 @@ def recorded_positions(reg, args, holding: frozenset[str]) -> tuple[list[Positio
     found: list[Position] = []
     keys: set[str] = set()
     other_format = 0
-    enough = None if holding else 40 * args.nodes
+    wanted = holding | using
+    enough = None if wanted else 40 * args.nodes
     for directory in args.games_dir:
         for path in sorted(Path(directory).glob("*.jsonl")):
             with path.open(encoding="utf-8") as handle:
                 for line in handle:
-                    if holding and not any(item in line for item in holding):
+                    if wanted and not any(name in line for name in wanted):
                         continue
                     try:
                         record = json.loads(line)
@@ -194,6 +241,8 @@ def recorded_positions(reg, args, holding: frozenset[str]) -> tuple[list[Positio
                             continue
                         pos = Position.from_json(raw)
                         if holding and not on_field(pos, holding):
+                            continue
+                        if using and not knows_on_field(pos, using):
                             continue
                         keys.add(key)
                         found.append(pos)
@@ -399,6 +448,13 @@ def main() -> None:
         help="an item id to hand every Pokemon on the field first -- for an item no "
         "recorded team carries. Implies --holding of the same item.",
     )
+    ap.add_argument(
+        "--using",
+        default=None,
+        help="comma-separated breaksProtect move ids: keep positions where a Pokemon on "
+        "the field knows one, hold every cell that uses one to the port branch by branch, "
+        "and count where the break fired",
+    )
     args = ap.parse_args()
 
     if args.limit == 0 and not args.scenario:
@@ -412,6 +468,11 @@ def main() -> None:
     holding = frozenset(i for i in (args.holding or "").split(",") if i)
     if args.give:
         holding |= {args.give}
+    using = frozenset(m for m in (args.using or "").split(",") if m)
+    for move_id in sorted(using):
+        move = reg.moves.get(move_id)
+        if move is None or not move.raw.get("breaksProtect"):
+            ap.error(f"--using takes breaksProtect moves; {move_id} is not one here")
 
     if args.value:
         import torch
@@ -435,7 +496,9 @@ def main() -> None:
         positions = [scenario_pos]
         print(f"the node of {args.scenario}")
     elif args.games_dir:
-        positions, other_format = recorded_positions(reg, args, holding - {args.give})
+        positions, other_format = recorded_positions(
+            reg, args, holding - {args.give}, using
+        )
         print(
             f"{len(positions)} recorded positions from "
             f"{', '.join(str(d) for d in args.games_dir)}"
@@ -452,6 +515,8 @@ def main() -> None:
         print(f"{args.give} handed to {given} Pokemon on the field")
     if holding:
         positions = [pos for pos in positions if on_field(pos, holding)]
+    if using:
+        positions = [pos for pos in positions if knows_on_field(pos, using)]
     build = rustnode.require_current_binary()
     print(f"binary {build['sha256']} built {build['built']}")
 
@@ -483,6 +548,9 @@ def main() -> None:
     fired_worst = 0.0
     fired_notes: Counter = Counter()
     shown = 0
+    # Where the move was used, where its break fired, and what the port did there.
+    used = used_wrong = broke = broke_wrong = broke_paused = 0
+    broke_worst = 0.0
 
     for pos in positions:
         row = menu(reg, pos, 0, args.limit)
@@ -546,6 +614,39 @@ def main() -> None:
                             shown += 1
                             print(f"  cell {(i, j)} where the item fired: {wrong[0][:200]}")
 
+        if using:
+            node = rustnode.node_for(reg)
+            for i, a in enumerate(row):
+                for j, b in enumerate(col):
+                    if not (uses(a, using) or uses(b, using)):
+                        continue
+                    used += 1
+                    here = resolve_turn(reg, pos, [a, b], budget=budget)
+                    with unbroken():
+                        control = resolve_turn(reg, pos, [a, b], budget=budget)
+                    fired_here = differ(outcome(here), outcome(control))
+                    wrong = (
+                        ["no warm process"]
+                        if node is None
+                        else branch_differences(node, reg, pos, a, b, here, budget)
+                    )
+                    used_wrong += bool(wrong)
+                    if fired_here:
+                        broke += 1
+                        broke_wrong += bool(wrong)
+                        # `branch_differences` compares a paused turn's weight but not its
+                        # position -- the port hands back only a finished branch's -- so a
+                        # break that shows only in a paused state is not held here.
+                        broke_paused += bool(here.suspended)
+                        for index in range(len(evaluators)):
+                            broke_worst = max(
+                                broke_worst,
+                                abs(float(got[index][i, j] - expected[index][i, j])),
+                            )
+                    if wrong and shown < 5:
+                        shown += 1
+                        print(f"  cell {(i, j)} using {sorted(using)}: {wrong[0][:200]}")
+
         checked += 1
         cells += len(row) * len(col)
         for index, name in enumerate(names):
@@ -603,6 +704,15 @@ def main() -> None:
         print(f"    worst cell difference there  {fired_worst:.3e}")
         for note, times in fired_notes.most_common(4):
             print(f"    note only the item's turn carries, {times} cells: {note}")
+    if using:
+        print(f"\n  where {', '.join(sorted(using))} was used -- every one held branch by branch")
+        print(f"    {used} of {cells} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {used_wrong}")
+        print("  where the break fired -- the cells `_break_protection` taken out moves")
+        print(f"    {broke} of {used} cells")
+        print(f"    cells whose branches, weights, notes or positions differ  {broke_wrong}")
+        print(f"    cells with a paused branch, whose position is not compared  {broke_paused}")
+        print(f"    worst cell difference there  {broke_worst:.3e}")
     print(f"  python {python_seconds:.2f} s   rust {rust_seconds:.2f} s")
     if rust_seconds > 0:
         print(f"  end to end {python_seconds / rust_seconds:.1f}x")
@@ -613,6 +723,10 @@ def main() -> None:
     # reduction and a stratifying budget was let off; it now marks the same turns inexact.
     if masks_differ:
         failed.append(f"the exact mask differs on {mask_cells} cells of {masks_differ} nodes")
+    if used_wrong:
+        failed.append(f"{used_wrong} cells using {', '.join(sorted(using))} differ by branch")
+    if using and not broke:
+        failed.append("the break fired in no cell, so agreeing here says nothing")
     if failed:
         print(f"\nFAIL ({args.budget}): " + "; ".join(failed))
         sys.exit(1)

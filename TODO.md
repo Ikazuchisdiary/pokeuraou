@@ -9354,3 +9354,88 @@ exact マスクが 3,599 セル違うのは、Python の減縮が Rust に無い
 
 機械: cargo release ビルド 2 回（8 コア、各 20 秒・16 秒）、diff_node 既定 43 秒 ×2・fast 10 秒 ×2・exact --limit 12
 30 秒、テスト数十秒（すべて 1 コア、heavy.py に記録）。
+
+## 9/23 — IKA-61: port に `breaksProtect`（フェイント）を移す —— 記録局面のフェイントのセル 3,341 が枝ごとに一致、破りが効いた 343 セルも 0 不一致。拒否は w12 のフェイント持ち局で 9.93% → 0
+
+### 1. 規則（Showdown `cc089d36`、vendor）
+
+* `sim/battle-actions.ts:755-783` `hitStepBreakProtect`: `move.breaksProtect` なら対象ごとに
+  まもる系の揮発 7 つ（`banefulbunker burningbulwark kingsshield obstruct protect silktrap spikyshield`）を外し、
+  gen≥6 は味方かどうかに関わらず `craftyshield matblock quickguard wideguard` の場の状態を外す。何か外れたら
+  gen≥6 は `stall` を消す
+* フェイント自身がまもるを抜けるのは `data/moves.ts:5182` の flags に `protect` が無いから
+  （`sim/battle.ts:1300-1304` `checkMoveBypassesProtect`）。ワイドガード・ファストガードの `onTryHit`
+  （`data/moves.ts:20827`・`14508`、まもるは `13986`）も同じ関数で抜ける
+* M-C / M-B のダンプで `breaksProtect` の技は `feint` と `phantomforce`。場の状態は `quickguard` と `wideguard`
+  だけが居て、`craftyshield`・`matblock` はどちらのダンプにも無い
+* Python は `resolve.py:2006-2010` で技の命中処理の前に `_break_protection`（2616-2660 行）を呼ぶ。揮発は
+  `PROTECT_VOLATILES` の 9 つ（`detect` と `maxguard` を含む、ID が技名のため）
+
+### 2. port の変更
+
+* `rust/src/moves.rs`: `do_move` の `Err("breaksProtect move")` を `break_protection(&mut turn, &targets)` に
+  置き換えた。Python の `_break_protection` と同じ順（揮発 → 場の状態 → 何か外れたら対象の `stall`）、
+  対象の枠が空なら場の状態も触らない。`BREAKABLE_SIDE_CONDITIONS` も Python と同じ 4 つ。
+  `mon_at_mut` は個体の共有を解くので、外すものがあるときだけ書く（大半のフェイントは何も破らない）
+* 門（`item_handled` 等）は触っていない: 拒否は `do_move` の中の 1 行だけだった
+* `tools/port_gate_audit.py --check`・`tools/port_coverage.py --check`: どちらも ok（inert.rs の再生成は不要）
+
+### 3. 一致（効果が発火したセルを分けて数える）
+
+`tools/diff_node.py` に `--using <breaksProtect の技>` を足した。技を知っている個体が場に居る記録局面だけを取り、
+その技を使うセルは全部枝ごと（重み・中断の重み・注記・各枝の局面）に比べ、「発火」は Python の
+`_break_protection` を抜いた同じターンと結果が違うセルとして別に数える。発火が 0 なら失敗にする。
+
+```
+  data/ika73/w12 30 節点 14,944 セル（--limit 24）  matrix            fast
+    フェイントを使うセル                             3,341（不一致 0）  3,341（不一致 0）
+    破りが発火したセル                                343（不一致 0）    320（不一致 0）
+    セルの差の最大                                   5.6e-16            1.0e-15
+    port の拒否                                      0                  0
+```
+
+発火 343 のうち 9 セルは中断した枝を持つ。`branch_differences` は中断した枝の重みしか比べず局面は比べない
+（port が返すのは終わった枝の局面だけ）ので、この 9 セルの破りは節点の利得でしか見ていない。
+
+### 4. 陽性対照（scratch ビルド、C:/tmp/pokeuraou-machine/ika61/）
+
+```
+  pc1: break_protection を呼ばない    diff_node FAIL: 使うセル 335 不一致（全部発火セル）、worst 5.0e-01
+                                      test_feint_breaks_the_guard_the_same_way_over_there FAIL
+  pc2: stall だけ消さない             diff_node FAIL: 290 不一致、ただし利得の worst は 2.2e-16
+                                      同テスト FAIL（枝の局面で落ちる）
+```
+
+pc2 は利得では見えず枝の局面でだけ落ちる。pc1 でも一致した発火セルが 8 あり、中身を見た 3 つは終わった枝が 0 の中断だけのターンだった（中断の局面は比べていない）。
+
+### 5. 拒否率（`tools/refusal_replay.py`、matrix）
+
+```
+                                         前（e518549）                   後
+  w12 600 決定 86,160 セル               340（0.39%）うち breaksProtect 118   222（0.26%）breaksProtect 0
+  w12 --holding feint 600 決定 86,124    8,551（9.93%）全部 breaksProtect      0
+  selfplay-gen11L 600 決定 342,240       528（0.15%）全部 breaksProtect        0
+```
+
+w12 に残るのは `finalgambit`（selfdestruct 欄）174 と `lastresort` 48。全決定の一括実行はメモリが 13 GB に
+達して coordinator が止めた（`sample` が全決定を読み込む）。上の数は 600 決定の標本。
+
+### 6. テスト
+
+* `tests/test_rust_node.py::test_feint_breaks_the_guard_the_same_way_over_there`:
+  ドドゲザンにフェイント、相手はまもる・ワイドガードの選択肢だけ。Python から破りを抜くと利得が動くセルと
+  局面だけが動くセルの両方があることを先に確かめ、発火セルを全部枝ごとに比べる
+* `tests/test_beliefnode.py::test_a_cell_the_port_refuses_is_resolved_per_completion`: 拒否されるセルが要るので
+  フェイントからフラワートリック（`willCrit`、まだ拒否）に替えた。ほえるは吹き飛ばしで dirty になり共有されない
+
+### 7. 残り（別課題）
+
+* **Python が Showdown とずれている疑い**: Showdown の破りは手順 5 で、手順 2 のタイプ無効と手順 4 の命中で
+  外れた対象には届かない（`sim/battle-actions.ts:557-571` の順、`604` 行で対象を絞る）。Python は命中処理の前に
+  全対象で破るので、まもるを使ったゴーストタイプ（ヤバソチャ等）へのフェイントでもまもるが外れ、相方の技が
+  通る。port は Python に合わせたので同じ答え。オラクルで確かめて直すなら Python と port を同時に
+* `branch_differences` / `_turn_differences` は中断した枝の局面を比べない（橋が返さない）
+
+機械: cargo release ビルド 4 回（前・後・陽性対照 2、各 8 コア 20 秒）、diff_node 40〜100 秒 ×5、
+refusal_replay 4〜11 秒 ×6（4 回は 1 コア、--holding の 2 回は 8 コアの錠）、テスト数分（すべて heavy.py に
+記録）。全決定を一括で読む refusal_replay は 13 GB に達し、coordinator が止めた。

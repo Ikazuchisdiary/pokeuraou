@@ -405,8 +405,11 @@ fn use_move<'a>(
         return Ok(vec![(1.0, turn)]);
     }
 
+    // `hitStepBreakProtect` runs before the hits and for every target, so a Feint that
+    // breaks one Pokemon's Protect also strips its side's Wide Guard for the rest of the
+    // turn -- which is what the partner's move needs. Python's `_break_protection`.
     if mv.breaks_protect {
-        return Err("breaksProtect move".into());
+        break_protection(&mut turn, &targets);
     }
 
     if mv.category == "Status" {
@@ -585,6 +588,51 @@ fn redirection_target(
         }
     }
     None
+}
+
+/// Side conditions a `breaksProtect` move removes. From gen 6 it strips them regardless of
+/// whose side they are on, which is why there is no ally test here. Python's
+/// `BREAKABLE_SIDE_CONDITIONS`.
+const BREAKABLE_SIDE_CONDITIONS: [&str; 4] =
+    ["craftyshield", "matblock", "quickguard", "wideguard"];
+
+fn is_protect_volatile(id: &str) -> bool {
+    PROTECT_VOLATILES.iter().any(|(vid, _)| *vid == id)
+}
+
+/// Strips the guards a `breaksProtect` move tears down, for the rest of the turn.
+///
+/// Python's `_break_protection`, line for line: every protect-family volatile in
+/// `PROTECT_VOLATILES` (not Showdown's literal seven, because Detect stays `detect` here),
+/// then the side's breakable guards, and when anything broke, the target's `stall`.
+/// A target slot with no Pokemon in it is skipped whole, side conditions included.
+///
+/// Reads before it writes: `mon_at_mut` unshares the Pokemon, and most Feints break
+/// nothing.
+fn break_protection(turn: &mut Turn, targets: &[Slot]) {
+    for &(side, slot) in targets {
+        let Some(mon) = turn.mon_at(side, slot) else {
+            continue;
+        };
+        let broke = mon.volatiles.iter().any(|v| is_protect_volatile(v.id.as_str()));
+        if broke {
+            if let Some(mon) = turn.mon_at_mut(side, slot) {
+                mon.volatiles.retain(|v| !is_protect_volatile(v.id.as_str()));
+            }
+        }
+
+        let conditions = &mut turn.pos.sides[side].side_conditions;
+        let before = conditions.len();
+        conditions.retain(|c| !BREAKABLE_SIDE_CONDITIONS.contains(&c.id.as_str()));
+        let stripped = conditions.len() != before;
+
+        let stalling = turn.mon_at(side, slot).is_some_and(|m| m.has_volatile("stall"));
+        if (broke || stripped) && stalling {
+            if let Some(mon) = turn.mon_at_mut(side, slot) {
+                mon.volatiles.retain(|v| v.id.as_str() != "stall");
+            }
+        }
+    }
 }
 
 fn blocked_by_protect(
