@@ -13567,6 +13567,30 @@ seed 6601、--served --servers 2 --workers 24 --limit 12 --hide-bench -- --rank-
   release の写し（`timing/exe106.exe`、md5 47eafd5f…）を POKEURAOU_RUST_NODE_BIN で。各本の前に python 0 本、
   heavy.py 16 コア専有（02:57:59–03:03:07）。横で走っていた仕事は無し（監視の powershell が 5 分おきに 1 回だけ）
 
+## 9/24 — IKA-87: 局の記録に最終局面と終わった理由を足す（補助ターゲットの学習側はまだ）
+
+決定の記録は最終ターンの前で止まるので、「最後に誰が何 HP で残ったか」はどの局にも無かった。
+`GameRecord` に `final_position`（`Position.to_json` の形）と `end_reason` を足し、`to_json` は
+`finalPosition`・`endReason` を書く（`play_game` を通らない記録は両方とも書かない）。
+
+* 理由は4つ（`END_REASONS`）: `wipeout`（片側が空、または両側が空で最後に空いた側の負け。outcome あり）、
+  `draw`（両側が空で順が分からない）、`turn-cap`（`max_turns * 2` 決定ステップを使い切った）、
+  `unresolved`（重みのある枝が無い・途中交代が5回を超えた。最終局面はその手番を選んだ盤）。
+  自己対戦に投了は無いので理由も無い。生成は outcome が None の局を捨てるので、プールに残るのは `wipeout` だけ
+* 記録に版の欄は無い。読む側はキーの有無で判定する（`selfplay.final_position(record)` は旧記録で None）。
+  `encode_dataset`・`refusal_replay`・`replay_shown` はトップのキーを `get`／名指しで読むだけで、旧記録も新記録も同じに読む。
+  `refusal_replay --holding` は行の部分文字列で絞るので、最終局面の分だけ一致の機会が増える（持ち物は決定の局面と同じなので実害は無い見込み）
+* 大きさ（`C:/tmp/ika87/size.py`、`data/ika73/w12` 43,999局を読むだけ、1コア 55秒）: 1局 127,253 B、決定 13.46個、
+  決定の局面 1個 平均 8,197 B。最終局面は最後の決定の局面と同じ形なので増分の見込みは **1局 8,238 B（+6.5%）、
+  w12 の局数で +362 MB（5.60 GB → 5.96 GB）**。試走の実測は 8,204 B・8,127 B
+* テスト `tests/test_final_position.py`（8本、18秒）: 決着した隠蔽局で endReason=wipeout・HP 0 の側が負けた側・
+  最終局面は最後の手番の決定から記録された手で解いた枝の1つ（HP・瀕死・手番・winner で比較）。ターン上限の開示局でも同じ。
+  陰性対照: 最後の決定そのものの盤・その1つ前の手番の盤は枝に入らない。draw／unresolved は `_close_record` で直接。
+  旧形式（2キーを外した同じ局）で `final_position` は None、`replay_shown` と `encode_dir` の outcome・turn・game は同じ
+* 試走（heavy.py 1コア 04:45:12–04:46:28、`tools/selfplay.py --games 2 --hide-bench --limit 12 --seed 8701`、hp-share 葉）:
+  2局とも wipeout、final.turn = turns（11・13）、負けた側は4体とも 0 HP、勝った側は 3体・2体が残り、
+  最終局面は2局とも最後の決定（move）の枝の1つ
+
 ## 9/24 — IKA-82: M-C の語彙を M-B の延長にした。value-gen11L は M-C の Encoder でそのまま読め、M-B の局面ではビット一致、M-C にしかない種族・道具の局面では新しい行が読まれる
 
 ワーカー、基点 master 713f85d、ブランチ `ika-82-vocab-prefix`。9/23 の着地（追記式の順序）の残り 1〜4。
