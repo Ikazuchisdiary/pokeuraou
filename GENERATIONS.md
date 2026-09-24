@@ -1945,3 +1945,19 @@ M-C は M-B と別の盤（65 構築のプールから両席を引く、選出�
 * 決めた時点（2026-09-25）: gen-0 の検証の数字（records/IKA-82.md）は出ていたが、盤の結果は 1 本も出ていない。
   IKA-85 の「結果を見てから原点を選ばない」に従い、盤の前に決めた（ユーザーの判断）
 * M-B の最後の重み `value-gen11L` をそのまま M-C の盤に置いたものは、原点ではなく表の 1 行として測る
+
+### M-C gen-0（2026-09-25、IKA-77・IKA-82・IKA-86）
+
+生成: `data/selfplay-mc0`、39,998 局、葉 value-gen11L、幅 12、控え隠蔽、選出はその場で解く（records/IKA-77.md）。
+学習: 温間始動（`--init-from value-gen11L --epochs 2 --lr 5e-4 --keep last`）の 2 本 = `value-mc0.pt`・`value-mc0-s1.pt`。
+
+```
+M-C の盤（match_queue --pool、幅 12・rank-leaf・隠蔽・served 24/2）。ratings.py、data/matches-mc の 7,895 局、原点 hp-share/w12/hidden-bench
+  value-mc0x2（温間 x2）          +230 ±15    ← gen-0 の出荷
+  ゼロから x2（今のレシピ）        +207 ±15
+  value-gen11L（M-B の重みのまま） +151 ±17
+  hp-share/w12/hidden-bench          0（原点）
+温間 x2 対 ゼロから x2: SPRT(0,10) 795 対で H1、53.5%（Elo +24 [+8, +41]）。同じ腕どうしの null は 102 対すべて引き分けで H0
+```
+
+`ValueConfig` の既定は変えていない（M-C ではゼロからの SWA が x2 で 0.008 悪い）。温間とスケジュールの効果は IKA-261 で分ける。
