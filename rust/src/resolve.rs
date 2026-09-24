@@ -84,7 +84,9 @@ impl Budget {
             max_branches: value["maxBranches"].as_u64().unwrap_or(512) as usize,
             // Defaulted to on, as Python's field is: a fixture recorded before the merge
             // existed replays with it rather than against it.
-            merge_duplicates: value["mergeDuplicates"].as_bool().unwrap_or(true),
+            // IKA-210's positive control never merges.
+            merge_duplicates: !cfg!(feature = "ika210-control")
+                && value["mergeDuplicates"].as_bool().unwrap_or(true),
         }
     }
 
