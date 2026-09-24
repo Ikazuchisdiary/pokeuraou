@@ -113,6 +113,8 @@ export interface MoveEntry {
 	drain?: number[];
 	recoil?: number[];
 	multihit?: number | number[];
+	/** Each hit after the first rolls its own accuracy (Triple Axel, Population Bomb). */
+	multiaccuracy?: boolean;
 	secondaries?: MoveSecondary[];
 	damage?: number | 'level';
 	ohko?: boolean | 'Ice';
@@ -427,6 +429,10 @@ const DECLARATIVE_MOVE_KEYS = [
 	// use it (Clanging Scales, Clangorous Soul, Scale Shot), and dropping it silently lost
 	// their drawback entirely.
 	'selfBoost',
+	// Triple Axel and Population Bomb roll accuracy again before each later hit
+	// (`hitStepMoveHitLoop`). Left out until IKA-235, which hid the port's gate for it: the
+	// port read the first roll as all three hits.
+	'multiaccuracy',
 ] as const;
 
 /** Copies the listed keys when they carry a meaningful value. */
