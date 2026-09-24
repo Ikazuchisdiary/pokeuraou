@@ -588,6 +588,11 @@ class Encoder:
         side = np.zeros((n, 2, len(self.side_names)), dtype=np.float32)
         field = np.zeros((n, len(self.field_names)), dtype=np.float32)
         unknown: dict[str, int] = {}
+        # A Pokemon object met again is copied from its first row (IKA-267): the selection
+        # solve's 8,100 positions hold 48 different ones. `_row_key` says when that is safe.
+        first: dict[tuple[int, bool, bool], int] = {}
+        copy_to: list[int] = []
+        copy_from: list[int] = []
 
         for b, position in enumerate(positions):
             self._encode_field(field[b], position)
@@ -595,12 +600,24 @@ class Encoder:
                 self._encode_side(side[b, s], one_side)
                 for p, one_mon in enumerate(one_side.pokemon[:m]):
                     mask[b, s, p] = 1.0
+                    key = self._row_key(one_mon, one_side)
+                    if key is not None:
+                        row = (b * 2 + s) * m + p
+                        seen = first.setdefault(key, row)
+                        if seen != row:
+                            copy_to.append(row)
+                            copy_from.append(seen)
+                            continue
                     species[b, s, p] = self.vocab.species.get(one_mon.species, 0)
                     ability[b, s, p] = self.vocab.abilities.get(one_mon.ability or "", 0)
                     item[b, s, p] = self.vocab.items.get(one_mon.item or "", 0)
                     for k, slot in enumerate(one_mon.moves[:4]):
                         moves[b, s, p, k] = self.vocab.moves.get(slot.id, 0)
                     self._encode_mon(mon[b, s, p], one_mon, one_side, unknown)
+        if copy_to:
+            for array in (species, ability, item, moves, mon):
+                rows = array.reshape(n * 2 * m, *array.shape[3:])
+                rows[copy_to] = rows[copy_from]
         return Encoded(
             species=species,
             ability=ability,
@@ -675,6 +692,19 @@ class Encoder:
                 out[base + i] = 1.0 if name in ids else 0.0
             base += len(SLOT_CONDITIONS)
         assert base == len(self.side_names)
+
+    def _row_key(self, mon: Any, side: Any) -> tuple[int, bool, bool] | None:  # noqa: ANN401
+        """What a Pokemon's row depends on besides the object itself, or None to encode it.
+
+        The object, read during one call in which the caller holds every position (so an
+        id is not reused), and the two things `_encode_mon` reads off the side: whether its
+        mega is spent, and under revision 1 whether its slot is listed. A Pokemon with a
+        volatile is always encoded, so `unknown` counts each of its unnamed ones.
+        """
+        if mon.volatiles or mon.unmodelled_volatiles:
+            return None
+        listed = self.rules.mega_from_slots and mon.slot in side.mega_capable_slots
+        return (id(mon), bool(side.mega_used), bool(listed))
 
     def _holds_mega_stone(self, mon: Any) -> bool:  # noqa: ANN401
         """Whether this Pokemon holds the stone that megas it: its species and its item.
