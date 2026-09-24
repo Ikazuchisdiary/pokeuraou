@@ -286,13 +286,12 @@ def belief_payoffs(
 
     matrices: dict[int, list[np.ndarray]] = {}
     shared = redone = 0
-    for job in jobs:
-        shared_values = rows_of(job.shared)
+    # Every span mean of the node, all jobs at once and to the bit of one `@` per cell
+    # (IKA-265); the folds are still read one by one below.
+    means = _SpanMeans(filled, dirty, jobs, starts, values, reference_block)
+    for number, job in enumerate(jobs):
         payoff = np.zeros((len(row), len(col)), dtype=np.float64)
-        for i, j, indices, weights in filled.spans:
-            if not weights or dirty[i, j]:
-                continue
-            payoff[i, j] = float(shared_values[list(indices)] @ np.asarray(weights))
+        means.write_shared(payoff, number)
         # Every folded cell is dirty (above), so no fold is read off the shared rows.
         shared += int((~dirty).sum())
         if wanted:
@@ -301,18 +300,13 @@ def belief_payoffs(
                 # The exact completion is the true position itself, so its dirty cells are
                 # the reference fill's own leaves: what `_per_completion` scores for it.
                 ported = rows_of(reference_block)
-                for i, j, indices, weights in filled.spans:
-                    if weights and dirty[i, j]:
-                        part[i, j] = float(ported[indices] @ np.asarray(weights))
+                means.write_reference_dirty(part)
                 for i, j, root in filled.folded:
                     part[i, j] = fold_value(_fold_from_json(root), ported)
             elif job.dirty is not None:
                 ported = rows_of(job.dirty)
                 # As `resolve._rust_encoded_payoffs` writes a node the port filled.
-                for i, j, indices, weights in job.filled.spans:
-                    if not weights:
-                        continue
-                    part[i, j] = float(ported[indices] @ np.asarray(weights))
+                means.write_dirty(part, number)
                 for i, j, root in job.filled.folded:
                     part[i, j] = fold_value(_fold_from_json(root), ported)
             for i, j in wanted:
@@ -337,6 +331,50 @@ class _Job:
     #: The exact completion is the true position, and reads the reference fill instead.
     dirty_from_reference: bool = False
     notes: set[str] = field(default_factory=set)
+
+
+class _SpanMeans:
+    """A node's span means, computed together: what `belief_payoffs` read cell by cell.
+
+    Three reads, each ``float(rows[indices] @ weights)`` per span before (IKA-265):
+    the reference fill's clean spans over each job's shared block, its dirty spans over
+    the reference block (the exact completion's own dirty cells), and each job's own dirty
+    fill over that job's dirty block. `spanmean.SpanTable` gives the same doubles.
+    """
+
+    def __init__(  # noqa: PLR0913 - the node's pieces the loop read
+        self,
+        filled,  # noqa: ANN001 - EncodedNode
+        dirty: np.ndarray,
+        jobs: list[_Job],
+        starts: list[int],
+        values: np.ndarray,
+        reference_block: int | None,
+    ) -> None:
+        from .spanmean import SpanTable
+
+        clean = [span for span in filled.spans if not dirty[span[0], span[1]]]
+        self._shared = SpanTable(clean)
+        self._shared_means = self._shared.means(values, [starts[job.shared] for job in jobs])
+        self._reference = None
+        if reference_block is not None and any(job.dirty_from_reference for job in jobs):
+            self._reference = SpanTable(
+                [span for span in filled.spans if dirty[span[0], span[1]]]
+            )
+            self._reference_means = self._reference.means(values, [starts[reference_block]])[0]
+        own = [(number, job) for number, job in enumerate(jobs) if job.dirty is not None]
+        self._group = {number: g for g, (number, _job) in enumerate(own)}
+        self._own = SpanTable(groups=[(job.filled.spans, starts[job.dirty]) for _n, job in own])
+        self._own_means = self._own.means(values)[0]
+
+    def write_shared(self, payoff: np.ndarray, number: int) -> None:
+        self._shared.write(payoff, self._shared_means[number])
+
+    def write_reference_dirty(self, part: np.ndarray) -> None:
+        self._reference.write(part, self._reference_means)
+
+    def write_dirty(self, part: np.ndarray, number: int) -> None:
+        self._own.write(part, self._own_means, self._group[number])
 
 
 def _gather_dirty(  # noqa: PLR0913 - one completion's dirty cells, and where they go

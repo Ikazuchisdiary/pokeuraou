@@ -83,6 +83,112 @@ def _clean(p: np.ndarray, eps: float) -> np.ndarray:
     return p / total
 
 
+try:  # scipy's own HiGHS binding, the one `linprog(method="highs")` hands the problem to
+    import scipy.optimize._highspy._core as _highs_core
+    from scipy.optimize._linprog_util import _check_result
+except ImportError:  # pragma: no cover - a scipy that moved them; `linprog` it is
+    _highs_core = None
+
+
+@dataclass(frozen=True, slots=True)
+class _Solved:
+    success: bool
+    x: np.ndarray | None
+    message: str
+
+
+_HIGHS_OPTIONS = None
+
+
+def _highs_options():  # noqa: ANN202 - a HighsOptions
+    """What `linprog(method="highs")` sets with its defaults, and nothing else."""
+    global _HIGHS_OPTIONS  # noqa: PLW0603 - built once per process, read-only after
+    if _HIGHS_OPTIONS is None:
+        options = _highs_core.HighsOptions()
+        options.presolve = "on"
+        options.highs_debug_level = int(_highs_core.HighsDebugLevel.kHighsDebugLevelNone)
+        options.log_to_console = False
+        options.output_flag = False
+        options.simplex_strategy = int(
+            _highs_core.simplex_constants.SimplexStrategy.kSimplexStrategyDual
+        )
+        _HIGHS_OPTIONS = options
+    return _HIGHS_OPTIONS
+
+
+def _lp(  # noqa: PLR0913 - linprog's arguments, less the ones every caller leaves alone
+    c: np.ndarray,
+    a_ub: np.ndarray,
+    b_ub: np.ndarray,
+    a_eq: np.ndarray,
+    b_eq: np.ndarray,
+    *,
+    free_from: int,
+) -> _Solved:
+    """``linprog(..., method="highs")`` with bounds ``x >= 0`` below `free_from` and free
+    from it on, without linprog's input checking and result dressing (IKA-265).
+
+    The same HiGHS, handed the same model -- the same column-wise matrix (built the way
+    `csc_array` builds it from the dense one: nonzeros, column by column), bounds, row
+    bounds and options -- so it takes the same pivots and returns the same vertex to the
+    bit; the test compares the two on random games and `records/IKA-265.md` on every LP of
+    1,200 games. Success is linprog's: HiGHS optimal, then linprog's own residual check.
+    At these sizes (up to 12 by 72) linprog's wrapping was two thirds of the time.
+    """
+    if _highs_core is None:  # pragma: no cover
+        bounds = [(0.0, None)] * free_from + [(None, None)] * (len(c) - free_from)
+        res = linprog(c, A_ub=a_ub, b_ub=b_ub, A_eq=a_eq, b_eq=b_eq, bounds=bounds,
+                      method="highs")
+        return _Solved(bool(res.success), res.x, str(res.message))
+    h = _highs_core
+    inf = h.kHighsInf
+    a = np.vstack((a_ub, a_eq))
+    rows, cols = a.shape
+    columns = a.T
+    nonzero = columns != 0
+    start = np.zeros(cols + 1, dtype=np.int32)
+    np.cumsum(nonzero.sum(axis=1), out=start[1:])
+    lower = np.zeros(cols)
+    lower[free_from:] = -inf
+    upper = np.full(cols, inf)
+    row_upper = np.concatenate((b_ub, b_eq))
+    model = h.HighsLp()
+    model.num_col_ = cols
+    model.num_row_ = rows
+    model.a_matrix_.num_col_ = cols
+    model.a_matrix_.num_row_ = rows
+    model.a_matrix_.format_ = h.MatrixFormat.kColwise
+    model.col_cost_ = c
+    model.col_lower_ = lower
+    model.col_upper_ = upper
+    model.row_lower_ = np.concatenate((np.full(len(b_ub), -inf), b_eq))
+    model.row_upper_ = row_upper
+    model.a_matrix_.start_ = start
+    model.a_matrix_.index_ = np.nonzero(nonzero)[1].astype(np.int32)
+    model.a_matrix_.value_ = columns[nonzero]
+    highs = h._Highs()
+    highs.passOptions(_highs_options())
+    if highs.passModel(model) == h.HighsStatus.kError:
+        return _Solved(False, None, "HiGHS refused the model")
+    if highs.run() == h.HighsStatus.kError:
+        return _Solved(False, None, highs.modelStatusToString(highs.getModelStatus()))
+    status = highs.getModelStatus()
+    if status != h.HighsModelStatus.kOptimal:
+        return _Solved(False, None, highs.modelStatusToString(status))
+    solution = highs.getSolution()
+    x = np.array(solution.col_value)
+    slack = row_upper - solution.row_value
+    bounds = np.empty((cols, 2))
+    bounds[:, 0] = 0.0
+    bounds[free_from:, 0] = -np.inf
+    bounds[:, 1] = np.inf
+    checked, message = _check_result(
+        x, highs.getInfo().objective_function_value, 0, slack[: len(b_ub)],
+        slack[len(b_ub):], bounds, 1e-9, "optimal", None,
+    )
+    return _Solved(checked == 0, x, message)
+
+
 def _maximin(payoff: np.ndarray) -> tuple[float, np.ndarray]:
     """Row player's LP: maximise v subject to (A^T x) >= v, sum x = 1, x >= 0."""
     m, n = payoff.shape
@@ -100,8 +206,8 @@ def _maximin(payoff: np.ndarray) -> tuple[float, np.ndarray]:
     a_eq[0, :m] = 1.0
     b_eq = np.array([1.0])
 
-    bounds = [(0.0, None)] * m + [(None, None)]
-    res = linprog(c, A_ub=a_ub, b_ub=b_ub, A_eq=a_eq, b_eq=b_eq, bounds=bounds, method="highs")
+    # x >= 0, v free
+    res = _lp(c, a_ub, b_ub, a_eq, b_eq, free_from=m)
     if not res.success:
         raise EquilibriumError(f"row LP failed: {res.message}")
     return float(res.x[m]), res.x[:m]
@@ -202,10 +308,8 @@ def _bayesian_maximin(
 
     a_eq = np.zeros((1, m + k))
     a_eq[0, :m] = 1.0
-    res = linprog(
-        c, A_ub=a_ub, b_ub=b_ub, A_eq=a_eq, b_eq=np.array([1.0]),
-        bounds=[(0.0, None)] * m + [(None, None)] * k, method="highs",
-    )
+    # x >= 0, v free
+    res = _lp(c, a_ub, b_ub, a_eq, np.array([1.0]), free_from=m)
     if not res.success:
         raise EquilibriumError(f"Bayesian row LP failed: {res.message}")
     return float(res.x[m:].sum()), res.x[:m]
@@ -238,10 +342,8 @@ def _bayesian_minimax(
     for index, n in enumerate(columns):
         a_eq[index, offset : offset + n] = 1.0
         offset += n
-    res = linprog(
-        c, A_ub=a_ub, b_ub=b_ub, A_eq=a_eq, b_eq=np.ones(len(matrices)),
-        bounds=[(0.0, None)] * total + [(None, None)], method="highs",
-    )
+    # y >= 0, u free
+    res = _lp(c, a_ub, b_ub, a_eq, np.ones(len(matrices)), free_from=total)
     if not res.success:
         raise EquilibriumError(f"Bayesian column LP failed: {res.message}")
     strategies = []
