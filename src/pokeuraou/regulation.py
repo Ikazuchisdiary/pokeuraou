@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from functools import lru_cache
+from functools import cache, lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +20,10 @@ BOOST_IDS: tuple[str, ...] = ("atk", "def", "spa", "spd", "spe", "accuracy", "ev
 BOOST_INDEX: dict[str, int] = {s: i for i, s in enumerate(BOOST_IDS)}
 
 
+@cache
 def repo_root() -> Path:
+    # Once a process (IKA-264): `resolve()` is a realpath, 0.1 ms, and narrow asked
+    # for it on every pool through `rustnode.available()`.
     return Path(__file__).resolve().parents[2]
 
 

@@ -175,9 +175,64 @@ pub fn fill(reg: &Reg, request: &Request) -> Value {
 /// produces a hundred-odd of them, and a hundred positions is two megabytes of JSON per
 /// turn against the thirty kilobytes this costs.
 pub fn resolve_one(reg: &Reg, value: &Value) -> Value {
+    // The same turn twice in a row is the caller's `weights` and then its `branch`
+    // (IKA-264): resolved once, and the second answered from the first.
+    let key = resolve_key(value);
+    LAST_RESOLVE.with(|cell| {
+        let mut last = cell.borrow_mut();
+        if last.as_ref().is_none_or(|kept| kept.key != key) {
+            *last = None;
+            match resolve_fresh(reg, value, key) {
+                Err(refused) => return refused,
+                Ok(fresh) => *last = Some(fresh),
+            }
+        }
+        let kept = last.as_ref().expect("resolved just above");
+        let selected = value.get("select").and_then(Value::as_u64).map(|k| k as usize);
+        let chosen = match selected {
+            None => Value::Null,
+            Some(index) => match kept.positions.get(index) {
+                None => return json!({ "refused": "branch index out of range" }),
+                Some(position) => position.to_json(),
+            },
+        };
+        json!({
+            "branches": kept.weights,
+            "suspended": kept.paused,
+            "exact": kept.exact,
+            "unmodelled": kept.unmodelled,
+            "position": chosen,
+        })
+    })
+}
+
+/// A resolved turn as `resolve_one` answers from it: the weights, and the branches'
+/// positions for the `select` that follows.
+struct KeptTurn {
+    key: String,
+    weights: Vec<f64>,
+    paused: Vec<f64>,
+    exact: bool,
+    unmodelled: Vec<String>,
+    positions: Vec<Position>,
+}
+
+thread_local! {
+    /// The last `resolve` turn this process answered (IKA-264). One: the repeat it is for
+    /// is the very next request, and anything else asked in between replaces it.
+    static LAST_RESOLVE: std::cell::RefCell<Option<KeptTurn>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// What makes two `resolve` requests the same turn: everything but `select`.
+fn resolve_key(value: &Value) -> String {
+    format!("{}\u{1}{}\u{1}{}", value["position"], value["actions"], value["budget"])
+}
+
+fn resolve_fresh(reg: &Reg, value: &Value, key: String) -> Result<KeptTurn, Value> {
     let position = Position::from_json(&value["position"]);
     if &*position.format != reg.format_id.as_str() {
-        return json!({ "refused": "position is for another regulation" });
+        return Err(json!({ "refused": "position is for another regulation" }));
     }
     let actions_value = &value["actions"];
     let actions = [
@@ -186,28 +241,19 @@ pub fn resolve_one(reg: &Reg, value: &Value) -> Value {
     ];
     let budget = Budget::from_json(&value["budget"]);
     let result = match resolve_turn(reg, &position, &actions, budget) {
-        Err(reason) => return json!({ "refused": reason }),
+        Err(reason) => return Err(json!({ "refused": reason })),
         Ok(result) => result,
     };
     // A suspension's continuation state cannot cross a process boundary, but its weight
     // can -- and the caller only has to resolve the turn itself when it actually draws
     // one, which is rarer than merely having one.
-    let weights: Vec<f64> = result.branches.iter().map(|b| b.probability).collect();
-    let paused: Vec<f64> = result.suspended.iter().map(|s| s.probability).collect();
-    let selected = value.get("select").and_then(Value::as_u64).map(|k| k as usize);
-    let chosen = match selected {
-        None => Value::Null,
-        Some(index) => match result.branches.get(index) {
-            None => return json!({ "refused": "branch index out of range" }),
-            Some(branch) => branch.position.to_json(),
-        },
-    };
-    json!({
-        "branches": weights,
-        "suspended": paused,
-        "exact": result.exact,
-        "unmodelled": result.unmodelled.iter().cloned().collect::<Vec<_>>(),
-        "position": chosen,
+    Ok(KeptTurn {
+        key,
+        weights: result.branches.iter().map(|b| b.probability).collect(),
+        paused: result.suspended.iter().map(|s| s.probability).collect(),
+        exact: result.exact,
+        unmodelled: result.unmodelled.iter().cloned().collect(),
+        positions: result.branches.into_iter().map(|b| b.position).collect(),
     })
 }
 
