@@ -23,8 +23,8 @@ import pytest
 from pokeuraou.actions import side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Position
-from pokeuraou.resolve import Budget, resolve_turn, self_switches_needed
 
+from ._port import Budget, resolve_turn, self_switches_needed
 from .conftest import FORMAT_ID
 
 pytestmark = pytest.mark.oracle
@@ -133,55 +133,26 @@ def _play(oracle: Oracle, name: str) -> tuple[Position, list[str], dict, list[st
     return before, choices, theirs, log, switch
 
 
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_an_absorbed_hit_keeps_everything_but_its_damage(
-    reg,  # noqa: ANN001
-    oracle: Oracle,
-    name: str,
-) -> None:
-    before, choices, theirs, log, switch = _play(oracle, name)
-    assert CASES[name][2] in log, f"Showdown did not do what the case says: {log}"
-
-    actions = [
-        next(a for a in side_actions(reg, before, side) if a.to_choice() == choices[side]) for side in (0, 1)
-    ]
-    result = resolve_turn(reg, before, actions, budget=BUDGET)
-    outcomes = [(b.position, b.events) for b in result.branches]
-    outcomes += [(s.position, ["(suspended)"]) for s in result.suspended]
-    ours = [(pos, events) for pos, events in outcomes if not any(e.endswith("missed") for e in events)]
-    assert ours, "no Python outcome where every move hit"
-    for pos, events in ours:
-        assert _state(pos) == theirs, f"{name}: showdown {theirs} != python {_state(pos)}; " + " / ".join(
-            events
-        )
-        # U-turn's switch: Showdown asks for it, Python suspends on it.
-        assert self_switches_needed(pos)[0][0] == switch, (name, switch)
-
-
 # ---------------------------------------------------------------------------
 # The port against Showdown, not against Python (IKA-207). The port refused Disguise
 # ("forme change and 1/8 not ported") until IKA-208, and these were expected failures.
-# U-turn still stops at the replacement, whose position the port does not return (the
-# continuation is IKA-211).
+# Accuracy is pinned to a hit, as Showdown's policy has it, and U-turn's pause is an
+# outcome like the finished ones (IKA-210, through IKA-211's `turn` command; the hit
+# branches used to be picked by Python's events).
 
 
-def _port_case(name: str):  # noqa: ANN202
-    if name != "u-turn":
-        return name
-    return pytest.param(
-        name,
-        marks=pytest.mark.xfail(strict=True, reason="the port stops at the U-turn replacement (IKA-211)"),
-    )
-
-
-@pytest.mark.parametrize("name", [_port_case(n) for n in sorted(CASES)])
-def test_the_port_keeps_everything_but_the_absorbed_damage(reg, oracle: Oracle, port, name: str) -> None:  # noqa: ANN001
-    from ._port_showdown import port_turn
-
-    before, choices, theirs, log, _switch = _play(oracle, name)
+@pytest.mark.parametrize("name", sorted(CASES))
+def test_the_port_keeps_everything_but_the_absorbed_damage(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
+    before, choices, theirs, log, switch = _play(oracle, name)
     assert CASES[name][2] in log, f"Showdown did not do what the case says: {log}"
     actions = [
         next(a for a in side_actions(reg, before, side) if a.to_choice() == choices[side]) for side in (0, 1)
     ]
-    ours = port_turn(port, before, actions)
-    assert _state(ours) == theirs, f"{name}: showdown {theirs} != port {_state(ours)}"
+    result = resolve_turn(reg, before, actions, budget=replace(BUDGET, enumerate_accuracy=False))
+    outcomes = [b.position for b in result.branches] + [s.position for s in result.suspended]
+    assert outcomes, "no outcome"
+    for pos in outcomes:
+        assert _state(pos) == theirs, f"{name}: showdown {theirs} != port {_state(pos)}"
+        # U-turn's switch: Showdown asks for it, the port pauses on it.
+        assert self_switches_needed(pos)[0][0] == switch, (name, switch)
+

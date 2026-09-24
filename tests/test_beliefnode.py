@@ -42,7 +42,7 @@ from pokeuraou.teams import load_roster
 def setup():  # noqa: ANN201
     os.environ.setdefault("POKEURAOU_RUST_NODE", "1")
     if not rustnode.available():
-        pytest.skip("the shared path is only taken with the port; nothing to compare")
+        pytest.fail(f"no Rust binary at {rustnode.binary_path()}: the shared path needs the port")
     reg = load_regulation("gen9championsvgc2026regmb")
     register_mega_stones(reg)
     roster = load_roster("rizabanadohido")

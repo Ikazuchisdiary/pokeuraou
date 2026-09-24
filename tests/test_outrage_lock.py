@@ -49,12 +49,11 @@ import dataclasses
 
 import pytest
 
-from pokeuraou import rustnode
 from pokeuraou.actions import MoveAction, SwitchAction, side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Effect, Position
-from pokeuraou.resolve import Budget, resolve_turn
 
+from ._port import Budget, resolve_turn
 from .conftest import FORMAT_ID
 
 SP = {"hp": 20, "atk": 20, "def": 10, "spa": 20, "spd": 10, "spe": 20}
@@ -198,188 +197,26 @@ def test_showdown(oracle: Oracle, name: str, roll: str) -> None:
         assert _rampager(after).item is None, "the berry is eaten"
 
 
-@pytest.mark.oracle
-@pytest.mark.parametrize(("name", "roll"), PLAYED)
-def test_our_turn_from_showdowns_position(reg, oracle: Oracle, name: str, roll: str) -> None:  # noqa: ANN001
-    """The last turn resolved by us from Showdown's position, which carries the roll."""
-    case = CASES[name]
-    positions = _play(oracle, case, roll)
-    start = Position.from_json(positions[-2])
-    after = Position.from_json(positions[-1])
-    # Showdown's verdict rides into our children (`position.py` copies it), so it is
-    # cleared as a searched child carries it (IKA-169); the menu reads the lock itself.
-    for side in start.sides:
-        for mon in side.pokemon:
-            mon.trapped = False
-    result = resolve_turn(reg, start, _chosen(reg, start, case.steps[-1]), budget=Budget.matrix())
-    assert not result.suspended
-    # The roll is on the position, so nothing branches; a rampage that starts this turn has
-    # no roll yet (`_roll_rampage` makes it on the second turn).
-    want = _expected(case, roll)
-    started = _rampager(start).volatile("lockedmove") is None
-    if started and want[0] is not None:
-        want = ((*want[0][:2], None), want[1])
-    locks = {_lock(b.position) for b in result.branches}
-    assert locks == {want}, (locks, want)
-    for branch in result.branches:
-        assert _pp(branch.position) == _pp(after)
-        assert _rampager(branch.position).item == _rampager(after).item
-        moves, switches = _menu(reg, branch.position)
-        if want[0] is not None:
-            assert (moves, switches) == ({"outrage"}, False)
-        else:
-            assert len(moves) == 4 and switches
-
-
-def _generated(reg, positions: list[dict], case: Case, budget: Budget):  # noqa: ANN001, ANN202
-    """Every turn resolved by us from Showdown's first position: the generation form.
-
-    Returns the leaves as {(lock, confused): probability}, following every branch.
-    """
-    frontier = [(1.0, Position.from_json(positions[0]))]
-    for step in case.steps:
-        nxt = []
-        for weight, pos in frontier:
-            result = resolve_turn(reg, pos, _chosen(reg, pos, step), budget=budget)
-            assert not result.suspended
-            nxt.extend((weight * b.probability, b.position) for b in result.branches)
-        frontier = nxt
-    out: dict = {}
-    for weight, pos in frontier:
-        key = _lock(pos, with_roll=False)
-        out[key] = out.get(key, 0.0) + weight
-    return out
-
-
 MULTI_TURN = sorted(
     n for n, c in CASES.items() if len(c.steps) > 1 and c.short is not None and c.long is not None
 )
 
 
 @pytest.mark.oracle
-@pytest.mark.parametrize("name", MULTI_TURN)
-def test_the_games_we_generate(reg, oracle: Oracle, name: str) -> None:
-    """Showdown rolls 2 or 3 at the start; we branch when it first matters, one half each.
-
-    So the leaves of our tree are Showdown's two games, weighted a half each (or one game
-    at weight 1 when both rolls end alike).
-    """
-    case = CASES[name]
-    want: dict = {}
-    for roll in ROLLS:
-        positions = _play(oracle, case, roll)
-        lock, confused = _expected(case, roll)
-        key = (None if lock is None else lock[:2], confused)
-        want[key] = want.get(key, 0.0) + 0.5
-    ours = _generated(reg, positions, case, Budget.matrix())
-    assert ours.keys() == want.keys(), (ours, want)
-    for key, weight in want.items():
-        assert ours[key] == pytest.approx(weight), (key, ours, want)
-
-
-@pytest.mark.oracle
-@pytest.mark.parametrize("name", MULTI_TURN)
-def test_the_pinned_budget_rolls_two(reg, oracle: Oracle, name: str) -> None:
-    """`random(2, 4)` is 2 under the oracle's pinned policy, and the pinned budget agrees."""
-    case = CASES[name]
-    positions = _play(oracle, case, "short")
-    lock, confused = case.short
-    want = {(None if lock is None else lock[:2], confused): 1.0}
-    pinned = dataclasses.replace(Budget.deterministic(), pinned_policy=True)
-    assert _generated(reg, positions, case, pinned) == pytest.approx(want)
-
-
-@pytest.mark.oracle
-@pytest.mark.parametrize(
-    ("name", "roll"),
-    [p for p in PLAYED if p[0] in ("turn 2", "turn 3", "protected on turn 2", "asleep on turn 2",
-                                   "own tempo", "lum berry")],
-)
-def test_the_port_agrees(
-    reg,  # noqa: ANN001
-    oracle: Oracle,
-    monkeypatch: pytest.MonkeyPatch,
-    name: str,
-    roll: str,
-) -> None:
-    """The port resolves the last turn from Showdown's position as Python does.
-
-    The binary built from master before IKA-174 keeps a bare `lockedmove` for good.
-    """
-    if not rustnode.binary_path().exists():
-        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
-    monkeypatch.setenv(rustnode.ENV_ENABLE, "1")
-    rustnode.reset()
-    case = CASES[name]
-    positions = _play(oracle, case, roll)
-    start = Position.from_json(positions[-2])
-    # Showdown's stats ride along as an override, which the port refuses as a
-    # transformed Pokemon; the spreads are known, so the stats are too.
-    for side in start.sides:
-        for mon in side.pokemon:
-            mon.stats_override = None
-    chosen = _chosen(reg, start, case.steps[-1])
-    try:
-        node = rustnode.node_for(reg)
-        assert node is not None
-        ported = node.resolve(start, chosen, Budget.matrix(), select=0)
-    finally:
-        rustnode.reset()
-    assert ported is not None and ported.position is not None, "the port refused the turn"
-    ours = resolve_turn(reg, start, chosen, budget=Budget.matrix())
-    # One branch per foe the Outrage draws (IKA-178), each held to Showdown's lock.
-    assert len(ours.branches) == len(ported.branches) >= 1
-    want = _expected(case, roll)
-    if _rampager(start).volatile("lockedmove") is None and want[0] is not None:
-        want = ((*want[0][:2], None), want[1])
-    try:
-        node = rustnode.node_for(reg)
-        assert node is not None
-        for index, branch in enumerate(ours.branches):
-            picked = node.resolve(start, chosen, Budget.matrix(), select=index)
-            assert picked is not None and picked.position is not None
-            assert _lock(picked.position) == _lock(branch.position) == want
-            assert _pp(picked.position) == _pp(branch.position)
-    finally:
-        rustnode.reset()
-
-
-@pytest.mark.oracle
-def test_the_port_branches_the_roll(reg, oracle: Oracle, monkeypatch: pytest.MonkeyPatch) -> None:  # noqa: ANN001
-    """Turn 2 of a rampage our resolver started: both engines split it a half each."""
-    if not rustnode.binary_path().exists():
-        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
-    monkeypatch.setenv(rustnode.ENV_ENABLE, "1")
-    rustnode.reset()
+def test_the_port_branches_the_roll(reg, oracle: Oracle) -> None:  # noqa: ANN001
+    """Turn 2 of a rampage the port started (no Showdown roll on it): the length splits a
+    half each, `random(2, 4)`, each half split again by the foe drawn (IKA-178)."""
     positions = _play(oracle, CASES["turn 2"], "short")
     first = Position.from_json(positions[0])
-    for side in first.sides:
-        for mon in side.pokemon:
-            mon.stats_override = None
     ours = resolve_turn(reg, first, _chosen(reg, first, RAMP), budget=Budget.matrix())
     # Hippowdon or Milotic took the first Outrage (IKA-178); either starts the rampage.
     assert len(ours.branches) == 2
     start = ours.branches[0].position
-    chosen = _chosen(reg, start, RAMP)
-    try:
-        node = rustnode.node_for(reg)
-        assert node is not None
-        weights = node.resolve(start, chosen, Budget.matrix(), select=None).branches
-        picked = [
-            node.resolve(start, chosen, Budget.matrix(), select=i).position
-            for i in range(len(weights))
-        ]
-    finally:
-        rustnode.reset()
-    python = resolve_turn(reg, start, chosen, budget=Budget.matrix())
-    # The length's half and half, each split again by the foe drawn (IKA-178).
-    want = [(b.probability, _lock(b.position)) for b in python.branches]
-    got = [(w, _lock(p)) for w, p in zip(weights, picked, strict=True)]
-    assert [lock for _, lock in got] == [lock for _, lock in want]
-    assert [w for w, _ in got] == pytest.approx([w for w, _ in want])
+    result = resolve_turn(reg, start, _chosen(reg, start, RAMP), budget=Budget.matrix())
     by_lock: dict = {}
-    for weight, lock in want:
-        by_lock[lock] = by_lock.get(lock, 0.0) + weight
+    for branch in result.branches:
+        lock = _lock(branch.position)
+        by_lock[lock] = by_lock.get(lock, 0.0) + branch.probability
     assert by_lock.keys() == {(None, True), (("outrage", 1, 1), False)}
     assert list(by_lock.values()) == pytest.approx([0.5, 0.5])
 

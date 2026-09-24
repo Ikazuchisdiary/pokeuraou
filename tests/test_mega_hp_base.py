@@ -27,10 +27,11 @@ from pokeuraou import rustnode, view
 from pokeuraou.actions import MoveAction, side_actions
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.regulation import Regulation, regulation_dir
-from pokeuraou.resolve import Budget, resolve_turn
 from pokeuraou.selfplay import position_from_sets
 from pokeuraou.teams import load_roster
 from pokeuraou.view import battler
+
+from ._port import Budget
 
 FORMATS = ("gen9championsvgc2026regmb", "gen9championsvgc2026regmc")
 
@@ -88,7 +89,7 @@ def synthetic_node(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """
     binary = rustnode.binary_path()
     if not binary.exists():
-        pytest.skip(f"no Rust binary at {binary}; `cargo build --release`")
+        pytest.fail(f"no Rust binary at {binary}; `cargo build --release`")
     format_id = "gen9championsvgc2026regmb"
     data = _with_mega_hp(format_id, "charizardmegay", 108)
     target = tmp_path / "configs" / "regulations" / f"{format_id}.json"
@@ -110,9 +111,15 @@ def synthetic_node(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
 
 
 def test_a_mega_that_changes_its_hp_base_keeps_its_maximum_over_there_too(
-    synthetic_node,  # noqa: ANN001
+    synthetic_node, monkeypatch: pytest.MonkeyPatch  # noqa: ANN001
 ) -> None:
+    from pokeuraou import selfplay
+
     reg, node = synthetic_node
+    # The leads' switch-ins by the same port (IKA-210), not Python's.
+    monkeypatch.setattr(
+        selfplay, "apply_lead_abilities", lambda _reg, p, rng=None: node.apply_lead_abilities(p, rng=rng)
+    )
     sheet = {entry.species: entry for entry in load_roster("rizabanadohido").sets}
     own = [sheet[n] for n in ("charizard", "sylveon", "venusaur", "garchomp")]
     foe = [sheet[n] for n in ("incineroar", "toxapex", "garchomp", "venusaur")]
@@ -138,21 +145,16 @@ def test_a_mega_that_changes_its_hp_base_keeps_its_maximum_over_there_too(
     budget = Budget.matrix()
     evolved = 0
     for ours in megas[:6]:
-        here = resolve_turn(reg, pos, [ours, theirs], budget=budget)
         there = node.resolve(pos, [ours, theirs], budget)
         assert there is not None, "the port refused the turn"
-        assert there.branches == pytest.approx(
-            [b.probability for b in here.branches], abs=1e-12
-        )
-        for index, branch in enumerate(here.branches):
-            after = branch.position.sides[0].pokemon[0]
+        for index in range(len(there.branches)):
+            chosen = node.resolve(pos, [ours, theirs], budget, select=index)
+            assert chosen is not None and chosen.position is not None
+            after = chosen.position.sides[0].pokemon[0]
             if after.species == "charizardmegay":
                 evolved += 1
-                assert after.maxhp == maxhp, "Python's maximum stays"
+                assert after.maxhp == maxhp, "the position's maximum stays"
                 # Not vacuous: the HP stat this regulation recomputes is another number,
                 # and that is what the pre-IKA-60 port wrote.
                 assert int(battler(reg, after).stats[0][0]) != maxhp
-            chosen = node.resolve(pos, [ours, theirs], budget, select=index)
-            assert chosen is not None and chosen.position is not None
-            assert chosen.position.to_json() == branch.position.to_json(), (ours, index)
     assert evolved, "no branch had Charizard mega evolve, so nothing was tested"

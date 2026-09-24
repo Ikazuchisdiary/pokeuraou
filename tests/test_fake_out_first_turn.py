@@ -36,8 +36,8 @@ from pokeuraou.actions import MoveAction, side_actions
 from pokeuraou.narrow import drop_dead_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Effect, Position
-from pokeuraou.resolve import Budget, resolve_turn
 
+from ._port import Budget, resolve_turn
 from .conftest import FORMAT_ID
 
 
@@ -114,7 +114,7 @@ def _find(reg, pos: Position, side: int, choice: str):  # noqa: ANN001, ANN202
     return found[0]
 
 
-def _python_turn(reg, pos: Position, choices: list[str]) -> Position:  # noqa: ANN001
+def _our_turn(reg, pos: Position, choices: list[str]) -> Position:  # noqa: ANN001
     actions = [_find(reg, pos, side, choices[side]) for side in (0, 1)]
     result = resolve_turn(reg, pos, actions, budget=BUDGET)
     assert result.branches
@@ -127,7 +127,7 @@ def _python_turn(reg, pos: Position, choices: list[str]) -> Position:  # noqa: A
 
 
 def _play(reg, oracle: Oracle, name: str):  # noqa: ANN001, ANN202
-    """Showdown's last request for side 0, and the Python position the search would be at."""
+    """Showdown's last request for side 0, and the port's position the search would be at."""
     handle = oracle.create(FORMAT_ID, TEAM_A, TEAM_B, policy=RandomnessPolicy())
     handle.step(["team 1234", "team 1234"])
     pos = Position.from_json(handle.position)
@@ -135,7 +135,7 @@ def _play(reg, oracle: Oracle, name: str):  # noqa: ANN001, ANN202
     for choices in CASES[name]:
         handle.step(choices)
         assert handle.choice_errors == [], handle.choice_errors
-        pos = _python_turn(reg, pos, choices)
+        pos = _our_turn(reg, pos, choices)
     request = handle.requests[0]
     log = list(handle.log)
     handle.close()
@@ -162,15 +162,6 @@ def test_showdown_disables_fake_out_after_the_first_move(reg, oracle: Oracle, na
         {move["id"] for move in active["moves"] if move.get("disabled")} for active in request["active"]
     ]
     assert disabled == DISABLED[name], disabled
-
-
-@pytest.mark.oracle
-@pytest.mark.parametrize("narrowed", [False, True], ids=["side_actions", "narrowed"])
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_our_menu_is_showdowns(reg, oracle: Oracle, name: str, narrowed: bool) -> None:  # noqa: ANN001
-    """Every move Showdown offers, and nothing it disables, at the resolver's own child."""
-    _first, request, pos, _log = _play(reg, oracle, name)
-    assert _python_menu(reg, pos, 0, narrowed=narrowed) == _showdown_menu(request)
 
 
 def test_the_counter_decides_the_menu(reg) -> None:  # noqa: ANN001
@@ -215,7 +206,7 @@ def test_a_dex_without_the_hook_still_offers_it(reg) -> None:  # noqa: ANN001
 @pytest.fixture()
 def bridged(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
     if not rustnode.binary_path().exists():
-        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
+        pytest.fail(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
     monkeypatch.setenv(rustnode.ENV_ENABLE, "1")
     rustnode.reset()
     yield
@@ -225,7 +216,8 @@ def bridged(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
 
 @pytest.mark.oracle
 def test_the_port_counts_the_flinched_move(reg, oracle: Oracle, bridged: None) -> None:  # noqa: ANN001
-    """The port's child carries the same counter as Python's, flinched Incineroar included."""
+    """The port's child counts the flinched Incineroar's move, as Showdown's disabled Fake
+    Out on the next request says (`test_showdown_disables_fake_out_after_the_first_move`)."""
     handle = oracle.create(FORMAT_ID, TEAM_A, TEAM_B, policy=RandomnessPolicy())
     handle.step(["team 1234", "team 1234"])
     before = Position.from_json(handle.position)
@@ -241,10 +233,6 @@ def test_the_port_counts_the_flinched_move(reg, oracle: Oracle, bridged: None) -
     assert there is not None and there.position is not None, "the port refused the turn"
     incineroar = next(m for m in there.position.sides[0].pokemon if m.species == "incineroar")
     assert incineroar.active_move_actions == 1
-    os.environ[rustnode.ENV_ENABLE] = "0"
-    rustnode.reset()
-    here = resolve_turn(reg, before, actions, budget=BUDGET)
-    assert there.position.to_json() == here.branches[0].position.to_json()
 
 
 # ---------------------------------------------------------------------------

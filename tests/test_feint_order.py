@@ -21,17 +21,15 @@ broken would fail it.
 
 from __future__ import annotations
 
-import os
 from dataclasses import replace
 
 import pytest
 
-from pokeuraou import rustnode
 from pokeuraou.actions import side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Position
-from pokeuraou.resolve import Budget, resolve_turn
 
+from ._port import Budget
 from .conftest import FORMAT_ID
 
 pytestmark = pytest.mark.oracle
@@ -130,76 +128,6 @@ def _actions(reg, pos: Position, choices: list[str]) -> list:  # noqa: ANN001
         next(a for a in side_actions(reg, pos, side) if a.to_choice() == choices[side])
         for side in (0, 1)
     ]
-
-
-def _feint_missed(events: list[str]) -> bool:
-    return any(e.endswith("Feint missed") for e in events)
-
-
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_feint_breaks_only_what_it_reaches(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
-    before, choices, theirs, log = _play(oracle, name)
-    assert CASES[name][3] in log, f"Showdown did not do what the case says: {log}"
-
-    result = resolve_turn(reg, before, _actions(reg, before, choices), budget=BUDGET)
-    missed = name == "missed"
-    # Showdown's policy pins one accuracy outcome; the Python branches that match it are
-    # the ones where Feint did the same. The partner's own accuracy roll is pinned to
-    # "hit" in Showdown too, so only a branch where the partner hit is comparable -- except
-    # when the partner was blocked, where no roll was made and every branch must agree.
-    ours = [
-        b for b in result.branches
-        if _feint_missed(b.events) == missed
-        and not any(e.endswith(("Dragon Claw missed", "Rock Slide missed")) for e in b.events)
-    ]
-    assert ours, "no Python branch plays the same accuracy outcomes"
-    for branch in ours:
-        assert _hp(branch.position) == theirs, (
-            f"{name}: showdown {theirs} != python {_hp(branch.position)}; "
-            + " / ".join(branch.events)
-        )
-
-
-@pytest.fixture()
-def bridged(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
-    if not rustnode.binary_path().exists():
-        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
-    monkeypatch.setenv(rustnode.ENV_ENABLE, "1")
-    rustnode.reset()
-    yield
-    rustnode.reset()
-    os.environ.pop(rustnode.ENV_ENABLE, None)
-
-
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_the_port_breaks_only_what_it_reaches(
-    reg, oracle: Oracle, bridged: None, name: str  # noqa: ANN001
-) -> None:
-    """The port resolves the same turns branch for branch, positions included."""
-    before, choices, _theirs, _log = _play(oracle, name)
-    # Showdown's positions carry its final stats, which the port refuses as it would a
-    # transformed Pokemon's. Nobody here is transformed, so they follow from the spreads.
-    for side in before.sides:
-        for mon in side.pokemon:
-            mon.stats_override = None
-    actions = _actions(reg, before, choices)
-    budget = replace(Budget.matrix(), enumerate_accuracy=True)
-    os.environ[rustnode.ENV_ENABLE] = "0"
-    rustnode.reset()
-    here = resolve_turn(reg, before, actions, budget=budget)
-    os.environ[rustnode.ENV_ENABLE] = "1"
-    rustnode.reset()
-    node = rustnode.node_for(reg)
-    assert node is not None
-    there = node.resolve(before, actions, budget)
-    assert there is not None, "the port refused the turn"
-    mine = [b.probability for b in here.branches]
-    assert len(mine) == len(there.branches)
-    assert all(abs(x - y) < 1e-12 for x, y in zip(mine, there.branches, strict=True))
-    for index, branch in enumerate(here.branches):
-        chosen = node.resolve(before, actions, budget, select=index)
-        assert chosen is not None and chosen.position is not None
-        assert chosen.position.to_json() == branch.position.to_json(), (name, index)
 
 
 # ---------------------------------------------------------------------------

@@ -38,9 +38,9 @@ from pokeuraou.actions import SideAction, side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Position
 from pokeuraou.priors import SampledSet
-from pokeuraou.resolve import Budget, resolve_turn
 from pokeuraou.selfplay import position_from_sets
 
+from ._port import Budget
 from .conftest import FORMAT_ID
 
 pytestmark = pytest.mark.oracle
@@ -256,34 +256,25 @@ def test_showdown_starts_with_the_leads_terrain(oracle: Oracle, name: str) -> No
 
 
 @pytest.mark.parametrize("name", sorted(LEADS))
-def test_python_starts_from_the_position_showdown_does(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
+def test_the_port_starts_from_the_position_showdown_does(
+    reg, oracle: Oracle, name: str, monkeypatch: pytest.MonkeyPatch  # noqa: ANN001
+) -> None:
+    """`position_from_sets` with the leads' switch-ins run by the port (IKA-210)."""
+    from pokeuraou import selfplay
+
+    from . import _port
+
+    monkeypatch.setattr(selfplay, "apply_lead_abilities", _port.apply_lead_abilities)
     showdown = _lead(oracle, name)
     ours, theirs = LEADS[name]
-    python = position_from_sets(reg, _sampled(reg, ours), _sampled(reg, theirs))
-    assert _board(python) == _board(showdown)
-
-
-@pytest.mark.parametrize("name", sorted(TURNS))
-def test_python_plays_the_turn_as_showdown_does(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
-    before, after, log = _play(oracle, name)
-    moves = [line for line in log if line.startswith("|move|")]
-    if name.startswith("grassy-glide-"):
-        # The airborne case is a case only if Greninja moved first, and the grounded one
-        # only if the Glide knocked it out before it could.
-        airborne = name == "grassy-glide-needs-ground"
-        assert any("Dark Pulse" in line for line in moves) == airborne, moves
-        assert any(line.startswith("|faint|p2a: Greninja") for line in log), log[-12:]
-    choices = TURNS[name][3]
-    result = resolve_turn(reg, before, _actions(reg, before, choices), budget=BUDGET)
-    assert result.branches and not result.suspended
-    for branch in result.branches:
-        assert _board(branch.position) == _board(after), " / ".join(branch.events)
+    opened = position_from_sets(reg, _sampled(reg, ours), _sampled(reg, theirs))
+    assert _board(opened) == _board(showdown)
 
 
 @pytest.fixture()
 def bridged(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
     if not rustnode.binary_path().exists():
-        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
+        pytest.fail(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
     monkeypatch.setenv(rustnode.ENV_ENABLE, "1")
     rustnode.reset()
     yield
@@ -293,7 +284,14 @@ def bridged(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
 
 @pytest.mark.parametrize("name", sorted(TURNS))
 def test_the_port_plays_the_turn_as_showdown_does(reg, oracle: Oracle, bridged: None, name: str) -> None:  # noqa: ANN001
-    before, after, _log = _play(oracle, name)
+    before, after, log = _play(oracle, name)
+    moves = [line for line in log if line.startswith("|move|")]
+    if name.startswith("grassy-glide-"):
+        # The airborne case is a case only if Greninja moved first, and the grounded one
+        # only if the Glide knocked it out before it could.
+        airborne = name == "grassy-glide-needs-ground"
+        assert any("Dark Pulse" in line for line in moves) == airborne, moves
+        assert any(line.startswith("|faint|p2a: Greninja") for line in log), log[-12:]
     # The port declines a position with a stats override (it reads that as a Transform);
     # both engines compute the same stats from the spreads.
     for side in before.sides:
