@@ -16182,3 +16182,171 @@ Python で埋めた）。IKA-209 §3 で深さ 2 の決定を動かした唯一�
   heavy.py を通さない 30 秒未満の 1 コアの試し（count の g600・solve の w12 2 局・null の直接の走り）: 計 約 25 s
   合計  約 5 分（CPU）。GPU は使っていない
 ```
+
+## 9/24 — IKA-222: わざわいの 4 特性・スナイパー・そうだいしょう・ゆきがくれを port に入れた —— オラクル 76 件（port 側 43 件は直す前の exe で 29 落ち・14 通る）、diff_turn は Showdown から外れるターンが増えず、特性を差し込んだ標本では 36.5% → 5.7%・37.2% → 5.4%（外れが消えたターン 815・795、新しく外れたターン 0）。生成の壁時計は同じで、局もすべて同じ（価値関数 20 局 24.8 / 24.7 s → 24.7 / 24.7 s、20/20）
+
+ブランチ `ika-222-ignored-abilities-items`（master bd5deb4 から切り、報告の前に master を取り込んだ）。IKA-210 §6 の「注記が増えた 41 id」と gate の群のうち、ダメージに効く群と、M-C の試走で 1% 以上に出る id を入れた。
+
+### 1. 数えた表（M-C 試走 g600 の 600 局、`C:/tmp/ika222/count_ids.py`、1 コアで 0.5 秒）
+
+「局」は、両方の選出 4 体（`ownTeam`・`foeTeam`）のどれかがその id を持つ局の数。メガストーンを持つ個体は、メガ後の特性も数えた。「プール」は data/pool/regmc-matchupweb.json の 65 構築 390 体のうちその id を持つ体数。「種族」は M-C の規則表（configs/regulations/gen9championsvgc2026regmc.json）で、その特性を持てる種族の数（道具は誰でも持てるので `-`）。
+
+```
+id                 群              局      %   プール  種族
+snowcloak          gate            18   3.00        1     5   ← 1% 以上はこれだけ
+beadsofruin        ダメージ         0   0.00        0     0
+swordofruin        ダメージ         0   0.00        0     0
+tabletsofruin      ダメージ         0   0.00        0     0
+vesselofruin       ダメージ         0   0.00        0     0
+protosynthesis     ダメージ         0   0.00        0     0
+quarkdrive         ダメージ         0   0.00        0     0
+sniper             ダメージ         0   0.00        0     4
+supremeoverlord    ダメージ         0   0.00        0     1   （ドドゲザン）
+anticipation cheekpouch costar cudchew forewarn frisk gluttony harvest hydration leafguard magician
+moxie naturalcure perishbody pickpocket seedsower shedskin steadfast supersweetsyrup toxicchain
+wanderingspirit windpower（ほかの特性 22）                            すべて 0 局・プール 0
+  持てる種族: frisk 12・gluttony 8・moxie 8・naturalcure 5・steadfast 5・cheekpouch 4・cudchew 4・
+  pickpocket 4・leafguard 3・shedskin 3・anticipation 2・harvest 2・hydration 2・magician 2・
+  forewarn 1・seedsower 1・supersweetsyrup 1・wanderingspirit 1、costar・perishbody・toxicchain・windpower 0
+aspearberry bigroot bindingband cheriberry chestoberry kingsrock leppaberry mentalherb metronome
+pechaberry rawstberry（道具 11）、lumberry（確認用）                     すべて 0 局・プール 0
+aromaveil healer heavymetal lightmetal pressure sandveil symbiosis sweetveil telepathy（gate の残り 9）
+                                                                       すべて 0 局・プール 0
+  持てる種族: sweetveil 10・aromaveil 9・pressure 7・sandveil 6・telepathy 5・healer 4・symbiosis 3・
+  lightmetal 2・heavymetal 1
+```
+
+* **わざわいの 4 特性とこだいかっせい・クォークチャージは、M-C と M-B のどちらの規則表にも持てる種族が 0**（両方の dump の `abilities` には載っているが、`species` に持ち主がいない）。ブーストエナジーもどちらの dump の道具にも無い
+* lumberry は既に modelled.rs にある（port が名前で扱う。ほかの状態異常の実 5 つは無い）
+
+### 2. 範囲
+
+入れた: ダメージに効く群のうち 6 id（わざわいの 4 特性・sniper・supremeoverlord）と、1% 以上の snowcloak。**入れなかった: protosynthesis・quarkdrive**（ダメージに効く群だが、次の理由でこの課題から外した）。
+* M-B・M-C に持てる種族が 0、ブーストエナジーも無い（上の表）。生成にも diff_turn にも出ない
+* 入れるには、Showdown が volatile（`protosynthesis`／`quarkdrive`、`effectState.bestStat`・`fromBooster`）で持つ状態を位置に運ぶ必要がある。bridge の `MODELLED_VOLATILES` に足して dist を作り直し、port に天気・フィールドが変わるたび（登場時の特性、天気の技、残差で天気が終わるとき、フィールドも同じ）の付け外しと `getBestStat(false, true)`、能力 4 つの補正と素早さ 1.5 倍を入れることになる。今は、この volatile を持つ局面を port は「unmodelled volatiles」で断る
+* 別課題の候補に書いた（§9）
+
+### 3. Showdown の定義（vendor a5df827 の data/abilities.ts。champions mod はどれも上書きしない）と実装
+
+* **わざわいの 4 特性**（abilities.ts:384 beadsofruin・4819 swordofruin・4872 tabletsofruin・5285 vesselofruin）:
+  ```
+  tabletsofruin: onAnyModifyAtk(atk, source, target, move) {
+      const abilityHolder = this.effectState.target;
+      if (source.hasAbility('Tablets of Ruin')) return;
+      if (!move.ruinedAtk) move.ruinedAtk = abilityHolder;
+      if (move.ruinedAtk !== abilityHolder) return;
+      return this.chainModify(0.75);
+  }
+  vesselofruin: onAnyModifySpA（同じ形）
+  swordofruin:  onAnyModifyDef(def, target, source, move) { if (target.hasAbility('Sword of Ruin')) return; ... }
+  beadsofruin:  onAnyModifySpD（同じ形）
+  ```
+  どの補正の event が走るかは sim/battle-actions.ts の `getDamage`（1705〜1709 行）:
+  ```
+  attackStat = (category === 'Physical' ? 'atk' : 'spa');
+  attack = this.battle.runEvent('Modify' + statTable[attackStat], source, target, move, attack);
+  defense = this.battle.runEvent('Modify' + statTable[defenseStat], target, source, move, defense);
+  ```
+  攻撃側の event は分類で決まり、いつも使い手のもの。だからボディプレスの防御も、イカサマで借りた攻撃も、わざわいのおふだ（Tablets）で下がる（ボディプレスはつるぎ〔Sword〕では下がらない）。スルーされるのは、使い手自身が Tablets を持つときだけ。防御側の event は読んだ能力で決まる（サイコショックは防御なので Sword、Beads ではない）。
+  実装: `effects::ruin_of`・`any_ruin`・`ruined`、`damage::ruin_modifiers`。攻撃と防御の chain の最後に 0.75 を足す（`onAnyModify*` には priority が無いので、優先度の付いた補正の後）。場に Ruin が無ければ `ends_with("ofruin")` が 4 回だけで終わる
+* **わざわいの特性は、同じ技で倒れた後も残る**（Showdown では、範囲技のダメージは全員分を先に計算してから与える〔`getSpreadDamage` → `spreadDamage`〕。倒れたポケモンは技の後の `faintMessages` まで場にいる）。port は対象を 1 体ずつ当てるので、先に倒れた Ruin の持ち主が後の対象の計算から抜けていた。diff_turn で見つけた（§6 の seed 4 battle 31 turn 6: Sword を持つガブリアスのじしんで、Tablets を持つエルフーンが先に倒れ、味方のオコリザルへの同じじしんが Tablets 抜き・Sword ありで計算されて 35 多く減った）。`moves::field_for_hit`: 技の始めに HP があり、今は倒れている Ruin の持ち主だけを場に戻す。ほかの場の特性（フレンドガード・オーラ・ノーてんき）は変えていない（§9）
+* **sniper**（abilities.ts:4358）: `onModifyDamage(damage, source, target, move) { if (target.getMoveHitData(move).crit) return this.chainModify(1.5); }`。`effects::ability_modifiers` の ModifyDamage の表に 1 行（`is_crit`）。急所の枝は計算器の `crit = true` の呼び出しなので、急所の分かれ方（Showdown が先に引く急所の乱数）は今までの枝のまま
+* **supremeoverlord**（abilities.ts:4730）:
+  ```
+  onStart(pokemon) { if (pokemon.side.totalFainted) { ...; this.effectState.fallen = Math.min(pokemon.side.totalFainted, 5); } }
+  onBasePowerPriority: 21,
+  onBasePower(...) { if (this.effectState.fallen) { const powMod = [4096, 4506, 4915, 5325, 5734, 6144];
+      return this.chainModify([powMod[this.effectState.fallen], 4096]); } }
+  ```
+  数は登場時に数え、場にいる間は変わらない。bridge は `abilityState` を書き出す（`fallen` は数値なのでそのまま残る）。実装: `Battler::fallen`（持ち主だけ `abilityState.fallen` を読む。ほかの特性では map を引かない）、`Ctx::attacker_fallen`、BasePower の表に 5 行（priority 21）。`resolve::supreme_overlord_start` を `switch_in_ability` の中で呼ぶ（先発・交代・倒れた後の交代・途中交代・メガシンカの登場がここを通る）。Showdown は登場のたびに `abilityState` を作り直すので、倒れた味方がいなければ前の数を消す。`totalFainted` は、この形式では誰も生き返らないので、手持ちで倒れているポケモンの数
+* **snowcloak**（abilities.ts:4370）: `onModifyAccuracyPriority: -1`、`onModifyAccuracy(accuracy) { if (typeof accuracy !== 'number') return; if (this.field.isWeather(['hail', 'snowscape'])) return this.chainModify([3277, 4096]); }`、`flags: { breakable: 1 }`。`moves::snow_cloak_applies`（かたやぶりで無効、ノーてんき・エアロックが場にいれば天気なし）と `accuracy_of` の 1 行。それだけで event に乗るときは `modify(accuracy, 3277)` なので、整数の命中に `(acc * 3277 + 2047) / 4096` の切り捨て（100 → 80、80 → 64）。乱数は Showdown と同じく命中の 1 回（`randomChance(acc, 100)`）で、port の命中の枝の重みが変わるだけ
+* gate（`resolve::ability_handled`）: 7 id を新しい行に。snowcloak は「No effect a turn can observe」の群から外した
+
+### 4. オラクルのテスト（tests/test_ignored_abilities.py、76 件）
+
+Showdown の事実 33 件（効果が出た・出ないを、効果の無い同じ場面と比べて断言）と、port 対 Showdown 43 件。
+* わざわい 25 場面: 持ち主が相手側・使い手の味方・使い手自身・的自身、物理／特殊、サイコショック、ボディプレス、イカサマ（的が持つ・使い手が持つ）、無い場面 5。port はダメージ乱数最大で的の HP が Showdown と一致し、注記に 7 id が出ない
+* 範囲技の途中で倒れる Ruin の持ち主 3 場面（持ち主が p2a／p2b、持たない同じ場面）
+* sniper 3 場面（急所・急所なし・げきりゅうの急所）: port の急所の枝の HP に Showdown の HP が入る
+* そうだいしょう: おきみやげで 1 体倒れた後の交代で出たドドゲザン、先発（0 体）、まけんきの同じ場面。port の 1 ターンのダメージ、port の交代の段（控えに古い `fallen: 4` を置いても 1 になる）、先発（置いた 3 が消える）、ターン中の交代で数える
+* ゆきがくれ 5 場面（ねっとう 100 → 80、ハイドロポンプ 80 → 64、かたやぶり、雪なし、アイスボディ）: Showdown の `randomChance` の分子を読み、port の命中の枝の重みが分子/100 と一致
+
+| exe | Showdown の事実 33 | port 43 |
+|---|---|---|
+| 直す前（master bd5deb4 の build） | 33 通る | **29 落ち**・14 通る |
+| 途中の build（範囲技の直しの前） | 33 通る | 1 落ち（持ち主が p2a で先に倒れる場面） |
+| 後 | 33 通る | 43 通る |
+
+直す前で落ちる 29 の内訳: ダメージ・重み・数が違う 20（わざわい 11・範囲技 2・sniper 1・そうだいしょう 1・交代で数える 3・ゆきがくれ 2）、注記だけ 9（効果が出ない場面でも持ち主がいると注記が出ていた。わざわい 7・sniper 1・そうだいしょう 1）。直す前でも通る 14 は対照（Ruin の無い 5、特殊技に Tablets・物理技に Vessel、持たない範囲技、げきりゅうの急所、まけんきの 2、かたやぶり・雪なし・アイスボディ）。
+
+### 5. modelled.rs・inert.rs の差分（`tools/port_coverage.py --rust / --rust-modelled`、`--check` ok）
+
+```
+inert.rs     ability_is_inert 120 → 114   外れた: beadsofruin sniper supremeoverlord swordofruin tabletsofruin vesselofruin
+modelled.rs  ability_is_modelled 198 → 204  入った（注記が出なくなる）: 同じ 6 id
+items は変わらない（92・155）
+```
+
+snowcloak は前から modelled.rs にある（gate の「No effect a turn can observe」の群に名前があり、`port_coverage` はそれを「port が作用する」と読む）。だから前は注記も出ずに違う答えを返していた。同じ群の残り 9 id（pressure・telepathy・heavymetal・lightmetal・sandveil・healer・symbiosis・sweetveil・aromaveil）も今そうなっている（IKA-210 §6 の「今は注記が出る」は誤り。§9）。
+
+### 6. diff_turn（port の列、`--exes old=直す前,new`、PYTHONHASHSEED=0、roll 8、max-turns 10、1 コア）
+
+diff_turn には `--jobs` が無い（400 局が 1 本 12 秒なので足していない）。`C:/tmp/ika222/fire_turns.py` は `tools/diff_turn.run` をそのまま走らせ、`compare_port_turn` を包んで、ターンごとの判定（一致・乖離・停止など）と、ターンの始めに 7 id のどれかが場にいるかを記録する。`--inject` は、引いた構築ごとに選出 4 体のうち 1 体の特性をわざわいのどれかに、別の 1 体をそうだいしょうに替える（持ち主の種族がいないので、発火する標本を作るため。bridge は特性を確かめない）。`--neutral "Run Away"` は同じ引きで、替える特性をにげあしにする null 対照。
+
+```
+                                   old（直す前）            new                 場にいるターン   判定が変わったターン
+seed 1 × 400                       2,722 中 2,572（5.51%）   同じ                16               0
+seed 2 × 400、self-switch 0.8      2,747 中 2,563（6.70%）   同じ                24               0
+seed 3 × 400、差し込み              2,787 中 1,769（36.53%）  2,629（5.67%）      2,613            乖離 → 一致 815、一致 → 乖離 0
+seed 3 × 400、null 対照            2,774 中 2,614（5.77%）   同じ                14               0
+seed 4 × 400、差し込み              2,632 中 1,654（37.16%）  2,489（5.43%）      2,482            乖離 → 一致 795、乖離 → 停止 1、一致 → 乖離 0
+seed 4 × 400、null 対照            2,679 中 2,529（5.60%）   同じ                4                0
+壁時計: 各 11.7〜12.7 s
+```
+
+* ふつうの標本（seed 1・2）では 7 id が場にいるターンが 40 しかなく、決定的な budget（急所なし・必中）ではスナイパーとゆきがくれは発火しない。そうだいしょうも倒れた味方がいる場面が無く、判定は変わらない。注記は old の 7・8 回 → new 0
+* 差し込んだ標本では、new の乖離率（5.67%・5.43%）が null 対照（5.77%・5.60%）と同じ水準まで下がった。残る乖離は、差し込んだ特性の無い局と同じ種類（hp・boosts・item …）
+* 最初の build では seed 4 に「一致 → 乖離」が 1 ターンあった（battle 31 turn 6。§3 の範囲技の件）。直した後は 0
+
+### 7. 生成の壁時計（同じ窓、前・後・前・後の交互、`C:/tmp/ika222/gen_pair.py` は `tools/diff_generation.play` を 1 つの checkout と 2 つの exe で呼ぶ、1 コア）
+
+```
+                                                    前（直す前の exe）   後          同一の局
+M-C 価値関数 20 局 seed 11 一様選出（value-gen11L、cpu）  24.8 / 24.7 s     24.7 / 24.7 s   20/20・20/20
+M-C hp-share 200 局 seed 7 一様選出                        44.7 / 44.7 s     44.8 / 44.7 s   200/200・200/200
+```
+
+* 価値関数の 20 局に 7 id の持ち主は 0。hp-share の 200 局には snowcloak の持ち主（ユキメノコ）がいる局が 6 あるが、雪の下でねらわれた場面が無く局は同じ
+* 毎回の計算に足したもの: ダメージの計算ごとに場の特性 ≤4 つの `ends_with("ofruin")`、Battler を作るたびの特性名の比較 1 回、命中ごとの特性名の比較 1 回、当たるたびの 4 枠の小さなループ（`field_for_hit`）。どれも map を引かず確保もしない。壁時計の差は交互の揺れの中（0.1 s）
+
+### 8. その他の検査
+
+* `cargo build --release`（警告 28 は前と同じ）・`cargo test --release` 6 passed
+* `port_coverage --check`・`port_gate_audit --check`・`ruff check .` 通る
+* 関係テスト 18 ファイル（-n 0、1 コア、64 s）: 通る（skip 1 は vendor）。master 取り込み後にも回した（§10）
+* worktree に data/ の priors・standings・reportworm・pool を $M から複写（gitignore 対象、コミットしない）
+
+### 9. 入れなかった id と別課題の候補
+
+* **protosynthesis・quarkdrive**（ダメージに効く群。g600 0%・持てる種族 0）: §2 の理由で外した。入れるなら bridge の `MODELLED_VOLATILES` と dist、天気・フィールドの付け外し、`getBestStat`、素早さ
+* **1% 未満で入れなかった id**（g600 はどれも 0%）: 特性 anticipation cheekpouch costar cudchew forewarn frisk gluttony harvest hydration leafguard magician moxie naturalcure perishbody pickpocket seedsower shedskin steadfast supersweetsyrup toxicchain wanderingspirit windpower、道具 aspearberry bigroot bindingband cheriberry chestoberry kingsrock leppaberry mentalherb metronome pechaberry rawstberry、gate の pressure telepathy heavymetal lightmetal sandveil healer symbiosis sweetveil aromaveil。ただし diff_turn（seed 1 × 400）の注記では magician（攻撃側 32・防御側 36 回）・mentalherb（26・36 回）が上位に出る（事前分布から引く構築には出る）
+* **gate の「No effect a turn can observe」の群は注記も出ない**: `port_coverage` はこの群を「port が作用する」と読むので、pressure など 9 id は modelled.rs にあり、注記を出さずに違う答えを返す（IKA-210 §6 の「今は注記が出る」は誤り）。この群も `IGNORED_SECTION` と同じく「作用ではない」と読むか、群を分けるのが筋
+* **範囲技の途中で倒れたポケモンの場の特性**: port は対象を 1 体ずつ当て、先に倒れた持ち主の場の特性を後の対象の計算から外す。今回わざわいだけ戻した。フレンドガード・フェアリーオーラ／ダークオーラ・ノーてんき／エアロックも Showdown では技の終わりまで残る
+* **命中の補正が Showdown の fixed point ではない**: `accuracy_of` は ふくがん 1.3・はりきり 0.8・こうかくレンズ 1.1・ひかりのこな 0.9 を小数で掛け、命中・回避の段階も切り捨てない（Showdown は `chainModify` で 1 つの modifier にしてから `modify`、段階は `trunc(acc * (3+b) / 3)`）。例: 命中 90 の技を命中 −1 で 67.5% と読む（Showdown は 67%）
+* **Protean・Libero の「発動済み」を port は自分で立てない**: `Battler::protean_fired` は位置の `abilityState.protean` を読むだけで、port のターンで発動しても書かず、交代で消しもしない（コードを読んだだけで、測っていない）
+
+### 10. master の取り込み
+
+報告の前に `git merge master`（7f8c356、IKA-223。rust/src に変更なし）。取り込んだ後に build（変更なし）・関係テスト 19 ファイル（-n 0、63 s、通る）・`port_coverage --check`・`port_gate_audit --check`・`agent_drift --check`・`ruff check .` を回し直した。
+
+### 11. 機械（heavy.py、IKA-222）
+
+```
+cargo build --release（--cores 8）     5 回 計  97 s（27・24・23・23・0 s。最後は master 取り込み後で変更なし）
+cargo test --release（--cores 8）      1 回    10 s（6 passed）
+オラクルのテスト・正の対照（--cores 1） 12 回 計  16 s（1 回 1〜2 s。直す前・途中・後の exe）
+関係テスト 18〜19 ファイル（--cores 1） 3 回 計 146 s（19 s は data/priors が無くて落ちた回、64・63 s）
+diff_turn 400 局（--cores 1）           18 回 計 183 s（1 回 12〜13 s。0 s の 3 回は自分の道具のファイル名が標準の inspect を隠して起動できなかった回）
+生成の前後の対（--cores 1）             3 回 計 281 s（価値関数 20 局 × 4 本 99 s、hp-share 200 局 × 4 本 181 s、1 s は pool が無くて落ちた回）
+計 733 s（約 12 分）。heavy.py の外: 数え上げ 0.5 s、port_coverage・port_gate_audit・agent_drift・ruff、36 局の再現 2 本（各 2 s 未満）
+```
