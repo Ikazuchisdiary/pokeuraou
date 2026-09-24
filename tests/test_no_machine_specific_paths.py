@@ -53,6 +53,7 @@ EXEMPT = (
     # The record. TODO.md and GENERATIONS.md quote commands as they were actually run, and
     # a quotation that edits the path is a quotation that no longer matches its run.
     "TODO.md",
+    "records/",  # where the record went after TODO.md was frozen (IKA-228)
     "GENERATIONS.md",
     "README.md",
     "docs/",
