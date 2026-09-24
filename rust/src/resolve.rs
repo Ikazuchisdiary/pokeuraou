@@ -423,6 +423,7 @@ impl<'a> Turn<'a> {
         restore_types(reg, mon);
         mon.status = Some(Id::new("fnt"));
         mon.status_counter = None;
+        #[cfg(not(feature = "ika215-control"))]
         log_event!(self, "{} fainted", Name(side, slot));
         let wiped = self.pos.sides[side].pokemon.iter().all(|m| m.fainted);
         if wiped && !self.wipe_order.contains(&side) {

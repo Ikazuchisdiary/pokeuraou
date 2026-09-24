@@ -179,3 +179,77 @@ def test_the_log_groups_without_losing_a_line(roster) -> None:  # noqa: ANN001
     # several turns accumulates them, so zero across the lot would mean the end-of-turn
     # group is never labelled at all.
     assert labelled > 0, "no branch labelled its end-of-turn group"
+
+
+# ---------------------------------------------------------------------------
+# The port's trace (IKA-215): the same lines and the same cuts, when asked for
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(scope="module")
+def node(roster):  # noqa: ANN001, ANN201
+    from pokeuraou import rustnode
+
+    if not rustnode.binary_path().exists():
+        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
+    opened = rustnode.RustNode(roster.reg)
+    yield opened
+    opened.close()
+
+
+def test_the_port_cuts_the_trace_as_python_does(roster, node) -> None:  # noqa: ANN001
+    """`turn` with `events` gives every branch Python's lines and Python's `acts`."""
+    reg = roster.reg
+    positions = _mirror_turns(roster)
+    assert len(positions) >= 3, "the game ended too early to test anything"
+    lines = 0
+    for pos in positions:
+        row = narrow(reg, pos, 0, limit=4).actions
+        col = narrow(reg, pos, 1, limit=4).actions
+        for ours in row[:2]:
+            for theirs in col[:2]:
+                for budget in (Budget.matrix(), Budget.exact()):
+                    result = resolve_turn(reg, pos, [ours, theirs], budget=budget)
+                    port = node.turn(pos, [ours, theirs], budget, full=True, events=True)
+                    assert port is not None, "the port refused the turn"
+                    assert len(port.outcomes) == len(result.branches)
+                    for mine, answered in zip(result.branches, port.outcomes, strict=True):
+                        assert answered.events == mine.events
+                        assert answered.acts == [tuple(a) for a in mine.acts]
+                        lines += len(mine.events)
+    assert lines >= 200, f"only {lines} lines compared"
+
+
+def test_the_port_keeps_nothing_unless_asked(roster, node) -> None:  # noqa: ANN001
+    """Off by default: no trace comes back, so the generation road carries none."""
+    reg = roster.reg
+    pos = _mirror_turns(roster, turns=1)[0]
+    ours = narrow(reg, pos, 0, limit=1).actions[0]
+    theirs = narrow(reg, pos, 1, limit=1).actions[0]
+    port = node.turn(pos, [ours, theirs], Budget.matrix(), full=True)
+    assert port is not None and port.outcomes
+    assert all(not b.events and not b.acts for b in port.outcomes)
+
+
+def test_the_port_attributes_a_mirror_to_both_sides(roster, node) -> None:  # noqa: ANN001
+    """The mirror above, answered by the port: the two uses land on opposite sides."""
+    reg = roster.reg
+    sets = list(roster.sets[:4])
+    pos = position_from_sets(reg, sets, sets)
+    moves = [m.id for m in pos.sides[0].pokemon[pos.sides[0].active[0]].moves]
+    shared = next((m for m in moves if m not in ("protect", "fakeout")), moves[0])
+    actions = [
+        next(
+            a
+            for a in narrow(reg, pos, side, limit=40).actions
+            if a.to_choice().startswith(f"move {moves.index(shared) + 1} ")
+        )
+        for side in (0, 1)
+    ]
+    port = node.turn(pos, actions, Budget.exact(), full=True, events=True)
+    assert port is not None and port.outcomes
+    branch = max(port.outcomes, key=lambda b: b.probability)
+    name = reg.moves[shared].name
+    users = [label.split()[0] for _start, label in branch.acts if label.endswith(f" {name}")]
+    assert len(users) == 2 and users[0][:2] != users[1][:2], branch.acts
+    assert branch.acts[-1][1] == RESIDUAL_PHASE

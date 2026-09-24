@@ -3938,6 +3938,7 @@ fn residual_order(turn: &Turn) -> Result<(Vec<Slot>, bool), String> {
 pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
     crate::resolve::RESIDUALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let _ = reg;
+    #[cfg(not(feature = "ika215-control"))]
     turn.begin(|| "residual".to_string());
     let (order, tied) = residual_order(turn)?;
     if tied {

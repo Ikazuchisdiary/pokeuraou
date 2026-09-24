@@ -533,12 +533,22 @@ def nearest(candidates: list, recorded: dict):  # noqa: ANN001, ANN201
     return best, distance(best)
 
 
+class _PortTurn:
+    """The port's answer read as the `TurnResult` this module reads: `branches` and
+    `suspended`, each with a `probability`, a `position`, `events` and `acts` (IKA-215)."""
+
+    def __init__(self, port: object) -> None:
+        self.branches = list(port.outcomes or [])
+        self.suspended = list(port.pauses or [])
+
+
 def turn_events(
     reg: Regulation,
     loc: Localiser,
     decision: dict,
     rest: list[dict],
     outcome: float | None = None,
+    node: object | None = None,
 ) -> list[tuple[str | None, list[str]]]:
     """What actually happened, by re-resolving the turn that was played.
 
@@ -553,6 +563,9 @@ def turn_events(
     ``rest`` is every decision after this one, not just the next: an interrupted turn eats
     one of them per interrupt, and what the end of the turn has to be matched against is
     whatever is left.
+
+    ``node`` is a `rustnode.RustNode`: the turn and its resumptions are then the port's,
+    trace included (IKA-215), and everything else here reads them as it reads Python's.
     """
     from pokeuraou.narrow import narrow
     from pokeuraou.position import Position
@@ -593,7 +606,13 @@ def turn_events(
             ]
         lookup.append(actions[wanted])
 
-    result = resolve_turn(reg, pos, lookup, budget=Budget.exact())
+    if node is None:
+        result = resolve_turn(reg, pos, lookup, budget=Budget.exact())
+    else:
+        answered = node.turn(pos, lookup, Budget.exact(), full=True, events=True)
+        if answered is None:
+            return [(None, ["⚠ port が このターンを断りました"])]
+        result = _PortTurn(answered)
     prefix: list[str] = []
     resumed = False
     notes: list[str] = []
@@ -621,7 +640,14 @@ def turn_events(
         # Which side owes the replacement decides which half of the next record answers
         # it. Reading `ownChosen` either way silently lost every turn where the *opponent*
         # was the one switching out -- half of them.
-        side, alternatives = resume_alternatives(reg, paused)
+        if node is None:
+            side, alternatives = resume_alternatives(reg, paused)
+        else:
+            resumed_by_port = node.resume_alternatives(paused, events=True)
+            if resumed_by_port is None:
+                return [(None, ["⚠ port が 再開を断りました"])]
+            side = resumed_by_port[0]
+            alternatives = [(action, _PortTurn(r)) for action, r in resumed_by_port[1]]
         key = "foeChosen" if side == 1 else "ownChosen"
         answer = (answered_by or {}).get(key)
         picked = next(
@@ -744,7 +770,9 @@ def hidden_line(loc: Localiser, record: dict, seen: list[set[str]]) -> str:
     return "  ｜  ".join(parts)
 
 
-def render(reg: Regulation, loc: Localiser, record: dict, top: int) -> str:
+def render(
+    reg: Regulation, loc: Localiser, record: dict, top: int, node: object | None = None
+) -> str:
     out = io.StringIO()
     own = "・".join(loc.species(s["species"]) for s in record["ownTeam"])
     foe = "・".join(loc.species(s["species"]) for s in record["foeTeam"])
@@ -937,6 +965,7 @@ def render(reg: Regulation, loc: Localiser, record: dict, top: int) -> str:
             decision,
             decisions[position_in_game + 1 :],
             record.get("outcome"),
+            node,
         )
         if happened:
             out.write("  起きたこと:\n")
@@ -959,6 +988,10 @@ def main() -> None:
     ap.add_argument("--top", type=int, default=5, help="how many actions of the mixture")
     ap.add_argument("--out", type=Path, default=Path("game.txt"))
     ap.add_argument("--locale", default="ja")
+    ap.add_argument(
+        "--engine", choices=("python", "port"), default="python",
+        help="who re-resolves the turns for \"起きたこと\" (port: the Rust node, IKA-215)",
+    )
     args = ap.parse_args()
 
     path = args.file or sorted(args.dir.glob("*.jsonl"))[0]
@@ -972,7 +1005,14 @@ def main() -> None:
 
     reg = load_regulation(record["decisions"][0]["position"]["format"])
     loc = Localiser(reg, load_names(args.locale))
-    text = render(reg, loc, record, args.top)
+    node = None
+    if args.engine == "port":
+        from pokeuraou import rustnode
+        from pokeuraou.damage import register_mega_stones
+
+        register_mega_stones(reg)
+        node = rustnode.RustNode(reg)
+    text = render(reg, loc, record, args.top, node)
     args.out.write_text(text, encoding="utf-8")
     print(f"{path.name} game {args.game} -> {args.out} ({len(text):,} chars)")
 
