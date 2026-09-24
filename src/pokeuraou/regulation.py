@@ -85,7 +85,12 @@ class Move:
     category: str  # 'Physical' | 'Special' | 'Status'
     base_power: int
     accuracy: int | None  # None means "never misses"
+    #: The dex's PP. Not what a slot starts a battle with: that is `start_pp`.
     pp: int
+    #: A move slot's `pp` and `maxpp` at the start of a battle, as Showdown's `Pokemon`
+    #: constructor sets them (`battle.calculatePP` with three PP Ups; the champions mod's
+    #: `(pp / 5 + 1) * 4`, so Protect's 5 starts at 8). From the dump's `startPP` (IKA-244).
+    start_pp: int
     priority: int
     target: str
     crit_ratio: int
@@ -228,6 +233,7 @@ class Regulation:
                 base_power=mv["basePower"],
                 accuracy=None if acc is True else int(acc),
                 pp=mv["pp"],
+                start_pp=mv["startPP"],
                 priority=mv["priority"],
                 target=mv["target"],
                 crit_ratio=mv.get("critRatio", 1),
