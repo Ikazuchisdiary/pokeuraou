@@ -1,0 +1,333 @@
+"""One worker of an M-C match: two arms, both seats drawn from a pool (IKA-259).
+
+`tools/generation_match.py` plays one roster (our six) against a standings field with a
+selection book, which is the M-B board. M-C has no own side: generation draws both seats
+from the pool's 65 teams and solves each pair's selection with the leaf where the game
+starts (`pokeuraou.poolplay`, IKA-81). This is that game with two agents in it.
+
+What an arm is, per arm, and so in whichever seat it sits:
+
+* its leaf (`--inference-arm` / `--baseline-inference-arm` on a server, or `--value` /
+  `--baseline` loaded here; no baseline leaf means hp-share, the M-C origin),
+* its width (`--limit` / `--baseline-limit`) and narrowing (`--rank-leaf` /
+  `--baseline-rank-leaf`),
+* its selection: an arm with a leaf solves the pair's selection game with THAT leaf,
+  draws its four from its side of the solve, and believes the opponent's bench from the
+  same solve. Solves are shared between workers through one directory per arm
+  (`--selection-store` / `--baseline-selection-store`), never mixed: the tag names the
+  leaf and a store solved for another leaf stops the run. An arm without a leaf draws four
+  of six uniformly and holds the uniform belief.
+
+Index `i` is game `i // 2` with the tested arm at side `i % 2`; the pair and its seats
+come from the game's seed, so the two seats of a game are the same teams with the arms
+swapped. Records carry `gameIndex`, `seatIndex` and a provenance whose `seat` names the
+tested arm's side, which is what `pokeuraou.sprt` pairs on.
+
+Run through `tools/match_queue.py --pool`, which starts the inference servers and the
+queue. The worker prints, per arm, what it plays, and at the end what each arm did in
+each seat -- the echo that says a setting reached both seats.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+import time
+from collections.abc import Iterator, Sequence
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from pokeuraou.benchflags import add_bench_flags, require_bench  # noqa: E402
+from pokeuraou.damage import register_mega_stones  # noqa: E402
+from pokeuraou.encode import Encoder  # noqa: E402
+from pokeuraou.payoff import HP_SHARE  # noqa: E402
+from pokeuraou.pool import load_pool  # noqa: E402
+from pokeuraou.poolplay import PoolArm, SolvedSelections, pool_match_game  # noqa: E402
+from pokeuraou.provenance import open_games, provenance, write_game  # noqa: E402
+from pokeuraou.selfplay import MAX_TURNS  # noqa: E402
+from pokeuraou.workqueue import WorkClient  # noqa: E402
+
+#: The width M-C generation plays (IKA-77).
+GENERATION_LIMIT = 12
+
+
+def leaf_name(files: Sequence[str | Path]) -> str:
+    """A model stem, `-sN` dropped, `xN` for an ensemble -- `generation_match`'s names."""
+    stem = re.sub(r"-s\d+$", "", Path(files[0]).stem)
+    return stem if len(files) == 1 else f"{stem}x{len(files)}"
+
+
+def build_leaves(args: argparse.Namespace, encoder: Encoder) -> tuple[object, object | None,
+                                                                      str, str | None]:
+    """(tested leaf, other leaf or None, their names). None is hp-share."""
+    if args.inference is not None:
+        from pokeuraou.inference import RemoteValue
+
+        value = RemoteValue(args.inference, args.inference_arm, encoder)
+        baseline = None
+        if args.baseline_inference_arm:
+            baseline = (
+                value
+                if args.baseline_inference_arm == args.inference_arm
+                else RemoteValue(args.inference, args.baseline_inference_arm, encoder)
+            )
+        # Asked of the server: a worker is told an arm's name, never what it holds.
+        names = [leaf_name(value.describe())]
+        names.append(leaf_name(baseline.describe()) if baseline is not None else None)
+        return value, baseline, names[0], names[1]
+    import torch
+
+    from pokeuraou.value import BatchedValue, load_ensemble
+
+    torch.set_num_threads(args.torch_threads)
+    device = torch.device(args.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    nets, _ = load_ensemble(args.value, encoder)
+    value = BatchedValue([n.to(device) for n in nets], encoder, device=device)
+    baseline = None
+    if args.baseline:
+        if [p.resolve() for p in args.baseline] == [p.resolve() for p in args.value]:
+            baseline = value
+        else:
+            base_nets, _ = load_ensemble(args.baseline, encoder)
+            baseline = BatchedValue([n.to(device) for n in base_nets], encoder, device=device)
+    return (
+        value, baseline, leaf_name(args.value),
+        leaf_name(args.baseline) if args.baseline else None,
+    )
+
+
+def main(argv: list[str] | None = None) -> None:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--pool", required=True, help="data/pool/<id>.json, e.g. regmc-matchupweb")
+    ap.add_argument("--value", type=Path, nargs="+", default=None,
+                    help="the tested arm's leaf, loaded here (one model or an ensemble)")
+    ap.add_argument("--baseline", type=Path, nargs="+", default=None,
+                    help="the other arm's leaf, loaded here. Omitted: hp-share")
+    ap.add_argument("--inference", default=None, metavar="HOST:PORT")
+    ap.add_argument("--inference-arm", default="value")
+    ap.add_argument("--baseline-inference-arm", default=None,
+                    help="the server's name for the other arm; omitted: hp-share")
+    ap.add_argument("--limit", type=int, default=GENERATION_LIMIT)
+    ap.add_argument("--baseline-limit", type=int, default=None, help="default: --limit")
+    ap.add_argument("--rank-leaf", action="store_true",
+                    help="the tested arm narrows by its leaf (what M-C generation does)")
+    ap.add_argument("--baseline-rank-leaf", action="store_true", help="same for the other arm")
+    add_bench_flags(ap)
+    ap.add_argument("--selection-store", type=Path, default=None,
+                    help="the tested arm's shared solves. Default <games-out dir>/"
+                    "selection-<leaf>")
+    ap.add_argument("--baseline-selection-store", type=Path, default=None)
+    ap.add_argument("--explore-epsilon", type=float, default=0.0,
+                    help="selection exploration in the draw and the belief alike. 0: the "
+                    "pure equilibrium, as a rating wants (generation plays 0.25)")
+    ap.add_argument("--explore-temperature", type=float, default=1.0)
+    ap.add_argument("--seed", type=int, default=77)
+    ap.add_argument("--games", type=int, default=100, help="games per seat, without --queue")
+    ap.add_argument("--queue", default=None)
+    ap.add_argument("--max-turns", type=int, default=MAX_TURNS)
+    ap.add_argument("--games-out", type=Path, default=None)
+    ap.add_argument("--out", type=Path, default=None, help="one summary line per seat")
+    ap.add_argument("--device", default=None)
+    ap.add_argument("--torch-threads", type=int, default=1)
+    ap.add_argument("--report-every", type=int, default=25)
+    args = ap.parse_args(argv)
+    hide_bench = require_bench(args)
+    if (args.inference is None) == (args.value is None):
+        ap.error("one of --inference or --value names the tested arm's leaf")
+    if args.inference is not None and args.baseline:
+        ap.error("--baseline is loaded here; with --inference use --baseline-inference-arm")
+
+    pool = load_pool(args.pool)
+    reg = pool.reg
+    register_mega_stones(reg)
+    encoder = Encoder(reg)
+    value, baseline, value_name, baseline_name = build_leaves(args, encoder)
+    home = args.games_out.parent if args.games_out is not None else Path(".")
+
+    def solver_for(leaf: object, name: str, store: Path | None) -> SolvedSelections:
+        # The tag is generation's (`pool sha | value:<leaf>`), so a store generation
+        # solved with the same leaf can be read, and one solved with another cannot.
+        return SolvedSelections(
+            reg, pool.teams, leaf, model=f"value:{name}",
+            store=store or home / f"selection-{name}", tag=f"{pool.sha256}|value:{name}",
+        )
+
+    tested = PoolArm(
+        name=value_name, evaluate=value,
+        solver=solver_for(value, value_name, args.selection_store),
+        limit=args.limit, rank_by_leaf=args.rank_leaf,
+    )
+    other_limit = args.limit if args.baseline_limit is None else args.baseline_limit
+    if baseline is None:
+        other = PoolArm(name=HP_SHARE.name, evaluate=None, solver=None,
+                        limit=other_limit, rank_by_leaf=args.baseline_rank_leaf)
+    else:
+        assert baseline_name is not None
+        # One solver per arm even over one leaf: shared, the second arm would reuse the
+        # first one's memo and the echo could not say that each arm solved its own.
+        other = PoolArm(
+            name=baseline_name, evaluate=baseline,
+            solver=(
+                tested.solver
+                if baseline is value and args.baseline_selection_store is None
+                else solver_for(baseline, baseline_name, args.baseline_selection_store)
+            ),
+            limit=other_limit, rank_by_leaf=args.baseline_rank_leaf,
+        )
+    arms = (tested, other)
+    print(pool.summary(), file=sys.stderr)
+    print(f"pool match / {reg.meta.format_id} / bench {'hidden' if hide_bench else 'OPEN'} / "
+          f"selection eps={args.explore_epsilon}, T={args.explore_temperature}",
+          file=sys.stderr)
+    for label, arm in (("tested arm", tested), ("other arm", other)):
+        store = arm.solver.store if arm.solver is not None else None
+        print(
+            f"  {label}: leaf {arm.name} / width {arm.limit} / "
+            f"{'leaf' if arm.rank_by_leaf else 'damage'} ranking / selection "
+            f"{arm.selection}" + (f" by its own leaf, store {store}" if store else "")
+            + f" / belief {'solved' if arm.solver is not None and hide_bench else 'uniform'}",
+            file=sys.stderr,
+        )
+    ranking = tuple("leaf" if arm.rank_by_leaf else "damage" for arm in arms)
+    tags = ""
+    if tested.limit != other.limit:
+        tags += f"@w{tested.limit}"
+    if ranking[0] != ranking[1]:
+        tags += {"leaf": "@leafrank", "damage": "@damagerank"}[ranking[0]]
+    arm_label = f"{tested.name}{tags}"
+
+    client = WorkClient(args.queue) if args.queue else None
+
+    def work() -> Iterator[int]:
+        if client is None:
+            yield from range(2 * args.games)
+            return
+        while (index := client.take()) is not None:
+            yield index
+
+    games_file = open_games(args.games_out)
+    # Per seat (tested at side 0, side 1): wins, played, unfinished, seconds.
+    tally = [[0, 0, 0, 0.0], [0, 0, 0, 0.0]]
+    # The echo, per seat and per ARM (0 tested, 1 other): what each arm's side was given.
+    echo = [[{"selection": {}, "belief": {}, "leaf": set(), "calls": 0} for _ in arms]
+            for _ in range(2)]
+    done = 0
+    started_all = time.perf_counter()
+    for index in work():
+        which, game_index = index % 2, index // 2
+        calls_before = [getattr(arm.evaluate, "calls", 0) for arm in arms]
+        started = time.perf_counter()
+        record, sides = pool_match_game(
+            reg, pool, arms, seed=args.seed, game_index=game_index, which=which,
+            hide_bench=hide_bench, max_turns=args.max_turns,
+            epsilon=args.explore_epsilon, temperature=args.explore_temperature,
+        )
+        done += 1
+        if done % args.report_every == 0:
+            print(f"    {done} played, {(time.perf_counter() - started_all) / done:.2f} s/game",
+                  flush=True)
+        for arm_index in (0, 1):
+            side = which if arm_index == 0 else 1 - which
+            bucket = echo[which][arm_index]
+            for key, value_ in (("selection", sides["selections"][side]),
+                                ("belief", sides["beliefs"][side])):
+                bucket[key][value_] = bucket[key].get(value_, 0) + 1
+            bucket["leaf"].add(sides["leaves"][side])
+            if arms[0].evaluate is not arms[1].evaluate:
+                bucket["calls"] += getattr(arms[arm_index].evaluate, "calls", 0) - calls_before[
+                    arm_index]
+        if record.outcome is None:
+            tally[which][2] += 1
+            if client is not None:
+                client.finish(index)
+            continue
+        side_leaves = sides["leaves"]
+        write_game(
+            games_file,
+            record,
+            # Side 0's leaf: `searchValue` in the body is side 0's search.
+            objective=side_leaves[0] if side_leaves[0] == HP_SHARE.name
+            else f"value:{side_leaves[0]}",
+            search_limit=sides["limits"],
+            extra={
+                "gameIndex": game_index,
+                "seatIndex": which,
+                "pool": {
+                    "id": pool.id, "sha256": pool.sha256, "pair": sides["pair"],
+                    "teams": [pool.teams[t].id for t in sides["teams"]],
+                    "mirror": sides["mirror"],
+                    "picks": [[int(i) for i in p] for p in sides["picks"]],
+                    "epsilon": args.explore_epsilon,
+                    "temperature": args.explore_temperature,
+                },
+            },
+            source=provenance(
+                "pool-match",
+                seat=f"{arm_label} = side {which}",
+                leaves=side_leaves,
+                limits=sides["limits"],
+                rankings=sides["rankings"],
+                books=sides["selections"],
+                information=("hidden-bench", "hidden-bench") if hide_bench
+                else ("open", "open"),
+                beliefs=sides["beliefs"],
+            ),
+        )
+        tally[which][1] += 1
+        tested_won = record.outcome > 0.5 if which == 0 else record.outcome < 0.5
+        tally[which][0] += int(tested_won)
+        tally[which][3] += time.perf_counter() - started
+        if client is not None:
+            client.finish(index)
+    if client is not None:
+        client.close()
+    games_file.close()
+
+    names = (f"tested {tested.name}", f"other {other.name}")
+    for which in (0, 1):
+        for arm_index in (0, 1):
+            bucket = echo[which][arm_index]
+            if not bucket["leaf"]:
+                continue
+            print(
+                f"  echo, {arm_label} = side {which}: {names[arm_index]} sat at side "
+                f"{which if arm_index == 0 else 1 - which}, leaf {sorted(bucket['leaf'])}, "
+                f"selection {bucket['selection']}, belief {bucket['belief']}"
+                + (f", leaf requests {bucket['calls']:,}" if bucket["calls"] else ""),
+                file=sys.stderr,
+            )
+    for arm, label in zip(arms, names, strict=True):
+        if arm.solver is not None:
+            s = arm.solver
+            print(f"  selection of {label}: {s.solves} solved here, {s.loaded} read from "
+                  f"{s.store}, {s.reused} reused", file=sys.stderr)
+    wins = played = 0
+    for which in (0, 1):
+        seat_wins, seat_played, unfinished, elapsed = tally[which]
+        rate = seat_wins / seat_played if seat_played else float("nan")
+        print(f"  {arm_label} = side {which}: {seat_played} games, won {rate * 100:.1f}% "
+              f"({elapsed / max(seat_played, 1):.2f} s/game, unfinished {unfinished})",
+              flush=True)
+        if args.out is not None:
+            args.out.parent.mkdir(parents=True, exist_ok=True)
+            with args.out.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(json.dumps({
+                    "seat": f"{arm_label} = side {which}", "seed": args.seed,
+                    "model": tested.name, "baseline": other.name, "pool": pool.id,
+                    "limit": tested.limit, "baselineLimit": other.limit,
+                    "played": seat_played, "wins": seat_wins, "unfinished": unfinished,
+                    "seconds": elapsed,
+                }) + "\n")
+        wins += seat_wins
+        played += seat_played
+    if played:
+        print(f"\n  both seats, {played} games: {arm_label} won {wins / played * 100:.1f}%",
+              flush=True)
+
+
+if __name__ == "__main__":
+    main()
