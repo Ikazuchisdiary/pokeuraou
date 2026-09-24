@@ -1153,7 +1153,8 @@ def _note_repeat(request: dict[str, Any]) -> None:
     digest = hashlib.blake2b(
         json.dumps(asked, ensure_ascii=False).encode("utf-8"), digest_size=16
     ).digest()
-    timing.repeat(f"port.{kind}", digest)
+    asker = timing.caller()
+    timing.repeat_where(f"port.{kind}", digest, where=asker)
     # The position alone, whatever was asked of it: what a child that kept the last few
     # positions it parsed would not have to be sent again.
     if "position" in request:
@@ -1161,7 +1162,7 @@ def _note_repeat(request: dict[str, Any]) -> None:
             json.dumps(request["position"], ensure_ascii=False).encode("utf-8"),
             digest_size=16,
         ).digest()
-        timing.repeat("port.position", where)
+        timing.repeat_where("port.position", where, where=asker)
         # And a node's cells one by one: a cell of the leaf ranking's fill that the matrix
         # fills again, on the same position with the same two actions, is the same turn.
         if "ours" in request and "theirs" in request:

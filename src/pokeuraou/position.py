@@ -548,7 +548,12 @@ class Position:
         }
         if timing.DUPES:
             # IKA-258: the same position written out again within one decision.
-            timing.repeat("position.json", json.dumps(out, ensure_ascii=False))
+            text = json.dumps(out, ensure_ascii=False)
+            where = timing.caller()
+            timing.repeat_where("position.json", text, where=where)
+            # IKA-264: the same object written out again unchanged -- what a
+            # per-object memo would catch.
+            timing.repeat_where("position.json.object", (id(self), text), where=where)
         return out
 
     @staticmethod
