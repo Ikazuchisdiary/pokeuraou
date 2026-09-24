@@ -15946,3 +15946,30 @@ diff_generation（--cores 1）          6 回 50・13・50・13・90・92 s（�
 main.rs の自己試験（--cores 1）       3 回 各 1 s 未満（1 回は exe の相対パスで起動できず）
 collect・ruff・port_coverage・port_gate_audit・agent_drift・ci_skip_audit（heavy.py 外、1 コア）  計 約 1 分
 ```
+
+## 9/24 — IKA-204 の調整（続き）: IKA-210 の後半と IKA-212 が入り、Python の resolver は無くなった
+
+調整役のセッション（9/24、worktree `reinforcement-learning-improvements-782a96`）の記録。前の節「IKA-204 の調整」の「残り」2 つを、worker-medium に `isolation: "worktree"` で 1 人ずつ渡した。
+
+| 課題 | 中身 | master |
+|---|---|---|
+| IKA-210 後半 | resolver を import するテスト 0（tools 経由も）。tests/_port.py は pokeuraou.port の上の薄い層、test_rust_node は port の fill を port の turn と比べる | 471b98e |
+| IKA-212 | resolve.py（6,622 行）と道具 24 本を削除、15 本と diff_turn・diverge_report・diff_replacement・show_game を port へ。説明 約 780 行を rust/src のコメントへ。生成は 471b98e と record 一致、壁時計は同じ | d10d144 |
+
+取り込み前の確認（調整役の worktree、`--agent IKA-204`）:
+
+```
+                      IKA-210 後半                       IKA-212
+cargo test --release  6 passed                           6 passed
+テスト一式 (-n 8)     1,541 件 失敗 0・skip 14・xfail 1   1,539 件 失敗 0・skip 11・xfail 1
+                      （63 s）                            （66 s）
+ci_skip_audit         standings=9・vendor=2 ok           同じ（beliefnode の 3 件が消えた）
+port_coverage/gate    ok / ok                            ok / ok
+その他                resolve を塞いで collect 1,541 件   src・tools・tests に resolve の import 0、ruff ok
+```
+
+鎖は Showdown → port の 1 段になった。IKA-204 の段 1〜6 はすべて master にある。
+
+IKA-212 の別課題の候補から起票したもの（すべて IKA-204 の子、Backlog）: IKA-224（3 体以上の同速を注記しない）、IKA-225（自己試験の turns.json が古い。書き出す道具は消えた）、IKA-226（port_gate_audit の 2 つ目の問いと port_coverage.mentioned の走査を Showdown の handler に揃える）、IKA-227（diverge_report が途中交代の先を比べない）。起票しなかったもの: 前から読まれないコード（speed の ORDER_RESIDUAL・SpeedReport、effects の _rain、view の clear_stats_memo、moveinfo の COUNTER_MOVES、regulation の BOOST_INDEX）、rust/src の「Python's `_x`」204 か所（読み方は resolve.rs の先頭）、port が inexact の理由（reductions）を返さないこと、port.py の turn に events の口が無いこと（本番で要るようになったら足す）。
+
+IKA-218（diff_turn の PYTHONHASHSEED 依存）は Python の列で見つかったもの。その列は IKA-212 で消えたので、port の列だけで再現するかを先に確かめる。
