@@ -4,6 +4,7 @@
 //! JSON document for the Python side, so nothing here has to touch Showdown's TypeScript.
 
 use crate::id::{FnvBuild, Id, ID_CAPACITY};
+use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
@@ -286,6 +287,56 @@ pub struct Reg {
     pub move_ids: Vec<String>,
     /// The types any species has, sorted. Index into this, not into `types`.
     pub species_types: Vec<String>,
+    /// Move id -> its own `boosts` keys in the dump's order, which `serde_json::Value`
+    /// sorts away. Showdown's `boost()` walks the object in that order and Python's dict
+    /// keeps it, so the trace's lines come in it (Shell Smash: def, spd, atk, ...). Only
+    /// the moves whose order is not the sorted one (IKA-215).
+    pub boost_order: HashMap<String, Vec<String>>,
+}
+
+/// The key order of every move's own `boosts`, read from the dump text a second time.
+fn boost_order(text: &str) -> Result<HashMap<String, Vec<String>>, String> {
+    struct Keys(Vec<String>);
+    impl<'de> Deserialize<'de> for Keys {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Keys, D::Error> {
+            struct Visit;
+            impl<'de> serde::de::Visitor<'de> for Visit {
+                type Value = Keys;
+                fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                    f.write_str("a boosts object")
+                }
+                fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Keys, A::Error> {
+                    let mut keys = Vec::new();
+                    while let Some((key, _)) = map.next_entry::<String, serde::de::IgnoredAny>()? {
+                        keys.push(key);
+                    }
+                    Ok(Keys(keys))
+                }
+            }
+            deserializer.deserialize_map(Visit)
+        }
+    }
+    #[derive(Deserialize)]
+    struct OrderedMove {
+        id: String,
+        #[serde(default)]
+        boosts: Option<Keys>,
+    }
+    #[derive(Deserialize)]
+    struct Dump {
+        moves: Vec<OrderedMove>,
+    }
+    let dump: Dump = serde_json::from_str(text).map_err(|e| format!("boost order: {e}"))?;
+    Ok(dump
+        .moves
+        .into_iter()
+        .filter_map(|m| {
+            let keys = m.boosts?.0;
+            let mut sorted = keys.clone();
+            sorted.sort();
+            (sorted != keys).then_some((m.id, keys))
+        })
+        .collect())
 }
 
 fn format_id_of(doc: &Value) -> String {
@@ -665,6 +716,7 @@ impl Reg {
             choice_items,
             untraceable,
             effect_immunities,
+            boost_order: boost_order(&text)?,
         })
     }
 

@@ -9,6 +9,8 @@
 //! Python stays the oracle for Rust, and Showdown stays the oracle for Python
 //! (`tools/diff_*.py`), so the chain of verification is not broken by the port.
 
+#[macro_use]
+mod events;
 mod battler;
 #[cfg(feature = "count-allocations")]
 mod counting_alloc;
