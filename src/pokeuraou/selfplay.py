@@ -34,9 +34,11 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from . import timing
+from . import port, timing
 from .actions import SideAction, switch_actions_after_faint
+from .budget import Budget
 from .equilibrium import EquilibriumError, solve
+from .fold import TurnLeaves
 from .hidden import completions, identity, seen_identities, seen_slots, shown_species
 from .narrow import narrow
 from .payoff import HP_SHARE, Objective
@@ -45,19 +47,7 @@ from .position import Field, MoveSlot, Pokemon, Position, Side
 from .priors import Cooccurrence, MetagamePrior, SampledSet
 from .provenance import engine_fingerprint
 from .regulation import STAT_IDS, Regulation, repo_root
-from .resolve import (
-    Budget,
-    SuspendedTurn,
-    TurnLeaves,
-    TurnResult,
-    apply_lead_abilities,
-    paused_in,
-    replacements_needed,
-    resolve_replacements,
-    resolve_turn,
-    resume_alternatives,
-    turn_leaves,
-)
+from .rustnode import PortPause, PortTurn
 from .search import belief_solve, believed_ranking, leaf_ranking, search
 from .selection_book import (
     DEFAULT_EPSILON,
@@ -413,6 +403,89 @@ def position_from_sets(
     applied, Defiant having answered it, and a lead's weather already up. Without that,
     every sun and rain team in the format was searched with no weather.
     """
+    # A lead's Trace between two foes is drawn from `rng` for the game being played, and is
+    # the first foe (noted and dropped) for a caller that only wants a position (IKA-203).
+    return port.apply_lead_abilities(reg, _opening(reg, own, foe), rng=rng).position
+
+
+def positions_from_sets(
+    reg: Regulation, pairs: Sequence[tuple[list[SampledSet], list[SampledSet]]]
+) -> list[Position]:
+    """`position_from_sets` without a generator, for many pairs at once.
+
+    The selection solve builds 8,100 of these a pair, and the leads' switch-ins were a
+    quarter of a millisecond each in Python and are a round trip each through the port
+    (IKA-209: 0.25 against 0.75 ms, nearly all of it the positions' JSON). But 8,100
+    selections are 900 lead quartets, each with nine different backs, and the switch-ins
+    before turn 1 are the leads' and the field's: so the port is asked once a quartet, and
+    the other eight take its answer with their own back two put in.
+
+    That is checked, not assumed: the quartet's answer must have left its own back two and
+    the side's `mega_capable_slots` exactly as they went in, or the quartet's every member
+    is asked for. What it cannot check is a switch-in that *reads* the bench without
+    writing it (Illusion, which neither engine models) -- a regulation that brings one
+    has to stop sharing. `tools/diff_generation.py` with a learned leaf holds the result to
+    the per-position answer through the recorded selection policy.
+
+    Shallow: the members of a quartet share its leads' objects. These positions go to a
+    leaf evaluator, which reads them.
+    """
+    active = reg.meta.active_per_side
+    openings = [_opening(reg, own, foe) for own, foe in pairs]
+    groups: dict[tuple[tuple[int, ...], tuple[int, ...]], list[int]] = {}
+    for index, (own, foe) in enumerate(pairs):
+        key = (tuple(id(s) for s in own[:active]), tuple(id(s) for s in foe[:active]))
+        groups.setdefault(key, []).append(index)
+    firsts = [members[0] for members in groups.values()]
+    answered = port.apply_lead_abilities_many(reg, [openings[i] for i in firsts])
+    out: list[Position | None] = [None] * len(pairs)
+    unshared: list[int] = []
+    for members, phase in zip(groups.values(), answered, strict=True):
+        led = phase.position
+        opening = openings[members[0]]
+        if not _bench_untouched(led, opening, active):
+            out[members[0]] = led
+            unshared.extend(members[1:])
+            continue
+        for index in members:
+            out[index] = led if index == members[0] else _with_back(led, openings[index], active)
+    if unshared:
+        for index, phase in zip(
+            unshared,
+            port.apply_lead_abilities_many(reg, [openings[i] for i in unshared]),
+            strict=True,
+        ):
+            out[index] = phase.position
+    return [pos for pos in out if pos is not None]
+
+
+def _bench_untouched(led: Position, opening: Position, active: int) -> bool:
+    """Whether the leads' switch-ins left everything a member of the quartet differs in."""
+    return all(
+        [mon.to_json() for mon in after.pokemon[active:]]
+        == [mon.to_json() for mon in before.pokemon[active:]]
+        and after.mega_capable_slots == before.mega_capable_slots
+        for after, before in zip(led.sides, opening.sides, strict=True)
+    )
+
+
+def _with_back(led: Position, opening: Position, active: int) -> Position:
+    """`led` with `opening`'s back Pokemon and mega list: its own quartet, another back."""
+    return replace(
+        led,
+        sides=[
+            replace(
+                side,
+                pokemon=[*side.pokemon[:active], *mine.pokemon[active:]],
+                mega_capable_slots=list(mine.mega_capable_slots),
+            )
+            for side, mine in zip(led.sides, opening.sides, strict=True)
+        ],
+    )
+
+
+def _opening(reg: Regulation, own: list[SampledSet], foe: list[SampledSet]) -> Position:
+    """The turn-1 position before the leads' switch-ins."""
     sides: list[Side] = []
     for side_index, sets in enumerate((own, foe)):
         mons = [
@@ -431,10 +504,7 @@ def position_from_sets(
                 ],
             )
         )
-    opening = Position(format=reg.meta.format_id, sides=sides, turn=1, field=Field())
-    # A lead's Trace between two foes is drawn from `rng` for the game being played, and is
-    # the first foe (noted and dropped) for a caller that only wants a position (IKA-203).
-    return apply_lead_abilities(reg, opening, rng=rng).position
+    return Position(format=reg.meta.format_id, sides=sides, turn=1, field=Field())
 
 
 def _with_lead(
@@ -830,7 +900,7 @@ def play_game(
         seen = [seen_identities(pos, i, seen[i]) for i in (0, 1)]
         shown = [seen_slots(pos, i, seen[i]) for i in (0, 1)]
         recorded_shown = _shown_record(pos, None if sheets is None else seen)
-        owed = replacements_needed(pos)
+        owed = port.replacements_needed(reg, pos)
         if any(owed[0]) or any(owed[1]):
             pos = _do_replacement_node(
                 reg, rng, pos, owed, record, leaves,
@@ -1103,49 +1173,28 @@ def _advance_turn(
     *,
     hidden: _HiddenBench | None = None,
 ) -> Position | None:
-    """Resolves the chosen actions and samples one outcome.
+    """Resolves the chosen actions and samples one outcome, all through the port.
 
-    The Rust port fills this when it is enabled and the turn does not suspend -- a
-    suspension carries continuation state that cannot cross a process boundary, and the
-    replacement it asks for is a decision node rather than a chance node. The sampling
-    stays here either way, so the generator draws the same way and a game played through
-    the bridge is the same game.
+    The weights come first and are sampled here, so the generator draws once a turn as it
+    always has; then the drawn branch, or the drawn pause, is asked for. A pause is a
+    decision node (`_do_self_switch_node`) and is carried on with the port's own
+    continuation (IKA-209: it used to be resolved again in Python, whose continuation
+    could not cross the process boundary).
     """
-    from . import rustnode
-
-    if rustnode.available():
-        node = rustnode.node_for(reg)
-        if node is not None:
-            try:
-                weights = node.resolve(pos, chosen, Budget.exact())
-                if weights is not None:
-                    record.unmodelled.extend(weights.unmodelled)
-                    counts = np.array(
-                        weights.branches + weights.suspended, dtype=np.float64
-                    )
-                    if not counts.size or float(counts.sum()) <= 0:
-                        return None
-                    index = _sample_index(rng, counts)
-                    if index < len(weights.branches):
-                        picked = node.resolve(pos, chosen, Budget.exact(), select=index)
-                        if picked is not None and picked.position is not None:
-                            return picked.position
-                    else:
-                        # A replacement was drawn. Its continuation lives in the Rust
-                        # process, so the turn is resolved here -- but the draw has already
-                        # happened, and re-drawing would put this game on a different
-                        # random stream than one played without the bridge.
-                        result = resolve_turn(reg, pos, chosen, budget=Budget.exact())
-                        return _advance(
-                            reg, rng, result, record, leaves, objective,
-                            first_index=index, hidden=hidden,
-                        )
-            except Exception as exc:  # noqa: BLE001 - a broken bridge must not fail a run
-                rustnode.disable(str(exc))
-
-    result = resolve_turn(reg, pos, chosen, budget=Budget.exact())
-    record.unmodelled.extend(result.unmodelled)
-    return _advance(reg, rng, result, record, leaves, objective, hidden=hidden)
+    weights = port.weights(reg, pos, chosen, Budget.exact())
+    record.unmodelled.extend(weights.unmodelled)
+    counts = np.array(weights.branches + weights.suspended, dtype=np.float64)
+    if not counts.size or float(counts.sum()) <= 0:
+        return None
+    index = _sample_index(rng, counts)
+    if index < len(weights.branches):
+        return port.branch(reg, pos, chosen, Budget.exact(), index)
+    paused = port.turn(reg, pos, chosen, Budget.exact(), select=index).pause
+    if paused is None:
+        raise port.PortRefused(f"the port gave no pause at index {index} of the turn")
+    return _advance(
+        reg, rng, None, record, leaves, objective, first_pause=paused, hidden=hidden
+    )
 
 
 @dataclass(frozen=True)
@@ -1166,11 +1215,11 @@ class _HiddenBench:
 def _advance(
     reg: Regulation,
     rng: np.random.Generator,
-    result: TurnResult,
+    result: PortTurn | None,
     record: GameRecord,
     leaves: tuple[LeafEvaluator | None, LeafEvaluator | None],
     objective: Objective,
-    first_index: int | None = None,
+    first_pause: PortPause | None = None,
     hidden: _HiddenBench | None = None,
 ) -> Position | None:
     """Samples one outcome of a resolved turn, answering any mid-turn request on the way.
@@ -1178,26 +1227,24 @@ def _advance(
     Returns ``None`` when the turn produced nothing to continue from, which the caller
     treats as the end of the game.
 
-    ``first_index`` is for a caller that has already drawn the first index -- the Rust
-    bridge hands back the weights and samples there, so that the generator is used exactly
-    once per turn whichever path the turn takes.
+    `result` is a full port turn (`PortTurn.outcomes` and `pauses`). ``first_pause`` is
+    for a caller that has already drawn a pause -- `_advance_turn` samples the weights
+    itself, so the generator is used exactly once per turn whichever way the turn goes --
+    and `result` is then None.
     """
     for attempt in range(5):
-        weights = np.array(
-            [b.probability for b in result.branches]
-            + [p.probability for p in result.suspended],
-            dtype=np.float64,
-        )
-        if not weights.size or float(weights.sum()) <= 0:
-            return None
-        index = (
-            first_index
-            if attempt == 0 and first_index is not None
-            else _sample_index(rng, weights)
-        )
-        if index < len(result.branches):
-            return result.branches[index].position
-        pause = result.suspended[index - len(result.branches)]
+        if attempt == 0 and first_pause is not None:
+            pause = first_pause
+        else:
+            assert result is not None and result.outcomes is not None
+            assert result.pauses is not None
+            weights = np.array(result.branches + result.suspended, dtype=np.float64)
+            if not weights.size or float(weights.sum()) <= 0:
+                return None
+            index = _sample_index(rng, weights)
+            if index < len(result.branches):
+                return result.outcomes[index].position
+            pause = result.pauses[index - len(result.branches)]
         resumed = _do_self_switch_node(
             reg, pause, record, leaves, objective, hidden=hidden
         )
@@ -1210,14 +1257,14 @@ def _advance(
 
 def _do_self_switch_node(
     reg: Regulation,
-    pause: SuspendedTurn,
+    pause: PortPause,
     record: GameRecord,
     leaves: tuple[LeafEvaluator | None, LeafEvaluator | None],
     objective: Objective,
     *,
     hidden: _HiddenBench | None = None,
     definition: bool = False,
-) -> TurnResult | None:
+) -> PortTurn | None:
     """Chooses the replacement a self-switching move demanded, and finishes the turn.
 
     Unlike the post-turn replacement phase this is not simultaneous: one side is asked and
@@ -1249,7 +1296,7 @@ def _do_self_switch_node(
     option; the tests and `scratchpad/ika150_selfswitch_replay.py` hold the two equal.
     """
     with timing.stage("selfswitch.resume"):
-        chooser, alternatives = resume_alternatives(reg, pause)
+        chooser, alternatives = port.resume_alternatives(reg, pause)
     if chooser is None or not alternatives:
         return None
     record.unmodelled.append(
@@ -1282,7 +1329,7 @@ def _do_self_switch_node(
     if spread is None:
         weights = [1.0]
         with timing.stage("selfswitch.leaves"):
-            plans = [[turn_leaves(reg, resumed) for _option, resumed in alternatives]]
+            plans = [[port.turn_leaves(reg, resumed) for _option, resumed in alternatives]]
     else:
         timing.count("selfswitch.completions", len(spread))
         weights = [item.weight for item in spread]
@@ -1343,18 +1390,18 @@ def _do_self_switch_node(
 
 def _self_switch_plans(
     reg: Regulation,
-    pause: SuspendedTurn,
+    pause: PortPause,
     chooser: int,
     options: list[str],
-    alternatives: list[tuple[SideAction, TurnResult]],
+    alternatives: list[tuple[SideAction, PortTurn]],
     spread: Sequence[Any],
     *,
     definition: bool = False,
 ) -> list[list[TurnLeaves]]:
     """Every completion's plan per option: `[completion][option]`, in `spread`'s order.
 
-    By definition each completion's pause is rebuilt (`paused_in`), every option resumed in
-    it and flattened (`turn_leaves`). That is still done for an option the shared path
+    By definition each completion's pause is rebuilt (the port's `paused_in`), every option
+    resumed in it and flattened (`port.turn_leaves`). That is still done for an option the shared path
     cannot vouch for; the others are the true pause's plan with the bench swapped in.
     """
     other = 1 - chooser
@@ -1367,12 +1414,13 @@ def _self_switch_plans(
     timing.count("selfswitch.shared", sum(plan is not None for plan in shared))
     per_world: list[list[TurnLeaves]] = []
     for item in spread:
-        found: list[tuple[SideAction, TurnResult]] | None = None
+        found: list[tuple[SideAction, PortTurn]] | None = None
         if any(plan is None for plan in shared):
-            with timing.stage("selfswitch.complete"):
-                rebuilt = paused_in(pause, item.position, other)
+            # The pause rebuilt in this completion, over there (`paused_in`).
             with timing.stage("selfswitch.resume"):
-                seen_as, found = resume_alternatives(reg, rebuilt)
+                seen_as, found = port.resume_alternatives(
+                    reg, pause, world=(item.position, other)
+                )
             timing.count("selfswitch.resumed", len(found))
             found_options = [option.to_choice() for option, _resumed in found]
             if seen_as != chooser or found_options != options:
@@ -1390,16 +1438,16 @@ def _self_switch_plans(
                     world.append(_with_bench(plan, other, item))
                 else:
                     assert found is not None
-                    world.append(turn_leaves(reg, found[k][1]))
+                    world.append(port.turn_leaves(reg, found[k][1]))
         per_world.append(world)
     return per_world
 
 
 def _shared_self_switch_plans(
     reg: Regulation,
-    pause: SuspendedTurn,
+    pause: PortPause,
     other: int,
-    alternatives: list[tuple[SideAction, TurnResult]],
+    alternatives: list[tuple[SideAction, PortTurn]],
     slots: tuple[int, ...],
 ) -> list[TurnLeaves | None]:
     """Each option's true plan where it holds in every completion, else None.
@@ -1424,14 +1472,14 @@ def _shared_self_switch_plans(
     """
     before = pause.position.sides[other].pokemon
     held = {index: mon for index, mon in enumerate(before) if mon.slot in slots}
-    if any(queued.side == other and queued.kind == "switch" for queued in pause._remaining):
+    if port.remaining_switches(pause, other):
         return [None] * len(alternatives)
     out: list[TurnLeaves | None] = []
     for _option, resumed in alternatives:
         if resumed.suspended:
             out.append(None)
             continue
-        plan = turn_leaves(reg, resumed)
+        plan = port.turn_leaves(reg, resumed)
         untouched = all(
             leaf.sides[other].pokemon[index] == mon
             and leaf.sides[other].pokemon[index].active_index is None
@@ -1530,7 +1578,7 @@ def _do_replacement_node(
         would leave a third of a game's decisions scored by the thing being replaced.
         """
         resolved = [
-            [resolve_replacements(reg, at, [a, b]).position for b in options[1]]
+            [port.resolve_replacements(reg, at, [a, b]).position for b in options[1]]
             for a in options[0]
         ]
         if evaluate is None:
@@ -1635,7 +1683,7 @@ def _do_replacement_node(
         )
     )
     timing.decided("replacement")
-    outcome = resolve_replacements(reg, pos, chosen, rng=rng)
+    outcome = port.resolve_replacements(reg, pos, chosen, rng=rng)
     record.unmodelled.extend(outcome.unmodelled)
     return outcome.position
 
@@ -1986,5 +2034,6 @@ __all__ = [
     "generate",
     "play_game",
     "position_from_sets",
+    "positions_from_sets",
     "selfplay_dir",
 ]

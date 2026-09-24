@@ -44,7 +44,7 @@ from .position import Position
 from .priors import SampledSet
 from .regulation import Regulation
 from .selection_book import BookEntry
-from .selfplay import position_from_sets
+from .selfplay import position_from_sets, positions_from_sets
 from .teams import all_selections
 
 
@@ -143,15 +143,16 @@ def solve_selection(
     matrices: list[np.ndarray] = []
     evaluated = 0
     for spread_class in classes:
-        positions = [
-            position_from_sets(
-                reg,
-                [our_six[i] for i in ours],
-                [spread_class.sets[j] for j in theirs],
-            )
-            for ours in selections
-            for theirs in selections
-        ]
+        # In one pipelined exchange with the port (IKA-209): the leads' switch-ins were a
+        # quarter of a millisecond each in Python and are a round trip each over there.
+        positions = positions_from_sets(
+            reg,
+            [
+                ([our_six[i] for i in ours], [spread_class.sets[j] for j in theirs])
+                for ours in selections
+                for theirs in selections
+            ],
+        )
         values = evaluate(positions)
         evaluated += len(positions)
         matrices.append(values.reshape(len(selections), len(selections)))
