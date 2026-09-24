@@ -61,6 +61,7 @@ PORT_ENGINE_FILES = [
     "speed.rs",
     "terrain.rs",
     "moveinfo.rs",
+    "damage_callback.rs",
 ]
 
 #: What is left of Python's engine -- the damage calculator, speed, the menus -- read by
@@ -207,7 +208,9 @@ MODELLED_HEADER = (
     "//! Every other ability and item on a hit is one Showdown acts on and this port ignores,\n"
     "//! and `damage::unmodelled_effects` names it so the caller is told. Generated from the\n"
     "//! regulation dump's `customHooks` and the port's engine source by\n"
-    "//! `tools/port_coverage.py --rust-modelled` (IKA-210; it was Python's calculator sets).\n\n"
+    "//! `tools/port_coverage.py --rust-modelled` (IKA-210; it was Python's calculator sets).\n"
+    "//! The last predicate is the other way round: the damaging moves that do need a note\n"
+    "//! (IKA-213).\n\n"
 )
 
 
@@ -282,7 +285,9 @@ def modelled(regulation: str, engine: str | None = None) -> Generated:
     A status move is fully modelled when its whole effect is its declarative fields (no
     custom code in the dex) or the port names it; any other status move with custom code
     is reported (`moves::apply_status_move`). A gate's arm under "Python reports these and
-    changes nothing" is not the port acting on the id; every other name is.
+    changes nothing" is not the port acting on the id; every other name is. A damaging move
+    with custom code the engine never names is listed in `damaging_move_is_unmodelled` and
+    reported (`moves::use_move`, IKA-213).
     """
     data = regulation_dump(regulation)
     text = port_text() if engine is None else engine
@@ -300,6 +305,14 @@ def modelled(regulation: str, engine: str | None = None) -> Generated:
         e["id"]
         for e in data["moves"]
         if e.get("category") == "Status" and (not e.get("hasCustomCode") or mentioned(text, e["id"]))
+    )
+    # The damaging moves' side of the same question (IKA-213), as the short list: a hook such
+    # as `damageCallback` is not a field, so nothing refused Counter, and it was answered as a
+    # base-power-0 hit. A move with custom code the engine never names is reported.
+    damaging_moves = sorted(
+        e["id"]
+        for e in data["moves"]
+        if e.get("category") != "Status" and e.get("hasCustomCode") and not mentioned(text, e["id"])
     )
     body = (
         MODELLED_HEADER
@@ -320,6 +333,13 @@ def modelled(regulation: str, engine: str | None = None) -> Generated:
             status_moves,
             "/// The status moves whose whole effect is the declarative fields, or whose custom\n"
             "/// code the port's engine implements, so they are not reported.",
+        )
+        + "\n"
+        + rust_predicate(
+            "damaging_move_is_unmodelled",
+            damaging_moves,
+            "/// The damaging moves with custom code (a hook such as `damageCallback`) that the\n"
+            "/// port's engine never names, so a turn that uses one reports it (IKA-213).",
         )
     )
     return Generated(
