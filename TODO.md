@@ -15511,3 +15511,78 @@ score.rs の `unmodelled volatiles` と `stats_override`（transformed と同じ
   テストファイル（--cores 1、-n 0）              5 回 約 8.5 分
   probe・プロファイル（--cores 1）               約 15 回 約 10 分
 ```
+
+## 9/24 — IKA-209（続き）: 自交代の葉を encode して越えさせた（`alternativesEncoded`）—— 価値関数の生成 20 局は寄せる前（master 7637b99）128.4 / 128.3 s → 25.0 / 25.2 s（5.1 倍速い）、hp-share 200 局は 45.1 / 46.9 s → 45.9 / 47.3 s（同じ）。局は JSON の道とバイト一致
+
+調整役の指示（取り込みの条件: 生成を遅くしない）で、前の節 §8 の候補 1 をこの枝で入れた。master 7637b99（IKA-215）を取り込み済み。
+
+### 1. 何をしたか
+
+* **rust/src/commands.rs（末尾に新しい関数だけ）**: `alternatives_of`（`alternatives_command` と同じ選択肢と再開、JSON なし）、`flatten`（Python の `port.turn_leaves` と同じ順で葉を並べる。**共有しない**: 呼ぶ側がほかの plan と 1 回で採点するので、行も行数も位置の道と同じでなければならない）、`alternatives_encoded`（命令 `alternativesEncoded`）、`shift_fold`。
+  * 要求: `pause`、`in`（完成形）、`want`（平らにする option）、`shared: {side, slots}`（`_shared_self_switch_plans` と同じ判定を option ごとに返す。Rust の `Pokemon` の `==` と `active_index`、残りの列に `side` の交代があれば全部 false）、`objectives`（葉ごとの値）、`encode: false`（配列を作らない）、`encoding`（IKA-141 の規則）
+  * 答え: header（`chooser`・`options`・`plans`［`start`・`count`・`fold`（plan の中の番号）・`unmodelled`・`suspended`・`untouched`］・`valueRows`）と、encode した node と同じ本体（shm か pipe、`place_body` をそのまま使う）
+  * `--features ika209-control`: どの fold も最初の part の重みを半分にする（葉は正しく、値だけが誤る）
+* **rust/src/node.rs**: `answer` に `alternativesEncoded` の分岐を 1 つ（26 行）。**rust/Cargo.toml**: feature 1 つ
+* **rustnode**: `RustNode.alternatives_encoded(...)` → `EncodedAlternatives`（`plans` は `EncodedPlan`、`values` は目的ごとの葉の値）。`require_node` は切り替えを cache より先に見る
+* **port**: `alternatives_encoded`・`resume`（選んだ 1 つだけを再開、full）・`fold_from_json`（重みを `np.float64` に。前の節 §2 の `sum()` の件）
+* **selfplay**: `_do_self_switch_node` はまず `_self_switch_encoded` を通る。
+  * 学習済みの葉（`from_encoded` を持つ）: 本当の pause で全 option を encode して受け取り、控え隠蔽では共有できる option の行を完成形ごとに `beliefnode._patched` で差し替え（位置の道の `_with_bench` と同じ）、共有できない option は完成形ごとに `in` で。完成形 × option の順に積んで（`beliefnode._stacked`）葉を 1 回呼ぶ。選んだ option だけ `port.resume` で続ける
+  * 葉が無く目的が hp-share・faints: 葉の値だけを受け取る（`encode: false`）。共有はしない（共有した葉の値には差し替えた局面が要る）。完成形ごとに port で解く＝定義の道で、共有の道とは位置が JSON 単位で同じ（tests/test_hidden_selfswitch.py）
+  * どちらでもない評価（手書きの callable）: 前の節の位置の道のまま
+* **tests/test_port_only.py（新）**: `POKEURAOU_RUST_NODE=0` で `position_from_sets`・`port.batched_payoff`・`port.replacements_needed` が `PortUnavailable`。対照: 同じ呼び出しが on で答える
+* **tools/diff_depth2.py**: `--control`（= `--after-sub-branches 1`）
+
+### 2. 一致（diff_generation、M-C プール、heavy.py --cores 1）
+
+```
+                                                 相手                         同一
+  価値関数 20 局 seed 11 一様選出（自交代 5・4 局）  前の節の JSON の道（c9881e4）   20/20（2 回）
+  hp-share 200 局 seed 7（自交代 45・36 局）          同上                         200/200
+  正の対照: ika209-control の exe、価値関数 20 局     同上                         18/20（自交代の searchValue が game 9・18 で違う。残る 2 局は part が 1 つの fold で、Average が正規化するので半分にしても動かない）
+  価値関数 20 局 seed 11                               寄せる前 + 交代の 1 行（before-fixed）  20/20
+  価値関数 10 局 seed 7（選出を解く）                   同上                         10/10
+  hp-share 200 局 seed 7                                同上                         197/200（game 79 の 1 ulp と、41・182 の注記 1 行。前の節 §2 (b) と同じ 3 局）
+  （寄せる前そのもの（master 7637b99）とは、前の節 §2 (a) の交代の番号のずれで価値関数 0/20・0/10、hp-share 195/200）
+```
+
+### 3. 速さ（同じ窓、寄せる前 → 寄せた後の順に 1 本の diff_generation の中で、2 回ずつ）
+
+```
+                                       寄せる前（master 7637b99）   寄せた後
+  価値関数 20 局 seed 11 一様選出         128.4 / 128.3 s             25.0 / 25.2 s
+  hp-share 200 局 seed 7                   45.1 / 46.9 s             45.9 / 47.3 s
+  価値関数 10 局 seed 7 選出を解く          35.9 / 36.0 s             29.9 / 30.0 s
+  （JSON の道: 価値関数 20 局 185.3・190.6・169.4 s、hp-share 200 局 46.0 s に対し encode の道 44.1 s）
+```
+
+価値関数の生成は、Python の resolver が自交代を解いていた寄せる前よりも 5 倍速い（寄せる前は自交代の全葉を Python で作っていた）。hp-share は差が 1〜2%（交互 2 回の差の範囲。JSON の道では同じ標本で 6% 遅かった: 44.0 / 43.6 s → 47.0 / 46.1 s）。
+
+### 4. 深さ 2・呼び出しの数・テスト（取り込み後の枝）
+
+* diff_depth2（400 局面、`--jobs 8`）: master 7637b99 と 352/400 がビット一致。違う 48 のうち 34 は注記だけ（IKA-210 の inert の表で port が `noguard`・`speedboost`・`infiltrator`・`cursedbody` の damage 層の注記を出さなくなった。Python は出す）、14 は前の節 §3 と同じ（13 は正規化の和、1 は局面 302 のいのちがけ）。null 対照（`--jobs 1` と `--jobs 8`）はバイト一致。**正の対照 `--control`: 87/400 しか一致しない**（深さ 2 が枝を 1 本しか残さない）
+* count_resolver_calls: 対照 17,065 回、生成（M-C 価値関数・hp-share、M-B 隠蔽・深さ 2）と cli はすべて 0 回
+* テスト（-n 0）: test_port_only・test_hidden_selfswitch・test_hidden・test_selfplay・test_poolplay・test_port_commands・test_mega_hp_base・test_rust_node・test_beliefnode・test_search・test_line_endings が通る（skip 3 は元から）
+* `POKEURAOU_RUST_NODE=0` を立てるテストを grep した: test_rust_node.py の 13 か所だけ。どれも resolve.py の `batched_payoffs`（道具の道、まだ Python に落ちる）を呼ぶためで、`bridged` fixture が後で環境を戻す。本番の関数を 0 で呼ぶテストは無かった。止まることは test_port_only で固定した
+
+### 5. port.py の公開名（前の節 §6 に足したもの）
+
+```
+alternatives_encoded(reg, pause, *, world=None, want=None, shared=None, rules=None,
+                     objectives=(), encode=True) -> rustnode.EncodedAlternatives
+resume(reg, pause, choices) -> PortTurn            # full。resume_turn
+fold_from_json(node) -> fold.Fold                  # 重みは np.float64
+```
+
+### 6. 別課題の候補
+
+* `resolve.batched_payoffs`（道具の道）は `POKEURAOU_RUST_NODE=0` でまだ Python に落ちる。test_rust_node の 13 か所と diff_node 等がそれを使う（IKA-212 で道具ごと消える）
+* diff_depth2 の注記の差（34 局面）は、Python の damage 層の注記と port の inert の表の差。Python が消えれば無くなる
+
+### 7. 機械（heavy.py、IKA-209、この節の分）
+
+```
+  cargo build --release（--cores 8）: 本体 2 回・ika209-control 1 回、各 22〜27 s
+  diff_generation（--cores 1）: 約 18 回、計 約 40 分（寄せる前の価値関数 20 局が 1 本 125〜133 s）
+  diff_depth2（--cores 8 --jobs 8）: 2 回 57 s（null の --jobs 1 を含む）
+  count_resolver_calls・テスト（--cores 1）: 約 2 分
+```
