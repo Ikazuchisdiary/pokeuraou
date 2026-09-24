@@ -445,11 +445,14 @@ def positions_from_sets(
     has to stop sharing. `tools/diff_generation.py` with a learned leaf holds the result to
     the per-position answer through the recorded selection policy.
 
-    Shallow: the members of a quartet share its leads' objects. These positions go to a
-    leaf evaluator, which reads them.
+    Shallow: the members of a quartet share its leads' objects, and every opening shares
+    its Pokemon with the other openings that put the same set in the same slot (IKA-267:
+    8,100 positions of 12 sets were 97,200 stat lines of 48 different Pokemon). These
+    positions go to a leaf evaluator, which reads them.
     """
     active = reg.meta.active_per_side
-    openings = [_opening(reg, own, foe) for own, foe in pairs]
+    made: dict[tuple[int, int, int], Pokemon] = {}
+    openings = [_opening(reg, own, foe, made) for own, foe in pairs]
     groups: dict[tuple[tuple[int, ...], tuple[int, ...]], list[int]] = {}
     for index, (own, foe) in enumerate(pairs):
         key = (tuple(id(s) for s in own[:active]), tuple(id(s) for s in foe[:active]))
@@ -502,14 +505,20 @@ def _with_back(led: Position, opening: Position, active: int) -> Position:
     )
 
 
-def _opening(reg: Regulation, own: list[SampledSet], foe: list[SampledSet]) -> Position:
-    """The turn-1 position before the leads' switch-ins."""
+def _opening(
+    reg: Regulation,
+    own: list[SampledSet],
+    foe: list[SampledSet],
+    made: dict[tuple[int, int, int], Pokemon] | None = None,
+) -> Position:
+    """The turn-1 position before the leads' switch-ins.
+
+    ``made`` shares the Pokemon between openings: a caller that passes one gets the same
+    object for the same set in the same slot of the same side, and must not change it.
+    """
     sides: list[Side] = []
     for side_index, sets in enumerate((own, foe)):
-        mons = [
-            _make_pokemon(reg, i, entry, i if i < reg.meta.active_per_side else None)
-            for i, entry in enumerate(sets)
-        ]
+        mons = [_made_pokemon(reg, made, side_index, i, entry) for i, entry in enumerate(sets)]
         sides.append(
             Side(
                 id=f"p{side_index + 1}",
@@ -523,6 +532,28 @@ def _opening(reg: Regulation, own: list[SampledSet], foe: list[SampledSet]) -> P
             )
         )
     return Position(format=reg.meta.format_id, sides=sides, turn=1, field=Field())
+
+
+def _made_pokemon(
+    reg: Regulation,
+    made: dict[tuple[int, int, int], Pokemon] | None,
+    side_index: int,
+    index: int,
+    entry: SampledSet,
+) -> Pokemon:
+    """`_make_pokemon`, once per (side, slot, set) when `made` is given (IKA-267).
+
+    Keyed by the set's identity: the caller holds every set for as long as `made` lives,
+    so an id is not reused under it.
+    """
+    active = index if index < reg.meta.active_per_side else None
+    if made is None:
+        return _make_pokemon(reg, index, entry, active)
+    key = (side_index, index, id(entry))
+    found = made.get(key)
+    if found is None:
+        found = made[key] = _make_pokemon(reg, index, entry, active)
+    return found
 
 
 def _with_lead(
