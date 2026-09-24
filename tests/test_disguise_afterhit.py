@@ -159,14 +159,22 @@ def test_an_absorbed_hit_keeps_everything_but_its_damage(
 
 
 # ---------------------------------------------------------------------------
-# The port against Showdown, not against Python (IKA-207). The port refuses Disguise
-# ("forme change and 1/8 not ported"), so every case is an expected failure until it
-# does; `strict` makes the first one that passes say so. U-turn also stops at the
-# replacement, whose position the port does not return (the continuation is IKA-211).
+# The port against Showdown, not against Python (IKA-207). The port refused Disguise
+# ("forme change and 1/8 not ported") until IKA-208, and these were expected failures.
+# U-turn still stops at the replacement, whose position the port does not return (the
+# continuation is IKA-211).
 
 
-@pytest.mark.xfail(strict=True, reason="the port refuses Disguise (IKA-208)")
-@pytest.mark.parametrize("name", sorted(CASES))
+def _port_case(name: str):  # noqa: ANN202
+    if name != "u-turn":
+        return name
+    return pytest.param(
+        name,
+        marks=pytest.mark.xfail(strict=True, reason="the port stops at the U-turn replacement (IKA-211)"),
+    )
+
+
+@pytest.mark.parametrize("name", [_port_case(n) for n in sorted(CASES)])
 def test_the_port_keeps_everything_but_the_absorbed_damage(reg, oracle: Oracle, port, name: str) -> None:  # noqa: ANN001
     from ._port_showdown import port_turn
 

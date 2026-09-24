@@ -324,8 +324,10 @@ def test_the_port_switches_the_holder_as_python_does(
     assert node is not None
     there = node.resolve(before, actions, BUDGET)
     if what == "drag":
-        # Dragon Tail's shape: a replacement drawn at random, which the port refuses.
-        assert there is None
+        # Dragon Tail's shape: a replacement drawn at random. Python marks the holder
+        # `pendingforceswitch` and stops there; the port drags (IKA-208), which is held to
+        # Showdown below, so the two are not compared.
+        assert there is not None, "the port refused the turn"
         return
     assert there is not None, "the port refused the turn"
     here = resolve_turn(reg, before, actions, budget=BUDGET)
@@ -408,20 +410,10 @@ def test_a_red_card_reaches_the_attackers_hidden_bench(reg, oracle: Oracle) -> N
 # The port against Showdown, not against Python (IKA-207). A mid-turn eject is a
 # suspended outcome whose position stays in the port's process, so for those cases only
 # the fact of stopping is compared; the resumed turn waits for the command (IKA-211).
+# Red Card's drag was refused until IKA-208 (an expected failure here).
 
 
-def _drag_refused(name: str):  # noqa: ANN202
-    if CASES[name][4] != "drag":
-        return name
-    return pytest.param(
-        name,
-        marks=pytest.mark.xfail(
-            strict=True, reason="Red Card drags in a random replacement, which the port refuses"
-        ),
-    )
-
-
-@pytest.mark.parametrize("name", [_drag_refused(n) for n in sorted(CASES)])
+@pytest.mark.parametrize("name", sorted(CASES))
 def test_the_port_switches_the_holder_as_showdown_does(reg, oracle: Oracle, port, name: str) -> None:  # noqa: ANN001
     from ._port_showdown import port_branches, port_weights
 
@@ -432,6 +424,14 @@ def test_the_port_switches_the_holder_as_showdown_does(reg, oracle: Oracle, port
     reply = port_weights(port, before, actions, BUDGET)
     if what == "eject":
         assert reply["suspended"] and not reply["branches"], reply
+        return
+    if what == "drag":
+        # Red Card's drag (IKA-208): under this budget the first on the bench, which is
+        # what the oracle's pinned `sample` draws; the card is gone either way.
+        ((_weight, pos),) = port_branches(port, before, actions, BUDGET)
+        lead = lambda p: p.sides[0].pokemon[p.sides[0].active[0]].species  # noqa: E731
+        assert lead(pos) == lead(after) != lead(before), (lead(before), lead(pos), lead(after))
+        assert _lead_item(pos, 1) == _lead_item(after, 1) is None
         return
     for _weight, pos in port_branches(port, before, actions, BUDGET):
         ours = _what_python_does(pos, False)

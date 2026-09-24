@@ -125,7 +125,6 @@ CASES: dict[str, Case] = {
               "Choice Scarf"), *FILL],
         [["move 1 2, move 2", "move 1 1, move 2"], ["move 3, move 2", "move 2 1, move 2"]],
         [None, "rockslide"],
-        ported=False,
     ),
     # The control: Encore on the locked move changes nothing.
     "encored while locked": Case(

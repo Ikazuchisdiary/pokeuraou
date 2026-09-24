@@ -146,10 +146,9 @@ def test_disguise_takes_only_a_hit_that_lands(reg, oracle: Oracle, name: str) ->
 # ---------------------------------------------------------------------------
 # The port against Showdown, not against Python (IKA-207). Without events to pick the
 # branch Showdown's accuracy pin played, the port is held to having Showdown's state among
-# its branches. It refuses Disguise, so every case is an expected failure until it does.
+# its branches. It refused Disguise until IKA-208, and these were expected failures.
 
 
-@pytest.mark.xfail(strict=True, reason="the port refuses Disguise (IKA-208)")
 @pytest.mark.parametrize("name", sorted(CASES))
 def test_the_ports_disguise_takes_only_a_hit_that_lands(reg, oracle: Oracle, port, name: str) -> None:  # noqa: ANN001
     from ._port_showdown import port_branches

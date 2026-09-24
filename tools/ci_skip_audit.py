@@ -174,6 +174,9 @@ CLASSES: tuple[Class, ...] = (
             r"|no usable archetype"
             r"|no game finished in this small sample"
             r"|only \d+ (phases|turns) compared"
+            # test_beliefnode's refused-cell tests: no move is left for the port to refuse
+            # (IKA-208), and the Python fallback they hold goes in IKA-209.
+            r"|the port refuses no move"
         ),
         "the fixture or the sampled data holds no instance of the case",
         environment=False,

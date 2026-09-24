@@ -859,13 +859,15 @@ def test_feint_breaks_the_guard_the_same_way_over_there(
 
 @pytest.mark.parametrize("ability", ["disguise", "iceface"])
 def test_disguise_and_ice_face_are_refused_by_name(bridged: None, ability: str) -> None:
-    """The port zeroes the hit and nothing else, so a holder is refused, and says why.
+    """Ice Face is refused by name, and says why; Disguise is answered.
 
-    Python also busts the forme and takes Mimikyu's 1/8. An answer from the port would be
-    a wrong one, which is worse than a refused cell -- Python fills those. The reason is
-    held exactly: the gate's own refusal reads `ability: disguise`, so a test that only
-    counted refusals would pass with the named check deleted, and would keep passing the
-    day someone lists the ability in `ability_handled` (IKA-71).
+    Until IKA-208 both were refused: the port zeroed the hit and nothing else, where
+    Python also busts the forme and takes Mimikyu's 1/8. The port busts it now
+    (`moves::bust_disguise`, held to Showdown by test_disguise_order and
+    test_disguise_afterhit). Ice Face stays refused, because its intact forme `eiscue` is
+    in neither regulation. The reason is held exactly: the gate's own refusal would read
+    `ability: iceface`, so a test that only counted refusals would pass with the named
+    check deleted (IKA-71).
     """
     reg, pos, row, col = _node()
     mine = pos.sides[0].active_pokemon()[0]
@@ -878,9 +880,12 @@ def test_disguise_and_ice_face_are_refused_by_name(bridged: None, ability: str) 
     node = rustnode.node_for(reg)
     assert node is not None
     filled = node.fill(pos, row, col, ["hp-share"], Budget.matrix())
+    if ability == "disguise":
+        assert not filled.refused, sorted({why for _i, _j, why in filled.refused})
+        return
     assert len(filled.refused) == len(row) * len(col)
     assert {why for _i, _j, why in filled.refused} == {
-        f"ability: {ability} (forme change and 1/8 not ported)"
+        f"ability: {ability} (its intact forme is not in the regulation)"
     }
 
 

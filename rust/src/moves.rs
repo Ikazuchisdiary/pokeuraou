@@ -383,6 +383,96 @@ pub(crate) fn confuse(turn: &mut Turn, side: usize, slot: usize, source: Option<
     }
 }
 
+/// Disguise's `onUpdate` after the hit it took: `formeChange('Mimikyu-Busted', ..., true)`
+/// and `this.damage(pokemon.baseMaxhp / 8, ...)` (data/abilities.ts; Python's
+/// `_bust_disguise`, IKA-208).
+fn bust_disguise(reg: &Reg, turn: &mut Turn, target: Slot) -> Result<(), String> {
+    let maxhp = match turn.mon_at(target.0, target.1) {
+        Some(mon) if !mon.fainted && mon.species.as_str() == "mimikyu" => mon.maxhp,
+        _ => return Ok(()),
+    };
+    change_forme(reg, turn, target.0, target.1, "mimikyubusted")?;
+    turn.deal_damage(target.0, target.1, (maxhp / 8).max(1), false)?;
+    Ok(())
+}
+
+/// What Dragon Darts does with its target (IKA-208).
+enum SmartHits {
+    /// The ordinary two-hit move at these targets: one foe, or none that it can reach.
+    Ordinary(Vec<Slot>),
+    /// A hit on each of two foes, or -- where one of them fails a hit step -- both hits on
+    /// the other, one plan per accuracy outcome with its weight.
+    Split(Vec<(f64, Vec<(Slot, usize)>)>),
+}
+
+/// `smartTarget` (sim/pokemon.ts `getSmartTargets`, sim/battle-actions.ts): the target and
+/// its adjacent ally, when that ally stands and is not the user; the hit steps run on both,
+/// and any failure among them -- Protect, an immunity, a miss -- turns `smartTarget` off,
+/// leaving the move's two hits to whoever is left. With both still there, hit 1 goes to
+/// the first and hit 2 to the second, each a single-target hit (no spread).
+fn smart_hits(
+    reg: &Reg,
+    turn: &Turn,
+    action: &QueuedAction,
+    mv: &Move,
+    targets: &[Slot],
+    budget: &Budget,
+) -> Result<SmartHits, String> {
+    let ordinary = || Ok(SmartHits::Ordinary(targets.to_vec()));
+    let [first] = targets else { return ordinary() };
+    let first = *first;
+    let second = (first.0, 1 - first.1);
+    let standing = |at: Slot| matches!(turn.mon_at(at.0, at.1), Some(m) if !m.fainted && m.hp > 0);
+    if second == (action.side, action.slot) || !standing(second) || !standing(first) {
+        return ordinary();
+    }
+    let Some(attacker) = turn.battler_at(action.side, action.slot)? else { return ordinary() };
+    // Protect (step 3) and the type immunity (step 2), per target.
+    let mut reached: Vec<(Slot, f64)> = Vec::new();
+    for at in [first, second] {
+        if blocked_by_protect(turn, action, mv, at).is_some() {
+            continue;
+        }
+        let Some(defender) = turn.battler_at(at.0, at.1)? else { continue };
+        let field = turn.field();
+        let probe = calculate(reg, &attacker, &defender, mv.id.as_str(), &field, at.0, false, false, None, None, false);
+        if probe.immune {
+            continue;
+        }
+        let accuracy = accuracy_of(turn, mv, &attacker, &defender);
+        let accuracy = if budget.enumerate_accuracy { accuracy } else if accuracy > 0.0 { 1.0 } else { 0.0 };
+        reached.push((at, accuracy));
+    }
+    match reached.as_slice() {
+        [(a, pa), (b, pb)] => {
+            let (a, b, pa, pb) = (*a, *b, *pa, *pb);
+            let plans = vec![
+                (pa * pb, vec![(a, 1), (b, 1)]),
+                (pa * (1.0 - pb), vec![(a, 2)]),
+                ((1.0 - pa) * pb, vec![(b, 2)]),
+                ((1.0 - pa) * (1.0 - pb), vec![]),
+            ];
+            Ok(SmartHits::Split(plans.into_iter().filter(|(w, _)| *w > 0.0).collect()))
+        }
+        // One left: the ordinary move at it, whose accuracy `hit_target` rolls.
+        [(only, _)] => Ok(SmartHits::Ordinary(vec![*only])),
+        _ => ordinary(),
+    }
+}
+
+/// Damp's `onAnyTryMove`: any active Pokemon with it stops Explosion, Self-Destruct,
+/// Misty Explosion (and Mind Blown) -- `breakable`, so not against a Mold Breaker's own
+/// blast (IKA-208).
+fn damp_stops(turn: &Turn, action: &QueuedAction) -> bool {
+    let source = Some((action.side, action.slot));
+    (0..turn.pos.sides.len()).any(|side| {
+        (0..turn.pos.sides[side].active.len()).any(|slot| {
+            matches!(turn.mon_at(side, slot), Some(mon)
+                if !mon.fainted && mon.ability == "damp" && !ability_broken_by(turn, mon, source))
+        })
+    })
+}
+
 /// `suppressingAbility(mon)` under `source`'s move: Python's `_ability_broken_by`.
 fn ability_broken_by(turn: &Turn, mon: &crate::position::Pokemon, source: Option<Slot>) -> bool {
     let Some((side, slot)) = source else { return false };
@@ -990,6 +1080,10 @@ fn use_move<'a>(
         turn.move_failed[action.side][action.slot] = true;
         return Ok(vec![(1.0, turn)]);
     }
+    if move_id.as_str() == "lastresort" && last_resort_fails(&turn, action) {
+        turn.move_failed[action.side][action.slot] = true;
+        return Ok(vec![(1.0, turn)]);
+    }
 
     if move_id.as_str() == "suckerpunch" {
         let candidates = resolve_targets(reg, &mut turn, action, mv)?;
@@ -1058,6 +1152,22 @@ fn use_move<'a>(
     }
 
     let targets = resolve_targets(reg, &mut turn, action, mv)?;
+    // Explosion, Self-Destruct, Misty Explosion (IKA-208): `useMoveInner` faints the user
+    // right after `TryMove` -- Damp's `onAnyTryMove` -- and before it looks at the targets,
+    // so it goes whatever the blast meets. The hits are then computed from the user as it
+    // was: Showdown's `faint()` only zeroes the HP, and the boosts and volatiles stay until
+    // `faintMessages`.
+    let exploded = if mv.raw.get("selfdestruct").and_then(Value::as_str) == Some("always") {
+        if damp_stops(&turn, action) {
+            turn.move_failed[action.side][action.slot] = true;
+            return Ok(vec![(1.0, turn)]);
+        }
+        let as_used = turn.mon_at(action.side, action.slot).cloned();
+        turn.faint(action.side, action.slot);
+        as_used
+    } else {
+        None
+    };
     let no_target_needed = matches!(
         mv.target.as_str(),
         "self" | "allySide" | "allyTeam" | "all" | "foeSide"
@@ -1109,12 +1219,44 @@ fn use_move<'a>(
     turn.move_damage_total = 0;
     turn.move_connected = false;
     begin_move_watch(&mut turn);
+    let targets = if mv.raw.get("smartTarget").and_then(Value::as_bool) == Some(true) {
+        match smart_hits(reg, &turn, action, mv, &targets, &budget)? {
+            SmartHits::Split(splits) => {
+                let mut branches: Vec<Outcome<'a>> = Vec::new();
+                for (weight, plan) in splits {
+                    let mut here: Vec<Outcome<'a>> = vec![(weight, turn.clone())];
+                    if plan.is_empty() {
+                        here[0].1.move_failed[action.side][action.slot] = true;
+                    }
+                    for (target, hits) in plan {
+                        let mut expanded: Vec<Outcome<'a>> = Vec::new();
+                        for (w, state) in here {
+                            for (inner, next) in
+                                hit_target(reg, state, action, mv, target, false, budget, None, Some(hits))?
+                            {
+                                expanded.push((w * inner, next));
+                            }
+                        }
+                        here = expanded;
+                    }
+                    branches.extend(here);
+                }
+                for (_weight, state) in branches.iter_mut() {
+                    after_move(state, action, mv)?;
+                }
+                return Ok(branches);
+            }
+            SmartHits::Ordinary(targets) => targets,
+        }
+    } else {
+        targets
+    };
     let mut branches: Vec<Outcome<'a>> = vec![(1.0, turn)];
     for target in &targets {
         let mut expanded: Vec<Outcome<'a>> = Vec::new();
         for (weight, state) in branches.into_iter() {
             let started = crate::resolve::phase_start();
-            let hit = hit_target(reg, state, action, mv, *target, spread, budget)?;
+            let hit = hit_target(reg, state, action, mv, *target, spread, budget, exploded.as_ref(), None)?;
             crate::resolve::phase_end(9, started);
             for (inner_weight, inner_state) in hit {
                 expanded.push((weight * inner_weight, inner_state));
@@ -1126,6 +1268,16 @@ fn use_move<'a>(
         after_move(state, action, mv)?;
     }
     Ok(branches)
+}
+
+/// Last Resort's `onTry` (data/moves.ts, IKA-208): `false` with fewer than two moves, or
+/// while any other move slot is not `used` -- which `moveUsed` sets and a switch clears.
+fn last_resort_fails(turn: &Turn, action: &QueuedAction) -> bool {
+    let Some(mon) = turn.mon_at(action.side, action.slot) else { return true };
+    let slots: Vec<_> = mon.moves.iter().collect();
+    slots.len() < 2
+        || !slots.iter().any(|slot| slot.id.as_str() == "lastresort")
+        || slots.iter().any(|slot| slot.id.as_str() != "lastresort" && !slot.used)
 }
 
 fn spend_pp(turn: &mut Turn, action: &QueuedAction) {
@@ -1393,6 +1545,8 @@ fn hit_target<'a>(
     target: Slot,
     spread: bool,
     budget: Budget,
+    exploded: Option<&crate::position::Pokemon>,
+    forced_hits: Option<usize>,
 ) -> Result<Vec<Outcome<'a>>, String> {
     let move_id = action.move_id.unwrap();
     if let Some(blocked) = blocked_by_protect(&turn, action, mv, target) {
@@ -1400,34 +1554,63 @@ fn hit_target<'a>(
         return Ok(vec![(1.0, turn)]);
     }
 
-    let Some(attacker) = turn.battler_at(action.side, action.slot)? else {
-        return Ok(vec![(1.0, turn)]);
+    let attacker = match exploded {
+        Some(mon) => Battler::from_pokemon(reg, mon)?,
+        None => match turn.battler_at(action.side, action.slot)? {
+            Some(attacker) => attacker,
+            None => return Ok(vec![(1.0, turn)]),
+        },
     };
     let Some(defender) = turn.battler_at(target.0, target.1)? else {
         return Ok(vec![(1.0, turn)]);
     };
-    if matches!(defender.ability.as_str(), "disguise" | "iceface") {
+    if defender.ability.as_str() == "iceface" {
         return Err(format!("forme guard: {}", defender.ability));
     }
     // Python's `_hit_target`: a doll in front takes each hit while it stands (IKA-180).
     let subbed = hits_substitute(&turn, action, mv, target);
+    // Disguise (IKA-208), Python's `_forme_guard` / `_bust_disguise` (IKA-155, IKA-157):
+    // `onDamage` returns 0 for the first hit's damage, at the damage step -- after the
+    // immunity, the accuracy and the break -- and 0 is still a hit, so everything the hit
+    // carries happens; `onCriticalHit` is false and `onEffectiveness` 0 for it; the forme
+    // changes at the `Update` after that hit and costs `baseMaxhp / 8`. A doll in front
+    // takes the hit instead (`_substitute_in_front`).
+    let multihit = mv.raw.get("multihit").is_some_and(|v| !v.is_null());
+    // `flags: { breakable: 1 }`: not against a Mold Breaker's move.
+    let mut guarded = mv.category != "Status"
+        && defender.ability.as_str() == "disguise"
+        && defender.species.as_str() == "mimikyu"
+        && !is_mold_breaker(attacker.ability.as_str());
+    if subbed && guarded {
+        if multihit {
+            turn.report(format!("substitute: {} past a broken Substitute into a forme guard", mv.id));
+        }
+        guarded = false;
+    }
 
     let accuracy = accuracy_of(&turn, mv, &attacker, &defender);
     let crit_p = crit_probability(reg, &attacker, &defender, move_id.as_str());
 
-    let accuracy_branches: Vec<(f64, bool)> =
-        if budget.enumerate_accuracy && accuracy > 0.0 && accuracy < 1.0 {
+    let accuracy_branches: Vec<(f64, bool)> = if forced_hits.is_some() {
+        // `smart_hits` has rolled it already.
+        vec![(1.0, true)]
+    } else if budget.enumerate_accuracy && accuracy > 0.0 && accuracy < 1.0 {
             vec![(accuracy, true), (1.0 - accuracy, false)]
         } else {
             vec![(1.0, accuracy > 0.0)]
         };
-    let crit_branches: Vec<(f64, bool)> =
+    let mut crit_branches: Vec<(f64, bool)> =
         if budget.enumerate_crit && crit_p > 0.0 && crit_p < 1.0 {
             vec![(crit_p, true), (1.0 - crit_p, false)]
         } else {
             vec![(1.0, crit_p >= 1.0)]
         };
-    let rolls = stratified_rolls(&budget);
+    let mut rolls = stratified_rolls(&budget);
+    if guarded && !multihit {
+        // The one hit is absorbed: neither a crit nor a roll changes anything.
+        crit_branches = vec![(1.0, false)];
+        rolls = vec![(rolls[0].0, 1.0)];
+    }
     // Python's `_hit_target` returns every outcome from here on with the note "damage
     // rolls stratified" unless the roll is pinned or all sixteen are kept, and `_run_queue`
     // makes the turn inexact for it. Setting it on `turn` puts it on every clone below;
@@ -1439,7 +1622,10 @@ fn hit_target<'a>(
     // building this inside the loop was fifteen wasted allocations per hit on the path that
     // advances a game. Under the matrix budget the roll is fixed and it costs nothing,
     // which is why the allocation count barely moved and the clock did.
-    let hit_counts = multihit_counts(mv, &budget, attacker.ability.as_str());
+    let hit_counts = match forced_hits {
+        Some(hits) => vec![(hits, 1.0)],
+        None => multihit_counts(mv, &budget, attacker.ability.as_str()),
+    };
 
     let ctx_started = crate::resolve::phase_start();
     let move_ctx = MoveContext {
@@ -1484,6 +1670,7 @@ fn hit_target<'a>(
             continue;
         }
         let started = crate::resolve::phase_start();
+        // A guarded first hit never crits; `crit` then speaks for the later hits only.
         let result = calculate(
             reg,
             &attacker,
@@ -1492,7 +1679,7 @@ fn hit_target<'a>(
             &field,
             target.0,
             spread,
-            crit,
+            crit && !guarded,
             Some(&move_ctx),
             None,
             false,
@@ -1571,16 +1758,30 @@ fn hit_target<'a>(
                         }
                         again.rolls[*roll]
                     };
+                    // Final Gambit (IKA-208): `damageCallback(pokemon) { const damage =
+                    // pokemon.hp; pokemon.faint(); return damage; }` runs in `getDamage`,
+                    // after the immunity, on a doll as on the Pokemon, so the user is in
+                    // the faint queue before the target (`selfdestruct: "ifHit"` then
+                    // finds it fainted already).
+                    if hit_index == 0 && mv.id == "finalgambit" {
+                        state.faint(action.side, action.slot);
+                    }
                     if on_doll {
                         hit_substitute(&mut state, action, mv, target, amount, &budget)?;
                         continue;
                     }
-                    let dealt = state.deal_damage(target.0, target.1, amount, true)?;
+                    let absorbed = guarded && hit_index == 0;
+                    let dealt = if absorbed {
+                        0
+                    } else {
+                        state.deal_damage(target.0, target.1, amount, true)?
+                    };
                     reached = true;
                     state.move_hit[target.0][target.1] = true;
                     let after_started = crate::resolve::phase_start();
-                    // A hit into Endure at 1 HP deals 0 and is still a hit (IKA-171).
-                    let landed = amount > 0;
+                    // A hit into Endure at 1 HP deals 0 and is still a hit (IKA-171), and
+                    // so is one Disguise took, which is neutral (no resist berry).
+                    let landed = absorbed || amount > 0;
                     after_hit(
                         &mut state,
                         action,
@@ -1589,9 +1790,12 @@ fn hit_target<'a>(
                         dealt,
                         landed,
                         &budget,
-                        result.type_mod,
+                        if absorbed { 0 } else { result.type_mod },
                     )?;
                     crate::resolve::phase_end(11, after_started);
+                    if absorbed {
+                        bust_disguise(reg, &mut state, target)?;
+                    }
                 }
                 let weight = acc_weight * crit_weight * roll_weight * hit_weight;
                 for (extra, mut expanded) in spread_secondaries(state, action, hits > 1)? {
@@ -1917,8 +2121,9 @@ fn after_hit(
         }
     }
 
+    // Dragon Tail, Circle Throw: `spreadMoveHit`'s step 6, `forceSwitch` (IKA-208).
     if mv.force_switch {
-        return Err("forceSwitch move".into());
+        let _ = raise_force_switch(turn, (action.side, action.slot), target);
     }
 
     on_being_hit(turn, mv, target, action.side)?;
@@ -2015,12 +2220,39 @@ fn spread_secondaries<'a>(
     if state.pending_secondaries.is_empty() {
         return Ok(vec![(1.0, state)]);
     }
-    let pending = std::mem::take(&mut state.pending_secondaries);
-    if pending.len() > MAX_BRANCHED_SECONDARIES {
-        return Err("more secondaries on one hit than this port branches".into());
-    }
+    let mut pending = std::mem::take(&mut state.pending_secondaries);
     if multihit {
-        return Err("secondary on a multi-hit move".into());
+        // Cursed Body is pushed once per hit, and `if (source.volatiles['disable']) return;`
+        // makes every try after the one that lands a no-op: n tries of p are one chance of
+        // 1 - (1 - p)^n, and what it does does not depend on which hit it was (IKA-208).
+        let mut kept: Vec<(f64, Value, Slot)> = Vec::new();
+        for (chance, secondary, target) in pending {
+            let disable = secondary.get("disable").and_then(Value::as_bool) == Some(true);
+            let merged = kept.iter_mut().find(|(_, s, t)| {
+                disable && *t == target && s.get("disable").and_then(Value::as_bool) == Some(true)
+            });
+            match merged {
+                Some(entry) => entry.0 = 1.0 - (1.0 - entry.0) * (1.0 - chance),
+                None => {
+                    if !disable {
+                        // No move in either regulation has one; Python's answer and note.
+                        state.report("secondary on a multi-hit move (applied after the last hit)");
+                    }
+                    kept.push((chance, secondary, target));
+                }
+            }
+        }
+        pending = kept;
+    }
+    if pending.len() > MAX_BRANCHED_SECONDARIES {
+        // Python's `_spread_secondaries`: the tail past the cap did not happen, and says so.
+        // No move in either regulation reaches it (IKA-208).
+        for (chance, _secondary, _target) in pending.drain(MAX_BRANCHED_SECONDARIES..) {
+            state.report(format!(
+                "secondary {}%: beyond the {MAX_BRANCHED_SECONDARIES} branched on one hit (not branched)",
+                (chance * 100.0) as i64
+            ));
+        }
     }
     let mut out: Vec<(f64, Turn<'a>)> = vec![(1.0, state)];
     for (chance, secondary, target) in pending {
@@ -2154,6 +2386,34 @@ fn crossed_half(hp: i64, maxhp: i64, before: i64) -> bool {
     hp > 0 && 2 * hp <= maxhp && 2 * before > maxhp
 }
 
+/// `runEvent('DragOut', target, source)`: Guard Dog and Suction Cups (both `breakable`)
+/// and Ingrain's volatile answer `null` -- the Pokemon stays, and nothing fails (IKA-208).
+fn drag_out_stopped(turn: &Turn, at: Slot, source: Option<Slot>) -> bool {
+    let Some(mon) = turn.mon_at(at.0, at.1) else { return true };
+    if mon.has_volatile("ingrain") {
+        return true;
+    }
+    matches!(mon.ability.as_str(), "guarddog" | "suctioncups") && !ability_broken_by(turn, mon, source)
+}
+
+/// `forceSwitch` in `spreadMoveHit` (sim/battle-actions.ts): `if (target.hp > 0 &&
+/// source.hp > 0 && this.battle.canSwitch(target.side))` and `DragOut` lets it, the target's
+/// `forceSwitchFlag` -- here `pendingforceswitch`, which `resolve::drag_in` answers at the
+/// end of the action. Says whether it was raised (IKA-208).
+fn raise_force_switch(turn: &mut Turn, source: Slot, target: Slot) -> bool {
+    let standing = |turn: &Turn, at: Slot| matches!(turn.mon_at(at.0, at.1), Some(m) if !m.fainted && m.hp > 0);
+    if !standing(turn, target) || !standing(turn, source) || !can_switch(turn, target.0) {
+        return false;
+    }
+    if drag_out_stopped(turn, target, Some(source)) {
+        return false;
+    }
+    if !turn.mon_at(target.0, target.1).is_some_and(|m| m.has_volatile("pendingforceswitch")) {
+        turn.add_volatile(target.0, target.1, "pendingforceswitch", None);
+    }
+    true
+}
+
 fn switch_flagged(mon: &crate::position::Pokemon) -> bool {
     mon.has_volatile("pendingselfswitch") || mon.has_volatile("pendingforceswitch")
 }
@@ -2282,7 +2542,13 @@ fn after_move_secondary_switches(turn: &mut Turn, action: &QueuedAction, mv: &Mo
         if matches!(turn.mon_at(target.0, target.1), Some(mon) if mon.has_volatile("pendingforceswitch")) {
             continue;
         }
-        return Err("redcard (replacement is drawn at random)".into());
+        // `if (target.useItem(source)) { if (this.runEvent('DragOut', source, target, move))
+        // source.forceSwitchFlag = true; }` -- the card goes even when the drag is stopped
+        // (IKA-208). The drag itself is `resolve::drag_in`, at the end of the action.
+        turn.consume_item(target.0, target.1);
+        if !drag_out_stopped(turn, me, None) {
+            turn.add_volatile(me.0, me.1, "pendingforceswitch", None);
+        }
     }
 
     for target in hit {
@@ -2846,6 +3112,11 @@ fn immune_to_move(
     if good_as_gold_blocks(turn, action, mv, target) {
         return Some("goodasgold".into());
     }
+    // Trick and Switcheroo: `onTryImmunity(target) { return !target.hasAbility('stickyhold'); }`
+    // (data/moves.ts, IKA-208).
+    if matches!(mv.id.as_str(), "trick" | "switcheroo") && defender.ability == "stickyhold" {
+        return Some("stickyhold".into());
+    }
     let self_targeted = target == (action.side, action.slot);
     let types = turn.types_of(defender);
 
@@ -3081,6 +3352,12 @@ fn apply_status_move(
     let me = (action.side, action.slot);
     let mut suppress_self_switch = false;
 
+    // Healing Wish's `onTryHit`: `if (!this.canSwitch(source.side)) { ...; return
+    // this.NOT_FAIL; }` -- nothing happens and the user stays (IKA-208).
+    if mv.id == "healingwish" && !can_switch(turn, me.0) {
+        return Ok(());
+    }
+
     if let Some(condition) = mv.side_condition.as_deref() {
         let condition = condition.to_string();
         let duration = effect_duration(turn, mv, &condition, action.side, action.slot);
@@ -3244,6 +3521,26 @@ fn apply_status_move(
     if mv.id == "perishsong" {
         perish_song(turn, me);
     }
+    // `runMoveEffects`: `target.side.addSlotCondition(target, moveData.slotCondition)` --
+    // Healing Wish's, which heals whoever comes into the slot next (IKA-208).
+    if let Some(cid) = mv.raw.get("slotCondition").and_then(Value::as_str) {
+        for target in targets {
+            let conditions = &mut turn.pos.sides[target.0].slot_conditions;
+            if conditions.len() <= target.1 {
+                conditions.resize_with(target.1 + 1, Vec::new);
+            }
+            if !conditions[target.1].iter().any(|c| c.id.as_str() == cid) {
+                conditions[target.1].push(Effect::new(Id::new(cid)));
+            }
+        }
+    }
+    if matches!(mv.id.as_str(), "trick" | "switcheroo") {
+        for target in targets {
+            if !swap_items(reg, turn, me, *target) {
+                turn.move_failed[me.0][me.1] = true;
+            }
+        }
+    }
 
     if mv.raw.get("hasCustomCode").and_then(Value::as_bool).unwrap_or(false)
         && !crate::modelled::status_move_is_fully_modelled(&mv.id)
@@ -3253,8 +3550,25 @@ fn apply_status_move(
     if mv.self_switch && !suppress_self_switch {
         mark_self_switch(turn, action);
     }
+    // Memento, Healing Wish: `if (moveData.selfdestruct === 'ifHit' && damage[i] !== false)
+    // this.faint(source)` -- a status move's `damage[i]` is `undefined` once it reached a
+    // target, so a Memento into -6 or Clear Body still faints its user; Protect, a miss,
+    // an immunity or a doll keep the target out of `targets` (IKA-208).
+    if mv.raw.get("selfdestruct").and_then(Value::as_str) == Some("ifHit") && !targets.is_empty() {
+        turn.faint(me.0, me.1);
+    }
+    // Roar, Whirlwind (IKA-208): `runMoveEffects` answers `forceSwitch` with
+    // `canSwitch(target.side)` -- no one to come in is a failure -- and `forceSwitch` then
+    // raises the flag unless `DragOut` stops it (which, for a status move, is a failure
+    // only on `false`; Guard Dog, Suction Cups and Ingrain all answer `null`).
     if mv.force_switch {
-        return Err("forceSwitch status move".into());
+        for target in targets {
+            if !can_switch(turn, target.0) {
+                turn.move_failed[me.0][me.1] = true;
+                continue;
+            }
+            let _ = raise_force_switch(turn, me, *target);
+        }
     }
     let _ = reg;
     Ok(())
@@ -3269,6 +3583,108 @@ fn apply_status_move(
 /// Soundproof -- everyone already counting -- is `return false`, a failure. IKA-172: the
 /// port had no such path while `modelled.rs` listed the move, so its turn left nobody
 /// counting down and reported nothing.
+/// `takeItem` (sim/pokemon.ts): the `TakeItem` event on the holder, which the item's own
+/// `onTakeItem` answers -- in Reg M-C only the mega stones have one -- and Unburden's
+/// `onTakeItem(item, pokemon) { pokemon.addVolatile('unburden'); }` hears. `None` is
+/// `takeItem`'s `undefined` (nothing held), `Some(None)` its `false`.
+fn take_item(reg: &Reg, turn: &mut Turn, holder: Slot) -> Option<Option<Id>> {
+    let mon = turn.mon_at_mut(holder.0, holder.1)?;
+    let item = mon.item?;
+    if reg.mega_stone_stays(mon.species.as_str(), item.as_str()) {
+        return Some(None);
+    }
+    mon.item = None;
+    if mon.ability == "unburden" && !mon.has_volatile("unburden") {
+        mon.volatiles.push(Effect::new(Id::new("unburden")));
+    }
+    Some(Some(item))
+}
+
+/// Trick and Switcheroo's `onHit` (data/moves.ts, IKA-208):
+///
+///     const yourItem = target.takeItem(source);
+///     const myItem = source.takeItem();
+///     if (yourItem === false || myItem === false || (!yourItem && !myItem)) { ...restore; return false; }
+///     if ((myItem && !this.singleEvent('TakeItem', myItem, ..., target, source, move, myItem)) ||
+///         (yourItem && !this.singleEvent('TakeItem', yourItem, ..., source, target, move, yourItem))) {
+///         ...restore; return false;
+///     }
+///     if (myItem) target.setItem(myItem); ...  if (yourItem) source.setItem(yourItem); ...
+///
+/// The second test asks each item's `onTakeItem` about its *receiver*, so a mega stone cannot
+/// be handed to its own species either. `setItem` then runs the new item's `onStart`: a
+/// Choice item drops `choicelock`, a terrain seed on its terrain is used at once, a White
+/// Herb clears lowered stats. A berry is eaten at the next `Update`, which comes before
+/// anything else moves. The giver of a Choice item keeps `choicelock` until
+/// `onDisableMove` at the end of the turn (`choice_lock_ends`). Returns false for a failure.
+fn swap_items(reg: &Reg, turn: &mut Turn, me: Slot, target: Slot) -> bool {
+    let alive = |turn: &Turn, at: Slot| matches!(turn.mon_at(at.0, at.1), Some(m) if !m.fainted);
+    if !alive(turn, me) || !alive(turn, target) {
+        return false;
+    }
+    let yours = take_item(reg, turn, target);
+    let mine = take_item(reg, turn, me);
+    let restore = |turn: &mut Turn, yours: Option<Option<Id>>, mine: Option<Option<Id>>| {
+        if let Some(Some(item)) = yours {
+            turn.mon_at_mut(target.0, target.1).unwrap().item = Some(item);
+        }
+        if let Some(Some(item)) = mine {
+            turn.mon_at_mut(me.0, me.1).unwrap().item = Some(item);
+        }
+    };
+    if matches!(yours, Some(None)) || matches!(mine, Some(None)) || (yours.is_none() && mine.is_none()) {
+        restore(turn, yours, mine);
+        return false;
+    }
+    let (yours, mine) = (yours.flatten(), mine.flatten());
+    let receiver_species = |turn: &Turn, at: Slot| turn.mon_at(at.0, at.1).unwrap().species;
+    let refused = mine.is_some_and(|i| reg.mega_stone_stays(receiver_species(turn, target).as_str(), i.as_str()))
+        || yours.is_some_and(|i| reg.mega_stone_stays(receiver_species(turn, me).as_str(), i.as_str()));
+    if refused {
+        restore(turn, yours.map(Some), mine.map(Some));
+        return false;
+    }
+    for (at, item) in [(target, mine), (me, yours)] {
+        let Some(item) = item else { continue };
+        turn.mon_at_mut(at.0, at.1).unwrap().item = Some(item);
+        if reg.choice_items.contains(item.as_str()) {
+            let mon = turn.mon_at_mut(at.0, at.1).unwrap();
+            mon.volatiles.retain(|v| v.id.as_str() != "choicelock");
+        }
+        crate::terrain::use_terrain_seed(turn, at.0, at.1);
+    }
+    crate::resolve::check_white_herb(turn);
+    for at in [target, me] {
+        eat_received_berry(turn, at);
+    }
+    true
+}
+
+/// The `onUpdate` of a berry just received: Sitrus and Oran below half, Lum on any status or
+/// confusion, Persim on confusion -- the berries this port eats elsewhere (IKA-208).
+fn eat_received_berry(turn: &mut Turn, at: Slot) {
+    turn.check_berry(at.0, at.1);
+    let cures = match turn.mon_at(at.0, at.1) {
+        Some(mon) if !mon.fainted => {
+            let confused = mon.has_volatile("confusion");
+            (is(mon.item, "lumberry") && (mon.status.is_some() || confused))
+                || (is(mon.item, "persimberry") && confused)
+        }
+        _ => false,
+    };
+    if !cures || turn.berries_blocked(at.0) {
+        return;
+    }
+    let lum = is(turn.mon_at(at.0, at.1).unwrap().item, "lumberry");
+    turn.consume_item(at.0, at.1);
+    let mon = turn.mon_at_mut(at.0, at.1).unwrap();
+    mon.volatiles.retain(|v| v.id.as_str() != "confusion");
+    if lum {
+        mon.status = None;
+        mon.status_counter = None;
+    }
+}
+
 fn perish_song(turn: &mut Turn, me: Slot) {
     let ignores_ability = turn
         .mon_at(me.0, me.1)
