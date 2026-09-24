@@ -113,7 +113,8 @@ pub fn fixed_damage(
         "counter" | "mirrorcoat" | "metalburst" | "comeuppance" if ctx.reply_damage > 0 => {
             Some(ctx.reply_damage)
         }
-        _ => None,
+        // Seismic Toss and Night Shade, `damage: 'level'` (IKA-239).
+        _ => crate::level_struggle::level_damage(move_id, attacker),
     }
 }
 

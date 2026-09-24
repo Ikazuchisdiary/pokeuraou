@@ -2528,8 +2528,8 @@ fn after_hit(
             Some(berry_type) => {
                 berry_type == mv.mtype.as_str() && (berry_type == "Normal" || type_mod > 0)
                     // The berry is `onSourceModifyDamage`, which a `damageCallback` never
-                    // reaches (IKA-213).
-                    && !crate::damage_callback::ported(mv.id.as_str())
+                    // reaches (IKA-213), nor a level move; Struggle is `???` (IKA-239).
+                    && !crate::level_struggle::misses_resist_berry(mv.id.as_str())
             }
         },
     };
@@ -3417,6 +3417,7 @@ fn hit_substitute(
             turn.deal_damage(me.0, me.1, amount, false, "recoil")?;
         }
     }
+    crate::level_struggle::struggle_recoil(turn, me, mv, dealt)?;
     if let Some(drain) = mv.drain.as_ref().and_then(Value::as_array) {
         if dealt > 0 && drain.len() >= 2 {
             let numerator = drain[0].as_i64().unwrap_or(1);
@@ -3504,6 +3505,7 @@ fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), S
             turn.deal_damage(me.0, me.1, amount, false, "recoil")?;
         }
     }
+    crate::level_struggle::struggle_recoil(turn, me, mv, total)?;
     after_move_secondary_switches(turn, action, mv)?;
     let (item, maxhp) = match turn.mon_at(me.0, me.1) {
         None => (None, 0),

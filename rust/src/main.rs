@@ -26,6 +26,7 @@ mod encoded_node;
 mod fixedpoint;
 mod id;
 mod inert;
+mod level_struggle;
 mod modelled;
 mod moveinfo;
 mod node;
