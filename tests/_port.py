@@ -317,14 +317,16 @@ class ReplacementResult:
         raise AssertionError("the port keeps no event log yet (IKA-215)")
 
 
-def _phase(reg: Regulation, request: dict[str, Any], rng: Any) -> ReplacementResult:  # noqa: ANN401
+def _phase(
+    reg: Regulation, request: dict[str, Any], rng: Any, pos: Position  # noqa: ANN401
+) -> ReplacementResult:
     """As `RustNode._phase`: a draw is sampled from `rng` exactly as Python sampled it."""
     if rng is None:
-        reply = _ask(reg, request)
+        reply = _ask(reg, request, pos)
     else:
         presets: list[int] = []
         while True:
-            reply = _ask(reg, {**request, "presets": presets})
+            reply = _ask(reg, {**request, "presets": presets}, pos)
             weights = reply.get("draw")
             if not weights:
                 break
@@ -347,6 +349,7 @@ def resolve_replacements(
         reg,
         {"kind": "replacements", "position": given(pos).to_json(), "choices": _actions(choices)},
         rng,
+        pos,
     )
 
 
@@ -354,7 +357,7 @@ def apply_lead_abilities(
     reg: Regulation, pos: Position, *, rng: Any = None  # noqa: ANN401
 ) -> ReplacementResult:
     """`resolve.apply_lead_abilities`."""
-    return _phase(reg, {"kind": "leads", "position": given(pos).to_json()}, rng)
+    return _phase(reg, {"kind": "leads", "position": given(pos).to_json()}, rng, pos)
 
 
 def replacements_needed(

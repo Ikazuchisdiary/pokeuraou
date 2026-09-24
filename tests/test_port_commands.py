@@ -29,17 +29,9 @@ from pokeuraou import rustnode
 from pokeuraou.actions import PassAction, SideAction, side_actions, switch_actions_after_faint
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Position
-from pokeuraou.resolve import (
-    Budget,
-    apply_lead_abilities,
-    paused_in,
-    replacements_needed,
-    resolve_replacements,
-    resolve_turn,
-    resume_alternatives,
-    resume_turn,
-)
 
+from . import _port
+from ._port import Budget, replacements_needed
 from .conftest import FORMAT_ID
 
 FAST = {"hp": 2, "atk": 32, "def": 0, "spa": 0, "spd": 0, "spe": 32}
@@ -69,6 +61,14 @@ BUDGET = replace(
 ).with_fixed_roll(0)
 BRANCHING = replace(BUDGET, enumerate_secondary=True)
 PASSES = SideAction(slots=(PassAction(slot=0), PassAction(slot=1)))
+
+
+@pytest.fixture(autouse=True)
+def _leads_on_the_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`position_from_sets` runs the leads' switch-ins through the port, not Python (IKA-210)."""
+    from pokeuraou import selfplay
+
+    monkeypatch.setattr(selfplay, "apply_lead_abilities", _port.apply_lead_abilities)
 
 
 @pytest.fixture()
@@ -143,8 +143,6 @@ def test_the_port_resumes_a_mid_turn_replacement_as_showdown_does(reg, oracle: O
     turn = node.turn(before, actions, BRANCHING, full=True)
     assert turn is not None, "the port refused the turn"
     assert turn.pauses and not turn.outcomes
-    here = resolve_turn(reg, before, actions, budget=BRANCHING)
-    assert [p.probability for p in turn.pauses] == [p.probability for p in here.suspended]
     for k, pause in enumerate(turn.pauses):
         # `select` names this pause as the full answer does, and it crossed as data.
         chosen = node.turn(before, actions, BRANCHING, select=len(turn.outcomes) + k)
@@ -159,11 +157,6 @@ def test_the_port_resumes_a_mid_turn_replacement_as_showdown_does(reg, oracle: O
         got = sorted((b.probability, _board(b.position)) for b in resumed.outcomes)
         assert [p for p, _b in got] == pytest.approx([pause.probability / 2] * 2, abs=1e-15)
         assert {b for _p, b in got} == {boards["first"], boards["last"]}
-        # Python's resumed turn, position for position.
-        python = resume_turn(reg, here.suspended[k], [option, PASSES])
-        assert [b.position.to_json() for b in python.branches] == [
-            b.position.to_json() for b in resumed.outcomes
-        ]
         for index, outcome in enumerate(resumed.outcomes):
             one = node.resume(pause, [option, PASSES], select=index)
             assert one is not None and one.position is not None
@@ -172,9 +165,10 @@ def test_the_port_resumes_a_mid_turn_replacement_as_showdown_does(reg, oracle: O
         answered = node.resume_alternatives(pause)
         assert answered is not None
         chooser, alternatives = answered
-        py_chooser, py_alternatives = resume_alternatives(reg, here.suspended[k])
-        assert chooser == py_chooser == 0
-        assert [o.to_choice() for o, _ in alternatives] == [o.to_choice() for o, _ in py_alternatives]
+        assert chooser == 0
+        assert [o.to_choice() for o, _ in alternatives] == [
+            o.to_choice() for o in switch_actions_after_faint(reg, pause.position, 0, [True, False])
+        ]
         picked = next(r for o, r in alternatives if o.to_choice() == "switch 3, pass")
         assert [b.position.to_json() for b in picked.outcomes] == [
             b.position.to_json() for b in resumed.outcomes
@@ -259,9 +253,6 @@ def test_the_port_places_both_replacements_before_either_ability(reg, oracle: Or
     phase = node.resolve_replacements(before, picks)
     assert phase is not None, "the port refused the phase"
     assert _intimidated(phase.position) == theirs, f"showdown {theirs} != port {_intimidated(phase.position)}"
-    python = resolve_replacements(reg, before, picks)
-    assert phase.position.to_json() == python.position.to_json()
-    assert phase.unmodelled == python.unmodelled
 
 
 # ---------------------------------------------------------------------------
@@ -315,11 +306,6 @@ def test_the_port_runs_the_leads_as_showdown_does(reg, oracle: Oracle, node) -> 
         drawn = node.apply_lead_abilities(fresh, rng=rng)
         assert drawn is not None and drawn.unmodelled == ()
         seen.add(_board(drawn.position))
-        # The same draw from the same generator as Python, and the generator left the same.
-        mine = np.random.default_rng(seed)
-        python = apply_lead_abilities(reg, fresh, rng=mine)
-        assert python.position.to_json() == drawn.position.to_json()
-        assert mine.bit_generator.state == rng.bit_generator.state
     assert seen == {boards["first"], boards["last"]}
 
 
@@ -346,7 +332,6 @@ def test_the_port_runs_the_leads_fastest_first(reg, oracle: Oracle, node) -> Non
     phase = node.apply_lead_abilities(fresh)
     assert phase is not None, "the port refused the leads"
     assert _board(phase.position) == _board(showdown)
-    assert phase.position.to_json() == apply_lead_abilities(reg, fresh).position.to_json()
 
 
 # ---------------------------------------------------------------------------
@@ -354,7 +339,7 @@ def test_the_port_runs_the_leads_fastest_first(reg, oracle: Oracle, node) -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_a_pause_resumed_in_another_world_is_pythons(reg, node) -> None:  # noqa: ANN001
+def test_a_pause_resumed_in_another_world_uses_that_world(reg, node) -> None:  # noqa: ANN001
     """IKA-120's shape: the opponent's unseen back two rebuilt, and every option resumed there."""
     from pokeuraou.priors import SampledSet
     from pokeuraou.regulation import to_id
@@ -372,26 +357,25 @@ def test_a_pause_resumed_in_another_world_is_pythons(reg, node) -> None:  # noqa
 
     start = position_from_sets(reg, sampled([RILLA, WHIM, KING, CHOMP]), sampled(INTIMIDATE_AND_DROUGHT))
     actions = _actions(reg, start, U_TURN)
-    here = resolve_turn(reg, start, actions, budget=BUDGET)
     turn = node.turn(start, actions, BUDGET, full=True)
-    assert turn is not None and here.suspended and len(turn.pauses) == len(here.suspended)
+    assert turn is not None and turn.pauses
     # Another world: the opponent's bench Kingambit is at half HP and holds Leftovers.
-    world = here.suspended[0].position.copy()
+    world = turn.pauses[0].position.copy()
     bench = world.sides[1].pokemon[2]
     assert not bench.is_active
     bench.hp = bench.maxhp // 2
     bench.item = "leftovers"
-    python_chooser, python = resume_alternatives(reg, paused_in(here.suspended[0], world, 1))
     answered = node.resume_alternatives(turn.pauses[0], world=(world, 1))
     assert answered is not None
     chooser, port = answered
-    assert chooser == python_chooser
-    assert len(port) == len(python)
-    for (mine, resumed), (theirs, port_resumed) in zip(python, port, strict=True):
-        assert mine.to_choice() == theirs.to_choice()
-        assert [b.position.to_json() for b in resumed.branches] == [
-            b.position.to_json() for b in port_resumed.outcomes
-        ]
-        assert [b.probability for b in resumed.branches] == port_resumed.branches
+    assert chooser == 0 and port
+    # The control: in the pause's own world nobody holds Leftovers there.
+    plain = node.resume_alternatives(turn.pauses[0])
+    assert plain is not None and plain[1]
+    assert not any(
+        b.position.sides[1].pokemon[2].item == "leftovers" for _o, r in plain[1] for b in r.outcomes
+    )
+    for _theirs, port_resumed in port:
+        assert port_resumed.outcomes
         # The world was used: its bench is in every leaf.
         assert all(b.position.sides[1].pokemon[2].item == "leftovers" for b in port_resumed.outcomes)

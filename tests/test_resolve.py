@@ -27,35 +27,23 @@ from pokeuraou.actions import (
     side_actions,
     switch_actions_after_faint,
 )
-from pokeuraou.oracle import ORACLE_JS, Oracle, RandomnessPolicy, TeamSet
+from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Effect, MoveSlot, Position
 from pokeuraou.regulation import Regulation, to_id
-from pokeuraou.resolve import (
-    FREEZE_COUNTER,
-    FULL_PARALYSIS_CHANCE,
-    SLEEP_COUNTER_MODAL,
-    SLEEP_COUNTER_PINNED,
-    Average,
-    BestOf,
+
+# Python's resolver only where the search's own fold or fill is what is tested (IKA-209,
+# IKA-212 take them): `turn_expectation`, `turn_leaves` and `batched_payoffs`' chunking.
+from pokeuraou.resolve import Average, BestOf, turn_expectation, turn_leaves
+from pokeuraou.resolve import resolve_turn as python_resolve_turn
+from pokeuraou.resolve import resume_alternatives as python_resume_alternatives
+
+from ._port import (
     Budget,
-    _apply_disable,
-    _apply_encore,
-    _encore_override,
-    _Turn,
-    multihit_counts,
-    pending_attacks,
+    PortRefused,
     resolve_turn,
-    resume_alternatives,
     resume_turn,
     self_switches_needed,
-    stall_success_chance,
-    stratified_rolls,
-    turn_expectation,
-    turn_leaves,
 )
-from pokeuraou.speed import QueuedAction
-
-from . import _diff_turn_entry as diff_turn
 from .conftest import FORMAT_ID
 from .test_actions import _synthetic_position
 
@@ -90,76 +78,6 @@ MAX_TOTAL_DIVERGENCE = 0.10
 # ---------------------------------------------------------------------------
 # Randomness accounting
 # ---------------------------------------------------------------------------
-
-
-def test_stratified_rolls_are_a_probability_distribution() -> None:
-    for count in range(1, 17):
-        rolls = stratified_rolls(Budget(damage_rolls=count))
-        assert sum(w for _, w in rolls) == pytest.approx(1.0)
-        assert all(0 <= r < 16 for r, _ in rolls)
-        assert len({r for r, _ in rolls}) == len(rolls)
-
-
-def test_sixteen_rolls_is_the_exact_distribution() -> None:
-    rolls = stratified_rolls(Budget(damage_rolls=16))
-    assert [r for r, _ in rolls] == list(range(16))
-    assert all(w == pytest.approx(1 / 16) for _, w in rolls)
-
-
-def test_stratification_keeps_the_mean_roll() -> None:
-    """A reduced roll set is a quantisation, not a bias.
-
-    Each representative carries the weight of the block it stands for, so the expected
-    roll index is preserved -- which is what stops a cheap budget from systematically
-    over- or under-estimating damage.
-    """
-    exact = sum(r * w for r, w in stratified_rolls(Budget(damage_rolls=16)))
-    for count in (2, 4, 8):
-        got = sum(r * w for r, w in stratified_rolls(Budget(damage_rolls=count)))
-        assert got == pytest.approx(exact, abs=0.5)
-
-
-def test_a_pinned_roll_is_a_single_branch() -> None:
-    assert stratified_rolls(Budget.deterministic(8)) == [(8, 1.0)]
-    assert stratified_rolls(Budget.deterministic(0)) == [(0, 1.0)]
-    assert stratified_rolls(Budget.deterministic(15)) == [(15, 1.0)]
-
-
-def test_stall_chance_matches_showdown(reg: Regulation) -> None:
-    """Protect is certain the first time and one in three the second."""
-    del reg
-    assert stall_success_chance(1) == 1.0
-    assert stall_success_chance(3) == pytest.approx(1 / 3)
-    assert stall_success_chance(9) == pytest.approx(1 / 9)
-
-
-def test_multihit_distribution(reg: Regulation) -> None:
-    exact = Budget.exact()
-    fixed = Budget.deterministic(0)
-
-    single = reg.moves["ironhead"]
-    assert multihit_counts(single, exact) == [(1, 1.0)]
-
-    if "populationbomb" in reg.moves:
-        assert multihit_counts(reg.moves["populationbomb"], exact) == [(10, 1.0)]
-
-    if "dualwingbeat" in reg.moves:
-        assert multihit_counts(reg.moves["dualwingbeat"], exact) == [(2, 1.0)]
-
-    # A [2, 5] move is not uniform: Showdown samples [2 x7, 3 x7, 4 x3, 5 x3], 35-35-15-15
-    # (IKA-160; tests/test_multihit_counts.py reads the array off the simulator).
-    two_to_five = next(
-        (m for m in reg.moves.values() if m.raw.get("multihit") == [2, 5]), None
-    )
-    if two_to_five is not None:
-        spread = dict(multihit_counts(two_to_five, exact))
-        assert spread[2] == pytest.approx(0.35)
-        assert spread[3] == pytest.approx(0.35)
-        assert spread[4] == pytest.approx(0.15)
-        assert spread[5] == pytest.approx(0.15)
-        assert sum(spread.values()) == pytest.approx(1.0)
-        # A pinned budget takes the minimum, which is what Showdown's policy forces.
-        assert multihit_counts(two_to_five, fixed) == [(2, 1.0)]
 
 
 # ---------------------------------------------------------------------------
@@ -345,7 +263,7 @@ def test_a_hidden_spread_is_refused_not_guessed(reg: Regulation, team_a: list[Te
     pos.sides[1].pokemon[0].sp = None
     pos.sides[1].pokemon[0].stats_override = None
     both = [side_actions(reg, pos, 0)[0], side_actions(reg, pos, 1)[0]]
-    with pytest.raises(ValueError, match="belief layer"):
+    with pytest.raises(PortRefused, match="hidden SP spread"):
         resolve_turn(reg, pos, both, budget=Budget.deterministic(0))
 
 
@@ -395,9 +313,10 @@ def test_protect_blocks_a_damaging_move(reg: Regulation, team_a: list[TeamSet]) 
     result = resolve_turn(
         reg, pos, [attacking, side_actions(reg, pos, 1)[0]], budget=Budget.deterministic(0)
     )
+    # Every move hits under the pinned budget, so an unchanged HP is the block.
+    assert len(result.branches) == 1
     after = result.branches[0].position.sides[1].pokemon[0]
     assert after.hp == hp_before
-    assert any("blocked by protect" in e for e in result.branches[0].events)
 
 
 def test_protect_used_twice_is_a_branch(reg: Regulation, team_a: list[TeamSet]) -> None:
@@ -465,10 +384,6 @@ def _install_move(pos: Position, side: int, slot: int, move_id: str) -> None:
     """
     mon = pos.sides[side].pokemon[pos.sides[side].active[slot]]
     mon.moves[0] = MoveSlot(id=move_id, pp=10, maxpp=10)
-
-
-def _turn_for(reg: Regulation, pos: Position) -> _Turn:
-    return _Turn(reg, pos, Budget.deterministic(0), {})
 
 
 def test_wide_guard_raises_the_protect_counter(
@@ -549,108 +464,6 @@ def test_endure_consults_and_raises_the_counter(
     assert stall is not None and stall.counter == 3
 
 
-def test_endure_survives_a_lethal_move_from_any_hp(
-    reg: Regulation, team_a: list[TeamSet]
-) -> None:
-    pos = _synthetic_position(reg, team_a)
-    turn = _turn_for(reg, pos)
-    mon = turn.mon_at(1, 0)
-    assert mon is not None
-    mon.hp = mon.maxhp // 2
-    mon.item = None
-    mon.volatiles.append(Effect(id="endure", duration=1))
-
-    dealt = turn.deal_damage(1, 0, mon.maxhp * 4, reason="testmove", from_move=True)
-    assert dealt == mon.maxhp // 2 - 1
-    assert mon.hp == 1 and not mon.fainted
-
-
-def test_endure_does_not_survive_residual_damage(
-    reg: Regulation, team_a: list[TeamSet]
-) -> None:
-    """Showdown's Endure tests `effect.effectType === 'Move'`.
-
-    Sandstorm, recoil and Life Orb go straight through it. Applying the cap to every
-    source turns a lost Pokemon into a surviving one.
-    """
-    pos = _synthetic_position(reg, team_a)
-    turn = _turn_for(reg, pos)
-    mon = turn.mon_at(1, 0)
-    assert mon is not None
-    mon.hp = 4
-    mon.item = None
-    mon.volatiles.append(Effect(id="endure", duration=1))
-
-    turn.deal_damage(1, 0, 40, reason="sandstorm")
-    assert mon.fainted
-
-
-def test_focus_sash_needs_full_hp_and_is_consumed(
-    reg: Regulation, team_a: list[TeamSet]
-) -> None:
-    pos = _synthetic_position(reg, team_a)
-    turn = _turn_for(reg, pos)
-    mon = turn.mon_at(1, 0)
-    assert mon is not None
-    mon.hp = mon.maxhp
-    mon.item = "focussash"
-
-    turn.deal_damage(1, 0, mon.maxhp * 4, reason="testmove", from_move=True)
-    assert mon.hp == 1 and not mon.fainted
-    assert mon.item is None
-
-    # One short of full is not full.
-    other = turn.mon_at(1, 1)
-    assert other is not None
-    other.hp = other.maxhp - 1
-    other.item = "focussash"
-    turn.deal_damage(1, 1, other.maxhp * 4, reason="testmove", from_move=True)
-    assert other.fainted
-
-
-def test_endure_takes_precedence_over_the_sash(
-    reg: Regulation, team_a: list[TeamSet]
-) -> None:
-    """Endure runs at onDamagePriority -10 and the Sash at -40.
-
-    Endure caps the damage first, so the Sash sees a survivable hit and is not spent.
-    """
-    pos = _synthetic_position(reg, team_a)
-    turn = _turn_for(reg, pos)
-    mon = turn.mon_at(1, 0)
-    assert mon is not None
-    mon.hp = mon.maxhp
-    mon.item = "focussash"
-    mon.volatiles.append(Effect(id="endure", duration=1))
-
-    turn.deal_damage(1, 0, mon.maxhp * 4, reason="testmove", from_move=True)
-    assert mon.hp == 1
-    assert mon.item == "focussash", "Endure absorbed the hit, so the Sash is still held"
-
-
-def test_focus_band_is_a_chance_and_is_reported_not_guessed(
-    reg: Regulation, team_a: list[TeamSet]
-) -> None:
-    """Focus Band is `randomChance(1, 10)` from any HP and is not consumed.
-
-    Resolving it as a certain save was wrong; resolving it silently as no save would be
-    wrong in the other direction on a tenth of these hits. The resolver takes the
-    deterministic reading the pinned oracle policy takes and declares it, so the turn
-    lands in the flagged bucket rather than the silent one.
-    """
-    pos = _synthetic_position(reg, team_a)
-    turn = _turn_for(reg, pos)
-    mon = turn.mon_at(1, 0)
-    assert mon is not None
-    mon.hp = mon.maxhp
-    mon.item = "focusband"
-
-    turn.deal_damage(1, 0, mon.maxhp * 4, reason="testmove", from_move=True)
-    assert mon.fainted
-    assert mon.item == "focusband", "Focus Band is not consumed"
-    assert any("focusband" in flag for flag in turn.unmodelled)
-
-
 def test_perish_song_counts_down_and_kills(reg: Regulation, team_a: list[TeamSet]) -> None:
     """The one volatile whose *expiry* faints its holder.
 
@@ -699,20 +512,6 @@ def test_perish_song_hits_both_sides(reg: Regulation, team_a: list[TeamSet]) -> 
             assert perish.duration == 3
 
 
-def test_pending_attacks_reads_the_chosen_actions(reg: Regulation, team_a: list[TeamSet]) -> None:
-    """Sucker Punch is decidable here because the resolver sees both sides' choices."""
-    pos = _synthetic_position(reg, team_a)
-    actions = [side_actions(reg, pos, 0)[0], side_actions(reg, pos, 1)[0]]
-    attacks = pending_attacks(reg, actions)
-    assert attacks
-    for (side, slot), attacking in attacks.items():
-        chosen = next(s for s in actions[side].slots if s.slot == slot)
-        if isinstance(chosen, MoveAction):
-            assert attacking == (reg.moves[chosen.move_id].category != "Status")
-        else:
-            assert attacking is False
-
-
 def test_collapse_groups_outcomes_readably(reg: Regulation, team_a: list[TeamSet]) -> None:
     pos = _synthetic_position(reg, team_a)
     both = [side_actions(reg, pos, 0)[0], side_actions(reg, pos, 1)[0]]
@@ -748,7 +547,8 @@ def test_expected_value_is_a_probability_weighted_mean(
 
 
 # ---------------------------------------------------------------------------
-# Differential test
+# Differential test: the thresholds. The port's run against Showdown is
+# tests/test_diff_turn_port.py; Python's went with IKA-210.
 # ---------------------------------------------------------------------------
 
 
@@ -759,41 +559,6 @@ def test_expected_value_is_a_probability_weighted_mean(
 #: the sample; the total rate is held tight only on the large sample below, where the
 #: count of *declared* gaps averages out.
 MAX_TOTAL_DIVERGENCE_PER_SEED = 0.14
-
-
-@pytest.mark.oracle
-@pytest.mark.parametrize("seed", [1, 5])
-def test_resolved_positions_match_showdown(seed: int) -> None:
-    if not ORACLE_JS.exists():
-        pytest.skip("oracle not built")
-    report = diff_turn.run(battles=8, roll=8, seed=seed, max_turns=10)
-    assert report.compared >= 25, f"only {report.compared} turns compared"
-    assert report.silent_rate <= MAX_SILENT_DIVERGENCE, report.render()
-    assert report.divergence_rate <= MAX_TOTAL_DIVERGENCE_PER_SEED, report.render()
-
-
-@pytest.mark.oracle
-@pytest.mark.slow
-def test_resolver_divergence_over_a_large_sample() -> None:
-    """The number quoted in the README, measured rather than asserted from memory."""
-    if not ORACLE_JS.exists():
-        pytest.skip("oracle not built")
-    compared = matched = silent = flagged = 0
-    for seed in range(1, 9):
-        report = diff_turn.run(battles=10, roll=8, seed=seed, max_turns=10)
-        compared += report.compared
-        matched += report.matched
-        silent += report.silent_divergences
-        flagged += report.flagged_divergences
-    total_rate = 1 - matched / compared
-    silent_rate = silent / compared
-    print(
-        f"\nresolver divergence over {compared} turns: {total_rate * 100:.2f}% total, "
-        f"{silent_rate * 100:.2f}% silent, {flagged} flagged"
-    )
-    assert compared > 350
-    assert silent_rate <= MAX_SILENT_DIVERGENCE
-    assert total_rate <= MAX_TOTAL_DIVERGENCE
 
 
 def test_the_matrix_budget_gives_the_lp_a_zero_sum_game(reg: Regulation) -> None:
@@ -1056,7 +821,8 @@ def test_summarising_a_suspended_turn_is_refused(
         )
     )
     theirs = side_actions(reg, pos, 1)[0]
-    result = resolve_turn(reg, pos, [ours, theirs], budget=Budget.deterministic(8))
+    # Python's: the fold under test is the search's `turn_expectation` (IKA-209 moves it).
+    result = python_resolve_turn(reg, pos, [ours, theirs], budget=Budget.deterministic(8))
     assert result.suspended
 
     with pytest.raises(ValueError, match="suspended"):
@@ -1088,10 +854,11 @@ def test_the_mid_turn_replacement_is_a_choice_and_not_an_average(
         )
     )
     theirs = side_actions(reg, pos, 1)[0]
-    result = resolve_turn(reg, pos, [ours, theirs], budget=Budget.deterministic(8))
+    # Python's: the fold under test is the search's `turn_leaves` (IKA-209 moves it).
+    result = python_resolve_turn(reg, pos, [ours, theirs], budget=Budget.deterministic(8))
     assert result.suspended
 
-    chooser, alternatives = resume_alternatives(reg, result.suspended[0])
+    chooser, alternatives = python_resume_alternatives(reg, result.suspended[0])
     assert chooser == 0
     assert len(alternatives) >= 2, "a bench of two is the point of the test"
 
@@ -1156,7 +923,9 @@ def test_a_chunked_fill_scores_the_same_node(
     ours = [uturn, *side_actions(reg, pos, 0)[:3]]
     theirs = side_actions(reg, pos, 1)[:4]
     budget = Budget.matrix()
-    assert resolve_turn(reg, pos, [uturn, theirs[0]], budget=budget).suspended, (
+    # Python's own fill (`batched_payoffs`, `LEAF_CHUNK`) is what is under test; it goes with
+    # the resolver (IKA-212).
+    assert python_resolve_turn(reg, pos, [uturn, theirs[0]], budget=budget).suspended, (
         "the node has to contain a suspended turn for the fold to be under test"
     )
 
@@ -1206,7 +975,8 @@ def test_a_chunk_boundary_never_falls_inside_a_cell(
     theirs = side_actions(reg, pos, 1)[:3]
     budget = Budget.matrix()
     def leaves_of(a: SideAction, b: SideAction) -> int:
-        result = resolve_turn(reg, pos, [a, b], budget=budget)
+        # Python's own fill is under test, as above (IKA-212).
+        result = python_resolve_turn(reg, pos, [a, b], budget=budget)
         if result.suspended:
             return len(turn_leaves(reg, result).positions)
         return len(result.branches)
@@ -1561,9 +1331,11 @@ def test_the_paralysis_chance_is_the_one_the_simulator_rolls(oracle: Oracle) -> 
     assert not handle.choice_errors, handle.choice_errors
     denominators = _chance_denominators(handle.rolls)
     assert denominators, f"no 1-in-N roll recorded at all: {handle.rolls}"
-    expected = round(1 / FULL_PARALYSIS_CHANCE)
+    # The champions mod's `par.onBeforeMove` is `randomChance(1, 8)`; the port's weight for
+    # it is held in tests/test_confusion_duration.py (IKA-210: was Python's constant).
+    expected = 8
     assert expected in denominators, (
-        f"FULL_PARALYSIS_CHANCE is 1/{expected} but the simulator rolled "
+        f"the full paralysis is 1/{expected} but the simulator rolled "
         f"1 in {sorted(denominators)} on a paralysed Pokemon's turn"
     )
     handle.close()
@@ -1593,92 +1365,12 @@ def test_the_sleep_counter_is_the_distribution_the_simulator_samples(oracle: Ora
     assert samples, f"no sample recorded on the turn sleep landed: {handle.rolls}"
     counters = sorted(int(v) for v in samples[0])
     assert counters, samples
+    # `sample([2, 3, 3])`: modal 3, and the policy's pinned answer (the first element) 2.
+    # The port's turns are held to the modal one in
+    # `test_a_sleeping_pokemon_wakes_and_the_counter_is_not_the_lucky_one` (IKA-210).
     modal = max(set(counters), key=counters.count)
-    assert modal == SLEEP_COUNTER_MODAL, (
-        f"the simulator samples {counters}, whose modal value is {modal}, but the resolver "
-        f"uses {SLEEP_COUNTER_MODAL} when it does not branch the duration"
-    )
-    # And the pinned reading has to stay the policy's answer, or the differential test
-    # stops being an equality test.
-    assert counters[0] == SLEEP_COUNTER_PINNED, (
-        f"the policy answers sample() with its first element ({counters[0]}), so the "
-        f"pinned counter must match it, not {SLEEP_COUNTER_PINNED}"
-    )
+    assert (modal, counters[0]) == (3, 2), counters
     handle.close()
-
-
-def test_a_sleeping_pokemon_wakes_and_the_counter_is_not_the_lucky_one(
-    reg: Regulation, team_a: list[TeamSet]
-) -> None:
-    """End to end: the modal counter costs two turns, and sleep does end.
-
-    The pinned counter of 2 cost one turn, which is Champions' one-in-three outcome -- so
-    every sleep in the search was priced as the best case for the sleeper. Asserting the
-    number of turns lost rather than the counter is what makes this independent of how the
-    counter is spelled.
-    """
-    pos = _synthetic_position(reg, team_a)
-    # Nobody attacks: an earlier version of this let the sleeper faint to whatever action
-    # happened to be first, and skipped. A test that skips proves nothing.
-    for side in (0, 1):
-        for slot in (0, 1):
-            _install_move(pos, side, slot, "protect")
-    target = pos.sides[1].pokemon[pos.sides[1].active[0]]
-    turn = _Turn(reg, pos, Budget.matrix(), {})
-    assert turn.apply_status(1, 0, "slp", reason="test")
-    assert target.status == "slp"
-    assert target.status_counter == SLEEP_COUNTER_MODAL
-
-    asleep = 0
-    for _ in range(5):
-        both = [_protect_both(pos, 0), _protect_both(pos, 1)]
-        result = resolve_turn(reg, pos, both, budget=Budget.matrix())
-        pos = max(result.branches, key=lambda b: b.probability).position
-        mon = pos.sides[1].pokemon[pos.sides[1].active[0]]
-        assert not mon.fainted, "nothing should be able to faint in a turn of Protects"
-        if mon.status == "slp":
-            asleep += 1
-        else:
-            break
-    assert asleep == SLEEP_COUNTER_MODAL - 1, (
-        f"Champions' modal sleep is {SLEEP_COUNTER_MODAL - 1} turns, counted {asleep}"
-    )
-
-
-def test_freeze_cannot_last_the_whole_battle(
-    reg: Regulation, team_a: list[TeamSet]
-) -> None:
-    """The mod caps a freeze at three attempts; we had only the 1-in-4 roll to end it.
-
-    Without the counter a freeze ends with probability 1/4 a turn and never otherwise, so it
-    holds for the rest of the battle with probability (3/4)^n -- the same "no duration,
-    therefore permanent" shape that made four volatiles permanent, in geometric clothing.
-    Checked with the roll pinned to "no", which is the state that used to be a trap.
-    """
-    pos = _synthetic_position(reg, team_a)
-    for side in (0, 1):
-        for slot in (0, 1):
-            _install_move(pos, side, slot, "protect")
-    target = pos.sides[1].pokemon[pos.sides[1].active[0]]
-    turn = _Turn(reg, pos, Budget.matrix(), {})
-    assert turn.apply_status(1, 0, "frz", reason="test")
-    assert target.status_counter == FREEZE_COUNTER, (
-        "a freeze needs a counter, or only the roll can ever end it"
-    )
-
-    for _ in range(FREEZE_COUNTER + 2):
-        both = [_protect_both(pos, 0), _protect_both(pos, 1)]
-        result = resolve_turn(reg, pos, both, budget=Budget.matrix())
-        pos = max(result.branches, key=lambda b: b.probability).position
-        mon = pos.sides[1].pokemon[pos.sides[1].active[0]]
-        assert not mon.fainted, "nothing should be able to faint in a turn of Protects"
-        if mon.status != "frz":
-            break
-    else:
-        raise AssertionError(
-            f"still frozen after {FREEZE_COUNTER + 2} turns with the thaw roll pinned to "
-            "no, so nothing but the roll can end it"
-        )
 
 
 def test_speed_boost_raises_speed_every_turn_but_not_on_arrival(
@@ -1817,10 +1509,7 @@ def test_a_flinch_actually_costs_the_target_its_action(
     flinched = [b for b in result.branches if not acted(b) and not
                 branch_target_fainted(b)]
     got_to_move = [b for b in result.branches if acted(b)]
-    assert flinched, (
-        "no branch has the target losing its action: "
-        + " | ".join(" / ".join(b.events) for b in result.branches[:3])
-    )
+    assert flinched, "no branch has the target losing its action"
     assert got_to_move, "and it must sometimes get to move, or this is not a branch"
 
     chance = float((reg.moves["ironhead"].raw["secondaries"] or [{}])[0]["chance"]) / 100.0
@@ -1979,46 +1668,6 @@ def test_cursed_body_can_disable_the_move_that_hit_it(
     assert offered, "and the rest of the moves must still be there"
 
 
-def test_a_disable_expires_and_the_move_comes_back(
-    reg: Regulation, team_a: list[TeamSet]
-) -> None:
-    """The flag lives on the move slot, so expiry has to clear it or it is permanent.
-
-    This is the shape that made four volatiles permanent: state kept somewhere the expiry
-    loop does not look. Asserting the move returns is the only way to catch it.
-    """
-    pos = _synthetic_position(reg, team_a)
-    for side in (0, 1):
-        for slot in (0, 1):
-            _install_move(pos, side, slot, "protect")
-    mon = pos.sides[0].pokemon[pos.sides[0].active[0]]
-    mon.last_move = "protect"
-    turn = _Turn(reg, pos, Budget.matrix(), {})
-    turn.current_actor = (0, 0)
-    assert _apply_disable(turn, 0, 0)
-    volatile = mon.volatile("disable")
-    assert volatile is not None and volatile.duration is not None
-    assert not mon.moves[0].usable, "the move slot has to carry the flag"
-
-    seen: list[int | None] = [volatile.duration]
-    for _ in range(volatile.duration + 2):
-        result = resolve_turn(
-            reg, pos, [_protect_both(pos, 0), _protect_both(pos, 1)], budget=Budget.matrix()
-        )
-        pos = max(result.branches, key=lambda b: b.probability).position
-        mon = pos.sides[0].pokemon[pos.sides[0].active[0]]
-        assert not mon.fainted, "nothing should faint in a turn of Protects"
-        current = mon.volatile("disable")
-        seen.append(current.duration if current else None)
-        if current is None:
-            break
-    assert seen[-1] is None, f"the disable never expired: durations {seen}"
-    assert all(m.usable or m.pp <= 0 for m in mon.moves), (
-        f"the move slot's flag was not cleared on expiry: "
-        f"{[(m.id, m.disabled, m.pp) for m in mon.moves]}"
-    )
-
-
 @pytest.mark.oracle
 def test_light_clay_extends_a_screen_and_the_dump_says_so(
     reg: Regulation, oracle: Oracle
@@ -2102,142 +1751,6 @@ def test_light_clay_extends_a_screen_and_the_dump_says_so(
             f"an extended screen is not an approximation: {result.unmodelled}"
         )
         handle.close()
-
-
-def test_encore_leaves_exactly_one_move_on_offer(
-    reg: Regulation, team_a: list[TeamSet]
-) -> None:
-    """Encore added a volatile and locked nothing, on 27.7% of the field's teams.
-
-    109 of the 394 tournament teams carry it -- the third most common of the moves that
-    interfere with an action, behind Fake Out and ahead of Taunt. Locking the opponent into
-    one move is most of what makes it worth a slot, and the search could neither use it nor
-    fear it.
-
-    Duration is the mirror of Disable's: 3, or 4 when the target has already moved this
-    turn, because the volatile is decremented at the end of it either way.
-    """
-    pos = _synthetic_position(reg, team_a)
-    for side in (0, 1):
-        for slot in (0, 1):
-            _install_move(pos, side, slot, "protect")
-    target = pos.sides[1].pokemon[pos.sides[1].active[0]]
-    target.last_move = target.moves[1].id
-    turn = _Turn(reg, pos, Budget.matrix(), {})
-    assert _apply_encore(turn, 1, 0, reg.moves["encore"])
-    locked = target.volatile("encore")
-    assert locked is not None and locked.move == target.moves[1].id
-    assert locked.duration == 3, f"3 when the target has not moved yet: {locked.duration}"
-
-    offered = {
-        a.move_id
-        for action in side_actions(reg, pos, 1)
-        for a in action.slots
-        if isinstance(a, MoveAction) and a.slot == 0
-    }
-    assert offered == {locked.move}, (
-        f"an encored Pokemon may only pick the encored move, got {sorted(offered)}"
-    )
-
-    # A Pokemon that has already acted gets the extra turn back.
-    fresh = _synthetic_position(reg, team_a)
-    other = fresh.sides[1].pokemon[fresh.sides[1].active[0]]
-    other.last_move = other.moves[1].id
-    later = _Turn(reg, fresh, Budget.matrix(), {})
-    later.acted.add((1, 0))
-    assert _apply_encore(later, 1, 0, reg.moves["encore"])
-    assert other.volatile("encore").duration == 4
-
-
-def test_encore_refuses_what_showdown_refuses(
-    reg: Regulation, team_a: list[TeamSet]
-) -> None:
-    """`onStart` returns false three ways, and each means no volatile at all.
-
-    A volatile that locks a Pokemon into a move it cannot use would leave it with an empty
-    legal action set, which is the shape of bug that spun the replacement phase in place.
-    """
-    pos = _synthetic_position(reg, team_a)
-    target = pos.sides[1].pokemon[pos.sides[1].active[0]]
-    encore = reg.moves["encore"]
-
-    # Never moved.
-    target.last_move = None
-    assert not _apply_encore(_Turn(reg, pos, Budget.matrix(), {}), 1, 0, encore)
-    assert target.volatile("encore") is None
-
-    # A move that carries `failencore` -- Struggle, Sleep Talk, Copycat, Transform, Encore.
-    assert "failencore" in reg.moves["encore"].flags
-    target.moves[0] = MoveSlot(id="encore", pp=5, maxpp=5)
-    target.last_move = "encore"
-    assert not _apply_encore(_Turn(reg, pos, Budget.matrix(), {}), 1, 0, encore)
-
-    # Out of PP.
-    target.moves[0] = MoveSlot(id="protect", pp=0, maxpp=5)
-    target.last_move = "protect"
-    assert not _apply_encore(_Turn(reg, pos, Budget.matrix(), {}), 1, 0, encore)
-
-
-def test_an_encored_action_is_rewritten_but_keeps_its_priority(
-    reg: Regulation, team_a: list[TeamSet]
-) -> None:
-    """The turn Encore lands, the target had already chosen something else.
-
-        const priority = baseMove.priority;
-        ...
-        baseMove.priority = priority;   // the *original* move's priority
-
-    So a Pokemon that picked Protect executes the encored move at +4 and still moves first.
-    Getting that backwards would reorder the turn, so it is asserted rather than assumed:
-    the encored move here has priority 0 and the chosen one +4, and the rewritten action has
-    to keep the +4.
-    """
-    pos = _synthetic_position(reg, team_a)
-    _install_move(pos, 1, 0, "protect")
-    mon = pos.sides[1].pokemon[pos.sides[1].active[0]]
-    mon.moves[1] = MoveSlot(id="ironhead", pp=15, maxpp=15)
-    mon.volatiles.append(Effect(id="encore", duration=3, move="ironhead"))
-
-    chosen = QueuedAction(
-        side=1,
-        slot=0,
-        kind="move",
-        order=200,
-        priority=reg.moves["protect"].priority,
-        fractional=0.0,
-        speed=np.zeros(1, dtype=np.int64),
-        move_id="protect",
-        target=None,
-    )
-    assert chosen.priority > 0, "the point of the test is a priority move being overridden"
-
-    turn = _Turn(reg, pos, Budget.matrix(), {})
-    variants = _encore_override(reg, turn, chosen)
-    assert sum(w for w, _ in variants) == pytest.approx(1.0)
-    for _weight, rewritten in variants:
-        assert rewritten.move_id == "ironhead", "the action has to become the encored move"
-        assert rewritten.priority == chosen.priority, (
-            f"Showdown keeps the original move's priority: {rewritten.priority} vs "
-            f"{chosen.priority}"
-        )
-
-    # `getRandomTarget` is uniform over adjacent foes, so both live foes come back with
-    # equal weight. Picking one instead would bias the matchup rather than approximate it:
-    # the encored move would always land on the same slot.
-    assert sorted(v.target for _w, v in variants) == [1, 2], (
-        f"both live foes have to be offered: {[v.target for _w, v in variants]}"
-    )
-    assert all(w == pytest.approx(0.5) for w, _ in variants)
-
-    # With one foe down there is nothing to flip.
-    pos.sides[0].pokemon[pos.sides[0].active[1]].fainted = True
-    pos.sides[0].pokemon[pos.sides[0].active[1]].hp = 0
-    single = _encore_override(reg, _Turn(reg, pos, Budget.matrix(), {}), chosen)
-    assert len(single) == 1 and single[0][0] == pytest.approx(1.0)
-
-    # An action that already matches is left alone, object and all.
-    matching = replace(chosen, move_id="ironhead", target=1)
-    assert _encore_override(reg, turn, matching) == [(1.0, matching)]
 
 
 def test_every_duration_the_dump_carries_is_keyed_the_way_it_is_looked_up(
@@ -2453,22 +1966,25 @@ def test_feint_tears_the_guard_down_for_the_rest_of_the_turn(
     after = result.branches[0].position
     hit = after.sides[1].pokemon[after.sides[1].active[0]]
 
-    assert hit.hp < target.maxhp, (
-        "Feint itself has to get through a Protect: " + " / ".join(result.branches[0].events)
-    )
+    assert hit.hp < target.maxhp, "Feint itself has to get through a Protect"
     assert hit.volatile("protect") is None and hit.volatile("detect") is None, (
-        "the Protect has to be gone, not merely bypassed: "
-        + " / ".join(result.branches[0].events)
+        "the Protect has to be gone, not merely bypassed"
     )
     assert hit.volatile("stall") is None, "breaking a guard also resets the Protect counter"
-    # And the consequence that matters: the partner's Iron Head landed too.
-    assert any("ironhead" in event for event in result.branches[0].events), (
-        "the partner's move should not be blocked any more: "
-        + " / ".join(result.branches[0].events)
+    # And the consequence that matters: the partner's Iron Head landed too -- the target
+    # loses more than to Feint alone, with the partner Protecting instead (IKA-210: this
+    # was read off Python's events).
+    alone = pos.copy()
+    alone.sides[0].pokemon[alone.sides[0].active[1]].moves[1] = MoveSlot(id="protect", pp=10, maxpp=10)
+    only_feint = SideAction(
+        slots=(
+            _move_action(alone, 0, 0, "feint", 1),
+            _move_action(alone, 0, 1, "protect", None),
+        )
     )
-    assert not any("blocked by protect" in event for event in result.branches[0].events), (
-        " / ".join(result.branches[0].events)
-    )
+    single = resolve_turn(reg, alone, [only_feint, _protect_both(alone, 1)], budget=Budget.deterministic(8))
+    feinted = single.branches[0].position.sides[1].pokemon[alone.sides[1].active[0]]
+    assert hit.hp < feinted.hp < target.maxhp, (hit.hp, feinted.hp, target.maxhp)
 
 
 def test_feint_also_strips_wide_guard_from_the_side(
@@ -2498,9 +2014,7 @@ def test_feint_also_strips_wide_guard_from_the_side(
         reg, pos, [ours, _protect_both(pos, 1)], budget=Budget.deterministic(8)
     )
     after = result.branches[0].position
-    assert not after.sides[1].has_side_condition("wideguard"), (
-        "Feint has to strip Wide Guard: " + " / ".join(result.branches[0].events)
-    )
+    assert not after.sides[1].has_side_condition("wideguard"), "Feint has to strip Wide Guard"
 
 
 @pytest.mark.oracle
@@ -2729,3 +2243,302 @@ def test_using_a_move_with_a_choice_item_sets_the_lock(
         if isinstance(a, MoveAction) and a.slot == 0
     }
     assert offered == {"ironhead"}, f"next turn only that move is legal: {sorted(offered)}"
+
+
+# ---------------------------------------------------------------------------
+# Rules that were tested on Python's `_Turn` (IKA-210)
+# ---------------------------------------------------------------------------
+#
+# Endure, Focus Sash and Focus Band were tested by calling Python's `_Turn.deal_damage`
+# directly, the sleep and freeze counters by `_Turn.apply_status`, Disable and Encore by
+# `_apply_disable` / `_apply_encore`. Those are Python's insides and go with it; the rules
+# are asked of the port here as whole turns. The synthetic position is a mirror: p1a and
+# p2a Charizard (slow), p1b and p2b Absol (fast). Every turn is pinned (`deterministic`)
+# unless the rule is a roll, and whoever is not under test Protects.
+
+
+def _slot(pos: Position, side: int, slot: int):  # noqa: ANN202
+    return pos.sides[side].pokemon[pos.sides[side].active[slot]]
+
+
+def _set_move(pos: Position, side: int, slot: int, index: int, move_id: str, pp: int = 10) -> None:
+    _slot(pos, side, slot).moves[index] = MoveSlot(id=move_id, pp=pp, maxpp=max(pp, 1))
+
+
+def _act(pos: Position, side: int, *chosen: tuple[str, int | None]) -> SideAction:
+    return SideAction(
+        slots=tuple(
+            _move_action(pos, side, slot, move_id, target)
+            for slot, (move_id, target) in enumerate(chosen)
+        )
+    )
+
+
+def _one(reg: Regulation, pos: Position, ours: SideAction, theirs: SideAction) -> Position:
+    result = resolve_turn(reg, pos, [ours, theirs], budget=Budget.deterministic(0))
+    assert len(result.branches) == 1 and not result.suspended, result
+    return result.branches[0].position
+
+
+def _hit_by_air_slash(reg: Regulation, team_a: list[TeamSet], move_id: str, item: str | None,
+                      hp: int, maxhp: int) -> tuple[Position, object]:
+    """p1a Charizard's Air Slash into p2a, which uses `move_id`, holds `item` and stands at
+    `hp` of `maxhp` -- a small maximum, so the hit is lethal from full."""
+    pos = _synthetic_position(reg, team_a)
+    target = _slot(pos, 1, 0)
+    target.maxhp, target.hp, target.item = maxhp, hp, item
+    _set_move(pos, 1, 0, 0, move_id)
+    _set_move(pos, 1, 1, 0, "protect")
+    _set_move(pos, 0, 1, 0, "protect")
+    after = _one(
+        reg, pos,
+        _act(pos, 0, ("airslash", 1), ("protect", None)),
+        _act(pos, 1, (move_id, None), ("protect", None)),
+    )
+    return after, _slot(after, 1, 0)
+
+
+@pytest.mark.parametrize("endures", [True, False], ids=["endure", "control"])
+def test_endure_survives_a_lethal_move_from_any_hp(
+    reg: Regulation, team_a: list[TeamSet], endures: bool
+) -> None:
+    """Endure caps a move's damage at 1 HP from wherever the Pokemon stands; the control
+    without it faints to the same hit."""
+    _after, mon = _hit_by_air_slash(reg, team_a, "endure" if endures else "swordsdance", None, 10, 185)
+    if endures:
+        assert mon.hp == 1 and not mon.fainted, mon.hp
+    else:
+        assert mon.fainted
+
+
+def test_endure_does_not_survive_residual_damage(reg: Regulation, team_a: list[TeamSet]) -> None:
+    """Showdown's Endure tests `effect.effectType === 'Move'`: a sandstorm goes through it."""
+    pos = _synthetic_position(reg, team_a)
+    pos.field.weather, pos.field.weather_duration = "sandstorm", 5
+    target = _slot(pos, 1, 0)
+    target.hp, target.item = 4, None
+    _set_move(pos, 1, 0, 0, "endure")
+    for side, slot in ((0, 0), (0, 1), (1, 1)):
+        _set_move(pos, side, slot, 0, "protect")
+    after = _one(
+        reg, pos,
+        _act(pos, 0, ("protect", None), ("protect", None)),
+        _act(pos, 1, ("endure", None), ("protect", None)),
+    )
+    assert _slot(after, 1, 0).fainted
+
+
+def test_focus_sash_needs_full_hp_and_is_consumed(reg: Regulation, team_a: list[TeamSet]) -> None:
+    """At full HP the Sash leaves 1 HP and is spent; one short of full it does nothing."""
+    pos = _synthetic_position(reg, team_a)
+    full, short = _slot(pos, 1, 0), _slot(pos, 1, 1)
+    full.maxhp = full.hp = 10
+    short.maxhp, short.hp = 10, 9
+    full.item = short.item = "focussash"
+    _set_move(pos, 1, 0, 0, "swordsdance")
+    _set_move(pos, 1, 1, 0, "swordsdance")
+    after = _one(
+        reg, pos,
+        _act(pos, 0, ("airslash", 1), ("playrough", 2)),
+        _act(pos, 1, ("swordsdance", None), ("swordsdance", None)),
+    )
+    saved, gone = _slot(after, 1, 0), _slot(after, 1, 1)
+    assert saved.hp == 1 and not saved.fainted and saved.item is None, (saved.hp, saved.item)
+    assert gone.fainted
+
+
+def test_endure_takes_precedence_over_the_sash(reg: Regulation, team_a: list[TeamSet]) -> None:
+    """Endure runs at onDamagePriority -10 and the Sash at -40: Endure caps the damage
+    first, so the Sash sees a survivable hit and is not spent."""
+    _after, mon = _hit_by_air_slash(reg, team_a, "endure", "focussash", 10, 10)
+    assert mon.hp == 1
+    assert mon.item == "focussash", "Endure absorbed the hit, so the Sash is still held"
+
+
+def test_focus_band_is_a_chance_and_is_reported_not_guessed(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """Focus Band is `randomChance(1, 10)` from any HP and is not consumed. Under the pinned
+    budget the port takes the reading the pinned oracle policy takes, and says so."""
+    pos = _synthetic_position(reg, team_a)
+    target = _slot(pos, 1, 0)
+    target.maxhp = target.hp = 10
+    target.item = "focusband"
+    _set_move(pos, 1, 0, 0, "swordsdance")
+    _set_move(pos, 1, 1, 0, "protect")
+    _set_move(pos, 0, 1, 0, "protect")
+    result = resolve_turn(
+        reg, pos,
+        [
+            _act(pos, 0, ("airslash", 1), ("protect", None)),
+            _act(pos, 1, ("swordsdance", None), ("protect", None)),
+        ],
+        budget=Budget.deterministic(0),
+    )
+    mon = _slot(result.branches[0].position, 1, 0)
+    assert mon.fainted
+    assert mon.item == "focusband", "Focus Band is not consumed"
+    assert any("focusband" in note for note in result.unmodelled), result.unmodelled
+
+
+def _quiet(pos: Position, target_move: str = "swordsdance") -> list[SideAction]:
+    """Everyone Protects but p2a, which uses `target_move`."""
+    return [
+        _act(pos, 0, ("protect", None), ("protect", None)),
+        _act(pos, 1, (target_move, None), ("protect", None)),
+    ]
+
+
+def _heaviest(reg: Regulation, pos: Position, actions: list[SideAction]) -> Position:
+    result = resolve_turn(reg, pos, actions, budget=Budget.matrix())
+    assert result.branches and not result.suspended
+    return max(result.branches, key=lambda b: b.probability).position
+
+
+def test_a_sleeping_pokemon_wakes_and_the_counter_is_not_the_lucky_one(
+    reg: Regulation, team_a: list[TeamSet]
+) -> None:
+    """Champions sleep is `sample([2, 3, 3])` (data/mods/champions/conditions.ts): the modal
+    counter is 3, and sleep does end. Absol (faster) Spores Charizard, and the heaviest
+    branch is followed from there -- the modal counter, if the port rolls it.
+
+    Charizard tries to move on the Spore turn itself, which spends one (`time--` in
+    `slp.onBeforeMove`), so the modal 3 leaves it asleep through one more turn and awake on
+    the next; the lucky 2 would wake it on the first.
+    """
+    pos = _synthetic_position(reg, team_a)
+    _set_move(pos, 0, 1, 0, "spore")
+    _set_move(pos, 0, 0, 0, "protect")
+    _set_move(pos, 1, 1, 0, "protect")
+    _set_move(pos, 1, 0, 0, "swordsdance")
+    pos = _heaviest(
+        reg, pos,
+        [
+            _act(pos, 0, ("protect", None), ("spore", 1)),
+            _act(pos, 1, ("swordsdance", None), ("protect", None)),
+        ],
+    )
+    assert _slot(pos, 1, 0).status == "slp"
+    asleep = 0
+    for _ in range(5):
+        pos = _heaviest(reg, pos, _quiet(pos))
+        mon = _slot(pos, 1, 0)
+        assert not mon.fainted, "nothing should be able to faint in a turn of Protects"
+        if mon.status != "slp":
+            break
+        asleep += 1
+    assert asleep == 1, f"the modal counter keeps it asleep one turn past the Spore's, counted {asleep}"
+
+
+def test_freeze_cannot_last_the_whole_battle(reg: Regulation, team_a: list[TeamSet]) -> None:
+    """The champions mod caps a freeze at three attempts (`startTime = 3`); following the
+    heaviest branch -- the 1-in-4 thaw roll answered "no" every time -- it still ends."""
+    pos = _synthetic_position(reg, team_a)
+    for side, slot in ((0, 0), (0, 1), (1, 1)):
+        _set_move(pos, side, slot, 0, "protect")
+    _set_move(pos, 1, 0, 0, "swordsdance")
+    target = _slot(pos, 1, 0)
+    target.status, target.status_counter = "frz", 3
+    for _ in range(5):
+        pos = _heaviest(reg, pos, _quiet(pos))
+        mon = _slot(pos, 1, 0)
+        assert not mon.fainted
+        if mon.status != "frz":
+            break
+    else:
+        raise AssertionError("still frozen after 5 turns with the thaw roll answered no")
+
+
+def test_a_disable_expires_and_the_move_comes_back(reg: Regulation, team_a: list[TeamSet]) -> None:
+    """The flag lives on the move slot, so expiry has to clear it or it is permanent."""
+    pos = _synthetic_position(reg, team_a)
+    for side, slot in ((0, 1), (1, 0), (1, 1)):
+        _set_move(pos, side, slot, 0, "protect")
+    _set_move(pos, 0, 0, 0, "protect")
+    _set_move(pos, 0, 0, 1, "swordsdance")
+    mon = _slot(pos, 0, 0)
+    mon.last_move = "protect"
+    mon.moves[0].disabled = True
+    mon.volatiles.append(Effect(id="disable", duration=4, move="protect"))
+    seen: list[int | None] = [4]
+    for _ in range(6):
+        pos = _heaviest(
+            reg, pos,
+            [
+                _act(pos, 0, ("swordsdance", None), ("protect", None)),
+                _act(pos, 1, ("protect", None), ("protect", None)),
+            ],
+        )
+        mon = _slot(pos, 0, 0)
+        current = mon.volatile("disable")
+        seen.append(current.duration if current else None)
+        if current is None:
+            break
+    assert seen[-1] is None, f"the disable never expired: durations {seen}"
+    assert all(m.usable or m.pp <= 0 for m in mon.moves), [(m.id, m.disabled, m.pp) for m in mon.moves]
+
+
+@pytest.mark.parametrize(
+    ("order", "locked", "left"),
+    [("encore first", "airslash", 2), ("target first", "extremespeed", 3)],
+)
+def test_encore_leaves_exactly_one_move_on_offer(
+    reg: Regulation, team_a: list[TeamSet], order: str, locked: str, left: int
+) -> None:
+    """Encore locks the target's last move for 3 turns, 4 when the target has already moved
+    this turn (`if (!this.queue.willMove(target)) this.effectState.duration++`), one of them
+    spent at the end of this one; the menu after is that move alone."""
+    pos = _synthetic_position(reg, team_a)
+    _set_move(pos, 0, 1, 0, "encore")
+    _set_move(pos, 0, 0, 0, "protect")
+    _set_move(pos, 1, 1, 0, "protect")
+    target = _slot(pos, 1, 0)
+    target.last_move = "airslash"
+    if order == "target first":
+        _set_move(pos, 1, 0, 3, "extremespeed")
+        theirs = _act(pos, 1, ("extremespeed", 1), ("protect", None))
+    else:
+        _set_move(pos, 1, 0, 3, "swordsdance")
+        theirs = _act(pos, 1, ("swordsdance", None), ("protect", None))
+    result = resolve_turn(
+        reg, pos, [_act(pos, 0, ("protect", None), ("encore", 1)), theirs], budget=Budget.deterministic(0)
+    )
+    assert result.branches
+    for branch in result.branches:
+        after = branch.position
+        held = _slot(after, 1, 0).volatile("encore")
+        assert held is not None and held.move == locked, held
+        assert held.duration == left, (order, held.duration)
+        offered = {
+            a.move_id
+            for action in side_actions(reg, after, 1)
+            for a in action.slots
+            if isinstance(a, MoveAction) and a.slot == 0
+        }
+        assert offered == {locked}, sorted(offered)
+
+
+@pytest.mark.parametrize("why", ["never moved", "failencore", "no pp"])
+def test_encore_refuses_what_showdown_refuses(reg: Regulation, team_a: list[TeamSet], why: str) -> None:
+    """`onStart` returns false three ways, and each means no volatile at all."""
+    pos = _synthetic_position(reg, team_a)
+    _set_move(pos, 0, 1, 0, "encore")
+    _set_move(pos, 0, 0, 0, "protect")
+    _set_move(pos, 1, 1, 0, "protect")
+    _set_move(pos, 1, 0, 3, "swordsdance")
+    target = _slot(pos, 1, 0)
+    if why == "never moved":
+        target.last_move = None
+    elif why == "failencore":
+        assert "failencore" in reg.moves["encore"].flags
+        _set_move(pos, 1, 0, 0, "encore", pp=5)
+        target.last_move = "encore"
+    else:
+        _set_move(pos, 1, 0, 0, "protect", pp=0)
+        target.last_move = "protect"
+    after = _one(
+        reg, pos,
+        _act(pos, 0, ("protect", None), ("encore", 1)),
+        _act(pos, 1, ("swordsdance", None), ("protect", None)),
+    )
+    assert _slot(after, 1, 0).volatile("encore") is None

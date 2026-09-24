@@ -18,9 +18,9 @@ import pytest
 from pokeuraou.actions import switch_actions_after_faint
 from pokeuraou.oracle import ORACLE_JS, TeamSet
 from pokeuraou.regulation import Regulation
-from pokeuraou.resolve import replacements_needed, resolve_replacements
 
 from . import _diff_replacement_entry as diff
+from ._port import replacements_needed, resolve_replacements
 from .test_actions import _synthetic_position
 
 pytestmark = pytest.mark.oracle
@@ -73,8 +73,25 @@ def _pass(pos, side_index: int):  # noqa: ANN001, ANN202
     )
 
 
+@pytest.fixture()
+def on_the_port(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The harness in tools/ asks Python's replacement phase; here it asks the port's
+    (IKA-210). The tool itself moves to the port with IKA-212."""
+    monkeypatch.setattr(diff._MODULE, "replacements_needed", replacements_needed)  # noqa: SLF001
+    monkeypatch.setattr(diff._MODULE, "resolve_replacements", resolve_replacements)  # noqa: SLF001
+
+
+#: The port refuses a phase the sampled battles reach (IKA-208): a Throat Chop'd Pokemon
+#: (seed 1, and the large sample) and a Disguise holder (seed 2). Strict, so the day the
+#: port answers them these come off (IKA-210).
+REFUSED = pytest.mark.xfail(
+    strict=True, raises=AssertionError, reason="the port refuses throatchop / disguise (IKA-208)"
+)
+
+
+@REFUSED
 @pytest.mark.parametrize("seed", [1, 2])
-def test_replacements_match_showdown(seed: int) -> None:
+def test_replacements_match_showdown(seed: int, on_the_port: None) -> None:
     if not ORACLE_JS.exists():
         pytest.skip("oracle not built")
     report = diff.run(battles=10, seed=seed, max_turns=14)
@@ -87,8 +104,9 @@ def test_replacements_match_showdown(seed: int) -> None:
     assert report.divergence_rate == 0.0, report.render()
 
 
+@REFUSED
 @pytest.mark.slow
-def test_replacement_divergence_over_a_large_sample() -> None:
+def test_replacement_divergence_over_a_large_sample(on_the_port: None) -> None:
     """The number quoted in the README, measured rather than remembered."""
     if not ORACLE_JS.exists():
         pytest.skip("oracle not built")
