@@ -15116,3 +15116,164 @@ old の拒否の内訳（seed 1）は IKA-207 の記録と同じ（throatchop 57
 * 既に起票済み: IKA-213（カウンター等が damageCallback のフックで素通り）、IKA-214（はたきおとす・どろぼうがねんちゃくを見ない、メガシンカ後の石が外せる）
 
 構造の変更（取り込みの時に見るもの）: `Turn` に項目は足していない。`hit_target` に引数 2 つ（`exploded`・`forced_hits`）、`reg::Species` に `base`、`Reg::mega_stone_stays`、`resolve::drag_in`・`showdown_volatiles`。`resolve_turn` の入口で `showdown_volatiles` を通す（2 行）。
+
+## 9/24 — IKA-210: 規則のテストを port に向け直した —— 55 ファイル 1,323 件 → 854 件（Python 側の写し 354・Python 対 port 113 を消し、8 件を Rust の単体試験へ）。テスト一式は exe を前提にし、無ければ失敗。inert.rs・modelled.rs は dex の handler と port の source で決める port 自身の表になった（注記が 41 id 増え 23 id 減る）
+
+段 5（親 IKA-204 §6）。src/pokeuraou/resolve.py と呼び出し元は触っていない。
+
+### 1. 何をしたか
+
+* `tests/_port.py`: Python の `resolve_turn`・`resume_turn`・`resume_alternatives`・`paused_in`・`resolve_replacements`・`apply_lead_abilities`・`replacements_needed` と同じ名前・同じ形（`TurnResult` の `branches`/`suspended`/`exact`/`unmodelled`、再開できる pause）で、port の `turn`・`alternatives`・`replacements`・`leads`・`needed` に聞く。イベント（`Branch.events`・`acts`）を読むと IKA-215 を名指しして落ちる。拒否は理由付きの `PortRefused`（skip にも None にもしない）。process はセッションで 1 本。`POKEURAOU_RUST_NODE_BIN` で別の build に向けられ、`POKEURAOU_PORT_BEFORE_TURN=1` で `turn` 命令の無い古い exe にも `resolve`＋`select` で聞ける（正の対照専用。他の命令は即座に断る。古い exe は未知の kind を fill と読んで pipe で待ち続けるため）。`Budget` もここから取る（rustnode 経由。IKA-212 で移る）
+* port twin のあるオラクル 33 ファイル: Python 側の試験を消し、port 側が Python と比べていた半分（行列 budget の再解・Python の枝の `to_json`・Python のイベントで命中の枝を選ぶ）を消した。命中の枝は budget で命中を固定して選ぶ（`enumerate_accuracy=False`。chance の方針の局面は「Showdown の局面が port の枝の中にある」）。Python の試験にしか無かった Showdown 側の確かめ（ログの行、要求の中身）は twin に移した。IKA-208 の後、Disguise・Trick・U ターンの xfail は外した（U ターンは turn 命令で pause の局面まで比べる）
+* Python だけの規則: `test_resolve` の `_Turn.deal_damage`・`apply_status`・`_apply_disable`・`_apply_encore` で試していたもの（こらえる 2、きあいのタスキ、こらえる＞タスキ、きあいのハチマキ、眠りと凍りのカウンタ、かなしばりの解け、アンコールの固定・長さ・失敗）を port の 1 ターンとして書き直した。眠りは「スポアの同じターンに 1 回減る」ので、最頻の 3 で眠りは 1 ターン（2 なら 0）
+* `test_eject_selfswitch` の twin は「止まったか」しか見ておらず、だっしゅつボタンの持ち主の交代でも止まるので攻撃側の交代を区別できていなかった。Python の試験と同じく攻撃側の枠の `pendingselfswitch` を見る形に直した
+* 内部の試験: `stratified_rolls` 4・`stall_success_chance`・`multihit_counts`（`test_resolve` と `test_multihit_counts`）を `rust/src/moves_unit_tests.rs`（moves の子 module、moves.rs の末尾に include 1 行）へ。CI に `cargo test --release` の手順を足した。`pending_attacks`・`_encore_override`・`_Turn` の項目の監査・Python の位置の複写の監査・`_duration` の dex 監査は消した（最後は port の 1 ターンの試験に替えた: おいかぜ 4、まとわりつくの縛りに長さがある）
+* exe の前提化: 26 ファイルの「no Rust binary」の skip を `pytest.fail` に。exe を存在しない場所に向けると test_recharge・switch_in_order・weather_recovery の 24 件中 21 件が落ちる（残る 3 件は Showdown とメニューだけを読む）。`tools/ci_skip_audit.py` の rust の分類は `--absent rust` を受け付けない（`declarable=False`）
+
+### 2. 件数（向け直す前 d7239e0 と後、同じ 55 ファイル）
+
+```
+  前 1,323 件 → 後 854 件（消えた 505・増えた 36・そのまま 818）
+  消えた 505 の内訳
+    port twin のあるオラクル試験の Python 側                 354
+    Python と port を比べる試験                                113
+    名前・パラメタの付け替え（同じ規則、後ろの「増えた」に対応）  23
+    Rust の単体試験へ（6 本になった）                            8
+    Python の内部（_Turn の項目・pending_attacks・_encore_override・位置の複写）  4
+    Python の diff_turn の走り（port の走りは test_diff_turn_port）  3
+  増えた 36: 付け替え 23・新しい試験（メニューだけの確かめ、Scale Shot の重み、merge 等）6・IKA-217 の取り込み 7
+  そのまま 818: port で走る 704（Python の fold の 4 とイベントの 2 を除く 698 が port）、Python のまま 114（§3）
+  ほかに: IKA-208 の新しいオラクル 6 ファイル（Budget を _port から）、test_port_coverage +3（うち 1 は vendor が無いと skip）、Rust の単体試験 6
+```
+
+### 3. まだ Python の resolver を import するテスト
+
+イベントで断言する（IKA-215 の後）: `test_event_grouping` 3・`test_resumed_turn_log` 3・`test_residual_speed_tie::test_python_orders_the_residuals_as_showdown` 2。計 8 件。
+
+道具として使う（IKA-209 で呼び出し元が port に寄った後に向ける。調整役の指示で書き換えは待つ）:
+
+| ファイル | 件数 | 使うもの | IKA-209 の後の向け方 |
+|---|---|---|---|
+| test_belief | 9 | `resolve_turn`・`turn_expectation` | `pokeuraou.port.turn` と `fold` の期待値 |
+| test_beliefnode | 18 | `batched_payoff`・`resolve_turn` | `port.batched_payoff`。3 件は IKA-208 の skip（fallback は IKA-209） |
+| test_search | 15 | `batched_payoff`・`resolve_turn` | `port.batched_payoff(s)` |
+| test_hidden | 21 | `paused_in`・`resume_alternatives`・`turn_leaves` | `port.resume_alternatives`・`port.turn_leaves` |
+| test_hidden_search | 9 | `batched_payoff`・`replacements_needed` | 同上 |
+| test_hidden_selfswitch | 2 | `resume_alternatives`・`turn_leaves` | 同上 |
+| test_symmetry | 5 | `turn_expectation`・`settle_outcome`、1 件はイベント | fold と port、イベントの 1 件は IKA-215 |
+| test_rust_node | 25 | Python の fill と port の fill を比べる | 比べる相手が消える。port の `turn` を各セルで引いた値と `fill` を比べる形（port の中の一致）に |
+| test_resolve | 4 | `turn_expectation`・`turn_leaves`・`batched_payoffs` の `LEAF_CHUNK` | fold の 2 は `fold.py` へ、chunk の 2 は Python の fill ごと IKA-212 で消える |
+| test_diff_turn_port | 11 | tools/diff_turn の Python の列 | IKA-212（道具の Python の列を消す時） |
+
+IKA-209 が `pokeuraou.port`（batched_payoff(s)・turn・resume_alternatives・turn_leaves・replacements_needed・resolve_replacements・apply_lead_abilities）を入れたら、`tests/_port.py` はその上の薄い層にする（`resolve_turn` という名前とイベントで落ちる所だけを残す）。`Budget` は budget.py、fold は fold.py、`FIRST_TURN_OUT_MOVES` は moveinfo.py へ（IKA-209）。
+
+### 4. 正の対照（ファイルごとの「規則の失敗」の件数。[ ] は旧 exe が命令を知らない・断る失敗）
+
+exe: old1 = 50ab618（IKA-172 の前）、old2 = 010ccb4（IKA-153 の前）、211c = `--features ika211-control`（d7239e0、交代の段だけは IKA-208 の後の build）、210c = `--features ika210-control`（この枝で足した。反動の固定が解けない・だっしゅつボタン／ききかいひの隣で自分の交代を消す・天気が終わってから残差を並べ同速を注記・2〜5 回を 1/3 1/3 1/6 1/6・枝を併合しない。既定 off、IKA-211 と同じ形）
+
+```
+file                               old1   old2   211c   210c
+after_move_oracle                    14     14      0      0
+hazards_after_hit                    11     11      0      0
+hazards_foe_side                      0      4      0      0
+helping_hand_fails                    5      5      0      0
+perish_song                           7      7      0      0
+psychic_terrain_per_target            0      6      0      0
+salt_cure_champions                   0      3      0      0
+substitute                           22     22      0      0
+taunt_before_move                     4      4      0      0
+terrain_surge                      8[6]   8[6]      1      0
+type_spending_moves                   0      6      0      0
+weather_recovery                     16     16      0      0
+recharge                              0      0      0      1
+charge_target                         4      4      0      0
+choice_lock                           8      8      0      0
+confusion_duration                   19     19      0      0
+confusion_immunity                   21     21      0      0
+eject_items                        5[9]   5[9]      0      0
+eject_selfswitch                      0      0      0      1
+fake_out_first_turn                   0      3      0      0
+feint_order                           0   0[4]      0      0
+goodasgold_flowerveil                11     11      0      0
+leech_seed                            0      6      0      0
+multihit_counts                       0      2      0      1
+outrage_lock                         31     31      0      0
+priority_block_per_target             0      9      0      0
+random_target                         5      5      0      0
+residual_speed_tie                    0      0      0      1
+switch_in_order                    0[1]   0[1]      1      0
+trace_synchronize                 13[5]  13[5]      1      0
+trap_sources                          1      3      0      0
+actions                               1      1      0      0
+replacement                        0[5]   0[5]      2      0
+trapped_flag_children              4[1]   4[1]      0      0
+port_commands                      0[6]   0[6]      3      0
+resolve                            1[3]   1[5]      1      0
+branch_merge                        時間切れ（古い exe の select 総当たり）   2
+Rust の単体試験                    210c で multihit_distribution が落ちる（6 中 1）
+```
+
+規則の失敗が 0 のもの: disguise_afterhit・disguise_order・IKA-208 の 6 ファイル（旧 exe は Disguise 等を断る。規則を入れたのが IKA-208 で、その対照は IKA-208 の記録）、feint（old2 は Feint を断る = IKA-61 の前）、mega_hp_base（旧 exe に leads 命令が無い。規則は IKA-60 の記録の対照）、position_copy（port を通らない）、encode・final_position・game_log（port は局面を作る道具。規則を断言していない）。
+
+### 5. inert.rs・modelled.rs を port 自身の表にした
+
+`tools/port_coverage.py` は Python の source と `effects.all_modelled_*`・`resolve.STATUS_MOVES_FULLY_MODELLED` の走査をやめ、port の engine（resolve・moves・commands・damage・effects・battler・speed・terrain・moveinfo）の source と、regulation の dump の `customHooks`（bridge が dex から読む）で決める。
+
+* `inert`: port の engine が名前を出さない id（gate はそれを自分のコード無しで通す）
+* `modelled`（注記を出さない）: Showdown が何もしない（`customHooks` が空で、Showdown の他のコードも名前を出さない）／port が作用する（名前を出す。ただし gate の「Python reports these and changes nothing」の群だけは作用ではない。そのうち作用の場所で report するものは除く）／メガストーン
+* `status_move_is_fully_modelled`: custom code の無い（fields が全て）変化技と、custom code を port が名前で扱う変化技
+* dump の `customHooks` が空でも Showdown が名前で扱う id（ふゆう・ダンサー・はやおき・ふしょく・マルチタイプ・ARシステム・あとだしを Showdown の sim / conditions.ts が名前で扱う、天気の岩・ひかりのねんど・グランドコート・しめつけバンドの durationCallback、カブトアーマー・シェルアーマーの `onCriticalHit: false`）は `SHOWDOWN_ACTS_BY_NAME` に書き、vendor がある時に `test_showdowns_names_are_the_ones_listed` が vendor から読み直して照合する（worktree には vendor が無いので skip。**監査の `--absent vendor` が 1 増える**）
+* 種族が持ち dex に無い id（オーラガード）は handler を持つとみなす
+* `resolve.rs`: 変化技の拒否（「Python は模型化し port はしていない」）を消した。それが拒否していた技は今日 0（全部 `status_move_handled` にあった）。`status_move_handled` は gate ではなくなり（記録として残し `#[allow(dead_code)]`）、`port_gate_audit` からも外した。Moonlight の形（IKA-187）は `test_port_coverage` の「custom code の技を port が名前で呼ばなくなると fully から外れて report が出る」で見る。`ability_handled` に `stickyhold`・`suctioncups` を足した（port は実装しているが gate に書かれず、Python が名前を出さないので inert で通っていた。新しい走査で見つかった）
+
+違う id（前の表 → 今の表、理由つき）:
+
+```
+ability_is_inert 134 → 120
+  外れた 14（port が名前を出す。gate の群を含む。通ることは変わらない）:
+    aromaveil bigpecks damp healer heavymetal keeneye lightmetal pressure snowcloak
+    stickyhold suctioncups sweetveil symbiosis telepathy
+item_is_inert 93 → 92
+  外れた 1（port が名前を出す）: lightclay
+
+ability_is_modelled 206 → 198
+  注記が増える 30（Showdown に handler があり port は名前を出さない＝port は無視している）:
+    anticipation beadsofruin cheekpouch costar cudchew forewarn frisk gluttony harvest hydration
+    leafguard magician moxie naturalcure perishbody pickpocket protosynthesis quarkdrive seedsower
+    shedskin sniper steadfast supersweetsyrup supremeoverlord swordofruin tabletsofruin toxicchain
+    vesselofruin wanderingspirit windpower
+  外れた 1（M-C の dump に無い）: embodyaspect
+  注記が減る 16（port が作用する）: comatose cursedbody earlybird infiltrator noguard quickdraw
+    slowstart speedboost stall steamengine stickyhold suctioncups surgesurfer thermalexchange
+    triage watercompaction
+  注記が減る 4（無視するが作用の場所で report する。毎回の注記は二重）: angerpoint angershell berserk poisonpoint
+  注記が減る 3（Showdown が何もしない）: ballfetch honeygather terashell
+item_is_modelled 167 → 155
+  注記が増える 11（handler があり port は名前を出さない）: aspearberry bigroot bindingband
+    cheriberry chestoberry kingsrock leppaberry mentalherb metronome pechaberry rawstberry
+  外れた 1（M-C の dump に無い）: custapberry
+status_move_is_fully_modelled 77 → 112
+  外れた 11（M-C の変化技ではない。表は dump から作る）: burningbulwark covet growl knockoff
+    leer maxguard obstruct silktrap spotlight tailwhip thief
+  入った 35（custom code が無い。report は元から出ない。変わるのは消した拒否の側だけ）:
+    acidarmor aromaticmist babydolleyes coaching coil cosmicpower cottonguard cottonspore decorate
+    doubleteam dragondance eerieimpulse featherdance flatter glare memento nobleroar poisonpowder
+    quiverdance rockpolish scaryface shellsmash shelter shiftgear sing spicyextract stringshot
+    stunspore swagger sweetkiss sweetscent tearfullook teeterdance tickle toxicthread
+  入った 11（custom code を port が名前で扱う。「status move: X」の report が減る）: charge
+    disable dragoncheer endure focusenergy healingwish ingrain magicroom magnetrise safeguard wonderroom
+```
+
+`port_coverage --check`・`port_gate_audit --check`・ruff は通る。表を変えた後の exe で、向け直した 65 ファイル 961 件は全部通る（skip 4 は IKA-208 の 3 と vendor の 1、xfail 1 は IKA-208 の Flash Fire の 1.5 倍。両エンジンに無い）。
+
+### 6. 別課題の候補
+
+* **注記が増えた 41 id は、port（と Python）が Showdown と違う答えを出している所**。Python の `all_modelled_abilities` はこれらを「計算に入っている」と書いて注記を止めていた。ダメージに効くもの: わざわいの 4 特性（beadsofruin・swordofruin・tabletsofruin・vesselofruin）、スナイパー、こだいかっせい・クォークチャージ、そうだいしょう。ほかに moxie（じしんかじょう）・pickpocket・magician・ほかの状態異常の実、おうじゃのしるし、メトロノーム
+* gate の「No effect a turn can observe」の群に、ターンに効く特性が入っている: pressure（PP を余分に減らす）、telepathy（味方の技を受けない）、heavymetal・lightmetal（ヘビーボンバー・けたぐりの威力）、snowcloak・sandveil（回避）、healer・symbiosis・sweetveil・aromaveil。今は注記が出る（前は出なかった）
+* `tests/_port.py` を IKA-209 の `pokeuraou.port` の上に載せ替える（§3）
+* `test_rust_node` は比べる相手（Python の fill）が消えるので、port の中の一致（`turn` をセルごとに引いた値と `fill`）の形に作り直す
+* `test_replacement` の harness（tools/diff_replacement）は tools 側がまだ Python。テストでは port の段に差し替えて回している。道具ごと port に向けるのは IKA-212
+
+### 7. 機械
+
+heavy.py の記録（IKA-210）: cargo build --release 15 回 計 373 s（8 コア。本体・ika210-control・ika211-control・旧 2 本）、cargo test 4 回 30 s（8 コア）、テストファイル 9 回 計 581 s（1 コア。1 回で最長 182 s）、正の対照 13 回 計 1,595 s（1 コア。うち古い exe での時間切れと待ちの取り消しが 2 回。古い exe に `resolve` の select を枝ごとに聞くので exact の budget で遅い）。
