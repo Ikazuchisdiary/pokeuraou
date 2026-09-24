@@ -183,10 +183,21 @@ def _same_probability(mine: float, theirs: float, what: str, tally: Counter) -> 
         raise Differ(f"{what}: probability python {mine!r}, port {theirs!r}")
 
 
+def _same_notes(mine, theirs, what: str, tally: Counter) -> None:  # noqa: ANN001
+    """The notes (`unmodelled`). A difference is booked, not raised: IKA-210 rebuilt the
+    port's `inert.rs` and `modelled.rs` from Showdown's handlers, so the port now notes ids
+    Python does not and the other way round. The sample is then `notes only` if nothing
+    else differs, with the ids that account for it."""
+    left, right = set(mine.unmodelled), set(theirs.unmodelled)
+    if left != right:
+        del what
+        only = sorted(left - right), sorted(right - left)
+        tally[f"notes: python only {only[0]}, port only {only[1]}"] += 1
+
+
 def compare_turn(py: TurnResult, port: rustnode.PortTurn, what: str, tally: Counter) -> None:
     """Every branch and every pause, in order, with the notes and `exact`."""
-    if tuple(sorted(py.unmodelled)) != tuple(sorted(port.unmodelled)):
-        raise Differ(f"{what}: notes python {sorted(py.unmodelled)}, port {sorted(port.unmodelled)}")
+    _same_notes(py, port, what, tally)
     if bool(py.exact) != bool(port.exact):
         raise Differ(f"{what}: exact python {py.exact}, port {port.exact}")
     if len(py.branches) != len(port.outcomes) or len(py.suspended) != len(port.pauses):
@@ -483,8 +494,7 @@ def _run_phase(node: rustnode.RustNode, sample: dict, py: dict, tally: Counter) 
     if port is None:
         raise Differ("refused: the port refused the phase")
     mine = py["plain"]
-    if tuple(sorted(mine.unmodelled)) != tuple(sorted(port.unmodelled)):
-        raise Differ(f"notes python {sorted(mine.unmodelled)}, port {sorted(port.unmodelled)}")
+    _same_notes(mine, port, "phase", tally)
     _same_position(mine.position, port.position, "phase")
     same_lines(mine, port, "phase")
     tally["positions"] += 1
@@ -498,8 +508,7 @@ def _run_phase(node: rustnode.RustNode, sample: dict, py: dict, tally: Counter) 
         if theirs is None:
             raise Differ(f"refused: seed {seed}")
         _same_position(phase.position, theirs.position, f"seed {seed}")
-        if tuple(sorted(phase.unmodelled)) != tuple(sorted(theirs.unmodelled)):
-            raise Differ(f"seed {seed}: notes differ")
+        _same_notes(phase, theirs, f"seed {seed}", tally)
         if json.dumps(rng.bit_generator.state, sort_keys=True) != state:
             raise Differ(f"seed {seed}: the generator drew differently")
         same_lines(phase, theirs, f"seed {seed}")
@@ -541,6 +550,10 @@ def work(sample: dict) -> dict:
                 _run_phase(node, sample, py, tally)
             verdict = "same"
             detail = ""
+            noted = sorted(k for k in tally if k.startswith("notes: "))
+            if noted:
+                verdict = "notes only"
+                detail = " | ".join(noted)
         except Differ as exc:
             text = str(exc)
             verdict = "refused" if text.startswith("refused") else "differ"
@@ -587,8 +600,8 @@ def summarise(results: list[dict], exes: list[str]) -> dict:
                 if v["detail"]:
                     if v["verdict"] == "differ":
                         key = v["detail"][:160]
-                    elif v["verdict"] == "port-only rule":
-                        key = v["detail"]
+                    elif v["verdict"] in ("port-only rule", "notes only"):
+                        key = v["detail"][:240]
                     else:
                         key = v["detail"].split(":")[0]
                     details[key] += 1
@@ -600,7 +613,7 @@ def summarise(results: list[dict], exes: list[str]) -> dict:
                 {
                     "differ_where": unexplained[:10],
                     "verdicts": dict(verdicts),
-                    "tally": dict(sorted(tally.items())),
+                    "tally": dict(sorted((k, n) for k, n in tally.items() if not k.startswith("notes: "))),
                     "details": dict(details.most_common(8)),
                 }
             )
