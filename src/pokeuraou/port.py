@@ -35,7 +35,14 @@ from .budget import Budget
 from .fold import Average, BestOf, Fold, LeafRef, TurnLeaves, _fold_from_json, _shift, fold_value
 from .position import Position
 from .regulation import Regulation
-from .rustnode import PortPause, PortPhase, PortTurn, PortUnavailable, RustNode
+from .rustnode import (
+    EncodedAlternatives,
+    PortPause,
+    PortPhase,
+    PortTurn,
+    PortUnavailable,
+    RustNode,
+)
 
 #: The objectives the port scores itself.
 PORTED_OBJECTIVES = frozenset({"hp-share", "faints"})
@@ -133,6 +140,54 @@ def resume_alternatives(
         return answer
 
     return ask(reg, call)
+
+
+def alternatives_encoded(
+    reg: Regulation,
+    pause: PortPause,
+    *,
+    world: tuple[Position, int] | None = None,
+    want: Sequence[int] | None = None,
+    shared: tuple[int, Sequence[int]] | None = None,
+    rules: Any = None,  # noqa: ANN401 - EncodingRules
+) -> EncodedAlternatives:
+    """`resume_alternatives` with the wanted options' turns flattened and encoded over there
+    (`RustNode.alternatives_encoded`): the self-switch node's leaves as arrays (IKA-209)."""
+
+    def call(node: RustNode) -> EncodedAlternatives:
+        answer = node.alternatives_encoded(
+            pause, world=world, want=want, shared=shared, rules=rules
+        )
+        if answer is None:
+            raise _refused(node, "a paused turn")
+        return answer
+
+    return ask(reg, call)
+
+
+def resume(reg: Regulation, pause: PortPause, choices: Sequence[SideAction]) -> PortTurn:
+    """`resume_turn`: the rest of a paused turn with both sides' choices, every branch."""
+
+    def call(node: RustNode) -> PortTurn:
+        answer = node.resume(pause, list(choices), full=True)
+        if answer is None:
+            raise _refused(node, "a paused turn")
+        return answer
+
+    return ask(reg, call)
+
+
+def fold_from_json(node: dict) -> Fold:
+    """The port's fold tree with `numpy.float64` weights, as `turn_leaves` builds its own:
+    `fold_value` sums the parts with `sum()`, which adds exact floats differently (IKA-209)."""
+    if "leaf" in node:
+        return LeafRef(index=int(node["leaf"]))
+    if "best" in node:
+        return BestOf(
+            chooser=int(node["best"]),
+            options=[fold_from_json(option) for option in node["options"]],
+        )
+    return Average(parts=[(np.float64(w), fold_from_json(part)) for w, part in node["avg"]])
 
 
 def turn_leaves(reg: Regulation, result: PortTurn, *, depth: int = 0) -> TurnLeaves:
@@ -524,6 +579,7 @@ __all__ = [
     "PORTED_OBJECTIVES",
     "HeldLeaves",
     "PortRefused",
+    "alternatives_encoded",
     "apply_lead_abilities",
     "ask",
     "batched_payoff",
@@ -531,6 +587,7 @@ __all__ = [
     "branch",
     "replacements_needed",
     "resolve_replacements",
+    "resume",
     "resume_alternatives",
     "turn",
     "turn_leaves",

@@ -994,6 +994,75 @@ class RustNode:
             ],
         )
 
+    @timing.timed("rust.alternatives")
+    def alternatives_encoded(
+        self,
+        pause: PortPause,
+        *,
+        world: tuple[Position, int] | None = None,
+        want: Sequence[int] | None = None,
+        shared: tuple[int, Sequence[int]] | None = None,
+        rules: Any = None,  # noqa: ANN401 - EncodingRules
+    ) -> EncodedAlternatives | None:
+        """`resume_alternatives` with each wanted option's turn flattened over there, as
+        `turn_leaves` flattens it, and every leaf encoded (IKA-209).
+
+        What the self-switch node scores: the leaves cross as the encoder's arrays, by the
+        road an encoded node's take, instead of as positions. `shared=(side, slots)` also
+        answers `_shared_self_switch_plans`' question per option. None when the port
+        declines the pause.
+        """
+        request: dict[str, Any] = {
+            "kind": "alternativesEncoded",
+            "pause": pause.raw,
+            "in": _world(world),
+        }
+        if want is not None:
+            request["want"] = [int(k) for k in want]
+        if shared is not None:
+            request["shared"] = {"side": int(shared[0]), "slots": [int(s) for s in shared[1]]}
+        wants_old = bool(rules is not None and rules.mega_from_slots)
+        if wants_old:
+            request["encoding"] = rules.to_request()
+        if not self._shm_off:
+            request["shm"] = (
+                {"name": self._shm.name, "bytes": self._shm.size}
+                if self._shm is not None
+                else {"name": None, "bytes": 0}
+            )
+        header = self._exchange(request)
+        if header.get("refused"):
+            self.refusal = str(header["refused"])
+            return None
+        count = int(header["bytes"])
+        _road, body = self._body(header, count)
+        node = EncodedNode.unpack(header, body)
+        if wants_old and node.mega_from_slots is not True:
+            raise RuntimeError(
+                "the Rust node was asked for the revision-1 can_mega rule and did not say "
+                f"it applied it (echo {node.mega_from_slots!r}); the binary predates IKA-141"
+            )
+        timing.count("body.bytes", count)
+        chooser = header["chooser"]
+        return EncodedAlternatives(
+            chooser=None if chooser is None else int(chooser),
+            options=[_side_action(option) for option in header["options"]],
+            plans=[
+                None
+                if "start" not in plan
+                else EncodedPlan(
+                    start=int(plan["start"]),
+                    count=int(plan["count"]),
+                    fold=plan["fold"],
+                    unmodelled=tuple(plan["unmodelled"]),
+                    suspended=bool(plan["suspended"]),
+                )
+                for plan in header["plans"]
+            ],
+            untouched=[plan.get("untouched") for plan in header["plans"]],
+            node=node,
+        )
+
     @timing.timed("rust.replacements")
     def resolve_replacements(
         self,
@@ -1102,6 +1171,31 @@ class PortPause:
 
 def _acts(raw: dict[str, Any]) -> list[tuple[int, str]]:
     return [(int(start), str(label)) for start, label in raw.get("acts") or []]
+
+
+@dataclass
+class EncodedPlan:
+    """One option's turn as `turn_leaves` flattens it: its rows of the answer's arrays
+    (`start`, `count`) and the fold over them, with leaf indices local to the plan."""
+
+    start: int
+    count: int
+    fold: dict[str, Any]
+    unmodelled: tuple[str, ...]
+    #: Whether the resumed turn paused again (it is then not one the shared path can use).
+    suspended: bool
+
+
+@dataclass
+class EncodedAlternatives:
+    """`alternatives_encoded`'s answer: who chooses, every option, the wanted options'
+    plans (None for the others), `shared`'s answer per option, and the arrays."""
+
+    chooser: int | None
+    options: list[SideAction]
+    plans: list[EncodedPlan | None]
+    untouched: list[bool | None]
+    node: EncodedNode
 
 
 @dataclass

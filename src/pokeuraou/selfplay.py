@@ -1294,7 +1294,17 @@ def _do_self_switch_node(
     also says what "never reaches" is checked against. Only the options that do reach them
     are resolved per completion. `definition=True` takes the per-completion path for every
     option; the tests and `scratchpad/ika150_selfswitch_replay.py` hold the two equal.
+
+    A learned leaf takes `_self_switch_encoded` instead (IKA-209): the same plans, the same
+    rows in the same order and the same fold, with the leaves crossing as the encoder's
+    arrays rather than as positions. This road is for an evaluator without an encoded form.
     """
+    if any(_encoded_scoring(reg, leaf) is not None for leaf in leaves):
+        done = _self_switch_encoded(
+            reg, pause, record, leaves, hidden=hidden, definition=definition
+        )
+        if done is not _BY_POSITIONS:
+            return done
     with timing.stage("selfswitch.resume"):
         chooser, alternatives = port.resume_alternatives(reg, pause)
     if chooser is None or not alternatives:
@@ -1305,25 +1315,10 @@ def _do_self_switch_node(
     options = [option.to_choice() for option, _resumed in alternatives]
     timing.count("selfswitch.options", len(options))
 
-    spread = None
-    if hidden is not None:
-        other = 1 - chooser
-        with timing.stage("selfswitch.complete"):
-            carried = seen_identities(pause.position, other, hidden.seen[other])
-            shown = seen_slots(pause.position, other, carried)
-            try:
-                spread = completions(
-                    reg, pause.position, other, hidden.sheets[other], seen=shown,
-                    weights=_bench_weights(
-                        hidden.bench_prior, other, pause.position, shown, record,
-                        hidden.leads[other],
-                    ),
-                )
-            except ValueError as problem:
-                record.unmodelled.append(f"hidden bench at a self-switch: {problem}")
-                return None
-        if len(spread) == 1 and spread[0].exact:
-            spread = None
+    try:
+        spread = _self_switch_spread(reg, pause, chooser, record, hidden)
+    except ValueError:
+        return None
 
     # One list of plans per world the chooser cannot tell apart, and that world's weight.
     if spread is None:
@@ -1356,36 +1351,246 @@ def _do_self_switch_node(
                 record.unmodelled.extend(plan.unmodelled)
                 offset += count
 
-        # Side 0 is the maximiser the payoff matrices are written for.
-        best = int(np.argmax(scores)) if chooser == 0 else int(np.argmin(scores))
-        policy = [0.0] * len(alternatives)
-        policy[best] = 1.0
-        waiting = ["pass"]
-        record.decisions.append(
-            Decision(
-                turn=pause.position.turn,
-                kind="selfswitch",
-                position=pause.position.to_json(),
-                own_actions=options if chooser == 0 else waiting,
-                own_policy=policy if chooser == 0 else [1.0],
-                foe_actions=waiting if chooser == 0 else options,
-                foe_policy=[1.0] if chooser == 0 else policy,
-                search_value=float(scores[best]),
-                own_chosen=options[best] if chooser == 0 else waiting[0],
-                foe_chosen=waiting[0] if chooser == 0 else options[best],
-                # Read for the record alone: the choice above used only `other`'s.
-                shown=_shown_record(
-                    pause.position,
-                    None
-                    if hidden is None
-                    else [
-                        seen_identities(pause.position, i, hidden.seen[i]) for i in (0, 1)
-                    ],
+        best = _record_self_switch(record, pause, chooser, options, scores, hidden)
+    return alternatives[best][1]
+
+
+#: `_self_switch_encoded` saying "not mine": the chooser's leaf has no encoded form.
+_BY_POSITIONS = object()
+
+
+def _encoded_scoring(reg: Regulation, evaluate: Any) -> tuple[Any, Any, Any] | None:  # noqa: ANN401
+    """(scorer, encoder, rules) for a leaf with an encoded form, else None."""
+    if evaluate is None:
+        return None
+    owner = getattr(evaluate, "__self__", evaluate)
+    scorer = getattr(owner, "from_encoded", None)
+    if scorer is None:
+        return None
+    from .beliefnode import _encoder_for
+    from .encode import rules_of
+
+    encoder = (
+        getattr(owner, "encoder", None)
+        or getattr(getattr(scorer, "__self__", None), "encoder", None)
+        or _encoder_for(reg)
+    )
+    return scorer, encoder, rules_of(evaluate)
+
+
+def _self_switch_spread(
+    reg: Regulation,
+    pause: PortPause,
+    chooser: int,
+    record: GameRecord,
+    hidden: _HiddenBench | None,
+) -> list | None:
+    """The completions of the other side's unseen bench, or None when nothing is hidden.
+    Raises ValueError (after noting it) when the sheet cannot explain the board."""
+    if hidden is None:
+        return None
+    other = 1 - chooser
+    with timing.stage("selfswitch.complete"):
+        carried = seen_identities(pause.position, other, hidden.seen[other])
+        shown = seen_slots(pause.position, other, carried)
+        try:
+            spread = completions(
+                reg, pause.position, other, hidden.sheets[other], seen=shown,
+                weights=_bench_weights(
+                    hidden.bench_prior, other, pause.position, shown, record,
+                    hidden.leads[other],
                 ),
             )
+        except ValueError as problem:
+            record.unmodelled.append(f"hidden bench at a self-switch: {problem}")
+            raise
+    if len(spread) == 1 and spread[0].exact:
+        return None
+    return spread
+
+
+def _self_switch_encoded(
+    reg: Regulation,
+    pause: PortPause,
+    record: GameRecord,
+    leaves: tuple[LeafEvaluator | None, LeafEvaluator | None],
+    *,
+    hidden: _HiddenBench | None,
+    definition: bool,
+) -> PortTurn | None | object:
+    """`_do_self_switch_node` with the leaves encoded over there (IKA-209).
+
+    The same plans in the same order as the positions road: per world, per option, each
+    plan's rows as `turn_leaves` lays them out, a shared option's rows the true pause's
+    with the completion's bench patched in (`beliefnode._patched`, which the positions
+    road does to the positions with `_with_bench`), and the whole node scored in one
+    call of the leaf, chunked where `BatchedValue` chunks. Only what crosses changed:
+    arrays instead of every leaf as JSON, which was 1.5x a value-net generation run.
+    """
+    from .beliefnode import _patched, _stacked
+    from .fold import fold_value
+
+    with timing.stage("selfswitch.resume"):
+        probe = port.alternatives_encoded(reg, pause, want=[])
+    chooser = probe.chooser
+    if chooser is None or not probe.options:
+        return None
+    road = _encoded_scoring(reg, leaves[chooser])
+    if road is None:
+        return _BY_POSITIONS
+    scorer, encoder, rules = road
+    record.unmodelled.append(
+        "mid-turn replacement chosen against the opponent's already-committed action"
+    )
+    options = [option.to_choice() for option in probe.options]
+    timing.count("selfswitch.options", len(options))
+    try:
+        spread = _self_switch_spread(reg, pause, chooser, record, hidden)
+    except ValueError:
+        return None
+    other = 1 - chooser
+
+    parts: list[tuple[int, Any]] = []
+
+    def block(answer: Any, plan: Any, patch: Any = None) -> int:  # noqa: ANN401
+        def make() -> Any:  # noqa: ANN401
+            rows = _rows(answer.node.encoded, plan.start, plan.count)
+            return rows if patch is None else patch(rows)
+
+        parts.append((plan.count, make))
+        return len(parts) - 1
+
+    layout: list[list[tuple[Any, int]]] = []
+    answers: list[Any] = []
+    with timing.stage("selfswitch.leaves"):
+        if spread is None:
+            weights = [1.0]
+            true = port.alternatives_encoded(reg, pause, rules=rules)
+            answers.append(true)
+            layout.append([(plan, block(true, plan)) for plan in true.plans])
+        else:
+            timing.count("selfswitch.completions", len(spread))
+            weights = [item.weight for item in spread]
+            slots = spread[0].slots
+            shared = [False] * len(options)
+            true = None
+            if not definition:
+                true = port.alternatives_encoded(
+                    reg, pause, shared=(other, slots), rules=rules
+                )
+                answers.append(true)
+                shared = [bool(flag) for flag in true.untouched]
+            timing.count("selfswitch.shared", sum(shared))
+            for item in spread:
+                found = None
+                if not all(shared):
+                    found = port.alternatives_encoded(
+                        reg, pause, world=(item.position, other),
+                        want=[k for k, flag in enumerate(shared) if not flag], rules=rules,
+                    )
+                    answers.append(found)
+                    timing.count("selfswitch.resumed", len(found.options))
+                    found_options = [option.to_choice() for option in found.options]
+                    if found.chooser != chooser or found_options != options:
+                        raise AssertionError(
+                            f"a completion of side {other}'s bench changed side {chooser}'s "
+                            f"self-switch options: {options} -> {found_options}"
+                        )
+                world: list[tuple[Any, int]] = []
+                for k, flag in enumerate(shared):
+                    if flag:
+                        plan = true.plans[k]
+
+                        def patch(rows: Any, item: Any = item) -> Any:  # noqa: ANN401
+                            return _patched(
+                                rows, other, slots, item, reg, pause.position, encoder, rules
+                            )
+
+                        world.append((plan, block(true, plan, patch)))
+                    else:
+                        plan = found.plans[k]
+                        world.append((plan, block(found, plan)))
+                layout.append(world)
+    for answer in answers:
+        port.note_port_rule([scorer], answer.node)
+    total = sum(rows for rows, _make in parts)
+    if not total:
+        return None
+    timing.count("selfswitch.leaves", total)
+    stacked, starts = _stacked(parts, answers[0].node.encoded)
+    values = np.asarray(scorer(stacked), dtype=np.float64)
+    del stacked
+    with timing.stage("selfswitch.fold"):
+        scores = np.zeros(len(options), dtype=np.float64)
+        for weight, world in zip(weights, layout, strict=True):
+            for k, (plan, index) in enumerate(world):
+                start = starts[index]
+                scores[k] += weight * fold_value(
+                    port.fold_from_json(plan.fold), values[start : start + plan.count]
+                )
+                record.unmodelled.extend(plan.unmodelled)
+        best = _record_self_switch(record, pause, chooser, options, scores, hidden)
+    from .actions import PassAction
+
+    passes = SideAction(
+        slots=tuple(
+            PassAction(slot=i) for i in range(len(pause.position.sides[other].active))
         )
+    )
+    choice = probe.options[best]
+    return port.resume(reg, pause, [choice, passes] if chooser == 0 else [passes, choice])
+
+
+def _rows(encoded: Any, start: int, count: int) -> Any:  # noqa: ANN401
+    """Rows `start:start+count` of an `Encoded`, as views."""
+    from .beliefnode import _ARRAYS
+    from .encode import Encoded
+
+    return Encoded(
+        **{name: getattr(encoded, name)[start : start + count] for name in _ARRAYS},
+        unknown_volatiles=dict(encoded.unknown_volatiles),
+    )
+
+
+def _record_self_switch(
+    record: GameRecord,
+    pause: PortPause,
+    chooser: int,
+    options: list[str],
+    scores: np.ndarray,
+    hidden: _HiddenBench | None,
+) -> int:
+    """The chooser's best option, and the decision written down."""
+    # Side 0 is the maximiser the payoff matrices are written for.
+    best = int(np.argmax(scores)) if chooser == 0 else int(np.argmin(scores))
+    policy = [0.0] * len(options)
+    policy[best] = 1.0
+    waiting = ["pass"]
+    record.decisions.append(
+        Decision(
+            turn=pause.position.turn,
+            kind="selfswitch",
+            position=pause.position.to_json(),
+            own_actions=options if chooser == 0 else waiting,
+            own_policy=policy if chooser == 0 else [1.0],
+            foe_actions=waiting if chooser == 0 else options,
+            foe_policy=[1.0] if chooser == 0 else policy,
+            search_value=float(scores[best]),
+            own_chosen=options[best] if chooser == 0 else waiting[0],
+            foe_chosen=waiting[0] if chooser == 0 else options[best],
+            # Read for the record alone: the choice above used only `other`'s.
+            shown=_shown_record(
+                pause.position,
+                None
+                if hidden is None
+                else [
+                    seen_identities(pause.position, i, hidden.seen[i]) for i in (0, 1)
+                ],
+            ),
+        )
+    )
     timing.decided("selfswitch")
-    return alternatives[best][1]
+    return best
 
 
 def _self_switch_plans(

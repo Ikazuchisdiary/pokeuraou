@@ -725,3 +725,220 @@ fn phase_speed(state: &Turn, side: usize, slot: usize) -> Result<i64, String> {
         }
     })
 }
+
+// ---------------------------------------------------------------------------
+// A pause's replacements, their turns flattened and encoded (IKA-209)
+// ---------------------------------------------------------------------------
+
+/// `alternatives_command`'s options and resumed turns, without the JSON.
+fn alternatives_of<'a>(
+    reg: &'a Reg,
+    paused: &Suspended<'a>,
+) -> Result<Option<(usize, Vec<(Vec<SlotAction>, TurnResult<'a>)>)>, String> {
+    let owed = self_switches_needed(&paused.turn.pos);
+    let sides: Vec<usize> = (0..2).filter(|i| owed[*i].iter().any(|f| *f)).collect();
+    let Some(&chooser) = sides.first() else {
+        return Ok(None);
+    };
+    let other = 1 - chooser;
+    let passes: Vec<SlotAction> = (0..paused.turn.pos.sides[other].active.len())
+        .map(|slot| SlotAction::Pass { slot })
+        .collect();
+    let mut out = Vec::new();
+    for option in replacement_options(&paused.turn.pos, chooser, owed[chooser]) {
+        let choices = if chooser == 0 {
+            [option.clone(), passes.clone()]
+        } else {
+            [passes.clone(), option.clone()]
+        };
+        let mut resumed = resume_turn(reg, paused, &choices)?;
+        if sides.len() > 1 {
+            resumed.unmodelled.insert("simultaneous mid-turn replacements".into());
+        }
+        out.push((option, resumed));
+    }
+    Ok(Some((chooser, out)))
+}
+
+/// Python's `port.turn_leaves` over the port's own turn: every leaf in the same order (no
+/// sharing -- the caller scores them in one batch beside other plans, and the rows must be
+/// the rows it would have had), the fold with indices local to `leaves`.
+fn flatten<'a>(
+    reg: &'a Reg,
+    result: &TurnResult<'a>,
+    depth: usize,
+    leaves: &mut Vec<Position>,
+    notes: &mut std::collections::BTreeSet<String>,
+) -> Result<Value, String> {
+    notes.extend(result.unmodelled.iter().cloned());
+    let mut parts: Vec<Value> = Vec::new();
+    for branch in &result.branches {
+        leaves.push(branch.position.clone());
+        parts.push(json!([branch.probability, { "leaf": leaves.len() - 1 }]));
+    }
+    for pause in &result.suspended {
+        if depth >= 4 {
+            notes.insert("more than four mid-turn replacements in one turn".into());
+            leaves.push(pause.turn.pos.clone());
+            parts.push(json!([pause.probability, { "leaf": leaves.len() - 1 }]));
+            continue;
+        }
+        match alternatives_of(reg, pause)? {
+            Some((chooser, resumed)) if !resumed.is_empty() => {
+                let mut options = Vec::new();
+                for (_option, one) in &resumed {
+                    options.push(flatten(reg, one, depth + 1, leaves, notes)?);
+                }
+                parts.push(json!([pause.probability, { "best": chooser, "options": options }]));
+            }
+            _ => {
+                notes.insert("a suspended turn offered no replacement".into());
+                leaves.push(pause.turn.pos.clone());
+                parts.push(json!([pause.probability, { "leaf": leaves.len() - 1 }]));
+            }
+        }
+    }
+    // The positive control (`--features ika209-control`): the first part of every fold
+    // weighs half, which is a plan valued wrong while every leaf is right.
+    #[cfg(feature = "ika209-control")]
+    if let Some(first) = parts.first_mut() {
+        first[0] = json!(first[0].as_f64().unwrap_or(0.0) * 0.5);
+    }
+    Ok(json!({ "avg": parts }))
+}
+
+/// `alternativesEncoded`: the `alternatives` of a pause (in `in`'s completion when given),
+/// each wanted option's turn flattened as `turn_leaves` flattens it and every leaf encoded
+/// -- the self-switch node's leaves as arrays instead of positions (IKA-209).
+///
+/// `want` lists the options to flatten (default all). `shared: {side, slots}` also answers,
+/// per option, what `_shared_self_switch_plans` asks of it: that its rest of the turn does
+/// not pause again and leaves `side`'s Pokemon at `slots` as the pause held them, off the
+/// field -- or false for every option when `side` still has a switch queued.
+pub fn alternatives_encoded(
+    reg: &Reg,
+    encoder: &crate::encode::Encoder,
+    value: &Value,
+) -> Result<(Value, crate::encode::Encoded, Vec<f64>), String> {
+    let paused = requested_pause(reg, value)?;
+    let rules = crate::encode::EncodeRules {
+        mega_from_slots: value
+            .get("encoding")
+            .and_then(|e| e.get("megaFromSlots"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    };
+    let found = alternatives_of(reg, &paused)?;
+    let (chooser, resumed) = match found {
+        None => (None, Vec::new()),
+        Some((chooser, resumed)) => (Some(chooser), resumed),
+    };
+    let wanted: Option<Vec<usize>> = value.get("want").and_then(Value::as_array).map(|list| {
+        list.iter().filter_map(Value::as_u64).map(|k| k as usize).collect()
+    });
+    let shared = value.get("shared").filter(|s| !s.is_null()).map(|s| {
+        let side = s["side"].as_u64().unwrap_or(0) as usize;
+        let slots: Vec<usize> = s["slots"]
+            .as_array()
+            .map(|l| l.iter().filter_map(Value::as_u64).map(|k| k as usize).collect())
+            .unwrap_or_default();
+        (side, slots)
+    });
+    let queued_switch = shared.as_ref().is_some_and(|(side, _)| {
+        paused
+            .remaining
+            .iter()
+            .any(|queued| queued.side == *side && queued.kind == ActionKind::Switch)
+    });
+
+    let mut leaves: Vec<Position> = Vec::new();
+    let mut options = Vec::new();
+    let mut plans = Vec::new();
+    for (k, (option, one)) in resumed.iter().enumerate() {
+        options.push(option.iter().map(slot_action_json).collect::<Vec<_>>());
+        let untouched = shared.as_ref().map(|(side, slots)| {
+            if queued_switch || !one.suspended.is_empty() {
+                return false;
+            }
+            let before = &paused.turn.pos.sides[*side].pokemon;
+            one.branches.iter().all(|branch| {
+                before.iter().enumerate().filter(|(_, mon)| slots.contains(&mon.slot)).all(
+                    |(index, mon)| {
+                        branch.position.sides[*side].pokemon.get(index).is_some_and(|leaf| {
+                            **leaf == **mon && leaf.active_index.is_none()
+                        })
+                    },
+                )
+            })
+        });
+        if wanted.as_ref().is_some_and(|w| !w.contains(&k)) {
+            plans.push(json!({ "untouched": untouched }));
+            continue;
+        }
+        let start = leaves.len();
+        let mut notes = std::collections::BTreeSet::new();
+        let root = flatten(reg, one, 0, &mut leaves, &mut notes)?;
+        // Local to the plan, as `turn_leaves` numbers its own positions.
+        let root = shift_fold(root, start);
+        plans.push(json!({
+            "start": start,
+            "count": leaves.len() - start,
+            "fold": root,
+            "unmodelled": notes.into_iter().collect::<Vec<_>>(),
+            "suspended": !one.suspended.is_empty(),
+            "untouched": untouched,
+        }));
+    }
+    let borrowed: Vec<&Position> = leaves.iter().collect();
+    let encoded = encoder.encode_positions_with(&borrowed, rules);
+    let body_bytes = (encoded.species.len()
+        + encoded.ability.len()
+        + encoded.item.len()
+        + encoded.moves.len()
+        + encoded.mon.len()
+        + encoded.mask.len()
+        + encoded.side.len()
+        + encoded.field.len())
+        * 4;
+    let header = json!({
+        "kind": "alternativesEncoded",
+        "chooser": chooser,
+        "options": options,
+        "plans": plans,
+        "leaves": leaves.len(),
+        "spans": [],
+        "folded": [],
+        "exact": [],
+        "refused": [],
+        "unmodelled": [],
+        "unknownVolatiles": encoded.unknown_volatiles,
+        "leafObjectives": [],
+        "encoding": { "megaFromSlots": rules.mega_from_slots },
+        "monsPerSide": encoder.widths.mons_per_side,
+        "monWidth": encoder.widths.mon,
+        "sideWidth": encoder.widths.side,
+        "fieldWidth": encoder.widths.field,
+        "bytes": body_bytes,
+    });
+    Ok((header, encoded, Vec::new()))
+}
+
+/// A fold's leaf indices less `start`: the plan's leaves are numbered from its own first.
+fn shift_fold(node: Value, start: usize) -> Value {
+    if let Some(index) = node.get("leaf").and_then(Value::as_u64) {
+        return json!({ "leaf": index as usize - start });
+    }
+    if let Some(options) = node.get("options").and_then(Value::as_array) {
+        return json!({
+            "best": node["best"],
+            "options": options.iter().cloned().map(|o| shift_fold(o, start)).collect::<Vec<_>>(),
+        });
+    }
+    let parts = node["avg"].as_array().cloned().unwrap_or_default();
+    json!({
+        "avg": parts
+            .into_iter()
+            .map(|part| json!([part[0], shift_fold(part[1].clone(), start)]))
+            .collect::<Vec<_>>()
+    })
+}
