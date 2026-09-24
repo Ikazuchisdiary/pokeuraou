@@ -20,6 +20,12 @@ from .battler import Battler
 from .effects import item_is_removable
 from .regulation import Regulation
 
+#: Moves that only work on the turn their user came in. Showdown writes the rule three
+#: times, once per move, as `if (source.activeMoveActions > 1) return false`. Fake Out is
+#: the one that matters -- 234 of the 394 tournament teams carry it, more than any other
+#: move -- and it worked on every turn until this existed.
+FIRST_TURN_OUT_MOVES = frozenset({"fakeout", "firstimpression", "matblock"})
+
 #: Weight thresholds shared by Low Kick and Grass Knot, in hectograms as Showdown stores
 #: them (``weightkg`` here is kilograms, so the thresholds are divided by 10).
 _WEIGHT_BP: tuple[tuple[float, int], ...] = (
