@@ -89,7 +89,7 @@ def synthetic_node(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """
     binary = rustnode.binary_path()
     if not binary.exists():
-        pytest.skip(f"no Rust binary at {binary}; `cargo build --release`")
+        pytest.fail(f"no Rust binary at {binary}; `cargo build --release`")
     format_id = "gen9championsvgc2026regmb"
     data = _with_mega_hp(format_id, "charizardmegay", 108)
     target = tmp_path / "configs" / "regulations" / f"{format_id}.json"

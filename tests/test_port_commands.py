@@ -74,7 +74,7 @@ def _leads_on_the_port(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.fixture()
 def node(reg):  # noqa: ANN001, ANN201
     if not rustnode.binary_path().exists():
-        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
+        pytest.fail(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
     opened = rustnode.RustNode(reg)
     yield opened
     opened.close()

@@ -43,7 +43,7 @@ def _need_port() -> None:
     if not ORACLE_JS.exists():
         pytest.skip("oracle not built")
     if not rustnode.binary_path().exists():
-        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
+        pytest.fail(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
 
 
 @pytest.mark.parametrize("seed", [1, 5])

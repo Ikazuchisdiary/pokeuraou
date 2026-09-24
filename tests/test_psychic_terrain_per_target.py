@@ -164,7 +164,7 @@ ALLY_FAKE_OUT = SideAction(slots=(MoveAction(0, 2, "calmmind", None), MoveAction
 @pytest.fixture()
 def bridged(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
     if not rustnode.binary_path().exists():
-        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
+        pytest.fail(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
     monkeypatch.setenv(rustnode.ENV_ENABLE, "1")
     rustnode.reset()
     yield

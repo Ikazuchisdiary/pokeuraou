@@ -367,7 +367,7 @@ def _rust_encode(dump: str, fixture: Path, out: Path) -> subprocess.CompletedPro
 
 def test_the_port_reads_the_same_order(tmp_path: Path) -> None:
     if not rustnode.binary_path().exists():
-        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
+        pytest.fail(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
     dump = _scratch(tmp_path)
     reg = load_regulation(FORMAT, dump)
     encoder = Encoder(reg)

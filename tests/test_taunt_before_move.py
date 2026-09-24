@@ -186,7 +186,7 @@ def _actions(reg, pos: Position, choices: tuple[str, str]) -> list:  # noqa: ANN
 @pytest.fixture()
 def bridged(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
     if not rustnode.binary_path().exists():
-        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
+        pytest.fail(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
     monkeypatch.setenv(rustnode.ENV_ENABLE, "1")
     rustnode.reset()
     yield
