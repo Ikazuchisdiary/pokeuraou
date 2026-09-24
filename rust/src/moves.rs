@@ -1349,7 +1349,8 @@ fn use_move<'a>(
 
     // `move.spreadHit` is decided from every target before the hit steps run, and Psychic
     // Terrain (step 1, ahead of Protect) then drops the grounded ones.
-    let spread = move_hits_multiple(reg, move_id.as_str(), targets.len());
+    let spread = move_hits_multiple(reg, move_id.as_str(), targets.len())
+        || (targets.len() > 1 && crate::airborne::expanding_force_spreads(&turn, action, mv));
     if turn.log.is_some() {
         let stopped: Vec<Slot> =
             targets.iter().copied().filter(|t| stopped_by_psychic_terrain(&turn, action, mv, *t)).collect();
@@ -1468,7 +1469,7 @@ fn resolve_targets(
         matches!(turn.mon_at(side, slot), Some(mon) if !mon.fainted)
     };
 
-    match mv.target.as_str() {
+    match crate::airborne::move_target(turn, action, mv) {
         "self" | "allySide" | "allyTeam" | "all" | "foeSide" => return Ok(vec![me]),
         "allAdjacentFoes" => {
             return Ok(slots.filter(|s| live(turn, foe_side, *s)).map(|s| (foe_side, s)).collect())
@@ -1669,7 +1670,7 @@ fn blocked_by_protect(
     let side = &turn.pos.sides[target.0];
     let from_foe = target.0 != action.side;
     if from_foe
-        && matches!(mv.target.as_str(), "allAdjacentFoes" | "allAdjacent")
+        && matches!(crate::airborne::move_target(turn, action, mv), "allAdjacentFoes" | "allAdjacent")
         && side.has_side_condition("wideguard")
     {
         return Some("wideguard".into());
@@ -2348,6 +2349,10 @@ fn after_hit(
     if eats_berry && !turn.berries_blocked(target.0) {
         let berry = turn.mon_at(target.0, target.1).and_then(|m| m.item);
         turn.consume_item(target.0, target.1, berry.as_ref().map(|b| b.as_str()).unwrap_or(""));
+    }
+
+    if landed {
+        crate::airborne::pop_air_balloon(turn, target);
     }
 
     // Knock Off removes what it hit; Thief and Covet take it when the attacker has
@@ -3238,6 +3243,7 @@ fn hit_substitute(
     } else if after_sub_damage_unmodelled(mv.id.as_str()) {
         turn.report(format!("substitute: {} onAfterSubDamage", mv.id));
     }
+    crate::airborne::pop_air_balloon(turn, target);
 
     if matches!(turn.mon_at(me.0, me.1), Some(m) if m.ability == "sheerforce") {
         return Ok(());
