@@ -1,31 +1,31 @@
 """The port, asked the questions the tests used to put to Python's resolver (IKA-210).
 
 Python's `resolve_turn` and its neighbours are going away (IKA-204): the port is the only
-engine. A rule test that built a position and asked `resolve_turn` what happens now asks
-the port the same question through these functions, which keep Python's names and
-shapes -- a `TurnResult`'s `branches` / `suspended` / `exact` / `unmodelled`, a pause that
+engine, and `pokeuraou.port` is the production roads' door to it (IKA-209). This is a thin
+layer over that door. It keeps the names and shapes the rule tests were written against --
+a `TurnResult`'s `branches` / `suspended` / `exact` / `unmodelled`, a pause that
 `resume_turn` and `resume_alternatives` take back -- so a test's assertions read as they
-did. Only the engine behind them changed.
+did; the asking is `pokeuraou.port`'s (`port.ask`: one warm process, restarted on a broken
+pipe, `PortUnavailable` without a binary).
 
-What the port does not carry, these do not pretend to:
+* **events and acts** come from the port (IKA-215) when a turn is asked with
+  `events=True`: `Branch.events` is then the port's trace, and a pause asked that way
+  carries it into `resume_turn` / `resume_alternatives`. Off by default -- the trace
+  costs 3-4% of the rule tests' time and most read none -- and reading one from a turn
+  asked without raises rather than handing a test an empty list. Phases always carry it.
+* `reductions` and `merged` are not carried -- the port reports `exact` only.
 
-* **events and acts** (`Branch.events`, IKA-215). Reading one raises, so a test that
-  asserts on the log fails loudly instead of passing on an empty list.
-* `reductions` and `merged` -- the port reports `exact` only.
+A refusal is `pokeuraou.port.PortRefused` naming the port's reason, never a skip or a `None`
+for the test to misread. There is no fallback: without a release binary every function here
+fails, and so does the test that called it (IKA-210: the suite assumes the binary).
 
-A refusal is a failure naming the port's reason, never a skip or a `None` for the test to
-misread. There is no fallback: without a release binary every function here fails, and so
-does the test that called it (IKA-210: the suite assumes the binary).
-
-The process is shared for the session, one per regulation and binary.
-`POKEURAOU_RUST_NODE_BIN` points it at another build -- which is how a positive control
-runs the same tests against an older or deliberately broken port.
+`POKEURAOU_RUST_NODE_BIN` points the process at another build -- which is how a positive
+control runs the same tests against an older or deliberately broken port.
+`POKEURAOU_PORT_BEFORE_TURN=1` asks `resolve_turn` of a binary older than the `turn` command.
 """
 
 from __future__ import annotations
 
-import atexit
-import contextlib
 import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -33,14 +33,32 @@ from typing import Any
 
 import pytest
 
-from pokeuraou import rustnode
+from pokeuraou import port, rustnode
 from pokeuraou.actions import SideAction
+from pokeuraou.budget import Budget
+from pokeuraou.fold import TurnLeaves
 from pokeuraou.position import Position
 from pokeuraou.regulation import Regulation, load_regulation
 
-#: The port's budget, as `rustnode` sends it. Imported from here so no test names the
-#: resolver's module for it (it moves with IKA-212).
-Budget = rustnode.Budget
+__all__ = [
+    "Budget",
+    "Branch",
+    "PortRefused",
+    "ReplacementResult",
+    "SuspendedTurn",
+    "TurnResult",
+    "apply_lead_abilities",
+    "given",
+    "paused_in",
+    "replacements_needed",
+    "resolve_replacements",
+    "resolve_turn",
+    "resume_alternatives",
+    "resume_turn",
+    "self_switches_needed",
+    "turn_expectation",
+    "turn_leaves",
+]
 
 #: Set to 1 to ask `resolve_turn` of a binary built before the `turn` command, as a
 #: positive control against an older port does (IKA-210). Never set by the suite itself.
@@ -49,7 +67,8 @@ ENV_BEFORE_TURN = "POKEURAOU_PORT_BEFORE_TURN"
 #: The regulation for the helpers Python took without one (`replacements_needed`).
 DEFAULT_FORMAT = "gen9championsvgc2026regmc"
 
-_NODES: dict[tuple[str, str], rustnode.RustNode] = {}
+#: The port's refusal. The same class the production roads raise.
+PortRefused = port.PortRefused
 
 
 def require_binary() -> None:
@@ -61,24 +80,29 @@ def require_binary() -> None:
         )
 
 
-def node(reg: Regulation) -> rustnode.RustNode:
-    """The session's port process for `reg`."""
+def _before_turn(kind: str) -> None:
+    if os.environ.get(ENV_BEFORE_TURN) == "1":
+        # An older binary reads an unknown kind as a fill and can wait on the pipe for good.
+        raise PortRefused(f"the binary predates the {kind!r} command")
+
+
+def _asked[T](reg: Regulation, call: Callable[[rustnode.RustNode], T | None], what: str,
+              pos: Position | None = None, *, retry: bool = True) -> T:
+    """`port.ask`, with a `None` answer turned into the port's reason. Without `retry` (a
+    phase drawing from a generator: a second try would draw twice) it asks once."""
     require_binary()
-    key = (reg.meta.format_id, str(rustnode.binary_path()))
-    live = _NODES.get(key)
-    if live is None or live._process.poll() is not None:  # noqa: SLF001
-        live = rustnode.RustNode(reg)
-        _NODES[key] = live
-    return live
 
+    def ask(node: rustnode.RustNode) -> T:
+        answer = call(node)
+        if answer is None:
+            reason = node.refusal or "no reason given"
+            if reason == "position carries unmodelled volatiles" and pos is not None:
+                names = {v for s in pos.sides for m in s.pokemon for v in m.unmodelled_volatiles}
+                reason = f"{reason}: {','.join(sorted(names))}"
+            raise PortRefused(f"the port refused {what}: {reason}")
+        return answer
 
-@atexit.register
-def _close_all() -> None:
-    for live in _NODES.values():
-        # The interpreter is going away; a child that is already gone is not an error.
-        with contextlib.suppress(Exception):
-            live.close()
-    _NODES.clear()
+    return port.ask(reg, ask) if retry else ask(rustnode.require_node(reg))
 
 
 def given(pos: Position) -> Position:
@@ -92,63 +116,64 @@ def given(pos: Position) -> Position:
     return out
 
 
-class PortRefused(AssertionError):
-    """The port declined the question; the message is its reason."""
-
-
-def _ask(reg: Regulation, request: dict[str, Any], pos: Position | None = None) -> dict[str, Any]:
-    if os.environ.get(ENV_BEFORE_TURN) == "1" and request.get("kind") != "resolve":
-        # An older binary reads an unknown kind as a fill and can wait on the pipe for good.
-        raise PortRefused(f"the binary predates the {request.get('kind')!r} command")
-    reply = node(reg)._exchange(request)  # noqa: SLF001
-    reason = reply.get("refused")
-    if reason:
-        if reason == "position carries unmodelled volatiles" and pos is not None:
-            names = {v for s in pos.sides for m in s.pokemon for v in m.unmodelled_volatiles}
-            reason = f"{reason}: {','.join(sorted(names))}"
-        raise PortRefused(f"the port refused: {reason}")
-    return reply
-
-
-def _actions(actions: Sequence[SideAction]) -> list[list[dict[str, Any]]]:
-    return [[rustnode.dump_action(a) for a in side.slots] for side in actions]
-
-
 # ---------------------------------------------------------------------------
 # Turns
 # ---------------------------------------------------------------------------
 
 
+def _no_log(what: str) -> AssertionError:
+    return AssertionError(f"this {what} was asked without events (pass events=True)")
+
+
 @dataclass
 class Branch:
-    """One finished outcome. `events` is not the port's (IKA-215)."""
+    """One finished outcome, with the port's trace when it was asked for."""
 
     probability: float
     position: Position
+    _events: list[str] | None = None
+    _acts: list[tuple[int, str]] | None = None
 
     @property
     def events(self) -> list[str]:
-        raise AssertionError("the port keeps no event log yet (IKA-215)")
+        if self._events is None:
+            raise _no_log("turn")
+        return self._events
 
     @property
     def acts(self) -> list[tuple[int, str]]:
-        raise AssertionError("the port keeps no event log yet (IKA-215)")
+        if self._acts is None:
+            raise _no_log("turn")
+        return self._acts
 
 
 @dataclass
 class SuspendedTurn:
-    """A turn the port stopped for a mid-turn replacement. `raw` is the port's own pause,
-    handed back whole to resume it; `world` is `paused_in`'s completion, if any."""
+    """A turn the port stopped for a mid-turn replacement: the port's own pause, handed back
+    whole to resume it; `world` is `paused_in`'s completion, if any."""
 
     probability: float
     position: Position
-    raw: dict[str, Any]
+    pause: rustnode.PortPause | None
     reg: Regulation
     world: tuple[Position, int] | None = None
+    logged: bool = True
+
+    @property
+    def raw(self) -> dict[str, Any]:
+        return {} if self.pause is None else self.pause.raw
 
     @property
     def events(self) -> list[str]:
-        raise AssertionError("the port keeps no event log yet (IKA-215)")
+        if not self.logged or self.pause is None:
+            raise _no_log("pause")
+        return self.pause.events
+
+    @property
+    def acts(self) -> list[tuple[int, str]]:
+        if not self.logged or self.pause is None:
+            raise _no_log("pause")
+        return self.pause.acts
 
 
 @dataclass
@@ -158,6 +183,8 @@ class TurnResult:
     unmodelled: tuple[str, ...] = ()
     suspended: tuple[SuspendedTurn, ...] = ()
     extra: dict[str, Any] = field(default_factory=dict)
+    #: The port's own answer, for `port.turn_leaves`. None from a pre-`turn` binary.
+    port: rustnode.PortTurn | None = None
 
     @property
     def total_probability(self) -> float:
@@ -184,18 +211,24 @@ class TurnResult:
         return dict(sorted(((k, v / total) for k, v in out.items()), key=lambda kv: -kv[1]))
 
 
-def _result(reg: Regulation, reply: dict[str, Any]) -> TurnResult:
+def _result(reg: Regulation, answer: rustnode.PortTurn, *, events: bool) -> TurnResult:
     return TurnResult(
         branches=[
-            Branch(float(b["probability"]), Position.from_json(b["position"]))
-            for b in reply["branches"]
+            Branch(
+                o.probability,
+                o.position,
+                list(o.events) if events else None,
+                list(o.acts) if events else None,
+            )
+            for o in answer.outcomes or []
         ],
-        exact=bool(reply["exact"]),
-        unmodelled=tuple(reply["unmodelled"]),
+        exact=answer.exact,
+        unmodelled=answer.unmodelled,
         suspended=tuple(
-            SuspendedTurn(float(p["probability"]), Position.from_json(p["position"]), p, reg)
-            for p in reply["suspended"]
+            SuspendedTurn(p.probability, p.position, p, reg, logged=events)
+            for p in answer.pauses or []
         ),
+        port=answer,
     )
 
 
@@ -205,93 +238,89 @@ def resolve_turn(
     side_actions: Sequence[SideAction],
     *,
     budget: Budget | None = None,
+    events: bool = False,
 ) -> TurnResult:
     """`resolve.resolve_turn`, answered by the port: every branch and every pause."""
     budget = budget or Budget.exact()
     if os.environ.get(ENV_BEFORE_TURN) == "1":
         return _resolve_before_turn(reg, pos, side_actions, budget)
-    reply = _ask(
+    shown = given(pos)
+    answer = _asked(
         reg,
-        {
-            "kind": "turn",
-            "position": given(pos).to_json(),
-            "actions": _actions(side_actions),
-            "budget": rustnode.dump_budget(budget),
-            "full": True,
-        },
+        lambda node: node.turn(shown, list(side_actions), budget, full=True, events=events),
+        "a turn",
         pos,
     )
-    return _result(reg, reply)
+    return _result(reg, answer, events=events)
 
 
 def _resolve_before_turn(
     reg: Regulation, pos: Position, side_actions: Sequence[SideAction], budget: Budget
 ) -> TurnResult:
     """`resolve_turn` from a binary older than the `turn` command (IKA-211), for a positive
-    control only: the weights, then each branch by `select`. A pause has its weight but no
-    position (`resolve` never sent one), so it comes back without one."""
-    request = {
-        "kind": "resolve",
-        "position": given(pos).to_json(),
-        "actions": _actions(side_actions),
-        "budget": rustnode.dump_budget(budget),
-        "select": None,
-    }
-    reply = _ask(reg, request, pos)
+    control only: the weights, then each branch by `select` (`RustNode.resolve`). A pause
+    has its weight but no position (`resolve` never sent one), so it comes back without one."""
+    shown = given(pos)
+    weights = _asked(
+        reg, lambda node: node.resolve(shown, list(side_actions), budget), "a turn", pos
+    )
     branches = []
-    for index, weight in enumerate(reply["branches"]):
-        chosen = _ask(reg, {**request, "select": index}, pos)
-        branches.append(Branch(float(weight), Position.from_json(chosen["position"])))
+    for index, weight in enumerate(weights.branches):
+        chosen = _asked(
+            reg,
+            lambda node, index=index: node.resolve(
+                shown, list(side_actions), budget, select=index
+            ),
+            "a turn",
+            pos,
+        )
+        branches.append(Branch(float(weight), chosen.position))
     return TurnResult(
         branches=branches,
-        exact=bool(reply["exact"]),
-        unmodelled=tuple(reply["unmodelled"]),
+        exact=weights.exact,
+        unmodelled=weights.unmodelled,
         suspended=tuple(
-            SuspendedTurn(float(w), None, {}, reg)  # type: ignore[arg-type]
-            for w in reply.get("suspended", [])
+            SuspendedTurn(float(w), None, None, reg)  # type: ignore[arg-type]
+            for w in weights.suspended
         ),
     )
 
 
-def _world(world: tuple[Position, int] | None) -> dict[str, Any] | None:
-    if world is None:
-        return None
-    position, side = world
-    return {"position": given(position).to_json(), "side": int(side)}
+def _world(world: tuple[Position, int] | None) -> tuple[Position, int] | None:
+    return None if world is None else (given(world[0]), int(world[1]))
 
 
 def resume_turn(
     reg: Regulation, paused: SuspendedTurn, choices: Sequence[SideAction]
 ) -> TurnResult:
     """`resolve.resume_turn`: the rest of the paused turn with both sides' choices."""
-    reply = _ask(
+    _before_turn("turn")
+    answer = _asked(
         reg,
-        {
-            "kind": "turn",
-            "pause": paused.raw,
-            "choices": _actions(choices),
-            "full": True,
-            "in": _world(paused.world),
-        },
+        lambda node: node.resume(
+            paused.pause, list(choices), full=True, world=_world(paused.world),
+            events=paused.logged,
+        ),
+        "a paused turn",
     )
-    return _result(reg, reply)
+    return _result(reg, answer, events=paused.logged)
 
 
 def resume_alternatives(
     reg: Regulation, paused: SuspendedTurn
 ) -> tuple[int | None, list[tuple[SideAction, TurnResult]]]:
     """`resolve.resume_alternatives`: who chooses, and every option with its turn."""
-    reply = _ask(
-        reg, {"kind": "alternatives", "pause": paused.raw, "in": _world(paused.world), "full": True}
+    _before_turn("alternatives")
+    chooser, options = _asked(
+        reg,
+        lambda node: node.resume_alternatives(
+            paused.pause, world=_world(paused.world), full=True, events=paused.logged
+        ),
+        "a paused turn",
     )
-    chooser = reply["chooser"]
-    return (
-        None if chooser is None else int(chooser),
-        [
-            (rustnode._side_action(option), _result(reg, result))  # noqa: SLF001
-            for option, result in zip(reply["options"], reply["results"], strict=True)
-        ],
-    )
+    return chooser, [
+        (option, _result(reg, resumed, events=paused.logged)) for option, resumed in options
+    ]
 
 
 def paused_in(paused: SuspendedTurn, position: Position, side: int) -> SuspendedTurn:
@@ -299,10 +328,29 @@ def paused_in(paused: SuspendedTurn, position: Position, side: int) -> Suspended
     return SuspendedTurn(
         probability=paused.probability,
         position=position,
-        raw=paused.raw,
+        pause=paused.pause,
         reg=paused.reg,
         world=(position, side),
+        logged=paused.logged,
     )
+
+
+def turn_leaves(reg: Regulation, result: TurnResult) -> TurnLeaves:
+    """`resolve.turn_leaves`: `port.turn_leaves` of the port's own answer."""
+    if result.port is None:
+        raise ValueError("turn_leaves needs a turn the `turn` command answered")
+    return port.turn_leaves(reg, result.port)
+
+
+def turn_expectation(
+    reg: Regulation, result: TurnResult, value: Callable[[Position], float]
+) -> tuple[float, tuple[str, ...]]:
+    """`resolve.turn_expectation`: the turn's value under `value` (side 0's view), every
+    mid-turn replacement chosen by the fold `port.turn_leaves` builds."""
+    if not result.suspended:
+        return result.expected(value), result.unmodelled
+    plan = turn_leaves(reg, result)
+    return plan.value([value(p) for p in plan.positions]), plan.unmodelled
 
 
 # ---------------------------------------------------------------------------
@@ -314,29 +362,12 @@ def paused_in(paused: SuspendedTurn, position: Position, side: int) -> Suspended
 class ReplacementResult:
     position: Position
     unmodelled: tuple[str, ...] = ()
-
-    @property
-    def events(self) -> list[str]:
-        raise AssertionError("the port keeps no event log yet (IKA-215)")
+    events: list[str] = field(default_factory=list)
 
 
-def _phase(
-    reg: Regulation, request: dict[str, Any], rng: Any, pos: Position  # noqa: ANN401
-) -> ReplacementResult:
-    """As `RustNode._phase`: a draw is sampled from `rng` exactly as Python sampled it."""
-    if rng is None:
-        reply = _ask(reg, request, pos)
-    else:
-        presets: list[int] = []
-        while True:
-            reply = _ask(reg, {**request, "presets": presets}, pos)
-            weights = reply.get("draw")
-            if not weights:
-                break
-            total = float(sum(weights))
-            presets.append(int(rng.choice(len(weights), p=[w / total for w in weights])))
+def _phase_result(phase: rustnode.PortPhase) -> ReplacementResult:
     return ReplacementResult(
-        position=Position.from_json(reply["position"]), unmodelled=tuple(reply["unmodelled"])
+        position=phase.position, unmodelled=phase.unmodelled, events=list(phase.events)
     )
 
 
@@ -347,29 +378,45 @@ def resolve_replacements(
     *,
     rng: Any = None,  # noqa: ANN401 - numpy.random.Generator
 ) -> ReplacementResult:
-    """`resolve.resolve_replacements`."""
-    return _phase(
-        reg,
-        {"kind": "replacements", "position": given(pos).to_json(), "choices": _actions(choices)},
-        rng,
-        pos,
+    """`resolve.resolve_replacements`, with its trace. A draw is sampled from `rng` exactly
+    as Python sampled it (`RustNode._phase`)."""
+    _before_turn("replacements")
+    shown = given(pos)
+    return _phase_result(
+        _asked(
+            reg,
+            lambda node: node.resolve_replacements(shown, list(choices), rng=rng, events=True),
+            "a replacement phase",
+            pos,
+            retry=rng is None,
+        )
     )
 
 
 def apply_lead_abilities(
     reg: Regulation, pos: Position, *, rng: Any = None  # noqa: ANN401
 ) -> ReplacementResult:
-    """`resolve.apply_lead_abilities`."""
-    return _phase(reg, {"kind": "leads", "position": given(pos).to_json()}, rng, pos)
+    """`resolve.apply_lead_abilities`, with its trace."""
+    _before_turn("leads")
+    shown = given(pos)
+    return _phase_result(
+        _asked(
+            reg,
+            lambda node: node.apply_lead_abilities(shown, rng=rng, events=True),
+            "the leads",
+            pos,
+            retry=rng is None,
+        )
+    )
 
 
 def replacements_needed(
     pos: Position, reg: Regulation | None = None
 ) -> tuple[tuple[bool, ...], ...]:
-    """`resolve.replacements_needed`, answered by the port."""
-    reg = reg or load_regulation(DEFAULT_FORMAT)
-    reply = _ask(reg, {"kind": "needed", "position": pos.to_json()})
-    return tuple(tuple(bool(flag) for flag in side) for side in reply["needed"])
+    """`resolve.replacements_needed`: `port.replacements_needed`."""
+    _before_turn("needed")
+    require_binary()
+    return port.replacements_needed(reg or load_regulation(DEFAULT_FORMAT), pos)
 
 
 def self_switches_needed(pos: Position) -> tuple[tuple[bool, ...], ...]:

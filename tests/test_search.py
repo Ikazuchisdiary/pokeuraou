@@ -25,11 +25,13 @@ from pokeuraou.damage import register_mega_stones
 from pokeuraou.equilibrium import solve
 from pokeuraou.narrow import narrow
 from pokeuraou.payoff import HP_SHARE
+from pokeuraou.port import batched_payoff
 from pokeuraou.position import Position
-from pokeuraou.resolve import Budget, batched_payoff, resolve_turn
 from pokeuraou.search import leaf_ranking, search
 from pokeuraou.selfplay import position_from_sets
 from pokeuraou.teams import load_roster
+
+from ._port import Budget, resolve_turn
 
 #: The parameter-free objective in batch form stands in for a learned value function.
 #: Every claim here is about the search, not about the leaf, and a leaf with no weights

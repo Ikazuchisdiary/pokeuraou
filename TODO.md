@@ -15621,3 +15621,126 @@ fold_from_json(node) -> fold.Fold                  # 重みは np.float64
 
 * M-C の gen-0 に効く: IKA-222（Showdown が作用するのに port が無視している特性・道具 41 id。わざわいの 4 特性・スナイパー等、High）、IKA-219（へんしん・かわりもの、High）、IKA-213（カウンター・ミラーコート等が素通り、High）、IKA-223（控え隠蔽の交代の行列の番号のずれが 9/17 からの教材に効いていた、High）
 * ほか: IKA-214（はたきおとす等とねんちゃく）、IKA-216（両エンジン共通の乖離の上位）、IKA-218（diff_turn の PYTHONHASHSEED 依存）、IKA-220（もらいび等の小さな規則）、IKA-221（リバイバルブレスの slotCondition）
+
+## 9/24 — IKA-210（後半）: Python の resolver を import するテストを 0 にした —— tests/_port.py は `pokeuraou.port` の上の薄い層、イベントの試験は port の events / acts で、test_rust_node は port の `fill` を port 自身の `turn` と比べる形に作り直した。`pokeuraou.resolve` の import を止める仕掛けで tests/ 全部の collect と関係 67 ファイルの実行が通る（master のファイルでは 13 ファイルが collect で落ちる）
+
+ブランチ `ika-210-tests-off-resolver`（master 5111c12 から）。IKA-204 の段 5 の後半。src/pokeuraou（本番の経路）は触っていない。rust/src は `ika210-control` の cfg ブロック 1 つだけ（既定の build は変わらない）。
+
+### 1. 何をしたか
+
+* **tests/_port.py**: `pokeuraou.port` の上の薄い層にした。問い合わせは `port.ask`（温かい process 1 本、壊れたら作り直す、exe が無ければ `PortUnavailable`）、拒否は `port.PortRefused`（production と同じ class）、`turn_leaves` は `port.turn_leaves`、`replacements_needed` は `port.replacements_needed`、`Budget` は budget.py から。残したもの: `resolve_turn` という名前と `TurnResult` / `Branch` / `SuspendedTurn` の形、`given`（Showdown の stats を落とす）、`POKEURAOU_RUST_NODE_BIN`（`rustnode.binary_path` がそのまま読む）、`POKEURAOU_PORT_BEFORE_TURN=1`（`turn` 命令の無い古い exe に `resolve`＋`select` で聞く。ほかの命令は即座に断る）。足したもの: `turn_expectation`・`turn_leaves`（port の答えの上で）
+  * **イベント**: `resolve_turn(..., events=True)` で port に trace を頼む（IKA-215）。pause もその trace を持ち、`resume_turn` / `resume_alternatives` はそれを続ける。**既定は off**: 59 ファイル（_port を使う全部）を交互 2 回で測って on 67.0 / 67.2 s、off 65.0 / 64.3 s（+3〜4%）だったので、読む試験だけが頼む。頼まずに `Branch.events` を読むと「pass events=True」で落ちる（空の list を返さない）。既定 off にして落ちたのはちょうど読む 11 件（下の 8 件＋symmetry 2＋rust_node の Feint 1）で、ほかに trace を読む試験は無い。交代の段・先発は常に trace を付ける
+* **イベントで断言する 8 件**を port の trace に向けた: test_event_grouping 3（acts が trace を過不足なく区切り最後が残差、mirror で同じ技を両側に帰属、show_game の group_events が行を落とさない）、test_resumed_turn_log 3（記録の pause を選ぶ。`turn_events` には port の node を渡す＝`show_game --engine port`）、test_residual_speed_tie 2（`test_python_orders_...` → `test_the_port_orders_the_residuals_as_showdown`。Showdown の log の燃焼の順と port の trace を比べる）。test_symmetry のイベント 2 件（相打ちの勝者と最後の倒れ、どくタイプのどくどくが外れない）も port の trace
+* **Python と比べる試験を消した（5 件）**: test_event_grouping の `test_the_port_cuts_the_trace_as_python_does`（port の行と区切りを Python と比べる）と `test_the_port_attributes_a_mirror_to_both_sides`（向け直した mirror の試験と同じ中身になった。最後の「残差で終わる」の断言だけ移した）、test_resumed_turn_log の `test_the_port_renders_the_same_log`（port と Python の読み物の一致）、test_diff_turn_port の Python の列の null 対照 2 件（`test_adding_the_port_changes_no_python_number`・`test_carrying_paused_turns_on_changes_no_python_number`）。後者の代わりに port の列どうしの null 対照 `test_two_columns_of_one_binary_agree`（同じ exe の 2 列が同じ数え）を足した
+* **道具として使う試験**: test_belief・test_beliefnode・test_search・test_hidden・test_hidden_search は `Budget`（budget.py）・`batched_payoff`（port.py）・`replacements_needed(reg, pos)`（port.py）・`resolve_turn`／`paused_in`／`resume_alternatives`／`turn_leaves`（_port）に。test_symmetry の `test_settle_outcome_reads_showdowns_rule`（Python の `settle_outcome` の表）は port で 1 ターン打つ `test_a_one_sided_knockout_goes_to_the_survivor` に替えた（片方だけ全滅→残った側の勝ち、席を入れ替えても。誰も倒れなければ続く）。両方全滅は相打ちの試験が port で見ている。「順番の記録なしで全滅して届いた局面は引き分け」の行は Python の関数にしか入らない入力なので消した
+* **test_resolve**: fold の 2 件（`test_summarising_a_suspended_turn_is_refused`・`test_the_mid_turn_replacement_is_a_choice_and_not_an_average`）は **tests/test_fold.py（新）** へ移し、port のターンを畳む形に。`LEAF_CHUNK` の 2 件は**消さずに向け直した**（指示は「消す」だった）。理由: chunk は Python の fill にだけあったのではなく、IKA-209 が `port._scored_here`（port が採点できない評価関数の道）に同じ `LEAF_CHUNK` ごと移しており、本番に残る。2 件は `port.LEAF_CHUNK` を動かして `port.batched_payoffs` を呼ぶ形になった（中身の断言は同じ: 分けても同じ行列、区切りはセルの中に落ちない）
+* **test_rust_node を作り直した**（25 → 26 件）: 比べる相手は Python の fill ではなく port 自身の `turn`。`_by_turn` = `port._scored_here`（各セルを `turn` 命令で、pause は `alternatives` 命令で解き、ここで採点して `port.turn_leaves` の fold で畳む＝定義）と、`_filled` = `port.batched_payoffs`（名前の目的は `fill` の `turn_value`、学習済みの葉は `fill_encoded` の配列と fold）を比べる。`_turn_differences` は `turn` 命令と `resolve` 命令（生成が次の局面を引く道）を枝ごとに比べる。
+  * 新: `test_a_node_with_replacements_is_its_turns_folded`（Parting Shot の行を足し、ガオガエンが先に動くよう素早さ +6。pause の選択肢の値が違うことを先に確かめる。遅い Parting Shot では控えのどれを出しても値が同じで、平均でも通ってしまう）
+  * `test_the_refused_cells_are_filled_in_one_call`（拒否セルを Python が 1 回で埋める）は `test_a_refused_cell_stops_the_node` に（Ice Face の局面で 3 つの道とも `PortRefused`、外せば答える）
+  * Feint の対照は Python の `_break_protection` を monkeypatch していた。今は port の trace の「broke」の行で発火セルを選ぶ
+  * クイッククローの対照（外すと動くセル）は port の `fill` で取る
+  * `Budget.fast()` の試験は Python の `reductions`（inexact の理由）を読んでいた。port は `exact` しか返さないので、前提は「このセルは狭まってから止まる（suspended かつ inexact）」「inexact のセルがある」に弱めた
+  * `POKEURAOU_RUST_NODE=0` を立てる 13 か所は無くなった（narrow の比べ 1 か所だけ残る。落ち先は `damage.calculate` で resolver ではない）
+* **道具**（最小の変更。Python の列そのものは IKA-212）:
+  * tools/show_game.py: `RESIDUAL_PHASE = "residual"` を自前に（port が moves.rs で書く文字列）。`turn_events` の Python の道（node なし）は `resolve_turn`・`resume_alternatives` を呼ぶ所で import
+  * tools/diff_turn.py: `run(..., python=False)` / `--no-python` で port の列だけを走らせる（resolver は Python の列の関数の中で import）。Python の列が引いていた途中交代の選択（`py_rng.choice`）は `answer_port_pauses` が port の pause から同じように引く。**null 対照**: master の diff_turn（Python と port）と、この枝の port だけの走りで、port の列の表示（python/port の突き合わせの行を除く）が 4/4 同一（seed 1・5 の 8 局、seed 2 self-switch 0.8 の 8 局、seed 7 self-switch 0.5 の 40 局＝289 ターン）。つまり試験は前と同じ対局を測っている。port の列が pause の自交代を読むのは `_owed_self_switches`（port が書いた `pendingselfswitch` の旗を読むだけ。`resolve.self_switches_needed` と同じ本文）
+  * tools/diff_replacement.py: `replacements_needed`・`resolve_replacements` を呼ばれた時に Python の関数を import する包みに（test_replacement は今までどおり port の関数に差し替える）
+  * tools/refusal_replay.py: `Budget` を budget.py から
+* **rust/src/resolve.rs**: `turn_value`（`fill` の fold）に `#[cfg(feature = "ika210-control")]` の 1 行（途中交代を控えの平均で値付けする）。`turn` 命令・`alternatives` 命令には入らないので、`fill` と定義の片方だけの誤りになる。Cargo.toml の説明に 1 文。既定の build は同じ
+
+### 2. 件数（collect、向け直す前 master 5111c12 → 後）
+
+```
+                         前    後
+  test_belief             9     9
+  test_beliefnode        18    18   （skip 3 は元から: IKA-208 の後 port が拒否しないので fixture が skip）
+  test_search            15    15
+  test_hidden            21    21
+  test_hidden_search      9     9
+  test_symmetry           5     5   （settle_outcome の表 → port の片側全滅 1）
+  test_event_grouping     6     4   （Python 比べ 1・重複 1 を消した）
+  test_resumed_turn_log   4     3   （Python 比べ 1）
+  test_residual_speed_tie 8     8
+  test_resolve           78    76   （fold 2 を test_fold へ）
+  test_fold               -     2
+  test_rust_node         25    26
+  test_diff_turn_port    11    10   （Python の列の null 対照 2 → port の列の null 対照 1）
+  計                    209   206
+  tests/ 全部          1,544 → 1,541（117 → 118 ファイル）
+```
+
+tools 経由で resolver を import していたテスト（test_replacement 5・test_refusal_replay_sample 9・test_game_log 5）は件数そのまま。
+
+### 3. import が 0 であることの確かめ
+
+`C:/tmp/ika210/block_resolve.py`（コミットしない）: `sys.meta_path` の先頭に `pokeuraou.resolve` の find_spec で ImportError を投げる finder を置く pytest の plugin。`PYTHONPATH=<wt>/src;C:/tmp/ika210` と `-p block_resolve` で読ませる。
+
+* **正の対照（master のファイル）**: `pytest -p block_resolve --collect-only tests` が 13 ファイルで ImportError（test_belief・beliefnode・diff_turn_port・event_grouping・hidden_search・refusal_replay_sample・replacement・residual_speed_tie・resolve・resumed_turn_log・rust_node・search・symmetry）。test_hidden（関数の中）と test_game_log（fixture で show_game を読む）は collect の後で import するので、collect の対照には出ない。道具 28 本を仕掛けの下で読み込むと diff_replacement・diff_turn・show_game・refusal_replay の 4 本が落ちた（`C:/tmp/ika210/tool_imports.py`）
+* **この枝**: tests/ 全部の collect が仕掛けの下で通る（1,541 件、エラー 0）。**実行**でも、向け直したファイルと _port を使う全ファイル・道具経由のファイル（計 67 ファイル）が仕掛けの下で全部通る（skip 4 は IKA-208 の 3 と vendor の 1。元から）。tests/ の grep で `pokeuraou.resolve` の import は 0
+* 本番の module（src/pokeuraou）は元から resolver を import しない（IKA-209）
+
+### 4. 正の対照（仕掛けの下、向け直した 16 ファイル 225 件。数は落ちた件数）
+
+exe はすべてこの枝の rust/ から `--features` 付きで作った（events を返す新しい build。旧 exe の old1・old2 は `turn`・`alternatives`・events の命令を知らず、ここで向け直した試験は全部が命令の失敗になるので使わなかった）。
+
+```
+file                        件数  この枝  210c  211c  215c  209c
+test_rust_node                26      0     2     6     0     0
+test_event_grouping            4      0     0     0     3     0
+test_residual_speed_tie        8      0     2     0     0     0
+test_symmetry                  5      0     0     0     1     0
+test_replacement               5      0     0     2     0     0
+test_diff_turn_port           10      0     0     1     0     0
+test_resolve                  76      0     0     1     0     0
+test_belief                    9      0     0     0     0     0
+test_beliefnode               18      0     0     0     0     0
+test_search                   15      0     0     0     0     0
+test_hidden                   21      0     0     0     0     0
+test_hidden_search             9      0     0     0     0     0
+test_fold                      2      0     0     0     0     0
+test_resumed_turn_log          3      0     0     0     0     0
+test_refusal_replay_sample     9      0     0     0     0     0
+test_game_log                  5      0     0     0     0     0
+計                           225      0     4    10     4     0
+```
+
+* 210c（反動・だっしゅつボタンの隣の自交代・天気の後の残差順・2〜5 回・併合なし、**＋この枝で足した fill の途中交代の平均**）: rust_node の途中交代のノードとクロー＋Parting Shot（fill の平均）、残差の順（trace と注記）
+* 211c（JSON で渡した pause の残りの列が最後の手を失う＝`alternatives`・`turn` の再開だけ。`fill` は process 内の pause を使うので正しいまま）: rust_node 6（途中交代のノード、学習済みの葉、IKA-140 の葉の数 210 → 30、fast budget、クロー＋Parting Shot、2 つの規則の葉）、diff_turn の port の列、交代の段、test_resolve の交代のオラクル 1
+* 215c（残差の acts なし・「fainted」の行なし）: event_grouping 3、symmetry の相打ち（最後の倒れ）
+* 209c（`alternativesEncoded` の fold）: 0。この命令は test_hidden_selfswitch（IKA-209）が見ている
+* **どの exe でも落ちない試験とその理由**: belief（同値類の粒子が同じ値になるか）・beliefnode（共有したノードと完成形ごとのノード）・search（深さ 1 が batched_payoff と同じ、深さ 2 が定義どおり）・hidden（paused_in と完成形から解き直したもの）・hidden_search は、**同じ port の 2 つの道の一致**を見る道具の性質の試験で、規則を壊すと両方が同じように動く。fold は Python 側の fold.py の算術（choice か average か、符号）で exe の対照は届かない。resumed_turn_log は記録の pause を選ぶ読み物の照合、refusal_replay_sample は標本の引き方、game_log は場の表示（残りターンの数え）で、どの対照も触らない規則。symmetry の席の入れ替え・どくどくは対照が壊す規則ではない
+
+### 5. tests/_port.py の新しい形
+
+```
+Budget（budget.py）・PortRefused（= port.PortRefused）
+resolve_turn(reg, pos, actions, *, budget=None, events=False) -> TurnResult
+    TurnResult.branches[i].probability / .position / .events / .acts（events=True のときだけ。無ければ AssertionError）
+    TurnResult.suspended[i]（SuspendedTurn: .pause = rustnode.PortPause、.raw、.events、.world）、.exact、.unmodelled、.port（PortTurn）
+resume_turn(reg, paused, choices) / resume_alternatives(reg, paused) / paused_in(paused, position, side)
+turn_leaves(reg, result) = port.turn_leaves(reg, result.port)、turn_expectation(reg, result, value)
+resolve_replacements(reg, pos, choices, *, rng=None) / apply_lead_abilities(reg, pos, *, rng=None)  # trace 付き。rng のときは再試行しない
+replacements_needed(pos, reg=None) = port.replacements_needed、self_switches_needed(pos)（旗を読むだけ）
+given(pos)、require_binary()、ENV_BEFORE_TURN
+```
+
+本番の port.py には口を足していない（events は `port.ask` の中で `RustNode.turn(..., events=True)` 等を呼ぶ）。生成は触っていないので、生成の壁時計の対は取っていない。
+
+### 6. 別課題の候補
+
+* **test_beliefnode の skip 3 件**（`the port refuses no move since IKA-208; the fallback goes in IKA-209`）: IKA-209 で拒否セルは Python に落ちず `PortRefused` になったので、この 3 件が試す「拒否セルの落ち道」はもう無い。消すか「dirty でないセルの拒否で止まる」に向け直す
+* **diff_turn の Python の列**（IKA-212）: 消すときは `--no-python` を既定にし、`_owed_self_switches`・`_port.self_switches_needed`・`resolve.self_switches_needed` の 3 つの同じ本文を 1 つに（port.py か rustnode）
+* **show_game の Python の道**と diff_replacement の Python の段（IKA-212）: 呼ばれた時の import にしただけ。`show_game --engine port` を既定に、diff_replacement は port の段に
+* **port は inexact の理由を返さない**（Python の `reductions`）: test_rust_node の IKA-151 の前提（「stratified の roll だけが理由のセル」）は弱めるしかなかった。理由が要る所があれば `turn` 命令に reductions を足す
+* port.py の `turn`・`resume_alternatives`・`resolve_replacements`・`apply_lead_abilities` に `events` の口は無い（tests/_port.py は `port.ask` の中で RustNode を直接呼ぶ）。本番で trace が要るようになったら（show_game の既定を port にする時など）口を足す
+
+### 7. 機械（heavy.py、IKA-210 の後半）
+
+```
+  cargo build --release（--cores 8）       本体 2 回 26・24 s、対照 5 本（210c 2 回・211c・215c・209c）計 116 s
+  cargo test --release（--cores 8）         1 回 10 s（6 passed）
+  テストファイル（--cores 1、-n 0）         15 回 計 229 s、collect（仕掛けあり・なし）3 回 計 8 s
+  正の対照（--cores 1）                    18 回 計 724 s（16 ファイル × 5 exe を 3 巡、test_rust_node だけ 1 巡）
+  events の on/off の壁時計（--cores 1）   2 回 132・264 s（1 回目は集計の不具合で途中終了）
+  道具の読み込み・diff_turn の null 対照・port_coverage・port_gate_audit（--cores 1）  計 20 s
+```

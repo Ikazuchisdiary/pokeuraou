@@ -17,13 +17,14 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
+from pokeuraou.budget import Budget
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.equilibrium import solve
 from pokeuraou.hidden import completions
 from pokeuraou.narrow import narrow
 from pokeuraou.payoff import HP_SHARE
+from pokeuraou.port import batched_payoff
 from pokeuraou.regulation import load_regulation
-from pokeuraou.resolve import Budget, batched_payoff
 from pokeuraou.search import belief_solve, search
 from pokeuraou.selfplay import position_from_sets
 from pokeuraou.teams import load_roster
@@ -195,15 +196,15 @@ def replacement():  # noqa: ANN201
     import json
     from pathlib import Path
 
+    from pokeuraou.port import replacements_needed
     from pokeuraou.position import Position
-    from pokeuraou.resolve import replacements_needed
 
     path = Path(__file__).parent / "fixtures" / "replacement-mixed.json"
     data = json.loads(path.read_text(encoding="utf-8"))
     reg = load_regulation(data["position"]["format"])
     register_mega_stones(reg)
     position = Position.from_json(data["position"])
-    return reg, position, replacements_needed(position), data
+    return reg, position, replacements_needed(reg, position), data
 
 
 def _replace(reg, position, owed, sheets, shown):  # noqa: ANN001, ANN202

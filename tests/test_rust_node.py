@@ -1,11 +1,18 @@
-"""The Rust bridge answers exactly what Python answers, or it is not used.
+"""The port's node commands answer what the port's own turn answers, cell for cell.
 
-Skipped when the binary is not built, because the port is optional: nothing in the project
-depends on it, and a missing binary must read as "not built" rather than as a failure.
+A node reaches the port three ways (`pokeuraou.port.batched_payoffs`): a ported objective is
+*filled* over there (`fill`, folded by `turn_value`), a learned leaf gets the node's leaves
+*encoded* over there with the folds to take back (`fill_encoded`), and anything else is
+resolved over there one cell at a time -- the `turn` command, the `alternatives` command for a
+pause -- and folded here (`port.turn_leaves`, `port._scored_here`). Those are three pieces
+of code, and the third is the definition: a cell is its turn's outcomes, weighted, with each
+mid-turn replacement chosen by the side that owes it.
 
-The differentials in `tools/` are the wide checks -- thousands of turns, whole nodes, whole
-games. This is the narrow one that runs with the suite: if the bridge is present, a node
-filled through it must equal the node filled here, cell for cell.
+Until IKA-210 this file held the first two to Python's resolver. Python is going away
+(IKA-204), so the reference is now the port's own turn: `fill` and `fill_encoded` against
+`_scored_here`, and the `resolve` command's branches against the `turn` command's. The
+differentials in `tools/` are the wide checks; this is the narrow one that runs with the
+suite. The suite assumes the binary: without one every test here fails.
 """
 
 from __future__ import annotations
@@ -17,17 +24,19 @@ from typing import Any
 import numpy as np
 import pytest
 
-from pokeuraou import resolve as resolve_module
-from pokeuraou import rustnode
+from pokeuraou import port, rustnode
 from pokeuraou.actions import side_actions
+from pokeuraou.budget import Budget
 from pokeuraou.cli import _modal, build_beliefs
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
+from pokeuraou.fold import _fold_from_json, fold_value
 from pokeuraou.narrow import narrow
 from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.position import validate_position
-from pokeuraou.resolve import Budget, batched_payoffs, resolve_turn, turn_leaves
 from pokeuraou.setup import load_scenario, with_spreads
+
+from ._port import resolve_turn
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "scenario-turn5.json"
 
@@ -48,8 +57,8 @@ def _node(limit: int = 6):
     """A real node: the scenario with the belief layer's modal spreads filled in.
 
     Not a hand-made one. Fabricating spreads for the hidden Pokemon leaves HP and maximum
-    HP inconsistent, and the resolver's answer on a position that could not occur is not a
-    thing to hold two implementations to -- Python itself deals negative damage on one.
+    HP inconsistent, and a resolver's answer on a position that could not occur is not a
+    thing to hold two roads to.
     """
     scenario = load_scenario(EXAMPLE)
     reg = scenario.reg
@@ -62,31 +71,109 @@ def _node(limit: int = 6):
     return reg, pos, row, col
 
 
-def test_a_node_is_the_same_through_the_bridge(bridged: None) -> None:
-    reg, pos, row, col = _node()
-    objectives = [OBJECTIVES["hp-share"], OBJECTIVES["faints"]]
-    evaluators = [o.batch for o in objectives]
+def _by_turn(
+    reg: Any, pos: Any, row: list, col: list, evaluators: list, budget: Budget,
+    cells: list | None = None,
+) -> tuple[list[np.ndarray], set[str], np.ndarray]:
+    """The definition: every cell from the `turn` command (and `alternatives` for a pause),
+    its leaves scored here by `evaluators` and folded here. `port.batched_payoffs`' road for
+    an evaluator the port cannot score, taken on purpose for any evaluator."""
+    return port._scored_here(reg, pos, row, col, evaluators, budget, cells)  # noqa: SLF001
 
-    node = rustnode.node_for(reg)
-    assert node is not None, "the bridge reported itself available but produced no process"
-    through_rust, _notes, rust_exact = batched_payoffs(
-        reg, pos, row, col, evaluators, budget=Budget.matrix()
-    )
 
-    rustnode.reset()
-    os.environ[rustnode.ENV_ENABLE] = "0"
-    in_python, _python_notes, python_exact = batched_payoffs(
-        reg, pos, row, col, evaluators, budget=Budget.matrix()
-    )
+def _filled(
+    reg: Any, pos: Any, row: list, col: list, evaluators: list, budget: Budget,
+    cells: list | None = None,
+) -> tuple[list[np.ndarray], set[str], np.ndarray]:
+    """`port.batched_payoffs`: `fill` for named objectives, `fill_encoded` for a leaf."""
+    return port.batched_payoffs(reg, pos, row, col, evaluators, budget=budget, cells=cells)
 
-    for index, objective in enumerate(objectives):
-        gap = float(
-            np.abs(np.asarray(through_rust[index]) - np.asarray(in_python[index])).max()
+
+def _assert_same(got: list, want: list, what: list[str], atol: float = 1e-12) -> None:
+    for index, name in enumerate(what):
+        gap = np.abs(np.asarray(got[index]) - np.asarray(want[index]))
+        # A payoff is a weighted mean and the roads sum it in different orders, so the last
+        # place may differ; nothing else may. A wrong effect is worth 1e-3.
+        assert float(gap.max()) < atol, (
+            f"{name} differs by {float(gap.max())} on {int((gap > atol).sum())} cells"
         )
-        # A payoff is a weighted mean and numpy sums a dot product in a different order
-        # than a sequential loop, so the last place may differ; nothing else may.
-        assert gap < 1e-12, f"{objective.name} differs by {gap}"
-    assert np.array_equal(rust_exact, python_exact)
+
+
+def _objectives() -> tuple[list, list[str]]:
+    objectives = [OBJECTIVES["hp-share"], OBJECTIVES["faints"]]
+    return [o.batch for o in objectives], [o.name for o in objectives]
+
+
+def _pausing_cells(reg: Any, pos: Any, row: list, col: list, budget: Budget) -> list:
+    """The cells whose turn stops for a mid-turn replacement: where the folds differ from a
+    plain mean, so a node that has none cannot tell a wrong fold from a right one."""
+    return [
+        (i, j)
+        for i in range(len(row))
+        for j in range(len(col))
+        if port.turn(reg, pos, [row[i], col[j]], budget).suspended
+    ]
+
+
+def test_a_node_is_its_turns_folded(bridged: None) -> None:
+    """`fill` against the definition, both objectives, every cell, and the exact mask."""
+    reg, pos, row, col = _node()
+    evaluators, names = _objectives()
+    filled, notes, exact = _filled(reg, pos, row, col, evaluators, Budget.matrix())
+    turned, turn_notes, turn_exact = _by_turn(reg, pos, row, col, evaluators, Budget.matrix())
+    _assert_same(filled, turned, names)
+    assert np.array_equal(exact, turn_exact)
+    assert notes == turn_notes
+
+
+#: Rows where Incineroar's Parting Shot pauses a turn with the rest of the queue still to
+#: run (IKA-146's), so a resumed turn has something left to get wrong.
+PAUSING_ROWS = [
+    "move 2 1, move 2 1", "move 2 1, move 2 2", "move 2 2, move 2 1",
+    "move 2 2, move 2 2", "move 4 2, move 2 1", "move 4 2, move 2 2",
+]
+
+
+def _with_parting_shot(reg: Any, pos: Any, row: list) -> list:
+    """The narrowed row, plus the Parting Shot choices that pause a turn."""
+    menu = {a.to_choice(): a for a in side_actions(reg, pos, 0)}
+    extra = [menu[choice] for choice in PAUSING_ROWS]
+    return list({a.to_choice(): a for a in [*row, *extra]}.values())
+
+
+def _choice_matters(reg: Any, pos: Any, row: list, col: list, cells: list) -> bool:
+    """Whether some pause among `cells` offers replacements worth different hp-shares: a
+    node where every option is worth the same cannot tell choosing from averaging."""
+    for i, j in cells:
+        plan = port.turn_leaves(reg, port.turn(reg, pos, [row[i], col[j]], Budget.matrix(), full=True))
+        values = OBJECTIVES["hp-share"].batch(plan.positions)
+        for _weight, part in plan.root.parts:
+            options = getattr(part, "options", None)
+            if options and len({round(fold_value(o, values), 12) for o in options}) > 1:
+                return True
+    return False
+
+
+def test_a_node_with_replacements_is_its_turns_folded(bridged: None) -> None:
+    """`fill`'s `turn_value` folds a pause by the chooser's best option; so does the
+    definition, over the `alternatives` command's turns. Both objectives, every cell.
+
+    Incineroar is made the fastest on the field so its Parting Shot pauses the turn before
+    the foes move: the replacement then takes their hits, and which one comes in is worth
+    something. Paused last, every option is worth the same and a fold that averaged the
+    bench would pass."""
+    reg, pos, row, col = _node()
+    pos.sides[0].active_pokemon()[1].boosts["spe"] = 6
+    row = _with_parting_shot(reg, pos, row)
+    evaluators, names = _objectives()
+    cells = _pausing_cells(reg, pos, row, col, Budget.matrix())
+    assert cells, "no cell pauses"
+    assert _choice_matters(reg, pos, row, col, cells), "no pause offers a choice worth making"
+    filled, notes, exact = _filled(reg, pos, row, col, evaluators, Budget.matrix())
+    turned, turn_notes, turn_exact = _by_turn(reg, pos, row, col, evaluators, Budget.matrix())
+    _assert_same(filled, turned, names)
+    assert np.array_equal(exact, turn_exact)
+    assert notes == turn_notes
 
 
 class _EncodedLeaf:
@@ -116,24 +203,16 @@ def test_a_leaf_that_reads_the_encoding_crosses_as_arrays(bridged: None) -> None
 
     Its input is the encoding, so the port cannot hand back a number -- it hands back the
     encoded leaves and how to fold their values, and the matrix that comes out has to be
-    the one Python builds by encoding the same leaves itself.
+    the one built here by encoding the `turn` command's leaves in Python. The row carries
+    the Parting Shot cells, so the folds the port sends are exercised too.
     """
     reg, pos, row, col = _node()
+    row = _with_parting_shot(reg, pos, row)
     leaf = _EncodedLeaf(Encoder(reg))
-
-    through_rust, _notes, rust_exact = batched_payoffs(
-        reg, pos, row, col, [leaf], budget=Budget.matrix()
-    )
-
-    rustnode.reset()
-    os.environ[rustnode.ENV_ENABLE] = "0"
-    in_python, _python_notes, python_exact = batched_payoffs(
-        reg, pos, row, col, [leaf], budget=Budget.matrix()
-    )
-
-    gap = float(np.abs(np.asarray(through_rust[0]) - np.asarray(in_python[0])).max())
-    assert gap < 1e-12, f"the encoded crossing differs by {gap}"
-    assert np.array_equal(rust_exact, python_exact)
+    encoded, _notes, exact = _filled(reg, pos, row, col, [leaf], Budget.matrix())
+    turned, _turn_notes, turn_exact = _by_turn(reg, pos, row, col, [leaf], Budget.matrix())
+    _assert_same(encoded, turned, ["the encoded leaf"])
+    assert np.array_equal(exact, turn_exact)
 
 
 def test_a_named_objective_rides_along_with_a_learned_leaf(bridged: None) -> None:
@@ -146,22 +225,9 @@ def test_a_named_objective_rides_along_with_a_learned_leaf(bridged: None) -> Non
     """
     reg, pos, row, col = _node()
     evaluators = [_EncodedLeaf(Encoder(reg)), OBJECTIVES["hp-share"].batch]
-
-    through_rust, _notes, _rust_exact = batched_payoffs(
-        reg, pos, row, col, evaluators, budget=Budget.matrix()
-    )
-
-    rustnode.reset()
-    os.environ[rustnode.ENV_ENABLE] = "0"
-    in_python, _python_notes, _python_exact = batched_payoffs(
-        reg, pos, row, col, evaluators, budget=Budget.matrix()
-    )
-
-    for index, what in enumerate(["the encoded leaf", "hp-share"]):
-        gap = float(
-            np.abs(np.asarray(through_rust[index]) - np.asarray(in_python[index])).max()
-        )
-        assert gap < 1e-12, f"{what} differs by {gap}"
+    encoded, _notes, _exact = _filled(reg, pos, row, col, evaluators, Budget.matrix())
+    turned, _turn_notes, _turn_exact = _by_turn(reg, pos, row, col, evaluators, Budget.matrix())
+    _assert_same(encoded, turned, ["the encoded leaf", "hp-share"])
 
 
 def test_an_evaluator_that_reads_positions_keeps_the_node_here(bridged: None) -> None:
@@ -170,14 +236,12 @@ def test_an_evaluator_that_reads_positions_keeps_the_node_here(bridged: None) ->
     A plain objective crosses by name and a leaf that reads the encoding crosses as arrays;
     something that is neither reads positions, and positions are what does not cross.
     """
-    from pokeuraou.resolve import _encoded_leaf_plan, _objective_names
-
-    assert _objective_names([OBJECTIVES["hp-share"].batch]) == ["hp-share"]
-    assert _objective_names([lambda positions: np.zeros(len(positions))]) is None
-    assert _encoded_leaf_plan([lambda positions: np.zeros(len(positions))]) is None
+    assert port.objective_names([OBJECTIVES["hp-share"].batch]) == ["hp-share"]
+    assert port.objective_names([lambda positions: np.zeros(len(positions))]) is None
+    assert port.encoded_leaf_plan([lambda positions: np.zeros(len(positions))]) is None
     # A named objective on its own has a plan, but no reason to take this crossing: the
-    # payoff itself crosses, and `_rust_payoffs` has already dealt with it.
-    assert _encoded_leaf_plan([OBJECTIVES["hp-share"].batch]) == [("hp-share", None)]
+    # payoff itself crosses, by `fill`.
+    assert port.encoded_leaf_plan([OBJECTIVES["hp-share"].batch]) == [("hp-share", None)]
 
 
 def test_the_menu_is_scored_the_same_through_the_bridge(bridged: None) -> None:
@@ -185,7 +249,8 @@ def test_the_menu_is_scored_the_same_through_the_bridge(bridged: None) -> None:
 
     Not close. The scores are only ever used to order candidates, and an order is what
     survives into the game -- a difference in the last place is a different menu, which is
-    a different game, which no tolerance would have caught.
+    a different game, which no tolerance would have caught. (Switched off, `narrow` scores
+    with `damage.calculate`, not with a resolver.)
     """
     reg, pos, _row, _col = _node()
 
@@ -225,30 +290,26 @@ def test_a_menu_scored_from_beliefs_stays_here(bridged: None) -> None:
 
 
 def test_asking_for_some_cells_answers_those_cells(bridged: None) -> None:
-    """A restricted fill must equal the whole one, cell for cell, on both paths.
+    """A restricted fill must equal the whole one, cell for cell, on every road.
 
     This is what lets a caller solve a node without resolving all of it: the equilibrium
     needs about a fifth of a wide matrix, and the rest is work nobody reads. What must not
     happen is a cell answering differently because of who it was asked alongside.
     """
     reg, pos, row, col = _node()
-    evaluators = [OBJECTIVES["hp-share"].batch, OBJECTIVES["faints"].batch]
+    evaluators, _names = _objectives()
     wanted = [(0, 0), (1, 2), (2, 1), (0, 3)]
     wanted = [(i, j) for i, j in wanted if i < len(row) and j < len(col)]
 
-    for bridge in ("1", "0"):
-        os.environ[rustnode.ENV_ENABLE] = bridge
-        rustnode.reset()
-        whole, _n, whole_exact = batched_payoffs(
-            reg, pos, row, col, evaluators, budget=Budget.matrix()
-        )
-        some, _n2, some_exact = batched_payoffs(
-            reg, pos, row, col, evaluators, budget=Budget.matrix(), cells=wanted
+    for road in (_filled, _by_turn):
+        whole, _n, whole_exact = road(reg, pos, row, col, evaluators, Budget.matrix())
+        some, _n2, some_exact = road(
+            reg, pos, row, col, evaluators, Budget.matrix(), cells=wanted
         )
         for index in range(len(evaluators)):
             for i, j in wanted:
                 assert some[index][i, j] == whole[index][i, j], (
-                    f"cell {(i, j)} differs with the bridge {bridge}"
+                    f"cell {(i, j)} differs on {road.__name__}"
                 )
                 assert some_exact[i, j] == whole_exact[i, j]
 
@@ -324,7 +385,7 @@ def _cell_values(filled: Any) -> dict[tuple[int, int], float]:
         if weights
     }
     for i, j, root in filled.folded:
-        out[(i, j)] = resolve_module.fold_value(resolve_module._fold_from_json(root), values)  # noqa: SLF001
+        out[(i, j)] = fold_value(_fold_from_json(root), values)
     return out
 
 
@@ -358,14 +419,15 @@ def test_leaf_sharing_switched_off_stores_every_leaf_and_changes_no_cell(
 
 
 def test_a_resumed_turn_is_resolved_on_the_turns_own_budget(bridged: None) -> None:
-    """A turn paused by Parting Shot resumes at the resolution Python gives it (IKA-140).
+    """A turn paused by Parting Shot resumes at the resolution it was asked for (IKA-140).
 
     Every other test here runs `Budget.matrix()`, whose pinned roll is never narrowed, so
     none of them can see what budget a resumed turn gets. `Budget()` can: Kowtow Cleave's
     and Close Combat's rolls are live branches by the time Incineroar's Parting Shot pauses
-    the turn, so that step runs on a narrowed budget. Python resumes the turn on the
-    budget it was asked for; the port used to resume it on the narrowed one, and made 110
-    leaves of this cell where Python makes 210.
+    the turn, so that step runs on a narrowed budget. The turn resumes on the budget it was
+    asked for; `fill_encoded` used to resume it on the narrowed one, and made 110 leaves of
+    this cell where the turn makes 210. The reference is the `turn` command's pause resumed
+    by the `alternatives` command and flattened here (`port.turn_leaves`).
     """
     reg, pos, _row, col = _node()
     ours = next(
@@ -374,41 +436,35 @@ def test_a_resumed_turn_is_resolved_on_the_turns_own_budget(bridged: None) -> No
     theirs = next(a for a in col if a.to_choice() == "move 1 2, move 2")
     budget = Budget()
 
-    python = resolve_turn(reg, pos, [ours, theirs], budget=budget)
-    assert python.suspended, "this cell no longer pauses; it tests nothing"
-    python_leaves = len(turn_leaves(reg, python).positions)
+    whole = port.turn(reg, pos, [ours, theirs], budget, full=True)
+    assert whole.pauses, "this cell no longer pauses; it tests nothing"
+    turn_leaves = len(port.turn_leaves(reg, whole).positions)
 
     node = rustnode.node_for(reg)
     assert node is not None
     filled = node.fill_encoded(pos, [ours], [theirs], budget, ["hp-share"], None)
     assert not filled.refused
     assert [(i, j) for i, j, _root in filled.folded] == [(0, 0)]
-    assert _references(filled.folded[0][2]) == python_leaves
+    assert _references(filled.folded[0][2]) == turn_leaves
 
-    objectives = [OBJECTIVES["hp-share"], OBJECTIVES["faints"]]
-    evaluators = [o.batch for o in objectives]
-    through_rust, _notes, _exact = batched_payoffs(
-        reg, pos, [ours], [theirs], evaluators, budget=budget
-    )
-    rustnode.reset()
-    os.environ[rustnode.ENV_ENABLE] = "0"
-    in_python, _python_notes, _python_exact = batched_payoffs(
-        reg, pos, [ours], [theirs], evaluators, budget=budget
-    )
-    for index, objective in enumerate(objectives):
-        gap = abs(float(through_rust[index][0][0]) - float(in_python[index][0][0]))
-        assert gap < 1e-12, f"{objective.name} differs by {gap}"
+    evaluators, names = _objectives()
+    got, _notes, _exact = _filled(reg, pos, [ours], [theirs], evaluators, budget)
+    want, _turn_notes, _turn_exact = _by_turn(reg, pos, [ours], [theirs], evaluators, budget)
+    _assert_same(got, want, names)
 
 
-def test_a_node_is_the_same_through_the_bridge_under_the_fast_budget(bridged: None) -> None:
+def test_a_node_is_its_turns_folded_under_the_fast_budget(bridged: None) -> None:
     """A whole node under `Budget.fast()`, whose branch budget is divided as a turn unfolds.
 
     `Budget.matrix()` pins the roll and never narrows, so the node test above cannot see
     the path that narrows or the budget a paused turn resumes on (IKA-146). This node adds
     to the narrowed menu the rows and columns where Parting Shot pauses a turn after the
     rolls have already branched: IKA-140's line moved 12 cells of scenario-turn5's whole
-    menu under this budget, and these rows and columns carry all 12 -- cell
-    `move 2 1, move 2 1` / `move 1 2, move 1` by 5.3e-4 in hp-share and 0.036 in faints.
+    menu under this budget, and these rows and columns carry all 12.
+
+    The exact mask as well (IKA-151): under a stratified roll a turn is inexact, and the
+    mask has to say so on both roads. (Python's `reductions` named why; the port reports
+    `exact` alone, so the premise is held as "some cell is inexact, and one that pauses".)
     """
     reg, pos, row, col = _node()
     menu = {0: side_actions(reg, pos, 0), 1: side_actions(reg, pos, 1)}
@@ -419,47 +475,25 @@ def test_a_node_is_the_same_through_the_bridge_under_the_fast_budget(bridged: No
     def joined(narrowed: list[Any], added: list[Any]) -> list[Any]:
         return list({a.to_choice(): a for a in narrowed + added}.values())
 
-    pausing_rows = ["move 2 1, move 2 1", "move 2 1, move 2 2", "move 2 2, move 2 1"]
-    pausing_rows += ["move 2 2, move 2 2", "move 4 2, move 2 1", "move 4 2, move 2 2"]
-    row = joined(row, pick(0, pausing_rows))
+    row = joined(row, pick(0, PAUSING_ROWS))
     col = joined(col, pick(1, ["move 1 2, move 1", "move 3 2, move 1"]))
     budget = Budget.fast()
 
     # What makes the node worth holding to: a cell that narrows before it pauses.
     cell = pick(0, ["move 2 1, move 2 1"]) + pick(1, ["move 1 2, move 1"])
-    python_turn = resolve_turn(reg, pos, cell, budget=budget)
-    assert python_turn.suspended, "this cell no longer pauses; it tests nothing"
-    assert "resolution narrowed to fit the branch budget" in python_turn.reductions
+    paused = port.turn(reg, pos, cell, budget)
+    assert paused.suspended and not paused.exact, "this cell no longer narrows and pauses"
 
-    objectives = [OBJECTIVES["hp-share"], OBJECTIVES["faints"]]
-    evaluators = [o.batch for o in objectives]
-    through_rust, _notes, rust_exact = batched_payoffs(
-        reg, pos, row, col, evaluators, budget=budget
-    )
-    rustnode.reset()
-    os.environ[rustnode.ENV_ENABLE] = "0"
-    in_python, _python_notes, python_exact = batched_payoffs(
-        reg, pos, row, col, evaluators, budget=budget
-    )
-    for index, objective in enumerate(objectives):
-        gap = np.abs(np.asarray(through_rust[index]) - np.asarray(in_python[index]))
-        assert float(gap.max()) < 1e-12, (
-            f"{objective.name} differs by {float(gap.max())} on {int((gap > 1e-12).sum())} cells"
-        )
-    # The exact mask as well (IKA-151). Under a stratified roll Python marks a turn inexact
-    # for "damage rolls stratified"; the port had no such reduction and called every cell
-    # of this node exact that nothing else made inexact. The comparison means something
-    # only if the node has a cell the stratified roll is the *only* reason for.
-    only_stratified = resolve_turn(reg, pos, [row[0], col[0]], budget=budget)
-    assert set(only_stratified.reductions) == {"damage rolls stratified"}, (
-        f"cell (0, 0) no longer tests the demotion alone: {only_stratified.reductions}"
-    )
-    rust_exact, python_exact = np.asarray(rust_exact), np.asarray(python_exact)
-    assert not python_exact[0, 0]
-    assert np.array_equal(rust_exact, python_exact), (
-        f"the exact mask differs on {int((rust_exact != python_exact).sum())} of "
-        f"{python_exact.size} cells ({int((rust_exact & ~python_exact).sum())} exact in "
-        "the port only)"
+    evaluators, names = _objectives()
+    got, notes, exact = _filled(reg, pos, row, col, evaluators, budget)
+    want, turn_notes, turn_exact = _by_turn(reg, pos, row, col, evaluators, budget)
+    _assert_same(got, want, names)
+    assert notes == turn_notes
+    exact, turn_exact = np.asarray(exact), np.asarray(turn_exact)
+    assert not turn_exact.all(), "no cell is inexact, so the mask says nothing"
+    assert np.array_equal(exact, turn_exact), (
+        f"the exact mask differs on {int((exact != turn_exact).sum())} of "
+        f"{turn_exact.size} cells ({int((exact & ~turn_exact).sum())} exact in fill only)"
     )
 
 
@@ -468,87 +502,48 @@ def test_a_node_that_dies_is_replaced_rather_than_given_up_on(bridged: None) -> 
 
     It fell back to Python and stayed there, at a twentieth of the speed, for however many
     games were left -- and a generation run lost two workers to exactly that. A node
-    process holds nothing between requests, so the answer to one dying is another one.
+    process holds nothing between requests, so the answer to one dying is another one
+    (`port.ask`).
     """
     reg, pos, row, col = _node()
     evaluators = [OBJECTIVES["hp-share"].batch]
-    before, _notes, _exact = batched_payoffs(
-        reg, pos, row, col, evaluators, budget=Budget.matrix()
-    )
+    before, _notes, _exact = _filled(reg, pos, row, col, evaluators, Budget.matrix())
 
     node = rustnode.node_for(reg)
     assert node is not None
     node._process.kill()  # noqa: SLF001 - the failure a generation run saw
 
-    after, _n2, _e2 = batched_payoffs(reg, pos, row, col, evaluators, budget=Budget.matrix())
-    assert np.allclose(np.asarray(after[0]), np.asarray(before[0])), "the answer changed"
+    after, _n2, _e2 = _filled(reg, pos, row, col, evaluators, Budget.matrix())
+    assert np.array_equal(np.asarray(after[0]), np.asarray(before[0])), "the answer changed"
     assert rustnode.available(), "one failure gave up on the bridge"
 
-    # And the next node goes through the port again rather than through Python.
     replacement = rustnode.node_for(reg)
-    assert replacement is not None
+    assert replacement is not None and replacement is not node
     filled = replacement.fill(pos, row, col, ["hp-share"], Budget.matrix())
     assert not filled.refused
 
 
-def test_the_refused_cells_are_filled_in_one_call(
-    bridged: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A node's refused cells are filled together, not one at a time.
+def test_a_refused_cell_stops_the_node(bridged: None) -> None:
+    """A cell the port refuses is a stop naming why, on every road (IKA-209).
 
-    Measured on 2026-09-20: 6.0% of a generation's leaf rows were arriving in 94.9% of its
-    forward passes, because each cell the port declined was filled by calling
-    `batched_payoffs` on a 1x1 node of its own -- a forward pass for a handful of leaves,
-    too small to amortise a kernel launch. `cells=` was already there; only using it was
-    missing.
-
-    The guard is the count of calls rather than the time, because the time belongs to the
-    machine and the count is the property that made it slow.
+    It used to be filled by Python's resolver, the whole tail in one call. There is none
+    now, so a node with a refused cell raises rather than coming back partly filled or
+    filled by something else. Ice Face is refused by name (its intact forme is in neither
+    regulation); the control is the same node without it, which every road answers.
     """
-    reg, pos, row, col = _node()
-    evaluators = [OBJECTIVES["hp-share"].batch, OBJECTIVES["faints"].batch]
+    reg, pos, row, col = _node(limit=3)
+    evaluators, _names = _objectives()
+    leaf = _EncodedLeaf(Encoder(reg))
+    for road, asked in ((_filled, evaluators), (_filled, [leaf]), (_by_turn, evaluators)):
+        road(reg, pos, row, col, asked, Budget.matrix())
 
-    # Slow Start is implemented here and refused there, so every cell comes back named
-    # and the tail is the only thing that fills this node.
     mine = pos.sides[0].active_pokemon()[0]
     assert mine is not None
-    mine.ability = "slowstart"
+    mine.ability = "iceface"
     assert not validate_position(pos, reg.meta.active_per_side)
-
-    os.environ[rustnode.ENV_ENABLE] = "0"
-    rustnode.reset()
-    expected, _notes, expected_exact = batched_payoffs(
-        reg, pos, row, col, evaluators, budget=Budget.matrix()
-    )
-
-    os.environ[rustnode.ENV_ENABLE] = "1"
-    rustnode.reset()
-    node = rustnode.node_for(reg)
-    assert node is not None
-    filled = node.fill(pos, row, col, ["hp-share", "faints"], Budget.matrix())
-    assert len(filled.refused) == len(row) * len(col), "the port was meant to refuse these"
-
-    asked: list[object] = []
-    real = resolve_module.batched_payoffs
-
-    def counting(*args: Any, **kwargs: Any):  # noqa: ANN202
-        asked.append(kwargs.get("cells"))
-        return real(*args, **kwargs)
-
-    monkeypatch.setattr(resolve_module, "batched_payoffs", counting)
-    rustnode.reset()
-    got, _n2, got_exact = counting(
-        reg, pos, row, col, evaluators, budget=Budget.matrix()
-    )
-
-    assert len(asked) == 2, f"{len(asked) - 1} calls filled the tail, not 1"
-    assert asked[0] is None
-    assert asked[1] is not None and len(asked[1]) == len(row) * len(col)
-    for index in range(len(evaluators)):
-        # Bit-identical here, and it has to be: these cells were resolved and scored in
-        # Python on both runs, so nothing summed anything in a different order.
-        assert np.array_equal(np.asarray(got[index]), np.asarray(expected[index]))
-    assert np.array_equal(np.asarray(got_exact), np.asarray(expected_exact))
+    for road, asked in ((_filled, evaluators), (_filled, [leaf]), (_by_turn, evaluators)):
+        with pytest.raises(port.PortRefused, match="iceface"):
+            road(reg, pos, row, col, asked, Budget.matrix())
 
 
 def test_a_white_herb_holder_is_not_refused(bridged: None) -> None:
@@ -563,57 +558,47 @@ def test_a_white_herb_holder_is_not_refused(bridged: None) -> None:
     assert mine is not None
     mine.item = "whiteherb"
     assert not validate_position(pos, reg.meta.active_per_side)
-    evaluators = [OBJECTIVES["hp-share"].batch, OBJECTIVES["faints"].batch]
+    evaluators, names = _objectives()
 
     node = rustnode.node_for(reg)
     assert node is not None
     filled = node.fill(pos, row, col, ["hp-share", "faints"], Budget.matrix())
     assert not [why for _i, _j, why in filled.refused if "whiteherb" in why]
 
-    os.environ[rustnode.ENV_ENABLE] = "0"
-    rustnode.reset()
-    expected, _notes, _e = batched_payoffs(
-        reg, pos, row, col, evaluators, budget=Budget.matrix()
-    )
-    os.environ[rustnode.ENV_ENABLE] = "1"
-    rustnode.reset()
-    got, _n2, _e2 = batched_payoffs(reg, pos, row, col, evaluators, budget=Budget.matrix())
-    for index in range(len(evaluators)):
-        # Not bit-identical: a cell is a weighted mean and the port sums it in its own
-        # order, which is worth about 1e-16. A wrong effect is worth 1e-03.
-        assert np.allclose(
-            np.asarray(got[index]), np.asarray(expected[index]), rtol=0, atol=1e-12
-        )
+    got, _n, _e = _filled(reg, pos, row, col, evaluators, Budget.matrix())
+    want, _n2, _e2 = _by_turn(reg, pos, row, col, evaluators, Budget.matrix())
+    _assert_same(got, want, names)
 
 
 def _turn_differences(node: Any, reg: Any, pos: Any, a: Any, b: Any) -> list[str]:
-    """One cell resolved by both engines, compared branch by branch.
+    """One cell asked of two commands, compared branch by branch.
 
     The matrix is a weighted mean, so a branch weight that is wrong and a branch weight
     that is right can give the same cell whenever the branches score alike. This compares
     the thing itself: every weight, every suspended weight, the notes, and every branch's
-    position -- the same equality `pokeuraou-damage turns` holds a fixture to.
+    position -- from the `turn` command (what the rule tests and the definition read) and
+    from the `resolve` command (what generation draws a game's next position from).
     """
     budget = Budget.matrix()
-    here = resolve_module.resolve_turn(reg, pos, [a, b], budget=budget)
+    here = port.turn(reg, pos, [a, b], budget, full=True)
     there = node.resolve(pos, [a, b], budget)
     if there is None:
         return ["the port refused the turn"]
     wrong: list[str] = []
-    mine = [branch.probability for branch in here.branches]
+    mine = [branch.probability for branch in here.outcomes]
     if len(mine) != len(there.branches) or any(
         abs(x - y) > 1e-12 for x, y in zip(mine, there.branches, strict=False)
     ):
-        wrong.append(f"branch weights: python {mine}, rust {there.branches}")
-    paused = [s.probability for s in here.suspended]
+        wrong.append(f"branch weights: turn {mine}, resolve {there.branches}")
+    paused = [s.probability for s in here.pauses]
     if len(paused) != len(there.suspended) or any(
         abs(x - y) > 1e-12 for x, y in zip(paused, there.suspended, strict=False)
     ):
-        wrong.append(f"suspended weights: python {paused}, rust {there.suspended}")
+        wrong.append(f"suspended weights: turn {paused}, resolve {there.suspended}")
     if sorted(here.unmodelled) != sorted(there.unmodelled):
-        wrong.append(f"notes: python {sorted(here.unmodelled)}, rust {sorted(there.unmodelled)}")
+        wrong.append(f"notes: turn {sorted(here.unmodelled)}, resolve {sorted(there.unmodelled)}")
     if not wrong:
-        for index, branch in enumerate(here.branches):
+        for index, branch in enumerate(here.outcomes):
             chosen = node.resolve(pos, [a, b], budget, select=index)
             assert chosen is not None and chosen.position is not None
             if chosen.position.to_json() != branch.position.to_json():
@@ -621,13 +606,22 @@ def _turn_differences(node: Any, reg: Any, pos: Any, a: Any, b: Any) -> list[str
     return wrong
 
 
+def _moved_by(reg: Any, pos: Any, bare: Any, row: list, col: list) -> np.ndarray:
+    """The cells whose hp-share `fill` moves between `pos` and `bare`: the control that the
+    thing taken away in `bare` is exercised by this node at all."""
+    evaluators = [OBJECTIVES["hp-share"].batch]
+    with_it, _n, _e = _filled(reg, pos, row, col, evaluators, Budget.matrix())
+    without, _n0, _e0 = _filled(reg, bare, row, col, evaluators, Budget.matrix())
+    return np.argwhere(np.abs(np.asarray(with_it[0]) - np.asarray(without[0])) > 1e-12)
+
+
 def test_a_quick_claw_holder_is_resolved_over_there_and_rolls_the_same(bridged: None) -> None:
-    """The claw is `fractional_priority`'s, in both engines; only the gate was never told.
+    """The claw is `fractional_priority`'s; only the gate was never told (IKA-70).
 
     A cell the claw does not move is no evidence -- its two queue branches reach the same
-    states and merge back into one -- so the control comes first: the cells whose Python
-    answer changes when the claw is taken away again. Those are held to the port branch by
-    branch, because a wrong 20% can still average to the right cell (IKA-70).
+    states and merge back into one -- so the control comes first: the cells whose answer
+    changes when the claw is taken away again. Those are held branch by branch across the
+    two commands, because a wrong 20% can still average to the right cell.
 
     The holder is Incineroar at p1b and not Kingambit at p1a on purpose. The first action
     queued was the one place Python weighed the claw right, and the first version of this
@@ -638,39 +632,30 @@ def test_a_quick_claw_holder_is_resolved_over_there_and_rolls_the_same(bridged: 
     assert mine is not None and mine.species == "incineroar"
     mine.item = "quickclaw"
     assert not validate_position(pos, reg.meta.active_per_side)
-    evaluators = [OBJECTIVES["hp-share"].batch, OBJECTIVES["faints"].batch]
-
-    os.environ[rustnode.ENV_ENABLE] = "0"
-    rustnode.reset()
-    expected, _notes, _e = batched_payoffs(reg, pos, row, col, evaluators, budget=Budget.matrix())
     bare = pos.copy()
     bare.sides[0].active_pokemon()[1].item = None
-    without, _n0, _e0 = batched_payoffs(reg, bare, row, col, evaluators, budget=Budget.matrix())
-    moved = np.argwhere(np.abs(np.asarray(expected[0]) - np.asarray(without[0])) > 1e-12)
+    moved = _moved_by(reg, pos, bare, row, col)
     assert len(moved), "the claw changed no cell, so agreeing here would say nothing"
 
-    os.environ[rustnode.ENV_ENABLE] = "1"
-    rustnode.reset()
     node = rustnode.node_for(reg)
     assert node is not None
     filled = node.fill(pos, row, col, ["hp-share", "faints"], Budget.matrix())
     assert not filled.refused, f"refused: {sorted({why for _i, _j, why in filled.refused})}"
-    got, _n2, _e2 = batched_payoffs(reg, pos, row, col, evaluators, budget=Budget.matrix())
-    for index in range(len(evaluators)):
-        assert np.allclose(
-            np.asarray(got[index]), np.asarray(expected[index]), rtol=0, atol=1e-12
-        )
+    evaluators, names = _objectives()
+    got, _n, _e = _filled(reg, pos, row, col, evaluators, Budget.matrix())
+    want, _n2, _e2 = _by_turn(reg, pos, row, col, evaluators, Budget.matrix())
+    _assert_same(got, want, names)
     for i, j in moved:
         assert not _turn_differences(node, reg, pos, row[i], col[j]), (int(i), int(j))
 
 
 def test_a_claw_holders_status_move_rolls_over_there_too(bridged: None) -> None:
-    """Quick Claw fires on a status move in Showdown, and so in both engines (IKA-145).
+    """Quick Claw fires on a status move in Showdown, and so in the port (IKA-145).
 
-    Both skipped the claw on every status move, so `tools/diff_node.py` agreed while both
-    were wrong. The cells held here are Incineroar's Parting Shot with the claw, and the
-    control comes first: the Python answer on them must move when the claw is taken away,
-    or agreeing would say nothing -- before the fix neither engine rolled it there.
+    Both engines skipped the claw on every status move, so `tools/diff_node.py` agreed while
+    both were wrong. The cells held here are Incineroar's Parting Shot with the claw, and
+    the control comes first: the answer on them must move when the claw is taken away, or
+    agreeing would say nothing.
     """
     reg, pos, _row, col = _node()
     mine = pos.sides[0].active_pokemon()[1]
@@ -684,72 +669,54 @@ def test_a_claw_holders_status_move_rolls_over_there_too(bridged: None) -> None:
         and not getattr(choice.slots[0], "mega", False)
     ][:4]
     assert row, "no Parting Shot choice for the holder"
-    evaluators = [OBJECTIVES["hp-share"].batch, OBJECTIVES["faints"].batch]
-
-    os.environ[rustnode.ENV_ENABLE] = "0"
-    rustnode.reset()
-    expected, _notes, _e = batched_payoffs(reg, pos, row, col, evaluators, budget=Budget.matrix())
     bare = pos.copy()
     bare.sides[0].active_pokemon()[1].item = None
-    without, _n0, _e0 = batched_payoffs(reg, bare, row, col, evaluators, budget=Budget.matrix())
-    moved = np.argwhere(np.abs(np.asarray(expected[0]) - np.asarray(without[0])) > 1e-12)
+    moved = _moved_by(reg, pos, bare, row, col)
     assert len(moved), "the claw moved no Parting Shot cell, so agreeing would say nothing"
 
-    os.environ[rustnode.ENV_ENABLE] = "1"
-    rustnode.reset()
     node = rustnode.node_for(reg)
     assert node is not None
     for i, j in moved:
         assert not _turn_differences(node, reg, pos, row[i], col[j]), (int(i), int(j))
-    got, _n2, _e2 = batched_payoffs(reg, pos, row, col, evaluators, budget=Budget.matrix())
-    for index in range(len(evaluators)):
-        assert np.allclose(
-            np.asarray(got[index]), np.asarray(expected[index]), rtol=0, atol=1e-12
-        )
+    evaluators, names = _objectives()
+    got, _n, _e = _filled(reg, pos, row, col, evaluators, Budget.matrix())
+    want, _n2, _e2 = _by_turn(reg, pos, row, col, evaluators, Budget.matrix())
+    _assert_same(got, want, names)
 
 
 def test_a_focus_band_holder_falls_the_same_way_over_there(bridged: None) -> None:
-    """Neither engine branches the band's 1-in-10: both let the hit land and say so.
+    """The band's 1-in-10 is not branched: the hit lands and the turn says so.
 
-    Python reports `survival chance not branched:focusband` and faints the holder. The
-    port used to refuse the turn at that point instead, which was a line nobody could reach
+    The port reports `survival chance not branched:focusband` and faints the holder. It
+    used to refuse the turn at that point instead, which was a line nobody could reach
     while the gate refused every holder -- and the first thing listing the item would have
-    made reachable. So the cells held to the port here are the ones that take that path:
-    a lethal hit on the holder, which is what Close Combat into a Kingambit on 120 HP is.
+    made reachable. So the cells held here are the ones that take that path: a lethal hit
+    on the holder, which is what Close Combat into a Kingambit on 120 HP is.
     """
     reg, pos, row, col = _node()
     mine = pos.sides[0].active_pokemon()[0]
     assert mine is not None and mine.species == "kingambit"
     mine.item = "focusband"
     assert not validate_position(pos, reg.meta.active_per_side)
-    evaluators = [OBJECTIVES["hp-share"].batch, OBJECTIVES["faints"].batch]
+    evaluators, names = _objectives()
     note = "survival chance not branched:focusband"
-
-    os.environ[rustnode.ENV_ENABLE] = "0"
-    rustnode.reset()
-    expected, notes, _e = batched_payoffs(reg, pos, row, col, evaluators, budget=Budget.matrix())
     fired = [
         (i, j)
         for i in range(len(row))
         for j in range(len(col))
-        if note
-        in resolve_module.resolve_turn(reg, pos, [row[i], col[j]], budget=Budget.matrix()).unmodelled
+        if note in port.turn(reg, pos, [row[i], col[j]], Budget.matrix()).unmodelled
     ]
-    assert note in notes and fired, "no cell reached the band, so agreeing would say nothing"
+    assert fired, "no cell reached the band, so agreeing would say nothing"
 
-    os.environ[rustnode.ENV_ENABLE] = "1"
-    rustnode.reset()
     node = rustnode.node_for(reg)
     assert node is not None
     filled = node.fill(pos, row, col, ["hp-share", "faints"], Budget.matrix())
     assert not filled.refused, f"refused: {sorted({why for _i, _j, why in filled.refused})}"
     assert note in filled.unmodelled
-    got, rust_notes, _e2 = batched_payoffs(reg, pos, row, col, evaluators, budget=Budget.matrix())
-    assert rust_notes == notes
-    for index in range(len(evaluators)):
-        assert np.allclose(
-            np.asarray(got[index]), np.asarray(expected[index]), rtol=0, atol=1e-12
-        )
+    got, notes, _e = _filled(reg, pos, row, col, evaluators, Budget.matrix())
+    want, turn_notes, _e2 = _by_turn(reg, pos, row, col, evaluators, Budget.matrix())
+    assert notes == turn_notes
+    _assert_same(got, want, names)
     for i, j in fired:
         assert not _turn_differences(node, reg, pos, row[i], col[j]), (i, j)
 
@@ -790,8 +757,7 @@ def _feint_node() -> tuple[Any, Any, list, list]:
         )
     ]
     # Sneasler's Protect first. The other guard is Sinistcha's, a Ghost that Feint cannot
-    # touch, so since IKA-153 a Feint into it breaks nothing: until then every cell where
-    # the break moved a payoff here was one of those, and Showdown moves none of them.
+    # touch, so since IKA-153 a Feint into it breaks nothing.
     sneasler_protects = [
         c for c in guards if getattr(c.slots[0], "move_id", None) == "protect"
     ]
@@ -800,59 +766,39 @@ def _feint_node() -> tuple[Any, Any, list, list]:
     return reg, pos, row, col
 
 
-def _turn_json(reg: Any, pos: Any, a: Any, b: Any) -> list[tuple[float, str]]:
-    turn = resolve_module.resolve_turn(reg, pos, [a, b], budget=Budget.matrix())
-    return [(branch.probability, str(branch.position.to_json())) for branch in turn.branches]
+def test_feint_breaks_the_guard_the_same_way_over_there(bridged: None) -> None:
+    """`breaksProtect` (IKA-61), the same on every road.
 
-
-def test_feint_breaks_the_guard_the_same_way_over_there(
-    bridged: None, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """`breaksProtect` in the port is Python's `_break_protection` (IKA-61).
-
-    The port refused every Feint turn until IKA-61 -- 74% of what it still refused, and
-    since IKA-139 each of those cells is filled per completion on the hidden-bench path.
-    The control comes first: the cells whose Python turn changes when the break is taken
-    out of Python -- some in the payoff (a Protect broken, the hit lands), some only in the
-    position (Wide Guard gone, `stall` reset), which no payoff sees. Every one is held to
-    the port branch by branch, since a wrong break can still average to the right cell.
+    The port refused every Feint turn until IKA-61. The control comes first: the cells
+    whose turn breaks a guard, read off the port's own trace (`... broke protect on p2a`,
+    IKA-215) -- some move the payoff (a Protect broken, the hit lands), some only the
+    position (Wide Guard gone, `stall` reset), which no payoff sees. Every one is held
+    across the two commands branch by branch, since a wrong break can still average to the
+    right cell.
     """
     reg, pos, row, col = _feint_node()
-    evaluators = [OBJECTIVES["hp-share"].batch, OBJECTIVES["faints"].batch]
-
-    os.environ[rustnode.ENV_ENABLE] = "0"
-    rustnode.reset()
-    expected, _notes, _e = batched_payoffs(reg, pos, row, col, evaluators, budget=Budget.matrix())
-    with monkeypatch.context() as patched:
-        patched.setattr(resolve_module, "_break_protection", lambda *_args: None)
-        without, _n0, _e0 = batched_payoffs(
-            reg, pos, row, col, evaluators, budget=Budget.matrix()
-        )
-        unbroken = {
-            (i, j): _turn_json(reg, pos, row[i], col[j])
-            for i in range(len(row))
-            for j in range(len(col))
-        }
     fired = [
         (i, j)
-        for (i, j), turn in unbroken.items()
-        if _turn_json(reg, pos, row[i], col[j]) != turn
+        for i in range(len(row))
+        for j in range(len(col))
+        if any(
+            " broke " in line
+            for branch in resolve_turn(
+                reg, pos, [row[i], col[j]], budget=Budget.matrix(), events=True
+            ).branches
+            for line in branch.events
+        )
     ]
-    moved = np.argwhere(np.abs(np.asarray(expected[0]) - np.asarray(without[0])) > 1e-12)
-    assert len(moved), "breaking the guard changed no payoff, so agreeing would say nothing"
-    assert len(fired) > len(moved), "no cell where only the position shows the break"
+    assert fired, "no Feint broke a guard, so agreeing would say nothing"
 
-    os.environ[rustnode.ENV_ENABLE] = "1"
-    rustnode.reset()
     node = rustnode.node_for(reg)
     assert node is not None
     filled = node.fill(pos, row, col, ["hp-share", "faints"], Budget.matrix())
     assert not filled.refused, f"refused: {sorted({why for _i, _j, why in filled.refused})}"
-    got, _n2, _e2 = batched_payoffs(reg, pos, row, col, evaluators, budget=Budget.matrix())
-    for index in range(len(evaluators)):
-        assert np.allclose(
-            np.asarray(got[index]), np.asarray(expected[index]), rtol=0, atol=1e-12
-        )
+    evaluators, names = _objectives()
+    got, _n, _e = _filled(reg, pos, row, col, evaluators, Budget.matrix())
+    want, _n2, _e2 = _by_turn(reg, pos, row, col, evaluators, Budget.matrix())
+    _assert_same(got, want, names)
     for i, j in fired:
         assert not _turn_differences(node, reg, pos, row[i], col[j]), (i, j)
 
@@ -890,12 +836,12 @@ def test_disguise_and_ice_face_are_refused_by_name(bridged: None, ability: str) 
 
 
 def test_stance_change_takes_the_forme_over_there_too(bridged: None) -> None:
-    """The forme decides the stats, so a port that skipped it read the wrong Pokemon.
+    """The forme decides the stats, so a road that skipped it read the wrong Pokemon.
 
-    The holder does not have to be Aegislash: neither implementation checks the species
-    before changing the forme, so pinning the ability on whoever is in front tests exactly
-    the arithmetic `change_forme` has to match -- species, types, maximum HP, and the HP
-    carried across the change.
+    The holder does not have to be Aegislash: the port does not check the species before
+    changing the forme, so pinning the ability on whoever is in front tests the arithmetic
+    `change_forme` does -- species, types, maximum HP, and the HP carried across the
+    change -- on `fill` and on the definition alike.
     """
     reg, pos, row, col = _node()
     mine = pos.sides[0].active_pokemon()[0]
@@ -909,28 +855,16 @@ def test_stance_change_takes_the_forme_over_there_too(bridged: None) -> None:
     filled = node.fill(pos, row, col, ["hp-share", "faints"], Budget.matrix())
     assert not [why for _i, _j, why in filled.refused if "stancechange" in why]
 
-    os.environ[rustnode.ENV_ENABLE] = "0"
-    rustnode.reset()
-    expected, _notes, _e = batched_payoffs(
-        reg, pos, row, col, evaluators, budget=Budget.matrix()
-    )
-    os.environ[rustnode.ENV_ENABLE] = "1"
-    rustnode.reset()
-    got, _n2, _e2 = batched_payoffs(reg, pos, row, col, evaluators, budget=Budget.matrix())
-    for index in range(len(evaluators)):
-        # Not bit-identical: a cell is a weighted mean and the port sums it in its own
-        # order, which is worth about 1e-16. A wrong effect is worth 1e-03.
-        assert np.allclose(
-            np.asarray(got[index]), np.asarray(expected[index]), rtol=0, atol=1e-12
-        )
+    got, _n, _e = _filled(reg, pos, row, col, evaluators, Budget.matrix())
+    want, _n2, _e2 = _by_turn(reg, pos, row, col, evaluators, Budget.matrix())
+    _assert_same(got, want, [o.name for o in (OBJECTIVES["hp-share"], OBJECTIVES["faints"])])
 
 
 def test_an_impossible_position_is_refused(bridged: None) -> None:
-    """A position Python's own validator rejects must not be answered, only refused.
+    """A position `validate_position` rejects must not be answered, only refused.
 
-    Two implementations of a well-defined function agree; two implementations handed a
-    state the game cannot reach do whatever they each do. The port says so rather than
-    quietly producing the other answer.
+    A state the game cannot reach has no right answer to hold anything to. The port says so
+    rather than quietly producing one.
     """
     os.environ[rustnode.ENV_ENABLE] = "1"
     rustnode.reset()
@@ -948,11 +882,10 @@ def test_an_impossible_position_is_refused(bridged: None) -> None:
 def _after_the_stone_holder_switches_in():  # noqa: ANN202
     """Charizard, the side's only stone, starts at party slot 2 and is switched in.
 
-    Resolved rather than assembled, because `_do_switch` is what renumbers the slots.
+    Resolved rather than assembled, because the switch is what renumbers the slots.
     """
-    from pokeuraou.actions import MoveAction, SwitchAction, side_actions
+    from pokeuraou.actions import MoveAction, SwitchAction
     from pokeuraou.regulation import load_regulation
-    from pokeuraou.resolve import resolve_turn
     from pokeuraou.selfplay import position_from_sets
     from pokeuraou.teams import load_roster
 
@@ -978,8 +911,8 @@ def _after_the_stone_holder_switches_in():  # noqa: ANN202
             for one in action.slots
         )
     )
-    turn = resolve_turn(reg, before, [ours, theirs], budget=Budget.exact())
-    after = turn.branches[0].position
+    turn = port.turn(reg, before, [ours, theirs], Budget.exact(), full=True)
+    after = turn.outcomes[0].position
     assert after.sides[0].mega_capable_slots == [2]
     assert after.sides[0].pokemon[0].species == "charizard", "the premise: it moved"
     return reg, after
@@ -989,7 +922,7 @@ def test_the_port_puts_can_mega_on_the_stone_holder_after_a_switch(bridged: None
     """`encode.rs` read `side.mega_capable_slots` as well, and was wrong the same way.
 
     Both implementations applied one rule, which is why `diff_encode.py` agreed with both
-    while both were wrong (IKA-121). So the port is not compared with Python here: every
+    while both were wrong (IKA-121). So the port is not compared with anything here: every
     leaf it encodes is asked whether `can_mega` stands exactly on the rows whose species
     and item are a mega pairing, on a side that has not spent its mega -- and whether
     `mega_available` says the same of the side. The node starts right after the holder
@@ -1100,14 +1033,23 @@ def test_two_leaves_in_one_process_each_get_their_own_rule(bridged: None) -> Non
 
     old = Leaf(Encoder(reg, rules=EncodingRules(mega_from_slots=True)))
     new = Leaf(Encoder(reg))
-    old_payoff, _notes, _exact = batched_payoffs(reg, pos, row, col, [old], budget=Budget.matrix())
-    new_payoff, _notes, _exact = batched_payoffs(reg, pos, row, col, [new], budget=Budget.matrix())
+    old_payoff, _notes, _exact = _filled(reg, pos, row, col, [old], Budget.matrix())
+    new_payoff, _notes, _exact = _filled(reg, pos, row, col, [new], Budget.matrix())
     assert "rust can_mega=slots" in old.encoder.used, old.encoder.used
     assert "rust can_mega=holder" not in old.encoder.used, old.encoder.used
     assert "rust can_mega=holder" in new.encoder.used, new.encoder.used
     assert "rust can_mega=slots" not in new.encoder.used, new.encoder.used
     assert not np.array_equal(old_payoff[0], new_payoff[0])
-    # A mixture that disagrees cannot share one fill, so the port is not asked for it.
-    assert resolve_module._rust_encoded_payoffs(
-        reg, pos, row, col, [old, new], Budget.matrix()
-    ) is None
+    # A mixture that disagrees cannot share one fill, so the port is not asked for one:
+    # the node is resolved over there and scored here, each leaf by its own encoder.
+    real = port._encoded  # noqa: SLF001
+
+    def refuse(*_args: Any) -> None:
+        raise AssertionError("a mixture of rules was sent to one fill_encoded")
+
+    port._encoded = refuse  # noqa: SLF001
+    try:
+        mixed, _notes, _exact = _filled(reg, pos, row, col, [old, new], Budget.matrix())
+    finally:
+        port._encoded = real  # noqa: SLF001
+    _assert_same(mixed, [old_payoff[0], new_payoff[0]], ["revision 1", "current"])

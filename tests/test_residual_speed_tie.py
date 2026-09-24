@@ -31,10 +31,7 @@ from pokeuraou.actions import side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Position
 
-# Python's resolver only for the one test that reads the event log (IKA-215).
-from pokeuraou.resolve import resolve_turn as python_resolve_turn
-
-from ._port import Budget
+from ._port import Budget, resolve_turn
 from .conftest import FORMAT_ID
 
 TIE_NOTE = "residual speed tie (Showdown breaks it at random)"
@@ -106,7 +103,9 @@ def _chosen(reg, pos: Position, step: list[str]):  # noqa: ANN001, ANN202
 def _resolved(reg, positions: list[dict], turn: int):  # noqa: ANN001, ANN202
     start = _loaded(positions[turn - 1])
     chosen = _chosen(reg, start, STEPS[turn - 1])
-    return start, chosen, python_resolve_turn(reg, start, chosen, budget=Budget.matrix())
+    return start, chosen, resolve_turn(
+        reg, start, chosen, budget=Budget.matrix(), events=True
+    )
 
 
 @pytest.mark.oracle
@@ -127,10 +126,10 @@ def test_showdown_sorts_before_the_sun_ends(oracle: Oracle, case: str) -> None:
 
 @pytest.mark.oracle
 @pytest.mark.parametrize("case", sorted(FOES))
-def test_python_orders_the_residuals_as_showdown(reg, oracle: Oracle, case: str) -> None:  # noqa: ANN001
-    """On every turn Showdown does not shuffle, our burn events come in its order.
+def test_the_port_orders_the_residuals_as_showdown(reg, oracle: Oracle, case: str) -> None:  # noqa: ANN001
+    """On every turn Showdown does not shuffle, the port's burn events come in its order.
 
-    Still Python's: the port keeps no events (IKA-215). Its HP after the residual is held
+    The port's trace (IKA-215); Python's until IKA-210. The HP after the residual is held
     to Showdown's in `test_the_port_ends_the_residual_where_showdown_does`.
     """
     positions, kept = _play(oracle, case)
@@ -145,8 +144,8 @@ def test_python_orders_the_residuals_as_showdown(reg, oracle: Oracle, case: str)
 
 
 # ---------------------------------------------------------------------------
-# The port against Showdown, not against Python (IKA-207). The port keeps no events, so
-# the order is held through what it decides: every Pokemon's HP after the residual, on the
+# The port against Showdown, not against Python (IKA-207). Beside the trace above, the
+# order is held through what it decides: every Pokemon's HP after the residual, on the
 # turns Showdown does not shuffle.
 
 

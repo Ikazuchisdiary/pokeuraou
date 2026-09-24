@@ -31,18 +31,13 @@ from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Effect, MoveSlot, Position
 from pokeuraou.regulation import Regulation, to_id
 
-# Python's resolver only where the search's own fold or fill is what is tested (IKA-209,
-# IKA-212 take them): `turn_expectation`, `turn_leaves` and `batched_payoffs`' chunking.
-from pokeuraou.resolve import Average, BestOf, turn_expectation, turn_leaves
-from pokeuraou.resolve import resolve_turn as python_resolve_turn
-from pokeuraou.resolve import resume_alternatives as python_resume_alternatives
-
 from ._port import (
     Budget,
     PortRefused,
     resolve_turn,
     resume_turn,
     self_switches_needed,
+    turn_leaves,
 )
 from .conftest import FORMAT_ID
 from .test_actions import _synthetic_position
@@ -781,92 +776,6 @@ def test_a_self_switch_suspends_the_turn_instead_of_finishing_it(
     assert owed[0][0] and not any(owed[1]), f"only the mover owes a replacement: {owed}"
 
 
-def test_summarising_a_suspended_turn_is_refused(
-    reg: Regulation, team_a: list[TeamSet]
-) -> None:
-    """A partial expectation is worse than an error, because it looks like a number.
-
-    Averaging over `branches` while a suspension holds part of the mass gives a value short
-    by that fraction and perfectly ordinary-looking. Every caller has to answer the
-    replacement first.
-    """
-    pos = _synthetic_position(reg, team_a)
-    mover = pos.sides[0].pokemon[pos.sides[0].active[0]]
-    mover.moves[0] = MoveSlot(id="uturn", pp=20, maxpp=20)
-    ours = SideAction(
-        slots=(
-            MoveAction(slot=0, move_index=1, move_id="uturn", target=1),
-            PassAction(slot=1),
-        )
-    )
-    theirs = side_actions(reg, pos, 1)[0]
-    # Python's: the fold under test is the search's `turn_expectation` (IKA-209 moves it).
-    result = python_resolve_turn(reg, pos, [ours, theirs], budget=Budget.deterministic(8))
-    assert result.suspended
-
-    with pytest.raises(ValueError, match="suspended"):
-        result.expected(lambda _p: 0.0)
-
-    # ...and the fold does produce a number, once the choice is part of it.
-    value, _flags = turn_expectation(reg, result, lambda _p: 0.5)
-    assert value == pytest.approx(0.5)
-
-
-def test_the_mid_turn_replacement_is_a_choice_and_not_an_average(
-    reg: Regulation, team_a: list[TeamSet]
-) -> None:
-    """The interrupted side gets its best option, not the mean of all of them.
-
-    This is the whole reason `TurnLeaves` exists. Which Pokemon comes in is a decision, so
-    averaging over the bench would price a Parting Shot as if the player brought in
-    something at random. Zero-sum means side 0 maximises and side 1 minimises, and the
-    direction is asserted both ways because getting the sign backwards would be invisible
-    in aggregate.
-    """
-    pos = _synthetic_position(reg, team_a)
-    mover = pos.sides[0].pokemon[pos.sides[0].active[0]]
-    mover.moves[0] = MoveSlot(id="uturn", pp=20, maxpp=20)
-    ours = SideAction(
-        slots=(
-            MoveAction(slot=0, move_index=1, move_id="uturn", target=1),
-            PassAction(slot=1),
-        )
-    )
-    theirs = side_actions(reg, pos, 1)[0]
-    # Python's: the fold under test is the search's `turn_leaves` (IKA-209 moves it).
-    result = python_resolve_turn(reg, pos, [ours, theirs], budget=Budget.deterministic(8))
-    assert result.suspended
-
-    chooser, alternatives = python_resume_alternatives(reg, result.suspended[0])
-    assert chooser == 0
-    assert len(alternatives) >= 2, "a bench of two is the point of the test"
-
-    # Score each candidate by which species ended up in the slot, so the values are
-    # distinct and the best one is known independently of the value function.
-    plan = turn_leaves(reg, result)
-    species = [
-        (p.sides[0].pokemon[p.sides[0].active[0]].species if p.sides[0].active[0] is not None else "")
-        for p in plan.positions
-    ]
-    scores = {name: float(i + 1) for i, name in enumerate(sorted(set(species)))}
-    values = [scores[name] for name in species]
-
-    assert plan.value(values) == pytest.approx(max(scores.values())), (
-        "side 0 chooses, so the fold must take the option it likes most"
-    )
-    # Flip the fold's owner and the same leaves must produce the worst value instead.
-    flipped = replace(
-        plan,
-        root=Average(
-            parts=[
-                (w, BestOf(chooser=1, options=node.options) if isinstance(node, BestOf) else node)
-                for w, node in plan.root.parts
-            ]
-        ),
-    )
-    assert flipped.value(values) == pytest.approx(min(scores.values()))
-
-
 def test_a_chunked_fill_scores_the_same_node(
     reg: Regulation, team_a: list[TeamSet], monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -874,7 +783,9 @@ def test_a_chunked_fill_scores_the_same_node(
 
     `batched_payoffs` held every leaf of every cell alive until the whole node was
     resolved, and a 24x24 depth-1 node measured that way took this machine to 0.3 GB free
-    (IKA-27). `LEAF_CHUNK` bounds the list instead. The leaves it scores are the same
+    (IKA-27). `LEAF_CHUNK` bounds the list instead -- today in `pokeuraou.port`'s road for an
+    evaluator the port cannot score (`_scored_here`, IKA-209), which is what a plain
+    function like the one below takes; it was Python's fill until IKA-210. The leaves it scores are the same
     leaves and the folds are the same folds, so for a per-position objective the matrix has
     to come back identical to the bit -- not close, identical, because a payoff that moves
     is an equilibrium that moves.
@@ -887,7 +798,7 @@ def test_a_chunked_fill_scores_the_same_node(
     changes that number. That difference is measured where it belongs, against the value
     function, and not asserted here.
     """
-    from pokeuraou import resolve as resolve_module
+    from pokeuraou import port as port_module
     from pokeuraou.payoff import HP_SHARE
 
     pos = _synthetic_position(reg, team_a)
@@ -902,9 +813,7 @@ def test_a_chunked_fill_scores_the_same_node(
     ours = [uturn, *side_actions(reg, pos, 0)[:3]]
     theirs = side_actions(reg, pos, 1)[:4]
     budget = Budget.matrix()
-    # Python's own fill (`batched_payoffs`, `LEAF_CHUNK`) is what is under test; it goes with
-    # the resolver (IKA-212).
-    assert python_resolve_turn(reg, pos, [uturn, theirs[0]], budget=budget).suspended, (
+    assert resolve_turn(reg, pos, [uturn, theirs[0]], budget=budget).suspended, (
         "the node has to contain a suspended turn for the fold to be under test"
     )
 
@@ -914,15 +823,15 @@ def test_a_chunked_fill_scores_the_same_node(
         calls.append(len(positions))
         return HP_SHARE.batch(positions)
 
-    monkeypatch.setattr(resolve_module, "LEAF_CHUNK", 0)
-    whole, whole_notes, whole_exact = resolve_module.batched_payoffs(
+    monkeypatch.setattr(port_module, "LEAF_CHUNK", 0)
+    whole, whole_notes, whole_exact = port_module.batched_payoffs(
         reg, pos, ours, theirs, [evaluate], budget=budget
     )
     at_once = calls.copy()
     calls.clear()
 
-    monkeypatch.setattr(resolve_module, "LEAF_CHUNK", 64)
-    chunked, chunked_notes, chunked_exact = resolve_module.batched_payoffs(
+    monkeypatch.setattr(port_module, "LEAF_CHUNK", 64)
+    chunked, chunked_notes, chunked_exact = port_module.batched_payoffs(
         reg, pos, ours, theirs, [evaluate], budget=budget
     )
 
@@ -944,9 +853,9 @@ def test_a_chunk_boundary_never_falls_inside_a_cell(
     cell split across two calls would be folded from half an array. `LEAF_CHUNK` is a
     floor checked between cells rather than a ceiling enforced inside one, and that is the
     reason: with the chunk set to 1 every cell flushes on its own, and each call is exactly
-    one cell's leaves.
+    one cell's leaves. (`pokeuraou.port`'s scored-here road, as above.)
     """
-    from pokeuraou import resolve as resolve_module
+    from pokeuraou import port as port_module
     from pokeuraou.payoff import HP_SHARE
 
     pos = _synthetic_position(reg, team_a)
@@ -954,8 +863,7 @@ def test_a_chunk_boundary_never_falls_inside_a_cell(
     theirs = side_actions(reg, pos, 1)[:3]
     budget = Budget.matrix()
     def leaves_of(a: SideAction, b: SideAction) -> int:
-        # Python's own fill is under test, as above (IKA-212).
-        result = python_resolve_turn(reg, pos, [a, b], budget=budget)
+        result = resolve_turn(reg, pos, [a, b], budget=budget, events=False)
         if result.suspended:
             return len(turn_leaves(reg, result).positions)
         return len(result.branches)
@@ -968,8 +876,8 @@ def test_a_chunk_boundary_never_falls_inside_a_cell(
         calls.append(len(positions))
         return HP_SHARE.batch(positions)
 
-    monkeypatch.setattr(resolve_module, "LEAF_CHUNK", 1)
-    resolve_module.batched_payoffs(reg, pos, ours, theirs, [evaluate], budget=budget)
+    monkeypatch.setattr(port_module, "LEAF_CHUNK", 1)
+    port_module.batched_payoffs(reg, pos, ours, theirs, [evaluate], budget=budget)
 
     assert [n for n in calls if n] == [n for n in per_cell if n]
 

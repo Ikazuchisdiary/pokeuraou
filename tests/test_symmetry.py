@@ -42,9 +42,10 @@ from pokeuraou.damage import register_mega_stones
 from pokeuraou.narrow import narrow
 from pokeuraou.payoff import HP_SHARE
 from pokeuraou.position import Position
-from pokeuraou.resolve import Budget, resolve_turn, settle_outcome, turn_expectation
 from pokeuraou.selfplay import position_from_sets
 from pokeuraou.teams import load_roster
+
+from ._port import Budget, resolve_turn, turn_expectation
 
 REGULATION = "gen9championsvgc2026regmb"
 
@@ -173,7 +174,7 @@ def test_a_mutual_knockout_goes_to_the_side_that_ran_out_last(roster) -> None:  
         slots=(MoveAction(slot=0, move_index=0, move_id="flareblitz", target=1),)
     )
     pos = one_each()
-    result = resolve_turn(reg, pos, [action, action], budget=Budget.matrix())
+    result = resolve_turn(reg, pos, [action, action], budget=Budget.matrix(), events=True)
     assert result.branches
     for branch in result.branches:
         after = branch.position
@@ -205,46 +206,58 @@ def test_a_mutual_knockout_goes_to_the_side_that_ran_out_last(roster) -> None:  
     assert forward == pytest.approx(0.5) and backward == pytest.approx(0.5)
 
 
-def test_settle_outcome_reads_showdowns_rule() -> None:
-    """The rule itself, as a table: one side out, both out, and both out unattributed."""
-    roster = load_roster("rizabanadohido")
-    reg = roster.reg
-    register_mega_stones(reg)
-    sets = list(roster.sets[:4])
+def test_a_one_sided_knockout_goes_to_the_survivor(roster) -> None:  # noqa: ANN001
+    """The other half of Showdown's `checkWin`, on the port: one side out, the other wins,
+    from either seat -- and a turn in which nobody runs out leaves the battle going.
 
-    def wiped(*sides: int) -> Position:
+    Was a table over Python's `settle_outcome` (IKA-210: the resolver's own function goes
+    with it). The both-out half is the mutual knockout above; the "arrived already empty,
+    no order recorded" row was a Python-only input no turn produces.
+    """
+    reg = roster.reg
+    sets = [roster.sets[2], roster.sets[0], roster.sets[1], roster.sets[3]]
+    assert sets[0].species == "garchomp"
+
+    def last_each(hp_behind: int) -> Position:
         pos = position_from_sets(reg, sets, sets)
-        for index in sides:
-            for mon in pos.sides[index].pokemon:
+        for side in pos.sides:
+            for mon in side.pokemon[1:]:
                 mon.hp = 0
                 mon.fainted = True
+                mon.status = "fnt"
+            side.active = [0, None]
+        pos.sides[1].pokemon[0].hp = hp_behind
         return pos
 
-    one = wiped(0)
-    settle_outcome(one, [0])
-    assert one.ended and one.winner == one.sides[1].id
+    claw = SideAction(
+        slots=(MoveAction(slot=0, move_index=1, move_id="dragonclaw", target=1),)
+    )
+    # Stomping Tantrum cannot take a full-HP Garchomp, so side 0 survives in every
+    # branch (and, unlike Rock Slide, cannot flinch it out of its Dragon Claw).
+    slide = SideAction(
+        slots=(MoveAction(slot=0, move_index=2, move_id="stompingtantrum", target=1),)
+    )
 
-    other = wiped(1)
-    settle_outcome(other, [1])
-    assert other.ended and other.winner == other.sides[0].id
+    for flipped in (False, True):
+        pos = last_each(1)
+        actions = [claw, slide]
+        if flipped:
+            pos, actions = pos.swapped(), [slide, claw]
+        survivor = 1 if flipped else 0
+        result = resolve_turn(reg, pos, actions, budget=Budget.matrix())
+        assert result.branches and not result.suspended
+        for branch in result.branches:
+            after = branch.position
+            assert all(m.fainted for m in after.sides[1 - survivor].pokemon)
+            assert after.ended and after.winner == after.sides[survivor].id, flipped
 
-    # Both out: the side whose wipe-out completed last wins, in either order.
-    for order, winner_index in (([0, 1], 1), ([1, 0], 0)):
-        both = wiped(0, 1)
-        settle_outcome(both, order)
-        assert both.ended
-        assert both.winner == both.sides[winner_index].id, order
-
-    # Both out with no order recorded -- a position that arrived empty from an earlier
-    # turn. A draw is the honest answer; guessing would put the old bug back.
-    unattributed = wiped(0, 1)
-    settle_outcome(unattributed, [])
-    assert unattributed.ended and unattributed.winner is None
-
-    # Nobody out: untouched, including `ended`.
-    alive = position_from_sets(reg, sets, sets)
-    settle_outcome(alive, [])
-    assert not alive.ended and alive.winner is None
+    # Nobody out: the battle goes on (the Garchomp behind has its full HP this time).
+    full = last_each(1)
+    full.sides[1].pokemon[0].hp = full.sides[1].pokemon[0].maxhp
+    result = resolve_turn(reg, full, [slide, slide], budget=Budget.matrix())
+    assert result.branches
+    for branch in result.branches:
+        assert not branch.position.ended and branch.position.winner is None
 
 
 def test_swapping_relocates_the_effects_that_name_a_side(roster) -> None:  # noqa: ANN001
@@ -324,7 +337,7 @@ def test_a_poison_type_never_misses_toxic(roster) -> None:  # noqa: ANN001
                 MoveAction(slot=1, move_index=3, move_id="protect", target=None),
             )
         )
-        result = resolve_turn(reg, pos, [ours, theirs], budget=Budget.exact())
+        result = resolve_turn(reg, pos, [ours, theirs], budget=Budget.exact(), events=True)
         return {
             any("Toxic" in line and "missed" in line for line in branch.events)
             for branch in result.branches
