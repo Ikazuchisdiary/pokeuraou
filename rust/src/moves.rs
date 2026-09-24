@@ -4380,6 +4380,10 @@ fn apply_status_move(
             }
         }
     }
+    // Transform's `onHit: return pokemon.transformInto(target)` (IKA-219).
+    if mv.id == "transform" {
+        transform_move(turn, me, targets)?;
+    }
 
     if mv.raw.get("hasCustomCode").and_then(Value::as_bool).unwrap_or(false)
         && !crate::modelled::status_move_is_fully_modelled(&mv.id)
@@ -4410,6 +4414,20 @@ fn apply_status_move(
         }
     }
     let _ = reg;
+    Ok(())
+}
+
+/// Transform on its one target: a failed `transformInto` fails the move, and a new
+/// ability's `Start` runs at once, as `setAbility` does it (a copied Intimidate lands).
+fn transform_move(turn: &mut Turn, me: Slot, targets: &[Slot]) -> Result<(), String> {
+    use crate::transform::{transform_into, Transformed};
+    for target in targets {
+        match transform_into(turn, me, *target, "transform")? {
+            Transformed::Failed => turn.move_failed[me.0][me.1] = true,
+            Transformed::SameAbility => {}
+            Transformed::NewAbility => crate::resolve::switch_in_ability(turn, me.0, me.1),
+        }
+    }
     Ok(())
 }
 

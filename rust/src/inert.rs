@@ -53,8 +53,6 @@ pub fn ability_is_inert(id: &str) -> bool {
             | "hungerswitch"
             | "hydration"
             | "illuminate"
-            | "illusion"
-            | "imposter"
             | "innardsout"
             | "intrepidsword"
             | "klutz"

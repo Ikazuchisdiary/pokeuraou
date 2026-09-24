@@ -209,6 +209,17 @@ pub struct Pokemon {
     pub ability_state: Blob,
     pub stats_override: Option<[i64; 6]>,
     pub transformed: bool,
+    /// What a switch out or a faint gives back to a transformed Pokemon (IKA-219):
+    /// Showdown's `baseAbility` and `baseMoveSlots`. Boxed, and only while `transformed`,
+    /// so the Pokemon every branch copies grows by one pointer.
+    pub transform_base: Option<Box<TransformBase>>,
+}
+
+/// `clearVolatile`'s `ability = baseAbility` and `moveSlots = baseMoveSlots.slice()`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TransformBase {
+    pub ability: Id,
+    pub moves: Moves,
 }
 
 /// A Pokemon's live types: at most three, inline.
@@ -318,6 +329,7 @@ impl Pokemon {
             ability_state: blob_from(value.get("abilityState")),
             stats_override: read_stats(value.get("statsOverride")),
             transformed: value.get("transformed").and_then(Value::as_bool).unwrap_or(false),
+            transform_base: transform_base_from(value),
         }
     }
 
@@ -377,6 +389,13 @@ impl Pokemon {
         if self.stats_override.is_some() {
             out.insert("statsOverride".into(), stats_json(self.stats_override, &STAT_IDS));
         }
+        if let Some(base) = self.transform_base.as_deref() {
+            out.insert("baseAbility".into(), json!(base.ability.as_str()));
+            out.insert(
+                "baseMoves".into(),
+                Value::Array(base.moves.iter().map(MoveSlot::to_json).collect()),
+            );
+        }
         if let Some(v) = self.status_duration {
             out.insert("statusDuration".into(), json!(v));
         }
@@ -405,6 +424,16 @@ impl Pokemon {
     pub fn boost(&self, stat: &str) -> i8 {
         boost_index(stat).map(|i| self.boosts[i]).unwrap_or(0)
     }
+}
+
+/// `baseAbility` and `baseMoves`, which the bridge writes only for a transformed Pokemon.
+fn transform_base_from(value: &Value) -> Option<Box<TransformBase>> {
+    let ability = value.get("baseAbility").and_then(Value::as_str)?;
+    let mut moves = Moves::default();
+    for entry in value.get("baseMoves").and_then(Value::as_array)? {
+        moves.push(MoveSlot::from_json(entry));
+    }
+    Some(Box::new(TransformBase { ability: Id::new(ability), moves }))
 }
 
 fn id_json(value: Option<Id>) -> Value {

@@ -127,6 +127,13 @@ export interface PokemonSnapshot {
 	statsOverride?: Record<string, number>;
 	/** Set while Transform is active, so the override is known to be authoritative. */
 	transformed: boolean;
+	/**
+	 * What a switch out or a faint gives back to a transformed Pokemon (IKA-219):
+	 * `clearVolatile` sets `ability = baseAbility` and `moveSlots = baseMoveSlots.slice()`,
+	 * PP spent before the Transform included. Present only while `transformed`.
+	 */
+	baseAbility?: string;
+	baseMoves?: MoveSlotSnapshot[];
 }
 
 export interface SideSnapshot {
@@ -331,6 +338,16 @@ export function positionFromBattle(battle: AnyBattle, megaUsedBySide: boolean[])
 				statsOverride: { hp: p.maxhp, ...p.storedStats },
 				transformed: !!p.transformed,
 			};
+			if (p.transformed) {
+				snap.baseAbility = p.baseAbility;
+				snap.baseMoves = p.baseMoveSlots.map((m: AnyBattle) => ({
+					id: m.id,
+					pp: m.pp,
+					maxpp: m.maxpp,
+					disabled: !!m.disabled,
+					used: !!m.used,
+				}));
+			}
 			if (typeof p.statusState?.duration === 'number') snap.statusDuration = p.statusState.duration;
 			if (typeof p.statusState?.time === 'number') snap.statusCounter = p.statusState.time;
 			else if (typeof p.statusState?.stage === 'number') snap.statusCounter = p.statusState.stage;

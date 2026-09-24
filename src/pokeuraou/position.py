@@ -151,6 +151,11 @@ class Pokemon:
     #: for a transformed Pokemon, whose stats do not follow from its own SP spread.
     stats_override: dict[str, int] | None = None
     transformed: bool = False
+    #: What a switch out or a faint gives back to a transformed Pokemon: Showdown's
+    #: `baseAbility` and `baseMoveSlots` (PP spent before the Transform included). Set only
+    #: while `transformed` (IKA-219); passed through, never read here.
+    base_ability: str | None = None
+    base_moves: list[MoveSlot] | None = None
 
     @property
     def is_active(self) -> bool:
@@ -232,6 +237,8 @@ class Pokemon:
             ability_state=self.ability_state,
             stats_override=self.stats_override,
             transformed=self.transformed,
+            base_ability=self.base_ability,
+            base_moves=None if self.base_moves is None else [m.copy() for m in self.base_moves],
         )
 
     @staticmethod
@@ -270,6 +277,10 @@ class Pokemon:
             ability_state=dict(d.get("abilityState", {})),
             stats_override=dict(d["statsOverride"]) if d.get("statsOverride") else None,
             transformed=bool(d.get("transformed")),
+            base_ability=d.get("baseAbility"),
+            base_moves=(
+                [MoveSlot.from_json(m) for m in d["baseMoves"]] if d.get("baseMoves") is not None else None
+            ),
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -307,6 +318,10 @@ class Pokemon:
         }
         if self.stats_override is not None:
             out["statsOverride"] = dict(self.stats_override)
+        if self.base_ability is not None:
+            out["baseAbility"] = self.base_ability
+        if self.base_moves is not None:
+            out["baseMoves"] = [m.to_json() for m in self.base_moves]
         if self.status_duration is not None:
             out["statusDuration"] = self.status_duration
         if self.status_counter is not None:
