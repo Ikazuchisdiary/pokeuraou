@@ -3558,10 +3558,14 @@ fn apply_status_move(
     for target in targets {
         let own_side = target.0 == action.side;
         if let Some(boosts) = mv.raw.get("boosts").and_then(Value::as_object) {
-            let table: Vec<(&str, i64)> = boosts
+            let mut table: Vec<(&str, i64)> = boosts
                 .iter()
                 .map(|(stat, value)| (stat.as_str(), value.as_i64().unwrap_or(0)))
                 .collect();
+            // In the dump's order, as Showdown's `boost()` walks it (IKA-215).
+            if let Some(order) = reg.boost_order.get(mv.id.as_str()) {
+                table.sort_by_key(|(stat, _)| order.iter().position(|s| s == stat));
+            }
             turn.apply_boosts_by(
                 target.0,
                 target.1,
@@ -4071,6 +4075,10 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
             let per_stage = (maxhp / 16).max(1);
             turn.deal_damage(side, slot, per_stage * stage, false, "tox")?;
         }
+        // Read again, as Python's `mon.volatile(...)` is: a faint to the status damage
+        // above has cleared it, and a freed line would follow (IKA-215).
+        let has_trap =
+            has_trap && turn.mon_at(side, slot).is_some_and(|m| m.has_volatile("partiallytrapped"));
         if has_trap {
             if trapper_gone(turn, trap_source) {
                 if let Some(mon) = turn.mon_at_mut(side, slot) {
