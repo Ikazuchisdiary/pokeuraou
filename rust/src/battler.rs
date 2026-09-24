@@ -76,6 +76,9 @@ pub struct Battler {
     pub gender: Id,
     /// Protean and Libero record here that they have already retyped their user.
     pub protean_fired: bool,
+    /// Supreme Overlord's count, `abilityState.fallen`: its side's faints when it came in,
+    /// at most 5 (IKA-222). 0 for every other ability.
+    pub fallen: i64,
 }
 
 impl Battler {
@@ -118,6 +121,7 @@ impl Battler {
                 .get("protean")
                 .map(|v| v != &serde_json::Value::Bool(false) && !v.is_null())
                 .unwrap_or(false),
+            fallen: fallen_of(mon),
         })
     }
 
@@ -144,6 +148,15 @@ impl Battler {
 
 fn species_types(species: &crate::reg::Species) -> Types {
     species.type_ids
+}
+
+/// Supreme Overlord's `effectState.fallen`, read only for a holder: every Battler build
+/// would otherwise pay a map lookup for an ability almost no one has.
+fn fallen_of(mon: &Pokemon) -> i64 {
+    if mon.ability != "supremeoverlord" {
+        return 0;
+    }
+    mon.ability_state.get("fallen").and_then(|v| v.as_i64()).unwrap_or(0).clamp(0, 5)
 }
 
 /// The field as the calculator sees it. Owned ids, because the resolver rebuilds it
@@ -230,6 +243,7 @@ impl From<&BattlerCase> for Battler {
             volatiles,
             gender: Id::new(&case.gender),
             protean_fired: case.protean_fired,
+            fallen: 0,
         }
     }
 }

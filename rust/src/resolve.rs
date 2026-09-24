@@ -945,7 +945,12 @@ fn ability_handled(ability: &str) -> bool {
             // No effect a turn can observe.
             | "pressure" | "shadowtag" | "arenatrap" | "magnetpull" | "runaway" | "telepathy"
             | "healer" | "symbiosis" | "sweetveil" | "aromaveil" | "damp"
-            | "lightmetal" | "heavymetal" | "sandveil" | "snowcloak" | "stall"
+            | "lightmetal" | "heavymetal" | "sandveil" | "stall"
+            // The Ruin abilities and Sniper in the damage layer, Supreme Overlord's count at
+            // switch-in, Snow Cloak in `moves::accuracy_of` (IKA-222). Snow Cloak was in the
+            // group above, which it is not.
+            | "tabletsofruin" | "vesselofruin" | "swordofruin" | "beadsofruin" | "sniper"
+            | "supremeoverlord" | "snowcloak"
             // `moves::trick_blocked` and the forceSwitch block (IKA-208), which named them
             // without listing them: gated only by `inert.rs` while Python never named them,
             // and found when the scan became the port's own (IKA-210).
@@ -2922,6 +2927,37 @@ fn switched_in(reg: &Reg, turn: &mut Turn, side: usize, slot: usize) -> Result<(
     Ok(())
 }
 
+/// Supreme Overlord's `onStart` (IKA-222):
+///
+/// ```text
+/// if (pokemon.side.totalFainted) {
+///     const fallen = Math.min(pokemon.side.totalFainted, 5);
+///     this.effectState.fallen = fallen;
+/// }
+/// ```
+///
+/// A switch-in gets a fresh `abilityState` (`initEffectState` in `switchIn`), so a count
+/// from an earlier stint on the field goes when there is no faint to count. Nothing in
+/// this format revives, so `totalFainted` is the side's fainted Pokemon.
+fn supreme_overlord_start(turn: &mut Turn, side: usize, slot: usize) {
+    let fainted = turn.pos.sides[side].pokemon.iter().filter(|mon| mon.fainted).count() as i64;
+    let stale = turn.mon_at(side, slot).map(|mon| mon.ability_state.get("fallen").cloned());
+    let want = (fainted > 0).then(|| serde_json::Value::from(fainted.min(5)));
+    if stale == Some(want.clone()) {
+        return;
+    }
+    let Some(mon) = turn.mon_at_mut(side, slot) else { return };
+    let state = Rc::make_mut(&mut mon.ability_state);
+    match want {
+        Some(count) => {
+            state.insert("fallen".into(), count);
+        }
+        None => {
+            state.remove("fallen");
+        }
+    }
+}
+
 fn switch_in_ability(turn: &mut Turn, side: usize, slot: usize) {
     // First, so that the ability it copies starts here too (`setAbility` runs its Start),
     // as Python's (IKA-203).
@@ -2934,6 +2970,9 @@ fn switch_in_ability(turn: &mut Turn, side: usize, slot: usize) {
         (mon.ability, mon.item, mon.maxhp)
     };
     let _ = maxhp;
+    if ability == "supremeoverlord" {
+        supreme_overlord_start(turn, side, slot);
+    }
 
     let weather = match ability.as_str() {
         "drought" => Some("sunnyday"),

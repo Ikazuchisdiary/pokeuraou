@@ -42,6 +42,8 @@ pub struct Ctx<'a> {
     pub attacker_status: Option<Id>,
     pub attacker_volatiles: VolatileFlags,
     pub attacker_gender: Id,
+    /// Supreme Overlord's count (`Battler::fallen`).
+    pub attacker_fallen: i64,
 
     pub defender_species: Id,
     pub defender_types: Types,
@@ -231,6 +233,24 @@ fn defender_full_hp(c: &Ctx) -> bool {
 fn is_pikachu(c: &Ctx) -> bool {
     c.attacker_species.starts_with("pikachu")
 }
+fn is_crit(c: &Ctx) -> bool {
+    c.is_crit
+}
+fn fallen_1(c: &Ctx) -> bool {
+    c.attacker_fallen == 1
+}
+fn fallen_2(c: &Ctx) -> bool {
+    c.attacker_fallen == 2
+}
+fn fallen_3(c: &Ctx) -> bool {
+    c.attacker_fallen == 3
+}
+fn fallen_4(c: &Ctx) -> bool {
+    c.attacker_fallen == 4
+}
+fn fallen_5(c: &Ctx) -> bool {
+    c.attacker_fallen >= 5
+}
 
 // -- tables ----------------------------------------------------------------
 
@@ -278,6 +298,16 @@ pub fn ability_modifiers(ability: &str) -> &'static [ModDef] {
         ],
         "reckless" => table![m("reckless", Slot::BasePower, 4915.0, 4096.0, 23, false, has_recoil)],
         "sandforce" => table![m("sandforce", Slot::BasePower, 5325.0, 4096.0, 21, false, sandforce)],
+        // `onBasePowerPriority: 21`, `powMod[this.effectState.fallen]` of
+        // `[4096, 4506, 4915, 5325, 5734, 6144]` (IKA-222). The count is taken at switch-in
+        // (`resolve::supreme_overlord_start`) and read from `abilityState`.
+        "supremeoverlord" => table![
+            m("supremeoverlord", Slot::BasePower, 4506.0, 4096.0, 21, false, fallen_1),
+            m("supremeoverlord", Slot::BasePower, 4915.0, 4096.0, 21, false, fallen_2),
+            m("supremeoverlord", Slot::BasePower, 5325.0, 4096.0, 21, false, fallen_3),
+            m("supremeoverlord", Slot::BasePower, 5734.0, 4096.0, 21, false, fallen_4),
+            m("supremeoverlord", Slot::BasePower, 6144.0, 4096.0, 21, false, fallen_5),
+        ],
         "fairyaura" => table![m("fairyaura", Slot::BasePower, 5448.0, 4096.0, 20, false, always)],
         "darkaura" => table![m("darkaura", Slot::BasePower, 5448.0, 4096.0, 20, false, always)],
         // -- Atk / SpA ---------------------------------------------------
@@ -312,6 +342,9 @@ pub fn ability_modifiers(ability: &str) -> &'static [ModDef] {
         "grasspelt" => table![m("grasspelt", Slot::Def, 1.5, 1.0, 6, false, grasspelt)],
         // -- ModifyDamage ------------------------------------------------
         "tintedlens" => table![m("tintedlens", Slot::Damage, 2.0, 1.0, 0, false, resisted)],
+        // `onModifyDamage`: 1.5x on a crit (IKA-222). The crit branch is the calculator's
+        // `crit = true` call, so the crit's own roll is the one Showdown makes first.
+        "sniper" => table![m("sniper", Slot::Damage, 1.5, 1.0, 0, false, is_crit)],
         "neuroforce" => {
             table![m("neuroforce", Slot::Damage, 5120.0, 4096.0, 0, false, supereffective)]
         }
@@ -382,6 +415,35 @@ pub fn type_immunity_ability(ability: &str) -> Option<&'static str> {
         "windrider" => Some("Flying"),
         _ => None,
     }
+}
+
+/// The Ruin ability an `onAny` stat event meets (IKA-222): Tablets the attacking event of a
+/// physical move, Vessel of a special one, Sword the defending event on Def, Beads on SpD.
+///
+/// The attacking event is the category's whatever stat the move read (`getDamage` resets
+/// `attackStat` before `runEvent('Modify' + statTable[attackStat], source, ...)`), so Body
+/// Press's Def meets Tablets, and it is the user's, so Foul Play's borrowed Atk does too.
+pub fn ruin_of(attacking: bool, stat: &str) -> Option<&'static str> {
+    match (attacking, stat) {
+        (true, "atk") => Some("tabletsofruin"),
+        (true, "spa") => Some("vesselofruin"),
+        (false, "def") => Some("swordofruin"),
+        (false, "spd") => Some("beadsofruin"),
+        _ => None,
+    }
+}
+
+/// Whether any of the active abilities is a Ruin ability: the one check every hit pays.
+#[inline]
+pub fn any_ruin(field_abilities: &[Id]) -> bool {
+    field_abilities.iter().any(|a| a.as_str().ends_with("ofruin"))
+}
+
+/// A Ruin ability's 0.75x lands on the event's Pokemon unless it has the same ability
+/// (`if (source.hasAbility('Tablets of Ruin')) return;`); any other active holder, on
+/// either side, applies it once (`move.ruinedAtk`).
+pub fn ruined(field_abilities: &[Id], owner: Id, ruin: &str) -> bool {
+    owner != ruin && field_abilities.iter().any(|a| *a == ruin)
 }
 
 pub fn is_mold_breaker(ability: &str) -> bool {
