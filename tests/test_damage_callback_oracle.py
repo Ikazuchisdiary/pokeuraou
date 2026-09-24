@@ -127,6 +127,7 @@ def _teams(
     foe_b: str = "Incineroar",
     foe_spe: tuple[int, int] = (32, 20),
     foe_a_item: str | None = None,
+    foe_b_item: str | None = None,
 ) -> tuple[list[TeamSet], list[TeamSet]]:
     mine = [
         _mon(user, "Damp", user_moves or REPLY, user_spe, hp=32, **{"def": 20, "spd": 20}),
@@ -134,7 +135,7 @@ def _teams(
     ]
     theirs = [
         _mon(foe_a, foe_a_ability, FOE_A, foe_spe[0], foe_a_item),
-        _mon(foe_b, "Blaze", FOE_B, foe_spe[1]),
+        _mon(foe_b, "Blaze", FOE_B, foe_spe[1], foe_b_item),
         _mon("Milotic", "Marvel Scale", FOE_B, 0),
     ]
     return mine, theirs
@@ -191,6 +192,14 @@ CASES: dict[str, tuple] = {
     ),
     "control-counter-with-nothing-to-return": (
         _teams(), [], [_me(COUNTER), QUIET], "|-fail|p1a: Swampert",
+    ),
+    # A resist berry is `onSourceModifyDamage`, which a `damageCallback` never reaches: a
+    # super-effective Counter leaves Incineroar's Chople Berry (the port ate it).
+    "counter-leaves-a-resist-berry": (
+        _teams(foe_b_item="Chople Berry"),
+        [],
+        [_me(COUNTER), "move 3, move 1 1"],
+        "|-damage|p2b: Incineroar",
     ),
     # -- Mirror Coat
     "mirror-coat-returns-a-special-hit": (
@@ -251,6 +260,12 @@ CASES: dict[str, tuple] = {
     ),
     "super-fang-halves-the-target": (
         _teams(user="Houndoom", user_moves=FIXED), [], [_me(FANG), AWAY], "|-damage|p2a: Garchomp",
+    ),
+    "super-fang-leaves-a-chilan-berry": (
+        _teams(user="Houndoom", user_moves=FIXED, foe_a_item="Chilan Berry"),
+        [],
+        [_me(FANG), AWAY],
+        "|-damage|p2a: Garchomp",
     ),
     "super-fang-halves-an-odd-hp": (
         _teams(user="Houndoom", user_moves=FIXED), [["move 2 1, move 4 -1", "move 2 2, move 2 2"]],

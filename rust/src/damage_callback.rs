@@ -51,11 +51,12 @@ pub struct DamagedBy {
     pub special: Option<(Slot, i64)>,
 }
 
-/// The moves whose `damageCallback` this port implements. Consulted by no gate: a damaging
-/// move with custom code the port never names is reported (`modelled::damaging_move_is_unmodelled`),
-/// and `tests/test_damage_callback_oracle.py` holds this list to every move with the hook in
-/// the regulation dumps, so a new one is a failing test before it is a note.
-#[allow(dead_code)]
+/// The moves whose `damageCallback` this port implements. Their damage skips `modifyDamage`,
+/// so a resist berry (`onSourceModifyDamage`) is not eaten (`moves::after_hit`). Consulted by
+/// no gate: a damaging move with custom code the port never names is reported
+/// (`modelled::damaging_move_is_unmodelled`), and `tests/test_damage_callback_oracle.py` holds
+/// this list to every move with the hook in the regulation dumps, so a new one is a failing
+/// test before it is a note.
 pub(crate) fn ported(move_id: &str) -> bool {
     matches!(
         move_id,

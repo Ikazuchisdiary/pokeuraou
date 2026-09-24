@@ -2382,6 +2382,9 @@ fn after_hit(
             None => false,
             Some(berry_type) => {
                 berry_type == mv.mtype.as_str() && (berry_type == "Normal" || type_mod > 0)
+                    // The berry is `onSourceModifyDamage`, which a `damageCallback` never
+                    // reaches (IKA-213).
+                    && !crate::damage_callback::ported(mv.id.as_str())
             }
         },
     };
