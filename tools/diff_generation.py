@@ -1,19 +1,23 @@
-"""Does a generated game come out the same with the Rust node as without it?
+"""Is a generated game the same game after a change to the roads it is played through?
 
-The node differential compares matrices. This compares the only thing that is finally
-used: the game. Both sides play the same seeds, and because every action is sampled from
-the equilibrium of a matrix this fills, any difference in that matrix large enough to move
-an LP solution would show up here as a different game -- a different move chosen, a
-different winner, a different number of turns.
+Plays one generation twice -- `tools/selfplay.py` with the same flags and seed, once from
+another checkout (`--before`, e.g. the last version that resolved in Python) and once from
+this one -- through the same Rust binary, and compares the records line for line. A record
+is compared whole, as the JSON the generation run writes, less the two fields that are not
+the game: `searchSeconds` (the clock) and `engine` (which code wrote it).
 
-    POKEURAOU_RUST_NODE=1 uv run python tools/diff_generation.py --games 4
-    POKEURAOU_RUST_NODE=1 uv run --group learn python tools/diff_generation.py --games 2 \
-        --value data/models/value-gen234.pt
+    python tools/diff_generation.py --before C:/tmp/ikaNNN/before --games 20 --seed 3 \\
+        -- --pool regmc-matchupweb --uniform-selection
+    python tools/diff_generation.py --before C:/tmp/ikaNNN/before --games 4 --seed 3 \\
+        -- --pool regmc-matchupweb --value data/models/value-gen11L.pt --device cpu
 
-It also times both, which is the number the port exists for. With `--value` the games are
-played by the learned value function, which is what generation actually runs on -- and the
-crossing is the other one: the leaves go across as the encoder's arrays rather than the
-payoff coming back as a number.
+Everything after `--` goes to `tools/selfplay.py` as it is (not `--games`, `--seed` or
+`--out`, which this sets). The decisions are counted by kind, so a sample in which no turn
+paused for a replacement says so instead of passing for one that did.
+
+Until IKA-209 this compared a game played with `POKEURAOU_RUST_NODE=0` against the same
+game through the port. The production roads have no Python resolver any more, so the
+comparison is between checkouts instead: the one before a change and the one after it.
 """
 
 from __future__ import annotations
@@ -21,165 +25,141 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
 import time
+from collections import Counter
 from pathlib import Path
 
-import numpy as np
+ROOT = Path(__file__).resolve().parents[1]
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from pokeuraou import rustnode  # noqa: E402
-from pokeuraou.damage import register_mega_stones  # noqa: E402
-from pokeuraou.payoff import OBJECTIVES  # noqa: E402
-from pokeuraou.priors import find_cached_chaos, load_chaos  # noqa: E402
-from pokeuraou.selfplay import play_game  # noqa: E402
-from pokeuraou.standings import (  # noqa: E402
-    find_cached_standings,
-    load_standings,
-    sample_standings_team,
-)
-from pokeuraou.teams import all_selections, load_roster  # noqa: E402
+#: The fields of a record that are not the game.
+NOT_THE_GAME = ("searchSeconds", "engine")
 
 
-def _report(index: int, python: dict, rust: dict) -> None:
-    """Says *what* differs, because the two kinds mean opposite things.
+def default_binary() -> Path:
+    name = "pokeuraou-damage.exe" if sys.platform == "win32" else "pokeuraou-damage"
+    return ROOT / "rust" / "target" / "release" / name
 
-    A different action, winner or turn count is a divergence: the port answered something
-    that moved a decision. The same decisions with a search value a few places apart is
-    float arithmetic, and the game the generation run stores is the same game.
-    """
-    for field in ("turns", "outcome", "unmodelled"):
-        if python[field] != rust[field]:
-            print(f"\n  game {index}: {field} {python[field]!r} against {rust[field]!r}")
-    if len(python["decisions"]) != len(rust["decisions"]):
-        print(
-            f"\n  game {index}: {len(python['decisions'])} decisions against "
-            f"{len(rust['decisions'])}"
-        )
-        return
-    worst = 0.0
-    for step, (mine, theirs) in enumerate(
-        zip(python["decisions"], rust["decisions"], strict=True)
-    ):
-        if mine[:2] != theirs[:2]:
-            print(
-                f"\n  game {index} decision {step}: chose {mine[:2]!r} in python and "
-                f"{theirs[:2]!r} through the port"
+
+def play(checkout: Path, args: argparse.Namespace, out: Path, binary: Path) -> float:
+    """One run of `checkout`'s own `tools/selfplay.py`; its seconds."""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(checkout / "src")
+    env["POKEURAOU_RUST_NODE"] = "1"
+    env["POKEURAOU_RUST_NODE_BIN"] = str(binary)
+    env.setdefault("PYTHONHASHSEED", "0")
+    command = [
+        sys.executable,
+        str(checkout / "tools" / "selfplay.py"),
+        *args.selfplay,
+        "--games",
+        str(args.games),
+        "--seed",
+        str(args.seed),
+        "--out",
+        str(out),
+    ]
+    # A fresh directory: a pool run keeps its selection solves beside `--out`, and a run
+    # that read the last run's solves would not have solved anything.
+    if out.parent.exists():
+        shutil.rmtree(out.parent)
+    out.parent.mkdir(parents=True)
+    started = time.perf_counter()
+    done = subprocess.run(command, env=env, capture_output=True, text=True, check=False)
+    seconds = time.perf_counter() - started
+    if done.returncode != 0:
+        sys.stderr.write(done.stdout + done.stderr)
+        raise SystemExit(f"{checkout}: tools/selfplay.py exited {done.returncode}")
+    return seconds
+
+
+def the_game(line: str) -> str:
+    record = json.loads(line)
+    for key in NOT_THE_GAME:
+        record.pop(key, None)
+    return json.dumps(record, sort_keys=True, ensure_ascii=False)
+
+
+def first_difference(before: dict, after: dict) -> str:
+    """Where two records part, in the words of the game."""
+    for step, (a, b) in enumerate(zip(before["decisions"], after["decisions"], strict=False)):
+        if a != b:
+            fields = sorted(k for k in set(a) | set(b) if a.get(k) != b.get(k))
+            return (
+                f"decision {step} (turn {a.get('turn')}, {a.get('kind')}/{b.get('kind')}) "
+                f"differs in {', '.join(fields)}: chose {a.get('ownChosen')!r}/"
+                f"{a.get('foeChosen')!r} before, {b.get('ownChosen')!r}/{b.get('foeChosen')!r} after"
             )
-            return
-        worst = max(worst, abs(mine[2] - theirs[2]))
-    print(
-        f"  game {index}: the same decisions throughout; the search value differs by at "
-        f"most {worst:.1e}"
-    )
+    if len(before["decisions"]) != len(after["decisions"]):
+        return f"{len(before['decisions'])} decisions before, {len(after['decisions'])} after"
+    fields = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+    return f"the decisions agree; the record differs in {', '.join(fields)}"
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--games", type=int, default=3)
-    ap.add_argument("--seed", type=int, default=5)
-    ap.add_argument("--limit", type=int, default=24)
-    ap.add_argument("--max-turns", type=int, default=40)
-    ap.add_argument("--roster", default="rizabanadohido")
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
+    ap.add_argument("--before", type=Path, required=True, help="the other checkout")
     ap.add_argument(
-        "--value",
-        default=None,
-        help="play the games with a trained value function (data/models/*.pt) instead of "
-        "hp-share",
+        "--after", type=Path, default=ROOT, help="the checkout to compare (default: this one)"
     )
-    ap.add_argument("--device", default="cpu")
+    ap.add_argument("--games", type=int, default=4)
+    ap.add_argument("--seed", type=int, default=3)
     ap.add_argument(
-        "--solve-sparsely",
-        action="store_true",
-        help="solve nodes by proving the equilibrium rather than filling the matrix. The "
-        "port must not change the answer with it on either.",
+        "--binary", type=Path, default=None, help="the Rust node both runs use (default: this "
+        "checkout's rust/target/release)"
     )
+    ap.add_argument("--work", type=Path, required=True, help="a directory for the two runs")
+    ap.add_argument("selfplay", nargs=argparse.REMAINDER, help="-- then tools/selfplay.py's flags")
     args = ap.parse_args()
+    if args.selfplay[:1] == ["--"]:
+        args.selfplay = args.selfplay[1:]
+    binary = args.binary or default_binary()
+    if not binary.exists():
+        raise SystemExit(f"no Rust binary at {binary}")
+    args.work.mkdir(parents=True, exist_ok=True)
 
-    roster = load_roster(args.roster)
-    reg = roster.reg
-    register_mega_stones(reg)
-    prior = load_chaos(find_cached_chaos(reg.meta.format_id), reg)
-    standings = load_standings(find_cached_standings(), reg)
-    pool = standings.pool("all")
-    selections = tuple(all_selections(reg.meta.team_size, reg.meta.picked_team_size))
+    seconds = {}
+    lines = {}
+    for name, checkout in (("before", args.before), ("after", args.after)):
+        out = args.work / name / "games.jsonl"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        seconds[name] = play(checkout.resolve(), args, out, binary)
+        lines[name] = out.read_text(encoding="utf-8").splitlines()
 
-    if args.value:
-        import torch
-
-        from pokeuraou.encode import Encoder
-        from pokeuraou.value import BatchedValue, load_model
-
-        device = torch.device(args.device)
-        encoder = Encoder(reg)
-        net, _meta = load_model(Path(args.value), encoder)
-        objective = BatchedValue(net.to(device), encoder, device=device).objective("win")
-    else:
-        objective = OBJECTIVES["hp-share"]
-
-    def run(use_rust: bool) -> tuple[list[str], float, int]:
-        os.environ[rustnode.ENV_ENABLE] = "1" if use_rust else "0"
-        # A toggle mid-process must not keep a process from the other setting.
-        rustnode.reset()
-        records: list[str] = []
-        turns = 0
-        rng = np.random.default_rng(args.seed)
-        started = time.perf_counter()
-        for _ in range(args.games):
-            team = pool[int(rng.integers(len(pool)))]
-            foe_six = sample_standings_team(rng, reg, prior, team)
-            own_pick = selections[int(rng.integers(len(selections)))]
-            foe_pick = selections[int(rng.integers(len(selections)))]
-            record = play_game(
-                reg,
-                rng,
-                [roster.sets[i] for i in own_pick],
-                [foe_six[j] for j in foe_pick],
-                "diff-generation",
-                objective=objective,
-                search_limit=args.limit,
-                max_turns=args.max_turns,
-                solve_sparsely=args.solve_sparsely,
-                open_information=True,
-            )
-            turns += record.turns
-            # The decisions are what a difference would show up in first.
-            records.append(
-                json.dumps(
-                    {
-                        "turns": record.turns,
-                        "outcome": record.outcome,
-                        # The reported effects are part of a game record, and a caller
-                        # reads them; a bridged game must not report a different set.
-                        "unmodelled": sorted(set(record.unmodelled)),
-                        "decisions": [
-                            [d.own_chosen, d.foe_chosen, round(d.search_value, 12)]
-                            for d in record.decisions
-                        ],
-                    },
-                    sort_keys=True,
-                    default=str,
-                )
-            )
-        return records, time.perf_counter() - started, turns
-
-    build = rustnode.require_current_binary()
-    print(f"binary {build['sha256']} built {build['built']}")
-
-    python_records, python_seconds, turns = run(False)
-    rust_records, rust_seconds, rust_turns = run(True)
-
-    same = sum(1 for a, b in zip(python_records, rust_records, strict=True) if a == b)
-    print(f"{args.games} games, {turns} turns")
-    print(f"  identical games {same}/{args.games}")
-    for index, (a, b) in enumerate(zip(python_records, rust_records, strict=True)):
-        if a != b:
-            _report(index, json.loads(a), json.loads(b))
-    print(f"  python {python_seconds:.1f} s ({python_seconds / max(turns, 1):.3f} s/turn)")
-    print(f"  rust   {rust_seconds:.1f} s ({rust_seconds / max(rust_turns, 1):.3f} s/turn)")
-    if rust_seconds > 0:
-        print(f"  generation is {python_seconds / rust_seconds:.1f}x faster")
+    before, after = lines["before"], lines["after"]
+    print(f"binary {binary}")
+    print(f"before {args.before}  ({seconds['before']:.1f} s)")
+    print(f"after  {args.after}  ({seconds['after']:.1f} s)")
+    print(f"selfplay {' '.join(args.selfplay)} --games {args.games} --seed {args.seed}")
+    if len(before) != len(after):
+        print(f"  {len(before)} records before, {len(after)} after")
+    kinds: Counter[str] = Counter()
+    games_with: Counter[str] = Counter()
+    same = 0
+    differing: list[int] = []
+    for index, (a, b) in enumerate(zip(before, after, strict=False)):
+        record = json.loads(a)
+        found = Counter(d["kind"] for d in record["decisions"])
+        kinds.update(found)
+        for kind in found:
+            games_with[kind] += 1
+        if the_game(a) == the_game(b):
+            same += 1
+        else:
+            differing.append(index)
+    count = min(len(before), len(after))
+    print(f"  identical games {same}/{count}")
+    print(
+        "  decisions in the sample (before): "
+        + ", ".join(f"{kind} {kinds[kind]} in {games_with[kind]} games" for kind in sorted(kinds))
+    )
+    for index in differing:
+        print(
+            f"  game {index}: "
+            + first_difference(json.loads(before[index]), json.loads(after[index]))
+        )
 
 
 if __name__ == "__main__":
