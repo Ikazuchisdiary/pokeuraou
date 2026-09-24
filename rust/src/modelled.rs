@@ -523,7 +523,6 @@ pub fn damaging_move_is_unmodelled(id: &str) -> bool {
             | "snore"
             | "sparklingaria"
             | "steelbeam"
-            | "struggle"
             | "supercellslam"
             | "syrupbomb"
             | "upperhand"
