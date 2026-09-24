@@ -11,13 +11,14 @@
 //! Python's answer, a turn it refuses costs nothing but Python's own time, and the refusal
 //! reasons are counted so the next thing to implement is chosen by impact.
 //!
-//! Two things Python produces are deliberately absent: the event log and the per-action
-//! `acts` offsets. They are for display, they allocate on every action, and nothing in the
-//! differential compares them.
+//! The event log and the per-action `acts` offsets are kept only when a command asks for
+//! them (`events: true`, IKA-215; see `events.rs`). They are for display, so a turn that is
+//! not logging formats nothing and allocates nothing for them.
 
 use crate::battler::{Battler, FieldState};
 use crate::damage::{self, crit_probability};
 use crate::effects::survive_chance_item;
+pub(crate) use crate::events::{EventLog, Name};
 use crate::id::Id;
 use crate::moveinfo::MoveContext;
 use crate::position::{boost_index, Effect, Pokemon, Position, Types, BOOST_IDS};
@@ -188,6 +189,8 @@ fn round_half_even(value: f64) -> f64 {
 pub struct Branch {
     pub probability: f64,
     pub position: Position,
+    /// The trace, when the turn was asked to keep one (IKA-215).
+    pub log: Option<Box<EventLog>>,
 }
 
 /// A turn Showdown stopped half-way through to ask for a replacement.
@@ -256,6 +259,9 @@ pub struct Turn<'a> {
     /// Python's `_Turn.draws`: how a draw inside one switch-in is answered (IKA-203). Set
     /// only by `switch_in_with_draws`, for the length of the switch-in.
     pub(crate) draws: Option<Draws>,
+    /// Python's `_Turn.events` and `acts`, or None when nobody asked (IKA-215). Never
+    /// compared: a merged branch keeps the first contributor's, as Python's does.
+    pub(crate) log: Option<Box<EventLog>>,
 }
 
 impl<'a> Turn<'a> {
@@ -280,6 +286,16 @@ impl<'a> Turn<'a> {
             move_start_hp: None,
             move_hit: [[false; 2]; 2],
             draws: None,
+            log: None,
+        }
+    }
+
+    /// `_Turn.begin`: where one action's events start. The label is built only when the
+    /// turn is logging.
+    pub(crate) fn begin(&mut self, label: impl FnOnce() -> String) {
+        if let Some(log) = self.log.as_mut() {
+            let start = log.events.len();
+            log.acts.push((start, label()));
         }
     }
 
@@ -325,6 +341,7 @@ impl<'a> Turn<'a> {
         slot: usize,
         amount: i64,
         from_move: bool,
+        reason: &str,
     ) -> Result<i64, String> {
         let (mut dealt, uses_sash, unbranched) = {
             let Some(mon) = self.mon_at(side, slot) else { return Ok(0) };
@@ -359,7 +376,7 @@ impl<'a> Turn<'a> {
             self.report(note);
         }
         if uses_sash {
-            self.consume_item(side, slot);
+            self.consume_item(side, slot, "focussash");
         }
         if dealt < 0 {
             dealt = 0;
@@ -370,6 +387,7 @@ impl<'a> Turn<'a> {
             mon.hp <= 0
         };
         self.hurt_this_turn[side][slot] = true;
+        log_event!(self, "{} -{} ({})", Name(side, slot), dealt, reason);
         if fainted {
             self.faint(side, slot);
         } else {
@@ -378,13 +396,16 @@ impl<'a> Turn<'a> {
         Ok(dealt)
     }
 
-    pub(crate) fn heal(&mut self, side: usize, slot: usize, amount: i64) -> i64 {
+    pub(crate) fn heal(&mut self, side: usize, slot: usize, amount: i64, reason: &str) -> i64 {
         let Some(mon) = self.mon_at_mut(side, slot) else { return 0 };
         if mon.fainted || amount <= 0 {
             return 0;
         }
         let healed = amount.min(mon.maxhp - mon.hp);
         mon.hp += healed;
+        if healed != 0 {
+            log_event!(self, "{} +{} ({})", Name(side, slot), healed, reason);
+        }
         healed
     }
 
@@ -402,17 +423,17 @@ impl<'a> Turn<'a> {
         restore_types(reg, mon);
         mon.status = Some(Id::new("fnt"));
         mon.status_counter = None;
+        log_event!(self, "{} fainted", Name(side, slot));
         let wiped = self.pos.sides[side].pokemon.iter().all(|m| m.fainted);
         if wiped && !self.wipe_order.contains(&side) {
             self.wipe_order.push(side);
         }
     }
 
-    pub(crate) fn consume_item(&mut self, side: usize, slot: usize) {
+    pub(crate) fn consume_item(&mut self, side: usize, slot: usize, reason: &str) {
+        let Some(item) = self.mon_at(side, slot).and_then(|mon| mon.item) else { return };
+        log_event!(self, "{} lost {} ({})", Name(side, slot), item, reason);
         let Some(mon) = self.mon_at_mut(side, slot) else { return };
-        if mon.item.is_none() {
-            return;
-        }
         if mon.ability == "unburden" && !mon.has_volatile("unburden") {
             mon.volatiles.push(Effect::new(Id::new("unburden")));
         }
@@ -449,8 +470,8 @@ impl<'a> Turn<'a> {
         } else {
             10
         };
-        self.consume_item(side, slot);
-        self.heal(side, slot, amount);
+        self.consume_item(side, slot, "pinch berry");
+        self.heal(side, slot, amount, "berry");
     }
 
     /// Applies a boost table, and says whether any stat actually moved.
@@ -460,8 +481,9 @@ impl<'a> Turn<'a> {
         slot: usize,
         boosts: &[(&str, i64)],
         from_foe: bool,
+        reason: &str,
     ) -> bool {
-        self.apply_boosts_by(side, slot, boosts, from_foe, from_foe)
+        self.apply_boosts_by(side, slot, boosts, from_foe, from_foe, reason)
     }
 
     /// `apply_boosts` with whether another Pokemon caused it said apart from `from_foe`:
@@ -473,6 +495,7 @@ impl<'a> Turn<'a> {
         boosts: &[(&str, i64)],
         from_foe: bool,
         by_other: bool,
+        reason: &str,
     ) -> bool {
         let Some(mon) = self.mon_at(side, slot) else { return false };
         if mon.fainted {
@@ -491,10 +514,17 @@ impl<'a> Turn<'a> {
                 continue;
             };
             if delta < 0 && from_foe && blocks_drops {
+                if self.log.is_some() {
+                    let ability = self.mon_at(side, slot).map(|m| m.ability).unwrap_or_default();
+                    log_event!(self, "{} {} blocked the drop", Name(side, slot), ability);
+                }
                 continue;
             }
-            if delta < 0 && by_other && crate::moves::flower_veil(self, side, slot) {
-                continue;
+            if delta < 0 && by_other {
+                if let Some(ally) = crate::moves::flower_veil_holder(self, side, slot) {
+                    log_event!(self, "{} flowerveil ({}) blocked the drop", Name(side, slot), Name(side, ally));
+                    continue;
+                }
             }
             let mon = self.mon_at_mut(side, slot).unwrap();
             let before = mon.boosts[index] as i64;
@@ -504,6 +534,7 @@ impl<'a> Turn<'a> {
             }
             mon.boosts[index] = after as i8;
             changed = true;
+            log_event!(self, "{} {} {:+} -> {} ({})", Name(side, slot), stat, delta, after, reason);
             if delta < 0 && from_foe {
                 self.on_stat_lowered_by_foe(side, slot);
             }
@@ -517,21 +548,17 @@ impl<'a> Turn<'a> {
             Some(mon) => mon.ability,
         };
         if ability == "defiant" {
-            self.apply_boosts(side, slot, &[("atk", 2)], false);
+            self.apply_boosts(side, slot, &[("atk", 2)], false, "defiant");
         } else if ability == "competitive" {
-            self.apply_boosts(side, slot, &[("spa", 2)], false);
+            self.apply_boosts(side, slot, &[("spa", 2)], false, "competitive");
         }
     }
 
     /// Flower Veil's `onAllySetStatus` first (IKA-202): every caller's source is another
     /// Pokemon but Yawn's sleep, which calls `apply_status_unveiled`. Python's
     /// `_flower_veil_refuses_status`.
-    pub(crate) fn apply_status(&mut self, side: usize, slot: usize, status: &str) -> Result<bool, String> {
-        let alive = self.mon_at(side, slot).is_some_and(|m| !m.fainted && m.status.is_none());
-        if alive && crate::moves::flower_veil(self, side, slot) {
-            return Ok(false);
-        }
-        self.apply_status_unveiled(side, slot, status)
+    pub(crate) fn apply_status(&mut self, side: usize, slot: usize, status: &str, reason: &str) -> Result<bool, String> {
+        self.apply_status_veiled(side, slot, status, reason, true)
     }
 
     pub(crate) fn apply_status_unveiled(
@@ -539,6 +566,20 @@ impl<'a> Turn<'a> {
         side: usize,
         slot: usize,
         status: &str,
+        reason: &str,
+    ) -> Result<bool, String> {
+        self.apply_status_veiled(side, slot, status, reason, false)
+    }
+
+    /// Python's `apply_status`: Flower Veil is read after the type and ability immunities,
+    /// which is where its "blocked the status" line comes (IKA-215).
+    fn apply_status_veiled(
+        &mut self,
+        side: usize,
+        slot: usize,
+        status: &str,
+        reason: &str,
+        veiled: bool,
     ) -> Result<bool, String> {
         let (types, ability, grounded) = {
             let Some(mon) = self.mon_at(side, slot) else { return Ok(false) };
@@ -569,6 +610,12 @@ impl<'a> Turn<'a> {
                 | "thermalexchange"
         ) {
             return Ok(false);
+        }
+        if veiled {
+            if let Some(ally) = crate::moves::flower_veil_holder(self, side, slot) {
+                log_event!(self, "{} flowerveil ({}) blocked the status", Name(side, slot), Name(side, ally));
+                return Ok(false);
+            }
         }
         let terrain = self.pos.field.terrain;
         if matches!(terrain, Some(t) if t.as_str() == "mistyterrain") && grounded {
@@ -605,8 +652,9 @@ impl<'a> Turn<'a> {
             };
             mon.item.map(|i| i.as_str() == "lumberry").unwrap_or(false)
         };
+        log_event!(self, "{} -> {} ({})", Name(side, slot), status, reason);
         if lum {
-            self.consume_item(side, slot);
+            self.consume_item(side, slot, "lumberry");
             let mon = self.mon_at_mut(side, slot).unwrap();
             mon.status = None;
             mon.status_counter = None;
@@ -625,8 +673,11 @@ impl<'a> Turn<'a> {
             return;
         }
         // Flower Veil's `onAllyTryAddVolatile` (IKA-202).
-        if vid == "yawn" && crate::moves::flower_veil(self, side, slot) {
-            return;
+        if vid == "yawn" {
+            if let Some(ally) = crate::moves::flower_veil_holder(self, side, slot) {
+                log_event!(self, "{} flowerveil ({}) blocked yawn", Name(side, slot), Name(side, ally));
+                return;
+            }
         }
         let Some(mon) = self.mon_at_mut(side, slot) else { return };
         if mon.fainted || mon.has_volatile(vid) {
@@ -661,6 +712,7 @@ impl<'a> Turn<'a> {
         effect.duration = duration;
         effect.layers = Some(1);
         self.pos.sides[side].side_conditions.push(effect);
+        log_event!(self, "p{} side +{}", side + 1, cid);
         true
     }
 }
@@ -1181,6 +1233,17 @@ pub fn resolve_turn<'a>(
     side_actions: &[Vec<SlotAction>; 2],
     budget: Budget,
 ) -> Result<TurnResult<'a>, String> {
+    resolve_turn_logged(reg, pos, side_actions, budget, false)
+}
+
+/// `resolve_turn`, keeping each branch's trace when `events` is set (IKA-215).
+pub fn resolve_turn_logged<'a>(
+    reg: &'a Reg,
+    pos: &Position,
+    side_actions: &[Vec<SlotAction>; 2],
+    budget: Budget,
+    events: bool,
+) -> Result<TurnResult<'a>, String> {
     let started = phase_start();
     let (adopted, notes) = showdown_volatiles(pos);
     let pos = adopted.as_ref().unwrap_or(pos);
@@ -1227,11 +1290,11 @@ pub fn resolve_turn<'a>(
         for (permutation, tie_weight) in tie_permutations(&order, &ties, &budget) {
             let sequence: Vec<QueuedAction> =
                 permutation.iter().map(|index| queue[*index].clone()).collect();
-            let start = Live {
-                weight: 1.0,
-                turn: Turn::new(reg, pos.clone(), budget, attacks),
-                remaining: sequence,
-            };
+            let mut turn = Turn::new(reg, pos.clone(), budget, attacks);
+            if events {
+                turn.log = Some(Box::default());
+            }
+            let start = Live { weight: 1.0, turn, remaining: sequence };
             let started = phase_start();
             let sub = run_queue(reg, vec![start], budget)?;
             phase_end(2, started);
@@ -1589,6 +1652,8 @@ fn same_turn(a: &Turn, b: &Turn) -> bool {
         move_hit: _,
         // Set only inside one switch-in, None wherever branches merge (IKA-203).
         draws: _,
+        // The readable trace; Python's `_MERGE_IGNORED_STATE` (IKA-215).
+        log: _,
     } = a;
     std::ptr::eq(*reg, b.reg)
         && *self_switch_pending == b.self_switch_pending
@@ -1749,6 +1814,11 @@ fn run_queue<'a>(
                 .map(|(_, variant)| variant.move_id != action.move_id)
                 .unwrap_or(false);
             let mut outcomes: Vec<(f64, Turn<'a>)> = Vec::new();
+            if overridden {
+                if let Some(forced) = variants[0].1.move_id {
+                    log_event!(item.turn, "{} must use {} (encore)", Name(action.side, action.slot), forced);
+                }
+            }
             // One variant is the ordinary case -- Encore is what makes it more than one --
             // and a turn is an eleven-kilobyte position, so the ordinary case hands the
             // state over rather than copying it. This one clone was 28% of all of them.
@@ -1760,6 +1830,7 @@ fn run_queue<'a>(
                         "encore override changed the move Sucker Punch was read against",
                     );
                 }
+                base.begin(|| action_label(reg, variant));
                 let started = phase_start();
                 let produced = execute(reg, base, variant, step_budget)?;
                 phase_end(6, started);
@@ -1776,6 +1847,7 @@ fn run_queue<'a>(
                             "encore override changed the move Sucker Punch was read against",
                         );
                     }
+                    base.begin(|| action_label(reg, variant));
                     for (weight, turn) in execute(reg, base, variant, step_budget)? {
                         outcomes.push((variant_weight * weight, turn));
                     }
@@ -1859,7 +1931,7 @@ fn run_queue<'a>(
         }
         item.turn.pos.turn += 1;
         unmodelled.extend(item.turn.unmodelled.iter().cloned());
-        branches.push(Branch { probability: item.weight, position: item.turn.pos });
+        branches.push(Branch { probability: item.weight, position: item.turn.pos, log: item.turn.log });
     }
     // A paused branch gets no residuals and no turn increment: the residual phase is
     // behind the interrupt, so it belongs to whatever the resume produces.
@@ -1873,6 +1945,37 @@ fn run_queue<'a>(
         });
     }
     Ok(TurnResult { branches, exact, suspended, unmodelled })
+}
+
+/// `QueuedAction.label` (speed.py): what `acts` heads an action's events with.
+pub(crate) fn action_label(reg: &Reg, action: &QueuedAction) -> String {
+    let who = Name(action.side, action.slot);
+    match action.kind {
+        ActionKind::Switch => match action.switch_to {
+            Some(index) => format!("{who} switch->{index}"),
+            None => format!("{who} switch->None"),
+        },
+        ActionKind::Mega => format!("{who} mega"),
+        ActionKind::Move => {
+            let name = action.move_id.map(|id| {
+                reg.moves
+                    .get(id.as_str())
+                    .and_then(|m| m.raw["name"].as_str())
+                    .map(String::from)
+                    .unwrap_or_else(|| id.as_str().to_string())
+            });
+            format!("{who} {}", name.unwrap_or_else(|| "?".into()))
+        }
+    }
+}
+
+/// `action.label(reg)` for a line that names the action (`"p1a Earth Power missed"`).
+pub(crate) struct Label<'r>(pub &'r Reg, pub &'r QueuedAction);
+
+impl std::fmt::Display for Label<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&action_label(self.0, self.1))
+    }
 }
 
 /// The action Encore forces its user to take, with its target's odds.
@@ -2225,7 +2328,7 @@ fn do_switch_with(
                 let leaving = &turn.pos.sides[action.side].pokemon[leaving_index];
                 (leaving.maxhp / 3).max(1)
             };
-            turn.heal(action.side, action.slot, amount);
+            turn.heal(action.side, action.slot, amount, "regenerator");
         }
         {
             let leaving =
@@ -2267,6 +2370,10 @@ fn do_switch_with(
         if matches!(incoming.status, Some(s) if s.as_str() == "tox") {
             incoming.status_counter = Some(0);
         }
+    }
+    if turn.log.is_some() {
+        let species = turn.pos.sides[action.side].pokemon[action.slot].species;
+        log_event!(turn, "{} <- {}", Name(action.side, action.slot), species);
     }
     if run_switch_in {
         on_switch_in(reg, turn, action.side, action.slot)?;
@@ -2585,7 +2692,7 @@ fn switched_in(reg: &Reg, turn: &mut Turn, side: usize, slot: usize) -> Result<(
                 let mult = reg.type_effectiveness("Rock", &types);
                 let maxhp = turn.mon_at(side, slot).map(|m| m.maxhp).unwrap_or(0);
                 let amount = ((maxhp as f64 * mult / 8.0) as i64).max(1);
-                turn.deal_damage(side, slot, amount, false)?;
+                turn.deal_damage(side, slot, amount, false, "stealthrock")?;
             }
             "spikes" if is_grounded => {
                 let denominator = match layers.unwrap_or(1).min(3) {
@@ -2594,20 +2701,21 @@ fn switched_in(reg: &Reg, turn: &mut Turn, side: usize, slot: usize) -> Result<(
                     _ => 4,
                 };
                 let maxhp = turn.mon_at(side, slot).map(|m| m.maxhp).unwrap_or(0);
-                turn.deal_damage(side, slot, (maxhp / denominator).max(1), false)?;
+                turn.deal_damage(side, slot, (maxhp / denominator).max(1), false, "spikes")?;
             }
             "toxicspikes" if is_grounded => {
                 if types.contains("Poison") {
                     turn.pos.sides[side]
                         .side_conditions
                         .retain(|c| c.id.as_str() != "toxicspikes");
+                    log_event!(turn, "{} absorbed toxicspikes", Name(side, slot));
                 } else if !types.contains("Steel") {
                     let status = if layers.unwrap_or(1) >= 2 { "tox" } else { "psn" };
-                    turn.apply_status(side, slot, status)?;
+                    turn.apply_status(side, slot, status, "toxicspikes")?;
                 }
             }
             "stickyweb" if is_grounded => {
-                turn.apply_boosts(side, slot, &[("spe", -1)], true);
+                turn.apply_boosts(side, slot, &[("spe", -1)], true, "stickyweb");
             }
             _ => {}
         }
@@ -2658,6 +2766,7 @@ fn switch_in_ability(turn: &mut Turn, side: usize, slot: usize) {
             };
             let extended = matches!((rock, item), (Some(r), Some(i)) if i.as_str() == r);
             turn.pos.field.weather_duration = Some(if extended { 8 } else { 5 });
+            log_event!(turn, "{} set {}", Name(side, slot), weather);
         }
     }
 
@@ -2690,7 +2799,7 @@ fn switch_in_ability(turn: &mut Turn, side: usize, slot: usize) {
             if crate::moves::intimidate_meets_substitute(turn, (1 - side, foe_slot)) {
                 continue;
             }
-            turn.apply_boosts(1 - side, foe_slot, &[("atk", -1)], true);
+            turn.apply_boosts(1 - side, foe_slot, &[("atk", -1)], true, "intimidate");
         }
     }
 
@@ -2701,7 +2810,7 @@ fn switch_in_ability(turn: &mut Turn, side: usize, slot: usize) {
             _ => 0,
         };
         if amount > 0 {
-            turn.heal(side, ally_slot, amount);
+            turn.heal(side, ally_slot, amount, "hospitality");
         }
     }
 }
@@ -2727,7 +2836,8 @@ pub(crate) fn check_white_herb(turn: &mut Turn) {
                     }
                 }
             }
-            turn.consume_item(side, slot);
+            turn.consume_item(side, slot, "whiteherb");
+            log_event!(turn, "{} stat drops undone (whiteherb)", Name(side, slot));
         }
     }
 }
@@ -2779,6 +2889,7 @@ pub(crate) fn change_forme(
     // `mon.maxhp` is deliberately not assigned: see above. Written as the whole expression
     // anyway so the two implementations can be read against each other.
     mon.hp = (mon.hp + (mon.maxhp - maxhp_before)).max(1).min(mon.maxhp);
+    log_event!(turn, "{} -> {}", Name(side, slot), species_id);
     Ok(())
 }
 
@@ -2835,6 +2946,7 @@ fn do_mega(reg: &Reg, turn: &mut Turn, action: &QueuedAction) -> Result<(), Stri
         mon.hp = (mon.hp + (mon.maxhp - maxhp_before)).min(mon.maxhp);
     }
     turn.pos.sides[action.side].mega_used = true;
+    log_event!(turn, "{} -> {}", Name(action.side, action.slot), target_id);
     switch_in_ability(turn, action.side, action.slot);
     check_white_herb(turn);
     Ok(())
@@ -2924,6 +3036,7 @@ fn trace(turn: &mut Turn, side: usize, slot: usize) {
     if let Some(mon) = turn.mon_at_mut(side, slot) {
         mon.ability = copied;
     }
+    log_event!(turn, "{} traced {}", Name(side, slot), copied);
 }
 
 /// Python's `_switch_may_trace`.
@@ -3056,8 +3169,9 @@ pub(crate) fn apply_status_from(
     target: Slot,
     status: &str,
     source: Slot,
+    reason: &str,
 ) -> Result<bool, String> {
-    let applied = turn.apply_status(target.0, target.1, status)?;
+    let applied = turn.apply_status(target.0, target.1, status, reason)?;
     if applied {
         synchronize(turn, target, source, status)?;
     }
@@ -3072,7 +3186,8 @@ fn synchronize(turn: &mut Turn, holder: Slot, source: Slot, status: &str) -> Res
     if !matches!(turn.mon_at(holder.0, holder.1), Some(mon) if mon.ability == "synchronize") {
         return Ok(());
     }
-    apply_status_from(turn, source, status, holder).map(|_| ())
+    log_event!(turn, "{} passes {} on (synchronize)", Name(holder.0, holder.1), status);
+    apply_status_from(turn, source, status, holder, "synchronize").map(|_| ())
 }
 
 // IKA-211: the node commands for what only Python's resolver answered. A child module,

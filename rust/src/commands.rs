@@ -196,6 +196,7 @@ fn turn_state_json(turn: &Turn) -> Result<Value, String> {
         move_start_hp,
         move_hit,
         draws,
+        log,
     } = turn;
     // Both are set and cleared inside one action, and a pause is taken between actions.
     // Either one here would mean a pause taken somewhere this module does not expect.
@@ -224,7 +225,52 @@ fn turn_state_json(turn: &Turn) -> Result<Value, String> {
         "unmodelled": unmodelled.iter().cloned().collect::<Vec<_>>(),
         "moveStartHp": move_start_hp.map(|hp| json!([[hp[0][0], hp[0][1]], [hp[1][0], hp[1][1]]])),
         "moveHit": flags_json(move_hit),
+        "log": log.as_deref().map(log_json),
     }))
+}
+
+/// A trace as the caller reads it: Python's `events` and `acts` (IKA-215).
+fn log_json(log: &EventLog) -> Value {
+    json!({
+        "events": log.events,
+        "acts": log.acts.iter().map(|(start, label)| json!([start, label])).collect::<Vec<_>>(),
+    })
+}
+
+fn log_from(value: &Value) -> Result<Option<Box<EventLog>>, String> {
+    if value.is_null() {
+        return Ok(None);
+    }
+    let events = value["events"]
+        .as_array()
+        .ok_or("a pause log has no events")?
+        .iter()
+        .map(|line| line.as_str().map(String::from).ok_or("a pause event is not a string"))
+        .collect::<Result<Vec<_>, _>>()?;
+    let acts = value["acts"]
+        .as_array()
+        .ok_or("a pause log has no acts")?
+        .iter()
+        .map(|entry| match (entry[0].as_u64(), entry[1].as_str()) {
+            (Some(start), Some(label)) => Ok((start as usize, label.to_string())),
+            _ => Err("a pause act does not parse"),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Some(Box::new(EventLog { events, acts })))
+}
+
+/// Whether a request asks for the trace.
+fn wants_events(value: &Value) -> bool {
+    value["events"].as_bool().unwrap_or(false)
+}
+
+/// Puts `log` into the answer for one outcome, when there is one.
+fn with_log(mut out: Value, log: Option<&EventLog>) -> Value {
+    if let Some(log) = log {
+        out["events"] = json!(log.events);
+        out["acts"] = log_json(log)["acts"].clone();
+    }
+    out
 }
 
 fn turn_from<'a>(reg: &'a Reg, pos: Position, state: &Value) -> Result<Turn<'a>, String> {
@@ -270,22 +316,26 @@ fn turn_from<'a>(reg: &'a Reg, pos: Position, state: &Value) -> Result<Turn<'a>,
         }
     };
     turn.move_hit = flags_from(&state["moveHit"])?;
+    turn.log = log_from(&state["log"])?;
     Ok(turn)
 }
 
 /// A pause as the caller holds it: its weight and position to read, and the state to hand
 /// back. `position` is the pause's own and is not repeated inside `state`.
 fn pause_json(pause: &Suspended) -> Result<Value, String> {
-    Ok(json!({
-        "probability": pause.probability,
-        "position": pause.turn.pos.to_json(),
-        "state": {
-            "format": reg_format(pause.turn.reg),
-            "probability": bits(pause.probability),
-            "turn": turn_state_json(&pause.turn)?,
-            "remaining": pause.remaining.iter().map(queued_json).collect::<Vec<_>>(),
-        },
-    }))
+    Ok(with_log(
+        json!({
+            "probability": pause.probability,
+            "position": pause.turn.pos.to_json(),
+            "state": {
+                "format": reg_format(pause.turn.reg),
+                "probability": bits(pause.probability),
+                "turn": turn_state_json(&pause.turn)?,
+                "remaining": pause.remaining.iter().map(queued_json).collect::<Vec<_>>(),
+            },
+        }),
+        pause.turn.log.as_deref(),
+    ))
 }
 
 fn reg_format(reg: &Reg) -> &str {
@@ -355,9 +405,15 @@ fn paused_in<'a>(paused: Suspended<'a>, position: Position, side: usize) -> Susp
     Suspended { probability, turn, remaining }
 }
 
-/// The pause a request names, rebuilt in another completion when it says `in`.
+/// The pause a request names, rebuilt in another completion when it says `in`. It keeps
+/// its trace when the request asks for events, and starts one if it carried none.
 fn requested_pause<'a>(reg: &'a Reg, value: &Value) -> Result<Suspended<'a>, String> {
-    let pause = pause_from(reg, &value["pause"])?;
+    let mut pause = pause_from(reg, &value["pause"])?;
+    if !wants_events(value) {
+        pause.turn.log = None;
+    } else if pause.turn.log.is_none() {
+        pause.turn.log = Some(Box::default());
+    }
     match value.get("in") {
         None | Some(Value::Null) => Ok(pause),
         Some(world) => {
@@ -386,7 +442,12 @@ fn result_json(result: &TurnResult, full: bool) -> Result<Value, String> {
         "branches": result
             .branches
             .iter()
-            .map(|b| json!({ "probability": b.probability, "position": b.position.to_json() }))
+            .map(|b| {
+                with_log(
+                    json!({ "probability": b.probability, "position": b.position.to_json() }),
+                    b.log.as_deref(),
+                )
+            })
             .collect::<Vec<_>>(),
         "suspended": result.suspended.iter().map(pause_json).collect::<Result<Vec<_>, _>>()?,
         "exact": result.exact,
@@ -412,7 +473,7 @@ fn turn_command(reg: &Reg, value: &Value) -> Result<Value, String> {
             return Err("position is for another regulation".into());
         }
         let budget = Budget::from_json(&value["budget"]);
-        resolve_turn(reg, &position, &two_sides(&value["actions"]), budget)?
+        resolve_turn_logged(reg, &position, &two_sides(&value["actions"]), budget, wants_events(value))?
     };
     let full = value["full"].as_bool().unwrap_or(false);
     let mut out = result_json(&result, full)?;
@@ -420,6 +481,7 @@ fn turn_command(reg: &Reg, value: &Value) -> Result<Value, String> {
         let count = result.branches.len();
         if index < count {
             out["position"] = result.branches[index].position.to_json();
+            out = with_log(out, result.branches[index].log.as_deref());
         } else {
             match result.suspended.get(index - count) {
                 None => return Err("branch index out of range".into()),
@@ -544,6 +606,9 @@ fn phase_command(reg: &Reg, value: &Value, phase: Phase) -> Result<Value, String
     let choices = if phase == Phase::Replacements { two_sides(&value["choices"]) } else { [Vec::new(), Vec::new()] };
     check_position_supported(&position, &choices)?;
     let mut state = Turn::new(reg, position, deterministic(), [[false; 2]; 2]);
+    if wants_events(value) {
+        state.log = Some(Box::default());
+    }
     state.draws = Some(match value.get("presets").and_then(Value::as_array) {
         None => Draws { report: true, ..Default::default() },
         Some(listed) => Draws {
@@ -640,11 +705,15 @@ fn phase_command(reg: &Reg, value: &Value, phase: Phase) -> Result<Value, String
         }
     }
     notes.extend(state.unmodelled.iter().cloned());
-    Ok(json!({
+    let mut out = json!({
         "position": state.pos.to_json(),
         "unmodelled": notes.into_iter().collect::<Vec<_>>(),
         "draw": opened.first(),
-    }))
+    });
+    if let Some(log) = state.log.as_deref() {
+        out["events"] = json!(log.events);
+    }
+    Ok(out)
 }
 
 fn phase_speed(state: &Turn, side: usize, slot: usize) -> Result<i64, String> {
