@@ -422,8 +422,17 @@ def note_repeated_rows(encoded: Any, rows: int) -> None:  # noqa: ANN401 - Encod
         for name in ARRAYS
     ]
     joined = np.concatenate(flat, axis=1)
+    where = timing.caller(4)
+    inside: set[bytes] = set()
     for row in joined:
-        timing.repeat("leafrow", hashlib.blake2b(row.tobytes(), digest_size=16).digest())
+        digest = hashlib.blake2b(row.tobytes(), digest_size=16).digest()
+        timing.repeat_where("leafrow", digest, where=where)
+        # IKA-264: and a row repeated inside this one request, which is what
+        # merging before sending can take without touching another request.
+        timing.count("dup.leafrow_request.calls")
+        if digest in inside:
+            timing.count("dup.leafrow_request.repeat")
+        inside.add(digest)
 
 
 def served_model(value: Any):

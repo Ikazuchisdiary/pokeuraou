@@ -39,6 +39,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from pokeuraou import rustnode
 from pokeuraou.benchflags import add_bench_flags, require_bench
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.payoff import OBJECTIVES
@@ -146,6 +147,9 @@ def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
         drawn = from_queue(client)
     out = args.out or selfplay_dir() / f"pool-{pool.id}-seed{args.seed}.jsonl"
     store = args.selection_store or out.parent / "selection-solved"
+    # A generation worker edits no position it has sent: each decision's positions are
+    # written, and a repeated `score` asked, once (IKA-264).
+    rustnode.hold_positions()
     started = time.perf_counter()
     stats = generate_pool(
         reg,
@@ -478,6 +482,7 @@ def main() -> None:
 
         drawn = from_queue(client)
 
+    rustnode.hold_positions()  # as the pool path above (IKA-264)
     started = time.perf_counter()
     stats = generate(
         reg,

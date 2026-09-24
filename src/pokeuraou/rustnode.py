@@ -169,7 +169,21 @@ def enabled() -> bool:
 
 
 def available() -> bool:
-    return not _GAVE_UP and enabled() and binary_path().exists()
+    return not _GAVE_UP and enabled() and _binary_found(binary_path())
+
+
+#: Binaries seen to exist (IKA-264): `exists()` is a stat, and narrow asks every pool.
+_FOUND: set[str] = set()
+
+
+def _binary_found(path: Path) -> bool:
+    key = str(path)
+    if key in _FOUND:
+        return True
+    if path.exists():
+        _FOUND.add(key)
+        return True
+    return False
 
 
 def dump_action(action: object) -> dict[str, Any]:
@@ -540,7 +554,7 @@ class RustNode:
         """
         request = {
             "kind": "score",
-            "position": pos.to_json(),
+            "position": _position(pos),
             "side": side,
             "candidates": [[dump_action(a) for a in c.slots] for c in candidates],
         }
@@ -570,7 +584,7 @@ class RustNode:
         """
         request = {
             "kind": "resolve",
-            "position": pos.to_json(),
+            "position": _position(pos),
             "actions": [[dump_action(a) for a in side.slots] for side in actions],
             "budget": dump_budget(budget),
             "select": select,
@@ -597,7 +611,10 @@ class RustNode:
         different at each end and the fixes are different too.
         """
         with timing.stage("rust.ask"):
-            payload = json.dumps(request, ensure_ascii=False).encode("utf-8")
+            payload = _payload(request)
+        kept = _answered(request, payload)
+        if kept is not None:
+            return kept
         if timing.DUPES:
             _note_repeat(request)
         self._process.stdin.write(payload + b"\n")
@@ -609,6 +626,7 @@ class RustNode:
             response = json.loads(line.decode("utf-8"))
         if "error" in response:
             raise RuntimeError(f"the Rust node refused the request: {response['error']}")
+        _keep(request, payload, response)
         return response
 
     def _exchange_many(self, requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -797,7 +815,7 @@ class RustNode:
         """
         started = timing.clock()
         request = {
-            "position": pos.to_json(),
+            "position": _position(pos),
             "ours": [[dump_action(a) for a in side.slots] for side in ours],
             "theirs": [[dump_action(a) for a in side.slots] for side in theirs],
             "budget": dump_budget(budget),
@@ -874,7 +892,7 @@ class RustNode:
     ) -> NodeResult:
         started = timing.clock()
         request = {
-            "position": pos.to_json(),
+            "position": _position(pos),
             "ours": [[dump_action(a) for a in side.slots] for side in ours],
             "theirs": [[dump_action(a) for a in side.slots] for side in theirs],
             "budget": dump_budget(budget),
@@ -930,7 +948,7 @@ class RustNode:
         response = self._ask(
             {
                 "kind": "turn",
-                "position": pos.to_json(),
+                "position": _position(pos),
                 "actions": [[dump_action(a) for a in side.slots] for side in actions],
                 "budget": dump_budget(budget),
                 "full": full,
@@ -1099,7 +1117,7 @@ class RustNode:
         return self._phase(
             {
                 "kind": "replacements",
-                "position": pos.to_json(),
+                "position": _position(pos),
                 "choices": [[dump_action(a) for a in side.slots] for side in choices],
                 "events": events,
             },
@@ -1115,11 +1133,11 @@ class RustNode:
         events: bool = False,
     ) -> PortPhase | None:
         """`apply_lead_abilities`, with its draws answered as `resolve_replacements`'."""
-        return self._phase({"kind": "leads", "position": pos.to_json(), "events": events}, rng)
+        return self._phase({"kind": "leads", "position": _position(pos), "events": events}, rng)
 
     @timing.timed("rust.needed")
     def replacements_needed(self, pos: Position) -> tuple[tuple[bool, ...], ...] | None:
-        response = self._ask({"kind": "needed", "position": pos.to_json()})
+        response = self._ask({"kind": "needed", "position": _position(pos)})
         if response is None:
             return None
         return tuple(tuple(bool(flag) for flag in side) for side in response["needed"])
@@ -1150,18 +1168,22 @@ def _note_repeat(request: dict[str, Any]) -> None:
     """
     kind = request.get("kind") or ("fill_encoded" if request.get("encode") else "fill")
     asked = {key: value for key, value in request.items() if key != "shm"}
-    digest = hashlib.blake2b(
-        json.dumps(asked, ensure_ascii=False).encode("utf-8"), digest_size=16
-    ).digest()
-    timing.repeat(f"port.{kind}", digest)
+    digest = hashlib.blake2b(_payload(asked), digest_size=16).digest()
+    asker = timing.caller()
+    timing.repeat_where(f"port.{kind}", digest, where=asker)
     # The position alone, whatever was asked of it: what a child that kept the last few
     # positions it parsed would not have to be sent again.
     if "position" in request:
+        position = request["position"]
         where = hashlib.blake2b(
-            json.dumps(request["position"], ensure_ascii=False).encode("utf-8"),
+            (
+                position.text
+                if isinstance(position, _Held)
+                else json.dumps(position, ensure_ascii=False)
+            ).encode("utf-8"),
             digest_size=16,
         ).digest()
-        timing.repeat("port.position", where)
+        timing.repeat_where("port.position", where, where=asker)
         # And a node's cells one by one: a cell of the leaf ranking's fill that the matrix
         # fills again, on the same position with the same two actions, is the same turn.
         if "ours" in request and "theirs" in request:
@@ -1172,6 +1194,96 @@ def _note_repeat(request: dict[str, Any]) -> None:
             ]
             for i, j in cells:
                 timing.repeat("port.cell", (where, ours[i], theirs[j]))
+
+
+# -- IKA-264: what one decision sends the port more than once, written and asked once.
+#
+# Over a decision of M-C generation, 55% of `Position.to_json` calls and 52% of the
+# positions in port requests were a position this decision had already sent -- the same
+# object: `needed` then `score` on the node's position, the leaf ranking's reply `score`
+# then its fill, a replacement node's matrix once per pair. And a quarter of `score`
+# requests were the same request: the leaf ranking's reply narrow and the other side's
+# own narrow, on the same position, the same side and the same pool.
+#
+# Held for one decision (`timing.on_decided`) and only when switched on
+# (`hold_positions`): the text is the object's at the time it was first sent, so an
+# object changed in place afterwards would be sent as it was. Generation changes none --
+# a position is a new object from the port or from a copy -- and a tool or a test that
+# edits one in place and asks again is exactly what the switch keeps this away from.
+
+_HOLD = [False]
+#: id -> (the object, its text). The object is held so its id cannot be reused.
+_HELD: dict[int, tuple[Position, _Held]] = {}
+#: A request's bytes -> the answer, for the kinds answered from the position alone.
+_ANSWERS: dict[bytes, dict[str, Any]] = {}
+_ANSWERED_KINDS = frozenset({"score"})
+#: Past this many positions in one decision the memo starts again (a bound, not a tune).
+_HELD_MAX = 512
+_MARK = "\x00held-position\x00"
+_MARK_TEXT = json.dumps(_MARK)
+
+
+class _Held:
+    """A position already written as JSON text, spliced into the request as it is sent."""
+
+    __slots__ = ("text",)
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+
+
+def hold_positions(on: bool = True) -> None:
+    """Keep each position's JSON text, and each `score` answer, for one decision."""
+    _HOLD[0] = on
+    _forget()
+    timing.on_decided(_forget)
+
+
+def _forget() -> None:
+    _HELD.clear()
+    _ANSWERS.clear()
+
+
+def _position(pos: Position) -> dict[str, Any] | _Held:
+    """`pos.to_json()`, or with `hold_positions` its text, written once a decision."""
+    if not _HOLD[0]:
+        return pos.to_json()
+    found = _HELD.get(id(pos))
+    if found is not None and found[0] is pos:
+        timing.count("position.held")
+        return found[1]
+    if len(_HELD) >= _HELD_MAX:
+        _HELD.clear()
+    data = pos.to_json()
+    with timing.stage("rust.ask"):
+        held = _Held(json.dumps(data, ensure_ascii=False))
+    _HELD[id(pos)] = (pos, held)
+    return held
+
+
+def _payload(request: dict[str, Any]) -> bytes:
+    """The request's line, byte for byte what `json.dumps(request)` wrote before: a held
+    position is written in its place, where its dict would have been written."""
+    held = request.get("position")
+    if not isinstance(held, _Held):
+        return json.dumps(request, ensure_ascii=False).encode("utf-8")
+    text = json.dumps({**request, "position": _MARK}, ensure_ascii=False)
+    return text.replace(_MARK_TEXT, held.text, 1).encode("utf-8")
+
+
+def _answered(request: dict[str, Any], payload: bytes) -> dict[str, Any] | None:
+    """The answer this decision already had for the same request, if it may be reused."""
+    if not _HOLD[0] or request.get("kind") not in _ANSWERED_KINDS:
+        return None
+    found = _ANSWERS.get(payload)
+    if found is not None:
+        timing.count("port.answer.held")
+    return found
+
+
+def _keep(request: dict[str, Any], payload: bytes, response: dict[str, Any]) -> None:
+    if _HOLD[0] and request.get("kind") in _ANSWERED_KINDS:
+        _ANSWERS[payload] = response
 
 
 def _world(world: tuple[Position, int] | None) -> dict[str, Any] | None:
