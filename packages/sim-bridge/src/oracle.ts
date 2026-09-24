@@ -39,6 +39,12 @@ export interface RandomnessPolicy {
 	 * foe of a `randomNormal` move (`side.randomFoe`), which 'first' never does (IKA-178).
 	 */
 	sample: 'first' | 'last';
+	/**
+	 * Answers for the accuracy rolls (`randomChance(n, 100)`) of each step, in the order
+	 * they are asked; past its end, `accuracy` answers. Counted from the start of every
+	 * step, so a later hit of Triple Axel can miss after the first hit landed (IKA-235).
+	 */
+	accuracyScript?: ('hit' | 'miss')[];
 }
 
 export const DEFAULT_POLICY: RandomnessPolicy = {
@@ -86,7 +92,11 @@ function installPolicy(battle: AnyBattle, policy: RandomnessPolicy) {
 			// A guaranteed crit (denominator 1) stays guaranteed.
 			return denominator === 1 ? true : policy.crit;
 		}
-		if (denominator === 100) return policy.accuracy === 'hit';
+		if (denominator === 100) {
+			// `rolls` is cleared at every step: this is the step's n-th accuracy roll.
+			const asked = rolls.filter(r => r.kind === 'chance' && r.denominator === 100).length;
+			return (policy.accuracyScript?.[asked - 1] ?? policy.accuracy) === 'hit';
+		}
 		// Anything else (Gen 2/3 Quick Claw, ability procs) follows the secondary policy.
 		return policy.secondary;
 	};
