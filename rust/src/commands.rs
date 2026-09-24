@@ -579,6 +579,16 @@ pub fn replacements_needed(pos: &Position) -> Vec<Vec<bool>> {
         .collect()
 }
 
+/// Showdown's `forcedPassesLeft` (`side.ts` `clearChoice`): of the slots `side` owes, how
+/// many it may leave empty, `canSwitchOut - min(canSwitchOut, canSwitchIn)`. Two faints
+/// with one Pokemon left is `forceSwitch: [true, true]` and one pass (`battle.ts` keeps both
+/// `switchFlag`s while `canSwitch` is not 0), so `replacements_needed` stays per slot and the
+/// shortfall is counted here (IKA-257).
+fn forced_passes(pos: &Position, side: usize, needed: &[bool]) -> usize {
+    let bench = pos.sides[side].pokemon.iter().filter(|m| !m.fainted && !m.is_active()).count();
+    needed.iter().filter(|owed| **owed).count().saturating_sub(bench)
+}
+
 fn needed_command(reg: &Reg, value: &Value) -> Result<Value, String> {
     let position = Position::from_json(&value["position"]);
     if &*position.format != reg.format_id.as_str() {
@@ -611,7 +621,8 @@ fn deterministic() -> Budget {
 ///
 /// The replacement phase: a slot that owes nothing carries a pass, and a slot that owes a
 /// replacement and is given a pass is left alone and reported, because silently choosing
-/// for the player is the thing the resolver exists not to do. `runSwitch` carries order 101
+/// for the player is the thing the resolver exists not to do -- unless the bench is too short
+/// to fill it, which is Showdown's own pass (`forced_passes`). `runSwitch` carries order 101
 /// and is sorted on speed, fastest first, so a fast replacement eats the hazards and fires
 /// its ability before a slow one.
 ///
@@ -652,10 +663,16 @@ fn phase_command(reg: &Reg, value: &Value, phase: Phase) -> Result<Value, String
         Phase::Replacements => {
             let needed = replacements_needed(&state.pos);
             for (side_index, actions) in choices.iter().enumerate() {
+                let mut passes_left = forced_passes(&state.pos, side_index, &needed[side_index]);
                 for action in actions {
                     match action {
                         SlotAction::Pass { slot } => {
                             if needed[side_index].get(*slot).copied().unwrap_or(false) {
+                                // A pass the bench cannot fill is Showdown's own (IKA-257).
+                                if passes_left > 0 {
+                                    passes_left -= 1;
+                                    continue;
+                                }
                                 notes.insert(format!(
                                     "replacement owed at p{}[{}] but none was chosen",
                                     side_index + 1,
