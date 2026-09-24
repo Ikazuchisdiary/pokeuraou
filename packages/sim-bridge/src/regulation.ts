@@ -115,6 +115,14 @@ export interface MoveEntry {
 	multihit?: number | number[];
 	/** Each hit after the first rolls its own accuracy (Triple Axel, Population Bomb). */
 	multiaccuracy?: boolean;
+	/** Struggle's `Math.round(baseMaxhp / 4)` recoil. */
+	struggleRecoil?: boolean;
+	/** Steel Beam's (and Mind Blown's) `Math.round(maxhp / 2)` recoil. */
+	mindBlownRecoil?: boolean;
+	/** Usable while asleep (Sleep Talk, Snore). */
+	sleepUsable?: boolean;
+	/** Spectral Thief takes the target's positive boosts. */
+	stealsBoosts?: boolean;
 	secondaries?: MoveSecondary[];
 	damage?: number | 'level';
 	ohko?: boolean | 'Ice';
@@ -433,6 +441,11 @@ const DECLARATIVE_MOVE_KEYS = [
 	// (`hitStepMoveHitLoop`). Left out until IKA-235, which hid the port's gate for it: the
 	// port read the first roll as all three hits.
 	'multiaccuracy',
+	// The rest of the port's `UNHANDLED_MOVE_FIELDS` (rust/src/resolve.rs). A field the dump
+	// leaves out is a gate that never fires: Steel Beam, Sleep Talk and Snore went through
+	// with the field unread (IKA-246). `tests/test_gate_fields_in_dump.py` holds the two
+	// lists together.
+	'struggleRecoil', 'mindBlownRecoil', 'sleepUsable', 'stealsBoosts',
 ] as const;
 
 /** Copies the listed keys when they carry a meaningful value. */

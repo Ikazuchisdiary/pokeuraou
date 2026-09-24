@@ -1032,11 +1032,16 @@ fn item_handled(item: &str) -> bool {
 }
 
 /// Move fields this port does not implement. A move carrying one is refused.
-pub(crate) const UNHANDLED_MOVE_FIELDS: [&str; 10] = [
+///
+/// The gate reads the regulation dump, so a field here that `DECLARATIVE_MOVE_KEYS`
+/// (packages/sim-bridge/src/regulation.ts) does not write is a gate that never fires
+/// (IKA-235, IKA-246); `tests/test_gate_fields_in_dump.py` holds the two lists together.
+/// `struggleRecoil` left with IKA-246, when the dump began to carry it: Struggle's recoil is
+/// `level_struggle::struggle_recoil`, by name (IKA-239).
+pub(crate) const UNHANDLED_MOVE_FIELDS: [&str; 9] = [
     "damageCallback",
     "multiaccuracy",
     "selfdestruct",
-    "struggleRecoil",
     "mindBlownRecoil",
     "smartTarget",
     "stealsBoosts",
