@@ -285,7 +285,8 @@ def _after_the_stone_holder_switches_in():  # noqa: ANN202
     Everyone else protects, so the one thing the turn does is the switch.
     """
     from pokeuraou.actions import MoveAction, SwitchAction, side_actions
-    from pokeuraou.resolve import Budget, resolve_turn
+
+    from ._port import Budget, resolve_turn
 
     reg = load_regulation("gen9championsvgc2026regmb")
     sheet = {entry.species: entry for entry in load_roster("rizabanadohido").sets}

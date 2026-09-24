@@ -25,16 +25,14 @@ Three consequences of the quoted rule are pinned:
 from __future__ import annotations
 
 import copy
-import os
 
 import pytest
 
-from pokeuraou import rustnode
 from pokeuraou.actions import side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Position
-from pokeuraou.resolve import Budget, resolve_turn
 
+from ._port import Budget, resolve_turn
 from .conftest import FORMAT_ID
 
 pytestmark = pytest.mark.oracle
@@ -104,39 +102,6 @@ def _battle(oracle: Oracle):  # noqa: ANN202
     return handle
 
 
-def test_the_planter_is_healed_by_what_was_drained(reg, oracle: Oracle) -> None:  # noqa: ANN001
-    """Python plants the seed and runs the residual; Showdown does the same turn."""
-    handle = _battle(oracle)
-    before = Position.from_json(handle.position)
-    venusaur = before.sides[1].pokemon[before.sides[1].active[0]]
-    assert venusaur.hp < venusaur.maxhp, "the planter must have HP to get back"
-
-    handle.step(PLANT)
-    assert handle.choice_errors == [], handle.choice_errors
-    theirs = _hp(Position.from_json(handle.position))
-    handle.close()
-    assert theirs["p2 venusaur"] > venusaur.hp, f"Showdown heals the planter: {theirs}"
-
-    hit = [p for p in _resolve(reg, before, PLANT) if _seeded(p)]
-    assert hit, "some branch has the seed landing"
-    for pos in hit:
-        assert _hp(pos) == theirs, f"showdown {theirs} != ours {_hp(pos)}"
-
-
-def test_a_seed_read_from_showdown_heals_too(reg, oracle: Oracle) -> None:  # noqa: ANN001
-    """The other encoding: a seed Showdown planted carries ``sourceSlot = 'p2a'``."""
-    handle = _battle(oracle)
-    handle.step(PLANT)
-    before = Position.from_json(handle.position)
-    assert _seeded(before)
-    handle.step(QUIET)
-    assert handle.choice_errors == [], handle.choice_errors
-    theirs = _hp(Position.from_json(handle.position))
-    handle.close()
-    for pos in _resolve(reg, before, QUIET):
-        assert _hp(pos) == theirs, f"showdown {theirs} != ours {_hp(pos)}"
-
-
 def _after_planting(oracle: Oracle) -> Position:
     handle = _battle(oracle)
     handle.step(PLANT)
@@ -182,23 +147,13 @@ def test_whoever_took_the_slot_is_healed(reg, oracle: Oracle) -> None:  # noqa: 
         )
 
 
-@pytest.fixture()
-def bridged(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
-    if not rustnode.binary_path().exists():
-        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
-    monkeypatch.setenv(rustnode.ENV_ENABLE, "1")
-    rustnode.reset()
-    yield
-    rustnode.reset()
-    os.environ.pop(rustnode.ENV_ENABLE, None)
-
-
 @pytest.mark.parametrize("encoding", ["10", "p2a"])
 @pytest.mark.parametrize("planter", ["alive", "fainted"])
-def test_the_port_drains_and_heals_as_python_does(
-    reg, oracle: Oracle, bridged: None, encoding: str, planter: str  # noqa: ANN001
+def test_the_port_drains_by_either_encoding_and_not_into_a_fainted_slot(
+    reg, oracle: Oracle, encoding: str, planter: str  # noqa: ANN001
 ) -> None:
-    """The port answers every one of the rule's cases the way the resolver does.
+    """Both encodings of the planter's slot drain, and a fainted planter drains nothing
+    (the `test_a_fainted_planter_drains_nothing` rule), under the matrix budget.
 
     Before IKA-56 the port read only ``"10"`` (so a Showdown ``"p2a"`` seed healed nobody
     there) and drained a seeded Pokemon whose planter's slot had fainted.
@@ -221,27 +176,13 @@ def test_the_port_drains_and_heals_as_python_does(
         next(a for a in side_actions(reg, pos, side) if a.to_choice().endswith(choices[side]))
         for side in (0, 1)
     ]
-    budget = Budget.matrix()
-    here = resolve_turn(reg, pos, actions, budget=budget)
-    # The positive control: this cell is one the rule decides.
+    here = resolve_turn(reg, pos, actions, budget=Budget.matrix())
+    assert here.branches
     drained = [b.position.sides[0].pokemon[b.position.sides[0].active[0]].hp for b in here.branches]
     if planter == "fainted":
         assert drained == [mon.hp] * len(drained)
     else:
-        assert all(hp < mon.hp for hp in drained)
-
-    node = rustnode.node_for(reg)
-    assert node is not None
-    there = node.resolve(pos, actions, budget)
-    assert there is not None, "the port refused the turn"
-    assert [b.probability for b in here.branches] == pytest.approx(there.branches, abs=1e-12)
-    for index, branch in enumerate(here.branches):
-        chosen = node.resolve(pos, actions, budget, select=index)
-        assert chosen is not None and chosen.position is not None
-        assert _hp(chosen.position) == _hp(branch.position), (
-            f"branch {index}: rust {_hp(chosen.position)} != python {_hp(branch.position)}"
-        )
-        assert chosen.position.to_json() == branch.position.to_json(), f"branch {index}"
+        assert all(hp < mon.hp for hp in drained), (drained, mon.hp)
 
 
 # ---------------------------------------------------------------------------

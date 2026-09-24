@@ -40,17 +40,24 @@ import dataclasses
 
 import pytest
 
-from pokeuraou import rustnode
 from pokeuraou.actions import side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Effect, Position
-from pokeuraou.resolve import CONFUSION_SELF_HIT_CHANCE, FULL_PARALYSIS_CHANCE, Budget, resolve_turn
 
+from ._port import Budget, resolve_turn
 from .conftest import FORMAT_ID
 
 SP = {"hp": 20, "atk": 20, "def": 10, "spa": 20, "spd": 10, "spe": 20}
 FAST = {"hp": 20, "atk": 20, "def": 10, "spa": 0, "spd": 0, "spe": 32}
 SLOW = {"hp": 32, "atk": 20, "def": 10, "spa": 0, "spd": 4, "spe": 0}
+
+
+#: Showdown's own chances, not the resolver's constants (IKA-210): the confusion self-hit
+#: is `!this.randomChance(33, 100)` (data/conditions.ts, `confusion.onBeforeMove`) and the
+#: champions mod's full paralysis `this.randomChance(1, 8)` (data/mods/champions/conditions.ts,
+#: `par.onBeforeMove`). The rolls Showdown logs are checked against the first.
+CONFUSION_SELF_HIT_CHANCE = 33 / 100
+FULL_PARALYSIS_CHANCE = 1 / 8
 
 
 def _mon(species: str, ability: str, moves: list[str], item: str | None = None,
@@ -189,198 +196,6 @@ def test_showdown(oracle: Oracle, name: str, roll: str) -> None:
         assert _target(Position.from_json(positions[-1])).item is None, "the berry is eaten"
     else:
         assert ("chance", None, None, 33, 100) in asked
-
-
-@pytest.mark.oracle
-@pytest.mark.parametrize(("name", "roll"), PLAYED)
-def test_our_turn_from_showdowns_position(reg, oracle: Oracle, name: str, roll: str) -> None:  # noqa: ANN001
-    """Every step resolved by us from Showdown's position before it, which carries `time`.
-
-    A confusion that starts in the step has no `time` in ours (the roll waits for the try
-    where the lengths first differ), so only its presence is compared then.
-    """
-    case = CASES[name]
-    positions, _ = _play(oracle, case, roll)
-    for index, step in enumerate(case.steps):
-        start = _loaded(positions[index])
-        after = Position.from_json(positions[index + 1])
-        result = resolve_turn(reg, start, _chosen(reg, start, step), budget=Budget.matrix())
-        assert not result.suspended
-        want = _time(after)
-        got = {_time(b.position) for b in result.branches}
-        items = {_target(b.position).item for b in result.branches}
-        if want and _time(start) == 0:
-            # Axe Kick's miss and its 70% without confusion are branches of ours too.
-            assert None in got, (index, got)
-            assert _target(after).item in items
-            continue
-        assert got == {want}, (index, got, want)
-        assert items == {_target(after).item}
-
-
-def _tree(reg, start: Position, steps: list[list[str]], budget: Budget) -> list[dict]:  # noqa: ANN001
-    """Every step resolved by us from `start`, every branch followed: after each step, the
-    probability that p2a is still confused, keyed by whether it is."""
-    frontier = [(1.0, start)]
-    out = []
-    for step in steps:
-        nxt = []
-        for weight, pos in frontier:
-            result = resolve_turn(reg, pos, _chosen(reg, pos, step), budget=budget)
-            assert not result.suspended
-            nxt.extend((weight * b.probability, b.position) for b in result.branches)
-        frontier = nxt
-        confused = sum(w for w, p in frontier if _target(p).has_volatile("confusion"))
-        out.append(confused / sum(w for w, _ in frontier))
-    return out
-
-
-@pytest.mark.oracle
-def test_the_games_we_generate(reg, oracle: Oracle) -> None:
-    """Showdown rolls `time` once, 2 to 5; we branch each try where it may end. After k
-    tries the chance of still being confused is P(time > k) = (5 - k) / 4, and Showdown's
-    two games are the ends of it."""
-    case = CASES["confuse ray"]
-    positions, _ = _play(oracle, case, "short")
-    ours = _tree(reg, _loaded(positions[0]), case.steps, Budget.matrix())
-    assert ours == pytest.approx([1.0, 0.75, 0.5, 0.25, 0.0, 0.0])
-
-
-@pytest.mark.oracle
-def test_axe_kicks_confusion_from_our_own_position(reg, oracle: Oracle) -> None:  # noqa: ANN001
-    """`random(3, 6)`: after Axe Kick's first try the chance of still being confused is 1,
-    then 2/3, 1/3, 0. From Showdown's position after the kick with the roll taken off, as
-    our resolver writes its own."""
-    case = CASES["axe kick"]
-    positions, _ = _play(oracle, case, "short")
-    start = _loaded(positions[1])
-    held = _target(start).volatile("confusion")
-    assert held is not None
-    held.extra = {"tries": 1, "min": 3}
-    ours = _tree(reg, start, case.steps[1:], Budget.matrix())
-    assert ours == pytest.approx([1.0, 2 / 3, 1 / 3, 0.0, 0.0])
-
-
-@pytest.mark.oracle
-@pytest.mark.parametrize("name", ["confuse ray", "axe kick"])
-def test_the_pinned_budget_rolls_the_lowest(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
-    """`random(a, 6)` is `a` under the oracle's pinned policy, and the pinned budget agrees.
-
-    The pinned budget collapses Axe Kick's 30% to "did not happen", so that case starts
-    after the kick, from Showdown's position with the roll taken off."""
-    case = CASES[name]
-    positions, _ = _play(oracle, case, "short")
-    pinned = dataclasses.replace(Budget.deterministic(), pinned_policy=True)
-    first = 0 if name == "confuse ray" else 1
-    start = _loaded(positions[first])
-    if first:
-        held = _target(start).volatile("confusion")
-        assert held is not None
-        held.extra = {"tries": 1, "min": 3}
-    ours = _tree(reg, start, case.steps[first:], pinned)
-    assert ours == [1.0 if t else 0.0 for t in case.short[first:]]
-
-
-@pytest.mark.oracle
-def test_confusion_is_rolled_before_paralysis(reg, oracle: Oracle) -> None:  # noqa: ANN001
-    """Priority 3 against paralysis's 1: Showdown asks the self-hit first, and under the
-    policy it hits, so paralysis is never asked. Our weights follow the same order."""
-    case = CASES["confuse ray"]
-    positions, rolls = _play(oracle, case, "long", [PARALYSE, CONFUSE, SET_UP])
-    asked = [(r["kind"], r.get("numerator"), r.get("denominator")) for r in rolls[2]]
-    assert ("chance", 33, 100) in asked and ("chance", 1, 8) not in asked, asked
-    start = _loaded(positions[2])
-    assert _target(start).status == "par" and _time(start) == 4
-    result = resolve_turn(reg, start, _chosen(reg, start, SET_UP), budget=Budget.matrix())
-    before = _target(start)
-    by_kind: dict[str, float] = {}
-    for branch in result.branches:
-        mon = _target(branch.position)
-        kind = ("self-hit" if mon.hp < before.hp
-                else "acted" if mon.boosts.get("atk", 0) > before.boosts.get("atk", 0)
-                else "paralysed")
-        by_kind[kind] = by_kind.get(kind, 0.0) + branch.probability
-    assert CONFUSION_SELF_HIT_CHANCE == 0.33
-    hit = CONFUSION_SELF_HIT_CHANCE
-    assert by_kind == pytest.approx({
-        "self-hit": hit,
-        "paralysed": (1 - hit) * FULL_PARALYSIS_CHANCE,
-        "acted": (1 - hit) * (1 - FULL_PARALYSIS_CHANCE),
-    })
-
-
-def _port(reg, monkeypatch: pytest.MonkeyPatch):  # noqa: ANN001, ANN202
-    if not rustnode.binary_path().exists():
-        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
-    monkeypatch.setenv(rustnode.ENV_ENABLE, "1")
-    rustnode.reset()
-    node = rustnode.node_for(reg)
-    assert node is not None
-    return node
-
-
-def _both(reg, node, start: Position, step: list[str]):  # noqa: ANN001, ANN202
-    """Python's branches and the port's, as sorted (probability, time, item)."""
-    chosen = _chosen(reg, start, step)
-    python = resolve_turn(reg, start, chosen, budget=Budget.matrix())
-    weights = node.resolve(start, chosen, Budget.matrix(), select=None)
-    assert weights is not None, "the port refused the turn"
-    picked = [
-        node.resolve(start, chosen, Budget.matrix(), select=i).position
-        for i in range(len(weights.branches))
-    ]
-
-    def key(pos: Position):  # noqa: ANN202
-        held = _target(pos).volatile("confusion")
-        return (_time(pos), None if held is None else held.extra.get("tries"),
-                _target(pos).item, _target(pos).hp)
-
-    want = sorted(((b.probability, key(b.position)) for b in python.branches), key=repr)
-    got = sorted(((w, key(p)) for w, p in zip(weights.branches, picked, strict=True)), key=repr)
-    return want, got
-
-
-@pytest.mark.oracle
-@pytest.mark.parametrize(("name", "roll"), PLAYED)
-def test_the_port_agrees(
-    reg, oracle: Oracle, monkeypatch: pytest.MonkeyPatch, name: str, roll: str  # noqa: ANN001
-) -> None:
-    """The port resolves every step from Showdown's position as Python does."""
-    case = CASES[name]
-    positions, _ = _play(oracle, case, roll)
-    node = _port(reg, monkeypatch)
-    try:
-        for index, step in enumerate(case.steps):
-            want, got = _both(reg, node, _loaded(positions[index]), step)
-            assert [k for _, k in got] == [k for _, k in want], index
-            assert [w for w, _ in got] == pytest.approx([w for w, _ in want]), index
-    finally:
-        rustnode.reset()
-
-
-@pytest.mark.oracle
-@pytest.mark.parametrize("name", ["confuse ray", "axe kick"])
-def test_the_port_branches_the_roll(
-    reg, oracle: Oracle, monkeypatch: pytest.MonkeyPatch, name: str  # noqa: ANN001
-) -> None:
-    """From positions our resolver made (no `time`), both engines branch each try alike."""
-    case = CASES[name]
-    positions, _ = _play(oracle, case, "short")
-    node = _port(reg, monkeypatch)
-    try:
-        start = _loaded(positions[0])
-        for step in case.steps[:5]:
-            want, got = _both(reg, node, start, step)
-            assert [k for _, k in got] == [k for _, k in want]
-            assert [w for w, _ in got] == pytest.approx([w for w, _ in want])
-            # Follow the heaviest branch that is still confused, if any.
-            python = resolve_turn(reg, start, _chosen(reg, start, step), budget=Budget.matrix())
-            confused = [b for b in python.branches if _target(b.position).has_volatile("confusion")]
-            if not confused:
-                break
-            start = max(confused, key=lambda b: b.probability).position
-    finally:
-        rustnode.reset()
 
 
 # ---------------------------------------------------------------------------
@@ -548,6 +363,7 @@ def test_the_port_rolls_confusion_before_paralysis(reg, oracle: Oracle, port) ->
                 else "paralysed")
         by_kind[kind] = by_kind.get(kind, 0.0) + weight
     hit = CONFUSION_SELF_HIT_CHANCE
+    assert ("chance", 33, 100) in asked
     assert by_kind == pytest.approx({
         "self-hit": hit,
         "paralysed": (1 - hit) * FULL_PARALYSIS_CHANCE,

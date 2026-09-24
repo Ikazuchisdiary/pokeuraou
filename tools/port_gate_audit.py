@@ -82,7 +82,7 @@ class Gate:
 GATES = (
     Gate("ability_handled", "abilities", "abilities"),
     Gate("item_handled", "items", "items"),
-    Gate("status_move_handled", "moves", "status moves"),
+    # `status_move_handled` gates nothing since IKA-210 (the refusal was Python's).
 )
 
 #: Candidates for the first question that a person has looked at and kept, because the

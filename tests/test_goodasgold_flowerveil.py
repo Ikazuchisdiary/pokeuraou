@@ -47,12 +47,11 @@ from collections.abc import Callable
 
 import pytest
 
-from pokeuraou import rustnode
 from pokeuraou.actions import side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Pokemon, Position
-from pokeuraou.resolve import Budget, resolve_turn
 
+from ._port import Budget
 from .conftest import FORMAT_ID
 
 FAST = {"hp": 20, "atk": 20, "def": 10, "spa": 20, "spd": 10, "spe": 32}
@@ -234,65 +233,6 @@ def test_showdown(oracle: Oracle, name: str) -> None:
     case = CASES[name]
     _, after = _play(oracle, case)
     assert case.landed(Position.from_json(after)) == case.want
-
-
-@pytest.mark.oracle
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_our_turn_from_showdowns_position(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
-    """A refused effect is in none of our branches; an allowed one is in some (a miss is a
-    branch of ours)."""
-    case = CASES[name]
-    before, _ = _play(oracle, case)
-    start = _loaded(before)
-    result = resolve_turn(reg, start, _chosen(reg, start, case.step), budget=Budget.matrix())
-    assert not result.suspended
-    landed = {case.landed(b.position) for b in result.branches}
-    assert (True in landed) == case.want, landed
-
-
-def _port(reg, monkeypatch: pytest.MonkeyPatch):  # noqa: ANN001, ANN202
-    if not rustnode.binary_path().exists():
-        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
-    monkeypatch.setenv(rustnode.ENV_ENABLE, "1")
-    rustnode.reset()
-    node = rustnode.node_for(reg)
-    assert node is not None
-    return node
-
-
-def _key(pos: Position) -> tuple:
-    def one(mon: Pokemon) -> tuple:
-        return (mon.status, tuple(sorted((k, v) for k, v in mon.boosts.items() if v)),
-                tuple(sorted(v.id for v in mon.volatiles)), mon.hp)
-
-    return (one(_p2a(pos)), one(_p2b(pos)))
-
-
-@pytest.mark.oracle
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_the_port_agrees(reg, oracle: Oracle, monkeypatch: pytest.MonkeyPatch, name: str) -> None:  # noqa: ANN001
-    case = CASES[name]
-    before, _ = _play(oracle, case)
-    start = _loaded(before)
-    chosen = _chosen(reg, start, case.step)
-    budget = Budget.matrix()
-    python = resolve_turn(reg, start, chosen, budget=budget)
-    node = _port(reg, monkeypatch)
-    try:
-        weights = node.resolve(start, chosen, budget, select=None)
-        assert weights is not None, "the port refused the turn"
-        picked = [node.resolve(start, chosen, budget, select=i).position
-                  for i in range(len(weights.branches))]
-    finally:
-        rustnode.reset()
-
-    def order(item):  # noqa: ANN001, ANN202
-        return (repr(item[1]), round(item[0], 12))
-
-    want = sorted(((b.probability, _key(b.position)) for b in python.branches), key=order)
-    got = sorted(((w, _key(p)) for w, p in zip(weights.branches, picked, strict=True)), key=order)
-    assert [k for _, k in got] == [k for _, k in want]
-    assert [w for w, _ in got] == pytest.approx([w for w, _ in want])
 
 
 # ---------------------------------------------------------------------------

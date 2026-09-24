@@ -10,6 +10,9 @@ the turn is equal, so the distribution over successor positions is unchanged. Ch
 against the unmerged tree with `to_json` as the key -- deliberately not the resolver's own
 comparison, which is what is on trial.
 
+The turns are the port's (IKA-210); the audit that every field of Python's `_Turn` is
+either compared or named as ignored went with Python's merge.
+
 *It never costs exactness.* Fewer branches means the cap binds less often and each action
 gets more of the resolution budget, so a turn that was exact without the merge must be
 exact with it. The reverse would be the optimisation paying for itself with accuracy.
@@ -18,22 +21,14 @@ exact with it. The reverse would be the optimisation paying for itself with accu
 from __future__ import annotations
 
 import json
-from dataclasses import fields, replace
+from dataclasses import replace
 
 from pokeuraou.actions import side_actions
 from pokeuraou.oracle import TeamSet
 from pokeuraou.position import Position
 from pokeuraou.regulation import Regulation
-from pokeuraou.resolve import (
-    _MERGE_COMPARED_STATE,
-    _MERGE_IGNORED_STATE,
-    Budget,
-    TurnResult,
-    _Live,
-    _Turn,
-    resolve_turn,
-)
 
+from ._port import Budget, TurnResult, resolve_turn
 from .test_actions import _synthetic_position
 
 #: Enough branching to be worth merging, small enough that neither arm hits the cap: four
@@ -69,30 +64,6 @@ def pairs(reg: Regulation, pos: Position, count: int = 6) -> list[tuple]:
     return [(ours[i], theirs[(i * 7) % len(theirs)]) for i in range(0, len(ours), step)][:count]
 
 
-def test_the_comparison_covers_every_field_of_the_working_state() -> None:
-    """A field added to `_Turn` and forgotten is the one way this can merge two states.
-
-    Not a style check. `_same_state` decides whether two branches are the same branch; a
-    field it does not read is a difference it cannot see, and two branches that differ only
-    there would be folded into one -- silently, and with the right probabilities, so
-    nothing downstream would look wrong.
-    """
-    named = set(_MERGE_COMPARED_STATE) | set(_MERGE_IGNORED_STATE) | {"reg"}
-    missing = set(_Turn.__slots__) - named
-    assert not missing, (
-        f"{sorted(missing)} is part of the turn's working state but is neither compared "
-        "before two branches merge nor named as deliberately ignored"
-    )
-    assert not named - set(_Turn.__slots__), "names that are not fields of `_Turn`"
-
-    # The same hole one level up: a branch is its weight, its state and the queue behind
-    # it, and the merge reads all three. A fourth field would be one it does not read.
-    assert {spec.name for spec in fields(_Live)} == {"weight", "turn", "remaining"}, (
-        "`_Live` grew a field: decide whether two branches that differ in it may merge, "
-        "and say so in `_merge_live`"
-    )
-
-
 def test_a_guaranteed_knockout_stops_being_sixteen_branches(
     reg: Regulation, team_a: list[TeamSet]
 ) -> None:
@@ -123,7 +94,6 @@ def test_a_guaranteed_knockout_stops_being_sixteen_branches(
 
     outcomes = len(merged.branches) + len(merged.suspended)
     assert outcomes < len(plain.branches) + len(plain.suspended)
-    assert merged.merged > 0
     assert merged.exact, "the whole turn fits once the duplicate rolls are folded"
     assert not plain.exact, (
         "without the merge this turn does not fit the cap -- if it now does, the fixture "

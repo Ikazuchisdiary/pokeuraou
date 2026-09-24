@@ -54,6 +54,10 @@ class Class:
     #: What the machine would have to hold for this class not to fire. Checked when the
     #: class is required, so that "no skips" cannot be satisfied by a suite that never ran.
     probe: Callable[[], bool] | None = field(default=None, compare=False)
+    #: Whether `--absent` may declare it. The Rust binary may not (IKA-210): the port is the
+    #: only engine the rule tests have, so without it they fail rather than skip, and a
+    #: machine that lacks it has not run the suite at all.
+    declarable: bool = True
 
 
 def _oracle_built() -> bool:
@@ -114,8 +118,11 @@ CLASSES: tuple[Class, ...] = (
         re.compile(
             r"no Rust binary at|the shared path is only taken with the port"
         ),
-        "rust/target/release/pokeuraou-damage; `cargo build --release`",
+        "rust/target/release/pokeuraou-damage; `cargo build --release`. Since IKA-210 the "
+        "suite fails instead of skipping without it, so a match here is a test that still "
+        "skips -- it should fail -- and the class cannot be declared absent",
         probe=_rust_built,
+        declarable=False,
     ),
     Class(
         "priors",
@@ -246,6 +253,9 @@ def main(argv: list[str] | None = None) -> int:
         known = {c.name for c in CLASSES if c.environment}
         if name not in known:
             print(f"  --absent {name}: not an environment class ({', '.join(sorted(known))})")
+            return 2
+        if not next(c for c in CLASSES if c.name == name).declarable:
+            print(f"  --absent {name}: the suite requires it and fails without it (IKA-210)")
             return 2
         absent[name] = int(count) if count else 0
 

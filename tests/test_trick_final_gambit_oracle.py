@@ -52,8 +52,8 @@ from pokeuraou import rustnode
 from pokeuraou.actions import side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Position
-from pokeuraou.resolve import Budget
 
+from ._port import Budget
 from .conftest import FORMAT_ID
 
 pytestmark = pytest.mark.oracle
@@ -259,7 +259,7 @@ def _actions(reg, pos: Position, choices: list[str]) -> list:  # noqa: ANN001
 @pytest.fixture()
 def bridged(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
     if not rustnode.binary_path().exists():
-        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
+        pytest.fail(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
     monkeypatch.setenv(rustnode.ENV_ENABLE, "1")
     rustnode.reset()
     yield

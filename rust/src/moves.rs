@@ -86,6 +86,10 @@ pub(crate) fn do_move<'a>(
     if move_id.as_str() == RECHARGE {
         if let Some(mon) = turn.mon_at_mut(action.side, action.slot) {
             mon.volatiles.retain(|v| v.id.as_str() != "mustrecharge");
+            // IKA-210's positive control puts the recharge lock back, for good.
+            if cfg!(feature = "ika210-control") {
+                mon.volatiles.push(Effect::new(Id::new("mustrecharge")));
+            }
         }
         log_event!(turn, "{} must recharge", Name(action.side, action.slot));
         turn.move_failed[action.side][action.slot] = true;
@@ -1595,6 +1599,10 @@ fn multihit_counts(mv: &Move, budget: &Budget, ability: &str) -> Vec<(usize, f64
     if !budget.enumerate_secondary {
         return vec![(low, 1.0)];
     }
+    // IKA-210's positive control: the older `[2, 2, 3, 3, 4, 5]` (IKA-160's bug).
+    if cfg!(feature = "ika210-control") && (low, high) == (2, 5) {
+        return vec![(2, 1.0 / 3.0), (3, 1.0 / 3.0), (4, 1.0 / 6.0), (5, 1.0 / 6.0)];
+    }
     if (low, high) == (2, 5) {
         return vec![
             (2, 7.0 / 20.0),
@@ -2430,6 +2438,19 @@ fn mark_self_switch(turn: &mut Turn, action: &QueuedAction) {
         .count();
     if bench == 0 {
         return;
+    }
+    // IKA-210's positive control: the old Showdown (before a5df827), whose Eject Button and
+    // Emergency Exit cancelled the attacker's self-switch -- here, whenever a foe holds one.
+    if cfg!(feature = "ika210-control") {
+        let foe = 1 - action.side;
+        let exits = (0..turn.pos.sides[foe].active.len()).any(|slot| {
+            matches!(turn.mon_at(foe, slot), Some(mon) if !mon.fainted
+                && (mon.item.map(|i| i.as_str() == "ejectbutton").unwrap_or(false)
+                    || mon.ability.as_str() == "emergencyexit"))
+        });
+        if exits {
+            return;
+        }
     }
     turn.add_volatile(action.side, action.slot, "pendingselfswitch", None);
     turn.self_switch_pending = true;
@@ -3961,6 +3982,14 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
             }
         }
     }
+    // IKA-210's positive control orders the residuals after the weather ended, and notes a
+    // tie there (IKA-190's bug in Python).
+    #[cfg(feature = "ika210-control")]
+    let (order, tied_after) = residual_order(turn)?;
+    #[cfg(feature = "ika210-control")]
+    if tied_after && !tied {
+        turn.report("residual speed tie (Showdown breaks it at random)");
+    }
 
     if matches!(turn.pos.field.weather, Some(w) if w.as_str() == "sandstorm") && !weather_expired
     {
@@ -4290,3 +4319,8 @@ const PARTIAL_TRAP_DAMAGE: (i64, i64) = (1, 8);
 // The champions mod's Salt Cure, half the base game's (IKA-159); see resolve.py.
 const SALT_CURE_DAMAGE: (i64, i64) = (1, 16);
 const SALT_CURE_DAMAGE_WEAK: (i64, i64) = (1, 8);
+
+// The port's own unit tests of what Python's test_resolve held (IKA-210).
+#[cfg(test)]
+#[path = "moves_unit_tests.rs"]
+mod unit_tests;

@@ -20,7 +20,6 @@ from pokeuraou.actions import side_actions
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.position import Position
 from pokeuraou.regulation import load_regulation
-from pokeuraou.resolve import Budget, resolve_turn
 from pokeuraou.selfplay import (
     END_REASONS,
     GameRecord,
@@ -31,6 +30,8 @@ from pokeuraou.selfplay import (
 )
 from pokeuraou.teams import load_roster
 from tests._harness import load_tool
+
+from ._port import Budget, resolve_turn
 
 encode_dataset = load_tool("encode_dataset")
 
