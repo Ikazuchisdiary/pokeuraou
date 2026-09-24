@@ -20,7 +20,7 @@
 		"teraEnabled": false,
 		"megaPerSide": 1,
 		"showdownCommit": "a5df8274e85b0889bf2a9b3422a08b39732374fc",
-		"generatedAt": "2026-09-23T13:44:24.687Z"
+		"generatedAt": "2026-09-24T07:12:33.293Z"
 	},
 	"natures": [
 		{
@@ -21757,7 +21757,8 @@
 			},
 			"hasCustomCode": false,
 			"customHooks": [],
-			"multihit": 10
+			"multihit": 10,
+			"multiaccuracy": true
 		},
 		{
 			"id": "pounce",
@@ -25582,7 +25583,8 @@
 			"customHooks": [
 				"basePowerCallback"
 			],
-			"multihit": 3
+			"multihit": 3,
+			"multiaccuracy": true
 		},
 		{
 			"id": "twinbeam",

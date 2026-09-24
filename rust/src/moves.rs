@@ -1874,6 +1874,7 @@ fn hit_target<'a>(
         Some(hits) => vec![(hits, 1.0)],
         None => multihit_counts(mv, &budget, attacker.ability.as_str()),
     };
+    let rolls_later_hits = rolls_each_hit(mv, &attacker);
 
     let ctx_started = crate::resolve::phase_start();
     let move_ctx = MoveContext {
@@ -1965,6 +1966,10 @@ fn hit_target<'a>(
                 // Python's `total` and its loop variable, for "hit Nx for T" (IKA-215).
                 let mut total = 0i64;
                 let mut last_index = 0usize;
+                // A later hit of a multiaccuracy move that misses ends the move there
+                // (IKA-235): each such stop, its weight and its hits so far.
+                let mut stops: Vec<(f64, Turn<'a>, usize, i64, bool)> = Vec::new();
+                let mut stop_weight = 1.0f64;
                 for hit_index in 0..hits {
                     last_index = hit_index;
                     let gone = match state.mon_at(target.0, target.1) {
@@ -1973,6 +1978,20 @@ fn hit_target<'a>(
                     };
                     if gone {
                         break;
+                    }
+                    if rolls_later_hits && hit_index > 0 {
+                        // A fainted user stops the loop before the roll, as below.
+                        let Some(chance) = later_hit_chance(&state, mv, action, target)? else {
+                            break;
+                        };
+                        if chance <= 0.0 {
+                            break;
+                        }
+                        if chance < 1.0 && budget.enumerate_accuracy {
+                            let stopped = state.clone();
+                            stops.push((stop_weight * (1.0 - chance), stopped, hit_index - 1, total, reached));
+                            stop_weight *= chance;
+                        }
                     }
                     let on_doll = subbed && hits_substitute(&state, action, mv, target);
                     let amount = if hit_index == 0 {
@@ -2058,15 +2077,18 @@ fn hit_target<'a>(
                         }
                     }
                 }
+                stops.push((stop_weight, state, last_index, total, reached));
+                for (stop_weight, mut state, last_index, total, reached) in stops {
                 if hits > 1 {
                     log_event!(state, "{} hit {}x for {}", Label(reg, action), last_index + 1, total);
                 }
-                let weight = acc_weight * crit_weight * roll_weight * hit_weight;
+                let weight = acc_weight * crit_weight * roll_weight * hit_weight * stop_weight;
                 for (extra, mut expanded) in spread_secondaries(state, action, hits > 1)? {
                     if reached {
                         thaw_on_hit(&mut expanded, action, mv, target);
                     }
                     outcomes.push((weight * extra, expanded));
+                }
                 }
             }
         }
@@ -2143,6 +2165,28 @@ fn showdown_accuracy(
     defender: &Battler,
     accuracy: i64,
 ) -> i64 {
+    let accuracy = accuracy_modifiers(turn, mv, attacker, defender).apply(accuracy);
+    let mut boost = attacker.boost("accuracy").clamp(-6, 6);
+    if !mv.ignore_evasion {
+        boost = (boost - defender.boost("evasion")).clamp(-6, 6);
+    }
+    if boost > 0 {
+        accuracy * (3 + boost) / 3
+    } else if boost < 0 {
+        accuracy * 3 / (3 - boost)
+    } else {
+        accuracy
+    }
+}
+
+/// The `ModifyAccuracy` handlers' chain (IKA-231), for `showdown_accuracy` and
+/// `later_hit_chance`.
+fn accuracy_modifiers(
+    turn: &Turn,
+    mv: &Move,
+    attacker: &Battler,
+    defender: &Battler,
+) -> crate::fixedpoint::Chain {
     let mut chain = crate::fixedpoint::Chain::new();
     // onSourceModifyAccuracyPriority / onModifyAccuracyPriority: -1.
     if attacker.ability == "compoundeyes" {
@@ -2161,18 +2205,80 @@ fn showdown_accuracy(
     if is(defender.item, "brightpowder") {
         chain.add_fp(3686, "brightpowder");
     }
-    let accuracy = chain.apply(accuracy);
-    let mut boost = attacker.boost("accuracy").clamp(-6, 6);
-    if !mv.ignore_evasion {
-        boost = (boost - defender.boost("evasion")).clamp(-6, 6);
+    chain
+}
+
+/// Whether each hit after the first rolls accuracy again: `multiaccuracy` (Triple Axel,
+/// Population Bomb; Triple Kick is not in either regulation), unless Skill Link's
+/// `onModifyMove` deleted it. Loaded Dice deletes it too, and is `isNonstandard: "Past"`
+/// in both Champions mods.
+fn rolls_each_hit(mv: &Move, attacker: &Battler) -> bool {
+    mv.raw.get("multiaccuracy").is_some_and(|v| v.as_bool() == Some(true))
+        && attacker.ability != "skilllink"
+}
+
+/// The chance that a later hit of a `multiaccuracy` move lands (IKA-235), from the live
+/// state before that hit; None when the user is gone, which ends the move before the roll.
+///
+/// `hitStepMoveHitLoop` (sim/battle-actions.ts 911-940, vendor a5df827; the champions
+/// mod's copy is data/mods/champions/scripts.ts 482-511) does not use `hitStepAccuracy`:
+///
+/// ```text
+/// let accuracy = move.accuracy;
+/// const boostTable = [1, 4 / 3, 5 / 3, 2, 7 / 3, 8 / 3, 3];
+/// if (!move.ignoreAccuracy) { boost = clamp(user accuracy);
+///     if (boost > 0) accuracy *= boostTable[boost]; else accuracy /= boostTable[-boost]; }
+/// if (!move.ignoreEvasion) { boost = clamp(target evasion);
+///     if (boost > 0) accuracy /= boostTable[boost]; else if (boost < 0) accuracy *= boostTable[-boost]; }
+/// accuracy = this.battle.runEvent('ModifyAccuracy', target, pokemon, move, accuracy);
+/// if (!move.alwaysHit) { accuracy = runEvent('Accuracy', ...);
+///     if (accuracy !== true && !this.battle.randomChance(accuracy, 100)) break; }
+/// ```
+///
+/// So the two stages are floats, each clamped and applied on its own, not the first hit's
+/// one combined integer stage. `runEvent` applies its modifier chain only to a
+/// non-negative integer (`relayVar === Math.abs(Math.floor(relayVar))`, sim/battle.ts
+/// 929), so a staged 67.5 keeps no Compound Eyes or Wide Lens. `randomChance(x, 100)` is
+/// `random(100) < x` over the integers 0-99: the chance is `ceil(x) / 100`, 68% for 67.5.
+/// The arithmetic is f64 in the same order, so the float residue is Showdown's too (for a
+/// 90% move it only shows past 100: -2 accuracy against -4 evasion is 126.00000000000001).
+/// No Guard answers the `Accuracy` event with true.
+fn later_hit_chance(
+    turn: &Turn,
+    mv: &Move,
+    action: &QueuedAction,
+    target: Slot,
+) -> Result<Option<f64>, String> {
+    let Some(attacker) = turn.battler_at(action.side, action.slot)? else {
+        return Ok(None);
+    };
+    let Some(defender) = turn.battler_at(target.0, target.1)? else {
+        return Ok(None);
+    };
+    let Some(base) = mv.accuracy else { return Ok(Some(1.0)) };
+    if mv.always_hit || attacker.ability == "noguard" || defender.ability == "noguard" {
+        return Ok(Some(1.0));
     }
+    const BOOST_TABLE: [f64; 7] = [1.0, 4.0 / 3.0, 5.0 / 3.0, 2.0, 7.0 / 3.0, 8.0 / 3.0, 3.0];
+    let mut accuracy = base as f64;
+    let boost = attacker.boost("accuracy").clamp(-6, 6);
     if boost > 0 {
-        accuracy * (3 + boost) / 3
-    } else if boost < 0 {
-        accuracy * 3 / (3 - boost)
+        accuracy *= BOOST_TABLE[boost as usize];
     } else {
-        accuracy
+        accuracy /= BOOST_TABLE[(-boost) as usize];
     }
+    if !mv.ignore_evasion {
+        let boost = defender.boost("evasion").clamp(-6, 6);
+        if boost > 0 {
+            accuracy /= BOOST_TABLE[boost as usize];
+        } else if boost < 0 {
+            accuracy *= BOOST_TABLE[(-boost) as usize];
+        }
+    }
+    if accuracy >= 0.0 && accuracy == accuracy.floor() {
+        accuracy = accuracy_modifiers(turn, mv, &attacker, &defender).apply(accuracy as i64) as f64;
+    }
+    Ok(Some(accuracy.ceil().clamp(0.0, 100.0) / 100.0))
 }
 
 /// Snow Cloak (IKA-222): `onModifyAccuracy`, `chainModify([3277, 4096])` while

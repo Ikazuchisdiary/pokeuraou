@@ -39,6 +39,9 @@ class RandomnessPolicy:
     speed_tie: str = "keep"  # 'keep' | 'reverse'
     #: What `sample(values)` answers: 'first' or 'last' (IKA-178, a `randomNormal` foe).
     sample: str = "first"
+    #: Answers for a step's accuracy rolls in order, then ``accuracy`` (IKA-235: a later
+    #: hit of Triple Axel that misses).
+    accuracy_script: tuple[str, ...] = ()
 
     def to_json(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -52,6 +55,8 @@ class RandomnessPolicy:
         # Only when asked for, so the request every other caller sends is unchanged.
         if self.sample != "first":
             out["sample"] = self.sample
+        if self.accuracy_script:
+            out["accuracyScript"] = list(self.accuracy_script)
         return out
 
 
