@@ -20,7 +20,7 @@
 		"teraEnabled": false,
 		"megaPerSide": 1,
 		"showdownCommit": "a5df8274e85b0889bf2a9b3422a08b39732374fc",
-		"generatedAt": "2026-09-24T13:16:11.338Z"
+		"generatedAt": "2026-09-24T13:41:43.179Z"
 	},
 	"natures": [
 		{
@@ -22932,7 +22932,8 @@
 				"onHit",
 				"onTry"
 			],
-			"ignoreImmunity": true
+			"ignoreImmunity": true,
+			"sleepUsable": true
 		},
 		{
 			"id": "sludgebomb",
@@ -23090,6 +23091,7 @@
 			"customHooks": [
 				"onTry"
 			],
+			"sleepUsable": true,
 			"secondaries": [
 				{
 					"chance": 30,
@@ -23466,7 +23468,8 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onMoveFail"
-			]
+			],
+			"mindBlownRecoil": true
 		},
 		{
 			"id": "steelroller",
@@ -23729,7 +23732,8 @@
 			"hasCustomCode": true,
 			"customHooks": [
 				"onModifyMove"
-			]
+			],
+			"struggleRecoil": true
 		},
 		{
 			"id": "strugglebug",
