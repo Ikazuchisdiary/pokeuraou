@@ -1,4 +1,4 @@
-# IKA-82: M-C gen-0 で温間始動とゼロからを検証で比べた —— 温間（value-gen11L から 2 エポック）は単体で log loss −0.011、x2 どうしでは −0.001〜−0.002 の差しかない。盤は道具が無く未実施
+# IKA-82: M-C gen-0 では温間始動（value-gen11L から 2 エポック）がゼロからより強い —— 盤で x2 どうし 53.5%（Elo +24 [+8, +41]、SPRT H1）。原点 hp-share/w12 の上に +230、ゼロからは +207、value-gen11L は +151。出荷は value-mc0（温間 x2）
 
 2026-09-25。ワーカー（IKA-82・IKA-86 を 1 つの手順で答える回）。master c6ec705、ブランチ `ika-82-mc0-training`。
 これより前の IKA-82 の記録は TODO.md「9/23 — IKA-82」「9/24 — IKA-82」（語彙の延長と、温間 対 ゼロからの手順 1〜6）にある。
@@ -68,7 +68,7 @@ x2 = 2 本の logit の平均（served のアンサンブルと同じ）、|dp| 
 * 温間の最良: **W2 x2**。x2 の log loss は WA（0.4504）とほぼ同じ（+0.0006）で、単体・AUC・turn-1 AUC は W2 が上。学習が 2 エポックと短く、SA の早期終了が選ぶエポックに左右されない
 * ゼロからの最良: **S-A x2**。S-B8 は単体では S-A と同じだが、x2 では 0.4602 と +0.008 悪い（2 本が似すぎてアンサンブルが効かない）
 
-## 3. 盤: 未実施（道具が無い）
+## 3. 盤: 未実施（道具が無い）→ IKA-259 で作った。盤の結果は §4
 
 `tools/match_queue.py`（→ `tools/generation_match.py`）には **M-C のプールから両席を引く口が無い**。`generation_match.py` は `--roster`（自陣の 1 構築）対 `standings.pool("all")`
 で、`--selection-book` か `--uniform-selection` を要る。M-C の生成の形（`--pool regmc-matchupweb`・選出はその場で解く・両席の控えの推定分布も同じ解から）は
@@ -83,6 +83,90 @@ poolplay.py・selfplay.py・agent_drift.py・replacement_audit.py だけ。
 3. 生成と同じ旗（幅 12・`--rank-leaf`・隠蔽・served）。`tools/agent_drift.py --check` に通す（measurement-lags-generation）
 4. ワーカーの echo に、腕ごとの葉・選出の出どころ・控えの扱いを両席分出す（a-menu-belongs-to-the-agent-that-built-it）
 
+## 4. 盤（9/25 — 続き、master eb1ed5a = IKA-259 を取り込んだ後）
+
+道具は `tools/match_queue.py --pool regmc-matchupweb`（IKA-259）。全対戦で生成と同じ条件（幅 12・`--rank-leaf`・隠蔽・served 24 ワーカー / 2 サーバ）。
+各腕は自分の葉で選出を解き、推定分布も自分の解から取る（ε 0・T 1）。hp-share の腕は一様。駆動は `C:/tmp/ikamc0/board.py`（コミットしない）。
+記録は `$M/data/matches-mc/<名前>/`（M-B の `data/matches` と分けた。理由は §4.4）。腕のモデルは `C:/tmp/ikamc0/arms/`:
+
+* `value-mc0-warm2-s{0,1}.pt` = 温間・2ep lr 5e-4（W2）の 2 本。盤では x2 = `value-mc0-warm2x2`
+* `value-mc0-scratch-s{0,1}.pt` = ゼロから・今のレシピ（S-A）の 2 本。盤では x2 = `value-mc0-scratchx2`
+* 選出の解は葉ごとに `C:/tmp/ikamc0/stores/<葉>/` に貯めて使い回した（gen11L は gen-0 の生成の解の写し、2,145 対）
+
+### 4.1 null: warm2x2 対 warm2x2（`--sprt 0 10`、seed 8201）
+
+```
+SPRT        H0 after 102 pairs (204 games), LLR -2.970
+対の得点    lost 0 / split 102 / won 0（50.0%、全対が引き分け）
+壁時計      1.9 分
+echo        両席とも tested・other の葉 value-mc0-warm2x2、selection solved・belief solved。推論サーバの腕 value・baseline とも
+            「value-mc0-warm2-s0.pt, value-mc0-warm2-s1.pt (ensemble, logits averaged)」
+```
+
+### 4.2 本番: warm2x2 対 scratchx2（`--sprt 0 10`、上限 6,000 局/席、seed 8202）
+
+```
+SPRT        H1 after 795 pairs (1,590 games), LLR +2.983
+対の得点    won 221 / split 414 / lost 160（温間が勝ち越し）
+全 1,660 局 温間 53.49% ±2.35（対で見た区間）、Elo +24.3 [+7.9, +40.8]、対の 52% が引き分け（sprt_replay。止まるのはライブと同じ対 795）
+壁時計      14.5 分（両腕の選出を初めて解く分を含む。scratchx2 は 1,099 対、warm2x2 は 864 対を解いた）
+echo        worker7: 席 0・席 1 とも tested = warm2x2、other = scratchx2。どちらも selection solved・belief solved、store は葉ごとに別
+```
+
+⚠ 24 本のワーカーのうち 1 本（worker4）が 341 秒で落ちた。store のファイルを読もうとした瞬間に、別のワーカーがそのファイルを置き換えていた
+（Windows の `PermissionError`。IKA-259 で直したのは書く側だけで、これは読む側）。キューがその 1 局を配り直し、局は番号から種を取るので、局も答えも変わらない。
+match_queue の rc は 1。読む側を直した（`poolplay._read_shared`: `PermissionError` なら 20 ms 待って最大 50 回読み直す。テスト 1 件と、ずっと断られるときは例外のままという対照）。
+直した後の 2 本（§4.3 の warm2x2・scratchx2 の行）で落ちたワーカーは 0。
+
+### 4.3 表の行: 原点 `hp-share/w12/hidden-bench` に対する大きさ（固定局数、各 1,000 局/席）
+
+大きさなので SPRT ではなく固定局数（register-the-stop-before-the-match）。
+
+```
+  腕                         seed   原点に対する勝率（対で見た区間）   Elo（sprt_replay）          壁時計
+  value-gen11L（x1）         8211   70.40% ±1.93                     +150.5 [+134.7, +166.9]    4.1 分
+  value-mc0-warm2x2          8212   78.90% ±1.80                     +229.1 [+210.9, +248.5]    10.1 分（新しい対の解を含む。1 コアのテストと重なった）
+  value-mc0-scratchx2        8213   76.90% ±1.86                     +208.9 [+191.2, +227.7]    10.0 分
+```
+
+`tools/ratings.py --matches $M/data/matches-mc --anchor hp-share/w12/hidden-bench`（null・本番・3 行、7,895 局、4 腕、全部隠蔽）:
+
+```
+  agent                                                                  Elo      +-    games
+  value-mc0-warm2x2/w12/leaf/book:solved/hidden-bench/belief:solved     230.3   14.9    4129
+  value-mc0-scratchx2/w12/leaf/book:solved/hidden-bench/belief:solved   207.1   14.6    3661
+  value-gen11L/w12/leaf/book:solved/hidden-bench/belief:solved          150.8   16.7    2000
+  hp-share/w12/hidden-bench                                               0.0    0.0    6000
+  席の有利 −0.023 logit（席 0 の勝ち 49.4%）。対戦ごとの fit と観測の差は ±0.8 ポイント以内（循環なし）
+```
+
+⚠ ratings は engine の指紋が 2 つある（2574b487 = 6,000 局・6b30e42d = 1,895 局）と言う。指紋はソースのハッシュで、§4.2 の後に `_read_shared` を入れたので分かれた。
+違いは読むときの例外処理だけで、局は変わらない。
+
+### 4.4 `ratings.py` は `pool-match` の記録を読むか
+
+読む。`ratings.py` は `games-worker*.jsonl` の `provenance` と `outcome` があれば数え、`provenance.kind` で絞らない。名前は `agent_name` が作り、
+原点は `hp-share/w12/hidden-bench` になる（上の表）。
+
+ただし **規則（M-B / M-C）で分けない**。`--matches` の下を全部 1 つの fit に入れるので、M-C の対戦を `data/matches` に置くと M-B の表と混ざる。
+今は名前が重ならない（`data/matches/.ratings-cache.json` に `hp-share/w12/hidden-bench` は 0 件）ので、つながらない別の成分になるだけ。
+それでも `--anchor` の既定は M-B の `hp-share/w24/hidden-bench` なので、M-C の行は原点の無い成分として並ぶ。今回は `data/matches-mc` に分けて `--matches` で指した。
+→ 別課題の候補（直していない）
+
+## 5. 結論（IKA-82）
+
+* **温間始動はゼロからより強い。** 同じ記録（gen-0）・同じ分割・同じ評価の盤で、温間 x2 がゼロから x2 に 53.5%（Elo +24 [+8, +41]）、SPRT(0, 10) は H1。
+  原点に対しても 78.9% 対 76.9%（+229 対 +209、ratings では +230 対 +207）で、向きが同じ
+* 検証の数字（x2 の log loss 差 0.0014、AUC 差 0.0017）は雑音の床より小さかったが、盤でははっきり差が出た。学習の数字だけで「差が無い」としなかったのは正しかった
+* **value-gen11L をそのまま M-C で使うより、gen-0 で学習し直すほうがずっと強い**: +151 → +230（温間）・+207（ゼロから）
+* **gen-0 の出荷モデル: 温間・2ep lr 5e-4 の 2 本**（盤で勝った側）
+  * `$M/data/models/value-mc0.pt` = `C:/tmp/ikamc0/models/W2lr5e-4-s0.pt`（sha256 25d4c030c0a389fb…）
+  * `$M/data/models/value-mc0-s1.pt` = `W2lr5e-4-s1.pt`（sha256 384f2e495e4e6a5f…）
+  * `train_value.py --data $M/data/selfplay-mc0-encoded.npz --init-from $M/data/models/value-gen11L.pt --epochs 2 --lr 5e-4 --keep last --split-seed 0 --seed {0,1}`
+  * 検証（6,000 局の held-out）: 単体 log loss 0.4514 / 0.4517、AUC 0.8648 / 0.8648、x2 0.4510 / 0.8651
+  * 盤の名前は `value-mc0-warm2x2` だった。同じ重みを `value-mc0.pt`・`value-mc0-s1.pt` の名で使うと、葉の名前は `value-mc0x2` になる。
+    選出の解の store は tag に葉の名前が入るので、`C:/tmp/ikamc0/stores/value-mc0-warm2x2`（約 1,700 対）をそのままは読めない（答えは同じ）
+
 ## 機械
 
 heavy.py の行（`--agent IKA-82`）:
@@ -91,4 +175,12 @@ heavy.py の行（`--agent IKA-82`）:
   00:58:25–01:00:36  1 コア    符号化                           131 s
   01:01:05–01:04:42  16 コア   12 本の学習（GPU 専有）           217 s（1 本 9〜28 s、1 エポック 2.6〜3.2 s）
   01:04:53–01:04:58  16 コア   12 本と gen11L の held-out 評価    5 s
+  01:35:43–01:37:37  16 コア   盤 null warm2x2                  114 s
+  01:37:50–01:52:23  16 コア   盤 warm2x2 対 scratchx2          873 s（rc 1 = ワーカー 1 本が落ちた）
+  01:53:20–01:57:30  16 コア   行 gen11L 対 hp-share            250 s
+  01:58:05–02:08:14  16 コア   行 warm2x2 対 hp-share           609 s
+  01:58:00–02:07:43   1 コア   読む側の直しのテスト              582 s（上の行と重なった）
+  02:08:14–02:18:13  16 コア   行 scratchx2 対 hp-share         599 s
 ```
+
+合計: 16 コア 2,667 s（44.5 分。うち GPU の学習・評価 222 s、盤 2,445 s）、1 コア 713 s。
