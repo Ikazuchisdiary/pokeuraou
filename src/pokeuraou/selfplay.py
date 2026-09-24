@@ -45,10 +45,17 @@ from .payoff import HP_SHARE, Objective
 from .policy import policy_ranking
 from .position import Field, MoveSlot, Pokemon, Position, Side
 from .priors import Cooccurrence, MetagamePrior, SampledSet
-from .provenance import engine_fingerprint
+from .provenance import LEGACY_RANK_FILL, engine_fingerprint
 from .regulation import STAT_IDS, Regulation, repo_root
 from .rustnode import PortPause, PortTurn
-from .search import belief_solve, believed_ranking, leaf_ranking, search
+from .search import (
+    DEFAULT_RANK_FILL,
+    belief_solve,
+    believed_ranking,
+    leaf_ranking,
+    parse_rank_fill,
+    search,
+)
 from .selection_book import (
     DEFAULT_EPSILON,
     DEFAULT_TEMPERATURE,
@@ -255,6 +262,10 @@ class GameRecord:
     #: (`RANK_VIEWS`): "heaviest" since IKA-143, "first" before it. Written only for a
     #: hidden-bench game, so a record without it is either open or older than the rule.
     rank_view: list[str] = field(default_factory=lambda: ["heaviest", "heaviest"])
+    #: How each side's leaf ranking filled its cells (`search.parse_rank_fill`, IKA-268).
+    #: Written only when a side did not play `LEGACY_RANK_FILL`, so a record without it
+    #: ranked the way every game before IKA-268 did.
+    rank_fill: list[str] = field(default_factory=lambda: [LEGACY_RANK_FILL, LEGACY_RANK_FILL])
     #: The equilibrium mixtures over the 90 ordered selections, when a book was used.
     #: These are the policy targets a selection head would learn -- the *solver's*
     #: recommendation, not the softened distribution the game was drawn from.
@@ -322,6 +333,11 @@ class GameRecord:
             "information": self.information,
             "ranking": self.ranking,
             **({"rankView": list(self.rank_view)} if self.information == "hidden-bench" else {}),
+            **(
+                {"rankFill": list(self.rank_fill)}
+                if set(self.rank_fill) != {LEGACY_RANK_FILL}
+                else {}
+            ),
             "ownSelectionPolicy": self.own_selection_policy,
             "foeSelectionPolicy": self.foe_selection_policy,
             "ownSelectionMixture": self.own_selection_mixture,
@@ -565,6 +581,7 @@ def _menus(
     spreads: dict[int, list] | None = None,
     rank_view: str = "heaviest",
     used: dict[int, tuple[int, tuple[str, ...]]] | None = None,
+    rank_fill: str = DEFAULT_RANK_FILL,
 ) -> tuple[list[SideAction], list[SideAction]]:
     """Both sides' candidate menus, as one agent sees them.
 
@@ -579,9 +596,15 @@ def _menus(
     -- supersedes ``rank_by_leaf`` when it is given, because both answer the same question
     and an agent asks it once. It is a supersession rather than an error so that an agent
     can be described by adding one setting to an existing pair rather than by rewriting it.
+
+    ``rank_fill`` is how the leaf ranking fills its cells (`search.parse_rank_fill`,
+    IKA-268): how many damage replies each candidate is resolved against, and whether at
+    this budget or at `Budget.fast`. It changes nothing with the damage or policy ranking.
     """
     if rank_view not in RANK_VIEWS:
         raise ValueError(f"rank_view {rank_view!r} is not one of {RANK_VIEWS}")
+    references, fast_fill = parse_rank_fill(rank_fill)
+    rank_budget = Budget.fast() if fast_fill else budget
     if policy is None and not rank_by_leaf:
         # The damage score reads only the active Pokemon, so it has nothing to be blind
         # about and the true position costs nothing here.
@@ -640,7 +663,9 @@ def _menus(
             (
                 policy_ranking(policy, at, side)
                 if policy is not None
-                else leaf_ranking(reg, at, side, evaluate, budget=budget),
+                else leaf_ranking(
+                    reg, at, side, evaluate, budget=rank_budget, references=references
+                ),
                 weight,
             )
             for at, weight in views(side)
@@ -727,6 +752,7 @@ def play_game(
     bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None = None,
     one_agent: bool = True,
     rank_view: str | tuple[str, str] = "heaviest",
+    rank_fill: str | tuple[str, str] = DEFAULT_RANK_FILL,
 ) -> GameRecord:
     """Plays one game to a result, sampling both sides from the turn's equilibrium.
 
@@ -784,6 +810,10 @@ def play_game(
     agent's leaf or policy ranking reads under a hidden bench (`RANK_VIEWS`, IKA-143).
     "heaviest" ships; "first" is the enumeration-order rule every game before it played.
     It changes nothing without ``sheets`` or with the damage ranking.
+
+    ``rank_fill`` takes a pair too: how each agent's leaf ranking fills its cells --
+    ``refs<N>`` replies at the matrix budget, ``-fast`` for `Budget.fast` (IKA-268). It
+    changes nothing with the damage or policy ranking.
     """
     # Closes the stretch since the last game's last record (IKA-98); the first one ends startup.
     timing.decided("between")
@@ -810,6 +840,9 @@ def play_game(
     for rule in views_rule:
         if rule not in RANK_VIEWS:
             raise ValueError(f"rank_view {rule!r} is not one of {RANK_VIEWS}")
+    fills = (rank_fill, rank_fill) if isinstance(rank_fill, str) else tuple(rank_fill)
+    for fill in fills:
+        parse_rank_fill(fill)
     if sheets is None and not open_information:
         raise ValueError(
             "no `sheets`, so the search would be shown the opponent's four -- the open "
@@ -848,6 +881,7 @@ def play_game(
         "policy" if policies[0] is not None else "leaf" if ranked[0] else "damage"
     )
     record.rank_view = list(views_rule)
+    record.rank_fill = list(fills)
     pos = start if start is not None else position_from_sets(reg, own, foe, rng=rng)
     budget = Budget.matrix()
     # Who each side has shown, accumulated across turns. A Pokemon that came in and went
@@ -939,7 +973,7 @@ def play_game(
         foe_views: dict[int, tuple[int, tuple[str, ...]]] | None = None
         ours, theirs = _menus(
             reg, pos, limits, own_leaf, budget, ranked[0], policies[0], spreads,
-            rank_view=views_rule[0], used=own_views,
+            rank_view=views_rule[0], used=own_views, rank_fill=fills[0],
         )
         menu_seconds = perf_counter() - menu_started
         if not ours or not theirs:
@@ -962,6 +996,8 @@ def play_game(
             ranked[1] == ranked[0]
             and policies[1] is policies[0]
             and views_rule[1] == views_rule[0]
+            # A leaf ranking filled another way orders another menu (IKA-268).
+            and (fills[1] == fills[0] or policies[0] is not None or not ranked[0])
             and (
                 policies[0] is not None
                 or not ranked[0]
@@ -1008,7 +1044,7 @@ def play_game(
                 foe_views = {}
                 foe_ours, foe_theirs = _menus(
                     reg, pos, limits, foe_leaf, budget, ranked[1], policies[1], spreads,
-                    rank_view=views_rule[1], used=foe_views,
+                    rank_view=views_rule[1], used=foe_views, rank_fill=fills[1],
                 )
                 if not foe_ours or not foe_theirs:
                     break
@@ -1052,6 +1088,7 @@ def play_game(
                 or policies[1] is not policies[0]
                 or sparse[1] != sparse[0]
                 or restricted[1] != restricted[0]
+                or (fills[1] != fills[0] and ranked[0] and policies[0] is None)
             ):
                 foe_started = perf_counter()
                 foe_ours, foe_theirs = (
@@ -1059,7 +1096,7 @@ def play_game(
                     if same_menu
                     else _menus(
                         reg, pos, limits, foe_leaf, budget, ranked[1], policies[1],
-                        spreads, rank_view=views_rule[1],
+                        spreads, rank_view=views_rule[1], rank_fill=fills[1],
                     )
                 )
                 if not foe_ours or not foe_theirs:

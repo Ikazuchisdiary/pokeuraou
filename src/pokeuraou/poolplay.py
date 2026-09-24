@@ -56,6 +56,7 @@ from . import timing
 from .payoff import HP_SHARE, Objective
 from .pool import Pool, draw_pair
 from .regulation import Regulation
+from .search import DEFAULT_RANK_FILL
 from .selection_book import (
     DEFAULT_EPSILON,
     DEFAULT_TEMPERATURE,
@@ -270,6 +271,7 @@ def generate_pool(
     explore_temperature: float = DEFAULT_TEMPERATURE,
     rank_by_leaf: bool = False,
     policy: Any = None,
+    rank_fill: str = DEFAULT_RANK_FILL,
     indices: Iterable[int] | None = None,
     on_finish: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
@@ -375,6 +377,7 @@ def generate_pool(
                 evaluate=evaluate,
                 rank_by_leaf=rank_by_leaf,
                 policy=policy,
+                rank_fill=rank_fill,
                 sheets=(six0, six1) if hide_bench else None,
                 open_information=not hide_bench,
                 bench_prior=priors,
@@ -459,6 +462,8 @@ class PoolArm:
     solver: SolvedSelections | None
     limit: int
     rank_by_leaf: bool
+    #: How its leaf ranking fills its cells (`search.parse_rank_fill`, IKA-268).
+    rank_fill: str = DEFAULT_RANK_FILL
 
     @property
     def selection(self) -> str:
@@ -593,6 +598,7 @@ def pool_match_game(
         open_information=not hide_bench,
         bench_prior=priors,
         rank_view="heaviest",
+        rank_fill=(side_arms[0].rank_fill, side_arms[1].rank_fill),
         selection=(species[0], species[1], picks[0], picks[1]),
     )
     sources = tuple(arm.selection for arm in side_arms)
@@ -607,6 +613,7 @@ def pool_match_game(
         "leaves": tuple(arm.name for arm in side_arms),
         "limits": tuple(arm.limit for arm in side_arms),
         "rankings": tuple("leaf" if arm.rank_by_leaf else "damage" for arm in side_arms),
+        "rank_fills": tuple(arm.rank_fill for arm in side_arms),
         "selections": sources,
         "beliefs": beliefs,
         "picks": picks,

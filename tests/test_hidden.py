@@ -591,7 +591,7 @@ def _ranking_by_world(monkeypatch, favoured):  # noqa: ANN001, ANN202
 
     asked: list[tuple[int, object]] = []
 
-    def stub(reg, at, side, evaluate, *, budget):  # noqa: ANN001, ANN202, ARG001
+    def stub(reg, at, side, evaluate, *, budget, references=2):  # noqa: ANN001, ANN202, ARG001
         asked.append((side, at))
         sign = 1.0 if at is favoured else -1.0
 
@@ -700,7 +700,7 @@ def test_play_game_records_which_completion_each_side_ranked_from(
         def weights(self, seen, leads=None):  # noqa: ANN001, ANN202, ARG002
             return {heavy_key: 0.9, first_key: 0.1}
 
-    def stub(reg, at, side, evaluate, *, budget):  # noqa: ANN001, ANN202, ARG001
+    def stub(reg, at, side, evaluate, *, budget, references=2):  # noqa: ANN001, ANN202, ARG001
         return lambda pool, _scored=None: np.zeros(len(pool))
 
     monkeypatch.setattr(selfplay, "leaf_ranking", stub)

@@ -32,6 +32,12 @@ from typing import Any
 
 from .regulation import repo_root
 
+#: How every game before IKA-268 filled its leaf ranking (`search.parse_rank_fill`), and so
+#: what a record without the field played. Fixed, unlike `search.DEFAULT_RANK_FILL`: a
+#: record is read by what it did, not by today's rule. Here rather than in `search` so that
+#: reading a record does not import the search.
+LEGACY_RANK_FILL = "refs2"
+
 #: Recorded games whose `provenance.kind` is this came from ordinary self-play, where both
 #: sides are the same agent. Absent provenance means the same thing -- every game written
 #: before this existed was self-play.
@@ -126,6 +132,7 @@ def provenance(
     beliefs: tuple[str, str] = ("uniform", "uniform"),
     encodings: tuple[str, str] = ("new", "new"),
     rank_views: tuple[str, str] = ("heaviest", "heaviest"),
+    rank_fills: tuple[str, str] = (LEGACY_RANK_FILL, LEGACY_RANK_FILL),
     note: str = "",
 ) -> dict[str, Any]:
     """What produced this game, per side, in the order the sides appear in the record.
@@ -185,6 +192,13 @@ def provenance(
         # (`selfplay.RANK_VIEWS`). Written only when a side played the pre-IKA-143 rule,
         # like `encodings`, so an ordinary record stays what it was.
         **({"rankViews": list(rank_views)} if set(rank_views) != {"heaviest"} else {}),
+        # How each side's leaf ranking filled its cells (`search.parse_rank_fill`,
+        # IKA-268). Written only when a side ranked otherwise than every game before it.
+        **(
+            {"rankFills": list(rank_fills)}
+            if set(rank_fills) != {LEGACY_RANK_FILL}
+            else {}
+        ),
         **({"note": note} if note else {}),
     }
 
@@ -283,6 +297,11 @@ def agent_name(source: dict[str, Any], side: int) -> str:
     rank_view = (source.get("rankViews") or ["heaviest", "heaviest"])[side]
     if rank_view != "heaviest":
         name += f"/rankview:{rank_view}"
+    # The leaf ranking filled another way (IKA-268): another menu, so another agent. Only
+    # a leaf ranking fills cells at all.
+    rank_fill = (source.get("rankFills") or [LEGACY_RANK_FILL, LEGACY_RANK_FILL])[side]
+    if rank_fill != LEGACY_RANK_FILL and ranking == "leaf":
+        name += f"/rankfill:{rank_fill}"
     return name
 
 

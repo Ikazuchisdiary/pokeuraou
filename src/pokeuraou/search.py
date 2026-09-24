@@ -139,6 +139,7 @@ the time on.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
@@ -187,6 +188,28 @@ ORACLE_TOLERANCE = 1e-6
 #: thing that is not arbitrary; more than two buys little, because the ranking only has to
 #: order candidates and not value them.
 DEFAULT_REFERENCES = 2
+
+#: How a leaf ranking fills its cells, as one label per agent (IKA-268): ``refs<N>`` resolves
+#: each candidate against the first N damage replies at the node's own matrix budget, and a
+#: ``-fast`` suffix fills those cells at `Budget.fast` instead.
+#:
+#:     2026-09-25, IKA-268: neither is cheaper for nothing. In M-C generation (width 12,
+#:     hidden, served) ``refs1`` halves the ranking's fill and runs 1.08-1.13x the games a
+#:     minute, but keeps 67% of the played menu's actions and plays 51.30% +-1.34 for
+#:     ``refs2`` over 4,000 board games (Elo +9.0 [-0.3, +18.3] for two replies). ``-fast``
+#:     is DEARER: two damage rolls against the matrix budget's one give 2.5x the leaves.
+#:     So the default stays; the label exists so an arm can play the other.
+DEFAULT_RANK_FILL = f"refs{DEFAULT_REFERENCES}"
+
+_RANK_FILL = re.compile(r"refs([1-9][0-9]*)(-fast)?")
+
+
+def parse_rank_fill(label: str) -> tuple[int, bool]:
+    """(references, fast) from a rank-fill label; a label that is not one stops."""
+    got = _RANK_FILL.fullmatch(label)
+    if got is None:
+        raise ValueError(f"rank fill {label!r} is not refs<N> or refs<N>-fast")
+    return int(got.group(1)), got.group(2) is not None
 
 
 def leaf_ranking(
@@ -782,6 +805,7 @@ def belief_solve(
 
 __all__ = [
     "DEFAULT_PASSES",
+    "DEFAULT_RANK_FILL",
     "DEFAULT_REFERENCES",
     "DEFAULT_REFINE",
     "DEFAULT_SUB_BRANCHES",
@@ -792,5 +816,6 @@ __all__ = [
     "belief_solve",
     "believed_ranking",
     "leaf_ranking",
+    "parse_rank_fill",
     "search",
 ]
