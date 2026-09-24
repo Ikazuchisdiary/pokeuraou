@@ -55,8 +55,9 @@ def _slot_leaf(reg):  # noqa: ANN001, ANN202
 
 def _self_switch_pause(reg, sheet, *, both: bool):  # noqa: ANN001, ANN202
     """Turn 1's pause after our U-turn; with `both`, side 1 U-turns later in the turn."""
+    from pokeuraou import port
+    from pokeuraou.budget import Budget
     from pokeuraou.position import MoveSlot
-    from pokeuraou.resolve import Budget, resolve_turn
 
     start = _uturn_start(reg, sheet[:4], sheet[:4])
     turn = dict(UTURN_TURN)
@@ -64,9 +65,10 @@ def _self_switch_pause(reg, sheet, *, both: bool):  # noqa: ANN001, ANN202
         start.sides[1].pokemon[0].moves[0] = MoveSlot(id="uturn", pp=20, maxpp=20)
         turn[1] = "move 1 1, move 4"
     chosen = [_action(reg, start, side, turn[side]) for side in (0, 1)]
-    truth = resolve_turn(reg, start, chosen, budget=Budget.deterministic(8))
-    assert len(truth.suspended) == 1, "the U-turn has to pause the turn once"
-    return truth.suspended[0]
+    # The port's pause: the self-switch node carries it on over there (IKA-209).
+    truth = port.turn(reg, start, chosen, Budget.deterministic(8), full=True)
+    assert len(truth.pauses) == 1, "the U-turn has to pause the turn once"
+    return truth.pauses[0]
 
 
 def _node_both_ways(reg, sheet, pause):  # noqa: ANN001, ANN202
@@ -98,7 +100,7 @@ def _node_both_ways(reg, sheet, pause):  # noqa: ANN001, ANN202
 
 def _share_everything(reg, pause, other, alternatives, slots):  # noqa: ANN001, ANN202, ARG001
     """The shared path with its checks removed: every option's true plan, in every world."""
-    from pokeuraou.resolve import turn_leaves
+    from pokeuraou.port import turn_leaves
 
     return [turn_leaves(reg, resumed) for _option, resumed in alternatives]
 
@@ -111,7 +113,7 @@ def test_the_shared_self_switch_is_the_definition(setup) -> None:  # noqa: ANN00
     to the bit. And it must actually be the shared path: both options are vouched for
     here, or the comparison would be the definition against itself.
     """
-    from pokeuraou.resolve import resume_alternatives
+    from pokeuraou.port import resume_alternatives
     from pokeuraou.selfplay import _shared_self_switch_plans
 
     reg, roster = setup
@@ -141,7 +143,7 @@ def test_an_option_that_reaches_their_bench_is_resolved_per_completion(
     the checks catch.
     """
     from pokeuraou import selfplay
-    from pokeuraou.resolve import resume_alternatives
+    from pokeuraou.port import resume_alternatives
 
     reg, roster = setup
     sheet = _sheet(roster)

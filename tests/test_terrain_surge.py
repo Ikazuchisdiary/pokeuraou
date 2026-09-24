@@ -264,7 +264,7 @@ def test_the_port_starts_from_the_position_showdown_does(
 
     from . import _port
 
-    monkeypatch.setattr(selfplay, "apply_lead_abilities", _port.apply_lead_abilities)
+    monkeypatch.setattr(selfplay, "apply_lead_abilities", _port.apply_lead_abilities, raising=False)
     showdown = _lead(oracle, name)
     ours, theirs = LEADS[name]
     opened = position_from_sets(reg, _sampled(reg, ours), _sampled(reg, theirs))

@@ -94,7 +94,11 @@ def first_difference(before: dict, after: dict) -> str:
             )
     if len(before["decisions"]) != len(after["decisions"]):
         return f"{len(before['decisions'])} decisions before, {len(after['decisions'])} after"
-    fields = sorted(k for k in set(before) | set(after) if before.get(k) != after.get(k))
+    fields = sorted(
+        k
+        for k in set(before) | set(after)
+        if k not in NOT_THE_GAME and before.get(k) != after.get(k)
+    )
     return f"the decisions agree; the record differs in {', '.join(fields)}"
 
 

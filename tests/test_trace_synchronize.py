@@ -240,7 +240,7 @@ def test_the_leads_trace_the_first_foe_or_a_drawn_one(
     from pokeuraou.priors import SampledSet
     from pokeuraou.regulation import to_id
 
-    monkeypatch.setattr(selfplay, "apply_lead_abilities", apply_lead_abilities)
+    monkeypatch.setattr(selfplay, "apply_lead_abilities", apply_lead_abilities, raising=False)
 
     ours = [GARDE, WHIM, KING, CHOMP]
     boards = {}
@@ -347,7 +347,7 @@ def test_the_port_keeps_light_clay_screens_eight_turns(
     from pokeuraou.priors import SampledSet
     from pokeuraou.selfplay import position_from_sets
 
-    monkeypatch.setattr(selfplay, "apply_lead_abilities", apply_lead_abilities)
+    monkeypatch.setattr(selfplay, "apply_lead_abilities", apply_lead_abilities, raising=False)
 
     grimm = SampledSet(species="grimmsnarl", ability="prankster", item="lightclay", nature="Careful",
                        moves=["lightscreen", "reflect", "protect", "spiritbreak"], sp={"hp": 32})
