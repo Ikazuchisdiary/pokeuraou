@@ -7,8 +7,8 @@
 use crate::battler::{Battler, DamageResult, FieldState, N_ROLLS, V_CHARGE, V_HELPING_HAND};
 use crate::battler::{V_INGRAIN, V_MAGNET_RISE, V_SMACK_DOWN, V_TELEKINESIS};
 use crate::effects::{
-    ability_modifiers, is_mold_breaker, is_retyping, item_modifiers, pierces_ghost, resist_berry,
-    suppresses_weather, type_boost_item, type_boost_item_fp, type_changing_ability,
+    ability_modifiers, any_ruin, is_mold_breaker, is_retyping, item_modifiers, pierces_ghost,
+    resist_berry, ruin_of, ruined, suppresses_weather, type_boost_item, type_boost_item_fp, type_changing_ability,
     type_immunity_ability, Ctx, ModDef, Slot, AURA_ABILITIES, AURA_BREAK_ABILITY, AURA_BROKEN_FP,
     AURA_FP, SCREEN_CONDITIONS, SCREEN_FP_DOUBLES, SCREEN_FP_SINGLES, TYPE_CHANGE_BOOST_FP,
 };
@@ -294,6 +294,25 @@ fn collect(slot: Slot, ctx: &Ctx, a: &Battler, d: &Battler, field: &FieldState) 
     chain
 }
 
+/// The Ruin abilities' 0.75x (IKA-222), last in each chain: `onAnyModify*` has no priority
+/// of its own, so it runs after every prioritised handler on the event.
+///
+/// The attacking event is the user's and the category's (`effects::ruin_of`); the defending
+/// event is the target's and the stat it reads -- Psyshock's Def meets Sword.
+fn ruin_modifiers(ctx: &Ctx, is_physical: bool, def_key: &str, atk: &mut Chain, def: &mut Chain) {
+    let attacking = if is_physical { "atk" } else { "spa" };
+    if let Some(ruin) = ruin_of(true, attacking) {
+        if ruined(ctx.field_abilities, ctx.attacker_ability, ruin) {
+            atk.add(0.75, 1.0, "ruin");
+        }
+    }
+    if let Some(ruin) = ruin_of(false, def_key) {
+        if ruined(ctx.field_abilities, ctx.defender_ability, ruin) {
+            def.add(0.75, 1.0, "ruin");
+        }
+    }
+}
+
 pub fn is_grounded(mon: &Battler) -> bool {
     if mon.volatiles.has(V_SMACK_DOWN)
         || mon.volatiles.has(V_INGRAIN)
@@ -530,6 +549,7 @@ pub fn calculate(
         attacker_status: attacker.status,
         attacker_volatiles: attacker.volatiles,
         attacker_gender: attacker.gender,
+        attacker_fallen: attacker.fallen,
         defender_species: defender.species,
         defender_types: defender.types,
         defender_ability: defender.ability,
@@ -591,10 +611,12 @@ pub fn calculate(
     let attack = stat_owner_atk.stat(atk_key, ignore_atk_boost);
     let defence = stat_owner_def.stat(def_key, ignore_def_boost);
 
-    let atk_chain = collect(Slot::Atk, &ctx, attacker, defender, field);
+    let mut atk_chain = collect(Slot::Atk, &ctx, attacker, defender, field);
+    let mut def_chain = collect(Slot::Def, &ctx, defender, attacker, field);
+    if any_ruin(ctx.field_abilities) {
+        ruin_modifiers(&ctx, is_physical, def_key, &mut atk_chain, &mut def_chain);
+    }
     let attack = atk_chain.apply(attack);
-
-    let def_chain = collect(Slot::Def, &ctx, defender, attacker, field);
     let mut defence = def_chain.apply(defence);
 
     if same(weather, "sandstorm") && def_key == "spd" && defender.types.contains("Rock") {

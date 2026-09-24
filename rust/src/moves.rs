@@ -1874,7 +1874,7 @@ fn hit_target<'a>(
             outcomes.push((acc_weight, state));
             continue;
         }
-        let field = turn.field();
+        let field = field_for_hit(&turn);
         for (crit_weight, crit) in crit_branches.iter().copied() {
         if crit_weight <= 0.0 {
             continue;
@@ -1954,7 +1954,7 @@ fn hit_target<'a>(
                         }
                         let mut again_ctx = move_ctx.clone();
                         again_ctx.hit_index = hit_index as i64 + 1;
-                        let field = state.field();
+                        let field = field_for_hit(&state);
                         let again = calculate(
                             reg,
                             &live_attacker,
@@ -2081,6 +2081,9 @@ fn accuracy_of(turn: &Turn, mv: &Move, attacker: &Battler, defender: &Battler) -
     if is(defender.item, "brightpowder") {
         accuracy *= 0.9;
     }
+    if snow_cloak_applies(turn, attacker, defender) {
+        accuracy = ((accuracy * 3277.0 + 2047.0) / 4096.0).floor();
+    }
     if !mv.ignore_evasion {
         let stages = (attacker.boost("accuracy") - defender.boost("evasion")).clamp(-6, 6);
         let ratio = if stages >= 0 {
@@ -2091,6 +2094,26 @@ fn accuracy_of(turn: &Turn, mv: &Move, attacker: &Battler, defender: &Battler) -
         accuracy *= ratio;
     }
     (accuracy / 100.0).clamp(0.0, 1.0)
+}
+
+/// Snow Cloak (IKA-222): `onModifyAccuracy`, `chainModify([3277, 4096])` while
+/// `this.field.isWeather(['hail', 'snowscape'])`, `flags: { breakable: 1 }`. `isWeather`
+/// reads the effective weather, which an active Cloud Nine or Air Lock clears. Alone on the
+/// event it is `modify(accuracy, 3277)`, which the floor below is for an integer accuracy.
+fn snow_cloak_applies(turn: &Turn, attacker: &Battler, defender: &Battler) -> bool {
+    if defender.ability != "snowcloak" || is_mold_breaker(attacker.ability.as_str()) {
+        return false;
+    }
+    let weather = turn.pos.field.weather.as_ref().map(|w| w.as_str());
+    if !matches!(weather, Some("hail" | "snowscape" | "snow")) {
+        return false;
+    }
+    !turn.pos.sides.iter().any(|side| {
+        (0..side.active.len()).any(|slot| {
+            matches!(side.active_pokemon(slot), Some(mon)
+                if !mon.fainted && crate::effects::suppresses_weather(mon.ability.as_str()))
+        })
+    })
 }
 
 /// Spiky Shield and friends punish the blocked attacker (contact moves only).
@@ -2677,6 +2700,32 @@ fn active_hp(turn: &Turn) -> [[i64; 2]; 2] {
         }
     }
     out
+}
+
+/// The field one target's damage is computed on (IKA-222).
+///
+/// Showdown computes a spread move's damage for every target before any is dealt
+/// (`getSpreadDamage`, then `spreadDamage`), and a Pokemon knocked out by the move stays on
+/// the field until `faintMessages` after it. This port hits the targets one by one, so a
+/// Ruin holder the move has already knocked out is put back for the targets after it --
+/// it still lowers their stat in Showdown. Only the Ruin abilities are put back: the other
+/// field abilities (Friend Guard, the auras, Cloud Nine) keep the reading they had.
+fn field_for_hit(turn: &Turn) -> crate::battler::FieldState {
+    let mut field = turn.field();
+    let Some(start) = turn.move_start_hp else { return field };
+    for (side, row) in start.iter().enumerate() {
+        for (slot, before) in row.iter().enumerate() {
+            if *before <= 0 {
+                continue;
+            }
+            if let Some(mon) = turn.mon_at(side, slot) {
+                if mon.fainted && mon.ability.as_str().ends_with("ofruin") {
+                    field.active_abilities[side].push(mon.ability);
+                }
+            }
+        }
+    }
+    field
 }
 
 /// Python's `_begin_move_watch`.
