@@ -2109,37 +2109,75 @@ fn accuracy_of(turn: &Turn, mv: &Move, attacker: &Battler, defender: &Battler) -
             accuracy = 50.0;
         }
     }
+    let accuracy = showdown_accuracy(turn, mv, attacker, defender, accuracy as i64);
+    // `randomChance(accuracy, 100)` is `this.random(100) < accuracy` (sim/prng.ts): an
+    // integer from 0 to 99, so the chance is `accuracy / 100` and anything past 100 hits.
+    accuracy.clamp(0, 100) as f64 / 100.0
+}
+
+/// The number `hitStepAccuracy` rolls against (IKA-231), all in integers as Showdown has it
+/// (sim/battle-actions.ts, vendor a5df827; the champions mod does not override the step):
+///
+/// ```text
+/// accuracy = this.battle.runEvent('ModifyAccuracy', target, pokemon, move, accuracy);
+/// if (!move.ignoreAccuracy) boost = clampIntRange(boosts['accuracy'], -6, 6);
+/// if (!move.ignoreEvasion) boost = clampIntRange(boost - boosts['evasion'], -6, 6);
+/// if (boost > 0) accuracy = trunc(accuracy * (3 + boost) / 3);
+/// else if (boost < 0) accuracy = trunc(accuracy * 3 / (3 - boost));
+/// ```
+///
+/// The ModifyAccuracy handlers each `chainModify` one 4096-based modifier, and `runEvent`
+/// applies it once at the end with `modify` (half rounded down). The handlers run by
+/// priority: -1 (Compound Eyes 5325, Hustle 3277 on a physical move, Snow Cloak 3277), then
+/// -2 (Wide Lens 4505, Bright Powder 3686). The chain rounds at each step, and the first
+/// step from 4096 is exact, so the order inside a priority only matters for three or more
+/// modifiers with two at -2: Wide Lens and Bright Powder after Compound Eyes or Hustle.
+/// Showdown orders those two by the holders' speed; this takes the user's first.
+///
+/// An accuracy-ignoring move (`ignoreEvasion`) still reads the user's own accuracy stage.
+fn showdown_accuracy(
+    turn: &Turn,
+    mv: &Move,
+    attacker: &Battler,
+    defender: &Battler,
+    accuracy: i64,
+) -> i64 {
+    let mut chain = crate::fixedpoint::Chain::new();
+    // onSourceModifyAccuracyPriority / onModifyAccuracyPriority: -1.
     if attacker.ability == "compoundeyes" {
-        accuracy *= 1.3;
+        chain.add_fp(5325, "compoundeyes");
     }
     if attacker.ability == "hustle" && mv.category == "Physical" {
-        accuracy *= 0.8;
-    }
-    if is(attacker.item, "widelens") {
-        accuracy *= 1.1;
-    }
-    if is(defender.item, "brightpowder") {
-        accuracy *= 0.9;
+        chain.add_fp(3277, "hustle");
     }
     if snow_cloak_applies(turn, attacker, defender) {
-        accuracy = ((accuracy * 3277.0 + 2047.0) / 4096.0).floor();
+        chain.add_fp(3277, "snowcloak");
     }
+    // Priority -2.
+    if is(attacker.item, "widelens") {
+        chain.add_fp(4505, "widelens");
+    }
+    if is(defender.item, "brightpowder") {
+        chain.add_fp(3686, "brightpowder");
+    }
+    let accuracy = chain.apply(accuracy);
+    let mut boost = attacker.boost("accuracy").clamp(-6, 6);
     if !mv.ignore_evasion {
-        let stages = (attacker.boost("accuracy") - defender.boost("evasion")).clamp(-6, 6);
-        let ratio = if stages >= 0 {
-            (3.0 + stages as f64) / 3.0
-        } else {
-            3.0 / (3.0 - stages as f64)
-        };
-        accuracy *= ratio;
+        boost = (boost - defender.boost("evasion")).clamp(-6, 6);
     }
-    (accuracy / 100.0).clamp(0.0, 1.0)
+    if boost > 0 {
+        accuracy * (3 + boost) / 3
+    } else if boost < 0 {
+        accuracy * 3 / (3 - boost)
+    } else {
+        accuracy
+    }
 }
 
 /// Snow Cloak (IKA-222): `onModifyAccuracy`, `chainModify([3277, 4096])` while
 /// `this.field.isWeather(['hail', 'snowscape'])`, `flags: { breakable: 1 }`. `isWeather`
-/// reads the effective weather, which an active Cloud Nine or Air Lock clears. Alone on the
-/// event it is `modify(accuracy, 3277)`, which the floor below is for an integer accuracy.
+/// reads the effective weather, which an active Cloud Nine or Air Lock clears. Its modifier
+/// joins the event's chain in `showdown_accuracy`.
 fn snow_cloak_applies(turn: &Turn, attacker: &Battler, defender: &Battler) -> bool {
     if defender.ability != "snowcloak" || is_mold_breaker(attacker.ability.as_str()) {
         return false;
