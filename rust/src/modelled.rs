@@ -5,6 +5,8 @@
 //! and `damage::unmodelled_effects` names it so the caller is told. Generated from the
 //! regulation dump's `customHooks` and the port's engine source by
 //! `tools/port_coverage.py --rust-modelled` (IKA-210; it was Python's calculator sets).
+//! The last predicate is the other way round: the damaging moves that do need a note
+//! (IKA-213).
 
 /// No Showdown handler, or one the port's engine acts on.
 pub fn ability_is_modelled(id: &str) -> bool {
@@ -496,5 +498,35 @@ pub fn status_move_is_fully_modelled(id: &str) -> bool {
             | "willowisp"
             | "wonderroom"
             | "yawn"
+    )
+}
+
+/// The damaging moves with custom code (a hook such as `damageCallback`) that the
+/// port's engine never names, so a turn that uses one reports it (IKA-213).
+pub fn damaging_move_is_unmodelled(id: &str) -> bool {
+    matches!(
+        id,
+        "beakblast"
+            | "belch"
+            | "brickbreak"
+            | "bugbite"
+            | "clearsmog"
+            | "fellstinger"
+            | "focuspunch"
+            | "futuresight"
+            | "highjumpkick"
+            | "jawlock"
+            | "pluck"
+            | "pollenpuff"
+            | "poltergeist"
+            | "psychicfangs"
+            | "snore"
+            | "sparklingaria"
+            | "steelbeam"
+            | "struggle"
+            | "supercellslam"
+            | "syrupbomb"
+            | "upperhand"
+            | "uproar"
     )
 }

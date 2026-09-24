@@ -467,6 +467,11 @@ pub fn calculate(
             unmodelled,
         };
     }
+    // Endeavor's `onTryImmunity` (IKA-213), step 3 of `trySpreadMoveHit`, before the damage
+    // step the forme guards act at: at no lower HP than the target it is immune.
+    if crate::damage_callback::immune_on_try(move_id, attacker, defender) {
+        return DamageResult { rolls: [0; N_ROLLS], effectiveness: eff, type_mod, immune: true, unmodelled };
+    }
     // After the immunity, as in damage.py (IKA-155): the forme guards act at the damage
     // step, so a Normal move into an intact Mimikyu is immune, not absorbed.
     // Disguise is `breakable`: a Mold Breaker's move goes through it (IKA-208).
@@ -483,7 +488,7 @@ pub fn calculate(
         return zeros;
     }
 
-    if let Some(fixed) = fixed_damage(move_id, attacker, defender) {
+    if let Some(fixed) = fixed_damage(move_id, attacker, defender, ctx_move) {
         return DamageResult {
             rolls: [fixed; N_ROLLS],
             effectiveness: eff,
