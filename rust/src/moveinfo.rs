@@ -23,6 +23,10 @@ pub struct MoveContext {
     pub hit_index: i64,
     pub moving_last: bool,
     pub ally_used_same_move: bool,
+    /// What a reply's `damageCallback` returns this turn (`damage_callback::damage`), 0 when
+    /// there is no turn to read it from (IKA-213).
+    #[serde(default)]
+    pub reply_damage: i64,
 }
 
 impl MoveContext {
@@ -94,11 +98,21 @@ fn relative_weight_bp(attacker_kg: f64, target_kg: f64) -> i64 {
     40
 }
 
-pub fn fixed_damage(move_id: &str, attacker: &Battler, defender: &Battler) -> Option<i64> {
+pub fn fixed_damage(
+    move_id: &str,
+    attacker: &Battler,
+    defender: &Battler,
+    ctx: &MoveContext,
+) -> Option<i64> {
     match move_id {
         "superfang" | "naturesmadness" | "ruination" => Some((defender.hp / 2).max(1)),
         "finalgambit" => Some(attacker.hp.max(1)),
         "endeavor" => Some((defender.hp - attacker.hp).max(0)),
+        // Counter, Mirror Coat, Metal Burst, Comeuppance (IKA-213). Without a turn's record
+        // (a scorer's context) the damage is unknown, as before.
+        "counter" | "mirrorcoat" | "metalburst" | "comeuppance" if ctx.reply_damage > 0 => {
+            Some(ctx.reply_damage)
+        }
         _ => None,
     }
 }
@@ -111,7 +125,7 @@ pub fn effective_type(
 ) -> Option<&'static str> {
     match move_id {
         "weatherball" => weather_ball_type(ctx.weather_name()),
-        "terrainpulse" => terrain_pulse_type(ctx.terrain_name()),
+        "terrainpulse" => terrain_pulse_type(crate::airborne::terrain_under(attacker, ctx)),
         "aurawheel" => {
             if attacker.species.as_str() == "morpekohangry" {
                 Some("Dark")
@@ -282,7 +296,7 @@ pub fn base_power(
             return Some(if doubled { declared * 2 } else { declared });
         }
         "terrainpulse" => {
-            let doubled = terrain_pulse_type(ctx.terrain_name()).is_some();
+            let doubled = crate::airborne::terrain_under(attacker, ctx).is_some();
             return Some(if doubled { declared * 2 } else { declared });
         }
         "risingvoltage" => {
@@ -349,7 +363,9 @@ pub fn base_power_modifiers(
     if matches!(move_id, "solarbeam" | "solarblade") && solar_weak(ctx.weather_name()) {
         return Some(("solar", 0.5, 1.0));
     }
-    if move_id == "expandingforce" && ctx.terrain_name() == Some("psychicterrain") {
+    if move_id == "expandingforce"
+        && crate::airborne::terrain_under(attacker, ctx) == Some("psychicterrain")
+    {
         return Some(("expandingforce", 1.5, 1.0));
     }
     None

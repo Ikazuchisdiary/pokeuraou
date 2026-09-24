@@ -197,6 +197,7 @@ fn turn_state_json(turn: &Turn) -> Result<Value, String> {
         move_hit,
         draws,
         log,
+        damaged_by,
     } = turn;
     // Both are set and cleared inside one action, and a pause is taken between actions.
     // Either one here would mean a pause taken somewhere this module does not expect.
@@ -226,6 +227,7 @@ fn turn_state_json(turn: &Turn) -> Result<Value, String> {
         "moveStartHp": move_start_hp.map(|hp| json!([[hp[0][0], hp[0][1]], [hp[1][0], hp[1][1]]])),
         "moveHit": flags_json(move_hit),
         "log": log.as_deref().map(log_json),
+        "damagedBy": crate::damage_callback::to_json(damaged_by),
     }))
 }
 
@@ -276,6 +278,7 @@ fn with_log(mut out: Value, log: Option<&EventLog>) -> Value {
 fn turn_from<'a>(reg: &'a Reg, pos: Position, state: &Value) -> Result<Turn<'a>, String> {
     let mut turn = Turn::new(reg, pos, Budget::from_json(&state["budget"]), flags_from(&state["attacks"])?);
     turn.hurt_this_turn = flags_from(&state["hurtThisTurn"])?;
+    turn.damaged_by = crate::damage_callback::from_json(&state["damagedBy"])?;
     turn.move_failed = flags_from(&state["moveFailed"])?;
     turn.move_damage_total = state["moveDamageTotal"].as_i64().ok_or("moveDamageTotal")?;
     turn.move_connected = state["moveConnected"].as_bool().ok_or("moveConnected")?;

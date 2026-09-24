@@ -1338,6 +1338,12 @@ fn use_move<'a>(
         turn.move_failed[action.side][action.slot] = true;
         return Ok(vec![(1.0, turn)]);
     }
+    // Counter, Mirror Coat, Metal Burst, Comeuppance: `onTry`, after `TryMove` (IKA-213).
+    if crate::damage_callback::fails_on_try(&turn, action, move_id.as_str()) {
+        log_event!(turn, "{} failed (nothing to return)", Label(reg, action));
+        turn.move_failed[action.side][action.slot] = true;
+        return Ok(vec![(1.0, turn)]);
+    }
 
     // The protection a `breaksProtect` move tears down is torn down per target, inside
     // `hit_target`, once the hit is known to land (IKA-153). Every such move is damaging
@@ -1346,10 +1352,15 @@ fn use_move<'a>(
     if mv.category == "Status" {
         return do_status_move(reg, turn, action, mv, &targets, budget);
     }
+    // A damaging move with custom code the port never names (`modelled.rs`, IKA-213).
+    if crate::modelled::damaging_move_is_unmodelled(move_id.as_str()) {
+        turn.report(format!("damaging move: {move_id}"));
+    }
 
     // `move.spreadHit` is decided from every target before the hit steps run, and Psychic
     // Terrain (step 1, ahead of Protect) then drops the grounded ones.
-    let spread = move_hits_multiple(reg, move_id.as_str(), targets.len());
+    let spread = move_hits_multiple(reg, move_id.as_str(), targets.len())
+        || (targets.len() > 1 && crate::airborne::expanding_force_spreads(&turn, action, mv));
     if turn.log.is_some() {
         let stopped: Vec<Slot> =
             targets.iter().copied().filter(|t| stopped_by_psychic_terrain(&turn, action, mv, *t)).collect();
@@ -1468,7 +1479,7 @@ fn resolve_targets(
         matches!(turn.mon_at(side, slot), Some(mon) if !mon.fainted)
     };
 
-    match mv.target.as_str() {
+    match crate::airborne::move_target(turn, action, mv) {
         "self" | "allySide" | "allyTeam" | "all" | "foeSide" => return Ok(vec![me]),
         "allAdjacentFoes" => {
             return Ok(slots.filter(|s| live(turn, foe_side, *s)).map(|s| (foe_side, s)).collect())
@@ -1501,6 +1512,9 @@ fn resolve_targets(
         // action's target, and it is redirected as any other (IKA-178).
         _ => {}
     }
+    if let Some(recorded) = crate::damage_callback::target(turn, action, mv.id.as_str()) {
+        return Ok(reply_targets(turn, action, mv, recorded));
+    }
 
     let mut chosen = match action.target {
         None => {
@@ -1531,6 +1545,31 @@ fn resolve_targets(
         chosen = redirected;
     }
     Ok(if live(turn, chosen.0, chosen.1) { vec![chosen] } else { Vec::new() })
+}
+
+/// Counter, Mirror Coat, Metal Burst and Comeuppance aim at the slot that hit the user
+/// (IKA-213). `getMoveTargets` retargets a fainted foe first and then runs `RedirectTarget`,
+/// where Follow Me (priority 1) outranks Counter's own redirect (-1), which sends Counter and
+/// Mirror Coat back to the recorded slot -- so they fail on a fainted attacker, while Metal
+/// Burst and Comeuppance (`onModifyTarget`, before all of it) hit the other foe.
+fn reply_targets(turn: &Turn, action: &QueuedAction, mv: &Move, recorded: Slot) -> Vec<Slot> {
+    let live = |slot: Slot| matches!(turn.mon_at(slot.0, slot.1), Some(mon) if !mon.fainted);
+    let mut chosen = recorded;
+    if !live(chosen) {
+        if let Some(slot) = (0..turn.pos.sides[recorded.0].active.len()).find(|s| live((recorded.0, *s))) {
+            chosen = (recorded.0, slot);
+        }
+    }
+    match redirection_target(turn, action, mv, chosen) {
+        Some(redirected) => chosen = redirected,
+        None if crate::damage_callback::redirects_back(mv.id.as_str()) => chosen = recorded,
+        None => {}
+    }
+    if live(chosen) {
+        vec![chosen]
+    } else {
+        Vec::new()
+    }
 }
 
 /// Follow Me / Rage Powder / Spotlight, then the type-drawing abilities. Rage Powder is a
@@ -1669,7 +1708,7 @@ fn blocked_by_protect(
     let side = &turn.pos.sides[target.0];
     let from_foe = target.0 != action.side;
     if from_foe
-        && matches!(mv.target.as_str(), "allAdjacentFoes" | "allAdjacent")
+        && matches!(crate::airborne::move_target(turn, action, mv), "allAdjacentFoes" | "allAdjacent")
         && side.has_side_condition("wideguard")
     {
         return Some("wideguard".into());
@@ -1858,6 +1897,7 @@ fn hit_target<'a>(
         hit_index: 1,
         moving_last: false,
         ally_used_same_move: false,
+        reply_damage: crate::damage_callback::damage(&turn, action, move_id.as_str()),
     };
 
     crate::resolve::phase_end(12, ctx_started);
@@ -1992,6 +2032,7 @@ fn hit_target<'a>(
                         state.deal_damage(target.0, target.1, amount, true, move_id.as_str())?
                     };
                     total += dealt;
+                    crate::damage_callback::record(&mut state, (action.side, action.slot), target, dealt, mv.category.as_str());
                     reached = true;
                     state.move_hit[target.0][target.1] = true;
                     let after_started = crate::resolve::phase_start();
@@ -2069,37 +2110,75 @@ fn accuracy_of(turn: &Turn, mv: &Move, attacker: &Battler, defender: &Battler) -
             accuracy = 50.0;
         }
     }
+    let accuracy = showdown_accuracy(turn, mv, attacker, defender, accuracy as i64);
+    // `randomChance(accuracy, 100)` is `this.random(100) < accuracy` (sim/prng.ts): an
+    // integer from 0 to 99, so the chance is `accuracy / 100` and anything past 100 hits.
+    accuracy.clamp(0, 100) as f64 / 100.0
+}
+
+/// The number `hitStepAccuracy` rolls against (IKA-231), all in integers as Showdown has it
+/// (sim/battle-actions.ts, vendor a5df827; the champions mod does not override the step):
+///
+/// ```text
+/// accuracy = this.battle.runEvent('ModifyAccuracy', target, pokemon, move, accuracy);
+/// if (!move.ignoreAccuracy) boost = clampIntRange(boosts['accuracy'], -6, 6);
+/// if (!move.ignoreEvasion) boost = clampIntRange(boost - boosts['evasion'], -6, 6);
+/// if (boost > 0) accuracy = trunc(accuracy * (3 + boost) / 3);
+/// else if (boost < 0) accuracy = trunc(accuracy * 3 / (3 - boost));
+/// ```
+///
+/// The ModifyAccuracy handlers each `chainModify` one 4096-based modifier, and `runEvent`
+/// applies it once at the end with `modify` (half rounded down). The handlers run by
+/// priority: -1 (Compound Eyes 5325, Hustle 3277 on a physical move, Snow Cloak 3277), then
+/// -2 (Wide Lens 4505, Bright Powder 3686). The chain rounds at each step, and the first
+/// step from 4096 is exact, so the order inside a priority only matters for three or more
+/// modifiers with two at -2: Wide Lens and Bright Powder after Compound Eyes or Hustle.
+/// Showdown orders those two by the holders' speed; this takes the user's first.
+///
+/// An accuracy-ignoring move (`ignoreEvasion`) still reads the user's own accuracy stage.
+fn showdown_accuracy(
+    turn: &Turn,
+    mv: &Move,
+    attacker: &Battler,
+    defender: &Battler,
+    accuracy: i64,
+) -> i64 {
+    let mut chain = crate::fixedpoint::Chain::new();
+    // onSourceModifyAccuracyPriority / onModifyAccuracyPriority: -1.
     if attacker.ability == "compoundeyes" {
-        accuracy *= 1.3;
+        chain.add_fp(5325, "compoundeyes");
     }
     if attacker.ability == "hustle" && mv.category == "Physical" {
-        accuracy *= 0.8;
-    }
-    if is(attacker.item, "widelens") {
-        accuracy *= 1.1;
-    }
-    if is(defender.item, "brightpowder") {
-        accuracy *= 0.9;
+        chain.add_fp(3277, "hustle");
     }
     if snow_cloak_applies(turn, attacker, defender) {
-        accuracy = ((accuracy * 3277.0 + 2047.0) / 4096.0).floor();
+        chain.add_fp(3277, "snowcloak");
     }
+    // Priority -2.
+    if is(attacker.item, "widelens") {
+        chain.add_fp(4505, "widelens");
+    }
+    if is(defender.item, "brightpowder") {
+        chain.add_fp(3686, "brightpowder");
+    }
+    let accuracy = chain.apply(accuracy);
+    let mut boost = attacker.boost("accuracy").clamp(-6, 6);
     if !mv.ignore_evasion {
-        let stages = (attacker.boost("accuracy") - defender.boost("evasion")).clamp(-6, 6);
-        let ratio = if stages >= 0 {
-            (3.0 + stages as f64) / 3.0
-        } else {
-            3.0 / (3.0 - stages as f64)
-        };
-        accuracy *= ratio;
+        boost = (boost - defender.boost("evasion")).clamp(-6, 6);
     }
-    (accuracy / 100.0).clamp(0.0, 1.0)
+    if boost > 0 {
+        accuracy * (3 + boost) / 3
+    } else if boost < 0 {
+        accuracy * 3 / (3 - boost)
+    } else {
+        accuracy
+    }
 }
 
 /// Snow Cloak (IKA-222): `onModifyAccuracy`, `chainModify([3277, 4096])` while
 /// `this.field.isWeather(['hail', 'snowscape'])`, `flags: { breakable: 1 }`. `isWeather`
-/// reads the effective weather, which an active Cloud Nine or Air Lock clears. Alone on the
-/// event it is `modify(accuracy, 3277)`, which the floor below is for an integer accuracy.
+/// reads the effective weather, which an active Cloud Nine or Air Lock clears. Its modifier
+/// joins the event's chain in `showdown_accuracy`.
 fn snow_cloak_applies(turn: &Turn, attacker: &Battler, defender: &Battler) -> bool {
     if defender.ability != "snowcloak" || is_mold_breaker(attacker.ability.as_str()) {
         return false;
@@ -2342,12 +2421,19 @@ fn after_hit(
             None => false,
             Some(berry_type) => {
                 berry_type == mv.mtype.as_str() && (berry_type == "Normal" || type_mod > 0)
+                    // The berry is `onSourceModifyDamage`, which a `damageCallback` never
+                    // reaches (IKA-213).
+                    && !crate::damage_callback::ported(mv.id.as_str())
             }
         },
     };
     if eats_berry && !turn.berries_blocked(target.0) {
         let berry = turn.mon_at(target.0, target.1).and_then(|m| m.item);
         turn.consume_item(target.0, target.1, berry.as_ref().map(|b| b.as_str()).unwrap_or(""));
+    }
+
+    if landed {
+        crate::airborne::pop_air_balloon(turn, target);
     }
 
     // Knock Off removes what it hit; Thief and Covet take it when the attacker has
@@ -3238,6 +3324,7 @@ fn hit_substitute(
     } else if after_sub_damage_unmodelled(mv.id.as_str()) {
         turn.report(format!("substitute: {} onAfterSubDamage", mv.id));
     }
+    crate::airborne::pop_air_balloon(turn, target);
 
     if matches!(turn.mon_at(me.0, me.1), Some(m) if m.ability == "sheerforce") {
         return Ok(());

@@ -14,10 +14,12 @@
 
 #[macro_use]
 mod events;
+mod airborne;
 mod battler;
 #[cfg(feature = "count-allocations")]
 mod counting_alloc;
 mod damage;
+mod damage_callback;
 mod effects;
 mod encode;
 mod encoded_node;

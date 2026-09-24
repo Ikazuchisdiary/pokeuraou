@@ -26,7 +26,6 @@ the draw Python's column used to take, so a seed plays the battles it played bes
 from __future__ import annotations
 
 import argparse
-import os
 import random
 import sys
 from collections import Counter
@@ -51,7 +50,12 @@ from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet  # noqa: E402
 from pokeuraou.port import self_switches_needed  # noqa: E402
 from pokeuraou.position import Position  # noqa: E402
-from pokeuraou.priors import find_cached_chaos, load_chaos, sample_team  # noqa: E402
+from pokeuraou.priors import (  # noqa: E402
+    MetagamePrior,
+    find_cached_chaos,
+    load_chaos,
+    sample_team,
+)
 from pokeuraou.regulation import Regulation, load_regulation, to_id  # noqa: E402
 from pokeuraou.speed import action_overriding_effects  # noqa: E402
 
@@ -579,6 +583,9 @@ class PortPending:
     log: list[str]
     #: Index of the next Showdown step to answer the pause with.
     cursor: int = 0
+    #: The end of the turn as `_resume_port` compared it -- (ours, theirs, unmodelled) --
+    #: once it matched or diverged; `diverge_report` ranks from it (IKA-227).
+    decided: tuple[dict[str, Any], dict[str, Any], tuple[str, ...]] | None = None
 
 
 def _dumped(actions: list[SideAction]) -> list[list[dict[str, Any]]]:
@@ -773,6 +780,7 @@ def _resume_port(
         want = theirs_owed[side_index][: len(flags)]
         if want and list(flags) != want:
             differences = {"mid-turn interrupt": (f"port owes {list(flags)}", f"showdown {want}")}
+            pending.decided = _decided(differences, tuple(sorted(pending.unmodelled)))
             _port_divergence(
                 reg, port, pending.where, pending.before, pending.chosen,
                 tuple(sorted(pending.unmodelled)), differences, pending.log,
@@ -809,6 +817,7 @@ def _resume_port(
                 "showdown stopped" if showdown_stopped else "showdown carried on",
             )
         }
+        pending.decided = _decided(differences, unmodelled)
         _port_divergence(
             reg, port, pending.where, pending.before, pending.chosen, unmodelled,
             differences, pending.log,
@@ -820,6 +829,7 @@ def _resume_port(
     port.continued += 1
     ours = canonical(Position.from_json(reply["position"]))
     theirs = canonical(Position.from_json(after["position"]))
+    pending.decided = (ours, theirs, unmodelled)
     keys = [k for k in ours if ours[k] != theirs.get(k)]
     if not keys:
         port.compared += 1
@@ -833,6 +843,15 @@ def _resume_port(
         {k: (ours[k], theirs.get(k)) for k in keys}, pending.log,
     )
     return "diverge"
+
+
+def _decided(
+    differences: dict[str, tuple[Any, Any]], unmodelled: tuple[str, ...]
+) -> tuple[dict[str, Any], dict[str, Any], tuple[str, ...]]:
+    """A disagreement about stopping, as the (ours, theirs) pair `PortPending.decided` holds."""
+    ours = {k: a for k, (a, _) in differences.items()}
+    theirs = {k: b for k, (_, b) in differences.items()}
+    return ours, theirs, unmodelled
 
 
 @dataclass
@@ -896,6 +915,29 @@ def open_ports(
     return nodes
 
 
+def hash_free_prior(reg: Regulation, prior: MetagamePrior) -> MetagamePrior:
+    """``prior`` with every ability table in an order that does not depend on the hash seed.
+
+    `load_chaos` fills the table of a species seen only as its mega forme with a uniform
+    distribution built by iterating a *set* of ability ids, so the table's order -- and so
+    which ability `weighted_choice` draws for the same generator state -- changed with
+    PYTHONHASHSEED (18 species in the cached usage file, Delphox and Mawile the commonest).
+    The same `--seed` then drew other teams and played other turns (IKA-207: 2,726 and
+    2,727 compared turns; IKA-218).
+    Those tables (the species `prior.abilities_unobserved` names) are put in the dex's order
+    of the species' abilities; the probabilities are untouched, and every other table keeps
+    the usage file's order, which never depended on the hash seed. Done here rather than in
+    `load_chaos` because generation reads the same function (IKA-218's record).
+    """
+    unobserved = set(prior.abilities_unobserved)
+    for entry in prior.species.values():
+        if entry.name not in unobserved:
+            continue
+        order = [to_id(a) for a in reg.species[entry.species_id].abilities]
+        entry.abilities = {a: entry.abilities[a] for a in order if a in entry.abilities}
+    return prior
+
+
 def run(
     battles: int,
     roll: int,
@@ -909,7 +951,7 @@ def run(
     chaos = find_cached_chaos(FORMAT_ID)
     if chaos is None:
         raise SystemExit("no cached usage stats; run tools/fetch_priors.py first")
-    prior = load_chaos(chaos, reg)
+    prior = hash_free_prior(reg, load_chaos(chaos, reg))
     register_mega_stones(reg)
     rng = np.random.default_rng(seed)
     py_rng = random.Random(seed)
@@ -1011,11 +1053,8 @@ def main() -> None:
         "this tree's rust/target/release; POKEURAOU_RUST_NODE_BIN names the default one)",
     )
     args = ap.parse_args()
-    if not os.environ.get("PYTHONHASHSEED"):
-        # Two runs of the same seed differ by a turn or two without it (IKA-207 measured
-        # 2,726 and 2,727 compared turns at 400 battles), so a pair of runs is not a pair.
-        print("[diff_turn] PYTHONHASHSEED is unset: the same --seed can play other turns",
-              file=sys.stderr)
+    # No PYTHONHASHSEED is needed: the hash-ordered ability tables that made the same seed
+    # play other turns (IKA-207) are put in the dex's order by `hash_free_prior` (IKA-218).
     report = run(
         args.battles,
         args.roll,
