@@ -1095,6 +1095,8 @@ fn move_field_is_ported(field: &str, move_id: &str) -> bool {
             | ("willCrit", _)
         // `moves::smart_hits`: Dragon Darts, a hit on each foe or both on one.
             | ("smartTarget", "dragondarts")
+        // `moves::later_hit_chance`: Triple Axel, Population Bomb (IKA-235).
+            | ("multiaccuracy", _)
     )
 }
 
