@@ -235,6 +235,32 @@ def test_a_second_writer_of_the_same_pair_keeps_the_first_file(pool, tmp_path, m
         second._write(0, 2, second._solve(0, 2))
 
 
+def test_a_read_during_another_workers_rename_waits_for_it(pool, tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    """The reading half of the race (IKA-82's first board match lost a worker to it): an
+    open refused while the file is being replaced is retried, and a refusal that never
+    ends is still an error."""
+    store = tmp_path / "store"
+    SolvedSelections(pool.reg, pool.teams, _stub, store=store, tag="t").entry(0, 1)
+    real = poolplay.Path.read_bytes
+    refusals = {"left": 3}
+
+    def busy(self):  # noqa: ANN001, ANN202
+        if self.name == "000-001.json" and refusals["left"] > 0:
+            refusals["left"] -= 1
+            raise PermissionError(13, "Permission denied", str(self))
+        return real(self)
+
+    monkeypatch.setattr(poolplay.Path, "read_bytes", busy)
+    reader = SolvedSelections(pool.reg, pool.teams, _stub, store=store, tag="t")
+    reader.entry(0, 1)
+    assert reader.loaded == 1 and reader.solves == 0 and refusals["left"] == 0
+    # Control: a file that stays locked is not read as missing or swallowed.
+    refusals["left"] = 10_000
+    stuck = SolvedSelections(pool.reg, pool.teams, _stub, store=store, tag="t")
+    with pytest.raises(PermissionError):
+        stuck.entry(0, 1)
+
+
 # ----------------------------------------------------------------------- the null
 
 

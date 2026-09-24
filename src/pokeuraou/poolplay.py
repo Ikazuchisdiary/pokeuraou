@@ -71,6 +71,23 @@ SOLVED = "solved"
 SELECTIONS = ("solved", "uniform")
 
 
+def _read_shared(path: Path, *, attempts: int = 50, pause: float = 0.02) -> bytes:
+    """A store file's bytes, waiting out another worker's rename onto it.
+
+    Windows refuses to open a file while another process is replacing it, the reading half
+    of the race `SolvedSelections._write` settles for writing: in the first M-C board
+    match (IKA-82, warm2x2 vs scratchx2) one worker of 24 died on it after 341 s. The
+    rename is atomic, so a later attempt reads the whole file, old or new -- the same
+    answer either way.
+    """
+    for _ in range(attempts - 1):
+        try:
+            return path.read_bytes()
+        except PermissionError:
+            time.sleep(pause)
+    return path.read_bytes()
+
+
 @dataclass
 class SolvedSelections:
     """The selection game of each pair, solved on first sight and kept (one worker, one leaf).
@@ -155,7 +172,7 @@ class SolvedSelections:
         path = self._path(lo, hi)
         if path is None or not path.exists():
             return None
-        data = json.loads(path.read_bytes().decode("utf-8"))
+        data = json.loads(_read_shared(path).decode("utf-8"))
         teams = [self.teams[lo].id, self.teams[hi].id]
         if data.get("tag") != self.tag or data.get("teams") != teams:
             raise ValueError(
