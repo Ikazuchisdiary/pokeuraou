@@ -81,15 +81,6 @@ def on_the_port(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(diff._MODULE, "resolve_replacements", resolve_replacements)  # noqa: SLF001
 
 
-#: The port refuses a phase the sampled battles reach (IKA-208): a Throat Chop'd Pokemon
-#: (seed 1, and the large sample) and a Disguise holder (seed 2). Strict, so the day the
-#: port answers them these come off (IKA-210).
-REFUSED = pytest.mark.xfail(
-    strict=True, raises=AssertionError, reason="the port refuses throatchop / disguise (IKA-208)"
-)
-
-
-@REFUSED
 @pytest.mark.parametrize("seed", [1, 2])
 def test_replacements_match_showdown(seed: int, on_the_port: None) -> None:
     if not ORACLE_JS.exists():
@@ -104,7 +95,6 @@ def test_replacements_match_showdown(seed: int, on_the_port: None) -> None:
     assert report.divergence_rate == 0.0, report.render()
 
 
-@REFUSED
 @pytest.mark.slow
 def test_replacement_divergence_over_a_large_sample(on_the_port: None) -> None:
     """The number quoted in the README, measured rather than remembered."""

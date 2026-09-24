@@ -79,8 +79,6 @@ class Case:
     steps: list[list[str]]
     #: Showdown's lock on p1a after each step.
     locks: list[str | None]
-    #: Whether the port plays the case (it refuses Trick).
-    ported: bool = True
     #: How many steps our own game follows. Taunt on a Pokemon that has moved lasts a turn
     #: longer (`duration++`), which the resolver does not do: not this issue.
     generated: int | None = None
@@ -136,15 +134,6 @@ CASES: dict[str, Case] = {
     ),
 }
 STEPS = [(name, i) for name, case in sorted(CASES.items()) for i in range(len(case.steps))]
-
-
-def _unported(name: str, step: int = 0) -> tuple:
-    """A case the port refuses (Trick, IKA-208) is held as a strict xfail, so the day the
-    port answers it the mark has to come off (IKA-210). Its Trick is the first step; the
-    step after it the port answers."""
-    if CASES[name].ported or step > 0:
-        return ()
-    return (pytest.mark.xfail(strict=True, reason="the port refuses Trick (IKA-208)"),)
 
 
 def _play(oracle: Oracle, case: Case) -> tuple[list[dict], list[set[str]]]:
@@ -224,7 +213,7 @@ def test_showdown(oracle: Oracle, name: str) -> None:
 
 @pytest.mark.oracle
 @pytest.mark.parametrize(
-    ("name", "step"), [pytest.param(n, i, marks=_unported(n, i)) for n, i in STEPS]
+    ("name", "step"), STEPS
 )
 def test_the_port_agrees(
     reg,  # noqa: ANN001
@@ -296,7 +285,7 @@ def test_a_recorded_lock_on_struggle_does_not_hold(reg) -> None:  # noqa: ANN001
 
 
 @pytest.mark.oracle
-@pytest.mark.parametrize("name", [pytest.param(n, marks=_unported(n)) for n in sorted(CASES)])
+@pytest.mark.parametrize("name", sorted(CASES))
 def test_the_games_the_port_generates(reg, oracle: Oracle, port, name: str) -> None:  # noqa: ANN001
     """`test_the_games_we_generate` with the port playing every turn, branch 0 followed."""
     from ._port_showdown import port_branch
