@@ -27,6 +27,7 @@ mod fixedpoint;
 mod id;
 mod inert;
 mod level_struggle;
+mod magic_guard;
 mod modelled;
 mod move_hooks;
 mod moveinfo;

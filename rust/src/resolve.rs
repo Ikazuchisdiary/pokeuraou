@@ -411,6 +411,9 @@ impl<'a> Turn<'a> {
         from_move: bool,
         reason: &str,
     ) -> Result<i64, String> {
+        if crate::magic_guard::stops(self, side, slot, from_move, reason) {
+            return Ok(0);
+        }
         let (mut dealt, uses_sash, unbranched) = {
             let Some(mon) = self.mon_at(side, slot) else { return Ok(0) };
             if mon.fainted || amount <= 0 {
