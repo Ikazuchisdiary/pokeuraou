@@ -31,10 +31,11 @@ from dataclasses import dataclass
 import numpy as np
 
 from .actions import SideAction
+from .budget import Budget
 from .equilibrium import Equilibrium, solve
+from .port import batched_payoffs
 from .position import Position
 from .regulation import Regulation
-from .resolve import Budget, batched_payoffs
 
 #: Weight below which a strategy is not on an action. The LP returns exact zeros for
 #: actions outside the support, so this only guards against a solver's dust.
