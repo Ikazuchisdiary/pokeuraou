@@ -293,6 +293,56 @@ def repeat(kind: str, key: Any, n: int = 1) -> bool:
     return False
 
 
+#: IKA-264: which caller sent a key first in this stretch, so a repeat names both ends.
+_FIRST: dict[str, dict[Any, str]] = {}
+#: The exchange's own modules: a caller is the first frame outside them.
+_PLUMBING = frozenset(
+    {"timing.py", "rustnode.py", "port.py", "position.py", "inference.py", "functools.py"}
+)
+
+#: IKA-264: called at every decision boundary, timing on or off -- what a cache that
+#: lives one decision forgets on.
+_ON_DECIDED: list[Callable[[], None]] = []
+
+
+def on_decided(hook: Callable[[], None]) -> None:
+    """Run `hook` at every `decided` call from now on (once, however often asked)."""
+    if hook not in _ON_DECIDED:
+        _ON_DECIDED.append(hook)
+
+
+def caller(depth: int = 3) -> str:
+    """`module.function` of the first `depth` frames outside the exchange's own modules,
+    innermost first, joined by `<`. For the repeat counts only: walking the stack is not free.
+    """
+    frame = sys._getframe(1)
+    names: list[str] = []
+    while frame is not None and len(names) < depth:
+        name = os.path.basename(frame.f_code.co_filename)
+        if name not in _PLUMBING:
+            names.append(f"{name.removesuffix('.py')}.{frame.f_code.co_name}")
+        frame = frame.f_back
+    return "<".join(names) or "?"
+
+
+def repeat_where(kind: str, key: Any, n: int = 1, where: str | None = None) -> bool:
+    """`repeat`, and the same counts by caller (IKA-264): `dup.<kind>.calls@<caller>` and
+    `dup.<kind>.repeat@<first caller> >> <this caller>`. `where` saves the stack walk
+    when one call counts many keys."""
+    if not DUPES:
+        return False
+    if where is None:
+        where = caller()
+    again = repeat(kind, key, n)
+    first = _FIRST.setdefault(kind, {})
+    count(f"dup.{kind}.calls@{where}", n)
+    if again:
+        count(f"dup.{kind}.repeat@{first.get(key, '?')} >> {where}", n)
+    else:
+        first[key] = where
+    return again
+
+
 #: IKA-258: sample the main thread's stack this many times a second, into the report.
 #: Zero (the default) starts no thread. Only with timing on.
 ENV_SAMPLE = "POKEURAOU_SAMPLE_HZ"
@@ -495,9 +545,12 @@ def decided(kind: str) -> None:
     The first call only ends `startup`: the wall clock from this module's import to here,
     less any stage that ran in between, becomes that row. It is not part of "the rest".
     """
+    for hook in _ON_DECIDED:
+        hook()
     if not ON:
         return
     _SEEN.clear()
+    _FIRST.clear()
     now = time.perf_counter()
     if not _STARTUP_CPU:
         _end_startup(now)
