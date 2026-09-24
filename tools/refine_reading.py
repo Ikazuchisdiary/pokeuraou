@@ -51,10 +51,11 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 from budget_effect import load_positions, total_variation  # noqa: E402
 
+from pokeuraou.budget import Budget  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.equilibrium import EquilibriumError, solve  # noqa: E402
+from pokeuraou.port import batched_payoff  # noqa: E402 - Python's resolver until IKA-212
 from pokeuraou.regulation import load_regulation  # noqa: E402
-from pokeuraou.resolve import Budget, batched_payoff  # noqa: E402
 from pokeuraou.search import (  # noqa: E402
     DEFAULT_PASSES,
     DEFAULT_REFINE,

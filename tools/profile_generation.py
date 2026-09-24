@@ -1,6 +1,7 @@
 """Where a generated game's time actually goes, with the learned leaf in place.
 
-`tools/profile_resolve.py` profiles the resolver alone, against the hp-share leaf. That
+`tools/profile_resolve.py` profiled the Python resolver alone (deleted in IKA-212), against
+the hp-share leaf. That
 answered the question it was built for and is now the wrong workload: generation runs a
 learned value net, at candidate width 24 rather than 16, and the two changes move the
 balance. The launcher still repeats a measurement taken at width 16 -- "the forward pass is

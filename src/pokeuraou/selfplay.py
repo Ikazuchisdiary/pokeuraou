@@ -67,7 +67,8 @@ from .teams import (
 
 #: How many actions per side reach the exact solver during self-play. The cost of a solved
 #: position is rows x columns, so this is the dial that decides whether self-play is
-#: affordable -- see tools/selfplay_budget.py. It is smaller than the analysis default
+#: affordable -- see tools/selfplay_budget.py (deleted in IKA-212 with Python's resolver;
+#: README records what it measured). It is smaller than the analysis default
 #: because a training game needs many positions, not one deep one.
 SEARCH_LIMIT = 8
 

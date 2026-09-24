@@ -42,7 +42,8 @@ from .regulation import STAT_IDS, Regulation, regulation_dir
 from .stats import nature_multipliers, stats_from_sp
 
 #: Volatiles the resolver can set, as an ordered vocabulary. Derived from the volatile ids
-#: actually present across the generated games plus the ones ``resolve.py`` adds by name;
+#: actually present across the generated games plus the ones the resolver adds by name
+#: (Python's ``resolve.py`` when this was written; the port since IKA-212);
 #: anything else lands in the ``other`` bucket, and :attr:`Encoded.unknown_volatiles`
 #: counts it so the omission shows up as a number instead of as silence.
 VOLATILES = (

@@ -419,23 +419,5 @@ def replacements_needed(
     return port.replacements_needed(reg or load_regulation(DEFAULT_FORMAT), pos)
 
 
-def self_switches_needed(pos: Position) -> tuple[tuple[bool, ...], ...]:
-    """Per side, per active slot, whether the port left a self-switch waiting on a choice.
-
-    Not a rule: it reads the `pendingselfswitch` flag the port wrote onto the position (and
-    the bench it can be answered from), which is what `resolve.self_switches_needed` read.
-    """
-    out: list[tuple[bool, ...]] = []
-    for side in pos.sides:
-        bench = sum(1 for mon in side.pokemon if not mon.fainted and not mon.is_active)
-        flags: list[bool] = []
-        for party_index in side.active:
-            mon = side.pokemon[party_index] if party_index is not None else None
-            flags.append(
-                bench > 0
-                and mon is not None
-                and not mon.fainted
-                and mon.has_volatile("pendingselfswitch")
-            )
-        out.append(tuple(flags))
-    return tuple(out)
+#: `port.self_switches_needed`: the flag the port wrote, one copy for tests and tools (IKA-212).
+self_switches_needed = port.self_switches_needed

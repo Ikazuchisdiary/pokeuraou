@@ -382,6 +382,13 @@ fn switch_target<'p>(side: &'p crate::position::Side, queued: &QueuedAction) -> 
 
 /// Python's `paused_in`: the same pause with `position` in place of its own, a queued
 /// switch of `side`'s re-aimed by slot at whoever stands there in `position`.
+///
+/// For the self-switch node under a hidden bench (IKA-120): `position` is a completion of
+/// the pause's own position -- `side`'s unseen slots rebuilt from the sheet, everything else
+/// the pause's -- and resuming the result is resuming the turn in that world. An unseen
+/// Pokemon took no part in the turn up to the interrupt, so nothing else in the continuation
+/// refers to it except a queued switch into its slot, which names its target by species
+/// first -- and the true species would find nobody.
 fn paused_in<'a>(paused: Suspended<'a>, position: Position, side: usize) -> Suspended<'a> {
     let Suspended { probability, mut turn, remaining } = paused;
     let before = turn.pos.sides[side].clone();
@@ -598,6 +605,19 @@ fn deterministic() -> Budget {
 /// `presets` absent: a draw takes its first option and is noted, as Python's with no
 /// generator. `presets` a list: those are the choices already drawn, and the first draw
 /// past them comes back as `draw` (its weights) for the caller to sample and ask again.
+///
+/// The replacement phase: a slot that owes nothing carries a pass, and a slot that owes a
+/// replacement and is given a pass is left alone and reported, because silently choosing
+/// for the player is the thing the resolver exists not to do. `runSwitch` carries order 101
+/// and is sorted on speed, fastest first, so a fast replacement eats the hazards and fires
+/// its ability before a slow one.
+///
+/// The leads: a freshly built turn-1 position has had nothing applied to it -- no
+/// Intimidate, no Defiant answering it, no weather from a lead's ability -- and Showdown has
+/// done all of that before the first request goes out (`|turn|1`), so a position without it
+/// is not the position the game starts from. Speed-ordered like the replacement phase and
+/// through the same switch-in, so hazards and White Herb behave identically should a caller
+/// hand it a position that has them.
 fn phase_command(reg: &Reg, value: &Value, phase: Phase) -> Result<Value, String> {
     let position = Position::from_json(&value["position"]);
     if &*position.format != reg.format_id.as_str() {

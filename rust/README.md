@@ -40,6 +40,11 @@ GPU で **15〜18 倍**、CPU で順伝播しても **8〜10 倍**速くなり�
 
 ## 推測せず拒否する
 
+> **9/24 以降（IKA-209・IKA-212）**: この節は移植の途中の契約です。今の port は唯一の解決器で、
+> 契約は「**Showdown と同じ答え**」です（下の「検証」）。拒否は落ち先が無いので呼び出し側で止まり
+> （`pokeuraou.port.PortRefused`）、IKA-208 で対局が出会う拒否は 0 になりました。
+> Python の解決器（`src/pokeuraou/resolve.py`）は IKA-212 で消えています。
+
 移植の契約は「**Python と同じ答え**」です。だから未対応に出会ったら推測せず `Err(reason)` を返し、
 呼び出し側は Python の答えをそのまま使います。これが部分移植を「測れるだけ」ではなく
 「使える」ものにします:
@@ -63,7 +68,25 @@ GPU で **15〜18 倍**、CPU で順伝播しても **8〜10 倍**速くなり�
 
 ## 検証
 
-Python がオラクル、Showdown は Python のオラクル（`tools/diff_*.py`）。鎖は切れていません。
+**鎖は Showdown → port の 1 段です（IKA-212 から）。** Python の解決器は消え、port の答えは
+Showdown と直接比べます:
+
+- `tests/` のオラクルのテスト（`@pytest.mark.oracle`）: Showdown で打ったターンを port に渡し、
+  結果の局面を比べる。テスト一式は release の exe を前提にし、無ければ失敗する（IKA-210）
+- `tools/diff_turn.py`: Showdown で対局を打ち、毎ターンの局面と選択を port に渡してフィールドごとに
+  比べる。途中交代は port の pause を Showdown の交代で続けて比べる（IKA-207・IKA-217）。
+  `--exes old=...,new` で 2 つの build を同じ対局に並べる
+- `tools/diverge_report.py`（乖離の原因を lift で並べる）・`tools/diff_replacement.py`（交代の段）
+- `tools/diff_damage.py`・`diff_speed.py`・`diff_order.py`: 残った Python のダメージ計算・素早さ
+  （推論と `narrow` が使う）を Showdown と比べる
+- 同じ種の生成が変更の前後で同じか: `tools/diff_generation.py --before <別の checkout>`
+
+`rust/src/main.rs` の自己試験（`damage`・`turns`・`roundtrip`・`encode`）は、Python が書き出した
+既存の fixture（`cases*.json`・`turns*.json`、git 管理外）を読むだけの回帰試験として残ります。
+書き出した道具（`dump_*`）は Python の解決器ごと消えたので、fixture は作り直せません。
+`turns` の「一致」は、書き出した時点の Python の答えとの一致です。
+
+下の表は、Python がオラクル、Showdown が Python のオラクルだった頃（9/12〜9/23）の記録です。
 
 | 対象 | 母数 | 結果 |
 |---|---|---|
@@ -252,16 +275,16 @@ hp-share では 19.1x → 22.3x です。
 
 ## 使い方
 
-既定では**オフ**です。何も設定しなければ何も変わりません。
+**既定でオン、そして唯一の道です**（IKA-209 から。Python の解決器は IKA-212 で消えました）。
+exe が無い・ソースより古い・`POKEURAOU_RUST_NODE=0` なら `rustnode.PortUnavailable` で止まります。
+壊れたプロセスは作り直して同じ要求をもう一度出し、再起動を使い切ったら止まります（`port.ask`）。
 
 ```bash
 cd rust && cargo build --release
-
-export POKEURAOU_RUST_NODE=1          # 使う
 uv run python tools/selfplay.py --games 100
 ```
 
-壊れていたら黙って Python に戻り、理由を 1 度だけ表示します。実行を失敗させません。
+（9/12〜9/23 は既定でオフ、壊れていたら黙って Python に戻る作りでした。）
 
 ### 境界はノード単位
 
@@ -356,47 +379,37 @@ narrow は 3.8〜4.2x、生成全体では 17.8x → 19.6x（学習済み価値�
 実装できませんでした。43/394 のチームが持っています。
 
 サンプルの作り方も変えました。普通のサンプルには `electroshot` が 1 件も入っていません。
-`tools/dump_turn_cases.py --only-move` / `--only-ability` は「覚えたばかりのものだけ」を
-集めます。**カバー率はサンプルの性質**なので、実装した直後に必要なのは
+`tools/dump_turn_cases.py --only-move` / `--only-ability`（IKA-212 で削除）は「覚えたばかりのものだけ」を
+集めていました。**カバー率はサンプルの性質**なので、実装した直後に必要なのは
 そのサンプルです。
 
 ## 走らせ方
 
 ```bash
-# 差分の材料を作る
-uv run python tools/dump_damage_cases.py --out rust/cases.json
-uv run python tools/dump_damage_cases_selfplay.py --games 6 --out rust/cases-field.json
-uv run python tools/dump_damage_cases_synthetic.py --out rust/cases-synthetic.json
-uv run python tools/dump_turn_cases.py --games 2 --out rust/turns.json
+cd rust && cargo build --release && cargo test --release
 
-# 差分を取る
-cd rust && cargo build --release
+# port を Showdown と比べる（鎖は Showdown -> port の 1 段）
+uv run python tools/diff_turn.py --battles 40 --roll 8
+uv run python tools/diff_turn.py --battles 400 --self-switch 0.8
+uv run python tools/diff_turn.py --battles 400 --exes old=C:/tmp/old.exe,new   # 2 つの build
+uv run python tools/diverge_report.py --seeds 12 --battles 10
+uv run python tools/diff_replacement.py --battles 25
+
+# 同じ種の生成が変更の前後で同じか（2 つの checkout、同じ exe）
+uv run python tools/diff_generation.py --before C:/tmp/ikaNNN/before --work C:/tmp/ikaNNN/dg \
+    --games 20 --seed 11 -- --pool regmc-matchupweb --uniform-selection
+
+# 手元に fixture があるなら、exe の自己試験（書き出した時点の Python の答えとの回帰試験）
 ./target/release/pokeuraou-damage damage    ../configs/regulations/gen9championsvgc2026regmc.json cases-synthetic.json
 ./target/release/pokeuraou-damage roundtrip turns.json
 ./target/release/pokeuraou-damage turns     ../configs/regulations/gen9championsvgc2026regmc.json turns.json
 
-# 符号化の差分（学習済み価値関数を使うなら必須）
+# 符号化の差分（encode.py と encode.rs。学習済み価値関数を使うなら必須）
 ./target/release/pokeuraou-damage encode ../configs/regulations/gen9championsvgc2026regmb.json turns.json encoded.bin
 uv run python tools/diff_encode.py rust/turns.json rust/encoded.bin
 
-# ノードと対戦の差分（こちらが実使用の形）
-POKEURAOU_RUST_NODE=1 uv run python tools/diff_node.py --games 2 --nodes 20
-POKEURAOU_RUST_NODE=1 uv run python tools/diff_narrow.py --games 6 --seed 77
-uv run python tools/diff_generation.py --games 3 --seed 5
-
-# 学習済み価値関数で同じことをする
-POKEURAOU_RUST_NODE=1 uv run --group learn python tools/diff_node.py \
-    --games 2 --nodes 10 --value data/models/value-gen234.pt
-POKEURAOU_RUST_NODE=1 uv run --group learn python tools/diff_generation.py \
-    --games 6 --seed 77 --device cuda --value data/models/value-gen234.pt
-
-# 覚えたばかりのものだけを集めて突合する（普通のサンプルには 1 件も入らない）
-uv run python tools/dump_turn_cases.py --games 8 --seed 404 \
-    --only-move fly,dig,dive,bounce,phantomforce,shadowforce,skyattack,meteorbeam \
-    --out rust/turns-twoturn.json
-uv run python tools/dump_turn_cases.py --games 10 --seed 404 \
-    --value data/models/value-gen234.pt --only-ability cursedbody \
-    --out rust/turns-cursedbody.json
+# 9/23 までの Python 対 port の道具（diff_node・diff_narrow・diff_solve_node・diff_commands・
+# dump_*）は Python の解決器と一緒に IKA-212 で消えました。記録の中の数字はそれらで取ったものです。
 
 # 白リストの再生成（エンジンが効果を覚えたら必ず）
 uv run python tools/port_coverage.py --rust

@@ -3,7 +3,7 @@
 `POKEURAOU_RUST_NODE=0` used to mean "resolve in Python". The roads generation, the analyser
 and the selection solve take (`pokeuraou.port`) have nothing to fall back to, so with the
 bridge switched off they raise `PortUnavailable` rather than quietly doing something else.
-resolve.py's own `batched_payoffs` -- the tools' road, until IKA-212 -- still honours it.
+resolve.py's own `batched_payoffs` -- the tools' road -- honoured it until IKA-212 deleted it.
 """
 
 from __future__ import annotations

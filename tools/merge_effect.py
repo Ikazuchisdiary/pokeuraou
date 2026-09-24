@@ -46,13 +46,14 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from pokeuraou import port  # noqa: E402 - Python's resolver until IKA-212
+from pokeuraou.budget import Budget  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.equilibrium import EquilibriumError, solve  # noqa: E402
 from pokeuraou.narrow import narrow  # noqa: E402
 from pokeuraou.payoff import OBJECTIVES  # noqa: E402
 from pokeuraou.position import Position  # noqa: E402
 from pokeuraou.regulation import Regulation, load_regulation  # noqa: E402
-from pokeuraou.resolve import Budget, resolve_turn, turn_expectation  # noqa: E402
 
 
 def matrix_for(
@@ -70,8 +71,8 @@ def matrix_for(
     started = time.perf_counter()
     for i, a in enumerate(ours):
         for j, b in enumerate(theirs):
-            result = resolve_turn(reg, pos, [a, b], budget=budget)
-            value, _flags = turn_expectation(reg, result, objective)
+            result = port.turn(reg, pos, [a, b], budget, full=True)
+            value, _flags = port.turn_expectation(reg, result, objective)
             payoff[i, j] = value
             leaves += len(result.branches) + len(result.suspended)
             exact_cells += int(result.exact)

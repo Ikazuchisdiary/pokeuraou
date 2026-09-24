@@ -26,12 +26,12 @@ is why the pipe is still here.
 On by default since IKA-209: the port is the only resolver the production roads have,
 so a missing or stale binary stops them (`require_node`) rather than falling back::
 
-    POKEURAOU_RUST_NODE=0                      # off: only resolve.py's own tool road
+    POKEURAOU_RUST_NODE=0                      # off: every road stops (PortUnavailable)
     POKEURAOU_RUST_NODE_BIN=/path/to/binary    # defaults to rust/target/release/
     POKEURAOU_RUST_NODE_SHM_MB=512             # the largest block; 0 keeps the pipe
 
-`available()` answers without raising, for resolve.py's `batched_payoffs` (the tools'
-road, which still has Python behind it). `require_node` is the production roads' door.
+`available()` answers without raising (it was for resolve.py's `batched_payoffs`, which had
+Python behind it until IKA-212 deleted it). `require_node` is every road's door.
 """
 
 from __future__ import annotations
@@ -398,9 +398,8 @@ def disable(reason: str) -> bool:
     Giving up is still the end state -- a broken bridge must not cost a subprocess per
     node on top of Python's own time -- but it is no longer the first move.
 
-    True when a fresh process was started, False once the restarts have run out. Only
-    resolve.py's tool road falls back to Python after that; the production roads stop
-    (`port.ask`, IKA-209).
+    True when a fresh process was started, False once the restarts have run out; the
+    roads then stop (`port.ask`, IKA-209). There is no Python to fall back to (IKA-212).
     """
     global _GAVE_UP, _RESTARTS
     reset()

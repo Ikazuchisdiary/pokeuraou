@@ -63,10 +63,10 @@ PORT_ENGINE_FILES = [
     "moveinfo.rs",
 ]
 
-#: Python's engine, still read by `tools/port_gate_audit.py` (until IKA-212). `names.py`, the
-#: priors and the tools are not the engine.
+#: What is left of Python's engine -- the damage calculator, speed, the menus -- read by
+#: `tools/port_gate_audit.py`. `resolve.py` was the first entry until IKA-212 deleted it.
+#: `names.py`, the priors and the tools are not the engine.
 ENGINE_FILES = [
-    "resolve.py",
     "damage.py",
     "effects.py",
     "speed.py",

@@ -58,9 +58,9 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 from budget_effect import load_positions  # noqa: E402
 
+from pokeuraou.budget import Budget  # noqa: E402
 from pokeuraou.narrow import narrow  # noqa: E402
 from pokeuraou.regulation import load_regulation  # noqa: E402
-from pokeuraou.resolve import Budget  # noqa: E402
 from pokeuraou.rustnode import RustNode  # noqa: E402
 
 SPEED_TURNS = re.compile(r"= ([0-9.]+) us/turn")

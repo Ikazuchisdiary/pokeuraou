@@ -12,9 +12,12 @@ merely popular. That turns "what to fix next" into a ranking rather than a guess
 
     uv run python tools/diverge_report.py --seeds 12 --battles 10
 
-The port (`RustNode.resolve`, the same pins) is ranked beside Python on the same turns
-(IKA-207); a turn it refuses is counted under `skipped` by its reason. `--no-port` for
-Python alone; `POKEURAOU_RUST_NODE_BIN` names another binary.
+The engine ranked is the port (`RustNode.resolve`, the same pins, IKA-207); a turn it
+refuses is counted under `skipped` by its reason, and `POKEURAOU_RUST_NODE_BIN` names
+another binary. Python's ranking ran beside it until IKA-212 deleted Python's resolver.
+A turn the port and Showdown both stopped inside at a mid-turn replacement is set aside
+(`diff_turn` carries such turns on; this ranking does not), and Showdown's run then answers
+the replacement with `default`.
 """
 
 from __future__ import annotations
@@ -36,12 +39,12 @@ import diff_turn  # noqa: E402
 from diff_turn import canonical, field_kind  # noqa: E402
 
 from pokeuraou.actions import MoveAction, SideAction, side_actions  # noqa: E402
+from pokeuraou.budget import Budget  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet  # noqa: E402
 from pokeuraou.position import Position  # noqa: E402
 from pokeuraou.priors import find_cached_chaos, load_chaos, sample_team  # noqa: E402
 from pokeuraou.regulation import Regulation, load_regulation  # noqa: E402
-from pokeuraou.resolve import Budget, resolve_turn  # noqa: E402
 from pokeuraou.speed import action_overriding_effects  # noqa: E402
 
 FORMAT_ID = "gen9championsvgc2026regmc"
@@ -99,8 +102,6 @@ class Aggregate:
     #: effect -> the fields that diverged alongside it, for reading the mechanism off.
     fields_with: dict[str, Counter[str]] = field(default_factory=dict)
     examples: dict[str, list[str]] = field(default_factory=dict)
-    #: The same ranking for the port, on the same turns (IKA-207).
-    port: Aggregate | None = None
 
     @property
     def compared(self) -> int:
@@ -162,16 +163,10 @@ class Aggregate:
             out.append(f"  -- {effect}")
             for line in lines[:2]:
                 out.append(f"     {line}")
-        if self.port is not None:
-            out.append("")
-            out.append("port:")
-            out.append(self.port.render(top, min_count))
         return "\n".join(out)
 
 
-def run(
-    seeds: int, battles: int, roll: int, max_turns: int, port: bool = False
-) -> Aggregate:
+def run(seeds: int, battles: int, roll: int, max_turns: int) -> Aggregate:
     reg = load_regulation(FORMAT_ID)
     chaos = find_cached_chaos(FORMAT_ID)
     if chaos is None:
@@ -183,14 +178,10 @@ def run(
         damage_roll=roll, accuracy="hit", crit=False, secondary=False,
         multihit="min", speed_tie="keep",
     )
-    budget = Budget.deterministic(roll)
-    node = None
-    if port:
-        from pokeuraou import rustnode
+    from pokeuraou import rustnode
 
-        rustnode.require_current_binary()
-        node = rustnode.RustNode(reg)
-        agg.port = Aggregate()
+    rustnode.require_current_binary()
+    node = rustnode.RustNode(reg)
 
     with Oracle() as oracle:
         for seed in range(1, seeds + 1):
@@ -237,53 +228,10 @@ def run(
                     if forced or len(chosen) != 2:
                         agg.skipped["replacement turn"] += 1
                         continue
-                    if node is not None and agg.port is not None:
-                        # First: Python's mid-turn replacement steps Showdown on.
-                        _score_port(reg, node, before, chosen, handle, roll, agg.port)
-                    _score(reg, before, chosen, handle, budget, agg, py_rng)
+                    _score_port(reg, node, before, chosen, handle, roll, agg)
                 handle.close()
-    if node is not None:
-        node.close()
+    node.close()
     return agg
-
-
-def _score(
-    reg: Regulation,
-    before: Position,
-    chosen: list[SideAction],
-    handle: Any,
-    budget: Budget,
-    agg: Aggregate,
-    py_rng: random.Random,
-) -> None:
-    # Only the overrides the resolver cannot reproduce: Encore is modelled.
-    if action_overriding_effects(handle.log, only_unmodelled=True):
-        agg.skipped["action overridden mid-turn"] += 1
-        return
-    result = resolve_turn(reg, before, chosen, budget=budget)
-    if result.suspended:
-        # A self-switching move interrupted the turn. These used to fall into "not a single
-        # branch" and be dropped, which meant the ranking below was computed without Parting
-        # Shot, U-turn, Flip Turn or Volt Switch in it at all. `diff_turn.resolve_pauses`
-        # answers the request the same way on both sides and is tested; its own bookkeeping
-        # is discarded here because what this tool wants is the finished turn.
-        finished = diff_turn.resolve_pauses(
-            reg, result, handle, py_rng, 0, diff_turn.Report()
-        )
-        if finished is None:
-            agg.skipped["mid-turn replacement could not be carried through"] += 1
-            return
-        result = finished
-    if len(result.branches) != 1:
-        agg.skipped["not a single branch"] += 1
-        return
-    if any(n.startswith("forceSwitch") for n in result.unmodelled):
-        agg.skipped["pending replacement"] += 1
-        return
-
-    ours = canonical(result.branches[0].position)
-    theirs = canonical(Position.from_json(handle.position))
-    _tally(reg, before, chosen, ours, theirs, bool(result.unmodelled), agg)
 
 
 def _tally(
@@ -335,7 +283,7 @@ def _score_port(
     roll: int,
     agg: Aggregate,
 ) -> None:
-    """The port on the turn `_score` gives Python, before Showdown is stepped past it.
+    """The port on one turn, before Showdown is stepped past it.
 
     `diff_turn.compare_port_turn`'s rules: one request with branch 0, a refusal counted by
     its reason, a turn both stopped inside at a replacement set aside (the port has no
@@ -429,9 +377,8 @@ def main() -> None:
     ap.add_argument("--max-turns", type=int, default=10)
     ap.add_argument("--top", type=int, default=25)
     ap.add_argument("--min-count", type=int, default=3)
-    ap.add_argument("--no-port", action="store_true", help="Python's ranking only")
     args = ap.parse_args()
-    agg = run(args.seeds, args.battles, args.roll, args.max_turns, port=not args.no_port)
+    agg = run(args.seeds, args.battles, args.roll, args.max_turns)
     print(agg.render(args.top, args.min_count))
 
 

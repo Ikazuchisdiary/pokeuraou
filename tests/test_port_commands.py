@@ -15,7 +15,8 @@ tests hold `resolve`:
 - **Leads.** A lead Trace between Intimidate and Drought: the first foe, noted, without a
   generator; Showdown's two answers with one, drawn in the same order as Python draws them.
 
-`tools/diff_commands.py` is the Python comparison over recorded games.
+`tools/diff_commands.py` was the Python comparison over recorded games, until IKA-212
+deleted it with Python's resolver.
 """
 
 from __future__ import annotations

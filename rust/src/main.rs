@@ -1,4 +1,4 @@
-//! Differential harnesses for the Rust port, with Python as the oracle.
+//! The port's entry point: the node process (`node`) and the self-tests over fixture files.
 //!
 //!     cargo run --release -- damage    <regulation.json> <cases.json> [repeats]
 //!     cargo run --release -- roundtrip <turns.json>
@@ -6,8 +6,11 @@
 //!     cargo run --release -- node      <regulation.json>          # JSONL over stdio
 //!     cargo run --release -- encode    <regulation.json> <turns.json> <out.bin> [--mega-from-slots]
 //!
-//! Python stays the oracle for Rust, and Showdown stays the oracle for Python
-//! (`tools/diff_*.py`), so the chain of verification is not broken by the port.
+//! The self-tests (`damage`, `roundtrip`, `turns`, `encode`) read fixture files Python's
+//! resolver wrote (`cases*.json`, `turns*.json`, kept out of git): they are regression tests
+//! against Python's answers as of when each file was written. The tools that wrote them went
+//! with Python's resolver (IKA-212), so the files are kept and not regenerated. The chain of
+//! verification is Showdown -> port since IKA-212: the oracle tests and `tools/diff_turn.py`.
 
 #[macro_use]
 mod events;
@@ -414,7 +417,7 @@ fn turns_main(args: &[String]) {
         // Everything that is not the resolver is hoisted out of the loop, because the
         // Python benchmark it is compared against does the same.
         // Only the turns Rust actually resolves are timed: the rest cost Python's time in
-        // a hybrid, and `tools/bench_turn_cases.py` times those separately.
+        // a hybrid, and `tools/bench_turn_cases.py` timed those separately (until IKA-212).
         let prepared: Vec<(usize, [Vec<resolve::SlotAction>; 2], resolve::Budget)> = cases
             .iter()
             .enumerate()

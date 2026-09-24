@@ -460,7 +460,10 @@ pub fn survives_at_one_ability(ability: &str) -> bool {
     ability == "sturdy"
 }
 
-/// Items that give a *chance* to survive a lethal hit, as (numerator, denominator).
+/// Items that give a *chance* to survive a lethal hit, as (numerator, denominator). Focus
+/// Band is deliberately not a survive-at-one item like the Sash: it is `randomChance(1, 10)`
+/// from any HP and is not consumed, so treating it as a certain full-HP save is wrong in
+/// both directions.
 pub fn survive_chance_item(item: &str) -> Option<(i64, i64)> {
     if item == "focusband" { Some((1, 10)) } else { None }
 }

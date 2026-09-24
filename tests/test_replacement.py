@@ -73,16 +73,10 @@ def _pass(pos, side_index: int):  # noqa: ANN001, ANN202
     )
 
 
-@pytest.fixture()
-def on_the_port(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The harness in tools/ asks Python's replacement phase; here it asks the port's
-    (IKA-210). The tool itself moves to the port with IKA-212."""
-    monkeypatch.setattr(diff._MODULE, "replacements_needed", replacements_needed)  # noqa: SLF001
-    monkeypatch.setattr(diff._MODULE, "resolve_replacements", resolve_replacements)  # noqa: SLF001
-
-
 @pytest.mark.parametrize("seed", [1, 2])
-def test_replacements_match_showdown(seed: int, on_the_port: None) -> None:
+def test_replacements_match_showdown(seed: int) -> None:
+    """The harness in tools/ asks the port's replacement phase (IKA-212; until then the
+    test put the port's in place of Python's, IKA-210)."""
     if not ORACLE_JS.exists():
         pytest.skip("oracle not built")
     report = diff.run(battles=10, seed=seed, max_turns=14)
@@ -96,7 +90,7 @@ def test_replacements_match_showdown(seed: int, on_the_port: None) -> None:
 
 
 @pytest.mark.slow
-def test_replacement_divergence_over_a_large_sample(on_the_port: None) -> None:
+def test_replacement_divergence_over_a_large_sample() -> None:
     """The number quoted in the README, measured rather than remembered."""
     if not ORACLE_JS.exists():
         pytest.skip("oracle not built")

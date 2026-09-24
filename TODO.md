@@ -15744,3 +15744,205 @@ given(pos)、require_binary()、ENV_BEFORE_TURN
   events の on/off の壁時計（--cores 1）   2 回 132・264 s（1 回目は集計の不具合で途中終了）
   道具の読み込み・diff_turn の null 対照・port_coverage・port_gate_audit（--cores 1）  計 20 s
 ```
+
+
+## 9/24 — IKA-212: Python の resolver を消した —— resolve.py（6,622 行）と Python 対 port の道具・fixture の書き出し・使われていない分析の道具 24 本（計 8,834 行）を削除、15 本を port に向け直した。同じ種の生成は消す前（master 471b98e）とバイト一致（M-C 価値関数 20 局・M-B 隠蔽 20 局・M-C hp-share 200 局、各 2 回）、壁時計は変わらない。docstring にしかなかった説明 約 780 行を rust/src に移した
+
+ブランチ `ika-212-delete-resolver`（master 471b98e から）。IKA-204 の段 6（最後の子課題）。
+
+### 0. 新しい鎖（要約）
+
+* **Showdown → port の 1 段。** Python の解決器は無い。port（rust/src）は唯一の解決器で、本番の経路（`pokeuraou.port`、IKA-209）も、テスト（オラクルのテスト、`tests/_port.py`、IKA-210）も、道具（`diff_turn`・`diverge_report`・`diff_replacement`・`show_game`・分析の道具）も port に聞く
+* port が断れば `port.PortRefused`、exe が無い・古い・`POKEURAOU_RUST_NODE=0` なら `PortUnavailable` で止まる。落ち先は無い
+* Python に残る規則のコード: `damage.py`・`speed.py`・`effects.py`・`battler.py`・`view.py`・`moveinfo.py`・`actions.py`。推論（observe・belief）・`narrow` の Python の採点・合法手の生成が使う。`diff_damage`・`diff_speed`・`diff_order` がそれを Showdown と比べる
+* rust/src のコメントの「Python's `_x`」は、471b98e の resolve.py の関数名を指す（resolve.rs の先頭に書いた）
+
+### 1. 消したもの（行数は 471b98e の時点）
+
+```
+src/pokeuraou/resolve.py                         6,622
+Python 対 port の道具
+  tools/diff_node.py                             3,580
+  tools/diff_commands.py                           671   （IKA-211・215 で使用。比べる相手の Python が消える。port の命令は test_port_commands が Showdown と比べる）
+  tools/diff_solve_node.py                         196
+  tools/diff_narrow.py                             167
+  tools/count_resolver_calls.py                    186   （resolve.py の存在が前提）
+fixture の書き出しと Python 側の時間
+  tools/dump_turn_cases.py                         243
+  tools/dump_damage_cases.py                       181
+  tools/dump_damage_cases_selfplay.py              130
+  tools/dump_damage_cases_synthetic.py             227   （dump_damage_cases を import する族）
+  tools/bench_turn_cases.py                        135
+  tools/bench_damage_cases.py                      118
+分析の道具（記録で使われていない、または Python の内部を測る）
+  tools/branch_dedup.py 312・bench.py 222・cells_needed.py 217・seat_bias.py 264・regret_playout.py 251・
+  width_vs_ranking.py 182・narrow_regret.py 168・oneshot/depth_effect.py 166・narrow_effect.py 165・
+  hidden_dominance.py 147・selfplay_budget.py 125・ko_branch_count.py 103・profile_resolve.py 94
+src/pokeuraou/damage.py のうち resolver だけが読んだもの   33   crit_stage・crit_probability・CRIT_MULT
+src/pokeuraou/effects.py のうち resolver だけが読んだもの  14   TERRAIN_SEEDS・SURVIVE_CHANCE_ITEMS
+tests: test_beliefnode の 1 件（下の §4）、test_bench_default の branch_dedup の 1 パラメタ
+計: 削除 15,706 行・追加 1,135 行（74 ファイル、git diff --stat master）
+```
+
+* `damage.py`・`speed.py`・`effects.py`・`battler.py`・`view.py` の top-level 名を、残る src・tools・tests から参照を辿って数えた（`C:/tmp/ika212/unused_names.py`）。参照が無くなった名前のうち、resolve.py が読んでいたのは上の 5 つだけ。ほかに参照の無い名前（speed の `ORDER_RESIDUAL`・`_PRIORITY_ABILITIES`・`SPEED_CHANGING_EFFECTS`・`SpeedReport`・`speed_comparison_report`、effects の `_rain`、view の `clear_stats_memo`、moveinfo の `COUNTER_MOVES`、regulation の `BOOST_INDEX`）は 471b98e でも resolve.py を含め誰も読んでいない（前からの死にコード）。段の範囲外なので残した（§8）
+* `damage.register_mega_stones` だけを使う道具（23 本）: damage.py は推論が使うので残り、関数も置き場所は変わらない。道具は触っていない
+* fixture ファイル（`rust/turns.json` 等、git 管理外）は残した。`rust/src/main.rs` の自己試験（`damage`・`turns`・`roundtrip`・`encode`）はもとから fixture を読むだけなので、コードは変えず、先頭の説明を「書き出した時点の Python の答えとの回帰試験。書き出す道具は消えたので作り直せない」に替えた。$M/rust/turns.json（9/19）を `turns` で読むと 955 件中 660 一致・295 違い・拒否 0 で、master の exe でも同じ数（違いは 9/19 以降の規則の修正。fixture が古い、§8）
+
+### 2. 道具ごとの「消す／向け直す」
+
+基準（調整役の指示）: TODO.md の最近の記録で使われていれば port に向け直す、使われていなければ消す。git log は 9/10 以降（リポジトリの最初の commit が 9/10 なので全部が入る）。TODO.md の言及は「道具名.py」「tools/道具名」の数（`C:/tmp/ika212/tool_table.py`）。TODO.md は 9/17 以降の記録。
+
+```
+道具                   commits  TODO   決定      理由
+bench                     2      0     消す      記録で未使用（"bench" の語は別の意味で出る）
+bench_turn_cases          3      0     消す      fixture を Python が解く時間。Python が無い
+bench_damage_cases        1      0     消す      同上
+budget_effect             3      0     向け直す  未使用だが、残す 5 本（bench_ika99・narrow_as_built・policy_ceiling・
+                                                 policy_pool_recall・refine_reading）が load_positions を import する
+cells_needed              3      2     消す      2 回とも使用の記録ではない（IKA-40 の argv の例、IKA-123 の旗の一覧）
+hidden_dominance          1      0     消す      未使用
+ko_branch_count           4      0     消す      未使用（commit は 9/19 の初版と IKA-76 の家パス）
+narrow_effect             1      0     消す      未使用
+narrow_regret             3      0     消す      未使用
+oneshot/depth_effect      1      0     消す      未使用（IKA-25 で退避済み）
+profile_resolve           1      0     消す      測る対象（Python の resolver）が無い
+regret_playout            1      0     消す      未使用
+seat_bias                 1      0     消す      未使用
+selfplay_budget           1      0     消す      未使用
+width_vs_ranking          1      0     消す      未使用
+branch_dedup              2      4     消す      9/20 の測定 2 で使用。ただし search・selfplay の resolve_turn を差し替えて数える道具で、
+                                                 IKA-209 から両方とも resolve_turn を呼ばないので、9/24 には既に 0 回しか数えない。
+                                                 port に差し込み口は無い。merge の効果は merge_effect が port で測れる
+count_resolver_calls      1      2     消す      resolve.py の存在が前提
+diff_node                58     38     消す      Python 対 port
+diff_solve_node           4      0     消す      Python の全行列と比べる
+diff_narrow               3      0     消す      Python 対 port（narrow の採点）
+diff_commands             3      3     消す      Python 対 port（IKA-211・215）
+dump_turn_cases・dump_damage_cases*          消す      fixture の書き出し（課題本文の指定）
+
+bench_ika99               1      1     向け直す  Budget を budget.py から
+depth2_cost               2      2     向け直す  port.turn（full）・port.batched_payoff
+human_baseline            6      1     向け直す  port.turn（full）。branch は .outcomes
+merge_effect              1      1     向け直す  port.turn・port.turn_expectation
+narrow_as_built           4      2     向け直す  port.batched_payoffs
+policy_ceiling            7      1     向け直す  同上
+policy_pool_recall        1      2     向け直す  同上
+refine_reading            1      4     向け直す  port.batched_payoff
+roll_headroom             1      1     向け直す  port.turn・port.turn_expectation
+what_the_leak_buys        2      1     向け直す  port.batched_payoff
+why_action                1      7     向け直す  port.turn（full）
+diff_depth2               2      3     向け直す  Budget を budget.py から
+diff_turn                 7     10     向け直す  Python の列を消した（下）
+diverge_report            3      3     向け直す  Python の順位を消し、port の順位だけに（下）
+diff_replacement          2      2     向け直す  port の交代の段に（下）
+show_game                21      7     向け直す  port だけに（下）
+refusal_replay            3      7     変更なし  IKA-210 で Budget を budget.py に替えてある
+```
+
+* `pokeuraou.port` に足したもの: `self_switches_needed(pos)`（pause の `pendingselfswitch` を読むだけ）と `turn_expectation(reg, result, value)`（Python の `resolve.turn_expectation` の port 版。pause の無いターンは確率で重み付けした平均を総和で割る＝`TurnResult.expected`、pause があれば `turn_leaves` の fold）
+* **自交代の旗を読む本文は 1 か所になった**: `resolve.self_switches_needed` は消え、`tests/_port.self_switches_needed` は `port.self_switches_needed` の別名、`tools/diff_turn._owed_self_switches` は消して port のものを import
+* **diff_turn**: Python の列（`_compare_python`・`resolve_pauses`・`Report` の Python の数え・`joint` の表・`PortPending.python`）を消した。`--no-python` と、Python の列だけを走らせる `--no-port` は旗ごと消した（`run()` の `port`・`python` 引数も）。途中交代の引きは IKA-210 の `answer_port_pauses`（port の pause から `py_rng.choice`、Python の列と同じ引き）がいつも担う。`Report` は列の入れ物（`ports`・どの列にも聞かなかったターンの `skipped`）になった。tests/test_diff_turn_port は `python=False`・`port=True` と「Python の列が走っていない」断言を外した
+* **diverge_report**: Python の順位（`_score`、`diff_turn.resolve_pauses` を使っていた）を消し、port の順位（`_score_port`）が本体の `Aggregate` になった。`--no-port` を消した。port と Showdown が両方止まった途中交代のターンは今までどおり脇に置く（diff_turn のようには続けない、§8）
+* **diff_replacement**: `replacements_needed`・`resolve_replacements` が port の `needed`・`replacements` 命令（Showdown の局面は `diff_turn.port_position` で渡す、trace 付き）。test_replacement の `on_the_port`（port の関数に差し替える fixture）は要らなくなったので消した
+* **show_game**: `turn_events` は port の node が必須（無ければ TypeError）、`render` は node が無ければ自分で RustNode を起こす。`--engine` は `port` だけ（既定）
+* **tests/_port.py**: `resolve_turn`・`TurnResult` 等の Python の名前と形は**残した**。60 を超えるテストファイルがこの名前と `branches`/`suspended` の形で書かれていて、書き換えは大きく、読み手には中身が port だと先頭の docstring が言っている
+
+### 3. docstring から rust/src へ移した説明
+
+resolve.py の docstring とコメント 436 項目を読み（`C:/tmp/ika212/resolve_docs.txt`、130 KB）、同名の Rust 関数の doc と並べて（`resolve_pairs.txt`）、Rust に無い説明を移した。コードは 1 行も変えていない（コメントのみ。`cargo test` 6 件と §5 の生成のバイト一致）。移した行（`C:/tmp/ika212/moved_docs.py`、git diff の追加行）:
+
+```
+resolve.rs（計 約 250）: 先頭の module doc 約 30（3 つの設計の約束・拒否は落ち先が無い・「Python's `_x`」の読み方）、
+  Turn の項目の doc 約 35（Sucker Punch・willAct・checkWin の wipe_order など）、状態異常の定数 約 25
+  （Champions のまひ 1/8 の確認の仕方、こおりの 3 回の上限と 1/4 は mod のソースから、ねむりの sample([2,3,3])）、
+  do_switch_with 18（Showdown の party の入れ替え、tox の数え直し、ねこだましの再装填）、trace 26（Trace の TS を引用）、
+  synchronize 16、run_queue 18、resume_turn 12、stratified_rolls 6、tie_permutations 6、deal_damage 5（こらえる -10 対
+  道具 -40）、apply_boosts 12（あまのじゃく・クリアボディ・まけんき）、switched_in 5、check_white_herb 5、ほか 1〜5 行ずつ
+moves.rs（計 約 490）: Substitute の節の頭に Showdown の substitute を丸ごと 40、residuals 29、after_hit 28、perish_song 23、
+  residual_order 20（eachEvent の speedSort、席依存の 4.8 点、1 回だけ並べる理由）、settle_outcome 20（checkWin）、
+  after_move_secondary_switches 17、on_being_hit 16（どくげしょう）、effect_duration 15（手書きの表が永続効果を生んだ話）、
+  immune_to_move 15（粉・いたずらごころ）、do_protect 12、do_status_move 12、multihit_counts 11（35-35-15-15 の出典）、
+  after_move 11、do_move 11（反動ターン）、taunt_stops 11、hit_target 10、use_move 10、spread_secondaries 10、
+  lock_choice 9（こだわりのガブリアスの話）、apply_status_move_and_judge 9、apply_encore 8、start_rampage 8、ほか
+commands.rs 20（phase_command: 交代の段と先発、paused_in: IKA-120）、damage.rs 4（crit）、effects.rs 4（きあいのハチマキ）、
+main.rs 7（自己試験は fixture の回帰試験）
+計 追加 782 行・書き換え 49 行
+```
+
+* 位置のずれていた doc を 2 つ直した: `_restore_types` の doc が `drag_in` の上に、`perish_song` の doc が `take_item` の上にあった
+* 事実に合わなくなった Rust のコメントを直した: resolve.rs・moves.rs の「拒否したら呼び出し側が Python に落ちる」、use_move の「この port のオラクルは Python」、moves.rs の「see resolve.py」
+* **正の対照（うっかり）**: 反動ターンのコメントに Showdown の `removeVolatile('truant')` を引用したら、`port_coverage --check` が modelled.rs に `truant` が増えると言って落ちた。`port_coverage.mentioned` は port のソースの引用符付きの id をコメントの中でも「port が名前を出す」と読む。引用をやめて書き直した（その旨もコメントに）。ほかに追加したコメントの引用符付きの id で表は動かない（`--check` ok）
+* Python の docstring がコードと合っていなかった所が 1 つ: `_tie_permutations` は「3 体以上の同速は報告する」と書いていたが、Python も port も報告しない。Rust の doc にはそのまま書いた（§8）
+
+### 4. テスト
+
+```
+collect（--collect-only -q tests、エラー 0）
+  前 master 471b98e: 1,541 件 118 ファイル（worktree 外に展開した tests では test_showdown_commit の 7 件が git の外で collect できないので 1,534 + 7）
+  後: 1,539 件 118 ファイル
+    −1 test_bench_default の branch_dedup のパラメタ
+    −1 test_beliefnode::test_a_cell_the_port_refuses_is_resolved_per_completion
+```
+
+* **test_beliefnode の skip 3 件**: `_with_feint`（port に拒否させる局面）が IKA-208 から skip していた。1 件（拒否セルを完成形ごとに Python で埋める道＝IKA-139）は、IKA-209 で拒否セルが `port.raise_refused` で止まるようになって試すものが無いので消した（止まることは test_port_only が見る）。残る 2 件（葉が 1 回の順伝播で採点される、完成形の行を 1 つずらすと落ちる正の対照）は拒否に依存しない試験なので、`_with_feint` をやめて mid-game の node そのもの（`_plain`）で回すようにした。skip 3 → 0、両方とも通る
+* 変更で影響する 24 ファイル（heavy.py --cores 1、-n 0）: 290 passed・1 skipped（test_port_coverage の vendor、worktree に submodule が無い）・1 xfailed（Flash Fire、元から）。README 等を直した後に文書を読む 6 ファイル: 52 passed・1 skipped（同じ vendor）
+* `ci_skip_audit`（上の junit）: 分類されない skip 0（vendor 1 は申告どおり）
+* 全体テストは回していない（調整役が回す）
+
+### 5. 生成のバイト一致と壁時計（`tools/diff_generation.py`、heavy.py --cores 1）
+
+消す前 = 471b98e の configs・examples・src・tools を `C:/tmp/ika212/before` に展開し、data の pool・priors・reportworm・standings を複写。exe は両方ともこの枝の build（Rust の変更はコメントだけ）。PYTHONHASHSEED=0。1 本の diff_generation の中で前 → 後の順、それを 2 回。
+
+```
+                                                 前        後        同一の局   record のハッシュ（searchSeconds・engine を除く）
+M-C 価値関数 20 局 seed 11 一様選出   1 回目    25.4 s   24.8 s   20/20      bab3fc737750b2d9 = bab3fc737750b2d9
+（value-gen11L、cpu）                 2 回目    24.9 s   24.8 s   20/20      同上
+M-B 隠蔽 20 局 seed 5（--hide-bench）  1 回目     6.4 s    6.4 s   20/20      309627762ec1ecbd = 309627762ec1ecbd
+                                      2 回目     6.3 s    6.4 s   20/20      同上
+M-C hp-share 200 局 seed 7 一様選出   1 回目    44.7 s   44.6 s   200/200    3fad49b4d79390d5 = 3fad49b4d79390d5
+                                      2 回目    45.1 s   46.6 s   200/200    同上
+標本の決定: 価値関数 move 157・replacement 58・selfswitch 5（4 局）、隠蔽 move 186・replacement 52・selfswitch 5（4 局）、
+hp-share move 1,652・replacement 566・selfswitch 45（36 局）
+```
+
+本番の経路は IKA-209 から resolve.py を呼ばないので、局は同じで時間も変わらない（差は交互の中の揺れの幅）。
+
+### 6. 検査
+
+* `cargo build --release`（警告の数は前と同じ 28）・`cargo test --release` 6 passed
+* `port_coverage --check`: ok（inert.rs 120/92・modelled.rs 198/155、どちらもバイト一致）。`ENGINE_FILES`（port_gate_audit が読む「Python のエンジン」）から resolve.py を外した
+* `port_gate_audit --check`: ok（M-B・M-C）。resolve.py を外したら `truant` が「Python が名前を出し port が出さない」から外れた（471b98e の resolve.py:1788 の docstring の引用だけが名前を出していた）ので `KNOWN_UNREFERENCED` から外し、理由を書いた
+* `agent_drift --check`: ok（消した道具の `EXPECTED`・`EXCUSED_ARGS` の行を消した）
+* ruff（src・tools・tests 全体）: ok
+* **道具が読み込めること**: tools/*.py と tools/oneshot/*.py の 100 本すべてを、`__main__` でない module として 1 本ずつ別 process で読み込み、`pokeuraou.resolve` が sys.modules に無いことも確かめた: 100/100（`C:/tmp/ika212/tool_imports.py`、43 s）。**正の対照**: 471b98e の why_action・diverge_report・budget_effect を同じ仕掛けで読むと 3 本とも落ちる（自分の木の src の resolve.py を読み込む）。diff_replacement は 471b98e でも import を関数の中に遅らせていたので通る（仕掛けは読み込みしか見ない）
+* `.github/workflows/ci.yml`: 消した道具を呼ぶ手順は無かった（`agent_drift`・`port_gate_audit`・`port_coverage`・`fetch_priors`・`ci_skip_audit`・cargo だけ）
+
+### 7. README の変更
+
+* `rust/README.md`: 「検証」の「Python がオラクル、Showdown は Python のオラクル」を「鎖は Showdown → port の 1 段」に替え、今の道具（オラクルのテスト・diff_turn・diverge_report・diff_replacement・diff_damage 等・diff_generation）と、main.rs の自己試験が古い fixture の回帰試験であることを書いた。下の表は「Python がオラクルだった頃（9/12〜9/23）の記録」と断った。「推測せず拒否する」に今の契約（Showdown と同じ答え、拒否は止まる）の注、「使い方」を「既定でオン・唯一の道」に、「走らせ方」から dump_*・diff_node・diff_narrow を外して diff_turn・diverge_report・diff_replacement・diff_generation に替えた
+* `README.md`: モジュール一覧の resolve.py を port.py・rustnode.py・budget.py・fold.py に、道具の一覧から bench・profile_resolve・selfplay_budget を外し、コマンド例から bench・profile_resolve・selfplay_budget を外した。数字の表の Python の `resolve_turn` の行と selfplay_budget の節には「IKA-212 で削除」と注した
+* `docs/tools-inventory.md`: 先頭に IKA-212 で消した道具の一覧（表の行は残す）
+* CLAUDE.md は無い。TODO.md の既存の行は変えていない
+
+### 8. 別課題の候補
+
+* **3 体以上の同速を報告しない**: `tie_permutations` は 2 体の同速だけを展開し、3 体以上は正規の順のまま報告もしない（Python の docstring は「報告する」と書いていたが、コードは Python も同じ）。ダブルで 3〜4 体が同速になる局面は稀だが、黙っている
+* **main.rs の `turns` の fixture が古い**: $M/rust/turns.json（9/19）は 955 件中 295 件が当時の Python の答えと違う（規則の修正で）。書き出す道具が消えたので作り直せない。Showdown の記録から作る fixture か、port 自身の snapshot（規則を直したら差分を読んで更新する）に替えるか、自己試験の `turns` を捨てるか
+* **port_gate_audit の 2 つ目の問い**（「gate が通し、Python が名前を出し、port が出さない」）は、残った Python のモジュール（damage・speed 等）を「Python のエンジン」として読んでいる。本来の問いは「Showdown が作用するのに port が名前を出さない」で、port_coverage の modelled と同じく dump の `customHooks` で決め直すのが筋（IKA-222 の 41 id と同じ種類）
+* **`port_coverage.mentioned` はコメントの中の引用符付きの id も「port が名前を出す」と読む**: 今回、コメントに Showdown の `'truant'` を引用しただけで modelled.rs が変わった。コメントを除いて走査する方が安全
+* **diverge_report は port と Showdown の両方が止まった途中交代のターンを続けない**（diff_turn は IKA-217 で続ける）。同じ `follow_port` を使えば順位に自交代のターンが入る
+* **前からの死にコード**（resolver 以外）: speed の `ORDER_RESIDUAL`・`_PRIORITY_ABILITIES`・`SPEED_CHANGING_EFFECTS`・`SpeedReport`/`speed_comparison_report`、effects の `_rain`、view の `clear_stats_memo`、moveinfo の `COUNTER_MOVES`、regulation の `BOOST_INDEX`（471b98e でも誰も読まない）
+* rust/src のコメントに「Python's `_x`」が 204 か所残る。resolve.rs の先頭に読み方を書いたが、少しずつ Showdown の名前での説明に置き換えると読みやすい
+* 残った Python の規則コード（damage・speed・effects・moveinfo・actions）は port と二重管理のまま（IKA-204 §3 の「推論も port に寄せる」は別課題）
+
+### 9. 機械（heavy.py、IKA-212）
+
+```
+cargo build --release（--cores 8）   3 回 27・22・22 s
+cargo test --release（--cores 8）    1 回 9 s（6 passed）
+テストファイル（--cores 1、-n 0）    2 回 37・40 s
+道具の読み込み（--cores 1）          2 回 44・43 s（1 回目は仕掛けの不具合＝module を sys.modules に入れず dataclass が落ちた、で 12 本が偽の失敗）
+diff_generation（--cores 1）          6 回 50・13・50・13・90・92 s（計 5.1 分）
+main.rs の自己試験（--cores 1）       3 回 各 1 s 未満（1 回は exe の相対パスで起動できず）
+collect・ruff・port_coverage・port_gate_audit・agent_drift・ci_skip_audit（heavy.py 外、1 コア）  計 約 1 分
+```

@@ -60,24 +60,18 @@ AGENT_ARGS = (
 )
 #: One argument a tool may omit for a reason, where excusing the whole file in `EXPECTED`
 #: would also excuse every other argument it might stop passing later.
-EXCUSED_ARGS = {
-    "branch_dedup.py": {
-        "bench_prior": "draws both fours uniformly with no book, and against a uniform "
-        "draw the uniform belief is the true one -- what generation holds on a book miss",
-    },
+EXCUSED_ARGS: dict[str, dict[str, str]] = {
+    # `branch_dedup.py` stood here (bench_prior) until IKA-212 deleted it.
 }
 #: Tools that drive something other than a full game on purpose, so a missing argument is
 #: a choice rather than a drift. Each one says why.
 EXPECTED = {
     "diff_generation.py": "differential harness: compares two engines on identical inputs",
-    "diff_narrow.py": "differential harness for narrowing itself",
-    "diff_node.py": "differential harness for one node",
-    "diff_solve_node.py": "differential harness for one node",
-    "dump_turn_cases.py": "dumps positions; the agent is not the subject",
+    # diff_narrow, diff_node, diff_solve_node, dump_turn_cases and cells_needed stood here
+    # until IKA-212 deleted them with Python's resolver.
     "bench_generation.py": "throughput benchmark; the agent is the variable being swept",
     "profile_generation.py": "profiler",
     "worker_growth.py": "throughput benchmark",
-    "cells_needed.py": "counts cells; plays nothing that is scored",
 }
 #: The tools that drift as of 2026-09-19, recorded so that `--check` can fail on an
 #: eighth without first demanding these seven be fixed. Not an excuse: a board number from

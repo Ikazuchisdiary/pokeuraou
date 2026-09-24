@@ -723,8 +723,12 @@ pub fn crit_stage(reg: &Reg, attacker: &Battler, move_id: &str) -> i64 {
     stage
 }
 
+/// Crit multiplier denominators by crit stage, gen 7+ (`critMult` in battle-actions.ts).
 const CRIT_MULT: [i64; 5] = [0, 24, 8, 2, 1];
 
+/// Exact crit probability, or 0 when the defender cannot be crit. Showdown clamps
+/// `critRatio` to 0..4 and looks up `critMult = [0, 24, 8, 2, 1]`: a ratio of 0 never crits,
+/// and a ratio of 4 always does.
 pub fn crit_probability(reg: &Reg, attacker: &Battler, defender: &Battler, move_id: &str) -> f64 {
     if defender.ability == "battlearmor" || defender.ability == "shellarmor" {
         return 0.0;

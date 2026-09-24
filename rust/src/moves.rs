@@ -2,7 +2,9 @@
 //!
 //! Split from `resolve.rs` only for length; the state it works on is `resolve::Turn`.
 //! Every path that meets something this port does not model returns `Err(reason)` so the
-//! caller can fall back to Python rather than take a wrong answer.
+//! caller stops rather than take a wrong answer (it fell back to Python until IKA-209; the
+//! Python resolver is gone since IKA-212 -- see the head of `resolve.rs` for what "Python's
+//! `_x`" in these comments names).
 
 use crate::battler::Battler;
 use crate::damage::{calculate, crit_probability};
@@ -24,7 +26,9 @@ use serde_json::{json, Value};
 
 const RECHARGE: &str = "recharge";
 
-/// Protect-family volatiles, and what each blocks.
+/// Protect-family volatiles, and what each blocks. Endure is deliberately absent: it is a
+/// stalling move that shares the counter, but its volatile caps damage rather than blocking
+/// the hit, so it is handled in `deal_damage` instead.
 const PROTECT_VOLATILES: [(&str, &str); 9] = [
     ("protect", "all"),
     ("detect", "all"),
@@ -83,6 +87,17 @@ pub(crate) fn do_move<'a>(
     budget: Budget,
 ) -> Result<Vec<Outcome<'a>>, String> {
     let move_id = action.move_id.ok_or("a move action with no move")?;
+    // The turn after Hyper Beam: nothing happens, and the lock lifts. Showdown's
+    // `mustrecharge` condition has `onBeforeMovePriority: 11` and an `onBeforeMove` that
+    // adds the `cant` line, removes itself (and Truant's volatile) and returns null.
+    // Priority 11 is above sleep's 10 and flinch's 8, so the recharge is spent even by a
+    // Pokemon that could not have moved anyway -- which is why this sits ahead of `can_act`.
+    // No PP is spent: there is no move slot to spend it from, and Showdown's request
+    // confirms it (Hyper Beam stays at 7 of 8 across the recharge turn). Truant is not
+    // modelled; the volatile's `duration: 2` is not tracked either, since the only way to
+    // hold it past this point is to be forced out, and a switch clears volatiles anyway.
+    // (Showdown's quoted ids are left unquoted here on purpose: `tools/port_coverage.py`
+    // reads a quoted id anywhere in the port as the port naming it.)
     if move_id.as_str() == RECHARGE {
         if let Some(mon) = turn.mon_at_mut(action.side, action.slot) {
             mon.volatiles.retain(|v| v.id.as_str() != "mustrecharge");
@@ -280,6 +295,14 @@ pub(crate) fn rampage_move(mon: &crate::position::Pokemon) -> Option<Id> {
 
 /// `onStart` (duration 2, the move; the roll waits for `roll_rampage`) or `onRestart`
 /// (duration back to 2 while `trueDuration >= 2`).
+///
+/// `self: {volatileStatus: 'lockedmove'}` landing: Outrage, Petal Dance, Raging Fury,
+/// Thrash. `after_move` calls it only once the move reached a target, which is `selfDrops`.
+/// `onStart` also rolls `trueDuration = random(2, 4)`, but nothing reads it until the second
+/// turn, so `roll_rampage` branches it there, where the two lengths first differ (continue,
+/// or stop and be confused) -- rather than doubling every first turn's leaves into pairs no
+/// one-ply payoff or encoding can tell apart. A bare recorded one (before IKA-174, with no
+/// move or length) is replaced, not restarted.
 pub(crate) fn start_rampage(turn: &mut Turn, side: usize, slot: usize) {
     let Some(mon) = turn.mon_at_mut(side, slot) else { return };
     if mon.fainted {
@@ -303,6 +326,11 @@ pub(crate) fn start_rampage(turn: &mut Turn, side: usize, slot: usize) {
 }
 
 /// The length on the second turn when the position lacks it: 1 or 2 left, a half each.
+///
+/// `random(2, 4)` at the start, one taken off by the first turn's residual: 1 left is a
+/// two-turn rampage, 2 a three-turn one. Showdown's own positions carry it and never branch
+/// here. A budget that collapses the random ranges takes the short one, which is also what
+/// the oracle's pinned `random(a, b)` answers (as `multihit_counts`).
 fn roll_rampage<'a>(
     turn: &mut Turn<'a>,
     action: &QueuedAction,
@@ -342,6 +370,8 @@ fn roll_rampage<'a>(
     Some(out)
 }
 
+/// `onEnd`'s test, `trueDuration > 1` returning early: whether the rampage ran its full
+/// length, which is when it confuses.
 fn rampage_last_turn(turn: &mut Turn, left: Option<i64>) -> bool {
     match left {
         Some(left) => left <= 1,
@@ -353,6 +383,11 @@ fn rampage_last_turn(turn: &mut Turn, left: Option<i64>) -> bool {
 }
 
 /// `onAfterMove`: `if (duration === 1) removeVolatile('lockedmove')`, then `onEnd`.
+///
+/// It runs after every move the Pokemon made, hit or not -- a Protect on the second turn
+/// skipped the restart, so the rampage ends there. A Pokemon that could not move (flinch,
+/// sleep, paralysis, its own confusion) never gets here; its rampage runs out at the
+/// residual instead (`rampage_runs_out`).
 fn rampage_after_move(turn: &mut Turn, action: &QueuedAction) {
     let left = match turn.mon_at(action.side, action.slot).and_then(|m| m.volatile("lockedmove")) {
         Some(held) if held.move_id.is_some() && held.duration == Some(1) => rampage_left(held),
@@ -368,7 +403,8 @@ fn rampage_after_move(turn: &mut Turn, action: &QueuedAction) {
 }
 
 /// The rampage's `onEnd` confusion: Own Tempo and grounded under Misty Terrain refuse it;
-/// the berries are every confusion's, in `start_confusion` (IKA-177).
+/// the berries are every confusion's, in `start_confusion` (IKA-177). Safeguard does not,
+/// since the rampage has no source other than itself.
 fn confused_by_fatigue(turn: &mut Turn, side: usize, slot: usize) {
     match turn.mon_at(side, slot) {
         Some(mon) if !mon.fainted && !mon.has_volatile("confusion") => {}
@@ -381,6 +417,11 @@ fn confused_by_fatigue(turn: &mut Turn, side: usize, slot: usize) {
 
 /// `addVolatile('confusion', source)`: `TryAddVolatile`, `start_confusion`, then Own
 /// Tempo's `onUpdate` for a Mold Breaker move that got past it -- Python's `_confuse`.
+///
+/// Every confusion goes through here -- a status move's, a secondary's, the fatigue's. Only
+/// a Mold Breaker move gets past Own Tempo's `onTryAddVolatile`: the confusion then starts,
+/// a Persim or Lum Berry eats it, and otherwise `onUpdate` cures it at once
+/// (vendor/pokemon-showdown/data/abilities.ts `owntempo`; the oracle eats the berry).
 pub(crate) fn confuse(turn: &mut Turn, side: usize, slot: usize, source: Option<Slot>) {
     match turn.mon_at(side, slot) {
         Some(mon) if !mon.fainted && !mon.has_volatile("confusion") => {}
@@ -646,6 +687,11 @@ fn set_extra(effect: &mut Effect, key: &str, value: Option<Value>) {
 
 /// `addVolatile('confusion')`: `onStart` (the roll waits for `roll_confusion`; tries are
 /// counted meanwhile), then a Persim or Lum Berry's `onUpdate` unless Unnerve forbids.
+///
+/// `onStart` rolls `time = random(2, 6)`, but nothing reads it before a try where the
+/// lengths first differ, so the roll waits -- as the rampage's length waits for its second
+/// turn (IKA-174). The berries' `onUpdate` eats whenever `volatiles['confusion']`, whatever
+/// confused the holder (the resolver once ate them only for a rampage's fatigue).
 pub(crate) fn start_confusion(turn: &mut Turn, side: usize, slot: usize) {
     let berry = {
         let Some(mon) = turn.mon_at_mut(side, slot) else { return };
@@ -676,12 +722,17 @@ fn confused_by_axe_kick(turn: &mut Turn, target: Slot) {
     }
 }
 
+/// `move.flags['defrost'] && !(move.id === 'burnup' && !pokemon.hasType('Fire'))`.
 fn defrosts(turn: &Turn, mon: &crate::position::Pokemon, mv: &Move) -> bool {
     mv.has_flag(F_DEFROST) && !(mv.id == "burnup" && !turn.types_of(mon).contains("Fire"))
 }
 
 /// Whether this try gets as far as confusion's `onBeforeMove`: past a flinch, and past a
 /// sleep or a freeze only when it wakes or thaws for certain.
+///
+/// Confusion's `onBeforeMove` is priority 3, below a flinch (8), a sleep (10) and a freeze
+/// (10). A freeze left to its 1-in-4 is not reached, as `can_act` does not look at
+/// confusion there.
 fn confusion_reached(turn: &Turn, mon: &crate::position::Pokemon, mv: &Move) -> bool {
     if mon.fainted || mon.has_volatile("flinch") || taunt_stops(mon, mv) {
         return false;
@@ -698,6 +749,11 @@ fn confusion_reached(turn: &Turn, mon: &crate::position::Pokemon, mv: &Move) -> 
 
 /// The chance this try ends the confusion given the ones before did not: 0 before `min`,
 /// then one in `6 - k` at try k; the shortest length when the checks are collapsed.
+///
+/// `time` is uniform on min..5 and try k cures when `time == k`, so after k - 1 tries it is
+/// uniform on max(min, k)..5, and try k cures one time in `6 - k` once `k >= min`: 0, 1/4,
+/// 1/3, 1/2, 1 for the plain confusion. The shortest length is also the oracle's pinned
+/// `random(a, b)`, `a`.
 fn confusion_cure_chance(held: &Effect, budget: &Budget) -> f64 {
     let tries = extra_int(held, CONFUSION_TRIES).unwrap_or(0) + 1;
     let low = extra_int(held, CONFUSION_MIN).unwrap_or(2);
@@ -712,6 +768,12 @@ fn confusion_cure_chance(held: &Effect, budget: &Budget) -> f64 {
 
 /// Python's `_roll_confusion`: cured now (`time` 1) or one more try, when the position
 /// does not carry the length.
+///
+/// At the head of the move, as `roll_rampage`, because the two outcomes are different
+/// states and `can_act` answers weights. Branching per try rather than rolling the whole
+/// length once keeps the leaves to two a try; a length rolled at the first try that can end
+/// would split the rest into three or four states no encoding tells apart. Showdown's own
+/// positions carry `time` and never branch.
 fn roll_confusion<'a>(
     turn: &mut Turn<'a>,
     action: &QueuedAction,
@@ -797,11 +859,24 @@ fn confusion_stage(
 
 /// Python's `_taunt_stops`: Taunt's `onBeforeMove` (priority 5) stops a status move but
 /// Me First, before PP or a Choice lock (IKA-188).
+///
+/// ```text
+/// if (!(move.isZ && move.isZOrMaxPowered) && move.category === 'Status' && move.id !== 'mefirst') {
+///     this.add('cant', attacker, 'move: Taunt', move);
+///     return false;
+/// }
+/// ```
+///
+/// `onDisableMove` only shapes the next request, so this is what stops a status move chosen
+/// before the Taunt landed -- a Prankster Taunt, then the Tailwind. No PP is spent and no
+/// Choice lock is set: both come after `BeforeMove`.
 fn taunt_stops(mon: &crate::position::Pokemon, mv: &Move) -> bool {
     mon.has_volatile("taunt") && mv.category == "Status" && mv.id.as_str() != "mefirst"
 }
 
 /// Python's `_taunt_stage`: Taunt's check, then confusion's (5 is above confusion's 3).
+/// 5 is below sleep and freeze (10) and flinch (8), and above confusion (3) and paralysis
+/// (1), so a taunted status move spends no confused try.
 fn taunt_stage(
     turn: &mut Turn,
     action: &QueuedAction,
@@ -852,6 +927,9 @@ fn can_act(
     }
 
     if is(status, "slp") {
+        // `slp.onBeforeMove` decrements the counter when the Pokemon tries to move and cures
+        // it at zero, so waking happens here rather than at end of turn. The duration was
+        // set when sleep was applied and is part of the state, so this is deterministic.
         let woke = {
             let mon = turn.mon_at_mut(action.side, action.slot).unwrap();
             let mut counter = mon.status_counter.unwrap_or(0) - 1;
@@ -891,6 +969,8 @@ fn can_act(
             log_event!(turn, "{} thawed ({})", Name(action.side, action.slot), mv.id);
             return Ok(taunt_stage(turn, action, mv, budget));
         }
+        // `time--; if (time <= 0 || randomChance(1, 4))` -- the counter is spent on the
+        // attempt to move, and reaching zero thaws regardless of the roll.
         let thawed = {
             let mon = turn.mon_at_mut(action.side, action.slot).unwrap();
             let counter = mon.status_counter.unwrap_or(FREEZE_COUNTER) - 1;
@@ -1012,6 +1092,15 @@ fn priority_blocked_by(
 /// move only when the lock is new -- a Struggle while locked leaves it on the locked move
 /// (IKA-179). A lock naming no move slot (a record's lock on `struggle`) is one Showdown's
 /// end of turn had dropped, so it locks afresh. Python's `_live_choice_lock`.
+///
+/// Any Choice item, not just the Scarf: the dump says which. Only the move that *started*
+/// the lock is recorded, because `addVolatile` on a volatile already there does not run
+/// `onStart` again. Overwriting it every move once let a Choice item stop being one: the
+/// locked move ran out of PP, the holder Struggled, Struggle rewrote the lock to `struggle`
+/// -- in nobody's move list -- and the legality rule dropped it as stale and offered the
+/// whole moveset back (a Choice Scarf Garchomp locked into Earthquake for ten turns
+/// Struggled on the eleventh and picked Stomping Tantrum on the twelfth). Showdown keeps
+/// the lock on Earthquake and Struggles for the rest of the game.
 fn lock_choice(turn: &mut Turn, side: usize, slot: usize, move_id: Id) {
     let Some(mon) = turn.mon_at_mut(side, slot) else { return };
     let stale = mon
@@ -1106,7 +1195,9 @@ fn use_move<'a>(
         }
     }
 
-    // `runMove` increments this before `onTry` runs.
+    // `runMove` increments this before `onTry` runs, so the counter is 1 during the first
+    // move a Pokemon makes after coming in. Last Resort fails until every *other* move the
+    // Pokemon knows has been used, and needs at least two moves to begin with.
     let first_turn_failure = {
         let Some(mon) = turn.mon_at_mut(action.side, action.slot) else {
             return Ok(vec![(1.0, turn)]);
@@ -1125,6 +1216,9 @@ fn use_move<'a>(
         return Ok(vec![(1.0, turn)]);
     }
 
+    // The target must still be *waiting* to attack. One that already moved this turn --
+    // commonly a faster Aqua Jet in the same priority bracket -- leaves nothing to counter,
+    // and Showdown's `willMove` returns nothing.
     if move_id.as_str() == "suckerpunch" {
         let candidates = resolve_targets(reg, &mut turn, action, mv)?;
         let pending = candidates.iter().any(|slot| {
@@ -1139,10 +1233,10 @@ fn use_move<'a>(
         }
     }
 
-    // A move that spends a turn winding up. Python models exactly this much of them and
-    // no more -- there is no semi-invulnerability anywhere in the engine -- so Fly and Dig
-    // have the same shape here as Solar Beam, and having the same shape is the whole
-    // requirement: the oracle for this port is Python, not Showdown.
+    // A move that spends a turn winding up. Exactly this much of them is modelled and no
+    // more -- there is no semi-invulnerability anywhere in the engine -- so Fly and Dig have
+    // the same shape here as Solar Beam. (This was written when the port's oracle was
+    // Python; since IKA-212 it is Showdown, against which Fly and Dig are not modelled.)
     if let Some((_, skip_weather)) =
         TWO_TURN_MOVES.iter().find(|(id, _)| *id == move_id.as_str())
     {
@@ -1357,6 +1451,9 @@ fn move_hits_multiple(reg: &Reg, move_id: &str, live_targets: usize) -> bool {
     }
 }
 
+/// Which (side, slot) the move actually hits, after redirection. "If a targeted foe faints,
+/// the move is retargeted" (`Battle#getTarget`): a move whose target has already fallen this
+/// turn hits the other one rather than failing.
 fn resolve_targets(
     reg: &Reg,
     turn: &mut Turn,
@@ -1436,6 +1533,10 @@ fn resolve_targets(
     Ok(if live(turn, chosen.0, chosen.1) { vec![chosen] } else { Vec::new() })
 }
 
+/// Follow Me / Rage Powder / Spotlight, then the type-drawing abilities. Rage Powder is a
+/// powder effect, so it does not pull in a move used by a Grass type, a Safety Goggles
+/// holder or an Overcoat Pokemon; the exemption is on the move's user, not on the
+/// redirector, and Follow Me has no such exemption.
 fn redirection_target(
     turn: &Turn,
     action: &QueuedAction,
@@ -1500,6 +1601,11 @@ fn is_protect_volatile(id: &str) -> bool {
 
 /// Strips the guards a `breaksProtect` move tears down, for the rest of the turn.
 ///
+/// Letting the move through was only half of it: if the volatile survived, the target's
+/// *partner* was still protected and the point of Feint in doubles -- break the Protect,
+/// then hit with the partner -- never happened. Breaking anything also clears `stall`, so
+/// the target's next Protect is certain again instead of one in three.
+///
 /// Python's `_break_protection`, line for line: every protect-family volatile in
 /// `PROTECT_VOLATILES` (not Showdown's literal seven, because Detect stays `detect` here),
 /// then the side's breakable guards, and when anything broke, the target's `stall`.
@@ -1549,6 +1655,8 @@ fn break_protection(turn: &mut Turn, action: &QueuedAction, targets: &[Slot]) {
     }
 }
 
+/// Whether a Protect-family effect or a guard blocks this hit. A same-side target is still
+/// protected: Earthquake hits its own partner, and a partner behind Protect is not hit.
 fn blocked_by_protect(
     turn: &Turn,
     action: &QueuedAction,
@@ -1585,6 +1693,17 @@ fn blocked_by_protect(
 /// Python's `multihit_counts`. A [2, 5] move is 35-35-15-15, Showdown's
 /// `sample([2 x7, 3 x7, 4 x3, 5 x3])`, and Skill Link takes the upper end before anything
 /// is drawn, under every budget (IKA-160).
+///
+/// The source is `hitStepMoveHitLoop`'s
+/// `sample([2, 2, 2, 2, 2, 2, 2, 3, 3, 3, 3, 3, 3, 3, 4, 4, 4, 5, 5, 5])`
+/// (vendor/pokemon-showdown/sim/battle-actions.ts:869-870, and the champions mod's copy in
+/// data/mods/champions/scripts.ts:440-441). It was 1/3, 1/3, 1/6, 1/6 -- the older
+/// `[2, 2, 3, 3, 4, 5]` -- until IKA-160; 200,000 real turns of Bullet Seed in the Champions
+/// format came out 35.0 / 35.1 / 14.9 / 14.9 (and a Skill Link user's 200,000 all 5). Under a
+/// budget that does not enumerate it the count is the minimum, which is what Showdown's
+/// `multihit='min'` policy produces (`sample` returns the first element, `random(a, b)`
+/// returns `a`). Loaded Dice is `isNonstandard: "Past"` in both Champions mods and is not
+/// modelled.
 fn multihit_counts(mv: &Move, budget: &Budget, ability: &str) -> Vec<(usize, f64)> {
     let Some(multihit) = mv.multihit.as_ref() else { return vec![(1, 1.0)] };
     if let Some(fixed) = multihit.as_u64() {
@@ -1615,6 +1734,16 @@ fn multihit_counts(mv: &Move, budget: &Budget, ability: &str) -> Vec<(usize, f64
     (0..span).map(|i| (low + i, 1.0 / span as f64)).collect()
 }
 
+/// One damaging hit on one target, enumerating accuracy, crit and damage roll.
+///
+/// With accuracy not enumerated the move hits: that is what the budget means, and it is
+/// what Showdown's pinned `accuracy: 'hit'` policy does (deciding by whether the accuracy
+/// exceeds 50% would make Hurricane miss in sun). The damage passed on is the raw roll, not
+/// one capped at the target's HP: `deal_damage` owns the cap *and* the Focus Sash / Sturdy
+/// consumption that goes with it, and capping here as well would leave the item on the
+/// field. Between the hits of a multi-hit move the defender's state has moved on -- Stamina
+/// has raised its Defence, a berry has fired, its HP is lower for a fraction-of-HP move --
+/// so each later hit's damage is computed again rather than reused.
 #[allow(clippy::too_many_arguments)]
 fn hit_target<'a>(
     reg: &'a Reg,
@@ -1910,6 +2039,13 @@ fn hit_target<'a>(
     Ok(outcomes)
 }
 
+/// Hit chance in [0, 1].
+///
+/// Toxic never misses when a Poison type uses it, from gen 8 on. The rule is not in the
+/// move's data -- `toxic` still says `accuracy: 90`, with a comment pointing at the hook --
+/// so reading the dump alone leaves a Poison type's Toxic failing one time in ten:
+/// `move.alwaysHit || (move.id === 'toxic' && this.battle.gen >= 8 &&
+/// pokemon.hasType('Poison')) || ... accuracy = true`.
 fn accuracy_of(turn: &Turn, mv: &Move, attacker: &Battler, defender: &Battler) -> f64 {
     if mv.accuracy.is_none() || mv.always_hit {
         return 1.0;
@@ -1957,6 +2093,7 @@ fn accuracy_of(turn: &Turn, mv: &Move, attacker: &Battler, defender: &Battler) -
     (accuracy / 100.0).clamp(0.0, 1.0)
 }
 
+/// Spiky Shield and friends punish the blocked attacker (contact moves only).
 fn protect_punish(
     turn: &mut Turn,
     action: &QueuedAction,
@@ -1995,6 +2132,9 @@ fn protect_punish(
     Ok(())
 }
 
+/// What an immune defender gains from the hit it just shrugged off. Treating these purely
+/// as immunities loses half the mechanic: Dry Skin heals off a Water move and Lightning Rod
+/// gains Special Attack from an Electric one, and either can decide the next turn.
 fn absorb(turn: &mut Turn, mv: &Move, target: Slot) {
     let (ability, maxhp) = match turn.mon_at(target.0, target.1) {
         None => return,
@@ -2032,6 +2172,30 @@ fn absorb(turn: &mut Turn, mv: &Move, target: Slot) {
     }
 }
 
+/// Drain, item reactions, contact effects and secondaries, for one hit on one target.
+///
+/// `landed` is any hit that reached the target, including the two that deal 0: a hit
+/// Disguise took, and a hit into Endure at 1 HP. 0 is still a damaging hit to Showdown --
+/// `DamagingHit` runs for any numeric damage -- so the handlers gated on `landed` fire for
+/// them too (IKA-157, IKA-171). A damaging move can also carry a volatile or a status
+/// outright, not only as a chance-based secondary: Infestation's trap, Salt Cure, Nuzzle's
+/// paralysis; a trap records who applied it, since it ends when that Pokemon leaves.
+///
+/// Spicy Spray (Mega Scovillain) is an `onDamagingHit` too, but *not* contact-gated and not
+/// rolled -- `onDamagingHit(damage, target, source, move) { source.trySetStatus('brn',
+/// target); }` -- so any damaging hit burns the attacker, Moonblast included. It was once
+/// declared modelled because it changes no damage number, which was true of the calculator
+/// and wrong of the resolver; unlike Static and Flame Body (1-in-3, reported rather than
+/// branched) it is certain and simply applied. The contact effects run from `damage()`,
+/// before the faint is processed, so Rough Skin still hurts the attacker when the Pokemon
+/// holding it is knocked out by that very hit.
+///
+/// A secondary under a budget that does not branch them is collapsed to "it did not
+/// happen" and said out loud, because under such a budget a Rock Slide never flinches --
+/// except under the pinned policy, where the oracle answers every secondary roll with no,
+/// so the collapse is exact and declaring it would flag turns that are right. A branched one
+/// is pushed to `pending_secondaries`: this function holds one state, and the hit loop fans
+/// it out.
 fn after_hit(
     turn: &mut Turn,
     action: &QueuedAction,
@@ -2144,7 +2308,10 @@ fn after_hit(
         turn.report("ability: poisontouch (30% poison not branched)");
     }
 
-    // A resist berry is eaten only by a hit it actually weakened.
+    // A resist berry is eaten only by a hit it actually weakened. Occa Berry's handler is
+    // `if (move.type === 'Fire' && typeMod > 0) { if (target.eatItem()) ... }`, so a Fire
+    // move that is *not* super effective leaves the berry alone. Chilan Berry is the one
+    // exception: it halves Normal regardless of effectiveness.
     let eats_berry = match turn.mon_at(target.0, target.1) {
         None => false,
         Some(mon) if mon.fainted => false,
@@ -2309,6 +2476,16 @@ fn apply_secondary(
     Ok(())
 }
 
+/// Fans one resolved hit out over the secondaries it would roll: (weight, state) pairs
+/// summing to one, and the state itself when nothing is pending, which is the
+/// overwhelmingly common case.
+///
+/// Each secondary is independent, so the fan-out is a cross product, capped at
+/// `MAX_BRANCHED_SECONDARIES` per hit: each doubles the states for that hit and the turn's
+/// tree is the product over every hit, so four targets each carrying two secondaries would
+/// be 256 states from this alone. Two is enough for every real move (a spread move's two
+/// targets each carry one); past the cap the rest are collapsed to "did not happen" and
+/// reported.
 fn spread_secondaries<'a>(
     mut state: Turn<'a>,
     action: &QueuedAction,
@@ -2366,6 +2543,22 @@ fn spread_secondaries<'a>(
     Ok(out)
 }
 
+/// Abilities that trigger on the defender taking a hit: (stat changes, the move types that
+/// trigger it -- empty means any type). The ones whose effect depends on how much HP was
+/// lost or on a chance are not modelled and are reported.
+///
+/// Toxic Debris (IKA-173):
+///
+/// ```text
+/// onDamagingHit(damage, target, source, move) {
+///     const side = source.isAlly(target) ? source.side.foe : source.side;
+///     const toxicSpikes = side.sideConditions['toxicspikes'];
+///     if (move.category === 'Physical' && (!toxicSpikes || toxicSpikes.layers < 2)) {
+/// ```
+///
+/// The attacker's side, or its foe's for a partner's hit: the side across from Glimmora
+/// either way, so the attacker's side is not read. `onDamagingHit` runs before the faint is
+/// processed, so a Glimmora knocked out by the hit lays them too.
 fn on_being_hit(
     turn: &mut Turn,
     mv: &Move,
@@ -2419,9 +2612,11 @@ fn attacker_ability_of(turn: &Turn, me: Slot) -> Option<Id> {
 
 /// Records that the user of a self-switching move has to be replaced.
 ///
-/// Which Pokemon comes in is the player's choice, so nothing is picked here. A Pokemon with
-/// an empty bench is not marked at all -- Showdown's `switchFlag` has nothing to answer it
-/// with, and the move simply leaves it in place.
+/// Which Pokemon comes in is the player's choice, so nothing is picked here. The mark is what
+/// suspends the turn: `run_queue` sees it and hands the branch back with its remaining
+/// queue, and `resume_turn` continues once the choice is made. A Pokemon with an empty bench
+/// is not marked at all -- Showdown's `switchFlag` has nothing to answer it with, and the
+/// move simply leaves it in place.
 fn mark_self_switch(turn: &mut Turn, action: &QueuedAction) {
     let alive = matches!(turn.mon_at(action.side, action.slot), Some(mon) if !mon.fainted);
     if !alive {
@@ -2461,7 +2656,10 @@ fn mark_self_switch(turn: &mut Turn, action: &QueuedAction) {
 // Eject Button, Red Card, Emergency Exit and Wimp Out (IKA-191)
 // ---------------------------------------------------------------------------
 
-/// `resolve.EMERGENCY_EXIT_ABILITIES`: the champions mod's one `onEmergencyExit`.
+/// `resolve.EMERGENCY_EXIT_ABILITIES`: the abilities that switch their holder out when it
+/// drops to half its HP or below. The champions mod gives both the same `onEmergencyExit`
+/// (data/mods/champions/abilities.ts), which no longer clears anyone else's `switchFlag`
+/// (57ecb348b, IKA-164).
 fn is_emergency_exit(ability: &str) -> bool {
     matches!(ability, "emergencyexit" | "wimpout")
 }
@@ -2532,6 +2730,13 @@ fn switch_flagged(mon: &crate::position::Pokemon) -> bool {
 
 /// Python's `_emergency_exit`: the holder's `switchFlag`, answered mid-turn like U-turn's
 /// and after the residual phase with the faint replacements.
+///
+/// The champions mod's `onEmergencyExit`, for a holder that has just crossed half:
+/// `if (!this.canSwitch(target.side) || target.forceSwitchFlag || target.switchFlag)
+/// return; target.switchFlag = true;`. The flag is the same one U-turn sets, so it is
+/// answered the same way: mid-turn it suspends the turn for the holder's player to choose;
+/// after the residual phase it is owed with the faint replacements, which is the one
+/// request Showdown makes there.
 fn emergency_exit(turn: &mut Turn, slot: Slot, mid_turn: bool) {
     let fires = matches!(turn.mon_at(slot.0, slot.1), Some(mon)
         if !mon.fainted && is_emergency_exit(mon.ability.as_str()) && !switch_flagged(mon));
@@ -2604,6 +2809,23 @@ fn by_speed(turn: &mut Turn, slots: Vec<Slot>) -> Result<Vec<Slot>, String> {
 /// Python's `_after_move_secondary_switches`: the user's Emergency Exit from `DamagingHit`
 /// and recoil, then (not under Sheer Force) Eject Button, Red Card and the targets'
 /// Emergency Exit.
+///
+/// Everything between a damaging move's recoil and its Life Orb that switches a Pokemon out
+/// (vendor/pokemon-showdown/data/mods/champions/scripts.ts `hitStepMoveHitLoop`,
+/// data/mods/champions/items.ts, data/items.ts):
+///
+/// 1. The user's Emergency Exit, for Rough Skin, Rocky Helmet (`DamagingHit`) or recoil
+///    taking it across half. A U-turn user's flag is already up, so it never fires.
+/// 2. `afterMoveSecondaryEvent`, which Sheer Force skips: Eject Button (priority 2) on a
+///    target the move reached, unless any active Pokemon's `switchFlag === true` --
+///    U-turn's is the move id, so a U-turn does not stop it, and the champions mod no
+///    longer clears the attacker's flag (aa6d5f085). Then Red Card (priority 0), which drags
+///    the attacker out at random: the forced-switch mark Dragon Tail leaves (IKA-191).
+/// 3. Each target's Emergency Exit, also skipped by Sheer Force.
+///
+/// Holders act in the order `runEvent` sorts their handlers (`by_speed`). The user's
+/// Emergency Exit after `AfterMoveSecondarySelf` (Life Orb) is checked again by
+/// `useMoveInner`; `after_move` does that, and skips it under Sheer Force as Showdown does.
 fn after_move_secondary_switches(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), String> {
     if turn.move_start_hp.is_none() {
         return Ok(());
@@ -2723,6 +2945,10 @@ fn modify(value: i64, modifier: i64) -> i64 {
     (value * modifier + 2047) / 4096
 }
 
+/// `clampIntRange(Math.round(amount * num / den), 1)`, as Showdown does for recoil, drain
+/// and a `heal` field. JavaScript's `Math.round` rounds halves up (Python's `round` rounds
+/// them to even, which the resolver had to work around), and generation 5 on rounds rather
+/// than floors: a quarter of 227 heals 57, not 56.
 fn round_fraction(amount: i64, ratio: &Value) -> i64 {
     let list = ratio.as_array();
     let (numerator, denominator) = match list {
@@ -2737,6 +2963,11 @@ fn round_fraction(amount: i64, ratio: &Value) -> i64 {
 }
 
 /// Python's `_sheer_forced`: `move.hasSheerForce && pokemon.hasAbility('sheerforce')`.
+///
+/// Sheer Force's `onModifyMove` sets `hasSheerForce` only on a move that has secondaries
+/// (`if (move.secondaries && !move.hasSheerForceBoost)`), and deletes them; the flag is what
+/// `useMoveInner` and `afterMoveSecondaryEvent` read to skip `AfterMoveSecondarySelf` (Life
+/// Orb, Shell Bell) and `AfterMoveSecondary` (Scald's thaw).
 fn sheer_forced(turn: &Turn, me: Slot, mv: &Move) -> bool {
     mv.has_secondaries
         && !mv.raw.get("hasSheerForceBoost").and_then(Value::as_bool).unwrap_or(false)
@@ -2764,7 +2995,46 @@ fn thaw_on_hit(turn: &mut Turn, action: &QueuedAction, mv: &Move, target: Slot) 
 }
 
 // ---------------------------------------------------------------------------
-// Substitute (IKA-180): Python's section of the same name, which quotes Showdown.
+// Substitute (IKA-180)
+//
+// vendor/pokemon-showdown data/moves.ts, substitute (the champions mod keeps it):
+//
+//     onTryHit(source) {
+//         if (source.volatiles['substitute']) { ...; return this.NOT_FAIL; }
+//         if (source.hp <= source.maxhp / 4 || source.maxhp === 1) { ...; return this.NOT_FAIL; }
+//     },
+//     onHit(target) { this.directDamage(target.maxhp / 4); },
+//     condition: {
+//         onStart(target) {
+//             this.effectState.hp = Math.floor(target.maxhp / 4);
+//             if (target.volatiles['partiallytrapped']) { ...; delete target.volatiles['partiallytrapped']; }
+//         },
+//         onTryPrimaryHit(target, source, move) {
+//             if (target === source || move.flags['bypasssub'] || move.infiltrates) return;
+//             let damage = this.actions.getDamage(source, target, move);
+//             if (!damage && damage !== 0) { ...; return null; }
+//             if (damage > target.volatiles['substitute'].hp) damage = target.volatiles['substitute'].hp;
+//             target.volatiles['substitute'].hp -= damage;
+//             if (target.volatiles['substitute'].hp <= 0) target.removeVolatile('substitute');
+//             if (damage) this.actions.applyRecoilDamage(damage, move, source);
+//             if (move.drain) this.heal(Math.ceil(damage * move.drain[0] / move.drain[1]), ...);
+//             this.singleEvent('AfterSubDamage', ...); this.runEvent('AfterSubDamage', ...);
+//             return this.HIT_SUBSTITUTE;
+//         },
+//     },
+//
+// and data/mods/champions/scripts.ts `spreadMoveHit`: the check runs for neither a secondary
+// nor a self hit, nor a move whose target is `all`, `allyTeam`, `allySide` or `foeSide`; a
+// HIT_SUBSTITUTE target is `null` from there on, so its damage, the move's own effects, its
+// secondaries, `DamagingHit` (the contact abilities, Rocky Helmet, Cursed Body) and
+// `AfterHit` (Knock Off, Stone Axe) skip it, while `selfDrops` and a secondary's `self` still
+// reach the user. `hitStepMoveHitLoop` counts it 0 towards `totalDamage` (recoil, Shell
+// Bell) and still as a hit (Life Orb, U-turn). A status move gets `null` from `getDamage` and
+// does nothing to that target, and the move is not a failure. The resist berries return
+// early for a hit the doll takes (`hitSub`), and Intimidate skips a Pokemon behind one.
+// A Disguise behind a doll is not the first hit's guard; a multi-hit move that breaks the
+// doll would meet the guard on a later hit, which the hit loop does not follow, so that is
+// said (`hit_target`).
 // ---------------------------------------------------------------------------
 
 const SUBSTITUTE: &str = "substitute";
@@ -2812,6 +3082,12 @@ pub(crate) fn intimidate_meets_substitute(turn: &Turn, target: Slot) -> bool {
 
 /// Python's `_use_substitute`: the two refusals (a failure for Stomping Tantrum), then the
 /// doll at `floor(maxhp / 4)` and the same HP paid by `directDamage`.
+///
+/// `directDamage` meets no Endure, Sash or Magic Guard and marks no hurt. A refusal is
+/// `NOT_FAIL` from `onTryHit`, which the champions mod's `spreadMoveHit` meets first as the
+/// move's own `singleEvent('TryHit')` and turns into `[false]`: a failure Stomping Tantrum
+/// reads. Showdown's position after a second Substitute, or one at a quarter of the HP,
+/// carries `moveLastTurnFailed` (tests/test_substitute.py).
 fn use_substitute(turn: &mut Turn, action: &QueuedAction) {
     let me = (action.side, action.slot);
     let Some(mon) = turn.mon_at_mut(me.0, me.1) else { return };
@@ -2963,6 +3239,17 @@ fn apply_status_move_past_substitutes(
     apply_status_move(reg, turn, action, mv, &applied)
 }
 
+/// Effects that fire once per move use, not once per target.
+///
+/// Showdown computes recoil from `damageDealt` -- the total across every target -- and Life
+/// Orb's recoil and a move's own `self` effect are single `onAfterMoveSecondary` handlers;
+/// running them per target multiplies them by the number of Pokemon hit. Shell Bell heals an
+/// eighth of the move's *total* damage, once, truncated -- so a move dealing under eight
+/// heals nothing. `selfBoost` is a separate field from `self`, applied once after the move
+/// succeeds (Clanging Scales, Clangorous Soul, Scale Shot). The self-switch is `else if
+/// (move.selfSwitch && source.hp && !source.volatiles['commanded'])`, reached only when the
+/// move `didAnything`: a U-turn into a Ghost type, or one that missed, leaves its user in
+/// place. White Herb is `onAnyAfterMove`: every holder on the field is checked.
 fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), String> {
     let me = (action.side, action.slot);
     let total = turn.move_damage_total;
@@ -3069,6 +3356,18 @@ fn helping_hand_fails(turn: &Turn, targets: &[Slot]) -> bool {
     true
 }
 
+/// A status move, which can miss (Hypnosis 60, Will-O-Wisp 85, Thunder Wave 90).
+///
+/// Protect also blocks status moves that carry the `protect` flag, and the accuracy check
+/// is per target. Psychic Terrain comes before Protect, as on the damaging path (IKA-156).
+/// Wide Guard and Quick Guard carry Protect's `onTry() { return !!queue.willAct(); }`
+/// gate: a guard that resolves after everything else has moved has nothing to guard.
+///
+/// Protect's `onTryHit` returns `NOT_FAIL`, which `hitStepTryHitEvent` keeps, so a move
+/// every target of which Protected ends with `moveThisTurnResult` null -- not the `false`
+/// Stomping Tantrum reads. Psychic Terrain's `null` becomes `false` there (`hitResults[i] ||
+/// false`), and an immunity is `false` from the start, so either makes it a failure
+/// (IKA-171).
 fn do_status_move<'a>(
     reg: &'a Reg,
     mut turn: Turn<'a>,
@@ -3179,6 +3478,15 @@ const UNJUDGED_STATUS_EFFECTS: [&str; 9] = [
 
 /// Python's `_apply_status_move_and_judge`: `move_failed` for a status move made only of
 /// declarative effects when none of them did anything to any target (IKA-171).
+///
+/// `runMoveEffects` combines each effect's result per target: a heal on a target at full HP
+/// is `false` outright, a status that did not take is `false` (`if (!hitResult &&
+/// move.status)`), a boost that moved nothing is `null`, and `null` becomes `false` at the
+/// end; a weather or terrain already in place returns `false` from `setWeather` /
+/// `setTerrain`. The move's result is `false` when every target's is, which is a failure for
+/// Stomping Tantrum -- a Recover at full HP (`-fail heal`), a Toxic into a Poison type, a
+/// second Sunny Day. Only the moves made entirely of those declarative effects are judged; a
+/// move with a side condition, a volatile or custom code keeps the old reading.
 fn apply_status_move_and_judge(
     reg: &Reg,
     turn: &mut Turn,
@@ -3239,6 +3547,21 @@ fn apply_status_move_and_judge(
     Ok(())
 }
 
+/// Why this target ignores this move outright, or None if it does not.
+///
+/// Two immunities Showdown checks per target before anything else happens, both read from
+/// the regulation's `effectImmunities` rather than written down here.
+///
+/// **Powder.** `hitStepTryImmunity`: `gen >= 6 && move.flags['powder'] && target !== pokemon
+/// && !this.dex.getImmunity('powder', target)`, so a Grass type ignores Sleep Powder, Spore
+/// and Stun Spore. Overcoat and Safety Goggles block them by a separate `onTryHit`, included
+/// for completeness.
+///
+/// **Prankster.** `gen >= 7 && move.pranksterBoosted && pokemon.hasAbility('prankster') &&
+/// !targets[i].isAlly(pokemon) && !this.dex.getImmunity('prankster', target)`.
+/// `pranksterBoosted` is set by the ability's own `onModifyPriority`, so it means exactly "a
+/// Status move used by a Prankster holder". Allies are exempt, so Prankster Tailwind and
+/// screens are unaffected.
 fn immune_to_move(
     reg: &Reg,
     turn: &Turn,
@@ -3345,8 +3668,14 @@ fn apply_disable(turn: &mut Turn, side: usize, slot: usize, mv: Option<&Move>) -
 }
 
 /// Locks the target into the move it last used. Fails -- with no volatile at all --
-/// when the target has not moved, when that move cannot be encored, or when it is out of
-/// PP, all three of which are `return false` in Showdown's `onStart`.
+/// when the target has not moved, when that move cannot be encored (`failencore`: Struggle,
+/// Sleep Talk, Copycat, Transform and Encore itself), or when it is out of PP, all three of
+/// which are `return false` in Showdown's `onStart`.
+///
+/// Duration 3, or 4 when the target has already moved this turn: `if
+/// (!queue.willMove(target)) duration++`. The volatile is decremented at the end of this
+/// turn either way, so the increment is what gives a Pokemon that has already acted its
+/// full three turns.
 fn apply_encore(turn: &mut Turn, side: usize, slot: usize, mv: &Move) -> bool {
     let (last_move, already) = match turn.mon_at(side, slot) {
         None => return false,
@@ -3383,10 +3712,17 @@ fn apply_encore(turn: &mut Turn, side: usize, slot: usize, mv: &Move) -> bool {
     true
 }
 
+/// `randomChance(1, counter)`: certain on the first use, a third on the second.
 fn stall_success_chance(counter: i64) -> f64 {
     1.0 / counter.max(1) as f64
 }
 
+/// Raises the Protect counter, as Showdown's `addVolatile('stall')` does. The volatile lasts
+/// two turns, so a turn spent on anything else lets it lapse and the next Protect is certain
+/// again. Wide Guard and Quick Guard come through here without ever having consulted the
+/// counter: Showdown gives them `source.addVolatile('stall')` in `onHitSide` but no
+/// `stallingMove` flag, so they always succeed themselves and still make the next Protect a
+/// 1-in-3. Which moves *consult* the counter comes from the dumped `stallingMove` flag.
 fn bump_stall(turn: &mut Turn, side: usize, slot: usize) {
     let Some(mon) = turn.mon_at_mut(side, slot) else { return };
     match mon.volatile_mut("stall") {
@@ -3403,6 +3739,18 @@ fn bump_stall(turn: &mut Turn, side: usize, slot: usize) {
     }
 }
 
+/// A Protect-family move, which fails more often the more it is repeated (the `stall`
+/// counter, `bump_stall`).
+///
+/// Showdown gates Protect on `!!this.queue.willAct()`: a Protect that resolves last in the
+/// turn fails outright. In doubles that is the common case for a slow side, so letting it
+/// succeed is not a rounding error. The protection lasts one turn, stated here rather than
+/// by membership of `PROTECT_VOLATILES`: Endure is a stalling move and is *not* in that
+/// table (its volatile caps damage rather than blocking the hit, in `deal_damage`), so it
+/// once got no duration, missed the unconditional removal, and lasted the rest of the
+/// battle -- the Pokemon surviving every lethal hit at 1 HP forever. Under a budget that
+/// does not enumerate status checks the reading is failure, which is also what the pinned
+/// policy answers `randomChance(1, counter)` with for any counter above 1.
 fn do_protect<'a>(
     mut turn: Turn<'a>,
     action: &QueuedAction,
@@ -3448,7 +3796,10 @@ fn do_protect<'a>(
 
 /// Whether Showdown really *rolls* this duration. A `durationCallback` alone does not
 /// mean that -- most of them apply an item or ability extension -- so the dumper records
-/// whether calling it consumed randomness, and that is what this reads.
+/// whether calling it consumed randomness, and that is what this reads. Thirteen of the
+/// fourteen effects that have one use it for an extension, and only `partiallytrapped`
+/// calls `this.random`; reading the mere presence of a function once had Tailwind and every
+/// screen reported as "Showdown rolls it".
 fn duration_is_rolled(mv: &Move, effect_id: &str) -> bool {
     mv.raw
         .get("durations")
@@ -3460,6 +3811,21 @@ fn duration_is_rolled(mv: &Move, effect_id: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// How long this effect lasts for *this* user, extensions included, from the regulation
+/// dump.
+///
+/// Keyed by the effect actually being added, because one move can name a volatile, a side
+/// condition and a slot condition and they need not share a duration. `durationCallback
+/// (target, source)` reads the source's item and ability, and the dump carries what it
+/// returns for each -- so Light Clay's screens, Grip Claw's binds, Persistent's rooms and
+/// Terrain Extender's terrains follow from the position rather than from a number written
+/// here. When the callback rolls (`partiallytrapped` declares 5 and returns 5 or 6) the
+/// fixed value is the pinned reading and the caller reports the approximation.
+///
+/// This used to be a hand-written list, and the list was the root cause of a whole class of
+/// bug: anything missing from it became a *permanent* effect. Four were -- including a bind
+/// the target could never escape and an Endure that survived every lethal hit for the rest
+/// of the battle -- and it gave Tailwind 5 turns where Showdown gives 4.
 fn effect_duration(
     turn: &Turn,
     mv: &Move,
@@ -3539,6 +3905,8 @@ fn apply_status_move(
     if let Some(pseudo) = mv.pseudo_weather.as_deref() {
         let pid = pseudo.to_lowercase().replace(' ', "");
         let already = turn.pos.field.has_pseudo_weather(&pid);
+        // Only the room moves switch themselves off when used again (`onFieldRestart`);
+        // Gravity and the rest just fail. Persistent makes Trick Room and Gravity 7.
         let toggling = matches!(pid.as_str(), "trickroom" | "magicroom" | "wonderroom");
         if already && toggling {
             turn.pos.field.pseudo_weather.retain(|p| p.id.as_str() != pid);
@@ -3629,6 +3997,9 @@ fn apply_status_move(
             if vid == "taunt" && !already {
                 taunt_lasts_longer(turn, target.0, target.1);
             }
+            // Leech Seed heals whoever stands in the planter's *slot* at the end of the turn,
+            // so the slot is written down: `this.volatiles[status.id].sourceSlot =
+            // source.getSlot();` (sim/pokemon.ts:2008).
             if vid == "leechseed" && !already {
                 if let Some(mon) = turn.mon_at_mut(target.0, target.1) {
                     if let Some(applied) = mon.volatile_mut("leechseed") {
@@ -3650,6 +4021,12 @@ fn apply_status_move(
         weather_recovery(turn, me, mv);
     }
 
+    // Parting Shot's drops are in an `onHit` handler, so they are not in the dumped
+    // declarative fields:
+    //     const success = this.boost({atk: -1, spa: -1}, target, source);
+    //     if (!success && !target.hasAbility('mirrorarmor')) delete move.selfSwitch;
+    // A target that cannot be lowered any further, or that is behind Clear Body, leaves the
+    // user standing. Mirror Armor is the exception: it bounces the drops and the user leaves.
     if mv.id == "partingshot" {
         let mut landed = false;
         for target in targets {
@@ -3734,15 +4111,6 @@ fn apply_status_move(
     Ok(())
 }
 
-/// Perish Song's `onHitField` (`data/moves.ts`): every active Pokemon on both sides, the
-/// singer's included, gets `perishsong` at duration 4, which the residual below counts
-/// down from the end of this same turn, so the faint lands three turns later. Soundproof's
-/// `onTryHit` (`target !== source`) is the `null` that still counts as a result, and it is
-/// `breakable`: a Mold Breaker singer (Mycelium Might too, this being a status move)
-/// reaches it unless the holder has an Ability Shield. Nobody reached and nobody
-/// Soundproof -- everyone already counting -- is `return false`, a failure. IKA-172: the
-/// port had no such path while `modelled.rs` listed the move, so its turn left nobody
-/// counting down and reported nothing.
 /// `takeItem` (sim/pokemon.ts): the `TakeItem` event on the holder, which the item's own
 /// `onTakeItem` answers -- in Reg M-C only the mega stones have one -- and Unburden's
 /// `onTakeItem(item, pokemon) { pokemon.addVolatile('unburden'); }` hears. `None` is
@@ -3847,6 +4215,29 @@ fn eat_received_berry(turn: &mut Turn, at: Slot) {
     }
 }
 
+/// Perish Song's `onHitField` (`data/moves.ts`): every active Pokemon on both sides, the
+/// singer's included, gets `perishsong` at duration 4, which the residual below counts
+/// down from the end of this same turn, so the faint lands three turns later. Soundproof's
+/// `onTryHit` (`target !== source`) is the `null` that still counts as a result, and it is
+/// `breakable`: a Mold Breaker singer (Mycelium Might too, this being a status move)
+/// reaches it unless the holder has an Ability Shield. Nobody reached and nobody
+/// Soundproof -- everyone already counting -- is `return false`, a failure. IKA-172: the
+/// port had no such path while `modelled.rs` listed the move, so its turn left nobody
+/// counting down and reported nothing.
+///
+/// ```text
+/// for (const pokemon of this.getAllActive()) {
+///     if (this.runEvent('Invulnerability', pokemon, source, move) === false) { ...
+///     } else if (this.runEvent('TryHit', pokemon, source, move) === null) {
+///         result = true;
+///     } else if (!pokemon.volatiles['perishsong']) {
+///         pokemon.addVolatile('perishsong');
+/// ...
+/// if (!result) return false;
+/// ```
+///
+/// Nothing is ever semi-invulnerable here. Good as Gold's `onTryHit` (a status move,
+/// IKA-202) answers `null` as Soundproof's does.
 fn perish_song(turn: &mut Turn, me: Slot, action: &QueuedAction) {
     let ignores_ability = turn
         .mon_at(me.0, me.1)
@@ -3886,6 +4277,9 @@ fn perish_song(turn: &mut Turn, me: Slot, action: &QueuedAction) {
 // End of turn
 // ---------------------------------------------------------------------------
 
+/// Turns a `source_slot` into our (side, slot) pair, in either encoding in use. Reading only
+/// one of the two once left Leech Seed's heal unreachable for every seed the resolver
+/// planted (IKA-56).
 fn slot_of(turn: &Turn, source_slot: Option<Id>) -> Option<Slot> {
     let source = source_slot?;
     let text = source.as_str();
@@ -3909,6 +4303,9 @@ fn slot_of(turn: &Turn, source_slot: Option<Id>) -> Option<Slot> {
     Some((side, slot))
 }
 
+/// Whether the Pokemon that applied a trap has left the field. A trap whose source is gone
+/// ends without dealing damage, so keeping it going costs the trapped Pokemon an eighth of
+/// its HP a turn that it should not lose.
 fn trapper_gone(turn: &Turn, source_slot: Option<Id>) -> bool {
     let Some((side, slot)) = slot_of(turn, source_slot) else { return false };
     match turn.mon_at(side, slot) {
@@ -3918,6 +4315,26 @@ fn trapper_gone(turn: &Turn, source_slot: Option<Id>) -> bool {
 }
 
 /// Active slots in Showdown's residual order: by Speed, fastest first.
+///
+/// ```text
+/// eachEvent(eventid, effect, relayVar) {
+///     const actives = this.getAllActive();
+///     ...
+///     this.speedSort(actives, (a, b) => b.speed - a.speed);
+/// ```
+///
+/// `pokemon.speed` is the Trick-Room-inverted value, so under Trick Room the order reverses
+/// -- the same quantity the action queue sorts on. This once iterated side 0 then side 1,
+/// which made the residual phase seat-dependent: in a mirrored position our burn and trap
+/// resolved before their poison in *both* orientations, so a faint the residuals cause
+/// landed on a different side depending on which seat we held (4.8 points on one cell of a
+/// turn-14 position). Empty and fainted slots keep their place in the list and sort last.
+///
+/// It is computed once for the whole phase, for two reasons that usually disagree.
+/// Faithfulness: `eachEvent('Residual')` speed-sorts the actives a single time and walks that
+/// list, so a Speed change *during* the phase (Speed Boost is itself an `onResidual`) does
+/// not reorder what is left of it. Cost: each computation is four Speed calculations, each
+/// of which builds a battler; eight per phase once made it 30% of generation time.
 fn residual_order(turn: &Turn) -> Result<(Vec<Slot>, bool), String> {
     let trick_room = turn.pos.field.trick_room();
     let field = turn.field();
@@ -3956,17 +4373,23 @@ fn residual_order(turn: &Turn) -> Result<(Vec<Slot>, bool), String> {
     ))
 }
 
+/// End-of-turn effects, in Showdown's residual order.
 pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
     crate::resolve::RESIDUALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let _ = reg;
     #[cfg(not(feature = "ika215-control"))]
     turn.begin(|| "residual".to_string());
+    // Sorted before anything ends, as Showdown's `updateSpeed()` and `fieldEvent`'s one
+    // `speedSort` run before the weather's handler decrements it: on the turn the sun runs
+    // out, Chlorophyll's doubled Speed still orders the phase (IKA-190).
     let (order, tied) = residual_order(turn)?;
     if tied {
         turn.report("residual speed tie (Showdown breaks it at random)");
     }
 
-    // Residual order 1: weather.
+    // Residual order 1: weather. Its duration is decremented *before* its handler runs and
+    // the handler is skipped when it expires, so the last turn of a sandstorm deals no
+    // damage at all.
     let mut weather_expired = false;
     if turn.pos.field.weather.is_some() {
         if let Some(duration) = turn.pos.field.weather_duration {
@@ -4018,6 +4441,8 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
         }
     }
 
+    // Abilities that trade HP with the weather. Showdown hangs these on `onWeather`, which
+    // runs with the weather's own residual, so they go here beside the sandstorm.
     if turn.pos.field.weather.is_some() && !weather_expired {
         let weather = turn.pos.field.weather.unwrap();
         for (side, slot) in order.iter().copied() {
@@ -4064,6 +4489,12 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
         let Some(source_slot) = seed_source else { continue };
         // data/moves.ts:10218-10227: `getAtSlot(sourceSlot)`, and when that slot is empty
         // or fainted the seed returns before `this.damage` -- no drain at all (IKA-56).
+        //     const target = this.getAtSlot(pokemon.volatiles['leechseed'].sourceSlot);
+        //     if (!target || target.fainted || target.hp <= 0) { return; }
+        //     const damage = this.damage(pokemon.baseMaxhp / 8, pokemon, target);
+        //     if (damage) { this.heal(damage, target, pokemon); }
+        // A *slot*, not a Pokemon: if the planter switched out, whoever replaced it is
+        // healed. (Big Root and Liquid Ooze act on the heal; neither is modelled.)
         let Some(planter) = slot_of(turn, source_slot) else { continue };
         let alive =
             matches!(turn.mon_at(planter.0, planter.1), Some(m) if !m.fainted && m.hp > 0);
@@ -4098,6 +4529,8 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
             let amount = turn.fraction_of_max(side, slot, POISON_DAMAGE);
             turn.deal_damage(side, slot, amount, false, "psn")?;
         } else if is(status, "tox") {
+            // Showdown: `clampIntRange(baseMaxhp / 16, 1) * stage` -- the sixteenth is
+            // truncated first and then multiplied, which is not truncating the product.
             let stage = (counter.unwrap_or(0) + 1).min(15);
             if let Some(mon) = turn.mon_at_mut(side, slot) {
                 mon.status_counter = Some(stage);
@@ -4134,7 +4567,10 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
         }
     }
 
-    // Residual order 24: Perish Song.
+    // Residual order 24: Perish Song. The counter is decremented like any other duration,
+    // but on expiry the effect *runs* -- `onEnd` faints the Pokemon -- where weather's handler
+    // is skipped instead. Missing it leaves a Pokemon alive that the game killed. (It is not
+    // decremented again in the volatile loop below, which would kill a turn and a half early.)
     for (side, slot) in order.iter().copied() {
         let left = {
             let Some(mon) = turn.mon_at_mut(side, slot) else { continue };
@@ -4158,7 +4594,8 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
         }
     }
 
-    // Residual order 28: Speed Boost.
+    // Residual order 28: Speed Boost. `if (pokemon.activeTurns)` is what stops it firing on
+    // the turn its holder came in, and `newly_switched` is that flag.
     for (side, slot) in order.iter().copied() {
         let boosts = matches!(turn.mon_at(side, slot), Some(mon)
             if !mon.fainted && mon.ability == "speedboost" && !mon.newly_switched);
@@ -4167,6 +4604,7 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
         }
     }
 
+    // Residual order 29: the last of White Herb's four chances to fire.
     check_white_herb(turn);
 
     for side in 0..2 {
@@ -4219,6 +4657,11 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
         // out of PP (false), as the volatiles meet them (IKA-215).
         let mut said: Vec<bool> = Vec::new();
         for mut volatile in std::mem::take(&mut mon.volatiles) {
+            // The Protect-family volatiles last one turn. `stall` is deliberately not here:
+            // it carries the repeat counter and expires on its own two-turn duration. Yawn's
+            // whole effect is on expiry: the target falls asleep at the end of the turn after
+            // it lands. An Encore whose move ran out of PP ends early (`onResidual`), or the
+            // only legal move would be an unusable one.
             let single_turn = PROTECT_VOLATILES.iter().any(|(v, _)| *v == volatile.id.as_str())
                 || matches!(
                     volatile.id.as_str(),
@@ -4290,6 +4733,26 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
     Ok(())
 }
 
+/// Marks the battle over and names the winner, the way Showdown's `checkWin` does:
+///
+/// ```text
+/// checkWin(faintData) {
+///     if (this.sides.every(side => !side.pokemonLeft)) {
+///         this.win(faintData && this.gen > 4 ? faintData.target.side : null);
+/// ```
+///
+/// Two cases and one rule. One side out: the other wins, and Showdown ends the battle at the
+/// faint that emptied it rather than at the end of the turn. Both sides out: gen 5 and later
+/// give it to the side of the Pokemon that fainted *last*. Both readings are "whichever
+/// side's wipe-out completed last wins", so `wipe_order` -- recorded as the faints happen,
+/// because by now both sides just look empty -- answers them together.
+///
+/// This was once wrong in a way only a rare position exposed: a loop over the sides that
+/// assigned a winner per wiped side, so with both wiped the second iteration overwrote the
+/// first and side 0 won every mutual knockout -- a seat-dependent result on the closest
+/// games there are, every one labelled a win for our roster in the training data. Without
+/// `wipe_order` (a position that arrived already empty) a mutual wipe-out cannot be
+/// attributed and is left as a draw rather than guessed.
 pub fn settle_outcome(pos: &mut Position, wipe_order: &[usize]) {
     let wiped: Vec<usize> = (0..pos.sides.len())
         .filter(|index| pos.sides[*index].pokemon.iter().all(|m| m.fainted))
@@ -4316,7 +4779,7 @@ const SANDSTORM_DAMAGE: (i64, i64) = (1, 16);
 const LEECH_SEED_DRAIN: (i64, i64) = (1, 8);
 const LEFTOVERS_HEAL: (i64, i64) = (1, 16);
 const PARTIAL_TRAP_DAMAGE: (i64, i64) = (1, 8);
-// The champions mod's Salt Cure, half the base game's (IKA-159); see resolve.py.
+// The champions mod's Salt Cure, half the base game's (IKA-159); see resolve.rs.
 const SALT_CURE_DAMAGE: (i64, i64) = (1, 16);
 const SALT_CURE_DAMAGE_WEAK: (i64, i64) = (1, 8);
 
