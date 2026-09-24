@@ -155,3 +155,30 @@ def test_an_unmatchable_pause_is_flagged_rather_than_guessed(tool, interrupted) 
     assert "⚠" in text and "中断時の局面" in text, (
         f"an unreachable pause has to be named as one:\n{text}"
     )
+
+
+def test_the_port_renders_the_same_log(tool, interrupted) -> None:  # noqa: ANN001
+    """`turn_events` through the port (IKA-215): the pause, its resumption and the trace
+    are the port's, and the reading is Python's line for line."""
+    from pokeuraou import rustnode
+
+    if not rustnode.binary_path().exists():
+        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
+    reg, pos, result = interrupted
+    played = result.suspended[-1]
+    _chooser, alternatives = resume_alternatives(reg, played)
+    action, resumed = alternatives[0]
+    ending = max(resumed.branches, key=lambda b: b.probability)
+    decisions = record_of(reg, pos, played, action, ending)
+    loc = tool.Localiser(reg, tool.load_names("ja"))
+    python = tool.turn_events(reg, loc, decisions[0], decisions[1:], 1.0)
+    node = rustnode.RustNode(reg)
+    try:
+        port = tool.turn_events(reg, loc, decisions[0], decisions[1:], 1.0, node)
+    finally:
+        node.close()
+    assert port == python
+    text = "\n".join((header or "") + " " + " ".join(lines) for header, lines in port)
+    assert "⚠" not in text, text
+    recorded = next(e for e in played.events if "stompingtantrum" in e).split()[1]
+    assert recorded in text

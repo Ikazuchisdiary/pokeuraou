@@ -915,10 +915,14 @@ class RustNode:
         *,
         full: bool = False,
         select: int | None = None,
+        events: bool = False,
     ) -> PortTurn | None:
         """`resolve_turn` through the port: every branch with `full`, and with `select` the
         outcome at that index of the branches followed by the pauses -- a pause included,
-        which `resolve` could only give the weight of. None when the port declines."""
+        which `resolve` could only give the weight of. None when the port declines.
+
+        `events` asks for each outcome's trace, Python's `Branch.events` and `acts`
+        (IKA-215). Off by default: the port then formats and keeps nothing."""
         response = self._ask(
             {
                 "kind": "turn",
@@ -927,6 +931,7 @@ class RustNode:
                 "budget": dump_budget(budget),
                 "full": full,
                 "select": select,
+                "events": events,
             }
         )
         return None if response is None else PortTurn.read(response)
@@ -940,9 +945,11 @@ class RustNode:
         full: bool = False,
         select: int | None = None,
         world: tuple[Position, int] | None = None,
+        events: bool = False,
     ) -> PortTurn | None:
         """`resume_turn`: the rest of a paused turn with both sides' replacement choices.
-        `world` is `paused_in`'s position and side: the pause resumed in that completion."""
+        `world` is `paused_in`'s position and side: the pause resumed in that completion.
+        With `events` the trace goes on from the pause's own, as Python's does."""
         response = self._ask(
             {
                 "kind": "turn",
@@ -951,18 +958,30 @@ class RustNode:
                 "full": full,
                 "select": select,
                 "in": _world(world),
+                "events": events,
             }
         )
         return None if response is None else PortTurn.read(response)
 
     @timing.timed("rust.alternatives")
     def resume_alternatives(
-        self, pause: PortPause, *, world: tuple[Position, int] | None = None, full: bool = True
+        self,
+        pause: PortPause,
+        *,
+        world: tuple[Position, int] | None = None,
+        full: bool = True,
+        events: bool = False,
     ) -> tuple[int | None, list[tuple[SideAction, PortTurn]]] | None:
         """`resume_alternatives` (and, with `world`, of `paused_in`'s pause): who chooses, and
         every replacement with the turn it produces, in Python's order."""
         response = self._ask(
-            {"kind": "alternatives", "pause": pause.raw, "in": _world(world), "full": full}
+            {
+                "kind": "alternatives",
+                "pause": pause.raw,
+                "in": _world(world),
+                "full": full,
+                "events": events,
+            }
         )
         if response is None:
             return None
@@ -982,6 +1001,7 @@ class RustNode:
         choices: list[SideAction],
         *,
         rng: Any = None,  # noqa: ANN401 - numpy.random.Generator
+        events: bool = False,
     ) -> PortPhase | None:
         """`resolve_replacements`. A draw inside a switch-in is sampled from `rng` exactly as
         Python's `_draw` samples it -- same call, same order -- or is the first, noted."""
@@ -990,16 +1010,21 @@ class RustNode:
                 "kind": "replacements",
                 "position": pos.to_json(),
                 "choices": [[dump_action(a) for a in side.slots] for side in choices],
+                "events": events,
             },
             rng,
         )
 
     @timing.timed("rust.leads")
     def apply_lead_abilities(
-        self, pos: Position, *, rng: Any = None  # noqa: ANN401 - numpy.random.Generator
+        self,
+        pos: Position,
+        *,
+        rng: Any = None,  # noqa: ANN401 - numpy.random.Generator
+        events: bool = False,
     ) -> PortPhase | None:
         """`apply_lead_abilities`, with its draws answered as `resolve_replacements`'."""
-        return self._phase({"kind": "leads", "position": pos.to_json()}, rng)
+        return self._phase({"kind": "leads", "position": pos.to_json(), "events": events}, rng)
 
     def replacements_needed(self, pos: Position) -> tuple[tuple[bool, ...], ...] | None:
         response = self._ask({"kind": "needed", "position": pos.to_json()})
@@ -1060,6 +1085,9 @@ class PortPause:
     probability: float
     position: Position
     raw: dict[str, Any]
+    #: The trace up to the pause, when it was asked for (IKA-215).
+    events: list[str] = field(default_factory=list)
+    acts: list[tuple[int, str]] = field(default_factory=list)
 
     @staticmethod
     def read(raw: dict[str, Any]) -> PortPause:
@@ -1067,13 +1095,22 @@ class PortPause:
             probability=float(raw["probability"]),
             position=Position.from_json(raw["position"]),
             raw=raw,
+            events=list(raw.get("events") or []),
+            acts=_acts(raw),
         )
+
+
+def _acts(raw: dict[str, Any]) -> list[tuple[int, str]]:
+    return [(int(start), str(label)) for start, label in raw.get("acts") or []]
 
 
 @dataclass
 class PortBranch:
     probability: float
     position: Position
+    #: Python's `Branch.events` and `acts`, when the turn was asked for them (IKA-215).
+    events: list[str] = field(default_factory=list)
+    acts: list[tuple[int, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -1089,6 +1126,9 @@ class PortTurn:
     pauses: list[PortPause] | None = None
     position: Position | None = None
     pause: PortPause | None = None
+    #: The trace of the branch `select` named, when events were asked for.
+    events: list[str] = field(default_factory=list)
+    acts: list[tuple[int, str]] = field(default_factory=list)
 
     @staticmethod
     def read(response: dict[str, Any]) -> PortTurn:
@@ -1101,7 +1141,12 @@ class PortTurn:
         paused = response.get("pause")
         if full or (not branches and not suspended):
             outcomes = [
-                PortBranch(float(b["probability"]), Position.from_json(b["position"]))
+                PortBranch(
+                    float(b["probability"]),
+                    Position.from_json(b["position"]),
+                    list(b.get("events") or []),
+                    _acts(b),
+                )
                 for b in branches
             ]
             pauses = [PortPause.read(p) for p in suspended]
@@ -1114,6 +1159,8 @@ class PortTurn:
                 pauses=pauses,
                 position=Position.from_json(chosen) if chosen else None,
                 pause=PortPause.read(paused) if paused else None,
+                events=list(response.get("events") or []),
+                acts=_acts(response),
             )
         return PortTurn(
             branches=[float(w) for w in branches],
@@ -1122,13 +1169,15 @@ class PortTurn:
             unmodelled=tuple(response["unmodelled"]),
             position=Position.from_json(chosen) if chosen else None,
             pause=PortPause.read(paused) if paused else None,
+            events=list(response.get("events") or []),
+            acts=_acts(response),
         )
 
 
 @dataclass
 class PortPhase:
-    """A replacement phase or the leads' switch-ins: Python's `ReplacementResult`, without
-    the event log (the port keeps none)."""
+    """A replacement phase or the leads' switch-ins: Python's `ReplacementResult`. `events`
+    is the phase's trace when it was asked for (IKA-215), else empty."""
 
     position: Position
     unmodelled: tuple[str, ...] = ()
@@ -1139,4 +1188,5 @@ class PortPhase:
         return PortPhase(
             position=Position.from_json(response["position"]),
             unmodelled=tuple(response["unmodelled"]),
+            events=list(response.get("events") or []),
         )

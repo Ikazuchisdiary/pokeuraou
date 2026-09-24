@@ -4,7 +4,7 @@
 //! resolve.py, kept together so the resolver and the move layer each call one function.
 
 use crate::id::Id;
-use crate::resolve::{grounded, Turn};
+use crate::resolve::{grounded, Name, Turn};
 
 /// The Surges' `onStart`: `this.field.setTerrain(...)`.
 fn surge_terrain(ability: &str) -> Option<&'static str> {
@@ -33,7 +33,9 @@ pub(crate) fn surge(turn: &mut Turn, side: usize, slot: usize) {
     let Some(mon) = turn.mon_at(side, slot) else { return };
     let Some(terrain) = surge_terrain(mon.ability.as_str()) else { return };
     let extended = matches!(mon.item, Some(i) if i.as_str() == "terrainextender");
-    set_terrain(turn, terrain, if extended { 8 } else { 5 });
+    if set_terrain(turn, terrain, if extended { 8 } else { 5 }) {
+        log_event!(turn, "{} set {}", Name(side, slot), terrain);
+    }
 }
 
 /// `Field#setTerrain`: the same terrain again changes nothing; otherwise every active
@@ -44,6 +46,7 @@ pub(crate) fn set_terrain(turn: &mut Turn, terrain: &str, duration: i64) -> bool
     }
     turn.pos.field.terrain = Some(Id::new(terrain));
     turn.pos.field.terrain_duration = Some(duration);
+    log_event!(turn, "terrain -> {}", terrain);
     for side in 0..turn.pos.sides.len() {
         for slot in 0..turn.pos.sides[side].active.len() {
             use_terrain_seed(turn, side, slot);
@@ -58,12 +61,13 @@ pub(crate) fn use_terrain_seed(turn: &mut Turn, side: usize, slot: usize) {
     if mon.fainted {
         return;
     }
-    let Some((terrain, stat)) = mon.item.and_then(|i| seed(i.as_str())) else { return };
+    let Some(item) = mon.item else { return };
+    let Some((terrain, stat)) = seed(item.as_str()) else { return };
     if !matches!(turn.pos.field.terrain, Some(t) if t.as_str() == terrain) {
         return;
     }
-    turn.apply_boosts(side, slot, &[(stat, 1)], false);
-    turn.consume_item(side, slot);
+    turn.apply_boosts(side, slot, &[(stat, 1)], false, item.as_str());
+    turn.consume_item(side, slot, item.as_str());
 }
 
 /// `_grassy_terrain_heal`: `baseMaxhp / 16` for each grounded Pokemon, in residual order.
@@ -78,7 +82,7 @@ pub(crate) fn grassy_terrain_heal(turn: &mut Turn, order: &[(usize, usize)]) {
         };
         if heals {
             let amount = turn.fraction_of_max(side, slot, (1, 16));
-            turn.heal(side, slot, amount);
+            turn.heal(side, slot, amount, "grassyterrain");
         }
     }
 }

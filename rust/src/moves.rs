@@ -14,8 +14,8 @@ use crate::reg::{
     Move, Reg, F_BYPASSSUB, F_CONTACT, F_DEFROST, F_FAILENCORE, F_POWDER, F_PROTECT,
 };
 use crate::resolve::{
-    change_forme, check_white_herb, grounded_ignoring, stratified_rolls, Budget, Outcome, Slot,
-    Turn,
+    change_forme, check_white_herb, grounded_ignoring, stratified_rolls, Budget, Label, Name,
+    Outcome, Slot, Turn,
     CONFUSION_SELF_HIT_CHANCE, FREEZE_COUNTER, FULL_PARALYSIS_CHANCE, THAW_CHANCE,
     TWO_TURN_MOVES,
 };
@@ -91,6 +91,7 @@ pub(crate) fn do_move<'a>(
                 mon.volatiles.push(Effect::new(Id::new("mustrecharge")));
             }
         }
+        log_event!(turn, "{} must recharge", Name(action.side, action.slot));
         turn.move_failed[action.side][action.slot] = true;
         return Ok(vec![(1.0, turn)]);
     }
@@ -149,6 +150,7 @@ pub(crate) fn do_move<'a>(
                     vec![(1.0, state)]
                 };
                 for (hit_weight, mut hit_state) in hits {
+                    log_event!(hit_state, "{} did not happen ({})", Label(reg, action), reason);
                     hit_state.move_failed[action.side][action.slot] = true;
                     outcomes.push((*probability * hit_weight, hit_state));
                 }
@@ -248,7 +250,7 @@ fn confusion_self_hits<'a>(
             last.as_ref().expect("taken only at the last roll").clone()
         };
         let amount = confusion_damage(&state, action.side, action.slot, *roll)?;
-        state.deal_damage(action.side, action.slot, amount, false)?;
+        state.deal_damage(action.side, action.slot, amount, false, "confusion")?;
         out.push((*weight, state));
     }
     Ok(out)
@@ -295,7 +297,9 @@ pub(crate) fn start_rampage(turn: &mut Turn, side: usize, slot: usize) {
     let mut effect = Effect::new(Id::new("lockedmove"));
     effect.duration = Some(2);
     effect.move_id = mon.last_move;
+    let last_move = mon.last_move;
     mon.volatiles.push(effect);
+    log_event!(turn, "{} is rampaging ({})", Name(side, slot), OrNone(last_move));
 }
 
 /// The length on the second turn when the position lacks it: 1 or 2 left, a half each.
@@ -357,6 +361,7 @@ fn rampage_after_move(turn: &mut Turn, action: &QueuedAction) {
     if let Some(mon) = turn.mon_at_mut(action.side, action.slot) {
         mon.volatiles.retain(|v| v.id.as_str() != "lockedmove");
     }
+    log_event!(turn, "{}'s rampage ended", Name(action.side, action.slot));
     if rampage_last_turn(turn, left) {
         confused_by_fatigue(turn, action.side, action.slot);
     }
@@ -365,6 +370,11 @@ fn rampage_after_move(turn: &mut Turn, action: &QueuedAction) {
 /// The rampage's `onEnd` confusion: Own Tempo and grounded under Misty Terrain refuse it;
 /// the berries are every confusion's, in `start_confusion` (IKA-177).
 fn confused_by_fatigue(turn: &mut Turn, side: usize, slot: usize) {
+    match turn.mon_at(side, slot) {
+        Some(mon) if !mon.fainted && !mon.has_volatile("confusion") => {}
+        _ => return,
+    }
+    log_event!(turn, "{} tires (fatigue)", Name(side, slot));
     // `addVolatile` fills in `source = this`: the rampager is its own source (IKA-189).
     confuse(turn, side, slot, Some((side, slot)));
 }
@@ -376,13 +386,27 @@ pub(crate) fn confuse(turn: &mut Turn, side: usize, slot: usize, source: Option<
         Some(mon) if !mon.fainted && !mon.has_volatile("confusion") => {}
         _ => return,
     }
-    if confusion_refused(turn, side, slot, source) {
+    if let Some(refused) = confusion_refused(turn, side, slot, source) {
+        log_event!(turn, "{} is not confused ({})", Name(side, slot), refused);
         return;
     }
     start_confusion(turn, side, slot);
     if let Some(mon) = turn.mon_at_mut(side, slot) {
-        if mon.ability == "owntempo" {
+        if mon.ability == "owntempo" && mon.has_volatile("confusion") {
             mon.volatiles.retain(|v| v.id.as_str() != "confusion");
+            log_event!(turn, "{} snapped out of its confusion (owntempo)", Name(side, slot));
+        }
+    }
+}
+
+/// Python's `f"{x}"` of an optional id: the id, or `None`.
+pub(crate) struct OrNone(pub Option<Id>);
+
+impl std::fmt::Display for OrNone {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.0 {
+            Some(id) => write!(f, "{id}"),
+            None => f.write_str("None"),
         }
     }
 }
@@ -396,7 +420,7 @@ fn bust_disguise(reg: &Reg, turn: &mut Turn, target: Slot) -> Result<(), String>
         _ => return Ok(()),
     };
     change_forme(reg, turn, target.0, target.1, "mimikyubusted")?;
-    turn.deal_damage(target.0, target.1, (maxhp / 8).max(1), false)?;
+    turn.deal_damage(target.0, target.1, (maxhp / 8).max(1), false, "disguise")?;
     Ok(())
 }
 
@@ -498,22 +522,22 @@ fn ability_broken_by(turn: &Turn, mon: &crate::position::Pokemon, source: Option
 
 /// Own Tempo, Misty Terrain on the grounded, Safeguard against another's move unless it
 /// infiltrates: Python's `_confusion_refused` (IKA-189).
-fn confusion_refused(turn: &Turn, side: usize, slot: usize, source: Option<Slot>) -> bool {
-    let Some(mon) = turn.mon_at(side, slot) else { return false };
+fn confusion_refused(turn: &Turn, side: usize, slot: usize, source: Option<Slot>) -> Option<&'static str> {
+    let mon = turn.mon_at(side, slot)?;
     let broken = ability_broken_by(turn, mon, source);
     if mon.ability == "owntempo" && !broken {
-        return true;
+        return Some("owntempo");
     }
     if is(turn.pos.field.terrain, "mistyterrain") && grounded_ignoring(turn, mon, broken) {
-        return true;
+        return Some("mistyterrain");
     }
     match source {
         Some(from) if from != (side, slot) && turn.pos.sides[side].has_side_condition("safeguard") => {
             let infiltrates = from.0 != side
                 && turn.mon_at(from.0, from.1).is_some_and(|user| user.ability == "infiltrator");
-            !infiltrates
+            (!infiltrates).then_some("safeguard")
         }
-        _ => false,
+        _ => None,
     }
 }
 
@@ -530,13 +554,14 @@ pub(crate) fn good_as_gold_blocks(turn: &Turn, action: &QueuedAction, mv: &Move,
 }
 
 /// A Grass type beside (or holding) a Flower Veil no `current_actor` Mold Breaker move
-/// passes: Python's `_flower_veil` (IKA-202). The callers check the source.
-pub(crate) fn flower_veil(turn: &Turn, side: usize, slot: usize) -> bool {
-    let Some(mon) = turn.mon_at(side, slot) else { return false };
+/// passes: Python's `_flower_veil` (IKA-202). The callers check the source. The slot of
+/// the ally that holds it, which the trace names (IKA-215).
+pub(crate) fn flower_veil_holder(turn: &Turn, side: usize, slot: usize) -> Option<usize> {
+    let mon = turn.mon_at(side, slot)?;
     if mon.fainted || !turn.types_of(mon).contains("Grass") {
-        return false;
+        return None;
     }
-    (0..turn.pos.sides[side].active.len()).any(|ally| {
+    (0..turn.pos.sides[side].active.len()).find(|&ally| {
         turn.mon_at(side, ally).is_some_and(|holder| {
             !holder.fainted
                 && holder.ability == "flowerveil"
@@ -557,6 +582,7 @@ fn rampage_runs_out(turn: &mut Turn, order: &[Slot]) {
             },
             _ => continue,
         };
+        log_event!(turn, "{}'s rampage ran out", Name(side, slot));
         if rampage_last_turn(turn, left) {
             confused_by_fatigue(turn, side, slot);
         }
@@ -578,6 +604,7 @@ fn rampage_residual(turn: &mut Turn, order: &[Slot]) {
         }
         if asleep {
             mon.volatiles.retain(|v| v.id.as_str() != "lockedmove");
+            log_event!(turn, "{}'s rampage ended (asleep)", Name(side, slot));
             continue;
         }
         if let Some(left) = rampage_left(held) {
@@ -628,10 +655,11 @@ pub(crate) fn start_confusion(turn: &mut Turn, side: usize, slot: usize) {
         let mut effect = Effect::new(Id::new("confusion"));
         set_extra(&mut effect, CONFUSION_TRIES, Some(json!(0)));
         mon.volatiles.push(effect);
-        is(mon.item, "persimberry") || is(mon.item, "lumberry")
+        mon.item.filter(|i| i.as_str() == "persimberry" || i.as_str() == "lumberry")
     };
-    if berry && !turn.berries_blocked(side) {
-        turn.consume_item(side, slot);
+    log_event!(turn, "{} became confused", Name(side, slot));
+    if let Some(berry) = berry.filter(|_| !turn.berries_blocked(side)) {
+        turn.consume_item(side, slot, berry.as_str());
         if let Some(mon) = turn.mon_at_mut(side, slot) {
             mon.volatiles.retain(|v| v.id.as_str() != "confusion");
         }
@@ -737,6 +765,7 @@ fn confusion_try(turn: &mut Turn, side: usize, slot: usize) -> bool {
     };
     if matches!(left, Some(left) if left - 1 <= 0) {
         mon.volatiles.retain(|v| v.id.as_str() != "confusion");
+        log_event!(turn, "{} snapped out of its confusion", Name(side, slot));
         return false;
     }
     let Some(held) = mon.volatile_mut("confusion") else { return false };
@@ -838,6 +867,9 @@ fn can_act(
                 false
             }
         };
+        if woke {
+            log_event!(turn, "{} woke up", Name(action.side, action.slot));
+        }
         return Ok(if woke {
             taunt_stage(turn, action, mv, budget)
         } else {
@@ -856,6 +888,7 @@ fn can_act(
                 mon.status = None;
                 mon.status_counter = None;
             }
+            log_event!(turn, "{} thawed ({})", Name(action.side, action.slot), mv.id);
             return Ok(taunt_stage(turn, action, mv, budget));
         }
         let thawed = {
@@ -871,6 +904,7 @@ fn can_act(
             }
         };
         if thawed {
+            log_event!(turn, "{} thawed (counter)", Name(action.side, action.slot));
             return Ok(taunt_stage(turn, action, mv, budget));
         }
         if !budget.enumerate_status_checks {
@@ -1081,10 +1115,12 @@ fn use_move<'a>(
         FIRST_TURN_OUT_MOVES.contains(&move_id.as_str()) && mon.active_move_actions > 1
     };
     if first_turn_failure {
+        log_event!(turn, "{} failed (only on the first turn out)", Label(reg, action));
         turn.move_failed[action.side][action.slot] = true;
         return Ok(vec![(1.0, turn)]);
     }
     if move_id.as_str() == "lastresort" && last_resort_fails(&turn, action) {
+        log_event!(turn, "{} failed (other moves not all used)", Label(reg, action));
         turn.move_failed[action.side][action.slot] = true;
         return Ok(vec![(1.0, turn)]);
     }
@@ -1097,6 +1133,7 @@ fn use_move<'a>(
                 && !turn.acted[slot.0][slot.1]
         });
         if !pending {
+            log_event!(turn, "{} failed (nothing left to counter)", Label(reg, action));
             turn.move_failed[action.side][action.slot] = true;
             return Ok(vec![(1.0, turn)]);
         }
@@ -1126,7 +1163,7 @@ fn use_move<'a>(
             // raises Special Attack and attacks in the same turn, so leaving the boost out
             // understates its damage by a whole stage.
             if let Some(boosts) = charge_turn_boosts(move_id.as_str()) {
-                turn.apply_boosts(action.side, action.slot, boosts, false);
+                turn.apply_boosts(action.side, action.slot, boosts, false, move_id.as_str());
             }
             let skipped = turn
                 .pos
@@ -1150,6 +1187,7 @@ fn use_move<'a>(
                         }
                     }
                 }
+                log_event!(turn, "{} is charging", Label(reg, action));
                 return Ok(vec![(1.0, turn)]);
             }
         }
@@ -1177,6 +1215,7 @@ fn use_move<'a>(
         "self" | "allySide" | "allyTeam" | "all" | "foeSide"
     );
     if targets.is_empty() && !no_target_needed {
+        log_event!(turn, "{} had no target", Label(reg, action));
         turn.move_failed[action.side][action.slot] = true;
         return Ok(vec![(1.0, turn)]);
     }
@@ -1190,12 +1229,18 @@ fn use_move<'a>(
             None => false,
         };
         if lacks {
+            log_event!(turn, "{} failed (no {} type)", Label(reg, action), spent);
             return Ok(vec![(1.0, turn)]);
         }
     }
 
     // `TryMove`: after the PP, the target and the charge turn, before any hit step.
-    if priority_blocked_by(&turn, action, mv, &targets).is_some() {
+    if let Some(holder) = priority_blocked_by(&turn, action, mv, &targets) {
+        if turn.log.is_some() {
+            let ability = turn.mon_at(holder.0, holder.1).map(|m| m.ability.as_str().to_string());
+            let ability = ability.unwrap_or_else(|| "?".into());
+            log_event!(turn, "{} did not happen (ability: {})", Label(reg, action), ability);
+        }
         turn.move_failed[action.side][action.slot] = true;
         return Ok(vec![(1.0, turn)]);
     }
@@ -1211,6 +1256,13 @@ fn use_move<'a>(
     // `move.spreadHit` is decided from every target before the hit steps run, and Psychic
     // Terrain (step 1, ahead of Protect) then drops the grounded ones.
     let spread = move_hits_multiple(reg, move_id.as_str(), targets.len());
+    if turn.log.is_some() {
+        let stopped: Vec<Slot> =
+            targets.iter().copied().filter(|t| stopped_by_psychic_terrain(&turn, action, mv, *t)).collect();
+        for t in stopped {
+            log_event!(turn, "{} protected by psychicterrain", Name(t.0, t.1));
+        }
+    }
     let targets: Vec<Slot> = targets
         .iter()
         .copied()
@@ -1371,13 +1423,16 @@ fn resolve_targets(
             .find(|s| live(turn, foe_side, *s))
         {
             chosen = (foe_side, slot);
+            log_event!(turn, "{} retargeted to {}", Label(reg, action), Name(chosen.0, chosen.1));
         }
     }
 
     if let Some(redirected) = redirection_target(turn, action, mv, chosen) {
+        if redirected != chosen {
+            log_event!(turn, "{} redirected to {}", Label(reg, action), Name(redirected.0, redirected.1));
+        }
         chosen = redirected;
     }
-    let _ = reg;
     Ok(if live(turn, chosen.0, chosen.1) { vec![chosen] } else { Vec::new() })
 }
 
@@ -1452,12 +1507,24 @@ fn is_protect_volatile(id: &str) -> bool {
 ///
 /// Reads before it writes: `mon_at_mut` unshares the Pokemon, and most Feints break
 /// nothing.
-fn break_protection(turn: &mut Turn, targets: &[Slot]) {
+fn break_protection(turn: &mut Turn, action: &QueuedAction, targets: &[Slot]) {
     for &(side, slot) in targets {
         let Some(mon) = turn.mon_at(side, slot) else {
             continue;
         };
         let broke = mon.volatiles.iter().any(|v| is_protect_volatile(v.id.as_str()));
+        // Python's `broke + stripped`, for the trace (IKA-215).
+        let mut names: Vec<Id> = Vec::new();
+        if turn.log.is_some() {
+            names.extend(mon.volatiles.iter().map(|v| v.id).filter(|id| is_protect_volatile(id.as_str())));
+            names.extend(
+                turn.pos.sides[side]
+                    .side_conditions
+                    .iter()
+                    .map(|c| c.id)
+                    .filter(|id| BREAKABLE_SIDE_CONDITIONS.contains(&id.as_str())),
+            );
+        }
         if broke {
             if let Some(mon) = turn.mon_at_mut(side, slot) {
                 mon.volatiles.retain(|v| !is_protect_volatile(v.id.as_str()));
@@ -1468,6 +1535,10 @@ fn break_protection(turn: &mut Turn, targets: &[Slot]) {
         let before = conditions.len();
         conditions.retain(|c| !BREAKABLE_SIDE_CONDITIONS.contains(&c.id.as_str()));
         let stripped = conditions.len() != before;
+        if broke || stripped {
+            let joined = names.iter().map(|id| id.as_str()).collect::<Vec<_>>().join(", ");
+            log_event!(turn, "{} broke {} on {}", Label(turn.reg, action), joined, Name(side, slot));
+        }
 
         let stalling = turn.mon_at(side, slot).is_some_and(|m| m.has_volatile("stall"));
         if (broke || stripped) && stalling {
@@ -1558,6 +1629,7 @@ fn hit_target<'a>(
 ) -> Result<Vec<Outcome<'a>>, String> {
     let move_id = action.move_id.unwrap();
     if let Some(blocked) = blocked_by_protect(&turn, action, mv, target) {
+        log_event!(turn, "{} blocked by {}", Label(reg, action), blocked);
         protect_punish(&mut turn, action, mv, &blocked)?;
         return Ok(vec![(1.0, turn)]);
     }
@@ -1668,6 +1740,7 @@ fn hit_target<'a>(
         }
         if !hit {
             let mut state = turn.clone();
+            log_event!(state, "{} missed", Label(reg, action));
             state.move_failed[action.side][action.slot] = true;
             outcomes.push((acc_weight, state));
             continue;
@@ -1698,6 +1771,7 @@ fn hit_target<'a>(
         }
         if result.immune {
             let mut state = turn.clone();
+            log_event!(state, "{} had no effect", Label(reg, action));
             state.move_failed[action.side][action.slot] = true;
             absorb(&mut state, mv, target);
             outcomes.push((acc_weight * crit_weight, state));
@@ -1716,10 +1790,14 @@ fn hit_target<'a>(
                 // Feint into a Protecting Ghost, or one that misses, breaks nothing
                 // (IKA-153). Python's `_hit_target`, at the same place.
                 if mv.breaks_protect {
-                    break_protection(&mut state, &[target]);
+                    break_protection(&mut state, action, &[target]);
                 }
                 let mut reached = false;
+                // Python's `total` and its loop variable, for "hit Nx for T" (IKA-215).
+                let mut total = 0i64;
+                let mut last_index = 0usize;
                 for hit_index in 0..hits {
+                    last_index = hit_index;
                     let gone = match state.mon_at(target.0, target.1) {
                         None => true,
                         Some(mon) => mon.fainted,
@@ -1782,8 +1860,9 @@ fn hit_target<'a>(
                     let dealt = if absorbed {
                         0
                     } else {
-                        state.deal_damage(target.0, target.1, amount, true)?
+                        state.deal_damage(target.0, target.1, amount, true, move_id.as_str())?
                     };
+                    total += dealt;
                     reached = true;
                     state.move_hit[target.0][target.1] = true;
                     let after_started = crate::resolve::phase_start();
@@ -1803,7 +1882,14 @@ fn hit_target<'a>(
                     crate::resolve::phase_end(11, after_started);
                     if absorbed {
                         bust_disguise(reg, &mut state, target)?;
+                        if state.log.is_some() {
+                            let busted = state.mon_at(target.0, target.1).map(|m| m.ability);
+                            log_event!(state, "{} absorbed by {}", Label(reg, action), OrNone(busted));
+                        }
                     }
+                }
+                if hits > 1 {
+                    log_event!(state, "{} hit {}x for {}", Label(reg, action), last_index + 1, total);
                 }
                 let weight = acc_weight * crit_weight * roll_weight * hit_weight;
                 for (extra, mut expanded) in spread_secondaries(state, action, hits > 1)? {
@@ -1887,22 +1973,22 @@ fn protect_punish(
     };
     match blocked {
         "spikyshield" => {
-            turn.deal_damage(me.0, me.1, (maxhp / 8).max(1), false)?;
+            turn.deal_damage(me.0, me.1, (maxhp / 8).max(1), false, "spikyshield")?;
         }
         "banefulbunker" => {
-            turn.apply_status(me.0, me.1, "psn")?;
+            turn.apply_status(me.0, me.1, "psn", "banefulbunker")?;
         }
         "burningbulwark" => {
-            turn.apply_status(me.0, me.1, "brn")?;
+            turn.apply_status(me.0, me.1, "brn", "burningbulwark")?;
         }
         "kingsshield" => {
-            turn.apply_boosts(me.0, me.1, &[("atk", -1)], true);
+            turn.apply_boosts(me.0, me.1, &[("atk", -1)], true, "kingsshield");
         }
         "obstruct" => {
-            turn.apply_boosts(me.0, me.1, &[("def", -2)], true);
+            turn.apply_boosts(me.0, me.1, &[("def", -2)], true, "obstruct");
         }
         "silktrap" => {
-            turn.apply_boosts(me.0, me.1, &[("spe", -1)], true);
+            turn.apply_boosts(me.0, me.1, &[("spe", -1)], true, "silktrap");
         }
         _ => {}
     }
@@ -1922,7 +2008,7 @@ fn absorb(turn: &mut Turn, mv: &Move, target: Slot) {
         _ => None,
     };
     if heals == Some(mv.mtype.as_str()) {
-        turn.heal(target.0, target.1, (maxhp / 4).max(1));
+        turn.heal(target.0, target.1, (maxhp / 4).max(1), ability.as_str());
         return;
     }
     let boosts: Option<(&str, &[(&str, i64)])> = match ability.as_str() {
@@ -1937,7 +2023,7 @@ fn absorb(turn: &mut Turn, mv: &Move, target: Slot) {
     };
     if let Some((wanted, table)) = boosts {
         if wanted == mv.mtype.as_str() {
-            turn.apply_boosts(target.0, target.1, table, false);
+            turn.apply_boosts(target.0, target.1, table, false, ability.as_str());
             return;
         }
     }
@@ -1965,7 +2051,7 @@ fn after_hit(
     if let Some(drain) = mv.drain.as_ref() {
         if dealt > 0 {
             let amount = round_fraction(dealt, drain);
-            turn.heal(me.0, me.1, amount);
+            turn.heal(me.0, me.1, amount, "drain");
         }
     }
 
@@ -1994,13 +2080,13 @@ fn after_hit(
         }
         if let Some(status) = mv.status.as_deref() {
             let status = status.to_string();
-            crate::resolve::apply_status_from(turn, target, &status, me)?;
+            crate::resolve::apply_status_from(turn, target, &status, me, mv.id.as_str())?;
         }
     }
 
     let defender_ability = turn.mon_at(target.0, target.1).map(|m| m.ability);
     if landed && matches!(defender_ability, Some(a) if a.as_str() == "spicyspray") {
-        crate::resolve::apply_status_from(turn, me, "brn", target)?;
+        crate::resolve::apply_status_from(turn, me, "brn", target, "spicyspray")?;
     }
 
     // Throat Chop adds its own condition from a 100%-chance `secondary.onHit`, so there is
@@ -2008,6 +2094,7 @@ fn after_hit(
     if mv.id == "throatchop" && landed && defender_alive {
         let duration = effect_duration(turn, mv, "throatchop", action.side, action.slot);
         turn.add_volatile(target.0, target.1, "throatchop", duration);
+        log_event!(turn, "{} cannot use sound moves (throatchop)", Name(target.0, target.1));
     }
 
     // Cursed Body: `onDamagingHit` with `randomChance(3, 10)`, gated on neither contact
@@ -2035,11 +2122,11 @@ fn after_hit(
             Some(mon) => (Some(mon.ability), mon.item),
         };
         let attacker_maxhp = turn.mon_at(me.0, me.1).map(|m| m.maxhp).unwrap_or(0);
-        if matches!(ability, Some(a) if matches!(a.as_str(), "roughskin" | "ironbarbs")) {
-            turn.deal_damage(me.0, me.1, (attacker_maxhp / 8).max(1), false)?;
+        if let Some(barbs) = ability.filter(|a| matches!(a.as_str(), "roughskin" | "ironbarbs")) {
+            turn.deal_damage(me.0, me.1, (attacker_maxhp / 8).max(1), false, barbs.as_str())?;
         }
         if is(item, "rockyhelmet") {
-            turn.deal_damage(me.0, me.1, (attacker_maxhp / 6).max(1), false)?;
+            turn.deal_damage(me.0, me.1, (attacker_maxhp / 6).max(1), false, "rockyhelmet")?;
         }
         if let Some(ability) = ability {
             if matches!(
@@ -2069,7 +2156,8 @@ fn after_hit(
         },
     };
     if eats_berry && !turn.berries_blocked(target.0) {
-        turn.consume_item(target.0, target.1);
+        let berry = turn.mon_at(target.0, target.1).and_then(|m| m.item);
+        turn.consume_item(target.0, target.1, berry.as_ref().map(|b| b.as_str()).unwrap_or(""));
     }
 
     // Knock Off removes what it hit; Thief and Covet take it when the attacker has
@@ -2089,12 +2177,13 @@ fn after_hit(
             let attacker_empty =
                 matches!(turn.mon_at(me.0, me.1), Some(mon) if mon.item.is_none());
             if removable && mv.id == "knockoff" {
-                turn.consume_item(target.0, target.1);
+                turn.consume_item(target.0, target.1, "knockoff");
             } else if removable && attacker_empty {
-                turn.consume_item(target.0, target.1);
+                turn.consume_item(target.0, target.1, mv.id.as_str());
                 if let Some(mon) = turn.mon_at_mut(me.0, me.1) {
                     mon.item = Some(item);
                 }
+                log_event!(turn, "{} stole {}", Name(me.0, me.1), item);
             }
         }
     }
@@ -2184,7 +2273,7 @@ fn apply_secondary(
     }
     if let Some(status) = secondary.get("status").and_then(Value::as_str) {
         let status = status.to_string();
-        crate::resolve::apply_status_from(turn, target, &status, (action.side, action.slot))?;
+        crate::resolve::apply_status_from(turn, target, &status, (action.side, action.slot), "secondary")?;
     }
     if let Some(vid) = secondary.get("volatileStatus").and_then(Value::as_str) {
         let vid = vid.to_string();
@@ -2204,7 +2293,7 @@ fn apply_secondary(
             .iter()
             .map(|(stat, value)| (stat.as_str(), value.as_i64().unwrap_or(0)))
             .collect();
-        turn.apply_boosts(target.0, target.1, &table, true);
+        turn.apply_boosts(target.0, target.1, &table, true, "secondary");
     }
     if let Some(self_boosts) = secondary
         .get("self")
@@ -2215,7 +2304,7 @@ fn apply_secondary(
             .iter()
             .map(|(stat, value)| (stat.as_str(), value.as_i64().unwrap_or(0)))
             .collect();
-        turn.apply_boosts(action.side, action.slot, &table, false);
+        turn.apply_boosts(action.side, action.slot, &table, false, "secondary");
     }
     Ok(())
 }
@@ -2313,7 +2402,7 @@ fn on_being_hit(
     };
     if let Some((boosts, types)) = entry {
         if types.is_empty() || types.contains(&mv.mtype.as_str()) {
-            turn.apply_boosts(target.0, target.1, boosts, false);
+            turn.apply_boosts(target.0, target.1, boosts, false, ability.as_str());
         }
     }
     // Cursed Body stays on this list even though the Disable is branched: Python reports
@@ -2365,6 +2454,7 @@ fn mark_self_switch(turn: &mut Turn, action: &QueuedAction) {
     }
     turn.add_volatile(action.side, action.slot, "pendingselfswitch", None);
     turn.self_switch_pending = true;
+    log_event!(turn, "{} must switch out", Name(action.side, action.slot));
 }
 
 // ---------------------------------------------------------------------------
@@ -2431,6 +2521,7 @@ fn raise_force_switch(turn: &mut Turn, source: Slot, target: Slot) -> bool {
     }
     if !turn.mon_at(target.0, target.1).is_some_and(|m| m.has_volatile("pendingforceswitch")) {
         turn.add_volatile(target.0, target.1, "pendingforceswitch", None);
+        log_event!(turn, "{} is forced out", Name(target.0, target.1));
     }
     true
 }
@@ -2450,6 +2541,10 @@ fn emergency_exit(turn: &mut Turn, slot: Slot, mid_turn: bool) {
     turn.add_volatile(slot.0, slot.1, "pendingselfswitch", None);
     if mid_turn {
         turn.self_switch_pending = true;
+    }
+    if turn.log.is_some() {
+        let ability = turn.mon_at(slot.0, slot.1).map(|m| m.ability).unwrap_or_default();
+        log_event!(turn, "{} must switch out ({})", Name(slot.0, slot.1), ability);
     }
 }
 
@@ -2548,9 +2643,10 @@ fn after_move_secondary_switches(turn: &mut Turn, action: &QueuedAction, mv: &Mo
         if !can_switch(turn, target.0) || forced {
             continue;
         }
-        turn.consume_item(target.0, target.1);
+        turn.consume_item(target.0, target.1, "ejectbutton");
         turn.add_volatile(target.0, target.1, "pendingselfswitch", None);
         turn.self_switch_pending = true;
+        log_event!(turn, "{} must switch out (ejectbutton)", Name(target.0, target.1));
     }
 
     let carding = holding(turn, "redcard");
@@ -2566,9 +2662,10 @@ fn after_move_secondary_switches(turn: &mut Turn, action: &QueuedAction, mv: &Mo
         // `if (target.useItem(source)) { if (this.runEvent('DragOut', source, target, move))
         // source.forceSwitchFlag = true; }` -- the card goes even when the drag is stopped
         // (IKA-208). The drag itself is `resolve::drag_in`, at the end of the action.
-        turn.consume_item(target.0, target.1);
+        turn.consume_item(target.0, target.1, "redcard");
         if !drag_out_stopped(turn, me, None) {
             turn.add_volatile(me.0, me.1, "pendingforceswitch", None);
+            log_event!(turn, "{} is forced out", Name(me.0, me.1));
         }
     }
 
@@ -2613,11 +2710,11 @@ fn weather_recovery_modifier(weather: Option<&str>) -> i64 {
 
 /// `this.heal(this.modify(pokemon.maxhp, factor))` (`resolve._weather_recovery`). `modify`
 /// rounds a half down, where Recover's `heal` field is `Math.round` (`round_fraction`).
-fn weather_recovery(turn: &mut Turn, me: Slot) {
+fn weather_recovery(turn: &mut Turn, me: Slot, mv: &Move) {
     let Some(maxhp) = turn.mon_at(me.0, me.1).map(|m| m.maxhp) else { return };
     let modifier =
         weather_recovery_modifier(turn.pos.field.weather.as_ref().map(|w| w.as_str()));
-    turn.heal(me.0, me.1, modify(maxhp, modifier));
+    turn.heal(me.0, me.1, modify(maxhp, modifier), mv.id.as_str());
 }
 
 /// Showdown's `battle.modify(value, modifier / 4096)`: `tr((tr(value * modifier) + 2048 - 1)
@@ -2662,6 +2759,7 @@ fn thaw_on_hit(turn: &mut Turn, action: &QueuedAction, mv: &Move, target: Slot) 
             mon.status = None;
             mon.status_counter = None;
         }
+        log_event!(turn, "{} thawed ({})", Name(target.0, target.1), mv.id);
     }
 }
 
@@ -2721,6 +2819,8 @@ fn use_substitute(turn: &mut Turn, action: &QueuedAction) {
         return;
     }
     if mon.has_volatile(SUBSTITUTE) || mon.hp * 4 <= mon.maxhp || mon.maxhp == 1 {
+        let why = if mon.has_volatile(SUBSTITUTE) { "a Substitute is already up" } else { "too weak" };
+        log_event!(turn, "{} failed ({})", Label(turn.reg, action), why);
         turn.move_failed[me.0][me.1] = true;
         return;
     }
@@ -2730,6 +2830,7 @@ fn use_substitute(turn: &mut Turn, action: &QueuedAction) {
     set_extra(&mut doll, "hp", Some(json!(cost)));
     mon.volatiles.push(doll);
     mon.hp -= cost;
+    log_event!(turn, "{} -{} (substitute)", Name(me.0, me.1), cost);
     turn.check_berry(me.0, me.1);
 }
 
@@ -2782,8 +2883,12 @@ fn hit_substitute(
     let left = held - dealt;
     if left <= 0 {
         mon.volatiles.retain(|v| v.id.as_str() != SUBSTITUTE);
-    } else if let Some(doll) = mon.volatile_mut(SUBSTITUTE) {
-        set_extra(doll, "hp", Some(json!(left)));
+        log_event!(turn, "{}'s Substitute broke ({})", Name(target.0, target.1), mv.id);
+    } else {
+        if let Some(doll) = mon.volatile_mut(SUBSTITUTE) {
+            set_extra(doll, "hp", Some(json!(left)));
+        }
+        log_event!(turn, "{}'s Substitute -{} ({})", Name(target.0, target.1), dealt, mv.id);
     }
     turn.move_connected = true;
 
@@ -2792,14 +2897,14 @@ fn hit_substitute(
     if let Some(recoil) = mv.recoil.as_ref() {
         if dealt > 0 && !rockhead && turn.mon_at(me.0, me.1).is_some() {
             let amount = round_fraction(dealt, recoil);
-            turn.deal_damage(me.0, me.1, amount, false)?;
+            turn.deal_damage(me.0, me.1, amount, false, "recoil")?;
         }
     }
     if let Some(drain) = mv.drain.as_ref().and_then(Value::as_array) {
         if dealt > 0 && drain.len() >= 2 {
             let numerator = drain[0].as_i64().unwrap_or(1);
             let denominator = drain[1].as_i64().unwrap_or(1);
-            turn.heal(me.0, me.1, (dealt * numerator + denominator - 1) / denominator);
+            turn.heal(me.0, me.1, (dealt * numerator + denominator - 1) / denominator, "drain");
         }
     }
 
@@ -2848,6 +2953,9 @@ fn apply_status_move_past_substitutes(
     if subbed.is_empty() {
         return apply_status_move_and_judge(reg, turn, action, mv, reachable);
     }
+    for target in subbed {
+        log_event!(turn, "{}'s Substitute blocked {}", Name(target.0, target.1), mv.id);
+    }
     let applied: Vec<Slot> = reachable.iter().copied().filter(|t| !subbed.contains(t)).collect();
     if applied.is_empty() {
         return Ok(());
@@ -2864,7 +2972,7 @@ fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), S
     if let Some(recoil) = mv.recoil.as_ref() {
         if total > 0 && !rockhead {
             let amount = round_fraction(total, recoil);
-            turn.deal_damage(me.0, me.1, amount, false)?;
+            turn.deal_damage(me.0, me.1, amount, false, "recoil")?;
         }
     }
     after_move_secondary_switches(turn, action, mv)?;
@@ -2877,10 +2985,10 @@ fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), S
     // `move_connected`, not the total (IKA-171).
     let sheer = sheer_forced(turn, me, mv);
     if is(item, "lifeorb") && turn.move_connected && !sheer {
-        turn.deal_damage(me.0, me.1, (maxhp / 10).max(1), false)?;
+        turn.deal_damage(me.0, me.1, (maxhp / 10).max(1), false, "lifeorb")?;
     }
     if is(item, "shellbell") && total >= 8 && !sheer {
-        turn.heal(me.0, me.1, total / 8);
+        turn.heal(me.0, me.1, total / 8, "shellbell");
     }
     if !sheer && mv.category != "Status" && turn.move_start_hp.is_some() {
         let flagged = user_self_switches(turn, mv);
@@ -2896,7 +3004,7 @@ fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), S
                     .iter()
                     .map(|(stat, value)| (stat.as_str(), value.as_i64().unwrap_or(0)))
                     .collect();
-                turn.apply_boosts(me.0, me.1, &table, false);
+                turn.apply_boosts(me.0, me.1, &table, false, mv.id.as_str());
             }
             if let Some(vid) = self_effect.get("volatileStatus").and_then(Value::as_str) {
                 let vid = vid.to_string();
@@ -2920,13 +3028,17 @@ fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), S
             if let Some(mon) = turn.mon_at_mut(me.0, me.1) {
                 mon.types = Types::from_slice(&replaced);
             }
+            if turn.log.is_some() {
+                let joined = replaced.iter().map(|t| t.as_str()).collect::<Vec<_>>().join("/");
+                log_event!(turn, "{} is {} ({})", Name(me.0, me.1), joined, mv.id);
+            }
         }
         if let Some(boosts) = mv.self_boost_boosts.as_ref() {
             let table: Vec<(&str, i64)> = boosts
                 .iter()
                 .map(|(stat, value)| (stat.as_str(), value.as_i64().unwrap_or(0)))
                 .collect();
-            turn.apply_boosts(me.0, me.1, &table, false);
+            turn.apply_boosts(me.0, me.1, &table, false, mv.id.as_str());
         }
     }
 
@@ -2973,15 +3085,18 @@ fn do_status_move<'a>(
     let mut failed_any = false;
     for target in targets {
         if stopped_by_psychic_terrain(&turn, action, mv, *target) {
+            log_event!(turn, "{} protected by psychicterrain", Name(target.0, target.1));
             failed_any = true;
             continue;
         }
-        if *target != (action.side, action.slot)
-            && blocked_by_protect(&turn, action, mv, *target).is_some()
-        {
-            continue;
+        if *target != (action.side, action.slot) {
+            if let Some(blocked) = blocked_by_protect(&turn, action, mv, *target) {
+                log_event!(turn, "{} blocked by {}", Label(reg, action), blocked);
+                continue;
+            }
         }
-        if immune_to_move(reg, &turn, action, mv, *target).is_some() {
+        if let Some(immunity) = immune_to_move(reg, &turn, action, mv, *target) {
+            log_event!(turn, "{} immune ({})", Name(target.0, target.1), immunity);
             failed_any = true;
             continue;
         }
@@ -3015,11 +3130,13 @@ fn do_status_move<'a>(
     }
 
     if STALL_BUMPING_MOVES.contains(&mv.id.as_str()) && turn.actions_remaining == 0 {
+        log_event!(turn, "{} failed (nothing left to act)", Label(reg, action));
         turn.move_failed[action.side][action.slot] = true;
         return Ok(vec![(1.0, turn)]);
     }
 
     if mv.id == "helpinghand" && helping_hand_fails(&turn, &reachable) {
+        log_event!(turn, "{} failed (partner already moved)", Label(reg, action));
         turn.move_failed[action.side][action.slot] = true;
         return Ok(vec![(1.0, turn)]);
     }
@@ -3031,6 +3148,7 @@ fn do_status_move<'a>(
 
     if !budget.enumerate_accuracy || accuracy >= 1.0 || accuracy <= 0.0 {
         if accuracy <= 0.0 {
+            log_event!(turn, "{} missed", Label(reg, action));
             turn.move_failed[action.side][action.slot] = true;
             return Ok(vec![(1.0, turn)]);
         }
@@ -3040,6 +3158,7 @@ fn do_status_move<'a>(
 
     let mut hit_state = turn.clone();
     apply_status_move_past_substitutes(reg, &mut hit_state, action, mv, &reachable, &subbed)?;
+    log_event!(turn, "{} missed", Label(reg, action));
     turn.move_failed[action.side][action.slot] = true;
     Ok(vec![(accuracy, hit_state), (1.0 - accuracy, turn)])
 }
@@ -3114,6 +3233,7 @@ fn apply_status_move_and_judge(
         }
     }
     if !did {
+        log_event!(turn, "{} failed (did nothing)", Label(reg, action));
         turn.move_failed[action.side][action.slot] = true;
     }
     Ok(())
@@ -3148,7 +3268,7 @@ fn immune_to_move(
             .map(|set| types.as_slice().iter().any(|t| set.contains(t.as_str())))
             .unwrap_or(false);
         if immune {
-            return Some("powder".into());
+            return Some("powder vs Grass".into());
         }
         if defender.ability == "overcoat" {
             return Some("overcoat".into());
@@ -3170,7 +3290,7 @@ fn immune_to_move(
                 .map(|set| types.as_slice().iter().any(|t| set.contains(t.as_str())))
                 .unwrap_or(false);
             if immune {
-                return Some("prankster".into());
+                return Some("prankster vs Dark".into());
             }
         }
     }
@@ -3220,6 +3340,7 @@ fn apply_disable(turn: &mut Turn, side: usize, slot: usize, mv: Option<&Move>) -
             move_slot.disabled = true;
         }
     }
+    log_event!(turn, "{} cannot use {} (disable)", Name(side, slot), last_move);
     true
 }
 
@@ -3258,6 +3379,7 @@ fn apply_encore(turn: &mut Turn, side: usize, slot: usize, mv: &Move) -> bool {
         effect.move_id = Some(last_move);
         mon.volatiles.push(effect);
     }
+    log_event!(turn, "{} is locked into {} (encore)", Name(side, slot), last_move);
     true
 }
 
@@ -3290,6 +3412,7 @@ fn do_protect<'a>(
     let me = (action.side, action.slot);
     let Some(mon) = turn.mon_at(me.0, me.1) else { return Ok(vec![(1.0, turn)]) };
     if turn.actions_remaining == 0 {
+        log_event!(turn, "{} failed (nothing left to act)", Label(turn.reg, action));
         turn.move_failed[me.0][me.1] = true;
         return Ok(vec![(1.0, turn)]);
     }
@@ -3299,8 +3422,10 @@ fn do_protect<'a>(
     let succeed = |state: &mut Turn, move_id: &str| {
         state.add_volatile(me.0, me.1, move_id, Some(1));
         bump_stall(state, me.0, me.1);
+        log_event!(state, "{} protected (1 in {})", Label(state.reg, action), counter);
     };
     let fail = |state: &mut Turn| {
+        log_event!(state, "{} failed (1 in {})", Label(state.reg, action), counter);
         state.move_failed[me.0][me.1] = true;
         if let Some(mon) = state.mon_at_mut(me.0, me.1) {
             mon.volatiles.retain(|v| v.id.as_str() != "stall");
@@ -3394,6 +3519,7 @@ fn apply_status_move(
         if !turn.add_side_condition(condition_side, &condition, duration) {
             // Nothing else in these moves does anything, so `didSomething` is false and
             // the move fails (IKA-173): a second Stealth Rock or Tailwind, a fourth Spikes.
+            log_event!(turn, "{} failed ({} already up)", Label(reg, action), condition);
             turn.move_failed[me.0][me.1] = true;
         }
     }
@@ -3402,6 +3528,7 @@ fn apply_status_move(
         turn.pos.field.weather = Some(Id::new(&weather));
         turn.pos.field.weather_duration =
             Some(effect_duration(turn, mv, &weather, action.side, action.slot).unwrap_or(5));
+        log_event!(turn, "weather -> {}", weather);
     }
     if let Some(terrain) = mv.terrain.as_deref() {
         let terrain = terrain.to_lowercase().replace(' ', "");
@@ -3415,12 +3542,16 @@ fn apply_status_move(
         let toggling = matches!(pid.as_str(), "trickroom" | "magicroom" | "wonderroom");
         if already && toggling {
             turn.pos.field.pseudo_weather.retain(|p| p.id.as_str() != pid);
+            log_event!(turn, "{} ended", pid);
         } else if !already {
             let duration =
                 effect_duration(turn, mv, &pid, action.side, action.slot).unwrap_or(5);
             let mut effect = Effect::new(Id::new(&pid));
             effect.duration = Some(duration);
             turn.pos.field.pseudo_weather.push(effect);
+            log_event!(turn, "{} started", pid);
+        } else {
+            log_event!(turn, "{} failed (already active)", pid);
         }
     }
 
@@ -3430,7 +3561,7 @@ fn apply_status_move(
                 .iter()
                 .map(|(stat, value)| (stat.as_str(), value.as_i64().unwrap_or(0)))
                 .collect();
-            turn.apply_boosts(me.0, me.1, &table, false);
+            turn.apply_boosts(me.0, me.1, &table, false, mv.id.as_str());
         }
         if let Some(vid) = self_effect.get("volatileStatus").and_then(Value::as_str) {
             let vid = vid.to_string();
@@ -3448,26 +3579,32 @@ fn apply_status_move(
     for target in targets {
         let own_side = target.0 == action.side;
         if let Some(boosts) = mv.raw.get("boosts").and_then(Value::as_object) {
-            let table: Vec<(&str, i64)> = boosts
+            let mut table: Vec<(&str, i64)> = boosts
                 .iter()
                 .map(|(stat, value)| (stat.as_str(), value.as_i64().unwrap_or(0)))
                 .collect();
+            // In the dump's order, as Showdown's `boost()` walks it (IKA-215).
+            if let Some(order) = reg.boost_order.get(mv.id.as_str()) {
+                table.sort_by_key(|(stat, _)| order.iter().position(|s| s == stat));
+            }
             turn.apply_boosts_by(
                 target.0,
                 target.1,
                 &table,
                 !own_side,
                 (target.0, target.1) != me,
+                mv.id.as_str(),
             );
         }
         if let Some(status) = mv.status.as_deref() {
             let status = status.to_string();
-            crate::resolve::apply_status_from(turn, *target, &status, me)?;
+            crate::resolve::apply_status_from(turn, *target, &status, me, mv.id.as_str())?;
         }
         if let Some(vid) = mv.volatile_status.as_deref() {
             let vid = vid.to_string();
             if vid == "encore" {
                 if !apply_encore(turn, target.0, target.1, mv) {
+                    log_event!(turn, "{} failed (nothing to encore)", Label(reg, action));
                     turn.move_failed[action.side][action.slot] = true;
                 }
                 continue;
@@ -3476,6 +3613,7 @@ fn apply_status_move(
                 // Which move is the whole effect, and it fails outright when the target has
                 // not moved, so the generic path cannot express it.
                 if !apply_disable(turn, target.0, target.1, Some(mv)) {
+                    log_event!(turn, "{} failed (nothing to disable)", Label(reg, action));
                     turn.move_failed[action.side][action.slot] = true;
                 }
                 continue;
@@ -3503,19 +3641,19 @@ fn apply_status_move(
             let maxhp = turn.mon_at(target.0, target.1).map(|m| m.maxhp).unwrap_or(0);
             if maxhp > 0 {
                 let amount = round_fraction(maxhp, heal);
-                turn.heal(target.0, target.1, amount);
+                turn.heal(target.0, target.1, amount, mv.id.as_str());
             }
         }
     }
 
     if WEATHER_RECOVERY_MOVES.contains(&mv.id.as_str()) {
-        weather_recovery(turn, me);
+        weather_recovery(turn, me, mv);
     }
 
     if mv.id == "partingshot" {
         let mut landed = false;
         for target in targets {
-            if turn.apply_boosts(target.0, target.1, &[("atk", -1), ("spa", -1)], true) {
+            if turn.apply_boosts(target.0, target.1, &[("atk", -1), ("spa", -1)], true, "partingshot") {
                 landed = true;
             }
             if matches!(turn.mon_at(target.0, target.1), Some(m) if m.ability == "mirrorarmor") {
@@ -3524,6 +3662,7 @@ fn apply_status_move(
         }
         if !landed {
             suppress_self_switch = true;
+            log_event!(turn, "{} did nothing, so nobody switched", Label(reg, action));
         }
     }
 
@@ -3540,7 +3679,7 @@ fn apply_status_move(
         bump_stall(turn, action.side, action.slot);
     }
     if mv.id == "perishsong" {
-        perish_song(turn, me);
+        perish_song(turn, me, action);
     }
     // `runMoveEffects`: `target.side.addSlotCondition(target, moveData.slotCondition)` --
     // Healing Wish's, which heals whoever comes into the slot next (IKA-208).
@@ -3665,6 +3804,7 @@ fn swap_items(reg: &Reg, turn: &mut Turn, me: Slot, target: Slot) -> bool {
         restore(turn, yours.map(Some), mine.map(Some));
         return false;
     }
+    log_event!(turn, "{} and {} swapped items", Name(me.0, me.1), Name(target.0, target.1));
     for (at, item) in [(target, mine), (me, yours)] {
         let Some(item) = item else { continue };
         turn.mon_at_mut(at.0, at.1).unwrap().item = Some(item);
@@ -3696,8 +3836,9 @@ fn eat_received_berry(turn: &mut Turn, at: Slot) {
     if !cures || turn.berries_blocked(at.0) {
         return;
     }
-    let lum = is(turn.mon_at(at.0, at.1).unwrap().item, "lumberry");
-    turn.consume_item(at.0, at.1);
+    let berry = turn.mon_at(at.0, at.1).unwrap().item;
+    let lum = is(berry, "lumberry");
+    turn.consume_item(at.0, at.1, berry.as_ref().map(|b| b.as_str()).unwrap_or(""));
     let mon = turn.mon_at_mut(at.0, at.1).unwrap();
     mon.volatiles.retain(|v| v.id.as_str() != "confusion");
     if lum {
@@ -3706,7 +3847,7 @@ fn eat_received_berry(turn: &mut Turn, at: Slot) {
     }
 }
 
-fn perish_song(turn: &mut Turn, me: Slot) {
+fn perish_song(turn: &mut Turn, me: Slot, action: &QueuedAction) {
     let ignores_ability = turn
         .mon_at(me.0, me.1)
         .is_some_and(|singer| is_mold_breaker(singer.ability.as_str()));
@@ -3722,6 +3863,8 @@ fn perish_song(turn: &mut Turn, me: Slot) {
                 && (side, slot) != me
                 && !(ignores_ability && !shielded)
             {
+                let ability = mon.ability;
+                log_event!(turn, "{} immune ({})", Name(side, slot), ability);
                 result = true;
                 continue;
             }
@@ -3729,10 +3872,12 @@ fn perish_song(turn: &mut Turn, me: Slot) {
                 continue;
             }
             turn.add_volatile(side, slot, "perishsong", Some(4));
+            log_event!(turn, "{} perish3", Name(side, slot));
             result = true;
         }
     }
     if !result {
+        log_event!(turn, "{} failed (everyone is already counting)", Label(turn.reg, action));
         turn.move_failed[me.0][me.1] = true;
     }
 }
@@ -3814,6 +3959,8 @@ fn residual_order(turn: &Turn) -> Result<(Vec<Slot>, bool), String> {
 pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
     crate::resolve::RESIDUALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let _ = reg;
+    #[cfg(not(feature = "ika215-control"))]
+    turn.begin(|| "residual".to_string());
     let (order, tied) = residual_order(turn)?;
     if tied {
         turn.report("residual speed tie (Showdown breaks it at random)");
@@ -3826,6 +3973,9 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
             let left = duration - 1;
             turn.pos.field.weather_duration = Some(left);
             if left <= 0 {
+                if let Some(weather) = turn.pos.field.weather {
+                    log_event!(turn, "{} ended", weather);
+                }
                 turn.pos.field.weather = None;
                 turn.pos.field.weather_duration = None;
                 weather_expired = true;
@@ -3864,7 +4014,7 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
                 continue;
             }
             let amount = turn.fraction_of_max(side, slot, SANDSTORM_DAMAGE);
-            turn.deal_damage(side, slot, amount, false)?;
+            turn.deal_damage(side, slot, amount, false, "sandstorm")?;
         }
     }
 
@@ -3887,9 +4037,9 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
             let Some((numerator, denominator)) = ratio else { continue };
             let amount = turn.fraction_of_max(side, slot, (numerator.abs(), denominator));
             if numerator < 0 {
-                turn.deal_damage(side, slot, amount, false)?;
+                turn.deal_damage(side, slot, amount, false, ability.as_str())?;
             } else {
-                turn.heal(side, slot, amount);
+                turn.heal(side, slot, amount, ability.as_str());
             }
         }
     }
@@ -3901,7 +4051,7 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
             if !mon.fainted && is(mon.item, "leftovers"));
         if leftovers {
             let amount = turn.fraction_of_max(side, slot, LEFTOVERS_HEAL);
-            turn.heal(side, slot, amount);
+            turn.heal(side, slot, amount, "leftovers");
         }
     }
 
@@ -3921,9 +4071,9 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
             continue;
         }
         let amount = turn.fraction_of_max(side, slot, LEECH_SEED_DRAIN);
-        let drained = turn.deal_damage(side, slot, amount, false)?;
+        let drained = turn.deal_damage(side, slot, amount, false, "leechseed")?;
         if drained > 0 {
-            turn.heal(planter.0, planter.1, drained);
+            turn.heal(planter.0, planter.1, drained, "leechseed");
         }
     }
 
@@ -3943,26 +4093,31 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
             };
         if is(status, "brn") {
             let amount = turn.fraction_of_max(side, slot, BURN_DAMAGE);
-            turn.deal_damage(side, slot, amount, false)?;
+            turn.deal_damage(side, slot, amount, false, "brn")?;
         } else if is(status, "psn") {
             let amount = turn.fraction_of_max(side, slot, POISON_DAMAGE);
-            turn.deal_damage(side, slot, amount, false)?;
+            turn.deal_damage(side, slot, amount, false, "psn")?;
         } else if is(status, "tox") {
             let stage = (counter.unwrap_or(0) + 1).min(15);
             if let Some(mon) = turn.mon_at_mut(side, slot) {
                 mon.status_counter = Some(stage);
             }
             let per_stage = (maxhp / 16).max(1);
-            turn.deal_damage(side, slot, per_stage * stage, false)?;
+            turn.deal_damage(side, slot, per_stage * stage, false, "tox")?;
         }
+        // Read again, as Python's `mon.volatile(...)` is: a faint to the status damage
+        // above has cleared it, and a freed line would follow (IKA-215).
+        let has_trap =
+            has_trap && turn.mon_at(side, slot).is_some_and(|m| m.has_volatile("partiallytrapped"));
         if has_trap {
             if trapper_gone(turn, trap_source) {
                 if let Some(mon) = turn.mon_at_mut(side, slot) {
                     mon.volatiles.retain(|v| v.id.as_str() != "partiallytrapped");
                 }
+                log_event!(turn, "{} freed (trapper left)", Name(side, slot));
             } else {
                 let amount = turn.fraction_of_max(side, slot, PARTIAL_TRAP_DAMAGE);
-                turn.deal_damage(side, slot, amount, false)?;
+                turn.deal_damage(side, slot, amount, false, "partiallytrapped")?;
             }
         }
         if has_saltcure {
@@ -3975,7 +4130,7 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
             };
             let ratio = if weak { SALT_CURE_DAMAGE_WEAK } else { SALT_CURE_DAMAGE };
             let amount = turn.fraction_of_max(side, slot, ratio);
-            turn.deal_damage(side, slot, amount, false)?;
+            turn.deal_damage(side, slot, amount, false, "saltcure")?;
         }
     }
 
@@ -3997,6 +4152,7 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
                 },
             }
         };
+        log_event!(turn, "{} perish{}", Name(side, slot), left.max(0));
         if left <= 0 {
             turn.faint(side, slot);
         }
@@ -4007,7 +4163,7 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
         let boosts = matches!(turn.mon_at(side, slot), Some(mon)
             if !mon.fainted && mon.ability == "speedboost" && !mon.newly_switched);
         if boosts {
-            turn.apply_boosts(side, slot, &[("spe", 1)], false);
+            turn.apply_boosts(side, slot, &[("spe", 1)], false, "speedboost");
         }
     }
 
@@ -4019,6 +4175,7 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
             if let Some(duration) = condition.duration {
                 condition.duration = Some(duration - 1);
                 if duration - 1 <= 0 {
+                    log_event!(turn, "p{} side -{}", side + 1, condition.id);
                     continue;
                 }
             }
@@ -4030,6 +4187,10 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
     if let Some(duration) = turn.pos.field.terrain_duration {
         turn.pos.field.terrain_duration = Some(duration - 1);
         if duration - 1 <= 0 {
+            if turn.log.is_some() {
+                let terrain = turn.pos.field.terrain;
+                log_event!(turn, "{} ended", crate::moves::OrNone(terrain));
+            }
             turn.pos.field.terrain = None;
             turn.pos.field.terrain_duration = None;
         }
@@ -4039,6 +4200,7 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
         if let Some(duration) = pseudo.duration {
             pseudo.duration = Some(duration - 1);
             if duration - 1 <= 0 {
+                log_event!(turn, "{} ended", pseudo.id);
                 continue;
             }
         }
@@ -4049,9 +4211,13 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
     rampage_runs_out(turn, &order);
     for (side, slot) in order.iter().copied() {
         let failed = turn.move_failed[side][slot];
+        let logging = turn.log.is_some();
         let Some(mon) = turn.mon_at_mut(side, slot) else { continue };
         let mut kept: Vec<Effect> = Vec::new();
         let mut yawn_expired = false;
+        // Python's order of the loop's lines: Yawn's sleep (true) and an Encore that ran
+        // out of PP (false), as the volatiles meet them (IKA-215).
+        let mut said: Vec<bool> = Vec::new();
         for mut volatile in std::mem::take(&mut mon.volatiles) {
             let single_turn = PROTECT_VOLATILES.iter().any(|(v, _)| *v == volatile.id.as_str())
                 || matches!(
@@ -4071,6 +4237,9 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
                 if duration - 1 <= 0 {
                     if volatile.id.as_str() == "yawn" {
                         yawn_expired = true;
+                        if logging {
+                            said.push(true);
+                        }
                     }
                     if volatile.id.as_str() == "disable" {
                         // The flag lives on the move slot, so it has to be cleared here or
@@ -4092,6 +4261,9 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
                     .map(|slot| slot.pp > 0)
                     .unwrap_or(false);
                 if !spent {
+                    if logging && volatile.move_id.is_some() {
+                        said.push(false);
+                    }
                     continue;
                 }
             }
@@ -4100,8 +4272,15 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
         mon.volatiles = kept;
         mon.newly_switched = false;
         mon.move_last_turn_failed = failed;
-        if yawn_expired {
-            turn.apply_status_unveiled(side, slot, "slp")?;
+        if !logging && yawn_expired {
+            turn.apply_status_unveiled(side, slot, "slp", "yawn")?;
+        }
+        for yawn in said {
+            if yawn {
+                turn.apply_status_unveiled(side, slot, "slp", "yawn")?;
+            } else {
+                log_event!(turn, "{} is free of encore (no PP)", Name(side, slot));
+            }
         }
     }
     rampage_residual(turn, &order);
