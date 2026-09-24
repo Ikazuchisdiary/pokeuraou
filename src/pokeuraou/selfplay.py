@@ -374,7 +374,8 @@ def _make_pokemon(reg: Regulation, index: int, entry: SampledSet, active: int | 
         ability=entry.ability,
         nature=entry.nature,
         moves=[
-            MoveSlot(id=m, pp=reg.moves[m].pp, maxpp=reg.moves[m].pp) for m in entry.moves
+            MoveSlot(id=m, pp=reg.moves[m].start_pp, maxpp=reg.moves[m].start_pp)
+            for m in entry.moves
         ],
         hp=maxhp,
         maxhp=maxhp,
