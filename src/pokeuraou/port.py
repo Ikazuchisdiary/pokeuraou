@@ -487,33 +487,19 @@ def _encoded(
     payoffs = [np.zeros((len(ours), len(theirs)), dtype=np.float64) for _ in plan]
     exact = np.array(filled.exact, dtype=bool)
     timing.count("leaves.node", len(filled.encoded.species))
-    spans = _span_table(filled.spans)
     for index, (name, score) in enumerate(plan):
         values = (
             np.asarray(filled.leaf_values[name], dtype=np.float64)
             if score is None
             else np.asarray(score(filled.encoded), dtype=np.float64)
         )
-        _write_span_means(spans, payoffs[index], values)
+        for i, j, indices, weights in filled.spans:
+            if not weights:
+                continue
+            payoffs[index][i, j] = float(values[indices] @ np.asarray(weights))
         for i, j, root in filled.folded:
             payoffs[index][i, j] = fold_value(_fold_from_json(root), values)
     return payoffs, set(filled.unmodelled), exact
-
-
-def _span_table(spans: Sequence) -> object:
-    """The fill's spans laid out once for every evaluator's values (IKA-265)."""
-    from .spanmean import SpanTable
-
-    return SpanTable(spans)
-
-
-def _write_span_means(table: object, payoff: np.ndarray, values: np.ndarray) -> None:
-    """``payoff[i, j] = float(values[indices] @ weights)`` for every span, in one pass.
-
-    The same doubles as the per-cell loop it replaced: `spanmean` reproduces the BLAS
-    kernel's own order of operations, and falls back to one `@` per span where it cannot.
-    """
-    table.write(payoff, table.means(values)[0])
 
 
 class HeldLeaves:

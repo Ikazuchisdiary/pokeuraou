@@ -3,20 +3,23 @@
 A port fill describes each cell whose turn did not stop as a weighted mean of leaf values:
 ``(i, j, indices, weights)``. The readers (`beliefnode.belief_payoffs`, `port._encoded`)
 wrote each one as ``float(values[indices] @ np.asarray(weights))`` -- a Python loop with a
-fancy index, an array from a list and a BLAS call per cell, 16% of the generation worker's
-CPU with the loops of `belief_payoffs` (IKA-258). This computes every span of a fill at
-once (IKA-265).
+fancy index, an array from a list and a BLAS call per cell. This computes the spans of a
+fill together (IKA-265).
 
 It has to be the *same* double, or the games change. `@` on two float64 vectors is
 OpenBLAS's `ddot`, and below 16 elements that kernel is a sequential loop of fused
 multiply-adds, ``dot = fma(x[k], y[k], dot)`` from ``dot = 0`` (the compiler contracts the
-tail loop; measured on the recorded spans, `records/IKA-265.md`). A plain ``(x * y).sum()``
-rounds every product and adds in another order, and differs in the last bit on about a
-third of spans. So the short spans here run that same loop, a column at a time across all
-spans, with the fused multiply-add emulated exactly in plain double arithmetic (Boldo and
-Melquiond's algorithm: an exact product and an exact sum, their tails rounded to odd, one
-final rounding). Spans of 16 or more go to the kernel's blocked path, which this does not
-reproduce, so they are still one `@` each -- 2.6% of spans.
+tail loop; measured, `records/IKA-265.md`). A plain ``(x * y).sum()`` rounds every product
+and adds in another order, and differs in the last bit on about a third of spans. So the
+short spans here run that same loop, a column at a time across all spans, with the fused
+multiply-add emulated exactly in plain double arithmetic (Boldo and Melquiond's algorithm:
+an exact product and an exact sum, their tails rounded to odd, one final rounding).
+
+A column costs a fixed ~20 numpy calls whatever the number of spans, and a span left to its
+own `@` costs about four, so the widest spans are cheaper one by one: each read picks the
+number of columns that makes the whole cheapest, and the spans longer than that -- and all
+of 16 or more, where the kernel's blocked path starts, which this does not reproduce -- are
+still one `@` each. Either road is the same double; the choice is only speed.
 
 Whether the loop *is* the kernel is a property of the BLAS build and the CPU it dispatched
 to, not of this code. `exact()` checks it once per process against `@` itself on fixed
@@ -38,6 +41,10 @@ _SPLIT = 134217729.0  # 2**27 + 1
 #: product would not be exact. Leaf values and chance weights are nowhere near it.
 _TINY = 2.0**-900
 _BIG = 2.0**900
+#: The cost of one column across every span, and of one span read on its own, in the same
+#: (rough) unit: numpy calls. Only the speed depends on them.
+_COLUMN_COST = 20.0
+_SPAN_COST = 4.0
 
 _EXACT: bool | None = None
 
@@ -54,22 +61,33 @@ def _split(a: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return high, a - high
 
 
-def _fma(
-    a: np.ndarray, b: np.ndarray, b_high: np.ndarray, b_low: np.ndarray, c: np.ndarray
-) -> np.ndarray:
-    """``a * b + c`` rounded once, for finite inputs well inside the exponent range."""
+def _exact_product(
+    a: np.ndarray, b: np.ndarray, b_high: np.ndarray, b_low: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """``(p, e)`` with ``p = a * b`` rounded and ``p + e`` exactly ``a * b`` (Dekker)."""
     product = a * b
     a_high, a_low = _split(a)
-    product_err = ((a_high * b_high - product) + a_high * b_low + a_low * b_high) + a_low * b_low
+    err = ((a_high * b_high - product) + a_high * b_low + a_low * b_high) + a_low * b_low
+    return product, err
+
+
+def _fma_step(c: np.ndarray, product: np.ndarray, product_err: np.ndarray) -> np.ndarray:
+    """``fma(a, b, c)`` given the exact product of ``a * b`` as ``product + product_err``."""
     high, low = _two_sum(c, product)
     # low + product_err, rounded to odd: round to nearest, and when that was inexact and
     # landed on an even significand, step to the neighbour on the other side of the truth.
     tail, err = _two_sum(low, product_err)
-    even = (tail.view(np.int64) & 1) == 0
-    step = (err != 0) & even
+    step = (err != 0) & ((tail.view(np.int64) & 1) == 0)
     if step.any():
         tail = np.where(step, np.nextafter(tail, np.where(err > 0, np.inf, -np.inf)), tail)
     return high + tail
+
+
+def _fma(
+    a: np.ndarray, b: np.ndarray, b_high: np.ndarray, b_low: np.ndarray, c: np.ndarray
+) -> np.ndarray:
+    """``a * b + c`` rounded once, for finite inputs well inside the exponent range."""
+    return _fma_step(c, *_exact_product(a, b, b_high, b_low))
 
 
 class SpanTable:
@@ -100,28 +118,32 @@ class SpanTable:
             kept_offsets.extend([int(offset)] * (len(kept) - lo))
             self.bounds.append((lo, len(kept)))
         self._kept = kept
+        self._built: dict[int, tuple[np.ndarray, np.ndarray]] = {}
         count = len(kept)
         self.size = count
         self._offsets = np.asarray(kept_offsets, dtype=np.intp)
-        self.i = np.fromiter((span[0] for span in kept), dtype=np.intp, count=count)
-        self.j = np.fromiter((span[1] for span in kept), dtype=np.intp, count=count)
-        lengths = np.fromiter((len(span[3]) for span in kept), dtype=np.intp, count=count)
+        rows, cols, indices, weights = zip(*kept, strict=True) if kept else ((), (), (), ())
+        self.i = np.array(rows, dtype=np.intp)
+        self.j = np.array(cols, dtype=np.intp)
+        lengths = np.fromiter(map(len, weights), dtype=np.intp, count=count)
         total = int(lengths.sum())
-        flat_index = np.fromiter(
-            chain.from_iterable(span[2] for span in kept), dtype=np.intp, count=total
-        ) + np.repeat(self._offsets, lengths)
-        flat_weight = np.fromiter(
-            chain.from_iterable(span[3] for span in kept), dtype=np.float64, count=total
-        )
+        flat_index = np.fromiter(chain.from_iterable(indices), dtype=np.intp, count=total)
+        flat_index += np.repeat(self._offsets, lengths)
+        flat_weight = np.fromiter(chain.from_iterable(weights), dtype=np.float64, count=total)
+        self._unique_cells = self._cells_unique(len(groups))
         long = lengths >= SHORT
-        self._long = [self._span(k) for k in np.flatnonzero(long)]
-        self._each_made: list | None = None
-        # The short spans, longest first, so the spans still running at column k are a prefix.
+        self._long = [int(k) for k in np.flatnonzero(long)]
+        # The short spans, longest first: the spans longer than any cut are a prefix, and
+        # the spans still running at column k of those after it are a prefix of the rest.
         short = np.flatnonzero(~long)
         order = short[np.argsort(-lengths[short], kind="stable")]
         self._order = order
         widest = int(lengths[order[0]]) if len(order) else 0
-        self._active = [int((lengths[order] > k).sum()) for k in range(widest)]
+        ordered = lengths[order]
+        #: longer[k]: how many short spans are longer than k (a prefix of `order`).
+        self._longer = (
+            len(order) - np.cumsum(np.bincount(ordered, minlength=widest + 1))
+        ).tolist()
         index = np.zeros((widest, len(order)), dtype=np.intp)
         weight = np.zeros((widest, len(order)), dtype=np.float64)
         # Each element of a short span to (its place in the span, its span's place in order).
@@ -135,55 +157,83 @@ class SpanTable:
         self._index = index
         self._weight = weight
         self._weight_split = _split(weight)
-        self._weight_ok = bool(
-            np.isfinite(weight).all() and (np.abs(weight) < _BIG).all()
-        )
+        magnitude = np.abs(flat_weight)
+        self._weight_ok = bool(((magnitude < _BIG) & ((magnitude >= _TINY) | (magnitude == 0))).all())
 
-    def means(self, values: np.ndarray, starts: Sequence[int] = (0,)) -> np.ndarray:
+    def _cells_unique(self, groups: int) -> bool:
+        """No cell named twice within a group: the cells can then be written at once."""
+        if self.size < 2:
+            return True
+        width = int(self.j.max()) + 1
+        key = self.i * width + self.j
+        if groups > 1:
+            group = np.repeat(np.arange(groups), [hi - lo for lo, hi in self.bounds])
+            key += group * (int(self.i.max()) + 1) * width
+        return int(np.bincount(key).max()) == 1
+
+    def means(
+        self, values: np.ndarray, starts: Sequence[int] = (0,), *, cut: int | None = None
+    ) -> np.ndarray:
         """``(len(starts), size)``: each span's mean over ``values[start + indices]``.
 
         Bit for bit ``float(values[start + indices] @ np.asarray(weights))`` span by span.
+        `cut` forces the number of columns run together (the probe's; otherwise the cheapest).
         """
         values = np.asarray(values, dtype=np.float64)
-        out = np.zeros((len(starts), self.size), dtype=np.float64)
+        reads = len(starts)
+        out = np.zeros((reads, self.size), dtype=np.float64)
         if not self.size:
             return out
         base = np.asarray(starts, dtype=np.intp)
+        alone: list[int]
         if self._fast(values):
+            longer = self._longer
+            if cut is None:
+                cut = min(
+                    range(len(longer)),
+                    key=lambda k: _COLUMN_COST * k + _SPAN_COST * reads * longer[k],
+                )
+            cut = min(cut, len(longer) - 1)
             order = self._order
-            acc = np.zeros((len(starts), len(order)), dtype=np.float64)
-            w_high, w_low = self._weight_split
-            for k, active in enumerate(self._active):
-                x = values[base[:, None] + self._index[k, :active]]
-                w = self._weight[k, :active]
-                if k == 0:
-                    # fma(x, w, 0) is the rounded product.
-                    acc[:, :active] = x * w
-                else:
-                    acc[:, :active] = _fma(
-                        x, w, w_high[k, :active], w_low[k, :active], acc[:, :active]
+            first = longer[cut]  # spans of `order` before this are longer than the cut
+            if cut and first < len(order):
+                lanes = order[first:]
+                x = values[base[:, None, None] + self._index[None, :cut, first:]]
+                w_high, w_low = self._weight_split
+                product, err = _exact_product(
+                    x, self._weight[:cut, first:], w_high[:cut, first:], w_low[:cut, first:]
+                )
+                # fma(x, w, 0) is the rounded product.
+                acc = product[:, 0, :].copy()
+                for k in range(1, cut):
+                    active = longer[k] - first
+                    if active <= 0:
+                        break
+                    acc[:, :active] = _fma_step(
+                        acc[:, :active], product[:, k, :active], err[:, k, :active]
                     )
-            # numpy adds the kernel's answer to a zero it starts from.
-            out[:, order] = acc + 0.0
-            slow = self._long
+                # numpy adds the kernel's answer to a zero it starts from.
+                out[:, lanes] = acc + 0.0
+            alone = self._long + [int(k) for k in order[:first]]
         else:
-            if self._each_made is None:
-                self._each_made = [self._span(k) for k in range(self.size)]
-            slow = self._each_made
-        for k, indices, weights in slow:
+            alone = list(range(self.size))
+        for k in alone:
+            indices, weights = self._span(k)
             for row, start in enumerate(base):
                 out[row, k] = float(values[start + indices] @ weights)
         return out
 
-    def _span(self, k: int) -> tuple[int, np.ndarray, np.ndarray]:
-        """Span `k` as its own `@` takes it: the long ones always, every one when the loop
-        is not this BLAS's."""
-        _i, _j, indices, weights = self._kept[int(k)]
-        return (
-            int(k),
-            np.asarray(indices, dtype=np.intp) + self._offsets[int(k)],
-            np.asarray(weights, dtype=np.float64),
-        )
+    def _span(self, k: int) -> tuple[np.ndarray, np.ndarray]:
+        """Span `k` as its own `@` takes it."""
+        built = self._built.get(k)
+        if built is None:
+            _i, _j, indices, weights = self._kept[k]
+            built = (
+                np.asarray(indices, dtype=np.intp) + self._offsets[k],
+                np.asarray(weights, dtype=np.float64),
+            )
+            self._built[k] = built
+        return built
 
     def write(self, target: np.ndarray, means: np.ndarray, group: int | None = None) -> None:
         """``target[i, j] = mean`` for every kept span (of one group), in the fill's order.
@@ -191,30 +241,19 @@ class SpanTable:
         A cell two spans name keeps the later one's, as the loop this replaces did.
         """
         lo, hi = (0, self.size) if group is None else self.bounds[group]
-        i, j = self.i[lo:hi], self.j[lo:hi]
-        if self._unique(lo, hi):
-            target[i, j] = means[lo:hi]
+        if self._unique_cells:
+            target[self.i[lo:hi], self.j[lo:hi]] = means[lo:hi]
             return
         for k in range(lo, hi):
             target[self.i[k], self.j[k]] = means[k]
 
-    def _unique(self, lo: int, hi: int) -> bool:
-        if hi - lo < 2:
-            return True
-        key = self.i[lo:hi] * (int(self.j[lo:hi].max()) + 1) + self.j[lo:hi]
-        return len(np.unique(key)) == hi - lo
-
     def _fast(self, values: np.ndarray) -> bool:
-        if not exact() or not self._weight_ok:
+        if not self._weight_ok or not exact():
             return False
         magnitude = np.abs(values)
-        if not np.isfinite(values).all() or (magnitude >= _BIG).any():
-            return False
-        # A product that is tiny but not zero could lose its exact tail to underflow.
-        small = (magnitude < _TINY) & (magnitude != 0)
-        return not small.any() and not (
-            (np.abs(self._weight) < _TINY) & (self._weight != 0)
-        ).any()
+        # NaN fails every comparison, so this is also the finiteness check; and a product
+        # that is tiny but not zero could lose its exact tail to underflow.
+        return bool(((magnitude < _BIG) & ((magnitude >= _TINY) | (magnitude == 0))).all())
 
 
 def exact() -> bool:
@@ -243,9 +282,9 @@ def _probe() -> bool:
     flat = np.concatenate(values)
     table = SpanTable(spans)
     global _EXACT  # noqa: PLW0603
-    _EXACT = True  # let `means` take the loop it is being checked on
+    _EXACT = True  # let `means` take the loop it is being checked on, every column of it
     try:
-        got = table.means(flat)[0]
+        got = table.means(flat, cut=SHORT - 1)[0]
     finally:
         _EXACT = None
     want = np.array(
