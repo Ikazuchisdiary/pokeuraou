@@ -28,6 +28,15 @@ The remaining cells are resolved per completion, restricted with ``cells=``:
 Both sides' games share the one resolution, because their hidden slots are disjoint and a
 shared cell's resolution depends on neither. That is what takes 6.0x to a projected 2.2x.
 
+A dirty cell is dirty for a side (IKA-269). One that reaches only side 0's bench is the true
+position's turn for every completion of side 1's, read off their patched blocks like a
+shared cell; and one that reaches a bench only by that side's own switches is the same turn
+for every completion that brings the same Pokemon into the same slot -- the port brings in
+the switch's species wherever it stands (`_entering`) -- read off the first such
+completion's fill with its other hidden slot patched. Half the per-completion cell
+resolutions of M-C generation went (2,781 -> 1,360 a game), and the node is the same to the
+bit with a row-wise leaf over 1,375 nodes generation met.
+
 And the whole node is scored in one call of the leaf (IKA-105): every completion's patched
 rows and the port's leaves of its dirty cells
 are blocks of one `Encoded`, and each completion reads its values back by where its block
@@ -54,7 +63,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from . import port, timing
-from .actions import MoveAction, SideAction
+from .actions import MoveAction, SideAction, SwitchAction
 from .budget import Budget
 from .fold import _fold_from_json, fold_value
 from .port import batched_payoff
@@ -241,6 +250,15 @@ def belief_payoffs(
         parts.append((rows, make))
         return len(parts) - 1
 
+    # Which dirty cells reach each side's own bench, and through which slots (IKA-269).
+    reach = {
+        side: _reaching(reg, row, col, side, slots, position, filled.folded, dirty)
+        for side, slots in hidden.items()
+        # The pre-IKA-119 patch keeps the true side vector, which a completion's own fill
+        # does not: under it every dirty cell is filled per completion, as before.
+        if slots and not rules.patch_shares_side
+    }
+    claimed: dict[int, dict] = {side: {} for side in reach}
     reference_block: int | None = None
     jobs: list[_Job] = []
     for side, items in spreads.items():
@@ -258,7 +276,18 @@ def belief_payoffs(
                         reference, side, slots, item, reg, position, encoder, rules
                     ),
                 )
-            if wanted:
+            if wanted and side in reach and not item.exact:
+                own_cells = _borrow(
+                    job, reach[side], claimed[side], filled, wanted, block,
+                    lambda rows, patch, item=item, side=side: _patched(
+                        rows, side, patch, item, reg, position, encoder, rules
+                    ),
+                )
+                if own_cells:
+                    _gather_dirty(
+                        job, reg, position, row, col, budget, own_cells, rules, scorer, block
+                    )
+            elif wanted:
                 _gather_dirty(
                     job, reg, position, row, col, budget, wanted, rules, scorer, block
                 )
@@ -315,10 +344,17 @@ def belief_payoffs(
                     part[i, j] = float(ported[indices] @ np.asarray(weights))
                 for i, j, root in job.filled.folded:
                     part[i, j] = fold_value(_fold_from_json(root), ported)
+            for index, spans, folds in job.borrowed:
+                ported = rows_of(job.shared if index is None else index)
+                for i, j, indices, weights in spans:
+                    if weights:
+                        part[i, j] = float(ported[indices] @ np.asarray(weights))
+                for i, j, root in folds:
+                    part[i, j] = fold_value(_fold_from_json(root), ported)
             for i, j in wanted:
                 payoff[i, j] = part[i, j]
             unmodelled |= job.notes
-            redone += len(wanted)
+            redone += len(wanted) if job.resolved is None else job.resolved
         matrices.setdefault(1 - job.side, []).append(payoff)
     return BeliefNode(matrices, unmodelled, shared, redone)
 
@@ -337,6 +373,175 @@ class _Job:
     #: The exact completion is the true position, and reads the reference fill instead.
     dirty_from_reference: bool = False
     notes: set[str] = field(default_factory=set)
+    #: Dirty cells read elsewhere (IKA-269): (block, spans, folds), block None for `shared`.
+    borrowed: list = field(default_factory=list)
+    #: Its own fill's spans by cell, once another completion borrows from it.
+    by_cell: dict | None = None
+    #: How many of the dirty cells it resolved itself, when it borrowed the others.
+    resolved: int | None = None
+
+
+def _reaching(  # noqa: PLR0913 - the node's pieces, for one side
+    reg: Regulation,
+    row: list[SideAction],
+    col: list[SideAction],
+    side: int,
+    slots: tuple[int, ...],
+    position: Position,
+    folded: list,
+    dirty: np.ndarray,
+) -> dict[tuple[int, int], tuple | None]:
+    """The dirty cells that can put `side`'s own hidden slots on the field, and how.
+
+    `reaches_bench` with only this side's slots hidden -- what a match with two leaves
+    already asks of it per side -- plus a cell whose turn stops for a replacement that
+    `side` chooses. A cell that reaches the bench only by this side's own switches maps to
+    those switch actions (which Pokemon they bring in is the completion's, `_entering`);
+    phazing, Red Card and a replacement could bring in any of them, and map to None. Every
+    other dirty cell is the true position's turn for this side's completions, with their
+    bench patched in (IKA-269).
+    """
+    mine = reaches_bench(reg, row, col, {side: slots}, position)
+    carded = _red_card_on_field(position, 1 - side)
+    out: dict[tuple[int, int], tuple | None] = {}
+    for i, j in zip(*np.nonzero(mine), strict=True):
+        own, other = (row[i], col[j]) if side == 0 else (col[j], row[i])
+        switches = tuple(
+            s for s in own.slots
+            if isinstance(s, SwitchAction) and s.party_index - 1 in slots
+        )
+        anywhere = _phazes(reg, other) or (carded and _attacks(reg, own))
+        out[(int(i), int(j))] = None if anywhere or not switches else switches
+    for i, j, root in folded:
+        if side in _choosers(root):
+            out[(int(i), int(j))] = None
+    assert all(dirty[cell] for cell in out), "a cell reaching a bench was not dirty"
+    return out
+
+
+def _entering(item, side: int, switches: tuple) -> tuple | None:  # noqa: ANN001 - Completion
+    """Which of this completion's slots the switches bring in, and who stands there.
+
+    As the port picks it (`transform::switch_names` in `resolve::involved` and the switch
+    itself): the party member of the switch's species or base species, else the one at its
+    party index. So a switch to the true bench's Sylveon brings in this completion's
+    Sylveon wherever it sits, and a completion without one gets whoever is at that index.
+    None when it cannot be said cleanly -- the cell is then resolved for this completion.
+    """
+    from .regulation import to_id
+
+    pokemon = item.position.sides[side].pokemon
+    hidden = set(item.slots)
+    out = []
+    for switch in switches:
+        wanted = to_id(switch.species)
+        found = next(
+            (
+                q for q, mon in enumerate(pokemon)
+                if to_id(mon.species) == wanted or to_id(mon.base_species) == wanted
+            ),
+            switch.party_index - 1,
+        )
+        if not 0 <= found < len(pokemon) or pokemon[found].slot != found or found not in hidden:
+            return None
+        out.append((found, to_id(pokemon[found].species)))
+    if len({q for q, _species in out}) != len(out):
+        return None
+    return tuple(out)
+
+
+def _choosers(tree: dict) -> set[int]:
+    """The sides that choose a replacement anywhere in a port fold tree."""
+    found: set[int] = set()
+    stack = [tree]
+    while stack:
+        node = stack.pop()
+        if "best" in node:
+            found.add(int(node["best"]))
+            stack.extend(node["options"])
+        elif "avg" in node:
+            stack.extend(part for _w, part in node["avg"])
+    return found
+
+
+def _borrow(  # noqa: PLR0913 - one completion's dirty cells, and where each is read
+    job: _Job,
+    reach: dict[tuple[int, int], tuple | None],
+    claimed: dict,
+    filled,  # noqa: ANN001 - EncodedNode, the reference fill
+    wanted: list[tuple[int, int]],
+    block: Callable[[int, Callable], int],
+    patch: Callable,
+) -> list[tuple[int, int]]:
+    """Which of the node's dirty cells this completion resolves itself; the rest are booked.
+
+    A cell that does not reach this side's bench is the reference's turn: its spans and
+    folds are read off this completion's patched block. A cell that reaches it only by
+    switches bringing in the same Pokemon into the same slots as for an earlier completion
+    of this side is that completion's turn, and its leaves are the earlier fill's rows with
+    the other hidden slots patched to this completion's (a folded one is resolved again:
+    its tree is not renumbered). What is left is returned, to be filled here (IKA-269).
+    """
+    spans = {(i, j): (i, j, ix, w) for i, j, ix, w in filled.spans}
+    folds = {(i, j): (i, j, root) for i, j, root in filled.folded}
+    everything = frozenset(job.item.slots)
+    shared_spans: list = []
+    shared_folds: list = []
+    lent: dict[tuple[int, tuple[int, ...]], tuple[_Job, list]] = {}
+    own: list[tuple[int, int]] = []
+    for cell in wanted:
+        if cell not in reach:
+            if cell in spans:
+                shared_spans.append(spans[cell])
+            elif cell in folds:
+                shared_folds.append(folds[cell])
+            continue
+        switches = reach[cell]
+        entering = None if switches is None else _entering(job.item, job.side, switches)
+        if entering is None:
+            own.append(cell)
+            continue
+        key = (cell, entering)
+        owner = claimed.get(key)
+        if owner is not None:
+            if owner.by_cell is None:
+                owner.by_cell = {(i, j): (ix, w) for i, j, ix, w in owner.filled.spans}
+            span = owner.by_cell.get(cell)
+            if span is not None:
+                rest = tuple(sorted(everything - {q for q, _species in entering}))
+                lent.setdefault((id(owner), rest), (owner, []))[1].append((cell, span))
+                continue
+            if not any((i, j) == cell for i, j, _root in owner.filled.folded):
+                continue  # an empty cell there: empty here, as it would be filled
+        else:
+            claimed[key] = job
+        own.append(cell)
+    if shared_spans or shared_folds:
+        job.borrowed.append((None, shared_spans, shared_folds))
+    for (_owner_id, rest), (owner, cells) in lent.items():
+        rows = sorted({int(k) for _cell, (ix, _w) in cells for k in ix})
+        at = {k: n for n, k in enumerate(rows)}
+        index = block(
+            len(rows),
+            lambda owner=owner, rows=rows, rest=rest: patch(
+                _subset(owner.filled.encoded, rows), rest
+            ),
+        )
+        job.borrowed.append(
+            (index, [(i, j, [at[int(k)] for k in ix], w) for (i, j), (ix, w) in cells], [])
+        )
+    job.resolved = len(own)
+    return own
+
+
+def _subset(encoded, rows: list[int]):  # noqa: ANN001, ANN202 - Encoded
+    """Rows `rows` of an `Encoded`, in that order."""
+    from .encode import Encoded
+
+    return Encoded(
+        **{name: getattr(encoded, name)[rows] for name in _ARRAYS},
+        unknown_volatiles=dict(encoded.unknown_volatiles),
+    )
 
 
 def _gather_dirty(  # noqa: PLR0913 - one completion's dirty cells, and where they go

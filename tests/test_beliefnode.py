@@ -896,3 +896,93 @@ def test_rows_scattered_to_the_wrong_completion_are_caught(midgame, monkeypatch)
     assert len(wrong) == completions_total, (
         f"only {len(wrong)} of {completions_total} completion matrices moved: {wrong}"
     )
+
+
+# ------------------------------------------------------------------- IKA-269 --
+#
+# A dirty cell was resolved once per completion, whichever bench it reached. A cell that
+# reaches only side 0's bench is the true position's turn for every completion of side 1's
+# (read off their patched blocks), and a cell that reaches it only by a switch is the same
+# turn for every completion that brings the same Pokemon into the same slot (read off the
+# first such completion's fill, the other hidden slot patched). The equality tests above are
+# what says the answers did not move; these say the sharing happened and that each of the
+# two can be seen to go wrong.
+
+
+def _counted_node(reg, position, ours, theirs, spreads, leaf, monkeypatch):  # noqa: ANN001, ANN202, PLR0913
+    """The node, with the cells each completion's own fill asked for and what it borrowed."""
+    asked: list[int] = []
+    borrowed: list[tuple[str, int]] = []
+    real_gather, real_borrow = beliefnode._gather_dirty, beliefnode._borrow
+
+    def gather(job, *rest):  # noqa: ANN001, ANN002, ANN202
+        asked.append(len(rest[5]))  # `wanted`, after reg, position, row, col, budget
+        return real_gather(job, *rest)
+
+    def borrow(job, *rest):  # noqa: ANN001, ANN002, ANN202
+        own = real_borrow(job, *rest)
+        for index, spans, folds in job.borrowed:
+            kind = "reference" if index is None else "completion"
+            borrowed.append((kind, len(spans) + len(folds)))
+        return own
+
+    monkeypatch.setattr(beliefnode, "_gather_dirty", gather)
+    monkeypatch.setattr(beliefnode, "_borrow", borrow)
+    node = belief_payoffs(
+        reg, position, ours, theirs, leaf, budget=Budget.matrix(), spreads=spreads
+    )
+    monkeypatch.setattr(beliefnode, "_gather_dirty", real_gather)
+    monkeypatch.setattr(beliefnode, "_borrow", real_borrow)
+    return node, asked, borrowed
+
+
+def test_a_dirty_cell_is_resolved_once_per_bench_it_reaches(setup, monkeypatch) -> None:  # noqa: ANN001
+    reg, sheet, position = setup
+    ours, theirs = _menus(reg, position, 10)
+    spreads = {s: completions(reg, position, s, sheet) for s in (0, 1)}
+    hidden = {s: items[0].slots for s, items in spreads.items()}
+    dirty = int(reaches_bench(reg, ours, theirs, hidden, position).sum())
+    before = dirty * sum(len(items) for items in spreads.values())
+    node, asked, borrowed = _counted_node(
+        reg, position, ours, theirs, spreads, _SlotLeaf(Encoder(reg)), monkeypatch
+    )
+    kinds = {kind for kind, cells in borrowed if cells}
+    assert kinds == {"reference", "completion"}, f"borrowed only from {kinds}"
+    assert sum(asked) == node.redone
+    assert dirty and node.redone < 0.7 * before, (node.redone, before)
+    wrong = _node_mismatches(reg, position, ours, theirs, spreads, _SlotLeaf(Encoder(reg)))
+    assert not wrong, f"cells not equal to the bit: {wrong}"
+
+
+def test_a_cell_reaching_a_bench_read_off_the_reference_is_caught(setup, monkeypatch) -> None:  # noqa: ANN001
+    """The positive control for the per-side split: say no dirty cell reaches either bench,
+    so every completion reads them off its patched reference, and the node must differ."""
+    reg, sheet, position = setup
+    ours, theirs = _menus(reg, position, 10)
+    spreads = {s: completions(reg, position, s, sheet) for s in (0, 1)}
+    monkeypatch.setattr(beliefnode, "_reaching", lambda *args: {})
+    wrong = _node_mismatches(reg, position, ours, theirs, spreads, _SlotLeaf(Encoder(reg)))
+    assert wrong, "switches into hidden slots were read off the reference and no cell moved"
+
+
+def _by_party_index(item, side, switches):  # noqa: ANN001, ANN202
+    """`_entering` as first written: the slot the switch's party index names. The port
+    brings in the switch's species wherever it stands, so this keys two different turns as
+    one."""
+    party = item.position.sides[side].pokemon
+    return tuple(
+        (switch.party_index - 1, to_id(party[switch.party_index - 1].species))
+        for switch in switches
+    )
+
+
+def test_a_switch_keyed_by_party_index_is_caught(setup, monkeypatch) -> None:  # noqa: ANN001
+    """The positive control for the per-completion sharing, and the fault it was first
+    written with: a completion holding the true bench's Pokemon in the other hidden slot
+    brings that one in, so keying by the index lends it another completion's turn."""
+    reg, sheet, position = setup
+    ours, theirs = _menus(reg, position, 10)
+    spreads = {s: completions(reg, position, s, sheet) for s in (0, 1)}
+    monkeypatch.setattr(beliefnode, "_entering", _by_party_index)
+    wrong = _node_mismatches(reg, position, ours, theirs, spreads, _SlotLeaf(Encoder(reg)))
+    assert wrong, "keyed by the party index and no cell moved"
