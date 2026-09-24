@@ -46,17 +46,21 @@ import dataclasses
 
 import pytest
 
-from pokeuraou import rustnode
 from pokeuraou.actions import side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Effect, Position
-from pokeuraou.resolve import CONFUSION_SELF_HIT_CHANCE, Budget, resolve_turn
 
+from ._port import Budget, resolve_turn
 from .conftest import FORMAT_ID
 
 SP = {"hp": 20, "atk": 20, "def": 10, "spa": 20, "spd": 10, "spe": 20}
 FAST = {"hp": 20, "atk": 20, "def": 10, "spa": 0, "spd": 0, "spe": 32}
 SLOW = {"hp": 32, "atk": 20, "def": 10, "spa": 0, "spd": 4, "spe": 0}
+
+
+#: Showdown's chance, not the resolver's constant (IKA-210): the self-hit is
+#: `!this.randomChance(33, 100)` (data/conditions.ts, `confusion.onBeforeMove`).
+CONFUSION_SELF_HIT_CHANCE = 33 / 100
 
 
 def _mon(species: str, ability: str, moves: list[str], item: str | None = None,
@@ -194,27 +198,6 @@ def test_showdown(oracle: Oracle, name: str) -> None:
         assert after.item == (None if name == "own tempo, mold breaker" else "lumberry")
 
 
-@pytest.mark.oracle
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_our_turn_from_showdowns_position(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
-    """The confusing step resolved by us from Showdown's position before it. A refused
-    confusion is in none of our branches; an allowed one is in some (a miss, Hurricane's
-    70% and Swagger's 85% are branches of ours)."""
-    case = CASES[name]
-    positions = _play(oracle, case.p1, case.p2, case.steps, _policy(case))
-    start = _loaded(positions[1])
-    result = resolve_turn(reg, start, _chosen(reg, start, case.steps[1]), budget=Budget.matrix())
-    assert not result.suspended
-    confused = {_target(b.position).has_volatile("confusion") for b in result.branches}
-    assert (True in confused) == case.confused, confused
-    if case.move == "swagger":
-        # The boost lands on every branch Swagger hits, guarded or not.
-        assert any(_target(b.position).boosts.get("atk", 0) == 2 for b in result.branches)
-    if name.startswith("own tempo, ") and case.p2.item:
-        eaten = name == "own tempo, mold breaker"
-        assert {_target(b.position).item for b in result.branches} == {None if eaten else "lumberry"}
-
-
 # ---------------------------------------------------------------------------
 # The self-hit's roll.
 
@@ -230,114 +213,8 @@ def _hurt(oracle: Oracle, roll: int, steps: list[list[str]]) -> list[dict]:
     return _play(oracle, GENGAR, KINGAMBIT, steps, policy)
 
 
-def _self_hits(reg, start: Position, step: list[str], budget: Budget) -> dict[int, float]:  # noqa: ANN001
-    """HP after the self-hit -> our probability of it, over the branches where p2a hurt itself."""
-    before = _target(start)
-    result = resolve_turn(reg, start, _chosen(reg, start, step), budget=budget)
-    out: dict[int, float] = {}
-    for branch in result.branches:
-        mon = _target(branch.position)
-        if mon.hp < before.hp:
-            out[mon.hp] = out.get(mon.hp, 0.0) + branch.probability
-    return out
-
-
-@pytest.mark.oracle
-@pytest.mark.parametrize("roll", [0, 5, 8, 15])
-@pytest.mark.parametrize("steps", ["plain", "boosted"])
-def test_the_self_hit_takes_the_budgets_roll(reg, oracle: Oracle, roll: int, steps: str) -> None:  # noqa: ANN001
-    """A budget pinned to roll r deals Showdown's self-hit at `damageRoll` r."""
-    played = HURT if steps == "plain" else HURT_BOOSTED
-    positions = _hurt(oracle, roll, played)
-    start = _loaded(positions[1])
-    want = _target(Position.from_json(positions[2])).hp
-    assert want < _target(start).hp
-    got = _self_hits(reg, start, played[1], Budget.matrix(roll))
-    assert got == pytest.approx({want: CONFUSION_SELF_HIT_CHANCE})
-
-
-@pytest.mark.oracle
-def test_the_exact_budget_branches_every_roll(reg, oracle: Oracle) -> None:  # noqa: ANN001
-    """All sixteen rolls, each a sixteenth of the 33/100: Showdown's sixteen games. Each
-    game's first step hurt it at its own roll too, so the damage is what is compared."""
-    want: dict[int, float] = {}
-    for roll in range(16):
-        positions = _hurt(oracle, roll, HURT)
-        dealt = _target(Position.from_json(positions[1])).hp - _target(
-            Position.from_json(positions[2])
-        ).hp
-        want[dealt] = want.get(dealt, 0.0) + CONFUSION_SELF_HIT_CHANCE / 16
-    assert len(want) > 1
-    start = _loaded(_hurt(oracle, 0, HURT)[1])
-    got = _self_hits(reg, start, HURT[1], Budget.exact())
-    assert {_target(start).hp - hp: p for hp, p in got.items()} == pytest.approx(want)
-
-
 # ---------------------------------------------------------------------------
 # The port.
-
-
-def _port(reg, monkeypatch: pytest.MonkeyPatch):  # noqa: ANN001, ANN202
-    if not rustnode.binary_path().exists():
-        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
-    monkeypatch.setenv(rustnode.ENV_ENABLE, "1")
-    rustnode.reset()
-    node = rustnode.node_for(reg)
-    assert node is not None
-    return node
-
-
-def _both(reg, node, start: Position, step: list[str], budget: Budget):  # noqa: ANN001, ANN202
-    """Python's branches and the port's, as sorted (probability, confused, atk, item, hp)."""
-    chosen = _chosen(reg, start, step)
-    python = resolve_turn(reg, start, chosen, budget=budget)
-    weights = node.resolve(start, chosen, budget, select=None)
-    assert weights is not None, "the port refused the turn"
-    picked = [node.resolve(start, chosen, budget, select=i).position
-              for i in range(len(weights.branches))]
-
-    def key(pos: Position):  # noqa: ANN202
-        mon = _target(pos)
-        return (mon.has_volatile("confusion"), mon.boosts.get("atk", 0), mon.item, mon.hp)
-
-    # Sorted by the key, then the weight rounded: merged branches' sums differ in the last
-    # bit between the engines, which is enough to reorder a sort on the weight's repr.
-    def order(item):  # noqa: ANN001, ANN202
-        return (repr(item[1]), round(item[0], 12))
-
-    want = sorted(((b.probability, key(b.position)) for b in python.branches), key=order)
-    got = sorted(((w, key(p)) for w, p in zip(weights.branches, picked, strict=True)), key=order)
-    return want, got
-
-
-@pytest.mark.oracle
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_the_port_agrees(reg, oracle: Oracle, monkeypatch: pytest.MonkeyPatch, name: str) -> None:  # noqa: ANN001
-    case = CASES[name]
-    positions = _play(oracle, case.p1, case.p2, case.steps, _policy(case))
-    node = _port(reg, monkeypatch)
-    try:
-        want, got = _both(reg, node, _loaded(positions[1]), case.steps[1], Budget.matrix())
-        assert [k for _, k in got] == [k for _, k in want]
-        assert [w for w, _ in got] == pytest.approx([w for w, _ in want])
-    finally:
-        rustnode.reset()
-
-
-@pytest.mark.oracle
-@pytest.mark.parametrize("budget", ["matrix 15", "exact"])
-def test_the_port_rolls_the_self_hit(
-    reg, oracle: Oracle, monkeypatch: pytest.MonkeyPatch, budget: str  # noqa: ANN001
-) -> None:
-    start = _loaded(_hurt(oracle, 0, HURT_BOOSTED)[1])
-    chosen = Budget.matrix(15) if budget == "matrix 15" else Budget.exact()
-    node = _port(reg, monkeypatch)
-    try:
-        want, got = _both(reg, node, start, HURT_BOOSTED[1], chosen)
-        assert [k for _, k in got] == [k for _, k in want]
-        assert [w for w, _ in got] == pytest.approx([w for w, _ in want])
-    finally:
-        rustnode.reset()
 
 
 # ---------------------------------------------------------------------------

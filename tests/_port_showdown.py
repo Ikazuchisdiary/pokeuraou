@@ -18,7 +18,8 @@ from typing import Any
 
 from pokeuraou import rustnode
 from pokeuraou.position import Position
-from pokeuraou.resolve import Budget
+
+from ._port import Budget
 
 
 def given(pos: Position) -> Position:

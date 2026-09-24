@@ -30,8 +30,8 @@ import pytest
 from pokeuraou.actions import side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Position
-from pokeuraou.resolve import Budget, resolve_turn, self_switches_needed
 
+from ._port import Budget, resolve_turn, self_switches_needed
 from .conftest import FORMAT_ID
 
 pytestmark = pytest.mark.oracle
@@ -136,29 +136,6 @@ def test_showdown_switches_the_attacker_out_as_well(oracle: Oracle, name: str) -
         assert (attacker, holder) == (True, True), (name, attacker, holder)
 
 
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_python_switches_the_attacker_as_showdown_does(
-    reg,  # noqa: ANN001
-    oracle: Oracle,
-    name: str,
-) -> None:
-    """Only the attacker's side: the resolver does not model the holder's exit."""
-    before, (attacker, _holder), _log = _play(oracle, name)
-    actions = [
-        next(a for a in side_actions(reg, before, side) if a.to_choice() == UTURN[side]) for side in (0, 1)
-    ]
-    result = resolve_turn(reg, before, actions, budget=BUDGET)
-    outcomes = [(b.position, b.events) for b in result.branches]
-    outcomes += [(s.position, ["(suspended)"]) for s in result.suspended]
-    hits = [(pos, events) for pos, events in outcomes if not any(e.endswith("missed") for e in events)]
-    assert hits, "no Python outcome where the U-turn hit"
-    for pos, events in hits:
-        ours = self_switches_needed(pos)[0][0]
-        assert ours == attacker, (
-            f"{name}: showdown asks the attacker {attacker}, python {ours}; " + " / ".join(events)
-        )
-
-
 # ---------------------------------------------------------------------------
 # The port against Showdown, not against Python (IKA-207): under Showdown's pins the
 # U-turn hits, and the port stops for the attacker's switch exactly when Showdown asks.
@@ -166,11 +143,14 @@ def test_python_switches_the_attacker_as_showdown_does(
 
 @pytest.mark.parametrize("name", sorted(CASES))
 def test_the_port_switches_the_attacker_as_showdown_does(reg, oracle: Oracle, port, name: str) -> None:  # noqa: ANN001
-    from ._port_showdown import port_weights
-
     before, (attacker, _holder), _log = _play(oracle, name)
     actions = [
         next(a for a in side_actions(reg, before, side) if a.to_choice() == UTURN[side]) for side in (0, 1)
     ]
-    reply = port_weights(port, before, actions, Budget.deterministic(0))
-    assert bool(reply["suspended"]) == attacker, (name, reply)
+    # The attacker's own slot, in every outcome: the holder's exit pauses the turn too
+    # (IKA-191), so whether the port paused at all does not say whose switch it is (IKA-210).
+    result = resolve_turn(reg, before, actions, budget=Budget.deterministic(0))
+    outcomes = [b.position for b in result.branches] + [s.position for s in result.suspended]
+    assert outcomes
+    for pos in outcomes:
+        assert self_switches_needed(pos)[0][0] == attacker, (name, attacker)

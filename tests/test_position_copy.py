@@ -14,6 +14,9 @@ write into a shared dict then raises instead of leaking a mutation from one bran
 search into its sibling -- a defect that would otherwise show up as nothing more than
 slightly wrong numbers.
 
+That execution test ran Python's resolver on the proxies, and went with it (IKA-210): the
+turns are the port's now, which never sees a Python dict. What stays is the copy itself.
+
 The second test covers the other direction. Every *mutable* field that is genuinely copied
 must come out as a distinct object, and the list of fields is read from the dataclass
 rather than typed out here, so a field added later is covered without anyone remembering
@@ -25,13 +28,10 @@ from __future__ import annotations
 import dataclasses
 from types import MappingProxyType
 
-import numpy as np
 import pytest
 
 from pokeuraou.damage import register_mega_stones
-from pokeuraou.narrow import narrow
 from pokeuraou.position import Pokemon, Position
-from pokeuraou.resolve import Budget, resolve_turn
 from pokeuraou.selfplay import position_from_sets
 from pokeuraou.teams import load_roster
 
@@ -60,53 +60,6 @@ def _freeze_shared(pos: Position) -> None:
                 value = getattr(mon, name)
                 if isinstance(value, dict):
                     setattr(mon, name, MappingProxyType(value))
-
-
-def test_resolving_turns_never_writes_into_a_shared_dict(roster) -> None:  # noqa: ANN001
-    """Several turns of three real games, with the shared dicts read-only.
-
-    Mirrors, because they keep a game alive long enough to accumulate the states that
-    would plausibly want to write somewhere: statuses, boosts, weather, a depleted bench.
-    `Budget.matrix()` rather than `exact()` so that every branch of every turn -- the
-    secondaries, the accuracy rolls, the critical hits -- is resolved on a copied
-    position, which is where an aliased write would do its damage.
-
-    Three seeds rather than one because a single game can end, or suspend on a
-    self-switching move, after two turns; the count asserted at the end is what keeps a
-    game that dies early from passing as a test that checked something.
-    """
-    reg = roster.reg
-    resolved = 0
-    for seed in (3, 5, 11):
-        sets = list(roster.sets[:4])
-        pos = position_from_sets(reg, sets, sets)
-        _freeze_shared(pos)
-        rng = np.random.default_rng(seed)
-        for _ in range(6):
-            if pos.ended:
-                break
-            ours = narrow(reg, pos, 0, limit=6).actions
-            theirs = narrow(reg, pos, 1, limit=6).actions
-            if not ours or not theirs:
-                break
-            for row in ours[:3]:
-                for col in theirs[:3]:
-                    # A TypeError from MappingProxyType here is the point of the test.
-                    resolve_turn(reg, pos, [row, col], budget=Budget.matrix())
-                    resolved += 1
-            result = resolve_turn(
-                reg,
-                pos,
-                [ours[int(rng.integers(len(ours)))], theirs[int(rng.integers(len(theirs)))]],
-                budget=Budget.exact(),
-            )
-            if result.suspended or not result.branches:
-                break
-            weights = np.array([b.probability for b in result.branches], dtype=np.float64)
-            pos = result.branches[
-                int(rng.choice(len(weights), p=weights / weights.sum()))
-            ].position
-    assert resolved >= 60, f"only {resolved} cells resolved; the games ended too early"
 
 
 def test_the_shared_dicts_are_the_same_object_after_a_copy(roster) -> None:  # noqa: ANN001

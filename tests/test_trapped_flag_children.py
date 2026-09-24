@@ -13,6 +13,8 @@ and a benched Pokemon lost it in `clearVolatile`. The resolver now drops it at t
 point, in Python (`resolve._clear_trapped`, after the residuals and after the faint
 replacements) and in the port (`run_queue`), and a child's trap is read off the position
 alone, which is what generation has always done.
+
+Every turn here is the port's (IKA-210); the pre-IKA-175 binary returns the flag set.
 """
 
 from __future__ import annotations
@@ -22,13 +24,8 @@ import pytest
 from pokeuraou.actions import SwitchAction, side_actions, switch_actions_after_faint
 from pokeuraou.oracle import Oracle, RandomnessPolicy
 from pokeuraou.position import Effect, Position
-from pokeuraou.resolve import (
-    Budget,
-    replacements_needed,
-    resolve_replacements,
-    resolve_turn,
-)
 
+from ._port import Budget, replacements_needed, resolve_replacements, resolve_turn
 from .conftest import FORMAT_ID
 from .test_trap_sources import (
     MEGA_TURN,
@@ -177,42 +174,3 @@ def test_a_standing_trapper_still_traps_the_child(reg, oracle: Oracle) -> None: 
         assert not any(_flags(child))
         assert _switches(reg, child, 0, 0) == set() and _switches(reg, child, 0, 1) == set()
 
-
-@pytest.mark.oracle
-@pytest.mark.parametrize("turn", ["ko", "protect"])
-def test_the_port_drops_it_at_the_same_point(
-    reg,  # noqa: ANN001
-    oracle: Oracle,
-    monkeypatch: pytest.MonkeyPatch,
-    turn: str,
-) -> None:
-    """The port hands the child back without the flag. The binary built from master before
-    IKA-175 returns it still set."""
-    from pokeuraou import rustnode
-
-    if not rustnode.binary_path().exists():
-        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
-    monkeypatch.setenv(rustnode.ENV_ENABLE, "1")
-    rustnode.reset()
-    root = _tagged_root(oracle)
-    # The port refuses Showdown's stat override as a transformed Pokemon; the spreads are
-    # known, so the stats are too.
-    for side in root.sides:
-        for mon in side.pokemon:
-            mon.stats_override = None
-    if turn == "ko":
-        root.sides[1].pokemon[root.sides[1].active[0]].hp = 1
-    chosen = _choose(reg, root, KO_TURN if turn == "ko" else PROTECT_TURN)
-    try:
-        node = rustnode.node_for(reg)
-        assert node is not None
-        ported = node.resolve(root, chosen, Budget.matrix(), select=0)
-    finally:
-        rustnode.reset()
-    assert ported is not None and ported.position is not None, "the port refused the turn"
-    child = ported.position
-    ours = resolve_turn(reg, root, chosen, budget=Budget.matrix()).branches[0].position
-    assert _flags(child) == _flags(ours) == [False] * len(_flags(child))
-    trapped = turn == "protect"
-    assert (_switches(reg, child, 0, 0) == set()) is trapped
-    assert (_switches(reg, ours, 0, 0) == set()) is trapped

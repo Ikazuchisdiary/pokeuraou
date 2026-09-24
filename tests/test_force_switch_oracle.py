@@ -44,8 +44,8 @@ from pokeuraou import rustnode
 from pokeuraou.actions import side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Position
-from pokeuraou.resolve import Budget
 
+from ._port import Budget
 from .conftest import FORMAT_ID
 from .test_self_destruct_oracle import bridged  # noqa: F401
 

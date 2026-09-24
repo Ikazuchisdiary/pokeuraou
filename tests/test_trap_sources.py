@@ -43,8 +43,8 @@ import pytest
 from pokeuraou.actions import MoveAction, SwitchAction, side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Effect, Position
-from pokeuraou.resolve import Budget, resolve_turn
 
+from ._port import Budget
 from .conftest import FORMAT_ID
 
 SP = {"hp": 20, "atk": 20, "def": 10, "spa": 20, "spd": 10, "spe": 20}
@@ -294,91 +294,6 @@ def test_we_agree_once_the_flag_is_gone(reg, oracle: Oracle, name: str) -> None:
 GENERATION = sorted(n for n, c in CASES.items() if c.generation)
 
 
-@pytest.mark.oracle
-@pytest.mark.parametrize("name", GENERATION)
-def test_the_position_our_resolver_builds(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
-    """The generation form: our resolver plays Showdown's last turn, then we build the menu."""
-    case = CASES[name]
-    handle, before = _play(oracle, case)
-    after = Position.from_json(handle.position)
-    handle.close()
-    start = Position.from_json(before)
-    chosen = []
-    for side, choice in enumerate(case.steps[-1]):
-        menu = {a.to_choice(): a for a in side_actions(reg, start, side)}
-        assert choice in menu, (choice, sorted(menu))
-        chosen.append(menu[choice])
-    result = resolve_turn(reg, start, chosen, budget=Budget.matrix())
-    assert not result.suspended
-    assert result.branches
-    for branch in result.branches:
-        child = branch.position
-        assert all(not m.trapped for s in child.sides for m in s.pokemon)
-        _check(reg, child, case, name, "our resolver's child")
-        if name.startswith("twoturnmove/"):
-            # The marker itself is Showdown's: the move, and one turn left of its two.
-            ours = child.sides[0].pokemon[child.sides[0].active[0]].volatile("twoturnmove")
-            theirs = after.sides[0].pokemon[after.sides[0].active[0]].volatile("twoturnmove")
-            assert theirs is not None and ours is not None
-            assert (ours.move, ours.duration) == (theirs.move, theirs.duration), (ours, theirs)
-        if name.startswith("lockedmove/"):
-            # Outrage's rampage since IKA-174: the move and one turn left, as Showdown has
-            # it. The length is rolled on the second turn (`tests/test_outrage_lock.py`).
-            ours = child.sides[0].pokemon[child.sides[0].active[0]].volatile("lockedmove")
-            theirs = after.sides[0].pokemon[after.sides[0].active[0]].volatile("lockedmove")
-            assert theirs is not None and ours is not None
-            assert (ours.move, ours.duration) == (theirs.move, theirs.duration), (ours, theirs)
-
-
-@pytest.mark.oracle
-@pytest.mark.parametrize("name", ["twoturnmove/electroshot", "twoturnmove/solarbeam"])
-def test_the_port_charges_the_same_way(
-    reg,  # noqa: ANN001
-    oracle: Oracle,
-    monkeypatch: pytest.MonkeyPatch,
-    name: str,
-) -> None:
-    """The port stores the charge's move and duration as Python does.
-
-    The port builds no menus, but it resolves the turns generation plays, and the next
-    turn's menu is read off the position it hands back. The binary built from master
-    before IKA-169 returns `twoturnmove` with neither.
-    """
-    from pokeuraou import rustnode
-
-    if not rustnode.binary_path().exists():
-        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
-    monkeypatch.setenv(rustnode.ENV_ENABLE, "1")
-    rustnode.reset()
-    case = CASES[name]
-    handle, before = _play(oracle, case)
-    handle.close()
-    start = Position.from_json(before)
-    # Showdown's stats ride along as an override, which the port refuses as a
-    # transformed Pokemon; the spreads are known, so the stats are too.
-    for side in start.sides:
-        for mon in side.pokemon:
-            mon.stats_override = None
-    chosen = []
-    for side, choice in enumerate(case.steps[-1]):
-        menu = {a.to_choice(): a for a in side_actions(reg, start, side)}
-        chosen.append(menu[choice])
-    try:
-        node = rustnode.node_for(reg)
-        assert node is not None
-        ported = node.resolve(start, chosen, Budget.matrix(), select=0)
-    finally:
-        rustnode.reset()
-    assert ported is not None and ported.position is not None, "the port refused the turn"
-    ours = resolve_turn(reg, start, chosen, budget=Budget.matrix())
-    assert len(ours.branches) == len(ported.branches) == 1
-    python_mark = ours.branches[0].position.sides[0].pokemon[0].volatile("twoturnmove")
-    port_mark = ported.position.sides[0].pokemon[0].volatile("twoturnmove")
-    assert python_mark is not None and port_mark is not None
-    assert (port_mark.move, port_mark.duration) == (python_mark.move, python_mark.duration)
-    assert port_mark.move == LOCKS[name]
-
-
 # ---------------------------------------------------------------------------
 # No oracle: hand-built positions.
 
@@ -538,7 +453,7 @@ def test_a_recorded_charge_without_its_move(reg) -> None:  # noqa: ANN001
 @pytest.mark.oracle
 @pytest.mark.parametrize("name", GENERATION)
 def test_the_position_the_port_builds(reg, oracle: Oracle, port, name: str) -> None:  # noqa: ANN001
-    """`test_the_position_our_resolver_builds` with the port playing Showdown's last turn."""
+    """The generation form: the port plays Showdown's last turn, then we build the menu."""
     from ._port_showdown import port_branches
 
     case = CASES[name]

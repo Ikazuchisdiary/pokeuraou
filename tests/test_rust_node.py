@@ -35,7 +35,7 @@ EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "scenario-turn5.jso
 @pytest.fixture()
 def bridged(monkeypatch: pytest.MonkeyPatch):
     if not rustnode.binary_path().exists():
-        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
+        pytest.fail(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
     monkeypatch.setenv(rustnode.ENV_ENABLE, "1")
     # The process cache is module state and the fixture must not leak one.
     rustnode.reset()

@@ -28,17 +28,15 @@ Pawmot that still has its Electric type -- were right before and have to stay ri
 
 from __future__ import annotations
 
-import os
 from dataclasses import replace
 
 import pytest
 
-from pokeuraou import rustnode
 from pokeuraou.actions import side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Position
-from pokeuraou.resolve import Budget, resolve_turn
 
+from ._port import Budget, resolve_turn
 from .conftest import FORMAT_ID
 
 pytestmark = pytest.mark.oracle
@@ -175,63 +173,22 @@ def _actions(reg, pos: Position, choices: list[str]) -> list:  # noqa: ANN001
 
 
 @pytest.mark.parametrize("name", sorted(CASES))
-def test_python_spends_the_type_as_showdown_does(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
+def test_the_port_spends_the_type_as_showdown_does(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
+    """Every outcome where every move hit -- finished or paused -- is Showdown's.
+
+    High Horsepower is 95% accurate and Showdown's policy lets it hit, so accuracy is
+    pinned to a hit (IKA-210: the hit branches used to be picked by Python's events).
+    """
     before, choices, theirs, log = _play(oracle, name)
     shown = any(line.startswith(CASES[name][2]) for line in log)
     assert shown, f"Showdown did not do what the case says: {log}"
 
-    result = resolve_turn(reg, before, _actions(reg, before, choices), budget=BUDGET)
-    outcomes = [(b.position, b.events) for b in result.branches]
-    outcomes += [(s.position, ["(suspended)"]) for s in result.suspended]
-    # High Horsepower is 95% accurate. Showdown's policy lets it hit, so the branches where
-    # every move hit are the ones compared.
-    ours = [(pos, events) for pos, events in outcomes if not any(e.endswith("missed") for e in events)]
-    assert ours, "no Python outcome where every move hit"
-    for pos, events in ours:
+    result = resolve_turn(
+        reg, before, _actions(reg, before, choices), budget=replace(BUDGET, enumerate_accuracy=False)
+    )
+    outcomes = [b.position for b in result.branches] + [s.position for s in result.suspended]
+    assert outcomes, "no outcome"
+    for index, pos in enumerate(outcomes):
         ours_now = _state(pos)
-        assert ours_now == theirs, f"{name}: showdown {theirs} != python {ours_now}; " + " / ".join(events)
+        assert ours_now == theirs, f"{name}, outcome {index}: showdown {theirs} != port {ours_now}"
 
-
-@pytest.fixture()
-def bridged(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
-    if not rustnode.binary_path().exists():
-        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
-    monkeypatch.setenv(rustnode.ENV_ENABLE, "1")
-    rustnode.reset()
-    yield
-    rustnode.reset()
-    os.environ.pop(rustnode.ENV_ENABLE, None)
-
-
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_the_port_spends_the_type_as_showdown_does(
-    reg, oracle: Oracle, bridged: None, name: str  # noqa: ANN001
-) -> None:
-    before, choices, theirs, _log = _play(oracle, name)
-    # Showdown's position carries each Pokemon's stats, and the port declines any position
-    # with an override (it reads that as a Transform). Both engines compute the same stats
-    # from the spreads.
-    for side in before.sides:
-        for party in side.pokemon:
-            party.stats_override = None
-    actions = _actions(reg, before, choices)
-    node = rustnode.node_for(reg)
-    assert node is not None
-    there = node.resolve(before, actions, BUDGET)
-    assert there is not None, "the port refused the turn"
-    # The branches come back in Python's order, so Python's events say which ones are the
-    # branch where every move hit. Only the order is taken from Python; the state each of
-    # those branches holds is compared with Showdown's.
-    here = resolve_turn(reg, before, actions, budget=BUDGET)
-    assert [b.probability for b in here.branches] == pytest.approx(there.branches, abs=1e-12)
-    hit = [
-        index
-        for index, branch in enumerate(here.branches)
-        if not any(e.endswith("missed") for e in branch.events)
-    ]
-    assert hit, "no outcome where every move hit"
-    for index in hit:
-        chosen = node.resolve(before, actions, BUDGET, select=index)
-        assert chosen is not None and chosen.position is not None
-        rust_now = _state(chosen.position)
-        assert rust_now == theirs, f"{name}, branch {index}: showdown {theirs} != rust {rust_now}"

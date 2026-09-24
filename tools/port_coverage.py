@@ -1,19 +1,24 @@
-"""What the Rust port may ignore, and what Python's calculator claims to model.
+"""What the Rust port may ignore, and which of those it has to say it ignored.
 
-Two generated lists, both about the same question: the port's contract is "the same answer
-as Python", and deciding by memory which ids Python acts on is how a port acquires a silent
-wrong answer.
+Two generated lists, both the port's own (IKA-210). They were Python's: `inert.rs` was the
+ids Python's source never named and `modelled.rs` Python's calculator sets, because the
+port's contract was "the same answer as Python". The contract is Showdown's now, so both are
+decided by two facts that do not depend on Python -- whether Showdown has a handler for the
+id (the regulation dump's `customHooks`, which the bridge reads off the dex) and whether the
+port's engine names it:
 
-    uv run python tools/port_coverage.py                   # what the engine reads
+    uv run python tools/port_coverage.py                   # what the port reads
     uv run python tools/port_coverage.py --rust            # -> rust/src/inert.rs
     uv run python tools/port_coverage.py --rust-modelled   # -> rust/src/modelled.rs
     uv run python tools/port_coverage.py --check           # both, compared, neither written
 
-`inert.rs` is the ids the engine never acts on, found by scanning its source -- so the port
-may ignore them. `modelled.rs` is `effects.all_modelled_abilities()` and
-`all_modelled_items()`, which `damage._unmodelled` uses to name, on every hit, the ability
-or item the calculator does *not* account for. Those notes reach the caller, so a port that
-resolved turns correctly and skipped them would quietly shrink what the caller is told.
+`inert.rs` is the ids the port's engine never names, found by scanning its source -- so its
+gates take them without code of their own. `modelled.rs` says which of the regulation's ids
+need no note: one with no Showdown handler (ignoring it cannot differ from Showdown), one the
+port names (it acts on it), and a mega stone (the mega action owns it). Every other id is
+one Showdown acts on and the port ignores, and `damage::unmodelled_effects` names it on every
+hit -- so a port that learned an effect and was not regenerated would go on reporting a gap
+it no longer has, and one that dropped an effect would stop reporting one it has.
 
 Regenerate both when the engine learns a new effect. `--check` is that sentence as a test,
 and CI runs it: it builds both files the way the two flags would, writes neither, and fails
@@ -39,8 +44,27 @@ ROOT = Path(__file__).resolve().parents[1]
 #: Where the generated files live. Read at call time rather than bound into each function,
 #: so a test can point `--check` at a copy with one line changed.
 RUST_SRC = ROOT / "rust" / "src"
+#: Where the port's engine is read from: apart from `RUST_SRC`, so a test that points the
+#: generated files at copies still scans the real engine.
+PORT_SRC = ROOT / "rust" / "src"
 
-#: The files a turn goes through. `names.py`, the priors and the tools are not the engine.
+#: The port's engine: the files a turn goes through (IKA-210). The loader (`reg.rs`, whose
+#: JSON keys would read as names), the encoder, the node's plumbing and the generated files
+#: themselves are not the engine.
+PORT_ENGINE_FILES = [
+    "resolve.rs",
+    "moves.rs",
+    "commands.rs",
+    "damage.rs",
+    "effects.rs",
+    "battler.rs",
+    "speed.rs",
+    "terrain.rs",
+    "moveinfo.rs",
+]
+
+#: Python's engine, still read by `tools/port_gate_audit.py` (until IKA-212). `names.py`, the
+#: priors and the tools are not the engine.
 ENGINE_FILES = [
     "resolve.py",
     "damage.py",
@@ -82,6 +106,36 @@ def engine_text() -> str:
     )
 
 
+#: The port's gates, whose arms are grouped under comments saying why each is taken.
+GATE_FUNCTIONS = ("ability_handled", "item_handled")
+#: The one group that says the port takes the id and does nothing Showdown does with it. A
+#: name there is not the port acting on the id, so it does not take the note away.
+IGNORED_SECTION = "Python reports these and changes nothing"
+
+
+def taken_and_ignored(text: str) -> set[str]:
+    """The gates' ids under `IGNORED_SECTION`: taken by the port, not acted on."""
+    out: set[str] = set()
+    for name in GATE_FUNCTIONS:
+        start = text.find(f"fn {name}(")
+        if start < 0:
+            continue
+        section = ""
+        for line in text[start : text.find("\n}\n", start)].splitlines():
+            stripped = line.strip()
+            if stripped.startswith("//"):
+                section = stripped.lstrip("/ ")
+                continue
+            if section.startswith(IGNORED_SECTION):
+                out |= set(re.findall(r'"([a-z0-9]+)"', line))
+    return out
+
+
+def port_text() -> str:
+    """The port's engine source, the text `inert` and `modelled` scan."""
+    return "\n".join((PORT_SRC / name).read_text(encoding="utf-8") for name in PORT_ENGINE_FILES)
+
+
 def mentioned(text: str, identifier: str) -> bool:
     """Whether the engine names this id as a string literal."""
     return re.search(rf'["\']{re.escape(identifier)}["\']', text) is not None
@@ -113,29 +167,29 @@ class Generated:
 #: Written into the file by hand after it was first generated, and better than what this
 #: tool used to say, so the tool says it now (IKA-72).
 INERT_HEADER = (
-    "//! Ids the Python engine never acts on.\n"
+    "//! Ids this port's engine never acts on.\n"
     "//!\n"
-    "//! The port's contract is \"the same answer as Python\", so an ability or item Python never\n"
-    "//! mentions outside its own inventory lists is one this port may ignore without diverging.\n"
-    "//! Deciding that by memory is how a port acquires a silent wrong answer, so it is decided\n"
-    "//! by scanning the engine's source: `tools/port_coverage.py --rust` regenerates this file,\n"
-    "//! and it must be regenerated when the engine learns a new effect.\n\n"
+    "//! An ability or item the engine never names is one its gates may take without code of\n"
+    "//! their own: whatever Showdown does with it, the port does nothing, and `modelled.rs` says\n"
+    "//! whether that nothing needs a note. Deciding which ids those are by memory is how a port\n"
+    "//! acquires a silent wrong answer, so it is decided by scanning the engine's source:\n"
+    "//! `tools/port_coverage.py --rust` regenerates this file, and it must be regenerated when\n"
+    "//! the engine learns a new effect (IKA-210; it was Python's source until then).\n\n"
 )
 INERT_DOC = (
-    "/// Ids the Python engine never mentions, so ignoring them cannot diverge\n"
-    "/// from it. Generated by `tools/port_coverage.py --rust`."
+    "/// Ids the port's engine never names. Generated by `tools/port_coverage.py --rust`."
 )
 
 
 def inert(regulation: str, engine: str | None = None) -> Generated:
-    """`rust/src/inert.rs`: the regulation's ids that the engine's source never names.
+    """`rust/src/inert.rs`: the regulation's ids that the port's engine never names.
 
-    `engine` stands in for `engine_text()`. It is how a test hands this an engine that has
+    `engine` stands in for `port_text()`. It is how a test hands this an engine that has
     learned one more effect, which is the change `--check` exists to notice.
     """
     data = regulation_dump(regulation)
-    text = engine_text() if engine is None else engine
-    abilities = sorted(e["id"] for e in data["abilities"] if not mentioned(text, e["id"]))
+    text = port_text() if engine is None else engine
+    abilities = sorted(e["id"] for e in _abilities(data) if not mentioned(text, e["id"]))
     items = sorted(e["id"] for e in data["items"] if not mentioned(text, e["id"]))
     body = (
         INERT_HEADER
@@ -147,57 +201,125 @@ def inert(regulation: str, engine: str | None = None) -> Generated:
 
 
 MODELLED_HEADER = (
-    "//! The ids Python's calculator accounts for, and therefore does not report.\n"
+    "//! The ids that need no note: Showdown has no handler for them, this port acts on them,\n"
+    "//! or (an item) the mega action owns them.\n"
     "//!\n"
-    "//! `damage._unmodelled` names every ability and item outside these sets, on every\n"
-    "//! hit, and the resolver unions those notes into the turn's report. Generated by\n"
-    "//! `tools/port_coverage.py --rust-modelled`.\n\n"
+    "//! Every other ability and item on a hit is one Showdown acts on and this port ignores,\n"
+    "//! and `damage::unmodelled_effects` names it so the caller is told. Generated from the\n"
+    "//! regulation dump's `customHooks` and the port's engine source by\n"
+    "//! `tools/port_coverage.py --rust-modelled` (IKA-210; it was Python's calculator sets).\n\n"
 )
 
 
-def modelled(regulation: str) -> Generated:
-    """`rust/src/modelled.rs`: what `effects` says the calculator accounts for."""
-    src = ROOT / "src"
-    if str(src) not in sys.path:
-        sys.path.insert(0, str(src))
-    import pokeuraou
-    from pokeuraou.effects import all_modelled_abilities, all_modelled_items
-    from pokeuraou.regulation import load_regulation
-    from pokeuraou.resolve import STATUS_MOVES_FULLY_MODELLED
+def _abilities(data: dict) -> list[dict]:
+    """The dump's abilities, and any a species carries that the dex list lacks.
 
-    # `engine_text` reads this tree's files by path; the sets below come from whichever
-    # `pokeuraou` was imported. In one process those can be two trees -- a worktree whose
-    # test run forgot PYTHONPATH gets the main checkout's package -- and a comparison
-    # between them is wrong without failing. So it fails.
-    if not Path(pokeuraou.__file__).parent.samefile(src / "pokeuraou"):
-        raise SystemExit(
-            f"  port_coverage: pokeuraou was imported from {Path(pokeuraou.__file__).parent},\n"
-            f"  not from this tree's {src / 'pokeuraou'}. Put this tree's src on PYTHONPATH."
-        )
+    Aura Guard is the one (Mega Pokemon's champions ability): no dex entry, so no
+    `customHooks` to read. It is taken to have a handler -- a note unless the port names it.
+    """
+    listed = {e["id"] for e in data["abilities"]}
+    carried = {
+        re.sub(r"[^a-z0-9]", "", name.lower())
+        for species in data["species"]
+        for name in (species.get("abilities") or [])
+    }
+    unlisted = [{"id": i, "customHooks": ["(no dex entry)"]} for i in sorted(carried - listed)]
+    return list(data["abilities"]) + unlisted
 
-    reg = load_regulation(regulation)
-    abilities = sorted(all_modelled_abilities())
-    # The stones are passed, not registered: `register_mega_stones` sets a global in
-    # `damage` that this output never reads, and `--check` also runs inside the suite.
-    items = sorted(all_modelled_items(frozenset(reg.mega_map)))
-    status_moves = sorted(STATUS_MOVES_FULLY_MODELLED)
+
+#: Ids Showdown acts on without a handler of their own, so the dump's empty `customHooks`
+#: does not mean "nothing happens": the simulator or another effect names them
+#: (`pokemon.hasAbility('levitate')`, the weather rocks in `conditions.ts`'s
+#: `durationCallback`s), or the entry carries a value where a handler would be (Battle
+#: Armor's and Shell Armor's `onCriticalHit: false`). Read off vendor a5df827 by
+#: `tests/test_port_coverage.py::test_showdowns_names_are_the_ones_listed` (IKA-210).
+SHOWDOWN_ACTS_BY_NAME = {
+    "abilities": frozenset(
+        {
+            "battlearmor", "corrosion", "dancer", "earlybird", "levitate", "multitype",
+            "rkssystem", "shellarmor", "stall",
+        }
+    ),
+    "items": frozenset(
+        {"bindingband", "damprock", "heatrock", "icyrock", "lightclay", "smoothrock", "terrainextender"}
+    ),
+}
+#: The two of those that are a value rather than a name, which the vendor scan cannot see.
+SHOWDOWN_VALUE_NOT_HANDLER = frozenset({"battlearmor", "shellarmor"})
+
+
+def showdown_acts(entry: dict, kind: str) -> bool:
+    """Whether Showdown does anything with the id: a handler, or a name somewhere else."""
+    return bool(entry.get("customHooks")) or entry["id"] in SHOWDOWN_ACTS_BY_NAME[kind]
+
+
+def _without_gates(text: str) -> str:
+    for name in GATE_FUNCTIONS:
+        start = text.find(f"fn {name}(")
+        if start >= 0:
+            text = text[:start] + text[text.find("\n}\n", start) + 3 :]
+    return text
+
+
+def _needs_no_note(entry: dict, text: str, kind: str, ignored: set[str], behaviour: str) -> bool:
+    """No note: Showdown does nothing with it, the port acts on it, or it is a mega stone.
+
+    The port acts on an id it names -- in a gate's arm other than the ignored group, or
+    anywhere outside the gates. An ignored-group id named outside them is one the port
+    reports where it fires (`contact ability: static`), so a note on every hit would say it
+    twice.
+    """
+    identifier = entry["id"]
+    acts = mentioned(behaviour, identifier) or (
+        mentioned(text, identifier) and identifier not in ignored
+    )
+    return not showdown_acts(entry, kind) or acts or bool(entry.get("megaStone"))
+
+
+def modelled(regulation: str, engine: str | None = None) -> Generated:
+    """`rust/src/modelled.rs`: what needs no note, from the dex and the port's source.
+
+    A status move is fully modelled when its whole effect is its declarative fields (no
+    custom code in the dex) or the port names it; any other status move with custom code
+    is reported (`moves::apply_status_move`). A gate's arm under "Python reports these and
+    changes nothing" is not the port acting on the id; every other name is.
+    """
+    data = regulation_dump(regulation)
+    text = port_text() if engine is None else engine
+    ignored = taken_and_ignored(text)
+    behaviour = _without_gates(text)
+    abilities = sorted(
+        e["id"]
+        for e in _abilities(data)
+        if _needs_no_note(e, text, "abilities", ignored, behaviour)
+    )
+    items = sorted(
+        e["id"] for e in data["items"] if _needs_no_note(e, text, "items", ignored, behaviour)
+    )
+    status_moves = sorted(
+        e["id"]
+        for e in data["moves"]
+        if e.get("category") == "Status" and (not e.get("hasCustomCode") or mentioned(text, e["id"]))
+    )
     body = (
         MODELLED_HEADER
         + rust_predicate(
-            "ability_is_modelled", abilities, "/// `effects.all_modelled_abilities()`."
+            "ability_is_modelled",
+            abilities,
+            "/// No Showdown handler, or one the port's engine acts on.",
         )
         + "\n"
         + rust_predicate(
             "item_is_modelled",
             items,
-            "/// `effects.all_modelled_items(mega_stones)` for this regulation's stones.",
+            "/// No Showdown handler, one the port's engine acts on, or a mega stone.",
         )
         + "\n"
         + rust_predicate(
             "status_move_is_fully_modelled",
             status_moves,
-            "/// `resolve.STATUS_MOVES_FULLY_MODELLED`: the status moves whose whole effect\n"
-            "/// is the declarative fields, so the resolver does not report them.",
+            "/// The status moves whose whole effect is the declarative fields, or whose custom\n"
+            "/// code the port's engine implements, so they are not reported.",
         )
     )
     return Generated(
@@ -271,7 +393,7 @@ def check(regulation: str, engine: str | None = None) -> int:
     byte, so a difference only in whitespace is still a different engine to it.
     """
     bad = 0
-    for generated in (inert(regulation, engine), modelled(regulation)):
+    for generated in (inert(regulation, engine), modelled(regulation, engine)):
         path = RUST_SRC / generated.name
         shown = f"rust/src/{generated.name}"
         if not path.exists():
@@ -324,11 +446,11 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     data = regulation_dump(args.regulation)
-    text = engine_text()
+    text = port_text()
     for kind in ("abilities", "items"):
         ids = sorted(entry["id"] for entry in data[kind])
         read = [i for i in ids if mentioned(text, i)]
-        print(f"{kind}: {len(read)} read by the engine, {len(ids) - len(read)} inert")
+        print(f"{kind}: {len(read)} read by the port's engine, {len(ids) - len(read)} inert")
         print("  read:", ", ".join(read))
     return 0
 

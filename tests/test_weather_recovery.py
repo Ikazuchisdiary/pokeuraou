@@ -47,8 +47,8 @@ from pokeuraou import rustnode
 from pokeuraou.actions import side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Position
-from pokeuraou.resolve import Budget, resolve_turn
 
+from ._port import Budget
 from .conftest import FORMAT_ID
 
 pytestmark = pytest.mark.oracle
@@ -140,19 +140,10 @@ def _actions(reg, pos: Position) -> list:  # noqa: ANN001
     return [next(a for a in side_actions(reg, pos, s) if a.to_choice() == TURN_2[s]) for s in (0, 1)]
 
 
-@pytest.mark.parametrize("name", sorted(CASES))
-def test_python_matches_showdown(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
-    before, theirs = _play(oracle, name)
-    result = resolve_turn(reg, before, _actions(reg, before), budget=BUDGET)
-    assert len(result.branches) == 1, [b.events for b in result.branches]
-    ours = _hp(result.branches[0].position)
-    assert ours == theirs, f"{name}: showdown {theirs} != python {ours}"
-
-
 @pytest.fixture()
 def bridged(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
     if not rustnode.binary_path().exists():
-        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
+        pytest.fail(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
     monkeypatch.setenv(rustnode.ENV_ENABLE, "1")
     rustnode.reset()
     yield
@@ -167,6 +158,7 @@ def test_the_port_matches_showdown(reg, oracle: Oracle, bridged: None, name: str
     assert node is not None
     there = node.resolve(before, _actions(reg, before), BUDGET, select=0)
     assert there is not None and there.position is not None, "the port refused the turn"
+    assert len(there.branches) == 1, there.branches
     assert not there.unmodelled, there.unmodelled
     rust_now = _hp(there.position)
     assert rust_now == theirs, f"{name}: showdown {theirs} != rust {rust_now}"

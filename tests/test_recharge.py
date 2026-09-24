@@ -28,8 +28,8 @@ import pytest
 from pokeuraou.actions import MoveAction, SwitchAction, side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Position
-from pokeuraou.resolve import Budget, resolve_turn
 
+from ._port import Budget
 from .conftest import FORMAT_ID
 
 pytestmark = pytest.mark.oracle
@@ -147,48 +147,6 @@ def test_a_blocked_hyper_beam_costs_nothing(reg, oracle: Oracle) -> None:  # noq
     handle.close()
 
 
-def test_the_recharge_turn_lifts_the_lock_and_spends_no_pp(reg, oracle: Oracle) -> None:  # noqa: ANN001
-    """Resolving the recharge in our resolver leaves what Showdown leaves.
-
-    PP in particular: there is no move slot behind the fake move, and Showdown's next
-    request shows Hyper Beam still at the count it had before the recharge turn.
-    """
-    handle = _battle(oracle)
-    handle.step(CONNECTS)
-    pos = Position.from_json(handle.position)
-    before = [(m.id, m.pp) for m in pos.sides[0].pokemon[pos.sides[0].active[0]].moves]
-
-    ours = next(
-        a for a in side_actions(reg, pos, 0) if any(
-            isinstance(p, MoveAction) and p.move_id == "recharge" for p in a.slots
-        )
-    )
-    theirs = side_actions(reg, pos, 1)[0]
-    result = resolve_turn(reg, pos, [ours, theirs], budget=Budget.exact())
-    assert result.branches, "the recharge turn has to resolve"
-    after_pos = max(result.branches, key=lambda b: b.probability).position
-    mon = after_pos.sides[0].pokemon[after_pos.sides[0].active[0]]
-    assert not mon.has_volatile("mustrecharge"), (
-        f"the lock lifts on the turn it is spent: {mon.volatiles}"
-    )
-    assert [(m.id, m.pp) for m in mon.moves] == before, (
-        f"a recharge turn spends no PP: {before} -> {[(m.id, m.pp) for m in mon.moves]}"
-    )
-
-    # And Showdown agrees, from the same position: spend the recharge and look at what
-    # comes back.
-    handle.step(["move 1, move 4", "move 1, move 3"])
-    assert handle.choice_errors == [], handle.choice_errors
-    active = handle.requests[0]["active"][0]
-    assert [m["id"] for m in active["moves"]] == [
-        "hyperbeam", "bodyslam", "protect", "yawn"
-    ], f"the full move set is back the turn after: {active}"
-    assert any("cant" in line and "recharge" in line for line in handle.log), (
-        f"Showdown logs the spent turn: {handle.log}"
-    )
-    handle.close()
-
-
 # ---------------------------------------------------------------------------
 # The port against Showdown, not against Python (IKA-207).
 
@@ -218,6 +176,13 @@ def test_the_ports_recharge_turn_lifts_the_lock_and_spends_no_pp(reg, oracle: Or
 
     handle.step([ours.to_choice(), theirs.to_choice()])
     assert handle.choice_errors == [], handle.choice_errors
+    active = handle.requests[0]["active"][0]
+    assert [m["id"] for m in active["moves"]] == [
+        "hyperbeam", "bodyslam", "protect", "yawn"
+    ], f"the full move set is back the turn after: {active}"
+    assert any("cant" in line and "recharge" in line for line in handle.log), (
+        f"Showdown logs the spent turn: {handle.log}"
+    )
     showdown = Position.from_json(handle.position)
     handle.close()
     pinned = port_turn(port, pos, [ours, theirs])

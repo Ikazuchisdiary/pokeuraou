@@ -49,12 +49,13 @@ def team_b() -> list[TeamSet]:
 def port(reg: Regulation) -> Iterator[object]:
     """A warm port process for an oracle test's port twin (IKA-207; `_port_showdown`).
 
-    Skips when there is no release binary, as the port tests always have.
+    Fails when there is no release binary (IKA-210): the port is the only engine the rule
+    tests have, so a machine without it has not run them, and a skip would say it had.
     """
     from pokeuraou import rustnode
 
     if not rustnode.binary_path().exists():
-        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
+        pytest.fail(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
     node = rustnode.RustNode(reg)
     yield node
     node.close()

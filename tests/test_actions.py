@@ -584,7 +584,8 @@ def test_struggling_does_not_relock_a_choice_item_onto_struggle(
     Struggle, then Stomping Tantrum.
     """
     from pokeuraou.position import Effect
-    from pokeuraou.resolve import Budget, resolve_turn
+
+    from ._port import Budget, resolve_turn
 
     pos = _synthetic_position(reg, team_a)
     side = pos.sides[0]

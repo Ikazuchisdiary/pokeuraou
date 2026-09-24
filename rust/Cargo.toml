@@ -18,6 +18,11 @@ int-rolls = []
 # skip the speed order, and a replayed draw is answered with its first option. Never for use; `tools/diff_commands.py` has to
 # tell a build with it from one without.
 ika211-control = []
+# IKA-210's positive control: old rules the re-pointed tests hold, broken on purpose -- a
+# recharge that never lifts, a self-switch cancelled beside an Eject Button or Emergency
+# Exit, the residuals ordered (and a tie noted) after the weather has ended, 2-5 hits at
+# 1/3, 1/3, 1/6, 1/6, and no branch merged. Never for use.
+ika210-control = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

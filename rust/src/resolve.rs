@@ -84,7 +84,9 @@ impl Budget {
             max_branches: value["maxBranches"].as_u64().unwrap_or(512) as usize,
             // Defaulted to on, as Python's field is: a fixture recorded before the merge
             // existed replays with it rather than against it.
-            merge_duplicates: value["mergeDuplicates"].as_bool().unwrap_or(true),
+            // IKA-210's positive control never merges.
+            merge_duplicates: !cfg!(feature = "ika210-control")
+                && value["mergeDuplicates"].as_bool().unwrap_or(true),
         }
     }
 
@@ -785,6 +787,10 @@ fn ability_handled(ability: &str) -> bool {
             | "pressure" | "shadowtag" | "arenatrap" | "magnetpull" | "runaway" | "telepathy"
             | "healer" | "symbiosis" | "sweetveil" | "aromaveil" | "damp"
             | "lightmetal" | "heavymetal" | "sandveil" | "snowcloak" | "stall"
+            // `moves::trick_blocked` and the forceSwitch block (IKA-208), which named them
+            // without listing them: gated only by `inert.rs` while Python never named them,
+            // and found when the scan became the port's own (IKA-210).
+            | "stickyhold" | "suctioncups"
             // Weather setters this port applies on switch-in and mega.
             | "desolateland" | "primordialsea" | "deltastream"
             // Terrain setters, `terrain::surge` on switch-in and mega (IKA-201).
@@ -876,6 +882,10 @@ pub(crate) const UNHANDLED_MOVE_FIELDS: [&str; 10] = [
 /// Narrower than Python's own `STATUS_MOVES_FULLY_MODELLED`, which answers a different
 /// question -- which ones it does not *report* -- and is generated into `modelled.rs`
 /// rather than retyped. One list was briefly doing both jobs.
+/// The status moves this port implements by name. Consulted by no gate since IKA-210 (the
+/// refusal it served was Python's, see `check_move_supported`); kept as the record of what
+/// is implemented, which `tools/port_coverage.py` reads as names like any other.
+#[allow(dead_code)]
 pub(crate) fn status_move_handled(move_id: &str) -> bool {
     matches!(
         move_id,
@@ -936,16 +946,11 @@ fn check_move_supported(reg: &Reg, move_id: &str) -> Result<(), String> {
             return Err(format!("move field {field}: {move_id}"));
         }
     }
-    // A status move Python does not fully model gets the declarative fields and a report,
-    // and nothing else -- which is exactly what this port does with one too. So refusing is
-    // right only where Python has custom code it *does* model and this port has not
-    // implemented it; refusing the rest was refusing to do the same nothing.
-    if mv.category == "Status"
-        && !status_move_handled(move_id)
-        && crate::modelled::status_move_is_fully_modelled(move_id)
-    {
-        return Err(format!("status move: {move_id}"));
-    }
+    // A status move whose custom code this port does not implement gets the declarative
+    // fields and a report (`moves::apply_status_move`), never a refusal. The refusal that
+    // stood here was for a move Python modelled and this port did not -- a different answer
+    // from Python's -- and with Python's resolver gone there is no such move (IKA-210). It
+    // refused nothing on the day it went: every move Python modelled was handled here.
     // Trick and Switcheroo are `moves::swap_items`, Last Resort `moves::last_resort_fails`
     // (IKA-208).
     Ok(())
