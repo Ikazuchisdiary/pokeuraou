@@ -27,6 +27,7 @@ mod fixedpoint;
 mod id;
 mod inert;
 mod modelled;
+mod move_hooks;
 mod moveinfo;
 mod node;
 mod objective;

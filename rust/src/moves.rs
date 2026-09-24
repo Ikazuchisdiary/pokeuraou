@@ -1344,6 +1344,12 @@ fn use_move<'a>(
         turn.move_failed[action.side][action.slot] = true;
         return Ok(vec![(1.0, turn)]);
     }
+    // Poltergeist: `onTry`, the target holds nothing (IKA-240).
+    if crate::move_hooks::fails_on_try(&turn, move_id.as_str(), &targets) {
+        log_event!(turn, "{} failed (the target holds nothing)", Label(reg, action));
+        turn.move_failed[action.side][action.slot] = true;
+        return Ok(vec![(1.0, turn)]);
+    }
 
     // The protection a `breaksProtect` move tears down is torn down per target, inside
     // `hit_target`, once the hit is known to land (IKA-153). Every such move is damaging
@@ -1915,6 +1921,8 @@ fn hit_target<'a>(
             continue;
         }
         let field = field_for_hit(&turn);
+        // Brick Break, Psychic Fangs: the screens are gone before `getDamage` (IKA-240).
+        let field = crate::move_hooks::field_past_screens(field, move_id.as_str(), target);
         for (crit_weight, crit) in crit_branches.iter().copied() {
         if crit_weight <= 0.0 {
             continue;
@@ -1961,6 +1969,8 @@ fn hit_target<'a>(
                 if mv.breaks_protect {
                     break_protection(&mut state, action, &[target]);
                 }
+                // The move's own `onTryHit`, after the immunity and the accuracy (IKA-240).
+                crate::move_hooks::break_screens(&mut state, move_id.as_str(), target);
                 let mut reached = false;
                 // Python's `total` and its loop variable, for "hit Nx for T" (IKA-215).
                 let mut total = 0i64;
@@ -2026,12 +2036,15 @@ fn hit_target<'a>(
                         continue;
                     }
                     let absorbed = guarded && hit_index == 0;
+                    let berry = crate::move_hooks::set_berry_aside(&mut state, move_id.as_str(), target);
                     let dealt = if absorbed {
                         0
                     } else {
                         state.deal_damage(target.0, target.1, amount, true, move_id.as_str())?
                     };
                     total += dealt;
+                    // Bug Bite, Pluck: `onHit`, before `DamagingHit` and the `Update` (IKA-240).
+                    crate::move_hooks::steal_berry(&mut state, action, target, berry, mv.mtype.as_str(), result.type_mod);
                     crate::damage_callback::record(&mut state, (action.side, action.slot), target, dealt, mv.category.as_str());
                     reached = true;
                     state.move_hit[target.0][target.1] = true;
