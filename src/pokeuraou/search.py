@@ -144,14 +144,15 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import timing
+from . import port, timing
 from .actions import SideAction
+from .budget import Budget
 from .equilibrium import Equilibrium, EquilibriumError, solve
 from .narrow import narrow
 from .node_solver import solve_node
+from .port import batched_payoff
 from .position import Position
 from .regulation import Regulation
-from .resolve import Budget, batched_payoff, resolve_turn
 
 #: A leaf evaluator: many positions in, one probability each out.
 LeafEvaluator = Callable[[list[Position]], np.ndarray]
@@ -630,16 +631,17 @@ def _refined_value(
     safe; inventing one is not.
     """
     unmodelled: set[str] = set()
-    result = resolve_turn(reg, pos, [ours, theirs], budget=budget)
+    # Every branch, from the port (IKA-209; it was Python's `resolve_turn`).
+    result = port.turn(reg, pos, [ours, theirs], budget, full=True)
     unmodelled.update(result.unmodelled)
-    if result.suspended or not result.branches:
+    if result.suspended or not result.outcomes:
         # A self-switching move pauses the turn for a replacement choice, which is a
         # decision node and not a chance node. `batched_payoff` already folds it
         # correctly at depth 1; refining it would need the fold and the subgame at once.
         return None, unmodelled, 0
 
-    branches = sorted(result.branches, key=lambda b: -b.probability)[:sub_branches]
-    if len(branches) < len(result.branches):
+    branches = sorted(result.outcomes, key=lambda b: -b.probability)[:sub_branches]
+    if len(branches) < len(result.outcomes):
         unmodelled.add(
             f"depth-2 kept the {sub_branches} likeliest branches of a refined cell"
         )
