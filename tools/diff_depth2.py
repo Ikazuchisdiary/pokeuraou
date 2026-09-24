@@ -13,8 +13,10 @@ IKA-209 moved `search._refined_value` from Python's `resolve_turn` to the port's
 command; this is what says the decisions did not move.
 
 `--null` solves this checkout twice, with `--jobs 1` and with `--jobs`, and the two must
-agree to the byte. `--after-sub-branches K` changes this checkout's `sub_branches`, which
-must show up as differences -- the positive control that the comparison can see a change.
+agree to the byte. `--control` solves this checkout with `sub_branches` 1 instead of the
+default 3 -- depth 2 keeps only the likeliest branch of each refined cell -- which must show
+up as differences: the positive control that the comparison can see a change
+(`--after-sub-branches K` for another K; 3 is the default and changes nothing).
 """
 
 from __future__ import annotations
@@ -166,7 +168,12 @@ def main() -> None:
     ap.add_argument("--binary", type=Path, default=None)
     ap.add_argument("--null", action="store_true", help="also solve this checkout with --jobs 1")
     ap.add_argument("--after-sub-branches", type=int, default=None)
+    ap.add_argument(
+        "--control", action="store_true", help="the positive control: --after-sub-branches 1"
+    )
     args = ap.parse_args()
+    if args.control:
+        args.after_sub_branches = 1
     if args.solve:
         solve_main(args)
         return

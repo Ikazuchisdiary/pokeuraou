@@ -889,9 +889,24 @@ pub fn alternatives_encoded(
             "untouched": untouched,
         }));
     }
-    let borrowed: Vec<&Position> = leaves.iter().collect();
+    // A parameter-free objective is scored here per leaf, and with `encode: false` the
+    // arrays are not built at all: an hp-share node needs the values and nothing else.
+    let objectives: Vec<String> = value["objectives"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_str).map(String::from).collect())
+        .unwrap_or_default();
+    let mut leaf_values: Vec<f64> = Vec::new();
+    for name in &objectives {
+        let score = crate::objective::by_name(name)
+            .ok_or_else(|| format!("objective not available in the port: {name}"))?;
+        leaf_values.extend(leaves.iter().map(score));
+    }
+    let encode = value.get("encode").and_then(Value::as_bool).unwrap_or(true);
+    let borrowed: Vec<&Position> =
+        if encode { leaves.iter().collect() } else { Vec::new() };
     let encoded = encoder.encode_positions_with(&borrowed, rules);
-    let body_bytes = (encoded.species.len()
+    let body_bytes = leaf_values.len() * 8
+        + (encoded.species.len()
         + encoded.ability.len()
         + encoded.item.len()
         + encoded.moves.len()
@@ -905,14 +920,15 @@ pub fn alternatives_encoded(
         "chooser": chooser,
         "options": options,
         "plans": plans,
-        "leaves": leaves.len(),
+        "leaves": borrowed.len(),
+        "valueRows": leaves.len(),
         "spans": [],
         "folded": [],
         "exact": [],
         "refused": [],
         "unmodelled": [],
         "unknownVolatiles": encoded.unknown_volatiles,
-        "leafObjectives": [],
+        "leafObjectives": objectives,
         "encoding": { "megaFromSlots": rules.mega_from_slots },
         "monsPerSide": encoder.widths.mons_per_side,
         "monWidth": encoder.widths.mon,
@@ -920,7 +936,7 @@ pub fn alternatives_encoded(
         "fieldWidth": encoder.widths.field,
         "bytes": body_bytes,
     });
-    Ok((header, encoded, Vec::new()))
+    Ok((header, encoded, leaf_values))
 }
 
 /// A fold's leaf indices less `start`: the plan's leaves are numbered from its own first.

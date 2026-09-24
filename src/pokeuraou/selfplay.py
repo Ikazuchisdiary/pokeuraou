@@ -1295,16 +1295,16 @@ def _do_self_switch_node(
     are resolved per completion. `definition=True` takes the per-completion path for every
     option; the tests and `scratchpad/ika150_selfswitch_replay.py` hold the two equal.
 
-    A learned leaf takes `_self_switch_encoded` instead (IKA-209): the same plans, the same
-    rows in the same order and the same fold, with the leaves crossing as the encoder's
-    arrays rather than as positions. This road is for an evaluator without an encoded form.
+    A learned leaf or a ported objective takes `_self_switch_encoded` instead (IKA-209):
+    the same plans, the same rows in the same order and the same fold, with the leaves
+    crossing as the encoder's arrays, or as one value each, rather than as positions. This
+    road is for an evaluator the port can neither encode for nor score.
     """
-    if any(_encoded_scoring(reg, leaf) is not None for leaf in leaves):
-        done = _self_switch_encoded(
-            reg, pause, record, leaves, hidden=hidden, definition=definition
-        )
-        if done is not _BY_POSITIONS:
-            return done
+    done = _self_switch_encoded(
+        reg, pause, record, leaves, objective, hidden=hidden, definition=definition
+    )
+    if done is not _BY_POSITIONS:
+        return done
     with timing.stage("selfswitch.resume"):
         chooser, alternatives = port.resume_alternatives(reg, pause)
     if chooser is None or not alternatives:
@@ -1414,6 +1414,7 @@ def _self_switch_encoded(
     pause: PortPause,
     record: GameRecord,
     leaves: tuple[LeafEvaluator | None, LeafEvaluator | None],
+    objective: Objective,
     *,
     hidden: _HiddenBench | None,
     definition: bool,
@@ -1426,6 +1427,11 @@ def _self_switch_encoded(
     road does to the positions with `_with_bench`), and the whole node scored in one
     call of the leaf, chunked where `BatchedValue` chunks. Only what crosses changed:
     arrays instead of every leaf as JSON, which was 1.5x a value-net generation run.
+
+    With no leaf and a ported objective (hp-share, faints) the port scores each leaf and
+    only the values cross. Nothing is shared then: a shared option's value would need
+    the patched leaf, which is a position, so every completion is resolved over there --
+    the definition, whose leaves the shared road equals (tests/test_hidden_selfswitch.py).
     """
     from .beliefnode import _patched, _stacked
     from .fold import fold_value
@@ -1436,9 +1442,19 @@ def _self_switch_encoded(
     if chooser is None or not probe.options:
         return None
     road = _encoded_scoring(reg, leaves[chooser])
+    named = None
     if road is None:
-        return _BY_POSITIONS
-    scorer, encoder, rules = road
+        name = getattr(objective, "name", None)
+        if leaves[chooser] is not None or name not in port.PORTED_OBJECTIVES:
+            return _BY_POSITIONS
+        named = name
+        scorer = encoder = rules = None
+    else:
+        scorer, encoder, rules = road
+    # What each request asks for: arrays for the leaf, or the objective's values alone.
+    asked: dict[str, Any] = (
+        {"rules": rules} if named is None else {"objectives": [named], "encode": False}
+    )
     record.unmodelled.append(
         "mid-turn replacement chosen against the opponent's already-committed action"
     )
@@ -1454,6 +1470,8 @@ def _self_switch_encoded(
 
     def block(answer: Any, plan: Any, patch: Any = None) -> int:  # noqa: ANN401
         def make() -> Any:  # noqa: ANN401
+            if named is not None:
+                return answer.values[named][plan.start : plan.start + plan.count]
             rows = _rows(answer.node.encoded, plan.start, plan.count)
             return rows if patch is None else patch(rows)
 
@@ -1465,7 +1483,7 @@ def _self_switch_encoded(
     with timing.stage("selfswitch.leaves"):
         if spread is None:
             weights = [1.0]
-            true = port.alternatives_encoded(reg, pause, rules=rules)
+            true = port.alternatives_encoded(reg, pause, **asked)
             answers.append(true)
             layout.append([(plan, block(true, plan)) for plan in true.plans])
         else:
@@ -1474,7 +1492,7 @@ def _self_switch_encoded(
             slots = spread[0].slots
             shared = [False] * len(options)
             true = None
-            if not definition:
+            if not definition and named is None:
                 true = port.alternatives_encoded(
                     reg, pause, shared=(other, slots), rules=rules
                 )
@@ -1486,7 +1504,7 @@ def _self_switch_encoded(
                 if not all(shared):
                     found = port.alternatives_encoded(
                         reg, pause, world=(item.position, other),
-                        want=[k for k, flag in enumerate(shared) if not flag], rules=rules,
+                        want=[k for k, flag in enumerate(shared) if not flag], **asked,
                     )
                     answers.append(found)
                     timing.count("selfswitch.resumed", len(found.options))
@@ -1511,15 +1529,20 @@ def _self_switch_encoded(
                         plan = found.plans[k]
                         world.append((plan, block(found, plan)))
                 layout.append(world)
-    for answer in answers:
-        port.note_port_rule([scorer], answer.node)
     total = sum(rows for rows, _make in parts)
     if not total:
         return None
     timing.count("selfswitch.leaves", total)
-    stacked, starts = _stacked(parts, answers[0].node.encoded)
-    values = np.asarray(scorer(stacked), dtype=np.float64)
-    del stacked
+    if named is not None:
+        pieces = [make() for _rows_count, make in parts]
+        starts = list(np.cumsum([0] + [len(piece) for piece in pieces])[:-1])
+        values = np.concatenate(pieces).astype(np.float64)
+    else:
+        for answer in answers:
+            port.note_port_rule([scorer], answer.node)
+        stacked, starts = _stacked(parts, answers[0].node.encoded)
+        values = np.asarray(scorer(stacked), dtype=np.float64)
+        del stacked
     with timing.stage("selfswitch.fold"):
         scores = np.zeros(len(options), dtype=np.float64)
         for weight, world in zip(weights, layout, strict=True):

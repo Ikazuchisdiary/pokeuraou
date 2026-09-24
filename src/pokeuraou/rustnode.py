@@ -428,15 +428,15 @@ def require_node(reg: Regulation) -> RustNode:
     and lets the caller fall back, this raises: switched off, no binary, a binary older
     than the sources (as `require_current_binary`), or a bridge that was given up on.
     """
-    format_id = reg.meta.format_id
-    held = _NODES.get(format_id)
-    if held is not None:
-        return held
     if not enabled():
         raise PortUnavailable(
             f"{ENV_ENABLE}=0, and the production roads have no Python resolver to fall "
             "back to (IKA-209); unset it"
         )
+    format_id = reg.meta.format_id
+    held = _NODES.get(format_id)
+    if held is not None:
+        return held
     if _GAVE_UP:
         raise PortUnavailable("the Rust node failed and was given up on; see the log above")
     path = binary_path()
@@ -1003,14 +1003,17 @@ class RustNode:
         want: Sequence[int] | None = None,
         shared: tuple[int, Sequence[int]] | None = None,
         rules: Any = None,  # noqa: ANN401 - EncodingRules
+        objectives: Sequence[str] = (),
+        encode: bool = True,
     ) -> EncodedAlternatives | None:
         """`resume_alternatives` with each wanted option's turn flattened over there, as
         `turn_leaves` flattens it, and every leaf encoded (IKA-209).
 
         What the self-switch node scores: the leaves cross as the encoder's arrays, by the
         road an encoded node's take, instead of as positions. `shared=(side, slots)` also
-        answers `_shared_self_switch_plans`' question per option. None when the port
-        declines the pause.
+        answers `_shared_self_switch_plans`' question per option. `objectives` are
+        scored over there per leaf; with `encode=False` no arrays are built -- an hp-share
+        node wants the values alone. None when the port declines the pause.
         """
         request: dict[str, Any] = {
             "kind": "alternativesEncoded",
@@ -1019,6 +1022,10 @@ class RustNode:
         }
         if want is not None:
             request["want"] = [int(k) for k in want]
+        if objectives:
+            request["objectives"] = list(objectives)
+        if not encode:
+            request["encode"] = False
         if shared is not None:
             request["shared"] = {"side": int(shared[0]), "slots": [int(s) for s in shared[1]]}
         wants_old = bool(rules is not None and rules.mega_from_slots)
@@ -1043,6 +1050,16 @@ class RustNode:
                 f"it applied it (echo {node.mega_from_slots!r}); the binary predates IKA-141"
             )
         timing.count("body.bytes", count)
+        import numpy as np
+
+        rows = int(header.get("valueRows", 0))
+        names = list(header.get("leafObjectives", []))
+        # The values follow the arrays, one block of `rows` per objective.
+        offset = count - rows * 8 * len(names)
+        values = {
+            name: np.frombuffer(body, dtype=np.float64, count=rows, offset=offset + k * rows * 8)
+            for k, name in enumerate(names)
+        }
         chooser = header["chooser"]
         return EncodedAlternatives(
             chooser=None if chooser is None else int(chooser),
@@ -1061,6 +1078,7 @@ class RustNode:
             ],
             untouched=[plan.get("untouched") for plan in header["plans"]],
             node=node,
+            values=values,
         )
 
     @timing.timed("rust.replacements")
@@ -1196,6 +1214,8 @@ class EncodedAlternatives:
     plans: list[EncodedPlan | None]
     untouched: list[bool | None]
     node: EncodedNode
+    #: One value per leaf for each objective asked for, scored over there.
+    values: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

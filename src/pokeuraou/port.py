@@ -150,13 +150,16 @@ def alternatives_encoded(
     want: Sequence[int] | None = None,
     shared: tuple[int, Sequence[int]] | None = None,
     rules: Any = None,  # noqa: ANN401 - EncodingRules
+    objectives: Sequence[str] = (),
+    encode: bool = True,
 ) -> EncodedAlternatives:
     """`resume_alternatives` with the wanted options' turns flattened and encoded over there
     (`RustNode.alternatives_encoded`): the self-switch node's leaves as arrays (IKA-209)."""
 
     def call(node: RustNode) -> EncodedAlternatives:
         answer = node.alternatives_encoded(
-            pause, world=world, want=want, shared=shared, rules=rules
+            pause, world=world, want=want, shared=shared, rules=rules,
+            objectives=objectives, encode=encode,
         )
         if answer is None:
             raise _refused(node, "a paused turn")
