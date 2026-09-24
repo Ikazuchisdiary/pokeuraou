@@ -132,6 +132,15 @@ def main() -> None:
         "a finished match. For a decision only -- a run stopped early reports a win rate "
         "biased away from 50%%, so a size needs a fixed count.",
     )
+    ap.add_argument(
+        "--pool",
+        default=None,
+        help="an M-C match (IKA-259): both seats from this pool (data/pool/<id>.json), "
+        "played by tools/pool_match.py. Each arm solves each pair's selection with its own "
+        "leaf and believes the opponent's bench from that solve, so there is no book; "
+        "without --baseline the other arm is hp-share (the M-C origin). The servers load "
+        "the pool's vocabulary.",
+    )
     ap.add_argument("--sprt-alpha", type=float, default=0.05,
                     help="chance of passing a change worth ELO0 or less")
     ap.add_argument("--sprt-beta", type=float, default=0.05,
@@ -165,7 +174,19 @@ def main() -> None:
     # whole distance from the parameter-free baseline to the best agent on the scale.
     # Every width match and several generation matches recorded `books: [uniform,
     # uniform]` without anyone choosing that.
-    if "--selection-book" not in extra and not args.uniform_selection:
+    pool_regulation = None
+    if args.pool is not None:
+        from pokeuraou.pool import find_pool
+
+        if "--selection-book" in extra or "--roster" in extra or args.uniform_selection:
+            raise SystemExit(
+                "--pool has no book, no roster and no uniform switch: each arm solves its "
+                "own selection (IKA-259)"
+            )
+        pool_regulation = json.loads(find_pool(args.pool).read_bytes().decode("utf-8"))[
+            "regulation"
+        ]
+    elif "--selection-book" not in extra and not args.uniform_selection:
         raise SystemExit(
             "no --selection-book in the options passed after `--`, so both arms will "
             "draw their four of six uniformly. That is worth about -141 Elo against the "
@@ -214,7 +235,9 @@ def main() -> None:
         for index in range(args.servers):
             command = [
                 sys.executable, str(ROOT / "tools" / "inference_server.py"),
-                "--device", args.device, "--arm", "value", *args.value,
+                "--device", args.device,
+                *(["--regulation", pool_regulation] if pool_regulation else []),
+                "--arm", "value", *args.value,
             ]
             if args.baseline:
                 command += ["--arm", "baseline", *args.baseline]
@@ -241,8 +264,10 @@ def main() -> None:
               file=sys.stderr, flush=True)
 
     def build(worker: int, address: str) -> list[str]:
+        program = "pool_match.py" if args.pool is not None else "generation_match.py"
         command = [
-            sys.executable, str(ROOT / "tools" / "generation_match.py"),
+            sys.executable, str(ROOT / "tools" / program),
+            *(["--pool", args.pool] if args.pool is not None else []),
             "--queue", address,
             "--seed", str(args.seed),
             "--games", str(args.games),

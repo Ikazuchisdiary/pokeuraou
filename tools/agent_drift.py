@@ -152,10 +152,13 @@ def pool_generation_missing(reference: set[str]) -> list[str]:
     the two generators drifting apart is the "measurement lags generation" defect with the
     teacher on both ends.
     """
-    passed: set[str] = set()
+    # Per CALL, not the union of the calls: the module holds generation's call and the
+    # pool match's (IKA-259), and a union would let one of them omit what the other
+    # passes -- the match measuring a different agent from the one generation plays.
+    missing: set[str] = set()
     for _, kwargs in calls(ROOT / "src/pokeuraou/poolplay.py"):
-        passed |= kwargs
-    return sorted(reference - passed)
+        missing |= reference - kwargs
+    return sorted(missing)
 
 
 def main(argv: list[str] | None = None) -> int:

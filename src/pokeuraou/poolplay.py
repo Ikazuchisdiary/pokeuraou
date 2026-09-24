@@ -180,7 +180,17 @@ class SolvedSelections:
         # rename makes whichever lands last whole rather than interleaved.
         temporary = path.with_name(f"{path.name}.{os.getpid()}.tmp")
         temporary.write_bytes(json.dumps(payload).encode("utf-8"))
-        os.replace(temporary, path)
+        try:
+            os.replace(temporary, path)
+        except PermissionError:
+            # Windows refuses to replace a file another process has open -- the other
+            # worker that solved the same pair, reading or replacing it. A match deals
+            # both seats of a game at once, so two workers meet the same new pair in the
+            # same second every game (IKA-259). Its file is the same answer (same pool,
+            # same leaf), so ours is dropped; anything else is still an error.
+            if not path.exists():
+                raise
+            temporary.unlink(missing_ok=True)
 
     def entry(self, seat0: int, seat1: int) -> BookEntry:
         """The pair's selection game with ``seat0``'s team as the row player."""
@@ -408,10 +418,188 @@ def generate_pool(
     return stats
 
 
+@dataclass
+class PoolArm:
+    """One agent of a pool-against-pool match (IKA-259).
+
+    An agent here is a leaf, a width, a narrowing order and its own selection: ``solver``
+    is the arm's `SolvedSelections` over ITS leaf, so each arm draws its four and believes
+    the opponent's bench from the selection game as its own value function defines it --
+    generation's "solved on the spot" (IKA-81), per arm. ``solver=None`` is an arm with no
+    selection model (hp-share, the M-C origin): four of six uniformly, uniform bench belief.
+
+    ``name`` is what the records call the leaf (a model stem such as ``value-gen11L``, or
+    ``hp-share``); a rating is keyed on it.
+    """
+
+    name: str
+    evaluate: LeafEvaluator | None
+    solver: SolvedSelections | None
+    limit: int
+    rank_by_leaf: bool
+
+    @property
+    def selection(self) -> str:
+        return SOLVED if self.solver is not None else "uniform"
+
+
+def selection_rng(seed: int, game_index: int, side: int) -> np.random.Generator:
+    """The stream side ``side`` draws its four from, in game ``game_index``.
+
+    Its own stream per SIDE, not the game's: an arm that draws from a solve takes one
+    uniform and an arm that draws uniformly takes several, so drawn from the game's stream
+    the two would leave it in different places and the pair's two seats would play
+    different games from the same seed for no reason but the draw's arithmetic.
+    """
+    return np.random.default_rng([seed, game_index, 1, side])
+
+
+def draw_side(
+    arm: PoolArm,
+    entry: BookEntry | None,
+    side: int,
+    six: Sequence[Any],
+    rng: np.random.Generator,
+    *,
+    size: int,
+    epsilon: float,
+    temperature: float,
+) -> tuple[int, ...]:
+    """The ordered four ``arm`` brings when it sits at ``side``.
+
+    ``entry`` is the arm's own solve read with the seat-0 team as the row player, so side
+    0 draws from the row strategy and side 1 from the column strategy.
+    """
+    if entry is None:
+        return tuple(pick_four_indices(rng, len(six), size=size))
+    mixture = (
+        entry.our_mixture(epsilon=epsilon, temperature=temperature)
+        if side == 0
+        else entry.their_mixture(0, epsilon=epsilon, temperature=temperature)
+    )
+    cumulative = np.cumsum(np.asarray(mixture, dtype=np.float64))
+    cumulative /= cumulative[-1]
+    index = min(
+        int(np.searchsorted(cumulative, rng.random(), side="right")), len(cumulative) - 1
+    )
+    return tuple(entry.selections[index])
+
+
+def pool_match_game(
+    reg: Regulation,
+    pool: Pool,
+    arms: tuple[PoolArm, PoolArm],
+    *,
+    seed: int,
+    game_index: int,
+    which: int,
+    hide_bench: bool,
+    objective: Objective = HP_SHARE,
+    max_turns: int = MAX_TURNS,
+    epsilon: float = 0.0,
+    temperature: float = 1.0,
+) -> tuple[Any, dict[str, Any]]:
+    """Plays game ``game_index`` of a pool match with the tested arm (``arms[0]``) at
+    side ``which`` (IKA-259).
+
+    The pair and its seats come from ``[seed, game_index]`` alone, so both seats of a game
+    are the same two teams in the same seats with the ARMS swapped -- what makes the two a
+    pair. Each side's four comes from that side's own stream (`selection_rng`) and from
+    the solve of the arm sitting there; each side's bench belief is the one its own arm
+    holds (never the opponent's actual mixture, which would leak its private strategy).
+
+    ``epsilon``/``temperature`` default to 0/1, the pure equilibrium: a rating asks what
+    the strategy is worth, and exploration belongs to generation (`generation_match` does
+    the same). The belief is built with the same pair, as `BenchPrior.of` requires.
+
+    Returns the record and what each side was: leaf name, selection, belief, pick.
+    """
+    if pool.reg.meta.format_id != reg.meta.format_id:
+        raise ValueError(
+            f"the pool is {pool.reg.meta.format_id}, the regulation {reg.meta.format_id}"
+        )
+    if which not in (0, 1):
+        raise ValueError(f"which must be 0 or 1, got {which}")
+    rng = np.random.default_rng([seed, game_index])
+    k, a, b = draw_pair(rng, pool.pairs)
+    team0, team1 = pool.teams[a], pool.teams[b]
+    six = (list(team0.sets), list(team1.sets))
+    species = ([s.species for s in six[0]], [s.species for s in six[1]])
+    mirror = a == b
+    side_arms = (arms[0], arms[1]) if which == 0 else (arms[1], arms[0])
+    size = reg.meta.picked_team_size
+
+    entries = tuple(
+        arm.solver.entry(a, b) if arm.solver is not None else None for arm in side_arms
+    )
+    picks = tuple(
+        draw_side(
+            side_arms[side], entries[side], side, six[side],
+            selection_rng(seed, game_index, side),
+            size=size, epsilon=epsilon, temperature=temperature,
+        )
+        for side in (0, 1)
+    )
+    # bench_prior[s] prices side s's bench and is read by side 1 - s: so it is built from
+    # the entry of the arm sitting at 1 - s, about side s.
+    priors: tuple[BenchPrior | None, BenchPrior | None] | None = None
+    if hide_bench:
+        about0 = (
+            BenchPrior.of(entries[1], 0, species[0], epsilon=epsilon, temperature=temperature)
+            if entries[1] is not None
+            else None
+        )
+        about1 = (
+            BenchPrior.of(entries[0], 1, species[1], epsilon=epsilon, temperature=temperature)
+            if entries[0] is not None
+            else None
+        )
+        if about0 is not None or about1 is not None:
+            priors = (about0, about1)
+
+    record = play_game(
+        reg, rng, [six[0][i] for i in picks[0]], [six[1][i] for i in picks[1]],
+        "mirror" if mirror else "pool",
+        objective=objective,
+        search_limit=(side_arms[0].limit, side_arms[1].limit),
+        max_turns=max_turns,
+        evaluate=(side_arms[0].evaluate, side_arms[1].evaluate),
+        rank_by_leaf=(side_arms[0].rank_by_leaf, side_arms[1].rank_by_leaf),
+        # Two agents even when they hold one leaf: each is charged its whole search.
+        one_agent=False,
+        sheets=six if hide_bench else None,
+        open_information=not hide_bench,
+        bench_prior=priors,
+        rank_view="heaviest",
+        selection=(species[0], species[1], picks[0], picks[1]),
+    )
+    sources = tuple(arm.selection for arm in side_arms)
+    record.selection_source = sources[0] if sources[0] == sources[1] else "mixed"
+    beliefs = tuple(
+        "uniform" if not hide_bench or entries[s] is None else SOLVED for s in (0, 1)
+    )
+    sides = {
+        "pair": k,
+        "teams": (a, b),
+        "mirror": mirror,
+        "leaves": tuple(arm.name for arm in side_arms),
+        "limits": tuple(arm.limit for arm in side_arms),
+        "rankings": tuple("leaf" if arm.rank_by_leaf else "damage" for arm in side_arms),
+        "selections": sources,
+        "beliefs": beliefs,
+        "picks": picks,
+    }
+    return record, sides
+
+
 __all__ = [
     "SELECTIONS",
     "SOLVED",
+    "PoolArm",
     "SolvedSelections",
+    "draw_side",
     "generate_pool",
+    "pool_match_game",
+    "selection_rng",
     "transposed",
 ]
