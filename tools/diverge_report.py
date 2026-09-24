@@ -11,13 +11,16 @@ An effect with high lift and a decent count is a cause. An effect with lift near
 merely popular. That turns "what to fix next" into a ranking rather than a guess.
 
     uv run python tools/diverge_report.py --seeds 12 --battles 10
+    uv run python tools/diverge_report.py --seeds 20 --battles 20 --jobs 8
 
 The engine ranked is the port (`RustNode.resolve`, the same pins, IKA-207); a turn it
 refuses is counted under `skipped` by its reason, and `POKEURAOU_RUST_NODE_BIN` names
 another binary. Python's ranking ran beside it until IKA-212 deleted Python's resolver.
-A turn the port and Showdown both stopped inside at a mid-turn replacement is set aside
-(`diff_turn` carries such turns on; this ranking does not), and Showdown's run then answers
-the replacement with `default`.
+A turn the port and Showdown both stopped inside at a mid-turn replacement is carried on
+as `diff_turn` carries it (IKA-217): Showdown's run answers the replacement with `default`,
+the port's pause is resumed with the Pokemon Showdown sent in, and the end of the turn is
+scored like any other (IKA-227; before, such turns were set aside). The battles played do
+not change with it: the port never steps Showdown.
 """
 
 from __future__ import annotations
@@ -102,10 +105,44 @@ class Aggregate:
     #: effect -> the fields that diverged alongside it, for reading the mechanism off.
     fields_with: dict[str, Counter[str]] = field(default_factory=dict)
     examples: dict[str, list[str]] = field(default_factory=dict)
+    #: Turns the port and Showdown both stopped inside at a mid-turn replacement, and of
+    #: those, the ones carried on to the end and scored, with their silent and flagged
+    #: divergences (IKA-227; until then they were set aside unscored).
+    paused: int = 0
+    carried_on: int = 0
+    carried_on_silent: int = 0
+    carried_on_flagged: int = 0
 
     @property
     def compared(self) -> int:
         return self.matched + self.silent + self.flagged
+
+    def merge(self, other: Aggregate) -> None:
+        """Adds ``other`` (the next seed) as if its turns had been scored here after these.
+
+        Every counter and dict keeps first-seen order, which the ranking's ties and the
+        examples read, so merging seeds in order gives the report one process gives.
+        """
+        self.matched += other.matched
+        self.silent += other.silent
+        self.flagged += other.flagged
+        self.paused += other.paused
+        self.carried_on += other.carried_on
+        self.carried_on_silent += other.carried_on_silent
+        self.carried_on_flagged += other.carried_on_flagged
+        for mine, theirs in (
+            (self.skipped, other.skipped),
+            (self.in_matched, other.in_matched),
+            (self.in_silent, other.in_silent),
+            (self.by_field, other.by_field),
+            (self.damage_ratio, other.damage_ratio),
+        ):
+            mine.update(theirs)
+        for effect, fields in other.fields_with.items():
+            self.fields_with.setdefault(effect, Counter()).update(fields)
+        for effect, lines in other.examples.items():
+            bucket = self.examples.setdefault(effect, [])
+            bucket.extend(lines[: max(0, 2 - len(bucket))])
 
     def lift(self, effect: str) -> float:
         """P(effect | silent divergence) / P(effect | match)."""
@@ -123,6 +160,11 @@ class Aggregate:
             f"{self.silent} silent ({self.silent / max(self.compared, 1) * 100:.2f}%), "
             f"{self.flagged} flagged"
         ]
+        out.append(
+            f"  stopped with Showdown at a mid-turn replacement {self.paused} times; carried on "
+            f"and scored {self.carried_on} turns: {self.carried_on_silent} silent, "
+            f"{self.carried_on_flagged} flagged"
+        )
         if self.by_field:
             out.append(
                 "  divergent fields: "
@@ -166,72 +208,167 @@ class Aggregate:
         return "\n".join(out)
 
 
-def run(seeds: int, battles: int, roll: int, max_turns: int) -> Aggregate:
+def run(seeds: int, battles: int, roll: int, max_turns: int, jobs: int = 1) -> Aggregate:
+    """Every seed's battles, ranked together.
+
+    A seed is the unit of work: its teams and choices come from its own generators, so the
+    seeds are independent and ``jobs`` processes can play them side by side. The per-seed
+    tallies are merged in seed order, which is the order one process plays them in, so the
+    report does not depend on ``jobs`` (`test_diverge_report`).
+    """
+    from pokeuraou import rustnode
+
+    rustnode.require_current_binary()
+    order = list(range(1, seeds + 1))
+    chunks = [(order[k::jobs], battles, roll, max_turns) for k in range(max(1, min(jobs, seeds)))]
+    if len(chunks) == 1:
+        parts = _run_seeds(chunks[0])
+    else:
+        from concurrent.futures import ProcessPoolExecutor
+
+        # By the name a worker can import (tools/ is on the path it inherits): run as a
+        # script this module is `__main__`, and loaded by the tests it has another name.
+        import diverge_report as importable
+
+        with ProcessPoolExecutor(max_workers=len(chunks)) as pool:
+            parts = [part for done in pool.map(importable._run_seeds, chunks) for part in done]
+    agg = Aggregate()
+    for _, part in sorted(parts, key=lambda pair: pair[0]):
+        agg.merge(part)
+    return agg
+
+
+def _run_seeds(task: tuple[list[int], int, int, int]) -> list[tuple[int, Aggregate]]:
+    """One process's seeds: one regulation, one Showdown and one port for all of them."""
+    seeds, battles, roll, max_turns = task
     reg = load_regulation(FORMAT_ID)
     chaos = find_cached_chaos(FORMAT_ID)
     if chaos is None:
         raise SystemExit("no cached usage stats; run tools/fetch_priors.py first")
-    prior = load_chaos(chaos, reg)
+    # The same teams whatever PYTHONHASHSEED is, as in diff_turn (IKA-218).
+    prior = diff_turn.hash_free_prior(reg, load_chaos(chaos, reg))
     register_mega_stones(reg)
-    agg = Aggregate()
     policy = RandomnessPolicy(
         damage_roll=roll, accuracy="hit", crit=False, secondary=False,
         multihit="min", speed_tie="keep",
     )
     from pokeuraou import rustnode
 
-    rustnode.require_current_binary()
     node = rustnode.RustNode(reg)
+    out: list[tuple[int, Aggregate]] = []
+    try:
+        with Oracle() as oracle:
+            for seed in seeds:
+                agg = Aggregate()
+                _play_seed(reg, prior, policy, oracle, node, seed, battles, roll, max_turns, agg)
+                out.append((seed, agg))
+    finally:
+        node.close()
+    return out
 
-    with Oracle() as oracle:
-        for seed in range(1, seeds + 1):
-            rng = np.random.default_rng(seed)
-            py_rng = random.Random(seed)
-            for _ in range(battles):
-                teams = [
-                    [
-                        TeamSet.from_json(s.to_team_set_json(reg))
-                        for s in sample_team(rng, reg, prior)
-                    ]
-                    for _ in range(2)
-                ]
-                handle = oracle.create(
-                    FORMAT_ID, teams[0], teams[1],
-                    seed=tuple(int(rng.integers(1, 60000)) for _ in range(4)),  # type: ignore[arg-type]
-                    policy=policy,
-                )
-                handle.step(["team 1,2,3,4", "team 1,2,3,4"])
-                for _ in range(max_turns):
-                    before = Position.from_json(handle.position)
-                    if before.ended:
-                        break
-                    chosen: list[SideAction] = []
-                    choices: list[str | None] = []
-                    forced = False
-                    for side_index in range(2):
-                        request = handle.requests[side_index]
-                        if request and request.get("forceSwitch"):
-                            forced = True
-                            choices.append("default")
-                            continue
-                        if not request or request.get("wait"):
-                            choices.append(None)
-                            continue
-                        pick = py_rng.choice(side_actions(reg, before, side_index))
-                        chosen.append(pick)
-                        choices.append(pick.to_choice())
-                    if all(c is None for c in choices):
-                        break
-                    handle.step(choices)
-                    if handle.choice_errors:
-                        break
-                    if forced or len(chosen) != 2:
-                        agg.skipped["replacement turn"] += 1
-                        continue
-                    _score_port(reg, node, before, chosen, handle, roll, agg)
-                handle.close()
-    node.close()
-    return agg
+
+def _play_seed(
+    reg: Regulation,
+    prior: Any,  # noqa: ANN401 - priors.MetagamePrior
+    policy: RandomnessPolicy,
+    oracle: Any,  # noqa: ANN401 - oracle.Oracle
+    node: Any,  # noqa: ANN401 - rustnode.RustNode
+    seed: int,
+    battles: int,
+    roll: int,
+    max_turns: int,
+    agg: Aggregate,
+) -> None:
+    rng = np.random.default_rng(seed)
+    py_rng = random.Random(seed)
+    for battle in range(battles):
+        teams = [
+            [TeamSet.from_json(s.to_team_set_json(reg)) for s in sample_team(rng, reg, prior)]
+            for _ in range(2)
+        ]
+        handle = oracle.create(
+            FORMAT_ID, teams[0], teams[1],
+            seed=tuple(int(rng.integers(1, 60000)) for _ in range(4)),  # type: ignore[arg-type]
+            policy=policy,
+        )
+        handle.step(["team 1,2,3,4", "team 1,2,3,4"])
+        # Every Showdown step from here on, and the port's paused turn if there is one:
+        # the run's own `default` replacement carries the port on (IKA-227).
+        carry = _Carry(tap=diff_turn.StepTap(handle), where=f"seed {seed} battle {battle}")
+        for _ in range(max_turns):
+            before = Position.from_json(handle.position)
+            if before.ended:
+                break
+            chosen: list[SideAction] = []
+            choices: list[str | None] = []
+            forced = False
+            for side_index in range(2):
+                request = handle.requests[side_index]
+                if request and request.get("forceSwitch"):
+                    forced = True
+                    choices.append("default")
+                    continue
+                if not request or request.get("wait"):
+                    choices.append(None)
+                    continue
+                pick = py_rng.choice(side_actions(reg, before, side_index))
+                chosen.append(pick)
+                choices.append(pick.to_choice())
+            if all(c is None for c in choices):
+                break
+            handle.step(choices)
+            _carry_on(reg, node, carry, agg)
+            if handle.choice_errors:
+                break
+            if forced or len(chosen) != 2:
+                agg.skipped["replacement turn"] += 1
+                continue
+            _score_port(reg, node, before, chosen, handle, roll, agg, carry)
+        # The last turn allowed can stop at a replacement the loop will not answer. The
+        # same `default` the next iteration would have sent finishes it: nothing after it
+        # is scored and no generator is drawn, so the battles played are unchanged.
+        for _ in range(4):
+            if carry.column.pending is None or handle.choice_errors:
+                break
+            owed = [bool(r and r.get("forceSwitch")) for r in handle.requests]
+            if not any(owed):
+                break
+            handle.step(["default" if o else None for o in owed])
+            _carry_on(reg, node, carry, agg)
+        _settle(carry, agg, "the battle stopped inside a paused turn")
+        handle.close()
+
+
+@dataclass
+class _Carry:
+    """A battle's Showdown steps and the port's column for a turn being carried on."""
+
+    tap: Any  # diff_turn.StepTap
+    where: str
+    column: Any = field(default_factory=lambda: diff_turn.PortReport())
+
+
+def _carry_on(reg: Regulation, node: Any, carry: _Carry, agg: Aggregate) -> None:  # noqa: ANN401
+    """Resumes a paused turn with the Showdown steps taken since (`diff_turn.follow_port`),
+    and scores it once the turn has ended."""
+    pending = carry.column.pending
+    if pending is None:
+        return
+    diff_turn.follow_port(reg, node, carry.column, carry.tap)
+    if carry.column.pending is None and pending.decided is not None:
+        ours, theirs, unmodelled = pending.decided
+        _tally(reg, pending.before, pending.chosen, ours, theirs, bool(unmodelled), agg, True)
+
+
+def _settle(carry: _Carry, agg: Aggregate, reason: str) -> None:
+    """A paused turn left unanswered is named, and what `follow_port` set aside is moved over."""
+    diff_turn.settle_port(carry.column, reason)
+    for name, count in carry.column.skipped.items():
+        agg.skipped[f"carried on, then {name}"] += count
+    for name, count in carry.column.refused.items():
+        agg.skipped[f"refused: {name}"] += count
+    carry.column.skipped.clear()
+    carry.column.refused.clear()
 
 
 def _tally(
@@ -242,10 +379,14 @@ def _tally(
     theirs: dict[str, Any],
     flagged: bool,
     agg: Aggregate,
+    carried: bool = False,
 ) -> None:
-    """One scored turn into the ranking, for either engine."""
-    effects = effects_in_play(reg, before, chosen)
+    """One scored turn into the ranking; ``carried``: a turn resumed past a replacement."""
+    # Sorted: a set's order follows PYTHONHASHSEED, and the counters' first-seen order is
+    # what breaks ties in the ranking and picks the examples (IKA-218).
+    effects = sorted(effects_in_play(reg, before, chosen))
     differences = [k for k in ours if ours[k] != theirs.get(k)]
+    agg.carried_on += carried
 
     if not differences:
         agg.matched += 1
@@ -254,11 +395,13 @@ def _tally(
         return
     if flagged:
         agg.flagged += 1
+        agg.carried_on_flagged += carried
         return
 
     agg.silent += 1
+    agg.carried_on_silent += carried
     _record_damage_ratios(before, ours, theirs, differences, agg)
-    kinds = {field_kind(k) for k in differences}
+    kinds = sorted({field_kind(k) for k in differences})
     for kind in kinds:
         agg.by_field[kind] += 1
     for effect in effects:
@@ -282,14 +425,16 @@ def _score_port(
     handle: Any,
     roll: int,
     agg: Aggregate,
+    carry: _Carry,
 ) -> None:
     """The port on one turn, before Showdown is stepped past it.
 
     `diff_turn.compare_port_turn`'s rules: one request with branch 0, a refusal counted by
-    its reason, a turn both stopped inside at a replacement set aside (the port has no
-    command to continue it), and a disagreement about stopping scored as a divergence on
-    the field ``mid-turn interrupt``.
+    its reason, a disagreement about stopping scored as a divergence on the field
+    ``mid-turn interrupt``, and a turn both stopped inside at a replacement carried on
+    with Showdown's replacements (`_carry_on`, IKA-227) and scored when it ends.
     """
+    diff_turn.settle_port(carry.column, "a new turn began inside a paused one")
     if action_overriding_effects(handle.log, only_unmodelled=True):
         agg.skipped["action overridden mid-turn"] += 1
         return
@@ -297,7 +442,17 @@ def _score_port(
     budget = Budget.deterministic(roll)
     reply = diff_turn.port_exchange(node, given, chosen, budget, select=0)
     if reply.get("refused") == "branch index out of range":
-        reply = diff_turn.port_exchange(node, given, chosen, budget)
+        # The turn stopped: `turn` hands the pause back with the weights (IKA-217).
+        from pokeuraou import rustnode
+
+        reply = diff_turn.port_turn_exchange(
+            node,
+            {
+                "position": given.to_json(),
+                "actions": [[rustnode.dump_action(a) for a in side.slots] for side in chosen],
+                "budget": rustnode.dump_budget(budget),
+            },
+        )
     if reply.get("refused"):
         agg.skipped[f"refused: {diff_turn.refusal_reason(reply, given)}"] += 1
         return
@@ -308,7 +463,16 @@ def _score_port(
     unmodelled = tuple(reply.get("unmodelled", []))
     showdown_stopped = diff_turn.showdown_paused_mid_turn(handle)
     if stopped and showdown_stopped:
-        agg.skipped["stopped at a mid-turn replacement (no command to continue it)"] += 1
+        agg.paused += 1
+        carry.column.pending = diff_turn.PortPending(
+            where=carry.where,
+            before=given,
+            chosen=chosen,
+            pause=reply["pause"],
+            unmodelled=set(unmodelled),
+            log=list(handle.log),
+            cursor=len(carry.tap.steps),
+        )
         return
     theirs = canonical(Position.from_json(handle.position))
     if stopped != showdown_stopped:
@@ -377,8 +541,15 @@ def main() -> None:
     ap.add_argument("--max-turns", type=int, default=10)
     ap.add_argument("--top", type=int, default=25)
     ap.add_argument("--min-count", type=int, default=3)
+    ap.add_argument(
+        "--jobs",
+        type=int,
+        default=1,
+        help="processes playing seeds side by side (a seed is the unit); the report is the "
+        "same as with 1",
+    )
     args = ap.parse_args()
-    agg = run(args.seeds, args.battles, args.roll, args.max_turns)
+    agg = run(args.seeds, args.battles, args.roll, args.max_turns, jobs=args.jobs)
     print(agg.render(args.top, args.min_count))
 
 
