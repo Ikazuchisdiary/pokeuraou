@@ -15586,3 +15586,38 @@ fold_from_json(node) -> fold.Fold                  # 重みは np.float64
   diff_depth2（--cores 8 --jobs 8）: 2 回 57 s（null の --jobs 1 を含む）
   count_resolver_calls・テスト（--cores 1）: 約 2 分
 ```
+
+## 9/24 — IKA-204 の調整: 子課題の工程表（段 1〜4 と段 3b が入った。残りは IKA-210 の後半と IKA-212）
+
+調整役のセッション（9/24、worktree `ika-204-subtask-coordination-0b4de5`）の記録。子は worker-medium に `isolation: "worktree"` で渡した。
+家の規則は `C:/tmp/pokeuraou-machine/house_rules_ika204.md`（一時ファイルは C:/tmp/ika<NN>/、git は `git -C`、heavy.py、比べる確認を遅くしない、など）。
+
+### 取り込んだ順
+
+| 課題 | 段 | 中身 | master |
+|---|---|---|---|
+| IKA-207 | 1 | diff_turn・diverge_report に port の列、オラクルのテストに port 側の断言 35 本 | 02e8916 |
+| IKA-211 | 3 | port の命令 turn・alternatives・replacements・leads・needed（commands.rs） | d7239e0 |
+| IKA-206 | — | diff_node の `--jobs`・`--exes`・`--python-cache`（1 コア 561 s → 105 s） | 40746e0 |
+| IKA-217 | — | diff_turn の port の列が途中交代の先まで比べる | 3738aa4 |
+| IKA-208 | 2 | port の拒否を 0 に（M-C 標本 2,256 → 0 セル） | 59885d1 |
+| IKA-210 前半 | 5 | 規則のテストを port へ、exe を前提に、inert.rs・modelled.rs を port 自身の表に | 5246564 |
+| IKA-215 | 3b | port の events / acts（既定 off） | 7637b99 |
+| IKA-209 | 4 | 本番の経路を port だけに（resolve.py の呼び出し 0）。価値関数の生成 128 s → 25 s | 5d54631 |
+
+### 残り
+
+1. **IKA-210 の後半**: Python の resolver を import するテストを 0 にする。イベントで断言する 8 件（IKA-215 の events で）と、道具として使う 114 件（belief・beliefnode・search・hidden*・symmetry・rust_node・fold・diff_turn_port。IKA-209 の port.py で）。tests/_port.py を `pokeuraou.port` の上の薄い層に載せ替える。test_rust_node は port の中の一致を見る形に作り直す
+2. **IKA-212**: resolve.py と Python 対 port の道具を消す。IKA-210 の後半の後、1 人で
+
+### 取り込みの手順（調整役）
+
+* `git -C <main> log -3 master` で master の移動を確かめる。子の枝が master を含まなければ、子の枝で `merge master` してからテストする
+* 並行の枝どうしは TODO.md の末尾への追記で必ず衝突する。子の枝で master を取り込み、両方の節を残して解く（`C:/tmp/coord/resolve_append.py`、bytes・LF）
+* 調整役の worktree で子の枝へ ff し、`cargo build --release`・`cargo test --release`・テスト一式（heavy.py --cores 8、PYTHONPATH をその worktree の src に）・`ci_skip_audit --absent standings=9 --absent vendor=2`・`port_coverage --check`・`port_gate_audit --check` を読んでから、`git -C <main> merge --no-ff`（英語の件名「Merge IKA-NNN: …」）。取り込んだ後に main の exe を作り直す
+* 調整役の worktree には data/priors と packages/sim-bridge/dist を $M から複写してある（gitignore 対象）。vendor の submodule は無い（申告 2 件）
+
+### 段取りの外で起票したもの（ユーザーの指示で「あとで」。まだ誰にも渡していない）
+
+* M-C の gen-0 に効く: IKA-222（Showdown が作用するのに port が無視している特性・道具 41 id。わざわいの 4 特性・スナイパー等、High）、IKA-219（へんしん・かわりもの、High）、IKA-213（カウンター・ミラーコート等が素通り、High）、IKA-223（控え隠蔽の交代の行列の番号のずれが 9/17 からの教材に効いていた、High）
+* ほか: IKA-214（はたきおとす等とねんちゃく）、IKA-216（両エンジン共通の乖離の上位）、IKA-218（diff_turn の PYTHONHASHSEED 依存）、IKA-220（もらいび等の小さな規則）、IKA-221（リバイバルブレスの slotCondition）
