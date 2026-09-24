@@ -23,13 +23,13 @@ The remaining cells are resolved per completion, restricted with ``cells=``:
 - the opponent's action switches into a hidden slot;
 - our action carries a move that forces their switch;
 - the turn suspends for a replacement, whose choices include the hidden slots;
-- the port refused the cell (it has no leaves to share), so Python resolves it.
+- (a cell the port refuses stops the node: there is no Python resolver behind it, IKA-209).
 
 Both sides' games share the one resolution, because their hidden slots are disjoint and a
 shared cell's resolution depends on neither. That is what takes 6.0x to a projected 2.2x.
 
 And the whole node is scored in one call of the leaf (IKA-105): every completion's patched
-rows, the port's leaves of its dirty cells and the leaves of the cells the port refused
+rows and the port's leaves of its dirty cells
 are blocks of one `Encoded`, and each completion reads its values back by where its block
 starts. It was a forward pass per completion and another per completion's dirty cells --
 15.5 a node over `data/ika73/w12` games 0-209, against 17.74 for a whole `move.hidden`
@@ -48,23 +48,18 @@ the port is available to be compared against.
 
 from __future__ import annotations
 
-import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import timing
+from . import port, timing
 from .actions import MoveAction, SideAction
+from .budget import Budget
+from .fold import _fold_from_json, fold_value
+from .port import batched_payoff
 from .position import Position
 from .regulation import Regulation
-from .resolve import (
-    Budget,
-    _fold_from_json,
-    batched_payoff,
-    batched_payoffs,
-    fold_value,
-)
 
 #: Moves that put a Pokemon on the field without its owner choosing it, so a cell carrying
 #: one can reach a hidden slot whatever the opponent declared. Listed rather than derived
@@ -188,11 +183,10 @@ def belief_payoffs(
     both exact the two completions are the same position, and `_per_completion` resolved
     it once per side. It resolves it once now.
 
-    Falls back to a matrix per completion when the port is not available, because the fast
-    path is defined as "equal to that" and there is nothing to be equal to without it.
+    A matrix per completion (`_per_completion`, the definition) when nothing is hidden or
+    the leaf has no encoded form. Both roads are the port's; there is no Python one to
+    fall back to (IKA-209), so a missing binary or a refused cell stops.
     """
-    from . import rustnode
-
     row, col = list(ours), list(theirs)
     hidden = {
         side: (items[0].slots if items and not items[0].exact else ())
@@ -202,8 +196,7 @@ def belief_payoffs(
         # Per decision, by whether any bench here is hidden (IKA-98's per-decision table).
         timing.refine("hidden" if any(hidden.values()) else "exact")
         timing.count("completions", sum(len(items) for items in spreads.values()))
-    node = rustnode.node_for(reg) if rustnode.available() else None
-    if node is None or not any(hidden.values()):
+    if not any(hidden.values()):
         return _per_completion(reg, row, col, evaluate, budget, spreads)
 
     from .encode import Encoded, rules_of
@@ -218,38 +211,24 @@ def belief_payoffs(
     encoder = getattr(owner, "encoder", None) or _encoder_for(reg)
     rules = rules_of(evaluate)
 
-    try:
-        filled = node.fill_encoded(position, row, col, budget, [], None, rules=rules)
-    except Exception:  # noqa: BLE001 - a broken bridge must not fail the run
-        return _per_completion(reg, row, col, evaluate, budget, spreads)
+    filled = port.ask(
+        reg, lambda node: node.fill_encoded(position, row, col, budget, [], None, rules=rules)
+    )
     if rules.mega_from_slots and filled.mega_from_slots is not True:
         # A binary that predates the field encoded with the current rule. The fill cannot
         # be used for this leaf; the per-completion path encodes in Python.
         return _per_completion(reg, row, col, evaluate, budget, spreads)
-    from .resolve import _note_port_rule
-
-    _note_port_rule([scorer], filled)
+    port.note_port_rule([scorer], filled)
+    # A refused cell has no span and no fold: it used to be resolved per completion in
+    # Python (IKA-139). There is no Python resolver now, so it stops the node (IKA-209).
+    port.raise_refused(filled.refused)
 
     dirty = reaches_bench(reg, row, col, hidden, position)
     for i, j, _root in filled.folded:
         dirty[i, j] = True
-    # A refused cell has no span and no fold, so unless it is dirty nothing ever writes it
-    # and it keeps the 0.0 the matrix was made with -- in every completion (IKA-139: 3,886
-    # cells of `data/ika73/w12` games 10-209, all Feint). Resolving it per completion is
-    # `_gather_dirty`, which fills what the port refuses in Python, as `_per_completion`
-    # does.
-    for i, j, _why in filled.refused:
-        dirty[i, j] = True
     reference: Encoded = filled.encoded
     unmodelled = set(filled.unmodelled)
     wanted = [(i, j) for i in range(len(row)) for j in range(len(col)) if dirty[i, j]]
-    # What a leaf resolved here in Python is encoded with: the scorer's own encoder, which
-    # is what `evaluate(positions)` would have encoded it with. Without one the Python
-    # leaves are scored on their own, as they were before.
-    leaf_encoder = getattr(owner, "encoder", None) or getattr(
-        getattr(scorer, "__self__", None), "encoder", None
-    )
-
     # Everything the node's leaves need, gathered first and scored once (IKA-105). Until
     # then a hidden decision paid a forward pass per completion for the shared cells, and
     # per completion again for the dirty cells -- the port's leaves in one and the cells
@@ -281,8 +260,7 @@ def belief_payoffs(
                 )
             if wanted:
                 _gather_dirty(
-                    job, reg, position, row, col, budget, wanted, filled, node, rules,
-                    scorer, evaluate, leaf_encoder, block,
+                    job, reg, position, row, col, budget, wanted, rules, scorer, block
                 )
                 if job.dirty_from_reference and reference_block is None:
                     reference_block = block(len(reference), lambda: reference)
@@ -337,17 +315,6 @@ def belief_payoffs(
                     part[i, j] = float(ported[indices] @ np.asarray(weights))
                 for i, j, root in job.filled.folded:
                     part[i, j] = fold_value(_fold_from_json(root), ported)
-            if job.held is not None:
-                held_values = (
-                    rows_of(job.python)
-                    if job.python is not None
-                    else np.asarray(evaluate(job.held.leaves), dtype=np.float64)
-                    if job.held.leaves
-                    else np.zeros(0)
-                )
-                job.held.write(held_values, part)
-            if job.fallback is not None:
-                part = job.fallback
             for i, j in wanted:
                 payoff[i, j] = part[i, j]
             unmodelled |= job.notes
@@ -369,12 +336,6 @@ class _Job:
     dirty: int | None = None
     #: The exact completion is the true position, and reads the reference fill instead.
     dirty_from_reference: bool = False
-    #: Cells the port refused, resolved here, and the block their leaves were encoded to
-    #: (None: scored through `evaluate` on their own, for a leaf with no encoder).
-    held: object = None
-    python: int | None = None
-    #: The dirty cells from `batched_payoffs`, when the port could not fill them here.
-    fallback: np.ndarray | None = None
     notes: set[str] = field(default_factory=set)
 
 
@@ -386,66 +347,33 @@ def _gather_dirty(  # noqa: PLR0913 - one completion's dirty cells, and where th
     col: list[SideAction],
     budget: Budget,
     wanted: list[tuple[int, int]],
-    filled,  # noqa: ANN001 - EncodedNode
-    node,  # noqa: ANN001 - rustnode.RustNode
     rules,  # noqa: ANN001 - EncodingRules
     scorer: Callable,
-    evaluate: Callable,
-    leaf_encoder,  # noqa: ANN001 - Encoder or None
     block: Callable[[int, Callable], int],
 ) -> None:
-    """Resolve one completion's dirty cells without scoring them, and book their blocks.
+    """Fill one completion's dirty cells over there without scoring them; book the block.
 
-    What `batched_payoffs(item.position, cells=wanted)` did, less its forward passes: the
-    port fills the cells (`resolve._rust_encoded_payoffs`), and the ones it refuses are
-    resolved here (`resolve.HeldLeaves`, which `batched_payoffs` itself uses). Both sets
-    of leaves become blocks of the node's one batch.
+    What `batched_payoffs(item.position, cells=wanted)` did, less its forward pass. The
+    cells the port refuses used to be resolved here in Python; they stop now (IKA-209).
     """
-    from . import rustnode
-    from .resolve import HeldLeaves, _note_port_rule
-
     item = job.item
     with timing.purpose("dirty"):
         if item.exact and item.position is position:
+            # The reference fill's own leaves (its refusals have already stopped the node).
             job.dirty_from_reference = True
-            refused = [(i, j) for i, j, _why in filled.refused]
-            why = [why for _i, _j, why in filled.refused]
-        else:
-            try:
-                own = node.fill_encoded(
-                    item.position, row, col, budget, [], wanted, rules=rules
-                )
-            except Exception as exc:  # noqa: BLE001 - a broken bridge must not fail the run
-                rustnode.disable(str(exc))
-                part, notes, _exact = batched_payoffs(
-                    reg, item.position, row, col, [evaluate], budget=budget, cells=wanted
-                )
-                job.fallback, job.notes = part[0], set(notes)
-                return
-            _note_port_rule([scorer], own)
-            timing.count("leaves.node", len(own.encoded))
-            job.filled = own
-            job.dirty = block(len(own.encoded), lambda own=own: own.encoded)
-            job.notes |= set(own.unmodelled)
-            refused = [(i, j) for i, j, _why in own.refused]
-            why = [why for _i, _j, why in own.refused]
-        if not refused:
             return
-        started = time.perf_counter()
-        held = HeldLeaves()
-        exact = np.zeros((len(row), len(col)), dtype=bool)
-        for i, j in refused:
-            held.resolve_cell(reg, item.position, row, col, i, j, budget, exact, job.notes)
-        job.held = held
-        timing.count("leaves.refused", len(held.leaves))
-        if leaf_encoder is not None and held.leaves:
-            job.python = block(
-                len(held.leaves), lambda: leaf_encoder.encode_positions(held.leaves)
-            )
-        timing.add("refused", time.perf_counter() - started, calls=1)
-        if timing.ON:
-            for reason in why:
-                timing.count(f"refused: {reason}")
+        own = port.ask(
+            reg,
+            lambda node: node.fill_encoded(
+                item.position, row, col, budget, [], wanted, rules=rules
+            ),
+        )
+        port.raise_refused(own.refused)
+        port.note_port_rule([scorer], own)
+        timing.count("leaves.node", len(own.encoded))
+        job.filled = own
+        job.dirty = block(len(own.encoded), lambda own=own: own.encoded)
+        job.notes |= set(own.unmodelled)
 
 
 #: The arrays one batch is made of, in `Encoded`'s order.

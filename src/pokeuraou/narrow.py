@@ -42,9 +42,9 @@ from .actions import (
 )
 from .battler import Battler
 from .damage import calculate, effective_damage
+from .moveinfo import FIRST_TURN_OUT_MOVES
 from .position import Position
 from .regulation import Regulation
-from .resolve import FIRST_TURN_OUT_MOVES
 
 if TYPE_CHECKING:
     from .names import Localiser

@@ -68,7 +68,7 @@ def _leads_on_the_port(monkeypatch: pytest.MonkeyPatch) -> None:
     """`position_from_sets` runs the leads' switch-ins through the port, not Python (IKA-210)."""
     from pokeuraou import selfplay
 
-    monkeypatch.setattr(selfplay, "apply_lead_abilities", _port.apply_lead_abilities)
+    monkeypatch.setattr(selfplay, "apply_lead_abilities", _port.apply_lead_abilities, raising=False)
 
 
 @pytest.fixture()

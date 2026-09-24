@@ -116,9 +116,10 @@ def test_a_mega_that_changes_its_hp_base_keeps_its_maximum_over_there_too(
     from pokeuraou import selfplay
 
     reg, node = synthetic_node
-    # The leads' switch-ins by the same port (IKA-210), not Python's.
+    # The leads' switch-ins by the same port (IKA-210): this synthetic node, which is the one
+    # that knows the regulation (selfplay asks `port` since IKA-209).
     monkeypatch.setattr(
-        selfplay, "apply_lead_abilities", lambda _reg, p, rng=None: node.apply_lead_abilities(p, rng=rng)
+        selfplay.port, "apply_lead_abilities", lambda _reg, p, rng=None: node.apply_lead_abilities(p, rng=rng)
     )
     sheet = {entry.species: entry for entry in load_roster("rizabanadohido").sets}
     own = [sheet[n] for n in ("charizard", "sylveon", "venusaur", "garchomp")]

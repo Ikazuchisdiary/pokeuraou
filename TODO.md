@@ -15373,4 +15373,216 @@ master 5246564 を取り込んだ後（exe はこの枝）
   show_game の比べ（1 コア）                         6 回  228〜428 s
   テスト（1 コア、-n 0）                             5 回  各 15〜55 s
   cargo test --release                               1 回
+
+## 9/24 — IKA-209: 本番の経路（生成・cli・選出・node_solver・beliefnode・探索の深さ 2）を port だけにした —— resolve.py を import した上で、生成（M-C 価値関数・hp-share、M-B 隠蔽・深さ 2）と cli で resolve.py の関数の呼び出しは 0 回（同じ道具で master は 7,308〜2,931,965 回）。生成は寄せる前と同じ局（hp-share 197/200、価値関数 10/10・20/20）。違いは Python だけの誤り 1 つと、IKA-208 で port だけに入った規則 1 つ
+
+ブランチ `ika-209-port-only`（master 5246564 を取り込み済み）。親 IKA-204 の段 4。rust/src は触っていない。
+
+### 1. 何をしたか
+
+* **`src/pokeuraou/port.py`（新）**: 本番の経路が使う唯一の resolver。resolve.py を import しない。公開する名前は §6。
+  * `batched_payoff(s)`: resolve.batched_payoffs の「橋が on」の道だけ。hp-share・faints は `fill`、学習済みの葉は `fill_encoded`（同じ fold・同じ順）。手書きの callable と「規則の違う学習済みの葉が 2 つ」は、port の `turn`（full）でセルを解いてここで採点する（Python の HeldLeaves と同じ形・同じ `LEAF_CHUNK`）。**拒否されたセルは `PortRefused` で止まる**（Python に落ちない）
+  * `turn`・`weights`・`branch`・`resume_alternatives`（`world` で paused_in）・`turn_leaves`・`remaining_switches`・`replacements_needed`・`resolve_replacements`・`apply_lead_abilities`・`apply_lead_abilities_many`: IKA-211 の命令の薄い包み
+  * `ask(reg, call)`: 失敗したら `rustnode.disable` で作り直して同じ要求をもう一度、再起動を使い切ったら `PortUnavailable` で止まる。乱数を引く段（`resolve_replacements`・`apply_lead_abilities` の rng あり）は、引いた後に作り直すと乱数が二重に進むので、再試行せずに止まる
+* **rustnode**: `POKEURAOU_RUST_NODE` は既定 on（`0/false/no` だけが off。前は未設定が off）。`require_node(reg)` を足した: off・exe が無い・exe がソースより古い（`require_current_binary` と同じ判定）・橋を諦めた後は `PortUnavailable`。`disable()` は作り直したかどうかを返す。`_ask` は拒否の理由を `node.refusal` に残す。`_exchange_many`（要求を流し込みながら答えを読む）と `apply_lead_abilities_many`
+* **selfplay**: `_advance_turn` は port の重みで引き、引いた枝は `branch`、引いた pause は `turn(select=…)` で pause そのものを受け取り、port の続きで進める（前は Python で解き直していた）。自交代の選択（`_do_self_switch_node`・`_self_switch_plans`・`_shared_self_switch_plans`）は `port.resume_alternatives`・`world=`（paused_in）・`port.turn_leaves`・`remaining_switches`。ターン終わりの交代は `port.replacements_needed`・`port.resolve_replacements`、開局は `port.apply_lead_abilities`
+* **selection（選出の解）**: 8,100 局面の先発を port に 1 つずつ聞くと 1 局面 0.25 → 0.75 ms（3 倍、ほぼ全部が局面の JSON）。`positions_from_sets` を足し、先発 4 体の組（900 組）ごとに 1 回だけ聞いて控えを差し替える。控え 2 体と `mega_capable_slots` が触られていないことを組ごとに確かめ、触られていたら組の全員を聞く（読むだけで書かない登場時の効果＝イリュージョンは両エンジンとも無い。入れるなら共有を止める）。8 対 × 8,100 = 64,800 局面で 1 つずつ聞いた答えとバイト一致、0.31 ms
+* **search の深さ 2**: `_refined_value` は `port.turn(full=True)`
+* **cli・node_solver**: `port.batched_payoffs`
+* **beliefnode**: dirty のセルは `fill_encoded` だけ。拒否されたセルは `PortRefused`（前は `HeldLeaves.resolve_cell` で Python）。fill が失敗したときの Python への落ち道（`_per_completion`・`batched_payoffs`）も消した
+* **resolve.py から移したもの**（定数と、本番が読む定義。本文はそのまま移し、resolve.py では import し直している）: `Budget`・`MERGE_BRANCHES_DEFAULT` → `budget.py`、`LeafRef`・`Average`・`BestOf`・`Fold`・`TurnLeaves`・`fold_value`・`_shift`・`_fold_from_json` → `fold.py`、`FIRST_TURN_OUT_MOVES` → `moveinfo.py`（port_coverage が走査する 8 本の 1 つなので inert の判定は動かない。`--check` は通る）
+* **テスト**（関係ファイルだけ、最小の変更）: test_hidden_selfswitch の pause を port の pause に（`port.turn`・`port.resume_alternatives`・`port.turn_leaves`）、test_port_commands・test_terrain_surge・test_trace_synchronize の `monkeypatch.setattr(selfplay, "apply_lead_abilities", …)` に `raising=False`（selfplay は既に port で先発を回すので無害）、test_mega_hp_base は合成の node を `selfplay.port.apply_lead_abilities` に差す
+* **道具**: `tools/diff_generation.py` を作り替えた（2 つの checkout で同じ `tools/selfplay.py` を同じ exe・同じ種で回し、record を丸ごと比べる。除くのは `searchSeconds` と `engine` だけ。決定の種類ごとの数も出す）。`tools/count_resolver_calls.py`（新）、`tools/diff_depth2.py`（新、`--jobs`・`--null`）
+
+### 2. 生成が同じ局になるか（`tools/diff_generation.py`、M-C プール、heavy.py --cores 1）
+
+寄せる前 = master 5246564（IKA-210 の前半を含む）の src。exe は両方ともこの枝の build（rust/src は同じ）。
+
+```
+                                               寄せる前(master)   寄せる前 + 下の 1 行   標本の決定（寄せる前）
+hp-share 200 局 seed 7 --uniform-selection       195/200            197/200           move 1,652・replacement 566・selfswitch 45（36 局）
+価値関数 value-gen11L 10 局 seed 7（選出を解く） 0/10               10/10             move 65・replacement 28・selfswitch 1
+価値関数 20 局 seed 11 --uniform-selection（2 回）  —                 20/20・20/20       —
+hp-share 60 局 seed 21（2 回）                      —                 57/60・57/60       move 452・replacement 167・selfswitch 7
+```
+
+（取り込み前の master 59885d1 でも同じ形: hp-share 197/200 と 199/200、価値関数 60 局 60/60。）
+
+**違いの原因は 2 つとも「寄せ方の誤り」ではない。** 寄せ方の誤りは 1 つ見つけて直した: fold の重みが Python では `numpy.float64` だった。`fold_value` は `sum()` で足すが、Python 3.12 の `sum()` は素の `float` の列だけを補正付きで足すので、同じ重みを `float` で持つと 2 ulp ずれた（M-C の自交代で 17 局）。`port.turn_leaves` で `np.float64` に揃えた。
+
+**(a) Python だけの誤り: 控え隠蔽の交代の行列で、交代先を 1 つずれた番号で探す。** `resolve_replacements` は `switch_to=slot_action.party_index`（`party_index` は 1 始まりで、`resume_turn`・`_run_queue` はどこも `- 1` している）。`_find_switch_target` は種族で先に探すので、本当の局面では当たる。当たらないのは、控え隠蔽の完成形の中で `_do_replacement_node` が行列を作る時だけ（完成形では見えていない控えが別の種族に置き換わっている）で、そのとき番号が 1 つずれ、別の控え（または誰もいない所）を出す。port は `party_index - 1`。**寄せる前の master を「Python の resolver を使う最後の版」として記録する。** 直さない（Python は消える）。
+* 効いていた範囲: 控え隠蔽の交代の行列は d959ab0（9/17 19:45「The replacement node was the last one still shown the opponent's bench」）から。それより前は交代の行列を本当の局面で作っていた。番号のずれそのものは 03f2a81（9/10）からある。記録の engine の commit で見ると、`data/selfplay-gen11L`（e9488d5）・`selfplay-hidden2`（affb931）・`selfplay-hidden-fixed`・`selfplay-hidden-weighted`・`data/ika73/w12`（63081f9）・M-C の試走 g600 は d959ab0 を含み、`selfplay-gen11h`（53e2534）は含まない。**実際に打つ交代**は本当の局面で解くので正しく、ずれるのは交代の決定の**行列（方策と値）**だけ
+* 数（手元の標本、M-C hp-share 200 局 seed 7、`C:/tmp/ika209/probe_replacements.py`）: 交代の決定 566（全部が控え隠蔽）のうち **471（83%）** で、行列の少なくとも 1 セルの交代が Python と port で違う局面になった。交代の段の解き 8,951 回のうち 3,337 回（37%）。hp-share では入れ替わった 2 体の HP の和がたいてい同じなので値はほぼ動かず、200 局中 2 局の record だけが変わった。価値関数の葉では 10 局すべての交代の値が変わった（選んだ手は 10 局とも同じ）
+* 正の対照: 寄せる前の src のこの 1 行だけを `party_index - 1` にすると（`C:/tmp/ika209/before-fixed`）、上の表の右の列になる
+
+**(b) IKA-208 で port だけに入った規則: 連続技へののろわれボディ。** 残る差は hp-share の game 79（とその取り込み後の game 41・182）。game 79 の record の差は 2 つの決定（6・7、どちらも自交代の直後のターン）の `searchValue` が各 1 ulp（`0x1.c1b718c40ee8ap-2` と `…89p-2`、`0x1.c951838cbf86fp-2` と `…870p-2`）と、`unmodelled` の Python だけの 3 行（`attacker.ability:cursedbody`・`defender.ability:cursedbody`・`secondary on a multi-hit move (applied after the last hit)`）。7,145 個の葉のうち差はこの 5 つだけで、選んだ手・方策・局面は同じ。game 41・182 は `defender.ability:cursedbody` の注記 1 行だけが違う（決定は全部同じ）。
+* 箇所: 再開したターンの残りの列にツインビーム（2 回攻撃）がのろわれボディのゲンガーに当たる。Python の `_spread_secondaries` は 1 発ごとに積まれた 30% の Disable を 2 つの独立な追加効果として掛け合わせ（0.3×0.3・0.3×0.7・0.7×0.3・0.7×0.7 の 4 本。3 本は同じ局面なので merge で足される）、port（IKA-208、`moves::spread_secondaries`）は 1 − 0.7² の 1 本にまとめる。数学的には同じ確率だが丸めが違い、枝の重みが相対 4.1e-16 以内でずれ（4,336 葉の fold で 2,224 個の重み）、fold の値が 1 ulp 動いた。確かめ: 同じ pause を `enumerate_secondary=False` で再開すると 90 本の重みが全部ビット一致、True だと 96 本中 56 本が違う。積の順（`item.weight * variant_weight * weight`）や正規化の和を port に揃えた Python（`before-assoc`・`before-sum`）では 1 ulp は消えない
+* 注記の差は、Python が付ける注記（連続技の追加効果の近似、のろわれボディの damage 層の注記）を port が付けない（IKA-208 で扱いを入れたので注記を外した）ため
+* 調整役の判断どおり「バイト単位で同じ」の例外とする（port と Python の規則の差で、寄せ方の誤りではない）
+
+### 3. 深さ 2（`tools/diff_depth2.py`、記録済みの局面）
+
+M-C の試走 g600 の move 決定から等間隔に 400 局面、limit 8、hp-share、`Budget.matrix()`、`search(depth=2)` の出荷の読み方と `solve_restricted` の両方。寄せる前（master）とこの枝を比べる。
+
+```
+  400 局面   ビット一致 386   違う 14   （--jobs 8、壁時計 各 7 s）
+  null 対照: この枝の --jobs 1（37.5 s）と --jobs 8 がバイト一致
+  refined cells 1,618・subgames 2,911（出荷の読み方の合計）
+```
+
+違う 14 局面の内訳:
+* 13 局面は値・方策が 1e-16〜3e-15 だけ違う（値の差は最大 1.7e-16）。原因は正規化の和: Python の `_run_queue` の `total_weight = sum(...)` は 3.12 の補正付き `sum()`、port の `iter().sum()` は素の和。寄せる前の src のこの 1 行を素の左から順の和にすると（`before-sum`）13 局面は全部ビット一致になる。つまり port と Python の数値の差で、今までの生成（`fill` は元から port）には既にあった
+* 1 局面（302）は深さ 2 の決定が動く（値 8.3e-4、相手の方策 0.50）。原因は規則の差: いのちがけ（Final Gambit）を撃つムクホーク。Python は使用者を倒さず（IKA-208 §4 のとおり selfdestruct が Python に無い）、port は倒す。深さ 1 の行列は元から port だったので、深さ 2 の枝だけが Python の規則で解かれていた
+* 陽性対照の試み: `--after-sub-branches 3` は既定値（`DEFAULT_SUB_BRANCHES = 3`）と同じで何も変えず、出力はバイト一致だった（対照として働かなかったことを記録する）。代わりに上の `before-sum` が「1 行を変えると 13 局面の差が消える」ことを示している
+
+### 4. 本番の経路が Python の resolver を呼ばないこと（`tools/count_resolver_calls.py`）
+
+resolve.py を最初に import し、resolve.py にある code object 280 個に `sys.monitoring` の PY_START を付けて、呼び出しを関数ごとに数える（ほかのコードは遅くならない）。正の対照として resolve_turn を 1 回呼び、見えなければ止まる。3 局ずつ、heavy.py --cores 1。
+
+```
+                                   この枝      master 5246564（同じ道具を複写して）
+  対照（resolve_turn 1 回）          17,065       17,392
+  generation-value（M-C、選出を解く） 0          2,931,965   _Turn.mon_at・_use_terrain_seed・_on_switch_in …（先発と交代の段）
+  generation-hp（M-C、一様選出）       0             13,220   replacements_needed …
+  generation-roster-hidden（M-B）     0              7,308
+  generation-roster-depth2（M-B 公開） 0            189,057   深さ 2 の resolve_turn
+  cli（examples 2 つ）                0                 30   batched_payoffs・Budget.matrix …
+```
+
+`Budget` と fold は移したので、本番の経路は resolve.py の code を 1 つも踏まない。本番の module（selfplay・search・cli・node_solver・beliefnode・poolplay・selection・rustnode）は resolve.py を import しない（import 後の `sys.modules` で確かめた）。
+
+### 5. 速さ（heavy.py --cores 1、同じ窓で寄せる前・後を交互に 2 回）
+
+```
+                                              寄せる前       寄せた後
+  M-C hp-share 60 局 seed 21（59885d1 の上）     17.4 / 17.3 s   17.3 / 17.4 s
+  M-C hp-share 60 局 seed 21（5246564 の上）     14.5 / 14.2 s   14.5 / 14.3 s
+  M-C 価値関数 20 局 seed 11、一様選出           129.6 / 127.2 s  182.3 / 199.5 s   ← 1.5 倍遅い
+  M-C 価値関数 10 局 seed 7、選出を解く           39.5 s          32.5 s（先発の組ごと共有の後）
+```
+
+**価値関数の生成が 1.5 倍遅くなった所は自交代の決定。** 20 局の `searchSeconds` の和は前後とも 8.4・8.2 s で、差は探索の外。プロファイル（`C:/tmp/ika209/prof_gen.py`、20 局）では `_advance` の 4 回（自交代を含むターン）が 251 s のうち大半で、port の `alternatives` が 5,135 回、受け取った局面 283,322 個の JSON の読み（`Position.from_json` 96 s）と子の側（readline 77 s）が占める。自交代は `Budget.exact()` で全葉を Python の葉の評価に渡すので、1 回の決定で数千〜数万の局面が JSON で process を越える。前は Python の中で作っていたので越えなかった。hp-share の生成では同じ局数で差が無い（この種では重い自交代が少ない）。先発以外で 1 つずつ聞いて遅くなった所はほかに見つからなかった（交代の段・`replacements_needed` は 1 局あたりの差が測れない大きさ）。**別課題の候補**（§8）。
+
+### 6. `port.py` の公開する名前と形（IKA-210 の tests/_port.py の載せ替え用）
+
+```
+PORTED_OBJECTIVES = frozenset({"hp-share", "faints"})
+class PortRefused(RuntimeError)                      # 拒否。rustnode.PortUnavailable は exe・橋の側
+ask(reg, call: Callable[[RustNode], T]) -> T         # 再起動して再試行、使い切ったら PortUnavailable
+turn(reg, pos, actions, budget, *, full=False, select=None) -> PortTurn      # resolve_turn
+weights(reg, pos, actions, budget) -> ResolvedTurn   # 重みだけ（RustNode.resolve）
+branch(reg, pos, actions, budget, index) -> Position # 枝 index の局面
+resume_alternatives(reg, pause: PortPause, *, world=None) -> (chooser | None, [(SideAction, PortTurn)])
+                                                     # full の PortTurn。world=(position, side) で paused_in
+turn_leaves(reg, result: PortTurn, *, depth=0) -> fold.TurnLeaves           # full の PortTurn から
+remaining_switches(pause: PortPause, side) -> bool   # 残りの列に side の交代があるか（pause._remaining の代わり）
+replacements_needed(reg, pos) -> tuple[tuple[bool, ...], ...]
+resolve_replacements(reg, pos, choices, *, rng=None) -> PortPhase           # .position・.unmodelled（events は空）
+apply_lead_abilities(reg, pos, *, rng=None) -> PortPhase
+apply_lead_abilities_many(reg, positions) -> list[PortPhase]                # rng なし、流し込み
+batched_payoff(reg, pos, ours, theirs, evaluate, *, budget) -> (ndarray, set[str])
+batched_payoffs(reg, pos, ours, theirs, evaluators, *, budget, cells=None) -> ([ndarray], set[str], ndarray[bool])
+class HeldLeaves                                     # resolve.HeldLeaves と同じ面（resolve_cell・write・clear）
+objective_names(evaluators)・encoded_leaf_plan(evaluators)・note_port_rule(scorers, filled)・raise_refused(refused)
+LEAF_CHUNK                                            # POKEURAOU_LEAF_CHUNK、既定 32768
+```
+
+Python の名前との違い: `resolve_turn(reg, pos, actions, budget=…)` は `turn(reg, pos, actions, budget)`（budget が位置引数）で、返り値は `TurnResult` ではなく `PortTurn`（`.outcomes[i].position`・`.pauses`・`.branches` は重みの list）。`resume_alternatives` は `SuspendedTurn` ではなく `PortPause` を取る。`paused_in` は無く、`resume_alternatives(…, world=…)`。`resume_turn` は `rustnode.RustNode.resume` のまま（port.py には包みを置いていない）。イベント（`events`・`acts`）はどれにも無い（IKA-215）。`selfplay.positions_from_sets(reg, pairs)` も足した。
+
+### 7. narrow の採点（score.rs）の拒否
+
+score.rs の `unmodelled volatiles` と `stats_override`（transformed と同じ扱い）の拒否は残した（rust/src は触らない）。**拒否が narrow の結果を変えないこと:** 生成の局面では 1 度も拒否されない。M-C 200 局 3,304 回・M-B 60 局（隠蔽）1,236 回の `score` で拒否 0（`C:/tmp/ika209/probe_score.py`）。拒否は Showdown の局面（unmodelledVolatiles は橋が入れる）とへんしんでだけ起きる。また narrow の落ち先は Python の damage.calculate で、resolver ではない（数えの道具の cli でも 0 回）。
+
+### 8. 別課題の候補
+
+* **自交代の決定で全葉が JSON で越える**（§5）: 価値関数の生成が 1.5 倍遅い。`alternatives` に `fill_encoded` と同じく「葉を encode して配列で返し、fold を JSON で返す」形（と葉ごとの hp-share）を足せば、越えるのは配列だけになる。rust/src（commands.rs）の変更
+* **Python の交代の番号のずれ**（§2 (a)）が過去の教材の交代の決定の方策と値に効いていた範囲の評価（調整役が判断）
+* 深さ 2 の枝のいのちがけ（§3 の 302）: 深さ 2 を使った過去の比較（depth_match 等）は、深さ 2 の枝だけ Python の規則だった
+* diff_depth2 に働く陽性対照が無い（`--after-sub-branches` の既定値が 3 で対照にならなかった）。例えば `--after-sub-branches 1`
+* テストの全体はまだ回していない。関係 44 ファイル（本番の経路を import するもの）は通る。`POKEURAOU_RUST_NODE=0` を立てて本番の関数を呼ぶテストは、今は `PortUnavailable` で止まる（今回の 44 ファイルには無かった）
+
+### 9. 機械（heavy.py、IKA-209）
+
+```
+  cargo build --release（--cores 8）            2 回 48 s
+  diff_depth2（--cores 8 --jobs 8）              5 回 100 s（null 対照の --jobs 1 を含む）
+  diff_generation（--cores 1）                  約 20 回、計 約 55 分（価値関数 60 局が 500 s・451 s、20 局 ×2 が 各 5.3 分）
+  count_resolver_calls（--cores 1）              3 回 約 1.5 分
+  テストファイル（--cores 1、-n 0）              5 回 約 8.5 分
+  probe・プロファイル（--cores 1）               約 15 回 約 10 分
+```
+
+## 9/24 — IKA-209（続き）: 自交代の葉を encode して越えさせた（`alternativesEncoded`）—— 価値関数の生成 20 局は寄せる前（master 7637b99）128.4 / 128.3 s → 25.0 / 25.2 s（5.1 倍速い）、hp-share 200 局は 45.1 / 46.9 s → 45.9 / 47.3 s（同じ）。局は JSON の道とバイト一致
+
+調整役の指示（取り込みの条件: 生成を遅くしない）で、前の節 §8 の候補 1 をこの枝で入れた。master 7637b99（IKA-215）を取り込み済み。
+
+### 1. 何をしたか
+
+* **rust/src/commands.rs（末尾に新しい関数だけ）**: `alternatives_of`（`alternatives_command` と同じ選択肢と再開、JSON なし）、`flatten`（Python の `port.turn_leaves` と同じ順で葉を並べる。**共有しない**: 呼ぶ側がほかの plan と 1 回で採点するので、行も行数も位置の道と同じでなければならない）、`alternatives_encoded`（命令 `alternativesEncoded`）、`shift_fold`。
+  * 要求: `pause`、`in`（完成形）、`want`（平らにする option）、`shared: {side, slots}`（`_shared_self_switch_plans` と同じ判定を option ごとに返す。Rust の `Pokemon` の `==` と `active_index`、残りの列に `side` の交代があれば全部 false）、`objectives`（葉ごとの値）、`encode: false`（配列を作らない）、`encoding`（IKA-141 の規則）
+  * 答え: header（`chooser`・`options`・`plans`［`start`・`count`・`fold`（plan の中の番号）・`unmodelled`・`suspended`・`untouched`］・`valueRows`）と、encode した node と同じ本体（shm か pipe、`place_body` をそのまま使う）
+  * `--features ika209-control`: どの fold も最初の part の重みを半分にする（葉は正しく、値だけが誤る）
+* **rust/src/node.rs**: `answer` に `alternativesEncoded` の分岐を 1 つ（26 行）。**rust/Cargo.toml**: feature 1 つ
+* **rustnode**: `RustNode.alternatives_encoded(...)` → `EncodedAlternatives`（`plans` は `EncodedPlan`、`values` は目的ごとの葉の値）。`require_node` は切り替えを cache より先に見る
+* **port**: `alternatives_encoded`・`resume`（選んだ 1 つだけを再開、full）・`fold_from_json`（重みを `np.float64` に。前の節 §2 の `sum()` の件）
+* **selfplay**: `_do_self_switch_node` はまず `_self_switch_encoded` を通る。
+  * 学習済みの葉（`from_encoded` を持つ）: 本当の pause で全 option を encode して受け取り、控え隠蔽では共有できる option の行を完成形ごとに `beliefnode._patched` で差し替え（位置の道の `_with_bench` と同じ）、共有できない option は完成形ごとに `in` で。完成形 × option の順に積んで（`beliefnode._stacked`）葉を 1 回呼ぶ。選んだ option だけ `port.resume` で続ける
+  * 葉が無く目的が hp-share・faints: 葉の値だけを受け取る（`encode: false`）。共有はしない（共有した葉の値には差し替えた局面が要る）。完成形ごとに port で解く＝定義の道で、共有の道とは位置が JSON 単位で同じ（tests/test_hidden_selfswitch.py）
+  * どちらでもない評価（手書きの callable）: 前の節の位置の道のまま
+* **tests/test_port_only.py（新）**: `POKEURAOU_RUST_NODE=0` で `position_from_sets`・`port.batched_payoff`・`port.replacements_needed` が `PortUnavailable`。対照: 同じ呼び出しが on で答える
+* **tools/diff_depth2.py**: `--control`（= `--after-sub-branches 1`）
+
+### 2. 一致（diff_generation、M-C プール、heavy.py --cores 1）
+
+```
+                                                 相手                         同一
+  価値関数 20 局 seed 11 一様選出（自交代 5・4 局）  前の節の JSON の道（c9881e4）   20/20（2 回）
+  hp-share 200 局 seed 7（自交代 45・36 局）          同上                         200/200
+  正の対照: ika209-control の exe、価値関数 20 局     同上                         18/20（自交代の searchValue が game 9・18 で違う。残る 2 局は part が 1 つの fold で、Average が正規化するので半分にしても動かない）
+  価値関数 20 局 seed 11                               寄せる前 + 交代の 1 行（before-fixed）  20/20
+  価値関数 10 局 seed 7（選出を解く）                   同上                         10/10
+  hp-share 200 局 seed 7                                同上                         197/200（game 79 の 1 ulp と、41・182 の注記 1 行。前の節 §2 (b) と同じ 3 局）
+  （寄せる前そのもの（master 7637b99）とは、前の節 §2 (a) の交代の番号のずれで価値関数 0/20・0/10、hp-share 195/200）
+```
+
+### 3. 速さ（同じ窓、寄せる前 → 寄せた後の順に 1 本の diff_generation の中で、2 回ずつ）
+
+```
+                                       寄せる前（master 7637b99）   寄せた後
+  価値関数 20 局 seed 11 一様選出         128.4 / 128.3 s             25.0 / 25.2 s
+  hp-share 200 局 seed 7                   45.1 / 46.9 s             45.9 / 47.3 s
+  価値関数 10 局 seed 7 選出を解く          35.9 / 36.0 s             29.9 / 30.0 s
+  （JSON の道: 価値関数 20 局 185.3・190.6・169.4 s、hp-share 200 局 46.0 s に対し encode の道 44.1 s）
+```
+
+価値関数の生成は、Python の resolver が自交代を解いていた寄せる前よりも 5 倍速い（寄せる前は自交代の全葉を Python で作っていた）。hp-share は差が 1〜2%（交互 2 回の差の範囲。JSON の道では同じ標本で 6% 遅かった: 44.0 / 43.6 s → 47.0 / 46.1 s）。
+
+### 4. 深さ 2・呼び出しの数・テスト（取り込み後の枝）
+
+* diff_depth2（400 局面、`--jobs 8`）: master 7637b99 と 352/400 がビット一致。違う 48 のうち 34 は注記だけ（IKA-210 の inert の表で port が `noguard`・`speedboost`・`infiltrator`・`cursedbody` の damage 層の注記を出さなくなった。Python は出す）、14 は前の節 §3 と同じ（13 は正規化の和、1 は局面 302 のいのちがけ）。null 対照（`--jobs 1` と `--jobs 8`）はバイト一致。**正の対照 `--control`: 87/400 しか一致しない**（深さ 2 が枝を 1 本しか残さない）
+* count_resolver_calls: 対照 17,065 回、生成（M-C 価値関数・hp-share、M-B 隠蔽・深さ 2）と cli はすべて 0 回
+* テスト（-n 0）: test_port_only・test_hidden_selfswitch・test_hidden・test_selfplay・test_poolplay・test_port_commands・test_mega_hp_base・test_rust_node・test_beliefnode・test_search・test_line_endings が通る（skip 3 は元から）
+* `POKEURAOU_RUST_NODE=0` を立てるテストを grep した: test_rust_node.py の 13 か所だけ。どれも resolve.py の `batched_payoffs`（道具の道、まだ Python に落ちる）を呼ぶためで、`bridged` fixture が後で環境を戻す。本番の関数を 0 で呼ぶテストは無かった。止まることは test_port_only で固定した
+
+### 5. port.py の公開名（前の節 §6 に足したもの）
+
+```
+alternatives_encoded(reg, pause, *, world=None, want=None, shared=None, rules=None,
+                     objectives=(), encode=True) -> rustnode.EncodedAlternatives
+resume(reg, pause, choices) -> PortTurn            # full。resume_turn
+fold_from_json(node) -> fold.Fold                  # 重みは np.float64
+```
+
+### 6. 別課題の候補
+
+* `resolve.batched_payoffs`（道具の道）は `POKEURAOU_RUST_NODE=0` でまだ Python に落ちる。test_rust_node の 13 か所と diff_node 等がそれを使う（IKA-212 で道具ごと消える）
+* diff_depth2 の注記の差（34 局面）は、Python の damage 層の注記と port の inert の表の差。Python が消えれば無くなる
+
+### 7. 機械（heavy.py、IKA-209、この節の分）
+
+```
+  cargo build --release（--cores 8）: 本体 2 回・ika209-control 1 回、各 22〜27 s
+  diff_generation（--cores 1）: 約 18 回、計 約 40 分（寄せる前の価値関数 20 局が 1 本 125〜133 s）
+  diff_depth2（--cores 8 --jobs 8）: 2 回 57 s（null の --jobs 1 を含む）
+  count_resolver_calls・テスト（--cores 1）: 約 2 分
 ```

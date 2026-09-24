@@ -23,14 +23,15 @@ end makes one of exactly that. A platform without shared memory, a machine that 
 spare the commit, or a binary built before any of this all fall back to the pipe, which
 is why the pipe is still here.
 
-Opt-in and off by default::
+On by default since IKA-209: the port is the only resolver the production roads have,
+so a missing or stale binary stops them (`require_node`) rather than falling back::
 
-    POKEURAOU_RUST_NODE=1                      # use it when it is available
+    POKEURAOU_RUST_NODE=0                      # off: only resolve.py's own tool road
     POKEURAOU_RUST_NODE_BIN=/path/to/binary    # defaults to rust/target/release/
     POKEURAOU_RUST_NODE_SHM_MB=512             # the largest block; 0 keeps the pipe
 
-Nothing imports this unless the variable is set, and `available()` answers without raising
-so a caller can fall back silently rather than fail a run that was working.
+`available()` answers without raising, for resolve.py's `batched_payoffs` (the tools'
+road, which still has Python behind it). `require_node` is the production roads' door.
 """
 
 from __future__ import annotations
@@ -52,9 +53,9 @@ from typing import Any
 
 from . import timing
 from .actions import MoveAction, PassAction, SideAction, SwitchAction
+from .budget import Budget
 from .position import Position
 from .regulation import Regulation, repo_root
-from .resolve import Budget
 
 #: Seconds to wait for one node before giving up on the subprocess entirely. Not a
 #: latency budget: a width-48 node is tens of megabytes and a dozen workers share one
@@ -163,7 +164,8 @@ def require_current_binary() -> dict[str, Any]:
 
 
 def enabled() -> bool:
-    return os.environ.get(ENV_ENABLE, "") not in ("", "0", "false", "no")
+    # On unless switched off (IKA-209). Before, unset meant off.
+    return os.environ.get(ENV_ENABLE, "1").strip().lower() not in ("0", "false", "no")
 
 
 def available() -> bool:
@@ -390,11 +392,15 @@ RESTARTS_ALLOWED = int(os.environ.get("POKEURAOU_RUST_NODE_RESTARTS", "3"))
 _RESTARTS = 0
 
 
-def disable(reason: str) -> None:
+def disable(reason: str) -> bool:
     """Answers a failed bridge with a fresh process, or gives up if that keeps happening.
 
     Giving up is still the end state -- a broken bridge must not cost a subprocess per
     node on top of Python's own time -- but it is no longer the first move.
+
+    True when a fresh process was started, False once the restarts have run out. Only
+    resolve.py's tool road falls back to Python after that; the production roads stop
+    (`port.ask`, IKA-209).
     """
     global _GAVE_UP, _RESTARTS
     reset()
@@ -404,9 +410,50 @@ def disable(reason: str) -> None:
             f"[rustnode] restarting the node ({_RESTARTS} of {RESTARTS_ALLOWED}): {reason}",
             file=sys.stderr,
         )
-        return
-    print(f"[rustnode] falling back to Python: {reason}", file=sys.stderr)
+        return True
+    print(f"[rustnode] giving up on the node: {reason}", file=sys.stderr)
     _GAVE_UP = True
+    return False
+
+
+class PortUnavailable(RuntimeError):
+    """The production roads were asked for the port and there is none to ask (IKA-209)."""
+
+
+def require_node(reg: Regulation) -> RustNode:
+    """The warm process for this regulation, or a stop that says why there is none.
+
+    For the production roads -- generation, the analyser, the selection solve -- which
+    have no Python resolver behind them any more (IKA-209). Where `node_for` answers None
+    and lets the caller fall back, this raises: switched off, no binary, a binary older
+    than the sources (as `require_current_binary`), or a bridge that was given up on.
+    """
+    if not enabled():
+        raise PortUnavailable(
+            f"{ENV_ENABLE}=0, and the production roads have no Python resolver to fall "
+            "back to (IKA-209); unset it"
+        )
+    format_id = reg.meta.format_id
+    held = _NODES.get(format_id)
+    if held is not None:
+        return held
+    if _GAVE_UP:
+        raise PortUnavailable("the Rust node failed and was given up on; see the log above")
+    path = binary_path()
+    if not path.exists():
+        raise PortUnavailable(
+            f"no Rust binary at {path}; `cd rust && cargo build --release`"
+        )
+    stale = sources_newer_than_binary()
+    if stale:
+        listed = ", ".join(stale[:4]) + ("..." if len(stale) > 4 else "")
+        raise PortUnavailable(
+            f"{path.name} was built before {listed} changed; the port is the only "
+            "resolver, so `cd rust && cargo build --release` first"
+        )
+    made = RustNode(reg)
+    _NODES[format_id] = made
+    return made
 
 
 class RustNode:
@@ -531,6 +578,7 @@ class RustNode:
         }
         response = self._exchange(request)
         if response.get("refused"):
+            self.refusal = str(response["refused"])
             return None
         raw = response.get("position")
         return ResolvedTurn(
@@ -561,6 +609,67 @@ class RustNode:
         if "error" in response:
             raise RuntimeError(f"the Rust node refused the request: {response['error']}")
         return response
+
+    def _exchange_many(self, requests: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Many requests down the pipe while their answers come back, in order (IKA-209).
+
+        For stateless requests only -- each answer is read as its own header line, so a
+        request whose answer has a body (an encoded node) must not be sent this way. The
+        child answers them one at a time either way; what this saves is the wait between
+        one answer and the next request, which for a small request is most of its cost. A
+        writer thread feeds the child while this one reads, so neither pipe can fill with
+        both ends waiting on it.
+        """
+        import threading
+
+        with timing.stage("rust.ask"):
+            payloads = [
+                json.dumps(request, ensure_ascii=False).encode("utf-8") + b"\n"
+                for request in requests
+            ]
+        failure: list[BaseException] = []
+
+        def feed() -> None:
+            try:
+                for payload in payloads:
+                    self._process.stdin.write(payload)
+                self._process.stdin.flush()
+            except BaseException as exc:  # noqa: BLE001 - reported by the reader
+                failure.append(exc)
+
+        writer = threading.Thread(target=feed, daemon=True)
+        writer.start()
+        answers: list[dict[str, Any]] = []
+        for _request in requests:
+            line = self._with_deadline(self._process.stdout.readline, "header")
+            if not line:
+                raise RuntimeError(
+                    f"the Rust node process stopped: {failure or ''} {self._stderr_text()}"
+                )
+            with timing.stage("rust.header"):
+                response = json.loads(line.decode("utf-8"))
+            if "error" in response:
+                raise RuntimeError(f"the Rust node refused the request: {response['error']}")
+            answers.append(response)
+        writer.join()
+        if failure:
+            raise RuntimeError(f"writing to the Rust node failed: {failure[0]}")
+        return answers
+
+    @timing.timed("rust.leads")
+    def apply_lead_abilities_many(self, positions: Sequence[Position]) -> list[PortPhase | None]:
+        """`apply_lead_abilities` without a generator, for many positions in one go."""
+        answers = self._exchange_many(
+            [{"kind": "leads", "position": pos.to_json()} for pos in positions]
+        )
+        out: list[PortPhase | None] = []
+        for response in answers:
+            if response.get("refused"):
+                self.refusal = str(response["refused"])
+                out.append(None)
+            else:
+                out.append(PortPhase.read(response))
+        return out
 
     def _grow_to(self, body_bytes: int) -> Any:
         """A block at least `body_bytes` long, or None when one cannot be had.
@@ -783,12 +892,19 @@ class RustNode:
             unmodelled=tuple(response["unmodelled"]),
         )
 
-    # -- What only Python's resolver answered (IKA-211). Not on any production road yet:
-    # -- selfplay, search and beliefnode still call `resolve` in Python (IKA-209 moves them).
+    # -- What only Python's resolver answered (IKA-211). The production roads reach these
+    # -- through `port` (IKA-209).
+
+    #: Why the port declined the last request it declined -- for a caller that stops on a
+    #: refusal and has to say what it was (IKA-209).
+    refusal: str | None = None
 
     def _ask(self, request: dict[str, Any]) -> dict[str, Any] | None:
         response = self._exchange(request)
-        return None if response.get("refused") else response
+        if response.get("refused"):
+            self.refusal = str(response["refused"])
+            return None
+        return response
 
     @timing.timed("rust.turn")
     def turn(
@@ -876,6 +992,93 @@ class RustNode:
                 (_side_action(option), PortTurn.read(result))
                 for option, result in zip(response["options"], response["results"], strict=True)
             ],
+        )
+
+    @timing.timed("rust.alternatives")
+    def alternatives_encoded(
+        self,
+        pause: PortPause,
+        *,
+        world: tuple[Position, int] | None = None,
+        want: Sequence[int] | None = None,
+        shared: tuple[int, Sequence[int]] | None = None,
+        rules: Any = None,  # noqa: ANN401 - EncodingRules
+        objectives: Sequence[str] = (),
+        encode: bool = True,
+    ) -> EncodedAlternatives | None:
+        """`resume_alternatives` with each wanted option's turn flattened over there, as
+        `turn_leaves` flattens it, and every leaf encoded (IKA-209).
+
+        What the self-switch node scores: the leaves cross as the encoder's arrays, by the
+        road an encoded node's take, instead of as positions. `shared=(side, slots)` also
+        answers `_shared_self_switch_plans`' question per option. `objectives` are
+        scored over there per leaf; with `encode=False` no arrays are built -- an hp-share
+        node wants the values alone. None when the port declines the pause.
+        """
+        request: dict[str, Any] = {
+            "kind": "alternativesEncoded",
+            "pause": pause.raw,
+            "in": _world(world),
+        }
+        if want is not None:
+            request["want"] = [int(k) for k in want]
+        if objectives:
+            request["objectives"] = list(objectives)
+        if not encode:
+            request["encode"] = False
+        if shared is not None:
+            request["shared"] = {"side": int(shared[0]), "slots": [int(s) for s in shared[1]]}
+        wants_old = bool(rules is not None and rules.mega_from_slots)
+        if wants_old:
+            request["encoding"] = rules.to_request()
+        if not self._shm_off:
+            request["shm"] = (
+                {"name": self._shm.name, "bytes": self._shm.size}
+                if self._shm is not None
+                else {"name": None, "bytes": 0}
+            )
+        header = self._exchange(request)
+        if header.get("refused"):
+            self.refusal = str(header["refused"])
+            return None
+        count = int(header["bytes"])
+        _road, body = self._body(header, count)
+        node = EncodedNode.unpack(header, body)
+        if wants_old and node.mega_from_slots is not True:
+            raise RuntimeError(
+                "the Rust node was asked for the revision-1 can_mega rule and did not say "
+                f"it applied it (echo {node.mega_from_slots!r}); the binary predates IKA-141"
+            )
+        timing.count("body.bytes", count)
+        import numpy as np
+
+        rows = int(header.get("valueRows", 0))
+        names = list(header.get("leafObjectives", []))
+        # The values follow the arrays, one block of `rows` per objective.
+        offset = count - rows * 8 * len(names)
+        values = {
+            name: np.frombuffer(body, dtype=np.float64, count=rows, offset=offset + k * rows * 8)
+            for k, name in enumerate(names)
+        }
+        chooser = header["chooser"]
+        return EncodedAlternatives(
+            chooser=None if chooser is None else int(chooser),
+            options=[_side_action(option) for option in header["options"]],
+            plans=[
+                None
+                if "start" not in plan
+                else EncodedPlan(
+                    start=int(plan["start"]),
+                    count=int(plan["count"]),
+                    fold=plan["fold"],
+                    unmodelled=tuple(plan["unmodelled"]),
+                    suspended=bool(plan["suspended"]),
+                )
+                for plan in header["plans"]
+            ],
+            untouched=[plan.get("untouched") for plan in header["plans"]],
+            node=node,
+            values=values,
         )
 
     @timing.timed("rust.replacements")
@@ -986,6 +1189,33 @@ class PortPause:
 
 def _acts(raw: dict[str, Any]) -> list[tuple[int, str]]:
     return [(int(start), str(label)) for start, label in raw.get("acts") or []]
+
+
+@dataclass
+class EncodedPlan:
+    """One option's turn as `turn_leaves` flattens it: its rows of the answer's arrays
+    (`start`, `count`) and the fold over them, with leaf indices local to the plan."""
+
+    start: int
+    count: int
+    fold: dict[str, Any]
+    unmodelled: tuple[str, ...]
+    #: Whether the resumed turn paused again (it is then not one the shared path can use).
+    suspended: bool
+
+
+@dataclass
+class EncodedAlternatives:
+    """`alternatives_encoded`'s answer: who chooses, every option, the wanted options'
+    plans (None for the others), `shared`'s answer per option, and the arrays."""
+
+    chooser: int | None
+    options: list[SideAction]
+    plans: list[EncodedPlan | None]
+    untouched: list[bool | None]
+    node: EncodedNode
+    #: One value per leaf for each objective asked for, scored over there.
+    values: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

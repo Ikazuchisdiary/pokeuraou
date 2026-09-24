@@ -393,6 +393,32 @@ fn answer<R: BufRead, W: Write>(
         Err(error) => json!({ "error": error.to_string() }),
         Ok(value) if value["kind"].as_str() == Some("resolve") => resolve_one(reg, &value),
         Ok(value) if value["kind"].as_str() == Some("score") => score_pool(reg, &value),
+        // A pause's replacements with their leaves encoded (IKA-209): the arrays take the
+        // same roads as an encoded node's.
+        Ok(value) if value["kind"].as_str() == Some("alternativesEncoded") => {
+            match crate::resolve::commands::alternatives_encoded(reg, encoder, &value) {
+                Err(reason) => json!({ "refused": reason }),
+                Ok((mut header, encoded, leaf_values)) => {
+                    let body_bytes = header["bytes"].as_u64().unwrap_or(0) as usize;
+                    let target = value.get("shm").map(|block| shm::Target {
+                        name: block.get("name").and_then(Value::as_str).map(String::from),
+                        capacity: block.get("bytes").and_then(Value::as_u64).unwrap_or(0) as usize,
+                    });
+                    return match &target {
+                        Some(target) => place_body(
+                            &encoded, &leaf_values, body_bytes, target, shared, input,
+                            stdout, &mut header, parse_us,
+                        ),
+                        None => {
+                            header["via"] = json!("pipe");
+                            writeln!(stdout, "{}", with_timings(&header, parse_us))?;
+                            crate::encoded_node::write_body(stdout, &encoded, &leaf_values)?;
+                            stdout.flush()
+                        }
+                    };
+                }
+            }
+        }
         Ok(value) if crate::resolve::commands::handles(value["kind"].as_str()) => {
             crate::resolve::commands::answer(reg, &value)
         }
