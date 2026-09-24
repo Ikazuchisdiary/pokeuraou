@@ -45,6 +45,7 @@ from pokeuraou.damage import register_mega_stones
 from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.priors import build_cooccurrence, find_cached_chaos, load_chaos
 from pokeuraou.regulation import Regulation
+from pokeuraou.search import DEFAULT_RANK_FILL, parse_rank_fill
 from pokeuraou.selection_book import (
     DEFAULT_EPSILON,
     DEFAULT_TEMPERATURE,
@@ -86,6 +87,13 @@ def add_pool_flags(ap: argparse.ArgumentParser) -> None:
         "solved once for the whole run rather than once per worker. Default: "
         "selection-solved/ beside --out, which is every worker's directory under "
         "tools/generate_queue.py.",
+    )
+    ap.add_argument(
+        "--rank-fill",
+        default=DEFAULT_RANK_FILL,
+        help="with --pool and --rank-leaf: how the leaf ranking fills its cells -- "
+        "refs<N> replies at the matrix budget, refs<N>-fast at Budget.fast (IKA-268). "
+        f"Default {DEFAULT_RANK_FILL}.",
     )
 
 
@@ -130,7 +138,8 @@ def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
         f"pool vs pool / {reg.meta.format_id} / search {args.limit}x{args.limit} / "
         f"leaf {leaf_label} / selection {selection}"
         f"{'' if selection == 'uniform' else f' (eps={args.explore_epsilon}, T={args.explore_temperature})'}"
-        f" / bench {'hidden' if hide_bench else 'OPEN (reference)'}",
+        f" / bench {'hidden' if hide_bench else 'OPEN (reference)'}"
+        f" / {'leaf ranking, fill ' + args.rank_fill if args.rank_leaf else 'damage ranking'}",
         file=sys.stderr,
     )
     client = None
@@ -169,6 +178,7 @@ def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
         explore_epsilon=args.explore_epsilon,
         explore_temperature=args.explore_temperature,
         rank_by_leaf=args.rank_leaf,
+        rank_fill=args.rank_fill,
         indices=drawn,
         on_finish=client.finish if client is not None else None,
     )
@@ -372,9 +382,18 @@ def main() -> None:
     )
     add_pool_flags(ap)
     args = ap.parse_args()
+    try:
+        parse_rank_fill(args.rank_fill)
+    except ValueError as problem:
+        ap.error(str(problem))
     if args.pool is not None:
         run_pool(args, ap)
         return
+    if args.rank_fill != DEFAULT_RANK_FILL:
+        # The roster path's `generate` takes no fill, and a flag it dropped would be
+        # recorded nowhere and played by nobody.
+        ap.error("--rank-fill is the pool path's (IKA-268); the roster path ranks at "
+                 f"{DEFAULT_RANK_FILL}")
     if args.roster is None:
         args.roster = DEFAULT_ROSTER
     require_bench(args)
