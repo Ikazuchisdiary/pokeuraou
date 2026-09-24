@@ -460,14 +460,6 @@ TERRAIN_ABILITIES: dict[str, str] = {
     "psychicsurge": "psychicterrain",
 }
 
-#: The Seeds: the terrain each is used under and the boost `useItem` applies (IKA-201).
-TERRAIN_SEEDS: dict[str, tuple[str, str]] = {
-    "electricseed": ("electricterrain", "def"),
-    "grassyseed": ("grassyterrain", "def"),
-    "mistyseed": ("mistyterrain", "spd"),
-    "psychicseed": ("psychicterrain", "spd"),
-}
-
 #: Abilities that suppress weather effects entirely.
 WEATHER_SUPPRESSING_ABILITIES = frozenset({"cloudnine", "airlock"})
 
@@ -567,12 +559,6 @@ ITEM_MODIFIERS: dict[str, tuple[Modifier, ...]] = {
 #: do not save from residual damage, recoil or Life Orb.
 SURVIVE_AT_ONE_ITEMS = frozenset({"focussash"})
 SURVIVE_AT_ONE_ABILITIES = frozenset({"sturdy"})
-
-#: Items that give a *chance* to survive a lethal hit at 1 HP, as (numerator, denominator).
-#: Focus Band is deliberately not in SURVIVE_AT_ONE_ITEMS: it is `randomChance(1, 10)`
-#: from any HP and is not consumed, so treating it as a certain full-HP save is wrong in
-#: both directions.
-SURVIVE_CHANCE_ITEMS: dict[str, tuple[int, int]] = {"focusband": (1, 10)}
 
 #: Side conditions that reduce damage, with their doubles strength. Showdown uses
 #: chainModify([2732, 4096]) when activePerHalf > 1 and 0.5 in singles.

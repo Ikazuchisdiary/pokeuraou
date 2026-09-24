@@ -1,7 +1,7 @@
 """How much of a turn's randomness to enumerate: the `Budget` every road hands the port.
 
 Moved out of resolve.py (IKA-209) so that the production roads, which no longer resolve a
-turn in Python, do not import the resolver for it. `resolve.Budget` is this class.
+turn in Python, did not import the resolver for it. resolve.py is gone since IKA-212.
 """
 
 from __future__ import annotations
@@ -65,8 +65,9 @@ class Budget:
     #: nothing -- and integer HP produces the same collapse below the threshold.
     #:
     #: The knob exists because "lossless" is a claim that has to be checkable: with it
-    #: off the resolver produces the unmerged tree, and `tools/branch_dedup.py` holds the
-    #: two against each other outcome by outcome. `POKEURAOU_MERGE_BRANCHES=0` turns it
+    #: off the resolver produces the unmerged tree, and `tools/branch_dedup.py` held the
+    #: two against each other outcome by outcome (Python's resolver; both went in IKA-212,
+    #: and `tools/merge_effect.py` asks the port). `POKEURAOU_MERGE_BRANCHES=0` turns it
     #: off for a whole run -- see :data:`MERGE_BRANCHES_DEFAULT`.
     merge_duplicates: bool = field(default_factory=lambda: MERGE_BRANCHES_DEFAULT)
 

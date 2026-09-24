@@ -134,8 +134,6 @@ KNOWN_UNGATED: frozenset[str] = frozenset()
 #:    dancer                             speed.ACTION_OVERRIDING_EFFECTS, read by a
 #:                                       helper that scans protocol lines for a
 #:                                       differential, not by the resolver.
-#:    truant                             resolve.py:1788, inside a docstring quoting
-#:                                       Showdown's own TypeScript.
 #:    runaway                            actions._escapes_traps (IKA-136): the champions
 #:                                       mod frees Run Away from traps, which decides
 #:                                       whether a switch is *offered*. Menus are built
@@ -147,10 +145,14 @@ KNOWN_UNGATED: frozenset[str] = frozenset()
 #:                                       The gate lists it in `item_handled` now that
 #:                                       `inert.rs` no longer does.
 #:
+#: `truant` was here too (resolve.py:1788, inside a docstring quoting Showdown's own
+#: TypeScript) and was struck off when IKA-212 deleted resolve.py: what is left of Python's
+#: engine (`port_coverage.ENGINE_FILES`) never names it, so it is "python is silent too".
+#:
 #: Recorded rather than required to be empty so that `--check` can fail on the next one
-#: without first demanding these seven be re-argued.
+#: without first demanding these six be re-argued.
 KNOWN_UNREFERENCED: frozenset[str] = frozenset(
-    {"shadowtag", "arenatrap", "magnetpull", "dancer", "truant", "runaway", "shedshell"}
+    {"shadowtag", "arenatrap", "magnetpull", "dancer", "runaway", "shedshell"}
 )
 
 

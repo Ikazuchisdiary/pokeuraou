@@ -43,12 +43,14 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from pokeuraou import port  # noqa: E402 - Python's resolver until IKA-212
+from pokeuraou.budget import Budget  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.equilibrium import EquilibriumError, solve  # noqa: E402
 from pokeuraou.narrow import narrow  # noqa: E402
+from pokeuraou.port import batched_payoff  # noqa: E402
 from pokeuraou.position import Position  # noqa: E402
 from pokeuraou.regulation import load_regulation  # noqa: E402
-from pokeuraou.resolve import Budget, batched_payoff, resolve_turn  # noqa: E402
 
 #: `search.DEFAULT_SUB_BRANCHES`: the chance branches a refined cell keeps.
 SHIPPED_SUB_BRANCHES = 3
@@ -136,10 +138,10 @@ def main() -> None:
         branches_seen = sub_games = 0
         started = time.perf_counter()
         for i, j in sample:
-            result = resolve_turn(reg, position, [ours[i], theirs[j]], budget=budget)
+            result = port.turn(reg, position, [ours[i], theirs[j]], budget, full=True)
             if result.suspended or not result.branches:
                 continue
-            picked = sorted(result.branches, key=lambda b: -b.probability)
+            picked = sorted(result.outcomes, key=lambda b: -b.probability)
             if modal_only:
                 picked = picked[:1]
             branches_seen += len(picked)
@@ -190,14 +192,14 @@ def main() -> None:
         kept_mass: list[float] = []
         for a in ours:
             for b in theirs:
-                result = resolve_turn(reg, position, [a, b], budget=sub_budget)
+                result = port.turn(reg, position, [a, b], sub_budget, full=True)
                 suspended += len(result.suspended)
                 if not result.branches:
                     continue
                 branches += len(result.branches)
-                for branch in result.branches:
+                for branch in result.outcomes:
                     seen[json.dumps(branch.position.to_json(), sort_keys=True)] += 1
-                weights = sorted((br.probability for br in result.branches), reverse=True)
+                weights = sorted(result.branches, reverse=True)
                 total = sum(weights)
                 over_cap += int(len(weights) > SHIPPED_SUB_BRANCHES)
                 if total > 0:

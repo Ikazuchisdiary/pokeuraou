@@ -2,7 +2,8 @@
 (IKA-180).
 
 vendor/pokemon-showdown (a5df827), data/moves.ts `substitute`, which the champions mod
-keeps -- quoted in full above `_hits_substitute` in src/pokeuraou/resolve.py:
+keeps -- quoted in full at the head of the Substitute section of rust/src/moves.rs (it was
+above `_hits_substitute` in src/pokeuraou/resolve.py until IKA-212):
 
 - **Use.** `onTryHit` refuses a second doll and a user at or below a quarter of its HP
   (`NOT_FAIL`: a `null` result, which Stomping Tantrum does not count); `onHit` pays

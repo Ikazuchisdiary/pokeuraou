@@ -67,9 +67,6 @@ from .moveinfo import effective_type as move_effective_type
 from .moveinfo import fixed_damage as move_fixed_damage
 from .regulation import Regulation
 
-#: Crit multiplier denominators by crit stage, gen 7+ (``critMult`` in battle-actions.ts).
-CRIT_MULT = (0, 24, 8, 2, 1)
-
 #: Mega stone ids seen so far, filled in from the regulation on first use so that
 #: unmodelled-effect reporting does not flag them.
 _MEGA_STONE_IDS: frozenset[str] = frozenset()
@@ -680,33 +677,3 @@ def effective_damage(result: DamageResult, defender: Battler) -> np.ndarray:
         capped = np.minimum(dealt, np.maximum(defender.hp[:, None] - 1, 0))
         dealt = np.where(at_full, capped, dealt)
     return dealt
-
-
-def crit_stage(reg: Regulation, attacker: Battler, move_id: str) -> int:
-    """Crit stage, before Showdown's clamp to 0..4."""
-    move = reg.moves[move_id]
-    stage = move.crit_ratio - 1 if move.crit_ratio else 0
-    if bool(move.raw.get("willCrit")):
-        return 4
-    if "focusenergy" in attacker.volatiles:
-        stage += 2
-    if "dragoncheer" in attacker.volatiles:
-        stage += 1
-    if attacker.item == "scopelens":
-        stage += 1
-    if attacker.item == "leek" and attacker.species.startswith(("farfetchd", "sirfetchd")):
-        stage += 2
-    if attacker.ability == "superluck":
-        stage += 1
-    return stage
-
-
-def crit_probability(reg: Regulation, attacker: Battler, defender: Battler, move_id: str) -> float:
-    """Exact crit probability, or 0 when the defender cannot be crit."""
-    if defender.ability in ("battlearmor", "shellarmor"):
-        return 0.0
-    # Showdown clamps critRatio to 0..4 and looks up critMult = [0, 24, 8, 2, 1]; a ratio
-    # of 0 never crits, and a ratio of 4 always does.
-    ratio = max(0, min(4, crit_stage(reg, attacker, move_id) + 1))
-    denom = CRIT_MULT[ratio]
-    return 0.0 if denom == 0 else 1.0 / denom

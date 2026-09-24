@@ -45,14 +45,15 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from pokeuraou.budget import Budget  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.equilibrium import solve, solve_bayesian  # noqa: E402
 from pokeuraou.hidden import completions  # noqa: E402
 from pokeuraou.narrow import narrow  # noqa: E402
+from pokeuraou.port import batched_payoff  # noqa: E402 - Python's resolver until IKA-212
 from pokeuraou.position import Position  # noqa: E402
 from pokeuraou.priors import SampledSet  # noqa: E402
 from pokeuraou.regulation import load_regulation  # noqa: E402
-from pokeuraou.resolve import Budget, batched_payoff  # noqa: E402
 
 STAT_KEYS = ("hp", "atk", "def", "spa", "spd", "spe")
 

@@ -4,14 +4,15 @@ A width-48 node is 2,304 cells and the resolver is most of a generation run, but
 equilibrium does not need every cell. To show that an unplayed action is not a better
 reply you need its payoff against the *opponent's mixed strategy*, and that strategy sits
 on one to five columns. Measured on the leaf generation actually runs
-(`tools/cells_needed.py`), a fifth of the matrix is enough.
+(`tools/cells_needed.py`, deleted in IKA-212), a fifth of the matrix is enough.
 
 Double oracle is the standard way to use that, and what makes it usable here is that it
 ends in a proof rather than an approximation: keep a restricted set of rows and columns,
 solve the small game, then look for a better reply for each side over *all* of its
 actions. When neither side can find one, the restricted solution is an equilibrium of the
 whole game -- including every cell that was never resolved. `tools/diff_solve_node.py`
-checks that claim against the full matrix rather than trusting the argument.
+checked that claim against the full matrix rather than trusting the argument (until
+IKA-212 deleted it with Python's resolver, which it filled the full matrix with).
 
 What it does not promise is *which* equilibrium. Where a game has several of equal value
 the vertex reached can differ from the one a full LP would return, and this project samples

@@ -4,6 +4,17 @@
 検証できなくなる。**この表は削除の根拠ではない。** 退避であって削除ではなく、退避した
 ものも `tools/oneshot/` にそのまま残っている。
 
+> **9/24 IKA-212 で消した道具（下の表の行はそのまま残す）。** Python の解決器
+> （`src/pokeuraou/resolve.py`）を消したので、それを前提にする道具を消した。消した本文は
+> git の 471b98e で読める。理由は TODO.md の「9/24 — IKA-212」の節の表:
+> `bench`・`bench_turn_cases`・`bench_damage_cases`・`branch_dedup`・`cells_needed`・
+> `count_resolver_calls`・`diff_commands`・`diff_narrow`・`diff_node`・`diff_solve_node`・
+> `dump_damage_cases`・`dump_damage_cases_selfplay`・`dump_damage_cases_synthetic`・
+> `dump_turn_cases`・`hidden_dominance`・`ko_branch_count`・`narrow_effect`・`narrow_regret`・
+> `oneshot/depth_effect`・`profile_resolve`・`regret_playout`・`seat_bias`・`selfplay_budget`・
+> `width_vs_ranking`。port に向け直したもの（`diff_turn`・`diverge_report`・`diff_replacement`・
+> `show_game`・`why_action` ほか）は残っている。
+
 ## 数えた結果（IKA-25 で再測定）
 
 | 数えたもの | 本数 |

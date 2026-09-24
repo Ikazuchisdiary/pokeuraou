@@ -2,7 +2,7 @@
 
 Chance is an `Average` and a mid-turn replacement a `BestOf`. Moved out of resolve.py
 (IKA-209): the port builds these trees now (`port.turn_leaves`, and the folds it sends
-with an encoded node), and resolve.py re-exports them for the callers it still has.
+with an encoded node). resolve.py re-exported them until IKA-212 deleted it.
 """
 
 from __future__ import annotations

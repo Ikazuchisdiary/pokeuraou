@@ -41,13 +41,14 @@ sys.path.insert(0, str(ROOT / "tools"))
 
 from budget_effect import load_positions  # noqa: E402
 
+from pokeuraou.budget import Budget  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.equilibrium import EquilibriumError, solve  # noqa: E402
 from pokeuraou.narrow import narrow  # noqa: E402
 from pokeuraou.payoff import OBJECTIVES  # noqa: E402
 from pokeuraou.policy import load_policy  # noqa: E402
+from pokeuraou.port import batched_payoffs  # noqa: E402 - Python's resolver until IKA-212
 from pokeuraou.regulation import load_regulation  # noqa: E402
-from pokeuraou.resolve import Budget, batched_payoffs  # noqa: E402
 from pokeuraou.search import leaf_ranking  # noqa: E402
 
 #: Weight below which an action is not being played. The LP returns exact zeros outside

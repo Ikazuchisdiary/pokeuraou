@@ -36,9 +36,8 @@ from pokeuraou.regulation import Regulation, load_regulation, to_id
 from pokeuraou.teams import all_selections
 
 #: The label `acts` gives the end-of-turn phase, which belongs to nobody: what the port
-#: writes (`turn.begin(|| "residual")` in rust/src/moves.rs) and what resolve.py's
-#: `RESIDUAL_PHASE` is. Here so the tool, and the tests that load it, do not import the
-#: Python resolver for a string (IKA-210).
+#: writes (`turn.begin(|| "residual")` in rust/src/moves.rs), and what Python's resolver
+#: called `RESIDUAL_PHASE` until IKA-212 deleted it.
 RESIDUAL_PHASE = "residual"
 
 
@@ -569,9 +568,12 @@ def turn_events(
     one of them per interrupt, and what the end of the turn has to be matched against is
     whatever is left.
 
-    ``node`` is a `rustnode.RustNode`: the turn and its resumptions are then the port's,
-    trace included (IKA-215), and everything else here reads them as it reads Python's.
+    ``node`` is a `rustnode.RustNode`: the turn and its resumptions are the port's, trace
+    included (IKA-215). It was Python's resolver when no node was given, until IKA-212
+    deleted that resolver; the port is the only engine now.
     """
+    if node is None:
+        raise TypeError("turn_events needs the port's node (rustnode.RustNode); see render()")
     from pokeuraou.budget import Budget
     from pokeuraou.narrow import narrow
     from pokeuraou.position import Position
@@ -611,16 +613,10 @@ def turn_events(
             ]
         lookup.append(actions[wanted])
 
-    if node is None:
-        # Python's resolver only on its own road, so the port's does not load it.
-        from pokeuraou.resolve import resolve_turn
-
-        result = resolve_turn(reg, pos, lookup, budget=Budget.exact())
-    else:
-        answered = node.turn(pos, lookup, Budget.exact(), full=True, events=True)
-        if answered is None:
-            return [(None, ["⚠ port が このターンを断りました"])]
-        result = _PortTurn(answered)
+    answered = node.turn(pos, lookup, Budget.exact(), full=True, events=True)
+    if answered is None:
+        return [(None, ["⚠ port が このターンを断りました"])]
+    result = _PortTurn(answered)
     prefix: list[str] = []
     resumed = False
     notes: list[str] = []
@@ -648,16 +644,11 @@ def turn_events(
         # Which side owes the replacement decides which half of the next record answers
         # it. Reading `ownChosen` either way silently lost every turn where the *opponent*
         # was the one switching out -- half of them.
-        if node is None:
-            from pokeuraou.resolve import resume_alternatives
-
-            side, alternatives = resume_alternatives(reg, paused)
-        else:
-            resumed_by_port = node.resume_alternatives(paused, events=True)
-            if resumed_by_port is None:
-                return [(None, ["⚠ port が 再開を断りました"])]
-            side = resumed_by_port[0]
-            alternatives = [(action, _PortTurn(r)) for action, r in resumed_by_port[1]]
+        resumed_by_port = node.resume_alternatives(paused, events=True)
+        if resumed_by_port is None:
+            return [(None, ["⚠ port が 再開を断りました"])]
+        side = resumed_by_port[0]
+        alternatives = [(action, _PortTurn(r)) for action, r in resumed_by_port[1]]
         key = "foeChosen" if side == 1 else "ownChosen"
         answer = (answered_by or {}).get(key)
         picked = next(
@@ -783,6 +774,14 @@ def hidden_line(loc: Localiser, record: dict, seen: list[set[str]]) -> str:
 def render(
     reg: Regulation, loc: Localiser, record: dict, top: int, node: object | None = None
 ) -> str:
+    """The game as text. ``node`` is the port's process the turns are re-resolved with; one
+    is started for this game when none is given."""
+    if node is None:
+        from pokeuraou import rustnode
+        from pokeuraou.damage import register_mega_stones
+
+        register_mega_stones(reg)
+        node = rustnode.RustNode(reg)
     out = io.StringIO()
     own = "・".join(loc.species(s["species"]) for s in record["ownTeam"])
     foe = "・".join(loc.species(s["species"]) for s in record["foeTeam"])
@@ -999,8 +998,9 @@ def main() -> None:
     ap.add_argument("--out", type=Path, default=Path("game.txt"))
     ap.add_argument("--locale", default="ja")
     ap.add_argument(
-        "--engine", choices=("python", "port"), default="python",
-        help="who re-resolves the turns for \"起きたこと\" (port: the Rust node, IKA-215)",
+        "--engine", choices=("port",), default="port",
+        help="who re-resolves the turns for \"起きたこと\": the port (IKA-215); Python's resolver "
+        "was the other choice until IKA-212 deleted it",
     )
     args = ap.parse_args()
 
@@ -1015,14 +1015,7 @@ def main() -> None:
 
     reg = load_regulation(record["decisions"][0]["position"]["format"])
     loc = Localiser(reg, load_names(args.locale))
-    node = None
-    if args.engine == "port":
-        from pokeuraou import rustnode
-        from pokeuraou.damage import register_mega_stones
-
-        register_mega_stones(reg)
-        node = rustnode.RustNode(reg)
-    text = render(reg, loc, record, args.top, node)
+    text = render(reg, loc, record, args.top)
     args.out.write_text(text, encoding="utf-8")
     print(f"{path.name} game {args.game} -> {args.out} ({len(text):,} chars)")
 

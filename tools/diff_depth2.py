@@ -53,10 +53,10 @@ def _init(src: str, limit: int, sub_branches: int | None) -> None:
 
 
 def _solve(line: str) -> str:
+    from pokeuraou.budget import Budget
     from pokeuraou.narrow import narrow
     from pokeuraou.payoff import HP_SHARE
     from pokeuraou.position import Position
-    from pokeuraou.resolve import Budget  # re-exported after IKA-209; loads, calls nothing
     from pokeuraou.search import DEFAULT_SUB_BRANCHES, search
 
     reg, limit = _STATE["reg"], _STATE["limit"]

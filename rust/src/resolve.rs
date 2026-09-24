@@ -1,15 +1,39 @@
 //! Single-turn resolver, transcribed from `src/pokeuraou/resolve.py`.
 //!
+//! Since IKA-212 this is the only resolver: the Python one is deleted, and the chain of
+//! checks is Showdown -> this port (the oracle tests, `tools/diff_turn.py`). Where a comment
+//! here says "Python's `_x`" or "as Python does", it names the function of
+//! `src/pokeuraou/resolve.py` as it stood at 471b98e, the last commit that had it; the
+//! explanations that lived only in its docstrings were moved beside the code below.
+//!
+//! Takes a fully-known position and one chosen action per side, and returns the possible
+//! successor positions with their exact probabilities. The caller integrates over them;
+//! nothing here averages anything itself, so nothing it returns is a point estimate
+//! standing in for a distribution. Three commitments shape it:
+//!
+//! * **The position is fully known.** The belief layer hands the resolver one concrete SP
+//!   spread per particle, so from inside there is no hidden information, and the engine can
+//!   be compared against Showdown -- also fully informed -- turn by turn and field by field.
+//!   A hidden SP here is a programming error rather than something to guess at.
+//! * **Randomness is enumerated, not sampled.** A turn's chance is a few independent draws
+//!   (16 damage rolls per hit, a crit, an accuracy check, a secondary, a Speed tie, a Quick
+//!   Claw). Enumerating them gives exact probabilities and reproducible output; sampling
+//!   would put Monte Carlo noise into a displayed win probability. When the branch count
+//!   would exceed the budget, damage rolls are *stratified* -- a fixed subset carrying the
+//!   weight of the block it represents -- and the result says it is not exact.
+//! * **Showdown's mid-turn re-sort is honoured.** From generation 8 on, Speed is recomputed
+//!   and the remaining queue re-sorted after every action, so Tailwind going up or a Speed
+//!   drop landing reorders what has not happened yet. Each branch re-sorts against its own
+//!   state.
+//!
 //! Generation spends 96.7% of its wall clock in `resolve_turn` (measured with counters;
-//! cProfile misattributes a sixth of the run to scipy), so this is the whole target of the
-//! port.
+//! cProfile misattributes a sixth of the run to scipy), which is why it was ported.
 //!
 //! **It refuses rather than guesses.** Every entry point returns `Err(reason)` when it
-//! meets something this port does not model -- an ability outside the handled set, a move
-//! field it does not implement, a mid-turn replacement. The caller falls back to Python for
-//! that turn. That is what makes a partial port useful: a turn Rust resolves is exactly
-//! Python's answer, a turn it refuses costs nothing but Python's own time, and the refusal
-//! reasons are counted so the next thing to implement is chosen by impact.
+//! meets something this port does not model. There is nothing to fall back to any more
+//! (IKA-209): the caller stops with the reason (`pokeuraou.port.PortRefused`), and the
+//! reasons are counted (`tools/refusal_replay.py`) so the next thing to implement is chosen
+//! by impact. IKA-208 took the refusals a game meets to zero.
 //!
 //! The event log and the per-action `acts` offsets are kept only when a command asks for
 //! them (`events: true`, IKA-215; see `events.rs`). They are for display, so a turn that is
@@ -147,6 +171,12 @@ impl Budget {
     }
 }
 
+/// (roll index, probability) covering all 16 rolls with the budget's resolution.
+///
+/// With 16 this is the exact distribution. With fewer, each representative carries the
+/// weight of the block it stands for, so the distribution's mean is preserved and the only
+/// loss is resolution near a knock-out threshold. A pinned roll returns just that roll with
+/// weight 1, which is what the oracle's pinned policy draws.
 pub fn stratified_rolls(budget: &Budget) -> Vec<(usize, f64)> {
     if let Some(fixed) = budget.fixed_roll() {
         return vec![(fixed, 1.0)];
@@ -231,17 +261,44 @@ pub struct Turn<'a> {
     pub reg: &'a Reg,
     pub pos: Position,
     pub(crate) budget: Budget,
-    /// Which active slots are about to use a damaging move, for Sucker Punch.
+    /// Which active slots are about to use a damaging move, for Sucker Punch. Knowable
+    /// precisely because a turn is resolved for a *pair* of chosen actions, which is what
+    /// makes Sucker Punch a read that belongs in the matrix rather than a coin flip. A
+    /// recharge turn's action attacks nothing.
     pub(crate) attacks: [[bool; 2]; 2],
     pub(crate) hurt_this_turn: [[bool; 2]; 2],
     pub(crate) move_failed: [[bool; 2]; 2],
+    /// Damage the move resolving now has dealt, summed over its targets. Recoil and Life
+    /// Orb are computed from the total once, not per target.
     pub(crate) move_damage_total: i64,
+    /// Whether the move resolving now connected with anything. A move that was blocked,
+    /// missed or had no effect does not apply its own `self` effect.
     pub(crate) move_connected: bool,
+    /// Slots that have already taken their action this turn. Sucker Punch fails against a
+    /// target that has already moved, which is the difference between a read that worked
+    /// and one that did not.
     pub(crate) acted: [[bool; 2]; 2],
+    /// How many actions are still queued behind the one resolving. Protect (and the
+    /// guards) fail when this is zero: Showdown gates them on `queue.willAct()`.
     pub(crate) actions_remaining: usize,
+    /// Set when a self-switching move has left a slot owing a replacement, which suspends
+    /// the turn. A flag rather than a scan of the position because it is consulted after
+    /// every action in the innermost loop.
     pub(crate) self_switch_pending: bool,
+    /// Sub-100% secondaries the hit would apply, as (chance, secondary, target). Recorded
+    /// rather than applied because applying one is a branch and this state is singular; the
+    /// hit loop owns the fan-out.
     pub(crate) pending_secondaries: Vec<(f64, Value, Slot)>,
+    /// The slot whose move is resolving. Disable's duration depends on whether its subject
+    /// is the Pokemon that triggered it, which is how Cursed Body gets four turns rather
+    /// than five; a Mold Breaker's move is read through it too.
     pub(crate) current_actor: Option<Slot>,
+    /// Side indices in the order their last Pokemon fainted. Showdown's `checkWin` decides
+    /// a mutual wipe-out by the side of the Pokemon that fainted *last*
+    /// (`this.win(faintData.target.side)` for gen > 4), and a sequential wipe-out ends the
+    /// battle the moment one side runs out -- the same rule read the same way. Only the
+    /// moment of the faint knows the order; by the end of the turn both sides just look
+    /// empty. See `moves::settle_outcome`.
     pub(crate) wipe_order: Vec<usize>,
     /// Effects met that this port models only approximately -- the same strings Python
     /// reports, because a caller that prints them must not see the set shrink just
@@ -337,6 +394,11 @@ impl<'a> Turn<'a> {
     }
 
     /// Applies damage, honouring survival effects, and returns what was dealt.
+    ///
+    /// Endure, Focus Sash and Sturdy all test `effect.effectType === 'Move'` in Showdown, so
+    /// `from_move` decides whether they apply at all: none of them saves from sandstorm,
+    /// recoil or Life Orb. Endure runs at `onDamagePriority` -10 and the items at -40, so
+    /// Endure caps the damage first and the Sash, seeing a survivable hit, is never consumed.
     pub(crate) fn deal_damage(
         &mut self,
         side: usize,
@@ -437,12 +499,15 @@ impl<'a> Turn<'a> {
         let Some(item) = self.mon_at(side, slot).and_then(|mon| mon.item) else { return };
         log_event!(self, "{} lost {} ({})", Name(side, slot), item, reason);
         let Some(mon) = self.mon_at_mut(side, slot) else { return };
+        // Unburden's doubled Speed keys off a volatile added when the item is lost, not off
+        // simply holding nothing.
         if mon.ability == "unburden" && !mon.has_volatile("unburden") {
             mon.volatiles.push(Effect::new(Id::new("unburden")));
         }
         mon.item = None;
     }
 
+    /// Whether an opposing Unnerve (or As One) stops this side from eating berries.
     pub(crate) fn berries_blocked(&self, side: usize) -> bool {
         let foe_side = 1 - side;
         (0..self.pos.sides[foe_side].active.len()).any(|slot| {
@@ -478,6 +543,18 @@ impl<'a> Turn<'a> {
     }
 
     /// Applies a boost table, and says whether any stat actually moved.
+    ///
+    /// The return value is Showdown's `success` from `Battle#boost`, which Parting Shot reads
+    /// to decide whether it switches out at all.
+    ///
+    /// Contrary's `onChangeBoost` inverts every change aimed at the holder, whatever the
+    /// source -- its own Close Combat's drops included, which is the point of Mega
+    /// Staraptor -- and it does so *before* anything reads the sign, so Defiant does not see a
+    /// foe's drop that became a raise. Clear Body and its kin block only a drop another
+    /// Pokemon inflicted; a move's own drawback still applies to its user. Defiant and
+    /// Competitive answer from `runEvent('AfterEachBoost')`, which sits *inside* Showdown's
+    /// per-stat loop and fires only when the stat moved: Parting Shot's two drops are +4, not
+    /// +2, and each raise is part of the state the next drop meets.
     pub(crate) fn apply_boosts(
         &mut self,
         side: usize,
@@ -545,6 +622,7 @@ impl<'a> Turn<'a> {
         changed
     }
 
+    /// Defiant and Competitive react only to a drop the opponent caused.
     fn on_stat_lowered_by_foe(&mut self, side: usize, slot: usize) {
         let ability = match self.mon_at(side, slot) {
             None => return,
@@ -720,21 +798,49 @@ impl<'a> Turn<'a> {
     }
 }
 
+/// Freeze, as the champions mod writes it: `startTime = 3`, decremented on each attempt to
+/// move, and a forced thaw at zero on top of the 1/4 roll. Without the cap a freeze had
+/// only the geometric tail of the roll to end it, so it could hold for the rest of the
+/// battle.
 pub const FREEZE_COUNTER: i64 = 3;
+/// The oracle's policy answers `sample(values)` with `values[0]`, so this is the sleep the
+/// pinned (differential) policy's Showdown produces.
 pub const SLEEP_COUNTER_PINNED: i64 = 2;
+/// Champions sleep is `sample([2, 3, 3])` in the mod: the counter starts at 2 one time in
+/// three and at 3 the rest. With the decrement in `can_act` that is one turn of sleep or
+/// two -- the first action is always asleep, the second wakes one time in three, the third
+/// always acts. (The base game rolls `random(2, 5)`: 1, 2 or 3 turns equally.) This is the
+/// modal outcome, which is what an unbranched sleep uses; pinning 2 assumed the lucky case
+/// on every sleep in the search.
 pub const SLEEP_COUNTER_MODAL: i64 = 3;
+/// Full paralysis. The champions mod overrides the base game's 1/4:
+/// `par: { inherit: true, onBeforeMove(pokemon) { if (this.randomChance(1, 8)) ... } }`.
+/// Verified by reading the roll the simulator asked for -- `randomChance(1, 8)` on every
+/// turn a paralysed Pokemon tries to move. This was 0.25, twice the real rate, and the
+/// search multiplied it through every branch.
 pub const FULL_PARALYSIS_CHANCE: f64 = 1.0 / 8.0;
-/// `randomChance(33, 100)` (IKA-177; it was 1/3).
+/// `randomChance(33, 100)` in `confusion.onBeforeMove`, which has no Champions override and
+/// which the oracle's roll record shows (IKA-177; it was 1/3).
 pub const CONFUSION_SELF_HIT_CHANCE: f64 = 0.33;
+/// Thawing. The champions mod rewrites `frz.onBeforeMove` to `randomChance(1, 4)` with a
+/// hard three-turn cap (`FREEZE_COUNTER`), where the base game uses 1/5 and no cap. Taken
+/// from the mod's source rather than an observed roll: the policy has to force secondaries
+/// on before a freeze can be applied at all, and no thaw roll was recorded in that state,
+/// so this one is not independently confirmed the way paralysis is.
 pub const THAW_CHANCE: f64 = 0.25;
 
+/// Residual amounts, as (numerator, denominator) of max HP.
 const BURN_DAMAGE: (i64, i64) = (1, 16);
 const POISON_DAMAGE: (i64, i64) = (1, 8);
 const SANDSTORM_DAMAGE: (i64, i64) = (1, 16);
 const LEECH_SEED_DRAIN: (i64, i64) = (1, 8);
 const LEFTOVERS_HEAL: (i64, i64) = (1, 16);
 const PARTIAL_TRAP_DAMAGE: (i64, i64) = (1, 8);
-// The champions mod's Salt Cure, half the base game's (IKA-159); see resolve.py.
+// The champions mod's Salt Cure, half the base game's 1/8 and 1/4 (IKA-159):
+//     saltcure: { condition: { onResidual(pokemon) {
+//         this.damage(pokemon.baseMaxhp / (pokemon.hasType(['Water', 'Steel']) ? 8 : 16));
+// (vendor/pokemon-showdown/data/mods/champions/moves.ts). No other residual fraction is
+// changed by the mod.
 const SALT_CURE_DAMAGE: (i64, i64) = (1, 16);
 const SALT_CURE_DAMAGE_WEAK: (i64, i64) = (1, 8);
 
@@ -1325,6 +1431,12 @@ pub fn resolve_turn_logged<'a>(
     Ok(TurnResult { branches, exact, suspended, unmodelled })
 }
 
+/// Orders produced by resolving Speed ties, with their probabilities.
+///
+/// Showdown shuffles a tied group, so each permutation is equally likely. Pairwise ties are
+/// what occur in doubles and are expanded exactly; a larger tied group keeps the canonical
+/// order. (Python's docstring said such a group "is reported"; neither its code nor this
+/// reports it -- IKA-212 left that as it was.)
 fn tie_permutations(
     order: &[usize],
     ties: &[Vec<usize>],
@@ -1747,6 +1859,8 @@ fn merge_branches(items: Vec<Branch>) -> Vec<Branch> {
     .0
 }
 
+/// Pauses that are the same pause: same state, same queue still owed. A pause is resumed
+/// once per candidate replacement, so folding two saves that whole fan-out, not a leaf.
 fn merge_suspended<'a>(items: Vec<Suspended<'a>>) -> Vec<Suspended<'a>> {
     if items.len() < 2 {
         return items;
@@ -1760,6 +1874,15 @@ fn merge_suspended<'a>(items: Vec<Suspended<'a>>) -> Vec<Suspended<'a>> {
     .0
 }
 
+/// Runs branches until their queues are empty or a replacement request interrupts them.
+///
+/// Entered both at the top of a turn and again from `resume_turn`, so a turn interrupted
+/// twice -- two U-turns on the same side, say -- goes through exactly one code path. The
+/// remaining branch budget is divided among the live branches and each action's resolution
+/// narrowed to fit; without that the generation is built at full resolution and then thrown
+/// away, which costs the time anyway. It is pruned as it is built, not after: building it in
+/// full first would peak at the cap times the branching factor -- a quarter of a million
+/// copied positions for an exact budget.
 fn run_queue<'a>(
     reg: &'a Reg,
     start: Vec<Live<'a>>,
@@ -1865,6 +1988,9 @@ fn run_queue<'a>(
                     turn.rolls_stratified = false;
                     exact = false;
                 }
+                // Showdown ends the battle as soon as a side is wiped and abandons the rest
+                // of the queue. Carrying on would apply moves that never happened --
+                // including a spread move hitting the winner's own partner.
                 let wiped = turn.pos.sides.iter().any(|s| s.pokemon.iter().all(|m| m.fainted));
                 let remaining_actions = if wiped { Vec::new() } else { rest.clone() };
                 let child =
@@ -1928,6 +2054,12 @@ fn run_queue<'a>(
         // `clearVolatile`), so a child never inherits the root's verdict; the trap is
         // read off the position from here on, as `resolve._clear_trapped` (IKA-175).
         // Only a flagged one is written, so a shared bench Pokemon is not copied.
+        // `endTurn` sets `pokemon.trapped = pokemon.maybeTrapped = false` and reruns
+        // `TrapPokemon`; the flag is only ever Showdown's verdict on the position it was
+        // computed for, and a trapper that fainted or left this turn would otherwise keep
+        // its target trapped in every child. `actions._is_trapped` reads the trap off the
+        // position (IKA-163, IKA-169), which is what a generated position (never flagged)
+        // always did. A paused turn keeps it, as Showdown's mid-turn state does.
         for side in item.turn.pos.sides.iter_mut() {
             for mon in side.pokemon.iter_mut() {
                 if mon.trapped {
@@ -2136,6 +2268,9 @@ pub(crate) fn phase_end(_index: usize, _start: PhaseStart) {}
 pub static RESORTS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 pub static RESIDUALS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
+/// Re-sorts the remaining queue against the current state: the generation 8+ behaviour in
+/// `Battle#runAction`, where Speed is recomputed and the queue re-sorted before each move,
+/// so a Speed change earlier in the turn reorders what is left -- in this branch only.
 fn resort(
     reg: &Reg,
     turn: &Turn,
@@ -2198,8 +2333,6 @@ fn execute<'a>(
     }
 }
 
-/// Python's `_restore_types` (IKA-162): the species' own types, as `clearVolatile`'s
-/// `setSpecies` leaves them on a switch out and on a faint.
 /// Phazing, at the end of `runAction` (sim/battle.ts): for each side and each active
 /// position in order, a Pokemon with `forceSwitchFlag` and HP is dragged out by
 /// `dragIn` -- `getRandomSwitchable`, a `sample` over the bench in party order -- and the
@@ -2285,6 +2418,10 @@ fn drag_in<'a>(reg: &'a Reg, turn: Turn<'a>, budget: &Budget) -> Result<Vec<Outc
     Ok(out)
 }
 
+/// Python's `_restore_types` (IKA-162): the species' own types, as `clearVolatile`'s
+/// `setSpecies(this.baseSpecies)` leaves them on a switch out and on a faint. A mega or a
+/// busted Disguise is a permanent forme change, so `baseSpecies` is the forme and
+/// `mon.species` is the same id.
 fn restore_types(reg: &Reg, mon: &mut Pokemon) {
     if let Some(entry) = reg.species.get(mon.species.as_str()) {
         mon.types = entry.type_ids;
@@ -2295,6 +2432,24 @@ fn do_switch(reg: &Reg, turn: &mut Turn, action: &QueuedAction) -> Result<(), St
     do_switch_with(reg, turn, action, true)
 }
 
+/// Brings a benched Pokemon in, mirroring Showdown's party-slot swap.
+///
+/// `BattleActions#switchIn` swaps the two Pokemon's positions in `side.pokemon` whenever
+/// there is an outgoing Pokemon at all -- the swap is inside `if (oldActive)`, with no test
+/// for whether it fainted -- so an active Pokemon always sits at its own active index and
+/// `side.active` stays `[0, 1]`. The party index is what `switch N` choice strings count, so
+/// this has to match exactly or every later choice refers to the wrong Pokemon. The incoming
+/// Pokemon is found by species identity first and by index second: the first switch of a
+/// double switch swaps party positions, so the index recorded when the action was queued
+/// may now point at a different Pokemon (Species Clause makes the species unique).
+///
+/// The fainted case only differs in what happens to the Pokemon leaving: a conscious one
+/// keeps its status and loses its volatiles (Unburden's marker and Disable's flag, which
+/// lives on the move slot, with them), while `if (oldActive.fainted) oldActive.status = ''`
+/// clears the fainted marker on the way to the bench. The newcomer gets
+/// `activeMoveActions = 0` beside the `moveSlot.used = false` loop, which re-arms Fake Out,
+/// and `tox.onSwitchIn` restarts a bad poison's counter rather than resuming it.
+///
 /// `run_switch_in` is false for a mid-turn replacement, where every incoming Pokemon is
 /// placed before any of them sees a hazard or an Intimidate.
 fn do_switch_with(
@@ -2392,6 +2547,11 @@ fn do_switch_with(
 // ---------------------------------------------------------------------------
 
 /// Per side, per active slot, whether a self-switching move is waiting on a choice.
+///
+/// Narrower than `replacements_needed` on purpose. A faint is answered after the turn and a
+/// forced switch is a random drag, but a self-switch interrupts the turn *now*, so only these
+/// slots may be filled by `resume_turn`. (`pokeuraou.port.self_switches_needed` reads the same
+/// flag off a pause on the Python side.)
 pub fn self_switches_needed(pos: &Position) -> [[bool; 2]; 2] {
     let mut out = [[false; 2]; 2];
     for (side_index, side) in pos.sides.iter().enumerate() {
@@ -2483,6 +2643,15 @@ fn build_combinations(
 }
 
 /// Finishes a turn that stopped at a mid-turn replacement request.
+///
+/// `choices` is one action list per side, shaped like the post-turn replacement phase: a
+/// switch for each slot that owes one, a pass everywhere else. Only the interrupted slot may
+/// move -- filling any other one here would be a free switch the turn never offered. The
+/// replacement enters and then the rest of the queue runs, the residual phase included,
+/// which is the whole point: Showdown puts the interrupt in front of both. The result can
+/// suspend again (two U-turns on the same side are two separate requests, as in Showdown).
+/// The pause is not consumed: it is resumed once per candidate replacement when the caller
+/// is choosing between them, so its state is copied here.
 pub fn resume_turn<'a>(
     reg: &'a Reg,
     paused: &Suspended<'a>,
@@ -2555,7 +2724,9 @@ pub fn resume_turn<'a>(
         Ok(())
     })?;
 
-    // Python's `_without_replaced`: an action queued for the Pokemon that left goes with it.
+    // Python's `_without_replaced`: an action queued for the Pokemon that left goes with it
+    // (`runAction` skips a Pokemon that is no longer active), so an Eject Button holder that
+    // had not moved yet does not move, and neither does its replacement.
     let remaining: Vec<QueuedAction> = paused
         .remaining
         .iter()
@@ -2574,6 +2745,11 @@ pub fn resume_turn<'a>(
 }
 
 /// Every replacement the interrupted side could send in, and the turn each produces.
+///
+/// Showdown checks `switchFlag` after each action, so at most one side is ever asked at a
+/// time and the choice belongs to one player. If both sides owe one at once the choices
+/// interact and it is no longer a single-player decision, so that is reported rather than
+/// quietly treated as one.
 pub fn resume_alternatives<'a>(
     reg: &'a Reg,
     paused: &Suspended<'a>,
@@ -2685,6 +2861,11 @@ fn on_switch_in(reg: &Reg, turn: &mut Turn, side: usize, slot: usize) -> Result<
     result
 }
 
+/// Entry hazards, then the switch-in ability, then a Seed under a terrain already up
+/// (`onSwitchInPriority: -1`), then White Herb (`onAnySwitchInPriority: -2`, after the
+/// switch-in abilities: an Intimidate drop is undone before anything else reads the stat).
+/// A grounded Poison type absorbs Toxic Spikes and clears them for the whole side, which is
+/// a bigger deal than the status it dodges.
 fn switched_in(reg: &Reg, turn: &mut Turn, side: usize, slot: usize) -> Result<(), String> {
     let (types, is_grounded) = {
         let Some(mon) = turn.mon_at(side, slot) else { return Ok(()) };
@@ -2742,7 +2923,8 @@ fn switched_in(reg: &Reg, turn: &mut Turn, side: usize, slot: usize) -> Result<(
 }
 
 fn switch_in_ability(turn: &mut Turn, side: usize, slot: usize) {
-    // First, so that the ability it copies starts here too, as Python's (IKA-203).
+    // First, so that the ability it copies starts here too (`setAbility` runs its Start),
+    // as Python's (IKA-203).
     trace(turn, side, slot);
     let (ability, item, maxhp) = {
         let Some(mon) = turn.mon_at(side, slot) else { return };
@@ -2825,6 +3007,11 @@ fn switch_in_ability(turn: &mut Turn, side: usize, slot: usize) {
     }
 }
 
+/// Consumes White Herb on any holder that currently has a lowered stat.
+///
+/// Showdown hangs this on `onAnySwitchIn` / `onAnyAfterMove` / `onAnyAfterMega` and on the
+/// residual, all of which call the same handler, so the faithful shape is one scan over
+/// every active slot rather than a check tied to whoever just acted.
 pub(crate) fn check_white_herb(turn: &mut Turn) {
     for side in 0..turn.pos.sides.len() {
         for slot in 0..turn.pos.sides[side].active.len() {
@@ -2957,6 +3144,8 @@ fn do_mega(reg: &Reg, turn: &mut Turn, action: &QueuedAction) -> Result<(), Stri
     }
     turn.pos.sides[action.side].mega_used = true;
     log_event!(turn, "{} -> {}", Name(action.side, action.slot), target_id);
+    // The new ability's switch-in effect fires, which is how a mega Intimidate lands; then
+    // `onAnyAfterMega`: a drop the mega's own Intimidate just caused is undone at once.
     switch_in_ability(turn, action.side, action.slot);
     check_white_herb(turn);
     Ok(())
@@ -3007,6 +3196,32 @@ fn traceable(reg: &Reg, ability: &str) -> bool {
 
 /// Python's `_trace`: the ability of a foe standing, drawn uniformly over the foes, and
 /// nothing with an Ability Shield or a `noability` foe.
+///
+/// Trace (data/abilities.ts; the champions mod leaves it alone):
+///
+/// ```text
+/// onStart(pokemon) {
+///     this.effectState.seek = true;
+///     if (pokemon.adjacentFoes().some(foeActive => foeActive.ability === 'noability'))
+///         this.effectState.seek = false;
+///     if (pokemon.hasItem('Ability Shield')) { ...; this.effectState.seek = false; }
+///     if (this.effectState.seek) this.singleEvent('Update', ...);
+/// },
+/// onUpdate(pokemon) {
+///     const possibleTargets = pokemon.adjacentFoes().filter(
+///         target => !target.getAbility().flags['notrace'] && target.ability !== 'noability');
+///     if (!possibleTargets.length) return;
+///     const target = this.sample(possibleTargets);
+///     pokemon.setAbility(target.getAbility(), target);
+/// },
+/// ```
+///
+/// `adjacentFoes` is the foes standing, in slot order, and `sample` is uniform over them, so
+/// two foes with the same ability are one outcome of twice the weight. `setAbility` ends in
+/// `singleEvent('Start', ability)`: a traced Intimidate or weather starts at once, which is
+/// why this runs at the top of `switch_in_ability`. With nothing to copy the ability goes
+/// on seeking at every `Update`, which is not modelled (noted). Mega Alakazam and the Mega
+/// Meowstics trace on the mega too (`setAbility` from the forme change runs Start).
 fn trace(turn: &mut Turn, side: usize, slot: usize) {
     let shielded = match turn.mon_at(side, slot) {
         Some(mon) if !mon.fainted && mon.ability == "trace" => {
@@ -3083,6 +3298,12 @@ fn mega_may_trace(reg: &Reg, turn: &Turn, action: &QueuedAction) -> bool {
 
 /// Python's `_switch_in_with_draws`: the switch-in once per outcome of its draws, the
 /// first on `turn` itself, the others on copies of the state from before, breadth first.
+///
+/// Each draw met is answered by its first option; for every other option a copy of the
+/// state from before is run again with the choices up to that draw fixed. Nothing is copied
+/// when no Pokemon that could draw is coming in. A budget that collapses the random ranges
+/// takes the first with a note, and the pinned one takes it silently, as
+/// `draw_random_target` does.
 fn switch_in_with_draws<'a>(
     mut turn: Turn<'a>,
     budget: &Budget,
@@ -3136,6 +3357,9 @@ fn resume_forks<'a>(
             self_switches_needed(&state.pos).iter().any(|side| side.iter().any(|flag| *flag));
         let part = if state.self_switch_pending {
             // Python's `_suspended_again`: the other side is asked before the queue runs on.
+            // Showdown asks both at once (a U-turn into an Eject Button); one after the
+            // other is the nearest shape the self-switch node has, and
+            // `resume_alternatives` reports it.
             let unmodelled = state.unmodelled.clone();
             TurnResult {
                 branches: Vec::new(),
@@ -3189,6 +3413,22 @@ pub(crate) fn apply_status_from(
 }
 
 /// Python's `_synchronize`: a poison, burn or paralysis from another Pokemon is passed back.
+///
+/// Synchronize (data/abilities.ts; the champions mod leaves it alone):
+///
+/// ```text
+/// onAfterSetStatus(status, target, source, effect) {
+///     if (!source || source === target) return;
+///     if (effect && effect.id === 'toxicspikes') return;
+///     if (status.id === 'slp' || status.id === 'frz') return;
+///     source.trySetStatus(status, target, {status: status.id, id: 'synchronize'});
+/// },
+/// ```
+///
+/// `AfterSetStatus` runs when the status is set, before a Lum Berry's `Update` cures it, so
+/// a Lum holder passes it on too. `trySetStatus` fails on a Pokemon that already has a
+/// status and goes through the same immunities as any other (`apply_status`). Toxic Spikes
+/// passes no source here, and neither does anything else without one.
 fn synchronize(turn: &mut Turn, holder: Slot, source: Slot, status: &str) -> Result<(), String> {
     if source == holder || status == "slp" || status == "frz" {
         return Ok(());

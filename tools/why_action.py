@@ -49,7 +49,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from human_baseline import CASES, load_leaf, position_of  # noqa: E402
 
+from pokeuraou import port  # noqa: E402 - Python's resolver until IKA-212
 from pokeuraou.actions import SideAction, SwitchAction, target_names  # noqa: E402
+from pokeuraou.budget import Budget  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.encode import Encoder  # noqa: E402
 from pokeuraou.equilibrium import solve  # noqa: E402
@@ -57,7 +59,6 @@ from pokeuraou.names import localiser  # noqa: E402
 from pokeuraou.narrow import narrow  # noqa: E402
 from pokeuraou.position import Position  # noqa: E402
 from pokeuraou.regulation import load_regulation  # noqa: E402
-from pokeuraou.resolve import Budget, resolve_turn  # noqa: E402
 from pokeuraou.search import leaf_ranking, search  # noqa: E402
 
 
@@ -239,8 +240,8 @@ def main() -> None:  # noqa: PLR0912, PLR0915 - a report, and splitting it hides
         for j in shown[np.argsort(-y[shown])]:
             print(f"\n  相手: {theirs[j].describe(reg, loc, their_targets)}  （質量 {y[j]:.1%}）")
             for i, choice in zip(idx, wanted, strict=True):
-                res = resolve_turn(reg, pos, [ours[i], theirs[j]], budget=Budget())
-                best = max(res.branches, key=lambda br: br.probability)
+                res = port.turn(reg, pos, [ours[i], theirs[j]], Budget(), full=True)
+                best = max(res.outcomes, key=lambda br: br.probability)
                 print(
                     f"    {choice:22s} p={best.probability:.2f}  {outcome(pos, best.position)}"
                 )

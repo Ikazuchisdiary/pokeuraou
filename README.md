@@ -25,7 +25,9 @@ src/pokeuraou/                  Python。ソルバ側。Showdown には一切触
   battler.py / damage.py        ダメージ計算
   effects.py / moveinfo.py      特性・道具・技固有の修正子（Showdown から転記）
   speed.py                      実効素早さ・優先度・行動順
-  resolve.py                    1ターン解決器（乱数は列挙、サンプルしない）
+  port.py / rustnode.py         1ターン解決器（rust/ の port。乱数は列挙、サンプルしない）への口。
+                                Python の resolve.py は IKA-212 で削除（鎖は Showdown → port）
+  budget.py / fold.py           乱数をどこまで列挙するか（Budget）と、葉を畳む木
   priors.py                     Smogon usage stats → 事前分布・チームサンプラ
   view.py                       Position → 計算器入力
   belief.py                     隠れ情報（SP 配分）のパーティクルと局面依存の縮約
@@ -42,8 +44,8 @@ src/pokeuraou/                  Python。ソルバ側。Showdown には一切触
   payoff.py                     評価軸。無パラメータのものだけ
   setup.py                      局面 JSON → Position（相手の配分は空のまま）
   cli.py                        1ターン検討ツール本体
-tools/                          fetch_priors / coverage / bench / diverge_report /
-                                belief_report / profile_resolve / selfplay_budget /
+tools/                          fetch_priors / coverage / diverge_report /
+                                belief_report /
                                 selfplay / selfplay_analyse / asymmetry /
                                 cooc_report / archetype_audit / fetch_standings /
                                 standings_report / names_report /
@@ -430,7 +432,7 @@ p2[1]  候補 1314 → 1314（エントロピー -0.25 bit）  やけど 1/16 �
 | `effective_speed` | 1.2 µs |
 | `side_actions`（242 手） | 176 µs |
 | `Position.copy` | 26 µs（`copy.deepcopy` は 403 µs） |
-| `resolve_turn`（`Budget.matrix()`、1 分岐） | **1.10 ms** |
+| `resolve_turn`（Python、`Budget.matrix()`、1 分岐。IKA-212 で削除） | **1.10 ms** |
 | `resolve_turn`（`Budget.fast()`、2 乱数） | 77 ms |
 | `resolve_turn`（`Budget.exact()`、上限 512 分岐） | 1.3 s |
 | `solve`（24×24 LP） | 2.2 ms |
@@ -460,7 +462,7 @@ override 経路で memo を通らない）ので、近似ではなく厳密な�
 3 ターン後に誤ったダメージとして出てくるバグに化けるので、書き込みは即座に例外にします。
 （適用後も乖離率は不変: 解決器 5.62% / 無警告 3.37%、ダメージ 0.000%）
 
-### 自己対戦の予算（`tools/selfplay_budget.py`、1 ゲーム 12 ターン / 50,000 ゲーム）
+### 自己対戦の予算（`tools/selfplay_budget.py`、1 ゲーム 12 ターン / 50,000 ゲーム。Python の解決器の頃の数字で、道具は IKA-212 で削除）
 
 | 探索サイズ | セル数 | 1 局面 | 1 ゲーム | 1 コア | 16 コア |
 |---|---|---|---|---|---|
@@ -1377,9 +1379,8 @@ node packages/sim-bridge/dist/cli/dump-regulation.js
 uv sync
 uv run pytest -m "not slow"                       # 高速
 uv run pytest                                     # 全数スイープ込み
-uv run python tools/bench.py                      # 性能
 uv run python tools/coverage.py                   # 使用率加重カバー率
-uv run python tools/diff_turn.py --battles 40     # 解決器の乖離率
+uv run python tools/diff_turn.py --battles 40     # 解決器（port）の Showdown との乖離率
 uv run python tools/diff_replacement.py --battles 25  # 交代フェーズの乖離率
 uv run python tools/selfplay.py --games 100 --report   # 自己対戦データ生成
 uv run python tools/selfplay_analyse.py           # 中身とプロキシの AUC
@@ -1389,8 +1390,6 @@ uv run --group learn python tools/encode_dataset.py --dir data/selfplay-gen1
 uv run --group learn python tools/train_value.py --curve 0.25,0.5,1.0
 uv run python tools/diverge_report.py --seeds 14  # 乖離原因を lift で順位付け
 uv run python tools/belief_report.py --positions 30 --stability 8   # 信念層の実測
-uv run python tools/profile_resolve.py --workload matrix --top 20  # ホットパス
-uv run python tools/selfplay_budget.py            # 自己対戦の予算
 uv run python -m pokeuraou.cli examples/scenario-turn1.json --stability
 uv run python -m pokeuraou.cli examples/scenario-turn5.json   # 観測つき（事後分布）
 ```

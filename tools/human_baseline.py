@@ -34,13 +34,14 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from pokeuraou import port  # noqa: E402 - Python's resolver until IKA-212
 from pokeuraou.actions import side_actions  # noqa: E402
+from pokeuraou.budget import Budget  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.encode import Encoder  # noqa: E402
 from pokeuraou.narrow import narrow  # noqa: E402
 from pokeuraou.position import Position  # noqa: E402
 from pokeuraou.regulation import load_regulation  # noqa: E402
-from pokeuraou.resolve import Budget, resolve_turn  # noqa: E402
 from pokeuraou.search import leaf_ranking, search  # noqa: E402
 
 
@@ -199,10 +200,10 @@ def check_resolver(case: Case, reg, pos: Position, decision: dict) -> str | None
     }
     if action not in legal[0] or their not in legal[1]:
         return f"{action!r} or {their!r} is not legal in this position"
-    result = resolve_turn(reg, pos, [legal[0][action], legal[1][their]], budget=Budget())
+    result = port.turn(reg, pos, [legal[0][action], legal[1][their]], Budget(), full=True)
     dead = Counter()
     total = 0.0
-    for branch in result.branches:
+    for branch in result.outcomes:
         mon = next(
             (m for m in branch.position.sides[1].pokemon if m.species == species), None
         )
@@ -230,11 +231,11 @@ def check_dominance(case: Case, reg, pos: Position) -> str | None:  # noqa: ANN0
             return f"{choice!r} is not legal in this position"
 
     def score(ours: str, theirs: str) -> tuple[float, float, float]:
-        res = resolve_turn(reg, pos, [legal[0][ours], legal[1][theirs]], budget=Budget())
+        res = port.turn(reg, pos, [legal[0][ours], legal[1][theirs]], Budget(), full=True)
         before_them = {m.species: m.hp for m in pos.sides[1].pokemon}
         before_us = {m.species: m.hp for m in pos.sides[0].pokemon}
         dead = total = dealt = taken = 0.0
-        for branch in res.branches:
+        for branch in res.outcomes:
             total += branch.probability
             occupant = branch.position.sides[1].active_pokemon()[case.dominance_slot]
             if occupant is not None and occupant.fainted:

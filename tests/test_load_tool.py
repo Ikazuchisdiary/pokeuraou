@@ -37,8 +37,8 @@ BELOW = "\n\ndef defined_below() -> int:\n    return 1\n"
 FAILURES = {
     "import": (f"import {ABSENT}\n", ModuleNotFoundError, f"No module named '{ABSENT}'"),
     # Not an Exception, so a fix that caught Exception would leave this one behind. The tree
-    # has the real thing: `tools/cells_needed.py` parses its arguments at module scope, and
-    # under pytest's argv that is SystemExit(2).
+    # had the real thing: `tools/cells_needed.py` parsed its arguments at module scope, and
+    # under pytest's argv that is SystemExit(2) (the tool went in IKA-212).
     "exit": ("raise SystemExit('ika40: stopped at module scope')\n", SystemExit, "ika40: stopped"),
 }
 

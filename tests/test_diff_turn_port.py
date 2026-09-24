@@ -1,13 +1,13 @@
 """The port held to Showdown over whole battles (IKA-207).
 
 `tools/diff_turn.py` plays Showdown and hands every turn's position and choices to the port
-under Showdown's pins. The tool still has Python's column beside it (IKA-212 takes it);
-these run the port's column alone (`python=False`, IKA-210), with the thresholds
-`test_resolve` held Python to. Until IKA-210 they ran both and also held the guard that
-mattered while both engines existed: on a turn both answered, the port never diverged
-where Python matched. Beside Python gone, a mid-turn replacement is now Showdown's
-`default` on the run's next step rather than one Python's column drew, so the battles
-are not the ones the numbers below were measured on.
+under Showdown's pins, with the thresholds `test_resolve` held Python to. The tool had
+Python's column beside the port's until IKA-212, which deleted it with the resolver; these
+ran the port's column alone since IKA-210. Until IKA-210 they ran both and also held the
+guard that mattered while both engines existed: on a turn both answered, the port never
+diverged where Python matched. A mid-turn replacement is drawn from the port's own pause,
+as Python's column drew it, so a seed plays the battles it played beside Python wherever
+the two pauses agreed.
 
 Measured when written (seed 1, 400 battles, PYTHONHASHSEED=0): Python diverged on 156 of
 2,723 compared turns, the port on 127 of 2,456, and on the 2,456 both answered the two
@@ -52,11 +52,9 @@ def _need_port() -> None:
 @pytest.mark.parametrize("seed", [1, 5])
 def test_the_port_matches_showdown_over_whole_battles(seed: int) -> None:
     _need_port()
-    report = diff_turn.run(
-        battles=8, roll=8, seed=seed, max_turns=10, port=True, python=False
-    )
+    report = diff_turn.run(battles=8, roll=8, seed=seed, max_turns=10)
     port = report.port
-    assert port is not None and report.compared == 0, "Python's column ran"
+    assert port is not None
     assert port.compared >= 20, f"only {port.compared} turns compared\n{port.render()}"
     assert port.silent_rate <= MAX_SILENT_DIVERGENCE, port.render()
     assert port.divergence_rate <= MAX_TOTAL_DIVERGENCE_PER_SEED, port.render()
@@ -92,9 +90,7 @@ def test_the_port_carries_paused_turns_on_with_showdown() -> None:
     """IKA-217: a turn the port and Showdown both stopped inside is resumed and compared,
     not set aside; aimed at U-turn and friends so there are stops to carry on."""
     _need_port()
-    report = diff_turn.run(
-        battles=8, roll=8, seed=2, max_turns=10, port=True, self_switch=0.8, python=False
-    )
+    report = diff_turn.run(battles=8, roll=8, seed=2, max_turns=10, self_switch=0.8)
     port = report.port
     assert port is not None
     assert port.paused > 0 and port.continued > 0, port.render()
@@ -110,7 +106,7 @@ def test_two_columns_of_one_binary_agree() -> None:
     same = rustnode.binary_path()
     report = diff_turn.run(
         battles=4, roll=8, seed=2, max_turns=10, self_switch=0.8,
-        exes=[("a", same), ("b", same)], python=False,
+        exes=[("a", same), ("b", same)],
     )
     a, b = report.ports["a"], report.ports["b"]
     assert a.compared > 0 and a.continued > 0, a.render("a")

@@ -83,7 +83,7 @@ def test_the_flag_pair() -> None:
         ("selfplay", []),
         ("generation_match", []),
         ("selection_check", []),
-        ("branch_dedup", []),
+        # `branch_dedup` stood here until IKA-212 deleted it with Python's resolver.
         ("profile_stages", ["generation"]),
     ],
 )

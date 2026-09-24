@@ -8,10 +8,11 @@ game has never been compared with anything.
 
 Self-play to a win or a loss goes through this phase constantly, so it gets the same
 treatment as everything else: play real battles, make the choice explicitly on both sides,
-apply the identical choice through `resolve_replacements`, and compare the resulting
-positions field by field.
+apply the identical choice through the port's replacement phase (`replacements`, IKA-211;
+Python's `resolve_replacements` until IKA-212), and compare the resulting positions field
+by field.
 
-Two things get checked, not one. Whether the resolver *knows* a replacement is owed --
+Two things get checked, not one. Whether the port *knows* a replacement is owed --
 `replacements_needed` against Showdown's own `forceSwitch` flags -- and whether applying
 it produces the same position. The first failing silently would be worse: a game loop that
 does not notice it owes a replacement simply stops.
@@ -32,8 +33,9 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from diff_turn import canonical, field_kind  # noqa: E402
+from diff_turn import canonical, field_kind, port_position  # noqa: E402
 
+from pokeuraou import port
 from pokeuraou.actions import PassAction, SideAction, side_actions, switch_actions_after_faint
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
@@ -44,20 +46,23 @@ from pokeuraou.regulation import Regulation, load_regulation
 FORMAT_ID = "gen9championsvgc2026regmc"
 
 
-# Python's replacement phase, imported when it is asked for rather than at load: the
-# suite loads this harness and puts the port's in these two names (tests/test_replacement,
-# IKA-210), and must not import the resolver to do it. The tool moves to the port with
-# IKA-212.
-def replacements_needed(pos: Position) -> tuple[tuple[bool, ...], tuple[bool, ...]]:
-    from pokeuraou.resolve import replacements_needed as python
-
-    return python(pos)
+# The port's replacement phase (IKA-212). A Showdown position is handed over as the port
+# is given one (`diff_turn.port_position`: Showdown's stats dropped where nothing reads them).
+def replacements_needed(reg: Regulation, pos: Position) -> tuple[tuple[bool, ...], ...]:
+    return port.replacements_needed(reg, port_position(pos.to_json()))
 
 
 def resolve_replacements(reg: Regulation, pos: Position, choices: list) -> object:
-    from pokeuraou.resolve import resolve_replacements as python
+    """The phase with its trace, for the examples; a refusal raises `port.PortRefused`."""
+    shown = port_position(pos.to_json())
 
-    return python(reg, pos, choices)
+    def call(node):  # noqa: ANN001, ANN202
+        answer = node.resolve_replacements(shown, list(choices), events=True)
+        if answer is None:
+            raise port.PortRefused(f"the port refused a replacement phase: {node.refusal}")
+        return answer
+
+    return port.ask(reg, call)
 
 
 @dataclass
@@ -180,7 +185,7 @@ def _compare(
     py_rng: random.Random,
     report: Report,
 ) -> None:
-    ours_flags, theirs_flags = replacements_needed(before)
+    ours_flags, theirs_flags = replacements_needed(reg, before)
     our_view = [ours_flags, theirs_flags]
 
     chosen: list[SideAction] = []

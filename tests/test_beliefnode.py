@@ -794,51 +794,17 @@ def test_a_midgame_patched_leaf_equals_the_ports_own_leaf(midgame) -> None:  # n
     assert compared > 0
 
 
-def test_a_cell_the_port_refuses_is_resolved_per_completion(midgame) -> None:  # noqa: ANN001
-    """The defect IKA-139 found on master: a refused cell was left at 0.0.
-
-    `belief_payoffs` asks the port for the whole node on the true position and reads its
-    spans and folds -- and a cell the port refuses has neither. Nothing marked it dirty, so
-    it was not re-resolved either, and its payoff stayed at the 0.0 the matrix was made
-    with in every completion; `_per_completion` fills the same cell in Python, as every
-    other caller of the port does (`resolve._rust_encoded_payoffs`). On `data/ika73/w12`
-    games 10-209 that was 3,886 cells in 179 of 10,158 completion matrices, 19 decisions,
-    every one `breaksProtect move` (Feint). The turn-1 fixtures and games 0-9 had none.
-
-    The port answers Feint since IKA-61, and since IKA-208 it refuses no move at all: Flower
-    Trick and then Dragon Darts were the refused move here, given to side 1's Toxapex
-    (Garchomp is locked into Earthquake by its Scarf). With nothing left to refuse per cell
-    (a refused *position* refuses every cell, and the fast path then shares none), these
-    tests skip; the Python fallback they hold goes in IKA-209. Not Roar: phazing marks the
-    cell dirty, so the fast path never shares it.
-    """
-    reg, position, ours, theirs, spreads = _with_feint(midgame)
-    wrong = _node_mismatches(reg, position, ours, theirs, spreads, _SlotLeaf(Encoder(reg)))
-    assert not wrong, f"cells not equal to the bit: {wrong}"
+# `test_a_cell_the_port_refuses_is_resolved_per_completion` and its `_with_feint` node stood
+# here until IKA-212. They held the road IKA-139 fixed -- a cell the port refused, filled in
+# Python per completion -- and had skipped since IKA-208 (the port refuses no move a game
+# meets) and held nothing since IKA-209, when a refused cell stopped being filled here and
+# started raising (`port.raise_refused`, tests/test_port_only.py). The two tests below used
+# the same node only as a node with shared and dirty cells; they take the mid-game node as it
+# is now.
 
 
-def _with_feint(midgame):  # noqa: ANN001, ANN202
-    """The mid-game node with Dragon Darts on Toxapex: shared refused cells, and dirty ones."""
-    from pokeuraou.position import MoveSlot
-
-    reg, position, ours, _theirs, _spreads, sheet, seen = midgame
-    position = position.copy()
-    toxapex = next(m for m in position.sides[1].pokemon if to_id(m.species) == "toxapex")
-    toxapex.moves[0] = MoveSlot(id="dragondarts", pp=16, maxpp=16)
-    # The completions have to be of this position, not of the fixture's.
-    spreads = {s: completions(reg, position, s, sheet, seen=seen[s]) for s in (0, 1)}
-    theirs = [
-        action for action in side_actions(reg, position, 1)
-        if any(getattr(slot, "move_id", None) == "dragondarts" for slot in action.slots)
-    ][:4] + narrow(reg, position, 1, limit=6).actions
-
-    port = rustnode.node_for(reg)
-    filled = port.fill_encoded(position, ours, theirs, Budget.matrix())
-    hidden = {side: items[0].slots for side, items in spreads.items()}
-    dirty = reaches_bench(reg, ours, theirs, hidden)
-    shared_refusals = [(i, j) for i, j, _why in filled.refused if not dirty[i, j]]
-    if not shared_refusals:
-        pytest.skip("the port refuses no move since IKA-208; the fallback goes in IKA-209")
+def _plain(midgame):  # noqa: ANN001, ANN202
+    reg, position, ours, theirs, spreads, _sheet, _seen = midgame
     return reg, position, ours, theirs, spreads
 
 
@@ -868,9 +834,10 @@ class _CountedSlotLeaf(_SlotLeaf):
 
 
 def test_a_hidden_node_is_scored_in_one_forward_pass(midgame, monkeypatch) -> None:  # noqa: ANN001
-    """Every completion's shared rows, its dirty cells from the port and the cells the port
-    refused all go through one `from_encoded`, and the node still equals the definition."""
-    reg, position, ours, theirs, spreads = _with_feint(midgame)
+    """Every completion's shared rows and its dirty cells from the port all go through one
+    `from_encoded` (and, until IKA-209, the cells the port refused), and the node still
+    equals the definition."""
+    reg, position, ours, theirs, spreads = _plain(midgame)
     shapes: list[list[int]] = []
     real = beliefnode._stacked
 
@@ -887,8 +854,8 @@ def test_a_hidden_node_is_scored_in_one_forward_pass(midgame, monkeypatch) -> No
     assert leaf.passes == 1 and leaf.calls == 0, (leaf.passes, leaf.calls)
     (blocks,) = shapes
     completions_total = sum(len(items) for items in spreads.values())
-    # A shared block per completion (the reference once for the exact side), a dirty block
-    # per completion, and the refused cells' Python leaves per completion.
+    # A shared block per completion (the reference once for the exact side), and a dirty
+    # block per completion (the refused cells' Python leaves were a third, until IKA-209).
     assert len(blocks) > completions_total + 1, blocks
 
     monkeypatch.setattr(beliefnode, "_stacked", real)
@@ -919,7 +886,7 @@ def test_rows_scattered_to_the_wrong_completion_are_caught(midgame, monkeypatch)
     """The positive control for the equality tests: hand each completion's shared rows to
     the next completion and the node must differ from the definition. Otherwise the tests
     that say it equals the definition could not see a scatter that went wrong."""
-    reg, position, ours, theirs, spreads = _with_feint(midgame)
+    reg, position, ours, theirs, spreads = _plain(midgame)
     monkeypatch.setattr(
         beliefnode, "_stacked", _rotated(beliefnode._stacked)
     )

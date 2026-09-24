@@ -17,8 +17,8 @@ command (IKA-211) or a stop, never a Python resolve:
   raises `rustnode.PortUnavailable`; a broken process is restarted and asked again, and
   once the restarts run out that raises too (`ask`).
 
-Nothing here imports `resolve`. `tools/count_resolver_calls.py` is what says the roads do
-not reach it either.
+Python's resolver itself is gone (IKA-212); `tools/count_resolver_calls.py`, which said the
+roads did not reach it, went with it.
 """
 
 from __future__ import annotations
@@ -245,6 +245,56 @@ def remaining_switches(pause: PortPause, side: int) -> bool:
         int(queued["side"]) == side and queued["kind"] == "switch"
         for queued in pause.raw["state"]["remaining"]
     )
+
+
+def self_switches_needed(pos: Position) -> tuple[tuple[bool, ...], ...]:
+    """Per side, per active slot, whether the port left a self-switch waiting on a choice.
+
+    Not a rule: it reads the `pendingselfswitch` flag the port wrote onto a paused position,
+    and the bench it can be answered from (`resolve::self_switches_needed` in the port reads
+    the same). Narrower than `replacements_needed` on purpose: a faint is answered after the
+    turn and a forced switch is a random drag, but a self-switch interrupts the turn *now*.
+    The one copy on this side (IKA-212): it was also `resolve.self_switches_needed`,
+    `tests/_port.self_switches_needed` and `tools/diff_turn._owed_self_switches`.
+    """
+    out: list[tuple[bool, ...]] = []
+    for side in pos.sides:
+        bench = sum(1 for mon in side.pokemon if not mon.fainted and not mon.is_active)
+        flags: list[bool] = []
+        for party_index in side.active:
+            mon = side.pokemon[party_index] if party_index is not None else None
+            flags.append(
+                bench > 0
+                and mon is not None
+                and not mon.fainted
+                and mon.has_volatile("pendingselfswitch")
+            )
+        out.append(tuple(flags))
+    return tuple(out)
+
+
+def turn_expectation(
+    reg: Regulation, result: PortTurn, value: Callable[[Position], float]
+) -> tuple[float, tuple[str, ...]]:
+    """The turn's value under `value` (side 0's view), every mid-turn replacement chosen
+    by the fold `turn_leaves` builds; `result` must be a full turn.
+
+    Python's `resolve.turn_expectation`, for the analysis tools that score one turn at a
+    time (IKA-212). A turn without a pause is the probability-weighted mean of its branches,
+    normalised by their total, as `TurnResult.expected` was.
+    """
+    if result.outcomes is None or result.pauses is None:
+        raise ValueError("turn_expectation needs a full turn (full=True)")
+    if not result.pauses:
+        total = sum(o.probability for o in result.outcomes)
+        if total <= 0:
+            return 0.0, tuple(result.unmodelled)
+        return (
+            sum(o.probability * value(o.position) for o in result.outcomes) / total,
+            tuple(result.unmodelled),
+        )
+    plan = turn_leaves(reg, result)
+    return plan.value([value(p) for p in plan.positions]), plan.unmodelled
 
 
 def replacements_needed(reg: Regulation, pos: Position) -> tuple[tuple[bool, ...], ...]:

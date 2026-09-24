@@ -39,13 +39,14 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from pokeuraou import port  # noqa: E402 - Python's resolver until IKA-212
+from pokeuraou.budget import Budget  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.equilibrium import EquilibriumError, solve  # noqa: E402
 from pokeuraou.narrow import narrow  # noqa: E402
 from pokeuraou.payoff import OBJECTIVES  # noqa: E402
 from pokeuraou.position import Position  # noqa: E402
 from pokeuraou.regulation import Regulation, load_regulation  # noqa: E402
-from pokeuraou.resolve import Budget, resolve_turn, turn_expectation  # noqa: E402
 
 
 def load_positions(games_dir: Path, min_turn: int, seed: int) -> list[Position]:
@@ -75,8 +76,8 @@ def matrix_for(
     started = time.perf_counter()
     for i, a in enumerate(ours):
         for j, b in enumerate(theirs):
-            result = resolve_turn(reg, pos, [a, b], budget=budget)
-            out[i, j], _flags = turn_expectation(reg, result, objective)
+            result = port.turn(reg, pos, [a, b], budget, full=True)
+            out[i, j], _flags = port.turn_expectation(reg, result, objective)
             leaves += len(result.branches) + len(result.suspended)
     return out, time.perf_counter() - started, leaves
 
