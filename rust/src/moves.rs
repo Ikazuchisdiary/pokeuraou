@@ -4098,6 +4098,51 @@ fn effect_duration(
         .or_else(|| entry.get("duration").and_then(Value::as_i64))
 }
 
+/// Parting Shot's `this.boost({atk: -1, spa: -1}, target, source)` on one target; true when
+/// a drop landed on it (IKA-238).
+///
+/// Mirror Armor's `onTryBoost` (data/abilities.ts) takes each drop off its holder and sends
+/// it back at the user, one stat at a time, unless the holder is already at -6 there:
+///
+/// ```text
+/// if (!source || target === source || !boost || effect.name === 'Mirror Armor') return;
+/// for (b in boost) {
+///     if (boost[b]! < 0) {
+///         if (target.boosts[b] === -6) continue;
+///         const negativeBoost = {}; negativeBoost[b] = boost[b]; delete boost[b];
+///         if (source.hp) {
+///             this.add('-ability', target, 'Mirror Armor');
+///             this.boost(negativeBoost, source, target, null, true);
+///         }
+///     }
+/// }
+/// ```
+///
+/// The ability is `breakable`, so a Mold Breaker user's drops land. The holder's own drops
+/// that are left (a stat at -6) change nothing. Nothing lands, so the caller's `landed` is
+/// Mirror Armor's own exception to `delete move.selfSwitch`.
+fn parting_shot_drops(turn: &mut Turn, target: Slot, me: Slot) -> bool {
+    const DROPS: [(&str, i64); 2] = [("atk", -1), ("spa", -1)];
+    let bounces = matches!(turn.mon_at(target.0, target.1), Some(mon)
+        if mon.ability == "mirrorarmor" && !mon.fainted && !ability_broken_by(turn, mon, Some(me)));
+    if !bounces || target == me {
+        return turn.apply_boosts(target.0, target.1, &DROPS, true, "partingshot");
+    }
+    for (stat, delta) in DROPS {
+        let at_floor = turn
+            .mon_at(target.0, target.1)
+            .zip(crate::position::boost_index(stat))
+            .is_some_and(|(mon, index)| mon.boosts[index] == -6);
+        let user_up = turn.mon_at(me.0, me.1).is_some_and(|m| m.hp > 0);
+        if at_floor || !user_up {
+            continue;
+        }
+        log_event!(turn, "{} mirrorarmor sent the {stat} drop back", Name(target.0, target.1));
+        turn.apply_boosts(me.0, me.1, &[(stat, delta)], true, "mirrorarmor");
+    }
+    false
+}
+
 fn apply_status_move(
     reg: &Reg,
     turn: &mut Turn,
@@ -4274,7 +4319,7 @@ fn apply_status_move(
     if mv.id == "partingshot" {
         let mut landed = false;
         for target in targets {
-            if turn.apply_boosts(target.0, target.1, &[("atk", -1), ("spa", -1)], true, "partingshot") {
+            if parting_shot_drops(turn, *target, me) {
                 landed = true;
             }
             if matches!(turn.mon_at(target.0, target.1), Some(m) if m.ability == "mirrorarmor") {
