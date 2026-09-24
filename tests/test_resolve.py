@@ -611,54 +611,33 @@ def test_the_matrix_budget_gives_the_lp_a_zero_sum_game(reg: Regulation) -> None
     assert np.abs(np.diag(matrix) - 0.5).max() < 1e-9
 
 
-def test_every_volatile_that_should_expire_has_a_duration(reg: Regulation) -> None:
+def test_a_volatile_that_should_expire_has_a_duration(reg: Regulation, team_a: list[TeamSet]) -> None:
     """A volatile added with no duration is kept for the rest of the battle.
 
-    The expiry loop reads ``if volatile.duration is not None: volatile.duration -= 1``, so
-    ``None`` means permanent. `_duration` used to look only at the move's own ``condition``
-    field, while Showdown keeps most durations on the condition in conditions.ts -- and that
-    silently made four effects permanent:
-
-    - **partiallytrapped** (bind, Fire Spin, Infestation, Sand Tomb, Snap Trap, Whirlpool,
-      Thunder Cage): the target could never switch again and lost an eighth of its HP every
-      turn for the rest of the game. Infestation is played on 40% of the turns Toxapex is
-      out, so this was frequent rather than exotic.
-    - **Endure**: a stalling move whose volatile is not in ``PROTECT_VOLATILES``, so it
-      missed the unconditional one-turn removal too. Once used, the Pokemon survived every
-      lethal hit at 1 HP for the rest of the battle.
-    - magnetrise, electrify: same shape, rarer moves.
-
-    This is the audit that would have caught all four, so it lives here as a test rather
-    than as a one-off script: every move whose volatile Showdown gives a duration must get
-    one from us, unless the volatile is in the set the residual removes unconditionally.
+    Showdown keeps most durations on the condition in conditions.ts, and reading only the
+    move's own `condition` once made four effects permanent in Python's resolver --
+    partiallytrapped (Infestation and the other binding moves), Endure, Magnet Rise and
+    Electrify. The dump carries every one under `durations`; the port reads it there
+    (`moves.rs`, `effect_duration`). Asked of the port as a turn (IKA-210; the audit over the
+    whole dump was of Python's `_duration`): Tailwind is Showdown's 4, one spent at the end
+    of the turn it was used, and Infestation's bind has a duration at all. Endure's single
+    turn is `test_endure_survives_a_lethal_move_from_any_hp` and the one after it.
     """
-    from pokeuraou.resolve import PROTECT_VOLATILES, _duration
-
-    # Removed every turn regardless of duration, so `None` is harmless for these.
-    single_turn = set(PROTECT_VOLATILES) | {
-        "flinch", "helpinghand", "followme", "ragepowder", "spotlight", "glaiverush",
-    }
-    # The expectation comes from the dump rather than from a list here, so it cannot drift
-    # from Showdown -- which is the whole point: the hand-written list this replaced was
-    # both incomplete (four permanent effects) and wrong (Tailwind 5, Showdown says 4).
-    permanent: list[str] = []
-    for move in reg.moves.values():
-        volatile = move.raw.get("volatileStatus")
-        if not isinstance(volatile, str) or volatile in single_turn:
-            continue
-        declared = (move.raw.get("durations") or {}).get(volatile)
-        if not isinstance(declared, dict) or "duration" not in declared:
-            continue  # Showdown leaves it permanent too, so None is correct.
-        if _duration(move, volatile) is None:
-            permanent.append(f"{move.id} -> {volatile}")
-
-    assert not permanent, (
-        "these would be added with no duration and never expire: " + ", ".join(sorted(permanent))
+    assert reg.moves["tailwind"].raw["durations"]["tailwind"]["duration"] == 4
+    pos = _synthetic_position(reg, team_a)
+    _set_move(pos, 0, 0, 0, "infestation")
+    _set_move(pos, 0, 1, 0, "tailwind")
+    _set_move(pos, 1, 0, 0, "swordsdance")
+    _set_move(pos, 1, 1, 0, "protect")
+    after = _one(
+        reg, pos,
+        _act(pos, 0, ("infestation", 1), ("tailwind", None)),
+        _act(pos, 1, ("swordsdance", None), ("protect", None)),
     )
-    # And the two that mattered, by name.
-    assert _duration(reg.moves["infestation"], "partiallytrapped") == 5
-    assert _duration(reg.moves["tailwind"], "tailwind") == 4, "Tailwind is 4 turns, not 5"
-    assert _duration(reg.moves["endure"], "endure") == 1
+    tailwind = after.sides[0].side_condition("tailwind")
+    assert tailwind is not None and tailwind.duration == 3, tailwind
+    bound = _slot(after, 1, 0).volatile("partiallytrapped")
+    assert bound is not None and bound.duration is not None and bound.duration >= 4, bound
 
 
 def test_a_bind_expires_and_blocks_switching_until_it_does(

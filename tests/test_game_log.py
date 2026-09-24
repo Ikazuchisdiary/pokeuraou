@@ -20,11 +20,11 @@ from pokeuraou.actions import MoveAction, PassAction, SideAction
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.narrow import narrow
 from pokeuraou.position import Effect
-from pokeuraou.resolve import Budget, resolve_turn
 from pokeuraou.selfplay import position_from_sets
 from pokeuraou.teams import load_roster
 
 from ._harness import load_tool
+from ._port import Budget, resolve_turn
 
 
 @pytest.fixture(scope="module")
