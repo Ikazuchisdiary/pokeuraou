@@ -14,6 +14,7 @@
 
 #[macro_use]
 mod events;
+mod airborne;
 mod battler;
 #[cfg(feature = "count-allocations")]
 mod counting_alloc;

@@ -125,7 +125,7 @@ pub fn effective_type(
 ) -> Option<&'static str> {
     match move_id {
         "weatherball" => weather_ball_type(ctx.weather_name()),
-        "terrainpulse" => terrain_pulse_type(ctx.terrain_name()),
+        "terrainpulse" => terrain_pulse_type(crate::airborne::terrain_under(attacker, ctx)),
         "aurawheel" => {
             if attacker.species.as_str() == "morpekohangry" {
                 Some("Dark")
@@ -296,7 +296,7 @@ pub fn base_power(
             return Some(if doubled { declared * 2 } else { declared });
         }
         "terrainpulse" => {
-            let doubled = terrain_pulse_type(ctx.terrain_name()).is_some();
+            let doubled = crate::airborne::terrain_under(attacker, ctx).is_some();
             return Some(if doubled { declared * 2 } else { declared });
         }
         "risingvoltage" => {
@@ -363,7 +363,9 @@ pub fn base_power_modifiers(
     if matches!(move_id, "solarbeam" | "solarblade") && solar_weak(ctx.weather_name()) {
         return Some(("solar", 0.5, 1.0));
     }
-    if move_id == "expandingforce" && ctx.terrain_name() == Some("psychicterrain") {
+    if move_id == "expandingforce"
+        && crate::airborne::terrain_under(attacker, ctx) == Some("psychicterrain")
+    {
         return Some(("expandingforce", 1.5, 1.0));
     }
     None
