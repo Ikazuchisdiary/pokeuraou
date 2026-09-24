@@ -112,6 +112,10 @@ jobs:
 
       - name: build the Rust node
         run: cargo build --release --manifest-path rust/Cargo.toml
+      # The port's own unit tests (rust/src/moves_unit_tests.rs), which took over what
+      # test_resolve held of Python's copies (IKA-210). Release, so it reuses the build.
+      - name: the Rust node's unit tests
+        run: cargo test --release --manifest-path rust/Cargo.toml
 
       - run: uv sync --frozen
 

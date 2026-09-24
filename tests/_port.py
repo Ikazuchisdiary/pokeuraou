@@ -97,6 +97,9 @@ class PortRefused(AssertionError):
 
 
 def _ask(reg: Regulation, request: dict[str, Any], pos: Position | None = None) -> dict[str, Any]:
+    if os.environ.get(ENV_BEFORE_TURN) == "1" and request.get("kind") != "resolve":
+        # An older binary reads an unknown kind as a fill and can wait on the pipe for good.
+        raise PortRefused(f"the binary predates the {request.get('kind')!r} command")
     reply = node(reg)._exchange(request)  # noqa: SLF001
     reason = reply.get("refused")
     if reason:
