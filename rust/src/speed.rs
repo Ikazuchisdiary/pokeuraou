@@ -232,11 +232,12 @@ pub fn order_actions(
     trick_room: bool,
 ) -> (Vec<usize>, Vec<Vec<usize>>) {
     let mut indices: Vec<usize> = (0..actions.len()).collect();
-    // Ascending order, descending priority, descending speed -- and stable, so the
-    // canonical order of a tie is the queue's own order, as Python's lexsort gives.
-    indices.sort_by(|a, b| {
-        let (oa, pa, sa) = sort_key(&actions[*a], trick_room);
-        let (ob, pb, sb) = sort_key(&actions[*b], trick_room);
+    // Ascending order, descending priority, descending speed -- by Showdown's own selection
+    // sort, so the canonical order of a tie is the one Showdown's queue is left in when its
+    // shuffle keeps the tied group as it lies (the oracle's `speedTie: 'keep'`, IKA-238).
+    showdown_speed_sort(&mut indices, |a, b| {
+        let (oa, pa, sa) = sort_key(&actions[a], trick_room);
+        let (ob, pb, sb) = sort_key(&actions[b], trick_room);
         oa.cmp(&ob).then(pb.cmp(&pa)).then(sb.cmp(&sa))
     });
 
@@ -261,4 +262,60 @@ pub fn order_actions(
         ties.push(run);
     }
     (indices, ties)
+}
+
+/// `Battle#speedSort` (sim/battle.ts), with the tied group's shuffle left out (IKA-238).
+///
+/// A selection sort: it picks the first of the remaining entries (with every entry tied to
+/// it, in list order) and swaps them to the front. The swaps move the entries they pass
+/// over, so a tie comes out in an order a stable sort does not give: with Incineroar
+/// and Incineroar tied behind two faster Pokemon, `[p1a, p1b, p2a, p2b]` sorts to
+/// `[p1b, p2b, p2a, p1a]`. `ties` and the tie permutations are unchanged by it.
+///
+/// ```text
+/// while (sorted + 1 < list.length) {
+///     let nextIndexes = [sorted];
+///     for (let i = sorted + 1; i < list.length; i++) {
+///         const delta = comparator(list[nextIndexes[0]], list[i]);
+///         if (delta < 0) continue;
+///         if (delta > 0) nextIndexes = [i];
+///         if (delta === 0) nextIndexes.push(i);
+///     }
+///     for (let i = 0; i < nextIndexes.length; i++) {
+///         const index = nextIndexes[i];
+///         if (index !== sorted + i) {
+///             [list[sorted + i], list[index]] = [list[index], list[sorted + i]];
+///         }
+///     }
+///     if (nextIndexes.length > 1) this.prng.shuffle(list, sorted, sorted + nextIndexes.length);
+///     sorted += nextIndexes.length;
+/// }
+/// ```
+pub fn showdown_speed_sort(
+    list: &mut [usize],
+    comparator: impl Fn(usize, usize) -> std::cmp::Ordering,
+) {
+    use std::cmp::Ordering;
+    let mut sorted = 0;
+    let mut next: Vec<usize> = Vec::with_capacity(list.len());
+    while sorted + 1 < list.len() {
+        next.clear();
+        next.push(sorted);
+        for i in sorted + 1..list.len() {
+            match comparator(list[next[0]], list[i]) {
+                Ordering::Less => {}
+                Ordering::Greater => {
+                    next.clear();
+                    next.push(i);
+                }
+                Ordering::Equal => next.push(i),
+            }
+        }
+        for (k, index) in next.iter().enumerate() {
+            if *index != sorted + k {
+                list.swap(sorted + k, *index);
+            }
+        }
+        sorted += next.len();
+    }
 }
