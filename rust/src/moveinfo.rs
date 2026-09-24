@@ -23,6 +23,10 @@ pub struct MoveContext {
     pub hit_index: i64,
     pub moving_last: bool,
     pub ally_used_same_move: bool,
+    /// What a reply's `damageCallback` returns this turn (`damage_callback::damage`), 0 when
+    /// there is no turn to read it from (IKA-213).
+    #[serde(default)]
+    pub reply_damage: i64,
 }
 
 impl MoveContext {
@@ -94,11 +98,21 @@ fn relative_weight_bp(attacker_kg: f64, target_kg: f64) -> i64 {
     40
 }
 
-pub fn fixed_damage(move_id: &str, attacker: &Battler, defender: &Battler) -> Option<i64> {
+pub fn fixed_damage(
+    move_id: &str,
+    attacker: &Battler,
+    defender: &Battler,
+    ctx: &MoveContext,
+) -> Option<i64> {
     match move_id {
         "superfang" | "naturesmadness" | "ruination" => Some((defender.hp / 2).max(1)),
         "finalgambit" => Some(attacker.hp.max(1)),
         "endeavor" => Some((defender.hp - attacker.hp).max(0)),
+        // Counter, Mirror Coat, Metal Burst, Comeuppance (IKA-213). Without a turn's record
+        // (a scorer's context) the damage is unknown, as before.
+        "counter" | "mirrorcoat" | "metalburst" | "comeuppance" if ctx.reply_damage > 0 => {
+            Some(ctx.reply_damage)
+        }
         _ => None,
     }
 }

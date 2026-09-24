@@ -321,6 +321,9 @@ pub struct Turn<'a> {
     /// Python's `_Turn.events` and `acts`, or None when nobody asked (IKA-215). Never
     /// compared: a merged branch keeps the first contributor's, as Python's does.
     pub(crate) log: Option<Box<EventLog>>,
+    /// Who damaged each active slot this turn, for Counter, Mirror Coat, Metal Burst and
+    /// Comeuppance (`damage_callback`, IKA-213).
+    pub(crate) damaged_by: [[crate::damage_callback::DamagedBy; 2]; 2],
 }
 
 impl<'a> Turn<'a> {
@@ -346,6 +349,7 @@ impl<'a> Turn<'a> {
             move_hit: [[false; 2]; 2],
             draws: None,
             log: None,
+            damaged_by: Default::default(),
         }
     }
 
@@ -1777,6 +1781,7 @@ fn same_turn(a: &Turn, b: &Turn) -> bool {
         draws: _,
         // The readable trace; Python's `_MERGE_IGNORED_STATE` (IKA-215).
         log: _,
+        damaged_by,
     } = a;
     std::ptr::eq(*reg, b.reg)
         && *self_switch_pending == b.self_switch_pending
@@ -1791,6 +1796,7 @@ fn same_turn(a: &Turn, b: &Turn) -> bool {
         && *attacks == b.attacks
         && *budget == b.budget
         && *pending_secondaries == b.pending_secondaries
+        && *damaged_by == b.damaged_by
         && same_position(pos, &b.pos)
 }
 

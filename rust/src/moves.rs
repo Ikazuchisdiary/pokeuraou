@@ -1338,6 +1338,12 @@ fn use_move<'a>(
         turn.move_failed[action.side][action.slot] = true;
         return Ok(vec![(1.0, turn)]);
     }
+    // Counter, Mirror Coat, Metal Burst, Comeuppance: `onTry`, after `TryMove` (IKA-213).
+    if crate::damage_callback::fails_on_try(&turn, action, move_id.as_str()) {
+        log_event!(turn, "{} failed (nothing to return)", Label(reg, action));
+        turn.move_failed[action.side][action.slot] = true;
+        return Ok(vec![(1.0, turn)]);
+    }
 
     // The protection a `breaksProtect` move tears down is torn down per target, inside
     // `hit_target`, once the hit is known to land (IKA-153). Every such move is damaging
@@ -1345,6 +1351,10 @@ fn use_move<'a>(
 
     if mv.category == "Status" {
         return do_status_move(reg, turn, action, mv, &targets, budget);
+    }
+    // A damaging move with custom code the port never names (`modelled.rs`, IKA-213).
+    if crate::modelled::damaging_move_is_unmodelled(move_id.as_str()) {
+        turn.report(format!("damaging move: {move_id}"));
     }
 
     // `move.spreadHit` is decided from every target before the hit steps run, and Psychic
@@ -1501,6 +1511,9 @@ fn resolve_targets(
         // action's target, and it is redirected as any other (IKA-178).
         _ => {}
     }
+    if let Some(recorded) = crate::damage_callback::target(turn, action, mv.id.as_str()) {
+        return Ok(reply_targets(turn, action, mv, recorded));
+    }
 
     let mut chosen = match action.target {
         None => {
@@ -1531,6 +1544,31 @@ fn resolve_targets(
         chosen = redirected;
     }
     Ok(if live(turn, chosen.0, chosen.1) { vec![chosen] } else { Vec::new() })
+}
+
+/// Counter, Mirror Coat, Metal Burst and Comeuppance aim at the slot that hit the user
+/// (IKA-213). `getMoveTargets` retargets a fainted foe first and then runs `RedirectTarget`,
+/// where Follow Me (priority 1) outranks Counter's own redirect (-1), which sends Counter and
+/// Mirror Coat back to the recorded slot -- so they fail on a fainted attacker, while Metal
+/// Burst and Comeuppance (`onModifyTarget`, before all of it) hit the other foe.
+fn reply_targets(turn: &Turn, action: &QueuedAction, mv: &Move, recorded: Slot) -> Vec<Slot> {
+    let live = |slot: Slot| matches!(turn.mon_at(slot.0, slot.1), Some(mon) if !mon.fainted);
+    let mut chosen = recorded;
+    if !live(chosen) {
+        if let Some(slot) = (0..turn.pos.sides[recorded.0].active.len()).find(|s| live((recorded.0, *s))) {
+            chosen = (recorded.0, slot);
+        }
+    }
+    match redirection_target(turn, action, mv, chosen) {
+        Some(redirected) => chosen = redirected,
+        None if crate::damage_callback::redirects_back(mv.id.as_str()) => chosen = recorded,
+        None => {}
+    }
+    if live(chosen) {
+        vec![chosen]
+    } else {
+        Vec::new()
+    }
 }
 
 /// Follow Me / Rage Powder / Spotlight, then the type-drawing abilities. Rage Powder is a
@@ -1858,6 +1896,7 @@ fn hit_target<'a>(
         hit_index: 1,
         moving_last: false,
         ally_used_same_move: false,
+        reply_damage: crate::damage_callback::damage(&turn, action, move_id.as_str()),
     };
 
     crate::resolve::phase_end(12, ctx_started);
@@ -1992,6 +2031,7 @@ fn hit_target<'a>(
                         state.deal_damage(target.0, target.1, amount, true, move_id.as_str())?
                     };
                     total += dealt;
+                    crate::damage_callback::record(&mut state, (action.side, action.slot), target, dealt, mv.category.as_str());
                     reached = true;
                     state.move_hit[target.0][target.1] = true;
                     let after_started = crate::resolve::phase_start();
