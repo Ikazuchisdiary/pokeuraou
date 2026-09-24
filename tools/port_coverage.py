@@ -106,6 +106,31 @@ def engine_text() -> str:
     )
 
 
+#: The port's gates, whose arms are grouped under comments saying why each is taken.
+GATE_FUNCTIONS = ("ability_handled", "item_handled")
+#: The one group that says the port takes the id and does nothing Showdown does with it. A
+#: name there is not the port acting on the id, so it does not take the note away.
+IGNORED_SECTION = "Python reports these and changes nothing"
+
+
+def taken_and_ignored(text: str) -> set[str]:
+    """The gates' ids under `IGNORED_SECTION`: taken by the port, not acted on."""
+    out: set[str] = set()
+    for name in GATE_FUNCTIONS:
+        start = text.find(f"fn {name}(")
+        if start < 0:
+            continue
+        section = ""
+        for line in text[start : text.find("\n}\n", start)].splitlines():
+            stripped = line.strip()
+            if stripped.startswith("//"):
+                section = stripped.lstrip("/ ")
+                continue
+            if section.startswith(IGNORED_SECTION):
+                out |= set(re.findall(r'"([a-z0-9]+)"', line))
+    return out
+
+
 def port_text() -> str:
     """The port's engine source, the text `inert` and `modelled` scan."""
     return "\n".join((PORT_SRC / name).read_text(encoding="utf-8") for name in PORT_ENGINE_FILES)
@@ -202,8 +227,53 @@ def _abilities(data: dict) -> list[dict]:
     return list(data["abilities"]) + unlisted
 
 
-def _needs_no_note(entry: dict, text: str) -> bool:
-    return not entry.get("customHooks") or mentioned(text, entry["id"]) or bool(entry.get("megaStone"))
+#: Ids Showdown acts on without a handler of their own, so the dump's empty `customHooks`
+#: does not mean "nothing happens": the simulator or another effect names them
+#: (`pokemon.hasAbility('levitate')`, the weather rocks in `conditions.ts`'s
+#: `durationCallback`s), or the entry carries a value where a handler would be (Battle
+#: Armor's and Shell Armor's `onCriticalHit: false`). Read off vendor a5df827 by
+#: `tests/test_port_coverage.py::test_showdowns_names_are_the_ones_listed` (IKA-210).
+SHOWDOWN_ACTS_BY_NAME = {
+    "abilities": frozenset(
+        {
+            "battlearmor", "corrosion", "dancer", "earlybird", "levitate", "multitype",
+            "rkssystem", "shellarmor", "stall",
+        }
+    ),
+    "items": frozenset(
+        {"bindingband", "damprock", "heatrock", "icyrock", "lightclay", "smoothrock", "terrainextender"}
+    ),
+}
+#: The two of those that are a value rather than a name, which the vendor scan cannot see.
+SHOWDOWN_VALUE_NOT_HANDLER = frozenset({"battlearmor", "shellarmor"})
+
+
+def showdown_acts(entry: dict, kind: str) -> bool:
+    """Whether Showdown does anything with the id: a handler, or a name somewhere else."""
+    return bool(entry.get("customHooks")) or entry["id"] in SHOWDOWN_ACTS_BY_NAME[kind]
+
+
+def _without_gates(text: str) -> str:
+    for name in GATE_FUNCTIONS:
+        start = text.find(f"fn {name}(")
+        if start >= 0:
+            text = text[:start] + text[text.find("\n}\n", start) + 3 :]
+    return text
+
+
+def _needs_no_note(entry: dict, text: str, kind: str, ignored: set[str], behaviour: str) -> bool:
+    """No note: Showdown does nothing with it, the port acts on it, or it is a mega stone.
+
+    The port acts on an id it names -- in a gate's arm other than the ignored group, or
+    anywhere outside the gates. An ignored-group id named outside them is one the port
+    reports where it fires (`contact ability: static`), so a note on every hit would say it
+    twice.
+    """
+    identifier = entry["id"]
+    acts = mentioned(behaviour, identifier) or (
+        mentioned(text, identifier) and identifier not in ignored
+    )
+    return not showdown_acts(entry, kind) or acts or bool(entry.get("megaStone"))
 
 
 def modelled(regulation: str, engine: str | None = None) -> Generated:
@@ -211,12 +281,21 @@ def modelled(regulation: str, engine: str | None = None) -> Generated:
 
     A status move is fully modelled when its whole effect is its declarative fields (no
     custom code in the dex) or the port names it; any other status move with custom code
-    is reported (`moves::apply_status_move`).
+    is reported (`moves::apply_status_move`). A gate's arm under "Python reports these and
+    changes nothing" is not the port acting on the id; every other name is.
     """
     data = regulation_dump(regulation)
     text = port_text() if engine is None else engine
-    abilities = sorted(e["id"] for e in _abilities(data) if _needs_no_note(e, text))
-    items = sorted(e["id"] for e in data["items"] if _needs_no_note(e, text))
+    ignored = taken_and_ignored(text)
+    behaviour = _without_gates(text)
+    abilities = sorted(
+        e["id"]
+        for e in _abilities(data)
+        if _needs_no_note(e, text, "abilities", ignored, behaviour)
+    )
+    items = sorted(
+        e["id"] for e in data["items"] if _needs_no_note(e, text, "items", ignored, behaviour)
+    )
     status_moves = sorted(
         e["id"]
         for e in data["moves"]

@@ -206,3 +206,27 @@ def test_a_move_that_is_its_fields_needs_no_name():
     the port never names it, and it is fully modelled all the same."""
     assert not tool.mentioned(tool.port_text(), "dragondance")
     assert '"dragondance"' in (tool.RUST_SRC / "modelled.rs").read_text(encoding="utf-8")
+
+
+def test_showdowns_names_are_the_ones_listed():
+    """`SHOWDOWN_ACTS_BY_NAME` is the no-handler ids Showdown's own code names, read off the
+    vendored simulator rather than remembered (IKA-210). An id there that the port never
+    names is noted on every hit; one missing from it would be taken for a no-op."""
+    import re
+
+    vendor = tool.ROOT / "vendor" / "pokemon-showdown"
+    if not (vendor / ".git").exists():
+        pytest.skip("vendor submodule not initialised")
+    files = [*sorted((vendor / "sim").glob("*.ts"))]
+    files += sorted((vendor / "data" / "mods" / "champions").glob("*.ts"))
+    for name in ("conditions.ts", "moves.ts", "scripts.ts", "items.ts", "abilities.ts"):
+        files.append(vendor / "data" / name)
+    text = "\n".join(f.read_text(encoding="utf-8") for f in files if f.exists())
+    data = tool.regulation_dump(REGULATION)
+    for kind in ("abilities", "items"):
+        named = {
+            e["id"]
+            for e in data[kind]
+            if not e.get("customHooks") and re.search(rf"['\"]{e['id']}['\"]", text)
+        }
+        assert named == tool.SHOWDOWN_ACTS_BY_NAME[kind] - tool.SHOWDOWN_VALUE_NOT_HANDLER, kind
