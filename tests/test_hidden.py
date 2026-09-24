@@ -222,8 +222,8 @@ def _action(reg, position, side, choice):  # noqa: ANN001, ANN202
 
 
 def _charizard_went_back(reg, position):  # noqa: ANN001, ANN202
-    """The turn-2 position, resolved from `position` by the real resolver."""
-    from pokeuraou.resolve import Budget, resolve_turn
+    """The turn-2 position, resolved from `position` by the port."""
+    from ._port import Budget, resolve_turn
 
     result = resolve_turn(
         reg,
@@ -521,7 +521,8 @@ def test_a_pause_resumed_in_a_completion_is_that_world_resolved_from_scratch(set
     import json
 
     from pokeuraou.hidden import completions
-    from pokeuraou.resolve import (
+
+    from ._port import (
         Budget,
         paused_in,
         resolve_turn,
@@ -610,8 +611,8 @@ def test_the_menu_is_ranked_from_the_heaviest_completion_not_the_first(
     import numpy as np
 
     from pokeuraou import selfplay
+    from pokeuraou.budget import Budget
     from pokeuraou.narrow import narrow
-    from pokeuraou.resolve import Budget
 
     reg, roster = setup
     sheet = _sheet(roster)
@@ -641,7 +642,7 @@ def test_the_old_rule_is_kept_and_uniform_weights_pick_the_first(
     monkeypatch,  # noqa: ANN001
 ) -> None:
     from pokeuraou import selfplay
-    from pokeuraou.resolve import Budget
+    from pokeuraou.budget import Budget
 
     reg, roster = setup
     sheet = _sheet(roster)

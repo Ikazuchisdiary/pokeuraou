@@ -33,6 +33,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from typing import TYPE_CHECKING  # noqa: E402
+
 from pokeuraou.actions import (  # noqa: E402
     MoveAction,
     PassAction,
@@ -41,19 +43,18 @@ from pokeuraou.actions import (  # noqa: E402
     side_actions,
     switch_actions_after_faint,
 )
+from pokeuraou.budget import Budget  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet  # noqa: E402
 from pokeuraou.position import Position  # noqa: E402
 from pokeuraou.priors import find_cached_chaos, load_chaos, sample_team  # noqa: E402
 from pokeuraou.regulation import Regulation, load_regulation, to_id  # noqa: E402
-from pokeuraou.resolve import (  # noqa: E402
-    Budget,
-    TurnResult,
-    resolve_turn,
-    resume_turn,
-    self_switches_needed,
-)
 from pokeuraou.speed import action_overriding_effects  # noqa: E402
+
+if TYPE_CHECKING:
+    # Python's resolver is imported by Python's column alone, where it is used, so a
+    # port-only run (`--no-python`, the suite's) never loads it (IKA-210).
+    from pokeuraou.resolve import TurnResult
 
 FORMAT_ID = "gen9championsvgc2026regmc"
 
@@ -279,6 +280,8 @@ def resolve_pauses(
     Returns the finished turn, or ``None`` when the turn could not be carried through --
     in which case the reason has already been recorded.
     """
+    from pokeuraou.resolve import resume_turn, self_switches_needed
+
     del roll
     for _ in range(4):
         if not result.suspended:
@@ -371,12 +374,15 @@ def compare_turn(
     report: Report,
     py_rng: random.Random,
     nodes: dict[str, Any] | None = None,
+    python: bool = True,
 ) -> None:
     """Python's column, and one port column per binary in ``nodes`` beside it.
 
     The ports go first: Python's mid-turn replacement steps Showdown on, and a port has to
     be held to the position Showdown reached at the end of the choices it was given.
-    Python is solved once however many binaries are compared.
+    Python is solved once however many binaries are compared. Without ``python`` the
+    ports are the only columns, and a mid-turn replacement is Showdown's `default` on the
+    run's next step (IKA-210).
     """
     if not nodes:
         _compare_python(reg, before, chosen, handle, lines, roll, report, py_rng)
@@ -392,6 +398,15 @@ def compare_turn(
         pending = report.ports[label].pending
         if pending is not None and report.showdown is not None:
             pending.cursor = len(report.showdown.steps)
+    if not python:
+        for label, verdict in verdicts.items():
+            port = report.ports[label]
+            if verdict == "pending" and port.pending is not None:
+                port.pending.python = "not run"
+                continue
+            port.joint[("not run", verdict)] += 1
+        answer_port_pauses(reg, handle, report, nodes, py_rng)
+        return
     matched = report.matched
     wrong = report.silent_divergences + report.flagged_divergences
     _compare_python(reg, before, chosen, handle, lines, roll, report, py_rng)
@@ -432,6 +447,8 @@ def _compare_python(
     if action_overriding_effects(lines, only_unmodelled=True):
         report.skipped["action overridden mid-turn"] += 1
         return
+
+    from pokeuraou.resolve import resolve_turn
 
     result = resolve_turn(reg, before, chosen, budget=Budget.deterministic(roll))
     report.branch_counts[len(result.branches) + len(result.suspended)] += 1
@@ -989,6 +1006,69 @@ def showdown_picks(pause: Position, step: ShowdownStep) -> list[SideAction] | st
     return picks
 
 
+def answer_port_pauses(
+    reg: Regulation,
+    handle: Any,  # noqa: ANN401 - oracle.BattleHandle
+    report: Report,
+    nodes: dict[str, Any],
+    py_rng: random.Random,
+) -> None:
+    """Without Python's column, the replacement draws it took: at each mid-turn stop
+    Showdown and a port column share, one `py_rng.choice` per side that owes one, from
+    the first pending column's pause -- `resolve_pauses`' draw, from the port's pause
+    rather than Python's. So a seed plays the battles it played beside Python (IKA-210),
+    wherever the two pauses agree; the ports then follow the step as they followed
+    Python's.
+    """
+    for _ in range(4):
+        pending = next(
+            (report.ports[label].pending for label in nodes if report.ports[label].pending),
+            None,
+        )
+        if pending is None or not showdown_paused_mid_turn(handle):
+            return
+        paused_at = Position.from_json(pending.pause["position"])
+        owed = _owed_self_switches(paused_at)
+        told: list[str | None] = []
+        for side_index in range(2):
+            request = handle.requests[side_index]
+            if not request or request.get("wait") or not request.get("forceSwitch"):
+                told.append(None)
+                continue
+            options = switch_actions_after_faint(
+                reg, paused_at, side_index, list(owed[side_index])
+            )
+            told.append(py_rng.choice(options).to_choice())
+        handle.step(told)
+        for label, node in nodes.items():
+            follow_port(reg, node, report.ports[label], report.showdown)
+        if handle.choice_errors:
+            return
+
+
+def _owed_self_switches(pos: Position) -> tuple[tuple[bool, ...], ...]:
+    """Per side, per active slot, whether the port left a self-switch waiting on a choice.
+
+    Not a rule: the `pendingselfswitch` flag the port wrote onto its pause, and a bench to
+    answer it from -- what `resolve.self_switches_needed` reads, read here so the port's
+    column does not import Python's resolver (IKA-210).
+    """
+    out: list[tuple[bool, ...]] = []
+    for side in pos.sides:
+        bench = sum(1 for mon in side.pokemon if not mon.fainted and not mon.is_active)
+        flags: list[bool] = []
+        for party_index in side.active:
+            mon = side.pokemon[party_index] if party_index is not None else None
+            flags.append(
+                bench > 0
+                and mon is not None
+                and not mon.fainted
+                and mon.has_volatile("pendingselfswitch")
+            )
+        out.append(tuple(flags))
+    return tuple(out)
+
+
 def follow_port(reg: Regulation, node: Any, port: PortReport, tap: StepTap | None) -> None:  # noqa: ANN401
     """Answers the port's pause with each Showdown step not yet answered, until the turn
     ends or the steps run out (the rest come on the run's next step)."""
@@ -1026,7 +1106,7 @@ def _resume_port(
         port.skipped["Showdown moved on without a replacement"] += 1
         return "skip"
     paused_at = Position.from_json(pending.pause["position"])
-    owed = self_switches_needed(paused_at)
+    owed = _owed_self_switches(paused_at)
     theirs_owed = [
         [bool(x) for x in ((r or {}).get("forceSwitch") or [])] for r in step.requests
     ]
@@ -1166,6 +1246,7 @@ def run(
     self_switch: float = 0.0,
     port: bool = False,
     exes: list[tuple[str, Path]] | None = None,
+    python: bool = True,
 ) -> Report:
     reg = load_regulation(FORMAT_ID)
     chaos = find_cached_chaos(FORMAT_ID)
@@ -1238,7 +1319,7 @@ def run(
                     continue
                 compare_turn(
                     reg, before, chosen, handle, handle.log, roll, report, py_rng,
-                    nodes=nodes,
+                    nodes=nodes, python=python,
                 )
             for port_column in report.ports.values():
                 settle_port(port_column, "the battle stopped inside a paused turn")
@@ -1271,6 +1352,11 @@ def main() -> None:
         "POKEURAOU_RUST_NODE_BIN names another binary)",
     )
     ap.add_argument(
+        "--no-python",
+        action="store_true",
+        help="the port's columns only: Python's resolver is not imported (IKA-210)",
+    )
+    ap.add_argument(
         "--port-json",
         help="write every turn the port diverged on, with Showdown's log, to this file",
     )
@@ -1294,6 +1380,7 @@ def main() -> None:
         self_switch=args.self_switch,
         port=not args.no_port,
         exes=parse_exes(args.exes) if args.exes else None,
+        python=not args.no_python,
     )
     if args.port_json and report.ports:
         import json

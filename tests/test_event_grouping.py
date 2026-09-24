@@ -1,4 +1,4 @@
-"""Which action each event belongs to, and why the resolver has to be the one to say.
+"""Which action each event belongs to, and why the port has to be the one to say.
 
 `Branch.events` is a flat trace, and "what happened this turn" is a question about
 actions: a reader wants Flare Blitz's damage and its recoil under Flare Blitz, not
@@ -15,6 +15,10 @@ same moves, the flat trace is genuinely ambiguous. A reader reconstructing the g
 matching reasons against the chosen moves would be right most of the time, which is the
 worst way for a log to be wrong. The mirror test below is the one that fails if attribution
 ever goes back to being inferred.
+
+The trace is the port's (IKA-215); until IKA-210 these asked Python's resolver, and a
+test here held the port's lines and cuts to Python's. With Python gone the assertions
+are the port's own.
 """
 
 from __future__ import annotations
@@ -24,12 +28,15 @@ import pytest
 
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.narrow import narrow
+from pokeuraou.port import turn
 from pokeuraou.position import Position
-from pokeuraou.resolve import RESIDUAL_PHASE, Budget, resolve_turn
 from pokeuraou.selfplay import position_from_sets
 from pokeuraou.teams import load_roster
 
 from ._harness import load_tool
+from ._port import Budget, resolve_turn
+
+RESIDUAL_PHASE = load_tool("show_game").RESIDUAL_PHASE
 
 
 @pytest.fixture(scope="module")
@@ -78,7 +85,9 @@ def test_acts_cover_every_event_exactly_once(roster) -> None:  # noqa: ANN001
         col = narrow(reg, pos, 1, limit=4).actions
         for ours in row[:2]:
             for theirs in col[:2]:
-                result = resolve_turn(reg, pos, [ours, theirs], budget=Budget.matrix())
+                result = resolve_turn(
+                    reg, pos, [ours, theirs], budget=Budget.matrix(), events=True
+                )
                 for branch in result.branches:
                     acts = branch.acts
                     assert acts, "a resolved turn always ran at least the residual phase"
@@ -127,7 +136,7 @@ def test_a_mirror_attributes_the_same_move_to_both_sides(roster) -> None:  # noq
         assert wanted is not None, f"{shared} should be offered to side {side}"
         actions.append(wanted)
 
-    result = resolve_turn(reg, pos, actions, budget=Budget.exact())
+    result = resolve_turn(reg, pos, actions, budget=Budget.exact(), events=True)
     branch = max(result.branches, key=lambda b: b.probability)
     name = reg.moves[shared].name
     # A slot can appear more than once in a turn -- a Mega Evolution is its own queued
@@ -139,6 +148,7 @@ def test_a_mirror_attributes_the_same_move_to_both_sides(roster) -> None:  # noq
     assert users[0][:2] != users[1][:2], (
         f"the two uses of {name} must be attributed to opposite sides: {branch.acts}"
     )
+    assert branch.acts[-1][1] == RESIDUAL_PHASE
 
 
 def test_the_log_groups_without_losing_a_line(roster) -> None:  # noqa: ANN001
@@ -159,7 +169,9 @@ def test_the_log_groups_without_losing_a_line(roster) -> None:  # noqa: ANN001
         col = narrow(reg, pos, 1, limit=3).actions
         for ours in row[:2]:
             for theirs in col[:2]:
-                result = resolve_turn(reg, pos, [ours, theirs], budget=Budget.exact())
+                result = resolve_turn(
+                    reg, pos, [ours, theirs], budget=Budget.exact(), events=True
+                )
                 for branch in result.branches:
                     groups = show_game.group_events(
                         loc, list(branch.events), list(branch.acts), pos
@@ -182,74 +194,18 @@ def test_the_log_groups_without_losing_a_line(roster) -> None:  # noqa: ANN001
 
 
 # ---------------------------------------------------------------------------
-# The port's trace (IKA-215): the same lines and the same cuts, when asked for
+# The trace is asked for (IKA-215): the generation road carries none
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="module")
-def node(roster):  # noqa: ANN001, ANN201
-    from pokeuraou import rustnode
+def test_the_port_keeps_nothing_unless_asked(roster) -> None:  # noqa: ANN001
+    """Off by default: no trace comes back, so the generation road carries none.
 
-    if not rustnode.binary_path().exists():
-        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
-    opened = rustnode.RustNode(roster.reg)
-    yield opened
-    opened.close()
-
-
-def test_the_port_cuts_the_trace_as_python_does(roster, node) -> None:  # noqa: ANN001
-    """`turn` with `events` gives every branch Python's lines and Python's `acts`."""
-    reg = roster.reg
-    positions = _mirror_turns(roster)
-    assert len(positions) >= 3, "the game ended too early to test anything"
-    lines = 0
-    for pos in positions:
-        row = narrow(reg, pos, 0, limit=4).actions
-        col = narrow(reg, pos, 1, limit=4).actions
-        for ours in row[:2]:
-            for theirs in col[:2]:
-                for budget in (Budget.matrix(), Budget.exact()):
-                    result = resolve_turn(reg, pos, [ours, theirs], budget=budget)
-                    port = node.turn(pos, [ours, theirs], budget, full=True, events=True)
-                    assert port is not None, "the port refused the turn"
-                    assert len(port.outcomes) == len(result.branches)
-                    for mine, answered in zip(result.branches, port.outcomes, strict=True):
-                        assert answered.events == mine.events
-                        assert answered.acts == [tuple(a) for a in mine.acts]
-                        lines += len(mine.events)
-    assert lines >= 200, f"only {lines} lines compared"
-
-
-def test_the_port_keeps_nothing_unless_asked(roster, node) -> None:  # noqa: ANN001
-    """Off by default: no trace comes back, so the generation road carries none."""
+    The other side of this file's tests, which all ask for the trace (`_port` does)."""
     reg = roster.reg
     pos = _mirror_turns(roster, turns=1)[0]
     ours = narrow(reg, pos, 0, limit=1).actions[0]
     theirs = narrow(reg, pos, 1, limit=1).actions[0]
-    port = node.turn(pos, [ours, theirs], Budget.matrix(), full=True)
-    assert port is not None and port.outcomes
+    port = turn(reg, pos, [ours, theirs], Budget.matrix(), full=True)
+    assert port.outcomes
     assert all(not b.events and not b.acts for b in port.outcomes)
-
-
-def test_the_port_attributes_a_mirror_to_both_sides(roster, node) -> None:  # noqa: ANN001
-    """The mirror above, answered by the port: the two uses land on opposite sides."""
-    reg = roster.reg
-    sets = list(roster.sets[:4])
-    pos = position_from_sets(reg, sets, sets)
-    moves = [m.id for m in pos.sides[0].pokemon[pos.sides[0].active[0]].moves]
-    shared = next((m for m in moves if m not in ("protect", "fakeout")), moves[0])
-    actions = [
-        next(
-            a
-            for a in narrow(reg, pos, side, limit=40).actions
-            if a.to_choice().startswith(f"move {moves.index(shared) + 1} ")
-        )
-        for side in (0, 1)
-    ]
-    port = node.turn(pos, actions, Budget.exact(), full=True, events=True)
-    assert port is not None and port.outcomes
-    branch = max(port.outcomes, key=lambda b: b.probability)
-    name = reg.moves[shared].name
-    users = [label.split()[0] for _start, label in branch.acts if label.endswith(f" {name}")]
-    assert len(users) == 2 and users[0][:2] != users[1][:2], branch.acts
-    assert branch.acts[-1][1] == RESIDUAL_PHASE

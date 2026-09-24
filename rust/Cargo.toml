@@ -26,7 +26,8 @@ ika215-control = []
 # IKA-210's positive control: old rules the re-pointed tests hold, broken on purpose -- a
 # recharge that never lifts, a self-switch cancelled beside an Eject Button or Emergency
 # Exit, the residuals ordered (and a tie noted) after the weather has ended, 2-5 hits at
-# 1/3, 1/3, 1/6, 1/6, and no branch merged. Never for use.
+# 1/3, 1/3, 1/6, 1/6, and no branch merged. Never for use. And (IKA-210's second half) `fill`
+# pricing a mid-turn replacement as the mean of the bench, which the `turn` command does not.
 ika210-control = []
 
 [dependencies]

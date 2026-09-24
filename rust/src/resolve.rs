@@ -2666,6 +2666,10 @@ pub fn turn_value(
         } else {
             scored.iter().cloned().fold(f64::INFINITY, f64::min)
         };
+        // IKA-210's positive control for `fill` against the `turn` command: the replacement
+        // priced as the mean of the bench, in `fill`'s fold alone (tests/test_rust_node.py).
+        #[cfg(feature = "ika210-control")]
+        let best = scored.iter().sum::<f64>() / scored.len() as f64;
         accumulated += pause.probability * best;
     }
     Ok(accumulated / total)

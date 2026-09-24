@@ -29,8 +29,9 @@ from pokeuraou.belief import (
 from pokeuraou.payoff import HP_SHARE
 from pokeuraou.priors import find_cached_chaos, load_chaos
 from pokeuraou.regulation import Regulation
-from pokeuraou.resolve import Budget, resolve_turn, turn_expectation
 from pokeuraou.setup import load_scenario, with_spreads
+
+from ._port import Budget, resolve_turn, turn_expectation
 
 EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "scenario-turn1.json"
 

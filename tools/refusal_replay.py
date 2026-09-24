@@ -36,10 +36,10 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pokeuraou import rustnode  # noqa: E402
 from pokeuraou.actions import side_actions  # noqa: E402
+from pokeuraou.budget import Budget  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.position import Position  # noqa: E402
 from pokeuraou.regulation import load_regulation  # noqa: E402
-from pokeuraou.resolve import Budget  # noqa: E402
 
 
 def candidates(args: argparse.Namespace) -> Iterator[dict]:

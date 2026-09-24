@@ -40,9 +40,24 @@ from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
 from pokeuraou.position import Position
 from pokeuraou.priors import find_cached_chaos, load_chaos, sample_team
 from pokeuraou.regulation import Regulation, load_regulation
-from pokeuraou.resolve import replacements_needed, resolve_replacements
 
 FORMAT_ID = "gen9championsvgc2026regmc"
+
+
+# Python's replacement phase, imported when it is asked for rather than at load: the
+# suite loads this harness and puts the port's in these two names (tests/test_replacement,
+# IKA-210), and must not import the resolver to do it. The tool moves to the port with
+# IKA-212.
+def replacements_needed(pos: Position) -> tuple[tuple[bool, ...], tuple[bool, ...]]:
+    from pokeuraou.resolve import replacements_needed as python
+
+    return python(pos)
+
+
+def resolve_replacements(reg: Regulation, pos: Position, choices: list) -> object:
+    from pokeuraou.resolve import resolve_replacements as python
+
+    return python(reg, pos, choices)
 
 
 @dataclass

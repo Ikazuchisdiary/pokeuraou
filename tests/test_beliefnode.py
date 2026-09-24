@@ -31,11 +31,13 @@ from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
 from pokeuraou.hidden import completions
 from pokeuraou.narrow import narrow
+from pokeuraou.port import batched_payoff
 from pokeuraou.regulation import load_regulation, to_id
-from pokeuraou.resolve import Budget, batched_payoff, resolve_turn
 from pokeuraou.search import belief_solve
 from pokeuraou.selfplay import position_from_sets
 from pokeuraou.teams import load_roster
+
+from ._port import Budget, resolve_turn
 
 
 @pytest.fixture(scope="module")

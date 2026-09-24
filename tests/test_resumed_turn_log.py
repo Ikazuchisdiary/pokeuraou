@@ -15,19 +15,24 @@ wrong suspension in 66 of 105 interrupted turns.
 So what is pinned here is the matching, in the shape the bug was found in: Stomping
 Tantrum in front of Parting Shot, where the record's roll and the top of the list are 50
 HP apart.
+
+The turn, its pauses, their traces and the renderer's re-resolution are the port's
+(IKA-215, IKA-210): `turn_events` is handed the port's node, as `show_game --engine
+port` does. A test here used to hold that rendering to Python's line for line.
 """
 
 from __future__ import annotations
 
 import pytest
 
+from pokeuraou import rustnode
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.narrow import narrow
-from pokeuraou.resolve import Budget, resolve_turn, resume_alternatives
 from pokeuraou.selfplay import position_from_sets
 from pokeuraou.teams import load_roster
 
 from ._harness import load_tool
+from ._port import Budget, require_binary, resolve_turn, resume_alternatives
 
 #: Garchomp's Stomping Tantrum at foe 1, Incineroar's Parting Shot at foe 1.
 OURS = "move 3 1, move 3 1"
@@ -53,8 +58,19 @@ def interrupted():  # noqa: ANN201
     pos = position_from_sets(reg, own, foe)
     ours = {a.to_choice(): a for a in narrow(reg, pos, 0, limit=512).actions}
     theirs = {a.to_choice(): a for a in narrow(reg, pos, 1, limit=512).actions}
-    result = resolve_turn(reg, pos, [ours[OURS], theirs[THEIRS]], budget=Budget.exact())
+    result = resolve_turn(
+        reg, pos, [ours[OURS], theirs[THEIRS]], budget=Budget.exact(), events=True
+    )
     return reg, pos, result
+
+
+@pytest.fixture(scope="module")
+def node(interrupted):  # noqa: ANN001, ANN201
+    """The port's process `turn_events` re-resolves the turn with."""
+    require_binary()
+    opened = rustnode.RustNode(interrupted[0])
+    yield opened
+    opened.close()
 
 
 def record_of(reg, pos, played, action, ending):  # noqa: ANN001, ANN201
@@ -97,7 +113,7 @@ def test_the_turn_has_many_pauses_to_choose_between(interrupted) -> None:  # noq
 
 
 def test_the_log_reproduces_the_recorded_pause_not_the_first_one(  # noqa: ANN001
-    tool, interrupted
+    tool, interrupted, node
 ) -> None:
     """The record names a pause; the log has to render that one.
 
@@ -115,7 +131,7 @@ def test_the_log_reproduces_the_recorded_pause_not_the_first_one(  # noqa: ANN00
 
     decisions = record_of(reg, pos, played, action, ending)
     loc = tool.Localiser(reg, tool.load_names("ja"))
-    groups = tool.turn_events(reg, loc, decisions[0], decisions[1:], 1.0)
+    groups = tool.turn_events(reg, loc, decisions[0], decisions[1:], 1.0, node)
     text = "\n".join(
         (header or "") + " " + " ".join(lines) for header, lines in groups
     )
@@ -130,7 +146,9 @@ def test_the_log_reproduces_the_recorded_pause_not_the_first_one(  # noqa: ANN00
     assert "⚠" not in text, f"a reproducible turn must not be flagged:\n{text}"
 
 
-def test_an_unmatchable_pause_is_flagged_rather_than_guessed(tool, interrupted) -> None:  # noqa: ANN001
+def test_an_unmatchable_pause_is_flagged_rather_than_guessed(  # noqa: ANN001
+    tool, interrupted, node
+) -> None:
     """A record whose pause no suspension explains still has to say so.
 
     The matcher returns the nearest candidate, which is the right answer when the record
@@ -148,37 +166,10 @@ def test_an_unmatchable_pause_is_flagged_rather_than_guessed(tool, interrupted) 
             mon["hp"] = max(1, mon["hp"] - 3)
 
     loc = tool.Localiser(reg, tool.load_names("ja"))
-    groups = tool.turn_events(reg, loc, decisions[0], decisions[1:], 1.0)
+    groups = tool.turn_events(reg, loc, decisions[0], decisions[1:], 1.0, node)
     text = "\n".join(
         (header or "") + " " + " ".join(lines) for header, lines in groups
     )
     assert "⚠" in text and "中断時の局面" in text, (
         f"an unreachable pause has to be named as one:\n{text}"
     )
-
-
-def test_the_port_renders_the_same_log(tool, interrupted) -> None:  # noqa: ANN001
-    """`turn_events` through the port (IKA-215): the pause, its resumption and the trace
-    are the port's, and the reading is Python's line for line."""
-    from pokeuraou import rustnode
-
-    if not rustnode.binary_path().exists():
-        pytest.skip(f"no Rust binary at {rustnode.binary_path()}; `cargo build --release`")
-    reg, pos, result = interrupted
-    played = result.suspended[-1]
-    _chooser, alternatives = resume_alternatives(reg, played)
-    action, resumed = alternatives[0]
-    ending = max(resumed.branches, key=lambda b: b.probability)
-    decisions = record_of(reg, pos, played, action, ending)
-    loc = tool.Localiser(reg, tool.load_names("ja"))
-    python = tool.turn_events(reg, loc, decisions[0], decisions[1:], 1.0)
-    node = rustnode.RustNode(reg)
-    try:
-        port = tool.turn_events(reg, loc, decisions[0], decisions[1:], 1.0, node)
-    finally:
-        node.close()
-    assert port == python
-    text = "\n".join((header or "") + " " + " ".join(lines) for header, lines in port)
-    assert "⚠" not in text, text
-    recorded = next(e for e in played.events if "stompingtantrum" in e).split()[1]
-    assert recorded in text

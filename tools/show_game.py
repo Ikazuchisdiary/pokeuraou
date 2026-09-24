@@ -33,8 +33,13 @@ from pokeuraou.hidden import seen_slots
 from pokeuraou.names import Localiser, load_names
 from pokeuraou.position import Position
 from pokeuraou.regulation import Regulation, load_regulation, to_id
-from pokeuraou.resolve import RESIDUAL_PHASE
 from pokeuraou.teams import all_selections
+
+#: The label `acts` gives the end-of-turn phase, which belongs to nobody: what the port
+#: writes (`turn.begin(|| "residual")` in rust/src/moves.rs) and what resolve.py's
+#: `RESIDUAL_PHASE` is. Here so the tool, and the tests that load it, do not import the
+#: Python resolver for a string (IKA-210).
+RESIDUAL_PHASE = "residual"
 
 
 def hp_bar(current: int, maximum: int, width: int = 10) -> str:
@@ -567,9 +572,9 @@ def turn_events(
     ``node`` is a `rustnode.RustNode`: the turn and its resumptions are then the port's,
     trace included (IKA-215), and everything else here reads them as it reads Python's.
     """
+    from pokeuraou.budget import Budget
     from pokeuraou.narrow import narrow
     from pokeuraou.position import Position
-    from pokeuraou.resolve import Budget, resolve_turn, resume_alternatives
 
     own = decision.get("ownChosen")
     foe = decision.get("foeChosen")
@@ -607,6 +612,9 @@ def turn_events(
         lookup.append(actions[wanted])
 
     if node is None:
+        # Python's resolver only on its own road, so the port's does not load it.
+        from pokeuraou.resolve import resolve_turn
+
         result = resolve_turn(reg, pos, lookup, budget=Budget.exact())
     else:
         answered = node.turn(pos, lookup, Budget.exact(), full=True, events=True)
@@ -641,6 +649,8 @@ def turn_events(
         # it. Reading `ownChosen` either way silently lost every turn where the *opponent*
         # was the one switching out -- half of them.
         if node is None:
+            from pokeuraou.resolve import resume_alternatives
+
             side, alternatives = resume_alternatives(reg, paused)
         else:
             resumed_by_port = node.resume_alternatives(paused, events=True)
