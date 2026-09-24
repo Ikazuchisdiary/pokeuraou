@@ -598,6 +598,8 @@ class RustNode:
         """
         with timing.stage("rust.ask"):
             payload = json.dumps(request, ensure_ascii=False).encode("utf-8")
+        if timing.DUPES:
+            _note_repeat(request)
         self._process.stdin.write(payload + b"\n")
         self._process.stdin.flush()
         line = self._with_deadline(self._process.stdout.readline, "header")
@@ -626,6 +628,9 @@ class RustNode:
                 json.dumps(request, ensure_ascii=False).encode("utf-8") + b"\n"
                 for request in requests
             ]
+        if timing.DUPES:
+            for request in requests:
+                _note_repeat(request)
         failure: list[BaseException] = []
 
         def feed() -> None:
@@ -1112,6 +1117,7 @@ class RustNode:
         """`apply_lead_abilities`, with its draws answered as `resolve_replacements`'."""
         return self._phase({"kind": "leads", "position": pos.to_json(), "events": events}, rng)
 
+    @timing.timed("rust.needed")
     def replacements_needed(self, pos: Position) -> tuple[tuple[bool, ...], ...] | None:
         response = self._ask({"kind": "needed", "position": pos.to_json()})
         if response is None:
@@ -1134,6 +1140,38 @@ class RustNode:
                 return PortPhase.read(response)
             total = float(sum(weights))
             presets.append(int(rng.choice(len(weights), p=[w / total for w in weights])))
+
+
+def _note_repeat(request: dict[str, Any]) -> None:
+    """IKA-258: count a request whose content this decision already sent (`timing.repeat`).
+
+    Keyed on the request less `shm`, which names this process's block and not the question.
+    Only called when `timing.DUPES` is on.
+    """
+    kind = request.get("kind") or ("fill_encoded" if request.get("encode") else "fill")
+    asked = {key: value for key, value in request.items() if key != "shm"}
+    digest = hashlib.blake2b(
+        json.dumps(asked, ensure_ascii=False).encode("utf-8"), digest_size=16
+    ).digest()
+    timing.repeat(f"port.{kind}", digest)
+    # The position alone, whatever was asked of it: what a child that kept the last few
+    # positions it parsed would not have to be sent again.
+    if "position" in request:
+        where = hashlib.blake2b(
+            json.dumps(request["position"], ensure_ascii=False).encode("utf-8"),
+            digest_size=16,
+        ).digest()
+        timing.repeat("port.position", where)
+        # And a node's cells one by one: a cell of the leaf ranking's fill that the matrix
+        # fills again, on the same position with the same two actions, is the same turn.
+        if "ours" in request and "theirs" in request:
+            ours = [json.dumps(a, sort_keys=True) for a in request["ours"]]
+            theirs = [json.dumps(a, sort_keys=True) for a in request["theirs"]]
+            cells = request.get("cells") or [
+                (i, j) for i in range(len(ours)) for j in range(len(theirs))
+            ]
+            for i, j in cells:
+                timing.repeat("port.cell", (where, ours[i], theirs[j]))
 
 
 def _world(world: tuple[Position, int] | None) -> dict[str, Any] | None:

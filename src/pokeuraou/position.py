@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from . import timing
 from .regulation import BOOST_IDS, STAT_IDS
 
 
@@ -522,6 +523,7 @@ class Position:
         return out
 
     @staticmethod
+    @timing.timed("position.parse")
     def from_json(d: dict[str, Any]) -> Position:
         return Position(
             format=d["format"],
@@ -533,8 +535,9 @@ class Position:
             winner=d.get("winner"),
         )
 
+    @timing.timed("position.json")
     def to_json(self) -> dict[str, Any]:
-        return {
+        out = {
             "format": self.format,
             "turn": self.turn,
             "field": self.field.to_json(),
@@ -543,6 +546,10 @@ class Position:
             "ended": self.ended,
             "winner": self.winner,
         }
+        if timing.DUPES:
+            # IKA-258: the same position written out again within one decision.
+            timing.repeat("position.json", json.dumps(out, ensure_ascii=False))
+        return out
 
     @staticmethod
     def load(path: str | Path) -> Position:

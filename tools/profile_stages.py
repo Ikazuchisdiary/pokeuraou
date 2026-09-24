@@ -71,7 +71,13 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from pokeuraou.benchflags import add_bench_flags, bench_argv, require_bench  # noqa: E402
-from pokeuraou.timing import BORROWED, PURPOSE_ROWS, PURPOSES, STAGES  # noqa: E402
+from pokeuraou.timing import (  # noqa: E402
+    BORROWED,
+    PURPOSE_ROWS,
+    PURPOSES,
+    STAGES,
+    WORKER_STAGES,
+)
 
 #: Rows printed under a heading, so a table reads as a breakdown rather than a list.
 GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
@@ -84,6 +90,8 @@ GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
                "rust.child.header")),
     ("server", ("server.held", "server.queue")),
     ("inclusive", ("refused",)),
+    # Outside the search, and the Python around each crossing (IKA-258).
+    ("worker", WORKER_STAGES),
     # `rust.fill` and the child's clocks again, cut by what the fill was for (IKA-98).
     ("by purpose", PURPOSE_ROWS),
 )
@@ -126,7 +134,11 @@ _UNGROUPED = sorted(set(STAGES) - {name for _heading, names in GROUPS for name i
 
 
 def tree_cpu(
-    pid: int, stop: threading.Event, every: float = 1.0, floor_gb: float = 2.0
+    pid: int,
+    stop: threading.Event,
+    every: float = 1.0,
+    floor_gb: float = 2.0,
+    progress: Any = None,  # noqa: ANN401 - a callable returning games written so far
 ) -> dict[str, Any]:
     """Poll a process tree's CPU seconds and RSS until `stop`, keeping the last reading.
 
@@ -148,6 +160,10 @@ def tree_cpu(
     samples = 0
     low_water = float("inf")
     stopped_for_memory = False
+    # IKA-258: (seconds since the start, games written, CPU seconds by role) at each poll,
+    # so the steady state can be read apart from the start-up and the tail.
+    trace: list[tuple[float, int, dict[str, float]]] = []
+    began = time.perf_counter()
     while not stop.is_set():
         rss = 0
         try:
@@ -174,6 +190,13 @@ def tree_cpu(
             except psutil.Error:
                 continue
         peak_rss = max(peak_rss, rss)
+        if progress is not None:
+            now_roles: dict[str, float] = {}
+            for known_pid, (known_name, spent) in totals.items():
+                role = roles.get(known_pid, known_name)
+                now_roles[role] = now_roles.get(role, 0.0) + spent
+            with contextlib.suppress(OSError, ValueError):
+                trace.append((time.perf_counter() - began, int(progress()), now_roles))
         free = psutil.virtual_memory().available / 1e9
         low_water = min(low_water, free)
         if group and free < floor_gb:
@@ -207,7 +230,80 @@ def tree_cpu(
         "stopped_for_memory": stopped_for_memory,
         "processes": len(totals),
         "samples": samples,
+        "trace": trace,
     }
+
+
+class GamesWritten:
+    """Lines in a run's games files so far, read incrementally (IKA-258's progress).
+
+    A file is only ever appended to, so each poll reads what was added since the last one
+    and counts its newlines, rather than rereading hundreds of megabytes a second.
+    """
+
+    def __init__(self, directory: Path) -> None:
+        self.directory = directory
+        self.offsets: dict[Path, int] = {}
+        self.count = 0
+
+    def __call__(self) -> int:
+        for path in self.directory.glob("games-worker*.jsonl"):
+            start = self.offsets.get(path, 0)
+            with path.open("rb") as handle:
+                handle.seek(start)
+                added = handle.read()
+            self.offsets[path] = start + len(added)
+            self.count += added.count(b"\n")
+        return self.count
+
+
+def steady(trace: list[Any], low: float = 0.1, high: float = 0.9) -> dict[str, Any] | None:
+    """Games a minute and CPU seconds a game between the `low` and `high` shares of the run.
+
+    Read off the poll's trace, between the first poll at or past `low` of the final count and
+    the first at or past `high`: the start-up (torch, CUDA, the port, the first node's block)
+    and the tail (the last games, workers idle) are outside it. The CPU is each role's
+    kernel counter over the same two polls, so it is what a game costs the machine in the
+    steady state, per role -- the number a cut would be read against (IKA-258).
+    """
+    if not trace:
+        return None
+    final = trace[-1][1]
+    if final <= 0:
+        return None
+    first = next((row for row in trace if row[1] >= low * final), None)
+    last = next((row for row in trace if row[1] >= high * final), None)
+    if first is None or last is None or last[1] <= first[1] or last[0] <= first[0]:
+        return None
+    games = last[1] - first[1]
+    seconds = last[0] - first[0]
+    roles = set(first[2]) | set(last[2])
+    per_game = {
+        role: (last[2].get(role, 0.0) - first[2].get(role, 0.0)) / games for role in roles
+    }
+    return {
+        "games": games,
+        "seconds": seconds,
+        "games_per_minute": 60.0 * games / seconds,
+        "cpu_per_game": per_game,
+        "cpu_per_game_total": sum(per_game.values()),
+        "busy_cores": sum(per_game.values()) * games / seconds,
+    }
+
+
+def print_steady(found: dict[str, Any] | None) -> None:
+    if found is None:
+        print("\n  steady state: not enough polls to read one")
+        return
+    print(f"\n  steady state (10%..90% of the games): {found['games']:,} games in "
+          f"{found['seconds']:.1f} s = {found['games_per_minute']:.1f} games/min, "
+          f"busy cores {found['busy_cores']:.1f}")
+    total = found["cpu_per_game_total"]
+    for role, spent in sorted(found["cpu_per_game"].items(), key=lambda kv: -kv[1]):
+        if spent <= 0:
+            continue
+        print(f"   {role:<28} {spent:8.3f} CPU s a game  {100 * spent / total:5.1f}%")
+    print(f"   {'total':<28} {total:8.3f}")
 
 
 def collect(directory: Path) -> list[dict[str, Any]]:
@@ -696,6 +792,73 @@ def print_rest_by_kind(found: dict[str, Any] | None) -> None:
     print(f"  {'outside any stretch':<22} {'':>7} {found['outside']:>9.1f}")
 
 
+def repeats(reports: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    """`dup.<kind>.calls` and `.repeat` over every worker, by kind (IKA-258)."""
+    out: dict[str, dict[str, int]] = {}
+    for report in _worker_reports(reports):
+        for name, value in (report.get("counts") or {}).items():
+            if not name.startswith("dup.") or "@" in name:
+                continue
+            kind, _dot, what = name[len("dup."):].rpartition(".")
+            row = out.setdefault(kind, {"calls": 0, "repeat": 0})
+            row[what] = row.get(what, 0) + int(value)
+    return out
+
+
+def _moves(reports: list[dict[str, Any]]) -> int:
+    """Decisions the workers closed, `between` stretches left out."""
+    return sum(
+        int(row.get("n", 0))
+        for report in _worker_reports(reports)
+        for kind, row in (report.get("decisions") or {}).items()
+        if not kind.startswith("between")
+    )
+
+
+def print_repeats(found: dict[str, dict[str, int]], decisions: int) -> None:
+    if not found:
+        return
+    print(f"\n  calls on an input the same decision had already sent, over {decisions:,} "
+          f"decisions (between-game stretches not counted in the denominator)")
+    print(f"  {'what':<24} {'calls':>12} {'repeated':>12} {'share':>7} {'a decision':>11}")
+    for kind, row in sorted(found.items()):
+        calls, again = row.get("calls", 0), row.get("repeat", 0)
+        share = 100.0 * again / calls if calls else 0.0
+        print(f"  {kind:<24} {calls:>12,} {again:>12,} {share:>6.1f}% "
+              f"{calls / max(decisions, 1):>11.1f}")
+
+
+def stack_samples(reports: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The workers' stack samples summed (IKA-258), or None when none sampled."""
+    ticks = 0
+    tables: dict[str, dict[str, int]] = {"self": {}, "own": {}, "inclusive": {}}
+    for report in _worker_reports(reports):
+        found = report.get("samples")
+        if not found:
+            continue
+        ticks += int(found.get("ticks", 0))
+        for table, into in tables.items():
+            for name, n in (found.get(table) or {}).items():
+                into[name] = into.get(name, 0) + int(n)
+    if not ticks:
+        return None
+    return {"ticks": ticks, **tables}
+
+
+def print_stack_samples(found: dict[str, Any] | None, top: int = 30) -> None:
+    if found is None:
+        return
+    ticks = found["ticks"]
+    for table, what in (
+        ("own", "innermost frame in pokeuraou (library time charged to its caller)"),
+        ("self", "innermost frame, wherever it is"),
+        ("inclusive", "anywhere on the stack"),
+    ):
+        print(f"\n  stack samples, {ticks:,} over the workers' main threads: {what}")
+        for name, n in sorted(found[table].items(), key=lambda kv: -kv[1])[:top]:
+            print(f"   {100.0 * n / ticks:5.1f}%  {n:>9,}  {name}")
+
+
 def _flag(argv: list[str], flag: str) -> str | None:
     return argv[argv.index(flag) + 1] if flag in argv[:-1] else None
 
@@ -727,7 +890,7 @@ def delivery(
     seen: dict[str, dict[str, int]] = {}
     for argv in workers:
         for flag in ("--limit", "--seed", "--roster", "--selection-book", "--force-lead",
-                     "--inference-arm", "--value"):
+                     "--inference-arm", "--value", "--pool", "--selection-store"):
             value = _flag(argv, flag)
             seen.setdefault(flag, {})
             seen[flag][str(value)] = seen[flag].get(str(value), 0) + 1
@@ -738,7 +901,7 @@ def delivery(
     if args is not None and args.workload == "generation":
         wanted = {
             "--limit": args.limit, "--seed": args.seed, "--roster": args.roster,
-            "--force-lead": args.force_lead,
+            "--force-lead": args.force_lead, "--pool": getattr(args, "pool", None),
         }
         for argv in workers:
             for flag, value in wanted.items():
@@ -808,6 +971,7 @@ def build(args: argparse.Namespace) -> list[str]:
             *given("--selection-book", args.selection_book),
             *(["--uniform-selection"] if args.uniform_selection else []),
             *given("--force-lead", args.force_lead),
+            *given("--pool", getattr(args, "pool", None)),
             "--device", args.device,
             *(["--no-bridge"] if args.no_bridge else []),
             *(["--served", "--servers", str(args.servers)] if args.served else []),
@@ -852,6 +1016,25 @@ def main() -> None:
     ap.add_argument("--selection-book", type=Path, default=None)
     ap.add_argument("--uniform-selection", action="store_true")
     ap.add_argument("--force-lead", default=None)
+    ap.add_argument("--pool", default=None, help="generation: generate_queue.py's --pool (M-C)")
+    ap.add_argument(
+        "--no-timing",
+        action="store_true",
+        help="run the driver without POKEURAOU_TIMING: the null control for the timers' own "
+        "cost. Only the process tree and the steady state are read (IKA-258).",
+    )
+    ap.add_argument(
+        "--dupes",
+        action="store_true",
+        help="also count calls on an input the same decision already sent (hashes every "
+        "request and leaf row, so this run's clock is not read)",
+    )
+    ap.add_argument(
+        "--sample-hz",
+        type=float,
+        default=0.0,
+        help="also sample each worker's main-thread stack this often (IKA-258)",
+    )
     ap.add_argument("--value", default="data/models/value-gen11L.pt")
     ap.add_argument("--baseline", default="data/models/value-gen10.pt")
     ap.add_argument("--case", default="sash-ko", help="analysis: a human_baseline case")
@@ -890,7 +1073,7 @@ def main() -> None:
     generation_only = {
         "--seed": args.seed, "--first-game": args.first_game, "--roster": args.roster,
         "--selection-book": args.selection_book, "--force-lead": args.force_lead,
-        "--uniform-selection": args.uniform_selection or None,
+        "--uniform-selection": args.uniform_selection or None, "--pool": args.pool,
     }
     stray = [flag for flag, value in generation_only.items() if value is not None]
     if args.workload != "generation" and stray and args.report is None:
@@ -914,6 +1097,8 @@ def main() -> None:
         print_decisions(per_decision(reports))
         print_rest_fit(rest_fit(reports))
         print_rest_by_kind(rest_by_kind(reports))
+        print_repeats(repeats(reports), _moves(reports))
+        print_stack_samples(stack_samples(reports))
         print_delivery(delivery(reports, None))
         return
 
@@ -924,7 +1109,20 @@ def main() -> None:
         args.out = ROOT / "data" / "timing" / f"{args.workload}-{stamp}-games"
 
     env = dict(os.environ)
-    env["POKEURAOU_TIMING"] = str(timing_dir)
+    if args.no_timing:
+        # The null control: every timer is the undecorated function again. Set to nothing
+        # rather than removed, so the environment block keeps its layout (a variable's
+        # length has moved a Rust timing by 19% on this machine).
+        env["POKEURAOU_TIMING"] = ""
+    else:
+        env["POKEURAOU_TIMING"] = str(timing_dir)
+    env["POKEURAOU_TIMING_DUPES"] = "1" if args.dupes else ""
+    env["POKEURAOU_SAMPLE_HZ"] = f"{args.sample_hz:g}" if args.sample_hz > 0 else ""
+    # And a pad that makes the three together the same length in every mode, so an arm
+    # with the timers and the null control without them differ in the timers alone.
+    used = sum(len(env[name]) for name in
+               ("POKEURAOU_TIMING", "POKEURAOU_TIMING_DUPES", "POKEURAOU_SAMPLE_HZ"))
+    env["POKEURAOU_TIMING_PAD"] = "x" * max(len(str(timing_dir)) + 16 - used, 0)
     env["PYTHONPATH"] = str(ROOT / "src")
     # The drivers set this for their workers; the analysis workload has no driver, so it
     # is set here and the drivers overwrite it with the same value.
@@ -939,8 +1137,13 @@ def main() -> None:
     stop = threading.Event()
     tree: dict[str, Any] = {}
 
+    written = (
+        GamesWritten(Path(args.out)) if args.workload == "generation" else None
+    )
+
     def poll() -> None:
-        tree.update(tree_cpu(process.pid, stop, floor_gb=args.memory_floor))
+        tree.update(tree_cpu(process.pid, stop, floor_gb=args.memory_floor,
+                             progress=written))
 
     watcher = threading.Thread(target=poll, daemon=True)
     watcher.start()
@@ -951,6 +1154,20 @@ def main() -> None:
     if code != 0:
         print(f"  the run exited {code}; the table below is of whatever it did first",
               file=sys.stderr)
+    found_steady = steady(tree.get("trace") or [])
+
+    if args.no_timing:
+        # Nothing reported, by design: the machine's side of the run is all there is.
+        summary = {"command": command, "wall": wall, "tree": tree, "steady": found_steady,
+                   "timing": False}
+        print(f"\n  run {wall:,.1f} s of wall clock, no timers (the null control)")
+        print_table({"stages": {}, "counts": {}, "accounted": 0.0, "elapsed": 0.0,
+                     "processes": 0, "roles": {}}, tree, wall)
+        print_steady(found_steady)
+        target = args.json or (timing_dir / "summary.json")
+        target.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"\n  {target}")
+        return
 
     reports = collect(timing_dir)
     if not reports:
@@ -976,6 +1193,12 @@ def main() -> None:
     print_rest_fit(summary["rest_fit"])
     summary["rest_by_kind"] = rest_by_kind(reports)
     print_rest_by_kind(summary["rest_by_kind"])
+    summary["steady"] = found_steady
+    print_steady(found_steady)
+    summary["repeats"] = repeats(reports)
+    print_repeats(summary["repeats"], _moves(reports))
+    summary["stack_samples"] = stack_samples(reports)
+    print_stack_samples(summary["stack_samples"])
     summary["delivery"] = delivery(reports, args)
     print_delivery(summary["delivery"])
     target = args.json or (timing_dir / "summary.json")

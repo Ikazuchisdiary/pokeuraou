@@ -274,3 +274,61 @@ def test_the_rest_by_kind_names_where_the_lump_is(tool: Any) -> None:
     old = worker(tool)
     del old["decisions"]
     assert tool.rest_by_kind([old]) is None
+
+
+# -- IKA-258: the pool, the steady state, and the null control's environment.
+
+
+def test_the_pool_goes_to_the_driver(tool: Any) -> None:
+    command = tool.build(namespace(pool="regmc-matchupweb", hide_bench=True,
+                                   rest=["--rank-leaf"]))
+    joined = " ".join(command)
+    assert "--pool regmc-matchupweb" in joined
+    # Control: without it, nothing of the kind is passed.
+    assert "--pool" not in tool.build(namespace())
+
+
+def test_games_written_reads_only_what_was_appended(tool: Any, tmp_path: Path) -> None:
+    counter = tool.GamesWritten(tmp_path)
+    assert counter() == 0
+    (tmp_path / "games-worker0.jsonl").write_bytes(b'{"a": 1}\n{"a": 2}\n')
+    assert counter() == 2
+    with (tmp_path / "games-worker0.jsonl").open("ab") as handle:
+        handle.write(b'{"a": 3}\n')
+    (tmp_path / "games-worker1.jsonl").write_bytes(b'{"b": 1}\n')
+    # Another file that is not a worker's games is not counted.
+    (tmp_path / "CMD").write_bytes(b"x\ny\n")
+    assert counter() == 4
+    assert counter() == 4
+
+
+def test_steady_reads_between_the_shares(tool: Any) -> None:
+    """A start-up of 10 s with nothing written, then 10 games a second at 2 CPU s a game."""
+    trace = [(float(t), 0, {"selfplay.py": 1.0 * t}) for t in range(11)]
+    trace += [
+        (10.0 + t, 10 * t, {"selfplay.py": 10.0 + 20.0 * t, "pokeuraou-damage.exe": 5.0 * t})
+        for t in range(1, 11)
+    ]
+    found = tool.steady(trace)
+    assert found["games_per_minute"] == pytest.approx(600.0)
+    assert found["cpu_per_game"]["selfplay.py"] == pytest.approx(2.0)
+    assert found["cpu_per_game"]["pokeuraou-damage.exe"] == pytest.approx(0.5)
+    assert found["busy_cores"] == pytest.approx(25.0)
+    # Control: read over the whole run, the start-up drags the rate down -- which is what
+    # the 10%..90% window is for.
+    whole = tool.steady(trace, low=0.0, high=1.0)
+    assert whole["games_per_minute"] < 400.0
+    assert tool.steady([]) is None
+
+
+def test_repeats_sum_over_workers(tool: Any) -> None:
+    worker = {"argv": ["python", "tools/selfplay.py"],
+              "counts": {"dup.port.score.calls": 10, "dup.port.score.repeat": 4,
+                         "dup.leafrow.calls": 7, "fills": 3},
+              "decisions": {"move": {"n": 5}, "between": {"n": 1}}}
+    server = {"argv": ["python", "tools/inference_server.py"],
+              "counts": {"dup.port.score.calls": 99}}
+    found = tool.repeats([worker, worker, server])
+    assert found == {"port.score": {"calls": 20, "repeat": 8},
+                     "leafrow": {"calls": 14, "repeat": 0}}
+    assert tool._moves([worker, worker, server]) == 10

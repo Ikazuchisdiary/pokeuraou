@@ -347,6 +347,8 @@ class RemoteValue:
                 stop = min(start + self.batch_size, rows)
                 out[start:stop] = self.from_encoded(_slice(encoded, start, stop))
             return out
+        if timing.DUPES:
+            note_repeated_rows(encoded, rows)
         layout, used = _plan(encoded)
         result_offset = (used + 63) & ~63
         needed = result_offset + rows * 8
@@ -404,6 +406,24 @@ class RemoteValue:
         # One round trip is one pass on the server; a longer batch came through here in pieces.
         timing.count("forward.passes")
         return scores
+
+
+def note_repeated_rows(encoded: Any, rows: int) -> None:  # noqa: ANN401 - Encoded
+    """IKA-258: count leaf rows sent to the net that this decision already sent.
+
+    A row is every array's bytes for that leaf, so two rows are the same only if the net
+    would be handed the same input. Counted as `dup.leafrow.*` (`timing.repeat`); only when
+    `timing.DUPES` is on.
+    """
+    import hashlib
+
+    flat = [
+        np.ascontiguousarray(getattr(encoded, name)).reshape(rows, -1).view(np.uint8)
+        for name in ARRAYS
+    ]
+    joined = np.concatenate(flat, axis=1)
+    for row in joined:
+        timing.repeat("leafrow", hashlib.blake2b(row.tobytes(), digest_size=16).digest())
 
 
 def served_model(value: Any):

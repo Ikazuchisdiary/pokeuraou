@@ -41,6 +41,7 @@ from dataclasses import dataclass
 from itertools import combinations
 from typing import TYPE_CHECKING
 
+from . import timing
 from .position import Pokemon, Position, Side
 
 if TYPE_CHECKING:  # pragma: no cover - imported for types only; selfplay imports us
@@ -181,6 +182,7 @@ def shown_species(
     return out
 
 
+@timing.timed("completions")
 def completions(
     reg: Regulation,
     position: Position,
