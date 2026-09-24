@@ -32,12 +32,20 @@ import pytest
 SOURCE = Path(__file__).resolve().parents[1] / "src" / "pokeuraou" / "timing.py"
 
 
-def load(monkeypatch: pytest.MonkeyPatch, directory: Path | None) -> Any:
+def load(
+    monkeypatch: pytest.MonkeyPatch,
+    directory: Path | None,
+    *,
+    dupes: bool = False,
+    sample_hz: float = 0.0,
+) -> Any:
     """A private copy of the module, with the environment it reads at import time."""
     if directory is None:
         monkeypatch.delenv("POKEURAOU_TIMING", raising=False)
     else:
         monkeypatch.setenv("POKEURAOU_TIMING", str(directory))
+    monkeypatch.setenv("POKEURAOU_TIMING_DUPES", "1" if dupes else "")
+    monkeypatch.setenv("POKEURAOU_SAMPLE_HZ", f"{sample_hz:g}" if sample_hz else "")
     spec = importlib.util.spec_from_file_location("_timing_under_test", SOURCE)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -376,3 +384,86 @@ def test_served_is_the_leaf_this_process_built(monkeypatch: pytest.MonkeyPatch) 
         with RemoteValue(f"127.0.0.1:{port}", "value", encoder=None, buffer_bytes=1 << 12):
             pass
     assert real.snapshot()["served"] is True
+
+
+# -- IKA-258: counting repeated inputs, and sampling where a worker's main thread is.
+
+
+def test_repeats_are_counted_within_a_stretch_only(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A key seen twice in one decision is one repeat; the next decision starts empty."""
+    timing = load(monkeypatch, tmp_path, dupes=True)
+    assert timing.DUPES is True
+    timing.decided("between")
+    assert timing.repeat("port.score", b"a") is False
+    assert timing.repeat("port.score", b"b") is False
+    assert timing.repeat("port.score", b"a") is True
+    # Another kind with the same key is another question.
+    assert timing.repeat("port.fill", b"a") is False
+    timing.decided("move")
+    assert timing.repeat("port.score", b"a") is False
+    counts = timing.snapshot()["counts"]
+    assert counts["dup.port.score.calls"] == 4
+    assert counts["dup.port.score.repeat"] == 1
+    assert counts["dup.port.fill.calls"] == 1
+    assert "dup.port.fill.repeat" not in counts
+    # And per decision, as every other count.
+    move = timing.snapshot()["decisions"]["move"]["counts"]
+    assert move["dup.port.score.repeat"] == 1
+
+
+def test_repeats_need_their_own_switch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The null control: timing on, the switch off -- nothing is hashed or counted."""
+    timing = load(monkeypatch, tmp_path)
+    assert timing.DUPES is False
+    assert timing.repeat("port.score", b"a") is False
+    assert timing.repeat("port.score", b"a") is False
+    assert timing.snapshot()["counts"] == {}
+    off = load(monkeypatch, None, dupes=True)
+    assert off.DUPES is False
+    assert off.repeat("port.score", b"a") is False
+    assert off.snapshot()["counts"] == {}
+
+
+def _spin_here(seconds: float) -> None:
+    end = time.perf_counter() + seconds
+    while time.perf_counter() < end:
+        pass
+
+
+def test_the_sampler_finds_the_function_that_is_running(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Positive control: a main thread busy in one function is sampled there."""
+    timing = load(monkeypatch, tmp_path, sample_hz=500)
+    try:
+        assert timing.SAMPLE_HZ == 500
+        _spin_here(0.4)
+    finally:
+        timing._SAMPLER_STOP.set()
+    samples = timing.snapshot()["samples"]
+    assert samples["ticks"] > 20
+    here = samples["self"].get("test_timing.py:_spin_here", 0)
+    assert here > 0.5 * samples["ticks"]
+    assert samples["inclusive"]["test_timing.py:_spin_here"] >= here
+
+
+def test_no_sampler_without_the_rate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The null control: no rate, no thread and no samples in the report; timing off too."""
+    before = {t.name for t in threading.enumerate()}
+    timing = load(monkeypatch, tmp_path)
+    assert timing.SAMPLE_HZ == 0
+    assert timing.snapshot()["samples"] is None
+    off = load(monkeypatch, None, sample_hz=500)
+    assert off.SAMPLE_HZ == 0
+    after = [t.name for t in threading.enumerate() if t.name not in before]
+    assert "pokeuraou-sampler" not in after
+
+
+def test_the_worker_stages_are_named(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """IKA-258's rows are in STAGES, so a report has them even when they never ran."""
+    timing = load(monkeypatch, tmp_path)
+    assert set(timing.WORKER_STAGES) <= set(timing.STAGES)
+    assert not set(timing.WORKER_STAGES) & timing.BORROWED
+    assert set(timing.WORKER_STAGES) <= set(timing.snapshot()["stages"])

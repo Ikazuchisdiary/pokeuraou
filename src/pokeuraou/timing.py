@@ -76,6 +76,22 @@ ENV_DIR = "POKEURAOU_TIMING"
 #: purposes always add up to the whole: the replacement and self-switch nodes, the analyser.
 PURPOSES = ("rank", "matrix", "dirty", "other")
 
+#: IKA-258's rows: where a pool worker's clock went that no earlier row named.
+WORKER_STAGES = (
+    "selection",        # a game's four each side and bench priors: the solve read, the draw
+    "selection.solve",  # solving a pair's selection game, minus the encode/forward inside it
+    "record",           # a finished game's JSON and its line in the file
+    "completions",      # the hidden bench's completions at a node (hidden.completions)
+    "position.json",    # Position.to_json, wherever it is called (a request, a record)
+    "position.parse",   # Position.from_json, wherever it is called (an answer)
+    "rust.turn",        # a turn through the port (port.turn), the wait included
+    "rust.needed",      # the replacement check before every decision, the wait included
+    "rust.leads",       # the leads' switch-ins (a game's start, the selection solve)
+    "rust.replacements",  # the replacement phase
+    "rust.resume",      # a paused turn resumed
+    "rust.alternatives",  # a pause's alternatives, encoded or not
+)
+
 #: The stages, in the order a report prints them. Named here rather than created on first
 #: use so that a report always has every row -- a stage missing because it never ran and a
 #: stage missing because nobody instrumented it look identical otherwise, and the second
@@ -109,6 +125,9 @@ STAGES = (
     "server.held",   # the serving side, working  (its own counter)
     "server.queue",  # the serving side, queueing (its own counter)
     "refused",       # filling the cells the port declined, in one call a node
+    # What a worker does outside the search, and the Python around every crossing that no
+    # row above held (IKA-258): each of these was in "the rest" or inside `rust.fill`.
+    *WORKER_STAGES,
     # One fill's whole call here (header, body, unpack and the wait), by what it was for...
     *(f"rust.fill@{name}" for name in PURPOSES),
     # ...and what the child says that fill cost it, all four of its clocks together.
@@ -245,6 +264,98 @@ _DECISIONS: dict[str, dict[str, Any]] = {}
 _STARTUP_CPU: list[float] = []
 #: Whether this process's leaf is a server's: set by `RemoteValue` when one is built.
 _SERVED: list[bool] = [False]
+
+
+#: IKA-258: count calls that repeat an input already seen in the same decision stretch.
+#: Its own switch on top of `POKEURAOU_TIMING`, because hashing every request and every
+#: leaf row is not free: a run that counts is a run whose clock is not read.
+ENV_DUPES = "POKEURAOU_TIMING_DUPES"
+DUPES = ON and bool(os.environ.get(ENV_DUPES))
+#: kind -> the keys seen since the stretch opened. Cleared by `decided`.
+_SEEN: dict[str, set[Any]] = {}
+
+
+def repeat(kind: str, key: Any, n: int = 1) -> bool:
+    """Count `n` calls of `kind` on input `key`; True when this stretch saw `key` already.
+
+    Counted as `dup.<kind>.calls` and `dup.<kind>.repeat`, so they land in the per-decision
+    table beside everything else. A stage timer cannot see a call made twice on the same
+    input -- both calls look like work -- and that is the waste a cache would remove.
+    """
+    if not DUPES:
+        return False
+    seen = _SEEN.setdefault(kind, set())
+    count(f"dup.{kind}.calls", n)
+    if key in seen:
+        count(f"dup.{kind}.repeat", n)
+        return True
+    seen.add(key)
+    return False
+
+
+#: IKA-258: sample the main thread's stack this many times a second, into the report.
+#: Zero (the default) starts no thread. Only with timing on.
+ENV_SAMPLE = "POKEURAOU_SAMPLE_HZ"
+_SAMPLES: dict[str, dict[str, int]] = {"self": {}, "own": {}, "inclusive": {}}
+_SAMPLE_TICKS = [0]
+#: Set to stop the sampler (a test's; a worker's stops with the process).
+_SAMPLER_STOP = threading.Event()
+_PACKAGE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+
+#: code object -> (its name in a report, whether it is this package's). Once per code.
+_CODES: dict[Any, tuple[str, bool]] = {}
+
+
+def _frame_name(code: Any) -> tuple[str, bool]:
+    found = _CODES.get(code)
+    if found is None:
+        path = code.co_filename
+        found = _CODES[code] = (
+            f"{os.path.basename(path)}:{code.co_name}",
+            os.path.dirname(os.path.abspath(path)) == _PACKAGE_DIR,
+        )
+    return found
+
+
+def _sample_loop(hz: float, target: int) -> None:
+    """Every 1/hz seconds, where the main thread is: its innermost frame (`self`), its
+    innermost frame in this package (`own`, so numpy and json are charged to the caller
+    that asked for them) and every function on its stack once (`inclusive`)."""
+    every = 1.0 / hz
+    selfs, owns, inclusive = _SAMPLES["self"], _SAMPLES["own"], _SAMPLES["inclusive"]
+    while not _SAMPLER_STOP.wait(every):
+        frame = sys._current_frames().get(target)  # noqa: SLF001 - the sampler's whole job
+        if frame is None:
+            continue
+        _SAMPLE_TICKS[0] += 1
+        leaf = _frame_name(frame.f_code)[0]
+        selfs[leaf] = selfs.get(leaf, 0) + 1
+        mine = None
+        names: set[str] = set()
+        while frame is not None:
+            name, ours = _frame_name(frame.f_code)
+            names.add(name)
+            if mine is None and ours:
+                mine = name
+            frame = frame.f_back
+        if mine is not None:
+            owns[mine] = owns.get(mine, 0) + 1
+        for name in names:
+            inclusive[name] = inclusive.get(name, 0) + 1
+
+
+def _start_sampler() -> float:
+    hz = float(os.environ.get(ENV_SAMPLE) or 0) if ON else 0.0
+    if hz > 0:
+        threading.Thread(
+            target=_sample_loop, args=(hz, threading.main_thread().ident), daemon=True,
+            name="pokeuraou-sampler",
+        ).start()
+    return hz
+
+
+SAMPLE_HZ = _start_sampler()
 
 
 def stage(name: str) -> Any:
@@ -386,6 +497,7 @@ def decided(kind: str) -> None:
     """
     if not ON:
         return
+    _SEEN.clear()
     now = time.perf_counter()
     if not _STARTUP_CPU:
         _end_startup(now)
@@ -549,6 +661,13 @@ def snapshot() -> dict[str, Any]:
         "decisions": _decisions() if ON else {},
         "startup_process_cpu": _STARTUP_CPU[0] if _STARTUP_CPU else None,
         "process": _process_times(),
+        # IKA-258: whether this process counted repeats, and its stack samples if any.
+        "dupes": DUPES,
+        "sample_hz": SAMPLE_HZ,
+        "samples": (
+            {"ticks": _SAMPLE_TICKS[0], **{k: dict(v) for k, v in _SAMPLES.items()}}
+            if SAMPLE_HZ > 0 else None
+        ),
     }
 
 
@@ -625,6 +744,7 @@ __all__ = [
     "PURPOSES",
     "PURPOSE_ROWS",
     "STAGES",
+    "WORKER_STAGES",
     "add",
     "clock",
     "count",
@@ -634,6 +754,7 @@ __all__ = [
     "purpose",
     "ready",
     "refine",
+    "repeat",
     "serving",
     "set_total",
     "snapshot",

@@ -52,6 +52,7 @@ from typing import Any
 
 import numpy as np
 
+from . import timing
 from .payoff import HP_SHARE, Objective
 from .pool import Pool, draw_pair
 from .regulation import Regulation
@@ -121,6 +122,7 @@ class SolvedSelections:
     loaded: int = 0
     _kept: dict[tuple[int, int], BookEntry] = field(default_factory=dict)
 
+    @timing.timed("selection.solve")
     def _solve(self, lo: int, hi: int) -> BookEntry:
         # Imported here: `selection` imports `selfplay`, which this module also imports,
         # and nothing that only draws uniformly should need the LP.
@@ -341,27 +343,29 @@ def generate_pool(
             drawn = None
             priors: tuple[BenchPrior | None, BenchPrior | None] | None = None
             started = time.perf_counter()
-            if selection == SOLVED:
-                assert solver is not None
-                entry = solver.entry(a, b)
-                drawn = entry.draw(
-                    rng, epsilon=explore_epsilon, temperature=explore_temperature
-                )
-                pick0, pick1 = drawn.our_pick, drawn.foe_pick
-                if hide_bench:
-                    priors = (
-                        BenchPrior.of(
-                            entry, 0, [s.species for s in six0],
-                            epsilon=explore_epsilon, temperature=explore_temperature,
-                        ),
-                        BenchPrior.of(
-                            entry, 1, [s.species for s in six1],
-                            epsilon=explore_epsilon, temperature=explore_temperature,
-                        ),
+            # IKA-258: the stretch before a game's first decision had no row of its own.
+            with timing.stage("selection"):
+                if selection == SOLVED:
+                    assert solver is not None
+                    entry = solver.entry(a, b)
+                    drawn = entry.draw(
+                        rng, epsilon=explore_epsilon, temperature=explore_temperature
                     )
-            else:
-                pick0 = pick_four_indices(rng, len(six0), size=size)
-                pick1 = pick_four_indices(rng, len(six1), size=size)
+                    pick0, pick1 = drawn.our_pick, drawn.foe_pick
+                    if hide_bench:
+                        priors = (
+                            BenchPrior.of(
+                                entry, 0, [s.species for s in six0],
+                                epsilon=explore_epsilon, temperature=explore_temperature,
+                            ),
+                            BenchPrior.of(
+                                entry, 1, [s.species for s in six1],
+                                epsilon=explore_epsilon, temperature=explore_temperature,
+                            ),
+                        )
+                else:
+                    pick0 = pick_four_indices(rng, len(six0), size=size)
+                    pick1 = pick_four_indices(rng, len(six1), size=size)
             stats["selection_seconds"] += time.perf_counter() - started
 
             record = play_game(
@@ -402,26 +406,27 @@ def generate_pool(
                 if mirror:
                     stats["mirror_wins"] += int(record.outcome > 0.5)
                     stats["mirror_draws"] += int(record.outcome == 0.5)
-                payload = record.to_json(
-                    objective=leaf or objective.name, search_limit=search_limit
-                )
-                payload["pool"] = {
-                    "id": pool.id,
-                    "sha256": pool.sha256,
-                    "teams": [team0.id, team1.id],
-                    "names": [team0.name, team1.name],
-                    "pair": k,
-                    "mirror": mirror,
-                    "benchPrior": (
-                        None if not hide_bench
-                        else ["solved", "solved"] if priors is not None
-                        else ["uniform", "uniform"]
-                    ),
-                }
-                if index is not None:
-                    payload["gameIndex"] = index
-                handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
-                handle.flush()
+                with timing.stage("record"):  # IKA-258
+                    payload = record.to_json(
+                        objective=leaf or objective.name, search_limit=search_limit
+                    )
+                    payload["pool"] = {
+                        "id": pool.id,
+                        "sha256": pool.sha256,
+                        "teams": [team0.id, team1.id],
+                        "names": [team0.name, team1.name],
+                        "pair": k,
+                        "mirror": mirror,
+                        "benchPrior": (
+                            None if not hide_bench
+                            else ["solved", "solved"] if priors is not None
+                            else ["uniform", "uniform"]
+                        ),
+                    }
+                    if index is not None:
+                        payload["gameIndex"] = index
+                    handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                    handle.flush()
             if index is not None and on_finish is not None:
                 on_finish(index)
     stats["path"] = str(out)
