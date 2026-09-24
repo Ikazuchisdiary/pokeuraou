@@ -28,6 +28,7 @@ mod id;
 mod inert;
 mod level_struggle;
 mod modelled;
+mod move_hooks;
 mod moveinfo;
 mod node;
 mod objective;

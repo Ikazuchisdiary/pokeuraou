@@ -381,13 +381,16 @@ def test_a_reply_after_a_u_turn_goes_through_the_pause(
     assert [n for n in finished.unmodelled if any(i in n for i in REPLY_IDS)] == []
 
 
-@pytest.mark.parametrize(("move", "noted"), [("brickbreak", True), ("dragonclaw", False), ("counter", False)])
+@pytest.mark.parametrize(
+    ("move", "noted"), [("highjumpkick", True), ("dragonclaw", False), ("counter", False)]
+)
 def test_a_damaging_move_the_port_never_names_is_reported(
     reg, oracle: Oracle, bridged: None, move: str, noted: bool  # noqa: ANN001
 ) -> None:
-    """The mechanism behind the fix (`modelled::damaging_move_is_unmodelled`): Brick Break's
-    screen-breaking is an `onTryHit` the port never names, so the turn says so; Dragon Claw has
-    no custom code, and Counter has custom code the port now names."""
+    """The mechanism behind the fix (`modelled::damaging_move_is_unmodelled`): High Jump Kick's
+    crash is an `onMoveFail` the port never names, so the turn says so (Brick Break was the
+    example until IKA-240 named it); Dragon Claw has no custom code, and Counter has custom
+    code the port now names."""
     mine = [_mon("Kangaskhan", "Inner Focus", [move, "protect"], 10, atk=32),
             _mon("Swampert", "Damp", ["protect", "earthquake"], 0)]
     theirs = [_mon("Garchomp", "Rough Skin", FOE_A, 32), _mon("Incineroar", "Blaze", FOE_B, 20)]
