@@ -15277,3 +15277,100 @@ status_move_is_fully_modelled 77 → 112
 ### 7. 機械
 
 heavy.py の記録（IKA-210）: cargo build --release 15 回 計 373 s（8 コア。本体・ika210-control・ika211-control・旧 2 本）、cargo test 4 回 30 s（8 コア）、テストファイル 9 回 計 581 s（1 コア。1 回で最長 182 s）、正の対照 13 回 計 1,595 s（1 コア。うち古い exe での時間切れと待ちの取り消しが 2 回。古い exe に `resolve` の select を枝ごとに聞くので exact の budget で遅い）。
+
+
+## 9/24 — IKA-215: port が Python の events と acts を返す（既定は off）—— 記録 M-C・M-B の pause・交代・先発・turn の標本（各 200、turn は 800 も）で行と区切りが Python と一致、違う標本は 0（除いたのは port だけの規則の 6 件）。show_game の読み物は 400 局で 399 局が同じ（残り 1 局は Final Gambit）。off のとき確保の回数は同一
+
+ブランチ `ika-215-port-events`。IKA-204 の段 3b（IKA-211 から切り出し）。呼び出し元（selfplay など）は触っていない。tests/_port.py に events を返させるのは IKA-210 の後半。
+
+### 1. 形
+
+* `rust/src/events.rs`（新規）: `EventLog { events, acts }`、`Name`（`p1a`）、`log_event!`。`Turn` と `Branch` に `log: Option<Box<EventLog>>` を足した。既定は None。`log_event!` は log があるかを先に見て、無ければ format の引数も評価しない。clone で写るのは null ポインタ 1 個だけ。`same_turn` は `log: _`（Python の `_MERGE_IGNORED_STATE`）で、merge は最初の分岐の trace を残す（Python の `_fold` と同じ）
+* 行は resolve.py の `_Turn.log` の文字列を 1 文字ずつ写した。`deal_damage`・`heal`・`consume_item`・`apply_boosts(_by)`・`apply_status(_unveiled)`・`apply_status_from` に Python の `reason` を足した（呼び出し 約 70 か所）。Flower Veil は守っている味方の名前が要るので `flower_veil` を `flower_veil_holder`（何番の味方か）に替え、状態異常への Flower Veil は Python と同じくタイプと特性の免疫の後で見るようにした（結果は同じ。行の出る位置だけ）
+* acts: `run_queue` の `execute` の直前 2 か所（variant が 1 つのときと複数のとき）と `residuals` の頭。label は `QueuedAction.label`（`resolve::action_label`、技は dex の `name`）
+* 出力（`commands.rs`）: 要求に `events: true` があるときだけ、`turn` の branch・pause・`select`、`alternatives` の各再開、`replacements`・`leads` の phase に `events` / `acts` を載せる。pause は state の中にも log を持つので、再開した turn は pause までの行から続く（Python の resumed turn と同じ）。`events: false` で再開すると log は捨てる
+* rustnode: `turn`・`resume`・`resume_alternatives`・`resolve_replacements`・`apply_lead_abilities` に `events=False`。`PortBranch`・`PortPause`・`PortTurn`（select）・`PortPhase` に `events` / `acts`
+
+### 2. 行を揃えるために直した 2 件（局面・確率は変わらない）
+
+* **Coil・Shell Smash・Shift Gear の boosts の順**: `serde_json::Value` は object の鍵を並べ替える（preserve_order なし）ので、port は atk, def, spa… の順で上げていた。Showdown の `boost()` は object を書いた順（Shell Smash は def, spd, atk, spa, spe）に回し、Python の dict もその順。`reg.rs` で dump の文字列をもう 1 回読んで、技そのものの `boosts` の鍵の順を `Reg.boost_order` に持つ（並びが sorted と違う技だけ。M-B・M-C とも上の 3 技だけ）。3 技とも自分への変化で `from_foe` が偽なので、まけんき・かちき・クリアボディ・Flower Veil は通らず、あまのじゃくは全部を反転するだけ、上限 ±6 は能力ごと、しろいハーブは全部の後に 1 回。だから順で結果は変わらない
+* **残差で状態異常のダメージで倒れた後の「freed (trapper left)」**: port は `partiallytrapped` の有無をループの頭で読んでいたので、どく等で倒れた（volatile が消えた）ポケモンにも行が出た。Python は倒れた後に読み直す。port も読み直すようにした（retain は元々空振りで、局面は同じ）
+* 確かめ: 直す前の master の exe（59885d1）と直した exe を `diff_commands`（events なし）に並べ、M-C・M-B の pause 800・turn 800 で集計が全く同じ（M-C pause 186 同じ + 1 除外、turn 796 + 4 除外、M-B pause 792、turn 794、どちらの exe も）。`pokeuraou-damage turns`（955 件）の exact/wrong の数も同じ
+
+### 3. Python との一致（`tools/diff_commands.py --events`、kind `turn` を足した）
+
+`--events` で port に trace を頼み、位置・確率・exact を比べた後に、枝と pause ごとに events を 1 行ずつ、acts を比べる。phase は events を比べる。新しい kind `turn` は記録の move 決定を `--turn-stride` おきに取り、`Budget.exact()`（show_game と同じ）で丸ごと比べる。Python は標本ごとに 1 回解く。
+
+port だけの規則（IKA-208）に当たる標本は数えから除き、理由を付ける（`port-only rule`）: 技 trick・switcheroo・finalgambit・explosion・selfdestruct・mistyexplosion・memento・healingwish・lastresort・roar・whirlwind・dragontail・circlethrow・dragondarts、`slotCondition` を持つ技、場のレッドカード、かたやぶり系対ばけのかわ。IKA-210 の inert/modelled の作り直しで注記の集合が違う標本は、ほかが全部同じなら `notes only` として数える（差は下）。
+
+```
+master 5246564 を取り込んだ後（exe はこの枝）
+                       標本   一致   notes only   除外（理由）                       行 / acts
+  M-C g600  pause       187    175       11       1（slotCondition: revivalblessing）  704,068 / 303,472
+            交代        200    200        0                                            1,628
+            先発        200    200        0                                            2,008
+            turn        200    181       18       1（finalgambit）                     118,091 / 77,836
+            turn 800    800    748       48       4（finalgambit）                     （800 は stride 3）
+  M-B w12   pause       200    200        0                                          456,198 / 201,803
+            交代        200    200        0                                            1,308
+            先発        200    200        0                                              532
+            turn        200    198        2                                          128,432 / 73,355
+            turn 794    794    778       16                                          （6 は記録の手が今は選べない）
+  events・acts が Python と違う標本（除外の外）: 0
+```
+
+* **除外 6 件**: finalgambit 5（port は使用者を倒す、Python は倒さない＝局面から違う）、revivalblessing 1（IKA-208 の汎用の `slotCondition` 処理がリバイバルブレスの `revivalblessing` も置く。局面の `slotConditions` だけ違い、events は同じ。別課題、調整役が起票）
+* **notes only**: どれも Python だけが出す注記で、port から消えたもの。id は `attacker/defender.ability:noguard`・`cursedbody`・`speedboost`・`infiltrator`（IKA-210 が modelled.rs を Showdown の handler と port の実装で作り直し、これらは resolver が扱うので注記しない側になった）。port だけが出す注記は 0。これらの標本でも位置・確率・events・acts は同じ
+* merge 前（59885d1 の上）でも同じ標本で notes 以外は同じだった（M-C pause 186・turn 199/796、M-B 全部）
+* **正の対照**: `--features ika215-control`（残差の acts を付けない、「fainted」の行を出さない）の exe は M-C で pause 186/186・turn 193/198 が events で落ちる（交代・先発は倒れも残差も無いので 200/200 同じ）。master の exe（events が無い）は pause・turn・交代・先発の全部が events で落ち、位置と確率は全部通る
+* **null 対照**: M-C 60/kind を `--jobs 1` と `--jobs 8` で回し、集計（時間を除く）が完全に一致。40.6 s と 7.9 s
+
+### 4. show_game の読み物
+
+`tools/show_game.py --engine port`（`turn_events(..., node)`、`render(..., node)`）。記録を読み、各ターンを port の `turn`（exact・events）と `alternatives` で解き直す。比べ方は同じ記録を Python と port で render して全行を比べる（`C:/tmp/ika215/show_cmp.py`）。
+
+```
+  M-C g600  200 局  199 同じ（49,273 行）  残り 1 局は Final Gambit のターン（port は使用者を倒すので、Python の engine で作った記録に一致する枝が無く「⚠ 記録と一致しない枝」と出る）
+  M-B w12   200 局  200 同じ（59,428 行）
+  ika215-control の exe   M-C 0/200、M-B 0/200
+```
+
+### 5. テスト（port 側の断言を 2 ファイルで試した）
+
+* `tests/test_event_grouping.py` に 3 件: mirror の 5 ターン × 2×2 の手 × matrix・exact で port の events/acts が Python と同じ（`test_the_port_cuts_the_trace_as_python_does`）、頼まなければ何も返さない、mirror で同じ技を両側に帰属させる（port だけで断言）
+* `tests/test_resumed_turn_log.py` に 1 件: 中断ターンの `turn_events` を port で回し、Python の読み物と同じで、記録の乱数の行が出る
+* 正の対照: ika215-control の exe では 4 件中 2 件（行の比べと mirror）、master の exe では 3 件が落ちる（「頼まなければ返さない」は master でも通る）
+* IKA-210 の後半は、tests/_port.py が `events=True` で聞けば同じ形が得られる
+
+### 6. off の費用
+
+* **確保は同じ**: `--features count-allocations` で master（5246564）とこの枝を `turns`（M-B 955 件 ×3）で比べ、確保 1,674,576 回＝584.5 回/turn で同一。position の clone・damage 呼び出し・battler・re-sort・残差の回数も同一。1 回あたりの大きさだけ 448 → 452 B（Turn と Branch に 8 B のポインタ）
+* **時間**: `pokeuraou-damage turns`（M-B、repeats 20）を 32 通りの env padding × 3 回（各 layout の最小）で、同じ窓で before/after と null（同じ exe を 2 本）を並べた。heavy.py `--cores 16` で lock を取った 10:55:31〜11:04:55。窓の前は python・cargo は 0 本、窓の後半に他の session の python が 6 本立っていた
+
+```
+                    min-of-32   中央値の比   layout ごとの比の中央値
+  after / before     1.0157       1.0180          1.0181
+  null（同じ exe）   0.9847       0.9923          0.9929
+  前の窓（10:35、負荷 40%）after/before 1.028、null 0.975
+```
+
+  after/before は +1.6〜1.8%、null の幅は −0.8〜−1.5%。区別できる差とは言えないが、0 と言い切れる幅でもない（上限 2% 程度）。コード上 off の道に残るのは 100 か所ほどの `log.is_some()` の分岐、`reason: &str` の引数、`consume_item` の 2 回の lookup、残差の trap の読み直しで、確保は増えない。生成の壁時計で測るなら 600 局の対が要る（未実施）
+
+### 7. 別課題の候補
+
+* **リバイバルブレスの slotCondition**（調整役が起票）: IKA-208 の `apply_status_move` の `slotCondition` 汎用処理が Healing Wish 以外（`revivalblessing`）も置く
+* **serde_json の鍵の並べ替え**: 技の `boosts` 以外（`self.boosts`・`secondaries[].boosts`・`selfBoost`）は今の dump ではどれも sorted と同じ順なので `boost_order` に入れていない。dump が変われば同じ問題が出る。`preserve_order` を入れるなら全体の速さを測ってから
+* **off の時間**: 生成（600 局）の壁時計の対で +1% 台が見えるかは未測定
+* Python には無く port にだけある行（IKA-208 の規則）: 「is forced out」「swapped items」は Python の書式に合わせたが、強制交代の引き出し・トリックの受け手の確かめなど、Python に対応する行の無い出来事は行を出していない（Python を消した後に行を足すなら Showdown の |-message| に揃える）
+
+### 8. 機械（heavy.py、IKA-215）
+
+```
+  cargo build --release（--cores 8）                 本体 6 回・control 1 回・count-allocations 4 回・master 2 回  各 23〜35 s
+  diff_commands --events --jobs 8                    約 14 回  各 4〜65 s（M-B pause 800 の比較で 146 s）
+  diff_commands --jobs 1（null 対照）                1 回 41 s
+  turns timing（--cores 8/16、lock）                 4 回  99 s・293 s・307 s・564 s
+  show_game の比べ（1 コア）                         6 回  228〜428 s
+  テスト（1 コア、-n 0）                             5 回  各 15〜55 s
+  cargo test --release                               1 回
+```
