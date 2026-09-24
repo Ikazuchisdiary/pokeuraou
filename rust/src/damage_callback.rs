@@ -51,6 +51,10 @@ pub struct DamagedBy {
     pub special: Option<(Slot, i64)>,
 }
 
+/// Every active slot's record, side by side. Boxed and optional in `Turn` so that a turn with
+/// no reply holder hit carries 8 bytes of it, not 400, through every clone of the hit loop.
+pub type Records = [[DamagedBy; 2]; 2];
+
 /// The moves whose `damageCallback` this port implements. Their damage skips `modifyDamage`,
 /// so a resist berry (`onSourceModifyDamage`) is not eaten (`moves::after_hit`). Consulted by
 /// no gate: a damaging move with custom code the port never names is reported
@@ -65,11 +69,22 @@ pub(crate) fn ported(move_id: &str) -> bool {
 }
 
 /// A foe's damaging hit landed on `target` (a number, 0 included; not a doll).
+///
+/// Only for a target that knows a reply: nothing else reads the record, and two states that
+/// differ in it do not merge (`same_turn`), so recording every hit split branches that had
+/// always been one -- two rolls of a first hit before a knockout second one leave the same
+/// position and different last hits -- and generation drew different games from the same seed.
 pub(crate) fn record(turn: &mut Turn, source: Slot, target: Slot, dealt: i64, category: &str) {
     if source.0 == target.0 {
         return;
     }
-    let entry = &mut turn.damaged_by[target.0][target.1];
+    let knows_a_reply = turn
+        .mon_at(target.0, target.1)
+        .is_some_and(|mon| mon.moves.iter().any(|slot| replies(slot.id.as_str())));
+    if !knows_a_reply {
+        return;
+    }
+    let entry = &mut turn.damaged_by.get_or_insert_with(Default::default)[target.0][target.1];
     entry.last = Some((source, dealt));
     match category {
         "Physical" => entry.physical = Some((source, dealt)),
@@ -79,7 +94,7 @@ pub(crate) fn record(turn: &mut Turn, source: Slot, target: Slot, dealt: i64, ca
 }
 
 fn entry(turn: &Turn, action: &QueuedAction, move_id: &str) -> Option<(Slot, i64)> {
-    let record = turn.damaged_by.get(action.side)?.get(action.slot)?;
+    let record = turn.damaged_by.as_ref()?.get(action.side)?.get(action.slot)?;
     match move_id {
         "counter" => record.physical,
         "mirrorcoat" => record.special,
@@ -139,7 +154,8 @@ fn entry_from(value: &Value) -> Result<Option<(Slot, i64)>, String> {
 }
 
 /// A pause's copy of `Turn::damaged_by` (commands.rs), side by side and slot by slot.
-pub(crate) fn to_json(records: &[[DamagedBy; 2]; 2]) -> Value {
+pub(crate) fn to_json(records: &Option<Box<Records>>) -> Value {
+    let Some(records) = records else { return Value::Null };
     json!(records
         .iter()
         .map(|side| side
@@ -150,11 +166,11 @@ pub(crate) fn to_json(records: &[[DamagedBy; 2]; 2]) -> Value {
 }
 
 /// The inverse of `to_json`. A pause written before IKA-213 has none: nothing was recorded.
-pub(crate) fn from_json(value: &Value) -> Result<[[DamagedBy; 2]; 2], String> {
-    let mut out: [[DamagedBy; 2]; 2] = Default::default();
+pub(crate) fn from_json(value: &Value) -> Result<Option<Box<Records>>, String> {
     if value.is_null() {
-        return Ok(out);
+        return Ok(None);
     }
+    let mut out: Box<Records> = Default::default();
     for (side, row) in out.iter_mut().enumerate() {
         for (slot, record) in row.iter_mut().enumerate() {
             let cell = &value[side][slot];
@@ -165,5 +181,5 @@ pub(crate) fn from_json(value: &Value) -> Result<[[DamagedBy; 2]; 2], String> {
             };
         }
     }
-    Ok(out)
+    Ok(Some(out))
 }

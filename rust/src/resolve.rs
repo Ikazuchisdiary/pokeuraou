@@ -323,7 +323,7 @@ pub struct Turn<'a> {
     pub(crate) log: Option<Box<EventLog>>,
     /// Who damaged each active slot this turn, for Counter, Mirror Coat, Metal Burst and
     /// Comeuppance (`damage_callback`, IKA-213).
-    pub(crate) damaged_by: [[crate::damage_callback::DamagedBy; 2]; 2],
+    pub(crate) damaged_by: Option<Box<crate::damage_callback::Records>>,
 }
 
 impl<'a> Turn<'a> {
@@ -349,7 +349,7 @@ impl<'a> Turn<'a> {
             move_hit: [[false; 2]; 2],
             draws: None,
             log: None,
-            damaged_by: Default::default(),
+            damaged_by: None,
         }
     }
 
