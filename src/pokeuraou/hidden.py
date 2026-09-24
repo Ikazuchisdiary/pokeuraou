@@ -173,7 +173,10 @@ def shown_species(
     for mon in position.sides[side_index].pokemon:
         if mon.slot not in seen:
             continue
-        out.add(to_id(mon.species))
+        # A transformed Pokemon wears the species it copied, which says nothing about its
+        # own team: a Ditto that became our Garchomp does not rule out theirs (IKA-219).
+        if not mon.transformed:
+            out.add(to_id(mon.species))
         out.add(to_id(mon.base_species))
     return out
 

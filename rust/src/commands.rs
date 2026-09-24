@@ -372,7 +372,7 @@ fn switch_target<'p>(side: &'p crate::position::Side, queued: &QueuedAction) -> 
         if let Some(mon) = side
             .pokemon
             .iter()
-            .find(|mon| mon.species == species || mon.base_species == species)
+            .find(|mon| crate::transform::switch_names(mon, species))
         {
             return Some(mon);
         }

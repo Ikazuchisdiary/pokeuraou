@@ -36,6 +36,7 @@ mod score;
 mod shm;
 mod speed;
 mod terrain;
+mod transform;
 
 #[cfg(feature = "count-allocations")]
 #[global_allocator]

@@ -976,6 +976,9 @@ fn ability_handled(ability: &str) -> bool {
             | "stancechange"
             // `moves::hit_target`'s forme guard and `moves::bust_disguise` (IKA-208).
             | "disguise"
+            // `transform::imposter` in `switch_in_ability`; Illusion's one effect a turn
+            // can observe is a failed Transform, which `transform_into` notes (IKA-219).
+            | "imposter" | "illusion"
     ) || crate::inert::ability_is_inert(ability)
 }
 
@@ -1151,7 +1154,7 @@ fn involved<'a>(pos: &'a Position, side_actions: &[Vec<SlotAction>; 2]) -> Vec<&
                 let found = side
                     .pokemon
                     .iter()
-                    .find(|mon| mon.species == *species || mon.base_species == *species)
+                    .find(|mon| crate::transform::switch_names(mon, *species))
                     .or_else(|| side.pokemon.get(party_index.saturating_sub(1)));
                 if let Some(mon) = found {
                     out.push(mon);
@@ -1198,11 +1201,8 @@ fn check_position_supported(
             }
             // A stats override by itself is Showdown's `storedStats` riding along with a
             // known spread, and `Battler::from_pokemon` reads it only for a transformed
-            // Pokemon or one without a spread -- Python's `view.battler` rule. What stays
-            // refused is the Transform itself (IKA-208: neither engine performs one).
-            if mon.transformed {
-                return Err("transformed Pokemon".into());
-            }
+            // Pokemon or one without a spread -- Python's `view.battler` rule. A transformed
+            // Pokemon is answered since IKA-219 (`transform.rs`).
             // A position the game could not reach is not a thing to hold two
             // implementations to: Python deals negative damage on one, and whatever this
             // port did instead would be a different wrong answer rather than a bug. These
@@ -2428,6 +2428,8 @@ fn drag_in<'a>(reg: &'a Reg, turn: Turn<'a>, budget: &Budget) -> Result<Vec<Outc
 /// busted Disguise is a permanent forme change, so `baseSpecies` is the forme and
 /// `mon.species` is the same id.
 fn restore_types(reg: &Reg, mon: &mut Pokemon) {
+    // `clearVolatile` also ends a Transform: its ability, moves and species (IKA-219).
+    crate::transform::revert(mon);
     if let Some(entry) = reg.species.get(mon.species.as_str()) {
         mon.types = entry.type_ids;
     }
@@ -2469,7 +2471,7 @@ fn do_switch_with(
         let by_species = action.switch_species.and_then(|species| {
             side.pokemon
                 .iter()
-                .position(|mon| mon.species == species || mon.base_species == species)
+                .position(|mon| crate::transform::switch_names(mon, species))
         });
         match by_species.or(action.switch_to.filter(|i| *i < side.pokemon.len())) {
             None => return Ok(()),
@@ -2958,7 +2960,9 @@ fn supreme_overlord_start(turn: &mut Turn, side: usize, slot: usize) {
     }
 }
 
-fn switch_in_ability(turn: &mut Turn, side: usize, slot: usize) {
+pub(crate) fn switch_in_ability(turn: &mut Turn, side: usize, slot: usize) {
+    // Imposter's `onSwitchIn` sets the ability whose `Start` the rest of this runs (IKA-219).
+    crate::transform::imposter(turn, side, slot);
     // First, so that the ability it copies starts here too (`setAbility` runs its Start),
     // as Python's (IKA-203).
     trace(turn, side, slot);
@@ -3312,7 +3316,7 @@ fn switch_may_trace(turn: &Turn, action: &QueuedAction) -> bool {
     let found = action
         .switch_species
         .and_then(|species| {
-            side.pokemon.iter().find(|mon| mon.species == species || mon.base_species == species)
+            side.pokemon.iter().find(|mon| crate::transform::switch_names(mon, species))
         })
         .or_else(|| action.switch_to.and_then(|index| side.pokemon.get(index)));
     matches!(found, Some(mon) if mon.ability == "trace")
