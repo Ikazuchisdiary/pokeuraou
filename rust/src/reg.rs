@@ -22,6 +22,9 @@ pub struct Species {
     /// `types` as inline ids, built once here so a Battler or a damage call that needs a
     /// species' own types copies them instead of collecting a `Vec` (IKA-101).
     pub type_ids: crate::position::Types,
+    /// `baseSpecies` as an id: what a mega stone's `onTakeItem` reads
+    /// (`item.megaStone?.[source.baseSpecies.baseSpecies]`, IKA-208).
+    pub base: String,
 }
 
 /// A nature's numerators per stat: 110 boosted, 90 hindered, 100 otherwise.
@@ -384,6 +387,7 @@ impl Reg {
                         .map(|a| a.iter().filter_map(|t| t.as_str()).map(String::from).collect())
                         .unwrap_or_default(),
                     type_ids: crate::position::Types::from_slice(&type_ids),
+                    base: to_id(entry["baseSpecies"].as_str().unwrap_or_default()),
                 },
             );
         }
@@ -725,6 +729,28 @@ impl Reg {
             None => false,
             Some(item) => self.mega_holders.contains(&(species, item)),
         }
+    }
+
+    /// A mega stone's `onTakeItem(item, source) { return !item.megaStone?.[source.baseSpecies
+    /// .baseSpecies]; }` (data/items.ts): the stone stays with -- and cannot be handed to --
+    /// a Pokemon whose species' base species it belongs to. That is the base *species*
+    /// name, so Charizard-Mega-X keeps its stone (IKA-208).
+    ///
+    /// Floettite and Meowsticite have their own, on the holder's own species rather than
+    /// its base: `!item.megaStone[source.baseSpecies.name] &&
+    /// !Object.values(item.megaStone).includes(source.baseSpecies.name)` -- a form it megas
+    /// from or into (Floette-Eternal's base species is Floette, which the first rule misses).
+    pub fn mega_stone_stays(&self, species_id: &str, item_id: &str) -> bool {
+        if matches!(item_id, "floettite" | "meowsticite") {
+            return self.mega_targets.iter().any(|((from, item), to)| {
+                item == item_id && (from == species_id || to_id(to) == species_id)
+            });
+        }
+        let base = match self.species.get(species_id) {
+            Some(entry) if !entry.base.is_empty() => entry.base.as_str(),
+            _ => species_id,
+        };
+        self.mega_by_species.contains(&(base.to_string(), item_id.to_string()))
     }
 
     pub fn item_is_removable(&self, species_id: &str, item_id: Option<&str>) -> bool {

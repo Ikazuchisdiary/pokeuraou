@@ -134,14 +134,13 @@ def _play(oracle: Oracle, name: str) -> tuple[Position, list[str], dict, list[st
 
 
 # ---------------------------------------------------------------------------
-# The port against Showdown, not against Python (IKA-207). The port refuses Disguise
-# ("forme change and 1/8 not ported"), so every case is an expected failure until it
-# does; `strict` makes the first one that passes say so. Accuracy is pinned to a hit, as
-# Showdown's policy has it, and U-turn's pause is an outcome like the finished ones
-# (IKA-210: the hit branches used to be picked by Python's events).
+# The port against Showdown, not against Python (IKA-207). The port refused Disguise
+# ("forme change and 1/8 not ported") until IKA-208, and these were expected failures.
+# Accuracy is pinned to a hit, as Showdown's policy has it, and U-turn's pause is an
+# outcome like the finished ones (IKA-210, through IKA-211's `turn` command; the hit
+# branches used to be picked by Python's events).
 
 
-@pytest.mark.xfail(strict=True, reason="the port refuses Disguise (IKA-208)")
 @pytest.mark.parametrize("name", sorted(CASES))
 def test_the_port_keeps_everything_but_the_absorbed_damage(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
     before, choices, theirs, log, switch = _play(oracle, name)

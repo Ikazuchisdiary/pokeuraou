@@ -15004,3 +15004,115 @@ exe は列ごとに 1 本を使い回す（今までどおり）。増えたの�
 ### 7. 機械
 
 heavy.py の記録（IKA-217）: cargo build --release 2 回（worktree 30 s・ika211-control 27 s、--cores 8）。1 コアの実行: diff_turn 30 局の試走 1 回、400 局 × 10 回（各 10〜16 s、計 約 2.3 分）、テストファイル 2 回（8 s・ctl の exe で 2 件）。
+
+## 9/24 — IKA-208: port の拒否を 0 にした —— M-C 標本（g600、2,000 決定）の拒否 2,256 → 0 セル。diff_turn（seed 1・2 × 400 局）の port の拒否 145・133 → 5・3 ターン（残りは Transform だけ）。Python が合って port だけ外れるターンは 0
+
+ブランチ `ika-208-port-refusals`。IKA-204 の段 2。Python の resolver には触れていない（Python は段 6 で消える）。規則はすべて Showdown（vendor a5df827、champions mod）の定義で入れ、テストは port 対 Showdown だけ（Python は断言しない）。
+
+### 1. 取り直した拒否（直す前、master 1e2d956 の exe d6dccb8b）
+
+`tools/refusal_replay.py --games-dir C:/tmp/ika77/out/g600 --decisions 2000 --per-game 4`: 284,680 セルのうち 2,256（0.79%）。
+`move field selfdestruct: finalgambit` 1,308（26 ノード）、`status move: trick` 948（34）。auraguard は IKA-203 で消えていた。
+
+### 2. 入れたもの（Showdown の定義 → port）
+
+| 規則 | Showdown | port | テスト |
+|---|---|---|---|
+| トリック・すりかえ | `onTryImmunity`（ねんちゃく）、`onHit` の `takeItem` ×2 → 受け手への `singleEvent('TakeItem')` → `setItem`。メガストーンは `!item.megaStone?.[source.baseSpecies.baseSpecies]`、フラエッテナイト・ニャオニクスナイトだけ `baseSpecies.name` と megaStone の値で見る独自の `onTakeItem`。かるわざは `onTakeItem` で volatile。新しい持ち物の `onStart`（こだわりの `removeVolatile('choicelock')`・シード・しろいハーブ）、きのみは次の `Update` | `moves::swap_items`・`take_item`・`eat_received_berry`、`Reg::mega_stone_stays`（`Species.base` を足した） | test_trick_final_gambit_oracle 23 件 |
+| いのちがけ（Final Gambit） | `damageCallback(pokemon) { const damage = pokemon.hp; pokemon.faint(); return damage; }`（`getDamage` の免疫の後、身代わりにも） | `hit_target` の 1 発目の前に使用者を倒す（倒れの順が先＝両方全滅なら相手の勝ち） | 同上 |
+| だいばくはつ・じばく・ミストバースト | `useMoveInner`: `TryMove`（しめりけの `onAnyTryMove`、breakable）の後、対象を見る前に `faint`。技は倒れる前の使用者で計算 | `use_move` で faint、`hit_target` に倒れる前の使用者を渡す（`exploded`）、`damp_stops` | test_self_destruct_oracle 16 件 |
+| おきみやげ・いやしのねがい | `runMoveEffects` の `selfdestruct === 'ifHit' && damage[i] !== false`（変化技は届けば `undefined`）。いやしのねがいは `onTryHit` で控えが無ければ `NOT_FAIL`、`slotCondition` を置く | `apply_status_move` の最後で faint、`slotCondition` を `slot_conditions` に置く | 同上 |
+| willCrit（ストームスロー・トリックフラワー・こおりのいぶき） | `moveHit.crit = move.willCrit`、`CriticalHit`（カブトアーマー等）で止まる | 元から `crit_stage` 4。拒否を外しただけ | 同上 |
+| ラストリゾート | `onTry`: 技 2 つ以上、ほかの技が全部 `used` | `moves::last_resort_fails` | test_last_resort_oracle 3 件 |
+| stats_override だけの局面 | Showdown の局面は全員 `storedStats` を持つ | `Battler::from_pokemon` は Python の `view.battler` と同じく transformed か SP 無しの時だけ override を読む。拒否は transformed だけに | test_trick_final_gambit_oracle の `test_a_stats_override_is_not_a_transform` |
+| ばけのかわ | `onDamage` で 1 発目の技のダメージだけ 0（0 も当たり）、`onCriticalHit` false、`onEffectiveness` 0、`Update` でフォルム変更と `baseMaxhp / 8`。`breakable` | Python の `_forme_guard`／`_bust_disguise` の形を写す（IKA-155・157 で Showdown に合わせてある）。かたやぶりには効かない（damage 層の 0 も） | IKA-207 の test_disguise_order・test_disguise_afterhit の port 側（strict xfail を外した。U ターンだけ IKA-211 の続き待ちで xfail）、test_disguise_mold_breaker_port 2 件 |
+| Showdown の局面の unmodelledVolatiles | 橋が `MODELLED_VOLATILES` 以外を入れる（Showdown の局面にだけ出る） | `resolve::showdown_volatiles`: 溜め技自身の volatile（twoturnmove が持つ）は捨てる、`flashfire` は `volatiles` へ、無視する持ち物の volatile（メトロノーム）は捨てる、残り（throatchop・stockpile）は置いたまま `volatile not modelled: X` と注記して答える | test_showdown_volatiles_port 6 件、test_charge_target の strict xfail 2 件を外した |
+| 強制交代（ほえる・ふきとばし・ドラゴンテール・ともえなげ・レッドカード） | `spreadMoveHit` の `forceSwitch`（対象と使用者が立っていて `canSwitch`、`DragOut`：ばんけん・きゅうばん・ねをはるは null）。変化技は `canSwitch` が偽なら失敗。`runAction` の最後に `dragIn`：`getRandomSwitchable` は控えを並び順に `sample`、`switchIn(isDrag)` で登場の処理はその場。引き出された側の技は飛ぶ | 技・カードで `pendingforceswitch` を立て、`resolve::drag_in` が行動の最後に控え 1 体ごとに等しい重みの分岐（乱数を分けない budget では先頭＝オラクルの `sample` first）。引き出した枠は `acted` にして、残っていた技を飛ばす（Turn に項目は足していない） | test_force_switch_oracle 10 件、test_eject_items のレッドカードの strict xfail を外した |
+| ドラゴンアロー（smartTarget） | `getSmartTargets`: 対象と、その隣の味方（立っていて使用者でない）。命中の段のどこかで失敗（まもる・免疫・外れ）すれば smartTarget を切り、2 発とも残った方へ。両方残れば 1 発ずつ、単体の当たり | `moves::smart_hits`（まもると免疫で絞り、命中の組み合わせごとに計画）、`hit_target` に打つ回数の指定（`forced_hits`） | test_dragon_darts_oracle 5 件 |
+| 連続技への追加効果（のろわれボディ） | `onDamagingHit` は `source.volatiles['disable']` なら即 return、それ以外 3/10。2 発なら 1 − 0.7² | 1 発ごとに積まれる同じ Disable を 1 − Π(1 − p) の 1 つにまとめる。ほかの追加効果（両規則に無い）と、上限を超える分は Python と同じく注記して答える | test_dragon_darts_oracle の cursed-body |
+
+### 3. 残した拒否の道と、残してよい理由
+
+M-C・M-B の規則表を走査して確かめた（`C:/tmp/ika208/gates.py`・`gaps.py`・`secs.py`・`megas.py`）。
+
+* **transformed**（diff_turn で 5・3 ターン）: どちらのエンジンもへんしん・かわりものを実装していない（Python の resolve.py に transform の字は無い）ので、生成の局面には出ない。Showdown の局面（diff_turn）でだけ出る。M-C にはメタモンがいるので、実装は別課題（§9）
+* **ice face**: 元のフォルム `eiscue` が M-B・M-C のどちらにも無い（`eiscuenoice` だけで、battle-only で持ち込めない）。理由の文字列を「its intact forme is not in the regulation」に変えた
+* **slow start**: M-B・M-C の誰も持たない
+* **hp の範囲外・fainted と hp の食い違い、2 対 2 以外、規則に無い技**: 到達しない局面
+* **ability_handled / item_handled の外**: M-B・M-C で門が断る特性は ice face だけ（上の走査）。メガシンカ先の特性はすべて扱える
+* **UNHANDLED_MOVE_FIELDS の残り**（multiaccuracy・struggleRecoil・mindBlownRecoil・stealsBoosts・sleepUsable・onHitField・damageCallback）: 規則表のどの技も持たない。damageCallback と onHitField は dump では field ではなく hook（`customHooks`）なので、そもそもこの拒否は発火しない。カウンター等が素通りする件は IKA-213
+* **追加効果の未知の field・volatile**: 規則表に未知の field を持つ技は無い。`volatile_handled` は空の否定形（全部通す）
+* hidden SP spread（battler.rs）は控え隠蔽の完成形が埋める設計なので残す
+
+### 4. diff_node はその分ずれる（Python 側）
+
+Python は finalgambit で使用者を倒さず（selfdestruct が Python に無い）、トリックはメガストーンを全部拒否しきのみ等を見ず、強制交代は `pendingforceswitch` を付けて止まるだけ、ドラゴンアローは 1 体に 2 発、ばけのかわはかたやぶりでも剥がれる。これらのセルで diff_node は Python と port の差を出す。`--using` は trick・finalgambit を受けないので（diff_node.py は触らない決まり）、絞れたのは `--give redcard` だけ:
+
+```
+  diff_node M-C g600 --give redcard 20 ノード（--jobs 8 --exes old,new）
+    old  拒否 3,928 セル、ほかはビット一致の範囲            OK
+    new  拒否 0、カードが発火した 3,894 セルが違う（最大 0.229）  FAIL（Python がずれる側）
+  diff_node M-C g600 100 ノード（無作為、null 対照）
+    old と new で集計の全行が同じ（ビット一致 76,356/89,380、拒否 0、最大 5.6e-16）
+```
+
+### 5. 測った数
+
+```
+refusal_replay M-C g600 --decisions 2000 --per-game 4      前 2,256 セル（0.79%）  後 0
+diff_turn（PYTHONHASHSEED=0、roll 8、max-turns 10、IKA-217 の続けて比べる版、--exes old=前,new）
+  seed 1 × 400      Python 2,723 中 2,567 一致（5.73%）
+                    old    2,455 中 2,329（5.13%）、拒否 145
+                    new    2,722 中 2,572（5.51%）、拒否 5（transformed）
+                    同じターンの表（new）: 両方乖離 149 / Python だけ乖離 4 / Python 一致・port 乖離 0 / 両方一致 2,566
+  seed 2 × 400、self-switch 0.8
+                    Python 2,731 中 2,547（6.74%）
+                    old    2,279 中 2,130（6.54%）、拒否 133
+                    new    2,747 中 2,563（6.70%）、拒否 3（transformed）
+                    同じターンの表（new）: 両方乖離 182 / Python だけ乖離 4 / Python 一致・port 乖離 0 / 両方一致 2,545
+diff_commands M-C g600 60 ×3 種（--jobs 8、merge 後）       180/180 same
+```
+
+old の拒否の内訳（seed 1）は IKA-207 の記録と同じ（throatchop 57・electroshot 18・disguise 17・flowertrick 9 …）。new で新しく比べたターンの乖離はどれも Python も外している（上の表）。その中に、ばけのかわをかたやぶり（メガギャラドス）で剥がした 1 件があり（seed 2 battle 205 turn 6）、そこで §2 の breakable を直した。
+
+### 6. 正の対照と対照
+
+* 直す前の exe（C:/tmp/ika208/before-1e2d956.exe）で、新しいテストの port 側は全部「the port refused the turn」で落ちる（対照の Protect だけの 1 件を除く）
+* 規則ごとに壊した build（C:/tmp/ika208/fault1〜4、worktree の外に rust/ を複写して 1 か所ずつ外した）: 使用者を倒さない → Final Gambit 3 件、受け手の石の確かめを外す → 1 件、きのみを食べない → 1 件、ねんちゃくを外す → 1 件、受け手のこだわり解除を外す → スカーフ同士の 1 件、しめりけを外す → 1 件、倒れる前の使用者を渡さない → 爆発のダメージ 4 件、おきみやげの自滅を外す → 3 件、willCrit を外す → 3 件、引き出した枠の技を飛ばさない → 1 件、DragOut を外す → 2 件、smartTarget を外す → 3 件が落ちる。しろいハーブの `onStart` を外しても落ちない（直後の `onAnyAfterMove` が同じことをする）
+* フラエッテナイトは、先に書いた一般形（baseSpecies.baseSpecies）で Showdown と食い違うのをテストで見てから独自規則を足した。かたやぶりは diff_turn で見つけ、直す前の exe でテストが落ちるのを見た
+* 対照（効果が出ないこと）: まもる・ゴースト・身代わり・クリアボディ・控え無し・ばけのかわ無しの相手・ねをはる・ばんけん など、各ファイルの `control-` の付いたケース
+* port_gate_audit の ACKNOWLEDGED から trick・switcheroo・disguise を消した（門を通るので「決めた」記録が要らない）。`--check`・`port_coverage.py --check`・ruff は通る
+
+### 7. 変えたテスト
+
+* test_beliefnode の拒否セルの 3 件: 断る技がもう無いので skip（理由「the port refuses no move」を ci_skip_audit の no-such-case に足した）。Python に落ちる道そのものは IKA-209 で消える
+* test_rust_node の ice face／disguise: ice face は新しい理由で拒否、disguise は答える
+* test_choice_lock の「trick scarf for scarf」: ported=True
+* test_eject_items の drag: Python 対 port の比べは port が答えることだけ見る（Python は止まるだけなので比べない）。Showdown 側は先頭の控えが出てカードが消えることを見る
+
+### 8. 機械（heavy.py の記録、IKA-208）
+
+```
+  cargo build --release（--cores 8）   16 回 349 s（worktree 12 回、壊した build 4 回）
+  diff_node --jobs 8                    3 回 53 s（M-C 100 ノード 22 s、--give redcard 20 ノード 30 s、ほか 1 s）
+  diff_commands --jobs 8                1 回 6 s
+  diff_turn 400 局（1 コア）             6 回 各 14 s
+  refusal_replay（1 コア）               3 回 各 10 s
+  テストファイル（1 コア、-n 0）          約 20 回 計 約 5 分
+```
+
+### 9. 別課題の候補
+
+* **もらいびの 1.5 倍がどちらのエンジンにも無い**: 両方とも volatile を付けるだけで damage が読まない（test_showdown_volatiles_port に strict xfail）
+* **ねをはるの 1/16 回復がどちらにも無い**（test_force_switch_oracle の ingrain のケースは HP を比べない）
+* **へんしん・かわりものがどちらにも無い**: M-C にメタモンがいる。port は transformed の局面を断るだけ
+* **いやしのねがいの回復**: port は slot condition を置くが、交代先に効かせる処理はどちらのエンジンにも無い（交代の段＝IKA-211 の命令側）
+* **Throat Chop**: port は volatile と期間を付けるが、音の技を止める処理の有無は見ていない。Showdown の局面では `volatile not modelled: throatchop` と注記して答える
+* **トリックで受け取ったきのみ**: port が食べるのはオボン・オレン・ラム・キーのみだけ。ほかの状態異常のきのみ（クラボ等）は両エンジンとも inert
+* **ミストバーストのミストフィールドでの 1.5 倍**は近似の注記のまま（`is_approximate`）
+* **score.rs（narrow の採点）にも stats_override と unmodelled volatiles の拒否が同じ形で残る**。resolve の門だけ直した
+* **Python のばけのかわはかたやぶりでも剥がれる**（Python 側だけの誤り。段 6 で消えるなら不要）
+* **diff_turn で「Python は skip・port は乖離」が seed 1 で 1、seed 2 で 2 ターン**。中身は見ていない
+* 既に起票済み: IKA-213（カウンター等が damageCallback のフックで素通り）、IKA-214（はたきおとす・どろぼうがねんちゃくを見ない、メガシンカ後の石が外せる）
+
+構造の変更（取り込みの時に見るもの）: `Turn` に項目は足していない。`hit_target` に引数 2 つ（`exploded`・`forced_hits`）、`reg::Species` に `base`、`Reg::mega_stone_stays`、`resolve::drag_in`・`showdown_volatiles`。`resolve_turn` の入口で `showdown_volatiles` を通す（2 行）。

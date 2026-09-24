@@ -804,6 +804,8 @@ fn ability_handled(ability: &str) -> bool {
             // The forme change this drives is in `use_move`, which is why it is here and
             // no longer in `check_position_supported`'s pair.
             | "stancechange"
+            // `moves::hit_target`'s forme guard and `moves::bust_disguise` (IKA-208).
+            | "disguise"
     ) || crate::inert::ability_is_inert(ability)
 }
 
@@ -892,6 +894,29 @@ pub(crate) fn status_move_handled(move_id: &str) -> bool {
             | "perishsong" | "knockoff" | "thief" | "covet"
             // `moves::use_substitute` (IKA-180).
             | "substitute"
+            // `moves::swap_items` (IKA-208).
+            | "trick" | "switcheroo"
+            // `moves::raise_force_switch` and `drag_in` (IKA-208).
+            | "roar" | "whirlwind"
+    )
+}
+
+/// The moves one of `UNHANDLED_MOVE_FIELDS` is implemented for, by name (IKA-208).
+fn move_field_is_ported(field: &str, move_id: &str) -> bool {
+    matches!(
+        (field, move_id),
+        // `moves::hit_target`: the user faints in `damageCallback`, before its HP hits.
+        ("selfdestruct", "finalgambit")
+        // `moves::self_destruct`: `selfdestruct: "always"`, after `TryMove` (Damp).
+            | ("selfdestruct", "explosion" | "selfdestruct" | "mistyexplosion")
+        // `apply_status_move`: `selfdestruct: "ifHit"` on a status move that reached.
+            | ("selfdestruct", "memento" | "healingwish")
+        // `damage::crit_stage` returns 4 for it, and Battle Armor / Shell Armor stop it
+        // in `crit_probability` (`runEvent('CriticalHit')`): Storm Throw, Flower Trick,
+        // Frost Breath.
+            | ("willCrit", _)
+        // `moves::smart_hits`: Dragon Darts, a hit on each foe or both on one.
+            | ("smartTarget", "dragondarts")
     )
 }
 
@@ -907,7 +932,9 @@ fn check_move_supported(reg: &Reg, move_id: &str) -> Result<(), String> {
     };
     // The first of UNHANDLED_MOVE_FIELDS the entry has non-null, found once at load.
     if let Some(field) = mv.unhandled_field {
-        return Err(format!("move field {field}: {move_id}"));
+        if !move_field_is_ported(field, move_id) {
+            return Err(format!("move field {field}: {move_id}"));
+        }
     }
     // A status move Python does not fully model gets the declarative fields and a report,
     // and nothing else -- which is exactly what this port does with one too. So refusing is
@@ -919,11 +946,8 @@ fn check_move_supported(reg: &Reg, move_id: &str) -> Result<(), String> {
     {
         return Err(format!("status move: {move_id}"));
     }
-    // Trick and Switcheroo swap items, which this port does not implement; Last Resort
-    // reads which of its user's other moves have been used.
-    if matches!(move_id, "lastresort" | "trick" | "switcheroo") {
-        return Err(format!("item-swapping or history move: {move_id}"));
-    }
+    // Trick and Switcheroo are `moves::swap_items`, Last Resort `moves::last_resort_fails`
+    // (IKA-208).
     Ok(())
 }
 
@@ -982,8 +1006,12 @@ fn check_position_supported(
             // `_bust_disguise`, so answering here would be a wrong answer, not a refusal.
             // Refusing costs little: Eiscue is not in Reg M-C at all, and Mimikyu is on 1
             // of Baltimore's 1,067 teams and none of 2026 Worlds' 394 (IKA-71).
-            if matches!(mon.ability.as_str(), "disguise" | "iceface") {
-                return Err(format!("ability: {} (forme change and 1/8 not ported)", mon.ability));
+            // Disguise is `moves::hit_target`'s forme guard since IKA-208. Ice Face stays
+            // refused, and cannot be met: its intact forme `eiscue` is in neither Reg M-B
+            // nor M-C (only the battle-only `eiscuenoice` is, which no team can bring), so
+            // nothing can turn into it.
+            if mon.ability.as_str() == "iceface" {
+                return Err(format!("ability: {} (its intact forme is not in the regulation)", mon.ability));
             }
             if !ability_handled(mon.ability.as_str()) {
                 return Err(format!("ability: {}", mon.ability));
@@ -993,15 +1021,17 @@ fn check_position_supported(
                     return Err(format!("item: {}", item));
                 }
             }
-            if !mon.unmodelled_volatiles.is_empty() {
-                return Err("position carries unmodelled volatiles".into());
-            }
+            // `unmodelledVolatiles` is read by `showdown_volatiles` instead (IKA-208).
             for volatile in &mon.volatiles {
                 if !volatile_handled(volatile.id.as_str()) {
                     return Err(format!("volatile: {}", volatile.id));
                 }
             }
-            if mon.transformed || mon.stats_override.is_some() {
+            // A stats override by itself is Showdown's `storedStats` riding along with a
+            // known spread, and `Battler::from_pokemon` reads it only for a transformed
+            // Pokemon or one without a spread -- Python's `view.battler` rule. What stays
+            // refused is the Transform itself (IKA-208: neither engine performs one).
+            if mon.transformed {
                 return Err("transformed Pokemon".into());
             }
             // A position the game could not reach is not a thing to hold two
@@ -1024,6 +1054,58 @@ fn check_position_supported(
         }
     }
     Ok(())
+}
+
+/// The volatiles a position read from Showdown carries in `unmodelledVolatiles` -- the
+/// bridge files there whatever is not on its `MODELLED_VOLATILES` list, and only a
+/// Showdown position has any (IKA-208; a position this port or Python made never does).
+/// The port refused all of them; Python ignores them. Now:
+///
+/// * the charging move's own volatile (`electroshot`, `solarbeam`, ...) beside
+///   `twoturnmove`, which already carries its move and target, is dropped;
+/// * `flashfire` is this port's own volatile under the same id (`absorb`), and is moved
+///   into `volatiles`;
+/// * the volatile of an item this port ignores (Metronome's) is dropped with it;
+/// * anything else stays where it is and the turn names it, as an effect it does not model
+///   (Throat Chop, Stockpile).
+///
+/// A copy is made only when there is something to move.
+fn showdown_volatiles(pos: &Position) -> (Option<Position>, Vec<String>) {
+    let carries = pos.sides.iter().any(|side| side.pokemon.iter().any(|m| !m.unmodelled_volatiles.is_empty()));
+    if !carries {
+        return (None, Vec::new());
+    }
+    let mut own = pos.clone();
+    let mut notes = Vec::new();
+    for side in own.sides.iter_mut() {
+        for mon in side.pokemon.iter_mut() {
+            if mon.unmodelled_volatiles.is_empty() {
+                continue;
+            }
+            let mon = std::rc::Rc::make_mut(mon);
+            let charging = mon.volatile("twoturnmove").and_then(|v| v.move_id);
+            let held = mon.item;
+            let mut kept = Vec::new();
+            for vid in std::mem::take(&mut mon.unmodelled_volatiles) {
+                if charging == Some(vid) {
+                    continue;
+                }
+                if vid.as_str() == "flashfire" {
+                    if !mon.has_volatile("flashfire") {
+                        mon.volatiles.push(Effect::new(vid));
+                    }
+                    continue;
+                }
+                if held == Some(vid) && crate::inert::item_is_inert(vid.as_str()) {
+                    continue;
+                }
+                notes.push(format!("volatile not modelled: {vid}"));
+                kept.push(vid);
+            }
+            mon.unmodelled_volatiles = kept;
+        }
+    }
+    (Some(own), notes)
 }
 
 pub(crate) fn volatile_is_handled(vid: &str) -> bool {
@@ -1100,6 +1182,8 @@ pub fn resolve_turn<'a>(
     budget: Budget,
 ) -> Result<TurnResult<'a>, String> {
     let started = phase_start();
+    let (adopted, notes) = showdown_volatiles(pos);
+    let pos = adopted.as_ref().unwrap_or(pos);
     check_position_supported(pos, side_actions)?;
     phase_end(0, started);
     if pos.sides.len() != 2 || pos.sides.iter().any(|s| s.active.len() != 2) {
@@ -1133,7 +1217,7 @@ pub fn resolve_turn<'a>(
     let mut branches: Vec<Branch> = Vec::new();
     let mut suspended: Vec<Suspended<'a>> = Vec::new();
     let mut exact = true;
-    let mut unmodelled: std::collections::BTreeSet<String> = Default::default();
+    let mut unmodelled: std::collections::BTreeSet<String> = notes.into_iter().collect();
     for queue in queues {
         if queue.is_empty() {
             continue;
@@ -1984,17 +2068,114 @@ fn execute<'a>(
             switch_in_with_draws(turn, &budget, may, |state| do_mega(reg, state, action))
         }
         ActionKind::Move => {
+            // A Pokemon dragged in this turn has no action, and the one it replaced took
+            // its own with it: `runAction` skips a move whose Pokemon is not active.
+            // `drag_in` marks the slot acted, which is also what Sucker Punch reads.
+            if turn.acted[action.side][action.slot] {
+                return Ok(vec![(1.0, turn)]);
+            }
             let mut outcomes = do_move(reg, turn, action, budget)?;
             for (_weight, state) in outcomes.iter_mut() {
                 state.acted[action.side][action.slot] = true;
             }
-            Ok(outcomes)
+            let mut dragged = Vec::with_capacity(outcomes.len());
+            for (weight, state) in outcomes {
+                for (inner, next) in drag_in(reg, state, &budget)? {
+                    dragged.push((weight * inner, next));
+                }
+            }
+            Ok(dragged)
         }
     }
 }
 
 /// Python's `_restore_types` (IKA-162): the species' own types, as `clearVolatile`'s
 /// `setSpecies` leaves them on a switch out and on a faint.
+/// Phazing, at the end of `runAction` (sim/battle.ts): for each side and each active
+/// position in order, a Pokemon with `forceSwitchFlag` and HP is dragged out by
+/// `dragIn` -- `getRandomSwitchable`, a `sample` over the bench in party order -- and the
+/// newcomer's switch-in runs at once (`switchIn(..., isDrag)`). One branch per bench
+/// Pokemon, of equal weight; a budget that does not branch chance takes the first, as the
+/// oracle's pinned `sample` does (IKA-208). The newcomer does not act: its slot is marked
+/// acted, and the move queued for the Pokemon it replaced is skipped.
+fn drag_in<'a>(reg: &'a Reg, turn: Turn<'a>, budget: &Budget) -> Result<Vec<Outcome<'a>>, String> {
+    let flagged: Vec<(usize, usize)> = (0..turn.pos.sides.len())
+        .flat_map(|side| (0..turn.pos.sides[side].active.len()).map(move |slot| (side, slot)))
+        .filter(|&(side, slot)| {
+            matches!(turn.mon_at(side, slot), Some(mon) if mon.has_volatile("pendingforceswitch"))
+        })
+        .collect();
+    if flagged.is_empty() {
+        return Ok(vec![(1.0, turn)]);
+    }
+    let branches = budget.enumerate_secondary && !budget.pinned_policy;
+    let mut out: Vec<Outcome<'a>> = vec![(1.0, turn)];
+    for (side, slot) in flagged {
+        let mut next: Vec<Outcome<'a>> = Vec::new();
+        for (weight, mut state) in out {
+            let standing = match state.mon_at_mut(side, slot) {
+                Some(mon) => {
+                    mon.volatiles.retain(|v| v.id.as_str() != "pendingforceswitch");
+                    !mon.fainted && mon.hp > 0
+                }
+                None => false,
+            };
+            let mut bench: Vec<usize> = state.pos.sides[side]
+                .pokemon
+                .iter()
+                .enumerate()
+                .filter(|(_, mon)| !mon.fainted && !mon.is_active())
+                .map(|(index, _)| index)
+                .collect();
+            if !standing || bench.is_empty() {
+                next.push((weight, state));
+                continue;
+            }
+            if bench.len() > 1 && !branches {
+                if !budget.pinned_policy {
+                    state.report("forced switch (the first on the bench; not branched)");
+                }
+                bench.truncate(1);
+            }
+            let share = 1.0 / bench.len() as f64;
+            for index in bench {
+                let mut drawn = state.clone();
+                let species = drawn.pos.sides[side].pokemon[index].species;
+                let action = QueuedAction {
+                    side,
+                    slot,
+                    kind: ActionKind::Switch,
+                    order: ORDER_SWITCH,
+                    priority: 0,
+                    fractional: 0.0,
+                    speed: 0,
+                    move_id: None,
+                    target: None,
+                    switch_to: Some(index),
+                    switch_species: Some(species),
+                    branch_probability: 1.0,
+                };
+                drawn.acted[side][slot] = true;
+                let may = switch_may_trace(&drawn, &action);
+                for (inner, forked) in switch_in_with_draws(drawn, budget, may, |s| do_switch(reg, s, &action))? {
+                    next.push((weight * share * inner, forked));
+                }
+            }
+        }
+        out = next;
+    }
+    // A U-turn's own flag leaves with its Pokemon (`clearVolatile`), so the turn no longer
+    // waits for its replacement.
+    for (_weight, state) in out.iter_mut() {
+        state.self_switch_pending = (0..state.pos.sides.len()).any(|side| {
+            (0..state.pos.sides[side].active.len()).any(|slot| {
+                matches!(state.mon_at(side, slot), Some(mon) if mon.has_volatile("pendingselfswitch"))
+            })
+        });
+    }
+    Ok(out)
+}
+
 fn restore_types(reg: &Reg, mon: &mut Pokemon) {
     if let Some(entry) = reg.species.get(mon.species.as_str()) {
         mon.types = entry.type_ids;

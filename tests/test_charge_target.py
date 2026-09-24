@@ -365,13 +365,9 @@ def _port_turn(reg, port, pos: Position, choices: list[str]) -> Position:  # noq
     "form",
     [
         # Showdown's charging Pokemon carries the move's own `electroshot` volatile, which
-        # Python ignores and the port refuses (IKA-207 found it; the refusal is IKA-208's).
-        pytest.param(
-            "showdown position",
-            marks=pytest.mark.xfail(
-                strict=True, reason="the port refuses the unmodelled `electroshot` volatile"
-            ),
-        ),
+        # Python ignores and the port refused until IKA-208 (IKA-207 found it); it is the
+        # charge `twoturnmove` already carries, and the port drops it.
+        "showdown position",
         "the port's child",
     ],
 )
