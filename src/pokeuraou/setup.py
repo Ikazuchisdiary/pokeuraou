@@ -124,7 +124,7 @@ def _moves(reg: Regulation, entry: dict[str, Any]) -> list[MoveSlot]:
                 f"{name!r} is not legal in {reg.meta.format_id}; the regulation config is the "
                 "authority on the move pool"
             )
-        out.append(MoveSlot(id=move_id, pp=move.pp, maxpp=move.pp))
+        out.append(MoveSlot(id=move_id, pp=move.start_pp, maxpp=move.start_pp))
     return out
 
 

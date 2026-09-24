@@ -444,7 +444,9 @@ def _synthetic_position(reg: Regulation, team: list[TeamSet]) -> Position:
             nature=s.nature,
             moves=[
                 __import__("pokeuraou.position", fromlist=["MoveSlot"]).MoveSlot(
-                    id=to_id(m), pp=reg.moves[to_id(m)].pp, maxpp=reg.moves[to_id(m)].pp
+                    id=to_id(m),
+                    pp=reg.moves[to_id(m)].start_pp,
+                    maxpp=reg.moves[to_id(m)].start_pp,
                 )
                 for m in s.moves
             ],

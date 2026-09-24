@@ -6,7 +6,7 @@
  * never reads Showdown -- it only reads that JSON. Nothing about a regulation (legal
  * species, mega-capable species, item pool) is hardcoded anywhere.
  */
-import { Dex } from 'pokemon-showdown';
+import { Battle, Dex } from 'pokemon-showdown';
 import type { Species } from 'pokemon-showdown/dist/sim/dex-species';
 
 /** Neutral natures that exist in Showdown but NOT in the real Champions game. */
@@ -96,6 +96,13 @@ export interface MoveEntry {
 	/** `true` means "never misses". */
 	accuracy: number | true;
 	pp: number;
+	/**
+	 * The PP a move slot holds when the battle starts (its `pp` and `maxpp` both), as
+	 * Showdown's `Pokemon` constructor computes it (`startPP` below). Not `pp`: the
+	 * champions mod gives every move its PP Ups as `(pp / 5 + 1) * 4`, so Protect's 5
+	 * starts at 8 (IKA-244).
+	 */
+	startPP: number;
 	priority: number;
 	target: string;
 	critRatio: number;
@@ -448,6 +455,17 @@ const DECLARATIVE_MOVE_KEYS = [
 	'struggleRecoil', 'mindBlownRecoil', 'sleepUsable', 'stealsBoosts',
 ] as const;
 
+/**
+ * A move slot's PP at the start of a battle in this format, asked of a Battle rather than
+ * copied: sim/pokemon.ts builds each slot with `ppUps = move.noPPBoosts || move.id ===
+ * 'trumpcard' ? 0 : 3` and `pp = maxpp = this.battle.calculatePP(move, ppUps)`, and a mod
+ * may replace `calculatePP` (data/mods/champions/scripts.ts does). IKA-244.
+ */
+function startPP(formatId: string): (move: ReturnType<typeof Dex.moves.get>) => number {
+	const battle = new Battle({ formatid: formatId as never });
+	return move => battle.calculatePP(move as never, move.noPPBoosts || move.id === 'trumpcard' ? 0 : 3);
+}
+
 /** Copies the listed keys when they carry a meaningful value. */
 function pickDeclarative(src: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> {
 	const out: Record<string, unknown> = {};
@@ -552,6 +570,7 @@ export function buildRegulationConfig(formatId: string, showdownCommit: string):
 	// the dex knows, so a new Light Clay in a later regulation is found without editing this.
 	const itemIds = dex.items.all().map(i => i.id);
 	const abilityIds = dex.abilities.all().map(a => a.id);
+	const startPPOf = startPP(format.id);
 
 	for (const m of dex.moves.all()) {
 		if (!m.exists || m.isNonstandard || m.isZ || m.isMax) continue;
@@ -573,6 +592,7 @@ export function buildRegulationConfig(formatId: string, showdownCommit: string):
 			basePower: m.basePower,
 			accuracy: m.accuracy,
 			pp: m.pp,
+			startPP: startPPOf(m),
 			priority: m.priority,
 			target: m.target,
 			critRatio: m.critRatio ?? 1,
