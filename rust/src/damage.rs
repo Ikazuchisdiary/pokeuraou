@@ -422,7 +422,9 @@ pub fn calculate(
         }
     };
 
-    let (mut move_type, type_change_fp) = effective_move_type(mv, attacker);
+    // Struggle is `???` before any ability's ModifyType (IKA-239).
+    let (mut move_type, type_change_fp) = crate::level_struggle::struggle_type(mv)
+        .unwrap_or_else(|| effective_move_type(mv, attacker));
     if let Some(own) = effective_type(move_id, attacker, ctx_move) {
         move_type = Id::new(own);
     }

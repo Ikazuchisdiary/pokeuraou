@@ -62,6 +62,8 @@ PORT_ENGINE_FILES = [
     "terrain.rs",
     "moveinfo.rs",
     "damage_callback.rs",
+    "level_struggle.rs",
+    "move_hooks.rs",
 ]
 
 #: What is left of Python's engine -- the damage calculator, speed, the menus -- read by

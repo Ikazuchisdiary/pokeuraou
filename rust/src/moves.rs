@@ -1344,6 +1344,12 @@ fn use_move<'a>(
         turn.move_failed[action.side][action.slot] = true;
         return Ok(vec![(1.0, turn)]);
     }
+    // Poltergeist: `onTry`, the target holds nothing (IKA-240).
+    if crate::move_hooks::fails_on_try(&turn, move_id.as_str(), &targets) {
+        log_event!(turn, "{} failed (the target holds nothing)", Label(reg, action));
+        turn.move_failed[action.side][action.slot] = true;
+        return Ok(vec![(1.0, turn)]);
+    }
 
     // The protection a `breaksProtect` move tears down is torn down per target, inside
     // `hit_target`, once the hit is known to land (IKA-153). Every such move is damaging
@@ -1916,6 +1922,8 @@ fn hit_target<'a>(
             continue;
         }
         let field = field_for_hit(&turn);
+        // Brick Break, Psychic Fangs: the screens are gone before `getDamage` (IKA-240).
+        let field = crate::move_hooks::field_past_screens(field, move_id.as_str(), target);
         for (crit_weight, crit) in crit_branches.iter().copied() {
         if crit_weight <= 0.0 {
             continue;
@@ -1962,6 +1970,8 @@ fn hit_target<'a>(
                 if mv.breaks_protect {
                     break_protection(&mut state, action, &[target]);
                 }
+                // The move's own `onTryHit`, after the immunity and the accuracy (IKA-240).
+                crate::move_hooks::break_screens(&mut state, move_id.as_str(), target);
                 let mut reached = false;
                 // Python's `total` and its loop variable, for "hit Nx for T" (IKA-215).
                 let mut total = 0i64;
@@ -2045,12 +2055,15 @@ fn hit_target<'a>(
                         continue;
                     }
                     let absorbed = guarded && hit_index == 0;
+                    let berry = crate::move_hooks::set_berry_aside(&mut state, move_id.as_str(), target);
                     let dealt = if absorbed {
                         0
                     } else {
                         state.deal_damage(target.0, target.1, amount, true, move_id.as_str())?
                     };
                     total += dealt;
+                    // Bug Bite, Pluck: `onHit`, before `DamagingHit` and the `Update` (IKA-240).
+                    crate::move_hooks::steal_berry(&mut state, action, target, berry, mv.mtype.as_str(), result.type_mod);
                     crate::damage_callback::record(&mut state, (action.side, action.slot), target, dealt, mv.category.as_str());
                     reached = true;
                     state.move_hit[target.0][target.1] = true;
@@ -2528,8 +2541,8 @@ fn after_hit(
             Some(berry_type) => {
                 berry_type == mv.mtype.as_str() && (berry_type == "Normal" || type_mod > 0)
                     // The berry is `onSourceModifyDamage`, which a `damageCallback` never
-                    // reaches (IKA-213).
-                    && !crate::damage_callback::ported(mv.id.as_str())
+                    // reaches (IKA-213), nor a level move; Struggle is `???` (IKA-239).
+                    && !crate::level_struggle::misses_resist_berry(mv.id.as_str())
             }
         },
     };
@@ -3417,6 +3430,7 @@ fn hit_substitute(
             turn.deal_damage(me.0, me.1, amount, false, "recoil")?;
         }
     }
+    crate::level_struggle::struggle_recoil(turn, me, mv, dealt)?;
     if let Some(drain) = mv.drain.as_ref().and_then(Value::as_array) {
         if dealt > 0 && drain.len() >= 2 {
             let numerator = drain[0].as_i64().unwrap_or(1);
@@ -3504,6 +3518,7 @@ fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), S
             turn.deal_damage(me.0, me.1, amount, false, "recoil")?;
         }
     }
+    crate::level_struggle::struggle_recoil(turn, me, mv, total)?;
     after_move_secondary_switches(turn, action, mv)?;
     let (item, maxhp) = match turn.mon_at(me.0, me.1) {
         None => (None, 0),
@@ -4096,6 +4111,51 @@ fn effect_duration(
         .or_else(|| entry.get("duration").and_then(Value::as_i64))
 }
 
+/// Parting Shot's `this.boost({atk: -1, spa: -1}, target, source)` on one target; true when
+/// a drop landed on it (IKA-238).
+///
+/// Mirror Armor's `onTryBoost` (data/abilities.ts) takes each drop off its holder and sends
+/// it back at the user, one stat at a time, unless the holder is already at -6 there:
+///
+/// ```text
+/// if (!source || target === source || !boost || effect.name === 'Mirror Armor') return;
+/// for (b in boost) {
+///     if (boost[b]! < 0) {
+///         if (target.boosts[b] === -6) continue;
+///         const negativeBoost = {}; negativeBoost[b] = boost[b]; delete boost[b];
+///         if (source.hp) {
+///             this.add('-ability', target, 'Mirror Armor');
+///             this.boost(negativeBoost, source, target, null, true);
+///         }
+///     }
+/// }
+/// ```
+///
+/// The ability is `breakable`, so a Mold Breaker user's drops land. The holder's own drops
+/// that are left (a stat at -6) change nothing. Nothing lands, so the caller's `landed` is
+/// Mirror Armor's own exception to `delete move.selfSwitch`.
+fn parting_shot_drops(turn: &mut Turn, target: Slot, me: Slot) -> bool {
+    const DROPS: [(&str, i64); 2] = [("atk", -1), ("spa", -1)];
+    let bounces = matches!(turn.mon_at(target.0, target.1), Some(mon)
+        if mon.ability == "mirrorarmor" && !mon.fainted && !ability_broken_by(turn, mon, Some(me)));
+    if !bounces || target == me {
+        return turn.apply_boosts(target.0, target.1, &DROPS, true, "partingshot");
+    }
+    for (stat, delta) in DROPS {
+        let at_floor = turn
+            .mon_at(target.0, target.1)
+            .zip(crate::position::boost_index(stat))
+            .is_some_and(|(mon, index)| mon.boosts[index] == -6);
+        let user_up = turn.mon_at(me.0, me.1).is_some_and(|m| m.hp > 0);
+        if at_floor || !user_up {
+            continue;
+        }
+        log_event!(turn, "{} mirrorarmor sent the {stat} drop back", Name(target.0, target.1));
+        turn.apply_boosts(me.0, me.1, &[(stat, delta)], true, "mirrorarmor");
+    }
+    false
+}
+
 fn apply_status_move(
     reg: &Reg,
     turn: &mut Turn,
@@ -4272,7 +4332,7 @@ fn apply_status_move(
     if mv.id == "partingshot" {
         let mut landed = false;
         for target in targets {
-            if turn.apply_boosts(target.0, target.1, &[("atk", -1), ("spa", -1)], true, "partingshot") {
+            if parting_shot_drops(turn, *target, me) {
                 landed = true;
             }
             if matches!(turn.mon_at(target.0, target.1), Some(m) if m.ability == "mirrorarmor") {
