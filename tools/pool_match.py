@@ -10,7 +10,8 @@ What an arm is, per arm, and so in whichever seat it sits:
 * its leaf (`--inference-arm` / `--baseline-inference-arm` on a server, or `--value` /
   `--baseline` loaded here; no baseline leaf means hp-share, the M-C origin),
 * its width (`--limit` / `--baseline-limit`) and narrowing (`--rank-leaf` /
-  `--baseline-rank-leaf`),
+  `--baseline-rank-leaf`), and how its leaf ranking fills its cells (`--rank-fill` /
+  `--baseline-rank-fill`, IKA-268),
 * its selection: an arm with a leaf solves the pair's selection game with THAT leaf,
   draws its four from its side of the solve, and believes the opponent's bench from the
   same solve. Solves are shared between workers through one directory per arm
@@ -48,6 +49,7 @@ from pokeuraou.payoff import HP_SHARE  # noqa: E402
 from pokeuraou.pool import load_pool  # noqa: E402
 from pokeuraou.poolplay import PoolArm, SolvedSelections, pool_match_game  # noqa: E402
 from pokeuraou.provenance import open_games, provenance, write_game  # noqa: E402
+from pokeuraou.search import DEFAULT_RANK_FILL, parse_rank_fill  # noqa: E402
 from pokeuraou.selfplay import MAX_TURNS  # noqa: E402
 from pokeuraou.workqueue import WorkClient  # noqa: E402
 
@@ -116,6 +118,11 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--rank-leaf", action="store_true",
                     help="the tested arm narrows by its leaf (what M-C generation does)")
     ap.add_argument("--baseline-rank-leaf", action="store_true", help="same for the other arm")
+    ap.add_argument("--rank-fill", default=DEFAULT_RANK_FILL,
+                    help="how the tested arm's leaf ranking fills its cells: refs<N> replies "
+                    "at the matrix budget, refs<N>-fast at Budget.fast (IKA-268)")
+    ap.add_argument("--baseline-rank-fill", default=DEFAULT_RANK_FILL,
+                    help="same for the other arm")
     add_bench_flags(ap)
     ap.add_argument("--selection-store", type=Path, default=None,
                     help="the tested arm's shared solves. Default <games-out dir>/"
@@ -140,6 +147,11 @@ def main(argv: list[str] | None = None) -> None:
         ap.error("one of --inference or --value names the tested arm's leaf")
     if args.inference is not None and args.baseline:
         ap.error("--baseline is loaded here; with --inference use --baseline-inference-arm")
+    for fill in (args.rank_fill, args.baseline_rank_fill):
+        try:
+            parse_rank_fill(fill)
+        except ValueError as problem:
+            ap.error(str(problem))
 
     pool = load_pool(args.pool)
     reg = pool.reg
@@ -159,12 +171,13 @@ def main(argv: list[str] | None = None) -> None:
     tested = PoolArm(
         name=value_name, evaluate=value,
         solver=solver_for(value, value_name, args.selection_store),
-        limit=args.limit, rank_by_leaf=args.rank_leaf,
+        limit=args.limit, rank_by_leaf=args.rank_leaf, rank_fill=args.rank_fill,
     )
     other_limit = args.limit if args.baseline_limit is None else args.baseline_limit
     if baseline is None:
         other = PoolArm(name=HP_SHARE.name, evaluate=None, solver=None,
-                        limit=other_limit, rank_by_leaf=args.baseline_rank_leaf)
+                        limit=other_limit, rank_by_leaf=args.baseline_rank_leaf,
+                        rank_fill=args.baseline_rank_fill)
     else:
         assert baseline_name is not None
         # One solver per arm even over one leaf: shared, the second arm would reuse the
@@ -177,6 +190,7 @@ def main(argv: list[str] | None = None) -> None:
                 else solver_for(baseline, baseline_name, args.baseline_selection_store)
             ),
             limit=other_limit, rank_by_leaf=args.baseline_rank_leaf,
+            rank_fill=args.baseline_rank_fill,
         )
     arms = (tested, other)
     print(pool.summary(), file=sys.stderr)
@@ -187,7 +201,9 @@ def main(argv: list[str] | None = None) -> None:
         store = arm.solver.store if arm.solver is not None else None
         print(
             f"  {label}: leaf {arm.name} / width {arm.limit} / "
-            f"{'leaf' if arm.rank_by_leaf else 'damage'} ranking / selection "
+            f"{'leaf' if arm.rank_by_leaf else 'damage'} ranking"
+            + (f" (fill {arm.rank_fill})" if arm.rank_by_leaf else "")
+            + " / selection "
             f"{arm.selection}" + (f" by its own leaf, store {store}" if store else "")
             + f" / belief {'solved' if arm.solver is not None and hide_bench else 'uniform'}",
             file=sys.stderr,
@@ -198,6 +214,8 @@ def main(argv: list[str] | None = None) -> None:
         tags += f"@w{tested.limit}"
     if ranking[0] != ranking[1]:
         tags += {"leaf": "@leafrank", "damage": "@damagerank"}[ranking[0]]
+    if tested.rank_by_leaf and tested.rank_fill != other.rank_fill:
+        tags += f"@rankfill:{tested.rank_fill}"
     arm_label = f"{tested.name}{tags}"
 
     client = WorkClient(args.queue) if args.queue else None
@@ -213,7 +231,8 @@ def main(argv: list[str] | None = None) -> None:
     # Per seat (tested at side 0, side 1): wins, played, unfinished, seconds.
     tally = [[0, 0, 0, 0.0], [0, 0, 0, 0.0]]
     # The echo, per seat and per ARM (0 tested, 1 other): what each arm's side was given.
-    echo = [[{"selection": {}, "belief": {}, "leaf": set(), "calls": 0} for _ in arms]
+    echo = [[{"selection": {}, "belief": {}, "leaf": set(), "fill": {}, "calls": 0}
+             for _ in arms]
             for _ in range(2)]
     done = 0
     started_all = time.perf_counter()
@@ -237,6 +256,10 @@ def main(argv: list[str] | None = None) -> None:
                                 ("belief", sides["beliefs"][side])):
                 bucket[key][value_] = bucket[key].get(value_, 0) + 1
             bucket["leaf"].add(sides["leaves"][side])
+            # What `play_game` itself recorded as that side's fill, not what the arm holds:
+            # the echo has to be read off the game, or it only repeats the command line.
+            played_fill = record.rank_fill[side]
+            bucket["fill"][played_fill] = bucket["fill"].get(played_fill, 0) + 1
             if arms[0].evaluate is not arms[1].evaluate:
                 bucket["calls"] += getattr(arms[arm_index].evaluate, "calls", 0) - calls_before[
                     arm_index]
@@ -271,6 +294,7 @@ def main(argv: list[str] | None = None) -> None:
                 leaves=side_leaves,
                 limits=sides["limits"],
                 rankings=sides["rankings"],
+                rank_fills=sides["rank_fills"],
                 books=sides["selections"],
                 information=("hidden-bench", "hidden-bench") if hide_bench
                 else ("open", "open"),
@@ -296,7 +320,8 @@ def main(argv: list[str] | None = None) -> None:
             print(
                 f"  echo, {arm_label} = side {which}: {names[arm_index]} sat at side "
                 f"{which if arm_index == 0 else 1 - which}, leaf {sorted(bucket['leaf'])}, "
-                f"selection {bucket['selection']}, belief {bucket['belief']}"
+                f"selection {bucket['selection']}, belief {bucket['belief']}, "
+                f"rank fill {bucket['fill']}"
                 + (f", leaf requests {bucket['calls']:,}" if bucket["calls"] else ""),
                 file=sys.stderr,
             )
