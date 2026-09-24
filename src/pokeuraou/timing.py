@@ -300,6 +300,16 @@ _PLUMBING = frozenset(
     {"timing.py", "rustnode.py", "port.py", "position.py", "inference.py", "functools.py"}
 )
 
+#: IKA-264: called at every decision boundary, timing on or off -- what a cache that
+#: lives one decision forgets on.
+_ON_DECIDED: list[Callable[[], None]] = []
+
+
+def on_decided(hook: Callable[[], None]) -> None:
+    """Run `hook` at every `decided` call from now on (once, however often asked)."""
+    if hook not in _ON_DECIDED:
+        _ON_DECIDED.append(hook)
+
 
 def caller(depth: int = 3) -> str:
     """`module.function` of the first `depth` frames outside the exchange's own modules,
@@ -535,6 +545,8 @@ def decided(kind: str) -> None:
     The first call only ends `startup`: the wall clock from this module's import to here,
     less any stage that ran in between, becomes that row. It is not part of "the rest".
     """
+    for hook in _ON_DECIDED:
+        hook()
     if not ON:
         return
     _SEEN.clear()
