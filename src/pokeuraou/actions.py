@@ -234,11 +234,41 @@ class SideAction:
         return tuple(a.party_index for a in self.slots if isinstance(a, SwitchAction))
 
 
-def _usable_move_slots(mon, reg: Regulation) -> list[tuple[int, str]]:  # noqa: ANN001
+def imprisoned_moves(pos: Position, side_index: int) -> frozenset[str]:
+    """The moves an opposing Imprison takes off this side's menu (IKA-256).
+
+    Imprison's volatile sits on its user, and its `onFoeDisableMove` runs for every
+    opposing active Pokemon::
+
+        for (const moveSlot of this.effectState.source.moveSlots) {
+            if (moveSlot.id === 'struggle') continue;
+            pokemon.disableMove(moveSlot.id, true);
+        }
+
+    Every move slot counts, PP or not. The volatile goes when its user leaves the field.
+    """
+    foe = pos.sides[1 - side_index]
+    out: set[str] = set()
+    for party in foe.active:
+        if party is None:
+            continue
+        mon = foe.pokemon[party]
+        if mon.fainted or not mon.has_volatile("imprison"):
+            continue
+        out.update(m.id for m in mon.moves if m.id != STRUGGLE)
+    return frozenset(out)
+
+
+def _usable_move_slots(
+    mon,  # noqa: ANN001
+    reg: Regulation,
+    imprisoned: frozenset[str] = frozenset(),
+) -> list[tuple[int, str]]:
     """1-based move indices the Pokemon may select, after locks and disables.
 
     Struggle is returned as an empty list, which the caller turns into the Struggle
-    choice; Showdown itself represents this as a single fake move slot.
+    choice; Showdown itself represents this as a single fake move slot. `imprisoned` is
+    :func:`imprisoned_moves` for the Pokemon's side.
     """
     locked = mon.locked_move
     if locked:
@@ -246,6 +276,9 @@ def _usable_move_slots(mon, reg: Regulation) -> list[tuple[int, str]]:  # noqa: 
             if m.id == locked and m.usable:
                 # Choice-locked into Gigaton Hammer right after it: Struggle (IKA-176).
                 if _disabled_after_itself(reg.moves.get(m.id), mon):
+                    return []
+                # Locked into a move a foe has Imprisoned: nothing else is on offer.
+                if m.id in imprisoned:
                     return []
                 return [(i, m.id)]
         # A lock naming a move that is gone leaves the normal set available.
@@ -299,6 +332,8 @@ def _usable_move_slots(mon, reg: Regulation) -> list[tuple[int, str]]:  # noqa: 
             continue
         if _disabled_after_itself(move, mon):
             continue
+        if m.id in imprisoned:
+            continue
         out.append((i, m.id))
     return out
 
@@ -347,7 +382,7 @@ def _disabled_once_moved(move) -> bool:  # noqa: ANN001
     )
 
 
-def is_struggling(mon, reg: Regulation) -> bool:  # noqa: ANN001
+def is_struggling(mon, reg: Regulation, imprisoned: frozenset[str] = frozenset()) -> bool:  # noqa: ANN001
     """True when nothing on the moveset can be selected, so Showdown offers Struggle.
 
     Not "every move is out of PP": a Choice item can leave exactly one move selectable and
@@ -355,7 +390,7 @@ def is_struggling(mon, reg: Regulation) -> bool:  # noqa: ANN001
     The condition is the legal set being empty, and it is named here so a reader of a game
     log and the search enumerating that turn cannot disagree about what was on the menu.
     """
-    return not _usable_move_slots(mon, reg)
+    return not _usable_move_slots(mon, reg, imprisoned)
 
 
 def _targets_for(
@@ -474,7 +509,7 @@ def slot_actions(
 
     out: list[SlotAction] = []
 
-    usable = _usable_move_slots(mon, reg)
+    usable = _usable_move_slots(mon, reg, imprisoned_moves(pos, side_index))
     mega_target = None
     if allow_mega and not side.mega_used and not mon.is_mega:
         mega_target = reg.mega_target(mon.species, mon.item)
