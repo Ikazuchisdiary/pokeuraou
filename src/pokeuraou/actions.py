@@ -277,8 +277,11 @@ def _usable_move_slots(
                 # Choice-locked into Gigaton Hammer right after it: Struggle (IKA-176).
                 if _disabled_after_itself(reg.moves.get(m.id), mon):
                     return []
-                # Locked into a move a foe has Imprisoned: nothing else is on offer.
-                if m.id in imprisoned:
+                # Choice-locked or Encored into a move a foe has Imprisoned: nothing else is on
+                # offer. A charging move's second turn is fired whatever is disabled
+                # (`chooseMove` takes `getLockedMove()`, sim/side.ts:675), and Imprison stops it
+                # at `BeforeMove` instead.
+                if m.id in imprisoned and not mon.has_volatile("twoturnmove"):
                     return []
                 return [(i, m.id)]
         # A lock naming a move that is gone leaves the normal set available.

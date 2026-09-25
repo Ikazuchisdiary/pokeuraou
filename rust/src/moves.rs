@@ -3409,8 +3409,8 @@ fn use_substitute(turn: &mut Turn, action: &QueuedAction) {
 ///
 /// The boosts go up in `onTryHit`, before the HP is paid; a user that can raise nothing
 /// (all five at +6, or Contrary at -6) fails and pays nothing. `directDamage` floors the
-/// cost and skips the `Damage` event (Magic Guard does not stop it); the berry is eaten at
-/// the next `Update`.
+/// cost and skips the `Damage` event (Magic Guard does not stop it) and `hurtThisTurn`;
+/// the berry is eaten at the next `Update`.
 fn clangorous_soul(turn: &mut Turn, action: &QueuedAction, mv: &Move) {
     let me = (action.side, action.slot);
     let Some(mon) = turn.mon_at(me.0, me.1) else { return };
@@ -3445,7 +3445,8 @@ fn clangorous_soul(turn: &mut Turn, action: &QueuedAction, mv: &Move) {
         mon.hp = (mon.hp - cost).max(0);
         mon.hp <= 0
     };
-    turn.hurt_this_turn[me.0][me.1] = true;
+    // No `hurt_this_turn`: `directDamage` goes through `Pokemon.damage`, and only
+    // `spreadDamage` sets `hurtThisTurn` (sim/battle.ts:2138), so a later Assurance stays 60.
     log_event!(turn, "{} -{} (clangoroussoul)", Name(me.0, me.1), cost);
     if fainted {
         turn.faint(me.0, me.1);

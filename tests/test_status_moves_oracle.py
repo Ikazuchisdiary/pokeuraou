@@ -55,9 +55,9 @@ from dataclasses import replace
 import pytest
 
 from pokeuraou import rustnode
-from pokeuraou.actions import MoveAction, side_actions
+from pokeuraou.actions import MoveAction, is_struggling, side_actions
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet
-from pokeuraou.position import Position
+from pokeuraou.position import Effect, Position
 
 from ._port import Budget, resolve_turn
 from .conftest import FORMAT_ID
@@ -86,6 +86,8 @@ PARTNER = ["protect", "swordsdance", "helpinghand", "focusenergy"]
 FOE_A = ["swordsdance", "dragonclaw", "protect", "substitute"]
 #: Foe B: 1 Focus Energy, 2 Growl, 3 Helping Hand, 4 Protect.
 FOE_B = ["focusenergy", "growl", "helpinghand", "protect"]
+#: Foe B with Assurance in place of Growl.
+ASSURER = ["focusenergy", "assurance", "helpinghand", "protect"]
 
 
 def _teams(
@@ -93,6 +95,7 @@ def _teams(
     user_item: str | None = None,
     user_spe: int = 0,
     foe_a_moves: list[str] | None = None,
+    foe_b_moves: list[str] | None = None,
 ) -> tuple[list[TeamSet], list[TeamSet]]:
     mine = [
         _mon("Kommo-o", user_ability, USER, user_spe, user_item),
@@ -100,7 +103,7 @@ def _teams(
     ]
     theirs = [
         _mon("Garchomp", "Rough Skin", foe_a_moves or FOE_A, 10),
-        _mon("Incineroar", "Blaze", FOE_B, 10),
+        _mon("Incineroar", "Blaze", foe_b_moves or FOE_B, 10),
         _mon("Milotic", "Marvel Scale", FOE_B, 0),
     ]
     return mine, theirs
@@ -142,6 +145,16 @@ CASES: dict[str, tuple] = {
     ),
     "clangorous-soul-with-contrary": (
         _teams(user_ability="Contrary"), [], [_me(SOUL), QUIET], "|-unboost|p1a: Kommo-o",
+    ),
+    # `directDamage` does not set `hurtThisTurn` (only `spreadDamage` does), so a later
+    # Assurance stays 60 (PR #1 review).
+    "assurance-after-clangorous-soul-stays-60": (
+        _teams(user_spe=FAST, foe_b_moves=ASSURER), [], [_me(SOUL), "move 1, move 2 1"],
+        "|move|p2b: Incineroar|Assurance|p1a: Kommo-o",
+    ),
+    "control-assurance-after-psych-up": (
+        _teams(user_spe=FAST, foe_b_moves=ASSURER), [], [_me("move 3 2"), "move 1, move 2 1"],
+        "|move|p2b: Incineroar|Assurance|p1a: Kommo-o",
     ),
     # -- Imprison (the user moves first unless it says otherwise)
     "imprison-stops-a-shared-move-chosen-before": (
@@ -336,3 +349,22 @@ def test_the_menu_matches_showdowns_request(reg, oracle: Oracle, bridged: None, 
     # Foe B shares nothing, and the imprisoner's own side is untouched.
     for (side, slot), moves in shown.items():
         assert _our_moves(reg, picked.position, side, slot) == moves, (side, slot)
+
+
+def test_a_charging_move_is_not_struggle_under_imprison(reg, oracle: Oracle) -> None:  # noqa: ANN001
+    """A charging move's second turn is fired whatever is disabled (`chooseMove` takes
+    `getLockedMove()`, sim/side.ts:675) and Imprison stops it at `BeforeMove`, so the move
+    is not Struggle (`tools/show_game.py` reads `is_struggling`). A Choice lock into an
+    Imprisoned move is (PR #1 review)."""
+    mine, theirs = _teams()
+    handle = oracle.create(FORMAT_ID, mine, theirs, policy=RandomnessPolicy())
+    handle.step(["team 12", "team 12"])
+    pos = Position.from_json(handle.position)
+    handle.close()
+    foe = pos.sides[1].pokemon[pos.sides[1].active[0]]
+    imprisoned = frozenset({"dragonclaw"})
+    foe.locked_move = "dragonclaw"
+    foe.volatiles.append(Effect(id="twoturnmove", duration=1, move="dragonclaw"))
+    assert not is_struggling(foe, reg, imprisoned)
+    foe.volatiles = [v for v in foe.volatiles if v.id != "twoturnmove"]
+    assert is_struggling(foe, reg, imprisoned)
