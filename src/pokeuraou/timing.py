@@ -205,8 +205,12 @@ class _Stage:
             outer = stack[-1]
             outer[0].wall += wall - outer[1]
             outer[0].cpu += cpu - outer[2]
+            if REGIONS:
+                _charge_region(outer[0].name, wall - outer[1], cpu - outer[2], 0)
         stack.append([self, wall, cpu])
         self.calls += 1
+        if REGIONS:
+            _charge_region(self.name, 0.0, 0.0, 1)
         return self
 
     def __exit__(self, *_exc: object) -> bool:
@@ -216,6 +220,8 @@ class _Stage:
         mine = stack.pop()
         mine[0].wall += wall - mine[1]
         mine[0].cpu += cpu - mine[2]
+        if REGIONS:
+            _charge_region(mine[0].name, wall - mine[1], cpu - mine[2], 0)
         if stack:
             outer = stack[-1]
             outer[1] = wall
@@ -341,6 +347,145 @@ def repeat_where(kind: str, key: Any, n: int = 1, where: str | None = None) -> b
     else:
         first[key] = where
     return again
+
+
+#: IKA-32: which part of a decision a stage's time was spent in -- the menus, a hidden
+#: node's completions, a depth-2 pass's sub-games -- because what may run beside what is a
+#: property of the part, not of the stage (`rust.fill` is a cell-parallel matrix in one
+#: part and a completion-parallel dirty fill in another). Its own switch on top of
+#: `POKEURAOU_TIMING`: it reads the Rust child's CPU from the kernel at every part's edge.
+ENV_REGIONS = "POKEURAOU_TIMING_REGIONS"
+REGIONS = ON and bool(os.environ.get(ENV_REGIONS))
+#: "part" -> [wall, cpu, calls, child cpu], each the part's OWN time (an inner part
+#: suspends it, as a stage suspends its outer one); "part|stage" -> [wall, cpu, calls, 0],
+#: the stage's time spent while that part was the innermost; "part|#count" -> [n, 0, 0, 0].
+#: "-" is no part at all. Process-wide rather than per thread: parts are entered on the main
+#: thread only, and a stage the pipe's reader thread times belongs to the part waiting on it.
+_REGION_ROWS: dict[str, list[float]] = {}
+#: [part, wall, cpu, child cpu] it last resumed at, innermost last.
+_REGION_STACK: list[list[Any]] = []
+#: The Rust children whose CPU a part is charged with (`child_process`).
+_CHILDREN: list[Any] = []
+
+
+def _region_name() -> str:
+    return _REGION_STACK[-1][0] if _REGION_STACK else "-"
+
+
+def _charge_region(stage_name: str, wall: float, cpu: float, calls: int) -> None:
+    row = _REGION_ROWS.setdefault(f"{_region_name()}|{stage_name}", [0.0, 0.0, 0, 0.0])
+    row[0] += wall
+    row[1] += cpu
+    row[2] += calls
+
+
+def _children_cpu() -> float:
+    spent = 0.0
+    for child in _CHILDREN:
+        try:
+            times = child.cpu_times()
+        except Exception:  # noqa: BLE001, S112 - a child that is gone has stopped spending
+            continue
+        spent += float(times.user + times.system)
+    return spent
+
+
+def child_process(pid: int) -> None:
+    """Charge this child's CPU (a Rust node) to the parts it works in. Only with regions."""
+    if not REGIONS:
+        return
+    try:
+        import psutil
+
+        _CHILDREN.append(psutil.Process(pid))
+    except Exception:  # noqa: BLE001 - a report is never worth failing a run for
+        return
+
+
+class _Region:
+    """One named part of a decision, as a context manager (`region`)."""
+
+    __slots__ = ("name",)
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+    def __enter__(self) -> _Region:
+        wall, cpu, child = time.perf_counter(), time.thread_time(), _children_cpu()
+        _split_stage(wall, cpu)
+        if _REGION_STACK:
+            _charge_own(_REGION_STACK[-1], wall, cpu, child)
+        else:
+            _charge_outside(wall, cpu, child)
+        _REGION_STACK.append([self.name, wall, cpu, child])
+        _REGION_ROWS.setdefault(self.name, [0.0, 0.0, 0, 0.0])[2] += 1
+        return self
+
+    def __exit__(self, *_exc: object) -> bool:
+        wall, cpu, child = time.perf_counter(), time.thread_time(), _children_cpu()
+        _split_stage(wall, cpu)
+        _charge_own(_REGION_STACK.pop(), wall, cpu, child)
+        if _REGION_STACK:
+            outer = _REGION_STACK[-1]
+            outer[1], outer[2], outer[3] = wall, cpu, child
+        else:
+            _OUTSIDE[1], _OUTSIDE[2], _OUTSIDE[3] = wall, cpu, child
+        return False
+
+
+def _split_stage(wall: float, cpu: float) -> None:
+    """Charge the running stage up to a part's edge, so each side of it gets its own share.
+
+    The stage's own totals are the same either way: its time is only cut in two.
+    """
+    stack = _stack()
+    if stack:
+        top = stack[-1]
+        top[0].wall += wall - top[1]
+        top[0].cpu += cpu - top[2]
+        _charge_region(top[0].name, wall - top[1], cpu - top[2], 0)
+        top[1] = wall
+        top[2] = cpu
+
+
+def _charge_own(entry: list[Any], wall: float, cpu: float, child: float) -> None:
+    row = _REGION_ROWS.setdefault(entry[0], [0.0, 0.0, 0, 0.0])
+    row[0] += wall - entry[1]
+    row[1] += cpu - entry[2]
+    row[3] += child - entry[3]
+
+
+#: The time outside every part, as a part named "-": it resumes where the last one ended.
+_OUTSIDE: list[Any] = ["-", time.perf_counter(), time.thread_time(), 0.0]
+
+
+def _charge_outside(wall: float, cpu: float, child: float) -> None:
+    _charge_own(_OUTSIDE, wall, cpu, child)
+
+
+def _settle_outside() -> None:
+    """Bring the "-" part up to now, so a decision's delta holds its own outside time."""
+    if not REGIONS or _REGION_STACK:
+        return
+    wall, cpu, child = time.perf_counter(), time.thread_time(), _children_cpu()
+    _charge_outside(wall, cpu, child)
+    _OUTSIDE[1], _OUTSIDE[2], _OUTSIDE[3] = wall, cpu, child
+
+
+_REGION_OBJECTS: dict[str, _Region] = {}
+
+
+def region(name: str) -> Any:
+    """A context manager naming the part of a decision its body is, or a no-op when off.
+
+    Nothing about the work changes: it is the stage clocks cut the other way (IKA-32).
+    """
+    if not REGIONS:
+        return _OFF
+    found = _REGION_OBJECTS.get(name)
+    if found is None:
+        found = _REGION_OBJECTS[name] = _Region(name)
+    return found
 
 
 #: IKA-258: sample the main thread's stack this many times a second, into the report.
@@ -508,6 +653,8 @@ def add(name: str, seconds: float, *, calls: int = 1) -> None:
         found = _STAGES[name] = _Stage(name)
     found.wall += seconds
     found.calls += calls
+    if REGIONS:
+        _charge_region(name, seconds, 0.0, calls)
 
 
 def count(name: str, n: int = 1) -> None:
@@ -522,6 +669,8 @@ def count(name: str, n: int = 1) -> None:
     if not ON:
         return
     _COUNTS[name] = _COUNTS.get(name, 0) + n
+    if REGIONS:
+        _REGION_ROWS.setdefault(f"{_region_name()}|#{name}", [0.0, 0.0, 0, 0.0])[0] += n
     if name in PURPOSED:
         key = f"{name}@{current_purpose()}"
         _COUNTS[key] = _COUNTS.get(key, 0) + n
@@ -551,6 +700,11 @@ def decided(kind: str) -> None:
         return
     _SEEN.clear()
     _FIRST.clear()
+    while REGIONS and _REGION_STACK:
+        # A part an exception left open (its body raised): closed here, and counted.
+        count("region.unclosed")
+        _REGION_OBJECTS[_REGION_STACK[-1][0]].__exit__(None, None, None)
+    _settle_outside()
     now = time.perf_counter()
     if not _STARTUP_CPU:
         _end_startup(now)
@@ -561,6 +715,7 @@ def decided(kind: str) -> None:
         now,
         {name: (s.wall, s.calls) for name, s in _STAGES.items()},
         dict(_COUNTS),
+        {key: tuple(row) for key, row in _REGION_ROWS.items()} if REGIONS else None,
     ]
 
 
@@ -595,7 +750,7 @@ def _kind(kind: str, opened: list[Any]) -> str:
 
 def _delta(opened: list[Any], now: float) -> dict[str, Any]:
     """What the open stretch has cost so far: its wall clock, stage clocks and counts."""
-    _details, started, stages, counts = opened
+    _details, started, stages, counts, regions = opened
     moved: dict[str, list[float]] = {}
     for name, found in _STAGES.items():
         wall, calls = stages.get(name, (0.0, 0))
@@ -606,7 +761,16 @@ def _delta(opened: list[Any], now: float) -> dict[str, Any]:
         for name, value in _COUNTS.items()
         if value != counts.get(name, 0)
     }
-    return {"wall": now - started, "stages": moved, "counts": tallied}
+    out = {"wall": now - started, "stages": moved, "counts": tallied}
+    if regions is not None:
+        _settle_outside()
+        zero = (0.0, 0.0, 0, 0.0)
+        out["regions"] = {
+            key: [a - b for a, b in zip(row, regions.get(key, zero), strict=True)]
+            for key, row in _REGION_ROWS.items()
+            if tuple(row) != regions.get(key, zero)
+        }
+    return out
 
 
 def _merge(into: dict[str, Any], delta: dict[str, Any]) -> None:
@@ -618,6 +782,10 @@ def _merge(into: dict[str, Any], delta: dict[str, Any]) -> None:
         row[1] += calls
     for name, value in delta["counts"].items():
         into["counts"][name] = into["counts"].get(name, 0) + value
+    for key, row in delta.get("regions", {}).items():
+        have = into.setdefault("regions", {}).setdefault(key, [0.0, 0.0, 0, 0.0])
+        for index, value in enumerate(row):
+            have[index] += value
 
 
 def _empty() -> dict[str, Any]:
@@ -655,6 +823,8 @@ def _decisions() -> dict[str, dict[str, Any]]:
             "wall": row["wall"],
             "stages": {name: list(pair) for name, pair in row["stages"].items()},
             "counts": dict(row["counts"]),
+            **({"regions": {k: list(v) for k, v in row["regions"].items()}}
+               if "regions" in row else {}),
         }
         for kind, row in _DECISIONS.items()
     }
@@ -716,6 +886,8 @@ def snapshot() -> dict[str, Any]:
         "process": _process_times(),
         # IKA-258: whether this process counted repeats, and its stack samples if any.
         "dupes": DUPES,
+        # IKA-32: the parts of a decision, when this process kept them.
+        "regions": {k: list(v) for k, v in _REGION_ROWS.items()} if REGIONS else None,
         "sample_hz": SAMPLE_HZ,
         "samples": (
             {"ticks": _SAMPLE_TICKS[0], **{k: dict(v) for k, v in _SAMPLES.items()}}
@@ -799,6 +971,7 @@ __all__ = [
     "STAGES",
     "WORKER_STAGES",
     "add",
+    "child_process",
     "clock",
     "count",
     "current_purpose",
@@ -807,6 +980,7 @@ __all__ = [
     "purpose",
     "ready",
     "refine",
+    "region",
     "repeat",
     "serving",
     "set_total",

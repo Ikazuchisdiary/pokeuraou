@@ -157,6 +157,9 @@ def tree_cpu(
     totals: dict[int, tuple[str, float]] = {}
     roles: dict[int, str] = {}
     peak_rss = 0
+    # IKA-32: the largest RSS one process of each role ever had, and the role's sum.
+    peak_one: dict[str, int] = {}
+    peak_role: dict[str, int] = {}
     samples = 0
     low_water = float("inf")
     stopped_for_memory = False
@@ -166,6 +169,7 @@ def tree_cpu(
     began = time.perf_counter()
     while not stop.is_set():
         rss = 0
+        by_role_rss: dict[str, int] = {}
         try:
             root = psutil.Process(pid)
             group = [root, *root.children(recursive=True)]
@@ -186,10 +190,16 @@ def tree_cpu(
                     except psutil.Error:
                         line = []
                     roles[process.pid] = process_role(name, line)
-                rss += int(process.memory_info().rss)
+                one = int(process.memory_info().rss)
+                rss += one
+                role = roles[process.pid]
+                peak_one[role] = max(peak_one.get(role, 0), one)
+                by_role_rss[role] = by_role_rss.get(role, 0) + one
             except psutil.Error:
                 continue
         peak_rss = max(peak_rss, rss)
+        for role, held in by_role_rss.items():
+            peak_role[role] = max(peak_role.get(role, 0), held)
         if progress is not None:
             now_roles: dict[str, float] = {}
             for known_pid, (known_name, spent) in totals.items():
@@ -226,6 +236,8 @@ def tree_cpu(
         "role_processes": role_processes,
         "total": sum(by_name.values()),
         "peak_rss": peak_rss,
+        "peak_rss_one": peak_one,
+        "peak_rss_role": peak_role,
         "free_low_water": 0.0 if low_water == float("inf") else low_water,
         "stopped_for_memory": stopped_for_memory,
         "processes": len(totals),
@@ -565,7 +577,51 @@ def per_decision(reports: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
                 stage[1] += int(calls)
             for name, value in (row.get("counts") or {}).items():
                 into["counts"][name] = into["counts"].get(name, 0) + int(value)
+            for key, values in (row.get("regions") or {}).items():
+                have = into.setdefault("regions", {}).setdefault(key, [0.0, 0.0, 0, 0.0])
+                for index, value in enumerate(values):
+                    have[index] += value
     return out
+
+
+#: IKA-32: the stages a part's time is read by, in `print_regions`.
+REGION_PORT_WAIT = ("rust.fill", "rust.turn", "rust.score", "rust.resolve", "rust.needed",
+                    "rust.replacements", "rust.leads", "rust.resume", "rust.alternatives")
+
+
+def print_regions(found: dict[str, dict[str, Any]]) -> None:
+    """IKA-32: each part of a decision, per decision of that kind (with --regions).
+
+    `own` is the part's own wall clock (an inner part suspends it); `py cpu` the worker's
+    main-thread CPU in it; `child` the Rust children's CPU in it, read off the kernel at
+    every edge; `serve` the wait on the inference server; `port wait` the wall of the stages
+    that cross to the child, and `other` the rest of the part's stages' wall.
+    """
+    for kind, row in sorted(found.items(), key=lambda kv: -kv[1]["n"]):
+        regions = row.get("regions")
+        if not regions:
+            continue
+        n = max(row["n"], 1)
+        parts = sorted(k for k in regions if "|" not in k)
+        print(f"\n  parts of a `{kind}` decision (IKA-32), ms per decision over {row['n']:,}")
+        print(f"  {'part':<14} {'calls':>7} {'own':>8} {'py cpu':>8} {'child':>8} "
+              f"{'serve':>8} {'port wait':>9} {'lp':>7} {'narrow':>7} {'belief':>7}")
+        total = 0.0
+        for part in parts:
+            wall, cpu, calls, child = regions[part]
+            total += wall
+
+            def staged(name: str, part: str = part, regions: dict = regions) -> float:
+                return float(regions.get(f"{part}|{name}", [0.0])[0])
+
+            port_wait = sum(staged(name) for name in REGION_PORT_WAIT)
+            print(f"  {part:<14} {calls / n:>7.2f} {1000 * wall / n:>8.2f} "
+                  f"{1000 * cpu / n:>8.2f} {1000 * child / n:>8.2f} "
+                  f"{1000 * staged('serve.wait') / n:>8.2f} {1000 * port_wait / n:>9.2f} "
+                  f"{1000 * staged('lp') / n:>7.2f} {1000 * staged('narrow') / n:>7.2f} "
+                  f"{1000 * staged('belief') / n:>7.2f}")
+        print(f"  {'(all parts)':<14} {'':>7} {1000 * total / n:>8.2f}   "
+              f"decision wall {1000 * row['wall'] / n:.2f}")
 
 
 #: Per-decision columns: (heading, where it comes from). A count, or a stage's calls.
@@ -1032,6 +1088,12 @@ def main() -> None:
         "request and leaf row, so this run's clock is not read)",
     )
     ap.add_argument(
+        "--regions",
+        action="store_true",
+        help="also keep each decision's parts -- menus, a node's completions, depth 2's "
+        "sub-games -- with the Rust child's CPU read at their edges (IKA-32)",
+    )
+    ap.add_argument(
         "--sample-hz",
         type=float,
         default=0.0,
@@ -1097,6 +1159,7 @@ def main() -> None:
         if servers:
             print_server(summarise(servers))
         print_decisions(per_decision(reports))
+        print_regions(per_decision(reports))
         print_rest_fit(rest_fit(reports))
         print_rest_by_kind(rest_by_kind(reports))
         print_repeats(repeats(reports), _moves(reports))
@@ -1120,10 +1183,12 @@ def main() -> None:
         env["POKEURAOU_TIMING"] = str(timing_dir)
     env["POKEURAOU_TIMING_DUPES"] = "1" if args.dupes else ""
     env["POKEURAOU_SAMPLE_HZ"] = f"{args.sample_hz:g}" if args.sample_hz > 0 else ""
-    # And a pad that makes the three together the same length in every mode, so an arm
+    env["POKEURAOU_TIMING_REGIONS"] = "1" if args.regions else ""
+    # And a pad that makes the four together the same length in every mode, so an arm
     # with the timers and the null control without them differ in the timers alone.
     used = sum(len(env[name]) for name in
-               ("POKEURAOU_TIMING", "POKEURAOU_TIMING_DUPES", "POKEURAOU_SAMPLE_HZ"))
+               ("POKEURAOU_TIMING", "POKEURAOU_TIMING_DUPES", "POKEURAOU_SAMPLE_HZ",
+                "POKEURAOU_TIMING_REGIONS"))
     env["POKEURAOU_TIMING_PAD"] = "x" * max(len(str(timing_dir)) + 16 - used, 0)
     env["PYTHONPATH"] = str(ROOT / "src")
     # The drivers set this for their workers; the analysis workload has no driver, so it
@@ -1191,6 +1256,7 @@ def main() -> None:
         print_spin(summary["spin"])
     summary["decisions"] = per_decision(reports)
     print_decisions(summary["decisions"])
+    print_regions(summary["decisions"])
     summary["rest_fit"] = rest_fit(reports)
     print_rest_fit(summary["rest_fit"])
     summary["rest_by_kind"] = rest_by_kind(reports)

@@ -502,6 +502,7 @@ class RustNode:
             stdout=subprocess.PIPE,
             stderr=self._errors,
         )
+        timing.child_process(self._process.pid)  # IKA-32: a no-op unless parts are kept
         # One thread, so a read that never returns can be abandoned. Killing the child
         # closes the pipe, which is what actually unblocks it.
         self._reader = ThreadPoolExecutor(max_workers=1)

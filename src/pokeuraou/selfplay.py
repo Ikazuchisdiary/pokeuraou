@@ -775,15 +775,19 @@ def _menus(
         )
 
     if not widths:
-        return (
-            narrow(reg, pos, 0, limit=limits[0], rank=ranker(0)).actions,
-            narrow(reg, pos, 1, limit=limits[1], rank=ranker(1)).actions,
-        )
+        # A part each (IKA-32): the two sides' menus are independent of each other.
+        with timing.region("menu.side"):
+            first = narrow(reg, pos, 0, limit=limits[0], rank=ranker(0)).actions
+        with timing.region("menu.side"):
+            second = narrow(reg, pos, 1, limit=limits[1], rank=ranker(1)).actions
+        return first, second
     # The same calls in the same order, each side's ranking remembered for its wider menus.
-    own_rank = _remembered(ranker(0))
-    own = narrow(reg, pos, 0, limit=limits[0], rank=own_rank).actions
-    foe_rank = _remembered(ranker(1))
-    foe = narrow(reg, pos, 1, limit=limits[1], rank=foe_rank).actions
+    with timing.region("menu.side"):
+        own_rank = _remembered(ranker(0))
+        own = narrow(reg, pos, 0, limit=limits[0], rank=own_rank).actions
+    with timing.region("menu.side"):
+        foe_rank = _remembered(ranker(1))
+        foe = narrow(reg, pos, 1, limit=limits[1], rank=foe_rank).actions
     for width in widths:
         wider[width] = (
             narrow(reg, pos, 0, limit=width, rank=own_rank).actions,
