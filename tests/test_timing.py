@@ -38,6 +38,7 @@ def load(
     *,
     dupes: bool = False,
     sample_hz: float = 0.0,
+    regions: bool = False,
 ) -> Any:
     """A private copy of the module, with the environment it reads at import time."""
     if directory is None:
@@ -45,6 +46,7 @@ def load(
     else:
         monkeypatch.setenv("POKEURAOU_TIMING", str(directory))
     monkeypatch.setenv("POKEURAOU_TIMING_DUPES", "1" if dupes else "")
+    monkeypatch.setenv("POKEURAOU_TIMING_REGIONS", "1" if regions else "")
     monkeypatch.setenv("POKEURAOU_SAMPLE_HZ", f"{sample_hz:g}" if sample_hz else "")
     spec = importlib.util.spec_from_file_location("_timing_under_test", SOURCE)
     assert spec is not None and spec.loader is not None
@@ -467,3 +469,120 @@ def test_the_worker_stages_are_named(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     assert set(timing.WORKER_STAGES) <= set(timing.STAGES)
     assert not set(timing.WORKER_STAGES) & timing.BORROWED
     assert set(timing.WORKER_STAGES) <= set(timing.snapshot()["stages"])
+
+
+def test_regions_off_are_the_shared_no_op(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """IKA-32: without their own switch, parts are the no-op and nothing is kept -- with
+    timing on as well as off."""
+    for timing in (load(monkeypatch, tmp_path), load(monkeypatch, None, regions=True)):
+        assert timing.REGIONS is False
+        assert timing.region("d2.fills") is timing.region("lp.side")
+        with timing.region("d2.fills"):
+            pass
+        timing.child_process(12345)
+        assert timing._CHILDREN == []
+        assert timing.snapshot()["regions"] is None
+
+
+def test_a_part_splits_the_stage_running_across_its_edge(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """IKA-32: a stage running when a part opens is cut at the edge -- its total is the same,
+    and each side of the edge is charged to its own part."""
+    timing = load(monkeypatch, tmp_path, regions=True)
+    timing.decided("between")
+    with timing.stage("belief"):
+        burn(0.05)
+        with timing.region("belief.fold"):
+            burn(0.10)
+            with timing.region("d2.fold"):
+                burn(0.05)
+            burn(0.02)
+        burn(0.03)
+    timing.decided("move")
+    report = timing.snapshot()
+    parts = report["decisions"]["move"]["regions"]
+    total = report["stages"]["belief"]["wall"]
+    outside = parts["-|belief"][0]
+    fold = parts["belief.fold|belief"][0]
+    inner = parts["d2.fold|belief"][0]
+    assert outside + fold + inner == pytest.approx(total, abs=1e-6)
+    assert outside == pytest.approx(0.08, abs=0.02)
+    assert fold == pytest.approx(0.12, abs=0.02)
+    assert inner == pytest.approx(0.05, abs=0.02)
+    # A part's own time excludes the part nested in it.
+    assert parts["belief.fold"][0] == pytest.approx(0.12, abs=0.02)
+    assert parts["belief.fold"][2] == 1
+    assert parts["d2.fold"][0] == pytest.approx(0.05, abs=0.02)
+    # The parts, "-" included, hold the whole stretch.
+    own = sum(v[0] for k, v in parts.items() if "|" not in k)
+    assert own == pytest.approx(report["decisions"]["move"]["wall"], abs=0.005)
+
+
+def test_a_part_is_charged_its_child_s_cpu(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """IKA-32: the Rust child's CPU, read at the edges, goes to the part it was spent in.
+    Positive control: a child that burns only while the part is open."""
+    import subprocess
+    import sys
+
+    timing = load(monkeypatch, tmp_path, regions=True)
+    # The base interpreter: a venv's python.exe on Windows is a launcher that runs the real
+    # one as its own child, and the launcher's CPU is next to nothing.
+    child = subprocess.Popen(
+        [getattr(sys, "_base_executable", sys.executable), "-c",
+         "import sys, time\n"
+         "sys.stdin.readline()\n"
+         "end = time.perf_counter() + 0.4\n"
+         "while time.perf_counter() < end: pass\n"
+         "print('done', flush=True)\n"],
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True,
+    )
+    try:
+        timing.child_process(child.pid)
+        timing.decided("between")
+        with timing.region("belief.jobs"):
+            child.stdin.write("go\n")
+            child.stdin.flush()
+            assert child.stdout.readline().strip() == "done"
+        burn(0.05)
+        timing.decided("move")
+    finally:
+        child.wait(timeout=10)
+    parts = timing.snapshot()["decisions"]["move"]["regions"]
+    assert parts["belief.jobs"][3] == pytest.approx(0.4, abs=0.1)
+    assert parts.get("-", [0.0, 0.0, 0, 0.0])[3] < 0.05
+
+
+def test_a_part_left_open_by_a_raise_is_closed_at_the_decision(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    timing = load(monkeypatch, tmp_path, regions=True)
+    timing.decided("between")
+    part = timing.region("d2.turns")
+    part.__enter__()  # as `_refine_cells` does; its body raises before the exit
+    burn(0.02)
+    timing.decided("move")
+    assert timing._REGION_STACK == []
+    found = timing.snapshot()["decisions"]["move"]
+    assert found["counts"]["region.unclosed"] == 1
+    assert found["regions"]["d2.turns"][0] == pytest.approx(0.02, abs=0.01)
+
+
+def test_a_refusal_in_a_depth2_stage_closes_its_part(monkeypatch: pytest.MonkeyPatch) -> None:
+    """IKA-32: `_refine_cells` raises a refused turn from inside its `d2.turns` part; the part
+    must close on the way out, or every part after it nests under it until the decision."""
+    from pokeuraou import port, search, timing
+
+    monkeypatch.setattr(timing, "REGIONS", True)
+    monkeypatch.setattr(timing, "_REGION_STACK", [])
+    monkeypatch.setattr(timing, "_REGION_ROWS", {})
+    monkeypatch.setattr(timing, "_REGION_OBJECTS", {})
+
+    def refused(*_args: object, **_kwargs: object):  # noqa: ANN202
+        yield port.PortRefused("refused on purpose")
+
+    monkeypatch.setattr(search, "_cell_turns", refused)
+    with pytest.raises(port.PortRefused):
+        search._refine_cells(None, [object()], None, budget=None, sub_limit=8, sub_branches=3)
+    assert timing._REGION_STACK == []
+    assert timing._REGION_ROWS["d2.turns"][2] == 1

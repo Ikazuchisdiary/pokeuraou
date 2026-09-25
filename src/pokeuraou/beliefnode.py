@@ -264,7 +264,8 @@ def belief_payoffs(
         timing.refine("hidden" if any(hidden.values()) else "exact")
         timing.count("completions", sum(len(items) for items in spreads.values()))
     if not any(hidden.values()):
-        return _per_completion(reg, row, col, evaluate, budget, spreads)
+        with timing.region("belief.exact"):
+            return _per_completion(reg, row, col, evaluate, budget, spreads)
 
     from .encode import Encoded, rules_of
 
@@ -278,9 +279,10 @@ def belief_payoffs(
     encoder = getattr(owner, "encoder", None) or _encoder_for(reg)
     rules = rules_of(evaluate)
 
-    filled = port.ask(
-        reg, lambda node: node.fill_encoded(position, row, col, budget, [], None, rules=rules)
-    )
+    with timing.region("belief.ref"):
+        filled = port.ask(
+            reg, lambda node: node.fill_encoded(position, row, col, budget, [], None, rules=rules)
+        )
     if rules.mega_from_slots and filled.mega_from_slots is not True:
         # A binary that predates the field encoded with the current rule. The fill cannot
         # be used for this leaf; the per-completion path encodes in Python.
@@ -319,46 +321,49 @@ def belief_payoffs(
     claimed: dict[int, dict] = {side: {} for side in reach}
     reference_block: int | None = None
     jobs: list[_Job] = []
-    for side, items in spreads.items():
-        slots = hidden.get(side, ())
-        for item in items:
-            job = _Job(side=side, item=item)
-            if item.exact or not slots:
-                if reference_block is None:
-                    reference_block = block(len(reference), lambda: reference)
-                job.shared = reference_block
-            else:
-                job.shared = block(
-                    len(reference),
-                    lambda item=item, side=side, slots=slots: _patched(
-                        reference, side, slots, item, reg, position, encoder, rules
-                    ),
-                )
-            if wanted and side in reach and not item.exact:
-                own_cells = _borrow(
-                    job, reach[side], claimed[side], filled, wanted, block,
-                    lambda rows, patch, item=item, side=side: _patched(
-                        rows, side, patch, item, reg, position, encoder, rules
-                    ),
-                )
-                if own_cells:
-                    _gather_dirty(
-                        job, reg, position, row, col, budget, own_cells, rules, scorer, block
+    with timing.region("belief.jobs"):
+        for side, items in spreads.items():
+            slots = hidden.get(side, ())
+            for item in items:
+                job = _Job(side=side, item=item)
+                if item.exact or not slots:
+                    if reference_block is None:
+                        reference_block = block(len(reference), lambda: reference)
+                    job.shared = reference_block
+                else:
+                    job.shared = block(
+                        len(reference),
+                        lambda item=item, side=side, slots=slots: _patched(
+                            reference, side, slots, item, reg, position, encoder, rules
+                        ),
                     )
-            elif wanted:
-                _gather_dirty(
-                    job, reg, position, row, col, budget, wanted, rules, scorer, block
-                )
-                if job.dirty_from_reference and reference_block is None:
-                    reference_block = block(len(reference), lambda: reference)
-            jobs.append(job)
+                if wanted and side in reach and not item.exact:
+                    own_cells = _borrow(
+                        job, reach[side], claimed[side], filled, wanted, block,
+                        lambda rows, patch, item=item, side=side: _patched(
+                            rows, side, patch, item, reg, position, encoder, rules
+                        ),
+                    )
+                    if own_cells:
+                        _gather_dirty(
+                            job, reg, position, row, col, budget, own_cells, rules, scorer, block
+                        )
+                elif wanted:
+                    _gather_dirty(
+                        job, reg, position, row, col, budget, wanted, rules, scorer, block
+                    )
+                    if job.dirty_from_reference and reference_block is None:
+                        reference_block = block(len(reference), lambda: reference)
+                jobs.append(job)
 
-    stacked, starts = _stacked(parts, reference)
-    values = (
-        np.asarray(scorer(stacked), dtype=np.float64)
-        if len(stacked)
-        else np.zeros(0, dtype=np.float64)
-    )
+    with timing.region("belief.stack"):
+        stacked, starts = _stacked(parts, reference)
+    with timing.region("belief.score"):
+        values = (
+            np.asarray(scorer(stacked), dtype=np.float64)
+            if len(stacked)
+            else np.zeros(0, dtype=np.float64)
+        )
     del stacked
     # The parts' arrays are in the batch now, and only their sizes, spans and folds are
     # read from here on; a dirty fill is as large as the node, so it is let go.
@@ -373,47 +378,48 @@ def belief_payoffs(
 
     matrices: dict[int, list[np.ndarray]] = {}
     shared = redone = 0
-    for job in jobs:
-        shared_values = rows_of(job.shared)
-        payoff = np.zeros((len(row), len(col)), dtype=np.float64)
-        for i, j, indices, weights in filled.spans:
-            if not weights or dirty[i, j]:
-                continue
-            payoff[i, j] = float(shared_values[list(indices)] @ np.asarray(weights))
-        # Every folded cell is dirty (above), so no fold is read off the shared rows.
-        shared += int((~dirty).sum())
-        if wanted:
-            part = np.zeros((len(row), len(col)), dtype=np.float64)
-            if job.dirty_from_reference:
-                # The exact completion is the true position itself, so its dirty cells are
-                # the reference fill's own leaves: what `_per_completion` scores for it.
-                ported = rows_of(reference_block)
-                for i, j, indices, weights in filled.spans:
-                    if weights and dirty[i, j]:
+    with timing.region("belief.fold"):
+        for job in jobs:
+            shared_values = rows_of(job.shared)
+            payoff = np.zeros((len(row), len(col)), dtype=np.float64)
+            for i, j, indices, weights in filled.spans:
+                if not weights or dirty[i, j]:
+                    continue
+                payoff[i, j] = float(shared_values[list(indices)] @ np.asarray(weights))
+            # Every folded cell is dirty (above), so no fold is read off the shared rows.
+            shared += int((~dirty).sum())
+            if wanted:
+                part = np.zeros((len(row), len(col)), dtype=np.float64)
+                if job.dirty_from_reference:
+                    # The exact completion is the true position itself, so its dirty cells are
+                    # the reference fill's own leaves: what `_per_completion` scores for it.
+                    ported = rows_of(reference_block)
+                    for i, j, indices, weights in filled.spans:
+                        if weights and dirty[i, j]:
+                            part[i, j] = float(ported[indices] @ np.asarray(weights))
+                    for i, j, root in filled.folded:
+                        part[i, j] = fold_value(_fold_from_json(root), ported)
+                elif job.dirty is not None:
+                    ported = rows_of(job.dirty)
+                    # As `resolve._rust_encoded_payoffs` writes a node the port filled.
+                    for i, j, indices, weights in job.filled.spans:
+                        if not weights:
+                            continue
                         part[i, j] = float(ported[indices] @ np.asarray(weights))
-                for i, j, root in filled.folded:
-                    part[i, j] = fold_value(_fold_from_json(root), ported)
-            elif job.dirty is not None:
-                ported = rows_of(job.dirty)
-                # As `resolve._rust_encoded_payoffs` writes a node the port filled.
-                for i, j, indices, weights in job.filled.spans:
-                    if not weights:
-                        continue
-                    part[i, j] = float(ported[indices] @ np.asarray(weights))
-                for i, j, root in job.filled.folded:
-                    part[i, j] = fold_value(_fold_from_json(root), ported)
-            for index, spans, folds in job.borrowed:
-                ported = rows_of(job.shared if index is None else index)
-                for i, j, indices, weights in spans:
-                    if weights:
-                        part[i, j] = float(ported[indices] @ np.asarray(weights))
-                for i, j, root in folds:
-                    part[i, j] = fold_value(_fold_from_json(root), ported)
-            for i, j in wanted:
-                payoff[i, j] = part[i, j]
-            unmodelled |= job.notes
-            redone += len(wanted) if job.resolved is None else job.resolved
-        matrices.setdefault(1 - job.side, []).append(payoff)
+                    for i, j, root in job.filled.folded:
+                        part[i, j] = fold_value(_fold_from_json(root), ported)
+                for index, spans, folds in job.borrowed:
+                    ported = rows_of(job.shared if index is None else index)
+                    for i, j, indices, weights in spans:
+                        if weights:
+                            part[i, j] = float(ported[indices] @ np.asarray(weights))
+                    for i, j, root in folds:
+                        part[i, j] = fold_value(_fold_from_json(root), ported)
+                for i, j in wanted:
+                    payoff[i, j] = part[i, j]
+                unmodelled |= job.notes
+                redone += len(wanted) if job.resolved is None else job.resolved
+            matrices.setdefault(1 - job.side, []).append(payoff)
     return BeliefNode(matrices, unmodelled, shared, redone)
 
 
