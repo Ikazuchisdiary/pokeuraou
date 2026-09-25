@@ -486,14 +486,20 @@ def game_terms(
 # -- compute ---------------------------------------------------------------------------------
 
 
-def _evaluator(models: Sequence[Path], device: str | None) -> tuple[Any, Any]:  # noqa: ANN401
+def _evaluator(
+    models: Sequence[Path], device: str | None, format_id: str = "gen9championsvgc2026regmc"
+) -> tuple[Any, Any]:  # noqa: ANN401
     import torch
 
     from pokeuraou.encode import Encoder
     from pokeuraou.regulation import load_regulation
     from pokeuraou.value import BatchedValue, load_ensemble
 
-    reg = load_regulation("gen9championsvgc2026regmc")
+    reg = load_regulation(format_id)
+    if format_id.endswith("regmb"):
+        from pokeuraou.damage import register_mega_stones
+
+        register_mega_stones(reg)
     encoder = Encoder(reg)
     torch.set_num_threads(1)
     where = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -514,7 +520,7 @@ def compute(args: argparse.Namespace) -> None:
     models = args.value or [
         ROOT / "data" / "models" / "value-mc0.pt", ROOT / "data" / "models" / "value-mc0-s1.pt"
     ]
-    reg, evaluate = _evaluator(models, args.device)
+    reg, evaluate = _evaluator(models, args.device, args.format)
     k, n = (int(x) for x in args.shard.split("/"))
     done: set[tuple[str, int]] = set()
     if args.out.exists():
@@ -746,6 +752,7 @@ def main(argv: list[str] | None = None) -> None:
     c.add_argument("--out", type=Path, required=True)
     c.add_argument("--value", type=Path, nargs="+", help="the evaluator (default value-mc0x2)")
     c.add_argument("--device", default=None)
+    c.add_argument("--format", default="gen9championsvgc2026regmc")
     c.add_argument("--shard", default="0/1", help="k/n: the games whose index is k mod n")
     c.add_argument("--limit", type=int, default=0, help="stop after this many games")
     c.add_argument("--actions", action="store_true", help="the action term too (stage 2)")
