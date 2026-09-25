@@ -229,6 +229,24 @@ def test_the_restricted_reading_keeps_to_its_rectangle(roster) -> None:  # noqa:
     assert grew >= 1, "no rectangle ever grew, so the oracle was never exercised"
 
 
+def test_a_decided_rectangle_still_asks_the_oracle() -> None:
+    """A rectangle whose only cell is decided (exactly 1: no ``bern``, never refined) is
+    settled, so the column outside that takes its strategy apart joins it.
+
+    Found on IKA-254's answer set: a rectangle waiting on a cell worth 1.0 never grew, and
+    its strategy lost 0.63 to a column it never asked about.
+    """
+    payoff = np.array([[1.0, 0.1], [0.9, 0.8]])
+    node = deepen_mod._Node(
+        pos=None, rows=[], cols=[], payoff=payoff, equilibrium=solve(payoff), level=0,
+        rect=([0], [0]),
+    )
+    deepen_mod._reread(node)
+    assert node.rect == ([0], [0, 1])
+    # And the rectangle's strategy is read against the whole matrix: it guarantees 0.1.
+    assert node.equilibrium.value == pytest.approx(0.1)
+
+
 def test_the_label_parses_and_a_bad_one_stops() -> None:
     assert deepen_mod.DEFAULT_DEEPEN == LEGACY_DEEPEN == "none"
     assert deepen_mod.parse_deepen("none") == (None, 0)

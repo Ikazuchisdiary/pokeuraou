@@ -458,8 +458,15 @@ def _reread(node: _Node) -> None:
         duality_gap=float(restricted.duality_gap),
     )
     node.signal = None
+    # Settled: nothing left in the rectangle the rule would refine -- each cell refined,
+    # refused, or worth nothing (a value of exactly 0 or 1 has no `bern`). Waiting on a
+    # decided cell would keep the oracle from ever being asked, and a rectangle that
+    # cannot grow reads a strategy whose guarantee a column outside it takes apart.
+    signal = _signal(node)
     settled = all(
-        (i, j) in node.children or (i, j) in node.refused for i in rows for j in cols
+        (i, j) in node.children or (i, j) in node.refused or signal[i, j] <= 0.0
+        for i in rows
+        for j in cols
     )
     if not settled:
         return
