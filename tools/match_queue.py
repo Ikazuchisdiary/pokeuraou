@@ -108,6 +108,15 @@ def main() -> None:
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--no-bridge", action="store_true")
     ap.add_argument(
+        "--port-threads",
+        type=int,
+        default=None,
+        help="threads each worker's port resolves a node's cells on (IKA-32; "
+        "POKEURAOU_PORT_THREADS). The games are the same at any count; only the wall clock "
+        "moves. For a match shaped like play on a clock (one worker); with many workers the "
+        "machine is already full. Default: the environment's, else 1.",
+    )
+    ap.add_argument(
         "--uniform-selection",
         action="store_true",
         help="both arms draw their four of six uniformly, and you mean it. Required when "
@@ -226,6 +235,10 @@ def main() -> None:
     env = dict(os.environ)
     env["POKEURAOU_RUST_NODE"] = "0" if args.no_bridge else "1"
     env["PYTHONPATH"] = str(ROOT / "src")
+    if args.port_threads is not None:
+        if args.port_threads < 1:
+            raise SystemExit("--port-threads must be at least 1")
+        env["POKEURAOU_PORT_THREADS"] = str(args.port_threads)
 
     servers: list[subprocess.Popen] = []
     served_at: list[str] = []

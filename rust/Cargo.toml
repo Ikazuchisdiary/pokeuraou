@@ -29,6 +29,10 @@ ika215-control = []
 # 1/3, 1/3, 1/6, 1/6, and no branch merged. Never for use. And (IKA-210's second half) `fill`
 # pricing a mid-turn replacement as the mean of the bench, which the `turn` command does not.
 ika210-control = []
+# IKA-32's fault: the cell threads' answers gathered in the order they finished rather than
+# the order the cells were asked in. Never for use; a check that the answers agree at 1 and
+# at N threads has to tell a build with it from one without.
+ika32-control = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
