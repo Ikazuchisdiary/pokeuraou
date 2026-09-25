@@ -471,12 +471,26 @@ def test_blocks_scored_together_are_what_each_block_gets_alone(parts, device_nam
     together = local.from_encoded_segments(blocks)
     for got, want in zip(together, alone, strict=True):
         assert np.array_equal(got, want)
+    # The positive control: the same rows in blocks of other sizes are other answers here
+    # (every block one row longer, the next block's first row borrowed).
+    from pokeuraou.beliefnode import _stacked, _subset
+
+    stacked, starts = _stacked([(len(b.species), (lambda b=b: b)) for b in blocks], blocks[0])
+    shifted = [
+        local.from_encoded(_subset(stacked, list(range(start, start + len(b.species) + 1))))
+        for start, b in zip(starts[:-1], blocks[:-1], strict=True)
+    ]
+    assert any(
+        not np.array_equal(longer[: len(want)], want)
+        for longer, want in zip(shifted, alone, strict=False)
+    )
 
     row_bytes = sum(
         np.asarray(getattr(blocks[0], name))[0].nbytes
         for name in ("species", "ability", "item", "moves", "mon", "mask", "side", "field")
     )
-    server, address = serve({"value": served_model(local)})
+    model = served_model(local)
+    server, address = serve({"value": model})
     trips = []
     try:
         for buffer_bytes in (8 << 20, row_bytes * 12):
@@ -493,3 +507,52 @@ def test_blocks_scored_together_are_what_each_block_gets_alone(parts, device_nam
     # five together; a buffer of about 12 rows needs more trips for those five.
     assert trips[0] == 4
     assert trips[1] > trips[0]
+    # On the card the small blocks were CUDA-graph replays (`_Graphs`), and the equality
+    # above is against eager `from_encoded`: the graph is the eager answer to the bit.
+    if device_name == "cuda":
+        assert model.graphs is not None and model.graphs.captured > 0
+        assert model.replays > 0
+    else:
+        assert model.graphs is None
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graphs need a card")
+def test_a_graph_replay_is_the_eager_answer_for_an_ensemble_too(parts):
+    """IKA-291's `_Graphs` on the ensemble road (`vmap` over stacked members), at every
+    size from 1 to 40 and a few larger ones, with the port's int32 index arrays and the
+    encoder's int64 ones: each replay equals eager `from_encoded` to the bit."""
+    regulation, encoder, net = parts
+    device = torch.device("cuda")
+    torch.manual_seed(11)
+    second = build(encoder, ValueConfig()).eval()
+    nets = [net.to(device), second.to(device)]
+
+    from pokeuraou.inference import ARRAYS, served_model
+
+    local = BatchedValue(nets, encoder, device=device)
+    model = served_model(BatchedValue(nets, encoder, device=device))
+    encoded = encoder.encode_positions(_positions(regulation, 300))
+    sizes = [*range(1, 41), 63, 64, 65, 128, 257, 300]
+    for index_type in (np.int64, np.int32):
+        for size in sizes:
+            arrays = {name: np.asarray(getattr(encoded, name))[:size] for name in ARRAYS}
+            for name in ("species", "ability", "item", "moves"):
+                arrays[name] = arrays[name].astype(index_type)
+            from pokeuraou.encode import Encoded
+
+            want = local.from_encoded(Encoded(**arrays, unknown_volatiles={}))
+            got = model.block(arrays, size)
+            assert np.array_equal(got, want), (size, index_type)
+    assert model.graphs.captured == 2 * len(sizes)
+    assert model.replays == 2 * len(sizes)
+    # The positive control: on this net and card a row's answer does move with the size of
+    # its call (16 of these 45 sizes on the RTX 5070 when one row is added), so a replay
+    # at the wrong size would have been seen.
+    from pokeuraou.beliefnode import _subset
+
+    moved = 0
+    for size in sizes[:45]:
+        alone = local.from_encoded(_subset(encoded, list(range(size))))
+        longer = local.from_encoded(_subset(encoded, list(range(size + 1))))[:size]
+        moved += int(not np.array_equal(alone, longer))
+    assert moved > 0
