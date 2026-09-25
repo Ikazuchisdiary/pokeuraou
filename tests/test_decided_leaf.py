@@ -242,3 +242,37 @@ def test_the_old_rule_leaves_the_nets_number_and_counts_the_same(game) -> None:
             assert old_payoff[i, j] == new_payoff[i, j]
         else:
             assert new_payoff[i, j] == want and abs(old_payoff[i, j] - want) > 0.05
+
+
+@pytest.mark.parametrize("served", [False, True])
+def test_the_depth_two_cell_hidden_depth_two_reads_is_its_result(served: bool) -> None:
+    """`search._refined_value`, which IKA-111's `_restricted_belief` calls per cell and per bench
+    determinization: with one Sucker Punch left, Swords Dance into Sucker Punch leaves a turn in
+    which every cell ends -- Earthquake wins whatever Kingambit does -- so the cell is exactly 1."""
+    from pokeuraou.inference import RemoteValue, serve, served_model
+    from pokeuraou.search import _refined_value
+
+    reg, pos = _chomp_gambit(1)
+    encoder = Encoder(reg)
+    torch.manual_seed(7)
+    local = BatchedValue(build(encoder, ValueConfig()).eval(), encoder, device=torch.device("cpu"))
+    row = narrow(reg, pos, 0, limit=48).actions
+    col = narrow(reg, pos, 1, limit=48).actions
+    sd = next(a for a in row if "swords" in a.describe(reg).lower())
+    sp = next(a for a in col if "sucker" in a.describe(reg).lower())
+
+    def refined(leaf):  # noqa: ANN001, ANN202
+        return _refined_value(reg, pos, sd, sp, leaf, budget=Budget.matrix(), sub_limit=48,
+                              sub_branches=8)
+
+    if not served:
+        value, _notes, solved = refined(local)
+    else:
+        server, address = serve({"value": served_model(local)})
+        try:
+            with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20) as remote:
+                value, _notes, solved = refined(remote)
+        finally:
+            server.shutdown()
+    assert solved >= 1
+    assert value == 1.0
