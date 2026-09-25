@@ -54,6 +54,9 @@ def test_the_hidden_bench_path_rebuilds_the_other_side() -> None:
     assert "foe_answers[1].strategy" in hidden, (
         "side 1's strategy must come from the solve over side 1's menu"
     )
+    # IKA-282: each of the two solves is asked only for the side it is read on
+    # (`tests/test_board_belief_once.py` counts it in a game).
+    assert "sides=(1,)" in hidden, "the solve over side 1's menu builds side 0's node too"
 
 
 def test_the_replacement_node_solves_each_side_with_its_own_leaf() -> None:
