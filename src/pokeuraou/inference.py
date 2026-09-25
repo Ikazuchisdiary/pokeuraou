@@ -565,11 +565,16 @@ class RemoteValue:
         # One pass per block on the server, in one round trip.
         timing.count("forward.passes", len(blocks))
         timing.count("serve.requests")
+        from .encode import settle
+
         out: list[np.ndarray] = []
         at = 0
         for block in blocks:
             n = int(len(block.species))
-            out.append(scores[at : at + n])
+            values = scores[at : at + n].copy()
+            # As `from_encoded`: the server never hears which rows ended (IKA-253).
+            self.ended += settle(values, block, self.encoder.rules)
+            out.append(values)
             at += n
         return out
 

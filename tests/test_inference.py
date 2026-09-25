@@ -463,7 +463,11 @@ def test_blocks_scored_together_are_what_each_block_gets_alone(parts, device_nam
 
     local = BatchedValue(net.to(device), encoder, device=device, batch_size=8)
     blocks = _blocks(encoder, regulation, [3, 11, 1, 8, 6, 2, 5])
+    # Two rows marked as ended (IKA-253): their results go on after the pass, per block.
+    blocks[1].decided[9] = 0.0
+    blocks[4].decided[0] = 1.0
     alone = [local.from_encoded(block) for block in blocks]
+    assert alone[1][9] == 0.0 and alone[4][0] == 1.0
     together = local.from_encoded_segments(blocks)
     for got, want in zip(together, alone, strict=True):
         assert np.array_equal(got, want)

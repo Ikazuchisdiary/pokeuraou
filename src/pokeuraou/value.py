@@ -1165,6 +1165,9 @@ class BatchedValue:
             for index, start, stop, _scores in pending:
                 outs[index][start:stop] = host[at : at + stop - start]
                 at += stop - start
+        for encoded, out in zip(segments, outs, strict=True):
+            # Each block's ended leaves are their results, as `from_encoded` settles them.
+            self.ended += settle(out, encoded, self.encoder.rules)
         rows = sum(len(out) for out in outs)
         self.evaluated += rows
         timing.count("leaves", rows)

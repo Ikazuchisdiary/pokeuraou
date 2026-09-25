@@ -102,7 +102,7 @@ def _stacked_scoring(evaluate, segments):  # noqa: ANN001, ANN202
 
     stacked, starts = _stacked([(len(s.species), (lambda s=s: s)) for s in segments], segments[0])
     values = np.asarray(evaluate.__self__.from_encoded(stacked), dtype=np.float64)
-    return [values[start : start + len(s.species)] for start, s in zip(starts, segments)]
+    return [values[start : start + len(s.species)] for start, s in zip(starts, segments, strict=True)]
 
 
 def _positions(roster) -> list:  # noqa: ANN001
