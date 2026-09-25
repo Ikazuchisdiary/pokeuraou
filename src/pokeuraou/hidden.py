@@ -266,6 +266,11 @@ def completions(
 #:     2026-09-25, IKA-279: in M-C generation the heaviest completion carries >= 0.95 on
 #:     66% of hidden sides, and the completions under 5% hold 45% of all leaves. Dropping
 #:     them moved the Bayesian solves' regret by 2e-5 on average (max 0.004).
+#:
+#:     2026-09-25, IKA-283: ``w5`` cuts M-C generation's leaves 25,946 -> 14,220 a game
+#:     (-45%) and its CPU a game by 16% (1.14-1.19x the games a minute); the menus are the
+#:     same (the ranking reads the heaviest completion). The board is in records/IKA-283.md.
+#:     The default stays until a leaf taught by the cheaper pool is compared at equal cost.
 DEFAULT_BENCH_DROP = "none"
 
 _BENCH_DROP = re.compile(r"none|([wm])([0-9]+(?:\.[0-9]+)?)")
