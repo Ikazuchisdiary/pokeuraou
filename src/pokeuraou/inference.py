@@ -752,6 +752,16 @@ GRAPH_ROWS = int(os.environ.get("POKEURAOU_GRAPH_ROWS", "512"))
 #: game of server against 0.426 at 512 (0.583 at 128), for 0.2 GB of peak memory.
 GRAPH_CACHE = int(os.environ.get("POKEURAOU_GRAPH_CACHE", "512"))
 
+#: The one lock every arm's `_Graphs` takes (IKA-306). torch allows one capture at a time
+#: in a process: `torch.cuda.graph` captures on one process-wide side stream, synchronizes
+#: the device on entry, and the caching allocator records one pool at a time. With a lock
+#: per arm, a leaf-vs-leaf match (`--baseline`, two arms on one server) captured on two
+#: threads at once and lost two workers a run to `operation failed due to a previous error
+#: during capture`; a capture stream per arm or `relaxed` mode still failed (the entry's
+#: synchronize, "beginAllocateToPool: already recording"). Replays take it too, as within
+#: one arm, so no replay is enqueued inside another arm's capture.
+_GRAPH_LOCK = threading.Lock()
+
 
 class _Graphs:
     """One arm's forward pass as CUDA graphs, one per block size, for `score_segments` and
@@ -771,10 +781,11 @@ class _Graphs:
 
     One set per arm, shared by the serving threads under one lock: a graph writes into
     fixed buffers, so two replays cannot overlap, and a capture must not see another
-    capture. Captured on first use of a size, in `thread_local` mode on a side stream, so
-    the other threads' eager passes go on meanwhile (280 captures beside six eager threads:
-    no error, no answer moved). The forward pass is its own `BatchedValue`, as a serving
-    thread's is, so no thread's parameters are swapped under it.
+    capture. The lock is the process's, not the arm's (`_GRAPH_LOCK`, IKA-306): two arms
+    capturing at once broke each other. Captured on first use of a size, in `thread_local`
+    mode on a side stream, so the other threads' eager passes go on meanwhile (280 captures
+    beside six eager threads: no error, no answer moved). The forward pass is its own
+    `BatchedValue`, as a serving thread's is, so no thread's parameters are swapped under it.
     """
 
     @staticmethod
@@ -791,7 +802,8 @@ class _Graphs:
             device=value.device,
             batch_size=value.batch_size,
         )
-        self.lock = threading.Lock()
+        #: Shared with every other arm in the process, not this arm's own (IKA-306).
+        self.lock = _GRAPH_LOCK
         #: (dtype and trailing shape of every array) -> the input buffers, the pool, and
         #: rows -> (graph, output). The port's index arrays are int32 and the encoder's
         #: int64; each kind gets its own buffers rather than a cast.

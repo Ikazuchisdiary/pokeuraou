@@ -173,6 +173,124 @@ impl<'a> Collector<'a> {
 /// buffer is the largest allocation this process makes and it is a copy of what it is
 /// built from.
 pub fn fill(reg: &Reg, encoder: &Encoder, request: &Request) -> (Value, Encoded, Vec<f64>) {
+    let (header, encoded, leaf_values, _kept) = fill_shared(reg, encoder, request, None, false);
+    (header, encoded, leaf_values)
+}
+
+/// A node's resolved turns, kept for a later node of the same `fills` crossing (IKA-295).
+pub struct Kept {
+    position: Position,
+    /// The request's actions as it sent them, to find a cell by its two actions.
+    ours: Vec<Value>,
+    theirs: Vec<Value>,
+    /// Per (i, j), a turn that did not pause: its weights, notes and branches.
+    cells: HashMap<(usize, usize), KeptCell>,
+}
+
+struct KeptCell {
+    exact: bool,
+    unmodelled: BTreeSet<String>,
+    branches: Vec<(f64, Position)>,
+}
+
+/// How a node may read its cells' turns off an earlier node's (IKA-295): the earlier one
+/// is `kept`, and the two positions are two completions of one position -- the same but
+/// for `side`'s hidden `slots` (checked when this is made, not assumed).
+pub struct Like<'k> {
+    kept: &'k Kept,
+    side: usize,
+    slots: Vec<usize>,
+    ours: Vec<Value>,
+    theirs: Vec<Value>,
+}
+
+impl<'k> Like<'k> {
+    /// `None` unless `position` is `kept`'s position with other Pokemon in `side`'s
+    /// `slots` (and that side's `mega_capable_slots`, which are read off the party) and
+    /// in nothing else.
+    pub fn new(
+        kept: &'k Kept,
+        position: &Position,
+        side: usize,
+        slots: Vec<usize>,
+        ours: Vec<Value>,
+        theirs: Vec<Value>,
+    ) -> Option<Like<'k>> {
+        let before = &kept.position.sides.get(side)?.pokemon;
+        let after = &position.sides.get(side)?.pokemon;
+        if slots.is_empty()
+            || before.len() != after.len()
+            || slots.iter().any(|&s| s >= before.len() || before[s].slot != s || after[s].slot != s)
+        {
+            return None;
+        }
+        let mut probe = position.clone();
+        for &s in &slots {
+            probe.sides[side].pokemon[s] = before[s].clone();
+        }
+        probe.sides[side].mega_capable_slots = kept.position.sides[side].mega_capable_slots.clone();
+        if probe != kept.position {
+            return None;
+        }
+        Some(Like { kept, side, slots, ours, theirs })
+    }
+
+    /// Cell (i, j)'s turn in `position`, read off the kept node's cell with the same two
+    /// actions: its branches with `position`'s Pokemon in the hidden slots. `None` -- and
+    /// the cell is resolved -- when there is no such cell, when it paused, or when any
+    /// branch left a hidden slot other than it found it (a Pokemon brought in, dragged in
+    /// or touched), which is a turn the bench took part in.
+    fn turn<'a>(&self, i: usize, j: usize, position: &Position) -> Option<TurnResult<'a>> {
+        let ri = self.kept.ours.iter().position(|a| *a == self.ours[i])?;
+        let rj = self.kept.theirs.iter().position(|a| *a == self.theirs[j])?;
+        let cell = self.kept.cells.get(&(ri, rj))?;
+        let before = &self.kept.position.sides[self.side];
+        let after = &position.sides[self.side];
+        let mut branches = Vec::with_capacity(cell.branches.len());
+        for (probability, branch) in &cell.branches {
+            let mine = &branch.sides[self.side];
+            if mine.mega_capable_slots != before.mega_capable_slots
+                || self.slots.iter().any(|&s| {
+                    !std::rc::Rc::ptr_eq(&mine.pokemon[s], &before.pokemon[s])
+                        && *mine.pokemon[s] != *before.pokemon[s]
+                })
+            {
+                return None;
+            }
+            let mut made = branch.clone();
+            for &s in &self.slots {
+                made.sides[self.side].pokemon[s] = after.pokemon[s].clone();
+            }
+            made.sides[self.side].mega_capable_slots = after.mega_capable_slots.clone();
+            branches.push(crate::resolve::Branch { probability: *probability, position: made, log: None });
+        }
+        Some(TurnResult {
+            branches,
+            exact: cell.exact,
+            suspended: Vec::new(),
+            unmodelled: cell.unmodelled.clone(),
+        })
+    }
+}
+
+/// `fill`, reading cells' turns off an earlier node's where `like` allows and keeping this
+/// node's for a later one when `keep` (IKA-295). The leaves, their order, the sharing
+/// between them and the encoding are `fill`'s: a turn read off is the branches the port
+/// would have resolved, handed to the same collector.
+pub fn fill_shared(
+    reg: &Reg,
+    encoder: &Encoder,
+    request: &Request,
+    like: Option<&Like>,
+    keep: bool,
+) -> (Value, Encoded, Vec<f64>, Option<Kept>) {
+    let mut kept = keep.then(|| Kept {
+        position: request.position.clone(),
+        ours: request.ours_json.clone(),
+        theirs: request.theirs_json.clone(),
+        cells: HashMap::new(),
+    });
+    let mut read_off = 0usize;
     let rows = request.ours.len();
     let cols = request.theirs.len();
     let mut exact = vec![vec![false; cols]; rows];
@@ -191,14 +309,39 @@ pub fn fill(reg: &Reg, encoder: &Encoder, request: &Request) -> (Value, Encoded,
 
     for (i, j) in request.wanted_cells() {
         {
-            let actions = [request.ours[i].clone(), request.theirs[j].clone()];
-            let result = match resolve_turn(reg, &request.position, &actions, request.budget) {
-                Err(reason) => {
-                    refused.push(json!([i, j, reason]));
-                    continue;
+            let reused = like.and_then(|like| like.turn(i, j, &request.position));
+            if reused.is_some() {
+                read_off += 1;
+            }
+            let result = match reused {
+                Some(result) => result,
+                None => {
+                    let actions = [request.ours[i].clone(), request.theirs[j].clone()];
+                    match resolve_turn(reg, &request.position, &actions, request.budget) {
+                        Err(reason) => {
+                            refused.push(json!([i, j, reason]));
+                            continue;
+                        }
+                        Ok(result) => result,
+                    }
                 }
-                Ok(result) => result,
             };
+            if let Some(kept) = kept.as_mut() {
+                if !result.is_suspended() {
+                    kept.cells.insert(
+                        (i, j),
+                        KeptCell {
+                            exact: result.exact,
+                            unmodelled: result.unmodelled.clone(),
+                            branches: result
+                                .branches
+                                .iter()
+                                .map(|b| (b.probability, b.position.clone()))
+                                .collect(),
+                        },
+                    );
+                }
+            }
             exact[i][j] = result.exact;
             if result.is_suspended() {
                 let root = collector.turn_leaves(&result, 0);
@@ -264,7 +407,7 @@ pub fn fill(reg: &Reg, encoder: &Encoder, request: &Request) -> (Value, Encoded,
     }
     let fold_us = fold_started.elapsed().as_secs_f64() * 1e6;
 
-    let header = json!({
+    let mut header = json!({
         "kind": "encoded",
         "leaves": collector.leaves.len(),
         // Leaves handed to `add_leaf`, against the `leaves` above that were kept. The
@@ -291,7 +434,11 @@ pub fn fill(reg: &Reg, encoder: &Encoder, request: &Request) -> (Value, Encoded,
         "encodeUs": encode_us,
         "foldUs": fold_us,
     });
-    (header, encoded, leaf_values)
+    if like.is_some() {
+        // The cells whose turn was read off the earlier node rather than resolved.
+        header["readOff"] = json!(read_off);
+    }
+    (header, encoded, leaf_values, kept)
 }
 
 /// How many bytes `write_body` will write for the arrays, without building them.

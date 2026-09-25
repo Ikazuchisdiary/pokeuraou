@@ -711,3 +711,72 @@ def test_a_lone_request_is_a_graph_replay_and_the_eager_answer(parts, monkeypatc
         longer = local.from_encoded(_subset(encoded, list(range(size + 1))))[:size]
         moved += int(not np.array_equal(alone, longer))
     assert moved > 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graphs need a card")
+def test_two_arms_capturing_at_once_answer_as_eager(parts):
+    """IKA-306: a server with two arms (a leaf-vs-leaf match's `--baseline`) meets sizes
+    neither has seen, from several workers per arm at once. Each arm has its own graphs,
+    but torch captures on one process-wide side stream and allows one capture at a time
+    in the process, so two arms capturing together broke each other: the match lost two
+    workers a run to `operation failed due to a previous error during capture`, and here
+    the arms gave the graphs up, answered errors, and replayed wrong rows.
+
+    Every answer must be the eager one, no arm may give its graphs up, and both must have
+    captured and replayed (the positive control that the graph road was the one taken)."""
+    regulation, encoder, net = parts
+    device = torch.device("cuda")
+    from pokeuraou import inference
+    from pokeuraou.beliefnode import _subset
+
+    local = BatchedValue(net.to(device), encoder, device=device)
+    encoded = encoder.encode_positions(_positions(regulation, 48))
+    sizes = list(range(1, 49))
+    blocks = {}
+    want = {}
+    for size in sizes:
+        block = _subset(encoded, list(range(size)))
+        want[size] = local.from_encoded(block)
+        for name in ("species", "ability", "item", "moves"):
+            setattr(block, name, np.asarray(getattr(block, name)).astype(np.int32))
+        blocks[size] = block
+    arms = {
+        name: inference.served_model(BatchedValue(net.to(device), encoder, device=device))
+        for name in ("value", "baseline")
+    }
+    server, address = serve(arms)
+    per_arm = 4
+    ready = threading.Barrier(per_arm * len(arms))
+    wrong: list[str] = []
+    try:
+
+        def ask(name: str, index: int) -> None:
+            order = list(sizes)
+            np.random.default_rng(index).shuffle(order)
+            with RemoteValue(address, name, encoder, buffer_bytes=8 << 20) as remote:
+                ready.wait()
+                for size in order:
+                    try:
+                        got = remote.from_encoded(blocks[size])
+                    except Exception as error:  # noqa: BLE001 - reported below
+                        wrong.append(f"{name} {size}: {str(error).splitlines()[0]}")
+                        continue
+                    if not np.array_equal(got, want[size]):
+                        wrong.append(f"{name} {size}: not the eager answer")
+
+        threads = [
+            threading.Thread(target=ask, args=(name, index))
+            for name in arms
+            for index in range(per_arm)
+        ]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        server.shutdown()
+    assert not wrong, (len(wrong), wrong[:5])
+    for name, model in arms.items():
+        assert model.graphs.failed is None, (name, model.graphs.failed)
+        assert model.graphs.captured == len(sizes), name
+        assert model.replays == per_arm * len(sizes), name

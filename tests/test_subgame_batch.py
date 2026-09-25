@@ -85,7 +85,7 @@ def roster():  # noqa: ANN201
     return loaded
 
 
-def _per_sub_game(reg, cells, evaluate, *, budget, sub_limit, sub_branches):  # noqa: ANN001, ANN202
+def _per_sub_game(reg, cells, evaluate, *, budget, sub_limit, sub_branches, shares=None):  # noqa: ANN001, ANN202, ARG001
     """The pass as it was before IKA-291: `_refined_value` per cell, a call per sub-game."""
     return [
         search_mod._refined_value(

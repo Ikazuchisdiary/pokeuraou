@@ -147,7 +147,7 @@ jobs:
       #   torch      twelve skips (counted on the first full CI run, IKA-51); the `learn` job
       #              below runs them with torch present and allows none of these.
       #   cuda       none here (the modules that need a card skip for torch first); the
-      #              `learn` job has no card either and allows the three CUDA-graph tests.
+      #              `learn` job has no card either and allows the five CUDA-graph tests.
       - name: what the suite skipped, and whether it was allowed to
         if: always()
         run: >
@@ -236,7 +236,7 @@ jobs:
         if: always()
         run: >
           uv run --no-sync python tools/ci_skip_audit.py --junit reports/pytest-learn.xml
-          --absent standings=9 --absent cpu-batch=1 --absent cuda=4
+          --absent standings=9 --absent cpu-batch=1 --absent cuda=5
 
       - uses: actions/upload-artifact@v4
         if: always()

@@ -69,6 +69,7 @@ from .fold import _fold_from_json, fold_value
 from .port import batched_payoff
 from .position import Position
 from .regulation import Regulation
+from .rustnode import PortBranch
 
 #: Moves that put a Pokemon on the field without its owner choosing it, so a cell carrying
 #: one can reach a hidden slot whatever the opponent declared. Listed rather than derived
@@ -143,6 +144,63 @@ def reaches_bench(
                 or (col_carded[j] and theirs_hidden)
             )
     return mask
+
+
+def turn_in_completion(
+    reference: Position,
+    turn: port.PortTurn,
+    position: Position,
+    side: int,
+    slots: tuple[int, ...],
+) -> port.PortTurn | None:
+    """`turn`, resolved in `reference`, as the same turn in `position` (IKA-295), or None.
+
+    `reference` and `position` are two completions of one node: the same position but for
+    `side`'s hidden `slots`. A turn in which no hidden Pokemon is brought in -- the cells
+    `reaches_bench` clears, and the caller asks only for those -- is the same turn in both,
+    and each branch differs only in who stands in those slots, as `belief_payoffs` shares
+    a clean cell's leaves. So each branch here is the reference's with `position`'s
+    Pokemon in those slots, and the side's `mega_capable_slots` (numbers read off the
+    party when the side was built, which the port hands back as it was given) theirs.
+
+    Checked rather than assumed, branch by branch: a hidden slot the turn changed in any
+    way -- brought in, dragged in, renumbered, touched -- is not the Pokemon the reference
+    had there, and then this is None and the caller resolves the turn itself. So is a turn
+    that paused (a replacement could choose a hidden slot) or kept no branch.
+    """
+    if turn.pauses or not turn.outcomes:
+        return None
+    before = reference.sides[side]
+    after = position.sides[side]
+    for slot in slots:
+        if (
+            slot >= len(before.pokemon)
+            or slot >= len(after.pokemon)
+            or before.pokemon[slot].slot != slot
+            or after.pokemon[slot].slot != slot
+        ):
+            return None
+    outcomes: list[port.PortBranch] = []
+    for branch in turn.outcomes:
+        mine = branch.position.sides[side]
+        if mine.mega_capable_slots != before.mega_capable_slots:
+            return None
+        if any(mine.pokemon[slot] != before.pokemon[slot] for slot in slots):
+            return None
+        made = branch.position.copy()
+        own = made.sides[side]
+        for slot in slots:
+            own.pokemon[slot] = after.pokemon[slot].copy()
+        own.mega_capable_slots = list(after.mega_capable_slots)
+        outcomes.append(PortBranch(branch.probability, made))
+    return port.PortTurn(
+        branches=list(turn.branches),
+        suspended=[],
+        exact=turn.exact,
+        unmodelled=tuple(turn.unmodelled),
+        outcomes=outcomes,
+        pauses=[],
+    )
 
 
 def _phazes(reg: Regulation, action: SideAction) -> bool:
@@ -793,4 +851,10 @@ def _per_completion(
     return BeliefNode(matrices, unmodelled, shared, redone)
 
 
-__all__ = ["PHAZING_MOVES", "BeliefNode", "belief_payoffs", "reaches_bench"]
+__all__ = [
+    "PHAZING_MOVES",
+    "BeliefNode",
+    "belief_payoffs",
+    "reaches_bench",
+    "turn_in_completion",
+]
