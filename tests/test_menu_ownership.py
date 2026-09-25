@@ -73,6 +73,10 @@ def test_the_replacement_node_solves_each_side_with_its_own_leaf() -> None:
 def test_a_hidden_bench_game_refuses_depth_and_sparse() -> None:
     """`belief_solve` has no parameter for either, so accepting them is a lie.
 
+    Since IKA-111 it has one for depth 2 in the restricted reading, and only that
+    (`tests/test_hidden_depth2.py`): depth 2 without it, the flag at depth 1, and the
+    sparse solve are still refused.
+
     Raised before any work happens, so the caller learns at the first game rather than
     finding the flags missing from a finished run's behaviour and present in its record.
     """

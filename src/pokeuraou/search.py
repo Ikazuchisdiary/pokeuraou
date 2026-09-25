@@ -359,7 +359,7 @@ def search(
     only at depth 2 -- see `_restricted_search`. On the board it beat both depth 1 and the
     mixed reading (IKA-68). It is still an option and not the default, because depth 2
     itself does not run where the agent ships: a hidden bench goes through `belief_solve`,
-    which has no depth at all (IKA-111).
+    which had no depth at all until IKA-111 gave it this reading and no other.
 
     ``deepen`` is a budget of cells to spend after the depth-1 solve, best first over the
     whole tree (`deepen.best_first`, IKA-33). Zero is the depth-1 search unchanged; it
@@ -767,6 +767,16 @@ class BeliefResult:
     unmodelled: set[str] = field(default_factory=set)
     #: Completions averaged over. One means nothing was hidden and this is the old answer.
     classes: int = 1
+    #: Cells given a depth-2 value, counted per completion: (row, column, completion).
+    #: Zero at depth 1 (IKA-111).
+    refined: int = 0
+    #: Sub-games solved for those cells.
+    subgames: int = 0
+    #: Whether the depth-2 oracle ran out of actions to add before the passes did.
+    converged: bool = True
+    #: The restricted game's own value minus what its strategy guarantees against every
+    #: column of every completion, as `SearchResult.optimism`.
+    optimism: float = 0.0
 
 
 def belief_solve(
@@ -779,6 +789,11 @@ def belief_solve(
     *,
     budget: Budget,
     sides: Sequence[int] = (0, 1),
+    depth: int | tuple[int, int] = 1,
+    refine: int = DEFAULT_REFINE,
+    passes: int = DEFAULT_PASSES,
+    sub_limit: int = DEFAULT_SUB_LIMIT,
+    sub_branches: int = DEFAULT_SUB_BRANCHES,
 ) -> dict[int, BeliefResult]:
     """Both sides' answers, resolving each turn as few times as it has to be resolved.
 
@@ -796,10 +811,17 @@ def belief_solve(
     a match whose arms build different menus solves this twice a turn and reads one side
     of each (IKA-282). With one leaf the shared node is built as before, whichever side is
     asked for, so self-play is unchanged; only the unread LP is skipped.
+
+    `depth` is per side, as `play_game`'s (IKA-111). At 1 the answer is the one above,
+    untouched. At 2 that answer is only the start of the restricted reading
+    (`_restricted_belief`): the double-oracle of `_restricted_search`, with a column set
+    per completion and each refined cell resolved and sub-solved in that completion's
+    position. The knobs are `search`'s and mean the same.
     """
     from .beliefnode import belief_payoffs
     from .equilibrium import solve_bayesian
 
+    depths = (depth, depth) if isinstance(depth, int) else tuple(depth)
     wanted = tuple(side for side in (0, 1) if side in sides)
     if not wanted:
         raise ValueError(f"belief_solve asked for no side: {sides!r}")
@@ -821,6 +843,9 @@ def belief_solve(
         }
 
     out: dict[int, BeliefResult] = {}
+    #: Depth-2 cell values in side 0's orientation, shared by both sides' answers: with
+    #: one leaf, a position both sides' lists hold (an exact bench) is one position.
+    memo: dict[tuple, tuple[float | None, set[str], int]] = {}
     for side in wanted:
         built = nodes[side].matrices[side]
         items = completions_by_side[1 - side]
@@ -839,7 +864,161 @@ def belief_solve(
             unmodelled=nodes[side].unmodelled,
             classes=len(matrices),
         )
+        if depths[side] >= 2:
+            out[side] = _restricted_belief(
+                reg, side, row, col, items, matrices, weights, solved, evaluators[side],
+                out[side], memo, budget=budget, refine=refine, passes=passes,
+                sub_limit=sub_limit, sub_branches=sub_branches,
+            )
     return out
+
+
+def _restricted_belief(  # noqa: PLR0913 - one side's Bayesian node and the depth-2 knobs
+    reg: Regulation,
+    side: int,
+    row: list[SideAction],
+    col: list[SideAction],
+    items: list,
+    matrices: list[np.ndarray],
+    weights: np.ndarray,
+    solved,  # noqa: ANN001 - BayesianEquilibrium, the depth-1 answer
+    evaluate: LeafEvaluator,
+    start: BeliefResult,
+    memo: dict,
+    *,
+    budget: Budget,
+    refine: int,
+    passes: int,
+    sub_limit: int,
+    sub_branches: int,
+) -> BeliefResult:
+    """`_restricted_search` for a side that cannot see the other side's bench (IKA-111).
+
+    `matrices[k]` is this side's own game (rows its actions) when the other bench is
+    completion `k`. The rectangle has one row set, because this side does not know `k`,
+    and a column set per completion, because the opponent does: the cells refined are
+    (i, j, k). Each is `_refined_value` on completion `k`'s position -- the turn resolved
+    there and the next turn's game solved as if that bench were known. That is the
+    determinization the issue named as the cheap choice: the belief is not carried into the
+    sub-game.
+
+    The oracles are the Bayesian ones. Our best row maximises sum_k w_k (M_k y_k); the
+    opponent's best column is per completion, the argmin of (x M_k). A row is added when
+    it beats the restricted game's value, a completion's column when it beats what that
+    completion's reply earns inside the rectangle. With one completion of weight 1 each
+    of these is `_restricted_search`'s, and so is the answer (tested).
+
+    The value returned is what the strategy guarantees against every column of every
+    completion at the prices in hand, sum_k w_k min_j (x M_k)_j -- not the restricted
+    game's own value, which restricts the opponent too.
+    """
+    from .equilibrium import solve_bayesian
+
+    w = np.asarray(weights, dtype=np.float64)
+    w = w / w.sum()
+    rows = [int(i) for i in _top(solved.row_strategy, refine)]
+    cols = [[int(j) for j in _top(y, refine)] for y in solved.col_strategies]
+    prices = [np.array(m, dtype=np.float64, copy=True) for m in matrices]
+    refined: set[tuple[int, int, int]] = set()
+    unrefinable: set[tuple[int, int, int]] = set()
+    unmodelled = set(start.unmodelled)
+    answer: BeliefResult | None = None
+    subgames = 0
+    converged = False
+    for _attempt in range(passes):
+        for k, item in enumerate(items):
+            for i in rows:
+                for j in cols[k]:
+                    if (i, j, k) in refined or (i, j, k) in unrefinable:
+                        continue
+                    # This side's (i, j) is side 0's (i, j), or (j, i) for side 1.
+                    ours, theirs = (i, j) if side == 0 else (j, i)
+                    key = (id(item.position), id(evaluate), ours, theirs)
+                    found = memo.get(key)
+                    if found is None:
+                        with timing.purpose("matrix"):
+                            found = _refined_value(
+                                reg, item.position, row[ours], col[theirs], evaluate,
+                                budget=budget, sub_limit=sub_limit,
+                                sub_branches=sub_branches,
+                            )
+                        memo[key] = found
+                        subgames += found[2]
+                    value, notes, _solved = found
+                    unmodelled.update(notes)
+                    if value is None:
+                        unrefinable.add((i, j, k))
+                        continue
+                    refined.add((i, j, k))
+                    prices[k][i, j] = value if side == 0 else -value
+        try:
+            restricted = solve_bayesian(
+                [prices[k][np.ix_(rows, cols[k])] for k in range(len(items))], w
+            )
+        except EquilibriumError:
+            break
+        strategy = np.zeros(len(prices[0]), dtype=np.float64)
+        strategy[rows] = restricted.row_strategy
+        replies = []
+        for k in range(len(items)):
+            reply = np.zeros(prices[k].shape[1], dtype=np.float64)
+            reply[cols[k]] = restricted.col_strategies[k]
+            replies.append(reply)
+        col_ev = [strategy @ prices[k] for k in range(len(items))]
+        row_ev = sum(w[k] * (prices[k] @ replies[k]) for k in range(len(items)))
+        guarantee = float(sum(w[k] * float(col_ev[k].min()) for k in range(len(items))))
+        answer = BeliefResult(
+            strategy=strategy,
+            value=guarantee,
+            replies=tuple(replies),
+            ours=start.ours,
+            theirs=start.theirs,
+            unmodelled=unmodelled,
+            classes=start.classes,
+            optimism=float(restricted.value) - guarantee,
+        )
+        grew = False
+        best_row = int(np.argmax(row_ev))
+        if (
+            best_row not in rows
+            and float(row_ev[best_row]) > float(restricted.value) + ORACLE_TOLERANCE
+        ):
+            rows.append(best_row)
+            grew = True
+        for k in range(len(items)):
+            earned = float(col_ev[k] @ replies[k])
+            best_col = int(np.argmin(col_ev[k]))
+            if (
+                best_col not in cols[k]
+                and float(col_ev[k][best_col]) < earned - ORACLE_TOLERANCE
+            ):
+                cols[k].append(best_col)
+                grew = True
+        if not grew:
+            converged = True
+            break
+
+    if timing.ON:
+        timing.count("depth2.cells", len(refined))
+        timing.count("depth2.subgames", subgames)
+    if answer is None:
+        # Nothing was solved; the depth-1 answer is still an answer, as in the open game.
+        return start
+    if unrefinable:
+        unmodelled.add(
+            f"hidden depth-2 left {len(unrefinable)} cell(s) of the restricted game at depth 1"
+        )
+    unmodelled.add(
+        f"hidden-bench strategy read from the restricted {len(rows)}x"
+        f"{'/'.join(str(len(c)) for c in cols)} game over {len(items)} completion(s); "
+        f"{len(refined)} cells of it at depth 2"
+    )
+    if not converged:
+        unmodelled.add("hidden depth-2 best responses had not run out when the passes did")
+    answer.refined = len(refined)
+    answer.subgames = subgames
+    answer.converged = converged
+    return answer
 
 
 __all__ = [

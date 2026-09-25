@@ -137,6 +137,18 @@ def main(argv: list[str] | None = None) -> None:
                     "cells and read the root whole / restricted (IKA-33); none is off")
     ap.add_argument("--baseline-deepen", default=DEFAULT_DEEPEN,
                     help="same for the other arm")
+    ap.add_argument("--depth", type=int, default=1, choices=(1, 2),
+                    help="the tested arm's search depth at move nodes. 2 needs "
+                    "--solve-restricted: under a hidden bench that is the only depth-2 "
+                    "reading `belief_solve` has (IKA-111)")
+    ap.add_argument("--baseline-depth", type=int, default=1, choices=(1, 2),
+                    help="same for the other arm")
+    ap.add_argument("--solve-restricted", action="store_true",
+                    help="at depth 2, the tested arm reads its strategy off the refined "
+                    "rectangle solved as its own game (IKA-68; per completion under a "
+                    "hidden bench, IKA-111)")
+    ap.add_argument("--baseline-solve-restricted", action="store_true",
+                    help="same for the other arm")
     add_bench_flags(ap)
     ap.add_argument("--selection-store", type=Path, default=None,
                     help="the tested arm's shared solves. Default <games-out dir>/"
@@ -176,6 +188,13 @@ def main(argv: list[str] | None = None) -> None:
             parse_bench_drop(drop)
         except ValueError as problem:
             ap.error(str(problem))
+    for depth, restricted in ((args.depth, args.solve_restricted),
+                              (args.baseline_depth, args.baseline_solve_restricted)):
+        if restricted != (depth == 2):
+            # `play_game` refuses anything else under a hidden bench; the open game would
+            # take depth 2 in the mixed reading, which this tool has no use for.
+            ap.error("--depth 2 goes with --solve-restricted and depth 1 without it "
+                     "(per arm; IKA-111)")
 
     pool = load_pool(args.pool)
     reg = pool.reg
@@ -196,7 +215,8 @@ def main(argv: list[str] | None = None) -> None:
         name=value_name, evaluate=value,
         solver=solver_for(value, value_name, args.selection_store),
         limit=args.limit, rank_by_leaf=args.rank_leaf, rank_fill=args.rank_fill,
-        bench_drop=args.bench_drop, deepen=args.deepen,
+        bench_drop=args.bench_drop, deepen=args.deepen, depth=args.depth,
+        solve_restricted=args.solve_restricted,
     )
     other_limit = args.limit if args.baseline_limit is None else args.baseline_limit
     if baseline is None:
@@ -204,7 +224,9 @@ def main(argv: list[str] | None = None) -> None:
                         limit=other_limit, rank_by_leaf=args.baseline_rank_leaf,
                         rank_fill=args.baseline_rank_fill,
                         bench_drop=args.baseline_bench_drop,
-                        deepen=args.baseline_deepen)
+                        deepen=args.baseline_deepen,
+                        depth=args.baseline_depth,
+                        solve_restricted=args.baseline_solve_restricted)
     else:
         assert baseline_name is not None
         # One solver per arm even over one leaf: shared, the second arm would reuse the
@@ -220,6 +242,8 @@ def main(argv: list[str] | None = None) -> None:
             rank_fill=args.baseline_rank_fill,
             bench_drop=args.baseline_bench_drop,
             deepen=args.baseline_deepen,
+            depth=args.baseline_depth,
+            solve_restricted=args.baseline_solve_restricted,
         )
     arms = (tested, other)
     print(pool.summary(), file=sys.stderr)
@@ -234,6 +258,7 @@ def main(argv: list[str] | None = None) -> None:
             + (f" (fill {arm.rank_fill})" if arm.rank_by_leaf else "")
             + (f" / bench drop {arm.bench_drop}" if hide_bench else "")
             + f" / deepen {arm.deepen}"
+            + (f" / depth {arm.depth} restricted" if arm.depth != 1 else "")
             + " / selection "
             f"{arm.selection}" + (f" by its own leaf, store {store}" if store else "")
             + f" / belief {'solved' if arm.solver is not None and hide_bench else 'uniform'}",
@@ -251,6 +276,8 @@ def main(argv: list[str] | None = None) -> None:
         tags += f"@benchdrop:{tested.bench_drop}"
     if tested.deepen != other.deepen:
         tags += f"@deepen:{tested.deepen}"
+    if tested.depth != other.depth:
+        tags += f"@d{tested.depth}"
     arm_label = f"{tested.name}{tags}"
 
     client = WorkClient(args.queue) if args.queue else None
@@ -267,7 +294,7 @@ def main(argv: list[str] | None = None) -> None:
     tally = [[0, 0, 0, 0.0], [0, 0, 0, 0.0]]
     # The echo, per seat and per ARM (0 tested, 1 other): what each arm's side was given.
     echo = [[{"selection": {}, "belief": {}, "leaf": set(), "fill": {}, "drop": {},
-              "deepen": {}, "deepened": 0, "calls": 0}
+              "deepen": {}, "deepened": 0, "depth": {}, "calls": 0}
              for _ in arms]
             for _ in range(2)]
     done = 0
@@ -305,6 +332,11 @@ def main(argv: list[str] | None = None) -> None:
                 1 for d in record.decisions
                 if d.deepened is not None and d.deepened[side] is not None
             )
+            played_depth = (
+                f"{record.depth[side]}"
+                + ("r" if record.depth[side] != 1 and record.solve_restricted[side] else "")
+            )
+            bucket["depth"][played_depth] = bucket["depth"].get(played_depth, 0) + 1
             if arms[0].evaluate is not arms[1].evaluate:
                 bucket["calls"] += getattr(arms[arm_index].evaluate, "calls", 0) - calls_before[
                     arm_index]
@@ -342,6 +374,8 @@ def main(argv: list[str] | None = None) -> None:
                 rank_fills=sides["rank_fills"],
                 bench_drops=sides["bench_drops"],
                 deepens=sides["deepens"],
+                depths=sides["depths"],
+                solvers=sides["solvers"],
                 books=sides["selections"],
                 information=("hidden-bench", "hidden-bench") if hide_bench
                 else ("open", "open"),
@@ -369,7 +403,8 @@ def main(argv: list[str] | None = None) -> None:
                 f"{which if arm_index == 0 else 1 - which}, leaf {sorted(bucket['leaf'])}, "
                 f"selection {bucket['selection']}, belief {bucket['belief']}, "
                 f"rank fill {bucket['fill']}, bench drop {bucket['drop']}, "
-                f"deepen {bucket['deepen']} ({bucket['deepened']:,} decisions deepened)"
+                f"deepen {bucket['deepen']} ({bucket['deepened']:,} decisions deepened), "
+                f"depth {bucket['depth']}"
                 + (f", leaf requests {bucket['calls']:,}" if bucket["calls"] else ""),
                 file=sys.stderr,
             )
