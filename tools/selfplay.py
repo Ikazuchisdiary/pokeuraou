@@ -95,6 +95,14 @@ def add_pool_flags(ap: argparse.ArgumentParser) -> None:
         "refs<N> replies at the matrix budget, refs<N>-fast at Budget.fast (IKA-268). "
         f"Default {DEFAULT_RANK_FILL}.",
     )
+    ap.add_argument(
+        "--record-rank-scores",
+        action="store_true",
+        help="with --pool and --rank-leaf: also write each game's leaf rankings -- every "
+        "candidate's leaf values against the replies and the score narrow ordered by -- "
+        "to rank-<name>.jsonl.gz beside --out (IKA-278, teacher data for IKA-274). Changes "
+        "no game and no byte of --out.",
+    )
 
 
 #: Flags of the roster path that mean nothing without an own side, with their defaults.
@@ -108,6 +116,19 @@ _ROSTER_ONLY = {
     "solve_sparsely": False,
     "solve_restricted": False,
 }
+
+
+def rank_scores_path(
+    args: argparse.Namespace, ap: argparse.ArgumentParser, out: Path
+) -> Path | None:
+    """Where `--record-rank-scores` writes, or None; without a leaf ranking it stops."""
+    if not args.record_rank_scores:
+        return None
+    if not args.rank_leaf:
+        ap.error("--record-rank-scores records the leaf ranking; pass --rank-leaf")
+    from pokeuraou.rank_scores import path_for
+
+    return path_for(out)
 
 
 def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
@@ -156,6 +177,10 @@ def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
         drawn = from_queue(client)
     out = args.out or selfplay_dir() / f"pool-{pool.id}-seed{args.seed}.jsonl"
     store = args.selection_store or out.parent / "selection-solved"
+    ranks_out = rank_scores_path(args, ap, out)
+    if ranks_out is not None:
+        # The worker log's own echo, which is what says the run recorded (IKA-278).
+        print(f"  rank scores: recording every leaf ranking to {ranks_out}", file=sys.stderr)
     # A generation worker edits no position it has sent: each decision's positions are
     # written, and a repeated `score` asked, once (IKA-264).
     rustnode.hold_positions()
@@ -181,11 +206,18 @@ def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
         rank_fill=args.rank_fill,
         indices=drawn,
         on_finish=client.finish if client is not None else None,
+        rank_scores_out=ranks_out,
     )
     if client is not None:
         client.close()
     elapsed = time.perf_counter() - started
     finished = stats["finished"] or 1
+    if ranks_out is not None:
+        written = stats.get("rank_scores_bytes", 0)
+        print(
+            f"  rank scores: {written} bytes ({written / finished:.0f} a game) -> {ranks_out}",
+            file=sys.stderr,
+        )
     print(
         f"{stats['games']} games in {elapsed:.1f}s "
         f"({elapsed / max(stats['games'], 1):.2f}s each)\n"
@@ -394,6 +426,8 @@ def main() -> None:
         # recorded nowhere and played by nobody.
         ap.error("--rank-fill is the pool path's (IKA-268); the roster path ranks at "
                  f"{DEFAULT_RANK_FILL}")
+    if args.record_rank_scores:
+        ap.error("--record-rank-scores is the pool path's (IKA-278)")
     if args.roster is None:
         args.roster = DEFAULT_ROSTER
     require_bench(args)

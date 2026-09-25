@@ -34,7 +34,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from . import port, timing
+from . import port, rank_scores, timing
 from .actions import SideAction, switch_actions_after_faint
 from .budget import Budget
 from .equilibrium import EquilibriumError, solve
@@ -701,7 +701,12 @@ def _menus(
             )
             for at, weight in views(side)
         ]
-        return believed_ranking(parts)
+        if policy is not None:
+            return believed_ranking(parts)
+        # IKA-278: the ranking itself unless a generation worker is recording it.
+        return rank_scores.watch(
+            believed_ranking(parts), side, used, spreads, [w for _r, w in parts]
+        )
 
     return (
         narrow(reg, pos, 0, limit=limits[0], rank=ranker(0)).actions,
@@ -1002,6 +1007,7 @@ def play_game(
         # side 0's construction, `foe_views` from side 1's when it builds its own.
         own_views: dict[int, tuple[int, tuple[str, ...]]] = {}
         foe_views: dict[int, tuple[int, tuple[str, ...]]] | None = None
+        rank_scores.at_node(len(record.decisions), pos.turn, 0)  # IKA-278
         ours, theirs = _menus(
             reg, pos, limits, own_leaf, budget, ranked[0], policies[0], spreads,
             rank_view=views_rule[0], used=own_views, rank_fill=fills[0],
@@ -1073,6 +1079,7 @@ def play_game(
                 # handed a menu ranked by the other arm's value function in one seat.
                 foe_started = perf_counter()
                 foe_views = {}
+                rank_scores.at_node(len(record.decisions), pos.turn, 1)  # IKA-278
                 foe_ours, foe_theirs = _menus(
                     reg, pos, limits, foe_leaf, budget, ranked[1], policies[1], spreads,
                     rank_view=views_rule[1], used=foe_views, rank_fill=fills[1],
@@ -1122,6 +1129,7 @@ def play_game(
                 or (fills[1] != fills[0] and ranked[0] and policies[0] is None)
             ):
                 foe_started = perf_counter()
+                rank_scores.at_node(len(record.decisions), pos.turn, 1)  # IKA-278
                 foe_ours, foe_theirs = (
                     (ours, theirs)
                     if same_menu

@@ -895,7 +895,8 @@ def delivery(
             value = _flag(argv, flag)
             seen.setdefault(flag, {})
             seen[flag][str(value)] = seen[flag].get(str(value), 0) + 1
-        for flag in ("--hide-bench", "--open-bench", "--rank-leaf", "--no-bridge"):
+        for flag in ("--hide-bench", "--open-bench", "--rank-leaf", "--no-bridge",
+                     "--record-rank-scores"):
             seen.setdefault(flag, {})
             present = "yes" if flag in argv else "no"
             seen[flag][present] = seen[flag].get(present, 0) + 1

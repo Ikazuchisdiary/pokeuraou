@@ -192,11 +192,20 @@ def main() -> None:
         "--uniform-selection draws the fours uniformly instead.",
     )
     ap.add_argument(
+        "--record-rank-scores",
+        action="store_true",
+        help="with --pool and --rank-leaf after --: every worker also writes its games' leaf "
+        "rankings to rank-workerN.jsonl.gz beside its games (IKA-278, teacher data for "
+        "IKA-274). Plays the same games; the games files are byte for byte the same.",
+    )
+    ap.add_argument(
         "rest",
         nargs=argparse.REMAINDER,
         help="after --, options passed to every worker unchanged",
     )
     args = ap.parse_args()
+    if args.record_rank_scores and args.pool is None:
+        raise SystemExit("--record-rank-scores is the pool path's (IKA-278); pass --pool")
     if args.pool is not None and args.hide_bench is None:
         args.hide_bench = True
     require_bench(args)
@@ -319,6 +328,7 @@ def main() -> None:
             *bench_argv(args.hide_bench),
             *(["--force-lead", args.force_lead] if args.force_lead else []),
             "--out", str(out_dir / f"games-worker{worker}.jsonl"),
+            *(["--record-rank-scores"] if args.record_rank_scores else []),
         ]
         if served_at:
             # Which worker lands on which server changes no answer: requests are never
@@ -342,7 +352,8 @@ def main() -> None:
         f"({numbers.start}..{numbers.stop - 1}) -> {out_dir}\n"
         f"  run seed {args.seed}, search {args.limit}, "
         f"leaf {args.value or 'hp-share'} on {args.device}, "
-        f"bench {'hidden' if args.hide_bench else 'OPEN (reference)'}",
+        f"bench {'hidden' if args.hide_bench else 'OPEN (reference)'}"
+        f"{', rank scores recorded (rank-worker*.jsonl.gz)' if args.record_rank_scores else ''}",
         file=sys.stderr,
         flush=True,
     )
