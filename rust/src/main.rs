@@ -37,6 +37,7 @@ mod moves;
 mod position;
 mod reg;
 mod resolve;
+mod qfeatures;
 mod score;
 mod shm;
 mod speed;

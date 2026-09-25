@@ -121,22 +121,10 @@ fn move_context(pos: &Position, side: usize, slot: usize) -> MoveContext {
     }
 }
 
-/// Damage each choice is expected to do, minus what it does to one's own partner.
-pub fn score_candidates(
-    reg: &Reg,
-    pos: &Position,
-    side: usize,
-    candidates: &[Vec<SlotAction>],
-) -> Result<Vec<Scored>, String> {
-    let field = field_state(pos);
-    let foe = 1 - side;
-    let live_foes: Vec<usize> = (0..pos.sides[foe].active.len())
-        .filter(|i| matches!(pos.mon_at(foe, *i), Some(mon) if !mon.fainted))
-        .collect();
-
-    // The same guard the resolver keeps: a position the game could not reach is not a
-    // thing to hold two implementations to, and a volatile this port dropped on the way in
-    // could be one the calculator reads.
+/// The same guard the resolver keeps: a position the game could not reach is not a
+/// thing to hold two implementations to, and a volatile this port dropped on the way in
+/// could be one the calculator reads. Shared with `qfeatures` (IKA-274).
+pub fn check_scorable(pos: &Position) -> Result<(), String> {
     for one_side in pos.sides.iter() {
         for slot in 0..one_side.active.len() {
             let Some(mon) = one_side.active_pokemon(slot) else { continue };
@@ -154,6 +142,23 @@ pub fn score_candidates(
             }
         }
     }
+    Ok(())
+}
+
+/// Damage each choice is expected to do, minus what it does to one's own partner.
+pub fn score_candidates(
+    reg: &Reg,
+    pos: &Position,
+    side: usize,
+    candidates: &[Vec<SlotAction>],
+) -> Result<Vec<Scored>, String> {
+    let field = field_state(pos);
+    let foe = 1 - side;
+    let live_foes: Vec<usize> = (0..pos.sides[foe].active.len())
+        .filter(|i| matches!(pos.mon_at(foe, *i), Some(mon) if !mon.fainted))
+        .collect();
+
+    check_scorable(pos)?;
 
     // One Battler per active slot, built once for the whole pool rather than per candidate.
     let mut battlers: Vec<[Option<Battler>; 4]> = vec![[None, None, None, None]; 2];
