@@ -663,3 +663,51 @@ def test_a_graph_replay_is_the_eager_answer_for_an_ensemble_too(parts):
         longer = local.from_encoded(_subset(encoded, list(range(size + 1))))[:size]
         moved += int(not np.array_equal(alone, longer))
     assert moved > 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graphs need a card")
+def test_a_lone_request_is_a_graph_replay_and_the_eager_answer(parts, monkeypatch):
+    """IKA-107: depth 1's requests -- one `score` each, never `score_segments` -- are CUDA
+    graph replays on the card when they are short enough, and eager past that; either way
+    the answer is local eager `from_encoded` to the bit. Both index widths come through:
+    the port's int32 (`from_encoded`) and the encoder's int64 (`__call__`).
+
+    The replay count is the positive control that the new road was taken (it is 0 where
+    lone requests go eager), and the one-row-longer check is the control that a replay
+    at the wrong size would be seen on this net and card."""
+    regulation, encoder, net = parts
+    device = torch.device("cuda")
+    from pokeuraou import inference
+    from pokeuraou.beliefnode import _subset
+
+    # A small ceiling, so a few rows cover both roads.
+    monkeypatch.setattr(inference, "GRAPH_ROWS", 24)
+    local = BatchedValue(net.to(device), encoder, device=device)
+    model = inference.served_model(BatchedValue(net.to(device), encoder, device=device))
+    positions = _positions(regulation, 60)
+    encoded = encoder.encode_positions(positions)
+    short, long = [1, 2, 3, 8, 13, 24], [25, 40, 60]
+    server, address = serve({"value": model})
+    try:
+        with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20) as remote:
+            for size in short + long:
+                block = _subset(encoded, list(range(size)))
+                for name in ("species", "ability", "item", "moves"):
+                    setattr(block, name, np.asarray(getattr(block, name)).astype(np.int32))
+                want = local.from_encoded(_subset(encoded, list(range(size))))
+                assert np.array_equal(remote.from_encoded(block), want), ("int32", size)
+                assert np.array_equal(remote(positions[:size]), local(positions[:size])), (
+                    "int64", size,
+                )
+    finally:
+        server.shutdown()
+    assert model.replays == 2 * len(short)
+    assert model.calls - model.replays == 2 * len(long)
+    assert model.graphs.captured == 2 * len(short)
+
+    moved = 0
+    for size in short:
+        alone = local.from_encoded(_subset(encoded, list(range(size))))
+        longer = local.from_encoded(_subset(encoded, list(range(size + 1))))[:size]
+        moved += int(not np.array_equal(alone, longer))
+    assert moved > 0

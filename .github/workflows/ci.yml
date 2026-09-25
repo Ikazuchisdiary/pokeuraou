@@ -236,7 +236,7 @@ jobs:
         if: always()
         run: >
           uv run --no-sync python tools/ci_skip_audit.py --junit reports/pytest-learn.xml
-          --absent standings=9 --absent cpu-batch=1 --absent cuda=3
+          --absent standings=9 --absent cpu-batch=1 --absent cuda=4
 
       - uses: actions/upload-artifact@v4
         if: always()

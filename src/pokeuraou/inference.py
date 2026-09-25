@@ -237,7 +237,13 @@ class _Handler(socketserver.StreamRequestHandler):
             buffer[out : out + scores.nbytes] = scores.tobytes()
             return {"ok": True, "rows": int(scores.shape[0])}
 
-        scores = models[name](arrays, rows)
+        # IKA-107: a lone request is scored the way one block of `score_segments` is -- a
+        # CUDA graph's replay when it is small enough (`block`), the eager pass otherwise.
+        # Depth 1 sends only these, and four in five of them are 512 rows or fewer (600
+        # M-C games: 80.0%, 42.6% at 8 or fewer), each paying the eager pass's launches.
+        # Same rows, same count, same answer to the bit.
+        model = models[name]
+        scores = (getattr(model, "block", None) or model)(arrays, rows)
 
         out = int(request["result_offset"])
         buffer[out : out + scores.nbytes] = scores.tobytes()
@@ -699,8 +705,9 @@ def served_model(value: Any):
     graphs = _Graphs(value) if _Graphs.usable(value) else None
 
     def block(arrays: dict[str, np.ndarray], rows: int) -> np.ndarray:
-        """One block of a `score_segments` request (IKA-291): a CUDA graph's replay when
-        one fits, otherwise `score`. The two are the same answer to the bit."""
+        """One block of a `score_segments` request (IKA-291), or a lone `score` request
+        (IKA-107): a CUDA graph's replay when one fits, otherwise `score`. The two are the
+        same answer to the bit."""
         if graphs is None:
             return score(arrays, rows)
         started = time.perf_counter()
@@ -721,21 +728,34 @@ def served_model(value: Any):
     return score
 
 
-#: The largest block `_Graphs` replays; longer ones take the eager road. Depth 2's sub-games
-#: are a few hundred rows (57-395 in the turn-1 probe of IKA-291) and a node's own call is
-#: thousands, so this takes the first and leaves the second. 0 turns the graphs off.
+#: The largest request or block `_Graphs` replays; longer ones take the eager road. Depth
+#: 2's sub-games are a few hundred rows (57-395 in the turn-1 probe of IKA-291) and a node's
+#: own call is thousands, so this takes the first and leaves the second. 0 turns the graphs
+#: off.
+#:
+#: Depth 1 (IKA-107, 600 M-C generation games at width 12, hidden bench): 80.0% of the
+#: requests are 512 rows or fewer (82.4% with w5), over 511 sizes; 42.6% are 8 or fewer.
+#: The next band, 513-1,024, is 6.8% (9.2%) of the requests but another ~500 sizes, each
+#: met a few times per 600 games -- about 1.5% of the server's CPU for another 0.33 GB of
+#: graphs per arm. A replay saves 0.86 ms of CPU over eager on the single net and 1.66 ms
+#: on a two-net ensemble; a capture costs about one eager pass.
 GRAPH_ROWS = int(os.environ.get("POKEURAOU_GRAPH_ROWS", "512"))
 
 #: Graphs kept per arm (and index dtype), least recently replayed dropped first. Each holds
-#: about 0.65 MB of host memory (IKA-291: 512 of them measured at +361 MB). As many as there
-#: are sizes: 48 depth-2 games met 860 sizes over two servers, and a cache of 256 captured
-#: 1,804 times for 1,292 evictions -- 0.546 CPU s a game of server against 0.426 at 512
-#: (0.583 at 128), for 0.2 GB of peak memory.
+#: about 0.65 MB of host memory on one net and 0.86 MB on a two-net ensemble (IKA-107: 511
+#: of them +332 / +442 MB; IKA-291 measured +361 MB for 512), and next to nothing on the
+#: card (the pool is shared: +27 / +50 MB for all 511). At GRAPH_ROWS = 512 there are at
+#: most 512 sizes a kind, so this cache never evicts and bounds nothing -- it is the
+#: memory bound for a larger GRAPH_ROWS. 600 depth-1 games captured 1,020 graphs over
+#: two servers, and none was evicted. IKA-291 at depth 2: 48 games met 860 sizes over two
+#: servers, and a cache of 256 captured 1,804 times for 1,292 evictions -- 0.546 CPU s a
+#: game of server against 0.426 at 512 (0.583 at 128), for 0.2 GB of peak memory.
 GRAPH_CACHE = int(os.environ.get("POKEURAOU_GRAPH_CACHE", "512"))
 
 
 class _Graphs:
-    """One arm's forward pass as CUDA graphs, one per block size, for `score_segments`.
+    """One arm's forward pass as CUDA graphs, one per block size, for `score_segments` and
+    for a lone `score` request (IKA-107: depth 1, the shipping road).
 
     IKA-291. A depth-2 pass sends dozens of sub-games of a few hundred rows each, and each
     must be scored at its own size to keep its answer (a CUDA answer moves with the number
