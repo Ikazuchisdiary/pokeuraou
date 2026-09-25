@@ -7,14 +7,25 @@ it throws away is *sayable*.
 
 Two rules keep it sayable.
 
-**Nothing is eliminated, only combinations are.** Ranking by damage and keeping the top N
-would silently delete every switch and every status move from the answer -- a Protect or
-a Fake Out scores zero damage and would never survive a damage ranking, which is exactly
-backwards for the positions where those are the answer. So coverage comes first: the kept
-set is chosen to contain every individual slot option that appears anywhere in the
-candidates, and only then is the remaining budget spent on the highest-scoring
-combinations. If the budget is too small to cover everything, the options left out are
-returned in :attr:`Narrowed.uncovered` and printed, never dropped quietly.
+**Nothing is dropped quietly.** Ranking by damage and keeping the top N would silently
+delete every switch and every status move from the answer -- a Protect or a Fake Out
+scores zero damage and would never survive a damage ranking, which is exactly backwards
+for the positions where those are the answer. So coverage comes first: the kept set is
+chosen to contain every individual slot option that appears anywhere in the candidates,
+and only then is the remaining budget spent on the highest-scoring combinations. If the
+budget is too small to cover everything, the options left out are returned in
+:attr:`Narrowed.uncovered` and printed.
+
+The cover is where a menu starts, not a promise that every option stays on it. A search
+that has solved the menu knows more than the cover does, and the root's double oracle
+that swaps (`deepen`, ``s<W>``; the user's decision of 9/26, IKA-293 / IKA-310) may push
+an action out once it carries no weight in the equilibrium -- even when it was the last
+one carrying some option. Three conditions keep that sayable: only a weightless action
+leaves; the options the menu no longer covers are reported, as :attr:`Narrowed.uncovered`
+reports the budget's (`slot_options` is the shared account, `Deepened.uncovered` the
+decision's record); and the action is outside the menu again, where the oracle asks it
+every round like any other candidate, so it comes back the moment it is a best
+response. What is eliminated is always an option somebody can name.
 
 **The score orders candidates; it never becomes an output.** It is an average damage
 fraction, computed straight from the calculator, and it decides only which cells the
@@ -160,6 +171,19 @@ def _slot_key(action: SideAction, index: int) -> str:
 
 def _slot_label(reg: Regulation, action: SideAction, index: int) -> str:
     return f"slot{index + 1} {action.slots[index].describe(reg)}"
+
+
+def slot_options(reg: Regulation, actions: Sequence[SideAction]) -> dict[str, str]:
+    """Every single slot option `actions` carry, as the cover counts them: key -> label.
+
+    The same identities and the same labels as :attr:`Narrowed.uncovered`, so what a
+    later step takes out of a menu's cover is reported in the same words (IKA-293).
+    """
+    out: dict[str, str] = {}
+    for action in actions:
+        for index in range(len(action.slots)):
+            out.setdefault(_slot_key(action, index), _slot_label(reg, action, index))
+    return out
 
 
 def _hit_slots(
@@ -628,4 +652,5 @@ __all__ = [
     "action_kind",
     "narrow",
     "score_action",
+    "slot_options",
 ]
