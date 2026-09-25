@@ -594,6 +594,29 @@ def test_graphs_dropped_from_a_full_cache_are_captured_again_to_the_same_answer(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graphs need a card")
+def test_a_failed_capture_leaves_the_eager_road(parts, monkeypatch):
+    """A capture that raises gives the graphs up for good, and the block is answered
+    eagerly -- the same answer, never an error to the worker."""
+    regulation, encoder, net = parts
+    device = torch.device("cuda")
+    from pokeuraou import inference
+    from pokeuraou.encode import Encoded
+
+    def broken(self, inputs, pool):  # noqa: ANN001, ANN202
+        raise RuntimeError("capture refused")
+
+    monkeypatch.setattr(inference._Graphs, "_capture", broken)
+    local = BatchedValue(net.to(device), encoder, device=device)
+    model = inference.served_model(BatchedValue(net.to(device), encoder, device=device))
+    encoded = encoder.encode_positions(_positions(regulation, 20))
+    for size in (5, 9):
+        arrays = {name: np.asarray(getattr(encoded, name))[:size] for name in inference.ARRAYS}
+        want = local.from_encoded(Encoded(**arrays, unknown_volatiles={}))
+        assert np.array_equal(model.block(arrays, size), want)
+    assert model.graphs.failed and model.replays == 0
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graphs need a card")
 def test_a_graph_replay_is_the_eager_answer_for_an_ensemble_too(parts):
     """IKA-291's `_Graphs` on the ensemble road (`vmap` over stacked members), at every
     size from 1 to 40 and a few larger ones, with the port's int32 index arrays and the

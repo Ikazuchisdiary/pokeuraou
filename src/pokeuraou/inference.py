@@ -775,10 +775,13 @@ class _Graphs:
         self.kinds: dict[tuple, tuple[dict[str, Any], Any, dict[int, tuple[Any, Any]]]] = {}
         self.captured = 0
         self.evicted = 0
+        self.warm: set[int] = set()
+        #: Why the graphs were given up, once a capture has failed.
+        self.failed: str | None = None
 
     def score(self, arrays: dict[str, np.ndarray], rows: int) -> np.ndarray | None:
         """The block's values, or None when it is too long for a graph (or empty)."""
-        if rows <= 0 or rows > GRAPH_ROWS or rows > self.value.batch_size:
+        if self.failed or rows <= 0 or rows > GRAPH_ROWS or rows > self.value.batch_size:
             return None
         import torch
 
@@ -817,7 +820,17 @@ class _Graphs:
                     graphs.popitem(last=False)
                     self.evicted += 1
                     timing.count("graph.evicted")
-                graphs[rows] = self._capture({name: t[:rows] for name, t in inputs.items()}, pool)
+                try:
+                    graphs[rows] = self._capture(
+                        {name: t[:rows] for name, t in inputs.items()}, pool
+                    )
+                except Exception as error:  # noqa: BLE001 - the eager road answers instead
+                    # A capture that failed can leave its pool mid-recording, so no graph
+                    # is trusted after one: every block from here takes the eager road,
+                    # which is the same answer at the old cost.
+                    self.failed = f"{type(error).__name__}: {error}"
+                    timing.count("graph.failed")
+                    return None
                 self.captured += 1
                 timing.count("graph.captured")
             timing.count("graph.replays")
@@ -833,14 +846,19 @@ class _Graphs:
     def _capture(self, inputs: dict[str, Any], pool: Any) -> tuple[Any, Any]:  # noqa: ANN401
         import torch
 
-        # Warm-up off the default stream first, as capturing asks (cuBLAS and the
-        # ensemble's mapped call set themselves up on first use).
-        side = torch.cuda.Stream()
-        side.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(side):
-            for _ in range(2):
-                self.value._mean_logit(inputs)
-        torch.cuda.current_stream().wait_stream(side)
+        if threading.get_ident() not in self.warm:
+            # Warm-up off the default stream first, as capturing asks (cuBLAS and the
+            # ensemble's mapped call set themselves up on first use, per thread: a
+            # thread that had not warmed failed its capture with the others running).
+            # Once a thread is enough: its later sizes are captured cold, a third of the
+            # cost of a capture, and replay the eager answer all the same (tested).
+            side = torch.cuda.Stream()
+            side.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(side):
+                for _ in range(2):
+                    self.value._mean_logit(inputs)
+            torch.cuda.current_stream().wait_stream(side)
+            self.warm.add(threading.get_ident())
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph, pool=pool, capture_error_mode="thread_local"):
             # `BatchedValue.from_encoded`'s own expression, on the same rows.

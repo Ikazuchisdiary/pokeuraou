@@ -229,9 +229,10 @@ def test_a_hidden_depth_2_decision_calls_the_leaf_once_a_pass(roster, monkeypatc
     # Before: the node's own call(s), then one per sub-game and none batched.
     assert before_leaf.calls["segments"] == 0
     assert before_leaf.calls["from_encoded"] >= subgames
-    # After: the node's own call(s), then one call per pass per side (two passes, two sides).
+    # After: the node's own call(s), then one call per pass per side (two passes, two sides),
+    # or a few more where a pass holds more than `GATHER_ROWS` rows.
     node_calls = batched_leaf.calls["from_encoded"] + batched_leaf.calls["positions"]
-    assert batched_leaf.calls["segments"] <= 4
+    assert batched_leaf.calls["segments"] * 5 < subgames
     assert batched_leaf.blocks >= subgames
     assert node_calls < before_leaf.calls["from_encoded"] - subgames + 2
     assert batched_leaf.total() * 5 < before_leaf.total()
