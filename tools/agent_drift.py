@@ -60,6 +60,9 @@ AGENT_ARGS = (
     # How a leaf ranking fills its cells (IKA-268). Its default is what ships, so omitting
     # it drifts nothing; a tool that passes another fill plays another menu.
     "rank_fill",
+    # Which completions a hidden-bench belief leaves out (IKA-283). Its default is what
+    # ships, so omitting it drifts nothing; a tool that passes a drop plays another game.
+    "bench_drop",
 )
 #: One argument a tool may omit for a reason, where excusing the whole file in `EXPECTED`
 #: would also excuse every other argument it might stop passing later.

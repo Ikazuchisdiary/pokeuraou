@@ -54,6 +54,7 @@ from typing import Any
 import numpy as np
 
 from . import rank_scores, timing
+from .hidden import DEFAULT_BENCH_DROP
 from .payoff import HP_SHARE, Objective
 from .pool import Pool, draw_pair
 from .regulation import Regulation
@@ -273,6 +274,7 @@ def generate_pool(
     rank_by_leaf: bool = False,
     policy: Any = None,
     rank_fill: str = DEFAULT_RANK_FILL,
+    bench_drop: str = DEFAULT_BENCH_DROP,
     indices: Iterable[int] | None = None,
     on_finish: Callable[[int], None] | None = None,
     rank_scores_out: Path | None = None,
@@ -390,6 +392,7 @@ def generate_pool(
                     rank_by_leaf=rank_by_leaf,
                     policy=policy,
                     rank_fill=rank_fill,
+                    bench_drop=bench_drop,
                     sheets=(six0, six1) if hide_bench else None,
                     open_information=not hide_bench,
                     bench_prior=priors,
@@ -484,6 +487,8 @@ class PoolArm:
     rank_by_leaf: bool
     #: How its leaf ranking fills its cells (`search.parse_rank_fill`, IKA-268).
     rank_fill: str = DEFAULT_RANK_FILL
+    #: Which completions its belief drops (`hidden.parse_bench_drop`, IKA-283).
+    bench_drop: str = DEFAULT_BENCH_DROP
 
     @property
     def selection(self) -> str:
@@ -619,6 +624,7 @@ def pool_match_game(
         bench_prior=priors,
         rank_view="heaviest",
         rank_fill=(side_arms[0].rank_fill, side_arms[1].rank_fill),
+        bench_drop=(side_arms[0].bench_drop, side_arms[1].bench_drop),
         selection=(species[0], species[1], picks[0], picks[1]),
     )
     sources = tuple(arm.selection for arm in side_arms)
@@ -634,6 +640,7 @@ def pool_match_game(
         "limits": tuple(arm.limit for arm in side_arms),
         "rankings": tuple("leaf" if arm.rank_by_leaf else "damage" for arm in side_arms),
         "rank_fills": tuple(arm.rank_fill for arm in side_arms),
+        "bench_drops": tuple(arm.bench_drop for arm in side_arms),
         "selections": sources,
         "beliefs": beliefs,
         "picks": picks,
