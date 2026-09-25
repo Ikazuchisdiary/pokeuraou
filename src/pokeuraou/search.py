@@ -750,6 +750,7 @@ def belief_solve(
     evaluators: dict[int, LeafEvaluator],
     *,
     budget: Budget,
+    sides: Sequence[int] = (0, 1),
 ) -> dict[int, BeliefResult]:
     """Both sides' answers, resolving each turn as few times as it has to be resolved.
 
@@ -761,10 +762,19 @@ def belief_solve(
     neither. With different leaves the scoring differs, so each side gets its own call and
     the sharing is only across that side's completions -- 3.0x instead of 2.2x, against
     6.0x for a matrix per completion.
+
+    `sides` names the answers wanted; the result holds only those. With different leaves
+    each side's node and LP are its own, so an answer nobody reads is not built at all --
+    a match whose arms build different menus solves this twice a turn and reads one side
+    of each (IKA-282). With one leaf the shared node is built as before, whichever side is
+    asked for, so self-play is unchanged; only the unread LP is skipped.
     """
     from .beliefnode import belief_payoffs
     from .equilibrium import solve_bayesian
 
+    wanted = tuple(side for side in (0, 1) if side in sides)
+    if not wanted:
+        raise ValueError(f"belief_solve asked for no side: {sides!r}")
     row, col = list(ours), list(theirs)
     same = evaluators[0] is evaluators[1]
     if same:
@@ -779,11 +789,11 @@ def belief_solve(
                 reg, position, row, col, evaluators[side], budget=budget,
                 spreads={1 - side: completions_by_side[1 - side]},
             )
-            for side in (0, 1)
+            for side in wanted
         }
 
     out: dict[int, BeliefResult] = {}
-    for side in (0, 1):
+    for side in wanted:
         built = nodes[side].matrices[side]
         items = completions_by_side[1 - side]
         weights = np.asarray([item.weight for item in items], dtype=np.float64)
