@@ -29,7 +29,6 @@ from pathlib import Path
 
 import numpy as np
 import pytest
-import torch
 
 from pokeuraou import rustnode
 from pokeuraou.encode import (
@@ -43,7 +42,12 @@ from pokeuraou.encode import (
 from pokeuraou.regulation import load_regulation, regulation_dir, repo_root
 from pokeuraou.selfplay import position_from_sets
 from pokeuraou.teams import load_roster
-from pokeuraou.value import ValueConfig, build, load_model, save_model
+
+# `pokeuraou.value` imports torch at module scope; without the learn group this file
+# raised at collection (the suite job's first CI run, IKA-51).
+torch = pytest.importorskip("torch", reason="the dataset needs the optional learn group")
+
+from pokeuraou.value import ValueConfig, build, load_model, save_model  # noqa: E402
 
 FORMAT = "gen9championsvgc2026regmb"
 NEW_MOVE = "ika82testmove"

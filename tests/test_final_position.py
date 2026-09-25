@@ -33,6 +33,9 @@ from tests._harness import load_tool
 
 from ._port import Budget, resolve_turn
 
+# `tools/encode_dataset.py` imports `pokeuraou.value`, which imports torch at module
+# scope; without the learn group this file raised at collection (IKA-51).
+pytest.importorskip("torch", reason="the dataset needs the optional learn group")
 encode_dataset = load_tool("encode_dataset")
 
 

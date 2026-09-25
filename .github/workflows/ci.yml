@@ -144,13 +144,13 @@ jobs:
       # reason is a failure on its own. The numbers are measured, not guessed:
       #   standings  data/standings/*.json.gz, from a small community API that the tool's
       #              own docstring calls a manual one-off fetch. Not called on every push.
-      #   torch      four modules and two tests in test_selection_book; the `learn` job
+      #   torch      six modules and two tests in test_selection_book; the `learn` job
       #              below runs them with torch present and allows none of these.
       - name: what the suite skipped, and whether it was allowed to
         if: always()
         run: >
           uv run python tools/ci_skip_audit.py --junit reports/pytest.xml
-          --absent standings=9 --absent torch=6
+          --absent standings=9 --absent torch=8
 
       - uses: actions/upload-artifact@v4
         if: always()

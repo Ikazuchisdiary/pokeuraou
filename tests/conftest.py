@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from pokeuraou import rustnode
 from pokeuraou.oracle import ORACLE_JS, Oracle, TeamSet, load_team
 from pokeuraou.regulation import Regulation, load_regulation, regulation_dir
 
@@ -15,6 +16,19 @@ FIXTURES = Path(__file__).parent / "fixtures"
 def pytest_configure(config: pytest.Config) -> None:
     config.addinivalue_line("markers", "oracle: needs the built TypeScript Showdown oracle")
     config.addinivalue_line("markers", "slow: long-running (exhaustive sweeps, benchmarks)")
+
+
+@pytest.fixture(autouse=True)
+def _positions_not_held() -> Iterator[None]:
+    """`rustnode.hold_positions` is process-wide and `tools/selfplay.py` turns it on for good.
+
+    A test that runs `run_pool` in-process (test_poolplay, test_rank_scores) left it on, and
+    a later test in the same worker that edits a position after sending it had the old text
+    sent: five test_rust_node tests failed on the first CI run, and fail locally when run
+    after test_rank_scores in one process (IKA-51).
+    """
+    yield
+    rustnode.hold_positions(False)
 
 
 @pytest.fixture(scope="session")
