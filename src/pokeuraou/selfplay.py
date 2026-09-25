@@ -758,10 +758,12 @@ def _menus(
             believed_ranking(parts), side, used, spreads, [w for _r, w in parts]
         )
 
-    return (
-        narrow(reg, pos, 0, limit=limits[0], rank=ranker(0)).actions,
-        narrow(reg, pos, 1, limit=limits[1], rank=ranker(1)).actions,
-    )
+    # A part each (IKA-32): the two sides' menus are independent of each other.
+    with timing.region("menu.side"):
+        first = narrow(reg, pos, 0, limit=limits[0], rank=ranker(0)).actions
+    with timing.region("menu.side"):
+        second = narrow(reg, pos, 1, limit=limits[1], rank=ranker(1)).actions
+    return first, second
 
 
 def _believed(

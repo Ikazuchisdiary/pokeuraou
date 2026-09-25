@@ -264,7 +264,8 @@ def belief_payoffs(
         timing.refine("hidden" if any(hidden.values()) else "exact")
         timing.count("completions", sum(len(items) for items in spreads.values()))
     if not any(hidden.values()):
-        return _per_completion(reg, row, col, evaluate, budget, spreads)
+        with timing.region("belief.exact"):
+            return _per_completion(reg, row, col, evaluate, budget, spreads)
 
     from .encode import Encoded, rules_of
 
@@ -278,9 +279,10 @@ def belief_payoffs(
     encoder = getattr(owner, "encoder", None) or _encoder_for(reg)
     rules = rules_of(evaluate)
 
-    filled = port.ask(
-        reg, lambda node: node.fill_encoded(position, row, col, budget, [], None, rules=rules)
-    )
+    with timing.region("belief.ref"):
+        filled = port.ask(
+            reg, lambda node: node.fill_encoded(position, row, col, budget, [], None, rules=rules)
+        )
     if rules.mega_from_slots and filled.mega_from_slots is not True:
         # A binary that predates the field encoded with the current rule. The fill cannot
         # be used for this leaf; the per-completion path encodes in Python.
@@ -319,6 +321,8 @@ def belief_payoffs(
     claimed: dict[int, dict] = {side: {} for side in reach}
     reference_block: int | None = None
     jobs: list[_Job] = []
+    jobs_part = timing.region("belief.jobs")
+    jobs_part.__enter__()
     for side, items in spreads.items():
         slots = hidden.get(side, ())
         for item in items:
@@ -352,13 +356,16 @@ def belief_payoffs(
                 if job.dirty_from_reference and reference_block is None:
                     reference_block = block(len(reference), lambda: reference)
             jobs.append(job)
+    jobs_part.__exit__(None, None, None)
 
-    stacked, starts = _stacked(parts, reference)
-    values = (
-        np.asarray(scorer(stacked), dtype=np.float64)
-        if len(stacked)
-        else np.zeros(0, dtype=np.float64)
-    )
+    with timing.region("belief.stack"):
+        stacked, starts = _stacked(parts, reference)
+    with timing.region("belief.score"):
+        values = (
+            np.asarray(scorer(stacked), dtype=np.float64)
+            if len(stacked)
+            else np.zeros(0, dtype=np.float64)
+        )
     del stacked
     # The parts' arrays are in the batch now, and only their sizes, spans and folds are
     # read from here on; a dirty fill is as large as the node, so it is let go.
@@ -373,6 +380,8 @@ def belief_payoffs(
 
     matrices: dict[int, list[np.ndarray]] = {}
     shared = redone = 0
+    fold_part = timing.region("belief.fold")
+    fold_part.__enter__()
     for job in jobs:
         shared_values = rows_of(job.shared)
         payoff = np.zeros((len(row), len(col)), dtype=np.float64)
@@ -414,6 +423,7 @@ def belief_payoffs(
             unmodelled |= job.notes
             redone += len(wanted) if job.resolved is None else job.resolved
         matrices.setdefault(1 - job.side, []).append(payoff)
+    fold_part.__exit__(None, None, None)
     return BeliefNode(matrices, unmodelled, shared, redone)
 
 

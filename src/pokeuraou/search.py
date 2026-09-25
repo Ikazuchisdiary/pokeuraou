@@ -382,8 +382,10 @@ def search(
             theirs=col,
             unmodelled=solved.unmodelled,
         )
-    payoff, unmodelled = batched_payoff(reg, pos, row, col, evaluate, budget=budget)
-    equilibrium = solve(payoff)
+    with timing.region("open.node"):
+        payoff, unmodelled = batched_payoff(reg, pos, row, col, evaluate, budget=budget)
+    with timing.region("lp.open"):
+        equilibrium = solve(payoff)
     if deepen > 0:
         equilibrium, payoff, deepened = _deepen.best_first(
             reg, pos, row, col, evaluate, budget=budget, payoff=payoff,
@@ -410,21 +412,22 @@ def search(
         )
 
     if solve_restricted:
-        return _restricted_search(
-            reg,
-            pos,
-            row,
-            col,
-            evaluate,
-            budget=budget,
-            payoff=payoff,
-            equilibrium=equilibrium,
-            unmodelled=unmodelled,
-            refine=refine,
-            passes=passes,
-            sub_limit=sub_limit,
-            sub_branches=sub_branches,
-        )
+        with timing.region("d2"):
+            return _restricted_search(
+                reg,
+                pos,
+                row,
+                col,
+                evaluate,
+                budget=budget,
+                payoff=payoff,
+                equilibrium=equilibrium,
+                unmodelled=unmodelled,
+                refine=refine,
+                passes=passes,
+                sub_limit=sub_limit,
+                sub_branches=sub_branches,
+            )
 
     #: (i, j) -> the depth-2 value, so a cell is never refined twice across passes.
     refined: dict[tuple[int, int], float] = {}
@@ -996,7 +999,8 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
     def score() -> None:
         nonlocal held
         if waiting:
-            values = port.score_segments(evaluate, [p.encoded for p in waiting])
+            with timing.region("d2.score"):
+                values = port.score_segments(evaluate, [p.encoded for p in waiting])
             for pending, scores in zip(waiting, values, strict=True):
                 pending.scored(scores)
             waiting.clear()
@@ -1004,6 +1008,8 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
 
     # 1. The turns. A refused one is raised where `_kept_branches` raised it: first in order.
     kept_positions: list[list[Position]] = []
+    turns_part = timing.region("d2.turns")
+    turns_part.__enter__()
     for result in _cell_turns(reg, cells, budget, shares):
         if isinstance(result, port.PortRefused):
             raise result
@@ -1015,8 +1021,11 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
             continue
         branches, cell.weights = kept
         kept_positions.append([branch.position for branch in branches])
+    turns_part.__exit__(None, None, None)
 
     # 2. Both sides' menus at every branch that has a game left in it.
+    menus_part = timing.region("d2.menus")
+    menus_part.__enter__()
     asks = [
         (pos, side)
         for positions in kept_positions
@@ -1061,8 +1070,11 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
             if sub.empty or sub.error is not None:
                 # `_refined_value` stops at this branch; the ones after it are not asked.
                 break
+    menus_part.__exit__(None, None, None)
 
     # 4. The sub-games' nodes, a crossing per `FILL_BATCH`, scored as the rows gather.
+    fills_part = timing.region("d2.fills")
+    fills_part.__enter__()
     for chunk, links in _fill_chunks(to_fill, related):
         filled = port.pending_payoffs(
             reg, [(pos, row, col) for _sub, pos, row, col in chunk], evaluate, budget=budget,
@@ -1088,8 +1100,10 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
             held += pending.rows
         if held >= GATHER_ROWS:
             score()
+    fills_part.__exit__(None, None, None)
     score()
-    return [_fold_cell(cell) for cell in work]
+    with timing.region("d2.fold"):
+        return [_fold_cell(cell) for cell in work]
 
 
 def _fold_cell(cell: _Cell) -> tuple[float | None, set[str], int]:
@@ -1230,7 +1244,8 @@ def belief_solve(
         # of the negation. Solving that rather than reading the column strategy off side
         # 0's solve is what makes the uncertainty sit on the side that has it.
         matrices = [m if side == 0 else -m.T for m in built]
-        solved = solve_bayesian(matrices, weights)
+        with timing.region("lp.side"):
+            solved = solve_bayesian(matrices, weights)
         out[side] = BeliefResult(
             strategy=np.asarray(solved.row_strategy, dtype=np.float64),
             value=float(solved.value),
@@ -1241,11 +1256,12 @@ def belief_solve(
             classes=len(matrices),
         )
         if depths[side] >= 2:
-            out[side] = _restricted_belief(
-                reg, side, row, col, items, matrices, weights, solved, evaluators[side],
-                out[side], memo, budget=budget, refine=refine, passes=passes,
-                sub_limit=sub_limit, sub_branches=sub_branches,
-            )
+            with timing.region("d2"):
+                out[side] = _restricted_belief(
+                    reg, side, row, col, items, matrices, weights, solved, evaluators[side],
+                    out[side], memo, budget=budget, refine=refine, passes=passes,
+                    sub_limit=sub_limit, sub_branches=sub_branches,
+                )
     return out
 
 
