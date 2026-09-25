@@ -886,7 +886,35 @@ fn taunt_stage(
     if turn.mon_at(action.side, action.slot).is_some_and(|mon| taunt_stops(mon, mv)) {
         return vec![(1.0, Some("taunt".into()))];
     }
+    if imprison_stops(turn, action, mv) {
+        return vec![(1.0, Some("imprison".into()))];
+    }
     confusion_stage(turn, action, budget)
+}
+
+/// Imprison's `onFoeBeforeMove` (priority 4, between Taunt's 5 and confusion's 3), IKA-256:
+///
+/// ```text
+/// if (move.id !== 'struggle' && this.effectState.source.hasMove(move.id) && !move.isZOrMaxPowered) {
+///     this.add('cant', attacker, 'move: Imprison', move);
+///     return false;
+/// }
+/// ```
+///
+/// The volatile is on the imprisoner (`target: "self"`), which is its own `source`, and a
+/// `Foe` handler is every opposing active Pokemon's. Its `onFoeDisableMove` takes the moves
+/// off the next menu (`actions._usable_move_slots`); this stops the ones chosen before the
+/// Imprison went up. No PP is spent: `BeforeMove` comes first.
+fn imprison_stops(turn: &Turn, action: &QueuedAction, mv: &Move) -> bool {
+    if mv.id == "struggle" || mv.id == "recharge" {
+        return false;
+    }
+    let foe = 1 - action.side;
+    (0..turn.pos.sides[foe].active.len()).any(|slot| {
+        turn.mon_at(foe, slot).is_some_and(|mon| {
+            !mon.fainted && mon.has_volatile("imprison") && mon.moves.iter().any(|m| m.id.as_str() == mv.id)
+        })
+    })
 }
 
 /// Python's `_taunt_lasts_longer`: `if (target.activeTurns && !this.queue.willMove(target))
@@ -3364,6 +3392,108 @@ fn use_substitute(turn: &mut Turn, action: &QueuedAction) {
     turn.check_berry(me.0, me.1);
 }
 
+/// Clangorous Soul (IKA-256; the champions mod makes it `accuracy: true`):
+///
+/// ```text
+/// onTry(source) {
+///     if (source.hp <= (source.maxhp * 33 / 100) || source.maxhp === 1) return false;
+/// },
+/// onTryHit(pokemon, target, move) {
+///     if (!this.boost(move.boosts!)) return null;
+///     delete move.boosts;
+/// },
+/// onHit(pokemon) {
+///     this.directDamage(pokemon.maxhp * 33 / 100);
+/// },
+/// ```
+///
+/// The boosts go up in `onTryHit`, before the HP is paid; a user that can raise nothing
+/// (all five at +6, or Contrary at -6) fails and pays nothing. `directDamage` floors the
+/// cost and skips the `Damage` event (Magic Guard does not stop it) and `hurtThisTurn`;
+/// the berry is eaten at the next `Update`.
+fn clangorous_soul(turn: &mut Turn, action: &QueuedAction, mv: &Move) {
+    let me = (action.side, action.slot);
+    let Some(mon) = turn.mon_at(me.0, me.1) else { return };
+    if mon.fainted {
+        return;
+    }
+    let (hp, maxhp) = (mon.hp, mon.maxhp);
+    // `hp <= maxhp * 33 / 100` in floats, exactly this in integers.
+    if hp * 100 <= maxhp * 33 || maxhp == 1 {
+        log_event!(turn, "{} failed (too weak)", Label(turn.reg, action));
+        turn.move_failed[me.0][me.1] = true;
+        return;
+    }
+    let boosts: Vec<(&str, i64)> = mv
+        .raw
+        .get("boosts")
+        .and_then(Value::as_object)
+        .map(|b| b.iter().map(|(stat, v)| (stat.as_str(), v.as_i64().unwrap_or(0))).collect())
+        .unwrap_or_default();
+    let mut table = boosts;
+    if let Some(order) = turn.reg.boost_order.get(mv.id.as_str()) {
+        table.sort_by_key(|(stat, _)| order.iter().position(|s| s == stat));
+    }
+    if !turn.apply_boosts_by(me.0, me.1, &table, false, false, mv.id.as_str()) {
+        log_event!(turn, "{} failed (nothing to raise)", Label(turn.reg, action));
+        turn.move_failed[me.0][me.1] = true;
+        return;
+    }
+    let cost = (maxhp * 33 / 100).max(1);
+    let fainted = {
+        let mon = turn.mon_at_mut(me.0, me.1).unwrap();
+        mon.hp = (mon.hp - cost).max(0);
+        mon.hp <= 0
+    };
+    // No `hurt_this_turn`: `directDamage` goes through `Pokemon.damage`, and only
+    // `spreadDamage` sets `hurtThisTurn` (sim/battle.ts:2138), so a later Assurance stays 60.
+    log_event!(turn, "{} -{} (clangoroussoul)", Name(me.0, me.1), cost);
+    if fainted {
+        turn.faint(me.0, me.1);
+    } else {
+        turn.check_berry(me.0, me.1);
+    }
+}
+
+/// Psych Up's `onHit` (IKA-256): the user takes the target's stages as they are -- an
+/// assignment, not a `boost`, so Contrary, Simple and Clear Body do nothing -- and the crit
+/// volatiles, its own removed first:
+///
+/// ```text
+/// for (i in target.boosts) source.boosts[i] = target.boosts[i];
+/// const volatilesToCopy = ['dragoncheer', 'focusenergy', 'gmaxchistrike', 'laserfocus'];
+/// for (const volatile of volatilesToCopy) source.removeVolatile(volatile);
+/// for (const volatile of volatilesToCopy) {
+///     if (target.volatiles[volatile]) { source.addVolatile(volatile); ... hasDragonType ... }
+/// }
+/// ```
+///
+/// The move has no `protect` flag and `bypasssub`, so Protect and a Substitute do not stop it.
+fn psych_up(turn: &mut Turn, me: Slot, targets: &[Slot]) {
+    const CRIT_VOLATILES: [&str; 4] = ["dragoncheer", "focusenergy", "gmaxchistrike", "laserfocus"];
+    for target in targets {
+        let Some(foe) = turn.mon_at(target.0, target.1) else { continue };
+        if foe.fainted {
+            continue;
+        }
+        let boosts = foe.boosts;
+        let copied: Vec<Effect> = foe
+            .volatiles
+            .iter()
+            .filter(|v| CRIT_VOLATILES.contains(&v.id.as_str()))
+            .cloned()
+            .collect();
+        let Some(mon) = turn.mon_at_mut(me.0, me.1) else { continue };
+        if mon.fainted {
+            continue;
+        }
+        mon.boosts = boosts;
+        mon.volatiles.retain(|v| !CRIT_VOLATILES.contains(&v.id.as_str()));
+        mon.volatiles.extend(copied);
+        log_event!(turn, "{} copied {}'s stat changes (psychup)", Name(me.0, me.1), Name(target.0, target.1));
+    }
+}
+
 /// Python's `_behind_substitute`: a resist berry halves nothing the doll takes.
 fn behind_substitute(defender: Battler) -> Battler {
     match defender.item {
@@ -3699,6 +3829,11 @@ fn do_status_move<'a>(
 
     if mv.id == "substitute" {
         use_substitute(&mut turn, action);
+        return Ok(vec![(1.0, turn)]);
+    }
+
+    if mv.id == "clangoroussoul" {
+        clangorous_soul(&mut turn, action, mv);
         return Ok(vec![(1.0, turn)]);
     }
 
@@ -4299,6 +4434,12 @@ fn apply_status_move(
             if vid == "taunt" && !already {
                 taunt_lasts_longer(turn, target.0, target.1);
             }
+            // A second Imprison: `addVolatile` returns false, the move's only effect, so
+            // the move fails (IKA-256).
+            if vid == "imprison" && already {
+                log_event!(turn, "{} failed (already imprisoning)", Label(reg, action));
+                turn.move_failed[action.side][action.slot] = true;
+            }
             // Leech Seed heals whoever stands in the planter's *slot* at the end of the turn,
             // so the slot is written down: `this.volatiles[status.id].sourceSlot =
             // source.getSlot();` (sim/pokemon.ts:2008).
@@ -4379,6 +4520,9 @@ fn apply_status_move(
                 turn.move_failed[me.0][me.1] = true;
             }
         }
+    }
+    if mv.id == "psychup" {
+        psych_up(turn, me, targets);
     }
     // Transform's `onHit: return pokemon.transformInto(target)` (IKA-219).
     if mv.id == "transform" {

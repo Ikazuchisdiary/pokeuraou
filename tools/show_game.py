@@ -28,7 +28,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from pokeuraou.actions import RECHARGE, STRUGGLE, is_struggling
+from pokeuraou.actions import RECHARGE, STRUGGLE, imprisoned_moves, is_struggling
 from pokeuraou.hidden import seen_slots
 from pokeuraou.names import Localiser, load_names
 from pokeuraou.position import Position
@@ -160,7 +160,9 @@ def name_action(
             struggling = (
                 parsed is not None
                 and party is not None
-                and is_struggling(parsed.sides[actor].pokemon[party], reg)
+                and is_struggling(
+                    parsed.sides[actor].pokemon[party], reg, imprisoned_moves(parsed, actor)
+                )
             )
             move_id = (
                 RECHARGE
