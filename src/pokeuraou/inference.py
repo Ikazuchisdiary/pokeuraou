@@ -52,6 +52,7 @@ import socket
 import socketserver
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from multiprocessing import shared_memory
@@ -725,6 +726,10 @@ def served_model(value: Any):
 #: thousands, so this takes the first and leaves the second. 0 turns the graphs off.
 GRAPH_ROWS = int(os.environ.get("POKEURAOU_GRAPH_ROWS", "512"))
 
+#: Graphs kept per arm (and index dtype), least recently replayed dropped first. Each holds
+#: about 0.65 MB of host memory (IKA-291: 512 of them measured at +361 MB).
+GRAPH_CACHE = int(os.environ.get("POKEURAOU_GRAPH_CACHE", "256"))
+
 
 class _Graphs:
     """One arm's forward pass as CUDA graphs, one per block size, for `score_segments`.
@@ -769,6 +774,7 @@ class _Graphs:
         #: int64; each kind gets its own buffers rather than a cast.
         self.kinds: dict[tuple, tuple[dict[str, Any], Any, dict[int, tuple[Any, Any]]]] = {}
         self.captured = 0
+        self.evicted = 0
 
     def score(self, arrays: dict[str, np.ndarray], rows: int) -> np.ndarray | None:
         """The block's values, or None when it is too long for a graph (or empty)."""
@@ -799,11 +805,22 @@ class _Graphs:
                     )
                     for name, dtype, shape in kind
                 }
-                self.kinds[kind] = (inputs, torch.cuda.graph_pool_handle(), {})
+                self.kinds[kind] = (inputs, torch.cuda.graph_pool_handle(), OrderedDict())
             inputs, pool, graphs = self.kinds[kind]
-            if rows not in graphs:
+            if rows in graphs:
+                graphs.move_to_end(rows)
+            else:
+                if len(graphs) >= GRAPH_CACHE:
+                    # Least recently replayed first. A graph holds about 0.65 MB of host
+                    # memory, and 512 of them in each of two servers put a 600-game run
+                    # under the machine's memory floor.
+                    graphs.popitem(last=False)
+                    self.evicted += 1
+                    timing.count("graph.evicted")
                 graphs[rows] = self._capture({name: t[:rows] for name, t in inputs.items()}, pool)
                 self.captured += 1
+                timing.count("graph.captured")
+            timing.count("graph.replays")
             graph, out = graphs[rows]
             for name in ARRAYS:
                 inputs[name][:rows].copy_(staged[name], non_blocking=True)

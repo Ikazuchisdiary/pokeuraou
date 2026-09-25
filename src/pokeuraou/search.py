@@ -737,9 +737,9 @@ def _kept_branches(  # noqa: PLR0913 - one cell's turn and the branch knob
 
 #: Rows a batch of sub-games holds before they are scored, so that a pass whose sub-games
 #: happen to be self-switch nodes (IKA-284: one reached 363,181 leaves) does not hold them
-#: all at once. About 240 MB of encoded leaves; scoring early changes no value, because
-#: every sub-game is scored as its own block wherever the batch is cut.
-GATHER_ROWS = 65_536
+#: all at once. About 60 MB of encoded leaves in each of 24 workers; scoring early changes
+#: no value, because every sub-game is scored as its own block wherever the batch is cut.
+GATHER_ROWS = 16_384
 
 
 @dataclass

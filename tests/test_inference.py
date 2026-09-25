@@ -570,6 +570,30 @@ def test_blocks_scored_together_are_what_each_block_gets_alone(parts, device_nam
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graphs need a card")
+def test_graphs_dropped_from_a_full_cache_are_captured_again_to_the_same_answer(
+    parts, monkeypatch
+):
+    """A cache of three graphs asked for five sizes in turn: every size is captured again
+    after it is dropped, and every replay is still the eager answer."""
+    regulation, encoder, net = parts
+    device = torch.device("cuda")
+    from pokeuraou import inference
+    from pokeuraou.encode import Encoded
+
+    monkeypatch.setattr(inference, "GRAPH_CACHE", 3)
+    local = BatchedValue(net.to(device), encoder, device=device)
+    model = inference.served_model(BatchedValue(net.to(device), encoder, device=device))
+    encoded = encoder.encode_positions(_positions(regulation, 40))
+    for _round in range(3):
+        for size in (7, 12, 19, 25, 33):
+            arrays = {name: np.asarray(getattr(encoded, name))[:size] for name in inference.ARRAYS}
+            want = local.from_encoded(Encoded(**arrays, unknown_volatiles={}))
+            assert np.array_equal(model.block(arrays, size), want)
+    assert model.graphs.captured == 15
+    assert model.graphs.evicted == 12
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graphs need a card")
 def test_a_graph_replay_is_the_eager_answer_for_an_ensemble_too(parts):
     """IKA-291's `_Graphs` on the ensemble road (`vmap` over stacked members), at every
     size from 1 to 40 and a few larger ones, with the port's int32 index arrays and the
