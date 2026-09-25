@@ -54,6 +54,7 @@ from typing import Any
 import numpy as np
 
 from . import rank_scores, timing
+from .deepen import DEFAULT_DEEPEN
 from .hidden import DEFAULT_BENCH_DROP
 from .payoff import HP_SHARE, Objective
 from .pool import Pool, draw_pair
@@ -275,6 +276,7 @@ def generate_pool(
     policy: Any = None,
     rank_fill: str = DEFAULT_RANK_FILL,
     bench_drop: str = DEFAULT_BENCH_DROP,
+    deepen: str = DEFAULT_DEEPEN,
     depth: int = 1,
     solve_restricted: bool = False,
     indices: Iterable[int] | None = None,
@@ -395,6 +397,7 @@ def generate_pool(
                     policy=policy,
                     rank_fill=rank_fill,
                     bench_drop=bench_drop,
+                    deepen=deepen,
                     depth=depth,
                     solve_restricted=solve_restricted,
                     sheets=(six0, six1) if hide_bench else None,
@@ -493,6 +496,8 @@ class PoolArm:
     rank_fill: str = DEFAULT_RANK_FILL
     #: Which completions its belief drops (`hidden.parse_bench_drop`, IKA-283).
     bench_drop: str = DEFAULT_BENCH_DROP
+    #: How it deepens its move decisions (`deepen.parse_deepen`, IKA-33); none is off.
+    deepen: str = DEFAULT_DEEPEN
     #: Its search depth at the move nodes, and whether depth 2 reads the restricted game
     #: -- which a hidden bench requires (`search.belief_solve`, IKA-111).
     depth: int = 1
@@ -633,6 +638,7 @@ def pool_match_game(
         rank_view="heaviest",
         rank_fill=(side_arms[0].rank_fill, side_arms[1].rank_fill),
         bench_drop=(side_arms[0].bench_drop, side_arms[1].bench_drop),
+        deepen=(side_arms[0].deepen, side_arms[1].deepen),
         depth=(side_arms[0].depth, side_arms[1].depth),
         solve_restricted=(side_arms[0].solve_restricted, side_arms[1].solve_restricted),
         selection=(species[0], species[1], picks[0], picks[1]),
@@ -651,6 +657,7 @@ def pool_match_game(
         "rankings": tuple("leaf" if arm.rank_by_leaf else "damage" for arm in side_arms),
         "rank_fills": tuple(arm.rank_fill for arm in side_arms),
         "bench_drops": tuple(arm.bench_drop for arm in side_arms),
+        "deepens": tuple(arm.deepen for arm in side_arms),
         "depths": tuple(arm.depth for arm in side_arms),
         "solvers": tuple(
             "restricted" if arm.depth >= 2 and arm.solve_restricted else "full"

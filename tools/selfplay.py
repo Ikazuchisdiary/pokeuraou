@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from pokeuraou import rustnode
 from pokeuraou.benchflags import add_bench_flags, require_bench
 from pokeuraou.damage import register_mega_stones
+from pokeuraou.deepen import DEFAULT_DEEPEN, parse_deepen
 from pokeuraou.hidden import DEFAULT_BENCH_DROP, parse_bench_drop
 from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.priors import build_cooccurrence, find_cached_chaos, load_chaos
@@ -103,6 +104,14 @@ def add_pool_flags(ap: argparse.ArgumentParser) -> None:
         "slots the belief leaves out -- w<P> those under P%% of the weight, m<P> all but "
         "the heaviest carrying P%%; the heaviest always stays and the rest are "
         f"renormalised (IKA-283). Default {DEFAULT_BENCH_DROP}.",
+    )
+    ap.add_argument(
+        "--deepen",
+        default=DEFAULT_DEEPEN,
+        help="with --pool: how each move decision deepens its answer best first after the "
+        "depth-1 solve, where no bench is hidden -- m<N> spends N cells and reads the root "
+        "whole, r<N> reads it as the restricted game (IKA-33). "
+        f"Default {DEFAULT_DEEPEN}, off.",
     )
     ap.add_argument(
         "--record-rank-scores",
@@ -171,6 +180,7 @@ def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
         f" / bench {'hidden' if hide_bench else 'OPEN (reference)'}"
         f" / {'leaf ranking, fill ' + args.rank_fill if args.rank_leaf else 'damage ranking'}"
         f" / bench drop {args.bench_drop}"
+        f" / deepen {args.deepen}"
         + (f" / depth {args.depth}"
            + (" restricted" if args.solve_restricted else "") if args.depth != 1 else ""),
         file=sys.stderr,
@@ -217,6 +227,7 @@ def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
         rank_by_leaf=args.rank_leaf,
         rank_fill=args.rank_fill,
         bench_drop=args.bench_drop,
+        deepen=args.deepen,
         depth=args.depth,
         solve_restricted=args.solve_restricted,
         indices=drawn,
@@ -432,6 +443,7 @@ def main() -> None:
     try:
         parse_rank_fill(args.rank_fill)
         parse_bench_drop(args.bench_drop)
+        parse_deepen(args.deepen)
     except ValueError as problem:
         ap.error(str(problem))
     if args.pool is not None:
@@ -446,6 +458,9 @@ def main() -> None:
         # The same for the belief: the roster path's `generate` takes no drop.
         ap.error("--bench-drop is the pool path's (IKA-283); the roster path believes "
                  "every completion")
+    if args.deepen != DEFAULT_DEEPEN:
+        # The same for the deepening: the roster path's `generate` takes no budget.
+        ap.error("--deepen is the pool path's (IKA-33); the roster path searches at depth 1")
     if args.record_rank_scores:
         ap.error("--record-rank-scores is the pool path's (IKA-278)")
     if args.roster is None:

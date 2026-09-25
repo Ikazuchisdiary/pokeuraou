@@ -63,6 +63,9 @@ AGENT_ARGS = (
     # Which completions a hidden-bench belief leaves out (IKA-283). Its default is what
     # ships, so omitting it drifts nothing; a tool that passes a drop plays another game.
     "bench_drop",
+    # A best-first deepening budget in cells (IKA-33). Its default is what ships (0, off),
+    # so omitting it drifts nothing; a tool that passes a budget plays another search.
+    "deepen",
 )
 #: One argument a tool may omit for a reason, where excusing the whole file in `EXPECTED`
 #: would also excuse every other argument it might stop passing later.

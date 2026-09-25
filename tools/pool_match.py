@@ -46,6 +46,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from pokeuraou.benchflags import add_bench_flags, require_bench  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
+from pokeuraou.deepen import DEFAULT_DEEPEN, parse_deepen  # noqa: E402
 from pokeuraou.encode import Encoder, EncodingRules  # noqa: E402
 from pokeuraou.hidden import DEFAULT_BENCH_DROP, parse_bench_drop  # noqa: E402
 from pokeuraou.payoff import HP_SHARE  # noqa: E402
@@ -151,6 +152,12 @@ def main(argv: list[str] | None = None) -> None:
                     "the heaviest P%%; the heaviest stays (IKA-283)")
     ap.add_argument("--baseline-bench-drop", default=DEFAULT_BENCH_DROP,
                     help="same for the other arm")
+    ap.add_argument("--deepen", default=DEFAULT_DEEPEN,
+                    help="how the tested arm deepens each move decision best first after "
+                    "the depth-1 solve, where no bench is hidden: m<N> / r<N> spend N "
+                    "cells and read the root whole / restricted (IKA-33); none is off")
+    ap.add_argument("--baseline-deepen", default=DEFAULT_DEEPEN,
+                    help="same for the other arm")
     ap.add_argument("--depth", type=int, default=1, choices=(1, 2),
                     help="the tested arm's search depth at move nodes. 2 needs "
                     "--solve-restricted: under a hidden bench that is the only depth-2 "
@@ -197,6 +204,11 @@ def main(argv: list[str] | None = None) -> None:
             parse_rank_fill(fill)
         except ValueError as problem:
             ap.error(str(problem))
+    for label in (args.deepen, args.baseline_deepen):
+        try:
+            parse_deepen(label)
+        except ValueError as problem:
+            ap.error(str(problem))
     for drop in (args.bench_drop, args.baseline_bench_drop):
         try:
             parse_bench_drop(drop)
@@ -240,7 +252,7 @@ def main(argv: list[str] | None = None) -> None:
         name=value_name, evaluate=value,
         solver=solver_for(value, value_name, args.selection_store),
         limit=args.limit, rank_by_leaf=args.rank_leaf, rank_fill=args.rank_fill,
-        bench_drop=args.bench_drop, depth=args.depth,
+        bench_drop=args.bench_drop, deepen=args.deepen, depth=args.depth,
         solve_restricted=args.solve_restricted,
     )
     other_limit = args.limit if args.baseline_limit is None else args.baseline_limit
@@ -249,6 +261,7 @@ def main(argv: list[str] | None = None) -> None:
                         limit=other_limit, rank_by_leaf=args.baseline_rank_leaf,
                         rank_fill=args.baseline_rank_fill,
                         bench_drop=args.baseline_bench_drop,
+                        deepen=args.baseline_deepen,
                         depth=args.baseline_depth,
                         solve_restricted=args.baseline_solve_restricted)
     else:
@@ -265,6 +278,7 @@ def main(argv: list[str] | None = None) -> None:
             limit=other_limit, rank_by_leaf=args.baseline_rank_leaf,
             rank_fill=args.baseline_rank_fill,
             bench_drop=args.baseline_bench_drop,
+            deepen=args.baseline_deepen,
             depth=args.baseline_depth,
             solve_restricted=args.baseline_solve_restricted,
         )
@@ -280,6 +294,7 @@ def main(argv: list[str] | None = None) -> None:
             f"{'leaf' if arm.rank_by_leaf else 'damage'} ranking"
             + (f" (fill {arm.rank_fill})" if arm.rank_by_leaf else "")
             + (f" / bench drop {arm.bench_drop}" if hide_bench else "")
+            + f" / deepen {arm.deepen}"
             + (f" / ends {_ends_rule(arm.evaluate)}" if arm.evaluate is not None else "")
             + (f" / depth {arm.depth} restricted" if arm.depth != 1 else "")
             + " / selection "
@@ -297,6 +312,8 @@ def main(argv: list[str] | None = None) -> None:
         tags += f"@rankfill:{tested.rank_fill}"
     if hide_bench and tested.bench_drop != other.bench_drop:
         tags += f"@benchdrop:{tested.bench_drop}"
+    if tested.deepen != other.deepen:
+        tags += f"@deepen:{tested.deepen}"
     if tested_rules != other_rules:
         tags += f"@enc:{tested_rules.label()}"
     if tested.depth != other.depth:
@@ -317,7 +334,7 @@ def main(argv: list[str] | None = None) -> None:
     tally = [[0, 0, 0, 0.0], [0, 0, 0, 0.0]]
     # The echo, per seat and per ARM (0 tested, 1 other): what each arm's side was given.
     echo = [[{"selection": {}, "belief": {}, "leaf": set(), "fill": {}, "drop": {},
-              "depth": {}, "calls": 0}
+              "deepen": {}, "deepened": 0, "depth": {}, "calls": 0}
              for _ in arms]
             for _ in range(2)]
     done = 0
@@ -348,6 +365,13 @@ def main(argv: list[str] | None = None) -> None:
             bucket["fill"][played_fill] = bucket["fill"].get(played_fill, 0) + 1
             played_drop = record.bench_drop[side]
             bucket["drop"][played_drop] = bucket["drop"].get(played_drop, 0) + 1
+            played_deepen = record.deepen[side]
+            bucket["deepen"][played_deepen] = bucket["deepen"].get(played_deepen, 0) + 1
+            # Decisions this side actually deepened, read off the game (IKA-33).
+            bucket["deepened"] += sum(
+                1 for d in record.decisions
+                if d.deepened is not None and d.deepened[side] is not None
+            )
             played_depth = (
                 f"{record.depth[side]}"
                 + ("r" if record.depth[side] != 1 and record.solve_restricted[side] else "")
@@ -389,6 +413,7 @@ def main(argv: list[str] | None = None) -> None:
                 rankings=sides["rankings"],
                 rank_fills=sides["rank_fills"],
                 bench_drops=sides["bench_drops"],
+                deepens=sides["deepens"],
                 depths=sides["depths"],
                 solvers=sides["solvers"],
                 books=sides["selections"],
@@ -418,6 +443,7 @@ def main(argv: list[str] | None = None) -> None:
                 f"{which if arm_index == 0 else 1 - which}, leaf {sorted(bucket['leaf'])}, "
                 f"selection {bucket['selection']}, belief {bucket['belief']}, "
                 f"rank fill {bucket['fill']}, bench drop {bucket['drop']}, "
+                f"deepen {bucket['deepen']} ({bucket['deepened']:,} decisions deepened), "
                 f"depth {bucket['depth']}"
                 + (f", leaf requests {bucket['calls']:,}" if bucket["calls"] else ""),
                 file=sys.stderr,

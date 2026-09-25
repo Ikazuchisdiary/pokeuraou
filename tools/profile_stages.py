@@ -891,7 +891,7 @@ def delivery(
     for argv in workers:
         for flag in ("--limit", "--seed", "--roster", "--selection-book", "--force-lead",
                      "--inference-arm", "--value", "--pool", "--selection-store",
-                     "--rank-fill", "--bench-drop", "--depth"):
+                     "--rank-fill", "--bench-drop", "--deepen", "--depth"):
             value = _flag(argv, flag)
             seen.setdefault(flag, {})
             seen[flag][str(value)] = seen[flag].get(str(value), 0) + 1
