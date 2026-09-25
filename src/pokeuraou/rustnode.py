@@ -686,6 +686,242 @@ class RustNode:
             raise RuntimeError(f"writing to the Rust node failed: {failure[0]}")
         return answers
 
+    def _exchange_list(
+        self,
+        kind: str,
+        requests: list[dict[str, Any]],
+        extra: dict[str, Any] | None = None,
+        payloads: list[bytes] | None = None,
+    ) -> dict[str, Any]:
+        """Many requests in one line, `{"kind": kind, "requests": [...]}` (IKA-295).
+
+        Each request is written as `_payload` writes it alone -- a held position's text
+        where its dict would be -- so each is the question its own line would have asked
+        (`payloads`, when the caller has written them already). One header line comes
+        back; `many` carries every answer in it, `fills` names each node's header and the
+        body follows as one.
+        """
+        with timing.stage("rust.ask"):
+            head = json.dumps({"kind": kind, **(extra or {})}, ensure_ascii=False)
+            if payloads is None:
+                payloads = [_payload(request) for request in requests]
+            payload = (
+                head[:-1].encode("utf-8") + b',"requests":[' + b",".join(payloads) + b"]}"
+            )
+        if timing.DUPES:
+            for request in requests:
+                _note_repeat(request)
+        timing.count(f"port.{kind}.lines")
+        timing.count(f"port.{kind}.requests", len(requests))
+        self._process.stdin.write(payload + b"\n")
+        self._process.stdin.flush()
+        line = self._with_deadline(self._process.stdout.readline, "header")
+        if not line:
+            raise RuntimeError(f"the Rust node process stopped: {self._stderr_text()}")
+        with timing.stage("rust.header"):
+            response = json.loads(line.decode("utf-8"))
+        if "error" in response:
+            raise RuntimeError(f"the Rust node refused the request: {response['error']}")
+        return response
+
+    def _many(
+        self, requests: list[dict[str, Any]], payloads: list[bytes] | None = None
+    ) -> list[dict[str, Any]]:
+        """`many`: header-only requests answered in one line each way, in order."""
+        if not requests:
+            return []
+        answers = self._exchange_list("many", requests, payloads=payloads)["answers"]
+        if len(answers) != len(requests):
+            raise RuntimeError(f"`many` answered {len(answers)} of {len(requests)} requests")
+        for answer in answers:
+            if "error" in answer:
+                raise RuntimeError(f"the Rust node refused the request: {answer['error']}")
+        return answers
+
+    @timing.timed("rust.score")
+    def score_many(
+        self, asks: Sequence[tuple[Position, int, list[SideAction]]]
+    ) -> list[list[tuple[float, list[tuple[int, int, bool, float, bool]]]] | None]:
+        """`score` for many pools in one crossing (IKA-295): each answer is `score`'s.
+
+        A request this decision already had the answer to (`hold_positions`) is answered
+        from it and not sent, and every fresh answer is kept, as `_exchange` does alone.
+        """
+        requests = [
+            {
+                "kind": "score",
+                "position": _position(pos),
+                "side": side,
+                "candidates": [[dump_action(a) for a in c.slots] for c in candidates],
+            }
+            for pos, side, candidates in asks
+        ]
+        responses: list[dict[str, Any] | None] = [None] * len(requests)
+        missing: list[int] = []
+        payloads: dict[int, bytes] = {}
+        for index, request in enumerate(requests):
+            with timing.stage("rust.ask"):
+                payload = _payload(request)
+            kept = _answered(request, payload)
+            if kept is not None:
+                responses[index] = kept
+            else:
+                missing.append(index)
+                payloads[index] = payload
+        answered = self._many(
+            [requests[index] for index in missing], [payloads[index] for index in missing]
+        )
+        for index, response in zip(missing, answered, strict=True):
+            _keep(requests[index], payloads[index], response)
+            responses[index] = response
+        out: list = []
+        for response in responses:
+            if response.get("refused"):
+                out.append(None)
+                continue
+            out.append(
+                [
+                    (
+                        float(score),
+                        [(int(a), int(b), bool(c), float(d), bool(e)) for a, b, c, d, e in parts],
+                    )
+                    for score, parts in zip(response["scores"], response["detail"], strict=True)
+                ]
+            )
+        return out
+
+    @timing.timed("rust.turn")
+    def turn_many(
+        self, asks: Sequence[tuple[Position, list[SideAction]]], budget: Budget, *, full: bool
+    ) -> list[PortTurn | str]:
+        """`turn` for many (position, actions) in one crossing (IKA-295). A refused turn is
+        its refusal's text in place of the answer, where `turn` would have returned None."""
+        answers = self._many(
+            [
+                {
+                    "kind": "turn",
+                    "position": _position(pos),
+                    "actions": [[dump_action(a) for a in side.slots] for side in actions],
+                    "budget": dump_budget(budget),
+                    "full": full,
+                    "select": None,
+                    "events": False,
+                }
+                for pos, actions in asks
+            ]
+        )
+        return [
+            str(answer["refused"]) if answer.get("refused") else PortTurn.read(answer)
+            for answer in answers
+        ]
+
+    @timing.timed("rust.fill")
+    def fill_encoded_many(
+        self,
+        asks: Sequence[tuple[Position, list[SideAction], list[SideAction]]],
+        budget: Budget,
+        *,
+        rules: Any = None,  # noqa: ANN401 - EncodingRules
+        links: Sequence[dict[str, Any] | None] | None = None,
+    ) -> list[EncodedNode]:
+        """`fill_encoded` of many whole nodes in one crossing (IKA-295).
+
+        Each node is the port's `fill_encoded` of its own request, and its arrays are the
+        bytes its own crossing would have carried: the body is the nodes' bodies one after
+        another, cut here at each node's `bytes`. The counts and clocks `fill_encoded` keeps
+        are kept per node, so a table reads the same; the crossing's own are once.
+
+        `links[n]`, when given, is `{"keep": True}` for a node a later one reads its turns
+        off, or `{"like": {"node": m, "side": s, "slots": [...]}}` for a node that may read
+        its cells' turns off node m of this crossing (the port checks that the two
+        positions differ only in side s's hidden slots, and each turn that no branch
+        touched them).
+        """
+        if not asks:
+            return []
+        started = timing.clock()
+        wants_old = bool(rules is not None and rules.mega_from_slots)
+        requests = []
+        for pos, ours, theirs in asks:
+            request = {
+                "position": _position(pos),
+                "ours": [[dump_action(a) for a in side.slots] for side in ours],
+                "theirs": [[dump_action(a) for a in side.slots] for side in theirs],
+                "budget": dump_budget(budget),
+                "objectives": [],
+                "encode": True,
+            }
+            if wants_old:
+                request["encoding"] = rules.to_request()
+            link = links[len(requests)] if links is not None else None
+            if link:
+                request.update(link)
+            requests.append(request)
+        extra = {}
+        if not self._shm_off:
+            extra["shm"] = (
+                {"name": self._shm.name, "bytes": self._shm.size}
+                if self._shm is not None
+                else {"name": None, "bytes": 0}
+            )
+        header = self._exchange_list("fills", requests, extra)
+        count = int(header["bytes"])
+        road, body = self._body(header, count)
+        heads = header["nodes"]
+        if len(heads) != len(asks):
+            raise RuntimeError(f"`fills` answered {len(heads)} of {len(asks)} nodes")
+        nodes: list[EncodedNode] = []
+        # Each node's arrays are views of its stretch of the one body, as a node's own
+        # crossing gives views of its own; the body goes when the last of them does.
+        whole = memoryview(body)
+        at = 0
+        for head in heads:
+            size = int(head["bytes"])
+            node = EncodedNode.unpack(head, whole[at : at + size])
+            at += size
+            if wants_old and node.mega_from_slots is not True:
+                raise RuntimeError(
+                    "the Rust node was asked for the revision-1 can_mega rule and did not say "
+                    f"it applied it (echo {node.mega_from_slots!r}); the binary predates "
+                    "IKA-141 -- rebuild it"
+                )
+            timing.add("rust.child.resolve", node.resolve_us / 1e6)
+            timing.add("rust.child.encode", node.encode_us / 1e6)
+            timing.count("leaves.offered", int(head.get("offered", 0)))
+            timing.count("leaves.stored", int(head["leaves"]))
+            if "readOff" in head:
+                # Cells whose turn the port read off an earlier node; null, a node it could
+                # not read anything off (the positions were not two completions of one).
+                if head["readOff"] is None:
+                    timing.count("fill.like.refused")
+                else:
+                    timing.count("fill.like")
+                    timing.count("fill.cells.read_off", int(head["readOff"]))
+            if timing.ON:
+                used = timing.current_purpose()
+                timing.add(
+                    f"rust.child@{used}",
+                    (node.resolve_us + node.encode_us + node.header_us) / 1e6,
+                )
+                timing.count("fills")
+                timing.count("fill.cells", len(node.exact) * len(node.exact[0]) if node.exact else 0)
+                timing.count("fill.leaves", int(head["leaves"]))
+            nodes.append(node)
+        if at != count:
+            raise RuntimeError(f"`fills` sent {count} bytes for nodes of {at}")
+        del body, whole
+        parse_us = float(header.get("parseUs", 0.0))
+        header_us = float(header.get("headerUs", 0.0))
+        timing.add("rust.child.parse", parse_us / 1e6)
+        timing.add("rust.child.header", header_us / 1e6)
+        timing.count("body.bytes", count)
+        timing.count("body.shm" if road == "shm" else "body.pipe")
+        if timing.ON:
+            used = timing.current_purpose()
+            timing.add(f"rust.fill@{used}", timing.clock() - started)
+            timing.add(f"rust.child@{used}", (parse_us + header_us) / 1e6)
+        return nodes
+
     @timing.timed("rust.leads")
     def apply_lead_abilities_many(self, positions: Sequence[Position]) -> list[PortPhase | None]:
         """`apply_lead_abilities` without a generator, for many positions in one go."""

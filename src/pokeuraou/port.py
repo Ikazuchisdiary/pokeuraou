@@ -101,6 +101,32 @@ def turn(
     return ask(reg, call)
 
 
+def turns(
+    reg: Regulation,
+    asks: Sequence[tuple[Position, Sequence[SideAction]]],
+    budget: Budget,
+    *,
+    full: bool = True,
+) -> list[PortTurn | PortRefused]:
+    """`turn` of every (position, actions) in one crossing (IKA-295).
+
+    Each answer is the one `turn` would have given alone; a refused one is the
+    `PortRefused` that `turn` would have raised, handed back in its place so that the
+    caller raises it where it would have been met.
+    """
+    if not asks:
+        return []
+
+    def call(node: RustNode) -> list[PortTurn | PortRefused]:
+        answers = node.turn_many([(pos, list(actions)) for pos, actions in asks], budget, full=full)
+        return [
+            PortRefused(f"the port refused a turn: {answer}") if isinstance(answer, str) else answer
+            for answer in answers
+        ]
+
+    return ask(reg, call)
+
+
 def weights(reg: Regulation, pos: Position, actions: Sequence[SideAction], budget: Budget):  # noqa: ANN201
     """The turn's branch and pause weights, without the positions (`RustNode.resolve`)."""
 
@@ -587,6 +613,57 @@ def pending_payoff(
     return PendingPayoff(filled, (len(ours), len(theirs)))
 
 
+def pending_payoffs(
+    reg: Regulation,
+    asks: Sequence[tuple[Position, Sequence[SideAction], Sequence[SideAction]]],
+    evaluate: Callable[[list[Position]], np.ndarray],
+    *,
+    budget: Budget,
+    links: Sequence[dict[str, Any] | None] | None = None,
+) -> list[PendingPayoff | PortRefused] | None:
+    """`pending_payoff` of many nodes in one crossing to the port (IKA-295), or None when
+    `evaluate` does not take that road.
+
+    Each node is `_fill_encoded`'s of its own request -- the same arrays, spans, folds and
+    notes -- and a node the port refused is the `PortRefused` that `pending_payoff` would
+    have raised, in its place. `links` lets a node read its cells' turns off an earlier
+    node of the crossing (`RustNode.fill_encoded_many`); what it reads is what it would
+    have resolved.
+    """
+    names = objective_names([evaluate])
+    if names is not None and set(names) <= PORTED_OBJECTIVES:
+        return None
+    plan = encoded_leaf_plan([evaluate])
+    if plan is None or plan[0][1] is None:
+        return None
+    if not asks:
+        return []
+    from .encode import rules_of
+
+    scorer = plan[0][1]
+    rules = rules_of(scorer)
+    filled = ask(
+        reg,
+        lambda node: node.fill_encoded_many(
+            [(pos, list(ours), list(theirs)) for pos, ours, theirs in asks],
+            budget,
+            rules=rules,
+            links=links,
+        ),
+    )
+    out: list[PendingPayoff | PortRefused] = []
+    for node, (_pos, ours, theirs) in zip(filled, asks, strict=True):
+        try:
+            raise_refused(node.refused)
+        except PortRefused as refused:
+            out.append(refused)
+            continue
+        note_port_rule([scorer], node)
+        timing.count("leaves.node", len(node.encoded.species))
+        out.append(PendingPayoff(node, (len(ours), len(theirs))))
+    return out
+
+
 def score_segments(
     evaluate: Callable[[list[Position]], np.ndarray], segments: Sequence[Any]
 ) -> list[np.ndarray]:
@@ -746,6 +823,7 @@ __all__ = [
     "batched_payoffs",
     "branch",
     "pending_payoff",
+    "pending_payoffs",
     "replacements_needed",
     "resolve_replacements",
     "resume",
@@ -753,5 +831,6 @@ __all__ = [
     "score_segments",
     "turn",
     "turn_leaves",
+    "turns",
     "weights",
 ]

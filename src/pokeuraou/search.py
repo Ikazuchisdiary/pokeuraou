@@ -743,6 +743,13 @@ def _kept_branches(  # noqa: PLR0913 - one cell's turn and the branch knob
     None when the cell cannot be refined. The turn's notes go into `unmodelled`."""
     # Every branch, from the port (IKA-209; it was Python's `resolve_turn`).
     result = port.turn(reg, pos, [ours, theirs], budget, full=True)
+    return _kept_from(result, sub_branches, unmodelled)
+
+
+def _kept_from(
+    result: port.PortTurn, sub_branches: int, unmodelled: set[str]
+) -> tuple[list, np.ndarray] | None:
+    """`_kept_branches` of a turn already resolved."""
     unmodelled.update(result.unmodelled)
     if result.suspended or not result.outcomes:
         # A self-switching move pauses the turn for a replacement choice, which is a
@@ -797,7 +804,158 @@ class _Cell:
     subs: list[_Sub] = field(default_factory=list)
 
 
-def _refine_cells(  # noqa: PLR0913 - the cells and the depth-2 knobs
+#: Sub-games filled per crossing to the port (IKA-295). Each is a node the size of a
+#: small matrix (a few hundred leaves); a crossing of eight holds about as many rows as
+#: the scoring below lets wait (`GATHER_ROWS`), so a worker holds at most about twice what
+#: it held before, where a whole pass in one crossing would be ten times that.
+FILL_BATCH = 8
+
+
+@dataclass
+class TurnShare:
+    """How a refined cell's turn may be read off another completion's (IKA-295).
+
+    The cells of a hidden depth-2 pass are (i, j, k): the same two actions in every
+    completion k of the hidden side's bench. Where the two actions cannot reach that bench
+    (`beliefnode.reaches_bench`), the turn is the same turn in every completion and only who
+    stands on the bench differs -- `belief_payoffs`' reason for resolving such a cell once,
+    here for the turn a refined cell is sub-solved from. `cache` holds, per `key`, the first
+    completion's position and turn; the others are `beliefnode.turn_in_completion` of it,
+    which also checks, branch by branch, that the turn left the hidden slots as they were.
+    """
+
+    cache: dict
+    #: The two actions, as indices of the node's lists (side 0's row, column).
+    key: tuple[int, int]
+    #: The side whose hidden slots the completions fill, and the slots.
+    side: int
+    slots: tuple[int, ...]
+    #: Whether `reaches_bench` clears the two actions; otherwise the cell resolves its own.
+    clean: bool
+
+
+def _cell_reaches_bench(  # noqa: PLR0913 - one cell and the hidden slots
+    reg: Regulation,
+    ours: SideAction,
+    theirs: SideAction,
+    side: int,
+    slots: tuple[int, ...],
+    position: Position,
+) -> bool:
+    """`beliefnode.reaches_bench` for one cell and one side's hidden slots: whether the two
+    actions could put one of them on the field (then the cell's turn is its own)."""
+    from .beliefnode import reaches_bench
+
+    return bool(reaches_bench(reg, [ours], [theirs], {side: slots}, position)[0, 0])
+
+
+def _cell_turns(
+    reg: Regulation,
+    cells: Sequence[tuple[Position, SideAction, SideAction]],
+    budget: Budget,
+    shares: Sequence[TurnShare | None] | None,
+) -> list[port.PortTurn | port.PortRefused]:
+    """Every cell's turn, `port.turn(full=True)`'s answer each, in one crossing (IKA-295).
+
+    A cell with a clean `TurnShare` whose key another completion has already resolved --
+    earlier in the pass, in an earlier pass, or first in this one -- is read off that turn
+    instead. If the read finds a hidden slot the turn touched, the cell is resolved on its
+    own after all (a second crossing, for those alone).
+    """
+    from .beliefnode import turn_in_completion
+
+    answers: list = [None] * len(cells)
+    asked: list[int] = []
+    following: list[int] = []
+    leading: dict[tuple[int, int], int] = {}
+    for index, _cell in enumerate(cells):
+        share = shares[index] if shares is not None else None
+        if share is not None and share.clean:
+            if share.key in share.cache or share.key in leading:
+                following.append(index)
+                continue
+            leading[share.key] = index
+        asked.append(index)
+
+    def resolve(indices: list[int]) -> None:
+        found = port.turns(
+            reg, [(cells[i][0], [cells[i][1], cells[i][2]]) for i in indices], budget, full=True
+        )
+        for index, answer in zip(indices, found, strict=True):
+            answers[index] = answer
+            share = shares[index] if shares is not None else None
+            if (
+                share is not None
+                and share.clean
+                and not isinstance(answer, port.PortRefused)
+                and share.key not in share.cache
+            ):
+                share.cache[share.key] = (cells[index][0], answer)
+
+    resolve(asked)
+    again: list[int] = []
+    for index in following:
+        share = shares[index]
+        reference = share.cache.get(share.key)
+        made = (
+            None
+            if reference is None
+            else turn_in_completion(reference[0], reference[1], cells[index][0], share.side, share.slots)
+        )
+        if made is None:
+            again.append(index)
+            continue
+        answers[index] = made
+    if timing.ON:
+        timing.count("depth2.turns", len(asked) + len(again))
+        timing.count("depth2.turns.shared", len(following) - len(again))
+        timing.count("depth2.turns.touched", len(again))
+        if shares is not None:
+            timing.count(
+                "depth2.turns.dirty", sum(1 for s in shares if s is not None and not s.clean)
+            )
+    if again:
+        resolve(again)
+    return answers
+
+
+def _fill_chunks(to_fill: list, related: list) -> list[tuple[list, list]]:
+    """The sub-games to fill, cut into crossings of about `FILL_BATCH`, with each node's link.
+
+    The same branch of the same refined cell in several completions is one position but
+    for the hidden bench, and most of its cells' turns are the same turns (`TurnShare`'s
+    reason, a turn further down). So those sub-games go in one crossing, the first kept
+    and the rest reading their turns off it (`RustNode.fill_encoded_many`); the port says
+    which cells it could read and resolves the others. The order of the fills changes
+    nothing: each node is its own request and its own block of leaves.
+    """
+    groups: dict = {}
+    for index, link in enumerate(related):
+        key = ("alone", index) if link is None else link[0]
+        groups.setdefault(key, []).append(index)
+    out: list[tuple[list, list]] = []
+    chunk: list = []
+    links: list = []
+    for members in groups.values():
+        if chunk and len(chunk) + len(members) > FILL_BATCH:
+            out.append((chunk, links))
+            chunk, links = [], []
+        first = len(chunk)
+        for position, index in enumerate(members):
+            chunk.append(to_fill[index])
+            if len(members) < 2:
+                links.append(None)
+            elif position == 0:
+                links.append({"keep": True})
+            else:
+                _key, side, slots = related[index]
+                links.append({"like": {"node": first, "side": side, "slots": list(slots)}})
+    if chunk:
+        out.append((chunk, links))
+    return out
+
+
+def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knobs, four stages
     reg: Regulation,
     cells: Sequence[tuple[Position, SideAction, SideAction]],
     evaluate: LeafEvaluator,
@@ -805,6 +963,7 @@ def _refine_cells(  # noqa: PLR0913 - the cells and the depth-2 knobs
     budget: Budget,
     sub_limit: int,
     sub_branches: int,
+    shares: Sequence[TurnShare | None] | None = None,
 ) -> list[tuple[float | None, set[str], int]]:
     """`_refined_value` of every cell, with all their sub-games' leaves in one call (IKA-291).
 
@@ -821,7 +980,15 @@ def _refine_cells(  # noqa: PLR0913 - the cells and the depth-2 knobs
     them into one forward pass would be cheaper still and is not the same leaf: a row's
     value moves with the size of its batch (IKA-291 measured 37 different answers for the
     same rows between 8 and 988 rows), and depth 2 was accepted on games these values made.
+
+    And the port is asked by the stage, not by the sub-game (IKA-295): every cell's turn in
+    one crossing (`_cell_turns`, which reads a turn off another completion's where `shares`
+    allows), both sides' damage scores for every branch in one (`narrow_many`), and the
+    sub-games' nodes `FILL_BATCH` at a time (`port.pending_payoffs`). Each answer is the one
+    its own crossing gave, and a refusal is raised or kept where `_refined_value` met it.
     """
+    from .narrow import narrow_many
+
     work: list[_Cell] = []
     waiting: list[port.PendingPayoff] = []
     held = 0
@@ -835,46 +1002,94 @@ def _refine_cells(  # noqa: PLR0913 - the cells and the depth-2 knobs
             waiting.clear()
             held = 0
 
-    for pos, ours, theirs in cells:
+    # 1. The turns. A refused one is raised where `_kept_branches` raised it: first in order.
+    kept_positions: list[list[Position]] = []
+    for result in _cell_turns(reg, cells, budget, shares):
+        if isinstance(result, port.PortRefused):
+            raise result
         cell = _Cell(unmodelled=set())
         work.append(cell)
-        kept = _kept_branches(reg, pos, ours, theirs, budget, sub_branches, cell.unmodelled)
+        kept = _kept_from(result, sub_branches, cell.unmodelled)
         if kept is None:
+            kept_positions.append([])
             continue
         branches, cell.weights = kept
-        for branch in branches:
-            sub = _gather_subgame(reg, branch.position, evaluate, budget, sub_limit)
+        kept_positions.append([branch.position for branch in branches])
+
+    # 2. Both sides' menus at every branch that has a game left in it.
+    asks = [
+        (pos, side)
+        for positions in kept_positions
+        for pos in positions
+        if not pos.ended
+        for side in (0, 1)
+    ]
+    menus = iter(narrow_many(reg, asks, limit=sub_limit) if asks else [])
+
+    # 3. Each cell's sub-games in `_refined_value`'s order, up to the first that stops it.
+    to_fill: list[tuple[_Sub, Position, list[SideAction], list[SideAction]]] = []
+    #: Per sub-game to fill, the completions' shared key: its cell's actions and branch.
+    related: list[tuple | None] = []
+    for index, (cell, positions) in enumerate(zip(work, kept_positions, strict=True)):
+        share = shares[index] if shares is not None else None
+        menus_of = [
+            None if pos.ended else (next(menus), next(menus)) for pos in positions
+        ]
+        for branch, (pos, menu) in enumerate(zip(positions, menus_of, strict=True)):
+            if menu is None:
+                sub = _Sub(value=float(evaluate([pos])[0]), ended=True)
+            else:
+                sub = _Sub()
+                for narrowed in menu:
+                    if isinstance(narrowed, port.PortRefused):
+                        sub.error = narrowed
+                        break
+                    if isinstance(narrowed, Exception):
+                        raise narrowed
+                if sub.error is None:
+                    row, col = menu[0].actions, menu[1].actions
+                    if not row or not col:
+                        sub.empty = True
+                    else:
+                        to_fill.append((sub, pos, row, col))
+                        related.append(
+                            None
+                            if share is None or not share.clean
+                            else ((share.key, branch), share.side, share.slots)
+                        )
             cell.subs.append(sub)
-            if sub.pending is not None:
-                waiting.append(sub.pending)
-                held += sub.pending.rows
-                if held >= GATHER_ROWS:
-                    score()
             if sub.empty or sub.error is not None:
                 # `_refined_value` stops at this branch; the ones after it are not asked.
                 break
+
+    # 4. The sub-games' nodes, a crossing per `FILL_BATCH`, scored as the rows gather.
+    for chunk, links in _fill_chunks(to_fill, related):
+        filled = port.pending_payoffs(
+            reg, [(pos, row, col) for _sub, pos, row, col in chunk], evaluate, budget=budget,
+            links=links,
+        )
+        if filled is None:
+            # No forward pass to share: `_subgame_value`'s own road, a node at a time.
+            for sub, pos, row, col in chunk:
+                try:
+                    sub.payoff, sub.notes = batched_payoff(
+                        reg, pos, row, col, evaluate, budget=budget
+                    )
+                except port.PortRefused as refused:
+                    sub.error = refused
+            continue
+        for (sub, _pos, _row, _col), pending in zip(chunk, filled, strict=True):
+            if isinstance(pending, port.PortRefused):
+                sub.error = pending
+                continue
+            sub.pending = pending
+            sub.notes = pending.unmodelled
+            waiting.append(pending)
+            held += pending.rows
+        if held >= GATHER_ROWS:
+            score()
     score()
     return [_fold_cell(cell) for cell in work]
-
-
-def _gather_subgame(
-    reg: Regulation, pos: Position, evaluate: LeafEvaluator, budget: Budget, sub_limit: int
-) -> _Sub:
-    """`_subgame_value` up to the leaf."""
-    if pos.ended:
-        return _Sub(value=float(evaluate([pos])[0]), ended=True)
-    try:
-        row = narrow(reg, pos, 0, limit=sub_limit).actions
-        col = narrow(reg, pos, 1, limit=sub_limit).actions
-        if not row or not col:
-            return _Sub(empty=True)
-        pending = port.pending_payoff(reg, pos, row, col, evaluate, budget=budget)
-        if pending is None:
-            payoff, notes = batched_payoff(reg, pos, row, col, evaluate, budget=budget)
-            return _Sub(payoff=payoff, notes=notes)
-    except port.PortRefused as refused:
-        return _Sub(error=refused)
-    return _Sub(pending=pending, notes=pending.unmodelled)
 
 
 def _fold_cell(cell: _Cell) -> tuple[float | None, set[str], int]:
@@ -1086,10 +1301,29 @@ def _restricted_belief(  # noqa: PLR0913 - one side's Bayesian node and the dept
     answer: BeliefResult | None = None
     subgames = 0
     converged = False
+    # The refined cells' turns, per pair of actions, across the completions and the passes
+    # (IKA-295): the completions differ only in the other side's hidden slots.
+    hidden_side = 1 - side
+    turns: dict[tuple[int, int], tuple] = {}
+    clean: dict[tuple[int, int], bool] = {}
+
+    def share_of(item, ours: int, theirs: int) -> TurnShare | None:  # noqa: ANN001 - Completion
+        if item.exact or not item.slots:
+            return None
+        if (ours, theirs) not in clean:
+            clean[(ours, theirs)] = not _cell_reaches_bench(
+                reg, row[ours], col[theirs], hidden_side, tuple(item.slots), item.position
+            )
+        return TurnShare(
+            cache=turns, key=(ours, theirs), side=hidden_side, slots=tuple(item.slots),
+            clean=clean[(ours, theirs)],
+        )
+
     for _attempt in range(passes):
         todo: list[tuple[int, int, int, tuple]] = []
         #: The cells of this pass no answer has resolved yet, in the order they are met.
         asked: dict[tuple, tuple[Position, SideAction, SideAction]] = {}
+        shares: list[TurnShare | None] = []
         for k, item in enumerate(items):
             for i in rows:
                 for j in cols[k]:
@@ -1100,13 +1334,14 @@ def _restricted_belief(  # noqa: PLR0913 - one side's Bayesian node and the dept
                     key = (id(item.position), id(evaluate), ours, theirs)
                     if key not in memo and key not in asked:
                         asked[key] = (item.position, row[ours], col[theirs])
+                        shares.append(share_of(item, ours, theirs))
                     todo.append((i, j, k, key))
         if asked:
             # Every completion's sub-games of the pass in one call to the leaf (IKA-291).
             with timing.purpose("matrix"):
                 found = _refine_cells(
                     reg, list(asked.values()), evaluate, budget=budget,
-                    sub_limit=sub_limit, sub_branches=sub_branches,
+                    sub_limit=sub_limit, sub_branches=sub_branches, shares=shares,
                 )
             for key, answer in zip(asked, found, strict=True):
                 memo[key] = answer
