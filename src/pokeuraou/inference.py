@@ -727,8 +727,11 @@ def served_model(value: Any):
 GRAPH_ROWS = int(os.environ.get("POKEURAOU_GRAPH_ROWS", "512"))
 
 #: Graphs kept per arm (and index dtype), least recently replayed dropped first. Each holds
-#: about 0.65 MB of host memory (IKA-291: 512 of them measured at +361 MB).
-GRAPH_CACHE = int(os.environ.get("POKEURAOU_GRAPH_CACHE", "256"))
+#: about 0.65 MB of host memory (IKA-291: 512 of them measured at +361 MB). As many as there
+#: are sizes: 48 depth-2 games met 860 sizes over two servers, and a cache of 256 captured
+#: 1,804 times for 1,292 evictions -- 0.546 CPU s a game of server against 0.426 at 512
+#: (0.583 at 128), for 0.2 GB of peak memory.
+GRAPH_CACHE = int(os.environ.get("POKEURAOU_GRAPH_CACHE", "512"))
 
 
 class _Graphs:
