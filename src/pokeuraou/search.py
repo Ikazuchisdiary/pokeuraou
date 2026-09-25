@@ -1008,99 +1008,93 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
 
     # 1. The turns. A refused one is raised where `_kept_branches` raised it: first in order.
     kept_positions: list[list[Position]] = []
-    turns_part = timing.region("d2.turns")
-    turns_part.__enter__()
-    for result in _cell_turns(reg, cells, budget, shares):
-        if isinstance(result, port.PortRefused):
-            raise result
-        cell = _Cell(unmodelled=set())
-        work.append(cell)
-        kept = _kept_from(result, sub_branches, cell.unmodelled)
-        if kept is None:
-            kept_positions.append([])
-            continue
-        branches, cell.weights = kept
-        kept_positions.append([branch.position for branch in branches])
-    turns_part.__exit__(None, None, None)
+    with timing.region("d2.turns"):
+        for result in _cell_turns(reg, cells, budget, shares):
+            if isinstance(result, port.PortRefused):
+                raise result
+            cell = _Cell(unmodelled=set())
+            work.append(cell)
+            kept = _kept_from(result, sub_branches, cell.unmodelled)
+            if kept is None:
+                kept_positions.append([])
+                continue
+            branches, cell.weights = kept
+            kept_positions.append([branch.position for branch in branches])
 
     # 2. Both sides' menus at every branch that has a game left in it.
-    menus_part = timing.region("d2.menus")
-    menus_part.__enter__()
-    asks = [
-        (pos, side)
-        for positions in kept_positions
-        for pos in positions
-        if not pos.ended
-        for side in (0, 1)
-    ]
-    menus = iter(narrow_many(reg, asks, limit=sub_limit) if asks else [])
-
-    # 3. Each cell's sub-games in `_refined_value`'s order, up to the first that stops it.
-    to_fill: list[tuple[_Sub, Position, list[SideAction], list[SideAction]]] = []
-    #: Per sub-game to fill, the completions' shared key: its cell's actions and branch.
-    related: list[tuple | None] = []
-    for index, (cell, positions) in enumerate(zip(work, kept_positions, strict=True)):
-        share = shares[index] if shares is not None else None
-        menus_of = [
-            None if pos.ended else (next(menus), next(menus)) for pos in positions
+    with timing.region("d2.menus"):
+        asks = [
+            (pos, side)
+            for positions in kept_positions
+            for pos in positions
+            if not pos.ended
+            for side in (0, 1)
         ]
-        for branch, (pos, menu) in enumerate(zip(positions, menus_of, strict=True)):
-            if menu is None:
-                sub = _Sub(value=float(evaluate([pos])[0]), ended=True)
-            else:
-                sub = _Sub()
-                for narrowed in menu:
-                    if isinstance(narrowed, port.PortRefused):
-                        sub.error = narrowed
-                        break
-                    if isinstance(narrowed, Exception):
-                        raise narrowed
-                if sub.error is None:
-                    row, col = menu[0].actions, menu[1].actions
-                    if not row or not col:
-                        sub.empty = True
-                    else:
-                        to_fill.append((sub, pos, row, col))
-                        related.append(
-                            None
-                            if share is None or not share.clean
-                            else ((share.key, branch), share.side, share.slots)
-                        )
-            cell.subs.append(sub)
-            if sub.empty or sub.error is not None:
-                # `_refined_value` stops at this branch; the ones after it are not asked.
-                break
-    menus_part.__exit__(None, None, None)
+        menus = iter(narrow_many(reg, asks, limit=sub_limit) if asks else [])
+
+        # 3. Each cell's sub-games in `_refined_value`'s order, up to the first that stops it.
+        to_fill: list[tuple[_Sub, Position, list[SideAction], list[SideAction]]] = []
+        #: Per sub-game to fill, the completions' shared key: its cell's actions and branch.
+        related: list[tuple | None] = []
+        for index, (cell, positions) in enumerate(zip(work, kept_positions, strict=True)):
+            share = shares[index] if shares is not None else None
+            menus_of = [
+                None if pos.ended else (next(menus), next(menus)) for pos in positions
+            ]
+            for branch, (pos, menu) in enumerate(zip(positions, menus_of, strict=True)):
+                if menu is None:
+                    sub = _Sub(value=float(evaluate([pos])[0]), ended=True)
+                else:
+                    sub = _Sub()
+                    for narrowed in menu:
+                        if isinstance(narrowed, port.PortRefused):
+                            sub.error = narrowed
+                            break
+                        if isinstance(narrowed, Exception):
+                            raise narrowed
+                    if sub.error is None:
+                        row, col = menu[0].actions, menu[1].actions
+                        if not row or not col:
+                            sub.empty = True
+                        else:
+                            to_fill.append((sub, pos, row, col))
+                            related.append(
+                                None
+                                if share is None or not share.clean
+                                else ((share.key, branch), share.side, share.slots)
+                            )
+                cell.subs.append(sub)
+                if sub.empty or sub.error is not None:
+                    # `_refined_value` stops at this branch; the ones after it are not asked.
+                    break
 
     # 4. The sub-games' nodes, a crossing per `FILL_BATCH`, scored as the rows gather.
-    fills_part = timing.region("d2.fills")
-    fills_part.__enter__()
-    for chunk, links in _fill_chunks(to_fill, related):
-        filled = port.pending_payoffs(
-            reg, [(pos, row, col) for _sub, pos, row, col in chunk], evaluate, budget=budget,
-            links=links,
-        )
-        if filled is None:
-            # No forward pass to share: `_subgame_value`'s own road, a node at a time.
-            for sub, pos, row, col in chunk:
-                try:
-                    sub.payoff, sub.notes = batched_payoff(
-                        reg, pos, row, col, evaluate, budget=budget
-                    )
-                except port.PortRefused as refused:
-                    sub.error = refused
-            continue
-        for (sub, _pos, _row, _col), pending in zip(chunk, filled, strict=True):
-            if isinstance(pending, port.PortRefused):
-                sub.error = pending
+    with timing.region("d2.fills"):
+        for chunk, links in _fill_chunks(to_fill, related):
+            filled = port.pending_payoffs(
+                reg, [(pos, row, col) for _sub, pos, row, col in chunk], evaluate, budget=budget,
+                links=links,
+            )
+            if filled is None:
+                # No forward pass to share: `_subgame_value`'s own road, a node at a time.
+                for sub, pos, row, col in chunk:
+                    try:
+                        sub.payoff, sub.notes = batched_payoff(
+                            reg, pos, row, col, evaluate, budget=budget
+                        )
+                    except port.PortRefused as refused:
+                        sub.error = refused
                 continue
-            sub.pending = pending
-            sub.notes = pending.unmodelled
-            waiting.append(pending)
-            held += pending.rows
-        if held >= GATHER_ROWS:
-            score()
-    fills_part.__exit__(None, None, None)
+            for (sub, _pos, _row, _col), pending in zip(chunk, filled, strict=True):
+                if isinstance(pending, port.PortRefused):
+                    sub.error = pending
+                    continue
+                sub.pending = pending
+                sub.notes = pending.unmodelled
+                waiting.append(pending)
+                held += pending.rows
+            if held >= GATHER_ROWS:
+                score()
     score()
     with timing.region("d2.fold"):
         return [_fold_cell(cell) for cell in work]
