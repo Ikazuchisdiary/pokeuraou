@@ -1732,6 +1732,7 @@ def _rows(encoded: Any, start: int, count: int) -> Any:  # noqa: ANN401
     return Encoded(
         **{name: getattr(encoded, name)[start : start + count] for name in _ARRAYS},
         unknown_volatiles=dict(encoded.unknown_volatiles),
+        decided=None if encoded.decided is None else encoded.decided[start : start + count],
     )
 
 

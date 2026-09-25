@@ -8,7 +8,7 @@
 use crate::position::Position;
 
 /// 1.0 or 0.0 once the battle is over, so a win is never merely a large payoff.
-fn decided(pos: &Position) -> Option<f64> {
+pub fn decided(pos: &Position) -> Option<f64> {
     if !pos.ended {
         return None;
     }
@@ -49,6 +49,17 @@ pub fn faint_share(pos: &Position) -> f64 {
         return 0.5;
     }
     standing[0] / denominator
+}
+
+/// The leaves the battle ended in, as `[index, 1/0/0.5]` pairs, for the header of an
+/// encoded node. A learned leaf is scored in Python and would otherwise put the net's guess
+/// on a finished battle (IKA-253: 0.54 on a certain loss); these go over it there.
+pub fn decided_leaves<'a>(leaves: impl IntoIterator<Item = &'a Position>) -> Vec<(usize, f64)> {
+    leaves
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, pos)| decided(pos).map(|value| (index, value)))
+        .collect()
 }
 
 pub fn by_name(name: &str) -> Option<fn(&Position) -> f64> {

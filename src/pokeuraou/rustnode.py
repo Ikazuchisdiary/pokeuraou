@@ -285,6 +285,13 @@ class EncodedNode:
             # more than that once they had to be copied into a shared buffer at twice the
             # width on the way to an inference server.
             arrays[name] = flat.reshape(shape)
+        # The leaves the battle ended in, as [index, 1/0/0.5] pairs (IKA-253): a learned leaf
+        # scores those as their result. Read strictly -- a binary that does not send them
+        # would have the net score a finished battle again, silently.
+        decided = np.full(n, np.nan, dtype=np.float64)
+        for index, value in header["decided"]:
+            if int(index) < n:
+                decided[int(index)] = float(value)
         return EncodedNode(
             encoded=Encoded(
                 species=arrays["species"],
@@ -296,6 +303,7 @@ class EncodedNode:
                 side=arrays["side"],
                 field=arrays["field"],
                 unknown_volatiles=dict(header.get("unknownVolatiles", {})),
+                decided=decided,
             ),
             spans=[
                 (int(i), int(j), list(indices), list(w))

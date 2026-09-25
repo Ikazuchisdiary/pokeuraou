@@ -277,6 +277,7 @@ pub fn fill(reg: &Reg, encoder: &Encoder, request: &Request) -> (Value, Encoded,
         "refused": refused,
         "unmodelled": collector.notes.into_iter().collect::<Vec<_>>(),
         "unknownVolatiles": encoded.unknown_volatiles,
+        "decided": crate::objective::decided_leaves(&collector.leaves),
         "leafObjectives": request.objectives,
         // The rule these arrays were encoded under, echoed so the caller can tell a binary
         // that applied it from one that never heard of it (IKA-141).
