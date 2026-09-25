@@ -98,6 +98,14 @@ def _torch_present() -> bool:
     return True
 
 
+def _cuda_present() -> bool:
+    try:
+        import torch
+    except Exception:
+        return False
+    return bool(torch.cuda.is_available())
+
+
 #: Every skip reason the suite can produce, and which of them is a build's job to prevent.
 #: Ordered: the first pattern that matches wins, so the specific ones come first.
 CLASSES: tuple[Class, ...] = (
@@ -156,6 +164,13 @@ CLASSES: tuple[Class, ...] = (
         re.compile(r"could not import 'torch'|needs the optional learn group"),
         "the optional learn group; `uv sync --group learn`",
         probe=_torch_present,
+    ),
+    Class(
+        "cuda",
+        re.compile(r"CUDA graphs need a card"),
+        "a CUDA card; the server's CUDA-graph replays (IKA-291) have nothing to replay on "
+        "without one, and GitHub's runner has none",
+        probe=_cuda_present,
     ),
     Class(
         "cpu-batch",
