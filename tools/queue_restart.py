@@ -21,8 +21,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import Counter
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 
 def _index(raw: bytes, path: Path) -> int:
@@ -45,6 +48,7 @@ def where(out: Path, total: int) -> int:
             path.write_bytes(keep)
             print(f"  {path.name}: dropped a torn last line ({len(data) - len(keep)} bytes, "
                   f"kept in {torn.name})")
+    _repair_rank_files(out)
     first = next((i for i in range(total) if i not in seen), total)
     ahead = sum(1 for i in seen if i >= first)
     duplicates = sum(n - 1 for n in seen.values() if n > 1)
@@ -53,6 +57,34 @@ def where(out: Path, total: int) -> int:
     if first < total:
         print(f"resume with: --first-game {first} --games {total - first}")
     return first
+
+
+def _repair_rank_files(out: Path) -> None:
+    """IKA-278: a torn last gzip member of a rank file, kept beside as ``.torn``."""
+    from pokeuraou.rank_scores import repair
+
+    for path in sorted(out.glob("rank-*.jsonl.gz")):
+        cut = repair(path)
+        if cut:
+            print(f"  {path.name}: dropped a torn last member ({cut} bytes, "
+                  f"kept in {path.name}.torn)")
+
+
+def _move_rank_files(out: Path, resume: Path, tag: str) -> None:
+    """IKA-278: the resume run's rank files, moved in whole under the tag.
+
+    Not filtered: a replayed index is the same game, and `rank_scores.iter_records` keeps
+    the first line of an index.
+    """
+    sources = sorted(resume.glob("rank-worker*.jsonl.gz"))
+    targets = [out / path.name.replace("rank-", f"rank-{tag}-", 1) for path in sources]
+    clash = [t for t in targets if t.exists()]
+    if clash:
+        raise SystemExit(f"{clash[0]} exists; pick another tag")
+    for path, target in zip(sources, targets, strict=True):
+        path.replace(target)
+    if sources:
+        print(f"moved {len(sources)} rank files into {out}")
 
 
 def merge(out: Path, resume: Path, tag: str) -> int:
@@ -85,6 +117,7 @@ def merge(out: Path, resume: Path, tag: str) -> int:
         target.write_bytes(bytes(keep))
         path.unlink()
     (resume / "dropped-duplicates.jsonl").write_bytes(bytes(dropped))
+    _move_rank_files(out, resume, tag)
     print(f"moved {len(sources)} files ({kept} games) into {out}; dropped "
           f"{dropped.count(b'\n')} duplicates; {len(have)} distinct games now")
     return kept

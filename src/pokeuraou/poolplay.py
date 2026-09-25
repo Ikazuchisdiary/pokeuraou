@@ -46,13 +46,14 @@ import json
 import os
 import time
 from collections.abc import Callable, Iterable, Iterator, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 
-from . import timing
+from . import rank_scores, timing
 from .payoff import HP_SHARE, Objective
 from .pool import Pool, draw_pair
 from .regulation import Regulation
@@ -274,8 +275,13 @@ def generate_pool(
     rank_fill: str = DEFAULT_RANK_FILL,
     indices: Iterable[int] | None = None,
     on_finish: Callable[[int], None] | None = None,
+    rank_scores_out: Path | None = None,
 ) -> dict[str, Any]:
     """Plays pool-against-pool games and appends one JSON line per finished game.
+
+    ``rank_scores_out`` (IKA-278), when given, is a second file that gets each written
+    game's leaf rankings (`rank_scores`), written just before the game's own line. It
+    changes no game and no byte of ``out``.
 
     ``selection`` is "solved" (what M-C ships: the selection game solved with the leaf at
     the start of each game, both seats drawn from it, and both seats' bench beliefs taken
@@ -336,6 +342,11 @@ def generate_pool(
         "mirror_draws": 0,
         "selection_seconds": 0.0,
     }
+    writer = rank_scores.Writer(rank_scores_out) if rank_scores_out is not None else None
+    if writer is not None:
+        stats["rank_scores_path"] = str(rank_scores_out)
+        stats["rank_scores_bytes"] = 0
+        stats["rank_scores_repaired"] = writer.repaired
     with out.open("a", encoding="utf-8") as handle:
         for index, rng in scheduled():
             k, a, b = draw_pair(rng, pairs)
@@ -370,24 +381,25 @@ def generate_pool(
                     pick1 = pick_four_indices(rng, len(six1), size=size)
             stats["selection_seconds"] += time.perf_counter() - started
 
-            record = play_game(
-                reg, rng, [six0[i] for i in pick0], [six1[i] for i in pick1],
-                "mirror" if mirror else "pool",
-                objective=objective, search_limit=search_limit, max_turns=max_turns,
-                evaluate=evaluate,
-                rank_by_leaf=rank_by_leaf,
-                policy=policy,
-                rank_fill=rank_fill,
-                sheets=(six0, six1) if hide_bench else None,
-                open_information=not hide_bench,
-                bench_prior=priors,
-                selection=(
-                    [s.species for s in six0],
-                    [s.species for s in six1],
-                    tuple(pick0),
-                    tuple(pick1),
-                ),
-            )
+            with rank_scores.collecting() if writer is not None else nullcontext() as sink:
+                record = play_game(
+                    reg, rng, [six0[i] for i in pick0], [six1[i] for i in pick1],
+                    "mirror" if mirror else "pool",
+                    objective=objective, search_limit=search_limit, max_turns=max_turns,
+                    evaluate=evaluate,
+                    rank_by_leaf=rank_by_leaf,
+                    policy=policy,
+                    rank_fill=rank_fill,
+                    sheets=(six0, six1) if hide_bench else None,
+                    open_information=not hide_bench,
+                    bench_prior=priors,
+                    selection=(
+                        [s.species for s in six0],
+                        [s.species for s in six1],
+                        tuple(pick0),
+                        tuple(pick1),
+                    ),
+                )
             record.selection_source = selection
             if drawn is not None:
                 record.own_selection_policy = [float(x) for x in drawn.our_equilibrium]
@@ -428,11 +440,19 @@ def generate_pool(
                     }
                     if index is not None:
                         payload["gameIndex"] = index
+                    if writer is not None:
+                        # Before the game's own line: a kill between the two leaves a
+                        # ranking whose game the restart replays, not a game without one.
+                        stats["rank_scores_bytes"] += writer.write(
+                            rank_scores.game_line(index, sink, len(record.decisions))
+                        )
                     handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
                     handle.flush()
             if index is not None and on_finish is not None:
                 on_finish(index)
     stats["path"] = str(out)
+    if writer is not None:
+        writer.close()
     if solver is not None:
         stats["solves"] = solver.solves
         stats["solves_reused"] = solver.reused

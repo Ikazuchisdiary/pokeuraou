@@ -145,7 +145,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from . import port, timing
+from . import port, rank_scores, timing
 from .actions import SideAction
 from .budget import Budget
 from .equilibrium import Equilibrium, EquilibriumError, solve
@@ -255,6 +255,7 @@ def leaf_ranking(
         # stages a node's matrix pays for, and IKA-108 asks how the two compare.
         with timing.purpose("rank"):
             payoff, _notes = batched_payoff(reg, pos, ours, theirs, evaluate, budget=budget)
+        rank_scores.saw_fill(side, pool, replies, payoff)  # IKA-278; nothing unless recording
         # `payoff` is always side 0's win probability, so the column player wants it low.
         return payoff.mean(axis=1) if side == 0 else -payoff.mean(axis=0)
 
