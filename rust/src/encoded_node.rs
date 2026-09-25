@@ -134,7 +134,8 @@ impl<'a> Collector<'a> {
                 parts.push(json!([pause.probability, { "leaf": index }]));
                 continue;
             }
-            match self.alternatives(pause) {
+            let shared = crate::resolve::sharing_budget(pause, result.suspended.len());
+            match self.alternatives(shared.as_ref().unwrap_or(pause)) {
                 None => {
                     self.notes.insert("a suspended turn offered no replacement".into());
                     let index = self.add_leaf(pause.turn.pos.clone());
