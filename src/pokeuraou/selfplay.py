@@ -37,7 +37,7 @@ import numpy as np
 from . import port, rank_scores, timing
 from .actions import SideAction, switch_actions_after_faint
 from .budget import Budget
-from .deepen import DEFAULT_DEEPEN, parse_deepen
+from .deepen import DEFAULT_DEEPEN, deepen_spec
 from .equilibrium import EquilibriumError, solve
 from .fold import TurnLeaves
 from .hidden import (
@@ -651,6 +651,19 @@ def _sample_index(rng: np.random.Generator, weights: np.ndarray) -> int:
 RANK_VIEWS = ("heaviest", "first")
 
 
+def _belief_deepen(
+    cells: int, how: dict[str, bool], outside: tuple | None
+) -> dict[str, Any]:
+    """`belief_solve`'s ``deepen`` entry for one side (IKA-294): its cells, reading,
+    swap and oracle candidates (side 0's, side 1's), as `search` takes them."""
+    return {
+        "cells": cells,
+        "reading": "breadth" if how["breadth_only"] else "mixed",
+        "swap": how["swap"],
+        "outside": outside,
+    }
+
+
 def _menus(
     reg: Regulation,
     pos: Position,
@@ -663,6 +676,8 @@ def _menus(
     rank_view: str = "heaviest",
     used: dict[int, tuple[int, tuple[str, ...]]] | None = None,
     rank_fill: str = DEFAULT_RANK_FILL,
+    wide: Sequence[int] = (),
+    wider: dict[int, tuple[list[SideAction], list[SideAction]]] | None = None,
 ) -> tuple[list[SideAction], list[SideAction]]:
     """Both sides' candidate menus, as one agent sees them.
 
@@ -681,18 +696,32 @@ def _menus(
     ``rank_fill`` is how the leaf ranking fills its cells (`search.parse_rank_fill`,
     IKA-268): how many damage replies each candidate is resolved against, and whether at
     this budget or at `Budget.fast`. It changes nothing with the damage or policy ranking.
+
+    ``wide`` asks for the same agent's menus at other widths too, written into ``wider``
+    by width: the candidates of the root's double oracle (IKA-293). They are ranked by
+    the same scores -- the ranking is asked once per side and remembered -- so each is
+    the menu this agent would build at that width. Without it nothing here changes.
     """
     if rank_view not in RANK_VIEWS:
         raise ValueError(f"rank_view {rank_view!r} is not one of {RANK_VIEWS}")
     references, fast_fill = parse_rank_fill(rank_fill)
     rank_budget = Budget.fast() if fast_fill else budget
+    widths = sorted(set(wide))
+    if widths and wider is None:
+        raise ValueError("wide menus need a `wider` to be written into")
     if policy is None and not rank_by_leaf:
         # The damage score reads only the active Pokemon, so it has nothing to be blind
         # about and the true position costs nothing here.
-        return (
+        menus = (
             narrow(reg, pos, 0, limit=limits[0]).actions,
             narrow(reg, pos, 1, limit=limits[1]).actions,
         )
+        for width in widths:
+            wider[width] = (
+                narrow(reg, pos, 0, limit=width).actions,
+                narrow(reg, pos, 1, limit=width).actions,
+            )
+        return menus
 
     def views(side: int) -> list[tuple[Position, float]]:
         """The positions side `side` ranks from.
@@ -758,12 +787,39 @@ def _menus(
             believed_ranking(parts), side, used, spreads, [w for _r, w in parts]
         )
 
-    # A part each (IKA-32): the two sides' menus are independent of each other.
+    if not widths:
+        # A part each (IKA-32): the two sides' menus are independent of each other.
+        with timing.region("menu.side"):
+            first = narrow(reg, pos, 0, limit=limits[0], rank=ranker(0)).actions
+        with timing.region("menu.side"):
+            second = narrow(reg, pos, 1, limit=limits[1], rank=ranker(1)).actions
+        return first, second
+    # The same calls in the same order, each side's ranking remembered for its wider menus.
     with timing.region("menu.side"):
-        first = narrow(reg, pos, 0, limit=limits[0], rank=ranker(0)).actions
+        own_rank = _remembered(ranker(0))
+        own = narrow(reg, pos, 0, limit=limits[0], rank=own_rank).actions
     with timing.region("menu.side"):
-        second = narrow(reg, pos, 1, limit=limits[1], rank=ranker(1)).actions
-    return first, second
+        foe_rank = _remembered(ranker(1))
+        foe = narrow(reg, pos, 1, limit=limits[1], rank=foe_rank).actions
+    for width in widths:
+        wider[width] = (
+            narrow(reg, pos, 0, limit=width, rank=own_rank).actions,
+            narrow(reg, pos, 1, limit=width, rank=foe_rank).actions,
+        )
+    return own, foe
+
+
+def _remembered(rank: Any) -> Any:  # noqa: ANN401
+    """`rank`, asked once per pool: a second menu from the same scores costs no fill."""
+    seen: dict[tuple[str, ...], Any] = {}
+
+    def again(pool: list[SideAction], scored: object = None) -> Any:  # noqa: ANN401
+        key = tuple(action.to_choice() for action in pool)
+        if key not in seen:
+            seen[key] = rank(pool, scored)
+        return seen[key]
+
+    return again
 
 
 def _believed(
@@ -942,7 +998,13 @@ def play_game(
     side's bench is hidden -- the node is then the open game's node, and it is solved as
     one (`search`) instead of as a one-completion Bayesian game; a node with a bench
     still hidden stays at depth 1 (`belief_solve` has no depth, IKA-111). It goes with
-    depth 1 and the full-matrix solve only.
+    depth 1 and the full-matrix solve only. ``m<N>o<W>`` / ``m<N>oall`` also widen the
+    root by its double oracle (IKA-293) over the rest of the agent's own width-W menu
+    (or every legal action), at the same nodes; the recorded menus are then the grown
+    ones the strategies index. A label ending in ``h`` (IKA-294) deepens and widens the
+    nodes with a bench still hidden too: each side that carries it spends its budget on
+    its own Bayesian game (`deepen.deepen_belief`, inside `belief_solve`), and the nodes
+    with no bench hidden are deepened as without the ``h``.
     """
     # Closes the stretch since the last game's last record (IKA-98); the first one ends startup.
     timing.decided("between")
@@ -976,9 +1038,15 @@ def play_game(
     for drop in drops:
         parse_bench_drop(drop)
     deepens = (deepen, deepen) if isinstance(deepen, str) else tuple(deepen)
-    parsed = [parse_deepen(label) for label in deepens]
-    cells = (parsed[0][1], parsed[1][1])
-    deep_restricted = (parsed[0][0] == "restricted", parsed[1][0] == "restricted")
+    specs = [deepen_spec(label) for label in deepens]
+    cells = (specs[0].cells, specs[1].cells)
+    deep_restricted = (specs[0].reading == "restricted", specs[1].reading == "restricted")
+    # The root's double oracle's width per side (IKA-293), or None; whether it swaps,
+    # and whether it runs alone, without deepening.
+    oracles = (specs[0].oracle, specs[1].oracle)
+    how = [
+        {"swap": spec.swap, "breadth_only": spec.reading == "breadth"} for spec in specs
+    ]
     for side in (0, 1):
         if cells[side] and (depths[side] != 1 or sparse[side] or restricted[side]):
             raise ValueError(
@@ -1119,20 +1187,6 @@ def play_game(
                 record.unmodelled.append(f"hidden bench: {problem}")
                 break
             spreads = _believed(spreads, drops)
-        menu_started = perf_counter()
-        # Side -> the completion that side's ranking read, per agent: `own_views` from
-        # side 0's construction, `foe_views` from side 1's when it builds its own.
-        own_views: dict[int, tuple[int, tuple[str, ...]]] = {}
-        foe_views: dict[int, tuple[int, tuple[str, ...]]] | None = None
-        rank_scores.at_node(len(record.decisions), pos.turn, 0)  # IKA-278
-        ours, theirs = _menus(
-            reg, pos, limits, own_leaf, budget, ranked[0], policies[0], spreads,
-            rank_view=views_rule[0], used=own_views, rank_fill=fills[0],
-        )
-        menu_seconds = perf_counter() - menu_started
-        if not ours or not theirs:
-            break
-
         # Whether the two agents build the SAME menu, which is the only case where one
         # construction may serve both.
         #
@@ -1159,6 +1213,41 @@ def play_game(
             )
         )
 
+        # Which sides widen the root by the double oracle here (IKA-293): where they
+        # deepen at all -- every move node of the open game, and the nodes with no bench
+        # hidden under `sheets` (the `exact` below).
+        widens = (False, False)
+        if oracles != (None, None):
+            open_node = spreads is None or all(
+                len(items) == 1 and items[0].exact for items in spreads.values()
+            )
+            widens = tuple(
+                # A label ending in h widens where a bench is hidden too (IKA-294).
+                (open_node or specs[side].hidden)
+                and cells[side] > 0
+                and oracles[side] is not None
+                for side in (0, 1)
+            )
+        # Each agent's wider menus by width: `own_wider` from side 0's construction.
+        own_wider: dict[int, tuple[list[SideAction], list[SideAction]]] = {}
+        foe_wider: dict[int, tuple[list[SideAction], list[SideAction]]] = {}
+        menu_started = perf_counter()
+        # Side -> the completion that side's ranking read, per agent: `own_views` from
+        # side 0's construction, `foe_views` from side 1's when it builds its own.
+        own_views: dict[int, tuple[int, tuple[str, ...]]] = {}
+        foe_views: dict[int, tuple[int, tuple[str, ...]]] | None = None
+        rank_scores.at_node(len(record.decisions), pos.turn, 0)  # IKA-278
+        ours, theirs = _menus(
+            reg, pos, limits, own_leaf, budget, ranked[0], policies[0], spreads,
+            rank_view=views_rule[0], used=own_views, rank_fill=fills[0],
+            # Side 1 reads these too when the two build one menu.
+            wide=[oracles[side] for side in (0, 1) if widens[side] and (side == 0 or same_menu)],
+            wider=own_wider,
+        )
+        menu_seconds = perf_counter() - menu_started
+        if not ours or not theirs:
+            break
+
         own_seconds = foe_seconds = 0.0
         foe_solved = False
         foe_search_value: float | None = None
@@ -1178,6 +1267,12 @@ def play_game(
                 len(items) == 1 and items[0].exact for items in spreads.values()
             )
             deep = (exact and cells[0] > 0, exact and cells[1] > 0)
+            # A label ending in h deepens the Bayesian root where a bench is still hidden
+            # (IKA-294): `belief_solve` spends it, per side, on its own game.
+            hidden_deep = tuple(
+                not exact and specs[side].hidden and cells[side] > 0 for side in (0, 1)
+            )
+
             own_deep = foe_deep = None
             solve_started = perf_counter()
             try:
@@ -1194,6 +1289,14 @@ def play_game(
                         reg, pos, ours, theirs, spreads,
                         {0: own_leaf, 1: foe_leaf}, budget=budget,
                         sides=asked, depth=depths,
+                        deepen={
+                            side: _belief_deepen(
+                                cells[side], how[side],
+                                own_wider.get(oracles[side]) if widens[side] else None,
+                            )
+                            for side in asked
+                            if hidden_deep[side]
+                        } or None,
                     )
                     if asked
                     else {}
@@ -1202,6 +1305,8 @@ def play_game(
                     own_deep = search(
                         reg, pos, ours, theirs, own_leaf, budget=budget,
                         deepen=cells[0], solve_restricted=deep_restricted[0],
+                        outside=own_wider.get(oracles[0]) if widens[0] else None,
+                        **how[0],
                     )
                 if same_menu and deep[1]:
                     # One agent on both sides reads both strategies off one solve.
@@ -1213,6 +1318,8 @@ def play_game(
                         else search(
                             reg, pos, ours, theirs, foe_leaf, budget=budget,
                             deepen=cells[1], solve_restricted=deep_restricted[1],
+                            outside=own_wider.get(oracles[1]) if widens[1] else None,
+                            **how[1],
                         )
                     )
             except EquilibriumError:
@@ -1224,20 +1331,31 @@ def play_game(
             if own_deep is None:
                 own_strategy = answers[0].strategy
                 search_value = answers[0].value
+                if answers[0].deepened is not None:
+                    # The Bayesian root's menus, grown by its oracle when it widens.
+                    deepened[0] = answers[0].deepened
+                    ours = answers[0].ours
+            foe_theirs = theirs
             if own_deep is not None:
                 record.unmodelled.extend(own_deep.unmodelled)
                 own_strategy = np.asarray(own_deep.equilibrium.row_strategy, dtype=np.float64)
                 search_value = float(own_deep.equilibrium.value)
                 deepened[0] = own_deep.deepened
-            foe_theirs = theirs
+                # The root's menu, grown by the oracle when it widens (IKA-293); the
+                # same actions otherwise.
+                ours = own_deep.ours
             if same_menu and foe_deep is not None:
                 if foe_deep is not own_deep:
                     record.unmodelled.extend(foe_deep.unmodelled)
                 foe_strategy = np.asarray(foe_deep.equilibrium.col_strategy, dtype=np.float64)
+                foe_theirs = foe_deep.theirs
                 foe_search_value = float(foe_deep.equilibrium.value)
                 deepened[1] = foe_deep.deepened
             elif same_menu:
                 foe_strategy = answers[1].strategy
+                if answers[1].deepened is not None:
+                    deepened[1] = answers[1].deepened
+                    foe_theirs = answers[1].theirs
                 # Side 1 solved the negated transpose, so its value is minus side 0's
                 # win probability as side 1 believes it; negated back into side 0's units.
                 foe_search_value = -answers[1].value
@@ -1254,6 +1372,7 @@ def play_game(
                 foe_ours, foe_theirs = _menus(
                     reg, pos, limits, foe_leaf, budget, ranked[1], policies[1], spreads,
                     rank_view=views_rule[1], used=foe_views, rank_fill=fills[1],
+                    wide=[oracles[1]] if widens[1] else [], wider=foe_wider,
                 )
                 if not foe_ours or not foe_theirs:
                     break
@@ -1262,12 +1381,22 @@ def play_game(
                         foe_deep = search(
                             reg, pos, foe_ours, foe_theirs, foe_leaf, budget=budget,
                             deepen=cells[1], solve_restricted=deep_restricted[1],
+                            outside=foe_wider.get(oracles[1]) if widens[1] else None,
+                            **how[1],
                         )
                     else:
                         foe_answers = belief_solve(
                             reg, pos, foe_ours, foe_theirs, spreads,
                             {0: own_leaf, 1: foe_leaf}, budget=budget, sides=(1,),
                             depth=depths,
+                            deepen=(
+                                {1: _belief_deepen(
+                                    cells[1], how[1],
+                                    foe_wider.get(oracles[1]) if widens[1] else None,
+                                )}
+                                if hidden_deep[1]
+                                else None
+                            ),
                         )
                 except EquilibriumError:
                     break
@@ -1276,11 +1405,15 @@ def play_game(
                     foe_strategy = np.asarray(
                         foe_deep.equilibrium.col_strategy, dtype=np.float64
                     )
+                    foe_theirs = foe_deep.theirs
                     foe_search_value = float(foe_deep.equilibrium.value)
                     deepened[1] = foe_deep.deepened
                 else:
                     record.unmodelled.extend(foe_answers[1].unmodelled)
                     foe_strategy = foe_answers[1].strategy
+                    if foe_answers[1].deepened is not None:
+                        deepened[1] = foe_answers[1].deepened
+                        foe_theirs = foe_answers[1].theirs
                     # Side 1 played off this solve, over its own menu, so its value is
                     # this one.
                     foe_search_value = -foe_answers[1].value
@@ -1294,6 +1427,8 @@ def play_game(
                     solve_sparsely=sparse[0],
                     solve_restricted=restricted[0] or deep_restricted[0],
                     deepen=cells[0],
+                    outside=own_wider.get(oracles[0]) if widens[0] else None,
+                    **how[0],
                 )
             except EquilibriumError:
                 break
@@ -1326,8 +1461,11 @@ def play_game(
                     else _menus(
                         reg, pos, limits, foe_leaf, budget, ranked[1], policies[1],
                         spreads, rank_view=views_rule[1], rank_fill=fills[1],
+                        wide=[oracles[1]] if widens[1] else [], wider=foe_wider,
                     )
                 )
+                if same_menu:
+                    foe_wider = own_wider
                 if not foe_ours or not foe_theirs:
                     break
                 try:
@@ -1336,12 +1474,17 @@ def play_game(
                         depth=depths[1], solve_sparsely=sparse[1],
                         solve_restricted=restricted[1] or deep_restricted[1],
                         deepen=cells[1],
+                        outside=foe_wider.get(oracles[1]) if widens[1] else None,
+                        **how[1],
                     )
                 except EquilibriumError:
                     break
                 record.unmodelled.extend(foe_search.unmodelled)
                 foe_equilibrium = foe_search.equilibrium
                 deepened[1] = foe_search.deepened
+                if foe_search.deepened is not None:
+                    # Its root's menus, grown by the oracle when it widens (IKA-293).
+                    foe_theirs = foe_search.theirs
                 foe_seconds = perf_counter() - foe_started
                 foe_solved = True
             own_strategy = np.asarray(equilibrium.row_strategy, dtype=np.float64)
@@ -1350,6 +1493,11 @@ def play_game(
             deepened[0] = own_search.deepened
             if not foe_solved:
                 deepened[1] = own_search.deepened
+            if own_search.deepened is not None:
+                # The root's menus, grown by the oracle when it widens (IKA-293).
+                ours = own_search.ours
+                if not foe_solved:
+                    foe_theirs = own_search.theirs
 
         if foe_solved:
             # `same_menu` is the only case where one construction served both agents;

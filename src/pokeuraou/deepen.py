@@ -46,6 +46,52 @@ read whole under either (their menus are `sub_limit` wide).
 
 Each decision reports what it did (`Deepened`): cells spent, cells refined, and the depth
 the deepest refined cell reached, so a recorded game says how far each answer looked.
+
+**Breadth at the root, as a double oracle** (IKA-293, the label's ``o<W>`` / ``oall``,
+mixed reading only). Before every step the actions outside the root's menu -- the rest of
+a width-W menu built with the same ranking, or every legal action -- are asked, in one
+fill, what they get against the other side's current support: a row's gain is its payoff
+against the column strategy less the root's value, a column's the root's value less what
+the row strategy gets against it. That is the best-response gain, the bound on how far
+adding the action can move the root's value; IKA-293 measured it picking the action that
+moves the root most first in 78% of positions. If any action gains more than
+`ORACLE_TOLERANCE`, the one that gains most joins the root (the rest of its row or column
+filled at depth 1) and the root is re-solved; otherwise the step is a deepening step as
+above. Cells already asked are kept, so a probe fills only what the support's changes
+made new. Every probed and added cell is charged to the budget; a probe and what
+follows it (a widening or a deepening step) are one step, so the budget is checked
+before each and the last may pass it. Without candidates outside the menu this is
+`m<N>` to the bit.
+
+Two variants (the user's decision of 9/26, IKA-310's measurement). ``s<W>`` / ``sall``
+**swaps** instead of only adding: once the action joins and the root is re-solved,
+an action of the same side that carries no weight in that equilibrium leaves -- the
+one that loses most against it, never one with a refined cell -- so the menu keeps
+its size. Removing a weightless action leaves the equilibrium standing. That may
+break `narrow`'s cover (every single slot option somewhere on the menu); the options
+the root no longer covers are reported (`Deepened.uncovered`, written into the
+decision's record) rather than dropped quietly, and a removed action is outside the
+menu again, so the next probe asks it like any other and it can come back. The
+``b<N>`` reading is **breadth only**: the oracle alone, no deepening -- it stops when
+nothing outside gains, or at the budget.
+
+**Where a bench is hidden** (IKA-294, a label ending in ``h``). Each side's game there is
+Bayesian (`search.belief_solve`): one row set, a matrix per completion of the other
+side's bench, the other side's reply per completion. `deepen_belief` deepens that root
+the same way, over cells ``(completion, row, column)``: refining one resolves the turn in
+that completion's position and solves the next turn as if that bench were known (IKA-111's
+determinization), and the root is re-solved as the Bayesian game after every step. A
+cell's priority is ``bern/gap`` read in its completion, times the completion's weight
+(`BELIEF_WEIGHTED`). The double oracle asks rows against each completion's reply and
+columns against the one row strategy, completion by completion (`_BeliefOracle`); it
+swaps under the same three rules. Without the ``h`` only the nodes with no bench hidden
+deepen, as before.
+
+**What a budget costs.** Labels count cells, so a game is the same game on any machine.
+Time is counted separately (`Cost`): fills, refinements and cells each have a price in
+milliseconds, measured per machine form and per number of cores, and `cells_for_seconds`
+turns a clock into a budget in those prices' units (IKA-293; IKA-32 keeps the prices per
+kind of work because each shrinks differently on more cores).
 """
 
 from __future__ import annotations
@@ -54,6 +100,7 @@ import heapq
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 
@@ -61,7 +108,7 @@ from . import port, timing
 from .actions import SideAction
 from .budget import Budget
 from .equilibrium import Equilibrium, EquilibriumError, solve
-from .narrow import narrow
+from .narrow import narrow, slot_options
 from .port import batched_payoff
 from .position import Position
 from .regulation import Regulation
@@ -72,6 +119,9 @@ LeafEvaluator = Callable[[list[Position]], np.ndarray]
 #: support ranks by its uncertainty rather than by an infinity.
 GAP_FLOOR = 1e-3
 
+#: A strategy's weight at or under this is none: the actions a swap may push out.
+WEIGHTLESS = 1e-12
+
 #: How far a best response outside the restricted rectangle has to beat its value to join
 #: it (`search.ORACLE_TOLERANCE`, repeated so this module does not import the search).
 ORACLE_TOLERANCE = 1e-6
@@ -81,40 +131,139 @@ ORACLE_TOLERANCE = 1e-6
 #: decided cells stops on its own (priority 0).
 MAX_LEVELS = 8
 
-#: Cells of deepening a second of one logical core buys, for the human opponent's clock and
-#: nothing else. IKA-279's generation NPS (about 26,000 leaves a second a logical core, 2.6
-#: leaves a cell) would say 10,000; a deepened cell costs more than a matrix cell, because
-#: each refined cell pays its own turn, a narrow and a forward pass per child for a handful
-#: of cells (IKA-33: 0.43-0.64 CPU ms a deepened cell in M-C generation, 0.74 ms wall at
-#: the median on IKA-254's endgames with a local GPU leaf, 3.7 ms at p90).
-CELLS_PER_SECOND = 1_500
+@dataclass(frozen=True, slots=True)
+class Cost:
+    """What each kind of counted work costs, in milliseconds, on one machine form at one
+    number of cores (IKA-293).
+
+    A deepening spends three kinds of work, and their prices do not move together: a
+    `fill` is one crossing to the port and one call into the leaf, whatever its size; a
+    `refine` is one refined cell's own turn with every branch, the `narrow` of each child
+    and the re-solves up to the root; a `cell` is one resolved turn of a matrix and its
+    leaves. One number of cells a second (IKA-33's 1,500) was 4x off on the middle game
+    with a local GPU, because the count of fills and refinements per cell moves with the
+    size of the child matrices. On more cores each kind shrinks differently (IKA-32), so a
+    price belongs to a core count and is measured there, never scaled.
+    """
+
+    fill: float
+    refine: float
+    cell: float
+
+    def ms(self, fills: int, refines: int, cells: int) -> float:
+        return fills * self.fill + refines * self.refine + cells * self.cell
+
+
+#: Measured prices, by (machine form, logical cores) -- IKA-293, 2026-09-26.
+#:
+#: ``local``: one process, the shipped ensemble leaf (value-mc0 + value-mc0-s1) on the
+#: local GPU -- a person's opponent. Wall milliseconds, least squares over 624 deepenings
+#: (78 recorded M-C positions x 8 labels, m25 to m1000o24): R^2 0.979 against 0.581 for
+#: one number of cells a second (4,478/s at best; IKA-33's 1,500/s was 3.06x slow). Held
+#: out by halves: R^2 0.976 / 0.980, totals within 2%.
+#:
+#: ``served``: the board's shape (24 workers over 2 inference servers, one server arm, the
+#: 16 cores busy), CPU milliseconds of every process (workers, port, servers) above the
+#: width-12 depth-1 arm, least squares over 11 same-arm board runs of 300 games (m100 to
+#: m3000o24, swaps and breadth alone). A fill there costs what it costs locally; a cell
+#: 5.6x (the port, the server's forward passes and the Python are all on the CPU).
+#:
+#: One core only (the counts above were run one process a worker); IKA-32 measures the
+#: others, per kind, rather than scaling these.
+COSTS: dict[tuple[str, int], Cost] = {
+    ("local", 1): Cost(fill=4.925, refine=1.494, cell=0.0286),
+    ("served", 1): Cost(fill=4.990, refine=1.354, cell=0.1602),
+}
 
 #: What ships: no deepening. A label is ``none``, ``m<N>`` (the whole matrix read, N cells)
-#: or ``r<N>`` (the restricted reading, N cells).
+#: or ``r<N>`` (the restricted reading, N cells), and ``m<N>`` may end in ``o<W>`` or
+#: ``oall``: the root's double oracle over the rest of a width-W menu, or every legal action
+#: -- or in ``s<W>`` / ``sall``, the oracle that swaps a weightless action out for each one
+#: it adds. ``b<N>`` with either suffix is the oracle alone, without deepening.
 DEFAULT_DEEPEN = "none"
 
-READINGS = {"m": "mixed", "r": "restricted"}
+READINGS = {"m": "mixed", "r": "restricted", "b": "breadth"}
 
-_DEEPEN = re.compile(r"none|([mr])([1-9][0-9]*)")
+#: The oracle's candidates as a width: ``oall`` is every legal action.
+ALL_ACTIONS = 1 << 30
+
+_DEEPEN = re.compile(r"none|([mrb])([1-9][0-9]*)(?:([os])([1-9][0-9]*|all))?(h)?")
+
+
+@dataclass(frozen=True, slots=True)
+class DeepenSpec:
+    """A deepen label read: how the root is read, the cells, and the oracle's width."""
+
+    reading: str | None
+    cells: int
+    #: Width of the menu whose rest the root's double oracle asks (`ALL_ACTIONS` for every
+    #: legal action), or None: no breadth at the root.
+    oracle: int | None = None
+    #: Whether the oracle swaps a weightless action out for each one it adds (``s``).
+    swap: bool = False
+    #: Whether it deepens (and widens) where a bench is still hidden too (``h``, IKA-294):
+    #: the Bayesian root of `deepen_belief`. Without it only the nodes with no bench
+    #: hidden deepen, as IKA-33 and IKA-293 did.
+    hidden: bool = False
+
+
+def deepen_spec(label: str) -> DeepenSpec:
+    """`DeepenSpec` of a label: ``none``, ``m400``, ``r25``, ``m400o24``, ``m400sall``,
+    ``b200s24``, ``m400sallh``."""
+    got = _DEEPEN.fullmatch(label)
+    if got is None:
+        raise ValueError(
+            f"deepen {label!r} is not none, m<N>, r<N>, m<N>o<W>, m<N>s<W>, b<N>o<W> or "
+            "b<N>s<W> (N cells, N >= 1; W the oracle's width, or all), each but r<N> "
+            "optionally ending in h (hidden nodes too)"
+        )
+    if got.group(1) is None:
+        return DeepenSpec(None, 0)
+    letter, kind, oracle = got.group(1), got.group(3), got.group(4)
+    hidden = got.group(5) is not None
+    if oracle is not None and letter == "r":
+        raise ValueError(
+            f"deepen {label!r}: the root's double oracle goes with the whole-matrix reading "
+            "(m); the restricted one (r) already grows its rectangle by its own oracle"
+        )
+    if hidden and letter == "r":
+        raise ValueError(
+            f"deepen {label!r}: a hidden bench's restricted reading is depth 2 "
+            "(`--depth 2 --solve-restricted`, IKA-111); h goes with m and b"
+        )
+    if oracle is None and letter == "b":
+        raise ValueError(
+            f"deepen {label!r}: breadth only (b) is the root's double oracle alone; it "
+            "needs o<W> / s<W> / oall / sall"
+        )
+    width = None if oracle is None else ALL_ACTIONS if oracle == "all" else int(oracle)
+    return DeepenSpec(READINGS[letter], int(got.group(2)), width, kind == "s", hidden)
 
 
 def parse_deepen(label: str) -> tuple[str | None, int]:
     """(reading, cells) from a deepen label: (None, 0), ("mixed", 400), ("restricted", 400)."""
-    got = _DEEPEN.fullmatch(label)
-    if got is None:
-        raise ValueError(f"deepen {label!r} is not none, m<N> or r<N> (N cells, N >= 1)")
-    if got.group(1) is None:
-        return None, 0
-    return READINGS[got.group(1)], int(got.group(2))
+    spec = deepen_spec(label)
+    return spec.reading, spec.cells
 
 
-def cells_for_seconds(seconds: float, cores: int = 1) -> int:
-    """The cell budget that fits in `seconds` of `cores` logical cores (the human's clock).
+def cells_for_seconds(seconds: float, cores: int = 1, *, form: str = "local") -> int:
+    """The budget that fits in `seconds` on `cores` logical cores (the human's clock), in
+    units of one cell at `COSTS[form, cores]`'s prices.
 
-    Generation and the board never call this: a budget in seconds would read the load of
-    the machine into the game.
+    Spend it with ``cost=COSTS[form, cores]`` (`search(deepen_cost=)`): each fill and each
+    refinement is then charged its own price in cells, so the budget stops where the
+    clock would. It is still a count -- the same answer on a busy machine and an idle one.
+    Generation and the board never call this: they count cells alone.
     """
-    return max(0, int(seconds * cores * CELLS_PER_SECOND))
+    try:
+        cost = COSTS[form, cores]
+    except KeyError:
+        measured = sorted(COSTS)
+        raise ValueError(
+            f"no measured prices for {form!r} on {cores} core(s); measured: {measured}. "
+            "A price is measured at its core count, not scaled (IKA-32)"
+        ) from None
+    return max(0, int(seconds * 1000.0 / cost.cell))
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,14 +283,45 @@ class Deepened:
     #: Cells found unrefinable (a turn that paused for a mid-turn switch, a child with no
     #: action on one side, a child the LP could not solve). They keep their value.
     refused: int = 0
+    #: Whether the root's double oracle was asked (a label with ``o``). The three counts
+    #: below are written only then.
+    oracle: bool = False
+    #: Cells the oracle's probes filled (outside actions against the other side's support).
+    probed: int = 0
+    #: Actions the oracle added to the root, both sides.
+    widened: int = 0
+    #: Fills this deepening made (children, probes, added rows and columns): `Cost.fill`'s count.
+    fills: int = 0
+    #: Whether the oracle swapped (``s``): each action it added pushed a weightless one out.
+    swap: bool = False
+    #: Actions it pushed out (``s``).
+    swapped: int = 0
+    #: Each side's single slot options the root's menu covered before and no longer does
+    #: (``s``): what the swaps took out of `narrow`'s cover, said rather than dropped.
+    uncovered: tuple[tuple[str, ...], tuple[str, ...]] = ((), ())
+    #: The completions of the other side's bench the root was solved over (IKA-294's
+    #: Bayesian root), or 0: a node with no bench hidden, read as one game.
+    classes: int = 0
 
-    def to_json(self) -> dict[str, int]:
+    def to_json(self) -> dict[str, Any]:
         return {
             "budget": self.budget,
             "cells": self.cells,
             "expanded": self.expanded,
             "depth": self.depth,
+            **({"classes": self.classes} if self.classes else {}),
             **({"refused": self.refused} if self.refused else {}),
+            **(
+                {"probed": self.probed, "widened": self.widened, "fills": self.fills}
+                if self.oracle
+                else {}
+            ),
+            **({"swapped": self.swapped} if self.swap else {}),
+            **(
+                {"uncovered": [list(side) for side in self.uncovered]}
+                if any(self.uncovered)
+                else {}
+            ),
         }
 
 
@@ -175,6 +355,19 @@ class _Node:
         return float(self.equilibrium.value)
 
 
+@dataclass(frozen=True, slots=True)
+class Deepening:
+    """`deepen_root`'s answer: the root's game as it stands when the budget ran out."""
+
+    equilibrium: Equilibrium
+    payoff: np.ndarray
+    #: The root's menus -- the ones it was given, plus whatever the oracle added, in the
+    #: order it added them. The strategies index these.
+    rows: list[SideAction]
+    cols: list[SideAction]
+    report: Deepened
+
+
 def best_first(
     reg: Regulation,
     pos: Position,
@@ -200,6 +393,55 @@ def best_first(
     notes from every turn resolved here. `trace`, when given, receives the root node and
     then one ``(node, cell, took)`` per step -- for the tests, which check the tree.
     """
+    got = deepen_root(
+        reg, pos, rows, cols, evaluate, budget=budget, payoff=payoff,
+        equilibrium=equilibrium, cells=cells, sub_limit=sub_limit,
+        sub_branches=sub_branches, unmodelled=unmodelled, reading=reading, refine=refine,
+        trace=trace,
+    )
+    return got.equilibrium, got.payoff, got.report
+
+
+def deepen_root(
+    reg: Regulation,
+    pos: Position,
+    rows: Sequence[SideAction],
+    cols: Sequence[SideAction],
+    evaluate: LeafEvaluator,
+    *,
+    budget: Budget,
+    payoff: np.ndarray,
+    equilibrium: Equilibrium,
+    cells: int,
+    sub_limit: int,
+    sub_branches: int,
+    unmodelled: set[str],
+    reading: str = "mixed",
+    refine: int = 4,
+    trace: list | None = None,
+    outside: tuple[Sequence[SideAction], Sequence[SideAction]] | None = None,
+    cost: Cost | None = None,
+    swap: bool = False,
+) -> Deepening:
+    """`best_first`, and the root's double oracle when `outside` is given (IKA-293).
+
+    `outside` is each side's candidates for the root: actions already on its menu are
+    skipped, the rest are asked every step whether they gain against the other side's
+    support, and the best that gains joins the root (see the module's docstring). Given,
+    even with nothing outside the menu, the report says what the oracle did.
+
+    `swap` pushes a weightless action of the same side out for each one that joins, and
+    the ``breadth`` reading is the oracle alone, without deepening (both need `outside`).
+
+    `cost` changes only how the budget is counted: None counts cells (a refined cell's
+    turn is one), a `Cost` charges each fill, refinement and cell its price in units of
+    one cell (`cells_for_seconds`'s budget).
+    """
+    if outside is not None and reading not in ("mixed", "breadth"):
+        raise ValueError("the root's double oracle goes with the mixed reading")
+    if outside is None and (swap or reading == "breadth"):
+        raise ValueError("swapping and breadth only are the root's double oracle's; no outside")
+    deepens = reading != "breadth"
     root = _Node(
         pos=pos, rows=list(rows), cols=list(cols),
         payoff=np.array(payoff, dtype=np.float64, copy=True),
@@ -211,24 +453,34 @@ def best_first(
             [int(j) for j in _top(equilibrium.col_strategy, refine)],
         )
         _reread(root)
-    elif reading != "mixed":
+    elif reading not in ("mixed", "breadth"):
         raise ValueError(f"reading {reading!r} is not one of {sorted(READINGS.values())}")
     if trace is not None:
         trace.append(root)
-    spent = 0
+    meter = _Meter(cost)
+    oracle = None if outside is None else _Oracle(root, outside, swap=swap)
     expanded = 0
     deepest = 0
     refused = 0
-    while spent < cells:
+    while meter.spent < cells:
+        if oracle is not None:
+            # One step: the probe and what it leads to -- a widening, or else a deepening.
+            oracle.probe(reg, evaluate, budget, meter, unmodelled)
+            if oracle.widen(reg, evaluate, budget, meter, unmodelled):
+                if trace is not None:
+                    trace.append((root, None, True))
+                continue
+            if not deepens:
+                break
         target = _best(root)
         if target is None:
             break
         node, cell = target
-        cost, ok = _expand(
+        spent, ok, fills = _expand(
             reg, node, cell, evaluate, budget=budget, sub_limit=sub_limit,
             sub_branches=sub_branches, unmodelled=unmodelled,
         )
-        spent += cost
+        meter.refined(spent - 1, fills)
         if trace is not None:
             trace.append((node, cell, ok))
         if not ok:
@@ -241,12 +493,771 @@ def best_first(
         deepest = max(deepest, node.level + 1)
         _propagate(node, cell)
     if timing.ON:
-        timing.count("deepen.cells", spent)
+        timing.count("deepen.cells", meter.refines + meter.cells)
         timing.count("deepen.expanded", expanded)
+        timing.count("deepen.fills", meter.fills)
+        timing.count("deepen.refines", meter.refines)
+        if oracle is not None:
+            timing.count("deepen.oracle.calls", 1)
+            timing.count("deepen.oracle.probes", oracle.probes)
+            timing.count("deepen.oracle.probed", oracle.probed)
+            timing.count("deepen.oracle.widened", oracle.widened)
+            timing.count("deepen.oracle.swapped", oracle.swapped)
+            timing.count("deepen.oracle.stalled", int(oracle.stalled))
+    uncovered: tuple[tuple[str, ...], tuple[str, ...]] = ((), ())
+    if oracle is not None and oracle.swapped:
+        uncovered = (
+            _lost_options(reg, rows, root.rows),
+            _lost_options(reg, cols, root.cols),
+        )
+        if timing.ON:
+            timing.count("deepen.oracle.uncovered", len(uncovered[0]) + len(uncovered[1]))
     report = Deepened(
-        budget=cells, cells=spent, expanded=expanded, depth=1 + deepest, refused=refused
+        budget=cells, cells=meter.refines + meter.cells, expanded=expanded,
+        depth=1 + deepest, refused=refused, oracle=oracle is not None,
+        probed=0 if oracle is None else oracle.probed,
+        widened=0 if oracle is None else oracle.widened,
+        fills=meter.fills, swap=swap,
+        swapped=0 if oracle is None else oracle.swapped, uncovered=uncovered,
     )
-    return root.equilibrium, root.payoff, report
+    return Deepening(
+        equilibrium=root.equilibrium, payoff=root.payoff, rows=root.rows, cols=root.cols,
+        report=report,
+    )
+
+
+def _lost_options(
+    reg: Regulation, given: Sequence[SideAction], now: Sequence[SideAction]
+) -> tuple[str, ...]:
+    """Labels of the single slot options `given` covered and `now` does not."""
+    before = slot_options(reg, given)
+    after = slot_options(reg, now)
+    return tuple(sorted(before[key] for key in set(before) - set(after)))
+
+
+class _Meter:
+    """What a deepening has spent, by kind, and the budget's reading of it.
+
+    Without a `Cost` the budget counts cells as IKA-33 did (a refined cell's own turn is
+    one); with one, each fill and refinement is charged its price in cells as well.
+    """
+
+    def __init__(self, cost: Cost | None) -> None:
+        self.cost = cost
+        self.fills = 0
+        self.refines = 0
+        self.cells = 0
+
+    def refined(self, cells: int, fills: int) -> None:
+        self.refines += 1
+        self.cells += cells
+        self.fills += fills
+
+    def filled(self, cells: int) -> None:
+        self.fills += 1
+        self.cells += cells
+
+    @property
+    def spent(self) -> float:
+        if self.cost is None:
+            return self.refines + self.cells
+        return self.cost.ms(self.fills, self.refines, self.cells) / self.cost.cell
+
+
+class _Oracle:
+    """The root's double oracle over actions outside its menu (IKA-293).
+
+    Keeps every cell it has asked, by the two actions' choices, so a probe fills only the
+    pairs the support's last change made new, and an action that joins brings the cells
+    already known into its row or column.
+    """
+
+    def __init__(
+        self,
+        root: _Node,
+        outside: tuple[Sequence[SideAction], Sequence[SideAction]],
+        *,
+        swap: bool = False,
+    ) -> None:
+        self.root = root
+        self.swap = swap
+        # The menu's own actions are candidates too, after the given ones: an action a
+        # swap pushed out is outside again and can come back.
+        self.candidates: tuple[list[SideAction], list[SideAction]] = ([], [])
+        for side, menu in ((0, root.rows), (1, root.cols)):
+            seen: set[str] = set()
+            for action in (*outside[side], *menu):
+                if action.to_choice() not in seen:
+                    seen.add(action.to_choice())
+                    self.candidates[side].append(action)
+        self.known: dict[tuple[str, str], float] = {}
+        #: Actions that could not join (the LP failed with them); never asked again.
+        self.dropped: tuple[set[str], set[str]] = (set(), set())
+        self.probes = 0
+        self.probed = 0
+        self.widened = 0
+        self.swapped = 0
+        # Actions a swap has pushed out. Each leaves at most once: swapping every
+        # weightless action cycled (a row joins, pushes one out, a column's answer to it
+        # brings that one back, ...) in 57 of 60 random 9x8 games, and a cell asked once
+        # costs nothing the second time, so the budget would not stop it. With each
+        # leaving once, every action joins at most twice and the oracle ends -- where
+        # nothing outside gains, which is the whole game's equilibrium.
+        self.left: set[str] = set()
+        # A guard, not a rule: widenings past this mean the argument above is wrong.
+        self.cap = 4 * (len(self.candidates[0]) + len(self.candidates[1])) + 4
+        self.stalled = False
+
+    def _outside(self, side: int) -> list[SideAction]:
+        menu = self.root.rows if side == 0 else self.root.cols
+        on = {action.to_choice() for action in menu}
+        return [
+            action for action in self.candidates[side]
+            if action.to_choice() not in on and action.to_choice() not in self.dropped[side]
+        ]
+
+    def _support(self, side: int) -> list[int]:
+        eq = self.root.equilibrium
+        strategy = eq.row_strategy if side == 0 else eq.col_strategy
+        return [int(k) for k in np.flatnonzero(strategy > 1e-9)]
+
+    def probe(
+        self,
+        reg: Regulation,
+        evaluate: LeafEvaluator,
+        budget: Budget,
+        meter: _Meter,
+        unmodelled: set[str],
+    ) -> None:
+        """Fill, in one call, every outside action against the other side's support that
+        is not known yet."""
+        root = self.root
+        out_rows, out_cols = self._outside(0), self._outside(1)
+        sup_rows, sup_cols = self._support(0), self._support(1)
+        rows: list[SideAction] = []
+        cols: list[SideAction] = []
+        at_row: dict[str, int] = {}
+        at_col: dict[str, int] = {}
+        wanted: list[tuple[int, int]] = []
+
+        def row_index(action: SideAction) -> int:
+            key = action.to_choice()
+            if key not in at_row:
+                at_row[key] = len(rows)
+                rows.append(action)
+            return at_row[key]
+
+        def col_index(action: SideAction) -> int:
+            key = action.to_choice()
+            if key not in at_col:
+                at_col[key] = len(cols)
+                cols.append(action)
+            return at_col[key]
+
+        for action in out_rows:
+            for j in sup_cols:
+                if (action.to_choice(), root.cols[j].to_choice()) not in self.known:
+                    wanted.append((row_index(action), col_index(root.cols[j])))
+        for action in out_cols:
+            for i in sup_rows:
+                if (root.rows[i].to_choice(), action.to_choice()) not in self.known:
+                    wanted.append((row_index(root.rows[i]), col_index(action)))
+        if not wanted:
+            return
+        matrices, notes, _exact = port.batched_payoffs(
+            reg, root.pos, rows, cols, [evaluate], budget=budget, cells=wanted
+        )
+        unmodelled.update(notes)
+        for i, j in wanted:
+            self.known[(rows[i].to_choice(), cols[j].to_choice())] = float(matrices[0][i, j])
+        meter.filled(len(wanted))
+        self.probes += 1
+        self.probed += len(wanted)
+
+    def widen(
+        self,
+        reg: Regulation,
+        evaluate: LeafEvaluator,
+        budget: Budget,
+        meter: _Meter,
+        unmodelled: set[str],
+    ) -> bool:
+        """Add the outside action with the largest best-response gain, if one gains.
+
+        Rows before columns, first in the candidates' order on a tie. The rest of its row
+        or column is filled at depth 1 (charged) and the root re-solved. Returns whether
+        an action joined.
+        """
+        if self.stalled:
+            return False
+        root = self.root
+        eq = root.equilibrium
+        value = float(eq.value)
+        best: tuple[float, int, SideAction] | None = None
+        for side in (0, 1):
+            support = self._support(1 - side)
+            strategy = eq.col_strategy if side == 0 else eq.row_strategy
+            for action in self._outside(side):
+                key = action.to_choice()
+                if side == 0:
+                    got = sum(
+                        float(strategy[j]) * self.known[(key, root.cols[j].to_choice())]
+                        for j in support
+                    )
+                    gain = got - value
+                else:
+                    got = sum(
+                        float(strategy[i]) * self.known[(root.rows[i].to_choice(), key)]
+                        for i in support
+                    )
+                    gain = value - got
+                if gain > ORACLE_TOLERANCE and (best is None or gain > best[0]):
+                    best = (gain, side, action)
+        if best is None:
+            return False
+        _gain, side, action = best
+        key = action.to_choice()
+        others = root.cols if side == 0 else root.rows
+        pairs = [
+            (key, other.to_choice()) if side == 0 else (other.to_choice(), key)
+            for other in others
+        ]
+        missing = [k for k, pair in enumerate(pairs) if pair not in self.known]
+        if missing:
+            ours, theirs = (
+                ([action], [others[k] for k in missing])
+                if side == 0
+                else ([others[k] for k in missing], [action])
+            )
+            filled, notes = port.batched_payoff(
+                reg, root.pos, ours, theirs, evaluate, budget=budget
+            )
+            unmodelled.update(notes)
+            flat = filled.reshape(-1)
+            for n, k in enumerate(missing):
+                self.known[pairs[k]] = float(flat[n])
+            meter.filled(len(missing))
+        line = np.array([self.known[pair] for pair in pairs], dtype=np.float64)
+        grown = (
+            np.vstack([root.payoff, line[None, :]])
+            if side == 0
+            else np.hstack([root.payoff, line[:, None]])
+        )
+        try:
+            solved = solve(grown)
+        except EquilibriumError:
+            self.dropped[side].add(key)
+            return False
+        root.payoff = grown
+        (root.rows if side == 0 else root.cols).append(action)
+        root.equilibrium = solved
+        root.signal = None
+        self.widened += 1
+        if self.swap:
+            self._swap_out(side, key)
+        if self.widened >= self.cap:
+            self.stalled = True
+        return True
+
+    def _swap_out(self, side: int, added: str) -> None:
+        """Push out the action of `side` that carries no weight and loses most (the later
+        on a tie), other than the one that just joined, any with a refined or refused
+        cell, and any that has left once already. Nothing leaves when there is none.
+
+        A weightless action's removal leaves the equilibrium an equilibrium of the smaller
+        game -- the other side's replies to it were never read -- so the root is re-solved
+        only to keep its arrays in step (the value stays).
+        """
+        root = self.root
+        eq = root.equilibrium
+        menu = root.rows if side == 0 else root.cols
+        weight = eq.row_strategy if side == 0 else eq.col_strategy
+        loss = eq.row_ev_loss if side == 0 else eq.col_ev_loss
+        busy = {cell[side] for cell in (*root.children, *root.refused)}
+        free = [
+            k for k in range(len(menu))
+            if weight[k] <= WEIGHTLESS
+            and k not in busy
+            and menu[k].to_choice() != added
+            and menu[k].to_choice() not in self.left
+        ]
+        if not free:
+            return
+        out = max(free, key=lambda k: (float(loss[k]), k))
+        smaller = np.delete(root.payoff, out, axis=side)
+        try:
+            solved = solve(smaller)
+        except EquilibriumError:
+            return
+        self.left.add(menu.pop(out).to_choice())
+        root.payoff = smaller
+        root.equilibrium = solved
+        root.signal = None
+
+        def moved(cell: tuple[int, int]) -> tuple[int, int]:
+            if cell[side] < out:
+                return cell
+            return (cell[0] - 1, cell[1]) if side == 0 else (cell[0], cell[1] - 1)
+
+        root.children = {moved(cell): kept for cell, kept in root.children.items()}
+        root.refused = {moved(cell) for cell in root.refused}
+        for cell, kept in root.children.items():
+            for _weight, child in kept:
+                if isinstance(child, _Node):
+                    child.parent = (root, cell)
+        self.swapped += 1
+
+
+#: Whether a Bayesian root's cell priority is ``bern/gap`` times its completion's weight
+#: (IKA-294). Without the weight a cell of a completion the belief barely holds would be
+#: deepened as early as one of the likeliest, though it moves the answer w_k as much.
+BELIEF_WEIGHTED = True
+
+
+class _BeliefRoot:
+    """The root of a side that cannot see the other side's bench (IKA-294).
+
+    `belief_solve`'s game for `side`: one row set (this side's actions -- it does not
+    know which completion it faces), a matrix per completion `k` of the other bench,
+    each in this side's own orientation (side 1's is side 0's negated transpose), and
+    the Bayesian equilibrium over them. Its cells are ``(k, i, j)``, and refining one is
+    `_expand` in completion `k`'s position: the turn resolved there and the next turn's
+    game solved as if that bench were known -- IKA-111's determinization. The children
+    are ordinary open nodes, in side 0's orientation as every node below the root is.
+    """
+
+    level = 0
+    parent = None
+    rect = None
+
+    def __init__(
+        self,
+        side: int,
+        own: Sequence[SideAction],
+        other: Sequence[SideAction],
+        items: Sequence[Any],
+        weights: np.ndarray,
+        prices: Sequence[np.ndarray],
+        equilibrium: Any,  # noqa: ANN401 - BayesianEquilibrium
+    ) -> None:
+        self.side = side
+        self.own = list(own)
+        self.other = list(other)
+        self.items = list(items)
+        w = np.asarray(weights, dtype=np.float64)
+        self.w = w / w.sum()
+        self.prices = [np.array(p, dtype=np.float64, copy=True) for p in prices]
+        self.equilibrium = equilibrium
+        self.children: dict[tuple[int, int, int], list[tuple[float, _Node | float]]] = {}
+        self.refused: set[tuple[int, int, int]] = set()
+        self.signal: np.ndarray | None = None
+
+    @property
+    def value(self) -> float:
+        return float(self.equilibrium.value)
+
+    def pair(self, i: int, j: int) -> list[SideAction]:
+        """Row `i` and column `j` as the turn's two actions, side 0's first."""
+        return [self.own[i], self.other[j]] if self.side == 0 else [self.other[j], self.own[i]]
+
+    def turn_of(self, cell: tuple[int, int, int]) -> tuple[Position, list[SideAction]]:
+        k, i, j = cell
+        return self.items[k].position, self.pair(i, j)
+
+    def scores(self) -> np.ndarray:
+        """``bern/gap`` of every cell (k, i, j) -- its side-0 value's d(1 - d) over the
+        row's regret plus the column's in completion k -- times w_k (`BELIEF_WEIGHTED`)."""
+        if self.signal is None:
+            eq = self.equilibrium
+            out = np.empty((len(self.prices), len(self.own), len(self.other)))
+            for k, prices in enumerate(self.prices):
+                won = prices if self.side == 0 else -prices
+                gap = eq.row_ev_loss[:, None] + eq.col_ev_loss[k][None, :]
+                out[k] = won * (1.0 - won) / (gap + GAP_FLOOR)
+                if BELIEF_WEIGHTED:
+                    out[k] *= self.w[k]
+            self.signal = out
+        return self.signal
+
+    def solve(self) -> bool:
+        """Re-solve the Bayesian game at today's prices; keep the last answer if it fails."""
+        from .equilibrium import solve_bayesian
+
+        try:
+            self.equilibrium = solve_bayesian(self.prices, self.w)
+        except EquilibriumError:
+            return False
+        finally:
+            self.signal = None
+        return True
+
+    def write(self, cell: tuple[int, int, int], won: float) -> None:
+        """A refined cell's side-0 value into its completion's matrix, then re-solve."""
+        k, i, j = cell
+        self.prices[k][i, j] = won if self.side == 0 else -won
+        self.solve()
+
+
+@dataclass(frozen=True, slots=True)
+class BeliefDeepening:
+    """`deepen_belief`'s answer: the side's Bayesian root when the budget ran out."""
+
+    equilibrium: Any  # BayesianEquilibrium over `prices`
+    prices: list[np.ndarray]
+    #: This side's actions (the strategy indexes them) and the other side's, grown and
+    #: swapped by the oracle.
+    own: list[SideAction]
+    other: list[SideAction]
+    report: Deepened
+
+
+class _BeliefOracle:
+    """The root's double oracle on a Bayesian root (IKA-294): `_Oracle`, per completion.
+
+    A row (this side's action) gains what it gets against each completion's reply,
+    weighted, less the root's value: sum_k w_k (M_k y_k)_a - v. A column (the other
+    side's) gains what the completions that would take it save by it: sum_k w_k
+    max(0, x M_k y_k - (x M_k)_b) -- the other side knows its bench, so each completion
+    answers on its own, and a column only one of them wants still joins. With one
+    completion both are `_Oracle`'s. The cells are asked in `belief_payoffs`, so a cell
+    that reaches no hidden slot is resolved once for every completion.
+    """
+
+    def __init__(
+        self,
+        root: _BeliefRoot,
+        outside: tuple[Sequence[SideAction], Sequence[SideAction]],
+        fill: Callable[[list[SideAction], list[SideAction]], list[np.ndarray]],
+        *,
+        swap: bool = False,
+    ) -> None:
+        self.root = root
+        self.fill = fill
+        self.swap = swap
+        self.candidates: tuple[list[SideAction], list[SideAction]] = ([], [])
+        for role, menu in ((0, root.own), (1, root.other)):
+            seen: set[str] = set()
+            for action in (*outside[role], *menu):
+                if action.to_choice() not in seen:
+                    seen.add(action.to_choice())
+                    self.candidates[role].append(action)
+        #: (own choice, other choice) -> the cell's price in every completion.
+        self.known: dict[tuple[str, str], np.ndarray] = {}
+        self.dropped: tuple[set[str], set[str]] = (set(), set())
+        self.probes = 0
+        self.probed = 0
+        self.widened = 0
+        self.swapped = 0
+        self.left: set[str] = set()
+        self.cap = 4 * (len(self.candidates[0]) + len(self.candidates[1])) + 4
+        self.stalled = False
+
+    def _menu(self, role: int) -> list[SideAction]:
+        return self.root.own if role == 0 else self.root.other
+
+    def _outside(self, role: int) -> list[SideAction]:
+        on = {action.to_choice() for action in self._menu(role)}
+        return [
+            action for action in self.candidates[role]
+            if action.to_choice() not in on and action.to_choice() not in self.dropped[role]
+        ]
+
+    def _rows(self) -> list[int]:
+        return [int(i) for i in np.flatnonzero(self.root.equilibrium.row_strategy > 1e-9)]
+
+    def _cols(self) -> list[list[int]]:
+        return [
+            [int(j) for j in np.flatnonzero(y > 1e-9)]
+            for y in self.root.equilibrium.col_strategies
+        ]
+
+    def _ask(
+        self, rows: list[SideAction], cols: list[SideAction], meter: _Meter
+    ) -> None:
+        """Fill the rectangle `rows` x `cols` in every completion; remember each cell."""
+        if not rows or not cols:
+            return
+        prices = self.fill(rows, cols)
+        for r, a in enumerate(rows):
+            for c, b in enumerate(cols):
+                self.known[(a.to_choice(), b.to_choice())] = np.array(
+                    [float(p[r, c]) for p in prices], dtype=np.float64
+                )
+        meter.filled(len(rows) * len(cols) * len(prices))
+        self.probed += len(rows) * len(cols) * len(prices)
+
+    def probe(self, meter: _Meter) -> None:
+        """Ask every outside action against the other side's support, where not known.
+
+        Two rectangles: the outside rows against the union of the completions' column
+        supports, and the row support against the outside columns. A rectangle is filled
+        whole, so a row is asked against a column of the union a completion does not use.
+        """
+        root = self.root
+        union = sorted({j for cols in self._cols() for j in cols})
+        support = self._rows()
+        rows = [
+            a for a in self._outside(0)
+            if any((a.to_choice(), root.other[j].to_choice()) not in self.known for j in union)
+        ]
+        cols_needed = [
+            root.other[j] for j in union
+            if any((a.to_choice(), root.other[j].to_choice()) not in self.known for a in rows)
+        ]
+        outside_cols = [
+            b for b in self._outside(1)
+            if any((root.own[i].to_choice(), b.to_choice()) not in self.known for i in support)
+        ]
+        rows_needed = [
+            root.own[i] for i in support
+            if any((root.own[i].to_choice(), b.to_choice()) not in self.known for b in outside_cols)
+        ]
+        if not (rows and cols_needed) and not (outside_cols and rows_needed):
+            return
+        self._ask(rows, cols_needed, meter)
+        self._ask(rows_needed, outside_cols, meter)
+        self.probes += 1
+
+    def widen(self, meter: _Meter) -> bool:
+        """Add the outside action with the largest gain, if one gains (rows first on a
+        tie, then the candidates' order); its whole row or column is filled, the root
+        re-solved. Returns whether an action joined."""
+        if self.stalled:
+            return False
+        root = self.root
+        eq = root.equilibrium
+        value = float(eq.value)
+        w = root.w
+        x = eq.row_strategy
+        ys = eq.col_strategies
+        support = self._rows()
+        cols = self._cols()
+        earned = [float(x @ root.prices[k] @ ys[k]) for k in range(len(root.prices))]
+        best: tuple[float, int, SideAction] | None = None
+        for role in (0, 1):
+            for action in self._outside(role):
+                key = action.to_choice()
+                if role == 0:
+                    got = sum(
+                        float(w[k]) * float(ys[k][j])
+                        * float(self.known[(key, root.other[j].to_choice())][k])
+                        for k in range(len(root.prices))
+                        for j in cols[k]
+                    )
+                    gain = got - value
+                else:
+                    gain = 0.0
+                    for k in range(len(root.prices)):
+                        cost = sum(
+                            float(x[i]) * float(self.known[(root.own[i].to_choice(), key)][k])
+                            for i in support
+                        )
+                        gain += float(w[k]) * max(0.0, earned[k] - cost)
+                if gain > ORACLE_TOLERANCE and (best is None or gain > best[0]):
+                    best = (gain, role, action)
+        if best is None:
+            return False
+        _gain, role, action = best
+        key = action.to_choice()
+        others = root.other if role == 0 else root.own
+        pairs = [
+            (key, other.to_choice()) if role == 0 else (other.to_choice(), key)
+            for other in others
+        ]
+        missing = [others[n] for n, pair in enumerate(pairs) if pair not in self.known]
+        if role == 0:
+            self._ask([action], missing, meter)
+        else:
+            self._ask(missing, [action], meter)
+        lines = np.array([self.known[pair] for pair in pairs], dtype=np.float64)  # (n, K)
+        grown = [
+            np.vstack([p, lines[:, k][None, :]]) if role == 0 else np.hstack([p, lines[:, k][:, None]])
+            for k, p in enumerate(root.prices)
+        ]
+        before = (root.prices, root.equilibrium)
+        root.prices = grown
+        if not root.solve():
+            root.prices, root.equilibrium = before
+            self.dropped[role].add(key)
+            return False
+        self._menu(role).append(action)
+        self.widened += 1
+        if self.swap:
+            self._swap_out(role, key)
+        if self.widened >= self.cap:
+            self.stalled = True
+        return True
+
+    def _swap_out(self, role: int, added: str) -> None:
+        """`_Oracle._swap_out` on the Bayesian root: a column is weightless when no
+        completion plays it, and its loss is the completions' weighted losses."""
+        root = self.root
+        eq = root.equilibrium
+        menu = self._menu(role)
+        if role == 0:
+            weightless = eq.row_strategy <= WEIGHTLESS
+            loss = np.asarray(eq.row_ev_loss, dtype=np.float64)
+        else:
+            weightless = np.all(
+                np.stack([y <= WEIGHTLESS for y in eq.col_strategies]), axis=0
+            )
+            loss = sum(float(root.w[k]) * eq.col_ev_loss[k] for k in range(len(root.prices)))
+        axis = 1 + role  # a cell is (k, i, j)
+        busy = {cell[axis] for cell in (*root.children, *root.refused)}
+        free = [
+            n for n in range(len(menu))
+            if weightless[n]
+            and n not in busy
+            and menu[n].to_choice() != added
+            and menu[n].to_choice() not in self.left
+        ]
+        if not free:
+            return
+        out = max(free, key=lambda n: (float(loss[n]), n))
+        before = (root.prices, root.equilibrium)
+        root.prices = [np.delete(p, out, axis=role) for p in root.prices]
+        if not root.solve():
+            root.prices, root.equilibrium = before
+            return
+        self.left.add(menu.pop(out).to_choice())
+
+        def moved(cell: tuple[int, int, int]) -> tuple[int, int, int]:
+            if cell[axis] < out:
+                return cell
+            return (cell[0], cell[1] - 1, cell[2]) if role == 0 else (cell[0], cell[1], cell[2] - 1)
+
+        root.children = {moved(cell): kept for cell, kept in root.children.items()}
+        root.refused = {moved(cell) for cell in root.refused}
+        for cell, kept in root.children.items():
+            for _weight, child in kept:
+                if isinstance(child, _Node):
+                    child.parent = (root, cell)
+        self.swapped += 1
+
+
+def deepen_belief(
+    reg: Regulation,
+    side: int,
+    position: Position,
+    own: Sequence[SideAction],
+    other: Sequence[SideAction],
+    items: Sequence[Any],
+    weights: np.ndarray,
+    prices: Sequence[np.ndarray],
+    equilibrium: Any,  # noqa: ANN401 - BayesianEquilibrium, the depth-1 answer
+    evaluate: LeafEvaluator,
+    *,
+    budget: Budget,
+    cells: int,
+    sub_limit: int,
+    sub_branches: int,
+    unmodelled: set[str],
+    reading: str = "mixed",
+    outside: tuple[Sequence[SideAction], Sequence[SideAction]] | None = None,
+    swap: bool = False,
+    cost: Cost | None = None,
+    trace: list | None = None,
+) -> BeliefDeepening:
+    """`deepen_root` for a side whose opponent's bench is hidden (IKA-294, label ``h``).
+
+    `prices[k]` is this side's own game (rows `own`) when the other bench is completion
+    `items[k]`, and `equilibrium` its Bayesian answer over `weights` -- `belief_solve`'s
+    depth-1 answer. The budget is spent best first over the cells ``(k, i, j)`` and the
+    trees under them (`_BeliefRoot`), the root re-solved as the Bayesian game after
+    every step; with `outside` (this side's candidates, the other side's) the root's
+    double oracle asks them first every step (`_BeliefOracle`), and `swap` / the
+    ``breadth`` reading are `deepen_root`'s. A cell spent is one resolved turn in one
+    completion: a probed cell counts once per completion.
+    """
+    if reading not in ("mixed", "breadth"):
+        raise ValueError(f"a Bayesian root is read whole or breadth only, not {reading!r}")
+    if outside is None and (swap or reading == "breadth"):
+        raise ValueError("swapping and breadth only are the root's double oracle's; no outside")
+    from .beliefnode import belief_payoffs
+
+    deepens = reading != "breadth"
+    root = _BeliefRoot(side, own, other, items, weights, prices, equilibrium)
+    if trace is not None:
+        trace.append(root)
+    spreads = {1 - side: list(items)}
+
+    def fill(rows: list[SideAction], cols: list[SideAction]) -> list[np.ndarray]:
+        """This side's prices of `rows` x `cols` in every completion, in its orientation."""
+        ours, theirs = (rows, cols) if side == 0 else (cols, rows)
+        node = belief_payoffs(
+            reg, position, ours, theirs, evaluate, budget=budget, spreads=spreads
+        )
+        unmodelled.update(node.unmodelled)
+        return [m if side == 0 else -m.T for m in node.matrices[side]]
+
+    meter = _Meter(cost)
+    oracle = None if outside is None else _BeliefOracle(root, outside, fill, swap=swap)
+    expanded = 0
+    deepest = 0
+    refused = 0
+    while meter.spent < cells:
+        if oracle is not None:
+            oracle.probe(meter)
+            if oracle.widen(meter):
+                if trace is not None:
+                    trace.append((root, None, True))
+                continue
+            if not deepens:
+                break
+        target = _best(root)  # type: ignore[arg-type]
+        if target is None:
+            break
+        node, cell = target
+        spent, ok, fills = _expand(
+            reg, node, cell, evaluate, budget=budget, sub_limit=sub_limit,
+            sub_branches=sub_branches, unmodelled=unmodelled,
+        )
+        meter.refined(spent - 1, fills)
+        if trace is not None:
+            trace.append((node, cell, ok))
+        if not ok:
+            node.refused.add(cell)
+            if isinstance(node, _BeliefRoot):
+                node.signal = None
+            refused += 1
+            continue
+        expanded += 1
+        deepest = max(deepest, node.level + 1)
+        _propagate(node, cell)
+    if timing.ON:
+        timing.count("deepen.hidden.calls", 1)
+        timing.count("deepen.hidden.classes", len(root.prices))
+        timing.count("deepen.cells", meter.refines + meter.cells)
+        timing.count("deepen.expanded", expanded)
+        timing.count("deepen.fills", meter.fills)
+        timing.count("deepen.refines", meter.refines)
+        if oracle is not None:
+            timing.count("deepen.oracle.calls", 1)
+            timing.count("deepen.oracle.probes", oracle.probes)
+            timing.count("deepen.oracle.probed", oracle.probed)
+            timing.count("deepen.oracle.widened", oracle.widened)
+            timing.count("deepen.oracle.swapped", oracle.swapped)
+            timing.count("deepen.oracle.stalled", int(oracle.stalled))
+    uncovered: tuple[tuple[str, ...], tuple[str, ...]] = ((), ())
+    if oracle is not None and oracle.swapped:
+        mine = _lost_options(reg, own, root.own)
+        theirs = _lost_options(reg, other, root.other)
+        uncovered = (mine, theirs) if side == 0 else (theirs, mine)
+        if timing.ON:
+            timing.count("deepen.oracle.uncovered", len(mine) + len(theirs))
+    report = Deepened(
+        budget=cells, cells=meter.refines + meter.cells, expanded=expanded,
+        depth=1 + deepest, refused=refused, oracle=oracle is not None,
+        probed=0 if oracle is None else oracle.probed,
+        widened=0 if oracle is None else oracle.widened,
+        fills=meter.fills, swap=swap,
+        swapped=0 if oracle is None else oracle.swapped, uncovered=uncovered,
+        classes=len(root.prices),
+    )
+    return BeliefDeepening(
+        equilibrium=root.equilibrium, prices=root.prices, own=root.own, other=root.other,
+        report=report,
+    )
 
 
 def _signal(node: _Node) -> np.ndarray:
@@ -295,6 +1306,30 @@ def _best(root: _Node) -> tuple[_Node, tuple[int, int]] | None:
         bound, _order, node, inherited = heapq.heappop(heap)
         if best is not None and -bound <= best[0]:
             break
+        if isinstance(node, _BeliefRoot):
+            # The Bayesian root (IKA-294): its cells are (completion, row, column), the
+            # first in that order on a tie. It is only ever the root, so nothing is
+            # in hand yet and nothing is inherited.
+            scores = node.scores()
+            candidates = scores.copy()
+            for cell in (*node.children, *node.refused):
+                candidates[cell] = -np.inf
+            if candidates.size:
+                flat = int(np.argmax(candidates))
+                score = float(candidates.flat[flat])
+                if score > 0.0:
+                    best = (
+                        score, node,
+                        tuple(int(v) for v in np.unravel_index(flat, candidates.shape)),
+                    )
+            for cell in sorted(node.children):
+                for weight, child in node.children[cell]:
+                    if isinstance(child, _Node):
+                        passed = float(scores[cell]) * weight
+                        if passed > 0.0:
+                            met += 1
+                            heapq.heappush(heap, (-passed, met, child, passed))
+            continue
         scores = _scores(node, inherited)
         candidates = scores.copy()
         if node.rect is not None:
@@ -332,17 +1367,23 @@ def _expand(
     sub_limit: int,
     sub_branches: int,
     unmodelled: set[str],
-) -> tuple[int, bool]:
+) -> tuple[int, bool, int]:
     """Refine one cell of `node` as `search._refined_value` does, keeping the children.
 
-    Returns the cells spent and whether the cell took a deeper value.
+    Returns the cells spent, whether the cell took a deeper value, and the fills made.
     """
-    i, j = cell
-    result = port.turn(reg, node.pos, [node.rows[i], node.cols[j]], budget, full=True)
+    if isinstance(node, _BeliefRoot):
+        # The cell's completion, as if its bench were known (IKA-111's determinization).
+        at, pair = node.turn_of(cell)
+    else:
+        i, j = cell
+        at, pair = node.pos, [node.rows[i], node.cols[j]]
+    result = port.turn(reg, at, pair, budget, full=True)
     unmodelled.update(result.unmodelled)
     spent = 1
+    fills = 0
     if result.suspended or not result.outcomes:
-        return spent, False
+        return spent, False, fills
     branches = sorted(result.outcomes, key=lambda b: -b.probability)[:sub_branches]
     if len(branches) < len(result.outcomes):
         unmodelled.add(
@@ -351,7 +1392,7 @@ def _expand(
     weights = np.array([b.probability for b in branches], dtype=np.float64)
     total = float(weights.sum())
     if total <= 0:
-        return spent, False
+        return spent, False, fills
     weights /= total
 
     # Finished branches are scored by the leaf, as `_subgame_value` scores them, in one
@@ -367,14 +1408,15 @@ def _expand(
         row = narrow(reg, child_pos, 0, limit=sub_limit).actions
         col = narrow(reg, child_pos, 1, limit=sub_limit).actions
         if not row or not col:
-            return spent, False
+            return spent, False, fills
         payoff, notes = batched_payoff(reg, child_pos, row, col, evaluate, budget=budget)
+        fills += 1
         spent += len(row) * len(col)
         unmodelled.update(notes)
         try:
             equilibrium = solve(payoff)
         except EquilibriumError:
-            return spent, False
+            return spent, False, fills
         kept.append((
             float(weight),
             _Node(
@@ -384,7 +1426,7 @@ def _expand(
             ),
         ))
     node.children[cell] = kept
-    return spent, True
+    return spent, True, fills
 
 
 def _cell_value(branches: list[tuple[float, _Node | float]]) -> float:
@@ -403,6 +1445,9 @@ def _propagate(node: _Node, cell: tuple[int, int]) -> None:
     here: _Node | None = node
     at = cell
     while here is not None:
+        if isinstance(here, _BeliefRoot):
+            here.write(at, _cell_value(here.children[at]))
+            return
         here.payoff[at] = _cell_value(here.children[at])
         here.signal = None
         if here.rect is not None:
@@ -481,13 +1526,22 @@ def _reread(node: _Node) -> None:
 
 
 __all__ = [
-    "CELLS_PER_SECOND",
+    "ALL_ACTIONS",
+    "BELIEF_WEIGHTED",
+    "COSTS",
     "DEFAULT_DEEPEN",
     "READINGS",
     "GAP_FLOOR",
     "MAX_LEVELS",
+    "Cost",
+    "DeepenSpec",
     "Deepened",
+    "Deepening",
+    "BeliefDeepening",
     "best_first",
     "cells_for_seconds",
+    "deepen_belief",
+    "deepen_root",
+    "deepen_spec",
     "parse_deepen",
 ]
