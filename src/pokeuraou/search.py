@@ -349,6 +349,8 @@ def search(
     deepen: int = 0,
     outside: tuple[Sequence[SideAction], Sequence[SideAction]] | None = None,
     deepen_cost: _deepen.Cost | None = None,
+    swap: bool = False,
+    breadth_only: bool = False,
 ) -> SearchResult:
     """Solve this turn's matrix game, optionally refining the cells that decide it.
 
@@ -371,13 +373,17 @@ def search(
     ``outside`` turns on the root's double oracle while deepening (IKA-293): each side's
     candidates beyond its menu, asked every step whether they gain against the other
     side's support. The result's ``ours`` / ``theirs`` are then the grown menus, which
-    the strategies index. ``deepen_cost`` counts the budget in `deepen.Cost`'s prices
-    instead of cells (the human's clock, `deepen.cells_for_seconds`).
+    the strategies index. ``swap`` pushes a weightless action out for each that joins,
+    ``breadth_only`` runs the oracle without deepening (the labels' ``s`` and ``b``).
+    ``deepen_cost`` counts the budget in `deepen.Cost`'s prices instead of cells (the
+    human's clock, `deepen.cells_for_seconds`).
     """
     if deepen and (depth > 1 or solve_sparsely):
         raise ValueError("deepen is a budget on top of the depth-1 full-matrix search")
-    if (outside is not None or deepen_cost is not None) and not deepen:
-        raise ValueError("outside and deepen_cost are how a deepening spends; deepen is 0")
+    if (outside is not None or deepen_cost is not None or swap or breadth_only) and not deepen:
+        raise ValueError(
+            "outside, deepen_cost, swap and breadth_only are how a deepening spends; deepen is 0"
+        )
     row = list(ours)
     col = list(theirs)
     if solve_sparsely and depth <= 1:
@@ -401,8 +407,10 @@ def search(
             reg, pos, row, col, evaluate, budget=budget, payoff=payoff,
             equilibrium=equilibrium, cells=deepen, sub_limit=sub_limit,
             sub_branches=sub_branches, unmodelled=unmodelled,
-            reading="restricted" if solve_restricted else "mixed", refine=refine,
-            outside=outside, cost=deepen_cost,
+            reading=(
+                "breadth" if breadth_only else "restricted" if solve_restricted else "mixed"
+            ),
+            refine=refine, outside=outside, cost=deepen_cost, swap=swap,
         )
         return SearchResult(
             equilibrium=got.equilibrium,

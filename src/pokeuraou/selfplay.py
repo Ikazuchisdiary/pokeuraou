@@ -1025,8 +1025,12 @@ def play_game(
     specs = [deepen_spec(label) for label in deepens]
     cells = (specs[0].cells, specs[1].cells)
     deep_restricted = (specs[0].reading == "restricted", specs[1].reading == "restricted")
-    # The root's double oracle's width per side (IKA-293), or None.
+    # The root's double oracle's width per side (IKA-293), or None; whether it swaps,
+    # and whether it runs alone, without deepening.
     oracles = (specs[0].oracle, specs[1].oracle)
+    how = [
+        {"swap": spec.swap, "breadth_only": spec.reading == "breadth"} for spec in specs
+    ]
     for side in (0, 1):
         if cells[side] and (depths[side] != 1 or sparse[side] or restricted[side]):
             raise ValueError(
@@ -1269,6 +1273,7 @@ def play_game(
                         reg, pos, ours, theirs, own_leaf, budget=budget,
                         deepen=cells[0], solve_restricted=deep_restricted[0],
                         outside=own_wider.get(oracles[0]) if widens[0] else None,
+                        **how[0],
                     )
                 if same_menu and deep[1]:
                     # One agent on both sides reads both strategies off one solve.
@@ -1281,6 +1286,7 @@ def play_game(
                             reg, pos, ours, theirs, foe_leaf, budget=budget,
                             deepen=cells[1], solve_restricted=deep_restricted[1],
                             outside=own_wider.get(oracles[1]) if widens[1] else None,
+                            **how[1],
                         )
                     )
             except EquilibriumError:
@@ -1336,6 +1342,7 @@ def play_game(
                             reg, pos, foe_ours, foe_theirs, foe_leaf, budget=budget,
                             deepen=cells[1], solve_restricted=deep_restricted[1],
                             outside=foe_wider.get(oracles[1]) if widens[1] else None,
+                            **how[1],
                         )
                     else:
                         foe_answers = belief_solve(
@@ -1370,6 +1377,7 @@ def play_game(
                     solve_restricted=restricted[0] or deep_restricted[0],
                     deepen=cells[0],
                     outside=own_wider.get(oracles[0]) if widens[0] else None,
+                    **how[0],
                 )
             except EquilibriumError:
                 break
@@ -1416,6 +1424,7 @@ def play_game(
                         solve_restricted=restricted[1] or deep_restricted[1],
                         deepen=cells[1],
                         outside=foe_wider.get(oracles[1]) if widens[1] else None,
+                        **how[1],
                     )
                 except EquilibriumError:
                     break

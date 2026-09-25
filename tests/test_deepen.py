@@ -37,7 +37,7 @@ from pokeuraou import deepen as deepen_mod
 from pokeuraou import selfplay
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.equilibrium import solve
-from pokeuraou.narrow import narrow
+from pokeuraou.narrow import narrow, slot_options
 from pokeuraou.pool import load_pool
 from pokeuraou.poolplay import PoolArm, SolvedSelections, pool_match_game
 from pokeuraou.port import batched_payoff
@@ -264,13 +264,20 @@ def test_the_label_parses_and_a_bad_one_stops() -> None:
     assert deepen_mod.deepen_spec("m50oall").oracle == deepen_mod.ALL_ACTIONS
     assert deepen_mod.deepen_spec("m50").oracle is None
     assert deepen_mod.deepen_spec("none") == deepen_mod.DeepenSpec(None, 0)
+    assert deepen_mod.deepen_spec("m400s24") == deepen_mod.DeepenSpec("mixed", 400, 24, True)
+    assert deepen_mod.deepen_spec("b200sall") == deepen_mod.DeepenSpec(
+        "breadth", 200, deepen_mod.ALL_ACTIONS, True
+    )
+    assert deepen_mod.deepen_spec("b200o24").swap is False
     for bad in ("", "0", "400", "m0", "r", "x400", "R400", "m-1", "none1", "r04",
-                "m40o0", "m40o", "m40oAll", "m40o04", "nonoe24", "o24"):
+                "m40o0", "m40o", "m40oAll", "m40o04", "nonoe24", "o24", "b200", "m40x24",
+                "m40s", "s24"):
         with pytest.raises(ValueError, match="deepen"):
             deepen_mod.parse_deepen(bad)
     # The oracle goes with the whole-matrix reading only.
-    with pytest.raises(ValueError, match="mixed|whole-matrix"):
-        deepen_mod.parse_deepen("r40o24")
+    for bad in ("r40o24", "r40s24"):
+        with pytest.raises(ValueError, match="mixed|whole-matrix"):
+            deepen_mod.parse_deepen(bad)
 
 
 def test_seconds_turn_into_a_budget_at_measured_prices() -> None:
@@ -441,7 +448,9 @@ class _Act:
         return self.name
 
 
-def _grown_by_oracle(full: np.ndarray, rows: list[int], cols: list[int]):  # noqa: ANN202
+def _grown_by_oracle(  # noqa: ANN202
+    full: np.ndarray, rows: list[int], cols: list[int], swap: bool = False
+):
     """The oracle run to the end over a matrix whose every cell it already knows."""
     names_r = [_Act(f"r{i}") for i in range(full.shape[0])]
     names_c = [_Act(f"c{j}") for j in range(full.shape[1])]
@@ -450,18 +459,20 @@ def _grown_by_oracle(full: np.ndarray, rows: list[int], cols: list[int]):  # noq
         pos=None, rows=[names_r[i] for i in rows], cols=[names_c[j] for j in cols],
         payoff=payoff.copy(), equilibrium=solve(payoff), level=0,
     )
-    oracle = deepen_mod._Oracle(root, (names_r, names_c))
+    oracle = deepen_mod._Oracle(root, (names_r, names_c), swap=swap)
     for i, a in enumerate(names_r):
         for j, b in enumerate(names_c):
             oracle.known[(a.to_choice(), b.to_choice())] = float(full[i, j])
     meter = deepen_mod._Meter(None)
     added = []
-    while True:
+    for _ in range(1_000):
         before = (len(root.rows), len(root.cols))
         oracle.probe(None, None, None, meter, set())
         if not oracle.widen(None, None, None, meter, set()):
             break
         added.append("row" if len(root.rows) > before[0] else "col")
+    else:
+        raise AssertionError("the oracle never stopped")
     return root, oracle, meter, added
 
 
@@ -505,14 +516,71 @@ def test_the_oracle_adds_the_largest_gain_rows_first_on_a_tie() -> None:
     assert added == [] and oracle.widened == 0
 
 
-def _oracle_root(reg, pos, ours, theirs, wide, cells):  # noqa: ANN001, ANN202
+def test_swapping_still_reaches_the_whole_games_value() -> None:
+    """With swaps the menus stay small, each action leaves at most once, and the oracle
+    still ends where nothing outside gains: at the whole game's value."""
+    rng = np.random.default_rng(310)
+    finished = swapped = 0
+    for _ in range(60):
+        full = rng.random((9, 8))
+        root, oracle, _meter, added = _grown_by_oracle(full, [0, 1, 2], [0, 1, 2], swap=True)
+        assert len(root.rows) + len(root.cols) == 6 + oracle.widened - oracle.swapped
+        swapped += oracle.swapped
+        assert not oracle.stalled and oracle.swapped == len(oracle.left)
+        finished += 1
+        assert root.equilibrium.value == pytest.approx(solve(full).value, abs=1e-7)
+    assert swapped > 60 and finished == 60, (swapped, finished)
+
+
+def test_a_swap_pushes_out_only_a_weightless_action_and_keeps_the_tree() -> None:
+    a, b, c = _Act("a"), _Act("b"), _Act("c")
+    x, y = _Act("x"), _Act("y")
+
+    def root_of(payoff):  # noqa: ANN001, ANN202
+        payoff = np.array(payoff, dtype=np.float64)
+        return deepen_mod._Node(
+            pos=None, rows=[a, b, c], cols=[x, y], payoff=payoff,
+            equilibrium=solve(payoff), level=0,
+        )
+
+    # Matching pennies on a, b; c is dominated, so it carries no weight.
+    root = root_of([[1.0, 0.0], [0.0, 1.0], [0.25, 0.25]])
+    oracle = deepen_mod._Oracle(root, ([], []), swap=True)
+    oracle._swap_out(0, added="a")
+    assert [r.name for r in root.rows] == ["a", "b"] and oracle.swapped == 1
+    assert root.equilibrium.value == pytest.approx(0.5)
+    # Nothing weightless (other than the one that joined): nothing leaves.
+    oracle._swap_out(0, added="a")
+    assert [r.name for r in root.rows] == ["a", "b"] and oracle.swapped == 1
+    # A weightless row with a refined cell stays; the refined cells of the rows after a
+    # removed one move up with their child nodes' parent links.
+    root = root_of([[0.25, 0.25], [1.0, 0.0], [0.0, 1.0]])
+    child = deepen_mod._Node(pos=None, rows=[], cols=[], payoff=np.zeros((1, 1)),
+                             equilibrium=solve(np.array([[0.5]])), level=1)
+    child.parent = (root, (2, 1))
+    root.children = {(2, 1): [(1.0, child)]}
+    root.refused = {(1, 0)}
+    oracle = deepen_mod._Oracle(root, ([], []), swap=True)
+    oracle._swap_out(0, added="b")
+    assert [r.name for r in root.rows] == ["b", "c"]
+    assert root.children == {(1, 1): [(1.0, child)]} and child.parent == (root, (1, 1))
+    assert root.refused == {(0, 0)}
+    assert root.payoff.shape == (2, 2) and root.payoff[1, 1] == 1.0
+    blocked = root_of([[0.25, 0.25], [1.0, 0.0], [0.0, 1.0]])
+    blocked.children = {(0, 0): []}
+    oracle = deepen_mod._Oracle(blocked, ([], []), swap=True)
+    oracle._swap_out(0, added="b")
+    assert len(blocked.rows) == 3 and oracle.swapped == 0
+
+
+def _oracle_root(reg, pos, ours, theirs, wide, cells, swap=False, reading="mixed"):  # noqa: ANN001, ANN202
     payoff, notes = batched_payoff(reg, pos, ours, theirs, LEAF, budget=Budget.matrix())
     trace: list = []
     got = deepen_mod.deepen_root(
         reg, pos, ours, theirs, LEAF, budget=Budget.matrix(), payoff=payoff,
         equilibrium=solve(payoff), cells=cells, sub_limit=DEFAULT_SUB_LIMIT,
         sub_branches=DEFAULT_SUB_BRANCHES, unmodelled=set(notes), trace=trace,
-        outside=wide,
+        outside=wide, swap=swap, reading=reading,
     )
     return payoff, got, trace
 
@@ -536,26 +604,56 @@ def test_with_nothing_outside_the_oracle_is_the_deepening_to_the_bit(roster) -> 
         assert "probed" not in plain_json
 
 
-def test_the_oracle_widens_the_root_with_outside_actions(roster) -> None:  # noqa: ANN001
+@pytest.mark.parametrize("swap", [False, True])
+def test_the_oracle_widens_the_root_with_outside_actions(roster, monkeypatch, swap) -> None:  # noqa: ANN001
     reg = roster.reg
-    widened = 0
+    widened = swapped = 0
+    # Every cell deepening fills, counted where it is filled: the report must charge them all.
+    filled = [0]
+    many = deepen_mod.port.batched_payoffs
+
+    def counted_many(reg_, pos_, rows, cols, evaluators, *, budget, cells=None):  # noqa: ANN001, ANN202
+        filled[0] += len(cells) if cells is not None else len(rows) * len(cols)
+        return many(reg_, pos_, rows, cols, evaluators, budget=budget, cells=cells)
+
     for pos in _played(roster)[:4]:
         ours, theirs = _menus(reg, pos, limit=3)
         wide = _menus(reg, pos, limit=8)
-        payoff, got, trace = _oracle_root(reg, pos, ours, theirs, wide, 400)
-        again = _oracle_root(reg, pos, ours, theirs, wide, 400)[1]
+        with monkeypatch.context() as patched:
+            # Every fill goes through `port.batched_payoffs` (`batched_payoff` calls it).
+            patched.setattr(deepen_mod.port, "batched_payoffs", counted_many)
+            filled[0] = 0
+            payoff, got, trace = _oracle_root(reg, pos, ours, theirs, wide, 400, swap)
+            refines = got.report.expanded + got.report.refused
+            spent = filled[0] - len(ours) * len(theirs)  # less the depth-1 root's own fill
+            assert got.report.cells == refines + spent, "a filled cell went uncharged"
+        again = _oracle_root(reg, pos, ours, theirs, wide, 400, swap)[1]
         # The same answer twice (no clock, no order from a set).
         assert got.report == again.report and np.array_equal(got.payoff, again.payoff)
         assert [a.to_choice() for a in got.rows] == [a.to_choice() for a in again.rows]
         root = trace[0]
         report = got.report
-        # The menus it was given come first, then outside actions, each once.
-        assert got.rows[: len(ours)] == list(ours) and got.cols[: len(theirs)] == list(theirs)
+        # Each action once, every one from the menu or the candidates.
         for grown, given, pool in ((got.rows, ours, wide[0]), (got.cols, theirs, wide[1])):
-            extra = [a.to_choice() for a in grown[len(given):]]
-            assert len(set(extra)) == len(extra)
-            assert set(extra) <= {a.to_choice() for a in pool} - {a.to_choice() for a in given}
-        assert report.widened == len(got.rows) + len(got.cols) - len(ours) - len(theirs)
+            names = [a.to_choice() for a in grown]
+            assert len(set(names)) == len(names)
+            assert set(names) <= {a.to_choice() for a in (*pool, *given)}
+        assert report.widened - report.swapped == (
+            len(got.rows) + len(got.cols) - len(ours) - len(theirs)
+        )
+        if not swap:
+            # Adding only: the menus it was given come first, then what joined.
+            assert got.rows[: len(ours)] == list(ours)
+            assert got.cols[: len(theirs)] == list(theirs)
+            assert report.swapped == 0 and report.uncovered == ((), ())
+        else:
+            # What a swap took out of the cover is said, in `narrow`'s words.
+            for side, (given, now) in enumerate(((ours, got.rows), (theirs, got.cols))):
+                before, after = slot_options(reg, given), slot_options(reg, now)
+                assert report.uncovered[side] == tuple(
+                    sorted(before[k] for k in set(before) - set(after))
+                )
+        swapped += report.swapped
         assert report.widened == sum(1 for step in trace[1:] if step[1] is None)
         # Unrefined root cells are depth-1 values of the grown menus; refined ones are
         # their branches' values; the equilibrium is the matrix's.
@@ -566,16 +664,17 @@ def test_the_oracle_widens_the_root_with_outside_actions(roster) -> None:  # noq
             assert got.payoff[cell] == deepen_mod._cell_value(branches)
         assert np.array_equal(got.payoff[untouched], fresh[untouched])
         assert got.equilibrium.value == solve(got.payoff).value
-        # Every probed or added cell was charged.
-        assert report.cells >= report.probed
         assert report.fills >= (1 if report.probed else 0)
         widened += report.widened
-        # A budget of one cell is spent by the first probe: nothing joins, nothing deepens.
-        one = _oracle_root(reg, pos, ours, theirs, wide, 1)[1].report
-        if one.probed:
-            assert one.cells == one.probed and one.fills == 1
-            assert one.widened == 0 and one.expanded == 0
+        # A budget of one cell is one step: a probe and one widening or deepening.
+        single = _oracle_root(reg, pos, ours, theirs, wide, 1, swap)[1].report
+        assert single.widened + single.expanded + single.refused <= 1
+        # Breadth only never deepens, and stops once nothing gains.
+        alone = _oracle_root(reg, pos, ours, theirs, wide, 10_000, swap, "breadth")[1]
+        assert alone.report.expanded == 0 and alone.report.depth == 1
     assert widened >= 1, "no outside action ever joined, so the oracle was not exercised"
+    if swap:
+        assert swapped >= 1, "nothing was ever swapped out"
 
 
 def test_a_cost_counts_fills_and_refinements_too(roster) -> None:  # noqa: ANN001
@@ -612,7 +711,7 @@ def test_the_wider_menus_come_from_the_same_ranking(roster) -> None:  # noqa: AN
             ]
 
 
-@pytest.mark.parametrize("label", ["m60o6", "m60oall"])
+@pytest.mark.parametrize("label", ["m60o6", "m60oall", "m60s6", "b60sall"])
 def test_under_a_hidden_bench_the_oracle_widens_where_it_deepens(setup, label) -> None:  # noqa: ANN001
     base = _hidden_game(setup, "none")
     plain = _hidden_game(setup, "m60")
@@ -625,6 +724,9 @@ def test_under_a_hidden_bench_the_oracle_widens_where_it_deepens(setup, label) -
         assert d.kind == "move" and _both_shown(d)
         report = d.deepened[0]
         assert {"probed", "widened", "fills"} <= set(report)
+        assert ("swapped" in report) == ("s" in label[1:])
+        if label.startswith("b"):
+            assert report["expanded"] == 0 and report["depth"] == 1
         fired += 1
         first = k if first is None else first
         widened += report["widened"]

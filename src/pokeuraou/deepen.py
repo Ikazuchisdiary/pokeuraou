@@ -58,8 +58,22 @@ moves the root most first in 78% of positions. If any action gains more than
 `ORACLE_TOLERANCE`, the one that gains most joins the root (the rest of its row or column
 filled at depth 1) and the root is re-solved; otherwise the step is a deepening step as
 above. Cells already asked are kept, so a probe fills only what the support's changes
-made new. Every probed and added cell is charged to the budget. Without candidates
-outside the menu this is `m<N>` to the bit.
+made new. Every probed and added cell is charged to the budget; a probe and what
+follows it (a widening or a deepening step) are one step, so the budget is checked
+before each and the last may pass it. Without candidates outside the menu this is
+`m<N>` to the bit.
+
+Two variants (the user's decision of 9/26, IKA-310's measurement). ``s<W>`` / ``sall``
+**swaps** instead of only adding: once the action joins and the root is re-solved,
+an action of the same side that carries no weight in that equilibrium leaves -- the
+one that loses most against it, never one with a refined cell -- so the menu keeps
+its size. Removing a weightless action leaves the equilibrium standing. That may
+break `narrow`'s cover (every single slot option somewhere on the menu); the options
+the root no longer covers are reported (`Deepened.uncovered`, written into the
+decision's record) rather than dropped quietly, and a removed action is outside the
+menu again, so the next probe asks it like any other and it can come back. The
+``b<N>`` reading is **breadth only**: the oracle alone, no deepening -- it stops when
+nothing outside gains, or at the budget.
 
 **What a budget costs.** Labels count cells, so a game is the same game on any machine.
 Time is counted separately (`Cost`): fills, refinements and cells each have a price in
@@ -74,6 +88,7 @@ import heapq
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 
@@ -81,7 +96,7 @@ from . import port, timing
 from .actions import SideAction
 from .budget import Budget
 from .equilibrium import Equilibrium, EquilibriumError, solve
-from .narrow import narrow
+from .narrow import narrow, slot_options
 from .port import batched_payoff
 from .position import Position
 from .regulation import Regulation
@@ -91,6 +106,9 @@ LeafEvaluator = Callable[[list[Position]], np.ndarray]
 #: Added to a regret before dividing by it (IKA-281's `GAP_FLOOR`), so an action on the
 #: support ranks by its uncertainty rather than by an infinity.
 GAP_FLOOR = 1e-3
+
+#: A strategy's weight at or under this is none: the actions a swap may push out.
+WEIGHTLESS = 1e-12
 
 #: How far a best response outside the restricted rectangle has to beat its value to join
 #: it (`search.ORACLE_TOLERANCE`, repeated so this module does not import the search).
@@ -135,15 +153,17 @@ COSTS: dict[tuple[str, int], Cost] = {
 
 #: What ships: no deepening. A label is ``none``, ``m<N>`` (the whole matrix read, N cells)
 #: or ``r<N>`` (the restricted reading, N cells), and ``m<N>`` may end in ``o<W>`` or
-#: ``oall``: the root's double oracle over the rest of a width-W menu, or every legal action.
+#: ``oall``: the root's double oracle over the rest of a width-W menu, or every legal action
+#: -- or in ``s<W>`` / ``sall``, the oracle that swaps a weightless action out for each one
+#: it adds. ``b<N>`` with either suffix is the oracle alone, without deepening.
 DEFAULT_DEEPEN = "none"
 
-READINGS = {"m": "mixed", "r": "restricted"}
+READINGS = {"m": "mixed", "r": "restricted", "b": "breadth"}
 
 #: The oracle's candidates as a width: ``oall`` is every legal action.
 ALL_ACTIONS = 1 << 30
 
-_DEEPEN = re.compile(r"none|([mr])([1-9][0-9]*)(?:o([1-9][0-9]*|all))?")
+_DEEPEN = re.compile(r"none|([mrb])([1-9][0-9]*)(?:([os])([1-9][0-9]*|all))?")
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,26 +175,34 @@ class DeepenSpec:
     #: Width of the menu whose rest the root's double oracle asks (`ALL_ACTIONS` for every
     #: legal action), or None: no breadth at the root.
     oracle: int | None = None
+    #: Whether the oracle swaps a weightless action out for each one it adds (``s``).
+    swap: bool = False
 
 
 def deepen_spec(label: str) -> DeepenSpec:
-    """`DeepenSpec` of a label: ``none``, ``m400``, ``r25``, ``m400o24``, ``m400oall``."""
+    """`DeepenSpec` of a label: ``none``, ``m400``, ``r25``, ``m400o24``, ``m400sall``,
+    ``b200s24``."""
     got = _DEEPEN.fullmatch(label)
     if got is None:
         raise ValueError(
-            f"deepen {label!r} is not none, m<N>, r<N>, m<N>o<W> or m<N>oall "
-            "(N cells, N >= 1; W the oracle's width)"
+            f"deepen {label!r} is not none, m<N>, r<N>, m<N>o<W>, m<N>s<W>, b<N>o<W> or "
+            "b<N>s<W> (N cells, N >= 1; W the oracle's width, or all)"
         )
     if got.group(1) is None:
         return DeepenSpec(None, 0)
-    oracle = got.group(3)
-    if oracle is not None and got.group(1) != "m":
+    letter, kind, oracle = got.group(1), got.group(3), got.group(4)
+    if oracle is not None and letter == "r":
         raise ValueError(
             f"deepen {label!r}: the root's double oracle goes with the whole-matrix reading "
             "(m); the restricted one (r) already grows its rectangle by its own oracle"
         )
+    if oracle is None and letter == "b":
+        raise ValueError(
+            f"deepen {label!r}: breadth only (b) is the root's double oracle alone; it "
+            "needs o<W> / s<W> / oall / sall"
+        )
     width = None if oracle is None else ALL_ACTIONS if oracle == "all" else int(oracle)
-    return DeepenSpec(READINGS[got.group(1)], int(got.group(2)), width)
+    return DeepenSpec(READINGS[letter], int(got.group(2)), width, kind == "s")
 
 
 def parse_deepen(label: str) -> tuple[str | None, int]:
@@ -229,8 +257,15 @@ class Deepened:
     widened: int = 0
     #: Fills this deepening made (children, probes, added rows and columns): `Cost.fill`'s count.
     fills: int = 0
+    #: Whether the oracle swapped (``s``): each action it added pushed a weightless one out.
+    swap: bool = False
+    #: Actions it pushed out (``s``).
+    swapped: int = 0
+    #: Each side's single slot options the root's menu covered before and no longer does
+    #: (``s``): what the swaps took out of `narrow`'s cover, said rather than dropped.
+    uncovered: tuple[tuple[str, ...], tuple[str, ...]] = ((), ())
 
-    def to_json(self) -> dict[str, int]:
+    def to_json(self) -> dict[str, Any]:
         return {
             "budget": self.budget,
             "cells": self.cells,
@@ -240,6 +275,12 @@ class Deepened:
             **(
                 {"probed": self.probed, "widened": self.widened, "fills": self.fills}
                 if self.oracle
+                else {}
+            ),
+            **({"swapped": self.swapped} if self.swap else {}),
+            **(
+                {"uncovered": [list(side) for side in self.uncovered]}
+                if any(self.uncovered)
                 else {}
             ),
         }
@@ -341,6 +382,7 @@ def deepen_root(
     trace: list | None = None,
     outside: tuple[Sequence[SideAction], Sequence[SideAction]] | None = None,
     cost: Cost | None = None,
+    swap: bool = False,
 ) -> Deepening:
     """`best_first`, and the root's double oracle when `outside` is given (IKA-293).
 
@@ -349,12 +391,18 @@ def deepen_root(
     support, and the best that gains joins the root (see the module's docstring). Given,
     even with nothing outside the menu, the report says what the oracle did.
 
+    `swap` pushes a weightless action of the same side out for each one that joins, and
+    the ``breadth`` reading is the oracle alone, without deepening (both need `outside`).
+
     `cost` changes only how the budget is counted: None counts cells (a refined cell's
     turn is one), a `Cost` charges each fill, refinement and cell its price in units of
     one cell (`cells_for_seconds`'s budget).
     """
-    if outside is not None and reading != "mixed":
+    if outside is not None and reading not in ("mixed", "breadth"):
         raise ValueError("the root's double oracle goes with the mixed reading")
+    if outside is None and (swap or reading == "breadth"):
+        raise ValueError("swapping and breadth only are the root's double oracle's; no outside")
+    deepens = reading != "breadth"
     root = _Node(
         pos=pos, rows=list(rows), cols=list(cols),
         payoff=np.array(payoff, dtype=np.float64, copy=True),
@@ -366,24 +414,25 @@ def deepen_root(
             [int(j) for j in _top(equilibrium.col_strategy, refine)],
         )
         _reread(root)
-    elif reading != "mixed":
+    elif reading not in ("mixed", "breadth"):
         raise ValueError(f"reading {reading!r} is not one of {sorted(READINGS.values())}")
     if trace is not None:
         trace.append(root)
     meter = _Meter(cost)
-    oracle = None if outside is None else _Oracle(root, outside)
+    oracle = None if outside is None else _Oracle(root, outside, swap=swap)
     expanded = 0
     deepest = 0
     refused = 0
     while meter.spent < cells:
         if oracle is not None:
+            # One step: the probe and what it leads to -- a widening, or else a deepening.
             oracle.probe(reg, evaluate, budget, meter, unmodelled)
-            if meter.spent >= cells:
-                break
             if oracle.widen(reg, evaluate, budget, meter, unmodelled):
                 if trace is not None:
                     trace.append((root, None, True))
                 continue
+            if not deepens:
+                break
         target = _best(root)
         if target is None:
             break
@@ -414,17 +463,37 @@ def deepen_root(
             timing.count("deepen.oracle.probes", oracle.probes)
             timing.count("deepen.oracle.probed", oracle.probed)
             timing.count("deepen.oracle.widened", oracle.widened)
+            timing.count("deepen.oracle.swapped", oracle.swapped)
+            timing.count("deepen.oracle.stalled", int(oracle.stalled))
+    uncovered: tuple[tuple[str, ...], tuple[str, ...]] = ((), ())
+    if oracle is not None and oracle.swapped:
+        uncovered = (
+            _lost_options(reg, rows, root.rows),
+            _lost_options(reg, cols, root.cols),
+        )
+        if timing.ON:
+            timing.count("deepen.oracle.uncovered", len(uncovered[0]) + len(uncovered[1]))
     report = Deepened(
         budget=cells, cells=meter.refines + meter.cells, expanded=expanded,
         depth=1 + deepest, refused=refused, oracle=oracle is not None,
         probed=0 if oracle is None else oracle.probed,
         widened=0 if oracle is None else oracle.widened,
-        fills=meter.fills,
+        fills=meter.fills, swap=swap,
+        swapped=0 if oracle is None else oracle.swapped, uncovered=uncovered,
     )
     return Deepening(
         equilibrium=root.equilibrium, payoff=root.payoff, rows=root.rows, cols=root.cols,
         report=report,
     )
+
+
+def _lost_options(
+    reg: Regulation, given: Sequence[SideAction], now: Sequence[SideAction]
+) -> tuple[str, ...]:
+    """Labels of the single slot options `given` covered and `now` does not."""
+    before = slot_options(reg, given)
+    after = slot_options(reg, now)
+    return tuple(sorted(before[key] for key in set(before) - set(after)))
 
 
 class _Meter:
@@ -465,16 +534,40 @@ class _Oracle:
     """
 
     def __init__(
-        self, root: _Node, outside: tuple[Sequence[SideAction], Sequence[SideAction]]
+        self,
+        root: _Node,
+        outside: tuple[Sequence[SideAction], Sequence[SideAction]],
+        *,
+        swap: bool = False,
     ) -> None:
         self.root = root
-        self.candidates = (list(outside[0]), list(outside[1]))
+        self.swap = swap
+        # The menu's own actions are candidates too, after the given ones: an action a
+        # swap pushed out is outside again and can come back.
+        self.candidates: tuple[list[SideAction], list[SideAction]] = ([], [])
+        for side, menu in ((0, root.rows), (1, root.cols)):
+            seen: set[str] = set()
+            for action in (*outside[side], *menu):
+                if action.to_choice() not in seen:
+                    seen.add(action.to_choice())
+                    self.candidates[side].append(action)
         self.known: dict[tuple[str, str], float] = {}
         #: Actions that could not join (the LP failed with them); never asked again.
         self.dropped: tuple[set[str], set[str]] = (set(), set())
         self.probes = 0
         self.probed = 0
         self.widened = 0
+        self.swapped = 0
+        # Actions a swap has pushed out. Each leaves at most once: swapping every
+        # weightless action cycled (a row joins, pushes one out, a column's answer to it
+        # brings that one back, ...) in 57 of 60 random 9x8 games, and a cell asked once
+        # costs nothing the second time, so the budget would not stop it. With each
+        # leaving once, every action joins at most twice and the oracle ends -- where
+        # nothing outside gains, which is the whole game's equilibrium.
+        self.left: set[str] = set()
+        # A guard, not a rule: widenings past this mean the argument above is wrong.
+        self.cap = 4 * (len(self.candidates[0]) + len(self.candidates[1])) + 4
+        self.stalled = False
 
     def _outside(self, side: int) -> list[SideAction]:
         menu = self.root.rows if side == 0 else self.root.cols
@@ -556,6 +649,8 @@ class _Oracle:
         or column is filled at depth 1 (charged) and the root re-solved. Returns whether
         an action joined.
         """
+        if self.stalled:
+            return False
         root = self.root
         eq = root.equilibrium
         value = float(eq.value)
@@ -619,7 +714,59 @@ class _Oracle:
         root.equilibrium = solved
         root.signal = None
         self.widened += 1
+        if self.swap:
+            self._swap_out(side, key)
+        if self.widened >= self.cap:
+            self.stalled = True
         return True
+
+    def _swap_out(self, side: int, added: str) -> None:
+        """Push out the action of `side` that carries no weight and loses most (the later
+        on a tie), other than the one that just joined, any with a refined or refused
+        cell, and any that has left once already. Nothing leaves when there is none.
+
+        A weightless action's removal leaves the equilibrium an equilibrium of the smaller
+        game -- the other side's replies to it were never read -- so the root is re-solved
+        only to keep its arrays in step (the value stays).
+        """
+        root = self.root
+        eq = root.equilibrium
+        menu = root.rows if side == 0 else root.cols
+        weight = eq.row_strategy if side == 0 else eq.col_strategy
+        loss = eq.row_ev_loss if side == 0 else eq.col_ev_loss
+        busy = {cell[side] for cell in (*root.children, *root.refused)}
+        free = [
+            k for k in range(len(menu))
+            if weight[k] <= WEIGHTLESS
+            and k not in busy
+            and menu[k].to_choice() != added
+            and menu[k].to_choice() not in self.left
+        ]
+        if not free:
+            return
+        out = max(free, key=lambda k: (float(loss[k]), k))
+        smaller = np.delete(root.payoff, out, axis=side)
+        try:
+            solved = solve(smaller)
+        except EquilibriumError:
+            return
+        self.left.add(menu.pop(out).to_choice())
+        root.payoff = smaller
+        root.equilibrium = solved
+        root.signal = None
+
+        def moved(cell: tuple[int, int]) -> tuple[int, int]:
+            if cell[side] < out:
+                return cell
+            return (cell[0] - 1, cell[1]) if side == 0 else (cell[0], cell[1] - 1)
+
+        root.children = {moved(cell): kept for cell, kept in root.children.items()}
+        root.refused = {moved(cell) for cell in root.refused}
+        for cell, kept in root.children.items():
+            for _weight, child in kept:
+                if isinstance(child, _Node):
+                    child.parent = (root, cell)
+        self.swapped += 1
 
 
 def _signal(node: _Node) -> np.ndarray:

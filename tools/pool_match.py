@@ -157,7 +157,9 @@ def main(argv: list[str] | None = None) -> None:
                     "the depth-1 solve, where no bench is hidden: m<N> / r<N> spend N "
                     "cells and read the root whole / restricted (IKA-33); m<N>o<W> / "
                     "m<N>oall also widen the root by a double oracle over the rest of "
-                    "the width-W menu / every legal action (IKA-293); none is off")
+                    "the width-W menu / every legal action, s<W> / sall swapping a "
+                    "weightless action out for each, b<N>... the oracle without "
+                    "deepening (IKA-293); none is off")
     ap.add_argument("--baseline-deepen", default=DEFAULT_DEEPEN,
                     help="same for the other arm")
     ap.add_argument("--depth", type=int, default=1, choices=(1, 2),
@@ -336,7 +338,8 @@ def main(argv: list[str] | None = None) -> None:
     tally = [[0, 0, 0, 0.0], [0, 0, 0, 0.0]]
     # The echo, per seat and per ARM (0 tested, 1 other): what each arm's side was given.
     echo = [[{"selection": {}, "belief": {}, "leaf": set(), "fill": {}, "drop": {},
-              "deepen": {}, "deepened": 0, "widened": 0, "oracle": 0, "depth": {},
+              "deepen": {}, "deepened": 0, "widened": 0, "swapped": 0, "oracle": 0,
+              "depth": {},
               "calls": 0}
              for _ in arms]
             for _ in range(2)]
@@ -381,6 +384,7 @@ def main(argv: list[str] | None = None) -> None:
                 if got is not None and "widened" in got:
                     bucket["oracle"] += 1
                     bucket["widened"] += got["widened"]
+                    bucket["swapped"] += got.get("swapped", 0)
             played_depth = (
                 f"{record.depth[side]}"
                 + ("r" if record.depth[side] != 1 and record.solve_restricted[side] else "")
@@ -455,7 +459,7 @@ def main(argv: list[str] | None = None) -> None:
                 f"deepen {bucket['deepen']} ({bucket['deepened']:,} decisions deepened"
                 + (
                     f", oracle asked at {bucket['oracle']:,}, {bucket['widened']:,} actions "
-                    "widened"
+                    f"widened, {bucket['swapped']:,} swapped out"
                     if bucket["oracle"]
                     else ""
                 )
