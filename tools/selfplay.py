@@ -121,9 +121,9 @@ _ROSTER_ONLY = {
     "mirror_share": 0.0,
     "force_lead": None,
     "opponents": "worlds",
-    "depth": 1,
+    # `depth` and `solve_restricted` left this list with IKA-111: the pool path hides the
+    # bench, and `belief_solve` now takes depth 2 in the restricted reading.
     "solve_sparsely": False,
-    "solve_restricted": False,
 }
 
 
@@ -170,7 +170,9 @@ def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
         f"{'' if selection == 'uniform' else f' (eps={args.explore_epsilon}, T={args.explore_temperature})'}"
         f" / bench {'hidden' if hide_bench else 'OPEN (reference)'}"
         f" / {'leaf ranking, fill ' + args.rank_fill if args.rank_leaf else 'damage ranking'}"
-        f" / bench drop {args.bench_drop}",
+        f" / bench drop {args.bench_drop}"
+        + (f" / depth {args.depth}"
+           + (" restricted" if args.solve_restricted else "") if args.depth != 1 else ""),
         file=sys.stderr,
     )
     client = None
@@ -215,6 +217,8 @@ def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
         rank_by_leaf=args.rank_leaf,
         rank_fill=args.rank_fill,
         bench_drop=args.bench_drop,
+        depth=args.depth,
+        solve_restricted=args.solve_restricted,
         indices=drawn,
         on_finish=client.finish if client is not None else None,
         rank_scores_out=ranks_out,
