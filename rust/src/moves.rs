@@ -5068,6 +5068,18 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
         }
     }
 
+    // Residual order 28, sub-order 2: Moody's +2 and -1 to two stats drawn at random. Not
+    // applied, and said so here, where it fires: the note on a hit (`damage::
+    // unmodelled_effects`) was the only one, so a turn its holder spent on status moves
+    // missed the boosts silently (IKA-308). Showdown fires it with no `activeTurns` guard.
+    for (side, slot) in order.iter().copied() {
+        let moody = matches!(turn.mon_at(side, slot), Some(mon)
+            if !mon.fainted && mon.ability == "moody");
+        if moody {
+            turn.report("ability: moody (end-of-turn +2/-1 not applied)");
+        }
+    }
+
     // Residual order 29: the last of White Herb's four chances to fire.
     check_white_herb(turn);
 

@@ -110,6 +110,7 @@ pub fn ability_is_modelled(id: &str) -> bool {
             | "mirrorarmor"
             | "mistysurge"
             | "moldbreaker"
+            | "moody"
             | "motordrive"
             | "multiscale"
             | "myceliummight"
