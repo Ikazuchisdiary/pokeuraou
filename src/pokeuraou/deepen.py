@@ -81,11 +81,13 @@ ORACLE_TOLERANCE = 1e-6
 #: decided cells stops on its own (priority 0).
 MAX_LEVELS = 8
 
-#: Cells a second of search buys on one logical core, for the human opponent's clock and
-#: nothing else. From IKA-279's generation NPS (about 26,000 leaves a second a logical core)
-#: at 2.6 leaves a cell (IKA-283's counts: 10,928 port leaves over 4,228 cells a game).
-#: Measured again for this search in records/IKA-33.md.
-CELLS_PER_SECOND = 10_000
+#: Cells of deepening a second of one logical core buys, for the human opponent's clock and
+#: nothing else. IKA-279's generation NPS (about 26,000 leaves a second a logical core, 2.6
+#: leaves a cell) would say 10,000; a deepened cell costs more than a matrix cell, because
+#: each refined cell pays its own turn, a narrow and a forward pass per child for a handful
+#: of cells (IKA-33: 0.43-0.64 CPU ms a deepened cell in M-C generation, 0.74 ms wall at
+#: the median on IKA-254's endgames with a local GPU leaf, 3.7 ms at p90).
+CELLS_PER_SECOND = 1_500
 
 #: What ships: no deepening. A label is ``none``, ``m<N>`` (the whole matrix read, N cells)
 #: or ``r<N>`` (the restricted reading, N cells).
