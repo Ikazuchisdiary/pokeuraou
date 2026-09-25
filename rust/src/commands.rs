@@ -516,8 +516,13 @@ fn slot_action_json(action: &SlotAction) -> Value {
 
 /// `resume_alternatives`, with the options it resumed: the interrupted side's every
 /// replacement and the turn each produces, whole.
+///
+/// `share: n` resumes it as one of `n` pauses of the same turn, on the budget they share
+/// (`resolve::shared_pause_budget`, IKA-284) -- what Python's `turn_leaves` asks for.
 fn alternatives_command(reg: &Reg, value: &Value) -> Result<Value, String> {
     let paused = requested_pause(reg, value)?;
+    let share = value.get("share").and_then(Value::as_u64).unwrap_or(1) as usize;
+    let paused = crate::resolve::sharing_budget(&paused, share).unwrap_or(paused);
     let owed = self_switches_needed(&paused.turn.pos);
     let sides: Vec<usize> = (0..2).filter(|i| owed[*i].iter().any(|f| *f)).collect();
     let Some(&chooser) = sides.first() else {
@@ -823,7 +828,9 @@ fn flatten<'a>(
             parts.push(json!([pause.probability, { "leaf": leaves.len() - 1 }]));
             continue;
         }
-        match alternatives_of(reg, pause)? {
+        // The pauses of this turn share its budget (IKA-284).
+        let shared = crate::resolve::sharing_budget(pause, result.suspended.len());
+        match alternatives_of(reg, shared.as_ref().unwrap_or(pause))? {
             Some((chooser, resumed)) if !resumed.is_empty() => {
                 let mut options = Vec::new();
                 for (_option, one) in &resumed {

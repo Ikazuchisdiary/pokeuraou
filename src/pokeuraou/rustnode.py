@@ -993,18 +993,21 @@ class RustNode:
         world: tuple[Position, int] | None = None,
         full: bool = True,
         events: bool = False,
+        share: int = 1,
     ) -> tuple[int | None, list[tuple[SideAction, PortTurn]]] | None:
         """`resume_alternatives` (and, with `world`, of `paused_in`'s pause): who chooses, and
-        every replacement with the turn it produces, in Python's order."""
-        response = self._ask(
-            {
-                "kind": "alternatives",
-                "pause": pause.raw,
-                "in": _world(world),
-                "full": full,
-                "events": events,
-            }
-        )
+        every replacement with the turn it produces, in Python's order. `share=n` resumes it
+        as one of `n` pauses of the same turn, on the budget they share (IKA-284)."""
+        request: dict[str, Any] = {
+            "kind": "alternatives",
+            "pause": pause.raw,
+            "in": _world(world),
+            "full": full,
+            "events": events,
+        }
+        if share > 1:
+            request["share"] = int(share)
+        response = self._ask(request)
         if response is None:
             return None
         chooser = response["chooser"]

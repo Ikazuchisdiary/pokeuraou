@@ -128,13 +128,18 @@ def branch(
 
 
 def resume_alternatives(
-    reg: Regulation, pause: PortPause, *, world: tuple[Position, int] | None = None
+    reg: Regulation,
+    pause: PortPause,
+    *,
+    world: tuple[Position, int] | None = None,
+    share: int = 1,
 ) -> tuple[int | None, list[tuple[SideAction, PortTurn]]]:
     """Every replacement the paused side could send in, and the whole turn each produces;
-    with `world`, of the pause rebuilt in that completion (`paused_in`)."""
+    with `world`, of the pause rebuilt in that completion (`paused_in`). `share=n`: the
+    pause is one of `n` of the same turn, resumed on the budget they share (IKA-284)."""
 
     def call(node: RustNode) -> tuple[int | None, list[tuple[SideAction, PortTurn]]]:
-        answer = node.resume_alternatives(pause, world=world, full=True)
+        answer = node.resume_alternatives(pause, world=world, full=True, share=share)
         if answer is None:
             raise _refused(node, "a paused turn")
         return answer
@@ -221,7 +226,8 @@ def turn_leaves(reg: Regulation, result: PortTurn, *, depth: int = 0) -> TurnLea
             unmodelled.add("more than four mid-turn replacements in one turn")
             parts.append((np.float64(pause.probability), add_leaf(pause.position)))
             continue
-        chooser, alternatives = resume_alternatives(reg, pause)
+        # The pauses of one turn share its budget, as the port's own walks do (IKA-284).
+        chooser, alternatives = resume_alternatives(reg, pause, share=len(result.pauses))
         if chooser is None or not alternatives:
             unmodelled.add("a suspended turn offered no replacement")
             parts.append((np.float64(pause.probability), add_leaf(pause.position)))

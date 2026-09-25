@@ -2801,6 +2801,39 @@ pub fn resume_alternatives<'a>(
     Ok((Some(chooser), out))
 }
 
+/// The budget one of `count` pauses of the same turn is resumed with, when a walk resumes
+/// every pause of that turn to flatten or score it (IKA-284).
+///
+/// `run_queue` divides its branch budget among the live branches, and a pause is resumed
+/// on its own `turn.budget` (IKA-62, IKA-140) -- right for the one pause a game actually
+/// stops at, and for the pause the self-switch node is asked about. But a walk that
+/// expands a resumed turn which paused *again* resumes every one of those pauses, and each
+/// got the whole budget: under `Budget.exact()` a Parting Shot into a Heat Wave that trips
+/// Emergency Exit paused in hundreds of ways, each resumed at 512 branches, and one
+/// self-switch node flattened 363,000 leaves and 4 GB. The pauses of one turn now share its
+/// budget as live branches do. A pinned roll is never narrowed (`Budget::narrowed`), and
+/// neither is its branch cap here, so a matrix cell walks exactly as before.
+pub fn shared_pause_budget(budget: Budget, count: usize) -> Budget {
+    if count <= 1 || budget.fixed_roll().is_some() {
+        return budget;
+    }
+    let room = (budget.max_branches / count).max(1);
+    let mut shared = budget.narrowed(room);
+    shared.max_branches = room;
+    shared
+}
+
+/// `paused` resumed as one of `count` pauses of the same turn (`shared_pause_budget`).
+pub fn sharing_budget<'a>(paused: &Suspended<'a>, count: usize) -> Option<Suspended<'a>> {
+    let budget = shared_pause_budget(paused.turn.budget, count);
+    if budget == paused.turn.budget {
+        return None;
+    }
+    let mut turn = paused.turn.clone();
+    turn.budget = budget;
+    Some(Suspended { probability: paused.probability, turn, remaining: paused.remaining.clone() })
+}
+
 /// The turn's value under one objective, folding through the replacement choice.
 ///
 /// Python builds a tree of leaf positions and folds values over it, because its leaves are
@@ -2844,7 +2877,8 @@ pub fn turn_value(
             accumulated += pause.probability * score(&pause.turn.pos);
             continue;
         }
-        let (chooser, alternatives) = resume_alternatives(reg, pause)?;
+        let shared = sharing_budget(pause, result.suspended.len());
+        let (chooser, alternatives) = resume_alternatives(reg, shared.as_ref().unwrap_or(pause))?;
         let Some(chooser) = chooser else {
             notes.insert("a suspended turn offered no replacement".into());
             accumulated += pause.probability * score(&pause.turn.pos);
