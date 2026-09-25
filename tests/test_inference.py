@@ -114,6 +114,59 @@ def test_two_workers_at_once_get_what_they_would_get_alone(parts, device_name):
         )
 
 
+@pytest.mark.parametrize("device_name", DEVICES)
+def test_blocks_from_several_workers_at_once_get_what_they_would_get_alone(parts, device_name):
+    """IKA-291: six workers at once, four sending blocks (CUDA-graph replays on the card,
+    captured while the others run) and two sending whole batches (eager), each answer the
+    one it gets alone. The graphs share buffers and one stream with the eager threads, so
+    this is where a replay reading another's inputs, or a copy out before the replay
+    finished, would show."""
+    regulation, encoder, net = parts
+    device = torch.device(device_name)
+    local = BatchedValue(net.to(device), encoder, device=device)
+
+    from pokeuraou.inference import served_model
+
+    block_sets = [
+        _blocks(encoder, regulation, sizes)
+        for sizes in ([3, 17, 9, 1], [40, 2, 33], [5, 5, 5, 5, 5], [64, 7])
+    ]
+    block_alone = [[local.from_encoded(block) for block in blocks] for blocks in block_sets]
+    whole = [_positions(regulation, 30), _positions(regulation, 45)]
+    whole_alone = [local(positions) for positions in whole]
+
+    model = served_model(BatchedValue(net.to(device), encoder, device=device))
+    server, address = serve({"value": model})
+    wrong: list[str] = []
+    try:
+
+        def send_blocks(index):
+            with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20) as remote:
+                for _ in range(8):
+                    got = remote.from_encoded_segments(block_sets[index])
+                    for block, (a, b) in enumerate(zip(got, block_alone[index], strict=True)):
+                        if not np.array_equal(a, b):
+                            wrong.append(f"blocks {index}/{block}")
+
+        def send_whole(index):
+            with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20) as remote:
+                for _ in range(8):
+                    if not np.array_equal(remote(whole[index]), whole_alone[index]):
+                        wrong.append(f"whole {index}")
+
+        threads = [threading.Thread(target=send_blocks, args=(i,)) for i in range(4)]
+        threads += [threading.Thread(target=send_whole, args=(i,)) for i in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        server.shutdown()
+    assert not wrong, wrong[:5]
+    if device_name == "cuda":
+        assert model.replays >= 4 * 8 * 3
+
+
 def test_a_worker_dying_leaves_the_server_up(parts):
     regulation, encoder, net = parts
     device = torch.device("cpu")

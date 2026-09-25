@@ -780,6 +780,16 @@ class _Graphs:
             (name, np.asarray(arrays[name]).dtype.str, tuple(np.asarray(arrays[name]).shape[1:]))
             for name in ARRAYS
         )
+        # Staged in page-locked memory first, so that the copies in and out are ordinary
+        # stream work: everything below is ordered on the one stream every serving thread
+        # issues onto, and the lock need only cover putting it there -- not the wait for
+        # the card, which a lock held across would make every thread's wait.
+        staged = {
+            name: torch.from_numpy(np.ascontiguousarray(arrays[name])).pin_memory()
+            for name in ARRAYS
+        }
+        result = torch.empty(rows, dtype=torch.float64, pin_memory=True)
+        done = torch.cuda.Event()
         with self.lock, torch.no_grad():
             if kind not in self.kinds:
                 inputs = {
@@ -796,9 +806,12 @@ class _Graphs:
                 self.captured += 1
             graph, out = graphs[rows]
             for name in ARRAYS:
-                inputs[name][:rows].copy_(torch.from_numpy(np.ascontiguousarray(arrays[name])))
+                inputs[name][:rows].copy_(staged[name], non_blocking=True)
             graph.replay()
-            return out.cpu().numpy()
+            result.copy_(out, non_blocking=True)
+            done.record()
+        done.synchronize()
+        return result.numpy().copy()
 
     def _capture(self, inputs: dict[str, Any], pool: Any) -> tuple[Any, Any]:  # noqa: ANN401
         import torch
