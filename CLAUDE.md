@@ -79,5 +79,6 @@ uv run pytest --junitxml=reports/pytest.xml && uv run python tools/ci_skip_audit
 - **課題:** 管理は Linear（team Ikazuchi、project pokeuraou、IKA-NNN）。
 - **ファイル:** すべて LF（`tests/test_line_endings.py`）。Python の `write_text` は Windows で CRLF になるので、bytes で書く。`tools/` と `src/` に機械ごとの絶対パスを書かない（`tests/test_no_machine_specific_paths.py`）。`scratchpad/` は当時のコードをそのまま残す記録なので、lint しない・書き換えない。
 - **本番の経路:** 生成を遅くする変更は入れない。前後を交互（ABBA）に回し、同じ窓で壁時計を比べる（同じ exe、同じ長さのパスで）。規則を変えて局が変わるなら、盤で弱くならないことを確かめる。
+- **速さと強さの引き換え:** 探索を安くして局が変わる変更（順位付けや予算を安くするなど）は、同じ費用で判定する。生成向けは、同じ壁時計で作ったプールから学んだ葉の強さで比べる（IKA-73 の形）。打ち手向けは、同じ時間の盤で比べる。設定を固定した盤で弱くなるだけでは捨てない（IKA-268・IKA-270 は捨てずに枝に残してある）。
 - **データ:** `data/` は git の外。生成データ・モデル・大会データ（standings）・使用率（priors）はここに置く。
 - **環境:** Windows（PowerShell と Git Bash）。Git Bash の MSYS は `/` で始まる引数をパスに書き換える。1 コアや 30 秒を超える仕事を並べるときは、機械（8 物理・16 論理コア、31 GB、RTX 5070）を取り合わないようにする。
