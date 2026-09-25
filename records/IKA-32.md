@@ -37,6 +37,40 @@ dirty の充填になる。割れるかどうかは **仕事の置き場所（�
 （計器なし）とこの枝の `--regions` あり（計器が全部通る）で、**深さ 1: 48/48 局・558 決定、深さ 2: 48/48 局・548 決定が同一**。
 対照（局 i と i+1）はどちらも 0。陽性対照（新しい道が通った数）: この枝の深さ 2 の本で部分の数えが出ている（`d2.fills` 3.8 回/手など）。
 
+### 1.1 生成の経路で遅くならず、局も変わらないこと（ABBA、計器は既定 off）
+
+`search.py`・`beliefnode.py`・`selfplay.py`・`rustnode.py`（生成の熱い経路）に部分を置いたので、家の規則の形で確かめた。
+M-C 生成の形（`profile_stages.py generation --seed 7701 --served --servers 2 --workers 24 --limit 12 --hide-bench -- --rank-leaf
+--selection-store <solved の写し>`、bench drop は none、`--regions` なし）。木は m = master e1a56c9 と w = この枝 6a932ce の
+`git archive` で、同じ長さのパス（`C:/tmp/ika32/mt`・`wt`）に置き、port の exe は同じもの（両方の rust/ は同じ）。各本 300 局、
+heavy.py `--exclusive`、順は m w w m。前半の組（A1・B1）は種 0〜299、後半の組（B2・A2）は種 300〜599。各本の前後で他の
+python は 2 本（heavy.py と待ち手）。ワーカーの報告の source は 24/24 がその本の木（`C:/tmp/ika32/scripts/abba*.py`）。
+
+```
+  本  木  深さ 局    壁時計   局/分(定常)  busy  CPU 秒/局  port   ワーカー サーバ
+  A1  m   1    0-    26.3 s   885.0       13.3  0.960     0.454  0.410    0.095
+  B1  w   1    0-    26.4 s   960.2       13.3  0.963     0.461  0.408    0.095
+  B2  w   1    300-  26.3 s   839.7       13.2  0.970     0.456  0.419    0.095
+  A2  m   1    300-  27.6 s   940.8       12.9  0.986     0.471  0.421    0.094
+  C1  m   2    0-   109.8 s   178.3       13.1  4.641     2.144  2.098    0.399
+  D1  w   2    0-   108.2 s   184.1       13.8  4.631     2.148  2.091    0.392
+  D2  w   2    300- 111.8 s   175.6       13.9  4.799     2.216  2.166    0.418
+  C2  m   2    300- 112.1 s   176.1       13.2  4.782     2.206  2.165    0.411
+```
+
+* 深さ 1: 壁時計 m 26.95 s・w 26.35 s、CPU 秒/局 m 0.973・w 0.967。深さ 2: 壁時計 m 110.95 s・w 110.0 s、CPU m 4.712・w 4.715。
+  どちらも組の中の差は組の間の差より小さく、遅くなる向きの差は見えない
+* **局の一致**: 深さ 1 は A1 = B1 300/300 局（3,535 決定）・A2 = B2 300/300 局（3,587 決定）で **600/600**。深さ 2 は C1 = D1
+  300/300 局（3,486 決定）・C2 = D2 300/300 局（3,533 決定）で **600/600**。対照（局 i と i+1）はどの組も 0
+* 陽性対照（新しい道が通ること）は、既定 off の道ではこの本には無い（部分は no-op）。計器 on の道は §1 の 48 局（`--regions` あり）で
+  master と一致している
+
+**部分の閉じ忘れを直した**（調整役の指摘）: `_refine_cells` の `d2.turns`・`d2.menus`・`d2.fills` と `belief_payoffs` の
+`belief.jobs`・`belief.fold` は `__enter__`/`__exit__` を手で呼んでいて、途中の `raise result`（PortRefused）で部分が開いたまま
+残り、計器が on のとき後の部分がその下に入れ子になった（決定の境で閉じて `region.unclosed` を数えるが、その決定の中はずれる）。
+5 か所とも `with` にした（中身の字下げが変わっただけ）。テスト `test_a_refusal_in_a_depth2_stage_closes_its_part`（`_cell_turns` が
+断ったターンを返す）は、直す前の search.py では落ち、直した後で通る。上の ABBA は直した後の 6a932ce。
+
 ## 2. 形
 
 `profile_stages.py generation --seed 7701 --first-game 0 --served --servers 1 --workers 1 --limit L --value value-gen11L
@@ -325,6 +359,7 @@ Python のワーカーの CPU の大きい段（§3）と、既存の課題と�
   01:58:37–02:07:20   内訳の 7 本（2 コア、20/36/31/88/40/85/120 s）
   02:00–02:10         multiprocessing の往復（1 コア、数十秒）、計器の費用の測り（1 コア）
   02:10–02:13         故障注入（1 コア、約 1 分）、関係テスト（4 コア、11 s）
+  02:20:42–02:30:00   ABBA 8 本（16 コア・排他、深さ 1 各 27 s、深さ 2 各 108〜113 s）
 ```
 
 出力は `C:/tmp/ika32/`（`run-*.log`・`t-*/summary.json`・`g-*`・`analysis.txt`・`tables.txt`・`pystages.txt`・`childsplit.txt`・
