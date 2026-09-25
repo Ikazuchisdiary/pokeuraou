@@ -123,6 +123,21 @@ def test_every_played_turn_lands_on_an_exact_branch(played) -> None:  # noqa: AN
     assert statuses and set(statuses) <= {"matched", "paused"}
 
 
+def test_a_record_without_its_final_position_corrects_the_last_turn_by_its_winner(played) -> None:  # noqa: ANN001
+    """Records before IKA-87 have no `finalPosition`; the outcome decides the last turn's
+    term exactly, because every branch the game can have ended on scores as that result."""
+    reg, games = played
+    decided = [game for game in games if game.get("outcome") is not None]
+    assert decided
+    for game in decided:
+        with_final = aivat.game_terms(reg, game, HP_SHARE.batch)
+        old = {k: v for k, v in game.items() if k not in ("finalPosition", "endReason")}
+        without = aivat.game_terms(reg, old, HP_SHARE.batch)
+        assert without.stages[-1].status == "by-outcome"
+        assert with_final.stages[-1].status == "matched"
+        assert without.total == pytest.approx(with_final.total, abs=1e-12)
+
+
 def test_the_matrix_budget_does_not_find_the_branches(played) -> None:  # noqa: ANN001
     """The control: collapse the damage rolls and the played positions stop being branches.
     Were the matching loose (say, on who is standing), this would pass as well as the above."""

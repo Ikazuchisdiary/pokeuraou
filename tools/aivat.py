@@ -66,9 +66,13 @@ sys.path.insert(0, str(ROOT / "src"))
 #: mismatch  no branch (or pause) equals the next record entry: left at zero
 #: refused   the port declined the turn or its resumption: left at zero
 #: illegal   a recorded choice is not a legal action here any more: left at zero
-#: no-next   the record has nothing to match the last turn against (no finalPosition)
+#: by-outcome  the last turn of a record without finalPosition (before IKA-87): the landed
+#:           branch is one the battle ended in with the recorded winner, all scored alike
+#: no-next   the record has nothing to match the last turn against
 #: empty     the turn had no outcome with weight (the game ended "unresolved")
-STATUSES = ("matched", "paused", "mismatch", "refused", "illegal", "no-next", "empty")
+STATUSES = (
+    "matched", "paused", "by-outcome", "mismatch", "refused", "illegal", "no-next", "empty",
+)
 
 
 def neutral_correction(
@@ -247,8 +251,23 @@ def game_terms(
             values = np.concatenate([values, np.zeros(len(pauses))])
             there = target(j)
             if there is None:
-                stage.status = "no-next"
-                _, stage.expected = neutral_correction(values, weights, paused, None)
+                # A record from before IKA-87 has no final position, but a game with an
+                # outcome ended on its last turn: every branch it can have landed on is one
+                # the battle ended in with that winner, and the evaluator scores each of
+                # them as that result -- so the correction is exact without the position.
+                won = [
+                    k for k, o in enumerate(outcomes)
+                    if o.position.ended and o.position.winner is not None
+                    and float(o.position.winner == o.position.sides[0].id) == terms.outcome
+                ]
+                if terms.outcome is None or not won:
+                    stage.status = "no-next"
+                    _, stage.expected = neutral_correction(values, weights, paused, None)
+                else:
+                    stage.status = "by-outcome"
+                    stage.c, stage.expected = neutral_correction(values, weights, paused, won[0])
+                    stage.landed_value = float(values[won[0]])
+                    stage.p_landed = sum(weights[k] for k in won) / sum(weights)
                 terms.stages.append(stage)
                 break
             if there["kind"] == "selfswitch":
@@ -455,7 +474,7 @@ def report(args: argparse.Namespace) -> None:
         later = Counter(s["s"] for s in stages if s["st"] > 0)
         if later:
             print(f"  resumed stages after a pause: {dict(later)}")
-        corrected_stages = [s for s in stages if s["s"] in ("matched", "paused")]
+        corrected_stages = [s for s in stages if s["s"] in ("matched", "paused", "by-outcome")]
         inexact = [s for s in corrected_stages if not s["x"]]
         print(
             f"  corrected stages {len(corrected_stages)}, inexact enumeration (max_branches"
