@@ -155,7 +155,11 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--deepen", default=DEFAULT_DEEPEN,
                     help="how the tested arm deepens each move decision best first after "
                     "the depth-1 solve, where no bench is hidden: m<N> / r<N> spend N "
-                    "cells and read the root whole / restricted (IKA-33); none is off")
+                    "cells and read the root whole / restricted (IKA-33); m<N>o<W> / "
+                    "m<N>oall also widen the root by a double oracle over the rest of "
+                    "the width-W menu / every legal action, s<W> / sall swapping a "
+                    "weightless action out for each, b<N>... the oracle without "
+                    "deepening (IKA-293); none is off")
     ap.add_argument("--baseline-deepen", default=DEFAULT_DEEPEN,
                     help="same for the other arm")
     ap.add_argument("--depth", type=int, default=1, choices=(1, 2),
@@ -334,7 +338,9 @@ def main(argv: list[str] | None = None) -> None:
     tally = [[0, 0, 0, 0.0], [0, 0, 0, 0.0]]
     # The echo, per seat and per ARM (0 tested, 1 other): what each arm's side was given.
     echo = [[{"selection": {}, "belief": {}, "leaf": set(), "fill": {}, "drop": {},
-              "deepen": {}, "deepened": 0, "depth": {}, "calls": 0}
+              "deepen": {}, "deepened": 0, "widened": 0, "swapped": 0, "oracle": 0,
+              "depth": {},
+              "calls": 0}
              for _ in arms]
             for _ in range(2)]
     done = 0
@@ -372,6 +378,13 @@ def main(argv: list[str] | None = None) -> None:
                 1 for d in record.decisions
                 if d.deepened is not None and d.deepened[side] is not None
             )
+            # And where the root's double oracle was asked, and what it added (IKA-293).
+            for d in record.decisions:
+                got = d.deepened[side] if d.deepened is not None else None
+                if got is not None and "widened" in got:
+                    bucket["oracle"] += 1
+                    bucket["widened"] += got["widened"]
+                    bucket["swapped"] += got.get("swapped", 0)
             played_depth = (
                 f"{record.depth[side]}"
                 + ("r" if record.depth[side] != 1 and record.solve_restricted[side] else "")
@@ -443,7 +456,14 @@ def main(argv: list[str] | None = None) -> None:
                 f"{which if arm_index == 0 else 1 - which}, leaf {sorted(bucket['leaf'])}, "
                 f"selection {bucket['selection']}, belief {bucket['belief']}, "
                 f"rank fill {bucket['fill']}, bench drop {bucket['drop']}, "
-                f"deepen {bucket['deepen']} ({bucket['deepened']:,} decisions deepened), "
+                f"deepen {bucket['deepen']} ({bucket['deepened']:,} decisions deepened"
+                + (
+                    f", oracle asked at {bucket['oracle']:,}, {bucket['widened']:,} actions "
+                    f"widened, {bucket['swapped']:,} swapped out"
+                    if bucket["oracle"]
+                    else ""
+                )
+                + "), "
                 f"depth {bucket['depth']}"
                 + (f", leaf requests {bucket['calls']:,}" if bucket["calls"] else ""),
                 file=sys.stderr,
