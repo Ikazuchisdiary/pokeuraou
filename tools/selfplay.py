@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from pokeuraou import rustnode
 from pokeuraou.benchflags import add_bench_flags, require_bench
 from pokeuraou.damage import register_mega_stones
+from pokeuraou.hidden import DEFAULT_BENCH_DROP, parse_bench_drop
 from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.priors import build_cooccurrence, find_cached_chaos, load_chaos
 from pokeuraou.regulation import Regulation
@@ -94,6 +95,14 @@ def add_pool_flags(ap: argparse.ArgumentParser) -> None:
         help="with --pool and --rank-leaf: how the leaf ranking fills its cells -- "
         "refs<N> replies at the matrix budget, refs<N>-fast at Budget.fast (IKA-268). "
         f"Default {DEFAULT_RANK_FILL}.",
+    )
+    ap.add_argument(
+        "--bench-drop",
+        default=DEFAULT_BENCH_DROP,
+        help="with --pool and a hidden bench: which completions of the opponent's unseen "
+        "slots the belief leaves out -- w<P> those under P%% of the weight, m<P> all but "
+        "the heaviest carrying P%%; the heaviest always stays and the rest are "
+        f"renormalised (IKA-283). Default {DEFAULT_BENCH_DROP}.",
     )
     ap.add_argument(
         "--record-rank-scores",
@@ -160,7 +169,8 @@ def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
         f"leaf {leaf_label} / selection {selection}"
         f"{'' if selection == 'uniform' else f' (eps={args.explore_epsilon}, T={args.explore_temperature})'}"
         f" / bench {'hidden' if hide_bench else 'OPEN (reference)'}"
-        f" / {'leaf ranking, fill ' + args.rank_fill if args.rank_leaf else 'damage ranking'}",
+        f" / {'leaf ranking, fill ' + args.rank_fill if args.rank_leaf else 'damage ranking'}"
+        f" / bench drop {args.bench_drop}",
         file=sys.stderr,
     )
     client = None
@@ -204,6 +214,7 @@ def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
         explore_temperature=args.explore_temperature,
         rank_by_leaf=args.rank_leaf,
         rank_fill=args.rank_fill,
+        bench_drop=args.bench_drop,
         indices=drawn,
         on_finish=client.finish if client is not None else None,
         rank_scores_out=ranks_out,
@@ -416,6 +427,7 @@ def main() -> None:
     args = ap.parse_args()
     try:
         parse_rank_fill(args.rank_fill)
+        parse_bench_drop(args.bench_drop)
     except ValueError as problem:
         ap.error(str(problem))
     if args.pool is not None:
@@ -426,6 +438,10 @@ def main() -> None:
         # recorded nowhere and played by nobody.
         ap.error("--rank-fill is the pool path's (IKA-268); the roster path ranks at "
                  f"{DEFAULT_RANK_FILL}")
+    if args.bench_drop != DEFAULT_BENCH_DROP:
+        # The same for the belief: the roster path's `generate` takes no drop.
+        ap.error("--bench-drop is the pool path's (IKA-283); the roster path believes "
+                 "every completion")
     if args.record_rank_scores:
         ap.error("--record-rank-scores is the pool path's (IKA-278)")
     if args.roster is None:

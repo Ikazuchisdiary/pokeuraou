@@ -45,6 +45,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from pokeuraou.benchflags import add_bench_flags, require_bench  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.encode import Encoder  # noqa: E402
+from pokeuraou.hidden import DEFAULT_BENCH_DROP, parse_bench_drop  # noqa: E402
 from pokeuraou.payoff import HP_SHARE  # noqa: E402
 from pokeuraou.pool import load_pool  # noqa: E402
 from pokeuraou.poolplay import PoolArm, SolvedSelections, pool_match_game  # noqa: E402
@@ -123,6 +124,12 @@ def main(argv: list[str] | None = None) -> None:
                     "at the matrix budget, refs<N>-fast at Budget.fast (IKA-268)")
     ap.add_argument("--baseline-rank-fill", default=DEFAULT_RANK_FILL,
                     help="same for the other arm")
+    ap.add_argument("--bench-drop", default=DEFAULT_BENCH_DROP,
+                    help="which completions of the opponent's unseen slots the tested "
+                    "arm's belief leaves out: w<P> under P%% of the weight, m<P> beyond "
+                    "the heaviest P%%; the heaviest stays (IKA-283)")
+    ap.add_argument("--baseline-bench-drop", default=DEFAULT_BENCH_DROP,
+                    help="same for the other arm")
     add_bench_flags(ap)
     ap.add_argument("--selection-store", type=Path, default=None,
                     help="the tested arm's shared solves. Default <games-out dir>/"
@@ -152,6 +159,11 @@ def main(argv: list[str] | None = None) -> None:
             parse_rank_fill(fill)
         except ValueError as problem:
             ap.error(str(problem))
+    for drop in (args.bench_drop, args.baseline_bench_drop):
+        try:
+            parse_bench_drop(drop)
+        except ValueError as problem:
+            ap.error(str(problem))
 
     pool = load_pool(args.pool)
     reg = pool.reg
@@ -172,12 +184,14 @@ def main(argv: list[str] | None = None) -> None:
         name=value_name, evaluate=value,
         solver=solver_for(value, value_name, args.selection_store),
         limit=args.limit, rank_by_leaf=args.rank_leaf, rank_fill=args.rank_fill,
+        bench_drop=args.bench_drop,
     )
     other_limit = args.limit if args.baseline_limit is None else args.baseline_limit
     if baseline is None:
         other = PoolArm(name=HP_SHARE.name, evaluate=None, solver=None,
                         limit=other_limit, rank_by_leaf=args.baseline_rank_leaf,
-                        rank_fill=args.baseline_rank_fill)
+                        rank_fill=args.baseline_rank_fill,
+                        bench_drop=args.baseline_bench_drop)
     else:
         assert baseline_name is not None
         # One solver per arm even over one leaf: shared, the second arm would reuse the
@@ -191,6 +205,7 @@ def main(argv: list[str] | None = None) -> None:
             ),
             limit=other_limit, rank_by_leaf=args.baseline_rank_leaf,
             rank_fill=args.baseline_rank_fill,
+            bench_drop=args.baseline_bench_drop,
         )
     arms = (tested, other)
     print(pool.summary(), file=sys.stderr)
@@ -203,6 +218,7 @@ def main(argv: list[str] | None = None) -> None:
             f"  {label}: leaf {arm.name} / width {arm.limit} / "
             f"{'leaf' if arm.rank_by_leaf else 'damage'} ranking"
             + (f" (fill {arm.rank_fill})" if arm.rank_by_leaf else "")
+            + (f" / bench drop {arm.bench_drop}" if hide_bench else "")
             + " / selection "
             f"{arm.selection}" + (f" by its own leaf, store {store}" if store else "")
             + f" / belief {'solved' if arm.solver is not None and hide_bench else 'uniform'}",
@@ -216,6 +232,8 @@ def main(argv: list[str] | None = None) -> None:
         tags += {"leaf": "@leafrank", "damage": "@damagerank"}[ranking[0]]
     if tested.rank_by_leaf and tested.rank_fill != other.rank_fill:
         tags += f"@rankfill:{tested.rank_fill}"
+    if hide_bench and tested.bench_drop != other.bench_drop:
+        tags += f"@benchdrop:{tested.bench_drop}"
     arm_label = f"{tested.name}{tags}"
 
     client = WorkClient(args.queue) if args.queue else None
@@ -231,7 +249,8 @@ def main(argv: list[str] | None = None) -> None:
     # Per seat (tested at side 0, side 1): wins, played, unfinished, seconds.
     tally = [[0, 0, 0, 0.0], [0, 0, 0, 0.0]]
     # The echo, per seat and per ARM (0 tested, 1 other): what each arm's side was given.
-    echo = [[{"selection": {}, "belief": {}, "leaf": set(), "fill": {}, "calls": 0}
+    echo = [[{"selection": {}, "belief": {}, "leaf": set(), "fill": {}, "drop": {},
+              "calls": 0}
              for _ in arms]
             for _ in range(2)]
     done = 0
@@ -260,6 +279,8 @@ def main(argv: list[str] | None = None) -> None:
             # the echo has to be read off the game, or it only repeats the command line.
             played_fill = record.rank_fill[side]
             bucket["fill"][played_fill] = bucket["fill"].get(played_fill, 0) + 1
+            played_drop = record.bench_drop[side]
+            bucket["drop"][played_drop] = bucket["drop"].get(played_drop, 0) + 1
             if arms[0].evaluate is not arms[1].evaluate:
                 bucket["calls"] += getattr(arms[arm_index].evaluate, "calls", 0) - calls_before[
                     arm_index]
@@ -295,6 +316,7 @@ def main(argv: list[str] | None = None) -> None:
                 limits=sides["limits"],
                 rankings=sides["rankings"],
                 rank_fills=sides["rank_fills"],
+                bench_drops=sides["bench_drops"],
                 books=sides["selections"],
                 information=("hidden-bench", "hidden-bench") if hide_bench
                 else ("open", "open"),
@@ -321,7 +343,7 @@ def main(argv: list[str] | None = None) -> None:
                 f"  echo, {arm_label} = side {which}: {names[arm_index]} sat at side "
                 f"{which if arm_index == 0 else 1 - which}, leaf {sorted(bucket['leaf'])}, "
                 f"selection {bucket['selection']}, belief {bucket['belief']}, "
-                f"rank fill {bucket['fill']}"
+                f"rank fill {bucket['fill']}, bench drop {bucket['drop']}"
                 + (f", leaf requests {bucket['calls']:,}" if bucket["calls"] else ""),
                 file=sys.stderr,
             )

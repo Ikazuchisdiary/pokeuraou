@@ -36,8 +36,9 @@ is another. This module only makes the set, and says what each member is worth.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Collection, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from itertools import combinations
 from typing import TYPE_CHECKING
 
@@ -256,6 +257,75 @@ def completions(
     ]
 
 
+#: How an agent's belief treats the completions its bench prior barely weighs (IKA-283), as
+#: one label per agent: ``none`` keeps every completion (what every game before it played),
+#: ``w<P>`` drops those under P% of the weight, and ``m<P>`` keeps the heaviest until they
+#: carry P% of it. Either way the heaviest completion stays -- it is the one the menu is
+#: ranked from (`selfplay._menus.views`) -- and what is left is renormalised to sum to 1.
+#:
+#:     2026-09-25, IKA-279: in M-C generation the heaviest completion carries >= 0.95 on
+#:     66% of hidden sides, and the completions under 5% hold 45% of all leaves. Dropping
+#:     them moved the Bayesian solves' regret by 2e-5 on average (max 0.004).
+#:
+#:     2026-09-25, IKA-283: ``w5`` cuts M-C generation's leaves 25,946 -> 14,220 a game
+#:     (-45%) and its CPU a game by 16% (1.14-1.19x the games a minute); the menus are the
+#:     same (the ranking reads the heaviest completion). The board is in records/IKA-283.md.
+#:     The default stays until a leaf taught by the cheaper pool is compared at equal cost.
+DEFAULT_BENCH_DROP = "none"
+
+_BENCH_DROP = re.compile(r"none|([wm])([0-9]+(?:\.[0-9]+)?)")
+
+
+def parse_bench_drop(label: str) -> tuple[str, float]:
+    """(rule, fraction) from a bench-drop label: ("none", 0), ("w", 0.05), ("m", 0.95).
+
+    A label that is not one stops, and so does a percentage outside (0, 100).
+    """
+    got = _BENCH_DROP.fullmatch(label)
+    if got is None:
+        raise ValueError(f"bench drop {label!r} is not none, w<P> or m<P>")
+    if label == "none":
+        return "none", 0.0
+    fraction = float(got.group(2)) / 100.0
+    if not 0.0 < fraction < 1.0:
+        raise ValueError(f"bench drop {label!r}: the percentage must be in (0, 100)")
+    return got.group(1), fraction
+
+
+def drop_light(items: list[Completion], label: str) -> list[Completion]:
+    """`items` less the completions `label` drops, the rest's weights renormalised.
+
+    The same list object when nothing is dropped, so an agent that drops nothing -- the
+    default, or a side whose completions all clear the bar -- plays the same bits as one
+    that never asked. The heaviest completion, the first of equal maxima as the menu's
+    `max` picks it, is always kept; the order of the rest is the enumeration's.
+    """
+    rule, fraction = parse_bench_drop(label)
+    if rule == "none" or len(items) < 2:
+        return items
+    heaviest = max(range(len(items)), key=lambda i: items[i].weight)
+    if rule == "w":
+        kept = {i for i, item in enumerate(items) if item.weight >= fraction}
+    else:
+        # Heaviest first, enumeration order among equals (a stable sort).
+        order = sorted(range(len(items)), key=lambda i: -items[i].weight)
+        kept, mass = set(), 0.0
+        for i in order:
+            if mass >= fraction:
+                break
+            kept.add(i)
+            mass += items[i].weight
+    kept.add(heaviest)
+    if len(kept) == len(items):
+        return items
+    total = sum(items[i].weight for i in kept)
+    return [
+        replace(item, weight=item.weight / total)
+        for i, item in enumerate(items)
+        if i in kept
+    ]
+
+
 def substitute(
     reg: Regulation,
     position: Position,
@@ -296,9 +366,12 @@ def substitute(
 
 
 __all__ = [
+    "DEFAULT_BENCH_DROP",
     "Completion",
     "completions",
+    "drop_light",
     "identity",
+    "parse_bench_drop",
     "seen_identities",
     "seen_slots",
     "shown_species",

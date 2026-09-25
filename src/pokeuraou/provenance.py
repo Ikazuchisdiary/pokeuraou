@@ -38,6 +38,10 @@ from .regulation import repo_root
 #: reading a record does not import the search.
 LEGACY_RANK_FILL = "refs2"
 
+#: What every game before IKA-283 did with the completions its bench prior barely weighs
+#: (`hidden.parse_bench_drop`): kept them all. Fixed for the same reason as the fill above.
+LEGACY_BENCH_DROP = "none"
+
 #: Recorded games whose `provenance.kind` is this came from ordinary self-play, where both
 #: sides are the same agent. Absent provenance means the same thing -- every game written
 #: before this existed was self-play.
@@ -133,6 +137,7 @@ def provenance(
     encodings: tuple[str, str] = ("new", "new"),
     rank_views: tuple[str, str] = ("heaviest", "heaviest"),
     rank_fills: tuple[str, str] = (LEGACY_RANK_FILL, LEGACY_RANK_FILL),
+    bench_drops: tuple[str, str] = (LEGACY_BENCH_DROP, LEGACY_BENCH_DROP),
     note: str = "",
 ) -> dict[str, Any]:
     """What produced this game, per side, in the order the sides appear in the record.
@@ -197,6 +202,13 @@ def provenance(
         **(
             {"rankFills": list(rank_fills)}
             if set(rank_fills) != {LEGACY_RANK_FILL}
+            else {}
+        ),
+        # Which completions each side's belief dropped (`hidden.parse_bench_drop`,
+        # IKA-283). Written only when a side dropped any rule's worth.
+        **(
+            {"benchDrops": list(bench_drops)}
+            if set(bench_drops) != {LEGACY_BENCH_DROP}
             else {}
         ),
         **({"note": note} if note else {}),
@@ -302,6 +314,11 @@ def agent_name(source: dict[str, Any], side: int) -> str:
     rank_fill = (source.get("rankFills") or [LEGACY_RANK_FILL, LEGACY_RANK_FILL])[side]
     if rank_fill != LEGACY_RANK_FILL and ranking == "leaf":
         name += f"/rankfill:{rank_fill}"
+    # Its belief left out the completions its prior barely weighs (IKA-283): another
+    # Bayesian game, so another agent. Only a hidden bench has completions.
+    bench_drop = (source.get("benchDrops") or [LEGACY_BENCH_DROP, LEGACY_BENCH_DROP])[side]
+    if bench_drop != LEGACY_BENCH_DROP and information != "open":
+        name += f"/benchdrop:{bench_drop}"
     return name
 
 

@@ -39,13 +39,22 @@ from .actions import SideAction, switch_actions_after_faint
 from .budget import Budget
 from .equilibrium import EquilibriumError, solve
 from .fold import TurnLeaves
-from .hidden import completions, identity, seen_identities, seen_slots, shown_species
+from .hidden import (
+    DEFAULT_BENCH_DROP,
+    completions,
+    drop_light,
+    identity,
+    parse_bench_drop,
+    seen_identities,
+    seen_slots,
+    shown_species,
+)
 from .narrow import narrow
 from .payoff import HP_SHARE, Objective
 from .policy import policy_ranking
 from .position import Field, MoveSlot, Pokemon, Position, Side
 from .priors import Cooccurrence, MetagamePrior, SampledSet
-from .provenance import LEGACY_RANK_FILL, engine_fingerprint
+from .provenance import LEGACY_BENCH_DROP, LEGACY_RANK_FILL, engine_fingerprint
 from .regulation import STAT_IDS, Regulation, repo_root
 from .rustnode import PortPause, PortTurn
 from .search import (
@@ -266,6 +275,12 @@ class GameRecord:
     #: Written only when a side did not play `LEGACY_RANK_FILL`, so a record without it
     #: ranked the way every game before IKA-268 did.
     rank_fill: list[str] = field(default_factory=lambda: [LEGACY_RANK_FILL, LEGACY_RANK_FILL])
+    #: Which completions each side's belief dropped (`hidden.parse_bench_drop`, IKA-283).
+    #: Written only when a side did not play `LEGACY_BENCH_DROP`, so a record without it
+    #: believed every completion, as every game before IKA-283 did.
+    bench_drop: list[str] = field(
+        default_factory=lambda: [LEGACY_BENCH_DROP, LEGACY_BENCH_DROP]
+    )
     #: The equilibrium mixtures over the 90 ordered selections, when a book was used.
     #: These are the policy targets a selection head would learn -- the *solver's*
     #: recommendation, not the softened distribution the game was drawn from.
@@ -336,6 +351,11 @@ class GameRecord:
             **(
                 {"rankFill": list(self.rank_fill)}
                 if set(self.rank_fill) != {LEGACY_RANK_FILL}
+                else {}
+            ),
+            **(
+                {"benchDrop": list(self.bench_drop)}
+                if set(self.bench_drop) != {LEGACY_BENCH_DROP}
                 else {}
             ),
             "ownSelectionPolicy": self.own_selection_policy,
@@ -714,6 +734,27 @@ def _menus(
     )
 
 
+def _believed(
+    spreads: dict[int, list], drops: tuple[str, str]
+) -> dict[int, list]:
+    """Each side's completions as the agent that is blind to them believes them.
+
+    `spreads[s]` completes side `s`'s own bench, so it is side `1 - s`'s belief, and it
+    is side `1 - s`'s rule that drops from it (IKA-283). One dict then serves both
+    agents: each side's game, its menu's view and its Bayesian solve read only the
+    other side's list. The dict itself when neither drops anything.
+    """
+    if set(drops) == {DEFAULT_BENCH_DROP}:
+        return spreads
+    out = {side: drop_light(items, drops[1 - side]) for side, items in spreads.items()}
+    if timing.ON:
+        timing.count(
+            "completions.dropped",
+            sum(len(spreads[side]) - len(out[side]) for side in spreads),
+        )
+    return out
+
+
 def _rank_views(
     own_views: dict[int, tuple[int, tuple[str, ...]]],
     foe_views: dict[int, tuple[int, tuple[str, ...]]] | None,
@@ -789,6 +830,7 @@ def play_game(
     one_agent: bool = True,
     rank_view: str | tuple[str, str] = "heaviest",
     rank_fill: str | tuple[str, str] = DEFAULT_RANK_FILL,
+    bench_drop: str | tuple[str, str] = DEFAULT_BENCH_DROP,
 ) -> GameRecord:
     """Plays one game to a result, sampling both sides from the turn's equilibrium.
 
@@ -850,6 +892,10 @@ def play_game(
     ``rank_fill`` takes a pair too: how each agent's leaf ranking fills its cells --
     ``refs<N>`` replies at the matrix budget, ``-fast`` for `Budget.fast` (IKA-268). It
     changes nothing with the damage or policy ranking.
+
+    ``bench_drop`` takes a pair too: which completions of the opponent's unseen slots
+    each agent's belief leaves out at a move node (`hidden.parse_bench_drop`, IKA-283).
+    "none" ships. It changes nothing without ``sheets``.
     """
     # Closes the stretch since the last game's last record (IKA-98); the first one ends startup.
     timing.decided("between")
@@ -879,6 +925,9 @@ def play_game(
     fills = (rank_fill, rank_fill) if isinstance(rank_fill, str) else tuple(rank_fill)
     for fill in fills:
         parse_rank_fill(fill)
+    drops = (bench_drop, bench_drop) if isinstance(bench_drop, str) else tuple(bench_drop)
+    for drop in drops:
+        parse_bench_drop(drop)
     if sheets is None and not open_information:
         raise ValueError(
             "no `sheets`, so the search would be shown the opponent's four -- the open "
@@ -918,6 +967,7 @@ def play_game(
     )
     record.rank_view = list(views_rule)
     record.rank_fill = list(fills)
+    record.bench_drop = list(drops)
     pos = start if start is not None else position_from_sets(reg, own, foe, rng=rng)
     budget = Budget.matrix()
     # Who each side has shown, accumulated across turns. A Pokemon that came in and went
@@ -1002,6 +1052,7 @@ def play_game(
             except ValueError as problem:
                 record.unmodelled.append(f"hidden bench: {problem}")
                 break
+            spreads = _believed(spreads, drops)
         menu_started = perf_counter()
         # Side -> the completion that side's ranking read, per agent: `own_views` from
         # side 0's construction, `foe_views` from side 1's when it builds its own.
