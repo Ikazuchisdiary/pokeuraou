@@ -1104,23 +1104,30 @@ def play_game(
             # on either bench.
             solve_started = perf_counter()
             try:
+                # Two menus mean two solves, each read on one side only: this one for
+                # side 0, the one over side 1's menu below for side 1. Asking each for
+                # the side it is read on is what keeps the other side's node and LP from
+                # being built and thrown away (IKA-282: half of the board's matrix,
+                # dirty fill and LP).
                 answers = belief_solve(
                     reg, pos, ours, theirs, spreads,
                     {0: own_leaf, 1: foe_leaf}, budget=budget,
+                    sides=(0, 1) if same_menu else (0,),
                 )
             except EquilibriumError:
                 break
             own_seconds = perf_counter() - solve_started
             record.unmodelled.extend(
-                answers[0].unmodelled | answers[1].unmodelled
+                set().union(*(answer.unmodelled for answer in answers.values()))
             )
             own_strategy = answers[0].strategy
-            foe_strategy = answers[1].strategy
             foe_theirs = theirs
             search_value = answers[0].value
-            # Side 1 solved the negated transpose, so its value is minus side 0's win
-            # probability as side 1 believes it; negated back into side 0's units.
-            foe_search_value = -answers[1].value
+            if same_menu:
+                foe_strategy = answers[1].strategy
+                # Side 1 solved the negated transpose, so its value is minus side 0's
+                # win probability as side 1 believes it; negated back into side 0's units.
+                foe_search_value = -answers[1].value
             if not same_menu:
                 # The open path rebuilds the column player's game when the settings
                 # differ; this one used to skip that entirely, so under a hidden bench
@@ -1140,7 +1147,7 @@ def play_game(
                 try:
                     foe_answers = belief_solve(
                         reg, pos, foe_ours, foe_theirs, spreads,
-                        {0: own_leaf, 1: foe_leaf}, budget=budget,
+                        {0: own_leaf, 1: foe_leaf}, budget=budget, sides=(1,),
                     )
                 except EquilibriumError:
                     break
