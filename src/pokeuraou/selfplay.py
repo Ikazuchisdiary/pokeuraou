@@ -281,6 +281,11 @@ class GameRecord:
     bench_drop: list[str] = field(
         default_factory=lambda: [LEGACY_BENCH_DROP, LEGACY_BENCH_DROP]
     )
+    #: Each side's search depth and whether its depth 2 read the restricted game (IKA-111).
+    #: Written only when a side searched past depth 1, so a record without them is depth 1
+    #: on both sides, as every generated game before IKA-111 was.
+    depth: list[int] = field(default_factory=lambda: [1, 1])
+    solve_restricted: list[bool] = field(default_factory=lambda: [False, False])
     #: The equilibrium mixtures over the 90 ordered selections, when a book was used.
     #: These are the policy targets a selection head would learn -- the *solver's*
     #: recommendation, not the softened distribution the game was drawn from.
@@ -356,6 +361,11 @@ class GameRecord:
             **(
                 {"benchDrop": list(self.bench_drop)}
                 if set(self.bench_drop) != {LEGACY_BENCH_DROP}
+                else {}
+            ),
+            **(
+                {"depth": list(self.depth), "solveRestricted": list(self.solve_restricted)}
+                if set(self.depth) != {1}
                 else {}
             ),
             "ownSelectionPolicy": self.own_selection_policy,
@@ -875,7 +885,12 @@ def play_game(
     ``solve_restricted`` takes a pair and is a property of depth 2 alone: it says whether
     the refined cells are read as the restricted game they form, or left in the full
     matrix the way the search that IKA-12 played out did. At depth 1 it changes nothing,
-    which is what makes it safe to carry on an arm that is not deep.
+    which is what makes it safe to carry on an arm that is not deep. Under ``sheets`` it is
+    the only depth-2 reading there is: `belief_solve` refines per completion of the
+    opponent's bench and reads the restricted Bayesian game (IKA-111), so depth 2 there
+    takes ``solve_restricted=True`` and the mixed reading stops (and depth 1 there takes it
+    False: a flag that would change nothing is refused, not recorded). Only move nodes go deeper;
+    the replacement nodes stay at depth 1, as in the open game.
 
     ``solve_sparsely`` takes a pair too, and it is the one whose two values are supposed
     to be *equally correct*: both settle on an equilibrium of the same game, verified to
@@ -938,17 +953,22 @@ def play_game(
     if sheets is not None and open_information:
         raise ValueError("`sheets` hides the bench and `open_information=True` shows it")
     if sheets is not None and (
-        depths != (1, 1) or sparse != (False, False) or restricted != (False, False)
+        sparse != (False, False)
+        # Depth 2 in the restricted reading, and the flag nowhere else: at depth 1 it
+        # would do nothing, and a flag that does nothing is refused here, not recorded.
+        or any(d not in (1, 2) or bool(r) != (d == 2) for d, r in zip(depths, restricted, strict=True))
     ):
-        # `belief_solve` takes neither, so under a hidden bench these were accepted,
+        # `belief_solve` took none of these, so under a hidden bench they were accepted,
         # recorded per side in the provenance, and then dropped. An argument that is
         # silently ignored is how every measurement defect found today was built: the
         # caller reads the flag it passed, the record repeats it, and nothing played it.
+        # Since IKA-111 it takes depth 2 in the restricted reading, and only that.
         raise ValueError(
             f"depth {depths}, solve_sparsely {sparse} and solve_restricted "
-            f"{restricted} cannot be honoured with a hidden bench -- belief_solve has no "
-            "parameter for any of them. Pass depth 1 with both flags False, or drop "
-            "`sheets` and measure in the open game."
+            f"{restricted} cannot be honoured with a hidden bench -- belief_solve takes "
+            "depth 1 without solve_restricted, or depth 2 with it (IKA-111), and no "
+            "sparse solve. "
+            "Pass one of those, or drop `sheets` and measure in the open game."
         )
     record = GameRecord(
         own_team=[_set_json(reg, s) for s in own],
@@ -968,6 +988,8 @@ def play_game(
     record.rank_view = list(views_rule)
     record.rank_fill = list(fills)
     record.bench_drop = list(drops)
+    record.depth = [int(d) for d in depths]
+    record.solve_restricted = [bool(r) for r in restricted]
     pos = start if start is not None else position_from_sets(reg, own, foe, rng=rng)
     budget = Budget.matrix()
     # Who each side has shown, accumulated across turns. A Pokemon that came in and went
@@ -1113,6 +1135,7 @@ def play_game(
                     reg, pos, ours, theirs, spreads,
                     {0: own_leaf, 1: foe_leaf}, budget=budget,
                     sides=(0, 1) if same_menu else (0,),
+                    depth=depths,
                 )
             except EquilibriumError:
                 break
@@ -1148,6 +1171,7 @@ def play_game(
                     foe_answers = belief_solve(
                         reg, pos, foe_ours, foe_theirs, spreads,
                         {0: own_leaf, 1: foe_leaf}, budget=budget, sides=(1,),
+                        depth=depths,
                     )
                 except EquilibriumError:
                     break
