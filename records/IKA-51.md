@@ -1,4 +1,4 @@
-# IKA-51: CI の走る場所ができた —— GitHub の公開リポジトリに繋ぎ、4 回の赤で 3 つの不具合（テスト同士の干渉 1、CI の組み立て 2）を直した。CPU で行の答えが束ね方に依存しない性質は、GitHub のランナーでは成り立たない
+# IKA-51: CI の走る場所ができた —— GitHub の公開リポジトリに繋ぎ、5 回の赤で 3 つの不具合（テスト同士の干渉 1、CI の組み立て 2）を直した。CPU で行の答えが束ね方に依存しない性質は、GitHub のランナーでは成り立たない
 
 2026-09-25。担当は調整役のセッション。
 
@@ -40,6 +40,8 @@
 | 2 | `test_rust_node` の 5 本（不可能な局面を拒否しない、など）と、torch の無い suite ジョブでの収集エラー 2 本 | 下の (a)(b) |
 | 3 | suite ジョブで torch の skip が 12 本あり、許した 8 本を超えた。learn ジョブで `test_inference` の CPU 版が 1 ulp ずれた | 許す本数を実際に数えた 12 本にした。CI の CPU 版 torch を lockfile と同じ 2.11.0 に固定した |
 | 4 | torch を 2.11.0 に固定しても、CPU 版が同じ 5.96e-8 でずれた | (c) |
+| 5 | learn の失敗は 0 本。ただし、この間に入った IKA-291 の CUDA グラフのテスト 3 本が「CUDA graphs need a card」で skip し、audit が分類できなかった | `ci_skip_audit` に `cuda` の分類を足した（GPU があるかを probe で見る）。learn は `--absent cuda=3`、suite は `cuda=0`。直す前に、5 回目の junit を手元の audit に通して確かめた |
+| 6 | 3 つのジョブがすべて緑（run 36115489395。suite 7m15s、learn 7m35s、lint 11s） | |
 
 **(a) `hold_positions` が次のテストへ持ち越されていた（テスト同士の干渉）。**
 * `tools/selfplay.py` は `rustnode.hold_positions()` を入れっぱなしにする。局面を書き換えない生成ワーカーのための設定（IKA-264）で、生成ではこれで正しい。
