@@ -142,13 +142,25 @@ class Cost:
         return fills * self.fill + refines * self.refine + cells * self.cell
 
 
-#: Measured prices, by (machine form, logical cores). ``local``: one process, the shipped
-#: ensemble leaf on the local GPU -- a person's opponent. ``served``: the board's shape
-#: (24 workers over 2 inference servers, 16 cores busy), CPU milliseconds a worker spends.
-#: Only one core is measured (IKA-293 section 10); IKA-32 adds the others.
+#: Measured prices, by (machine form, logical cores) -- IKA-293, 2026-09-26.
+#:
+#: ``local``: one process, the shipped ensemble leaf (value-mc0 + value-mc0-s1) on the
+#: local GPU -- a person's opponent. Wall milliseconds, least squares over 624 deepenings
+#: (78 recorded M-C positions x 8 labels, m25 to m1000o24): R^2 0.979 against 0.581 for
+#: one number of cells a second (4,478/s at best; IKA-33's 1,500/s was 3.06x slow). Held
+#: out by halves: R^2 0.976 / 0.980, totals within 2%.
+#:
+#: ``served``: the board's shape (24 workers over 2 inference servers, one server arm, the
+#: 16 cores busy), CPU milliseconds of every process (workers, port, servers) above the
+#: width-12 depth-1 arm, least squares over 11 same-arm board runs of 300 games (m100 to
+#: m3000o24, swaps and breadth alone). A fill there costs what it costs locally; a cell
+#: 5.6x (the port, the server's forward passes and the Python are all on the CPU).
+#:
+#: One core only (the counts above were run one process a worker); IKA-32 measures the
+#: others, per kind, rather than scaling these.
 COSTS: dict[tuple[str, int], Cost] = {
-    ("local", 1): Cost(fill=3.79, refine=2.64, cell=0.030),
-    ("served", 1): Cost(fill=3.79, refine=2.64, cell=0.030),
+    ("local", 1): Cost(fill=4.925, refine=1.494, cell=0.0286),
+    ("served", 1): Cost(fill=4.990, refine=1.354, cell=0.1602),
 }
 
 #: What ships: no deepening. A label is ``none``, ``m<N>`` (the whole matrix read, N cells)
