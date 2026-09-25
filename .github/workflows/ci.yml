@@ -144,13 +144,13 @@ jobs:
       # reason is a failure on its own. The numbers are measured, not guessed:
       #   standings  data/standings/*.json.gz, from a small community API that the tool's
       #              own docstring calls a manual one-off fetch. Not called on every push.
-      #   torch      six modules and two tests in test_selection_book; the `learn` job
+      #   torch      twelve skips (counted on the first full CI run, IKA-51); the `learn` job
       #              below runs them with torch present and allows none of these.
       - name: what the suite skipped, and whether it was allowed to
         if: always()
         run: >
           uv run python tools/ci_skip_audit.py --junit reports/pytest.xml
-          --absent standings=9 --absent torch=8
+          --absent standings=9 --absent torch=12
 
       - uses: actions/upload-artifact@v4
         if: always()
@@ -203,8 +203,10 @@ jobs:
       # it. Say plainly what that costs: this job checks that the value function's *code*
       # still runs, not that the training box's wheel still resolves. The second question
       # is a real one and this does not answer it.
+      # Pinned to the lockfile's version (2.11.0, cu128 there): with an unpinned 2.14.0 the
+      # batch-invariance test in test_inference moved a row by one float32 ulp (IKA-51).
       - name: install the CPU build of torch
-        run: uv pip install "torch>=2.7" --index-url https://download.pytorch.org/whl/cpu
+        run: uv pip install "torch==2.11.0" --index-url https://download.pytorch.org/whl/cpu
       - name: torch has to be importable before this job claims anything
         run: uv run --no-sync python -c "import torch; print(torch.__version__)"
 
