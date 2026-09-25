@@ -220,7 +220,12 @@ jobs:
           uv run --no-sync python tools/fetch_priors.py
           --month "$PRIORS_MONTH" --format "$PRIORS_FORMAT" --cutoff "$PRIORS_CUTOFF"
 
+      # GitHub's runner moves a row's answer by one float32 ulp when its batch changes on
+      # CPU (torch 2.11.0 and 2.14.0 alike); the box this project runs on does not. The
+      # CPU variant of that test is skipped here and counted below; CUDA is not on a runner.
       - name: pytest
+        env:
+          POKEURAOU_CPU_BATCH_VARIES: "1"
         run: uv run --no-sync pytest --junitxml=reports/pytest-learn.xml
 
       # No `--absent torch`: with the learn group installed, a torch skip here means the
@@ -229,7 +234,7 @@ jobs:
         if: always()
         run: >
           uv run --no-sync python tools/ci_skip_audit.py --junit reports/pytest-learn.xml
-          --absent standings=9
+          --absent standings=9 --absent cpu-batch=1
 
       - uses: actions/upload-artifact@v4
         if: always()

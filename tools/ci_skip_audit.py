@@ -30,6 +30,7 @@ file that decides what CI provides is also the file that lists what it does not.
 from __future__ import annotations
 
 import argparse
+import os
 import re
 import sys
 import xml.etree.ElementTree as ET
@@ -155,6 +156,13 @@ CLASSES: tuple[Class, ...] = (
         re.compile(r"could not import 'torch'|needs the optional learn group"),
         "the optional learn group; `uv sync --group learn`",
         probe=_torch_present,
+    ),
+    Class(
+        "cpu-batch",
+        re.compile(r"CPU kernels let a row's answer depend on its batch"),
+        "a CPU whose torch kernels keep a row's answer independent of its batch; the "
+        "AVX512 box does, GitHub's runner does not (IKA-51)",
+        probe=lambda: not os.environ.get("POKEURAOU_CPU_BATCH_VARIES"),
     ),
     Class(
         "fixtures",
