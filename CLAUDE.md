@@ -10,7 +10,7 @@ Pokémon Champions（VGC 2026 Reg M-C）のダブルバトル検討ソルバ。�
 ```bash
 # 初回（vendor の Showdown、sim-bridge、Rust の port、Python）
 git submodule update --init
-cd vendor/pokemon-showdown && npm ci && node build && cd -
+cd vendor/pokemon-showdown && npm ci && node build decl && cd -
 npm install && npm run build                       # packages/sim-bridge/dist（オラクル。テストが使う）
 cd rust && cargo build --release && cd -           # port の exe（rust/target/release/pokeuraou-damage.exe）
 uv sync                                            # 価値関数を使うなら uv sync --group learn

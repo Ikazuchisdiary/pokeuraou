@@ -97,11 +97,13 @@ jobs:
       # Showdown is a TypeScript source tree in the submodule; `main` points at dist/,
       # which only exists after its own build. Installing the workspace is not enough --
       # `require('pokemon-showdown')` fails with MODULE_NOT_FOUND until this runs.
+      # `decl` also writes dist/**/*.d.ts; without them the sim-bridge's strict tsc fails
+      # with TS7016 on every import of pokemon-showdown (the first CI run, IKA-51).
       - name: build the vendored Showdown
         working-directory: vendor/pokemon-showdown
         run: |
           npm install --no-audit --no-fund
-          node build
+          node build decl
 
       - name: build the sim-bridge
         run: |
@@ -183,7 +185,7 @@ jobs:
         working-directory: vendor/pokemon-showdown
         run: |
           npm install --no-audit --no-fund
-          node build
+          node build decl
       - name: build the sim-bridge
         run: |
           npm ci
