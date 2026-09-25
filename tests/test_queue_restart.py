@@ -72,3 +72,31 @@ def test_merge_refuses_a_used_tag(tmp_path: Path) -> None:
     else:
         raise AssertionError("merge overwrote a file")
     assert (resume / "games-worker0.jsonl").exists()
+
+
+def _rank_member(index: int) -> bytes:
+    import gzip
+
+    return gzip.compress(json.dumps({"gameIndex": index}).encode() + b"\n", mtime=0)
+
+
+def test_the_rank_files_are_repaired_and_moved_with_the_games(tmp_path: Path) -> None:
+    """IKA-278: rank-*.jsonl.gz beside the games get the same care, and no *.jsonl reader
+    sees them."""
+    from pokeuraou.rank_scores import iter_records
+
+    out, resume = tmp_path / "out", tmp_path / "r1"
+    out.mkdir()
+    resume.mkdir()
+    write(out / "games-worker0.jsonl", [0, 1])
+    torn = _rank_member(2)[:7]
+    (out / "rank-worker0.jsonl.gz").write_bytes(_rank_member(0) + _rank_member(1) + torn)
+    assert queue_restart.where(out, 4) == 2
+    assert (out / "rank-worker0.jsonl.gz.torn").read_bytes() == torn
+    write(resume / "games-worker0.jsonl", [2, 3])
+    (resume / "rank-worker0.jsonl.gz").write_bytes(_rank_member(2) + _rank_member(3))
+    queue_restart.merge(out, resume, "r1")
+    assert not list(resume.glob("rank-*"))
+    assert sorted(line["gameIndex"] for line in iter_records(out)) == [0, 1, 2, 3]
+    assert sorted(p.name for p in out.glob("*.jsonl")) == [
+        "games-r1-worker0.jsonl", "games-worker0.jsonl"]
