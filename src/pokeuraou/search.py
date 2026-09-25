@@ -142,6 +142,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
+from typing import Any
 
 import numpy as np
 
@@ -1180,6 +1181,10 @@ class BeliefResult:
     #: The restricted game's own value minus what its strategy guarantees against every
     #: column of every completion, as `SearchResult.optimism`.
     optimism: float = 0.0
+    #: What a best-first deepening of the Bayesian root did (IKA-294), or None. When it
+    #: widened, `ours` / `theirs` are the grown menus (side 0's actions first, as always)
+    #: and the strategy indexes this side's.
+    deepened: _deepen.Deepened | None = None
 
 
 def belief_solve(
@@ -1197,6 +1202,7 @@ def belief_solve(
     passes: int = DEFAULT_PASSES,
     sub_limit: int = DEFAULT_SUB_LIMIT,
     sub_branches: int = DEFAULT_SUB_BRANCHES,
+    deepen: dict[int, dict[str, Any]] | None = None,
 ) -> dict[int, BeliefResult]:
     """Both sides' answers, resolving each turn as few times as it has to be resolved.
 
@@ -1220,11 +1226,21 @@ def belief_solve(
     (`_restricted_belief`): the double-oracle of `_restricted_search`, with a column set
     per completion and each refined cell resolved and sub-solved in that completion's
     position. The knobs are `search`'s and mean the same.
+
+    `deepen` maps a side to how it deepens its Bayesian root after the depth-1 answer
+    (IKA-294, a label ending in ``h``): `deepen.deepen_belief`'s ``cells``, ``reading``,
+    ``swap`` and ``outside`` -- the last in side 0's orientation, as `search`'s (side 0's
+    candidates, side 1's). It goes with depth 1 on that side. A side not in it is
+    answered as above.
     """
     from .beliefnode import belief_payoffs
     from .equilibrium import solve_bayesian
 
     depths = (depth, depth) if isinstance(depth, int) else tuple(depth)
+    deepen = deepen or {}
+    for side in deepen:
+        if depths[side] != 1:
+            raise ValueError("deepen on a hidden bench goes with depth 1 (IKA-294)")
     wanted = tuple(side for side in (0, 1) if side in sides)
     if not wanted:
         raise ValueError(f"belief_solve asked for no side: {sides!r}")
@@ -1268,6 +1284,33 @@ def belief_solve(
             unmodelled=nodes[side].unmodelled,
             classes=len(matrices),
         )
+        if side in deepen:
+            how = dict(deepen[side])
+            outside = how.pop("outside", None)
+            if outside is not None and side == 1:
+                outside = (outside[1], outside[0])
+            own, other = (row, col) if side == 0 else (col, row)
+            # Its own copy: with one leaf both sides' answers share the node's notes.
+            notes = set(nodes[side].unmodelled)
+            with timing.region("deepen.hidden"):
+                got = _deepen.deepen_belief(
+                    reg, side, position, own, other, items, weights, matrices, solved,
+                    evaluators[side], budget=budget, sub_limit=sub_limit,
+                    sub_branches=sub_branches, unmodelled=notes, outside=outside, **how,
+                )
+            grown_row, grown_col = (got.own, got.other) if side == 0 else (got.other, got.own)
+            eq = got.equilibrium
+            out[side] = BeliefResult(
+                strategy=np.asarray(eq.row_strategy, dtype=np.float64),
+                value=float(eq.value),
+                replies=tuple(np.asarray(y, dtype=np.float64) for y in eq.col_strategies),
+                ours=list(grown_row),
+                theirs=list(grown_col),
+                unmodelled=notes,
+                classes=len(matrices),
+                refined=got.report.expanded,
+                deepened=got.report,
+            )
         if depths[side] >= 2:
             with timing.region("d2"):
                 out[side] = _restricted_belief(
