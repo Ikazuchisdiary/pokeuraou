@@ -29,7 +29,7 @@ import argparse
 import random
 import sys
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -193,6 +193,29 @@ def pick_action(
         )
     ]
     return py_rng.choice(switching or options)
+
+
+def showdown_choice(pick: SideAction, request: dict[str, Any] | None) -> str:
+    """``pick`` as Showdown's choice string, its move numbers read off Showdown's request.
+
+    `MoveAction.move_index` is the move's place among the Pokemon's four, which is what
+    the port and the records read. Showdown numbers a choice by its place in the request
+    instead, and those differ when a move locks: a charging move's second turn, Outrage's
+    rampage and Hyper Beam's recharge offer that one move alone (`getMoves(lockedMove)`),
+    so the charging move in slot 3 is `move 1` there, and `move 3` is refused with "doesn't
+    have a move 3" (IKA-309). The menu already gives the lock no target (IKA-176); this
+    gives it the request's number. A move the request does not list keeps its own.
+    """
+    if not request or not request.get("active"):
+        return pick.to_choice()
+    parts: list[str] = []
+    for action in pick.slots:
+        if isinstance(action, MoveAction) and action.slot < len(request["active"]):
+            listed = [m.get("id") for m in (request["active"][action.slot] or {}).get("moves", [])]
+            if action.move_id in listed:
+                action = replace(action, move_index=listed.index(action.move_id) + 1)
+        parts.append(action.to_choice())
+    return ", ".join(parts)
 
 
 def showdown_paused_mid_turn(handle: Any) -> bool:
@@ -734,6 +757,7 @@ def answer_port_pauses(
         for label, node in nodes.items():
             follow_port(reg, node, report.ports[label], report.showdown)
         if handle.choice_errors:
+            report.skipped["Showdown refused a mid-turn replacement"] += 1
             return
 
 
@@ -1004,7 +1028,7 @@ def run(
                         reg, before, side_index, py_rng, wanted, self_switch
                     )
                     chosen.append(pick)
-                    choices.append(pick.to_choice())
+                    choices.append(showdown_choice(pick, request))
                 if all(c is None for c in choices):
                     break
                 handle.step(choices)
@@ -1012,6 +1036,8 @@ def run(
                     # A turn left at the stop goes on with this step.
                     follow_port(reg, node, report.ports[label], report.showdown)
                 if handle.choice_errors:
+                    # Named, not silent: the rest of the battle goes uncompared (IKA-309).
+                    report.skipped["battle stopped: Showdown refused a choice"] += 1
                     break
                 if forced or len(chosen) != 2:
                     report.skipped["replacement turn"] += 1
