@@ -43,6 +43,7 @@ the deepest refined cell reached, so a recorded game says how far each answer lo
 
 from __future__ import annotations
 
+import heapq
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
@@ -131,6 +132,8 @@ class _Node:
         default_factory=dict
     )
     refused: set[tuple[int, int]] = field(default_factory=set)
+    #: `_signal`'s matrix while the equilibrium it was read from stands.
+    signal: np.ndarray | None = None
 
     @property
     def value(self) -> float:
@@ -201,10 +204,12 @@ def best_first(
 
 def _signal(node: _Node) -> np.ndarray:
     """``bern/gap`` for every cell of `node`, refined or not, at its current value."""
-    eq = node.equilibrium
-    values = node.payoff
-    gap = eq.row_ev_loss[:, None] + eq.col_ev_loss[None, :]
-    return values * (1.0 - values) / (gap + GAP_FLOOR)
+    if node.signal is None:
+        eq = node.equilibrium
+        values = node.payoff
+        gap = eq.row_ev_loss[:, None] + eq.col_ev_loss[None, :]
+        node.signal = values * (1.0 - values) / (gap + GAP_FLOOR)
+    return node.signal
 
 
 def _scores(node: _Node, inherited: float | None) -> np.ndarray:
@@ -229,14 +234,20 @@ def _scores(node: _Node, inherited: float | None) -> np.ndarray:
 def _best(root: _Node) -> tuple[_Node, tuple[int, int]] | None:
     """The unrefined cell with the highest positive priority under `root`, or None.
 
-    Walked in a fixed order -- a node, then its refined cells in row-major order and each
-    one's branches in the order kept -- and a tie goes to the first met, so the choice is
-    a function of the tree alone.
+    Every priority under a node is at most what that node inherited, so the tree is
+    searched best first from the root and a subtree is not opened once the best cell in
+    hand is worth at least its bound. Nodes are opened in order of that bound, ties by
+    the order they were met (a node, then its refined cells in row-major order and each
+    one's branches in the order kept), and within a node a tie goes to the first cell --
+    so the choice is a function of the tree alone.
     """
     best: tuple[float, _Node, tuple[int, int]] | None = None
-    queue: list[tuple[_Node, float | None]] = [(root, None)]
-    while queue:
-        node, inherited = queue.pop(0)
+    met = 0
+    heap: list[tuple[float, int, _Node, float | None]] = [(-np.inf, met, root, None)]
+    while heap:
+        bound, _order, node, inherited = heapq.heappop(heap)
+        if best is not None and -bound <= best[0]:
+            break
         scores = _scores(node, inherited)
         candidates = scores.copy()
         for cell in node.children:
@@ -251,7 +262,10 @@ def _best(root: _Node) -> tuple[_Node, tuple[int, int]] | None:
         for cell in sorted(node.children):
             for weight, child in node.children[cell]:
                 if isinstance(child, _Node):
-                    queue.append((child, float(scores[cell]) * weight))
+                    passed = float(scores[cell]) * weight
+                    if passed > 0.0:
+                        met += 1
+                        heapq.heappush(heap, (-passed, met, child, passed))
     if best is None:
         return None
     return best[1], best[2]
@@ -289,11 +303,15 @@ def _expand(
         return spent, False
     weights /= total
 
+    # Finished branches are scored by the leaf, as `_subgame_value` scores them, in one
+    # call for the cell -- a row-wise leaf gives the same numbers either way.
+    ended = [branch.position for branch in branches if branch.position.ended]
+    finished = iter(np.asarray(evaluate(ended), dtype=np.float64) if ended else ())
     kept: list[tuple[float, _Node | float]] = []
     for weight, branch in zip(weights, branches, strict=True):
         child_pos = branch.position
         if child_pos.ended:
-            kept.append((float(weight), float(evaluate([child_pos])[0])))
+            kept.append((float(weight), float(next(finished))))
             continue
         row = narrow(reg, child_pos, 0, limit=sub_limit).actions
         col = narrow(reg, child_pos, 1, limit=sub_limit).actions
@@ -335,6 +353,7 @@ def _propagate(node: _Node, cell: tuple[int, int]) -> None:
     at = cell
     while here is not None:
         here.payoff[at] = _cell_value(here.children[at])
+        here.signal = None
         try:
             here.equilibrium = solve(here.payoff)
         except EquilibriumError:
