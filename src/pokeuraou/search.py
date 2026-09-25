@@ -410,17 +410,15 @@ def search(
         if not fresh:
             converged = True
             break
-        for i, j in fresh:
-            value, notes, solved = _refined_value(
-                reg,
-                pos,
-                row[i],
-                col[j],
-                evaluate,
-                budget=budget,
-                sub_limit=sub_limit,
-                sub_branches=sub_branches,
-            )
+        found = _refine_cells(
+            reg,
+            [(pos, row[i], col[j]) for i, j in fresh],
+            evaluate,
+            budget=budget,
+            sub_limit=sub_limit,
+            sub_branches=sub_branches,
+        )
+        for (i, j), (value, notes, solved) in zip(fresh, found, strict=True):
             subgames += solved
             unmodelled.update(notes)
             if value is not None:
@@ -512,30 +510,32 @@ def _restricted_search(
     used = 0
     for attempt in range(1, passes + 1):
         used = attempt
-        for i in rows:
-            for j in cols:
-                if (i, j) in refined or (i, j) in unrefinable:
-                    continue
-                value, notes, solved = _refined_value(
-                    reg,
-                    pos,
-                    row[i],
-                    col[j],
-                    evaluate,
-                    budget=budget,
-                    sub_limit=sub_limit,
-                    sub_branches=sub_branches,
-                )
-                subgames += solved
-                unmodelled.update(notes)
-                if value is None:
-                    # The cell keeps its depth-1 price, so the rectangle is that much
-                    # less consistent -- one cell of sixteen rather than 560 of 576, and
-                    # counted out loud rather than left to be inferred.
-                    unrefinable.add((i, j))
-                    continue
-                refined[(i, j)] = value
-                prices[i, j] = value
+        fresh = [
+            (i, j)
+            for i in rows
+            for j in cols
+            if (i, j) not in refined and (i, j) not in unrefinable
+        ]
+        # The pass's sub-games scored in one call to the leaf (IKA-291).
+        found = _refine_cells(
+            reg,
+            [(pos, row[i], col[j]) for i, j in fresh],
+            evaluate,
+            budget=budget,
+            sub_limit=sub_limit,
+            sub_branches=sub_branches,
+        )
+        for (i, j), (value, notes, solved) in zip(fresh, found, strict=True):
+            subgames += solved
+            unmodelled.update(notes)
+            if value is None:
+                # The cell keeps its depth-1 price, so the rectangle is that much
+                # less consistent -- one cell of sixteen rather than 560 of 576, and
+                # counted out loud rather than left to be inferred.
+                unrefinable.add((i, j))
+                continue
+            refined[(i, j)] = value
+            prices[i, j] = value
         try:
             restricted = solve(prices[np.ix_(rows, cols)])
         except EquilibriumError:
@@ -655,25 +655,10 @@ def _refined_value(
     safe; inventing one is not.
     """
     unmodelled: set[str] = set()
-    # Every branch, from the port (IKA-209; it was Python's `resolve_turn`).
-    result = port.turn(reg, pos, [ours, theirs], budget, full=True)
-    unmodelled.update(result.unmodelled)
-    if result.suspended or not result.outcomes:
-        # A self-switching move pauses the turn for a replacement choice, which is a
-        # decision node and not a chance node. `batched_payoff` already folds it
-        # correctly at depth 1; refining it would need the fold and the subgame at once.
+    kept = _kept_branches(reg, pos, ours, theirs, budget, sub_branches, unmodelled)
+    if kept is None:
         return None, unmodelled, 0
-
-    branches = sorted(result.outcomes, key=lambda b: -b.probability)[:sub_branches]
-    if len(branches) < len(result.outcomes):
-        unmodelled.add(
-            f"depth-2 kept the {sub_branches} likeliest branches of a refined cell"
-        )
-    weights = np.array([b.probability for b in branches], dtype=np.float64)
-    total = float(weights.sum())
-    if total <= 0:
-        return None, unmodelled, 0
-    weights /= total
+    branches, weights = kept
 
     values: list[float] = []
     solved = 0
@@ -714,6 +699,179 @@ def _subgame_value(
         return float(solve(payoff).value), unmodelled, 1
     except EquilibriumError:
         return None, unmodelled, 1
+
+
+def _kept_branches(  # noqa: PLR0913 - one cell's turn and the branch knob
+    reg: Regulation,
+    pos: Position,
+    ours: SideAction,
+    theirs: SideAction,
+    budget: Budget,
+    sub_branches: int,
+    unmodelled: set[str],
+) -> tuple[list, np.ndarray] | None:
+    """A refined cell's turn: its heaviest branches and their renormalised weights, or
+    None when the cell cannot be refined. The turn's notes go into `unmodelled`."""
+    # Every branch, from the port (IKA-209; it was Python's `resolve_turn`).
+    result = port.turn(reg, pos, [ours, theirs], budget, full=True)
+    unmodelled.update(result.unmodelled)
+    if result.suspended or not result.outcomes:
+        # A self-switching move pauses the turn for a replacement choice, which is a
+        # decision node and not a chance node. `batched_payoff` already folds it
+        # correctly at depth 1; refining it would need the fold and the subgame at once.
+        return None
+
+    branches = sorted(result.outcomes, key=lambda b: -b.probability)[:sub_branches]
+    if len(branches) < len(result.outcomes):
+        unmodelled.add(
+            f"depth-2 kept the {sub_branches} likeliest branches of a refined cell"
+        )
+    weights = np.array([b.probability for b in branches], dtype=np.float64)
+    total = float(weights.sum())
+    if total <= 0:
+        return None
+    weights /= total
+    return branches, weights
+
+
+#: Rows a batch of sub-games holds before they are scored, so that a pass whose sub-games
+#: happen to be self-switch nodes (IKA-284: one reached 363,181 leaves) does not hold them
+#: all at once. About 240 MB of encoded leaves; scoring early changes no value, because
+#: every sub-game is scored as its own block wherever the batch is cut.
+GATHER_ROWS = 65_536
+
+
+@dataclass
+class _Sub:
+    """One kept branch of a refined cell, between its fill and its fold."""
+
+    #: An ended branch's leaf value, or a sub-game resolved on a road with no forward pass
+    #: to share (its matrix is already whole).
+    value: float | None = None
+    payoff: np.ndarray | None = None
+    pending: port.PendingPayoff | None = None
+    notes: set[str] = field(default_factory=set)
+    #: `_subgame_value` returned None here before scoring anything: a side had no action.
+    empty: bool = False
+    #: The port refused this branch's node; raised when the fold reaches it, where
+    #: `_refined_value` would have raised it.
+    error: port.PortRefused | None = None
+    ended: bool = False
+
+
+@dataclass
+class _Cell:
+    unmodelled: set[str]
+    weights: np.ndarray | None = None
+    subs: list[_Sub] = field(default_factory=list)
+
+
+def _refine_cells(  # noqa: PLR0913 - the cells and the depth-2 knobs
+    reg: Regulation,
+    cells: Sequence[tuple[Position, SideAction, SideAction]],
+    evaluate: LeafEvaluator,
+    *,
+    budget: Budget,
+    sub_limit: int,
+    sub_branches: int,
+) -> list[tuple[float | None, set[str], int]]:
+    """`_refined_value` of every cell, with all their sub-games' leaves in one call (IKA-291).
+
+    `_refined_value` scored each sub-game as it came to it, so a depth-2 pass paid a
+    call to the leaf per sub-game: 438 of them a game in M-C generation where depth 1 made
+    45, for 3.07x the rows (IKA-111). Here every cell's turn is resolved and every kept
+    branch's node filled first, all their encoded leaves go to the leaf in one call
+    (`port.score_segments`), and each cell is then folded and solved in `_refined_value`'s
+    order -- the same values, the same notes and the same count of sub-games, since a
+    branch that `_refined_value` would never have reached (one after an empty or unsolvable
+    sub-game) is filled, scored and then ignored.
+
+    The one call keeps each sub-game its own block, scored as it would be alone. Stacking
+    them into one forward pass would be cheaper still and is not the same leaf: a row's
+    value moves with the size of its batch (IKA-291 measured 37 different answers for the
+    same rows between 8 and 988 rows), and depth 2 was accepted on games these values made.
+    """
+    work: list[_Cell] = []
+    waiting: list[port.PendingPayoff] = []
+    held = 0
+
+    def score() -> None:
+        nonlocal held
+        if waiting:
+            values = port.score_segments(evaluate, [p.encoded for p in waiting])
+            for pending, scores in zip(waiting, values, strict=True):
+                pending.scored(scores)
+            waiting.clear()
+            held = 0
+
+    for pos, ours, theirs in cells:
+        cell = _Cell(unmodelled=set())
+        work.append(cell)
+        kept = _kept_branches(reg, pos, ours, theirs, budget, sub_branches, cell.unmodelled)
+        if kept is None:
+            continue
+        branches, cell.weights = kept
+        for branch in branches:
+            sub = _gather_subgame(reg, branch.position, evaluate, budget, sub_limit)
+            cell.subs.append(sub)
+            if sub.pending is not None:
+                waiting.append(sub.pending)
+                held += sub.pending.rows
+                if held >= GATHER_ROWS:
+                    score()
+            if sub.empty or sub.error is not None:
+                # `_refined_value` stops at this branch; the ones after it are not asked.
+                break
+    score()
+    return [_fold_cell(cell) for cell in work]
+
+
+def _gather_subgame(
+    reg: Regulation, pos: Position, evaluate: LeafEvaluator, budget: Budget, sub_limit: int
+) -> _Sub:
+    """`_subgame_value` up to the leaf."""
+    if pos.ended:
+        return _Sub(value=float(evaluate([pos])[0]), ended=True)
+    try:
+        row = narrow(reg, pos, 0, limit=sub_limit).actions
+        col = narrow(reg, pos, 1, limit=sub_limit).actions
+        if not row or not col:
+            return _Sub(empty=True)
+        pending = port.pending_payoff(reg, pos, row, col, evaluate, budget=budget)
+        if pending is None:
+            payoff, notes = batched_payoff(reg, pos, row, col, evaluate, budget=budget)
+            return _Sub(payoff=payoff, notes=notes)
+    except port.PortRefused as refused:
+        return _Sub(error=refused)
+    return _Sub(pending=pending, notes=pending.unmodelled)
+
+
+def _fold_cell(cell: _Cell) -> tuple[float | None, set[str], int]:
+    """The rest of `_refined_value` and `_subgame_value`, once the leaves are scored."""
+    if cell.weights is None:
+        return None, cell.unmodelled, 0
+    values: list[float] = []
+    solved = 0
+    for sub in cell.subs:
+        if sub.error is not None:
+            raise sub.error
+        if sub.ended:
+            value, notes, did = sub.value, set(), 0
+        elif sub.empty:
+            value, notes, did = None, set(), 0
+        else:
+            payoff = sub.payoff if sub.pending is None else sub.pending.finish()
+            notes, did = sub.notes, 1
+            try:
+                value = float(solve(payoff).value)
+            except EquilibriumError:
+                value = None
+        cell.unmodelled.update(notes)
+        solved += did
+        if value is None:
+            return None, cell.unmodelled, solved
+        values.append(value)
+    return float(np.array(values) @ cell.weights), cell.unmodelled, solved
 
 
 @dataclass
@@ -898,6 +1056,9 @@ def _restricted_belief(  # noqa: PLR0913 - one side's Bayesian node and the dept
     subgames = 0
     converged = False
     for _attempt in range(passes):
+        todo: list[tuple[int, int, int, tuple]] = []
+        #: The cells of this pass no answer has resolved yet, in the order they are met.
+        asked: dict[tuple, tuple[Position, SideAction, SideAction]] = {}
         for k, item in enumerate(items):
             for i in rows:
                 for j in cols[k]:
@@ -906,23 +1067,27 @@ def _restricted_belief(  # noqa: PLR0913 - one side's Bayesian node and the dept
                     # This side's (i, j) is side 0's (i, j), or (j, i) for side 1.
                     ours, theirs = (i, j) if side == 0 else (j, i)
                     key = (id(item.position), id(evaluate), ours, theirs)
-                    found = memo.get(key)
-                    if found is None:
-                        with timing.purpose("matrix"):
-                            found = _refined_value(
-                                reg, item.position, row[ours], col[theirs], evaluate,
-                                budget=budget, sub_limit=sub_limit,
-                                sub_branches=sub_branches,
-                            )
-                        memo[key] = found
-                        subgames += found[2]
-                    value, notes, _solved = found
-                    unmodelled.update(notes)
-                    if value is None:
-                        unrefinable.add((i, j, k))
-                        continue
-                    refined.add((i, j, k))
-                    prices[k][i, j] = value if side == 0 else -value
+                    if key not in memo and key not in asked:
+                        asked[key] = (item.position, row[ours], col[theirs])
+                    todo.append((i, j, k, key))
+        if asked:
+            # Every completion's sub-games of the pass in one call to the leaf (IKA-291).
+            with timing.purpose("matrix"):
+                found = _refine_cells(
+                    reg, list(asked.values()), evaluate, budget=budget,
+                    sub_limit=sub_limit, sub_branches=sub_branches,
+                )
+            for key, answer in zip(asked, found, strict=True):
+                memo[key] = answer
+                subgames += answer[2]
+        for i, j, k, key in todo:
+            value, notes, _solved = memo[key]
+            unmodelled.update(notes)
+            if value is None:
+                unrefinable.add((i, j, k))
+                continue
+            refined.add((i, j, k))
+            prices[k][i, j] = value if side == 0 else -value
         try:
             restricted = solve_bayesian(
                 [prices[k][np.ix_(rows, cols[k])] for k in range(len(items))], w

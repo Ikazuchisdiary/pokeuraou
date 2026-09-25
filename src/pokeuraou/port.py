@@ -478,6 +478,30 @@ def _encoded(
     cells: Sequence[tuple[int, int]] | None,
 ) -> tuple[list[np.ndarray], set[str], np.ndarray]:
     """`resolve._rust_encoded_payoffs`, the same folds in the same order."""
+    filled = _fill_encoded(reg, pos, ours, theirs, plan, learned, budget, cells)
+    exact = np.array(filled.exact, dtype=bool)
+    payoffs = []
+    for name, score in plan:
+        values = (
+            np.asarray(filled.leaf_values[name], dtype=np.float64)
+            if score is None
+            else np.asarray(score(filled.encoded), dtype=np.float64)
+        )
+        payoffs.append(_folded(filled, values, (len(ours), len(theirs))))
+    return payoffs, set(filled.unmodelled), exact
+
+
+def _fill_encoded(
+    reg: Regulation,
+    pos: Position,
+    ours: Sequence[SideAction],
+    theirs: Sequence[SideAction],
+    plan: list[tuple[str | None, Callable | None]],
+    learned: list[Callable],
+    budget: Budget,
+    cells: Sequence[tuple[int, int]] | None,
+) -> Any:  # noqa: ANN401 - rustnode's EncodedNode
+    """The port's half of `_encoded`: the node resolved and its leaves encoded, unscored."""
     from .encode import rules_of
 
     rules = rules_of(learned[0])
@@ -490,22 +514,98 @@ def _encoded(
     )
     raise_refused(filled.refused)
     note_port_rule(learned, filled)
-    payoffs = [np.zeros((len(ours), len(theirs)), dtype=np.float64) for _ in plan]
-    exact = np.array(filled.exact, dtype=bool)
     timing.count("leaves.node", len(filled.encoded.species))
-    for index, (name, score) in enumerate(plan):
-        values = (
-            np.asarray(filled.leaf_values[name], dtype=np.float64)
-            if score is None
-            else np.asarray(score(filled.encoded), dtype=np.float64)
-        )
-        for i, j, indices, weights in filled.spans:
-            if not weights:
-                continue
-            payoffs[index][i, j] = float(values[indices] @ np.asarray(weights))
-        for i, j, root in filled.folded:
-            payoffs[index][i, j] = fold_value(_fold_from_json(root), values)
-    return payoffs, set(filled.unmodelled), exact
+    return filled
+
+
+def _folded(filled: Any, values: np.ndarray, shape: tuple[int, int]) -> np.ndarray:  # noqa: ANN401
+    """One matrix from a fill's spans and folds over its leaves' values (`_encoded`'s)."""
+    payoff = np.zeros(shape, dtype=np.float64)
+    for i, j, indices, weights in filled.spans:
+        if not weights:
+            continue
+        payoff[i, j] = float(values[indices] @ np.asarray(weights))
+    for i, j, root in filled.folded:
+        payoff[i, j] = fold_value(_fold_from_json(root), values)
+    return payoff
+
+
+class PendingPayoff:
+    """A node the port has resolved and encoded and the leaf has not scored yet (IKA-291).
+
+    `batched_payoff`'s learned road cut in two, so that many nodes' leaves can go to the
+    leaf in one call (`score_segments`) and each matrix is folded afterwards from its own
+    rows. `finish` is `_encoded`'s fold over the same values, so a node scored this way is
+    the node `batched_payoff` returns whenever the leaf gives each block the answer it
+    would have given the block alone -- which `score_segments` is built to guarantee.
+    """
+
+    def __init__(self, filled: Any, shape: tuple[int, int]) -> None:  # noqa: ANN401
+        self.filled = filled
+        self.shape = shape
+        self.unmodelled: set[str] = set(filled.unmodelled)
+        self.rows = len(filled.encoded.species)
+        self.values: np.ndarray | None = None
+
+    @property
+    def encoded(self) -> Any:  # noqa: ANN401 - encode.Encoded
+        return self.filled.encoded
+
+    def scored(self, values: np.ndarray) -> None:
+        """Keep the leaf's answer and let the encoded arrays go (a fill is node-sized)."""
+        self.values = np.asarray(values, dtype=np.float64)
+        self.filled.encoded = None
+
+    def finish(self) -> np.ndarray:
+        if self.values is None:
+            raise RuntimeError("a pending payoff was folded before its leaves were scored")
+        return _folded(self.filled, self.values, self.shape)
+
+
+def pending_payoff(
+    reg: Regulation,
+    pos: Position,
+    ours: Sequence[SideAction],
+    theirs: Sequence[SideAction],
+    evaluate: Callable[[list[Position]], np.ndarray],
+    *,
+    budget: Budget,
+) -> PendingPayoff | None:
+    """`batched_payoff` up to the leaf, or None when `evaluate` does not take that road.
+
+    The learned road only: a ported objective is scored inside the port and a hand-written
+    one here, and neither has a forward pass to share, so the caller asks
+    `batched_payoff` for those as before.
+    """
+    names = objective_names([evaluate])
+    if names is not None and set(names) <= PORTED_OBJECTIVES:
+        return None
+    plan = encoded_leaf_plan([evaluate])
+    if plan is None or plan[0][1] is None:
+        return None
+    filled = _fill_encoded(reg, pos, ours, theirs, plan, [plan[0][1]], budget, None)
+    return PendingPayoff(filled, (len(ours), len(theirs)))
+
+
+def score_segments(
+    evaluate: Callable[[list[Position]], np.ndarray], segments: Sequence[Any]
+) -> list[np.ndarray]:
+    """Each encoded block's values from one call into the leaf (IKA-291).
+
+    Every block is scored as `from_encoded` would score it alone -- the same rows in a
+    call of the same size -- because a leaf's answer for a row depends on how many rows
+    share its forward pass (5.96e-08 on the card, 37 different answers for the same eight
+    rows between batch sizes 8 and 988) and a changed payoff is a changed equilibrium.
+    What is shared is the call: a leaf that offers `from_encoded_segments` takes all the
+    blocks at once (one round trip to a server, one synchronisation on a card), and any
+    other leaf is called once per block, which is what `batched_payoff` did.
+    """
+    owner = getattr(evaluate, "__self__", evaluate)
+    many = getattr(owner, "from_encoded_segments", None)
+    if many is not None:
+        return [np.asarray(values, dtype=np.float64) for values in many(list(segments))]
+    one = owner.from_encoded
+    return [np.asarray(one(segment), dtype=np.float64) for segment in segments]
 
 
 class HeldLeaves:
@@ -637,6 +737,7 @@ def encoded_leaf_plan(
 __all__ = [
     "PORTED_OBJECTIVES",
     "HeldLeaves",
+    "PendingPayoff",
     "PortRefused",
     "alternatives_encoded",
     "apply_lead_abilities",
@@ -644,10 +745,12 @@ __all__ = [
     "batched_payoff",
     "batched_payoffs",
     "branch",
+    "pending_payoff",
     "replacements_needed",
     "resolve_replacements",
     "resume",
     "resume_alternatives",
+    "score_segments",
     "turn",
     "turn_leaves",
     "weights",

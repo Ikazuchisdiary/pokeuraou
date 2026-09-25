@@ -402,3 +402,90 @@ def test_a_batch_longer_than_one_chunk_is_cut_where_batchedvalue_cuts(parts, dev
         f"max difference {np.abs(got - expected).max():.3e} -- the server cut a long batch "
         f"somewhere BatchedValue does not"
     )
+
+
+def _blocks(encoder, regulation, sizes):
+    """Encoded blocks of the given row counts, cut from one encoding."""
+    from pokeuraou.beliefnode import _subset
+
+    encoded = encoder.encode_positions(_positions(regulation, sum(sizes)))
+    out, at = [], 0
+    for size in sizes:
+        out.append(_subset(encoded, list(range(at, at + size))))
+        at += size
+    return out
+
+
+def test_blocks_in_one_round_trip_are_scored_as_their_own_requests(parts):
+    """IKA-291: `from_encoded_segments` sends many blocks at once, and the server must
+    still score each at its own size. The stand-in model's answer moves with the row count
+    of its call (as a card's does), so equality with one request per block says the blocks
+    were not merged -- and the stacked request, the positive control, is not equal."""
+    regulation, encoder, _net = parts
+
+    def sized(arrays, rows):
+        base = arrays["species"].reshape(rows, -1).sum(axis=1).astype(np.float64)
+        return base * 1e-3 + rows * 1e-9
+
+    from pokeuraou.beliefnode import _stacked
+
+    blocks = _blocks(encoder, regulation, [1, 5, 7, 12, 3, 2])
+    server, address = serve({"value": sized})
+    try:
+        with RemoteValue(address, "value", encoder, buffer_bytes=4 << 20) as remote:
+            alone = [remote.from_encoded(block) for block in blocks]
+            before = remote.calls
+            together = remote.from_encoded_segments(blocks)
+            round_trips = remote.calls - before
+            stacked, _starts = _stacked(
+                [(len(b.species), (lambda b=b: b)) for b in blocks], blocks[0]
+            )
+            merged = remote.from_encoded(stacked)
+    finally:
+        server.shutdown()
+
+    assert round_trips == 1
+    assert [len(t) for t in together] == [len(b.species) for b in blocks]
+    for got, want in zip(together, alone, strict=True):
+        assert np.array_equal(got, want)
+    assert not np.array_equal(np.concatenate(together), merged)
+
+
+@pytest.mark.parametrize("device_name", DEVICES)
+def test_blocks_scored_together_are_what_each_block_gets_alone(parts, device_name):
+    """The real net, served and local: `from_encoded_segments` is `from_encoded` per block
+    to the bit, including a block longer than one chunk (cut where `BatchedValue` cuts) and
+    a buffer too small for all of them at once (several round trips, same answers)."""
+    regulation, encoder, net = parts
+    device = torch.device(device_name)
+
+    from pokeuraou.inference import served_model
+
+    local = BatchedValue(net.to(device), encoder, device=device, batch_size=8)
+    blocks = _blocks(encoder, regulation, [3, 11, 1, 8, 6, 2, 5])
+    alone = [local.from_encoded(block) for block in blocks]
+    together = local.from_encoded_segments(blocks)
+    for got, want in zip(together, alone, strict=True):
+        assert np.array_equal(got, want)
+
+    row_bytes = sum(
+        np.asarray(getattr(blocks[0], name))[0].nbytes
+        for name in ("species", "ability", "item", "moves", "mon", "mask", "side", "field")
+    )
+    server, address = serve({"value": served_model(local)})
+    trips = []
+    try:
+        for buffer_bytes in (8 << 20, row_bytes * 12):
+            with RemoteValue(
+                address, "value", encoder, buffer_bytes=buffer_bytes, batch_size=8
+            ) as remote:
+                served = remote.from_encoded_segments(blocks)
+                trips.append(remote.calls)
+            for got, want in zip(served, alone, strict=True):
+                assert np.array_equal(got, want)
+    finally:
+        server.shutdown()
+    # [3] alone (the 11 cuts the group), the 11 in two chunks of 8 and 3, then the other
+    # five together; a buffer of about 12 rows needs more trips for those five.
+    assert trips[0] == 4
+    assert trips[1] > trips[0]

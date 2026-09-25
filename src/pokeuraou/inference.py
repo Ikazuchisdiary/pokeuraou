@@ -99,6 +99,39 @@ def _plan(encoded: Any) -> tuple[list[dict[str, Any]], int]:
     return layout, offset
 
 
+def _rows(blocks: Sequence[Any]) -> int:
+    return sum(int(len(block.species)) for block in blocks)
+
+
+def _plan_blocks(blocks: Sequence[Any]) -> tuple[list[dict[str, Any]] | None, int]:
+    """`_plan` of the blocks one after another, or None if their arrays do not stack.
+
+    Each array is the blocks' rows end to end, as `np.concatenate` would lay them, so the
+    server reads block k as rows `[start_k, start_k + n_k)` of every array.
+    """
+    rows = _rows(blocks)
+    layout: list[dict[str, Any]] = []
+    offset = 0
+    for name in ARRAYS:
+        first = np.asarray(getattr(blocks[0], name))
+        for block in blocks[1:]:
+            other = np.asarray(getattr(block, name))
+            if other.dtype != first.dtype or other.shape[1:] != first.shape[1:]:
+                return None, 0
+        offset = (offset + 63) & ~63
+        shape = [rows, *first.shape[1:]]
+        nbytes = int(first.dtype.itemsize * int(np.prod(shape)))
+        layout.append({
+            "name": name,
+            "offset": offset,
+            "shape": shape,
+            "dtype": first.dtype.str,
+            "nbytes": nbytes,
+        })
+        offset += nbytes
+    return layout, offset
+
+
 def _slice(encoded: Any, start: int, stop: int) -> Any:
     """Rows `start:stop` of an encoded batch, as an `Encoded`."""
     from .encode import Encoded
@@ -163,7 +196,7 @@ class _Handler(socketserver.StreamRequestHandler):
                     for name, group in server.arms.items()  # type: ignore[attr-defined]
                 },
             }
-        if request.get("op") != "score":
+        if request.get("op") not in ("score", "score_segments"):
             raise ValueError(f"unknown op {request.get('op')!r}")
 
         name = request["model"]
@@ -177,6 +210,24 @@ class _Handler(socketserver.StreamRequestHandler):
         buffer = attached[handle].buf
         arrays = _views(buffer, request["layout"])
         rows = int(request["rows"])
+
+        if request["op"] == "score_segments":
+            # IKA-291: several blocks in one round trip, each scored as its own request
+            # would have been -- the same rows in a call of the same size.
+            parts: list[np.ndarray] = []
+            at = 0
+            for size in request["segments"]:
+                size = int(size)
+                block = {key: value[at : at + size] for key, value in arrays.items()}
+                parts.append(np.asarray(models[name](block, size), dtype=np.float64))
+                server.note_request(size)  # type: ignore[attr-defined]
+                at += size
+            if at != rows:
+                raise ValueError(f"segments add up to {at} rows, the request says {rows}")
+            scores = np.concatenate(parts) if parts else np.zeros(0, dtype=np.float64)
+            out = int(request["result_offset"])
+            buffer[out : out + scores.nbytes] = scores.tobytes()
+            return {"ok": True, "rows": int(scores.shape[0])}
 
         scores = models[name](arrays, rows)
 
@@ -405,7 +456,113 @@ class RemoteValue:
         timing.count("leaves", rows)
         # One round trip is one pass on the server; a longer batch came through here in pieces.
         timing.count("forward.passes")
+        timing.count("serve.requests")
         return scores
+
+    @timing.timed("forward")
+    def from_encoded_segments(self, segments: Sequence[Any]) -> list[np.ndarray]:
+        """Score several blocks in one round trip, each as `from_encoded` would alone.
+
+        IKA-291. The server runs each block as its own forward pass at its own size -- the
+        only way a row gets the answer `from_encoded` gives it, since a CUDA answer depends
+        on the number of rows in the call -- so what this saves is the round trips, not the
+        passes. Blocks are laid one after another in the shared buffer and sent together
+        while they fit; a block longer than `batch_size` goes through `from_encoded`, which
+        cuts it where `BatchedValue` does.
+        """
+        outs: list[np.ndarray | None] = [None] * len(segments)
+        group: list[int] = []
+
+        def send() -> None:
+            if group:
+                scored = self._score_together([segments[i] for i in group])
+                for index, scores in zip(group, scored, strict=True):
+                    outs[index] = scores
+                group.clear()
+
+        for index, encoded in enumerate(segments):
+            rows = int(len(encoded.species))
+            if rows == 0:
+                outs[index] = np.zeros(0, dtype=np.float64)
+                continue
+            if rows > self.batch_size:
+                send()
+                outs[index] = self.from_encoded(encoded)
+                continue
+            if group and not self._fits([segments[i] for i in (*group, index)]):
+                send()
+            group.append(index)
+        send()
+        return [out if out is not None else np.zeros(0, dtype=np.float64) for out in outs]
+
+    def _fits(self, blocks: Sequence[Any]) -> bool:
+        layout, used = _plan_blocks(blocks)
+        return layout is not None and ((used + 63) & ~63) + 8 * _rows(blocks) <= self.buffer_bytes
+
+    def _score_together(self, blocks: Sequence[Any]) -> list[np.ndarray]:
+        layout, used = _plan_blocks(blocks)
+        if layout is None or len(blocks) == 1:
+            # Blocks whose arrays do not stack (a dtype or a width differs), or only one.
+            return [self.from_encoded(block) for block in blocks]
+        rows = _rows(blocks)
+        if timing.DUPES:
+            for block in blocks:
+                note_repeated_rows(block, len(block.species))
+        result_offset = (used + 63) & ~63
+        needed = result_offset + rows * 8
+        if needed > self.buffer_bytes:
+            return [self.from_encoded(block) for block in blocks]
+        view = self._block.buf
+        before_copy = time.perf_counter()
+        with timing.stage("serve.copy"):
+            for item in layout:
+                at = int(item["offset"])
+                for block in blocks:
+                    array = np.ascontiguousarray(getattr(block, item["name"]))
+                    target = np.frombuffer(
+                        view, dtype=array.dtype, count=array.size, offset=at
+                    ).reshape(array.shape)
+                    np.copyto(target, array)
+                    at += int(array.nbytes)
+        self.copied += time.perf_counter() - before_copy
+
+        sent = time.perf_counter()
+        with timing.stage("serve.wait"):
+            self._file.write(
+                (json.dumps({
+                    "op": "score_segments",
+                    "model": self.model,
+                    "shm": self._block.name,
+                    "rows": rows,
+                    "segments": [int(len(block.species)) for block in blocks],
+                    "layout": layout,
+                    "result_offset": result_offset,
+                }) + "\n").encode("utf-8")
+            )
+            self._file.flush()
+            line = self._file.readline()
+        if not line:
+            raise RuntimeError("the inference server closed the connection")
+        self.waited += time.perf_counter() - sent
+        self.calls += 1
+        reply = json.loads(line)
+        if not reply.get("ok"):
+            raise RuntimeError(f"inference failed: {reply.get('error')}")
+        scores = np.frombuffer(
+            view[result_offset : result_offset + rows * 8], dtype=np.float64
+        ).copy()
+        self.evaluated += rows
+        timing.count("leaves", rows)
+        # One pass per block on the server, in one round trip.
+        timing.count("forward.passes", len(blocks))
+        timing.count("serve.requests")
+        out: list[np.ndarray] = []
+        at = 0
+        for block in blocks:
+            n = int(len(block.species))
+            out.append(scores[at : at + n])
+            at += n
+        return out
 
 
 def note_repeated_rows(encoded: Any, rows: int) -> None:  # noqa: ANN401 - Encoded
