@@ -42,6 +42,10 @@ pub struct Request {
     /// Which encoding rule the asking leaf wants (`EncodingRules`, IKA-141). Absent means
     /// the current one, which is what every caller but a fix-measuring match sends.
     pub encoding: crate::encode::EncodeRules,
+    /// The two action lists as the request wrote them, for a `fills` node that reads its
+    /// cells off another's by their actions (IKA-295). Empty everywhere else.
+    pub ours_json: Vec<Value>,
+    pub theirs_json: Vec<Value>,
 }
 
 impl Request {
@@ -105,6 +109,8 @@ pub fn parse_request(value: &Value) -> Result<Request, String> {
             .unwrap_or(false),
     };
     Ok(Request {
+        ours_json: Vec::new(),
+        theirs_json: Vec::new(),
         encoding,
         encode,
         cells,
@@ -420,6 +426,163 @@ fn place_body<R: BufRead, W: Write>(
     stdout.flush()
 }
 
+/// Many header-only requests in one line each way (IKA-295).
+///
+/// Each is answered by the function that answers it alone, in the order sent, so an answer
+/// is the one its own line would have had. What goes is the wait between one answer and
+/// the next request: a depth-2 pass asked for a turn per refined cell and two scores per
+/// sub-game, a line each. A panic on one refuses that one, as it would have refused its
+/// own line, and the rest are answered.
+fn many(reg: &Reg, value: &Value) -> Value {
+    let Some(list) = value["requests"].as_array() else {
+        return json!({ "error": "`many` without a list of requests" });
+    };
+    let answers: Vec<Value> = list
+        .iter()
+        .map(|one| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match one["kind"].as_str() {
+                Some("score") => score_pool(reg, one),
+                kind if crate::resolve::commands::handles(kind) => {
+                    crate::resolve::commands::answer(reg, one)
+                }
+                _ => json!({ "error": "`many` answers `score` and the turn commands only" }),
+            }))
+            .unwrap_or_else(|_| json!({ "refused": "the port panicked on this node" }))
+        })
+        .collect();
+    json!({ "kind": "many", "answers": answers })
+}
+
+/// Several encoded nodes in one crossing (IKA-295): one header line naming each node's own
+/// header, and one body that is their bodies one after another.
+///
+/// Every node is `encoded_node::fill` of its own request, so its arrays are the bytes its
+/// own crossing would have carried; the reader cuts the body at each node's `bytes`. Only
+/// encoded nodes are taken (a depth-2 pass's sub-games), and a request that would have been
+/// an error alone makes the whole line an error, which the caller treats as it treated one.
+fn fills<R: BufRead, W: Write>(
+    reg: &Reg,
+    encoder: &crate::encode::Encoder,
+    shared: &mut shm::Cache,
+    input: &mut R,
+    stdout: &mut W,
+    value: &Value,
+    parse_us: f64,
+) -> std::io::Result<()> {
+    let fail = |stdout: &mut W, reason: String| -> std::io::Result<()> {
+        writeln!(stdout, "{}", json!({ "error": reason }))?;
+        stdout.flush()
+    };
+    let Some(list) = value["requests"].as_array() else {
+        return fail(stdout, "`fills` without a list of requests".into());
+    };
+    let mut headers: Vec<Value> = Vec::with_capacity(list.len());
+    let mut bodies: Vec<(crate::encode::Encoded, Vec<f64>)> = Vec::with_capacity(list.len());
+    // A node another node of this crossing reads its turns off (`like`), by index.
+    let mut kept: Vec<Option<crate::encoded_node::Kept>> = Vec::with_capacity(list.len());
+    let mut total = 0usize;
+    for one in list {
+        let mut request = match parse_request(one) {
+            Err(reason) => return fail(stdout, reason),
+            Ok(request) => request,
+        };
+        let listed = |key: &str| one[key].as_array().cloned().unwrap_or_default();
+        let like_of = one.get("like").filter(|l| !l.is_null());
+        let keep = one.get("keep").and_then(Value::as_bool).unwrap_or(false);
+        if keep || like_of.is_some() {
+            request.ours_json = listed("ours");
+            request.theirs_json = listed("theirs");
+        }
+        if &*request.position.format != reg.format_id.as_str() {
+            return fail(
+                stdout,
+                format!(
+                    "position is {} but the regulation is {}",
+                    request.position.format, reg.format_id
+                ),
+            );
+        }
+        if !request.encode {
+            return fail(stdout, "`fills` answers encoded nodes only".into());
+        }
+        // Only an earlier node, and only one that was kept; anything else resolves.
+        let like = like_of.and_then(|spec| {
+            let index = spec.get("node")?.as_u64()? as usize;
+            let side = spec.get("side")?.as_u64()? as usize;
+            let slots: Vec<usize> = spec
+                .get("slots")?
+                .as_array()?
+                .iter()
+                .filter_map(|s| s.as_u64().map(|s| s as usize))
+                .collect();
+            let earlier = kept.get(index)?.as_ref()?;
+            crate::encoded_node::Like::new(
+                earlier,
+                &request.position,
+                side,
+                slots,
+                request.ours_json.clone(),
+                request.theirs_json.clone(),
+            )
+        });
+        let (mut header, encoded, leaf_values, keeping) =
+            crate::encoded_node::fill_shared(reg, encoder, &request, like.as_ref(), keep);
+        if like_of.is_some() && like.is_none() {
+            // Asked to read off a node and could not: said, so the caller can count it.
+            header["readOff"] = json!(null);
+        }
+        total += header["bytes"].as_u64().unwrap_or(0) as usize;
+        headers.push(header);
+        bodies.push((encoded, leaf_values));
+        kept.push(keeping);
+    }
+    let write_all = |sink: &mut dyn Write| -> std::io::Result<()> {
+        for (encoded, leaf_values) in &bodies {
+            crate::encoded_node::write_body(sink, encoded, leaf_values)?;
+        }
+        Ok(())
+    };
+    let mut header = json!({ "kind": "encodedMany", "nodes": headers, "bytes": total });
+    let target = value.get("shm").map(|block| shm::Target {
+        name: block.get("name").and_then(Value::as_str).map(String::from),
+        capacity: block.get("bytes").and_then(Value::as_u64).unwrap_or(0) as usize,
+    });
+    let Some(target) = target else {
+        header["via"] = json!("pipe");
+        writeln!(stdout, "{}", with_timings(&header, parse_us))?;
+        write_all(stdout)?;
+        return stdout.flush();
+    };
+    // `place_body`'s three roads, for a body written by `write_all`.
+    if shm::place(shared, &target, total, |sink| write_all(sink)).is_some() {
+        header["via"] = json!("shm");
+        writeln!(stdout, "{}", with_timings(&header, parse_us))?;
+        return stdout.flush();
+    }
+    header["via"] = json!("grow");
+    writeln!(stdout, "{}", with_timings(&header, parse_us))?;
+    stdout.flush()?;
+    let mut reply = String::new();
+    if input.read_line(&mut reply)? == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::UnexpectedEof,
+            "the caller was asked for a block and went away",
+        ));
+    }
+    let offered: Value = serde_json::from_str(reply.trim()).unwrap_or(Value::Null);
+    let grown = shm::Target {
+        name: offered.get("name").and_then(Value::as_str).map(String::from),
+        capacity: offered.get("bytes").and_then(Value::as_u64).unwrap_or(0) as usize,
+    };
+    if shm::place(shared, &grown, total, |sink| write_all(sink)).is_some() {
+        writeln!(stdout, "{}", json!({ "via": "shm" }))?;
+        return stdout.flush();
+    }
+    writeln!(stdout, "{}", json!({ "via": "pipe" }))?;
+    write_all(stdout)?;
+    stdout.flush()
+}
+
 /// Answers one request onto `stdout`. `Err` means the pipe is gone and serving is over.
 fn answer<R: BufRead, W: Write>(
     reg: &Reg,
@@ -439,6 +602,10 @@ fn answer<R: BufRead, W: Write>(
         Err(error) => json!({ "error": error.to_string() }),
         Ok(value) if value["kind"].as_str() == Some("resolve") => resolve_one(reg, &value),
         Ok(value) if value["kind"].as_str() == Some("score") => score_pool(reg, &value),
+        Ok(value) if value["kind"].as_str() == Some("many") => many(reg, &value),
+        Ok(value) if value["kind"].as_str() == Some("fills") => {
+            return fills(reg, encoder, shared, input, stdout, &value, parse_us);
+        }
         // A pause's replacements with their leaves encoded (IKA-209): the arrays take the
         // same roads as an encoded node's.
         Ok(value) if value["kind"].as_str() == Some("alternativesEncoded") => {

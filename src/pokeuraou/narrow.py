@@ -282,6 +282,89 @@ def _bridged_scores(
     return out
 
 
+#: `narrow`'s "ask the port yourself" (a pool `narrow_many` scored may have been refused,
+#: which is None, so None cannot mean "not asked").
+_ASK = object()
+
+
+def _bridged_scores_many(
+    reg: Regulation, asks: Sequence[tuple[Position, int, list[SideAction]]]
+) -> list[list[Candidate] | None]:
+    """`_bridged_scores` of many pools in one crossing (IKA-295): the same candidates each,
+    and None where the port declined one (or all of them, where `_bridged_scores` would)."""
+    from . import rustnode
+
+    if not asks:
+        return []
+    if not rustnode.available():
+        return [None] * len(asks)
+    node = rustnode.node_for(reg)
+    if node is None:
+        return [None] * len(asks)
+    try:
+        answers = node.score_many(asks)
+    except Exception as exc:  # noqa: BLE001 - a broken bridge must not fail the run
+        rustnode.disable(str(exc))
+        return [None] * len(asks)
+    out: list[list[Candidate] | None] = []
+    for (_pos, _side, pool), scored in zip(asks, answers, strict=True):
+        if scored is None:
+            out.append(None)
+            continue
+        cands: list[Candidate] = []
+        for action, (total, parts) in zip(pool, scored, strict=True):
+            detail = tuple(
+                f"{action.slots[slot].describe(reg)} -> "
+                f"{'foe' if is_foe else 'ally'}{target_slot + 1} {signed:+.3f}"
+                f"{'' if exact else '?'}"
+                for slot, target_slot, is_foe, signed, exact in parts
+            )
+            cands.append(Candidate(action=action, score=total, detail=detail))
+        out.append(cands)
+    return out
+
+
+def narrow_many(
+    reg: Regulation, asks: Sequence[tuple[Position, int]], *, limit: int = DEFAULT_LIMIT
+) -> list[Narrowed | Exception]:
+    """`narrow(reg, pos, side, limit=limit)` of every (pos, side), the port's damage scores
+    for all their pools asked in one crossing (IKA-295).
+
+    Each answer is `narrow`'s: the pool is built the same way, the same request is asked of
+    the port, and the same Python ranks and covers. A pool whose building raised is that
+    exception, in its place, for the caller to raise where it would have been met.
+    """
+    pools: list[list[SideAction] | Exception] = []
+    for pos, side in asks:
+        try:
+            pools.append(drop_dead_actions(reg, pos, side, side_actions(reg, pos, side)))
+        except Exception as exc:  # noqa: BLE001 - handed back, raised by the caller
+            pools.append(exc)
+    wanted = [
+        index for index, pool in enumerate(pools) if not isinstance(pool, Exception) and pool
+    ]
+    scored = _bridged_scores_many(
+        reg, [(asks[index][0], asks[index][1], pools[index]) for index in wanted]
+    )
+    found = dict(zip(wanted, scored, strict=True))
+    out: list[Narrowed | Exception] = []
+    for index, (pos, side) in enumerate(asks):
+        pool = pools[index]
+        if isinstance(pool, Exception):
+            out.append(pool)
+            continue
+        try:
+            out.append(
+                narrow(
+                    reg, pos, side, limit=limit, candidates=pool,
+                    _prescored=found.get(index, _ASK),
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - handed back, raised by the caller
+            out.append(exc)
+    return out
+
+
 def score_action(
     reg: Regulation,
     pos: Position,
@@ -408,6 +491,7 @@ def narrow(
     weights: Mapping[tuple[int, int], np.ndarray] | None = None,
     candidates: list[SideAction] | None = None,
     rank: Callable[[list[SideAction], list[Candidate]], Sequence[float]] | None = None,
+    _prescored: object = _ASK,
 ) -> Narrowed:
     """Narrows one side's legal choices to at most ``limit``, covering every option.
 
@@ -437,7 +521,10 @@ def narrow(
         return Narrowed(kept=[], considered=0)
     scored = None
     if battlers is None and weights is None:
-        scored = _bridged_scores(reg, pos, side, pool)
+        # `narrow_many` asked the port for this pool already, with the others (IKA-295).
+        scored = (
+            _bridged_scores(reg, pos, side, pool) if _prescored is _ASK else _prescored
+        )
     if scored is None:
         table = dict(battlers) if battlers is not None else _battlers_from_position(reg, pos)
         scored = [
