@@ -782,10 +782,10 @@ class _Graphs:
     One set per arm, shared by the serving threads under one lock: a graph writes into
     fixed buffers, so two replays cannot overlap, and a capture must not see another
     capture. The lock is the process's, not the arm's (`_GRAPH_LOCK`, IKA-306): two arms
-    capturing at once broke each other. Captured on first use of a size, in `thread_local` mode on a side stream, so
-    the other threads' eager passes go on meanwhile (280 captures beside six eager threads:
-    no error, no answer moved). The forward pass is its own `BatchedValue`, as a serving
-    thread's is, so no thread's parameters are swapped under it.
+    capturing at once broke each other. Captured on first use of a size, in `thread_local`
+    mode on a side stream, so the other threads' eager passes go on meanwhile (280 captures
+    beside six eager threads: no error, no answer moved). The forward pass is its own
+    `BatchedValue`, as a serving thread's is, so no thread's parameters are swapped under it.
     """
 
     @staticmethod
