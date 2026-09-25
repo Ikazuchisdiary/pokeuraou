@@ -541,6 +541,7 @@ def _subset(encoded, rows: list[int]):  # noqa: ANN001, ANN202 - Encoded
     return Encoded(
         **{name: getattr(encoded, name)[rows] for name in _ARRAYS},
         unknown_volatiles=dict(encoded.unknown_volatiles),
+        decided=None if encoded.decided is None else encoded.decided[rows],
     )
 
 
@@ -602,6 +603,8 @@ def _stacked(
         name: np.empty((total, *getattr(like, name).shape[1:]), dtype=getattr(like, name).dtype)
         for name in _ARRAYS
     }
+    # Which rows are a finished battle (IKA-253); a part that does not say is "not known".
+    decided = np.full(total, np.nan, dtype=np.float64)
     starts: list[int] = []
     at = 0
     for rows, make in parts:
@@ -611,8 +614,10 @@ def _stacked(
             assert len(made) == rows, (len(made), rows)
             for name in _ARRAYS:
                 out[name][at : at + rows] = getattr(made, name)
+            if made.decided is not None:
+                decided[at : at + rows] = made.decided
         at += rows
-    return Encoded(**out, unknown_volatiles=dict(like.unknown_volatiles)), starts
+    return Encoded(**out, unknown_volatiles=dict(like.unknown_volatiles), decided=decided), starts
 
 
 def _patched(
@@ -664,6 +669,7 @@ def _patched(
             side=reference.side,
             field=reference.field,
             unknown_volatiles=dict(reference.unknown_volatiles),
+            decided=reference.decided,
         )
         for slot in slots:
             old.species[:, side, slot] = source.species[0, side, slot]
@@ -684,6 +690,9 @@ def _patched(
         # Nothing in the field vector reads a Pokemon.
         field=reference.field,
         unknown_volatiles=dict(reference.unknown_volatiles),
+        # A cell reaching no hidden slot ends the same way whatever the bench is: a side
+        # with an unseen Pokemon has one standing, so only the other side can have lost.
+        decided=reference.decided,
     )
     for slot in slots:
         out.species[:, side, slot] = source.species[0, side, slot]
