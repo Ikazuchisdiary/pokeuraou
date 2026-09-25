@@ -99,7 +99,12 @@ def decided(pos: Any) -> float:
 
 
 def with_ends_decided(leaf: LeafEvaluator) -> LeafEvaluator:
-    """The leaf with every ended position scored 1/0 (0.5 for a draw), as IKA-253 fixes it."""
+    """The leaf with every ended position scored 1/0 (0.5 for a draw), as IKA-253 fixes it.
+
+    Since IKA-253 landed, `BatchedValue` and `RemoteValue` do this themselves
+    (`encode.settle`), so over a learned leaf this is a no-op and `asis` equals `fixed`;
+    it stays for a leaf that is neither.
+    """
 
     def evaluate(positions: list[Any]) -> np.ndarray:
         out = np.asarray(leaf(positions), dtype=np.float64).copy()

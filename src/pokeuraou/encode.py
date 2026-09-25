@@ -37,6 +37,7 @@ from typing import Any
 import numpy as np
 
 from . import timing
+from .payoff import _decided
 from .position import Position
 from .regulation import STAT_IDS, Regulation, regulation_dir
 from .stats import nature_multipliers, stats_from_sp
@@ -168,14 +169,18 @@ class EncodingRules:
     * `patch_shares_side` -- IKA-119 undone. `beliefnode._patched` hands every completion
       the true position's side vector and copies the bench rows' `can_mega` from the
       completion's root without ANDing the leaf's `mega_used`.
+    * `net_scores_ends` -- IKA-253 undone. A position the battle has ended in is scored by
+      the net rather than as its result (`settle`). Not an encoding at all -- the arrays
+      are the same -- but it belongs to the leaf in the same way, per arm.
     """
 
     mega_from_slots: bool = False
     patch_shares_side: bool = False
+    net_scores_ends: bool = False
 
     @property
     def is_current(self) -> bool:
-        return not (self.mega_from_slots or self.patch_shares_side)
+        return not (self.mega_from_slots or self.patch_shares_side or self.net_scores_ends)
 
     def label(self) -> str:
         """`new`, or which fixes are undone -- what a worker echoes and a record stores."""
@@ -186,6 +191,8 @@ class EncodingRules:
             parts.append("old-can-mega")
         if self.patch_shares_side:
             parts.append("old-patch")
+        if self.net_scores_ends:
+            parts.append("old-ends")
         return "+".join(parts)
 
     def to_request(self) -> dict[str, bool]:
@@ -195,6 +202,30 @@ class EncodingRules:
 
 #: The rules a leaf with no encoder of its own is scored under.
 CURRENT_RULES = EncodingRules()
+
+
+def settle(values: np.ndarray, encoded: Encoded, rules: EncodingRules) -> int:
+    """Replace every ended position's value by its result (IKA-253); how many ended.
+
+    In place, and after the forward pass rather than instead of it: the ended rows stay in
+    the batch, because a CUDA answer depends on how many rows were in the call, and taking
+    rows out would move the other rows' last bits. So a position still in play gets the
+    same number it got before, to the bit.
+
+    `rules.net_scores_ends` leaves the net's number on them (the defect, for a match that
+    measures the fix); the count is the same either way, so an echo can say the arm met
+    ended leaves and what it did with them.
+    """
+    decided = encoded.decided
+    if decided is None:
+        return 0
+    known = ~np.isnan(decided)
+    count = int(known.sum())
+    if count:
+        timing.count("leaves.ended", count)
+        if not rules.net_scores_ends:
+            values[known] = decided[known]
+    return count
 
 
 def rules_of(leaf: Any) -> EncodingRules:  # noqa: ANN401
@@ -400,6 +431,13 @@ class Encoded:
     field: np.ndarray  # (B, G) float32, side-independent only
     #: Volatiles encountered that :data:`VOLATILES` does not name, by id.
     unknown_volatiles: dict[str, int]
+    #: (B,) float64: 1.0 / 0.0 / 0.5 where the battle is already over (side 0 won, lost,
+    #: drew), NaN where it is not. Not a feature -- the net never sees it. A learned leaf
+    #: writes it over the net's number (`settle`), as `payoff._decided` does for hp-share
+    #: (IKA-253): the net was trained on decision points only, and put 0.54 on a certain
+    #: loss. None (a training set, the server's copy) means "not known", and nothing is
+    #: substituted.
+    decided: np.ndarray | None = None
 
     def __len__(self) -> int:
         return int(self.species.shape[0])
@@ -421,6 +459,7 @@ class Encoded:
             side=self.side[:, ::-1],
             field=self.field,
             unknown_volatiles=dict(self.unknown_volatiles),
+            decided=None if self.decided is None else 1.0 - self.decided,
         )
 
     def slice(self, index: np.ndarray) -> Encoded:
@@ -434,6 +473,7 @@ class Encoded:
             side=self.side[index],
             field=self.field[index],
             unknown_volatiles=dict(self.unknown_volatiles),
+            decided=None if self.decided is None else self.decided[index],
         )
 
 
@@ -588,6 +628,7 @@ class Encoder:
         side = np.zeros((n, 2, len(self.side_names)), dtype=np.float32)
         field = np.zeros((n, len(self.field_names)), dtype=np.float32)
         unknown: dict[str, int] = {}
+        decided = np.full(n, np.nan, dtype=np.float64)
         # A Pokemon object met again is copied from its first row (IKA-267): the selection
         # solve's 8,100 positions hold 48 different ones. `_row_key` says when that is safe.
         first: dict[tuple[int, bool, bool], int] = {}
@@ -595,6 +636,8 @@ class Encoder:
         copy_from: list[int] = []
 
         for b, position in enumerate(positions):
+            if position.ended:
+                decided[b] = _decided(position)
             self._encode_field(field[b], position)
             for s, one_side in enumerate(position.sides):
                 self._encode_side(side[b, s], one_side)
@@ -628,6 +671,7 @@ class Encoder:
             side=side,
             field=field,
             unknown_volatiles=unknown,
+            decided=decided,
         )
 
     # ------------------------------------------------------------------ pieces --
@@ -819,6 +863,7 @@ __all__ = [
     "read_vocab_extends",
     "read_vocab_order",
     "rules_of",
+    "settle",
     "side_feature_names",
     "vocab_order_path",
 ]

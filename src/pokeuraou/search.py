@@ -729,7 +729,8 @@ def _subgame_value(
 
     A finished position has no game to solve and its leaf value is already the answer --
     the objectives all return exactly 1 or 0 once the battle is decided, so this is not a
-    shortcut but the same number by a cheaper route.
+    shortcut but the same number by a cheaper route. A learned leaf does too since IKA-253
+    (`encode.settle`); before it, `value-all` put 0.54 on a certain loss here.
     """
     if pos.ended:
         return float(evaluate([pos])[0]), set(), 0

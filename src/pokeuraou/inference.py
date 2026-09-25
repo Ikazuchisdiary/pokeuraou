@@ -103,9 +103,11 @@ def _slice(encoded: Any, start: int, stop: int) -> Any:
     """Rows `start:stop` of an encoded batch, as an `Encoded`."""
     from .encode import Encoded
 
+    decided = getattr(encoded, "decided", None)
     return Encoded(
         **{name: getattr(encoded, name)[start:stop] for name in ARRAYS},
         unknown_volatiles={},
+        decided=None if decided is None else decided[start:stop],
     )
 
 
@@ -250,6 +252,8 @@ class RemoteValue:
 
     def __post_init__(self) -> None:
         self.evaluated = 0
+        #: Ended positions among them (IKA-253), as `BatchedValue.ended`.
+        self.ended = 0
         #: Seconds, split so the server's own report can be subtracted from them. `copied`
         #: is laying the arrays into the shared block; `waited` is from sending the control
         #: line to having the reply; `calls` counts requests, not batches, so a long batch
@@ -401,6 +405,11 @@ class RemoteValue:
         scores = np.frombuffer(
             view[result_offset : result_offset + rows * 8], dtype=np.float64
         ).copy()
+        # The server scores the arrays and never hears which rows ended; the result goes on
+        # here, as `BatchedValue.from_encoded` puts it on (IKA-253).
+        from .encode import settle
+
+        self.ended += settle(scores, encoded, self.encoder.rules)
         self.evaluated += rows
         timing.count("leaves", rows)
         # One round trip is one pass on the server; a longer batch came through here in pieces.

@@ -39,7 +39,7 @@ import torch
 from torch import Tensor, nn
 
 from . import timing
-from .encode import Encoded, Encoder, Vocabulary
+from .encode import Encoded, Encoder, Vocabulary, settle
 
 
 @dataclass(slots=True)
@@ -1003,6 +1003,9 @@ class BatchedValue:
         self.batch_size = batch_size
         #: Positions scored so far, so a caller can report the cost it incurred.
         self.evaluated = 0
+        #: Of those, how many the battle had ended in (IKA-253): scored as their result,
+        #: or by the net under `rules.net_scores_ends`. What a match echoes per arm.
+        self.ended = 0
         #: Members stacked into one call. Three members run one after another cost 2.9x a
         #: single net rather than the 1.15x their arithmetic would suggest, because the
         #: GPU here is bound by launch latency -- 2.1 ms whether the batch is 8 rows or
@@ -1073,9 +1076,10 @@ class BatchedValue:
                 "field": torch.from_numpy(encoded.field),
             }
             batch = {k: v.to(self.device) for k, v in batch.items()}
-            out[start : start + len(chunk)] = (
-                torch.sigmoid(self._mean_logit(batch)).double().cpu().numpy()
-            )
+            values = torch.sigmoid(self._mean_logit(batch)).double().cpu().numpy()
+            # An ended position is its result, not the net's guess at it (IKA-253).
+            self.ended += settle(values, encoded, self.encoder.rules)
+            out[start : start + len(chunk)] = values
         self.evaluated += len(positions)
         timing.count("leaves", len(positions))
         timing.count("forward.passes", -(-len(positions) // self.batch_size))
@@ -1115,6 +1119,10 @@ class BatchedValue:
             }
             batch = {k: v.to(self.device) for k, v in batch.items()}
             out[start:stop] = torch.sigmoid(self._mean_logit(batch)).double().cpu().numpy()
+        # An ended position is its result, not the net's guess at it (IKA-253). The port
+        # says which leaves ended (`EncodedNode.unpack`); an encoding with no word on it
+        # (a training set) is left as the net scored it.
+        self.ended += settle(out, encoded, self.encoder.rules)
         self.evaluated += n
         timing.count("leaves", n)
         timing.count("forward.passes", -(-n // self.batch_size))

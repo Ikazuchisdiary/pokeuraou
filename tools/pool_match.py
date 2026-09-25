@@ -12,6 +12,8 @@ What an arm is, per arm, and so in whichever seat it sits:
 * its width (`--limit` / `--baseline-limit`) and narrowing (`--rank-leaf` /
   `--baseline-rank-leaf`), and how its leaf ranking fills its cells (`--rank-fill` /
   `--baseline-rank-fill`, IKA-268),
+* whether its leaf scores a finished battle by the net instead of as its result
+  (`--net-scores-ends` / `--baseline-net-scores-ends`: IKA-253 undone, for measuring it),
 * its selection: an arm with a leaf solves the pair's selection game with THAT leaf,
   draws its four from its side of the solve, and believes the opponent's bench from the
   same solve. Solves are shared between workers through one directory per arm
@@ -45,7 +47,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from pokeuraou.benchflags import add_bench_flags, require_bench  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.deepen import DEFAULT_DEEPEN, parse_deepen  # noqa: E402
-from pokeuraou.encode import Encoder  # noqa: E402
+from pokeuraou.encode import Encoder, EncodingRules  # noqa: E402
 from pokeuraou.hidden import DEFAULT_BENCH_DROP, parse_bench_drop  # noqa: E402
 from pokeuraou.payoff import HP_SHARE  # noqa: E402
 from pokeuraou.pool import load_pool  # noqa: E402
@@ -65,9 +67,16 @@ def leaf_name(files: Sequence[str | Path]) -> str:
     return stem if len(files) == 1 else f"{stem}x{len(files)}"
 
 
-def build_leaves(args: argparse.Namespace, encoder: Encoder) -> tuple[object, object | None,
-                                                                      str, str | None]:
-    """(tested leaf, other leaf or None, their names). None is hp-share."""
+def build_leaves(
+    args: argparse.Namespace, encoder: Encoder, other_encoder: Encoder | None = None
+) -> tuple[object, object | None, str, str | None]:
+    """(tested leaf, other leaf or None, their names). None is hp-share.
+
+    `other_encoder` is the other arm's, when its rules differ (IKA-253's `net_scores_ends`):
+    the rules travel with the leaf, so the same weights under other rules are another leaf
+    object -- never the tested arm's, or both seats would play one rule.
+    """
+    other_encoder = other_encoder or encoder
     if args.inference is not None:
         from pokeuraou.inference import RemoteValue
 
@@ -77,7 +86,8 @@ def build_leaves(args: argparse.Namespace, encoder: Encoder) -> tuple[object, ob
             baseline = (
                 value
                 if args.baseline_inference_arm == args.inference_arm
-                else RemoteValue(args.inference, args.baseline_inference_arm, encoder)
+                and other_encoder is encoder
+                else RemoteValue(args.inference, args.baseline_inference_arm, other_encoder)
             )
         # Asked of the server: a worker is told an arm's name, never what it holds.
         names = [leaf_name(value.describe())]
@@ -93,15 +103,26 @@ def build_leaves(args: argparse.Namespace, encoder: Encoder) -> tuple[object, ob
     value = BatchedValue([n.to(device) for n in nets], encoder, device=device)
     baseline = None
     if args.baseline:
-        if [p.resolve() for p in args.baseline] == [p.resolve() for p in args.value]:
+        if (
+            [p.resolve() for p in args.baseline] == [p.resolve() for p in args.value]
+            and other_encoder is encoder
+        ):
             baseline = value
         else:
-            base_nets, _ = load_ensemble(args.baseline, encoder)
-            baseline = BatchedValue([n.to(device) for n in base_nets], encoder, device=device)
+            base_nets, _ = load_ensemble(args.baseline, other_encoder)
+            baseline = BatchedValue(
+                [n.to(device) for n in base_nets], other_encoder, device=device
+            )
     return (
         value, baseline, leaf_name(args.value),
         leaf_name(args.baseline) if args.baseline else None,
     )
+
+
+def _ends_rule(leaf: object) -> str:
+    """How this leaf scores a finished battle: by the net (IKA-253 undone) or its result."""
+    rules = getattr(getattr(leaf, "encoder", None), "rules", None)
+    return "by the net" if getattr(rules, "net_scores_ends", False) else "as the result"
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -150,6 +171,11 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--baseline-solve-restricted", action="store_true",
                     help="same for the other arm")
     add_bench_flags(ap)
+    ap.add_argument("--net-scores-ends", action="store_true",
+                    help="the tested arm's leaf scores a finished battle by the net, not as "
+                    "its result (IKA-253 undone; only for measuring the fix)")
+    ap.add_argument("--baseline-net-scores-ends", action="store_true",
+                    help="same for the other arm")
     ap.add_argument("--selection-store", type=Path, default=None,
                     help="the tested arm's shared solves. Default <games-out dir>/"
                     "selection-<leaf>")
@@ -199,8 +225,19 @@ def main(argv: list[str] | None = None) -> None:
     pool = load_pool(args.pool)
     reg = pool.reg
     register_mega_stones(reg)
-    encoder = Encoder(reg)
-    value, baseline, value_name, baseline_name = build_leaves(args, encoder)
+    # One encoder per arm when their rules differ: the rules travel with the leaf.
+    tested_rules = EncodingRules(net_scores_ends=args.net_scores_ends)
+    other_rules = EncodingRules(net_scores_ends=args.baseline_net_scores_ends)
+    encoder = Encoder(reg, rules=tested_rules)
+    other_encoder = (
+        encoder if other_rules == tested_rules
+        else Encoder(reg, vocab=encoder.vocab, rules=other_rules)
+    )
+    value, baseline, value_name, baseline_name = (
+        build_leaves(args, encoder)
+        if other_encoder is encoder
+        else build_leaves(args, encoder, other_encoder)
+    )
     home = args.games_out.parent if args.games_out is not None else Path(".")
 
     def solver_for(leaf: object, name: str, store: Path | None) -> SolvedSelections:
@@ -258,6 +295,7 @@ def main(argv: list[str] | None = None) -> None:
             + (f" (fill {arm.rank_fill})" if arm.rank_by_leaf else "")
             + (f" / bench drop {arm.bench_drop}" if hide_bench else "")
             + f" / deepen {arm.deepen}"
+            + (f" / ends {_ends_rule(arm.evaluate)}" if arm.evaluate is not None else "")
             + (f" / depth {arm.depth} restricted" if arm.depth != 1 else "")
             + " / selection "
             f"{arm.selection}" + (f" by its own leaf, store {store}" if store else "")
@@ -276,6 +314,8 @@ def main(argv: list[str] | None = None) -> None:
         tags += f"@benchdrop:{tested.bench_drop}"
     if tested.deepen != other.deepen:
         tags += f"@deepen:{tested.deepen}"
+    if tested_rules != other_rules:
+        tags += f"@enc:{tested_rules.label()}"
     if tested.depth != other.depth:
         tags += f"@d{tested.depth}"
     arm_label = f"{tested.name}{tags}"
@@ -408,6 +448,14 @@ def main(argv: list[str] | None = None) -> None:
                 + (f", leaf requests {bucket['calls']:,}" if bucket["calls"] else ""),
                 file=sys.stderr,
             )
+    # What each arm's leaf did with the finished battles it met, counted by the leaf itself
+    # (IKA-253): the echo that says the rule reached the arm, not the command line again.
+    for arm, label in zip(arms, names, strict=True):
+        if arm.evaluate is not None:
+            print(f"  ends of {label}: {getattr(arm.evaluate, 'ended', 0):,} ended leaves, "
+                  f"scored {_ends_rule(arm.evaluate)}", file=sys.stderr)
+            if arms[0].evaluate is arms[1].evaluate:
+                break
     for arm, label in zip(arms, names, strict=True):
         if arm.solver is not None:
             s = arm.solver
