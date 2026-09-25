@@ -76,7 +76,8 @@ uv run pytest --junitxml=reports/pytest.xml && uv run python tools/ci_skip_audit
 ## 守ること
 
 - **記録:** 作業の記録は `records/IKA-NNN.md`（1 課題 1 ファイル、日本語）。`TODO.md` は 9/24 から凍結で、読むだけ（1.3 MB あるので grep で位置を出して読む）。記録を探すときは `grep -rn '<語>' records/ TODO.md GENERATIONS.md`。世代とレーティングの表は `GENERATIONS.md`。M-B と M-C は別の尺度で、M-C の原点は `hp-share/w12/hidden-bench`。
-- **課題:** 管理は Linear（team Ikazuchi、project pokeuraou、IKA-NNN）。
+- **課題:** 管理は Notion のデータベース「Issues」（ページ「pokeuraou」の下、https://app.notion.com/p/f58fae0e4bf843e5b00c03873f17b328）。番号は IKA-NNN を手で振る（最大の No + 1）。9/25 に Linear から移った。Linear に残っているのは、未完了の子を持たない Done の課題。
+- **用語:** 同じページの下の「用語集」（https://app.notion.com/p/3e64b8acaa6c8195a66ce7bc42f24256）に従う。たとえば「控え」は「裏」、「完成形」は「裏の決定化」、「盤」は「対戦評価」と書く。コードの識別子・旗・JSON のキーは変えず、古い記録は旧名のまま読む。
 - **ファイル:** すべて LF（`tests/test_line_endings.py`）。Python の `write_text` は Windows で CRLF になるので、bytes で書く。`tools/` と `src/` に機械ごとの絶対パスを書かない（`tests/test_no_machine_specific_paths.py`）。`scratchpad/` は当時のコードをそのまま残す記録なので、lint しない・書き換えない。
 - **本番の経路:** 生成を遅くする変更は入れない。前後を交互（ABBA）に回し、同じ窓で壁時計を比べる（同じ exe、同じ長さのパスで）。規則を変えて局が変わるなら、盤で弱くならないことを確かめる。
 - **速さと強さの引き換え:** 探索を安くして局が変わる変更（順位付けや予算を安くするなど）は、同じ費用で判定する。生成向けは、同じ壁時計で作ったプールから学んだ葉の強さで比べる（IKA-73 の形）。打ち手向けは、同じ時間の盤で比べる。設定を固定した盤で弱くなるだけでは捨てない（IKA-268・IKA-270 は捨てずに枝に残してある）。
