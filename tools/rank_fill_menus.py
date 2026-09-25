@@ -11,7 +11,8 @@ extra.
 Per move decision and side it counts whether the other fill's menu is the same set, the
 same order, how many of the played menu's actions it keeps, and how much of the played
 equilibrium's mass sits on actions it would have dropped -- the part of the change the
-game could feel.
+game could feel. Per decision it also counts the cells each fill's ranking filled and the
+leaves the port returned for them (IKA-270), so a cheaper budget shows what it saves.
 
     uv run --group learn python tools/rank_fill_menus.py --pool regmc-matchupweb \\
         --value data/models/value-mc0.pt data/models/value-mc0-s1.pt \\
@@ -62,7 +63,7 @@ def compare(played: list[str], other: list[str], mass: list[float] | None) -> di
 def run_worker(args: argparse.Namespace) -> None:
     import torch
 
-    from pokeuraou import poolplay, selfplay
+    from pokeuraou import poolplay, rustnode, selfplay
     from pokeuraou.damage import register_mega_stones
     from pokeuraou.encode import Encoder
     from pokeuraou.pool import load_pool
@@ -84,16 +85,36 @@ def run_worker(args: argparse.Namespace) -> None:
     current: list[int | None] = [None]
     original_menus = selfplay._menus
     original_play = poolplay.play_game
+    # (cells, leaves) the ranking filled while one menu was built (IKA-270).
+    filling: list[list[int] | None] = [None]
+    original_fill = rustnode.RustNode.fill_encoded
+
+    def fill_counted(self: Any, pos: Any, ours: Any, theirs: Any, *a: Any, **kw: Any) -> Any:  # noqa: ANN401
+        node = original_fill(self, pos, ours, theirs, *a, **kw)
+        if filling[0] is not None:
+            cells = a[2] if len(a) > 2 else kw.get("cells")
+            filling[0][0] += len(cells) if cells is not None else len(ours) * len(theirs)
+            filling[0][1] += len(node.encoded.species)
+        return node
+
+    def counted_menus(*a: Any, **kw: Any) -> tuple[Any, list[int]]:  # noqa: ANN401
+        filling[0] = [0, 0]
+        try:
+            return original_menus(*a, **kw), filling[0]
+        finally:
+            filling[0] = None
 
     def menus_with_shadows(*a: Any, **kw: Any) -> Any:  # noqa: ANN401
-        got = original_menus(*a, **kw)
+        got, _spent = counted_menus(*a, **kw)
         ranked, policy = a[5], a[6] if len(a) > 6 else kw.get("policy")
         if current[0] is None or not ranked or policy is not None:
             return got
-        entry = {"played": [[x.to_choice() for x in side] for side in got], "shadows": {}}
+        entry = {"played": [[x.to_choice() for x in side] for side in got], "shadows": {},
+                 "spent": {}}
         for fill in shadows:
-            alt = original_menus(*a, **{**kw, "rank_fill": fill, "used": {}})
+            alt, spent = counted_menus(*a, **{**kw, "rank_fill": fill, "used": {}})
             entry["shadows"][fill] = [[x.to_choice() for x in side] for side in alt]
+            entry["spent"][fill] = spent
         menus.setdefault(current[0], []).append(entry)
         return got
 
@@ -104,6 +125,7 @@ def run_worker(args: argparse.Namespace) -> None:
 
     selfplay._menus = menus_with_shadows
     poolplay.play_game = play_counted
+    rustnode.RustNode.fill_encoded = fill_counted
     indices = [args.first_game + i for i in range(args.games) if i % args.jobs == args.worker]
 
     def scheduled() -> Any:  # noqa: ANN401
@@ -137,10 +159,14 @@ def run_worker(args: argparse.Namespace) -> None:
             masses = (decision["ownPolicy"], decision["foePolicy"])
             for fill, alt in entry["shadows"].items():
                 for side in (0, 1):
+                    # The fill is one per decision, both sides' rankings together: booked
+                    # on side 0's row so that summing the rows counts it once.
+                    cells, leaves = entry["spent"][fill] if side == 0 else (0, 0)
                     rows.append({
                         "game": index, "decision": number, "turn": decision["turn"],
                         "side": side, "fill": fill,
                         **compare(played[side], alt[side], masses[side]),
+                        "cells": cells, "leaves": leaves,
                     })
     Path(args.rows).write_text(
         "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8", newline="\n"
@@ -150,7 +176,8 @@ def run_worker(args: argparse.Namespace) -> None:
 def summarise(rows: list[dict[str, Any]], fills: list[str]) -> list[str]:
     lines = [
         "  fill          decisions  sides   same set (decision)  same set (side)  "
-        "same order (side)  kept/size   dropped eq. mass (mean, share > 0)",
+        "same order (side)  kept/size   dropped eq. mass (mean, share > 0)   "
+        "cells/decision  leaves/decision  leaves/cell",
     ]
     for fill in fills:
         mine = [r for r in rows if r["fill"] == fill]
@@ -162,13 +189,17 @@ def summarise(rows: list[dict[str, Any]], fills: list[str]) -> list[str]:
             by_decision[key] = by_decision.get(key, True) and r["same_set"]
         n = len(mine)
         mass = [r["dropped_mass"] for r in mine]
+        cells = sum(r.get("cells", 0) for r in mine)
+        leaves = sum(r.get("leaves", 0) for r in mine)
         lines.append(
             f"  {fill:<12} {len(by_decision):>10} {n:>6}   "
             f"{sum(by_decision.values()) / len(by_decision) * 100:>17.1f}%  "
             f"{sum(r['same_set'] for r in mine) / n * 100:>14.1f}%  "
             f"{sum(r['same_order'] for r in mine) / n * 100:>16.1f}%  "
             f"{sum(r['kept'] for r in mine) / sum(r['size'] for r in mine) * 100:>8.1f}%   "
-            f"{sum(mass) / n:.4f}, {sum(m > 1e-9 for m in mass) / n * 100:.1f}%"
+            f"{sum(mass) / n:.4f}, {sum(m > 1e-9 for m in mass) / n * 100:.1f}%   "
+            f"{cells / len(by_decision):>14.1f}  {leaves / len(by_decision):>15.1f}  "
+            f"{leaves / cells if cells else 0.0:>11.3f}"
         )
     return lines
 
