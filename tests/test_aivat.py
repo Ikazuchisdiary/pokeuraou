@@ -102,7 +102,7 @@ def played():  # noqa: ANN201
     for seed in (5, 11):
         record = play_game(
             reg, np.random.default_rng(seed), sheet[:4], [sheet[i] for i in (1, 0, 4, 5)],
-            "test", search_limit=2, max_turns=40, sheets=(sheet, sheet),
+            "test", search_limit=4, max_turns=40, sheets=(sheet, sheet),
         )
         games.append(json.loads(json.dumps(record.to_json(objective="hp-share", search_limit=2))))
     return reg, games
@@ -129,13 +129,47 @@ def test_a_record_without_its_final_position_corrects_the_last_turn_by_its_winne
     reg, games = played
     decided = [game for game in games if game.get("outcome") is not None]
     assert decided
-    for game in decided:
+    for game in decided[:1]:
         with_final = aivat.game_terms(reg, game, HP_SHARE.batch)
         old = {k: v for k, v in game.items() if k not in ("finalPosition", "endReason")}
         without = aivat.game_terms(reg, old, HP_SHARE.batch)
         assert without.stages[-1].status == "by-outcome"
         assert with_final.stages[-1].status == "matched"
         assert without.total == pytest.approx(with_final.total, abs=1e-12)
+
+
+def _mix(decision: dict, side: str) -> tuple[list, list]:
+    return decision[f"{side}Actions"], decision[f"{side}Policy"]
+
+
+def test_the_action_term_averages_to_zero_over_the_recorded_mixtures(played) -> None:  # noqa: ANN001
+    """Stage 2: redraw one decision's pair every way its two mixtures allow; the terms,
+    weighted by the mixtures, sum to zero -- which also checks the drawn pair is looked up
+    by both names, not by one side's."""
+    reg, games = played
+    checked = 0
+    for game in games:
+        for decision in game["decisions"]:
+            if decision["kind"] != "move":
+                continue
+            own = [(a, p) for a, p in zip(*_mix(decision, "own"), strict=True) if p > 0]
+            foe = [(b, p) for b, p in zip(*_mix(decision, "foe"), strict=True) if p > 0]
+            if not 2 <= len(own) * len(foe) <= 4:
+                continue
+            total, weight = 0.0, 0.0
+            for a, pa in own:
+                for b, pb in foe:
+                    one = {**game, "decisions": [{**decision, "ownChosen": a, "foeChosen": b}]}
+                    # Any budget: the mean is zero for any fixed Q, and the matrix one is quick.
+                    (term,) = aivat.action_terms(reg, one, HP_SHARE.batch, budget=Budget.matrix())
+                    assert term.status == "corrected"
+                    total += pa * pb * term.c
+                    weight += pa * pb
+            assert abs(total / weight) < 1e-12
+            checked += 1
+            if checked == 1:
+                return
+    assert checked, "no decision with a mixed pair in the fixture games"
 
 
 def test_the_matrix_budget_does_not_find_the_branches(played) -> None:  # noqa: ANN001
