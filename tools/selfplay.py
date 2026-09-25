@@ -110,7 +110,9 @@ def add_pool_flags(ap: argparse.ArgumentParser) -> None:
         default=DEFAULT_DEEPEN,
         help="with --pool: how each move decision deepens its answer best first after the "
         "depth-1 solve, where no bench is hidden -- m<N> spends N cells and reads the root "
-        "whole, r<N> reads it as the restricted game (IKA-33). "
+        "whole, r<N> reads it as the restricted game (IKA-33); m<N>o<W> / m<N>oall "
+        "also widen the root by a double oracle over the rest of the width-W menu / "
+        "every legal action (IKA-293). "
         f"Default {DEFAULT_DEEPEN}, off.",
     )
     ap.add_argument(
