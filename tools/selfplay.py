@@ -105,6 +105,14 @@ def add_pool_flags(ap: argparse.ArgumentParser) -> None:
         f"renormalised (IKA-283). Default {DEFAULT_BENCH_DROP}.",
     )
     ap.add_argument(
+        "--deepen",
+        type=int,
+        default=0,
+        help="with --pool: a budget of cells each move decision spends deepening its "
+        "answer best first after the depth-1 solve, where no bench is hidden "
+        "(IKA-33). Default 0, off.",
+    )
+    ap.add_argument(
         "--record-rank-scores",
         action="store_true",
         help="with --pool and --rank-leaf: also write each game's leaf rankings -- every "
@@ -170,7 +178,8 @@ def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
         f"{'' if selection == 'uniform' else f' (eps={args.explore_epsilon}, T={args.explore_temperature})'}"
         f" / bench {'hidden' if hide_bench else 'OPEN (reference)'}"
         f" / {'leaf ranking, fill ' + args.rank_fill if args.rank_leaf else 'damage ranking'}"
-        f" / bench drop {args.bench_drop}",
+        f" / bench drop {args.bench_drop}"
+        f" / deepen {args.deepen}",
         file=sys.stderr,
     )
     client = None
@@ -215,6 +224,7 @@ def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
         rank_by_leaf=args.rank_leaf,
         rank_fill=args.rank_fill,
         bench_drop=args.bench_drop,
+        deepen=args.deepen,
         indices=drawn,
         on_finish=client.finish if client is not None else None,
         rank_scores_out=ranks_out,
@@ -428,6 +438,8 @@ def main() -> None:
     try:
         parse_rank_fill(args.rank_fill)
         parse_bench_drop(args.bench_drop)
+        if args.deepen < 0:
+            raise ValueError(f"--deepen {args.deepen}: a budget of cells is not negative")
     except ValueError as problem:
         ap.error(str(problem))
     if args.pool is not None:
@@ -442,6 +454,9 @@ def main() -> None:
         # The same for the belief: the roster path's `generate` takes no drop.
         ap.error("--bench-drop is the pool path's (IKA-283); the roster path believes "
                  "every completion")
+    if args.deepen:
+        # The same for the deepening: the roster path's `generate` takes no budget.
+        ap.error("--deepen is the pool path's (IKA-33); the roster path searches at depth 1")
     if args.record_rank_scores:
         ap.error("--record-rank-scores is the pool path's (IKA-278)")
     if args.roster is None:

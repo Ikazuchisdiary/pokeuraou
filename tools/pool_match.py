@@ -130,6 +130,12 @@ def main(argv: list[str] | None = None) -> None:
                     "the heaviest P%%; the heaviest stays (IKA-283)")
     ap.add_argument("--baseline-bench-drop", default=DEFAULT_BENCH_DROP,
                     help="same for the other arm")
+    ap.add_argument("--deepen", type=int, default=0,
+                    help="the tested arm's budget of cells for deepening each move "
+                    "decision best first after the depth-1 solve, where no bench is "
+                    "hidden (IKA-33); 0 is off")
+    ap.add_argument("--baseline-deepen", type=int, default=0,
+                    help="same for the other arm")
     add_bench_flags(ap)
     ap.add_argument("--selection-store", type=Path, default=None,
                     help="the tested arm's shared solves. Default <games-out dir>/"
@@ -159,6 +165,9 @@ def main(argv: list[str] | None = None) -> None:
             parse_rank_fill(fill)
         except ValueError as problem:
             ap.error(str(problem))
+    for cells in (args.deepen, args.baseline_deepen):
+        if cells < 0:
+            ap.error(f"deepen {cells}: a budget of cells is not negative")
     for drop in (args.bench_drop, args.baseline_bench_drop):
         try:
             parse_bench_drop(drop)
@@ -184,14 +193,15 @@ def main(argv: list[str] | None = None) -> None:
         name=value_name, evaluate=value,
         solver=solver_for(value, value_name, args.selection_store),
         limit=args.limit, rank_by_leaf=args.rank_leaf, rank_fill=args.rank_fill,
-        bench_drop=args.bench_drop,
+        bench_drop=args.bench_drop, deepen=args.deepen,
     )
     other_limit = args.limit if args.baseline_limit is None else args.baseline_limit
     if baseline is None:
         other = PoolArm(name=HP_SHARE.name, evaluate=None, solver=None,
                         limit=other_limit, rank_by_leaf=args.baseline_rank_leaf,
                         rank_fill=args.baseline_rank_fill,
-                        bench_drop=args.baseline_bench_drop)
+                        bench_drop=args.baseline_bench_drop,
+                        deepen=args.baseline_deepen)
     else:
         assert baseline_name is not None
         # One solver per arm even over one leaf: shared, the second arm would reuse the
@@ -206,6 +216,7 @@ def main(argv: list[str] | None = None) -> None:
             limit=other_limit, rank_by_leaf=args.baseline_rank_leaf,
             rank_fill=args.baseline_rank_fill,
             bench_drop=args.baseline_bench_drop,
+            deepen=args.baseline_deepen,
         )
     arms = (tested, other)
     print(pool.summary(), file=sys.stderr)
@@ -219,6 +230,7 @@ def main(argv: list[str] | None = None) -> None:
             f"{'leaf' if arm.rank_by_leaf else 'damage'} ranking"
             + (f" (fill {arm.rank_fill})" if arm.rank_by_leaf else "")
             + (f" / bench drop {arm.bench_drop}" if hide_bench else "")
+            + f" / deepen {arm.deepen}"
             + " / selection "
             f"{arm.selection}" + (f" by its own leaf, store {store}" if store else "")
             + f" / belief {'solved' if arm.solver is not None and hide_bench else 'uniform'}",
@@ -234,6 +246,8 @@ def main(argv: list[str] | None = None) -> None:
         tags += f"@rankfill:{tested.rank_fill}"
     if hide_bench and tested.bench_drop != other.bench_drop:
         tags += f"@benchdrop:{tested.bench_drop}"
+    if tested.deepen != other.deepen:
+        tags += f"@deepen:{tested.deepen}"
     arm_label = f"{tested.name}{tags}"
 
     client = WorkClient(args.queue) if args.queue else None
@@ -250,7 +264,7 @@ def main(argv: list[str] | None = None) -> None:
     tally = [[0, 0, 0, 0.0], [0, 0, 0, 0.0]]
     # The echo, per seat and per ARM (0 tested, 1 other): what each arm's side was given.
     echo = [[{"selection": {}, "belief": {}, "leaf": set(), "fill": {}, "drop": {},
-              "calls": 0}
+              "deepen": {}, "deepened": 0, "calls": 0}
              for _ in arms]
             for _ in range(2)]
     done = 0
@@ -281,6 +295,13 @@ def main(argv: list[str] | None = None) -> None:
             bucket["fill"][played_fill] = bucket["fill"].get(played_fill, 0) + 1
             played_drop = record.bench_drop[side]
             bucket["drop"][played_drop] = bucket["drop"].get(played_drop, 0) + 1
+            played_deepen = record.deepen[side]
+            bucket["deepen"][played_deepen] = bucket["deepen"].get(played_deepen, 0) + 1
+            # Decisions this side actually deepened, read off the game (IKA-33).
+            bucket["deepened"] += sum(
+                1 for d in record.decisions
+                if d.deepened is not None and d.deepened[side] is not None
+            )
             if arms[0].evaluate is not arms[1].evaluate:
                 bucket["calls"] += getattr(arms[arm_index].evaluate, "calls", 0) - calls_before[
                     arm_index]
@@ -317,6 +338,7 @@ def main(argv: list[str] | None = None) -> None:
                 rankings=sides["rankings"],
                 rank_fills=sides["rank_fills"],
                 bench_drops=sides["bench_drops"],
+                deepens=sides["deepens"],
                 books=sides["selections"],
                 information=("hidden-bench", "hidden-bench") if hide_bench
                 else ("open", "open"),
@@ -343,7 +365,8 @@ def main(argv: list[str] | None = None) -> None:
                 f"  echo, {arm_label} = side {which}: {names[arm_index]} sat at side "
                 f"{which if arm_index == 0 else 1 - which}, leaf {sorted(bucket['leaf'])}, "
                 f"selection {bucket['selection']}, belief {bucket['belief']}, "
-                f"rank fill {bucket['fill']}, bench drop {bucket['drop']}"
+                f"rank fill {bucket['fill']}, bench drop {bucket['drop']}, "
+                f"deepen {bucket['deepen']} ({bucket['deepened']:,} decisions deepened)"
                 + (f", leaf requests {bucket['calls']:,}" if bucket["calls"] else ""),
                 file=sys.stderr,
             )

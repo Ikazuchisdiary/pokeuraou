@@ -145,6 +145,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from . import deepen as _deepen
 from . import port, rank_scores, timing
 from .actions import SideAction
 from .budget import Budget
@@ -324,6 +325,9 @@ class SearchResult:
     #: column at the prices in hand. Zero at convergence, because then no column outside
     #: the rectangle beats it; positive when the pass budget ran out first.
     optimism: float = 0.0
+    #: What a best-first deepening spent and how deep it reached (`deepen.Deepened`,
+    #: IKA-33). None when the search was not asked to deepen.
+    deepened: _deepen.Deepened | None = None
 
 
 @timing.labelled("matrix")
@@ -342,6 +346,7 @@ def search(
     sub_branches: int = DEFAULT_SUB_BRANCHES,
     solve_restricted: bool = False,
     solve_sparsely: bool = False,
+    deepen: int = 0,
 ) -> SearchResult:
     """Solve this turn's matrix game, optionally refining the cells that decide it.
 
@@ -355,7 +360,13 @@ def search(
     mixed reading (IKA-68). It is still an option and not the default, because depth 2
     itself does not run where the agent ships: a hidden bench goes through `belief_solve`,
     which has no depth at all (IKA-111).
+
+    ``deepen`` is a budget of cells to spend after the depth-1 solve, best first over the
+    whole tree (`deepen.best_first`, IKA-33). Zero is the depth-1 search unchanged; it
+    goes with ``depth=1`` only.
     """
+    if deepen and (depth > 1 or solve_sparsely):
+        raise ValueError("deepen is a budget on top of the depth-1 full-matrix search")
     row = list(ours)
     col = list(theirs)
     if solve_sparsely and depth <= 1:
@@ -372,6 +383,21 @@ def search(
         )
     payoff, unmodelled = batched_payoff(reg, pos, row, col, evaluate, budget=budget)
     equilibrium = solve(payoff)
+    if deepen > 0:
+        equilibrium, payoff, deepened = _deepen.best_first(
+            reg, pos, row, col, evaluate, budget=budget, payoff=payoff,
+            equilibrium=equilibrium, cells=deepen, sub_limit=sub_limit,
+            sub_branches=sub_branches, unmodelled=unmodelled,
+        )
+        return SearchResult(
+            equilibrium=equilibrium,
+            payoff=payoff,
+            ours=row,
+            theirs=col,
+            unmodelled=unmodelled,
+            refined=deepened.expanded,
+            deepened=deepened,
+        )
     if depth <= 1:
         return SearchResult(
             equilibrium=equilibrium,

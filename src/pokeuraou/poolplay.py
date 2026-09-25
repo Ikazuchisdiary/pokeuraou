@@ -275,6 +275,7 @@ def generate_pool(
     policy: Any = None,
     rank_fill: str = DEFAULT_RANK_FILL,
     bench_drop: str = DEFAULT_BENCH_DROP,
+    deepen: int = 0,
     indices: Iterable[int] | None = None,
     on_finish: Callable[[int], None] | None = None,
     rank_scores_out: Path | None = None,
@@ -393,6 +394,7 @@ def generate_pool(
                     policy=policy,
                     rank_fill=rank_fill,
                     bench_drop=bench_drop,
+                    deepen=deepen,
                     sheets=(six0, six1) if hide_bench else None,
                     open_information=not hide_bench,
                     bench_prior=priors,
@@ -489,6 +491,8 @@ class PoolArm:
     rank_fill: str = DEFAULT_RANK_FILL
     #: Which completions its belief drops (`hidden.parse_bench_drop`, IKA-283).
     bench_drop: str = DEFAULT_BENCH_DROP
+    #: Its best-first deepening budget in cells (`deepen.best_first`, IKA-33); 0 is off.
+    deepen: int = 0
 
     @property
     def selection(self) -> str:
@@ -625,6 +629,7 @@ def pool_match_game(
         rank_view="heaviest",
         rank_fill=(side_arms[0].rank_fill, side_arms[1].rank_fill),
         bench_drop=(side_arms[0].bench_drop, side_arms[1].bench_drop),
+        deepen=(side_arms[0].deepen, side_arms[1].deepen),
         selection=(species[0], species[1], picks[0], picks[1]),
     )
     sources = tuple(arm.selection for arm in side_arms)
@@ -641,6 +646,7 @@ def pool_match_game(
         "rankings": tuple("leaf" if arm.rank_by_leaf else "damage" for arm in side_arms),
         "rank_fills": tuple(arm.rank_fill for arm in side_arms),
         "bench_drops": tuple(arm.bench_drop for arm in side_arms),
+        "deepens": tuple(arm.deepen for arm in side_arms),
         "selections": sources,
         "beliefs": beliefs,
         "picks": picks,

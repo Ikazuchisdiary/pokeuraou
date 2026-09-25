@@ -46,7 +46,8 @@ def test_the_hidden_bench_path_rebuilds_the_other_side() -> None:
     """The `spreads` branch has to do what the open branch does when the arms differ."""
     body = source_of("play_game")
     hidden = body[body.index("if spreads is not None:") :]
-    hidden = hidden[: hidden.index("        else:")]
+    # The open branch's own `else:`, at the branch's indent -- not an inner one (IKA-33).
+    hidden = hidden[: hidden.index("\n        else:\n")]
     assert "if not same_menu:" in hidden, "the hidden branch never rebuilds"
     assert hidden.count("belief_solve(") == 2, (
         "the column player's answer has to come from its own solve, so there are two"
