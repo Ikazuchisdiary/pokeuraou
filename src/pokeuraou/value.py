@@ -943,6 +943,10 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 
+#: The arrays of an `Encoded` the net reads.
+_ENCODED_ARRAYS = ("species", "ability", "item", "moves", "mon", "mask", "side", "field")
+
+
 class BatchedValue:
     """Win probabilities for many positions in one forward pass.
 
@@ -1127,6 +1131,48 @@ class BatchedValue:
         timing.count("leaves", n)
         timing.count("forward.passes", -(-n // self.batch_size))
         return out
+
+    @timing.timed("forward")
+    @torch.no_grad()
+    def from_encoded_segments(self, segments: Sequence[Encoded]) -> list[np.ndarray]:
+        """`from_encoded` of each block, with one wait for the device instead of one each.
+
+        IKA-291: a depth-2 pass scores dozens of sub-games, each a few hundred rows. Stacking
+        them into one batch would be one forward pass, but not the same answers -- a row's
+        value moves with the number of rows in its call (37 different answers for the same
+        eight rows between 8 and 988 rows on the card), and depth 2 was accepted on games
+        these answers made. So every block is cut and run exactly as `from_encoded` would
+        run it alone, and only the copy back waits for the device, once, at the end.
+        """
+        outs = [np.empty(len(encoded.species), dtype=np.float64) for encoded in segments]
+        pending: list[tuple[int, int, int, Tensor]] = []
+        passes = 0
+        for index, encoded in enumerate(segments):
+            n = len(encoded.species)
+            for start in range(0, n, self.batch_size):
+                stop = min(start + self.batch_size, n)
+                batch = {
+                    name: torch.from_numpy(getattr(encoded, name)[start:stop]).to(self.device)
+                    for name in _ENCODED_ARRAYS
+                }
+                pending.append(
+                    (index, start, stop, torch.sigmoid(self._mean_logit(batch)).double())
+                )
+                passes += 1
+        if pending:
+            host = torch.cat([scores for *_where, scores in pending]).cpu().numpy()
+            at = 0
+            for index, start, stop, _scores in pending:
+                outs[index][start:stop] = host[at : at + stop - start]
+                at += stop - start
+        for encoded, out in zip(segments, outs, strict=True):
+            # Each block's ended leaves are their results, as `from_encoded` settles them.
+            self.ended += settle(out, encoded, self.encoder.rules)
+        rows = sum(len(out) for out in outs)
+        self.evaluated += rows
+        timing.count("leaves", rows)
+        timing.count("forward.passes", passes)
+        return outs
 
     def objective(self, name: str = "win") -> Any:  # noqa: ANN401
         """The value function as a single-position :class:`~pokeuraou.payoff.Objective`.

@@ -47,10 +47,12 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import socket
 import socketserver
 import threading
 import time
+from collections import OrderedDict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from multiprocessing import shared_memory
@@ -96,6 +98,39 @@ def _plan(encoded: Any) -> tuple[list[dict[str, Any]], int]:
             "nbytes": int(array.nbytes),
         })
         offset += int(array.nbytes)
+    return layout, offset
+
+
+def _rows(blocks: Sequence[Any]) -> int:
+    return sum(int(len(block.species)) for block in blocks)
+
+
+def _plan_blocks(blocks: Sequence[Any]) -> tuple[list[dict[str, Any]] | None, int]:
+    """`_plan` of the blocks one after another, or None if their arrays do not stack.
+
+    Each array is the blocks' rows end to end, as `np.concatenate` would lay them, so the
+    server reads block k as rows `[start_k, start_k + n_k)` of every array.
+    """
+    rows = _rows(blocks)
+    layout: list[dict[str, Any]] = []
+    offset = 0
+    for name in ARRAYS:
+        first = np.asarray(getattr(blocks[0], name))
+        for block in blocks[1:]:
+            other = np.asarray(getattr(block, name))
+            if other.dtype != first.dtype or other.shape[1:] != first.shape[1:]:
+                return None, 0
+        offset = (offset + 63) & ~63
+        shape = [rows, *first.shape[1:]]
+        nbytes = int(first.dtype.itemsize * int(np.prod(shape)))
+        layout.append({
+            "name": name,
+            "offset": offset,
+            "shape": shape,
+            "dtype": first.dtype.str,
+            "nbytes": nbytes,
+        })
+        offset += nbytes
     return layout, offset
 
 
@@ -165,7 +200,7 @@ class _Handler(socketserver.StreamRequestHandler):
                     for name, group in server.arms.items()  # type: ignore[attr-defined]
                 },
             }
-        if request.get("op") != "score":
+        if request.get("op") not in ("score", "score_segments"):
             raise ValueError(f"unknown op {request.get('op')!r}")
 
         name = request["model"]
@@ -179,6 +214,28 @@ class _Handler(socketserver.StreamRequestHandler):
         buffer = attached[handle].buf
         arrays = _views(buffer, request["layout"])
         rows = int(request["rows"])
+
+        if request["op"] == "score_segments":
+            # IKA-291: several blocks in one round trip, each scored as its own request
+            # would have been -- the same rows in a call of the same size. A model from
+            # `served_model` scores a small block by replaying a CUDA graph (`block`);
+            # anything else (a test's stand-in) is called once per block.
+            model = models[name]
+            one = getattr(model, "block", None) or model
+            parts: list[np.ndarray] = []
+            at = 0
+            for size in request["segments"]:
+                size = int(size)
+                block = {key: value[at : at + size] for key, value in arrays.items()}
+                parts.append(np.asarray(one(block, size), dtype=np.float64))
+                server.note_request(size)  # type: ignore[attr-defined]
+                at += size
+            if at != rows:
+                raise ValueError(f"segments add up to {at} rows, the request says {rows}")
+            scores = np.concatenate(parts) if parts else np.zeros(0, dtype=np.float64)
+            out = int(request["result_offset"])
+            buffer[out : out + scores.nbytes] = scores.tobytes()
+            return {"ok": True, "rows": int(scores.shape[0])}
 
         scores = models[name](arrays, rows)
 
@@ -414,7 +471,118 @@ class RemoteValue:
         timing.count("leaves", rows)
         # One round trip is one pass on the server; a longer batch came through here in pieces.
         timing.count("forward.passes")
+        timing.count("serve.requests")
         return scores
+
+    @timing.timed("forward")
+    def from_encoded_segments(self, segments: Sequence[Any]) -> list[np.ndarray]:
+        """Score several blocks in one round trip, each as `from_encoded` would alone.
+
+        IKA-291. The server runs each block as its own forward pass at its own size -- the
+        only way a row gets the answer `from_encoded` gives it, since a CUDA answer depends
+        on the number of rows in the call -- so what this saves is the round trips, not the
+        passes. Blocks are laid one after another in the shared buffer and sent together
+        while they fit; a block longer than `batch_size` goes through `from_encoded`, which
+        cuts it where `BatchedValue` does.
+        """
+        outs: list[np.ndarray | None] = [None] * len(segments)
+        group: list[int] = []
+
+        def send() -> None:
+            if group:
+                scored = self._score_together([segments[i] for i in group])
+                for index, scores in zip(group, scored, strict=True):
+                    outs[index] = scores
+                group.clear()
+
+        for index, encoded in enumerate(segments):
+            rows = int(len(encoded.species))
+            if rows == 0:
+                outs[index] = np.zeros(0, dtype=np.float64)
+                continue
+            if rows > self.batch_size:
+                send()
+                outs[index] = self.from_encoded(encoded)
+                continue
+            if group and not self._fits([segments[i] for i in (*group, index)]):
+                send()
+            group.append(index)
+        send()
+        return [out if out is not None else np.zeros(0, dtype=np.float64) for out in outs]
+
+    def _fits(self, blocks: Sequence[Any]) -> bool:
+        layout, used = _plan_blocks(blocks)
+        return layout is not None and ((used + 63) & ~63) + 8 * _rows(blocks) <= self.buffer_bytes
+
+    def _score_together(self, blocks: Sequence[Any]) -> list[np.ndarray]:
+        layout, used = _plan_blocks(blocks)
+        if layout is None or len(blocks) == 1:
+            # Blocks whose arrays do not stack (a dtype or a width differs), or only one.
+            return [self.from_encoded(block) for block in blocks]
+        rows = _rows(blocks)
+        if timing.DUPES:
+            for block in blocks:
+                note_repeated_rows(block, len(block.species))
+        result_offset = (used + 63) & ~63
+        needed = result_offset + rows * 8
+        if needed > self.buffer_bytes:
+            return [self.from_encoded(block) for block in blocks]
+        view = self._block.buf
+        before_copy = time.perf_counter()
+        with timing.stage("serve.copy"):
+            for item in layout:
+                at = int(item["offset"])
+                for block in blocks:
+                    array = np.ascontiguousarray(getattr(block, item["name"]))
+                    target = np.frombuffer(
+                        view, dtype=array.dtype, count=array.size, offset=at
+                    ).reshape(array.shape)
+                    np.copyto(target, array)
+                    at += int(array.nbytes)
+        self.copied += time.perf_counter() - before_copy
+
+        sent = time.perf_counter()
+        with timing.stage("serve.wait"):
+            self._file.write(
+                (json.dumps({
+                    "op": "score_segments",
+                    "model": self.model,
+                    "shm": self._block.name,
+                    "rows": rows,
+                    "segments": [int(len(block.species)) for block in blocks],
+                    "layout": layout,
+                    "result_offset": result_offset,
+                }) + "\n").encode("utf-8")
+            )
+            self._file.flush()
+            line = self._file.readline()
+        if not line:
+            raise RuntimeError("the inference server closed the connection")
+        self.waited += time.perf_counter() - sent
+        self.calls += 1
+        reply = json.loads(line)
+        if not reply.get("ok"):
+            raise RuntimeError(f"inference failed: {reply.get('error')}")
+        scores = np.frombuffer(
+            view[result_offset : result_offset + rows * 8], dtype=np.float64
+        ).copy()
+        self.evaluated += rows
+        timing.count("leaves", rows)
+        # One pass per block on the server, in one round trip.
+        timing.count("forward.passes", len(blocks))
+        timing.count("serve.requests")
+        from .encode import settle
+
+        out: list[np.ndarray] = []
+        at = 0
+        for block in blocks:
+            n = int(len(block.species))
+            values = scores[at : at + n].copy()
+            # As `from_encoded`: the server never hears which rows ended (IKA-253).
+            self.ended += settle(values, block, self.encoder.rules)
+            out.append(values)
+            at += n
+        return out
 
 
 def note_repeated_rows(encoded: Any, rows: int) -> None:  # noqa: ANN401 - Encoded
@@ -528,10 +696,177 @@ def served_model(value: Any):
         score.calls += 1
         return out
 
+    graphs = _Graphs(value) if _Graphs.usable(value) else None
+
+    def block(arrays: dict[str, np.ndarray], rows: int) -> np.ndarray:
+        """One block of a `score_segments` request (IKA-291): a CUDA graph's replay when
+        one fits, otherwise `score`. The two are the same answer to the bit."""
+        if graphs is None:
+            return score(arrays, rows)
+        started = time.perf_counter()
+        out = graphs.score(arrays, rows)
+        if out is None:
+            return score(arrays, rows)
+        score.held += time.perf_counter() - started
+        score.calls += 1
+        score.replays += 1
+        return out
+
     score.waited = 0.0
     score.held = 0.0
     score.calls = 0
+    score.replays = 0
+    score.block = block
+    score.graphs = graphs
     return score
+
+
+#: The largest block `_Graphs` replays; longer ones take the eager road. Depth 2's sub-games
+#: are a few hundred rows (57-395 in the turn-1 probe of IKA-291) and a node's own call is
+#: thousands, so this takes the first and leaves the second. 0 turns the graphs off.
+GRAPH_ROWS = int(os.environ.get("POKEURAOU_GRAPH_ROWS", "512"))
+
+#: Graphs kept per arm (and index dtype), least recently replayed dropped first. Each holds
+#: about 0.65 MB of host memory (IKA-291: 512 of them measured at +361 MB). As many as there
+#: are sizes: 48 depth-2 games met 860 sizes over two servers, and a cache of 256 captured
+#: 1,804 times for 1,292 evictions -- 0.546 CPU s a game of server against 0.426 at 512
+#: (0.583 at 128), for 0.2 GB of peak memory.
+GRAPH_CACHE = int(os.environ.get("POKEURAOU_GRAPH_CACHE", "512"))
+
+
+class _Graphs:
+    """One arm's forward pass as CUDA graphs, one per block size, for `score_segments`.
+
+    IKA-291. A depth-2 pass sends dozens of sub-games of a few hundred rows each, and each
+    must be scored at its own size to keep its answer (a CUDA answer moves with the number
+    of rows in the call). Eagerly, such a forward pass is bound by launching its kernels --
+    1.66 ms for a block whose arithmetic takes a fraction of that -- so the server's CPU
+    went where the forward passes went, 10.9x at depth 2 for 3.07x the rows (IKA-111).
+
+    A graph captured for n rows replays the kernels eager chose for n rows, on the same
+    inputs, so the answer is the eager answer to the bit (checked on 113 sub-game blocks of
+    a turn-1 depth-2 decision and on 280 more sizes, single net and ensemble, and asserted
+    in `tests/test_inference.py`); the launches become one. It cost 4x less CPU and 1.8x
+    less wall per block there.
+
+    One set per arm, shared by the serving threads under one lock: a graph writes into
+    fixed buffers, so two replays cannot overlap, and a capture must not see another
+    capture. Captured on first use of a size, in `thread_local` mode on a side stream, so
+    the other threads' eager passes go on meanwhile (280 captures beside six eager threads:
+    no error, no answer moved). The forward pass is its own `BatchedValue`, as a serving
+    thread's is, so no thread's parameters are swapped under it.
+    """
+
+    @staticmethod
+    def usable(value: Any) -> bool:  # noqa: ANN401 - BatchedValue
+        device = getattr(value, "device", None)
+        return GRAPH_ROWS > 0 and getattr(device, "type", None) == "cuda"
+
+    def __init__(self, value: Any) -> None:  # noqa: ANN401 - BatchedValue
+        from .value import BatchedValue
+
+        self.value = BatchedValue(
+            value.nets if len(value.nets) > 1 else value.nets[0],
+            value.encoder,
+            device=value.device,
+            batch_size=value.batch_size,
+        )
+        self.lock = threading.Lock()
+        #: (dtype and trailing shape of every array) -> the input buffers, the pool, and
+        #: rows -> (graph, output). The port's index arrays are int32 and the encoder's
+        #: int64; each kind gets its own buffers rather than a cast.
+        self.kinds: dict[tuple, tuple[dict[str, Any], Any, dict[int, tuple[Any, Any]]]] = {}
+        self.captured = 0
+        self.evicted = 0
+        self.warm: set[int] = set()
+        #: Why the graphs were given up, once a capture has failed.
+        self.failed: str | None = None
+
+    def score(self, arrays: dict[str, np.ndarray], rows: int) -> np.ndarray | None:
+        """The block's values, or None when it is too long for a graph (or empty)."""
+        if self.failed or rows <= 0 or rows > GRAPH_ROWS or rows > self.value.batch_size:
+            return None
+        import torch
+
+        kind = tuple(
+            (name, np.asarray(arrays[name]).dtype.str, tuple(np.asarray(arrays[name]).shape[1:]))
+            for name in ARRAYS
+        )
+        # Staged in page-locked memory first, so that the copies in and out are ordinary
+        # stream work: everything below is ordered on the one stream every serving thread
+        # issues onto, and the lock need only cover putting it there -- not the wait for
+        # the card, which a lock held across would make every thread's wait.
+        staged = {
+            name: torch.from_numpy(np.ascontiguousarray(arrays[name])).pin_memory()
+            for name in ARRAYS
+        }
+        result = torch.empty(rows, dtype=torch.float64, pin_memory=True)
+        done = torch.cuda.Event()
+        with self.lock, torch.no_grad():
+            if kind not in self.kinds:
+                inputs = {
+                    name: torch.zeros(
+                        (GRAPH_ROWS, *shape), dtype=torch.from_numpy(np.zeros(0, dtype)).dtype,
+                        device=self.value.device,
+                    )
+                    for name, dtype, shape in kind
+                }
+                self.kinds[kind] = (inputs, torch.cuda.graph_pool_handle(), OrderedDict())
+            inputs, pool, graphs = self.kinds[kind]
+            if rows in graphs:
+                graphs.move_to_end(rows)
+            else:
+                if len(graphs) >= GRAPH_CACHE:
+                    # Least recently replayed first. A graph holds about 0.65 MB of host
+                    # memory, and 512 of them in each of two servers put a 600-game run
+                    # under the machine's memory floor.
+                    graphs.popitem(last=False)
+                    self.evicted += 1
+                    timing.count("graph.evicted")
+                try:
+                    graphs[rows] = self._capture(
+                        {name: t[:rows] for name, t in inputs.items()}, pool
+                    )
+                except Exception as error:  # noqa: BLE001 - the eager road answers instead
+                    # A capture that failed can leave its pool mid-recording, so no graph
+                    # is trusted after one: every block from here takes the eager road,
+                    # which is the same answer at the old cost.
+                    self.failed = f"{type(error).__name__}: {error}"
+                    timing.count("graph.failed")
+                    return None
+                self.captured += 1
+                timing.count("graph.captured")
+            timing.count("graph.replays")
+            graph, out = graphs[rows]
+            for name in ARRAYS:
+                inputs[name][:rows].copy_(staged[name], non_blocking=True)
+            graph.replay()
+            result.copy_(out, non_blocking=True)
+            done.record()
+        done.synchronize()
+        return result.numpy().copy()
+
+    def _capture(self, inputs: dict[str, Any], pool: Any) -> tuple[Any, Any]:  # noqa: ANN401
+        import torch
+
+        if threading.get_ident() not in self.warm:
+            # Warm-up off the default stream first, as capturing asks (cuBLAS and the
+            # ensemble's mapped call set themselves up on first use, per thread: a
+            # thread that had not warmed failed its capture with the others running).
+            # Once a thread is enough: its later sizes are captured cold, a third of the
+            # cost of a capture, and replay the eager answer all the same (tested).
+            side = torch.cuda.Stream()
+            side.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(side):
+                for _ in range(2):
+                    self.value._mean_logit(inputs)
+            torch.cuda.current_stream().wait_stream(side)
+            self.warm.add(threading.get_ident())
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, pool=pool, capture_error_mode="thread_local"):
+            # `BatchedValue.from_encoded`'s own expression, on the same rows.
+            out = torch.sigmoid(self.value._mean_logit(inputs)).double()
+        return graph, out
 
 
 def load_models(paths: dict[str, Sequence[Path]], encoder: Any, device_name: str) -> dict:

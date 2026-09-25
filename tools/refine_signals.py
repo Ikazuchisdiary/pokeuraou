@@ -600,15 +600,21 @@ def shipped_search(node: Node, *, restricted: bool, passes: int, refine: int = 4
             return None, set(), 0
         return float(node.d2[i, j]), set(), 1
 
-    saved = search_mod.batched_payoff, search_mod._refined_value
-    search_mod.batched_payoff, search_mod._refined_value = fake_payoff, fake_refined
+    def fake_cells(_reg: Any, cells: Any, *_a: Any, **_k: Any):  # noqa: ANN202
+        # The pass's cells, as `search._refine_cells` hands them over since IKA-291.
+        return [fake_refined(None, pos, ours, theirs) for pos, ours, theirs in cells]
+
+    saved = search_mod.batched_payoff, search_mod._refined_value, search_mod._refine_cells
+    search_mod.batched_payoff, search_mod._refined_value, search_mod._refine_cells = (
+        fake_payoff, fake_refined, fake_cells,
+    )
     try:
         got = search_mod.search(
             None, None, rows, cols, None, budget=Budget.matrix(), depth=2,
             refine=refine, passes=passes, solve_restricted=restricted,
         )
     finally:
-        search_mod.batched_payoff, search_mod._refined_value = saved
+        search_mod.batched_payoff, search_mod._refined_value, search_mod._refine_cells = saved
     eq = got.equilibrium
     return Read(eq.row_strategy, eq.col_strategy, float(eq.value)), int(got.refined)
 
