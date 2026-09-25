@@ -42,8 +42,8 @@ LEGACY_RANK_FILL = "refs2"
 #: (`hidden.parse_bench_drop`): kept them all. Fixed for the same reason as the fill above.
 LEGACY_BENCH_DROP = "none"
 
-#: The best-first deepening budget, in cells, of every game before IKA-33 (`deepen`): none.
-LEGACY_DEEPEN = 0
+#: The best-first deepening of every game before IKA-33 (`deepen.parse_deepen`): none.
+LEGACY_DEEPEN = "none"
 
 #: Recorded games whose `provenance.kind` is this came from ordinary self-play, where both
 #: sides are the same agent. Absent provenance means the same thing -- every game written
@@ -141,7 +141,7 @@ def provenance(
     rank_views: tuple[str, str] = ("heaviest", "heaviest"),
     rank_fills: tuple[str, str] = (LEGACY_RANK_FILL, LEGACY_RANK_FILL),
     bench_drops: tuple[str, str] = (LEGACY_BENCH_DROP, LEGACY_BENCH_DROP),
-    deepens: tuple[int, int] = (LEGACY_DEEPEN, LEGACY_DEEPEN),
+    deepens: tuple[str, str] = (LEGACY_DEEPEN, LEGACY_DEEPEN),
     note: str = "",
 ) -> dict[str, Any]:
     """What produced this game, per side, in the order the sides appear in the record.
@@ -215,8 +215,8 @@ def provenance(
             if set(bench_drops) != {LEGACY_BENCH_DROP}
             else {}
         ),
-        # Each side's best-first deepening budget in cells (IKA-33). Written only when a
-        # side deepened.
+        # Each side's best-first deepening label (IKA-33). Written only when a side
+        # deepened.
         **(
             {"deepens": list(deepens)}
             if set(deepens) != {LEGACY_DEEPEN}
@@ -330,8 +330,8 @@ def agent_name(source: dict[str, Any], side: int) -> str:
     bench_drop = (source.get("benchDrops") or [LEGACY_BENCH_DROP, LEGACY_BENCH_DROP])[side]
     if bench_drop != LEGACY_BENCH_DROP and information != "open":
         name += f"/benchdrop:{bench_drop}"
-    # It spent a budget of cells deepening its answers best first (IKA-33): another search,
-    # so another agent -- in the open game and the hidden one alike.
+    # It spent a budget of cells deepening its answers best first, read one way (IKA-33):
+    # another search, so another agent -- in the open game and the hidden one alike.
     deepen = (source.get("deepens") or [LEGACY_DEEPEN, LEGACY_DEEPEN])[side]
     if deepen != LEGACY_DEEPEN:
         name += f"/deepen:{deepen}"

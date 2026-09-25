@@ -12,6 +12,9 @@ What these tests hold:
   and a larger budget reaches past depth 2;
 - **the budget stops it**, overshooting by at most one refined cell's children, and the
   report says what was spent -- the same numbers on every run (no clock in it);
+- **the restricted reading** plays only its rectangle, reports what the strategy
+  guarantees, refines no root cell outside the rectangle, and grows it only once every
+  cell in it is settled -- by a row or a column that beats the rectangle's value;
 - **it fires where nothing is hidden**: under a hidden bench, a deepening agent deepens
   exactly the move decisions where both sides have shown all four, and plays the default
   game until the first of them; in the open game it deepens every move decision;
@@ -181,6 +184,61 @@ def test_the_budget_stops_it_and_the_answer_repeats(roster) -> None:  # noqa: AN
         assert spent == sorted(spent)
 
 
+def test_the_restricted_reading_keeps_to_its_rectangle(roster) -> None:  # noqa: ANN001
+    reg = roster.reg
+    grew = 0
+    for pos in _played(roster)[:4]:
+        ours, theirs = _menus(reg, pos, limit=8)
+        payoff, notes = batched_payoff(reg, pos, ours, theirs, LEAF, budget=Budget.matrix())
+        d1 = solve(payoff)
+        trace: list = []
+        eq, prices, report = deepen_mod.best_first(
+            reg, pos, ours, theirs, LEAF, budget=Budget.matrix(), payoff=payoff,
+            equilibrium=d1, cells=600, sub_limit=DEFAULT_SUB_LIMIT,
+            sub_branches=DEFAULT_SUB_BRANCHES, unmodelled=set(notes), trace=trace,
+            reading="restricted", refine=2,
+        )
+        root = trace[0]
+        rows, cols = root.rect
+        start = (
+            [int(i) for i in deepen_mod._top(d1.row_strategy, 2)],
+            [int(j) for j in deepen_mod._top(d1.col_strategy, 2)],
+        )
+        assert rows[: len(start[0])] == start[0] and cols[: len(start[1])] == start[1]
+        # The strategy is the rectangle's, and the value what it guarantees.
+        assert set(np.flatnonzero(eq.row_strategy > 1e-12)) <= set(rows)
+        assert set(np.flatnonzero(eq.col_strategy > 1e-12)) <= set(cols)
+        assert eq.value == pytest.approx(float((eq.row_strategy @ prices).min()), abs=1e-12)
+        # Every root cell refined was inside the rectangle as it stood when it was refined:
+        # replaying the steps, a row or column joins only once the rectangle is settled.
+        used = [len(start[0]), len(start[1])]
+        settled: set = set()
+        for node, cell, _took in trace[1:]:
+            if node is not root:
+                continue
+            p, q = rows.index(cell[0]), cols.index(cell[1])
+            if p >= used[0] or q >= used[1]:
+                # A row or column that joined since: the rectangle before it was settled.
+                assert all(
+                    (i, j) in settled for i in rows[: used[0]] for j in cols[: used[1]]
+                ), cell
+                used = [max(used[0], p + 1), max(used[1], q + 1)]
+                grew += 1
+            settled.add(cell)
+        assert report.cells >= 0
+    assert grew >= 1, "no rectangle ever grew, so the oracle was never exercised"
+
+
+def test_the_label_parses_and_a_bad_one_stops() -> None:
+    assert deepen_mod.DEFAULT_DEEPEN == LEGACY_DEEPEN == "none"
+    assert deepen_mod.parse_deepen("none") == (None, 0)
+    assert deepen_mod.parse_deepen("m400") == ("mixed", 400)
+    assert deepen_mod.parse_deepen("r25") == ("restricted", 25)
+    for bad in ("", "0", "400", "m0", "r", "x400", "R400", "m-1", "none1", "r04"):
+        with pytest.raises(ValueError, match="deepen"):
+            deepen_mod.parse_deepen(bad)
+
+
 def test_seconds_turn_into_cells_outside_the_search() -> None:
     assert deepen_mod.cells_for_seconds(0.1) == deepen_mod.CELLS_PER_SECOND // 10
     assert deepen_mod.cells_for_seconds(45, cores=2) == 90 * deepen_mod.CELLS_PER_SECOND
@@ -199,11 +257,11 @@ def setup():  # noqa: ANN201
     return reg, sheet
 
 
-def _hidden_game(setup, cells):  # noqa: ANN001, ANN202
+def _hidden_game(setup, label):  # noqa: ANN001, ANN202
     reg, sheet = setup
     return selfplay.play_game(
         reg, np.random.default_rng(33), sheet[:4], sheet[2:6], "test",
-        search_limit=3, max_turns=25, sheets=(sheet, sheet), deepen=cells,
+        search_limit=3, max_turns=25, sheets=(sheet, sheet), deepen=label,
     )
 
 
@@ -220,9 +278,10 @@ def _payload(record) -> dict:  # noqa: ANN001
     return out
 
 
-def test_under_a_hidden_bench_it_deepens_exactly_where_nothing_is_hidden(setup) -> None:  # noqa: ANN001
-    base = _hidden_game(setup, 0)
-    again = _hidden_game(setup, 0)
+@pytest.mark.parametrize("label", ["r60", "m60"])
+def test_under_a_hidden_bench_it_deepens_exactly_where_nothing_is_hidden(setup, label) -> None:  # noqa: ANN001
+    base = _hidden_game(setup, "none")
+    again = _hidden_game(setup, "none")
     assert _payload(base) == _payload(again)
     payload = base.to_json(objective="hp-share", search_limit=3)
     assert "deepen" not in payload
@@ -233,8 +292,8 @@ def test_under_a_hidden_bench_it_deepens_exactly_where_nothing_is_hidden(setup) 
     assert open_nodes, "the game never showed both fours; nothing could fire"
     assert len(open_nodes) < len(moves)
 
-    deep = _hidden_game(setup, 60)
-    assert deep.deepen == [60, 60]
+    deep = _hidden_game(setup, label)
+    assert deep.deepen == [label, label]
     fired = 0
     first = None
     for k, d in enumerate(deep.decisions):
@@ -253,7 +312,7 @@ def test_under_a_hidden_bench_it_deepens_exactly_where_nothing_is_hidden(setup) 
     base_json = _payload(base)["decisions"]
     deep_json = _payload(deep)["decisions"]
     assert deep_json[:first] == base_json[:first]
-    assert _payload(deep)["deepen"] == [60, 60]
+    assert _payload(deep)["deepen"] == [label, label]
     # Some node actually refined something (the report is not only a label).
     assert any(d.deepened[0]["expanded"] > 0 for d in deep.decisions if d.deepened)
 
@@ -262,7 +321,7 @@ def test_in_the_open_game_every_move_decision_deepens(setup) -> None:  # noqa: A
     reg, sheet = setup
     record = selfplay.play_game(
         reg, np.random.default_rng(34), sheet[:4], sheet[2:6], "test",
-        search_limit=3, max_turns=3, open_information=True, deepen=40,
+        search_limit=3, max_turns=3, open_information=True, deepen="r40",
     )
     moves = [d for d in record.decisions if d.kind == "move"]
     assert moves and all(d.deepened is not None for d in moves)
@@ -270,7 +329,12 @@ def test_in_the_open_game_every_move_decision_deepens(setup) -> None:  # noqa: A
     with pytest.raises(ValueError, match="deepen"):
         selfplay.play_game(
             reg, np.random.default_rng(34), sheet[:4], sheet[2:6], "test",
-            search_limit=3, max_turns=1, open_information=True, deepen=40, depth=2,
+            search_limit=3, max_turns=1, open_information=True, deepen="m40", depth=2,
+        )
+    with pytest.raises(ValueError, match="deepen"):
+        selfplay.play_game(
+            reg, np.random.default_rng(34), sheet[:4], sheet[2:6], "test",
+            search_limit=3, max_turns=1, open_information=True, deepen="40",
         )
 
 
@@ -285,25 +349,25 @@ def pool(tmp_path_factory):  # noqa: ANN001, ANN201
 def test_the_budget_follows_its_arm_into_either_seat(pool) -> None:  # noqa: ANN001
     solver = SolvedSelections(pool.reg, pool.teams, _stub)
 
-    def arm(cells: int) -> PoolArm:
+    def arm(label: str) -> PoolArm:
         return PoolArm(name="arm", evaluate=_stub, solver=solver, limit=2,
-                       rank_by_leaf=False, deepen=cells)
+                       rank_by_leaf=False, deepen=label)
 
-    tested, other = arm(30), arm(0)
+    tested, other = arm("r30"), arm("none")
     for which in (0, 1):
         record, sides = pool_match_game(
             pool.reg, pool, (tested, other), seed=33, game_index=0, which=which,
             hide_bench=False, max_turns=2,
         )
-        assert record.deepen[which] == 30 and record.deepen[1 - which] == 0
-        assert sides["deepens"][which] == 30
+        assert record.deepen[which] == "r30" and record.deepen[1 - which] == "none"
+        assert sides["deepens"][which] == "r30"
         moves = [d for d in record.decisions if d.kind == "move"]
         assert moves
         for d in moves:
             assert d.deepened[which] is not None and d.deepened[1 - which] is None
         payload = record.to_json(objective="value:arm", search_limit=(2, 2))
         assert payload["deepen"] == record.deepen
-    same = arm(0)
+    same = arm("none")
     record, _ = pool_match_game(
         pool.reg, pool, (same, same), seed=33, game_index=0, which=0,
         hide_bench=False, max_turns=2,
@@ -317,7 +381,7 @@ def test_a_deepening_agent_is_another_agent() -> None:
     old = provenance("pool-match", **base)
     assert "deepens" not in old
     assert provenance("pool-match", **base, deepens=(LEGACY_DEEPEN,) * 2) == old
-    new = provenance("pool-match", **base, deepens=(400, LEGACY_DEEPEN))
-    assert new["deepens"] == [400, 0]
-    assert agent_name(new, 0) == agent_name(old, 0) + "/deepen:400"
+    new = provenance("pool-match", **base, deepens=("r400", LEGACY_DEEPEN))
+    assert new["deepens"] == ["r400", "none"]
+    assert agent_name(new, 0) == agent_name(old, 0) + "/deepen:r400"
     assert agent_name(new, 1) == agent_name(old, 1)

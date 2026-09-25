@@ -363,7 +363,8 @@ def search(
 
     ``deepen`` is a budget of cells to spend after the depth-1 solve, best first over the
     whole tree (`deepen.best_first`, IKA-33). Zero is the depth-1 search unchanged; it
-    goes with ``depth=1`` only.
+    goes with ``depth=1`` only, and there ``solve_restricted`` picks the root's reading:
+    the restricted rectangle grown by its oracle, or the whole matrix.
     """
     if deepen and (depth > 1 or solve_sparsely):
         raise ValueError("deepen is a budget on top of the depth-1 full-matrix search")
@@ -388,6 +389,7 @@ def search(
             reg, pos, row, col, evaluate, budget=budget, payoff=payoff,
             equilibrium=equilibrium, cells=deepen, sub_limit=sub_limit,
             sub_branches=sub_branches, unmodelled=unmodelled,
+            reading="restricted" if solve_restricted else "mixed", refine=refine,
         )
         return SearchResult(
             equilibrium=equilibrium,

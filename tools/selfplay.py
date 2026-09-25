@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from pokeuraou import rustnode
 from pokeuraou.benchflags import add_bench_flags, require_bench
 from pokeuraou.damage import register_mega_stones
+from pokeuraou.deepen import DEFAULT_DEEPEN, parse_deepen
 from pokeuraou.hidden import DEFAULT_BENCH_DROP, parse_bench_drop
 from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.priors import build_cooccurrence, find_cached_chaos, load_chaos
@@ -106,11 +107,11 @@ def add_pool_flags(ap: argparse.ArgumentParser) -> None:
     )
     ap.add_argument(
         "--deepen",
-        type=int,
-        default=0,
-        help="with --pool: a budget of cells each move decision spends deepening its "
-        "answer best first after the depth-1 solve, where no bench is hidden "
-        "(IKA-33). Default 0, off.",
+        default=DEFAULT_DEEPEN,
+        help="with --pool: how each move decision deepens its answer best first after the "
+        "depth-1 solve, where no bench is hidden -- m<N> spends N cells and reads the root "
+        "whole, r<N> reads it as the restricted game (IKA-33). "
+        f"Default {DEFAULT_DEEPEN}, off.",
     )
     ap.add_argument(
         "--record-rank-scores",
@@ -438,8 +439,7 @@ def main() -> None:
     try:
         parse_rank_fill(args.rank_fill)
         parse_bench_drop(args.bench_drop)
-        if args.deepen < 0:
-            raise ValueError(f"--deepen {args.deepen}: a budget of cells is not negative")
+        parse_deepen(args.deepen)
     except ValueError as problem:
         ap.error(str(problem))
     if args.pool is not None:
@@ -454,7 +454,7 @@ def main() -> None:
         # The same for the belief: the roster path's `generate` takes no drop.
         ap.error("--bench-drop is the pool path's (IKA-283); the roster path believes "
                  "every completion")
-    if args.deepen:
+    if args.deepen != DEFAULT_DEEPEN:
         # The same for the deepening: the roster path's `generate` takes no budget.
         ap.error("--deepen is the pool path's (IKA-33); the roster path searches at depth 1")
     if args.record_rank_scores:

@@ -37,6 +37,7 @@ import numpy as np
 from . import port, rank_scores, timing
 from .actions import SideAction, switch_actions_after_faint
 from .budget import Budget
+from .deepen import DEFAULT_DEEPEN, parse_deepen
 from .equilibrium import EquilibriumError, solve
 from .fold import TurnLeaves
 from .hidden import (
@@ -291,9 +292,9 @@ class GameRecord:
     bench_drop: list[str] = field(
         default_factory=lambda: [LEGACY_BENCH_DROP, LEGACY_BENCH_DROP]
     )
-    #: Each side's best-first deepening budget in cells (`deepen.best_first`, IKA-33).
-    #: Written only when a side deepened, so a record without it searched at depth 1.
-    deepen: list[int] = field(default_factory=lambda: [LEGACY_DEEPEN, LEGACY_DEEPEN])
+    #: Each side's best-first deepening label (`deepen.parse_deepen`, IKA-33). Written
+    #: only when a side deepened, so a record without it searched at depth 1.
+    deepen: list[str] = field(default_factory=lambda: [LEGACY_DEEPEN, LEGACY_DEEPEN])
     #: The equilibrium mixtures over the 90 ordered selections, when a book was used.
     #: These are the policy targets a selection head would learn -- the *solver's*
     #: recommendation, not the softened distribution the game was drawn from.
@@ -850,7 +851,7 @@ def play_game(
     rank_view: str | tuple[str, str] = "heaviest",
     rank_fill: str | tuple[str, str] = DEFAULT_RANK_FILL,
     bench_drop: str | tuple[str, str] = DEFAULT_BENCH_DROP,
-    deepen: int | tuple[int, int] = 0,
+    deepen: str | tuple[str, str] = DEFAULT_DEEPEN,
 ) -> GameRecord:
     """Plays one game to a result, sampling both sides from the turn's equilibrium.
 
@@ -917,9 +918,10 @@ def play_game(
     each agent's belief leaves out at a move node (`hidden.parse_bench_drop`, IKA-283).
     "none" ships. It changes nothing without ``sheets``.
 
-    ``deepen`` takes a pair too: each agent's budget in cells for deepening its move
-    decisions best first after the depth-1 solve (`deepen.best_first`, IKA-33). 0 ships
-    and is the search unchanged. Under a hidden bench it applies only where neither
+    ``deepen`` takes a pair too: how each agent deepens its move decisions best first
+    after the depth-1 solve (`deepen.parse_deepen`, IKA-33): ``none`` ships and is the
+    search unchanged, ``m<N>`` / ``r<N>`` spend N cells and read the root whole /
+    restricted. Under a hidden bench it applies only where neither
     side's bench is hidden -- the node is then the open game's node, and it is solved as
     one (`search`) instead of as a one-completion Bayesian game; a node with a bench
     still hidden stays at depth 1 (`belief_solve` has no depth, IKA-111). It goes with
@@ -956,14 +958,16 @@ def play_game(
     drops = (bench_drop, bench_drop) if isinstance(bench_drop, str) else tuple(bench_drop)
     for drop in drops:
         parse_bench_drop(drop)
-    deepens = (deepen, deepen) if isinstance(deepen, int) else tuple(deepen)
-    for side, cells in enumerate(deepens):
-        if cells < 0:
-            raise ValueError(f"deepen {deepens}: a budget of cells is not negative")
-        if cells and (depths[side] != 1 or sparse[side]):
+    deepens = (deepen, deepen) if isinstance(deepen, str) else tuple(deepen)
+    parsed = [parse_deepen(label) for label in deepens]
+    cells = (parsed[0][1], parsed[1][1])
+    deep_restricted = (parsed[0][0] == "restricted", parsed[1][0] == "restricted")
+    for side in (0, 1):
+        if cells[side] and (depths[side] != 1 or sparse[side] or restricted[side]):
             raise ValueError(
                 f"deepen {deepens} on side {side} goes with depth 1 and the full-matrix "
-                f"solve, not depth {depths[side]} / solve_sparsely {sparse[side]}"
+                f"solve, not depth {depths[side]} / solve_sparsely {sparse[side]} / "
+                f"solve_restricted {restricted[side]} (the label carries its own reading)"
             )
     if sheets is None and not open_information:
         raise ValueError(
@@ -1146,10 +1150,10 @@ def play_game(
             # Unless neither is (IKA-33): then the node is the open game's, and a side
             # that deepens solves it as one, with `search`. A node with a bench still
             # hidden stays with `belief_solve`, which has no depth (IKA-111).
-            exact = deepens != (0, 0) and all(
+            exact = cells != (0, 0) and all(
                 len(items) == 1 and items[0].exact for items in spreads.values()
             )
-            deep = (exact and deepens[0] > 0, exact and deepens[1] > 0)
+            deep = (exact and cells[0] > 0, exact and cells[1] > 0)
             own_deep = foe_deep = None
             solve_started = perf_counter()
             try:
@@ -1173,7 +1177,7 @@ def play_game(
                 if deep[0]:
                     own_deep = search(
                         reg, pos, ours, theirs, own_leaf, budget=budget,
-                        deepen=deepens[0],
+                        deepen=cells[0], solve_restricted=deep_restricted[0],
                     )
                 if same_menu and deep[1]:
                     # One agent on both sides reads both strategies off one solve.
@@ -1184,7 +1188,7 @@ def play_game(
                         and deepens[1] == deepens[0]
                         else search(
                             reg, pos, ours, theirs, foe_leaf, budget=budget,
-                            deepen=deepens[1],
+                            deepen=cells[1], solve_restricted=deep_restricted[1],
                         )
                     )
             except EquilibriumError:
@@ -1233,7 +1237,7 @@ def play_game(
                     if deep[1]:
                         foe_deep = search(
                             reg, pos, foe_ours, foe_theirs, foe_leaf, budget=budget,
-                            deepen=deepens[1],
+                            deepen=cells[1], solve_restricted=deep_restricted[1],
                         )
                     else:
                         foe_answers = belief_solve(
@@ -1262,8 +1266,9 @@ def play_game(
             try:
                 own_search = search(
                     reg, pos, ours, theirs, own_leaf, budget=budget, depth=depths[0],
-                    solve_sparsely=sparse[0], solve_restricted=restricted[0],
-                    deepen=deepens[0],
+                    solve_sparsely=sparse[0],
+                    solve_restricted=restricted[0] or deep_restricted[0],
+                    deepen=cells[0],
                 )
             except EquilibriumError:
                 break
@@ -1304,7 +1309,8 @@ def play_game(
                     foe_search = search(
                         reg, pos, foe_ours, foe_theirs, foe_leaf, budget=budget,
                         depth=depths[1], solve_sparsely=sparse[1],
-                        solve_restricted=restricted[1], deepen=deepens[1],
+                        solve_restricted=restricted[1] or deep_restricted[1],
+                        deepen=cells[1],
                     )
                 except EquilibriumError:
                     break

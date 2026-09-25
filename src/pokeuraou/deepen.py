@@ -31,11 +31,18 @@ are for a human opponent only, and `cells_for_seconds` turns one into the other 
 the search. The last step may overshoot by one refined cell's children (at most
 ``1 + sub_branches * sub_limit**2``, 193 at the defaults); it is counted, not hidden.
 
-**The reading is the whole matrix** at every node: deepened cells hold their deeper value,
-the rest their leaf value. IKA-12 lost with that reading when the refined cells were the
-support's (x_i * y_j); IKA-281 measured that choice as no better than random against the
-all-cells depth-2 answer, and ``bern/gap`` as the best cheap rule under the same reading
-(exploit 0.0398 at 16 cells against 0.0523). Whether it plays better is the board's.
+**Two readings of the root** (the label's letter, `parse_deepen`). ``m`` reads the whole
+matrix: deepened cells hold their deeper value, the rest their leaf value. IKA-12 lost with
+that reading when the refined cells were the support's (x_i * y_j); IKA-281 measured that
+choice as no better than random against the all-cells depth-2 answer, and ``bern/gap`` as
+the best cheap rule under the same reading. ``r`` reads the root as IKA-68's restricted
+game: the rectangle of the depth-1 support (`refine` actions a side) is the game, its cells
+the only root candidates, and once all of them are refined the full matrix is asked, as a
+double oracle, whether a row or a column outside beats the rectangle's value -- if so it
+joins and its cells become candidates. The strategy is the rectangle's, and the value what
+it guarantees against every column. A matrix of mixed depths is what IKA-12 lost to; the
+rectangle keeps the cells a strategy is read from at one depth or deeper. Child nodes are
+read whole under either (their menus are `sub_limit` wide).
 
 Each decision reports what it did (`Deepened`): cells spent, cells refined, and the depth
 the deepest refined cell reached, so a recorded game says how far each answer looked.
@@ -44,6 +51,7 @@ the deepest refined cell reached, so a recorded game says how far each answer lo
 from __future__ import annotations
 
 import heapq
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
@@ -64,6 +72,10 @@ LeafEvaluator = Callable[[list[Position]], np.ndarray]
 #: support ranks by its uncertainty rather than by an infinity.
 GAP_FLOOR = 1e-3
 
+#: How far a best response outside the restricted rectangle has to beat its value to join
+#: it (`search.ORACLE_TOLERANCE`, repeated so this module does not import the search).
+ORACLE_TOLERANCE = 1e-6
+
 #: Levels below the root a refined cell may open. A guard, not a tuning knob: at the
 #: default widths the budget runs out long before it, and a node with nothing left but
 #: decided cells stops on its own (priority 0).
@@ -74,6 +86,24 @@ MAX_LEVELS = 8
 #: at 2.6 leaves a cell (IKA-283's counts: 10,928 port leaves over 4,228 cells a game).
 #: Measured again for this search in records/IKA-33.md.
 CELLS_PER_SECOND = 10_000
+
+#: What ships: no deepening. A label is ``none``, ``m<N>`` (the whole matrix read, N cells)
+#: or ``r<N>`` (the restricted reading, N cells).
+DEFAULT_DEEPEN = "none"
+
+READINGS = {"m": "mixed", "r": "restricted"}
+
+_DEEPEN = re.compile(r"none|([mr])([1-9][0-9]*)")
+
+
+def parse_deepen(label: str) -> tuple[str | None, int]:
+    """(reading, cells) from a deepen label: (None, 0), ("mixed", 400), ("restricted", 400)."""
+    got = _DEEPEN.fullmatch(label)
+    if got is None:
+        raise ValueError(f"deepen {label!r} is not none, m<N> or r<N> (N cells, N >= 1)")
+    if got.group(1) is None:
+        return None, 0
+    return READINGS[got.group(1)], int(got.group(2))
 
 
 def cells_for_seconds(seconds: float, cores: int = 1) -> int:
@@ -134,6 +164,9 @@ class _Node:
     refused: set[tuple[int, int]] = field(default_factory=set)
     #: `_signal`'s matrix while the equilibrium it was read from stands.
     signal: np.ndarray | None = None
+    #: The restricted reading's rectangle (rows, columns), at the root under ``r``; None
+    #: where the node is read whole.
+    rect: tuple[list[int], list[int]] | None = None
 
     @property
     def value(self) -> float:
@@ -154,6 +187,8 @@ def best_first(
     sub_limit: int,
     sub_branches: int,
     unmodelled: set[str],
+    reading: str = "mixed",
+    refine: int = 4,
     trace: list | None = None,
 ) -> tuple[Equilibrium, np.ndarray, Deepened]:
     """The root's equilibrium and prices after spending `cells` on deepening, best first.
@@ -168,6 +203,14 @@ def best_first(
         payoff=np.array(payoff, dtype=np.float64, copy=True),
         equilibrium=equilibrium, level=0,
     )
+    if reading == "restricted":
+        root.rect = (
+            [int(i) for i in _top(equilibrium.row_strategy, refine)],
+            [int(j) for j in _top(equilibrium.col_strategy, refine)],
+        )
+        _reread(root)
+    elif reading != "mixed":
+        raise ValueError(f"reading {reading!r} is not one of {sorted(READINGS.values())}")
     if trace is not None:
         trace.append(root)
     spent = 0
@@ -189,6 +232,8 @@ def best_first(
         if not ok:
             node.refused.add(cell)
             refused += 1
+            if node.rect is not None:
+                _reread(node)
             continue
         expanded += 1
         deepest = max(deepest, node.level + 1)
@@ -250,6 +295,10 @@ def _best(root: _Node) -> tuple[_Node, tuple[int, int]] | None:
             break
         scores = _scores(node, inherited)
         candidates = scores.copy()
+        if node.rect is not None:
+            inside = np.zeros(candidates.shape, dtype=bool)
+            inside[np.ix_(*node.rect)] = True
+            candidates[~inside] = -np.inf
         for cell in node.children:
             candidates[cell] = -np.inf
         for cell in node.refused:
@@ -354,6 +403,9 @@ def _propagate(node: _Node, cell: tuple[int, int]) -> None:
     while here is not None:
         here.payoff[at] = _cell_value(here.children[at])
         here.signal = None
+        if here.rect is not None:
+            _reread(here)
+            return
         try:
             here.equilibrium = solve(here.payoff)
         except EquilibriumError:
@@ -363,11 +415,70 @@ def _propagate(node: _Node, cell: tuple[int, int]) -> None:
         here, at = here.parent
 
 
+def _top(strategy: np.ndarray, count: int) -> np.ndarray:
+    """`search._top`: the heaviest `count` actions carrying any probability."""
+    live = np.flatnonzero(strategy > 1e-9)
+    if live.size <= count:
+        return live
+    order = np.argsort(-strategy[live], kind="stable")
+    return live[order[:count]]
+
+
+def _reread(node: _Node) -> None:
+    """The restricted reading of `node` (IKA-68's `_restricted_search`, one pass of it).
+
+    The rectangle is solved as the game; the strategy is its, extended by zeros; the value
+    is what it guarantees against every column at today's prices. Once every cell of the
+    rectangle has been refined or refused, the full matrix is the oracle: the best row and
+    the best column outside join if they beat the rectangle's own value. A rectangle the
+    LP cannot solve keeps the last answer.
+    """
+    assert node.rect is not None
+    rows, cols = node.rect
+    prices = node.payoff
+    try:
+        restricted = solve(prices[np.ix_(rows, cols)])
+    except EquilibriumError:
+        return
+    strategy = np.zeros(prices.shape[0], dtype=np.float64)
+    strategy[rows] = restricted.row_strategy
+    reply = np.zeros(prices.shape[1], dtype=np.float64)
+    reply[cols] = restricted.col_strategy
+    row_ev = prices @ reply
+    col_ev = strategy @ prices
+    guarantee = float(col_ev.min())
+    node.equilibrium = Equilibrium(
+        value=guarantee,
+        row_strategy=strategy,
+        col_strategy=reply,
+        row_ev=row_ev,
+        col_ev=col_ev,
+        row_ev_loss=np.clip(guarantee - row_ev, 0.0, None),
+        col_ev_loss=np.clip(col_ev - guarantee, 0.0, None),
+        duality_gap=float(restricted.duality_gap),
+    )
+    node.signal = None
+    settled = all(
+        (i, j) in node.children or (i, j) in node.refused for i in rows for j in cols
+    )
+    if not settled:
+        return
+    best_row = int(np.argmax(row_ev))
+    best_col = int(np.argmin(col_ev))
+    if best_row not in rows and float(row_ev[best_row]) > float(restricted.value) + ORACLE_TOLERANCE:
+        rows.append(best_row)
+    if best_col not in cols and float(col_ev[best_col]) < float(restricted.value) - ORACLE_TOLERANCE:
+        cols.append(best_col)
+
+
 __all__ = [
     "CELLS_PER_SECOND",
+    "DEFAULT_DEEPEN",
+    "READINGS",
     "GAP_FLOOR",
     "MAX_LEVELS",
     "Deepened",
     "best_first",
     "cells_for_seconds",
+    "parse_deepen",
 ]

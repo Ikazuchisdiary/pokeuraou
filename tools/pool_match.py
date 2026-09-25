@@ -44,6 +44,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from pokeuraou.benchflags import add_bench_flags, require_bench  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
+from pokeuraou.deepen import DEFAULT_DEEPEN, parse_deepen  # noqa: E402
 from pokeuraou.encode import Encoder  # noqa: E402
 from pokeuraou.hidden import DEFAULT_BENCH_DROP, parse_bench_drop  # noqa: E402
 from pokeuraou.payoff import HP_SHARE  # noqa: E402
@@ -130,11 +131,11 @@ def main(argv: list[str] | None = None) -> None:
                     "the heaviest P%%; the heaviest stays (IKA-283)")
     ap.add_argument("--baseline-bench-drop", default=DEFAULT_BENCH_DROP,
                     help="same for the other arm")
-    ap.add_argument("--deepen", type=int, default=0,
-                    help="the tested arm's budget of cells for deepening each move "
-                    "decision best first after the depth-1 solve, where no bench is "
-                    "hidden (IKA-33); 0 is off")
-    ap.add_argument("--baseline-deepen", type=int, default=0,
+    ap.add_argument("--deepen", default=DEFAULT_DEEPEN,
+                    help="how the tested arm deepens each move decision best first after "
+                    "the depth-1 solve, where no bench is hidden: m<N> / r<N> spend N "
+                    "cells and read the root whole / restricted (IKA-33); none is off")
+    ap.add_argument("--baseline-deepen", default=DEFAULT_DEEPEN,
                     help="same for the other arm")
     add_bench_flags(ap)
     ap.add_argument("--selection-store", type=Path, default=None,
@@ -165,9 +166,11 @@ def main(argv: list[str] | None = None) -> None:
             parse_rank_fill(fill)
         except ValueError as problem:
             ap.error(str(problem))
-    for cells in (args.deepen, args.baseline_deepen):
-        if cells < 0:
-            ap.error(f"deepen {cells}: a budget of cells is not negative")
+    for label in (args.deepen, args.baseline_deepen):
+        try:
+            parse_deepen(label)
+        except ValueError as problem:
+            ap.error(str(problem))
     for drop in (args.bench_drop, args.baseline_bench_drop):
         try:
             parse_bench_drop(drop)

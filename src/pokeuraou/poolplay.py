@@ -54,6 +54,7 @@ from typing import Any
 import numpy as np
 
 from . import rank_scores, timing
+from .deepen import DEFAULT_DEEPEN
 from .hidden import DEFAULT_BENCH_DROP
 from .payoff import HP_SHARE, Objective
 from .pool import Pool, draw_pair
@@ -275,7 +276,7 @@ def generate_pool(
     policy: Any = None,
     rank_fill: str = DEFAULT_RANK_FILL,
     bench_drop: str = DEFAULT_BENCH_DROP,
-    deepen: int = 0,
+    deepen: str = DEFAULT_DEEPEN,
     indices: Iterable[int] | None = None,
     on_finish: Callable[[int], None] | None = None,
     rank_scores_out: Path | None = None,
@@ -491,8 +492,8 @@ class PoolArm:
     rank_fill: str = DEFAULT_RANK_FILL
     #: Which completions its belief drops (`hidden.parse_bench_drop`, IKA-283).
     bench_drop: str = DEFAULT_BENCH_DROP
-    #: Its best-first deepening budget in cells (`deepen.best_first`, IKA-33); 0 is off.
-    deepen: int = 0
+    #: How it deepens its move decisions (`deepen.parse_deepen`, IKA-33); none is off.
+    deepen: str = DEFAULT_DEEPEN
 
     @property
     def selection(self) -> str:
