@@ -975,6 +975,8 @@ pub fn alternatives_encoded(
         "refused": [],
         "unmodelled": [],
         "unknownVolatiles": encoded.unknown_volatiles,
+        // Over the encoded rows only: with `encode: false` there are none to settle.
+        "decided": crate::objective::decided_leaves(borrowed.iter().copied()),
         "leafObjectives": objectives,
         "encoding": { "megaFromSlots": rules.mega_from_slots },
         "monsPerSide": encoder.widths.mons_per_side,
