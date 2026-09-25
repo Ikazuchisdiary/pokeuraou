@@ -934,12 +934,21 @@ def main(argv: list[str] | None = None) -> int:
     )
     ap.add_argument("--json", action="store_true", help="機械可読な出力")
     ap.add_argument(
+        "--port-threads", type=int, default=None,
+        help="port の中で 1 ノードのセルを解くスレッド数（IKA-32）。答えはスレッド数によらず同じで、"
+        "速さだけが変わる。既定は環境変数 POKEURAOU_PORT_THREADS、無ければ 1",
+    )
+    ap.add_argument(
         "--lang",
         default="ja",
         help="表示言語。ja（既定）または en。訳の無い項目は英語名にフォールバックし、"
         "tools/names_report.py が不足を数える。--json の出力は常に英語（機械向け）",
     )
     args = ap.parse_args(argv)
+    if args.port_threads is not None:
+        from . import rustnode
+
+        rustnode.set_port_threads(args.port_threads)
 
     scenario = load_scenario(args.scenario)
     objective = OBJECTIVES[args.objective]

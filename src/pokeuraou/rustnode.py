@@ -362,6 +362,34 @@ class NodeResult:
 #: this is one Rust process per worker, which is what the parallelism wants.
 _NODES: dict[str, RustNode | None] = {}
 
+#: The environment variable the port reads its cell-thread count from (IKA-32).
+ENV_THREADS = "POKEURAOU_PORT_THREADS"
+
+#: Threads the port resolves a node's cells on, as `set_port_threads` last set it. None
+#: passes nothing and leaves it to the child: `POKEURAOU_PORT_THREADS`, else 1.
+_PORT_THREADS: list[int | None] = [None]
+
+
+def set_port_threads(threads: int | None) -> None:
+    """Resolve each node's cells on `threads` threads inside the port (IKA-32).
+
+    For a game played alone on a clock -- one game, sixteen cores. The answers are the same
+    bytes at any count, so a game does not change; only its wall clock does. Generation
+    leaves this alone: its machine is already full of workers, one core each.
+
+    The held processes are closed so the next node is started with the new count.
+    """
+    if threads is not None and threads < 1:
+        raise ValueError(f"port threads must be at least 1, not {threads}")
+    if threads != _PORT_THREADS[0]:
+        _PORT_THREADS[0] = threads
+        reset()
+
+
+def port_threads() -> int | None:
+    """What `set_port_threads` last set, or None if it was never called."""
+    return _PORT_THREADS[0]
+
 
 def node_for(reg: Regulation) -> RustNode | None:
     """The warm process for this regulation, or None if it is not usable.
@@ -480,8 +508,13 @@ def require_node(reg: Regulation) -> RustNode:
 class RustNode:
     """A warm subprocess. One per worker; it holds the regulation in memory."""
 
-    def __init__(self, reg: Regulation, binary: Path | None = None) -> None:
+    def __init__(
+        self, reg: Regulation, binary: Path | None = None, threads: int | None = None
+    ) -> None:
         self.format_id = reg.meta.format_id
+        #: Cell threads asked of this process (IKA-32): `threads`, else `set_port_threads`,
+        #: else None, which leaves the child to its environment.
+        self.threads = threads if threads is not None else _PORT_THREADS[0]
         self.binary = binary or binary_path()
         regulation = repo_root() / "configs" / "regulations" / f"{self.format_id}.json"
         # Binary, not text: an encoded node is a JSON header line followed by the raw
@@ -496,8 +529,9 @@ class RustNode:
         # Held for the life of the process and closed in `close`, so a context
         # manager is the wrong shape here.
         self._errors = tempfile.TemporaryFile()  # noqa: SIM115
+        asked = [] if self.threads is None else ["--threads", str(self.threads)]
         self._process = subprocess.Popen(
-            [str(self.binary), "node", str(regulation)],
+            [str(self.binary), "node", str(regulation), *asked],
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=self._errors,
@@ -610,6 +644,11 @@ class RustNode:
             unmodelled=tuple(response["unmodelled"]),
             position=Position.from_json(raw) if raw else None,
         )
+
+    def parallel(self) -> dict[str, Any]:
+        """The port's cell-thread counters (IKA-32): `threads`, and how many maps and items
+        ran on the pool, `offMain` of them on a thread other than the one reading requests."""
+        return self._exchange({"kind": "parallel"})
 
     def _exchange(self, request: dict[str, Any]) -> dict[str, Any]:
         """One request out, one header line back, with this end's JSON named.
