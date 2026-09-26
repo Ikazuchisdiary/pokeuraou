@@ -73,6 +73,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--max-levels", type=int, default=MAX_LEVELS,
                     help=f"the deepening's depth guard (default {MAX_LEVELS}, deepen.MAX_LEVELS; "
                     "IKA-307: long reads meet it)")
+    ap.add_argument("--depth-discount", type=float, default=None,
+                    help="the deepening's depth discount a ply (a label's d<P> as P / 100, "
+                    "IKA-342); default none")
     ap.add_argument("--open", action="store_true",
                     help="read with the opponent's bench open (the recorded position whole)")
     ap.add_argument("--threads", type=int, default=4,
@@ -167,7 +170,7 @@ def main(argv: list[str] | None = None) -> None:
 
     settings = analysis.Settings(
         width=args.width, oracle=_oracle_width(args.oracle), levels=args.max_levels,
-        rank_fill=fill, bench_drop=args.bench_drop, open_information=args.open,
+        discount=args.depth_discount, rank_fill=fill, bench_drop=args.bench_drop, open_information=args.open,
         interval_ms=args.interval_ms,
     )
     analyzer = analysis.Analyzer(reg, evaluate, name, loc=loc, settings=settings)
@@ -176,7 +179,9 @@ def main(argv: list[str] | None = None) -> None:
         sources.append(analysis.Source("進行中の局", args.current, current=True))
     limits = analysis.Limits(rss_gb=args.max_rss_gb, free_gb=args.min_free_gb, gpu_gb=args.max_gpu_gb)
     say(f"analysis: leaf {name} / menus {fill} / width {settings.width} / oracle {settings.oracle_label()}"
-        f" / guard {settings.levels} / {args.threads} thread(s)"
+        f" / guard {settings.levels}"
+        + (f" / discount {settings.discount:g}" if settings.discount is not None else "")
+        + f" / {args.threads} thread(s)"
         + (f" / {args.max_steps} steps" if args.max_steps is not None else "")
         + (f" / {args.max_seconds:g} s" if args.max_seconds is not None else ""))
 

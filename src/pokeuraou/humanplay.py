@@ -920,11 +920,13 @@ def solve_move(
     child_q: int | None = None,
     outside: tuple[list[SideAction], list[SideAction]] | None = None,
     progress: Callable[[Any], None] | None = None,
+    discount: float | None = None,
 ) -> SolvedMove:
     """Side ``me``'s answer on the menus ``ours`` (side 0's) x ``theirs`` (side 1's): the
     open game (`search`) when ``exact``, else its Bayesian game over the other side's
     completions in ``spreads`` (`belief_solve`, only ``me`` solved). ``cells`` > 0 deepens
-    best first, the budget read by ``cost``; ``outside`` adds the root's swap oracle.
+    best first, the budget read by ``cost``; ``outside`` adds the root's swap oracle;
+    ``levels`` and ``discount`` are the depth guard and the depth discount (IKA-342).
     What `HumanGame` asks at each move, and what the analysis mode asks with no budget
     (IKA-337). Raises `EquilibriumError` as the solves do."""
     you = 1 - me
@@ -934,7 +936,7 @@ def solve_move(
             **(
                 {"deepen": cells, "deepen_cost": cost, "levels": levels,
                  "child_q": child_q, "outside": outside,
-                 "swap": outside is not None}
+                 "swap": outside is not None, "discount": discount}
                 if cells else {}
             ),
             progress=progress,
@@ -953,7 +955,7 @@ def solve_move(
         deepen=(
             {me: {"cells": cells, "reading": "mixed", "swap": outside is not None,
                   "outside": outside, "cost": cost, "levels": levels,
-                  "child_q": child_q}}
+                  "child_q": child_q, "discount": discount}}
             if cells else None
         ),
         progress=progress,
