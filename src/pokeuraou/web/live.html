@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- 画像の取得元。{id} は Showdown の sprite id（フォルム込み）。既定は Showdown の画像サーバ（9/26 ユーザーの承認）。
+     読みに行くのは画面を開いたブラウザで、画像はどこにも保存しない。tools/play_human.py --sprite-url で
+     別の URL・手元のフォルダ・空（画像なし、名前とタイプの色の札）に替えられる -->
+<meta name="sprite-url" content="https://play.pokemonshowdown.com/sprites/gen5/{id}.png">
+<title>pokeuraou 対局と読み</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Dela+Gothic+One&family=IBM+Plex+Mono:wght@400;600&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="live.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><b>pokeuraou</b><span>対局と読み</span></div>
+  <div id="status" class="status">接続中…</div>
+  <div class="tools">
+    <label class="tool" for="hide"><input type="checkbox" id="hide"> 手を入れるまで読みを隠す</label>
+    <button class="tool" id="theme" type="button" aria-label="テーマを切り替える">テーマ: 自動</button>
+  </div>
+</header>
+<main class="layout">
+  <section class="stage" id="stage" aria-label="場">
+    <div class="side" id="sideTop"></div>
+    <div class="fieldbar" id="fieldbar"><div class="turnno"><span>ターン</span><b>–</b></div></div>
+    <div class="side" id="sideBottom"><div class="note">対局の始まりを待っています</div></div>
+    <div class="result" id="result" hidden></div>
+  </section>
+
+  <section class="panel" id="inputBox" aria-label="あなたの入力">
+    <h2>あなたの手</h2>
+    <div id="input"><span class="note">AI の番を待っています</span></div>
+  </section>
+
+  <section class="panel" id="reading" aria-label="AI の読み">
+    <div class="rhead"><h2>AI の読み</h2><span class="clocktext n" id="clocktext">–</span></div>
+    <div class="clockbar" id="clockbar"><i></i></div>
+    <div class="rbody">
+      <div class="balance">
+        <div class="balance-top"><span class="ai-c">AI <b class="big n" id="balAi">–</b></span>
+          <span class="dim" id="balLabel">形勢（AI から見た値）</span>
+          <span class="you-c"><b class="big n" id="balYou">–</b> あなた</span></div>
+        <div class="balance-bar"><i id="balBar" style="width:50%"></i></div>
+      </div>
+      <canvas class="chart" id="chart" aria-label="値の推移"></canvas>
+      <div class="strip n" id="strip"></div>
+
+      <h3>AI の混合戦略 <small>手ごとの確率・損は期待値の損</small></h3>
+      <div class="colhead"><span>手</span><span></span><span>確率</span><span>損</span></div>
+      <div class="mix ai" id="ours"></div>
+
+      <h3>AI が読むあなたの手 <small>裏の決定化の重みで平均</small></h3>
+      <div class="mix you" id="theirs"></div>
+
+      <details class="fold" id="beliefBox"><summary><b>あなたの裏の読み</b><small id="beliefSum">–</small></summary><div id="classes"></div></details>
+      <details class="fold" id="pvBox"><summary><b>読み筋</b><small id="pvSum">確率の付いた木</small></summary><div class="pv" id="pv"></div></details>
+      <details class="fold" id="countBox"><summary><b>読みの量</b><small>数の内訳と予算</small></summary><div><div class="counters" id="counters"></div><p class="note" id="plan"></p></div></details>
+      <div class="veil">あなたが手を入れると表示します</div>
+    </div>
+  </section>
+
+  <section class="panel" id="logBox" aria-label="経過">
+    <h2>経過</h2>
+    <ol class="log" id="log"></ol>
+  </section>
+
+  <details class="panel" id="sheetsBox"><summary>チーム（公開の情報）</summary><div class="sheets" id="sheets"></div></details>
+</main>
+<script src="live-data.js"></script>
+<script src="live-view.js"></script>
+</body>
+</html>
