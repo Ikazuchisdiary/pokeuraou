@@ -203,6 +203,17 @@ def main() -> None:
         "IKA-274). Plays the same games; the games files are byte for byte the same.",
     )
     ap.add_argument(
+        "--max-worker-failures",
+        type=int,
+        default=None,
+        help="stop once more workers than this have failed (IKA-336); -1 never stops. "
+        "Default: a quarter of --workers (6 of 24). A failed worker's games are replayed by "
+        "the others and come out byte for byte the same, so the games stay right and only "
+        "the run's speed suffers -- up to a quarter, not past it. Every failure is echoed "
+        "with its error and written to workers.json as it happens. profile_stages.py "
+        "passes 0: a timing run stops at the first.",
+    )
+    ap.add_argument(
         "rest",
         nargs=argparse.REMAINDER,
         help="after --, options passed to every worker unchanged",
@@ -227,6 +238,16 @@ def main() -> None:
         # flattens and the CPU is pegged. Direct stays at 8 because a direct worker is
         # 4.0 GB and eight of them did not fit in 31.1.
         args.workers = 24 if getattr(args, "served", False) else 8
+    # IKA-336. Not 0, unlike a board or a timing run: an hours-long generation that stops at
+    # its first failure idles the machine until somebody looks, and the failure took no game
+    # with it (a game is seeded by its number, so whoever replays it writes the same bytes).
+    # Past a quarter the failures are the run's condition rather than an accident, and it
+    # stops for `queue_restart.py` to resume once the cause is fixed.
+    max_failures = (
+        max(1, args.workers // 4) if args.max_worker_failures is None
+        else None if args.max_worker_failures < 0
+        else args.max_worker_failures
+    )
 
     extra = args.rest[1:] if args.rest and args.rest[0] == "--" else args.rest
 
@@ -360,7 +381,10 @@ def main() -> None:
         f"  run seed {args.seed}, search {args.limit}, "
         f"leaf {args.value or 'hp-share'} on {args.device}, "
         f"bench {'hidden' if args.hide_bench else 'OPEN (reference)'}"
-        f"{', rank scores recorded (rank-worker*.jsonl.gz)' if args.record_rank_scores else ''}",
+        f"{', rank scores recorded (rank-worker*.jsonl.gz)' if args.record_rank_scores else ''}"
+        f"\n  worker failures: stop after "
+        f"{'none (never)' if max_failures is None else max_failures} "
+        f"(IKA-336, -> {out_dir / 'workers.json'})",
         file=sys.stderr,
         flush=True,
     )
@@ -368,7 +392,8 @@ def main() -> None:
         status = run_workers(
             numbers, build,
             workers=args.workers, out_dir=out_dir, env=env, cwd=str(ROOT),
-            label="generation", counts=written,
+            label="generation", counts=written, max_failures=max_failures,
+            server_logs=[out_dir / "logs" / f"inference{i}.log" for i in range(len(servers))],
         )
     finally:
         # However the run ended. A leftover server holds VRAM and answers the next run's

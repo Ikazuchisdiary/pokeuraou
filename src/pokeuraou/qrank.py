@@ -226,7 +226,9 @@ class RemoteQ:
             raise RuntimeError("the inference server closed the connection")
         reply = json.loads(line)
         if not reply.get("ok"):
-            raise RuntimeError(f"Q request failed: {reply.get('error')}")
+            from .inference import request_failed
+
+            raise request_failed(reply, "Q request failed")
         return reply
 
     def describe(self) -> list[str]:
