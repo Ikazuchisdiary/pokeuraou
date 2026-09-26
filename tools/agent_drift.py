@@ -37,6 +37,10 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+
+from pokeuraou.qrank import DEFAULT_Q  # noqa: E402
+from pokeuraou.search import SHIPPED_RANK_FILL  # noqa: E402
 
 #: The arguments that decide which agent plays. `objective` is not here: it names the
 #: payoff, not the player, and every caller passes it.
@@ -57,8 +61,10 @@ AGENT_ARGS = (
     # Which completion a hidden-bench menu is ranked from (IKA-143). Its default is what
     # ships, so omitting it drifts nothing; a tool that passes "first" plays the old rule.
     "rank_view",
-    # How a leaf ranking fills its cells (IKA-268). Its default is what ships, so omitting
-    # it drifts nothing; a tool that passes another fill plays another menu.
+    # How a leaf ranking fills its cells (IKA-268). `play_game`'s default (refs2) is what
+    # M-B generation ships, so omitting it drifts nothing here. M-C generation plays
+    # q-nocover since IKA-338, and passes it: its tools' fill is checked where they resolve
+    # it, at their options (`resolution_drift` below), since no `play_game` call shows it.
     "rank_fill",
     # Which completions a hidden-bench belief leaves out (IKA-283). Its default is what
     # ships, so omitting it drifts nothing; a tool that passes a drop plays another game.
@@ -100,6 +106,55 @@ KNOWN_DRIFT = frozenset(
         "width_match.py",
     }
 )
+
+
+#: The options that name a leaf-ranked menu's fill. M-C generation's worker leaves them
+#: unset and resolves them with `search.resolve_rank_fill` (q-nocover for a leaf-ranked
+#: menu, IKA-338); a tool that defaults one to a label of its own plays another menu than
+#: generation whenever the flag is left off -- the IKA-338 switch would have left every
+#: board at refs2 had `pool_match.py` kept `default=DEFAULT_RANK_FILL`.
+FILL_OPTIONS = ("--rank-fill", "--baseline-rank-fill")
+#: A launcher's `--q-model`: unset, the Q the workers' fills want (`qrank.tail_wants_default_q`).
+Q_OPTIONS = ("--q-model",)
+#: Tools that resolve an unnamed fill or Q their own way on purpose, and why.
+OWN_RESOLUTION = {
+    "play_human.py": "a person's game: q-nocover when the Q is there, else refs2 with a "
+    "note, as for a missing leaf (IKA-330, IKA-338)",
+    "analyze.py": "play_human's agent, for a person reading (IKA-330)",
+    "profile_stages.py": "hands --q-model to generate_queue.py only when given, so the "
+    "driver's own default runs (IKA-98)",
+}
+
+
+def resolution_drift(path: Path) -> list[str]:
+    """How this tool's fill and Q options fail to resolve as M-C generation's do (IKA-338).
+
+    A fill option (`FILL_OPTIONS`) must default to None and the file must resolve it with
+    `resolve_rank_fill`; a `--q-model` must default to None and the file must ask
+    `tail_wants_default_q`. Empty when the file declares neither.
+    """
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    names = {
+        node.id if isinstance(node, ast.Name) else node.attr
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.Name, ast.Attribute))
+    }
+    problems: list[str] = []
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "add_argument" and node.args
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value in FILL_OPTIONS + Q_OPTIONS):
+            continue
+        option = node.args[0].value
+        default = next((k.value for k in node.keywords if k.arg == "default"), None)
+        if default is not None and not (isinstance(default, ast.Constant)
+                                        and default.value is None):
+            problems.append(f"{option} defaults to {ast.unparse(default)}")
+        resolver = "resolve_rank_fill" if option in FILL_OPTIONS else "tail_wants_default_q"
+        if resolver not in names:
+            problems.append(f"{option} is not resolved by {resolver}")
+    return problems
 
 
 def calls(path: Path) -> list[tuple[int, set[str]]]:
@@ -191,6 +246,27 @@ def main(argv: list[str] | None = None) -> int:
 
     drifted: set[str] = set()
     silent: list[str] = []
+    # IKA-338: the fill and the Q a tool plays when they are left off, beside the arguments
+    # it passes. The reference is M-C generation's worker, held to the same rule.
+    print(f"  an unnamed fill of a leaf-ranked menu (M-C): {SHIPPED_RANK_FILL} by {DEFAULT_Q} "
+          "(search.resolve_rank_fill, qrank.tail_wants_default_q)")
+    unresolved: list[str] = []
+    for path in sorted(glob.glob(str(ROOT / "tools/**/*.py"), recursive=True)):
+        p = Path(path)
+        problems = resolution_drift(p)
+        if not problems:
+            continue
+        if p.name in OWN_RESOLUTION:
+            print(f"  own way   {p.name:<26} {'; '.join(problems)}  -- {OWN_RESOLUTION[p.name]}")
+            continue
+        unresolved.append(p.relative_to(ROOT).as_posix())
+        print(f"  DEFAULT   {p.name:<26} {'; '.join(problems)}")
+    worker = ROOT / "tools/selfplay.py"
+    if "resolve_rank_fill" not in worker.read_text(encoding="utf-8"):
+        unresolved.append("tools/selfplay.py")
+        print("  DEFAULT   selfplay.py                M-C generation's worker does not "
+              "resolve its fill with resolve_rank_fill")
+    print()
     # `tools/oneshot/` is in scope too. A tool is shelved there when its question was
     # asked once, not because it stopped being runnable -- and a shelved tool that builds
     # an agent the current generation would not recognise is exactly the thing someone
@@ -246,12 +322,19 @@ def main(argv: list[str] | None = None) -> int:
             f"\n  UNSTATED: {', '.join(silent)} call play_game without saying which game.\n"
             "  Pass the sixes as `sheets`, or `open_information=True` for the open game."
         )
+    if unresolved:
+        print(
+            f"\n  DEFAULT: {', '.join(unresolved)} resolve an unnamed fill or Q apart from "
+            "generation.\n  Default the option to None and resolve it with "
+            "search.resolve_rank_fill / qrank.tail_wants_default_q, or add the file to "
+            "OWN_RESOLUTION with the reason."
+        )
     if pool_missing:
         print(
             f"\n  POOL: poolplay.py omits {', '.join(pool_missing)} that M-B generation passes.\n"
             "  The two generators have to build the same agent."
         )
-    return 1 if (appeared or fixed or silent or pool_missing) else 0
+    return 1 if (appeared or fixed or silent or pool_missing or unresolved) else 0
 
 
 if __name__ == "__main__":

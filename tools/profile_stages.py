@@ -1145,7 +1145,9 @@ def main() -> None:
     )
     ap.add_argument("--value", default="data/models/value-gen11L.pt")
     ap.add_argument("--q-model", default=None,
-                    help="generation: generate_queue.py's --q-model (IKA-274, a q rank fill)")
+                    help="generation: generate_queue.py's --q-model (IKA-274, a q rank fill). "
+                    "Unset, the driver's own default runs: with --pool and --rank-leaf, "
+                    "q-nocover by data/models/q-mc0.pt (IKA-338)")
     ap.add_argument("--baseline", default="data/models/value-gen10.pt")
     ap.add_argument("--case", default="sash-ko", help="analysis: a human_baseline case")
     ap.add_argument("--device", default="cuda")

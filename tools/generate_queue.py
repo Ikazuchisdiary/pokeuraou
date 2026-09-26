@@ -60,7 +60,10 @@ def main() -> None:
     ap.add_argument("--q-model", default=None,
                     help="the Q a q / q-nocover --rank-fill ranks by (IKA-274): the servers "
                     "load it as the Q arm `q` (workers get --q-arm q); unserved, every "
-                    "worker loads it (--q-model)")
+                    "worker loads it (--q-model). Default with --pool: data/models/q-mc0.pt "
+                    "when the workers rank by the default Q -- with --rank-leaf after -- and "
+                    "no --rank-fill, q-nocover is what M-C generation plays (IKA-338) -- and "
+                    "a stop if that file is not there")
     ap.add_argument("--device", default="cuda", choices=("cpu", "cuda"))
     # 24, swept on the board against 48 with the same model on both sides: -1.3 [-3.7,
     # +1.1] at 2.03x the speed, while 16 is -5.6 and 12 is -7.5. Only 24 sits inside the
@@ -250,6 +253,17 @@ def main() -> None:
     )
 
     extra = args.rest[1:] if args.rest and args.rest[0] == "--" else args.rest
+    if args.q_model is None and args.pool is not None:
+        from pokeuraou import qrank
+
+        # IKA-338: M-C generation ranks its leaf-ranked menus by the default Q unless the
+        # tail names another fill. Found here, not in each worker, so that the servers
+        # hold it and a missing file stops the run before any worker starts.
+        if qrank.tail_wants_default_q(extra):
+            q_path = qrank.default_q()
+            if not q_path.exists():
+                raise SystemExit(qrank.missing_q(q_path))
+            args.q_model = str(q_path)
 
     # The guard `generate_parallel.sh` has and this did not. A book missing from the
     # command line looked exactly like a book that was not wanted, and the two differ by
@@ -380,6 +394,7 @@ def main() -> None:
         f"({numbers.start}..{numbers.stop - 1}) -> {out_dir}\n"
         f"  run seed {args.seed}, search {args.limit}, "
         f"leaf {args.value or 'hp-share'} on {args.device}, "
+        f"{'Q ' + Path(args.q_model).name + ', ' if args.q_model else ''}"
         f"bench {'hidden' if args.hide_bench else 'OPEN (reference)'}"
         f"{', rank scores recorded (rank-worker*.jsonl.gz)' if args.record_rank_scores else ''}"
         f"\n  worker failures: stop after "

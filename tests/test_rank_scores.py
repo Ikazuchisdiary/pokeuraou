@@ -271,7 +271,9 @@ def test_the_cli_passes_the_file_and_says_so(pool, monkeypatch, capsys, tmp_path
     monkeypatch.setattr(poolplay, "generate_pool", fake_generate)
     monkeypatch.setattr(tool, "build_leaf", lambda args, reg: (_stub, "value:stub"))
     out = tmp_path / "games-worker4.jsonl"
-    base = ["selfplay.py", "--pool", "p", "--games", "1", "--out", str(out), "--rank-leaf"]
+    # refs2 named: the shipped fill would load the default Q (IKA-338), not this test's point.
+    base = ["selfplay.py", "--pool", "p", "--games", "1", "--out", str(out),
+            "--rank-fill", "refs2", "--rank-leaf"]
     monkeypatch.setattr("sys.argv", base)
     tool.main()
     assert called["rank_scores_out"] is None  # null: off unless asked

@@ -14,7 +14,9 @@ What an arm is, per arm, and so in whichever seat it sits:
   `--baseline-rank-leaf`), and how its leaf ranking fills its cells (`--rank-fill` /
   `--baseline-rank-fill`, IKA-268; a `-nocover` label builds its leaf-ranked menu without
   the cover, IKA-323; `q` / `q-nocover` rank it by a learned Q instead, IKA-274, named by
-  `--q-arm` on the server or `--q-model` here),
+  `--q-arm` on the server or `--q-model` here). An arm with `--rank-leaf` and no fill named
+  plays `q-nocover` by `data/models/q-mc0.pt`, as M-C generation does, and stops without
+  that file; `refs2` is played when named (IKA-338),
 * whether its leaf scores a finished battle by the net instead of as its result
   (`--net-scores-ends` / `--baseline-net-scores-ends`: IKA-253 undone, for measuring it),
 * its selection: an arm with a leaf solves the pair's selection game with THAT leaf,
@@ -58,7 +60,12 @@ from pokeuraou.payoff import HP_SHARE  # noqa: E402
 from pokeuraou.pool import load_pool  # noqa: E402
 from pokeuraou.poolplay import PoolArm, SolvedSelections, pool_match_game  # noqa: E402
 from pokeuraou.provenance import open_games, provenance, write_game  # noqa: E402
-from pokeuraou.search import DEFAULT_RANK_FILL, parse_rank_fill, rank_fill_covers  # noqa: E402
+from pokeuraou.search import (  # noqa: E402
+    SHIPPED_RANK_FILL,
+    parse_rank_fill,
+    rank_fill_covers,
+    resolve_rank_fill,
+)
 from pokeuraou.selfplay import MAX_TURNS  # noqa: E402
 from pokeuraou.workqueue import WorkClient  # noqa: E402
 
@@ -233,11 +240,13 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--rank-leaf", action="store_true",
                     help="the tested arm narrows by its leaf (what M-C generation does)")
     ap.add_argument("--baseline-rank-leaf", action="store_true", help="same for the other arm")
-    ap.add_argument("--rank-fill", default=DEFAULT_RANK_FILL,
+    ap.add_argument("--rank-fill", default=None,
                     help="how the tested arm's leaf ranking fills its cells: refs<N> replies "
                     "at the matrix budget, refs<N>-fast at Budget.fast (IKA-268); a -nocover "
-                    "suffix builds its leaf-ranked menu without the cover (IKA-323)")
-    ap.add_argument("--baseline-rank-fill", default=DEFAULT_RANK_FILL,
+                    "suffix builds its leaf-ranked menu without the cover (IKA-323); q / "
+                    "q-nocover rank by a Q (IKA-274). Default with --rank-leaf: "
+                    f"{SHIPPED_RANK_FILL}, what M-C generation plays (IKA-338)")
+    ap.add_argument("--baseline-rank-fill", default=None,
                     help="same for the other arm")
     qrank.add_q_flags(ap)
     ap.add_argument("--bench-drop", default=DEFAULT_BENCH_DROP,
@@ -302,6 +311,10 @@ def main(argv: list[str] | None = None) -> None:
     if args.inference is not None and args.baseline:
         ap.error("--baseline is loaded here; with --inference use --baseline-inference-arm")
     check_other_arm(args, ap.error)
+    # Each arm's fill as generation resolves it (IKA-338): named, or q-nocover for a
+    # leaf-ranked menu.
+    args.rank_fill = resolve_rank_fill(args.rank_fill, args.rank_leaf)
+    args.baseline_rank_fill = resolve_rank_fill(args.baseline_rank_fill, args.baseline_rank_leaf)
     for fill in (args.rank_fill, args.baseline_rank_fill):
         try:
             parse_rank_fill(fill)

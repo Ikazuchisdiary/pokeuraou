@@ -207,7 +207,38 @@ DEFAULT_REFERENCES = 2
 #: options that leaves off the menu are reported in `Narrowed.uncovered`, as the budget's
 #: are (narrow.py's principles). Only the root's leaf-ranked menu reads it; the damage
 #: menus -- a sub-game's, a deepened child's, the ranking's own references -- keep the cover.
+#:
+#: This is the LIBRARY's default -- `play_game`, `generate_pool`, `PoolArm` and M-B's
+#: roster path, none of which holds a Q -- and a damage-ranked arm's, which reads no fill.
+#: It is not what M-C generation and the board play since IKA-338: see `SHIPPED_RANK_FILL`.
 DEFAULT_RANK_FILL = f"refs{DEFAULT_REFERENCES}"
+
+#: The fill of a leaf-ranked menu that names none, in M-C generation and on the board
+#: (IKA-338): rank by the default Q (`qrank.DEFAULT_Q`) without the cover.
+#:
+#:     2026-09-27, IKA-331: from pools made in the same wall clock (IKA-73's form),
+#:     q-nocover's pool made 1.18x the games (1,243 against 1,056 a minute) and the leaf
+#:     learned from it played refs2's leaf at Elo +3.8 [-6.3, +14.0] over 2,000 pairs,
+#:     non-inferior (SPRT(-10, 0) H1). As a player it was +26.4 [+19.5, +33.3] over refs2
+#:     at the same CPU (IKA-274 stage 2), which is why the board and human play took it
+#:     first (9/26).
+#:
+#: The tools resolve an unnamed ``--rank-fill`` with `resolve_rank_fill`; ``refs2`` is still
+#: played when named. A q fill with no Q stops -- it never falls back to ``refs2`` in
+#: generation or on the board (`qrank.default_q`).
+SHIPPED_RANK_FILL = "q-nocover"
+
+
+def resolve_rank_fill(given: str | None, rank_leaf: bool) -> str:
+    """The fill an arm plays: the one named, else `SHIPPED_RANK_FILL` for a leaf-ranked menu.
+
+    A damage-ranked arm reads no fill, so it keeps `DEFAULT_RANK_FILL`: its records then
+    carry no ``rankFill``, as before IKA-338, and it needs no Q.
+    """
+    if given is not None:
+        return given
+    return SHIPPED_RANK_FILL if rank_leaf else DEFAULT_RANK_FILL
+
 
 _RANK_FILL = re.compile(r"refs([1-9][0-9]*)(-fast)?(-nocover)?")
 
@@ -1571,6 +1602,7 @@ __all__ = [
     "DEFAULT_SUB_BRANCHES",
     "DEFAULT_SUB_LIMIT",
     "ORACLE_TOLERANCE",
+    "SHIPPED_RANK_FILL",
     "BeliefResult",
     "SearchResult",
     "belief_solve",
@@ -1578,5 +1610,6 @@ __all__ = [
     "leaf_ranking",
     "parse_rank_fill",
     "rank_fill_covers",
+    "resolve_rank_fill",
     "search",
 ]

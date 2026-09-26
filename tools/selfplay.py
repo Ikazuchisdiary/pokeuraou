@@ -47,7 +47,12 @@ from pokeuraou.hidden import DEFAULT_BENCH_DROP, parse_bench_drop
 from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.priors import build_cooccurrence, find_cached_chaos, load_chaos
 from pokeuraou.regulation import Regulation
-from pokeuraou.search import DEFAULT_RANK_FILL, parse_rank_fill
+from pokeuraou.search import (
+    DEFAULT_RANK_FILL,
+    SHIPPED_RANK_FILL,
+    parse_rank_fill,
+    resolve_rank_fill,
+)
 from pokeuraou.selection_book import (
     DEFAULT_EPSILON,
     DEFAULT_TEMPERATURE,
@@ -92,10 +97,12 @@ def add_pool_flags(ap: argparse.ArgumentParser) -> None:
     )
     ap.add_argument(
         "--rank-fill",
-        default=DEFAULT_RANK_FILL,
+        default=None,
         help="with --pool and --rank-leaf: how the leaf ranking fills its cells -- "
-        "refs<N> replies at the matrix budget, refs<N>-fast at Budget.fast (IKA-268). "
-        f"Default {DEFAULT_RANK_FILL}.",
+        "refs<N> replies at the matrix budget, refs<N>-fast at Budget.fast (IKA-268), "
+        "q / q-nocover rank by a Q (IKA-274). "
+        f"Default {SHIPPED_RANK_FILL} (IKA-338), by {qrank.DEFAULT_Q} unless --q-arm / "
+        f"--q-model names a Q; {DEFAULT_RANK_FILL} is played when named.",
     )
     ap.add_argument(
         "--bench-drop",
@@ -465,6 +472,13 @@ def main() -> None:
     )
     add_pool_flags(ap)
     args = ap.parse_args()
+    # Named, or the pool path's shipped fill for a leaf-ranked menu (IKA-338). The roster
+    # path takes no fill, so an unnamed one is the one it plays.
+    named_fill = args.rank_fill
+    args.rank_fill = (
+        resolve_rank_fill(named_fill, args.rank_leaf) if args.pool is not None
+        else named_fill or DEFAULT_RANK_FILL
+    )
     try:
         parse_rank_fill(args.rank_fill)
         parse_bench_drop(args.bench_drop)

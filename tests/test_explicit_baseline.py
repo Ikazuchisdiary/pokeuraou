@@ -134,7 +134,8 @@ def test_an_explicit_baseline_is_passed_as_before(tmp_path, monkeypatch, pool_fi
     assert command[at + 1] == "b.pt" and "--baseline-hp-share" not in command
     # A leaf named in the tail counts: a served null control names the tested arm's own
     # server arm there (`-- --baseline-inference-arm value`, as IKA-307's boards do).
-    tail = ["--baseline-inference-arm", "value", "--rank-leaf"]
+    # refs2 named: the shipped fill would want the default Q (IKA-338), not this test's point.
+    tail = ["--baseline-inference-arm", "value", "--rank-leaf", "--rank-fill", "refs2"]
     code, command = _driver(tmp_path, monkeypatch,
                             ["--pool", pool_file, "--hide-bench", "--", *tail])
     assert code == 0
