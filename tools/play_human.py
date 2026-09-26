@@ -138,6 +138,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--view-port", type=int, default=8332)
     ap.add_argument("--live-out", type=Path, default=None,
                     help="keep the page's frames in this file (tools/live_view.py shows it again)")
+    ap.add_argument("--sprite-url", default=None,
+                    help="the page's images, {id} = Showdown's sprite id (default: Showdown's server; "
+                    "\"\" for none, name cards)")
     ap.add_argument("--interval-ms", type=float, default=100.0,
                     help="the least time between two steps sent while the agent thinks")
     args = ap.parse_args(argv)
@@ -209,7 +212,8 @@ def main(argv: list[str] | None = None) -> None:
     if args.view or args.live_out is not None:
         sink = liveview.FileSink(args.live_out) if args.live_out is not None else None
         server = liveview.LiveServer(
-            args.view_host, args.view_port if args.view else 0, sink=sink
+            args.view_host, args.view_port if args.view else 0, sink=sink,
+            sprite_url=args.sprite_url,
         ).start()
         if args.view:
             print(f"画面: {server.url}", file=sys.stderr)

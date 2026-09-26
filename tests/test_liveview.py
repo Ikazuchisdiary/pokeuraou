@@ -345,3 +345,52 @@ def test_a_page_that_connects_late_is_sent_the_game_so_far(pool) -> None:  # noq
     assert steps and all(s["kind"] == "done" for s in steps)
     assert len(steps) == len([s for s in seen if s["type"] == "answer"])
 
+
+# ------------------------------------------------------------------------ the page's data
+
+
+def test_the_events_carry_what_the_page_draws(pool) -> None:  # noqa: ANN001
+    heard = Heard()
+    _play(pool, PolicyPerson("random", 7), seed=7, listener=heard)
+    sheets = heard.of("sheets")[0]
+    for team in sheets["teams"]:
+        for mon in team:
+            assert mon["id"] and mon["id"] == mon["id"].lower() and mon["types"]
+    assert sheets["statNames"]["atk"] and sheets["statusNames"]["par"]
+    board = heard.of("board")[0]
+    for side in board["sides"]:
+        for mon in side["active"]:
+            assert mon["id"] and mon["types"] and "statusId" in mon
+    think = heard.of("think")[0]
+    assert "classCount" in think and "classes" not in think
+    prompt = heard.of("prompt")[0]
+    assert len(prompt["actives"]) == len(prompt["slots"][0])
+    turns = heard.of("turn")
+    assert turns and any(t["changes"] for t in turns)
+    for t in turns:
+        assert t["agent"].split(" ／ ") == t["agentSlots"]
+        for c in t["changes"]:
+            assert c["from"] != c["to"] or c["fainted"] or c["entered"] or c["status"]
+    # Labels are one part per slot, in slot order.
+    step = heard.of("step")[-1]
+    for label, action in zip(step.our_labels, step.ours, strict=True):
+        assert len(label.split(" ／ ")) == len(action.slots)
+
+
+def test_sprite_ids_carry_the_forme_and_the_server_writes_the_page_its_source(pool) -> None:  # noqa: ANN001
+    reg = pool.reg
+    assert humanplay.sprite_id(reg, "incineroar") == "incineroar"
+    if "urshifurapidstrike" in reg.species:
+        assert humanplay.sprite_id(reg, "urshifurapidstrike") == "urshifu-rapidstrike"
+    formes = [s for s in reg.species.values() if s.forme]
+    assert formes, "no forme in the dex; the check would be vacuous"
+    for species in formes:
+        got = humanplay.sprite_id(reg, species.id)
+        assert got.count("-") >= 1 and " " not in got and got == got.lower()
+    for url, want in ((None, liveview.SPRITE_URL), ("", ""), ("/sprites/{id}.png", "/sprites/{id}.png")):
+        server = liveview.LiveServer("127.0.0.1", 0, sprite_url=url).start()
+        try:
+            page = urllib.request.urlopen(server.url, timeout=10).read().decode("utf-8")  # noqa: S310
+        finally:
+            server.close()
+        assert f'<meta name="sprite-url" content="{want}">' in page

@@ -101,7 +101,7 @@ from .narrow import drop_dead_actions
 from .payoff import HP_SHARE, Objective
 from .position import Position
 from .priors import SampledSet
-from .progress import Reader, Recorder
+from .progress import SLOT_SEPARATOR, Reader, Recorder, action_label
 from .regulation import Regulation
 from .search import belief_solve, search
 from .selection_book import BenchPrior, BookEntry
@@ -521,11 +521,39 @@ def render_position(
     return "\n".join(out)
 
 
-def sheet_view(six: Sequence[SampledSet], loc: Any = None) -> list[dict[str, Any]]:  # noqa: ANN401
+def sprite_id(reg: Regulation, species: str) -> str:
+    """Showdown's sprite id: the base species' id, and ``-`` and the forme's id if there is
+    one (``urshifu-rapidstrike``, ``charizard-megay``)."""
+    from .regulation import to_id
+
+    found = reg.species.get(to_id(species))
+    if found is None:
+        return to_id(species)
+    base = to_id(found.base_species)
+    return f"{base}-{to_id(found.forme)}" if found.forme else base
+
+
+def species_types(reg: Regulation, species: str, current: Sequence[str] = ()) -> list[str]:
+    """The types as lower-case ids: ``current`` when a battle changed them, else the dex's."""
+    from .regulation import to_id
+
+    if current:
+        return [to_id(t) for t in current]
+    found = reg.species.get(to_id(species))
+    return [to_id(t) for t in found.types] if found is not None else []
+
+
+def sheet_view(
+    six: Sequence[SampledSet], loc: Any = None, reg: Regulation | None = None  # noqa: ANN401
+) -> list[dict[str, Any]]:
     """A team sheet as plain values (what `render_sheet` prints), for a screen."""
     return [
         {
             "species": _name(loc, "species", s.species),
+            **(
+                {"id": sprite_id(reg, s.species), "types": species_types(reg, s.species)}
+                if reg is not None else {}
+            ),
             "item": _name(loc, "item", s.item),
             "ability": _name(loc, "ability", s.ability),
             "nature": _name(loc, "nature", s.nature),
@@ -563,13 +591,13 @@ def board_view(
     def mon_view(mon: Any, exact: bool) -> dict[str, Any]:  # noqa: ANN401
         view: dict[str, Any] = {
             "species": _name(loc, "species", mon.species),
+            "id": sprite_id(reg, mon.species),
+            "types": species_types(reg, mon.species, mon.types),
             "fainted": bool(mon.fainted),
             "percent": displayed_percent(mon.hp, mon.maxhp, floor_rule=floor),
             "status": _name(loc, "status", mon.status) if mon.status else None,
-            "boosts": {
-                (loc.stat(k, short=True) if loc is not None else k): v
-                for k, v in mon.boosts.items() if v
-            },
+            "statusId": mon.status or None,
+            "boosts": {k: v for k, v in mon.boosts.items() if v},
             "item": _name(loc, "item", mon.item) if mon.item else None,
             "volatiles": [e.id for e in mon.volatiles],
         }
@@ -615,6 +643,57 @@ def board_view(
         "ended": bool(pos.ended),
         "seconds": seconds,
     }
+
+
+def turn_changes(
+    reg: Regulation,
+    before: Position,
+    after: Position,
+    viewer: int,
+    loc: Any = None,  # noqa: ANN401
+    *,
+    names: tuple[str, str] = ("側0", "側1"),
+) -> list[dict[str, Any]]:
+    """What a turn did, as side ``viewer`` could see it: per Pokemon whose displayed HP,
+    faint, status or place changed, the HP as displayed before and after (the other side's
+    as the game shows it, a percentage), whether it fainted, a new status, and whether it
+    came in. The other side's Pokemon it has not seen stay out unless they came in."""
+    floor = uses_floor_display(reg)
+    out = []
+    for side in (0, 1):
+        old = {identity(m): m for m in before.sides[side].pokemon}
+        for mon in after.sides[side].pokemon:
+            prev = old.get(identity(mon))
+            if prev is None:
+                continue
+            came = mon.active_index is not None and prev.active_index is None
+            if side != viewer and prev.active_index is None and not came:
+                continue
+            was = displayed_percent(prev.hp, prev.maxhp, floor_rule=floor)
+            now = displayed_percent(mon.hp, mon.maxhp, floor_rule=floor)
+            fainted = mon.fainted and not prev.fainted
+            status = (
+                mon.status
+                if mon.status and mon.status != prev.status and not mon.fainted
+                and mon.status != "fnt"
+                else None
+            )
+            if was == now and not fainted and not status and not came:
+                continue
+            out.append({
+                "side": side,
+                "name": names[side],
+                "species": _name(loc, "species", mon.species),
+                "id": sprite_id(reg, mon.species),
+                "from": was,
+                "to": now,
+                **({"hp": [prev.hp, mon.hp, mon.maxhp]} if side == viewer else {}),
+                "fainted": fainted,
+                "status": _name(loc, "status", status) if status else None,
+                "statusId": status,
+                "entered": came,
+            })
+    return out
 
 
 # ----------------------------------------------------------------------------- the agent
@@ -737,6 +816,14 @@ class HumanGame:
                 "heading": _HEADINGS.get(kind, kind),
                 "turn": pos.turn,
                 "choices": [a.to_choice() for a in legal],
+                # Slot k of every action is the person's k-th active Pokemon (None: empty).
+                "actives": [
+                    None if mon is None else {
+                        "species": _name(self.loc, "species", mon.species),
+                        "id": sprite_id(self.reg, mon.species),
+                    }
+                    for mon in pos.sides[self.you].active_pokemon()
+                ],
                 "slots": [
                     [
                         (s.to_choice(), s.describe(self.reg, self.loc, targets))
@@ -838,17 +925,24 @@ class HumanGame:
                 "-- 相手の行動: "
                 + agent_action.describe(reg, self.loc, target_names(pos, self.me))
             )
-            if self.listener is not None:
-                self.emit("turn", {
-                    "turn": pos.turn,
-                    "decision": len(record.decisions) - 1,
-                    "agent": agent_action.describe(reg, self.loc, target_names(pos, self.me)),
-                    "person": human_action.describe(reg, self.loc, target_names(pos, self.you)),
-                    "offMenu": extra["humanOffMenu"],
-                })
             advanced = self._advance_turn(
                 pos, chosen, _HiddenBench(self.sheets, list(seen), self.bench_prior, list(leads))
             )
+            if self.listener is not None:
+                agent_label = action_label(reg, agent_action, pos, self.me, self.loc)
+                person_label = action_label(reg, human_action, pos, self.you, self.loc)
+                self.emit("turn", {
+                    "turn": pos.turn,
+                    "decision": len(record.decisions) - 1,
+                    "agent": agent_label,
+                    "person": person_label,
+                    "agentSlots": agent_label.split(SLOT_SEPARATOR),
+                    "personSlots": person_label.split(SLOT_SEPARATOR),
+                    "offMenu": extra["humanOffMenu"],
+                    "changes": [] if advanced is None else turn_changes(
+                        reg, pos, advanced, self.you, self.loc, names=self.side_names
+                    ),
+                })
             if advanced is None:
                 record.end_reason = "unresolved"
                 break
@@ -896,7 +990,7 @@ class HumanGame:
             self.emit("think", {
                 "decision": len(self.record.decisions), "turn": pos.turn, "plan": plan,
                 "clock": agent.clock, "seconds": agent.seconds, "menuMs": menu_seconds * 1000.0,
-                "classes": classes, "exact": exact,
+                "classCount": classes, "exact": exact,
             })
             progress = Recorder(
                 Reader(reg, pos, me, loc=self.loc, names=self.side_names),
@@ -1279,7 +1373,15 @@ def play(
             "agentSide": agent_side, "personSide": you, "seed": seed, "gameIndex": game_index,
             "agent": agent.name, "seconds": agent.seconds, "clock": agent.clock,
             "cores": agent.cores,
-            "teams": [sheet_view(six[s], loc) for s in (0, 1)],
+            "teams": [sheet_view(six[s], loc, reg) for s in (0, 1)],
+            "statNames": {
+                k: (loc.stat(k, short=True) if loc is not None else k)
+                for k in ("atk", "def", "spa", "spd", "spe", "accuracy", "evasion")
+            },
+            "statusNames": {
+                k: (loc.status(k) if loc is not None else k)
+                for k in ("brn", "par", "psn", "tox", "slp", "frz")
+            },
             "names": ["AI" if s == agent_side else "あなた" for s in (0, 1)],
         })
         listener("select", {"size": size, "team": len(six[you])})
@@ -1389,6 +1491,9 @@ __all__ = [
     "WallCost",
     "agent_pick",
     "board_view",
+    "sprite_id",
+    "species_types",
+    "turn_changes",
     "clock_path",
     "node_time",
     "parse_choice",

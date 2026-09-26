@@ -9,6 +9,9 @@
 const STRINGS = 1, EVENT = 2, STEP = 3;
 const KINDS = ["start", "refine", "refused", "widen", "done"];
 const READS = ["leaf", "deep", "refused"];
+// An action's label is its slots' parts joined by this (slot k = the side's k-th active).
+const SLOT_SEPARATOR = " ／ ";
+const parts = (label) => label.split(SLOT_SEPARATOR).filter((x) => x !== "");
 const strings = [];
 let socket = null;
 
@@ -31,7 +34,11 @@ function decodeStep(buf) {
   const arr = (n, f) => { const a = []; for (let i = 0; i < n; i++) a.push(f()); return a; };
   s.ours = ids(nO); s.ourP = arr(nO, f64); s.ourLoss = arr(nO, f32);
   s.theirs = ids(nT); s.theirP = arr(nT, f32); s.theirLoss = arr(nT, f32);
-  s.classes = arr(nC, () => ({ weight: f32(), value: f32(), bench: strings[u32()], p: arr(nT, f32) }));
+  s.oursSlots = s.ours.map(parts); s.theirsSlots = s.theirs.map(parts);
+  s.classes = arr(nC, () => ({
+    weight: f32(), value: f32(), bench: parts(strings[u32()]), benchIds: parts(strings[u32()]),
+    p: arr(nT, f32),
+  }));
   const top = () => arr(u8(), () => [strings[u32()], f32()]);
   const branch = () => {
     const b = { weight: f32(), value: f32(), what: strings[u32()] };
@@ -42,6 +49,7 @@ function decodeStep(buf) {
   };
   const pairs = () => arr(u8(), () => {
     const p = { ours: strings[u32()], theirs: strings[u32()], klass: i16(), read: READS[u8()], p: f32(), value: f32() };
+    p.oursSlots = parts(p.ours); p.theirsSlots = parts(p.theirs);
     p.branches = arr(u8(), branch);
     return p;
   });
@@ -79,5 +87,5 @@ function send(line) {
   if (socket && socket.readyState === 1) socket.send(JSON.stringify({ line }));
 }
 
-window.LiveData = { connect, send, decodeStep, strings };
+window.LiveData = { connect, send, decodeStep, strings, SLOT_SEPARATOR };
 })();

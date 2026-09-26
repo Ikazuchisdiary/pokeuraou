@@ -27,6 +27,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=8332)
     ap.add_argument("--speed", type=float, default=1.0, help="0 sends everything at once")
+    ap.add_argument("--sprite-url", default=None,
+                    help="where the page takes images, {id} = Showdown's sprite id "
+                    "(default: Showdown's server; \"\" for none)")
     ap.add_argument("--dump", action="store_true", help="print the frames as JSON lines instead")
     args = ap.parse_args(argv)
     frames = list(liveview.read_record(args.record))
@@ -37,7 +40,7 @@ def main(argv: list[str] | None = None) -> None:
             if got is not None:
                 sys.stdout.write(json.dumps({"t": round(seconds, 4), **got}, ensure_ascii=False) + "\n")
         return
-    server = liveview.LiveServer(args.host, args.port).start()
+    server = liveview.LiveServer(args.host, args.port, sprite_url=args.sprite_url).start()
     print(f"画面: {server.url}（{len(frames)} フレーム）", file=sys.stderr)
     try:
         input("ページを開いたら Enter で再生 > ")

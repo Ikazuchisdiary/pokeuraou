@@ -54,6 +54,16 @@ PV_MIN_P = 0.005
 #: The top actions of each side shown at a node below the root.
 PV_TOP = 3
 
+#: Between the parts of an action's label, one per active slot (the page splits on it).
+SLOT_SEPARATOR = " ／ "
+
+
+def action_label(reg: Regulation, action: SideAction, pos: Position, side: int, loc: Any = None) -> str:  # noqa: ANN401
+    """An action as the page shows it: each slot's part (`describe`, targets named), in slot
+    order, joined by `SLOT_SEPARATOR` -- slot k is the side's k-th active Pokemon."""
+    targets = target_names(pos, side)
+    return SLOT_SEPARATOR.join(slot.describe(reg, loc, targets) for slot in action.slots)
+
 
 @dataclass(slots=True)
 class PvNode:
@@ -102,9 +112,11 @@ class ClassView:
     opponent's mixture if the bench is that one."""
 
     weight: float
+    #: The species it puts on the bench: names (localised) and ids (the dex's).
     bench: tuple[str, ...]
     p: np.ndarray
     value: float
+    bench_ids: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -188,7 +200,7 @@ class Reader:
         key = (repr(actives), side, action.to_choice())
         got = self._labels.get(key)
         if got is None:
-            got = action.describe(self.reg, self.loc, target_names(pos, side))
+            got = action_label(self.reg, action, pos, side, self.loc)
             self._labels[key] = got
         return got
 
@@ -223,6 +235,7 @@ class Reader:
                     weight=float(w[k]),
                     bench=tuple(self.species(s) for s in getattr(item, "species", ())),
                     p=y, value=_mine(v0, me),
+                    bench_ids=tuple(getattr(item, "species", ())),
                 ))
             read = 0.0
             for (k, i, j) in root.children:
@@ -450,6 +463,7 @@ __all__ = [
     "PV_MIN_P",
     "PV_PAIRS",
     "PV_PAIRS_BELOW",
+    "SLOT_SEPARATOR",
     "ClassView",
     "PvBranch",
     "PvNode",
@@ -457,4 +471,5 @@ __all__ = [
     "Reader",
     "Recorder",
     "Snapshot",
+    "action_label",
 ]

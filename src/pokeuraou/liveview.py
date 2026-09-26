@@ -31,8 +31,10 @@ from __future__ import annotations
 import base64
 import contextlib
 import hashlib
+import html
 import json
 import queue
+import re
 import socket
 import struct
 import threading
@@ -48,7 +50,7 @@ import numpy as np
 from .actions import SideAction
 from .humanplay import MovePlan, Person, parse_choice, parse_selection
 from .priors import SampledSet
-from .progress import PvBranch, PvNode, PvPair, Snapshot
+from .progress import SLOT_SEPARATOR, PvBranch, PvNode, PvPair, Snapshot
 
 # ----------------------------------------------------------------------------- the wire
 
@@ -135,7 +137,8 @@ class Wire:
         ]
         for view in snap.classes:
             parts.append(struct.pack(
-                "<ffI", view.weight, view.value, self.intern(" / ".join(view.bench) or "-")
+                "<ffII", view.weight, view.value, self.intern(SLOT_SEPARATOR.join(view.bench)),
+                self.intern(SLOT_SEPARATOR.join(view.bench_ids)),
             ))
             parts.append(np.asarray(view.p, dtype="<f4").tobytes())
         self._pairs(snap.pv, parts)
@@ -218,9 +221,11 @@ class Decoder:
         their_loss = take("<f4", n_theirs)
         classes = []
         for _ in range(n_classes):
-            weight, cvalue, bench = struct.unpack_from("<ffI", frame, at)
-            at += 12
-            classes.append({"weight": weight, "value": cvalue, "bench": s[bench],
+            weight, cvalue, bench, ids = struct.unpack_from("<ffII", frame, at)
+            at += 16
+            classes.append({"weight": weight, "value": cvalue,
+                            "bench": [b for b in s[bench].split(SLOT_SEPARATOR) if b],
+                            "benchIds": [b for b in s[ids].split(SLOT_SEPARATOR) if b],
                             "p": take("<f4", n_theirs).tolist()})
 
         def pairs() -> list[dict[str, Any]]:
@@ -384,6 +389,11 @@ def ws_send_text(sock: socket.socket, text: str) -> None:
     sock.sendall(ws_frame(text.encode("utf-8"), 1, mask=b"\x11\x22\x33\x44"))
 
 
+#: The page's images by default (the user's decision of 9/26): Showdown's sprite server,
+#: asked by the browser that opens the page. Nothing is downloaded into the repository or
+#: data/. ``{id}`` is Showdown's sprite id (`humanplay.sprite_id`).
+SPRITE_URL = "https://play.pokemonshowdown.com/sprites/gen5/{id}.png"
+
 #: The page's files: the structure, the look (CSS variables and layout), the data half
 #: (socket, frames, strings -- no drawing) and the drawing half. A designed page replaces
 #: the look and the drawing and keeps the data half.
@@ -413,10 +423,15 @@ class LiveServer:
         *,
         sink: Callable[[bytes], None] | None = None,
         web: Path = WEB,
+        sprite_url: str | None = None,
     ) -> None:
         self.wire = Wire()
         self.sink = sink
         self.web = web
+        #: Where the page takes its images (``{id}`` is Showdown's sprite id), written into
+        #: the page's ``sprite-url`` meta. None keeps the page's (`SPRITE_URL`, Showdown's
+        #: server: the browser asks it, nothing is stored); "" is no images, name cards.
+        self.sprite_url = sprite_url
         self.inbox: queue.Queue[str] = queue.Queue()
         self.lock = threading.Lock()
         self.clients: list[tuple[socket.socket, threading.Lock]] = []
@@ -436,6 +451,13 @@ class LiveServer:
                 found = FILES.get(self.path.split("?", 1)[0])
                 if found is not None:
                     body = (server.web / found[0]).read_bytes()
+                    if found[0] == "live.html" and server.sprite_url is not None:
+                        body = re.sub(
+                            rb'<meta name="sprite-url" content="[^"]*">',
+                            lambda _m: b'<meta name="sprite-url" content="'
+                            + html.escape(server.sprite_url).encode("utf-8") + b'">',
+                            body,
+                        )
                     self.send_response(200)
                     self.send_header("Content-Type", found[1])
                     self.send_header("Content-Length", str(len(body)))
@@ -621,6 +643,7 @@ __all__ = [
     "PAGE",
     "WEB",
     "STEP",
+    "SPRITE_URL",
     "STRINGS",
     "Decoder",
     "FileSink",
