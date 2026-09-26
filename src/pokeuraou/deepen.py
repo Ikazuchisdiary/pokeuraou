@@ -593,6 +593,9 @@ class Step:
     #: The cell this step refined or refused, and its node's level (0 at the root).
     cell: tuple[int, ...] | None = None
     level: int | None = None
+    #: The `Budget` a refined cell's turn was resolved with (None at a depth-1 answer):
+    #: a reader can ask the port that turn again, with its draws (IKA-345).
+    turn: Any = None
 
 
 #: A progress callback: called with each `Step`, returns nothing, changes nothing.
@@ -600,7 +603,8 @@ Progress = Callable[[Step], None]
 
 
 def _stepper(
-    progress: Progress, root: Any, meter: _Meter, cells: int, oracle: Any  # noqa: ANN401
+    progress: Progress, root: Any, meter: _Meter, cells: int, oracle: Any,  # noqa: ANN401
+    turn: Any = None,  # noqa: ANN401 - the turn's Budget
 ) -> Callable[..., None]:
     """The callback, bound to one deepening's root, meter and oracle."""
     count = [0]
@@ -619,6 +623,7 @@ def _stepper(
             widened=0 if oracle is None else oracle.widened,
             swapped=0 if oracle is None else oracle.swapped,
             cell=None if cell is None else tuple(int(c) for c in cell), level=level,
+            turn=turn,
         ))
 
     return announce
@@ -772,7 +777,9 @@ def deepen_root(
     refused = 0
     guard = MAX_LEVELS if levels is None else levels
     watch = _Watch()
-    announce = None if progress is None else _stepper(progress, root, meter, cells, oracle)
+    announce = (
+        None if progress is None else _stepper(progress, root, meter, cells, oracle, budget)
+    )
     if announce is not None:
         announce("start", expanded, deepest, refused)
     helper = (
@@ -1762,7 +1769,9 @@ def deepen_belief(
     refused = 0
     guard = MAX_LEVELS if levels is None else levels
     watch = _Watch()
-    announce = None if progress is None else _stepper(progress, root, meter, cells, oracle)
+    announce = (
+        None if progress is None else _stepper(progress, root, meter, cells, oracle, budget)
+    )
     if announce is not None:
         announce("start", expanded, deepest, refused)
     helper = (

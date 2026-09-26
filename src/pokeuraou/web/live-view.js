@@ -13,8 +13,8 @@ const SPRITE_URL = window.POKEURAOU_SPRITE_URL != null ? window.POKEURAOU_SPRITE
   : "https://play.pokemonshowdown.com/sprites/gen5/{id}.png";
 const LIVE_MIN = 0.005;      // a mixture weight below this counts as "not played"
 const REORDER_MS = 1000;     // bars keep their order at least this long (motion without shuffling)
-const PV_EVERY_MS = 400;
-const CHART_DECISIONS = 8;   // the value chart shows the last this many decisions     // the open PV tree is redrawn at most this often
+const PV_EVERY_MS = 400;     // the open PV tree is redrawn at most this often
+const CHART_DECISIONS = 8;   // the value chart shows the last this many decisions
 const TYPE_COLORS = {
   normal: "#9fa19f", fire: "#e62829", water: "#2980ef", electric: "#fac000", grass: "#3fa129", ice: "#3dcef3",
   fighting: "#ff8000", poison: "#9141cb", ground: "#915121", flying: "#81b9ef", psychic: "#ef4179", bug: "#91a119",
@@ -35,7 +35,8 @@ const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const pct = (p) => (p >= 0.1 || p === 0 ? (100 * p).toFixed(0) : (100 * p).toFixed(1)) + "%";
 const v3 = (v) => v.toFixed(3);
-const dlt = (d) => `<span class="n ${d >= 0 ? "up" : "down"}">${d >= 0 ? "+" : "−"}${Math.abs(d).toFixed(3)}</span>`;
+const dlt = (d) => (Math.abs(d) < 0.0005 ? '<span class="n zero">±0.000</span>'
+  : `<span class="n ${d > 0 ? "up" : "down"}">${d > 0 ? "+" : "−"}${Math.abs(d).toFixed(3)}</span>`);
 const aiSide = () => 1 - S.personSide;
 
 // ------------------------------------------------------------------ sprites
@@ -49,14 +50,15 @@ function learn(m) {
 }
 function infoOf(name) { return S.info.get(name) || { id: null, types: [] }; }
 function spriteUrl(id) { return SPRITE_URL && id ? SPRITE_URL.replace("{id}", encodeURIComponent(id)) : null; }
-function art(name, size) {
+function art(name, size, title, letters) {
   const inf = infoOf(name);
   const t1 = TYPE_COLORS[inf.types[0]] || "", t2 = TYPE_COLORS[inf.types[1]] || "";
   const style = `${t1 ? `--t1:${t1};` : ""}${t2 ? `--t2:${t2};` : ""}`;
   const url = spriteUrl(inf.id);
-  const fb = `<span class="fb-full">${esc(name)}</span><span class="fb-short">${esc(String(name).slice(0, 1))}</span>`;
-  if (!url || badSprite.has(url)) return `<span class="art s-${size} fb" style="${style}" title="${esc(name)}">${fb}</span>`;
-  return `<span class="art s-${size}" style="${style}" title="${esc(name)}">${fb}<img src="${esc(url)}" alt="${esc(name)}" decoding="async"></span>`;
+  const fb = `<span class="fb-full">${esc(name)}</span><span class="fb-short">${esc(String(name).slice(0, letters || 1))}</span>`;
+  const tip = esc(title || name);
+  if (!url || badSprite.has(url)) return `<span class="art s-${size} fb" style="${style}" title="${tip}">${fb}</span>`;
+  return `<span class="art s-${size}" style="${style}" title="${tip}">${fb}<img src="${esc(url)}" alt="${esc(name)}" decoding="async"></span>`;
 }
 document.addEventListener("error", (e) => {
   const img = e.target;
@@ -69,17 +71,53 @@ document.addEventListener("load", (e) => {
   if (img.tagName === "IMG" && img.parentElement && img.parentElement.classList.contains("art")) img.parentElement.classList.add("ok");
 }, true);
 
-// An action's label comes as one part per slot (live-data.js splits it): slot k is the side's
-// k-th active Pokemon, so each part gets its user's icon.
-function splitAct(label, side) {
-  const act = S.board && S.board.sides[side] ? S.board.sides[side].active : [];
-  const parts = Array.isArray(label) ? label : label.split(LiveData.SLOT_SEPARATOR);
-  if (parts.length === act.length) return parts.map((t, k) => [act[k] ? act[k].species : null, t]);
-  return [[null, parts.join(LiveData.SLOT_SEPARATOR)]];
+// An action's label comes as its parts, each [slot, text] with the active slot whose action it
+// is (IKA-345: the data says so; nothing is split or guessed). `who` names the Pokemon in each
+// active slot where the action is taken: the board's at the root, a node's field below it.
+function boardWho(side) {
+  const sd = S.board && S.board.sides[side];
+  return sd ? sd.active.map((m) => (m ? m.species : null)) : [];
 }
-function actHtml(label, side, size) {
-  return splitAct(label, side).map(([who, t]) =>
-    `<span class="part">${who ? art(who, size || "xs") : ""}<span>${esc(t)}</span></span>`).join("");
+function fieldWho(row) { return (row || []).map((m) => (m ? m.name : null)); }
+// A part is [slot, text, verb, target side (-1: none), target name, target sprite, mega]
+// (IKA-345): the move's name, then its target as the target's icon -- ringed, and its arrow
+// coloured, in the target's side's colour -- then the Mega Evolution mark. A part that is only
+// [slot, text] (an older record) is its text.
+const MEGA = '<span class="mega-mark" role="img" aria-label="メガシンカ" title="メガシンカ"></span>';
+function sideName(side) { return (S.names && S.names[side]) || (side === aiSide() ? "AI" : "あなた"); }
+function partBody(p, chunked) {
+  const [, t, verb, tside, tname, tsprite, , swap] = p;
+  if (verb === undefined) {
+    return chunked
+      ? `<span class="chunks">${String(t).split(/(?= → | \+ )/).map((c) => `<span class="ck">${esc(c.trim())}</span>`).join("")}</span>`
+      : `<span>${esc(t)}</span>`;
+  }
+  if (swap && tname) {
+    // A switch: the swap mark and the Pokemon coming in.
+    learn({ species: tname, id: tsprite });
+    const tip = `交代: ${tname}`;
+    return `<span class="pbody"><span class="swap ${tside === aiSide() ? "a" : "y"}" role="img" aria-label="${esc(tip)}" title="${esc(tip)}"><span class="swapmark" aria-hidden="true">⇄</span>${art(tname, "xs", tip, 2)}</span></span>`;
+  }
+  let h = `<span class="verb">${esc(verb)}</span>`;
+  if (tside >= 0 && tname) {
+    learn({ species: tname, id: tsprite });
+    const tip = `${tname}（${sideName(tside)}の側）`;
+    // Two letters on a name card: one would not tell ガオガエン from ガブリアス.
+    h += `<span class="tgt ${tside === aiSide() ? "a" : "y"}" aria-label="→ ${esc(tip)}"><span class="arrow" aria-hidden="true">→</span>${art(tname, "xs", tip, 2)}</span>`;
+  }
+  return `<span class="pbody">${h}</span>`;
+}
+function actHtml(parts, who, size, chunked) {
+  return (parts || []).map((p) => {
+    const slot = p[0], t = p[1];
+    const name = slot >= 0 && who ? who[slot] : null;
+    // Mega Evolution is the user's: its mark sits on the user's icon (or after the move
+    // where there is no icon). A slot that cannot act (its Pokemon fainted) passes, quietly.
+    const mega = p.length >= 7 && p[6];
+    const user = name ? `<span class="user">${art(name, size || "xs")}${mega ? MEGA : ""}</span>` : "";
+    const body = partBody(p, chunked) + (mega && !name ? MEGA : "");
+    return `<span class="part${t === "行動なし" || t === "pass" ? " idle" : ""}">${user}${body}</span>`;
+  }).join("");
 }
 const benchText = (bench) => (bench && bench.length ? bench.join(" / ") : "–");
 
@@ -128,14 +166,14 @@ function onEvent(e) {
       renderClock(e.seconds * 1000, true);
       break;
     case "prompt":
-      S.prompt = e; S.chosen = []; S.answered = false; renderInput(); applyHide();
+      S.prompt = e; S.chosen = []; S.mega = -1; S.answered = false; renderInput(); applyHide();
       setStatus(e.kind === "move" ? "あなたの番" : e.heading, "turn");
       break;
     case "turn":
       S.sent = false;
       if (S.prompt) { S.prompt = null; S.answered = true; applyHide(); }
       renderInput();
-      log(e.turn, `<span class="ai-c">AI</span> ${esc((e.agentSlots || [e.agent]).join(" ／ "))}<br><span class="you-c">あなた</span> ${esc((e.personSlots || [e.person]).join(" ／ "))}` +
+      log(e.turn, `<span class="ai-c">AI</span> <span class="logacts">${actHtml(e.agentParts || [[-1, e.agent]], boardWho(aiSide()))}</span><br><span class="you-c">あなた</span> <span class="logacts">${actHtml(e.personParts || [[-1, e.person]], boardWho(S.personSide))}</span>` +
         (e.offMenu ? ` <span class="badge" title="あなたの手は AI の候補集合の外でした">候補集合の外</span>` : "") +
         ((e.changes || []).length ? `<br><span class="dim">${e.changes.map((c) =>
           `${esc(c.species)}${c.entered ? " 登場" : ""}${c.from !== c.to ? ` ${c.from}→${c.to}%` : ""}${c.fainted ? " ひんし" : ""}${c.status ? " " + esc(c.status) : ""}`).join("・")}</span>` : ""));
@@ -164,8 +202,8 @@ function onStep(s) {
   S.last = s;
   renderClock(s.ms, s.kind === "done", s);
   renderBalance(s); renderStrip(s); drawChart();
-  renderMix("ours", s.ours, s.ourP, s.ourLoss, aiSide(), s.kind === "done", s.oursSlots);
-  renderMix("theirs", s.theirs, s.theirP, s.theirLoss, S.personSide, s.kind === "done", s.theirsSlots);
+  renderMix("ours", s.ours, s.ourP, s.ourLoss, aiSide(), s.kind === "done", s.oursParts);
+  renderMix("theirs", s.theirs, s.theirP, s.theirLoss, S.personSide, s.kind === "done", s.theirsParts);
   renderClasses(s);
   if ($("countBox").open) renderCounters(s);
   schedulePv(s.kind === "done");
@@ -173,6 +211,19 @@ function onStep(s) {
 
 // ------------------------------------------------------------------ the court
 function hpCls(p) { return p > 50 ? "" : p > 20 ? "mid" : "low"; }
+// Volatile conditions (Showdown's ids) in Japanese; an id not listed is shown as it is.
+const VOLATILE_JA = {
+  stall: "まもる連続", protect: "まもる", substitute: "みがわり", confusion: "こんらん", taunt: "ちょうはつ",
+  encore: "アンコール", leechseed: "やどりぎのタネ", flinch: "ひるみ", helpinghand: "てだすけ", followme: "このゆびとまれ",
+  ragepowder: "いかりのこな", focusenergy: "きあいだめ", charge: "じゅうでん", disable: "かなしばり", torment: "いちゃもん",
+  yawn: "あくび", perish1: "ほろびのうた 1", perish2: "ほろびのうた 2", perish3: "ほろびのうた 3", partiallytrapped: "バインド",
+  lockedmove: "あばれる", mustrecharge: "反動で動けない", twoturnmove: "ため", roost: "はねやすめ", magnetrise: "でんじふゆう",
+  attract: "メロメロ", throatchop: "じごくづき", glaiverush: "きょじゅうざん", saltcure: "しおづけ", syrupbomb: "みずあめ",
+  healblock: "かいふくふうじ", imprison: "ふういん", gastroacid: "いえき", smackdown: "うちおとす", destinybond: "みちづれ",
+  endure: "こらえる", wideguard: "ワイドガード", quickguard: "ファストガード", spotlight: "スポットライト",
+  dynamax: "ダイマックス", laserfocus: "とぎすます", curse: "のろい", nightmare: "あくむ", powder: "ふんじん",
+};
+const volJa = (v) => VOLATILE_JA[v] || v;
 function monCard(m, mine, key) {
   if (!m) return `<div class="mon empty">空き</div>`;
   const prev = S.prevHp.has(key) && S.prevHp.get(key)[0] === m.species ? S.prevHp.get(key)[1] : m.percent;
@@ -183,7 +234,7 @@ function monCard(m, mine, key) {
   const status = m.fainted ? `<span class="st">ひんし</span>` : m.status ? `<span class="st st-${esc(m.status)}">${esc(m.status)}</span>` : "";
   const more = [];
   if (m.item) more.push(`<div>持ち物 ${esc(m.item)}</div>`);
-  if ((m.volatiles || []).length) more.push(`<div>${m.volatiles.map(esc).join("・")}</div>`);
+  if ((m.volatiles || []).length) more.push(`<div>${m.volatiles.map((v) => esc(volJa(v))).join("・")}</div>`);
   if (mine && m.moves) more.push(`<table>${m.moves.map(([n, pp, mx]) => `<tr><td>${esc(n)}</td><td class="n">${pp}/${mx}</td></tr>`).join("")}</table>`);
   const drop = prev - hpNow;
   return `<article class="mon${m.fainted ? " fainted" : ""}${S.openMon.has(key) ? " open" : ""}" data-key="${key}" title="押すと詳細">
@@ -192,7 +243,7 @@ function monCard(m, mine, key) {
       <div class="mon-name">${esc(m.species)} ${status}</div>
       <div class="hp"><div class="hp-track"><i class="${hpCls(prev)}" style="width:${prev}%" data-to="${hpNow}"></i></div>
         <b class="hp-num n">${hpNow}<small>%</small></b></div>
-      <div class="mon-sub">${exact}${boosts}${(m.volatiles || []).length ? `<span>${m.volatiles.map(esc).join("・")}</span>` : ""}</div>
+      <div class="mon-sub">${exact}${boosts}${(m.volatiles || []).length ? `<span>${m.volatiles.map((v) => esc(volJa(v))).join("・")}</span>` : ""}</div>
     </div>
     ${drop > 0 ? `<span class="hp-delta n">−${drop}%</span>` : ""}
     <div class="mon-more">${more.join("") || "詳細なし"}</div>
@@ -257,11 +308,17 @@ function renderClock(ms, done, s) {
   const bar = $("clockbar");
   bar.classList.toggle("done", !!done);
   const count = S.think && S.think.clock === "count";
+  // The count clock is bounded by cells, not seconds: its band is the budget spent (IKA-345),
+  // full and in the warning colour past 100%, the seconds only a footnote.
   const f = count ? (s ? share(s) : done ? 1 : 0) : budget ? ms / budget : 0;
+  bar.classList.toggle("count", !!count);
+  bar.classList.toggle("over", !!count && f > 1.0005);
   bar.firstElementChild.style.width = Math.min(100, 100 * f) + "%";
-  $("clocktext").textContent = !budget ? "–" : count
-    ? `${(ms / 1000).toFixed(1)} 秒・数えの計算予算 ${Math.round(100 * Math.min(f, 9.99))}%${done ? "・答え" : ""}`
-    : `${(ms / 1000).toFixed(1)} / ${(budget / 1000).toFixed(1)} 秒${done ? "・答え" : ""}`;
+  if (count) {
+    $("clocktext").innerHTML = `計算予算 ${Math.round(100 * Math.min(f, 9.99))}%<span class="sub">${(ms / 1000).toFixed(1)} 秒${done ? "・答え" : ""}</span>`;
+  } else {
+    $("clocktext").textContent = !budget ? "–" : `${(ms / 1000).toFixed(1)} / ${(budget / 1000).toFixed(1)} 秒${done ? "・答え" : ""}`;
+  }
 }
 function renderBalance(s) {
   $("balAi").textContent = (100 * s.value).toFixed(1);
@@ -289,7 +346,7 @@ function renderCounters(s) {
   const t = S.think;
   if (t && S.analysis) {
     const p = t.plan || {};
-    $("plan").textContent = `ターン ${t.turn}: 計算予算なしで止めるまで読む。幅 ${p.width}・最善応答オラクル ${p.oracle}・深化の柵 ${p.guard} 段、` +
+    $("plan").textContent = `ターン ${t.turn}: 計算予算なしで止めるまで読む。幅 ${p.width}・最善応答オラクル ${p.oracle}・深化の深さの上限 ${p.guard} 段、` +
       `候補集合を作るのに ${Math.round(t.menuMs || 0)} ms。` + (t.exact ? "相手の裏は尽きている。" : `相手の裏の決定化 ${t.classCount} 通り。`) +
       "「深く読んだ重み」は均衡の組の確率のうち、葉より深く読んだ分（収束の目安）。";
   } else if (t) {
@@ -303,7 +360,7 @@ function renderCounters(s) {
 
 // Bars keep their places for REORDER_MS so a converging mixture reads as growing and shrinking
 // bars, not as rows jumping about.
-function renderMix(key, labels, p, loss, side, final, slots) {
+function renderMix(key, labels, p, loss, side, final, parts) {
   const el = $(key), ord = S.order[key], now = performance.now();
   const idx = labels.map((_, i) => i);
   const sameMenu = el._labels && el._labels.length === labels.length && el._labels.every((l, i) => l === labels[i]);
@@ -318,7 +375,7 @@ function renderMix(key, labels, p, loss, side, final, slots) {
     let r = el._rows.get(labels[i]);
     if (!r) {
       r = document.createElement("div"); r.className = "mrow";
-      r.innerHTML = `<div class="act" title="${esc(labels[i])}">${actHtml(slots ? slots[i] : labels[i], side)}</div><div class="track"><i></i></div><b class="pct n"></b><span class="loss n"></span>`;
+      r.innerHTML = `<div class="act" title="${esc(labels[i])}">${actHtml(parts ? parts[i] : [[-1, labels[i]]], boardWho(side))}</div><div class="track"><i></i></div><b class="pct n"></b><span class="loss n"></span>`;
       r._fill = r.children[1].firstChild; r._pct = r.children[2]; r._loss = r.children[3];
       el._rows.set(labels[i], r);
     }
@@ -345,6 +402,10 @@ function renderClasses(s) {
   const box = $("beliefBox");
   if (!s.classes.length) {
     $("beliefSum").textContent = S.think && S.think.exact ? "裏は尽きている" : "なし";
+    $("classes").innerHTML = ""; return;
+  }
+  if (s.classes.length === 1 && !s.classes[0].bench.filter((n) => n && n !== "-" && n !== "–").length) {
+    $("beliefSum").textContent = "相手の裏は残っていない";
     $("classes").innerHTML = ""; return;
   }
   const order = s.classes.map((c, k) => k).sort((a, b) => s.classes[b].weight - s.classes[a].weight);
@@ -383,24 +444,78 @@ function schedulePv(force) {
   if (force || now - S.pvAt >= PV_EVERY_MS) { S.pvAt = now; renderPv(s); }
   else S.pvTimer = setTimeout(() => { S.pvAt = performance.now(); renderPv(S.last); }, PV_EVERY_MS - (now - S.pvAt));
 }
-function pairHtml(pair, key, parentValue, s, root) {
-  const cls = pair.klass >= 0 && s.classes[pair.klass] ? ` <span class="badge cls">裏 ${esc(benchText(s.classes[pair.klass].bench))}</span>` : "";
-  // Icons only at the root: below it the actives may have changed and the data does not say how.
-  const ours = root ? actHtml(pair.oursSlots || pair.ours, aiSide()) : `<span class="part"><span>${esc(pair.ours)}</span></span>`;
-  const theirs = root ? actHtml(pair.theirsSlots || pair.theirs, S.personSide) : `<span class="part"><span>${esc(pair.theirs)}</span></span>`;
+// `who` is {a, y}: the Pokemon in each active slot of the AI's side and the person's where the
+// pair is played -- the board's at the root, the node's field below it (IKA-345).
+function pairHtml(pair, key, parentValue, s, who) {
+  // The completion's badge only where there is a choice of completions and it names someone.
+  const bench = pair.klass >= 0 && s.classes.length > 1 && s.classes[pair.klass]
+    ? s.classes[pair.klass].bench.filter((n) => n && n !== "-" && n !== "–") : [];
+  const cls = bench.length ? ` <span class="badge cls">裏 ${esc(benchText(bench))}</span>` : "";
+  const ours = actHtml(pair.oursParts, who.a, "xs", true);
+  const theirs = actHtml(pair.theirsParts, who.y, "xs", true);
   const head = `<span class="pp n">${pct(pair.p)}</span><span class="pvmain"><span class="pvacts"><span class="act a">${ours}</span><span class="x">×</span><span class="act y">${theirs}</span></span>
-    <span class="pvmeta"><span class="n">${v3(pair.value)}</span> ${dlt(pair.value - parentValue)} <span class="badge ${pair.read}">${READ_JA[pair.read] || pair.read}</span>${cls}</span></span>`;
+    <span class="pvmeta"><span class="n">${v3(pair.value)}</span> ${dlt(pair.value - parentValue)} <span class="badge r-${pair.read}">${READ_JA[pair.read] || pair.read}</span>${cls}</span></span>`;
   if (!pair.branches.length) return `<div class="leaf">${head}</div>`;
-  const inner = pair.branches.map((b, i) => branchHtml(b, `${key}.${i}`, pair.value, s)).join("");
+  const inner = pair.branches.map((b, i) => branchHtml(b, `${key}.${i}`, pair.value, s, pair.branches.length)).join("");
   return `<details data-key="${key}"${S.open.has(key) ? " open" : ""}><summary>${head}</summary>${inner}</details>`;
 }
-function branchHtml(b, key, parentValue, s) {
-  const head = `<span class="pp c n">${pct(b.weight)}</span><span class="pvmain"><span><span class="c">偶然</span> ${esc(b.what)}</span>
-    <span class="pvmeta"><span class="n">${v3(b.value)}</span> ${dlt(b.value - parentValue)}${b.ended ? ' <span class="badge">決着</span>' : ""}</span></span>`;
+// A chance branch: its weight, its draws (causes: purple where the draw went the rare way,
+// quiet where it went the ordinary way its sibling did not), then what it did on each side.
+function causeHtml(b, siblings, ended) {
+  const end = ended ? '<span class="cause end">決着</span>' : "";
+  if (siblings < 2) return `<span class="cause-row"><span class="cause plain">分岐なし</span>${end}</span>`;
+  const hot = b.causes.filter((c) => !c.plain), calm = b.causes.filter((c) => c.plain);
+  const chips = hot.map((c) => `<span class="cause" title="${esc(c.title)}"><b>${esc(c.head)}</b>${esc(c.body)}</span>`);
+  if (calm.length) {
+    chips.push(`<span class="cause plain" title="${esc(calm.map((c) => c.title || `${c.head} ${c.body}`).join("\n"))}">${esc(calm.map((c) => (c.head === "命中" ? "命中" : c.head)).filter((h, i, a) => a.indexOf(h) === i).join("・"))}</span>`);
+  }
+  if (end) chips.push(end);
+  return chips.length ? `<span class="cause-row">${chips.join("")}</span>` : "";
+}
+function changeHtml(c) {
+  learn({ species: c.name, id: c.sprite });
+  const bits = [];
+  if (c.entered) bits.push("<span>登場</span>");
+  const d = c.to - c.from;
+  if (d && !c.fainted) bits.push(`<span class="n ${d < 0 ? "down" : "up"}">${d < 0 ? "−" : "+"}${Math.abs(d)}%</span>`);
+  if (c.status) bits.push(`<span class="st st-${esc(c.status)}">${esc(c.status)}</span>`);
+  if (c.fainted) bits.push('<span class="ko">ひんし</span>');
+  const tip = `${c.name} ${c.from}% → ${c.fainted ? "ひんし" : c.to + "%"}`;
+  return `<span class="hit" title="${esc(tip)}">${art(c.name, "xs", tip)}${bits.join("")}</span>`;
+}
+function resultHtml(b) {
+  if (!b.changes[0].length && !b.changes[1].length) return '<span class="res"><span class="rl0">変化なし</span></span>';
+  const rows = [["", b.changes[0]], [" y", b.changes[1]]];
+  return `<span class="res">${rows.map(([cls, list]) => list.length
+    ? `<span class="rl${cls}">${list.map(changeHtml).join("")}</span>`
+    : `<span class="rl${cls} none">変化なし</span>`).join("")}</span>`;
+}
+function fieldHtml(n) {
+  const row = (list, cls, name) => `<span class="who ${cls}">${esc(name)}</span><span class="mons">${(list || []).map((m) => {
+    if (!m) return '<span class="fm empty"></span>';
+    learn({ species: m.name, id: m.sprite });
+    const tip = `${m.name} ${m.fainted ? "ひんし" : m.percent + "%"}${m.new ? "・この分岐で登場" : ""}`;
+    return `<span class="fm${m.new ? " new" : ""}${m.fainted ? " ko" : ""}" title="${esc(tip)}">${art(m.name, "xs", tip)}<span class="hpb"><i class="${hpCls(m.percent) === "low" ? "b" : hpCls(m.percent) === "mid" ? "w" : ""}" style="width:${m.fainted ? 0 : m.percent}%"></i></span></span>`;
+  }).join("")}</span>`;
+  const names = S.analysis ? ["検討する側", "相手"] : ["AI", "あなた"];
+  return `<div class="nodefield">${row(n.field[0], "a", names[0])}${row(n.field[1], "y", names[1])}` +
+    `<span class="val">次のターン 値 <span class="n">${v3(n.value)}</span>${n.more ? "・この先も読んだが省略" : ""}</span></div>`;
+}
+function topsHtml(n, who) {
+  const line = (list, cls, w) => list.length
+    ? `<span class="act ${cls}">${list.map(([, p, parts]) => `<span class="topline"><span class="tparts">${actHtml(parts, w, "xs", true)}</span><span class="n">${pct(p)}</span></span>`).join("")}</span>` : "";
+  return `<div class="nodetops">${line(n.ours, "a", who.a)}${line(n.theirs, "y", who.y)}</div>`;
+}
+function branchHtml(b, key, parentValue, s, siblings) {
+  const chance = siblings > 1;
+  const head = `<span class="pp${chance ? " c" : ""} n">${pct(b.weight)}</span><span class="pvmain">
+    ${causeHtml(b, siblings, b.ended)}
+    ${b.ended ? "" : resultHtml(b)}
+    <span class="pvmeta"><span class="n">${v3(b.value)}</span> ${dlt(b.value - parentValue)}</span></span>`;
   if (!b.node) return `<div class="leaf">${head}</div>`;
   const n = b.node;
-  const tops = `<div class="nodeline">次のターン 値 <span class="n">${v3(n.value)}</span>・<span class="a">AI ${n.ours.map(([l, p]) => `${esc(l)} ${pct(p)}`).join("、") || "–"}</span>・<span class="y">あなた ${n.theirs.map(([l, p]) => `${esc(l)} ${pct(p)}`).join("、") || "–"}</span>${b.more ? "・この先も読んだが省略" : ""}</div>`;
-  const inner = tops + n.pairs.map((p, i) => pairHtml(p, `${key}.${i}`, n.value, s, false)).join("");
+  const who = { a: fieldWho(n.field[0]), y: fieldWho(n.field[1]) };
+  const inner = fieldHtml({ ...n, more: b.more }) + topsHtml(n, who) + n.pairs.map((p, i) => pairHtml(p, `${key}.${i}`, n.value, s, who)).join("");
   return `<details data-key="${key}"${S.open.has(key) ? " open" : ""}><summary>${head}</summary>${inner}</details>`;
 }
 function renderPv(s) {
@@ -408,7 +523,7 @@ function renderPv(s) {
     ? (S.analysis
       ? `<p class="note">重い組（検討する側の手 × 相手の手）。読んだ組は偶然の分岐と次のターンへ開く。値は検討する側から見た値、括弧は親との差。</p>`
       : `<p class="note">重い組（AI の手 × あなたの手）。読んだ組は偶然の分岐と次のターンへ開く。値は AI から見た値、括弧は親との差。</p>`) +
-      s.pv.map((p, i) => pairHtml(p, `p${i}`, s.value, s, true)).join("")
+      s.pv.map((p, i) => pairHtml(p, `p${i}`, s.value, s, { a: boardWho(aiSide()), y: boardWho(S.personSide) })).join("")
     : '<span class="note">まだ組が無い</span>';
 }
 $("pv").addEventListener("toggle", (e) => {
@@ -511,27 +626,44 @@ function renderInput() {
   }
   const nSlots = p.slots.length ? p.slots[0].length : 0;
   const act = p.actives || (S.board ? S.board.sides[S.personSide].active : []);
-  const fits = (k) => p.slots.filter((a) => S.chosen.slice(0, k).every((c, j) => a[j][0] === c));
+  act.forEach((m) => m && learn(m));
+  // Each move once; Mega Evolution is the toggle on the slot's heading (choice.js turns the
+  // pair back into one of the legal actions). One Pokemon a game Mega Evolves, so with the
+  // toggle on for one slot the other's is off and cannot be pressed.
+  const C = window.LiveChoice;
+  const megas = C.megaSlots(p.slots);
+  if (S.mega >= 0 && !megas.includes(S.mega)) S.mega = -1;
   let html = `<div class="ask">${esc(p.heading)}</div><div class="note">ターン ${p.turn}・合法手 ${p.choices.length}</div>`;
   for (let k = 0; k < nSlots; k++) {
-    const opts = [];
-    fits(k).forEach((a) => { if (!opts.some((o) => o[0] === a[k][0])) opts.push(a[k]); });
+    const opts = C.options(p.slots, k, S.chosen);
     if (opts.length === 1) S.chosen[k] = opts[0][0];
     if (S.chosen[k] !== undefined && !opts.some((o) => o[0] === S.chosen[k])) S.chosen.length = k;
     const who = nSlots === act.length && act[k] ? act[k].species : null;
-    html += `<div class="slot"><div class="slot-head">${who ? art(who, "sm") + `<b>${esc(who)}</b>` : `<b>${nSlots > 1 ? `${k + 1} 体目` : "選ぶ"}</b>`}</div>
+    const toggle = megas.includes(k)
+      ? `<button type="button" class="megatoggle" data-k="${k}" aria-pressed="${S.mega === k}" ${S.mega >= 0 && S.mega !== k ? "disabled" : ""}
+          title="${S.mega >= 0 && S.mega !== k ? "メガシンカは 1 対戦に 1 回（もう 1 体に入れている）" : "この体をメガシンカさせる"}">${MEGA}<span>メガシンカ</span></button>`
+      : "";
+    html += `<div class="slot"><div class="slot-head">${who ? art(who, "sm") + `<b>${esc(who)}</b>` : `<b>${nSlots > 1 ? `${k + 1} 体目` : "選ぶ"}</b>`}${toggle}</div>
       <div class="opts">${opts.map(([c, l]) => `<button type="button" class="opt" data-k="${k}" data-c="${esc(c)}" aria-pressed="${S.chosen[k] === c}">${esc(l)}</button>`).join("")}</div></div>`;
     if (S.chosen[k] === undefined) { for (let j = k + 1; j < nSlots; j++) html += `<div class="slot"><div class="slot-head dim">${j + 1} 体目は上を選んでから</div></div>`; break; }
   }
   const ready = S.chosen.length === nSlots && S.chosen.every((c) => c !== undefined);
-  const labels = ready ? p.slots.find((a) => a.every((x, j) => x[0] === S.chosen[j])) : null;
-  html += `<div class="sendbar"><span class="summary">${labels ? esc(labels.map((x) => x[1]).join(" ／ ")) : "手を選んでください"}</span>
+  const index = ready ? C.resolve(p.slots, S.chosen, S.mega) : -1;
+  const labels = index >= 0 ? p.slots[index] : null;
+  const whoIn = act.map((m) => (m ? m.species : null));
+  const summary = labels
+    ? `<span class="act">${actHtml(labels.map((x, k) => (x[2] ? x[2] : [k, x[1]])), whoIn)}</span>`
+    : ready && S.mega >= 0 ? "この手ではメガシンカできない" : "手を選んでください";
+  html += `<div class="sendbar"><span class="summary">${summary}</span>
     <button type="button" class="primary" id="go" ${labels ? "" : "disabled"}>この手で決定</button></div>`;
   box.innerHTML = html;
   box.querySelectorAll(".opt").forEach((b) => b.onclick = () => {
     const k = +b.dataset.k; S.chosen[k] = b.dataset.c; S.chosen.length = k + 1; renderInput();
   });
-  $("go").onclick = () => { if (labels) send(S.chosen.join(", ")); };
+  box.querySelectorAll(".megatoggle").forEach((b) => b.onclick = () => {
+    const k = +b.dataset.k; S.mega = S.mega === k ? -1 : k; renderInput();
+  });
+  $("go").onclick = () => { if (labels) send(C.line(p.slots, index)); };
 }
 function applyHide() { document.body.classList.toggle("hidden-thinking", $("hide").checked && !S.answered); }
 $("hide").onchange = applyHide;
@@ -619,7 +751,29 @@ function renderTurns(keep) {
   if (g && !keep) $("aSide").value = String(g.side);
   $("aGameNote").textContent = g ? [g.open ? "裏は全公開で読みます（記録にシートが無い）" : "", g.note || ""].filter(Boolean).join("・") : "";
   $("aGo").disabled = !g || !g.decisions.length;
+  stepState();
 }
+// One turn back or forward: the picker moves and the position is read again, as when a turn
+// is picked from the list. The ends cannot be passed.
+function stepState() {
+  const sel = $("aTurn"), n = sel.options.length, i = sel.selectedIndex;
+  $("aPrev").disabled = !n || i <= 0;
+  $("aNext").disabled = !n || i < 0 || i >= n - 1;
+}
+function stepTurn(d) {
+  const sel = $("aTurn"), i = sel.selectedIndex + d;
+  if (i < 0 || i >= sel.options.length) return;
+  sel.selectedIndex = i; stepState(); startRead();
+}
+$("aPrev").onclick = () => stepTurn(-1);
+$("aNext").onclick = () => stepTurn(1);
+$("aTurn").addEventListener("change", stepState);
+document.addEventListener("keydown", (e) => {
+  if (!S.analysis || e.altKey || e.ctrlKey || e.metaKey || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return;
+  const el = document.activeElement;
+  if (el && (el.isContentEditable || ["INPUT", "SELECT", "TEXTAREA"].includes(el.tagName))) return;
+  e.preventDefault(); stepTurn(e.key === "ArrowLeft" ? -1 : 1);
+});
 $("aSource").onchange = () => { fillSelect($("aGame"), []); renderPicker(true); renderTurns(false); };
 $("aGame").onchange = () => renderTurns(false);
 $("aRefresh").onclick = () => LiveData.command({ cmd: "refresh" });
@@ -649,23 +803,31 @@ function onAnalysis(e) {
     if (e.source != null && S.catalogue) {
       $("aSource").value = String(e.source); renderPicker(true);
       $("aGame").value = String(e.game); renderTurns(true);
-      $("aTurn").value = String(e.decision); $("aSide").value = String(e.side);
+      $("aTurn").value = String(e.decision); $("aSide").value = String(e.side); stepState();
       $("aWidth").value = e.width; $("aGuard").value = e.guard;
     }
     setStatus(`読んでいます（ターン ${e.turn}・側 ${e.side}）`, "think");
-    $("aNote").textContent = (e.notes || []).length ? "注記: " + e.notes.join("・") : "";
-    log(e.turn, `検討を始めた: 側 ${e.side} から、幅 ${e.width}（候補集合 ${e.menu[0]}×${e.menu[1]}）・最善応答オラクル ${esc(e.oracle)}・深化の柵 ${e.guard}` +
+    $("aNote").textContent = (e.notes || []).length ? "注記: " + e.notes.map(noteJa).join("・") : "";
+    log(e.turn, `検討を始めた: 側 ${e.side} から、幅 ${e.width}（候補集合 ${e.menu[0]}×${e.menu[1]}）・最善応答オラクル ${esc(e.oracle)}・深化の深さの上限 ${e.guard} 段` +
       (e.exact ? "・裏は尽きている" : `・相手の裏の決定化 ${e.classCount} 通り`));
   } else {
     setRunning(false);
     setStatus(`${e.stopText}（${(e.seconds || 0).toFixed(1)} 秒・深化のステップ ${(e.steps || 0).toLocaleString("ja-JP")}）`, e.stop === "memory" ? "warn" : "end");
-    $("aNote").textContent = [e.why, (e.notes || []).length ? "注記: " + e.notes.join("・") : ""].filter(Boolean).join("・");
-    log(e.turn, `${esc(e.stopText)}${e.why ? `: ${esc(e.why)}` : ""}。深化のステップ ${(e.steps || 0).toLocaleString("ja-JP")}・${(e.seconds || 0).toFixed(1)} 秒・柵に当たった筋 ${e.guardLines}・木のノード ${(e.nodes || 0).toLocaleString("ja-JP")}`,
+    $("aNote").textContent = [e.why, (e.notes || []).length ? "注記: " + e.notes.map(noteJa).join("・") : ""].filter(Boolean).join("・");
+    log(e.turn, `${esc(e.stopText)}${e.why ? `: ${esc(e.why)}` : ""}。深化のステップ ${(e.steps || 0).toLocaleString("ja-JP")}・${(e.seconds || 0).toFixed(1)} 秒・深さの上限に当たった読み筋 ${e.guardLines}・木のノード ${(e.nodes || 0).toLocaleString("ja-JP")}`,
       e.stop === "memory" ? "err" : "");
     if (e.stop === "memory") toast(`メモリの上限の手前で止めました: ${e.why}`);
   }
 }
 const gb = (x) => (Number.isFinite(x) ? x.toFixed(1) : "–");
+// The notes the engine writes (English) that the page can say in Japanese; others as they are.
+const NOTES_JA = [
+  [/^depth-2 kept the (\d+) likeliest branches of a refined cell$/, "選択的延長のセルで、確率の高い分岐 $1 つだけを深さ 2 で読んだ"],
+];
+function noteJa(note) {
+  for (const [re, ja] of NOTES_JA) if (re.test(note)) return note.replace(re, ja);
+  return note;
+}
 function meter(label, value, share, warn, note) {
   const f = Number.isFinite(share) ? Math.max(0, Math.min(1, share)) : 0;
   return `<div class="meter${warn ? " warn" : ""}"><div class="mhead"><small>${label}</small><b class="n">${value}</b></div>` +
@@ -678,7 +840,7 @@ function onStatus(st) {
   const cells = [
     `<div class="stat"><small>経過</small><b class="n">${fmtTime(st.elapsed)}</b></div>`,
     `<div class="stat"><small>深化のステップ</small><b class="n">${st.steps.toLocaleString("ja-JP")}</b></div>`,
-    `<div class="stat${st.guardLines ? " hot" : ""}"><small>柵（${st.guard} 段）に当たった筋</small><b class="n">${st.guardLines.toLocaleString("ja-JP")}</b></div>`,
+    `<div class="stat${st.guardLines ? " hot" : ""}"><small>深さの上限（${st.guard} 段）に当たった読み筋</small><b class="n">${st.guardLines.toLocaleString("ja-JP")}</b></div>`,
     `<div class="stat"><small>木のノード・段</small><b class="n">${st.nodes.toLocaleString("ja-JP")}・${st.depth}</b></div>`,
   ];
   const lim = (x) => (x > 0 ? x : NaN);
