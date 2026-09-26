@@ -307,8 +307,9 @@ h3 small { font-weight: 400; font-size: 11px; color: var(--faint); letter-spacin
 .res .ko { color: var(--bad); font-weight: 700; }
 .part.idle { color: var(--faint); } .part.idle .art { opacity: .35; }
 .megatoggle { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px;
-  border: 1px solid var(--line); border-radius: 999px; background: var(--surface); color: var(--dim); font-size: 12px; cursor: pointer; }
-.megatoggle[aria-pressed="true"] { color: var(--ink); font-weight: 700; border-color: var(--you); background: color-mix(in srgb, var(--you) 10%, transparent); }
+  border: 1px solid var(--line); border-radius: 999px; background: var(--surface-2); color: var(--ink); font-size: 12px; cursor: pointer; }
+.megatoggle:hover:not(:disabled) { border-color: var(--you); }
+.megatoggle[aria-pressed="true"] { color: #fff; font-weight: 700; border-color: var(--you); background: var(--you); }
 .megatoggle:disabled { opacity: .45; cursor: default; }
 .stepper { display: flex; align-items: stretch; gap: 4px; }
 .stepper select { flex: 1; min-width: 0; }
@@ -331,7 +332,8 @@ h3 small { font-weight: 400; font-size: 11px; color: var(--faint); letter-spacin
 .tgt .art .fb-short, .swap .art .fb-short { font-size: 9px; letter-spacing: -0.02em; }
 .swap { display: inline-flex; align-items: center; gap: 4px; flex: none; }
 .part .swap, .part .swap span { overflow: visible; }
-.swapmark { font-weight: 700; color: var(--dim); font-size: 13px; line-height: 1; }
+.swapmark { font-weight: 700; line-height: 1; }
+.swap.a .swapmark { color: var(--ai-ink); } .swap.y .swapmark { color: var(--you-ink); }
 .part .user { position: relative; display: inline-flex; flex: none; overflow: visible; }
 .part .user .mega-mark { position: absolute; right: -3px; bottom: -3px; width: 10px; height: 10px;
   box-shadow: 0 0 0 1.5px var(--surface); }

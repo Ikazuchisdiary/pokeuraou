@@ -96,7 +96,7 @@ function partBody(p, chunked) {
     // A switch: the swap mark and the Pokemon coming in.
     learn({ species: tname, id: tsprite });
     const tip = `交代: ${tname}`;
-    return `<span class="pbody"><span class="swap" role="img" aria-label="${esc(tip)}" title="${esc(tip)}"><span class="swapmark" aria-hidden="true">⇄</span>${art(tname, "xs", tip, 2)}</span></span>`;
+    return `<span class="pbody"><span class="swap ${tside === aiSide() ? "a" : "y"}" role="img" aria-label="${esc(tip)}" title="${esc(tip)}"><span class="swapmark" aria-hidden="true">⇄</span>${art(tname, "xs", tip, 2)}</span></span>`;
   }
   let h = `<span class="verb">${esc(verb)}</span>`;
   if (tside >= 0 && tname) {
