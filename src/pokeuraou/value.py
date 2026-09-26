@@ -102,6 +102,13 @@ class ValueConfig:
     swa_from: float = 0.5
     #: OneCycle's warm-up share. 0.2 is what every model so far used.
     pct_start: float = 0.2
+    #: IKA-318: read each move's fixed properties from the dex (`qhead.move_table`: type,
+    #: category, power, accuracy, priority, target, flags, what else it does) beside its
+    #: id embedding. Off: the net, its parameters and its answers are exactly those of
+    #: every model before this field existed (a stored config without it reads back off).
+    move_properties: bool = False
+    #: Width of one move's property vector after its own small layer, when on.
+    move_property_dim: int = 32
 
 
 class ValueNet(nn.Module):
@@ -140,6 +147,21 @@ class ValueNet(nn.Module):
             nn.LayerNorm(config.mon_dim),
             nn.GELU(),
         )
+        if config.move_properties:
+            # IKA-318. Each move's dex properties go through a small layer of their own and
+            # are pooled over the four moves like the ids are; the pool joins the first
+            # layer of `mon_mlp` as extra input columns -- written as a second linear added
+            # to that layer's output, which is the same map as concatenating the inputs.
+            # Those columns start at zero, so a net warm-started from an id-only model reads
+            # every position exactly as that model does until training moves them.
+            table = move_property_table(encoder)
+            self.register_buffer("move_props", torch.from_numpy(table))
+            self.move_prop_embed = nn.Sequential(
+                nn.Linear(table.shape[1], config.move_property_dim), nn.GELU()
+            )
+            self.move_prop_in = nn.Linear(config.move_property_dim, config.mon_dim)
+            nn.init.zeros_(self.move_prop_in.weight)
+            nn.init.zeros_(self.move_prop_in.bias)
         # active mean, active max, bench mean, bench max
         pooled = 4 * config.mon_dim + widths["side"]
         self.side_mlp = nn.Sequential(
@@ -175,7 +197,13 @@ class ValueNet(nn.Module):
             ],
             dim=-1,
         )
-        mon = self.mon_mlp(features)  # (B,2,M,mon_dim)
+        if self.config.move_properties:
+            props = self.move_prop_embed(self.move_props[batch["moves"]])
+            props_pooled = (props * move_mask).sum(dim=3) / move_mask.sum(dim=3).clamp(min=1.0)
+            first = self.mon_mlp[0](features) + self.move_prop_in(props_pooled)
+            mon = self.mon_mlp[1:](first)
+        else:
+            mon = self.mon_mlp(features)  # (B,2,M,mon_dim)
 
         present = batch["mask"].unsqueeze(-1)
         is_active = batch["mon"][..., self._active_feature].unsqueeze(-1)
@@ -215,6 +243,24 @@ def _masked_max(values: Tensor, mask: Tensor) -> Tensor:
     out = filled.max(dim=2).values
     # A side with nothing in the group (no bench left) would otherwise be -inf.
     return torch.where(torch.isfinite(out), out, torch.zeros_like(out))
+
+
+def move_property_table(encoder: Encoder) -> np.ndarray:
+    """(move vocabulary rows, P) float32: `qhead.move_table` for the encoder's dex.
+
+    One row per row of the move embedding (index 0, unknown or none, is zeros), so a move
+    id indexes both. The table is IKA-274's, imported rather than copied, so the leaf and
+    the candidate model read a move the same way.
+    """
+    from .qhead import move_table
+
+    table = move_table(encoder.reg, encoder.vocab)
+    rows = encoder.vocab.sizes["move"]
+    if table.shape[0] < rows:
+        table = np.concatenate(
+            [table, np.zeros((rows - table.shape[0], table.shape[1]), np.float32)]
+        )
+    return np.ascontiguousarray(table[:rows], dtype=np.float32)
 
 
 def build(encoder: Encoder, config: ValueConfig) -> ValueNet:
@@ -855,6 +901,32 @@ def _refuse_unless_extended(blob: dict[str, Any], encoder: Encoder) -> None:
     )
 
 
+def _checked_move_props(stored: Tensor, encoder: Encoder) -> Tensor:
+    """The encoder's move property table, if the model was trained on the same rows of it.
+
+    A model with `move_properties` carries the table it learned from (IKA-318). The rows
+    it has must be the current dex's rows, bit for bit: the fingerprint pins which integer
+    is which move, and this pins what the model was told each move does. A grown
+    vocabulary's appended rows come from the current dex -- which is the point of reading
+    properties rather than ids alone, an unseen move is not blank. A changed column layout
+    or a changed row is refused, as a moved id is.
+    """
+    current = move_property_table(encoder)
+    rows, width = int(stored.shape[0]), int(stored.shape[1])
+    if width != current.shape[1] or rows > current.shape[0]:
+        raise ValueError(
+            f"the model's move property table is {rows}x{width} and this dex gives "
+            f"{current.shape[0]}x{current.shape[1]}: the columns changed meaning"
+        )
+    if not np.array_equal(stored.cpu().numpy(), current[:rows]):
+        changed = int((stored.cpu().numpy() != current[:rows]).any(axis=1).sum())
+        raise ValueError(
+            f"{changed} move(s) have other properties in this dex than the model was "
+            "trained on; the same move no longer reads as the same move"
+        )
+    return torch.from_numpy(current)
+
+
 def load_model(path: str | Path, encoder: Encoder) -> tuple[ValueNet, dict[str, Any]]:
     """Loads weights, refusing a vocabulary they were not trained against.
 
@@ -912,6 +984,9 @@ def load_model(path: str | Path, encoder: Encoder) -> tuple[ValueNet, dict[str, 
             "encoder gained or lost a feature, so the same column no longer means the "
             "same quantity"
         )
+    if "move_props" in weights:
+        weights = dict(weights)
+        weights["move_props"] = _checked_move_props(weights["move_props"], encoder)
     config = ValueConfig(**blob["config"])
     net = build(encoder, config)
     net._active_feature = int(blob["active_feature"])
@@ -930,6 +1005,7 @@ __all__ = [
     "build",
     "load_dataset",
     "load_model",
+    "move_property_table",
     "predict",
     "save_dataset",
     "save_model",
