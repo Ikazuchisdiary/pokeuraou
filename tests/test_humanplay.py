@@ -273,3 +273,97 @@ def test_the_wall_clock_spends_the_budget(pool, tmp_path) -> None:  # noqa: ANN0
     for path in (out, humanplay.clock_path(out)):
         raw = path.read_bytes()
         assert raw.count(b"\n") == 1 and b"\r" not in raw
+
+
+# ------------------------------------------------------------------------ IKA-343 defaults
+
+
+def _tool(name: str):  # noqa: ANN202
+    import importlib
+    import sys
+
+    tools = str(repo_root() / "tools")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    return importlib.import_module(name)
+
+
+def test_the_play_defaults_follow_the_records() -> None:
+    from pokeuraou.deepen import ALL_ACTIONS
+
+    # IKA-307: the rest of the budget deepens with the swap oracle over every action.
+    assert humanplay.PLAY_ORACLE == ALL_ACTIONS
+    # IKA-342 replaces this line; until then the guard is deepen.MAX_LEVELS.
+    assert humanplay.PLAY_MAX_LEVELS is None
+    # IKA-307's width-only optima are among the widths a small budget can take.
+    assert {18, 26, 36} <= set(humanplay.WIDTHS)
+    assert list(humanplay.WIDTHS) == sorted(humanplay.WIDTHS)
+    # IKA-32 stage 2: 4 threads, fewer on a machine with fewer physical cores.
+    assert humanplay.default_threads(16) == humanplay.PLAY_THREADS == 4
+    assert humanplay.default_threads(4) == 2
+    assert humanplay.default_threads(1) == 1
+
+
+def test_play_human_prices_the_count_clock_at_one_core_at_any_thread_count() -> None:
+    resolve = _tool("play_human").resolve_cores
+    threads = humanplay.default_threads()
+    assert resolve(None, None, "wall") == (threads, threads)
+    # The count clock has prices for 1 core only: the threads change no move there.
+    assert resolve(None, None, "count") == (threads, 1)
+    assert resolve(8, None, "count") == (8, 1)
+    # --cores alone sets both, as before IKA-343.
+    assert resolve(None, 8, "wall") == (8, 8)
+    assert resolve(2, 1, "wall") == (2, 1)
+
+
+def test_the_record_names_the_oracle_only_when_set(pool) -> None:  # noqa: ANN001
+    from pokeuraou.deepen import ALL_ACTIONS
+
+    plain, _, _ = _play(pool, PolicyPerson("first"), seed=4, turns=1)
+    assert "oracle" not in plain["clock"] and "maxLevels" not in plain["clock"]
+    agent = _agent(pool, oracle=ALL_ACTIONS, max_levels=8)
+    named, _, _ = _play(pool, PolicyPerson("first"), seed=4, agent=agent, turns=1)
+    assert named["clock"]["oracle"] == "sall" and named["clock"]["maxLevels"] == 8
+
+
+def test_the_memory_brake_stops_the_deepening_and_changes_nothing_unset(pool) -> None:  # noqa: ANN001
+    import threading
+
+    plain, plain_clock, _ = _play(pool, PolicyPerson("random", 7), seed=7)
+    brake = threading.Event()
+    free, free_clock, _ = _play(pool, PolicyPerson("random", 7), seed=7,
+                                agent=_agent(pool, halt=brake))
+    # Unset, the brake is the cost it wraps: the same game to the byte.
+    assert json.dumps(free, ensure_ascii=False) == json.dumps(plain, ensure_ascii=False)
+    assert not any(row.get("memoryStop") for row in free_clock["decisions"])
+    deep = [row for row in plain_clock["decisions"]
+            if row["kind"] == "move" and row.get("deepened", {}).get("expanded", 0) > 0]
+    assert deep, "no move deepened; the brake would have nothing to stop"
+    # Set, every move that would deepen stops before its first step and says so.
+    brake.set()
+    _, held_clock, _ = _play(pool, PolicyPerson("random", 7), seed=7,
+                             agent=_agent(pool, halt=brake))
+    moves = [row for row in held_clock["decisions"]
+             if row["kind"] == "move" and row["deepenBudget"] > 0]
+    assert moves and all(row["memoryStop"] for row in moves)
+    assert all(row["deepened"]["expanded"] == 0 for row in moves)
+
+
+def test_the_oracle_game_is_the_same_at_any_thread_count(pool) -> None:  # noqa: ANN001
+    from pokeuraou import deepen
+    from pokeuraou.deepen import ALL_ACTIONS
+
+    agent = _agent(pool, oracle=ALL_ACTIONS)
+    one, _, _ = _play(pool, PolicyPerson("random", 9), seed=9, agent=agent)
+    try:
+        humanplay.use_threads(3, pool.reg)
+        before = dict(deepen.ahead_counts())
+        three, _, _ = _play(pool, PolicyPerson("random", 9), seed=9, agent=agent)
+        after = deepen.ahead_counts()
+    finally:
+        humanplay.use_threads(1, pool.reg)
+    assert json.dumps(three, ensure_ascii=False) == json.dumps(one, ensure_ascii=False)
+    # The positive controls: the helpers expanded cells ahead, and the oracle was asked.
+    assert after["expanded"] > before["expanded"]
+    moves = [d for d in one["decisions"] if d["kind"] == "move" and d.get("deepened")]
+    assert any("probed" in (d["deepened"][0] or d["deepened"][1] or {}) for d in moves)
