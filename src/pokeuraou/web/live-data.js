@@ -2,11 +2,35 @@
 // It knows nothing of the page's look: it turns frames into plain objects and hands them
 // to the handlers it is given. The shapes are the table in records/IKA-332.md.
 //
-//   LiveData.connect({ onEvent(e), onStep(s), onOpen(), onClose() })
+//   LiveData.connect({ onEvent(e), onStep(s), onStatus(st), onOpen(), onClose() })
 //   LiveData.send(line)          // the person's answer, as a script line
+//   LiveData.command(obj)        // the analysis mode's requests: {cmd: "analyze"|"stop"|"refresh", ...}
 "use strict";
 (function () {
-const STRINGS = 1, EVENT = 2, STEP = 3;
+const STRINGS = 1, EVENT = 2, STEP = 3, STATUS = 4;
+// The analysis mode's status frame (IKA-337), after the type byte: liveview._STATUS.
+const STATUS_FIELDS = [
+  ["state", "u8"], ["flags", "u8"], ["elapsed", "f64"], ["steps", "u32"], ["guardLines", "u32"],
+  ["nodes", "u32"], ["guard", "u16"], ["depth", "u16"], ["threads", "u16"], ["rss", "f32"],
+  ["rssLimit", "f32"], ["free", "f32"], ["freeFloor", "f32"], ["gpu", "f32"], ["gpuTotal", "f32"],
+  ["gpuLimit", "f32"],
+];
+const STATES = ["idle", "running", "done"];
+function decodeStatus(buf) {
+  const dv = new DataView(buf);
+  let at = 1;
+  const st = {};
+  for (const [name, type] of STATUS_FIELDS) {
+    if (type === "u8") { st[name] = dv.getUint8(at); at += 1; }
+    else if (type === "u16") { st[name] = dv.getUint16(at, true); at += 2; }
+    else if (type === "u32") { st[name] = dv.getUint32(at, true); at += 4; }
+    else if (type === "f32") { st[name] = dv.getFloat32(at, true); at += 4; }
+    else { st[name] = dv.getFloat64(at, true); at += 8; }
+  }
+  st.state = STATES[st.state] || "idle";
+  st.warn = !!(st.flags & 1);
+  return st;
+}
 const KINDS = ["start", "refine", "refused", "widen", "done"];
 const READS = ["leaf", "deep", "refused"];
 // An action's label is its slots' parts joined by this (slot k = the side's k-th active).
@@ -72,6 +96,8 @@ function onFrame(buf, handlers) {
     handlers.onEvent(JSON.parse(new TextDecoder().decode(new Uint8Array(buf, 1))));
   } else if (type === STEP) {
     handlers.onStep(decodeStep(buf));
+  } else if (type === STATUS) {
+    if (handlers.onStatus) handlers.onStatus(decodeStatus(buf));
   }
 }
 
@@ -87,5 +113,9 @@ function send(line) {
   if (socket && socket.readyState === 1) socket.send(JSON.stringify({ line }));
 }
 
-window.LiveData = { connect, send, decodeStep, strings, SLOT_SEPARATOR };
+function command(message) {
+  if (socket && socket.readyState === 1) socket.send(JSON.stringify(message));
+}
+
+window.LiveData = { connect, send, command, decodeStep, decodeStatus, strings, SLOT_SEPARATOR };
 })();

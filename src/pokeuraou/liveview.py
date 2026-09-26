@@ -58,12 +58,24 @@ from .progress import SLOT_SEPARATOR, PvBranch, PvNode, PvPair, Snapshot
 STRINGS = 1
 EVENT = 2
 STEP = 3
+#: The analysis mode's status (IKA-337): the elapsed time, the steps, the lines at the depth
+#: guard, the tree's size and the memory against its limits, a few times a second.
+STATUS = 4
 
 KINDS = ("start", "refine", "refused", "widen", "done")
 READS = ("leaf", "deep", "refused")
 
 #: The step frame's fixed head, after the type byte (see `Wire.step`).
 _HEAD = struct.Struct("<BHIIIfIfIIIIIIHHddffHHH")
+
+#: The status frame after the type byte (see `Wire.status`): state, flags, elapsed seconds,
+#: steps, lines at the guard, nodes, guard, depth, threads, then the memory (GB; NaN when
+#: unknown): resident, its limit, host free, its floor, card used, card total, its limit.
+_STATUS = struct.Struct("<BBdIIIHHHfffffff")
+STATUS_FIELDS = (
+    "state", "flags", "elapsed", "steps", "guardLines", "nodes", "guard", "depth", "threads",
+    "rss", "rssLimit", "free", "freeFloor", "gpu", "gpuTotal", "gpuLimit",
+)
 
 
 def _plain(value: Any) -> Any:  # noqa: ANN401
@@ -114,6 +126,19 @@ class Wire:
     def event(self, kind: str, payload: Any) -> list[bytes]:  # noqa: ANN401
         body = json.dumps({"type": kind, **_plain(payload)}, ensure_ascii=False)
         return [bytes([EVENT]) + body.encode("utf-8")]
+
+    @staticmethod
+    def status(
+        *, state: int, elapsed: float, steps: int, guard_lines: int, nodes: int, guard: int,
+        depth: int, threads: int, rss: float, free: float, gpu: float, gpu_total: float,
+        rss_limit: float, free_floor: float, gpu_limit: float, warn: bool = False,
+    ) -> bytes:
+        """The analysis mode's status frame (`_STATUS`); ``warn``: a reading is near a limit."""
+        return bytes([STATUS]) + _STATUS.pack(
+            state, 1 if warn else 0, elapsed, steps, guard_lines, nodes, min(guard, 0xFFFF),
+            min(depth, 0xFFFF), min(threads, 0xFFFF), rss, rss_limit, free, free_floor, gpu,
+            gpu_total, gpu_limit,
+        )
 
     def step(self, snap: Snapshot) -> list[bytes]:
         """A snapshot's frames: new strings first, then the step."""
@@ -196,6 +221,8 @@ class Decoder:
             return json.loads(frame[1:].decode("utf-8"))
         if kind == STEP:
             return self._step(frame)
+        if kind == STATUS:
+            return {"type": "status", **dict(zip(STATUS_FIELDS, _STATUS.unpack_from(frame, 1), strict=True))}
         raise ValueError(f"unknown frame type {kind}")
 
     def _step(self, frame: bytes) -> dict[str, Any]:
@@ -424,8 +451,19 @@ class LiveServer:
         sink: Callable[[bytes], None] | None = None,
         web: Path = WEB,
         sprite_url: str | None = None,
+        on_command: Callable[[dict[str, Any]], None] | None = None,
+        keep_steps: int | None = None,
     ) -> None:
         self.wire = Wire()
+        #: Called (on the socket's thread) with each ``{"cmd": ...}`` a page sends: the
+        #: analysis mode's requests (IKA-337). None: such messages are dropped.
+        self.on_command = on_command
+        #: At most this many steps of the decision in progress are kept for a page that
+        #: connects late (every other one is dropped past it); None keeps them all. A read
+        #: with no budget sends steps for as long as it runs.
+        self.keep_steps = keep_steps
+        #: The last status frame, for a page that connects late.
+        self._status: bytes | None = None
         self.sink = sink
         self.web = web
         #: Where the page takes its images (``{id}`` is Showdown's sprite id), written into
@@ -514,6 +552,8 @@ class LiveServer:
                     self.history.append(frame)
                 else:
                     self._current.append(frame)
+                    if self.keep_steps is not None and len(self._current) > self.keep_steps:
+                        self._current = self._current[::2]
                 if self.sink is not None:
                     self.sink(frame)
             clients = list(self.clients)
@@ -524,6 +564,26 @@ class LiveServer:
                         sock.sendall(ws_frame(frame))
             except OSError:
                 self._drop(sock)
+
+    def status(self, frame: bytes) -> None:
+        """A status frame to the pages (and the sink); only the last one is kept."""
+        with self.lock:
+            self._status = frame
+            if self.sink is not None:
+                self.sink(frame)
+            clients = list(self.clients)
+        for sock, lock in clients:
+            try:
+                with lock:
+                    sock.sendall(ws_frame(frame))
+            except OSError:
+                self._drop(sock)
+
+    def begin_run(self) -> None:
+        """A new read begins: the steps and the status of the last one are not sent again."""
+        with self.lock:
+            self._current = []
+            self._status = None
 
     def _drop(self, sock: socket.socket) -> None:
         with self.lock:
@@ -547,7 +607,8 @@ class LiveServer:
             # The game so far, before anything new: the history and the steps in progress,
             # under the same lock the sender holds, so nothing is missed or sent twice.
             with lock:
-                for frame in [*self.history, *self._current]:
+                for frame in [*self.history, *self._current,
+                              *([self._status] if self._status is not None else [])]:
                     sock.sendall(ws_frame(frame))
             self.clients.append((sock, lock))
         try:
@@ -569,6 +630,11 @@ class LiveServer:
                     line = message.get("line") if isinstance(message, dict) else None
                     if isinstance(line, str):
                         self.inbox.put(line)
+                    elif (
+                        isinstance(message, dict) and isinstance(message.get("cmd"), str)
+                        and self.on_command is not None
+                    ):
+                        self.on_command(message)
         except (ConnectionError, OSError):
             pass
         finally:
@@ -633,6 +699,8 @@ class Replay:
             elif frame[0] == STEP:
                 kind = frame[1]
                 self.server._send([frame], keep="step", done=KINDS[kind] == "done")
+            elif frame[0] == STATUS:
+                self.server.status(frame)
             else:
                 self.server._send([frame], keep="event")
 
@@ -642,6 +710,7 @@ __all__ = [
     "FILES",
     "PAGE",
     "WEB",
+    "STATUS",
     "STEP",
     "SPRITE_URL",
     "STRINGS",
