@@ -400,7 +400,10 @@ function schedulePv(force) {
 // `who` is {a, y}: the Pokemon in each active slot of the AI's side and the person's where the
 // pair is played -- the board's at the root, the node's field below it (IKA-345).
 function pairHtml(pair, key, parentValue, s, who) {
-  const cls = pair.klass >= 0 && s.classes[pair.klass] ? ` <span class="badge cls">裏 ${esc(benchText(s.classes[pair.klass].bench))}</span>` : "";
+  // The completion's badge only where there is a choice of completions and it names someone.
+  const bench = pair.klass >= 0 && s.classes.length > 1 && s.classes[pair.klass]
+    ? s.classes[pair.klass].bench.filter((n) => n && n !== "-" && n !== "–") : [];
+  const cls = bench.length ? ` <span class="badge cls">裏 ${esc(benchText(bench))}</span>` : "";
   const ours = actHtml(pair.oursParts, who.a, "xs", true);
   const theirs = actHtml(pair.theirsParts, who.y, "xs", true);
   const head = `<span class="pp n">${pct(pair.p)}</span><span class="pvmain"><span class="pvacts"><span class="act a">${ours}</span><span class="x">×</span><span class="act y">${theirs}</span></span>
