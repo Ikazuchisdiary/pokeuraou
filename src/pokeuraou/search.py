@@ -379,6 +379,7 @@ def search(
     deepen_cost: _deepen.Cost | None = None,
     swap: bool = False,
     breadth_only: bool = False,
+    q_probe: int | None = None,
 ) -> SearchResult:
     """Solve this turn's matrix game, optionally refining the cells that decide it.
 
@@ -404,13 +405,18 @@ def search(
     the strategies index. ``swap`` pushes a weightless action out for each that joins,
     ``breadth_only`` runs the oracle without deepening (the labels' ``s`` and ``b``).
     ``deepen_cost`` counts the budget in `deepen.Cost`'s prices instead of cells (the
-    human's clock, `deepen.cells_for_seconds`).
+    human's clock, `deepen.cells_for_seconds`). ``q_probe`` narrows the oracle's probe to
+    a Q's best few a side (the label's ``q<k>``, IKA-322).
     """
     if deepen and (depth > 1 or solve_sparsely):
         raise ValueError("deepen is a budget on top of the depth-1 full-matrix search")
-    if (outside is not None or deepen_cost is not None or swap or breadth_only) and not deepen:
+    if (
+        outside is not None or deepen_cost is not None or swap or breadth_only
+        or q_probe is not None
+    ) and not deepen:
         raise ValueError(
-            "outside, deepen_cost, swap and breadth_only are how a deepening spends; deepen is 0"
+            "outside, deepen_cost, swap, breadth_only and q_probe are how a deepening "
+            "spends; deepen is 0"
         )
     row = list(ours)
     col = list(theirs)
@@ -438,7 +444,7 @@ def search(
             reading=(
                 "breadth" if breadth_only else "restricted" if solve_restricted else "mixed"
             ),
-            refine=refine, outside=outside, cost=deepen_cost, swap=swap,
+            refine=refine, outside=outside, cost=deepen_cost, swap=swap, q_probe=q_probe,
         )
         return SearchResult(
             equilibrium=got.equilibrium,
@@ -1261,8 +1267,8 @@ def belief_solve(
 
     `deepen` maps a side to how it deepens its Bayesian root after the depth-1 answer
     (IKA-294, a label ending in ``h``): `deepen.deepen_belief`'s ``cells``, ``reading``,
-    ``swap`` and ``outside`` -- the last in side 0's orientation, as `search`'s (side 0's
-    candidates, side 1's). It goes with depth 1 on that side. A side not in it is
+    ``swap``, ``q_probe`` (IKA-322) and ``outside`` -- the last in side 0's orientation,
+    as `search`'s (side 0's candidates, side 1's). It goes with depth 1 on that side. A side not in it is
     answered as above.
     """
     from .beliefnode import belief_payoffs
