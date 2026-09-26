@@ -64,8 +64,10 @@ STEP = 3
 #: guard, the tree's size and the memory against its limits, a few times a second.
 STATUS = 4
 #: New labels (IKA-345): the first id and the count, then each label's parts -- a count,
-#: and per part the active slot (i8, -1: none) and the part's string id.
+#: and per part `_PART`: the active slot (i8, -1: none), the text, the move, the target's
+#: side (i8, -1: none), name and sprite id (NONE: none), and whether it Mega Evolves.
 LABELS = 5
+_PART = struct.Struct("<bIIbIIB")
 
 #: No string (a field's empty slot, a change without a new status).
 NONE = 0xFFFFFFFF
@@ -119,8 +121,8 @@ class Wire:
     def __init__(self) -> None:
         self.ids: dict[str, int] = {}
         self._new: list[str] = []
-        self.label_ids: dict[tuple[tuple[int, str], ...], int] = {}
-        self._new_labels: list[tuple[tuple[int, int], ...]] = []
+        self.label_ids: dict[tuple[Any, ...], int] = {}
+        self._new_labels: list[tuple[bytes, ...]] = []
 
     def label(self, text: str) -> int:
         """A label's id in the table of labels (its parts' strings interned first)."""
@@ -129,7 +131,15 @@ class Wire:
         if got is None:
             got = len(self.label_ids)
             self.label_ids[parts] = got
-            self._new_labels.append(tuple((slot, self.intern(part)) for slot, part in parts))
+            self._new_labels.append(tuple(
+                _PART.pack(
+                    max(-1, min(p.slot, 127)), self.intern(p.text), self.intern(p.verb),
+                    p.target_side, self.intern(p.target_name) if p.target_side >= 0 else NONE,
+                    self.intern(p.target_sprite) if p.target_side >= 0 else NONE,
+                    1 if p.mega else 0,
+                )
+                for p in parts
+            ))
         return got
 
     def _labels(self) -> list[bytes]:
@@ -139,8 +149,7 @@ class Wire:
         out = [struct.pack("<BIH", LABELS, first, len(self._new_labels))]
         for parts in self._new_labels:
             out.append(struct.pack("<B", len(parts)))
-            for slot, sid in parts:
-                out.append(struct.pack("<bI", max(-1, min(slot, 127)), sid))
+            out.extend(parts)
         self._new_labels = []
         return [b"".join(out)]
 
@@ -278,7 +287,7 @@ class Decoder:
 
     def label(self, lid: int) -> str:
         """A label's text (its parts joined, as `progress.Label` writes it)."""
-        return SLOT_SEPARATOR.join(text for _slot, text in self.labels[lid])
+        return SLOT_SEPARATOR.join(part[1] for part in self.labels[lid])
 
     def feed(self, frame: bytes) -> dict[str, Any] | None:
         kind = frame[0]
@@ -292,9 +301,12 @@ class Decoder:
                 at += 1
                 parts = []
                 for _ in range(n):
-                    slot, sid = struct.unpack_from("<bI", frame, at)
-                    at += 5
-                    parts.append([slot, self.strings[sid]])
+                    slot, text, verb, tside, tname, tsprite, mega = _PART.unpack_from(frame, at)
+                    at += _PART.size
+                    s = self.strings
+                    parts.append([slot, s[text], s[verb], tside,
+                                  "" if tname == NONE else s[tname],
+                                  "" if tsprite == NONE else s[tsprite], bool(mega)])
                 self.labels.append(parts)
             return None
         if kind == STRINGS:

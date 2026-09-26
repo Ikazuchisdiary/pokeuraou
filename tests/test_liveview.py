@@ -256,6 +256,10 @@ def test_the_branches_say_their_draws_and_the_nodes_their_field(pool) -> None:  
                     assert all(len(side) >= 1 for side in b.node.field)
                     assert any(m is not None for side in b.node.field for m in side)
                     stack.extend(b.node.pairs)
+    # The parts carry each move's target as a Pokemon of a side (drawn as its icon).
+    aimed = [p for s in done for label in s.our_labels for p in label.rich if p.target_side >= 0]
+    assert aimed and all(p.target_name and p.target_sprite and p.verb for p in aimed)
+    assert all(p.target_name not in p.verb for p in aimed)
     # Positive controls: the tree split somewhere, and the port named the draws.
     assert split, "no pair with more than one branch; the check would be vacuous"
     assert named, "no branch named by its draws"
@@ -282,7 +286,13 @@ def test_the_wire_gives_back_what_it_packed(pool) -> None:  # noqa: ANN001
         assert len(back["classes"]) == len(snap.classes)
         assert [p["read"] for p in back["pv"]] == [p.read for p in snap.pv]
         assert [len(p["branches"]) for p in back["pv"]] == [len(p.branches) for p in snap.pv]
-        assert back["oursParts"] == [[list(x) for x in t.parts] for t in snap.our_labels]
+        assert [[p[:2] for p in parts] for parts in back["oursParts"]] == [
+            [list(x) for x in t.parts] for t in snap.our_labels
+        ]
+        assert [[p[3:7] for p in parts] for parts in back["oursParts"]] == [
+            [[x.target_side, x.target_name, x.target_sprite, x.mega] for x in t.rich]
+            for t in snap.our_labels
+        ]
         for bp, sp in zip(back["pv"], snap.pv, strict=True):
             for bb, sb in zip(bp["branches"], sp.branches, strict=True):
                 assert [c["body"] for c in bb["causes"]] == [c.body for c in sb.causes]

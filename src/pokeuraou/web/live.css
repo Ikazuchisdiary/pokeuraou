@@ -306,6 +306,27 @@ h3 small { font-weight: 400; font-size: 11px; color: var(--faint); letter-spacin
 .res .hit .n.down { font-weight: 600; }
 .res .ko { color: var(--bad); font-weight: 700; }
 .part.idle { color: var(--faint); } .part.idle .art { opacity: .35; }
+.stepper { display: flex; align-items: stretch; gap: 4px; }
+.stepper select { flex: 1; min-width: 0; }
+.stepper .step { flex: none; width: 32px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface);
+  color: var(--ink); cursor: pointer; font-size: 12px; }
+.stepper .step:disabled { color: var(--faint); cursor: default; opacity: .5; }
+/* IKA-345: a move's target as its icon, ringed in its side's colour; Mega Evolution as a mark */
+.pbody { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 2px 5px; min-width: 0; }
+.part .pbody { overflow: visible; }
+.part .pbody .verb { white-space: nowrap; }
+.mrow .part .pbody { flex-wrap: nowrap; }
+.mrow .part .pbody .verb { overflow: hidden; text-overflow: ellipsis; min-width: 0; }
+.tgt { display: inline-flex; align-items: center; gap: 3px; flex: none; }
+.part .tgt, .part .tgt span { overflow: visible; }
+.tgt .arrow { font-weight: 700; }
+.tgt.a .arrow { color: var(--ai-ink); } .tgt.y .arrow { color: var(--you-ink); }
+.tgt.a .art { box-shadow: 0 0 0 1.5px var(--ai); } .tgt.y .art { box-shadow: 0 0 0 1.5px var(--you); }
+.mega-mark { display: inline-block; flex: none; width: 14px; height: 14px; border-radius: 50%;
+  background: radial-gradient(circle, #fff 0 24%, transparent 27%),
+    conic-gradient(#d9443b, #ee9a2e, #e9cf3a, #4fb865, #3a86d8, #8458cc, #d9443b);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--ink) 25%, transparent); }
+.summary .act { display: flex; flex-direction: column; gap: 2px; }
 .nodefield { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 8px; align-items: center;
   margin: 2px 0 4px calc(1em + 3.4em); padding: 6px 8px; border-radius: 8px; background: var(--surface-2); font-size: 12px; }
 .nodefield .who { font-size: 11px; font-weight: 700; }

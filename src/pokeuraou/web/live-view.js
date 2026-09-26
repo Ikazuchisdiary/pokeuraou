@@ -79,14 +79,34 @@ function boardWho(side) {
   return sd ? sd.active.map((m) => (m ? m.species : null)) : [];
 }
 function fieldWho(row) { return (row || []).map((m) => (m ? m.name : null)); }
-function actHtml(parts, who, size, chunked) {
-  return (parts || []).map(([slot, t]) => {
-    const name = slot >= 0 && who ? who[slot] : null;
-    const text = chunked
+// A part is [slot, text, verb, target side (-1: none), target name, target sprite, mega]
+// (IKA-345): the move's name, then its target as the target's icon -- ringed, and its arrow
+// coloured, in the target's side's colour -- then the Mega Evolution mark. A part that is only
+// [slot, text] (an older record) is its text.
+const MEGA = '<span class="mega-mark" role="img" aria-label="メガシンカ" title="メガシンカ"></span>';
+function sideName(side) { return (S.names && S.names[side]) || (side === aiSide() ? "AI" : "あなた"); }
+function partBody(p, chunked) {
+  const [, t, verb, tside, tname, tsprite, mega] = p;
+  if (verb === undefined) {
+    return chunked
       ? `<span class="chunks">${String(t).split(/(?= → | \+ )/).map((c) => `<span class="ck">${esc(c.trim())}</span>`).join("")}</span>`
       : `<span>${esc(t)}</span>`;
+  }
+  let h = `<span class="verb">${esc(verb)}</span>`;
+  if (tside >= 0 && tname) {
+    learn({ species: tname, id: tsprite });
+    const tip = `${tname}（${sideName(tside)}の側）`;
+    h += `<span class="tgt ${tside === aiSide() ? "a" : "y"}" aria-label="→ ${esc(tip)}"><span class="arrow" aria-hidden="true">→</span>${art(tname, "xs", tip)}</span>`;
+  }
+  if (mega) h += MEGA;
+  return `<span class="pbody">${h}</span>`;
+}
+function actHtml(parts, who, size, chunked) {
+  return (parts || []).map((p) => {
+    const slot = p[0], t = p[1];
+    const name = slot >= 0 && who ? who[slot] : null;
     // A slot that cannot act (its Pokemon fainted) passes: shown, quietly.
-    return `<span class="part${t === "行動なし" || t === "pass" ? " idle" : ""}">${name ? art(name, size || "xs") : ""}${text}</span>`;
+    return `<span class="part${t === "行動なし" || t === "pass" ? " idle" : ""}">${name ? art(name, size || "xs") : ""}${partBody(p, chunked)}</span>`;
   }).join("");
 }
 const benchText = (bench) => (bench && bench.length ? bench.join(" / ") : "–");
@@ -596,6 +616,7 @@ function renderInput() {
   }
   const nSlots = p.slots.length ? p.slots[0].length : 0;
   const act = p.actives || (S.board ? S.board.sides[S.personSide].active : []);
+  act.forEach((m) => m && learn(m));
   const fits = (k) => p.slots.filter((a) => S.chosen.slice(0, k).every((c, j) => a[j][0] === c));
   let html = `<div class="ask">${esc(p.heading)}</div><div class="note">ターン ${p.turn}・合法手 ${p.choices.length}</div>`;
   for (let k = 0; k < nSlots; k++) {
@@ -610,7 +631,11 @@ function renderInput() {
   }
   const ready = S.chosen.length === nSlots && S.chosen.every((c) => c !== undefined);
   const labels = ready ? p.slots.find((a) => a.every((x, j) => x[0] === S.chosen[j])) : null;
-  html += `<div class="sendbar"><span class="summary">${labels ? esc(labels.map((x) => x[1]).join(" ／ ")) : "手を選んでください"}</span>
+  const whoIn = act.map((m) => (m ? m.species : null));
+  const summary = labels
+    ? `<span class="act">${actHtml(labels.map((x, k) => (x[2] ? x[2] : [k, x[1]])), whoIn)}</span>`
+    : "手を選んでください";
+  html += `<div class="sendbar"><span class="summary">${summary}</span>
     <button type="button" class="primary" id="go" ${labels ? "" : "disabled"}>この手で決定</button></div>`;
   box.innerHTML = html;
   box.querySelectorAll(".opt").forEach((b) => b.onclick = () => {
@@ -704,7 +729,29 @@ function renderTurns(keep) {
   if (g && !keep) $("aSide").value = String(g.side);
   $("aGameNote").textContent = g ? [g.open ? "裏は全公開で読みます（記録にシートが無い）" : "", g.note || ""].filter(Boolean).join("・") : "";
   $("aGo").disabled = !g || !g.decisions.length;
+  stepState();
 }
+// One turn back or forward: the picker moves and the position is read again, as when a turn
+// is picked from the list. The ends cannot be passed.
+function stepState() {
+  const sel = $("aTurn"), n = sel.options.length, i = sel.selectedIndex;
+  $("aPrev").disabled = !n || i <= 0;
+  $("aNext").disabled = !n || i < 0 || i >= n - 1;
+}
+function stepTurn(d) {
+  const sel = $("aTurn"), i = sel.selectedIndex + d;
+  if (i < 0 || i >= sel.options.length) return;
+  sel.selectedIndex = i; stepState(); startRead();
+}
+$("aPrev").onclick = () => stepTurn(-1);
+$("aNext").onclick = () => stepTurn(1);
+$("aTurn").addEventListener("change", stepState);
+document.addEventListener("keydown", (e) => {
+  if (!S.analysis || e.altKey || e.ctrlKey || e.metaKey || (e.key !== "ArrowLeft" && e.key !== "ArrowRight")) return;
+  const el = document.activeElement;
+  if (el && (el.isContentEditable || ["INPUT", "SELECT", "TEXTAREA"].includes(el.tagName))) return;
+  e.preventDefault(); stepTurn(e.key === "ArrowLeft" ? -1 : 1);
+});
 $("aSource").onchange = () => { fillSelect($("aGame"), []); renderPicker(true); renderTurns(false); };
 $("aGame").onchange = () => renderTurns(false);
 $("aRefresh").onclick = () => LiveData.command({ cmd: "refresh" });
@@ -734,7 +781,7 @@ function onAnalysis(e) {
     if (e.source != null && S.catalogue) {
       $("aSource").value = String(e.source); renderPicker(true);
       $("aGame").value = String(e.game); renderTurns(true);
-      $("aTurn").value = String(e.decision); $("aSide").value = String(e.side);
+      $("aTurn").value = String(e.decision); $("aSide").value = String(e.side); stepState();
       $("aWidth").value = e.width; $("aGuard").value = e.guard;
     }
     setStatus(`読んでいます（ターン ${e.turn}・側 ${e.side}）`, "think");

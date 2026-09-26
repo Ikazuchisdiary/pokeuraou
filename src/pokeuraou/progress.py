@@ -61,32 +61,83 @@ PV_TOP = 3
 SLOT_SEPARATOR = " ／ "
 
 
+@dataclass(frozen=True, slots=True)
+class Part:
+    """One slot's part of an action, for a page that draws it: the words (`text`, as
+    `describe` writes them), and the same split up -- `verb` (the move's name, or the whole
+    text where there is nothing to split), the target Pokemon when the move has one (its side,
+    0 or 1, its name and sprite id; side -1: none) and whether the Pokemon Mega Evolves."""
+
+    slot: int
+    text: str
+    verb: str = ""
+    target_side: int = -1
+    target_name: str = ""
+    target_sprite: str = ""
+    mega: bool = False
+
+
 class Label(str):
     """An action's label: the text, each slot's part joined by `SLOT_SEPARATOR`, and in
-    `parts` the parts themselves, each with the active slot whose action it is (IKA-345: the
-    page puts the user's icon on each part without splitting the text)."""
+    `parts` each part with the active slot whose action it is (IKA-345: the page puts the
+    user's icon on each part without splitting the text); `rich` holds the same parts as
+    `Part`s, the move, its target and Mega Evolution apart."""
 
     parts: tuple[tuple[int, str], ...]
+    rich: tuple[Part, ...]
 
-    def __new__(cls, parts: Sequence[tuple[int, str]]) -> Label:
-        self = super().__new__(cls, SLOT_SEPARATOR.join(text for _slot, text in parts))
-        self.parts = tuple((int(slot), str(text)) for slot, text in parts)
+    def __new__(cls, parts: Sequence[tuple[int, str] | Part]) -> Label:
+        rich = tuple(p if isinstance(p, Part) else Part(int(p[0]), str(p[1]), str(p[1])) for p in parts)
+        self = super().__new__(cls, SLOT_SEPARATOR.join(p.text for p in rich))
+        self.rich = rich
+        self.parts = tuple((p.slot, p.text) for p in rich)
         return self
 
     def __reduce__(self) -> tuple[Any, ...]:
-        return (Label, (self.parts,))
+        return (Label, (self.rich,))
 
 
-def label_parts(label: str) -> tuple[tuple[int, str], ...]:
+def label_parts(label: str) -> tuple[Part, ...]:
     """A label's parts: a `Label`'s own, or a plain text as one part for no slot (-1)."""
-    return label.parts if isinstance(label, Label) else ((-1, str(label)),)
+    return label.rich if isinstance(label, Label) else (Part(-1, str(label), str(label)),)
+
+
+def slot_part(reg: Regulation, slot: Any, pos: Position, side: int, loc: Any = None) -> Part:  # noqa: ANN401
+    """One slot's action as a `Part` (`describe`'s text, and its move, target and Mega apart)."""
+    from .actions import MoveAction
+    from .humanplay import sprite_id
+
+    targets = target_names(pos, side)
+    text = slot.describe(reg, loc, targets)
+    if not isinstance(slot, MoveAction):
+        return Part(slot.slot, text, text)
+    verb = loc.move(slot.move_id) if loc is not None else (
+        reg.moves[slot.move_id].name if slot.move_id in reg.moves else slot.move_id
+    )
+    species = targets.species_for(slot.target) if slot.target is not None else None
+    if slot.target is not None and species is None:
+        # An empty slot: the text says which index; nothing to draw.
+        return Part(slot.slot, text, text.removesuffix(" + メガ").removesuffix(" + Mega"),
+                    mega=slot.mega)
+    if species is None:
+        return Part(slot.slot, text, verb, mega=slot.mega)
+    name = loc.species(species) if loc is not None else species
+    return Part(
+        slot.slot, text, verb, target_side=(1 - side) if slot.target > 0 else side,
+        target_name=name, target_sprite=sprite_id(reg, species), mega=slot.mega,
+    )
 
 
 def action_label(reg: Regulation, action: SideAction, pos: Position, side: int, loc: Any = None) -> Label:  # noqa: ANN401
     """An action as the page shows it: each slot's part (`describe`, targets named), in slot
     order, with the active slot it is for (the side's k-th active Pokemon)."""
-    targets = target_names(pos, side)
-    return Label([(slot.slot, slot.describe(reg, loc, targets)) for slot in action.slots])
+    return Label([slot_part(reg, slot, pos, side, loc) for slot in action.slots])
+
+
+def part_json(part: Part) -> list[Any]:
+    """A part for an event: [slot, text, verb, target side, target name, target sprite, mega]."""
+    return [part.slot, part.text, part.verb, part.target_side, part.target_name,
+            part.target_sprite, part.mega]
 
 
 @dataclass(slots=True)
@@ -777,6 +828,7 @@ __all__ = [
     "PV_PAIRS_BELOW",
     "SLOT_SEPARATOR",
     "Cause",
+    "Part",
     "Change",
     "ClassView",
     "Label",
@@ -789,4 +841,6 @@ __all__ = [
     "Snapshot",
     "action_label",
     "label_parts",
+    "part_json",
+    "slot_part",
 ]
