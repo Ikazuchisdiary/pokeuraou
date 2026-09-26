@@ -313,12 +313,14 @@ def _play_seed(
                     continue
                 pick = py_rng.choice(side_actions(reg, before, side_index))
                 chosen.append(pick)
-                choices.append(pick.to_choice())
+                # Numbered by Showdown's request: a locked move is `move 1` (IKA-316).
+                choices.append(diff_turn.showdown_choice(pick, request))
             if all(c is None for c in choices):
                 break
             handle.step(choices)
             _carry_on(reg, node, carry, agg)
             if handle.choice_errors:
+                agg.skipped[diff_turn.REFUSED_CHOICE] += 1
                 break
             if forced or len(chosen) != 2:
                 agg.skipped["replacement turn"] += 1
