@@ -997,6 +997,9 @@ fn ability_handled(ability: &str) -> bool {
             // Not applied, and noted at the end of every turn its holder is there for,
             // in `moves::residuals` (IKA-308).
             | "moody"
+            // Not applied either, and noted where each fires, in `ability_notes` (IKA-317).
+            | "hydration" | "shedskin" | "poisonheal" | "harvest" | "cudchew" | "pickup"
+            | "hungerswitch" | "opportunist" | "forecast" | "liquidooze"
     ) || crate::inert::ability_is_inert(ability)
 }
 

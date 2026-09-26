@@ -25,6 +25,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from diff_turn import REFUSED_CHOICE, showdown_choice  # noqa: E402
+
 from pokeuraou.actions import SideAction, side_actions  # noqa: E402
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet  # noqa: E402
 from pokeuraou.position import Position  # noqa: E402
@@ -277,11 +279,13 @@ def run(battles: int, seed: int, max_turns: int, quiet: bool = True) -> Report:
                     options = side_actions(reg, pos, side_index)
                     pick = py_rng.choice(options)
                     chosen.append(pick)
-                    choices.append(pick.to_choice())
+                    # Numbered by Showdown's request: a locked move is `move 1` (IKA-316).
+                    choices.append(showdown_choice(pick, request))
                 if all(c is None for c in choices):
                     break
                 handle.step(choices)
                 if handle.choice_errors:
+                    report.skipped[REFUSED_CHOICE] += 1
                     break
                 if not forced and len(chosen) == 2:
                     compare_turn(reg, pos, chosen, handle.log, report)
