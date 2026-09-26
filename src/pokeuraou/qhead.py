@@ -279,20 +279,24 @@ def port_features(
     One crossing for both sides' pools. None when the port refuses the position (the
     same guard as the ranking's damage score).
     """
-    from . import rustnode
+    from . import rustnode, timing
 
     node = rustnode.node_for(reg)
     if node is None:
         raise rustnode.PortUnavailable("no Rust node for the candidate features")
-    response = node._exchange(  # noqa: SLF001 - one request, the same pipe `score` takes
-        {
-            "kind": "qfeatures",
-            "position": rustnode._position(pos),  # noqa: SLF001
-            "candidates": [
-                [[rustnode.dump_action(a) for a in c.slots] for c in pools[side]] for side in (0, 1)
-            ],
-        }
-    )
+    # IKA-339: the features' crossing, the wait included, as `rust.score` is; the request's
+    # and the answer's JSON are `rust.ask` and `rust.header` inside it.
+    with timing.stage("rust.qfeatures"):
+        response = node._exchange(  # noqa: SLF001 - one request, the same pipe `score` takes
+            {
+                "kind": "qfeatures",
+                "position": rustnode._position(pos),  # noqa: SLF001
+                "candidates": [
+                    [[rustnode.dump_action(a) for a in c.slots] for c in pools[side]]
+                    for side in (0, 1)
+                ],
+            }
+        )
     if response.get("refused"):
         return None
     if int(response["width"]) != FEATURE_WIDTH:
