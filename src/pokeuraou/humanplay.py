@@ -1130,7 +1130,8 @@ def play(
     payload["picks"] = [list(picks[0]), list(picks[1])]
     payload["human"] = {
         "side": you,
-        "person": person.kind,
+        # Who answered is the clock file's (`person`): the same inputs are the same game,
+        # whether a person typed them or a script read them back.
         "inputs": game.inputs,
         "beliefEpsilon": belief_epsilon,
     }
@@ -1152,6 +1153,7 @@ def play(
     clock = {
         "gameIndex": game_index,
         "seed": seed,
+        "person": person.kind,
         "mode": agent.clock,
         "cores": agent.cores,
         "secondsPerMove": agent.seconds,

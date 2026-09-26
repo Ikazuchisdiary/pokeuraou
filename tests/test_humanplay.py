@@ -228,6 +228,7 @@ def test_the_count_clock_replays_byte_for_byte(pool) -> None:  # noqa: ANN001
     assert deep, "no move deepened; the clock's road was not on this game"
     assert all(d["plan"]["clock"] == "count" for d in moves)
     assert "searchSeconds" not in first
+    assert clock["person"] == "random" and "person" not in first["human"]
     assert clock["moves"] == len(moves) and all(
         row["budget"] == 0.4 for row in clock["decisions"] if row["kind"] == "move"
     )
@@ -235,7 +236,6 @@ def test_the_count_clock_replays_byte_for_byte(pool) -> None:  # noqa: ANN001
     script = ScriptPerson(first["human"]["inputs"])
     replay, _, _ = _play(pool, script, seed=5)
     assert script.at == len(script.lines)
-    replay["human"]["person"] = first["human"]["person"]
     assert json.dumps(replay, ensure_ascii=False) == a
     # And the comparison can fail: another seed is another game.
     other, _, _ = _play(pool, PolicyPerson("random", 5), seed=6)
