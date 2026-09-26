@@ -82,6 +82,8 @@ def _mon(species: str, ability: str, moves: list[str], spe: int = 10) -> TeamSet
 USER = ["thunderbolt", "scald", "electroweb", "earthquake"]
 #: The user with Extreme Speed in place of Earthquake.
 QUICK_USER = ["thunderbolt", "scald", "electroweb", "extremespeed"]
+#: The user with Weather Ball and Rain Dance.
+RAIN_USER = ["thunderbolt", "weatherball", "raindance", "earthquake"]
 #: The partner: 1 Swords Dance, 2 Wide Guard, 3 Quick Guard, 4 Follow Me.
 PARTNER = ["swordsdance", "wideguard", "quickguard", "followme"]
 #: The foes: 1 Swords Dance, 2 Follow Me, 3 Wide Guard, 4 Thunderbolt.
@@ -182,6 +184,13 @@ CASES: dict[str, tuple] = {
     "control-mold-breaker-is-not-drawn-by-a-partners-lightning-rod": (
         _redirect_teams(partner=("Raichu", "Lightning Rod"), user_ability="Mold Breaker"), [],
         ["move 1 1, move 1", QUIET], "|move|p1a: Pikachu|Thunderbolt|p2a: Kommo-o",
+    ),
+    # The type is the one after `ModifyType` (diff_turn seed 3 battle 376: a Weather Ball in
+    # the rain drawn by Storm Drain). Pikachu's Rain Dance first.
+    "storm-drain-draws-a-weather-ball-in-the-rain": (
+        _redirect_teams(partner=("Milotic", "Storm Drain"), user_moves=RAIN_USER),
+        [["move 3, move 1", QUIET]], ["move 2 1, move 1", QUIET],
+        "|-activate|p1b: Milotic|ability: Storm Drain",
     ),
     "control-a-partners-lightning-rod-leaves-a-water-move": (
         _redirect_teams(partner=("Raichu", "Lightning Rod")), [], ["move 2 1, move 1", QUIET],

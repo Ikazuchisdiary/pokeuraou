@@ -1670,7 +1670,7 @@ fn redirection_target(
             ability => is_mold_breaker(ability),
         }
     });
-    let mut holders: Vec<Slot> = Vec::new();
+    let mut holders: Vec<(Slot, &str)> = Vec::new();
     for side in [action.side, foe_side] {
         for slot in 0..turn.pos.sides[side].active.len() {
             if (side, slot) == (action.side, action.slot) {
@@ -1681,15 +1681,28 @@ fn redirection_target(
                 continue;
             }
             let draws = match mon.ability.as_str() {
-                "lightningrod" => Some("Electric"),
-                "stormdrain" => Some("Water"),
-                _ => None,
+                "lightningrod" => "Electric",
+                "stormdrain" => "Water",
+                _ => continue,
             };
-            if draws == Some(mv.mtype.as_str()) {
-                holders.push((side, slot));
-            }
+            holders.push(((side, slot), draws));
         }
     }
+    if holders.is_empty() {
+        return Ok(None);
+    }
+    // The type after `ModifyType` (a Weather Ball in the rain is Water), only worked out when
+    // a holder is on the field: it builds the user's Battler.
+    let Some(user) = turn.battler_at(action.side, action.slot)? else { return Ok(None) };
+    let ctx = MoveContext {
+        weather: turn.pos.field.weather,
+        terrain: turn.pos.field.terrain,
+        hit_index: 1,
+        ..Default::default()
+    };
+    let move_type = crate::damage::modified_move_type(mv, &user, &ctx);
+    let mut holders: Vec<Slot> =
+        holders.into_iter().filter(|(_, draws)| move_type == *draws).map(|(slot, _)| slot).collect();
     if holders.len() > 1 {
         holders = by_speed_noting(turn, holders, "redirection speed tie (Showdown breaks it at random)")?;
     }
@@ -2014,7 +2027,7 @@ fn hit_target<'a>(
             let mut state = turn.clone();
             log_event!(state, "{} had no effect", Label(reg, action));
             state.move_failed[action.side][action.slot] = true;
-            absorb(&mut state, mv, target);
+            absorb(&mut state, crate::damage::modified_move_type(mv, &attacker, &move_ctx), target);
             outcomes.push((acc_weight * crit_weight, state));
             continue;
         }
@@ -2419,7 +2432,9 @@ fn protect_punish(
 /// What an immune defender gains from the hit it just shrugged off. Treating these purely
 /// as immunities loses half the mechanic: Dry Skin heals off a Water move and Lightning Rod
 /// gains Special Attack from an Electric one, and either can decide the next turn.
-fn absorb(turn: &mut Turn, mv: &Move, target: Slot) {
+/// `move_type` is the type after `ModifyType`, as the immunity itself was judged by (IKA-313:
+/// it was the declared type, so a Weather Ball in the rain into Storm Drain raised nothing).
+fn absorb(turn: &mut Turn, move_type: Id, target: Slot) {
     let (ability, maxhp) = match turn.mon_at(target.0, target.1) {
         None => return,
         Some(mon) if mon.fainted => return,
@@ -2431,7 +2446,7 @@ fn absorb(turn: &mut Turn, mv: &Move, target: Slot) {
         "eartheater" => Some("Ground"),
         _ => None,
     };
-    if heals == Some(mv.mtype.as_str()) {
+    if heals == Some(move_type.as_str()) {
         turn.heal(target.0, target.1, (maxhp / 4).max(1), ability.as_str());
         return;
     }
@@ -2446,12 +2461,12 @@ fn absorb(turn: &mut Turn, mv: &Move, target: Slot) {
         _ => None,
     };
     if let Some((wanted, table)) = boosts {
-        if wanted == mv.mtype.as_str() {
+        if wanted == move_type.as_str() {
             turn.apply_boosts(target.0, target.1, table, false, ability.as_str());
             return;
         }
     }
-    if ability == "flashfire" && mv.mtype == "Fire" {
+    if ability == "flashfire" && move_type == "Fire" {
         turn.add_volatile(target.0, target.1, "flashfire", None);
     }
 }

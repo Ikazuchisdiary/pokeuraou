@@ -87,6 +87,25 @@ fn same(value: Option<Id>, name: &str) -> bool {
     matches!(value, Some(v) if v.as_str() == name)
 }
 
+/// The move's type after `ModifyType`, and the -ate abilities' power boost. Struggle is `???`
+/// before any ability's ModifyType (IKA-239); then the abilities; then the move's own
+/// `onModifyType` (Weather Ball, Terrain Pulse).
+fn move_type_and_boost(mv: &Move, attacker: &Battler, ctx: &MoveContext) -> (Id, i64) {
+    let (mut move_type, type_change_fp) = crate::level_struggle::struggle_type(mv)
+        .unwrap_or_else(|| effective_move_type(mv, attacker));
+    if let Some(own) = effective_type(mv.id.as_str(), attacker, ctx) {
+        move_type = Id::new(own);
+    }
+    (move_type, type_change_fp)
+}
+
+/// The type the move is used as. `useMoveInner` runs `ModifyType` before `getMoveTargets`,
+/// so this is also the type Lightning Rod and Storm Drain draw by, and absorb by (IKA-313:
+/// a Weather Ball in the rain is a Water move to Storm Drain).
+pub fn modified_move_type(mv: &Move, attacker: &Battler, ctx: &MoveContext) -> Id {
+    move_type_and_boost(mv, attacker, ctx).0
+}
+
 fn effective_move_type(mv: &Move, attacker: &Battler) -> (Id, i64) {
     let declared = mv.mtype;
     let changed = match type_changing_ability(attacker.ability.as_str()) {
@@ -422,12 +441,7 @@ pub fn calculate(
         }
     };
 
-    // Struggle is `???` before any ability's ModifyType (IKA-239).
-    let (mut move_type, type_change_fp) = crate::level_struggle::struggle_type(mv)
-        .unwrap_or_else(|| effective_move_type(mv, attacker));
-    if let Some(own) = effective_type(move_id, attacker, ctx_move) {
-        move_type = Id::new(own);
-    }
+    let (move_type, type_change_fp) = move_type_and_boost(mv, attacker, ctx_move);
     // The chart is read by slot; the move's and the defender's are looked up once here and
     // shared by the immunity check and the effectiveness, which each computed them anew.
     let move_slot = reg.type_slot_of(move_type.as_str());
