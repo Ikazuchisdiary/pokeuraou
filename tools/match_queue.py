@@ -246,7 +246,9 @@ def main() -> None:
         default=None,
         help="the Q a q / q-nocover rank fill ranks by (IKA-274): with --served the servers "
         "load it as the Q arm `q` and every worker gets --q-arm q; otherwise every worker "
-        "gets --q-model",
+        "gets --q-model. Default with --pool: data/models/q-mc0.pt when an arm ranks by the "
+        "default Q -- an arm with --rank-leaf and no --rank-fill after -- plays q-nocover, "
+        "what M-C generation plays (IKA-338) -- and a stop if that file is not there",
     )
     ap.add_argument(
         "--q-model-named",
@@ -326,6 +328,17 @@ def main() -> None:
         )
 
     check_other_arm(args, extra)
+    if args.q_model is None and args.pool is not None:
+        from pokeuraou import qrank
+
+        # IKA-338: an arm ranks its leaf-ranked menus by the default Q unless the tail names
+        # another fill -- the player M-C generation ships. Found here so that the servers
+        # hold it and a missing file stops the board before any worker starts.
+        if qrank.tail_wants_default_q(extra):
+            q_path = qrank.default_q()
+            if not q_path.exists():
+                raise SystemExit(qrank.missing_q(q_path))
+            args.q_model = q_path
     if args.pool is not None and args.baseline_hp_share:
         extra = [*extra, "--baseline-hp-share"]
     check_aivat(args)

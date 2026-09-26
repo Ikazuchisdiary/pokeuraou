@@ -14,7 +14,9 @@ person is shown and how the agent spends its seconds). This file loads the piece
 * the leaf: the M-C ensemble (`DEFAULT_VALUE`) when it is there, ``--value`` to name
   another, ``--hp-share`` for none -- said at the start either way;
 * the menus: ``q-nocover`` when a Q is there (``--q-model``, default `DEFAULT_Q`), the
-  default fill otherwise, with a note; ``--rank-fill`` overrides;
+  default fill otherwise, with a note; ``--rank-fill`` overrides. Unlike generation and the
+  board, which stop without the Q (IKA-338), a person's game falls back and says so, as it
+  does for a missing leaf: the note is printed at the start and the record names the fill;
 * the cores: ``--cores`` prices the budget rule and spreads a move over that many threads
   (`humanplay.use_threads`: the port's cells, the deepening's cells expanded ahead, a big
   game's two LPs at once -- IKA-32); ``--threads`` sets the threads alone.
@@ -57,17 +59,19 @@ from pokeuraou.hidden import DEFAULT_BENCH_DROP, parse_bench_drop  # noqa: E402
 from pokeuraou.names import localiser  # noqa: E402
 from pokeuraou.pool import draw_pair, load_pool  # noqa: E402
 from pokeuraou.regulation import repo_root  # noqa: E402
-from pokeuraou.search import DEFAULT_RANK_FILL, parse_rank_fill  # noqa: E402
+from pokeuraou.search import DEFAULT_RANK_FILL, SHIPPED_RANK_FILL, parse_rank_fill  # noqa: E402
 from pokeuraou.selfplay import MAX_TURNS  # noqa: E402
 from pokeuraou.teams import load_roster  # noqa: E402
 
 #: The M-C leaf that ships (CLAUDE.md): the two-model ensemble.
 DEFAULT_VALUE = ("data/models/value-mc0.pt", "data/models/value-mc0-s1.pt")
-#: Where the Q that q-nocover ranks by is looked for when --q-model is not given. IKA-274
-#: stage 3 is still training it; until a file is here the menus fall back, with a note.
-DEFAULT_Q = "data/models/q-mc0.pt"
-#: The fill the user chose on 9/26 for boards and human play (IKA-274 stage 2).
-Q_FILL = "q-nocover"
+#: Where the Q that q-nocover ranks by is looked for when --q-model is not given: the same
+#: file generation and the board rank by (IKA-338). Without it the menus fall back, with a
+#: note -- here, not in generation or on the board, which stop.
+DEFAULT_Q = qrank.DEFAULT_Q
+#: The fill the user chose on 9/26 for boards and human play (IKA-274 stage 2), and M-C
+#: generation's since IKA-338.
+Q_FILL = SHIPPED_RANK_FILL
 
 
 def leaf_name(files: list[Path]) -> str:

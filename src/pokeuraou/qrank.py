@@ -671,7 +671,8 @@ def add_q_flags(ap: Any) -> None:  # noqa: ANN401 - an ArgumentParser
     )
     ap.add_argument(
         "--q-model", type=Path, default=None,
-        help="the same Q loaded here instead (torch in this worker)",
+        help="the same Q loaded here instead (torch in this worker). With neither, a q "
+        f"rank fill loads {DEFAULT_Q} here, and stops if it is not there (IKA-338)",
     )
     ap.add_argument(
         "--q-arm-named", nargs=2, action="append", default=[], metavar=("NAME", "ARM"),
@@ -683,13 +684,78 @@ def add_q_flags(ap: Any) -> None:  # noqa: ANN401 - an ArgumentParser
     )
 
 
+#: Where the default Q is, from the repository root: the Q of M-C's shipped leaf (IKA-274
+#: stage 3). What a q fill ranks by when no Q is named, in generation, on the board and in
+#: human play (IKA-338; `search.SHIPPED_RANK_FILL`).
+DEFAULT_Q = "data/models/q-mc0.pt"
+
+
+def default_q() -> Path:
+    """`DEFAULT_Q` in this checkout (it may not exist: `missing_q` says what to do)."""
+    from .regulation import repo_root
+
+    return repo_root() / DEFAULT_Q
+
+
+def missing_q(path: Path) -> str:
+    """The stop for a q fill whose default Q is not there (IKA-338).
+
+    Generation and the board never fall back to ``refs2`` on their own: a run that asked for
+    the shipped player and quietly got another is the drift `agent_drift.py` exists for.
+    """
+    return (
+        f"the rank fill q-nocover (the default for a leaf-ranked menu since IKA-338) ranks by "
+        f"a Q, and there is none at {path}: name one with --q-model FILE, or play without one "
+        "by naming --rank-fill refs2 (and --baseline-rank-fill refs2 for a board's other arm)"
+    )
+
+
+def tail_wants_default_q(tail: Sequence[str]) -> bool:
+    """Whether workers handed this tail rank by the default Q, so their launcher loads it.
+
+    The launchers (`generate_queue.py`, `match_queue.py`) pass everything after ``--`` to the
+    workers untouched. Read here for what decides the Q: each arm's ``--rank-leaf`` and
+    ``--rank-fill`` (``--baseline-*`` for a board's other arm), resolved as the worker
+    resolves them (`search.resolve_rank_fill`), and a ``--deepen`` whose oracle or children
+    rank by the default Q. A tail that names its own Q (``--q-arm`` / ``--q-model``) wants
+    none from the launcher.
+    """
+    import argparse
+
+    from .deepen import deepen_spec
+    from .search import resolve_rank_fill
+
+    ap = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    for arm in ("", "baseline-"):
+        ap.add_argument(f"--{arm}rank-leaf", action="store_true")
+        ap.add_argument(f"--{arm}rank-fill", default=None)
+        ap.add_argument(f"--{arm}deepen", default=None)
+    ap.add_argument("--q-arm", default=None)
+    ap.add_argument("--q-model", default=None)
+    got, _ = ap.parse_known_args(list(tail))
+    if got.q_arm is not None or got.q_model is not None:
+        return False
+    for leafy, fill, deepen in ((got.rank_leaf, got.rank_fill, got.deepen),
+                                (got.baseline_rank_leaf, got.baseline_rank_fill,
+                                 got.baseline_deepen)):
+        label = resolve_rank_fill(fill, leafy)
+        if leafy and is_q(label) and not q_name(label):
+            return True
+        if deepen is not None:
+            spec = deepen_spec(deepen)
+            if spec.q_probe is not None or spec.child_q is not None:
+                return True
+    return False
+
+
 def install_from_args(
     args: Any, encoder: Any, fills: Sequence[str], error: Callable[[str], Any]  # noqa: ANN401
 ) -> dict[str, Any]:
     """Installs the Qs the flags name, and stops when a q fill has none (or one has no use).
 
-    Returns {name: model} ("" the default), empty when no fill asks for a Q and none was
-    named.
+    A q fill of the default name with no Q named ranks by `default_q` (IKA-338), loaded
+    here; without that file it stops (`missing_q`). Returns {name: model} ("" the default),
+    empty when no fill asks for a Q and none was named.
     """
     wanted = {q_name(fill) for fill in fills if is_q(fill)}
     if args.q_arm is not None and args.q_model is not None:
@@ -713,7 +779,10 @@ def install_from_args(
         if name:
             error(f"a q rank fill .{name} needs --q-arm-named {name} ARM (served) or "
                   f"--q-model-named {name} FILE (loaded here)")
-        error("a q rank fill needs --q-arm (served) or --q-model (loaded here)")
+        path = default_q()
+        if not path.exists():
+            error(missing_q(path))
+        named[""] = ("model", str(path))
     models: dict[str, Any] = {}
     for name, (how, what) in named.items():
         if how == "arm":
@@ -741,7 +810,11 @@ def describe_installed(models: dict[str, Any]) -> list[str]:
 
 
 __all__ = [
+    "DEFAULT_Q",
     "add_q_flags",
+    "default_q",
+    "missing_q",
+    "tail_wants_default_q",
     "install_from_args",
     "describe_installed",
     "prefetch",
