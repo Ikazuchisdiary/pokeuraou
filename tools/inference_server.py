@@ -138,7 +138,9 @@ def main() -> None:
         arms={name: [p.name for p in group] for name, group in paths.items()},
         q_models=q_models,
     )
-
+    if args.device == "cuda" and args.cuda_memory_gb > 0:
+        # Named in every out-of-memory reply and its log line (IKA-336).
+        server.memory_cap_gb = args.cuda_memory_gb
     # First line of stdout, so a launcher can read it without parsing the prose.
     print(address, flush=True)
     for name, group in paths.items():
@@ -236,7 +238,9 @@ def main() -> None:
             print(f"  {now:,} requests, {server.rows_served:,} rows "
                   f"({now - served} since the last line); per call "
                   f"{1000 * waited / calls:.2f} ms queued, {1000 * held / calls:.2f} ms "
-                  f"working; cuda reserved {reserved:.2f} GB, in use {in_use:.2f} GB",
+                  f"working; cuda reserved {reserved:.2f} GB, in use {in_use:.2f} GB"
+                  + (f"; {server.oom_replies} out-of-memory replies so far (IKA-336)"
+                     if server.oom_replies else ""),
                   file=sys.stderr, flush=True)
             served, last = now, time.perf_counter()
     note()

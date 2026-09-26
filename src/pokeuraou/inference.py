@@ -50,6 +50,7 @@ import json
 import os
 import socket
 import socketserver
+import sys
 import threading
 import time
 from collections import OrderedDict
@@ -62,6 +63,7 @@ from typing import Any
 import numpy as np
 
 from . import timing
+from .workqueue import SERVER_OOM_MARK
 
 #: Environment variable carrying "host:port" to a worker.
 ENV_SERVER = "POKEURAOU_INFERENCE"
@@ -80,6 +82,33 @@ CHUNK_ROWS = 8192
 #: 128 MB while a request could be a whole node -- 21,520 rows was observed and 1,048,576
 #: was survived -- and requests are now chunks.
 BUFFER_BYTES = 64 * 1024 * 1024
+
+
+class ServerOutOfMemory(RuntimeError):
+    """The inference server ran out of CUDA memory answering this worker's request.
+
+    IKA-336. Since IKA-334 a server caps its allocator (`--cuda-memory-gb`), so a full card
+    is an OOM instead of a GPU reset -- and a worker that got it as a generic "inference
+    failed" died looking like any other crash, while the queue replayed its games and the
+    run's clock went quietly wrong. The name says what happened and what to change.
+    """
+
+
+def is_out_of_memory(error: BaseException) -> bool:
+    """torch's `OutOfMemoryError` (CUDA), or an older torch's RuntimeError saying so."""
+    return type(error).__name__ == "OutOfMemoryError" or "out of memory" in str(error).lower()
+
+
+def request_failed(reply: dict[str, Any], what: str) -> RuntimeError:
+    """The exception for a server's `ok: false` reply: `ServerOutOfMemory` for an OOM."""
+    if reply.get("oom"):
+        cap = reply.get("capGb")
+        return ServerOutOfMemory(
+            f"{what}: the inference server ran out of CUDA memory "
+            f"(its cap: {f'{cap:g} GB' if cap else 'none'}, --cuda-memory-gb, IKA-334) -- "
+            f"{reply.get('error')}"
+        )
+    return RuntimeError(f"{what}: {reply.get('error')}")
 
 
 def _plan(encoded: Any) -> tuple[list[dict[str, Any]], int]:
@@ -173,6 +202,11 @@ class _Handler(socketserver.StreamRequestHandler):
                     reply = self._serve(request, attached)
                 except Exception as error:  # noqa: BLE001 -- reported, never fatal
                     reply = {"ok": False, "error": f"{type(error).__name__}: {error}"}
+                    if is_out_of_memory(error):
+                        # IKA-336: said as what it is, to the worker and in this log.
+                        reply["oom"] = True
+                        reply["capGb"] = getattr(server, "memory_cap_gb", None)
+                        server.note_oom(request.get("op"), reply["error"])  # type: ignore[attr-defined]
                 self.wfile.write((json.dumps(reply) + "\n").encode("utf-8"))
                 self.wfile.flush()
         except (ConnectionError, OSError, json.JSONDecodeError):
@@ -309,7 +343,20 @@ class _Server(socketserver.ThreadingTCPServer):
         self.requests_served = 0
         self.rows_served = 0
         self.connections = 0
+        #: Replies that were a CUDA out-of-memory error (IKA-336), and the cap they hit
+        #: (`inference_server.py --cuda-memory-gb`, IKA-334), None when nobody set one.
+        self.oom_replies = 0
+        self.memory_cap_gb: float | None = None
         self._lock = threading.Lock()
+
+    def note_oom(self, op: Any, error: str) -> None:  # noqa: ANN401
+        with self._lock:
+            self.oom_replies += 1
+            count = self.oom_replies
+        cap = f"{self.memory_cap_gb:g} GB" if self.memory_cap_gb else "no cap"
+        # One line per reply, carrying `SERVER_OOM_MARK`, so a driver can count them here.
+        print(f"  {SERVER_OOM_MARK} #{count} to a {op!r} request (cuda memory cap: {cap}, "
+              f"IKA-334): {' '.join(error.split())[:400]}", file=sys.stderr, flush=True)
 
     def note_request(self, rows: int) -> None:
         with self._lock:
@@ -511,7 +558,7 @@ class RemoteValue:
         self.calls += 1
         reply = json.loads(line)
         if not reply.get("ok"):
-            raise RuntimeError(f"inference failed: {reply.get('error')}")
+            raise request_failed(reply, "inference failed")
         scores = np.frombuffer(
             view[result_offset : result_offset + rows * 8], dtype=np.float64
         ).copy()
@@ -615,7 +662,7 @@ class RemoteValue:
         self.calls += 1
         reply = json.loads(line)
         if not reply.get("ok"):
-            raise RuntimeError(f"inference failed: {reply.get('error')}")
+            raise request_failed(reply, "inference failed")
         scores = np.frombuffer(
             view[result_offset : result_offset + rows * 8], dtype=np.float64
         ).copy()
