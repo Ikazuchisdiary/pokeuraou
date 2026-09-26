@@ -638,7 +638,64 @@ fn fills<R: BufRead, W: Write>(
     // A node another node of this crossing reads its turns off (`like`), by index.
     let mut kept: Vec<Option<crate::encoded_node::Kept>> = Vec::with_capacity(list.len());
     let mut total = 0usize;
-    for one in list {
+    // IKA-32 stage 2: plain nodes -- none keeps its turns for another or reads another's --
+    // go one per pool thread, each resolved and encoded there whole (no pool inside it),
+    // with that thread's own encoder, and come back in the order sent. A node's bytes are
+    // what its own crossing would have carried (the cells, the shared leaves and the
+    // encoding are the node's alone), so the body is the same; what spreads is a crossing
+    // of many small nodes -- the deepening's children, 8 x 8 each -- that the cell pool
+    // could only split into a few cells a thread.
+    let plain = list.len() > 1
+        && list.iter().all(|one| {
+            !one.get("keep").and_then(Value::as_bool).unwrap_or(false)
+                && one.get("like").is_none_or(Value::is_null)
+        });
+    if let (Some(pool), true) = (crate::par::Pool::global(), plain) {
+        let owned: Vec<Value> = list
+            .iter()
+            .map(|one| {
+                let mut one = one.clone();
+                // A pool thread cannot see this thread's held positions (IKA-302).
+                if crate::held::held_id(&one["position"]).is_some() {
+                    one["position"] = crate::held::json(&one["position"]);
+                }
+                one
+            })
+            .collect();
+        let format = reg.format_id.as_str();
+        type Node = (Value, crate::encode::Encoded, Vec<f64>, Vec<u8>);
+        let answers: Vec<Result<Node, String>> = pool.map_with(
+            owned.len(),
+            || crate::encode::Encoder::new(reg),
+            |encoder, k| {
+                let request = parse_request(&owned[k])?;
+                if &*request.position.format != format {
+                    return Err(format!(
+                        "position is {} but the regulation is {}",
+                        request.position.format, format
+                    ));
+                }
+                if !request.encode {
+                    return Err("`fills` answers encoded nodes only".into());
+                }
+                let (header, encoded, leaf_values, spans, _kept) =
+                    crate::encoded_node::fill_shared_on(reg, encoder, &request, None, false, None);
+                Ok((header, encoded, leaf_values, spans))
+            },
+        );
+        for answer in answers {
+            match answer {
+                Err(reason) => return fail(stdout, reason),
+                Ok((header, encoded, leaf_values, spans)) => {
+                    total += header["bytes"].as_u64().unwrap_or(0) as usize;
+                    headers.push(header);
+                    bodies.push((encoded, leaf_values, spans));
+                }
+            }
+        }
+        crate::par::count_node_items(list.len());
+    }
+    for one in if bodies.is_empty() { &list[..] } else { &list[..0] } {
         let mut request = match parse_request(one) {
             Err(reason) => return fail(stdout, reason),
             Ok(request) => request,

@@ -44,6 +44,14 @@ pub fn threads() -> usize {
 pub static PARALLEL_MAPS: AtomicUsize = AtomicUsize::new(0);
 pub static PARALLEL_ITEMS: AtomicUsize = AtomicUsize::new(0);
 pub static OFF_MAIN_ITEMS: AtomicUsize = AtomicUsize::new(0);
+/// Nodes of a `fills` crossing resolved one per thread (IKA-32 stage 2), the positive
+/// control of that road.
+pub static NODE_ITEMS: AtomicUsize = AtomicUsize::new(0);
+
+/// Counts `n` nodes of a crossing that went one per thread.
+pub fn count_node_items(n: usize) {
+    NODE_ITEMS.fetch_add(n, Ordering::Relaxed);
+}
 
 /// A value built on one thread and read on another, although it holds `Rc`s.
 ///
@@ -231,6 +239,7 @@ pub fn report() -> serde_json::Value {
         "maps": PARALLEL_MAPS.load(Ordering::Relaxed),
         "items": PARALLEL_ITEMS.load(Ordering::Relaxed),
         "offMain": OFF_MAIN_ITEMS.load(Ordering::Relaxed),
+        "nodes": NODE_ITEMS.load(Ordering::Relaxed),
     })
 }
 
