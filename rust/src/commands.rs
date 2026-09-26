@@ -236,6 +236,7 @@ fn log_json(log: &EventLog) -> Value {
     json!({
         "events": log.events,
         "acts": log.acts.iter().map(|(start, label)| json!([start, label])).collect::<Vec<_>>(),
+        "chance": log.chance,
     })
 }
 
@@ -258,7 +259,12 @@ fn log_from(value: &Value) -> Result<Option<Box<EventLog>>, String> {
             _ => Err("a pause act does not parse"),
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(Some(Box::new(EventLog { events, acts })))
+    // A pause saved before IKA-345 has no tags: it starts with none.
+    let chance = value["chance"]
+        .as_array()
+        .map(|tags| tags.iter().filter_map(|t| t.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    Ok(Some(Box::new(EventLog { events, acts, chance })))
 }
 
 /// Whether a request asks for the trace.
@@ -271,6 +277,7 @@ fn with_log(mut out: Value, log: Option<&EventLog>) -> Value {
     if let Some(log) = log {
         out["events"] = json!(log.events);
         out["acts"] = log_json(log)["acts"].clone();
+        out["chance"] = json!(log.chance);
     }
     out
 }
