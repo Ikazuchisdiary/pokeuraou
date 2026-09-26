@@ -39,7 +39,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from pokeuraou import rustnode
+from pokeuraou import qrank, rustnode
 from pokeuraou.benchflags import add_bench_flags, require_bench
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.deepen import DEFAULT_DEEPEN, parse_deepen
@@ -152,6 +152,20 @@ def rank_scores_path(
     return path_for(out)
 
 
+def _install_q(args: argparse.Namespace, reg: Regulation, ap: argparse.ArgumentParser) -> None:
+    """The Q a q rank fill ranks by (IKA-274), installed and echoed; nothing otherwise."""
+    if qrank.is_q(args.rank_fill) and not args.rank_leaf:
+        ap.error(f"--rank-fill {args.rank_fill} ranks the leaf-ranked menu: it needs --rank-leaf")
+    from pokeuraou.encode import Encoder
+
+    encoder = Encoder(reg) if qrank.is_q(args.rank_fill) else None
+    model = qrank.install_from_args(args, encoder, (args.rank_fill,), ap.error)
+    if model is not None:
+        print(f"  Q: {', '.join(model.describe())} "
+              + (f"(the {args.q_arm} arm on {args.inference})" if args.q_arm else "(loaded here)"),
+              file=sys.stderr)
+
+
 def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
     """`--pool`: both seats from the pool, the selection solved per game (IKA-81)."""
     from pokeuraou.pool import load_pool
@@ -172,6 +186,7 @@ def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
     reg = pool.reg
     register_mega_stones(reg)
     evaluate, leaf_label = build_leaf(args, reg)
+    _install_q(args, reg, ap)
     selection = "uniform" if args.uniform_selection else SOLVED
     print(pool.summary(), file=sys.stderr)
     if pool.character:
@@ -349,6 +364,7 @@ def main() -> None:
         default="value",
         help="which named arm on the server to score with",
     )
+    qrank.add_q_flags(ap)
     ap.add_argument("--device", default=None, help="cuda or cpu; default is cuda if present")
     ap.add_argument(
         "--torch-threads",
