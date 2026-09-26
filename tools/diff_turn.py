@@ -195,6 +195,12 @@ def pick_action(
     return py_rng.choice(switching or options)
 
 
+#: The `skipped` reason every Showdown-driven diff tool counts a refused choice under: the
+#: battle stops there and its remaining turns go uncompared, so it is named, not silent
+#: (IKA-309 here; IKA-316 the other tools, which share `showdown_choice` below).
+REFUSED_CHOICE = "battle stopped: Showdown refused a choice"
+
+
 def showdown_choice(pick: SideAction, request: dict[str, Any] | None) -> str:
     """``pick`` as Showdown's choice string, its move numbers read off Showdown's request.
 
@@ -1037,7 +1043,7 @@ def run(
                     follow_port(reg, node, report.ports[label], report.showdown)
                 if handle.choice_errors:
                     # Named, not silent: the rest of the battle goes uncompared (IKA-309).
-                    report.skipped["battle stopped: Showdown refused a choice"] += 1
+                    report.skipped[REFUSED_CHOICE] += 1
                     break
                 if forced or len(chosen) != 2:
                     report.skipped["replacement turn"] += 1
