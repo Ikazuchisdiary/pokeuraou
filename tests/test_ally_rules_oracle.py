@@ -19,6 +19,7 @@ IKA-313, Lightning Rod and Storm Drain (data/abilities.ts)::
 
 `onAny`: the holder draws the move whichever side it is on, the user's partner included,
 and the user itself is no valid target. Two holders are met fastest first (`speedSort`).
+Both abilities are `breakable`, so a Mold Breaker user's move is drawn by neither side's.
 Follow Me and Rage Powder are `onFoeRedirectTarget` -- the user's foes only -- but the
 event's target is the user, so they draw a move aimed at the user's own partner too.
 
@@ -171,6 +172,16 @@ CASES: dict[str, tuple] = {
     "control-the-users-own-lightning-rod-draws-nothing": (
         _redirect_teams(user_ability="Lightning Rod"), [], ["move 1 1, move 1", QUIET],
         "|move|p1a: Pikachu|Thunderbolt|p2a: Kommo-o",
+    ),
+    # Both abilities are `breakable`: a Mold Breaker user's move is drawn by neither side's
+    # (diff_turn seed 3 battle 329: a Mega Gyarados's Waterfall past its partner's Storm Drain).
+    "mold-breaker-is-not-drawn-by-a-foes-lightning-rod": (
+        _redirect_teams(foe_b=("Raichu", "Lightning Rod"), user_ability="Mold Breaker"), [],
+        ["move 1 1, move 1", QUIET], "|move|p1a: Pikachu|Thunderbolt|p2a: Kommo-o",
+    ),
+    "control-mold-breaker-is-not-drawn-by-a-partners-lightning-rod": (
+        _redirect_teams(partner=("Raichu", "Lightning Rod"), user_ability="Mold Breaker"), [],
+        ["move 1 1, move 1", QUIET], "|move|p1a: Pikachu|Thunderbolt|p2a: Kommo-o",
     ),
     "control-a-partners-lightning-rod-leaves-a-water-move": (
         _redirect_teams(partner=("Raichu", "Lightning Rod")), [], ["move 2 1, move 1", QUIET],

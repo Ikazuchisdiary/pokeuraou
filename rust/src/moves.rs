@@ -1660,6 +1660,16 @@ fn redirection_target(
         }
         return Ok(Some((foe_side, slot)));
     }
+    // Both abilities are `breakable`: `runEvent` skips the handler of a holder
+    // `suppressingAbility` names -- a Mold Breaker user's move (Mycelium Might's only when it
+    // is a status move), unless the holder has an Ability Shield. A Mold Breaker Gyarados's
+    // Waterfall is not drawn by its partner's Storm Drain (IKA-313, diff_turn seed 3).
+    let ignores_abilities = turn.mon_at(action.side, action.slot).is_some_and(|user| {
+        match user.ability.as_str() {
+            "myceliummight" => mv.category == "Status",
+            ability => is_mold_breaker(ability),
+        }
+    });
     let mut holders: Vec<Slot> = Vec::new();
     for side in [action.side, foe_side] {
         for slot in 0..turn.pos.sides[side].active.len() {
@@ -1667,7 +1677,7 @@ fn redirection_target(
                 continue;
             }
             let Some(mon) = turn.mon_at(side, slot) else { continue };
-            if mon.fainted {
+            if mon.fainted || (ignores_abilities && !is(mon.item, "abilityshield")) {
                 continue;
             }
             let draws = match mon.ability.as_str() {
