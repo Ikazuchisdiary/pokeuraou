@@ -415,6 +415,66 @@ fn qfeatures(reg: &Reg, value: &Value) -> Value {
     json!({ "width": crate::qfeatures::WIDTH, "features": out })
 }
 
+/// `qfeatures` with `"binary": true` (IKA-350): the numbers go down the pipe behind the
+/// header as little-endian f64s, side 0's rows and then side 1's, `WIDTH` to a row, and the
+/// header says only how many (`rows`, `bytes`). The same doubles the JSON answer spelled out
+/// -- JSON's shortest round-trip text of an f64 reads back as that f64 -- so the caller's
+/// float32 of them is the same too. A refusal or an error is the JSON answer's, with no body.
+fn qfeatures_binary<W: Write>(
+    reg: &Reg,
+    value: &Value,
+    stdout: &mut W,
+) -> std::io::Result<()> {
+    let position = crate::held::position(&value["position"]);
+    let mut rows: Vec<Vec<[f64; crate::qfeatures::WIDTH]>> = Vec::with_capacity(2);
+    let mut refusal: Option<Value> = None;
+    if &*position.format != reg.format_id.as_str() {
+        refusal = Some(json!({
+            "error": format!(
+                "position is {} but the regulation is {}", position.format, reg.format_id
+            )
+        }));
+    } else {
+        for side in 0..2usize {
+            let candidates: Vec<Vec<crate::resolve::SlotAction>> = value["candidates"][side]
+                .as_array()
+                .map(|list| list.iter().map(crate::resolve::parse_actions_list).collect())
+                .unwrap_or_default();
+            match crate::qfeatures::side_features(reg, &position, side, &candidates) {
+                Err(reason) => {
+                    refusal = Some(json!({ "refused": reason }));
+                    break;
+                }
+                Ok(side_rows) => rows.push(side_rows),
+            }
+        }
+    }
+    let written = std::time::Instant::now();
+    if let Some(refusal) = refusal {
+        let text = refusal.to_string();
+        crate::wire::wrote(written, text.len());
+        writeln!(stdout, "{text}")?;
+        return stdout.flush();
+    }
+    let count: usize = rows.iter().map(Vec::len).sum();
+    let mut body: Vec<u8> = Vec::with_capacity(count * crate::qfeatures::WIDTH * 8);
+    for row in rows.iter().flatten() {
+        for number in row {
+            body.extend_from_slice(&number.to_le_bytes());
+        }
+    }
+    let text = json!({
+        "width": crate::qfeatures::WIDTH,
+        "rows": [rows[0].len(), rows[1].len()],
+        "bytes": body.len(),
+    })
+    .to_string();
+    crate::wire::wrote(written, text.len() + body.len());
+    writeln!(stdout, "{text}")?;
+    stdout.write_all(&body)?;
+    stdout.flush()
+}
+
 /// JSONL over stdio: one request per line, one response per line.
 ///
 /// The lock is held across the loop rather than taken per line, because an encoded node
@@ -840,6 +900,12 @@ fn answer<R: BufRead, W: Write>(
         }
         Ok(value) if value["kind"].as_str() == Some("resolve") => resolve_one(reg, &value),
         Ok(value) if value["kind"].as_str() == Some("score") => score_pool(reg, &value),
+        Ok(value)
+            if value["kind"].as_str() == Some("qfeatures")
+                && value.get("binary").and_then(Value::as_bool) == Some(true) =>
+        {
+            return qfeatures_binary(reg, &value, stdout);
+        }
         Ok(value) if value["kind"].as_str() == Some("qfeatures") => qfeatures(reg, &value),
         Ok(value) if value["kind"].as_str() == Some("many") => many(reg, &value),
         // The cell threads' own account (IKA-32): how many, and how much ran on them.
