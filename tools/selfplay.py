@@ -160,7 +160,9 @@ def _install_q(args: argparse.Namespace, reg: Regulation, ap: argparse.ArgumentP
 
     # A deepen label whose oracle probes by a Q (IKA-322's q<k>) wants the default Q; it
     # is named to `install_from_args` as a q fill would be.
-    probing = ["q"] if deepen_spec(args.deepen).q_probe is not None else []
+    # So does one whose children's menus a Q ranks (IKA-307's c<k>).
+    spec = deepen_spec(args.deepen)
+    probing = ["q"] if spec.q_probe is not None or spec.child_q is not None else []
     wanted = qrank.is_q(args.rank_fill) or bool(probing)
     encoder = Encoder(reg) if wanted else None
     models = qrank.install_from_args(args, encoder, (args.rank_fill, *probing), ap.error)

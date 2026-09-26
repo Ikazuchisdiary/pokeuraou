@@ -168,8 +168,10 @@ def _install_q(args: argparse.Namespace, encoder: Encoder, ap: argparse.Argument
             ap.error(f"{label} {fill} ranks the leaf-ranked menu: it needs that arm's rank-leaf")
     # A deepen label whose oracle probes by a Q (IKA-322's q<k>) wants the default Q; it
     # is named to `install_from_args` as a q fill would be, so the flags' checks hold for it.
+    # So does one whose children's menus a Q ranks (IKA-307's c<k>).
     probing = ["q" for label in (args.deepen, args.baseline_deepen)
-               if deepen_spec(label).q_probe is not None]
+               if deepen_spec(label).q_probe is not None
+               or deepen_spec(label).child_q is not None]
     models = qrank.install_from_args(
         args, encoder, (args.rank_fill, args.baseline_rank_fill, *probing), ap.error
     )
@@ -416,7 +418,7 @@ def main(argv: list[str] | None = None) -> None:
     echo = [[{"selection": {}, "belief": {}, "leaf": set(), "fill": {}, "drop": {},
               "deepen": {}, "deepened": 0, "widened": 0, "swapped": 0, "oracle": 0,
               "depth": {}, "coverless": {"menus": 0, "dropping": 0, "dropped": 0},
-              "q": [0, 0], "qprobe": [0, 0], "calls": 0}
+              "q": [0, 0], "qprobe": [0, 0], "childq": [0, 0], "lines": {}, "calls": 0}
              for _ in arms]
             for _ in range(2)]
     done = 0
@@ -469,6 +471,15 @@ def main(argv: list[str] | None = None) -> None:
                     # The Q that narrowed the probe (IKA-322): inferences, full probes.
                     bucket["qprobe"][0] += got.get("q", 0)
                     bucket["qprobe"][1] += got.get("qfull", 0)
+                if got is not None and "childQ" in got:
+                    # The Q that ranked the children's menus (IKA-307): passes, children.
+                    bucket["childq"][0] += got["childQ"]
+                    bucket["childq"][1] += got["childRanked"]
+                if got is not None and "lines" in got:
+                    # Why each deepened line stopped, under an explicit guard (IKA-307).
+                    for key, n in got["lines"].items():
+                        bucket["lines"][key] = bucket["lines"].get(key, 0) + n
+                    bucket["lines"]["guarded"] = bucket["lines"].get("guarded", 0) + got["guarded"]
             played_depth = (
                 f"{record.depth[side]}"
                 + ("r" if record.depth[side] != 1 and record.solve_restricted[side] else "")
@@ -570,6 +581,13 @@ def main(argv: list[str] | None = None) -> None:
                     if bucket["oracle"]
                     else ""
                 )
+                + (
+                    f", children's Q {bucket['childq'][0]:,} passes "
+                    f"({bucket['childq'][1]:,} children)"
+                    if bucket["childq"][0]
+                    else ""
+                )
+                + (f", lines {bucket['lines']}" if bucket["lines"] else "")
                 + "), "
                 f"depth {bucket['depth']}"
                 + (
