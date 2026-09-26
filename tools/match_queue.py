@@ -199,6 +199,14 @@ def main() -> None:
         "burn-in (registered in records/IKA-193.md §11.0), the trinomial test on the raw "
         "pairs written beside it. Off by default.",
     )
+    ap.add_argument(
+        "--q-model",
+        type=Path,
+        default=None,
+        help="the Q a q / q-nocover rank fill ranks by (IKA-274): with --served the servers "
+        "load it as the Q arm `q` and every worker gets --q-arm q; otherwise every worker "
+        "gets --q-model",
+    )
     ap.add_argument("--sprt-alpha", type=float, default=0.05,
                     help="chance of passing a change worth ELO0 or less")
     ap.add_argument("--sprt-beta", type=float, default=0.05,
@@ -309,6 +317,8 @@ def main() -> None:
             ]
             if args.baseline:
                 command += ["--arm", "baseline", *args.baseline]
+            if args.q_model is not None:
+                command += ["--q-arm", "q", str(args.q_model)]
             errors = (server_log / f"inference{index}.log").open("w", encoding="utf-8")
             process = subprocess.Popen(  # noqa: S603
                 command, env=env, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=errors,
@@ -356,6 +366,8 @@ def main() -> None:
             command += ["--value", *args.value]
             if args.baseline:
                 command += ["--baseline", *args.baseline]
+        if args.q_model is not None:
+            command += ["--q-arm", "q"] if served_at else ["--q-model", str(args.q_model)]
         command += bench_argv(args.hide_bench)
         return command + extra
 

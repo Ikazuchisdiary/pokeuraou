@@ -213,11 +213,20 @@ _RANK_FILL = re.compile(r"refs([1-9][0-9]*)(-fast)?(-nocover)?")
 
 
 def parse_rank_fill(label: str) -> tuple[int, bool]:
-    """(references, fast) from a rank-fill label; a label that is not one stops."""
+    """(references, fast) from a rank-fill label; a label that is not one stops.
+
+    ``q`` / ``q-nocover`` (IKA-274, `qrank`) rank by a learned Q and fill no cell with
+    the leaf: (0, False).
+    """
+    from .qrank import is_q
+
+    if is_q(label):
+        return 0, False
     got = _RANK_FILL.fullmatch(label)
     if got is None:
         raise ValueError(
-            f"rank fill {label!r} is not refs<N>, refs<N>-fast, or either with -nocover"
+            f"rank fill {label!r} is not refs<N>, refs<N>-fast, or either with -nocover, "
+            "or q / q-nocover"
         )
     return int(got.group(1)), got.group(2) is not None
 

@@ -38,6 +38,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pokeuraou.actions import (  # noqa: E402
+    STRUGGLE,
     MoveAction,
     PassAction,
     SideAction,
@@ -60,6 +61,11 @@ from pokeuraou.regulation import Regulation, load_regulation, to_id  # noqa: E40
 from pokeuraou.speed import action_overriding_effects  # noqa: E402
 
 FORMAT_ID = "gen9championsvgc2026regmc"
+
+#: The request targets a choice must name one of (`BattleActions.targetTypeChoices`).
+TARGET_CHOICES = frozenset(
+    {"normal", "any", "adjacentAlly", "adjacentAllyOrSelf", "adjacentFoe"}
+)
 
 #: Position fields compared, and how much each matters. HP and fainted decide the game;
 #: the rest shape the next turn.
@@ -211,15 +217,35 @@ def showdown_choice(pick: SideAction, request: dict[str, Any] | None) -> str:
     so the charging move in slot 3 is `move 1` there, and `move 3` is refused with "doesn't
     have a move 3" (IKA-309). The menu already gives the lock no target (IKA-176); this
     gives it the request's number. A move the request does not list keeps its own.
+
+    Struggle the request does not list is the one exception (IKA-327). Imprison disables
+    a move as `'hidden'`, and the last Pokemon of a side is asked with that hidden
+    (`getMoves(lockedMove, isLastActive)`), so an Encore into an imprisoned Protect lists
+    the four moves with Protect enabled, not Struggle. `move 1` then names the first of
+    them -- Draco Meteor, refused with "needs a target" before Showdown reaches its own
+    `!moves.length` Struggle. Showdown's player picks the move shown enabled and
+    struggles: so does this, taking the first one that takes no target.
     """
     if not request or not request.get("active"):
         return pick.to_choice()
     parts: list[str] = []
     for action in pick.slots:
         if isinstance(action, MoveAction) and action.slot < len(request["active"]):
-            listed = [m.get("id") for m in (request["active"][action.slot] or {}).get("moves", [])]
+            entries = (request["active"][action.slot] or {}).get("moves", [])
+            listed = [m.get("id") for m in entries]
             if action.move_id in listed:
                 action = replace(action, move_index=listed.index(action.move_id) + 1)
+            elif action.move_id == STRUGGLE and action.target is None:
+                shown = next(
+                    (
+                        i
+                        for i, m in enumerate(entries, start=1)
+                        if not m.get("disabled") and m.get("target") not in TARGET_CHOICES
+                    ),
+                    None,
+                )
+                if shown is not None:
+                    action = replace(action, move_index=shown)
         parts.append(action.to_choice())
     return ", ".join(parts)
 

@@ -2464,6 +2464,7 @@ fn after_hit(
     if let Some(drain) = mv.drain.as_ref() {
         if dealt > 0 {
             let amount = round_fraction(dealt, drain);
+            crate::ability_notes::drained_from(turn, target);
             turn.heal(me.0, me.1, amount, "drain");
         }
     }
@@ -3565,6 +3566,7 @@ fn hit_substitute(
         if dealt > 0 && drain.len() >= 2 {
             let numerator = drain[0].as_i64().unwrap_or(1);
             let denominator = drain[1].as_i64().unwrap_or(1);
+            crate::ability_notes::drained_from(turn, target);
             turn.heal(me.0, me.1, (dealt * numerator + denominator - 1) / denominator, "drain");
         }
     }
@@ -4933,10 +4935,14 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
         }
     }
 
+    // Whether a weather was up as the phase began, for Forecast (IKA-317).
+    let weather_seen = weather_expired || turn.pos.field.weather.is_some();
+    crate::ability_notes::before_status_damage(turn, &order);
+
     crate::terrain::grassy_terrain_heal(turn, &order);
 
     for (side, slot) in order.iter().copied() {
-        let leftovers = matches!(turn.mon_at(side, slot), Some(mon)
+        let leftovers =matches!(turn.mon_at(side, slot), Some(mon)
             if !mon.fainted && is(mon.item, "leftovers"));
         if leftovers {
             let amount = turn.fraction_of_max(side, slot, LEFTOVERS_HEAL);
@@ -4958,7 +4964,8 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
         //     const damage = this.damage(pokemon.baseMaxhp / 8, pokemon, target);
         //     if (damage) { this.heal(damage, target, pokemon); }
         // A *slot*, not a Pokemon: if the planter switched out, whoever replaced it is
-        // healed. (Big Root and Liquid Ooze act on the heal; neither is modelled.)
+        // healed. (Big Root and Liquid Ooze act on the heal; neither is modelled, and Liquid
+        // Ooze is noted, IKA-317.)
         let Some(planter) = slot_of(turn, source_slot) else { continue };
         let alive =
             matches!(turn.mon_at(planter.0, planter.1), Some(m) if !m.fainted && m.hp > 0);
@@ -4968,6 +4975,7 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
         let amount = turn.fraction_of_max(side, slot, LEECH_SEED_DRAIN);
         let drained = turn.deal_damage(side, slot, amount, false, "leechseed")?;
         if drained > 0 {
+            crate::ability_notes::drained_from(turn, (side, slot));
             turn.heal(planter.0, planter.1, drained, "leechseed");
         }
     }
@@ -5079,6 +5087,10 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
             turn.report("ability: moody (end-of-turn +2/-1 not applied)");
         }
     }
+
+    // Residual order 28 and 29: the other end-of-turn abilities the port does not apply,
+    // noted as Moody is (IKA-317).
+    crate::ability_notes::late_residual(turn, &order, weather_seen);
 
     // Residual order 29: the last of White Herb's four chances to fire.
     check_white_herb(turn);
