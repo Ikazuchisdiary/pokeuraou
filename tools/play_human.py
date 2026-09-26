@@ -125,6 +125,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--value", type=Path, nargs="+", default=None,
                     help=f"the agent's leaf (one model or an ensemble). Default: {' '.join(DEFAULT_VALUE)}")
     ap.add_argument("--hp-share", action="store_true", help="no leaf: the hp-share proxy")
+    ap.add_argument("--leaf-graphs", default="on", choices=("on", "off"),
+                    help="score the leaf's small blocks by CUDA-graph replays (humanplay.GraphLeaf, "
+                    "the eager answer to the bit; on a card only)")
     ap.add_argument("--rank-fill", default=None,
                     help=f"how the agent's menus are ranked. Default: {Q_FILL} when a Q is there, "
                     f"else {DEFAULT_RANK_FILL}")
@@ -183,6 +186,8 @@ def main(argv: list[str] | None = None) -> None:
         encoder = Encoder(reg)
         nets, _ = load_ensemble(values, encoder)
         evaluate = BatchedValue([n.to(device) for n in nets], encoder, device=torch.device(device))
+        if args.leaf_graphs == "on":
+            evaluate = humanplay.GraphLeaf(evaluate)
         name = leaf_name(values)
 
     # The menus.
@@ -204,7 +209,11 @@ def main(argv: list[str] | None = None) -> None:
         qrank.install(model)
         q_files = model.describe()
 
-    humanplay.use_threads(args.threads if args.threads is not None else args.cores)
+    humanplay.use_threads(
+        args.threads if args.threads is not None else args.cores, reg,
+        ([str(v) for v in values] if values and not args.hp_share else None,
+         str(device or "cpu"), args.leaf_graphs == "on"),
+    )
     agent = humanplay.Agent(
         reg=reg, evaluate=evaluate, name=name, seconds=args.seconds, cores=args.cores,
         clock=args.clock, rank_fill=fill, bench_drop=args.bench_drop,

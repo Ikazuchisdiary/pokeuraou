@@ -254,19 +254,100 @@ CLOCKS = ("wall", "count")
 #: 8 x 8 children, whose LPs are mostly Python (IKA-32 stage 2).
 LP_PAIR_CELLS = 1024
 
+#: Helper threads expanding the deepening's cells ahead, from four cores up.
+AHEAD_HELPERS = 2
 
-def use_threads(threads: int) -> None:
+
+class GraphLeaf:
+    """The agent's leaf with its small blocks scored by CUDA-graph replays (IKA-32 stage 2).
+
+    The inference server has scored blocks of up to `inference.GRAPH_ROWS` rows this way
+    since IKA-107 (`inference._Graphs`): a graph captured for n rows replays the kernels the
+    eager pass chose for n rows, so the answer is the eager answer to the bit, and a
+    two-net ensemble's forward pass stops being bound by launching its kernels. A person's
+    opponent scores its leaves in this process; the deepening's children are 8 x 8 blocks of
+    a few hundred rows, one eager pass each (2.2 ms of CPU for a fraction of that on the
+    card, 22% of a step). Positions, larger blocks and a card-less leaf go to the leaf as
+    before; an ended leaf is settled as `BatchedValue.from_encoded` settles it.
+    """
+
+    def __init__(self, value: Any) -> None:  # noqa: ANN401 - BatchedValue
+        from .inference import _Graphs
+
+        self.value = value
+        self.encoder = value.encoder
+        self.graphs = _Graphs(value) if _Graphs.usable(value) else None
+        #: Blocks answered by a replay (the positive control).
+        self.replays = 0
+
+    def __call__(self, positions: list[Any]) -> np.ndarray:
+        return self.value(positions)
+
+    def from_encoded(self, encoded: Any) -> np.ndarray:  # noqa: ANN401 - encode.Encoded
+        from .encode import settle
+        from .inference import ARRAYS
+
+        rows = len(encoded.species)
+        if self.graphs is not None and rows:
+            out = self.graphs.score({name: getattr(encoded, name) for name in ARRAYS}, rows)
+            if out is not None:
+                self.value.ended += settle(out, encoded, self.encoder.rules)
+                self.value.evaluated += rows
+                self.replays += 1
+                return out
+        return self.value.from_encoded(encoded)
+
+    def from_encoded_segments(self, segments: Sequence[Any]) -> list[np.ndarray]:
+        return [self.from_encoded(segment) for segment in segments]
+
+
+#: Worker processes expanding the deepening's cells ahead, at most (IKA-32 stage 2). Each
+#: holds a CUDA context and the leaf (about 0.5 GB of the card) and a port.
+AHEAD_WORKERS_MAX = 6
+
+
+def process_leaf(reg: Regulation, values: Sequence[str] | None, device: str, graphs: bool) -> Any:  # noqa: ANN401
+    """The agent's leaf built again in a worker process (`deepen.start_workers`): the same
+    files on the same device, as `tools/play_human.py` builds it; hp-share without files."""
+    if not values:
+        return HP_SHARE.batch
+    import torch
+
+    from .encode import Encoder
+    from .value import BatchedValue, load_ensemble
+
+    encoder = Encoder(reg)
+    nets, _ = load_ensemble([Path(v) for v in values], encoder)
+    leaf = BatchedValue([n.to(device) for n in nets], encoder, device=torch.device(device))
+    return GraphLeaf(leaf) if graphs else leaf
+
+
+def use_threads(
+    threads: int,
+    reg: Regulation | None = None,
+    leaf: tuple[Sequence[str] | None, str, bool] | None = None,
+) -> None:
     """Spread one move over `threads` cores (IKA-32): the port's cell pool (stage 1), the
-    deepening's cells expanded ahead on a helper thread and a big game's two LPs at once
-    (stage 2). None of them changes a move -- only how long it takes -- so a game on the
-    count clock is the same game at any count; 1 turns them all off."""
+    deepening's cells expanded ahead and a big game's two LPs at once (stage 2). With
+    `reg` and `leaf` (`process_leaf`'s files, device and graphs) the cells ahead are
+    expanded by ``threads - 1`` worker processes (at most `AHEAD_WORKERS_MAX`), each with
+    its own leaf, port and GIL; without, by helper threads in this process. None of them
+    changes a move -- only how long it takes -- so a game on the count clock is the same
+    game at any count; 1 turns them all off."""
     from . import deepen, equilibrium, rustnode
 
     if threads < 1:
         raise ValueError(f"threads must be >= 1, not {threads}")
     if (rustnode.port_threads() or 1) != threads:
         rustnode.set_port_threads(threads)
-    deepen.set_ahead(0 if threads == 1 else threads)
+    if reg is not None:
+        wanted = 0 if threads == 1 or leaf is None else min(threads - 1, AHEAD_WORKERS_MAX)
+        if deepen.workers(reg) != wanted:
+            deepen.start_workers(reg, wanted, process_leaf, tuple(leaf or ()), port_threads=1)
+    # Two helpers from four cores up, each with a port of `threads` cell threads: the
+    # helpers' Python and the loop's LPs share one GIL, so more helpers wait on it.
+    deepen.set_ahead(0 if threads == 1 else threads, helpers=AHEAD_HELPERS if threads >= 4 else 1,
+                     port_threads=threads)
     equilibrium.set_lp_pair(0 if threads == 1 else LP_PAIR_CELLS)
 
 # ----------------------------------------------------------------------------- the person

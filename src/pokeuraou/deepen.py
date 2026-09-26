@@ -145,6 +145,8 @@ port and the leaf.
 
 from __future__ import annotations
 
+import atexit
+import contextlib
 import heapq
 import os
 import re
@@ -1889,15 +1891,20 @@ def _expand(
 #: Cells expanded ahead of the loop (`set_ahead`): 0 is off, the serial `_expand` as before.
 AHEAD_ENV = "POKEURAOU_DEEPEN_AHEAD"
 _AHEAD = [int(os.environ.get(AHEAD_ENV, "0") or 0)]
+#: Helper threads, and the cell threads of each one's port (None: the module's count).
+_HELPERS: list[Any] = [1, None]
 
 
-def set_ahead(cells: int) -> None:
-    """Expand up to `cells` of the best cells ahead of the loop, on a helper thread
-    (the module's docstring). 0 turns it off. Changes how long a step takes, never what
-    it does; generation and the board leave it at 0."""
-    if cells < 0:
-        raise ValueError(f"cells ahead must be >= 0, not {cells}")
+def set_ahead(cells: int, helpers: int = 1, port_threads: int | None = None) -> None:
+    """Expand up to `cells` of the best cells ahead of the loop, on `helpers` threads with
+    a port process each of `port_threads` cell threads (the module's docstring). 0 cells
+    turns it off. Changes how long a step takes, never what it does; generation and the
+    board leave it at 0."""
+    if cells < 0 or helpers < 1:
+        raise ValueError(f"cells ahead must be >= 0 and helpers >= 1, not {cells}, {helpers}")
     _AHEAD[0] = int(cells)
+    _HELPERS[0] = int(helpers)
+    _HELPERS[1] = port_threads
 
 
 def ahead() -> int:
@@ -1930,13 +1937,18 @@ def _expand_many(
     budget: Budget,
     sub_limit: int,
     sub_branches: int,
+    leaf_lock: Any = None,  # noqa: ANN401 - a lock, or None
 ) -> list[_Expansion]:
     """`_expand` of many cells at once, without the tree and without the child LPs: one
     crossing for the turns, one for every branch's menus, one for the child matrices and
     one call into the leaf for their blocks. Each cell's answer is the one `_expand` would
     compute alone (the turns and menus are the port's answers to the same requests; each
-    block is scored in a call of its own size, `score_segments`)."""
+    block is scored in a call of its own size, `score_segments`). `leaf_lock` is held
+    around every call into the leaf, which is not safe on two threads at once (an
+    ensemble's stacked call swaps its parameters into one shared module)."""
     from .narrow import narrow_many
+
+    leaf = _NoLock() if leaf_lock is None else leaf_lock
 
     turns = port.turns(reg, asks, budget, full=True)
     out: list[_Expansion] = []
@@ -1965,7 +1977,8 @@ def _expand_many(
         weights /= total
         ended = [branch.position for branch in branches if branch.position.ended]
         try:
-            finished = iter(np.asarray(evaluate(ended), dtype=np.float64) if ended else ())
+            with leaf:
+                finished = iter(np.asarray(evaluate(ended), dtype=np.float64) if ended else ())
         except Exception:  # noqa: BLE001 - met again by the serial step, in its place
             exp.error = True
             continue
@@ -2000,7 +2013,8 @@ def _expand_many(
         for exp, b, pos, row, col in fills:
             weight = exp.branches[b][0]
             try:
-                payoff, notes = batched_payoff(reg, pos, row, col, evaluate, budget=budget)
+                with leaf:
+                    payoff, notes = batched_payoff(reg, pos, row, col, evaluate, budget=budget)
             except Exception:  # noqa: BLE001 - met again by the serial step
                 exp.branches[b] = (weight, "error", None)
                 continue
@@ -2009,7 +2023,8 @@ def _expand_many(
         return out
     scored = [p for p in pending if not isinstance(p, Exception)]
     try:
-        values = port.score_segments(evaluate, [p.encoded for p in scored]) if scored else []
+        with leaf:
+            values = port.score_segments(evaluate, [p.encoded for p in scored]) if scored else []
     except Exception:  # noqa: BLE001 - met again by the serial step
         for exp, b, *_rest in fills:
             exp.branches[b] = (exp.branches[b][0], "error", None)
@@ -2155,12 +2170,16 @@ def _ranked(root: Any, count: int) -> list[tuple[Any, tuple[int, ...]]]:  # noqa
 
 
 class _Ahead:
-    """The helper thread that expands cells ahead of the deepening loop (`set_ahead`).
+    """The helper threads that expand cells ahead of the deepening loop (`set_ahead`).
 
     The loop posts the cells it is likely to take next (`post`) and takes each step's
-    expansion (`expand`). The helper owns the port and the leaf while it works on a
-    batch; the loop's own uses of them (a cell expanded the serial way, the oracle) take
-    the same lock. `close` waits for the batch in hand, so the port is free after it.
+    expansion (`expand`). Each helper takes a batch of the posted cells and expands it on
+    a port process of its own (`rustnode.own_node`), so the helpers and the loop cross to
+    ports at the same time; the leaf is one object and is called under `lock`, by the
+    helpers and by the loop's own uses of it (a cell expanded the serial way, the oracle).
+    Where positions are held by number (`rustnode.hold_positions`, generation's), the
+    helpers share the loop's port instead and hold `lock` for a whole batch. `close` waits
+    for the batches in hand.
     """
 
     def __init__(
@@ -2172,15 +2191,22 @@ class _Ahead:
         sub_limit: int,
         sub_branches: int,
         count: int,
+        helpers: int = 1,
+        port_threads: int | None = None,
     ) -> None:
+        from . import rustnode
+
         self.reg = reg
         self.evaluate = evaluate
         self.budget = budget
         self.sub_limit = sub_limit
         self.sub_branches = sub_branches
         self.count = count
-        #: The port and the leaf: held by the helper for a batch, by the loop for its own.
+        self.batch = max(1, count // max(1, helpers))
+        self.port_threads = port_threads
+        #: The leaf (and, where the helpers share it, the loop's port).
         self.lock = threading.Lock()
+        self.shared_port = bool(rustnode._HOLD[0])
         self.cv = threading.Condition()
         self.want: list[tuple[tuple[Any, ...], Position, list[SideAction]]] = []
         self.busy: set[tuple[Any, ...]] = set()
@@ -2191,8 +2217,21 @@ class _Ahead:
         self.expanded = 0
         self.hits = 0
         self.misses = 0
-        self.thread = threading.Thread(target=self._run, name="deepen-ahead", daemon=True)
-        self.thread.start()
+        #: Batches expanded by a worker process.
+        self.remote_batches = 0
+        #: A worker process's connection per helper (`start_workers`), or none: the
+        #: helpers expand in this process.
+        found = _WORKERS.get(reg.meta.format_id)
+        self.remote = [conn for _process, conn in found[0]] if found else []
+        if self.remote:
+            helpers = len(self.remote)
+            self.batch = max(1, count // helpers)
+        self.threads = [
+            threading.Thread(target=self._run, args=(n,), name=f"deepen-ahead-{n}", daemon=True)
+            for n in range(max(1, helpers))
+        ]
+        for thread in self.threads:
+            thread.start()
 
     def post(self, root: Any) -> None:  # noqa: ANN401
         """The cells worth expanding now: the best `count` under `root`."""
@@ -2211,7 +2250,7 @@ class _Ahead:
     def expand(
         self, node: Any, cell: tuple[int, ...], unmodelled: set[str]  # noqa: ANN401
     ) -> tuple[int, bool, int]:
-        """`_expand`'s answer for the cell, from the helper when it can give it."""
+        """`_expand`'s answer for the cell, from the helpers when they can give it."""
         key = _key(node, cell)
         with self.cv:
             while key not in self.done:
@@ -2233,24 +2272,52 @@ class _Ahead:
                 unmodelled=unmodelled,
             )
 
-    def _run(self) -> None:
+    def _run(self, index: int) -> None:
+        from . import rustnode
+
+        if self.remote:
+            self._serve(own=False, conn=self.remote[index])
+            return
+        if self.shared_port:
+            self._serve(own=False)
+            return
+        try:
+            with rustnode.own_node(self.reg, threads=self.port_threads):
+                self._serve(own=True)
+        except Exception:  # noqa: BLE001 - no port of its own: share the loop's
+            self._serve(own=False)
+
+    def _serve(self, *, own: bool, conn: Any = None) -> None:  # noqa: ANN401
         while True:
             with self.cv:
                 while not self.stop and not self.want:
                     self.cv.wait()
                 if self.stop:
                     return
-                batch = self.want[: self.count]
-                del self.want[: self.count]
+                batch = self.want[: self.batch]
+                del self.want[: self.batch]
                 for key, _pos, _pair in batch:
                     self.busy.add(key)
+            asks = [(pos, pair) for _key, pos, pair in batch]
             try:
-                with self.lock:
+                if conn is not None:
+                    # A worker process: the batch goes over, the expansions come back.
+                    conn.send((asks, self.budget, self.sub_limit, self.sub_branches))
+                    got = conn.recv()
+                    with self.cv:
+                        self.remote_batches += 1
+                elif own:
                     got = _expand_many(
-                        self.reg, [(pos, pair) for _key, pos, pair in batch], self.evaluate,
-                        budget=self.budget, sub_limit=self.sub_limit,
-                        sub_branches=self.sub_branches,
+                        self.reg, asks, self.evaluate, budget=self.budget,
+                        sub_limit=self.sub_limit, sub_branches=self.sub_branches,
+                        leaf_lock=self.lock,
                     )
+                else:
+                    with self.lock:
+                        got = _expand_many(
+                            self.reg, asks, self.evaluate, budget=self.budget,
+                            sub_limit=self.sub_limit, sub_branches=self.sub_branches,
+                        )
             except Exception:  # noqa: BLE001 - each cell is met again the serial way
                 got = [_Expansion(set(), error=True) for _ in batch]
             with self.cv:
@@ -2266,7 +2333,8 @@ class _Ahead:
             self.stop = True
             self.want = []
             self.cv.notify_all()
-        self.thread.join()
+        for thread in self.threads:
+            thread.join()
         if timing.ON:
             timing.count("deepen.ahead.batches", self.batches)
             timing.count("deepen.ahead.expanded", self.expanded)
@@ -2276,10 +2344,118 @@ class _Ahead:
         _AHEAD_COUNTS["expanded"] += self.expanded
         _AHEAD_COUNTS["hits"] += self.hits
         _AHEAD_COUNTS["misses"] += self.misses
+        _AHEAD_COUNTS["remote"] += self.remote_batches
+
+
+#: Worker processes that expand cells ahead (`start_workers`), by regulation: a list of
+#: (process, connection), and the leaf spec they were started with.
+_WORKERS: dict[str, tuple[list[tuple[Any, Any]], tuple[Any, ...]]] = {}
+
+
+def _worker_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  # noqa: ANN401
+                 port_threads: int | None) -> None:
+    """A worker process: its own regulation, leaf and port; `_expand_many` on each batch."""
+    from . import rustnode
+    from .damage import register_mega_stones
+    from .regulation import load_regulation
+
+    reg = load_regulation(format_id)
+    register_mega_stones(reg)
+    if port_threads is not None:
+        rustnode.set_port_threads(port_threads)
+    try:
+        leaf = factory(reg, *args)
+    except Exception as error:  # noqa: BLE001 - said to the parent, which stops using it
+        conn.send(("failed", f"{type(error).__name__}: {error}"))
+        return
+    conn.send(("ready", None))
+    while True:
+        try:
+            message = conn.recv()
+        except EOFError:
+            return
+        if message is None:
+            return
+        asks, budget, sub_limit, sub_branches = message
+        try:
+            got = _expand_many(
+                reg, asks, leaf, budget=budget, sub_limit=sub_limit, sub_branches=sub_branches
+            )
+        except Exception:  # noqa: BLE001 - each cell is met again the serial way
+            got = [_Expansion(set(), error=True) for _ in asks]
+        conn.send(got)
+
+
+def start_workers(
+    reg: Regulation, count: int, factory: Any, args: tuple[Any, ...] = (),  # noqa: ANN401
+    *, port_threads: int | None = 1,
+) -> int:
+    """Start `count` worker processes that expand the deepening's cells ahead (IKA-32
+    stage 2), each with the leaf ``factory(reg, *args)`` (a module-level function, so a
+    spawned process can import it), its own port of `port_threads` cell threads and its own
+    GIL. Kept for the process's life (`stop_workers`); the helpers of every later deepening
+    on this regulation send their batches to them. Returns how many are ready. The leaf
+    must answer as the loop's own does -- the same model on the same device -- since the
+    workers' blocks stand for the loop's."""
+    import multiprocessing
+
+    stop_workers(reg)
+    if count <= 0:
+        return 0
+    context = multiprocessing.get_context("spawn")
+    started = []
+    for _ in range(count):
+        mine, theirs = context.Pipe()
+        process = context.Process(
+            target=_worker_main,
+            args=(theirs, reg.meta.format_id, factory, tuple(args), port_threads),
+            daemon=True,
+        )
+        process.start()
+        theirs.close()
+        started.append((process, mine))
+    ready = []
+    for process, conn in started:
+        try:
+            state, why = conn.recv()
+        except EOFError:
+            state, why = "failed", "the worker exited"
+        if state == "ready":
+            ready.append((process, conn))
+        else:
+            print(f"[deepen] a worker did not start: {why}", flush=True)
+            process.join(timeout=5)
+    _WORKERS[reg.meta.format_id] = (ready, (factory, tuple(args)))
+    return len(ready)
+
+
+def stop_workers(reg: Regulation | None = None) -> None:
+    """Stop the worker processes of `reg` (all of them when None)."""
+    keys = list(_WORKERS) if reg is None else [reg.meta.format_id]
+    for key in keys:
+        found = _WORKERS.pop(key, None)
+        if found is None:
+            continue
+        for process, conn in found[0]:
+            with contextlib.suppress(OSError, EOFError):
+                conn.send(None)
+            process.join(timeout=10)
+            if process.is_alive():
+                process.kill()
+            conn.close()
+
+
+def workers(reg: Regulation) -> int:
+    """How many worker processes expand ahead for `reg`."""
+    found = _WORKERS.get(reg.meta.format_id)
+    return 0 if found is None else len(found[0])
+
+
+atexit.register(stop_workers)
 
 
 #: Totals over the process of every `_Ahead` (the positive control of IKA-32 stage 2).
-_AHEAD_COUNTS = {"batches": 0, "expanded": 0, "hits": 0, "misses": 0}
+_AHEAD_COUNTS = {"batches": 0, "expanded": 0, "hits": 0, "misses": 0, "remote": 0}
 
 
 def ahead_counts() -> dict[str, int]:
@@ -2297,7 +2473,7 @@ def _start_ahead(
         return None
     return _Ahead(
         reg, evaluate, budget=budget, sub_limit=sub_limit, sub_branches=sub_branches,
-        count=count,
+        count=count, helpers=_HELPERS[0], port_threads=_HELPERS[1],
     )
 
 
