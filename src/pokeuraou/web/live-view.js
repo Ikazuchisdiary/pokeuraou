@@ -181,6 +181,19 @@ function onStep(s) {
 
 // ------------------------------------------------------------------ the court
 function hpCls(p) { return p > 50 ? "" : p > 20 ? "mid" : "low"; }
+// Volatile conditions (Showdown's ids) in Japanese; an id not listed is shown as it is.
+const VOLATILE_JA = {
+  stall: "まもる連続", protect: "まもる", substitute: "みがわり", confusion: "こんらん", taunt: "ちょうはつ",
+  encore: "アンコール", leechseed: "やどりぎのタネ", flinch: "ひるみ", helpinghand: "てだすけ", followme: "このゆびとまれ",
+  ragepowder: "いかりのこな", focusenergy: "きあいだめ", charge: "じゅうでん", disable: "かなしばり", torment: "いちゃもん",
+  yawn: "あくび", perish1: "ほろびのうた 1", perish2: "ほろびのうた 2", perish3: "ほろびのうた 3", partiallytrapped: "バインド",
+  lockedmove: "あばれる", mustrecharge: "反動で動けない", twoturnmove: "ため", roost: "はねやすめ", magnetrise: "でんじふゆう",
+  attract: "メロメロ", throatchop: "じごくづき", glaiverush: "きょじゅうざん", saltcure: "しおづけ", syrupbomb: "みずあめ",
+  healblock: "かいふくふうじ", imprison: "ふういん", gastroacid: "いえき", smackdown: "うちおとす", destinybond: "みちづれ",
+  endure: "こらえる", wideguard: "ワイドガード", quickguard: "ファストガード", spotlight: "スポットライト",
+  dynamax: "ダイマックス", laserfocus: "とぎすます", curse: "のろい", nightmare: "あくむ", powder: "ふんじん",
+};
+const volJa = (v) => VOLATILE_JA[v] || v;
 function monCard(m, mine, key) {
   if (!m) return `<div class="mon empty">空き</div>`;
   const prev = S.prevHp.has(key) && S.prevHp.get(key)[0] === m.species ? S.prevHp.get(key)[1] : m.percent;
@@ -191,7 +204,7 @@ function monCard(m, mine, key) {
   const status = m.fainted ? `<span class="st">ひんし</span>` : m.status ? `<span class="st st-${esc(m.status)}">${esc(m.status)}</span>` : "";
   const more = [];
   if (m.item) more.push(`<div>持ち物 ${esc(m.item)}</div>`);
-  if ((m.volatiles || []).length) more.push(`<div>${m.volatiles.map(esc).join("・")}</div>`);
+  if ((m.volatiles || []).length) more.push(`<div>${m.volatiles.map((v) => esc(volJa(v))).join("・")}</div>`);
   if (mine && m.moves) more.push(`<table>${m.moves.map(([n, pp, mx]) => `<tr><td>${esc(n)}</td><td class="n">${pp}/${mx}</td></tr>`).join("")}</table>`);
   const drop = prev - hpNow;
   return `<article class="mon${m.fainted ? " fainted" : ""}${S.openMon.has(key) ? " open" : ""}" data-key="${key}" title="押すと詳細">
@@ -200,7 +213,7 @@ function monCard(m, mine, key) {
       <div class="mon-name">${esc(m.species)} ${status}</div>
       <div class="hp"><div class="hp-track"><i class="${hpCls(prev)}" style="width:${prev}%" data-to="${hpNow}"></i></div>
         <b class="hp-num n">${hpNow}<small>%</small></b></div>
-      <div class="mon-sub">${exact}${boosts}${(m.volatiles || []).length ? `<span>${m.volatiles.map(esc).join("・")}</span>` : ""}</div>
+      <div class="mon-sub">${exact}${boosts}${(m.volatiles || []).length ? `<span>${m.volatiles.map((v) => esc(volJa(v))).join("・")}</span>` : ""}</div>
     </div>
     ${drop > 0 ? `<span class="hp-delta n">−${drop}%</span>` : ""}
     <div class="mon-more">${more.join("") || "詳細なし"}</div>
@@ -303,7 +316,7 @@ function renderCounters(s) {
   const t = S.think;
   if (t && S.analysis) {
     const p = t.plan || {};
-    $("plan").textContent = `ターン ${t.turn}: 計算予算なしで止めるまで読む。幅 ${p.width}・最善応答オラクル ${p.oracle}・深化の柵 ${p.guard} 段、` +
+    $("plan").textContent = `ターン ${t.turn}: 計算予算なしで止めるまで読む。幅 ${p.width}・最善応答オラクル ${p.oracle}・深化の深さの上限 ${p.guard} 段、` +
       `候補集合を作るのに ${Math.round(t.menuMs || 0)} ms。` + (t.exact ? "相手の裏は尽きている。" : `相手の裏の決定化 ${t.classCount} 通り。`) +
       "「深く読んだ重み」は均衡の組の確率のうち、葉より深く読んだ分（収束の目安）。";
   } else if (t) {
@@ -359,6 +372,10 @@ function renderClasses(s) {
   const box = $("beliefBox");
   if (!s.classes.length) {
     $("beliefSum").textContent = S.think && S.think.exact ? "裏は尽きている" : "なし";
+    $("classes").innerHTML = ""; return;
+  }
+  if (s.classes.length === 1 && !s.classes[0].bench.filter((n) => n && n !== "-" && n !== "–").length) {
+    $("beliefSum").textContent = "相手の裏は残っていない";
     $("classes").innerHTML = ""; return;
   }
   const order = s.classes.map((c, k) => k).sort((a, b) => s.classes[b].weight - s.classes[a].weight);
@@ -721,19 +738,27 @@ function onAnalysis(e) {
       $("aWidth").value = e.width; $("aGuard").value = e.guard;
     }
     setStatus(`読んでいます（ターン ${e.turn}・側 ${e.side}）`, "think");
-    $("aNote").textContent = (e.notes || []).length ? "注記: " + e.notes.join("・") : "";
-    log(e.turn, `検討を始めた: 側 ${e.side} から、幅 ${e.width}（候補集合 ${e.menu[0]}×${e.menu[1]}）・最善応答オラクル ${esc(e.oracle)}・深化の柵 ${e.guard}` +
+    $("aNote").textContent = (e.notes || []).length ? "注記: " + e.notes.map(noteJa).join("・") : "";
+    log(e.turn, `検討を始めた: 側 ${e.side} から、幅 ${e.width}（候補集合 ${e.menu[0]}×${e.menu[1]}）・最善応答オラクル ${esc(e.oracle)}・深化の深さの上限 ${e.guard} 段` +
       (e.exact ? "・裏は尽きている" : `・相手の裏の決定化 ${e.classCount} 通り`));
   } else {
     setRunning(false);
     setStatus(`${e.stopText}（${(e.seconds || 0).toFixed(1)} 秒・深化のステップ ${(e.steps || 0).toLocaleString("ja-JP")}）`, e.stop === "memory" ? "warn" : "end");
-    $("aNote").textContent = [e.why, (e.notes || []).length ? "注記: " + e.notes.join("・") : ""].filter(Boolean).join("・");
-    log(e.turn, `${esc(e.stopText)}${e.why ? `: ${esc(e.why)}` : ""}。深化のステップ ${(e.steps || 0).toLocaleString("ja-JP")}・${(e.seconds || 0).toFixed(1)} 秒・柵に当たった筋 ${e.guardLines}・木のノード ${(e.nodes || 0).toLocaleString("ja-JP")}`,
+    $("aNote").textContent = [e.why, (e.notes || []).length ? "注記: " + e.notes.map(noteJa).join("・") : ""].filter(Boolean).join("・");
+    log(e.turn, `${esc(e.stopText)}${e.why ? `: ${esc(e.why)}` : ""}。深化のステップ ${(e.steps || 0).toLocaleString("ja-JP")}・${(e.seconds || 0).toFixed(1)} 秒・深さの上限に当たった読み筋 ${e.guardLines}・木のノード ${(e.nodes || 0).toLocaleString("ja-JP")}`,
       e.stop === "memory" ? "err" : "");
     if (e.stop === "memory") toast(`メモリの上限の手前で止めました: ${e.why}`);
   }
 }
 const gb = (x) => (Number.isFinite(x) ? x.toFixed(1) : "–");
+// The notes the engine writes (English) that the page can say in Japanese; others as they are.
+const NOTES_JA = [
+  [/^depth-2 kept the (\d+) likeliest branches of a refined cell$/, "選択的延長のセルで、確率の高い分岐 $1 つだけを深さ 2 で読んだ"],
+];
+function noteJa(note) {
+  for (const [re, ja] of NOTES_JA) if (re.test(note)) return note.replace(re, ja);
+  return note;
+}
 function meter(label, value, share, warn, note) {
   const f = Number.isFinite(share) ? Math.max(0, Math.min(1, share)) : 0;
   return `<div class="meter${warn ? " warn" : ""}"><div class="mhead"><small>${label}</small><b class="n">${value}</b></div>` +
@@ -746,7 +771,7 @@ function onStatus(st) {
   const cells = [
     `<div class="stat"><small>経過</small><b class="n">${fmtTime(st.elapsed)}</b></div>`,
     `<div class="stat"><small>深化のステップ</small><b class="n">${st.steps.toLocaleString("ja-JP")}</b></div>`,
-    `<div class="stat${st.guardLines ? " hot" : ""}"><small>柵（${st.guard} 段）に当たった筋</small><b class="n">${st.guardLines.toLocaleString("ja-JP")}</b></div>`,
+    `<div class="stat${st.guardLines ? " hot" : ""}"><small>深さの上限（${st.guard} 段）に当たった読み筋</small><b class="n">${st.guardLines.toLocaleString("ja-JP")}</b></div>`,
     `<div class="stat"><small>木のノード・段</small><b class="n">${st.nodes.toLocaleString("ja-JP")}・${st.depth}</b></div>`,
   ];
   const lim = (x) => (x > 0 ? x : NaN);
