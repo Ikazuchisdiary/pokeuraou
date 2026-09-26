@@ -207,6 +207,16 @@ def main() -> None:
         "load it as the Q arm `q` and every worker gets --q-arm q; otherwise every worker "
         "gets --q-model",
     )
+    ap.add_argument(
+        "--q-model-named",
+        nargs=2,
+        action="append",
+        default=[],
+        metavar=("NAME", "MODEL"),
+        help="the Q a q.NAME / q-nocover.NAME rank fill ranks by (IKA-274 stage 3), so two "
+        "arms can rank by two Qs: with --served the servers load it as the Q arm NAME and "
+        "every worker gets --q-arm-named NAME NAME; otherwise --q-model-named NAME MODEL",
+    )
     ap.add_argument("--sprt-alpha", type=float, default=0.05,
                     help="chance of passing a change worth ELO0 or less")
     ap.add_argument("--sprt-beta", type=float, default=0.05,
@@ -319,6 +329,10 @@ def main() -> None:
                 command += ["--arm", "baseline", *args.baseline]
             if args.q_model is not None:
                 command += ["--q-arm", "q", str(args.q_model)]
+            for name, model in args.q_model_named:
+                if name == "q" and args.q_model is not None:
+                    raise SystemExit("--q-model-named q collides with --q-model's server arm q")
+                command += ["--q-arm", name, model]
             errors = (server_log / f"inference{index}.log").open("w", encoding="utf-8")
             process = subprocess.Popen(  # noqa: S603
                 command, env=env, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=errors,
@@ -368,6 +382,10 @@ def main() -> None:
                 command += ["--baseline", *args.baseline]
         if args.q_model is not None:
             command += ["--q-arm", "q"] if served_at else ["--q-model", str(args.q_model)]
+        for name, model in args.q_model_named:
+            command += (
+                ["--q-arm-named", name, name] if served_at else ["--q-model-named", name, model]
+            )
         command += bench_argv(args.hide_bench)
         return command + extra
 
