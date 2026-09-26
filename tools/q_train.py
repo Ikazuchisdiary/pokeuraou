@@ -389,20 +389,10 @@ def main() -> None:  # noqa: PLR0915
 
 
 def load_q(path: Path, device: str = "cpu") -> Any:  # noqa: ANN401
-    import torch
+    """`qhead.load_q` (moved there so the search can load a Q, IKA-274)."""
+    from pokeuraou.qhead import load_q as load
 
-    from pokeuraou.qhead import QConfig, build_net
-
-    blob = torch.load(path, map_location=device, weights_only=False)
-    from pokeuraou.encode import Encoder
-    from pokeuraou.regulation import load_regulation
-
-    encoder = Encoder(load_regulation(blob["regulation"]))
-    if blob.get("vocab_fingerprint") != encoder.vocab.fingerprint():
-        raise ValueError(f"{path} was trained on another vocabulary than this regulation's")
-    net = build_net(encoder, QConfig(**blob["config"]), blob.get("move_table"))
-    net.load_state_dict(blob["state"])
-    return net.to(device).eval()
+    return load(path, device)
 
 
 if __name__ == "__main__":

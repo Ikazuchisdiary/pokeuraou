@@ -12,7 +12,8 @@ What an arm is, per arm, and so in whichever seat it sits:
 * its width (`--limit` / `--baseline-limit`) and narrowing (`--rank-leaf` /
   `--baseline-rank-leaf`), and how its leaf ranking fills its cells (`--rank-fill` /
   `--baseline-rank-fill`, IKA-268; a `-nocover` label builds its leaf-ranked menu without
-  the cover, IKA-323),
+  the cover, IKA-323; `q` / `q-nocover` rank it by a learned Q instead, IKA-274, named by
+  `--q-arm` on the server or `--q-model` here),
 * whether its leaf scores a finished battle by the net instead of as its result
   (`--net-scores-ends` / `--baseline-net-scores-ends`: IKA-253 undone, for measuring it),
 * its selection: an arm with a leaf solves the pair's selection game with THAT leaf,
@@ -46,6 +47,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from pokeuraou import narrow as narrowing  # noqa: E402
+from pokeuraou import qrank  # noqa: E402
 from pokeuraou.benchflags import add_bench_flags, require_bench  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.deepen import DEFAULT_DEEPEN, parse_deepen  # noqa: E402
@@ -121,10 +123,66 @@ def build_leaves(
     )
 
 
+def luck_leaf(args: argparse.Namespace, value: object, encoder: Encoder) -> object:
+    """The evaluator `--aivat` scores the luck with (IKA-193 stage 3): the tested arm's own
+    weights through their own caller, so the arm's `calls` and `ended` stay the arm's."""
+    if args.inference is not None:
+        from pokeuraou.inference import RemoteValue
+
+        return RemoteValue(args.inference, args.inference_arm, encoder)
+    from pokeuraou.value import BatchedValue
+
+    return BatchedValue(value.nets, value.encoder, device=value.device)  # type: ignore[attr-defined]
+
+
+def play_with_luck(ledger_leaf: object | None, name: str, play: object) -> tuple:
+    """`play()`'s record and sides, and the game's luck when there is a ledger leaf."""
+    if ledger_leaf is None:
+        return (*play(), None)  # type: ignore[operator]
+    from pokeuraou import luck
+
+    started = time.perf_counter()
+    with luck.collecting(ledger_leaf, name) as ledger:  # type: ignore[arg-type]
+        record, sides = play()  # type: ignore[operator]
+    block = ledger.to_json()
+    block["gameSeconds"] = round(time.perf_counter() - started, 4)
+    return record, sides, block
+
+
 def _ends_rule(leaf: object) -> str:
     """How this leaf scores a finished battle: by the net (IKA-253 undone) or its result."""
     rules = getattr(getattr(leaf, "encoder", None), "rules", None)
     return "by the net" if getattr(rules, "net_scores_ends", False) else "as the result"
+
+
+def _install_q(args: argparse.Namespace, encoder: Encoder, ap: argparse.ArgumentParser) -> list[str]:
+    """The Q the q rank fills rank by (IKA-274): installed, and its files as the server
+    (or this worker) holds them -- for the records and the echo. Empty without a q fill."""
+    for fill, leafy, label in ((args.rank_fill, args.rank_leaf, "--rank-fill"),
+                               (args.baseline_rank_fill, args.baseline_rank_leaf,
+                                "--baseline-rank-fill")):
+        if qrank.is_q(fill) and not leafy:
+            # A damage-ranked arm never reaches the ranking, so the label would be recorded
+            # and played by nobody.
+            ap.error(f"{label} {fill} ranks the leaf-ranked menu: it needs that arm's rank-leaf")
+    model = qrank.install_from_args(
+        args, encoder, (args.rank_fill, args.baseline_rank_fill), ap.error
+    )
+    if model is None:
+        return []
+    files = model.describe()
+    print(f"  Q: {', '.join(files)} "
+          + (f"(the {args.q_arm} arm on {args.inference})" if args.q_arm else "(loaded here)"),
+          file=sys.stderr)
+    return files
+
+
+def _q_delta(before: dict[str, dict[str, int]], label: str) -> tuple[int, int]:
+    """(rankings, cells) the Q ranking did under `label` since `before` (`qrank.QRANKED`)."""
+    now = qrank.QRANKED.get(label, {})
+    was = before.get(label, {})
+    return (now.get("rankings", 0) - was.get("rankings", 0),
+            now.get("cells", 0) - was.get("cells", 0))
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -149,6 +207,7 @@ def main(argv: list[str] | None = None) -> None:
                     "suffix builds its leaf-ranked menu without the cover (IKA-323)")
     ap.add_argument("--baseline-rank-fill", default=DEFAULT_RANK_FILL,
                     help="same for the other arm")
+    qrank.add_q_flags(ap)
     ap.add_argument("--bench-drop", default=DEFAULT_BENCH_DROP,
                     help="which completions of the opponent's unseen slots the tested "
                     "arm's belief leaves out: w<P> under P%% of the weight, m<P> beyond "
@@ -200,6 +259,10 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--device", default=None)
     ap.add_argument("--torch-threads", type=int, default=1)
     ap.add_argument("--report-every", type=int, default=25)
+    ap.add_argument("--aivat", action="store_true",
+                    help="write each game's luck (AIVAT's chance and action terms, scored "
+                    "by the tested arm's leaf; `pokeuraou.luck`, IKA-193) into its record as "
+                    "`aivat`. The games are the same with or without it")
     args = ap.parse_args(argv)
     hide_bench = require_bench(args)
     if (args.inference is None) == (args.value is None):
@@ -245,6 +308,7 @@ def main(argv: list[str] | None = None) -> None:
         if other_encoder is encoder
         else build_leaves(args, encoder, other_encoder)
     )
+    q_files = _install_q(args, encoder, ap)
     home = args.games_out.parent if args.games_out is not None else Path(".")
 
     def solver_for(leaf: object, name: str, store: Path | None) -> SolvedSelections:
@@ -328,6 +392,10 @@ def main(argv: list[str] | None = None) -> None:
     arm_label = f"{tested.name}{tags}"
 
     client = WorkClient(args.queue) if args.queue else None
+    ledger_leaf = luck_leaf(args, value, encoder) if args.aivat else None
+    if ledger_leaf is not None:
+        print(f"  aivat: luck scored by {value_name} (the tested arm's leaf) on the true "
+              "position, written as `aivat`", file=sys.stderr)
 
     def work() -> Iterator[int]:
         if client is None:
@@ -343,7 +411,7 @@ def main(argv: list[str] | None = None) -> None:
     echo = [[{"selection": {}, "belief": {}, "leaf": set(), "fill": {}, "drop": {},
               "deepen": {}, "deepened": 0, "widened": 0, "swapped": 0, "oracle": 0,
               "depth": {}, "coverless": {"menus": 0, "dropping": 0, "dropped": 0},
-              "calls": 0}
+              "q": [0, 0], "calls": 0}
              for _ in arms]
             for _ in range(2)]
     done = 0
@@ -352,11 +420,15 @@ def main(argv: list[str] | None = None) -> None:
         which, game_index = index % 2, index // 2
         calls_before = [getattr(arm.evaluate, "calls", 0) for arm in arms]
         coverless_before = {k: dict(v) for k, v in narrowing.COVERLESS.items()}
+        q_before = {k: dict(v) for k, v in qrank.QRANKED.items()}
         started = time.perf_counter()
-        record, sides = pool_match_game(
-            reg, pool, arms, seed=args.seed, game_index=game_index, which=which,
-            hide_bench=hide_bench, max_turns=args.max_turns,
-            epsilon=args.explore_epsilon, temperature=args.explore_temperature,
+        record, sides, luck_block = play_with_luck(
+            ledger_leaf, value_name,
+            lambda game_index=game_index, which=which: pool_match_game(
+                reg, pool, arms, seed=args.seed, game_index=game_index, which=which,
+                hide_bench=hide_bench, max_turns=args.max_turns,
+                epsilon=args.explore_epsilon, temperature=args.explore_temperature,
+            ),
         )
         done += 1
         if done % args.report_every == 0:
@@ -406,6 +478,11 @@ def main(argv: list[str] | None = None) -> None:
                 was = coverless_before.get(arm_fill, {})
                 for key in bucket["coverless"]:
                     bucket["coverless"][key] += now.get(key, 0) - was.get(key, 0)
+            # Rankings this arm asked of the Q (IKA-274), under its label: the positive
+            # control that a q fill reached the menu. Two arms with one label share it.
+            if arms[arm_index].rank_by_leaf and qrank.is_q(arm_fill):
+                got = _q_delta(q_before, arm_fill)
+                bucket["q"] = [bucket["q"][0] + got[0], bucket["q"][1] + got[1]]
         if record.outcome is None:
             tally[which][2] += 1
             if client is not None:
@@ -430,6 +507,9 @@ def main(argv: list[str] | None = None) -> None:
                     "epsilon": args.explore_epsilon,
                     "temperature": args.explore_temperature,
                 },
+                # The Q behind a q rank fill (IKA-274), as its holder names it.
+                **({"qModel": q_files} if q_files else {}),
+                **({"aivat": luck_block} if luck_block is not None else {}),
             },
             source=provenance(
                 "pool-match",
@@ -483,6 +563,11 @@ def main(argv: list[str] | None = None) -> None:
                     f"({bucket['coverless']['dropping']:,} leaving options off, "
                     f"{bucket['coverless']['dropped']:,} options)"
                     if bucket["coverless"]["menus"]
+                    else ""
+                )
+                + (
+                    f", Q rankings {bucket['q'][0]:,} ({bucket['q'][1]:,} cells)"
+                    if bucket["q"][0]
                     else ""
                 )
                 + (f", leaf requests {bucket['calls']:,}" if bucket["calls"] else ""),

@@ -34,7 +34,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from . import port, rank_scores, timing
+from . import luck, port, qrank, rank_scores, timing
 from .actions import SideAction, switch_actions_after_faint
 from .budget import Budget
 from .deepen import DEFAULT_DEEPEN, deepen_spec
@@ -61,6 +61,7 @@ from .provenance import (
     LEGACY_RANK_FILL,
     engine_fingerprint,
 )
+from .qrank import is_q
 from .regulation import STAT_IDS, Regulation, repo_root
 from .rustnode import PortPause, PortTurn
 from .search import (
@@ -699,7 +700,10 @@ def _menus(
     this budget or at `Budget.fast`. It changes nothing with the damage or policy ranking.
     A ``-nocover`` label (IKA-323) builds the leaf-ranked menus -- the wider ones too --
     from the ranking alone, with no cover of every slot option first; what that leaves
-    off is in each `Narrowed.uncovered` and tallied in `narrow.COVERLESS`.
+    off is in each `Narrowed.uncovered` and tallied in `narrow.COVERLESS`. A ``q`` or
+    ``q-nocover`` label (IKA-274, `qrank`) ranks by the process's Q instead of filling
+    cells with the leaf: Q over both whole pools on the same view, each candidate scored
+    against the other side's half of its solve.
 
     ``wide`` asks for the same agent's menus at other widths too, written into ``wider``
     by width: the candidates of the root's double oracle (IKA-293). They are ranked by
@@ -774,6 +778,9 @@ def _menus(
         return [(items[index].position, 1.0)]
 
     def ranker(side: int) -> Any:  # noqa: ANN401
+        if policy is None and is_q(rank_fill):
+            # IKA-274: a Q's solve on the same view, no cell filled by the leaf.
+            return _q_ranker(reg, views(side), side, rank_fill)
         parts = [
             (
                 policy_ranking(policy, at, side)
@@ -818,6 +825,14 @@ def _menus(
             menu(1, width, foe_rank, tally=False),
         )
     return own, foe
+
+
+def _q_ranker(
+    reg: Regulation, views: list[tuple[Position, float]], side: int, label: str
+) -> Any:  # noqa: ANN401
+    """The ``q`` rank fills' ranking (IKA-274, `qrank`) from the one view `_menus` reads."""
+    (at, _weight), = views
+    return qrank.q_ranking(reg, at, side, qrank.installed(), label)
 
 
 def _remembered(rank: Any) -> Any:  # noqa: ANN401
@@ -1264,6 +1279,8 @@ def play_game(
         foe_search_value: float | None = None
         # What each side's best-first deepening did here (IKA-33); None where it did not.
         deepened: list[Any] = [None, None]
+        # (side whose leaf built it, its search's answer): the matrices `luck` reads.
+        solved: list[tuple[int, Any]] = []
 
         if spreads is not None:
             # Each side is uncertain about a different bench, so each gets its own answer.
@@ -1336,6 +1353,8 @@ def play_game(
             except EquilibriumError:
                 break
             own_seconds = perf_counter() - solve_started
+            solved.extend(answers.items())
+            solved.extend((s, got) for s, got in ((0, own_deep), (1, foe_deep)) if got is not None)
             record.unmodelled.extend(
                 set().union(*(answer.unmodelled for answer in answers.values()))
             )
@@ -1411,6 +1430,7 @@ def play_game(
                         )
                 except EquilibriumError:
                     break
+                solved.append((1, foe_deep if foe_deep is not None else foe_answers[1]))
                 if foe_deep is not None:
                     record.unmodelled.extend(foe_deep.unmodelled)
                     foe_strategy = np.asarray(
@@ -1444,6 +1464,7 @@ def play_game(
             except EquilibriumError:
                 break
             own_seconds = perf_counter() - solve_started
+            solved.append((0, own_search))
             record.unmodelled.extend(own_search.unmodelled)
             equilibrium = own_search.equilibrium
 
@@ -1490,6 +1511,7 @@ def play_game(
                     )
                 except EquilibriumError:
                     break
+                solved.append((1, foe_search))
                 record.unmodelled.extend(foe_search.unmodelled)
                 foe_equilibrium = foe_search.equilibrium
                 deepened[1] = foe_search.deepened
@@ -1578,6 +1600,14 @@ def play_game(
                 ),
             )
         )
+        if luck.active():
+            # AIVAT's action term off the searches' own matrices (IKA-193); a leafless
+            # side's matrix is not in win probability and is left out.
+            luck.saw_mixtures(
+                len(record.decisions) - 1, pos.turn, ours, own_strategy, foe_theirs,
+                foe_strategy, chosen, [r for s, r in solved if leaves[s] is not None],
+                forced=first_action is not None and len(record.decisions) == 1,
+            )
         timing.decided("move")
         advanced = _advance_turn(
             reg, rng, pos, chosen, record, leaves, objective,
@@ -1625,7 +1655,10 @@ def _advance_turn(
         return None
     index = _sample_index(rng, counts)
     if index < len(weights.branches):
-        return port.branch(reg, pos, chosen, Budget.exact(), index)
+        landed = port.branch(reg, pos, chosen, Budget.exact(), index)
+        luck.saw_turn(reg, pos, chosen, counts, index, landed)
+        return landed
+    luck.saw_turn(reg, pos, chosen, counts, index)
     paused = port.turn(reg, pos, chosen, Budget.exact(), select=index).pause
     if paused is None:
         raise port.PortRefused(f"the port gave no pause at index {index} of the turn")
@@ -1679,6 +1712,7 @@ def _advance(
             if not weights.size or float(weights.sum()) <= 0:
                 return None
             index = _sample_index(rng, weights)
+            luck.saw_resumed(result, index)
             if index < len(result.branches):
                 return result.outcomes[index].position
             pause = result.pauses[index - len(result.branches)]

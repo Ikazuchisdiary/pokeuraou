@@ -34,6 +34,13 @@ counted and left uncorrected -- a correction of zero is always unbiased, but cho
 
     compute:  aivat.py compute <match dir> --out <jsonl> [--value M ...] [--shard k/n]
     report:   aivat.py report <jsonl> ... [--sprt 0 10] [--bootstrap 2000]
+    compare:  aivat.py compare <match dir> <jsonl>   (the worker's own terms, IKA-193 stage 3)
+
+`compute --actions-matrix` prices the action term's pairs with the matrix budget instead of
+the exact one: the Q a worker reads off its search when one leaf builds one matrix over the
+true position (an open-bench match of one leaf against itself), so `compare` can check the
+worker's action term too. `--pool` reads the leaf with the pool's regulation, as the
+worker does.
 
 `compute` writes one line per game: its index, seat, outcome and the per-decision terms.
 `report` pairs the games as `tools/paired_result.py` does and prints the raw and corrected
@@ -75,32 +82,8 @@ STATUSES = (
 )
 
 
-def neutral_correction(
-    values: Sequence[float],
-    weights: Sequence[float],
-    paused: Sequence[bool],
-    landed: int | None,
-) -> tuple[float, float]:
-    """(c, E): one chance stage's correction and the expectation it subtracts.
-
-    `values[k]` is V of outcome k (read only where `paused[k]` is False), `weights` the
-    port's weights (normalised here, as `_sample_index` normalises them), `landed` the
-    index the game drew. A pause is scored at `E`, the weighted mean of the non-pause
-    outcomes, so the scoring is fixed before the draw and `sum_k p_k c(k) = 0` exactly:
-    a pause landing corrects nothing, anything else corrects by `V - E`.
-    """
-    w = np.asarray(weights, dtype=np.float64)
-    v = np.asarray(values, dtype=np.float64)
-    mask = ~np.asarray(paused, dtype=bool)
-    total = float(w.sum())
-    if total <= 0 or not mask.any():
-        return 0.0, math.nan
-    p = w / total
-    kept = float(p[mask].sum())
-    expected = float((p[mask] * v[mask]).sum() / kept) if kept > 0 else math.nan
-    if landed is None or not mask[landed] or kept <= 0:
-        return 0.0, expected
-    return float(v[landed]) - expected, expected
+# One definition, shared with the worker's ledger (IKA-193 stage 3).
+from pokeuraou.luck import neutral_correction  # noqa: E402
 
 
 @dataclass
@@ -242,6 +225,7 @@ def action_terms(
     evaluate: Callable[[list[Any]], np.ndarray],
     *,
     budget: Any = None,  # noqa: ANN401
+    kind: str = "exact",
 ) -> list[ActionTerm]:
     """Every move decision's action correction, in side 0's units.
 
@@ -250,7 +234,14 @@ def action_terms(
     Q is a fixed function of the pair. Replacement decisions are not here: in the records
     this was written for, every one was a pure strategy (no draw to correct). A decision
     whose mixtures put weight on a single pair contributes exactly zero.
+
+    ``kind="matrix"`` prices the pairs as a search's matrix does -- one `batched_payoff`
+    over the support, a cell being the leaf's expectation at ``budget`` -- which is the Q a
+    worker's ledger reads (`pokeuraou.luck`) when one leaf builds one matrix on the true
+    position.
     """
+    if kind == "matrix":
+        return _matrix_action_terms(reg, game, evaluate, budget=budget)
     from pokeuraou import port
     from pokeuraou.actions import side_actions
     from pokeuraou.budget import Budget
@@ -313,6 +304,45 @@ def action_terms(
         p = np.asarray([w for _, _, w in pairs])
         p = p / p.sum()
         out.append(ActionTerm(i, "corrected", len(pairs), float(q[drawn[0]] - (p * q).sum())))
+    return out
+
+
+def _matrix_action_terms(
+    reg: Any,  # noqa: ANN401
+    game: dict[str, Any],
+    evaluate: Callable[[list[Any]], np.ndarray],
+    *,
+    budget: Any,  # noqa: ANN401
+) -> list[ActionTerm]:
+    from pokeuraou.actions import side_actions
+    from pokeuraou.luck import action_correction
+    from pokeuraou.port import batched_payoff
+    from pokeuraou.position import Position
+
+    out: list[ActionTerm] = []
+    for i, decision in enumerate(game["decisions"]):
+        if decision["kind"] != "move":
+            continue
+        own = [a for a, p in zip(decision["ownActions"], decision["ownPolicy"], strict=True) if p > 0]
+        foe = [b for b, p in zip(decision["foeActions"], decision["foePolicy"], strict=True) if p > 0]
+        if len(own) * len(foe) <= 1:
+            out.append(ActionTerm(i, "pure", len(own) * len(foe)))
+            continue
+        pos = Position.from_json(decision["position"])
+        legal = [{x.to_choice(): x for x in side_actions(reg, pos, s)} for s in (0, 1)]
+        if any(a not in legal[0] for a in own) or any(b not in legal[1] for b in foe):
+            out.append(ActionTerm(i, "illegal", len(own) * len(foe)))
+            continue
+        payoff, _notes = batched_payoff(
+            reg, pos, [legal[0][a] for a in own], [legal[1][b] for b in foe], evaluate,
+            budget=budget,
+        )
+        status, c, pairs = action_correction(
+            decision["ownActions"], decision["ownPolicy"], decision["foeActions"],
+            decision["foePolicy"], (decision["ownChosen"], decision["foeChosen"]),
+            [(own, foe, np.asarray(payoff, dtype=np.float64))],
+        )
+        out.append(ActionTerm(i, status, pairs, c))
     return out
 
 
@@ -487,7 +517,8 @@ def game_terms(
 
 
 def _evaluator(
-    models: Sequence[Path], device: str | None, format_id: str = "gen9championsvgc2026regmc"
+    models: Sequence[Path], device: str | None, format_id: str = "gen9championsvgc2026regmc",
+    pool: str | None = None,
 ) -> tuple[Any, Any]:  # noqa: ANN401
     import torch
 
@@ -495,8 +526,16 @@ def _evaluator(
     from pokeuraou.regulation import load_regulation
     from pokeuraou.value import BatchedValue, load_ensemble
 
-    reg = load_regulation(format_id)
-    if format_id.endswith("regmb"):
+    if pool is not None:
+        # The regulation a pool match's worker encodes with (`tools/pool_match.py`).
+        from pokeuraou.damage import register_mega_stones
+        from pokeuraou.pool import load_pool
+
+        reg = load_pool(pool).reg
+        register_mega_stones(reg)
+    else:
+        reg = load_regulation(format_id)
+    if pool is None and format_id.endswith("regmb"):
         from pokeuraou.damage import register_mega_stones
 
         register_mega_stones(reg)
@@ -520,7 +559,7 @@ def compute(args: argparse.Namespace) -> None:
     models = args.value or [
         ROOT / "data" / "models" / "value-mc0.pt", ROOT / "data" / "models" / "value-mc0-s1.pt"
     ]
-    reg, evaluate = _evaluator(models, args.device, args.format)
+    reg, evaluate = _evaluator(models, args.device, args.format, args.pool)
     k, n = (int(x) for x in args.shard.split("/"))
     done: set[tuple[str, int]] = set()
     if args.out.exists():
@@ -542,8 +581,14 @@ def compute(args: argparse.Namespace) -> None:
                 break
             terms = game_terms(reg, game, evaluate)
             row = {"file": name, "line": number, **terms.to_json()}
-            if args.actions:
-                acted = action_terms(reg, game, evaluate)
+            if args.actions or args.actions_matrix:
+                from pokeuraou.budget import Budget
+
+                acted = action_terms(
+                    reg, game, evaluate,
+                    budget=Budget.matrix() if args.actions_matrix else None,
+                    kind="matrix" if args.actions_matrix else "exact",
+                )
                 row["A"] = float(sum(a.c for a in acted))
                 row["actions"] = [a.to_json() for a in acted]
             out.write((json.dumps(row) + "\n").encode("utf-8"))
@@ -744,6 +789,81 @@ def report(args: argparse.Namespace) -> None:
                     f"  (z {cs.mean() / se if se else 0:+.2f})"
                 )
 
+# -- compare -------------------------------------------------------------------------------
+
+
+def worker_rows(directory: Path) -> dict[tuple[int, str], dict[str, Any]]:
+    """The worker's own terms (`pokeuraou.luck`), keyed by (game index, seat label)."""
+    out = {}
+    for _name, _number, line in _games(directory):
+        game = json.loads(line)
+        block = game.get("aivat")
+        if block is None or game.get("gameIndex") is None:
+            continue
+        seat = str((game.get("provenance") or {}).get("seat", ""))
+        out[(int(game["gameIndex"]), seat)] = block
+    return out
+
+
+def compare(args: argparse.Namespace) -> None:
+    """Per game, the worker's C and A against `compute`'s, and where they differ."""
+    worker = worker_rows(args.dir)
+    rows = [json.loads(line) for line in args.jsonl.open(encoding="utf-8") if line.strip()]
+    tol = args.tolerance
+    both = 0
+    diff_c: list[float] = []
+    diff_a: list[float] = []
+    over_c, explained, over_a = [], [], []
+    stage_status: Counter = Counter()
+    action_status: Counter = Counter()
+    seconds = game_seconds = port_seconds = leaf_seconds = 0.0
+    leaves = turns = 0
+    for row in rows:
+        key = (int(row["gameIndex"]), str(row["seat"]))
+        block = worker.get(key)
+        if block is None:
+            continue
+        both += 1
+        seconds += float(block.get("seconds", 0.0))
+        game_seconds += float(block.get("gameSeconds", 0.0))
+        leaves += int(block.get("leaves", 0))
+        turns += int(block.get("turns", 0))
+        port_seconds += float(block.get("portSeconds", 0.0))
+        leaf_seconds += float(block.get("leafSeconds", 0.0))
+        stage_status.update(s["s"] for s in block["stages"])
+        action_status.update(a["s"] for a in block["actions"])
+        dc = abs(float(block["C"]) - float(row["C"]))
+        diff_c.append(dc)
+        if dc > tol:
+            # Two pauses at one position: the record cannot say which was drawn and
+            # `compute` mixes them; the worker resumed the one it drew (records §11.0).
+            grouped = any(s.get("g", 1) > 1 for s in row["stages"])
+            (explained if grouped else over_c).append((key, dc))
+        if "A" in row:
+            da = abs(float(block["A"]) - float(row["A"]))
+            diff_a.append(da)
+            if da > tol:
+                over_a.append((key, da))
+    print(f"{args.dir}: {len(worker)} games with a worker ledger, {len(rows)} computed, "
+          f"{both} in both")
+    if not both:
+        return
+    print(f"  chance term C: max |worker - compute| {max(diff_c):.3e}, over {tol:g}: "
+          f"{len(over_c)} unexplained, {len(explained)} at two pauses of one position")
+    for key, d in over_c[:10] + explained[:10]:
+        print(f"    game {key}: |dC| {d:.3e}")
+    if diff_a:
+        print(f"  action term A: max |worker - compute| {max(diff_a):.3e}, over {tol:g}: "
+              f"{len(over_a)}")
+        for key, d in over_a[:10]:
+            print(f"    game {key}: |dA| {d:.3e}")
+    print(f"  worker stages {dict(stage_status)}; worker action terms {dict(action_status)}")
+    if game_seconds:
+        print(f"  worker cost: {seconds:.2f} s in the ledger over {game_seconds:.2f} s of games "
+              f"({seconds / game_seconds:.1%}), {leaves:,} leaves over {turns:,} extra turns; "
+              f"of it the extra port turns {port_seconds:.2f} s, the leaf {leaf_seconds:.2f} s")
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="command", required=True)
@@ -756,6 +876,14 @@ def main(argv: list[str] | None = None) -> None:
     c.add_argument("--shard", default="0/1", help="k/n: the games whose index is k mod n")
     c.add_argument("--limit", type=int, default=0, help="stop after this many games")
     c.add_argument("--actions", action="store_true", help="the action term too (stage 2)")
+    c.add_argument("--actions-matrix", action="store_true",
+                   help="the action term with Q from the matrix budget (stage 3's check)")
+    c.add_argument("--pool", default=None,
+                   help="read the leaf with this pool's regulation, as a pool match's worker")
+    k = sub.add_parser("compare")
+    k.add_argument("dir", type=Path, help="a match run with --aivat")
+    k.add_argument("jsonl", type=Path, help="`compute` over the same directory")
+    k.add_argument("--tolerance", type=float, default=1e-5)
     r = sub.add_parser("report")
     r.add_argument("jsonl", type=Path, nargs="+")
     r.add_argument("--sprt", type=float, nargs=2, default=(0.0, 10.0))
@@ -768,7 +896,7 @@ def main(argv: list[str] | None = None) -> None:
         help="pairs before the normal test may stop (0: the rule registered first)",
     )
     args = ap.parse_args(argv)
-    (compute if args.command == "compute" else report)(args)
+    {"compute": compute, "report": report, "compare": compare}[args.command](args)
 
 
 if __name__ == "__main__":
