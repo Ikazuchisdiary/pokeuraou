@@ -531,6 +531,59 @@ def config_dict(config: QConfig) -> dict[str, Any]:
     return asdict(config)
 
 
+def load_q(path: str | Path, device: str = "cpu") -> Any:  # noqa: ANN401
+    """A trained Q (`tools/q_train.py`'s file) in eval mode on `device`.
+
+    Stops when the file was trained on another vocabulary than its regulation's today:
+    the action encoding indexes the same move table the trunk embeds.
+    """
+    import torch
+
+    from .encode import Encoder
+    from .regulation import load_regulation
+
+    blob = torch.load(path, map_location=device, weights_only=False)
+    encoder = Encoder(load_regulation(blob["regulation"]))
+    if blob.get("vocab_fingerprint") != encoder.vocab.fingerprint():
+        raise ValueError(f"{path} was trained on another vocabulary than this regulation's")
+    net = build_net(encoder, QConfig(**blob["config"]), blob.get("move_table"))
+    net.load_state_dict(blob["state"])
+    net.vocab_fingerprint = blob["vocab_fingerprint"]
+    return net.to(device).eval()
+
+
+#: The position arrays a Q reads, in `Encoded`'s names.
+POSITION_ARRAYS = ("species", "ability", "item", "moves", "mon", "mask", "side", "field")
+
+
+def q_matrix(net: Any, arrays: dict[str, np.ndarray], device: Any) -> np.ndarray:  # noqa: ANN401
+    """(N0, N1) float64: side 0's win probability for every pair, from one request's arrays.
+
+    ``arrays`` holds one position's `POSITION_ARRAYS` (one row each), ``acts0`` / ``acts1``
+    (`encode_actions`) and, for a net with properties, ``feats0`` / ``feats1``
+    (`port_features`). The one expression `tools/q_menus.py` measured with, so a served
+    Q and a local one answer alike.
+    """
+    torch = _torch()
+    batch = {
+        name: torch.from_numpy(np.ascontiguousarray(arrays[name])).to(device)
+        for name in POSITION_ARRAYS
+    }
+    acts = [
+        torch.from_numpy(np.ascontiguousarray(arrays[f"acts{s}"]).astype(np.int64))[None].to(device)
+        for s in (0, 1)
+    ]
+    feats: list[Any] = [None, None]
+    if net.config.properties:
+        feats = [
+            torch.from_numpy(np.ascontiguousarray(arrays[f"feats{s}"], dtype=np.float32))[None].to(device)
+            for s in (0, 1)
+        ]
+    with torch.no_grad():
+        logits = net(batch, acts[0], acts[1], feats[0], feats[1])
+    return torch.sigmoid(logits[0]).double().cpu().numpy()
+
+
 def encoded_row(encoded: Encoded, index: int) -> dict[str, np.ndarray]:
     """One position's arrays, as the teaching shards store them."""
     return {
@@ -558,4 +611,6 @@ __all__ = [
     "encode_actions",
     "encoded_row",
     "legal_pool",
+    "load_q",
+    "q_matrix",
 ]
