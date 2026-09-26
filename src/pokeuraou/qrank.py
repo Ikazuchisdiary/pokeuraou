@@ -29,8 +29,10 @@ of a match that name a ``q`` label rank with it.
 from __future__ import annotations
 
 import json
+import os
 import re
 import socket
+import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -46,7 +48,13 @@ from .position import Position
 from .regulation import Regulation
 
 #: ``q`` or ``q-nocover``: rank the leaf-ranked root menu by a Q's solve (this module).
-Q_RANK_FILL = re.compile(r"q(-nocover)?")
+#: A ``.NAME`` suffix (stage 3) ranks by the process's Q of that name instead of its
+#: default one (`install`), so two arms of one match can each rank by their own Q:
+#: ``q-nocover`` against ``q-nocover.long``.
+Q_RANK_FILL = re.compile(r"q(-nocover)?(?:\.([a-z0-9_]+))?")
+
+#: Both sides' pools of one Q request: (side 0's actions, side 1's actions).
+Pools = tuple[Sequence[SideAction], Sequence[SideAction]]
 
 
 def is_q(label: str) -> bool:
@@ -54,27 +62,51 @@ def is_q(label: str) -> bool:
     return Q_RANK_FILL.fullmatch(label) is not None
 
 
+def _parsed(label: str) -> re.Match[str]:
+    got = Q_RANK_FILL.fullmatch(label)
+    if got is None:
+        raise ValueError(f"{label!r} is not a q rank fill")
+    return got
+
+
+def q_name(label: str) -> str:
+    """Which of the process's Qs a q label ranks by: its ``.NAME``, or "" (the default)."""
+    return _parsed(label).group(2) or ""
+
+
+def q_covers(label: str) -> bool:
+    """Whether a q label keeps the cover (``q``) or not (``q-nocover``)."""
+    return _parsed(label).group(1) is None
+
+
 #: Per rank-fill label, what the Q ranking did in this process: rankings asked, and the
 #: cells of the Q matrices behind them. The positive control that a ``q`` label reached a
 #: menu, read as a change by a match's echo (as `narrow.COVERLESS`).
 QRANKED: dict[str, dict[str, int]] = {}
 
-_INSTALLED: list[Any] = []
+#: The process's Qs by name: "" is the default (``q``, ``q-nocover``), any other name the
+#: Q of the labels that carry it (``q-nocover.NAME``).
+_INSTALLED: dict[str, Any] = {}
 
 
-def install(model: Any) -> None:  # noqa: ANN401 - LocalQ or RemoteQ
-    """Makes `model` the process's Q: every ``q`` label ranks with it."""
-    _INSTALLED[:] = [model]
+def install(model: Any, name: str = "") -> None:  # noqa: ANN401 - LocalQ or RemoteQ
+    """Makes `model` the process's Q of `name`: every ``q`` label of that name ranks with it."""
+    _INSTALLED[name] = model
 
 
-def installed() -> Any:  # noqa: ANN401
-    """The process's Q, or a stop that says how to give one."""
-    if not _INSTALLED:
+def installed(name: str = "") -> Any:  # noqa: ANN401
+    """The process's Q of `name`, or a stop that says how to give one."""
+    if name not in _INSTALLED:
+        if name:
+            raise RuntimeError(
+                f"a q rank fill .{name} needs the Q {name!r}: --q-model-named {name} <file> "
+                f"(loaded here) or --q-arm-named {name} <arm> (on the inference server)"
+            )
         raise RuntimeError(
             "a q rank fill needs a Q: --q-model <file> (loaded here) or --q-arm <name> "
             "(on the inference server, which --q-model on the launcher loads)"
         )
-    return _INSTALLED[0]
+    return _INSTALLED[name]
 
 
 def _pool_arrays(
@@ -132,6 +164,10 @@ class LocalQ:
         self.calls += 1
         return qhead.q_matrix(self.net, arrays, self._device)
 
+    def matrices(self, reg: Regulation, asks: Sequence[tuple[Position, Pools]]) -> list[np.ndarray]:
+        """`matrix` of each (position, pools), in order."""
+        return [self.matrix(reg, pos, pools) for pos, pools in asks]
+
 
 def _plan_named(arrays: dict[str, np.ndarray]) -> tuple[list[dict[str, Any]], int]:
     """Where each named array sits in the shared block (`inference._plan`'s layout)."""
@@ -157,7 +193,9 @@ class RemoteQ:
     """A Q that lives in the inference server (`--q-arm`); this process holds no torch.
 
     The same shared-memory road as `inference.RemoteValue`, its own connection and block,
-    and the op ``q``: one position, both pools, one matrix back.
+    and the op ``q``: one position, both pools, one matrix back. ``q_many`` (stage 3) asks
+    several in one round trip -- both sides' rankings of a menu (`prefetch`) -- and the
+    server answers each as its own ``q`` would.
     """
 
     address: str
@@ -166,6 +204,7 @@ class RemoteQ:
     properties: bool = True
     buffer_bytes: int = Q_BUFFER_BYTES
     calls: int = field(default=0, init=False)
+    trips: int = field(default=0, init=False)
     waited: float = field(default=0.0, init=False)
 
     def __post_init__(self) -> None:
@@ -204,53 +243,266 @@ class RemoteQ:
     def matrix(
         self, reg: Regulation, pos: Position, pools: tuple[Sequence[SideAction], Sequence[SideAction]]
     ) -> np.ndarray:
-        arrays = _pool_arrays(reg, self.encoder, pos, pools, self.properties)
-        layout, used = _plan_named(arrays)
-        shape = (len(pools[0]), len(pools[1]))
-        result_offset = (used + 63) & ~63
-        if result_offset + shape[0] * shape[1] * 8 > self.buffer_bytes:
-            raise RuntimeError(f"a Q request of {shape} does not fit {self.buffer_bytes} bytes")
+        return self.matrices(reg, [(pos, pools)])[0]
+
+    def matrices(self, reg: Regulation, asks: Sequence[tuple[Position, Pools]]) -> list[np.ndarray]:
+        """`matrix` of each (position, pools), in order, in one round trip."""
         view = self._block.buf
-        for item in layout:
-            array = arrays[item["name"]]
-            target = np.frombuffer(
-                view, dtype=array.dtype, count=array.size, offset=int(item["offset"])
-            ).reshape(array.shape)
-            np.copyto(target, array)
+        items: list[dict[str, Any]] = []
+        at = 0
+        for pos, pools in asks:
+            arrays = _pool_arrays(reg, self.encoder, pos, pools, self.properties)
+            layout, used = _plan_named(arrays)
+            for item in layout:
+                item["offset"] = int(item["offset"]) + at
+            shape = (len(pools[0]), len(pools[1]))
+            result_offset = (at + used + 63) & ~63
+            at = (result_offset + shape[0] * shape[1] * 8 + 63) & ~63
+            if at > self.buffer_bytes:
+                raise RuntimeError(
+                    f"Q requests up to {shape} do not fit {self.buffer_bytes} bytes"
+                )
+            for item in layout:
+                array = arrays[item["name"]]
+                target = np.frombuffer(
+                    view, dtype=array.dtype, count=array.size, offset=int(item["offset"])
+                ).reshape(array.shape)
+                np.copyto(target, array)
+            items.append({"layout": layout, "shape": list(shape), "result_offset": result_offset})
         sent = time.perf_counter()
         with timing.stage("serve.q"):
-            self._ask({
-                "op": "q", "model": self.model, "shm": self._block.name, "layout": layout,
-                "shape": list(shape), "result_offset": result_offset,
-            })
+            if len(items) == 1:
+                self._ask({"op": "q", "model": self.model, "shm": self._block.name, **items[0]})
+            else:
+                self._ask({
+                    "op": "q_many", "model": self.model, "shm": self._block.name, "items": items,
+                })
         self.waited += time.perf_counter() - sent
-        self.calls += 1
-        count = shape[0] * shape[1]
-        return np.frombuffer(
-            view[result_offset : result_offset + count * 8], dtype=np.float64
-        ).reshape(shape).copy()
+        self.calls += len(items)
+        self.trips += 1
+        out = []
+        for item in items:
+            shape = tuple(item["shape"])
+            start = int(item["result_offset"])
+            out.append(np.frombuffer(
+                view[start : start + shape[0] * shape[1] * 8], dtype=np.float64
+            ).reshape(shape).copy())
+        return out
+
+
+#: The longest pool `QGraphs` captures for; a request with a longer pool on either side is
+#: answered by the eager pass (`qhead.q_matrix`), the same answer. The 158,392 teaching
+#: views of IKA-274 met pools of 2 to 230 actions (138 sizes). 0 turns the graphs off.
+Q_GRAPH_POOL = int(os.environ.get("POKEURAOU_Q_GRAPH_POOL", "256"))
+
+
+class QGraphs:
+    """A Q arm's forward pass as CUDA graphs, cut where the shapes allow (IKA-274 stage 3).
+
+    `qhead.q_matrix` runs the net eagerly: about 150 kernels a request, each launched from
+    the server's Python under the GIL the value arms' threads also want, and a dozen
+    pageable copies in that each wait for the card's queue. Served beside 24 workers that
+    was 21-44 ms a request for a few ms of work (IKA-274 §15).
+
+    A request's shape is two pool sizes, and the pair of them is rarely met twice (6,051
+    pairs among the teaching views), so one graph per pair would be mostly captures. The
+    forward pass is cut instead where the shapes separate:
+
+    * the trunk and both sides' contexts read only the position, one shape: one graph;
+    * each side's actions (`QNet.encode_actions`) read the trunk's rows and that side's
+      pool: one graph per (side, pool size), at most 2 x 138;
+    * the pair head, which reads both sizes, stays eager (about 30 kernels).
+
+    Each piece replays the kernels eager chose for the same shapes on the same inputs, so
+    the matrix is `qhead.q_matrix`'s to the bit (asserted in `tests/test_q_rank.py` on
+    CUDA; exact sizes, nothing padded). The inputs go in through page-locked staging on
+    the one stream, and the whole request is enqueued under the process's graph lock
+    (`inference._GRAPH_LOCK`, IKA-306: one capture at a time, and no replay inside
+    another's capture) and waited for outside it, as `inference._Graphs` does.
+    """
+
+    @staticmethod
+    def usable(device: Any) -> bool:  # noqa: ANN401
+        return Q_GRAPH_POOL > 0 and getattr(device, "type", None) == "cuda"
+
+    def __init__(self, net: Any, device: Any) -> None:  # noqa: ANN401
+        from .inference import _GRAPH_LOCK
+
+        self.net = net
+        self.device = device
+        self.lock = _GRAPH_LOCK
+        self.kind: tuple | None = None
+        self.inputs: dict[str, Any] = {}
+        self.trunk: tuple[Any, tuple[Any, Any, Any]] | None = None
+        #: (side, pool size) -> (graph, that side's action vectors)
+        self.sides: dict[tuple[int, int], tuple[Any, Any]] = {}
+        self.warm: set[tuple[int, str]] = set()
+        self.captured = 0
+        self.replays = 0
+        #: Why the graphs were given up, once a capture has failed.
+        self.failed: str | None = None
+
+    def _warm(self, what: str, run: Callable[[], Any]) -> None:
+        """Runs `run` twice off the default stream before this thread's first capture of
+        `what` (cuBLAS and friends set themselves up on first use, per thread)."""
+        import torch
+
+        key = (threading.get_ident(), what)
+        if key in self.warm:
+            return
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            for _ in range(2):
+                run()
+        torch.cuda.current_stream().wait_stream(side)
+        self.warm.add(key)
+
+    def _capture(self, what: str, run: Callable[[], Any]) -> tuple[Any, Any]:  # noqa: ANN401
+        import torch
+
+        self._warm(what, run)
+        graph = torch.cuda.CUDAGraph()
+        # A pool of its own, not one shared with the other pieces: a shared pool is safe
+        # only when graphs replay in the order they were captured, and these replay in a
+        # request's order (trunk, side 0, side 1) whatever order their sizes were first met
+        # in -- a side graph captured earlier then writes its scratch over a later-captured
+        # one's output before the pair reads it (seen: 23 of 150 requests off by up to 0.9).
+        with torch.cuda.graph(
+            graph, pool=torch.cuda.graph_pool_handle(), capture_error_mode="thread_local"
+        ):
+            out = run()
+        self.captured += 1
+        timing.count("q.graph.captured")
+        return graph, out
+
+    def _trunk(self) -> tuple[Any, Any, Any]:  # noqa: ANN401
+        """(rows, side 0's context, side 1's context): `QNet.forward`'s first lines."""
+        import torch
+
+        from . import qhead
+
+        net = self.net
+        batch = {name: self.inputs[name] for name in qhead.POSITION_ARRAYS}
+        h, sides = net.mons(batch)
+        field = batch["field"]
+        ctx0 = net.context(torch.cat([sides[:, 0], sides[:, 1], field], dim=-1))
+        ctx1 = net.context(torch.cat([sides[:, 1], sides[:, 0], field], dim=-1))
+        return h, ctx0, ctx1
+
+    def matrix(self, arrays: dict[str, np.ndarray]) -> np.ndarray | None:
+        """The request's N0 x N1 matrix, or None when it is not for the graphs."""
+        n = (len(arrays["acts0"]), len(arrays["acts1"]))
+        if self.failed or min(n) <= 0 or max(n) > Q_GRAPH_POOL:
+            return None
+        import torch
+
+        from . import qhead
+
+        names = qhead.POSITION_ARRAYS
+        kind = tuple((name, arrays[name].dtype.str, tuple(arrays[name].shape)) for name in names)
+        if self.kind is not None and kind != self.kind:
+            return None
+        props = bool(self.net.config.properties)
+        # `qhead.q_matrix`'s own conversions, staged in page-locked memory.
+        staged = {
+            name: torch.from_numpy(np.ascontiguousarray(arrays[name])).pin_memory()
+            for name in names
+        }
+        for s in (0, 1):
+            staged[f"acts{s}"] = torch.from_numpy(
+                np.ascontiguousarray(arrays[f"acts{s}"]).astype(np.int64)
+            )[None].pin_memory()
+            if props:
+                staged[f"feats{s}"] = torch.from_numpy(
+                    np.ascontiguousarray(arrays[f"feats{s}"], dtype=np.float32)
+                )[None].pin_memory()
+        result = torch.empty(n, dtype=torch.float64, pin_memory=True)
+        done = torch.cuda.Event()
+        with self.lock, torch.no_grad():
+            try:
+                if self.kind is None:
+                    self.inputs = {
+                        name: torch.zeros(shape, dtype=staged[name].dtype, device=self.device)
+                        for name, _dtype, shape in kind
+                    }
+                    for s in (0, 1):
+                        self.inputs[f"acts{s}"] = torch.zeros(
+                            (1, Q_GRAPH_POOL, *arrays[f"acts{s}"].shape[1:]),
+                            dtype=torch.int64, device=self.device,
+                        )
+                        if props:
+                            self.inputs[f"feats{s}"] = torch.zeros(
+                                (1, Q_GRAPH_POOL, arrays[f"feats{s}"].shape[1]),
+                                dtype=torch.float32, device=self.device,
+                            )
+                    self.kind = kind
+                for name in names:
+                    self.inputs[name].copy_(staged[name], non_blocking=True)
+                for s in (0, 1):
+                    self.inputs[f"acts{s}"][:, : n[s]].copy_(staged[f"acts{s}"], non_blocking=True)
+                    if props:
+                        self.inputs[f"feats{s}"][:, : n[s]].copy_(
+                            staged[f"feats{s}"], non_blocking=True
+                        )
+                if self.trunk is None:
+                    self.trunk = self._capture("trunk", self._trunk)
+                h, ctx0, ctx1 = self.trunk[1]
+                for s in (0, 1):
+                    if (s, n[s]) not in self.sides:
+                        acts = self.inputs[f"acts{s}"][:, : n[s]]
+                        feats = self.inputs[f"feats{s}"][:, : n[s]] if props else None
+                        ctx = ctx0 if s == 0 else ctx1
+
+                        def run(s: int = s, acts: Any = acts, feats: Any = feats, ctx: Any = ctx) -> Any:  # noqa: ANN401
+                            return self.net.encode_actions(h, ctx, s, acts, feats)
+
+                        self.sides[(s, n[s])] = self._capture(f"side{s}", run)
+            except Exception as error:  # noqa: BLE001 - the eager road answers instead
+                # A capture that failed can leave the pool mid-recording, so no graph is
+                # trusted after one: every request from here is answered eagerly.
+                self.failed = f"{type(error).__name__}: {error}"
+                timing.count("q.graph.failed")
+                return None
+            self.trunk[0].replay()
+            self.sides[(0, n[0])][0].replay()
+            self.sides[(1, n[1])][0].replay()
+            u = self.sides[(0, n[0])][1]
+            v = self.sides[(1, n[1])][1]
+            # `QNet.forward`'s last line and `qhead.q_matrix`'s, eagerly: the only piece
+            # that reads both sizes.
+            logits = self.net.pair(u, v) - self.net.pair(v, u).transpose(1, 2)
+            result.copy_(torch.sigmoid(logits[0]).double(), non_blocking=True)
+            done.record()
+        done.synchronize()
+        self.replays += 1
+        timing.count("q.graph.replays")
+        return result.numpy().copy()
 
 
 def served_q(net: Any, device: Any, files: Sequence[str]) -> Callable[..., np.ndarray]:  # noqa: ANN401
     """The server's side of a Q arm: (arrays) -> the N0 x N1 matrix.
 
-    Eager, never a CUDA graph: a Q request's shape is two pool sizes, a few thousand
-    combinations, and the graphs are per value arm (`inference._Graphs`). Eager passes
-    already run beside captures (a value arm's long requests do, IKA-306 §1.2), so this
-    takes no graph lock and holds up no replay. The module is only read, never
+    On a card, by `QGraphs` (stage 3); a pool past `Q_GRAPH_POOL`, or a CPU server, by the
+    eager pass (`qhead.q_matrix`), which is the same answer. The module is only read, never
     reparametrised, so the serving threads share it.
     """
     from . import qhead
 
+    graphs = QGraphs(net, device) if QGraphs.usable(device) else None
+
     def answer(arrays: dict[str, np.ndarray]) -> np.ndarray:
         started = time.perf_counter()
-        out = qhead.q_matrix(net, arrays, device)
+        out = graphs.matrix(arrays) if graphs is not None else None
+        if out is None:
+            out = qhead.q_matrix(net, arrays, device)
         answer.held += time.perf_counter() - started
         answer.calls += 1
         return out
 
     answer.held = 0.0
     answer.calls = 0
+    answer.graphs = graphs
     answer.fingerprint = net.vocab_fingerprint
     answer.properties = bool(net.config.properties)
     answer.files = list(files)
@@ -270,8 +522,59 @@ def load_q_arms(paths: dict[str, Path], device_name: str) -> dict[str, Any]:
     }
 
 
+def _choices(actions: Sequence[SideAction]) -> tuple[str, ...]:
+    return tuple(action.to_choice() for action in actions)
+
+
+#: What `prefetch` hands `q_ranking` for one side: (the choices of the pool it asked for,
+#: the other side's pool, the matrix).
+Given = tuple[tuple[str, ...], list[SideAction], np.ndarray]
+
+
+def prefetch(
+    reg: Regulation, pos: Position, views: tuple[Position, Position], model: Any  # noqa: ANN401
+) -> dict[int, Given]:
+    """Both sides' Q matrices for one agent's menus, asked in one round trip (stage 3).
+
+    Side `s` ranks its pool on `pos` (what `narrow` hands the ranking: `qhead.legal_pool`
+    of `pos`) against the other side's pool on `views[s]`, the view it ranks from -- the
+    request `q_ranking` would make, made before `narrow` asks for it. Both go to the
+    server together (`RemoteQ.matrices`), which answers each as its own request, so the
+    matrices are the ones the two round trips would have brought. When both sides read
+    one position and one pair of pools (nothing hidden), that is one request.
+    A side with an empty pool on either side asks nothing, as `q_ranking` does not.
+    """
+    from . import qhead
+
+    asks: list[tuple[Position, Pools]] = []
+    keys: list[tuple[int, tuple[str, ...], tuple[str, ...]]] = []
+    plan: dict[int, tuple[tuple[str, ...], list[SideAction], int]] = {}
+    for side in (0, 1):
+        own = qhead.legal_pool(reg, pos, side)
+        at = views[side]
+        foe = qhead.legal_pool(reg, at, 1 - side)
+        if not own or not foe:
+            continue
+        pools = (own, foe) if side == 0 else (foe, own)
+        key = (id(at), _choices(pools[0]), _choices(pools[1]))
+        if key not in keys:
+            keys.append(key)
+            asks.append((at, pools))
+        plan[side] = (key[1 + side], foe, keys.index(key))
+    if not asks:
+        return {}
+    matrices = model.matrices(reg, asks)
+    timing.count("q.prefetch.trips")
+    timing.count("q.prefetch.requests", len(asks))
+    return {
+        side: (own_key, foe, matrices[index].copy())
+        for side, (own_key, foe, index) in plan.items()
+    }
+
+
 def q_ranking(
-    reg: Regulation, pos: Position, side: int, model: Any, label: str  # noqa: ANN401
+    reg: Regulation, pos: Position, side: int, model: Any, label: str,  # noqa: ANN401
+    given: Given | None = None,
 ) -> Callable[..., np.ndarray]:
     """A ranking for `narrow`: each candidate's value against the foe's half of Q's solve.
 
@@ -279,17 +582,24 @@ def q_ranking(
     the game on it is solved, and side 0's candidates are scored by their row value
     against the column mix, side 1's by minus their column value against the row mix --
     so higher is better for the side ranking, as the leaf ranking's scores are.
+
+    ``given`` is `prefetch`'s answer for this side: used when `narrow` hands the pool it
+    was asked for, and otherwise Q is asked here as without it.
     """
     from . import qhead
     from .equilibrium import EquilibriumError, solve
 
     def rank(pool: list[SideAction], _scored: object = None) -> np.ndarray:
-        foe = qhead.legal_pool(reg, pos, 1 - side)
-        if not pool or not foe:
-            return np.zeros(len(pool))
-        pools = (pool, foe) if side == 0 else (foe, pool)
-        with timing.purpose("rank"):
-            q = model.matrix(reg, pos, pools)
+        if given is not None and pool and given[0] == _choices(pool):
+            foe, q = given[1], given[2]
+            timing.count("q.prefetched")
+        else:
+            foe = qhead.legal_pool(reg, pos, 1 - side)
+            if not pool or not foe:
+                return np.zeros(len(pool))
+            pools = (pool, foe) if side == 0 else (foe, pool)
+            with timing.purpose("rank"):
+                q = model.matrix(reg, pos, pools)
         got = QRANKED.setdefault(label, {"rankings": 0, "cells": 0})
         got["rankings"] += 1
         got["cells"] += int(q.size)
@@ -306,7 +616,11 @@ def q_ranking(
 
 
 def add_q_flags(ap: Any) -> None:  # noqa: ANN401 - an ArgumentParser
-    """A worker's two ways to name its Q: an arm on its inference server, or a file here."""
+    """A worker's two ways to name its Q: an arm on its inference server, or a file here.
+
+    The plain flags give the default Q (labels ``q``, ``q-nocover``); the ``-named`` ones
+    give the Q of the labels ``q.NAME`` / ``q-nocover.NAME`` (stage 3).
+    """
     ap.add_argument(
         "--q-arm", default=None,
         help="the Q the q rank fills rank by, as the inference server's Q arm of this name "
@@ -316,37 +630,80 @@ def add_q_flags(ap: Any) -> None:  # noqa: ANN401 - an ArgumentParser
         "--q-model", type=Path, default=None,
         help="the same Q loaded here instead (torch in this worker)",
     )
+    ap.add_argument(
+        "--q-arm-named", nargs=2, action="append", default=[], metavar=("NAME", "ARM"),
+        help="the Q of the rank fills q.NAME / q-nocover.NAME, as the server's Q arm ARM",
+    )
+    ap.add_argument(
+        "--q-model-named", nargs=2, action="append", default=[], metavar=("NAME", "FILE"),
+        help="the same loaded here",
+    )
 
 
 def install_from_args(
     args: Any, encoder: Any, fills: Sequence[str], error: Callable[[str], Any]  # noqa: ANN401
-) -> Any:  # noqa: ANN401
-    """Installs the Q the flags name, and stops when a q fill has none (or one has no use).
+) -> dict[str, Any]:
+    """Installs the Qs the flags name, and stops when a q fill has none (or one has no use).
 
-    Returns the model, or None when no fill asks for one and none was named.
+    Returns {name: model} ("" the default), empty when no fill asks for a Q and none was
+    named.
     """
-    wanted = any(is_q(fill) for fill in fills)
+    wanted = {q_name(fill) for fill in fills if is_q(fill)}
     if args.q_arm is not None and args.q_model is not None:
         error("--q-arm and --q-model both name a Q; one of them")
-    if not wanted:
-        if args.q_arm is not None or args.q_model is not None:
-            error("a Q is named but no rank fill is q or q-nocover")
-        return None
+    named: dict[str, tuple[str, str]] = {}
+    for how, pairs in (("arm", getattr(args, "q_arm_named", None) or []),
+                       ("model", getattr(args, "q_model_named", None) or [])):
+        for name, what in pairs:
+            if not Q_NAME.fullmatch(name):
+                error(f"a Q's name is lower-case letters, digits and _: {name!r}")
+            if name in named:
+                error(f"the Q {name!r} is named twice")
+            named[name] = (how, what)
     if args.q_arm is not None:
-        if getattr(args, "inference", None) is None:
-            error("--q-arm is an arm of the inference server: it needs --inference")
-        model = RemoteQ(args.inference, args.q_arm, encoder)
+        named[""] = ("arm", args.q_arm)
     elif args.q_model is not None:
-        model = LocalQ(args.q_model, encoder, device=getattr(args, "device", None) or "cpu")
-    else:
+        named[""] = ("model", str(args.q_model))
+    for name in sorted(set(named) - wanted):
+        error(f"the Q {name or '(default)'} is named but no rank fill ranks by it")
+    for name in sorted(wanted - set(named)):
+        if name:
+            error(f"a q rank fill .{name} needs --q-arm-named {name} ARM (served) or "
+                  f"--q-model-named {name} FILE (loaded here)")
         error("a q rank fill needs --q-arm (served) or --q-model (loaded here)")
-    install(model)
-    return model
+    models: dict[str, Any] = {}
+    for name, (how, what) in named.items():
+        if how == "arm":
+            if getattr(args, "inference", None) is None:
+                error("--q-arm is an arm of the inference server: it needs --inference")
+            model = RemoteQ(args.inference, what, encoder)
+        else:
+            model = LocalQ(Path(what), encoder, device=getattr(args, "device", None) or "cpu")
+        install(model, name)
+        models[name] = model
+    return models
+
+
+#: A Q's name in a rank-fill label (``q-nocover.NAME``).
+Q_NAME = re.compile(r"[a-z0-9_]+")
+
+
+def describe_installed(models: dict[str, Any]) -> list[str]:
+    """The files behind `install_from_args`'s Qs, for a record: the default's as they are,
+    a named one's as ``NAME=file``."""
+    out: list[str] = []
+    for name in sorted(models):
+        out += [f if not name else f"{name}={f}" for f in models[name].describe()]
+    return out
 
 
 __all__ = [
     "add_q_flags",
     "install_from_args",
+    "describe_installed",
+    "prefetch",
+    "q_covers",
+    "q_name",
     "QRANKED",
     "Q_RANK_FILL",
     "LocalQ",
