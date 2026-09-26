@@ -82,7 +82,7 @@ DEFAULT_ORACLE = ALL_ACTIONS
 #: Why a read stopped, as the page says it.
 STOPS = {
     "person": "止めました",
-    "exhausted": "読み切り（柵の内に深化のステップに値するセルが無い）",
+    "exhausted": "読み切り（深さの上限の内に深化のステップに値するセルが無い）",
     "steps": "指定の深化のステップ数で止めました",
     "time": "指定の秒で止めました",
     "memory": "メモリの上限の手前で止めました",

@@ -89,11 +89,14 @@ def turn(
     *,
     full: bool = False,
     select: int | None = None,
+    events: bool = False,
 ) -> PortTurn:
-    """`resolve_turn`: every branch and pause with `full`, the one at `select` with that."""
+    """`resolve_turn`: every branch and pause with `full`, the one at `select` with that.
+    `events` asks for each branch's trace and draws (`PortBranch.chance`, IKA-345): the
+    same branches in the same order, with more said about each."""
 
     def call(node: RustNode) -> PortTurn:
-        answer = node.turn(pos, list(actions), budget, full=full, select=select)
+        answer = node.turn(pos, list(actions), budget, full=full, select=select, events=events)
         if answer is None:
             raise _refused(node, "a turn")
         return answer

@@ -140,11 +140,20 @@ pub(crate) fn do_move<'a>(
     // The last check cannot hand `turn` over instead of copying it, however tempting: the
     // fallback below needs it if every branch turns out to weigh nothing, and a move that
     // produced no outcome at all is a thing Python answers rather than refuses.
+    let checks_fork = checks.iter().filter(|(p, _)| *p > 0.0).count() > 1;
     for (probability, blocked) in checks.iter() {
         if *probability <= 0.0 {
             continue;
         }
         let mut state = turn.clone();
+        if checks_fork {
+            // IKA-345: `stopped <user> <move> - <reason>` or `acted <user> <move> -`.
+            let who = Name(action.side, action.slot);
+            match blocked {
+                Some(reason) => chance_tag!(state, "stopped {who} {} - {reason}", mv.id.as_str()),
+                None => chance_tag!(state, "acted {who} {} -", mv.id.as_str()),
+            }
+        }
         match blocked {
             Some(reason) => {
                 // `runMove` bumps `activeMoveActions` before `BeforeMove`, so a Pokemon
@@ -2024,6 +2033,13 @@ fn hit_target<'a>(
     crate::resolve::phase_end(12, ctx_started);
 
     let mut outcomes: Vec<Outcome<'a>> = Vec::new();
+    // The chance tags (IKA-345): `<kind> <user> <move> <target>`, only where a draw forks.
+    let who = Name(action.side, action.slot);
+    let whom = Name(target.0, target.1);
+    let accuracy_forks = accuracy_branches.len() > 1;
+    let crit_forks = crit_branches.len() > 1;
+    let roll_count = rolls.len();
+    let hits_fork = hit_counts.len() > 1;
     for (acc_weight, hit) in accuracy_branches {
         if acc_weight <= 0.0 {
             continue;
@@ -2031,6 +2047,9 @@ fn hit_target<'a>(
         if !hit {
             let mut state = turn.clone();
             log_event!(state, "{} missed", Label(reg, action));
+            if accuracy_forks {
+                chance_tag!(state, "miss {who} {} {whom}", move_id.as_str());
+            }
             state.move_failed[action.side][action.slot] = true;
             outcomes.push((acc_weight, state));
             continue;
@@ -2074,9 +2093,24 @@ fn hit_target<'a>(
         } else {
             None
         };
-        for (roll, roll_weight) in &rolls {
+        for (roll_place, (roll, roll_weight)) in rolls.iter().enumerate() {
             for (hits, hit_weight) in hit_counts.iter().copied() {
                 let mut state = turn.clone();
+                if state.log.is_some() {
+                    let mv_id = move_id.as_str();
+                    if accuracy_forks {
+                        chance_tag!(state, "hit {who} {mv_id} {whom}");
+                    }
+                    if crit_forks {
+                        chance_tag!(state, "{} {who} {mv_id} {whom}", if crit { "crit" } else { "nocrit" });
+                    }
+                    if roll_count > 1 {
+                        chance_tag!(state, "roll {who} {mv_id} {whom} {roll_place} {roll_count} {roll}");
+                    }
+                    if hits_fork {
+                        chance_tag!(state, "hits {who} {mv_id} {whom} {hits}");
+                    }
+                }
                 // `hitStepBreakProtect` is step 5 of `trySpreadMoveHit`, after the type
                 // immunity (2) and the accuracy (4), and only for the targets they left: a
                 // Feint into a Protecting Ghost, or one that misses, breaks nothing
@@ -2112,7 +2146,9 @@ fn hit_target<'a>(
                             break;
                         }
                         if chance < 1.0 && budget.enumerate_accuracy {
-                            let stopped = state.clone();
+                            let mut stopped = state.clone();
+                            // The (hit_index + 1)-th hit missed and ended the move.
+                            chance_tag!(stopped, "miss {who} {} {whom} {}", move_id.as_str(), hit_index + 1);
                             stops.push((stop_weight * (1.0 - chance), stopped, hit_index - 1, total, reached));
                             stop_weight *= chance;
                         }
@@ -2891,9 +2927,24 @@ fn spread_secondaries<'a>(
     let mut out: Vec<(f64, Turn<'a>)> = vec![(1.0, state)];
     for (chance, secondary, target) in pending {
         let mut expanded: Vec<(f64, Turn<'a>)> = Vec::new();
-        for (weight, current) in out.into_iter() {
+        for (weight, mut current) in out.into_iter() {
             let mut fired = current.clone();
             fired.pending_secondaries.clear();
+            if current.log.is_some() && chance > 0.0 && chance < 1.0 {
+                // IKA-345: `sec`/`nosec <user> <move> <target> <what>`, what = the status,
+                // the volatile, or `boosts`.
+                let what = secondary
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .or_else(|| secondary.get("volatileStatus").and_then(Value::as_str))
+                    .unwrap_or("boosts")
+                    .to_string();
+                let who = Name(action.side, action.slot);
+                let whom = Name(target.0, target.1);
+                let mv = action.move_id.map(|m| m.as_str().to_string()).unwrap_or_default();
+                chance_tag!(fired, "sec {who} {mv} {whom} {what}");
+                chance_tag!(current, "nosec {who} {mv} {whom} {what}");
+            }
             apply_secondary(&mut fired, action, &secondary, target)?;
             expanded.push((weight * chance, fired));
             expanded.push((weight * (1.0 - chance), current));
@@ -3959,8 +4010,11 @@ fn do_status_move<'a>(
     }
 
     let mut hit_state = turn.clone();
+    let who = Name(action.side, action.slot);
+    chance_tag!(hit_state, "hit {who} {} -", mv.id.as_str());
     apply_status_move_past_substitutes(reg, &mut hit_state, action, mv, &reachable, &subbed)?;
     log_event!(turn, "{} missed", Label(reg, action));
+    chance_tag!(turn, "miss {who} {} -", mv.id.as_str());
     turn.move_failed[action.side][action.slot] = true;
     Ok(vec![(accuracy, hit_state), (1.0 - accuracy, turn)])
 }
@@ -4274,9 +4328,15 @@ fn do_protect<'a>(
         state.add_volatile(me.0, me.1, move_id, Some(1));
         bump_stall(state, me.0, me.1);
         log_event!(state, "{} protected (1 in {})", Label(state.reg, action), counter);
+        if counter > 1 {
+            chance_tag!(state, "protect {} {move_id} - ok", Name(me.0, me.1));
+        }
     };
     let fail = |state: &mut Turn| {
         log_event!(state, "{} failed (1 in {})", Label(state.reg, action), counter);
+        if counter > 1 {
+            chance_tag!(state, "protect {} {} - fail", Name(me.0, me.1), mv.id.as_str());
+        }
         state.move_failed[me.0][me.1] = true;
         if let Some(mon) = state.mon_at_mut(me.0, me.1) {
             mon.volatiles.retain(|v| v.id.as_str() != "stall");
