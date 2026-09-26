@@ -188,6 +188,48 @@ def test_worker_processes_expand_to_the_serial_deepening(roster, kind) -> None: 
     assert deepen_mod.workers(roster.reg) == 0
 
 
+_MANY_DEEPENINGS = """
+import sys
+from pokeuraou import deepen
+from pokeuraou.damage import register_mega_stones
+from pokeuraou.teams import load_roster
+from tests.test_deepen_ahead import _belief
+from tests.test_hidden_depth2 import LEAF, _played
+
+roster = load_roster("rizabanadohido")
+register_mega_stones(roster.reg)
+positions = _played(roster)[:3]
+for n in range(12):
+    _belief(roster, positions[n % 3], n % 2, LEAF, 30, 4, 3)
+print("deepenings", n + 1, deepen.ahead_counts()["hits"])
+"""
+
+
+def test_the_helpers_outlive_many_deepenings() -> None:
+    """Twelve short deepenings in a row, three helpers each, in a process of their own that
+    must end within a minute. A thread that has run HiGHS can hang the process as it exits
+    (the next `Thread.start` waits on the GIL while the exiting thread spins): helpers
+    started and joined per deepening hung here, which is why they are kept (`_Helpers`)."""
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1]
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(
+        [str(root / "src"), str(root), os.environ.get("PYTHONPATH", "")]
+    ))
+    try:
+        done = subprocess.run(
+            [sys.executable, "-c", _MANY_DEEPENINGS], cwd=root, env=env,
+            capture_output=True, timeout=90, check=False,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("twelve deepenings with helpers did not end in 90 s (a hung helper)")
+    assert done.returncode == 0, done.stderr.decode(errors="replace")[-2000:]
+    assert b"deepenings 12" in done.stdout
+
+
 def test_a_wrong_guess_takes_the_same_cells(roster, monkeypatch) -> None:  # noqa: ANN001
     """The helper's guesses reversed -- the worst cells first -- so the cell the loop
     takes is almost never one it expanded ahead: the loop asks for it and waits, and the
