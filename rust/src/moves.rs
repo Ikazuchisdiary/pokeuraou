@@ -715,6 +715,7 @@ pub(crate) fn start_confusion(turn: &mut Turn, side: usize, slot: usize) {
         if let Some(mon) = turn.mon_at_mut(side, slot) {
             mon.volatiles.retain(|v| v.id.as_str() != "confusion");
         }
+        turn.ate_berry(side, slot);
     }
 }
 
@@ -790,7 +791,11 @@ fn roll_confusion<'a>(
         let mon = turn.mon_at(action.side, action.slot)?;
         let held = mon.volatile("confusion")?;
         let goes_on = held.extra.get(CONFUSION_GOES_ON).and_then(Value::as_bool).unwrap_or(false);
-        if extra_int(held, CONFUSION_LEFT).is_some() || goes_on || !confusion_reached(turn, mon, mv) {
+        if extra_int(held, CONFUSION_LEFT).is_some()
+            || goes_on
+            || !confusion_reached(turn, mon, mv)
+            || crate::small_rules::disable_stops(turn, action, mv)
+        {
             return None;
         }
         confusion_cure_chance(held, budget)
@@ -854,11 +859,19 @@ fn confusion_stage(
     action: &QueuedAction,
     budget: &Budget,
 ) -> Vec<(f64, Option<String>)> {
-    if confusion_try(turn, action.side, action.slot) && budget.enumerate_status_checks {
-        return vec![
-            (1.0 - CONFUSION_SELF_HIT_CHANCE, None),
-            (CONFUSION_SELF_HIT_CHANCE, Some("confusion".into())),
-        ];
+    if confusion_try(turn, action.side, action.slot) {
+        if budget.enumerate_status_checks {
+            return vec![
+                (1.0 - CONFUSION_SELF_HIT_CHANCE, None),
+                (CONFUSION_SELF_HIT_CHANCE, Some("confusion".into())),
+            ];
+        }
+        // The oracle's pinned policy answers `randomChance(33, 100)` as it answers an
+        // accuracy roll -- `hit` for the differential tools -- so its Pokemon hits itself
+        // every time (IKA-325); collapsed otherwise, the port's never does.
+        if budget.pinned_policy {
+            return vec![(1.0, Some("confusion".into()))];
+        }
     }
     vec![(1.0, None)]
 }
@@ -889,6 +902,9 @@ fn taunt_stage(
     mv: &Move,
     budget: &Budget,
 ) -> Vec<(f64, Option<String>)> {
+    if crate::small_rules::disable_stops(turn, action, mv) {
+        return vec![(1.0, Some("disable".into()))];
+    }
     if turn.mon_at(action.side, action.slot).is_some_and(|mon| taunt_stops(mon, mv)) {
         return vec![(1.0, Some("taunt".into()))];
     }
@@ -2153,6 +2169,11 @@ fn hit_target<'a>(
                         continue;
                     }
                     let absorbed = guarded && hit_index == 0;
+                    // A resist berry is eaten in the damage calculation, so Cheek Pouch's
+                    // heal lands before the damage; `after_hit` then takes the berry.
+                    if !absorbed && eats_resist_berry(&state, mv, target, result.type_mod, result.move_type.as_str()) {
+                        state.ate_berry(target.0, target.1);
+                    }
                     let berry = crate::move_hooks::set_berry_aside(&mut state, move_id.as_str(), target);
                     let dealt = if absorbed {
                         0
@@ -2161,7 +2182,7 @@ fn hit_target<'a>(
                     };
                     total += dealt;
                     // Bug Bite, Pluck: `onHit`, before `DamagingHit` and the `Update` (IKA-240).
-                    crate::move_hooks::steal_berry(&mut state, action, target, berry, mv.mtype.as_str(), result.type_mod);
+                    crate::move_hooks::steal_berry(&mut state, action, target, berry, result.move_type.as_str(), result.type_mod);
                     crate::damage_callback::record(&mut state, (action.side, action.slot), target, dealt, mv.category.as_str());
                     reached = true;
                     state.move_hit[target.0][target.1] = true;
@@ -2178,6 +2199,7 @@ fn hit_target<'a>(
                         landed,
                         &budget,
                         if absorbed { 0 } else { result.type_mod },
+                        result.move_type.as_str(),
                     )?;
                     crate::resolve::phase_end(11, after_started);
                     if absorbed {
@@ -2517,6 +2539,31 @@ fn absorb(turn: &mut Turn, move_type: Id, target: Slot) {
 /// so the collapse is exact and declaring it would flag turns that are right. A branched one
 /// is pushed to `pending_secondaries`: this function holds one state, and the hit loop fans
 /// it out.
+/// Whether this hit makes the target eat its resist berry. A resist berry is eaten only by a
+/// hit it actually weakened. Occa Berry's handler is
+/// `if (move.type === 'Fire' && typeMod > 0) { if (target.eatItem()) ... }`, so a Fire
+/// move that is *not* super effective leaves the berry alone. Chilan Berry is the one
+/// exception: it halves Normal regardless of effectiveness. `after_hit` takes the berry;
+/// `hit_target` asks first, for the Cheek Pouch heal that `eatItem` runs inside the hit's
+/// `ModifyDamage`, before its damage (IKA-329).
+fn eats_resist_berry(turn: &Turn, mv: &Move, target: Slot, type_mod: i64, hit_type: &str) -> bool {
+    let eats = match turn.mon_at(target.0, target.1) {
+        None => false,
+        Some(mon) if mon.fainted => false,
+        Some(mon) => match mon.item {
+            None => false,
+            // The hit's type, after a skin or the move's own change (IKA-326).
+            Some(item) => {
+                crate::small_rules::resist_berry_eaten(item.as_str(), hit_type, type_mod)
+                    // The berry is `onSourceModifyDamage`, which a `damageCallback` never
+                    // reaches (IKA-213), nor a level move; Struggle is `???` (IKA-239).
+                    && !crate::level_struggle::misses_resist_berry(mv.id.as_str())
+            }
+        },
+    };
+    eats && !turn.berries_blocked(target.0)
+}
+
 fn after_hit(
     turn: &mut Turn,
     action: &QueuedAction,
@@ -2526,6 +2573,7 @@ fn after_hit(
     landed: bool,
     budget: &Budget,
     type_mod: i64,
+    hit_type: &str,
 ) -> Result<(), String> {
     let me = (action.side, action.slot);
     turn.move_damage_total += dealt;
@@ -2630,24 +2678,7 @@ fn after_hit(
         turn.report("ability: poisontouch (30% poison not branched)");
     }
 
-    // A resist berry is eaten only by a hit it actually weakened. Occa Berry's handler is
-    // `if (move.type === 'Fire' && typeMod > 0) { if (target.eatItem()) ... }`, so a Fire
-    // move that is *not* super effective leaves the berry alone. Chilan Berry is the one
-    // exception: it halves Normal regardless of effectiveness.
-    let eats_berry = match turn.mon_at(target.0, target.1) {
-        None => false,
-        Some(mon) if mon.fainted => false,
-        Some(mon) => match mon.item.and_then(|i| resist_berry(i.as_str())) {
-            None => false,
-            Some(berry_type) => {
-                berry_type == mv.mtype.as_str() && (berry_type == "Normal" || type_mod > 0)
-                    // The berry is `onSourceModifyDamage`, which a `damageCallback` never
-                    // reaches (IKA-213), nor a level move; Struggle is `???` (IKA-239).
-                    && !crate::level_struggle::misses_resist_berry(mv.id.as_str())
-            }
-        },
-    };
-    if eats_berry && !turn.berries_blocked(target.0) {
+    if eats_resist_berry(turn, mv, target, type_mod, hit_type) {
         let berry = turn.mon_at(target.0, target.1).and_then(|m| m.item);
         turn.consume_item(target.0, target.1, berry.as_ref().map(|b| b.as_str()).unwrap_or(""));
     }
@@ -4768,6 +4799,7 @@ fn eat_received_berry(turn: &mut Turn, at: Slot) {
         mon.status = None;
         mon.status_counter = None;
     }
+    turn.ate_berry(at.0, at.1);
 }
 
 /// Perish Song's `onHitField` (`data/moves.ts`): every active Pokemon on both sides, the
@@ -5094,7 +5126,9 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
                 ),
             };
         if is(status, "brn") {
-            let amount = turn.fraction_of_max(side, slot, BURN_DAMAGE);
+            let sixteenth = turn.fraction_of_max(side, slot, BURN_DAMAGE);
+            // Heatproof halves it (IKA-328).
+            let amount = crate::small_rules::burn_damage(turn, side, slot, sixteenth);
             turn.deal_damage(side, slot, amount, false, "brn")?;
         } else if is(status, "psn") {
             let amount = turn.fraction_of_max(side, slot, POISON_DAMAGE);

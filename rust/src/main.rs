@@ -25,6 +25,7 @@ mod effects;
 mod encode;
 mod encoded_node;
 mod fixedpoint;
+mod held;
 mod id;
 mod inert;
 mod level_struggle;
@@ -43,9 +44,11 @@ mod qfeatures;
 mod score;
 mod semi_invulnerable;
 mod shm;
+mod small_rules;
 mod speed;
 mod terrain;
 mod transform;
+mod wire;
 
 #[cfg(feature = "count-allocations")]
 #[global_allocator]

@@ -427,7 +427,7 @@ fn requested_pause<'a>(reg: &'a Reg, value: &Value) -> Result<Suspended<'a>, Str
     match value.get("in") {
         None | Some(Value::Null) => Ok(pause),
         Some(world) => {
-            let position = Position::from_json(&world["position"]);
+            let position = crate::held::position(&world["position"]);
             let side = world["side"].as_u64().ok_or("`in` names no side")? as usize;
             Ok(paused_in(pause, position, side))
         }
@@ -438,7 +438,9 @@ fn requested_pause<'a>(reg: &'a Reg, value: &Value) -> Result<Suspended<'a>, Str
 // Turns
 // ---------------------------------------------------------------------------
 
-fn result_json(result: &TurnResult, full: bool) -> Result<Value, String> {
+/// `refs` (IKA-302): each branch's position is also kept here under a number the caller
+/// can send back in its place (`held`).
+fn result_json(result: &TurnResult, full: bool, refs: bool) -> Result<Value, String> {
     let unmodelled: Vec<String> = result.unmodelled.iter().cloned().collect();
     if !full {
         return Ok(json!({
@@ -453,10 +455,12 @@ fn result_json(result: &TurnResult, full: bool) -> Result<Value, String> {
             .branches
             .iter()
             .map(|b| {
-                with_log(
-                    json!({ "probability": b.probability, "position": b.position.to_json() }),
-                    b.log.as_deref(),
-                )
+                let mut branch =
+                    json!({ "probability": b.probability, "position": b.position.to_json() });
+                if refs {
+                    branch["held"] = json!(crate::held::keep(&b.position));
+                }
+                with_log(branch, b.log.as_deref())
             })
             .collect::<Vec<_>>(),
         "suspended": result.suspended.iter().map(pause_json).collect::<Result<Vec<_>, _>>()?,
@@ -478,7 +482,7 @@ fn turn_command(reg: &Reg, value: &Value) -> Result<Value, String> {
         let pause = requested_pause(reg, value)?;
         resume_turn(reg, &pause, &two_sides(&value["choices"]))?
     } else {
-        let position = Position::from_json(&value["position"]);
+        let position = crate::held::position(&value["position"]);
         if &*position.format != reg.format_id.as_str() {
             return Err("position is for another regulation".into());
         }
@@ -486,7 +490,8 @@ fn turn_command(reg: &Reg, value: &Value) -> Result<Value, String> {
         resolve_turn_logged(reg, &position, &two_sides(&value["actions"]), budget, wants_events(value))?
     };
     let full = value["full"].as_bool().unwrap_or(false);
-    let mut out = result_json(&result, full)?;
+    let refs = value.get("refs").and_then(Value::as_bool).unwrap_or(false);
+    let mut out = result_json(&result, full, refs)?;
     if let Some(index) = value.get("select").and_then(Value::as_u64).map(|k| k as usize) {
         let count = result.branches.len();
         if index < count {
@@ -546,7 +551,7 @@ fn alternatives_command(reg: &Reg, value: &Value) -> Result<Value, String> {
             resumed.unmodelled.insert("simultaneous mid-turn replacements".into());
         }
         options.push(option.iter().map(slot_action_json).collect::<Vec<_>>());
-        results.push(result_json(&resumed, full)?);
+        results.push(result_json(&resumed, full, false)?);
     }
     Ok(json!({ "chooser": chooser, "options": options, "results": results }))
 }
@@ -595,7 +600,7 @@ fn forced_passes(pos: &Position, side: usize, needed: &[bool]) -> usize {
 }
 
 fn needed_command(reg: &Reg, value: &Value) -> Result<Value, String> {
-    let position = Position::from_json(&value["position"]);
+    let position = crate::held::position(&value["position"]);
     if &*position.format != reg.format_id.as_str() {
         return Err("position is for another regulation".into());
     }
@@ -638,7 +643,7 @@ fn deterministic() -> Budget {
 /// through the same switch-in, so hazards and White Herb behave identically should a caller
 /// hand it a position that has them.
 fn phase_command(reg: &Reg, value: &Value, phase: Phase) -> Result<Value, String> {
-    let position = Position::from_json(&value["position"]);
+    let position = crate::held::position(&value["position"]);
     if &*position.format != reg.format_id.as_str() {
         return Err("position is for another regulation".into());
     }

@@ -50,7 +50,7 @@ from pokeuraou import narrow as narrowing  # noqa: E402
 from pokeuraou import qrank  # noqa: E402
 from pokeuraou.benchflags import add_bench_flags, require_bench  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
-from pokeuraou.deepen import DEFAULT_DEEPEN, parse_deepen  # noqa: E402
+from pokeuraou.deepen import DEFAULT_DEEPEN, deepen_spec, parse_deepen  # noqa: E402
 from pokeuraou.encode import Encoder, EncodingRules  # noqa: E402
 from pokeuraou.hidden import DEFAULT_BENCH_DROP, parse_bench_drop  # noqa: E402
 from pokeuraou.payoff import HP_SHARE  # noqa: E402
@@ -166,8 +166,12 @@ def _install_q(args: argparse.Namespace, encoder: Encoder, ap: argparse.Argument
             # A damage-ranked arm never reaches the ranking, so the label would be recorded
             # and played by nobody.
             ap.error(f"{label} {fill} ranks the leaf-ranked menu: it needs that arm's rank-leaf")
+    # A deepen label whose oracle probes by a Q (IKA-322's q<k>) wants the default Q; it
+    # is named to `install_from_args` as a q fill would be, so the flags' checks hold for it.
+    probing = ["q" for label in (args.deepen, args.baseline_deepen)
+               if deepen_spec(label).q_probe is not None]
     models = qrank.install_from_args(
-        args, encoder, (args.rank_fill, args.baseline_rank_fill), ap.error
+        args, encoder, (args.rank_fill, args.baseline_rank_fill, *probing), ap.error
     )
     if not models:
         return []
@@ -412,7 +416,7 @@ def main(argv: list[str] | None = None) -> None:
     echo = [[{"selection": {}, "belief": {}, "leaf": set(), "fill": {}, "drop": {},
               "deepen": {}, "deepened": 0, "widened": 0, "swapped": 0, "oracle": 0,
               "depth": {}, "coverless": {"menus": 0, "dropping": 0, "dropped": 0},
-              "q": [0, 0], "calls": 0}
+              "q": [0, 0], "qprobe": [0, 0], "calls": 0}
              for _ in arms]
             for _ in range(2)]
     done = 0
@@ -462,6 +466,9 @@ def main(argv: list[str] | None = None) -> None:
                     bucket["oracle"] += 1
                     bucket["widened"] += got["widened"]
                     bucket["swapped"] += got.get("swapped", 0)
+                    # The Q that narrowed the probe (IKA-322): inferences, full probes.
+                    bucket["qprobe"][0] += got.get("q", 0)
+                    bucket["qprobe"][1] += got.get("qfull", 0)
             played_depth = (
                 f"{record.depth[side]}"
                 + ("r" if record.depth[side] != 1 and record.solve_restricted[side] else "")
@@ -554,6 +561,12 @@ def main(argv: list[str] | None = None) -> None:
                 + (
                     f", oracle asked at {bucket['oracle']:,}, {bucket['widened']:,} actions "
                     f"widened, {bucket['swapped']:,} swapped out"
+                    + (
+                        f", Q probes {bucket['qprobe'][0]:,} inferences "
+                        f"({bucket['qprobe'][1]:,} steps probed in full)"
+                        if bucket["qprobe"][0]
+                        else ""
+                    )
                     if bucket["oracle"]
                     else ""
                 )

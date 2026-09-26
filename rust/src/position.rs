@@ -656,6 +656,13 @@ pub struct Position {
 
 impl Position {
     pub fn from_json(value: &Value) -> Position {
+        let started = std::time::Instant::now();
+        let position = Position::from_json_untimed(value);
+        crate::wire::POSITION_READ.add(started);
+        position
+    }
+
+    fn from_json_untimed(value: &Value) -> Position {
         Position {
             format: Rc::from(value["format"].as_str().unwrap_or_default()),
             sides: {
@@ -676,6 +683,13 @@ impl Position {
     }
 
     pub fn to_json(&self) -> Value {
+        let started = std::time::Instant::now();
+        let value = self.to_json_untimed();
+        crate::wire::POSITION_WRITE.add(started);
+        value
+    }
+
+    fn to_json_untimed(&self) -> Value {
         json!({
             "format": &*self.format,
             "turn": self.turn,

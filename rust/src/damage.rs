@@ -306,6 +306,12 @@ fn collect(slot: Slot, ctx: &Ctx, a: &Battler, d: &Battler, field: &FieldState) 
                 && (berry_type == "Normal" || ctx.type_mod > 0)
             {
                 chain.add(0.5, 1.0, "resistberry");
+                // Ripen's `onEatItem` marks a resist berry, and its
+                // `onSourceModifyDamage` (priority -1, after the berry's) halves again.
+                // Not `breakable`: Mold Breaker leaves it (IKA-329).
+                if d.ability == "ripen" {
+                    chain.add(0.5, 1.0, "ripen");
+                }
             }
         }
     }
@@ -470,6 +476,7 @@ pub fn calculate(
         rolls: [0; N_ROLLS],
         effectiveness: eff,
         type_mod,
+        move_type,
         immune: false,
         unmodelled: unmodelled.clone(),
     };
@@ -479,6 +486,7 @@ pub fn calculate(
             rolls: [0; N_ROLLS],
             effectiveness: eff,
             type_mod,
+            move_type,
             immune,
             unmodelled,
         };
@@ -486,7 +494,7 @@ pub fn calculate(
     // Endeavor's `onTryImmunity` (IKA-213), step 3 of `trySpreadMoveHit`, before the damage
     // step the forme guards act at: at no lower HP than the target it is immune.
     if crate::damage_callback::immune_on_try(move_id, attacker, defender) {
-        return DamageResult { rolls: [0; N_ROLLS], effectiveness: eff, type_mod, immune: true, unmodelled };
+        return DamageResult { rolls: [0; N_ROLLS], effectiveness: eff, type_mod, move_type, immune: true, unmodelled };
     }
     // After the immunity, as in damage.py (IKA-155): the forme guards act at the damage
     // step, so a Normal move into an intact Mimikyu is immune, not absorbed.
@@ -509,6 +517,7 @@ pub fn calculate(
             rolls: [fixed; N_ROLLS],
             effectiveness: eff,
             type_mod,
+            move_type,
             immune: false,
             unmodelled,
         };
@@ -735,7 +744,7 @@ pub fn calculate(
         *value = trunc16((*value).max(1));
     }
 
-    DamageResult { rolls: dmg, effectiveness: eff, type_mod, immune: false, unmodelled }
+    DamageResult { rolls: dmg, effectiveness: eff, type_mod, move_type, immune: false, unmodelled }
 }
 
 /// `crit_stage`, before Showdown's clamp to 0..4.
