@@ -257,9 +257,18 @@ class Reader:
         pos = Position.from_json(position)
         if self.reg is None:
             self._setup(pos)
+        from pokeuraou.actions import side_actions
+
         sides = []
         for side in (0, 1):
+            # The whole legal set, not `ee.legal`'s (less the provably dead): a recorded menu can
+            # hold an action today's `drop_dead_actions` drops ("pass, move 1 1", IKA-296).
             by = {a.to_choice(): a for a in ee.legal(self.reg, pos, side)}
+            for a in side_actions(self.reg, pos, side):
+                by.setdefault(a.to_choice(), a)
+            missing = [c for c in menu[side] if c not in by]
+            if missing:
+                return {"skipped": f"side {side} menu has {missing}, not legal today"}
             sides.append([by[c] for c in menu[side]])
         out: dict[str, Any] = {}
         for label in readings:
@@ -665,6 +674,7 @@ def run_mix(args: argparse.Namespace) -> None:
     labels = args.readings.split(",")
     target = np.zeros(len(game), bool)
     value = {lab: np.full(len(game), np.nan) for lab in labels}
+    skipped = 0
     for g, (s, e) in enumerate(zip(starts, [*starts[1:], len(game)], strict=True)):
         rows = games[g]["decisions"]
         if len(rows) != e - s or outcome[s] != games[g]["outcome"]:
@@ -677,6 +687,9 @@ def run_mix(args: argparse.Namespace) -> None:
             if is_target(d, args.max_product, args.bench):
                 if g not in reads or str(k) not in reads[g]:
                     raise SystemExit(f"game {g} decision {k} is a target without a reading")
+                if "skipped" in reads[g][str(k)]:
+                    skipped += 1
+                    continue
                 target[s + k] = True
                 for lab in labels:
                     value[lab][s + k] = reads[g][str(k)][lab]["value"]
@@ -689,7 +702,8 @@ def run_mix(args: argparse.Namespace) -> None:
     print(f"{len(game):,} rows, {len(games):,} games; targets (move, product <= {args.max_product}, "
           f"{args.bench}) {int(target.sum()):,} = {target.mean():.1%} of rows; "
           f"calibration fitted on the {int(fit_rows.sum()):,} in the training games "
-          f"(split seed {args.split_seed}, holdout {args.holdout}), {int(val_rows.sum()):,} held out")
+          f"(split seed {args.split_seed}, holdout {args.holdout}), {int(val_rows.sum()):,} held out; "
+          f"{skipped} targets not read (a recorded action not legal today) stay on the outcome")
     out: dict[str, np.ndarray] = {"target_rows": target}
     for lab in labels:
         fit = isotonic(value[lab][fit_rows], outcome[fit_rows])
