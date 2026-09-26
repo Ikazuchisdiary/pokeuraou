@@ -34,7 +34,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from . import port, rank_scores, timing
+from . import port, qrank, rank_scores, timing
 from .actions import SideAction, switch_actions_after_faint
 from .budget import Budget
 from .deepen import DEFAULT_DEEPEN, deepen_spec
@@ -61,6 +61,7 @@ from .provenance import (
     LEGACY_RANK_FILL,
     engine_fingerprint,
 )
+from .qrank import is_q
 from .regulation import STAT_IDS, Regulation, repo_root
 from .rustnode import PortPause, PortTurn
 from .search import (
@@ -699,7 +700,10 @@ def _menus(
     this budget or at `Budget.fast`. It changes nothing with the damage or policy ranking.
     A ``-nocover`` label (IKA-323) builds the leaf-ranked menus -- the wider ones too --
     from the ranking alone, with no cover of every slot option first; what that leaves
-    off is in each `Narrowed.uncovered` and tallied in `narrow.COVERLESS`.
+    off is in each `Narrowed.uncovered` and tallied in `narrow.COVERLESS`. A ``q`` or
+    ``q-nocover`` label (IKA-274, `qrank`) ranks by the process's Q instead of filling
+    cells with the leaf: Q over both whole pools on the same view, each candidate scored
+    against the other side's half of its solve.
 
     ``wide`` asks for the same agent's menus at other widths too, written into ``wider``
     by width: the candidates of the root's double oracle (IKA-293). They are ranked by
@@ -774,6 +778,9 @@ def _menus(
         return [(items[index].position, 1.0)]
 
     def ranker(side: int) -> Any:  # noqa: ANN401
+        if policy is None and is_q(rank_fill):
+            # IKA-274: a Q's solve on the same view, no cell filled by the leaf.
+            return _q_ranker(reg, views(side), side, rank_fill)
         parts = [
             (
                 policy_ranking(policy, at, side)
@@ -818,6 +825,14 @@ def _menus(
             menu(1, width, foe_rank, tally=False),
         )
     return own, foe
+
+
+def _q_ranker(
+    reg: Regulation, views: list[tuple[Position, float]], side: int, label: str
+) -> Any:  # noqa: ANN401
+    """The ``q`` rank fills' ranking (IKA-274, `qrank`) from the one view `_menus` reads."""
+    (at, _weight), = views
+    return qrank.q_ranking(reg, at, side, qrank.installed(), label)
 
 
 def _remembered(rank: Any) -> Any:  # noqa: ANN401
