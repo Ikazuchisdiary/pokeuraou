@@ -230,9 +230,10 @@ def plan_move(
 class WallCost:
     """A `deepen.Cost` that reads the wall clock instead of the counted work.
 
-    `deepen._Meter.spent` is ``cost.ms(fills, refines, cells) / cost.cell``; with ``cell``
-    1 it is the milliseconds since ``start``, so a deepening given the budget in
-    milliseconds stops at the deadline, one step late at most.
+    `deepen._Meter.spent` is ``cost.ms(fills, refines, cells, probed, qs) / cost.cell``;
+    with ``cell`` 1 it is the milliseconds since ``start``, so a deepening given the budget
+    in milliseconds stops at the deadline, one step late at most. The counts are ignored:
+    the clock already holds whatever they cost (IKA-322 added ``probed`` and ``qs``).
     """
 
     cell = 1.0
@@ -240,7 +241,9 @@ class WallCost:
     def __init__(self, start: float) -> None:
         self.start = start
 
-    def ms(self, fills: int, refines: int, cells: int) -> float:  # noqa: ARG002
+    def ms(  # noqa: ARG002
+        self, fills: int, refines: int, cells: int, probed: int = 0, qs: int = 0
+    ) -> float:
         return (time.perf_counter() - self.start) * 1000.0
 
 

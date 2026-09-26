@@ -554,7 +554,29 @@ impl<'a> Turn<'a> {
             10
         };
         self.consume_item(side, slot, "pinch berry");
-        self.heal(side, slot, amount, "berry");
+        self.berry_heal(side, slot, amount);
+        self.ate_berry(side, slot);
+    }
+
+    /// A berry's own heal, `this.heal(...)` in its `onEat`: Ripen's `onTryHeal` doubles
+    /// it (`if ((effect as Item).isBerry) return this.chainModify(2)`), exactly (IKA-329).
+    pub(crate) fn berry_heal(&mut self, side: usize, slot: usize, amount: i64) -> i64 {
+        let ripe = self.mon_at(side, slot).is_some_and(|mon| mon.ability == "ripen");
+        self.heal(side, slot, if ripe { amount * 2 } else { amount }, "berry")
+    }
+
+    /// `Pokemon#eatItem`'s `runEvent('EatItem')`, after the berry's own `Eat`, for every
+    /// berry the port lets a Pokemon eat: Cheek Pouch's `this.heal(pokemon.baseMaxhp / 3)`
+    /// (IKA-329). Its effect is the ability, not the berry, so Ripen does not double it.
+    /// Ripen's `onEatItem` only marks a resist berry for its second halving, which
+    /// `damage.rs` applies in the hit's chain.
+    pub(crate) fn ate_berry(&mut self, side: usize, slot: usize) {
+        let Some(mon) = self.mon_at(side, slot) else { return };
+        if mon.fainted || mon.ability != "cheekpouch" {
+            return;
+        }
+        let amount = (mon.maxhp / 3).max(1);
+        self.heal(side, slot, amount, "cheekpouch");
     }
 
     /// Applies a boost table, and says whether any stat actually moved.
@@ -754,6 +776,7 @@ impl<'a> Turn<'a> {
             let mon = self.mon_at_mut(side, slot).unwrap();
             mon.status = None;
             mon.status_counter = None;
+            self.ate_berry(side, slot);
         }
         Ok(true)
     }
@@ -1000,6 +1023,12 @@ fn ability_handled(ability: &str) -> bool {
             // Not applied either, and noted where each fires, in `ability_notes` (IKA-317).
             | "hydration" | "shedskin" | "poisonheal" | "harvest" | "cudchew" | "pickup"
             | "hungerswitch" | "opportunist" | "forecast" | "liquidooze"
+            // Where a berry is eaten (IKA-329): Ripen in `Turn::berry_heal` and the resist
+            // berry's chain in `damage.rs`, Cheek Pouch in `Turn::ate_berry`. Gluttony acts
+            // only on the 1/4 pinch berries (Figy, Liechi, ...), none of which Reg M-B or M-C
+            // has (`tests/test_berry_abilities_oracle.py` holds the dumps to that), so doing
+            // nothing is its whole effect here.
+            | "ripen" | "cheekpouch" | "gluttony"
     ) || crate::inert::ability_is_inert(ability)
 }
 
