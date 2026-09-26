@@ -76,7 +76,7 @@ pub(crate) fn transform_into(turn: &mut Turn, me: Slot, target: Slot, from: &str
     // does not say whether one is up, so a Zoroark is taken as showing itself (noted).
     let illusion = user.ability == "illusion" || foe.ability == "illusion";
     let stats = Battler::from_pokemon(reg, foe)?.stats;
-    let types = turn.types_of(foe);
+    let types = turn.base_types_of(foe);
     let mut moves = Moves::default();
     for slot in foe.moves.iter() {
         let pp = reg
