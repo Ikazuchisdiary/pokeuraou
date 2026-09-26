@@ -21,6 +21,7 @@ from pathlib import Path
 import pytest
 
 from pokeuraou import port, regulation, rustnode, timing
+from pokeuraou.actions import side_actions
 from pokeuraou.budget import Budget
 from pokeuraou.cli import _modal, build_beliefs
 from pokeuraou.damage import register_mega_stones
@@ -129,6 +130,61 @@ def test_a_repeated_score_is_answered_from_the_first(bridged: None) -> None:
     narrow(reg, pos, 1, limit=6)
     narrow(reg, pos, 1, limit=6)
     assert len([line for line in sent if b'"kind": "score"' in line]) == 4
+
+
+def test_a_score_request_is_the_line_json_dumps_wrote(bridged: None) -> None:
+    """IKA-321: the candidate list written from each slot action's text, with the position
+    held or not, is byte for byte the line `json.dumps` of the dicts wrote."""
+    reg, pos = _node()
+    for side in (0, 1):
+        pool = side_actions(reg, pos, side)
+        assert len(pool) > 1
+        plain = {
+            "kind": "score",
+            "position": pos.to_json(),
+            "side": side,
+            "candidates": [[rustnode.dump_action(a) for a in c.slots] for c in pool],
+        }
+        before = json.dumps(plain, ensure_ascii=False).encode("utf-8")
+        texted = {**plain, "candidates": rustnode._candidates(pool)}
+        assert rustnode._payload(texted) == before
+        # Twice: the second is written from the kept texts.
+        assert rustnode._payload({**plain, "candidates": rustnode._candidates(pool)}) == before
+        rustnode.hold_positions()
+        held = {**texted, "position": rustnode._position(pos)}
+        assert isinstance(held["position"], rustnode._Held)
+        assert rustnode._payload(held) == before
+        rustnode.hold_positions(False)
+
+
+def test_the_detail_written_when_read_is_the_detail_written_before(bridged: None) -> None:
+    """IKA-321: a candidate's detail lines, written when first read, are the lines the port's
+    parts gave when `narrow` wrote them itself; ranked, the leaf's line comes first."""
+    reg, pos = _node()
+    node = rustnode.node_for(reg)
+    assert node is not None
+    for side in (0, 1):
+        got = narrow(reg, pos, side, limit=6)
+        scored = node.score(pos, side, [c.action for c in got.kept])
+        assert scored is not None
+        damage = {}
+        for c, (_total, parts) in zip(got.kept, scored, strict=True):
+            want = tuple(
+                f"{c.action.slots[slot].describe(reg)} -> "
+                f"{'foe' if is_foe else 'ally'}{target + 1} {signed:+.3f}{'' if exact else '?'}"
+                for slot, target, is_foe, signed, exact in parts
+            )
+            assert c.detail == want
+            damage[c.action.to_choice()] = want
+        assert any(damage.values()), "control: some candidate has a line"
+
+        ranked = narrow(
+            reg, pos, side, limit=6, rank=lambda pool, _s: [0.5 - 0.01 * i for i in range(len(pool))]
+        )
+        for c in ranked.kept:
+            assert c.detail[0] == f"leaf {c.score:+.4f}"
+            if c.action.to_choice() in damage:
+                assert c.detail[1:] == damage[c.action.to_choice()]
 
 
 def test_the_branch_after_the_weights_is_the_branch_a_fresh_port_gives(bridged: None) -> None:

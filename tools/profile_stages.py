@@ -947,7 +947,7 @@ def delivery(
     for argv in workers:
         for flag in ("--limit", "--seed", "--roster", "--selection-book", "--force-lead",
                      "--inference-arm", "--value", "--pool", "--selection-store",
-                     "--rank-fill", "--bench-drop", "--deepen", "--depth"):
+                     "--rank-fill", "--bench-drop", "--deepen", "--depth", "--q-arm"):
             value = _flag(argv, flag)
             seen.setdefault(flag, {})
             seen[flag][str(value)] = seen[flag].get(str(value), 0) + 1
@@ -1025,6 +1025,7 @@ def build(args: argparse.Namespace) -> list[str]:
             *given("--seed", args.seed),
             *given("--roster", args.roster),
             "--value", str(args.value),
+            *given("--q-model", getattr(args, "q_model", None)),
             *given("--limit", args.limit),
             *given("--selection-book", args.selection_book),
             *(["--uniform-selection"] if args.uniform_selection else []),
@@ -1100,6 +1101,8 @@ def main() -> None:
         help="also sample each worker's main-thread stack this often (IKA-258)",
     )
     ap.add_argument("--value", default="data/models/value-gen11L.pt")
+    ap.add_argument("--q-model", default=None,
+                    help="generation: generate_queue.py's --q-model (IKA-274, a q rank fill)")
     ap.add_argument("--baseline", default="data/models/value-gen10.pt")
     ap.add_argument("--case", default="sash-ko", help="analysis: a human_baseline case")
     ap.add_argument("--device", default="cuda")

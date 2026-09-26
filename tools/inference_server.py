@@ -58,6 +58,15 @@ def main() -> None:
         help="a named arm and its model files; several files are an ensemble, "
         "averaged in logit space",
     )
+    ap.add_argument(
+        "--q-arm",
+        action="append",
+        nargs=2,
+        default=[],
+        metavar=("NAME", "MODEL"),
+        help="a named Q arm (IKA-274, pokeuraou.qrank): one Q file, asked by the q rank "
+        "fills of the workers (--q-arm NAME there)",
+    )
     ap.add_argument("--roster", default="rizabanadohido")
     ap.add_argument(
         "--regulation",
@@ -96,6 +105,14 @@ def main() -> None:
         # (spinning) wait. IKA-106.
         wait_by_sleeping()
     models = load_models(paths, encoder, args.device)
+    q_models = {}
+    if args.q_arm:
+        from pokeuraou.qrank import load_q_arms
+
+        q_models = load_q_arms({name: Path(path) for name, path in args.q_arm}, args.device)
+        for name, model in q_models.items():
+            if model.fingerprint != encoder.vocab.fingerprint():
+                raise SystemExit(f"Q arm {name!r} reads another vocabulary than this server's")
     server, address = serve(
         models,
         host=args.host,
@@ -103,6 +120,7 @@ def main() -> None:
         # So a client can ask what an arm *is*, rather than recording the name it was
         # given on its own command line.
         arms={name: [p.name for p in group] for name, group in paths.items()},
+        q_models=q_models,
     )
 
     # First line of stdout, so a launcher can read it without parsing the prose.
@@ -111,6 +129,8 @@ def main() -> None:
         print(f"  arm {name}: {', '.join(p.name for p in group)}"
               + (" (ensemble, logits averaged)" if len(group) > 1 else ""),
               file=sys.stderr)
+    for name, model in q_models.items():
+        print(f"  Q arm {name}: {', '.join(model.files)} (eager, no graphs)", file=sys.stderr)
     if args.device == "cuda":
         print(f"  cuda waits: {scheduling()}", file=sys.stderr)
     print(f"  on {args.device}; requests are served as they arrive and are never merged "
@@ -147,6 +167,12 @@ def main() -> None:
             sum(getattr(m, "waited", 0.0) for m in models.values()),
             calls=sum(getattr(m, "calls", 0) for m in models.values()),
         )
+        if q_models:
+            timing.set_total(
+                "server.q",
+                sum(m.held for m in q_models.values()),
+                calls=sum(m.calls for m in q_models.values()),
+            )
         # Rows are a count, not a call count. Putting `rows_served` in the calls column
         # made the queueing row read as 3.2 million calls of 0.03 microseconds each.
         timing.count("server.rows", int(server.rows_served) - _reported_rows[0])

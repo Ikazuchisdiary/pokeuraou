@@ -200,6 +200,8 @@ class _Handler(socketserver.StreamRequestHandler):
                     for name, group in server.arms.items()  # type: ignore[attr-defined]
                 },
             }
+        if request.get("op") in ("q", "describe_q"):
+            return _serve_q(server, request, attached)
         if request.get("op") not in ("score", "score_segments"):
             raise ValueError(f"unknown op {request.get('op')!r}")
 
@@ -251,6 +253,28 @@ class _Handler(socketserver.StreamRequestHandler):
         return {"ok": True, "rows": int(scores.shape[0])}
 
 
+def _serve_q(server: Any, request: dict[str, Any], attached: dict) -> dict[str, Any]:  # noqa: ANN401
+    """A Q arm's two ops (IKA-274, `qrank`): what it is, and one position's matrix."""
+    name = request["model"]
+    q_models = getattr(server, "q_models", {})
+    if name not in q_models:
+        raise KeyError(f"no Q arm named {name!r}; have {sorted(q_models)}")
+    model = q_models[name]
+    if request["op"] == "describe_q":
+        return {"ok": True, "files": list(model.files), "fingerprint": model.fingerprint,
+                "properties": bool(model.properties)}
+    handle = request["shm"]
+    if handle not in attached:
+        attached[handle] = shared_memory.SharedMemory(name=handle)
+    buffer = attached[handle].buf
+    matrix = model(_views(buffer, request["layout"]))
+    if list(matrix.shape) != [int(n) for n in request["shape"]]:
+        raise ValueError(f"Q answered {matrix.shape}, asked {request['shape']}")
+    out = int(request["result_offset"])
+    buffer[out : out + matrix.nbytes] = np.ascontiguousarray(matrix, dtype=np.float64).tobytes()
+    return {"ok": True}
+
+
 class _Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -258,6 +282,9 @@ class _Server(socketserver.ThreadingTCPServer):
     def __init__(self, address, handler, models: dict, arms: dict | None = None) -> None:
         super().__init__(address, handler)
         self.models = models
+        #: Q arms (IKA-274, `qrank.served_q`), apart from the value arms: they answer
+        #: another op and take no part in the value arms' reports.
+        self.q_models: dict = {}
         #: Each arm's model file names, for `describe`. Empty when the caller built the
         #: models itself (a test with a stub), which `describe` then reports honestly as
         #: empty rather than inventing something.
@@ -282,13 +309,16 @@ def serve(
     host: str = "127.0.0.1",
     port: int = 0,
     arms: dict | None = None,
+    q_models: dict | None = None,
 ) -> tuple[_Server, str]:
     """Starts the server. `models` maps a name to a callable (arrays, rows) -> scores.
 
     ``arms`` maps the same names to the model files behind them, which `describe` hands
     back so a caller can record what it is really playing instead of what it was told.
+    ``q_models`` are Q arms (`qrank.load_q_arms`), asked by `qrank.RemoteQ`.
     """
     server = _Server((host, port), _Handler, models, arms)
+    server.q_models = dict(q_models or {})
     threading.Thread(target=server.serve_forever, daemon=True).start()
     shown_host, shown_port = server.server_address[:2]
     return server, f"{shown_host}:{shown_port}"
