@@ -65,7 +65,8 @@ STEP = 3
 STATUS = 4
 #: New labels (IKA-345): the first id and the count, then each label's parts -- a count,
 #: and per part `_PART`: the active slot (i8, -1: none), the text, the move, the target's
-#: side (i8, -1: none), name and sprite id (NONE: none), and whether it Mega Evolves.
+#: side (i8, -1: none), name and sprite id (NONE: none), and flags (1 Mega Evolves, 2 a
+#: switch: the target is the Pokemon coming in).
 LABELS = 5
 _PART = struct.Struct("<bIIbIIB")
 
@@ -136,7 +137,7 @@ class Wire:
                     max(-1, min(p.slot, 127)), self.intern(p.text), self.intern(p.verb),
                     p.target_side, self.intern(p.target_name) if p.target_side >= 0 else NONE,
                     self.intern(p.target_sprite) if p.target_side >= 0 else NONE,
-                    1 if p.mega else 0,
+                    (1 if p.mega else 0) | (2 if p.switch_in else 0),
                 )
                 for p in parts
             ))
@@ -301,12 +302,13 @@ class Decoder:
                 at += 1
                 parts = []
                 for _ in range(n):
-                    slot, text, verb, tside, tname, tsprite, mega = _PART.unpack_from(frame, at)
+                    slot, text, verb, tside, tname, tsprite, flags = _PART.unpack_from(frame, at)
                     at += _PART.size
                     s = self.strings
                     parts.append([slot, s[text], s[verb], tside,
                                   "" if tname == NONE else s[tname],
-                                  "" if tsprite == NONE else s[tsprite], bool(mega)])
+                                  "" if tsprite == NONE else s[tsprite], bool(flags & 1),
+                                  bool(flags & 2)])
                 self.labels.append(parts)
             return None
         if kind == STRINGS:
@@ -575,6 +577,7 @@ FILES = {
     "/live.html": ("live.html", "text/html; charset=utf-8"),
     "/live.css": ("live.css", "text/css; charset=utf-8"),
     "/live-data.js": ("live-data.js", "text/javascript; charset=utf-8"),
+    "/choice.js": ("choice.js", "text/javascript; charset=utf-8"),
     "/live-view.js": ("live-view.js", "text/javascript; charset=utf-8"),
 }
 

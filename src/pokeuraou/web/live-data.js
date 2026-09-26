@@ -119,11 +119,12 @@ function onFrame(buf, handlers) {
     for (let i = 0; i < count; i++) {
       const n = dv.getUint8(at); at += 1;
       const parts = [];
-      // [slot, text, verb, target side (-1: none), target name, target sprite, mega]
+      // [slot, text, verb, target side (-1: none), target name, target sprite, mega, switch]
       for (let k = 0; k < n; k++) {
         const tn = dv.getUint32(at + 10, true), ts = dv.getUint32(at + 14, true);
         parts.push([dv.getInt8(at), strings[dv.getUint32(at + 1, true)], strings[dv.getUint32(at + 5, true)],
-          dv.getInt8(at + 9), tn === NONE ? "" : strings[tn], ts === NONE ? "" : strings[ts], !!dv.getUint8(at + 18)]);
+          dv.getInt8(at + 9), tn === NONE ? "" : strings[tn], ts === NONE ? "" : strings[ts],
+          !!(dv.getUint8(at + 18) & 1), !!(dv.getUint8(at + 18) & 2)]);
         at += 19;
       }
       labels[first + i] = parts;

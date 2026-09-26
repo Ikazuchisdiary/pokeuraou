@@ -75,6 +75,8 @@ class Part:
     target_name: str = ""
     target_sprite: str = ""
     mega: bool = False
+    #: A switch: the target fields name the Pokemon coming in (on the acting side).
+    switch_in: bool = False
 
 
 class Label(str):
@@ -104,11 +106,15 @@ def label_parts(label: str) -> tuple[Part, ...]:
 
 def slot_part(reg: Regulation, slot: Any, pos: Position, side: int, loc: Any = None) -> Part:  # noqa: ANN401
     """One slot's action as a `Part` (`describe`'s text, and its move, target and Mega apart)."""
-    from .actions import MoveAction
+    from .actions import MoveAction, SwitchAction
     from .humanplay import sprite_id
 
     targets = target_names(pos, side)
     text = slot.describe(reg, loc, targets)
+    if isinstance(slot, SwitchAction):
+        name = loc.species(slot.species) if loc is not None else slot.species
+        return Part(slot.slot, text, "交代" if loc is not None else "switch", target_side=side,
+                    target_name=name, target_sprite=sprite_id(reg, slot.species), switch_in=True)
     if not isinstance(slot, MoveAction):
         return Part(slot.slot, text, text)
     verb = loc.move(slot.move_id) if loc is not None else (
@@ -135,9 +141,10 @@ def action_label(reg: Regulation, action: SideAction, pos: Position, side: int, 
 
 
 def part_json(part: Part) -> list[Any]:
-    """A part for an event: [slot, text, verb, target side, target name, target sprite, mega]."""
+    """A part for an event: [slot, text, verb, target side, target name, target sprite, mega,
+    switch]."""
     return [part.slot, part.text, part.verb, part.target_side, part.target_name,
-            part.target_sprite, part.mega]
+            part.target_sprite, part.mega, part.switch_in]
 
 
 @dataclass(slots=True)

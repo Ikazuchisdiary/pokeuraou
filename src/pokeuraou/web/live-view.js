@@ -86,11 +86,17 @@ function fieldWho(row) { return (row || []).map((m) => (m ? m.name : null)); }
 const MEGA = '<span class="mega-mark" role="img" aria-label="メガシンカ" title="メガシンカ"></span>';
 function sideName(side) { return (S.names && S.names[side]) || (side === aiSide() ? "AI" : "あなた"); }
 function partBody(p, chunked) {
-  const [, t, verb, tside, tname, tsprite, mega] = p;
+  const [, t, verb, tside, tname, tsprite, , swap] = p;
   if (verb === undefined) {
     return chunked
       ? `<span class="chunks">${String(t).split(/(?= → | \+ )/).map((c) => `<span class="ck">${esc(c.trim())}</span>`).join("")}</span>`
       : `<span>${esc(t)}</span>`;
+  }
+  if (swap && tname) {
+    // A switch: the swap mark and the Pokemon coming in.
+    learn({ species: tname, id: tsprite });
+    const tip = `交代: ${tname}`;
+    return `<span class="pbody"><span class="swap" role="img" aria-label="${esc(tip)}" title="${esc(tip)}"><span class="swapmark" aria-hidden="true">⇄</span>${art(tname, "xs", tip, 2)}</span></span>`;
   }
   let h = `<span class="verb">${esc(verb)}</span>`;
   if (tside >= 0 && tname) {
@@ -160,7 +166,7 @@ function onEvent(e) {
       renderClock(e.seconds * 1000, true);
       break;
     case "prompt":
-      S.prompt = e; S.chosen = []; S.answered = false; renderInput(); applyHide();
+      S.prompt = e; S.chosen = []; S.mega = -1; S.answered = false; renderInput(); applyHide();
       setStatus(e.kind === "move" ? "あなたの番" : e.heading, "turn");
       break;
     case "turn":
@@ -621,31 +627,43 @@ function renderInput() {
   const nSlots = p.slots.length ? p.slots[0].length : 0;
   const act = p.actives || (S.board ? S.board.sides[S.personSide].active : []);
   act.forEach((m) => m && learn(m));
-  const fits = (k) => p.slots.filter((a) => S.chosen.slice(0, k).every((c, j) => a[j][0] === c));
+  // Each move once; Mega Evolution is the toggle on the slot's heading (choice.js turns the
+  // pair back into one of the legal actions). One Pokemon a game Mega Evolves, so with the
+  // toggle on for one slot the other's is off and cannot be pressed.
+  const C = window.LiveChoice;
+  const megas = C.megaSlots(p.slots);
+  if (S.mega >= 0 && !megas.includes(S.mega)) S.mega = -1;
   let html = `<div class="ask">${esc(p.heading)}</div><div class="note">ターン ${p.turn}・合法手 ${p.choices.length}</div>`;
   for (let k = 0; k < nSlots; k++) {
-    const opts = [];
-    fits(k).forEach((a) => { if (!opts.some((o) => o[0] === a[k][0])) opts.push(a[k]); });
+    const opts = C.options(p.slots, k, S.chosen);
     if (opts.length === 1) S.chosen[k] = opts[0][0];
     if (S.chosen[k] !== undefined && !opts.some((o) => o[0] === S.chosen[k])) S.chosen.length = k;
     const who = nSlots === act.length && act[k] ? act[k].species : null;
-    html += `<div class="slot"><div class="slot-head">${who ? art(who, "sm") + `<b>${esc(who)}</b>` : `<b>${nSlots > 1 ? `${k + 1} 体目` : "選ぶ"}</b>`}</div>
+    const toggle = megas.includes(k)
+      ? `<button type="button" class="megatoggle" data-k="${k}" aria-pressed="${S.mega === k}" ${S.mega >= 0 && S.mega !== k ? "disabled" : ""}
+          title="${S.mega >= 0 && S.mega !== k ? "メガシンカは 1 対戦に 1 回（もう 1 体に入れている）" : "この体をメガシンカさせる"}">${MEGA}<span>メガシンカ</span></button>`
+      : "";
+    html += `<div class="slot"><div class="slot-head">${who ? art(who, "sm") + `<b>${esc(who)}</b>` : `<b>${nSlots > 1 ? `${k + 1} 体目` : "選ぶ"}</b>`}${toggle}</div>
       <div class="opts">${opts.map(([c, l]) => `<button type="button" class="opt" data-k="${k}" data-c="${esc(c)}" aria-pressed="${S.chosen[k] === c}">${esc(l)}</button>`).join("")}</div></div>`;
     if (S.chosen[k] === undefined) { for (let j = k + 1; j < nSlots; j++) html += `<div class="slot"><div class="slot-head dim">${j + 1} 体目は上を選んでから</div></div>`; break; }
   }
   const ready = S.chosen.length === nSlots && S.chosen.every((c) => c !== undefined);
-  const labels = ready ? p.slots.find((a) => a.every((x, j) => x[0] === S.chosen[j])) : null;
+  const index = ready ? C.resolve(p.slots, S.chosen, S.mega) : -1;
+  const labels = index >= 0 ? p.slots[index] : null;
   const whoIn = act.map((m) => (m ? m.species : null));
   const summary = labels
     ? `<span class="act">${actHtml(labels.map((x, k) => (x[2] ? x[2] : [k, x[1]])), whoIn)}</span>`
-    : "手を選んでください";
+    : ready && S.mega >= 0 ? "この手ではメガシンカできない" : "手を選んでください";
   html += `<div class="sendbar"><span class="summary">${summary}</span>
     <button type="button" class="primary" id="go" ${labels ? "" : "disabled"}>この手で決定</button></div>`;
   box.innerHTML = html;
   box.querySelectorAll(".opt").forEach((b) => b.onclick = () => {
     const k = +b.dataset.k; S.chosen[k] = b.dataset.c; S.chosen.length = k + 1; renderInput();
   });
-  $("go").onclick = () => { if (labels) send(S.chosen.join(", ")); };
+  box.querySelectorAll(".megatoggle").forEach((b) => b.onclick = () => {
+    const k = +b.dataset.k; S.mega = S.mega === k ? -1 : k; renderInput();
+  });
+  $("go").onclick = () => { if (labels) send(C.line(p.slots, index)); };
 }
 function applyHide() { document.body.classList.toggle("hidden-thinking", $("hide").checked && !S.answered); }
 $("hide").onchange = applyHide;
