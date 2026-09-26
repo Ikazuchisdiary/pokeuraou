@@ -15,7 +15,9 @@ person is shown and how the agent spends its seconds). This file loads the piece
   another, ``--hp-share`` for none -- said at the start either way;
 * the menus: ``q-nocover`` when a Q is there (``--q-model``, default `DEFAULT_Q`), the
   default fill otherwise, with a note; ``--rank-fill`` overrides;
-* the port's threads: ``--cores`` (`rustnode.set_port_threads`, IKA-32).
+* the cores: ``--cores`` prices the budget rule and spreads a move over that many threads
+  (`humanplay.use_threads`: the port's cells, the deepening's cells expanded ahead, a big
+  game's two LPs at once -- IKA-32); ``--threads`` sets the threads alone.
 
 The person: ``terminal`` (you), ``first`` / ``random`` (stand-ins, for smoke runs),
 ``script:<file>`` (one answer per line: the selection as party numbers, then each choice
@@ -46,7 +48,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from pokeuraou import humanplay, liveview, qrank, rustnode  # noqa: E402
+from pokeuraou import humanplay, liveview, qrank  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.hidden import DEFAULT_BENCH_DROP, parse_bench_drop  # noqa: E402
 from pokeuraou.names import localiser  # noqa: E402
@@ -109,7 +111,12 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--human-side", type=int, default=0, choices=(0, 1))
     ap.add_argument("--seconds", type=float, default=45.0, help="the agent's budget per move")
     ap.add_argument("--cores", type=int, default=1,
-                    help="the port's threads (IKA-32: 8 is the practical best)")
+                    help="the cores a move may use: the budget rule's prices and, unless --threads "
+                    "says otherwise, the threads (IKA-32: 8 is the practical best)")
+    ap.add_argument("--threads", type=int, default=None,
+                    help="threads a move spreads over (the port's cells, the deepening's cells "
+                    "expanded ahead, a big game's two LPs at once), when not --cores. They change "
+                    "no move: a count-clock game is the same game at any number")
     ap.add_argument("--clock", default="wall", choices=humanplay.CLOCKS,
                     help="wall: stop the deepening at the budget by the clock (default); "
                     "count: spend it at measured prices, reproducible by seed")
@@ -197,8 +204,7 @@ def main(argv: list[str] | None = None) -> None:
         qrank.install(model)
         q_files = model.describe()
 
-    if args.cores > 1:
-        rustnode.set_port_threads(args.cores)
+    humanplay.use_threads(args.threads if args.threads is not None else args.cores)
     agent = humanplay.Agent(
         reg=reg, evaluate=evaluate, name=name, seconds=args.seconds, cores=args.cores,
         clock=args.clock, rank_fill=fill, bench_drop=args.bench_drop,
@@ -206,6 +212,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     say(f"agent: leaf {name} / menus {fill}" + (f" ({', '.join(q_files)})" if q_files else "")
         + f" / {args.seconds:g} s a move on {args.cores} core(s), {args.clock} clock"
+        + (f", {args.threads} thread(s)" if args.threads is not None else "")
         + (" / width only" if args.width_only else "") + " / bench hidden")
 
     server = None

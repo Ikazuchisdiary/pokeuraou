@@ -249,6 +249,26 @@ class WallCost:
 
 CLOCKS = ("wall", "count")
 
+#: From how many cells a game's two LPs are solved at once when the agent has more than
+#: one core (`equilibrium.set_lp_pair`): the root's Bayesian game of a wide menu, not the
+#: 8 x 8 children, whose LPs are mostly Python (IKA-32 stage 2).
+LP_PAIR_CELLS = 1024
+
+
+def use_threads(threads: int) -> None:
+    """Spread one move over `threads` cores (IKA-32): the port's cell pool (stage 1), the
+    deepening's cells expanded ahead on a helper thread and a big game's two LPs at once
+    (stage 2). None of them changes a move -- only how long it takes -- so a game on the
+    count clock is the same game at any count; 1 turns them all off."""
+    from . import deepen, equilibrium, rustnode
+
+    if threads < 1:
+        raise ValueError(f"threads must be >= 1, not {threads}")
+    if (rustnode.port_threads() or 1) != threads:
+        rustnode.set_port_threads(threads)
+    deepen.set_ahead(0 if threads == 1 else threads)
+    equilibrium.set_lp_pair(0 if threads == 1 else LP_PAIR_CELLS)
+
 # ----------------------------------------------------------------------------- the person
 
 

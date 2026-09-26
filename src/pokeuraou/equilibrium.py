@@ -21,6 +21,10 @@ entry shifts the value and leaves the strategies unchanged, so a constant-sum ga
 
 from __future__ import annotations
 
+import os
+import threading
+from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
 import numpy as np
@@ -31,6 +35,54 @@ from . import timing
 
 class EquilibriumError(RuntimeError):
     pass
+
+
+#: Cells (rows x columns, all classes) from which a game's two LPs -- the row player's and
+#: the column player's, independent of each other -- are solved at once on two threads
+#: (IKA-32 stage 2). HiGHS lets go of the GIL while it pivots, so a 64 x 64 x 4 Bayesian
+#: game takes about half the wall time; each LP is the same model handed to the same
+#: HiGHS, so the answer is the same to the bit. 0 is off (generation and the board: one
+#: core a worker already). A small game stays on one thread: its LPs are mostly Python.
+LP_PAIR_ENV = "POKEURAOU_LP_PAIR_CELLS"
+_LP_PAIR = [int(os.environ.get(LP_PAIR_ENV, "0") or 0)]
+_LP_POOL: list[ThreadPoolExecutor | None] = [None]
+_LP_POOL_LOCK = threading.Lock()
+#: How many games had their two LPs solved at once (the stage's positive control).
+LP_PAIRS = [0]
+
+
+def set_lp_pair(cells: int) -> None:
+    """Solve a game's two LPs at once from `cells` cells up; 0 turns it off."""
+    if cells < 0:
+        raise ValueError(f"cells must be >= 0, not {cells}")
+    _LP_PAIR[0] = int(cells)
+
+
+def lp_pair() -> int:
+    """`set_lp_pair`'s threshold in cells, 0 when off."""
+    return _LP_PAIR[0]
+
+
+def _both[A, B](cells: int, first: Callable[[], A], second: Callable[[], B]) -> tuple[A, B]:
+    """``(first(), second())``, the second on a helper thread when the game is big enough.
+
+    An error is the one the serial order meets first: `first`'s, else `second`'s.
+    """
+    threshold = _LP_PAIR[0]
+    if threshold <= 0 or cells < threshold:
+        return first(), second()
+    with _LP_POOL_LOCK:
+        if _LP_POOL[0] is None:
+            _LP_POOL[0] = ThreadPoolExecutor(max_workers=2, thread_name_prefix="lp-pair")
+        pool = _LP_POOL[0]
+    later = pool.submit(second)
+    try:
+        a = first()
+    except BaseException:
+        later.exception()  # wait: the helper's LP is not left running
+        raise
+    LP_PAIRS[0] += 1
+    return a, later.result()
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,9 +280,10 @@ def solve(payoff: np.ndarray, eps: float = 1e-9) -> Equilibrium:
         raise ValueError("payoff contains non-finite entries")
     m, n = a.shape
 
-    value_row, x_raw = _maximin(a)
     # The column player minimises A, which is the row player of the game -A^T.
-    value_col_neg, y_raw = _maximin(-a.T)
+    (value_row, x_raw), (value_col_neg, y_raw) = _both(
+        m * n, lambda: _maximin(a), lambda: _maximin(-a.T)
+    )
     value_col = -value_col_neg
 
     x = _clean(x_raw, eps)
@@ -381,8 +434,11 @@ def solve_bayesian(
         raise ValueError("class weights must be non-negative")
     w = w / w.sum()
 
-    value_row, x_raw = _bayesian_maximin(mats, w)
-    value_col, y_raw = _bayesian_minimax(mats, w)
+    (value_row, x_raw), (value_col, y_raw) = _both(
+        sum(mat.size for mat in mats),
+        lambda: _bayesian_maximin(mats, w),
+        lambda: _bayesian_minimax(mats, w),
+    )
 
     x = _clean(x_raw, eps)
     ys = tuple(_clean(y, eps) for y in y_raw)
