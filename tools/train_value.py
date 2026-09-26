@@ -251,6 +251,15 @@ def main() -> None:
         "outcome, whatever this is set to, or the rows stop being comparable.",
     )
     ap.add_argument(
+        "--target-file",
+        type=Path,
+        default=None,
+        help="fit the per-row targets in this .npz (key --target-key) instead of the outcome, "
+        "e.g. `tools/deep_targets.py mix` (IKA-296). One value in [0, 1] per row of --data, in "
+        "its order. Validation stays against the real outcome.",
+    )
+    ap.add_argument("--target-key", default=None)
+    ap.add_argument(
         "--init-from",
         type=Path,
         default=None,
@@ -314,6 +323,22 @@ def main() -> None:
             f"TD target: {1 - args.td_lambda:.2f} x outcome + {args.td_lambda:.2f} x "
             f"searchValue (leaves {sorted(leaves)}). Validation stays on the outcome."
         )
+    if args.target_file is not None:
+        if args.td_lambda or args.target_key is None:
+            raise SystemExit("--target-file needs --target-key and excludes --td-lambda")
+        target = np.load(args.target_file)[args.target_key].astype(np.float32)
+        if target.shape != dataset.outcome.shape or not (
+            np.isfinite(target).all() and (target >= 0).all() and (target <= 1).all()
+        ):
+            raise SystemExit(
+                f"{args.target_file}[{args.target_key}] is not one value in [0, 1] per row "
+                f"of {args.data} ({target.shape} against {dataset.outcome.shape})"
+            )
+        moved = float(np.mean(np.abs(target - dataset.outcome) > 1e-9))
+        print(
+            f"target: {args.target_file}[{args.target_key}], {moved:.1%} of rows differ from "
+            "the outcome. Validation stays on the outcome."
+        )
     reg = load_regulation(
         __import__("json").loads(str(np.load(args.data)["meta_json"]))["format_id"]
     )
@@ -376,7 +401,7 @@ def main() -> None:
     print(f"antisymmetry V(x) + V(mirror x) - 1: max |error| {worst:.2e} at init")
 
     if args.curve:
-        if args.td_lambda:
+        if args.td_lambda or args.target_file is not None:
             # Rather than quietly train the curve on a different target than the banner
             # said. The curve answers "would more games help", which is a question about
             # the outcome label; mixing in the search value changes what "more games"
@@ -498,6 +523,8 @@ def main() -> None:
                 # training (IKA-194). None for a fresh initialisation.
                 "init_from": init_meta or None,
                 "td_lambda": args.td_lambda,
+                "target_file": None if args.target_file is None else str(args.target_file),
+                "target_key": args.target_key,
                 "seed": args.seed,
                 # Separately, because --seed moves three things and only this one
                 # decides what the row above was marked against. A model whose record

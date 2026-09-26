@@ -23,6 +23,11 @@ nothing:
   analyse   Tables from `read` / `endgame` output: error against the exact value per
             menu-product bucket and against the recorded outcomes (Brier score, bias,
             calibration), the IKA-95 label shift on the sampled games, and the cost.
+  mix       (IKA-296) From a `read` of every game and the same games encoded: each reading
+            calibrated by isotonic regression on the target rows of the training games, and
+            per-row training targets for `tools/train_value.py --target-file`, mixed into the
+            target rows only (`<reading>-rows-<lam>`) or into those and every earlier row of
+            the game (`<reading>-back-<lam>`, IKA-95's form).
 
 Positions are read open (the recorded position is the true one), as IKA-254 and IKA-33 did.
 A target's "no bench" is either no standing Pokemon off the field on either side
@@ -238,7 +243,12 @@ class Reader:
         device = self.torch.device(self.device)
         self.leaf = BatchedValue([m.to(device) for m in nets], encoder, device=device)
 
-    def read(self, position: dict[str, Any], menu: Sequence[Sequence[str]]) -> dict[str, Any]:
+    def read(
+        self,
+        position: dict[str, Any],
+        menu: Sequence[Sequence[str]],
+        readings: Sequence[str] = tuple(READINGS),
+    ) -> dict[str, Any]:
         import endgame_exact as ee
 
         from pokeuraou.budget import Budget
@@ -252,7 +262,8 @@ class Reader:
             by = {a.to_choice(): a for a in ee.legal(self.reg, pos, side)}
             sides.append([by[c] for c in menu[side]])
         out: dict[str, Any] = {}
-        for label, kwargs in READINGS.items():
+        for label in readings:
+            kwargs = READINGS[label]
             self.count["cells"] = 0
             wall = time.perf_counter()
             cpu = time.process_time()
@@ -282,14 +293,43 @@ def sample_games(games: list[dict[str, Any]], n: int, seed: int) -> list[int]:
     return sorted(order[:n])
 
 
+def _records(path: str, wanted: Sequence[int]) -> Any:
+    """(line, record) for each wanted line of one file, in one pass over it."""
+    want = set(wanted)
+    last = max(want)
+    with open(path, encoding="utf-8") as handle:
+        for n, line in enumerate(handle):
+            if n in want:
+                yield n, json.loads(line)
+            if n >= last:
+                return
+
+
+def _share(games: list[dict[str, Any]], chosen: list[int], jobs: int, worker: int) -> list[int]:
+    """This worker's games: whole files, round robin over the files the chosen games are in.
+
+    A file is read once, front to back, by one worker (IKA-296: reading the whole pool game by
+    game through `_line` re-read each ~200 MB file up to every game's line). Which worker reads a
+    game does not change its readings.
+    """
+    files = sorted({games[g]["file"] for g in chosen})
+    mine = set(files[worker :: max(jobs, 1)])
+    return [g for g in chosen if games[g]["file"] in mine]
+
+
 def run_read(args: argparse.Namespace) -> None:
     games = load_scan(args.scan)
     chosen = sample_games(games, args.games, args.seed)
+    readings = tuple(args.readings.split(",")) if args.readings else tuple(READINGS)
+    unknown = [r for r in readings if r not in READINGS]
+    if unknown:
+        raise SystemExit(f"unknown readings {unknown}; known: {sorted(READINGS)}")
     if args.worker is None and args.jobs > 1:
         base = [sys.executable, str(Path(__file__).resolve()), "read"]
         passed = ["--scan", str(args.scan), "--games", str(args.games), "--seed", str(args.seed),
                   "--jobs", str(args.jobs), "--out", str(args.out), "--device", args.device,
-                  "--max-product", str(args.max_product), "--value", *args.value]
+                  "--max-product", str(args.max_product), "--readings", ",".join(readings),
+                  "--value", *args.value]
         procs = [subprocess.Popen([*base, *passed, "--worker", str(w)]) for w in range(args.jobs)]
         codes = [p.wait() for p in procs]
         if any(codes):
@@ -303,28 +343,39 @@ def run_read(args: argparse.Namespace) -> None:
         Path(args.out).write_bytes(b"".join(x + b"\n" for x in lines))
         return
     worker = args.worker or 0
-    mine = chosen[worker :: max(args.jobs, 1)]
+    mine = _share(games, chosen, args.jobs, worker)
     reader = Reader(args.value, args.device)
     import pokeuraou
 
-    print(f"[{worker}] pokeuraou from {pokeuraou.__file__}", flush=True)
+    print(f"[{worker}] pokeuraou from {pokeuraou.__file__}; readings {readings}", flush=True)
     part = Path(f"{args.out}.part{worker}") if args.jobs > 1 else Path(args.out)
     started = time.perf_counter()
+
+    def where(g: int) -> list[int]:
+        return [k for k, d in enumerate(games[g]["decisions"])
+                if is_target(d, args.max_product, "shown") or is_target(d, args.max_product, "bench0")]
+
+    by_file: dict[str, list[int]] = {}
+    for g in mine:
+        by_file.setdefault(games[g]["file"], []).append(g)
+    n = 0
     with part.open("wb") as handle:
-        for n, g in enumerate(mine):
-            game = games[g]
-            where = [k for k, d in enumerate(game["decisions"])
-                     if is_target(d, args.max_product, "shown") or is_target(d, args.max_product, "bench0")]
-            readings: dict[str, Any] = {}
-            if where:
-                record = _line(game["file"], game["line"])
-                for k in where:
+        for path, gs in by_file.items():
+            at_line = {games[g]["line"]: g for g in gs}
+            got: dict[int, dict[str, Any]] = {g: {} for g in gs}
+            needed = [line for line, g in at_line.items() if where(g)]
+            for line, record in (_records(path, needed) if needed else ()):
+                g = at_line[line]
+                for k in where(g):
                     d = record["decisions"][k]
-                    readings[str(k)] = reader.read(d["position"], (d["ownActions"], d["foeActions"]))
-            handle.write((json.dumps({"game": g, "readings": readings}) + "\n").encode("utf-8"))
+                    got[g][str(k)] = reader.read(
+                        d["position"], (d["ownActions"], d["foeActions"]), readings
+                    )
+            for g in gs:
+                handle.write((json.dumps({"game": g, "readings": got[g]}) + "\n").encode("utf-8"))
             handle.flush()
-            if n % 50 == 0:
-                print(f"[{worker}] {n}/{len(mine)} games, {time.perf_counter() - started:.0f}s", flush=True)
+            n += len(gs)
+            print(f"[{worker}] {n}/{len(mine)} games, {time.perf_counter() - started:.0f}s", flush=True)
 
 
 # --------------------------------------------------------------------------------------
@@ -535,6 +586,139 @@ def read_tables(reads: list[dict[str, Any]], games: list[dict[str, Any]]) -> str
     return "\n".join(out)
 
 
+# --------------------------------------------------------------------------------------
+# mix (IKA-296: the training stage)
+
+
+def isotonic(x: np.ndarray, y: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Isotonic regression of y on x (pool adjacent violators), as (block upper x, block mean y)."""
+    order = np.argsort(x, kind="stable")
+    xs, ys = np.asarray(x, float)[order], np.asarray(y, float)[order]
+    sums: list[float] = []
+    counts: list[float] = []
+    highs: list[float] = []
+    for xv, yv in zip(xs, ys, strict=True):
+        sums.append(yv)
+        counts.append(1.0)
+        highs.append(xv)
+        while len(sums) > 1 and sums[-2] / counts[-2] > sums[-1] / counts[-1]:
+            s, c, h = sums.pop(), counts.pop(), highs.pop()
+            sums[-1] += s
+            counts[-1] += c
+            highs[-1] = h
+    return np.array(highs), np.array(sums) / np.array(counts)
+
+
+def calibrate(fit: tuple[np.ndarray, np.ndarray], v: np.ndarray) -> np.ndarray:
+    """The fitted step function at v: the first block whose upper end is at or above v."""
+    highs, means = fit
+    idx = np.minimum(np.searchsorted(highs, v, side="left"), len(highs) - 1)
+    return means[idx]
+
+
+def relabel(
+    game: np.ndarray,
+    outcome: np.ndarray,
+    target: np.ndarray,
+    value: np.ndarray,
+    lam: float,
+    back: bool,
+) -> np.ndarray:
+    """Per-row training targets with a (calibrated) deep value mixed in.
+
+    Rows are in record order: a game's rows are contiguous and in decision order. A target row
+    becomes ``(1 - lam) * outcome + lam * value``. With ``back`` (IKA-95's form) every earlier row
+    of the same game does too, with the value of the first target decision at or after it; rows
+    after a game's last target keep the outcome.
+    """
+    out = outcome.astype(np.float64).copy()
+    ahead = np.nan
+    for i in range(len(out) - 1, -1, -1):
+        if i == len(out) - 1 or game[i] != game[i + 1]:
+            ahead = np.nan
+        if target[i]:
+            ahead = value[i]
+        use = value[i] if target[i] else (ahead if back else np.nan)
+        if not np.isnan(use):
+            out[i] = (1.0 - lam) * outcome[i] + lam * use
+    return out.astype(np.float32)
+
+
+def _scores(v: np.ndarray, z: np.ndarray) -> str:
+    from pokeuraou.value import auc
+
+    c = np.clip(v, 1e-4, 1 - 1e-4)
+    loss = -np.mean(z * np.log(c) + (1 - z) * np.log(1 - c))
+    return f"Brier {np.mean((v - z) ** 2):.4f}  log loss {loss:.4f}  AUC {auc(v, z):.4f}"
+
+
+def run_mix(args: argparse.Namespace) -> None:
+    from pokeuraou.value import ValueConfig, load_dataset, split_for
+
+    games = load_scan(args.scan)
+    reads = {r["game"]: r["readings"] for r in load_scan(args.read)}
+    data = load_dataset(args.data)
+    game, outcome, kind = data.game, data.outcome.astype(np.float64), data.kind
+    starts = np.flatnonzero(np.r_[True, game[1:] != game[:-1]])
+    if len(starts) != len(games) or not np.array_equal(game[starts], np.arange(len(games))):
+        raise SystemExit(f"{args.data} holds {len(starts)} games in order, the scan {len(games)}")
+    labels = args.readings.split(",")
+    target = np.zeros(len(game), bool)
+    value = {lab: np.full(len(game), np.nan) for lab in labels}
+    for g, (s, e) in enumerate(zip(starts, [*starts[1:], len(game)], strict=True)):
+        rows = games[g]["decisions"]
+        if len(rows) != e - s or outcome[s] != games[g]["outcome"]:
+            raise SystemExit(f"game {g}: {e - s} rows / outcome {outcome[s]} in the data, "
+                             f"{len(rows)} / {games[g]['outcome']} in the scan")
+        for k, d in enumerate(rows):
+            sv = data.search_value[s + k]
+            if d[0] != kind[s + k] or not (abs(d[6] - sv) < 1e-4 or (np.isnan(d[6]) and np.isnan(sv))):
+                raise SystemExit(f"game {g} decision {k}: scan and data disagree")
+            if is_target(d, args.max_product, args.bench):
+                if g not in reads or str(k) not in reads[g]:
+                    raise SystemExit(f"game {g} decision {k} is a target without a reading")
+                target[s + k] = True
+                for lab in labels:
+                    value[lab][s + k] = reads[g][str(k)][lab]["value"]
+    config = ValueConfig(seed=args.split_seed, split_seed=args.split_seed)
+    train_idx, val_idx = split_for(data, args.holdout, config)
+    is_train = np.zeros(len(game), bool)
+    is_train[train_idx] = True
+    fit_rows = target & is_train
+    val_rows = target & ~is_train
+    print(f"{len(game):,} rows, {len(games):,} games; targets (move, product <= {args.max_product}, "
+          f"{args.bench}) {int(target.sum()):,} = {target.mean():.1%} of rows; "
+          f"calibration fitted on the {int(fit_rows.sum()):,} in the training games "
+          f"(split seed {args.split_seed}, holdout {args.holdout}), {int(val_rows.sum()):,} held out")
+    out: dict[str, np.ndarray] = {"target_rows": target}
+    for lab in labels:
+        fit = isotonic(value[lab][fit_rows], outcome[fit_rows])
+        cal = np.where(target, calibrate(fit, np.nan_to_num(value[lab])), np.nan)
+        out[f"{lab}-raw"] = value[lab].astype(np.float32)
+        out[f"{lab}-cal"] = cal.astype(np.float32)
+        for name, rows in (("training", fit_rows), ("held out", val_rows)):
+            print(f"  {lab:<4} {name:<9} raw  {_scores(value[lab][rows], outcome[rows])}")
+            print(f"  {lab:<4} {name:<9} cal  {_scores(cal[rows], outcome[rows])}")
+        print(f"  {lab:<4} isotonic: {len(fit[0])} blocks")
+        for lam in args.lam:
+            for back in (False, True):
+                name = f"{lab}-{'back' if back else 'rows'}-{lam:g}"
+                mixed = relabel(game, outcome, target, cal, lam, back)
+                shift = np.abs(mixed - outcome)
+                out[name] = mixed
+                print(f"  {name:<14} rows moved {np.mean(shift > 1e-9):6.1%}  mean |shift| "
+                      f"(all rows) {shift.mean():.4f}  shift > 0.5 {np.mean(shift > 0.5):.2%}")
+    for rows, name in ((val_rows, "held out"), (fit_rows, "training")):
+        print(f"  recorded searchValue on the {name} targets: "
+              f"{_scores(data.search_value[rows].astype(float), outcome[rows])}")
+    np.savez_compressed(args.out, **out, meta_json=json.dumps({
+        "scan": str(args.scan), "read": str(args.read), "data": str(args.data),
+        "max_product": args.max_product, "bench": args.bench, "split_seed": args.split_seed,
+        "holdout": args.holdout, "readings": labels, "lam": list(args.lam), "rows": len(game),
+    }))
+    print(f"-> {args.out}")
+
+
 def run_analyse(args: argparse.Namespace) -> None:
     if args.endgame:
         print(endgame_tables(load_scan(args.endgame)))
@@ -563,7 +747,20 @@ def main(argv: Sequence[str] | None = None) -> None:
     p.add_argument("--out", required=True)
     p.add_argument("--device", default="cuda")
     p.add_argument("--value", nargs="+", required=True)
+    p.add_argument("--readings", default="", help="comma-separated subset of " + ",".join(READINGS))
     p.set_defaults(func=run_read)
+    p = sub.add_parser("mix")
+    p.add_argument("--scan", required=True)
+    p.add_argument("--read", required=True, help="a `read` of every game in the scan")
+    p.add_argument("--data", required=True, help="the same games encoded (tools/encode_dataset.py)")
+    p.add_argument("--out", required=True)
+    p.add_argument("--readings", default="d2r")
+    p.add_argument("--max-product", type=int, default=64)
+    p.add_argument("--bench", choices=("shown", "bench0"), default="shown")
+    p.add_argument("--split-seed", type=int, default=0)
+    p.add_argument("--holdout", type=float, default=0.15)
+    p.add_argument("--lam", type=float, nargs="+", default=[0.5, 1.0])
+    p.set_defaults(func=run_mix)
     p = sub.add_parser("endgame")
     p.add_argument("--answers", required=True)
     p.add_argument("--games-dir", required=True)
