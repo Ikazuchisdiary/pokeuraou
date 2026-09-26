@@ -23,6 +23,8 @@ use std::collections::HashMap;
 thread_local! {
     static STORE: RefCell<HashMap<u64, Position>> = RefCell::new(HashMap::new());
     static NEXT: Cell<u64> = const { Cell::new(1) };
+    /// The kept (odd) numbers by `leaf_key`, to find an equal position already kept.
+    static KEPT: RefCell<HashMap<u64, Vec<u64>>> = RefCell::new(HashMap::new());
 }
 
 /// The number a `{"held": id}` value names, if it is one.
@@ -60,20 +62,38 @@ pub fn define(id: u64, value: &Value) {
     STORE.with(|store| store.borrow_mut().insert(id, position));
 }
 
-/// A position this process wrote, kept under a fresh (odd) number for the caller to name.
+/// A position this process wrote, kept under a fresh (odd) number for the caller to name --
+/// or under the number of an equal one it already kept this decision. The caller memoises
+/// answers on its request's bytes, which once held the position's text: two equal branches
+/// of two turns wrote the same text and hit the same answer, and under one number they
+/// still do.
 pub fn keep(position: &Position) -> u64 {
+    let key = crate::encoded_node::leaf_key(position);
+    let found = KEPT.with(|kept| {
+        STORE.with(|store| {
+            let store = store.borrow();
+            kept.borrow().get(&key).and_then(|ids| {
+                ids.iter().copied().find(|id| store.get(id).is_some_and(|held| held == position))
+            })
+        })
+    });
+    if let Some(id) = found {
+        return id;
+    }
     let id = NEXT.with(|next| {
         let id = next.get();
         next.set(id + 2);
         id
     });
     STORE.with(|store| store.borrow_mut().insert(id, position.clone()));
+    KEPT.with(|kept| kept.borrow_mut().entry(key).or_default().push(id));
     id
 }
 
 /// `forget`: the decision is over.
 pub fn forget() {
     STORE.with(|store| store.borrow_mut().clear());
+    KEPT.with(|kept| kept.borrow_mut().clear());
 }
 
 #[cfg(test)]
@@ -90,6 +110,7 @@ mod tests {
     #[test]
     fn kept_numbers_are_odd_and_never_reused() {
         let a = keep(&test_position());
+        assert_eq!(keep(&test_position()), a, "an equal position is kept once");
         forget();
         let b = keep(&test_position());
         assert!(a % 2 == 1 && b % 2 == 1 && b > a);

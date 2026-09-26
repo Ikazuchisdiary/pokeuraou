@@ -1587,6 +1587,8 @@ _HOLD = [False]
 _HELD: dict[int, tuple[Position, _Stored]] = {}
 #: A request's bytes -> the answer, for the kinds answered from the position alone.
 _ANSWERS: dict[bytes, dict[str, Any]] = {}
+#: A held position's text -> its entry, so equal objects share a number (`_position`).
+_BY_TEXT: dict[str, _Stored] = {}
 _ANSWERED_KINDS = frozenset({"score"})
 #: Past this many positions in one decision the memo starts again (a bound, not a tune).
 _HELD_MAX = 512
@@ -1644,6 +1646,7 @@ def hold_positions(on: bool = True) -> None:
 
 def _forget() -> None:
     _HELD.clear()
+    _BY_TEXT.clear()
     _ANSWERS.clear()
     # And the port's: a `forget` line goes ahead of the next request to each node that
     # holds anything (IKA-302).
@@ -1661,13 +1664,26 @@ def _position(pos: Position) -> dict[str, Any] | _Stored:
     if found is not None and found[0] is pos:
         timing.count("position.held")
         return found[1]
-    return _store(pos, next(_KEYS))
+    # Written now, as the text memo wrote it, and an object with the same text as one
+    # already held takes that one's number: the request is then the same bytes, and a
+    # `score` asked of either is answered from the first (`_ANSWERS`), as it was.
+    stored = _Stored(next(_KEYS), pos)
+    text = stored.json_text()
+    same = _BY_TEXT.get(text)
+    if same is not None:
+        stored = same
+    else:
+        _BY_TEXT[text] = stored
+    return _store(pos, stored)
 
 
-def _store(pos: Position, key: int) -> _Stored:
+def _store(pos: Position, stored: _Stored | int) -> _Stored:
+    """Hold `pos` under `stored` (or a new entry for the port's number `stored`)."""
     if len(_HELD) >= _HELD_MAX:
         _HELD.clear()
-    stored = _Stored(key, pos)
+        _BY_TEXT.clear()
+    if not isinstance(stored, _Stored):
+        stored = _Stored(stored, pos)
     _HELD[id(pos)] = (pos, stored)
     return stored
 

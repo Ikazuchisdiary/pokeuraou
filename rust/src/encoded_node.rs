@@ -53,7 +53,7 @@ struct Collector<'a> {
 /// fails, never a leaf that is wrongly shared. So this hashes what varies between the
 /// leaves of one node -- HP, status, boosts, which volatiles are on, who is out -- and
 /// skips the rest.
-fn leaf_key(pos: &Position) -> u64 {
+pub fn leaf_key(pos: &Position) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     let mut eat = |value: u64| {
         hash ^= value;
