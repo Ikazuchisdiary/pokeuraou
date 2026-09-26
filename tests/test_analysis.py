@@ -197,7 +197,8 @@ def test_a_stop_from_another_thread_ends_the_read(pool, record) -> None:  # noqa
         timer.start()
 
     started = time.perf_counter()
-    got = analyzer.run(game, point, settings=_settings(levels=64), on_session=keep)
+    # max_seconds is a backstop: a stop that is not heard fails as "time", not as a hang.
+    got = analyzer.run(game, point, settings=_settings(levels=64), on_session=keep, max_seconds=30)
     took = time.perf_counter() - started
     assert got.stop == "person"
     assert got.steps > 0
@@ -213,7 +214,7 @@ def test_the_seconds_limit_and_the_memory_watch_stop_a_read(pool, record) -> Non
     assert timed.stop == "time" and timed.steps > 0
     held = []
     got = analyzer.run(
-        game, point, settings=_settings(levels=64),
+        game, point, settings=_settings(levels=64), max_seconds=30,  # the backstop, as above
         limits=analysis.Limits(rss_gb=1e-3, free_gb=0, gpu_gb=0), on_session=held.append,
     )
     assert got.stop == "memory"
