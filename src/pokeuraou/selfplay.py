@@ -779,10 +779,20 @@ def _menus(
             used[side] = (index, tuple(items[index].species))
         return [(items[index].position, 1.0)]
 
+    # IKA-274 stage 3: both sides' Q requests in one round trip, before either menu asks.
+    q_given = (
+        qrank.prefetch(
+            reg, pos, (_one_view(views(0)), _one_view(views(1))),
+            qrank.installed(qrank.q_name(rank_fill)),
+        )
+        if policy is None and is_q(rank_fill)
+        else {}
+    )
+
     def ranker(side: int) -> Any:  # noqa: ANN401
         if policy is None and is_q(rank_fill):
             # IKA-274: a Q's solve on the same view, no cell filled by the leaf.
-            return _q_ranker(reg, views(side), side, rank_fill)
+            return _q_ranker(reg, views(side), side, rank_fill, q_given.get(side))
         parts = [
             (
                 policy_ranking(policy, at, side)
@@ -829,12 +839,21 @@ def _menus(
     return own, foe
 
 
-def _q_ranker(
-    reg: Regulation, views: list[tuple[Position, float]], side: int, label: str
-) -> Any:  # noqa: ANN401
-    """The ``q`` rank fills' ranking (IKA-274, `qrank`) from the one view `_menus` reads."""
+def _one_view(views: list[tuple[Position, float]]) -> Position:
+    """The one position of `_menus.views` (a Q ranks from one view, as the leaf does)."""
     (at, _weight), = views
-    return qrank.q_ranking(reg, at, side, qrank.installed(), label)
+    return at
+
+
+def _q_ranker(
+    reg: Regulation, views: list[tuple[Position, float]], side: int, label: str,
+    given: Any = None,  # noqa: ANN401 - qrank.Given
+) -> Any:  # noqa: ANN401
+    """The ``q`` rank fills' ranking (IKA-274, `qrank`) from the one view `_menus` reads,
+    by the Q the label names; `given` is `qrank.prefetch`'s answer for this side."""
+    return qrank.q_ranking(
+        reg, _one_view(views), side, qrank.installed(qrank.q_name(label)), label, given
+    )
 
 
 def _remembered(rank: Any) -> Any:  # noqa: ANN401

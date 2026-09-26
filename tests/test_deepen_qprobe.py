@@ -255,7 +255,7 @@ def _open_run(full, q, k, monkeypatch, swap=False):  # noqa: ANN001, ANN202
     monkeypatch.setattr(port, "batched_payoff", payoff)
     model = None if q is None else _MatrixQ(q)
     if model is not None:
-        monkeypatch.setattr(qrank, "_INSTALLED", [model])
+        monkeypatch.setattr(qrank, "_INSTALLED", {"": model})
     rows, cols = [0, 1], [0]
     payoff0 = full[np.ix_(rows, cols)]
     root = deepen_mod._Node(
@@ -370,7 +370,7 @@ def _strip_q(payload: dict) -> dict:
 
 def test_in_a_game_a_list_past_the_outside_plays_the_all_game(setup, monkeypatch) -> None:  # noqa: ANN001, F811
     model = _HashQ()
-    monkeypatch.setattr(qrank, "_INSTALLED", [model])
+    monkeypatch.setattr(qrank, "_INSTALLED", {"": model})
     plain = _payload(_hidden_game(setup, "m60sallh"))
     wide = _payload(_hidden_game(setup, "m60sq9999h"))
     assert model.calls > 0
@@ -385,7 +385,7 @@ def test_in_a_game_a_list_past_the_outside_plays_the_all_game(setup, monkeypatch
 
 
 def test_in_a_game_q3_narrows_and_is_reproducible(setup, monkeypatch) -> None:  # noqa: ANN001, F811
-    monkeypatch.setattr(qrank, "_INSTALLED", [_HashQ()])
+    monkeypatch.setattr(qrank, "_INSTALLED", {"": _HashQ()})
     game = _hidden_game(setup, "m60sq1h")
     again = _hidden_game(setup, "m60sq1h")
     assert _payload(game) == _payload(again)

@@ -158,14 +158,14 @@ def _install_q(args: argparse.Namespace, reg: Regulation, ap: argparse.ArgumentP
         ap.error(f"--rank-fill {args.rank_fill} ranks the leaf-ranked menu: it needs --rank-leaf")
     from pokeuraou.encode import Encoder
 
-    # A deepen label whose oracle probes by a Q (IKA-322's q<k>) wants the same Q; it
+    # A deepen label whose oracle probes by a Q (IKA-322's q<k>) wants the default Q; it
     # is named to `install_from_args` as a q fill would be.
     probing = ["q"] if deepen_spec(args.deepen).q_probe is not None else []
     wanted = qrank.is_q(args.rank_fill) or bool(probing)
     encoder = Encoder(reg) if wanted else None
-    model = qrank.install_from_args(args, encoder, (args.rank_fill, *probing), ap.error)
-    if model is not None:
-        print(f"  Q: {', '.join(model.describe())} "
+    models = qrank.install_from_args(args, encoder, (args.rank_fill, *probing), ap.error)
+    if models:
+        print(f"  Q: {', '.join(qrank.describe_installed(models))} "
               + (f"(the {args.q_arm} arm on {args.inference})" if args.q_arm else "(loaded here)"),
               file=sys.stderr)
 

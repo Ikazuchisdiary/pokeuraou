@@ -200,7 +200,7 @@ class _Handler(socketserver.StreamRequestHandler):
                     for name, group in server.arms.items()  # type: ignore[attr-defined]
                 },
             }
-        if request.get("op") in ("q", "describe_q"):
+        if request.get("op") in ("q", "q_many", "describe_q"):
             return _serve_q(server, request, attached)
         if request.get("op") not in ("score", "score_segments"):
             raise ValueError(f"unknown op {request.get('op')!r}")
@@ -254,7 +254,8 @@ class _Handler(socketserver.StreamRequestHandler):
 
 
 def _serve_q(server: Any, request: dict[str, Any], attached: dict) -> dict[str, Any]:  # noqa: ANN401
-    """A Q arm's two ops (IKA-274, `qrank`): what it is, and one position's matrix."""
+    """A Q arm's ops (IKA-274, `qrank`): what it is, one position's matrix, and several
+    positions' matrices in one round trip (``q_many``, each answered as its own ``q``)."""
     name = request["model"]
     q_models = getattr(server, "q_models", {})
     if name not in q_models:
@@ -267,11 +268,14 @@ def _serve_q(server: Any, request: dict[str, Any], attached: dict) -> dict[str, 
     if handle not in attached:
         attached[handle] = shared_memory.SharedMemory(name=handle)
     buffer = attached[handle].buf
-    matrix = model(_views(buffer, request["layout"]))
-    if list(matrix.shape) != [int(n) for n in request["shape"]]:
-        raise ValueError(f"Q answered {matrix.shape}, asked {request['shape']}")
-    out = int(request["result_offset"])
-    buffer[out : out + matrix.nbytes] = np.ascontiguousarray(matrix, dtype=np.float64).tobytes()
+    for item in request["items"] if request["op"] == "q_many" else [request]:
+        matrix = model(_views(buffer, item["layout"]))
+        if list(matrix.shape) != [int(n) for n in item["shape"]]:
+            raise ValueError(f"Q answered {matrix.shape}, asked {item['shape']}")
+        out = int(item["result_offset"])
+        buffer[out : out + matrix.nbytes] = np.ascontiguousarray(
+            matrix, dtype=np.float64
+        ).tobytes()
     return {"ok": True}
 
 

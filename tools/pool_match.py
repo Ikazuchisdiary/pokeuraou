@@ -156,8 +156,9 @@ def _ends_rule(leaf: object) -> str:
 
 
 def _install_q(args: argparse.Namespace, encoder: Encoder, ap: argparse.ArgumentParser) -> list[str]:
-    """The Q the q rank fills rank by (IKA-274): installed, and its files as the server
-    (or this worker) holds them -- for the records and the echo. Empty without a q fill."""
+    """The Qs the q rank fills rank by (IKA-274): installed, and their files as the server
+    (or this worker) holds them -- for the records and the echo; a named Q's (stage 3,
+    ``q-nocover.NAME``) as ``NAME=file``. Empty without a q fill."""
     for fill, leafy, label in ((args.rank_fill, args.rank_leaf, "--rank-fill"),
                                (args.baseline_rank_fill, args.baseline_rank_leaf,
                                 "--baseline-rank-fill")):
@@ -165,18 +166,18 @@ def _install_q(args: argparse.Namespace, encoder: Encoder, ap: argparse.Argument
             # A damage-ranked arm never reaches the ranking, so the label would be recorded
             # and played by nobody.
             ap.error(f"{label} {fill} ranks the leaf-ranked menu: it needs that arm's rank-leaf")
-    # A deepen label whose oracle probes by a Q (IKA-322's q<k>) wants the same Q; it is
-    # named to `install_from_args` as a q fill would be, so the flags' checks hold for it.
+    # A deepen label whose oracle probes by a Q (IKA-322's q<k>) wants the default Q; it
+    # is named to `install_from_args` as a q fill would be, so the flags' checks hold for it.
     probing = ["q" for label in (args.deepen, args.baseline_deepen)
                if deepen_spec(label).q_probe is not None]
-    model = qrank.install_from_args(
+    models = qrank.install_from_args(
         args, encoder, (args.rank_fill, args.baseline_rank_fill, *probing), ap.error
     )
-    if model is None:
+    if not models:
         return []
-    files = model.describe()
+    files = qrank.describe_installed(models)
     print(f"  Q: {', '.join(files)} "
-          + (f"(the {args.q_arm} arm on {args.inference})" if args.q_arm else "(loaded here)"),
+          + (f"(served by {args.inference})" if args.inference else "(loaded here)"),
           file=sys.stderr)
     return files
 
