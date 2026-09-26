@@ -67,8 +67,9 @@ from pokeuraou.search import DEFAULT_RANK_FILL, SHIPPED_RANK_FILL, parse_rank_fi
 from pokeuraou.selfplay import MAX_TURNS  # noqa: E402
 from pokeuraou.teams import load_roster  # noqa: E402
 
-#: The M-C leaf that ships (CLAUDE.md): the two-model ensemble.
-DEFAULT_VALUE = ("data/models/value-mc0.pt", "data/models/value-mc0-s1.pt")
+#: The M-C leaf that ships (CLAUDE.md): the two-model ensemble. gen-1 since IKA-346
+#: (value-mc0x2 before it).
+DEFAULT_VALUE = ("data/models/value-mc1.pt", "data/models/value-mc1-s1.pt")
 #: Where the Q that q-nocover ranks by is looked for when --q-model is not given: the same
 #: file generation and the board rank by (IKA-338). Without it the menus fall back, with a
 #: note -- here, not in generation or on the board, which stop.

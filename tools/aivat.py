@@ -557,7 +557,7 @@ def _games(directory: Path) -> Any:  # noqa: ANN401
 
 def compute(args: argparse.Namespace) -> None:
     models = args.value or [
-        ROOT / "data" / "models" / "value-mc0.pt", ROOT / "data" / "models" / "value-mc0-s1.pt"
+        ROOT / "data" / "models" / "value-mc1.pt", ROOT / "data" / "models" / "value-mc1-s1.pt"
     ]
     reg, evaluate = _evaluator(models, args.device, args.format, args.pool)
     k, n = (int(x) for x in args.shard.split("/"))
@@ -870,7 +870,8 @@ def main(argv: list[str] | None = None) -> None:
     c = sub.add_parser("compute")
     c.add_argument("dir", type=Path)
     c.add_argument("--out", type=Path, required=True)
-    c.add_argument("--value", type=Path, nargs="+", help="the evaluator (default value-mc0x2)")
+    c.add_argument("--value", type=Path, nargs="+",
+                   help="the evaluator (default value-mc1x2, the shipped M-C leaf)")
     c.add_argument("--device", default=None)
     c.add_argument("--format", default="gen9championsvgc2026regmc")
     c.add_argument("--shard", default="0/1", help="k/n: the games whose index is k mod n")
