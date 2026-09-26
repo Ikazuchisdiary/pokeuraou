@@ -50,12 +50,12 @@ function learn(m) {
 }
 function infoOf(name) { return S.info.get(name) || { id: null, types: [] }; }
 function spriteUrl(id) { return SPRITE_URL && id ? SPRITE_URL.replace("{id}", encodeURIComponent(id)) : null; }
-function art(name, size, title) {
+function art(name, size, title, letters) {
   const inf = infoOf(name);
   const t1 = TYPE_COLORS[inf.types[0]] || "", t2 = TYPE_COLORS[inf.types[1]] || "";
   const style = `${t1 ? `--t1:${t1};` : ""}${t2 ? `--t2:${t2};` : ""}`;
   const url = spriteUrl(inf.id);
-  const fb = `<span class="fb-full">${esc(name)}</span><span class="fb-short">${esc(String(name).slice(0, 1))}</span>`;
+  const fb = `<span class="fb-full">${esc(name)}</span><span class="fb-short">${esc(String(name).slice(0, letters || 1))}</span>`;
   const tip = esc(title || name);
   if (!url || badSprite.has(url)) return `<span class="art s-${size} fb" style="${style}" title="${tip}">${fb}</span>`;
   return `<span class="art s-${size}" style="${style}" title="${tip}">${fb}<img src="${esc(url)}" alt="${esc(name)}" decoding="async"></span>`;
@@ -96,17 +96,21 @@ function partBody(p, chunked) {
   if (tside >= 0 && tname) {
     learn({ species: tname, id: tsprite });
     const tip = `${tname}（${sideName(tside)}の側）`;
-    h += `<span class="tgt ${tside === aiSide() ? "a" : "y"}" aria-label="→ ${esc(tip)}"><span class="arrow" aria-hidden="true">→</span>${art(tname, "xs", tip)}</span>`;
+    // Two letters on a name card: one would not tell ガオガエン from ガブリアス.
+    h += `<span class="tgt ${tside === aiSide() ? "a" : "y"}" aria-label="→ ${esc(tip)}"><span class="arrow" aria-hidden="true">→</span>${art(tname, "xs", tip, 2)}</span>`;
   }
-  if (mega) h += MEGA;
   return `<span class="pbody">${h}</span>`;
 }
 function actHtml(parts, who, size, chunked) {
   return (parts || []).map((p) => {
     const slot = p[0], t = p[1];
     const name = slot >= 0 && who ? who[slot] : null;
-    // A slot that cannot act (its Pokemon fainted) passes: shown, quietly.
-    return `<span class="part${t === "行動なし" || t === "pass" ? " idle" : ""}">${name ? art(name, size || "xs") : ""}${partBody(p, chunked)}</span>`;
+    // Mega Evolution is the user's: its mark sits on the user's icon (or after the move
+    // where there is no icon). A slot that cannot act (its Pokemon fainted) passes, quietly.
+    const mega = p.length >= 7 && p[6];
+    const user = name ? `<span class="user">${art(name, size || "xs")}${mega ? MEGA : ""}</span>` : "";
+    const body = partBody(p, chunked) + (mega && !name ? MEGA : "");
+    return `<span class="part${t === "行動なし" || t === "pass" ? " idle" : ""}">${user}${body}</span>`;
   }).join("");
 }
 const benchText = (bench) => (bench && bench.length ? bench.join(" / ") : "–");

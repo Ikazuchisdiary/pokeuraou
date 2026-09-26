@@ -321,7 +321,13 @@ h3 small { font-weight: 400; font-size: 11px; color: var(--faint); letter-spacin
 .part .tgt, .part .tgt span { overflow: visible; }
 .tgt .arrow { font-weight: 700; }
 .tgt.a .arrow { color: var(--ai-ink); } .tgt.y .arrow { color: var(--you-ink); }
-.tgt.a .art { box-shadow: 0 0 0 1.5px var(--ai); } .tgt.y .art { box-shadow: 0 0 0 1.5px var(--you); }
+.tgt.a .art { box-shadow: 0 0 0 var(--tgt-ring, 2px) var(--ai); } .tgt.y .art { box-shadow: 0 0 0 var(--tgt-ring, 2px) var(--you); }
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --tgt-ring: 1.5px; } }
+:root[data-theme="dark"] { --tgt-ring: 1.5px; }
+.tgt .art .fb-short { font-size: 9px; letter-spacing: -0.02em; }
+.part .user { position: relative; display: inline-flex; flex: none; overflow: visible; }
+.part .user .mega-mark { position: absolute; right: -3px; bottom: -3px; width: 10px; height: 10px;
+  box-shadow: 0 0 0 1.5px var(--surface); }
 .mega-mark { display: inline-block; flex: none; width: 14px; height: 14px; border-radius: 50%;
   background: radial-gradient(circle, #fff 0 24%, transparent 27%),
     conic-gradient(#d9443b, #ee9a2e, #e9cf3a, #4fb865, #3a86d8, #8458cc, #d9443b);
