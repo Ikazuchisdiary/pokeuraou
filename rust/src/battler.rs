@@ -212,6 +212,9 @@ pub struct DamageResult {
     pub rolls: [i64; N_ROLLS],
     pub effectiveness: f64,
     pub type_mod: i64,
+    /// The type the hit was calculated with: the move's, after a skin (`effective_move_type`)
+    /// or its own change (`effective_type`). A resist berry reads this (IKA-326).
+    pub move_type: Id,
     pub immune: bool,
     /// What the calculator could not account for, in Python's own wording. Usually empty,
     /// and an empty `Vec` does not allocate.
