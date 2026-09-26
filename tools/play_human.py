@@ -24,11 +24,20 @@ as its number in the legal list or its choice string), or ``record:<games.jsonl>
 clock).
 
 Each game appends one line to ``--out`` and its clock to ``<out>.clock.jsonl``.
+
+The screen (IKA-332): ``--view`` serves a page at http://127.0.0.1:8332/ (``--view-port``)
+that shows the board, the agent's answer as it forms (its mixture, the value over time, the
+cells and levels read, the opponent's mixture and the bench belief, the principal variation
+as a tree) and takes the person's input with ``--person web``. ``--live-out`` keeps the
+page's frames (`liveview.FileSink`); ``tools/live_view.py`` shows such a file again.
+
+    uv run python tools/play_human.py --seconds 15 --cores 8 --person web --view
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import re
 import sys
 import time
@@ -37,7 +46,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from pokeuraou import humanplay, qrank, rustnode  # noqa: E402
+from pokeuraou import humanplay, liveview, qrank, rustnode  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.hidden import DEFAULT_BENCH_DROP, parse_bench_drop  # noqa: E402
 from pokeuraou.names import localiser  # noqa: E402
@@ -71,7 +80,11 @@ def _team(pool, key: str):  # noqa: ANN001, ANN202
     raise SystemExit(f"no team {key!r} in {pool.id}")
 
 
-def _person(spec: str, reg, loc, seed: int):  # noqa: ANN001, ANN202
+def _person(spec: str, reg, loc, seed: int, server=None):  # noqa: ANN001, ANN202
+    if spec == "web":
+        if server is None:
+            raise SystemExit("--person web answers from the page: give --view")
+        return liveview.WebPerson(server)
     if spec == "terminal":
         return humanplay.TerminalPerson(reg, loc)
     if spec in ("first", "random"):
@@ -81,7 +94,9 @@ def _person(spec: str, reg, loc, seed: int):  # noqa: ANN001, ANN202
     if spec.startswith("record:"):
         path, _, line = spec[len("record:"):].partition("@")
         return humanplay.ScriptPerson.from_record(Path(path), int(line or 0))
-    raise SystemExit(f"--person is terminal, first, random, script:<file> or record:<file>[@n], not {spec!r}")
+    raise SystemExit(
+        f"--person is terminal, web, first, random, script:<file> or record:<file>[@n], not {spec!r}"
+    )
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -123,7 +138,20 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--locale", default="ja")
     ap.add_argument("--device", default=None)
     ap.add_argument("--quiet", action="store_true", help="no board on the terminal (stand-in persons)")
+    ap.add_argument("--view", action="store_true",
+                    help="serve the page that shows the game and the agent's reading (IKA-332)")
+    ap.add_argument("--view-host", default="127.0.0.1")
+    ap.add_argument("--view-port", type=int, default=8332)
+    ap.add_argument("--live-out", type=Path, default=None,
+                    help="keep the page's frames in this file (tools/live_view.py shows it again)")
+    ap.add_argument("--sprite-url", default=None,
+                    help="the page's images, {id} = Showdown's sprite id (default: Showdown's server; "
+                    "\"\" for none, name cards)")
+    ap.add_argument("--interval-ms", type=float, default=100.0,
+                    help="the least time between two steps sent while the agent thinks")
     args = ap.parse_args(argv)
+    if args.person == "web":
+        args.view = True
     parse_bench_drop(args.bench_drop)
 
     pool = load_pool(args.pool)
@@ -188,7 +216,16 @@ def main(argv: list[str] | None = None) -> None:
         + f" / {args.seconds:g} s a move on {args.cores} core(s), {args.clock} clock"
         + (" / width only" if args.width_only else "") + " / bench hidden")
 
-    person = _person(args.person, reg, loc, args.seed)
+    server = None
+    if args.view or args.live_out is not None:
+        sink = liveview.FileSink(args.live_out) if args.live_out is not None else None
+        server = liveview.LiveServer(
+            args.view_host, args.view_port if args.view else 0, sink=sink,
+            sprite_url=args.sprite_url,
+        ).start()
+        if args.view:
+            print(f"画面: {server.url}", file=sys.stderr)
+    person = _person(args.person, reg, loc, args.seed, server)
     for n in range(args.games):
         index = args.game_index + n
         if args.human_team_file or args.agent_team_file:
@@ -209,7 +246,9 @@ def main(argv: list[str] | None = None) -> None:
         started = time.perf_counter()
         payload, clock, game = humanplay.play(
             agent, person, teams, agent_side=agent_side, seed=args.seed, game_index=index,
-            max_turns=args.max_turns, loc=loc, out=None if args.quiet else sys.stdout,
+            max_turns=args.max_turns, loc=loc,
+            out=None if args.quiet or args.person == "web" else sys.stdout,
+            listener=None if server is None else server.listener, interval_ms=args.interval_ms,
         )
         payload["pool"] = {"id": pool.id, "sha256": pool.sha256}
         if q_files:
@@ -232,6 +271,13 @@ def main(argv: list[str] | None = None) -> None:
             file=sys.stderr,
         )
         del game
+    if server is not None:
+        if server.sink is not None:
+            server.sink.close()
+        if args.view and not args.quiet:
+            with contextlib.suppress(EOFError, KeyboardInterrupt):
+                input("画面を閉じるには Enter（Ctrl+C）> ")
+        server.close()
 
 
 if __name__ == "__main__":
