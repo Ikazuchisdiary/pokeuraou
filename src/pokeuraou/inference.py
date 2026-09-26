@@ -725,12 +725,16 @@ def served_model(value: Any):
         encoded = Encoded(**{name: arrays[name] for name in ARRAYS}, unknown_volatiles={})
         arrived = time.perf_counter()
         instance = mine()
-        entered = time.perf_counter()
-        out = instance.from_encoded(encoded)
-        done = time.perf_counter()
+        # Through the process's gate (`EAGER_PASSES`, IKA-334): a pass holds its
+        # activations on the card until its answer is back, and the card runs the passes
+        # one after another anyway. Waiting at the gate counts as `waited`.
+        with _EAGER_GATE:
+            entered = time.perf_counter()
+            out = instance.from_encoded(encoded)
+            done = time.perf_counter()
         # Kept for the same reason they were added: they are how anyone knows whether the
-        # serving side is queueing. `waited` is now only the cost of finding this thread's
-        # copy, so it should sit near zero and its growing again would mean something new.
+        # serving side is queueing. `waited` is finding this thread's copy and the wait at
+        # the eager gate (IKA-334); the gate's wait replaces a wait the card imposed anyway.
         score.waited += entered - arrived
         score.held += done - entered
         score.calls += 1
@@ -774,6 +778,21 @@ def served_model(value: Any):
 #: graphs per arm. A replay saves 0.86 ms of CPU over eager on the single net and 1.66 ms
 #: on a two-net ensemble; a capture costs about one eager pass.
 GRAPH_ROWS = int(os.environ.get("POKEURAOU_GRAPH_ROWS", "512"))
+
+#: Eager forward passes (the value arms' blocks over `GRAPH_ROWS`) the serving threads run
+#: at once, process-wide (IKA-334). Each holds about 0.39 GB of activations for a 4,096-row
+#: chunk of a two-net ensemble until its answer is back, so twelve serving threads at once
+#: held 4.6 GB a server. Two servers of that, beside the desktop, filled the 12 GB card;
+#: WDDM does not fail the allocation but pages it to system memory, and the card hung
+#: (TDR) and took both servers with it -- IKA-274 stage 3's first board, and again on the
+#: shipped build under the same board shape. The passes share the one stream, so the card
+#: runs them one after another whatever this is: 12 threads through a gate of 2 did the
+#: same work in the same wall time (0.73-0.76 s against 0.77-0.87 s ungated) with a peak
+#: of 1.0 GB against 3.0 GB, answers bit-equal. 0 lifts the gate.
+EAGER_PASSES = int(os.environ.get("POKEURAOU_EAGER_PASSES", "2"))
+_EAGER_GATE = (
+    threading.BoundedSemaphore(EAGER_PASSES) if EAGER_PASSES > 0 else contextlib.nullcontext()
+)
 
 #: Graphs kept per arm (and index dtype), least recently replayed dropped first. Each holds
 #: about 0.65 MB of host memory on one net and 0.86 MB on a two-net ensemble (IKA-107: 511
