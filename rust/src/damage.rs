@@ -287,6 +287,12 @@ fn collect(slot: Slot, ctx: &Ctx, a: &Battler, d: &Battler, field: &FieldState) 
                 && (berry_type == "Normal" || ctx.type_mod > 0)
             {
                 chain.add(0.5, 1.0, "resistberry");
+                // Ripen's `onEatItem` marks a resist berry, and its
+                // `onSourceModifyDamage` (priority -1, after the berry's) halves again.
+                // Not `breakable`: Mold Breaker leaves it (IKA-329).
+                if d.ability == "ripen" {
+                    chain.add(0.5, 1.0, "ripen");
+                }
             }
         }
     }
