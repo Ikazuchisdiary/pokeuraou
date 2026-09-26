@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import itertools
 import json
 import os
 import subprocess
@@ -292,6 +293,11 @@ class EncodedNode:
         for index, value in header["decided"]:
             if int(index) < n:
                 decided[int(index)] = float(value)
+        spans = (
+            _binary_spans(header, body)
+            if "spanCount" in header
+            else [(int(i), int(j), list(indices), list(w)) for i, j, indices, w in header["spans"]]
+        )
         return EncodedNode(
             encoded=Encoded(
                 species=arrays["species"],
@@ -305,10 +311,7 @@ class EncodedNode:
                 unknown_volatiles=dict(header.get("unknownVolatiles", {})),
                 decided=decided,
             ),
-            spans=[
-                (int(i), int(j), list(indices), list(w))
-                for i, j, indices, w in header["spans"]
-            ],
+            spans=spans,
             folded=[(int(i), int(j), root) for i, j, root in header["folded"]],
             exact=header["exact"],
             refused=[(int(i), int(j), str(why)) for i, j, why in header["refused"]],
@@ -332,6 +335,40 @@ class EncodedNode:
                 else None
             ),
         )
+
+
+def _binary_spans(
+    header: dict[str, Any], body: Any  # noqa: ANN401 - a bytearray or a memoryview of one
+) -> list[tuple[int, int, list[int], list[float]]]:
+    """A node's spans out of its body (IKA-302), as the lists the JSON header gave.
+
+    The block follows the arrays and the leaf values, at `spanAt`: every span's weights
+    (f64), then the spans' rows, columns and lengths (u32 each), then every span's leaf
+    indices (u32), all little-endian. The weights are the port's doubles bit for bit, as
+    JSON's shortest round-trip text of them was, and each span is handed on as Python
+    lists, as before -- the folds build their own arrays from them.
+    """
+    import numpy as np
+
+    count = int(header["spanCount"])
+    total = int(header["spanLeaves"])
+    at = int(header["spanAt"])
+    weights = np.frombuffer(body, dtype="<f8", count=total, offset=at).tolist()
+    at += total * 8
+    rows = np.frombuffer(body, dtype="<u4", count=count, offset=at).tolist()
+    at += count * 4
+    cols = np.frombuffer(body, dtype="<u4", count=count, offset=at).tolist()
+    at += count * 4
+    lengths = np.frombuffer(body, dtype="<u4", count=count, offset=at).tolist()
+    at += count * 4
+    indices = np.frombuffer(body, dtype="<u4", count=total, offset=at).tolist()
+    spans = []
+    start = 0
+    for i, j, length in zip(rows, cols, lengths, strict=True):
+        end = start + length
+        spans.append((i, j, indices[start:end], weights[start:end]))
+        start = end
+    return spans
 
 
 @dataclass
@@ -427,6 +464,9 @@ def reset() -> None:
             continue
         with contextlib.suppress(Exception):
             node.close()
+    # A fresh process holds no positions, and numbers the old one gave its branches may be
+    # given again by the new one (IKA-302): what this side holds goes with it.
+    _forget()
 
 
 #: How many times a failure may be answered by starting a fresh process before the bridge
@@ -545,6 +585,10 @@ class RustNode:
         self._shm: Any = None
         #: Set when a block could not be made, so the pipe is not re-refused per node.
         self._shm_off = SHM_MAX_BYTES <= 0
+        #: IKA-302: the numbers of the positions this process holds, and whether a
+        #: `forget` is owed ahead of the next request (`_forget`).
+        self._known: set[int] = set()
+        self._forget_owed = False
 
     def close(self) -> None:
         if self._process.poll() is None:
@@ -650,6 +694,27 @@ class RustNode:
         ran on the pool, `offMain` of them on a thread other than the one reading requests."""
         return self._exchange({"kind": "parallel"})
 
+    def _defined(self, requests: Sequence[dict[str, Any]]) -> bytes:
+        """The lines that go ahead of `requests` (IKA-302): a `forget` if one is owed,
+        and a `hold` for each position they name that this process does not hold yet.
+        Neither is answered. Called when the requests are sent, not when written, so a
+        request answered from `_ANSWERS` defines nothing."""
+        lines: list[bytes] = []
+        if self._forget_owed:
+            lines.append(b'{"kind": "forget"}\n')
+            self._forget_owed = False
+        known = self._known
+        for request in requests:
+            stored = request.get("position")
+            if stored.__class__ is _Stored and stored.key not in known:
+                known.add(stored.key)
+                body = stored.json_text()
+                lines.append(
+                    f'{{"kind": "hold", "id": {stored.key}, "position": {body}}}\n'.encode()
+                )
+                timing.count("position.defined")
+        return b"".join(lines)
+
     def _exchange(self, request: dict[str, Any]) -> dict[str, Any]:
         """One request out, one header line back, with this end's JSON named.
 
@@ -665,7 +730,7 @@ class RustNode:
             return kept
         if timing.DUPES:
             _note_repeat(request)
-        self._process.stdin.write(payload + b"\n")
+        self._process.stdin.write(self._defined((request,)) + payload + b"\n")
         self._process.stdin.flush()
         line = self._with_deadline(self._process.stdout.readline, "header")
         if not line:
@@ -753,7 +818,7 @@ class RustNode:
                 _note_repeat(request)
         timing.count(f"port.{kind}.lines")
         timing.count(f"port.{kind}.requests", len(requests))
-        self._process.stdin.write(payload + b"\n")
+        self._process.stdin.write(self._defined(requests) + payload + b"\n")
         self._process.stdin.flush()
         line = self._with_deadline(self._process.stdout.readline, "header")
         if not line:
@@ -836,6 +901,9 @@ class RustNode:
     ) -> list[PortTurn | str]:
         """`turn` for many (position, actions) in one crossing (IKA-295). A refused turn is
         its refusal's text in place of the answer, where `turn` would have returned None."""
+        # IKA-302: with positions held, the port keeps every branch it writes under a
+        # number, and a sub-game's `score` and `fills` name it instead of sending it back.
+        refs = {"refs": True} if _HOLD[0] and full else {}
         answers = self._many(
             [
                 {
@@ -846,14 +914,25 @@ class RustNode:
                     "full": full,
                     "select": None,
                     "events": False,
+                    **refs,
                 }
                 for pos, actions in asks
             ]
         )
-        return [
-            str(answer["refused"]) if answer.get("refused") else PortTurn.read(answer)
-            for answer in answers
-        ]
+        out: list[PortTurn | str] = []
+        for answer in answers:
+            if answer.get("refused"):
+                out.append(str(answer["refused"]))
+                continue
+            turn = PortTurn.read(answer)
+            if refs and turn.outcomes:
+                for outcome, raw in zip(turn.outcomes, answer["branches"], strict=True):
+                    key = raw.get("held")
+                    if key is not None:
+                        _store(outcome.position, int(key))
+                        self._known.add(int(key))
+            out.append(turn)
+        return out
 
     @timing.timed("rust.fill")
     def fill_encoded_many(
@@ -1084,6 +1163,7 @@ class RustNode:
         cells: Sequence[tuple[int, int]] | None = None,
         *,
         rules: Any = None,  # noqa: ANN401 - EncodingRules; encode imports numpy
+        json_spans: bool = False,
     ) -> EncodedNode:
         """The node's leaves, already encoded, and how to fold their values.
 
@@ -1111,6 +1191,10 @@ class RustNode:
         # Only these cells, when the caller is solving rather than tabulating.
         if cells is not None:
             request["cells"] = [[int(i), int(j)] for i, j in cells]
+        # IKA-302: the spans come in the body; `json_spans` asks for the old JSON road, which
+        # only the test holding the two to the same lists does.
+        if json_spans:
+            request["jsonSpans"] = True
         # Sent only for a leaf that asks for an undone fix, so every other request is the
         # bytes it always was.
         wants_old = bool(rules is not None and rules.mega_from_slots)
@@ -1464,8 +1548,8 @@ def _note_repeat(request: dict[str, Any]) -> None:
         position = request["position"]
         where = hashlib.blake2b(
             (
-                position.text
-                if isinstance(position, _Held)
+                position.json_text()
+                if isinstance(position, _Stored)
                 else json.dumps(position, ensure_ascii=False)
             ).encode("utf-8"),
             digest_size=16,
@@ -1499,10 +1583,12 @@ def _note_repeat(request: dict[str, Any]) -> None:
 # edits one in place and asks again is exactly what the switch keeps this away from.
 
 _HOLD = [False]
-#: id -> (the object, its text). The object is held so its id cannot be reused.
-_HELD: dict[int, tuple[Position, _Held]] = {}
+#: id -> (the object, its entry). The object is held so its id cannot be reused.
+_HELD: dict[int, tuple[Position, _Stored]] = {}
 #: A request's bytes -> the answer, for the kinds answered from the position alone.
 _ANSWERS: dict[bytes, dict[str, Any]] = {}
+#: A held position's text -> its entry, so equal objects share a number (`_position`).
+_BY_TEXT: dict[str, _Stored] = {}
 _ANSWERED_KINDS = frozenset({"score"})
 #: Past this many positions in one decision the memo starts again (a bound, not a tune).
 _HELD_MAX = 512
@@ -1511,7 +1597,7 @@ _MARK = "\x00held\x00"
 
 
 class _Held:
-    """A position already written as JSON text, spliced into the request as it is sent."""
+    """Text already written, spliced into the request as it is sent (`_candidates`)."""
 
     __slots__ = ("text",)
 
@@ -1519,8 +1605,40 @@ class _Held:
         self.text = text
 
 
+#: IKA-302: the numbers this side gives the positions it holds in the port. Even, and
+#: never reused; the port's own (a branch it wrote, `refs`) are odd.
+_KEYS = itertools.count(2, 2)
+
+
+class _Stored:
+    """A position the port holds, or is told to hold, under `key` (IKA-302).
+
+    A request carries `{"held": key}` where the position was (`text`). Before the
+    first request that names it goes to a node that does not hold it, the position
+    itself goes as a `hold` line (`RustNode._defined`), written from the object as it
+    is then -- once a decision, as the text memo it replaces was.
+    """
+
+    __slots__ = ("_json", "key", "pos", "text")
+
+    def __init__(self, key: int, pos: Position) -> None:
+        self.key = key
+        self.pos = pos
+        self.text = f'{{"held": {key}}}'
+        self._json: str | None = None
+
+    def json_text(self) -> str:
+        """The position's JSON, written once."""
+        if self._json is None:
+            data = self.pos.to_json()
+            with timing.stage("rust.ask"):
+                self._json = json.dumps(data, ensure_ascii=False)
+        return self._json
+
+
 def hold_positions(on: bool = True) -> None:
-    """Keep each position's JSON text, and each `score` answer, for one decision."""
+    """Hold each position in the port by number, and keep each `score` answer, for one
+    decision (IKA-264; by number since IKA-302)."""
     _HOLD[0] = on
     _forget()
     timing.on_decided(_forget)
@@ -1528,31 +1646,57 @@ def hold_positions(on: bool = True) -> None:
 
 def _forget() -> None:
     _HELD.clear()
+    _BY_TEXT.clear()
     _ANSWERS.clear()
+    # And the port's: a `forget` line goes ahead of the next request to each node that
+    # holds anything (IKA-302).
+    for node in _NODES.values():
+        if node is not None and node._known:  # noqa: SLF001
+            node._known.clear()  # noqa: SLF001
+            node._forget_owed = True  # noqa: SLF001
 
 
-def _position(pos: Position) -> dict[str, Any] | _Held:
-    """`pos.to_json()`, or with `hold_positions` its text, written once a decision."""
+def _position(pos: Position) -> dict[str, Any] | _Stored:
+    """`pos.to_json()`, or with `hold_positions` its number in the port (IKA-302)."""
     if not _HOLD[0]:
         return pos.to_json()
     found = _HELD.get(id(pos))
     if found is not None and found[0] is pos:
         timing.count("position.held")
         return found[1]
+    # Written now, as the text memo wrote it, and an object with the same text as one
+    # already held takes that one's number: the request is then the same bytes, and a
+    # `score` asked of either is answered from the first (`_ANSWERS`), as it was.
+    stored = _Stored(next(_KEYS), pos)
+    text = stored.json_text()
+    same = _BY_TEXT.get(text)
+    if same is not None:
+        stored = same
+    else:
+        _BY_TEXT[text] = stored
+    return _store(pos, stored)
+
+
+def _store(pos: Position, stored: _Stored | int) -> _Stored:
+    """Hold `pos` under `stored` (or a new entry for the port's number `stored`)."""
     if len(_HELD) >= _HELD_MAX:
         _HELD.clear()
-    data = pos.to_json()
-    with timing.stage("rust.ask"):
-        held = _Held(json.dumps(data, ensure_ascii=False))
-    _HELD[id(pos)] = (pos, held)
-    return held
+        _BY_TEXT.clear()
+    if not isinstance(stored, _Stored):
+        stored = _Stored(stored, pos)
+    _HELD[id(pos)] = (pos, stored)
+    return stored
 
 
 def _payload(request: dict[str, Any]) -> bytes:
     """The request's line, byte for byte what `json.dumps(request)` wrote before: a held
     position (or a `score` request's candidates, `_candidates`) is written in its place,
     where its dict would have been written."""
-    held = [(key, value) for key, value in request.items() if value.__class__ is _Held]
+    held = [
+        (key, value)
+        for key, value in request.items()
+        if value.__class__ is _Held or value.__class__ is _Stored
+    ]
     if not held:
         return json.dumps(request, ensure_ascii=False).encode("utf-8")
     text = json.dumps(

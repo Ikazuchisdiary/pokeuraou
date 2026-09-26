@@ -3,8 +3,9 @@
 
 Three repeats of M-C generation's exchange with the port, each answered from the first:
 
-* a position sent again in the same decision is not written again (`hold_positions`): its
-  JSON text is kept and spliced into the request, byte for byte the line it was;
+* a position sent again in the same decision is not written again (`hold_positions`): it
+  goes to the port once, as a `hold` line, and every request names it by number (IKA-302;
+  until then its JSON text was kept and spliced into each request);
 * a `score` request made again in the same decision is answered from the first;
 * the port's `resolve` of a turn followed by the same turn with `select` (the caller's
   `weights` then `branch`) resolves the turn once.
@@ -69,20 +70,32 @@ def _lines(node: rustnode.RustNode) -> list[bytes]:
     return sent
 
 
-def test_a_held_position_is_spliced_in_as_the_same_bytes(bridged: None) -> None:
-    """The line with a held position is the line `json.dumps(request)` wrote (positive:
-    the text is held and reused; control: switched off, the dict goes as before)."""
+def _named(request: dict, key: int) -> bytes:
+    """`request`'s line with its position named by number, as a held one is sent."""
+    text = json.dumps({**request, "position": "\x00"}, ensure_ascii=False)
+    return text.replace('"\\u0000"', f'{{"held": {key}}}', 1).encode("utf-8")
+
+
+def test_a_held_position_is_named_by_number(bridged: None) -> None:
+    """The line with a held position is the line `json.dumps(request)` wrote with the
+    position's number where the position was (positive: the entry is held and reused;
+    control: switched off, the dict goes as before)."""
     reg, pos = _node()
     request = {"kind": "needed", "position": pos.to_json(), "side": 1}
     before = json.dumps(request, ensure_ascii=False).encode("utf-8")
 
     rustnode.hold_positions()
     held = rustnode._position(pos)
-    assert isinstance(held, rustnode._Held)
+    assert isinstance(held, rustnode._Stored)
     assert rustnode._position(pos) is held, "the same object was written twice"
-    assert rustnode._payload({"kind": "needed", "position": held, "side": 1}) == before
-    # Another object with the same content is its own entry (keyed on the object).
-    assert rustnode._position(pos.copy()) is not held
+    assert held.json_text() == json.dumps(pos.to_json(), ensure_ascii=False)
+    line = rustnode._payload({"kind": "needed", "position": held, "side": 1})
+    assert line == _named(request, held.key)
+    # Another object with the same content shares the number (the line is the same).
+    assert rustnode._position(pos.copy()).key == held.key
+    edited = pos.copy()
+    edited.turn += 1
+    assert rustnode._position(edited).key != held.key, "control: other content, other number"
 
     timing.decided("move")  # a decision ends: the memo goes with it
     assert rustnode._position(pos) is not held
@@ -99,9 +112,9 @@ def test_the_switch_is_what_keeps_an_edited_position_honest(bridged: None) -> No
     _reg, pos = _node()
     mon = pos.sides[0].pokemon[pos.sides[0].active[0]]
     rustnode.hold_positions()
-    first = rustnode._position(pos).text
+    first = rustnode._position(pos).json_text()
     mon.hp = max(1, mon.hp - 1)
-    assert rustnode._position(pos).text == first
+    assert rustnode._position(pos).json_text() == first
     rustnode.hold_positions(False)
     assert rustnode._position(pos) != json.loads(first)
 
@@ -151,9 +164,10 @@ def test_a_score_request_is_the_line_json_dumps_wrote(bridged: None) -> None:
         # Twice: the second is written from the kept texts.
         assert rustnode._payload({**plain, "candidates": rustnode._candidates(pool)}) == before
         rustnode.hold_positions()
-        held = {**texted, "position": rustnode._position(pos)}
-        assert isinstance(held["position"], rustnode._Held)
-        assert rustnode._payload(held) == before
+        stored = rustnode._position(pos)
+        held = {**texted, "position": stored}
+        assert isinstance(stored, rustnode._Stored)
+        assert rustnode._payload(held) == _named(plain, stored.key)
         rustnode.hold_positions(False)
 
 
@@ -208,6 +222,66 @@ def test_the_branch_after_the_weights_is_the_branch_a_fresh_port_gives(bridged: 
     port.weights(reg, pos, other, budget)
     assert port.branch(reg, pos, chosen, budget, last).to_json() == fresh[1]
     assert kept[0] != kept[1], "control: two branches of the turn are different positions"
+
+
+def test_a_position_crosses_once_a_decision(bridged: None) -> None:
+    """IKA-302: held, a position goes to the port once -- a `hold` line with its JSON,
+    ahead of the first request that names it -- and each request after names it by
+    number; a decision's end sends `forget` ahead of the next request, and the position
+    goes again. The answers are the ones the position itself gets (control: not held)."""
+    reg, pos = _node()
+    node = rustnode.node_for(reg)
+    assert node is not None
+    plain = [node.replacements_needed(pos), narrow(reg, pos, 0, limit=6).actions]
+    sent = _lines(node)
+    rustnode.hold_positions()
+    held = [node.replacements_needed(pos), narrow(reg, pos, 0, limit=6).actions]
+    assert held == plain
+    whole = json.dumps(pos.to_json(), ensure_ascii=False).encode("utf-8")
+    lines = b"".join(sent).splitlines()
+    holds = [line for line in lines if line.startswith(b'{"kind": "hold"')]
+    assert len(holds) == 1 and holds[0].endswith(b'"position": ' + whole + b"}")
+    key = rustnode._position(pos).key
+    asked = [line for line in lines if not line.startswith(b'{"kind": "hold"')]
+    assert len(asked) == 2
+    assert all(f'{{"held": {key}}}'.encode() in line and whole not in line for line in asked)
+
+    sent.clear()
+    timing.decided("move")
+    assert node.replacements_needed(pos) == plain[0]
+    lines = b"".join(sent).splitlines()
+    assert lines[0] == b'{"kind": "forget"}'
+    assert lines[1].startswith(b'{"kind": "hold"') and lines[1].endswith(whole + b"}")
+
+
+def test_a_turns_branches_are_named_by_the_port(bridged: None) -> None:
+    """IKA-302: held, a turn's branches come back with the port's (odd) numbers, and a
+    branch sent back is named by its number and not written (no `hold` line) -- with the
+    answers the branch itself gets. Equal branches share a number."""
+    reg, pos = _node()
+    row = narrow(reg, pos, 0, limit=3).actions
+    col = narrow(reg, pos, 1, limit=3).actions
+    asks = [(pos, [a, b]) for a in row for b in col]
+    plain = port.turns(reg, asks, Budget.matrix())
+    branches = [o.position for t in plain for o in t.outcomes]
+    want = [narrow(reg, b, 1, limit=4).actions for b in branches if not b.ended]
+
+    node = rustnode.node_for(reg)
+    sent = _lines(node)
+    rustnode.hold_positions()
+    turns = port.turns(reg, asks, Budget.matrix())
+    held = [o.position for t in turns for o in t.outcomes]
+    assert [b.to_json() for b in held] == [b.to_json() for b in branches]
+    keys = [rustnode._position(b).key for b in held]
+    assert all(k % 2 == 1 for k in keys), "the port numbered every branch"
+    texts = [json.dumps(b.to_json(), sort_keys=True) for b in held]
+    assert len(set(keys)) == len(set(texts)), "equal branches share a number, others not"
+    sent.clear()
+    got = [narrow(reg, b, 1, limit=4).actions for b in held if not b.ended]
+    assert got == want
+    lines = b"".join(sent).splitlines()
+    assert lines, "the scores were asked"
+    assert not [line for line in lines if line.startswith(b'{"kind": "hold"')]
 
 
 def test_the_repository_root_is_found_once() -> None:
