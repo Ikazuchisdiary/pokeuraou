@@ -664,6 +664,8 @@ def _belief_deepen(
         "reading": "breadth" if how["breadth_only"] else "mixed",
         "swap": how["swap"],
         "q_probe": how["q_probe"],
+        "levels": how["levels"],
+        "child_q": how["child_q"],
         "outside": outside,
     }
 
@@ -1096,6 +1098,8 @@ def play_game(
             "swap": spec.swap, "breadth_only": spec.reading == "breadth",
             # The oracle's probe narrowed by a Q (IKA-322's q<k>), or None.
             "q_probe": spec.q_probe,
+            # The depth guard (g<L>) and the children's menus by a Q (c<k>), IKA-307.
+            "levels": spec.levels, "child_q": spec.child_q,
         }
         for spec in specs
     ]

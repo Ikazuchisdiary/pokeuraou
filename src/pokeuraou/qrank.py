@@ -168,6 +168,18 @@ class LocalQ:
         """`matrix` of each (position, pools), in order."""
         return [self.matrix(reg, pos, pools) for pos, pools in asks]
 
+    def batched(self, reg: Regulation, asks: Sequence[tuple[Position, Pools]]) -> list[np.ndarray]:
+        """The matrix of each (position, pools) in ONE forward pass (`qhead.q_matrices`,
+        IKA-307). Not `matrices`' numbers to the bit: a batch may round otherwise."""
+        from . import qhead
+
+        requests = [
+            _pool_arrays(reg, self.encoder, pos, pools, self.net.config.properties)
+            for pos, pools in asks
+        ]
+        self.calls += 1
+        return qhead.q_matrices(self.net, requests, self._device)
+
 
 def _plan_named(arrays: dict[str, np.ndarray]) -> tuple[list[dict[str, Any]], int]:
     """Where each named array sits in the shared block (`inference._plan`'s layout)."""
@@ -249,6 +261,17 @@ class RemoteQ:
 
     def matrices(self, reg: Regulation, asks: Sequence[tuple[Position, Pools]]) -> list[np.ndarray]:
         """`matrix` of each (position, pools), in order, in one round trip."""
+        return self._send(reg, asks, "q" if len(asks) == 1 else "q_many")
+
+    def batched(self, reg: Regulation, asks: Sequence[tuple[Position, Pools]]) -> list[np.ndarray]:
+        """The matrix of each (position, pools) in one round trip and ONE forward pass on
+        the server (op ``q_batch``, `qhead.q_matrices`; IKA-307)."""
+        return self._send(reg, asks, "q_batch")
+
+    def _send(
+        self, reg: Regulation, asks: Sequence[tuple[Position, Pools]], op: str
+    ) -> list[np.ndarray]:
+        """The arrays into the shared block, one request line, the matrices back."""
         view = self._block.buf
         items: list[dict[str, Any]] = []
         at = 0
@@ -273,14 +296,14 @@ class RemoteQ:
             items.append({"layout": layout, "shape": list(shape), "result_offset": result_offset})
         sent = time.perf_counter()
         with timing.stage("serve.q"):
-            if len(items) == 1:
+            if op == "q":
                 self._ask({"op": "q", "model": self.model, "shm": self._block.name, **items[0]})
             else:
                 self._ask({
-                    "op": "q_many", "model": self.model, "shm": self._block.name, "items": items,
+                    "op": op, "model": self.model, "shm": self._block.name, "items": items,
                 })
         self.waited += time.perf_counter() - sent
-        self.calls += len(items)
+        self.calls += len(items) if op != "q_batch" else 1
         self.trips += 1
         out = []
         for item in items:
@@ -509,8 +532,19 @@ def served_q(net: Any, device: Any, files: Sequence[str]) -> Callable[..., np.nd
         answer.calls += 1
         return out
 
+    def batch(requests: list[dict[str, np.ndarray]]) -> list[np.ndarray]:
+        """Several positions' matrices in one eager forward pass (IKA-307, op ``q_batch``)."""
+        started = time.perf_counter()
+        out = qhead.q_matrices(net, requests, device)
+        answer.held += time.perf_counter() - started
+        answer.calls += 1
+        answer.batched += len(requests)
+        return out
+
     answer.held = 0.0
     answer.calls = 0
+    answer.batched = 0
+    answer.batch = batch
     answer.graphs = graphs
     answer.fingerprint = net.vocab_fingerprint
     answer.properties = bool(net.config.properties)

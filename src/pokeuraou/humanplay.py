@@ -719,6 +719,11 @@ class Agent:
     objective: Objective = HP_SHARE
     #: No deepening: the width rule alone (a baseline, and how `NODE_TIME` is measured).
     width_only: bool = False
+    #: The deepening's depth guard (IKA-307, a label's ``g<L>``), or None: `MAX_LEVELS`.
+    #: Given, each move's record says why the deepening and its lines stopped.
+    max_levels: int | None = None
+    #: The children's menus by the Q's k best (IKA-307, ``c<k>``), or None: `narrow`'s.
+    child_q: int | None = None
 
     def __post_init__(self) -> None:
         if self.clock not in CLOCKS:
@@ -1016,7 +1021,12 @@ class HumanGame:
             if exact:
                 got = search(
                     reg, pos, ours, theirs, agent.leaf, budget=budget,
-                    **({"deepen": cells, "deepen_cost": cost} if cells else {}), **watch,
+                    **(
+                        {"deepen": cells, "deepen_cost": cost, "levels": agent.max_levels,
+                         "child_q": agent.child_q}
+                        if cells else {}
+                    ),
+                    **watch,
                 )
                 strategy = np.asarray(
                     got.equilibrium.row_strategy if me == 0 else got.equilibrium.col_strategy,
@@ -1036,7 +1046,8 @@ class HumanGame:
                     {me: agent.leaf, you: _not_asked}, budget=budget, sides=(me,),
                     deepen=(
                         {me: {"cells": cells, "reading": "mixed", "swap": False,
-                              "outside": None, "cost": cost}}
+                              "outside": None, "cost": cost, "levels": agent.max_levels,
+                              "child_q": agent.child_q}}
                         if cells else None
                     ),
                     **watch,
