@@ -310,8 +310,8 @@ def test_the_worker_writes_records_that_pair_up(pool, tmp_path, monkeypatch, cap
     out = tmp_path / "m" / "games-worker0.jsonl"
     tool.main([
         "--pool", str(_write_pool(tmp_path / "pool.json", _variants())),
-        "--value", "unused.pt", "--hide-bench", "--games", "5", "--seed", "9",
-        "--games-out", str(out), "--limit", "2",
+        "--value", "unused.pt", "--baseline-hp-share", "--hide-bench", "--games", "5",
+        "--seed", "9", "--games-out", str(out), "--limit", "2",
     ])
     records = [json.loads(ln) for ln in out.read_text(encoding="utf-8").splitlines() if ln]
     assert len(records) == 10
