@@ -820,6 +820,16 @@ class Agent:
     objective: Objective = HP_SHARE
     #: No deepening: the width rule alone (a baseline, and how `NODE_TIME` is measured).
     width_only: bool = False
+    #: The deepening's depth guard (IKA-307, a label's ``g<L>``), or None: `MAX_LEVELS`.
+    #: Given, each move's record says why the deepening and its lines stopped.
+    max_levels: int | None = None
+    #: The children's menus by the Q's k best (IKA-307, ``c<k>``), or None: `narrow`'s.
+    child_q: int | None = None
+    #: The root's swap oracle while deepening (a label's ``s<W>`` / ``sall``, IKA-293/310;
+    #: IKA-307's allocation "width first, the rest to deepening with the swap oracle"):
+    #: the width of the menu whose rest it asks (`deepen.ALL_ACTIONS`: every legal
+    #: action), or None: no oracle.
+    oracle: int | None = None
 
     def __post_init__(self) -> None:
         if self.clock not in CLOCKS:
@@ -1082,10 +1092,14 @@ class HumanGame:
             form=agent.form, width_only=agent.width_only,
         )
         budget = Budget.matrix()
+        wider: dict[int, tuple[list[SideAction], list[SideAction]]] = {}
         ours, theirs = _menus(
             reg, pos, (plan.width, plan.width), agent.leaf, budget, agent.rank_by_leaf,
             None, spreads, rank_fill=agent.rank_fill,
+            wide=[agent.oracle] if agent.oracle is not None and plan.deepen_ms > 0 else [],
+            wider=wider,
         )
+        outside = wider.get(agent.oracle) if agent.oracle is not None else None
         if not ours or not theirs:
             return None
         menu_seconds = time.perf_counter() - started
@@ -1117,7 +1131,13 @@ class HumanGame:
             if exact:
                 got = search(
                     reg, pos, ours, theirs, agent.leaf, budget=budget,
-                    **({"deepen": cells, "deepen_cost": cost} if cells else {}), **watch,
+                    **(
+                        {"deepen": cells, "deepen_cost": cost, "levels": agent.max_levels,
+                         "child_q": agent.child_q, "outside": outside,
+                         "swap": outside is not None}
+                        if cells else {}
+                    ),
+                    **watch,
                 )
                 strategy = np.asarray(
                     got.equilibrium.row_strategy if me == 0 else got.equilibrium.col_strategy,
@@ -1136,8 +1156,9 @@ class HumanGame:
                     reg, pos, ours, theirs, spreads,
                     {me: agent.leaf, you: _not_asked}, budget=budget, sides=(me,),
                     deepen=(
-                        {me: {"cells": cells, "reading": "mixed", "swap": False,
-                              "outside": None, "cost": cost}}
+                        {me: {"cells": cells, "reading": "mixed", "swap": outside is not None,
+                              "outside": outside, "cost": cost, "levels": agent.max_levels,
+                              "child_q": agent.child_q}}
                         if cells else None
                     ),
                     **watch,

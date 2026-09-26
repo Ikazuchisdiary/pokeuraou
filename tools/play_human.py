@@ -82,6 +82,19 @@ def _team(pool, key: str):  # noqa: ANN001, ANN202
     raise SystemExit(f"no team {key!r} in {pool.id}")
 
 
+def _oracle_width(spec: str | None) -> int | None:
+    """``--oracle``: s<W> or sall as a width (`deepen.ALL_ACTIONS` for every action)."""
+    from pokeuraou.deepen import ALL_ACTIONS
+
+    if spec is None or spec == "none":
+        return None
+    if spec == "sall":
+        return ALL_ACTIONS
+    if spec.startswith("s") and spec[1:].isdigit() and int(spec[1:]) > 0:
+        return int(spec[1:])
+    raise SystemExit(f"--oracle is s<W>, sall or none, not {spec!r}")
+
+
 def _person(spec: str, reg, loc, seed: int, server=None):  # noqa: ANN001, ANN202
     if spec == "web":
         if server is None:
@@ -122,6 +135,15 @@ def main(argv: list[str] | None = None) -> None:
                     "count: spend it at measured prices, reproducible by seed")
     ap.add_argument("--width-only", action="store_true",
                     help="no deepening: the width rule alone (a baseline; how NODE_TIME is measured)")
+    ap.add_argument("--max-levels", type=int, default=None,
+                    help="the deepening's depth guard (IKA-307; default deepen.MAX_LEVELS). "
+                    "Given, each move's record says why the deepening and its lines stopped")
+    ap.add_argument("--oracle", default=None,
+                    help="the root's swap oracle while deepening: s<W> (the rest of a width-W menu) or "
+                    "sall (every legal action) -- IKA-307's allocation; default none")
+    ap.add_argument("--child-q", type=int, default=None,
+                    help="the deepening's child menus: each side's k best by the Q (IKA-307), "
+                    "instead of narrow's damage-ranked 8")
     ap.add_argument("--value", type=Path, nargs="+", default=None,
                     help=f"the agent's leaf (one model or an ensemble). Default: {' '.join(DEFAULT_VALUE)}")
     ap.add_argument("--hp-share", action="store_true", help="no leaf: the hp-share proxy")
@@ -217,8 +239,11 @@ def main(argv: list[str] | None = None) -> None:
     agent = humanplay.Agent(
         reg=reg, evaluate=evaluate, name=name, seconds=args.seconds, cores=args.cores,
         clock=args.clock, rank_fill=fill, bench_drop=args.bench_drop,
-        width_only=args.width_only,
+        width_only=args.width_only, max_levels=args.max_levels, child_q=args.child_q,
+        oracle=_oracle_width(args.oracle),
     )
+    if args.child_q is not None and not qrank.is_q(fill):
+        raise SystemExit("--child-q ranks the children by the Q: it needs a Q (a q rank fill)")
     say(f"agent: leaf {name} / menus {fill}" + (f" ({', '.join(q_files)})" if q_files else "")
         + f" / {args.seconds:g} s a move on {args.cores} core(s), {args.clock} clock"
         + (f", {args.threads} thread(s)" if args.threads is not None else "")

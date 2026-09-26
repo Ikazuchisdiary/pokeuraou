@@ -584,6 +584,45 @@ def q_matrix(net: Any, arrays: dict[str, np.ndarray], device: Any) -> np.ndarray
     return torch.sigmoid(logits[0]).double().cpu().numpy()
 
 
+def q_matrices(net: Any, requests: list[dict[str, np.ndarray]], device: Any) -> list[np.ndarray]:  # noqa: ANN401
+    """`q_matrix` of each request, in ONE forward pass (IKA-307: a deepening step's children).
+
+    The positions are stacked and each side's pool padded with zeros to the longest one;
+    an action's vector reads only its own position and itself, and a cell only its two
+    actions', so a padded row or column changes no real cell -- except in the last bits,
+    as a batch of another shape may take other kernels. A pass is a function of its
+    batch: the same requests give the same matrices.
+    """
+    torch = _torch()
+    if not requests:
+        return []
+    sizes = [(len(r["acts0"]), len(r["acts1"])) for r in requests]
+    batch = {
+        name: torch.from_numpy(
+            np.ascontiguousarray(np.concatenate([r[name] for r in requests], axis=0))
+        ).to(device)
+        for name in POSITION_ARRAYS
+    }
+
+    def padded(key: str, side: int, dtype: Any) -> Any:  # noqa: ANN401
+        longest = max(size[side] for size in sizes)
+        first = np.asarray(requests[0][key])
+        out = np.zeros((len(requests), longest, *first.shape[1:]), dtype=dtype)
+        for n, r in enumerate(requests):
+            got = np.asarray(r[key], dtype=dtype)
+            out[n, : len(got)] = got
+        return torch.from_numpy(out).to(device)
+
+    acts = [padded(f"acts{s}", s, np.int64) for s in (0, 1)]
+    feats: list[Any] = [None, None]
+    if net.config.properties:
+        feats = [padded(f"feats{s}", s, np.float32) for s in (0, 1)]
+    with torch.no_grad():
+        logits = net(batch, acts[0], acts[1], feats[0], feats[1])
+        got = torch.sigmoid(logits).double().cpu().numpy()
+    return [got[n, :n0, :n1].copy() for n, (n0, n1) in enumerate(sizes)]
+
+
 def encoded_row(encoded: Encoded, index: int) -> dict[str, np.ndarray]:
     """One position's arrays, as the teaching shards store them."""
     return {

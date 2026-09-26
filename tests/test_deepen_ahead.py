@@ -237,8 +237,8 @@ def test_a_wrong_guess_takes_the_same_cells(roster, monkeypatch) -> None:  # noq
     leaf = _leaf(roster, "sized")
     real = deepen_mod._ranked
 
-    def worst(root, count):  # noqa: ANN001, ANN202
-        return list(reversed(real(root, 10 * count)))[:count]
+    def worst(root, count, guard=deepen_mod.MAX_LEVELS):  # noqa: ANN001, ANN202
+        return list(reversed(real(root, 10 * count, guard)))[:count]
 
     pos = _played(roster)[1]
     serial, trace_s = _belief(roster, pos, 0, leaf, 1000, 0)

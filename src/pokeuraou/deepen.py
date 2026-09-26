@@ -105,6 +105,26 @@ root's position, or in each completion's on a Bayesian root; it never becomes a
 value, it only picks which cells are probed first. Its calls are counted
 (`Deepened.q`), not charged to a budget of cells; `Cost` prices them.
 
+**The depth guard and why a line stopped** (IKA-307, the label's ``g<L>``). A node
+`MAX_LEVELS` plies below the root opens no cell: a guard against a runaway tree, which
+IKA-330 found binding at 45 s a move (most moves reached depth 9). ``g<L>`` sets it to L
+for one agent and, with it set, the decision's record says why the deepening ended
+(``stop``: the budget, or nothing left worth a step) and why each deepened line -- each
+branch the tree ends in -- stopped: a finished game or a node with nothing left to
+decide (``decided``), a node at the guard with cells still worth a step (``guard``), or
+one that had them and the budget stopped first (``budget``); and how many steps the
+guard changed (a cell past it would have been taken). Without ``g`` the guard is
+`MAX_LEVELS` and nothing is added to the record.
+
+**Children's menus by a Q** (IKA-307 after IKA-322 section 18, the label's ``c<k>``). A
+refined cell's children get `narrow`'s damage-ranked `sub_limit` menus by default. With
+``c<k>`` each side's menu in a child is instead the k best of its whole pool by the
+process's Q solved over both pools (``q-full``, the root's ``q-nocover`` without the
+cover): IKA-322 measured half the NashConv of today's width-8 children at width 8, and
+less than it at width 4 with 30% of the cells. A step's children ask the Q together, in
+one forward pass (`qrank`'s ``batched``). The Q only picks the menus; the cells are
+the leaf's.
+
 **What a budget costs.** Labels count cells, so a game is the same game on any machine.
 Time is counted separately (`Cost`): fills, refinements and cells each have a price in
 milliseconds, measured per machine form and per number of cores, and `cells_for_seconds`
@@ -181,7 +201,7 @@ ORACLE_TOLERANCE = 1e-6
 
 #: Levels below the root a refined cell may open. A guard, not a tuning knob: at the
 #: default widths the budget runs out long before it, and a node with nothing left but
-#: decided cells stops on its own (priority 0).
+#: decided cells stops on its own (priority 0). A label's ``g<L>`` raises it (IKA-307).
 MAX_LEVELS = 8
 
 @dataclass(frozen=True, slots=True)
@@ -252,7 +272,10 @@ READINGS = {"m": "mixed", "r": "restricted", "b": "breadth"}
 #: The oracle's candidates as a width: ``oall`` is every legal action.
 ALL_ACTIONS = 1 << 30
 
-_DEEPEN = re.compile(r"none|([mrb])([1-9][0-9]*)(?:([os])([1-9][0-9]*|all|q[1-9][0-9]*))?(h)?")
+_DEEPEN = re.compile(
+    r"none|([mrb])([1-9][0-9]*)(?:([os])([1-9][0-9]*|all|q[1-9][0-9]*))?(h)?"
+    r"(?:c([1-9][0-9]*))?(?:g([1-9][0-9]*))?"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,23 +297,36 @@ class DeepenSpec:
     #: (``q<k>``, IKA-322; the candidates are every legal action), or None: it probes
     #: every candidate.
     q_probe: int | None = None
+    #: Each side's menu in a refined cell's children: the k best by a Q (``c<k>``,
+    #: IKA-307), or None: `narrow`'s `sub_limit` by damage.
+    child_q: int | None = None
+    #: The depth guard (``g<L>``, IKA-307), or None: `MAX_LEVELS`, and no stop report.
+    levels: int | None = None
 
 
 def deepen_spec(label: str) -> DeepenSpec:
     """`DeepenSpec` of a label: ``none``, ``m400``, ``r25``, ``m400o24``, ``m400sall``,
-    ``b200s24``, ``m400sallh``, ``m1200sq3h``."""
+    ``b200s24``, ``m400sallh``, ``m1200sq3h``, ``m1200hc6``, ``m1200hg16``."""
     got = _DEEPEN.fullmatch(label)
     if got is None:
         raise ValueError(
             f"deepen {label!r} is not none, m<N>, r<N>, m<N>o<W>, m<N>s<W>, b<N>o<W> or "
             "b<N>s<W> (N cells, N >= 1; W the oracle's width, all, or q<k>: every action, "
             "the probe narrowed to a Q's k best a side), each but r<N> optionally ending "
-            "in h (hidden nodes too)"
+            "in h (hidden nodes too), then c<k> (children's menus by a Q) and g<L> (the "
+            "depth guard)"
         )
     if got.group(1) is None:
         return DeepenSpec(None, 0)
     letter, kind, oracle = got.group(1), got.group(3), got.group(4)
     hidden = got.group(5) is not None
+    child_q = None if got.group(6) is None else int(got.group(6))
+    levels = None if got.group(7) is None else int(got.group(7))
+    if letter == "b" and (child_q is not None or levels is not None):
+        raise ValueError(
+            f"deepen {label!r}: breadth only (b) refines no cell, so it has no children's "
+            "menus (c) and no depth guard (g)"
+        )
     if oracle is not None and letter == "r":
         raise ValueError(
             f"deepen {label!r}: the root's double oracle goes with the whole-matrix reading "
@@ -316,7 +352,8 @@ def deepen_spec(label: str) -> DeepenSpec:
     else:
         width = int(oracle)
     return DeepenSpec(
-        READINGS[letter], int(got.group(2)), width, kind == "s", hidden, q_probe
+        READINGS[letter], int(got.group(2)), width, kind == "s", hidden, q_probe,
+        child_q, levels,
     )
 
 
@@ -344,6 +381,10 @@ def cells_for_seconds(seconds: float, cores: int = 1, *, form: str = "local") ->
             "A price is measured at its core count, not scaled (IKA-32)"
         ) from None
     return max(0, int(seconds * 1000.0 / cost.cell))
+
+
+#: Why a deepened line stopped (`Deepened.lines`, in this order).
+LINE_STOPS = ("ended", "decided", "guard", "budget")
 
 
 @dataclass(frozen=True, slots=True)
@@ -389,6 +430,24 @@ class Deepened:
     q: int = 0
     #: Steps whose short list gained nothing, so every outside action was probed.
     qfull: int = 0
+    #: The depth guard a label set (``g<L>``, IKA-307), or None. The four below are
+    #: always counted and written only when it is set.
+    levels: int | None = None
+    #: Why the deepening ended: "budget" (spent), "exhausted" (nothing left worth a
+    #: step, the guard included), or "" (it never stepped: a zero budget).
+    stop: str = ""
+    #: The deepened lines -- the branches the tree ends in -- by why each stopped:
+    #: (a finished game, a node with nothing left worth a step, a node at the guard with
+    #: cells still worth one, a node the budget stopped first).
+    lines: tuple[int, int, int, int] = (0, 0, 0, 0)
+    #: Steps where a cell past the guard was worth more than the one taken.
+    guarded: int = 0
+    #: Whether the children's menus came from a Q (``c<k>``). The two below then.
+    child_q: bool = False
+    #: The Q's forward passes for the children (one a refined cell) and the child
+    #: positions they ranked.
+    child_passes: int = 0
+    child_ranked: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -405,6 +464,21 @@ class Deepened:
             ),
             **({"swapped": self.swapped} if self.swap else {}),
             **({"q": self.q, "qfull": self.qfull} if self.q_probe else {}),
+            **(
+                {"childQ": self.child_passes, "childRanked": self.child_ranked}
+                if self.child_q
+                else {}
+            ),
+            **(
+                {
+                    "levels": self.levels,
+                    "stop": self.stop,
+                    "lines": dict(zip(LINE_STOPS, self.lines, strict=True)),
+                    "guarded": self.guarded,
+                }
+                if self.levels is not None
+                else {}
+            ),
             **(
                 {"uncovered": [list(side) for side in self.uncovered]}
                 if any(self.uncovered)
@@ -606,6 +680,8 @@ def deepen_root(
     cost: Cost | None = None,
     swap: bool = False,
     q_probe: int | None = None,
+    levels: int | None = None,
+    child_q: int | None = None,
     progress: Progress | None = None,
 ) -> Deepening:
     """`best_first`, and the root's double oracle when `outside` is given (IKA-293).
@@ -624,6 +700,9 @@ def deepen_root(
     turn is one), a `Cost` charges each fill, refinement and cell its price in units of
     one cell (`cells_for_seconds`'s budget).
 
+    `levels` is the depth guard (``g<L>``; None: `MAX_LEVELS`, and the report leaves the
+    stops out) and `child_q` the Q's width of the children's menus (``c<k>``; None:
+    `narrow`'s `sub_limit`), IKA-307.
     `progress`, when given, is called with a `Step` at the start, after every step and at
     the end (the module's docstring); it changes nothing the deepening computes.
     """
@@ -656,12 +735,14 @@ def deepen_root(
     expanded = 0
     deepest = 0
     refused = 0
+    guard = MAX_LEVELS if levels is None else levels
+    watch = _Watch()
     announce = None if progress is None else _stepper(progress, root, meter, cells, oracle)
     if announce is not None:
         announce("start", expanded, deepest, refused)
     helper = (
         _start_ahead(reg, evaluate, budget=budget, sub_limit=sub_limit, sub_branches=sub_branches)
-        if deepens and cells > 0
+        if deepens and cells > 0 and child_q is None
         else None
     )
     try:
@@ -677,18 +758,21 @@ def deepen_root(
                         announce("widen", expanded, deepest, refused)
                     continue
                 if not deepens:
+                    watch.stop = "exhausted"
                     break
-            target = _best(root)
+            target = _best(root, guard, watch)
             if target is None:
+                watch.stop = "exhausted"
                 break
             node, cell = target
             if helper is None:
                 spent, ok, fills = _expand(
                     reg, node, cell, evaluate, budget=budget, sub_limit=sub_limit,
-                    sub_branches=sub_branches, unmodelled=unmodelled,
+                    sub_branches=sub_branches, unmodelled=unmodelled, child_q=child_q,
+                    watch=watch,
                 )
             else:
-                helper.post(root)
+                helper.post(root, guard)
                 spent, ok, fills = helper.expand(node, cell, unmodelled)
             meter.refined(spent - 1, fills)
             if trace is not None:
@@ -709,11 +793,13 @@ def deepen_root(
     finally:
         if helper is not None:
             helper.close()
+    watch.finish(root, guard, cells)
     if timing.ON:
         timing.count("deepen.cells", meter.refines + meter.cells)
         timing.count("deepen.expanded", expanded)
         timing.count("deepen.fills", meter.fills)
         timing.count("deepen.refines", meter.refines)
+        watch.count()
         if oracle is not None:
             timing.count("deepen.oracle.calls", 1)
             timing.count("deepen.oracle.probes", oracle.probes)
@@ -741,6 +827,7 @@ def deepen_root(
         swapped=0 if oracle is None else oracle.swapped, uncovered=uncovered,
         q_probe=q_probe is not None, q=meter.qs,
         qfull=0 if oracle is None else oracle.fallbacks,
+        **watch.report(levels, child_q),
     )
     if announce is not None:
         announce("done", expanded, deepest, refused)
@@ -1568,6 +1655,8 @@ def deepen_belief(
     cost: Cost | None = None,
     trace: list | None = None,
     q_probe: int | None = None,
+    levels: int | None = None,
+    child_q: int | None = None,
     progress: Progress | None = None,
 ) -> BeliefDeepening:
     """`deepen_root` for a side whose opponent's bench is hidden (IKA-294, label ``h``).
@@ -1625,12 +1714,14 @@ def deepen_belief(
     expanded = 0
     deepest = 0
     refused = 0
+    guard = MAX_LEVELS if levels is None else levels
+    watch = _Watch()
     announce = None if progress is None else _stepper(progress, root, meter, cells, oracle)
     if announce is not None:
         announce("start", expanded, deepest, refused)
     helper = (
         _start_ahead(reg, evaluate, budget=budget, sub_limit=sub_limit, sub_branches=sub_branches)
-        if deepens and cells > 0
+        if deepens and cells > 0 and child_q is None
         else None
     )
     try:
@@ -1645,18 +1736,21 @@ def deepen_belief(
                         announce("widen", expanded, deepest, refused)
                     continue
                 if not deepens:
+                    watch.stop = "exhausted"
                     break
-            target = _best(root)  # type: ignore[arg-type]
+            target = _best(root, guard, watch)  # type: ignore[arg-type]
             if target is None:
+                watch.stop = "exhausted"
                 break
             node, cell = target
             if helper is None:
                 spent, ok, fills = _expand(
                     reg, node, cell, evaluate, budget=budget, sub_limit=sub_limit,
-                    sub_branches=sub_branches, unmodelled=unmodelled,
+                    sub_branches=sub_branches, unmodelled=unmodelled, child_q=child_q,
+                    watch=watch,
                 )
             else:
-                helper.post(root)
+                helper.post(root, guard)
                 spent, ok, fills = helper.expand(node, cell, unmodelled)
             meter.refined(spent - 1, fills)
             if trace is not None:
@@ -1677,6 +1771,7 @@ def deepen_belief(
     finally:
         if helper is not None:
             helper.close()
+    watch.finish(root, guard, cells)
     if timing.ON:
         timing.count("deepen.hidden.calls", 1)
         timing.count("deepen.hidden.classes", len(root.prices))
@@ -1684,6 +1779,7 @@ def deepen_belief(
         timing.count("deepen.expanded", expanded)
         timing.count("deepen.fills", meter.fills)
         timing.count("deepen.refines", meter.refines)
+        watch.count()
         if oracle is not None:
             timing.count("deepen.oracle.calls", 1)
             timing.count("deepen.oracle.probes", oracle.probes)
@@ -1710,6 +1806,7 @@ def deepen_belief(
         swapped=0 if oracle is None else oracle.swapped, uncovered=uncovered,
         classes=len(root.prices), q_probe=q_probe is not None, q=meter.qs,
         qfull=0 if oracle is None else oracle.fallbacks,
+        **watch.report(levels, child_q),
     )
     if announce is not None:
         announce("done", expanded, deepest, refused)
@@ -1748,7 +1845,69 @@ def _scores(node: _Node, inherited: float | None) -> np.ndarray:
     return inherited * signal / top
 
 
-def _best(root: _Node) -> tuple[_Node, tuple[int, int]] | None:
+class _Watch:
+    """Why a deepening stopped, line by line, and what its children's Q did (IKA-307)."""
+
+    def __init__(self) -> None:
+        self.stop = ""
+        self.lines = [0, 0, 0, 0]
+        self.guarded = 0
+        self.child_passes = 0
+        self.child_ranked = 0
+
+    def finish(self, root: Any, guard: int, cells: int) -> None:  # noqa: ANN401 - _Node or _BeliefRoot
+        """The stop, if the loop did not name one, and every deepened line's reason."""
+        if not self.stop and cells > 0:
+            self.stop = "budget"
+        for cell in root.children:
+            self._walk(root.children[cell], guard)
+
+    def _walk(self, branches: list[tuple[float, _Node | float]], guard: int) -> None:
+        for _weight, child in branches:
+            if not isinstance(child, _Node):
+                self.lines[0] += 1
+                continue
+            if child.children:
+                for cell in child.children:
+                    self._walk(child.children[cell], guard)
+                continue
+            signal = _signal(child)
+            live = np.ones(signal.shape, dtype=bool)
+            for cell in child.refused:
+                live[cell] = False
+            worth = bool(live.any()) and float(signal[live].max()) > 0.0
+            if not worth:
+                self.lines[1] += 1
+            elif child.level >= guard:
+                self.lines[2] += 1
+            elif self.stop == "exhausted":
+                # Worth a step in itself, but under a cell that stopped being worth one
+                # (its value decided since), so the search never reached it.
+                self.lines[1] += 1
+            else:
+                self.lines[3] += 1
+
+    def count(self) -> None:
+        for name, n in zip(LINE_STOPS, self.lines, strict=True):
+            timing.count(f"deepen.lines.{name}", n)
+        timing.count(f"deepen.stop.{self.stop or 'none'}", 1)
+        timing.count("deepen.guarded", self.guarded)
+        if self.child_passes:
+            timing.count("deepen.child.q", self.child_passes)
+            timing.count("deepen.child.ranked", self.child_ranked)
+
+    def report(self, levels: int | None, child_q: int | None) -> dict[str, Any]:
+        """`Deepened`'s fields for this."""
+        return {
+            "levels": levels, "stop": self.stop, "lines": tuple(self.lines),
+            "guarded": self.guarded, "child_q": child_q is not None,
+            "child_passes": self.child_passes, "child_ranked": self.child_ranked,
+        }
+
+
+def _best(
+    root: _Node, guard: int = MAX_LEVELS, watch: _Watch | None = None
+) -> tuple[_Node, tuple[int, int]] | None:
     """The unrefined cell with the highest positive priority under `root`, or None.
 
     Every priority under a node is at most what that node inherited, so the tree is
@@ -1757,8 +1916,14 @@ def _best(root: _Node) -> tuple[_Node, tuple[int, int]] | None:
     the order they were met (a node, then its refined cells in row-major order and each
     one's branches in the order kept), and within a node a tie goes to the first cell --
     so the choice is a function of the tree alone.
+
+    A node `guard` levels down opens no cell. `watch`, when given, counts the calls
+    where one of its cells was worth more than the cell returned (IKA-307): every node
+    that could hold such a cell is visited, since the search stops only at bounds no
+    better than the best in hand.
     """
     best: tuple[float, _Node, tuple[int, int]] | None = None
+    blocked = 0.0
     met = 0
     heap: list[tuple[float, int, _Node, float | None]] = [(-np.inf, met, root, None)]
     while heap:
@@ -1799,11 +1964,13 @@ def _best(root: _Node) -> tuple[_Node, tuple[int, int]] | None:
             candidates[cell] = -np.inf
         for cell in node.refused:
             candidates[cell] = -np.inf
-        if node.level < MAX_LEVELS and candidates.size:
+        if node.level < guard and candidates.size:
             flat = int(np.argmax(candidates))
             score = float(candidates.flat[flat])
             if score > 0.0 and (best is None or score > best[0]):
                 best = (score, node, divmod(flat, candidates.shape[1]))
+        elif watch is not None and candidates.size:
+            blocked = max(blocked, float(candidates.max()))
         for cell in sorted(node.children):
             for weight, child in node.children[cell]:
                 if isinstance(child, _Node):
@@ -1811,6 +1978,8 @@ def _best(root: _Node) -> tuple[_Node, tuple[int, int]] | None:
                     if passed > 0.0:
                         met += 1
                         heapq.heappush(heap, (-passed, met, child, passed))
+    if watch is not None and blocked > (0.0 if best is None else best[0]):
+        watch.guarded += 1
     if best is None:
         return None
     return best[1], best[2]
@@ -1826,10 +1995,14 @@ def _expand(
     sub_limit: int,
     sub_branches: int,
     unmodelled: set[str],
+    child_q: int | None = None,
+    watch: _Watch | None = None,
 ) -> tuple[int, bool, int]:
     """Refine one cell of `node` as `search._refined_value` does, keeping the children.
 
     Returns the cells spent, whether the cell took a deeper value, and the fills made.
+    With `child_q` the children's menus are each side's `child_q` best by the process's
+    Q (`_q_menus`), every child of the cell ranked in one forward pass (IKA-307).
     """
     if isinstance(node, _BeliefRoot):
         # The cell's completion, as if its bench were known (IKA-111's determinization).
@@ -1858,14 +2031,25 @@ def _expand(
     # call for the cell -- a row-wise leaf gives the same numbers either way.
     ended = [branch.position for branch in branches if branch.position.ended]
     finished = iter(np.asarray(evaluate(ended), dtype=np.float64) if ended else ())
+    menus: dict[int, tuple[list[SideAction], list[SideAction]]] = {}
+    if child_q is not None:
+        live = [n for n, branch in enumerate(branches) if not branch.position.ended]
+        got = _q_menus(reg, [branches[n].position for n in live], child_q)
+        menus = dict(zip(live, got, strict=True))
+        if watch is not None and live:
+            watch.child_passes += 1
+            watch.child_ranked += len(live)
     kept: list[tuple[float, _Node | float]] = []
-    for weight, branch in zip(weights, branches, strict=True):
+    for n, (weight, branch) in enumerate(zip(weights, branches, strict=True)):
         child_pos = branch.position
         if child_pos.ended:
             kept.append((float(weight), float(next(finished))))
             continue
-        row = narrow(reg, child_pos, 0, limit=sub_limit).actions
-        col = narrow(reg, child_pos, 1, limit=sub_limit).actions
+        if child_q is None:
+            row = narrow(reg, child_pos, 0, limit=sub_limit).actions
+            col = narrow(reg, child_pos, 1, limit=sub_limit).actions
+        else:
+            row, col = menus[n]
         if not row or not col:
             return spent, False, fills
         payoff, notes = batched_payoff(reg, child_pos, row, col, evaluate, budget=budget)
@@ -2121,7 +2305,9 @@ def _turn_of(node: Any, cell: tuple[int, ...]) -> tuple[Position, list[SideActio
     return node.pos, [node.rows[i], node.cols[j]]
 
 
-def _ranked(root: Any, count: int) -> list[tuple[Any, tuple[int, ...]]]:  # noqa: ANN401
+def _ranked(
+    root: Any, count: int, guard: int = MAX_LEVELS  # noqa: ANN401
+) -> list[tuple[Any, tuple[int, ...]]]:
     """The `count` unrefined cells of highest positive priority under `root`, best first --
     `_best`'s search, keeping `count` instead of one. Only a guess at the cells the loop
     takes next: the priorities move with every step."""
@@ -2151,7 +2337,7 @@ def _ranked(root: Any, count: int) -> list[tuple[Any, tuple[int, ...]]]:  # noqa
             candidates[~inside] = -np.inf
         for cell in (*node.children, *node.refused):
             candidates[cell] = -np.inf
-        if node.level < MAX_LEVELS and candidates.size:
+        if node.level < guard and candidates.size:
             flat = candidates.reshape(-1)
             take = min(count, flat.size)
             top = np.argpartition(-flat, take - 1)[:take] if take < flat.size else np.arange(flat.size)
@@ -2333,10 +2519,11 @@ class _Ahead:
                 raise RuntimeError("the deepening's helpers already serve another deepening")
             self.pool.session = self
 
-    def post(self, root: Any) -> None:  # noqa: ANN401
-        """The cells worth expanding now: the best `count` under `root`."""
+    def post(self, root: Any, guard: int = MAX_LEVELS) -> None:  # noqa: ANN401
+        """The cells worth expanding now: the best `count` under `root` (`guard`: the
+        depth guard, `_best`'s)."""
         wanted = []
-        for node, cell in _ranked(root, self.count):
+        for node, cell in _ranked(root, self.count, guard):
             key = _key(node, cell)
             if key in self.done or key in self.busy:
                 continue
@@ -2537,6 +2724,53 @@ class _NoLock:
 def _held(helper: _Ahead | None) -> Any:  # noqa: ANN401
     """The port and the leaf for the loop's own use: the helper's lock, or nothing."""
     return _NoLock() if helper is None else helper.lock
+
+
+def _q_menus(
+    reg: Regulation, positions: Sequence[Position], width: int
+) -> list[tuple[list[SideAction], list[SideAction]]]:
+    """Both sides' menus in each of `positions`: the `width` best of each side's whole pool
+    (`qhead.legal_pool`, what `narrow` ranks) by the process's Q solved over both pools --
+    the root's ``q-nocover`` ranking (`qrank.q_ranking`), without the cover. The Q is
+    asked for every position in one forward pass (`batched`).
+    """
+    from . import qhead, qrank
+
+    asks = [
+        (pos, (qhead.legal_pool(reg, pos, 0), qhead.legal_pool(reg, pos, 1)))
+        for pos in positions
+    ]
+    wanted = [n for n, (_pos, pools) in enumerate(asks) if pools[0] and pools[1]]
+    matrices = (
+        dict(zip(wanted, qrank.installed().batched(reg, [asks[n] for n in wanted]), strict=True))
+        if wanted
+        else {}
+    )
+    out: list[tuple[list[SideAction], list[SideAction]]] = []
+    for n, (pos, pools) in enumerate(asks):
+        if n not in matrices:
+            out.append(([], []))
+            continue
+        q = np.asarray(matrices[n], dtype=np.float64)
+        try:
+            e = solve(q)
+            scores = (np.asarray(e.row_ev), -np.asarray(e.col_ev))
+        except (EquilibriumError, ValueError):
+            # The mean against every reply, as `qrank.q_ranking` falls back to.
+            scores = (q.mean(axis=1), -q.mean(axis=0))
+        menu: list[list[SideAction]] = []
+        for side in (0, 1):
+            by = {a.to_choice(): float(s) for a, s in zip(pools[side], scores[side], strict=True)}
+
+            def rank(pool: list[SideAction], _scored: object = None, by: dict = by) -> list[float]:
+                return [by[a.to_choice()] for a in pool]
+
+            menu.append(
+                narrow(reg, pos, side, limit=width, candidates=pools[side], rank=rank,
+                       cover=False).actions
+            )
+        out.append((menu[0], menu[1]))
+    return out
 
 
 def _cell_value(branches: list[tuple[float, _Node | float]]) -> float:

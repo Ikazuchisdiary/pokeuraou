@@ -27,7 +27,9 @@ closes, which is exactly the event the queue needs to hear about.
 
 from __future__ import annotations
 
+import json
 import os
+import re
 import socket
 import socketserver
 import subprocess
@@ -45,6 +47,67 @@ ENV_QUEUE = "POKEURAOU_WORK_QUEUE"
 #: worker would otherwise kill every worker in turn, one at a time, and a queue that feeds
 #: a crash back to the pool forever is worse than the static split it replaced.
 MAX_ATTEMPTS = 3
+
+#: The run's own record of its workers, beside the games (IKA-336): how many failed, why,
+#: and whether the run stopped for it. Written for every run, a clean one included, so a
+#: missing failure count means an older tool and never "no failures".
+RUN_RECORD = "workers.json"
+
+#: What an inference server prints for every out-of-memory reply it sends (IKA-336), so a
+#: driver can count them in the server's log. `tools/inference_server.py` writes it.
+SERVER_OOM_MARK = "out-of-memory reply"
+
+#: The last line of a Python traceback: an exception's (dotted) name, then its message.
+_EXCEPTION_LINE = re.compile(
+    r"^(?:[A-Za-z_][\w]*\.)*[A-Za-z_]\w*(?:Error|Exception|Exit|Interrupt|OutOfMemory)\b"
+)
+_OOM = re.compile(r"out of memory|OutOfMemory", re.IGNORECASE)
+
+
+def worker_error(log: Path, tail_bytes: int = 65536) -> tuple[str, bool]:
+    """Why a worker died, from the end of its log, and whether it was out of memory.
+
+    The traceback's last line is the answer when there is one. stdout and stderr share the
+    log and stdout is flushed at exit, after the traceback, so it is looked for rather than
+    taken to be the last line. An out-of-memory line wins over any other: a CUDA OOM on the
+    server reaches the worker as `inference.ServerOutOfMemory` (IKA-336), and a worker's own
+    as torch's `OutOfMemoryError`; either is the thing to say first.
+    """
+    try:
+        with log.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - tail_bytes))
+            text = handle.read().decode("utf-8", "replace")
+    except OSError as problem:
+        return f"(no log: {problem})", False
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    raised = [line for line in lines if _EXCEPTION_LINE.match(line)]
+    oom = [line for line in raised if _OOM.search(line)] or [
+        line for line in lines if _OOM.search(line)
+    ]
+    if oom:
+        return oom[-1][:600], True
+    if raised:
+        return raised[-1][:600], False
+    return (lines[-1][:600] if lines else "(empty log)"), False
+
+
+def _exit_text(code: int) -> str:
+    # A native crash on Windows is an NTSTATUS, unreadable in decimal (3221225477).
+    return f"{code} (0x{code & 0xFFFFFFFF:08X})" if code < 0 or code > 255 else str(code)
+
+
+def server_ooms(logs: Iterable[Path]) -> int:
+    """Out-of-memory replies the inference servers sent, counted in their logs."""
+    total = 0
+    for path in logs:
+        try:
+            with path.open("rb") as handle:
+                total += sum(1 for line in handle if SERVER_OOM_MARK.encode() in line)
+        except OSError:
+            continue
+    return total
 
 
 class WorkQueue:
@@ -188,6 +251,9 @@ def run_workers(
     counts: Callable[[], int] | None = None,
     monitor: Callable[[WorkQueue], str | None] | None = None,
     poll: float = 20.0,
+    max_failures: int | None = 0,
+    server_logs: Sequence[Path] = (),
+    outcome: dict | None = None,
 ) -> int:
     """Serves a queue, runs `workers` processes against it, and reports what happened.
 
@@ -206,6 +272,21 @@ def run_workers(
     the run early and on purpose: the queue is closed, the games in flight finish and are
     written, and the rest are recorded as dropped rather than as work left undone. It is
     how a match stops the moment a sequential test has decided (`pokeuraou.sprt`).
+
+    A worker that fails (exits non-zero) is named on the spot with the line that says why --
+    the CUDA OOM line first when there is one -- and counted (IKA-336). Once more than
+    `max_failures` have failed the run stops as a monitor's stop does: nothing more is
+    handed out, the games in flight finish and are written. The default 0 stops at the first
+    failure, which is what a timing run and a board need: the queue gives a dead worker's
+    games to the living, so the games all arrive and only the clock and the CPU per game are
+    wrong -- IKA-307's cost runs lost 18 to 23 of 24 workers to OOM and still wrote 300
+    games. ``None`` never stops. Generation passes a budget of its own (`generate_queue.py`).
+
+    `server_logs` are the inference servers' logs, whose out-of-memory replies are counted.
+    Every run writes `RUN_RECORD` into `out_dir` -- workers, failures and why, whether it
+    stopped for them, replays, and the servers' OOM count -- rewritten at each failure so a
+    long run's record is current while it runs. `outcome`, when given, is filled with the
+    same dict.
 
     Returns a process exit code: non-zero when work was left unplayed or a worker failed,
     so an incomplete run says so rather than being discovered by counting files later.
@@ -271,25 +352,98 @@ def run_workers(
             log,
         ))
 
-    failed = 0
     finished_at: dict[int, float] = {}
+    failures: list[dict] = []
+    #: Why the run stopped for its workers, when it did (apart from a monitor's `stopped`).
+    gave_up: list[str] = []
+    record_lock = threading.Lock()
+    record: dict = {}
+
+    def write_record(done: bool = False) -> None:
+        with record_lock:
+            record.clear()
+            record.update({
+                "label": label,
+                "workers": workers,
+                "maxFailures": max_failures,
+                "failed": len(failures),
+                "outOfMemory": sum(1 for f in failures if f["oom"]),
+                "failures": list(failures),
+                "stoppedForFailures": gave_up[0] if gave_up else None,
+                "finished": done,
+            })
+            if done:
+                record.update({
+                    "jobsFinished": len(queue.done),
+                    "leftUnplayed": queue.remaining,
+                    "abandoned": sorted(queue.abandoned),
+                    "dropped": len(queue.dropped),
+                    "replayed": len(returned),
+                    "monitorStop": stopped[0] if stopped else None,
+                    "serverOutOfMemory": server_ooms(server_logs),
+                    "seconds": round(time.perf_counter() - started, 1),
+                })
+            # Bytes, so the file is LF on Windows too.
+            (out_dir / RUN_RECORD).write_bytes(
+                (json.dumps(record, ensure_ascii=False, indent=1) + "\n").encode("utf-8")
+            )
+
+    write_record()
 
     def watch(worker: int, process: subprocess.Popen) -> None:
-        nonlocal failed
         process.wait()
         finished_at[worker] = time.perf_counter() - started
         # Work nobody holds. A worker leaving while others still hold jobs has run out of
         # queue, which is what is supposed to happen at the end.
         left = queue.pending
-        if process.returncode != 0 or left:
+        if process.returncode == 0:
+            if left:
+                print(
+                    f"  worker {worker} exited with 0 after {finished_at[worker]:.0f}s, "
+                    f"{left} job(s) still unclaimed",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            return
+        log_path = out_dir / "logs" / f"worker{worker}.log"
+        error, oom = worker_error(log_path)
+        with record_lock:
+            failures.append({
+                "worker": worker,
+                "exit": process.returncode,
+                "seconds": round(finished_at[worker], 1),
+                "error": error,
+                "oom": oom,
+            })
+            count = len(failures)
+            stop = (
+                max_failures is not None and count > max_failures and not gave_up
+            )
+            if stop:
+                gave_up.append(
+                    f"worker {worker} failed ({count} failure(s), more than the "
+                    f"{max_failures} allowed)"
+                )
+        print(
+            f"  WORKER FAILED: worker {worker} exited with {_exit_text(process.returncode)} "
+            f"after {finished_at[worker]:.0f}s ({count} failed so far, {left} job(s) "
+            f"unclaimed)"
+            + ("\n    out of memory: " if oom else "\n    ")
+            + f"{error}\n    log: {log_path}",
+            file=sys.stderr,
+            flush=True,
+        )
+        if stop:
+            dropped = queue.close()
             print(
-                f"  worker {worker} exited with {process.returncode} after "
-                f"{finished_at[worker]:.0f}s, {left} job(s) still unclaimed",
+                f"  stopping: {gave_up[0]}. A dead worker's games are replayed by the "
+                f"others, so the games would all arrive and only the wall clock and the CPU "
+                f"per game would be wrong (IKA-336). {dropped} job(s) not handed out, the "
+                f"{queue.remaining} in flight finish and are written.",
                 file=sys.stderr,
                 flush=True,
             )
-        if process.returncode != 0:
-            failed += 1
+        write_record()
 
     threads = [threading.Thread(target=watch, args=(w, p)) for w, p, _ in running]
     for thread in threads:
@@ -317,6 +471,11 @@ def run_workers(
     order = sorted(finished_at.values())
     idle = sum(order[-1] - t for t in order) if order else 0.0
     written = counts() if counts is not None else len(queue.done)
+    write_record(done=True)
+    if outcome is not None:
+        outcome.clear()
+        outcome.update(record)
+    failed = len(failures)
     print(
         f"{label} done in {elapsed / 60:.1f} min: {written} written, "
         f"{len(queue.done)} jobs finished"
@@ -324,9 +483,29 @@ def run_workers(
         + (f", {len(queue.abandoned)} abandoned" if queue.abandoned else "")
         + (f", {len(queue.dropped)} not played because the run was stopped" if queue.dropped else "")
         + (f", {len(returned)} replayed after a worker went away" if returned else "")
-        + (f", {failed} worker(s) failed" if failed else ""),
+        # Always said, 0 included (IKA-336): a count that is only printed when it is not
+        # zero cannot be told apart from a tool that does not count.
+        + f", {failed} worker(s) failed"
+        + (f" ({record['outOfMemory']} out of memory)" if record["outOfMemory"] else "")
+        + (f", the servers sent {record['serverOutOfMemory']} out-of-memory replies"
+           if record["serverOutOfMemory"] else ""),
         file=sys.stderr,
     )
+    if gave_up:
+        print(
+            f"  STOPPED FOR A FAILED WORKER: {gave_up[0]}; first: worker "
+            f"{failures[0]['worker']}: {failures[0]['error']}. This run's timing and "
+            f"results are not to be used as they stand -> {out_dir / RUN_RECORD}",
+            file=sys.stderr,
+        )
+    elif failed:
+        print(
+            f"  {failed} worker(s) failed and the run went on (allowed: "
+            f"{'any' if max_failures is None else max_failures}); its games were replayed "
+            f"by the others, its wall clock is not the configured run's -> "
+            f"{out_dir / RUN_RECORD}",
+            file=sys.stderr,
+        )
     if order:
         print(
             f"  workers finished {order[-1] - order[0]:.0f}s apart, "

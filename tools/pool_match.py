@@ -8,7 +8,8 @@ starts (`pokeuraou.poolplay`, IKA-81). This is that game with two agents in it.
 What an arm is, per arm, and so in whichever seat it sits:
 
 * its leaf (`--inference-arm` / `--baseline-inference-arm` on a server, or `--value` /
-  `--baseline` loaded here; no baseline leaf means hp-share, the M-C origin),
+  `--baseline` loaded here; `--baseline-hp-share` plays hp-share, the M-C origin, and
+  one of the three is required -- a left-out leaf was silently hp-share until IKA-335),
 * its width (`--limit` / `--baseline-limit`) and narrowing (`--rank-leaf` /
   `--baseline-rank-leaf`), and how its leaf ranking fills its cells (`--rank-fill` /
   `--baseline-rank-fill`, IKA-268; a `-nocover` label builds its leaf-ranked menu without
@@ -40,7 +41,7 @@ import json
 import re
 import sys
 import time
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -168,8 +169,10 @@ def _install_q(args: argparse.Namespace, encoder: Encoder, ap: argparse.Argument
             ap.error(f"{label} {fill} ranks the leaf-ranked menu: it needs that arm's rank-leaf")
     # A deepen label whose oracle probes by a Q (IKA-322's q<k>) wants the default Q; it
     # is named to `install_from_args` as a q fill would be, so the flags' checks hold for it.
+    # So does one whose children's menus a Q ranks (IKA-307's c<k>).
     probing = ["q" for label in (args.deepen, args.baseline_deepen)
-               if deepen_spec(label).q_probe is not None]
+               if deepen_spec(label).q_probe is not None
+               or deepen_spec(label).child_q is not None]
     models = qrank.install_from_args(
         args, encoder, (args.rank_fill, args.baseline_rank_fill, *probing), ap.error
     )
@@ -190,17 +193,41 @@ def _q_delta(before: dict[str, dict[str, int]], label: str) -> tuple[int, int]:
             now.get("cells", 0) - was.get("cells", 0))
 
 
+def check_other_arm(args: argparse.Namespace, error: Callable[[str], object]) -> None:
+    """The other arm's leaf is named, never defaulted (IKA-335).
+
+    Without a baseline leaf the other arm is hp-share. That used to be what leaving the
+    flag out meant, and IKA-296's null control -- an arm against itself -- ran as the arm
+    against hp-share because its driver left `--baseline` out. Leaving a leaf out now
+    stops the run; hp-share is `--baseline-hp-share`.
+    """
+    named = args.baseline or args.baseline_inference_arm
+    if args.baseline_hp_share and named:
+        error("--baseline-hp-share contradicts the baseline leaf "
+              f"{args.baseline_inference_arm or [str(p) for p in args.baseline]}: "
+              "one of them is not what you meant")
+    if not args.baseline_hp_share and not named:
+        error("the other arm's leaf is not named: pass --baseline (loaded here) or "
+              "--baseline-inference-arm (on a server), or --baseline-hp-share to play "
+              "hp-share and mean it (IKA-335)")
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--pool", required=True, help="data/pool/<id>.json, e.g. regmc-matchupweb")
     ap.add_argument("--value", type=Path, nargs="+", default=None,
                     help="the tested arm's leaf, loaded here (one model or an ensemble)")
     ap.add_argument("--baseline", type=Path, nargs="+", default=None,
-                    help="the other arm's leaf, loaded here. Omitted: hp-share")
+                    help="the other arm's leaf, loaded here. One of this, "
+                    "--baseline-inference-arm or --baseline-hp-share is required")
     ap.add_argument("--inference", default=None, metavar="HOST:PORT")
     ap.add_argument("--inference-arm", default="value")
     ap.add_argument("--baseline-inference-arm", default=None,
-                    help="the server's name for the other arm; omitted: hp-share")
+                    help="the server's name for the other arm")
+    ap.add_argument("--baseline-hp-share", action="store_true",
+                    help="the other arm has no leaf: hp-share, the M-C origin, and you mean "
+                    "it. Leaving the other arm's leaf out used to mean this silently, and a "
+                    "null control meant as an arm against itself played hp-share (IKA-335)")
     ap.add_argument("--limit", type=int, default=GENERATION_LIMIT)
     ap.add_argument("--baseline-limit", type=int, default=None, help="default: --limit")
     ap.add_argument("--rank-leaf", action="store_true",
@@ -274,6 +301,7 @@ def main(argv: list[str] | None = None) -> None:
         ap.error("one of --inference or --value names the tested arm's leaf")
     if args.inference is not None and args.baseline:
         ap.error("--baseline is loaded here; with --inference use --baseline-inference-arm")
+    check_other_arm(args, ap.error)
     for fill in (args.rank_fill, args.baseline_rank_fill):
         try:
             parse_rank_fill(fill)
@@ -416,7 +444,7 @@ def main(argv: list[str] | None = None) -> None:
     echo = [[{"selection": {}, "belief": {}, "leaf": set(), "fill": {}, "drop": {},
               "deepen": {}, "deepened": 0, "widened": 0, "swapped": 0, "oracle": 0,
               "depth": {}, "coverless": {"menus": 0, "dropping": 0, "dropped": 0},
-              "q": [0, 0], "qprobe": [0, 0], "calls": 0}
+              "q": [0, 0], "qprobe": [0, 0], "childq": [0, 0], "lines": {}, "calls": 0}
              for _ in arms]
             for _ in range(2)]
     done = 0
@@ -469,6 +497,15 @@ def main(argv: list[str] | None = None) -> None:
                     # The Q that narrowed the probe (IKA-322): inferences, full probes.
                     bucket["qprobe"][0] += got.get("q", 0)
                     bucket["qprobe"][1] += got.get("qfull", 0)
+                if got is not None and "childQ" in got:
+                    # The Q that ranked the children's menus (IKA-307): passes, children.
+                    bucket["childq"][0] += got["childQ"]
+                    bucket["childq"][1] += got["childRanked"]
+                if got is not None and "lines" in got:
+                    # Why each deepened line stopped, under an explicit guard (IKA-307).
+                    for key, n in got["lines"].items():
+                        bucket["lines"][key] = bucket["lines"].get(key, 0) + n
+                    bucket["lines"]["guarded"] = bucket["lines"].get("guarded", 0) + got["guarded"]
             played_depth = (
                 f"{record.depth[side]}"
                 + ("r" if record.depth[side] != 1 and record.solve_restricted[side] else "")
@@ -570,6 +607,13 @@ def main(argv: list[str] | None = None) -> None:
                     if bucket["oracle"]
                     else ""
                 )
+                + (
+                    f", children's Q {bucket['childq'][0]:,} passes "
+                    f"({bucket['childq'][1]:,} children)"
+                    if bucket["childq"][0]
+                    else ""
+                )
+                + (f", lines {bucket['lines']}" if bucket["lines"] else "")
                 + "), "
                 f"depth {bucket['depth']}"
                 + (

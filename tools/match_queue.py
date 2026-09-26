@@ -56,6 +56,37 @@ def check_aivat(args: argparse.Namespace) -> None:
         raise SystemExit("--aivat is written by tools/pool_match.py: it goes with --pool")
 
 
+def check_other_arm(args: argparse.Namespace, extra: list[str]) -> None:
+    """The other arm is named, never defaulted (IKA-335).
+
+    Without `--baseline` the other arm has no leaf: hp-share. Leaving it out used to mean
+    that silently, and IKA-296's null control ran an arm against hp-share instead of
+    against itself. So a match names its baseline leaf or says `--baseline-hp-share`.
+    """
+    named = bool(args.baseline) or any(
+        flag in extra for flag in ("--baseline", "--baseline-inference-arm")
+    )
+    if args.baseline_hp_share and named:
+        raise SystemExit(
+            "--baseline-hp-share contradicts the baseline leaf also given; one of them is "
+            "not what you meant."
+        )
+    if not args.baseline_hp_share and not named:
+        raise SystemExit(
+            "no --baseline: the other arm would be hp-share without anyone choosing it "
+            "(IKA-296's null control ran against hp-share this way). Pass --baseline with "
+            "the other arm's leaf -- the same files as --value for a null control -- or "
+            "--baseline-hp-share to mean hp-share (IKA-335)."
+        )
+    if args.baseline_hp_share and args.pool is None and "--objective" in extra:
+        given = extra[extra.index("--objective") + 1: extra.index("--objective") + 2]
+        if given != ["hp-share"]:
+            raise SystemExit(
+                f"--baseline-hp-share contradicts --objective {' '.join(given)} in the tail: "
+                "without --baseline generation_match.py's other arm is its --objective."
+            )
+
+
 def corrected_monitor(args: argparse.Namespace, out_dir: Path) -> object:
     """The corrected test's monitor, registered in sprt.json before the first game."""
     from pokeuraou.luck import NormalTest, StopWhenCorrectedDecided
@@ -109,7 +140,17 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=None)
     ap.add_argument("--seed", type=int, default=77)
     ap.add_argument("--value", nargs="+", required=True)
-    ap.add_argument("--baseline", nargs="+", default=None)
+    ap.add_argument("--baseline", nargs="+", default=None,
+                    help="the other arm's leaf. This or --baseline-hp-share is required")
+    ap.add_argument(
+        "--baseline-hp-share",
+        action="store_true",
+        help="the other arm has no leaf and you mean it: hp-share (with --pool the M-C "
+        "origin, passed on to every worker; without, generation_match.py's --objective, "
+        "which must then be hp-share). Leaving --baseline out used to mean this silently, "
+        "and IKA-296's null control -- an arm against itself -- ran against hp-share "
+        "because its driver left it out (IKA-335).",
+    )
     ap.add_argument(
         "--served",
         action="store_true",
@@ -181,7 +222,7 @@ def main() -> None:
         help="an M-C match (IKA-259): both seats from this pool (data/pool/<id>.json), "
         "played by tools/pool_match.py. Each arm solves each pair's selection with its own "
         "leaf and believes the opponent's bench from that solve, so there is no book; "
-        "without --baseline the other arm is hp-share (the M-C origin). The servers load "
+        "--baseline-hp-share makes the other arm hp-share (the M-C origin). The servers load "
         "the pool's vocabulary.",
     )
     ap.add_argument(
@@ -221,6 +262,15 @@ def main() -> None:
                     help="chance of passing a change worth ELO0 or less")
     ap.add_argument("--sprt-beta", type=float, default=0.05,
                     help="chance of failing a change worth ELO1 or more")
+    ap.add_argument(
+        "--max-worker-failures",
+        type=int,
+        default=0,
+        help="stop once more workers than this have failed (IKA-336); -1 never stops. "
+        "Default 0: the first failure stops the board -- the queue would hand the dead "
+        "worker's games to the others, so the games would all arrive and the run would "
+        "look whole while its clock and CPU per game were wrong (IKA-307).",
+    )
     ap.add_argument(
         "rest",
         nargs=argparse.REMAINDER,
@@ -275,6 +325,9 @@ def main() -> None:
             "them is not what you meant."
         )
 
+    check_other_arm(args, extra)
+    if args.pool is not None and args.baseline_hp_share:
+        extra = [*extra, "--baseline-hp-share"]
     check_aivat(args)
     if args.aivat:
         extra = [*extra, "--aivat"]
@@ -404,12 +457,25 @@ def main() -> None:
         flush=True,
     )
     # Two seats per game, interleaved, so a straggler cannot strand half of a pair.
+    outcome: dict = {}
     try:
         status = run_workers(
             range(2 * args.games), build,
             workers=args.workers, out_dir=out_dir, env=env, cwd=str(ROOT),
             label="match", counts=written, monitor=monitor,
+            max_failures=None if args.max_worker_failures < 0 else args.max_worker_failures,
+            server_logs=[out_dir / "logs" / f"inference{i}.log" for i in range(len(servers))],
+            outcome=outcome,
         )
+        if outcome.get("stoppedForFailures"):
+            # Before the SPRT's line, which would otherwise read "ran to --games" (IKA-336).
+            print(
+                f"  the board STOPPED because a worker failed ({outcome['stoppedForFailures']}): "
+                f"its count and its test below are of the games before the stop, not an "
+                f"answer -> {out_dir / 'workers.json'}",
+                file=sys.stderr,
+                flush=True,
+            )
         if args.aivat:
             from pokeuraou.luck import summary
 
@@ -432,8 +498,10 @@ def main() -> None:
             print(
                 f"  SPRT: {state['decision'] or 'no decision'} after {state['pairs']} pairs, "
                 f"LLR {state['llr']:+.3f}"
-                + ("" if state["stoppedEarly"] else " -- ran to --games, so the fixed count "
-                   "is the answer")
+                + ("" if state["stoppedEarly"]
+                   else " -- stopped by a failed worker, no answer"
+                   if outcome.get("stoppedForFailures")
+                   else " -- ran to --games, so the fixed count is the answer")
                 + f"\n  {json.dumps(state['counts'])} -> {out_dir / 'sprt.json'}",
                 file=sys.stderr,
                 flush=True,

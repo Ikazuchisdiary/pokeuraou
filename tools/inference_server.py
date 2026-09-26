@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import faulthandler
+import os
 import signal
 import sys
 import threading
@@ -39,6 +40,7 @@ sys.path.insert(0, str(ROOT / "src"))
 from pokeuraou import timing  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.inference import (  # noqa: E402
+    EAGER_PASSES,
     load_models,
     scheduling,
     serve,
@@ -78,6 +80,15 @@ def main() -> None:
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=0, help="0 asks the OS for a free one")
     ap.add_argument("--report-every", type=float, default=60.0, help="seconds, 0 to hush")
+    ap.add_argument(
+        "--cuda-memory-gb",
+        type=float,
+        default=float(os.environ.get("POKEURAOU_SERVER_CUDA_GB", "3.5")),
+        help="the most this server's allocator may hold on the card (IKA-334), 0 for no "
+        "cap. Past it the allocator frees its cache and retries, and only then fails with "
+        "an out-of-memory error. Without a cap, two servers of a Q board filled the 12 GB "
+        "card; WDDM paged instead of failing and the card hung (TDR).",
+    )
     args = ap.parse_args()
 
     import torch
@@ -104,6 +115,11 @@ def main() -> None:
         # Before the first CUDA call, or the context already exists with the default
         # (spinning) wait. IKA-106.
         wait_by_sleeping()
+        if args.cuda_memory_gb > 0:
+            # IKA-334. The cap moves no answer: it only decides when the allocator hands
+            # its cached blocks back, and the kernels read the same rows either way.
+            total = torch.cuda.mem_get_info()[1]
+            torch.cuda.set_per_process_memory_fraction(min(1.0, args.cuda_memory_gb * 1e9 / total))
     models = load_models(paths, encoder, args.device)
     q_models = {}
     if args.q_arm:
@@ -122,7 +138,9 @@ def main() -> None:
         arms={name: [p.name for p in group] for name, group in paths.items()},
         q_models=q_models,
     )
-
+    if args.device == "cuda" and args.cuda_memory_gb > 0:
+        # Named in every out-of-memory reply and its log line (IKA-336).
+        server.memory_cap_gb = args.cuda_memory_gb
     # First line of stdout, so a launcher can read it without parsing the prose.
     print(address, flush=True)
     for name, group in paths.items():
@@ -136,6 +154,9 @@ def main() -> None:
               file=sys.stderr)
     if args.device == "cuda":
         print(f"  cuda waits: {scheduling()}", file=sys.stderr)
+        cap = f"{args.cuda_memory_gb:g} GB" if args.cuda_memory_gb > 0 else "none"
+        print(f"  cuda memory cap: {cap}; eager passes at once: {EAGER_PASSES or 'no gate'} "
+              f"(IKA-334)", file=sys.stderr)
     print(f"  on {args.device}; requests are served as they arrive and are never merged "
           f"across workers, so every answer is the one a worker would have computed itself",
           file=sys.stderr, flush=True)
@@ -217,7 +238,9 @@ def main() -> None:
             print(f"  {now:,} requests, {server.rows_served:,} rows "
                   f"({now - served} since the last line); per call "
                   f"{1000 * waited / calls:.2f} ms queued, {1000 * held / calls:.2f} ms "
-                  f"working; cuda reserved {reserved:.2f} GB, in use {in_use:.2f} GB",
+                  f"working; cuda reserved {reserved:.2f} GB, in use {in_use:.2f} GB"
+                  + (f"; {server.oom_replies} out-of-memory replies so far (IKA-336)"
+                     if server.oom_replies else ""),
                   file=sys.stderr, flush=True)
             served, last = now, time.perf_counter()
     note()

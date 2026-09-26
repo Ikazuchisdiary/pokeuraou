@@ -780,3 +780,53 @@ def test_two_arms_capturing_at_once_answer_as_eager(parts):
         assert model.graphs.failed is None, (name, model.graphs.failed)
         assert model.graphs.captured == len(sizes), name
         assert model.replays == per_arm * len(sizes), name
+
+
+def test_the_eager_passes_go_through_the_process_gate(monkeypatch):
+    """IKA-334: twelve serving threads each holding an eager pass's activations at once
+    filled the card (4.6 GB a server), and on WDDM that hung the card instead of failing.
+    `served_model` admits `EAGER_PASSES` forward passes at a time, process-wide. The
+    stand-in pass sleeps and counts how many are inside it; with the gate lifted the same
+    threads overlap more than that, so the count can see an overlap (the control)."""
+    import contextlib
+    from types import SimpleNamespace
+
+    import pokeuraou.inference as inference
+    import pokeuraou.value as value_module
+
+    inside = {"now": 0, "most": 0}
+    count = threading.Lock()
+
+    class Pass:
+        def __init__(self, nets, encoder, device=None, batch_size=None):  # noqa: ANN001
+            pass
+
+        def from_encoded(self, encoded):  # noqa: ANN001, ANN202
+            with count:
+                inside["now"] += 1
+                inside["most"] = max(inside["most"], inside["now"])
+            threading.Event().wait(0.05)
+            with count:
+                inside["now"] -= 1
+            return np.zeros(len(encoded.species))
+
+    monkeypatch.setattr(value_module, "BatchedValue", Pass)
+    stand_in = SimpleNamespace(nets=[object(), object()], encoder=None, device=None, batch_size=4096)
+    rows = 3
+    arrays = {name: np.zeros((rows, 2, 4)) for name in inference.ARRAYS}
+
+    def most_at_once() -> int:
+        score = inference.served_model(stand_in)
+        assert score.graphs is None
+        inside["most"] = 0
+        threads = [threading.Thread(target=score, args=(arrays, rows)) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        return inside["most"]
+
+    assert most_at_once() == 2
+    assert inference.EAGER_PASSES == 2
+    monkeypatch.setattr(inference, "_EAGER_GATE", contextlib.nullcontext())
+    assert most_at_once() > 2
