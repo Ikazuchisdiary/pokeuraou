@@ -42,6 +42,7 @@ mod resolve;
 mod qfeatures;
 mod score;
 mod shm;
+mod small_rules;
 mod speed;
 mod terrain;
 mod transform;

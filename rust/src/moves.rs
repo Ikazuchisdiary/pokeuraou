@@ -784,7 +784,11 @@ fn roll_confusion<'a>(
         let mon = turn.mon_at(action.side, action.slot)?;
         let held = mon.volatile("confusion")?;
         let goes_on = held.extra.get(CONFUSION_GOES_ON).and_then(Value::as_bool).unwrap_or(false);
-        if extra_int(held, CONFUSION_LEFT).is_some() || goes_on || !confusion_reached(turn, mon, mv) {
+        if extra_int(held, CONFUSION_LEFT).is_some()
+            || goes_on
+            || !confusion_reached(turn, mon, mv)
+            || crate::small_rules::disable_stops(turn, action, mv)
+        {
             return None;
         }
         confusion_cure_chance(held, budget)
@@ -848,11 +852,19 @@ fn confusion_stage(
     action: &QueuedAction,
     budget: &Budget,
 ) -> Vec<(f64, Option<String>)> {
-    if confusion_try(turn, action.side, action.slot) && budget.enumerate_status_checks {
-        return vec![
-            (1.0 - CONFUSION_SELF_HIT_CHANCE, None),
-            (CONFUSION_SELF_HIT_CHANCE, Some("confusion".into())),
-        ];
+    if confusion_try(turn, action.side, action.slot) {
+        if budget.enumerate_status_checks {
+            return vec![
+                (1.0 - CONFUSION_SELF_HIT_CHANCE, None),
+                (CONFUSION_SELF_HIT_CHANCE, Some("confusion".into())),
+            ];
+        }
+        // The oracle's pinned policy answers `randomChance(33, 100)` as it answers an
+        // accuracy roll -- `hit` for the differential tools -- so its Pokemon hits itself
+        // every time (IKA-325); collapsed otherwise, the port's never does.
+        if budget.pinned_policy {
+            return vec![(1.0, Some("confusion".into()))];
+        }
     }
     vec![(1.0, None)]
 }
@@ -883,6 +895,9 @@ fn taunt_stage(
     mv: &Move,
     budget: &Budget,
 ) -> Vec<(f64, Option<String>)> {
+    if crate::small_rules::disable_stops(turn, action, mv) {
+        return vec![(1.0, Some("disable".into()))];
+    }
     if turn.mon_at(action.side, action.slot).is_some_and(|mon| taunt_stops(mon, mv)) {
         return vec![(1.0, Some("taunt".into()))];
     }
@@ -2091,7 +2106,7 @@ fn hit_target<'a>(
                     };
                     total += dealt;
                     // Bug Bite, Pluck: `onHit`, before `DamagingHit` and the `Update` (IKA-240).
-                    crate::move_hooks::steal_berry(&mut state, action, target, berry, mv.mtype.as_str(), result.type_mod);
+                    crate::move_hooks::steal_berry(&mut state, action, target, berry, result.move_type.as_str(), result.type_mod);
                     crate::damage_callback::record(&mut state, (action.side, action.slot), target, dealt, mv.category.as_str());
                     reached = true;
                     state.move_hit[target.0][target.1] = true;
@@ -2108,6 +2123,7 @@ fn hit_target<'a>(
                         landed,
                         &budget,
                         if absorbed { 0 } else { result.type_mod },
+                        result.move_type.as_str(),
                     )?;
                     crate::resolve::phase_end(11, after_started);
                     if absorbed {
@@ -2454,6 +2470,7 @@ fn after_hit(
     landed: bool,
     budget: &Budget,
     type_mod: i64,
+    hit_type: &str,
 ) -> Result<(), String> {
     let me = (action.side, action.slot);
     turn.move_damage_total += dealt;
@@ -2565,10 +2582,11 @@ fn after_hit(
     let eats_berry = match turn.mon_at(target.0, target.1) {
         None => false,
         Some(mon) if mon.fainted => false,
-        Some(mon) => match mon.item.and_then(|i| resist_berry(i.as_str())) {
+        Some(mon) => match mon.item {
             None => false,
-            Some(berry_type) => {
-                berry_type == mv.mtype.as_str() && (berry_type == "Normal" || type_mod > 0)
+            // The hit's type, after a skin or the move's own change (IKA-326).
+            Some(item) => {
+                crate::small_rules::resist_berry_eaten(item.as_str(), hit_type, type_mod)
                     // The berry is `onSourceModifyDamage`, which a `damageCallback` never
                     // reaches (IKA-213), nor a level move; Struggle is `???` (IKA-239).
                     && !crate::level_struggle::misses_resist_berry(mv.id.as_str())
@@ -4995,7 +5013,9 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
                 ),
             };
         if is(status, "brn") {
-            let amount = turn.fraction_of_max(side, slot, BURN_DAMAGE);
+            let sixteenth = turn.fraction_of_max(side, slot, BURN_DAMAGE);
+            // Heatproof halves it (IKA-328).
+            let amount = crate::small_rules::burn_damage(turn, side, slot, sixteenth);
             turn.deal_damage(side, slot, amount, false, "brn")?;
         } else if is(status, "psn") {
             let amount = turn.fraction_of_max(side, slot, POISON_DAMAGE);
