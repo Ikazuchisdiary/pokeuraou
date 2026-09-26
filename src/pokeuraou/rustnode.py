@@ -599,7 +599,7 @@ class RustNode:
             "kind": "score",
             "position": _position(pos),
             "side": side,
-            "candidates": [[dump_action(a) for a in c.slots] for c in candidates],
+            "candidates": _candidates(candidates),
         }
         response = self._exchange(request)
         if response.get("refused"):
@@ -792,7 +792,7 @@ class RustNode:
                 "kind": "score",
                 "position": _position(pos),
                 "side": side,
-                "candidates": [[dump_action(a) for a in c.slots] for c in candidates],
+                "candidates": _candidates(candidates),
             }
             for pos, side, candidates in asks
         ]
@@ -1506,8 +1506,8 @@ _ANSWERS: dict[bytes, dict[str, Any]] = {}
 _ANSWERED_KINDS = frozenset({"score"})
 #: Past this many positions in one decision the memo starts again (a bound, not a tune).
 _HELD_MAX = 512
-_MARK = "\x00held-position\x00"
-_MARK_TEXT = json.dumps(_MARK)
+#: A held value's mark is this and its key (`_payload`).
+_MARK = "\x00held\x00"
 
 
 class _Held:
@@ -1550,12 +1550,51 @@ def _position(pos: Position) -> dict[str, Any] | _Held:
 
 def _payload(request: dict[str, Any]) -> bytes:
     """The request's line, byte for byte what `json.dumps(request)` wrote before: a held
-    position is written in its place, where its dict would have been written."""
-    held = request.get("position")
-    if not isinstance(held, _Held):
+    position (or a `score` request's candidates, `_candidates`) is written in its place,
+    where its dict would have been written."""
+    held = [(key, value) for key, value in request.items() if value.__class__ is _Held]
+    if not held:
         return json.dumps(request, ensure_ascii=False).encode("utf-8")
-    text = json.dumps({**request, "position": _MARK}, ensure_ascii=False)
-    return text.replace(_MARK_TEXT, held.text, 1).encode("utf-8")
+    text = json.dumps(
+        {**request, **{key: _MARK + key for key, _value in held}}, ensure_ascii=False
+    )
+    # From the last one back: each mark is found before the text spliced in after it.
+    for key, value in reversed(held):
+        text = text.replace(json.dumps(_MARK + key), value.text, 1)
+    return text.encode("utf-8")
+
+
+#: IKA-321: each slot action's JSON text, as `json.dumps(dump_action(action))` writes it.
+#: Keyed on the (frozen) action's value; a bound, not a tune.
+_ACTION_TEXT: dict[object, str] = {}
+_ACTION_TEXT_MAX = 1 << 16
+
+
+def _candidates(candidates: Sequence[SideAction]) -> _Held:
+    """A `score` request's candidate list as the text `json.dumps` wrote for its dicts
+    (`[[dump_action(a) for a in c.slots] for c in candidates]`), each slot action's text
+    written once: the list was most of the request line, 14% of `narrow` (IKA-319).
+
+    A slot action object is shared by the combinations it is in, so it is looked up by its
+    id first -- hashing a dataclass's fields a hundred times a pool cost more than the
+    text it found."""
+    texts = _ACTION_TEXT
+    local: dict[int, str] = {}
+    rows = []
+    for candidate in candidates:
+        row = []
+        for action in candidate.slots:
+            text = local.get(id(action))
+            if text is None:
+                text = texts.get(action)
+                if text is None:
+                    if len(texts) >= _ACTION_TEXT_MAX:
+                        texts.clear()
+                    text = texts[action] = json.dumps(dump_action(action), ensure_ascii=False)
+                local[id(action)] = text
+            row.append(text)
+        rows.append("[" + ", ".join(row) + "]")
+    return _Held("[" + ", ".join(rows) + "]")
 
 
 def _answered(request: dict[str, Any], payload: bytes) -> dict[str, Any] | None:

@@ -34,7 +34,7 @@ from typing import Any, Protocol
 
 import numpy as np
 
-from . import port, qrank, rank_scores, timing
+from . import luck, port, qrank, rank_scores, timing
 from .actions import SideAction, switch_actions_after_faint
 from .budget import Budget
 from .deepen import DEFAULT_DEEPEN, deepen_spec
@@ -1298,6 +1298,8 @@ def play_game(
         foe_search_value: float | None = None
         # What each side's best-first deepening did here (IKA-33); None where it did not.
         deepened: list[Any] = [None, None]
+        # (side whose leaf built it, its search's answer): the matrices `luck` reads.
+        solved: list[tuple[int, Any]] = []
 
         if spreads is not None:
             # Each side is uncertain about a different bench, so each gets its own answer.
@@ -1370,6 +1372,8 @@ def play_game(
             except EquilibriumError:
                 break
             own_seconds = perf_counter() - solve_started
+            solved.extend(answers.items())
+            solved.extend((s, got) for s, got in ((0, own_deep), (1, foe_deep)) if got is not None)
             record.unmodelled.extend(
                 set().union(*(answer.unmodelled for answer in answers.values()))
             )
@@ -1445,6 +1449,7 @@ def play_game(
                         )
                 except EquilibriumError:
                     break
+                solved.append((1, foe_deep if foe_deep is not None else foe_answers[1]))
                 if foe_deep is not None:
                     record.unmodelled.extend(foe_deep.unmodelled)
                     foe_strategy = np.asarray(
@@ -1478,6 +1483,7 @@ def play_game(
             except EquilibriumError:
                 break
             own_seconds = perf_counter() - solve_started
+            solved.append((0, own_search))
             record.unmodelled.extend(own_search.unmodelled)
             equilibrium = own_search.equilibrium
 
@@ -1524,6 +1530,7 @@ def play_game(
                     )
                 except EquilibriumError:
                     break
+                solved.append((1, foe_search))
                 record.unmodelled.extend(foe_search.unmodelled)
                 foe_equilibrium = foe_search.equilibrium
                 deepened[1] = foe_search.deepened
@@ -1612,6 +1619,14 @@ def play_game(
                 ),
             )
         )
+        if luck.active():
+            # AIVAT's action term off the searches' own matrices (IKA-193); a leafless
+            # side's matrix is not in win probability and is left out.
+            luck.saw_mixtures(
+                len(record.decisions) - 1, pos.turn, ours, own_strategy, foe_theirs,
+                foe_strategy, chosen, [r for s, r in solved if leaves[s] is not None],
+                forced=first_action is not None and len(record.decisions) == 1,
+            )
         timing.decided("move")
         advanced = _advance_turn(
             reg, rng, pos, chosen, record, leaves, objective,
@@ -1659,7 +1674,10 @@ def _advance_turn(
         return None
     index = _sample_index(rng, counts)
     if index < len(weights.branches):
-        return port.branch(reg, pos, chosen, Budget.exact(), index)
+        landed = port.branch(reg, pos, chosen, Budget.exact(), index)
+        luck.saw_turn(reg, pos, chosen, counts, index, landed)
+        return landed
+    luck.saw_turn(reg, pos, chosen, counts, index)
     paused = port.turn(reg, pos, chosen, Budget.exact(), select=index).pause
     if paused is None:
         raise port.PortRefused(f"the port gave no pause at index {index} of the turn")
@@ -1713,6 +1731,7 @@ def _advance(
             if not weights.size or float(weights.sum()) <= 0:
                 return None
             index = _sample_index(rng, weights)
+            luck.saw_resumed(result, index)
             if index < len(result.branches):
                 return result.outcomes[index].position
             pause = result.pauses[index - len(result.branches)]
