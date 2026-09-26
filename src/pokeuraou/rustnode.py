@@ -44,6 +44,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
@@ -428,6 +429,41 @@ def port_threads() -> int | None:
     return _PORT_THREADS[0]
 
 
+#: A thread's own processes (`own_node`), by format; the module's `_NODES` otherwise.
+_LOCAL = threading.local()
+
+
+def _own(format_id: str) -> RustNode | None:
+    nodes = getattr(_LOCAL, "nodes", None)
+    return None if nodes is None else nodes.get(format_id)
+
+
+@contextlib.contextmanager
+def own_node(reg: Regulation, threads: int | None = None):  # noqa: ANN201
+    """A port process of this thread's own for the block (IKA-32 stage 2).
+
+    Every road on this thread (`require_node`, `node_for`) asks it instead of the module's
+    warm process, so a helper thread can cross to a port while the thread that owns the
+    module's is crossing to that one: each process answers one line at a time, and its
+    answers are the same bytes as any other's (a node keeps nothing between requests). Not
+    with positions held by number (`hold_positions`): that table is the module's, for its
+    own process. Closed at the end of the block.
+    """
+    if _HOLD[0]:
+        raise RuntimeError("a thread's own port does not hold positions (hold_positions is on)")
+    format_id = reg.meta.format_id
+    nodes = getattr(_LOCAL, "nodes", None)
+    if nodes is None:
+        nodes = _LOCAL.nodes = {}
+    made = RustNode(reg, threads=threads)
+    nodes[format_id] = made
+    try:
+        yield made
+    finally:
+        nodes.pop(format_id, None)
+        made.close()
+
+
 def node_for(reg: Regulation) -> RustNode | None:
     """The warm process for this regulation, or None if it is not usable.
 
@@ -436,6 +472,9 @@ def node_for(reg: Regulation) -> RustNode | None:
     silently wrong.
     """
     format_id = reg.meta.format_id
+    own = _own(format_id)
+    if own is not None:
+        return own
     if format_id in _NODES:
         return _NODES[format_id]
     if not available():
@@ -492,6 +531,11 @@ def disable(reason: str) -> bool:
     roads then stop (`port.ask`, IKA-209). There is no Python to fall back to (IKA-212).
     """
     global _GAVE_UP, _RESTARTS
+    if getattr(_LOCAL, "nodes", None):
+        # A thread's own process failed (`own_node`): it is not restarted, and the
+        # module's is left alone -- the thread's caller meets the failure instead.
+        print(f"[rustnode] a thread's own node failed: {reason}", file=sys.stderr)
+        return False
     reset()
     if _RESTARTS < RESTARTS_ALLOWED:
         _RESTARTS += 1
@@ -523,6 +567,9 @@ def require_node(reg: Regulation) -> RustNode:
             "back to (IKA-209); unset it"
         )
     format_id = reg.meta.format_id
+    own = _own(format_id)
+    if own is not None:
+        return own
     held = _NODES.get(format_id)
     if held is not None:
         return held

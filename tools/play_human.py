@@ -15,7 +15,9 @@ person is shown and how the agent spends its seconds). This file loads the piece
   another, ``--hp-share`` for none -- said at the start either way;
 * the menus: ``q-nocover`` when a Q is there (``--q-model``, default `DEFAULT_Q`), the
   default fill otherwise, with a note; ``--rank-fill`` overrides;
-* the port's threads: ``--cores`` (`rustnode.set_port_threads`, IKA-32).
+* the cores: ``--cores`` prices the budget rule and spreads a move over that many threads
+  (`humanplay.use_threads`: the port's cells, the deepening's cells expanded ahead, a big
+  game's two LPs at once -- IKA-32); ``--threads`` sets the threads alone.
 
 The person: ``terminal`` (you), ``first`` / ``random`` (stand-ins, for smoke runs),
 ``script:<file>`` (one answer per line: the selection as party numbers, then each choice
@@ -46,7 +48,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from pokeuraou import humanplay, liveview, qrank, rustnode  # noqa: E402
+from pokeuraou import humanplay, liveview, qrank  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.hidden import DEFAULT_BENCH_DROP, parse_bench_drop  # noqa: E402
 from pokeuraou.names import localiser  # noqa: E402
@@ -80,6 +82,19 @@ def _team(pool, key: str):  # noqa: ANN001, ANN202
     raise SystemExit(f"no team {key!r} in {pool.id}")
 
 
+def _oracle_width(spec: str | None) -> int | None:
+    """``--oracle``: s<W> or sall as a width (`deepen.ALL_ACTIONS` for every action)."""
+    from pokeuraou.deepen import ALL_ACTIONS
+
+    if spec is None or spec == "none":
+        return None
+    if spec == "sall":
+        return ALL_ACTIONS
+    if spec.startswith("s") and spec[1:].isdigit() and int(spec[1:]) > 0:
+        return int(spec[1:])
+    raise SystemExit(f"--oracle is s<W>, sall or none, not {spec!r}")
+
+
 def _person(spec: str, reg, loc, seed: int, server=None):  # noqa: ANN001, ANN202
     if spec == "web":
         if server is None:
@@ -109,7 +124,12 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--human-side", type=int, default=0, choices=(0, 1))
     ap.add_argument("--seconds", type=float, default=45.0, help="the agent's budget per move")
     ap.add_argument("--cores", type=int, default=1,
-                    help="the port's threads (IKA-32: 8 is the practical best)")
+                    help="the cores a move may use: the budget rule's prices and, unless --threads "
+                    "says otherwise, the threads (IKA-32: 8 is the practical best)")
+    ap.add_argument("--threads", type=int, default=None,
+                    help="threads a move spreads over (the port's cells, the deepening's cells "
+                    "expanded ahead, a big game's two LPs at once), when not --cores. They change "
+                    "no move: a count-clock game is the same game at any number")
     ap.add_argument("--clock", default="wall", choices=humanplay.CLOCKS,
                     help="wall: stop the deepening at the budget by the clock (default); "
                     "count: spend it at measured prices, reproducible by seed")
@@ -118,12 +138,18 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--max-levels", type=int, default=None,
                     help="the deepening's depth guard (IKA-307; default deepen.MAX_LEVELS). "
                     "Given, each move's record says why the deepening and its lines stopped")
+    ap.add_argument("--oracle", default=None,
+                    help="the root's swap oracle while deepening: s<W> (the rest of a width-W menu) or "
+                    "sall (every legal action) -- IKA-307's allocation; default none")
     ap.add_argument("--child-q", type=int, default=None,
                     help="the deepening's child menus: each side's k best by the Q (IKA-307), "
                     "instead of narrow's damage-ranked 8")
     ap.add_argument("--value", type=Path, nargs="+", default=None,
                     help=f"the agent's leaf (one model or an ensemble). Default: {' '.join(DEFAULT_VALUE)}")
     ap.add_argument("--hp-share", action="store_true", help="no leaf: the hp-share proxy")
+    ap.add_argument("--leaf-graphs", default="on", choices=("on", "off"),
+                    help="score the leaf's small blocks by CUDA-graph replays (humanplay.GraphLeaf, "
+                    "the eager answer to the bit; on a card only)")
     ap.add_argument("--rank-fill", default=None,
                     help=f"how the agent's menus are ranked. Default: {Q_FILL} when a Q is there, "
                     f"else {DEFAULT_RANK_FILL}")
@@ -182,6 +208,8 @@ def main(argv: list[str] | None = None) -> None:
         encoder = Encoder(reg)
         nets, _ = load_ensemble(values, encoder)
         evaluate = BatchedValue([n.to(device) for n in nets], encoder, device=torch.device(device))
+        if args.leaf_graphs == "on":
+            evaluate = humanplay.GraphLeaf(evaluate)
         name = leaf_name(values)
 
     # The menus.
@@ -203,17 +231,22 @@ def main(argv: list[str] | None = None) -> None:
         qrank.install(model)
         q_files = model.describe()
 
-    if args.cores > 1:
-        rustnode.set_port_threads(args.cores)
+    humanplay.use_threads(
+        args.threads if args.threads is not None else args.cores, reg,
+        ([str(v) for v in values] if values and not args.hp_share else None,
+         str(device or "cpu"), args.leaf_graphs == "on"),
+    )
     agent = humanplay.Agent(
         reg=reg, evaluate=evaluate, name=name, seconds=args.seconds, cores=args.cores,
         clock=args.clock, rank_fill=fill, bench_drop=args.bench_drop,
         width_only=args.width_only, max_levels=args.max_levels, child_q=args.child_q,
+        oracle=_oracle_width(args.oracle),
     )
     if args.child_q is not None and not qrank.is_q(fill):
         raise SystemExit("--child-q ranks the children by the Q: it needs a Q (a q rank fill)")
     say(f"agent: leaf {name} / menus {fill}" + (f" ({', '.join(q_files)})" if q_files else "")
         + f" / {args.seconds:g} s a move on {args.cores} core(s), {args.clock} clock"
+        + (f", {args.threads} thread(s)" if args.threads is not None else "")
         + (" / width only" if args.width_only else "") + " / bench hidden")
 
     server = None
