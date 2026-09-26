@@ -657,11 +657,13 @@ def _belief_deepen(
     cells: int, how: dict[str, bool], outside: tuple | None
 ) -> dict[str, Any]:
     """`belief_solve`'s ``deepen`` entry for one side (IKA-294): its cells, reading,
-    swap and oracle candidates (side 0's, side 1's), as `search` takes them."""
+    swap, Q-narrowed probe (IKA-322) and oracle candidates (side 0's, side 1's), as
+    `search` takes them."""
     return {
         "cells": cells,
         "reading": "breadth" if how["breadth_only"] else "mixed",
         "swap": how["swap"],
+        "q_probe": how["q_probe"],
         "outside": outside,
     }
 
@@ -1071,7 +1073,12 @@ def play_game(
     # and whether it runs alone, without deepening.
     oracles = (specs[0].oracle, specs[1].oracle)
     how = [
-        {"swap": spec.swap, "breadth_only": spec.reading == "breadth"} for spec in specs
+        {
+            "swap": spec.swap, "breadth_only": spec.reading == "breadth",
+            # The oracle's probe narrowed by a Q (IKA-322's q<k>), or None.
+            "q_probe": spec.q_probe,
+        }
+        for spec in specs
     ]
     for side in (0, 1):
         if cells[side] and (depths[side] != 1 or sparse[side] or restricted[side]):

@@ -87,11 +87,29 @@ columns against the one row strategy, completion by completion (`_BeliefOracle`)
 swaps under the same three rules. Without the ``h`` only the nodes with no bench hidden
 deepen, as before.
 
+**A probe narrowed by a Q** (IKA-322, the oracle's ``q<k>`` in place of a width:
+``m<N>sq3h``). The candidates are every legal action, as ``all``'s, but a step's probe
+fills only the cells of each side's `k` outside actions a learned Q (`qrank`, IKA-274)
+ranks best against the root's current equilibrium: a row by its Q payoff against the
+column strategy (per completion's reply, weighted, on a Bayesian root), a column by
+what it saves against the row strategy (per completion, weighted, the ``max 0`` of
+`_BeliefOracle`). The real cells decide, exactly as the unnarrowed oracle's: the one
+of the short list that gains most joins. When none of them gains, the step probes
+every outside action once (the proof that nothing outside gains -- IKA-322's
+``Bqk3f``, which kept the whole game's equilibrium in reach with 36% fewer probed
+cells). The Q is asked once per node: over both sides' whole candidate lists, in the
+root's position, or in each completion's on a Bayesian root; it never becomes a
+value, it only picks which cells are probed first. Its calls are counted
+(`Deepened.q`), not charged to a budget of cells; `Cost` prices them.
+
 **What a budget costs.** Labels count cells, so a game is the same game on any machine.
 Time is counted separately (`Cost`): fills, refinements and cells each have a price in
 milliseconds, measured per machine form and per number of cores, and `cells_for_seconds`
 turns a clock into a budget in those prices' units (IKA-293; IKA-32 keeps the prices per
-kind of work because each shrinks differently on more cores).
+kind of work because each shrinks differently on more cores). Two more kinds are counted
+apart (IKA-322): the oracle's probed cells (IKA-294 found a hidden root's probe cheaper a
+cell than a refinement's, since a cell no hidden slot reaches is resolved once for every
+completion) and the Q's inferences.
 """
 
 from __future__ import annotations
@@ -149,9 +167,21 @@ class Cost:
     fill: float
     refine: float
     cell: float
+    #: A probed cell of the root's double oracle (IKA-294's fourth kind, IKA-322), or
+    #: None: priced as any `cell`. Probed cells are among `cells`; this reprices them.
+    probe: float | None = None
+    #: One inference of a Q that narrows the oracle's probe (``q<k>``, IKA-322).
+    q: float = 0.0
 
-    def ms(self, fills: int, refines: int, cells: int) -> float:
-        return fills * self.fill + refines * self.refine + cells * self.cell
+    def ms(
+        self, fills: int, refines: int, cells: int, probed: int = 0, qs: int = 0
+    ) -> float:
+        """Milliseconds of the counted work; `probed` of the `cells` were probes."""
+        rest = cells - probed if self.probe is not None else cells
+        return (
+            fills * self.fill + refines * self.refine + rest * self.cell
+            + (probed * self.probe if self.probe is not None else 0.0) + qs * self.q
+        )
 
 
 #: Measured prices, by (machine form, logical cores) -- IKA-293, 2026-09-26.
@@ -187,7 +217,7 @@ READINGS = {"m": "mixed", "r": "restricted", "b": "breadth"}
 #: The oracle's candidates as a width: ``oall`` is every legal action.
 ALL_ACTIONS = 1 << 30
 
-_DEEPEN = re.compile(r"none|([mrb])([1-9][0-9]*)(?:([os])([1-9][0-9]*|all))?(h)?")
+_DEEPEN = re.compile(r"none|([mrb])([1-9][0-9]*)(?:([os])([1-9][0-9]*|all|q[1-9][0-9]*))?(h)?")
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,17 +235,22 @@ class DeepenSpec:
     #: the Bayesian root of `deepen_belief`. Without it only the nodes with no bench
     #: hidden deepen, as IKA-33 and IKA-293 did.
     hidden: bool = False
+    #: The oracle's probe narrowed to each side's k best outside actions by a Q
+    #: (``q<k>``, IKA-322; the candidates are every legal action), or None: it probes
+    #: every candidate.
+    q_probe: int | None = None
 
 
 def deepen_spec(label: str) -> DeepenSpec:
     """`DeepenSpec` of a label: ``none``, ``m400``, ``r25``, ``m400o24``, ``m400sall``,
-    ``b200s24``, ``m400sallh``."""
+    ``b200s24``, ``m400sallh``, ``m1200sq3h``."""
     got = _DEEPEN.fullmatch(label)
     if got is None:
         raise ValueError(
             f"deepen {label!r} is not none, m<N>, r<N>, m<N>o<W>, m<N>s<W>, b<N>o<W> or "
-            "b<N>s<W> (N cells, N >= 1; W the oracle's width, or all), each but r<N> "
-            "optionally ending in h (hidden nodes too)"
+            "b<N>s<W> (N cells, N >= 1; W the oracle's width, all, or q<k>: every action, "
+            "the probe narrowed to a Q's k best a side), each but r<N> optionally ending "
+            "in h (hidden nodes too)"
         )
     if got.group(1) is None:
         return DeepenSpec(None, 0)
@@ -236,8 +271,18 @@ def deepen_spec(label: str) -> DeepenSpec:
             f"deepen {label!r}: breadth only (b) is the root's double oracle alone; it "
             "needs o<W> / s<W> / oall / sall"
         )
-    width = None if oracle is None else ALL_ACTIONS if oracle == "all" else int(oracle)
-    return DeepenSpec(READINGS[letter], int(got.group(2)), width, kind == "s", hidden)
+    q_probe = None
+    if oracle is None:
+        width = None
+    elif oracle == "all":
+        width = ALL_ACTIONS
+    elif oracle.startswith("q"):
+        width, q_probe = ALL_ACTIONS, int(oracle[1:])
+    else:
+        width = int(oracle)
+    return DeepenSpec(
+        READINGS[letter], int(got.group(2)), width, kind == "s", hidden, q_probe
+    )
 
 
 def parse_deepen(label: str) -> tuple[str | None, int]:
@@ -302,6 +347,13 @@ class Deepened:
     #: The completions of the other side's bench the root was solved over (IKA-294's
     #: Bayesian root), or 0: a node with no bench hidden, read as one game.
     classes: int = 0
+    #: Whether a Q narrowed the oracle's probe (``q<k>``, IKA-322). The two counts below
+    #: are written only then.
+    q_probe: bool = False
+    #: Inferences of the Q: one for an open root, one per completion for a Bayesian one.
+    q: int = 0
+    #: Steps whose short list gained nothing, so every outside action was probed.
+    qfull: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -317,6 +369,7 @@ class Deepened:
                 else {}
             ),
             **({"swapped": self.swapped} if self.swap else {}),
+            **({"q": self.q, "qfull": self.qfull} if self.q_probe else {}),
             **(
                 {"uncovered": [list(side) for side in self.uncovered]}
                 if any(self.uncovered)
@@ -422,6 +475,7 @@ def deepen_root(
     outside: tuple[Sequence[SideAction], Sequence[SideAction]] | None = None,
     cost: Cost | None = None,
     swap: bool = False,
+    q_probe: int | None = None,
 ) -> Deepening:
     """`best_first`, and the root's double oracle when `outside` is given (IKA-293).
 
@@ -432,6 +486,8 @@ def deepen_root(
 
     `swap` pushes a weightless action of the same side out for each one that joins, and
     the ``breadth`` reading is the oracle alone, without deepening (both need `outside`).
+    `q_probe` narrows each probe to the process's Q's best `q_probe` outside actions a
+    side, all of them once when those gain nothing (``q<k>``, IKA-322).
 
     `cost` changes only how the budget is counted: None counts cells (a refined cell's
     turn is one), a `Cost` charges each fill, refinement and cell its price in units of
@@ -439,8 +495,10 @@ def deepen_root(
     """
     if outside is not None and reading not in ("mixed", "breadth"):
         raise ValueError("the root's double oracle goes with the mixed reading")
-    if outside is None and (swap or reading == "breadth"):
-        raise ValueError("swapping and breadth only are the root's double oracle's; no outside")
+    if outside is None and (swap or reading == "breadth" or q_probe is not None):
+        raise ValueError(
+            "swapping, breadth only and a Q's probe are the root's double oracle's; no outside"
+        )
     deepens = reading != "breadth"
     root = _Node(
         pos=pos, rows=list(rows), cols=list(cols),
@@ -458,15 +516,16 @@ def deepen_root(
     if trace is not None:
         trace.append(root)
     meter = _Meter(cost)
-    oracle = None if outside is None else _Oracle(root, outside, swap=swap)
+    oracle = (
+        None if outside is None else _Oracle(root, outside, swap=swap, q_probe=q_probe)
+    )
     expanded = 0
     deepest = 0
     refused = 0
     while meter.spent < cells:
         if oracle is not None:
             # One step: the probe and what it leads to -- a widening, or else a deepening.
-            oracle.probe(reg, evaluate, budget, meter, unmodelled)
-            if oracle.widen(reg, evaluate, budget, meter, unmodelled):
+            if oracle.step(reg, evaluate, budget, meter, unmodelled):
                 if trace is not None:
                     trace.append((root, None, True))
                 continue
@@ -504,6 +563,9 @@ def deepen_root(
             timing.count("deepen.oracle.widened", oracle.widened)
             timing.count("deepen.oracle.swapped", oracle.swapped)
             timing.count("deepen.oracle.stalled", int(oracle.stalled))
+            if q_probe is not None:
+                timing.count("deepen.oracle.q", meter.qs)
+                timing.count("deepen.oracle.qfull", oracle.fallbacks)
     uncovered: tuple[tuple[str, ...], tuple[str, ...]] = ((), ())
     if oracle is not None and oracle.swapped:
         uncovered = (
@@ -519,6 +581,8 @@ def deepen_root(
         widened=0 if oracle is None else oracle.widened,
         fills=meter.fills, swap=swap,
         swapped=0 if oracle is None else oracle.swapped, uncovered=uncovered,
+        q_probe=q_probe is not None, q=meter.qs,
+        qfull=0 if oracle is None else oracle.fallbacks,
     )
     return Deepening(
         equilibrium=root.equilibrium, payoff=root.payoff, rows=root.rows, cols=root.cols,
@@ -547,21 +611,33 @@ class _Meter:
         self.fills = 0
         self.refines = 0
         self.cells = 0
+        #: Of `cells`, the oracle's probes (IKA-322's fourth kind).
+        self.probed = 0
+        #: Inferences of the Q that narrows the probe. Counted, not charged to cells.
+        self.qs = 0
 
     def refined(self, cells: int, fills: int) -> None:
         self.refines += 1
         self.cells += cells
         self.fills += fills
 
-    def filled(self, cells: int) -> None:
+    def filled(self, cells: int, *, probe: bool = False) -> None:
         self.fills += 1
         self.cells += cells
+        if probe:
+            self.probed += cells
+
+    def asked_q(self, count: int) -> None:
+        self.qs += count
 
     @property
     def spent(self) -> float:
         if self.cost is None:
             return self.refines + self.cells
-        return self.cost.ms(self.fills, self.refines, self.cells) / self.cost.cell
+        return (
+            self.cost.ms(self.fills, self.refines, self.cells, self.probed, self.qs)
+            / self.cost.cell
+        )
 
 
 class _Oracle:
@@ -578,9 +654,16 @@ class _Oracle:
         outside: tuple[Sequence[SideAction], Sequence[SideAction]],
         *,
         swap: bool = False,
+        q_probe: int | None = None,
     ) -> None:
         self.root = root
         self.swap = swap
+        self.q_probe = q_probe
+        #: The Q over both sides' candidates (side 0's value), asked at the first step.
+        self.q: np.ndarray | None = None
+        self.q_at: tuple[dict[str, int], dict[str, int]] = ({}, {})
+        #: Steps whose Q short list gained nothing, so every outside action was probed.
+        self.fallbacks = 0
         # The menu's own actions are candidates too, after the given ones: an action a
         # swap pushed out is outside again and can come back.
         self.candidates: tuple[list[SideAction], list[SideAction]] = ([], [])
@@ -621,6 +704,67 @@ class _Oracle:
         strategy = eq.row_strategy if side == 0 else eq.col_strategy
         return [int(k) for k in np.flatnonzero(strategy > 1e-9)]
 
+    def step(
+        self,
+        reg: Regulation,
+        evaluate: LeafEvaluator,
+        budget: Budget,
+        meter: _Meter,
+        unmodelled: set[str],
+    ) -> bool:
+        """One oracle step: probe, then widen. Returns whether an action joined.
+
+        With a Q (``q<k>``) the probe is the Q's short list first, and every outside
+        action only when none of the short list gains (IKA-322's ``Bqk3f``).
+        """
+        if self.q_probe is None:
+            self.probe(reg, evaluate, budget, meter, unmodelled)
+            return self.widen(reg, evaluate, budget, meter, unmodelled)
+        short = self._shortlist(reg, meter)
+        self.probe(reg, evaluate, budget, meter, unmodelled, only=short)
+        if self.widen(reg, evaluate, budget, meter, unmodelled, only=short):
+            return True
+        if all(len(short[side]) == len(self._outside(side)) for side in (0, 1)):
+            return False
+        self.fallbacks += 1
+        self.probe(reg, evaluate, budget, meter, unmodelled)
+        return self.widen(reg, evaluate, budget, meter, unmodelled)
+
+    def _shortlist(
+        self, reg: Regulation, meter: _Meter
+    ) -> tuple[list[SideAction], list[SideAction]]:
+        """Each side's `q_probe` outside actions the Q ranks best against the root's
+        current equilibrium: rows by their Q payoff against the column strategy, columns
+        by minus the row strategy's Q payoff against them (ties: the candidates' order)."""
+        from . import qrank
+
+        root = self.root
+        if self.q is None:
+            self.q = np.asarray(
+                qrank.installed().matrix(reg, root.pos, self.candidates), dtype=np.float64
+            )
+            meter.asked_q(1)
+            for side in (0, 1):
+                self.q_at[side].update(
+                    (action.to_choice(), n) for n, action in enumerate(self.candidates[side])
+                )
+        eq = root.equilibrium
+        rows = [self.q_at[0][a.to_choice()] for a in root.rows]
+        cols = [self.q_at[1][b.to_choice()] for b in root.cols]
+        out: tuple[list[SideAction], list[SideAction]] = ([], [])
+        for side in (0, 1):
+            outside = self._outside(side)
+            if side == 0:
+                at = [self.q_at[0][a.to_choice()] for a in outside]
+                score = self.q[np.ix_(at, cols)] @ np.asarray(eq.col_strategy)
+            else:
+                at = [self.q_at[1][b.to_choice()] for b in outside]
+                score = -(np.asarray(eq.row_strategy) @ self.q[np.ix_(rows, at)])
+            order = sorted(range(len(outside)), key=lambda n: (-float(score[n]), n))
+            keep = set(order[: self.q_probe])
+            out[side].extend(action for n, action in enumerate(outside) if n in keep)
+        return out
+
     def probe(
         self,
         reg: Regulation,
@@ -628,11 +772,14 @@ class _Oracle:
         budget: Budget,
         meter: _Meter,
         unmodelled: set[str],
+        only: tuple[list[SideAction], list[SideAction]] | None = None,
     ) -> None:
-        """Fill, in one call, every outside action against the other side's support that
-        is not known yet."""
+        """Fill, in one call, every outside action (or those of `only`) against the other
+        side's support that is not known yet."""
         root = self.root
-        out_rows, out_cols = self._outside(0), self._outside(1)
+        out_rows, out_cols = (
+            (self._outside(0), self._outside(1)) if only is None else only
+        )
         sup_rows, sup_cols = self._support(0), self._support(1)
         rows: list[SideAction] = []
         cols: list[SideAction] = []
@@ -670,7 +817,7 @@ class _Oracle:
         unmodelled.update(notes)
         for i, j in wanted:
             self.known[(rows[i].to_choice(), cols[j].to_choice())] = float(matrices[0][i, j])
-        meter.filled(len(wanted))
+        meter.filled(len(wanted), probe=True)
         self.probes += 1
         self.probed += len(wanted)
 
@@ -681,8 +828,10 @@ class _Oracle:
         budget: Budget,
         meter: _Meter,
         unmodelled: set[str],
+        only: tuple[list[SideAction], list[SideAction]] | None = None,
     ) -> bool:
-        """Add the outside action with the largest best-response gain, if one gains.
+        """Add the outside action (of `only`, when given) with the largest best-response
+        gain, if one gains.
 
         Rows before columns, first in the candidates' order on a tie. The rest of its row
         or column is filled at depth 1 (charged) and the root re-solved. Returns whether
@@ -694,11 +843,16 @@ class _Oracle:
         eq = root.equilibrium
         value = float(eq.value)
         best: tuple[float, int, SideAction] | None = None
+        asked = None if only is None else tuple(
+            {action.to_choice() for action in only[side]} for side in (0, 1)
+        )
         for side in (0, 1):
             support = self._support(1 - side)
             strategy = eq.col_strategy if side == 0 else eq.row_strategy
             for action in self._outside(side):
                 key = action.to_choice()
+                if asked is not None and key not in asked[side]:
+                    continue
                 if side == 0:
                     got = sum(
                         float(strategy[j]) * self.known[(key, root.cols[j].to_choice())]
@@ -930,10 +1084,19 @@ class _BeliefOracle:
         fill: Callable[[list[SideAction], list[SideAction]], list[np.ndarray]],
         *,
         swap: bool = False,
+        q_probe: int | None = None,
+        ask_q: Callable[[list[SideAction], list[SideAction]], list[np.ndarray]] | None = None,
     ) -> None:
         self.root = root
         self.fill = fill
         self.swap = swap
+        self.q_probe = q_probe
+        #: (own candidates, other candidates) -> the Q per completion, in this side's
+        #: orientation (IKA-322). Asked once, at the first step.
+        self.ask_q = ask_q
+        self.q: list[np.ndarray] | None = None
+        self.q_at: tuple[dict[str, int], dict[str, int]] = ({}, {})
+        self.fallbacks = 0
         self.candidates: tuple[list[SideAction], list[SideAction]] = ([], [])
         for role, menu in ((0, root.own), (1, root.other)):
             seen: set[str] = set()
@@ -972,7 +1135,8 @@ class _BeliefOracle:
         ]
 
     def _ask(
-        self, rows: list[SideAction], cols: list[SideAction], meter: _Meter
+        self, rows: list[SideAction], cols: list[SideAction], meter: _Meter,
+        *, probe: bool = False,
     ) -> None:
         """Fill the rectangle `rows` x `cols` in every completion; remember each cell."""
         if not rows or not cols:
@@ -983,11 +1147,68 @@ class _BeliefOracle:
                 self.known[(a.to_choice(), b.to_choice())] = np.array(
                     [float(p[r, c]) for p in prices], dtype=np.float64
                 )
-        meter.filled(len(rows) * len(cols) * len(prices))
+        meter.filled(len(rows) * len(cols) * len(prices), probe=probe)
         self.probed += len(rows) * len(cols) * len(prices)
 
-    def probe(self, meter: _Meter) -> None:
-        """Ask every outside action against the other side's support, where not known.
+    def step(self, meter: _Meter) -> bool:
+        """`_Oracle.step` on the Bayesian root: the Q's short list, every outside action
+        only when none of it gains."""
+        if self.q_probe is None:
+            self.probe(meter)
+            return self.widen(meter)
+        short = self._shortlist(meter)
+        self.probe(meter, only=short)
+        if self.widen(meter, only=short):
+            return True
+        if all(len(short[role]) == len(self._outside(role)) for role in (0, 1)):
+            return False
+        self.fallbacks += 1
+        self.probe(meter)
+        return self.widen(meter)
+
+    def _shortlist(self, meter: _Meter) -> tuple[list[SideAction], list[SideAction]]:
+        """Each role's `q_probe` outside actions the Q ranks best against the Bayesian
+        equilibrium, read as `widen` reads the real cells: a row by its weighted Q
+        payoff against each completion's reply, a column by the weighted ``max 0`` of
+        what it saves each completion against the row strategy (ties: candidates' order)."""
+        root = self.root
+        if self.q is None:
+            if self.ask_q is None:
+                raise ValueError("a Q's probe (q<k>) on a Bayesian root needs ask_q")
+            self.q = [np.asarray(q, dtype=np.float64) for q in self.ask_q(*self.candidates)]
+            meter.asked_q(len(self.q))
+            for role in (0, 1):
+                self.q_at[role].update(
+                    (action.to_choice(), n) for n, action in enumerate(self.candidates[role])
+                )
+        eq = root.equilibrium
+        x = np.asarray(eq.row_strategy)
+        rows = [self.q_at[0][a.to_choice()] for a in root.own]
+        cols = [self.q_at[1][b.to_choice()] for b in root.other]
+        out: tuple[list[SideAction], list[SideAction]] = ([], [])
+        for role in (0, 1):
+            outside = self._outside(role)
+            at = [self.q_at[role][a.to_choice()] for a in outside]
+            score = np.zeros(len(outside))
+            for k, q in enumerate(self.q):
+                y = np.asarray(eq.col_strategies[k])
+                if role == 0:
+                    score += float(root.w[k]) * (q[np.ix_(at, cols)] @ y)
+                else:
+                    earned = float(x @ q[np.ix_(rows, cols)] @ y)
+                    score += float(root.w[k]) * np.maximum(
+                        0.0, earned - x @ q[np.ix_(rows, at)]
+                    )
+            order = sorted(range(len(outside)), key=lambda n: (-float(score[n]), n))
+            keep = set(order[: self.q_probe])
+            out[role].extend(action for n, action in enumerate(outside) if n in keep)
+        return out
+
+    def probe(
+        self, meter: _Meter, only: tuple[list[SideAction], list[SideAction]] | None = None
+    ) -> None:
+        """Ask every outside action (or those of `only`) against the other side's
+        support, where not known.
 
         Two rectangles: the outside rows against the union of the completions' column
         supports, and the row support against the outside columns. A rectangle is filled
@@ -996,8 +1217,11 @@ class _BeliefOracle:
         root = self.root
         union = sorted({j for cols in self._cols() for j in cols})
         support = self._rows()
+        out_rows, out_cols = (
+            (self._outside(0), self._outside(1)) if only is None else only
+        )
         rows = [
-            a for a in self._outside(0)
+            a for a in out_rows
             if any((a.to_choice(), root.other[j].to_choice()) not in self.known for j in union)
         ]
         cols_needed = [
@@ -1005,7 +1229,7 @@ class _BeliefOracle:
             if any((a.to_choice(), root.other[j].to_choice()) not in self.known for a in rows)
         ]
         outside_cols = [
-            b for b in self._outside(1)
+            b for b in out_cols
             if any((root.own[i].to_choice(), b.to_choice()) not in self.known for i in support)
         ]
         rows_needed = [
@@ -1014,14 +1238,16 @@ class _BeliefOracle:
         ]
         if not (rows and cols_needed) and not (outside_cols and rows_needed):
             return
-        self._ask(rows, cols_needed, meter)
-        self._ask(rows_needed, outside_cols, meter)
+        self._ask(rows, cols_needed, meter, probe=True)
+        self._ask(rows_needed, outside_cols, meter, probe=True)
         self.probes += 1
 
-    def widen(self, meter: _Meter) -> bool:
-        """Add the outside action with the largest gain, if one gains (rows first on a
-        tie, then the candidates' order); its whole row or column is filled, the root
-        re-solved. Returns whether an action joined."""
+    def widen(
+        self, meter: _Meter, only: tuple[list[SideAction], list[SideAction]] | None = None
+    ) -> bool:
+        """Add the outside action (of `only`, when given) with the largest gain, if one
+        gains (rows first on a tie, then the candidates' order); its whole row or column
+        is filled, the root re-solved. Returns whether an action joined."""
         if self.stalled:
             return False
         root = self.root
@@ -1034,9 +1260,14 @@ class _BeliefOracle:
         cols = self._cols()
         earned = [float(x @ root.prices[k] @ ys[k]) for k in range(len(root.prices))]
         best: tuple[float, int, SideAction] | None = None
+        asked = None if only is None else tuple(
+            {action.to_choice() for action in only[role]} for role in (0, 1)
+        )
         for role in (0, 1):
             for action in self._outside(role):
                 key = action.to_choice()
+                if asked is not None and key not in asked[role]:
+                    continue
                 if role == 0:
                     got = sum(
                         float(w[k]) * float(ys[k][j])
@@ -1157,6 +1388,7 @@ def deepen_belief(
     swap: bool = False,
     cost: Cost | None = None,
     trace: list | None = None,
+    q_probe: int | None = None,
 ) -> BeliefDeepening:
     """`deepen_root` for a side whose opponent's bench is hidden (IKA-294, label ``h``).
 
@@ -1167,12 +1399,15 @@ def deepen_belief(
     every step; with `outside` (this side's candidates, the other side's) the root's
     double oracle asks them first every step (`_BeliefOracle`), and `swap` / the
     ``breadth`` reading are `deepen_root`'s. A cell spent is one resolved turn in one
-    completion: a probed cell counts once per completion.
+    completion: a probed cell counts once per completion. `q_probe` narrows the probe by
+    the process's Q, asked once per completion in that completion's position (IKA-322).
     """
     if reading not in ("mixed", "breadth"):
         raise ValueError(f"a Bayesian root is read whole or breadth only, not {reading!r}")
-    if outside is None and (swap or reading == "breadth"):
-        raise ValueError("swapping and breadth only are the root's double oracle's; no outside")
+    if outside is None and (swap or reading == "breadth" or q_probe is not None):
+        raise ValueError(
+            "swapping, breadth only and a Q's probe are the root's double oracle's; no outside"
+        )
     from .beliefnode import belief_payoffs
 
     deepens = reading != "breadth"
@@ -1190,15 +1425,29 @@ def deepen_belief(
         unmodelled.update(node.unmodelled)
         return [m if side == 0 else -m.T for m in node.matrices[side]]
 
+    def ask_q(own_c: list[SideAction], other_c: list[SideAction]) -> list[np.ndarray]:
+        """The Q of `own_c` x `other_c` in every completion, in this side's orientation."""
+        from . import qrank
+
+        model = qrank.installed()
+        pools = (own_c, other_c) if side == 0 else (other_c, own_c)
+        out = []
+        for item in items:
+            q = np.asarray(model.matrix(reg, item.position, pools), dtype=np.float64)
+            out.append(q if side == 0 else -q.T)
+        return out
+
     meter = _Meter(cost)
-    oracle = None if outside is None else _BeliefOracle(root, outside, fill, swap=swap)
+    oracle = (
+        None if outside is None
+        else _BeliefOracle(root, outside, fill, swap=swap, q_probe=q_probe, ask_q=ask_q)
+    )
     expanded = 0
     deepest = 0
     refused = 0
     while meter.spent < cells:
         if oracle is not None:
-            oracle.probe(meter)
-            if oracle.widen(meter):
+            if oracle.step(meter):
                 if trace is not None:
                     trace.append((root, None, True))
                 continue
@@ -1238,6 +1487,9 @@ def deepen_belief(
             timing.count("deepen.oracle.widened", oracle.widened)
             timing.count("deepen.oracle.swapped", oracle.swapped)
             timing.count("deepen.oracle.stalled", int(oracle.stalled))
+            if q_probe is not None:
+                timing.count("deepen.oracle.q", meter.qs)
+                timing.count("deepen.oracle.qfull", oracle.fallbacks)
     uncovered: tuple[tuple[str, ...], tuple[str, ...]] = ((), ())
     if oracle is not None and oracle.swapped:
         mine = _lost_options(reg, own, root.own)
@@ -1252,7 +1504,8 @@ def deepen_belief(
         widened=0 if oracle is None else oracle.widened,
         fills=meter.fills, swap=swap,
         swapped=0 if oracle is None else oracle.swapped, uncovered=uncovered,
-        classes=len(root.prices),
+        classes=len(root.prices), q_probe=q_probe is not None, q=meter.qs,
+        qfull=0 if oracle is None else oracle.fallbacks,
     )
     return BeliefDeepening(
         equilibrium=root.equilibrium, prices=root.prices, own=root.own, other=root.other,
