@@ -382,7 +382,15 @@ impl<'a> Turn<'a> {
         }
     }
 
+    /// The types Showdown's `getTypes()` answers: Roost's `onType` takes Flying away for
+    /// the rest of the turn (IKA-315).
     pub(crate) fn types_of(&self, mon: &Pokemon) -> Types {
+        crate::battler::roosted(mon, self.base_types_of(mon))
+    }
+
+    /// The types before Roost's `onType`: what a type change writes over, and what
+    /// Transform copies (`pokemon.volatiles['roost'].typeWas`, sim/pokemon.ts).
+    pub(crate) fn base_types_of(&self, mon: &Pokemon) -> Types {
         damage::types_or_species(self.reg, mon.species.as_str(), mon.types)
     }
 
