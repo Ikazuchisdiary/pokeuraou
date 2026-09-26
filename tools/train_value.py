@@ -204,6 +204,18 @@ def warm_start(
     net, meta = load_model(path, encoder)
     blob = torch.load(path, map_location="cpu", weights_only=False)
     config = replace(ValueConfig(**blob["config"]), **run)
+    if config.move_properties and not net.config.move_properties:
+        # IKA-318: an id-only model gains the move-property branch. Its input columns start
+        # at zero, so before the first step this net answers exactly as the loaded one; the
+        # branch's own layer is initialised from --seed, not from whatever ran before.
+        torch.manual_seed(config.seed)
+        grown = build(encoder, config)
+        grown._active_feature = net._active_feature
+        missing, unexpected = grown.load_state_dict(net.state_dict(), strict=False)
+        new = {"move_props", *(k for k in grown.state_dict() if k.startswith("move_prop_"))}
+        if unexpected or set(missing) != new:
+            raise SystemExit(f"warm start into move properties: missing {missing}, unexpected {unexpected}")
+        net = grown
     record = {
         "path": str(path),
         "format_id": blob["format_id"],
@@ -251,6 +263,15 @@ def main() -> None:
         "outcome, whatever this is set to, or the rows stop being comparable.",
     )
     ap.add_argument(
+        "--target-file",
+        type=Path,
+        default=None,
+        help="fit the per-row targets in this .npz (key --target-key) instead of the outcome, "
+        "e.g. `tools/deep_targets.py mix` (IKA-296). One value in [0, 1] per row of --data, in "
+        "its order. Validation stays against the real outcome.",
+    )
+    ap.add_argument("--target-key", default=None)
+    ap.add_argument(
         "--init-from",
         type=Path,
         default=None,
@@ -266,6 +287,20 @@ def main() -> None:
     ap.add_argument("--ema-decay", type=float, default=None)
     ap.add_argument("--swa-from", type=float, default=None)
     ap.add_argument("--pct-start", type=float, default=None)
+    ap.add_argument(
+        "--move-properties",
+        action="store_true",
+        help="IKA-318: read each move's dex properties (qhead.move_table) beside its id "
+        "embedding. With --init-from an id-only model, the new branch's input columns start "
+        "at zero, so the first step starts from that model's own answers.",
+    )
+    ap.add_argument(
+        "--drop-train-moves",
+        default="",
+        help="comma-separated move ids: leave every training decision whose position holds "
+        "one of them out of the fit, and keep the validation games as they are -- a move "
+        "the net has never been taught, on the same marking (IKA-318)",
+    )
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--no-save", action="store_true")
     ap.add_argument(
@@ -314,6 +349,22 @@ def main() -> None:
             f"TD target: {1 - args.td_lambda:.2f} x outcome + {args.td_lambda:.2f} x "
             f"searchValue (leaves {sorted(leaves)}). Validation stays on the outcome."
         )
+    if args.target_file is not None:
+        if args.td_lambda or args.target_key is None:
+            raise SystemExit("--target-file needs --target-key and excludes --td-lambda")
+        target = np.load(args.target_file)[args.target_key].astype(np.float32)
+        if target.shape != dataset.outcome.shape or not (
+            np.isfinite(target).all() and (target >= 0).all() and (target <= 1).all()
+        ):
+            raise SystemExit(
+                f"{args.target_file}[{args.target_key}] is not one value in [0, 1] per row "
+                f"of {args.data} ({target.shape} against {dataset.outcome.shape})"
+            )
+        moved = float(np.mean(np.abs(target - dataset.outcome) > 1e-9))
+        print(
+            f"target: {args.target_file}[{args.target_key}], {moved:.1%} of rows differ from "
+            "the outcome. Validation stays on the outcome."
+        )
     reg = load_regulation(
         __import__("json").loads(str(np.load(args.data)["meta_json"]))["format_id"]
     )
@@ -326,6 +377,7 @@ def main() -> None:
             ("ema_decay", args.ema_decay),
             ("swa_from", args.swa_from),
             ("pct_start", args.pct_start),
+            ("move_properties", True if args.move_properties else None),
         )
         if value is not None
     }
@@ -357,6 +409,15 @@ def main() -> None:
         f"-> {len(train_idx):,} train / {len(val_idx):,} validation, split by game "
         f"at split-seed {args.split_seed} (fit seed {args.seed})"
     )
+    dropped_moves = [m for m in args.drop_train_moves.split(",") if m]
+    if dropped_moves:
+        ids = [encoder.vocab.moves[m] for m in dropped_moves]
+        flat = dataset.encoded.moves[train_idx].reshape(len(train_idx), -1)
+        train_idx = train_idx[~np.isin(flat, ids).any(axis=1)]
+        print(
+            f"--drop-train-moves: {len(train_idx):,} training decisions left without "
+            f"{', '.join(dropped_moves)} (validation unchanged)"
+        )
     print(f"{parameters:,} parameters on {device}")
 
     # The identity the architecture is supposed to guarantee, checked before training so a
@@ -376,7 +437,7 @@ def main() -> None:
     print(f"antisymmetry V(x) + V(mirror x) - 1: max |error| {worst:.2e} at init")
 
     if args.curve:
-        if args.td_lambda:
+        if args.td_lambda or args.target_file is not None:
             # Rather than quietly train the curve on a different target than the banner
             # said. The curve answers "would more games help", which is a question about
             # the outcome label; mixing in the search value changes what "more games"
@@ -410,7 +471,16 @@ def main() -> None:
         f"(warm-up {config.pct_start:g}), keep {config.keep}, average {config.average}"
     )
     history, best = train(
-        net, dataset, config, device=device, holdout=args.holdout, log=log, target=target
+        net,
+        dataset,
+        config,
+        device=device,
+        holdout=args.holdout,
+        log=log,
+        target=target,
+        # Only when moves were dropped: otherwise `train` resolves the same split itself,
+        # as every run before IKA-318 did.
+        **({"train_index": train_idx, "val_index": val_idx} if dropped_moves else {}),
     )
     net.load_state_dict(best)
 
@@ -498,6 +568,8 @@ def main() -> None:
                 # training (IKA-194). None for a fresh initialisation.
                 "init_from": init_meta or None,
                 "td_lambda": args.td_lambda,
+                "target_file": None if args.target_file is None else str(args.target_file),
+                "target_key": args.target_key,
                 "seed": args.seed,
                 # Separately, because --seed moves three things and only this one
                 # decides what the row above was marked against. A model whose record

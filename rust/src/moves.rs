@@ -715,6 +715,7 @@ pub(crate) fn start_confusion(turn: &mut Turn, side: usize, slot: usize) {
         if let Some(mon) = turn.mon_at_mut(side, slot) {
             mon.volatiles.retain(|v| v.id.as_str() != "confusion");
         }
+        turn.ate_berry(side, slot);
     }
 }
 
@@ -2153,6 +2154,11 @@ fn hit_target<'a>(
                         continue;
                     }
                     let absorbed = guarded && hit_index == 0;
+                    // A resist berry is eaten in the damage calculation, so Cheek Pouch's
+                    // heal lands before the damage; `after_hit` then takes the berry.
+                    if !absorbed && eats_resist_berry(&state, mv, target, result.type_mod) {
+                        state.ate_berry(target.0, target.1);
+                    }
                     let berry = crate::move_hooks::set_berry_aside(&mut state, move_id.as_str(), target);
                     let dealt = if absorbed {
                         0
@@ -2517,6 +2523,30 @@ fn absorb(turn: &mut Turn, move_type: Id, target: Slot) {
 /// so the collapse is exact and declaring it would flag turns that are right. A branched one
 /// is pushed to `pending_secondaries`: this function holds one state, and the hit loop fans
 /// it out.
+/// Whether this hit makes the target eat its resist berry. A resist berry is eaten only by a
+/// hit it actually weakened. Occa Berry's handler is
+/// `if (move.type === 'Fire' && typeMod > 0) { if (target.eatItem()) ... }`, so a Fire
+/// move that is *not* super effective leaves the berry alone. Chilan Berry is the one
+/// exception: it halves Normal regardless of effectiveness. `after_hit` takes the berry;
+/// `hit_target` asks first, for the Cheek Pouch heal that `eatItem` runs inside the hit's
+/// `ModifyDamage`, before its damage (IKA-329).
+fn eats_resist_berry(turn: &Turn, mv: &Move, target: Slot, type_mod: i64) -> bool {
+    let eats = match turn.mon_at(target.0, target.1) {
+        None => false,
+        Some(mon) if mon.fainted => false,
+        Some(mon) => match mon.item.and_then(|i| resist_berry(i.as_str())) {
+            None => false,
+            Some(berry_type) => {
+                berry_type == mv.mtype.as_str() && (berry_type == "Normal" || type_mod > 0)
+                    // The berry is `onSourceModifyDamage`, which a `damageCallback` never
+                    // reaches (IKA-213), nor a level move; Struggle is `???` (IKA-239).
+                    && !crate::level_struggle::misses_resist_berry(mv.id.as_str())
+            }
+        },
+    };
+    eats && !turn.berries_blocked(target.0)
+}
+
 fn after_hit(
     turn: &mut Turn,
     action: &QueuedAction,
@@ -2630,24 +2660,7 @@ fn after_hit(
         turn.report("ability: poisontouch (30% poison not branched)");
     }
 
-    // A resist berry is eaten only by a hit it actually weakened. Occa Berry's handler is
-    // `if (move.type === 'Fire' && typeMod > 0) { if (target.eatItem()) ... }`, so a Fire
-    // move that is *not* super effective leaves the berry alone. Chilan Berry is the one
-    // exception: it halves Normal regardless of effectiveness.
-    let eats_berry = match turn.mon_at(target.0, target.1) {
-        None => false,
-        Some(mon) if mon.fainted => false,
-        Some(mon) => match mon.item.and_then(|i| resist_berry(i.as_str())) {
-            None => false,
-            Some(berry_type) => {
-                berry_type == mv.mtype.as_str() && (berry_type == "Normal" || type_mod > 0)
-                    // The berry is `onSourceModifyDamage`, which a `damageCallback` never
-                    // reaches (IKA-213), nor a level move; Struggle is `???` (IKA-239).
-                    && !crate::level_struggle::misses_resist_berry(mv.id.as_str())
-            }
-        },
-    };
-    if eats_berry && !turn.berries_blocked(target.0) {
+    if eats_resist_berry(turn, mv, target, type_mod) {
         let berry = turn.mon_at(target.0, target.1).and_then(|m| m.item);
         turn.consume_item(target.0, target.1, berry.as_ref().map(|b| b.as_str()).unwrap_or(""));
     }
@@ -4768,6 +4781,7 @@ fn eat_received_berry(turn: &mut Turn, at: Slot) {
         mon.status = None;
         mon.status_counter = None;
     }
+    turn.ate_berry(at.0, at.1);
 }
 
 /// Perish Song's `onHitField` (`data/moves.ts`): every active Pokemon on both sides, the
