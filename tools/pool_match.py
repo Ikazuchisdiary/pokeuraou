@@ -11,7 +11,8 @@ What an arm is, per arm, and so in whichever seat it sits:
   `--baseline` loaded here; no baseline leaf means hp-share, the M-C origin),
 * its width (`--limit` / `--baseline-limit`) and narrowing (`--rank-leaf` /
   `--baseline-rank-leaf`), and how its leaf ranking fills its cells (`--rank-fill` /
-  `--baseline-rank-fill`, IKA-268),
+  `--baseline-rank-fill`, IKA-268; a `-nocover` label builds its leaf-ranked menu without
+  the cover, IKA-323),
 * whether its leaf scores a finished battle by the net instead of as its result
   (`--net-scores-ends` / `--baseline-net-scores-ends`: IKA-253 undone, for measuring it),
 * its selection: an arm with a leaf solves the pair's selection game with THAT leaf,
@@ -44,6 +45,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from pokeuraou import narrow as narrowing  # noqa: E402
 from pokeuraou.benchflags import add_bench_flags, require_bench  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.deepen import DEFAULT_DEEPEN, parse_deepen  # noqa: E402
@@ -53,7 +55,7 @@ from pokeuraou.payoff import HP_SHARE  # noqa: E402
 from pokeuraou.pool import load_pool  # noqa: E402
 from pokeuraou.poolplay import PoolArm, SolvedSelections, pool_match_game  # noqa: E402
 from pokeuraou.provenance import open_games, provenance, write_game  # noqa: E402
-from pokeuraou.search import DEFAULT_RANK_FILL, parse_rank_fill  # noqa: E402
+from pokeuraou.search import DEFAULT_RANK_FILL, parse_rank_fill, rank_fill_covers  # noqa: E402
 from pokeuraou.selfplay import MAX_TURNS  # noqa: E402
 from pokeuraou.workqueue import WorkClient  # noqa: E402
 
@@ -143,7 +145,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--baseline-rank-leaf", action="store_true", help="same for the other arm")
     ap.add_argument("--rank-fill", default=DEFAULT_RANK_FILL,
                     help="how the tested arm's leaf ranking fills its cells: refs<N> replies "
-                    "at the matrix budget, refs<N>-fast at Budget.fast (IKA-268)")
+                    "at the matrix budget, refs<N>-fast at Budget.fast (IKA-268); a -nocover "
+                    "suffix builds its leaf-ranked menu without the cover (IKA-323)")
     ap.add_argument("--baseline-rank-fill", default=DEFAULT_RANK_FILL,
                     help="same for the other arm")
     ap.add_argument("--bench-drop", default=DEFAULT_BENCH_DROP,
@@ -339,7 +342,7 @@ def main(argv: list[str] | None = None) -> None:
     # The echo, per seat and per ARM (0 tested, 1 other): what each arm's side was given.
     echo = [[{"selection": {}, "belief": {}, "leaf": set(), "fill": {}, "drop": {},
               "deepen": {}, "deepened": 0, "widened": 0, "swapped": 0, "oracle": 0,
-              "depth": {},
+              "depth": {}, "coverless": {"menus": 0, "dropping": 0, "dropped": 0},
               "calls": 0}
              for _ in arms]
             for _ in range(2)]
@@ -348,6 +351,7 @@ def main(argv: list[str] | None = None) -> None:
     for index in work():
         which, game_index = index % 2, index // 2
         calls_before = [getattr(arm.evaluate, "calls", 0) for arm in arms]
+        coverless_before = {k: dict(v) for k, v in narrowing.COVERLESS.items()}
         started = time.perf_counter()
         record, sides = pool_match_game(
             reg, pool, arms, seed=args.seed, game_index=game_index, which=which,
@@ -393,6 +397,15 @@ def main(argv: list[str] | None = None) -> None:
             if arms[0].evaluate is not arms[1].evaluate:
                 bucket["calls"] += getattr(arms[arm_index].evaluate, "calls", 0) - calls_before[
                     arm_index]
+            # Menus this arm built without the cover, counted by `_menus` under its label
+            # (IKA-323): the positive control that -nocover reached the menu. Two arms with
+            # the same label share one count.
+            arm_fill = arms[arm_index].rank_fill
+            if arms[arm_index].rank_by_leaf and not rank_fill_covers(arm_fill):
+                now = narrowing.COVERLESS.get(arm_fill, {})
+                was = coverless_before.get(arm_fill, {})
+                for key in bucket["coverless"]:
+                    bucket["coverless"][key] += now.get(key, 0) - was.get(key, 0)
         if record.outcome is None:
             tally[which][2] += 1
             if client is not None:
@@ -465,6 +478,13 @@ def main(argv: list[str] | None = None) -> None:
                 )
                 + "), "
                 f"depth {bucket['depth']}"
+                + (
+                    f", coverless menus {bucket['coverless']['menus']:,} "
+                    f"({bucket['coverless']['dropping']:,} leaving options off, "
+                    f"{bucket['coverless']['dropped']:,} options)"
+                    if bucket["coverless"]["menus"]
+                    else ""
+                )
                 + (f", leaf requests {bucket['calls']:,}" if bucket["calls"] else ""),
                 file=sys.stderr,
             )

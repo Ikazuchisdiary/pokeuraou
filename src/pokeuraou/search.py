@@ -201,17 +201,31 @@ DEFAULT_REFERENCES = 2
 #:     ``refs2`` over 4,000 board games (Elo +9.0 [-0.3, +18.3] for two replies). ``-fast``
 #:     is DEARER: two damage rolls against the matrix budget's one give 2.5x the leaves.
 #:     So the default stays; the label exists so an arm can play the other.
+#:
+#: A ``-nocover`` suffix (IKA-323) builds the leaf-ranked root menu from the ranking alone:
+#: the top ``limit`` candidates, with no greedy cover of every slot option first. The
+#: options that leaves off the menu are reported in `Narrowed.uncovered`, as the budget's
+#: are (narrow.py's principles). Only the root's leaf-ranked menu reads it; the damage
+#: menus -- a sub-game's, a deepened child's, the ranking's own references -- keep the cover.
 DEFAULT_RANK_FILL = f"refs{DEFAULT_REFERENCES}"
 
-_RANK_FILL = re.compile(r"refs([1-9][0-9]*)(-fast)?")
+_RANK_FILL = re.compile(r"refs([1-9][0-9]*)(-fast)?(-nocover)?")
 
 
 def parse_rank_fill(label: str) -> tuple[int, bool]:
     """(references, fast) from a rank-fill label; a label that is not one stops."""
     got = _RANK_FILL.fullmatch(label)
     if got is None:
-        raise ValueError(f"rank fill {label!r} is not refs<N> or refs<N>-fast")
+        raise ValueError(
+            f"rank fill {label!r} is not refs<N>, refs<N>-fast, or either with -nocover"
+        )
     return int(got.group(1)), got.group(2) is not None
+
+
+def rank_fill_covers(label: str) -> bool:
+    """Whether a leaf-ranked menu of this rank-fill label is built on the cover (IKA-323)."""
+    parse_rank_fill(label)
+    return not label.endswith("-nocover")
 
 
 def leaf_ranking(
@@ -1510,5 +1524,6 @@ __all__ = [
     "believed_ranking",
     "leaf_ranking",
     "parse_rank_fill",
+    "rank_fill_covers",
     "search",
 ]

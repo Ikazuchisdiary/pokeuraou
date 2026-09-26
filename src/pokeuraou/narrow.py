@@ -27,6 +27,19 @@ decision's record); and the action is outside the menu again, where the oracle a
 every round like any other candidate, so it comes back the moment it is a best
 response. What is eliminated is always an option somebody can name.
 
+The cover exists because the *damage* score gives a Protect, a status move or a switch
+zero, so without it they would never reach a menu. A menu ranked by the leaf does not have
+that blind spot -- the leaf values where a Protect leads -- and its cover spends up to
+half the width on combinations the ranking put low (IKA-310 / IKA-311: at width 12 the
+cover's slots let slip support that the ranking's own top 12 would have kept). So a
+leaf-ranked root menu may be built without it (``cover=False``; the ``-nocover`` rank-fill
+label, the user's decision of 9/26, IKA-323): the top ``limit`` by the ranking and nothing
+else. It stays sayable the same way: every slot option that leaves off the menu is in
+:attr:`Narrowed.uncovered`, exactly as the budget's would be, and `COVERLESS` counts the
+menus and options it did that to. Every damage-ranked menu -- a sub-game's, a deepened
+child's, the leaf ranking's own reference replies -- keeps the cover, because there the
+blind spot is still real.
+
 **The score orders candidates; it never becomes an output.** It is an average damage
 fraction, computed straight from the calculator, and it decides only which cells the
 resolver visits. Every number the tool prints -- the equilibrium value, the frequencies,
@@ -515,6 +528,7 @@ def narrow(
     weights: Mapping[tuple[int, int], np.ndarray] | None = None,
     candidates: list[SideAction] | None = None,
     rank: Callable[[list[SideAction], list[Candidate]], Sequence[float]] | None = None,
+    cover: bool = True,
     _prescored: object = _ASK,
 ) -> Narrowed:
     """Narrows one side's legal choices to at most ``limit``, covering every option.
@@ -536,7 +550,14 @@ def narrow(
     call whatever the ordering is, so a ranker that wants them -- a learned one does, as a
     feature -- should not pay for them twice: recomputing them cost a second crossing to
     the port, 0.779 ms a pool, which was 16% of what the learned ordering cost.
+
+    ``cover=False`` keeps the top ``limit`` by the score and covers nothing first (IKA-323,
+    the module's principles): the options that leaves off are in :attr:`Narrowed.uncovered`.
+    Only for a ``rank`` that can see what a Protect or a switch is worth; the damage score
+    cannot, so it is refused without one.
     """
+    if not cover and rank is None:
+        raise ValueError("a menu without the cover needs a rank that is not the damage score")
     if limit < 1:
         raise ValueError("limit must be at least 1")
     pool = candidates if candidates is not None else side_actions(reg, pos, side)
@@ -592,7 +613,7 @@ def narrow(
     taken: set[int] = set()
     uncovered = set(needed)
     for_coverage = 0
-    while uncovered and len(kept_indices) < limit:
+    while cover and uncovered and len(kept_indices) < limit:
         best = -1
         best_gain = 0
         for i in order:
@@ -620,6 +641,9 @@ def narrow(
             continue
         kept_indices.append(i)
         taken.add(i)
+        if not cover:
+            for index in range(n_slots):
+                uncovered.discard(_slot_key(pool[i], index))
 
     kept = sorted(
         (scored[i] for i in kept_indices), key=lambda c: (-c.score, c.action.to_choice())
@@ -637,6 +661,21 @@ def narrow(
     )
 
 
+#: Leaf-ranked menus built without the cover (IKA-323), per rank-fill label: how many
+#: menus, how many of them left some option off, and how many options in all. A process
+#: total that `_menus` adds to and a caller reads the change of, as the echo of a match
+#: reads the port's counts -- the positive control that the label reached the menu.
+COVERLESS: dict[str, dict[str, int]] = {}
+
+
+def note_coverless(label: str, narrowed: Narrowed) -> None:
+    """Adds one coverless menu to `COVERLESS` under `label`."""
+    got = COVERLESS.setdefault(label, {"menus": 0, "dropping": 0, "dropped": 0})
+    got["menus"] += 1
+    got["dropping"] += int(bool(narrowed.uncovered))
+    got["dropped"] += len(narrowed.uncovered)
+
+
 def _count_kinds(reg: Regulation, kept: list[Candidate]) -> dict[str, int]:
     counts: dict[str, int] = {}
     for c in kept:
@@ -650,7 +689,9 @@ __all__ = [
     "Candidate",
     "Narrowed",
     "action_kind",
+    "COVERLESS",
     "narrow",
+    "note_coverless",
     "score_action",
     "slot_options",
 ]
