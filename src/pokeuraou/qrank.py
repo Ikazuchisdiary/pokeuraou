@@ -333,6 +333,9 @@ class QGraphs:
         self.lock = _GRAPH_LOCK
         self.kind: tuple | None = None
         self.inputs: dict[str, Any] = {}
+        #: One memory pool per piece ("trunk", "side0", "side1"), shared by that piece's
+        #: graphs of every size.
+        self.pools: dict[str, Any] = {}
         self.trunk: tuple[Any, tuple[Any, Any, Any]] | None = None
         #: (side, pool size) -> (graph, that side's action vectors)
         self.sides: dict[tuple[int, int], tuple[Any, Any]] = {}
@@ -363,14 +366,18 @@ class QGraphs:
 
         self._warm(what, run)
         graph = torch.cuda.CUDAGraph()
-        # A pool of its own, not one shared with the other pieces: a shared pool is safe
-        # only when graphs replay in the order they were captured, and these replay in a
-        # request's order (trunk, side 0, side 1) whatever order their sizes were first met
-        # in -- a side graph captured earlier then writes its scratch over a later-captured
-        # one's output before the pair reads it (seen: 23 of 150 requests off by up to 0.9).
-        with torch.cuda.graph(
-            graph, pool=torch.cuda.graph_pool_handle(), capture_error_mode="thread_local"
-        ):
+        # One pool per piece, never one for all. A shared pool is safe only when graphs
+        # replay in the order they were captured, and these replay in a request's order
+        # (trunk, side 0, side 1) whatever order their sizes were first met in: with one
+        # pool, a side-1 graph captured earlier wrote its scratch over a later-captured
+        # side-0 graph's output before the pair read it (seen: 23 of 150 requests off by
+        # up to 0.9). Within a piece only one graph replays per request and its output is
+        # read before the next, so its sizes can share. A pool per graph was right too,
+        # but kept a segment per graph: two Q arms of ~180 graphs each reserved 3.4-4.6 GB
+        # a server, and a 4,000-pair board lost both servers to an abort after 2 minutes.
+        if what not in self.pools:
+            self.pools[what] = torch.cuda.graph_pool_handle()
+        with torch.cuda.graph(graph, pool=self.pools[what], capture_error_mode="thread_local"):
             out = run()
         self.captured += 1
         timing.count("q.graph.captured")
