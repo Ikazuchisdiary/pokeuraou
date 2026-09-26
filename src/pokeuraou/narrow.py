@@ -71,16 +71,91 @@ SPREAD_FOE_TARGETS = frozenset({"allAdjacentFoes", "foeSide"})
 SPREAD_ALL_TARGETS = frozenset({"allAdjacent"})
 
 
-@dataclass(frozen=True, slots=True)
 class Candidate:
-    """One side's complete choice, with the score that ranked it."""
+    """One side's complete choice, with the score that ranked it.
 
-    action: SideAction
-    #: Sum over slots of expected damage as a fraction of the target's current HP, with
-    #: damage to one's own partner subtracted. Ordering only; never printed as a result.
-    score: float
-    #: Per-slot contributions, so a surprising ranking can be read rather than trusted.
-    detail: tuple[str, ...] = ()
+    `action`, `score` and `detail` as the frozen dataclass this was; `detail` may be handed
+    over unwritten (IKA-321) and is then written the first time it is read.
+    """
+
+    __slots__ = ("_detail", "action", "score")
+
+    def __init__(
+        self,
+        action: SideAction,
+        score: float,
+        detail: tuple[str, ...] | _PortDetail | _LeafDetail = (),
+    ) -> None:
+        self.action = action
+        #: Sum over slots of expected damage as a fraction of the target's current HP, with
+        #: damage to one's own partner subtracted. Ordering only; never printed as a result.
+        self.score = score
+        self._detail = detail
+
+    @property
+    def detail(self) -> tuple[str, ...]:
+        """Per-slot contributions, so a surprising ranking can be read rather than trusted.
+
+        Nothing in a search reads them -- the CLI, a record or a test does -- and writing
+        every candidate's lines was 14% of `narrow` (IKA-319), so the port's parts are kept
+        and the lines written here, the same text the eager version wrote (IKA-321).
+        """
+        text = self._detail
+        if type(text) is not tuple:
+            text = text.write()
+            self._detail = text
+        return text
+
+    def __eq__(self, other: object) -> bool:
+        if other.__class__ is not Candidate:
+            return NotImplemented
+        return (self.action, self.score, self.detail) == (  # type: ignore[attr-defined]
+            other.action, other.score, other.detail,  # type: ignore[attr-defined]
+        )
+
+    def __hash__(self) -> int:
+        return hash((self.action, self.score, self.detail))
+
+    def __repr__(self) -> str:
+        return f"Candidate(action={self.action!r}, score={self.score!r}, detail={self.detail!r})"
+
+    def __reduce__(self) -> tuple[object, ...]:
+        # Written out: an unwritten detail holds the regulation.
+        return (Candidate, (self.action, self.score, self.detail))
+
+
+class _PortDetail:
+    """A candidate's detail lines from the port's parts, written when read (IKA-321)."""
+
+    __slots__ = ("action", "parts", "reg")
+
+    def __init__(
+        self, reg: Regulation, action: SideAction, parts: list[tuple[int, int, bool, float, bool]]
+    ) -> None:
+        self.reg = reg
+        self.action = action
+        self.parts = parts
+
+    def write(self) -> tuple[str, ...]:
+        reg, slots = self.reg, self.action.slots
+        return tuple(
+            f"{slots[slot].describe(reg)} -> "
+            f"{'foe' if is_foe else 'ally'}{target_slot + 1} {signed:+.3f}{'' if exact else '?'}"
+            for slot, target_slot, is_foe, signed, exact in self.parts
+        )
+
+
+class _LeafDetail:
+    """The leaf's score in front of the damage detail it replaced, written when read."""
+
+    __slots__ = ("under", "value")
+
+    def __init__(self, value: float, under: Candidate) -> None:
+        self.value = value
+        self.under = under
+
+    def write(self) -> tuple[str, ...]:
+        return (f"leaf {self.value:+.4f}", *self.under.detail)
 
 
 @dataclass(slots=True)
@@ -295,15 +370,10 @@ def _bridged_scores(
     if scored is None:
         return None
 
-    out: list[Candidate] = []
-    for action, (total, parts) in zip(pool, scored, strict=True):
-        detail = tuple(
-            f"{action.slots[slot].describe(reg)} -> "
-            f"{'foe' if is_foe else 'ally'}{target_slot + 1} {signed:+.3f}{'' if exact else '?'}"
-            for slot, target_slot, is_foe, signed, exact in parts
-        )
-        out.append(Candidate(action=action, score=total, detail=detail))
-    return out
+    return [
+        Candidate(action, total, _PortDetail(reg, action, parts))
+        for action, (total, parts) in zip(pool, scored, strict=True)
+    ]
 
 
 #: `narrow`'s "ask the port yourself" (a pool `narrow_many` scored may have been refused,
@@ -335,16 +405,12 @@ def _bridged_scores_many(
         if scored is None:
             out.append(None)
             continue
-        cands: list[Candidate] = []
-        for action, (total, parts) in zip(pool, scored, strict=True):
-            detail = tuple(
-                f"{action.slots[slot].describe(reg)} -> "
-                f"{'foe' if is_foe else 'ally'}{target_slot + 1} {signed:+.3f}"
-                f"{'' if exact else '?'}"
-                for slot, target_slot, is_foe, signed, exact in parts
-            )
-            cands.append(Candidate(action=action, score=total, detail=detail))
-        out.append(cands)
+        out.append(
+            [
+                Candidate(action, total, _PortDetail(reg, action, parts))
+                for action, (total, parts) in zip(pool, scored, strict=True)
+            ]
+        )
     return out
 
 
@@ -560,47 +626,59 @@ def narrow(
         # score thought.
         values = rank(pool, scored)
         scored = [
-            replace(c, score=float(v), detail=(f"leaf {float(v):+.4f}", *c.detail))
-            for c, v in zip(scored, values, strict=True)
+            Candidate(c.action, value, _LeafDetail(value, c))
+            for c, value in ((c, float(v)) for c, v in zip(scored, values, strict=True))
         ]
-    n_slots = len(pool[0].slots)
     # Highest score first, with a stable tiebreak so the same position gives the same
     # answer twice.
-    order = sorted(
-        range(len(scored)),
-        key=lambda i: (-scored[i].score, pool[i].to_choice()),
-    )
+    choices = _choices(pool)
+    order = sorted(range(len(scored)), key=lambda i: (-scored[i].score, choices[i]))
     if len(pool) <= limit:
         kept = [scored[i] for i in order]
         return Narrowed(
             kept=kept, considered=len(pool), for_score=len(kept),
             by_kind=_count_kinds(reg, kept),
         )
+    out = _cover(reg, pool, scored, order, limit)
+    out.by_kind = _count_kinds(reg, out.kept)
+    return out
 
-    needed: dict[str, str] = {}
-    options: dict[str, tuple[int, object]] = {}
-    for action in pool:
-        for index in range(n_slots):
-            key = _slot_key(action, index)
-            needed.setdefault(key, _slot_label(reg, action, index))
-            options.setdefault(key, (index, action.slots[index]))
+
+def _cover(
+    reg: Regulation,
+    pool: list[SideAction],
+    scored: list[Candidate],
+    order: list[int],
+    limit: int,
+) -> Narrowed:
+    """`narrow` past its sort, for a pool larger than `limit`: the cover, then the best
+    scores, then the kept set in score order (`by_kind` is left to the caller)."""
+    n_slots = len(pool[0].slots)
+    keys, options = _option_ids(pool, n_slots)
 
     # Greedy set cover, taking the best-scoring candidate among those covering the most
     # still-uncovered options. Greedy is not optimal cover, but the guarantee it has to
     # honour is "every option appears", and any cover honours that.
+    #
+    # Each candidate's options are small integers written once (IKA-321): rebuilding every
+    # candidate's `_slot_key` strings on every round was 39% of `narrow` (IKA-319). The
+    # rounds, the order they scan and the gains they compare are the same.
     kept_indices: list[int] = []
-    taken: set[int] = set()
-    uncovered = set(needed)
+    taken = bytearray(len(pool))
+    uncovered = bytearray(b"\x01") * len(options)
+    left = len(options)
     for_coverage = 0
-    while uncovered and len(kept_indices) < limit:
+    while left and len(kept_indices) < limit:
         best = -1
         best_gain = 0
         for i in order:
-            if i in taken:
+            if taken[i]:
                 continue
-            gain = sum(
-                1 for index in range(n_slots) if _slot_key(pool[i], index) in uncovered
-            )
+            if n_slots == 2:
+                first, second = keys[i]
+                gain = uncovered[first] + uncovered[second]
+            else:
+                gain = sum(uncovered[k] for k in keys[i])
             if gain > best_gain:
                 best, best_gain = i, gain
             if best_gain == n_slots:
@@ -608,33 +686,87 @@ def narrow(
         if best < 0:
             break
         kept_indices.append(best)
-        taken.add(best)
+        taken[best] = 1
         for_coverage += 1
-        for index in range(n_slots):
-            uncovered.discard(_slot_key(pool[best], index))
+        for k in keys[best]:
+            if uncovered[k]:
+                uncovered[k] = 0
+                left -= 1
 
     for i in order:
         if len(kept_indices) >= limit:
             break
-        if i in taken:
+        if taken[i]:
             continue
         kept_indices.append(i)
-        taken.add(i)
+        taken[i] = 1
 
     kept = sorted(
         (scored[i] for i in kept_indices), key=lambda c: (-c.score, c.action.to_choice())
     )
+    # Only the options left out are named, so only they are written.
+    labels = {
+        k: f"slot{options[k][0] + 1} {options[k][1].describe(reg)}"  # as `_slot_label`
+        for k in range(len(options))
+        if uncovered[k]
+    }
     return Narrowed(
         kept=kept,
         considered=len(pool),
-        uncovered=tuple(sorted(needed[k] for k in uncovered)),
-        uncovered_options=tuple(
-            options[k] for k in sorted(uncovered, key=lambda k: needed[k])
-        ),
+        uncovered=tuple(sorted(labels.values())),
+        uncovered_options=tuple(options[k] for k in sorted(labels, key=labels.__getitem__)),
         for_coverage=for_coverage,
         for_score=len(kept) - for_coverage,
-        by_kind=_count_kinds(reg, kept),
     )
+
+
+def _choices(pool: Sequence[SideAction]) -> list[str]:
+    """`action.to_choice()` of every action in `pool`, each slot action's written once
+    (the combinations share their slot action objects, `_option_ids`)."""
+    memo: dict[int, str] = {}
+    out = []
+    for action in pool:
+        parts = []
+        for slot in action.slots:
+            text = memo.get(id(slot))
+            if text is None:
+                text = memo[id(slot)] = slot.to_choice()
+            parts.append(text)
+        out.append(", ".join(parts))
+    return out
+
+
+def _option_ids(
+    pool: Sequence[SideAction], n_slots: int
+) -> tuple[list[tuple[int, ...]], list[tuple[int, object]]]:
+    """Each candidate's slot options as integers, and each integer's (slot index, slot
+    action) where it was first met -- the options `_slot_key` tells apart, numbered.
+
+    A slot action object is usually shared by every combination it is in (`side_actions`
+    builds the product of the slots' lists), so its key is written once per object; a pool
+    whose objects are not shared still gets the same numbers through the key text.
+    """
+    ids: dict[str, int] = {}
+    options: list[tuple[int, object]] = []
+    seen: list[dict[int, int]] = [{} for _ in range(n_slots)]
+    keys: list[tuple[int, ...]] = []
+    for action in pool:
+        slots = action.slots
+        row = []
+        for index in range(n_slots):
+            slot = slots[index]
+            memo = seen[index]
+            k = memo.get(id(slot))
+            if k is None:
+                name = _slot_key(action, index)
+                k = ids.get(name)
+                if k is None:
+                    k = ids[name] = len(options)
+                    options.append((index, slot))
+                memo[id(slot)] = k
+            row.append(k)
+        keys.append(tuple(row))
+    return keys, options
 
 
 def _count_kinds(reg: Regulation, kept: list[Candidate]) -> dict[str, int]:
