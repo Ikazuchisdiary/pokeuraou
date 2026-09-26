@@ -1977,6 +1977,27 @@ M-C の盤（match_queue --pool、幅 12・rank-leaf・隠蔽・served 24/2）�
 
 `ValueConfig` の既定は変えていない（M-C ではゼロからの SWA が x2 で 0.008 悪い）。温間とスケジュールの効果は IKA-261 で分ける。
 
+### M-C gen-1（2026-09-27、IKA-346）
+
+データ生成: `data/selfplay-mc1`、39,999 局、評価モデル value-mc0（x1）、候補集合 q-nocover・Q `data/models/q-mc0.pt`、幅 12、裏非公開、選出は value-mc0 で解く
+（IKA-331 の Q の条件そのもの。今の master で局 0〜47 が 48/48 バイト一致。records/IKA-346.md §0.1）。
+学習: gen-0 + gen-1（79,997 局・912,417 決定）を、value-mc0 の種ごとに温間始動（種 k ← gen-0 の種 k、`--epochs 2 --lr 5e-4 --keep last`）の 2 本 = `value-mc1.pt`・`value-mc1-s1.pt`。
+
+```
+M-C の対戦評価（match_queue --pool、幅 12・rank-leaf・裏非公開・推論サーバ 24/2、両腕 q-nocover・Q q-mc0）。data/matches-mc/mc1-*
+  A/A 対照 value-mc1x2 どうし 100 対                   100/100 が同じ局
+  gen-1 だけ x2 対 gen-0+gen-1 x2    SPRT(0,10) H0（939 対）   −7.3 [−21.3, +6.6]   → 足す方（M-B の「足していく」が温間始動でも再現）
+  value-mc1x2 対 value-mc0x2         SPRT(0,10) H1（509 対）   +31.7 [+13.2, +50.3]  → 本番を value-mc1 に
+ratings.py、data/matches-mc の 15,531 局、原点 hp-share/w12/hidden-bench
+  value-mc1x2 /rankfill:q-nocover（gen-1 の本番）       +260 ±16
+  value-mc1g1x2 /rankfill:q-nocover（gen-1 だけ）       +251 ±22
+  value-mc0x2 /rankfill:q-nocover（gen-0、同じ形）      +232 ±16
+  value-mc0-warm2x2（gen-0、refs2、上の表）             +232 ±15
+```
+
+q-nocover の腕は名前に `/rankfill:q-nocover` が付くので、上の gen-0 の表（refs2）とは別の名前。原点の行（各 1,000 対）で同じ尺度につないだ。
+Q（q-mc0）は value-mc0 の答えで学んだもので、value-mc1 の答えに対してセルの誤差が +55.7%（水準のずれを除いても +29.4%）。規則（11% 未満ならそのまま）を超えたので、作り直しは IKA-348。
+
 ### M-C の打ち手: 同じ CPU なら深さ 2 も深化も幅に負ける 〔9/25・IKA-292〕
 
 M-C の盤（match_queue --pool、value-mc0x2、rank-leaf、隠蔽、served 24/2）、SPRT(0, 10)。費用は 1 局の CPU 秒で揃えた
