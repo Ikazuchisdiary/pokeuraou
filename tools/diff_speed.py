@@ -21,6 +21,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from diff_turn import REFUSED_CHOICE, showdown_choice  # noqa: E402
+
 from pokeuraou.actions import side_actions  # noqa: E402
 from pokeuraou.oracle import Oracle, RandomnessPolicy, TeamSet  # noqa: E402
 from pokeuraou.position import Position  # noqa: E402
@@ -38,6 +40,8 @@ class Report:
     matched: int = 0
     #: (ability, item, status, side conditions) -> count, for attributing a divergence.
     divergences: Counter[tuple[str, ...]] = field(default_factory=Counter)
+    #: Why a battle stopped early, by reason (IKA-316: a refused choice was silent).
+    skipped: Counter[str] = field(default_factory=Counter)
     examples: list[str] = field(default_factory=list)
 
     @property
@@ -49,6 +53,10 @@ class Report:
             f"compared {self.compared} Speed values, matched {self.matched}, "
             f"divergence rate {self.divergence_rate * 100:.3f}%"
         ]
+        if self.skipped:
+            out.append(
+                "  skipped: " + ", ".join(f"{k} x{v}" for k, v in self.skipped.most_common(8))
+            )
         if self.divergences:
             out.append("  divergences by (ability / item / status / side conditions / weather):")
             for key, count in self.divergences.most_common(15):
@@ -130,11 +138,14 @@ def run(battles: int, seed: int, max_turns: int, quiet: bool = True) -> Report:
                     if not request or request.get("wait"):
                         choices.append(None)
                         continue
-                    choices.append(py_rng.choice(side_actions(reg, pos, side_index)).to_choice())
+                    # Numbered by Showdown's request: a locked move is `move 1` (IKA-316).
+                    pick = py_rng.choice(side_actions(reg, pos, side_index))
+                    choices.append(showdown_choice(pick, request))
                 if all(c is None for c in choices):
                     break
                 handle.step(choices)
                 if handle.choice_errors:
+                    report.skipped[REFUSED_CHOICE] += 1
                     break
             handle.close()
 

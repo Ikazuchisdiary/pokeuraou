@@ -33,7 +33,13 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from diff_turn import canonical, field_kind, port_position  # noqa: E402
+from diff_turn import (  # noqa: E402
+    REFUSED_CHOICE,
+    canonical,
+    field_kind,
+    port_position,
+    showdown_choice,
+)
 
 from pokeuraou import port
 from pokeuraou.actions import PassAction, SideAction, side_actions, switch_actions_after_faint
@@ -160,16 +166,22 @@ def run(battles: int, seed: int, max_turns: int, quiet: bool = True) -> Report:
                             choices.append(None)
                             continue
                         options = side_actions(reg, before, side_index)
-                        choices.append(py_rng.choice(options).to_choice() if options else None)
+                        # Numbered by Showdown's request: a locked move is `move 1` (IKA-316).
+                        choices.append(
+                            showdown_choice(py_rng.choice(options), request) if options else None
+                        )
                     if all(c is None for c in choices):
                         break
                     handle.step(choices)
                     if handle.choice_errors:
+                        report.skipped[REFUSED_CHOICE] += 1
                         break
                     continue
 
                 _compare(reg, before, handle, py_rng, report)
                 if handle.choice_errors:
+                    # `_compare` counted it under "choice rejected: ..."; the battle stops.
+                    report.skipped[REFUSED_CHOICE] += 1
                     break
             handle.close()
 
