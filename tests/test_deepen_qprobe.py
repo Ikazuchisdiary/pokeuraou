@@ -293,6 +293,30 @@ def test_the_open_oracle_narrowed_reaches_the_whole_game(monkeypatch) -> None:  
     assert probed["perfect"] < probed["all"], probed
 
 
+def test_the_full_probe_is_asked_once_per_menu() -> None:
+    """After a full probe finds nothing, the next steps ask the short list alone until an
+    action joins: the deepening's steps do not probe everything again."""
+    rng = np.random.default_rng(3224)
+    checked = 0
+    for _ in range(20):
+        k = int(rng.integers(1, 4))
+        full = [rng.random((10, 9)) for _ in range(k)]
+        w = rng.random(k) + 0.1
+        w = w / w.sum()
+        noise = [rng.random((10, 9)) for _ in range(k)]
+        root, oracle, meter, _added, _asked = _belief_run(full, w, [0, 1], [0], q=noise, k=2)
+        if not oracle.proved:
+            continue  # it ended with the short list covering the whole outside
+        checked += 1
+        fallbacks, probed = oracle.fallbacks, meter.probed
+        for _step in range(3):
+            assert not oracle.step(meter)
+        assert oracle.fallbacks == fallbacks and oracle.proved
+        # Only the short list was asked, against a support that did not move: nothing new.
+        assert meter.probed == probed
+    assert checked >= 10
+
+
 def test_a_cost_prices_the_q_and_the_probe_apart() -> None:
     plain = deepen_mod.Cost(fill=5.0, refine=1.5, cell=0.1)
     # Without the two new prices a probed cell is any cell and a Q is free: as before.

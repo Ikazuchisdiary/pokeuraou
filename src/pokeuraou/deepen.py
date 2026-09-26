@@ -97,7 +97,10 @@ what it saves against the row strategy (per completion, weighted, the ``max 0`` 
 of the short list that gains most joins. When none of them gains, the step probes
 every outside action once (the proof that nothing outside gains -- IKA-322's
 ``Bqk3f``, which kept the whole game's equilibrium in reach with 36% fewer probed
-cells). The Q is asked once per node: over both sides' whole candidate lists, in the
+cells). Once per menu: when that full probe finds nothing too, the deepening steps
+after it -- which move the prices a little -- ask the short list alone, until an action
+joins and the menu changes (probing everything before every deepening step would be
+``sall`` again). The Q is asked once per node: over both sides' whole candidate lists, in the
 root's position, or in each completion's on a Bayesian root; it never becomes a
 value, it only picks which cells are probed first. Its calls are counted
 (`Deepened.q`), not charged to a budget of cells; `Cost` prices them.
@@ -664,6 +667,9 @@ class _Oracle:
         self.q_at: tuple[dict[str, int], dict[str, int]] = ({}, {})
         #: Steps whose Q short list gained nothing, so every outside action was probed.
         self.fallbacks = 0
+        #: Whether a full probe found nothing and no action has joined since: the
+        #: short list alone is asked until one does (IKA-322, once per menu).
+        self.proved = False
         # The menu's own actions are candidates too, after the given ones: an action a
         # swap pushed out is outside again and can come back.
         self.candidates: tuple[list[SideAction], list[SideAction]] = ([], [])
@@ -715,7 +721,10 @@ class _Oracle:
         """One oracle step: probe, then widen. Returns whether an action joined.
 
         With a Q (``q<k>``) the probe is the Q's short list first, and every outside
-        action only when none of the short list gains (IKA-322's ``Bqk3f``).
+        action only when none of the short list gains (IKA-322's ``Bqk3f``) -- once
+        per menu: after a full probe has found nothing, the steps that follow (the
+        deepening's, which move the prices) ask the short list alone until an
+        action joins.
         """
         if self.q_probe is None:
             self.probe(reg, evaluate, budget, meter, unmodelled)
@@ -723,12 +732,17 @@ class _Oracle:
         short = self._shortlist(reg, meter)
         self.probe(reg, evaluate, budget, meter, unmodelled, only=short)
         if self.widen(reg, evaluate, budget, meter, unmodelled, only=short):
+            self.proved = False
             return True
-        if all(len(short[side]) == len(self._outside(side)) for side in (0, 1)):
+        if self.proved or all(
+            len(short[side]) == len(self._outside(side)) for side in (0, 1)
+        ):
             return False
         self.fallbacks += 1
         self.probe(reg, evaluate, budget, meter, unmodelled)
-        return self.widen(reg, evaluate, budget, meter, unmodelled)
+        joined = self.widen(reg, evaluate, budget, meter, unmodelled)
+        self.proved = not joined
+        return joined
 
     def _shortlist(
         self, reg: Regulation, meter: _Meter
@@ -1097,6 +1111,9 @@ class _BeliefOracle:
         self.q: list[np.ndarray] | None = None
         self.q_at: tuple[dict[str, int], dict[str, int]] = ({}, {})
         self.fallbacks = 0
+        #: Whether a full probe found nothing and no action has joined since: the
+        #: short list alone is asked until one does (IKA-322, once per menu).
+        self.proved = False
         self.candidates: tuple[list[SideAction], list[SideAction]] = ([], [])
         for role, menu in ((0, root.own), (1, root.other)):
             seen: set[str] = set()
@@ -1152,19 +1169,24 @@ class _BeliefOracle:
 
     def step(self, meter: _Meter) -> bool:
         """`_Oracle.step` on the Bayesian root: the Q's short list, every outside action
-        only when none of it gains."""
+        only when none of it gains, once per menu (`_Oracle.step`)."""
         if self.q_probe is None:
             self.probe(meter)
             return self.widen(meter)
         short = self._shortlist(meter)
         self.probe(meter, only=short)
         if self.widen(meter, only=short):
+            self.proved = False
             return True
-        if all(len(short[role]) == len(self._outside(role)) for role in (0, 1)):
+        if self.proved or all(
+            len(short[role]) == len(self._outside(role)) for role in (0, 1)
+        ):
             return False
         self.fallbacks += 1
         self.probe(meter)
-        return self.widen(meter)
+        joined = self.widen(meter)
+        self.proved = not joined
+        return joined
 
     def _shortlist(self, meter: _Meter) -> tuple[list[SideAction], list[SideAction]]:
         """Each role's `q_probe` outside actions the Q ranks best against the Bayesian
