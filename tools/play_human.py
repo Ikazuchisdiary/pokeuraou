@@ -27,6 +27,9 @@ clock).
 
 Each game appends one line to ``--out`` and its clock to ``<out>.clock.jsonl``.
 
+``--current-out`` writes the move in hand before each of the agent's moves, for the
+analysis mode to read while the game goes on (``tools/analyze.py --current``, IKA-337).
+
 The screen (IKA-332): ``--view`` serves a page at http://127.0.0.1:8332/ (``--view-port``)
 that shows the board, the agent's answer as it forms (its mixture, the value over time, the
 cells and levels read, the opponent's mixture and the bench belief, the principal variation
@@ -48,7 +51,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from pokeuraou import humanplay, liveview, qrank  # noqa: E402
+from pokeuraou import analysis, humanplay, liveview, qrank  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.hidden import DEFAULT_BENCH_DROP, parse_bench_drop  # noqa: E402
 from pokeuraou.names import localiser  # noqa: E402
@@ -175,6 +178,9 @@ def main(argv: list[str] | None = None) -> None:
                     "\"\" for none, name cards)")
     ap.add_argument("--interval-ms", type=float, default=100.0,
                     help="the least time between two steps sent while the agent thinks")
+    ap.add_argument("--current-out", type=Path, default=None,
+                    help="before each move of the agent, write the position in hand here for the "
+                    "analysis mode (tools/analyze.py --current, IKA-337)")
     args = ap.parse_args(argv)
     if args.person == "web":
         args.view = True
@@ -199,17 +205,9 @@ def main(argv: list[str] | None = None) -> None:
         else:
             say(f"note: no {DEFAULT_VALUE[0]} here, so the agent plays hp-share (--value names a leaf)")
     if values and not args.hp_share:
-        import torch
-
-        from pokeuraou.encode import Encoder
-        from pokeuraou.value import BatchedValue, load_ensemble
-
-        device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        encoder = Encoder(reg)
-        nets, _ = load_ensemble(values, encoder)
-        evaluate = BatchedValue([n.to(device) for n in nets], encoder, device=torch.device(device))
-        if args.leaf_graphs == "on":
-            evaluate = humanplay.GraphLeaf(evaluate)
+        evaluate, encoder, device = humanplay.load_leaf(
+            reg, values, device, graphs=args.leaf_graphs == "on"
+        )
         name = leaf_name(values)
 
     # The menus.
@@ -277,11 +275,19 @@ def main(argv: list[str] | None = None) -> None:
         agent_side = 1 - args.human_side
         teams = (mine, human) if agent_side == 0 else (human, mine)
         started = time.perf_counter()
+        on_move = None
+        if args.current_out is not None:
+            def on_move(pos, seen, leads, index=index, you=1 - agent_side, teams=teams):  # noqa: ANN001, ANN202
+                analysis.write_point(args.current_out, analysis.point_json(
+                    reg, pos, you, seen, leads, teams,
+                    label=f"進行中の局 {index}・ターン {pos.turn}",
+                ))
         payload, clock, game = humanplay.play(
             agent, person, teams, agent_side=agent_side, seed=args.seed, game_index=index,
             max_turns=args.max_turns, loc=loc,
             out=None if args.quiet or args.person == "web" else sys.stdout,
             listener=None if server is None else server.listener, interval_ms=args.interval_ms,
+            on_move=on_move,
         )
         payload["pool"] = {"id": pool.id, "sha256": pool.sha256}
         if q_files:

@@ -327,6 +327,27 @@ def process_leaf(reg: Regulation, values: Sequence[str] | None, device: str, gra
     return GraphLeaf(leaf) if graphs else leaf
 
 
+def load_leaf(
+    reg: Regulation, values: Sequence[Path], device: str | None = None, graphs: bool = True,
+) -> tuple[Any, Any, str]:
+    """The agent's leaf from model files (one, or an ensemble averaged): the leaf (a
+    `GraphLeaf` when ``graphs``), its encoder, and the device it is on (CUDA when there is
+    a card and ``device`` is not given). What `tools/play_human.py` and `tools/analyze.py`
+    load."""
+    import torch
+
+    from .encode import Encoder
+    from .value import BatchedValue, load_ensemble
+
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    encoder = Encoder(reg)
+    nets, _ = load_ensemble(list(values), encoder)
+    leaf: Any = BatchedValue([n.to(device) for n in nets], encoder, device=torch.device(device))
+    if graphs:
+        leaf = GraphLeaf(leaf)
+    return leaf, encoder, device
+
+
 def use_threads(
     threads: int,
     reg: Regulation | None = None,
@@ -866,6 +887,88 @@ def _not_asked(positions: list[Position]) -> np.ndarray:  # pragma: no cover - n
     raise AssertionError("the person's side is never solved")
 
 
+@dataclass
+class SolvedMove:
+    """One side's answer at a move decision (`solve_move`)."""
+
+    #: That side's mixture over its menu (``ours`` when it is side 0, ``theirs`` when 1).
+    strategy: np.ndarray
+    #: The other side's mixture as this side models it (averaged over completions).
+    model: list[float]
+    ours: list[SideAction]
+    theirs: list[SideAction]
+    #: In side 0's units, as the record's ``searchValue``.
+    value: float
+    deepened: Any  # deepen.Deepened or None
+    unmodelled: set[str]
+
+
+def solve_move(
+    reg: Regulation,
+    pos: Position,
+    me: int,
+    ours: list[SideAction],
+    theirs: list[SideAction],
+    spreads: dict[int, list] | None,
+    leaf: LeafEvaluator,
+    *,
+    budget: Budget,
+    exact: bool,
+    cells: int = 0,
+    cost: Any = None,  # noqa: ANN401 - deepen.Cost, WallCost or another reading of the budget
+    levels: int | None = None,
+    child_q: int | None = None,
+    outside: tuple[list[SideAction], list[SideAction]] | None = None,
+    progress: Callable[[Any], None] | None = None,
+) -> SolvedMove:
+    """Side ``me``'s answer on the menus ``ours`` (side 0's) x ``theirs`` (side 1's): the
+    open game (`search`) when ``exact``, else its Bayesian game over the other side's
+    completions in ``spreads`` (`belief_solve`, only ``me`` solved). ``cells`` > 0 deepens
+    best first, the budget read by ``cost``; ``outside`` adds the root's swap oracle.
+    What `HumanGame` asks at each move, and what the analysis mode asks with no budget
+    (IKA-337). Raises `EquilibriumError` as the solves do."""
+    you = 1 - me
+    if exact:
+        got = search(
+            reg, pos, ours, theirs, leaf, budget=budget,
+            **(
+                {"deepen": cells, "deepen_cost": cost, "levels": levels,
+                 "child_q": child_q, "outside": outside,
+                 "swap": outside is not None}
+                if cells else {}
+            ),
+            progress=progress,
+        )
+        eq = got.equilibrium
+        return SolvedMove(
+            strategy=np.asarray(eq.row_strategy if me == 0 else eq.col_strategy, dtype=np.float64),
+            model=[float(x) for x in (eq.col_strategy if me == 0 else eq.row_strategy)],
+            ours=got.ours, theirs=got.theirs, value=float(eq.value), deepened=got.deepened,
+            unmodelled=set(got.unmodelled),
+        )
+    assert spreads is not None
+    answers = belief_solve(
+        reg, pos, ours, theirs, spreads,
+        {me: leaf, you: _not_asked}, budget=budget, sides=(me,),
+        deepen=(
+            {me: {"cells": cells, "reading": "mixed", "swap": outside is not None,
+                  "outside": outside, "cost": cost, "levels": levels,
+                  "child_q": child_q}}
+            if cells else None
+        ),
+        progress=progress,
+    )
+    got = answers[me]
+    return SolvedMove(
+        strategy=np.asarray(got.strategy, dtype=np.float64),
+        model=_averaged(got.replies, [item.weight for item in spreads[you]]),
+        ours=got.ours, theirs=got.theirs,
+        # Side 1 solved the negated transpose: its value back in side 0's units.
+        value=float(got.value) if me == 0 else -float(got.value),
+        deepened=got.deepened, unmodelled=set(got.unmodelled),
+    )
+
+
 _HEADINGS = {
     "move": "行動を選ぶ",
     "replacement": "交代先を選ぶ",
@@ -897,6 +1000,7 @@ class HumanGame:
         out: TextIO | None = None,
         listener: Callable[[str, Any], None] | None = None,
         interval_ms: float = 100.0,
+        on_move: Callable[[Position, list[frozenset[str]], list[list[str]]], None] | None = None,
     ) -> None:
         self.agent = agent
         self.reg = agent.reg
@@ -916,6 +1020,10 @@ class HumanGame:
         self.leaves = (agent.evaluate, agent.evaluate)
         self.listener = listener
         self.interval_ms = interval_ms
+        #: Called with the position, the identities each side has shown and the leads
+        #: before every move decision of the agent (``tools/play_human.py --current-out``
+        #: writes it for the analysis mode, IKA-337). Reads only.
+        self.on_move = on_move
         #: How the two sides are named on the screen, by side index.
         self.side_names = tuple("AI" if s == agent_side else "あなた" for s in (0, 1))
 
@@ -1030,6 +1138,8 @@ class HumanGame:
                 record.unmodelled.append(f"hidden bench: {problem}")
                 break
             spreads = _believed(spreads, (self.agent.bench_drop, self.agent.bench_drop))
+            if self.on_move is not None:
+                self.on_move(pos, list(seen), record.leads)
             moved = self._agent_move(pos, spreads, recorded_shown)
             if moved is None:
                 break
@@ -1126,7 +1236,6 @@ class HumanGame:
                 decision=len(self.record.decisions), turn=pos.turn, started=started,
                 interval_ms=self.interval_ms,
             )
-        watch = {} if progress is None else {"progress": progress}
         cells = 0
         cost: Any = None
         if plan.deepen_ms > 0:
@@ -1136,53 +1245,17 @@ class HumanGame:
             else:
                 cost = COSTS[agent.form, agent.cores]
                 cells = cells_for_seconds(plan.deepen_ms / 1000.0, agent.cores, form=agent.form)
-        deepened = None
         try:
-            if exact:
-                got = search(
-                    reg, pos, ours, theirs, agent.leaf, budget=budget,
-                    **(
-                        {"deepen": cells, "deepen_cost": cost, "levels": agent.max_levels,
-                         "child_q": agent.child_q, "outside": outside,
-                         "swap": outside is not None}
-                        if cells else {}
-                    ),
-                    **watch,
-                )
-                strategy = np.asarray(
-                    got.equilibrium.row_strategy if me == 0 else got.equilibrium.col_strategy,
-                    dtype=np.float64,
-                )
-                model = [
-                    float(x)
-                    for x in (got.equilibrium.col_strategy if me == 0 else got.equilibrium.row_strategy)
-                ]
-                ours, theirs = got.ours, got.theirs
-                value = float(got.equilibrium.value)
-                deepened = got.deepened
-                unmodelled = set(got.unmodelled)
-            else:
-                answers = belief_solve(
-                    reg, pos, ours, theirs, spreads,
-                    {me: agent.leaf, you: _not_asked}, budget=budget, sides=(me,),
-                    deepen=(
-                        {me: {"cells": cells, "reading": "mixed", "swap": outside is not None,
-                              "outside": outside, "cost": cost, "levels": agent.max_levels,
-                              "child_q": agent.child_q}}
-                        if cells else None
-                    ),
-                    **watch,
-                )
-                got = answers[me]
-                strategy = np.asarray(got.strategy, dtype=np.float64)
-                model = _averaged(got.replies, [item.weight for item in spreads[you]])
-                ours, theirs = got.ours, got.theirs
-                # Side 1 solved the negated transpose: its value back in side 0's units.
-                value = float(got.value) if me == 0 else -float(got.value)
-                deepened = got.deepened
-                unmodelled = set(got.unmodelled)
+            solved = solve_move(
+                reg, pos, me, ours, theirs, spreads, agent.leaf, budget=budget, exact=exact,
+                cells=cells, cost=cost, levels=agent.max_levels, child_q=agent.child_q,
+                outside=outside, progress=progress,
+            )
         except EquilibriumError:
             return None
+        strategy, model, value = solved.strategy, solved.model, solved.value
+        ours, theirs = solved.ours, solved.theirs
+        deepened, unmodelled = solved.deepened, solved.unmodelled
         mine = ours if me == 0 else theirs
         index = _sample_index(self.rng, strategy)
         took = time.perf_counter() - started
@@ -1479,6 +1552,7 @@ def play(
     belief_epsilon: float = BELIEF_EPSILON,
     listener: Callable[[str, Any], None] | None = None,
     interval_ms: float = 100.0,
+    on_move: Callable[[Position, list[frozenset[str]], list[list[str]]], None] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], HumanGame]:
     """Plays one game. ``teams`` are side 0's and side 1's sheets. Returns the game's
     record line, its clock line, and the game object (for a caller that wants the board).
@@ -1532,7 +1606,7 @@ def play(
     game = HumanGame(
         agent, person, agent_side=agent_side, sheets=six, picks=picks, bench_prior=priors,
         rng=np.random.default_rng([seed, game_index, 2]), max_turns=max_turns, loc=loc, out=out,
-        listener=listener, interval_ms=interval_ms,
+        listener=listener, interval_ms=interval_ms, on_move=on_move,
     )
     game.inputs = inputs
     record = game.play()
