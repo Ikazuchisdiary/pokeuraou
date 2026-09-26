@@ -70,12 +70,13 @@ def main(argv: list[str] | None = None) -> None:
                     help="both menus' width (IKA-307: width first; 64 is every legal action on most turns)")
     ap.add_argument("--oracle", default="sall",
                     help="the root's swap oracle while deepening: s<W>, sall (default) or none")
-    ap.add_argument("--max-levels", type=int, default=MAX_LEVELS,
-                    help=f"the deepening's depth guard (default {MAX_LEVELS}, deepen.MAX_LEVELS; "
+    ap.add_argument("--max-levels", type=int, default=humanplay.PLAY_MAX_LEVELS or MAX_LEVELS,
+                    help=f"the deepening's depth guard (default {humanplay.PLAY_MAX_LEVELS or MAX_LEVELS}: "
+                    "humanplay.PLAY_MAX_LEVELS, the person's game's, else deepen.MAX_LEVELS; "
                     "IKA-307: long reads meet it)")
     ap.add_argument("--open", action="store_true",
                     help="read with the opponent's bench open (the recorded position whole)")
-    ap.add_argument("--threads", type=int, default=4,
+    ap.add_argument("--threads", type=int, default=humanplay.default_threads(),
                     help="cores the read spreads over (IKA-32 stage 2: worker processes expand "
                     "cells ahead, a big game's two LPs at once); they change no answer")
     ap.add_argument("--value", type=Path, nargs="+", default=None,
@@ -88,8 +89,10 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--q-model", type=Path, default=None, help=f"the Q. Default: {DEFAULT_Q}")
     ap.add_argument("--bench-drop", default=DEFAULT_BENCH_DROP)
     ap.add_argument("--device", default=None)
-    ap.add_argument("--cuda-memory-gb", type=float, default=3.5,
-                    help="cap this process's CUDA allocator (IKA-334); 0: no cap")
+    ap.add_argument("--cuda-memory-gb", type=float, default=humanplay.PLAY_CUDA_MEMORY_GB,
+                    help="cap this process's CUDA allocator and each worker's (IKA-334); 0: no cap")
+    ap.add_argument("--open-browser", action="store_true",
+                    help="open the page in the browser once it is served")
     ap.add_argument("--max-steps", type=int, default=None,
                     help="stop each read after this many steps of the deepening (reproducible)")
     ap.add_argument("--max-seconds", type=float, default=None, help="stop each read after this long")
@@ -136,11 +139,7 @@ def main(argv: list[str] | None = None) -> None:
         else:
             say(f"note: no {DEFAULT_VALUE[0]} here, so the read uses hp-share (--value names a leaf)")
     if values and not args.hp_share:
-        import torch
-
-        if args.cuda_memory_gb > 0 and torch.cuda.is_available() and (args.device or "cuda") == "cuda":
-            total = torch.cuda.mem_get_info()[1]
-            torch.cuda.set_per_process_memory_fraction(min(1.0, args.cuda_memory_gb * 1e9 / total))
+        humanplay.cap_cuda(args.cuda_memory_gb, args.device)
         evaluate, encoder, device = humanplay.load_leaf(
             reg, values, device, graphs=args.leaf_graphs == "on"
         )
@@ -162,7 +161,7 @@ def main(argv: list[str] | None = None) -> None:
     humanplay.use_threads(
         args.threads, reg,
         ([str(v) for v in values] if values and not args.hp_share else None,
-         str(device or "cpu"), args.leaf_graphs == "on"),
+         str(device or "cpu"), args.leaf_graphs == "on", args.cuda_memory_gb),
     )
 
     settings = analysis.Settings(
@@ -198,6 +197,10 @@ def main(argv: list[str] | None = None) -> None:
                  "side": args.side}
     if not args.no_view:
         print(f"画面: {server.url}", file=sys.stderr)
+        if args.open_browser:
+            import webbrowser
+
+            webbrowser.open(server.url)
     try:
         service.serve(first, once=args.no_view)
     except KeyboardInterrupt:
