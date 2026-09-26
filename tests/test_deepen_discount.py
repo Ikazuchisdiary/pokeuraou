@@ -172,18 +172,38 @@ def test_in_a_game_the_discount_changes_the_moves_and_repeats(setup) -> None:  #
     assert first["decisions"] != plain["decisions"]
 
 
+def test_a_deepening_is_charged_its_levels_and_its_root(roster) -> None:  # noqa: ANN001
+    reg = roster.reg
+    pos = _played(roster)[0]
+    ours, theirs = _menus(reg, pos, 3)
+    base = deepen_mod.Cost(fill=0.0, refine=0.0, cell=1.0)
+    steps = {}
+    for name, cost in (("plain", base),
+                       ("level", deepen_mod.Cost(fill=0.0, refine=0.0, cell=1.0, level=20.0)),
+                       ("root", deepen_mod.Cost(fill=0.0, refine=0.0, cell=1.0, root=5.0))):
+        got, _trace = _deepen(reg, pos, ours, theirs, 400, levels=16, cost=cost)
+        steps[name] = got.report.expanded + got.report.refused
+    # The same budget buys fewer steps once a level or a root cell has a price.
+    assert steps["level"] < steps["plain"]
+    assert steps["root"] < steps["plain"]
+
+
 def test_the_meter_prices_a_refined_cell_by_its_level() -> None:
     plain = deepen_mod.Cost(fill=5.0, refine=1.5, cell=0.1)
-    leveled = deepen_mod.Cost(fill=5.0, refine=1.5, cell=0.1, level=0.4)
+    leveled = deepen_mod.Cost(fill=5.0, refine=1.5, cell=0.1, level=0.4, root=0.01)
     a, b = deepen_mod._Meter(plain), deepen_mod._Meter(leveled)  # noqa: SLF001
     for meter in (a, b):
-        meter.refined(10, 1, 0)
-        meter.refined(4, 1, 7)
-        meter.refined(2, 1, 12)
+        meter.refined(10, 1, 0, 300)
+        meter.refined(4, 1, 7, 300)
+        meter.refined(2, 1, 12, 320)
     assert a.levels == b.levels == 19
-    # Without the price a level costs nothing: the old reading, to the bit.
+    assert a.roots == b.roots == 920
+    # Without the prices a level and a root cell cost nothing: the old reading, to the bit.
     assert a.spent == plain.ms(3, 3, 16) / 0.1
-    assert b.spent == pytest.approx((plain.ms(3, 3, 16) + 0.4 * 19) / 0.1)
+    assert b.spent == pytest.approx((plain.ms(3, 3, 16) + 0.4 * 19 + 0.01 * 920) / 0.1)
+    # The deepening charges both: a root's cells at each refinement, the cell's level.
+    local = deepen_mod.COSTS["local", 1]
+    assert local.level > 0 and local.root > 0
     # A clock that stands in for a Cost (no `level`) reads as before.
 
     class Clock:
