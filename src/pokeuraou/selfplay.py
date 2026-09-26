@@ -50,7 +50,7 @@ from .hidden import (
     seen_slots,
     shown_species,
 )
-from .narrow import narrow
+from .narrow import narrow, note_coverless
 from .payoff import HP_SHARE, Objective
 from .policy import policy_ranking
 from .position import Field, MoveSlot, Pokemon, Position, Side
@@ -69,6 +69,7 @@ from .search import (
     believed_ranking,
     leaf_ranking,
     parse_rank_fill,
+    rank_fill_covers,
     search,
 )
 from .selection_book import (
@@ -696,6 +697,9 @@ def _menus(
     ``rank_fill`` is how the leaf ranking fills its cells (`search.parse_rank_fill`,
     IKA-268): how many damage replies each candidate is resolved against, and whether at
     this budget or at `Budget.fast`. It changes nothing with the damage or policy ranking.
+    A ``-nocover`` label (IKA-323) builds the leaf-ranked menus -- the wider ones too --
+    from the ranking alone, with no cover of every slot option first; what that leaves
+    off is in each `Narrowed.uncovered` and tallied in `narrow.COVERLESS`.
 
     ``wide`` asks for the same agent's menus at other widths too, written into ``wider``
     by width: the candidates of the root's double oracle (IKA-293). They are ranked by
@@ -705,6 +709,7 @@ def _menus(
     if rank_view not in RANK_VIEWS:
         raise ValueError(f"rank_view {rank_view!r} is not one of {RANK_VIEWS}")
     references, fast_fill = parse_rank_fill(rank_fill)
+    cover = rank_fill_covers(rank_fill)
     rank_budget = Budget.fast() if fast_fill else budget
     widths = sorted(set(wide))
     if widths and wider is None:
@@ -787,24 +792,30 @@ def _menus(
             believed_ranking(parts), side, used, spreads, [w for _r, w in parts]
         )
 
+    def menu(side: int, limit: int, rank: Any, *, tally: bool = True) -> list[SideAction]:  # noqa: ANN401
+        got = narrow(reg, pos, side, limit=limit, rank=rank, cover=cover)
+        if not cover and tally:
+            note_coverless(rank_fill, got)
+        return got.actions
+
     if not widths:
         # A part each (IKA-32): the two sides' menus are independent of each other.
         with timing.region("menu.side"):
-            first = narrow(reg, pos, 0, limit=limits[0], rank=ranker(0)).actions
+            first = menu(0, limits[0], ranker(0))
         with timing.region("menu.side"):
-            second = narrow(reg, pos, 1, limit=limits[1], rank=ranker(1)).actions
+            second = menu(1, limits[1], ranker(1))
         return first, second
     # The same calls in the same order, each side's ranking remembered for its wider menus.
     with timing.region("menu.side"):
         own_rank = _remembered(ranker(0))
-        own = narrow(reg, pos, 0, limit=limits[0], rank=own_rank).actions
+        own = menu(0, limits[0], own_rank)
     with timing.region("menu.side"):
         foe_rank = _remembered(ranker(1))
-        foe = narrow(reg, pos, 1, limit=limits[1], rank=foe_rank).actions
+        foe = menu(1, limits[1], foe_rank)
     for width in widths:
         wider[width] = (
-            narrow(reg, pos, 0, limit=width, rank=own_rank).actions,
-            narrow(reg, pos, 1, limit=width, rank=foe_rank).actions,
+            menu(0, width, own_rank, tally=False),
+            menu(1, width, foe_rank, tally=False),
         )
     return own, foe
 

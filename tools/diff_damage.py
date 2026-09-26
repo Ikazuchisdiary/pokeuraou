@@ -26,6 +26,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from diff_turn import REFUSED_CHOICE, showdown_choice  # noqa: E402
+
 from pokeuraou.actions import MoveAction, SwitchAction, side_actions  # noqa: E402
 from pokeuraou.damage import (  # noqa: E402
     calculate,
@@ -430,11 +432,17 @@ def run(
                         and not any(isinstance(s, SwitchAction) for s in a.slots)
                     ]
                     pick = py_rng.choice(damaging or actions)
-                    choices.append(pick.to_choice())
+                    # Numbered by Showdown's request: a locked move is `move 1` (IKA-316).
+                    choices.append(showdown_choice(pick, request))
 
                 if all(c is None for c in choices):
                     break
                 handle.step(choices)
+                if handle.choice_errors:
+                    # Until IKA-316 this was not looked at: the refused turn was compared as
+                    # an empty log, and the same refused choice came back every turn after.
+                    report.skipped_turns[REFUSED_CHOICE] += 1
+                    break
                 if not forced:
                     compare_turn(reg, pos, handle.log, roll, report)
             handle.close()
