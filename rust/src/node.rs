@@ -50,6 +50,9 @@ pub struct Request {
     /// copies from (IKA-32: a `Position` holds `Rc`s and cannot be shared between
     /// threads). `Null` when there is no pool, which is every run at one thread.
     pub position_json: Value,
+    /// An encoded node's spans in the header as JSON rather than in the body (IKA-302):
+    /// only for the test that holds the two roads to the same lists.
+    pub json_spans: bool,
 }
 
 impl Request {
@@ -69,7 +72,7 @@ impl Request {
 }
 
 pub fn parse_request(value: &Value) -> Result<Request, String> {
-    let position = Position::from_json(&value["position"]);
+    let position = crate::held::position(&value["position"]);
     let read = |key: &str| -> Vec<Vec<SlotAction>> {
         value[key]
             .as_array()
@@ -113,10 +116,11 @@ pub fn parse_request(value: &Value) -> Result<Request, String> {
             .unwrap_or(false),
     };
     let position_json = match crate::par::Pool::global() {
-        Some(_) => value["position"].clone(),
+        Some(_) => crate::held::json(&value["position"]),
         None => Value::Null,
     };
     Ok(Request {
+        json_spans: value.get("jsonSpans").and_then(Value::as_bool).unwrap_or(false),
         ours_json: Vec::new(),
         theirs_json: Vec::new(),
         position_json,
@@ -322,7 +326,7 @@ fn resolve_key(value: &Value) -> String {
 }
 
 fn resolve_fresh(reg: &Reg, value: &Value, key: String) -> Result<KeptTurn, Value> {
-    let position = Position::from_json(&value["position"]);
+    let position = crate::held::position(&value["position"]);
     if &*position.format != reg.format_id.as_str() {
         return Err(json!({ "refused": "position is for another regulation" }));
     }
@@ -355,7 +359,7 @@ fn resolve_fresh(reg: &Reg, value: &Value, key: String) -> Result<KeptTurn, Valu
 /// turns are resolved, only damage calculated, and what comes back is one number per
 /// candidate rather than a matrix.
 fn score_pool(reg: &Reg, value: &Value) -> Value {
-    let position = Position::from_json(&value["position"]);
+    let position = crate::held::position(&value["position"]);
     if &*position.format != reg.format_id.as_str() {
         return json!({
             "error": format!(
@@ -389,7 +393,7 @@ fn score_pool(reg: &Reg, value: &Value) -> Value {
 /// answers `WIDTH` numbers per candidate of each side's list, from the same calculator the
 /// `score` command uses. A position the calculator refuses is refused whole.
 fn qfeatures(reg: &Reg, value: &Value) -> Value {
-    let position = Position::from_json(&value["position"]);
+    let position = crate::held::position(&value["position"]);
     if &*position.format != reg.format_id.as_str() {
         return json!({
             "error": format!(
@@ -436,9 +440,11 @@ pub fn serve(reg: &Reg) {
         // node it panicked on is refused, which the caller already knows how to fill in
         // Python, and the process stays up. Two generation workers lost a thousand games
         // each to a failure that took the bridge down for good.
+        let started = std::time::Instant::now();
         let answered = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             answer(reg, &encoder, &mut shared, &mut input, &line, &mut stdout)
         }));
+        crate::wire::end(started);
         match answered {
             Ok(Ok(())) => {}
             Ok(Err(error)) => {
@@ -464,6 +470,11 @@ pub fn serve(reg: &Reg) {
         if let Err(error) = std::fs::write(&path, format!("{}\n", crate::par::report())) {
             eprintln!("node: could not write {}: {error}", path.display());
         }
+        // IKA-302: and what the wire cost, beside it.
+        let path = std::path::Path::new(&dir).join(format!("wire-{}.json", std::process::id()));
+        if let Err(error) = std::fs::write(&path, format!("{}\n", crate::wire::report())) {
+            eprintln!("node: could not write {}: {error}", path.display());
+        }
     }
 }
 
@@ -477,6 +488,7 @@ fn with_timings(header: &Value, parse_us: f64) -> String {
     let started = std::time::Instant::now();
     let mut text = header.to_string();
     let header_us = started.elapsed().as_secs_f64() * 1e6;
+    crate::wire::wrote(started, text.len());
     if !text.ends_with('}') {
         return text;
     }
@@ -498,6 +510,7 @@ fn with_timings(header: &Value, parse_us: f64) -> String {
 fn place_body<R: BufRead, W: Write>(
     encoded: &crate::encode::Encoded,
     leaf_values: &[f64],
+    tail: &[u8],
     body_bytes: usize,
     target: &shm::Target,
     shared: &mut shm::Cache,
@@ -507,7 +520,7 @@ fn place_body<R: BufRead, W: Write>(
     parse_us: f64,
 ) -> std::io::Result<()> {
     if shm::place(shared, target, body_bytes, |sink| {
-        crate::encoded_node::write_body(sink, encoded, leaf_values)
+        crate::encoded_node::write_body(sink, encoded, leaf_values, tail)
     })
     .is_some()
     {
@@ -532,7 +545,7 @@ fn place_body<R: BufRead, W: Write>(
         capacity: offered.get("bytes").and_then(Value::as_u64).unwrap_or(0) as usize,
     };
     if shm::place(shared, &grown, body_bytes, |sink| {
-        crate::encoded_node::write_body(sink, encoded, leaf_values)
+        crate::encoded_node::write_body(sink, encoded, leaf_values, tail)
     })
     .is_some()
     {
@@ -542,7 +555,7 @@ fn place_body<R: BufRead, W: Write>(
     // The caller said the pipe, or made a block this could not open. Either way the body
     // still has to arrive, and the pipe is the road that always works.
     writeln!(stdout, "{}", json!({ "via": "pipe" }))?;
-    crate::encoded_node::write_body(stdout, encoded, leaf_values)?;
+    crate::encoded_node::write_body(stdout, encoded, leaf_values, tail)?;
     stdout.flush()
 }
 
@@ -572,7 +585,25 @@ fn many(reg: &Reg, value: &Value) -> Value {
     // is seen by another's: on the pool they go one per item and come back in the order sent
     // (IKA-32).
     let answers: Vec<Value> = match crate::par::Pool::global() {
-        Some(pool) if list.len() > 1 => pool.map_with(list.len(), || (), |_, k| answer_one(&list[k])),
+        Some(pool) if list.len() > 1 => {
+            // A cell thread cannot see this thread's held positions (IKA-302): each
+            // request goes to it with its position written out.
+            let owned: Vec<Value> = list
+                .iter()
+                .map(|one| {
+                    let mut one = one.clone();
+                    if crate::held::held_id(&one["position"]).is_some() {
+                        one["position"] = crate::held::json(&one["position"]);
+                    }
+                    // Nor keep one for this thread: a branch goes back written out only.
+                    if one.get("refs").is_some() {
+                        one["refs"] = json!(false);
+                    }
+                    one
+                })
+                .collect();
+            pool.map_with(owned.len(), || (), |_, k| answer_one(&owned[k]))
+        }
         _ => list.iter().map(answer_one).collect(),
     };
     json!({ "kind": "many", "answers": answers })
@@ -602,7 +633,8 @@ fn fills<R: BufRead, W: Write>(
         return fail(stdout, "`fills` without a list of requests".into());
     };
     let mut headers: Vec<Value> = Vec::with_capacity(list.len());
-    let mut bodies: Vec<(crate::encode::Encoded, Vec<f64>)> = Vec::with_capacity(list.len());
+    let mut bodies: Vec<(crate::encode::Encoded, Vec<f64>, Vec<u8>)> =
+        Vec::with_capacity(list.len());
     // A node another node of this crossing reads its turns off (`like`), by index.
     let mut kept: Vec<Option<crate::encoded_node::Kept>> = Vec::with_capacity(list.len());
     let mut total = 0usize;
@@ -650,7 +682,7 @@ fn fills<R: BufRead, W: Write>(
                 request.theirs_json.clone(),
             )
         });
-        let (mut header, encoded, leaf_values, keeping) =
+        let (mut header, encoded, leaf_values, spans, keeping) =
             crate::encoded_node::fill_shared(reg, encoder, &request, like.as_ref(), keep);
         if like_of.is_some() && like.is_none() {
             // Asked to read off a node and could not: said, so the caller can count it.
@@ -658,12 +690,12 @@ fn fills<R: BufRead, W: Write>(
         }
         total += header["bytes"].as_u64().unwrap_or(0) as usize;
         headers.push(header);
-        bodies.push((encoded, leaf_values));
+        bodies.push((encoded, leaf_values, spans));
         kept.push(keeping);
     }
     let write_all = |sink: &mut dyn Write| -> std::io::Result<()> {
-        for (encoded, leaf_values) in &bodies {
-            crate::encoded_node::write_body(sink, encoded, leaf_values)?;
+        for (encoded, leaf_values, spans) in &bodies {
+            crate::encoded_node::write_body(sink, encoded, leaf_values, spans)?;
         }
         Ok(())
     };
@@ -723,8 +755,32 @@ fn answer<R: BufRead, W: Write>(
     let parse_started = std::time::Instant::now();
     let parsed = serde_json::from_str::<Value>(line);
     let parse_us = parse_started.elapsed().as_secs_f64() * 1e6;
+    crate::wire::begin(
+        match &parsed {
+            Err(_) => "error",
+            Ok(value) => match value["kind"].as_str() {
+                Some(kind) => kind,
+                None if value.get("encode").and_then(Value::as_bool) == Some(true) => "fill_encoded",
+                None => "fill",
+            },
+        },
+        parse_started.elapsed().as_nanos() as u64,
+        line.len(),
+    );
     let response = match parsed {
         Err(error) => json!({ "error": error.to_string() }),
+        // IKA-302: a position to hold, and the end of a decision. Neither is answered:
+        // they go down the pipe ahead of the request that needs them.
+        Ok(value) if value["kind"].as_str() == Some("hold") => {
+            if let Some(id) = value["id"].as_u64() {
+                crate::held::define(id, &value["position"]);
+            }
+            return Ok(());
+        }
+        Ok(value) if value["kind"].as_str() == Some("forget") => {
+            crate::held::forget();
+            return Ok(());
+        }
         Ok(value) if value["kind"].as_str() == Some("resolve") => resolve_one(reg, &value),
         Ok(value) if value["kind"].as_str() == Some("score") => score_pool(reg, &value),
         Ok(value) if value["kind"].as_str() == Some("qfeatures") => qfeatures(reg, &value),
@@ -747,13 +803,13 @@ fn answer<R: BufRead, W: Write>(
                     });
                     return match &target {
                         Some(target) => place_body(
-                            &encoded, &leaf_values, body_bytes, target, shared, input,
+                            &encoded, &leaf_values, &[], body_bytes, target, shared, input,
                             stdout, &mut header, parse_us,
                         ),
                         None => {
                             header["via"] = json!("pipe");
                             writeln!(stdout, "{}", with_timings(&header, parse_us))?;
-                            crate::encoded_node::write_body(stdout, &encoded, &leaf_values)?;
+                            crate::encoded_node::write_body(stdout, &encoded, &leaf_values, &[])?;
                             stdout.flush()
                         }
                     };
@@ -777,18 +833,18 @@ fn answer<R: BufRead, W: Write>(
                     // The arrays into the caller's block when there is one, and a header
                     // line either way saying where they went. A block is filled *before*
                     // its header is sent, because the header is what says to read it.
-                    let (mut header, encoded, leaf_values) =
+                    let (mut header, encoded, leaf_values, spans) =
                         crate::encoded_node::fill(reg, encoder, &request);
                     let body_bytes = header["bytes"].as_u64().unwrap_or(0) as usize;
                     return match &request.shm {
                         Some(target) => place_body(
-                            &encoded, &leaf_values, body_bytes, target, shared, input,
+                            &encoded, &leaf_values, &spans, body_bytes, target, shared, input,
                             stdout, &mut header, parse_us,
                         ),
                         None => {
                             header["via"] = json!("pipe");
                             writeln!(stdout, "{}", with_timings(&header, parse_us))?;
-                            crate::encoded_node::write_body(stdout, &encoded, &leaf_values)?;
+                            crate::encoded_node::write_body(stdout, &encoded, &leaf_values, &spans)?;
                             stdout.flush()
                         }
                     };
@@ -798,6 +854,9 @@ fn answer<R: BufRead, W: Write>(
             }
         },
     };
-    writeln!(stdout, "{response}")?;
+    let written = std::time::Instant::now();
+    let text = response.to_string();
+    crate::wire::wrote(written, text.len());
+    writeln!(stdout, "{text}")?;
     stdout.flush()
 }
