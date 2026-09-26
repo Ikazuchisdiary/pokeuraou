@@ -157,17 +157,20 @@ function onEvent(e) {
       break;
     case "think":
       S.sent = false; S.think = e; S.decision = e.decision; S.answered = false; S.prompt = null;
+      // IKA-344: with ponder the person is asked while the AI reads, until they choose.
+      S.pondering = !!e.ponder;
       S.history.push({ decision: e.decision, turn: e.turn, pts: [], done: false });
       if (!S.analysis) { renderInput(); setStatus(`AI が考えています（ターン ${e.turn}）`, "think"); applyHide(); }
       renderClock(0, false);
       break;
     case "answer":
+      S.pondering = false;
       if (!S.analysis) setStatus(`AI は手を決めました（${e.seconds.toFixed(1)} 秒）`, "turn");
       renderClock(e.seconds * 1000, true);
       break;
     case "prompt":
       S.prompt = e; S.chosen = []; S.mega = -1; S.answered = false; renderInput(); applyHide();
-      setStatus(e.kind === "move" ? "あなたの番" : e.heading, "turn");
+      setStatus(e.kind === "move" ? (S.pondering ? "あなたの番（AI は読み続けています）" : "あなたの番") : e.heading, "turn");
       break;
     case "turn":
       S.sent = false;
@@ -594,6 +597,7 @@ function send(line) {
   LiveData.send(line);
   S.prompt = null; S.select = null; S.answered = true; S.sent = true;
   renderInput(); applyHide();
+  if (S.pondering) setStatus("AI が読みを止めて手を引くのを待っています", "think");
 }
 function renderInput() {
   const box = $("input");
