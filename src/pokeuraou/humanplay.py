@@ -275,6 +275,15 @@ class HaltingCost:
             return self.full
         return self.inner.ms(fills, refines, cells, probed, qs)
 
+    def __getattr__(self, name: str) -> Any:  # noqa: ANN401
+        """Every other price is ``inner``'s: `deepen._Meter` reads a `deepen.Cost`'s
+        ``level`` and ``root`` (IKA-342) beside `ms`, and a wrapped count clock must charge
+        them as the bare one does (a `WallCost` has neither, and reads as before)."""
+        inner = self.__dict__.get("inner")
+        if inner is None or name.startswith("__"):
+            raise AttributeError(name)
+        return getattr(inner, name)
+
 
 CLOCKS = ("wall", "count")
 

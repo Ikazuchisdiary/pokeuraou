@@ -188,6 +188,26 @@ def test_a_deepening_is_charged_its_levels_and_its_root(roster) -> None:  # noqa
     assert steps["root"] < steps["plain"]
 
 
+def test_a_wrapped_count_clock_keeps_the_level_and_root_prices() -> None:
+    import threading
+
+    from pokeuraou import humanplay
+
+    local = deepen_mod.COSTS["local", 1]
+    bare = deepen_mod._Meter(local)  # noqa: SLF001
+    wrapped = deepen_mod._Meter(humanplay.HaltingCost(local, threading.Event(), 10**6))  # noqa: SLF001
+    for meter in (bare, wrapped):
+        meter.refined(12, 2, 5, 3000)
+        meter.refined(3, 1, 11, 3000)
+    # The memory brake's wrapper charges what the bare clock charges (IKA-344 found the
+    # prices read as 0 through it), and the prices are really there.
+    assert wrapped.spent == bare.spent
+    assert bare.spent > local.ms(3, 2, 15) / local.cell
+    # A wall clock has neither price, wrapped or not.
+    wall = deepen_mod._Meter(humanplay.HaltingCost(humanplay.WallCost(0.0), threading.Event(), 5))  # noqa: SLF001
+    assert getattr(wall.cost, "level", 0.0) == 0.0 and getattr(wall.cost, "root", 0.0) == 0.0
+
+
 def test_the_meter_prices_a_refined_cell_by_its_level() -> None:
     plain = deepen_mod.Cost(fill=5.0, refine=1.5, cell=0.1)
     leveled = deepen_mod.Cost(fill=5.0, refine=1.5, cell=0.1, level=0.4, root=0.01)
