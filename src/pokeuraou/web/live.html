@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pokeuraou 対局と読み</title>
+<link rel="stylesheet" href="live.css">
+</head>
+<body>
+<header>
+  <h1>pokeuraou 対局と読み</h1>
+  <span id="status">接続中…</span>
+  <label><input type="checkbox" id="hide"> 自分の手を入れるまで読みを隠す</label>
+  <span class="note">答えは混合戦略（手ごとの確率）。「最善手 1 つと評価値」は出しません。</span>
+</header>
+<main>
+  <div>
+    <section><h2>盤面</h2><div id="board">まだ何もない</div></section>
+    <section><h2>あなたの入力</h2><div id="input"><span class="note">AI の番を待っています</span></div></section>
+    <section><h2>経過</h2><div id="log"></div></section>
+  </div>
+  <div class="thinking">
+    <section><h2>読みの量</h2><div class="counters" id="counters"></div><div class="note" id="plan"></div></section>
+    <section><h2>値の推移（AI から見た値。横軸は考え始めてからのミリ秒）</h2><canvas id="chart"></canvas>
+      <div class="note" id="valuenote"></div></section>
+    <section><h2>AI の混合戦略（手ごとの確率と期待値の損）</h2><div class="bars ai" id="ours"></div></section>
+    <section><h2>あなたの手の読み（AI が考える相手の混合）</h2><div class="bars you" id="theirs"></div>
+      <div id="classes"></div></section>
+  </div>
+  <div class="thinking">
+    <section><h2>読み筋（確率の付いた木）</h2>
+      <div class="note">重い組（AI の手 × あなたの手）ごとに、読んだ組は偶然の枝（上位を正規化）と次のターンの両側の混合へ開く。読んでいない組は葉の値。</div>
+      <div class="pv" id="pv"></div></section>
+    <section><h2>チーム</h2><div id="sheets"></div></section>
+  </div>
+</main>
+<script src="live-data.js"></script>
+<script src="live-view.js"></script>
+</body>
+</html>

@@ -92,6 +92,16 @@ Time is counted separately (`Cost`): fills, refinements and cells each have a pr
 milliseconds, measured per machine form and per number of cores, and `cells_for_seconds`
 turns a clock into a budget in those prices' units (IKA-293; IKA-32 keeps the prices per
 kind of work because each shrinks differently on more cores).
+
+**Watching it think** (IKA-332). `deepen_root` and `deepen_belief` take an optional
+`progress` callback: it is called with a `Step` once at the depth-1 answer (``start``),
+once after every step (``refine``, ``refused``, ``widen``) and once at the end (``done``,
+the answer returned). A `Step` holds the counts and a live reference to the root; the
+callback reads what is already there and must not write. Without one nothing is called
+and nothing is computed that was not before; with one the search does the same work in
+the same order, so a game on counted cells is the same game either way (a wall-clock game
+is not replayed by seed in any case). `announce_depth1` / `announce_belief_depth1` give a
+node that is not deepened the same two calls.
 """
 
 from __future__ import annotations
@@ -368,6 +378,101 @@ class Deepening:
     report: Deepened
 
 
+@dataclass(frozen=True, slots=True)
+class Step:
+    """One report of a deepening's progress (IKA-332), for a `progress` callback.
+
+    The counts are the ones `Deepened` ends with, as they stand after this step. `root`
+    is the live root (`_Node`, or `_BeliefRoot` where a bench is hidden): read it inside
+    the callback, since the next step moves it, and never write to it.
+    """
+
+    #: 0 at the depth-1 answer, then 1, 2, ... per step; ``done`` repeats the last.
+    index: int
+    #: ``start``, ``refine`` (a cell took a deeper value), ``refused``, ``widen`` (the
+    #: oracle added an action) or ``done``.
+    kind: str
+    root: Any
+    budget: int
+    #: The budget's reading of the work so far (`_Meter.spent`): cells, or the cost's units.
+    spent: float
+    cells: int
+    fills: int
+    refines: int
+    expanded: int
+    depth: int
+    refused: int
+    probed: int = 0
+    widened: int = 0
+    swapped: int = 0
+    #: The cell this step refined or refused, and its node's level (0 at the root).
+    cell: tuple[int, ...] | None = None
+    level: int | None = None
+
+
+#: A progress callback: called with each `Step`, returns nothing, changes nothing.
+Progress = Callable[[Step], None]
+
+
+def _stepper(
+    progress: Progress, root: Any, meter: _Meter, cells: int, oracle: Any  # noqa: ANN401
+) -> Callable[..., None]:
+    """The callback, bound to one deepening's root, meter and oracle."""
+    count = [0]
+
+    def announce(
+        kind: str, expanded: int, deepest: int, refused: int,
+        cell: tuple[int, ...] | None = None, level: int | None = None,
+    ) -> None:
+        if kind not in ("start", "done"):
+            count[0] += 1
+        progress(Step(
+            index=count[0], kind=kind, root=root, budget=cells, spent=float(meter.spent),
+            cells=meter.refines + meter.cells, fills=meter.fills, refines=meter.refines,
+            expanded=expanded, depth=1 + deepest, refused=refused,
+            probed=0 if oracle is None else oracle.probed,
+            widened=0 if oracle is None else oracle.widened,
+            swapped=0 if oracle is None else oracle.swapped,
+            cell=None if cell is None else tuple(int(c) for c in cell), level=level,
+        ))
+
+    return announce
+
+
+def announce_depth1(
+    progress: Progress,
+    pos: Position,
+    rows: Sequence[SideAction],
+    cols: Sequence[SideAction],
+    payoff: np.ndarray,
+    equilibrium: Equilibrium,
+) -> None:
+    """A node that is not deepened, reported as one: ``start`` and ``done`` at depth 1.
+    The root handed over holds references to the answer, nothing copied or solved."""
+    root = _Node(pos=pos, rows=list(rows), cols=list(cols), payoff=payoff,
+                 equilibrium=equilibrium, level=0)
+    announce = _stepper(progress, root, _Meter(None), 0, None)
+    announce("start", 0, 0, 0)
+    announce("done", 0, 0, 0)
+
+
+def announce_belief_depth1(
+    progress: Progress,
+    side: int,
+    own: Sequence[SideAction],
+    other: Sequence[SideAction],
+    items: Sequence[Any],
+    weights: np.ndarray,
+    prices: Sequence[np.ndarray],
+    equilibrium: Any,  # noqa: ANN401 - BayesianEquilibrium
+) -> None:
+    """`announce_depth1` for a side's Bayesian node (`belief_solve` without deepening)."""
+    root = _BeliefRoot(side, own, other, items, weights, prices, equilibrium)
+    announce = _stepper(progress, root, _Meter(None), 0, None)
+    announce("start", 0, 0, 0)
+    announce("done", 0, 0, 0)
+
+
 def best_first(
     reg: Regulation,
     pos: Position,
@@ -422,6 +527,7 @@ def deepen_root(
     outside: tuple[Sequence[SideAction], Sequence[SideAction]] | None = None,
     cost: Cost | None = None,
     swap: bool = False,
+    progress: Progress | None = None,
 ) -> Deepening:
     """`best_first`, and the root's double oracle when `outside` is given (IKA-293).
 
@@ -436,6 +542,9 @@ def deepen_root(
     `cost` changes only how the budget is counted: None counts cells (a refined cell's
     turn is one), a `Cost` charges each fill, refinement and cell its price in units of
     one cell (`cells_for_seconds`'s budget).
+
+    `progress`, when given, is called with a `Step` at the start, after every step and at
+    the end (the module's docstring); it changes nothing the deepening computes.
     """
     if outside is not None and reading not in ("mixed", "breadth"):
         raise ValueError("the root's double oracle goes with the mixed reading")
@@ -462,6 +571,9 @@ def deepen_root(
     expanded = 0
     deepest = 0
     refused = 0
+    announce = None if progress is None else _stepper(progress, root, meter, cells, oracle)
+    if announce is not None:
+        announce("start", expanded, deepest, refused)
     while meter.spent < cells:
         if oracle is not None:
             # One step: the probe and what it leads to -- a widening, or else a deepening.
@@ -469,6 +581,8 @@ def deepen_root(
             if oracle.widen(reg, evaluate, budget, meter, unmodelled):
                 if trace is not None:
                     trace.append((root, None, True))
+                if announce is not None:
+                    announce("widen", expanded, deepest, refused)
                 continue
             if not deepens:
                 break
@@ -488,10 +602,14 @@ def deepen_root(
             refused += 1
             if node.rect is not None:
                 _reread(node)
+            if announce is not None:
+                announce("refused", expanded, deepest, refused, cell, node.level)
             continue
         expanded += 1
         deepest = max(deepest, node.level + 1)
         _propagate(node, cell)
+        if announce is not None:
+            announce("refine", expanded, deepest, refused, cell, node.level)
     if timing.ON:
         timing.count("deepen.cells", meter.refines + meter.cells)
         timing.count("deepen.expanded", expanded)
@@ -520,6 +638,8 @@ def deepen_root(
         fills=meter.fills, swap=swap,
         swapped=0 if oracle is None else oracle.swapped, uncovered=uncovered,
     )
+    if announce is not None:
+        announce("done", expanded, deepest, refused)
     return Deepening(
         equilibrium=root.equilibrium, payoff=root.payoff, rows=root.rows, cols=root.cols,
         report=report,
@@ -1157,6 +1277,7 @@ def deepen_belief(
     swap: bool = False,
     cost: Cost | None = None,
     trace: list | None = None,
+    progress: Progress | None = None,
 ) -> BeliefDeepening:
     """`deepen_root` for a side whose opponent's bench is hidden (IKA-294, label ``h``).
 
@@ -1195,12 +1316,17 @@ def deepen_belief(
     expanded = 0
     deepest = 0
     refused = 0
+    announce = None if progress is None else _stepper(progress, root, meter, cells, oracle)
+    if announce is not None:
+        announce("start", expanded, deepest, refused)
     while meter.spent < cells:
         if oracle is not None:
             oracle.probe(meter)
             if oracle.widen(meter):
                 if trace is not None:
                     trace.append((root, None, True))
+                if announce is not None:
+                    announce("widen", expanded, deepest, refused)
                 continue
             if not deepens:
                 break
@@ -1220,10 +1346,14 @@ def deepen_belief(
             if isinstance(node, _BeliefRoot):
                 node.signal = None
             refused += 1
+            if announce is not None:
+                announce("refused", expanded, deepest, refused, cell, node.level)
             continue
         expanded += 1
         deepest = max(deepest, node.level + 1)
         _propagate(node, cell)
+        if announce is not None:
+            announce("refine", expanded, deepest, refused, cell, node.level)
     if timing.ON:
         timing.count("deepen.hidden.calls", 1)
         timing.count("deepen.hidden.classes", len(root.prices))
@@ -1254,6 +1384,8 @@ def deepen_belief(
         swapped=0 if oracle is None else oracle.swapped, uncovered=uncovered,
         classes=len(root.prices),
     )
+    if announce is not None:
+        announce("done", expanded, deepest, refused)
     return BeliefDeepening(
         equilibrium=root.equilibrium, prices=root.prices, own=root.own, other=root.other,
         report=report,
@@ -1538,6 +1670,10 @@ __all__ = [
     "Deepened",
     "Deepening",
     "BeliefDeepening",
+    "Progress",
+    "Step",
+    "announce_belief_depth1",
+    "announce_depth1",
     "best_first",
     "cells_for_seconds",
     "deepen_belief",

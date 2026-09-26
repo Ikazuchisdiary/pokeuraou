@@ -375,6 +375,7 @@ def search(
     deepen_cost: _deepen.Cost | None = None,
     swap: bool = False,
     breadth_only: bool = False,
+    progress: _deepen.Progress | None = None,
 ) -> SearchResult:
     """Solve this turn's matrix game, optionally refining the cells that decide it.
 
@@ -401,7 +402,13 @@ def search(
     ``breadth_only`` runs the oracle without deepening (the labels' ``s`` and ``b``).
     ``deepen_cost`` counts the budget in `deepen.Cost`'s prices instead of cells (the
     human's clock, `deepen.cells_for_seconds`).
+
+    ``progress`` is called with each `deepen.Step` of the answer as it forms (IKA-332): the
+    depth-1 answer, every step of a deepening, the end. It goes with the depth-1 full
+    matrix, deepened or not, and changes nothing the search computes.
     """
+    if progress is not None and (depth > 1 or solve_sparsely):
+        raise ValueError("progress reports the depth-1 full-matrix search and its deepening")
     if deepen and (depth > 1 or solve_sparsely):
         raise ValueError("deepen is a budget on top of the depth-1 full-matrix search")
     if (outside is not None or deepen_cost is not None or swap or breadth_only) and not deepen:
@@ -435,6 +442,7 @@ def search(
                 "breadth" if breadth_only else "restricted" if solve_restricted else "mixed"
             ),
             refine=refine, outside=outside, cost=deepen_cost, swap=swap,
+            progress=progress,
         )
         return SearchResult(
             equilibrium=got.equilibrium,
@@ -446,6 +454,8 @@ def search(
             deepened=got.report,
         )
     if depth <= 1:
+        if progress is not None:
+            _deepen.announce_depth1(progress, pos, row, col, payoff, equilibrium)
         return SearchResult(
             equilibrium=equilibrium,
             payoff=payoff,
@@ -1231,6 +1241,7 @@ def belief_solve(
     sub_limit: int = DEFAULT_SUB_LIMIT,
     sub_branches: int = DEFAULT_SUB_BRANCHES,
     deepen: dict[int, dict[str, Any]] | None = None,
+    progress: _deepen.Progress | None = None,
 ) -> dict[int, BeliefResult]:
     """Both sides' answers, resolving each turn as few times as it has to be resolved.
 
@@ -1260,6 +1271,10 @@ def belief_solve(
     ``swap`` and ``outside`` -- the last in side 0's orientation, as `search`'s (side 0's
     candidates, side 1's). It goes with depth 1 on that side. A side not in it is
     answered as above.
+
+    `progress` is called with each `deepen.Step` of every wanted side's answer as it forms
+    (IKA-332; the step's root says which side), deepened or not. Depth 1 only; it changes
+    nothing that is computed.
     """
     from .beliefnode import belief_payoffs
     from .equilibrium import solve_bayesian
@@ -1270,6 +1285,8 @@ def belief_solve(
         if depths[side] != 1:
             raise ValueError("deepen on a hidden bench goes with depth 1 (IKA-294)")
     wanted = tuple(side for side in (0, 1) if side in sides)
+    if progress is not None and any(depths[side] != 1 for side in wanted):
+        raise ValueError("progress reports depth 1 and its deepening (IKA-332)")
     if not wanted:
         raise ValueError(f"belief_solve asked for no side: {sides!r}")
     row, col = list(ours), list(theirs)
@@ -1312,6 +1329,11 @@ def belief_solve(
             unmodelled=nodes[side].unmodelled,
             classes=len(matrices),
         )
+        if progress is not None and side not in deepen:
+            own, other = (row, col) if side == 0 else (col, row)
+            _deepen.announce_belief_depth1(
+                progress, side, own, other, items, weights, matrices, solved
+            )
         if side in deepen:
             how = dict(deepen[side])
             outside = how.pop("outside", None)
@@ -1324,7 +1346,8 @@ def belief_solve(
                 got = _deepen.deepen_belief(
                     reg, side, position, own, other, items, weights, matrices, solved,
                     evaluators[side], budget=budget, sub_limit=sub_limit,
-                    sub_branches=sub_branches, unmodelled=notes, outside=outside, **how,
+                    sub_branches=sub_branches, unmodelled=notes, outside=outside,
+                    progress=progress, **how,
                 )
             grown_row, grown_col = (got.own, got.other) if side == 0 else (got.other, got.own)
             eq = got.equilibrium

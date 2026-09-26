@@ -59,6 +59,16 @@ the lines a script would give (``human.inputs``), so a game with a person replay
 own record. The wall clock (``searchSeconds``, and per decision the seconds against the
 budget) goes to a second file beside it (``<out>.clock.jsonl``), so the game file is the
 game alone and two replays compare as bytes.
+
+**Watching** (IKA-332). A `listener` -- ``listener(kind, payload)``, Python objects, nothing
+serialised -- hears the game as it goes: ``sheets`` and ``select`` before the selection,
+``board`` (the board as the person sees it) before every decision, ``think`` when the agent
+starts a move, ``step`` with a `progress.Snapshot` of its answer as it forms (the first and
+the last of each move always, the ones between at most every ``interval_ms``), ``answer``
+when it has one (its mixture and value -- not the action it drew, which the person sees in
+``turn`` after they have chosen), ``prompt`` when the person is asked, ``turn`` and ``end``.
+The snapshots only read the search's tree, so a game on the count clock is the same game,
+byte for byte, with a listener and without (`liveview` is the listener that shows it).
 """
 
 from __future__ import annotations
@@ -91,6 +101,7 @@ from .narrow import drop_dead_actions
 from .payoff import HP_SHARE, Objective
 from .position import Position
 from .priors import SampledSet
+from .progress import Reader, Recorder
 from .regulation import Regulation
 from .search import belief_solve, search
 from .selection_book import BenchPrior, BookEntry
@@ -510,6 +521,102 @@ def render_position(
     return "\n".join(out)
 
 
+def sheet_view(six: Sequence[SampledSet], loc: Any = None) -> list[dict[str, Any]]:  # noqa: ANN401
+    """A team sheet as plain values (what `render_sheet` prints), for a screen."""
+    return [
+        {
+            "species": _name(loc, "species", s.species),
+            "item": _name(loc, "item", s.item),
+            "ability": _name(loc, "ability", s.ability),
+            "nature": _name(loc, "nature", s.nature),
+            "sp": [int(s.sp.get(k, 0)) for k in ("hp", "atk", "def", "spa", "spd", "spe")],
+            "moves": [_name(loc, "move", m) for m in s.moves],
+        }
+        for s in six
+    ]
+
+
+def _effect_name(loc: Any, effect: str) -> str:  # noqa: ANN401
+    """A weather, terrain or condition by the move that makes it, where Showdown's text
+    has one (its id is the move's), else its id."""
+    if loc is None:
+        return effect
+    got = loc.move(effect)
+    return got if got else effect
+
+
+def board_view(
+    reg: Regulation,
+    pos: Position,
+    viewer: int,
+    foe_seen: frozenset[str],
+    loc: Any = None,  # noqa: ANN401
+    *,
+    names: tuple[str, str] = ("側0", "側1"),
+    seconds: float | None = None,
+) -> dict[str, Any]:
+    """`render_position` as plain values: the board as side ``viewer`` sees it -- its own
+    side exactly, the other side's active Pokemon and the ones it has shown with HP as the
+    game displays it, the rest only counted."""
+    floor = uses_floor_display(reg)
+
+    def mon_view(mon: Any, exact: bool) -> dict[str, Any]:  # noqa: ANN401
+        view: dict[str, Any] = {
+            "species": _name(loc, "species", mon.species),
+            "fainted": bool(mon.fainted),
+            "percent": displayed_percent(mon.hp, mon.maxhp, floor_rule=floor),
+            "status": _name(loc, "status", mon.status) if mon.status else None,
+            "boosts": {
+                (loc.stat(k, short=True) if loc is not None else k): v
+                for k, v in mon.boosts.items() if v
+            },
+            "item": _name(loc, "item", mon.item) if mon.item else None,
+            "volatiles": [e.id for e in mon.volatiles],
+        }
+        if exact:
+            view["hp"] = [mon.hp, mon.maxhp]
+            view["moves"] = [[_name(loc, "move", m.id), m.pp, m.maxpp] for m in mon.moves]
+        return view
+
+    sides = []
+    for index in (0, 1):
+        side = pos.sides[index]
+        exact = index == viewer
+        active = [
+            None if mon is None else mon_view(mon, exact) for mon in side.active_pokemon()
+        ]
+        bench = []
+        hidden = 0
+        for mon in side.pokemon:
+            if mon.active_index is not None:
+                continue
+            if exact or identity(mon) in foe_seen:
+                bench.append(mon_view(mon, exact))
+            else:
+                hidden += 1
+        sides.append({
+            "name": names[index],
+            "conditions": [_effect_name(loc, e.id) for e in side.side_conditions],
+            "active": active,
+            "bench": bench,
+            "hidden": hidden,
+        })
+    field_bits = []
+    if pos.field.weather:
+        field_bits.append(_effect_name(loc, pos.field.weather))
+    if pos.field.terrain:
+        field_bits.append(_effect_name(loc, pos.field.terrain))
+    field_bits += [_effect_name(loc, e.id) for e in pos.field.pseudo_weather]
+    return {
+        "turn": pos.turn,
+        "viewer": viewer,
+        "field": field_bits,
+        "sides": sides,
+        "ended": bool(pos.ended),
+        "seconds": seconds,
+    }
+
+
 # ----------------------------------------------------------------------------- the agent
 
 
@@ -585,6 +692,8 @@ class HumanGame:
         max_turns: int = MAX_TURNS,
         loc: Any = None,  # noqa: ANN401
         out: TextIO | None = None,
+        listener: Callable[[str, Any], None] | None = None,
+        interval_ms: float = 100.0,
     ) -> None:
         self.agent = agent
         self.reg = agent.reg
@@ -602,6 +711,10 @@ class HumanGame:
         self.clock: list[dict[str, Any]] = []
         self.extras: dict[int, dict[str, Any]] = {}
         self.leaves = (agent.evaluate, agent.evaluate)
+        self.listener = listener
+        self.interval_ms = interval_ms
+        #: How the two sides are named on the screen, by side index.
+        self.side_names = tuple("AI" if s == agent_side else "あなた" for s in (0, 1))
 
     # -- output
     def say(self, text: str) -> None:
@@ -609,10 +722,29 @@ class HumanGame:
             self.out.write(text + "\n")
             self.out.flush()
 
+    def emit(self, kind: str, payload: Any) -> None:  # noqa: ANN401
+        if self.listener is not None:
+            self.listener(kind, payload)
+
     def _ask(self, kind: str, legal: Sequence[SideAction], pos: Position, seen: Any) -> SideAction:  # noqa: ANN401
         text = render_position(self.reg, pos, self.you, seen[self.me], self.loc)
         if isinstance(self.person, TerminalPerson):
             self.person._targets = target_names(pos, self.you)
+        if self.listener is not None:
+            targets = target_names(pos, self.you)
+            self.emit("prompt", {
+                "kind": kind,
+                "heading": _HEADINGS.get(kind, kind),
+                "turn": pos.turn,
+                "choices": [a.to_choice() for a in legal],
+                "slots": [
+                    [
+                        (s.to_choice(), s.describe(self.reg, self.loc, targets))
+                        for s in a.slots
+                    ]
+                    for a in legal
+                ],
+            })
         got = self.person.choose(kind, legal, f"{text}\n-- {_HEADINGS.get(kind, kind)}")
         self.inputs.append(got.to_choice())
         return got
@@ -664,6 +796,11 @@ class HumanGame:
             seen = [seen_identities(pos, i, seen[i]) for i in (0, 1)]
             shown = [seen_slots(pos, i, seen[i]) for i in (0, 1)]
             recorded_shown = _shown_record(pos, seen)
+            if self.listener is not None:
+                self.emit("board", board_view(
+                    reg, pos, self.you, seen[self.me], self.loc, names=self.side_names,
+                    seconds=self.agent.seconds,
+                ))
             owed = port.replacements_needed(reg, pos)
             if any(owed[0]) or any(owed[1]):
                 pos = self._replacement(pos, owed, seen, shown, leads, recorded_shown)
@@ -701,6 +838,14 @@ class HumanGame:
                 "-- 相手の行動: "
                 + agent_action.describe(reg, self.loc, target_names(pos, self.me))
             )
+            if self.listener is not None:
+                self.emit("turn", {
+                    "turn": pos.turn,
+                    "decision": len(record.decisions) - 1,
+                    "agent": agent_action.describe(reg, self.loc, target_names(pos, self.me)),
+                    "person": human_action.describe(reg, self.loc, target_names(pos, self.you)),
+                    "offMenu": extra["humanOffMenu"],
+                })
             advanced = self._advance_turn(
                 pos, chosen, _HiddenBench(self.sheets, list(seen), self.bench_prior, list(leads))
             )
@@ -713,6 +858,17 @@ class HumanGame:
             record.outcome = 1.0 if pos.winner == pos.sides[0].id else 0.0
         _close_record(record, pos)
         self.final = pos
+        if self.listener is not None:
+            self.emit("board", board_view(
+                reg, pos, self.you, seen[self.me], self.loc, names=self.side_names,
+                seconds=self.agent.seconds,
+            ))
+            self.emit("end", {
+                "outcome": record.outcome,
+                "reason": record.end_reason,
+                "turns": record.turns,
+                "personSide": self.you,
+            })
         return record
 
     def _agent_move(
@@ -735,6 +891,20 @@ class HumanGame:
         if not ours or not theirs:
             return None
         menu_seconds = time.perf_counter() - started
+        progress = None
+        if self.listener is not None:
+            self.emit("think", {
+                "decision": len(self.record.decisions), "turn": pos.turn, "plan": plan,
+                "clock": agent.clock, "seconds": agent.seconds, "menuMs": menu_seconds * 1000.0,
+                "classes": classes, "exact": exact,
+            })
+            progress = Recorder(
+                Reader(reg, pos, me, loc=self.loc, names=self.side_names),
+                lambda snapshot: self.emit("step", snapshot),
+                decision=len(self.record.decisions), turn=pos.turn, started=started,
+                interval_ms=self.interval_ms,
+            )
+        watch = {} if progress is None else {"progress": progress}
         cells = 0
         cost: Any = None
         if plan.deepen_ms > 0:
@@ -749,7 +919,7 @@ class HumanGame:
             if exact:
                 got = search(
                     reg, pos, ours, theirs, agent.leaf, budget=budget,
-                    **({"deepen": cells, "deepen_cost": cost} if cells else {}),
+                    **({"deepen": cells, "deepen_cost": cost} if cells else {}), **watch,
                 )
                 strategy = np.asarray(
                     got.equilibrium.row_strategy if me == 0 else got.equilibrium.col_strategy,
@@ -772,6 +942,7 @@ class HumanGame:
                               "outside": None, "cost": cost}}
                         if cells else None
                     ),
+                    **watch,
                 )
                 got = answers[me]
                 strategy = np.asarray(got.strategy, dtype=np.float64)
@@ -786,6 +957,14 @@ class HumanGame:
         mine = ours if me == 0 else theirs
         index = _sample_index(self.rng, strategy)
         took = time.perf_counter() - started
+        if self.listener is not None:
+            self.emit("answer", {
+                "decision": len(self.record.decisions), "turn": pos.turn,
+                "actions": list(mine), "strategy": strategy, "value0": value,
+                "seconds": took, "deepened": deepened,
+                "steps": None if progress is None else progress.calls,
+                "sent": None if progress is None else progress.sent,
+            })
         self.record.unmodelled.extend(unmodelled)
         self.record.search_seconds[me] += took
         report = None if deepened is None else deepened.to_json()
@@ -1069,9 +1248,12 @@ def play(
     loc: Any = None,  # noqa: ANN401
     out: TextIO | None = None,
     belief_epsilon: float = BELIEF_EPSILON,
+    listener: Callable[[str, Any], None] | None = None,
+    interval_ms: float = 100.0,
 ) -> tuple[dict[str, Any], dict[str, Any], HumanGame]:
     """Plays one game. ``teams`` are side 0's and side 1's sheets. Returns the game's
     record line, its clock line, and the game object (for a caller that wants the board).
+    ``listener`` hears the game as it goes (the module's docstring, IKA-332).
     """
     reg = agent.reg
     if agent_side not in (0, 1):
@@ -1092,6 +1274,15 @@ def play(
     if out is not None:
         out.write(f"\n相手のチーム（サイド {agent_side}）:\n{render_sheet(reg, six[agent_side], loc)}\n")
         out.write(f"\n自分のチーム（サイド {you}）:\n")
+    if listener is not None:
+        listener("sheets", {
+            "agentSide": agent_side, "personSide": you, "seed": seed, "gameIndex": game_index,
+            "agent": agent.name, "seconds": agent.seconds, "clock": agent.clock,
+            "cores": agent.cores,
+            "teams": [sheet_view(six[s], loc) for s in (0, 1)],
+            "names": ["AI" if s == agent_side else "あなた" for s in (0, 1)],
+        })
+        listener("select", {"size": size, "team": len(six[you])})
     yours = person.select(six[you], size, render_sheet(reg, six[you], loc))
     inputs = [selection_line(yours)]
     picks = (mine, yours) if agent_side == 0 else (yours, mine)
@@ -1104,6 +1295,7 @@ def play(
     game = HumanGame(
         agent, person, agent_side=agent_side, sheets=six, picks=picks, bench_prior=priors,
         rng=np.random.default_rng([seed, game_index, 2]), max_turns=max_turns, loc=loc, out=out,
+        listener=listener, interval_ms=interval_ms,
     )
     game.inputs = inputs
     record = game.play()
@@ -1196,6 +1388,7 @@ __all__ = [
     "TerminalPerson",
     "WallCost",
     "agent_pick",
+    "board_view",
     "clock_path",
     "node_time",
     "parse_choice",
@@ -1205,6 +1398,7 @@ __all__ = [
     "render_position",
     "render_sheet",
     "selection_line",
+    "sheet_view",
     "solve_entry",
     "write_line",
 ]
