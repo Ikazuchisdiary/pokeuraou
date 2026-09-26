@@ -1067,6 +1067,27 @@ _HEADINGS = {
 }
 
 
+def replacement_options(
+    reg: Regulation, pos: Position, owed: tuple[tuple[bool, ...], ...]
+) -> list[list[SideAction]]:
+    """Each side's options at a replacement phase: its replacements where it owes one,
+    else its single pass."""
+    options: list[list[SideAction]] = []
+    for side_index in range(2):
+        must = list(owed[side_index])
+        found = switch_actions_after_faint(reg, pos, side_index, must) if any(must) else []
+        if not found:
+            found = [
+                SideAction(
+                    slots=tuple(
+                        PassAction(slot=s) for s in range(len(pos.sides[side_index].active))
+                    )
+                )
+            ]
+        options.append(found)
+    return options
+
+
 def _averaged(replies: Sequence[np.ndarray], weights: Sequence[float]) -> list[float]:
     w = np.asarray(weights, dtype=np.float64)
     w = w / w.sum() if w.sum() > 0 else np.full(len(w), 1.0 / len(w))
@@ -1423,59 +1444,10 @@ class HumanGame:
         person's bench (as `selfplay._do_replacement_node` solves each side), the person
         asked."""
         reg, me, you, record = self.reg, self.me, self.you, self.record
-        options: list[list[SideAction]] = []
-        for side_index in range(2):
-            must = list(owed[side_index])
-            found = switch_actions_after_faint(reg, pos, side_index, must) if any(must) else []
-            if not found:
-                found = [
-                    SideAction(
-                        slots=tuple(
-                            PassAction(slot=s) for s in range(len(pos.sides[side_index].active))
-                        )
-                    )
-                ]
-            options.append(found)
+        options = replacement_options(reg, pos, owed)
         started = time.perf_counter()
-        leaf = self.agent.evaluate
-
-        def matrix(at: Position) -> np.ndarray:
-            resolved = [
-                [port.resolve_replacements(reg, at, [a, b]).position for b in options[1]]
-                for a in options[0]
-            ]
-            if leaf is None:
-                return np.array([[HP_SHARE(p) for p in row] for row in resolved], dtype=np.float64)
-            flat = [p for row in resolved for p in row]
-            return np.asarray(leaf(flat), dtype=np.float64).reshape(len(options[0]), len(options[1]))
-
         mine = options[me]
-        policy = [1.0]
-        model = [1.0 / len(options[you])] * len(options[you])
-        value = 0.5
-        if len(mine) > 1 or len(options[you]) > 1:
-            try:
-                items = completions(
-                    reg, pos, you, self.sheets[you], seen=shown[you],
-                    weights=_bench_weights(
-                        self.bench_prior, you, pos, shown[you], record, leads[you]
-                    ),
-                )
-            except ValueError as problem:
-                record.unmodelled.append(f"hidden bench at a replacement: {problem}")
-                items = []
-            if items:
-                built = [matrix(item.position) for item in items]
-                weights = np.asarray([item.weight for item in items], dtype=np.float64)
-                try:
-                    solved = solve_bayesian([m if me == 0 else -m.T for m in built], weights)
-                    policy = [float(x) for x in solved.row_strategy]
-                    model = _averaged(solved.col_strategies, weights)
-                    value = float(solved.value) if me == 0 else -float(solved.value)
-                except EquilibriumError:
-                    policy = [1.0 / len(mine)] * len(mine)
-            else:
-                policy = [1.0 / len(mine)] * len(mine)
+        policy, model, value = self._replacement_mixture(pos, options, me, shown, leads)
         agent_action = mine[_sample_index(self.rng, np.array(policy))]
         took = time.perf_counter() - started
         self.clock.append({
@@ -1506,6 +1478,63 @@ class HumanGame:
         outcome = port.resolve_replacements(reg, pos, chosen, rng=self.rng)
         record.unmodelled.extend(outcome.unmodelled)
         return outcome.position
+
+    def _replacement_mixture(
+        self,
+        pos: Position,
+        options: list[list[SideAction]],
+        side: int,
+        shown: list[frozenset[int]],
+        leads: list[frozenset[str] | None],
+    ) -> tuple[list[float], list[float], float]:
+        """Side ``side``'s answer at a replacement phase: its Bayesian game over the other
+        side's bench completions, each cell valued by the agent's leaf after both
+        replacements. Returns its mixture over ``options[side]``, its model of the other
+        side's (averaged over completions) and the value in side 0's units. What the agent
+        plays at a replacement (`_replacement`), and what an agent in the person's seat
+        plays there (`timematch`, IKA-333)."""
+        reg, record = self.reg, self.record
+        other = 1 - side
+        leaf = self.agent.evaluate
+
+        def matrix(at: Position) -> np.ndarray:
+            resolved = [
+                [port.resolve_replacements(reg, at, [a, b]).position for b in options[1]]
+                for a in options[0]
+            ]
+            if leaf is None:
+                return np.array([[HP_SHARE(p) for p in row] for row in resolved], dtype=np.float64)
+            flat = [p for row in resolved for p in row]
+            return np.asarray(leaf(flat), dtype=np.float64).reshape(len(options[0]), len(options[1]))
+
+        mine = options[side]
+        policy = [1.0]
+        model = [1.0 / len(options[other])] * len(options[other])
+        value = 0.5
+        if len(mine) > 1 or len(options[other]) > 1:
+            try:
+                items = completions(
+                    reg, pos, other, self.sheets[other], seen=shown[other],
+                    weights=_bench_weights(
+                        self.bench_prior, other, pos, shown[other], record, leads[other]
+                    ),
+                )
+            except ValueError as problem:
+                record.unmodelled.append(f"hidden bench at a replacement: {problem}")
+                items = []
+            if items:
+                built = [matrix(item.position) for item in items]
+                weights = np.asarray([item.weight for item in items], dtype=np.float64)
+                try:
+                    solved = solve_bayesian([m if side == 0 else -m.T for m in built], weights)
+                    policy = [float(x) for x in solved.row_strategy]
+                    model = _averaged(solved.col_strategies, weights)
+                    value = float(solved.value) if side == 0 else -float(solved.value)
+                except EquilibriumError:
+                    policy = [1.0 / len(mine)] * len(mine)
+            else:
+                policy = [1.0 / len(mine)] * len(mine)
+        return policy, model, value
 
     def _advance_turn(
         self, pos: Position, chosen: list[SideAction], hidden: _HiddenBench
@@ -1647,10 +1676,16 @@ def play(
     listener: Callable[[str, Any], None] | None = None,
     interval_ms: float = 100.0,
     on_move: Callable[[Position, list[frozenset[str]], list[list[str]]], None] | None = None,
+    entry: BookEntry | None = None,
+    make_game: Callable[..., HumanGame] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], HumanGame]:
     """Plays one game. ``teams`` are side 0's and side 1's sheets. Returns the game's
     record line, its clock line, and the game object (for a caller that wants the board).
     ``listener`` hears the game as it goes (the module's docstring, IKA-332).
+
+    ``entry`` is the selection solve of these two sheets when the caller already has it
+    (`solve_entry`; solved here when None). ``make_game`` builds the game in place of
+    `HumanGame`, with its arguments (`timematch`'s agent in the person's seat, IKA-333).
     """
     reg = agent.reg
     if agent_side not in (0, 1):
@@ -1660,9 +1695,8 @@ def play(
     six = (list(teams[0].sets), list(teams[1].sets))
     species = ([s.species for s in six[0]], [s.species for s in six[1]])
     started = time.perf_counter()
-    entry = (
-        solve_entry(reg, teams, agent.evaluate, agent.name) if agent.evaluate is not None else None
-    )
+    if entry is None and agent.evaluate is not None:
+        entry = solve_entry(reg, teams, agent.evaluate, agent.name)
     selection_seconds = time.perf_counter() - started
     mine = agent_pick(
         entry, agent_side, six[agent_side], size,
@@ -1697,7 +1731,7 @@ def play(
             BenchPrior.of(entry, side, species[side], epsilon=belief_epsilon, temperature=1.0)
             for side in (0, 1)
         )
-    game = HumanGame(
+    game = (make_game or HumanGame)(
         agent, person, agent_side=agent_side, sheets=six, picks=picks, bench_prior=priors,
         rng=np.random.default_rng([seed, game_index, 2]), max_turns=max_turns, loc=loc, out=out,
         listener=listener, interval_ms=interval_ms, on_move=on_move,
