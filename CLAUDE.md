@@ -67,7 +67,7 @@ uv run pytest --junitxml=reports/pytest.xml && uv run python tools/ci_skip_audit
 2. 局を打つ:
    - M-C は `poolplay.py`。両席を 65 構築のプールから引き、選出をその場で葉で解いて `selection-solved/` に共有する。
    - M-B は `selfplay.py`。自陣のロスタ対プール。
-3. 記録（jsonl）を `tools/encode_dataset.py` で符号化し、`tools/train_value.py` で学ぶ（温間始動は `--init-from`）。
+3. 記録（jsonl）を `tools/encode_dataset.py` で符号化し（局ごとの処理は port の `encode-games`、並べるなら `--jobs N`。IKA-347）、`tools/train_value.py` で学ぶ（温間始動は `--init-from`）。
 4. 盤は `tools/match_queue.py`（M-C は `--pool`、止めるのは `--sprt 0 10`）。レーティングは `tools/ratings.py`。
 5. 今の M-C の出荷の葉は `data/models/value-mc0.pt`・`value-mc0-s1.pt`（2 本の平均）。
 - M-C のデータ生成と対戦評価の候補集合は、葉の順位付けで `--rank-fill` を名指ししなければ `q-nocover`（Q は `data/models/q-mc0.pt`、無ければ止まる。IKA-338）。`refs2` は名指しすれば打てる。ライブラリ（`play_game` など）と M-B の既定は `refs2` のまま。人と打つ道具は Q が無ければ注記して `refs2`。
