@@ -10,6 +10,8 @@ two answers are compared as bytes: the header less the child's own clocks, and t
 behind it. The 4-thread process is then asked how much of the work ran off the thread that
 reads requests (`parallel`): an agreement where the threads never ran would be no check.
 The control build (`--features ika32-control`) gathers in finishing order and fails here.
+A `fills` crossing of plain nodes goes one node per thread (IKA-32 stage 2), each resolved
+and encoded whole there; its body is compared the same way.
 """
 
 from __future__ import annotations
@@ -87,6 +89,17 @@ def test_the_answers_are_the_same_bytes_at_one_and_at_four_threads(processes) ->
                 _node_request(pos, row[:4], col, encode=True),
             ],
         },
+        # Plain nodes (none keeps or reads another's): one per thread, whole (stage 2).
+        {
+            "kind": "fills",
+            "requests": [
+                _node_request(pos, row[:3], col[:3], encode=True),
+                _node_request(pos, row[2:], col, encode=True),
+                _node_request(pos, row, col[1:5], encode=True),
+                _node_request(pos, row[:1], col[:2], encode=True),
+                _node_request(pos, row[3:7], col[2:], encode=True, cells=[[0, 0], [1, 2], [3, 1]]),
+            ],
+        },
         {
             "kind": "many",
             "requests": [
@@ -132,8 +145,9 @@ def test_the_answers_are_the_same_bytes_at_one_and_at_four_threads(processes) ->
     assert counted["threads"] == 4
     assert counted["maps"] >= len(requests)
     assert counted["offMain"] > 0, "no cell ran on a worker thread"
+    assert counted["nodes"] >= 5, "no crossing's nodes went one per thread"
     alone = one.parallel()
-    assert alone["threads"] == 1 and alone["maps"] == 0, alone
+    assert alone["threads"] == 1 and alone["maps"] == 0 and alone["nodes"] == 0, alone
 
 
 def test_the_thread_count_reaches_the_process(monkeypatch: pytest.MonkeyPatch) -> None:

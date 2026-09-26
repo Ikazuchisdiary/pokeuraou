@@ -21,7 +21,12 @@ entry shifts the value and leaves the strategies unchanged, so a constant-sum ga
 
 from __future__ import annotations
 
+import os
+import queue
+import threading
+from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 from scipy.optimize import linprog
@@ -31,6 +36,93 @@ from . import timing
 
 class EquilibriumError(RuntimeError):
     pass
+
+
+#: Cells (rows x columns, all classes) from which a game's two LPs -- the row player's and
+#: the column player's, independent of each other -- are solved at once on two threads
+#: (IKA-32 stage 2). HiGHS lets go of the GIL while it pivots, so a 64 x 64 x 4 Bayesian
+#: game takes about half the wall time; each LP is the same model handed to the same
+#: HiGHS, so the answer is the same to the bit. 0 is off (generation and the board: one
+#: core a worker already). A small game stays on one thread: its LPs are mostly Python.
+LP_PAIR_ENV = "POKEURAOU_LP_PAIR_CELLS"
+_LP_PAIR = [int(os.environ.get(LP_PAIR_ENV, "0") or 0)]
+_LP_POOL_LOCK = threading.Lock()
+#: How many games had their two LPs solved at once (the stage's positive control).
+LP_PAIRS = [0]
+
+
+def set_lp_pair(cells: int) -> None:
+    """Solve a game's two LPs at once from `cells` cells up; 0 turns it off."""
+    if cells < 0:
+        raise ValueError(f"cells must be >= 0, not {cells}")
+    _LP_PAIR[0] = int(cells)
+
+
+def lp_pair() -> int:
+    """`set_lp_pair`'s threshold in cells, 0 when off."""
+    return _LP_PAIR[0]
+
+
+class _Later:
+    """One call handed to the pair's thread, and its answer or error when done."""
+
+    def __init__(self, call: Callable[[], Any]) -> None:
+        self.call = call
+        self.done = threading.Event()
+        self.value: Any = None
+        self.error: BaseException | None = None
+
+    def result(self) -> Any:  # noqa: ANN401
+        self.done.wait()
+        if self.error is not None:
+            raise self.error
+        return self.value
+
+
+#: The pair's second threads, kept for the process's life and never joined: a thread that
+#: has run HiGHS can hang the process as it exits (IKA-32 stage 2, `deepen._Helpers`), so
+#: none does. A pool of them, since two threads may each want a second at once.
+_LP_QUEUE: queue.SimpleQueue[_Later] = queue.SimpleQueue()
+_LP_THREADS: list[threading.Thread] = []
+
+
+def _lp_serve() -> None:
+    while True:
+        later = _LP_QUEUE.get()
+        try:
+            later.value = later.call()
+        except BaseException as error:  # noqa: BLE001 - handed back to the caller
+            later.error = error
+        later.done.set()
+
+
+def _later(call: Callable[[], Any]) -> _Later:
+    with _LP_POOL_LOCK:
+        if len(_LP_THREADS) < 4:
+            thread = threading.Thread(target=_lp_serve, name="lp-pair", daemon=True)
+            thread.start()
+            _LP_THREADS.append(thread)
+    later = _Later(call)
+    _LP_QUEUE.put(later)
+    return later
+
+
+def _both[A, B](cells: int, first: Callable[[], A], second: Callable[[], B]) -> tuple[A, B]:
+    """``(first(), second())``, the second on another thread when the game is big enough.
+
+    An error is the one the serial order meets first: `first`'s, else `second`'s.
+    """
+    threshold = _LP_PAIR[0]
+    if threshold <= 0 or cells < threshold:
+        return first(), second()
+    later = _later(second)
+    try:
+        a = first()
+    except BaseException:
+        later.done.wait()  # the other LP is not left running
+        raise
+    LP_PAIRS[0] += 1
+    return a, later.result()
 
 
 @dataclass(frozen=True, slots=True)
@@ -228,9 +320,10 @@ def solve(payoff: np.ndarray, eps: float = 1e-9) -> Equilibrium:
         raise ValueError("payoff contains non-finite entries")
     m, n = a.shape
 
-    value_row, x_raw = _maximin(a)
     # The column player minimises A, which is the row player of the game -A^T.
-    value_col_neg, y_raw = _maximin(-a.T)
+    (value_row, x_raw), (value_col_neg, y_raw) = _both(
+        m * n, lambda: _maximin(a), lambda: _maximin(-a.T)
+    )
     value_col = -value_col_neg
 
     x = _clean(x_raw, eps)
@@ -381,8 +474,11 @@ def solve_bayesian(
         raise ValueError("class weights must be non-negative")
     w = w / w.sum()
 
-    value_row, x_raw = _bayesian_maximin(mats, w)
-    value_col, y_raw = _bayesian_minimax(mats, w)
+    (value_row, x_raw), (value_col, y_raw) = _both(
+        sum(mat.size for mat in mats),
+        lambda: _bayesian_maximin(mats, w),
+        lambda: _bayesian_minimax(mats, w),
+    )
 
     x = _clean(x_raw, eps)
     ys = tuple(_clean(y, eps) for y in y_raw)

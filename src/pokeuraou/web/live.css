@@ -310,6 +310,41 @@ h3 small { font-weight: 400; font-size: 11px; color: var(--faint); letter-spacin
 .toast { position: fixed; left: 50%; bottom: calc(16px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%);
   background: var(--bad); color: #fff; padding: 8px 16px; border-radius: 10px; font-size: 13px; z-index: 30; max-width: calc(100% - 32px); }
 
+/* ---------------------------------------------------------------- the analysis mode (IKA-337) */
+#analysisBox { grid-area: input; }
+.status.warn { color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, var(--surface)); }
+.status.warn::before { background: var(--bad); }
+.pickrow { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end; margin-top: 8px; }
+.field { display: grid; gap: 3px; font-size: 12px; color: var(--dim); min-width: 0; }
+.field.wide { flex: 1 1 220px; }
+.field select, .field input { font: inherit; font-size: 14px; color: var(--ink); background: var(--surface-2);
+  border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; min-width: 0; max-width: 100%; }
+.field.num input { width: 6em; font-family: var(--font-num); }
+.field select:focus, .field input:focus { border-color: var(--ai); outline: none; }
+.sendbar .gap { flex: 1; }
+.stop { padding: 9px 20px; border-radius: 10px; border: 0; background: var(--bad); color: #fff; font-weight: 700; cursor: pointer; }
+.stop:disabled { opacity: 0.3; cursor: default; }
+.stop.small { padding: 3px 12px; border-radius: 8px; font-size: 12px; }
+.rtools { display: inline-flex; align-items: center; gap: 10px; }
+.clockbar.endless i { width: 100% !important; background: repeating-linear-gradient(90deg, var(--ai) 0 18px,
+  color-mix(in srgb, var(--ai) 35%, transparent) 18px 36px); background-size: 36px 100%; animation: endless 0.9s linear infinite; }
+@keyframes endless { to { background-position: 36px 0; } }
+.meters { display: grid; gap: 10px; margin-top: 14px; }
+.meters:empty { display: none; }
+.stats { display: grid; grid-template-columns: repeat(auto-fill, minmax(118px, 1fr)); gap: 6px; }
+.stat { background: var(--surface-2); border-radius: 8px; padding: 6px 8px; }
+.stat b { display: block; font-size: 15px; font-weight: 600; }
+.stat small { color: var(--dim); font-size: 11px; }
+.stat.hot b { color: var(--ai-ink); }
+.meter .mhead { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; font-size: 12px; color: var(--dim); }
+.meter .mhead b { font-size: 13px; color: var(--ink); }
+.mtrack { height: 6px; border-radius: 3px; background: var(--track); overflow: hidden; margin-top: 4px; }
+.mtrack i { display: block; height: 100%; background: var(--belief); transition: width .3s ease-out; }
+.meter.warn .mtrack i { background: var(--bad); }
+.meter.warn .mhead b { color: var(--bad); }
+.mnote { font-size: 11px; color: var(--faint); }
+body.analysis #inputBox { display: none; }
+
 /* ---------------------------------------------------------------- phone */
 @media (max-width: 560px) {
   body { font-size: 14px; }

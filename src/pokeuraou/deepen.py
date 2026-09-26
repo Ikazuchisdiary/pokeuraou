@@ -143,12 +143,34 @@ and nothing is computed that was not before; with one the search does the same w
 the same order, so a game on counted cells is the same game either way (a wall-clock game
 is not replayed by seed in any case). `announce_depth1` / `announce_belief_depth1` give a
 node that is not deepened the same two calls.
+
+**Expanding ahead on more cores** (IKA-32 stage 2, `set_ahead`; off by default, and
+generation and the board never turn it on). The loop is serial by definition -- each
+step's cell is the best under the equilibrium the last step left -- but what a step
+*does* to its cell is not: a refined cell's turn, its branches' menus, their matrices and
+leaves depend on the cell's position and its two actions alone. With `set_ahead(n)` a
+helper thread expands the cells the loop is likely to take next (the `n` best under the
+tree as it stands), in batches: every turn in one crossing to the port, every branch's
+two menus in one (`narrow_many`), every child matrix in one (`pending_payoffs`), their
+leaves in one call (`score_segments`, each block scored as it would be alone). The loop
+still picks its cell as before and takes the expansion from the helper when it is there;
+a cell the helper did not guess is asked of it first. The LP of each child is solved
+when its cell is taken, and a cell whose ahead-expansion met an error is expanded again
+the serial way, so it raises what the serial loop would raise. What the step writes --
+children, notes, counts -- is the serial step's, so a game on counted cells is the same
+game with or without it; the wasted expansions of cells never taken cost only time.
+While the loop re-solves the root (HiGHS lets go of the GIL) the helper talks to the
+port and the leaf.
 """
 
 from __future__ import annotations
 
+import atexit
+import contextlib
 import heapq
+import os
 import re
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -489,6 +511,9 @@ class _Node:
     #: The restricted reading's rectangle (rows, columns), at the root under ``r``; None
     #: where the node is read whole.
     rect: tuple[list[int], list[int]] | None = None
+    #: The key of the cell that opened it and its branch there (`_key`), () at the root:
+    #: a name the cells expanded ahead can use in another process (IKA-32 stage 2).
+    path: tuple[Any, ...] = ()
 
     @property
     def value(self) -> float:
@@ -718,43 +743,59 @@ def deepen_root(
     announce = None if progress is None else _stepper(progress, root, meter, cells, oracle)
     if announce is not None:
         announce("start", expanded, deepest, refused)
-    while meter.spent < cells:
-        if oracle is not None:
-            # One step: the probe and what it leads to -- a widening, or else a deepening.
-            if oracle.step(reg, evaluate, budget, meter, unmodelled):
-                if trace is not None:
-                    trace.append((root, None, True))
-                if announce is not None:
-                    announce("widen", expanded, deepest, refused)
-                continue
-            if not deepens:
+    helper = (
+        _start_ahead(reg, evaluate, budget=budget, sub_limit=sub_limit, sub_branches=sub_branches)
+        if deepens and cells > 0 and child_q is None
+        else None
+    )
+    try:
+        while meter.spent < cells:
+            if oracle is not None:
+                # One step: the probe and what it leads to -- a widening, or else a deepening.
+                with _held(helper):
+                    joined = oracle.step(reg, evaluate, budget, meter, unmodelled)
+                if joined:
+                    if trace is not None:
+                        trace.append((root, None, True))
+                    if announce is not None:
+                        announce("widen", expanded, deepest, refused)
+                    continue
+                if not deepens:
+                    watch.stop = "exhausted"
+                    break
+            target = _best(root, guard, watch)
+            if target is None:
                 watch.stop = "exhausted"
                 break
-        target = _best(root, guard, watch)
-        if target is None:
-            watch.stop = "exhausted"
-            break
-        node, cell = target
-        spent, ok, fills = _expand(
-            reg, node, cell, evaluate, budget=budget, sub_limit=sub_limit,
-            sub_branches=sub_branches, unmodelled=unmodelled, child_q=child_q, watch=watch,
-        )
-        meter.refined(spent - 1, fills)
-        if trace is not None:
-            trace.append((node, cell, ok))
-        if not ok:
-            node.refused.add(cell)
-            refused += 1
-            if node.rect is not None:
-                _reread(node)
+            node, cell = target
+            if helper is None:
+                spent, ok, fills = _expand(
+                    reg, node, cell, evaluate, budget=budget, sub_limit=sub_limit,
+                    sub_branches=sub_branches, unmodelled=unmodelled, child_q=child_q,
+                    watch=watch,
+                )
+            else:
+                helper.post(root, guard)
+                spent, ok, fills = helper.expand(node, cell, unmodelled)
+            meter.refined(spent - 1, fills)
+            if trace is not None:
+                trace.append((node, cell, ok))
+            if not ok:
+                node.refused.add(cell)
+                refused += 1
+                if node.rect is not None:
+                    _reread(node)
+                if announce is not None:
+                    announce("refused", expanded, deepest, refused, cell, node.level)
+                continue
+            expanded += 1
+            deepest = max(deepest, node.level + 1)
+            _propagate(node, cell)
             if announce is not None:
-                announce("refused", expanded, deepest, refused, cell, node.level)
-            continue
-        expanded += 1
-        deepest = max(deepest, node.level + 1)
-        _propagate(node, cell)
-        if announce is not None:
-            announce("refine", expanded, deepest, refused, cell, node.level)
+                announce("refine", expanded, deepest, refused, cell, node.level)
+    finally:
+        if helper is not None:
+            helper.close()
     watch.finish(root, guard, cells)
     if timing.ON:
         timing.count("deepen.cells", meter.refines + meter.cells)
@@ -1681,42 +1722,58 @@ def deepen_belief(
     announce = None if progress is None else _stepper(progress, root, meter, cells, oracle)
     if announce is not None:
         announce("start", expanded, deepest, refused)
-    while meter.spent < cells:
-        if oracle is not None:
-            if oracle.step(meter):
-                if trace is not None:
-                    trace.append((root, None, True))
-                if announce is not None:
-                    announce("widen", expanded, deepest, refused)
-                continue
-            if not deepens:
+    helper = (
+        _start_ahead(reg, evaluate, budget=budget, sub_limit=sub_limit, sub_branches=sub_branches)
+        if deepens and cells > 0 and child_q is None
+        else None
+    )
+    try:
+        while meter.spent < cells:
+            if oracle is not None:
+                with _held(helper):
+                    joined = oracle.step(meter)
+                if joined:
+                    if trace is not None:
+                        trace.append((root, None, True))
+                    if announce is not None:
+                        announce("widen", expanded, deepest, refused)
+                    continue
+                if not deepens:
+                    watch.stop = "exhausted"
+                    break
+            target = _best(root, guard, watch)  # type: ignore[arg-type]
+            if target is None:
                 watch.stop = "exhausted"
                 break
-        target = _best(root, guard, watch)  # type: ignore[arg-type]
-        if target is None:
-            watch.stop = "exhausted"
-            break
-        node, cell = target
-        spent, ok, fills = _expand(
-            reg, node, cell, evaluate, budget=budget, sub_limit=sub_limit,
-            sub_branches=sub_branches, unmodelled=unmodelled, child_q=child_q, watch=watch,
-        )
-        meter.refined(spent - 1, fills)
-        if trace is not None:
-            trace.append((node, cell, ok))
-        if not ok:
-            node.refused.add(cell)
-            if isinstance(node, _BeliefRoot):
-                node.signal = None
-            refused += 1
+            node, cell = target
+            if helper is None:
+                spent, ok, fills = _expand(
+                    reg, node, cell, evaluate, budget=budget, sub_limit=sub_limit,
+                    sub_branches=sub_branches, unmodelled=unmodelled, child_q=child_q,
+                    watch=watch,
+                )
+            else:
+                helper.post(root, guard)
+                spent, ok, fills = helper.expand(node, cell, unmodelled)
+            meter.refined(spent - 1, fills)
+            if trace is not None:
+                trace.append((node, cell, ok))
+            if not ok:
+                node.refused.add(cell)
+                if isinstance(node, _BeliefRoot):
+                    node.signal = None
+                refused += 1
+                if announce is not None:
+                    announce("refused", expanded, deepest, refused, cell, node.level)
+                continue
+            expanded += 1
+            deepest = max(deepest, node.level + 1)
+            _propagate(node, cell)
             if announce is not None:
-                announce("refused", expanded, deepest, refused, cell, node.level)
-            continue
-        expanded += 1
-        deepest = max(deepest, node.level + 1)
-        _propagate(node, cell)
-        if announce is not None:
-            announce("refine", expanded, deepest, refused, cell, node.level)
+                announce("refine", expanded, deepest, refused, cell, node.level)
+    finally:
+        if helper is not None:
+            helper.close()
     watch.finish(root, guard, cells)
     if timing.ON:
         timing.count("deepen.hidden.calls", 1)
@@ -2016,6 +2073,765 @@ def _expand(
         ))
     node.children[cell] = kept
     return spent, True, fills
+
+
+#: Cells expanded ahead of the loop (`set_ahead`): 0 is off, the serial `_expand` as before.
+AHEAD_ENV = "POKEURAOU_DEEPEN_AHEAD"
+_AHEAD = [int(os.environ.get(AHEAD_ENV, "0") or 0)]
+#: Helper threads, and the cell threads of each one's port (None: the module's count).
+_HELPERS: list[Any] = [1, None, 0]
+
+
+def set_ahead(
+    cells: int, helpers: int = 1, port_threads: int | None = None, deeper: int = 0
+) -> None:
+    """Expand up to `cells` of the best cells ahead of the loop, on `helpers` threads with
+    a port process each of `port_threads` cell threads (the module's docstring). 0 cells
+    turns it off. Changes how long a step takes, never what it does; generation and the
+    board leave it at 0."""
+    if cells < 0 or helpers < 1:
+        raise ValueError(f"cells ahead must be >= 0 and helpers >= 1, not {cells}, {helpers}")
+    _AHEAD[0] = int(cells)
+    _HELPERS[0] = int(helpers)
+    _HELPERS[1] = port_threads
+    _HELPERS[2] = int(deeper)
+
+
+def ahead() -> int:
+    """The cells expanded ahead of the loop (`set_ahead`), 0 when off."""
+    return _AHEAD[0]
+
+
+@dataclass(slots=True)
+class _Expansion:
+    """`_expand`'s work on one cell, done ahead and not yet written into the tree."""
+
+    #: The turn's notes (and the note on the branches kept).
+    notes: set[str]
+    #: The turn paused, or had no branch of any weight: `_expand` returns (1, False, 0).
+    early: bool = False
+    #: The kept branches in order, each (weight, kind, data): ``ended`` with the leaf's
+    #: value, ``empty`` (a side had no action: the serial step stops there), ``error``
+    #: (the serial step expands the cell itself) or ``node`` with (position, rows,
+    #: columns, payoff, notes of the fill, the child's equilibrium or None: its LP failed).
+    branches: list[tuple[float, str, Any]] = field(default_factory=list)
+    #: Something the batch met that the serial step has to meet in its own place.
+    error: bool = False
+
+
+def _expand_many(
+    reg: Regulation,
+    asks: Sequence[tuple[Position, list[SideAction]]],
+    evaluate: LeafEvaluator,
+    *,
+    budget: Budget,
+    sub_limit: int,
+    sub_branches: int,
+    leaf_lock: Any = None,  # noqa: ANN401 - a lock, or None
+) -> list[_Expansion]:
+    """`_expand` of many cells at once, without the tree and without the child LPs: one
+    crossing for the turns, one for every branch's menus, one for the child matrices and
+    one call into the leaf for their blocks. Each cell's answer is the one `_expand` would
+    compute alone (the turns and menus are the port's answers to the same requests; each
+    block is scored in a call of its own size, `score_segments`). `leaf_lock` is held
+    around every call into the leaf, which is not safe on two threads at once (an
+    ensemble's stacked call swaps its parameters into one shared module)."""
+    from .narrow import narrow_many
+
+    leaf = _NoLock() if leaf_lock is None else leaf_lock
+
+    turns = port.turns(reg, asks, budget, full=True)
+    out: list[_Expansion] = []
+    menus: list[tuple[Position, int]] = []
+    # (expansion, branch index) of each non-ended branch, in the order of `menus` / 2.
+    open_: list[tuple[_Expansion, int]] = []
+    for result in turns:
+        if isinstance(result, Exception):
+            out.append(_Expansion(set(), error=True))
+            continue
+        exp = _Expansion(set(result.unmodelled))
+        out.append(exp)
+        if result.suspended or not result.outcomes:
+            exp.early = True
+            continue
+        branches = sorted(result.outcomes, key=lambda b: -b.probability)[:sub_branches]
+        if len(branches) < len(result.outcomes):
+            exp.notes.add(
+                f"depth-2 kept the {sub_branches} likeliest branches of a refined cell"
+            )
+        weights = np.array([b.probability for b in branches], dtype=np.float64)
+        total = float(weights.sum())
+        if total <= 0:
+            exp.early = True
+            continue
+        weights /= total
+        ended = [branch.position for branch in branches if branch.position.ended]
+        try:
+            with leaf:
+                finished = iter(np.asarray(evaluate(ended), dtype=np.float64) if ended else ())
+        except Exception:  # noqa: BLE001 - met again by the serial step, in its place
+            exp.error = True
+            continue
+        for weight, branch in zip(weights, branches, strict=True):
+            if branch.position.ended:
+                exp.branches.append((float(weight), "ended", float(next(finished))))
+                continue
+            exp.branches.append((float(weight), "open", branch.position))
+            open_.append((exp, len(exp.branches) - 1))
+            menus.append((branch.position, 0))
+            menus.append((branch.position, 1))
+    narrowed = narrow_many(reg, menus, limit=sub_limit) if menus else []
+    fills: list[tuple[_Expansion, int, Position, list[SideAction], list[SideAction]]] = []
+    for n, (exp, b) in enumerate(open_):
+        weight, _kind, child_pos = exp.branches[b]
+        got_row, got_col = narrowed[2 * n], narrowed[2 * n + 1]
+        if isinstance(got_row, Exception) or isinstance(got_col, Exception):
+            exp.branches[b] = (weight, "error", None)
+            continue
+        row, col = got_row.actions, got_col.actions
+        if not row or not col:
+            exp.branches[b] = (weight, "empty", None)
+            continue
+        fills.append((exp, b, child_pos, list(row), list(col)))
+    if not fills:
+        return out
+    pending = port.pending_payoffs(
+        reg, [(pos, row, col) for _e, _b, pos, row, col in fills], evaluate, budget=budget
+    )
+    if pending is None:
+        # A ported (or hand-written) objective: no forward pass to share.
+        for exp, b, pos, row, col in fills:
+            weight = exp.branches[b][0]
+            try:
+                with leaf:
+                    payoff, notes = batched_payoff(reg, pos, row, col, evaluate, budget=budget)
+            except Exception:  # noqa: BLE001 - met again by the serial step
+                exp.branches[b] = (weight, "error", None)
+                continue
+            exp.branches[b] = (weight, "node", (pos, row, col, payoff, set(notes)))
+        _solve_children(out)
+        return out
+    scored = [p for p in pending if not isinstance(p, Exception)]
+    try:
+        with leaf:
+            values = port.score_segments(evaluate, [p.encoded for p in scored]) if scored else []
+    except Exception:  # noqa: BLE001 - met again by the serial step
+        for exp, b, *_rest in fills:
+            exp.branches[b] = (exp.branches[b][0], "error", None)
+        return out
+    for p, v in zip(scored, values, strict=True):
+        p.scored(v)
+    for (exp, b, pos, row, col), p in zip(fills, pending, strict=True):
+        weight = exp.branches[b][0]
+        if isinstance(p, Exception):
+            exp.branches[b] = (weight, "error", None)
+            continue
+        exp.branches[b] = (
+            weight, "node", (pos, row, col, np.asarray(p.finish(), dtype=np.float64), set(p.unmodelled))
+        )
+    _solve_children(out)
+    return out
+
+
+def _solve_children(expansions: list[_Expansion]) -> None:
+    """Each child matrix's equilibrium, as `_expand` solves it: kept with the matrix, or
+    None where the LP failed (the serial step stops there). Any other error is the serial
+    step's to meet."""
+    for exp in expansions:
+        for b, (weight, kind, data) in enumerate(exp.branches):
+            if kind != "node":
+                continue
+            try:
+                solved: Equilibrium | None = solve(data[3])
+            except EquilibriumError:
+                solved = None
+            except Exception:  # noqa: BLE001 - met again by the serial step
+                exp.branches[b] = (weight, "error", None)
+                continue
+            exp.branches[b] = (weight, "node", (*data, solved))
+
+
+def _taken(
+    exp: _Expansion, node: _Node, cell: tuple[int, ...], unmodelled: set[str]
+) -> tuple[int, bool, int] | None:
+    """Write an expansion done ahead into the tree, as `_expand` would have, or None when
+    the serial step has to expand the cell itself (the batch met an error before the
+    point where `_expand` stops)."""
+    if exp.error:
+        return None
+    if not exp.early:
+        for _weight, kind, _data in exp.branches:
+            if kind == "error":
+                return None
+            if kind == "empty":
+                break
+    unmodelled.update(exp.notes)
+    if exp.early:
+        return 1, False, 0
+    spent = 1
+    fills = 0
+    kept: list[tuple[float, _Node | float]] = []
+    for weight, kind, data in exp.branches:
+        if kind == "ended":
+            kept.append((weight, float(data)))
+            continue
+        if kind == "empty":
+            return spent, False, fills
+        child_pos, row, col, payoff, notes, equilibrium = data
+        fills += 1
+        spent += len(row) * len(col)
+        unmodelled.update(notes)
+        if equilibrium is None:  # the LP failed, as `_expand`'s `solve` would have
+            return spent, False, fills
+        kept.append((
+            weight,
+            _Node(
+                pos=child_pos, rows=list(row), cols=list(col), payoff=payoff,
+                equilibrium=equilibrium, level=node.level + 1, parent=(node, cell),
+                weight=weight,
+            ),
+        ))
+    node.children[cell] = kept
+    _named(node, cell)
+    return spent, True, fills
+
+
+def _key(node: Any, cell: tuple[int, ...]) -> tuple[Any, ...]:  # noqa: ANN401
+    """A cell by its node's path and its two actions (an index moves when the oracle
+    swaps): plain data, so a worker process can name the cells it expands a level down."""
+    if isinstance(node, _BeliefRoot):
+        k, i, j = cell
+        return ((), k, node.own[i].to_choice(), node.other[j].to_choice())
+    i, j = cell
+    return (node.path, -1, node.rows[i].to_choice(), node.cols[j].to_choice())
+
+
+def _named(node: Any, cell: tuple[int, ...]) -> None:  # noqa: ANN401
+    """Give the children a refined cell opened their paths (`_Node.path`)."""
+    key = _key(node, cell)
+    for b, (_weight, child) in enumerate(node.children.get(cell, ())):
+        if isinstance(child, _Node):
+            child.path = (key, b)
+
+
+def _turn_of(node: Any, cell: tuple[int, ...]) -> tuple[Position, list[SideAction]]:  # noqa: ANN401
+    if isinstance(node, _BeliefRoot):
+        return node.turn_of(cell)
+    i, j = cell
+    return node.pos, [node.rows[i], node.cols[j]]
+
+
+def _ranked(
+    root: Any, count: int, guard: int = MAX_LEVELS  # noqa: ANN401
+) -> list[tuple[Any, tuple[int, ...]]]:
+    """The `count` unrefined cells of highest positive priority under `root`, best first --
+    `_best`'s search, keeping `count` instead of one. Only a guess at the cells the loop
+    takes next: the priorities move with every step."""
+    found: list[tuple[float, int, Any, tuple[int, ...]]] = []  # min-heap of the best
+    order = 0
+    met = 0
+    heap: list[tuple[float, int, Any, float | None]] = [(-np.inf, met, root, None)]
+
+    def keep(score: float, node: Any, cell: tuple[int, ...]) -> None:  # noqa: ANN401
+        nonlocal order
+        order += 1
+        item = (score, -order, node, cell)
+        if len(found) < count:
+            heapq.heappush(found, item)
+        elif score > found[0][0]:
+            heapq.heapreplace(found, item)
+
+    while heap:
+        bound, _order, node, inherited = heapq.heappop(heap)
+        if len(found) >= count and -bound <= found[0][0]:
+            break
+        scores = node.scores() if isinstance(node, _BeliefRoot) else _scores(node, inherited)
+        candidates = scores.copy()
+        if node.rect is not None:
+            inside = np.zeros(candidates.shape, dtype=bool)
+            inside[np.ix_(*node.rect)] = True
+            candidates[~inside] = -np.inf
+        for cell in (*node.children, *node.refused):
+            candidates[cell] = -np.inf
+        if node.level < guard and candidates.size:
+            flat = candidates.reshape(-1)
+            take = min(count, flat.size)
+            top = np.argpartition(-flat, take - 1)[:take] if take < flat.size else np.arange(flat.size)
+            for index in top:
+                score = float(flat[index])
+                if score > 0.0:
+                    keep(score, node, tuple(int(v) for v in np.unravel_index(int(index), candidates.shape)))
+        for cell in sorted(node.children):
+            for weight, child in node.children[cell]:
+                if isinstance(child, _Node):
+                    passed = float(scores[cell]) * weight
+                    if passed > 0.0:
+                        met += 1
+                        heapq.heappush(heap, (-passed, met, child, passed))
+    return [(node, cell) for _score, _o, node, cell in sorted(found, key=lambda t: (-t[0], -t[1]))]
+
+
+class _Helpers:
+    """The threads that expand cells ahead of the deepening loop (`set_ahead`), started once
+    and kept for the process's life.
+
+    Kept, not started per deepening, because a thread that has run HiGHS can hang the
+    process when it exits: the second of three helper threads' tests (IKA-32 stage 2) sat
+    in the next `Thread.start` for eighteen minutes, the exiting thread holding the GIL.
+    The helpers serve one deepening at a time (`_Ahead`, the session): they wait on the
+    session's wanted cells, take a batch, expand it and hand the expansions back.
+
+    Each helper expands on a port process of its own (`rustnode.own_node`), or -- where
+    positions are held by number (`rustnode.hold_positions`, generation's) -- on the loop's
+    port under the session's lock, or by sending the batch to a worker process of its own
+    (`start_workers`; these helpers never run HiGHS and are stopped with the workers).
+    """
+
+    def __init__(
+        self, reg: Regulation, count: int, *, port_threads: int | None, conns: list[Any] | None
+    ) -> None:
+        from . import rustnode
+
+        self.reg = reg
+        self.port_threads = port_threads
+        self.conns = conns
+        self.shared_port = conns is None and bool(rustnode._HOLD[0])
+        self.cv = threading.Condition()
+        self.session: _Ahead | None = None
+        self.stop = False
+        self.threads = [
+            threading.Thread(target=self._run, args=(n,), name=f"deepen-ahead-{n}", daemon=True)
+            for n in range(max(1, count if conns is None else len(conns)))
+        ]
+        for thread in self.threads:
+            thread.start()
+
+    def _run(self, index: int) -> None:
+        from . import rustnode
+
+        if self.conns is not None:
+            self._serve(conn=self.conns[index])
+            return
+        if self.shared_port:
+            self._serve()
+            return
+        try:
+            with rustnode.own_node(self.reg, threads=self.port_threads):
+                self._serve(own=True)
+        except Exception:  # noqa: BLE001 - no port of its own: share the loop's
+            self._serve()
+
+    def _serve(self, *, own: bool = False, conn: Any = None) -> None:  # noqa: ANN401
+        while True:
+            with self.cv:
+                while not self.stop and (self.session is None or not self.session.want):
+                    self.cv.wait()
+                if self.stop:
+                    return
+                session = self.session
+                batch = session.want[: session.batch]
+                del session.want[: session.batch]
+                for key, _pos, _pair, _level in batch:
+                    session.busy.add(key)
+                session.active += 1
+            asks = [(pos, pair) for _key, pos, pair, _level in batch]
+            remote = False
+            extra: list[tuple[tuple[Any, ...], _Expansion]] = []
+            try:
+                if conn is not None:
+                    # A worker process: the batch goes over, the expansions come back, and
+                    # then the cells it expanded a level down.
+                    conn.send((
+                        asks, session.budget, session.sub_limit, session.sub_branches,
+                        [key for key, *_rest in batch], [level for *_rest, level in batch],
+                        session.guard, session.deeper,
+                    ))
+                    got = conn.recv()
+                    remote = True
+                elif own:
+                    got = _expand_many(
+                        session.reg, asks, session.evaluate, budget=session.budget,
+                        sub_limit=session.sub_limit, sub_branches=session.sub_branches,
+                        leaf_lock=session.lock,
+                    )
+                else:
+                    with session.lock:
+                        got = _expand_many(
+                            session.reg, asks, session.evaluate, budget=session.budget,
+                            sub_limit=session.sub_limit, sub_branches=session.sub_branches,
+                        )
+            except Exception:  # noqa: BLE001 - each cell is met again the serial way
+                got = [_Expansion(set(), error=True) for _ in batch]
+            with self.cv:
+                for (key, _pos, _pair, _level), exp in zip(batch, got, strict=True):
+                    session.busy.discard(key)
+                    session.done[key] = exp
+                session.batches += 1
+                session.remote_batches += int(remote)
+                session.expanded += len(batch)
+                self.cv.notify_all()
+            if remote and session.deeper:
+                try:
+                    extra = conn.recv()
+                except Exception:  # noqa: BLE001 - nothing ahead is lost but time
+                    extra = []
+            with self.cv:
+                for key, exp in extra:
+                    if key not in session.done and key not in session.busy:
+                        session.done[key] = exp
+                        session.expanded += 1
+                session.deeper_cells += len(extra)
+                session.active -= 1
+                self.cv.notify_all()
+
+    def close(self) -> None:
+        """Stop the helpers (the worker processes' ones: they never ran HiGHS)."""
+        with self.cv:
+            self.stop = True
+            self.cv.notify_all()
+        for thread in self.threads:
+            thread.join()
+
+
+#: The kept helpers of this process, by (format, helpers, port threads).
+_LOCAL_HELPERS: dict[tuple[Any, ...], _Helpers] = {}
+
+
+class _Ahead:
+    """One deepening's cells expanded ahead of its loop by the helpers (`_Helpers`).
+
+    The loop posts the cells it is likely to take next (`post`) and takes each step's
+    expansion (`expand`). The leaf is one object and is called under `lock`, by the
+    helpers and by the loop's own uses of it (a cell expanded the serial way, the oracle).
+    `close` waits for the batches in hand and lets the helpers go back to waiting.
+    """
+
+    def __init__(
+        self,
+        reg: Regulation,
+        evaluate: LeafEvaluator,
+        *,
+        budget: Budget,
+        sub_limit: int,
+        sub_branches: int,
+        count: int,
+        helpers: int = 1,
+        port_threads: int | None = None,
+        deeper: int = 0,
+    ) -> None:
+        self.reg = reg
+        self.evaluate = evaluate
+        self.budget = budget
+        self.sub_limit = sub_limit
+        self.sub_branches = sub_branches
+        self.count = count
+        #: The leaf (and, where the helpers share it, the loop's port).
+        self.lock = threading.Lock()
+        found = _WORKERS.get(reg.meta.format_id)
+        if found and found[2] is not None:
+            self.pool = found[2]
+        else:
+            key = (reg.meta.format_id, max(1, helpers), port_threads)
+            if key not in _LOCAL_HELPERS:
+                _LOCAL_HELPERS[key] = _Helpers(reg, max(1, helpers), port_threads=port_threads, conns=None)
+            self.pool = _LOCAL_HELPERS[key]
+        self.batch = max(1, count // len(self.pool.threads))
+        self.cv = self.pool.cv
+        self.want: list[tuple[tuple[Any, ...], Position, list[SideAction], int]] = []
+        self.busy: set[tuple[Any, ...]] = set()
+        self.done: dict[tuple[Any, ...], _Expansion] = {}
+        self.guard = MAX_LEVELS
+        #: Cells a worker process expands a level down from each cell it expands (the
+        #: likeliest next steps: the loop often goes on down the line it just refined).
+        self.deeper = deeper
+        #: Batches in a helper's hands.
+        self.active = 0
+        #: Counts: batches, cells expanded ahead, taken from them, expanded the serial way,
+        #: batches a worker process expanded.
+        self.batches = 0
+        self.expanded = 0
+        self.hits = 0
+        self.misses = 0
+        self.remote_batches = 0
+        #: Steps whose cell was expanded before the loop asked for it.
+        self.ready = 0
+        #: Cells the worker processes expanded a level down.
+        self.deeper_cells = 0
+        #: Steps whose cell no helper had started, expanded by the loop itself.
+        self.local = 0
+        with self.cv:
+            if self.pool.session is not None:
+                raise RuntimeError("the deepening's helpers already serve another deepening")
+            self.pool.session = self
+
+    def post(self, root: Any, guard: int = MAX_LEVELS) -> None:  # noqa: ANN401
+        """The cells worth expanding now: the best `count` under `root` (`guard`: the
+        depth guard, `_best`'s)."""
+        self.guard = guard
+        wanted = []
+        for node, cell in _ranked(root, self.count, guard):
+            key = _key(node, cell)
+            if key in self.done or key in self.busy:
+                continue
+            pos, pair = _turn_of(node, cell)
+            wanted.append((key, pos, pair, node.level))
+        with self.cv:
+            self.want = wanted
+            if wanted:
+                self.cv.notify_all()
+
+    def expand(
+        self, node: Any, cell: tuple[int, ...], unmodelled: set[str]  # noqa: ANN401
+    ) -> tuple[int, bool, int]:
+        """`_expand`'s answer for the cell, from the helpers when they can give it."""
+        key = _key(node, cell)
+        with self.cv:
+            self.ready += int(key in self.done)
+            here = key not in self.done and key not in self.busy
+            if here:
+                # Nobody has started it: the loop expands it itself, now, rather than
+                # queue it behind the helpers' guesses.
+                self.want = [w for w in self.want if w[0] != key]
+            while not here and key not in self.done:
+                self.cv.wait()
+            exp = None if here else self.done.pop(key)
+        got = None if exp is None else _taken(exp, node, cell, unmodelled)
+        if got is not None:
+            self.hits += 1
+            return got
+        if exp is None:
+            self.local += 1
+        else:
+            self.misses += 1
+        with self.lock:
+            got = _expand(
+                self.reg, node, cell, self.evaluate, budget=self.budget,
+                sub_limit=self.sub_limit, sub_branches=self.sub_branches,
+                unmodelled=unmodelled,
+            )
+        _named(node, cell)
+        return got
+
+    def close(self) -> None:
+        with self.cv:
+            self.want = []
+            while self.active:
+                self.cv.wait()
+            self.pool.session = None
+        if timing.ON:
+            timing.count("deepen.ahead.batches", self.batches)
+            timing.count("deepen.ahead.expanded", self.expanded)
+            timing.count("deepen.ahead.hits", self.hits)
+            timing.count("deepen.ahead.misses", self.misses)
+        _AHEAD_COUNTS["batches"] += self.batches
+        _AHEAD_COUNTS["expanded"] += self.expanded
+        _AHEAD_COUNTS["hits"] += self.hits
+        _AHEAD_COUNTS["misses"] += self.misses
+        _AHEAD_COUNTS["remote"] += self.remote_batches
+        _AHEAD_COUNTS["ready"] += self.ready
+        _AHEAD_COUNTS["deeper"] += self.deeper_cells
+        _AHEAD_COUNTS["local"] += self.local
+
+
+#: Worker processes that expand cells ahead (`start_workers`), by regulation: a list of
+#: (process, connection), and the leaf spec they were started with.
+_WORKERS: dict[str, tuple[list[tuple[Any, Any]], tuple[Any, ...], _Helpers | None]] = {}
+
+
+def _worker_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  # noqa: ANN401
+                 port_threads: int | None) -> None:
+    """A worker process: its own regulation, leaf and port; `_expand_many` on each batch."""
+    from . import rustnode
+    from .damage import register_mega_stones
+    from .regulation import load_regulation
+
+    reg = load_regulation(format_id)
+    register_mega_stones(reg)
+    if port_threads is not None:
+        rustnode.set_port_threads(port_threads)
+    try:
+        leaf = factory(reg, *args)
+    except Exception as error:  # noqa: BLE001 - said to the parent, which stops using it
+        conn.send(("failed", f"{type(error).__name__}: {error}"))
+        return
+    conn.send(("ready", None))
+    while True:
+        try:
+            message = conn.recv()
+        except EOFError:
+            return
+        if message is None:
+            return
+        asks, budget, sub_limit, sub_branches, keys, levels, guard, deeper = message
+        try:
+            got = _expand_many(
+                reg, asks, leaf, budget=budget, sub_limit=sub_limit, sub_branches=sub_branches
+            )
+        except Exception:  # noqa: BLE001 - each cell is met again the serial way
+            got = [_Expansion(set(), error=True) for _ in asks]
+        conn.send(got)
+        if not deeper:
+            continue
+        down = _down(keys, got, levels, guard, deeper)
+        try:
+            more = _expand_many(
+                reg, [(pos, pair) for _key, pos, pair in down], leaf, budget=budget,
+                sub_limit=sub_limit, sub_branches=sub_branches,
+            ) if down else []
+        except Exception:  # noqa: BLE001 - a guess, not needed
+            more = []
+        conn.send([(key, exp) for (key, _pos, _pair), exp in zip(down, more, strict=True)])
+
+
+def _down(
+    keys: Sequence[tuple[Any, ...]], got: Sequence[_Expansion], levels: Sequence[int],
+    guard: int, count: int,
+) -> list[tuple[tuple[Any, ...], Position, list[SideAction]]]:
+    """The `count` cells a level down from these expansions the loop is likeliest to take
+    next: in each child the tree would keep, its cells by `_signal` over the child's best,
+    times the branch's weight -- `_scores`'s ranking below the refined cell."""
+    found: list[tuple[float, tuple[Any, ...], Position, list[SideAction]]] = []
+    for key, exp, level in zip(keys, got, levels, strict=True):
+        if exp.error or exp.early or level + 1 >= guard:
+            continue
+        for b, (weight, kind, data) in enumerate(exp.branches):
+            if kind in ("empty", "error"):
+                break
+            if kind != "node":
+                continue
+            child_pos, row, col, payoff, _notes, equilibrium = data
+            if equilibrium is None:
+                break
+            gap = equilibrium.row_ev_loss[:, None] + equilibrium.col_ev_loss[None, :]
+            signal = payoff * (1.0 - payoff) / (gap + GAP_FLOOR)
+            top = float(signal.max()) if signal.size else 0.0
+            if top <= 0.0:
+                continue
+            path = (key, b)
+            for flat in np.argsort(-signal, axis=None, kind="stable")[:count]:
+                i, j = divmod(int(flat), signal.shape[1])
+                if signal[i, j] <= 0.0:
+                    break
+                found.append((
+                    weight * float(signal[i, j]) / top,
+                    (path, -1, row[i].to_choice(), col[j].to_choice()),
+                    child_pos, [row[i], col[j]],
+                ))
+    found.sort(key=lambda item: -item[0])
+    return [(key, pos, pair) for _score, key, pos, pair in found[:count]]
+
+
+def start_workers(
+    reg: Regulation, count: int, factory: Any, args: tuple[Any, ...] = (),  # noqa: ANN401
+    *, port_threads: int | None = 1,
+) -> int:
+    """Start `count` worker processes that expand the deepening's cells ahead (IKA-32
+    stage 2), each with the leaf ``factory(reg, *args)`` (a module-level function, so a
+    spawned process can import it), its own port of `port_threads` cell threads and its own
+    GIL. Kept for the process's life (`stop_workers`); the helpers of every later deepening
+    on this regulation send their batches to them. Returns how many are ready. The leaf
+    must answer as the loop's own does -- the same model on the same device -- since the
+    workers' blocks stand for the loop's."""
+    import multiprocessing
+
+    stop_workers(reg)
+    if count <= 0:
+        return 0
+    context = multiprocessing.get_context("spawn")
+    started = []
+    for _ in range(count):
+        mine, theirs = context.Pipe()
+        process = context.Process(
+            target=_worker_main,
+            args=(theirs, reg.meta.format_id, factory, tuple(args), port_threads),
+            daemon=True,
+        )
+        process.start()
+        theirs.close()
+        started.append((process, mine))
+    ready = []
+    for process, conn in started:
+        try:
+            state, why = conn.recv()
+        except EOFError:
+            state, why = "failed", "the worker exited"
+        if state == "ready":
+            ready.append((process, conn))
+        else:
+            print(f"[deepen] a worker did not start: {why}", flush=True)
+            process.join(timeout=5)
+    helpers = (
+        _Helpers(reg, len(ready), port_threads=None, conns=[conn for _p, conn in ready])
+        if ready else None
+    )
+    _WORKERS[reg.meta.format_id] = (ready, (factory, tuple(args)), helpers)
+    return len(ready)
+
+
+def stop_workers(reg: Regulation | None = None) -> None:
+    """Stop the worker processes of `reg` (all of them when None)."""
+    keys = list(_WORKERS) if reg is None else [reg.meta.format_id]
+    for key in keys:
+        found = _WORKERS.pop(key, None)
+        if found is None:
+            continue
+        if found[2] is not None:
+            found[2].close()
+        for process, conn in found[0]:
+            with contextlib.suppress(OSError, EOFError):
+                conn.send(None)
+            process.join(timeout=10)
+            if process.is_alive():
+                process.kill()
+            conn.close()
+
+
+def workers(reg: Regulation) -> int:
+    """How many worker processes expand ahead for `reg`."""
+    found = _WORKERS.get(reg.meta.format_id)
+    return 0 if found is None else len(found[0])
+
+
+atexit.register(stop_workers)
+
+
+#: Totals over the process of every `_Ahead` (the positive control of IKA-32 stage 2).
+_AHEAD_COUNTS = {
+    "batches": 0, "expanded": 0, "hits": 0, "misses": 0, "remote": 0, "ready": 0, "deeper": 0,
+    "local": 0,
+}
+
+
+def ahead_counts() -> dict[str, int]:
+    """Batches, cells expanded ahead, taken from the helper, and expanded the serial way
+    (a batch error), over the process so far."""
+    return dict(_AHEAD_COUNTS)
+
+
+def _start_ahead(
+    reg: Regulation, evaluate: LeafEvaluator, *, budget: Budget, sub_limit: int,
+    sub_branches: int,
+) -> _Ahead | None:
+    count = _AHEAD[0]
+    if count <= 0:
+        return None
+    return _Ahead(
+        reg, evaluate, budget=budget, sub_limit=sub_limit, sub_branches=sub_branches,
+        count=count, helpers=_HELPERS[0], port_threads=_HELPERS[1], deeper=_HELPERS[2],
+    )
+
+
+class _NoLock:
+    def __enter__(self) -> None:
+        return None
+
+    def __exit__(self, *_exc: object) -> bool:
+        return False
+
+
+def _held(helper: _Ahead | None) -> Any:  # noqa: ANN401
+    """The port and the leaf for the loop's own use: the helper's lock, or nothing."""
+    return _NoLock() if helper is None else helper.lock
 
 
 def _q_menus(

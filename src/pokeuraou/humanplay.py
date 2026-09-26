@@ -249,6 +249,138 @@ class WallCost:
 
 CLOCKS = ("wall", "count")
 
+#: From how many cells a game's two LPs are solved at once when the agent has more than
+#: one core (`equilibrium.set_lp_pair`): the root's Bayesian game of a wide menu, not the
+#: 8 x 8 children, whose LPs are mostly Python (IKA-32 stage 2).
+LP_PAIR_CELLS = 1024
+
+#: Helper threads expanding the deepening's cells ahead, from four cores up.
+AHEAD_HELPERS = 2
+
+#: Cells a worker process expands a level down from each cell it expands (the loop often
+#: goes on down the line it just refined). 0: measured no faster with the loop expanding
+#: the cells no helper started itself (records/IKA-32.md stage 2).
+AHEAD_DEEPER = 0
+
+
+class GraphLeaf:
+    """The agent's leaf with its small blocks scored by CUDA-graph replays (IKA-32 stage 2).
+
+    The inference server has scored blocks of up to `inference.GRAPH_ROWS` rows this way
+    since IKA-107 (`inference._Graphs`): a graph captured for n rows replays the kernels the
+    eager pass chose for n rows, so the answer is the eager answer to the bit, and a
+    two-net ensemble's forward pass stops being bound by launching its kernels. A person's
+    opponent scores its leaves in this process; the deepening's children are 8 x 8 blocks of
+    a few hundred rows, one eager pass each (2.2 ms of CPU for a fraction of that on the
+    card, 22% of a step). Positions, larger blocks and a card-less leaf go to the leaf as
+    before; an ended leaf is settled as `BatchedValue.from_encoded` settles it.
+    """
+
+    def __init__(self, value: Any) -> None:  # noqa: ANN401 - BatchedValue
+        from .inference import _Graphs
+
+        self.value = value
+        self.encoder = value.encoder
+        self.graphs = _Graphs(value) if _Graphs.usable(value) else None
+        #: Blocks answered by a replay (the positive control).
+        self.replays = 0
+
+    def __call__(self, positions: list[Any]) -> np.ndarray:
+        return self.value(positions)
+
+    def from_encoded(self, encoded: Any) -> np.ndarray:  # noqa: ANN401 - encode.Encoded
+        from .encode import settle
+        from .inference import ARRAYS
+
+        rows = len(encoded.species)
+        if self.graphs is not None and rows:
+            out = self.graphs.score({name: getattr(encoded, name) for name in ARRAYS}, rows)
+            if out is not None:
+                self.value.ended += settle(out, encoded, self.encoder.rules)
+                self.value.evaluated += rows
+                self.replays += 1
+                return out
+        return self.value.from_encoded(encoded)
+
+    def from_encoded_segments(self, segments: Sequence[Any]) -> list[np.ndarray]:
+        return [self.from_encoded(segment) for segment in segments]
+
+
+#: Worker processes expanding the deepening's cells ahead, at most (IKA-32 stage 2). Each
+#: holds a CUDA context and the leaf (about 0.5 GB of the card) and a port.
+AHEAD_WORKERS_MAX = 6
+
+
+def process_leaf(reg: Regulation, values: Sequence[str] | None, device: str, graphs: bool) -> Any:  # noqa: ANN401
+    """The agent's leaf built again in a worker process (`deepen.start_workers`): the same
+    files on the same device, as `tools/play_human.py` builds it; hp-share without files."""
+    if not values:
+        return HP_SHARE.batch
+    import torch
+
+    from .encode import Encoder
+    from .value import BatchedValue, load_ensemble
+
+    encoder = Encoder(reg)
+    nets, _ = load_ensemble([Path(v) for v in values], encoder)
+    leaf = BatchedValue([n.to(device) for n in nets], encoder, device=torch.device(device))
+    return GraphLeaf(leaf) if graphs else leaf
+
+
+def load_leaf(
+    reg: Regulation, values: Sequence[Path], device: str | None = None, graphs: bool = True,
+) -> tuple[Any, Any, str]:
+    """The agent's leaf from model files (one, or an ensemble averaged): the leaf (a
+    `GraphLeaf` when ``graphs``), its encoder, and the device it is on (CUDA when there is
+    a card and ``device`` is not given). What `tools/play_human.py` and `tools/analyze.py`
+    load."""
+    import torch
+
+    from .encode import Encoder
+    from .value import BatchedValue, load_ensemble
+
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    encoder = Encoder(reg)
+    nets, _ = load_ensemble(list(values), encoder)
+    leaf: Any = BatchedValue([n.to(device) for n in nets], encoder, device=torch.device(device))
+    if graphs:
+        leaf = GraphLeaf(leaf)
+    return leaf, encoder, device
+
+
+def use_threads(
+    threads: int,
+    reg: Regulation | None = None,
+    leaf: tuple[Sequence[str] | None, str, bool] | None = None,
+) -> None:
+    """Spread one move over `threads` cores (IKA-32): the port's cell pool (stage 1), the
+    deepening's cells expanded ahead and a big game's two LPs at once (stage 2). With
+    `reg` and `leaf` (`process_leaf`'s files, device and graphs) the cells ahead are
+    expanded by ``threads - 1`` worker processes (at most `AHEAD_WORKERS_MAX`), each with
+    its own leaf, port and GIL; without, by helper threads in this process. None of them
+    changes a move -- only how long it takes -- so a game on the count clock is the same
+    game at any count; 1 turns them all off."""
+    from . import deepen, equilibrium, rustnode
+
+    if threads < 1:
+        raise ValueError(f"threads must be >= 1, not {threads}")
+    if (rustnode.port_threads() or 1) != threads:
+        rustnode.set_port_threads(threads)
+    if reg is not None:
+        wanted = 0 if threads == 1 or leaf is None else min(threads - 1, AHEAD_WORKERS_MAX)
+        if deepen.workers(reg) != wanted:
+            deepen.start_workers(reg, wanted, process_leaf, tuple(leaf or ()), port_threads=1)
+    # Without worker processes: two helper threads from four cores up, each with a port of
+    # `threads` cell threads (the helpers' Python and the loop's LPs share one GIL, so more
+    # helpers wait on it). With them, each worker also expands `AHEAD_DEEPER` cells a
+    # level down from each cell it expands.
+    remote = reg is not None and deepen.workers(reg) > 0
+    deepen.set_ahead(
+        0 if threads == 1 else threads, helpers=AHEAD_HELPERS if threads >= 4 else 1,
+        port_threads=threads, deeper=AHEAD_DEEPER if remote else 0,
+    )
+    equilibrium.set_lp_pair(0 if threads == 1 else LP_PAIR_CELLS)
+
 # ----------------------------------------------------------------------------- the person
 
 
@@ -724,6 +856,11 @@ class Agent:
     max_levels: int | None = None
     #: The children's menus by the Q's k best (IKA-307, ``c<k>``), or None: `narrow`'s.
     child_q: int | None = None
+    #: The root's swap oracle while deepening (a label's ``s<W>`` / ``sall``, IKA-293/310;
+    #: IKA-307's allocation "width first, the rest to deepening with the swap oracle"):
+    #: the width of the menu whose rest it asks (`deepen.ALL_ACTIONS`: every legal
+    #: action), or None: no oracle.
+    oracle: int | None = None
 
     def __post_init__(self) -> None:
         if self.clock not in CLOCKS:
@@ -748,6 +885,88 @@ def legal_count(reg: Regulation, pos: Position, side: int) -> int:
 
 def _not_asked(positions: list[Position]) -> np.ndarray:  # pragma: no cover - never called
     raise AssertionError("the person's side is never solved")
+
+
+@dataclass
+class SolvedMove:
+    """One side's answer at a move decision (`solve_move`)."""
+
+    #: That side's mixture over its menu (``ours`` when it is side 0, ``theirs`` when 1).
+    strategy: np.ndarray
+    #: The other side's mixture as this side models it (averaged over completions).
+    model: list[float]
+    ours: list[SideAction]
+    theirs: list[SideAction]
+    #: In side 0's units, as the record's ``searchValue``.
+    value: float
+    deepened: Any  # deepen.Deepened or None
+    unmodelled: set[str]
+
+
+def solve_move(
+    reg: Regulation,
+    pos: Position,
+    me: int,
+    ours: list[SideAction],
+    theirs: list[SideAction],
+    spreads: dict[int, list] | None,
+    leaf: LeafEvaluator,
+    *,
+    budget: Budget,
+    exact: bool,
+    cells: int = 0,
+    cost: Any = None,  # noqa: ANN401 - deepen.Cost, WallCost or another reading of the budget
+    levels: int | None = None,
+    child_q: int | None = None,
+    outside: tuple[list[SideAction], list[SideAction]] | None = None,
+    progress: Callable[[Any], None] | None = None,
+) -> SolvedMove:
+    """Side ``me``'s answer on the menus ``ours`` (side 0's) x ``theirs`` (side 1's): the
+    open game (`search`) when ``exact``, else its Bayesian game over the other side's
+    completions in ``spreads`` (`belief_solve`, only ``me`` solved). ``cells`` > 0 deepens
+    best first, the budget read by ``cost``; ``outside`` adds the root's swap oracle.
+    What `HumanGame` asks at each move, and what the analysis mode asks with no budget
+    (IKA-337). Raises `EquilibriumError` as the solves do."""
+    you = 1 - me
+    if exact:
+        got = search(
+            reg, pos, ours, theirs, leaf, budget=budget,
+            **(
+                {"deepen": cells, "deepen_cost": cost, "levels": levels,
+                 "child_q": child_q, "outside": outside,
+                 "swap": outside is not None}
+                if cells else {}
+            ),
+            progress=progress,
+        )
+        eq = got.equilibrium
+        return SolvedMove(
+            strategy=np.asarray(eq.row_strategy if me == 0 else eq.col_strategy, dtype=np.float64),
+            model=[float(x) for x in (eq.col_strategy if me == 0 else eq.row_strategy)],
+            ours=got.ours, theirs=got.theirs, value=float(eq.value), deepened=got.deepened,
+            unmodelled=set(got.unmodelled),
+        )
+    assert spreads is not None
+    answers = belief_solve(
+        reg, pos, ours, theirs, spreads,
+        {me: leaf, you: _not_asked}, budget=budget, sides=(me,),
+        deepen=(
+            {me: {"cells": cells, "reading": "mixed", "swap": outside is not None,
+                  "outside": outside, "cost": cost, "levels": levels,
+                  "child_q": child_q}}
+            if cells else None
+        ),
+        progress=progress,
+    )
+    got = answers[me]
+    return SolvedMove(
+        strategy=np.asarray(got.strategy, dtype=np.float64),
+        model=_averaged(got.replies, [item.weight for item in spreads[you]]),
+        ours=got.ours, theirs=got.theirs,
+        # Side 1 solved the negated transpose: its value back in side 0's units.
+        value=float(got.value) if me == 0 else -float(got.value),
+        deepened=got.deepened, unmodelled=set(got.unmodelled),
+    )
 
 
 _HEADINGS = {
@@ -781,6 +1000,7 @@ class HumanGame:
         out: TextIO | None = None,
         listener: Callable[[str, Any], None] | None = None,
         interval_ms: float = 100.0,
+        on_move: Callable[[Position, list[frozenset[str]], list[list[str]]], None] | None = None,
     ) -> None:
         self.agent = agent
         self.reg = agent.reg
@@ -800,6 +1020,10 @@ class HumanGame:
         self.leaves = (agent.evaluate, agent.evaluate)
         self.listener = listener
         self.interval_ms = interval_ms
+        #: Called with the position, the identities each side has shown and the leads
+        #: before every move decision of the agent (``tools/play_human.py --current-out``
+        #: writes it for the analysis mode, IKA-337). Reads only.
+        self.on_move = on_move
         #: How the two sides are named on the screen, by side index.
         self.side_names = tuple("AI" if s == agent_side else "あなた" for s in (0, 1))
 
@@ -914,6 +1138,8 @@ class HumanGame:
                 record.unmodelled.append(f"hidden bench: {problem}")
                 break
             spreads = _believed(spreads, (self.agent.bench_drop, self.agent.bench_drop))
+            if self.on_move is not None:
+                self.on_move(pos, list(seen), record.leads)
             moved = self._agent_move(pos, spreads, recorded_shown)
             if moved is None:
                 break
@@ -986,10 +1212,14 @@ class HumanGame:
             form=agent.form, width_only=agent.width_only,
         )
         budget = Budget.matrix()
+        wider: dict[int, tuple[list[SideAction], list[SideAction]]] = {}
         ours, theirs = _menus(
             reg, pos, (plan.width, plan.width), agent.leaf, budget, agent.rank_by_leaf,
             None, spreads, rank_fill=agent.rank_fill,
+            wide=[agent.oracle] if agent.oracle is not None and plan.deepen_ms > 0 else [],
+            wider=wider,
         )
+        outside = wider.get(agent.oracle) if agent.oracle is not None else None
         if not ours or not theirs:
             return None
         menu_seconds = time.perf_counter() - started
@@ -1006,7 +1236,6 @@ class HumanGame:
                 decision=len(self.record.decisions), turn=pos.turn, started=started,
                 interval_ms=self.interval_ms,
             )
-        watch = {} if progress is None else {"progress": progress}
         cells = 0
         cost: Any = None
         if plan.deepen_ms > 0:
@@ -1016,52 +1245,17 @@ class HumanGame:
             else:
                 cost = COSTS[agent.form, agent.cores]
                 cells = cells_for_seconds(plan.deepen_ms / 1000.0, agent.cores, form=agent.form)
-        deepened = None
         try:
-            if exact:
-                got = search(
-                    reg, pos, ours, theirs, agent.leaf, budget=budget,
-                    **(
-                        {"deepen": cells, "deepen_cost": cost, "levels": agent.max_levels,
-                         "child_q": agent.child_q}
-                        if cells else {}
-                    ),
-                    **watch,
-                )
-                strategy = np.asarray(
-                    got.equilibrium.row_strategy if me == 0 else got.equilibrium.col_strategy,
-                    dtype=np.float64,
-                )
-                model = [
-                    float(x)
-                    for x in (got.equilibrium.col_strategy if me == 0 else got.equilibrium.row_strategy)
-                ]
-                ours, theirs = got.ours, got.theirs
-                value = float(got.equilibrium.value)
-                deepened = got.deepened
-                unmodelled = set(got.unmodelled)
-            else:
-                answers = belief_solve(
-                    reg, pos, ours, theirs, spreads,
-                    {me: agent.leaf, you: _not_asked}, budget=budget, sides=(me,),
-                    deepen=(
-                        {me: {"cells": cells, "reading": "mixed", "swap": False,
-                              "outside": None, "cost": cost, "levels": agent.max_levels,
-                              "child_q": agent.child_q}}
-                        if cells else None
-                    ),
-                    **watch,
-                )
-                got = answers[me]
-                strategy = np.asarray(got.strategy, dtype=np.float64)
-                model = _averaged(got.replies, [item.weight for item in spreads[you]])
-                ours, theirs = got.ours, got.theirs
-                # Side 1 solved the negated transpose: its value back in side 0's units.
-                value = float(got.value) if me == 0 else -float(got.value)
-                deepened = got.deepened
-                unmodelled = set(got.unmodelled)
+            solved = solve_move(
+                reg, pos, me, ours, theirs, spreads, agent.leaf, budget=budget, exact=exact,
+                cells=cells, cost=cost, levels=agent.max_levels, child_q=agent.child_q,
+                outside=outside, progress=progress,
+            )
         except EquilibriumError:
             return None
+        strategy, model, value = solved.strategy, solved.model, solved.value
+        ours, theirs = solved.ours, solved.theirs
+        deepened, unmodelled = solved.deepened, solved.unmodelled
         mine = ours if me == 0 else theirs
         index = _sample_index(self.rng, strategy)
         took = time.perf_counter() - started
@@ -1358,6 +1552,7 @@ def play(
     belief_epsilon: float = BELIEF_EPSILON,
     listener: Callable[[str, Any], None] | None = None,
     interval_ms: float = 100.0,
+    on_move: Callable[[Position, list[frozenset[str]], list[list[str]]], None] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], HumanGame]:
     """Plays one game. ``teams`` are side 0's and side 1's sheets. Returns the game's
     record line, its clock line, and the game object (for a caller that wants the board).
@@ -1411,7 +1606,7 @@ def play(
     game = HumanGame(
         agent, person, agent_side=agent_side, sheets=six, picks=picks, bench_prior=priors,
         rng=np.random.default_rng([seed, game_index, 2]), max_turns=max_turns, loc=loc, out=out,
-        listener=listener, interval_ms=interval_ms,
+        listener=listener, interval_ms=interval_ms, on_move=on_move,
     )
     game.inputs = inputs
     record = game.play()

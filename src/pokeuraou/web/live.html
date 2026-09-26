@@ -30,34 +30,58 @@
     <div class="result" id="result" hidden></div>
   </section>
 
+  <section class="panel" id="analysisBox" aria-label="検討する局面" hidden>
+    <h2>検討する局面</h2>
+    <div class="pickrow">
+      <label class="field">記録<select id="aSource"></select></label>
+      <label class="field wide">局<select id="aGame"></select></label>
+      <label class="field">ターン<select id="aTurn"></select></label>
+      <label class="field">読む側<select id="aSide"><option value="0">側 0</option><option value="1">側 1</option></select></label>
+    </div>
+    <div class="pickrow">
+      <label class="field num">幅<input id="aWidth" type="number" min="1" max="256" inputmode="numeric"></label>
+      <label class="field num">深化の柵<input id="aGuard" type="number" min="1" max="999" inputmode="numeric"></label>
+      <span class="note" id="aSettings"></span>
+    </div>
+    <p class="note" id="aGameNote"></p>
+    <div class="sendbar">
+      <button type="button" class="ghost" id="aRefresh">記録を読み直す</button>
+      <span class="gap"></span>
+      <button type="button" class="stop" id="aStop" disabled>止める</button>
+      <button type="button" class="primary" id="aGo" disabled>この局面を読む</button>
+    </div>
+    <div class="meters" id="aMeters"></div>
+    <p class="note" id="aNote"></p>
+  </section>
+
   <section class="panel" id="inputBox" aria-label="あなたの入力">
     <h2>あなたの手</h2>
     <div id="input"><span class="note">AI の番を待っています</span></div>
   </section>
 
   <section class="panel" id="reading" aria-label="AI の読み">
-    <div class="rhead"><h2>AI の読み</h2><span class="clocktext n" id="clocktext">–</span></div>
+    <div class="rhead"><h2 id="readingTitle">AI の読み</h2><span class="rtools"><span class="clocktext n" id="clocktext">–</span><button type="button" class="stop small" id="stopTop" hidden>止める</button></span></div>
     <div class="clockbar" id="clockbar"><i></i></div>
     <div class="rbody">
       <div class="balance">
-        <div class="balance-top"><span class="ai-c">AI <b class="big n" id="balAi">–</b></span>
+        <div class="balance-top"><span class="ai-c"><span id="balAiName">AI</span> <b class="big n" id="balAi">–</b></span>
           <span class="dim" id="balLabel">形勢（AI から見た値）</span>
-          <span class="you-c"><b class="big n" id="balYou">–</b> あなた</span></div>
+          <span class="you-c"><b class="big n" id="balYou">–</b> <span id="balYouName">あなた</span></span></div>
         <div class="balance-bar"><i id="balBar" style="width:50%"></i></div>
       </div>
       <canvas class="chart" id="chart" aria-label="値の推移"></canvas>
       <div class="strip n" id="strip"></div>
 
-      <h3>AI の混合戦略 <small>手ごとの確率・損は期待値の損</small></h3>
+      <h3><span id="oursTitle">AI の混合戦略</span> <small>手ごとの確率・損は期待値の損</small></h3>
       <div class="colhead"><span>手</span><span></span><span>確率</span><span>損</span></div>
       <div class="mix ai" id="ours"></div>
 
-      <h3>AI が読むあなたの手 <small>裏の決定化の重みで平均</small></h3>
+      <h3><span id="theirsTitle">AI が読むあなたの手</span> <small>裏の決定化の重みで平均</small></h3>
       <div class="mix you" id="theirs"></div>
 
-      <details class="fold" id="beliefBox"><summary><b>あなたの裏の読み</b><small id="beliefSum">–</small></summary><div id="classes"></div></details>
+      <details class="fold" id="beliefBox"><summary><b id="beliefTitle">あなたの裏の読み</b><small id="beliefSum">–</small></summary><div id="classes"></div></details>
       <details class="fold" id="pvBox"><summary><b>読み筋</b><small id="pvSum">確率の付いた木</small></summary><div class="pv" id="pv"></div></details>
-      <details class="fold" id="countBox"><summary><b>読みの量</b><small>数の内訳と予算</small></summary><div><div class="counters" id="counters"></div><p class="note" id="plan"></p></div></details>
+      <details class="fold" id="countBox"><summary><b>読みの量</b><small>数の内訳と計算予算</small></summary><div><div class="counters" id="counters"></div><p class="note" id="plan"></p></div></details>
       <div class="veil">あなたが手を入れると表示します</div>
     </div>
   </section>

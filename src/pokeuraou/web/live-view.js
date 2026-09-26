@@ -29,6 +29,7 @@ const S = {
   think: null, decision: -1, last: null, history: [], answered: true,
   info: new Map(), order: { ours: { keys: [], at: 0 }, theirs: { keys: [], at: 0 } },
   open: new Set(["p0"]), pvAt: 0, pvTimer: 0, openMon: new Set(),
+  analysis: false, catalogue: null, status: null, running: false, analysisState: null,
 };
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -100,7 +101,13 @@ function onEvent(e) {
       S.sheets = e; S.names = e.names; S.personSide = e.personSide; S.agentSide = e.agentSide;
       e.teams.forEach((team) => team.forEach(learn));
       renderSheets();
-      log(null, `対局開始。AI は <b>${esc(e.agent)}</b>、1 手 ${e.seconds} 秒（${e.clock === "wall" ? "壁時計" : "数えの時計"}・${e.cores} コア）`);
+      if (!e.analysis) log(null, `対局開始。AI は <b>${esc(e.agent)}</b>、1 手 ${e.seconds} 秒（${e.clock === "wall" ? "壁時計" : "数えの時計"}・${e.cores} コア）`);
+      break;
+    case "catalogue":
+      enterAnalysis(); S.catalogue = e; renderPicker(true);
+      break;
+    case "analysis":
+      enterAnalysis(); onAnalysis(e);
       break;
     case "select":
       S.select = e; S.picked = []; renderInput(); setStatus("選出を選んでください", "turn");
@@ -113,11 +120,11 @@ function onEvent(e) {
     case "think":
       S.sent = false; S.think = e; S.decision = e.decision; S.answered = false; S.prompt = null;
       S.history.push({ decision: e.decision, turn: e.turn, pts: [], done: false });
-      renderInput(); renderClock(0, false);
-      setStatus(`AI が考えています（ターン ${e.turn}）`, "think"); applyHide();
+      if (!S.analysis) { renderInput(); setStatus(`AI が考えています（ターン ${e.turn}）`, "think"); applyHide(); }
+      renderClock(0, false);
       break;
     case "answer":
-      setStatus(`AI は手を決めました（${e.seconds.toFixed(1)} 秒）`, "turn");
+      if (!S.analysis) setStatus(`AI は手を決めました（${e.seconds.toFixed(1)} 秒）`, "turn");
       renderClock(e.seconds * 1000, true);
       break;
     case "prompt":
@@ -129,7 +136,7 @@ function onEvent(e) {
       if (S.prompt) { S.prompt = null; S.answered = true; applyHide(); }
       renderInput();
       log(e.turn, `<span class="ai-c">AI</span> ${esc((e.agentSlots || [e.agent]).join(" ／ "))}<br><span class="you-c">あなた</span> ${esc((e.personSlots || [e.person]).join(" ／ "))}` +
-        (e.offMenu ? ` <span class="badge" title="あなたの手は AI のメニューの外でした">メニュー外</span>` : "") +
+        (e.offMenu ? ` <span class="badge" title="あなたの手は AI の候補集合の外でした">候補集合の外</span>` : "") +
         ((e.changes || []).length ? `<br><span class="dim">${e.changes.map((c) =>
           `${esc(c.species)}${c.entered ? " 登場" : ""}${c.from !== c.to ? ` ${c.from}→${c.to}%` : ""}${c.fainted ? " ひんし" : ""}${c.status ? " " + esc(c.status) : ""}`).join("・")}</span>` : ""));
       break;
@@ -152,7 +159,7 @@ function onStep(s) {
     S.decision = s.decision; S.history.push({ decision: s.decision, turn: s.turn, pts: [], done: false });
   }
   const h = S.history[S.history.length - 1];
-  h.pts.push([Math.min(1, share(s)), s.value]);
+  h.pts.push([Math.min(1, share(s)), s.value, s.ms]);
   h.done = s.kind === "done";
   S.last = s;
   renderClock(s.ms, s.kind === "done", s);
@@ -205,7 +212,7 @@ function renderBoard() {
   const top = aiSide(), bottom = S.personSide;
   const draw = (i, where) => {
     const sd = b.sides[i], mine = i === b.viewer;
-    const head = `<div class="side-head"><span class="who ${mine ? "you" : "ai"}">${esc(sd.name)}</span>
+    const head = `<div class="side-head"><span class="who ${i === aiSide() ? "ai" : "you"}">${esc(sd.name)}</span>
       ${sd.conditions.map((c) => `<span class="chip">${esc(c)}</span>`).join("")}</div>`;
     const actives = `<div class="actives">${sd.active.map((m, k) => monCard(m, mine, `${i}.${k}`)).join("")}</div>`;
     const bench = benchHtml(sd, mine);
@@ -241,6 +248,11 @@ function share(s) {
   return (s ? s.ms : 0) / budget;
 }
 function renderClock(ms, done, s) {
+  if (S.analysis) {
+    $("clockbar").classList.toggle("done", !!done);
+    $("clocktext").textContent = `経過 ${fmtTime(ms / 1000)}${s ? `・深化のステップ ${s.step.toLocaleString("ja-JP")}` : ""}${done ? "・答え" : ""}`;
+    return;
+  }
   const budget = S.think && S.think.seconds ? S.think.seconds * 1000 : 0;
   const bar = $("clockbar");
   bar.classList.toggle("done", !!done);
@@ -248,7 +260,7 @@ function renderClock(ms, done, s) {
   const f = count ? (s ? share(s) : done ? 1 : 0) : budget ? ms / budget : 0;
   bar.firstElementChild.style.width = Math.min(100, 100 * f) + "%";
   $("clocktext").textContent = !budget ? "–" : count
-    ? `${(ms / 1000).toFixed(1)} 秒・数えの予算 ${Math.round(100 * Math.min(f, 9.99))}%${done ? "・答え" : ""}`
+    ? `${(ms / 1000).toFixed(1)} 秒・数えの計算予算 ${Math.round(100 * Math.min(f, 9.99))}%${done ? "・答え" : ""}`
     : `${(ms / 1000).toFixed(1)} / ${(budget / 1000).toFixed(1)} 秒${done ? "・答え" : ""}`;
 }
 function renderBalance(s) {
@@ -265,18 +277,25 @@ function renderStrip(s) {
 function renderCounters(s) {
   const support = s.ourP.filter((p) => p > 1e-9).length;
   const items = [
-    ["経過", `${(s.ms / 1000).toFixed(2)} s`], ["歩", s.step], ["読んだセル", s.cells.toLocaleString("ja-JP")],
+    ["経過", `${(s.ms / 1000).toFixed(2)} s`], ["深化のステップ", s.step], ["読んだセル", s.cells.toLocaleString("ja-JP")],
     ["深化したセル", s.expanded], ["段（深さ）", s.depth], ["埋め", s.fills], ["精緻化", s.refines],
-    ["読めなかった", s.refused], ["幅（AI×あなた）", `${s.ours.length}×${s.theirs.length}`], ["台の大きさ", support],
-    ["深く読んだ重み", pct(s.read)], ["裏の決定化", s.classes.length || "なし"], ["予算", `${Math.round(s.spent)} / ${s.budget}`],
+    ["読めなかった", s.refused],
+    [S.analysis ? "幅（検討する側×相手）" : "幅（AI×あなた）", `${s.ours.length}×${s.theirs.length}`], ["サポートの大きさ", support],
+    ["深く読んだ重み", pct(s.read)], ["裏の決定化", s.classes.length || "なし"],
+    ["計算予算", S.analysis ? "なし（止めるまで）" : `${Math.round(s.spent)} / ${s.budget}`],
     ["双対ギャップ", s.gap.toExponential(1)],
   ];
   $("counters").innerHTML = items.map(([k, v]) => `<div><b class="n">${v}</b><small>${k}</small></div>`).join("");
   const t = S.think;
-  if (t) {
+  if (t && S.analysis) {
     const p = t.plan || {};
-    $("plan").textContent = `ターン ${t.turn}: 予算 ${t.seconds} 秒、メニューの幅 ${p.width}、深さ 1 の予測 ${Math.round(p.predictedMs || 0)} ms、` +
-      `深化に ${Math.round(p.deepenMs || 0)} ms、メニューに ${Math.round(t.menuMs || 0)} ms。` +
+    $("plan").textContent = `ターン ${t.turn}: 計算予算なしで止めるまで読む。幅 ${p.width}・最善応答オラクル ${p.oracle}・深化の柵 ${p.guard} 段、` +
+      `候補集合を作るのに ${Math.round(t.menuMs || 0)} ms。` + (t.exact ? "相手の裏は尽きている。" : `相手の裏の決定化 ${t.classCount} 通り。`) +
+      "「深く読んだ重み」は均衡の組の確率のうち、葉より深く読んだ分（収束の目安）。";
+  } else if (t) {
+    const p = t.plan || {};
+    $("plan").textContent = `ターン ${t.turn}: 計算予算 ${t.seconds} 秒、候補集合の幅 ${p.width}、深さ 1 の予測 ${Math.round(p.predictedMs || 0)} ms、` +
+      `深化に ${Math.round(p.deepenMs || 0)} ms、候補集合づくりに ${Math.round(t.menuMs || 0)} ms。` +
       (t.exact ? "あなたの裏は尽きている。" : `あなたの裏の決定化 ${t.classCount} 通り。`) +
       "「深く読んだ重み」は均衡の組の確率のうち、葉より深く読んだ分（収束の目安）。";
   }
@@ -386,7 +405,9 @@ function branchHtml(b, key, parentValue, s) {
 }
 function renderPv(s) {
   $("pv").innerHTML = s.pv.length
-    ? `<p class="note">重い組（AI の手 × あなたの手）。読んだ組は偶然の枝と次のターンへ開く。値は AI から見た値、括弧は親との差。</p>` +
+    ? (S.analysis
+      ? `<p class="note">重い組（検討する側の手 × 相手の手）。読んだ組は偶然の分岐と次のターンへ開く。値は検討する側から見た値、括弧は親との差。</p>`
+      : `<p class="note">重い組（AI の手 × あなたの手）。読んだ組は偶然の分岐と次のターンへ開く。値は AI から見た値、括弧は親との差。</p>`) +
       s.pv.map((p, i) => pairHtml(p, `p${i}`, s.value, s, true)).join("")
     : '<span class="note">まだ組が無い</span>';
 }
@@ -410,8 +431,15 @@ function drawChart() {
   const g = c.getContext("2d"); g.scale(dpr, dpr); g.clearRect(0, 0, w, h);
   const css = getComputedStyle(document.documentElement);
   const col = (n) => css.getPropertyValue(n).trim();
-  const H = S.history.filter((d) => d.pts.length).slice(-CHART_DECISIONS);
+  let H = S.history.filter((d) => d.pts.length).slice(-CHART_DECISIONS);
   if (!H.length) return;
+  if (S.analysis) {
+    // No budget: a read's x is its time over the longest time it has reached.
+    H = H.map((d) => {
+      const end = Math.max(1, ...d.pts.map((p) => p[2] || 0));
+      return { ...d, pts: d.pts.map((p) => [(p[2] || 0) / end, p[1], p[2]]) };
+    });
+  }
   const all = H.flatMap((d) => d.pts.map((p) => p[1]));
   let lo = Math.min(0.5, ...all), hi = Math.max(0.5, ...all);
   const span = Math.max(0.1, hi - lo); lo = Math.max(0, lo - span * 0.15); hi = Math.min(1, hi + span * 0.15);
@@ -538,8 +566,143 @@ if (window.matchMedia) window.matchMedia("(prefers-color-scheme: dark)").addEven
 applyTheme();
 
 // ------------------------------------------------------------------ connection
+
+// ------------------------------------------------------------------ the analysis mode (IKA-337)
+// The page reads a chosen position with no budget until 止める. The server says so by sending
+// "catalogue" (the games it can read); from then on the input panel is the position picker,
+// the clock is the elapsed time, and the status frames (a few a second) carry the steps, the
+// lines at the depth guard, the tree's size and the memory against its limits.
+function enterAnalysis() {
+  if (S.analysis) return;
+  S.analysis = true;
+  document.body.classList.add("analysis");
+  $("analysisBox").hidden = false; $("inputBox").hidden = true;
+  $("hide").closest("label").hidden = true; $("stopTop").hidden = false;
+  document.querySelector(".brand span").textContent = "検討";
+  document.title = "pokeuraou 検討";
+  $("readingTitle").textContent = "読み";
+  $("oursTitle").textContent = "検討する側の混合戦略";
+  $("theirsTitle").textContent = "相手の手の読み";
+  $("beliefTitle").textContent = "相手の裏の読み";
+  $("balAiName").textContent = "検討する側"; $("balYouName").textContent = "相手";
+  $("balLabel").textContent = "形勢（検討する側から見た値）";
+  $("input").innerHTML = "";
+  setStatus("局面を選んでください");
+}
+function fillSelect(el, options, keep) {
+  const was = keep ? el.value : null;
+  el.innerHTML = options.map(([v, t]) => `<option value="${esc(v)}">${esc(t)}</option>`).join("");
+  if (was !== null && options.some(([v]) => String(v) === was)) el.value = was;
+}
+function pickedGame() {
+  const src = S.catalogue && S.catalogue.sources[+$("aSource").value];
+  return src ? src.games[+$("aGame").value] : null;
+}
+function renderPicker(keep) {
+  const c = S.catalogue;
+  if (!c) return;
+  fillSelect($("aSource"), c.sources.map((src) => [src.id, `${src.name}（${src.games.length} 局）`]), keep);
+  const src = c.sources[+$("aSource").value];
+  fillSelect($("aGame"), src ? src.games.map((g) => [g.index, g.label]) : [], keep);
+  renderTurns(keep);
+  const st = c.settings;
+  if (!keep || !$("aWidth").value) $("aWidth").value = st.width;
+  if (!keep || !$("aGuard").value) $("aGuard").value = st.guard;
+  $("aSettings").textContent = `最善応答オラクル ${st.oracle}・${st.threads} コア・評価モデル ${st.agent}` +
+    (st.maxSteps != null ? `・${st.maxSteps} ステップで止める` : "") + (st.maxSeconds != null ? `・${st.maxSeconds} 秒で止める` : "");
+  const problem = src && src.problem ? `読めません: ${src.problem}` : src && !src.games.length ? (src.current ? "進行中の局はまだありません（play_human --current-out）" : "局がありません") : "";
+  $("aNote").textContent = problem;
+}
+function renderTurns(keep) {
+  const g = pickedGame();
+  fillSelect($("aTurn"), g ? g.decisions.map((d) => [d.index, `ターン ${d.turn}`]) : [], keep);
+  if (g && !keep) $("aSide").value = String(g.side);
+  $("aGameNote").textContent = g ? [g.open ? "裏は全公開で読みます（記録にシートが無い）" : "", g.note || ""].filter(Boolean).join("・") : "";
+  $("aGo").disabled = !g || !g.decisions.length;
+}
+$("aSource").onchange = () => { fillSelect($("aGame"), []); renderPicker(true); renderTurns(false); };
+$("aGame").onchange = () => renderTurns(false);
+$("aRefresh").onclick = () => LiveData.command({ cmd: "refresh" });
+function startRead() {
+  const g = pickedGame();
+  if (!g) return;
+  LiveData.command({
+    cmd: "analyze", source: +$("aSource").value, game: +$("aGame").value, decision: +$("aTurn").value,
+    side: +$("aSide").value, width: +$("aWidth").value || null, guard: +$("aGuard").value || null,
+  });
+  setStatus("読み始めます…", "think");
+}
+function stopRead() { LiveData.command({ cmd: "stop" }); }
+$("aGo").onclick = startRead;
+$("aStop").onclick = stopRead;
+$("stopTop").onclick = stopRead;
+function setRunning(on) {
+  S.running = on;
+  $("aStop").disabled = !on; $("stopTop").disabled = !on;
+  $("clockbar").classList.toggle("endless", on);
+}
+function onAnalysis(e) {
+  S.analysisState = e;
+  if (e.state === "running") {
+    setRunning(true);
+    // The picker shows what is being read (a read started from the command line, or another page).
+    if (e.source != null && S.catalogue) {
+      $("aSource").value = String(e.source); renderPicker(true);
+      $("aGame").value = String(e.game); renderTurns(true);
+      $("aTurn").value = String(e.decision); $("aSide").value = String(e.side);
+      $("aWidth").value = e.width; $("aGuard").value = e.guard;
+    }
+    setStatus(`読んでいます（ターン ${e.turn}・側 ${e.side}）`, "think");
+    $("aNote").textContent = (e.notes || []).length ? "注記: " + e.notes.join("・") : "";
+    log(e.turn, `検討を始めた: 側 ${e.side} から、幅 ${e.width}（候補集合 ${e.menu[0]}×${e.menu[1]}）・最善応答オラクル ${esc(e.oracle)}・深化の柵 ${e.guard}` +
+      (e.exact ? "・裏は尽きている" : `・相手の裏の決定化 ${e.classCount} 通り`));
+  } else {
+    setRunning(false);
+    setStatus(`${e.stopText}（${(e.seconds || 0).toFixed(1)} 秒・深化のステップ ${(e.steps || 0).toLocaleString("ja-JP")}）`, e.stop === "memory" ? "warn" : "end");
+    $("aNote").textContent = [e.why, (e.notes || []).length ? "注記: " + e.notes.join("・") : ""].filter(Boolean).join("・");
+    log(e.turn, `${esc(e.stopText)}${e.why ? `: ${esc(e.why)}` : ""}。深化のステップ ${(e.steps || 0).toLocaleString("ja-JP")}・${(e.seconds || 0).toFixed(1)} 秒・柵に当たった筋 ${e.guardLines}・木のノード ${(e.nodes || 0).toLocaleString("ja-JP")}`,
+      e.stop === "memory" ? "err" : "");
+    if (e.stop === "memory") toast(`メモリの上限の手前で止めました: ${e.why}`);
+  }
+}
+const gb = (x) => (Number.isFinite(x) ? x.toFixed(1) : "–");
+function meter(label, value, share, warn, note) {
+  const f = Number.isFinite(share) ? Math.max(0, Math.min(1, share)) : 0;
+  return `<div class="meter${warn ? " warn" : ""}"><div class="mhead"><small>${label}</small><b class="n">${value}</b></div>` +
+    `<div class="mtrack"><i style="width:${(100 * f).toFixed(1)}%"></i></div>${note ? `<small class="mnote">${note}</small>` : ""}</div>`;
+}
+function onStatus(st) {
+  enterAnalysis();
+  S.status = st;
+  if (st.state === "running" && !S.running) setRunning(true);
+  const cells = [
+    `<div class="stat"><small>経過</small><b class="n">${fmtTime(st.elapsed)}</b></div>`,
+    `<div class="stat"><small>深化のステップ</small><b class="n">${st.steps.toLocaleString("ja-JP")}</b></div>`,
+    `<div class="stat${st.guardLines ? " hot" : ""}"><small>柵（${st.guard} 段）に当たった筋</small><b class="n">${st.guardLines.toLocaleString("ja-JP")}</b></div>`,
+    `<div class="stat"><small>木のノード・段</small><b class="n">${st.nodes.toLocaleString("ja-JP")}・${st.depth}</b></div>`,
+  ];
+  const lim = (x) => (x > 0 ? x : NaN);
+  const meters = [
+    meter("このプロセスと補助のメモリ", `${gb(st.rss)} GB`, st.rss / lim(st.rssLimit), st.rssLimit > 0 && st.rss >= 0.9 * st.rssLimit,
+      st.rssLimit > 0 ? `上限 ${st.rssLimit} GB` : "上限なし"),
+    meter("ホストの空き", `${gb(st.free)} GB`, st.freeFloor > 0 && Number.isFinite(st.free) ? st.freeFloor / st.free : NaN,
+      st.freeFloor > 0 && st.free <= st.freeFloor / 0.9, st.freeFloor > 0 ? `下限 ${st.freeFloor} GB` : "下限なし"),
+    meter("GPU のメモリ（カード全体）", `${gb(st.gpu)} / ${gb(st.gpuTotal)} GB`, st.gpu / lim(st.gpuLimit),
+      st.gpuLimit > 0 && st.gpu >= 0.9 * st.gpuLimit, st.gpuLimit > 0 ? `上限 ${st.gpuLimit} GB` : "見張りなし"),
+  ];
+  $("aMeters").innerHTML = `<div class="stats">${cells.join("")}</div>${meters.join("")}`;
+  $("aMeters").classList.toggle("warn", st.warn);
+  if (st.state === "running") $("clocktext").textContent = `経過 ${fmtTime(st.elapsed)}・深化のステップ ${st.steps.toLocaleString("ja-JP")}`;
+}
+function fmtTime(sec) {
+  if (!Number.isFinite(sec)) return "–";
+  if (sec < 60) return `${sec.toFixed(1)} 秒`;
+  const m = Math.floor(sec / 60), r = Math.floor(sec - 60 * m);
+  return `${m} 分 ${String(r).padStart(2, "0")} 秒`;
+}
+
 LiveData.connect({
-  onEvent, onStep,
+  onEvent, onStep, onStatus,
   onOpen: () => setStatus("接続した"),
   onClose: () => setStatus("切れた（再読み込みで繋ぎ直す）"),
 });
