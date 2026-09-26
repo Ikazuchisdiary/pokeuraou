@@ -77,7 +77,10 @@ pub(crate) fn grassy_terrain_heal(turn: &mut Turn, order: &[(usize, usize)]) {
     }
     for &(side, slot) in order {
         let heals = match turn.mon_at(side, slot) {
-            Some(mon) => !mon.fainted && grounded(turn, mon),
+            // `pokemon.isGrounded() && !pokemon.isSemiInvulnerable()` (IKA-241).
+            Some(mon) => {
+                !mon.fainted && grounded(turn, mon) && crate::semi_invulnerable::hidden_by(mon).is_none()
+            }
             None => false,
         };
         if heals {
