@@ -49,7 +49,7 @@ def roster():  # noqa: ANN201
 @pytest.fixture(autouse=True)
 def _serial_after():  # noqa: ANN202
     yield
-    deepen_mod.set_ahead(0, helpers=1)
+    deepen_mod.set_ahead(0, helpers=1, deeper=0)
     eq_mod.set_lp_pair(0)
 
 
@@ -68,10 +68,10 @@ def _menus(reg, pos, limit=5):  # noqa: ANN001, ANN202
     return narrow(reg, pos, 0, limit=limit).actions, narrow(reg, pos, 1, limit=limit).actions
 
 
-def _belief(roster, pos, side, leaf, cells, ahead, helpers=1):  # noqa: ANN001, ANN202
+def _belief(roster, pos, side, leaf, cells, ahead, helpers=1, deeper=0):  # noqa: ANN001, ANN202
     reg = roster.reg
     ours, theirs = _menus(reg, pos)
-    deepen_mod.set_ahead(ahead, helpers=helpers)
+    deepen_mod.set_ahead(ahead, helpers=helpers, deeper=deeper)
     trace: list = []
     got = belief_solve(
         reg, pos, ours, theirs, _hidden(roster, pos), {0: leaf, 1: leaf},
@@ -145,8 +145,8 @@ def test_cells_expanded_ahead_are_the_serial_deepening_to_the_bit(roster, kind, 
     # Positive control: every step's cell came from the helper, and it expanded cells
     # the loop never took (its guesses were not all right, and it did not matter).
     assert steps > 20 and deeper > 0, "too little deepening to compare"
-    assert moved["hits"] == steps and moved["misses"] == 0
-    assert moved["expanded"] > moved["hits"]
+    assert moved["hits"] + moved["local"] == steps and moved["misses"] == 0
+    assert moved["hits"] > 0 and moved["expanded"] > moved["hits"]
     assert moved["batches"] > 0
     del reg
 
@@ -160,10 +160,11 @@ def _hp_share_leaf(reg):  # noqa: ANN001, ANN202, ARG001
     return LEAF
 
 
-@pytest.mark.parametrize("kind", ["hp-share", "sized"])
-def test_worker_processes_expand_to_the_serial_deepening(roster, kind) -> None:  # noqa: ANN001
+@pytest.mark.parametrize(("kind", "deeper"), [("hp-share", 0), ("sized", 2)])
+def test_worker_processes_expand_to_the_serial_deepening(roster, kind, deeper) -> None:  # noqa: ANN001
     """The cells ahead expanded by two worker processes, each with its own leaf (the same
-    stand-in, built in that process), port and GIL: the same tree and answer."""
+    stand-in, built in that process), port and GIL: the same tree and answer. With
+    `deeper` each worker also expands cells a level down, named by their paths."""
     leaf = _leaf(roster, kind)
     try:
         started = deepen_mod.start_workers(
@@ -175,16 +176,17 @@ def test_worker_processes_expand_to_the_serial_deepening(roster, kind) -> None: 
         for pos in _played(roster)[:2]:
             for side in (0, 1):
                 serial, trace_s = _belief(roster, pos, side, leaf, 400, 0)
-                fast, trace_f = _belief(roster, pos, side, leaf, 400, 4)
+                fast, trace_f = _belief(roster, pos, side, leaf, 400, 4, deeper=deeper)
                 _same_belief(serial, fast)
                 _same_tree(trace_s, trace_f)
                 steps += len(trace_s) - 1
         moved = _delta(before)
+        assert (moved["deeper"] > 0) == (deeper > 0)
     finally:
         deepen_mod.stop_workers(roster.reg)
     assert steps > 20
-    assert moved["hits"] == steps and moved["misses"] == 0
-    assert moved["remote"] == moved["batches"] > 0
+    assert moved["hits"] + moved["local"] == steps and moved["misses"] == 0
+    assert moved["hits"] > 0 and moved["remote"] == moved["batches"] > 0
     assert deepen_mod.workers(roster.reg) == 0
 
 
@@ -250,7 +252,7 @@ def test_a_wrong_guess_takes_the_same_cells(roster, monkeypatch) -> None:  # noq
     _same_tree(trace_s, trace_f)
     steps = len(trace_s) - 1
     assert steps > 10
-    assert moved["hits"] == steps
+    assert moved["hits"] + moved["local"] == steps and moved["local"] > 0
     # Most of what it expanded was never taken.
     assert moved["expanded"] - moved["hits"] > steps // 2
 
@@ -269,7 +271,8 @@ def test_a_failed_batch_is_expanded_the_serial_way(roster, monkeypatch) -> None:
     moved = _delta(before)
     _same_belief(serial, fast)
     _same_tree(trace_s, trace_f)
-    assert moved["misses"] == len(trace_s) - 1 > 0 and moved["hits"] == 0
+    assert moved["misses"] + moved["local"] == len(trace_s) - 1 and moved["misses"] > 0
+    assert moved["hits"] == 0
 
 
 def test_a_child_whose_lp_fails_stops_the_step_where_the_serial_one_does(roster, monkeypatch) -> None:  # noqa: ANN001
@@ -297,7 +300,7 @@ def test_a_child_whose_lp_fails_stops_the_step_where_the_serial_one_does(roster,
     _same_tree(trace_s, trace_f)
     refused = sum(1 for _level, _cell, took in _steps(trace_s) if not took)
     assert failed[0] > 0 and refused > 0
-    assert moved["hits"] == len(trace_s) - 1
+    assert moved["hits"] + moved["local"] == len(trace_s) - 1 and moved["hits"] > 0
 
 
 def test_an_open_root_expanded_ahead_is_the_same_search(roster) -> None:  # noqa: ANN001

@@ -257,6 +257,11 @@ LP_PAIR_CELLS = 1024
 #: Helper threads expanding the deepening's cells ahead, from four cores up.
 AHEAD_HELPERS = 2
 
+#: Cells a worker process expands a level down from each cell it expands (the loop often
+#: goes on down the line it just refined). 0: measured no faster with the loop expanding
+#: the cells no helper started itself (records/IKA-32.md stage 2).
+AHEAD_DEEPER = 0
+
 
 class GraphLeaf:
     """The agent's leaf with its small blocks scored by CUDA-graph replays (IKA-32 stage 2).
@@ -344,10 +349,15 @@ def use_threads(
         wanted = 0 if threads == 1 or leaf is None else min(threads - 1, AHEAD_WORKERS_MAX)
         if deepen.workers(reg) != wanted:
             deepen.start_workers(reg, wanted, process_leaf, tuple(leaf or ()), port_threads=1)
-    # Two helpers from four cores up, each with a port of `threads` cell threads: the
-    # helpers' Python and the loop's LPs share one GIL, so more helpers wait on it.
-    deepen.set_ahead(0 if threads == 1 else threads, helpers=AHEAD_HELPERS if threads >= 4 else 1,
-                     port_threads=threads)
+    # Without worker processes: two helper threads from four cores up, each with a port of
+    # `threads` cell threads (the helpers' Python and the loop's LPs share one GIL, so more
+    # helpers wait on it). With them, each worker also expands `AHEAD_DEEPER` cells a
+    # level down from each cell it expands.
+    remote = reg is not None and deepen.workers(reg) > 0
+    deepen.set_ahead(
+        0 if threads == 1 else threads, helpers=AHEAD_HELPERS if threads >= 4 else 1,
+        port_threads=threads, deeper=AHEAD_DEEPER if remote else 0,
+    )
     equilibrium.set_lp_pair(0 if threads == 1 else LP_PAIR_CELLS)
 
 # ----------------------------------------------------------------------------- the person

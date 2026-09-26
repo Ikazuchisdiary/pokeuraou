@@ -511,6 +511,9 @@ class _Node:
     #: The restricted reading's rectangle (rows, columns), at the root under ``r``; None
     #: where the node is read whole.
     rect: tuple[list[int], list[int]] | None = None
+    #: The key of the cell that opened it and its branch there (`_key`), () at the root:
+    #: a name the cells expanded ahead can use in another process (IKA-32 stage 2).
+    path: tuple[Any, ...] = ()
 
     @property
     def value(self) -> float:
@@ -2076,10 +2079,12 @@ def _expand(
 AHEAD_ENV = "POKEURAOU_DEEPEN_AHEAD"
 _AHEAD = [int(os.environ.get(AHEAD_ENV, "0") or 0)]
 #: Helper threads, and the cell threads of each one's port (None: the module's count).
-_HELPERS: list[Any] = [1, None]
+_HELPERS: list[Any] = [1, None, 0]
 
 
-def set_ahead(cells: int, helpers: int = 1, port_threads: int | None = None) -> None:
+def set_ahead(
+    cells: int, helpers: int = 1, port_threads: int | None = None, deeper: int = 0
+) -> None:
     """Expand up to `cells` of the best cells ahead of the loop, on `helpers` threads with
     a port process each of `port_threads` cell threads (the module's docstring). 0 cells
     turns it off. Changes how long a step takes, never what it does; generation and the
@@ -2089,6 +2094,7 @@ def set_ahead(cells: int, helpers: int = 1, port_threads: int | None = None) -> 
     _AHEAD[0] = int(cells)
     _HELPERS[0] = int(helpers)
     _HELPERS[1] = port_threads
+    _HELPERS[2] = int(deeper)
 
 
 def ahead() -> int:
@@ -2286,16 +2292,26 @@ def _taken(
             ),
         ))
     node.children[cell] = kept
+    _named(node, cell)
     return spent, True, fills
 
 
 def _key(node: Any, cell: tuple[int, ...]) -> tuple[Any, ...]:  # noqa: ANN401
-    """A cell by its node and its two actions (an index moves when the oracle swaps)."""
+    """A cell by its node's path and its two actions (an index moves when the oracle
+    swaps): plain data, so a worker process can name the cells it expands a level down."""
     if isinstance(node, _BeliefRoot):
         k, i, j = cell
-        return (node, k, node.own[i].to_choice(), node.other[j].to_choice())
+        return ((), k, node.own[i].to_choice(), node.other[j].to_choice())
     i, j = cell
-    return (node, -1, node.rows[i].to_choice(), node.cols[j].to_choice())
+    return (node.path, -1, node.rows[i].to_choice(), node.cols[j].to_choice())
+
+
+def _named(node: Any, cell: tuple[int, ...]) -> None:  # noqa: ANN401
+    """Give the children a refined cell opened their paths (`_Node.path`)."""
+    key = _key(node, cell)
+    for b, (_weight, child) in enumerate(node.children.get(cell, ())):
+        if isinstance(child, _Node):
+            child.path = (key, b)
 
 
 def _turn_of(node: Any, cell: tuple[int, ...]) -> tuple[Position, list[SideAction]]:  # noqa: ANN401
@@ -2415,15 +2431,21 @@ class _Helpers:
                 session = self.session
                 batch = session.want[: session.batch]
                 del session.want[: session.batch]
-                for key, _pos, _pair in batch:
+                for key, _pos, _pair, _level in batch:
                     session.busy.add(key)
                 session.active += 1
-            asks = [(pos, pair) for _key, pos, pair in batch]
+            asks = [(pos, pair) for _key, pos, pair, _level in batch]
             remote = False
+            extra: list[tuple[tuple[Any, ...], _Expansion]] = []
             try:
                 if conn is not None:
-                    # A worker process: the batch goes over, the expansions come back.
-                    conn.send((asks, session.budget, session.sub_limit, session.sub_branches))
+                    # A worker process: the batch goes over, the expansions come back, and
+                    # then the cells it expanded a level down.
+                    conn.send((
+                        asks, session.budget, session.sub_limit, session.sub_branches,
+                        [key for key, *_rest in batch], [level for *_rest, level in batch],
+                        session.guard, session.deeper,
+                    ))
                     got = conn.recv()
                     remote = True
                 elif own:
@@ -2441,12 +2463,24 @@ class _Helpers:
             except Exception:  # noqa: BLE001 - each cell is met again the serial way
                 got = [_Expansion(set(), error=True) for _ in batch]
             with self.cv:
-                for (key, _pos, _pair), exp in zip(batch, got, strict=True):
+                for (key, _pos, _pair, _level), exp in zip(batch, got, strict=True):
                     session.busy.discard(key)
                     session.done[key] = exp
                 session.batches += 1
                 session.remote_batches += int(remote)
                 session.expanded += len(batch)
+                self.cv.notify_all()
+            if remote and session.deeper:
+                try:
+                    extra = conn.recv()
+                except Exception:  # noqa: BLE001 - nothing ahead is lost but time
+                    extra = []
+            with self.cv:
+                for key, exp in extra:
+                    if key not in session.done and key not in session.busy:
+                        session.done[key] = exp
+                        session.expanded += 1
+                session.deeper_cells += len(extra)
                 session.active -= 1
                 self.cv.notify_all()
 
@@ -2483,6 +2517,7 @@ class _Ahead:
         count: int,
         helpers: int = 1,
         port_threads: int | None = None,
+        deeper: int = 0,
     ) -> None:
         self.reg = reg
         self.evaluate = evaluate
@@ -2502,9 +2537,13 @@ class _Ahead:
             self.pool = _LOCAL_HELPERS[key]
         self.batch = max(1, count // len(self.pool.threads))
         self.cv = self.pool.cv
-        self.want: list[tuple[tuple[Any, ...], Position, list[SideAction]]] = []
+        self.want: list[tuple[tuple[Any, ...], Position, list[SideAction], int]] = []
         self.busy: set[tuple[Any, ...]] = set()
         self.done: dict[tuple[Any, ...], _Expansion] = {}
+        self.guard = MAX_LEVELS
+        #: Cells a worker process expands a level down from each cell it expands (the
+        #: likeliest next steps: the loop often goes on down the line it just refined).
+        self.deeper = deeper
         #: Batches in a helper's hands.
         self.active = 0
         #: Counts: batches, cells expanded ahead, taken from them, expanded the serial way,
@@ -2514,6 +2553,12 @@ class _Ahead:
         self.hits = 0
         self.misses = 0
         self.remote_batches = 0
+        #: Steps whose cell was expanded before the loop asked for it.
+        self.ready = 0
+        #: Cells the worker processes expanded a level down.
+        self.deeper_cells = 0
+        #: Steps whose cell no helper had started, expanded by the loop itself.
+        self.local = 0
         with self.cv:
             if self.pool.session is not None:
                 raise RuntimeError("the deepening's helpers already serve another deepening")
@@ -2522,13 +2567,14 @@ class _Ahead:
     def post(self, root: Any, guard: int = MAX_LEVELS) -> None:  # noqa: ANN401
         """The cells worth expanding now: the best `count` under `root` (`guard`: the
         depth guard, `_best`'s)."""
+        self.guard = guard
         wanted = []
         for node, cell in _ranked(root, self.count, guard):
             key = _key(node, cell)
             if key in self.done or key in self.busy:
                 continue
             pos, pair = _turn_of(node, cell)
-            wanted.append((key, pos, pair))
+            wanted.append((key, pos, pair, node.level))
         with self.cv:
             self.want = wanted
             if wanted:
@@ -2540,24 +2586,31 @@ class _Ahead:
         """`_expand`'s answer for the cell, from the helpers when they can give it."""
         key = _key(node, cell)
         with self.cv:
-            while key not in self.done:
-                if key not in self.busy and not any(w[0] == key for w in self.want):
-                    pos, pair = _turn_of(node, cell)
-                    self.want.insert(0, (key, pos, pair))
-                    self.cv.notify_all()
+            self.ready += int(key in self.done)
+            here = key not in self.done and key not in self.busy
+            if here:
+                # Nobody has started it: the loop expands it itself, now, rather than
+                # queue it behind the helpers' guesses.
+                self.want = [w for w in self.want if w[0] != key]
+            while not here and key not in self.done:
                 self.cv.wait()
-            exp = self.done.pop(key)
-        got = _taken(exp, node, cell, unmodelled)
+            exp = None if here else self.done.pop(key)
+        got = None if exp is None else _taken(exp, node, cell, unmodelled)
         if got is not None:
             self.hits += 1
             return got
-        self.misses += 1
+        if exp is None:
+            self.local += 1
+        else:
+            self.misses += 1
         with self.lock:
-            return _expand(
+            got = _expand(
                 self.reg, node, cell, self.evaluate, budget=self.budget,
                 sub_limit=self.sub_limit, sub_branches=self.sub_branches,
                 unmodelled=unmodelled,
             )
+        _named(node, cell)
+        return got
 
     def close(self) -> None:
         with self.cv:
@@ -2575,6 +2628,9 @@ class _Ahead:
         _AHEAD_COUNTS["hits"] += self.hits
         _AHEAD_COUNTS["misses"] += self.misses
         _AHEAD_COUNTS["remote"] += self.remote_batches
+        _AHEAD_COUNTS["ready"] += self.ready
+        _AHEAD_COUNTS["deeper"] += self.deeper_cells
+        _AHEAD_COUNTS["local"] += self.local
 
 
 #: Worker processes that expand cells ahead (`start_workers`), by regulation: a list of
@@ -2606,7 +2662,7 @@ def _worker_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],
             return
         if message is None:
             return
-        asks, budget, sub_limit, sub_branches = message
+        asks, budget, sub_limit, sub_branches, keys, levels, guard, deeper = message
         try:
             got = _expand_many(
                 reg, asks, leaf, budget=budget, sub_limit=sub_limit, sub_branches=sub_branches
@@ -2614,6 +2670,55 @@ def _worker_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],
         except Exception:  # noqa: BLE001 - each cell is met again the serial way
             got = [_Expansion(set(), error=True) for _ in asks]
         conn.send(got)
+        if not deeper:
+            continue
+        down = _down(keys, got, levels, guard, deeper)
+        try:
+            more = _expand_many(
+                reg, [(pos, pair) for _key, pos, pair in down], leaf, budget=budget,
+                sub_limit=sub_limit, sub_branches=sub_branches,
+            ) if down else []
+        except Exception:  # noqa: BLE001 - a guess, not needed
+            more = []
+        conn.send([(key, exp) for (key, _pos, _pair), exp in zip(down, more, strict=True)])
+
+
+def _down(
+    keys: Sequence[tuple[Any, ...]], got: Sequence[_Expansion], levels: Sequence[int],
+    guard: int, count: int,
+) -> list[tuple[tuple[Any, ...], Position, list[SideAction]]]:
+    """The `count` cells a level down from these expansions the loop is likeliest to take
+    next: in each child the tree would keep, its cells by `_signal` over the child's best,
+    times the branch's weight -- `_scores`'s ranking below the refined cell."""
+    found: list[tuple[float, tuple[Any, ...], Position, list[SideAction]]] = []
+    for key, exp, level in zip(keys, got, levels, strict=True):
+        if exp.error or exp.early or level + 1 >= guard:
+            continue
+        for b, (weight, kind, data) in enumerate(exp.branches):
+            if kind in ("empty", "error"):
+                break
+            if kind != "node":
+                continue
+            child_pos, row, col, payoff, _notes, equilibrium = data
+            if equilibrium is None:
+                break
+            gap = equilibrium.row_ev_loss[:, None] + equilibrium.col_ev_loss[None, :]
+            signal = payoff * (1.0 - payoff) / (gap + GAP_FLOOR)
+            top = float(signal.max()) if signal.size else 0.0
+            if top <= 0.0:
+                continue
+            path = (key, b)
+            for flat in np.argsort(-signal, axis=None, kind="stable")[:count]:
+                i, j = divmod(int(flat), signal.shape[1])
+                if signal[i, j] <= 0.0:
+                    break
+                found.append((
+                    weight * float(signal[i, j]) / top,
+                    (path, -1, row[i].to_choice(), col[j].to_choice()),
+                    child_pos, [row[i], col[j]],
+                ))
+    found.sort(key=lambda item: -item[0])
+    return [(key, pos, pair) for _score, key, pos, pair in found[:count]]
 
 
 def start_workers(
@@ -2691,7 +2796,10 @@ atexit.register(stop_workers)
 
 
 #: Totals over the process of every `_Ahead` (the positive control of IKA-32 stage 2).
-_AHEAD_COUNTS = {"batches": 0, "expanded": 0, "hits": 0, "misses": 0, "remote": 0}
+_AHEAD_COUNTS = {
+    "batches": 0, "expanded": 0, "hits": 0, "misses": 0, "remote": 0, "ready": 0, "deeper": 0,
+    "local": 0,
+}
 
 
 def ahead_counts() -> dict[str, int]:
@@ -2709,7 +2817,7 @@ def _start_ahead(
         return None
     return _Ahead(
         reg, evaluate, budget=budget, sub_limit=sub_limit, sub_branches=sub_branches,
-        count=count, helpers=_HELPERS[0], port_threads=_HELPERS[1],
+        count=count, helpers=_HELPERS[0], port_threads=_HELPERS[1], deeper=_HELPERS[2],
     )
 
 
