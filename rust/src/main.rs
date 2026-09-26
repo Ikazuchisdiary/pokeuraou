@@ -44,6 +44,7 @@ mod qfeatures;
 mod score;
 mod semi_invulnerable;
 mod shm;
+mod small_rules;
 mod speed;
 mod terrain;
 mod transform;
