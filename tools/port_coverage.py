@@ -65,6 +65,7 @@ PORT_ENGINE_FILES = [
     "level_struggle.rs",
     "move_hooks.rs",
     "magic_guard.rs",
+    "ability_notes.rs",
     "transform.rs",
 ]
 
