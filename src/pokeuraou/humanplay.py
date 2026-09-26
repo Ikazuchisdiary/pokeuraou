@@ -101,7 +101,7 @@ from .narrow import drop_dead_actions
 from .payoff import HP_SHARE, Objective
 from .position import Position
 from .priors import SampledSet
-from .progress import SLOT_SEPARATOR, Reader, Recorder, action_label
+from .progress import Reader, Recorder, action_label
 from .regulation import Regulation
 from .search import belief_solve, search
 from .selection_book import BenchPrior, BookEntry
@@ -1170,8 +1170,11 @@ class HumanGame:
                     "decision": len(record.decisions) - 1,
                     "agent": agent_label,
                     "person": person_label,
-                    "agentSlots": agent_label.split(SLOT_SEPARATOR),
-                    "personSlots": person_label.split(SLOT_SEPARATOR),
+                    "agentSlots": [text for _slot, text in agent_label.parts],
+                    "personSlots": [text for _slot, text in person_label.parts],
+                    # Each part with the active slot it is for (IKA-345).
+                    "agentParts": [list(part) for part in agent_label.parts],
+                    "personParts": [list(part) for part in person_label.parts],
                     "offMenu": extra["humanOffMenu"],
                     "changes": [] if advanced is None else turn_changes(
                         reg, pos, advanced, self.you, self.loc, names=self.side_names

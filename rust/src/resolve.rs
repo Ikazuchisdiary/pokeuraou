@@ -1467,6 +1467,16 @@ pub fn resolve_turn_logged<'a>(
             let mut turn = Turn::new(reg, pos.clone(), budget, attacks);
             if events {
                 turn.log = Some(Box::default());
+                if tie_weight < 1.0 {
+                    // IKA-345: `tie <first> <second>` per Speed tie the order resolved.
+                    for group in ties.iter().filter(|g| g.len() == 2) {
+                        let at = |v: usize| permutation.iter().position(|x| *x == v);
+                        let (a, b) = (group[0], group[1]);
+                        let (first, second) = if at(a) <= at(b) { (a, b) } else { (b, a) };
+                        let (f, s) = (&queue[first], &queue[second]);
+                        chance_tag!(turn, "tie {} {}", Name(f.side, f.slot), Name(s.side, s.slot));
+                    }
+                }
             }
             let start = Live { weight: 1.0, turn, remaining: sequence };
             let started = phase_start();
@@ -1899,6 +1909,7 @@ fn merge_live<'a>(items: Vec<Live<'a>>) -> Vec<Live<'a>> {
         |x, y| x.remaining == y.remaining && same_turn(&x.turn, &y.turn),
         |into, other| {
             into.weight += other.weight;
+            crate::events::merge_logs(&mut into.turn.log, &other.turn.log);
             into.turn.unmodelled.extend(other.turn.unmodelled);
         },
     )
@@ -1918,7 +1929,10 @@ fn merge_branches(items: Vec<Branch>) -> Vec<Branch> {
         items,
         |branch| state_fingerprint(&branch.position, &[], false),
         |x, y| same_position(&x.position, &y.position),
-        |into, other| into.probability += other.probability,
+        |into, other| {
+            into.probability += other.probability;
+            crate::events::merge_logs(&mut into.log, &other.log);
+        },
     )
     .0
 }
@@ -1933,7 +1947,10 @@ fn merge_suspended<'a>(items: Vec<Suspended<'a>>) -> Vec<Suspended<'a>> {
         items,
         |pause| state_fingerprint(&pause.turn.pos, &pause.remaining, true),
         |x, y| x.remaining == y.remaining && same_turn(&x.turn, &y.turn),
-        |into, other| into.probability += other.probability,
+        |into, other| {
+            into.probability += other.probability;
+            crate::events::merge_logs(&mut into.turn.log, &other.turn.log);
+        },
     )
     .0
 }

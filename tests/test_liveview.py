@@ -224,6 +224,43 @@ def test_the_recorder_sends_the_first_and_the_last_and_throttles_between(pool) -
 # ------------------------------------------------------------------------ the wire
 
 
+def test_the_branches_say_their_draws_and_the_nodes_their_field(pool) -> None:  # noqa: ANN001
+    """IKA-345: a deepened pair's branches are named by the draws that split them (the
+    port's chance tags) -- siblings never read the same, draws and results together -- and
+    each branch's node carries each side's actives; labels come with their slots."""
+    heard = Heard()
+    _play(pool, PolicyPerson("random", 7), seed=7, listener=heard)
+    done = [s for s in heard.of("step") if s.kind == "done"]
+    split = named = 0
+    for s in done:
+        for label, action in zip(s.our_labels, s.ours, strict=True):
+            assert [slot for slot, _t in label.parts] == [a.slot for a in action.slots]
+        stack = list(s.pv)
+        while stack:
+            pair = stack.pop()
+            if len(pair.branches) > 1:
+                split += 1
+                texts = []
+                for b in pair.branches:
+                    named += bool(b.causes)
+                    texts.append((
+                        tuple((c.head, c.body) for c in b.causes),
+                        tuple(tuple((c.name, c.hp_from, c.hp_to, c.entered, c.fainted, c.status)
+                                    for c in side) for side in b.changes),
+                    ))
+                # The draws, with the results, tell every sibling apart.
+                assert len(set(texts)) == len(texts), texts
+            for b in pair.branches:
+                if b.node is not None:
+                    assert len(b.node.field) == 2
+                    assert all(len(side) >= 1 for side in b.node.field)
+                    assert any(m is not None for side in b.node.field for m in side)
+                    stack.extend(b.node.pairs)
+    # Positive controls: the tree split somewhere, and the port named the draws.
+    assert split, "no pair with more than one branch; the check would be vacuous"
+    assert named, "no branch named by its draws"
+
+
 def test_the_wire_gives_back_what_it_packed(pool) -> None:  # noqa: ANN001
     heard = Heard()
     _play(pool, PolicyPerson("random", 7), seed=7, listener=heard)
@@ -245,6 +282,17 @@ def test_the_wire_gives_back_what_it_packed(pool) -> None:  # noqa: ANN001
         assert len(back["classes"]) == len(snap.classes)
         assert [p["read"] for p in back["pv"]] == [p.read for p in snap.pv]
         assert [len(p["branches"]) for p in back["pv"]] == [len(p.branches) for p in snap.pv]
+        assert back["oursParts"] == [[list(x) for x in t.parts] for t in snap.our_labels]
+        for bp, sp in zip(back["pv"], snap.pv, strict=True):
+            for bb, sb in zip(bp["branches"], sp.branches, strict=True):
+                assert [c["body"] for c in bb["causes"]] == [c.body for c in sb.causes]
+                assert [[c["to"] for c in side] for side in bb["changes"]] == [
+                    [c.hp_to for c in side] for side in sb.changes
+                ]
+                if sb.node is not None:
+                    assert [[m and m["name"] for m in side] for side in bb["node"]["field"]] == [
+                        [m and m.name for m in side] for side in sb.node.field
+                    ]
     events = [b for k, _, b in got if k != "step"]
     assert events[0]["type"] == "sheets" and events[-1]["type"] == "end"
     prompt = next(b for b in events if b["type"] == "prompt")

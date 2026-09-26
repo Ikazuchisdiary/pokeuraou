@@ -10,7 +10,9 @@ board, and the person's input, in a browser.
    action a string id, its probability (f64, so the last one equals the recorded policy
    bit for bit) and its loss (f32), the opponent's per completion, and the principal
    variation as a pre-order list. Every string (an action's label, a bench, a branch's
-   text) goes once, in a strings frame, the first time it is used, and is an id after.
+   text) goes once, in a strings frame, the first time it is used, and is an id after. An
+   action's label is an id into a second table, of labels (IKA-345): each label's parts,
+   one per active slot with the slot's number, so the page never splits a text.
    The events that come once a turn or less (the board, the sheets, the person's prompt,
    the turn's result, the end) are small JSON texts in an event frame: they are read once
    by the page, not streamed, and JSON keeps them readable.
@@ -50,7 +52,7 @@ import numpy as np
 from .actions import SideAction
 from .humanplay import MovePlan, Person, parse_choice, parse_selection
 from .priors import SampledSet
-from .progress import SLOT_SEPARATOR, PvBranch, PvNode, PvPair, Snapshot
+from .progress import SLOT_SEPARATOR, PvBranch, PvNode, PvPair, Snapshot, label_parts
 
 # ----------------------------------------------------------------------------- the wire
 
@@ -61,6 +63,20 @@ STEP = 3
 #: The analysis mode's status (IKA-337): the elapsed time, the steps, the lines at the depth
 #: guard, the tree's size and the memory against its limits, a few times a second.
 STATUS = 4
+#: New labels (IKA-345): the first id and the count, then each label's parts -- a count,
+#: and per part the active slot (i8, -1: none) and the part's string id.
+LABELS = 5
+
+#: No string (a field's empty slot, a change without a new status).
+NONE = 0xFFFFFFFF
+#: A cause (`progress.Cause`): plain, head, body, title.
+_CAUSE = struct.Struct("<BIII")
+#: A change (`progress.Change`): name, sprite, HP before and after (%), flags (1 came in,
+#: 2 fainted), status (or NONE).
+_CHANGE = struct.Struct("<IIBBBI")
+#: A node's active (`progress.NodeMon`): name, sprite, HP %, flags (1 fainted, 2 came in,
+#: 4 empty slot).
+_FIELD = struct.Struct("<IIBB")
 
 KINDS = ("start", "refine", "refused", "widen", "done")
 READS = ("leaf", "deep", "refused")
@@ -103,6 +119,30 @@ class Wire:
     def __init__(self) -> None:
         self.ids: dict[str, int] = {}
         self._new: list[str] = []
+        self.label_ids: dict[tuple[tuple[int, str], ...], int] = {}
+        self._new_labels: list[tuple[tuple[int, int], ...]] = []
+
+    def label(self, text: str) -> int:
+        """A label's id in the table of labels (its parts' strings interned first)."""
+        parts = label_parts(text)
+        got = self.label_ids.get(parts)
+        if got is None:
+            got = len(self.label_ids)
+            self.label_ids[parts] = got
+            self._new_labels.append(tuple((slot, self.intern(part)) for slot, part in parts))
+        return got
+
+    def _labels(self) -> list[bytes]:
+        if not self._new_labels:
+            return []
+        first = len(self.label_ids) - len(self._new_labels)
+        out = [struct.pack("<BIH", LABELS, first, len(self._new_labels))]
+        for parts in self._new_labels:
+            out.append(struct.pack("<B", len(parts)))
+            for slot, sid in parts:
+                out.append(struct.pack("<bI", max(-1, min(slot, 127)), sid))
+        self._new_labels = []
+        return [b"".join(out)]
 
     def intern(self, text: str) -> int:
         got = self.ids.get(text)
@@ -142,8 +182,8 @@ class Wire:
 
     def step(self, snap: Snapshot) -> list[bytes]:
         """A snapshot's frames: new strings first, then the step."""
-        ours = np.array([self.intern(t) for t in snap.our_labels], dtype="<u4")
-        theirs = np.array([self.intern(t) for t in snap.their_labels], dtype="<u4")
+        ours = np.array([self.label(t) for t in snap.our_labels], dtype="<u4")
+        theirs = np.array([self.label(t) for t in snap.their_labels], dtype="<u4")
         parts = [
             bytes([STEP]),
             _HEAD.pack(
@@ -168,13 +208,14 @@ class Wire:
             parts.append(np.asarray(view.p, dtype="<f4").tobytes())
         self._pairs(snap.pv, parts)
         frame = b"".join(parts)
-        return [*self._strings(), frame]
+        labels = self._labels()
+        return [*self._strings(), *labels, frame]
 
     def _pairs(self, pairs: Sequence[PvPair], parts: list[bytes]) -> None:
         parts.append(struct.pack("<B", len(pairs)))
         for pair in pairs:
             parts.append(struct.pack(
-                "<IIhBffB", self.intern(pair.ours), self.intern(pair.theirs), pair.klass,
+                "<IIhBffB", self.label(pair.ours), self.label(pair.theirs), pair.klass,
                 READS.index(pair.read), pair.p, pair.value, len(pair.branches),
             ))
             for branch in pair.branches:
@@ -188,14 +229,43 @@ class Wire:
         parts.append(struct.pack(
             "<ffIB", branch.weight, branch.value, self.intern(branch.what), flags
         ))
+        parts.append(struct.pack("<B", len(branch.causes)))
+        for cause in branch.causes:
+            parts.append(_CAUSE.pack(
+                1 if cause.plain else 0, self.intern(cause.head), self.intern(cause.body),
+                self.intern(cause.title),
+            ))
+        for side in branch.changes:
+            parts.append(struct.pack("<B", len(side)))
+            for c in side:
+                parts.append(_CHANGE.pack(
+                    self.intern(c.name), self.intern(c.sprite), _pct(c.hp_from), _pct(c.hp_to),
+                    (1 if c.entered else 0) | (2 if c.fainted else 0),
+                    self.intern(c.status) if c.status else NONE,
+                ))
         if node is not None:
-            parts.append(struct.pack("<fB", node.value, len(node.ours)))
+            parts.append(struct.pack("<f", node.value))
+            for side in node.field:
+                parts.append(struct.pack("<B", len(side)))
+                for mon in side:
+                    if mon is None:
+                        parts.append(_FIELD.pack(NONE, NONE, 0, 4))
+                    else:
+                        parts.append(_FIELD.pack(
+                            self.intern(mon.name), self.intern(mon.sprite), _pct(mon.percent),
+                            (1 if mon.fainted else 0) | (2 if mon.new else 0),
+                        ))
+            parts.append(struct.pack("<B", len(node.ours)))
             for label, p in node.ours:
-                parts.append(struct.pack("<If", self.intern(label), p))
+                parts.append(struct.pack("<If", self.label(label), p))
             parts.append(struct.pack("<B", len(node.theirs)))
             for label, p in node.theirs:
-                parts.append(struct.pack("<If", self.intern(label), p))
+                parts.append(struct.pack("<If", self.label(label), p))
             self._pairs(node.pairs, parts)
+
+
+def _pct(value: int) -> int:
+    return max(0, min(int(value), 255))
 
 
 class Decoder:
@@ -203,9 +273,30 @@ class Decoder:
 
     def __init__(self) -> None:
         self.strings: list[str] = []
+        #: The table of labels: each a list of [slot, text].
+        self.labels: list[list[list[Any]]] = []
+
+    def label(self, lid: int) -> str:
+        """A label's text (its parts joined, as `progress.Label` writes it)."""
+        return SLOT_SEPARATOR.join(text for _slot, text in self.labels[lid])
 
     def feed(self, frame: bytes) -> dict[str, Any] | None:
         kind = frame[0]
+        if kind == LABELS:
+            first, count = struct.unpack_from("<IH", frame, 1)
+            if first != len(self.labels):
+                raise ValueError(f"labels from {first}, table has {len(self.labels)}")
+            at = 7
+            for _ in range(count):
+                (n,) = struct.unpack_from("<B", frame, at)
+                at += 1
+                parts = []
+                for _ in range(n):
+                    slot, sid = struct.unpack_from("<bI", frame, at)
+                    at += 5
+                    parts.append([slot, self.strings[sid]])
+                self.labels.append(parts)
+            return None
         if kind == STRINGS:
             first, count = struct.unpack_from("<IH", frame, 1)
             if first != len(self.strings):
@@ -240,10 +331,12 @@ class Decoder:
             return got
 
         s = self.strings
-        ours = [s[i] for i in take("<u4", n_ours)]
+        our_ids = take("<u4", n_ours)
+        ours = [self.label(i) for i in our_ids]
         our_p = take("<f8", n_ours)
         our_loss = take("<f4", n_ours)
-        theirs = [s[i] for i in take("<u4", n_theirs)]
+        their_ids = take("<u4", n_theirs)
+        theirs = [self.label(i) for i in their_ids]
         their_p = take("<f4", n_theirs)
         their_loss = take("<f4", n_theirs)
         classes = []
@@ -263,7 +356,9 @@ class Decoder:
             for _ in range(count):
                 o, t, klass, rd, p, v, nb = struct.unpack_from("<IIhBffB", frame, at)
                 at += struct.calcsize("<IIhBffB")
-                out.append({"ours": s[o], "theirs": s[t], "class": klass, "read": READS[rd],
+                out.append({"ours": self.label(o), "theirs": self.label(t),
+                            "oursParts": self.labels[o], "theirsParts": self.labels[t],
+                            "class": klass, "read": READS[rd],
                             "p": p, "value": v, "branches": [branch() for _ in range(nb)]})
             return out
 
@@ -275,7 +370,7 @@ class Decoder:
             for _ in range(count):
                 i, p = struct.unpack_from("<If", frame, at)
                 at += 8
-                out.append((s[i], p))
+                out.append((self.label(i), p))
             return out
 
         def branch() -> dict[str, Any]:
@@ -284,10 +379,45 @@ class Decoder:
             at += struct.calcsize("<ffIB")
             got: dict[str, Any] = {"weight": w, "value": v, "what": s[what],
                                    "ended": bool(flags & 1), "more": bool(flags & 4)}
+            (nc,) = struct.unpack_from("<B", frame, at)
+            at += 1
+            causes = []
+            for _ in range(nc):
+                plain, head, body, title = _CAUSE.unpack_from(frame, at)
+                at += _CAUSE.size
+                causes.append({"plain": bool(plain), "head": s[head], "body": s[body],
+                               "title": s[title]})
+            got["causes"] = causes
+            changes = []
+            for _side in range(2):
+                (n,) = struct.unpack_from("<B", frame, at)
+                at += 1
+                row = []
+                for _ in range(n):
+                    name, sprite, a, b, cf, status = _CHANGE.unpack_from(frame, at)
+                    at += _CHANGE.size
+                    row.append({"name": s[name], "sprite": s[sprite], "from": a, "to": b,
+                                "entered": bool(cf & 1), "fainted": bool(cf & 2),
+                                "status": "" if status == NONE else s[status]})
+                changes.append(row)
+            got["changes"] = changes
             if flags & 2:
                 (nv,) = struct.unpack_from("<f", frame, at)
                 at += 4
-                got["node"] = {"value": nv, "ours": top(), "theirs": top(), "pairs": pairs()}
+                field = []
+                for _side in range(2):
+                    (n,) = struct.unpack_from("<B", frame, at)
+                    at += 1
+                    row = []
+                    for _ in range(n):
+                        name, sprite, pct, ff = _FIELD.unpack_from(frame, at)
+                        at += _FIELD.size
+                        row.append(None if ff & 4 else {
+                            "name": s[name], "sprite": s[sprite], "percent": pct,
+                            "fainted": bool(ff & 1), "new": bool(ff & 2)})
+                    field.append(row)
+                got["node"] = {"value": nv, "field": field, "ours": top(), "theirs": top(),
+                               "pairs": pairs()}
             return got
 
         pv = pairs()
@@ -301,6 +431,8 @@ class Decoder:
             "value0": value0, "value": value, "read": read, "gap": gap,
             "ours": ours, "ourP": our_p.tolist(), "ourLoss": our_loss.tolist(),
             "theirs": theirs, "theirP": their_p.tolist(), "theirLoss": their_loss.tolist(),
+            "oursParts": [self.labels[i] for i in our_ids],
+            "theirsParts": [self.labels[i] for i in their_ids],
             "classes": classes, "pv": pv,
         }
 
@@ -544,7 +676,7 @@ class LiveServer:
     def _send(self, frames: list[bytes], *, keep: str, done: bool = False) -> None:
         with self.lock:
             for frame in frames:
-                if frame[0] == STRINGS or keep == "event":
+                if frame[0] in (STRINGS, LABELS) or keep == "event":
                     self.history.append(frame)
                 elif done:
                     # The decision's last step stays; the ones before it are dropped.
@@ -713,6 +845,7 @@ __all__ = [
     "STATUS",
     "STEP",
     "SPRITE_URL",
+    "LABELS",
     "STRINGS",
     "Decoder",
     "FileSink",
