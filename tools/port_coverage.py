@@ -67,6 +67,7 @@ PORT_ENGINE_FILES = [
     "magic_guard.rs",
     "ability_notes.rs",
     "transform.rs",
+    "small_rules.rs",
 ]
 
 #: What is left of Python's engine -- the damage calculator, speed, the menus -- read by
