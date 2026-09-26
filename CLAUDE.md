@@ -69,7 +69,8 @@ uv run pytest --junitxml=reports/pytest.xml && uv run python tools/ci_skip_audit
    - M-B は `selfplay.py`。自陣のロスタ対プール。
 3. 記録（jsonl）を `tools/encode_dataset.py` で符号化し、`tools/train_value.py` で学ぶ（温間始動は `--init-from`）。
 4. 盤は `tools/match_queue.py`（M-C は `--pool`、止めるのは `--sprt 0 10`）。レーティングは `tools/ratings.py`。
-5. 今の M-C の出荷の葉は `data/models/value-mc0.pt`・`value-mc0-s1.pt`（2 本の平均）。
+5. 今の M-C の本番の評価モデルは `data/models/value-mc1.pt`・`value-mc1-s1.pt`（gen-1、2 本の平均。IKA-346）。次の世代は、gen-0 + gen-1 のように前の世代のデータに足して、前の世代の評価モデルの種ごとに温間始動で学ぶ（`--init-from <前の種 k> --epochs 2 --lr 5e-4 --keep last`）。
+- Q（`data/models/q-mc0.pt`）は評価モデルを替えるたびに確かめる（IKA-346）: 新しい世代の局面 3,000（`q_teach.py index` の先頭）を、前と新しい評価モデルで `q_teach.py fill` し、Q のセルの MAE の増え方 r が 11% 未満なら Q はそのまま、以上なら Q の教材を新しい評価モデルで作り直して、同じ評価モデルの対戦評価で前の Q と比べる。gen-1 は r = +55.7%（行列全体の水準のずれを除いても +29.4%）で、作り直しは IKA-348。手順と 11% の根拠は records/IKA-346.md §4。
 - M-C のデータ生成と対戦評価の候補集合は、葉の順位付けで `--rank-fill` を名指ししなければ `q-nocover`（Q は `data/models/q-mc0.pt`、無ければ止まる。IKA-338）。`refs2` は名指しすれば打てる。ライブラリ（`play_game` など）と M-B の既定は `refs2` のまま。人と打つ道具は Q が無ければ注記して `refs2`。
 - 生成の設定と、対戦・計測の道具の設定がずれていないかは `agent_drift.py` が見る。対戦で打つ手は、生成と同じ引数で `play_game` を呼んでいなければならない。
 - 速さの内訳は `tools/profile_stages.py`（段の計時・二度呼びの数え・標本採り。既定で off）で測る。
