@@ -385,6 +385,32 @@ fn score_pool(reg: &Reg, value: &Value) -> Value {
     }
 }
 
+/// Both sides' candidate features for the candidate model (IKA-274): `qfeatures`
+/// answers `WIDTH` numbers per candidate of each side's list, from the same calculator the
+/// `score` command uses. A position the calculator refuses is refused whole.
+fn qfeatures(reg: &Reg, value: &Value) -> Value {
+    let position = Position::from_json(&value["position"]);
+    if &*position.format != reg.format_id.as_str() {
+        return json!({
+            "error": format!(
+                "position is {} but the regulation is {}", position.format, reg.format_id
+            )
+        });
+    }
+    let mut out = Vec::with_capacity(2);
+    for side in 0..2usize {
+        let candidates: Vec<Vec<crate::resolve::SlotAction>> = value["candidates"][side]
+            .as_array()
+            .map(|list| list.iter().map(crate::resolve::parse_actions_list).collect())
+            .unwrap_or_default();
+        match crate::qfeatures::side_features(reg, &position, side, &candidates) {
+            Err(reason) => return json!({ "refused": reason }),
+            Ok(rows) => out.push(rows.iter().map(|r| r.to_vec()).collect::<Vec<_>>()),
+        }
+    }
+    json!({ "width": crate::qfeatures::WIDTH, "features": out })
+}
+
 /// JSONL over stdio: one request per line, one response per line.
 ///
 /// The lock is held across the loop rather than taken per line, because an encoded node
@@ -534,6 +560,7 @@ fn many(reg: &Reg, value: &Value) -> Value {
     let answer_one = |one: &Value| -> Value {
         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match one["kind"].as_str() {
             Some("score") => score_pool(reg, one),
+            Some("qfeatures") => qfeatures(reg, one),
             kind if crate::resolve::commands::handles(kind) => {
                 crate::resolve::commands::answer(reg, one)
             }
@@ -700,6 +727,7 @@ fn answer<R: BufRead, W: Write>(
         Err(error) => json!({ "error": error.to_string() }),
         Ok(value) if value["kind"].as_str() == Some("resolve") => resolve_one(reg, &value),
         Ok(value) if value["kind"].as_str() == Some("score") => score_pool(reg, &value),
+        Ok(value) if value["kind"].as_str() == Some("qfeatures") => qfeatures(reg, &value),
         Ok(value) if value["kind"].as_str() == Some("many") => many(reg, &value),
         // The cell threads' own account (IKA-32): how many, and how much ran on them.
         Ok(value) if value["kind"].as_str() == Some("parallel") => crate::par::report(),
