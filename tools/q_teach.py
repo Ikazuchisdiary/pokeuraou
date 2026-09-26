@@ -198,8 +198,12 @@ def fill_position(ctx: dict[str, Any], k: int, check: bool) -> tuple[list[dict[s
             _children_cpu(),
             leaf.evaluated,
         )
+        spread = None
         try:
-            matrix, _unmodelled = port.batched_payoff(reg, pos, pools[0], pools[1], leaf, budget=budget)
+            if ctx.get("spread"):
+                matrix, spread = filled_with_spread(reg, pos, pools, leaf, budget)
+            else:
+                matrix, _unmodelled = port.batched_payoff(reg, pos, pools[0], pools[1], leaf, budget=budget)
         except port.PortRefused:
             notes["refused"] += 1
             continue
@@ -222,11 +226,51 @@ def fill_position(ctx: dict[str, Any], k: int, check: bool) -> tuple[list[dict[s
             "cols": [a.to_choice() for a in pools[1]],
             "cost": [seconds, cpu, kids, float(leaves)],
             "check": control(ctx, pos, pools, matrix) if check else None,
+            "spread": spread,
         }
         notes["views"] += 1
         out.append(row)
         made.append((as_json, row))
     return out, notes
+
+
+#: Chance branches a cell keeps at depth 2 (`search.DEFAULT_SUB_BRANCHES`), for the
+#: probability left outside them.
+SPREAD_TOP = 3
+
+
+def filled_with_spread(
+    reg: Any, pos: Any, pools: tuple[list, list], leaf: Any, budget: Any
+) -> tuple[np.ndarray, np.ndarray]:  # noqa: ANN401
+    """`port.batched_payoff`'s matrix, taken apart so each cell's chance branches are seen.
+
+    The same three steps `port._encoded` takes (the port's encoded node, one scoring call,
+    the fold), so the matrix is the one `batched_payoff` returns; beside it, per cell, the
+    probability-weighted sd of its branches' leaf values, the probability outside its
+    `SPREAD_TOP` likeliest branches, and how many branches it has (IKA-322's inputs). A
+    cell paused mid-turn (a fold) has NaN, NaN, 0.
+    """
+    from pokeuraou import port
+
+    plan = port.encoded_leaf_plan([leaf])
+    if plan is None or plan[0][1] is None:
+        raise ValueError("the branch spread needs a learned leaf on the encoded road")
+    filled = port._fill_encoded(reg, pos, pools[0], pools[1], plan, [plan[0][1]], budget, None)  # noqa: SLF001
+    values = np.asarray(plan[0][1](filled.encoded), dtype=np.float64)
+    shape = (len(pools[0]), len(pools[1]))
+    matrix = port._folded(filled, values, shape)  # noqa: SLF001
+    spread = np.zeros((3, *shape), dtype=np.float32)
+    spread[0:2] = np.nan
+    for i, j, indices, weights in filled.spans:
+        if not weights:
+            continue
+        w = np.asarray(weights, dtype=np.float64)
+        v = values[indices]
+        mean = float(v @ w) / float(w.sum())
+        spread[0, i, j] = float(np.sqrt(w @ (v - mean) ** 2 / w.sum()))
+        spread[1, i, j] = float(1.0 - np.sort(w)[::-1][:SPREAD_TOP].sum() / w.sum())
+        spread[2, i, j] = len(w)
+    return matrix, spread
 
 
 def control(ctx: dict[str, Any], pos: Any, pools: tuple[list, list], matrix: np.ndarray) -> list[float]:  # noqa: ANN401
@@ -347,6 +391,11 @@ def write_shard(path: Path, rows: list[dict[str, Any]], notes: dict[str, int], m
     }
     for name in ENCODED:
         arrays[f"enc_{name}"] = np.stack([r["encoded"][name] for r in rows]) if rows else np.zeros(0)
+    if rows and rows[0].get("spread") is not None:
+        # Per cell, in `cells` order: branch sd, probability outside the top branches, count.
+        arrays["spread_sd"] = np.concatenate([r["spread"][0].ravel() for r in rows])
+        arrays["spread_rest"] = np.concatenate([r["spread"][1].ravel() for r in rows])
+        arrays["spread_n"] = np.concatenate([r["spread"][2].ravel() for r in rows]).astype(np.int16)
     buffer = io.BytesIO()
     np.savez(buffer, **arrays)
     tmp = path.with_suffix(".tmp")
@@ -368,7 +417,14 @@ def run_worker(args: argparse.Namespace) -> None:
     reg = pool.reg
     register_mega_stones(reg)
     leaf, encoder = build_leaf(args, reg)
-    ctx = {"reg": reg, "pool": pool, "leaf": leaf, "encoder": encoder, "index": index}
+    ctx = {
+        "reg": reg,
+        "pool": pool,
+        "leaf": leaf,
+        "encoder": encoder,
+        "index": index,
+        "spread": args.branch_spread,
+    }
     out = Path(args.out)
     meta = {
         "value": [Path(p).name for p in args.value] if not args.inference else "served",
@@ -465,6 +521,7 @@ def run_fill(args: argparse.Namespace) -> None:
         args.device,
         "--check-every",
         str(args.check_every),
+        *(["--branch-spread"] if args.branch_spread else []),
         "--value",
         *args.value,
     ]
@@ -744,6 +801,11 @@ def main() -> None:
             )
             p.add_argument("--regulation", default="gen9championsvgc2026regmc")
             p.add_argument("--check-every", type=int, default=0)
+            p.add_argument(
+                "--branch-spread",
+                action="store_true",
+                help="also record each cell's chance-branch spread (IKA-322; off by default)",
+            )
             p.add_argument("--worker", type=int, default=None, help=argparse.SUPPRESS)
 
     feats = sub.add_parser("features")

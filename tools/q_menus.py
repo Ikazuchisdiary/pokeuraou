@@ -41,6 +41,24 @@ sys.path.insert(0, str(ROOT / "tools"))
 SUP = 1e-6
 TOL = 1e-6
 WIDTH = 12
+#: The menu widths the recall curves are read at (inside the width-24 menus).
+WIDTHS = (4, 6, 8, 10, 12, 14, 16, 20, 24)
+#: How near the best reply a reply counts as "the move that punishes" (win probability).
+EPS = 0.005
+RECALL_KEYS = (
+    "def_w0",
+    "def_w1",
+    "def_all0",
+    "def_all1",
+    "exp_best0",
+    "exp_best1",
+    "exp_any0",
+    "exp_any1",
+    "thr_best0",
+    "thr_best1",
+    "thr_any0",
+    "thr_any1",
+)
 
 
 def keys_of(choices: list[str]) -> list[list[str]]:
@@ -223,10 +241,52 @@ def one_position(
         return [payoff @ ymix_over_cols, -(xmix_over_rows @ payoff)]
 
     res: dict[str, dict[str, Any]] = {}
+    kept: dict[str, tuple[list[int], list[int]]] = {}
+    #: label -> width -> (rows, cols): how each form builds a menu of any width.
+    builders: dict[str, Any] = {}
+
+    def recall(rows, cols) -> dict[str, float]:  # noqa: ANN001
+        """The user's three kinds of needed move, each side: are they in this menu?
+
+        def: the width-24 equilibrium's support (weight inside, and all of it inside);
+        exp: the best reply to the other side's recorded play, and any within EPS of it;
+        thr: the best reply to the other side's strategy in THIS menu game (the move that
+        would punish our solve), and any within EPS -- in the replying side's own menu.
+        """
+        rows_s, cols_s = set(rows), set(cols)
+        out: dict[str, float] = {}
+        out["def_w0"] = float(sum(x24[i] for i in rows_s))
+        out["def_w1"] = float(sum(y24[j] for j in cols_s))
+        out["def_all0"] = float(all(i in rows_s for i in range(m) if x24[i] > SUP))
+        out["def_all1"] = float(all(j in cols_s for j in range(n) if y24[j] > SUP))
+        xa, ya, _ = eq(a, rows, cols)
+        for kind, v0, v1 in (
+            ("exp", a @ y_act, -(x_act @ a)),
+            ("thr", a @ ya, -(xa @ a)),
+        ):
+            for side, values, menu in ((0, v0, rows_s), (1, v1, cols_s)):
+                best = float(values.max())
+                out[f"{kind}_best{side}"] = float(int(np.argmax(values)) in menu)
+                near = [i for i in range(len(values)) if values[i] >= best - EPS]
+                out[f"{kind}_any{side}"] = float(any(i in menu for i in near))
+        return out
 
     def menus_from(form: str, scores, fixed=None):  # noqa: ANN001, ANN202
         orders = [order_of(scores[0], ch[0]), order_of(scores[1], ch[1])]
         for variant in ("cover", "nocover"):
+
+            def build(width, variant=variant):  # noqa: ANN001, ANN202
+                if fixed is not None and variant == "cover":
+                    return (
+                        menu_ordered(ch[0], orders[0], limit=width, fixed_cover=sorted(fixed[0]))[0],
+                        menu_ordered(ch[1], orders[1], limit=width, fixed_cover=sorted(fixed[1]))[0],
+                    )
+                return (
+                    menu_ordered(ch[0], orders[0], limit=width, cover=variant == "cover")[0],
+                    menu_ordered(ch[1], orders[1], limit=width, cover=variant == "cover")[0],
+                )
+
+            builders[f"{form}/{variant}"] = build
             if fixed is not None and variant == "cover":
                 r = menu_ordered(ch[0], orders[0], fixed_cover=fixed[0])[0]
                 c = menu_ordered(ch[1], orders[1], fixed_cover=fixed[1])[0]
@@ -236,6 +296,7 @@ def one_position(
             got = measure(r, c)
             got["auc"] = [auc(list(scores[s]), [w > SUP for w in full[s]]) for s in (0, 1)]
             res[f"{form}/{variant}"] = got
+            kept[f"{form}/{variant}"] = (r, c)
 
     # today's menu, and its cover
     menus_from("refs2", [-np.arange(m, dtype=float), -np.arange(n, dtype=float)])
@@ -289,6 +350,30 @@ def one_position(
     # today's 12 x 12 menus (as the opponent of IKA-312's S4 did), read off Q.
     xo, yo, _ = eq(qw, r12, c12)
     menus_from("q-opp12", scored(xo, yo, qw))
+    # Q's menu, then IKA-310's one best-response swap (it probes true cells: the search's
+    # double oracle on top of a Q-built menu).
+    for key in ("q-w24/nocover", "q-full/nocover"):
+        rs, cs = do_swap(a, *kept[key], 1)
+        res[f"{key}+swap1"] = measure(rs, cs)
+        builders[f"{key}+swap1"] = lambda width, key=key: do_swap(a, *builders[key](width), 1)
+    builders["swap1/cover"] = lambda width: do_swap(a, *builders["refs2/cover"](width), 1)
+    # The recall curves: every form at every width; random orders averaged over draws.
+    curves: dict[str, dict[int, dict[str, float]]] = {}
+    for label, build in builders.items():
+        curves[label] = {width: recall(*build(width)) for width in WIDTHS}
+    perms = [[[int(i) for i in rng.permutation(size)] for size in (m, n)] for _ in range(max(2, draws // 4))]
+    for variant in ("cover", "nocover"):
+        got: dict[int, dict[str, float]] = {}
+        for width in WIDTHS:
+            rows_draws = [
+                recall(
+                    menu_ordered(ch[0], perm[0], limit=width, cover=variant == "cover")[0],
+                    menu_ordered(ch[1], perm[1], limit=width, cover=variant == "cover")[0],
+                )
+                for perm in perms
+            ]
+            got[width] = {key: float(np.mean([r[key] for r in rows_draws])) for key in RECALL_KEYS}
+        curves[f"random/{variant}"] = got
     return {
         "index": row["index"],
         "m": m,
@@ -299,6 +384,7 @@ def one_position(
         "q_mass_on_w24": [float(np.sum(xq)), float(np.sum(yq))],
         "played_coverage": coverage,
         "res": res,
+        "curves": curves,
     }
 
 
@@ -338,6 +424,54 @@ def summarise(per: list[dict[str, Any]], boots: int, seed: int) -> str:
             f"{out[0]:>7.3f} / {out[1]:.3f}  {auc_txt:>14}"
             f"  {g.mean():+.4f} [{glo:+.4f}, {ghi:+.4f}]"
         )
+    return "\n".join(lines)
+
+
+def recall_summary(per: list[dict[str, Any]]) -> str:
+    """Recall at each width, both sides averaged, and the width each form needs to match
+    today's menu (refs2 with its cover) at width 12."""
+    labels = list(per[0]["curves"].keys())
+    kinds = (
+        ("defence: equilibrium weight inside", ("def_w0", "def_w1")),
+        ("defence: whole support inside", ("def_all0", "def_all1")),
+        ("exploit: best reply to recorded play inside", ("exp_best0", "exp_best1")),
+        ("exploit: a reply within eps inside", ("exp_any0", "exp_any1")),
+        ("threat: best reply to our menu's solve inside", ("thr_best0", "thr_best1")),
+        ("threat: a reply within eps inside", ("thr_any0", "thr_any1")),
+    )
+    lines = []
+    for title, keys in kinds:
+        mean = {
+            label: {
+                w: float(
+                    np.mean(
+                        [(p["curves"][label][w][keys[0]] + p["curves"][label][w][keys[1]]) / 2 for p in per]
+                    )
+                )
+                for w in WIDTHS
+            }
+            for label in labels
+        }
+        target = mean["refs2/cover"][12]
+        lines.append(f"{title}  (refs2 at 12 = {target:.3f}; sides 0 / 1 averaged)")
+        lines.append(
+            "  " + f"{'menu':<24}" + "".join(f"{w:>7}" for w in WIDTHS) + "   width to match refs2@12"
+        )
+        for label in labels:
+            curve = mean[label]
+            need = None
+            for lo, hi in zip(WIDTHS, WIDTHS[1:], strict=False):
+                if curve[lo] >= target:
+                    need = float(lo)
+                    break
+                if curve[hi] >= target:
+                    need = lo + (hi - lo) * (target - curve[lo]) / max(curve[hi] - curve[lo], 1e-12)
+                    break
+            need_txt = "-" if need is None else f"{need:.1f}"
+            lines.append(
+                "  " + f"{label:<24}" + "".join(f"{curve[w]:>7.3f}" for w in WIDTHS) + f"   {need_txt}"
+            )
+        lines.append("")
     return "\n".join(lines)
 
 
@@ -383,7 +517,7 @@ def main() -> None:
             if args.limit and len(per) >= args.limit:
                 break
     args.out.write_bytes(json.dumps(per).encode("utf-8"))
-    text = summarise(per, args.boots, 274)
+    text = summarise(per, args.boots, 274) + "\n\n" + recall_summary(per)
     args.out.with_suffix(".txt").write_bytes((text + "\n").encode("utf-8"))
     print(text)
 
