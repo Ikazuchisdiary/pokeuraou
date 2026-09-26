@@ -272,6 +272,13 @@ def main() -> None:  # noqa: PLR0915
     ap.add_argument("--weight-decay", type=float, default=1e-2)
     ap.add_argument("--holdout", type=float, default=0.1)
     ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument(
+        "--split-seed",
+        type=int,
+        default=None,
+        help="the seed of the held-out split (default: --seed). Two seeds of one model "
+        "compare on one held-out set only when this is the same",
+    )
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--limit", type=int, default=None, help="views to load at most")
     ap.add_argument("--eval-limit", type=int, default=2000, help="held-out views in the report")
@@ -301,7 +308,9 @@ def main() -> None:  # noqa: PLR0915
     torch.manual_seed(args.seed)
     started = time.perf_counter()
     views = Views(args.shards, args.limit, features=args.properties, dedupe=not args.keep_duplicates)
-    train_ix, held_ix = views.split(args.holdout, args.seed)
+    train_ix, held_ix = views.split(
+        args.holdout, args.seed if args.split_seed is None else args.split_seed
+    )
     print(
         f"{len(views)} views ({len(train_ix)} train, {len(held_ix)} held out, "
         f"{views.duplicates} duplicates dropped, {2 * len(train_ix)} with mirrors), "

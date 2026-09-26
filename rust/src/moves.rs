@@ -715,6 +715,7 @@ pub(crate) fn start_confusion(turn: &mut Turn, side: usize, slot: usize) {
         if let Some(mon) = turn.mon_at_mut(side, slot) {
             mon.volatiles.retain(|v| v.id.as_str() != "confusion");
         }
+        turn.ate_berry(side, slot);
     }
 }
 
@@ -1584,7 +1585,7 @@ fn resolve_targets(
         _ => {}
     }
     if let Some(recorded) = crate::damage_callback::target(turn, action, mv.id.as_str()) {
-        return Ok(reply_targets(turn, action, mv, recorded));
+        return reply_targets(turn, action, mv, recorded);
     }
 
     let mut chosen = match action.target {
@@ -1609,7 +1610,7 @@ fn resolve_targets(
         }
     }
 
-    if let Some(redirected) = redirection_target(turn, action, mv, chosen) {
+    if let Some(redirected) = redirection_target(turn, action, mv)? {
         if redirected != chosen {
             log_event!(turn, "{} redirected to {}", Label(reg, action), Name(redirected.0, redirected.1));
         }
@@ -1623,40 +1624,55 @@ fn resolve_targets(
 /// where Follow Me (priority 1) outranks Counter's own redirect (-1), which sends Counter and
 /// Mirror Coat back to the recorded slot -- so they fail on a fainted attacker, while Metal
 /// Burst and Comeuppance (`onModifyTarget`, before all of it) hit the other foe.
-fn reply_targets(turn: &Turn, action: &QueuedAction, mv: &Move, recorded: Slot) -> Vec<Slot> {
-    let live = |slot: Slot| matches!(turn.mon_at(slot.0, slot.1), Some(mon) if !mon.fainted);
+fn reply_targets(
+    turn: &mut Turn,
+    action: &QueuedAction,
+    mv: &Move,
+    recorded: Slot,
+) -> Result<Vec<Slot>, String> {
+    let live = |turn: &Turn, slot: Slot| matches!(turn.mon_at(slot.0, slot.1), Some(mon) if !mon.fainted);
     let mut chosen = recorded;
-    if !live(chosen) {
-        if let Some(slot) = (0..turn.pos.sides[recorded.0].active.len()).find(|s| live((recorded.0, *s))) {
+    if !live(turn, chosen) {
+        if let Some(slot) =
+            (0..turn.pos.sides[recorded.0].active.len()).find(|s| live(turn, (recorded.0, *s)))
+        {
             chosen = (recorded.0, slot);
         }
     }
-    match redirection_target(turn, action, mv, chosen) {
+    match redirection_target(turn, action, mv)? {
         Some(redirected) => chosen = redirected,
         None if crate::damage_callback::redirects_back(mv.id.as_str()) => chosen = recorded,
         None => {}
     }
-    if live(chosen) {
-        vec![chosen]
-    } else {
-        Vec::new()
-    }
+    Ok(if live(turn, chosen) { vec![chosen] } else { Vec::new() })
 }
 
 /// Follow Me / Rage Powder / Spotlight, then the type-drawing abilities. Rage Powder is a
 /// powder effect, so it does not pull in a move used by a Grass type, a Safety Goggles
 /// holder or an Overcoat Pokemon; the exemption is on the move's user, not on the
 /// redirector, and Follow Me has no such exemption.
+///
+/// Showdown a5df827 runs `RedirectTarget` with the user as the event's target
+/// (`pokemon.getMoveTargets`), so which side the chosen target is on does not matter
+/// (IKA-313):
+///
+/// * Spotlight, Follow Me and Rage Powder are `onFoeRedirectTarget` (priority 2, 1, 1):
+///   the user's foes draw, a move aimed at the user's own partner included.
+/// * Lightning Rod and Storm Drain are `onAnyRedirectTarget` (priority 0): a holder on
+///   either side draws, the user's partner included, but not the user itself
+///   (`validTarget` with `normal` is adjacency, and the user is not adjacent to itself).
+///   Two holders are met fastest first (`speedSort`, a tie at random). The chosen target is
+///   one of them when it holds the ability -- it is then drawn to itself. `pledgecombo`
+///   excuses no move in this regulation: no Pledge move is in the dump.
+///
+/// Before IKA-313 a target on the user's own side returned at once, and only the foes'
+/// abilities were read.
 fn redirection_target(
-    turn: &Turn,
+    turn: &mut Turn,
     action: &QueuedAction,
     mv: &Move,
-    chosen: Slot,
-) -> Option<Slot> {
-    if chosen.0 == action.side {
-        return None;
-    }
-    let foe_side = chosen.0;
+) -> Result<Option<Slot>, String> {
+    let foe_side = 1 - action.side;
     let powder_immune = match turn.mon_at(action.side, action.slot) {
         None => false,
         Some(user) => {
@@ -1680,23 +1696,55 @@ fn redirection_target(
         if drawing == ["ragepowder"] && powder_immune {
             continue;
         }
-        return Some((foe_side, slot));
+        return Ok(Some((foe_side, slot)));
     }
-    for slot in 0..turn.pos.sides[foe_side].active.len() {
-        let Some(mon) = turn.mon_at(foe_side, slot) else { continue };
-        if mon.fainted || (foe_side, slot) == chosen {
-            continue;
+    // Both abilities are `breakable`: `runEvent` skips the handler of a holder
+    // `suppressingAbility` names -- a Mold Breaker user's move (Mycelium Might's only when it
+    // is a status move), unless the holder has an Ability Shield. A Mold Breaker Gyarados's
+    // Waterfall is not drawn by its partner's Storm Drain (IKA-313, diff_turn seed 3).
+    let ignores_abilities = turn.mon_at(action.side, action.slot).is_some_and(|user| {
+        match user.ability.as_str() {
+            "myceliummight" => mv.category == "Status",
+            ability => is_mold_breaker(ability),
         }
-        let draws = match mon.ability.as_str() {
-            "lightningrod" => Some("Electric"),
-            "stormdrain" => Some("Water"),
-            _ => None,
-        };
-        if draws == Some(mv.mtype.as_str()) {
-            return Some((foe_side, slot));
+    });
+    let mut holders: Vec<(Slot, &str)> = Vec::new();
+    for side in [action.side, foe_side] {
+        for slot in 0..turn.pos.sides[side].active.len() {
+            if (side, slot) == (action.side, action.slot) {
+                continue;
+            }
+            let Some(mon) = turn.mon_at(side, slot) else { continue };
+            if mon.fainted || (ignores_abilities && !is(mon.item, "abilityshield")) {
+                continue;
+            }
+            let draws = match mon.ability.as_str() {
+                "lightningrod" => "Electric",
+                "stormdrain" => "Water",
+                _ => continue,
+            };
+            holders.push(((side, slot), draws));
         }
     }
-    None
+    if holders.is_empty() {
+        return Ok(None);
+    }
+    // The type after `ModifyType` (a Weather Ball in the rain is Water), only worked out when
+    // a holder is on the field: it builds the user's Battler.
+    let Some(user) = turn.battler_at(action.side, action.slot)? else { return Ok(None) };
+    let ctx = MoveContext {
+        weather: turn.pos.field.weather,
+        terrain: turn.pos.field.terrain,
+        hit_index: 1,
+        ..Default::default()
+    };
+    let move_type = crate::damage::modified_move_type(mv, &user, &ctx);
+    let mut holders: Vec<Slot> =
+        holders.into_iter().filter(|(_, draws)| move_type == *draws).map(|(slot, _)| slot).collect();
+    if holders.len() > 1 {
+        holders = by_speed_noting(turn, holders, "redirection speed tie (Showdown breaks it at random)")?;
+    }
+    Ok(holders.first().copied())
 }
 
 /// Side conditions a `breaksProtect` move removes. From gen 6 it strips them regardless of
@@ -1776,15 +1824,16 @@ fn blocked_by_protect(
     if !mv.has_flag(F_PROTECT) || mv.breaks_protect {
         return None;
     }
+    // The guards are side conditions whose `onTryHit` runs for any target on that side,
+    // whoever the user is: a partner's Earthquake stops at its own side's Wide Guard, and a
+    // partner's Extreme Speed at its Quick Guard (IKA-314). Until then both were foes-only.
     let side = &turn.pos.sides[target.0];
-    let from_foe = target.0 != action.side;
-    if from_foe
-        && matches!(crate::airborne::move_target(turn, action, mv), "allAdjacentFoes" | "allAdjacent")
+    if matches!(crate::airborne::move_target(turn, action, mv), "allAdjacentFoes" | "allAdjacent")
         && side.has_side_condition("wideguard")
     {
         return Some("wideguard".into());
     }
-    if from_foe && action.priority > 0 && side.has_side_condition("quickguard") {
+    if action.priority > 0 && side.has_side_condition("quickguard") {
         return Some("quickguard".into());
     }
     let mon = turn.mon_at(target.0, target.1)?;
@@ -2016,7 +2065,7 @@ fn hit_target<'a>(
             let mut state = turn.clone();
             log_event!(state, "{} had no effect", Label(reg, action));
             state.move_failed[action.side][action.slot] = true;
-            absorb(&mut state, mv, target);
+            absorb(&mut state, crate::damage::modified_move_type(mv, &attacker, &move_ctx), target);
             outcomes.push((acc_weight * crit_weight, state));
             continue;
         }
@@ -2120,6 +2169,11 @@ fn hit_target<'a>(
                         continue;
                     }
                     let absorbed = guarded && hit_index == 0;
+                    // A resist berry is eaten in the damage calculation, so Cheek Pouch's
+                    // heal lands before the damage; `after_hit` then takes the berry.
+                    if !absorbed && eats_resist_berry(&state, mv, target, result.type_mod, result.move_type.as_str()) {
+                        state.ate_berry(target.0, target.1);
+                    }
                     let berry = crate::move_hooks::set_berry_aside(&mut state, move_id.as_str(), target);
                     let dealt = if absorbed {
                         0
@@ -2422,7 +2476,9 @@ fn protect_punish(
 /// What an immune defender gains from the hit it just shrugged off. Treating these purely
 /// as immunities loses half the mechanic: Dry Skin heals off a Water move and Lightning Rod
 /// gains Special Attack from an Electric one, and either can decide the next turn.
-fn absorb(turn: &mut Turn, mv: &Move, target: Slot) {
+/// `move_type` is the type after `ModifyType`, as the immunity itself was judged by (IKA-313:
+/// it was the declared type, so a Weather Ball in the rain into Storm Drain raised nothing).
+fn absorb(turn: &mut Turn, move_type: Id, target: Slot) {
     let (ability, maxhp) = match turn.mon_at(target.0, target.1) {
         None => return,
         Some(mon) if mon.fainted => return,
@@ -2434,7 +2490,7 @@ fn absorb(turn: &mut Turn, mv: &Move, target: Slot) {
         "eartheater" => Some("Ground"),
         _ => None,
     };
-    if heals == Some(mv.mtype.as_str()) {
+    if heals == Some(move_type.as_str()) {
         turn.heal(target.0, target.1, (maxhp / 4).max(1), ability.as_str());
         return;
     }
@@ -2449,12 +2505,12 @@ fn absorb(turn: &mut Turn, mv: &Move, target: Slot) {
         _ => None,
     };
     if let Some((wanted, table)) = boosts {
-        if wanted == mv.mtype.as_str() {
+        if wanted == move_type.as_str() {
             turn.apply_boosts(target.0, target.1, table, false, ability.as_str());
             return;
         }
     }
-    if ability == "flashfire" && mv.mtype == "Fire" {
+    if ability == "flashfire" && move_type == "Fire" {
         turn.add_volatile(target.0, target.1, "flashfire", None);
     }
 }
@@ -2483,6 +2539,31 @@ fn absorb(turn: &mut Turn, mv: &Move, target: Slot) {
 /// so the collapse is exact and declaring it would flag turns that are right. A branched one
 /// is pushed to `pending_secondaries`: this function holds one state, and the hit loop fans
 /// it out.
+/// Whether this hit makes the target eat its resist berry. A resist berry is eaten only by a
+/// hit it actually weakened. Occa Berry's handler is
+/// `if (move.type === 'Fire' && typeMod > 0) { if (target.eatItem()) ... }`, so a Fire
+/// move that is *not* super effective leaves the berry alone. Chilan Berry is the one
+/// exception: it halves Normal regardless of effectiveness. `after_hit` takes the berry;
+/// `hit_target` asks first, for the Cheek Pouch heal that `eatItem` runs inside the hit's
+/// `ModifyDamage`, before its damage (IKA-329).
+fn eats_resist_berry(turn: &Turn, mv: &Move, target: Slot, type_mod: i64, hit_type: &str) -> bool {
+    let eats = match turn.mon_at(target.0, target.1) {
+        None => false,
+        Some(mon) if mon.fainted => false,
+        Some(mon) => match mon.item {
+            None => false,
+            // The hit's type, after a skin or the move's own change (IKA-326).
+            Some(item) => {
+                crate::small_rules::resist_berry_eaten(item.as_str(), hit_type, type_mod)
+                    // The berry is `onSourceModifyDamage`, which a `damageCallback` never
+                    // reaches (IKA-213), nor a level move; Struggle is `???` (IKA-239).
+                    && !crate::level_struggle::misses_resist_berry(mv.id.as_str())
+            }
+        },
+    };
+    eats && !turn.berries_blocked(target.0)
+}
+
 fn after_hit(
     turn: &mut Turn,
     action: &QueuedAction,
@@ -2597,25 +2678,7 @@ fn after_hit(
         turn.report("ability: poisontouch (30% poison not branched)");
     }
 
-    // A resist berry is eaten only by a hit it actually weakened. Occa Berry's handler is
-    // `if (move.type === 'Fire' && typeMod > 0) { if (target.eatItem()) ... }`, so a Fire
-    // move that is *not* super effective leaves the berry alone. Chilan Berry is the one
-    // exception: it halves Normal regardless of effectiveness.
-    let eats_berry = match turn.mon_at(target.0, target.1) {
-        None => false,
-        Some(mon) if mon.fainted => false,
-        Some(mon) => match mon.item {
-            None => false,
-            // The hit's type, after a skin or the move's own change (IKA-326).
-            Some(item) => {
-                crate::small_rules::resist_berry_eaten(item.as_str(), hit_type, type_mod)
-                    // The berry is `onSourceModifyDamage`, which a `damageCallback` never
-                    // reaches (IKA-213), nor a level move; Struggle is `???` (IKA-239).
-                    && !crate::level_struggle::misses_resist_berry(mv.id.as_str())
-            }
-        },
-    };
-    if eats_berry && !turn.berries_blocked(target.0) {
+    if eats_resist_berry(turn, mv, target, type_mod, hit_type) {
         let berry = turn.mon_at(target.0, target.1).and_then(|m| m.item);
         turn.consume_item(target.0, target.1, berry.as_ref().map(|b| b.as_str()).unwrap_or(""));
     }
@@ -3096,6 +3159,11 @@ fn user_self_switches(turn: &Turn, mv: &Move) -> bool {
 
 /// Python's `_by_speed`: fastest first (Trick Room reversed), a tie reported.
 fn by_speed(turn: &mut Turn, slots: Vec<Slot>) -> Result<Vec<Slot>, String> {
+    by_speed_noting(turn, slots, "item speed tie (Showdown breaks it at random)")
+}
+
+/// `by_speed` with the note a tie reports.
+fn by_speed_noting(turn: &mut Turn, slots: Vec<Slot>, tie: &str) -> Result<Vec<Slot>, String> {
     if slots.len() < 2 {
         return Ok(slots);
     }
@@ -3123,7 +3191,7 @@ fn by_speed(turn: &mut Turn, slots: Vec<Slot>) -> Result<Vec<Slot>, String> {
     speeds.sort_unstable();
     speeds.dedup();
     if speeds.len() != keyed.len() {
-        turn.report("item speed tie (Showdown breaks it at random)");
+        turn.report(tie);
     }
     keyed.sort();
     Ok(keyed.into_iter().map(|(_, _, slot, side)| (side, slot)).collect())
@@ -3733,7 +3801,7 @@ fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), S
         // Double Shock's and Burn Up's `self.onHit`: the spent type becomes `SPENT_TYPE`.
         if let Some(spent) = spent_type(mv.id.as_str()) {
             let current = match turn.mon_at(me.0, me.1) {
-                Some(mon) => turn.types_of(mon),
+                Some(mon) => turn.base_types_of(mon),
                 None => Types::default(),
             };
             let replaced: Vec<Id> = current
@@ -4403,7 +4471,18 @@ fn apply_status_move(
         }
     }
 
-    if let Some(self_effect) = mv.self_effect.as_ref() {
+    // A self-targeted heal at full HP is `-fail heal`: `runMoveEffects` makes the target's
+    // result `false`, the move fails, and `selfDrops` skips a `false` target, so the `self`
+    // effect never lands. Roost is the one status move with both (IKA-315): at full HP it
+    // leaves its user a Flying type.
+    let heal_fails = mv.target == "self"
+        && mv.raw.get("heal").is_some_and(|h| !h.is_null())
+        && turn.mon_at(me.0, me.1).is_some_and(|m| m.hp >= m.maxhp);
+    if heal_fails && mv.self_effect.is_some() {
+        log_event!(turn, "{} failed (full HP)", Label(reg, action));
+        turn.move_failed[me.0][me.1] = true;
+    }
+    if let Some(self_effect) = mv.self_effect.as_ref().filter(|_| !heal_fails) {
         if let Some(boosts) = self_effect.get("boosts").and_then(Value::as_object) {
             let table: Vec<(&str, i64)> = boosts
                 .iter()
@@ -4720,6 +4799,7 @@ fn eat_received_berry(turn: &mut Turn, at: Slot) {
         mon.status = None;
         mon.status_counter = None;
     }
+    turn.ate_berry(at.0, at.1);
 }
 
 /// Perish Song's `onHitField` (`data/moves.ts`): every active Pokemon on both sides, the

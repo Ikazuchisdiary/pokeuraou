@@ -105,7 +105,7 @@ impl Battler {
         }
         Ok(Battler {
             species: mon.species,
-            types: if mon.types.is_empty() { species_types(species) } else { mon.types },
+            types: roosted(mon, if mon.types.is_empty() { species_types(species) } else { mon.types }),
             ability: mon.ability,
             item: mon.item,
             level: mon.level,
@@ -148,6 +148,32 @@ impl Battler {
 
 fn species_types(species: &crate::reg::Species) -> Types {
     species.type_ids
+}
+
+/// Roost's `onType` (IKA-315), Showdown a5df827 data/moves.ts:
+///
+/// ```text
+/// roost: { self: { volatileStatus: 'roost' }, condition: {
+///     duration: 1, onResidualOrder: 25,
+///     onTypePriority: -1,
+///     onType(types, pokemon) { this.effectState.typeWas = types; return types.filter(type => type !== 'Flying'); },
+/// } },
+/// ```
+///
+/// and `getTypes` answers Normal for no types at all (sim/pokemon.ts). Every `hasType` reads
+/// it: type effectiveness, STAB and `isGrounded`. The champions dex has no Terastallization,
+/// so `onStart`'s Tera exception does not arise. Before IKA-315 the volatile was set and no
+/// type was read through it (reported in IKA-158).
+pub(crate) fn roosted(mon: &Pokemon, types: Types) -> Types {
+    if !types.as_slice().iter().any(|t| *t == "Flying") || !mon.has_volatile("roost") {
+        return types;
+    }
+    let kept: Vec<Id> = types.as_slice().iter().copied().filter(|t| *t != "Flying").collect();
+    if kept.is_empty() {
+        Types::from_slice(&[Id::new("Normal")])
+    } else {
+        Types::from_slice(&kept)
+    }
 }
 
 /// Supreme Overlord's `effectState.fallen`, read only for a holder: every Battler build
