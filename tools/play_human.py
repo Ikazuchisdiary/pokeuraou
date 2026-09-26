@@ -196,6 +196,15 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--child-q", type=int, default=None,
                     help="the deepening's child menus: each side's k best by the Q (IKA-307), "
                     "instead of narrow's damage-ranked 8")
+    ap.add_argument("--ponder", default="on" if humanplay.PLAY_PONDER else "off", choices=("on", "off"),
+                    help="on: the agent reads on while you choose (IKA-344) -- you are asked as "
+                    "its move starts, and it deepens until you have chosen (its budget at least, "
+                    "--ponder-seconds at most), then draws its action; yours is read after. "
+                    f"Default {'on' if humanplay.PLAY_PONDER else 'off'} (humanplay.PLAY_PONDER). "
+                    "A count-clock game replays from its record (record:<file>) with the stop "
+                    "points it wrote")
+    ap.add_argument("--ponder-seconds", type=float, default=humanplay.PLAY_PONDER_SECONDS,
+                    help="with --ponder on: the longest a move reads, from its start")
     ap.add_argument("--value", type=Path, nargs="+", default=None,
                     help=f"the agent's leaf (one model or an ensemble). Default: {' '.join(DEFAULT_VALUE)}")
     ap.add_argument("--hp-share", action="store_true", help="no leaf: the hp-share proxy")
@@ -302,13 +311,16 @@ def main(argv: list[str] | None = None) -> None:
         clock=args.clock, rank_fill=fill, bench_drop=args.bench_drop,
         width_only=args.width_only, max_levels=args.max_levels or None, child_q=args.child_q,
         oracle=_oracle_width(args.oracle), halt=halt,
+        ponder=args.ponder == "on", ponder_seconds=args.ponder_seconds,
     )
     if args.child_q is not None and not qrank.is_q(fill):
         raise SystemExit("--child-q ranks the children by the Q: it needs a Q (a q rank fill)")
     say(f"agent: leaf {name} / menus {fill}" + (f" ({', '.join(q_files)})" if q_files else "")
         + f" / {args.seconds:g} s a move on {cores} core(s), {args.clock} clock, {threads} thread(s)"
         + f" / oracle {args.oracle} / guard {args.max_levels or MAX_LEVELS}"
-        + (" / width only" if args.width_only else "") + " / bench hidden")
+        + (" / width only" if args.width_only else "")
+        + (f" / ponder (up to {args.ponder_seconds:g} s)" if args.ponder == "on" else "")
+        + " / bench hidden")
     watch = memory_watch(
         analysis.Limits(rss_gb=args.max_rss_gb, free_gb=args.min_free_gb, gpu_gb=args.max_gpu_gb),
         halt, lambda text: print(text, file=sys.stderr),
