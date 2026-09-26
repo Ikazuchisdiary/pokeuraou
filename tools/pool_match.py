@@ -119,6 +119,32 @@ def build_leaves(
     )
 
 
+def luck_leaf(args: argparse.Namespace, value: object, encoder: Encoder) -> object:
+    """The evaluator `--aivat` scores the luck with (IKA-193 stage 3): the tested arm's own
+    weights through their own caller, so the arm's `calls` and `ended` stay the arm's."""
+    if args.inference is not None:
+        from pokeuraou.inference import RemoteValue
+
+        return RemoteValue(args.inference, args.inference_arm, encoder)
+    from pokeuraou.value import BatchedValue
+
+    return BatchedValue(value.nets, value.encoder, device=value.device)  # type: ignore[attr-defined]
+
+
+def play_with_luck(ledger_leaf: object | None, name: str, play: object) -> tuple:
+    """`play()`'s record and sides, and the game's luck when there is a ledger leaf."""
+    if ledger_leaf is None:
+        return (*play(), None)  # type: ignore[operator]
+    from pokeuraou import luck
+
+    started = time.perf_counter()
+    with luck.collecting(ledger_leaf, name) as ledger:  # type: ignore[arg-type]
+        record, sides = play()  # type: ignore[operator]
+    block = ledger.to_json()
+    block["gameSeconds"] = round(time.perf_counter() - started, 4)
+    return record, sides, block
+
+
 def _ends_rule(leaf: object) -> str:
     """How this leaf scores a finished battle: by the net (IKA-253 undone) or its result."""
     rules = getattr(getattr(leaf, "encoder", None), "rules", None)
@@ -197,6 +223,10 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--device", default=None)
     ap.add_argument("--torch-threads", type=int, default=1)
     ap.add_argument("--report-every", type=int, default=25)
+    ap.add_argument("--aivat", action="store_true",
+                    help="write each game's luck (AIVAT's chance and action terms, scored "
+                    "by the tested arm's leaf; `pokeuraou.luck`, IKA-193) into its record as "
+                    "`aivat`. The games are the same with or without it")
     args = ap.parse_args(argv)
     hide_bench = require_bench(args)
     if (args.inference is None) == (args.value is None):
@@ -325,6 +355,10 @@ def main(argv: list[str] | None = None) -> None:
     arm_label = f"{tested.name}{tags}"
 
     client = WorkClient(args.queue) if args.queue else None
+    ledger_leaf = luck_leaf(args, value, encoder) if args.aivat else None
+    if ledger_leaf is not None:
+        print(f"  aivat: luck scored by {value_name} (the tested arm's leaf) on the true "
+              "position, written as `aivat`", file=sys.stderr)
 
     def work() -> Iterator[int]:
         if client is None:
@@ -349,10 +383,13 @@ def main(argv: list[str] | None = None) -> None:
         which, game_index = index % 2, index // 2
         calls_before = [getattr(arm.evaluate, "calls", 0) for arm in arms]
         started = time.perf_counter()
-        record, sides = pool_match_game(
-            reg, pool, arms, seed=args.seed, game_index=game_index, which=which,
-            hide_bench=hide_bench, max_turns=args.max_turns,
-            epsilon=args.explore_epsilon, temperature=args.explore_temperature,
+        record, sides, luck_block = play_with_luck(
+            ledger_leaf, value_name,
+            lambda game_index=game_index, which=which: pool_match_game(
+                reg, pool, arms, seed=args.seed, game_index=game_index, which=which,
+                hide_bench=hide_bench, max_turns=args.max_turns,
+                epsilon=args.explore_epsilon, temperature=args.explore_temperature,
+            ),
         )
         done += 1
         if done % args.report_every == 0:
@@ -417,6 +454,7 @@ def main(argv: list[str] | None = None) -> None:
                     "epsilon": args.explore_epsilon,
                     "temperature": args.explore_temperature,
                 },
+                **({"aivat": luck_block} if luck_block is not None else {}),
             },
             source=provenance(
                 "pool-match",

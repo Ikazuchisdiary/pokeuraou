@@ -1185,6 +1185,11 @@ class BeliefResult:
     #: widened, `ours` / `theirs` are the grown menus (side 0's actions first, as always)
     #: and the strategy indexes this side's.
     deepened: _deepen.Deepened | None = None
+    #: The depth-1 node this answer was solved over, as (side 0's menu, side 1's menu, one
+    #: matrix per completion in side 0's orientation, their weights) -- references, nothing
+    #: computed. Read by `luck.matrix_of` for AIVAT's action term (IKA-193); the menus are
+    #: the ones passed in, before any growth by a deepening.
+    node_payoff: tuple | None = None
 
 
 def belief_solve(
@@ -1318,6 +1323,7 @@ def belief_solve(
                     out[side], memo, budget=budget, refine=refine, passes=passes,
                     sub_limit=sub_limit, sub_branches=sub_branches,
                 )
+        out[side].node_payoff = (row, col, built, weights)
     return out
 
 
