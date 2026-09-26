@@ -204,6 +204,18 @@ def warm_start(
     net, meta = load_model(path, encoder)
     blob = torch.load(path, map_location="cpu", weights_only=False)
     config = replace(ValueConfig(**blob["config"]), **run)
+    if config.move_properties and not net.config.move_properties:
+        # IKA-318: an id-only model gains the move-property branch. Its input columns start
+        # at zero, so before the first step this net answers exactly as the loaded one; the
+        # branch's own layer is initialised from --seed, not from whatever ran before.
+        torch.manual_seed(config.seed)
+        grown = build(encoder, config)
+        grown._active_feature = net._active_feature
+        missing, unexpected = grown.load_state_dict(net.state_dict(), strict=False)
+        new = {"move_props", *(k for k in grown.state_dict() if k.startswith("move_prop_"))}
+        if unexpected or set(missing) != new:
+            raise SystemExit(f"warm start into move properties: missing {missing}, unexpected {unexpected}")
+        net = grown
     record = {
         "path": str(path),
         "format_id": blob["format_id"],
@@ -275,6 +287,20 @@ def main() -> None:
     ap.add_argument("--ema-decay", type=float, default=None)
     ap.add_argument("--swa-from", type=float, default=None)
     ap.add_argument("--pct-start", type=float, default=None)
+    ap.add_argument(
+        "--move-properties",
+        action="store_true",
+        help="IKA-318: read each move's dex properties (qhead.move_table) beside its id "
+        "embedding. With --init-from an id-only model, the new branch's input columns start "
+        "at zero, so the first step starts from that model's own answers.",
+    )
+    ap.add_argument(
+        "--drop-train-moves",
+        default="",
+        help="comma-separated move ids: leave every training decision whose position holds "
+        "one of them out of the fit, and keep the validation games as they are -- a move "
+        "the net has never been taught, on the same marking (IKA-318)",
+    )
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--no-save", action="store_true")
     ap.add_argument(
@@ -351,6 +377,7 @@ def main() -> None:
             ("ema_decay", args.ema_decay),
             ("swa_from", args.swa_from),
             ("pct_start", args.pct_start),
+            ("move_properties", True if args.move_properties else None),
         )
         if value is not None
     }
@@ -382,6 +409,15 @@ def main() -> None:
         f"-> {len(train_idx):,} train / {len(val_idx):,} validation, split by game "
         f"at split-seed {args.split_seed} (fit seed {args.seed})"
     )
+    dropped_moves = [m for m in args.drop_train_moves.split(",") if m]
+    if dropped_moves:
+        ids = [encoder.vocab.moves[m] for m in dropped_moves]
+        flat = dataset.encoded.moves[train_idx].reshape(len(train_idx), -1)
+        train_idx = train_idx[~np.isin(flat, ids).any(axis=1)]
+        print(
+            f"--drop-train-moves: {len(train_idx):,} training decisions left without "
+            f"{', '.join(dropped_moves)} (validation unchanged)"
+        )
     print(f"{parameters:,} parameters on {device}")
 
     # The identity the architecture is supposed to guarantee, checked before training so a
@@ -435,7 +471,16 @@ def main() -> None:
         f"(warm-up {config.pct_start:g}), keep {config.keep}, average {config.average}"
     )
     history, best = train(
-        net, dataset, config, device=device, holdout=args.holdout, log=log, target=target
+        net,
+        dataset,
+        config,
+        device=device,
+        holdout=args.holdout,
+        log=log,
+        target=target,
+        # Only when moves were dropped: otherwise `train` resolves the same split itself,
+        # as every run before IKA-318 did.
+        **({"train_index": train_idx, "val_index": val_idx} if dropped_moves else {}),
     )
     net.load_state_dict(best)
 
