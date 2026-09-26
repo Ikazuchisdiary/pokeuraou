@@ -46,6 +46,7 @@ mod shm;
 mod speed;
 mod terrain;
 mod transform;
+mod wire;
 
 #[cfg(feature = "count-allocations")]
 #[global_allocator]

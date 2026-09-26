@@ -292,6 +292,11 @@ class EncodedNode:
         for index, value in header["decided"]:
             if int(index) < n:
                 decided[int(index)] = float(value)
+        spans = (
+            _binary_spans(header, body)
+            if "spanCount" in header
+            else [(int(i), int(j), list(indices), list(w)) for i, j, indices, w in header["spans"]]
+        )
         return EncodedNode(
             encoded=Encoded(
                 species=arrays["species"],
@@ -305,10 +310,7 @@ class EncodedNode:
                 unknown_volatiles=dict(header.get("unknownVolatiles", {})),
                 decided=decided,
             ),
-            spans=[
-                (int(i), int(j), list(indices), list(w))
-                for i, j, indices, w in header["spans"]
-            ],
+            spans=spans,
             folded=[(int(i), int(j), root) for i, j, root in header["folded"]],
             exact=header["exact"],
             refused=[(int(i), int(j), str(why)) for i, j, why in header["refused"]],
@@ -332,6 +334,40 @@ class EncodedNode:
                 else None
             ),
         )
+
+
+def _binary_spans(
+    header: dict[str, Any], body: Any  # noqa: ANN401 - a bytearray or a memoryview of one
+) -> list[tuple[int, int, list[int], list[float]]]:
+    """A node's spans out of its body (IKA-302), as the lists the JSON header gave.
+
+    The block follows the arrays and the leaf values, at `spanAt`: every span's weights
+    (f64), then the spans' rows, columns and lengths (u32 each), then every span's leaf
+    indices (u32), all little-endian. The weights are the port's doubles bit for bit, as
+    JSON's shortest round-trip text of them was, and each span is handed on as Python
+    lists, as before -- the folds build their own arrays from them.
+    """
+    import numpy as np
+
+    count = int(header["spanCount"])
+    total = int(header["spanLeaves"])
+    at = int(header["spanAt"])
+    weights = np.frombuffer(body, dtype="<f8", count=total, offset=at).tolist()
+    at += total * 8
+    rows = np.frombuffer(body, dtype="<u4", count=count, offset=at).tolist()
+    at += count * 4
+    cols = np.frombuffer(body, dtype="<u4", count=count, offset=at).tolist()
+    at += count * 4
+    lengths = np.frombuffer(body, dtype="<u4", count=count, offset=at).tolist()
+    at += count * 4
+    indices = np.frombuffer(body, dtype="<u4", count=total, offset=at).tolist()
+    spans = []
+    start = 0
+    for i, j, length in zip(rows, cols, lengths, strict=True):
+        end = start + length
+        spans.append((i, j, indices[start:end], weights[start:end]))
+        start = end
+    return spans
 
 
 @dataclass
@@ -1084,6 +1120,7 @@ class RustNode:
         cells: Sequence[tuple[int, int]] | None = None,
         *,
         rules: Any = None,  # noqa: ANN401 - EncodingRules; encode imports numpy
+        json_spans: bool = False,
     ) -> EncodedNode:
         """The node's leaves, already encoded, and how to fold their values.
 
@@ -1111,6 +1148,10 @@ class RustNode:
         # Only these cells, when the caller is solving rather than tabulating.
         if cells is not None:
             request["cells"] = [[int(i), int(j)] for i, j in cells]
+        # IKA-302: the spans come in the body; `json_spans` asks for the old JSON road, which
+        # only the test holding the two to the same lists does.
+        if json_spans:
+            request["jsonSpans"] = True
         # Sent only for a leaf that asks for an undone fix, so every other request is the
         # bytes it always was.
         wants_old = bool(rules is not None and rules.mega_from_slots)

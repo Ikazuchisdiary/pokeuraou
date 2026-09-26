@@ -263,9 +263,14 @@ fn resume_all<'a>(reg: &'a Reg, result: &TurnResult<'a>, depth: usize) -> Resume
 /// puts the last two on the wire. They are not packed into one buffer here because that
 /// buffer is the largest allocation this process makes and it is a copy of what it is
 /// built from.
-pub fn fill(reg: &Reg, encoder: &Encoder, request: &Request) -> (Value, Encoded, Vec<f64>) {
-    let (header, encoded, leaf_values, _kept) = fill_shared(reg, encoder, request, None, false);
-    (header, encoded, leaf_values)
+pub fn fill(
+    reg: &Reg,
+    encoder: &Encoder,
+    request: &Request,
+) -> (Value, Encoded, Vec<f64>, Vec<u8>) {
+    let (header, encoded, leaf_values, spans, _kept) =
+        fill_shared(reg, encoder, request, None, false);
+    (header, encoded, leaf_values, spans)
 }
 
 /// A node's resolved turns, kept for a later node of the same `fills` crossing (IKA-295).
@@ -374,7 +379,7 @@ pub fn fill_shared(
     request: &Request,
     like: Option<&Like>,
     keep: bool,
-) -> (Value, Encoded, Vec<f64>, Option<Kept>) {
+) -> (Value, Encoded, Vec<f64>, Vec<u8>, Option<Kept>) {
     fill_shared_on(reg, encoder, request, like, keep, crate::par::Pool::global())
 }
 
@@ -389,7 +394,7 @@ pub fn fill_shared_on<'r>(
     like: Option<&Like>,
     keep: bool,
     pool: Option<&crate::par::Pool>,
-) -> (Value, Encoded, Vec<f64>, Option<Kept>) {
+) -> (Value, Encoded, Vec<f64>, Vec<u8>, Option<Kept>) {
     let mut kept = keep.then(|| Kept {
         position: request.position.clone(),
         ours: request.ours_json.clone(),
@@ -553,22 +558,30 @@ pub fn fill_shared_on<'r>(
         let score = crate::objective::by_name(name).expect("the request was checked");
         leaf_values.extend(collector.leaves.iter().map(score));
     }
-    let body_bytes = packed_len(&encoded) + leaf_values.len() * 8;
 
-    // The fold is the header's large part -- a cell's leaf indices and weights, one entry
-    // per filled cell -- and it is built as `Value`s because the header is JSON. What that
-    // costs is measured here rather than argued about: the arrays now have a road of their
-    // own, and whether the header should get one too is the next question after that.
+    // The fold was the header's large part -- a cell's leaf indices and weights, one entry
+    // per filled cell -- and it went as JSON until IKA-302 measured it. The spans now go
+    // in the body behind the arrays and the leaf values (`span_block`); a fold tree, rare
+    // (a cell whose turn paused), stays in the header.
     let fold_started = std::time::Instant::now();
-    let mut spans: Vec<Value> = Vec::new();
+    let mut spans: Vec<(usize, usize, Vec<usize>, Vec<f64>)> = Vec::new();
     let mut folded: Vec<Value> = Vec::new();
     for (i, j, cell) in cells {
         match cell {
             Cell::Empty => {}
-            Cell::Span(indices, weights) => spans.push(json!([i, j, indices, weights])),
+            Cell::Span(indices, weights) => spans.push((i, j, indices, weights)),
             Cell::Folded(root) => folded.push(json!([i, j, root])),
         }
     }
+    let span_at = packed_len(&encoded) + leaf_values.len() * 8;
+    // The JSON road is kept for the test that holds the two to the same lists
+    // (`jsonSpans` on the request); nothing on the production roads asks for it.
+    let (span_bytes, span_leaves) = if request.json_spans {
+        (Vec::new(), 0)
+    } else {
+        span_block(&spans)
+    };
+    let body_bytes = span_at + span_bytes.len();
     let fold_us = fold_started.elapsed().as_secs_f64() * 1e6;
 
     let mut header = json!({
@@ -578,7 +591,10 @@ pub fn fill_shared_on<'r>(
         // ratio is the sharing's own account of itself, for a caller that would otherwise
         // have to infer it from how large the node was.
         "offered": collector.offered,
-        "spans": spans,
+        // The spans' block in the body (`span_block`): where, how many, how many leaves.
+        "spanAt": span_at,
+        "spanCount": spans.len(),
+        "spanLeaves": span_leaves,
         "folded": folded,
         "exact": exact,
         "refused": refused,
@@ -598,11 +614,50 @@ pub fn fill_shared_on<'r>(
         "encodeUs": encode_us,
         "foldUs": fold_us,
     });
+    if request.json_spans {
+        let listed: Vec<Value> =
+            spans.iter().map(|(i, j, indices, weights)| json!([i, j, indices, weights])).collect();
+        let object = header.as_object_mut().expect("the header is an object");
+        object.remove("spanAt");
+        object.remove("spanCount");
+        object.remove("spanLeaves");
+        header["spans"] = Value::Array(listed);
+    }
     if like.is_some() {
         // The cells whose turn was read off the earlier node rather than resolved.
         header["readOff"] = json!(read_off);
     }
-    (header, encoded, leaf_values, kept)
+    (header, encoded, leaf_values, span_bytes, kept)
+}
+
+/// A node's spans as one binary block (IKA-302), little-endian: every span's weights
+/// (f64, bit for bit), then the spans' rows, columns and lengths (u32 each), then every
+/// span's leaf indices (u32). Python's `rustnode._binary_spans` reads it back into the
+/// lists the JSON header gave. Returns the block and the number of (index, weight) pairs.
+pub fn span_block(spans: &[(usize, usize, Vec<usize>, Vec<f64>)]) -> (Vec<u8>, usize) {
+    let leaves: usize = spans.iter().map(|(_, _, indices, _)| indices.len()).sum();
+    let mut out = Vec::with_capacity(leaves * 12 + spans.len() * 12);
+    for (_, _, _, weights) in spans {
+        for w in weights {
+            out.extend_from_slice(&w.to_le_bytes());
+        }
+    }
+    for (i, _, _, _) in spans {
+        out.extend_from_slice(&(*i as u32).to_le_bytes());
+    }
+    for (_, j, _, _) in spans {
+        out.extend_from_slice(&(*j as u32).to_le_bytes());
+    }
+    for (_, _, indices, weights) in spans {
+        debug_assert_eq!(indices.len(), weights.len());
+        out.extend_from_slice(&(indices.len() as u32).to_le_bytes());
+    }
+    for (_, _, indices, _) in spans {
+        for index in indices {
+            out.extend_from_slice(&(*index as u32).to_le_bytes());
+        }
+    }
+    (out, leaves)
 }
 
 /// How many bytes `write_body` will write for the arrays, without building them.
@@ -623,6 +678,7 @@ pub fn write_body<W: Write + ?Sized>(
     out: &mut W,
     encoded: &Encoded,
     leaf_values: &[f64],
+    tail: &[u8],
 ) -> std::io::Result<()> {
     const WINDOW: usize = 1 << 16;
     let mut buffer: Vec<u8> = Vec::with_capacity(WINDOW + 8);
@@ -649,6 +705,10 @@ pub fn write_body<W: Write + ?Sized>(
     stream!(leaf_values);
     if !buffer.is_empty() {
         out.write_all(&buffer)?;
+    }
+    // IKA-302: the spans' block, already bytes.
+    if !tail.is_empty() {
+        out.write_all(tail)?;
     }
     Ok(())
 }
