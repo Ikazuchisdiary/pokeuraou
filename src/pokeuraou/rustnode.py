@@ -1891,6 +1891,9 @@ class PortBranch:
     #: Python's `Branch.events` and `acts`, when the turn was asked for them (IKA-215).
     events: list[str] = field(default_factory=list)
     acts: list[tuple[int, str]] = field(default_factory=list)
+    #: The draws this branch took, when events were asked for (IKA-345, `EventLog::chance`):
+    #: ``<kind> <user> <move> <target> [<arg>...]``; a merged branch keeps what all share.
+    chance: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1926,6 +1929,7 @@ class PortTurn:
                     Position.from_json(b["position"]),
                     list(b.get("events") or []),
                     _acts(b),
+                    list(b.get("chance") or []),
                 )
                 for b in branches
             ]
