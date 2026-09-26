@@ -143,6 +143,7 @@ class NodeTime:
 #: cells, M-C ensemble leaf on the local GPU, Q ranking.
 NODE_TIME: dict[tuple[str, int], NodeTime] = {
     ("local", 1): NodeTime(fixed_ms=39.3, cell_ms=0.04176),
+    ("local", 8): NodeTime(fixed_ms=13.9, cell_ms=0.02851),
 }
 
 
