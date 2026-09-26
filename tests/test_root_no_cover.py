@@ -120,7 +120,7 @@ def test_the_root_menu_is_built_without_the_cover_only_when_asked(
 
     before = {k: dict(v) for k, v in narrowing.COVERLESS.items()}
     assert selfplay._menus(reg, pos, (4, 4), _stub, budget, True) == expect[True]
-    assert narrowing.COVERLESS == before  # the default counts nothing
+    assert before == narrowing.COVERLESS  # the default counts nothing
 
     menus = selfplay._menus(reg, pos, (4, 4), _stub, budget, True, rank_fill="refs2-nocover")
     assert menus == expect[False]
