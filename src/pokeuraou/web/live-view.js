@@ -136,7 +136,7 @@ function onEvent(e) {
       if (S.prompt) { S.prompt = null; S.answered = true; applyHide(); }
       renderInput();
       log(e.turn, `<span class="ai-c">AI</span> ${esc((e.agentSlots || [e.agent]).join(" ／ "))}<br><span class="you-c">あなた</span> ${esc((e.personSlots || [e.person]).join(" ／ "))}` +
-        (e.offMenu ? ` <span class="badge" title="あなたの手は AI のメニューの外でした">メニュー外</span>` : "") +
+        (e.offMenu ? ` <span class="badge" title="あなたの手は AI の候補集合の外でした">候補集合の外</span>` : "") +
         ((e.changes || []).length ? `<br><span class="dim">${e.changes.map((c) =>
           `${esc(c.species)}${c.entered ? " 登場" : ""}${c.from !== c.to ? ` ${c.from}→${c.to}%` : ""}${c.fainted ? " ひんし" : ""}${c.status ? " " + esc(c.status) : ""}`).join("・")}</span>` : ""));
       break;
@@ -260,7 +260,7 @@ function renderClock(ms, done, s) {
   const f = count ? (s ? share(s) : done ? 1 : 0) : budget ? ms / budget : 0;
   bar.firstElementChild.style.width = Math.min(100, 100 * f) + "%";
   $("clocktext").textContent = !budget ? "–" : count
-    ? `${(ms / 1000).toFixed(1)} 秒・数えの予算 ${Math.round(100 * Math.min(f, 9.99))}%${done ? "・答え" : ""}`
+    ? `${(ms / 1000).toFixed(1)} 秒・数えの計算予算 ${Math.round(100 * Math.min(f, 9.99))}%${done ? "・答え" : ""}`
     : `${(ms / 1000).toFixed(1)} / ${(budget / 1000).toFixed(1)} 秒${done ? "・答え" : ""}`;
 }
 function renderBalance(s) {
@@ -277,11 +277,12 @@ function renderStrip(s) {
 function renderCounters(s) {
   const support = s.ourP.filter((p) => p > 1e-9).length;
   const items = [
-    ["経過", `${(s.ms / 1000).toFixed(2)} s`], ["歩", s.step], ["読んだセル", s.cells.toLocaleString("ja-JP")],
+    ["経過", `${(s.ms / 1000).toFixed(2)} s`], ["深化のステップ", s.step], ["読んだセル", s.cells.toLocaleString("ja-JP")],
     ["深化したセル", s.expanded], ["段（深さ）", s.depth], ["埋め", s.fills], ["精緻化", s.refines],
-    ["読めなかった", s.refused], ["幅（AI×あなた）", `${s.ours.length}×${s.theirs.length}`], ["台の大きさ", support],
+    ["読めなかった", s.refused],
+    [S.analysis ? "幅（検討する側×相手）" : "幅（AI×あなた）", `${s.ours.length}×${s.theirs.length}`], ["サポートの大きさ", support],
     ["深く読んだ重み", pct(s.read)], ["裏の決定化", s.classes.length || "なし"],
-    S.analysis ? ["計算予算", "なし（止めるまで）"] : ["予算", `${Math.round(s.spent)} / ${s.budget}`],
+    ["計算予算", S.analysis ? "なし（止めるまで）" : `${Math.round(s.spent)} / ${s.budget}`],
     ["双対ギャップ", s.gap.toExponential(1)],
   ];
   $("counters").innerHTML = items.map(([k, v]) => `<div><b class="n">${v}</b><small>${k}</small></div>`).join("");
@@ -293,8 +294,8 @@ function renderCounters(s) {
       "「深く読んだ重み」は均衡の組の確率のうち、葉より深く読んだ分（収束の目安）。";
   } else if (t) {
     const p = t.plan || {};
-    $("plan").textContent = `ターン ${t.turn}: 予算 ${t.seconds} 秒、メニューの幅 ${p.width}、深さ 1 の予測 ${Math.round(p.predictedMs || 0)} ms、` +
-      `深化に ${Math.round(p.deepenMs || 0)} ms、メニューに ${Math.round(t.menuMs || 0)} ms。` +
+    $("plan").textContent = `ターン ${t.turn}: 計算予算 ${t.seconds} 秒、候補集合の幅 ${p.width}、深さ 1 の予測 ${Math.round(p.predictedMs || 0)} ms、` +
+      `深化に ${Math.round(p.deepenMs || 0)} ms、候補集合づくりに ${Math.round(t.menuMs || 0)} ms。` +
       (t.exact ? "あなたの裏は尽きている。" : `あなたの裏の決定化 ${t.classCount} 通り。`) +
       "「深く読んだ重み」は均衡の組の確率のうち、葉より深く読んだ分（収束の目安）。";
   }
@@ -406,7 +407,7 @@ function renderPv(s) {
   $("pv").innerHTML = s.pv.length
     ? (S.analysis
       ? `<p class="note">重い組（検討する側の手 × 相手の手）。読んだ組は偶然の分岐と次のターンへ開く。値は検討する側から見た値、括弧は親との差。</p>`
-      : `<p class="note">重い組（AI の手 × あなたの手）。読んだ組は偶然の枝と次のターンへ開く。値は AI から見た値、括弧は親との差。</p>`) +
+      : `<p class="note">重い組（AI の手 × あなたの手）。読んだ組は偶然の分岐と次のターンへ開く。値は AI から見た値、括弧は親との差。</p>`) +
       s.pv.map((p, i) => pairHtml(p, `p${i}`, s.value, s, true)).join("")
     : '<span class="note">まだ組が無い</span>';
 }
