@@ -51,7 +51,7 @@ from .battler import Battler, FieldState
 from .damage import _is_grounded
 from .fixedpoint import Chain
 from .position import Position
-from .regulation import Regulation
+from .regulation import Regulation, to_id
 
 #: Queue orders from ``BattleQueue#resolveAction``.
 ORDER_SWITCH = 103
@@ -522,11 +522,18 @@ SPEED_CHANGING_EFFECTS = frozenset(
 
 
 #: Effects that replace a queued action after the turn has started, which reorders the
-#: queue for a reason that is not a Speed change.
-ACTION_OVERRIDING_EFFECTS = frozenset({"encore", "instruct", "dancer", "afteryou", "quash"})
+#: queue for a reason that is not a Speed change. These are Showdown IDs; a turn's protocol
+#: names them in display form ("move: After You", "ability: Dancer"), so a line is read
+#: field by field through `to_id` (IKA-324: the display name has a space, and After You
+#: was never found). Round is here because the first Round user moves the next one up to
+#: act straight after it (`prioritizeAction` with no line of its own), so it counts only
+#: when two Rounds are used in the turn.
+ACTION_OVERRIDING_EFFECTS = frozenset(
+    {"encore", "instruct", "dancer", "afteryou", "quash", "round"}
+)
 
 #: The subset the resolver models, and which therefore must *not* be excluded from a
-#: differential comparison. Encore is the only one of the five that occurs in this format --
+#: differential comparison. Encore is the only one of these that occurs in this format --
 #: 109 of the 394 tournament teams carry it, against none for Instruct and Quash -- and it
 #: was being skipped, which is precisely how a whole class of bug stays invisible while the
 #: divergence rate looks healthy.
@@ -548,11 +555,27 @@ def action_overriding_effects(
         else ACTION_OVERRIDING_EFFECTS
     )
     found: set[str] = set()
+    rounds = 0
     for line in protocol_lines:
-        lowered = line.lower()
-        for name in names:
-            if f"move: {name}" in lowered or f"|{name}|" in lowered:
-                found.add(name)
+        parts = line.split("|")
+        # An effect ending (`|-end|p2a: Y|Encore`) reorders nothing.
+        if len(parts) < 4 or parts[1] == "-end":
+            continue
+        if parts[1] == "move" and to_id(parts[3]) == "round":
+            rounds += 1
+            continue
+        for part in parts[3:]:
+            text = part.strip()
+            if text.startswith("[from]"):
+                text = text[len("[from]"):].strip()
+            for prefix in ("move: ", "ability: "):
+                if text.startswith(prefix):
+                    text = text[len(prefix):]
+            effect = to_id(text)
+            if effect in names:
+                found.add(effect)
+    if rounds >= 2 and "round" in names:
+        found.add("round")
     return found
 
 
