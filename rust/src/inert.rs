@@ -67,7 +67,6 @@ pub fn ability_is_inert(id: &str) -> bool {
             | "merciless"
             | "mimicry"
             | "minus"
-            | "moody"
             | "moxie"
             | "multitype"
             | "mummy"

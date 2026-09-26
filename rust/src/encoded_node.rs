@@ -157,13 +157,104 @@ impl<'a> Collector<'a> {
     }
 
     fn alternatives(&mut self, pause: &Suspended<'a>) -> Option<(usize, Vec<TurnResult<'a>>)> {
-        match resume_alternatives(self.reg, pause) {
-            Err(_) => None,
-            Ok((None, _)) => None,
-            Ok((Some(chooser), options)) if !options.is_empty() => Some((chooser, options)),
-            Ok(_) => None,
-        }
+        alternatives(self.reg, pause)
     }
+
+    /// `turn_leaves` over pauses already resumed by `resume_all`: the same leaves handed to
+    /// `add_leaf` in the same order, and the same notes, because resuming never touched the
+    /// collector -- only where the resuming ran has moved (IKA-32).
+    fn turn_leaves_resumed(
+        &mut self,
+        result: &TurnResult<'a>,
+        resumed: &Resumed<'a>,
+        depth: usize,
+    ) -> Value {
+        self.notes.extend(result.unmodelled.iter().cloned());
+        let mut parts: Vec<Value> = Vec::new();
+        for branch in &result.branches {
+            let index = self.add_leaf(branch.position.clone());
+            parts.push(json!([branch.probability, { "leaf": index }]));
+        }
+        for (pause, walk) in result.suspended.iter().zip(&resumed.pauses) {
+            match walk {
+                Walk::TooDeep => {
+                    self.notes.insert("more than four mid-turn replacements in one turn".into());
+                    let index = self.add_leaf(pause.turn.pos.clone());
+                    parts.push(json!([pause.probability, { "leaf": index }]));
+                }
+                Walk::Nothing => {
+                    self.notes.insert("a suspended turn offered no replacement".into());
+                    let index = self.add_leaf(pause.turn.pos.clone());
+                    parts.push(json!([pause.probability, { "leaf": index }]));
+                }
+                Walk::Options(chooser, options) => {
+                    let options: Vec<Value> = options
+                        .iter()
+                        .map(|(one, below)| self.turn_leaves_resumed(one, below, depth + 1))
+                        .collect();
+                    parts.push(json!([
+                        pause.probability,
+                        { "best": chooser, "options": options }
+                    ]));
+                }
+            }
+        }
+        json!({ "avg": parts })
+    }
+}
+
+fn alternatives<'a>(reg: &'a Reg, pause: &Suspended<'a>) -> Option<(usize, Vec<TurnResult<'a>>)> {
+    match resume_alternatives(reg, pause) {
+        Err(_) => None,
+        Ok((None, _)) => None,
+        Ok((Some(chooser), options)) if !options.is_empty() => Some((chooser, options)),
+        Ok(_) => None,
+    }
+}
+
+/// A turn's pauses resumed ahead of collecting it, on the cell thread that resolved it
+/// (IKA-32), one `Walk` per pause in `suspended`'s order.
+struct Resumed<'a> {
+    pauses: Vec<Walk<'a>>,
+}
+
+/// What `turn_leaves` does at one pause.
+enum Walk<'a> {
+    /// Four replacements deep already: the paused position is the leaf.
+    TooDeep,
+    /// No replacement to choose: the paused position is the leaf.
+    Nothing,
+    /// The chooser, and each option's resumed turn with its own pauses resumed.
+    Options(usize, Vec<(TurnResult<'a>, Resumed<'a>)>),
+}
+
+/// `turn_leaves`' resuming, without the collecting: the same `sharing_budget` and
+/// `resume_alternatives` calls in the same order, recursively.
+fn resume_all<'a>(reg: &'a Reg, result: &TurnResult<'a>, depth: usize) -> Resumed<'a> {
+    let pauses = result
+        .suspended
+        .iter()
+        .map(|pause| {
+            if depth >= 4 {
+                return Walk::TooDeep;
+            }
+            let shared = crate::resolve::sharing_budget(pause, result.suspended.len());
+            match alternatives(reg, shared.as_ref().unwrap_or(pause)) {
+                None => Walk::Nothing,
+                Some((chooser, resumed)) => Walk::Options(
+                    chooser,
+                    resumed
+                        .into_iter()
+                        .map(|one| {
+                            let below = resume_all(reg, &one, depth + 1);
+                            (one, below)
+                        })
+                        .collect(),
+                ),
+            }
+        })
+        .collect();
+    Resumed { pauses }
 }
 
 /// Fills a node as leaves plus a fold, and encodes the leaves.
@@ -284,6 +375,21 @@ pub fn fill_shared(
     like: Option<&Like>,
     keep: bool,
 ) -> (Value, Encoded, Vec<f64>, Option<Kept>) {
+    fill_shared_on(reg, encoder, request, like, keep, crate::par::Pool::global())
+}
+
+/// Cells per thread in one of the pool's chunks (IKA-32).
+const CELLS_PER_THREAD: usize = 32;
+
+/// `fill_shared`, with its cells resolved on `pool` when there is one (IKA-32).
+pub fn fill_shared_on<'r>(
+    reg: &'r Reg,
+    encoder: &Encoder,
+    request: &Request,
+    like: Option<&Like>,
+    keep: bool,
+    pool: Option<&crate::par::Pool>,
+) -> (Value, Encoded, Vec<f64>, Option<Kept>) {
     let mut kept = keep.then(|| Kept {
         position: request.position.clone(),
         ours: request.ours_json.clone(),
@@ -307,25 +413,12 @@ pub fn fill_shared(
     // being guessed at from two benchmarks that did not add up. It goes back in the header.
     let resolve_started = std::time::Instant::now();
 
-    for (i, j) in request.wanted_cells() {
-        {
-            let reused = like.and_then(|like| like.turn(i, j, &request.position));
-            if reused.is_some() {
-                read_off += 1;
-            }
-            let result = match reused {
-                Some(result) => result,
-                None => {
-                    let actions = [request.ours[i].clone(), request.theirs[j].clone()];
-                    match resolve_turn(reg, &request.position, &actions, request.budget) {
-                        Err(reason) => {
-                            refused.push(json!([i, j, reason]));
-                            continue;
-                        }
-                        Ok(result) => result,
-                    }
-                }
-            };
+    // What the loop below does with a cell once its turn is in hand. On one thread the turn
+    // is resolved right before this and the pauses resumed inside `turn_leaves`; on the pool
+    // (IKA-32) both happened on a cell thread and arrive as `resumed`. Either way the cells
+    // come through here in `wanted_cells()`'s order, so the leaves, their sharing and the
+    // spans are the same.
+    let mut absorb = |i: usize, j: usize, result: TurnResult<'r>, resumed: Option<&Resumed<'r>>| {
             if let Some(kept) = kept.as_mut() {
                 if !result.is_suspended() {
                     kept.cells.insert(
@@ -344,7 +437,10 @@ pub fn fill_shared(
             }
             exact[i][j] = result.exact;
             if result.is_suspended() {
-                let root = collector.turn_leaves(&result, 0);
+                let root = match resumed {
+                    Some(resumed) => collector.turn_leaves_resumed(&result, resumed, 0),
+                    None => collector.turn_leaves(&result, 0),
+                };
                 // Whether the tree has anything in it, rather than whether collecting it
                 // grew the leaf list: with leaves shared, a cell can reference only leaves
                 // the node already had, and counting would call such a cell empty and
@@ -355,13 +451,13 @@ pub fn fill_shared(
                     .map(|parts| parts.is_empty())
                     .unwrap_or(true);
                 cells.push((i, j, if empty { Cell::Empty } else { Cell::Folded(root) }));
-                continue;
+                return;
             }
             collector.notes.extend(result.unmodelled.iter().cloned());
             let total: f64 = result.branches.iter().map(|b| b.probability).sum();
             if result.branches.is_empty() || total <= 0.0 {
                 cells.push((i, j, Cell::Empty));
-                continue;
+                return;
             }
             let weights: Vec<f64> =
                 result.branches.iter().map(|b| b.probability / total).collect();
@@ -371,6 +467,74 @@ pub fn fill_shared(
                 .map(|branch| collector.add_leaf(branch.position))
                 .collect();
             cells.push((i, j, Cell::Span(indices, weights)));
+    };
+
+    let wanted = request.wanted_cells();
+    match pool.filter(|_| !request.position_json.is_null()) {
+        None => {
+            for &(i, j) in &wanted {
+                let reused = like.and_then(|like| like.turn(i, j, &request.position));
+                if reused.is_some() {
+                    read_off += 1;
+                }
+                let result = match reused {
+                    Some(result) => result,
+                    None => {
+                        let actions = [request.ours[i].clone(), request.theirs[j].clone()];
+                        match resolve_turn(reg, &request.position, &actions, request.budget) {
+                            Err(reason) => {
+                                refused.push(json!([i, j, reason]));
+                                continue;
+                            }
+                            Ok(result) => result,
+                        }
+                    }
+                };
+                absorb(i, j, result, None);
+            }
+        }
+        Some(pool) => {
+            // A chunk at a time, so a width-48 node does not hold every cell's turn at once
+            // before the first is collected; a chunk is enough items per thread that the
+            // last one to finish does not keep the rest waiting long.
+            let chunk_len = (pool.threads() * CELLS_PER_THREAD).max(1);
+            let (ours, theirs, budget) = (&request.ours, &request.theirs, request.budget);
+            let position_json = &request.position_json;
+            for chunk in wanted.chunks(chunk_len) {
+                // Reading a turn off an earlier node touches that node's positions, which
+                // are this thread's: done here, before the pool is asked for the rest.
+                let mut reused: Vec<Option<TurnResult<'r>>> = chunk
+                    .iter()
+                    .map(|&(i, j)| like.and_then(|like| like.turn(i, j, &request.position)))
+                    .collect();
+                let todo: Vec<usize> =
+                    (0..chunk.len()).filter(|&k| reused[k].is_none()).collect();
+                let resolved = pool.map_with(
+                    todo.len(),
+                    || Position::from_json(position_json),
+                    |position, k| {
+                        let (i, j) = chunk[todo[k]];
+                        let actions = [ours[i].clone(), theirs[j].clone()];
+                        resolve_turn(reg, position, &actions, budget).map(|result| {
+                            let resumed = resume_all(reg, &result, 0);
+                            (result, resumed)
+                        })
+                    },
+                );
+                let mut resolved = resolved.into_iter();
+                for (k, &(i, j)) in chunk.iter().enumerate() {
+                    match reused[k].take() {
+                        Some(result) => {
+                            read_off += 1;
+                            absorb(i, j, result, None);
+                        }
+                        None => match resolved.next().expect("one answer per cell asked") {
+                            Err(reason) => refused.push(json!([i, j, reason])),
+                            Ok((result, resumed)) => absorb(i, j, result, Some(&resumed)),
+                        },
+                    }
+                }
+            }
         }
     }
 

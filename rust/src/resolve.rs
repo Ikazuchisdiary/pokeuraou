@@ -986,6 +986,9 @@ fn ability_handled(ability: &str) -> bool {
             // `transform::imposter` in `switch_in_ability`; Illusion's one effect a turn
             // can observe is a failed Transform, which `transform_into` notes (IKA-219).
             | "imposter" | "illusion"
+            // Not applied, and noted at the end of every turn its holder is there for,
+            // in `moves::residuals` (IKA-308).
+            | "moody"
     ) || crate::inert::ability_is_inert(ability)
 }
 

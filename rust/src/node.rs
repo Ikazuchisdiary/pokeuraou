@@ -46,6 +46,10 @@ pub struct Request {
     /// cells off another's by their actions (IKA-295). Empty everywhere else.
     pub ours_json: Vec<Value>,
     pub theirs_json: Vec<Value>,
+    /// The position as the request wrote it, for the cell threads to parse their own
+    /// copies from (IKA-32: a `Position` holds `Rc`s and cannot be shared between
+    /// threads). `Null` when there is no pool, which is every run at one thread.
+    pub position_json: Value,
 }
 
 impl Request {
@@ -108,9 +112,14 @@ pub fn parse_request(value: &Value) -> Result<Request, String> {
             .and_then(Value::as_bool)
             .unwrap_or(false),
     };
+    let position_json = match crate::par::Pool::global() {
+        Some(_) => value["position"].clone(),
+        None => Value::Null,
+    };
     Ok(Request {
         ours_json: Vec::new(),
         theirs_json: Vec::new(),
+        position_json,
         encoding,
         encode,
         cells,
@@ -125,6 +134,11 @@ pub fn parse_request(value: &Value) -> Result<Request, String> {
 
 /// Fills the matrix, leaving the cells this port refuses for the caller.
 pub fn fill(reg: &Reg, request: &Request) -> Value {
+    fill_on(reg, request, crate::par::Pool::global())
+}
+
+/// `fill`, with its cells on `pool` when there is one (IKA-32).
+pub fn fill_on(reg: &Reg, request: &Request, pool: Option<&crate::par::Pool>) -> Value {
     let rows = request.ours.len();
     let cols = request.theirs.len();
     let scorers: Vec<fn(&Position) -> f64> = request
@@ -138,6 +152,32 @@ pub fn fill(reg: &Reg, request: &Request) -> Value {
     let mut exact = vec![vec![false; cols]; rows];
     let mut refused: Vec<Value> = Vec::new();
     let mut unmodelled: BTreeSet<String> = BTreeSet::new();
+
+    if let Some(pool) = pool.filter(|_| !request.position_json.is_null()) {
+        let wanted = request.wanted_cells();
+        let answered = fill_cells(pool, reg, request, &scorers, &wanted);
+        for ((i, j), cell) in wanted.into_iter().zip(answered) {
+            unmodelled.extend(cell.notes);
+            match cell.outcome {
+                Err(reason) => refused.push(json!([i, j, reason])),
+                Ok((was_exact, values, failed)) => {
+                    exact[i][j] = was_exact;
+                    for (index, value) in values.into_iter().enumerate() {
+                        payoffs[index][i][j] = value;
+                    }
+                    if let Some(reason) = failed {
+                        refused.push(json!([i, j, reason]));
+                    }
+                }
+            }
+        }
+        return json!({
+            "payoffs": payoffs,
+            "exact": exact,
+            "refused": refused,
+            "unmodelled": unmodelled.into_iter().collect::<Vec<_>>(),
+        });
+    }
 
     for (i, j) in request.wanted_cells() {
         {
@@ -170,6 +210,52 @@ pub fn fill(reg: &Reg, request: &Request) -> Value {
         "refused": refused,
         "unmodelled": unmodelled.into_iter().collect::<Vec<_>>(),
     })
+}
+
+/// One cell of `fill`, answered on a cell thread (IKA-32).
+struct FilledCell {
+    /// The resolver's refusal, or (exact, the values up to the first objective that
+    /// failed, that objective's reason) -- exactly what `fill`'s own loop writes.
+    outcome: Result<(bool, Vec<f64>, Option<String>), String>,
+    notes: BTreeSet<String>,
+}
+
+/// `fill`'s loop body, one cell per item, on the pool. Each thread resolves from its own
+/// parse of the position; the notes are a set, so their union does not care who added
+/// what first, and the rest is written back cell by cell in `wanted`'s order.
+fn fill_cells(
+    pool: &crate::par::Pool,
+    reg: &Reg,
+    request: &Request,
+    scorers: &[fn(&Position) -> f64],
+    wanted: &[(usize, usize)],
+) -> Vec<FilledCell> {
+    let (ours, theirs, budget) = (&request.ours, &request.theirs, request.budget);
+    let position_json = &request.position_json;
+    pool.map_with(
+        wanted.len(),
+        || Position::from_json(position_json),
+        |position, k| {
+            let (i, j) = wanted[k];
+            let mut notes = BTreeSet::new();
+            let actions = [ours[i].clone(), theirs[j].clone()];
+            let outcome = resolve_turn(reg, position, &actions, budget).map(|result| {
+                let mut values = Vec::with_capacity(scorers.len());
+                let mut failed = None;
+                for score in scorers {
+                    match turn_value(reg, &result, *score, 0, &mut notes) {
+                        Ok(value) => values.push(value),
+                        Err(reason) => {
+                            failed = Some(reason);
+                            break;
+                        }
+                    }
+                }
+                (result.exact, values, failed)
+            });
+            FilledCell { outcome, notes }
+        },
+    )
 }
 
 /// One turn, for advancing a game rather than filling a matrix.
@@ -371,6 +457,14 @@ pub fn serve(reg: &Reg) {
             }
         }
     }
+    // IKA-32: the cell threads' counters, for a run whose workers cannot be asked (a
+    // generation run's). A file per process in the named directory; nothing without it.
+    if let Ok(dir) = std::env::var("POKEURAOU_PORT_THREADS_REPORT") {
+        let path = std::path::Path::new(&dir).join(format!("port-{}.json", std::process::id()));
+        if let Err(error) = std::fs::write(&path, format!("{}\n", crate::par::report())) {
+            eprintln!("node: could not write {}: {error}", path.display());
+        }
+    }
 }
 
 /// The header as text, carrying what its own serialisation cost.
@@ -463,20 +557,24 @@ fn many(reg: &Reg, value: &Value) -> Value {
     let Some(list) = value["requests"].as_array() else {
         return json!({ "error": "`many` without a list of requests" });
     };
-    let answers: Vec<Value> = list
-        .iter()
-        .map(|one| {
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match one["kind"].as_str() {
-                Some("score") => score_pool(reg, one),
-                Some("qfeatures") => qfeatures(reg, one),
-                kind if crate::resolve::commands::handles(kind) => {
-                    crate::resolve::commands::answer(reg, one)
-                }
-                _ => json!({ "error": "`many` answers `score` and the turn commands only" }),
-            }))
-            .unwrap_or_else(|_| json!({ "refused": "the port panicked on this node" }))
-        })
-        .collect();
+    let answer_one = |one: &Value| -> Value {
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match one["kind"].as_str() {
+            Some("score") => score_pool(reg, one),
+            Some("qfeatures") => qfeatures(reg, one),
+            kind if crate::resolve::commands::handles(kind) => {
+                crate::resolve::commands::answer(reg, one)
+            }
+            _ => json!({ "error": "`many` answers `score` and the turn commands only" }),
+        }))
+        .unwrap_or_else(|_| json!({ "refused": "the port panicked on this node" }))
+    };
+    // Each request parses its own position and answers in JSON, so nothing of one thread's
+    // is seen by another's: on the pool they go one per item and come back in the order sent
+    // (IKA-32).
+    let answers: Vec<Value> = match crate::par::Pool::global() {
+        Some(pool) if list.len() > 1 => pool.map_with(list.len(), || (), |_, k| answer_one(&list[k])),
+        _ => list.iter().map(answer_one).collect(),
+    };
     json!({ "kind": "many", "answers": answers })
 }
 
@@ -631,6 +729,8 @@ fn answer<R: BufRead, W: Write>(
         Ok(value) if value["kind"].as_str() == Some("score") => score_pool(reg, &value),
         Ok(value) if value["kind"].as_str() == Some("qfeatures") => qfeatures(reg, &value),
         Ok(value) if value["kind"].as_str() == Some("many") => many(reg, &value),
+        // The cell threads' own account (IKA-32): how many, and how much ran on them.
+        Ok(value) if value["kind"].as_str() == Some("parallel") => crate::par::report(),
         Ok(value) if value["kind"].as_str() == Some("fills") => {
             return fills(reg, encoder, shared, input, stdout, &value, parse_us);
         }

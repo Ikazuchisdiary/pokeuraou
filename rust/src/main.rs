@@ -34,6 +34,7 @@ mod moveinfo;
 mod node;
 mod objective;
 mod moves;
+mod par;
 mod position;
 mod reg;
 mod resolve;
@@ -148,7 +149,19 @@ fn encode_main(args: &[String]) {
 }
 
 /// Serves whole nodes over stdio, so a caller can fill a matrix in one crossing.
+///
+/// `node <regulation.json> [--threads N]`: N threads resolve a node's cells (IKA-32).
+/// Without it, `POKEURAOU_PORT_THREADS`, else 1.
 fn node_main(args: &[String]) {
+    if let Some(at) = args.iter().position(|a| a == "--threads") {
+        match args.get(at + 1).and_then(|n| n.parse::<usize>().ok()) {
+            Some(threads) if threads >= 1 => par::set_threads(threads),
+            _ => {
+                eprintln!("--threads takes a positive number");
+                std::process::exit(2);
+            }
+        }
+    }
     let reg = reg::Reg::load(&args[0]).unwrap_or_else(|e| {
         eprintln!("regulation: {e}");
         std::process::exit(1);

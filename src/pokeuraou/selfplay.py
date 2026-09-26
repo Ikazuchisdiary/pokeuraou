@@ -651,6 +651,19 @@ def _sample_index(rng: np.random.Generator, weights: np.ndarray) -> int:
 RANK_VIEWS = ("heaviest", "first")
 
 
+def _belief_deepen(
+    cells: int, how: dict[str, bool], outside: tuple | None
+) -> dict[str, Any]:
+    """`belief_solve`'s ``deepen`` entry for one side (IKA-294): its cells, reading,
+    swap and oracle candidates (side 0's, side 1's), as `search` takes them."""
+    return {
+        "cells": cells,
+        "reading": "breadth" if how["breadth_only"] else "mixed",
+        "swap": how["swap"],
+        "outside": outside,
+    }
+
+
 def _menus(
     reg: Regulation,
     pos: Position,
@@ -988,7 +1001,10 @@ def play_game(
     depth 1 and the full-matrix solve only. ``m<N>o<W>`` / ``m<N>oall`` also widen the
     root by its double oracle (IKA-293) over the rest of the agent's own width-W menu
     (or every legal action), at the same nodes; the recorded menus are then the grown
-    ones the strategies index.
+    ones the strategies index. A label ending in ``h`` (IKA-294) deepens and widens the
+    nodes with a bench still hidden too: each side that carries it spends its budget on
+    its own Bayesian game (`deepen.deepen_belief`, inside `belief_solve`), and the nodes
+    with no bench hidden are deepened as without the ``h``.
     """
     # Closes the stretch since the last game's last record (IKA-98); the first one ends startup.
     timing.decided("between")
@@ -1206,7 +1222,10 @@ def play_game(
                 len(items) == 1 and items[0].exact for items in spreads.values()
             )
             widens = tuple(
-                open_node and cells[side] > 0 and oracles[side] is not None
+                # A label ending in h widens where a bench is hidden too (IKA-294).
+                (open_node or specs[side].hidden)
+                and cells[side] > 0
+                and oracles[side] is not None
                 for side in (0, 1)
             )
         # Each agent's wider menus by width: `own_wider` from side 0's construction.
@@ -1248,6 +1267,12 @@ def play_game(
                 len(items) == 1 and items[0].exact for items in spreads.values()
             )
             deep = (exact and cells[0] > 0, exact and cells[1] > 0)
+            # A label ending in h deepens the Bayesian root where a bench is still hidden
+            # (IKA-294): `belief_solve` spends it, per side, on its own game.
+            hidden_deep = tuple(
+                not exact and specs[side].hidden and cells[side] > 0 for side in (0, 1)
+            )
+
             own_deep = foe_deep = None
             solve_started = perf_counter()
             try:
@@ -1264,6 +1289,14 @@ def play_game(
                         reg, pos, ours, theirs, spreads,
                         {0: own_leaf, 1: foe_leaf}, budget=budget,
                         sides=asked, depth=depths,
+                        deepen={
+                            side: _belief_deepen(
+                                cells[side], how[side],
+                                own_wider.get(oracles[side]) if widens[side] else None,
+                            )
+                            for side in asked
+                            if hidden_deep[side]
+                        } or None,
                     )
                     if asked
                     else {}
@@ -1298,6 +1331,10 @@ def play_game(
             if own_deep is None:
                 own_strategy = answers[0].strategy
                 search_value = answers[0].value
+                if answers[0].deepened is not None:
+                    # The Bayesian root's menus, grown by its oracle when it widens.
+                    deepened[0] = answers[0].deepened
+                    ours = answers[0].ours
             foe_theirs = theirs
             if own_deep is not None:
                 record.unmodelled.extend(own_deep.unmodelled)
@@ -1316,6 +1353,9 @@ def play_game(
                 deepened[1] = foe_deep.deepened
             elif same_menu:
                 foe_strategy = answers[1].strategy
+                if answers[1].deepened is not None:
+                    deepened[1] = answers[1].deepened
+                    foe_theirs = answers[1].theirs
                 # Side 1 solved the negated transpose, so its value is minus side 0's
                 # win probability as side 1 believes it; negated back into side 0's units.
                 foe_search_value = -answers[1].value
@@ -1349,6 +1389,14 @@ def play_game(
                             reg, pos, foe_ours, foe_theirs, spreads,
                             {0: own_leaf, 1: foe_leaf}, budget=budget, sides=(1,),
                             depth=depths,
+                            deepen=(
+                                {1: _belief_deepen(
+                                    cells[1], how[1],
+                                    foe_wider.get(oracles[1]) if widens[1] else None,
+                                )}
+                                if hidden_deep[1]
+                                else None
+                            ),
                         )
                 except EquilibriumError:
                     break
@@ -1363,6 +1411,9 @@ def play_game(
                 else:
                     record.unmodelled.extend(foe_answers[1].unmodelled)
                     foe_strategy = foe_answers[1].strategy
+                    if foe_answers[1].deepened is not None:
+                        deepened[1] = foe_answers[1].deepened
+                        foe_theirs = foe_answers[1].theirs
                     # Side 1 played off this solve, over its own menu, so its value is
                     # this one.
                     foe_search_value = -foe_answers[1].value
