@@ -2015,3 +2015,8 @@ oracle も深化も両側の裏が尽きたノード（move の決定の 35〜38
 ```
 
 深化を使うなら入れ替えの oracle を付けた方が強い（小さい予算）が、どの予算でも同じ費用の幅だけの深さ 1 を越えない。既定は変えない。
+
+### M-C のデータ生成と対戦評価の候補集合: q-nocover が既定 〔9/27・IKA-331・IKA-338〕
+
+IKA-338 の取り込み（ブランチ `ika-338-qnocover-default` のコード 8b2e4c4）以降の master では、M-C のデータ生成（`generate_queue.py --pool`・`selfplay.py --pool`）と対戦評価（`match_queue.py --pool`・`pool_match.py`）は、葉の順位付けの条件で `--rank-fill` を名指ししなければ `q-nocover`、Q は `data/models/q-mc0.pt` で打つ（無ければ止まる）。それより前の M-C の生成データ（`data/selfplay-mc0` など）と、名指しの無い対戦評価は `refs2`。記録の `rankFill` で見分けられる（`refs2` の局には無い）。
+判定は IKA-331（同じ壁時計の構築プールから学んだ評価モデルで +3.8 [−6.3, +14.0]、非劣性 H1、局は 1.18 倍）。新しい既定の局は、前の master に `--rank-fill q-nocover --q-model q-mc0.pt` を明示した局とバイト一致（データ生成 600/600、records/IKA-338.md）。
