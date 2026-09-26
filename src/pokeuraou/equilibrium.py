@@ -22,10 +22,11 @@ entry shifts the value and leaves the strategies unchanged, so a constant-sum ga
 from __future__ import annotations
 
 import os
+import queue
 import threading
 from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 from scipy.optimize import linprog
@@ -45,7 +46,6 @@ class EquilibriumError(RuntimeError):
 #: core a worker already). A small game stays on one thread: its LPs are mostly Python.
 LP_PAIR_ENV = "POKEURAOU_LP_PAIR_CELLS"
 _LP_PAIR = [int(os.environ.get(LP_PAIR_ENV, "0") or 0)]
-_LP_POOL: list[ThreadPoolExecutor | None] = [None]
 _LP_POOL_LOCK = threading.Lock()
 #: How many games had their two LPs solved at once (the stage's positive control).
 LP_PAIRS = [0]
@@ -63,23 +63,63 @@ def lp_pair() -> int:
     return _LP_PAIR[0]
 
 
+class _Later:
+    """One call handed to the pair's thread, and its answer or error when done."""
+
+    def __init__(self, call: Callable[[], Any]) -> None:
+        self.call = call
+        self.done = threading.Event()
+        self.value: Any = None
+        self.error: BaseException | None = None
+
+    def result(self) -> Any:  # noqa: ANN401
+        self.done.wait()
+        if self.error is not None:
+            raise self.error
+        return self.value
+
+
+#: The pair's second threads, kept for the process's life and never joined: a thread that
+#: has run HiGHS can hang the process as it exits (IKA-32 stage 2, `deepen._Helpers`), so
+#: none does. A pool of them, since two threads may each want a second at once.
+_LP_QUEUE: queue.SimpleQueue[_Later] = queue.SimpleQueue()
+_LP_THREADS: list[threading.Thread] = []
+
+
+def _lp_serve() -> None:
+    while True:
+        later = _LP_QUEUE.get()
+        try:
+            later.value = later.call()
+        except BaseException as error:  # noqa: BLE001 - handed back to the caller
+            later.error = error
+        later.done.set()
+
+
+def _later(call: Callable[[], Any]) -> _Later:
+    with _LP_POOL_LOCK:
+        if len(_LP_THREADS) < 4:
+            thread = threading.Thread(target=_lp_serve, name="lp-pair", daemon=True)
+            thread.start()
+            _LP_THREADS.append(thread)
+    later = _Later(call)
+    _LP_QUEUE.put(later)
+    return later
+
+
 def _both[A, B](cells: int, first: Callable[[], A], second: Callable[[], B]) -> tuple[A, B]:
-    """``(first(), second())``, the second on a helper thread when the game is big enough.
+    """``(first(), second())``, the second on another thread when the game is big enough.
 
     An error is the one the serial order meets first: `first`'s, else `second`'s.
     """
     threshold = _LP_PAIR[0]
     if threshold <= 0 or cells < threshold:
         return first(), second()
-    with _LP_POOL_LOCK:
-        if _LP_POOL[0] is None:
-            _LP_POOL[0] = ThreadPoolExecutor(max_workers=2, thread_name_prefix="lp-pair")
-        pool = _LP_POOL[0]
-    later = pool.submit(second)
+    later = _later(second)
     try:
         a = first()
     except BaseException:
-        later.exception()  # wait: the helper's LP is not left running
+        later.done.wait()  # the other LP is not left running
         raise
     LP_PAIRS[0] += 1
     return a, later.result()
