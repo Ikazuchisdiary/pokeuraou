@@ -130,7 +130,10 @@ def main() -> None:
               + (" (ensemble, logits averaged)" if len(group) > 1 else ""),
               file=sys.stderr)
     for name, model in q_models.items():
-        print(f"  Q arm {name}: {', '.join(model.files)} (eager, no graphs)", file=sys.stderr)
+        print(f"  Q arm {name}: {', '.join(model.files)} "
+              + ("(CUDA graphs: trunk, each side's pool size; pair head eager)"
+                 if getattr(model, "graphs", None) is not None else "(eager)"),
+              file=sys.stderr)
     if args.device == "cuda":
         print(f"  cuda waits: {scheduling()}", file=sys.stderr)
     print(f"  on {args.device}; requests are served as they arrive and are never merged "
@@ -173,6 +176,10 @@ def main() -> None:
                 sum(m.held for m in q_models.values()),
                 calls=sum(m.calls for m in q_models.values()),
             )
+            # Stage 3: requests the Q graphs answered, and graphs they captured.
+            graphed = [m.graphs for m in q_models.values() if getattr(m, "graphs", None)]
+            timing.set_total("server.q.graphed", 0.0, calls=sum(g.replays for g in graphed))
+            timing.set_total("server.q.captured", 0.0, calls=sum(g.captured for g in graphed))
         # Rows are a count, not a call count. Putting `rows_served` in the calls column
         # made the queueing row read as 3.2 million calls of 0.03 microseconds each.
         timing.count("server.rows", int(server.rows_served) - _reported_rows[0])
