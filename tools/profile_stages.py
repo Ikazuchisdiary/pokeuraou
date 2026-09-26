@@ -997,6 +997,45 @@ def print_delivery(found: dict[str, Any]) -> None:
             print(f"   {problem}")
 
 
+def worker_record(out: Path | None, since: float | None = None) -> dict[str, Any] | None:
+    """The driver's own record of its workers (`workqueue.RUN_RECORD`, IKA-336), if any.
+
+    One older than `since` (a `time.time()`) is an earlier run's in the same directory.
+    """
+    if out is None:
+        return None
+    path = Path(out) / "workers.json"
+    try:
+        if since is not None and path.stat().st_mtime < since:
+            return None
+        return json.loads(path.read_bytes().decode("utf-8"))
+    except (OSError, ValueError):
+        return None
+
+
+def run_verdict(code: int, workers: dict[str, Any] | None) -> str | None:
+    """Why this run's numbers are not to be used, or None when they are (IKA-336).
+
+    The driver's exit code decides, and the workers' record says why in words. Before,
+    a driver that exited 1 got a one-line aside and the table, and this tool exited 0 --
+    so an ABBA driver reading the exit code took a run whose workers had died for a clean
+    one.
+    """
+    failed = int((workers or {}).get("failed") or 0)
+    if code == 0 and not failed:
+        return None
+    parts = [f"the driver exited {code}"]
+    if failed:
+        first = workers["failures"][0]
+        parts.append(
+            f"{failed} worker(s) failed ({workers.get('outOfMemory', 0)} out of memory), "
+            f"first worker {first['worker']}: {first['error']}"
+        )
+    if workers and workers.get("serverOutOfMemory"):
+        parts.append(f"the servers sent {workers['serverOutOfMemory']} out-of-memory replies")
+    return "; ".join(parts)
+
+
 def build(args: argparse.Namespace) -> list[str]:
     """The real driver's command line for the named workload.
 
@@ -1035,6 +1074,10 @@ def build(args: argparse.Namespace) -> list[str]:
             *(["--no-bridge"] if args.no_bridge else []),
             *(["--served", "--servers", str(args.servers)] if args.served else []),
             *bench_argv(args.hide_bench),
+            # A timing run stops at its first failed worker (IKA-336): generation's own
+            # default lets a quarter fail, and the survivors replaying their games is
+            # exactly what made IKA-307's CPU per game and wall clock silently wrong.
+            "--max-worker-failures", "0",
             *(["--", *tail] if tail else []),
         ]
     if args.workload == "match":
@@ -1203,6 +1246,8 @@ def main() -> None:
     print(f"  timing -> {timing_dir}", file=sys.stderr, flush=True)
 
     started = time.perf_counter()
+    # Less a second, for a file system that keeps modification times coarsely.
+    started_at = time.time() - 1.0
     process = subprocess.Popen(command, env=env, cwd=str(ROOT))  # noqa: S603
     stop = threading.Event()
     tree: dict[str, Any] = {}
@@ -1221,15 +1266,27 @@ def main() -> None:
     stop.set()
     watcher.join(timeout=10)
     wall = time.perf_counter() - started
-    if code != 0:
-        print(f"  the run exited {code}; the table below is of whatever it did first",
-              file=sys.stderr)
+    workers_record = (
+        worker_record(args.out, since=started_at) if args.workload != "analysis" else None
+    )
+    verdict = run_verdict(code, workers_record)
+    if verdict:
+        print(f"  THE RUN FAILED ({verdict}); the table below is of whatever it did first "
+              f"and is not a timing", file=sys.stderr)
     found_steady = steady(tree.get("trace") or [])
+
+    def failed_exit() -> None:
+        # Last, after the summary is written, so an ABBA driver that reads only the exit
+        # code cannot take this run for a clean one (IKA-336).
+        if verdict:
+            print(f"\n  THE RUN FAILED: {verdict}", file=sys.stderr)
+            raise SystemExit(code or 4)
 
     if args.no_timing:
         # Nothing reported, by design: the machine's side of the run is all there is.
         summary = {"command": command, "wall": wall, "tree": tree, "steady": found_steady,
-                   "timing": False}
+                   "timing": False, "exit": code, "workers": workers_record,
+                   "failed": verdict}
         print(f"\n  run {wall:,.1f} s of wall clock, no timers (the null control)")
         print_table({"stages": {}, "counts": {}, "accounted": 0.0, "elapsed": 0.0,
                      "processes": 0, "roles": {}}, tree, wall)
@@ -1237,6 +1294,7 @@ def main() -> None:
         target = args.json or (timing_dir / "summary.json")
         target.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"\n  {target}")
+        failed_exit()
         return
 
     reports = collect(timing_dir)
@@ -1244,6 +1302,7 @@ def main() -> None:
         raise SystemExit(
             f"the run wrote no timing reports into {timing_dir}. Either it died before "
             f"any process exited, or POKEURAOU_TIMING did not reach it."
+            + (f" The run failed: {verdict}" if verdict else "")
         )
     workers, servers = _split(reports)
     summary = summarise(workers or reports)
@@ -1272,9 +1331,13 @@ def main() -> None:
     print_stack_samples(summary["stack_samples"])
     summary["delivery"] = delivery(reports, args)
     print_delivery(summary["delivery"])
+    summary["exit"] = code
+    summary["workers"] = workers_record
+    summary["failed"] = verdict
     target = args.json or (timing_dir / "summary.json")
     target.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"\n  {target}")
+    failed_exit()
     if summary["delivery"]["problems"]:
         raise SystemExit(3)
 

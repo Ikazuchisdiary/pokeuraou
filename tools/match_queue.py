@@ -263,6 +263,15 @@ def main() -> None:
     ap.add_argument("--sprt-beta", type=float, default=0.05,
                     help="chance of failing a change worth ELO1 or more")
     ap.add_argument(
+        "--max-worker-failures",
+        type=int,
+        default=0,
+        help="stop once more workers than this have failed (IKA-336); -1 never stops. "
+        "Default 0: the first failure stops the board -- the queue would hand the dead "
+        "worker's games to the others, so the games would all arrive and the run would "
+        "look whole while its clock and CPU per game were wrong (IKA-307).",
+    )
+    ap.add_argument(
         "rest",
         nargs=argparse.REMAINDER,
         help="after --, options passed to every worker unchanged",
@@ -448,12 +457,25 @@ def main() -> None:
         flush=True,
     )
     # Two seats per game, interleaved, so a straggler cannot strand half of a pair.
+    outcome: dict = {}
     try:
         status = run_workers(
             range(2 * args.games), build,
             workers=args.workers, out_dir=out_dir, env=env, cwd=str(ROOT),
             label="match", counts=written, monitor=monitor,
+            max_failures=None if args.max_worker_failures < 0 else args.max_worker_failures,
+            server_logs=[out_dir / "logs" / f"inference{i}.log" for i in range(len(servers))],
+            outcome=outcome,
         )
+        if outcome.get("stoppedForFailures"):
+            # Before the SPRT's line, which would otherwise read "ran to --games" (IKA-336).
+            print(
+                f"  the board STOPPED because a worker failed ({outcome['stoppedForFailures']}): "
+                f"its count and its test below are of the games before the stop, not an "
+                f"answer -> {out_dir / 'workers.json'}",
+                file=sys.stderr,
+                flush=True,
+            )
         if args.aivat:
             from pokeuraou.luck import summary
 
@@ -476,8 +498,10 @@ def main() -> None:
             print(
                 f"  SPRT: {state['decision'] or 'no decision'} after {state['pairs']} pairs, "
                 f"LLR {state['llr']:+.3f}"
-                + ("" if state["stoppedEarly"] else " -- ran to --games, so the fixed count "
-                   "is the answer")
+                + ("" if state["stoppedEarly"]
+                   else " -- stopped by a failed worker, no answer"
+                   if outcome.get("stoppedForFailures")
+                   else " -- ran to --games, so the fixed count is the answer")
                 + f"\n  {json.dumps(state['counts'])} -> {out_dir / 'sprt.json'}",
                 file=sys.stderr,
                 flush=True,
