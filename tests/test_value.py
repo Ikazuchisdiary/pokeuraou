@@ -338,6 +338,81 @@ def test_loading_refuses_a_changed_vocabulary(bundle, tmp_path) -> None:  # noqa
         load_model(path, tampered)
 
 
+def _random_batch(encoder, n: int = 64, seed: int = 0) -> dict:  # noqa: ANN001
+    """Positions with real move ids and nothing else real in them, for architecture tests."""
+    rng = np.random.default_rng(seed)
+    sizes, widths = encoder.vocab.sizes, encoder.widths
+    moves = rng.integers(0, sizes["move"], size=(n, 2, 4, 4))
+    moves[:, :, :, 3] = 0  # a Pokemon with three known moves, as a hidden one reads
+    mon = rng.normal(size=(n, 2, 4, widths["mon"])).astype(np.float32)
+    mon[..., encoder.mon_names.index("is_active")] = [1.0, 1.0, 0.0, 0.0]
+    arrays = {
+        "species": rng.integers(0, sizes["species"], size=(n, 2, 4)),
+        "ability": rng.integers(0, sizes["ability"], size=(n, 2, 4)),
+        "item": rng.integers(0, sizes["item"], size=(n, 2, 4)),
+        "moves": moves,
+        "mon": mon,
+        "mask": np.ones((n, 2, 4), np.float32),
+        "side": rng.normal(size=(n, 2, widths["side"])).astype(np.float32),
+        "field": rng.normal(size=(n, widths["field"])).astype(np.float32),
+    }
+    return {k: torch.from_numpy(v) for k, v in arrays.items()}
+
+
+def test_move_properties_are_off_by_default(encoder) -> None:  # noqa: ANN001
+    """The default net is the one every shipped leaf was trained as (IKA-318)."""
+    assert ValueConfig().move_properties is False
+    keys = set(build(encoder, ValueConfig()).state_dict())
+    assert not any(k.startswith("move_prop") for k in keys)
+
+
+def test_move_properties_start_as_the_id_only_net(encoder) -> None:  # noqa: ANN001
+    """Zero-initialised property columns: a warm start answers exactly as its source.
+
+    Bit for bit, not approximately -- then the only thing a warm-started comparison can
+    measure is what training did with the branch. The positive control moves the branch's
+    weights and must move the answer, or the equality is of a branch that is never read.
+    """
+    from dataclasses import replace
+
+    plain = build(encoder, ValueConfig()).eval()
+    config = replace(plain.config, move_properties=True)
+    torch.manual_seed(0)
+    props = build(encoder, config).eval()
+    missing, unexpected = props.load_state_dict(plain.state_dict(), strict=False)
+    assert not unexpected
+    assert {k.split(".")[0] for k in missing} == {"move_props", "move_prop_embed", "move_prop_in"}
+    batch = _random_batch(encoder)
+    with torch.no_grad():
+        assert torch.equal(plain(batch), props(batch))
+        props.move_prop_in.weight.normal_(0.0, 0.1)
+        moved = props(batch)
+        assert float((moved - plain(batch)).abs().max()) > 1e-3
+        # Antisymmetric with the branch live, as the architecture promises.
+        assert float((moved + props(_flip(batch))).abs().max()) < 1e-5
+
+
+def test_a_move_property_model_saves_loads_and_refuses_another_dex(encoder, tmp_path) -> None:  # noqa: ANN001
+    config = ValueConfig(move_properties=True)
+    torch.manual_seed(1)
+    net = build(encoder, config).eval()
+    with torch.no_grad():
+        net.move_prop_in.weight.normal_(0.0, 0.1)
+    path = tmp_path / "value.pt"
+    save_model(path, net, net.state_dict(), encoder.vocab, config, meta={}, widths=encoder.widths)
+    loaded, _meta = load_model(path, encoder)
+    batch = _random_batch(encoder, seed=2)
+    with torch.no_grad():
+        assert torch.equal(net(batch), loaded(batch))
+
+    # A model told something else about one move than this dex says is refused.
+    blob = torch.load(path, map_location="cpu", weights_only=False)
+    blob["weights"]["move_props"][5, 0] += 1.0
+    torch.save(blob, path)
+    with pytest.raises(ValueError, match="other properties"):
+        load_model(path, encoder)
+
+
 def test_auc_is_the_rank_statistic() -> None:
     # Perfect separation, perfect inversion, and a constant score.
     assert auc(np.array([0.1, 0.2, 0.9, 0.8]), np.array([0, 0, 1, 1])) == 1.0
