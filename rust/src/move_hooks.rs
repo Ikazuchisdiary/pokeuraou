@@ -155,16 +155,18 @@ pub(crate) fn steal_berry(
 /// port implements: Sitrus and Oran heal, Lum and Persim cure, a resist berry does nothing.
 /// Any other berry is reported rather than named here: a name in this file would tell
 /// `tools/port_coverage.py` that the port acts on the berry wherever it is held. The eater's
-/// Cheek Pouch, Cud Chew or Ripen (`EatItem`, `onTryHeal`) is reported where the port meets
-/// the ability, as it is for any ability `modelled::ability_is_modelled` does not list.
+/// Ripen doubles the heal (`onTryHeal`, the berry being the effect) and its Cheek Pouch
+/// heals after (`runEvent('EatItem', source, ...)`, IKA-329); Cud Chew is reported where
+/// the port meets the ability, as it is for any ability `modelled::ability_is_modelled`
+/// does not list.
 fn eat(turn: &mut Turn, at: Slot, berry: &str) {
     match berry {
         "sitrusberry" => {
             let amount = turn.mon_at(at.0, at.1).map(|m| (m.maxhp / 4).max(1)).unwrap_or(0);
-            turn.heal(at.0, at.1, amount, "berry");
+            turn.berry_heal(at.0, at.1, amount);
         }
         "oranberry" => {
-            turn.heal(at.0, at.1, 10, "berry");
+            turn.berry_heal(at.0, at.1, 10);
         }
         "lumberry" | "persimberry" => {
             if let Some(mon) = turn.mon_at_mut(at.0, at.1) {
@@ -178,4 +180,5 @@ fn eat(turn: &mut Turn, at: Slot, berry: &str) {
         _ if resist_berry(berry).is_some() => {}
         _ => turn.report(format!("berry eaten by another: {berry}")),
     }
+    turn.ate_berry(at.0, at.1);
 }
