@@ -17,6 +17,12 @@ choice, and which volatiles the encoder did not recognise. A volatile in the `ot
 bucket is a feature the network cannot see, so the count is worth reading rather than
 discovering later as unexplained error.
 
+The per-game loop runs in the port (`pokeuraou-damage encode-games`, IKA-347): reading the
+JSON, rebuilding the positions and encoding them were 85% of the 225 seconds
+`data/selfplay-mc0` took here, and the arrays it hands back are the same bytes this file's
+own loop writes (`--engine python`, kept as the reference the port is compared against).
+`--jobs N` reads N files at once; the npz itself is still written here.
+
     uv run --group learn python tools/encode_dataset.py --dir data/selfplay-gen1
     uv run --group learn python tools/encode_dataset.py \
         --dir data/selfplay-gen5 data/selfplay-gen6 data/selfplay-gen7 \
@@ -27,9 +33,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import subprocess
 import sys
 import time
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +45,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from pokeuraou import rustnode
 from pokeuraou.encode import ENCODING_REVISION, Encoded, Encoder
 from pokeuraou.payoff import HP_SHARE
 from pokeuraou.position import Position
@@ -105,53 +114,165 @@ def _lacks_foe_values(cache: Path, directory: Path, sources: list[list[Any]]) ->
     return False
 
 
-def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict[str, Any]]:
-    """Encodes one directory of games, or reads back the cache if it is still valid."""
-    cache = shard_path(directory)
-    sources = sources_of(directory)
-    if not sources:
-        raise SystemExit(f"no games in {directory}")
-    want = {
-        "sources": sources,
-        "kinds_filter": sorted(args.kinds) if args.kinds else None,
-        "limit": args.limit,
-    }
-    # A cache is also stale when it predates a FIELD, not only when its games changed.
-    #
-    # `information` -- what the search could see -- was added on 2026-09-18, and
-    # `data/selfplay-gen11L-encoded.npz` was written the day before. The three keys above
-    # all still matched, so it would have been reused; `merged()` skips a missing key, so
-    # a 24,000-game hidden pool would have been described as 12,000 hidden. The field the
-    # whole hidden-versus-open experiment turns on, wrong by half, in the meta of the
-    # model that experiment produces.
-    #
-    # So the cache records which keys it was written with, and any old shard is missing
-    # that and re-encodes once. Cheap: a shard is a few minutes, and the alternative is a
-    # model whose record describes a pool it was not trained on.
-    want["meta_keys"] = sorted(META_KEYS)
-    # And stale when a column changed meaning under it. The games are the same bytes and
-    # every key above still matches, but `can_mega` was read off a slot number until
-    # IKA-121 -- a shard from before it would hand the next generation the old feature
-    # beside new shards that have the new one.
-    want["encoding_revision"] = ENCODING_REVISION
-    # A filtered run does not get a cache, in either direction. `--limit 50` is a
-    # debugging flag, and letting it write `data/selfplay-gen7-encoded.npz` would replace
-    # a full generation with fifty games under a name that says otherwise -- a trap that
-    # would be sprung an hour later by a training run that read the file and believed it.
-    cacheable = not args.limit and not args.kinds
-    if cacheable and cache.exists() and not args.force:
-        try:
-            have = json.loads(str(np.load(cache, allow_pickle=False)["meta_json"]))
-        except (KeyError, ValueError, OSError):
-            have = {}
-        if all(have.get(k) == v for k, v in want.items()) and not _lacks_foe_values(
-            cache, directory, sources
-        ):
-            dataset = load_dataset(cache)
-            print(f"  {directory.name}: {len(dataset):,} decisions from cache")
-            return dataset, have
-        print(f"  {directory.name}: cache is stale, re-encoding")
+@dataclass
+class Games:
+    """One directory's finished games, encoded, and the counts its meta is made of."""
 
+    encoder: Encoder
+    dataset: Dataset
+    games: int
+    search_limits: Counter[str]
+    provenances: Counter[str]
+    engines: Counter[str]
+    objectives: Counter[str]
+    selections: Counter[str]
+    information: Counter[str]
+    branching: Counter[int]
+
+
+def _first_format(directory: Path, sources: list[list[Any]]) -> str | None:
+    """The format of the first finished game, which is what the Python loop built for."""
+    for name, _size in sources:
+        with (directory / name).open(encoding="utf-8") as handle:
+            for line in handle:
+                if not line.strip():
+                    continue
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if record.get("outcome") is not None:
+                    return record["decisions"][0]["position"]["format"]
+    return None
+
+
+#: A missing key, as against one present with the value null.
+_ABSENT = object()
+
+_ENCODED_ARRAYS = ("species", "ability", "item", "moves", "mon", "mask", "side", "field")
+
+
+def _meta_keys(field: str, pairs: list[list[Any]]) -> Counter[str]:
+    """A meta counter from the port's (raw JSON text or null, count) pairs.
+
+    The port does not decide what a field's value *means*: it hands over each distinct
+    raw text in the order it was first met, and this applies the same `.get(key,
+    default)`, `or {}` and `str()` the Python loop applied to the parsed record.
+    """
+    out: Counter[str] = Counter()
+    for raw, count in pairs:
+        value = _ABSENT if raw is None else json.loads(raw)
+        if field == "provenance":
+            key = ({} if value is _ABSENT else (value or {})).get("kind", SELF_PLAY)
+        elif field == "engine":
+            key = str(({} if value is _ABSENT else (value or {})).get("sources", "unrecorded"))
+        else:
+            default = {"selectionSource": "uniform", "information": "open"}.get(field)
+            key = str(default if value is _ABSENT else value)
+        out[key] += count
+    return out
+
+
+def _read_rust(
+    directory: Path, sources: list[list[Any]], args: argparse.Namespace
+) -> Games | None:
+    """The same loop in the port (`encode-games`), its arrays read straight into numpy."""
+    format_id = args.regulation or _first_format(directory, sources)
+    if format_id is None:
+        return None
+    reg = load_regulation(format_id)
+    encoder = Encoder(reg)
+    print(
+        f"encoding for {encoder.vocab.format_id} "
+        f"(vocab {encoder.vocab.fingerprint()}), widths {encoder.widths}"
+    )
+    rustnode.require_current_binary()
+    command = [
+        str(rustnode.binary_path()),
+        "encode-games",
+        str(reg.source),
+        "--jobs",
+        str(args.jobs),
+    ]
+    if args.limit:
+        command += ["--limit", str(args.limit)]
+    for kind in args.kinds or []:
+        command += ["--kind", kind]
+    command += ["--", *(str(directory / name) for name, _size in sources)]
+    arrays: dict[str, np.ndarray] = {}
+    with subprocess.Popen(command, stdout=subprocess.PIPE) as process:
+        assert process.stdout is not None
+        line = process.stdout.readline()
+        header = json.loads(line) if line else None
+        if header is not None:
+            n, m = header["decisions"], header["monsPerSide"]
+            shapes = {
+                "species": (n, 2, m),
+                "ability": (n, 2, m),
+                "item": (n, 2, m),
+                "moves": (n, 2, m, 4),
+                "mon": (n, 2, m, header["monWidth"]),
+                "mask": (n, 2, m),
+                "side": (n, 2, header["sideWidth"]),
+                "field": (n, header["fieldWidth"]),
+            }
+            for name, dtype in header["arrays"]:
+                array = np.empty(shapes.get(name, (n,)), dtype=np.dtype(dtype))
+                view = memoryview(array.reshape(-1).view(np.uint8))
+                got = 0
+                while got < len(view):
+                    read = process.stdout.readinto(view[got:])
+                    if not read:
+                        break
+                    got += read
+                if got != len(view):
+                    raise SystemExit(f"encode-games stopped inside {name} ({got} of {len(view)} bytes)")
+                arrays[name] = array.astype(array.dtype.newbyteorder("="), copy=False)
+            if process.stdout.read(1):
+                raise SystemExit("encode-games wrote more than its header declared")
+    if process.returncode != 0 or header is None:
+        raise SystemExit(f"encode-games failed (exit {process.returncode}); see above")
+    if header.get("control"):
+        print("  (the port was built with ika347-control: the turn feature is one slot along)")
+    widths = {"mon": header["monWidth"], "side": header["sideWidth"], "field": header["fieldWidth"]}
+    if widths != encoder.widths:
+        raise SystemExit(f"the port encodes widths {widths}, this encoder {encoder.widths}")
+    if header["games"] == 0 or header["decisions"] == 0:
+        return None
+    meta = header["meta"]
+    encoded = Encoded(
+        **{name: arrays[name] for name in _ENCODED_ARRAYS},
+        unknown_volatiles=dict(header["unknownVolatiles"]),
+    )
+    return Games(
+        encoder=encoder,
+        dataset=Dataset(
+            encoded=encoded,
+            outcome=arrays["outcome"],
+            game=arrays["game"],
+            turn=arrays["turn"],
+            search_value=arrays["search_value"],
+            hp_share=arrays["hp_share"],
+            kind=arrays["kind"],
+            foe=arrays["foe"],
+            foe_names=tuple("?" if raw is None else json.loads(raw) for raw in header["foeLabels"]),
+            foe_search_value=arrays["foe_search_value"],
+        ),
+        games=header["games"],
+        search_limits=_meta_keys("searchLimit", meta["searchLimit"]),
+        provenances=_meta_keys("provenance", meta["provenance"]),
+        engines=_meta_keys("engine", meta["engine"]),
+        objectives=_meta_keys("searchObjective", meta["searchObjective"]),
+        selections=_meta_keys("selectionSource", meta["selectionSource"]),
+        information=_meta_keys("information", meta["information"]),
+        branching=Counter({int(k): v for k, v in header["branching"]}),
+    )
+
+
+def _read_python(
+    directory: Path, sources: list[list[Any]], args: argparse.Namespace
+) -> Games | None:
+    """The loop as it ran here until IKA-347: the reference `_read_rust` is held to."""
     encoder: Encoder | None = None
     pending: list[Position] = []
     chunks: list[Encoded] = []
@@ -181,7 +302,6 @@ def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict
     information: Counter[str] = Counter()
     unknown: Counter[str] = Counter()
     game_id = 0
-    started = time.perf_counter()
 
     def flush() -> None:
         nonlocal pending
@@ -254,8 +374,7 @@ def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict
     flush()
 
     if encoder is None or not chunks:
-        raise SystemExit(f"no finished games found in {directory}")
-
+        return None
     encoded = Encoded(
         species=np.concatenate([c.species for c in chunks]),
         ability=np.concatenate([c.ability for c in chunks]),
@@ -267,18 +386,93 @@ def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict
         field=np.concatenate([c.field for c in chunks]),
         unknown_volatiles=dict(unknown),
     )
-    dataset = Dataset(
-        encoded=encoded,
-        outcome=np.array(outcomes, dtype=np.float32),
-        game=np.array(games, dtype=np.int32),
-        turn=np.array(turns, dtype=np.int16),
-        search_value=np.array(proxies, dtype=np.float32),
-        hp_share=np.array(hp_shares, dtype=np.float32),
-        kind=np.array(kinds, dtype=np.int8),
-        foe=np.array(foes, dtype=np.int32),
-        foe_names=tuple(foe_names),
-        foe_search_value=np.array(foe_values, dtype=np.float32),
+    return Games(
+        encoder=encoder,
+        dataset=Dataset(
+            encoded=encoded,
+            outcome=np.array(outcomes, dtype=np.float32),
+            game=np.array(games, dtype=np.int32),
+            turn=np.array(turns, dtype=np.int16),
+            search_value=np.array(proxies, dtype=np.float32),
+            hp_share=np.array(hp_shares, dtype=np.float32),
+            kind=np.array(kinds, dtype=np.int8),
+            foe=np.array(foes, dtype=np.int32),
+            foe_names=tuple(foe_names),
+            foe_search_value=np.array(foe_values, dtype=np.float32),
+        ),
+        games=game_id,
+        search_limits=search_limits,
+        provenances=provenances,
+        engines=engines,
+        objectives=objectives,
+        selections=selections,
+        information=information,
+        branching=branching,
     )
+
+
+def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict[str, Any]]:
+    """Encodes one directory of games, or reads back the cache if it is still valid."""
+    cache = shard_path(directory)
+    sources = sources_of(directory)
+    if not sources:
+        raise SystemExit(f"no games in {directory}")
+    want = {
+        "sources": sources,
+        "kinds_filter": sorted(args.kinds) if args.kinds else None,
+        "limit": args.limit,
+    }
+    # A cache is also stale when it predates a FIELD, not only when its games changed.
+    #
+    # `information` -- what the search could see -- was added on 2026-09-18, and
+    # `data/selfplay-gen11L-encoded.npz` was written the day before. The three keys above
+    # all still matched, so it would have been reused; `merged()` skips a missing key, so
+    # a 24,000-game hidden pool would have been described as 12,000 hidden. The field the
+    # whole hidden-versus-open experiment turns on, wrong by half, in the meta of the
+    # model that experiment produces.
+    #
+    # So the cache records which keys it was written with, and any old shard is missing
+    # that and re-encodes once. Cheap: a shard is a few minutes, and the alternative is a
+    # model whose record describes a pool it was not trained on.
+    want["meta_keys"] = sorted(META_KEYS)
+    # And stale when a column changed meaning under it. The games are the same bytes and
+    # every key above still matches, but `can_mega` was read off a slot number until
+    # IKA-121 -- a shard from before it would hand the next generation the old feature
+    # beside new shards that have the new one.
+    want["encoding_revision"] = ENCODING_REVISION
+    # A filtered run does not get a cache, in either direction. `--limit 50` is a
+    # debugging flag, and letting it write `data/selfplay-gen7-encoded.npz` would replace
+    # a full generation with fifty games under a name that says otherwise -- a trap that
+    # would be sprung an hour later by a training run that read the file and believed it.
+    cacheable = not args.limit and not args.kinds
+    if cacheable and cache.exists() and not args.force:
+        try:
+            have = json.loads(str(np.load(cache, allow_pickle=False)["meta_json"]))
+        except (KeyError, ValueError, OSError):
+            have = {}
+        if all(have.get(k) == v for k, v in want.items()) and not _lacks_foe_values(
+            cache, directory, sources
+        ):
+            dataset = load_dataset(cache)
+            print(f"  {directory.name}: {len(dataset):,} decisions from cache")
+            return dataset, have
+        print(f"  {directory.name}: cache is stale, re-encoding")
+
+    started = time.perf_counter()
+    read = _read_python if args.engine == "python" else _read_rust
+    read_games = read(directory, sources, args)
+    if read_games is None:
+        raise SystemExit(f"no finished games found in {directory}")
+    encoder = read_games.encoder
+    dataset = read_games.dataset
+    game_id = read_games.games
+    search_limits = read_games.search_limits
+    provenances = read_games.provenances
+    engines = read_games.engines
+    objectives = read_games.objectives
+    information = read_games.information
+    selections = read_games.selections
+    branching = read_games.branching
     meta = {
         **want,
         "format_id": encoder.vocab.format_id,
@@ -333,7 +527,19 @@ def main() -> None:
     ap.add_argument(
         "--limit", type=int, default=0, help="stop after this many games, per directory"
     )
-    ap.add_argument("--chunk", type=int, default=4096, help="positions per encode call")
+    ap.add_argument(
+        "--chunk", type=int, default=4096, help="positions per encode call (--engine python)"
+    )
+    ap.add_argument(
+        "--engine",
+        choices=("rust", "python"),
+        default="rust",
+        help="who runs the per-game loop: the port (IKA-347) or the Python loop it replaced, "
+        "kept as the reference the port's arrays are compared against",
+    )
+    ap.add_argument(
+        "--jobs", type=int, default=1, help="files the port reads at once (--engine rust)"
+    )
     ap.add_argument(
         "--force", action="store_true", help="re-encode even when a shard looks current"
     )

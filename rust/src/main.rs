@@ -5,6 +5,7 @@
 //!     cargo run --release -- turns     <regulation.json> <turns.json> [repeats]
 //!     cargo run --release -- node      <regulation.json>          # JSONL over stdio
 //!     cargo run --release -- encode    <regulation.json> <turns.json> <out.bin> [--mega-from-slots]
+//!     cargo run --release -- encode-games <regulation.json> [--jobs N] -- <games.jsonl> ...  # IKA-347
 //!
 //! The self-tests (`damage`, `roundtrip`, `turns`, `encode`) read fixture files Python's
 //! resolver wrote (`cases*.json`, `turns*.json`, kept out of git): they are regression tests
@@ -23,6 +24,7 @@ mod damage;
 mod damage_callback;
 mod effects;
 mod encode;
+mod encode_games;
 mod encoded_node;
 mod fixedpoint;
 mod held;
@@ -65,6 +67,7 @@ fn main() {
         Some("turns") => turns_main(&args[2..]),
         Some("node") => node_main(&args[2..]),
         Some("encode") => encode_main(&args[2..]),
+        Some("encode-games") => encode_games::main(&args[2..]),
         Some("clones") => clones_main(&args[2..]),
         _ => {
             eprintln!(
