@@ -72,7 +72,7 @@ impl Request {
 }
 
 pub fn parse_request(value: &Value) -> Result<Request, String> {
-    let position = Position::from_json(&value["position"]);
+    let position = crate::held::position(&value["position"]);
     let read = |key: &str| -> Vec<Vec<SlotAction>> {
         value[key]
             .as_array()
@@ -116,7 +116,7 @@ pub fn parse_request(value: &Value) -> Result<Request, String> {
             .unwrap_or(false),
     };
     let position_json = match crate::par::Pool::global() {
-        Some(_) => value["position"].clone(),
+        Some(_) => crate::held::json(&value["position"]),
         None => Value::Null,
     };
     Ok(Request {
@@ -326,7 +326,7 @@ fn resolve_key(value: &Value) -> String {
 }
 
 fn resolve_fresh(reg: &Reg, value: &Value, key: String) -> Result<KeptTurn, Value> {
-    let position = Position::from_json(&value["position"]);
+    let position = crate::held::position(&value["position"]);
     if &*position.format != reg.format_id.as_str() {
         return Err(json!({ "refused": "position is for another regulation" }));
     }
@@ -359,7 +359,7 @@ fn resolve_fresh(reg: &Reg, value: &Value, key: String) -> Result<KeptTurn, Valu
 /// turns are resolved, only damage calculated, and what comes back is one number per
 /// candidate rather than a matrix.
 fn score_pool(reg: &Reg, value: &Value) -> Value {
-    let position = Position::from_json(&value["position"]);
+    let position = crate::held::position(&value["position"]);
     if &*position.format != reg.format_id.as_str() {
         return json!({
             "error": format!(
@@ -393,7 +393,7 @@ fn score_pool(reg: &Reg, value: &Value) -> Value {
 /// answers `WIDTH` numbers per candidate of each side's list, from the same calculator the
 /// `score` command uses. A position the calculator refuses is refused whole.
 fn qfeatures(reg: &Reg, value: &Value) -> Value {
-    let position = Position::from_json(&value["position"]);
+    let position = crate::held::position(&value["position"]);
     if &*position.format != reg.format_id.as_str() {
         return json!({
             "error": format!(
@@ -585,7 +585,25 @@ fn many(reg: &Reg, value: &Value) -> Value {
     // is seen by another's: on the pool they go one per item and come back in the order sent
     // (IKA-32).
     let answers: Vec<Value> = match crate::par::Pool::global() {
-        Some(pool) if list.len() > 1 => pool.map_with(list.len(), || (), |_, k| answer_one(&list[k])),
+        Some(pool) if list.len() > 1 => {
+            // A cell thread cannot see this thread's held positions (IKA-302): each
+            // request goes to it with its position written out.
+            let owned: Vec<Value> = list
+                .iter()
+                .map(|one| {
+                    let mut one = one.clone();
+                    if crate::held::held_id(&one["position"]).is_some() {
+                        one["position"] = crate::held::json(&one["position"]);
+                    }
+                    // Nor keep one for this thread: a branch goes back written out only.
+                    if one.get("refs").is_some() {
+                        one["refs"] = json!(false);
+                    }
+                    one
+                })
+                .collect();
+            pool.map_with(owned.len(), || (), |_, k| answer_one(&owned[k]))
+        }
         _ => list.iter().map(answer_one).collect(),
     };
     json!({ "kind": "many", "answers": answers })
@@ -751,6 +769,18 @@ fn answer<R: BufRead, W: Write>(
     );
     let response = match parsed {
         Err(error) => json!({ "error": error.to_string() }),
+        // IKA-302: a position to hold, and the end of a decision. Neither is answered:
+        // they go down the pipe ahead of the request that needs them.
+        Ok(value) if value["kind"].as_str() == Some("hold") => {
+            if let Some(id) = value["id"].as_u64() {
+                crate::held::define(id, &value["position"]);
+            }
+            return Ok(());
+        }
+        Ok(value) if value["kind"].as_str() == Some("forget") => {
+            crate::held::forget();
+            return Ok(());
+        }
         Ok(value) if value["kind"].as_str() == Some("resolve") => resolve_one(reg, &value),
         Ok(value) if value["kind"].as_str() == Some("score") => score_pool(reg, &value),
         Ok(value) if value["kind"].as_str() == Some("qfeatures") => qfeatures(reg, &value),
