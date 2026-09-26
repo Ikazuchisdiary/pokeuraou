@@ -16,6 +16,11 @@ result is checked against `narrow` itself (same kept actions, scores and uncover
 options), so what is timed is what `narrow` does. The ranking (`rank=`) is not run: it is
 the leaf's fill and forward pass, which IKA-32 counts in its own parts.
 
+Since IKA-321 the request's candidate list is `rustnode._candidates`, the sort's keys are
+`narrow._choices`, the cover is `narrow._cover`, and the detail lines are written when read,
+so `t_detail` is making the candidates and `t_detail_write` (not part of `narrow`) is
+writing every line of them.
+
     python tools/legal_moves_cost.py --games-dir data/selfplay-mc0 --positions 4000
 """
 
@@ -44,9 +49,10 @@ from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.narrow import (  # noqa: E402
     Candidate,
     Narrowed,
+    _choices,
     _count_kinds,
-    _slot_key,
-    _slot_label,
+    _cover,
+    _PortDetail,
     drop_dead_actions,
     narrow,
 )
@@ -161,60 +167,17 @@ def legal_bucket(n: int) -> str:
 
 
 def cover(reg, pool, scored, limit: int, order: list[int]):  # noqa: ANN001, ANN201
-    """`narrow`'s cover and fill after its sort, as written there (checked against it)."""
-    n_slots = len(pool[0].slots)
+    """`narrow`'s cover and fill after its sort, as written there (checked against it).
+    Since IKA-321 the cover is `narrow._cover` itself."""
     if len(pool) <= limit:
         kept = [scored[i] for i in order]
         return Narrowed(kept=kept, considered=len(pool), for_score=len(kept))
-    needed: dict[str, str] = {}
-    options: dict[str, tuple[int, object]] = {}
-    for action in pool:
-        for index in range(n_slots):
-            key = _slot_key(action, index)
-            needed.setdefault(key, _slot_label(reg, action, index))
-            options.setdefault(key, (index, action.slots[index]))
-    kept_indices: list[int] = []
-    taken: set[int] = set()
-    uncovered = set(needed)
-    for_coverage = 0
-    while uncovered and len(kept_indices) < limit:
-        best = -1
-        best_gain = 0
-        for i in order:
-            if i in taken:
-                continue
-            gain = sum(1 for index in range(n_slots) if _slot_key(pool[i], index) in uncovered)
-            if gain > best_gain:
-                best, best_gain = i, gain
-            if best_gain == n_slots:
-                break
-        if best < 0:
-            break
-        kept_indices.append(best)
-        taken.add(best)
-        for_coverage += 1
-        for index in range(n_slots):
-            uncovered.discard(_slot_key(pool[best], index))
-    for i in order:
-        if len(kept_indices) >= limit:
-            break
-        if i in taken:
-            continue
-        kept_indices.append(i)
-        taken.add(i)
-    kept = sorted((scored[i] for i in kept_indices), key=lambda c: (-c.score, c.action.to_choice()))
-    return Narrowed(
-        kept=kept,
-        considered=len(pool),
-        uncovered=tuple(sorted(needed[k] for k in uncovered)),
-        uncovered_options=tuple(options[k] for k in sorted(uncovered, key=lambda k: needed[k])),
-        for_coverage=for_coverage,
-        for_score=len(kept) - for_coverage,
-    )
+    return _cover(reg, pool, scored, order, limit)
 
 
 def sort_only(pool, scored):  # noqa: ANN001, ANN201
-    return sorted(range(len(scored)), key=lambda i: (-scored[i].score, pool[i].to_choice()))
+    choices = _choices(pool)
+    return sorted(range(len(scored)), key=lambda i: (-scored[i].score, choices[i]))
 
 
 def main() -> None:  # noqa: C901, PLR0915
@@ -296,7 +259,7 @@ def main() -> None:  # noqa: C901, PLR0915
                     "kind": "score",
                     "position": rustnode._position(pos),  # noqa: SLF001
                     "side": side,
-                    "candidates": [[rustnode.dump_action(a) for a in c.slots] for c in pool],
+                    "candidates": rustnode._candidates(pool),  # noqa: SLF001
                 }
 
             def cross(payload):  # noqa: ANN001, ANN202
@@ -333,21 +296,21 @@ def main() -> None:  # noqa: C901, PLR0915
                 rows.append(row)
                 continue
 
+            # The candidates as `narrow._bridged_scores` makes them: the detail lines are
+            # written when read (IKA-321), so what they cost is timed apart, not in `narrow`.
             def detail(pool=pool, scored_raw=scored_raw):  # noqa: ANN001, ANN202
-                out = []
-                for action, (total, parts) in zip(pool, scored_raw, strict=True):
-                    text = tuple(
-                        f"{action.slots[slot].describe(reg)} -> "
-                        f"{'foe' if is_foe else 'ally'}{target_slot + 1} {signed:+.3f}"
-                        f"{'' if exact else '?'}"
-                        for slot, target_slot, is_foe, signed, exact in parts
-                    )
-                    out.append(Candidate(action=action, score=total, detail=text))
-                return out
+                return [
+                    Candidate(action, total, _PortDetail(reg, action, parts))
+                    for action, (total, parts) in zip(pool, scored_raw, strict=True)
+                ]
+
+            def write(scored):  # noqa: ANN001, ANN202
+                return [c.detail for c in scored]
 
             scored, t_detail = timed(detail)
+            _written, t_write = timed(write, detail())
             order, t_sort = timed_rep(sort_only, pool, scored)
-            row.update(t_port=t_port, t_detail=t_detail, t_sort=t_sort)
+            row.update(t_port=t_port, t_detail=t_detail, t_sort=t_sort, t_detail_write=t_write)
             cycles_sum_ms += t_detail + t_sort * args.repeats
             for limit in LIMITS:
                 got, t_cover = timed_rep(cover, reg, pool, scored, limit, order)

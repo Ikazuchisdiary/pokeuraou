@@ -57,6 +57,10 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=1, help="seeds the run, not a worker")
     ap.add_argument("--roster", default="rizabanadohido", help="also names the book")
     ap.add_argument("--value", default=None)
+    ap.add_argument("--q-model", default=None,
+                    help="the Q a q / q-nocover --rank-fill ranks by (IKA-274): the servers "
+                    "load it as the Q arm `q` (workers get --q-arm q); unserved, every "
+                    "worker loads it (--q-model)")
     ap.add_argument("--device", default="cuda", choices=("cpu", "cuda"))
     # 24, swept on the board against 48 with the same model on both sides: -1.3 [-3.7,
     # +1.1] at 2.03x the speed, while 16 is -5.6 and 12 is -7.5. Only 24 sits inside the
@@ -288,7 +292,8 @@ def main() -> None:
                 [sys.executable, str(ROOT / "tools" / "inference_server.py"),
                  "--device", args.device,
                  *(["--regulation", pool_regulation] if pool_regulation else []),
-                 "--arm", "value", args.value],
+                 "--arm", "value", args.value,
+                 *(["--q-arm", "q", args.q_model] if args.q_model else [])],
                 env=env, cwd=str(ROOT), stdout=subprocess.PIPE, stderr=errors, text=True,
             )
             servers.append(process)
@@ -337,6 +342,8 @@ def main() -> None:
                         "--inference-arm", "value"]
         elif args.value:
             command += ["--value", args.value]
+        if args.q_model:
+            command += ["--q-arm", "q"] if served_at else ["--q-model", args.q_model]
         return command + extra
 
     def written() -> int:

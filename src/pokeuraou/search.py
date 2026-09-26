@@ -213,11 +213,20 @@ _RANK_FILL = re.compile(r"refs([1-9][0-9]*)(-fast)?(-nocover)?")
 
 
 def parse_rank_fill(label: str) -> tuple[int, bool]:
-    """(references, fast) from a rank-fill label; a label that is not one stops."""
+    """(references, fast) from a rank-fill label; a label that is not one stops.
+
+    ``q`` / ``q-nocover`` (IKA-274, `qrank`) rank by a learned Q and fill no cell with
+    the leaf: (0, False).
+    """
+    from .qrank import is_q
+
+    if is_q(label):
+        return 0, False
     got = _RANK_FILL.fullmatch(label)
     if got is None:
         raise ValueError(
-            f"rank fill {label!r} is not refs<N>, refs<N>-fast, or either with -nocover"
+            f"rank fill {label!r} is not refs<N>, refs<N>-fast, or either with -nocover, "
+            "or q / q-nocover"
         )
     return int(got.group(1)), got.group(2) is not None
 
@@ -1199,6 +1208,11 @@ class BeliefResult:
     #: widened, `ours` / `theirs` are the grown menus (side 0's actions first, as always)
     #: and the strategy indexes this side's.
     deepened: _deepen.Deepened | None = None
+    #: The depth-1 node this answer was solved over, as (side 0's menu, side 1's menu, one
+    #: matrix per completion in side 0's orientation, their weights) -- references, nothing
+    #: computed. Read by `luck.matrix_of` for AIVAT's action term (IKA-193); the menus are
+    #: the ones passed in, before any growth by a deepening.
+    node_payoff: tuple | None = None
 
 
 def belief_solve(
@@ -1332,6 +1346,7 @@ def belief_solve(
                     out[side], memo, budget=budget, refine=refine, passes=passes,
                     sub_limit=sub_limit, sub_branches=sub_branches,
                 )
+        out[side].node_payoff = (row, col, built, weights)
     return out
 
 

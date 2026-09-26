@@ -159,6 +159,9 @@ pub(crate) fn do_move<'a>(
                         mon.volatiles.retain(|v| v.id.as_str() != "flinch");
                     }
                 }
+                if reason.as_str() != "fainted" {
+                    crate::semi_invulnerable::abort_charge(&mut state, action.side, action.slot);
+                }
                 let hits = if reason.as_str() == "confusion" {
                     confusion_self_hits(state, action, &budget)?
                 } else {
@@ -499,6 +502,9 @@ fn smart_hits(
     // Protect (step 3) and the type immunity (step 2), per target.
     let mut reached: Vec<(Slot, f64)> = Vec::new();
     for at in [first, second] {
+        if crate::semi_invulnerable::dodges(turn, (action.side, action.slot), mv, at) {
+            continue;
+        }
         if blocked_by_protect(turn, action, mv, at).is_some() {
             continue;
         }
@@ -1276,10 +1282,10 @@ fn use_move<'a>(
         }
     }
 
-    // A move that spends a turn winding up. Exactly this much of them is modelled and no
-    // more -- there is no semi-invulnerability anywhere in the engine -- so Fly and Dig have
-    // the same shape here as Solar Beam. (This was written when the port's oracle was
-    // Python; since IKA-212 it is Showdown, against which Fly and Dig are not modelled.)
+    // A move that spends a turn winding up: Fly and Dig have the same shape here as Solar
+    // Beam. While the marker stands, a Fly, Bounce, Dig, Dive, Phantom Force or Shadow Force
+    // user is out of reach (`semi_invulnerable`, IKA-241); taking it off below as the move
+    // fires is Showdown's `removeVolatile(move.id)` in `onTryMove`.
     if let Some((_, skip_weather)) =
         TWO_TURN_MOVES.iter().find(|(id, _)| *id == move_id.as_str())
     {
@@ -1410,6 +1416,17 @@ fn use_move<'a>(
     // Terrain (step 1, ahead of Protect) then drops the grounded ones.
     let spread = move_hits_multiple(reg, move_id.as_str(), targets.len())
         || (targets.len() > 1 && crate::airborne::expanding_force_spreads(&turn, action, mv));
+    // Step 0, a semi-invulnerable target (IKA-241). Dragon Darts meets it in `smart_hits`,
+    // where a miss on one of the two sends both hits to the other.
+    let smart = mv.raw.get("smartTarget").and_then(Value::as_bool) == Some(true);
+    let targets = if smart {
+        targets
+    } else {
+        match crate::semi_invulnerable::reached_or_fail(&mut turn, action, mv, &targets) {
+            Some(kept) => kept,
+            None => return Ok(vec![(1.0, turn)]),
+        }
+    };
     if turn.log.is_some() {
         let stopped: Vec<Slot> =
             targets.iter().copied().filter(|t| stopped_by_psychic_terrain(&turn, action, mv, *t)).collect();
@@ -1456,7 +1473,12 @@ fn use_move<'a>(
                 }
                 return Ok(branches);
             }
-            SmartHits::Ordinary(targets) => targets,
+            SmartHits::Ordinary(targets) => {
+                match crate::semi_invulnerable::reached_or_fail(&mut turn, action, mv, &targets) {
+                    Some(kept) => kept,
+                    None => return Ok(vec![(1.0, turn)]),
+                }
+            }
         }
     } else {
         targets
@@ -3788,8 +3810,9 @@ fn do_status_move<'a>(
     };
 
     let mut reachable: Vec<Slot> = Vec::new();
-    let mut failed_any = false;
-    for target in targets {
+    // Step 0, a semi-invulnerable target (IKA-241): `false`, a failure like the terrain's.
+    let (past, mut failed_any) = crate::semi_invulnerable::reachable(&mut turn, action, mv, targets);
+    for target in &past {
         if stopped_by_psychic_terrain(&turn, action, mv, *target) {
             log_event!(turn, "{} protected by psychicterrain", Name(target.0, target.1));
             failed_any = true;
@@ -4720,7 +4743,8 @@ fn eat_received_berry(turn: &mut Turn, at: Slot) {
 /// if (!result) return false;
 /// ```
 ///
-/// Nothing is ever semi-invulnerable here. Good as Gold's `onTryHit` (a status move,
+/// A semi-invulnerable Pokemon misses and counts as a result (IKA-241, the `-miss` branch
+/// shown). Good as Gold's `onTryHit` (a status move,
 /// IKA-202) answers `null` as Soundproof's does.
 fn perish_song(turn: &mut Turn, me: Slot, action: &QueuedAction) {
     let ignores_ability = turn
@@ -4732,6 +4756,14 @@ fn perish_song(turn: &mut Turn, me: Slot, action: &QueuedAction) {
             let Some(mon) = turn.mon_at(side, slot) else { continue };
             if mon.fainted {
                 continue;
+            }
+            // The Invulnerability event, first (IKA-241).
+            if let Some(mv) = turn.reg.moves.get("perishsong") {
+                if crate::semi_invulnerable::dodges(turn, me, mv, (side, slot)) {
+                    log_event!(turn, "{} missed {} (semi-invulnerable)", Name(me.0, me.1), Name(side, slot));
+                    result = true;
+                    continue;
+                }
             }
             let shielded = matches!(mon.item, Some(i) if i.as_str() == "abilityshield");
             if (mon.ability == "soundproof" || mon.ability == "goodasgold")
@@ -4915,6 +4947,7 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
                             "sandveil" | "sandrush" | "sandforce" | "overcoat" | "magicguard"
                         )
                         || is(mon.item, "safetygoggles")
+                        || crate::semi_invulnerable::sheltered_from_sand(mon)
                 }
             };
             if skip {
