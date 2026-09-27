@@ -90,6 +90,10 @@ WORKER_STAGES = (
     "rust.replacements",  # the replacement phase
     "rust.resume",      # a paused turn resumed
     "rust.alternatives",  # a pause's alternatives, encoded or not
+    # A Q rank fill's request (IKA-339), in the order a request makes them:
+    "rust.qfeatures",   # the port's per-candidate features (RustNode.qfeatures, IKA-350), the wait included
+    "q.arrays",         # the actions' encoding, the arrays and their copy into the block
+    "serve.q",          # from sending the Q request to having the matrices (RemoteQ)
 )
 
 #: The stages, in the order a report prints them. Named here rather than created on first
@@ -513,13 +517,114 @@ def _frame_name(code: Any) -> tuple[str, bool]:
     return found
 
 
+#: IKA-339: with this set as well as `ENV_SAMPLE`, the sampler also reads every Python
+#: thread's CPU seconds at each tick and sums them by thread (numbers taken out of the
+#: name, so 24 serving threads are one row), with what was spent before the first decision
+#: (or a server's `ready`) apart. It says which threads a process's CPU is on -- a server's
+#: serving threads against its main thread and the sampler itself.
+#:
+#: It does not say where in a thread the CPU went, and a first version that charged each
+#: tick's CPU to the frame the thread was in at the tick was wrong in exactly the threads
+#: in question: a thread that works for a millisecond and then blocks is found blocked,
+#: so a worker's tick showed 37% of its CPU in `threading.wait` and a server's 63% in
+#: `socket.readinto`, where the stages' own `thread_time` put next to nothing. Where the
+#: CPU goes inside a thread is the stages' `cpu` column. Off unless set.
+ENV_SAMPLE_CPU = "POKEURAOU_SAMPLE_CPU"
+#: Kernel CPU seconds by thread kind, over the ticks.
+_CPU_SAMPLES: dict[str, dict[str, float]] = {"thread": {}}
+
+
+class _ThreadClock:
+    """Another thread's CPU seconds, read from the sampler's thread (IKA-339):
+    `GetThreadTimes` on Windows, the thread's POSIX CPU clock elsewhere."""
+
+    def __init__(self) -> None:
+        self._handles: dict[int, Any] = {}
+        if sys.platform == "win32":
+            import ctypes
+            from ctypes import wintypes
+
+            self._ctypes = ctypes
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            self._open = kernel.OpenThread
+            self._open.restype = wintypes.HANDLE
+            self._open.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+            self._times = kernel.GetThreadTimes
+            self._times.argtypes = (wintypes.HANDLE, *(ctypes.POINTER(ctypes.c_ulonglong),) * 4)
+            self._close = kernel.CloseHandle
+            self._filetimes = [ctypes.c_ulonglong() for _ in range(4)]
+
+    def read(self, thread: threading.Thread) -> float | None:
+        """The CPU seconds the thread has spent, or None."""
+        if sys.platform != "win32":
+            try:
+                return time.clock_gettime(time.pthread_getcpuclockid(thread.ident))
+            except (OSError, AttributeError, TypeError):
+                return None
+        native = thread.native_id
+        if native is None:
+            return None
+        handle = self._handles.get(native)
+        if handle is None:
+            handle = self._open(0x0800, False, native)  # THREAD_QUERY_LIMITED_INFORMATION
+            if not handle:
+                return None
+            self._handles[native] = handle
+        if not self._times(handle, *(self._ctypes.byref(f) for f in self._filetimes)):
+            return None
+        # FILETIMEs: creation, exit, kernel, user, in 100 ns.
+        return (self._filetimes[2].value + self._filetimes[3].value) / 1e7
+
+    def forget(self, alive: set[int]) -> None:
+        """Close the handles of threads that have gone."""
+        for native in [n for n in self._handles if n not in alive]:
+            self._close(self._handles.pop(native))
+
+
+def _thread_kind(name: str) -> str:
+    """A thread's name without its numbers: 24 serving threads are one row."""
+    import re
+
+    return re.sub(r"[0-9]+", "N", name)
+
+
+def _cpu_tick(clock: _ThreadClock, last: dict[int, float]) -> None:
+    """Add each thread's CPU since the last tick to its kind's row."""
+    kinds = _CPU_SAMPLES["thread"]
+    alive: set[int] = set()
+    for thread in threading.enumerate():
+        ident = thread.ident
+        if ident is None:
+            continue
+        if thread.native_id is not None:
+            alive.add(thread.native_id)
+        now = clock.read(thread)
+        if now is None:
+            continue
+        before = last.get(ident)
+        last[ident] = now
+        if before is None or now <= before:
+            continue
+        kind = _thread_kind(thread.name)
+        if not _STARTUP_CPU:
+            kind = f"(startup) {kind}"
+        kinds[kind] = kinds.get(kind, 0.0) + (now - before)
+    if sys.platform == "win32":
+        clock.forget(alive)
+
+
 def _sample_loop(hz: float, target: int) -> None:
     """Every 1/hz seconds, where the main thread is: its innermost frame (`self`), its
     innermost frame in this package (`own`, so numpy and json are charged to the caller
-    that asked for them) and every function on its stack once (`inclusive`)."""
+    that asked for them) and every function on its stack once (`inclusive`). With
+    `ENV_SAMPLE_CPU`, also every thread's CPU since the last tick (`_cpu_tick`)."""
     every = 1.0 / hz
     selfs, owns, inclusive = _SAMPLES["self"], _SAMPLES["own"], _SAMPLES["inclusive"]
+    clock = _ThreadClock() if SAMPLE_CPU else None
+    last: dict[int, float] = {}
     while not _SAMPLER_STOP.wait(every):
+        if clock is not None:
+            _cpu_tick(clock, last)
         frame = sys._current_frames().get(target)  # noqa: SLF001 - the sampler's whole job
         if frame is None:
             continue
@@ -538,6 +643,9 @@ def _sample_loop(hz: float, target: int) -> None:
             owns[mine] = owns.get(mine, 0) + 1
         for name in names:
             inclusive[name] = inclusive.get(name, 0) + 1
+
+
+SAMPLE_CPU = ON and bool(os.environ.get(ENV_SAMPLE_CPU))
 
 
 def _start_sampler() -> float:
@@ -892,6 +1000,11 @@ def snapshot() -> dict[str, Any]:
         "samples": (
             {"ticks": _SAMPLE_TICKS[0], **{k: dict(v) for k, v in _SAMPLES.items()}}
             if SAMPLE_HZ > 0 else None
+        ),
+        # IKA-339: every thread's CPU seconds over the ticks, by thread kind.
+        "cpu_samples": (
+            {k: dict(v) for k, v in _CPU_SAMPLES.items()}
+            if SAMPLE_HZ > 0 and SAMPLE_CPU else None
         ),
     }
 

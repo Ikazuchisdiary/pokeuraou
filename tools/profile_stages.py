@@ -164,17 +164,39 @@ def tree_cpu(
     low_water = float("inf")
     stopped_for_memory = False
     # IKA-258: (seconds since the start, games written, CPU seconds by role) at each poll,
-    # so the steady state can be read apart from the start-up and the tail.
+    # so the steady state can be read apart from the start-up and the tail. IKA-339: the
+    # time is the poll's middle, because one poll of ~95 processes on a busy machine took
+    # 1.2-8.6 s, and the games are read on their own thread (`progress_trace`) every
+    # quarter second rather than once a poll -- the poll's own length (`poll_seconds`) was
+    # the steady state's resolution, and a 300-game run had 3 to 14 points in it.
     trace: list[tuple[float, int, dict[str, float]]] = []
+    progress_trace: list[tuple[float, int]] = []
+    poll_seconds: list[tuple[float, float, float]] = []
     began = time.perf_counter()
+    # A `Process` per PID, kept: its name and its handle's lookups are not redone a poll.
+    known_processes: dict[int, Any] = {}
+
+    def watch_progress() -> None:
+        while not stop.is_set():
+            with contextlib.suppress(OSError, ValueError):
+                progress_trace.append((time.perf_counter() - began, int(progress())))
+            stop.wait(0.25)
+
+    if progress is not None:
+        threading.Thread(target=watch_progress, daemon=True, name="progress").start()
     while not stop.is_set():
         rss = 0
         by_role_rss: dict[str, int] = {}
+        polled = time.perf_counter()
         try:
-            root = psutil.Process(pid)
-            group = [root, *root.children(recursive=True)]
+            root = known_processes.get(pid) or psutil.Process(pid)
+            known_processes[pid] = root
+            group = [root]
+            for child in root.children(recursive=True):
+                group.append(known_processes.setdefault(child.pid, child))
         except psutil.Error:
             group = []
+        listed = time.perf_counter()
         for process in group:
             try:
                 times = process.cpu_times()
@@ -200,13 +222,15 @@ def tree_cpu(
         peak_rss = max(peak_rss, rss)
         for role, held in by_role_rss.items():
             peak_role[role] = max(peak_role.get(role, 0), held)
+        done = time.perf_counter()
+        poll_seconds.append((polled - began, listed - polled, done - listed))
         if progress is not None:
             now_roles: dict[str, float] = {}
             for known_pid, (known_name, spent) in totals.items():
                 role = roles.get(known_pid, known_name)
                 now_roles[role] = now_roles.get(role, 0.0) + spent
-            with contextlib.suppress(OSError, ValueError):
-                trace.append((time.perf_counter() - began, int(progress()), now_roles))
+            games = progress_trace[-1][1] if progress_trace else 0
+            trace.append(((polled + done) / 2 - began, games, now_roles))
         free = psutil.virtual_memory().available / 1e9
         low_water = min(low_water, free)
         if group and free < floor_gb:
@@ -243,6 +267,8 @@ def tree_cpu(
         "processes": len(totals),
         "samples": samples,
         "trace": trace,
+        "progress": progress_trace,
+        "poll_seconds": poll_seconds,
     }
 
 
@@ -257,27 +283,72 @@ class GamesWritten:
         self.directory = directory
         self.offsets: dict[Path, int] = {}
         self.count = 0
+        #: IKA-339: each file is opened once and kept. Opening a file another process is
+        #: writing took up to 7 s on this machine (a reading every quarter second had
+        #: 18 gaps over a second in a 1,200-game run), and it was this, not psutil, that
+        #: made IKA-300's polls 1.2-8.6 s long.
+        self.handles: dict[Path, Any] = {}
 
     def __call__(self) -> int:
         for path in self.directory.glob("games-worker*.jsonl"):
-            start = self.offsets.get(path, 0)
-            with path.open("rb") as handle:
-                handle.seek(start)
-                added = handle.read()
-            self.offsets[path] = start + len(added)
+            handle = self.handles.get(path)
+            if handle is None:
+                handle = self.handles[path] = path.open("rb")
+            added = handle.read()
+            self.offsets[path] = self.offsets.get(path, 0) + len(added)
             self.count += added.count(b"\n")
         return self.count
 
+    def close(self) -> None:
+        for handle in self.handles.values():
+            handle.close()
+        self.handles.clear()
 
-def steady(trace: list[Any], low: float = 0.1, high: float = 0.9) -> dict[str, Any] | None:
+
+#: Below this many games a worker inside the window, the steady state is not read (IKA-339).
+#: Every worker starts its first game at the same moment and the games take about as long,
+#: so the first games finish in waves, and a window a few games a worker wide holds a
+#: fraction of a wave more or less: IKA-300's 300-game runs (12 games a worker) read the
+#: same setting at 953-1,350 games a minute.
+STEADY_MIN_PER_WORKER = 25
+
+
+def _interpolate(points: list[tuple[float, int]], t: float) -> float:
+    """Games written at time `t`, linear between the progress readings around it."""
+    before = None
+    for when, games in points:
+        if when >= t:
+            if before is None or when == before[0]:
+                return float(games)
+            share = (t - before[0]) / (when - before[0])
+            return before[1] + share * (games - before[1])
+        before = (when, games)
+    return float(points[-1][1])
+
+
+def steady(
+    trace: list[Any],
+    low: float = 0.1,
+    high: float = 0.9,
+    progress: list[Any] | None = None,
+    workers: int | None = None,
+) -> dict[str, Any] | None:
     """Games a minute and CPU seconds a game between the `low` and `high` shares of the run.
 
-    Read off the poll's trace, between the first poll at or past `low` of the final count and
-    the first at or past `high`: the start-up (torch, CUDA, the port, the first node's block)
-    and the tail (the last games, workers idle) are outside it. The CPU is each role's
-    kernel counter over the same two polls, so it is what a game costs the machine in the
-    steady state, per role -- the number a cut would be read against (IKA-258).
+    The start-up (torch, CUDA, the port, the first node's block) and the tail (the last
+    games, workers idle) are outside the window. The CPU is each role's kernel counter, so
+    it is what a game costs the machine in the steady state, per role -- the number a cut
+    would be read against (IKA-258).
+
+    IKA-339: with `progress` (games written, read every quarter second on its own thread),
+    games a minute is the least-squares slope of games on time inside the window, and the
+    CPU a game the slope of each role's CPU on the games interpolated at every poll's
+    middle -- a fit over every point rather than a difference of two, which is what a poll
+    that took 1-8 s left IKA-300 with. With `workers`, a window of fewer than
+    `STEADY_MIN_PER_WORKER` games a worker reads nothing (`short` says why).
     """
+    if progress:
+        return _steady_fit(trace, progress, low, high, workers)
     if not trace:
         return None
     final = trace[-1][1]
@@ -303,9 +374,72 @@ def steady(trace: list[Any], low: float = 0.1, high: float = 0.9) -> dict[str, A
     }
 
 
+def _steady_fit(
+    trace: list[Any], progress: list[Any], low: float, high: float, workers: int | None
+) -> dict[str, Any] | None:
+    final = progress[-1][1]
+    if final <= 0:
+        return None
+    start = next((t for t, games in progress if games >= low * final), None)
+    end = next((t for t, games in progress if games >= high * final), None)
+    if start is None or end is None or end <= start:
+        return None
+    inside = [(t, g) for t, g in progress if start <= t <= end]
+    fit = _fit([t for t, _g in inside], [float(g) for _t, g in inside])
+    if fit is None:
+        return None
+    rate = fit[1]
+    games = _interpolate(progress, end) - _interpolate(progress, start)
+    out: dict[str, Any] = {
+        "games": int(round(games)),
+        "seconds": end - start,
+        "games_per_minute": 60.0 * rate,
+        # The same two ends' difference, as the tool read it before (IKA-258).
+        "games_per_minute_ends": 60.0 * games / (end - start),
+        "progress_points": len(inside),
+        "short": None,
+    }
+    if workers and games / workers < STEADY_MIN_PER_WORKER:
+        out["short"] = (f"{games / workers:.1f} games a worker in the window, under "
+                        f"{STEADY_MIN_PER_WORKER}: the first games finish in waves")
+    polls = [row for row in trace if start <= row[0] <= end]
+    out["cpu_points"] = len(polls)
+    if len(polls) < 3:
+        out["cpu_per_game"] = None
+        return out
+    at = [_interpolate(progress, row[0]) for row in polls]
+    roles = set().union(*(row[2] for row in polls))
+    per_game: dict[str, float] = {}
+    for role in roles:
+        line = _fit(at, [row[2].get(role, 0.0) for row in polls])
+        per_game[role] = line[1] if line is not None else 0.0
+    out["cpu_per_game"] = per_game
+    out["cpu_per_game_total"] = sum(per_game.values())
+    out["busy_cores"] = out["cpu_per_game_total"] * rate
+    return out
+
+
 def print_steady(found: dict[str, Any] | None) -> None:
     if found is None:
         print("\n  steady state: not enough polls to read one")
+        return
+    if "progress_points" in found:
+        print(f"\n  steady state (10%..90% of the games, IKA-339's fit): {found['games']:,} "
+              f"games in {found['seconds']:.1f} s = {found['games_per_minute']:.1f} games/min "
+              f"over {found['progress_points']} progress points (the two ends alone: "
+              f"{found['games_per_minute_ends']:.1f}); {found['cpu_points']} CPU polls")
+        if found["short"]:
+            print(f"  ** not a steady state: {found['short']} **")
+        if not found.get("cpu_per_game"):
+            print("   too few CPU polls in the window to fit the CPU a game")
+            return
+        print(f"   busy cores {found['busy_cores']:.1f}")
+        total = found["cpu_per_game_total"]
+        for role, spent in sorted(found["cpu_per_game"].items(), key=lambda kv: -kv[1]):
+            if spent <= 0:
+                continue
+            print(f"   {role:<28} {spent:8.3f} CPU s a game  {100 * spent / total:5.1f}%")
+        print(f"   {'total':<28} {total:8.3f}")
         return
     print(f"\n  steady state (10%..90% of the games): {found['games']:,} games in "
           f"{found['seconds']:.1f} s = {found['games_per_minute']:.1f} games/min, "
@@ -517,6 +651,15 @@ def print_table(summary: dict[str, Any], tree: dict[str, Any] | None, wall: floa
                   "what it managed first **")
         if wall > 0:
             print(f"   busy cores: {tree['total'] / wall:.1f}")
+        polls = tree.get("poll_seconds") or []
+        if polls:
+            # IKA-339: what one poll cost, listing the tree and reading every process.
+            listing = sorted(p[1] for p in polls)
+            reading = sorted(p[2] for p in polls)
+            print(f"   a poll: listing the tree median {listing[len(listing) // 2]:.3f} s "
+                  f"(max {listing[-1]:.3f}), reading its processes median "
+                  f"{reading[len(reading) // 2]:.3f} s (max {reading[-1]:.3f}), "
+                  f"{len(polls)} polls")
 
 
 def spin(
@@ -586,7 +729,8 @@ def per_decision(reports: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 #: IKA-32: the stages a part's time is read by, in `print_regions`.
 REGION_PORT_WAIT = ("rust.fill", "rust.turn", "rust.score", "rust.resolve", "rust.needed",
-                    "rust.replacements", "rust.leads", "rust.resume", "rust.alternatives")
+                    "rust.replacements", "rust.leads", "rust.resume", "rust.alternatives",
+                    "rust.qfeatures")
 
 
 def print_regions(found: dict[str, dict[str, Any]]) -> None:
@@ -915,6 +1059,39 @@ def print_stack_samples(found: dict[str, Any] | None, top: int = 30) -> None:
             print(f"   {100.0 * n / ticks:5.1f}%  {n:>9,}  {name}")
 
 
+def cpu_samples(reports: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Every thread's CPU seconds (IKA-339's `cpu_samples`), by thread kind, summed over
+    the processes of each role -- workers and servers apart."""
+    out: dict[str, Any] = {}
+    for role, group in (("workers", _split(reports)[0]), ("servers", _split(reports)[1])):
+        threads: dict[str, float] = {}
+        process_cpu = 0.0
+        for report in group:
+            found = report.get("cpu_samples")
+            if not found:
+                continue
+            for name, seconds in (found.get("thread") or {}).items():
+                threads[name] = threads.get(name, 0.0) + float(seconds)
+            times = report.get("process") or {}
+            process_cpu += float(times.get("cpu_user", 0.0)) + float(times.get("cpu_system", 0.0))
+        if threads:
+            out[role] = {"seconds": sum(threads.values()), "process_cpu": process_cpu,
+                         "thread": threads}
+    return out or None
+
+
+def print_cpu_samples(found: dict[str, Any] | None) -> None:
+    if not found:
+        return
+    for role, row in found.items():
+        seconds = row["seconds"]
+        print(f"\n  CPU by thread (IKA-339), the {role}: {seconds:,.1f} s over the ticks of "
+              f"{row['process_cpu']:,.1f} s the processes report (the rest: threads Python did "
+              f"not start, and each process's time before its sampler)")
+        for name, spent in sorted(row["thread"].items(), key=lambda kv: -kv[1]):
+            print(f"    {100.0 * spent / seconds:5.1f}%  {spent:9.1f} s  {name}")
+
+
 def _flag(argv: list[str], flag: str) -> str | None:
     return argv[argv.index(flag) + 1] if flag in argv[:-1] else None
 
@@ -1143,6 +1320,18 @@ def main() -> None:
         default=0.0,
         help="also sample each worker's main-thread stack this often (IKA-258)",
     )
+    ap.add_argument(
+        "--sample-cpu",
+        action="store_true",
+        help="with --sample-hz: also sum every thread's CPU seconds by thread, in the "
+        "workers and the inference servers (IKA-339)",
+    )
+    ap.add_argument(
+        "--port-report",
+        action="store_true",
+        help="also have each port write its wire's clocks by request kind (IKA-302's "
+        "wire-<pid>.json) into the timing directory (IKA-339)",
+    )
     ap.add_argument("--value", default="data/models/value-gen11L.pt")
     ap.add_argument("--q-model", default=None,
                     help="generation: generate_queue.py's --q-model (IKA-274, a q rank fill). "
@@ -1212,6 +1401,7 @@ def main() -> None:
         print_rest_by_kind(rest_by_kind(reports))
         print_repeats(repeats(reports), _moves(reports))
         print_stack_samples(stack_samples(reports))
+        print_cpu_samples(cpu_samples(reports))
         print_delivery(delivery(reports, None))
         return
 
@@ -1232,12 +1422,20 @@ def main() -> None:
     env["POKEURAOU_TIMING_DUPES"] = "1" if args.dupes else ""
     env["POKEURAOU_SAMPLE_HZ"] = f"{args.sample_hz:g}" if args.sample_hz > 0 else ""
     env["POKEURAOU_TIMING_REGIONS"] = "1" if args.regions else ""
-    # And a pad that makes the four together the same length in every mode, so an arm
-    # with the timers and the null control without them differ in the timers alone.
-    used = sum(len(env[name]) for name in
+    env["POKEURAOU_SAMPLE_CPU"] = "1" if args.sample_cpu else ""
+    if args.port_report:
+        # IKA-339: each port writes its wire's clocks by request kind (`wire-<pid>.json`)
+        # beside the reports. Set only when asked: the port reads an empty value as a
+        # directory too, and would write into the working directory.
+        env["POKEURAOU_PORT_THREADS_REPORT"] = str(timing_dir)
+    # And a pad that makes these together the same length in every mode, so an arm with
+    # the timers and the null control without them differ in the timers alone.
+    used = sum(len(env.get(name, "")) for name in
                ("POKEURAOU_TIMING", "POKEURAOU_TIMING_DUPES", "POKEURAOU_SAMPLE_HZ",
-                "POKEURAOU_TIMING_REGIONS"))
-    env["POKEURAOU_TIMING_PAD"] = "x" * max(len(str(timing_dir)) + 16 - used, 0)
+                "POKEURAOU_TIMING_REGIONS", "POKEURAOU_SAMPLE_CPU"))
+    if args.port_report:
+        used += len("POKEURAOU_PORT_THREADS_REPORT=") + len(str(timing_dir)) + 1
+    env["POKEURAOU_TIMING_PAD"] = "x" * max(2 * len(str(timing_dir)) + 64 - used, 0)
     env["PYTHONPATH"] = str(ROOT / "src")
     # The drivers set this for their workers; the analysis workload has no driver, so it
     # is set here and the drivers overwrite it with the same value.
@@ -1267,6 +1465,10 @@ def main() -> None:
     code = process.wait()
     stop.set()
     watcher.join(timeout=10)
+    if written is not None:
+        # After the progress thread has stopped with the poll that stopped it.
+        time.sleep(0.3)
+        written.close()
     wall = time.perf_counter() - started
     workers_record = (
         worker_record(args.out, since=started_at) if args.workload != "analysis" else None
@@ -1275,7 +1477,11 @@ def main() -> None:
     if verdict:
         print(f"  THE RUN FAILED ({verdict}); the table below is of whatever it did first "
               f"and is not a timing", file=sys.stderr)
-    found_steady = steady(tree.get("trace") or [])
+    found_steady = steady(
+        tree.get("trace") or [],
+        progress=tree.get("progress") or None,
+        workers=(workers_record or {}).get("workers") or args.workers,
+    )
 
     def failed_exit() -> None:
         # Last, after the summary is written, so an ABBA driver that reads only the exit
@@ -1331,6 +1537,8 @@ def main() -> None:
     print_repeats(summary["repeats"], _moves(reports))
     summary["stack_samples"] = stack_samples(reports)
     print_stack_samples(summary["stack_samples"])
+    summary["cpu_samples"] = cpu_samples(reports)
+    print_cpu_samples(summary["cpu_samples"])
     summary["delivery"] = delivery(reports, args)
     print_delivery(summary["delivery"])
     summary["exit"] = code
