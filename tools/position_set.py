@@ -36,6 +36,34 @@ its own errors flattered).
 The reference is itself a reading (uniform depth 2 with narrow children), not the truth:
 a board decides; this set is for finding what is worth a board, and a record of how often
 the two agree says how far to trust it.
+
+IKA-367 adds the long-time band (a person's 30-45 s, the analysis view's hours):
+
+    python tools/position_set.py subset --set SET --out SMALL --count 40
+    python tools/position_set.py deep --set SMALL --base r24 --name deep --from 0 --to 5
+    python tools/position_set.py sweep --set SMALL --arm lad:ladder=L1 --seconds 1,4,16,64
+    python tools/position_set.py curve --set SMALL --svg curve.svg
+    python tools/position_set.py fit --set SMALL
+
+* **subset**: the first N positions of a set, with every reference they have.
+* **deep** (the long reference, IKA-366 §5.3): the base reference (every cell at depth 2)
+  with the cells of an 8 x 8 rectangle of its root read three plies -- the rectangle is the
+  base answer's support, then the actions that do best against the other side's answer;
+  each cell's turn with every branch and the knock-outs forked, each child at *every*
+  legal action a side, its 6 x 6 rectangle (support, then best replies) read a ply further
+  with every branch and the grandchildren at the Q's 24, the child game solved whole.
+* **sweep**: each condition read at each of several budgets on the node clock, as a
+  person's game reads it: the width rule's menus (at most the set's), then the
+  deepening, `depth2_auto` or the ladder (`ladder.read`). Written per position to
+  ``SET/sweep/<arm>@<seconds>/<n>.json`` with the wall seconds and, for a ladder, its
+  stages and counted work; ``--keep-matrix`` also writes a ladder's root prices as a
+  reference ``SET/ref-<arm>@<seconds>/`` (the longest read's game).
+* **curve**: per condition, loss and curse against every reference at each budget, the
+  paired change from one budget to the next and how many positions got worse; one table
+  and an SVG figure. ``--elo`` sets loss against a recorded Elo curve (IKA-366's 0.1 -> 0.8
+  s steps) to give one Elo per unit of loss.
+* **fit**: least squares of a ladder's wall milliseconds on its counted work
+  (`ladder.LadderCost`).
 """
 
 from __future__ import annotations
@@ -59,6 +87,11 @@ from pokeuraou.regulation import repo_root  # noqa: E402
 
 DEFAULT_VALUE = ("data/models/value-mc1.pt", "data/models/value-mc1-s1.pt")
 DEFAULT_Q = "data/models/q-mc0.pt"
+
+
+def _mine(args: argparse.Namespace, count: int) -> range:
+    """This process's positions: ``--from``..``--to``, every ``--stride``-th from ``--offset``."""
+    return range(args.start + args.offset, min(args.stop, count), args.stride)
 
 
 def _write(path: Path, payload: dict) -> None:
@@ -127,6 +160,17 @@ class _Kit:
                               wider=wider)
         return ours, theirs, wider.get(ALL_ACTIONS)
 
+    def menus_at(self, pos, width: int):  # noqa: ANN001, ANN201
+        """The menus at another width, as the agent builds them there (IKA-367)."""
+        from pokeuraou.budget import Budget
+        from pokeuraou.deepen import ALL_ACTIONS
+        from pokeuraou.selfplay import _menus
+
+        wider: dict = {}
+        ours, theirs = _menus(self.reg, pos, (width, width), self.leaf, Budget.matrix(), True,
+                              None, None, rank_fill="q-nocover", wide=[ALL_ACTIONS], wider=wider)
+        return ours, theirs, wider.get(ALL_ACTIONS)
+
 
 def reference(args: argparse.Namespace) -> None:
     from pokeuraou.budget import Budget
@@ -135,7 +179,7 @@ def reference(args: argparse.Namespace) -> None:
 
     kit = _Kit(args)
     out = Path(args.set) / f"ref-{args.name}"
-    for n in range(args.start, min(args.stop, len(kit.positions))):
+    for n in _mine(args, len(kit.positions)):
         path = out / f"{n}.npz"
         if path.exists():
             continue
@@ -188,7 +232,7 @@ def reference3(args: argparse.Namespace) -> None:
     out = Path(args.set) / f"ref-{args.name}"
     base_dir = Path(args.set) / f"ref-{args.base}"
     budget = Budget.matrix()
-    for n in range(args.start, min(args.stop, len(kit.positions))):
+    for n in _mine(args, len(kit.positions)):
         path = out / f"{n}.npz"
         if path.exists() or not (base_dir / f"{n}.npz").exists():
             continue
@@ -268,7 +312,7 @@ def evaluate(args: argparse.Namespace) -> None:
     cells = 0 if cond.width_only else cells_for_seconds(cond.seconds, cond.price_cores)
     cost = COSTS["local", cond.price_cores]
     refs = sorted(d for d in Path(args.set).glob("ref-*") if d.is_dir())
-    for n in range(args.start, min(args.stop, len(kit.positions))):
+    for n in _mine(args, len(kit.positions)):
         path = out / f"{n}.json"
         found = {d.name[4:]: np.load(d / f"{n}.npz") for d in refs if (d / f"{n}.npz").exists()}
         if path.exists() or not found:
@@ -379,6 +423,467 @@ def report(args: argparse.Namespace) -> None:
                 print(f"  loss {a} - {b} ({key}): {d.mean():+.4f} (se {d.std() / np.sqrt(len(ns)):.4f})")
 
 
+# ----------------------------------------------------------------------------- IKA-367
+
+
+def subset(args: argparse.Namespace) -> None:
+    """The first ``--count`` positions of a set and every reference they have."""
+    src, out = Path(args.set), Path(args.out)
+    data = json.loads((src / "positions.json").read_bytes())
+    data["positions"] = data["positions"][: args.count]
+    data["subsetOf"] = str(src)
+    _write(out / "positions.json", data)
+    copied = 0
+    for ref in sorted(d for d in src.glob("ref-*") if d.is_dir()):
+        for n in range(args.count):
+            f = ref / f"{n}.npz"
+            if f.exists():
+                (out / ref.name).mkdir(parents=True, exist_ok=True)
+                (out / ref.name / f.name).write_bytes(f.read_bytes())
+                copied += 1
+    print(f"{len(data['positions'])} positions, {copied} reference files -> {out}", file=sys.stderr)
+
+
+def _rectangle(strategy: np.ndarray, ev: np.ndarray, count: int, *, larger: bool) -> list[int]:
+    """Support by weight, then the rest by how they do against the other side's answer."""
+    from pokeuraou.ladder import _order
+
+    return _order(strategy, ev, count, larger=larger)
+
+
+def _deep_cell(kit, pos, a, b, budget, args, work: dict) -> float | None:  # noqa: ANN001
+    """One root cell read three plies (`deep`'s docstring)."""
+    from pokeuraou import qhead
+    from pokeuraou.equilibrium import EquilibriumError, solve
+    from pokeuraou.search import _kept_branches, _refine_cells, batched_payoff
+
+    notes: set[str] = set()
+    kept = _kept_branches(kit.reg, pos, a, b, budget, 1000, notes)
+    if kept is None:
+        return None
+    branches, weights = kept
+    work["turns"] += 1
+    values = []
+    for branch in branches:
+        child = branch.position
+        if child.ended:
+            values.append(float(np.asarray(kit.leaf([child]))[0]))
+            continue
+        crow, ccol = qhead.legal_pool(kit.reg, child, 0), qhead.legal_pool(kit.reg, child, 1)
+        if not crow or not ccol:
+            return None
+        m, _notes = batched_payoff(kit.reg, child, crow, ccol, kit.leaf, budget=budget)
+        m = np.asarray(m, dtype=np.float64)
+        work["subgames"] += 1
+        work["cells"] += m.size
+        try:
+            eq = solve(m)
+        except EquilibriumError:
+            return None
+        rows = _rectangle(eq.row_strategy, eq.row_ev, args.child_rect, larger=True)
+        cols = _rectangle(eq.col_strategy, eq.col_ev, args.child_rect, larger=False)
+        cells = [(i, j) for i in rows for j in cols]
+        found = _refine_cells(kit.reg, [(child, crow[i], ccol[j]) for i, j in cells], kit.leaf,
+                              budget=budget, sub_limit=args.grand, sub_branches=1000,
+                              child_q=args.grand)
+        for (i, j), (v, _n, _s) in zip(cells, found, strict=True):
+            if v is not None:
+                m[i, j] = v
+        try:
+            values.append(float(solve(m).value))
+        except EquilibriumError:
+            return None
+    return float(np.asarray(values) @ weights)
+
+
+def deep(args: argparse.Namespace) -> None:
+    """The long reference (the module's docstring, IKA-367)."""
+    from dataclasses import replace
+
+    from pokeuraou import search
+    from pokeuraou.budget import Budget
+    from pokeuraou.equilibrium import solve
+    from pokeuraou.position import Position
+
+    kit = _Kit(args)
+    out = Path(args.set) / f"ref-{args.name}"
+    base_dir = Path(args.set) / f"ref-{args.base}"
+    budget = replace(Budget.matrix(), enumerate_knockouts=True)
+    for n in _mine(args, len(kit.positions)):
+        path = out / f"{n}.npz"
+        if path.exists() or not (base_dir / f"{n}.npz").exists():
+            continue
+        began = time.perf_counter()
+        base = np.load(base_dir / f"{n}.npz")
+        pos = Position.from_json(kit.positions[n]["position"])
+        ours, theirs, _outside = kit.menus(pos)
+        if [a.to_choice() for a in ours] != list(base["rows"]):
+            raise SystemExit(f"position {n}: the menus are not the base reference's")
+        d = np.asarray(base["d2"], dtype=np.float64).copy()
+        eq = solve(d)
+        rows = _rectangle(eq.row_strategy, eq.row_ev, args.rect, larger=True)
+        cols = _rectangle(eq.col_strategy, eq.col_ev, args.rect, larger=False)
+        work = {"turns": 0, "subgames": 0, "cells": 0, "qs": 0}
+        search.WORK = work
+        deepened = 0
+        mask = np.zeros(d.shape, dtype=bool)
+        try:
+            for i in rows:
+                for j in cols:
+                    v = _deep_cell(kit, pos, ours[i], theirs[j], budget, args, work)
+                    if v is not None:
+                        d[i, j] = v
+                        mask[i, j] = True
+                        deepened += 1
+        finally:
+            search.WORK = None
+        out.mkdir(parents=True, exist_ok=True)
+        took = time.perf_counter() - began
+        np.savez(path, d1=base["d1"], d2=d, rows=base["rows"], cols=base["cols"], deep=mask,
+                 rect=args.rect, childRect=args.child_rect, grand=args.grand, seconds=took,
+                 work=json.dumps(work))
+        print(f"deep {n}: rectangle {len(rows)}x{len(cols)}, deepened {deepened}, "
+              f"{took:.1f}s, work {work}", file=sys.stderr, flush=True)
+
+
+def _score(x: np.ndarray, claimed: float, refs: dict) -> dict:  # noqa: ANN001
+    from pokeuraou.equilibrium import solve
+
+    out = {}
+    for label, matrix in refs.items():
+        m = np.asarray(matrix, dtype=np.float64)
+        best = float(solve(m).value)
+        got = _guarantee(x, m)
+        out[label] = {"best": best, "got": got, "loss": best - got, "curse": claimed - got}
+    return out
+
+
+def sweep(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912, PLR0915 - the readings of a condition
+    """Each condition at each budget, read as a person's game reads it (the module's docstring)."""
+    from dataclasses import replace
+
+    from pokeuraou import humanplay, timematch
+    from pokeuraou.budget import Budget
+    from pokeuraou.deepen import COSTS, cells_for_seconds
+    from pokeuraou.ladder import LADDER_COSTS, parse_ladder
+    from pokeuraou.position import Position
+
+    kit = _Kit(args)
+    budgets = [float(s) for s in args.seconds.split(",")]
+    # The budget is the sweep's; a condition names the rest (the node clock by default).
+    def spelled(arm: str) -> str:
+        name, _sep, rest = arm.partition(":")
+        keys = [k for k in rest.split(",") if k]
+        keys += [] if any(k.startswith("seconds=") for k in keys) else ["seconds=1"]
+        keys += [] if any(k.startswith("clock=") for k in keys) else ["clock=count"]
+        return f"{name}:{','.join(keys)}"
+
+    conds = [timematch.parse_condition(spelled(a)) for a in args.arm]
+    price = humanplay.node_time(1)
+    refs_dirs = sorted(d for d in Path(args.set).glob("ref-*") if d.is_dir())
+    for n in _mine(args, len(kit.positions)):
+        pos = Position.from_json(kit.positions[n]["position"])
+        found = {d.name[4:]: np.load(d / f"{n}.npz") for d in refs_dirs
+                 if (d / f"{n}.npz").exists()}
+        if not found:
+            continue
+        ref = found["r24"] if "r24" in found else next(iter(found.values()))
+        full = kit.menus(pos)
+        if [a.to_choice() for a in full[0]] != list(ref["rows"]):
+            raise SystemExit(f"position {n}: the menus are not the reference's (another leaf or Q?)")
+        index = {c: i for i, c in enumerate(ref["rows"])}
+        counts = (humanplay.legal_count(kit.reg, pos, 0), humanplay.legal_count(kit.reg, pos, 1), 1)
+        for base in conds:
+            if base.clock != "count":
+                raise SystemExit("a sweep reads on the node clock (clock=count)")
+            for seconds in budgets:
+                cond = replace(base, seconds=seconds)
+                name = f"{cond.name}@{seconds:g}"
+                path = Path(args.set) / "sweep" / name / f"{n}.json"
+                if path.exists():
+                    continue
+                plan = humanplay.plan_move(seconds, 1, *counts, width_only=cond.width_only,
+                                           width=cond.width)
+                width = min(plan.width, kit.width)
+                ours, theirs, outside = full if width >= kit.width else kit.menus_at(pos, width)
+                node_ms = price.ms(len(ours) * len(theirs))
+                budget = (replace(Budget.matrix(), enumerate_knockouts=True) if cond.knockouts
+                          else Budget.matrix())
+                extra: dict = {}
+                began = time.perf_counter()
+                if cond.ladder is not None:
+                    solved = humanplay.solve_move(
+                        kit.reg, pos, 0, list(ours), list(theirs), None, kit.leaf, budget=budget,
+                        exact=True, ladder={"stages": parse_ladder(cond.ladder),
+                                            "budget_ms": seconds * 1000.0, "clock": "count",
+                                            "cost": LADDER_COSTS["local", 1],
+                                            "start_ms": node_ms})
+                    extra["ladder"] = solved.ladder.to_json()
+                elif cond.depth2_auto:
+                    d2k = humanplay.depth2_children(seconds * 1000.0 - node_ms, 1, price)
+                    solved = humanplay.solve_move(
+                        kit.reg, pos, 0, list(ours), list(theirs), None, kit.leaf, budget=budget,
+                        exact=True, child_q=d2k if d2k is not None else None,
+                        sub_limit=cond.sub_limit, sub_branches=cond.sub_branches,
+                        depth=2 if d2k is not None else 1, refine=cond.refine, passes=cond.passes)
+                    extra["depth2Children"] = d2k
+                else:
+                    cells = (0 if cond.width_only or plan.deepen_ms <= 0
+                             else cells_for_seconds(plan.deepen_ms / 1000.0, 1))
+                    solved = humanplay.solve_move(
+                        kit.reg, pos, 0, list(ours), list(theirs), None, kit.leaf, budget=budget,
+                        exact=True, cells=cells, cost=COSTS["local", 1] if cells else None,
+                        levels=cond.max_levels if cells else None,
+                        child_q=cond.child_q if cells else None,
+                        outside=(outside if (cells and cond.oracle is not None
+                                             and not cond.restricted) else None),
+                        sub_limit=cond.sub_limit, sub_branches=cond.sub_branches,
+                        restricted=cond.restricted, depth=cond.depth, refine=cond.refine,
+                        passes=cond.passes)
+                    if solved.deepened is not None:
+                        extra["depth"] = solved.deepened.depth
+                        extra["expanded"] = solved.deepened.expanded
+                took = time.perf_counter() - began
+
+                def mapped(strategy, actions=solved.ours, index=index):  # noqa: ANN001, ANN202
+                    x = np.zeros(len(index), dtype=np.float64)
+                    lost = 0.0
+                    for a, p in zip(actions, strategy, strict=True):
+                        k = index.get(a.to_choice())
+                        if k is None:
+                            lost += float(p)
+                        else:
+                            x[k] += float(p)
+                    return (x / x.sum() if x.sum() > 0 else x), lost
+
+                x, outside_mass = mapped(solved.strategy)
+                refs = {"d1": ref["d1"]} | {f"d2-{k}": r["d2"] for k, r in found.items()}
+                if cond.ladder is not None:
+                    # Each completed stage scored as the answer it was: the read's own curve.
+                    extra["rungScores"] = [
+                        {"stage": g.stage, "spentMs": round(g.spent_ms, 1),
+                         "wallMs": round(g.wall_ms, 1),
+                         "x": [round(float(v), 6) for v in mapped(g.strategy)[0]],
+                         "claimed": g.value}
+                        | _score(mapped(g.strategy)[0], g.value, refs)
+                        for g in solved.ladder.rungs]
+                row = {"n": n, "arm": cond.name, "budget": seconds, "wall": round(took, 3),
+                       "nodeMs": round(node_ms, 2), "width": width, "claimed": solved.value,
+                       "outsideMass": outside_mass, "x": [round(float(v), 6) for v in x],
+                       **extra} | _score(x, solved.value, refs)
+                _write(path, row)
+                if args.keep_matrix and cond.ladder is not None and width >= kit.width:
+                    keep = Path(args.set) / f"ref-{name}"
+                    keep.mkdir(parents=True, exist_ok=True)
+                    np.savez(keep / f"{n}.npz", d1=ref["d1"], d2=solved.ladder.prices[0],
+                             rows=ref["rows"], cols=ref["cols"])
+                print(json.dumps({"n": n, "arm": name, "wall": row["wall"]}
+                                 | {k: round(v["loss"], 4) for k, v in row.items()
+                                    if isinstance(v, dict) and "loss" in v}),
+                      file=sys.stderr, flush=True)
+
+
+def _sweep_rows(set_dir: Path) -> dict:
+    """{arm: {budget: {n: row}}}, the scores refreshed against every reference now present."""
+    from pokeuraou.equilibrium import solve
+
+    refs = sorted(d for d in set_dir.glob("ref-*") if d.is_dir())
+    best: dict = {}
+    out: dict = {}
+    for f in sorted((set_dir / "sweep").glob("*/*.json")):
+        row = json.loads(f.read_bytes())
+        n = row["n"]
+        x = np.asarray(row["x"], dtype=np.float64)
+        for d in refs:
+            key = f"d2-{d.name[4:]}"
+            if not (d / f"{n}.npz").exists():
+                continue
+            scored = [(row, x)] + [(g, np.asarray(g["x"], dtype=np.float64))
+                                   for g in row.get("rungScores", [])]
+            if all(key in r for r, _x in scored):
+                continue
+            m = np.asarray(np.load(d / f"{n}.npz")["d2"], dtype=np.float64)
+            if (d.name, n) not in best:
+                best[d.name, n] = float(solve(m).value)
+            for r, xr in scored:
+                got = _guarantee(xr, m)
+                r[key] = {"best": best[d.name, n], "got": got, "loss": best[d.name, n] - got,
+                          "curse": r["claimed"] - got}
+        out.setdefault(row["arm"], {}).setdefault(row["budget"], {})[n] = row
+    return out
+
+
+def _svg(series: dict, key: str, path: Path) -> None:
+    """One line per condition: mean loss against ``key`` over budgets (log2 axis)."""
+    width, height, pad = 640, 400, 56
+    xs = sorted({b for s in series.values() for b in s})
+    ys = [v for s in series.values() for v in s.values()]
+    if not xs or not ys:
+        return
+    lx = np.log2(np.asarray(xs))
+    x0, x1 = float(lx.min()), float(lx.max()) if lx.max() > lx.min() else float(lx.min()) + 1
+    y0, y1 = 0.0, max(ys) * 1.1
+
+    def px(b: float) -> float:
+        return pad + (np.log2(b) - x0) / (x1 - x0) * (width - 2 * pad)
+
+    def py(v: float) -> float:
+        return height - pad - (v - y0) / (y1 - y0) * (height - 2 * pad)
+
+    colors = ["#2a6fdb", "#d9534f", "#2e9e5b", "#a05bd6", "#e08a1e", "#555555"]
+    parts = [f'<svg xmlns="http://www.w3.org/2000/svg" width="{width}" height="{height}" '
+             f'font-family="sans-serif" font-size="12"><rect width="100%" height="100%" '
+             f'fill="white"/>',
+             f'<text x="{pad}" y="20">loss against {key} (mean over positions), node-clock '
+             f'seconds on a log2 axis</text>',
+             f'<line x1="{pad}" y1="{height - pad}" x2="{width - pad}" y2="{height - pad}" '
+             f'stroke="black"/>',
+             f'<line x1="{pad}" y1="{pad}" x2="{pad}" y2="{height - pad}" stroke="black"/>']
+    for b in xs:
+        parts.append(f'<text x="{px(b):.1f}" y="{height - pad + 16}" text-anchor="middle">'
+                     f'{b:g}</text>')
+    for t in np.linspace(y0, y1, 5):
+        parts.append(f'<text x="{pad - 6}" y="{py(t) + 4:.1f}" text-anchor="end">{t:.3f}</text>')
+    for c, (name, s) in enumerate(series.items()):
+        color = colors[c % len(colors)]
+        pts = " ".join(f"{px(b):.1f},{py(v):.1f}" for b, v in sorted(s.items()))
+        parts.append(f'<polyline fill="none" stroke="{color}" stroke-width="2" points="{pts}"/>')
+        for b, v in s.items():
+            parts.append(f'<circle cx="{px(b):.1f}" cy="{py(v):.1f}" r="3" fill="{color}"/>')
+        parts.append(f'<text x="{width - pad + 4}" y="{pad + 16 * c}" fill="{color}">{name}</text>')
+    parts.append("</svg>\n")
+    path.write_bytes("\n".join(parts).encode("utf-8"))
+
+
+def curve(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912 - one table per reference
+    """Loss and curse by budget, per condition (the module's docstring)."""
+    arms = _sweep_rows(Path(args.set))
+    if args.arms:
+        arms = {a: arms[a] for a in args.arms.split(",") if a in arms}
+    ns = None
+    for budgets in arms.values():
+        for rows in budgets.values():
+            ns = set(rows) if ns is None else ns & set(rows)
+    ns = sorted(ns or [])
+    print(f"{len(ns)} positions read by every condition at every budget")
+    keys = sorted({k for b in arms.values() for rows in b.values() for r in rows.values()
+                   for k in r if isinstance(r[k], dict) and "loss" in r[k]})
+    keys = [k for k in keys if all(k in rows[n] for b in arms.values() for rows in b.values()
+                                   for n in ns)]
+    for key in keys:
+        print(f"\nagainst {key}:")
+        print(f"  {'condition':<14}{'s':>6}{'wall s':>9}{'loss':>9}{'se':>8}{'curse':>9}"
+              f"{'change':>10}{'se':>8}{'worse':>7}")
+        series: dict = {}
+        for arm, budgets in arms.items():
+            prev = None
+            for b in sorted(budgets):
+                rows = budgets[b]
+                loss = np.array([rows[n][key]["loss"] for n in ns])
+                curse = np.array([rows[n][key]["curse"] for n in ns])
+                wall = np.mean([rows[n]["wall"] for n in ns])
+                change = se_c = worse = ""
+                if prev is not None:
+                    d = loss - prev
+                    change = f"{d.mean():+.4f}"
+                    se_c = f"{d.std() / np.sqrt(len(ns)):.4f}"
+                    worse = f"{int((d > 1e-4).sum())}"
+                print(f"  {arm:<14}{b:>6g}{wall:>9.2f}{loss.mean():>9.4f}"
+                      f"{loss.std() / np.sqrt(len(ns)):>8.4f}{curse.mean():>+9.4f}"
+                      f"{change:>10}{se_c:>8}{worse:>7}")
+                series.setdefault(arm, {})[b] = float(loss.mean())
+                prev = loss
+        if args.svg:
+            svg = Path(args.svg)
+            _svg(series, key, svg.with_name(f"{svg.stem}-{key}{svg.suffix}"))
+    if args.stages:
+        # One ladder read's own curve: each stage's answer, where it completed.
+        name, _at, budget = args.stages.partition("@")
+        rows = arms[name][float(budget)]
+        for key in keys:
+            print(f"\nstages of {args.stages} against {key} (positions that completed the stage; "
+                  "the change and its cost are against the stage before, on those positions):")
+            print(f"  {'stage':<22}{'done':>5}{'loss':>9}{'curse':>9}{'spent s':>9}{'wall s':>8}"
+                  f"{'change':>9}{'se':>8}{'per s':>9}")
+            labels = []
+            for r in rows.values():
+                for g in r.get("rungScores", []):
+                    if g["stage"] not in labels:
+                        labels.append(g["stage"])
+            prev_label = None
+            for label in labels:
+                have = {n: next(g for g in r["rungScores"] if g["stage"] == label)
+                        for n, r in rows.items() if any(g["stage"] == label for g in r["rungScores"])}
+                loss = np.array([g[key]["loss"] for g in have.values()])
+                curse = np.array([g[key]["curse"] for g in have.values()])
+                spent = np.array([g["spentMs"] for g in have.values()]) / 1000
+                wall = np.array([g["wallMs"] for g in have.values()]) / 1000
+                change = se = per = ""
+                if prev_label is not None:
+                    before = {n: next(g for g in rows[n]["rungScores"] if g["stage"] == prev_label)
+                              for n in have}
+                    d = np.array([have[n][key]["loss"] - before[n][key]["loss"] for n in have])
+                    cost = np.array([have[n]["spentMs"] - before[n]["spentMs"] for n in have]) / 1000
+                    change, se = f"{d.mean():+.4f}", f"{d.std() / np.sqrt(len(d)):.4f}"
+                    per = f"{d.mean() / max(cost.mean(), 1e-9):+.5f}"
+                print(f"  {label:<22}{len(have):>5}{loss.mean():>9.4f}{curse.mean():>+9.4f}"
+                      f"{spent.mean():>9.2f}{wall.mean():>8.2f}{change:>9}{se:>8}{per:>9}")
+                prev_label = label
+    if args.elo:
+        # "0.1:0.2=15.1,0.2:0.4=25.5": a condition's loss change between two budgets and
+        # the Elo a board gave the same step.
+        arm = arms[args.elo_arm]
+        print(f"\nElo scale ({args.elo_arm}):")
+        total_elo = total_loss = 0.0
+        for item in args.elo.split(","):
+            span, elo = item.split("=")
+            lo, hi = (float(v) for v in span.split(":"))
+            for key in keys:
+                d = np.array([arm[lo][n][key]["loss"] - arm[hi][n][key]["loss"] for n in ns])
+                print(f"  {lo:g} -> {hi:g} s, {float(elo):+.1f} Elo: loss falls {d.mean():+.4f} "
+                      f"(se {d.std() / np.sqrt(len(ns)):.4f}) against {key}"
+                      + (f"; {float(elo) / d.mean():+.0f} Elo per unit" if d.mean() > 0 else ""))
+                if key == args.elo_key:
+                    total_elo += float(elo)
+                    total_loss += float(d.mean())
+        if total_loss > 0:
+            print(f"  pooled against {args.elo_key}: {total_elo:+.1f} Elo over a loss fall of "
+                  f"{total_loss:.4f}: {total_elo / total_loss:.0f} Elo per unit of loss "
+                  f"({total_elo / total_loss / 1000:.2f} Elo per 0.001)")
+
+
+def fit(args: argparse.Namespace) -> None:
+    """Non-negative least squares of the ladder's wall milliseconds on its counted work, a
+    row per stage (what it added to the work and the wall) and one for the unfinished rest."""
+    from scipy.optimize import nnls
+
+    kinds = ("turns", "subgames", "cells", "qs")
+    arms = _sweep_rows(Path(args.set))
+    xs, ys = [], []
+    for budgets in arms.values():
+        for rows in budgets.values():
+            for r in rows.values():
+                lad = r.get("ladder")
+                if lad is None:
+                    continue
+                marks = [(g["work"], g["wallMs"]) for g in lad["rungs"] if "work" in g]
+                marks.append((lad["work"], lad["wallMs"]))
+                prev = ({k: 0 for k in kinds}, 0.0)
+                for work, wall in marks:
+                    xs.append([work[k] - prev[0][k] for k in kinds])
+                    ys.append(wall - prev[1])
+                    prev = (work, wall)
+    if not xs:
+        raise SystemExit("no ladder readings in the sweep")
+    a, y = np.asarray(xs, dtype=np.float64), np.asarray(ys, dtype=np.float64)
+    coef, _res = nnls(a, y)
+    pred = a @ coef
+    r2 = 1 - ((y - pred) ** 2).sum() / ((y - y.mean()) ** 2).sum()
+    print(f"{len(y)} stages: turn {coef[0]:.3f} ms, subgame {coef[1]:.3f} ms, cell "
+          f"{coef[2]:.5f} ms, q {coef[3]:.3f} ms; R^2 {r2:.3f}; wall/predicted total "
+          f"{y.sum() / pred.sum():.3f}")
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -388,11 +893,13 @@ def main(argv: list[str] | None = None) -> None:
     b.add_argument("--seed", type=int, default=36200)
     b.add_argument("--width", type=int, default=64)
     b.add_argument("--out", type=Path, required=True)
-    for name in ("reference", "reference3", "evaluate"):
+    for name in ("reference", "reference3", "evaluate", "deep", "sweep"):
         s = sub.add_parser(name)
         s.add_argument("--set", type=Path, required=True)
         s.add_argument("--from", dest="start", type=int, default=0)
         s.add_argument("--to", dest="stop", type=int, default=10**9)
+        s.add_argument("--stride", type=int, default=1, help="every k-th position (IKA-367)")
+        s.add_argument("--offset", type=int, default=0, help="from the start plus this")
         s.add_argument("--pool", default="regmc-matchupweb")
         s.add_argument("--value", type=Path, nargs="+", default=None)
         s.add_argument("--q-model", type=Path, default=None)
@@ -410,13 +917,41 @@ def main(argv: list[str] | None = None) -> None:
                            help="branches kept per refined cell (64: all, in practice)")
         elif name == "evaluate":
             s.add_argument("--arm", required=True, help="a time-match condition on the node clock")
+        elif name == "deep":
+            s.add_argument("--name", default="deep")
+            s.add_argument("--base", default="r24", help="the every-cell depth-2 reference")
+            s.add_argument("--rect", type=int, default=8)
+            s.add_argument("--child-rect", type=int, default=6)
+            s.add_argument("--grand", type=int, default=24,
+                           help="the grandchildren's menus: the Q's k best")
+        elif name == "sweep":
+            s.add_argument("--arm", action="append", required=True,
+                           help="a time-match condition (its seconds are the sweep's)")
+            s.add_argument("--seconds", default="1,4,16,64")
+            s.add_argument("--keep-matrix", action="store_true",
+                           help="a ladder's root prices kept as a reference ref-<arm>@<s>")
+    sb = sub.add_parser("subset")
+    sb.add_argument("--set", type=Path, required=True)
+    sb.add_argument("--out", type=Path, required=True)
+    sb.add_argument("--count", type=int, default=40)
+    c = sub.add_parser("curve")
+    c.add_argument("--set", type=Path, required=True)
+    c.add_argument("--arms", default=None, help="comma-separated conditions (default: all)")
+    c.add_argument("--svg", default=None, help="figure path; one per reference")
+    c.add_argument("--stages", default=None, help="ARM@SECONDS: a ladder read's stages")
+    c.add_argument("--elo", default=None, help="lo:hi=Elo,... steps of a recorded curve")
+    c.add_argument("--elo-arm", default=None)
+    c.add_argument("--elo-key", default="d2-deep")
+    f = sub.add_parser("fit")
+    f.add_argument("--set", type=Path, required=True)
     r = sub.add_parser("report")
     r.add_argument("--set", type=Path, required=True)
     rs = sub.add_parser("rescore")
     rs.add_argument("--set", type=Path, required=True)
     args = ap.parse_args(argv)
     {"build": build, "reference": reference, "reference3": reference3, "evaluate": evaluate,
-     "rescore": rescore, "report": report}[args.cmd](args)
+     "rescore": rescore, "report": report, "subset": subset, "deep": deep, "sweep": sweep,
+     "curve": curve, "fit": fit}[args.cmd](args)
 
 
 if __name__ == "__main__":
