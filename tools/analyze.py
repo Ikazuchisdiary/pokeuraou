@@ -17,7 +17,7 @@ that reached the depth guard, as they form.
 How it reads (`pokeuraou.analysis`): IKA-307's allocation for a long read -- the menus at
 ``--width`` (64: every legal action on most turns), then the best-first deepening of the
 side's Bayesian root (``h``) with the root's swap oracle (``--oracle``, default sall), the
-depth guard at ``--max-levels`` (default `deepen.MAX_LEVELS`; raise it for long reads). The
+depth guard at ``--max-levels`` (default `humanplay.PLAY_MAX_LEVELS`, 16, IKA-342). The
 cells are expanded ahead on ``--threads`` cores (IKA-32 stage 2; 4 to 8 is the useful range).
 The leaf and the menus' Q are ``play_human``'s.
 
@@ -74,6 +74,9 @@ def main(argv: list[str] | None = None) -> None:
                     help=f"the deepening's depth guard (default {humanplay.PLAY_MAX_LEVELS or MAX_LEVELS}: "
                     "humanplay.PLAY_MAX_LEVELS, the person's game's, else deepen.MAX_LEVELS; "
                     "IKA-307: long reads meet it)")
+    ap.add_argument("--depth-discount", type=float, default=None,
+                    help="the deepening's depth discount a ply (a label's d<P> as P / 100, "
+                    "IKA-342); default none")
     ap.add_argument("--open", action="store_true",
                     help="read with the opponent's bench open (the recorded position whole)")
     ap.add_argument("--threads", type=int, default=humanplay.default_threads(),
@@ -169,7 +172,7 @@ def main(argv: list[str] | None = None) -> None:
 
     settings = analysis.Settings(
         width=args.width, oracle=_oracle_width(args.oracle), levels=args.max_levels,
-        rank_fill=fill, bench_drop=args.bench_drop, open_information=args.open,
+        discount=args.depth_discount, rank_fill=fill, bench_drop=args.bench_drop, open_information=args.open,
         interval_ms=args.interval_ms,
     )
     analyzer = analysis.Analyzer(reg, evaluate, name, loc=loc, settings=settings)
@@ -178,7 +181,9 @@ def main(argv: list[str] | None = None) -> None:
         sources.append(analysis.Source("進行中の局", args.current, current=True))
     limits = analysis.Limits(rss_gb=args.max_rss_gb, free_gb=args.min_free_gb, gpu_gb=args.max_gpu_gb)
     say(f"analysis: leaf {name} / menus {fill} / width {settings.width} / oracle {settings.oracle_label()}"
-        f" / guard {settings.levels} / {args.threads} thread(s)"
+        f" / guard {settings.levels}"
+        + (f" / discount {settings.discount:g}" if settings.discount is not None else "")
+        + f" / {args.threads} thread(s)"
         + (f" / {args.max_steps} steps" if args.max_steps is not None else "")
         + (f" / {args.max_seconds:g} s" if args.max_seconds is not None else ""))
 

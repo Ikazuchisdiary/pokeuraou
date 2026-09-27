@@ -584,6 +584,8 @@ class Settings:
     width: int = DEFAULT_WIDTH
     oracle: int | None = DEFAULT_ORACLE
     levels: int = MAX_LEVELS
+    #: The depth discount (``d<P>``, IKA-342), a factor a ply, or None: none.
+    discount: float | None = None
     rank_fill: str = "refs2"
     rank_by_leaf: bool = True
     bench_drop: str = DEFAULT_BENCH_DROP
@@ -880,7 +882,7 @@ class Analyzer:
             solved = solve_move(
                 reg, pos, me, ours, theirs, spreads, self.leaf, budget=budget, exact=exact,
                 cells=ENDLESS, cost=StopCost(stop, started), levels=settings.levels,
-                outside=outside, progress=session,
+                outside=outside, progress=session, discount=settings.discount,
             )
         except EquilibriumError as problem:
             session.halt("error", str(problem))

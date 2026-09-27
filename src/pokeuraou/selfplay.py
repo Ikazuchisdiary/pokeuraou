@@ -666,6 +666,7 @@ def _belief_deepen(
         "q_probe": how["q_probe"],
         "levels": how["levels"],
         "child_q": how["child_q"],
+        "discount": how["discount"],
         "outside": outside,
     }
 
@@ -1100,6 +1101,8 @@ def play_game(
             "q_probe": spec.q_probe,
             # The depth guard (g<L>) and the children's menus by a Q (c<k>), IKA-307.
             "levels": spec.levels, "child_q": spec.child_q,
+            # The depth discount (d<P>), IKA-342.
+            "discount": spec.discount,
         }
         for spec in specs
     ]
