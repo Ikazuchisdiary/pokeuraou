@@ -168,6 +168,22 @@ children, notes, counts -- is the serial step's, so a game on counted cells is t
 game with or without it; the wasted expansions of cells never taken cost only time.
 While the loop re-solves the root (HiGHS lets go of the GIL) the helper talks to the
 port and the leaf.
+
+**Widening the root mid-read** (IKA-354; off by default, and generation and the board
+never turn it on). `deepen_root` and `deepen_belief` take an optional `grow`: called at
+the top of every step with the budget's reading so far, it returns each side's actions
+to add to the root (side 0's, side 1's) or None. The actions not on the root's menu yet
+are appended -- rows after the rows, columns after the columns, so every cell already
+refined keeps its index and its subtree -- the new cells are filled at depth 1 (on a
+Bayesian root in every completion; charged to the budget as any fill), and the root is
+re-solved. The tree is kept: a refined cell's children and their values stand, and the
+next step's priorities read the grown root. That is a menu of width W read, then
+widened to W' with nothing thrown away -- the analysis mode's width changed while it
+reads (`analysis.Service`), and the agent that reads narrow first and widens with what
+is left (`humanplay.Agent.widen`). A step that grows is one step (``grow``); what it
+added is counted (`Deepened.grown`, written only when nonzero). The oracle, when on,
+counts the added actions among its candidates, so a swap may push one out and it can
+come back. A grow the LP cannot solve is dropped whole and the root stands.
 """
 
 from __future__ import annotations
@@ -478,6 +494,10 @@ class Deepened:
     #: positions they ranked.
     child_passes: int = 0
     child_ranked: int = 0
+    #: Actions the root was widened by mid-read (`grow`, IKA-354), both sides, and the
+    #: cells that filled. Written only when an action was added.
+    grown: int = 0
+    grown_cells: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -512,6 +532,11 @@ class Deepened:
             **(
                 {"uncovered": [list(side) for side in self.uncovered]}
                 if any(self.uncovered)
+                else {}
+            ),
+            **(
+                {"grown": self.grown, "grownCells": self.grown_cells}
+                if self.grown
                 else {}
             ),
         }
@@ -575,7 +600,7 @@ class Step:
     #: 0 at the depth-1 answer, then 1, 2, ... per step; ``done`` repeats the last.
     index: int
     #: ``start``, ``refine`` (a cell took a deeper value), ``refused``, ``widen`` (the
-    #: oracle added an action) or ``done``.
+    #: oracle added an action), ``grow`` (the root widened mid-read, IKA-354) or ``done``.
     kind: str
     root: Any
     budget: int
@@ -596,15 +621,169 @@ class Step:
     #: The `Budget` a refined cell's turn was resolved with (None at a depth-1 answer):
     #: a reader can ask the port that turn again, with its draws (IKA-345).
     turn: Any = None
+    #: Actions the root was widened by mid-read so far (`grow`, IKA-354).
+    grown: int = 0
 
 
 #: A progress callback: called with each `Step`, returns nothing, changes nothing.
 Progress = Callable[[Step], None]
 
+#: A widening of the root mid-read (IKA-354, the module's docstring): called at the top of
+#: every step with the budget's reading so far (`_Meter.spent`), it returns each side's
+#: actions to add -- (side 0's, side 1's) -- or None. Called on the deepening's own thread.
+Grow = Callable[[float], "tuple[Sequence[SideAction], Sequence[SideAction]] | None"]
+
+
+class _Grower:
+    """A deepening's `grow` and what it added."""
+
+    def __init__(self, ask: Grow) -> None:
+        self.ask = ask
+        #: Actions added, both sides; cells filled for them; grows that added any.
+        self.grown = 0
+        self.cells = 0
+        self.times = 0
+
+
+def _new_actions(
+    menu: Sequence[SideAction], wanted: Sequence[SideAction]
+) -> list[SideAction]:
+    """The actions of `wanted` not on `menu`, first of each choice, in `wanted`'s order."""
+    on = {action.to_choice() for action in menu}
+    out: list[SideAction] = []
+    for action in wanted:
+        key = action.to_choice()
+        if key not in on:
+            on.add(key)
+            out.append(action)
+    return out
+
+
+def _grow_open(
+    reg: Regulation,
+    root: _Node,
+    wanted: tuple[Sequence[SideAction], Sequence[SideAction]],
+    evaluate: LeafEvaluator,
+    budget: Budget,
+    meter: _Meter,
+    unmodelled: set[str],
+    oracle: _Oracle | None,
+    grower: _Grower,
+) -> int:
+    """Append `wanted`'s actions that are not on the open root's menus, fill the new cells
+    at depth 1 in one call (cells the oracle already asked are taken from it), re-solve.
+    Returns how many actions joined (0: none new, or the grown game's LP failed)."""
+    rows_new = _new_actions(root.rows, wanted[0])
+    cols_new = _new_actions(root.cols, wanted[1])
+    if not rows_new and not cols_new:
+        return 0
+    rows = [*root.rows, *rows_new]
+    cols = [*root.cols, *cols_new]
+    old_r, old_c = len(root.rows), len(root.cols)
+    known = {} if oracle is None else oracle.known
+    grown = np.empty((len(rows), len(cols)), dtype=np.float64)
+    grown[:old_r, :old_c] = root.payoff
+    fresh = [
+        (i, j)
+        for i in range(len(rows))
+        for j in range(len(cols))
+        if i >= old_r or j >= old_c
+    ]
+    wanted_cells = []
+    for i, j in fresh:
+        got = known.get((rows[i].to_choice(), cols[j].to_choice()))
+        if got is None:
+            wanted_cells.append((i, j))
+        else:
+            grown[i, j] = got
+    if wanted_cells:
+        matrices, notes, _exact = port.batched_payoffs(
+            reg, root.pos, rows, cols, [evaluate], budget=budget, cells=wanted_cells
+        )
+        unmodelled.update(notes)
+        for i, j in wanted_cells:
+            grown[i, j] = float(matrices[0][i, j])
+            if oracle is not None:
+                oracle.known[(rows[i].to_choice(), cols[j].to_choice())] = float(grown[i, j])
+        meter.filled(len(wanted_cells))
+        grower.cells += len(wanted_cells)
+    try:
+        solved = solve(grown)
+    except EquilibriumError:
+        return 0
+    root.rows.extend(rows_new)
+    root.cols.extend(cols_new)
+    root.payoff = grown
+    root.equilibrium = solved
+    root.signal = None
+    if oracle is not None:
+        oracle.joined(rows_new, cols_new)
+    added = len(rows_new) + len(cols_new)
+    grower.grown += added
+    grower.times += 1
+    return added
+
+
+def _grow_belief(
+    root: _BeliefRoot,
+    wanted: tuple[Sequence[SideAction], Sequence[SideAction]],
+    fill: Callable[[list[SideAction], list[SideAction]], list[np.ndarray]],
+    meter: _Meter,
+    oracle: _BeliefOracle | None,
+    grower: _Grower,
+) -> int:
+    """`_grow_open` on a Bayesian root: `wanted` in side order, mapped to this side's own
+    and the other's; the new rows against every column and the old rows against the new
+    columns filled in every completion (two rectangles), the Bayesian game re-solved."""
+    own_w, other_w = (wanted[0], wanted[1]) if root.side == 0 else (wanted[1], wanted[0])
+    own_new = _new_actions(root.own, own_w)
+    other_new = _new_actions(root.other, other_w)
+    if not own_new and not other_new:
+        return 0
+    others = [*root.other, *other_new]
+    count = len(root.prices)
+    below = fill(own_new, others) if own_new else None
+    right = fill(list(root.own), other_new) if other_new else None
+    cells = (len(own_new) * len(others) + len(root.own) * len(other_new)) * count
+    if below is not None:
+        meter.filled(len(own_new) * len(others) * count)
+    if right is not None:
+        meter.filled(len(root.own) * len(other_new) * count)
+    grower.cells += cells
+    grown = []
+    for k, prices in enumerate(root.prices):
+        top = prices if right is None else np.hstack([prices, np.asarray(right[k], dtype=np.float64)])
+        grown.append(top if below is None else np.vstack([top, np.asarray(below[k], dtype=np.float64)]))
+    if oracle is not None:
+        for block, rows_, cols_ in (
+            (below, own_new, others), (right, list(root.own), other_new)
+        ):
+            if block is None:
+                continue
+            for r, a in enumerate(rows_):
+                for c, b in enumerate(cols_):
+                    oracle.known[(a.to_choice(), b.to_choice())] = np.array(
+                        [float(p[r, c]) for p in block], dtype=np.float64
+                    )
+    before = (root.prices, root.equilibrium)
+    root.prices = grown
+    if not root.solve():
+        root.prices, root.equilibrium = before
+        return 0
+    root.own.extend(own_new)
+    root.other.extend(other_new)
+    if oracle is not None:
+        oracle.joined(own_new, other_new)
+    added = len(own_new) + len(other_new)
+    grower.grown += added
+    grower.times += 1
+    return added
+
 
 def _stepper(
     progress: Progress, root: Any, meter: _Meter, cells: int, oracle: Any,  # noqa: ANN401
     turn: Any = None,  # noqa: ANN401 - the turn's Budget
+    grower: _Grower | None = None,
 ) -> Callable[..., None]:
     """The callback, bound to one deepening's root, meter and oracle."""
     count = [0]
@@ -623,7 +802,7 @@ def _stepper(
             widened=0 if oracle is None else oracle.widened,
             swapped=0 if oracle is None else oracle.swapped,
             cell=None if cell is None else tuple(int(c) for c in cell), level=level,
-            turn=turn,
+            turn=turn, grown=0 if grower is None else grower.grown,
         ))
 
     return announce
@@ -722,6 +901,7 @@ def deepen_root(
     child_q: int | None = None,
     progress: Progress | None = None,
     discount: float | None = None,
+    grow: Grow | None = None,
 ) -> Deepening:
     """`best_first`, and the root's double oracle when `outside` is given (IKA-293).
 
@@ -745,7 +925,11 @@ def deepen_root(
     None: none), a factor under 1 on each branch's inherited priority.
     `progress`, when given, is called with a `Step` at the start, after every step and at
     the end (the module's docstring); it changes nothing the deepening computes.
+    `grow`, when given, widens the root mid-read (IKA-354, the module's docstring); the
+    whole-matrix and breadth readings only.
     """
+    if grow is not None and reading == "restricted":
+        raise ValueError("widening the root mid-read goes with the whole-matrix reading")
     if outside is not None and reading not in ("mixed", "breadth"):
         raise ValueError("the root's double oracle goes with the mixed reading")
     if outside is None and (swap or reading == "breadth" or q_probe is not None):
@@ -777,8 +961,10 @@ def deepen_root(
     refused = 0
     guard = MAX_LEVELS if levels is None else levels
     watch = _Watch()
+    grower = None if grow is None else _Grower(grow)
     announce = (
-        None if progress is None else _stepper(progress, root, meter, cells, oracle, budget)
+        None if progress is None
+        else _stepper(progress, root, meter, cells, oracle, budget, grower)
     )
     if announce is not None:
         announce("start", expanded, deepest, refused)
@@ -789,6 +975,19 @@ def deepen_root(
     )
     try:
         while meter.spent < cells:
+            if grower is not None:
+                # Under the helpers' lock: the grow may rank a menu with the leaf.
+                with _held(helper):
+                    wanted = grower.ask(meter.spent)
+                    added = 0 if wanted is None else _grow_open(
+                        reg, root, wanted, evaluate, budget, meter, unmodelled, oracle, grower,
+                    )
+                if added:
+                    if trace is not None:
+                        trace.append((root, None, "grow"))
+                    if announce is not None:
+                        announce("grow", expanded, deepest, refused)
+                    continue
             if oracle is not None:
                 # One step: the probe and what it leads to -- a widening, or else a deepening.
                 with _held(helper):
@@ -842,6 +1041,10 @@ def deepen_root(
         timing.count("deepen.fills", meter.fills)
         timing.count("deepen.refines", meter.refines)
         watch.count()
+        if grower is not None:
+            timing.count("deepen.grow.times", grower.times)
+            timing.count("deepen.grow.actions", grower.grown)
+            timing.count("deepen.grow.cells", grower.cells)
         if oracle is not None:
             timing.count("deepen.oracle.calls", 1)
             timing.count("deepen.oracle.probes", oracle.probes)
@@ -870,6 +1073,8 @@ def deepen_root(
         q_probe=q_probe is not None, q=meter.qs,
         qfull=0 if oracle is None else oracle.fallbacks,
         **watch.report(levels, child_q),
+        grown=0 if grower is None else grower.grown,
+        grown_cells=0 if grower is None else grower.cells,
     )
     if announce is not None:
         announce("done", expanded, deepest, refused)
@@ -1002,6 +1207,11 @@ class _Oracle:
         # A guard, not a rule: widenings past this mean the argument above is wrong.
         self.cap = 4 * (len(self.candidates[0]) + len(self.candidates[1])) + 4
         self.stalled = False
+
+    def joined(self, rows: Sequence[SideAction], cols: Sequence[SideAction]) -> None:
+        """Actions a mid-read widening added to the root (IKA-354): candidates from now on
+        (a swap may push one out and the probe ask it back), and the menu has changed."""
+        _join_candidates(self, rows, cols)
 
     def _outside(self, side: int) -> list[SideAction]:
         menu = self.root.rows if side == 0 else self.root.cols
@@ -1282,6 +1492,26 @@ class _Oracle:
         self.swapped += 1
 
 
+def _join_candidates(
+    oracle: Any, first: Sequence[SideAction], second: Sequence[SideAction]  # noqa: ANN401
+) -> None:
+    """Append added actions to an oracle's candidates (each side's, where not there yet),
+    lift its guard by as much, and forget a full probe's proof: the menu changed."""
+    new = False
+    for side, added in ((0, first), (1, second)):
+        seen = {action.to_choice() for action in oracle.candidates[side]}
+        for action in added:
+            if action.to_choice() not in seen:
+                seen.add(action.to_choice())
+                oracle.candidates[side].append(action)
+                oracle.cap += 4
+                new = True
+    if new and oracle.q is not None:
+        # A Q asked before the widening has no row for a new candidate: asked again.
+        oracle.q = None
+    oracle.proved = False
+
+
 #: Whether a Bayesian root's cell priority is ``bern/gap`` times its completion's weight
 #: (IKA-294). Without the weight a cell of a completion the belief barely holds would be
 #: deepened as early as one of the likeliest, though it moves the answer w_k as much.
@@ -1437,6 +1667,10 @@ class _BeliefOracle:
         self.left: set[str] = set()
         self.cap = 4 * (len(self.candidates[0]) + len(self.candidates[1])) + 4
         self.stalled = False
+
+    def joined(self, own: Sequence[SideAction], other: Sequence[SideAction]) -> None:
+        """`_Oracle.joined`: this side's added actions, then the other side's."""
+        _join_candidates(self, own, other)
 
     def _menu(self, role: int) -> list[SideAction]:
         return self.root.own if role == 0 else self.root.other
@@ -1721,6 +1955,7 @@ def deepen_belief(
     child_q: int | None = None,
     progress: Progress | None = None,
     discount: float | None = None,
+    grow: Grow | None = None,
 ) -> BeliefDeepening:
     """`deepen_root` for a side whose opponent's bench is hidden (IKA-294, label ``h``).
 
@@ -1733,6 +1968,8 @@ def deepen_belief(
     ``breadth`` reading are `deepen_root`'s. A cell spent is one resolved turn in one
     completion: a probed cell counts once per completion. `q_probe` narrows the probe by
     the process's Q, asked once per completion in that completion's position (IKA-322).
+    `grow` widens the root mid-read (IKA-354): its actions in side order, this side's
+    rows and the other side's columns appended in every completion's matrix.
     """
     if reading not in ("mixed", "breadth"):
         raise ValueError(f"a Bayesian root is read whole or breadth only, not {reading!r}")
@@ -1779,8 +2016,10 @@ def deepen_belief(
     refused = 0
     guard = MAX_LEVELS if levels is None else levels
     watch = _Watch()
+    grower = None if grow is None else _Grower(grow)
     announce = (
-        None if progress is None else _stepper(progress, root, meter, cells, oracle, budget)
+        None if progress is None
+        else _stepper(progress, root, meter, cells, oracle, budget, grower)
     )
     if announce is not None:
         announce("start", expanded, deepest, refused)
@@ -1791,6 +2030,18 @@ def deepen_belief(
     )
     try:
         while meter.spent < cells:
+            if grower is not None:
+                with _held(helper):
+                    wanted = grower.ask(meter.spent)
+                    added = 0 if wanted is None else _grow_belief(
+                        root, wanted, fill, meter, oracle, grower
+                    )
+                if added:
+                    if trace is not None:
+                        trace.append((root, None, "grow"))
+                    if announce is not None:
+                        announce("grow", expanded, deepest, refused)
+                    continue
             if oracle is not None:
                 with _held(helper):
                     joined = oracle.step(meter)
@@ -1847,6 +2098,10 @@ def deepen_belief(
         timing.count("deepen.fills", meter.fills)
         timing.count("deepen.refines", meter.refines)
         watch.count()
+        if grower is not None:
+            timing.count("deepen.grow.times", grower.times)
+            timing.count("deepen.grow.actions", grower.grown)
+            timing.count("deepen.grow.cells", grower.cells)
         if oracle is not None:
             timing.count("deepen.oracle.calls", 1)
             timing.count("deepen.oracle.probes", oracle.probes)
@@ -1874,6 +2129,8 @@ def deepen_belief(
         classes=len(root.prices), q_probe=q_probe is not None, q=meter.qs,
         qfull=0 if oracle is None else oracle.fallbacks,
         **watch.report(levels, child_q),
+        grown=0 if grower is None else grower.grown,
+        grown_cells=0 if grower is None else grower.cells,
     )
     if announce is not None:
         announce("done", expanded, deepest, refused)
@@ -3068,6 +3325,7 @@ __all__ = [
     "Deepened",
     "Deepening",
     "BeliefDeepening",
+    "Grow",
     "Progress",
     "Step",
     "announce_belief_depth1",

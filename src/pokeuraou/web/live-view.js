@@ -942,15 +942,38 @@ function stopRead() { LiveData.command({ cmd: "stop" }); }
 $("aGo").onclick = startRead;
 $("goTop").onclick = () => startRead();
 $("aReread").onclick = () => { openSettings(false); startRead(); };
+// A wider width for the position being read widens it without stopping (IKA-354): the server
+// keeps the tree and adds the new actions to the root. The button says which it will do.
+function widensRunning() {
+  const st = S.analysisState;
+  if (!S.running || !st || st.source == null) return false;
+  const guard = +$("aGuard").value || st.guard;
+  return st.source === +$("aSource").value && st.game === +$("aGame").value &&
+    st.decision === +$("aTurn").value && st.side === +$("aSide").value && guard === st.guard &&
+    +$("aWidth").value > st.width;
+}
+function rereadLabel() {
+  $("aReread").textContent = widensRunning() ? "幅を広げる（読みは続ける）" : "この設定で読み直す";
+}
+for (const id of ["aWidth", "aGuard", "aSide", "aTurn", "aGame", "aSource"]) $(id).addEventListener("input", rereadLabel);
+for (const id of ["aSide", "aTurn", "aGame", "aSource"]) $(id).addEventListener("change", rereadLabel);
 $("aStop").onclick = stopRead;
 $("stopTop").onclick = stopRead;
 function setRunning(on) {
   S.running = on;
+  if (typeof rereadLabel === "function") rereadLabel();
   $("aStop").disabled = !on; $("stopTop").disabled = !on; $("stopTop").hidden = S.analysis && !on; $("goTop").hidden = !S.analysis || on;
   $("clockbar").classList.toggle("endless", on);
 }
 function onAnalysis(e) {
   S.analysisState = e;
+  if (e.state === "running" && e.grown) {
+    // The read goes on at the wider width (IKA-354): nothing restarts.
+    $("aWidth").value = e.width;
+    log(e.turn, `幅を ${e.width} に広げた（候補集合 ${e.menu[0]}×${e.menu[1]}）。読んだ木はそのまま読み続ける`);
+    rereadLabel();
+    return;
+  }
   if (e.state === "running") {
     S.played = e.played || [];
     setRunning(true);
