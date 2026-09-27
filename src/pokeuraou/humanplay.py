@@ -434,6 +434,25 @@ def _find(cost: Any, kind: type) -> Any:  # noqa: ANN401
 
 CLOCKS = ("wall", "count")
 
+#: The children's widths a `depth2_auto` read picks from, widest first (IKA-362).
+DEPTH2_CHILDREN = (24, 16, 8)
+#: Its guess of the refined cells: a rectangle of `DEPTH2_RECT` a side per completion, this
+#: many branches a cell, each child k x k.
+DEPTH2_RECT = 4
+DEPTH2_BRANCHES = 1.5
+#: And its fixed cost a move (the Q's forward pass, the rectangle's LPs), in milliseconds.
+DEPTH2_FIXED_MS = 30.0
+
+
+def depth2_children(left_ms: float, classes: int, price: NodeTime) -> int | None:
+    """The widest of `DEPTH2_CHILDREN` whose depth-2 read is predicted within ``left_ms``,
+    or None (IKA-362)."""
+    for k in DEPTH2_CHILDREN:
+        cells = DEPTH2_RECT * DEPTH2_RECT * max(classes, 1) * DEPTH2_BRANCHES * k * k
+        if DEPTH2_FIXED_MS + price.cell_ms * cells <= left_ms:
+            return k
+    return None
+
 # ----------------------------------------------------------------------------- defaults
 # What `tools/play_human.py` and `tools/play.py` play with when no flag says otherwise
 # (IKA-343): the allocation IKA-307 measured best, spread over the cores IKA-32 measured
@@ -1171,6 +1190,11 @@ class Agent:
     #: oracle over ``passes`` passes (None: `search`'s 4 and 2).
     refine: int | None = None
     passes: int | None = None
+    #: The width rule, then -- instead of the deepening -- a fixed depth-2 read of the support
+    #: rectangle with the children by the Q, as wide (`DEPTH2_CHILDREN`) as the rest of the
+    #: budget pays for at `node_time`'s price (`depth2_children`); none fits: the width alone
+    #: (IKA-362).
+    depth2_auto: bool = False
     #: Read on while the person chooses (IKA-344, `PonderCost`): the person is asked when
     #: the move starts, and the move deepens until they have chosen -- its budget first,
     #: `ponder_seconds` at most. False: the agent chooses first, then the person is asked.
@@ -1285,7 +1309,8 @@ def solve_move(
     if exact:
         got = search(
             reg, pos, ours, theirs, leaf, budget=budget, **subs,
-            **({"depth": depth, "solve_restricted": True} if depth >= 2 else {}),
+            **({"depth": depth, "solve_restricted": True,
+                **({"child_q": child_q} if child_q is not None else {})} if depth >= 2 else {}),
             **(
                 {"deepen": cells, "deepen_cost": cost, "levels": levels,
                  "child_q": child_q, "discount": discount,
@@ -1309,7 +1334,8 @@ def solve_move(
     answers = belief_solve(
         reg, pos, ours, theirs, spreads,
         {me: leaf, you: _not_asked}, budget=budget, sides=(me,), **subs,
-        **({"depth": depth} if depth >= 2 else {}),
+        **({"depth": depth, **({"child_q": child_q} if child_q is not None else {})}
+           if depth >= 2 else {}),
         deepen=(
             {me: {"cells": cells, "cost": cost, "levels": levels,
                   # The restricted reading asks the whole matrices itself (IKA-362).
@@ -1695,8 +1721,19 @@ class HumanGame:
             from dataclasses import replace as _replace
 
             budget = _replace(budget, enumerate_knockouts=True)
+        # IKA-362: a fixed depth-2 read in place of the deepening, its children as wide as
+        # the rest of the budget pays for.
+        d2k = None
+        if agent.depth2_auto:
+            d2k = depth2_children(
+                plan.budget_ms - plan.predicted_ms, classes, node_time(agent.cores, agent.form)
+            )
         wider: dict[int, tuple[list[SideAction], list[SideAction]]] = {}
-        wide = [agent.oracle] if agent.oracle is not None and plan.deepen_ms > 0 else []
+        wide = (
+            [agent.oracle]
+            if agent.oracle is not None and plan.deepen_ms > 0 and not agent.depth2_auto
+            else []
+        )
         ours, theirs = _menus(
             reg, pos, (plan.width, plan.width), agent.leaf, budget, agent.rank_by_leaf,
             None, spreads, rank_fill=agent.rank_fill,
@@ -1722,7 +1759,7 @@ class HumanGame:
             )
         cells = 0
         cost: Any = None
-        if plan.deepen_ms > 0:
+        if plan.deepen_ms > 0 and not agent.depth2_auto:
             if agent.clock == "wall":
                 cost = WallCost(started)
                 cells = int(round(plan.budget_ms))
@@ -1750,9 +1787,10 @@ class HumanGame:
         try:
             solved = solve_move(
                 reg, pos, me, ours, theirs, spreads, agent.leaf, budget=budget, exact=exact,
-                cells=cells, cost=cost, levels=agent.max_levels, child_q=agent.child_q,
+                cells=cells, cost=cost, levels=agent.max_levels,
+                child_q=d2k if d2k is not None else agent.child_q,
                 sub_limit=agent.sub_limit, sub_branches=agent.sub_branches,
-                restricted=agent.restricted, depth=agent.depth,
+                restricted=agent.restricted, depth=2 if d2k is not None else agent.depth,
                 refine=agent.refine, passes=agent.passes,
                 outside=outside, progress=progress, grow=grow,
             )
@@ -1816,6 +1854,7 @@ class HumanGame:
             "nodeCells": len(ours) * len(theirs) * max(classes, 1),
             "predictedMs": round(plan.predicted_ms, 3),
             "deepenBudget": cells,
+            **({"depth2Children": d2k} if agent.depth2_auto else {}),
             **({"widenTo": later, "widened": grow is not None and grow.done}
                if later is not None else {}),
             # The budget's reading when the move stopped, in its units (the wall clock's

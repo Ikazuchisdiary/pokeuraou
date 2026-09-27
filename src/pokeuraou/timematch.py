@@ -97,6 +97,8 @@ class Condition:
     depth: int = 1
     refine: int | None = None
     passes: int | None = None
+    #: The width rule, then a fixed depth-2 read as the budget allows (IKA-362).
+    depth2_auto: bool = False
 
     @property
     def price_cores(self) -> int:
@@ -126,6 +128,7 @@ class Condition:
             + (f", depth {self.depth} fixed" if self.depth > 1 else "")
             + (f", rectangle {self.refine}" if self.refine is not None else "")
             + (f", {self.passes} passes" if self.passes is not None else "")
+            + (", depth 2 as the budget allows" if self.depth2_auto else "")
             + (f", child Q {self.child_q}" if self.child_q is not None else "")
         )
 
@@ -139,7 +142,7 @@ class Condition:
 #: The keys a condition is written with, and what each one parses.
 CONDITION_KEYS = ("seconds", "threads", "cores", "clock", "oracle", "levels", "width_only",
                   "width", "child_q", "knockouts", "sub_limit", "sub_branches", "restricted",
-                  "depth", "refine", "passes")
+                  "depth", "refine", "passes", "depth2_auto")
 
 
 def _oracle(spec: str) -> int | None:
@@ -395,6 +398,7 @@ class Match:
             knockouts=condition.knockouts, sub_limit=condition.sub_limit,
             sub_branches=condition.sub_branches, restricted=condition.restricted,
             depth=condition.depth, refine=condition.refine, passes=condition.passes,
+            depth2_auto=condition.depth2_auto,
             max_levels=condition.max_levels,
             child_q=condition.child_q, oracle=condition.oracle, halt=self.halt,
             # Off, as a person's game plays by default (the module's docstring).
