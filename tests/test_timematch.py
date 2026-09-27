@@ -239,3 +239,54 @@ def test_a_fixed_width_replaces_the_rule(pool) -> None:  # noqa: ANN001
 
     assert plan_move(0.1, 1, 40, 40, 3).width < 36
     assert plan_move(0.1, 1, 40, 40, 3, width=36).width == 36
+
+
+def test_the_restricted_reading_deepens_the_rectangle(pool) -> None:  # noqa: ANN001
+    """IKA-362: ``restricted`` reads the deepened root as IKA-68's ``r`` -- on the Bayesian
+    root too -- and plays; the count clock replays it."""
+    r = _cond("r", 0.4, restricted=True)
+    m = _cond("m", 0.4)
+    teams = (pool.teams[0], pool.teams[1])
+    first = timematch.play_pair(_match(pool, r, m, turns=4), 3, teams)
+    again = timematch.play_pair(_match(pool, r, m, turns=4), 3, teams)
+    assert json.dumps(_timeless(first)) == json.dumps(_timeless(again))
+    rows = [row for ln in first for row in ln["moves"] if row["condition"] == "r"]
+    deep = [row for row in rows if (row.get("deepened") or {}).get("expanded")]
+    assert deep, "no restricted move deepened"
+    hidden = [row for row in deep if row["classes"] > 1]
+    assert hidden, "no Bayesian root was read restricted"
+    # Nothing probed by the swap oracle: the restricted reading asks the matrices itself.
+    assert all("probed" not in (row.get("deepened") or {}) for row in rows)
+
+
+def test_the_port_threads_leave_a_node_time_pair_as_it_was(pool, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-362's `--port-threads`: more cell threads in the port, the same games."""
+    a, b = _cond("a", 0.3), _cond("b", 0.2)
+    teams = (pool.teams[0], pool.teams[1])
+    one = timematch.play_pair(_match(pool, a, b), 4, teams)
+    monkeypatch.setattr(timematch, "PORT_THREADS", 3)
+    three = timematch.play_pair(_match(pool, a, b), 4, teams)
+    from pokeuraou import rustnode
+
+    assert rustnode.port_threads() == 3
+    assert json.dumps(_timeless(three)) == json.dumps(_timeless(one))
+    monkeypatch.setattr(timematch, "PORT_THREADS", None)
+    timematch.spread_threads(pool.reg, 1)
+
+
+def test_a_fixed_depth_two_read_plays_and_replays(pool) -> None:  # noqa: ANN001
+    """IKA-362's D: ``depth=2`` with ``width_only`` reads the support rectangle a ply
+    deeper on both kinds of root; the count clock replays it, and it plays another game
+    than the depth-1 agent at the same width (the read reached the answer)."""
+    d = _cond("d", 0.3, width_only=True, depth=2)
+    flat = _cond("flat", 0.3, width_only=True)
+    teams = (pool.teams[0], pool.teams[1])
+    first = timematch.play_pair(_match(pool, d, flat, turns=4), 5, teams)
+    again = timematch.play_pair(_match(pool, d, flat, turns=4), 5, teams)
+    assert json.dumps(_timeless(first)) == json.dumps(_timeless(again))
+    same = timematch.play_pair(_match(pool, flat, _cond("flat2", 0.3, width_only=True), turns=4), 5,
+                               teams)
+    assert json.dumps(_timeless([ln["moves"] for ln in first])) != json.dumps(
+        _timeless([ln["moves"] for ln in same])) or [ln["outcome"] for ln in first] != [
+        ln["outcome"] for ln in same]
+    assert parse_condition("d:seconds=3,clock=count,width_only=on,depth=2").depth == 2

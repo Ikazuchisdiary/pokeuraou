@@ -674,20 +674,21 @@ RANK_VIEWS = ("heaviest", "first")
 
 
 def _belief_deepen(
-    cells: int, how: dict[str, bool], outside: tuple | None
+    cells: int, how: dict[str, bool], outside: tuple | None, restricted: bool = False
 ) -> dict[str, Any]:
     """`belief_solve`'s ``deepen`` entry for one side (IKA-294): its cells, reading,
     swap, Q-narrowed probe (IKA-322) and oracle candidates (side 0's, side 1's), as
     `search` takes them."""
     return {
         "cells": cells,
-        "reading": "breadth" if how["breadth_only"] else "mixed",
+        "reading": "breadth" if how["breadth_only"] else "restricted" if restricted else "mixed",
         "swap": how["swap"],
         "q_probe": how["q_probe"],
         "levels": how["levels"],
         "child_q": how["child_q"],
         "discount": how["discount"],
         "outside": outside,
+        **({"sub_limit": how["sub_limit"]} if "sub_limit" in how else {}),
     }
 
 
@@ -1129,6 +1130,8 @@ def play_game(
             "levels": spec.levels, "child_q": spec.child_q,
             # The depth discount (d<P>), IKA-342.
             "discount": spec.discount,
+            # The children's width by damage (w<k>), IKA-362; the search's own otherwise.
+            **({"sub_limit": spec.sub_limit} if spec.sub_limit is not None else {}),
         }
         for spec in specs
     ]
@@ -1389,6 +1392,7 @@ def play_game(
                             side: _belief_deepen(
                                 cells[side], how[side],
                                 own_wider.get(oracles[side]) if widens[side] else None,
+                                deep_restricted[side],
                             )
                             for side in asked
                             if hidden_deep[side]
@@ -1491,6 +1495,7 @@ def play_game(
                                 {1: _belief_deepen(
                                     cells[1], how[1],
                                     foe_wider.get(oracles[1]) if widens[1] else None,
+                                    deep_restricted[1],
                                 )}
                                 if hidden_deep[1]
                                 else None

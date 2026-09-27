@@ -139,6 +139,7 @@ the time on.
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -459,7 +460,9 @@ def search(
         raise ValueError("deepen is a budget on top of the depth-1 full-matrix search")
     if (
         outside is not None or deepen_cost is not None or swap or breadth_only
-        or q_probe is not None or levels is not None or child_q is not None
+        or q_probe is not None or levels is not None
+        # The children's menus by a Q go with depth 2 as well (IKA-362).
+        or (child_q is not None and depth < 2)
         or discount is not None or grow is not None
     ) and not deepen:
         raise ValueError(
@@ -532,6 +535,7 @@ def search(
                 passes=passes,
                 sub_limit=sub_limit,
                 sub_branches=sub_branches,
+                child_q=child_q,
             )
 
     #: (i, j) -> the depth-2 value, so a cell is never refined twice across passes.
@@ -553,6 +557,7 @@ def search(
             budget=budget,
             sub_limit=sub_limit,
             sub_branches=sub_branches,
+            child_q=child_q,
         )
         for (i, j), (value, notes, solved) in zip(fresh, found, strict=True):
             subgames += solved
@@ -604,6 +609,7 @@ def _restricted_search(
     passes: int,
     sub_limit: int,
     sub_branches: int,
+    child_q: int | None = None,
 ) -> SearchResult:
     """The double-oracle's own answer: the refined rectangle solved as the game it is.
 
@@ -660,6 +666,7 @@ def _restricted_search(
             budget=budget,
             sub_limit=sub_limit,
             sub_branches=sub_branches,
+            child_q=child_q,
         )
         for (i, j), (value, notes, solved) in zip(fresh, found, strict=True):
             subgames += solved
@@ -1072,6 +1079,7 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
     sub_limit: int,
     sub_branches: int,
     shares: Sequence[TurnShare | None] | None = None,
+    child_q: int | None = None,
 ) -> list[tuple[float | None, set[str], int]]:
     """`_refined_value` of every cell, with all their sub-games' leaves in one call (IKA-291).
 
@@ -1135,7 +1143,20 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
             if not pos.ended
             for side in (0, 1)
         ]
-        menus = iter(narrow_many(reg, asks, limit=sub_limit) if asks else [])
+        if child_q is None:
+            menus = iter(narrow_many(reg, asks, limit=sub_limit) if asks else [])
+        else:
+            # IKA-362: each child's menus by the Q's `child_q` best (`deepen._q_menus`), every
+            # child of the read in one forward pass; the same order as `asks`.
+            from .deepen import _q_menus
+
+            live = [pos for pos, side in asks if side == 0]
+            if os.environ.get(CHILD_Q_SERIAL_ENV) == "1":
+                # One forward pass a child, for the check that batching changes nothing.
+                by_q = [m for pos in live for m in _q_menus(reg, [pos], child_q)]
+            else:
+                by_q = _q_menus(reg, live, child_q) if live else []
+            menus = iter([_Listed(m[s]) for m in by_q for s in (0, 1)])
 
         # 3. Each cell's sub-games in `_refined_value`'s order, up to the first that stops it.
         to_fill: list[tuple[_Sub, Position, list[SideAction], list[SideAction]]] = []
@@ -1203,6 +1224,18 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
     score()
     with timing.region("d2.fold"):
         return [_fold_cell(cell) for cell in work]
+
+
+#: ``1`` asks the Q one child at a time in a depth-2 read (`_refine_cells`), for checking
+#: that the one forward pass per read changes no menu (IKA-362).
+CHILD_Q_SERIAL_ENV = "POKEURAOU_CHILD_Q_SERIAL"
+
+
+@dataclass(frozen=True, slots=True)
+class _Listed:
+    """A child's menu built by the Q (IKA-362), where `narrow_many` hands a `Narrowed`."""
+
+    actions: list[SideAction]
 
 
 def _fold_cell(cell: _Cell) -> tuple[float | None, set[str], int]:
@@ -1294,6 +1327,7 @@ def belief_solve(
     sub_branches: int = DEFAULT_SUB_BRANCHES,
     deepen: dict[int, dict[str, Any]] | None = None,
     progress: _deepen.Progress | None = None,
+    child_q: int | None = None,
 ) -> dict[int, BeliefResult]:
     """Both sides' answers, resolving each turn as few times as it has to be resolved.
 
@@ -1391,6 +1425,8 @@ def belief_solve(
         if side in deepen:
             how = dict(deepen[side])
             outside = how.pop("outside", None)
+            # A side's own children's width (a label's w<k>, IKA-362).
+            side_sub_limit = how.pop("sub_limit", sub_limit)
             if outside is not None and side == 1:
                 outside = (outside[1], outside[0])
             own, other = (row, col) if side == 0 else (col, row)
@@ -1399,7 +1435,7 @@ def belief_solve(
             with timing.region("deepen.hidden"):
                 got = _deepen.deepen_belief(
                     reg, side, position, own, other, items, weights, matrices, solved,
-                    evaluators[side], budget=budget, sub_limit=sub_limit,
+                    evaluators[side], budget=budget, sub_limit=side_sub_limit,
                     sub_branches=sub_branches, unmodelled=notes, outside=outside,
                     progress=progress, **how,
                 )
@@ -1421,7 +1457,7 @@ def belief_solve(
                 out[side] = _restricted_belief(
                     reg, side, row, col, items, matrices, weights, solved, evaluators[side],
                     out[side], memo, budget=budget, refine=refine, passes=passes,
-                    sub_limit=sub_limit, sub_branches=sub_branches,
+                    sub_limit=sub_limit, sub_branches=sub_branches, child_q=child_q,
                 )
         out[side].node_payoff = (row, col, built, weights)
     return out
@@ -1445,6 +1481,7 @@ def _restricted_belief(  # noqa: PLR0913 - one side's Bayesian node and the dept
     passes: int,
     sub_limit: int,
     sub_branches: int,
+    child_q: int | None = None,
 ) -> BeliefResult:
     """`_restricted_search` for a side that cannot see the other side's bench (IKA-111).
 
@@ -1520,6 +1557,7 @@ def _restricted_belief(  # noqa: PLR0913 - one side's Bayesian node and the dept
                 found = _refine_cells(
                     reg, list(asked.values()), evaluate, budget=budget,
                     sub_limit=sub_limit, sub_branches=sub_branches, shares=shares,
+                    child_q=child_q,
                 )
             for key, answer in zip(asked, found, strict=True):
                 memo[key] = answer

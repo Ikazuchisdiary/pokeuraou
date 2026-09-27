@@ -85,6 +85,20 @@ class Condition:
     #: is a board's ``d1@W``), or None: the rule.
     width: int | None = None
     child_q: int | None = None
+    #: Knock-outs forked in the move's turns (`humanplay.Agent.knockouts`, IKA-362).
+    knockouts: bool = False
+    #: The deepening's children's width and kept branches (`humanplay.Agent`, IKA-362).
+    sub_limit: int | None = None
+    sub_branches: int | None = None
+    #: The restricted reading of the deepened root (`humanplay.Agent.restricted`, IKA-362).
+    restricted: bool | str = False
+    #: A fixed depth-2 read (`humanplay.Agent.depth`, IKA-362's D), its rectangle's side
+    #: and passes.
+    depth: int = 1
+    refine: int | None = None
+    passes: int | None = None
+    #: The width rule, then a fixed depth-2 read as the budget allows (IKA-362).
+    depth2_auto: bool = False
 
     @property
     def price_cores(self) -> int:
@@ -106,6 +120,15 @@ class Condition:
             f"{'' if self.max_levels is not None else ' (unrecorded)'}"
             + (" , width only" if self.width_only else "")
             + (f", width fixed at {self.width}" if self.width is not None else "")
+            + (", knock-outs forked" if self.knockouts else "")
+            + (f", children {self.sub_limit} wide" if self.sub_limit is not None else "")
+            + (f", {self.sub_branches} branches kept" if self.sub_branches is not None else "")
+            + ((", open roots read restricted" if self.restricted == "open"
+                else ", root read restricted") if self.restricted else "")
+            + (f", depth {self.depth} fixed" if self.depth > 1 else "")
+            + (f", rectangle {self.refine}" if self.refine is not None else "")
+            + (f", {self.passes} passes" if self.passes is not None else "")
+            + (", depth 2 as the budget allows" if self.depth2_auto else "")
             + (f", child Q {self.child_q}" if self.child_q is not None else "")
         )
 
@@ -118,7 +141,8 @@ class Condition:
 
 #: The keys a condition is written with, and what each one parses.
 CONDITION_KEYS = ("seconds", "threads", "cores", "clock", "oracle", "levels", "width_only",
-                  "width", "child_q")
+                  "width", "child_q", "knockouts", "sub_limit", "sub_branches", "restricted",
+                  "depth", "refine", "passes", "depth2_auto")
 
 
 def _oracle(spec: str) -> int | None:
@@ -179,8 +203,10 @@ def parse_condition(spec: str) -> Condition:
             got["max_levels"] = int(value) or None
         elif key == "child_q":
             got["child_q"] = int(value)
-        elif key == "width":
-            got["width"] = int(value)
+        elif key in ("width", "sub_limit", "sub_branches", "depth", "refine", "passes"):
+            got[key] = int(value)
+        elif key == "restricted":
+            got[key] = "open" if value == "open" else _flag(value)
         else:
             got[key] = _flag(value)
     if "seconds" not in got:
@@ -196,12 +222,19 @@ def parse_condition(spec: str) -> Condition:
 # ----------------------------------------------------------------------------- threads
 
 
+#: The port's cell threads for every read, whatever the condition's threads (None: the
+#: condition's). A node-time run's games do not depend on them (IKA-343), so a run fills
+#: the machine's cores without more processes on the card (IKA-362, `--port-threads`).
+PORT_THREADS: int | None = None
+
+
 def spread_threads(reg: Any, threads: int) -> None:  # noqa: ANN401
     """`humanplay.use_threads` without starting or stopping the worker processes: the
     port's cell threads, the cells expanded ahead and the two LPs at once for ``threads``,
     with the worker processes already started for the process."""
-    if (rustnode.port_threads() or 1) != threads:
-        rustnode.set_port_threads(threads)
+    port = PORT_THREADS or threads
+    if (rustnode.port_threads() or 1) != port:
+        rustnode.set_port_threads(port)
     remote = deepen.workers(reg) > 0
     deepen.set_ahead(
         0 if threads == 1 else threads,
@@ -362,6 +395,10 @@ class Match:
             seconds=condition.seconds, cores=condition.price_cores, clock=condition.clock,
             rank_fill=self.rank_fill, rank_by_leaf=self.rank_by_leaf, bench_drop=self.bench_drop,
             width_only=condition.width_only, width=condition.width,
+            knockouts=condition.knockouts, sub_limit=condition.sub_limit,
+            sub_branches=condition.sub_branches, restricted=condition.restricted,
+            depth=condition.depth, refine=condition.refine, passes=condition.passes,
+            depth2_auto=condition.depth2_auto,
             max_levels=condition.max_levels,
             child_q=condition.child_q, oracle=condition.oracle, halt=self.halt,
             # Off, as a person's game plays by default (the module's docstring).

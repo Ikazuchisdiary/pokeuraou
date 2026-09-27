@@ -125,6 +125,10 @@ OWN_RESOLUTION = {
     "driver's own default runs (IKA-98)",
     "time_match.py": "play_human's agent in both seats: q-nocover by the default Q, and a "
     "match stops without it as a board does (IKA-333)",
+    "position_set.py": "a verification position set read by time-match conditions: the menus "
+    "are q-nocover by the Q it names (the default Q), the same for every reading (IKA-362)",
+    "child_menus.py": "measures child menus built by damage and by the Q it names (the "
+    "default Q); plays no game (IKA-362)",
 }
 
 
