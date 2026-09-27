@@ -976,19 +976,18 @@ def deepen_root(
     try:
         while meter.spent < cells:
             if grower is not None:
-                wanted = grower.ask(meter.spent)
-                if wanted is not None:
-                    with _held(helper):
-                        added = _grow_open(
-                            reg, root, wanted, evaluate, budget, meter, unmodelled, oracle,
-                            grower,
-                        )
-                    if added:
-                        if trace is not None:
-                            trace.append((root, None, "grow"))
-                        if announce is not None:
-                            announce("grow", expanded, deepest, refused)
-                        continue
+                # Under the helpers' lock: the grow may rank a menu with the leaf.
+                with _held(helper):
+                    wanted = grower.ask(meter.spent)
+                    added = 0 if wanted is None else _grow_open(
+                        reg, root, wanted, evaluate, budget, meter, unmodelled, oracle, grower,
+                    )
+                if added:
+                    if trace is not None:
+                        trace.append((root, None, "grow"))
+                    if announce is not None:
+                        announce("grow", expanded, deepest, refused)
+                    continue
             if oracle is not None:
                 # One step: the probe and what it leads to -- a widening, or else a deepening.
                 with _held(helper):
@@ -2022,16 +2021,17 @@ def deepen_belief(
     try:
         while meter.spent < cells:
             if grower is not None:
-                wanted = grower.ask(meter.spent)
-                if wanted is not None:
-                    with _held(helper):
-                        added = _grow_belief(root, wanted, fill, meter, oracle, grower)
-                    if added:
-                        if trace is not None:
-                            trace.append((root, None, "grow"))
-                        if announce is not None:
-                            announce("grow", expanded, deepest, refused)
-                        continue
+                with _held(helper):
+                    wanted = grower.ask(meter.spent)
+                    added = 0 if wanted is None else _grow_belief(
+                        root, wanted, fill, meter, oracle, grower
+                    )
+                if added:
+                    if trace is not None:
+                        trace.append((root, None, "grow"))
+                    if announce is not None:
+                        announce("grow", expanded, deepest, refused)
+                    continue
             if oracle is not None:
                 with _held(helper):
                     joined = oracle.step(meter)

@@ -137,6 +137,11 @@ def test_a_grow_midway_keeps_the_tree(roster) -> None:  # noqa: ANN001
             if step.kind != "grow":
                 seen["children"] = {c: list(b) for c, b in step.root.children.items()}
                 seen["payoff"] = step.root.payoff.copy()
+            else:
+                # The priorities are read again from the grown root, not a cache of the
+                # narrow one's.
+                seen["fresh"] = step.root.signal is None
+                seen["grown"] = step.grown
 
         grow = _once(150.0, big)
         got, trace = _root(reg, pos, *small, 600, grow=grow, progress=watch)
@@ -162,6 +167,7 @@ def test_a_grow_midway_keeps_the_tree(roster) -> None:  # noqa: ANN001
                     assert got.payoff[i, j] == fresh[i, j]
         assert got.equilibrium.value == solve(got.payoff).value
         assert got.report.grown == len(got.rows) + len(got.cols) - r0 - c0 > 0
+        assert seen["fresh"] and seen["grown"] == got.report.grown
         assert got.report.grown_cells == len(got.rows) * len(got.cols) - r0 * c0
         # Asked at the top of every step, with the budget's reading, never past it.
         assert grow.asked[0] == 0.0 and all(a < 600 for a in grow.asked)
@@ -243,10 +249,18 @@ def test_a_bayesian_root_grown_midway_keeps_its_tree(roster, side) -> None:  # n
     small = _menus(reg, pos, 3)
     big = _menus(reg, pos, 5)
     trace: list = []
+    fresh: list = []
+
+    def watch(step):  # noqa: ANN001, ANN202
+        if step.kind == "grow":
+            fresh.append(step.root.signal is None)
+
     got = belief_solve(
         reg, pos, *small, spreads, {0: LEAF, 1: LEAF}, budget=Budget.matrix(), sides=(side,),
         deepen={side: {"cells": 500, "trace": trace, "grow": _once(120.0, big)}},
+        progress=watch,
     )[side]
+    assert fresh == [True], "the grown root's priorities must be read afresh"
     root = trace[0]
     at = next(n for n, s in enumerate(trace) if n and s[2] == "grow")
     own0 = len(small[0] if side == 0 else small[1])
