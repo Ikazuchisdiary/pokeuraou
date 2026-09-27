@@ -75,6 +75,10 @@ pub struct Budget {
     /// Fold branches that reached the same state into one. Lossless, so it is on; see
     /// `Budget.merge_duplicates` in Python, which this mirrors field for field.
     pub merge_duplicates: bool,
+    /// IKA-359: under a pinned roll with crits collapsed, a single hit whose knock-out the
+    /// crit or the roll decides forks in two -- knocked out and not -- each weighted by its
+    /// share of the 2 x 16 (crit, roll) draws. `Budget.enumerate_knockouts` in Python.
+    pub enumerate_knockouts: bool,
 }
 
 impl Budget {
@@ -91,6 +95,7 @@ impl Budget {
             pinned_policy: false,
             max_branches: 16,
             merge_duplicates: true,
+            enumerate_knockouts: false,
         }
     }
 
@@ -112,6 +117,7 @@ impl Budget {
             // IKA-210's positive control never merges.
             merge_duplicates: !cfg!(feature = "ika210-control")
                 && value["mergeDuplicates"].as_bool().unwrap_or(true),
+            enumerate_knockouts: value["enumerateKnockouts"].as_bool().unwrap_or(false),
         }
     }
 
@@ -130,7 +136,7 @@ impl Budget {
             self.damage_rolls.clamp(1, 16) as usize
         };
         let mut factor = rolls;
-        if self.enumerate_crit {
+        if self.enumerate_crit || self.enumerate_knockouts {
             factor *= 2;
         }
         if self.enumerate_accuracy {
@@ -156,7 +162,10 @@ impl Budget {
                 break;
             }
             match field {
-                0 if narrowed.enumerate_crit => narrowed.enumerate_crit = false,
+                0 if narrowed.enumerate_crit || narrowed.enumerate_knockouts => {
+                    narrowed.enumerate_crit = false;
+                    narrowed.enumerate_knockouts = false;
+                }
                 1 if narrowed.enumerate_status_checks => {
                     narrowed.enumerate_status_checks = false
                 }
