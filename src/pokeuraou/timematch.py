@@ -207,12 +207,19 @@ def parse_condition(spec: str) -> Condition:
 # ----------------------------------------------------------------------------- threads
 
 
+#: The port's cell threads for every read, whatever the condition's threads (None: the
+#: condition's). A node-time run's games do not depend on them (IKA-343), so a run fills
+#: the machine's cores without more processes on the card (IKA-362, `--port-threads`).
+PORT_THREADS: int | None = None
+
+
 def spread_threads(reg: Any, threads: int) -> None:  # noqa: ANN401
     """`humanplay.use_threads` without starting or stopping the worker processes: the
     port's cell threads, the cells expanded ahead and the two LPs at once for ``threads``,
     with the worker processes already started for the process."""
-    if (rustnode.port_threads() or 1) != threads:
-        rustnode.set_port_threads(threads)
+    port = PORT_THREADS or threads
+    if (rustnode.port_threads() or 1) != port:
+        rustnode.set_port_threads(port)
     remote = deepen.workers(reg) > 0
     deepen.set_ahead(
         0 if threads == 1 else threads,

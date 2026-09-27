@@ -96,6 +96,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     "process whose pair had one fails, and the run stops: that move was not the "
                     "condition's)")
     ap.add_argument("--poll", type=float, default=15.0, help="seconds between the SPRT's looks")
+    ap.add_argument("--port-threads", type=int, default=None,
+                    help="the port's cell threads in every read, whatever the conditions' threads "
+                    "(node-time runs only: their games do not depend on it; IKA-362)")
     ap.add_argument("--resume", action="store_true",
                     help="play more pairs in a run's --out: the same settings (bar the pairs, the "
                     "processes and the checkout's head), the SPRT going on from the pairs in, in "
@@ -108,6 +111,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def conditions(args: argparse.Namespace) -> tuple[timematch.Condition, timematch.Condition]:
+    if args.port_threads is not None and "wall" in (
+        timematch.parse_condition(spec).clock for spec in args.arm
+    ):
+        raise SystemExit("--port-threads is for node-time conditions: on the wall clock it is the agent")
     if len(args.arm) != 2:
         raise SystemExit(f"--arm twice: the tested condition, then the other ({len(args.arm)} given)")
     try:
@@ -223,6 +230,7 @@ def worker(args: argparse.Namespace) -> None:
     q = qrank.LocalQ(q_path, encoder, device=device)
     qrank.install(q)
     threads = max(tested.threads, other.threads)
+    timematch.PORT_THREADS = args.port_threads
     humanplay.use_threads(
         threads, reg,
         ([str(v) for v in values], str(device), args.leaf_graphs == "on", args.cuda_memory_gb),
@@ -246,6 +254,7 @@ def worker(args: argparse.Namespace) -> None:
         f"  leaf {match.leaf_name} ({', '.join(str(v) for v in values)}) on {device}, "
         f"menus {Q_FILL} ({', '.join(q.describe())}), bench drop {args.bench_drop}\n"
         f"  deepening workers {started_workers}, threads {threads}, "
+        f"port threads {args.port_threads or threads}, "
         f"CUDA cap {args.cuda_memory_gb} GB, seed {args.seed}, max turns {args.max_turns}",
         file=sys.stderr, flush=True,
     )

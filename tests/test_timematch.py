@@ -257,3 +257,18 @@ def test_the_restricted_reading_deepens_the_rectangle(pool) -> None:  # noqa: AN
     assert hidden, "no Bayesian root was read restricted"
     # Nothing probed by the swap oracle: the restricted reading asks the matrices itself.
     assert all("probed" not in (row.get("deepened") or {}) for row in rows)
+
+
+def test_the_port_threads_leave_a_node_time_pair_as_it_was(pool, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-362's `--port-threads`: more cell threads in the port, the same games."""
+    a, b = _cond("a", 0.3), _cond("b", 0.2)
+    teams = (pool.teams[0], pool.teams[1])
+    one = timematch.play_pair(_match(pool, a, b), 4, teams)
+    monkeypatch.setattr(timematch, "PORT_THREADS", 3)
+    three = timematch.play_pair(_match(pool, a, b), 4, teams)
+    from pokeuraou import rustnode
+
+    assert rustnode.port_threads() == 3
+    assert json.dumps(_timeless(three)) == json.dumps(_timeless(one))
+    monkeypatch.setattr(timematch, "PORT_THREADS", None)
+    timematch.spread_threads(pool.reg, 1)
