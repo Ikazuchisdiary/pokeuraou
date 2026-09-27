@@ -371,3 +371,38 @@ def test_the_oracle_game_is_the_same_at_any_thread_count(pool) -> None:  # noqa:
     assert after["expanded"] > before["expanded"]
     moves = [d for d in one["decisions"] if d["kind"] == "move" and d.get("deepened")]
     assert any("probed" in (d["deepened"][0] or d["deepened"][1] or {}) for d in moves)
+
+
+def test_an_agent_that_widens_mid_read_keeps_to_its_clock(pool) -> None:  # noqa: ANN001
+    """IKA-354: narrow first (the width rule at a smaller share), widened to the rule's width
+    once the deepening has spent its share; the same game at any thread count."""
+    from pokeuraou.deepen import ALL_ACTIONS
+
+    with pytest.raises(ValueError, match="widen"):
+        _agent(pool, widen=(0.9, 0.3))
+    with pytest.raises(ValueError, match="widen"):
+        _agent(pool, widen=(0.05, 1.0))
+    agent = _agent(pool, widen=(0.05, 0.3), oracle=ALL_ACTIONS)
+    one, clock, _ = _play(pool, PolicyPerson("random", 9), seed=9, agent=agent)
+    again, _, _ = _play(pool, PolicyPerson("random", 9), seed=9, agent=agent)
+    try:
+        humanplay.use_threads(3, pool.reg)
+        three, _, _ = _play(pool, PolicyPerson("random", 9), seed=9, agent=agent)
+    finally:
+        humanplay.use_threads(1, pool.reg)
+    for other in (again, three):
+        assert json.dumps(other, ensure_ascii=False) == json.dumps(one, ensure_ascii=False)
+    rows = [row for row in clock["decisions"] if row["kind"] == "move"]
+    widened = [row for row in rows if row.get("widened")]
+    # The positive control: moves were read narrow and widened, and said so.
+    assert widened, "no move widened; the road was not taken"
+    for row in widened:
+        assert row["widenTo"] > row["width"]
+        assert row["deepened"]["grown"] > 0 and row["deepened"]["grownCells"] > 0
+    moves = [d for d in one["decisions"] if d["kind"] == "move" and d.get("plan", {}).get("widenTo")]
+    assert moves and all(d["plan"]["widenTo"] > d["plan"]["width"] for d in moves)
+    # Without it, the plan is the rule's own and nothing says widen.
+    plain, plain_clock, _ = _play(pool, PolicyPerson("random", 9), seed=9,
+                                  agent=_agent(pool, oracle=ALL_ACTIONS))
+    assert not any("widenTo" in row for row in plain_clock["decisions"])
+    assert json.dumps(plain, ensure_ascii=False) != json.dumps(one, ensure_ascii=False)
