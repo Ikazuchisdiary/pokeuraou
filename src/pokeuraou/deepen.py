@@ -315,7 +315,7 @@ ALL_ACTIONS = 1 << 30
 
 _DEEPEN = re.compile(
     r"none|([mrb])([1-9][0-9]*)(?:([os])([1-9][0-9]*|all|q[1-9][0-9]*))?(h)?"
-    r"(?:c([1-9][0-9]*))?(?:g([1-9][0-9]*))?(?:d([1-9][0-9]?))?"
+    r"(?:c([1-9][0-9]*))?(?:w([1-9][0-9]*))?(?:g([1-9][0-9]*))?(?:d([1-9][0-9]?))?"
 )
 
 
@@ -347,6 +347,9 @@ class DeepenSpec:
     #: priority times the branch's weight times P / 100, so a cell k plies down is worth
     #: (P / 100)^k of what it would be without. None: no discount.
     discount: float | None = None
+    #: Each side's menu width in a refined cell's children by `narrow`'s damage order
+    #: (``w<k>``, IKA-362), or None: the search's `sub_limit` (8).
+    sub_limit: int | None = None
 
 
 def deepen_spec(label: str) -> DeepenSpec:
@@ -366,9 +369,13 @@ def deepen_spec(label: str) -> DeepenSpec:
     letter, kind, oracle = got.group(1), got.group(3), got.group(4)
     hidden = got.group(5) is not None
     child_q = None if got.group(6) is None else int(got.group(6))
-    levels = None if got.group(7) is None else int(got.group(7))
-    discount = None if got.group(8) is None else int(got.group(8)) / 100.0
-    if letter == "b" and (child_q is not None or levels is not None or discount is not None):
+    sub_limit = None if got.group(7) is None else int(got.group(7))
+    levels = None if got.group(8) is None else int(got.group(8))
+    discount = None if got.group(9) is None else int(got.group(9)) / 100.0
+    if child_q is not None and sub_limit is not None:
+        raise ValueError(f"deepen {label!r}: the children's menus by a Q (c) or by damage (w)")
+    if letter == "b" and (child_q is not None or levels is not None or discount is not None
+                          or sub_limit is not None):
         raise ValueError(
             f"deepen {label!r}: breadth only (b) refines no cell, so it has no children's "
             "menus (c), no depth guard (g) and no depth discount (d)"
@@ -377,11 +384,6 @@ def deepen_spec(label: str) -> DeepenSpec:
         raise ValueError(
             f"deepen {label!r}: the root's double oracle goes with the whole-matrix reading "
             "(m); the restricted one (r) already grows its rectangle by its own oracle"
-        )
-    if hidden and letter == "r":
-        raise ValueError(
-            f"deepen {label!r}: a hidden bench's restricted reading is depth 2 "
-            "(`--depth 2 --solve-restricted`, IKA-111); h goes with m and b"
         )
     if oracle is None and letter == "b":
         raise ValueError(
@@ -399,7 +401,7 @@ def deepen_spec(label: str) -> DeepenSpec:
         width = int(oracle)
     return DeepenSpec(
         READINGS[letter], int(got.group(2)), width, kind == "s", hidden, q_probe,
-        child_q, levels, discount,
+        child_q, levels, discount, sub_limit,
     )
 
 

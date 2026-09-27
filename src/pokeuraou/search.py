@@ -1391,6 +1391,8 @@ def belief_solve(
         if side in deepen:
             how = dict(deepen[side])
             outside = how.pop("outside", None)
+            # A side's own children's width (a label's w<k>, IKA-362).
+            side_sub_limit = how.pop("sub_limit", sub_limit)
             if outside is not None and side == 1:
                 outside = (outside[1], outside[0])
             own, other = (row, col) if side == 0 else (col, row)
@@ -1399,7 +1401,7 @@ def belief_solve(
             with timing.region("deepen.hidden"):
                 got = _deepen.deepen_belief(
                     reg, side, position, own, other, items, weights, matrices, solved,
-                    evaluators[side], budget=budget, sub_limit=sub_limit,
+                    evaluators[side], budget=budget, sub_limit=side_sub_limit,
                     sub_branches=sub_branches, unmodelled=notes, outside=outside,
                     progress=progress, **how,
                 )

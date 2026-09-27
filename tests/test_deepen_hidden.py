@@ -62,7 +62,10 @@ def test_the_hidden_label_parses_and_goes_with_m_and_b() -> None:
     )
     assert not deepen_mod.deepen_spec("m100sall").hidden
     assert deepen_mod.parse_deepen("m100sallh") == ("mixed", 100)
-    for bad in ("r60h", "b60h", "m60hh", "h", "noneh", "m60oallx"):
+    # IKA-362: the restricted reading on the Bayesian root too, and the children by damage.
+    assert deepen_mod.deepen_spec("r60h") == deepen_mod.DeepenSpec("restricted", 60, hidden=True)
+    assert deepen_mod.deepen_spec("r60hw16g3").sub_limit == 16
+    for bad in ("b60h", "m60hh", "h", "noneh", "m60oallx", "m60hc6w16", "b60s24w16"):
         with pytest.raises(ValueError):
             deepen_mod.deepen_spec(bad)
 
