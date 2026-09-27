@@ -1195,6 +1195,11 @@ class Agent:
     #: budget pays for at `node_time`'s price (`depth2_children`); none fits: the width alone
     #: (IKA-362).
     depth2_auto: bool = False
+    #: With ``depth2_auto``: where either side has more legal actions than the widest of
+    #: `WIDTHS` (the opening), the root is every legal action of both sides when that node
+    #: is predicted within the whole budget, and the depth-2 read gets what it leaves
+    #: (IKA-366). Elsewhere the width rule's menus, as without it.
+    root_all: bool = False
     #: Read on while the person chooses (IKA-344, `PonderCost`): the person is asked when
     #: the move starts, and the move deepens until they have chosen -- its budget first,
     #: `ponder_seconds` at most. False: the agent chooses first, then the person is asked.
@@ -1211,6 +1216,8 @@ class Agent:
                     f"widen is (share, at) with 0 < share <= {WIDTH_SHARE} and 0 <= at < 1, "
                     f"not {self.widen!r}"
                 )
+        if self.root_all and not self.depth2_auto:
+            raise ValueError("root_all widens depth2_auto's root; it needs depth2_auto (IKA-366)")
         if self.clock == "count" and not self.width_only and (self.form, self.cores) not in COSTS:
             raise ValueError(
                 f"the count clock spends the budget at measured prices, and there are none "
@@ -1724,9 +1731,20 @@ class HumanGame:
         # IKA-362: a fixed depth-2 read in place of the deepening, its children as wide as
         # the rest of the budget pays for.
         d2k = None
+        # IKA-366: the opening's root at every legal action, when it fits the budget.
+        limits = (plan.width, plan.width)
+        node_ms = plan.predicted_ms
+        root_all = False
+        if agent.root_all and max(counts[0], counts[1]) > WIDTHS[-1]:
+            wide_ms = node_time(agent.cores, agent.form).ms(
+                counts[0] * counts[1] * max(classes, 1)
+            )
+            if wide_ms <= plan.budget_ms:
+                limits = (counts[0], counts[1]) if me == 0 else (counts[1], counts[0])
+                node_ms, root_all = wide_ms, True
         if agent.depth2_auto:
             d2k = depth2_children(
-                plan.budget_ms - plan.predicted_ms, classes, node_time(agent.cores, agent.form)
+                plan.budget_ms - node_ms, classes, node_time(agent.cores, agent.form)
             )
         wider: dict[int, tuple[list[SideAction], list[SideAction]]] = {}
         wide = (
@@ -1735,7 +1753,7 @@ class HumanGame:
             else []
         )
         ours, theirs = _menus(
-            reg, pos, (plan.width, plan.width), agent.leaf, budget, agent.rank_by_leaf,
+            reg, pos, limits, agent.leaf, budget, agent.rank_by_leaf,
             None, spreads, rank_fill=agent.rank_fill,
             wide=[*wide, *([later] if later is not None else [])], wider=wider,
         )
@@ -1855,6 +1873,9 @@ class HumanGame:
             "predictedMs": round(plan.predicted_ms, 3),
             "deepenBudget": cells,
             **({"depth2Children": d2k} if agent.depth2_auto else {}),
+            **({"rootAll": True} if root_all else {}),
+            # The read's value in side 0's units (IKA-366: the turns' share of a result).
+            "value0": round(float(value), 5),
             **({"widenTo": later, "widened": grow is not None and grow.done}
                if later is not None else {}),
             # The budget's reading when the move stopped, in its units (the wall clock's

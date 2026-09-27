@@ -99,6 +99,9 @@ class Condition:
     passes: int | None = None
     #: The width rule, then a fixed depth-2 read as the budget allows (IKA-362).
     depth2_auto: bool = False
+    #: depth2_auto's root at every legal action in the opening (`humanplay.Agent.root_all`,
+    #: IKA-366).
+    root_all: bool = False
 
     @property
     def price_cores(self) -> int:
@@ -129,6 +132,7 @@ class Condition:
             + (f", rectangle {self.refine}" if self.refine is not None else "")
             + (f", {self.passes} passes" if self.passes is not None else "")
             + (", depth 2 as the budget allows" if self.depth2_auto else "")
+            + (", the opening's root at every legal action" if self.root_all else "")
             + (f", child Q {self.child_q}" if self.child_q is not None else "")
         )
 
@@ -142,7 +146,7 @@ class Condition:
 #: The keys a condition is written with, and what each one parses.
 CONDITION_KEYS = ("seconds", "threads", "cores", "clock", "oracle", "levels", "width_only",
                   "width", "child_q", "knockouts", "sub_limit", "sub_branches", "restricted",
-                  "depth", "refine", "passes", "depth2_auto")
+                  "depth", "refine", "passes", "depth2_auto", "root_all")
 
 
 def _oracle(spec: str) -> int | None:
@@ -398,7 +402,7 @@ class Match:
             knockouts=condition.knockouts, sub_limit=condition.sub_limit,
             sub_branches=condition.sub_branches, restricted=condition.restricted,
             depth=condition.depth, refine=condition.refine, passes=condition.passes,
-            depth2_auto=condition.depth2_auto,
+            depth2_auto=condition.depth2_auto, root_all=condition.root_all,
             max_levels=condition.max_levels,
             child_q=condition.child_q, oracle=condition.oracle, halt=self.halt,
             # Off, as a person's game plays by default (the module's docstring).
