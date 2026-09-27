@@ -245,6 +245,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--sprite-url", default=None,
                     help="the page's images, {id} = Showdown's sprite id (default: Showdown's server; "
                     "\"\" for none, name cards)")
+    ap.add_argument("--analysis-url", default=None,
+                    help="the analysis page's address, for the page's links to it (default: the "
+                    "launcher's port 8337 on the same host)")
     ap.add_argument("--interval-ms", type=float, default=100.0,
                     help="the least time between two steps sent while the agent thinks")
     ap.add_argument("--current-out", type=Path, default=None,
@@ -332,6 +335,7 @@ def main(argv: list[str] | None = None) -> None:
         server = liveview.LiveServer(
             args.view_host, args.view_port if args.view else 0, sink=sink,
             sprite_url=args.sprite_url,
+            links={"analysis-url": args.analysis_url} if args.analysis_url else None,
         ).start()
         if args.view:
             print(f"画面: {server.url}", file=sys.stderr)
@@ -340,6 +344,9 @@ def main(argv: list[str] | None = None) -> None:
     person = _person(args.person, reg, loc, args.seed, server)
     for n in range(args.games):
         index = args.game_index + n
+        if server is not None:
+            # The page's end card says whether another game follows (IKA-349).
+            server.listener("session", {"game": n, "games": args.games, "gamesLeft": args.games - n - 1})
         if args.human_team_file or args.agent_team_file:
             if not (args.human_team_file and args.agent_team_file):
                 raise SystemExit("give both --human-team-file and --agent-team-file")

@@ -600,6 +600,7 @@ class LiveServer:
         sprite_url: str | None = None,
         on_command: Callable[[dict[str, Any]], None] | None = None,
         keep_steps: int | None = None,
+        links: dict[str, str] | None = None,
     ) -> None:
         self.wire = Wire()
         #: Called (on the socket's thread) with each ``{"cmd": ...}`` a page sends: the
@@ -617,6 +618,10 @@ class LiveServer:
         #: the page's ``sprite-url`` meta. None keeps the page's (`SPRITE_URL`, Showdown's
         #: server: the browser asks it, nothing is stored); "" is no images, name cards.
         self.sprite_url = sprite_url
+        #: The other page's address (IKA-349), written into the page's meta: ``game-url`` on
+        #: the analysis page, ``analysis-url`` on the game page. Absent: the page guesses the
+        #: launcher's ports on the same host.
+        self.links = dict(links or {})
         self.inbox: queue.Queue[str] = queue.Queue()
         self.lock = threading.Lock()
         self.clients: list[tuple[socket.socket, threading.Lock]] = []
@@ -636,6 +641,12 @@ class LiveServer:
                 found = FILES.get(self.path.split("?", 1)[0])
                 if found is not None:
                     body = (server.web / found[0]).read_bytes()
+                    if found[0] == "live.html" and server.links:
+                        extra = "".join(
+                            f'<meta name="{html.escape(k)}" content="{html.escape(v)}">'
+                            for k, v in server.links.items()
+                        ).encode("utf-8")
+                        body = body.replace(b"</head>", extra + b"\n</head>", 1)
                     if found[0] == "live.html" and server.sprite_url is not None:
                         body = re.sub(
                             rb'<meta name="sprite-url" content="[^"]*">',

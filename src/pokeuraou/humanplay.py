@@ -284,10 +284,13 @@ class HaltingCost:
         return units if inner is None else inner(units, work)
 
     def __getattr__(self, name: str) -> Any:  # noqa: ANN401
-        # Any other price the meter asks for is the inner reading's.
-        if name == "inner":
+        """Every other price is ``inner``'s: `deepen._Meter` reads a `deepen.Cost`'s
+        ``level`` and ``root`` (IKA-342) beside `ms`, and a wrapped count clock must charge
+        them as the bare one does (a `WallCost` has neither, and reads as before)."""
+        inner = self.__dict__.get("inner")
+        if inner is None or name.startswith("__"):
             raise AttributeError(name)
-        return getattr(self.inner, name)
+        return getattr(inner, name)
 
 
 class PonderCost:
@@ -377,9 +380,11 @@ class PonderCost:
         return units
 
     def __getattr__(self, name: str) -> Any:  # noqa: ANN401
-        if name == "inner":
+        # Every other price is ``inner``'s (as `HaltingCost`).
+        inner = self.__dict__.get("inner")
+        if inner is None or name.startswith("__"):
             raise AttributeError(name)
-        return getattr(self.inner, name)
+        return getattr(inner, name)
 
 
 class Tally:
@@ -402,9 +407,11 @@ class Tally:
         return units if inner is None else inner(units, work)
 
     def __getattr__(self, name: str) -> Any:  # noqa: ANN401
-        if name == "inner":
+        # Every other price is ``inner``'s (as `HaltingCost`).
+        inner = self.__dict__.get("inner")
+        if inner is None or name.startswith("__"):
             raise AttributeError(name)
-        return getattr(self.inner, name)
+        return getattr(inner, name)
 
 
 def _find(cost: Any, kind: type) -> Any:  # noqa: ANN401
@@ -430,9 +437,14 @@ CLOCKS = ("wall", "count")
 #: turns) it asks nothing; it matters where the legal list is longer than the width.
 PLAY_ORACLE = ALL_ACTIONS
 
-#: The deepening's depth guard for a person's game: None is `deepen.MAX_LEVELS` (8). IKA-342
-#: measures the guard; its answer replaces this one line.
-PLAY_MAX_LEVELS: int | None = None
+#: The deepening's depth guard for a person's game and the analysis mode (None would be
+#: `deepen.MAX_LEVELS`, 8, which generation and the board keep). IKA-342: 16. On 16 recorded
+#: M-C positions read for 7.5 to 60 s of the count clock, the answer at guard 16 lost less
+#: than guard 8's in the game of a long guard-32 read (15 s -0.003, 30 s -0.007 in 11 of 16,
+#: 60 s -0.011), and sat nearer the long guard-8 read than guard 32 did: the middle of two
+#: references that disagree. A read-only comparison with two references and no truth; the
+#: board at equal time waits for IKA-333's tools.
+PLAY_MAX_LEVELS: int | None = 16
 
 #: Threads a move spreads over (IKA-32 stage 2: the port's cells, three worker processes
 #: expanding the deepening's cells ahead, a big game's two LPs at once, the leaf's CUDA
@@ -1180,11 +1192,13 @@ def solve_move(
     child_q: int | None = None,
     outside: tuple[list[SideAction], list[SideAction]] | None = None,
     progress: Callable[[Any], None] | None = None,
+    discount: float | None = None,
 ) -> SolvedMove:
     """Side ``me``'s answer on the menus ``ours`` (side 0's) x ``theirs`` (side 1's): the
     open game (`search`) when ``exact``, else its Bayesian game over the other side's
     completions in ``spreads`` (`belief_solve`, only ``me`` solved). ``cells`` > 0 deepens
-    best first, the budget read by ``cost``; ``outside`` adds the root's swap oracle.
+    best first, the budget read by ``cost``; ``outside`` adds the root's swap oracle;
+    ``levels`` and ``discount`` are the depth guard and the depth discount (IKA-342).
     What `HumanGame` asks at each move, and what the analysis mode asks with no budget
     (IKA-337). Raises `EquilibriumError` as the solves do."""
     you = 1 - me
@@ -1194,7 +1208,7 @@ def solve_move(
             **(
                 {"deepen": cells, "deepen_cost": cost, "levels": levels,
                  "child_q": child_q, "outside": outside,
-                 "swap": outside is not None}
+                 "swap": outside is not None, "discount": discount}
                 if cells else {}
             ),
             progress=progress,
@@ -1213,7 +1227,7 @@ def solve_move(
         deepen=(
             {me: {"cells": cells, "reading": "mixed", "swap": outside is not None,
                   "outside": outside, "cost": cost, "levels": levels,
-                  "child_q": child_q}}
+                  "child_q": child_q, "discount": discount}}
             if cells else None
         ),
         progress=progress,
