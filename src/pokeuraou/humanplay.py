@@ -1167,6 +1167,10 @@ class Agent:
     #: deeper, its children's matrices whole, whatever the clock says -- with
     #: ``width_only`` it is the whole move. 1: none.
     depth: int = 1
+    #: The depth-2 read's rectangle: each side's heaviest ``refine`` actions, grown by its
+    #: oracle over ``passes`` passes (None: `search`'s 4 and 2).
+    refine: int | None = None
+    passes: int | None = None
     #: Read on while the person chooses (IKA-344, `PonderCost`): the person is asked when
     #: the move starts, and the move deepens until they have chosen -- its budget first,
     #: `ponder_seconds` at most. False: the agent chooses first, then the person is asked.
@@ -1260,6 +1264,8 @@ def solve_move(
     sub_branches: int | None = None,
     restricted: bool | str = False,
     depth: int = 1,
+    refine: int | None = None,
+    passes: int | None = None,
 ) -> SolvedMove:
     """Side ``me``'s answer on the menus ``ours`` (side 0's) x ``theirs`` (side 1's): the
     open game (`search`) when ``exact``, else its Bayesian game over the other side's
@@ -1271,7 +1277,8 @@ def solve_move(
     (IKA-337). Raises `EquilibriumError` as the solves do."""
     you = 1 - me
     # The deepening's children, when given (IKA-362); else `search`'s defaults.
-    subs = {k: v for k, v in (("sub_limit", sub_limit), ("sub_branches", sub_branches))
+    subs = {k: v for k, v in (("sub_limit", sub_limit), ("sub_branches", sub_branches),
+                              ("refine", refine), ("passes", passes))
             if v is not None}
     if depth >= 2 and cells:
         raise ValueError("a fixed depth-2 read is not deepened as well (IKA-362's D)")
@@ -1746,6 +1753,7 @@ class HumanGame:
                 cells=cells, cost=cost, levels=agent.max_levels, child_q=agent.child_q,
                 sub_limit=agent.sub_limit, sub_branches=agent.sub_branches,
                 restricted=agent.restricted, depth=agent.depth,
+                refine=agent.refine, passes=agent.passes,
                 outside=outside, progress=progress, grow=grow,
             )
         except EquilibriumError:
