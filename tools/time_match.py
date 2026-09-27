@@ -24,10 +24,14 @@ cores, what a person's game uses), and the processes it starts inherit it. A pro
 fails stops the run (``workers.json``, IKA-336), and so does a process whose deepening
 workers died. The SPRT reads the pairs in index order, once the queue has resolved them.
 
+A run longer than one sitting is played in pieces: ``--resume`` with the next ``--start``
+plays more pairs into the same ``--out`` (the settings must match; the SPRT goes on in pair
+order; each piece's ``logs`` and ``workers.json`` are kept as ``logs.<n>``, ``workers.<n>.json``).
+
 Output in ``--out``: ``settings.json`` (everything that decides the games, written before
-the first), ``games-worker<k>.jsonl`` (`timematch.game_line`), ``logs/`` (each process
-echoes its settings at its start), ``sprt.json`` with ``--sprt``, ``summary.json`` at the
-end (the Elo with its interval, and per condition the seconds against the budget, the
+the first; ``chunks`` lists the pieces), ``games-worker<k>.jsonl`` (`timematch.game_line`),
+``logs/`` (each process echoes its settings at its start), ``sprt.json`` with ``--sprt``,
+``summary.json`` at the end (the Elo with its interval, and per condition the seconds against the budget, the
 width, the cells and the deepening's steps and depth).
 """
 
@@ -83,6 +87,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--min-free-gb", type=float, default=analysis.Limits.free_gb)
     ap.add_argument("--max-gpu-gb", type=float, default=analysis.Limits.gpu_gb)
     ap.add_argument("--poll", type=float, default=15.0, help="seconds between the SPRT's looks")
+    ap.add_argument("--resume", action="store_true",
+                    help="play more pairs in a run's --out: the same settings (bar the pairs, the "
+                    "processes and the checkout's head), the SPRT going on from the pairs in, in "
+                    "order. Pairs already in are not played again")
     # A worker's own.
     ap.add_argument("--worker", type=int, default=None, help=argparse.SUPPRESS)
     ap.add_argument("--address", default=None, help=argparse.SUPPRESS)
@@ -244,9 +252,15 @@ def worker(args: argparse.Namespace) -> None:
             teams = (pool.teams[a], pool.teams[b])
             lines = timematch.play_pair(match, pair, teams)
             alive = deepen.workers_alive(reg)
+            peak = watch.peak
             for line in lines:
                 line["deepenWorkers"] = [started_workers, alive]
                 line["worker"] = args.worker
+                # The memory watch's worst so far in this process: its own and its workers'
+                # resident memory, the host's least free, the card's most held (all
+                # processes, so both games of a parallel run).
+                line["peak"] = {"rssGb": round(peak.rss_gb, 2), "leastFreeGb": round(peak.free_gb, 2),
+                                "gpuGb": round(peak.gpu_gb, 2)}
             with out.open("ab") as handle:
                 for line in lines:
                     handle.write((json.dumps(line, ensure_ascii=False) + "\n").encode("utf-8"))
@@ -282,16 +296,18 @@ def read_lines(out: Path) -> list[dict]:
 class Monitor:
     """Feeds the SPRT the pairs in index order, each once the queue has resolved it."""
 
-    def __init__(self, out: Path, start: int, test: Sprt | None) -> None:
+    def __init__(self, out: Path, start: int, test: Sprt | None, before: set[int] | None = None) -> None:
         self.out = out
         self.next = start
         self.test = test
+        #: Pairs written by earlier invocations of the run (``--resume``): resolved already.
+        self.before = set(before or ())
         self.trail: list[float] = []
         self.skipped: dict[int, str] = {}
         self.stopped_at: int | None = None
 
     def __call__(self, queue) -> str | None:  # noqa: ANN001
-        resolved = queue.resolved()
+        resolved = queue.resolved() | self.before
         scores, left = timematch.pair_scores(read_lines(self.out))
         while self.next in resolved:
             pair = self.next
@@ -363,6 +379,11 @@ def summary(out: Path, tested, other, monitor: Monitor, outcome: dict) -> dict: 
             for c in (tested, other)
         },
         "memoryStops": sum(ln["memoryStops"] for ln in lines),
+        "peak": {
+            "rssGb": max((ln["peak"]["rssGb"] for ln in lines), default=None),
+            "leastFreeGb": min((ln["peak"]["leastFreeGb"] for ln in lines), default=None),
+            "gpuGb": max((ln["peak"]["gpuGb"] for ln in lines), default=None),
+        },
         "gameSeconds": timematch._quantiles([ln["seconds"] for ln in lines]),
         "turns": timematch._quantiles([ln["turns"] for ln in lines]),
         "workers": outcome,
@@ -374,11 +395,34 @@ def driver(args: argparse.Namespace, argv: list[str]) -> int:
     values, q_path = files(args)
     parse_bench_drop(args.bench_drop)
     out: Path = args.out
-    if out.exists() and any(out.glob(GAME_FILES)):
-        raise SystemExit(f"{out} already holds games: a run is one directory")
-    out.mkdir(parents=True, exist_ok=True)
     sets = cpu_sets(args.cpu_sets, args.parallel)
     fixed = settings(args, tested, other, values, q_path)
+    chunk = {k: fixed[k] for k in ("head", "pairs", "parallel", "cpuSets")}
+    before: set[int] = set()
+    first = args.start
+    if args.resume:
+        old = json.loads((out / "settings.json").read_bytes())
+        differs = sorted(k for k in set(old) | set(fixed)
+                         if k not in (*chunk, "chunks") and old.get(k) != fixed.get(k))
+        if differs:
+            raise SystemExit(f"--resume with other settings than {out}'s: {', '.join(differs)}")
+        before = {int(ln["pair"]) for ln in read_lines(out)}
+        overlap = sorted(before & set(range(args.start, args.start + args.pairs)))
+        if overlap:
+            raise SystemExit(f"pairs {overlap[0]}..{overlap[-1]} are in already: start past them")
+        first = old["pairs"][0]
+        n = len(old.get("chunks", []))
+        # run_workers writes these afresh; the earlier invocations' are kept beside them.
+        for name in ("logs", "workers.json"):
+            if (out / name).exists():
+                (out / name).rename(out / f"{name}.{n}" if name == "logs" else out / f"workers.{n}.json")
+        old["chunks"] = [*old.get("chunks", []), chunk]
+        fixed = old
+    elif out.exists() and any(out.glob(GAME_FILES)):
+        raise SystemExit(f"{out} already holds games: a run is one directory (--resume adds to it)")
+    else:
+        fixed["chunks"] = [chunk]
+    out.mkdir(parents=True, exist_ok=True)
     (out / "settings.json").write_bytes((json.dumps(fixed, indent=1) + "\n").encode("utf-8"))
     print(
         f"time match -> {out}\n  tested {tested.describe()}\n  other  {other.describe()}\n"
@@ -390,15 +434,28 @@ def driver(args: argparse.Namespace, argv: list[str]) -> int:
     )
     test = None
     if args.sprt is not None:
-        if (out / "sprt.json").exists():
+        if (out / "sprt.json").exists() and not args.resume:
             raise SystemExit(f"{out / 'sprt.json'} already exists: a registered test belongs to one run")
         test = Sprt(args.sprt[0], args.sprt[1], alpha=args.sprt_alpha, beta=args.sprt_beta)
+        if args.resume:
+            registered = json.loads((out / "sprt.json").read_bytes()).get("registered")
+            if registered != test.registration():
+                raise SystemExit(f"--resume with another test than the one registered: {registered}")
         print(
             f"  registered SPRT({test.elo0:+g}, {test.elo1:+g}), alpha {test.alpha}, beta "
             f"{test.beta}: LLR bounds [{test.lower:+.3f}, {test.upper:+.3f}]",
             file=sys.stderr, flush=True,
         )
-    monitor = Monitor(out, args.start, test)
+    monitor = Monitor(out, first, test, before)
+    if before:
+        # The pairs already in, in order, as the run left them.
+        class _Nothing:
+            @staticmethod
+            def resolved() -> set[int]:
+                return set()
+
+        if monitor(_Nothing()) is not None or (test is not None and test.decision is not None):
+            raise SystemExit(f"the SPRT of {out} has decided already: {monitor.state()['decision']}")
     monitor.save()
 
     def command(k: int, address: str) -> list[str]:
@@ -421,7 +478,8 @@ def driver(args: argparse.Namespace, argv: list[str]) -> int:
         f"\n{tested.name} over {other.name}: {e.get('elo', '-')} Elo "
         f"[{e.get('low', '-')}, {e.get('high', '-')}] over {e.get('pairs', 0)} pairs "
         f"(lost/split/won {e.get('counts')}); no winner {len(result['noWinner'])}, "
-        f"fallbacks {result['fallbacks']}, memory stops {result['memoryStops']}"
+        f"fallbacks {result['fallbacks']}, memory stops {result['memoryStops']}, "
+        f"peak {result['peak']}"
         + (f"\nSPRT: {monitor.state()['decision'] or 'no decision'}, LLR {monitor.state()['llr']:+.3f}"
            if test is not None else ""),
         file=sys.stderr,
