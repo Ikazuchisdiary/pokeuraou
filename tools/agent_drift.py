@@ -123,7 +123,76 @@ OWN_RESOLUTION = {
     "analyze.py": "play_human's agent, for a person reading (IKA-330)",
     "profile_stages.py": "hands --q-model to generate_queue.py only when given, so the "
     "driver's own default runs (IKA-98)",
+    "time_match.py": "play_human's agent in both seats: q-nocover by the default Q, and a "
+    "match stops without it as a board does (IKA-333)",
 }
+
+
+def agent_kwargs(path: Path) -> set[str]:
+    """The keyword names of every `Agent(...)` / `humanplay.Agent(...)` call in this file."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        name = func.attr if isinstance(func, ast.Attribute) else getattr(func, "id", "")
+        if name == "Agent":
+            names |= {k.arg or "**" for k in node.keywords}
+    return names
+
+
+def flag_defaults(path: Path) -> dict[str, str]:
+    """``--flag``: its default as source text, for every `add_argument` in this file
+    (``store_true`` flags as ``False``)."""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    out: dict[str, str] = {}
+    for node in ast.walk(tree):
+        if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "add_argument" and node.args
+                and isinstance(node.args[0], ast.Constant)):
+            continue
+        keywords = {k.arg: k.value for k in node.keywords}
+        if "default" in keywords:
+            out[node.args[0].value] = ast.unparse(keywords["default"])
+        elif isinstance(keywords.get("action"), ast.Constant) and keywords["action"].value == "store_true":
+            out[node.args[0].value] = "False"
+    return out
+
+
+def play_agent_drift() -> list[str]:
+    """How the time match's agent (`timematch`, IKA-333) differs from a person's opponent
+    (`tools/play_human.py`): an argument its `Agent(...)` leaves out, or a condition's
+    default that is not the flag's default a person's game plays with."""
+    from pokeuraou import humanplay, timematch
+
+    problems: list[str] = []
+    reference = agent_kwargs(ROOT / "tools/play_human.py")
+    mine = agent_kwargs(ROOT / "src/pokeuraou/timematch.py")
+    if not reference:
+        problems.append("tools/play_human.py builds no Agent(...) to compare with")
+    if reference - mine:
+        problems.append(f"timematch's Agent(...) omits {', '.join(sorted(reference - mine))}")
+    flags = flag_defaults(ROOT / "tools/play_human.py")
+    base = timematch.Condition(name="default", seconds=1.0)
+    wanted = {
+        # flag: (what play_human's default resolves to, the condition's default)
+        "--oracle": (timematch._oracle(eval(flags.get("--oracle", "None")) or "none"), base.oracle),  # noqa: S307
+        "--clock": (eval(flags.get("--clock", "None")), base.clock),  # noqa: S307
+        "--max-levels": (
+            humanplay.PLAY_MAX_LEVELS if flags.get("--max-levels") == "humanplay.PLAY_MAX_LEVELS"
+            else flags.get("--max-levels"),
+            base.max_levels,
+        ),
+        "--threads": (humanplay.default_threads() if flags.get("--threads") == "None"
+                      else flags.get("--threads"), base.threads),
+        "--child-q": (eval(flags.get("--child-q", "0")), base.child_q),  # noqa: S307
+        "--width-only": (eval(flags.get("--width-only", "None")), base.width_only),  # noqa: S307
+    }
+    for flag, (theirs, ours) in wanted.items():
+        if theirs != ours:
+            problems.append(f"play_human {flag} plays {theirs!r}, a condition's default is {ours!r}")
+    return problems
 
 
 def resolution_drift(path: Path) -> list[str]:
@@ -266,6 +335,12 @@ def main(argv: list[str] | None = None) -> int:
         unresolved.append("tools/selfplay.py")
         print("  DEFAULT   selfplay.py                M-C generation's worker does not "
               "resolve its fill with resolve_rank_fill")
+    play_drift = play_agent_drift()
+    if play_drift:
+        print(f"  DRIFTED   time_match.py (IKA-333) plays another agent than play_human: "
+              f"{'; '.join(play_drift)}")
+    else:
+        print("  ok        time_match.py (IKA-333): play_human's agent, its defaults included")
     print()
     # `tools/oneshot/` is in scope too. A tool is shelved there when its question was
     # asked once, not because it stopped being runnable -- and a shelved tool that builds
@@ -334,7 +409,12 @@ def main(argv: list[str] | None = None) -> int:
             f"\n  POOL: poolplay.py omits {', '.join(pool_missing)} that M-B generation passes.\n"
             "  The two generators have to build the same agent."
         )
-    return 1 if (appeared or fixed or silent or pool_missing or unresolved) else 0
+    if play_drift:
+        print(
+            f"\n  PLAY: {'; '.join(play_drift)}.\n  The time match has to play the agent a "
+            "person meets: build it as play_human does, with play_human's defaults."
+        )
+    return 1 if (appeared or fixed or silent or pool_missing or unresolved or play_drift) else 0
 
 
 if __name__ == "__main__":

@@ -26,7 +26,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-ENTRIES = ("tools/play_human.py", "tools/analyze.py", "tools/play.py")
+ENTRIES = ("tools/play_human.py", "tools/analyze.py", "tools/play.py", "tools/time_match.py")
 
 
 def _is_call(node: ast.stmt) -> bool:
