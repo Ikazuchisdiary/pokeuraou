@@ -115,7 +115,8 @@ button { font: inherit; color: inherit; }
   body.analysis .mon > div:not(.mon-more) { display: contents; }
   body.analysis .mon-name { grid-column: 1 / -1; grid-row: 1; display: block; white-space: nowrap; overflow: hidden;
     text-overflow: ellipsis; text-align: left; font-size: 13px; }
-  body.analysis .mon .art.s-lg, body.analysis .mon .art.s-md { width: 40px; height: 40px; min-width: 40px; max-width: 40px; grid-column: 1; grid-row: 2; justify-self: start; }
+  body.analysis .mon .art.s-lg, body.analysis .mon .art.s-md { width: 40px; height: 40px; min-width: 40px; max-width: 40px;
+    min-height: 40px; max-height: 40px; aspect-ratio: 1; align-self: center; grid-column: 1; grid-row: 2; justify-self: start; }
   body.analysis .mon .mon-sub, body.analysis .mon .mon-more { grid-column: 1 / -1; margin-top: 0; }
   body.analysis .mon .mon-sub span { white-space: nowrap; }
   /* the card is ~124 px wide here: picture and % side by side, the HP bar across the card below */
