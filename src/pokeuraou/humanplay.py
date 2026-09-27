@@ -1159,8 +1159,9 @@ class Agent:
     #: Read the deepened root the restricted way (IKA-68's ``r``: the depth-1 support's
     #: rectangle deepened, the whole matrix its oracle; on a Bayesian root the same per
     #: completion) instead of the whole mixed-depth matrix (IKA-362). The root's swap
-    #: oracle goes with the whole reading, so it is not asked.
-    restricted: bool = False
+    #: oracle goes with the whole reading, so it is not asked. ``"open"``: open roots only
+    #: (no bench hidden), a Bayesian root read whole.
+    restricted: bool | str = False
     #: Read on while the person chooses (IKA-344, `PonderCost`): the person is asked when
     #: the move starts, and the move deepens until they have chosen -- its budget first,
     #: `ponder_seconds` at most. False: the agent chooses first, then the person is asked.
@@ -1252,7 +1253,7 @@ def solve_move(
     grow: Any = None,  # noqa: ANN401 - deepen.Grow
     sub_limit: int | None = None,
     sub_branches: int | None = None,
-    restricted: bool = False,
+    restricted: bool | str = False,
 ) -> SolvedMove:
     """Side ``me``'s answer on the menus ``ours`` (side 0's) x ``theirs`` (side 1's): the
     open game (`search`) when ``exact``, else its Bayesian game over the other side's
@@ -1295,7 +1296,7 @@ def solve_move(
         deepen=(
             {me: {"cells": cells, "cost": cost, "levels": levels,
                   # The restricted reading asks the whole matrices itself (IKA-362).
-                  **({"reading": "restricted"} if restricted else
+                  **({"reading": "restricted"} if restricted is True else
                      {"reading": "mixed", "swap": outside is not None, "outside": outside}),
                   "child_q": child_q, "discount": discount,
                   **({"grow": grow} if grow is not None else {})}}

@@ -91,7 +91,7 @@ class Condition:
     sub_limit: int | None = None
     sub_branches: int | None = None
     #: The restricted reading of the deepened root (`humanplay.Agent.restricted`, IKA-362).
-    restricted: bool = False
+    restricted: bool | str = False
 
     @property
     def price_cores(self) -> int:
@@ -116,7 +116,8 @@ class Condition:
             + (", knock-outs forked" if self.knockouts else "")
             + (f", children {self.sub_limit} wide" if self.sub_limit is not None else "")
             + (f", {self.sub_branches} branches kept" if self.sub_branches is not None else "")
-            + (", root read restricted" if self.restricted else "")
+            + ((", open roots read restricted" if self.restricted == "open"
+                else ", root read restricted") if self.restricted else "")
             + (f", child Q {self.child_q}" if self.child_q is not None else "")
         )
 
@@ -192,6 +193,8 @@ def parse_condition(spec: str) -> Condition:
             got["child_q"] = int(value)
         elif key in ("width", "sub_limit", "sub_branches"):
             got[key] = int(value)
+        elif key == "restricted":
+            got[key] = "open" if value == "open" else _flag(value)
         else:
             got[key] = _flag(value)
     if "seconds" not in got:
