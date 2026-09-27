@@ -45,6 +45,15 @@ export interface RandomnessPolicy {
 	 * step, so a later hit of Triple Axel can miss after the first hit landed (IKA-235).
 	 */
 	accuracyScript?: ('hit' | 'miss')[];
+	/**
+	 * Orders for a step's shuffles of a tied group (`speedSort`'s `prng.shuffle`), in the
+	 * order they are asked: entry `n` answers the step's `n`-th shuffle of a group of its
+	 * length, putting the group's `i`-th place to the entry's `i`-th Pokemon as the group
+	 * lay (`[2, 0, 1]`: the last first). A shuffle of another length, or one past the
+	 * script's end, follows `speedTie`. Reaches the orders of a group of three or more,
+	 * which `keep` and `reverse` do not (IKA-352).
+	 */
+	shuffleScript?: number[][];
 }
 
 export const DEFAULT_POLICY: RandomnessPolicy = {
@@ -112,7 +121,16 @@ function installPolicy(battle: AnyBattle, policy: RandomnessPolicy) {
 		return policy.multihit === 'min' ? from : to - 1;
 	};
 
+	battle._pokeuraouShuffles = 0;
 	const shuffle = (list: unknown[], start = 0, end = list.length) => {
+		const script = policy.shuffleScript ?? [];
+		const next = script[battle._pokeuraouShuffles as number];
+		if (next && next.length === end - start) {
+			battle._pokeuraouShuffles += 1;
+			const seg = list.slice(start, end);
+			for (let i = 0; i < seg.length; i++) list[start + i] = seg[next[i]];
+			return;
+		}
 		if (policy.speedTie === 'reverse') {
 			const seg = list.slice(start, end).reverse();
 			for (let i = 0; i < seg.length; i++) list[start + i] = seg[i];
@@ -255,6 +273,8 @@ export class OracleSession {
 
 	/** Applies one choice per side and advances the battle. */
 	step(choices: (string | null)[]): StepResult {
+		// `shuffleScript` counts from the start of every step, as `accuracyScript` does.
+		this.battle._pokeuraouShuffles = 0;
 		this.battle.sides.forEach((side: AnyBattle, i: number) => {
 			const choice = choices[i];
 			if (!choice) return;

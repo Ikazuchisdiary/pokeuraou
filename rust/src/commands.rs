@@ -744,8 +744,18 @@ fn phase_command(reg: &Reg, value: &Value, phase: Phase) -> Result<Value, String
         }
     }
     // The positive control leaves the switch-ins in the order they were placed.
+    // A Speed tie among them is a draw, as Showdown's shuffle in `runSwitch` (IKA-352):
+    // sampled by a caller with a generator, the first (noted) by one without.
     #[cfg(not(feature = "ika211-control"))]
-    placed.sort_by_key(|(speed, side, slot)| (-speed, *side, *slot));
+    {
+        let mut orders = switch_in_orders(reg, &state, &placed)?;
+        let pick = if orders.len() > 1 {
+            draw(&mut state, &vec![1.0; orders.len()], "switch-in speed tie")
+        } else {
+            0
+        };
+        placed = orders.swap_remove(pick);
+    }
     for (_speed, side_index, slot) in &placed {
         on_switch_in(reg, &mut state, *side_index, *slot)?;
     }
