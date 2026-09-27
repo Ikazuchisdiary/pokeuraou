@@ -28,19 +28,17 @@ deepening's guard, the swap oracle -- so a match can say what ten times the time
 **A pair** is two games on one pair of teams from the M-C pool (`pool.draw_pair`) with the
 conditions swapped between the sides, the same seed and the same selection draws, so the
 teams, the leads and the first chance draws cancel between them; a pair scores 0, 1/2 or
-1 for the tested condition (`sprt`). Which seat is `HumanGame`'s own (it reads first when
-no condition ponders) alternates by pair.
+1 for the tested condition (`sprt`). Which seat is `HumanGame`'s own (it reads first)
+alternates by pair.
 
 **Threads.** A condition's ``threads`` are applied before each of its reads
 (`spread_threads`): the port's cell threads, the deepening's cells expanded ahead and a
 big game's two LPs at once, as `humanplay.use_threads` spreads them. The worker processes
 that expand ahead are started once, for the larger of the two conditions.
 
-**Ponder** (IKA-344). A condition with ``ponder`` reads after the other seat and goes on
-deepening until it has spent what that seat spent (`ponder_ready`): the agent reading while
-a person thinks, on its own cores. Its read is then the longer of its own seconds and the
-other seat's, capped at ``ponder_seconds``. Both seats pondering: the first is held to the
-other's nominal seconds. It needs IKA-344's `Agent.ponder` (`ponder_available`).
+**Ponder** (IKA-344) is not a condition here: the user decided on 9/27 not to use it (a
+game whose two clocks differ is rare in practice), so both seats play with it off, as
+`tools/play_human.py` does by default.
 
 **Records.** One line per game (`game_line`): the conditions by side, the outcome, and
 per move decision the clock row `HumanGame` writes (seconds against the budget, width,
@@ -51,7 +49,7 @@ probes, and with a guard why it stopped), tagged with the seat and its condition
 from __future__ import annotations
 
 import time
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -84,11 +82,6 @@ class Condition:
     max_levels: int | None = humanplay.PLAY_MAX_LEVELS
     width_only: bool = False
     child_q: int | None = None
-    #: Read after the other seat and deepen until it has spent what that seat spent
-    #: (`ponder_ready`, IKA-344).
-    ponder: bool = False
-    #: A pondering read's cap, seconds from the start of the move (None: `Agent`'s).
-    ponder_seconds: float | None = None
 
     @property
     def price_cores(self) -> int:
@@ -110,9 +103,6 @@ class Condition:
             f"{'' if self.max_levels is not None else ' (unrecorded)'}"
             + (" , width only" if self.width_only else "")
             + (f", child Q {self.child_q}" if self.child_q is not None else "")
-            + ((", ponder" + (f" (cap {self.ponder_seconds:g} s)"
-                               if self.ponder_seconds is not None else ""))
-               if self.ponder else "")
         )
 
     def to_json(self) -> dict[str, Any]:
@@ -124,7 +114,7 @@ class Condition:
 
 #: The keys a condition is written with, and what each one parses.
 CONDITION_KEYS = ("seconds", "threads", "cores", "clock", "oracle", "levels", "width_only",
-                  "child_q", "ponder", "ponder_seconds")
+                  "child_q")
 
 
 def _oracle(spec: str) -> int | None:
@@ -185,8 +175,6 @@ def parse_condition(spec: str) -> Condition:
             got["max_levels"] = int(value) or None
         elif key == "child_q":
             got["child_q"] = int(value)
-        elif key == "ponder_seconds":
-            got["ponder_seconds"] = float(value)
         else:
             got[key] = _flag(value)
     if "seconds" not in got:
@@ -197,41 +185,6 @@ def parse_condition(spec: str) -> Condition:
     if condition.seconds <= 0 or condition.threads < 1:
         raise ValueError(f"seconds must be > 0 and threads >= 1: {spec!r}")
     return condition
-
-
-# ----------------------------------------------------------------------------- ponder
-
-
-def ponder_available() -> bool:
-    """Whether `humanplay.Agent` can ponder (IKA-344's ``ponder`` field)."""
-    from dataclasses import fields
-
-    return any(f.name == "ponder" for f in fields(humanplay.Agent))
-
-
-def ponder_threshold(other: Condition, before: dict[str, Any] | None) -> float:
-    """What the other seat spent on this move, in the units the deepening reads its budget
-    in (`humanplay.WallCost`: milliseconds from the start of the move; the count clock:
-    `deepen.COSTS` cells). ``before`` is the other seat's clock row when it read first: its
-    ``spentUnits`` when it deepened, else its seconds (wall) or nothing (count). Without a
-    row -- both seats ponder, and this one reads first -- the other's nominal seconds."""
-    from .deepen import cells_for_seconds
-
-    if before is not None:
-        if before.get("spentUnits") is not None:
-            return float(before["spentUnits"])
-        return float(before["seconds"]) * 1000.0 if other.clock == "wall" else 0.0
-    if other.clock == "wall":
-        return other.seconds * 1000.0
-    return float(cells_for_seconds(other.seconds, other.price_cores))
-
-
-def ponder_ready(threshold: float) -> Callable[[float, int], bool]:
-    """IKA-344's ``ready(units, work)``: true once this read has spent ``threshold``."""
-    def ready(units: float, work: int) -> bool:  # noqa: ARG001
-        return units >= threshold
-
-    return ready
 
 
 # ----------------------------------------------------------------------------- threads
@@ -295,25 +248,18 @@ class TimedGame(humanplay.HumanGame):
         self.fallbacks = [0, 0]
 
     def order(self) -> tuple[int, int]:
-        """Which side reads first: a pondering seat reads second, else `me` first."""
-        first = self.me
-        ponders = [c.ponder for c in self.conditions]
-        if ponders[first] and not ponders[1 - first]:
-            first = 1 - first
-        return first, 1 - first
+        """Which side reads first: `me` (the reads are independent; the order only has to
+        be fixed)."""
+        return self.me, 1 - self.me
 
-    def _read(self, side: int, pos: Any, spreads: Any, shown: Any, before: Any) -> Any:  # noqa: ANN401
+    def _read(self, side: int, pos: Any, spreads: Any, shown: Any) -> Any:  # noqa: ANN401
         saved = (self.agent, self.me, self.you)
         condition = self.conditions[side]
         self.agent, self.me, self.you = self.seats[side], side, 1 - side
         spread_threads(self.reg, condition.threads)
         start = len(self.clock)
         try:
-            if condition.ponder:
-                ready = ponder_ready(ponder_threshold(self.conditions[1 - side], before))
-                got = humanplay.HumanGame._agent_move(self, pos, spreads, shown, ready=ready)
-            else:
-                got = humanplay.HumanGame._agent_move(self, pos, spreads, shown)
+            got = humanplay.HumanGame._agent_move(self, pos, spreads, shown)
         finally:
             self.agent, self.me, self.you = saved
         for row in self.clock[start:]:
@@ -321,13 +267,12 @@ class TimedGame(humanplay.HumanGame):
             row["condition"] = condition.name
         if got is None:
             self.fallbacks[side] += 1
-        return got, (self.clock[start] if len(self.clock) > start else None)
+        return got
 
-    def _agent_move(self, pos, spreads, recorded_shown):  # noqa: ANN001, ANN202
+    def _agent_move(self, pos, spreads, recorded_shown, **_ponder):  # noqa: ANN001, ANN003, ANN202
         got: dict[int, Any] = {}
-        row = None
         for side in self.order():
-            got[side], row = self._read(side, pos, spreads, recorded_shown, row)
+            got[side] = self._read(side, pos, spreads, recorded_shown)
         other = got[self.you]
         self._answer = None if other is None else other[0]
         return got[self.me]
@@ -406,19 +351,14 @@ class Match:
     stamp: dict[str, Any] = field(default_factory=dict)
 
     def agent(self, condition: Condition) -> humanplay.Agent:
-        # IKA-344's fields, only when the condition ponders: without them the agent is
-        # the one a master without IKA-344 builds.
-        ponder: dict[str, Any] = {}
-        if condition.ponder:
-            ponder["ponder"] = True
-            if condition.ponder_seconds is not None:
-                ponder["ponder_seconds"] = condition.ponder_seconds
         return humanplay.Agent(
             reg=self.reg, evaluate=self.evaluate, name=self.leaf_name,
             seconds=condition.seconds, cores=condition.price_cores, clock=condition.clock,
             rank_fill=self.rank_fill, rank_by_leaf=self.rank_by_leaf, bench_drop=self.bench_drop,
             width_only=condition.width_only, max_levels=condition.max_levels,
-            child_q=condition.child_q, oracle=condition.oracle, halt=self.halt, **ponder,
+            child_q=condition.child_q, oracle=condition.oracle, halt=self.halt,
+            # Off, as a person's game plays by default (the module's docstring).
+            ponder=False, ponder_seconds=humanplay.PLAY_PONDER_SECONDS,
         )
 
 
@@ -607,9 +547,6 @@ __all__ = [
     "pair_scores",
     "parse_condition",
     "play_pair",
-    "ponder_available",
-    "ponder_ready",
-    "ponder_threshold",
     "prefix",
     "spread_threads",
 ]

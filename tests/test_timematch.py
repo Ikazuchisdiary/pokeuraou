@@ -16,7 +16,6 @@ What these hold:
 - **the scoring**: a pair is 0, 1/2 or 1 for the tested condition, a pair with a game
   nobody won is left out and said, and the in-order prefix stops at the first pair not
   yet in;
-- **ponder's threshold**: what the other seat spent, in the units its clock reads.
 
 Played as `test_humanplay` plays: hp-share scored in the port, damage-ranked menus, the
 count clock, on two variants of our M-B roster.
@@ -25,7 +24,6 @@ count clock, on two variants of our M-B roster.
 from __future__ import annotations
 
 import copy
-import dataclasses
 import json
 
 import pytest
@@ -100,7 +98,7 @@ def test_a_condition_left_alone_is_the_human_play_agent() -> None:
     assert got.threads == humanplay.default_threads()
     assert got.oracle == humanplay.PLAY_ORACLE
     assert got.max_levels == humanplay.PLAY_MAX_LEVELS
-    assert not got.width_only and got.child_q is None and not got.ponder
+    assert not got.width_only and got.child_q is None
     assert got.price_cores == got.threads
     old = parse_condition("old:seconds=1,threads=1,oracle=none,levels=16,width_only=on")
     assert (old.threads, old.oracle, old.max_levels, old.width_only) == (1, None, 16, True)
@@ -226,16 +224,3 @@ def test_a_pair_scores_zero_half_or_one_and_a_game_nobody_won_is_left_out() -> N
     assert got["low"] < got["elo"] < got["high"]
     assert timematch.elo_interval([]) == {"pairs": 0}
 
-
-def test_ponder_is_held_to_what_the_other_seat_spent() -> None:
-    wall, count = _cond("w", 2.0, ponder=True), _cond("c", 2.0, ponder=True)
-    wall = dataclasses.replace(wall, clock="wall")
-    assert timematch.ponder_threshold(wall, {"seconds": 1.5, "spentUnits": 1400.0}) == 1400.0
-    assert timematch.ponder_threshold(wall, {"seconds": 1.5}) == 1500.0
-    assert timematch.ponder_threshold(count, {"seconds": 1.5}) == 0.0
-    assert timematch.ponder_threshold(wall, None) == 2000.0
-    from pokeuraou.deepen import cells_for_seconds
-
-    assert timematch.ponder_threshold(count, None) == float(cells_for_seconds(2.0, 1))
-    ready = timematch.ponder_ready(100.0)
-    assert not ready(99.9, 5) and ready(100.0, 5)

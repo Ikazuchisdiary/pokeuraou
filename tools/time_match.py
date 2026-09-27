@@ -9,8 +9,8 @@ The game and the conditions are `pokeuraou.timematch`'s (its docstring says how 
 seats read, what is outside the clock and what a pair is). A condition is
 ``name:key=value,...`` with the keys ``seconds`` (required), ``threads``, ``cores``,
 ``clock`` (wall|count), ``oracle`` (sall|none|s<W>), ``levels`` (the deepening's guard; 0:
-`deepen.MAX_LEVELS` unrecorded), ``width_only``, ``child_q``, ``ponder`` and
-``ponder_seconds`` (IKA-344). A key left out is the human-play default -- what
+`deepen.MAX_LEVELS` unrecorded), ``width_only`` and ``child_q``. A key left out is the
+human-play default -- what
 ``tools/play_human.py`` plays with no flag (IKA-343) -- and so are the leaf
 (`play_human.DEFAULT_VALUE`), the menus (``q-nocover`` by `qrank.DEFAULT_Q`; a match stops
 without the Q, as a board does, IKA-338) and the bench belief. **The first --arm is the
@@ -22,7 +22,8 @@ a time in each. Each process is held to its own share of the logical cores (``--
 by default the machine split evenly, so ``--parallel 2`` gives each game four physical
 cores, what a person's game uses), and the processes it starts inherit it. A process that
 fails stops the run (``workers.json``, IKA-336), and so does a process whose deepening
-workers died. The SPRT reads the pairs in index order, once the queue has resolved them.
+workers died or whose memory watch stopped a move's deepening (``--allow-memory-stops``).
+The SPRT reads the pairs in index order, once the queue has resolved them.
 
 A run longer than one sitting is played in pieces: ``--resume`` with the next ``--start``
 plays more pairs into the same ``--out`` (the settings must match; the SPRT goes on in pair
@@ -86,6 +87,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--max-rss-gb", type=float, default=analysis.Limits.rss_gb)
     ap.add_argument("--min-free-gb", type=float, default=analysis.Limits.free_gb)
     ap.add_argument("--max-gpu-gb", type=float, default=analysis.Limits.gpu_gb)
+    ap.add_argument("--allow-memory-stops", action="store_true",
+                    help="go on after the memory watch stopped a move's deepening (by default a "
+                    "process whose pair had one fails, and the run stops: that move was not the "
+                    "condition's)")
     ap.add_argument("--poll", type=float, default=15.0, help="seconds between the SPRT's looks")
     ap.add_argument("--resume", action="store_true",
                     help="play more pairs in a run's --out: the same settings (bar the pairs, the "
@@ -107,8 +112,6 @@ def conditions(args: argparse.Namespace) -> tuple[timematch.Condition, timematch
         raise SystemExit(f"--arm: {problem}") from problem
     if tested.name == other.name:
         raise SystemExit("the two conditions need different names")
-    if (tested.ponder or other.ponder) and not timematch.ponder_available():
-        raise SystemExit("ponder needs IKA-344's Agent.ponder, which this checkout does not have")
     for c in (tested, other):
         priced = (humanplay.Agent.form, c.price_cores) in humanplay.COSTS
         if c.clock == "count" and not c.width_only and not priced:
@@ -268,6 +271,16 @@ def worker(args: argparse.Namespace) -> None:
                 raise SystemExit(
                     f"a deepening worker died during pair {pair} ({alive} of {started_workers} "
                     "alive): the reads after it were slower than the configured agent's"
+                )
+            braked = sum(line["memoryStops"] for line in lines)
+            if braked and not args.allow_memory_stops:
+                # A move the memory watch stopped did not read what its condition says: the
+                # games are not the agents compared. 9/27: a card shared with other jobs
+                # reached 11.1 GB and stopped 912 moves of a node-time run.
+                raise SystemExit(
+                    f"the memory watch stopped {braked} move(s) of pair {pair} (peak "
+                    f"{lines[-1]['peak']}): those moves were not the configured agents'. Fewer "
+                    "--parallel, or --allow-memory-stops to keep going"
                 )
             client.finish(pair)
             print(
