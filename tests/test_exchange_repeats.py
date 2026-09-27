@@ -146,28 +146,34 @@ def test_a_repeated_score_is_answered_from_the_first(bridged: None) -> None:
 
 
 def test_a_score_request_is_the_line_json_dumps_wrote(bridged: None) -> None:
-    """IKA-321: the candidate list written from each slot action's text, with the position
-    held or not, is byte for byte the line `json.dumps` of the dicts wrote."""
+    """IKA-321, and IKA-350's numbers: the candidate list is `json.dumps` of the dicts with
+    each slot action's dict replaced by its number, and the number's text is that dict's
+    `json.dumps` -- with the position held or not."""
     reg, pos = _node()
     for side in (0, 1):
         pool = side_actions(reg, pos, side)
         assert len(pool) > 1
-        plain = {
+        numbered = {
             "kind": "score",
             "position": pos.to_json(),
             "side": side,
-            "candidates": [[rustnode.dump_action(a) for a in c.slots] for c in pool],
+            "candidates": [[rustnode._action_number(a) for a in c.slots] for c in pool],
         }
-        before = json.dumps(plain, ensure_ascii=False).encode("utf-8")
-        texted = {**plain, "candidates": rustnode._candidates(pool)}
+        for c in pool:
+            for a in c.slots:
+                assert rustnode._ACTION_BY_NUMBER[rustnode._action_number(a)] == json.dumps(
+                    rustnode.dump_action(a), ensure_ascii=False
+                )
+        before = json.dumps(numbered, ensure_ascii=False).encode("utf-8")
+        texted = {**numbered, "candidates": rustnode._candidates(pool)}
         assert rustnode._payload(texted) == before
-        # Twice: the second is written from the kept texts.
-        assert rustnode._payload({**plain, "candidates": rustnode._candidates(pool)}) == before
+        # Twice: the second is written from the kept numbers.
+        assert rustnode._payload({**numbered, "candidates": rustnode._candidates(pool)}) == before
         rustnode.hold_positions()
         stored = rustnode._position(pos)
         held = {**texted, "position": stored}
         assert isinstance(stored, rustnode._Stored)
-        assert rustnode._payload(held) == _named(plain, stored.key)
+        assert rustnode._payload(held) == _named(numbered, stored.key)
         rustnode.hold_positions(False)
 
 
@@ -242,7 +248,11 @@ def test_a_position_crosses_once_a_decision(bridged: None) -> None:
     holds = [line for line in lines if line.startswith(b'{"kind": "hold"')]
     assert len(holds) == 1 and holds[0].endswith(b'"position": ' + whole + b"}")
     key = rustnode._position(pos).key
-    asked = [line for line in lines if not line.startswith(b'{"kind": "hold"')]
+    # The slot actions' numbers (IKA-350) went before, with the first score: not asked.
+    asked = [
+        line for line in lines
+        if not line.startswith(b'{"kind": "hold"') and not line.startswith(b'{"kind": "acts"')
+    ]
     assert len(asked) == 2
     assert all(f'{{"held": {key}}}'.encode() in line and whole not in line for line in asked)
 

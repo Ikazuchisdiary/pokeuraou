@@ -655,6 +655,29 @@ fn phase_command(reg: &Reg, value: &Value, phase: Phase) -> Result<Value, String
         return Err("position is for another regulation".into());
     }
     let choices = if phase == Phase::Replacements { two_sides(&value["choices"]) } else { [Vec::new(), Vec::new()] };
+    let (after, notes, opened, log) = phase_position(reg, position, value, phase, choices)?;
+    let mut out = json!({
+        "position": after.to_json(),
+        "unmodelled": notes.into_iter().collect::<Vec<_>>(),
+        "draw": opened.first(),
+    });
+    if let Some(log) = log.as_deref() {
+        out["events"] = json!(log.events);
+    }
+    Ok(out)
+}
+
+/// The phase's position, its notes, the draws it opened and its trace: `phase_command`'s
+/// answer before it is written out (IKA-350: `replacements_encoded` encodes it instead).
+type Phased = (Position, std::collections::BTreeSet<String>, Vec<Vec<f64>>, Option<Box<EventLog>>);
+
+fn phase_position(
+    reg: &Reg,
+    position: Position,
+    value: &Value,
+    phase: Phase,
+    choices: [Vec<SlotAction>; 2],
+) -> Result<Phased, String> {
     check_position_supported(&position, &choices)?;
     let mut state = Turn::new(reg, position, deterministic(), [[false; 2]; 2]);
     if wants_events(value) {
@@ -762,15 +785,69 @@ fn phase_command(reg: &Reg, value: &Value, phase: Phase) -> Result<Value, String
         }
     }
     notes.extend(state.unmodelled.iter().cloned());
-    let mut out = json!({
-        "position": state.pos.to_json(),
-        "unmodelled": notes.into_iter().collect::<Vec<_>>(),
-        "draw": opened.first(),
-    });
-    if let Some(log) = state.log.as_deref() {
-        out["events"] = json!(log.events);
+    let log = state.log.take();
+    Ok((state.pos, notes, opened, log))
+}
+
+/// `replacements` of one position for many pairs of choices, each phase's position encoded
+/// here rather than written out (IKA-350): the replacement node's matrix, whose positions
+/// were read back only to be encoded for the leaf. Each pair is `replacements` without
+/// `presets` -- a draw takes its first option, as there -- and its row is the encoder's of
+/// that position, in the order of `pairs`. A pair the port refuses refuses the whole
+/// request, as the node's first refused `replacements` stopped it.
+pub fn replacements_encoded(
+    reg: &Reg,
+    encoder: &crate::encode::Encoder,
+    value: &Value,
+) -> Result<(Value, crate::encode::Encoded), String> {
+    let position = crate::held::position(&value["position"]);
+    if &*position.format != reg.format_id.as_str() {
+        return Err("position is for another regulation".into());
     }
-    Ok(out)
+    let rules = crate::encode::EncodeRules {
+        mega_from_slots: value
+            .get("encoding")
+            .and_then(|e| e.get("megaFromSlots"))
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    };
+    let pairs = value["pairs"].as_array().cloned().unwrap_or_default();
+    let mut leaves: Vec<Position> = Vec::with_capacity(pairs.len());
+    for pair in &pairs {
+        let (after, _notes, _opened, _log) =
+            phase_position(reg, position.clone(), value, Phase::Replacements, two_sides(pair))?;
+        leaves.push(after);
+    }
+    let borrowed: Vec<&Position> = leaves.iter().collect();
+    let encoded = encoder.encode_positions_with(&borrowed, rules);
+    let body_bytes = (encoded.species.len()
+        + encoded.ability.len()
+        + encoded.item.len()
+        + encoded.moves.len()
+        + encoded.mon.len()
+        + encoded.mask.len()
+        + encoded.side.len()
+        + encoded.field.len())
+        * 4;
+    let header = json!({
+        "kind": "replacementsEncoded",
+        "leaves": borrowed.len(),
+        "spans": [],
+        "folded": [],
+        "exact": [],
+        "refused": [],
+        "unmodelled": [],
+        "unknownVolatiles": encoded.unknown_volatiles,
+        "decided": crate::objective::decided_leaves(borrowed.iter().copied()),
+        "leafObjectives": [],
+        "encoding": { "megaFromSlots": rules.mega_from_slots },
+        "monsPerSide": encoder.widths.mons_per_side,
+        "monWidth": encoder.widths.mon,
+        "sideWidth": encoder.widths.side,
+        "fieldWidth": encoder.widths.field,
+        "bytes": body_bytes,
+    });
+    Ok((header, encoded))
 }
 
 fn phase_speed(state: &Turn, side: usize, slot: usize) -> Result<i64, String> {

@@ -280,6 +280,9 @@ def main() -> None:  # noqa: C901, PLR0915
             k0 = sum(child.cpu_times()[:2])
             request, t_build = timed(build)
             payload, t_dumps = timed(rustnode._payload, request)  # noqa: SLF001
+            # The lines that go ahead of it: a held position, and the actions it names by
+            # number that this process has not been given yet (IKA-350), as `_exchange` sends.
+            payload = node._defined((request,)) + payload  # noqa: SLF001
             line, t_cross = timed(cross, payload)
             response, t_loads = timed(json.loads, line.decode("utf-8"))
             scored_raw, t_unpack = timed(unpack, response)

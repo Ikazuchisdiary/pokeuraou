@@ -1141,7 +1141,17 @@ class _Meter:
         per_root = getattr(self.cost, "root", 0.0)
         if per_root and self.roots:
             ms += per_root * self.roots
-        return ms / self.cost.cell
+        units = ms / self.cost.cell
+        # A cost may hold the reading back (IKA-344's ponder: `humanplay.PonderCost` keeps
+        # a move deepening past its budget until the person has chosen). ``work`` grows at
+        # every step, so a stop point written as it replays the same stop.
+        gate = getattr(self.cost, "gate", None)
+        return units if gate is None else gate(units, self.work)
+
+    @property
+    def work(self) -> int:
+        """Counted work so far: fills, refinements and cells. Every step adds to it."""
+        return self.fills + self.refines + self.cells
 
 
 class _Oracle:
