@@ -164,6 +164,91 @@ def reference(args: argparse.Namespace) -> None:
               f"{time.perf_counter() - began:.1f}s", file=sys.stderr, flush=True)
 
 
+def _support(strategy: np.ndarray, k: int) -> list[int]:
+    """The heaviest `k` actions carrying weight."""
+    live = np.flatnonzero(np.asarray(strategy) > 1e-6)
+    order = live[np.argsort(-np.asarray(strategy)[live], kind="stable")]
+    return [int(i) for i in order[:k]]
+
+
+def reference3(args: argparse.Namespace) -> None:
+    """A depth-3 reference on the support: the depth-2 reference ``--base`` (every cell at
+    depth 2), with the cells of its root's support rectangle (each side's ``--rect``
+    heaviest) read a ply further -- each branch's child game ``--sub-limit`` wide by damage,
+    the cells of *its* support rectangle refined to depth 2 (children as wide, every
+    branch), the child game solved -- and the root matrix otherwise the base's. Written to
+    ``SET/ref-<name>/<n>.npz`` as ``d2`` (the evaluation reads it like any reference)."""
+    from pokeuraou.budget import Budget
+    from pokeuraou.equilibrium import EquilibriumError, solve
+    from pokeuraou.narrow import narrow
+    from pokeuraou.position import Position
+    from pokeuraou.search import _kept_branches, _refined_value, batched_payoff
+
+    kit = _Kit(args)
+    out = Path(args.set) / f"ref-{args.name}"
+    base_dir = Path(args.set) / f"ref-{args.base}"
+    budget = Budget.matrix()
+    for n in range(args.start, min(args.stop, len(kit.positions))):
+        path = out / f"{n}.npz"
+        if path.exists() or not (base_dir / f"{n}.npz").exists():
+            continue
+        began = time.perf_counter()
+        base = np.load(base_dir / f"{n}.npz")
+        pos = Position.from_json(kit.positions[n]["position"])
+        ours, theirs, _outside = kit.menus(pos)
+        if [a.to_choice() for a in ours] != list(base["rows"]):
+            raise SystemExit(f"position {n}: the menus are not the base reference's")
+        d3 = np.asarray(base["d2"], dtype=np.float64).copy()
+        eq = solve(d3)
+        rows, cols = _support(eq.row_strategy, args.rect), _support(eq.col_strategy, args.rect)
+        deepened = 0
+        for i in rows:
+            for j in cols:
+                notes: set[str] = set()
+                kept = _kept_branches(kit.reg, pos, ours[i], theirs[j], budget, 64, notes)
+                if kept is None:
+                    continue
+                branches, weights = kept
+                values = []
+                for branch in branches:
+                    child = branch.position
+                    if child.ended:
+                        values.append(float(np.asarray(kit.leaf([child]))[0]))
+                        continue
+                    crow = narrow(kit.reg, child, 0, limit=args.sub_limit).actions
+                    ccol = narrow(kit.reg, child, 1, limit=args.sub_limit).actions
+                    if not crow or not ccol:
+                        values = None
+                        break
+                    m, _notes = batched_payoff(kit.reg, child, crow, ccol, kit.leaf, budget=budget)
+                    m = np.asarray(m, dtype=np.float64)
+                    try:
+                        ceq = solve(m)
+                    except EquilibriumError:
+                        values = None
+                        break
+                    for ci in _support(ceq.row_strategy, args.rect):
+                        for cj in _support(ceq.col_strategy, args.rect):
+                            v, _n, _s = _refined_value(kit.reg, child, crow[ci], ccol[cj], kit.leaf,
+                                                       budget=budget, sub_limit=args.sub_limit,
+                                                       sub_branches=64)
+                            if v is not None:
+                                m[ci, cj] = v
+                    try:
+                        values.append(float(solve(m).value))
+                    except EquilibriumError:
+                        values = None
+                        break
+                if values is not None:
+                    d3[i, j] = float(np.array(values) @ weights)
+                    deepened += 1
+        out.mkdir(parents=True, exist_ok=True)
+        np.savez(path, d1=base["d1"], d2=d3, rows=base["rows"], cols=base["cols"],
+                 deepened=deepened, rect=args.rect, subLimit=args.sub_limit)
+        print(f"reference3 {n}: rectangle {len(rows)}x{len(cols)}, deepened {deepened}, "
+              f"{time.perf_counter() - began:.1f}s", file=sys.stderr, flush=True)
+
+
 def _guarantee(x: np.ndarray, m: np.ndarray) -> float:
     return float((x @ m).min())
 
@@ -217,6 +302,7 @@ def evaluate(args: argparse.Namespace) -> None:
         if x.sum() > 0:
             x /= x.sum()
         row = {"n": n, "seconds": round(took, 3), "claimed": solved.value, "outsideMass": outside_mass,
+               "x": [round(float(v), 6) for v in x],
                "depth": None if solved.deepened is None else solved.deepened.depth,
                "expanded": None if solved.deepened is None else solved.deepened.expanded}
         for label, matrix in [("d1", ref["d1"])] + [(f"d2-{k}", r["d2"]) for k, r in found.items()]:
@@ -228,6 +314,33 @@ def evaluate(args: argparse.Namespace) -> None:
         print(json.dumps({k: row[k] for k in ("n", "seconds", "depth")}
                          | {k: round(v["loss"], 4) for k, v in row.items() if k.startswith("d")
                             and isinstance(v, dict)}), file=sys.stderr, flush=True)
+
+
+def rescore(args: argparse.Namespace) -> None:
+    """Every evaluation's kept mixture scored again against every reference now present."""
+    from pokeuraou.equilibrium import solve
+
+    refs = sorted(d for d in Path(args.set).glob("ref-*") if d.is_dir())
+    best: dict = {}
+    for f in sorted((Path(args.set) / "eval").glob("*/*.json")):
+        row = json.loads(f.read_bytes())
+        if "x" not in row:
+            continue
+        n = row["n"]
+        x = np.asarray(row["x"], dtype=np.float64)
+        for d in refs:
+            ref_path = d / f"{n}.npz"
+            if not ref_path.exists():
+                continue
+            m = np.asarray(np.load(ref_path)["d2"], dtype=np.float64)
+            if (d.name, n) not in best:
+                best[d.name, n] = float(solve(m).value)
+            got = _guarantee(x, m)
+            row[f"d2-{d.name[4:]}"] = {"best": best[d.name, n], "got": got,
+                                        "loss": best[d.name, n] - got,
+                                        "curse": row["claimed"] - got}
+        _write(f, row)
+    print("rescored", file=sys.stderr)
 
 
 def report(args: argparse.Namespace) -> None:
@@ -275,7 +388,7 @@ def main(argv: list[str] | None = None) -> None:
     b.add_argument("--seed", type=int, default=36200)
     b.add_argument("--width", type=int, default=64)
     b.add_argument("--out", type=Path, required=True)
-    for name in ("reference", "evaluate"):
+    for name in ("reference", "reference3", "evaluate"):
         s = sub.add_parser(name)
         s.add_argument("--set", type=Path, required=True)
         s.add_argument("--from", dest="start", type=int, default=0)
@@ -285,17 +398,25 @@ def main(argv: list[str] | None = None) -> None:
         s.add_argument("--q-model", type=Path, default=None)
         s.add_argument("--device", default=None)
         s.add_argument("--cuda-memory-gb", type=float, default=0.8)
+        if name == "reference3":
+            s.add_argument("--name", required=True)
+            s.add_argument("--base", required=True, help="the depth-2 reference it deepens")
+            s.add_argument("--rect", type=int, default=6)
+            s.add_argument("--sub-limit", type=int, default=24)
         if name == "reference":
             s.add_argument("--name", required=True, help="the reference's name: SET/ref-<name>")
             s.add_argument("--sub-limit", type=int, default=24)
             s.add_argument("--sub-branches", type=int, default=64,
                            help="branches kept per refined cell (64: all, in practice)")
-        else:
+        elif name == "evaluate":
             s.add_argument("--arm", required=True, help="a time-match condition on the node clock")
     r = sub.add_parser("report")
     r.add_argument("--set", type=Path, required=True)
+    rs = sub.add_parser("rescore")
+    rs.add_argument("--set", type=Path, required=True)
     args = ap.parse_args(argv)
-    {"build": build, "reference": reference, "evaluate": evaluate, "report": report}[args.cmd](args)
+    {"build": build, "reference": reference, "reference3": reference3, "evaluate": evaluate,
+     "rescore": rescore, "report": report}[args.cmd](args)
 
 
 if __name__ == "__main__":
