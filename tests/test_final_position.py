@@ -183,7 +183,9 @@ def test_an_old_record_reads_as_before(finished) -> None:  # noqa: ANN001
 
 
 def test_encode_dataset_reads_both_forms(tmp_path: Path, finished) -> None:  # noqa: ANN001
-    args = argparse.Namespace(kinds=None, limit=0, force=True, regulation=None, chunk=4096)
+    args = argparse.Namespace(
+        kinds=None, limit=0, force=True, regulation=None, chunk=4096, engine="rust", jobs=1
+    )
     out = {}
     for name, game in (("new", finished), ("old", _old(finished))):
         directory = tmp_path / name

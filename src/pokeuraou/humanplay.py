@@ -32,7 +32,10 @@ width first, depth with what is left:
    count; an unmeasured count uses the nearest measured one below it, which predicts
    slow and so errs narrow.
 2. The rest of the budget deepens the root best first, hidden nodes included (the ``m``
-   reading with ``h``: `deepen.deepen_belief` / `deepen.deepen_root`).
+   reading with ``h``: `deepen.deepen_belief` / `deepen.deepen_root`), with the root's
+   swap oracle when ``Agent.oracle`` is set (IKA-307: at equal CPU, width alone beat
+   width 12 + deepening at every budget it tried, and the oracle added +14 to +23 Elo to
+   deepening; the tools set it, `PLAY_ORACLE`).
 
 **The deadline.** Two clocks, ``wall`` (the default) and ``count``:
 
@@ -86,7 +89,7 @@ import numpy as np
 from . import port
 from .actions import PassAction, SideAction, side_actions, switch_actions_after_faint, target_names
 from .budget import Budget
-from .deepen import COSTS, cells_for_seconds
+from .deepen import ALL_ACTIONS, COSTS, cells_for_seconds
 from .equilibrium import EquilibriumError, solve_bayesian
 from .hidden import (
     DEFAULT_BENCH_DROP,
@@ -101,7 +104,7 @@ from .narrow import drop_dead_actions
 from .payoff import HP_SHARE, Objective
 from .position import Position
 from .priors import SampledSet
-from .progress import SLOT_SEPARATOR, Reader, Recorder, action_label
+from .progress import Reader, Recorder, action_label, part_json, slot_part
 from .regulation import Regulation
 from .search import belief_solve, search
 from .selection_book import BenchPrior, BookEntry
@@ -127,7 +130,10 @@ from .teams import Roster, pick_four_indices
 
 #: The menu widths the rule chooses from, narrowest first. 48 is the human form IKA-32
 #: timed; 64 is about every legal action of a doubles side (48 x 44 on average, IKA-293).
-WIDTHS = (8, 12, 16, 24, 32, 48, 64)
+#: 18, 26 and 36 are IKA-307's width-only optima at its three budgets (1 game = 1.05, 1.7
+#: and 2.65 CPU seconds a player): at equal CPU, width alone beat width 12 + deepening by
+#: 16-32 Elo at each, so a small budget spends itself on the widest of these that fits.
+WIDTHS = (8, 12, 16, 18, 24, 26, 32, 36, 48, 64)
 
 #: The share of the budget the depth-1 node may be predicted to take. The rest deepens.
 WIDTH_SHARE = 0.5
@@ -247,7 +253,80 @@ class WallCost:
         return (time.perf_counter() - self.start) * 1000.0
 
 
+class HaltingCost:
+    """A reading of the deepening's budget (`WallCost` or a `deepen.Cost`) that reads as
+    spent once ``stop`` is set: the memory watch's brake on a move (IKA-343). Until then it
+    is ``inner`` to the bit, so a game it never stops is the same game."""
+
+    def __init__(self, inner: Any, stop: Any, cells: int) -> None:  # noqa: ANN401
+        self.inner = inner
+        self.stop = stop
+        self.cell = inner.cell
+        #: What the loop reads once stopped: past its budget of ``cells``.
+        self.full = float(cells + 1) * inner.cell
+        #: Whether the brake was read as set (the clock file says so).
+        self.stopped = False
+
+    def ms(
+        self, fills: int, refines: int, cells: int, probed: int = 0, qs: int = 0
+    ) -> float:
+        if self.stop.is_set():
+            self.stopped = True
+            return self.full
+        return self.inner.ms(fills, refines, cells, probed, qs)
+
+
 CLOCKS = ("wall", "count")
+
+# ----------------------------------------------------------------------------- defaults
+# What `tools/play_human.py` and `tools/play.py` play with when no flag says otherwise
+# (IKA-343): the allocation IKA-307 measured best, spread over the cores IKA-32 measured
+# useful, under IKA-334's card cap and IKA-337's memory watch.
+
+#: The root's swap oracle while deepening: every legal action (``sall``). IKA-307: at equal
+#: CPU, the oracle added +14.6 / +13.9 / +22.5 Elo to deepening alone at its three budgets,
+#: so "width first, the rest to deepening" became "the rest to deepening with the oracle"
+#: (the ``s...h`` labels). With the menu already at every legal action (width 64 on most
+#: turns) it asks nothing; it matters where the legal list is longer than the width.
+PLAY_ORACLE = ALL_ACTIONS
+
+#: The deepening's depth guard for a person's game: None is `deepen.MAX_LEVELS` (8). IKA-342
+#: measures the guard; its answer replaces this one line.
+PLAY_MAX_LEVELS: int | None = None
+
+#: Threads a move spreads over (IKA-32 stage 2: the port's cells, three worker processes
+#: expanding the deepening's cells ahead, a big game's two LPs at once, the leaf's CUDA
+#: graphs). IKA-32 §12.5: steps in the same seconds were 1.41 / 1.34 / 1.15x at 4 threads
+#: and 1.33 / 1.28 / 1.12x at 8 (5 / 15 / 45 s a move), 16 slower still; 4 also leaves the
+#: other half of an 8-core machine to the analysis mode.
+PLAY_THREADS = 4
+
+#: This process's CUDA allocator cap, and each worker process's (IKA-334's server cap: a
+#: card that fills resets instead of raising out-of-memory).
+PLAY_CUDA_MEMORY_GB = 3.5
+
+
+def default_threads(cpus: int | None = None) -> int:
+    """`PLAY_THREADS`, or fewer on a machine with fewer physical cores (half the logical
+    ones, as ``os.cpu_count`` counts them with hyper-threading)."""
+    import os
+
+    logical = cpus if cpus is not None else (os.cpu_count() or 2)
+    return max(1, min(PLAY_THREADS, logical // 2))
+
+
+def cap_cuda(gb: float, device: str | None = None) -> bool:
+    """Caps this process's CUDA allocator at ``gb`` (IKA-334; the cap moves no answer).
+    False when there is no card, the device is not CUDA, or ``gb`` is 0."""
+    if gb <= 0 or (device is not None and not str(device).startswith("cuda")):
+        return False
+    import torch
+
+    if not torch.cuda.is_available():
+        return False
+    total = torch.cuda.mem_get_info()[1]
+    torch.cuda.set_per_process_memory_fraction(min(1.0, gb * 1e9 / total))
+    return True
 
 #: From how many cells a game's two LPs are solved at once when the agent has more than
 #: one core (`equilibrium.set_lp_pair`): the root's Bayesian game of a wide menu, not the
@@ -311,12 +390,19 @@ class GraphLeaf:
 AHEAD_WORKERS_MAX = 6
 
 
-def process_leaf(reg: Regulation, values: Sequence[str] | None, device: str, graphs: bool) -> Any:  # noqa: ANN401
+def process_leaf(
+    reg: Regulation, values: Sequence[str] | None, device: str, graphs: bool,
+    cuda_memory_gb: float = 0.0,
+) -> Any:  # noqa: ANN401
     """The agent's leaf built again in a worker process (`deepen.start_workers`): the same
-    files on the same device, as `tools/play_human.py` builds it; hp-share without files."""
+    files on the same device, as `tools/play_human.py` builds it; hp-share without files.
+    ``cuda_memory_gb`` caps the worker's CUDA allocator as the tool caps its own
+    (`cap_cuda`)."""
     if not values:
         return HP_SHARE.batch
     import torch
+
+    cap_cuda(cuda_memory_gb, device)
 
     from .encode import Encoder
     from .value import BatchedValue, load_ensemble
@@ -351,11 +437,12 @@ def load_leaf(
 def use_threads(
     threads: int,
     reg: Regulation | None = None,
-    leaf: tuple[Sequence[str] | None, str, bool] | None = None,
+    leaf: tuple[Any, ...] | None = None,
 ) -> None:
     """Spread one move over `threads` cores (IKA-32): the port's cell pool (stage 1), the
     deepening's cells expanded ahead and a big game's two LPs at once (stage 2). With
-    `reg` and `leaf` (`process_leaf`'s files, device and graphs) the cells ahead are
+    `reg` and `leaf` (`process_leaf`'s files, device, graphs and optionally the CUDA
+    cap) the cells ahead are
     expanded by ``threads - 1`` worker processes (at most `AHEAD_WORKERS_MAX`), each with
     its own leaf, port and GIL; without, by helper threads in this process. None of them
     changes a move -- only how long it takes -- so a game on the count clock is the same
@@ -861,6 +948,10 @@ class Agent:
     #: the width of the menu whose rest it asks (`deepen.ALL_ACTIONS`: every legal
     #: action), or None: no oracle.
     oracle: int | None = None
+    #: A `threading.Event` the memory watch sets near a limit (IKA-343): while it is set, a
+    #: move stops deepening at its next step (`HaltingCost`) and plays the answer it has.
+    #: None: no brake. Unset, it changes no move.
+    halt: Any = None  # noqa: ANN401
 
     def __post_init__(self) -> None:
         if self.clock not in CLOCKS:
@@ -1058,7 +1149,9 @@ class HumanGame:
                 ],
                 "slots": [
                     [
-                        (s.to_choice(), s.describe(self.reg, self.loc, targets))
+                        # [choice, words, the part drawn with icons (IKA-345)]
+                        (s.to_choice(), s.describe(self.reg, self.loc, targets),
+                         part_json(slot_part(self.reg, s, pos, self.you, self.loc)))
                         for s in a.slots
                     ]
                     for a in legal
@@ -1170,8 +1263,11 @@ class HumanGame:
                     "decision": len(record.decisions) - 1,
                     "agent": agent_label,
                     "person": person_label,
-                    "agentSlots": agent_label.split(SLOT_SEPARATOR),
-                    "personSlots": person_label.split(SLOT_SEPARATOR),
+                    "agentSlots": [text for _slot, text in agent_label.parts],
+                    "personSlots": [text for _slot, text in person_label.parts],
+                    # Each part with the active slot it is for (IKA-345).
+                    "agentParts": [part_json(part) for part in agent_label.rich],
+                    "personParts": [part_json(part) for part in person_label.rich],
                     "offMenu": extra["humanOffMenu"],
                     "changes": [] if advanced is None else turn_changes(
                         reg, pos, advanced, self.you, self.loc, names=self.side_names
@@ -1245,6 +1341,8 @@ class HumanGame:
             else:
                 cost = COSTS[agent.form, agent.cores]
                 cells = cells_for_seconds(plan.deepen_ms / 1000.0, agent.cores, form=agent.form)
+            if agent.halt is not None:
+                cost = HaltingCost(cost, agent.halt, cells)
         try:
             solved = solve_move(
                 reg, pos, me, ours, theirs, spreads, agent.leaf, budget=budget, exact=exact,
@@ -1295,6 +1393,7 @@ class HumanGame:
             "predictedMs": round(plan.predicted_ms, 3),
             "deepenBudget": cells,
             **({"deepened": report} if report is not None else {}),
+            **({"memoryStop": True} if isinstance(cost, HaltingCost) and cost.stopped else {}),
         })
         own_side = (mine, strategy.tolist()) if me == 0 else ((ours), model)
         foe_side = ((theirs), model) if me == 0 else (mine, strategy.tolist())
@@ -1645,6 +1744,12 @@ def play(
         "cores": agent.cores,
         "form": agent.form,
         "widthOnly": agent.width_only,
+        # They change the game, so the game line names them -- only when set, so a game
+        # without them keeps the bytes it had before IKA-343.
+        **({"oracle": "sall" if agent.oracle >= ALL_ACTIONS else f"s{agent.oracle}"}
+           if agent.oracle is not None else {}),
+        **({"maxLevels": agent.max_levels} if agent.max_levels is not None else {}),
+        **({"childQ": agent.child_q} if agent.child_q is not None else {}),
         "rule": {
             "widths": list(WIDTHS),
             "widthShare": WIDTH_SHARE,
@@ -1687,9 +1792,14 @@ __all__ = [
     "CLOCKS",
     "MIN_DEEPEN_MS",
     "NODE_TIME",
+    "PLAY_CUDA_MEMORY_GB",
+    "PLAY_MAX_LEVELS",
+    "PLAY_ORACLE",
+    "PLAY_THREADS",
     "WIDTHS",
     "WIDTH_SHARE",
     "Agent",
+    "HaltingCost",
     "HumanGame",
     "MovePlan",
     "NodeTime",
@@ -1700,6 +1810,8 @@ __all__ = [
     "WallCost",
     "agent_pick",
     "board_view",
+    "cap_cuda",
+    "default_threads",
     "sprite_id",
     "species_types",
     "turn_changes",
