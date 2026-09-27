@@ -588,8 +588,9 @@ def _choices(actions: Sequence[SideAction]) -> tuple[str, ...]:
 
 
 #: What `prefetch` hands `q_ranking` for one side: (the choices of the pool it asked for,
-#: the other side's pool, the matrix).
-Given = tuple[tuple[str, ...], list[SideAction], np.ndarray]
+#: the other side's pool, the matrix, and a memo shared by every side that asked the same
+#: request -- where the first to solve the matrix's game leaves it, IKA-339).
+Given = tuple[tuple[str, ...], list[SideAction], np.ndarray, dict[str, Any]]
 
 
 def prefetch(
@@ -627,8 +628,12 @@ def prefetch(
     matrices = model.matrices(reg, asks)
     timing.count("q.prefetch.trips")
     timing.count("q.prefetch.requests", len(asks))
+    # IKA-339: one memo a request. Two sides that read one position and one pair of pools
+    # rank from one matrix, and so from one game: its solve is the same LP on the same
+    # numbers, and was solved twice (2.9 of 16 rankings a game in M-C generation).
+    memos: list[dict[str, Any]] = [{} for _ in asks]
     return {
-        side: (own_key, foe, matrices[index].copy())
+        side: (own_key, foe, matrices[index].copy(), memos[index])
         for side, (own_key, foe, index) in plan.items()
     }
 
@@ -662,8 +667,10 @@ def q_ranking(
     from .equilibrium import EquilibriumError, solve
 
     def rank(pool: list[SideAction], _scored: object = None) -> np.ndarray:
+        memo: dict[str, Any] | None = None
         if given is not None and pool and given[0] == _choices(pool):
             foe, q = given[1], given[2]
+            memo = given[3] if len(given) > 3 else None
             timing.count("q.prefetched")
         else:
             foe = qhead.legal_pool(reg, pos, 1 - side)
@@ -677,14 +684,24 @@ def q_ranking(
         got["cells"] += int(q.size)
         timing.count("q.rankings")
         timing.count("q.cells", int(q.size))
-        try:
-            # IKA-339: the Q's own game, as a row apart from the search's LPs (`lp`).
-            # Timing off, this is `solve` itself.
-            e = _q_solve(solve)(q)
-        except (EquilibriumError, ValueError):
+        if memo is not None and "solved" in memo:
+            # IKA-339: the other side solved this matrix's game already.
+            e = memo["solved"]
+            timing.count("q.solve.shared")
+        else:
+            try:
+                # IKA-339: the Q's own game, as a row apart from the search's LPs (`lp`).
+                # Timing off, this is `solve` itself.
+                e = _q_solve(solve)(q)
+            except (EquilibriumError, ValueError):
+                e = None
+            if memo is not None:
+                memo["solved"] = e
+        if e is None:
             # An LP that does not solve still leaves an order: the mean against every reply.
             return q.mean(axis=1) if side == 0 else -q.mean(axis=0)
-        return np.asarray(e.row_ev if side == 0 else -np.asarray(e.col_ev), dtype=np.float64)
+        # A copy each: the two sides share `e` now, and neither may hand the other's array on.
+        return np.array(e.row_ev if side == 0 else -np.asarray(e.col_ev), dtype=np.float64)
 
     return rank
 

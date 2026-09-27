@@ -796,6 +796,9 @@ def served_model(value: Any):
         # The arrays are already exactly `rows` long: the client's layout was planned from
         # the batch it is asking about, and `_views` reshapes to that plan.
         encoded = Encoded(**{name: arrays[name] for name in ARRAYS}, unknown_volatiles={})
+        if timing.ON:
+            # IKA-339: the eager passes by their size, for what a larger GRAPH_ROWS would take.
+            timing.count(f"server.eager.rows.{rows}")
         arrived = time.perf_counter()
         instance = mine()
         # Through the process's gate (`EAGER_PASSES`, IKA-334): a pass holds its
