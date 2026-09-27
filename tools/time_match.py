@@ -86,6 +86,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--bench-drop", default=DEFAULT_BENCH_DROP)
     ap.add_argument("--max-turns", type=int, default=MAX_TURNS)
     ap.add_argument("--device", default=None)
+    ap.add_argument("--cpu-workers", type=int, default=0,
+                    help="the last N of the --parallel processes score the leaf and the Q on the "
+                    "CPU (node-time runs: more games at once than the card holds; each game is "
+                    "played on one device, both seats; IKA-362)")
     ap.add_argument("--leaf-graphs", default="on", choices=("on", "off"))
     ap.add_argument("--cuda-memory-gb", type=float, default=humanplay.PLAY_CUDA_MEMORY_GB)
     ap.add_argument("--max-rss-gb", type=float, default=analysis.Limits.rss_gb)
@@ -227,6 +231,11 @@ def worker(args: argparse.Namespace) -> None:
     evaluate, encoder, device = humanplay.load_leaf(
         reg, values, args.device, graphs=args.leaf_graphs == "on"
     )
+    if str(device) == "cpu":
+        import torch
+
+        # One thread a process: the CPU processes sit beside the card's (--cpu-workers).
+        torch.set_num_threads(1)
     q = qrank.LocalQ(q_path, encoder, device=device)
     qrank.install(q)
     threads = max(tested.threads, other.threads)
@@ -484,9 +493,16 @@ def driver(args: argparse.Namespace, argv: list[str]) -> int:
             raise SystemExit(f"the SPRT of {out} has decided already: {monitor.state()['decision']}")
     monitor.save()
 
+    if args.cpu_workers and any(
+        timematch.parse_condition(spec).clock == "wall" for spec in args.arm
+    ):
+        raise SystemExit("--cpu-workers is for node-time conditions: on the wall clock it is the agent")
+
     def command(k: int, address: str) -> list[str]:
+        on_cpu = k >= args.parallel - args.cpu_workers
         return [sys.executable, str(Path(__file__).resolve()), *argv, "--worker", str(k),
-                "--address", address, "--cpus", ",".join(str(c) for c in sets[k])]
+                "--address", address, "--cpus", ",".join(str(c) for c in sets[k]),
+                *(["--device", "cpu"] if on_cpu else [])]
 
     env = dict(os.environ)
     env["PYTHONPATH"] = str(ROOT / "src")
