@@ -1584,15 +1584,83 @@ class _BeliefRoot:
         return self.signal
 
     def solve(self) -> bool:
-        """Re-solve the Bayesian game at today's prices; keep the last answer if it fails."""
+        """Re-solve the Bayesian game at today's prices; keep the last answer if it fails.
+        With a rectangle (the restricted reading, IKA-362) the rectangle is the game."""
         from .equilibrium import solve_bayesian
 
+        if self.rect is not None:
+            return self._reread()
         try:
             self.equilibrium = solve_bayesian(self.prices, self.w)
         except EquilibriumError:
             return False
         finally:
             self.signal = None
+        return True
+
+    def _reread(self) -> bool:
+        """The restricted reading of a Bayesian root (IKA-362: `_reread`, per completion).
+
+        The rectangle -- this side's rows and the other side's columns, the same in every
+        completion -- is solved as the Bayesian game; the strategy is its, extended by
+        zeros, and so is each completion's reply. The value is what the strategy guarantees
+        against every column of every completion at today's prices, weighted. Once every
+        cell of the rectangle is refined, refused or worth nothing, the whole matrices are
+        the oracle: the best row against the replies joins if it beats the rectangle's
+        value, and in each completion the best column against the strategy if it holds the
+        strategy under that completion's rectangle value. A rectangle the LP cannot solve
+        keeps the last answer.
+        """
+        from .equilibrium import BayesianEquilibrium, solve_bayesian
+
+        assert self.rect is not None
+        rows, cols = self.rect
+        try:
+            got = solve_bayesian([p[np.ix_(rows, cols)] for p in self.prices], self.w)
+        except EquilibriumError:
+            self.signal = None
+            return False
+        strategy = np.zeros(len(self.own), dtype=np.float64)
+        strategy[rows] = got.row_strategy
+        replies = []
+        for y in got.col_strategies:
+            full = np.zeros(len(self.other), dtype=np.float64)
+            full[cols] = y
+            replies.append(full)
+        row_ev = np.zeros(len(self.own), dtype=np.float64)
+        for w, p, y in zip(self.w, self.prices, replies, strict=True):
+            row_ev += w * (p @ y)
+        col_evs = [strategy @ p for p in self.prices]
+        inside = [float(strategy @ p @ y) for p, y in zip(self.prices, replies, strict=True)]
+        guarantee = float(sum(w * float(c.min()) for w, c in zip(self.w, col_evs, strict=True)))
+        self.equilibrium = BayesianEquilibrium(
+            value=guarantee,
+            row_strategy=strategy,
+            col_strategies=tuple(replies),
+            col_marginal=None,
+            row_ev=row_ev,
+            row_ev_loss=np.clip(guarantee - row_ev, 0.0, None),
+            col_ev_loss=tuple(np.clip(c - float(c.min()), 0.0, None) for c in col_evs),
+            weights=self.w,
+            duality_gap=float(got.duality_gap),
+        )
+        self.signal = None
+        signal = self.scores()
+        settled = all(
+            (k, i, j) in self.children or (k, i, j) in self.refused or signal[k, i, j] <= 0.0
+            for k in range(len(self.prices))
+            for i in rows
+            for j in cols
+        )
+        if settled:
+            best_row = int(np.argmax(row_ev))
+            rect_value = float(sum(w * v for w, v in zip(self.w, inside, strict=True)))
+            if best_row not in rows and float(row_ev[best_row]) > rect_value + ORACLE_TOLERANCE:
+                rows.append(best_row)
+            for k, c in enumerate(col_evs):
+                best_col = int(np.argmin(c))
+                if best_col not in cols and float(c[best_col]) < inside[k] - ORACLE_TOLERANCE:
+                    cols.append(best_col)
         return True
 
     def write(self, cell: tuple[int, int, int], won: float) -> None:
@@ -1971,16 +2039,32 @@ def deepen_belief(
     `grow` widens the root mid-read (IKA-354): its actions in side order, this side's
     rows and the other side's columns appended in every completion's matrix.
     """
-    if reading not in ("mixed", "breadth"):
-        raise ValueError(f"a Bayesian root is read whole or breadth only, not {reading!r}")
+    if reading not in ("mixed", "breadth", "restricted"):
+        raise ValueError(
+            f"a Bayesian root is read whole, restricted or breadth only, not {reading!r}"
+        )
     if outside is None and (swap or reading == "breadth" or q_probe is not None):
         raise ValueError(
             "swapping, breadth only and a Q's probe are the root's double oracle's; no outside"
         )
+    if reading == "restricted" and (outside is not None or grow is not None):
+        raise ValueError("the restricted reading asks the whole matrices itself: no outside, no grow")
     from .beliefnode import belief_payoffs
 
     deepens = reading != "breadth"
     root = _BeliefRoot(side, own, other, items, weights, prices, equilibrium)
+    if reading == "restricted":
+        # IKA-362: the depth-1 support's rectangle, the columns the union of every
+        # completion's heaviest, as `deepen_root`'s ``r`` takes them.
+        from .search import DEFAULT_REFINE
+
+        cols: list[int] = []
+        for y in equilibrium.col_strategies:
+            for j in _top(np.asarray(y), DEFAULT_REFINE):
+                if int(j) not in cols:
+                    cols.append(int(j))
+        root.rect = ([int(i) for i in _top(np.asarray(equilibrium.row_strategy), DEFAULT_REFINE)], cols)
+        root.solve()
     if trace is not None:
         trace.append(root)
     spreads = {1 - side: list(items)}
@@ -2077,6 +2161,8 @@ def deepen_belief(
                 node.refused.add(cell)
                 if isinstance(node, _BeliefRoot):
                     node.signal = None
+                    if node.rect is not None:
+                        node.solve()
                 refused += 1
                 if announce is not None:
                     announce("refused", expanded, deepest, refused, cell, node.level)
@@ -2265,6 +2351,11 @@ def _best(
             # in hand yet and nothing is inherited.
             scores = node.scores()
             candidates = scores.copy()
+            if node.rect is not None:
+                inside = np.zeros(candidates.shape, dtype=bool)
+                rr, cc = np.ix_(node.rect[0], node.rect[1])
+                inside[:, rr, cc] = True
+                candidates[~inside] = -np.inf
             for cell in (*node.children, *node.refused):
                 candidates[cell] = -np.inf
             if candidates.size:

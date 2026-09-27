@@ -239,3 +239,21 @@ def test_a_fixed_width_replaces_the_rule(pool) -> None:  # noqa: ANN001
 
     assert plan_move(0.1, 1, 40, 40, 3).width < 36
     assert plan_move(0.1, 1, 40, 40, 3, width=36).width == 36
+
+
+def test_the_restricted_reading_deepens_the_rectangle(pool) -> None:  # noqa: ANN001
+    """IKA-362: ``restricted`` reads the deepened root as IKA-68's ``r`` -- on the Bayesian
+    root too -- and plays; the count clock replays it."""
+    r = _cond("r", 0.4, restricted=True)
+    m = _cond("m", 0.4)
+    teams = (pool.teams[0], pool.teams[1])
+    first = timematch.play_pair(_match(pool, r, m, turns=4), 3, teams)
+    again = timematch.play_pair(_match(pool, r, m, turns=4), 3, teams)
+    assert json.dumps(_timeless(first)) == json.dumps(_timeless(again))
+    rows = [row for ln in first for row in ln["moves"] if row["condition"] == "r"]
+    deep = [row for row in rows if (row.get("deepened") or {}).get("expanded")]
+    assert deep, "no restricted move deepened"
+    hidden = [row for row in deep if row["classes"] > 1]
+    assert hidden, "no Bayesian root was read restricted"
+    # Nothing probed by the swap oracle: the restricted reading asks the matrices itself.
+    assert all("probed" not in (row.get("deepened") or {}) for row in rows)

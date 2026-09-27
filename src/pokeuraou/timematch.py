@@ -85,6 +85,13 @@ class Condition:
     #: is a board's ``d1@W``), or None: the rule.
     width: int | None = None
     child_q: int | None = None
+    #: Knock-outs forked in the move's turns (`humanplay.Agent.knockouts`, IKA-362).
+    knockouts: bool = False
+    #: The deepening's children's width and kept branches (`humanplay.Agent`, IKA-362).
+    sub_limit: int | None = None
+    sub_branches: int | None = None
+    #: The restricted reading of the deepened root (`humanplay.Agent.restricted`, IKA-362).
+    restricted: bool = False
 
     @property
     def price_cores(self) -> int:
@@ -106,6 +113,10 @@ class Condition:
             f"{'' if self.max_levels is not None else ' (unrecorded)'}"
             + (" , width only" if self.width_only else "")
             + (f", width fixed at {self.width}" if self.width is not None else "")
+            + (", knock-outs forked" if self.knockouts else "")
+            + (f", children {self.sub_limit} wide" if self.sub_limit is not None else "")
+            + (f", {self.sub_branches} branches kept" if self.sub_branches is not None else "")
+            + (", root read restricted" if self.restricted else "")
             + (f", child Q {self.child_q}" if self.child_q is not None else "")
         )
 
@@ -118,7 +129,7 @@ class Condition:
 
 #: The keys a condition is written with, and what each one parses.
 CONDITION_KEYS = ("seconds", "threads", "cores", "clock", "oracle", "levels", "width_only",
-                  "width", "child_q")
+                  "width", "child_q", "knockouts", "sub_limit", "sub_branches", "restricted")
 
 
 def _oracle(spec: str) -> int | None:
@@ -179,8 +190,8 @@ def parse_condition(spec: str) -> Condition:
             got["max_levels"] = int(value) or None
         elif key == "child_q":
             got["child_q"] = int(value)
-        elif key == "width":
-            got["width"] = int(value)
+        elif key in ("width", "sub_limit", "sub_branches"):
+            got[key] = int(value)
         else:
             got[key] = _flag(value)
     if "seconds" not in got:
@@ -362,6 +373,8 @@ class Match:
             seconds=condition.seconds, cores=condition.price_cores, clock=condition.clock,
             rank_fill=self.rank_fill, rank_by_leaf=self.rank_by_leaf, bench_drop=self.bench_drop,
             width_only=condition.width_only, width=condition.width,
+            knockouts=condition.knockouts, sub_limit=condition.sub_limit,
+            sub_branches=condition.sub_branches, restricted=condition.restricted,
             max_levels=condition.max_levels,
             child_q=condition.child_q, oracle=condition.oracle, halt=self.halt,
             # Off, as a person's game plays by default (the module's docstring).

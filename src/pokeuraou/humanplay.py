@@ -1147,6 +1147,20 @@ class Agent:
     #: `WIDTH_SHARE` (the menus of the same ranking), the tree kept (`deepen.Grow`), and
     #: the rest of the budget deepens the wider root.
     widen: tuple[float, float] | None = None
+    #: Fork the knock-outs a crit or a high roll decides in every turn this move resolves --
+    #: the depth-1 matrix and each deepened cell (IKA-359's `Budget.enumerate_knockouts`;
+    #: IKA-362 asks whether the deepening's values need it). False: `Budget.matrix()`.
+    knockouts: bool = False
+    #: The deepening's children: each side's menu width in a refined cell's child games
+    #: (`narrow`'s damage order; `child_q` ranks by the Q instead) and how many of the
+    #: refined turn's likeliest branches are kept (IKA-362). None: `search`'s defaults (8, 3).
+    sub_limit: int | None = None
+    sub_branches: int | None = None
+    #: Read the deepened root the restricted way (IKA-68's ``r``: the depth-1 support's
+    #: rectangle deepened, the whole matrix its oracle; on a Bayesian root the same per
+    #: completion) instead of the whole mixed-depth matrix (IKA-362). The root's swap
+    #: oracle goes with the whole reading, so it is not asked.
+    restricted: bool = False
     #: Read on while the person chooses (IKA-344, `PonderCost`): the person is asked when
     #: the move starts, and the move deepens until they have chosen -- its budget first,
     #: `ponder_seconds` at most. False: the agent chooses first, then the person is asked.
@@ -1236,6 +1250,9 @@ def solve_move(
     progress: Callable[[Any], None] | None = None,
     discount: float | None = None,
     grow: Any = None,  # noqa: ANN401 - deepen.Grow
+    sub_limit: int | None = None,
+    sub_branches: int | None = None,
+    restricted: bool = False,
 ) -> SolvedMove:
     """Side ``me``'s answer on the menus ``ours`` (side 0's) x ``theirs`` (side 1's): the
     open game (`search`) when ``exact``, else its Bayesian game over the other side's
@@ -1246,13 +1263,19 @@ def solve_move(
     What `HumanGame` asks at each move, and what the analysis mode asks with no budget
     (IKA-337). Raises `EquilibriumError` as the solves do."""
     you = 1 - me
+    # The deepening's children, when given (IKA-362); else `search`'s defaults.
+    subs = {k: v for k, v in (("sub_limit", sub_limit), ("sub_branches", sub_branches))
+            if v is not None}
     if exact:
         got = search(
-            reg, pos, ours, theirs, leaf, budget=budget,
+            reg, pos, ours, theirs, leaf, budget=budget, **subs,
             **(
                 {"deepen": cells, "deepen_cost": cost, "levels": levels,
-                 "child_q": child_q, "outside": outside,
-                 "swap": outside is not None, "discount": discount,
+                 "child_q": child_q, "discount": discount,
+                 # The restricted reading asks the whole matrix as its oracle; the
+                 # root's swap oracle goes with the mixed reading only (IKA-362).
+                 **({"solve_restricted": True} if restricted else
+                    {"outside": outside, "swap": outside is not None}),
                  **({"grow": grow} if grow is not None else {})}
                 if cells else {}
             ),
@@ -1268,10 +1291,12 @@ def solve_move(
     assert spreads is not None
     answers = belief_solve(
         reg, pos, ours, theirs, spreads,
-        {me: leaf, you: _not_asked}, budget=budget, sides=(me,),
+        {me: leaf, you: _not_asked}, budget=budget, sides=(me,), **subs,
         deepen=(
-            {me: {"cells": cells, "reading": "mixed", "swap": outside is not None,
-                  "outside": outside, "cost": cost, "levels": levels,
+            {me: {"cells": cells, "cost": cost, "levels": levels,
+                  # The restricted reading asks the whole matrices itself (IKA-362).
+                  **({"reading": "restricted"} if restricted else
+                     {"reading": "mixed", "swap": outside is not None, "outside": outside}),
                   "child_q": child_q, "discount": discount,
                   **({"grow": grow} if grow is not None else {})}}
             if cells else None
@@ -1648,6 +1673,10 @@ class HumanGame:
             if first.width < plan.width and first.deepen_ms > 0:
                 later, plan = plan.width, first
         budget = Budget.matrix()
+        if agent.knockouts:
+            from dataclasses import replace as _replace
+
+            budget = _replace(budget, enumerate_knockouts=True)
         wider: dict[int, tuple[list[SideAction], list[SideAction]]] = {}
         wide = [agent.oracle] if agent.oracle is not None and plan.deepen_ms > 0 else []
         ours, theirs = _menus(
@@ -1704,6 +1733,8 @@ class HumanGame:
             solved = solve_move(
                 reg, pos, me, ours, theirs, spreads, agent.leaf, budget=budget, exact=exact,
                 cells=cells, cost=cost, levels=agent.max_levels, child_q=agent.child_q,
+                sub_limit=agent.sub_limit, sub_branches=agent.sub_branches,
+                restricted=agent.restricted,
                 outside=outside, progress=progress, grow=grow,
             )
         except EquilibriumError:
