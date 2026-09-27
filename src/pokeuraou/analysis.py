@@ -61,6 +61,7 @@ from .humanplay import (
     solve_entry,
     solve_move,
 )
+from .notes_ja import notes_ja
 from .payoff import HP_SHARE
 from .position import Position
 from .progress import Reader, Recorder
@@ -125,6 +126,10 @@ class Point:
     turn: int
     position: dict[str, Any]
     seen: tuple[frozenset[str], frozenset[str]]
+    #: The record's value at this decision, side 0's (``searchValue``), where it has one.
+    value: float | None = None
+    #: The actions each side played here (choice strings, side 0's first), where recorded.
+    played: tuple[str | None, str | None] = (None, None)
 
     def pos(self) -> Position:
         return Position.from_json(self.position)
@@ -195,10 +200,37 @@ def _points(record: dict[str, Any]) -> list[Point]:
         if decision.get("kind") != "move":
             continue
         shown = decision.get("shownIdentities") or decision.get("shown") or [[], []]
+        value = decision.get("searchValue")
         out.append(Point(
             decision=index, turn=int(decision["turn"]), position=decision["position"],
             seen=(frozenset(shown[0]), frozenset(shown[1])),
+            value=None if value is None else float(value),
+            played=(decision.get("ownChosen"), decision.get("foeChosen")),
         ))
+    return out
+
+
+def _played(
+    reg: Regulation, pos: Position, point: Point, me: int, loc: Any  # noqa: ANN401
+) -> list[dict[str, Any]]:
+    """The actions the record played at ``point``, the reading side's first (IKA-349): each
+    side, its label's text (as the reading labels its menus, so the page finds it there) and
+    parts. A side with no recorded action, or one the legal actions do not parse, is left out."""
+    from .actions import side_actions
+    from .humanplay import parse_choice
+    from .progress import action_label, part_json
+
+    out = []
+    for side in (me, 1 - me):
+        choice = point.played[side]
+        if not choice:
+            continue
+        try:
+            action = parse_choice(choice, side_actions(reg, pos, side))
+        except (ValueError, KeyError, IndexError):
+            continue
+        label = action_label(reg, action, pos, side, loc)
+        out.append({"side": side, "text": str(label), "parts": [part_json(p) for p in label.rich]})
     return out
 
 
@@ -818,10 +850,12 @@ class Analyzer:
         if on_session is not None:
             on_session(session)
         state = {
+            "played": _played(reg, pos, point, me, self.loc),
             "state": "running", "run": run, "turn": pos.turn, "side": me,
             "width": settings.width, "oracle": settings.oracle_label(), "guard": settings.levels,
             "exact": exact, "classCount": classes, "menu": [len(ours), len(theirs)],
-            "maxSteps": max_steps, "maxSeconds": max_seconds, "notes": list(notes),
+            "maxSteps": max_steps, "maxSeconds": max_seconds,
+            "notes": notes_ja(self.loc, notes), "notesRaw": list(notes),
             **(tag or {}),
         }
         emit("analysis", state)
@@ -887,7 +921,8 @@ class Analyzer:
             **state, "state": "done", "stop": reason, "stopText": STOPS.get(reason, reason),
             "why": session.why, "steps": session.steps, "seconds": seconds,
             "guardLines": session.guard_count, "nodes": session.nodes,
-            "notes": result.notes,
+            # The page reads them in Japanese (IKA-349); `--out` keeps the port's own.
+            "notes": notes_ja(self.loc, result.notes), "notesRaw": list(result.notes),
         })
         return result
 
@@ -987,7 +1022,8 @@ class Service:
                         "open": game.teams is None or game.information == "open",
                         "note": game.note,
                         "decisions": [
-                            {"index": k, "decision": p.decision, "turn": p.turn}
+                            {"index": k, "decision": p.decision, "turn": p.turn,
+                             "value": p.value}
                             for k, p in enumerate(game.points)
                         ],
                     }

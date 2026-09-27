@@ -16,13 +16,58 @@
 <body>
 <header class="top">
   <div class="brand"><b>pokeuraou</b><span>対局と読み</span></div>
+  <span class="seg modeseg" role="group" aria-label="画面">
+    <a class="segb" id="modeGame" aria-current="page" target="pokeuraou-game">対戦</a><a class="segb" id="modeAnalysis" target="pokeuraou-analysis">分析</a>
+  </span>
+  <span class="grow"></span>
   <div id="status" class="status">接続中…</div>
-  <div class="tools">
-    <label class="tool" for="hide"><input type="checkbox" id="hide"> 手を入れるまで読みを隠す</label>
-    <button class="tool" id="theme" type="button" aria-label="テーマを切り替える">テーマ: 自動</button>
-  </div>
+  <button class="gear" id="gear" type="button" aria-label="設定" title="設定" aria-expanded="false" aria-controls="settings">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"
+      d="M10.3 3h3.4l.5 2.4a7 7 0 0 1 1.9 1.1l2.3-.8 1.7 2.9-1.8 1.6a7 7 0 0 1 0 2.2l1.8 1.6-1.7 2.9-2.3-.8a7 7 0 0 1-1.9 1.1l-.5 2.4h-3.4l-.5-2.4a7 7 0 0 1-1.9-1.1l-2.3.8-1.7-2.9 1.8-1.6a7 7 0 0 1 0-2.2L3.9 8.6l1.7-2.9 2.3.8a7 7 0 0 1 1.9-1.1z"/>
+      <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+  </button>
 </header>
+<div class="backdrop" id="settingsBackdrop" hidden></div>
+<section class="settings" id="settings" role="dialog" aria-modal="false" aria-labelledby="settingsTitle" hidden>
+  <div class="grip" aria-hidden="true"></div>
+  <div class="shead"><h2 id="settingsTitle">設定</h2><button type="button" class="ghost small" id="settingsClose">閉じる</button></div>
+  <div class="sgroup">
+    <h3>表示</h3>
+    <span class="seg" role="group" aria-label="テーマ" id="themeSeg"><button type="button" data-t="auto">自動</button><button type="button" data-t="light">ライト</button><button type="button" data-t="dark">ダーク</button></span>
+  </div>
+  <div class="sgroup" id="readGroup">
+    <h3>AI の読み</h3>
+    <span class="seg" role="group" aria-label="AI の読み" id="readSeg">
+      <button type="button" data-v="show">見せる</button><button type="button" data-v="until">手を送るまで隠す</button><button type="button" data-v="off">隠す</button>
+    </span>
+    <p class="note" id="readHelp"></p>
+  </div>
+  <div class="sgroup" id="engineGroup" hidden>
+    <h3>読みの設定</h3>
+    <div class="pickrow">
+      <label class="field">記録<select id="aSource"></select></label>
+      <label class="field">読む側<select id="aSide"><option value="0">側 0</option><option value="1">側 1</option></select></label>
+      <label class="field num">幅<input id="aWidth" type="number" min="1" max="256" inputmode="numeric"></label>
+      <label class="field num">深さの上限<input id="aGuard" type="number" min="1" max="999" inputmode="numeric"></label>
+    </div>
+    <p class="note" id="aSettings"></p>
+    <div class="sendbar"><button type="button" class="ghost" id="aRefresh">記録を読み直す</button><span class="gap"></span><button type="button" class="primary" id="aReread">この設定で読み直す</button></div>
+    <details class="fold" id="meterBox"><summary><b>読みの量</b><small id="meterSum">経過・深化のステップ・木・メモリ</small></summary><div class="meters" id="aMeters"></div></details>
+  </div>
+</section>
 <main class="layout">
+  <section class="panel" id="timelineBox" aria-label="対局全体の値の推移" hidden>
+    <div class="nav">
+      <button type="button" class="step" id="tPrev" title="1 ターン戻る（←）" aria-label="1 ターン戻る">◀</button>
+      <span class="t" id="tTurn">–</span>
+      <button type="button" class="step" id="tNext" title="1 ターン進める（→）" aria-label="1 ターン進める">▶</button>
+      <label class="gamepick"><span class="sr">局</span><select id="aGame" aria-label="局"></select></label>
+      <small id="tLabel"></small>
+    </div>
+    <svg class="tl-svg" id="tSvg" role="img" aria-label="対局全体の値の推移"></svg>
+    <div class="tl-turns" id="tTurns"></div>
+    <p class="note tl-legend"><span class="lg rec"></span>記録の値　<span class="lg read"></span>このページで読んだ値　<span class="lg gap"></span>値の無いターン</p>
+  </section>
   <section class="stage" id="stage" aria-label="場">
     <div class="side" id="sideTop"></div>
     <div class="fieldbar" id="fieldbar"><div class="turnno"><span>ターン</span><b>–</b></div></div>
@@ -30,29 +75,23 @@
     <div class="result" id="result" hidden></div>
   </section>
 
-  <section class="panel" id="analysisBox" aria-label="検討する局面" hidden>
-    <h2>検討する局面</h2>
-    <div class="pickrow">
-      <label class="field">記録<select id="aSource"></select></label>
-      <label class="field wide">局<select id="aGame"></select></label>
-      <label class="field">ターン<span class="stepper"><button type="button" class="step" id="aPrev" title="1 ターン戻る（←）" aria-label="1 ターン戻る">◀</button><select id="aTurn"></select><button type="button" class="step" id="aNext" title="1 ターン進める（→）" aria-label="1 ターン進める">▶</button></span></label>
-      <label class="field">読む側<select id="aSide"><option value="0">側 0</option><option value="1">側 1</option></select></label>
-    </div>
-    <div class="pickrow">
-      <label class="field num">幅<input id="aWidth" type="number" min="1" max="256" inputmode="numeric"></label>
-      <label class="field num">深さの上限<input id="aGuard" type="number" min="1" max="999" inputmode="numeric"></label>
-      <span class="note" id="aSettings"></span>
-    </div>
+  <section class="panel" id="playedBox" aria-label="このターンに打った手" hidden>
+    <h2>このターンに打った手 <small>読んだ均衡の中での確率と損</small></h2>
+    <div class="played" id="played"><span class="note">読むと出ます</span></div>
     <p class="note" id="aGameNote"></p>
-    <div class="sendbar">
-      <button type="button" class="ghost" id="aRefresh">記録を読み直す</button>
-      <span class="gap"></span>
-      <button type="button" class="stop" id="aStop" disabled>止める</button>
-      <button type="button" class="primary" id="aGo" disabled>この局面を読む</button>
-    </div>
-    <div class="meters" id="aMeters"></div>
     <p class="note" id="aNote"></p>
+    <ul class="notes" id="aNotes"></ul>
   </section>
+
+  <div class="hiddenbar" id="hiddenBar" hidden>AI の読みは隠しています（対局のあと、分析の画面で見られます）<button type="button" class="ghost" id="showRead">見せる</button></div>
+
+  <!-- The analysis page's turn and its two buttons: the page drives them (the timeline's ◀ ▶ and the
+       reading's own buttons show them). -->
+  <div id="analysisBox" hidden>
+    <select id="aTurn"></select>
+    <button type="button" id="aPrev" tabindex="-1">◀</button><button type="button" id="aNext" tabindex="-1">▶</button>
+    <button type="button" id="aStop" disabled tabindex="-1">止める</button><button type="button" id="aGo" disabled tabindex="-1">この局面を読む</button>
+  </div>
 
   <section class="panel" id="inputBox" aria-label="あなたの入力">
     <h2>あなたの手</h2>
@@ -60,7 +99,7 @@
   </section>
 
   <section class="panel" id="reading" aria-label="AI の読み">
-    <div class="rhead"><h2 id="readingTitle">AI の読み</h2><span class="rtools"><span class="clocktext n" id="clocktext">–</span><button type="button" class="stop small" id="stopTop" hidden>止める</button></span></div>
+    <div class="rhead"><h2 id="readingTitle">AI の読み</h2><span class="rtools"><span class="clocktext n" id="clocktext">–</span><button type="button" class="stop small" id="stopTop" hidden>止める</button><button type="button" class="primary small" id="goTop" hidden>この局面を読む</button></span></div>
     <div class="clockbar" id="clockbar"><i></i></div>
     <div class="rbody">
       <div class="balance">
@@ -86,10 +125,9 @@
     </div>
   </section>
 
-  <section class="panel" id="logBox" aria-label="経過">
-    <h2>経過</h2>
+  <details class="panel" id="logBox" aria-label="経過" open><summary>経過</summary>
     <ol class="log" id="log"></ol>
-  </section>
+  </details>
 
   <details class="panel" id="sheetsBox"><summary>チーム（公開の情報）</summary><div class="sheets" id="sheets"></div></details>
 </main>
