@@ -779,6 +779,50 @@ def score_segments(
     return [np.asarray(one(segment), dtype=np.float64) for segment in segments]
 
 
+def score_stacked(
+    evaluate: Callable[[list[Position]], np.ndarray], segments: Sequence[Any]
+) -> list[np.ndarray]:
+    """Every encoded block's values from *one* forward pass over all their rows (IKA-367).
+
+    Not `score_segments`: a row's value moves with the rows that share its pass (5.96e-08 on
+    the card), so this is a different leaf to the last places, and only a reading that has
+    no earlier games to keep (the ladder, off by default) takes it. What it buys is the
+    passes: a depth-3 stage's child games are a few dozen rows each, and one pass a block
+    paid for the call, not the rows. A leaf with no encoded road is `score_segments`'."""
+    owner = getattr(evaluate, "__self__", evaluate)
+    one = getattr(owner, "from_encoded", None)
+    blocks = list(segments)
+    if one is None or len(blocks) < 2:
+        return score_segments(evaluate, blocks)
+    from .encode import Encoded
+
+    decided = ([b.decided for b in blocks] if all(b.decided is not None for b in blocks)
+               else None)
+    unknown: dict[str, int] = {}
+    for b in blocks:
+        for key, n in b.unknown_volatiles.items():
+            unknown[key] = unknown.get(key, 0) + n
+    stacked = Encoded(
+        species=np.concatenate([b.species for b in blocks]),
+        ability=np.concatenate([b.ability for b in blocks]),
+        item=np.concatenate([b.item for b in blocks]),
+        moves=np.concatenate([b.moves for b in blocks]),
+        mon=np.concatenate([b.mon for b in blocks]),
+        mask=np.concatenate([b.mask for b in blocks]),
+        side=np.concatenate([b.side for b in blocks]),
+        field=np.concatenate([b.field for b in blocks]),
+        unknown_volatiles=unknown,
+        decided=None if decided is None else np.concatenate(decided),
+    )
+    values = np.asarray(one(stacked), dtype=np.float64)
+    out = []
+    at = 0
+    for b in blocks:
+        out.append(values[at:at + len(b)])
+        at += len(b)
+    return out
+
+
 class HeldLeaves:
     """Cells resolved by the port and scored here: `resolve.HeldLeaves` on the port's turns."""
 

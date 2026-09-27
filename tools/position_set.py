@@ -89,9 +89,30 @@ DEFAULT_VALUE = ("data/models/value-mc1.pt", "data/models/value-mc1-s1.pt")
 DEFAULT_Q = "data/models/q-mc0.pt"
 
 
-def _mine(args: argparse.Namespace, count: int) -> range:
-    """This process's positions: ``--from``..``--to``, every ``--stride``-th from ``--offset``."""
-    return range(args.start + args.offset, min(args.stop, count), args.stride)
+def _mine(args: argparse.Namespace, count: int):  # noqa: ANN201 - an iterator of positions
+    """This process's positions: ``--from``..``--to``, every ``--stride``-th from ``--offset``,
+    or with ``--claim`` each one no other process has claimed yet (`_units`)."""
+    return _units(args, list(range(args.start, min(args.stop, count))))
+
+
+def _units(args: argparse.Namespace, units: list):  # noqa: ANN201 - an iterator of units
+    """The units of work this process takes. ``--claim DIR``: in order, each one whose claim
+    file it creates first (processes pulling from one queue, so a slow unit holds up only
+    its own process); else every ``--stride``-th from ``--offset``."""
+    import os
+
+    if getattr(args, "claim", None) is None:
+        yield from units[args.offset::args.stride]
+        return
+    claims = Path(args.claim)
+    claims.mkdir(parents=True, exist_ok=True)
+    for unit in units:
+        name = "-".join(str(u) for u in unit) if isinstance(unit, tuple) else str(unit)
+        try:
+            os.close(os.open(claims / name, os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+        except FileExistsError:
+            continue
+        yield unit
 
 
 def _write(path: Path, payload: dict) -> None:
@@ -198,7 +219,9 @@ class _Kit:
         values = args.value or [repo_root() / p for p in DEFAULT_VALUE]
         humanplay.cap_cuda(args.cuda_memory_gb, args.device)
         self.leaf, encoder, self.device = humanplay.load_leaf(
-            self.reg, [Path(v) for v in values], args.device, graphs=False)
+            self.reg, [Path(v) for v in values], args.device,
+            # CUDA graphs as a person's game loads the leaf (IKA-367's timing), else off.
+            graphs=bool(getattr(args, "leaf_graphs", False)))
         if str(self.device) == "cpu":
             import torch
 
@@ -575,8 +598,21 @@ def _deep_cell(kit, pos, a, b, budget, args, work: dict) -> float | None:  # noq
     return float(np.asarray(values) @ weights)
 
 
-def deep(args: argparse.Namespace) -> None:
-    """The long reference (the module's docstring, IKA-367)."""
+def _from_choices(reg, pos, side: int, choices) -> list:  # noqa: ANN001
+    """A side's menu from its recorded choice strings, in that order."""
+    from pokeuraou.actions import side_actions
+
+    legal = {a.to_choice(): a for a in side_actions(reg, pos, side)}
+    missing = [c for c in choices if str(c) not in legal]
+    if missing:
+        raise SystemExit(f"choices not legal here: {missing[:3]}")
+    return [legal[str(c)] for c in choices]
+
+
+def deep(args: argparse.Namespace) -> None:  # noqa: C901 - the units and their assembly
+    """The long reference (the module's docstring, IKA-367). The work is one unit per
+    completion of a position (an open position is one): each writes its part, and the unit
+    that finds every part of its position present writes the position's reference."""
     from dataclasses import replace
 
     from pokeuraou import search
@@ -586,52 +622,65 @@ def deep(args: argparse.Namespace) -> None:
 
     kit = _Kit(args)
     out = Path(args.set) / f"ref-{args.name}"
+    parts = out / "parts"
     base_dir = Path(args.set) / f"ref-{args.base}"
     budget = replace(Budget.matrix(), enumerate_knockouts=True)
-    for n in _mine(args, len(kit.positions)):
-        path = out / f"{n}.npz"
-        if path.exists() or not (base_dir / f"{n}.npz").exists():
+    units = []
+    for n in range(args.start, min(args.stop, len(kit.positions))):
+        if (out / f"{n}.npz").exists() or not (base_dir / f"{n}.npz").exists():
+            continue
+        spreads = kit.positions[n].get("spreads")
+        units += [(n, k) for k in range(1 if spreads is None else len(spreads["1"]))]
+    for n, k in _units(args, units):
+        if (parts / f"{n}-{k}.npz").exists():
             continue
         began = time.perf_counter()
         base = np.load(base_dir / f"{n}.npz")
         pos = Position.from_json(kit.positions[n]["position"])
         spreads = kit.spreads(n)
-        ours, theirs, _outside = kit.menus(pos, spreads)
-        if [a.to_choice() for a in ours] != list(base["rows"]):
-            raise SystemExit(f"position {n}: the menus are not the base reference's")
+        # The base's own menus, read back from its choices: the same actions whatever device
+        # this process's leaf and Q are on (a CPU process ranks a hair differently).
+        ours, theirs = (_from_choices(kit.reg, pos, side, base[key])
+                        for side, key in ((0, "rows"), (1, "cols")))
         # One matrix per completion (an open position is one of weight 1): the rectangle is
         # the base's Bayesian answer's -- one row set, a column set per completion.
         mats, w = _game(base["d2"], base.get("weights", None))
-        worlds = [pos] if spreads is None else [c.position for c in spreads[1]]
+        world = pos if spreads is None else spreads[1][k].position
         eq = solve_bayesian(mats, w)
         rows = _rectangle(eq.row_strategy, eq.row_ev, args.rect, larger=True)
-        cols = [_rectangle(y, eq.row_strategy @ m, args.rect, larger=False)
-                for y, m in zip(eq.col_strategies, mats, strict=True)]
+        cols = _rectangle(eq.col_strategies[k], eq.row_strategy @ mats[k], args.rect,
+                          larger=False)
         work = {"turns": 0, "subgames": 0, "cells": 0, "qs": 0}
         search.WORK = work
-        deepened = 0
-        mask = [np.zeros(m.shape, dtype=bool) for m in mats]
+        mask = np.zeros(mats[k].shape, dtype=bool)
         try:
-            for k, world in enumerate(worlds):
-                for i in rows:
-                    for j in cols[k]:
-                        v = _deep_cell(kit, world, ours[i], theirs[j], budget, args, work)
-                        if v is not None:
-                            mats[k][i, j] = v
-                            mask[k][i, j] = True
-                            deepened += 1
+            for i in rows:
+                for j in cols:
+                    v = _deep_cell(kit, world, ours[i], theirs[j], budget, args, work)
+                    if v is not None:
+                        mats[k][i, j] = v
+                        mask[i, j] = True
         finally:
             search.WORK = None
-        out.mkdir(parents=True, exist_ok=True)
         took = time.perf_counter() - began
-        hidden = spreads is not None
-        np.savez(path, d1=base["d1"], d2=np.stack(mats) if hidden else mats[0],
-                 rows=base["rows"], cols=base["cols"],
-                 deep=np.stack(mask) if hidden else mask[0], rect=args.rect,
-                 childRect=args.child_rect, grand=args.grand, seconds=took,
-                 work=json.dumps(work), **({"weights": w} if hidden else {}))
-        print(f"deep {n}: rectangle {len(rows)}x{[len(c) for c in cols]}, deepened {deepened}, "
+        parts.mkdir(parents=True, exist_ok=True)
+        tmp = parts / f"{n}-{k}.tmp.npz"
+        np.savez(tmp, d2=mats[k], deep=mask, seconds=took, work=json.dumps(work))
+        tmp.replace(parts / f"{n}-{k}.npz")
+        print(f"deep {n}/{k}: rectangle {len(rows)}x{len(cols)}, deepened {int(mask.sum())}, "
               f"{took:.1f}s, work {work}", file=sys.stderr, flush=True)
+        kinds = len(mats)
+        if all((parts / f"{n}-{kk}.npz").exists() for kk in range(kinds)):
+            got = [np.load(parts / f"{n}-{kk}.npz") for kk in range(kinds)]
+            hidden = spreads is not None
+            d2 = np.stack([g["d2"] for g in got]) if hidden else got[0]["d2"]
+            m = np.stack([g["deep"] for g in got]) if hidden else got[0]["deep"]
+            tmp = out / f"{n}.tmp.npz"
+            np.savez(tmp, d1=base["d1"], d2=d2, rows=base["rows"], cols=base["cols"], deep=m,
+                     rect=args.rect, childRect=args.child_rect, grand=args.grand,
+                     seconds=sum(float(g["seconds"]) for g in got),
+                     **({"weights": w} if hidden else {}))
+            tmp.replace(out / f"{n}.npz")
 
 
 def _game(matrix, weights=None) -> tuple[list[np.ndarray], np.ndarray]:  # noqa: ANN001
@@ -1041,6 +1090,8 @@ def main(argv: list[str] | None = None) -> None:
         s.add_argument("--to", dest="stop", type=int, default=10**9)
         s.add_argument("--stride", type=int, default=1, help="every k-th position (IKA-367)")
         s.add_argument("--offset", type=int, default=0, help="from the start plus this")
+        s.add_argument("--claim", default=None,
+                       help="a directory of claims: processes pull units from one queue")
         s.add_argument("--pool", default="regmc-matchupweb")
         s.add_argument("--value", type=Path, nargs="+", default=None)
         s.add_argument("--q-model", type=Path, default=None)

@@ -554,7 +554,7 @@ def _read_cells(  # noqa: PLR0913 - the cells and how they are read
     try:
         found = search._refine_cells(reg, asked, leaf, budget=budget, sub_limit=stage.child,
                                      sub_branches=stage.branches, shares=shares,
-                                     child_q=stage.child if stage.q else None)
+                                     child_q=stage.child if stage.q else None, stack=STACK)
     except port.PortRefused:
         if len(cells) == 1:
             unmodelled.add("ladder: the port refused a refined cell; it keeps its price")
@@ -607,6 +607,17 @@ def _deep_cell(  # noqa: PLR0913 - one cell and its stage
     else:
         menus = iter([(narrow(reg, p, 0, limit=stage.child).actions,
                        narrow(reg, p, 1, limit=stage.child).actions) for p in live])
+    if BATCH_CHILDREN and stage.sub.sub is None and work is not None:
+        listed = list(menus)
+        mark = dict(work)
+        got = _children_at_once(reg, branches, weights, listed, leaf, stage, root_budget, budget,
+                                unmodelled, stop, work)
+        if got is not _ALONE:
+            return got
+        # Something the one-at-a-time road meets on its own terms: take it, as it was.
+        work.clear()
+        work.update(mark)
+        menus = iter(listed)
     values = []
     for branch in branches:
         child = branch.position
@@ -646,6 +657,187 @@ def _deep_cell(  # noqa: PLR0913 - one cell and its stage
 class _Start:
     row_strategy: np.ndarray
     col_strategies: list[np.ndarray]
+
+
+#: Read a depth-3 cell's children together (IKA-367): their matrices in one crossing and one
+#: call to the leaf, and each pass of their depth-2 stages as one `search._refine_cells`
+#: (the Q asked in the groups the one-at-a-time road asks it in). The same values, the same
+#: counted work; off reads every child as a root of its own (`read`), the reference.
+BATCH_CHILDREN = True
+
+#: Score the leaves a stage gathers in one forward pass (`port.score_stacked`) rather than
+#: a pass per child game (IKA-367; the user's call on 9/28: the ladder is new and off by
+#: default, so it has no games to keep to the last bit, and a reading is not slowed for a
+#: determinism it does not need). Deterministic still: the same position, clock and budget
+#: give the same answer, whatever the threads. Off: `score_segments`, each game's pass its
+#: own, the answer `BATCH_CHILDREN` must match to the bit.
+STACK = True
+
+#: `_children_at_once`'s answer when a child needs the one-at-a-time road: a side with no
+#: action, a refused node or cell, an unsolvable matrix.
+_ALONE = object()
+
+
+@dataclass
+class _Child:
+    """One live child of a depth-3 cell, read by its stage (`read` with one stage, K = 1)."""
+
+    position: Position
+    row: list
+    col: list
+    prices: np.ndarray
+    x: np.ndarray
+    y: np.ndarray
+    rows: list[int] = field(default_factory=list)
+    cols: list[int] = field(default_factory=list)
+    trial: np.ndarray | None = None
+    memo: dict = field(default_factory=dict)
+    answer: tuple | None = None
+    active: bool = True
+
+
+def _children_at_once(  # noqa: PLR0913, PLR0912, C901 - a cell's children through one stage
+    reg: Any,  # noqa: ANN401
+    branches: list,
+    weights: np.ndarray,
+    menus: list,
+    leaf: Any,  # noqa: ANN401
+    stage: Stage,
+    root_budget: Budget,
+    budget: Budget,
+    unmodelled: set[str],
+    stop: Any,  # noqa: ANN401
+    work: dict[str, int],
+) -> float | None | object:
+    """`_deep_cell`'s loop over the children with ``stage.sub`` of depth 2, every child at once
+    (`BATCH_CHILDREN`): each step is `read`'s for one child, the arithmetic written the same
+    way, so each child's value is the one its own `read` gives. `_ALONE` where that road
+    would stop or fall back on its own."""
+    sub = stage.sub
+    kids: list[_Child] = []
+    listed = iter(menus)
+    for branch in branches:
+        if branch.position.ended:
+            continue
+        crow, ccol = next(listed)
+        if not crow or not ccol:
+            return _ALONE
+        kids.append(_Child(branch.position, list(crow), list(ccol), None, None, None))
+    if stop is not None and stop.is_set():
+        raise Stopped
+    if kids:
+        pending = port.pending_payoffs(reg, [(k.position, k.row, k.col) for k in kids], leaf,
+                                       budget=budget)
+        if pending is None or any(isinstance(p, port.PortRefused) for p in pending):
+            return _ALONE
+        scores = (port.score_stacked if STACK else port.score_segments)(
+            leaf, [p.encoded for p in pending])
+        for p, got in zip(pending, scores, strict=True):
+            p.scored(got)
+        for kid, p in zip(kids, pending, strict=True):
+            m = np.asarray(p.finish(), dtype=np.float64)
+            try:
+                eq = solve(m)
+            except EquilibriumError:
+                return _ALONE
+            unmodelled.update(p.unmodelled)
+            work["subgames"] += 1
+            work["cells"] += m.size
+            kid.prices, kid.x, kid.y = m, np.asarray(eq.row_strategy), np.asarray(eq.col_strategy)
+    w = np.asarray([1.0], dtype=np.float64)
+    w = w / w.sum()
+    sub_budget = replace(root_budget, enumerate_knockouts=True) if sub.knockouts else root_budget
+    for kid in kids:
+        prices = [np.array(kid.prices, dtype=np.float64, copy=True)]
+        x = np.asarray(kid.x, dtype=np.float64)
+        ys = [np.asarray(kid.y, dtype=np.float64)]
+        kid.rows = _order(x, sum(w[k] * (prices[k] @ ys[k]) for k in range(1)), sub.rect,
+                          larger=True)
+        kid.cols = _order(ys[0], x @ prices[0], sub.rect, larger=False)
+        kid.trial = prices[0].copy()
+    for attempt in range(sub.passes + 1):
+        cells: list = []
+        groups: list[int] = []
+        owners: list = []
+        for kid in kids:
+            if not kid.active:
+                continue
+            asked: list[tuple[int, int]] = []
+            for i in kid.rows:
+                for j in kid.cols:
+                    if (i, j) not in kid.memo and (i, j) not in asked:
+                        asked.append((i, j))
+            for at in range(0, len(asked), CHUNK):
+                chunk = asked[at:at + CHUNK]
+                groups.append(len(chunk))
+                cells += [(kid.position, kid.row[i], kid.col[j]) for i, j in chunk]
+                owners += [(kid, cell) for cell in chunk]
+        if stop is not None and stop.is_set():
+            raise Stopped
+        if cells:
+            try:
+                found = search._refine_cells(reg, cells, leaf, budget=sub_budget,
+                                             sub_limit=sub.child, sub_branches=sub.branches,
+                                             child_q=sub.child if sub.q else None,
+                                             q_groups=groups, stack=STACK)
+            except port.PortRefused:
+                return _ALONE
+            for (kid, cell), (value, _notes, _solved) in zip(owners, found, strict=True):
+                kid.memo[cell] = value
+        for kid in kids:
+            if not kid.active:
+                continue
+            trial = [kid.trial]
+            for i in kid.rows:
+                for j in kid.cols:
+                    v = kid.memo[(i, j)]
+                    if v is not None:
+                        trial[0][i, j] = v
+            try:
+                restricted = solve_bayesian([trial[0][np.ix_(kid.rows, kid.cols)]], w)
+            except EquilibriumError:
+                kid.active = False
+                continue
+            sx = np.zeros(len(trial[0]), dtype=np.float64)
+            sx[kid.rows] = restricted.row_strategy
+            y = np.zeros(trial[0].shape[1], dtype=np.float64)
+            y[kid.cols] = restricted.col_strategies[0]
+            sys_ = [y]
+            col_ev = [sx @ trial[k] for k in range(1)]
+            row_ev = sum(w[k] * (trial[k] @ sys_[k]) for k in range(1))
+            guarantee = float(sum(w[k] * float(col_ev[k].min()) for k in range(1)))
+            kid.answer = (sx, sys_, guarantee)
+            if attempt == sub.passes:
+                kid.active = False
+                continue
+            grew = False
+            best_row = int(np.argmax(row_ev))
+            if best_row not in kid.rows and float(row_ev[best_row]) > float(
+                    restricted.value) + search.ORACLE_TOLERANCE:
+                kid.rows.append(best_row)
+                grew = True
+            earned = float(col_ev[0] @ sys_[0])
+            best_col = int(np.argmin(col_ev[0]))
+            if best_col not in kid.cols and float(
+                    col_ev[0][best_col]) < earned - search.ORACLE_TOLERANCE:
+                kid.cols.append(best_col)
+                grew = True
+            if not grew:
+                kid.active = False
+        if not any(kid.active for kid in kids):
+            break
+    values = []
+    live = iter(kids)
+    for branch in branches:
+        if branch.position.ended:
+            values.append(float(np.asarray(leaf([branch.position]))[0]))
+            continue
+        kid = next(live)
+        work["reads"] += 1
+        if kid.answer is None:
+            return None
+        values.append(float(kid.answer[2]))
+    return float(np.asarray(values) @ weights)
 
 
 __all__ = ["LADDERS", "LADDER_COSTS", "Item", "LadderCost", "LadderResult", "Rung", "Stage",
