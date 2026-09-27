@@ -273,17 +273,23 @@ def port_features(
     reg: Any,  # noqa: ANN401
     pos: Position,
     pools: tuple[Sequence[SideAction], Sequence[SideAction]],
+    *,
+    json_answer: bool = False,
 ) -> tuple[np.ndarray, np.ndarray] | None:
     """Each candidate's damage, knock-out, speed and switch numbers, from the port.
 
     One crossing for both sides' pools. None when the port refuses the position (the
-    same guard as the ranking's damage score).
+    same guard as the ranking's damage score). The numbers come back binary (IKA-350,
+    `RustNode.qfeatures`); `json_answer` asks for the old JSON answer, which only the test
+    holding the two to the same bits does.
     """
     from . import rustnode
 
     node = rustnode.node_for(reg)
     if node is None:
         raise rustnode.PortUnavailable("no Rust node for the candidate features")
+    if not json_answer:
+        return node.qfeatures(pos, pools, FEATURE_WIDTH)
     response = node._exchange(  # noqa: SLF001 - one request, the same pipe `score` takes
         {
             "kind": "qfeatures",

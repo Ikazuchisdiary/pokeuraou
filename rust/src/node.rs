@@ -416,10 +416,11 @@ fn qfeatures(reg: &Reg, value: &Value) -> Value {
 }
 
 /// `qfeatures` with `"binary": true` (IKA-350): the numbers go down the pipe behind the
-/// header as little-endian f64s, side 0's rows and then side 1's, `WIDTH` to a row, and the
-/// header says only how many (`rows`, `bytes`). The same doubles the JSON answer spelled out
-/// -- JSON's shortest round-trip text of an f64 reads back as that f64 -- so the caller's
-/// float32 of them is the same too. A refusal or an error is the JSON answer's, with no body.
+/// header as little-endian f32s, side 0's rows and then side 1's, `WIDTH` to a row, and the
+/// header says only how many (`rows`, `bytes`). The caller read the JSON answer's doubles
+/// (its shortest round-trip text of each f64 reads back as that f64) into float32, rounding
+/// to nearest-even; `as f32` is the same rounding of the same double, so the rows are the
+/// same bits at half the bytes. A refusal or an error is the JSON answer's, with no body.
 fn qfeatures_binary<W: Write>(
     reg: &Reg,
     value: &Value,
@@ -457,10 +458,10 @@ fn qfeatures_binary<W: Write>(
         return stdout.flush();
     }
     let count: usize = rows.iter().map(Vec::len).sum();
-    let mut body: Vec<u8> = Vec::with_capacity(count * crate::qfeatures::WIDTH * 8);
+    let mut body: Vec<u8> = Vec::with_capacity(count * crate::qfeatures::WIDTH * 4);
     for row in rows.iter().flatten() {
         for number in row {
-            body.extend_from_slice(&number.to_le_bytes());
+            body.extend_from_slice(&(*number as f32).to_le_bytes());
         }
     }
     let text = json!({
@@ -889,13 +890,16 @@ fn answer<R: BufRead, W: Write>(
         // IKA-302: a position to hold, and the end of a decision. Neither is answered:
         // they go down the pipe ahead of the request that needs them.
         Ok(value) if value["kind"].as_str() == Some("hold") => {
-            if let Some(id) = value["id"].as_u64() {
-                crate::held::define(id, &value["position"]);
-            }
+            crate::held::define_line(&value);
             return Ok(());
         }
         Ok(value) if value["kind"].as_str() == Some("forget") => {
             crate::held::forget();
+            return Ok(());
+        }
+        // IKA-350: slot actions numbered once for the life of the process; not answered.
+        Ok(value) if value["kind"].as_str() == Some("acts") => {
+            crate::held::define_actions(&value["acts"]);
             return Ok(());
         }
         Ok(value) if value["kind"].as_str() == Some("resolve") => resolve_one(reg, &value),
@@ -933,6 +937,32 @@ fn answer<R: BufRead, W: Write>(
                             header["via"] = json!("pipe");
                             writeln!(stdout, "{}", with_timings(&header, parse_us))?;
                             crate::encoded_node::write_body(stdout, &encoded, &leaf_values, &[])?;
+                            stdout.flush()
+                        }
+                    };
+                }
+            }
+        }
+        // The replacement node's matrix with its positions encoded (IKA-350), by the roads
+        // an encoded node's arrays take.
+        Ok(value) if value["kind"].as_str() == Some("replacementsEncoded") => {
+            match crate::resolve::commands::replacements_encoded(reg, encoder, &value) {
+                Err(reason) => json!({ "refused": reason }),
+                Ok((mut header, encoded)) => {
+                    let body_bytes = header["bytes"].as_u64().unwrap_or(0) as usize;
+                    let target = value.get("shm").map(|block| shm::Target {
+                        name: block.get("name").and_then(Value::as_str).map(String::from),
+                        capacity: block.get("bytes").and_then(Value::as_u64).unwrap_or(0) as usize,
+                    });
+                    return match &target {
+                        Some(target) => place_body(
+                            &encoded, &[], &[], body_bytes, target, shared, input, stdout,
+                            &mut header, parse_us,
+                        ),
+                        None => {
+                            header["via"] = json!("pipe");
+                            writeln!(stdout, "{}", with_timings(&header, parse_us))?;
+                            crate::encoded_node::write_body(stdout, &encoded, &[], &[])?;
                             stdout.flush()
                         }
                     };
