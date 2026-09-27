@@ -420,6 +420,58 @@ def run_analyse(args: argparse.Namespace) -> None:
             print(f"    wide - {name} loss {diff.mean():+.4f} [{lo:+.4f}, {hi:+.4f}]")
 
 
+def run_fires(args: argparse.Namespace) -> None:
+    """How often the knock-out branch forks a cell in the move decisions of recorded games
+    (a board's): the positive control that the arm with it met positions where it acts."""
+    from pokeuraou import port
+    from pokeuraou.actions import side_actions
+    from pokeuraou.budget import Budget
+    from pokeuraou.damage import register_mega_stones
+    from pokeuraou.position import Position
+    from pokeuraou.regulation import load_regulation
+
+    base = Budget.matrix()
+    ko = replace(base, enumerate_knockouts=True)
+    reg = None
+    decisions = cells = forked = with_fork = 0
+    rng = random.Random(args.seed)
+    for path in args.games:
+        for line in Path(path).read_bytes().splitlines():
+            if not line or rng.random() > args.share:
+                continue
+            record = json.loads(line)
+            for d in record.get("decisions", ()):
+                if d.get("kind") != "move":
+                    continue
+                pos = Position.from_json(d["position"])
+                if reg is None:
+                    reg = load_regulation(pos.format)
+                    register_mega_stones(reg)
+                menus = []
+                for side, menu in ((0, d["ownActions"]), (1, d["foeActions"])):
+                    by = {a.to_choice(): a for a in side_actions(reg, pos, side)}
+                    menus.append([by[c] for c in menu if c in by])
+                asks = [(pos, [a, b]) for a in menus[0] for b in menus[1]]
+                if not asks:
+                    continue
+                plain = port.turns(reg, asks, base, full=False)
+                split = port.turns(reg, asks, ko, full=False)
+                n = sum(
+                    len(k.branches) + len(k.suspended) > len(p.branches) + len(p.suspended)
+                    for p, k in zip(plain, split, strict=True)
+                    if not isinstance(p, Exception) and not isinstance(k, Exception)
+                )
+                decisions += 1
+                cells += len(asks)
+                forked += n
+                with_fork += n > 0
+    print(
+        f"{decisions:,} move decisions, {cells:,} cells: the knock-out branch forks "
+        f"{forked:,} cells ({forked / max(cells, 1):.1%}), in {with_fork:,} decisions "
+        f"({with_fork / max(decisions, 1):.1%})"
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawTextHelpFormatter)
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -440,8 +492,14 @@ def main(argv: Sequence[str] | None = None) -> None:
     r.add_argument("--value", nargs="+", required=True)
     a = sub.add_parser("analyse")
     a.add_argument("reads", nargs="+")
+    f = sub.add_parser("fires")
+    f.add_argument("games", nargs="+", help="games-*.jsonl of a board or a generation")
+    f.add_argument("--share", type=float, default=0.05, help="share of the games read")
+    f.add_argument("--seed", type=int, default=1)
     args = ap.parse_args(argv)
-    {"scan": run_scan, "read": run_read, "analyse": run_analyse}[args.cmd](args)
+    {"scan": run_scan, "read": run_read, "analyse": run_analyse, "fires": run_fires}[args.cmd](
+        args
+    )
 
 
 if __name__ == "__main__":
