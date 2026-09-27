@@ -293,8 +293,12 @@ def test_the_play_defaults_follow_the_records() -> None:
 
     # IKA-307: the rest of the budget deepens with the swap oracle over every action.
     assert humanplay.PLAY_ORACLE == ALL_ACTIONS
-    # IKA-342 replaces this line; until then the guard is deepen.MAX_LEVELS.
-    assert humanplay.PLAY_MAX_LEVELS is None
+    # IKA-342: a person's game and the analysis mode deepen to guard 16; generation and the
+    # board keep deepen.MAX_LEVELS.
+    from pokeuraou.deepen import MAX_LEVELS
+
+    assert humanplay.PLAY_MAX_LEVELS == 16
+    assert MAX_LEVELS == 8
     # IKA-307's width-only optima are among the widths a small budget can take.
     assert {18, 26, 36} <= set(humanplay.WIDTHS)
     assert list(humanplay.WIDTHS) == sorted(humanplay.WIDTHS)

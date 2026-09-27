@@ -273,30 +273,32 @@ def port_features(
     reg: Any,  # noqa: ANN401
     pos: Position,
     pools: tuple[Sequence[SideAction], Sequence[SideAction]],
+    *,
+    json_answer: bool = False,
 ) -> tuple[np.ndarray, np.ndarray] | None:
     """Each candidate's damage, knock-out, speed and switch numbers, from the port.
 
     One crossing for both sides' pools. None when the port refuses the position (the
-    same guard as the ranking's damage score).
+    same guard as the ranking's damage score). The numbers come back binary (IKA-350,
+    `RustNode.qfeatures`); `json_answer` asks for the old JSON answer, which only the test
+    holding the two to the same bits does.
     """
-    from . import rustnode, timing
+    from . import rustnode
 
     node = rustnode.node_for(reg)
     if node is None:
         raise rustnode.PortUnavailable("no Rust node for the candidate features")
-    # IKA-339: the features' crossing, the wait included, as `rust.score` is; the request's
-    # and the answer's JSON are `rust.ask` and `rust.header` inside it.
-    with timing.stage("rust.qfeatures"):
-        response = node._exchange(  # noqa: SLF001 - one request, the same pipe `score` takes
-            {
-                "kind": "qfeatures",
-                "position": rustnode._position(pos),  # noqa: SLF001
-                "candidates": [
-                    [[rustnode.dump_action(a) for a in c.slots] for c in pools[side]]
-                    for side in (0, 1)
-                ],
-            }
-        )
+    if not json_answer:
+        return node.qfeatures(pos, pools, FEATURE_WIDTH)
+    response = node._exchange(  # noqa: SLF001 - one request, the same pipe `score` takes
+        {
+            "kind": "qfeatures",
+            "position": rustnode._position(pos),  # noqa: SLF001
+            "candidates": [
+                [[rustnode.dump_action(a) for a in c.slots] for c in pools[side]] for side in (0, 1)
+            ],
+        }
+    )
     if response.get("refused"):
         return None
     if int(response["width"]) != FEATURE_WIDTH:

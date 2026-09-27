@@ -41,6 +41,7 @@ from .rustnode import (
     PortPhase,
     PortTurn,
     PortUnavailable,
+    ResumedTurn,
     RustNode,
 )
 
@@ -214,6 +215,32 @@ def resume(reg: Regulation, pause: PortPause, choices: Sequence[SideAction]) -> 
     return ask(reg, call)
 
 
+def resumed(reg: Regulation, pause: PortPause, choices: Sequence[SideAction]) -> ResumedTurn:
+    """`resume`'s turn as its weights, each outcome asked for when it is read (IKA-350).
+
+    The same weights and, for the outcome a game draws (`ResumedTurn.pick`), the same
+    position or pause as `resume`'s full answer: the port resolves the resumed turn again
+    for the `select`, and a turn is a function of the pause and the choices."""
+    chosen = list(choices)
+
+    def fetch(select: int | None) -> PortTurn:
+        def call(node: RustNode) -> PortTurn:
+            answer = node.resume(pause, chosen, full=select is None, select=select)
+            if answer is None:
+                raise _refused(node, "a paused turn")
+            return answer
+
+        return ask(reg, call)
+
+    def weights(node: RustNode) -> PortTurn:
+        answer = node.resume(pause, chosen, full=False)
+        if answer is None:
+            raise _refused(node, "a paused turn")
+        return answer
+
+    return ResumedTurn(ask(reg, weights), fetch)
+
+
 def fold_from_json(node: dict) -> Fold:
     """The port's fold tree with `numpy.float64` weights, as `turn_leaves` builds its own:
     `fold_value` sums the parts with `sum()`, which adds exact floats differently (IKA-209)."""
@@ -363,6 +390,26 @@ def resolve_replacements(
         return answer
 
     return _phase(reg, call, rng)
+
+
+def replacements_encoded(
+    reg: Regulation,
+    pos: Position,
+    pairs: Sequence[tuple[SideAction, SideAction]],
+    *,
+    rules: Any = None,  # noqa: ANN401 - EncodingRules
+) -> Any:  # noqa: ANN401 - rustnode's EncodedNode
+    """`resolve_replacements(reg, pos, [a, b])` of every pair without a generator, each
+    phase's position as the encoder's row for a learned leaf (IKA-350). Stateless, so
+    asked again on a fresh process after a failure, as the phase without a generator is."""
+
+    def call(node: RustNode) -> Any:  # noqa: ANN401
+        answer = node.replacements_encoded(pos, pairs, rules=rules)
+        if answer is None:
+            raise _refused(node, "a replacement phase")
+        return answer
+
+    return ask(reg, call)
 
 
 def apply_lead_abilities(
@@ -827,10 +874,12 @@ __all__ = [
     "branch",
     "pending_payoff",
     "pending_payoffs",
+    "replacements_encoded",
     "replacements_needed",
     "resolve_replacements",
     "resume",
     "resume_alternatives",
+    "resumed",
     "score_segments",
     "turn",
     "turn_leaves",

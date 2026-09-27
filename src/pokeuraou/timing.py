@@ -91,7 +91,7 @@ WORKER_STAGES = (
     "rust.resume",      # a paused turn resumed
     "rust.alternatives",  # a pause's alternatives, encoded or not
     # A Q rank fill's request (IKA-339), in the order a request makes them:
-    "rust.qfeatures",   # the port's per-candidate features (qhead.port_features), the wait included
+    "rust.qfeatures",   # the port's per-candidate features (RustNode.qfeatures, IKA-350), the wait included
     "q.arrays",         # the actions' encoding, the arrays and their copy into the block
     "serve.q",          # from sending the Q request to having the matrices (RemoteQ)
 )

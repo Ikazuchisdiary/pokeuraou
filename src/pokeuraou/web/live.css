@@ -63,7 +63,74 @@ button { font: inherit; color: inherit; }
   display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
   padding: 10px 16px; background: color-mix(in srgb, var(--bg) 88%, transparent);
   backdrop-filter: blur(8px); border-bottom: 1px solid var(--line); }
-.brand { display: flex; align-items: baseline; gap: 8px; margin-right: auto; }
+.brand { display: flex; align-items: baseline; gap: 8px; }
+.grow { flex: 1; }
+/* IKA-349: which page (対戦 | 分析) and how the game page shows the AI's reading */
+.seg { display: inline-flex; padding: 3px; gap: 2px; border-radius: 10px; background: var(--surface-2); }
+.seg button, .seg .segb { border: 0; background: none; padding: 5px 12px; border-radius: 8px; font-size: 13px; color: var(--dim);
+  cursor: pointer; white-space: nowrap; text-decoration: none; font-family: inherit; }
+.seg button[aria-pressed="true"], .seg .segb[aria-current="page"] { background: var(--surface); color: var(--ink); font-weight: 700;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, .12); cursor: default; }
+.seg .segb[href]:hover, .seg button:hover { color: var(--ink); }
+.seg .segb:not([href]):not([aria-current="page"]) { opacity: .4; cursor: not-allowed; }
+.readseg { display: inline-flex; align-items: center; gap: 4px; }
+.readseg[hidden] { display: none; }
+.seglabel { font-size: 12px; color: var(--dim); }
+/* IKA-349: the gear and its panel (a popover under the gear; a bottom sheet on a phone) */
+.gear { flex: none; width: 40px; height: 40px; display: inline-grid; place-items: center; border-radius: 10px; border: 1px solid var(--line);
+  background: var(--surface); color: var(--dim); cursor: pointer; padding: 0; }
+.gear:hover, .gear[aria-expanded="true"] { color: var(--ink); }
+.settings { position: fixed; z-index: 40; top: calc(env(safe-area-inset-top, 0px) + 58px); right: 16px; width: 340px;
+  max-height: calc(100vh - 80px); overflow-y: auto; background: var(--surface); color: var(--ink); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow); padding: 12px 16px 16px; }
+.settings[hidden] { display: none; }
+.settings .grip { display: none; width: 40px; height: 4px; border-radius: 2px; background: var(--line); margin: 0 auto 8px; }
+.settings .shead { display: flex; align-items: center; justify-content: space-between; }
+.settings .shead h2 { margin: 0; font-size: 15px; }
+.settings .sgroup { padding: 12px 0; border-top: 1px solid var(--line); margin-top: 10px; }
+.settings .sgroup[hidden] { display: none; }
+.settings .sgroup h3 { margin: 0 0 8px; }
+.settings .seg { flex-wrap: wrap; }
+.settings .note { margin: 6px 0 0; }
+.backdrop { display: none; position: fixed; inset: 0; z-index: 39; background: rgba(0, 0, 0, .4); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.gamepick select { max-width: 22em; font-size: 12px; padding: 3px 6px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--surface-2); color: var(--ink); }
+#analysisBox { display: none !important; }
+.primary.small { padding: 3px 12px; border-radius: 8px; font-size: 12px; white-space: nowrap; flex: none; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .seg button[aria-pressed="true"], :root:not([data-theme="light"]) .seg .segb[aria-current="page"] {
+    background: color-mix(in srgb, var(--ink) 12%, var(--surface)); box-shadow: inset 0 0 0 1px var(--line); }
+}
+:root[data-theme="dark"] .seg button[aria-pressed="true"], :root[data-theme="dark"] .seg .segb[aria-current="page"] {
+  background: color-mix(in srgb, var(--ink) 12%, var(--surface)); box-shadow: inset 0 0 0 1px var(--line); }
+/* 375: one row -- logo, page, state (short), gear */
+@media (max-width: 560px) {
+  .top { flex-wrap: nowrap; gap: 8px; }
+  .top .brand b { font-size: 16px; }
+  .top .status { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .top .status .long { display: none; } .top .status .short { display: inline; }
+  /* the analysis page's cards in two rows: picture and name, then HP across the card */
+  body.analysis .mon { grid-template-columns: 40px minmax(0, 1fr); padding: 6px; gap: 6px; align-items: center; }
+  body.analysis .mon > div:not(.mon-more) { display: contents; }
+  body.analysis .mon-name { grid-column: 1 / -1; grid-row: 1; display: block; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; text-align: left; font-size: 13px; }
+  body.analysis .mon .art.s-lg, body.analysis .mon .art.s-md { width: 40px; height: 40px; min-width: 40px; max-width: 40px;
+    min-height: 40px; max-height: 40px; aspect-ratio: 1; align-self: center; grid-column: 1; grid-row: 2; justify-self: start; }
+  body.analysis .mon .mon-sub, body.analysis .mon .mon-more { grid-column: 1 / -1; margin-top: 0; }
+  body.analysis .mon .mon-sub span { white-space: nowrap; }
+  /* the card is ~124 px wide here: picture and % side by side, the HP bar across the card below */
+  body.analysis .mon .hp { display: contents; }
+  body.analysis .mon .hp-num { grid-column: 2; grid-row: 2; min-width: 0; text-align: left; font-size: 16px; }
+  body.analysis .mon .hp-track { grid-column: 1 / -1; grid-row: 3; min-width: 48px; }
+  .seg button, .seg .segb { padding: 5px 8px; font-size: 12px; }
+  .top .status { padding: 5px 10px; font-size: 12px; }
+  .settings { position: fixed; left: 0; right: 0; bottom: 0; top: auto; width: auto; max-height: 85vh; overflow-y: auto;
+    border-radius: 16px 16px 0 0; padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
+  .settings .grip { display: block; }
+  .backdrop { display: block; }
+  .backdrop[hidden] { display: none; }
+}
 .brand b { font-family: var(--font-display); font-weight: 400; font-size: 18px; letter-spacing: 0.02em; }
 .brand span { font-size: 12px; color: var(--dim); }
 .status { display: inline-flex; align-items: center; gap: 8px; padding: 5px 12px; border-radius: 999px;
@@ -74,6 +141,7 @@ button { font: inherit; color: inherit; }
 .status.turn { color: var(--you-ink); background: color-mix(in srgb, var(--you) 12%, var(--surface)); }
 .status.turn::before { background: var(--you); }
 .status.end::before { background: var(--ink); }
+.status .short { display: none; }
 @keyframes pulse { 50% { opacity: 0.25; } }
 .tools { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
 .tool { display: inline-flex; align-items: center; gap: 6px; padding: 5px 10px; border-radius: 8px;
@@ -92,6 +160,76 @@ button { font: inherit; color: inherit; }
   .layout { grid-template-columns: minmax(0, 1fr); grid-template-areas: "stage" "input" "reading" "log" "sheets"; grid-template-rows: none; padding: 12px 16px; gap: 12px; }
   #reading { position: static; }
 }
+/* IKA-349: the game page with the reading off -- one column, the court wider */
+body.read-off .layout { grid-template-columns: minmax(0, 1fr); max-width: 760px;
+  grid-template-areas: "stage" "hidden" "input" "log" "sheets"; grid-template-rows: none; }
+body.read-off #reading { display: none; }
+body.read-off .mon { grid-template-columns: 112px minmax(0, 1fr); }
+body.read-off .mon .art.s-lg { width: 112px; height: 112px; }
+body.read-off .mon-name { font-size: 17px; }
+@media (max-width: 560px) { body.read-off .mon { grid-template-columns: minmax(0, 1fr); } body.read-off .mon .art.s-lg { width: 80px; height: 80px; } }
+#hiddenBar { grid-area: hidden; display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 10px;
+  border: 1px dashed var(--line); font-size: 12px; color: var(--dim); }
+#hiddenBar[hidden] { display: none; }
+#hiddenBar button { margin-left: auto; flex: none; }
+/* the analysis page: the game's timeline on top, then the court and the settings (5) beside the reading (7) */
+#timelineBox { grid-area: timeline; } #playedBox { grid-area: played; } #analysisBox { grid-area: analysis; }
+body.analysis .layout { grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+  grid-template-areas: "timeline timeline" "stage reading" "played reading" "analysis reading" "log reading" "sheets reading";
+  grid-template-rows: auto auto auto auto auto 1fr; }
+@media (max-width: 960px) {
+  body.analysis .layout { grid-template-columns: minmax(0, 1fr);
+    grid-template-areas: "timeline" "stage" "played" "reading" "analysis" "log" "sheets"; grid-template-rows: none; }
+}
+body.analysis .mon { grid-template-columns: 64px minmax(0, 1fr); }
+body.analysis .mon .art.s-lg { width: 64px; height: 64px; }
+.nav { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.nav .t { font-family: var(--font-display); font-size: 26px; line-height: 1; min-width: 2.2em; text-align: center; }
+.nav small { color: var(--dim); font-size: 12px; min-width: 0; }
+.nav .step, .stepper .step { flex: none; width: 32px; height: 30px; border: 1px solid var(--line); border-radius: 8px;
+  background: var(--surface); color: var(--ink); cursor: pointer; font-size: 12px; }
+.nav .step:disabled { color: var(--faint); cursor: default; opacity: .5; }
+.tl-svg { width: 100%; height: 120px; display: block; margin-top: 6px; }
+.tl-svg .band { fill: color-mix(in srgb, var(--ink) 7%, transparent); }
+.tl-svg .mid { stroke: var(--line); stroke-dasharray: 4 4; }
+.tl-svg .ax { fill: var(--faint); font: 11px var(--font-num); text-anchor: end; }
+.tl-svg .rec { stroke: var(--faint); stroke-width: 2.5; vector-effect: non-scaling-stroke; }
+.tl-svg .rec.gap { stroke-width: 1.2; stroke-dasharray: 4 4; }
+.tl-svg .recpt { fill: var(--faint); }
+.tl-svg .readl { fill: none; stroke: var(--ai); stroke-width: 2.5; vector-effect: non-scaling-stroke; }
+.tl-svg .readpt { fill: var(--ai); stroke: var(--surface); stroke-width: 2; }
+.tl-turns { display: grid; grid-auto-flow: column; grid-auto-columns: minmax(2.6em, 1fr); gap: 2px; overflow-x: auto; margin-top: 4px; }
+.tl-turns button { border: 0; border-radius: 6px; padding: 4px 0; font: 600 12px var(--font-num); background: var(--surface-2); color: var(--dim); cursor: pointer; }
+.tl-turns button[aria-current="true"] { background: var(--ink); color: var(--surface); }
+.tl-turns button.read { box-shadow: inset 0 -3px 0 var(--good); }
+.tl-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin: 6px 0 0; }
+.tl-legend .lg { display: inline-block; width: 18px; height: 0; border-top: 2.5px solid var(--faint); vertical-align: middle; }
+.tl-legend .lg.read { border-top-color: var(--ai); } .tl-legend .lg.gap { border-top: 1.2px dashed var(--faint); }
+/* the actions played this turn, and how the reading rates them */
+#playedBox h2 small { font-weight: 400; color: var(--faint); letter-spacing: 0; margin-left: 6px; }
+.played { display: grid; gap: 4px; font-size: 13px; }
+.played .row { display: grid; grid-template-columns: 5.6em minmax(0, 1fr) auto; gap: 8px; align-items: center; padding: 6px 8px;
+  border-radius: 8px; background: var(--surface-2); }
+.played .who.a { color: var(--ai-ink); font-weight: 700; font-size: 12px; } .played .who.y { color: var(--you-ink); font-weight: 700; font-size: 12px; }
+.played .n { font-size: 12px; color: var(--dim); white-space: nowrap; }
+.played .n b { color: var(--ink); }
+@media (max-width: 560px) {
+  .played .row { grid-template-columns: minmax(0, 1fr) auto; }
+  .played .row > .act { grid-column: 1 / -1; grid-row: 2; }
+}
+.notes { margin: 6px 0 0; padding: 0; display: grid; gap: 4px; font-size: 12px; }
+.notes li { list-style: none; display: flex; gap: 6px; align-items: baseline; color: var(--dim); }
+.notes li::before { content: "注"; flex: none; font-size: 10px; font-weight: 700; color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 50%, transparent); border-radius: 4px; padding: 0 3px; }
+/* the end of a game: the card over the court, with the way into the analysis page */
+.endcard { display: grid; gap: 8px; justify-items: center; text-align: center; }
+.endcard b { font-family: var(--font-display); font-weight: 400; font-size: 28px; }
+.endcard small { font-size: 12px; color: var(--dim); }
+.btnlink { display: inline-block; padding: 8px 16px; border-radius: 10px; background: var(--you); color: #fff; font-weight: 700;
+  font-size: 14px; text-decoration: none; }
+.log .alink { float: right; font-size: 11px; color: var(--you-ink); text-decoration: none; border: 1px solid var(--line);
+  border-radius: 6px; padding: 0 6px; margin-left: 6px; }
+.log .alink:not([href]) { display: none; }
 .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius);
   padding: 14px 16px; min-width: 0; box-shadow: var(--shadow); }
 .panel > h2, .ph { font-size: 13px; font-weight: 700; color: var(--dim); letter-spacing: 0.06em; margin: 0 0 10px; }
@@ -380,6 +518,9 @@ h3 small { font-weight: 400; font-size: 11px; color: var(--faint); letter-spacin
 .log li:first-child { border-top: 0; }
 .log .t { font-family: var(--font-num); color: var(--faint); font-size: 12px; padding-top: 1px; }
 .log .err { color: var(--bad); }
+#logBox > summary { list-style: none; cursor: pointer; font-size: 13px; font-weight: 700; color: var(--dim); letter-spacing: 0.06em; }
+#logBox[open] > summary { margin-bottom: 10px; }
+#logBox > summary::-webkit-details-marker { display: none; }
 #sheetsBox > summary { list-style: none; cursor: pointer; font-size: 13px; font-weight: 700; color: var(--dim); letter-spacing: 0.06em; }
 #sheetsBox > summary::-webkit-details-marker { display: none; }
 .sheets { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 12px; }
@@ -392,7 +533,7 @@ h3 small { font-weight: 400; font-size: 11px; color: var(--faint); letter-spacin
   background: var(--bad); color: #fff; padding: 8px 16px; border-radius: 10px; font-size: 13px; z-index: 30; max-width: calc(100% - 32px); }
 
 /* ---------------------------------------------------------------- the analysis mode (IKA-337) */
-#analysisBox { grid-area: input; }
+/* IKA-349: the analysis page places it itself (#analysisBox { grid-area: analysis } above) */
 .status.warn { color: var(--bad); background: color-mix(in srgb, var(--bad) 12%, var(--surface)); }
 .status.warn::before { background: var(--bad); }
 .pickrow { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: flex-end; margin-top: 8px; }
@@ -405,7 +546,7 @@ h3 small { font-weight: 400; font-size: 11px; color: var(--faint); letter-spacin
 .sendbar .gap { flex: 1; }
 .stop { padding: 9px 20px; border-radius: 10px; border: 0; background: var(--bad); color: #fff; font-weight: 700; cursor: pointer; }
 .stop:disabled { opacity: 0.3; cursor: default; }
-.stop.small { padding: 3px 12px; border-radius: 8px; font-size: 12px; }
+.stop.small { padding: 3px 12px; border-radius: 8px; font-size: 12px; white-space: nowrap; flex: none; }
 .rtools { display: inline-flex; align-items: center; gap: 10px; }
 .clockbar.endless i { width: 100% !important; background: repeating-linear-gradient(90deg, var(--ai) 0 18px,
   color-mix(in srgb, var(--ai) 35%, transparent) 18px 36px); background-size: 36px 100%; animation: endless 0.9s linear infinite; }
