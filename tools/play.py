@@ -40,6 +40,10 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tools"))
 
+from pokeuraou import openmp  # noqa: E402
+
+openmp.quiet_wait()  # before anything loads torch (IKA-360)
+
 #: The seconds a move when --seconds is not given: long enough to deepen past the depth-1
 #: answer on every move (IKA-330 §4.1: 5 s already reaches the widest menu), short enough
 #: for a game of about 10 minutes of the agent's time.
