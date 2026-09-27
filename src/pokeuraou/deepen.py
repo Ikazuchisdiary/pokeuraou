@@ -3269,6 +3269,10 @@ def _held(helper: _Ahead | None) -> Any:  # noqa: ANN401
     return _NoLock() if helper is None else helper.lock
 
 
+#: Positions a `_q_menus` forward pass takes at most (IKA-362).
+Q_MENU_CHUNK = 16
+
+
 def _q_menus(
     reg: Regulation, positions: Sequence[Position], width: int
 ) -> list[tuple[list[SideAction], list[SideAction]]]:
@@ -3284,11 +3288,14 @@ def _q_menus(
         for pos in positions
     ]
     wanted = [n for n, (_pos, pools) in enumerate(asks) if pools[0] and pools[1]]
-    matrices = (
-        dict(zip(wanted, qrank.installed().batched(reg, [asks[n] for n in wanted]), strict=True))
-        if wanted
-        else {}
-    )
+    # In chunks of `Q_MENU_CHUNK` positions: a depth-2 read's children in one pass asked the
+    # card for more than a process's cap holds (IKA-362).
+    got: list = []
+    for start in range(0, len(wanted), Q_MENU_CHUNK):
+        got.extend(qrank.installed().batched(
+            reg, [asks[n] for n in wanted[start:start + Q_MENU_CHUNK]]
+        ))
+    matrices = dict(zip(wanted, got, strict=True)) if wanted else {}
     out: list[tuple[list[SideAction], list[SideAction]]] = []
     for n, (pos, pools) in enumerate(asks):
         if n not in matrices:
