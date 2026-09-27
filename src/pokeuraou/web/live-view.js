@@ -182,17 +182,20 @@ function onEvent(e) {
       break;
     case "think":
       S.sent = false; S.think = e; S.decision = e.decision; S.answered = false; S.prompt = null;
+      // IKA-344: with ponder the person is asked while the AI reads, until they choose.
+      S.pondering = !!e.ponder;
       S.history.push({ decision: e.decision, turn: e.turn, pts: [], done: false, width: S.analysisState && S.analysisState.width });
       if (!S.analysis) { renderInput(); setStatus(`AI が考えています（ターン ${e.turn}）`, "think"); applyHide(); }
       renderClock(0, false);
       break;
     case "answer":
+      S.pondering = false;
       if (!S.analysis) setStatus(`AI は手を決めました（${e.seconds.toFixed(1)} 秒）`, "turn");
       renderClock(e.seconds * 1000, true);
       break;
     case "prompt":
       S.prompt = e; S.chosen = []; S.mega = -1; S.answered = false; renderInput(); applyHide();
-      setStatus(e.kind === "move" ? "あなたの番" : e.heading, "turn");
+      setStatus(e.kind === "move" ? (S.pondering ? "あなたの番（AI は読み続けています）" : "あなたの番") : e.heading, "turn");
       break;
     case "turn":
       S.sent = false;
@@ -648,6 +651,7 @@ function send(line) {
   LiveData.send(line);
   S.prompt = null; S.select = null; S.answered = true; S.sent = true;
   renderInput(); applyHide();
+  if (S.pondering) setStatus("AI が読みを止めて手を引くのを待っています", "think");
 }
 function renderInput() {
   const box = $("input");
@@ -938,15 +942,38 @@ function stopRead() { LiveData.command({ cmd: "stop" }); }
 $("aGo").onclick = startRead;
 $("goTop").onclick = () => startRead();
 $("aReread").onclick = () => { openSettings(false); startRead(); };
+// A wider width for the position being read widens it without stopping (IKA-354): the server
+// keeps the tree and adds the new actions to the root. The button says which it will do.
+function widensRunning() {
+  const st = S.analysisState;
+  if (!S.running || !st || st.source == null) return false;
+  const guard = +$("aGuard").value || st.guard;
+  return st.source === +$("aSource").value && st.game === +$("aGame").value &&
+    st.decision === +$("aTurn").value && st.side === +$("aSide").value && guard === st.guard &&
+    +$("aWidth").value > st.width;
+}
+function rereadLabel() {
+  $("aReread").textContent = widensRunning() ? "幅を広げる（読みは続ける）" : "この設定で読み直す";
+}
+for (const id of ["aWidth", "aGuard", "aSide", "aTurn", "aGame", "aSource"]) $(id).addEventListener("input", rereadLabel);
+for (const id of ["aSide", "aTurn", "aGame", "aSource"]) $(id).addEventListener("change", rereadLabel);
 $("aStop").onclick = stopRead;
 $("stopTop").onclick = stopRead;
 function setRunning(on) {
   S.running = on;
+  if (typeof rereadLabel === "function") rereadLabel();
   $("aStop").disabled = !on; $("stopTop").disabled = !on; $("stopTop").hidden = S.analysis && !on; $("goTop").hidden = !S.analysis || on;
   $("clockbar").classList.toggle("endless", on);
 }
 function onAnalysis(e) {
   S.analysisState = e;
+  if (e.state === "running" && e.grown) {
+    // The read goes on at the wider width (IKA-354): nothing restarts.
+    $("aWidth").value = e.width;
+    log(e.turn, `幅を ${e.width} に広げた（候補集合 ${e.menu[0]}×${e.menu[1]}）。読んだ木はそのまま読み続ける`);
+    rereadLabel();
+    return;
+  }
   if (e.state === "running") {
     S.played = e.played || [];
     setRunning(true);

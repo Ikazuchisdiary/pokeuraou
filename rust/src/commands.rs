@@ -97,8 +97,9 @@ fn budget_json(budget: &Budget) -> Value {
         pinned_policy,
         max_branches,
         merge_duplicates,
+        enumerate_knockouts,
     } = budget;
-    json!({
+    let mut out = json!({
         "damageRolls": damage_rolls,
         "enumerateCrit": enumerate_crit,
         "enumerateAccuracy": enumerate_accuracy,
@@ -108,7 +109,12 @@ fn budget_json(budget: &Budget) -> Value {
         "pinnedPolicy": pinned_policy,
         "maxBranches": max_branches,
         "mergeDuplicates": merge_duplicates,
-    })
+    });
+    // Only when on, as Python sends it (IKA-359): the wire is unchanged for every other budget.
+    if *enumerate_knockouts {
+        out["enumerateKnockouts"] = json!(true);
+    }
+    out
 }
 
 fn kind_name(kind: ActionKind) -> &'static str {
@@ -626,6 +632,7 @@ fn deterministic() -> Budget {
         pinned_policy: true,
         max_branches: 1,
         merge_duplicates: true,
+        enumerate_knockouts: false,
     }
 }
 
@@ -767,8 +774,18 @@ fn phase_position(
         }
     }
     // The positive control leaves the switch-ins in the order they were placed.
+    // A Speed tie among them is a draw, as Showdown's shuffle in `runSwitch` (IKA-352):
+    // sampled by a caller with a generator, the first (noted) by one without.
     #[cfg(not(feature = "ika211-control"))]
-    placed.sort_by_key(|(speed, side, slot)| (-speed, *side, *slot));
+    {
+        let mut orders = switch_in_orders(reg, &state, &placed)?;
+        let pick = if orders.len() > 1 {
+            draw(&mut state, &vec![1.0; orders.len()], "switch-in speed tie")
+        } else {
+            0
+        };
+        placed = orders.swap_remove(pick);
+    }
     for (_speed, side_index, slot) in &placed {
         on_switch_in(reg, &mut state, *side_index, *slot)?;
     }
@@ -813,10 +830,44 @@ pub fn replacements_encoded(
     };
     let pairs = value["pairs"].as_array().cloned().unwrap_or_default();
     let mut leaves: Vec<Position> = Vec::with_capacity(pairs.len());
-    for pair in &pairs {
-        let (after, _notes, _opened, _log) =
+    // IKA-352: a pair whose phase draws (a Speed tie among the switch-ins that changes where
+    // they end, a Trace between two foes) is every outcome at its weight -- one row each,
+    // `branches` saying whose row and at what weight. Absent when no pair drew, so the
+    // answer is the one it was.
+    let mut branches: Vec<(usize, f64)> = Vec::with_capacity(pairs.len());
+    let mut drew = false;
+    for (cell, pair) in pairs.iter().enumerate() {
+        let (after, notes, _opened, _log) =
             phase_position(reg, position.clone(), value, Phase::Replacements, two_sides(pair))?;
-        leaves.push(after);
+        if !notes.iter().any(|note| note.ends_with(DRAWN)) {
+            leaves.push(after);
+            branches.push((cell, 1.0));
+            continue;
+        }
+        drew = true;
+        let mut pending: std::collections::VecDeque<(Vec<usize>, f64)> =
+            std::collections::VecDeque::from([(Vec::new(), 1.0)]);
+        while let Some((presets, weight)) = pending.pop_front() {
+            let asked = json!({ "presets": presets });
+            let (after, _notes, opened, _log) =
+                phase_position(reg, position.clone(), &asked, Phase::Replacements, two_sides(pair))?;
+            match opened.first() {
+                None => {
+                    leaves.push(after);
+                    branches.push((cell, weight));
+                }
+                Some(weights) => {
+                    let total: f64 = weights.iter().sum();
+                    for (option, w) in weights.iter().enumerate() {
+                        if *w > 0.0 {
+                            let mut next = presets.clone();
+                            next.push(option);
+                            pending.push_back((next, weight * w / total));
+                        }
+                    }
+                }
+            }
+        }
     }
     let borrowed: Vec<&Position> = leaves.iter().collect();
     let encoded = encoder.encode_positions_with(&borrowed, rules);
@@ -847,6 +898,10 @@ pub fn replacements_encoded(
         "fieldWidth": encoder.widths.field,
         "bytes": body_bytes,
     });
+    let mut header = header;
+    if drew {
+        header["branches"] = json!(branches);
+    }
     Ok((header, encoded))
 }
 

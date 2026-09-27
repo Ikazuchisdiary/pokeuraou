@@ -70,6 +70,11 @@ class Budget:
     #: and `tools/merge_effect.py` asks the port). `POKEURAOU_MERGE_BRANCHES=0` turns it
     #: off for a whole run -- see :data:`MERGE_BRANCHES_DEFAULT`.
     merge_duplicates: bool = field(default_factory=lambda: MERGE_BRANCHES_DEFAULT)
+    #: Under a pinned roll with crits collapsed, fork a single hit whose knock-out the crit or
+    #: the roll decides into knocked out and not, each weighted by its share of the 2 x 16
+    #: (crit, roll) draws (IKA-359, the port's `knockout_draws`). Off: it recovers most of
+    #: the depth-1 loss (see `matrix`), but the fixed-setting board did not tell it apart.
+    enumerate_knockouts: bool = False
 
     @staticmethod
     def exact() -> Budget:
@@ -133,6 +138,19 @@ class Budget:
         Crit is the one that stays collapsed: 2.7x for a thirtieth of the policy effect, and
         unlike a miss a crit changes one damage number rather than whether the move happened
         at all.
+
+        In an endgame that number decides a knock-out, and IKA-359 measured it there
+        (`tools/crit_effect.py`, recorded M-C positions by standing Pokemon, depth 1 with
+        the learned leaf, against `Budget.exact()`; loss is the NashConv of the collapsed
+        equilibrium in the exact matrix):
+
+            stage             this budget   + crit          + 16 rolls      + knock-outs
+            end (<=2 a side)       0.0190   0.0141  1.95x   0.0042   9.3x   0.0032  1.26x
+            mid                    0.0117   0.0095  3.14x   0.0056  25.6x   0.0052  1.43x
+
+        Crit alone buys little; the pinned median roll is the larger blind spot. The
+        knock-out branch (`enumerate_knockouts`) takes most of both, but at fixed settings
+        on the M-C board it read +2.1 Elo [-6.2, +10.3] over 1,500 pairs, so it is off.
         """
         # `pinned_policy` is cleared explicitly. It is built from `deterministic`, which
         # exists to reproduce the oracle's pinned randomness, and inheriting that flag would
@@ -194,7 +212,7 @@ class Budget:
         """
         rolls = 1 if self.fixed_roll is not None else max(1, min(16, self.damage_rolls))
         factor = rolls
-        if self.enumerate_crit:
+        if self.enumerate_crit or self.enumerate_knockouts:
             factor *= 2
         if self.enumerate_accuracy:
             factor *= 2
@@ -218,6 +236,8 @@ class Budget:
         for field_name in ("enumerate_crit", "enumerate_status_checks", "enumerate_secondary"):
             if narrowed.per_action_branches() <= room:
                 break
+            if field_name == "enumerate_crit" and narrowed.enumerate_knockouts:
+                narrowed = replace(narrowed, enumerate_knockouts=False)
             if getattr(narrowed, field_name):
                 narrowed = replace(narrowed, **{field_name: False})
         if narrowed.per_action_branches() > room and narrowed.enumerate_accuracy:

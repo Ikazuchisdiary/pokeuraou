@@ -302,6 +302,9 @@ class GameRecord:
     #: on both sides, as every generated game before IKA-111 was.
     depth: list[int] = field(default_factory=lambda: [1, 1])
     solve_restricted: list[bool] = field(default_factory=lambda: [False, False])
+    #: Whether each side's matrix budget took the knock-out branch
+    #: (`Budget.enumerate_knockouts`, IKA-359). Written only when a side did.
+    knockouts: list[bool] = field(default_factory=lambda: [False, False])
     #: The equilibrium mixtures over the 90 ordered selections, when a book was used.
     #: These are the policy targets a selection head would learn -- the *solver's*
     #: recommendation, not the softened distribution the game was drawn from.
@@ -384,6 +387,7 @@ class GameRecord:
                 if set(self.deepen) != {LEGACY_DEEPEN}
                 else {}
             ),
+            **({"knockouts": list(self.knockouts)} if any(self.knockouts) else {}),
             **(
                 {"depth": list(self.depth), "solveRestricted": list(self.solve_restricted)}
                 if set(self.depth) != {1}
@@ -501,7 +505,19 @@ def positions_from_sets(
     its Pokemon with the other openings that put the same set in the same slot (IKA-267:
     8,100 positions of 12 sets were 97,200 stat lines of 48 different Pokemon). These
     positions go to a leaf evaluator, which reads them.
+
+    A draw in the leads' switch-ins (IKA-352: a Speed tie that changes where they end, a
+    Trace between two foes) is its first option here; `lead_branches_from_sets` has every
+    option, and its first is this position.
     """
+    return [branches[0][1] for branches in lead_branches_from_sets(reg, pairs)]
+
+
+def lead_branches_from_sets(
+    reg: Regulation, pairs: Sequence[tuple[list[SampledSet], list[SampledSet]]]
+) -> list[list[tuple[float, Position]]]:
+    """`positions_from_sets` with every outcome of the leads' draws at its weight (IKA-352):
+    one `(1.0, position)` for an opening that draws nothing, which is nearly all of them."""
     active = reg.meta.active_per_side
     made: dict[tuple[int, int, int], Pokemon] = {}
     openings = [_opening(reg, own, foe, made) for own, foe in pairs]
@@ -510,26 +526,30 @@ def positions_from_sets(
         key = (tuple(id(s) for s in own[:active]), tuple(id(s) for s in foe[:active]))
         groups.setdefault(key, []).append(index)
     firsts = [members[0] for members in groups.values()]
-    answered = port.apply_lead_abilities_many(reg, [openings[i] for i in firsts])
-    out: list[Position | None] = [None] * len(pairs)
+    answered = port.lead_branches_many(reg, [openings[i] for i in firsts])
+    out: list[list[tuple[float, Position]] | None] = [None] * len(pairs)
     unshared: list[int] = []
-    for members, phase in zip(groups.values(), answered, strict=True):
-        led = phase.position
+    for members, branches in zip(groups.values(), answered, strict=True):
         opening = openings[members[0]]
-        if not _bench_untouched(led, opening, active):
+        led = [(weight, phase.position) for weight, phase in branches]
+        if not all(_bench_untouched(pos, opening, active) for _weight, pos in led):
             out[members[0]] = led
             unshared.extend(members[1:])
             continue
         for index in members:
-            out[index] = led if index == members[0] else _with_back(led, openings[index], active)
+            out[index] = (
+                led
+                if index == members[0]
+                else [(weight, _with_back(pos, openings[index], active)) for weight, pos in led]
+            )
     if unshared:
-        for index, phase in zip(
+        for index, branches in zip(
             unshared,
-            port.apply_lead_abilities_many(reg, [openings[i] for i in unshared]),
+            port.lead_branches_many(reg, [openings[i] for i in unshared]),
             strict=True,
         ):
-            out[index] = phase.position
-    return [pos for pos in out if pos is not None]
+            out[index] = [(weight, phase.position) for weight, phase in branches]
+    return [branches for branches in out if branches is not None]
 
 
 def _bench_untouched(led: Position, opening: Position, active: int) -> bool:
@@ -970,6 +990,7 @@ def play_game(
     rank_fill: str | tuple[str, str] = DEFAULT_RANK_FILL,
     bench_drop: str | tuple[str, str] = DEFAULT_BENCH_DROP,
     deepen: str | tuple[str, str] = DEFAULT_DEEPEN,
+    knockouts: bool | tuple[bool, bool] = False,
 ) -> GameRecord:
     """Plays one game to a result, sampling both sides from the turn's equilibrium.
 
@@ -1041,6 +1062,10 @@ def play_game(
     each agent's belief leaves out at a move node (`hidden.parse_bench_drop`, IKA-283).
     "none" ships. It changes nothing without ``sheets``.
 
+    ``knockouts`` (a pair too) puts the knock-out branch in that side's matrix budget
+    (`Budget.enumerate_knockouts`, IKA-359): off ships. Two sides that differ build and
+    solve their own menus, as for any other setting that differs.
+
     ``deepen`` takes a pair too: how each agent deepens its move decisions best first
     after the depth-1 solve (`deepen.parse_deepen`, IKA-33): ``none`` ships and is the
     search unchanged, ``m<N>`` / ``r<N>`` spend N cells and read the root whole /
@@ -1089,6 +1114,7 @@ def play_game(
         parse_bench_drop(drop)
     deepens = (deepen, deepen) if isinstance(deepen, str) else tuple(deepen)
     specs = [deepen_spec(label) for label in deepens]
+    kos = (knockouts, knockouts) if isinstance(knockouts, bool) else tuple(knockouts)
     cells = (specs[0].cells, specs[1].cells)
     deep_restricted = (specs[0].reading == "restricted", specs[1].reading == "restricted")
     # The root's double oracle's width per side (IKA-293), or None; whether it swaps,
@@ -1159,10 +1185,18 @@ def play_game(
     record.rank_fill = list(fills)
     record.bench_drop = list(drops)
     record.deepen = list(deepens)
+    record.knockouts = [bool(k) for k in kos]
     record.depth = [int(d) for d in depths]
     record.solve_restricted = [bool(r) for r in restricted]
     pos = start if start is not None else position_from_sets(reg, own, foe, rng=rng)
+    # Each side's matrix budget; `budget` is side 0's, and side 1's is the same object
+    # unless its knock-out setting differs (IKA-359).
     budget = Budget.matrix()
+    budgets = (
+        replace(budget, enumerate_knockouts=True) if kos[0] else budget,
+        replace(budget, enumerate_knockouts=True) if kos[1] else budget,
+    )
+    budget = budgets[0]
     # Who each side has shown, accumulated across turns. A Pokemon that came in and went
     # back out is still known, and the position alone stops saying so -- so this is
     # carried rather than recomputed from the board each time.
@@ -1261,6 +1295,7 @@ def play_game(
         # policy is given and the ranking is by leaf -- and not otherwise.
         same_menu = (
             ranked[1] == ranked[0]
+            and budgets[1] == budgets[0]
             and policies[1] is policies[0]
             and views_rule[1] == views_rule[0]
             # A leaf ranking filled another way orders another menu (IKA-268).
@@ -1377,7 +1412,7 @@ def play_game(
                         and leaves[1] is leaves[0]
                         and deepens[1] == deepens[0]
                         else search(
-                            reg, pos, ours, theirs, foe_leaf, budget=budget,
+                            reg, pos, ours, theirs, foe_leaf, budget=budgets[1],
                             deepen=cells[1], solve_restricted=deep_restricted[1],
                             outside=own_wider.get(oracles[1]) if widens[1] else None,
                             **how[1],
@@ -1433,7 +1468,7 @@ def play_game(
                 foe_views = {}
                 rank_scores.at_node(len(record.decisions), pos.turn, 1)  # IKA-278
                 foe_ours, foe_theirs = _menus(
-                    reg, pos, limits, foe_leaf, budget, ranked[1], policies[1], spreads,
+                    reg, pos, limits, foe_leaf, budgets[1], ranked[1], policies[1], spreads,
                     rank_view=views_rule[1], used=foe_views, rank_fill=fills[1],
                     wide=[oracles[1]] if widens[1] else [], wider=foe_wider,
                 )
@@ -1442,7 +1477,7 @@ def play_game(
                 try:
                     if deep[1]:
                         foe_deep = search(
-                            reg, pos, foe_ours, foe_theirs, foe_leaf, budget=budget,
+                            reg, pos, foe_ours, foe_theirs, foe_leaf, budget=budgets[1],
                             deepen=cells[1], solve_restricted=deep_restricted[1],
                             outside=foe_wider.get(oracles[1]) if widens[1] else None,
                             **how[1],
@@ -1450,7 +1485,7 @@ def play_game(
                     else:
                         foe_answers = belief_solve(
                             reg, pos, foe_ours, foe_theirs, spreads,
-                            {0: own_leaf, 1: foe_leaf}, budget=budget, sides=(1,),
+                            {0: own_leaf, 1: foe_leaf}, budget=budgets[1], sides=(1,),
                             depth=depths,
                             deepen=(
                                 {1: _belief_deepen(
@@ -1517,6 +1552,7 @@ def play_game(
                 or restricted[1] != restricted[0]
                 or (fills[1] != fills[0] and ranked[0] and policies[0] is None)
                 or deepens[1] != deepens[0]
+                or budgets[1] != budgets[0]
             ):
                 foe_started = perf_counter()
                 rank_scores.at_node(len(record.decisions), pos.turn, 1)  # IKA-278
@@ -1524,7 +1560,7 @@ def play_game(
                     (ours, theirs)
                     if same_menu
                     else _menus(
-                        reg, pos, limits, foe_leaf, budget, ranked[1], policies[1],
+                        reg, pos, limits, foe_leaf, budgets[1], ranked[1], policies[1],
                         spreads, rank_view=views_rule[1], rank_fill=fills[1],
                         wide=[oracles[1]] if widens[1] else [], wider=foe_wider,
                     )
@@ -1535,7 +1571,7 @@ def play_game(
                     break
                 try:
                     foe_search = search(
-                        reg, pos, foe_ours, foe_theirs, foe_leaf, budget=budget,
+                        reg, pos, foe_ours, foe_theirs, foe_leaf, budget=budgets[1],
                         depth=depths[1], solve_sparsely=sparse[1],
                         solve_restricted=restricted[1] or deep_restricted[1],
                         deepen=cells[1],
@@ -2327,22 +2363,18 @@ def _do_replacement_node(
                 reg, at, [(a, b) for a in options[0] for b in options[1]], rules=rules_of(scorer)
             )
             port.note_port_rule([scorer], filled)
-            return np.asarray(scorer(filled.encoded), dtype=np.float64).reshape(
-                len(options[0]), len(options[1])
-            )
-        resolved = [
-            [port.resolve_replacements(reg, at, [a, b]).position for b in options[1]]
-            for a in options[0]
-        ]
-        if evaluate is None:
-            return np.array(
-                [[HP_SHARE(after) for after in row] for row in resolved],
-                dtype=np.float64,
-            )
-        flat = [after for row in resolved for after in row]
-        return np.asarray(evaluate(flat), dtype=np.float64).reshape(
-            len(options[0]), len(options[1])
-        )
+            values = np.asarray(scorer(filled.encoded), dtype=np.float64)
+            # A phase that draws is every outcome at its weight, its cell their mean
+            # (IKA-352); the port says which rows are whose only when one did.
+            branches = getattr(filled, "branches", None)
+            if branches:
+                owner = np.array([cell for cell, _weight in branches], dtype=np.int64)
+                weights = np.array([weight for _cell, weight in branches], dtype=np.float64)
+                values = np.bincount(
+                    owner, weights=weights * values, minlength=len(options[0]) * len(options[1])
+                )
+            return values.reshape(len(options[0]), len(options[1]))
+        return replacement_matrix(reg, at, options, evaluate)
 
     foe_value: float | None = None
     if sheets is not None:
@@ -2439,6 +2471,36 @@ def _do_replacement_node(
     outcome = port.resolve_replacements(reg, pos, chosen, rng=rng)
     record.unmodelled.extend(outcome.unmodelled)
     return outcome.position
+
+
+def replacement_matrix(
+    reg: Regulation,
+    at: Position,
+    options: Sequence[Sequence[SideAction]],
+    evaluate: LeafEvaluator | None,
+) -> np.ndarray:
+    """Every pair of replacements resolved from `at` and scored, side 0's value.
+
+    A phase that draws -- a Speed tie among the switch-ins that changes where they end, a
+    Trace between two foes -- is every outcome at its weight (IKA-352), not the first one:
+    the cell is their weighted mean. A phase that draws nothing is its one position, scored
+    as before.
+    """
+    cells = [
+        port.replacement_branches(reg, at, [a, b]) for a in options[0] for b in options[1]
+    ]
+    flat = [phase.position for cell in cells for _weight, phase in cell]
+    weights = np.array([weight for cell in cells for weight, _phase in cell], dtype=np.float64)
+    owner = np.repeat(np.arange(len(cells)), [len(cell) for cell in cells])
+    if evaluate is None:
+        values = np.array([HP_SHARE(after) for after in flat], dtype=np.float64)
+    else:
+        values = np.asarray(evaluate(flat), dtype=np.float64)
+    if len(flat) == len(cells):
+        scored = values
+    else:
+        scored = np.bincount(owner, weights=weights * values, minlength=len(cells))
+    return scored.reshape(len(options[0]), len(options[1]))
 
 
 def _pass(slot: int) -> Any:  # noqa: ANN401
@@ -2785,8 +2847,10 @@ __all__ = [
     "GameRecord",
     "final_position",
     "generate",
+    "lead_branches_from_sets",
     "play_game",
     "position_from_sets",
     "positions_from_sets",
+    "replacement_matrix",
     "selfplay_dir",
 ]

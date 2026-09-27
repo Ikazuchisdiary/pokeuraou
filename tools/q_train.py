@@ -11,12 +11,21 @@ Held-out report: the cells' error, and each view's equilibrium -- the value erro
 |v(Q) - v(M)|, and what Q's equilibrium strategies give up in the true matrix (NashConv).
 
     python tools/q_train.py --shards <dir>/shards --out <dir>/q.pt --epochs 8 --device cuda
+
+A long run in pieces (IKA-348): `--checkpoint <file>` writes the whole state after every
+epoch (weights, optimiser, schedule, both random generators, the history), and the same
+command started again resumes from it; `--stop-after N` ends a call after N epochs. The
+model is written to `--out` only when the last epoch is done, and a run cut into calls
+gives the same weights bit for bit as one call.
+
+    python tools/q_train.py ... --epochs 30 --checkpoint <dir>/q.ckpt --stop-after 12
 """
 
 from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import time
 from pathlib import Path
@@ -262,7 +271,40 @@ def equilibrium_report(views: Views, index: np.ndarray, predicted: list[np.ndarr
     }
 
 
-def main() -> None:  # noqa: PLR0915
+#: Arguments that do not change the weights a run ends with, so a resumed call may differ
+#: in them: where things are written, how long this call may run, and the report's size.
+NOT_THE_RUN = ("out", "checkpoint", "stop_after", "max_hours", "eval_limit")
+
+
+def run_fingerprint(args: argparse.Namespace) -> dict[str, str]:
+    """What a checkpoint must agree on with the call that resumes it."""
+    return {k: str(v) for k, v in sorted(vars(args).items()) if k not in NOT_THE_RUN}
+
+
+def save_checkpoint(path: Path, state: dict[str, Any]) -> None:
+    """Written beside and renamed over, so a call killed while writing leaves the last one."""
+    import torch
+
+    tmp = path.with_name(path.name + ".tmp")
+    torch.save(state, tmp)
+    os.replace(tmp, path)
+
+
+def load_checkpoint(path: Path, args: argparse.Namespace) -> dict[str, Any]:
+    import torch
+
+    state = torch.load(path, map_location="cpu", weights_only=False)
+    mine = run_fingerprint(args)
+    if state["run"] != mine:
+        differ = sorted(k for k in set(mine) | set(state["run"]) if mine.get(k) != state["run"].get(k))
+        raise SystemExit(
+            f"{path} is another run's checkpoint: {', '.join(differ)} differ "
+            f"({ {k: state['run'].get(k) for k in differ} } there, { {k: mine.get(k) for k in differ} } here)"
+        )
+    return state
+
+
+def main(argv: list[str] | None = None) -> None:  # noqa: PLR0915, C901
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--shards", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
@@ -297,7 +339,22 @@ def main() -> None:  # noqa: PLR0915
         help="a leaf (value-*.pt) whose weights start the trunk; read only",
     )
     ap.add_argument("--max-hours", type=float, default=None, help="stop after this wall clock")
-    args = ap.parse_args()
+    ap.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=None,
+        help="the run's whole state, written after every epoch; when the file is there the "
+        "call resumes from it (IKA-348). --out is written only after the last epoch",
+    )
+    ap.add_argument(
+        "--stop-after",
+        type=int,
+        default=None,
+        help="with --checkpoint: end this call after this many epochs (the next call resumes)",
+    )
+    args = ap.parse_args(argv)
+    if args.stop_after is not None and args.checkpoint is None:
+        raise SystemExit("--stop-after cuts a run into calls, which needs --checkpoint to resume from")
 
     import torch
 
@@ -340,7 +397,28 @@ def main() -> None:  # noqa: PLR0915
     # shuffled blocks.
     sizes = np.array([c.size for c in views.cells])
     history = []
-    for epoch in range(args.epochs):
+    first = 0
+    calls: list[int] = []
+    if args.checkpoint is not None and args.checkpoint.exists():
+        # Everything the next epoch reads: weights, AdamW's moments, the schedule's step,
+        # the generator that orders the batches and torch's own (IKA-348). Restored after
+        # the net and the optimiser are built, so building them draws nothing that counts.
+        saved = load_checkpoint(args.checkpoint, args)
+        net.load_state_dict(saved["state"])
+        optimiser.load_state_dict(saved["optimiser"])
+        schedule.load_state_dict(saved["schedule"])
+        rng.bit_generator.state = saved["rng"]
+        torch.set_rng_state(saved["torch_rng"])
+        if saved.get("cuda_rng") is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all(saved["cuda_rng"])
+        history = saved["history"]
+        first = saved["epoch"]
+        calls = saved["calls"]
+        print(f"resumed from {args.checkpoint} after epoch {first} of {args.epochs}", flush=True)
+    calls.append(first)
+    for ran, epoch in enumerate(range(first, args.epochs)):
+        if args.stop_after is not None and ran >= args.stop_after:
+            break
         if args.max_hours is not None and time.perf_counter() - started > args.max_hours * 3600:
             print(f"stopping before epoch {epoch + 1}: past {args.max_hours} h", flush=True)
             break
@@ -379,6 +457,23 @@ def main() -> None:  # noqa: PLR0915
         }
         history.append(report)
         print(json.dumps(report), flush=True)
+        if args.checkpoint is not None:
+            save_checkpoint(args.checkpoint, {
+                "run": run_fingerprint(args),
+                "epoch": epoch + 1,
+                "calls": calls,
+                "state": net.state_dict(),
+                "optimiser": optimiser.state_dict(),
+                "schedule": schedule.state_dict(),
+                "rng": rng.bit_generator.state,
+                "torch_rng": torch.get_rng_state(),
+                "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                "history": history,
+            })
+    if args.checkpoint is not None and len(history) < args.epochs:
+        print(f"stopped after epoch {len(history)} of {args.epochs}; the same command resumes "
+              f"from {args.checkpoint} (no {args.out} yet)", flush=True)
+        return
     blob = {
         "state": net.state_dict(),
         "config": config_dict(config),
@@ -392,6 +487,8 @@ def main() -> None:  # noqa: PLR0915
         "train_views": len(train_ix),
         "held_views": len(held_ix),
         "args": {k: str(v) for k, v in vars(args).items()},
+        # The epoch each call started from: [0] for one call, [0, 12, 24] for three.
+        "calls": calls,
     }
     torch.save(blob, args.out)
     print(f"saved {args.out} after {time.perf_counter() - started:.1f}s")
