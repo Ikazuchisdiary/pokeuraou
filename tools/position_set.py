@@ -123,6 +123,67 @@ def build(args: argparse.Namespace) -> None:
     print(f"{len(picked)} positions -> {out / 'positions.json'}", file=sys.stderr)
 
 
+def build_hidden(args: argparse.Namespace) -> None:
+    """Positions where side 0 cannot see side 1's bench (IKA-367): one move decision a
+    game (turn ``--min-turn`` on, the middle of those with 2 to ``--max-completions``
+    completions of side 1's bench), with both sides' completions as a person's opponent
+    builds them from the public information (`hidden.completions` over the pool's sheet
+    and the slots shown, uniform weights: no bench prior)."""
+    from pokeuraou.damage import register_mega_stones
+    from pokeuraou.hidden import completions, seen_slots
+    from pokeuraou.pool import load_pool
+    from pokeuraou.position import Position
+
+    pool = load_pool(args.pool)
+    reg = pool.reg
+    register_mega_stones(reg)
+    rng = np.random.default_rng(args.seed)
+    files = sorted(Path(args.games_dir).glob("games-worker*.jsonl"))
+    rng.shuffle(files)
+    picked = []
+
+    def jsonl(items) -> list[dict]:  # noqa: ANN001
+        return [{"position": c.position.to_json(), "species": list(c.species),
+                 "slots": list(c.slots), "weight": c.weight, "exact": c.exact} for c in items]
+
+    for f in files:
+        for line in f.read_bytes().splitlines():
+            if not line.strip():
+                continue
+            game = json.loads(line)
+            named = game.get("pool")
+            if game.get("information") != "hidden-bench" or named is None:
+                continue
+            if named["sha256"] != pool.sha256:
+                raise SystemExit(f"{f.name}: a game from pool {named['sha256']}, not {pool.sha256}")
+            teams = [next(t for t in pool.teams if t.id == named["teams"][side]) for side in (0, 1)]
+            found = []
+            for d in game["decisions"]:
+                if d["kind"] != "move" or d["turn"] < args.min_turn:
+                    continue
+                pos = Position.from_json(d["position"])
+                shown = d["shownIdentities"]
+                spreads = {side: completions(reg, pos, side, list(teams[side].sets),
+                                             seen=seen_slots(pos, side, shown[side]))
+                           for side in (0, 1)}
+                if 2 <= len(spreads[1]) <= args.max_completions:
+                    found.append((d, spreads))
+            if found:
+                d, spreads = found[len(found) // 2]
+                picked.append({"source": f.name, "turn": d["turn"], "position": d["position"],
+                               "spreads": {str(side): jsonl(spreads[side]) for side in (0, 1)}})
+            if len(picked) >= args.count:
+                break
+        if len(picked) >= args.count:
+            break
+    out = Path(args.out)
+    _write(out / "positions.json", {"positions": picked, "seed": args.seed, "hidden": True,
+                                     "gamesDir": str(args.games_dir), "width": args.width})
+    sizes = [len(e["spreads"]["1"]) for e in picked]
+    print(f"{len(picked)} hidden positions (completions {min(sizes)}-{max(sizes)}, mean "
+          f"{np.mean(sizes):.1f}) -> {out / 'positions.json'}", file=sys.stderr)
+
+
 class _Kit:
     """The regulation, the leaf, the Q, and the positions of a set."""
 
@@ -149,26 +210,34 @@ class _Kit:
         self.positions = data["positions"]
         self.width = data["width"]
 
-    def menus(self, pos):  # noqa: ANN001, ANN201
-        from pokeuraou.budget import Budget
-        from pokeuraou.deepen import ALL_ACTIONS
-        from pokeuraou.selfplay import _menus
+    def spreads(self, n: int) -> dict | None:
+        """A hidden position's completions by side (`build-hidden`, IKA-367), or None."""
+        from pokeuraou.hidden import Completion
+        from pokeuraou.position import Position
 
-        wider: dict = {}
-        ours, theirs = _menus(self.reg, pos, (self.width, self.width), self.leaf, Budget.matrix(),
-                              True, None, None, rank_fill="q-nocover", wide=[ALL_ACTIONS],
-                              wider=wider)
-        return ours, theirs, wider.get(ALL_ACTIONS)
+        entry = self.positions[n]
+        if "spreads" not in entry:
+            return None
+        return {int(side): [Completion(position=Position.from_json(c["position"]),
+                                       species=tuple(c["species"]), slots=tuple(c["slots"]),
+                                       weight=float(c["weight"]), exact=bool(c["exact"]))
+                            for c in items]
+                for side, items in entry["spreads"].items()}
 
-    def menus_at(self, pos, width: int):  # noqa: ANN001, ANN201
-        """The menus at another width, as the agent builds them there (IKA-367)."""
+    def menus(self, pos, spreads=None):  # noqa: ANN001, ANN201
+        return self.menus_at(pos, self.width, spreads)
+
+    def menus_at(self, pos, width: int, spreads=None):  # noqa: ANN001, ANN201
+        """The menus at a width, as the agent builds them there (IKA-367; on a hidden
+        position ranked from each side's heaviest completion of the other's bench)."""
         from pokeuraou.budget import Budget
         from pokeuraou.deepen import ALL_ACTIONS
         from pokeuraou.selfplay import _menus
 
         wider: dict = {}
         ours, theirs = _menus(self.reg, pos, (width, width), self.leaf, Budget.matrix(), True,
-                              None, None, rank_fill="q-nocover", wide=[ALL_ACTIONS], wider=wider)
+                              None, spreads, rank_fill="q-nocover", wide=[ALL_ACTIONS],
+                              wider=wider)
         return ours, theirs, wider.get(ALL_ACTIONS)
 
 
@@ -185,25 +254,35 @@ def reference(args: argparse.Namespace) -> None:
             continue
         began = time.perf_counter()
         pos = Position.from_json(kit.positions[n]["position"])
-        ours, theirs, _outside = kit.menus(pos)
+        spreads = kit.spreads(n)
+        ours, theirs, _outside = kit.menus(pos, spreads)
         budget = Budget.matrix()
-        d1, _notes = batched_payoff(kit.reg, pos, ours, theirs, kit.leaf, budget=budget)
-        d1 = np.asarray(d1, dtype=np.float64)
-        d2 = d1.copy()
+        # A hidden position: the game once per completion of side 1's bench (IKA-367).
+        worlds = [pos] if spreads is None else [c.position for c in spreads[1]]
+        d1s, d2s = [], []
         refused = 0
-        for i, a in enumerate(ours):
-            for j, b in enumerate(theirs):
-                value, _n, _s = _refined_value(kit.reg, pos, a, b, kit.leaf, budget=budget,
-                                               sub_limit=args.sub_limit,
-                                               sub_branches=args.sub_branches)
-                if value is None:
-                    refused += 1
-                else:
-                    d2[i, j] = value
+        for world in worlds:
+            d1, _notes = batched_payoff(kit.reg, world, ours, theirs, kit.leaf, budget=budget)
+            d1 = np.asarray(d1, dtype=np.float64)
+            d2 = d1.copy()
+            for i, a in enumerate(ours):
+                for j, b in enumerate(theirs):
+                    value, _n, _s = _refined_value(kit.reg, world, a, b, kit.leaf, budget=budget,
+                                                   sub_limit=args.sub_limit,
+                                                   sub_branches=args.sub_branches)
+                    if value is None:
+                        refused += 1
+                    else:
+                        d2[i, j] = value
+            d1s.append(d1)
+            d2s.append(d2)
         out.mkdir(parents=True, exist_ok=True)
-        np.savez(path, d1=d1, d2=d2, rows=np.array([a.to_choice() for a in ours]),
+        extra = {} if spreads is None else {"weights": [c.weight for c in spreads[1]]}
+        np.savez(path, d1=d1s[0] if spreads is None else np.stack(d1s),
+                 d2=d2s[0] if spreads is None else np.stack(d2s),
+                 rows=np.array([a.to_choice() for a in ours]),
                  cols=np.array([b.to_choice() for b in theirs]), refused=refused,
-                 subLimit=args.sub_limit, subBranches=args.sub_branches)
+                 subLimit=args.sub_limit, subBranches=args.sub_branches, **extra)
         print(f"reference {n}: {len(ours)}x{len(theirs)}, refused {refused}, "
               f"{time.perf_counter() - began:.1f}s", file=sys.stderr, flush=True)
 
@@ -502,7 +581,7 @@ def deep(args: argparse.Namespace) -> None:
 
     from pokeuraou import search
     from pokeuraou.budget import Budget
-    from pokeuraou.equilibrium import solve
+    from pokeuraou.equilibrium import solve_bayesian
     from pokeuraou.position import Position
 
     kit = _Kit(args)
@@ -516,44 +595,70 @@ def deep(args: argparse.Namespace) -> None:
         began = time.perf_counter()
         base = np.load(base_dir / f"{n}.npz")
         pos = Position.from_json(kit.positions[n]["position"])
-        ours, theirs, _outside = kit.menus(pos)
+        spreads = kit.spreads(n)
+        ours, theirs, _outside = kit.menus(pos, spreads)
         if [a.to_choice() for a in ours] != list(base["rows"]):
             raise SystemExit(f"position {n}: the menus are not the base reference's")
-        d = np.asarray(base["d2"], dtype=np.float64).copy()
-        eq = solve(d)
+        # One matrix per completion (an open position is one of weight 1): the rectangle is
+        # the base's Bayesian answer's -- one row set, a column set per completion.
+        mats, w = _game(base["d2"], base.get("weights", None))
+        worlds = [pos] if spreads is None else [c.position for c in spreads[1]]
+        eq = solve_bayesian(mats, w)
         rows = _rectangle(eq.row_strategy, eq.row_ev, args.rect, larger=True)
-        cols = _rectangle(eq.col_strategy, eq.col_ev, args.rect, larger=False)
+        cols = [_rectangle(y, eq.row_strategy @ m, args.rect, larger=False)
+                for y, m in zip(eq.col_strategies, mats, strict=True)]
         work = {"turns": 0, "subgames": 0, "cells": 0, "qs": 0}
         search.WORK = work
         deepened = 0
-        mask = np.zeros(d.shape, dtype=bool)
+        mask = [np.zeros(m.shape, dtype=bool) for m in mats]
         try:
-            for i in rows:
-                for j in cols:
-                    v = _deep_cell(kit, pos, ours[i], theirs[j], budget, args, work)
-                    if v is not None:
-                        d[i, j] = v
-                        mask[i, j] = True
-                        deepened += 1
+            for k, world in enumerate(worlds):
+                for i in rows:
+                    for j in cols[k]:
+                        v = _deep_cell(kit, world, ours[i], theirs[j], budget, args, work)
+                        if v is not None:
+                            mats[k][i, j] = v
+                            mask[k][i, j] = True
+                            deepened += 1
         finally:
             search.WORK = None
         out.mkdir(parents=True, exist_ok=True)
         took = time.perf_counter() - began
-        np.savez(path, d1=base["d1"], d2=d, rows=base["rows"], cols=base["cols"], deep=mask,
-                 rect=args.rect, childRect=args.child_rect, grand=args.grand, seconds=took,
-                 work=json.dumps(work))
-        print(f"deep {n}: rectangle {len(rows)}x{len(cols)}, deepened {deepened}, "
+        hidden = spreads is not None
+        np.savez(path, d1=base["d1"], d2=np.stack(mats) if hidden else mats[0],
+                 rows=base["rows"], cols=base["cols"],
+                 deep=np.stack(mask) if hidden else mask[0], rect=args.rect,
+                 childRect=args.child_rect, grand=args.grand, seconds=took,
+                 work=json.dumps(work), **({"weights": w} if hidden else {}))
+        print(f"deep {n}: rectangle {len(rows)}x{[len(c) for c in cols]}, deepened {deepened}, "
               f"{took:.1f}s, work {work}", file=sys.stderr, flush=True)
 
 
-def _score(x: np.ndarray, claimed: float, refs: dict) -> dict:  # noqa: ANN001
-    from pokeuraou.equilibrium import solve
+def _game(matrix, weights=None) -> tuple[list[np.ndarray], np.ndarray]:  # noqa: ANN001
+    """A reference game: an open position's (R, C) matrix, or a hidden one's (K, R, C) with
+    the completions' weights (IKA-367)."""
+    m = np.asarray(matrix, dtype=np.float64)
+    if m.ndim == 2:
+        return [m.copy()], np.ones(1)
+    w = np.asarray(weights, dtype=np.float64)
+    return [mk.copy() for mk in m], w / w.sum()
 
+
+def _best_got(x: np.ndarray, matrix, weights=None) -> tuple[float, float]:  # noqa: ANN001
+    """The game's value (Bayesian: side 1 knows its bench) and what ``x`` guarantees in it."""
+    from pokeuraou.equilibrium import solve, solve_bayesian
+
+    mats, w = _game(matrix, weights)
+    best = float(solve(mats[0]).value) if len(mats) == 1 else float(solve_bayesian(mats, w).value)
+    got = float(sum(wk * float((x @ m).min()) for wk, m in zip(w, mats, strict=True)))
+    return best, got
+
+
+def _score(x: np.ndarray, claimed: float, refs: dict) -> dict:
+    """``refs``: label -> (matrix, weights or None)."""
     out = {}
-    for label, matrix in refs.items():
-        m = np.asarray(matrix, dtype=np.float64)
-        best = float(solve(m).value)
-        got = _guarantee(x, m)
+    for label, (matrix, weights) in refs.items():
+        best, got = _best_got(x, matrix, weights)
         out[label] = {"best": best, "got": got, "loss": best - got, "curse": claimed - got}
     return out
 
@@ -588,11 +693,15 @@ def sweep(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912, PLR0915 - t
         if not found:
             continue
         ref = found["r24"] if "r24" in found else next(iter(found.values()))
-        full = kit.menus(pos)
+        spreads = kit.spreads(n)
+        exact = spreads is None
+        classes = 1 if exact else len(spreads[1])
+        full = kit.menus(pos, spreads)
         if [a.to_choice() for a in full[0]] != list(ref["rows"]):
             raise SystemExit(f"position {n}: the menus are not the reference's (another leaf or Q?)")
         index = {c: i for i, c in enumerate(ref["rows"])}
-        counts = (humanplay.legal_count(kit.reg, pos, 0), humanplay.legal_count(kit.reg, pos, 1), 1)
+        counts = (humanplay.legal_count(kit.reg, pos, 0), humanplay.legal_count(kit.reg, pos, 1),
+                  classes)
         for base in conds:
             if base.clock != "count":
                 raise SystemExit("a sweep reads on the node clock (clock=count)")
@@ -605,25 +714,26 @@ def sweep(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912, PLR0915 - t
                 plan = humanplay.plan_move(seconds, 1, *counts, width_only=cond.width_only,
                                            width=cond.width)
                 width = min(plan.width, kit.width)
-                ours, theirs, outside = full if width >= kit.width else kit.menus_at(pos, width)
-                node_ms = price.ms(len(ours) * len(theirs))
+                ours, theirs, outside = (full if width >= kit.width
+                                         else kit.menus_at(pos, width, spreads))
+                node_ms = price.ms(len(ours) * len(theirs) * classes)
                 budget = (replace(Budget.matrix(), enumerate_knockouts=True) if cond.knockouts
                           else Budget.matrix())
                 extra: dict = {}
                 began = time.perf_counter()
                 if cond.ladder is not None:
                     solved = humanplay.solve_move(
-                        kit.reg, pos, 0, list(ours), list(theirs), None, kit.leaf, budget=budget,
-                        exact=True, ladder={"stages": parse_ladder(cond.ladder),
+                        kit.reg, pos, 0, list(ours), list(theirs), spreads, kit.leaf,
+                        budget=budget, exact=exact, ladder={"stages": parse_ladder(cond.ladder),
                                             "budget_ms": seconds * 1000.0, "clock": "count",
                                             "cost": LADDER_COSTS["local", 1],
                                             "start_ms": node_ms})
                     extra["ladder"] = solved.ladder.to_json()
                 elif cond.depth2_auto:
-                    d2k = humanplay.depth2_children(seconds * 1000.0 - node_ms, 1, price)
+                    d2k = humanplay.depth2_children(seconds * 1000.0 - node_ms, classes, price)
                     solved = humanplay.solve_move(
-                        kit.reg, pos, 0, list(ours), list(theirs), None, kit.leaf, budget=budget,
-                        exact=True, child_q=d2k if d2k is not None else None,
+                        kit.reg, pos, 0, list(ours), list(theirs), spreads, kit.leaf,
+                        budget=budget, exact=exact, child_q=d2k if d2k is not None else None,
                         sub_limit=cond.sub_limit, sub_branches=cond.sub_branches,
                         depth=2 if d2k is not None else 1, refine=cond.refine, passes=cond.passes)
                     extra["depth2Children"] = d2k
@@ -631,8 +741,9 @@ def sweep(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912, PLR0915 - t
                     cells = (0 if cond.width_only or plan.deepen_ms <= 0
                              else cells_for_seconds(plan.deepen_ms / 1000.0, 1))
                     solved = humanplay.solve_move(
-                        kit.reg, pos, 0, list(ours), list(theirs), None, kit.leaf, budget=budget,
-                        exact=True, cells=cells, cost=COSTS["local", 1] if cells else None,
+                        kit.reg, pos, 0, list(ours), list(theirs), spreads, kit.leaf,
+                        budget=budget, exact=exact, cells=cells,
+                        cost=COSTS["local", 1] if cells else None,
                         levels=cond.max_levels if cells else None,
                         child_q=cond.child_q if cells else None,
                         outside=(outside if (cells and cond.oracle is not None
@@ -657,10 +768,18 @@ def sweep(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912, PLR0915 - t
                     return (x / x.sum() if x.sum() > 0 else x), lost
 
                 x, outside_mass = mapped(solved.strategy)
-                refs = {"d1": ref["d1"]} | {f"d2-{k}": r["d2"] for k, r in found.items()}
+                refs = {"d1": (ref["d1"], ref.get("weights", None))} | {
+                    f"d2-{k}": (r["d2"], r.get("weights", None))
+                    for k, r in found.items()}
                 if cond.ladder is not None:
                     # Each completed stage scored as the answer it was: the read's own curve.
+                    # The depth-1 answer first, as a stage that spent the node.
+                    x0, v0 = solved.ladder.start
                     extra["rungScores"] = [
+                        {"stage": "d1", "spentMs": round(node_ms, 1), "wallMs": 0.0,
+                         "x": [round(float(v), 6) for v in mapped(x0)[0]], "claimed": v0}
+                        | _score(mapped(x0)[0], v0, refs)
+                    ] + [
                         {"stage": g.stage, "spentMs": round(g.spent_ms, 1),
                          "wallMs": round(g.wall_ms, 1),
                          "x": [round(float(v), 6) for v in mapped(g.strategy)[0]],
@@ -668,15 +787,20 @@ def sweep(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912, PLR0915 - t
                         | _score(mapped(g.strategy)[0], g.value, refs)
                         for g in solved.ladder.rungs]
                 row = {"n": n, "arm": cond.name, "budget": seconds, "wall": round(took, 3),
-                       "nodeMs": round(node_ms, 2), "width": width, "claimed": solved.value,
+                       "nodeMs": round(node_ms, 2), "width": width, "classes": classes,
+                       "claimed": solved.value,
                        "outsideMass": outside_mass, "x": [round(float(v), 6) for v in x],
                        **extra} | _score(x, solved.value, refs)
                 _write(path, row)
-                if args.keep_matrix and cond.ladder is not None and width >= kit.width:
+                if (args.keep_matrix and cond.ladder is not None and width >= kit.width
+                        and seconds == max(budgets)):
                     keep = Path(args.set) / f"ref-{name}"
                     keep.mkdir(parents=True, exist_ok=True)
-                    np.savez(keep / f"{n}.npz", d1=ref["d1"], d2=solved.ladder.prices[0],
-                             rows=ref["rows"], cols=ref["cols"])
+                    prices = solved.ladder.prices
+                    np.savez(keep / f"{n}.npz", d1=ref["d1"],
+                             d2=prices[0] if exact else np.stack(prices),
+                             rows=ref["rows"], cols=ref["cols"],
+                             **({} if exact else {"weights": ref["weights"]}))
                 print(json.dumps({"n": n, "arm": name, "wall": row["wall"]}
                                  | {k: round(v["loss"], 4) for k, v in row.items()
                                     if isinstance(v, dict) and "loss" in v}),
@@ -685,10 +809,8 @@ def sweep(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912, PLR0915 - t
 
 def _sweep_rows(set_dir: Path) -> dict:
     """{arm: {budget: {n: row}}}, the scores refreshed against every reference now present."""
-    from pokeuraou.equilibrium import solve
 
     refs = sorted(d for d in set_dir.glob("ref-*") if d.is_dir())
-    best: dict = {}
     out: dict = {}
     for f in sorted((set_dir / "sweep").glob("*/*.json")):
         row = json.loads(f.read_bytes())
@@ -702,13 +824,11 @@ def _sweep_rows(set_dir: Path) -> dict:
                                    for g in row.get("rungScores", [])]
             if all(key in r for r, _x in scored):
                 continue
-            m = np.asarray(np.load(d / f"{n}.npz")["d2"], dtype=np.float64)
-            if (d.name, n) not in best:
-                best[d.name, n] = float(solve(m).value)
+            npz = np.load(d / f"{n}.npz")
+            game = (npz["d2"], npz.get("weights", None))
             for r, xr in scored:
-                got = _guarantee(xr, m)
-                r[key] = {"best": best[d.name, n], "got": got, "loss": best[d.name, n] - got,
-                          "curse": r["claimed"] - got}
+                b, got = _best_got(xr, *game)
+                r[key] = {"best": b, "got": got, "loss": b - got, "curse": r["claimed"] - got}
         out.setdefault(row["arm"], {}).setdefault(row["budget"], {})[n] = row
     return out
 
@@ -758,6 +878,21 @@ def _svg(series: dict, key: str, path: Path) -> None:
 def curve(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912 - one table per reference
     """Loss and curse by budget, per condition (the module's docstring)."""
     arms = _sweep_rows(Path(args.set))
+    for spec in args.virtual or []:
+        # "lad@64=1,4,16": the answers a read at 64 s had at each budget -- its last stage
+        # completed within it (a read given that budget may skip a stage it predicts will
+        # not fit): a condition "lad~" at those budgets.
+        source, _eq, at = spec.partition("=")
+        name, _at, s = source.partition("@")
+        rows = arms[name][float(s)]
+        for b in (float(v) for v in at.split(",")):
+            for n, r in rows.items():
+                done = [g for g in r.get("rungScores", []) if g["spentMs"] <= b * 1000.0]
+                if not done:
+                    continue
+                g = done[-1]
+                arms.setdefault(f"{name}~", {}).setdefault(b, {})[n] = {
+                    **{k: v for k, v in g.items()}, "wall": g["wallMs"] / 1000.0, "stage": g["stage"]}
     if args.arms:
         arms = {a: arms[a] for a in args.arms.split(",") if a in arms}
     ns = None
@@ -832,15 +967,21 @@ def curve(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912 - one table 
     if args.elo:
         # "0.1:0.2=15.1,0.2:0.4=25.5": a condition's loss change between two budgets and
         # the Elo a board gave the same step.
-        arm = arms[args.elo_arm]
-        print(f"\nElo scale ({args.elo_arm}):")
+        # Or "A@s:B@s=Elo": B's Elo over A's, two conditions (IKA-362/366's matches).
+        print("\nElo scale:")
         total_elo = total_loss = 0.0
         for item in args.elo.split(","):
             span, elo = item.split("=")
-            lo, hi = (float(v) for v in span.split(":"))
+            ends = []
+            for end in span.split(":"):
+                name, _at, s = end.rpartition("@")
+                ends.append((name or args.elo_arm, float(s)))
+            (la, lo), (ha, hi) = ends
             for key in keys:
-                d = np.array([arm[lo][n][key]["loss"] - arm[hi][n][key]["loss"] for n in ns])
-                print(f"  {lo:g} -> {hi:g} s, {float(elo):+.1f} Elo: loss falls {d.mean():+.4f} "
+                d = np.array([arms[la][lo][n][key]["loss"] - arms[ha][hi][n][key]["loss"]
+                              for n in ns])
+                print(f"  {la}@{lo:g} -> {ha}@{hi:g}, {float(elo):+.1f} Elo: loss falls "
+                      f"{d.mean():+.4f} "
                       f"(se {d.std() / np.sqrt(len(ns)):.4f}) against {key}"
                       + (f"; {float(elo) / d.mean():+.0f} Elo per unit" if d.mean() > 0 else ""))
                 if key == args.elo_key:
@@ -857,7 +998,7 @@ def fit(args: argparse.Namespace) -> None:
     row per stage (what it added to the work and the wall) and one for the unfinished rest."""
     from scipy.optimize import nnls
 
-    kinds = ("turns", "subgames", "cells", "qs")
+    kinds = ("turns", "subgames", "cells", "qs", "reads")
     arms = _sweep_rows(Path(args.set))
     xs, ys = [], []
     for budgets in arms.values():
@@ -870,7 +1011,7 @@ def fit(args: argparse.Namespace) -> None:
                 marks.append((lad["work"], lad["wallMs"]))
                 prev = ({k: 0 for k in kinds}, 0.0)
                 for work, wall in marks:
-                    xs.append([work[k] - prev[0][k] for k in kinds])
+                    xs.append([work.get(k, 0) - prev[0].get(k, 0) for k in kinds])
                     ys.append(wall - prev[1])
                     prev = (work, wall)
     if not xs:
@@ -880,8 +1021,8 @@ def fit(args: argparse.Namespace) -> None:
     pred = a @ coef
     r2 = 1 - ((y - pred) ** 2).sum() / ((y - y.mean()) ** 2).sum()
     print(f"{len(y)} stages: turn {coef[0]:.3f} ms, subgame {coef[1]:.3f} ms, cell "
-          f"{coef[2]:.5f} ms, q {coef[3]:.3f} ms; R^2 {r2:.3f}; wall/predicted total "
-          f"{y.sum() / pred.sum():.3f}")
+          f"{coef[2]:.5f} ms, q {coef[3]:.3f} ms, read {coef[4]:.3f} ms; R^2 {r2:.3f}; "
+          f"wall/predicted total {y.sum() / pred.sum():.3f}")
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -929,7 +1070,17 @@ def main(argv: list[str] | None = None) -> None:
                            help="a time-match condition (its seconds are the sweep's)")
             s.add_argument("--seconds", default="1,4,16,64")
             s.add_argument("--keep-matrix", action="store_true",
-                           help="a ladder's root prices kept as a reference ref-<arm>@<s>")
+                           help="a ladder's root prices at the longest budget kept as a "
+                                "reference ref-<arm>@<s>")
+    bh = sub.add_parser("build-hidden")
+    bh.add_argument("--games-dir", type=Path, required=True)
+    bh.add_argument("--pool", default="regmc-matchupweb")
+    bh.add_argument("--count", type=int, default=40)
+    bh.add_argument("--seed", type=int, default=36700)
+    bh.add_argument("--width", type=int, default=36)
+    bh.add_argument("--min-turn", type=int, default=2)
+    bh.add_argument("--max-completions", type=int, default=6)
+    bh.add_argument("--out", type=Path, required=True)
     sb = sub.add_parser("subset")
     sb.add_argument("--set", type=Path, required=True)
     sb.add_argument("--out", type=Path, required=True)
@@ -939,6 +1090,8 @@ def main(argv: list[str] | None = None) -> None:
     c.add_argument("--arms", default=None, help="comma-separated conditions (default: all)")
     c.add_argument("--svg", default=None, help="figure path; one per reference")
     c.add_argument("--stages", default=None, help="ARM@SECONDS: a ladder read's stages")
+    c.add_argument("--virtual", action="append", default=None,
+                   help="ARM@S=B1,B2,...: a ladder read's answers at smaller budgets (ARM~)")
     c.add_argument("--elo", default=None, help="lo:hi=Elo,... steps of a recorded curve")
     c.add_argument("--elo-arm", default=None)
     c.add_argument("--elo-key", default="d2-deep")
@@ -951,6 +1104,7 @@ def main(argv: list[str] | None = None) -> None:
     args = ap.parse_args(argv)
     {"build": build, "reference": reference, "reference3": reference3, "evaluate": evaluate,
      "rescore": rescore, "report": report, "subset": subset, "deep": deep, "sweep": sweep,
+     "build-hidden": build_hidden,
      "curve": curve, "fit": fit}[args.cmd](args)
 
 

@@ -91,7 +91,8 @@ def _open_read(reg, pos, stages, budget_ms=None, *, side=0, width=8):  # noqa: A
 
 
 def test_a_stage_label_reads_back() -> None:
-    for label in ("d2r4b3k8", "d2r8bak24x", "d3r4b3k24x/r3b3k16", "d2r2b3n4", "d3r2ban4/r2b2n4"):
+    for label in ("d2r4b3k8", "d2r8bak24x", "d3r4b3k24x/r3b3k16", "d2r2b3n4", "d3r2ban4/r2b2n4",
+                  "d4r4bak24x/r4bak24/r3b3n16"):
         assert ladder.parse_stage(label).label == label
     assert [s.label for s in ladder.parse_ladder("d2r2b3n4+d2r3ban4x")] == ["d2r2b3n4",
                                                                            "d2r3ban4x"]
@@ -164,15 +165,19 @@ def test_one_completion_is_the_open_ladder(roster) -> None:  # noqa: ANN001
 
 def test_a_depth_three_stage_reads_a_ply_further(roster) -> None:  # noqa: ANN001
     reg = roster.reg
-    moved = 0
+    moved = four = 0
     for pos in _played(roster):
-        got = _open_read(reg, pos, "d2r2ban4+d3r2ban4/r2ban4", width=6)
+        got = _open_read(reg, pos, "d2r2ban4+d3r2ban4/r2ban4+d4r1b2n3/r1b2n3/r1b2n3", width=6)
         if len(got.rungs) < 2:
             continue
         assert got.rungs[1].stage == "d3r2ban4/r2ban4"
         assert got.work["subgames"] > 0 and got.rungs[1].fresh > 0
+        # The children's own reads add their work to the cell's.
+        assert got.rungs[1].work["subgames"] > got.rungs[0].work["subgames"]
         moved += abs(got.rungs[1].value - got.rungs[0].value) > 1e-9
+        four += len(got.rungs) == 3
     assert moved >= 1, "depth 3 moved no value"
+    assert four >= 1, "no depth-4 stage completed"
 
 
 # ----------------------------------------------------------------------- the agent

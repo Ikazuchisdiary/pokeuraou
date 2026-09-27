@@ -31,11 +31,13 @@ as `search._restricted_belief` is `_restricted_search` there. Cells are (row, co
 completion), each completion's cell read in that completion's position (the determinization
 `_restricted_belief` uses).
 
-Stages are written ``d<depth>r<rect>b<branches>k<child>[x]`` -- depth 2 or 3, the
+Stages are written ``d<depth>r<rect>b<branches>k<child>[x]`` -- the depth (2 and up), the
 rectangle's side, the branches kept per refined cell (``a``: all), each child's menus by the
-Q's k best, ``x``: knock-outs forked (`Budget.enumerate_knockouts`) -- and a depth-3 stage
-adds ``/r<rect>b<branches>k<child>``: each child read as a depth-2 restricted game of that
-rectangle, branches and grandchildren (`search.search(depth=2, solve_restricted=True)`).
+Q's k best (``n<k>``: `narrow`'s damage order instead), ``x``: knock-outs forked
+(`Budget.enumerate_knockouts`, at every level). A depth-d stage adds d - 2 segments
+``/r<rect>b<branches>k<child>``, one per level below: a depth-3 cell's children are each
+read as this module reads a root, one stage of depth 2 (``/r..b..k..``), a depth-4 cell's
+as one stage of depth 3, and so on -- so every cell of a stage is the same tree.
 """
 
 from __future__ import annotations
@@ -50,16 +52,14 @@ import numpy as np
 
 from . import port, search
 from .budget import Budget
-from .equilibrium import EquilibriumError, solve_bayesian
+from .equilibrium import EquilibriumError, solve, solve_bayesian
 from .position import Position
 
 #: All branches of a refined cell, in practice.
 ALL_BRANCHES = 1000
 
-_STAGE = re.compile(
-    r"d([23])r([1-9][0-9]*)b([1-9][0-9]*|a)([kn])([1-9][0-9]*)(x)?"
-    r"(?:/r([1-9][0-9]*)b([1-9][0-9]*|a)([kn])([1-9][0-9]*))?"
-)
+_HEAD = re.compile(r"d([2-9])r([1-9][0-9]*)b([1-9][0-9]*|a)([kn])([1-9][0-9]*)(x)?")
+_LEVEL = re.compile(r"r([1-9][0-9]*)b([1-9][0-9]*|a)([kn])([1-9][0-9]*)")
 
 
 @dataclass(frozen=True, slots=True)
@@ -71,67 +71,80 @@ class Stage:
     branches: int
     child: int
     knockouts: bool = False
+    #: Children's menus by the Q (``k``) or `narrow`'s damage order (``n``).
+    q: bool = True
     #: Oracle passes after the rectangle: each may add a row and a column.
     passes: int = 1
-    #: A depth-3 stage's child read: its rectangle, branches and grandchildren's menus.
-    child_rect: int = 0
-    child_branches: int = 0
-    grand: int = 0
-    #: Children's (and grandchildren's) menus by the Q (``k``) or `narrow`'s damage order
-    #: (``n``, a read without a Q).
-    q: bool = True
-    grand_q: bool = True
+    #: A depth-3-or-more stage's child read: one stage of depth - 1 on each child.
+    sub: Stage | None = None
 
     @property
     def kind(self) -> tuple:
-        """What a cell's value depends on: two stages of one kind share their cells."""
-        return (self.depth, self.branches, self.child, self.q, self.knockouts, self.child_rect,
-                self.child_branches, self.grand, self.grand_q)
+        """What a cell's value depends on (all but the top rectangle): two stages of one
+        kind share their cells."""
+        return (self.depth, self.branches, self.child, self.q, self.knockouts,
+                None if self.sub is None else self.sub.label)
 
     @property
     def label(self) -> str:
-        def b(n: int) -> str:
-            return "a" if n >= ALL_BRANCHES else str(n)
+        head = (f"d{self.depth}r{self.rect}b{_b(self.branches)}{'k' if self.q else 'n'}"
+                f"{self.child}{'x' if self.knockouts else ''}")
+        return head + "".join(f"/{level}" for level in self._levels())
 
-        out = f"d{self.depth}r{self.rect}b{b(self.branches)}{'k' if self.q else 'n'}{self.child}"
-        out += "x" if self.knockouts else ""
-        if self.depth == 3:
-            out += (f"/r{self.child_rect}b{b(self.child_branches)}"
-                    f"{'k' if self.grand_q else 'n'}{self.grand}")
+    def _levels(self) -> list[str]:
+        out = []
+        sub = self.sub
+        while sub is not None:
+            out.append(f"r{sub.rect}b{_b(sub.branches)}{'k' if sub.q else 'n'}{sub.child}")
+            sub = sub.sub
         return out
 
 
+def _b(n: int) -> str:
+    return "a" if n >= ALL_BRANCHES else str(n)
+
+
 def parse_stage(label: str) -> Stage:
-    got = _STAGE.fullmatch(label)
-    if got is None:
+    parts = label.split("/")
+    head = _HEAD.fullmatch(parts[0])
+    levels = [_LEVEL.fullmatch(p) for p in parts[1:]]
+    if head is None or any(m is None for m in levels):
         raise ValueError(
-            f"a stage is d<2|3>r<rect>b<branches|a>k<child>[x] (n<child>: damage order), a "
-            f"depth-3 one then /r<rect>b<branches|a>k<child>; not {label!r}"
+            f"a stage is d<depth>r<rect>b<branches|a>k<child>[x] (n<child>: damage order), "
+            f"then one /r<rect>b<branches|a>k<child> per level below depth 2; not {label!r}"
         )
+    depth = int(head.group(1))
+    if len(levels) != depth - 2:
+        raise ValueError(f"a depth-{depth} stage names {depth - 2} level(s) below: {label!r}")
+    knockouts = head.group(6) is not None
 
-    def b(text: str | None) -> int:
-        return ALL_BRANCHES if text == "a" else int(text or 0)
+    def b(text: str) -> int:
+        return ALL_BRANCHES if text == "a" else int(text)
 
-    depth = int(got.group(1))
-    if depth == 3 and got.group(7) is None:
-        raise ValueError(f"a depth-3 stage names its child read (/r..b..k..): {label!r}")
-    if depth == 2 and got.group(7) is not None:
-        raise ValueError(f"a depth-2 stage has no child read: {label!r}")
-    return Stage(
-        depth=depth, rect=int(got.group(2)), branches=b(got.group(3)), child=int(got.group(5)),
-        knockouts=got.group(6) is not None,
-        child_rect=int(got.group(7) or 0), child_branches=b(got.group(8)),
-        grand=int(got.group(10) or 0), q=got.group(4) == "k", grand_q=got.group(9) != "n",
-    )
+    sub = None
+    for d, m in zip(range(2, depth), reversed(levels), strict=True):
+        sub = Stage(depth=d, rect=int(m.group(1)), branches=b(m.group(2)),
+                    child=int(m.group(4)), knockouts=knockouts, q=m.group(3) == "k", sub=sub)
+    return Stage(depth=depth, rect=int(head.group(2)), branches=b(head.group(3)),
+                 child=int(head.group(5)), knockouts=knockouts, q=head.group(4) == "k", sub=sub)
 
 
 #: Named ladders. ``L1`` is the issue's order (IKA-367): depth 2 with three branches and
 #: narrow children, every branch and the knock-outs with children at the Q's 24 (IKA-366's
 #: +30), the rectangle 4 -> 8, then the support's depth 3 with three branches, then every
-#: branch there.
+#: branch there, then wider, then depth 4 (the analysis view's hours).
 LADDERS: dict[str, tuple[str, ...]] = {
     "L1": ("d2r4b3k8", "d2r4bak24x", "d2r8bak24x", "d3r4b3k24x/r3b3k16",
-           "d3r4bak24x/r4bak24", "d3r8bak24x/r4bak24"),
+           "d3r4bak24x/r4bak24", "d3r8bak24x/r4bak24", "d3r8bak24x/r6bak24",
+           "d4r4b3k24x/r3b3k24/r3b3k16", "d4r4bak24x/r4bak24/r4bak24"),
+    # L1 widened at three branches before every branch at depth 3 (IKA-367: every branch at
+    # depth 3 on the 4 x 4 moved the answer away from the long reference).
+    "L2": ("d2r4b3k8", "d2r4bak24x", "d2r8bak24x", "d3r4b3k24x/r3b3k16",
+           "d3r8b3k24x/r3b3k16", "d3r8bak24x/r4bak24", "d3r12bak24x/r4bak24",
+           "d4r4b3k24x/r3b3k24/r3b3k16"),
+    # Depth 2 only, ever wider: what depth 3 adds over the same time spent on width.
+    "L0": ("d2r4b3k8", "d2r4bak24x", "d2r8bak24x", "d2r12bak24x", "d2r16bak24x",
+           "d2r24bak24x"),
 }
 
 
@@ -145,33 +158,36 @@ def parse_ladder(spec: str) -> tuple[Stage, ...]:
 class LadderCost:
     """Milliseconds of the counted work (IKA-367): a refined cell's turn, a child game's
     node (its crossing, fold and LP), a resolved cell of a child's matrix, a forward pass
-    of the Q for children's menus. Measured on the local form, one core, the GPU leaf
-    (`tools/position_set.py fit`)."""
+    of the Q for children's menus, and a child game read by a stage of its own (depth 3
+    and up: its orderings, rectangles and LPs). Measured on the local form, one core, the
+    GPU leaf (`tools/position_set.py fit`)."""
 
     turn: float
     subgame: float
     cell: float
     q: float
+    read: float = 0.0
 
     def ms(self, work: dict[str, int]) -> float:
         return (work["turns"] * self.turn + work["subgames"] * self.subgame
-                + work["cells"] * self.cell + work["qs"] * self.q)
+                + work["cells"] * self.cell + work["qs"] * self.q
+                + work.get("reads", 0) * self.read)
 
 
 #: Measured (IKA-367, `tools/position_set.py fit`): non-negative least squares of each
-#: stage's wall milliseconds on the work it added, ladder L1 read at 4 and 16 s on 8 recorded
-#: M-C positions in one process (71 stages, R^2 0.979: subgame 6.19 ms, cell 0.0581 ms, turn
-#: and Q 0), and at 4 / 16 / 64 s on 16 positions in eight processes sharing the card (255
-#: stages, R^2 0.983: subgame 7.01, cell 0.0608, Q 11.6, turn 0). A cell here is about twice
-#: `deepen.COSTS`' (0.0286 ms): the knock-out fork and every branch put more leaves in one.
-#: The turn is kept at a small price so a stage of refused cells is not free.
+#: stage's wall milliseconds on the work it added -- ladder L1 read at 64 s on 24 recorded
+#: M-C positions (width 36), eight processes sharing the card, depth-2 and depth-3 stages
+#: (151 stages, R^2 0.934, wall over the priced clock 1.05). The depth-2 stages alone, in
+#: one process, fitted subgame 6.2 ms and cell 0.058 ms (71 stages, R^2 0.979): the prices
+#: trade against each other, the totals agree. The Q's pass and a child's own read came out
+#: at 0 (their cost is in the others).
 LADDER_COSTS: dict[tuple[str, int], LadderCost] = {
-    ("local", 1): LadderCost(turn=1.0, subgame=6.2, cell=0.058, q=8.0),
+    ("local", 1): LadderCost(turn=7.0, subgame=11.5, cell=0.027, q=0.0, read=0.0),
 }
 
 
 def _zero() -> dict[str, int]:
-    return {"turns": 0, "subgames": 0, "cells": 0, "qs": 0}
+    return {"turns": 0, "subgames": 0, "cells": 0, "qs": 0, "reads": 0}
 
 
 @dataclass
@@ -227,6 +243,8 @@ class LadderResult:
     wall_ms: float = 0.0
     work: dict[str, int] = field(default_factory=_zero)
     unmodelled: set[str] = field(default_factory=set)
+    #: The depth-1 answer it started from (its strategy and guaranteed value).
+    start: tuple[np.ndarray, float] | None = None
 
     @property
     def depth_reached(self) -> str:
@@ -249,22 +267,16 @@ _CHILD_LEGAL = 17.5
 
 
 def _guess_cell_ms(stage: Stage, cost: LadderCost) -> float:
-    def branches(kept: int, ko: bool) -> float:
-        return min(float(kept), _BRANCHES_GUESS[kept >= ALL_BRANCHES, ko])
-
-    def d2(kept: int, child: int, ko: bool) -> float:
-        k = min(float(child), _CHILD_LEGAL)
-        return cost.turn + branches(kept, ko) * (cost.subgame + k * k * cost.cell)
-
-    b = branches(stage.branches, stage.knockouts)
-    if stage.depth == 2:
-        return d2(stage.branches, stage.child, stage.knockouts) + cost.q / 16.0
+    """A priori milliseconds of one cell of ``stage`` (scaled in `read` by how far the
+    guesses of the stages already done were off)."""
+    b = min(float(stage.branches), _BRANCHES_GUESS[stage.branches >= ALL_BRANCHES,
+                                                  stage.knockouts])
     k = min(float(stage.child), _CHILD_LEGAL)
-    # The child's restricted rectangle grows from its support (1.7 actions a side on
-    # average, IKA-362 §4) by its oracle's passes: about 3 x 3.
-    rect = min(float(stage.child_rect), 3.0)
-    child = cost.subgame + k * k * cost.cell + rect * rect * d2(
-        stage.child_branches, stage.grand, stage.knockouts)
+    if stage.sub is None:
+        return cost.turn + b * (cost.subgame + k * k * cost.cell) + cost.q / 16.0
+    # Each child: its node, then its own stage's rectangle (support grown by the oracle).
+    rect = min(float(stage.sub.rect), k) + stage.sub.passes
+    child = cost.subgame + k * k * cost.cell + rect * rect * _guess_cell_ms(stage.sub, cost)
     return cost.turn + cost.q + b * child
 
 
@@ -311,6 +323,10 @@ class _Clock:
 CHUNK = 8
 
 
+class Stopped(Exception):  # noqa: N818 - a signal, not an error
+    """The caller's stop event, met inside a cell's own read (depth 3 and up)."""
+
+
 def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the clock
     reg: Any,  # noqa: ANN401
     side: int,
@@ -339,7 +355,8 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
     Bayesian answer. ``budget_ms`` is what the stages may spend (None: every stage, the
     caller's ``stop`` event the only brake), read on ``clock`` (``count``: `LadderCost`,
     ``wall``); ``start_ms`` is what the move has spent before (the node). ``on_rung`` is
-    called with each completed stage.
+    called with each completed stage. ``budget`` is the root's (the stages fork the
+    knock-outs on it where they say so).
     """
     cost = cost or LADDER_COSTS["local", 1]
     w = np.asarray(weights, dtype=np.float64)
@@ -349,7 +366,8 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
     x = np.asarray(start.row_strategy, dtype=np.float64)
     ys = [np.asarray(y, dtype=np.float64) for y in start.col_strategies]
     value = float(sum(w[k] * float((x @ prices[k]).min()) for k in range(kinds)))
-    result = LadderResult(strategy=x, value=value, replies=tuple(ys), prices=prices)
+    result = LadderResult(strategy=x, value=value, replies=tuple(ys), prices=prices,
+                          start=(x, value))
     #: (completion, own row, own column, kind) -> the cell's value in side 0's units, or None.
     memo: dict[tuple, float | None] = {}
     #: The turns shared across completions, per knock-out setting (`search.TurnShare`).
@@ -357,11 +375,14 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
     clean: dict[tuple[int, int], bool] = {}
     hidden_side = 1 - side
     work = _zero()
-    before = search.WORK
+    outer = search.WORK
     search.WORK = work
     run = _Clock(clock, cost, start_ms, budget_ms, stop)
     #: Measured milliseconds per fresh cell, by kind: the next stage's prediction.
     measured: dict[tuple, tuple[float, int]] = {}
+    #: By depth, the completed stages' measured and a-priori (`_guess_cell_ms`) totals: a
+    #: new kind's guess is scaled by how far the guesses have been off in this read.
+    calib: dict[int, tuple[float, float]] = {}
     try:
         for stage in stages:
             if run.stopped():
@@ -372,8 +393,15 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
                           larger=True)
             cols = [_order(ys[k], x @ prices[k], stage.rect, larger=False) for k in range(kinds)]
             trial = [p.copy() for p in prices]
-            per_cell = (measured[stage.kind][0] / max(measured[stage.kind][1], 1)
-                        if stage.kind in measured else _guess_cell_ms(stage, cost))
+            guess = _guess_cell_ms(stage, cost)
+            if stage.kind in measured:
+                per_cell = measured[stage.kind][0] / max(measured[stage.kind][1], 1)
+            else:
+                have = calib.get(stage.depth) or (
+                    (sum(v[0] for v in calib.values()), sum(v[1] for v in calib.values()))
+                    if calib else None)
+                ratio = 1.0 if not have or have[1] <= 0 else have[0] / have[1]
+                per_cell = guess * min(max(ratio, 0.05), 3.0)
             fresh_keys = {_key(side, i, j, k, stage) for k in range(kinds) for i in rows
                           for j in cols[k]} - set(memo)
             if per_cell * len(fresh_keys) > run.left_ms(work):
@@ -383,6 +411,7 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
             fresh = 0
             abandoned = False
             answer = None
+            step = CHUNK if stage.sub is None else 1
             for attempt in range(stage.passes + 1):
                 todo = [(i, j, k) for k in range(kinds) for i in rows for j in cols[k]]
                 asked: dict[tuple, tuple] = {}
@@ -392,20 +421,21 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
                         ours, theirs = (i, j) if side == 0 else (j, i)
                         asked[key] = (k, ours, theirs)
                 keys = list(asked)
-                for at in range(0, len(keys), CHUNK if stage.depth == 2 else 1):
-                    chunk = keys[at:at + (CHUNK if stage.depth == 2 else 1)]
-                    got = _read_cells(reg, [asked[key] for key in chunk], row, col, items, leaf,
-                                      stage, stage_budget, turns, clean, hidden_side,
-                                      result.unmodelled)
+                for at in range(0, len(keys), step):
+                    chunk = keys[at:at + step]
+                    try:
+                        got = _read_cells(reg, [asked[key] for key in chunk], row, col, items,
+                                          leaf, stage, budget, stage_budget, turns, clean,
+                                          hidden_side, result.unmodelled, cost, stop)
+                    except Stopped:
+                        abandoned = True
+                        break
                     for key, v in zip(chunk, got, strict=True):
                         memo[key] = v
                     fresh += len(chunk)
                     left = len(keys) - (at + len(chunk))
                     per = (run.spent_ms(work) - stage_began) / max(fresh, 1)
-                    if run.stopped():
-                        abandoned = True
-                        break
-                    if run.left_ms(work) < 0 or per * left > run.left_ms(work):
+                    if run.stopped() or run.left_ms(work) < 0 or per * left > run.left_ms(work):
                         abandoned = True
                         break
                 if abandoned:
@@ -454,6 +484,8 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
             spent = run.spent_ms(work) - stage_began
             total, count = measured.get(stage.kind, (0.0, 0))
             measured[stage.kind] = (total + spent, count + fresh)
+            got_ms, guessed = calib.get(stage.depth, (0.0, 0.0))
+            calib[stage.depth] = (got_ms + spent, guessed + guess * fresh)
             prices = trial
             x, ys = answer[0], answer[1]
             rung = Rung(stage=stage.label, value=answer[2], strategy=x, replies=tuple(ys),
@@ -466,7 +498,11 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
             if on_rung is not None:
                 on_rung(rung)
     finally:
-        search.WORK = before
+        search.WORK = outer
+        if outer is not None:
+            # A cell's own read (depth 3 and up): its work is the cell's.
+            for kind, n in work.items():
+                outer[kind] += n
     result.spent_ms = run.spent_ms(work)
     result.wall_ms = run.wall_ms()
     result.work = work
@@ -489,16 +525,19 @@ def _read_cells(  # noqa: PLR0913 - the cells and how they are read
     items: Sequence[Any],
     leaf: Any,  # noqa: ANN401
     stage: Stage,
+    root_budget: Budget,
     budget: Budget,
     turns: dict[bool, dict],
     clean: dict[tuple[int, int], bool],
     hidden_side: int,
     unmodelled: set[str],
+    cost: LadderCost,
+    stop: Any,  # noqa: ANN401
 ) -> list[float | None]:
     """Each cell's value in side 0's units (None: not refinable, it keeps its price)."""
-    if stage.depth == 3:
-        return [_depth3_cell(reg, items[k].position, row[i], col[j], leaf, stage, budget,
-                             unmodelled) for k, i, j in cells]
+    if stage.sub is not None:
+        return [_deep_cell(reg, items[k].position, row[i], col[j], leaf, stage, root_budget,
+                           budget, unmodelled, cost, stop) for k, i, j in cells]
     shares = []
     for k, i, j in cells:
         item = items[k]
@@ -521,8 +560,8 @@ def _read_cells(  # noqa: PLR0913 - the cells and how they are read
             unmodelled.add("ladder: the port refused a refined cell; it keeps its price")
             return [None]
         return [v for cell in cells for v in _read_cells(
-            reg, [cell], row, col, items, leaf, stage, budget, turns, clean, hidden_side,
-            unmodelled)]
+            reg, [cell], row, col, items, leaf, stage, root_budget, budget, turns, clean,
+            hidden_side, unmodelled, cost, stop)]
     out = []
     for value, notes, _solved in found:
         unmodelled.update(notes)
@@ -530,19 +569,23 @@ def _read_cells(  # noqa: PLR0913 - the cells and how they are read
     return out
 
 
-def _depth3_cell(  # noqa: PLR0913 - one cell and its stage
+def _deep_cell(  # noqa: PLR0913 - one cell and its stage
     reg: Any,  # noqa: ANN401
     pos: Position,
     ours: Any,  # noqa: ANN401
     theirs: Any,  # noqa: ANN401
     leaf: Any,  # noqa: ANN401
     stage: Stage,
+    root_budget: Budget,
     budget: Budget,
     unmodelled: set[str],
+    cost: LadderCost,
+    stop: Any,  # noqa: ANN401
 ) -> float | None:
-    """One cell read three plies: its turn's kept branches, each child a depth-2
-    restricted game (children's menus by the Q)."""
+    """One cell read ``stage.depth`` plies: its turn's kept branches, each child read as a
+    root by the one stage ``stage.sub`` (its menus by the Q's or damage's ``stage.child``)."""
     from .deepen import _q_menus
+    from .narrow import narrow
 
     work = search.WORK
     try:
@@ -557,15 +600,13 @@ def _depth3_cell(  # noqa: PLR0913 - one cell and its stage
         return None
     branches, weights = kept
     live = [b.position for b in branches if not b.position.ended]
-    if not stage.q:
-        from .narrow import narrow
-
-        menus = iter([(narrow(reg, p, 0, limit=stage.child).actions,
-                       narrow(reg, p, 1, limit=stage.child).actions) for p in live])
-    else:
+    if stage.q:
         menus = iter(_q_menus(reg, live, stage.child) if live else [])
         if work is not None and live:
             work["qs"] += 1
+    else:
+        menus = iter([(narrow(reg, p, 0, limit=stage.child).actions,
+                       narrow(reg, p, 1, limit=stage.child).actions) for p in live])
     values = []
     for branch in branches:
         child = branch.position
@@ -575,20 +616,37 @@ def _depth3_cell(  # noqa: PLR0913 - one cell and its stage
         crow, ccol = next(menus)
         if not crow or not ccol:
             return None
-        if work is not None:
-            work["subgames"] += 1
-            work["cells"] += len(crow) * len(ccol)
+        if stop is not None and stop.is_set():
+            raise Stopped
         try:
-            got = search.search(reg, child, crow, ccol, leaf, budget=budget, depth=2,
-                                solve_restricted=True, refine=stage.child_rect,
-                                sub_limit=stage.grand, sub_branches=stage.child_branches,
-                                child_q=stage.grand if stage.grand_q else None)
+            # The child's own matrix as the stage resolves its turns (the knock-out fork).
+            m, notes = search.batched_payoff(reg, child, crow, ccol, leaf, budget=budget)
+            m = np.asarray(m, dtype=np.float64)
+            eq = solve(m)
         except (EquilibriumError, port.PortRefused):
             return None
-        unmodelled.update(got.unmodelled)
-        values.append(float(got.equilibrium.value))
+        unmodelled.update(notes)
+        if work is not None:
+            work["subgames"] += 1
+            work["cells"] += m.size
+        start = _Start(eq.row_strategy, [eq.col_strategy])
+        got = read(reg, 0, crow, ccol, [Item(child)], [m], [1.0], start, leaf,
+                   budget=root_budget, stages=[stage.sub], budget_ms=None, cost=cost, stop=stop)
+        if work is not None:
+            work["reads"] += 1
+        if not got.rungs:
+            if got.stopped == "stop":
+                raise Stopped
+            return None
+        values.append(float(got.value))
     return float(np.asarray(values) @ weights)
 
 
+@dataclass
+class _Start:
+    row_strategy: np.ndarray
+    col_strategies: list[np.ndarray]
+
+
 __all__ = ["LADDERS", "LADDER_COSTS", "Item", "LadderCost", "LadderResult", "Rung", "Stage",
-           "parse_ladder", "parse_stage", "read"]
+           "Stopped", "parse_ladder", "parse_stage", "read"]
