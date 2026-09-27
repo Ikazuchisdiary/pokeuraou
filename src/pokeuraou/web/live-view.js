@@ -138,7 +138,12 @@ function actHtml(parts, who, size, chunked) {
 const benchText = (bench) => (bench && bench.length ? bench.join(" / ") : "–");
 
 // ------------------------------------------------------------------ events
-function setStatus(text, cls) { const el = $("status"); el.textContent = text; el.className = "status " + (cls || ""); }
+// `short` (optional) is what a phone's header shows; the whole text stays in the title.
+function setStatus(text, cls, short) {
+  const el = $("status");
+  el.innerHTML = short ? `<span class="long">${esc(text)}</span><span class="short">${esc(short)}</span>` : esc(text);
+  el.title = text; el.className = "status " + (cls || "");
+}
 function log(turn, html, cls) {
   const li = document.createElement("li");
   li.innerHTML = `<span class="t">${turn != null ? "T" + turn : "·"}</span><div class="${cls || ""}">${html}</div>`;
@@ -177,7 +182,7 @@ function onEvent(e) {
       break;
     case "think":
       S.sent = false; S.think = e; S.decision = e.decision; S.answered = false; S.prompt = null;
-      S.history.push({ decision: e.decision, turn: e.turn, pts: [], done: false });
+      S.history.push({ decision: e.decision, turn: e.turn, pts: [], done: false, width: S.analysisState && S.analysisState.width });
       if (!S.analysis) { renderInput(); setStatus(`AI が考えています（ターン ${e.turn}）`, "think"); applyHide(); }
       renderClock(0, false);
       break;
@@ -204,8 +209,14 @@ function onEvent(e) {
       const head = mine === null ? "打ち切り" : mine ? "あなたの勝ち" : "AI の勝ち";
       setStatus(`終局: ${head}`, "end");
       const r = $("result"); r.hidden = false;
+      // Why the game ended, in words (selfplay/humanplay's end reasons).
+      const why = e.reason === "turn-cap" ? "ターンの上限で打ち切り"
+        : e.reason === "unresolved" ? "解決できない局面で打ち切り"
+        : e.reason === "draw" ? "両者の最後の体が同時にひんし（引き分け）"
+        : e.reason === "wipeout" || mine !== null ? (mine ? "AI の 4 体がひんし" : "あなたの 4 体がひんし")
+        : e.reason ? esc(e.reason) : "";
       const more = S.gamesLeft > 0 ? "次の局を待っています" : "続けて打つには tools/play.py を起動し直してください";
-      r.innerHTML = `<div class="endcard"><b class="${mine === null ? "" : mine ? "you-c" : "ai-c"}">${head}</b><span>${e.turns} ターン${e.reason ? "・" + esc(e.reason) : ""}</span>
+      r.innerHTML = `<div class="endcard"><b class="${mine === null ? "" : mine ? "you-c" : "ai-c"}">${head}</b><span>${e.turns} ターン${why ? "・" + why : ""}</span>
         <a class="primary btnlink" href="${esc(withQuery(ANALYSIS_URL, { open: "last" }))}" target="pokeuraou-analysis">この対局を分析する</a>
         <small>${more}</small></div>`;
       log(e.turns, `<b>終局: ${head}</b>`);
@@ -219,7 +230,8 @@ function onEvent(e) {
 
 function onStep(s) {
   if (s.decision !== S.decision || !S.history.length) {
-    S.decision = s.decision; S.history.push({ decision: s.decision, turn: s.turn, pts: [], done: false });
+    S.decision = s.decision;
+    S.history.push({ decision: s.decision, turn: s.turn, pts: [], done: false, width: S.analysisState && S.analysisState.width });
   }
   const h = S.history[S.history.length - 1];
   h.pts.push([Math.min(1, share(s)), s.value, s.ms]);
@@ -227,6 +239,7 @@ function onStep(s) {
   S.last = s;
   renderClock(s.ms, s.kind === "done", s);
   renderBalance(s); renderStrip(s); drawChart();
+  document.body.classList.toggle("comparing", !!(S.analysis && S.cmpA));
   if (S.analysis && S.cmpA) { renderCompare("ours", s); renderCompare("theirs", s); }
   else {
     renderMix("ours", s.ours, s.ourP, s.ourLoss, aiSide(), s.kind === "done", s.oursParts);
@@ -567,6 +580,17 @@ $("countBox").addEventListener("toggle", () => S.last && $("countBox").open && r
 // ------------------------------------------------------------------ the value chart
 // One band per decision; inside a band the line is the value while the AI thinks (x = share of
 // the budget). The area between the line and 0.5 is tinted for whoever it favours.
+// A band's label under the value chart: its turn; on the analysis page a turn read again is
+// "N 回目", and the two readings being compared are "A（幅 w）" and "B（幅 w）".
+function bandLabel(H, i) {
+  const d = H[i];
+  if (!S.analysis) return `T${d.turn}`;
+  if (S.cmpA && i >= H.length - 2 && H.length >= 2 && H[H.length - 2].turn === H[H.length - 1].turn) {
+    return i === H.length - 1 ? `B（幅 ${d.width}）` : `A（幅 ${d.width}）`;
+  }
+  const same = H.filter((x) => x.turn === d.turn);
+  return same.length > 1 ? `T${d.turn} ${same.indexOf(d) + 1} 回目` : `T${d.turn}`;
+}
 function drawChart() {
   const c = $("chart"), dpr = window.devicePixelRatio || 1;
   const w = c.clientWidth, h = c.clientHeight;
@@ -592,7 +616,7 @@ function drawChart() {
   g.font = `11px ${col("--font-num") || "monospace"}`; g.textBaseline = "middle";
   H.forEach((d, i) => {
     if (i % 2 === 0) { g.fillStyle = col("--surface-2"); g.fillRect(L + bw * i, T, bw, h - T - B); }
-    g.fillStyle = col("--faint"); g.textAlign = "center"; g.fillText(`T${d.turn}`, L + bw * (i + 0.5), h - 8);
+    g.fillStyle = col("--faint"); g.textAlign = "center"; g.fillText(bandLabel(H, i), L + bw * (i + 0.5), h - 8);
   });
   g.textAlign = "right";
   const ticks = [lo, hi]; if (Math.abs(Y(0.5) - Y(lo)) > 14 && Math.abs(Y(0.5) - Y(hi)) > 14) ticks.push(0.5);
@@ -617,6 +641,7 @@ function drawChart() {
   g.beginPath(); g.arc(X(lastD, lastP[0]), Y(lastP[1]), 4, 0, 7); g.fill();
 }
 window.addEventListener("resize", drawChart);
+window.addEventListener("resize", () => renderTimeline());
 
 // ------------------------------------------------------------------ the person's input
 function send(line) {
@@ -779,7 +804,7 @@ function enterAnalysis() {
   document.body.classList.add("analysis");
   $("analysisBox").hidden = false; $("inputBox").hidden = true;
   $("timelineBox").hidden = false; $("playedBox").hidden = false; $("pvBox").open = true;
-  $("readSeg").hidden = true; $("stopTop").hidden = false;
+  $("readSeg").hidden = true; $("stopTop").hidden = false; $("logBox").open = false;
   $("modeGame").removeAttribute("aria-current"); $("modeAnalysis").setAttribute("aria-current", "page");
   applyHide();
   document.querySelector(".brand span").textContent = "検討";
@@ -914,7 +939,7 @@ function onAnalysis(e) {
       $("aTurn").value = String(e.decision); $("aSide").value = String(e.side); stepState();
       $("aWidth").value = e.width; $("aGuard").value = e.guard;
     }
-    setStatus(`読んでいます（ターン ${e.turn}・側 ${e.side}）`, "think");
+    setStatus(`読んでいます（ターン ${e.turn}・側 ${e.side}）`, "think", `読んでいます T${e.turn}`);
     $("aNote").textContent = "";
     renderNotes(e);
     $("aWiden").disabled = false;
@@ -922,7 +947,8 @@ function onAnalysis(e) {
       (e.exact ? "・裏は尽きている" : `・相手の裏の決定化 ${e.classCount} 通り`));
   } else {
     setRunning(false);
-    setStatus(`${e.stopText}（${(e.seconds || 0).toFixed(1)} 秒・深化のステップ ${(e.steps || 0).toLocaleString("ja-JP")}）`, e.stop === "memory" ? "warn" : "end");
+    setStatus(`${e.stopText}（${(e.seconds || 0).toFixed(1)} 秒・深化のステップ ${(e.steps || 0).toLocaleString("ja-JP")}）`, e.stop === "memory" ? "warn" : "end",
+      `止めた T${e.turn}・${(e.steps || 0).toLocaleString("ja-JP")} ステップ`);
     $("aNote").textContent = e.why || "";
     renderNotes(e);
     if (S.last && e.source != null) S.readValues.set(`${e.source}.${e.game}.${e.decision}`, e.side === 0 ? S.last.value : 1 - S.last.value);
@@ -958,7 +984,7 @@ function renderTimeline() {
   const all = [...rec, ...read].filter((v) => v != null);
   let lo = Math.min(0.4, ...all), hi = Math.max(0.6, ...all);
   const pad = (hi - lo) * 0.1; lo = Math.max(0, lo - pad); hi = Math.min(1, hi + pad);
-  const W = 1000, Hh = 120, n = g.decisions.length, L = 36, R = 8;
+  const W = Math.max(200, svg.clientWidth || 1000), Hh = 120, n = g.decisions.length, L = 36, R = 8;
   const X = (i) => L + (n === 1 ? (W - L - R) / 2 : (i * (W - L - R)) / (n - 1)), Y = (v) => 8 + (Hh - 16) * (1 - (v - lo) / (hi - lo));
   const ci = g.decisions.indexOf(d);
   let s = `<rect class="band" x="${X(ci) - (W - L - R) / Math.max(1, n - 1) / 2}" y="0" width="${(W - L - R) / Math.max(1, n - 1)}" height="${Hh}"/>`;
@@ -974,7 +1000,7 @@ function renderTimeline() {
   const ridx = read.map((v, i) => (v == null ? -1 : i)).filter((i) => i >= 0);
   if (ridx.length > 1) s += `<polyline class="readl" points="${ridx.map((i) => `${X(i)},${Y(read[i])}`).join(" ")}"/>`;
   ridx.forEach((i) => { s += `<circle class="readpt" cx="${X(i)}" cy="${Y(read[i])}" r="5"><title>T${g.decisions[i].turn} 読んだ値 ${read[i].toFixed(3)}</title></circle>`; });
-  svg.setAttribute("viewBox", `0 0 ${W} ${Hh}`); svg.setAttribute("preserveAspectRatio", "none");
+  svg.setAttribute("viewBox", `0 0 ${W} ${Hh}`);
   svg.innerHTML = s;
   turns.innerHTML = g.decisions.map((x, i) => `<button type="button" data-i="${x.index}" aria-current="${x.index === d.index}"${read[i] != null ? ' class="read" title="読んだターン"' : ""}>T${x.turn}</button>`).join("");
   turns.querySelectorAll("button").forEach((b) => b.onclick = () => { $("aTurn").value = b.dataset.i; stepState(); startRead(); });
