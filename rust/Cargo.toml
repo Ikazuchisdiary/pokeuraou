@@ -33,10 +33,15 @@ ika210-control = []
 # the order the cells were asked in. Never for use; a check that the answers agree at 1 and
 # at N threads has to tell a build with it from one without.
 ika32-control = []
+# IKA-347's positive control: `encode-games` writes the turn feature one slot along. Never
+# for use; the byte comparison against `tools/encode_dataset.py --engine python` has to fail.
+ika347-control = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# `raw_value` (IKA-347): `encode-games` reads floats from their text, because the default
+# float parser is not correctly rounded and the training arrays must be the bytes Python wrote.
+serde_json = { version = "1", features = ["raw_value"] }
 
 [profile.release]
 opt-level = 3

@@ -25,6 +25,12 @@ a 44-second move were decided by it). ``levels`` raises it (a label's ``g<L>``);
 that end at the guard with a cell still worth a step are counted as the read goes
 (`guard_lines`, the report's ``lines`` guard count) and shown.
 
+**Widening while it reads** (IKA-354). A wider width asked for the position being read
+(the page's gear, the same position, side and guard) does not stop the read: the menus at
+the new width are built with the read's own ranking and appended to the root, their cells
+filled at depth 1 and the root re-solved, the tree already deepened kept (`deepen.Grow`,
+`Widen`). A narrower width, or any other change, reads again from the start as before.
+
 **Memory.** A long read grows the tree. `MemoryWatch` reads the host's free memory, this
 process's resident memory with its worker processes', and the card's (``nvidia-smi``),
 and stops the read with a reason before a limit (`Limits`).
@@ -61,6 +67,7 @@ from .humanplay import (
     solve_entry,
     solve_move,
 )
+from .notes_ja import notes_ja
 from .payoff import HP_SHARE
 from .position import Position
 from .progress import Reader, Recorder
@@ -82,7 +89,7 @@ DEFAULT_ORACLE = ALL_ACTIONS
 #: Why a read stopped, as the page says it.
 STOPS = {
     "person": "止めました",
-    "exhausted": "読み切り（柵の内に深化のステップに値するセルが無い）",
+    "exhausted": "読み切り（深さの上限の内に深化のステップに値するセルが無い）",
     "steps": "指定の深化のステップ数で止めました",
     "time": "指定の秒で止めました",
     "memory": "メモリの上限の手前で止めました",
@@ -125,6 +132,10 @@ class Point:
     turn: int
     position: dict[str, Any]
     seen: tuple[frozenset[str], frozenset[str]]
+    #: The record's value at this decision, side 0's (``searchValue``), where it has one.
+    value: float | None = None
+    #: The actions each side played here (choice strings, side 0's first), where recorded.
+    played: tuple[str | None, str | None] = (None, None)
 
     def pos(self) -> Position:
         return Position.from_json(self.position)
@@ -195,10 +206,37 @@ def _points(record: dict[str, Any]) -> list[Point]:
         if decision.get("kind") != "move":
             continue
         shown = decision.get("shownIdentities") or decision.get("shown") or [[], []]
+        value = decision.get("searchValue")
         out.append(Point(
             decision=index, turn=int(decision["turn"]), position=decision["position"],
             seen=(frozenset(shown[0]), frozenset(shown[1])),
+            value=None if value is None else float(value),
+            played=(decision.get("ownChosen"), decision.get("foeChosen")),
         ))
+    return out
+
+
+def _played(
+    reg: Regulation, pos: Position, point: Point, me: int, loc: Any  # noqa: ANN401
+) -> list[dict[str, Any]]:
+    """The actions the record played at ``point``, the reading side's first (IKA-349): each
+    side, its label's text (as the reading labels its menus, so the page finds it there) and
+    parts. A side with no recorded action, or one the legal actions do not parse, is left out."""
+    from .actions import side_actions
+    from .humanplay import parse_choice
+    from .progress import action_label, part_json
+
+    out = []
+    for side in (me, 1 - me):
+        choice = point.played[side]
+        if not choice:
+            continue
+        try:
+            action = parse_choice(choice, side_actions(reg, pos, side))
+        except (ValueError, KeyError, IndexError):
+            continue
+        label = action_label(reg, action, pos, side, loc)
+        out.append({"side": side, "text": str(label), "parts": [part_json(p) for p in label.rich]})
     return out
 
 
@@ -552,6 +590,8 @@ class Settings:
     width: int = DEFAULT_WIDTH
     oracle: int | None = DEFAULT_ORACLE
     levels: int = MAX_LEVELS
+    #: The depth discount (``d<P>``, IKA-342), a factor a ply, or None: none.
+    discount: float | None = None
     rank_fill: str = "refs2"
     rank_by_leaf: bool = True
     bench_drop: str = DEFAULT_BENCH_DROP
@@ -566,6 +606,61 @@ class Settings:
         if self.oracle is None:
             return "none"
         return "sall" if self.oracle >= ALL_ACTIONS else f"s{self.oracle}"
+
+
+class Widen:
+    """A read's width raised while it runs (IKA-354): `request` from the page's thread,
+    `deepen.Grow` on the deepening's.
+
+    ``build(width)`` gives both sides' menus at a width, ranked as the read's own were;
+    ``on_grown(width, menus)`` is told of each widening as it is handed to the deepening.
+    The deepening asks at the top of every step, so a request is taken at the next one.
+    `close` ends it; a width asked for and never taken (the read ended first) is returned,
+    to be read from the start."""
+
+    def __init__(
+        self,
+        width: int,
+        build: Callable[[int], tuple[list[SideAction], list[SideAction]]],
+        on_grown: Callable[[int, tuple[list[SideAction], list[SideAction]]], None] | None = None,
+    ) -> None:
+        self.width = width
+        self.build = build
+        self.on_grown = on_grown
+        self.pending: int | None = None
+        self.closed = False
+        #: Widenings handed to the deepening.
+        self.grown = 0
+        self.lock = threading.Lock()
+
+    def request(self, width: int) -> bool:
+        """Asks for ``width`` (at least the width now). False once the read has ended."""
+        with self.lock:
+            if self.closed:
+                return False
+            if width > max(self.width, self.pending or 0):
+                self.pending = width
+            return True
+
+    def __call__(self, spent: float) -> tuple[list[SideAction], list[SideAction]] | None:  # noqa: ARG002
+        with self.lock:
+            width, self.pending = self.pending, None
+        if width is None:
+            return None
+        menus = self.build(width)
+        with self.lock:
+            self.width = width
+            self.grown += 1
+        if self.on_grown is not None:
+            self.on_grown(width, menus)
+        return menus
+
+    def close(self) -> int | None:
+        """Ends it; the width asked for and not taken, if any."""
+        with self.lock:
+            self.closed = True
+            left, self.pending = self.pending, None
+        return left
 
 
 class Session:
@@ -598,6 +693,12 @@ class Session:
         self._walked = -math.inf
         self._walk_ms = 0.0
         self.lock = threading.Lock()
+        #: The read's width, raised while it runs (IKA-354), and what it reads (`Service`
+        #: compares a new request with it: source, game, decision, side, guard).
+        self.widen: Widen | None = None
+        self.key: dict[str, Any] = {}
+        #: A width asked for too late (the read had ended), read from the start next.
+        self.left: int | None = None
 
     def halt(self, reason: str, why: str = "") -> None:
         """Stops the read; the first reason given is the one kept."""
@@ -653,6 +754,9 @@ class Result:
     deepened: dict[str, Any] | None
     notes: list[str] = field(default_factory=list)
     memory: Reading | None = None
+    #: The width it ended at, and the widths it was widened to while it read (IKA-354).
+    width: int = 0
+    widened_to: list[int] = field(default_factory=list)
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -663,6 +767,8 @@ class Result:
             "stop": self.stop, "guard": self.guard, "guardLines": self.guard_lines,
             "nodes": self.nodes, "exact": self.exact, "classes": self.classes,
             "deepened": self.deepened, "notes": self.notes,
+            **({"width": self.width} if self.width else {}),
+            **({"widenedTo": self.widened_to} if self.widened_to else {}),
             **({"memory": {"peakRssGb": round(self.memory.rss_gb, 3),
                            "leastFreeGb": round(self.memory.free_gb, 3),
                            "peakGpuGb": round(self.memory.gpu_gb, 3)}}
@@ -813,13 +919,38 @@ class Analyzer:
             stop, guard=settings.levels, recorder=recorder, max_steps=max_steps,
             guard_every_ms=settings.guard_every_ms,
         )
+        # The menus the root holds so far, and the widths it was widened to (IKA-354).
+        held = ([a.to_choice() for a in ours], [a.to_choice() for a in theirs])
+        widened_to: list[int] = []
+
+        def build(width: int) -> tuple[list[SideAction], list[SideAction]]:
+            return _menus(
+                reg, pos, (width, width), self.leaf, budget, settings.rank_by_leaf, None,
+                spreads, rank_fill=settings.rank_fill,
+            )
+
+        def grown(width: int, menus: tuple[list[SideAction], list[SideAction]]) -> None:
+            for have, menu in zip(held, menus, strict=True):
+                have.extend(c for c in (a.to_choice() for a in menu) if c not in have)
+            widened_to.append(width)
+            state["width"] = width
+            state["menu"] = [len(held[0]), len(held[1])]
+            emit("analysis", {**state, "grown": True})
+
+        session.widen = Widen(settings.width, build, grown)
+        session.key = {
+            **{k: v for k, v in (tag or {}).items() if k in ("source", "game", "decision")},
+            "side": me, "guard": settings.levels,
+        }
         if on_session is not None:
             on_session(session)
         state = {
+            "played": _played(reg, pos, point, me, self.loc),
             "state": "running", "run": run, "turn": pos.turn, "side": me,
             "width": settings.width, "oracle": settings.oracle_label(), "guard": settings.levels,
             "exact": exact, "classCount": classes, "menu": [len(ours), len(theirs)],
-            "maxSteps": max_steps, "maxSeconds": max_seconds, "notes": list(notes),
+            "maxSteps": max_steps, "maxSeconds": max_seconds,
+            "notes": notes_ja(self.loc, notes), "notesRaw": list(notes),
             **(tag or {}),
         }
         emit("analysis", state)
@@ -846,7 +977,8 @@ class Analyzer:
             solved = solve_move(
                 reg, pos, me, ours, theirs, spreads, self.leaf, budget=budget, exact=exact,
                 cells=ENDLESS, cost=StopCost(stop, started), levels=settings.levels,
-                outside=outside, progress=session,
+                outside=outside, progress=session, discount=settings.discount,
+                grow=session.widen,
             )
         except EquilibriumError as problem:
             session.halt("error", str(problem))
@@ -854,6 +986,8 @@ class Analyzer:
         finally:
             if watch is not None:
                 watch.close()
+            #: A width asked for too late for this read: the caller reads it again.
+            session.left = session.widen.close()
         reason = session.reason
         if not reason:
             report = solved.deepened
@@ -872,6 +1006,7 @@ class Analyzer:
             deepened=None if solved.deepened is None else solved.deepened.to_json(),
             notes=notes + sorted(solved.unmodelled),
             memory=None if watch is None else watch.peak,
+            width=int(state["width"]), widened_to=widened_to,
         )
         if status is not None:
             status(session, Reading() if watch is None else watch.last, "done:" + reason)
@@ -885,7 +1020,8 @@ class Analyzer:
             **state, "state": "done", "stop": reason, "stopText": STOPS.get(reason, reason),
             "why": session.why, "steps": session.steps, "seconds": seconds,
             "guardLines": session.guard_count, "nodes": session.nodes,
-            "notes": result.notes,
+            # The page reads them in Japanese (IKA-349); `--out` keeps the port's own.
+            "notes": notes_ja(self.loc, result.notes), "notesRaw": list(result.notes),
         })
         return result
 
@@ -959,13 +1095,32 @@ class Service:
             if self.session is not None:
                 self.session.halt("person")
         elif kind == "analyze":
-            if self.session is not None:
-                self.session.halt("new")
+            session = self.session
+            if session is not None and self._widens(session, message):
+                return
+            if session is not None:
+                session.halt("new")
             self.commands.put(message)
         elif kind in ("refresh", "quit"):
             if kind == "quit" and self.session is not None:
                 self.session.halt("person")
             self.commands.put(message)
+
+    def _widens(self, session: Session, message: dict[str, Any]) -> bool:
+        """Whether ``message`` asks the running read for a wider width and nothing else
+        (the same position, side and guard), and the read took the request (IKA-354)."""
+        widen, key = session.widen, session.key
+        if widen is None or not key or not message.get("width"):
+            return False
+        guard = int(message["guard"]) if message.get("guard") else self.analyzer.settings.levels
+        same = (
+            all(int(message.get(k, 0)) == key.get(k) for k in ("source", "game", "decision"))
+            and message.get("side") is not None and int(message["side"]) == key["side"]
+            and max(1, guard) == key["guard"]
+        )
+        if not same or int(message["width"]) <= widen.width:
+            return False
+        return widen.request(int(message["width"]))
 
     # -- the loop's side
     def catalogue(self) -> dict[str, Any]:
@@ -985,7 +1140,8 @@ class Service:
                         "open": game.teams is None or game.information == "open",
                         "note": game.note,
                         "decisions": [
-                            {"index": k, "decision": p.decision, "turn": p.turn}
+                            {"index": k, "decision": p.decision, "turn": p.turn,
+                             "value": p.value}
                             for k, p in enumerate(game.points)
                         ],
                     }
@@ -1042,8 +1198,11 @@ class Service:
         run = self.runs
         self.runs += 1
 
+        kept: list[Session] = []
+
         def keep(session: Session) -> None:
             self.session = session
+            kept.append(session)
 
         self.say(f"analysis {run}: {source.name} / {game.label} / turn {point.turn}")
         try:
@@ -1060,6 +1219,10 @@ class Service:
             return None
         finally:
             self.session = None
+        left = kept[0].left if kept else None
+        if left is not None:
+            # A wider width asked for as the read ended: read it from the start.
+            self.commands.put({**message, "width": left})
         self.results.append(result)
         self.say(
             f"analysis {run}: {result.stop} after {result.steps} steps, {result.seconds:.1f} s, "
@@ -1120,6 +1283,7 @@ __all__ = [
     "Settings",
     "Source",
     "StopCost",
+    "Widen",
     "game_from_record",
     "gpu_used_gb",
     "guard_lines",

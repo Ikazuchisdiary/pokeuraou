@@ -414,6 +414,8 @@ def search(
     levels: int | None = None,
     child_q: int | None = None,
     progress: _deepen.Progress | None = None,
+    discount: float | None = None,
+    grow: _deepen.Grow | None = None,
 ) -> SearchResult:
     """Solve this turn's matrix game, optionally refining the cells that decide it.
 
@@ -441,11 +443,15 @@ def search(
     ``deepen_cost`` counts the budget in `deepen.Cost`'s prices instead of cells (the
     human's clock, `deepen.cells_for_seconds`). ``q_probe`` narrows the oracle's probe to
     a Q's best few a side (the label's ``q<k>``, IKA-322). ``levels`` is the depth guard
-    (``g<L>``) and ``child_q`` the children's menus by a Q (``c<k>``), IKA-307.
+    (``g<L>``) and ``child_q`` the children's menus by a Q (``c<k>``), IKA-307;
+    ``discount`` the depth discount (``d<P>``, IKA-342).
 
     ``progress`` is called with each `deepen.Step` of the answer as it forms (IKA-332): the
     depth-1 answer, every step of a deepening, the end. It goes with the depth-1 full
     matrix, deepened or not, and changes nothing the search computes.
+
+    ``grow`` widens the root while it deepens (IKA-354, `deepen.Grow`): the result's
+    ``ours`` / ``theirs`` are then the grown menus.
     """
     if progress is not None and (depth > 1 or solve_sparsely):
         raise ValueError("progress reports the depth-1 full-matrix search and its deepening")
@@ -454,10 +460,11 @@ def search(
     if (
         outside is not None or deepen_cost is not None or swap or breadth_only
         or q_probe is not None or levels is not None or child_q is not None
+        or discount is not None or grow is not None
     ) and not deepen:
         raise ValueError(
-            "outside, deepen_cost, swap, breadth_only, q_probe, levels and child_q are how "
-            "a deepening spends; deepen is 0"
+            "outside, deepen_cost, swap, breadth_only, q_probe, levels, child_q, discount "
+            "and grow are how a deepening spends; deepen is 0"
         )
     row = list(ours)
     col = list(theirs)
@@ -487,7 +494,7 @@ def search(
             ),
             refine=refine, outside=outside, cost=deepen_cost, swap=swap, q_probe=q_probe,
             levels=levels, child_q=child_q,
-            progress=progress,
+            progress=progress, discount=discount, grow=grow,
         )
         return SearchResult(
             equilibrium=got.equilibrium,
@@ -1313,7 +1320,8 @@ def belief_solve(
 
     `deepen` maps a side to how it deepens its Bayesian root after the depth-1 answer
     (IKA-294, a label ending in ``h``): `deepen.deepen_belief`'s ``cells``, ``reading``,
-    ``swap``, ``q_probe`` (IKA-322), ``levels`` and ``child_q`` (IKA-307) and ``outside``
+    ``swap``, ``q_probe`` (IKA-322), ``levels`` and ``child_q`` (IKA-307), ``discount``
+    (IKA-342) and ``outside``
     -- the last in side 0's orientation,
     as `search`'s (side 0's candidates, side 1's). It goes with depth 1 on that side. A side not in it is
     answered as above.

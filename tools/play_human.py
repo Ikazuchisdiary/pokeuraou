@@ -47,7 +47,10 @@ import argparse
 import contextlib
 import re
 import sys
+import threading
 import time
+import webbrowser
+from collections.abc import Callable
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -55,6 +58,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from pokeuraou import analysis, humanplay, liveview, qrank  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
+from pokeuraou.deepen import MAX_LEVELS  # noqa: E402
 from pokeuraou.hidden import DEFAULT_BENCH_DROP, parse_bench_drop  # noqa: E402
 from pokeuraou.names import localiser  # noqa: E402
 from pokeuraou.pool import draw_pair, load_pool  # noqa: E402
@@ -122,6 +126,41 @@ def _person(spec: str, reg, loc, seed: int, server=None):  # noqa: ANN001, ANN20
     )
 
 
+def resolve_cores(threads: int | None, cores: int | None, clock: str) -> tuple[int, int]:
+    """The threads a move spreads over and the cores the budget rule prices it at (IKA-343).
+
+    ``--cores`` alone sets both, as before. Neither: `humanplay.default_threads` threads,
+    priced at that many cores on the wall clock and at 1 on the count clock, whose prices
+    are measured for 1 core only -- so a count-clock game is the same game at any
+    ``--threads``."""
+    if threads is None:
+        threads = cores if cores is not None else humanplay.default_threads()
+    if cores is None:
+        cores = threads if clock == "wall" else 1
+    return threads, cores
+
+
+def memory_watch(
+    limits: analysis.Limits, halt: threading.Event, say: Callable[[str], None],
+) -> analysis.MemoryWatch:
+    """IKA-337's memory watch over a person's game (IKA-343): twice a second it reads this
+    process with its workers, the host's free memory and the card; past a limit it sets
+    ``halt``, which makes the move in hand stop deepening at its next step and play the
+    answer it has (`humanplay.HaltingCost`), and says so once; back under 90% of every limit
+    it lifts the brake."""
+    def stop(reason: str, why: str) -> None:  # noqa: ARG001
+        if not halt.is_set():
+            say(f"note: memory near its limit, the agent stops deepening: {why}")
+        halt.set()
+
+    def tick(reading: analysis.Reading) -> None:
+        if halt.is_set() and not reading.over(limits, limits.warn):
+            halt.clear()
+            say("note: memory back under its limits, the agent deepens again")
+
+    return analysis.MemoryWatch(limits, stop, tick=tick).start()
+
+
 def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--pool", default="regmc-matchupweb")
@@ -131,27 +170,41 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--agent-team-file", type=Path, default=None, help="a roster file instead")
     ap.add_argument("--human-side", type=int, default=0, choices=(0, 1))
     ap.add_argument("--seconds", type=float, default=45.0, help="the agent's budget per move")
-    ap.add_argument("--cores", type=int, default=1,
-                    help="the cores a move may use: the budget rule's prices and, unless --threads "
-                    "says otherwise, the threads (IKA-32: 8 is the practical best)")
+    ap.add_argument("--cores", type=int, default=None,
+                    help="the cores the budget rule prices a move at and, unless --threads says "
+                    "otherwise, the threads. Default: the threads on the wall clock, 1 on the "
+                    "count clock (the only count priced, deepen.COSTS)")
     ap.add_argument("--threads", type=int, default=None,
                     help="threads a move spreads over (the port's cells, the deepening's cells "
-                    "expanded ahead, a big game's two LPs at once), when not --cores. They change "
-                    "no move: a count-clock game is the same game at any number")
+                    "expanded ahead, a big game's two LPs at once). Default: --cores when given, "
+                    f"else {humanplay.PLAY_THREADS} (IKA-32 stage 2; fewer on a smaller machine). "
+                    "They change no move: a count-clock game is the same game at any number; "
+                    "--threads 1 turns them off")
     ap.add_argument("--clock", default="wall", choices=humanplay.CLOCKS,
                     help="wall: stop the deepening at the budget by the clock (default); "
                     "count: spend it at measured prices, reproducible by seed")
     ap.add_argument("--width-only", action="store_true",
                     help="no deepening: the width rule alone (a baseline; how NODE_TIME is measured)")
-    ap.add_argument("--max-levels", type=int, default=None,
-                    help="the deepening's depth guard (IKA-307; default deepen.MAX_LEVELS). "
-                    "Given, each move's record says why the deepening and its lines stopped")
-    ap.add_argument("--oracle", default=None,
-                    help="the root's swap oracle while deepening: s<W> (the rest of a width-W menu) or "
-                    "sall (every legal action) -- IKA-307's allocation; default none")
+    ap.add_argument("--max-levels", type=int, default=humanplay.PLAY_MAX_LEVELS,
+                    help=f"the deepening's depth guard (IKA-307; default {humanplay.PLAY_MAX_LEVELS}, "
+                    "humanplay.PLAY_MAX_LEVELS, IKA-342). Set, each move's record says why the "
+                    f"deepening and its lines stopped; 0: deepen.MAX_LEVELS ({MAX_LEVELS}) unrecorded, "
+                    "as before IKA-343")
+    ap.add_argument("--oracle", default="sall",
+                    help="the root's swap oracle while deepening: sall (every legal action, the "
+                    "default: IKA-307's allocation), s<W> (the rest of a width-W menu) or none")
     ap.add_argument("--child-q", type=int, default=None,
                     help="the deepening's child menus: each side's k best by the Q (IKA-307), "
                     "instead of narrow's damage-ranked 8")
+    ap.add_argument("--ponder", default="on" if humanplay.PLAY_PONDER else "off", choices=("on", "off"),
+                    help="on: the agent reads on while you choose (IKA-344) -- you are asked as "
+                    "its move starts, and it deepens until you have chosen (its budget at least, "
+                    "--ponder-seconds at most), then draws its action; yours is read after. "
+                    f"Default {'on' if humanplay.PLAY_PONDER else 'off'} (humanplay.PLAY_PONDER). "
+                    "A count-clock game replays from its record (record:<file>) with the stop "
+                    "points it wrote")
+    ap.add_argument("--ponder-seconds", type=float, default=humanplay.PLAY_PONDER_SECONDS,
+                    help="with --ponder on: the longest a move reads, from its start")
     ap.add_argument("--value", type=Path, nargs="+", default=None,
                     help=f"the agent's leaf (one model or an ensemble). Default: {' '.join(DEFAULT_VALUE)}")
     ap.add_argument("--hp-share", action="store_true", help="no leaf: the hp-share proxy")
@@ -171,16 +224,30 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--out", type=Path, default=Path("data/human/games.jsonl"))
     ap.add_argument("--locale", default="ja")
     ap.add_argument("--device", default=None)
+    ap.add_argument("--cuda-memory-gb", type=float, default=humanplay.PLAY_CUDA_MEMORY_GB,
+                    help="cap this process's CUDA allocator and each worker's (IKA-334); 0: no cap")
+    ap.add_argument("--max-rss-gb", type=float, default=analysis.Limits.rss_gb,
+                    help="the memory watch (IKA-337): a move stops deepening before this process "
+                    "and its workers hold this much (0: off)")
+    ap.add_argument("--min-free-gb", type=float, default=analysis.Limits.free_gb,
+                    help="... or before the host's free memory falls under this (0: off)")
+    ap.add_argument("--max-gpu-gb", type=float, default=analysis.Limits.gpu_gb,
+                    help="... or before the card holds this much, all processes (0: off)")
     ap.add_argument("--quiet", action="store_true", help="no board on the terminal (stand-in persons)")
     ap.add_argument("--view", action="store_true",
                     help="serve the page that shows the game and the agent's reading (IKA-332)")
     ap.add_argument("--view-host", default="127.0.0.1")
     ap.add_argument("--view-port", type=int, default=8332)
+    ap.add_argument("--open-browser", action="store_true",
+                    help="with --view: open the page in the browser once it is served")
     ap.add_argument("--live-out", type=Path, default=None,
                     help="keep the page's frames in this file (tools/live_view.py shows it again)")
     ap.add_argument("--sprite-url", default=None,
                     help="the page's images, {id} = Showdown's sprite id (default: Showdown's server; "
                     "\"\" for none, name cards)")
+    ap.add_argument("--analysis-url", default=None,
+                    help="the analysis page's address, for the page's links to it (default: the "
+                    "launcher's port 8337 on the same host)")
     ap.add_argument("--interval-ms", type=float, default=100.0,
                     help="the least time between two steps sent while the agent thinks")
     ap.add_argument("--current-out", type=Path, default=None,
@@ -210,6 +277,7 @@ def main(argv: list[str] | None = None) -> None:
         else:
             say(f"note: no {DEFAULT_VALUE[0]} here, so the agent plays hp-share (--value names a leaf)")
     if values and not args.hp_share:
+        humanplay.cap_cuda(args.cuda_memory_gb, args.device)
         evaluate, encoder, device = humanplay.load_leaf(
             reg, values, device, graphs=args.leaf_graphs == "on"
         )
@@ -234,23 +302,32 @@ def main(argv: list[str] | None = None) -> None:
         qrank.install(model)
         q_files = model.describe()
 
+    threads, cores = resolve_cores(args.threads, args.cores, args.clock)
     humanplay.use_threads(
-        args.threads if args.threads is not None else args.cores, reg,
+        threads, reg,
         ([str(v) for v in values] if values and not args.hp_share else None,
-         str(device or "cpu"), args.leaf_graphs == "on"),
+         str(device or "cpu"), args.leaf_graphs == "on", args.cuda_memory_gb),
     )
+    halt = threading.Event()
     agent = humanplay.Agent(
-        reg=reg, evaluate=evaluate, name=name, seconds=args.seconds, cores=args.cores,
+        reg=reg, evaluate=evaluate, name=name, seconds=args.seconds, cores=cores,
         clock=args.clock, rank_fill=fill, bench_drop=args.bench_drop,
-        width_only=args.width_only, max_levels=args.max_levels, child_q=args.child_q,
-        oracle=_oracle_width(args.oracle),
+        width_only=args.width_only, max_levels=args.max_levels or None, child_q=args.child_q,
+        oracle=_oracle_width(args.oracle), halt=halt,
+        ponder=args.ponder == "on", ponder_seconds=args.ponder_seconds,
     )
     if args.child_q is not None and not qrank.is_q(fill):
         raise SystemExit("--child-q ranks the children by the Q: it needs a Q (a q rank fill)")
     say(f"agent: leaf {name} / menus {fill}" + (f" ({', '.join(q_files)})" if q_files else "")
-        + f" / {args.seconds:g} s a move on {args.cores} core(s), {args.clock} clock"
-        + (f", {args.threads} thread(s)" if args.threads is not None else "")
-        + (" / width only" if args.width_only else "") + " / bench hidden")
+        + f" / {args.seconds:g} s a move on {cores} core(s), {args.clock} clock, {threads} thread(s)"
+        + f" / oracle {args.oracle} / guard {args.max_levels or MAX_LEVELS}"
+        + (" / width only" if args.width_only else "")
+        + (f" / ponder (up to {args.ponder_seconds:g} s)" if args.ponder == "on" else "")
+        + " / bench hidden")
+    watch = memory_watch(
+        analysis.Limits(rss_gb=args.max_rss_gb, free_gb=args.min_free_gb, gpu_gb=args.max_gpu_gb),
+        halt, lambda text: print(text, file=sys.stderr),
+    )
 
     server = None
     if args.view or args.live_out is not None:
@@ -258,12 +335,18 @@ def main(argv: list[str] | None = None) -> None:
         server = liveview.LiveServer(
             args.view_host, args.view_port if args.view else 0, sink=sink,
             sprite_url=args.sprite_url,
+            links={"analysis-url": args.analysis_url} if args.analysis_url else None,
         ).start()
         if args.view:
             print(f"画面: {server.url}", file=sys.stderr)
+            if args.open_browser:
+                webbrowser.open(server.url)
     person = _person(args.person, reg, loc, args.seed, server)
     for n in range(args.games):
         index = args.game_index + n
+        if server is not None:
+            # The page's end card says whether another game follows (IKA-349).
+            server.listener("session", {"game": n, "games": args.games, "gamesLeft": args.games - n - 1})
         if args.human_team_file or args.agent_team_file:
             if not (args.human_team_file and args.agent_team_file):
                 raise SystemExit("give both --human-team-file and --agent-team-file")
@@ -315,6 +398,7 @@ def main(argv: list[str] | None = None) -> None:
             file=sys.stderr,
         )
         del game
+    watch.close()
     if server is not None:
         if server.sink is not None:
             server.sink.close()

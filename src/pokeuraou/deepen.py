@@ -116,6 +116,13 @@ one that had them and the budget stopped first (``budget``); and how many steps 
 guard changed (a cell past it would have been taken). Without ``g`` the guard is
 `MAX_LEVELS` and nothing is added to the record.
 
+**The depth discount** (IKA-342, the label's ``d<P>`` after ``g<L>``: ``m1200hg32d80``).
+The inherited priority has no cost of depth: a child's best cell is worth exactly its
+parent cell times the branch's weight, so with the guard raised the search follows a thin
+line to depth 30 and more (IKA-307). ``d<P>`` multiplies what every branch passes down by
+P / 100, so a cell k plies down is worth (P / 100)^k of its undiscounted priority. The
+bound `_best` prunes by still holds (it only shrinks). Without ``d`` nothing changes.
+
 **Children's menus by a Q** (IKA-307 after IKA-322 section 18, the label's ``c<k>``). A
 refined cell's children get `narrow`'s damage-ranked `sub_limit` menus by default. With
 ``c<k>`` each side's menu in a child is instead the k best of its whole pool by the
@@ -161,6 +168,22 @@ children, notes, counts -- is the serial step's, so a game on counted cells is t
 game with or without it; the wasted expansions of cells never taken cost only time.
 While the loop re-solves the root (HiGHS lets go of the GIL) the helper talks to the
 port and the leaf.
+
+**Widening the root mid-read** (IKA-354; off by default, and generation and the board
+never turn it on). `deepen_root` and `deepen_belief` take an optional `grow`: called at
+the top of every step with the budget's reading so far, it returns each side's actions
+to add to the root (side 0's, side 1's) or None. The actions not on the root's menu yet
+are appended -- rows after the rows, columns after the columns, so every cell already
+refined keeps its index and its subtree -- the new cells are filled at depth 1 (on a
+Bayesian root in every completion; charged to the budget as any fill), and the root is
+re-solved. The tree is kept: a refined cell's children and their values stand, and the
+next step's priorities read the grown root. That is a menu of width W read, then
+widened to W' with nothing thrown away -- the analysis mode's width changed while it
+reads (`analysis.Service`), and the agent that reads narrow first and widens with what
+is left (`humanplay.Agent.widen`). A step that grows is one step (``grow``); what it
+added is counted (`Deepened.grown`, written only when nonzero). The oracle, when on,
+counts the added actions among its candidates, so a swap may push one out and it can
+come back. A grow the LP cannot solve is dropped whole and the root stands.
 """
 
 from __future__ import annotations
@@ -227,6 +250,15 @@ class Cost:
     probe: float | None = None
     #: One inference of a Q that narrows the oracle's probe (``q<k>``, IKA-322).
     q: float = 0.0
+    #: Each level below the root of a refined cell's node (IKA-342): a step re-solves every
+    #: node on the path back to the root and walks a deeper tree, so a deep refinement
+    #: costs more than a shallow one. `_Meter` adds it and `root`; `ms` does not read them
+    #: (the clocks that stand in for a `Cost` -- `humanplay.WallCost`, `analysis.StopCost`
+    #: -- have neither).
+    level: float = 0.0
+    #: Each cell of the root's game, a refinement (IKA-342): the root's LP is solved again
+    #: after every step, and a wide Bayesian root (menus x completions) is most of a step.
+    root: float = 0.0
 
     def ms(
         self, fills: int, refines: int, cells: int, probed: int = 0, qs: int = 0
@@ -255,8 +287,17 @@ class Cost:
 #:
 #: One core only (the counts above were run one process a worker); IKA-32 measures the
 #: others, per kind, rather than scaling these.
+#:
+#: ``local``'s `level` and `root` (IKA-342, 2026-09-27): the long reads of the analysis
+#: mode (width 64, a Bayesian root, the guard at 8 and 32) ran 1.5x (guard 8) to 2.2x
+#: (guard 32) past the three prices above -- a step's time did not fall with its cells, and
+#: rose with the refined cell's level and the root's size. Least squares over the steps of
+#: 24 reads (8 recorded M-C positions x guards 8 / 32 / 32 with a discount, 30 s each, the
+#: GPU leaf, one thread), the three prices held: 0.36 ms a level, 0.52 us a root cell (halves:
+#: 0.41 / 0.40 ms and 0.54 / 0.12 us). The reads' wall over the priced clock went from 1.49
+#: / 2.18 (guard 8 / 32) to 0.87 / 0.95.
 COSTS: dict[tuple[str, int], Cost] = {
-    ("local", 1): Cost(fill=4.925, refine=1.494, cell=0.0286),
+    ("local", 1): Cost(fill=4.925, refine=1.494, cell=0.0286, level=0.36, root=0.00052),
     ("served", 1): Cost(fill=4.990, refine=1.354, cell=0.1602),
 }
 
@@ -274,7 +315,7 @@ ALL_ACTIONS = 1 << 30
 
 _DEEPEN = re.compile(
     r"none|([mrb])([1-9][0-9]*)(?:([os])([1-9][0-9]*|all|q[1-9][0-9]*))?(h)?"
-    r"(?:c([1-9][0-9]*))?(?:g([1-9][0-9]*))?"
+    r"(?:c([1-9][0-9]*))?(?:g([1-9][0-9]*))?(?:d([1-9][0-9]?))?"
 )
 
 
@@ -302,19 +343,23 @@ class DeepenSpec:
     child_q: int | None = None
     #: The depth guard (``g<L>``, IKA-307), or None: `MAX_LEVELS`, and no stop report.
     levels: int | None = None
+    #: The depth discount (``d<P>``, IKA-342): a child's cells inherit the parent cell's
+    #: priority times the branch's weight times P / 100, so a cell k plies down is worth
+    #: (P / 100)^k of what it would be without. None: no discount.
+    discount: float | None = None
 
 
 def deepen_spec(label: str) -> DeepenSpec:
     """`DeepenSpec` of a label: ``none``, ``m400``, ``r25``, ``m400o24``, ``m400sall``,
-    ``b200s24``, ``m400sallh``, ``m1200sq3h``, ``m1200hc6``, ``m1200hg16``."""
+    ``b200s24``, ``m400sallh``, ``m1200sq3h``, ``m1200hc6``, ``m1200hg16``, ``m1200hg32d80``."""
     got = _DEEPEN.fullmatch(label)
     if got is None:
         raise ValueError(
             f"deepen {label!r} is not none, m<N>, r<N>, m<N>o<W>, m<N>s<W>, b<N>o<W> or "
             "b<N>s<W> (N cells, N >= 1; W the oracle's width, all, or q<k>: every action, "
             "the probe narrowed to a Q's k best a side), each but r<N> optionally ending "
-            "in h (hidden nodes too), then c<k> (children's menus by a Q) and g<L> (the "
-            "depth guard)"
+            "in h (hidden nodes too), then c<k> (children's menus by a Q), g<L> (the "
+            "depth guard) and d<P> (the depth discount, P percent a ply, 1 to 99)"
         )
     if got.group(1) is None:
         return DeepenSpec(None, 0)
@@ -322,10 +367,11 @@ def deepen_spec(label: str) -> DeepenSpec:
     hidden = got.group(5) is not None
     child_q = None if got.group(6) is None else int(got.group(6))
     levels = None if got.group(7) is None else int(got.group(7))
-    if letter == "b" and (child_q is not None or levels is not None):
+    discount = None if got.group(8) is None else int(got.group(8)) / 100.0
+    if letter == "b" and (child_q is not None or levels is not None or discount is not None):
         raise ValueError(
             f"deepen {label!r}: breadth only (b) refines no cell, so it has no children's "
-            "menus (c) and no depth guard (g)"
+            "menus (c), no depth guard (g) and no depth discount (d)"
         )
     if oracle is not None and letter == "r":
         raise ValueError(
@@ -353,7 +399,7 @@ def deepen_spec(label: str) -> DeepenSpec:
         width = int(oracle)
     return DeepenSpec(
         READINGS[letter], int(got.group(2)), width, kind == "s", hidden, q_probe,
-        child_q, levels,
+        child_q, levels, discount,
     )
 
 
@@ -448,6 +494,10 @@ class Deepened:
     #: positions they ranked.
     child_passes: int = 0
     child_ranked: int = 0
+    #: Actions the root was widened by mid-read (`grow`, IKA-354), both sides, and the
+    #: cells that filled. Written only when an action was added.
+    grown: int = 0
+    grown_cells: int = 0
 
     def to_json(self) -> dict[str, Any]:
         return {
@@ -482,6 +532,11 @@ class Deepened:
             **(
                 {"uncovered": [list(side) for side in self.uncovered]}
                 if any(self.uncovered)
+                else {}
+            ),
+            **(
+                {"grown": self.grown, "grownCells": self.grown_cells}
+                if self.grown
                 else {}
             ),
         }
@@ -545,7 +600,7 @@ class Step:
     #: 0 at the depth-1 answer, then 1, 2, ... per step; ``done`` repeats the last.
     index: int
     #: ``start``, ``refine`` (a cell took a deeper value), ``refused``, ``widen`` (the
-    #: oracle added an action) or ``done``.
+    #: oracle added an action), ``grow`` (the root widened mid-read, IKA-354) or ``done``.
     kind: str
     root: Any
     budget: int
@@ -563,14 +618,172 @@ class Step:
     #: The cell this step refined or refused, and its node's level (0 at the root).
     cell: tuple[int, ...] | None = None
     level: int | None = None
+    #: The `Budget` a refined cell's turn was resolved with (None at a depth-1 answer):
+    #: a reader can ask the port that turn again, with its draws (IKA-345).
+    turn: Any = None
+    #: Actions the root was widened by mid-read so far (`grow`, IKA-354).
+    grown: int = 0
 
 
 #: A progress callback: called with each `Step`, returns nothing, changes nothing.
 Progress = Callable[[Step], None]
 
+#: A widening of the root mid-read (IKA-354, the module's docstring): called at the top of
+#: every step with the budget's reading so far (`_Meter.spent`), it returns each side's
+#: actions to add -- (side 0's, side 1's) -- or None. Called on the deepening's own thread.
+Grow = Callable[[float], "tuple[Sequence[SideAction], Sequence[SideAction]] | None"]
+
+
+class _Grower:
+    """A deepening's `grow` and what it added."""
+
+    def __init__(self, ask: Grow) -> None:
+        self.ask = ask
+        #: Actions added, both sides; cells filled for them; grows that added any.
+        self.grown = 0
+        self.cells = 0
+        self.times = 0
+
+
+def _new_actions(
+    menu: Sequence[SideAction], wanted: Sequence[SideAction]
+) -> list[SideAction]:
+    """The actions of `wanted` not on `menu`, first of each choice, in `wanted`'s order."""
+    on = {action.to_choice() for action in menu}
+    out: list[SideAction] = []
+    for action in wanted:
+        key = action.to_choice()
+        if key not in on:
+            on.add(key)
+            out.append(action)
+    return out
+
+
+def _grow_open(
+    reg: Regulation,
+    root: _Node,
+    wanted: tuple[Sequence[SideAction], Sequence[SideAction]],
+    evaluate: LeafEvaluator,
+    budget: Budget,
+    meter: _Meter,
+    unmodelled: set[str],
+    oracle: _Oracle | None,
+    grower: _Grower,
+) -> int:
+    """Append `wanted`'s actions that are not on the open root's menus, fill the new cells
+    at depth 1 in one call (cells the oracle already asked are taken from it), re-solve.
+    Returns how many actions joined (0: none new, or the grown game's LP failed)."""
+    rows_new = _new_actions(root.rows, wanted[0])
+    cols_new = _new_actions(root.cols, wanted[1])
+    if not rows_new and not cols_new:
+        return 0
+    rows = [*root.rows, *rows_new]
+    cols = [*root.cols, *cols_new]
+    old_r, old_c = len(root.rows), len(root.cols)
+    known = {} if oracle is None else oracle.known
+    grown = np.empty((len(rows), len(cols)), dtype=np.float64)
+    grown[:old_r, :old_c] = root.payoff
+    fresh = [
+        (i, j)
+        for i in range(len(rows))
+        for j in range(len(cols))
+        if i >= old_r or j >= old_c
+    ]
+    wanted_cells = []
+    for i, j in fresh:
+        got = known.get((rows[i].to_choice(), cols[j].to_choice()))
+        if got is None:
+            wanted_cells.append((i, j))
+        else:
+            grown[i, j] = got
+    if wanted_cells:
+        matrices, notes, _exact = port.batched_payoffs(
+            reg, root.pos, rows, cols, [evaluate], budget=budget, cells=wanted_cells
+        )
+        unmodelled.update(notes)
+        for i, j in wanted_cells:
+            grown[i, j] = float(matrices[0][i, j])
+            if oracle is not None:
+                oracle.known[(rows[i].to_choice(), cols[j].to_choice())] = float(grown[i, j])
+        meter.filled(len(wanted_cells))
+        grower.cells += len(wanted_cells)
+    try:
+        solved = solve(grown)
+    except EquilibriumError:
+        return 0
+    root.rows.extend(rows_new)
+    root.cols.extend(cols_new)
+    root.payoff = grown
+    root.equilibrium = solved
+    root.signal = None
+    if oracle is not None:
+        oracle.joined(rows_new, cols_new)
+    added = len(rows_new) + len(cols_new)
+    grower.grown += added
+    grower.times += 1
+    return added
+
+
+def _grow_belief(
+    root: _BeliefRoot,
+    wanted: tuple[Sequence[SideAction], Sequence[SideAction]],
+    fill: Callable[[list[SideAction], list[SideAction]], list[np.ndarray]],
+    meter: _Meter,
+    oracle: _BeliefOracle | None,
+    grower: _Grower,
+) -> int:
+    """`_grow_open` on a Bayesian root: `wanted` in side order, mapped to this side's own
+    and the other's; the new rows against every column and the old rows against the new
+    columns filled in every completion (two rectangles), the Bayesian game re-solved."""
+    own_w, other_w = (wanted[0], wanted[1]) if root.side == 0 else (wanted[1], wanted[0])
+    own_new = _new_actions(root.own, own_w)
+    other_new = _new_actions(root.other, other_w)
+    if not own_new and not other_new:
+        return 0
+    others = [*root.other, *other_new]
+    count = len(root.prices)
+    below = fill(own_new, others) if own_new else None
+    right = fill(list(root.own), other_new) if other_new else None
+    cells = (len(own_new) * len(others) + len(root.own) * len(other_new)) * count
+    if below is not None:
+        meter.filled(len(own_new) * len(others) * count)
+    if right is not None:
+        meter.filled(len(root.own) * len(other_new) * count)
+    grower.cells += cells
+    grown = []
+    for k, prices in enumerate(root.prices):
+        top = prices if right is None else np.hstack([prices, np.asarray(right[k], dtype=np.float64)])
+        grown.append(top if below is None else np.vstack([top, np.asarray(below[k], dtype=np.float64)]))
+    if oracle is not None:
+        for block, rows_, cols_ in (
+            (below, own_new, others), (right, list(root.own), other_new)
+        ):
+            if block is None:
+                continue
+            for r, a in enumerate(rows_):
+                for c, b in enumerate(cols_):
+                    oracle.known[(a.to_choice(), b.to_choice())] = np.array(
+                        [float(p[r, c]) for p in block], dtype=np.float64
+                    )
+    before = (root.prices, root.equilibrium)
+    root.prices = grown
+    if not root.solve():
+        root.prices, root.equilibrium = before
+        return 0
+    root.own.extend(own_new)
+    root.other.extend(other_new)
+    if oracle is not None:
+        oracle.joined(own_new, other_new)
+    added = len(own_new) + len(other_new)
+    grower.grown += added
+    grower.times += 1
+    return added
+
 
 def _stepper(
-    progress: Progress, root: Any, meter: _Meter, cells: int, oracle: Any  # noqa: ANN401
+    progress: Progress, root: Any, meter: _Meter, cells: int, oracle: Any,  # noqa: ANN401
+    turn: Any = None,  # noqa: ANN401 - the turn's Budget
+    grower: _Grower | None = None,
 ) -> Callable[..., None]:
     """The callback, bound to one deepening's root, meter and oracle."""
     count = [0]
@@ -589,6 +802,7 @@ def _stepper(
             widened=0 if oracle is None else oracle.widened,
             swapped=0 if oracle is None else oracle.swapped,
             cell=None if cell is None else tuple(int(c) for c in cell), level=level,
+            turn=turn, grown=0 if grower is None else grower.grown,
         ))
 
     return announce
@@ -686,6 +900,8 @@ def deepen_root(
     levels: int | None = None,
     child_q: int | None = None,
     progress: Progress | None = None,
+    discount: float | None = None,
+    grow: Grow | None = None,
 ) -> Deepening:
     """`best_first`, and the root's double oracle when `outside` is given (IKA-293).
 
@@ -705,10 +921,15 @@ def deepen_root(
 
     `levels` is the depth guard (``g<L>``; None: `MAX_LEVELS`, and the report leaves the
     stops out) and `child_q` the Q's width of the children's menus (``c<k>``; None:
-    `narrow`'s `sub_limit`), IKA-307.
+    `narrow`'s `sub_limit`), IKA-307. `discount` is the depth discount (``d<P>``, IKA-342;
+    None: none), a factor under 1 on each branch's inherited priority.
     `progress`, when given, is called with a `Step` at the start, after every step and at
     the end (the module's docstring); it changes nothing the deepening computes.
+    `grow`, when given, widens the root mid-read (IKA-354, the module's docstring); the
+    whole-matrix and breadth readings only.
     """
+    if grow is not None and reading == "restricted":
+        raise ValueError("widening the root mid-read goes with the whole-matrix reading")
     if outside is not None and reading not in ("mixed", "breadth"):
         raise ValueError("the root's double oracle goes with the mixed reading")
     if outside is None and (swap or reading == "breadth" or q_probe is not None):
@@ -740,7 +961,11 @@ def deepen_root(
     refused = 0
     guard = MAX_LEVELS if levels is None else levels
     watch = _Watch()
-    announce = None if progress is None else _stepper(progress, root, meter, cells, oracle)
+    grower = None if grow is None else _Grower(grow)
+    announce = (
+        None if progress is None
+        else _stepper(progress, root, meter, cells, oracle, budget, grower)
+    )
     if announce is not None:
         announce("start", expanded, deepest, refused)
     helper = (
@@ -750,6 +975,19 @@ def deepen_root(
     )
     try:
         while meter.spent < cells:
+            if grower is not None:
+                # Under the helpers' lock: the grow may rank a menu with the leaf.
+                with _held(helper):
+                    wanted = grower.ask(meter.spent)
+                    added = 0 if wanted is None else _grow_open(
+                        reg, root, wanted, evaluate, budget, meter, unmodelled, oracle, grower,
+                    )
+                if added:
+                    if trace is not None:
+                        trace.append((root, None, "grow"))
+                    if announce is not None:
+                        announce("grow", expanded, deepest, refused)
+                    continue
             if oracle is not None:
                 # One step: the probe and what it leads to -- a widening, or else a deepening.
                 with _held(helper):
@@ -763,7 +1001,7 @@ def deepen_root(
                 if not deepens:
                     watch.stop = "exhausted"
                     break
-            target = _best(root, guard, watch)
+            target = _best(root, guard, watch, discount)
             if target is None:
                 watch.stop = "exhausted"
                 break
@@ -775,9 +1013,9 @@ def deepen_root(
                     watch=watch,
                 )
             else:
-                helper.post(root, guard)
+                helper.post(root, guard, discount)
                 spent, ok, fills = helper.expand(node, cell, unmodelled)
-            meter.refined(spent - 1, fills)
+            meter.refined(spent - 1, fills, node.level, len(root.rows) * len(root.cols))
             if trace is not None:
                 trace.append((node, cell, ok))
             if not ok:
@@ -803,6 +1041,10 @@ def deepen_root(
         timing.count("deepen.fills", meter.fills)
         timing.count("deepen.refines", meter.refines)
         watch.count()
+        if grower is not None:
+            timing.count("deepen.grow.times", grower.times)
+            timing.count("deepen.grow.actions", grower.grown)
+            timing.count("deepen.grow.cells", grower.cells)
         if oracle is not None:
             timing.count("deepen.oracle.calls", 1)
             timing.count("deepen.oracle.probes", oracle.probes)
@@ -831,6 +1073,8 @@ def deepen_root(
         q_probe=q_probe is not None, q=meter.qs,
         qfull=0 if oracle is None else oracle.fallbacks,
         **watch.report(levels, child_q),
+        grown=0 if grower is None else grower.grown,
+        grown_cells=0 if grower is None else grower.cells,
     )
     if announce is not None:
         announce("done", expanded, deepest, refused)
@@ -865,11 +1109,17 @@ class _Meter:
         self.probed = 0
         #: Inferences of the Q that narrows the probe. Counted, not charged to cells.
         self.qs = 0
+        #: The refined cells' nodes' levels, summed (`Cost.level`'s count, IKA-342).
+        self.levels = 0
+        #: The root game's cells at each refinement, summed (`Cost.root`'s count).
+        self.roots = 0
 
-    def refined(self, cells: int, fills: int) -> None:
+    def refined(self, cells: int, fills: int, level: int = 0, root: int = 0) -> None:
         self.refines += 1
         self.cells += cells
         self.fills += fills
+        self.levels += level
+        self.roots += root
 
     def filled(self, cells: int, *, probe: bool = False) -> None:
         self.fills += 1
@@ -884,10 +1134,24 @@ class _Meter:
     def spent(self) -> float:
         if self.cost is None:
             return self.refines + self.cells
-        return (
-            self.cost.ms(self.fills, self.refines, self.cells, self.probed, self.qs)
-            / self.cost.cell
-        )
+        ms = self.cost.ms(self.fills, self.refines, self.cells, self.probed, self.qs)
+        per_level = getattr(self.cost, "level", 0.0)
+        if per_level and self.levels:
+            ms += per_level * self.levels
+        per_root = getattr(self.cost, "root", 0.0)
+        if per_root and self.roots:
+            ms += per_root * self.roots
+        units = ms / self.cost.cell
+        # A cost may hold the reading back (IKA-344's ponder: `humanplay.PonderCost` keeps
+        # a move deepening past its budget until the person has chosen). ``work`` grows at
+        # every step, so a stop point written as it replays the same stop.
+        gate = getattr(self.cost, "gate", None)
+        return units if gate is None else gate(units, self.work)
+
+    @property
+    def work(self) -> int:
+        """Counted work so far: fills, refinements and cells. Every step adds to it."""
+        return self.fills + self.refines + self.cells
 
 
 class _Oracle:
@@ -943,6 +1207,11 @@ class _Oracle:
         # A guard, not a rule: widenings past this mean the argument above is wrong.
         self.cap = 4 * (len(self.candidates[0]) + len(self.candidates[1])) + 4
         self.stalled = False
+
+    def joined(self, rows: Sequence[SideAction], cols: Sequence[SideAction]) -> None:
+        """Actions a mid-read widening added to the root (IKA-354): candidates from now on
+        (a swap may push one out and the probe ask it back), and the menu has changed."""
+        _join_candidates(self, rows, cols)
 
     def _outside(self, side: int) -> list[SideAction]:
         menu = self.root.rows if side == 0 else self.root.cols
@@ -1223,6 +1492,26 @@ class _Oracle:
         self.swapped += 1
 
 
+def _join_candidates(
+    oracle: Any, first: Sequence[SideAction], second: Sequence[SideAction]  # noqa: ANN401
+) -> None:
+    """Append added actions to an oracle's candidates (each side's, where not there yet),
+    lift its guard by as much, and forget a full probe's proof: the menu changed."""
+    new = False
+    for side, added in ((0, first), (1, second)):
+        seen = {action.to_choice() for action in oracle.candidates[side]}
+        for action in added:
+            if action.to_choice() not in seen:
+                seen.add(action.to_choice())
+                oracle.candidates[side].append(action)
+                oracle.cap += 4
+                new = True
+    if new and oracle.q is not None:
+        # A Q asked before the widening has no row for a new candidate: asked again.
+        oracle.q = None
+    oracle.proved = False
+
+
 #: Whether a Bayesian root's cell priority is ``bern/gap`` times its completion's weight
 #: (IKA-294). Without the weight a cell of a completion the belief barely holds would be
 #: deepened as early as one of the likeliest, though it moves the answer w_k as much.
@@ -1378,6 +1667,10 @@ class _BeliefOracle:
         self.left: set[str] = set()
         self.cap = 4 * (len(self.candidates[0]) + len(self.candidates[1])) + 4
         self.stalled = False
+
+    def joined(self, own: Sequence[SideAction], other: Sequence[SideAction]) -> None:
+        """`_Oracle.joined`: this side's added actions, then the other side's."""
+        _join_candidates(self, own, other)
 
     def _menu(self, role: int) -> list[SideAction]:
         return self.root.own if role == 0 else self.root.other
@@ -1661,6 +1954,8 @@ def deepen_belief(
     levels: int | None = None,
     child_q: int | None = None,
     progress: Progress | None = None,
+    discount: float | None = None,
+    grow: Grow | None = None,
 ) -> BeliefDeepening:
     """`deepen_root` for a side whose opponent's bench is hidden (IKA-294, label ``h``).
 
@@ -1673,6 +1968,8 @@ def deepen_belief(
     ``breadth`` reading are `deepen_root`'s. A cell spent is one resolved turn in one
     completion: a probed cell counts once per completion. `q_probe` narrows the probe by
     the process's Q, asked once per completion in that completion's position (IKA-322).
+    `grow` widens the root mid-read (IKA-354): its actions in side order, this side's
+    rows and the other side's columns appended in every completion's matrix.
     """
     if reading not in ("mixed", "breadth"):
         raise ValueError(f"a Bayesian root is read whole or breadth only, not {reading!r}")
@@ -1719,7 +2016,11 @@ def deepen_belief(
     refused = 0
     guard = MAX_LEVELS if levels is None else levels
     watch = _Watch()
-    announce = None if progress is None else _stepper(progress, root, meter, cells, oracle)
+    grower = None if grow is None else _Grower(grow)
+    announce = (
+        None if progress is None
+        else _stepper(progress, root, meter, cells, oracle, budget, grower)
+    )
     if announce is not None:
         announce("start", expanded, deepest, refused)
     helper = (
@@ -1729,6 +2030,18 @@ def deepen_belief(
     )
     try:
         while meter.spent < cells:
+            if grower is not None:
+                with _held(helper):
+                    wanted = grower.ask(meter.spent)
+                    added = 0 if wanted is None else _grow_belief(
+                        root, wanted, fill, meter, oracle, grower
+                    )
+                if added:
+                    if trace is not None:
+                        trace.append((root, None, "grow"))
+                    if announce is not None:
+                        announce("grow", expanded, deepest, refused)
+                    continue
             if oracle is not None:
                 with _held(helper):
                     joined = oracle.step(meter)
@@ -1741,7 +2054,7 @@ def deepen_belief(
                 if not deepens:
                     watch.stop = "exhausted"
                     break
-            target = _best(root, guard, watch)  # type: ignore[arg-type]
+            target = _best(root, guard, watch, discount)  # type: ignore[arg-type]
             if target is None:
                 watch.stop = "exhausted"
                 break
@@ -1753,9 +2066,11 @@ def deepen_belief(
                     watch=watch,
                 )
             else:
-                helper.post(root, guard)
+                helper.post(root, guard, discount)
                 spent, ok, fills = helper.expand(node, cell, unmodelled)
-            meter.refined(spent - 1, fills)
+            meter.refined(
+                spent - 1, fills, node.level, len(root.prices) * len(root.own) * len(root.other)
+            )
             if trace is not None:
                 trace.append((node, cell, ok))
             if not ok:
@@ -1783,6 +2098,10 @@ def deepen_belief(
         timing.count("deepen.fills", meter.fills)
         timing.count("deepen.refines", meter.refines)
         watch.count()
+        if grower is not None:
+            timing.count("deepen.grow.times", grower.times)
+            timing.count("deepen.grow.actions", grower.grown)
+            timing.count("deepen.grow.cells", grower.cells)
         if oracle is not None:
             timing.count("deepen.oracle.calls", 1)
             timing.count("deepen.oracle.probes", oracle.probes)
@@ -1810,6 +2129,8 @@ def deepen_belief(
         classes=len(root.prices), q_probe=q_probe is not None, q=meter.qs,
         qfull=0 if oracle is None else oracle.fallbacks,
         **watch.report(levels, child_q),
+        grown=0 if grower is None else grower.grown,
+        grown_cells=0 if grower is None else grower.cells,
     )
     if announce is not None:
         announce("done", expanded, deepest, refused)
@@ -1909,7 +2230,8 @@ class _Watch:
 
 
 def _best(
-    root: _Node, guard: int = MAX_LEVELS, watch: _Watch | None = None
+    root: _Node, guard: int = MAX_LEVELS, watch: _Watch | None = None,
+    discount: float | None = None,
 ) -> tuple[_Node, tuple[int, int]] | None:
     """The unrefined cell with the highest positive priority under `root`, or None.
 
@@ -1924,6 +2246,10 @@ def _best(
     where one of its cells was worth more than the cell returned (IKA-307): every node
     that could hold such a cell is visited, since the search stops only at bounds no
     better than the best in hand.
+
+    `discount` (IKA-342), when given, multiplies what each branch passes down, so a cell
+    k plies below the root is worth ``discount**k`` of its undiscounted priority; the
+    bound still holds (it only shrinks).
     """
     best: tuple[float, _Node, tuple[int, int]] | None = None
     blocked = 0.0
@@ -1953,6 +2279,8 @@ def _best(
                 for weight, child in node.children[cell]:
                     if isinstance(child, _Node):
                         passed = float(scores[cell]) * weight
+                        if discount is not None:
+                            passed *= discount
                         if passed > 0.0:
                             met += 1
                             heapq.heappush(heap, (-passed, met, child, passed))
@@ -1978,6 +2306,8 @@ def _best(
             for weight, child in node.children[cell]:
                 if isinstance(child, _Node):
                     passed = float(scores[cell]) * weight
+                    if discount is not None:
+                        passed *= discount
                     if passed > 0.0:
                         met += 1
                         heapq.heappush(heap, (-passed, met, child, passed))
@@ -2322,7 +2652,8 @@ def _turn_of(node: Any, cell: tuple[int, ...]) -> tuple[Position, list[SideActio
 
 
 def _ranked(
-    root: Any, count: int, guard: int = MAX_LEVELS  # noqa: ANN401
+    root: Any, count: int, guard: int = MAX_LEVELS,  # noqa: ANN401
+    discount: float | None = None,
 ) -> list[tuple[Any, tuple[int, ...]]]:
     """The `count` unrefined cells of highest positive priority under `root`, best first --
     `_best`'s search, keeping `count` instead of one. Only a guess at the cells the loop
@@ -2365,6 +2696,8 @@ def _ranked(
             for weight, child in node.children[cell]:
                 if isinstance(child, _Node):
                     passed = float(scores[cell]) * weight
+                    if discount is not None:
+                        passed *= discount
                     if passed > 0.0:
                         met += 1
                         heapq.heappush(heap, (-passed, met, child, passed))
@@ -2564,12 +2897,14 @@ class _Ahead:
                 raise RuntimeError("the deepening's helpers already serve another deepening")
             self.pool.session = self
 
-    def post(self, root: Any, guard: int = MAX_LEVELS) -> None:  # noqa: ANN401
-        """The cells worth expanding now: the best `count` under `root` (`guard`: the
-        depth guard, `_best`'s)."""
+    def post(
+        self, root: Any, guard: int = MAX_LEVELS, discount: float | None = None  # noqa: ANN401
+    ) -> None:
+        """The cells worth expanding now: the best `count` under `root` (`guard` and
+        `discount`: the depth guard and discount, `_best`'s)."""
         self.guard = guard
         wanted = []
-        for node, cell in _ranked(root, self.count, guard):
+        for node, cell in _ranked(root, self.count, guard, discount):
             key = _key(node, cell)
             if key in self.done or key in self.busy:
                 continue
@@ -2990,6 +3325,7 @@ __all__ = [
     "Deepened",
     "Deepening",
     "BeliefDeepening",
+    "Grow",
     "Progress",
     "Step",
     "announce_belief_depth1",

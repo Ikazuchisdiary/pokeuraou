@@ -32,7 +32,10 @@ width first, depth with what is left:
    count; an unmeasured count uses the nearest measured one below it, which predicts
    slow and so errs narrow.
 2. The rest of the budget deepens the root best first, hidden nodes included (the ``m``
-   reading with ``h``: `deepen.deepen_belief` / `deepen.deepen_root`).
+   reading with ``h``: `deepen.deepen_belief` / `deepen.deepen_root`), with the root's
+   swap oracle when ``Agent.oracle`` is set (IKA-307: at equal CPU, width alone beat
+   width 12 + deepening at every budget it tried, and the oracle added +14 to +23 Elo to
+   deepening; the tools set it, `PLAY_ORACLE`).
 
 **The deadline.** Two clocks, ``wall`` (the default) and ``count``:
 
@@ -74,6 +77,7 @@ byte for byte, with a listener and without (`liveview` is the listener that show
 from __future__ import annotations
 
 import json
+import math
 import sys
 import time
 from collections.abc import Callable, Sequence
@@ -86,7 +90,7 @@ import numpy as np
 from . import port
 from .actions import PassAction, SideAction, side_actions, switch_actions_after_faint, target_names
 from .budget import Budget
-from .deepen import COSTS, cells_for_seconds
+from .deepen import ALL_ACTIONS, COSTS, cells_for_seconds
 from .equilibrium import EquilibriumError, solve_bayesian
 from .hidden import (
     DEFAULT_BENCH_DROP,
@@ -101,7 +105,7 @@ from .narrow import drop_dead_actions
 from .payoff import HP_SHARE, Objective
 from .position import Position
 from .priors import SampledSet
-from .progress import SLOT_SEPARATOR, Reader, Recorder, action_label
+from .progress import Reader, Recorder, action_label, part_json, slot_part
 from .regulation import Regulation
 from .search import belief_solve, search
 from .selection_book import BenchPrior, BookEntry
@@ -127,7 +131,10 @@ from .teams import Roster, pick_four_indices
 
 #: The menu widths the rule chooses from, narrowest first. 48 is the human form IKA-32
 #: timed; 64 is about every legal action of a doubles side (48 x 44 on average, IKA-293).
-WIDTHS = (8, 12, 16, 24, 32, 48, 64)
+#: 18, 26 and 36 are IKA-307's width-only optima at its three budgets (1 game = 1.05, 1.7
+#: and 2.65 CPU seconds a player): at equal CPU, width alone beat width 12 + deepening by
+#: 16-32 Elo at each, so a small budget spends itself on the widest of these that fits.
+WIDTHS = (8, 12, 16, 18, 24, 26, 32, 36, 48, 64)
 
 #: The share of the budget the depth-1 node may be predicted to take. The rest deepens.
 WIDTH_SHARE = 0.5
@@ -199,6 +206,7 @@ def plan_move(
     *,
     form: str = "local",
     width_only: bool = False,
+    share: float = WIDTH_SHARE,
 ) -> MovePlan:
     """Width first, depth with the rest (the module's docstring; IKA-322 replaces this).
 
@@ -206,7 +214,8 @@ def plan_move(
     the completions of the person's bench the agent believes (1 when nothing is hidden).
     The widest of `WIDTHS` whose node is predicted within `WIDTH_SHARE` of the budget, or
     the narrowest when none is; what the prediction leaves goes to the deepening, unless
-    it is under `MIN_DEEPEN_MS` or ``width_only``.
+    it is under `MIN_DEEPEN_MS` or ``width_only``. ``share`` replaces `WIDTH_SHARE` (the
+    first width of an agent that widens mid-read, IKA-354).
     """
     budget_ms = max(0.0, seconds * 1000.0)
     price = node_time(cores, form)
@@ -216,7 +225,7 @@ def plan_move(
 
     width = WIDTHS[0]
     for candidate in WIDTHS:
-        if price.ms(cells_at(candidate)) <= WIDTH_SHARE * budget_ms:
+        if price.ms(cells_at(candidate)) <= share * budget_ms:
             width = candidate
         # Past every legal action on both sides a wider menu is the same menu.
         if candidate >= rows and candidate >= cols:
@@ -247,7 +256,241 @@ class WallCost:
         return (time.perf_counter() - self.start) * 1000.0
 
 
+class HaltingCost:
+    """A reading of the deepening's budget (`WallCost` or a `deepen.Cost`) that reads as
+    spent once ``stop`` is set: the memory watch's brake on a move (IKA-343). Until then it
+    is ``inner`` to the bit, so a game it never stops is the same game."""
+
+    def __init__(self, inner: Any, stop: Any, cells: int) -> None:  # noqa: ANN401
+        self.inner = inner
+        self.stop = stop
+        self.cell = inner.cell
+        #: What the loop reads once stopped: past its budget of ``cells``.
+        self.full = float(cells + 1) * inner.cell
+        #: Whether the brake was read as set (the clock file says so).
+        self.stopped = False
+
+    def ms(
+        self, fills: int, refines: int, cells: int, probed: int = 0, qs: int = 0
+    ) -> float:
+        if self.stop.is_set():
+            self.stopped = True
+            return self.full
+        return self.inner.ms(fills, refines, cells, probed, qs)
+
+    def gate(self, units: float, work: int) -> float:
+        """The inner reading's gate (`PonderCost`), unless the brake stopped the move."""
+        if self.stopped:
+            return units
+        inner = getattr(self.inner, "gate", None)
+        return units if inner is None else inner(units, work)
+
+    def __getattr__(self, name: str) -> Any:  # noqa: ANN401
+        """Every other price is ``inner``'s: `deepen._Meter` reads a `deepen.Cost`'s
+        ``level`` and ``root`` (IKA-342) beside `ms`, and a wrapped count clock must charge
+        them as the bare one does (a `WallCost` has neither, and reads as before)."""
+        inner = self.__dict__.get("inner")
+        if inner is None or name.startswith("__"):
+            raise AttributeError(name)
+        return getattr(inner, name)
+
+
+class PonderCost:
+    """A reading of the deepening's budget that keeps a move deepening past its own budget
+    until the other side has chosen (IKA-344, ponder).
+
+    Both sides choose at the same time, so the person is asked when the agent starts its
+    move, and the agent deepens the same position until ``ready`` says the person has
+    chosen -- its own budget read first in any case (the budget is a floor: a person who
+    answers at once meets the same agent as without ponder), and ``cap`` units at most.
+    The agent draws its action from the mixture it has then; the person's action is read
+    only after that.
+
+    ``ready(units, work)`` is asked at each reading of the budget: an `Event`'s
+    ``is_set`` for a person (`HumanGame`), a count for a board. The first ``work``
+    (`deepen._Meter.work`, which every step adds to) it was read true at is kept
+    (`ready_work`); given back as ``stop_at`` with ``replay``, ready is ``work >=
+    stop_at`` and the count clock deepens to the same step -- the same game, byte for byte.
+
+    `floor` is set once the move's own budget has been read: the move could be played. A
+    board where both sides ponder hands each side the other's `floor` as ``ready``.
+    """
+
+    def __init__(
+        self,
+        inner: Any,  # noqa: ANN401 - deepen.Cost or WallCost
+        cells: int,
+        cap: float,
+        ready: Callable[[float, int], bool] | None = None,
+        *,
+        replay: bool = False,
+        stop_at: int | None = None,
+    ) -> None:
+        import threading
+
+        self.inner = inner
+        self.cell = inner.cell
+        #: The move's own budget, the deepening loop's: in units of one cell.
+        self.cells = cells
+        #: Past this many units the move stops, chosen or not.
+        self.cap = max(float(cap), float(cells))
+        self.ready = ready
+        self.replay = replay
+        self.stop_at = stop_at
+        #: The first ``work`` read ready (None: never, the deepening ended first).
+        self.ready_work: int | None = None
+        #: Whether it held a reading at or past the budget: deepened past its own budget.
+        self.held = False
+        #: Whether the cap stopped it before the person had chosen.
+        self.capped = False
+        self.floor = threading.Event()
+        self._hold = math.nextafter(float(cells), -math.inf)
+
+    def ms(
+        self, fills: int, refines: int, cells: int, probed: int = 0, qs: int = 0
+    ) -> float:
+        return self.inner.ms(fills, refines, cells, probed, qs)
+
+    def _is_ready(self, units: float, work: int) -> bool:
+        if self.replay:
+            if self.stop_at is None or work < self.stop_at:
+                return False
+            # Written as it was when played: the replay's record is the game's.
+            self.ready_work = self.stop_at
+            return True
+        if self.ready_work is not None:
+            return True
+        if self.ready is not None and self.ready(units, work):
+            self.ready_work = work
+            return True
+        return False
+
+    def gate(self, units: float, work: int) -> float:
+        inner = getattr(self.inner, "gate", None)
+        if inner is not None:
+            units = inner(units, work)
+        if units >= self.cells:
+            self.floor.set()
+        if self._is_ready(units, work):
+            return units
+        if units >= self.cap:
+            self.capped = True
+            return units
+        if units >= self.cells:
+            self.held = True
+            return self._hold
+        return units
+
+    def __getattr__(self, name: str) -> Any:  # noqa: ANN401
+        # Every other price is ``inner``'s (as `HaltingCost`).
+        inner = self.__dict__.get("inner")
+        if inner is None or name.startswith("__"):
+            raise AttributeError(name)
+        return getattr(inner, name)
+
+
+class Tally:
+    """A reading of the budget passed through unchanged, keeping the last reading
+    (`last`, in units of one cell): what a move spent when it stopped."""
+
+    def __init__(self, inner: Any) -> None:  # noqa: ANN401
+        self.inner = inner
+        self.cell = inner.cell
+        self.last = 0.0
+
+    def ms(
+        self, fills: int, refines: int, cells: int, probed: int = 0, qs: int = 0
+    ) -> float:
+        return self.inner.ms(fills, refines, cells, probed, qs)
+
+    def gate(self, units: float, work: int) -> float:
+        self.last = units
+        inner = getattr(self.inner, "gate", None)
+        return units if inner is None else inner(units, work)
+
+    def __getattr__(self, name: str) -> Any:  # noqa: ANN401
+        # Every other price is ``inner``'s (as `HaltingCost`).
+        inner = self.__dict__.get("inner")
+        if inner is None or name.startswith("__"):
+            raise AttributeError(name)
+        return getattr(inner, name)
+
+
+def _find(cost: Any, kind: type) -> Any:  # noqa: ANN401
+    """The first reading of type ``kind`` in a chain of wrapped readings, or None."""
+    while cost is not None:
+        if isinstance(cost, kind):
+            return cost
+        cost = getattr(cost, "__dict__", {}).get("inner")
+    return None
+
+
 CLOCKS = ("wall", "count")
+
+# ----------------------------------------------------------------------------- defaults
+# What `tools/play_human.py` and `tools/play.py` play with when no flag says otherwise
+# (IKA-343): the allocation IKA-307 measured best, spread over the cores IKA-32 measured
+# useful, under IKA-334's card cap and IKA-337's memory watch.
+
+#: The root's swap oracle while deepening: every legal action (``sall``). IKA-307: at equal
+#: CPU, the oracle added +14.6 / +13.9 / +22.5 Elo to deepening alone at its three budgets,
+#: so "width first, the rest to deepening" became "the rest to deepening with the oracle"
+#: (the ``s...h`` labels). With the menu already at every legal action (width 64 on most
+#: turns) it asks nothing; it matters where the legal list is longer than the width.
+PLAY_ORACLE = ALL_ACTIONS
+
+#: The deepening's depth guard for a person's game and the analysis mode (None would be
+#: `deepen.MAX_LEVELS`, 8, which generation and the board keep). IKA-342: 16. On 16 recorded
+#: M-C positions read for 7.5 to 60 s of the count clock, the answer at guard 16 lost less
+#: than guard 8's in the game of a long guard-32 read (15 s -0.003, 30 s -0.007 in 11 of 16,
+#: 60 s -0.011), and sat nearer the long guard-8 read than guard 32 did: the middle of two
+#: references that disagree. A read-only comparison with two references and no truth; the
+#: board at equal time waits for IKA-333's tools.
+PLAY_MAX_LEVELS: int | None = 16
+
+#: Threads a move spreads over (IKA-32 stage 2: the port's cells, three worker processes
+#: expanding the deepening's cells ahead, a big game's two LPs at once, the leaf's CUDA
+#: graphs). IKA-32 §12.5: steps in the same seconds were 1.41 / 1.34 / 1.15x at 4 threads
+#: and 1.33 / 1.28 / 1.12x at 8 (5 / 15 / 45 s a move), 16 slower still; 4 also leaves the
+#: other half of an 8-core machine to the analysis mode.
+PLAY_THREADS = 4
+
+#: This process's CUDA allocator cap, and each worker process's (IKA-334's server cap: a
+#: card that fills resets instead of raising out-of-memory).
+PLAY_CUDA_MEMORY_GB = 3.5
+
+#: Whether the agent reads on while the person chooses (IKA-344, ponder). Off until a
+#: same-time board has shown it stronger (IKA-333's tool); ``--ponder on`` turns it on.
+PLAY_PONDER = False
+
+#: The longest a move reads when it ponders, in seconds from the start of the move: past
+#: it the agent waits with the answer it has. IKA-337's 10-minute read of the shipped form
+#: grew the process by 1.25 GB (4.96 -> 6.21 GB of the 10 GB watch), so a move this long
+#: stays under the memory watch; the watch still brakes a move that nears it.
+PLAY_PONDER_SECONDS = 600.0
+
+
+def default_threads(cpus: int | None = None) -> int:
+    """`PLAY_THREADS`, or fewer on a machine with fewer physical cores (half the logical
+    ones, as ``os.cpu_count`` counts them with hyper-threading)."""
+    import os
+
+    logical = cpus if cpus is not None else (os.cpu_count() or 2)
+    return max(1, min(PLAY_THREADS, logical // 2))
+
+
+def cap_cuda(gb: float, device: str | None = None) -> bool:
+    """Caps this process's CUDA allocator at ``gb`` (IKA-334; the cap moves no answer).
+    False when there is no card, the device is not CUDA, or ``gb`` is 0."""
+    if gb <= 0 or (device is not None and not str(device).startswith("cuda")):
+        return False
+    import torch
+
+    if not torch.cuda.is_available():
+        return False
+    total = torch.cuda.mem_get_info()[1]
+    torch.cuda.set_per_process_memory_fraction(min(1.0, gb * 1e9 / total))
+    return True
 
 #: From how many cells a game's two LPs are solved at once when the agent has more than
 #: one core (`equilibrium.set_lp_pair`): the root's Bayesian game of a wide menu, not the
@@ -311,12 +554,19 @@ class GraphLeaf:
 AHEAD_WORKERS_MAX = 6
 
 
-def process_leaf(reg: Regulation, values: Sequence[str] | None, device: str, graphs: bool) -> Any:  # noqa: ANN401
+def process_leaf(
+    reg: Regulation, values: Sequence[str] | None, device: str, graphs: bool,
+    cuda_memory_gb: float = 0.0,
+) -> Any:  # noqa: ANN401
     """The agent's leaf built again in a worker process (`deepen.start_workers`): the same
-    files on the same device, as `tools/play_human.py` builds it; hp-share without files."""
+    files on the same device, as `tools/play_human.py` builds it; hp-share without files.
+    ``cuda_memory_gb`` caps the worker's CUDA allocator as the tool caps its own
+    (`cap_cuda`)."""
     if not values:
         return HP_SHARE.batch
     import torch
+
+    cap_cuda(cuda_memory_gb, device)
 
     from .encode import Encoder
     from .value import BatchedValue, load_ensemble
@@ -351,11 +601,12 @@ def load_leaf(
 def use_threads(
     threads: int,
     reg: Regulation | None = None,
-    leaf: tuple[Sequence[str] | None, str, bool] | None = None,
+    leaf: tuple[Any, ...] | None = None,
 ) -> None:
     """Spread one move over `threads` cores (IKA-32): the port's cell pool (stage 1), the
     deepening's cells expanded ahead and a big game's two LPs at once (stage 2). With
-    `reg` and `leaf` (`process_leaf`'s files, device and graphs) the cells ahead are
+    `reg` and `leaf` (`process_leaf`'s files, device, graphs and optionally the CUDA
+    cap) the cells ahead are
     expanded by ``threads - 1`` worker processes (at most `AHEAD_WORKERS_MAX`), each with
     its own leaf, port and GIL; without, by helper threads in this process. None of them
     changes a move -- only how long it takes -- so a game on the count clock is the same
@@ -453,7 +704,21 @@ class ScriptPerson(Person):
     def from_record(cls, path: Path, line: int = 0) -> ScriptPerson:
         """The inputs of the ``line``-th game of a record file: that person, again."""
         rows = [r for r in path.read_text(encoding="utf-8").splitlines() if r.strip()]
-        return cls(json.loads(rows[line])["human"]["inputs"])
+        game = json.loads(rows[line])
+        person = cls(game["human"]["inputs"])
+        # A pondering agent's stop points (IKA-344), one per move of the agent: a game
+        # played with ponder replays only with them (`HumanGame.ponder_stops`).
+        stops = [
+            d["plan"]["ponder"]["ready"]
+            for d in game.get("decisions", [])
+            if "ponder" in d.get("plan", {})
+        ]
+        if stops:
+            person.ponder = stops
+        return person
+
+    #: The recorded stop points of a pondering agent's moves, or None (`from_record`).
+    ponder: list[int | None] | None = None
 
     def _next(self) -> str:
         if self.at >= len(self.lines):
@@ -861,10 +1126,33 @@ class Agent:
     #: the width of the menu whose rest it asks (`deepen.ALL_ACTIONS`: every legal
     #: action), or None: no oracle.
     oracle: int | None = None
+    #: A `threading.Event` the memory watch sets near a limit (IKA-343): while it is set, a
+    #: move stops deepening at its next step (`HaltingCost`) and plays the answer it has.
+    #: None: no brake. Unset, it changes no move.
+    halt: Any = None  # noqa: ANN401
+    #: Read narrow first and widen with what is left (IKA-354), or None: width first, the
+    #: rest to deepening, as before. ``(share, at)``: the first width is the one the width
+    #: rule picks at ``share`` of the budget instead of `WIDTH_SHARE`; once the deepening
+    #: has spent ``at`` of its budget the root is widened to the width the rule picks at
+    #: `WIDTH_SHARE` (the menus of the same ranking), the tree kept (`deepen.Grow`), and
+    #: the rest of the budget deepens the wider root.
+    widen: tuple[float, float] | None = None
+    #: Read on while the person chooses (IKA-344, `PonderCost`): the person is asked when
+    #: the move starts, and the move deepens until they have chosen -- its budget first,
+    #: `ponder_seconds` at most. False: the agent chooses first, then the person is asked.
+    ponder: bool = False
+    ponder_seconds: float = PLAY_PONDER_SECONDS
 
     def __post_init__(self) -> None:
         if self.clock not in CLOCKS:
             raise ValueError(f"clock is one of {CLOCKS}, not {self.clock!r}")
+        if self.widen is not None:
+            share, at = self.widen
+            if not (0.0 < share <= WIDTH_SHARE and 0.0 <= at < 1.0):
+                raise ValueError(
+                    f"widen is (share, at) with 0 < share <= {WIDTH_SHARE} and 0 <= at < 1, "
+                    f"not {self.widen!r}"
+                )
         if self.clock == "count" and not self.width_only and (self.form, self.cores) not in COSTS:
             raise ValueError(
                 f"the count clock spends the budget at measured prices, and there are none "
@@ -885,6 +1173,22 @@ def legal_count(reg: Regulation, pos: Position, side: int) -> int:
 
 def _not_asked(positions: list[Position]) -> np.ndarray:  # pragma: no cover - never called
     raise AssertionError("the person's side is never solved")
+
+
+class _WidenOnce:
+    """`deepen.Grow` of an agent that widens mid-read (IKA-354): the wider menus, once, at
+    the first step whose reading of the budget is ``at`` or more."""
+
+    def __init__(self, at: float, menus: tuple[list[SideAction], list[SideAction]]) -> None:
+        self.at = at
+        self.menus = menus
+        self.done = False
+
+    def __call__(self, spent: float) -> tuple[list[SideAction], list[SideAction]] | None:
+        if self.done or spent < self.at:
+            return None
+        self.done = True
+        return self.menus
 
 
 @dataclass
@@ -920,11 +1224,15 @@ def solve_move(
     child_q: int | None = None,
     outside: tuple[list[SideAction], list[SideAction]] | None = None,
     progress: Callable[[Any], None] | None = None,
+    discount: float | None = None,
+    grow: Any = None,  # noqa: ANN401 - deepen.Grow
 ) -> SolvedMove:
     """Side ``me``'s answer on the menus ``ours`` (side 0's) x ``theirs`` (side 1's): the
     open game (`search`) when ``exact``, else its Bayesian game over the other side's
     completions in ``spreads`` (`belief_solve`, only ``me`` solved). ``cells`` > 0 deepens
-    best first, the budget read by ``cost``; ``outside`` adds the root's swap oracle.
+    best first, the budget read by ``cost``; ``outside`` adds the root's swap oracle;
+    ``levels`` and ``discount`` are the depth guard and the depth discount (IKA-342);
+    ``grow`` widens the root mid-read (`deepen.Grow`, IKA-354).
     What `HumanGame` asks at each move, and what the analysis mode asks with no budget
     (IKA-337). Raises `EquilibriumError` as the solves do."""
     you = 1 - me
@@ -934,7 +1242,8 @@ def solve_move(
             **(
                 {"deepen": cells, "deepen_cost": cost, "levels": levels,
                  "child_q": child_q, "outside": outside,
-                 "swap": outside is not None}
+                 "swap": outside is not None, "discount": discount,
+                 **({"grow": grow} if grow is not None else {})}
                 if cells else {}
             ),
             progress=progress,
@@ -953,7 +1262,8 @@ def solve_move(
         deepen=(
             {me: {"cells": cells, "reading": "mixed", "swap": outside is not None,
                   "outside": outside, "cost": cost, "levels": levels,
-                  "child_q": child_q}}
+                  "child_q": child_q, "discount": discount,
+                  **({"grow": grow} if grow is not None else {})}}
             if cells else None
         ),
         progress=progress,
@@ -980,6 +1290,53 @@ def _averaged(replies: Sequence[np.ndarray], weights: Sequence[float]) -> list[f
     w = np.asarray(weights, dtype=np.float64)
     w = w / w.sum() if w.sum() > 0 else np.full(len(w), 1.0 / len(w))
     return [float(x) for x in sum(wk * np.asarray(r) for wk, r in zip(w, replies, strict=True))]
+
+
+class _Asker:
+    """The person's question asked on a thread of its own while the agent reads (ponder).
+    `done` is set once they have answered; `result` waits for it and hands the answer --
+    to be read only after the agent has drawn its own action."""
+
+    def __init__(
+        self, game: HumanGame, kind: str, legal: Sequence[SideAction], pos: Position,
+        seen: Any,  # noqa: ANN401
+    ) -> None:
+        import threading
+
+        self.game, self.kind, self.legal, self.pos, self.seen = game, kind, legal, pos, seen
+        self.done = threading.Event()
+        self.thread: Any = None
+        self.action: SideAction | None = None
+        self.error: BaseException | None = None
+        self.took = 0.0
+
+    def start(self) -> None:
+        import threading
+
+        if self.thread is not None:
+            return
+        self.thread = threading.Thread(target=self._run, name="ponder-ask", daemon=True)
+        self.thread.start()
+
+    def _run(self) -> None:
+        started = time.perf_counter()
+        try:
+            self.action = self.game._ask(self.kind, self.legal, self.pos, self.seen)
+        except BaseException as problem:  # noqa: BLE001 - handed to the game's thread
+            self.error = problem
+        finally:
+            self.took = time.perf_counter() - started
+            self.done.set()
+
+    def result(self) -> SideAction:
+        self.start()
+        while not self.done.wait(0.25):
+            pass
+        self.thread.join()
+        if self.error is not None:
+            raise self.error
+        assert self.action is not None
+        return self.action
 
 
 class HumanGame:
@@ -1026,6 +1383,11 @@ class HumanGame:
         self.on_move = on_move
         #: How the two sides are named on the screen, by side index.
         self.side_names = tuple("AI" if s == agent_side else "あなた" for s in (0, 1))
+        #: A pondering agent's recorded stop points, one per move decision, to replay a
+        #: game (`PonderCost`'s ``stop_at``; the person's `ponder` when read from a
+        #: record), or None: a live game, stopped when the person chooses.
+        stops = getattr(person, "ponder", None) if agent.ponder else None
+        self.ponder_stops: list[int | None] | None = None if stops is None else list(stops)
 
     # -- output
     def say(self, text: str) -> None:
@@ -1058,7 +1420,9 @@ class HumanGame:
                 ],
                 "slots": [
                     [
-                        (s.to_choice(), s.describe(self.reg, self.loc, targets))
+                        # [choice, words, the part drawn with icons (IKA-345)]
+                        (s.to_choice(), s.describe(self.reg, self.loc, targets),
+                         part_json(slot_part(self.reg, s, pos, self.you, self.loc)))
                         for s in a.slots
                     ]
                     for a in legal
@@ -1140,12 +1504,30 @@ class HumanGame:
             spreads = _believed(spreads, (self.agent.bench_drop, self.agent.bench_drop))
             if self.on_move is not None:
                 self.on_move(pos, list(seen), record.leads)
-            moved = self._agent_move(pos, spreads, recorded_shown)
-            if moved is None:
-                break
-            agent_action, decision, extra = moved
             legal = side_actions(reg, pos, self.you)
-            human_action = self._ask("move", legal, pos, seen)
+            if self.agent.ponder:
+                # Both choose at the same time: the person is asked as the move starts and
+                # the agent reads on until they have chosen (`PonderCost`).
+                asker = _Asker(self, "move", legal, pos, seen)
+                replay = self.ponder_stops is not None
+                stop_at = self.ponder_stops.pop(0) if replay and self.ponder_stops else None
+                moved = self._agent_move(
+                    pos, spreads, recorded_shown, asker=asker,
+                    ready=lambda _units, _work, asker=asker: asker.done.is_set(),
+                    replay=replay, stop_at=stop_at,
+                )
+                human_action = asker.result()
+                if moved is None:
+                    break
+                agent_action, decision, extra = moved
+                # Seconds go to the clock file only: the game file replays byte for byte.
+                self.clock[-1]["personSeconds"] = round(asker.took, 4)
+            else:
+                moved = self._agent_move(pos, spreads, recorded_shown)
+                if moved is None:
+                    break
+                agent_action, decision, extra = moved
+                human_action = self._ask("move", legal, pos, seen)
             chosen = [agent_action, human_action] if self.me == 0 else [human_action, agent_action]
             human_menu = decision.foe_actions if self.you == 1 else decision.own_actions
             extra["humanOffMenu"] = human_action.to_choice() not in human_menu
@@ -1170,8 +1552,11 @@ class HumanGame:
                     "decision": len(record.decisions) - 1,
                     "agent": agent_label,
                     "person": person_label,
-                    "agentSlots": agent_label.split(SLOT_SEPARATOR),
-                    "personSlots": person_label.split(SLOT_SEPARATOR),
+                    "agentSlots": [text for _slot, text in agent_label.parts],
+                    "personSlots": [text for _slot, text in person_label.parts],
+                    # Each part with the active slot it is for (IKA-345).
+                    "agentParts": [part_json(part) for part in agent_label.rich],
+                    "personParts": [part_json(part) for part in person_label.rich],
                     "offMenu": extra["humanOffMenu"],
                     "changes": [] if advanced is None else turn_changes(
                         reg, pos, advanced, self.you, self.loc, names=self.side_names
@@ -1200,24 +1585,43 @@ class HumanGame:
         return record
 
     def _agent_move(
-        self, pos: Position, spreads: dict[int, list], recorded_shown: list[list[str]]
+        self,
+        pos: Position,
+        spreads: dict[int, list],
+        recorded_shown: list[list[str]],
+        *,
+        asker: _Asker | None = None,
+        ready: Callable[[float, int], bool] | None = None,
+        replay: bool = False,
+        stop_at: int | None = None,
     ) -> tuple[SideAction, Decision, dict[str, Any]] | None:
+        """The agent's move. With ``agent.ponder``, ``ready`` (or ``replay`` and ``stop_at``)
+        is `PonderCost`'s: the move deepens past its budget until it says the other side
+        has chosen; ``asker`` is started once the move has its menus (the person is asked
+        while it reads). A board passes ``ready`` without an asker (IKA-333)."""
         reg, agent, me, you = self.reg, self.agent, self.me, self.you
         started = time.perf_counter()
         exact = all(len(items) == 1 and items[0].exact for items in spreads.values())
         classes = len(spreads[you])
+        counts = (legal_count(reg, pos, me), legal_count(reg, pos, you), classes)
         plan = plan_move(
-            agent.seconds, agent.cores,
-            legal_count(reg, pos, me), legal_count(reg, pos, you), classes,
-            form=agent.form, width_only=agent.width_only,
+            agent.seconds, agent.cores, *counts, form=agent.form, width_only=agent.width_only,
         )
+        # IKA-354: read narrow first, widen to the rule's width with what is left.
+        later = None
+        if agent.widen is not None and not agent.width_only:
+            first = plan_move(
+                agent.seconds, agent.cores, *counts, form=agent.form, share=agent.widen[0],
+            )
+            if first.width < plan.width and first.deepen_ms > 0:
+                later, plan = plan.width, first
         budget = Budget.matrix()
         wider: dict[int, tuple[list[SideAction], list[SideAction]]] = {}
+        wide = [agent.oracle] if agent.oracle is not None and plan.deepen_ms > 0 else []
         ours, theirs = _menus(
             reg, pos, (plan.width, plan.width), agent.leaf, budget, agent.rank_by_leaf,
             None, spreads, rank_fill=agent.rank_fill,
-            wide=[agent.oracle] if agent.oracle is not None and plan.deepen_ms > 0 else [],
-            wider=wider,
+            wide=[*wide, *([later] if later is not None else [])], wider=wider,
         )
         outside = wider.get(agent.oracle) if agent.oracle is not None else None
         if not ours or not theirs:
@@ -1229,6 +1633,7 @@ class HumanGame:
                 "decision": len(self.record.decisions), "turn": pos.turn, "plan": plan,
                 "clock": agent.clock, "seconds": agent.seconds, "menuMs": menu_seconds * 1000.0,
                 "classCount": classes, "exact": exact,
+                **({"ponder": True} if agent.ponder else {}),
             })
             progress = Recorder(
                 Reader(reg, pos, me, loc=self.loc, names=self.side_names),
@@ -1245,14 +1650,35 @@ class HumanGame:
             else:
                 cost = COSTS[agent.form, agent.cores]
                 cells = cells_for_seconds(plan.deepen_ms / 1000.0, agent.cores, form=agent.form)
+            if agent.ponder and (ready is not None or replay):
+                if agent.clock == "wall":
+                    cap = agent.ponder_seconds * 1000.0
+                else:
+                    cap = cells_for_seconds(
+                        max(0.0, agent.ponder_seconds - plan.predicted_ms / 1000.0),
+                        agent.cores, form=agent.form,
+                    )
+                cost = PonderCost(cost, cells, cap, ready, replay=replay, stop_at=stop_at)
+            cost = Tally(cost)
+            if agent.halt is not None:
+                cost = HaltingCost(cost, agent.halt, cells)
+        grow = None
+        if later is not None and cells > 0:
+            grow = _WidenOnce(agent.widen[1] * cells, wider[later])
+        pondering = _find(cost, PonderCost)
+        if asker is not None:
+            asker.start()
         try:
             solved = solve_move(
                 reg, pos, me, ours, theirs, spreads, agent.leaf, budget=budget, exact=exact,
                 cells=cells, cost=cost, levels=agent.max_levels, child_q=agent.child_q,
-                outside=outside, progress=progress,
+                outside=outside, progress=progress, grow=grow,
             )
         except EquilibriumError:
             return None
+        finally:
+            if pondering is not None:
+                pondering.floor.set()
         strategy, model, value = solved.strategy, solved.model, solved.value
         ours, theirs = solved.ours, solved.theirs
         deepened, unmodelled = solved.deepened, solved.unmodelled
@@ -1266,10 +1692,12 @@ class HumanGame:
                 "seconds": took, "deepened": deepened,
                 "steps": None if progress is None else progress.calls,
                 "sent": None if progress is None else progress.sent,
+                **({"ponder": True} if agent.ponder else {}),
             })
         self.record.unmodelled.extend(unmodelled)
         self.record.search_seconds[me] += took
         report = None if deepened is None else deepened.to_json()
+        tally = _find(cost, Tally)
         extra = {
             "plan": {
                 **plan.to_json(),
@@ -1277,6 +1705,18 @@ class HumanGame:
                 "deepenBudget": cells,
                 "exact": exact,
                 "classes": classes,
+                **({"widenTo": later} if later is not None else {}),
+                # The stop point replays the move (`PonderCost`): a count, not seconds.
+                # One per move of a pondering agent, deepened or not, so a replay pairs
+                # them with its moves in order (`ScriptPerson.from_record`).
+                **(
+                    {"ponder": {
+                        "ready": None if pondering is None else pondering.ready_work,
+                        "held": pondering is not None and pondering.held,
+                        "capped": pondering is not None and pondering.capped,
+                    }}
+                    if agent.ponder else {}
+                ),
             }
         }
         self.clock.append({
@@ -1294,7 +1734,16 @@ class HumanGame:
             "nodeCells": len(ours) * len(theirs) * max(classes, 1),
             "predictedMs": round(plan.predicted_ms, 3),
             "deepenBudget": cells,
+            **({"widenTo": later, "widened": grow is not None and grow.done}
+               if later is not None else {}),
+            # The budget's reading when the move stopped, in its units (the wall clock's
+            # milliseconds since the move started, or the count clock's cells): what a
+            # board hands the other side's `PonderCost` (IKA-333).
+            **({"spentUnits": round(tally.last, 3)} if tally is not None else {}),
             **({"deepened": report} if report is not None else {}),
+            **({"memoryStop": True} if isinstance(cost, HaltingCost) and cost.stopped else {}),
+            **({"ponderHeld": pondering.held, "ponderCapped": pondering.capped}
+               if pondering is not None else {}),
         })
         own_side = (mine, strategy.tolist()) if me == 0 else ((ours), model)
         foe_side = ((theirs), model) if me == 0 else (mine, strategy.tolist())
@@ -1645,6 +2094,13 @@ def play(
         "cores": agent.cores,
         "form": agent.form,
         "widthOnly": agent.width_only,
+        # They change the game, so the game line names them -- only when set, so a game
+        # without them keeps the bytes it had before IKA-343.
+        **({"oracle": "sall" if agent.oracle >= ALL_ACTIONS else f"s{agent.oracle}"}
+           if agent.oracle is not None else {}),
+        **({"maxLevels": agent.max_levels} if agent.max_levels is not None else {}),
+        **({"childQ": agent.child_q} if agent.child_q is not None else {}),
+        **({"ponder": {"seconds": agent.ponder_seconds}} if agent.ponder else {}),
         "rule": {
             "widths": list(WIDTHS),
             "widthShare": WIDTH_SHARE,
@@ -1687,19 +2143,30 @@ __all__ = [
     "CLOCKS",
     "MIN_DEEPEN_MS",
     "NODE_TIME",
+    "PLAY_CUDA_MEMORY_GB",
+    "PLAY_MAX_LEVELS",
+    "PLAY_ORACLE",
+    "PLAY_PONDER",
+    "PLAY_PONDER_SECONDS",
+    "PLAY_THREADS",
     "WIDTHS",
     "WIDTH_SHARE",
     "Agent",
+    "HaltingCost",
     "HumanGame",
     "MovePlan",
     "NodeTime",
     "Person",
     "PolicyPerson",
+    "PonderCost",
     "ScriptPerson",
     "TerminalPerson",
+    "Tally",
     "WallCost",
     "agent_pick",
     "board_view",
+    "cap_cuda",
+    "default_threads",
     "sprite_id",
     "species_types",
     "turn_changes",

@@ -415,6 +415,67 @@ fn qfeatures(reg: &Reg, value: &Value) -> Value {
     json!({ "width": crate::qfeatures::WIDTH, "features": out })
 }
 
+/// `qfeatures` with `"binary": true` (IKA-350): the numbers go down the pipe behind the
+/// header as little-endian f32s, side 0's rows and then side 1's, `WIDTH` to a row, and the
+/// header says only how many (`rows`, `bytes`). The caller read the JSON answer's doubles
+/// (its shortest round-trip text of each f64 reads back as that f64) into float32, rounding
+/// to nearest-even; `as f32` is the same rounding of the same double, so the rows are the
+/// same bits at half the bytes. A refusal or an error is the JSON answer's, with no body.
+fn qfeatures_binary<W: Write>(
+    reg: &Reg,
+    value: &Value,
+    stdout: &mut W,
+) -> std::io::Result<()> {
+    let position = crate::held::position(&value["position"]);
+    let mut rows: Vec<Vec<[f64; crate::qfeatures::WIDTH]>> = Vec::with_capacity(2);
+    let mut refusal: Option<Value> = None;
+    if &*position.format != reg.format_id.as_str() {
+        refusal = Some(json!({
+            "error": format!(
+                "position is {} but the regulation is {}", position.format, reg.format_id
+            )
+        }));
+    } else {
+        for side in 0..2usize {
+            let candidates: Vec<Vec<crate::resolve::SlotAction>> = value["candidates"][side]
+                .as_array()
+                .map(|list| list.iter().map(crate::resolve::parse_actions_list).collect())
+                .unwrap_or_default();
+            match crate::qfeatures::side_features(reg, &position, side, &candidates) {
+                Err(reason) => {
+                    refusal = Some(json!({ "refused": reason }));
+                    break;
+                }
+                Ok(side_rows) => rows.push(side_rows),
+            }
+        }
+    }
+    let written = std::time::Instant::now();
+    if let Some(refusal) = refusal {
+        let text = refusal.to_string();
+        crate::wire::wrote(written, text.len());
+        writeln!(stdout, "{text}")?;
+        return stdout.flush();
+    }
+    let count: usize = rows.iter().map(Vec::len).sum();
+    let mut body: Vec<u8> = Vec::with_capacity(count * crate::qfeatures::WIDTH * 4);
+    for row in rows.iter().flatten() {
+        for number in row {
+            body.extend_from_slice(&(*number as f32).to_le_bytes());
+        }
+    }
+    let text = json!({
+        "width": crate::qfeatures::WIDTH,
+        "rows": [rows[0].len(), rows[1].len()],
+        "bytes": body.len(),
+    })
+    .to_string();
+    crate::wire::wrote(written, text.len() + body.len());
+    writeln!(stdout, "{text}")?;
+    stdout.write_all(&body)?;
+    stdout.flush()
+}
+
 /// JSONL over stdio: one request per line, one response per line.
 ///
 /// The lock is held across the loop rather than taken per line, because an encoded node
@@ -829,17 +890,26 @@ fn answer<R: BufRead, W: Write>(
         // IKA-302: a position to hold, and the end of a decision. Neither is answered:
         // they go down the pipe ahead of the request that needs them.
         Ok(value) if value["kind"].as_str() == Some("hold") => {
-            if let Some(id) = value["id"].as_u64() {
-                crate::held::define(id, &value["position"]);
-            }
+            crate::held::define_line(&value);
             return Ok(());
         }
         Ok(value) if value["kind"].as_str() == Some("forget") => {
             crate::held::forget();
             return Ok(());
         }
+        // IKA-350: slot actions numbered once for the life of the process; not answered.
+        Ok(value) if value["kind"].as_str() == Some("acts") => {
+            crate::held::define_actions(&value["acts"]);
+            return Ok(());
+        }
         Ok(value) if value["kind"].as_str() == Some("resolve") => resolve_one(reg, &value),
         Ok(value) if value["kind"].as_str() == Some("score") => score_pool(reg, &value),
+        Ok(value)
+            if value["kind"].as_str() == Some("qfeatures")
+                && value.get("binary").and_then(Value::as_bool) == Some(true) =>
+        {
+            return qfeatures_binary(reg, &value, stdout);
+        }
         Ok(value) if value["kind"].as_str() == Some("qfeatures") => qfeatures(reg, &value),
         Ok(value) if value["kind"].as_str() == Some("many") => many(reg, &value),
         // The cell threads' own account (IKA-32): how many, and how much ran on them.
@@ -867,6 +937,32 @@ fn answer<R: BufRead, W: Write>(
                             header["via"] = json!("pipe");
                             writeln!(stdout, "{}", with_timings(&header, parse_us))?;
                             crate::encoded_node::write_body(stdout, &encoded, &leaf_values, &[])?;
+                            stdout.flush()
+                        }
+                    };
+                }
+            }
+        }
+        // The replacement node's matrix with its positions encoded (IKA-350), by the roads
+        // an encoded node's arrays take.
+        Ok(value) if value["kind"].as_str() == Some("replacementsEncoded") => {
+            match crate::resolve::commands::replacements_encoded(reg, encoder, &value) {
+                Err(reason) => json!({ "refused": reason }),
+                Ok((mut header, encoded)) => {
+                    let body_bytes = header["bytes"].as_u64().unwrap_or(0) as usize;
+                    let target = value.get("shm").map(|block| shm::Target {
+                        name: block.get("name").and_then(Value::as_str).map(String::from),
+                        capacity: block.get("bytes").and_then(Value::as_u64).unwrap_or(0) as usize,
+                    });
+                    return match &target {
+                        Some(target) => place_body(
+                            &encoded, &[], &[], body_bytes, target, shared, input, stdout,
+                            &mut header, parse_us,
+                        ),
+                        None => {
+                            header["via"] = json!("pipe");
+                            writeln!(stdout, "{}", with_timings(&header, parse_us))?;
+                            crate::encoded_node::write_body(stdout, &encoded, &[], &[])?;
                             stdout.flush()
                         }
                     };

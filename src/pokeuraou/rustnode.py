@@ -636,6 +636,8 @@ class RustNode:
         #: `forget` is owed ahead of the next request (`_forget`).
         self._known: set[int] = set()
         self._forget_owed = False
+        #: IKA-350: the slot-action numbers this process has been given (`_defined`).
+        self._acts: set[int] = set()
 
     def close(self) -> None:
         if self._process.poll() is None:
@@ -700,6 +702,54 @@ class RustNode:
             for score, parts in zip(response["scores"], response["detail"], strict=True)
         ]
 
+    @timing.timed("rust.qfeatures")
+    def qfeatures(
+        self, pos: Position, pools: tuple[Sequence[SideAction], Sequence[SideAction]], width: int
+    ) -> tuple[Any, Any] | None:
+        """Both pools' candidate features (`qhead.port_features`), or None when the port
+        refuses the position.
+
+        IKA-350: the numbers come back as float32 behind a small header, not as JSON (260 KB
+        a game of it), and the pools go as `score`'s cached action text. The rows are the
+        JSON answer's bits: that was each f64's round-trip text read back and rounded to
+        float32 here, and the port rounds the same f64 the same way (nearest-even).
+        """
+        import numpy as np
+
+        request = {
+            "kind": "qfeatures",
+            "position": _position(pos),
+            "candidates": _joined(_candidates(pools[0]), _candidates(pools[1])),
+            "binary": True,
+        }
+        with timing.stage("rust.ask"):
+            payload = _payload(request)
+        if timing.DUPES:
+            _note_repeat(request)
+        timing.count("port.qfeatures.binary")
+        self._process.stdin.write(self._defined((request,)) + payload + b"\n")
+        self._process.stdin.flush()
+        line = self._with_deadline(self._process.stdout.readline, "header")
+        if not line:
+            raise RuntimeError(f"the Rust node process stopped: {self._stderr_text()}")
+        with timing.stage("rust.header"):
+            header = json.loads(line.decode("utf-8"))
+        if "error" in header:
+            raise RuntimeError(f"the Rust node refused the request: {header['error']}")
+        if header.get("refused"):
+            return None
+        if int(header["width"]) != width:
+            raise ValueError(f"the port answers {header['width']} features, this reads {width}")
+        first, second = (int(n) for n in header["rows"])
+        if (first, second) != (len(pools[0]), len(pools[1])):
+            raise RuntimeError(f"`qfeatures` answered {first}+{second} rows for "
+                               f"{len(pools[0])}+{len(pools[1])} candidates")
+        count = int(header["bytes"])
+        body = self._read_exactly(count)
+        timing.count("port.qfeatures.bytes", count)
+        rows = np.frombuffer(body, dtype="<f4").reshape(first + second, width)
+        return rows[:first], rows[first:]
+
     @timing.timed("rust.resolve")
     def resolve(
         self,
@@ -719,7 +769,7 @@ class RustNode:
         request = {
             "kind": "resolve",
             "position": _position(pos),
-            "actions": [[dump_action(a) for a in side.slots] for side in actions],
+            "actions": _candidates(actions),
             "budget": dump_budget(budget),
             "select": select,
         }
@@ -750,16 +800,26 @@ class RustNode:
         if self._forget_owed:
             lines.append(b'{"kind": "forget"}\n')
             self._forget_owed = False
+        # IKA-350: the slot actions the requests name by number that this process has not
+        # been given yet, in one `acts` line; each once for the life of the process.
+        fresh: list[int] = []
+        acts = self._acts
+        for request in requests:
+            for value in request.values():
+                if value.__class__ is _Held and value.acts:
+                    for number in value.acts:
+                        if number not in acts:
+                            acts.add(number)
+                            fresh.append(number)
+        if fresh:
+            listed = ", ".join(f"[{number}, {_ACTION_BY_NUMBER[number]}]" for number in fresh)
+            lines.append(f'{{"kind": "acts", "acts": [{listed}]}}\n'.encode())
+            timing.count("port.acts.defined", len(fresh))
         known = self._known
         for request in requests:
             stored = request.get("position")
             if stored.__class__ is _Stored and stored.key not in known:
-                known.add(stored.key)
-                body = stored.json_text()
-                lines.append(
-                    f'{{"kind": "hold", "id": {stored.key}, "position": {body}}}\n'.encode()
-                )
-                timing.count("position.defined")
+                _define(stored, known, lines)
         return b"".join(lines)
 
     def _exchange(self, request: dict[str, Any]) -> dict[str, Any]:
@@ -956,7 +1016,7 @@ class RustNode:
                 {
                     "kind": "turn",
                     "position": _position(pos),
-                    "actions": [[dump_action(a) for a in side.slots] for side in actions],
+                    "actions": _candidates(actions),
                     "budget": dump_budget(budget),
                     "full": full,
                     "select": None,
@@ -1011,8 +1071,8 @@ class RustNode:
         for pos, ours, theirs in asks:
             request = {
                 "position": _position(pos),
-                "ours": [[dump_action(a) for a in side.slots] for side in ours],
-                "theirs": [[dump_action(a) for a in side.slots] for side in theirs],
+                "ours": _candidates(ours),
+                "theirs": _candidates(theirs),
                 "budget": dump_budget(budget),
                 "objectives": [],
                 "encode": True,
@@ -1227,8 +1287,8 @@ class RustNode:
         started = timing.clock()
         request = {
             "position": _position(pos),
-            "ours": [[dump_action(a) for a in side.slots] for side in ours],
-            "theirs": [[dump_action(a) for a in side.slots] for side in theirs],
+            "ours": _candidates(ours),
+            "theirs": _candidates(theirs),
             "budget": dump_budget(budget),
             # Named objectives asked for alongside: scored per leaf over there, since the
             # leaves are there already.
@@ -1308,8 +1368,8 @@ class RustNode:
         started = timing.clock()
         request = {
             "position": _position(pos),
-            "ours": [[dump_action(a) for a in side.slots] for side in ours],
-            "theirs": [[dump_action(a) for a in side.slots] for side in theirs],
+            "ours": _candidates(ours),
+            "theirs": _candidates(theirs),
             "budget": dump_budget(budget),
             "objectives": objectives,
         }
@@ -1364,7 +1424,7 @@ class RustNode:
             {
                 "kind": "turn",
                 "position": _position(pos),
-                "actions": [[dump_action(a) for a in side.slots] for side in actions],
+                "actions": _candidates(actions),
                 "budget": dump_budget(budget),
                 "full": full,
                 "select": select,
@@ -1391,7 +1451,7 @@ class RustNode:
             {
                 "kind": "turn",
                 "pause": pause.raw,
-                "choices": [[dump_action(a) for a in side.slots] for side in choices],
+                "choices": _candidates(choices),
                 "full": full,
                 "select": select,
                 "in": _world(world),
@@ -1536,11 +1596,62 @@ class RustNode:
             {
                 "kind": "replacements",
                 "position": _position(pos),
-                "choices": [[dump_action(a) for a in side.slots] for side in choices],
+                "choices": _candidates(choices),
                 "events": events,
             },
             rng,
         )
+
+    @timing.timed("rust.replacements")
+    def replacements_encoded(
+        self,
+        pos: Position,
+        pairs: Sequence[tuple[SideAction, SideAction]],
+        *,
+        rules: Any = None,  # noqa: ANN401 - EncodingRules
+    ) -> EncodedNode | None:
+        """`resolve_replacements(pos, [a, b])` of each pair without a generator, each phase's
+        position encoded over there, one row per pair in order (IKA-350). None when the port
+        refuses a pair.
+
+        The replacement node's matrix read every phase's position back as JSON (about 7 KB
+        each, 36 a game) only to encode it for the leaf; the rows are the encoder's arrays of
+        those same positions, by the road a node's leaves take."""
+        request: dict[str, Any] = {
+            "kind": "replacementsEncoded",
+            "position": _position(pos),
+            "pairs": _joined(*(_candidates((a, b)) for a, b in pairs)),
+        }
+        wants_old = bool(rules is not None and rules.mega_from_slots)
+        if wants_old:
+            request["encoding"] = rules.to_request()
+        if not self._shm_off:
+            request["shm"] = (
+                {"name": self._shm.name, "bytes": self._shm.size}
+                if self._shm is not None
+                else {"name": None, "bytes": 0}
+            )
+        header = self._exchange(request)
+        if header.get("refused"):
+            self.refusal = str(header["refused"])
+            return None
+        count = int(header["bytes"])
+        road, body = self._body(header, count)
+        node = EncodedNode.unpack(header, body)
+        if wants_old and node.mega_from_slots is not True:
+            raise RuntimeError(
+                "the Rust node was asked for the revision-1 can_mega rule and did not say "
+                f"it applied it (echo {node.mega_from_slots!r}); the binary predates IKA-141"
+            )
+        if len(node.encoded.species) != len(pairs):
+            raise RuntimeError(
+                f"`replacementsEncoded` answered {len(node.encoded.species)} rows for "
+                f"{len(pairs)} pairs"
+            )
+        timing.count("body.bytes", count)
+        timing.count("body.shm" if road == "shm" else "body.pipe")
+        timing.count("port.replacements.encoded", len(pairs))
+        return node
 
     @timing.timed("rust.leads")
     def apply_lead_abilities(
@@ -1605,8 +1716,13 @@ def _note_repeat(request: dict[str, Any]) -> None:
         # And a node's cells one by one: a cell of the leaf ranking's fill that the matrix
         # fills again, on the same position with the same two actions, is the same turn.
         if "ours" in request and "theirs" in request:
-            ours = [json.dumps(a, sort_keys=True) for a in request["ours"]]
-            theirs = [json.dumps(a, sort_keys=True) for a in request["theirs"]]
+            # Numbers since IKA-350 (`_candidates`), one per slot action's text.
+            listed = [
+                json.loads(value.text) if value.__class__ is _Held else value
+                for value in (request["ours"], request["theirs"])
+            ]
+            ours = [json.dumps(a, sort_keys=True) for a in listed[0]]
+            theirs = [json.dumps(a, sort_keys=True) for a in listed[1]]
             cells = request.get("cells") or [
                 (i, j) for i in range(len(ours)) for j in range(len(theirs))
             ]
@@ -1646,10 +1762,13 @@ _MARK = "\x00held\x00"
 class _Held:
     """Text already written, spliced into the request as it is sent (`_candidates`)."""
 
-    __slots__ = ("text",)
+    __slots__ = ("acts", "text")
 
-    def __init__(self, text: str) -> None:
+    def __init__(self, text: str, acts: Sequence[int] = ()) -> None:
         self.text = text
+        #: The action numbers the text names (IKA-350): each is defined to a port once, by
+        #: an `acts` line ahead of the first request that names it (`RustNode._defined`).
+        self.acts = acts
 
 
 #: IKA-302: the numbers this side gives the positions it holds in the port. Even, and
@@ -1666,13 +1785,17 @@ class _Stored:
     is then -- once a decision, as the text memo it replaces was.
     """
 
-    __slots__ = ("_json", "key", "pos", "text")
+    __slots__ = ("_json", "base", "delta", "key", "pos", "text")
 
     def __init__(self, key: int, pos: Position) -> None:
         self.key = key
         self.pos = pos
         self.text = f'{{"held": {key}}}'
         self._json: str | None = None
+        #: IKA-350: a completion's base (its entry) and (side, party indices) that differ
+        #: from it: defined to the port as the base with those Pokemon, not written whole.
+        self.base: _Stored | None = None
+        self.delta: tuple[int, tuple[int, ...]] | None = None
 
     def json_text(self) -> str:
         """The position's JSON, written once."""
@@ -1681,6 +1804,31 @@ class _Stored:
             with timing.stage("rust.ask"):
                 self._json = json.dumps(data, ensure_ascii=False)
         return self._json
+
+
+def _define(stored: _Stored, known: set[int], lines: list[bytes]) -> None:
+    """The `hold` line for `stored` (and first its base's, if the port lacks it)."""
+    known.add(stored.key)
+    if stored.base is None or stored.delta is None:
+        body = stored.json_text()
+        lines.append(f'{{"kind": "hold", "id": {stored.key}, "position": {body}}}\n'.encode())
+        timing.count("position.defined")
+        return
+    if stored.base.key not in known:
+        _define(stored.base, known, lines)
+    side_index, indices = stored.delta
+    side = stored.pos.sides[side_index]
+    with timing.stage("rust.ask"):
+        mons = ", ".join(
+            f"[{index}, {json.dumps(side.pokemon[index].to_json(), ensure_ascii=False)}]"
+            for index in indices
+        )
+        capable = json.dumps(list(side.mega_capable_slots))
+    lines.append(
+        f'{{"kind": "hold", "id": {stored.key}, "base": {stored.base.key}, '
+        f'"side": {side_index}, "pokemon": [{mons}], "megaCapableSlots": {capable}}}\n'.encode()
+    )
+    timing.count("position.defined.delta")
 
 
 def hold_positions(on: bool = True) -> None:
@@ -1695,6 +1843,7 @@ def _forget() -> None:
     _HELD.clear()
     _BY_TEXT.clear()
     _ANSWERS.clear()
+    _DELTAS.clear()
     # And the port's: a `forget` line goes ahead of the next request to each node that
     # holds anything (IKA-302).
     for node in _NODES.values():
@@ -1711,6 +1860,19 @@ def _position(pos: Position) -> dict[str, Any] | _Stored:
     if found is not None and found[0] is pos:
         timing.count("position.held")
         return found[1]
+    made = _DELTAS.get(id(pos))
+    if made is not None and made[0] is pos:
+        # A completion made this decision (IKA-350): its base is held (now, if it was
+        # not), and it is defined as the base with the Pokemon it changed. No text of
+        # its own, so it shares no number with an equal object: a `score` asked of both
+        # is asked twice, and answered the same.
+        base = _position(made[1])
+        assert base.__class__ is _Stored
+        stored = _Stored(next(_KEYS), pos)
+        stored.base = base
+        stored.delta = (made[2], made[3])
+        timing.count("position.delta")
+        return _store(pos, stored)
     # Written now, as the text memo wrote it, and an object with the same text as one
     # already held takes that one's number: the request is then the same bytes, and a
     # `score` asked of either is answered from the first (`_ANSWERS`), as it was.
@@ -1722,6 +1884,25 @@ def _position(pos: Position) -> dict[str, Any] | _Stored:
     else:
         _BY_TEXT[text] = stored
     return _store(pos, stored)
+
+
+#: IKA-350: completions made this decision (`note_completion`), by id: (the object, its
+#: base, the side, the party indices whose Pokemon it replaced).
+_DELTAS: dict[int, tuple[Position, Position, int, tuple[int, ...]]] = {}
+
+
+def note_completion(base: Position, made: Position, side: int, indices: Sequence[int]) -> None:
+    """`made` is `base` with the Pokemon at `indices` of side `side` rebuilt and that side's
+    `mega_capable_slots` recomputed, everything else equal (`hidden.substitute`).
+
+    With `hold_positions`, the port is then given `made` as `base` and those Pokemon
+    (IKA-350): a completion was a whole position of JSON, written here and read there,
+    for the one or two bench Pokemon it changes -- 34 of a game's 60 `hold` lines in M-C
+    generation. For this decision only: the promise that nothing held is changed in
+    place (`hold_positions`) is a decision's, so a completion kept past one is written
+    whole."""
+    if _HOLD[0]:
+        _DELTAS[id(made)] = (made, base, int(side), tuple(int(i) for i in indices))
 
 
 def _store(pos: Position, stored: _Stored | int) -> _Stored:
@@ -1760,16 +1941,53 @@ def _payload(request: dict[str, Any]) -> bytes:
 _ACTION_TEXT: dict[object, str] = {}
 _ACTION_TEXT_MAX = 1 << 16
 
+#: IKA-350: each slot action's text -> its number, the same in every port this process
+#: starts and for its whole life (a number is never given to another text); and the texts
+#: by number, for the `acts` line that defines one. Bounded by the distinct actions of the
+#: teams a process plays, so never cleared: clearing would give a text a second number.
+_ACTION_NUMBER: dict[str, int] = {}
+_ACTION_BY_NUMBER: list[str] = [""]
+#: An action object's value -> its number: the fast path in front of the text (a bound).
+_ACTION_ID: dict[object, int] = {}
+
+
+#: Held while a number is given: a thread's own port (`own_node`) numbers from the same
+#: table, and two threads must not give one number to two texts.
+_ACTION_LOCK = threading.Lock()
+
+
+def _action_number(action: object) -> int:
+    """`action`'s number (IKA-350), from its value, or its text written once."""
+    number = _ACTION_ID.get(action)
+    if number is None:
+        with _ACTION_LOCK:
+            text = _ACTION_TEXT.get(action)
+            if text is None:
+                if len(_ACTION_TEXT) >= _ACTION_TEXT_MAX:
+                    _ACTION_TEXT.clear()
+                text = _ACTION_TEXT[action] = json.dumps(dump_action(action), ensure_ascii=False)
+            number = _ACTION_NUMBER.get(text)
+            if number is None:
+                number = _ACTION_NUMBER[text] = len(_ACTION_BY_NUMBER)
+                _ACTION_BY_NUMBER.append(text)
+            if len(_ACTION_ID) >= _ACTION_TEXT_MAX:
+                _ACTION_ID.clear()
+            _ACTION_ID[action] = number
+    return number
+
 
 def _candidates(candidates: Sequence[SideAction]) -> _Held:
-    """A `score` request's candidate list as the text `json.dumps` wrote for its dicts
-    (`[[dump_action(a) for a in c.slots] for c in candidates]`), each slot action's text
-    written once: the list was most of the request line, 14% of `narrow` (IKA-319).
+    """A list of side actions (a `score` pool, a fill's two lists, a turn's choices) as the
+    text of their slot actions' numbers, `[[3, 7], [3, 9]]` (IKA-350). It was the text
+    `json.dumps` wrote for their dicts (`[[dump_action(a) for a in c.slots] for c in
+    candidates]`) -- once per action since IKA-319, but still every action's JSON in every
+    request, over half a megabyte a game of M-C generation. Now each action's JSON crosses
+    once for the life of the port (`RustNode._defined`), and the port reads a list of
+    numbers into the same actions.
 
     A slot action object is shared by the combinations it is in, so it is looked up by its
     id first -- hashing a dataclass's fields a hundred times a pool cost more than the
     text it found."""
-    texts = _ACTION_TEXT
     local: dict[int, str] = {}
     rows = []
     for candidate in candidates:
@@ -1777,15 +1995,18 @@ def _candidates(candidates: Sequence[SideAction]) -> _Held:
         for action in candidate.slots:
             text = local.get(id(action))
             if text is None:
-                text = texts.get(action)
-                if text is None:
-                    if len(texts) >= _ACTION_TEXT_MAX:
-                        texts.clear()
-                    text = texts[action] = json.dumps(dump_action(action), ensure_ascii=False)
-                local[id(action)] = text
+                text = local[id(action)] = str(_action_number(action))
             row.append(text)
         rows.append("[" + ", ".join(row) + "]")
-    return _Held("[" + ", ".join(rows) + "]")
+    return _Held("[" + ", ".join(rows) + "]", [int(text) for text in set(local.values())])
+
+
+def _joined(*lists: _Held) -> _Held:
+    """Several `_candidates` texts as one list of them, `[<a>, <b>]`."""
+    return _Held(
+        "[" + ", ".join(held.text for held in lists) + "]",
+        sorted({number for held in lists for number in held.acts}),
+    )
 
 
 def _answered(request: dict[str, Any], payload: bytes) -> dict[str, Any] | None:
@@ -1891,6 +2112,9 @@ class PortBranch:
     #: Python's `Branch.events` and `acts`, when the turn was asked for them (IKA-215).
     events: list[str] = field(default_factory=list)
     acts: list[tuple[int, str]] = field(default_factory=list)
+    #: The draws this branch took, when events were asked for (IKA-345, `EventLog::chance`):
+    #: ``<kind> <user> <move> <target> [<arg>...]``; a merged branch keeps what all share.
+    chance: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -1910,6 +2134,13 @@ class PortTurn:
     events: list[str] = field(default_factory=list)
     acts: list[tuple[int, str]] = field(default_factory=list)
 
+    def pick(self, index: int) -> Position | PortPause:
+        """Outcome `index` of the branches followed by the pauses, of a full turn."""
+        assert self.outcomes is not None and self.pauses is not None
+        if index < len(self.outcomes):
+            return self.outcomes[index].position
+        return self.pauses[index - len(self.outcomes)]
+
     @staticmethod
     def read(response: dict[str, Any]) -> PortTurn:
         branches = response["branches"]
@@ -1926,6 +2157,7 @@ class PortTurn:
                     Position.from_json(b["position"]),
                     list(b.get("events") or []),
                     _acts(b),
+                    list(b.get("chance") or []),
                 )
                 for b in branches
             ]
@@ -1952,6 +2184,57 @@ class PortTurn:
             events=list(response.get("events") or []),
             acts=_acts(response),
         )
+
+
+class ResumedTurn:
+    """A resumed turn's weights, with its outcomes asked for only when read (IKA-350).
+
+    `PortTurn`'s face: `branches`, `suspended`, `exact` and `unmodelled` are the weights
+    answer's. A game draws one outcome and takes it with `pick`, one `select` request; a
+    caller that reads `outcomes` or `pauses` gets the full answer, asked for once. A full
+    answer of a resumed turn at the exact budget was every branch's position as JSON --
+    250 KB a game of M-C generation, for the one position the draw kept.
+
+    `fetch(select)` is the port's answer to the same resume with `full` off and `select`
+    set (None: the full answer).
+    """
+
+    def __init__(self, weights: PortTurn, fetch: Any) -> None:  # noqa: ANN401
+        self.branches = weights.branches
+        self.suspended = weights.suspended
+        self.exact = weights.exact
+        self.unmodelled = weights.unmodelled
+        # No `select` was asked of the weights, as none is of a full resume.
+        self.position: Position | None = None
+        self.pause: PortPause | None = None
+        self._fetch = fetch
+        self._full: PortTurn | None = None
+
+    def _whole(self) -> PortTurn:
+        if self._full is None:
+            self._full = self._fetch(None)
+        return self._full
+
+    @property
+    def outcomes(self) -> list[PortBranch] | None:
+        return self._whole().outcomes
+
+    @property
+    def pauses(self) -> list[PortPause] | None:
+        return self._whole().pauses
+
+    def pick(self, index: int) -> Position | PortPause:
+        if self._full is not None:
+            return self._full.pick(index)
+        timing.count("port.resume.picked")
+        answer = self._fetch(index)
+        if index < len(self.branches):
+            if answer.position is None:
+                raise RuntimeError(f"the port gave no branch at index {index} of a resumed turn")
+            return answer.position
+        if answer.pause is None:
+            raise RuntimeError(f"the port gave no pause at index {index} of a resumed turn")
+        return answer.pause
 
 
 @dataclass

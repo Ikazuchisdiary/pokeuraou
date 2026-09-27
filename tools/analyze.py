@@ -17,7 +17,7 @@ that reached the depth guard, as they form.
 How it reads (`pokeuraou.analysis`): IKA-307's allocation for a long read -- the menus at
 ``--width`` (64: every legal action on most turns), then the best-first deepening of the
 side's Bayesian root (``h``) with the root's swap oracle (``--oracle``, default sall), the
-depth guard at ``--max-levels`` (default `deepen.MAX_LEVELS`; raise it for long reads). The
+depth guard at ``--max-levels`` (default `humanplay.PLAY_MAX_LEVELS`, 16, IKA-342). The
 cells are expanded ahead on ``--threads`` cores (IKA-32 stage 2; 4 to 8 is the useful range).
 The leaf and the menus' Q are ``play_human``'s.
 
@@ -70,12 +70,16 @@ def main(argv: list[str] | None = None) -> None:
                     help="both menus' width (IKA-307: width first; 64 is every legal action on most turns)")
     ap.add_argument("--oracle", default="sall",
                     help="the root's swap oracle while deepening: s<W>, sall (default) or none")
-    ap.add_argument("--max-levels", type=int, default=MAX_LEVELS,
-                    help=f"the deepening's depth guard (default {MAX_LEVELS}, deepen.MAX_LEVELS; "
+    ap.add_argument("--max-levels", type=int, default=humanplay.PLAY_MAX_LEVELS or MAX_LEVELS,
+                    help=f"the deepening's depth guard (default {humanplay.PLAY_MAX_LEVELS or MAX_LEVELS}: "
+                    "humanplay.PLAY_MAX_LEVELS, the person's game's, else deepen.MAX_LEVELS; "
                     "IKA-307: long reads meet it)")
+    ap.add_argument("--depth-discount", type=float, default=None,
+                    help="the deepening's depth discount a ply (a label's d<P> as P / 100, "
+                    "IKA-342); default none")
     ap.add_argument("--open", action="store_true",
                     help="read with the opponent's bench open (the recorded position whole)")
-    ap.add_argument("--threads", type=int, default=4,
+    ap.add_argument("--threads", type=int, default=humanplay.default_threads(),
                     help="cores the read spreads over (IKA-32 stage 2: worker processes expand "
                     "cells ahead, a big game's two LPs at once); they change no answer")
     ap.add_argument("--value", type=Path, nargs="+", default=None,
@@ -88,8 +92,10 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--q-model", type=Path, default=None, help=f"the Q. Default: {DEFAULT_Q}")
     ap.add_argument("--bench-drop", default=DEFAULT_BENCH_DROP)
     ap.add_argument("--device", default=None)
-    ap.add_argument("--cuda-memory-gb", type=float, default=3.5,
-                    help="cap this process's CUDA allocator (IKA-334); 0: no cap")
+    ap.add_argument("--cuda-memory-gb", type=float, default=humanplay.PLAY_CUDA_MEMORY_GB,
+                    help="cap this process's CUDA allocator and each worker's (IKA-334); 0: no cap")
+    ap.add_argument("--open-browser", action="store_true",
+                    help="open the page in the browser once it is served")
     ap.add_argument("--max-steps", type=int, default=None,
                     help="stop each read after this many steps of the deepening (reproducible)")
     ap.add_argument("--max-seconds", type=float, default=None, help="stop each read after this long")
@@ -105,6 +111,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--view-host", default="127.0.0.1")
     ap.add_argument("--view-port", type=int, default=8337)
     ap.add_argument("--sprite-url", default=None)
+    ap.add_argument("--game-url", default=None,
+                    help="the game page's address, for the page's link back (default: the "
+                    "launcher's port 8332 on the same host)")
     ap.add_argument("--interval-ms", type=float, default=100.0)
     ap.add_argument("--live-out", type=Path, default=None, help="keep the page's frames in this file")
     ap.add_argument("--locale", default="ja")
@@ -136,11 +145,7 @@ def main(argv: list[str] | None = None) -> None:
         else:
             say(f"note: no {DEFAULT_VALUE[0]} here, so the read uses hp-share (--value names a leaf)")
     if values and not args.hp_share:
-        import torch
-
-        if args.cuda_memory_gb > 0 and torch.cuda.is_available() and (args.device or "cuda") == "cuda":
-            total = torch.cuda.mem_get_info()[1]
-            torch.cuda.set_per_process_memory_fraction(min(1.0, args.cuda_memory_gb * 1e9 / total))
+        humanplay.cap_cuda(args.cuda_memory_gb, args.device)
         evaluate, encoder, device = humanplay.load_leaf(
             reg, values, device, graphs=args.leaf_graphs == "on"
         )
@@ -162,12 +167,12 @@ def main(argv: list[str] | None = None) -> None:
     humanplay.use_threads(
         args.threads, reg,
         ([str(v) for v in values] if values and not args.hp_share else None,
-         str(device or "cpu"), args.leaf_graphs == "on"),
+         str(device or "cpu"), args.leaf_graphs == "on", args.cuda_memory_gb),
     )
 
     settings = analysis.Settings(
         width=args.width, oracle=_oracle_width(args.oracle), levels=args.max_levels,
-        rank_fill=fill, bench_drop=args.bench_drop, open_information=args.open,
+        discount=args.depth_discount, rank_fill=fill, bench_drop=args.bench_drop, open_information=args.open,
         interval_ms=args.interval_ms,
     )
     analyzer = analysis.Analyzer(reg, evaluate, name, loc=loc, settings=settings)
@@ -176,7 +181,9 @@ def main(argv: list[str] | None = None) -> None:
         sources.append(analysis.Source("進行中の局", args.current, current=True))
     limits = analysis.Limits(rss_gb=args.max_rss_gb, free_gb=args.min_free_gb, gpu_gb=args.max_gpu_gb)
     say(f"analysis: leaf {name} / menus {fill} / width {settings.width} / oracle {settings.oracle_label()}"
-        f" / guard {settings.levels} / {args.threads} thread(s)"
+        f" / guard {settings.levels}"
+        + (f" / discount {settings.discount:g}" if settings.discount is not None else "")
+        + f" / {args.threads} thread(s)"
         + (f" / {args.max_steps} steps" if args.max_steps is not None else "")
         + (f" / {args.max_seconds:g} s" if args.max_seconds is not None else ""))
 
@@ -185,7 +192,7 @@ def main(argv: list[str] | None = None) -> None:
     server = liveview.LiveServer(
         args.view_host, 0 if args.no_view else args.view_port, sink=sink,
         sprite_url=args.sprite_url, on_command=lambda message: service.command(message),
-        keep_steps=600,
+        keep_steps=600, links={"game-url": args.game_url} if args.game_url else None,
     ).start()
     pools = {pool.id: pool}
     service = analysis.Service(
@@ -198,6 +205,10 @@ def main(argv: list[str] | None = None) -> None:
                  "side": args.side}
     if not args.no_view:
         print(f"画面: {server.url}", file=sys.stderr)
+        if args.open_browser:
+            import webbrowser
+
+            webbrowser.open(server.url)
     try:
         service.serve(first, once=args.no_view)
     except KeyboardInterrupt:

@@ -63,7 +63,7 @@ from .provenance import (
 )
 from .qrank import is_q
 from .regulation import STAT_IDS, Regulation, repo_root
-from .rustnode import PortPause, PortTurn
+from .rustnode import PortPause, PortTurn, ResumedTurn
 from .search import (
     DEFAULT_RANK_FILL,
     belief_solve,
@@ -666,6 +666,7 @@ def _belief_deepen(
         "q_probe": how["q_probe"],
         "levels": how["levels"],
         "child_q": how["child_q"],
+        "discount": how["discount"],
         "outside": outside,
     }
 
@@ -1100,6 +1101,8 @@ def play_game(
             "q_probe": spec.q_probe,
             # The depth guard (g<L>) and the children's menus by a Q (c<k>), IKA-307.
             "levels": spec.levels, "child_q": spec.child_q,
+            # The depth discount (d<P>), IKA-342.
+            "discount": spec.discount,
         }
         for spec in specs
     ]
@@ -1715,7 +1718,7 @@ class _HiddenBench:
 def _advance(
     reg: Regulation,
     rng: np.random.Generator,
-    result: PortTurn | None,
+    result: PortTurn | ResumedTurn | None,
     record: GameRecord,
     leaves: tuple[LeafEvaluator | None, LeafEvaluator | None],
     objective: Objective,
@@ -1727,7 +1730,8 @@ def _advance(
     Returns ``None`` when the turn produced nothing to continue from, which the caller
     treats as the end of the game.
 
-    `result` is a full port turn (`PortTurn.outcomes` and `pauses`). ``first_pause`` is
+    `result` is a full port turn (`PortTurn.outcomes` and `pauses`), or a resumed turn's
+    weights whose drawn outcome is asked for alone (`ResumedTurn`, IKA-350). ``first_pause`` is
     for a caller that has already drawn a pause -- `_advance_turn` samples the weights
     itself, so the generator is used exactly once per turn whichever way the turn goes --
     and `result` is then None.
@@ -1736,16 +1740,18 @@ def _advance(
         if attempt == 0 and first_pause is not None:
             pause = first_pause
         else:
-            assert result is not None and result.outcomes is not None
-            assert result.pauses is not None
+            assert result is not None
             weights = np.array(result.branches + result.suspended, dtype=np.float64)
             if not weights.size or float(weights.sum()) <= 0:
                 return None
             index = _sample_index(rng, weights)
             luck.saw_resumed(result, index)
+            # The drawn outcome alone (IKA-350): a resumed turn's weights came first, and
+            # only this branch or pause is asked for, not every branch's position.
+            picked = result.pick(index)
             if index < len(result.branches):
-                return result.outcomes[index].position
-            pause = result.pauses[index - len(result.branches)]
+                return picked
+            pause = picked
         resumed = _do_self_switch_node(
             reg, pause, record, leaves, objective, hidden=hidden
         )
@@ -1765,7 +1771,7 @@ def _do_self_switch_node(
     *,
     hidden: _HiddenBench | None = None,
     definition: bool = False,
-) -> PortTurn | None:
+) -> PortTurn | ResumedTurn | None:
     """Chooses the replacement a self-switching move demanded, and finishes the turn.
 
     Unlike the post-turn replacement phase this is not simultaneous: one side is asked and
@@ -1919,7 +1925,7 @@ def _self_switch_encoded(
     *,
     hidden: _HiddenBench | None,
     definition: bool,
-) -> PortTurn | None | object:
+) -> PortTurn | ResumedTurn | None | object:
     """`_do_self_switch_node` with the leaves encoded over there (IKA-209).
 
     The same plans in the same order as the positions road: per world, per option, each
@@ -2062,7 +2068,8 @@ def _self_switch_encoded(
         )
     )
     choice = probe.options[best]
-    return port.resume(reg, pause, [choice, passes] if chooser == 0 else [passes, choice])
+    # The weights, and the drawn outcome when `_advance` picks it (IKA-350).
+    return port.resumed(reg, pause, [choice, passes] if chooser == 0 else [passes, choice])
 
 
 def _rows(encoded: Any, start: int, count: int) -> Any:  # noqa: ANN401
@@ -2306,7 +2313,23 @@ def _do_replacement_node(
 
         The replacement node used `hp-share` regardless of what the move nodes used, which
         would leave a third of a game's decisions scored by the thing being replaced.
+
+        A learned leaf with an encoded form takes the phases' positions as the encoder's
+        rows from the port (IKA-350), the same rows in the same order, scored in the one
+        call `evaluate(flat)` made -- so the leaf sees the batch it saw.
         """
+        plan = None if evaluate is None else port.encoded_leaf_plan([evaluate])
+        if plan is not None and plan[0][1] is not None:
+            from .encode import rules_of
+
+            scorer = plan[0][1]
+            filled = port.replacements_encoded(
+                reg, at, [(a, b) for a in options[0] for b in options[1]], rules=rules_of(scorer)
+            )
+            port.note_port_rule([scorer], filled)
+            return np.asarray(scorer(filled.encoded), dtype=np.float64).reshape(
+                len(options[0]), len(options[1])
+            )
         resolved = [
             [port.resolve_replacements(reg, at, [a, b]).position for b in options[1]]
             for a in options[0]
