@@ -81,7 +81,9 @@ _CHANGE = struct.Struct("<IIBBBI")
 #: 4 empty slot).
 _FIELD = struct.Struct("<IIBB")
 
-KINDS = ("start", "refine", "refused", "widen", "done")
+#: A step's kind, by index on the wire; ``grow`` (the root widened mid-read, IKA-354) last
+#: so the older indices stay.
+KINDS = ("start", "refine", "refused", "widen", "done", "grow")
 READS = ("leaf", "deep", "refused")
 
 #: The step frame's fixed head, after the type byte (see `Wire.step`).
