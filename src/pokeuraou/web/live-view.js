@@ -164,7 +164,7 @@ function onEvent(e) {
       S.sheets = e; S.names = e.names; S.personSide = e.personSide; S.agentSide = e.agentSide;
       e.teams.forEach((team) => team.forEach(learn));
       renderSheets();
-      if (!e.analysis) log(null, `対局開始。AI は <b>${esc(e.agent)}</b>、1 手 ${e.seconds} 秒（${e.clock === "wall" ? "壁時計" : "数えの時計"}・${e.cores} コア）`);
+      if (!e.analysis) log(null, `対局開始。AI は <b>${esc(e.agent)}</b>、1 手 ${e.seconds} 秒（${e.clock === "wall" ? "実時間" : "ノード時間"}・${e.cores} コア）`);
       break;
     case "catalogue":
       enterAnalysis(); S.catalogue = e; renderPicker(true); openFromUrl(); renderTimeline();
