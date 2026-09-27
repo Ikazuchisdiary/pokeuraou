@@ -56,6 +56,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from pokeuraou import openmp  # noqa: E402
+
+openmp.quiet_wait()  # before anything loads torch (IKA-360)
+
 from pokeuraou import analysis, humanplay, liveview, qrank  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.deepen import MAX_LEVELS  # noqa: E402

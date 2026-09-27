@@ -321,6 +321,30 @@ def test_steady_reads_between_the_shares(tool: Any) -> None:
     assert tool.steady([]) is None
 
 
+def test_steady_fits_the_progress_between_slow_polls(tool: Any) -> None:
+    """IKA-339: games read every quarter second, CPU polls 3 s apart and off the progress
+    readings' times. 10 s of start-up, then 10 games a second at 2 CPU s a game."""
+
+    def games(t: float) -> int:
+        return 0 if t < 10 else int(10 * (t - 10))
+
+    def cpu(t: float) -> float:
+        return t if t < 10 else 10.0 + 20.0 * (t - 10)
+
+    progress = [(0.25 * i, games(0.25 * i)) for i in range(0, 81)]
+    trace = [(1.3 + 2 * i, 0, {"selfplay.py": cpu(1.3 + 2 * i)}) for i in range(10)]
+    found = tool.steady(trace, progress=progress, workers=2)
+    assert found["games_per_minute"] == pytest.approx(600.0, rel=0.02)
+    assert found["cpu_points"] == 4
+    assert found["cpu_per_game"]["selfplay.py"] == pytest.approx(2.0, rel=0.05)
+    assert found["short"] is None
+    # The games column of the polls is not read (it is 0 throughout here): the old
+    # reading, which takes it, finds nothing.
+    assert tool.steady(trace) is None
+    # With 24 workers the same 80 games are under four a worker: not a steady state.
+    assert tool.steady(trace, progress=progress, workers=24)["short"]
+
+
 def test_repeats_sum_over_workers(tool: Any) -> None:
     worker = {"argv": ["python", "tools/selfplay.py"],
               "counts": {"dup.port.score.calls": 10, "dup.port.score.repeat": 4,

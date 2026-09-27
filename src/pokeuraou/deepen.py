@@ -3127,6 +3127,13 @@ def workers(reg: Regulation) -> int:
     return 0 if found is None else len(found[0])
 
 
+def workers_alive(reg: Regulation) -> int:
+    """How many of `reg`'s worker processes are still running (one that died is a
+    failure a match must count, IKA-333)."""
+    found = _WORKERS.get(reg.meta.format_id)
+    return 0 if found is None else sum(1 for process, _conn in found[0] if process.is_alive())
+
+
 atexit.register(stop_workers)
 
 

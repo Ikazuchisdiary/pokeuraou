@@ -39,8 +39,10 @@ def load(
     dupes: bool = False,
     sample_hz: float = 0.0,
     regions: bool = False,
+    sample_cpu: bool = False,
 ) -> Any:
     """A private copy of the module, with the environment it reads at import time."""
+    monkeypatch.setenv("POKEURAOU_SAMPLE_CPU", "1" if sample_cpu else "")
     if directory is None:
         monkeypatch.delenv("POKEURAOU_TIMING", raising=False)
     else:
@@ -449,6 +451,52 @@ def test_the_sampler_finds_the_function_that_is_running(
     here = samples["self"].get("test_timing.py:_spin_here", 0)
     assert here > 0.5 * samples["ticks"]
     assert samples["inclusive"]["test_timing.py:_spin_here"] >= here
+
+
+def _hash_here(seconds: float) -> None:
+    """Busy outside the GIL, so a second busy thread does not take turns with it."""
+    import hashlib
+
+    block = bytes(1 << 20)
+    end = time.perf_counter() + seconds
+    while time.perf_counter() < end:
+        hashlib.sha256(block).digest()
+
+
+def test_the_cpu_sampler_charges_the_thread_that_burns(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """IKA-339: every thread's CPU seconds, by thread. A thread hashing is charged most of
+    its 0.6 s; a thread asleep the whole time next to nothing (the control: a wall-clock
+    sampler would give it as many ticks as the busy one)."""
+    timing = load(monkeypatch, tmp_path, sample_hz=500, sample_cpu=True)
+    try:
+        assert timing.SAMPLE_CPU
+        # Before this, every tick is charged to "(startup)".
+        timing.ready()
+        busy = threading.Thread(target=_hash_here, args=(0.6,), name="busy-7")
+        idle = threading.Thread(target=time.sleep, args=(0.6,), name="idle-7")
+        busy.start()
+        idle.start()
+        busy.join()
+        idle.join()
+    finally:
+        timing._SAMPLER_STOP.set()
+    threads = timing.snapshot()["cpu_samples"]["thread"]
+    assert threads.get("busy-N", 0) > 0.2
+    assert threads.get("idle-N", 0) < 0.05 * threads["busy-N"]
+    assert not any(name.startswith("(startup)") for name in threads)
+    assert timing.snapshot()["samples"]["ticks"] > 20
+
+
+def test_no_cpu_samples_unless_asked(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    timing = load(monkeypatch, tmp_path, sample_hz=500)
+    try:
+        assert not timing.SAMPLE_CPU
+        _spin_here(0.05)
+    finally:
+        timing._SAMPLER_STOP.set()
+    assert timing.snapshot()["cpu_samples"] is None
 
 
 def test_no_sampler_without_the_rate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
