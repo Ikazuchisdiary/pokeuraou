@@ -62,6 +62,34 @@ pub fn define(id: u64, value: &Value) {
     STORE.with(|store| store.borrow_mut().insert(id, position));
 }
 
+/// A `hold` line: `position` whole, or (IKA-350) a completion of a held one -- `base` with
+/// the Pokemon at the listed party indices of `side` replaced and that side's
+/// `megaCapableSlots` set, everything else the base's. That is what the caller's
+/// `hidden.substitute` builds, so the position is the one its whole JSON would have read
+/// into: `from_json` reads each field on its own.
+pub fn define_line(value: &Value) {
+    let Some(id) = value["id"].as_u64() else { return };
+    let Some(base) = value.get("base").and_then(Value::as_u64) else {
+        define(id, &value["position"]);
+        return;
+    };
+    let mut position = STORE.with(|store| match store.borrow().get(&base) {
+        Some(position) => position.clone(),
+        None => panic!("no position is held under {base}; the caller and the port disagree"),
+    });
+    let side_index = value["side"].as_u64().unwrap_or(0) as usize;
+    let side = &mut position.sides[side_index];
+    for pair in value["pokemon"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
+        let index = pair[0].as_u64().expect("a party index") as usize;
+        side.pokemon[index] = std::rc::Rc::new(crate::position::Pokemon::from_json(&pair[1]));
+    }
+    side.mega_capable_slots = value["megaCapableSlots"]
+        .as_array()
+        .map(|a| a.iter().filter_map(Value::as_u64).map(|v| v as usize).collect())
+        .unwrap_or_default();
+    STORE.with(|store| store.borrow_mut().insert(id, position));
+}
+
 /// A position this process wrote, kept under a fresh (odd) number for the caller to name --
 /// or under the number of an equal one it already kept this decision. The caller memoises
 /// answers on its request's bytes, which once held the position's text: two equal branches
@@ -94,6 +122,43 @@ pub fn keep(position: &Position) -> u64 {
 pub fn forget() {
     STORE.with(|store| store.borrow_mut().clear());
     KEPT.with(|kept| kept.borrow_mut().clear());
+}
+
+// -- Slot actions by number (IKA-350).
+//
+// A candidate list crossed as one JSON object per slot action -- `score`, `qfeatures`, every
+// fill's two lists, a turn's and a phase's choices, over half a megabyte a game of M-C
+// generation -- and the same few hundred actions were written and read again every time.
+// The caller now numbers each action text once (`acts`, a line that is not answered) and a
+// list names them: `[[3, 7], [3, 9]]` where `[[{…}, {…}], …]` was. For the life of the
+// process: an action's meaning never changes, so nothing is forgotten, and a number is
+// never given to another text. A cell thread (IKA-32) reads the same table, so it is shared
+// rather than per thread.
+
+static ACTS: std::sync::RwLock<Option<HashMap<u64, crate::resolve::SlotAction>>> =
+    std::sync::RwLock::new(None);
+
+/// `acts`: `[[id, {…action…}], …]`, each number the caller's for that action text.
+pub fn define_actions(listed: &Value) {
+    let Some(pairs) = listed.as_array() else { return };
+    let mut table = ACTS.write().expect("the action table's lock");
+    let table = table.get_or_insert_with(HashMap::new);
+    for pair in pairs {
+        if let (Some(id), Some(action)) = (pair[0].as_u64(), pair.get(1)) {
+            let parsed = crate::resolve::parse_slot_action(action);
+            table.insert(id, parsed);
+        }
+    }
+}
+
+/// The action the caller numbered `id`. A number never defined is the caller's bug and
+/// stops the request loudly, as an unknown held position does.
+pub fn action(id: u64) -> crate::resolve::SlotAction {
+    let table = ACTS.read().expect("the action table's lock");
+    match table.as_ref().and_then(|t| t.get(&id)) {
+        Some(action) => action.clone(),
+        None => panic!("no action is numbered {id}; the caller and the port disagree"),
+    }
 }
 
 #[cfg(test)]
