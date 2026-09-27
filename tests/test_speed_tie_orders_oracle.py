@@ -297,6 +297,18 @@ def test_the_replacement_search_reads_both_outcomes_of_the_tie(reg) -> None:  # 
     assert cell.tolist() == [[0.5]]
 
 
+def test_the_encoded_replacement_matrix_has_a_row_per_outcome(reg) -> None:  # noqa: ANN001
+    """A learned leaf's road (`replacementsEncoded`, IKA-350): the drawing pair is two rows
+    at a half each, and says so; a pair that draws nothing is one row and says nothing
+    (every other replacement test)."""
+    from pokeuraou import port
+
+    pos, chosen = _replacement_case(reg)
+    filled = port.replacements_encoded(reg, pos, [(chosen[0], chosen[1])])
+    assert filled.branches == [(0, 0.5), (0, 0.5)]
+    assert len(filled.encoded.species) == 2
+
+
 # ---------------------------------------------------------------------------
 # The residual phase: Perish Song takes all four, and the side whose last Pokemon faints
 # last wins (`checkWin` on the last of the faint queue). The two Venusaurs are the slowest
