@@ -1377,26 +1377,33 @@ pub fn parse_actions_list(value: &Value) -> Vec<SlotAction> {
         .as_array()
         .map(|list| {
             list.iter()
-                .map(|entry| {
-                    let slot = entry["slot"].as_u64().unwrap_or(0) as usize;
-                    match entry["kind"].as_str().unwrap_or("pass") {
-                        "move" => SlotAction::Move {
-                            slot,
-                            move_id: Id::new(entry["moveId"].as_str().unwrap_or_default()),
-                            target: entry["target"].as_i64(),
-                            mega: entry["mega"].as_bool().unwrap_or(false),
-                        },
-                        "switch" => SlotAction::Switch {
-                            slot,
-                            party_index: entry["partyIndex"].as_u64().unwrap_or(1) as usize,
-                            species: Id::new(entry["species"].as_str().unwrap_or_default()),
-                        },
-                        _ => SlotAction::Pass { slot },
-                    }
+                .map(|entry| match entry.as_u64() {
+                    // A number the caller gave this action's text (`acts`, IKA-350).
+                    Some(id) => crate::held::action(id),
+                    None => parse_slot_action(entry),
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// One slot action as the caller writes it.
+pub fn parse_slot_action(entry: &Value) -> SlotAction {
+    let slot = entry["slot"].as_u64().unwrap_or(0) as usize;
+    match entry["kind"].as_str().unwrap_or("pass") {
+        "move" => SlotAction::Move {
+            slot,
+            move_id: Id::new(entry["moveId"].as_str().unwrap_or_default()),
+            target: entry["target"].as_i64(),
+            mega: entry["mega"].as_bool().unwrap_or(false),
+        },
+        "switch" => SlotAction::Switch {
+            slot,
+            party_index: entry["partyIndex"].as_u64().unwrap_or(1) as usize,
+            species: Id::new(entry["species"].as_str().unwrap_or_default()),
+        },
+        _ => SlotAction::Pass { slot },
+    }
 }
 
 pub fn parse_actions(case: &Value) -> [Vec<SlotAction>; 2] {
@@ -3507,6 +3514,10 @@ pub(crate) struct Draws {
     report: bool,
 }
 
+/// How a draw answered with its first option is noted (`draw`); a caller that reads the
+/// notes to know a phase drew looks for it (IKA-352).
+pub(crate) const DRAWN: &str = " (the first; not branched)";
+
 /// Python's `_draw`: Showdown's `sample` inside a switch-in.
 fn draw(turn: &mut Turn, weights: &[f64], what: &str) -> usize {
     if weights.len() < 2 {
@@ -3524,7 +3535,7 @@ fn draw(turn: &mut Turn, weights: &[f64], what: &str) -> usize {
     }
     let report = turn.draws.as_ref().map(|d| d.report).unwrap_or(false);
     if !turn.budget.pinned_policy || report {
-        turn.report(format!("{what} (the first; not branched)"));
+        turn.report(format!("{what}{DRAWN}"));
     }
     0
 }
