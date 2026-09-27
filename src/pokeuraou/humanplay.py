@@ -124,6 +124,7 @@ from .selfplay import (
     _set_json,
     _shown_record,
     position_from_sets,
+    replacement_matrix,
 )
 from .teams import Roster, pick_four_indices
 
@@ -206,6 +207,7 @@ def plan_move(
     *,
     form: str = "local",
     width_only: bool = False,
+    share: float = WIDTH_SHARE,
 ) -> MovePlan:
     """Width first, depth with the rest (the module's docstring; IKA-322 replaces this).
 
@@ -213,7 +215,8 @@ def plan_move(
     the completions of the person's bench the agent believes (1 when nothing is hidden).
     The widest of `WIDTHS` whose node is predicted within `WIDTH_SHARE` of the budget, or
     the narrowest when none is; what the prediction leaves goes to the deepening, unless
-    it is under `MIN_DEEPEN_MS` or ``width_only``.
+    it is under `MIN_DEEPEN_MS` or ``width_only``. ``share`` replaces `WIDTH_SHARE` (the
+    first width of an agent that widens mid-read, IKA-354).
     """
     budget_ms = max(0.0, seconds * 1000.0)
     price = node_time(cores, form)
@@ -223,7 +226,7 @@ def plan_move(
 
     width = WIDTHS[0]
     for candidate in WIDTHS:
-        if price.ms(cells_at(candidate)) <= WIDTH_SHARE * budget_ms:
+        if price.ms(cells_at(candidate)) <= share * budget_ms:
             width = candidate
         # Past every legal action on both sides a wider menu is the same menu.
         if candidate >= rows and candidate >= cols:
@@ -1128,6 +1131,13 @@ class Agent:
     #: move stops deepening at its next step (`HaltingCost`) and plays the answer it has.
     #: None: no brake. Unset, it changes no move.
     halt: Any = None  # noqa: ANN401
+    #: Read narrow first and widen with what is left (IKA-354), or None: width first, the
+    #: rest to deepening, as before. ``(share, at)``: the first width is the one the width
+    #: rule picks at ``share`` of the budget instead of `WIDTH_SHARE`; once the deepening
+    #: has spent ``at`` of its budget the root is widened to the width the rule picks at
+    #: `WIDTH_SHARE` (the menus of the same ranking), the tree kept (`deepen.Grow`), and
+    #: the rest of the budget deepens the wider root.
+    widen: tuple[float, float] | None = None
     #: Read on while the person chooses (IKA-344, `PonderCost`): the person is asked when
     #: the move starts, and the move deepens until they have chosen -- its budget first,
     #: `ponder_seconds` at most. False: the agent chooses first, then the person is asked.
@@ -1137,6 +1147,13 @@ class Agent:
     def __post_init__(self) -> None:
         if self.clock not in CLOCKS:
             raise ValueError(f"clock is one of {CLOCKS}, not {self.clock!r}")
+        if self.widen is not None:
+            share, at = self.widen
+            if not (0.0 < share <= WIDTH_SHARE and 0.0 <= at < 1.0):
+                raise ValueError(
+                    f"widen is (share, at) with 0 < share <= {WIDTH_SHARE} and 0 <= at < 1, "
+                    f"not {self.widen!r}"
+                )
         if self.clock == "count" and not self.width_only and (self.form, self.cores) not in COSTS:
             raise ValueError(
                 f"the count clock spends the budget at measured prices, and there are none "
@@ -1157,6 +1174,22 @@ def legal_count(reg: Regulation, pos: Position, side: int) -> int:
 
 def _not_asked(positions: list[Position]) -> np.ndarray:  # pragma: no cover - never called
     raise AssertionError("the person's side is never solved")
+
+
+class _WidenOnce:
+    """`deepen.Grow` of an agent that widens mid-read (IKA-354): the wider menus, once, at
+    the first step whose reading of the budget is ``at`` or more."""
+
+    def __init__(self, at: float, menus: tuple[list[SideAction], list[SideAction]]) -> None:
+        self.at = at
+        self.menus = menus
+        self.done = False
+
+    def __call__(self, spent: float) -> tuple[list[SideAction], list[SideAction]] | None:
+        if self.done or spent < self.at:
+            return None
+        self.done = True
+        return self.menus
 
 
 @dataclass
@@ -1193,12 +1226,14 @@ def solve_move(
     outside: tuple[list[SideAction], list[SideAction]] | None = None,
     progress: Callable[[Any], None] | None = None,
     discount: float | None = None,
+    grow: Any = None,  # noqa: ANN401 - deepen.Grow
 ) -> SolvedMove:
     """Side ``me``'s answer on the menus ``ours`` (side 0's) x ``theirs`` (side 1's): the
     open game (`search`) when ``exact``, else its Bayesian game over the other side's
     completions in ``spreads`` (`belief_solve`, only ``me`` solved). ``cells`` > 0 deepens
     best first, the budget read by ``cost``; ``outside`` adds the root's swap oracle;
-    ``levels`` and ``discount`` are the depth guard and the depth discount (IKA-342).
+    ``levels`` and ``discount`` are the depth guard and the depth discount (IKA-342);
+    ``grow`` widens the root mid-read (`deepen.Grow`, IKA-354).
     What `HumanGame` asks at each move, and what the analysis mode asks with no budget
     (IKA-337). Raises `EquilibriumError` as the solves do."""
     you = 1 - me
@@ -1208,7 +1243,8 @@ def solve_move(
             **(
                 {"deepen": cells, "deepen_cost": cost, "levels": levels,
                  "child_q": child_q, "outside": outside,
-                 "swap": outside is not None, "discount": discount}
+                 "swap": outside is not None, "discount": discount,
+                 **({"grow": grow} if grow is not None else {})}
                 if cells else {}
             ),
             progress=progress,
@@ -1227,7 +1263,8 @@ def solve_move(
         deepen=(
             {me: {"cells": cells, "reading": "mixed", "swap": outside is not None,
                   "outside": outside, "cost": cost, "levels": levels,
-                  "child_q": child_q, "discount": discount}}
+                  "child_q": child_q, "discount": discount,
+                  **({"grow": grow} if grow is not None else {})}}
             if cells else None
         ),
         progress=progress,
@@ -1588,18 +1625,25 @@ class HumanGame:
         started = time.perf_counter()
         exact = all(len(items) == 1 and items[0].exact for items in spreads.values())
         classes = len(spreads[you])
+        counts = (legal_count(reg, pos, me), legal_count(reg, pos, you), classes)
         plan = plan_move(
-            agent.seconds, agent.cores,
-            legal_count(reg, pos, me), legal_count(reg, pos, you), classes,
-            form=agent.form, width_only=agent.width_only,
+            agent.seconds, agent.cores, *counts, form=agent.form, width_only=agent.width_only,
         )
+        # IKA-354: read narrow first, widen to the rule's width with what is left.
+        later = None
+        if agent.widen is not None and not agent.width_only:
+            first = plan_move(
+                agent.seconds, agent.cores, *counts, form=agent.form, share=agent.widen[0],
+            )
+            if first.width < plan.width and first.deepen_ms > 0:
+                later, plan = plan.width, first
         budget = Budget.matrix()
         wider: dict[int, tuple[list[SideAction], list[SideAction]]] = {}
+        wide = [agent.oracle] if agent.oracle is not None and plan.deepen_ms > 0 else []
         ours, theirs = _menus(
             reg, pos, (plan.width, plan.width), agent.leaf, budget, agent.rank_by_leaf,
             None, spreads, rank_fill=agent.rank_fill,
-            wide=[agent.oracle] if agent.oracle is not None and plan.deepen_ms > 0 else [],
-            wider=wider,
+            wide=[*wide, *([later] if later is not None else [])], wider=wider,
         )
         outside = wider.get(agent.oracle) if agent.oracle is not None else None
         if not ours or not theirs:
@@ -1640,6 +1684,9 @@ class HumanGame:
             cost = Tally(cost)
             if agent.halt is not None:
                 cost = HaltingCost(cost, agent.halt, cells)
+        grow = None
+        if later is not None and cells > 0:
+            grow = _WidenOnce(agent.widen[1] * cells, wider[later])
         pondering = _find(cost, PonderCost)
         if asker is not None:
             asker.start()
@@ -1647,7 +1694,7 @@ class HumanGame:
             solved = solve_move(
                 reg, pos, me, ours, theirs, spreads, agent.leaf, budget=budget, exact=exact,
                 cells=cells, cost=cost, levels=agent.max_levels, child_q=agent.child_q,
-                outside=outside, progress=progress,
+                outside=outside, progress=progress, grow=grow,
             )
         except EquilibriumError:
             return None
@@ -1680,6 +1727,7 @@ class HumanGame:
                 "deepenBudget": cells,
                 "exact": exact,
                 "classes": classes,
+                **({"widenTo": later} if later is not None else {}),
                 # The stop point replays the move (`PonderCost`): a count, not seconds.
                 # One per move of a pondering agent, deepened or not, so a replay pairs
                 # them with its moves in order (`ScriptPerson.from_record`).
@@ -1708,6 +1756,8 @@ class HumanGame:
             "nodeCells": len(ours) * len(theirs) * max(classes, 1),
             "predictedMs": round(plan.predicted_ms, 3),
             "deepenBudget": cells,
+            **({"widenTo": later, "widened": grow is not None and grow.done}
+               if later is not None else {}),
             # The budget's reading when the move stopped, in its units (the wall clock's
             # milliseconds since the move started, or the count clock's cells): what a
             # board hands the other side's `PonderCost` (IKA-333).
@@ -1804,14 +1854,8 @@ class HumanGame:
         leaf = self.agent.evaluate
 
         def matrix(at: Position) -> np.ndarray:
-            resolved = [
-                [port.resolve_replacements(reg, at, [a, b]).position for b in options[1]]
-                for a in options[0]
-            ]
-            if leaf is None:
-                return np.array([[HP_SHARE(p) for p in row] for row in resolved], dtype=np.float64)
-            flat = [p for row in resolved for p in row]
-            return np.asarray(leaf(flat), dtype=np.float64).reshape(len(options[0]), len(options[1]))
+            # A phase that draws is every outcome at its weight (IKA-352).
+            return replacement_matrix(reg, at, options, leaf)
 
         mine = options[side]
         policy = [1.0]

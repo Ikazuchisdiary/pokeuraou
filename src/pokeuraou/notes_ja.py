@@ -37,6 +37,8 @@ FIXED = {
         "近似: 連続技の追加効果は最後の 1 発の後に 1 回として読んだ",
     "residual speed tie (Showdown breaks it at random)":
         "近似: ターン終わりの処理の同速を分岐にしていない（Showdown は無作為に決める）",
+    "switch-in speed tie (the first; not branched)":
+        "近似: 同時に場に出る体の同速は、決まった順（側 0 が先）として読んだ（分岐にしていない）",
     "ability: moody (end-of-turn +2/-1 not applied)":
         "近似: ムラっけ（ターン終わりの能力変化）を入れていない",
     "forced switch (the first on the bench; not branched)":

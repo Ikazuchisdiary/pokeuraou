@@ -426,6 +426,50 @@ def apply_lead_abilities(
     return _phase(reg, call, rng)
 
 
+#: How the port notes a draw it answered with its first option (`resolve::draw`).
+DRAWN = " (the first; not branched)"
+
+
+def replacement_branches(
+    reg: Regulation, pos: Position, choices: Sequence[SideAction]
+) -> list[tuple[float, PortPhase]]:
+    """The replacement phase's every outcome and its weight, for a search that has no
+    generator to draw with (IKA-352: a Speed tie among the switch-ins, a Trace between two
+    foes). One outcome at weight 1 when nothing is drawn -- the position `resolve_replacements`
+    gives."""
+
+    def call(node: RustNode) -> list[tuple[float, PortPhase]]:
+        answer = node.replacement_branches(pos, list(choices))
+        if answer is None:
+            raise _refused(node, "a replacement phase")
+        return answer
+
+    return ask(reg, call)
+
+
+def lead_branches_many(
+    reg: Regulation, positions: Sequence[Position]
+) -> list[list[tuple[float, PortPhase]]]:
+    """`apply_lead_abilities_many` with every draw read every way (IKA-352): each position's
+    outcomes and their weights. Asked as before, pipelined; a position whose answer says a
+    draw was taken first is asked again, once per option."""
+    answers = apply_lead_abilities_many(reg, positions)
+    out: list[list[tuple[float, PortPhase]]] = []
+    for pos, answer in zip(positions, answers, strict=True):
+        if not any(note.endswith(DRAWN) for note in answer.unmodelled):
+            out.append([(1.0, answer)])
+            continue
+
+        def call(node: RustNode, pos: Position = pos) -> list[tuple[float, PortPhase]]:
+            branches = node.lead_branches(pos)
+            if branches is None:
+                raise _refused(node, "the leads")
+            return branches
+
+        out.append(ask(reg, call))
+    return out
+
+
 def apply_lead_abilities_many(reg: Regulation, positions: Sequence[Position]) -> list[PortPhase]:
     """`apply_lead_abilities` without a generator, for many positions: pipelined, so the
     selection solve's 8,100 turn-1 positions do not wait on 8,100 round trips."""
@@ -872,8 +916,10 @@ __all__ = [
     "batched_payoff",
     "batched_payoffs",
     "branch",
+    "lead_branches_many",
     "pending_payoff",
     "pending_payoffs",
+    "replacement_branches",
     "replacements_encoded",
     "replacements_needed",
     "resolve_replacements",

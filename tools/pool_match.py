@@ -277,6 +277,11 @@ def main(argv: list[str] | None = None) -> None:
                     "hidden bench, IKA-111)")
     ap.add_argument("--baseline-solve-restricted", action="store_true",
                     help="same for the other arm")
+    ap.add_argument("--knockouts", action="store_true",
+                    help="the tested arm's matrix budget forks a hit whose knock-out the "
+                    "crit or the roll decides (Budget.enumerate_knockouts, IKA-359)")
+    ap.add_argument("--baseline-knockouts", action="store_true",
+                    help="same for the other arm")
     add_bench_flags(ap)
     ap.add_argument("--net-scores-ends", action="store_true",
                     help="the tested arm's leaf scores a finished battle by the net, not as "
@@ -370,7 +375,7 @@ def main(argv: list[str] | None = None) -> None:
         solver=solver_for(value, value_name, args.selection_store),
         limit=args.limit, rank_by_leaf=args.rank_leaf, rank_fill=args.rank_fill,
         bench_drop=args.bench_drop, deepen=args.deepen, depth=args.depth,
-        solve_restricted=args.solve_restricted,
+        solve_restricted=args.solve_restricted, knockouts=args.knockouts,
     )
     other_limit = args.limit if args.baseline_limit is None else args.baseline_limit
     if baseline is None:
@@ -380,7 +385,8 @@ def main(argv: list[str] | None = None) -> None:
                         bench_drop=args.baseline_bench_drop,
                         deepen=args.baseline_deepen,
                         depth=args.baseline_depth,
-                        solve_restricted=args.baseline_solve_restricted)
+                        solve_restricted=args.baseline_solve_restricted,
+                        knockouts=args.baseline_knockouts)
     else:
         assert baseline_name is not None
         # One solver per arm even over one leaf: shared, the second arm would reuse the
@@ -398,6 +404,7 @@ def main(argv: list[str] | None = None) -> None:
             deepen=args.baseline_deepen,
             depth=args.baseline_depth,
             solve_restricted=args.baseline_solve_restricted,
+            knockouts=args.baseline_knockouts,
         )
     arms = (tested, other)
     print(pool.summary(), file=sys.stderr)
@@ -414,6 +421,7 @@ def main(argv: list[str] | None = None) -> None:
             + f" / deepen {arm.deepen}"
             + (f" / ends {_ends_rule(arm.evaluate)}" if arm.evaluate is not None else "")
             + (f" / depth {arm.depth} restricted" if arm.depth != 1 else "")
+            + (" / knockout branch" if arm.knockouts else "")
             + " / selection "
             f"{arm.selection}" + (f" by its own leaf, store {store}" if store else "")
             + f" / belief {'solved' if arm.solver is not None and hide_bench else 'uniform'}",
@@ -435,6 +443,8 @@ def main(argv: list[str] | None = None) -> None:
         tags += f"@enc:{tested_rules.label()}"
     if tested.depth != other.depth:
         tags += f"@d{tested.depth}"
+    if tested.knockouts != other.knockouts:
+        tags += "@ko" if tested.knockouts else "@noko"
     arm_label = f"{tested.name}{tags}"
 
     client = WorkClient(args.queue) if args.queue else None
@@ -456,7 +466,8 @@ def main(argv: list[str] | None = None) -> None:
     # The echo, per seat and per ARM (0 tested, 1 other): what each arm's side was given.
     echo = [[{"selection": {}, "belief": {}, "leaf": set(), "fill": {}, "drop": {},
               "deepen": {}, "deepened": 0, "widened": 0, "swapped": 0, "oracle": 0,
-              "depth": {}, "coverless": {"menus": 0, "dropping": 0, "dropped": 0},
+              "depth": {}, "knockouts": 0,
+              "coverless": {"menus": 0, "dropping": 0, "dropped": 0},
               "q": [0, 0], "qprobe": [0, 0], "childq": [0, 0], "lines": {}, "calls": 0}
              for _ in arms]
             for _ in range(2)]
@@ -493,6 +504,8 @@ def main(argv: list[str] | None = None) -> None:
             bucket["fill"][played_fill] = bucket["fill"].get(played_fill, 0) + 1
             played_drop = record.bench_drop[side]
             bucket["drop"][played_drop] = bucket["drop"].get(played_drop, 0) + 1
+            # Games this side played with the knock-out branch, read off the record.
+            bucket["knockouts"] += int(record.knockouts[side])
             played_deepen = record.deepen[side]
             bucket["deepen"][played_deepen] = bucket["deepen"].get(played_deepen, 0) + 1
             # Decisions this side actually deepened, read off the game (IKA-33).
@@ -607,7 +620,9 @@ def main(argv: list[str] | None = None) -> None:
                 f"{which if arm_index == 0 else 1 - which}, leaf {sorted(bucket['leaf'])}, "
                 f"selection {bucket['selection']}, belief {bucket['belief']}, "
                 f"rank fill {bucket['fill']}, bench drop {bucket['drop']}, "
-                f"deepen {bucket['deepen']} ({bucket['deepened']:,} decisions deepened"
+                + (f"knockout branch in {bucket['knockouts']:,} games, "
+                   if bucket["knockouts"] else "")
+                + f"deepen {bucket['deepen']} ({bucket['deepened']:,} decisions deepened"
                 + (
                     f", oracle asked at {bucket['oracle']:,}, {bucket['widened']:,} actions "
                     f"widened, {bucket['swapped']:,} swapped out"

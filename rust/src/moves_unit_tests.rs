@@ -21,6 +21,7 @@ fn budget(damage_rolls: i64, enumerate_secondary: bool) -> Budget {
         pinned_policy: false,
         max_branches: 512,
         merge_duplicates: true,
+        enumerate_knockouts: false,
     }
 }
 

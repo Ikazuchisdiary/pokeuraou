@@ -32,7 +32,7 @@ function decodeStatus(buf) {
   st.warn = !!(st.flags & 1);
   return st;
 }
-const KINDS = ["start", "refine", "refused", "widen", "done"];
+const KINDS = ["start", "refine", "refused", "widen", "done", "grow"];
 const READS = ["leaf", "deep", "refused"];
 // An action's label is an id into the table of labels (IKA-345): its parts, each [slot, text]
 // with the active slot whose action it is. The text is the parts joined by this.

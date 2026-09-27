@@ -49,6 +49,10 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from pokeuraou import openmp  # noqa: E402
+
+openmp.quiet_wait()  # before anything loads torch (IKA-360); the processes it starts inherit it
+
 from play_human import DEFAULT_VALUE, Q_FILL, leaf_name, memory_watch  # noqa: E402
 
 from pokeuraou import analysis, humanplay, qrank, timematch  # noqa: E402

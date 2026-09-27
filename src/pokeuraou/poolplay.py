@@ -502,6 +502,9 @@ class PoolArm:
     #: -- which a hidden bench requires (`search.belief_solve`, IKA-111).
     depth: int = 1
     solve_restricted: bool = False
+    #: Whether its matrix budget takes the knock-out branch (`Budget.enumerate_knockouts`,
+    #: IKA-359); off ships.
+    knockouts: bool = False
 
     @property
     def selection(self) -> str:
@@ -641,6 +644,7 @@ def pool_match_game(
         deepen=(side_arms[0].deepen, side_arms[1].deepen),
         depth=(side_arms[0].depth, side_arms[1].depth),
         solve_restricted=(side_arms[0].solve_restricted, side_arms[1].solve_restricted),
+        knockouts=(side_arms[0].knockouts, side_arms[1].knockouts),
         selection=(species[0], species[1], picks[0], picks[1]),
     )
     sources = tuple(arm.selection for arm in side_arms)
@@ -659,6 +663,7 @@ def pool_match_game(
         "bench_drops": tuple(arm.bench_drop for arm in side_arms),
         "deepens": tuple(arm.deepen for arm in side_arms),
         "depths": tuple(arm.depth for arm in side_arms),
+        "knockouts": tuple(arm.knockouts for arm in side_arms),
         "solvers": tuple(
             "restricted" if arm.depth >= 2 and arm.solve_restricted else "full"
             for arm in side_arms
