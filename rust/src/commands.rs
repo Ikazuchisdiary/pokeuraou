@@ -97,8 +97,9 @@ fn budget_json(budget: &Budget) -> Value {
         pinned_policy,
         max_branches,
         merge_duplicates,
+        enumerate_knockouts,
     } = budget;
-    json!({
+    let mut out = json!({
         "damageRolls": damage_rolls,
         "enumerateCrit": enumerate_crit,
         "enumerateAccuracy": enumerate_accuracy,
@@ -108,7 +109,12 @@ fn budget_json(budget: &Budget) -> Value {
         "pinnedPolicy": pinned_policy,
         "maxBranches": max_branches,
         "mergeDuplicates": merge_duplicates,
-    })
+    });
+    // Only when on, as Python sends it (IKA-359): the wire is unchanged for every other budget.
+    if *enumerate_knockouts {
+        out["enumerateKnockouts"] = json!(true);
+    }
+    out
 }
 
 fn kind_name(kind: ActionKind) -> &'static str {
@@ -626,6 +632,7 @@ fn deterministic() -> Budget {
         pinned_policy: true,
         max_branches: 1,
         merge_duplicates: true,
+        enumerate_knockouts: false,
     }
 }
 

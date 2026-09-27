@@ -221,6 +221,8 @@ def dump_budget(budget: Budget) -> dict[str, Any]:
         "pinnedPolicy": budget.pinned_policy,
         "maxBranches": budget.max_branches,
         "mergeDuplicates": budget.merge_duplicates,
+        # Only when on (IKA-359), so every other budget crosses as it did before.
+        **({"enumerateKnockouts": True} if budget.enumerate_knockouts else {}),
     }
 
 
