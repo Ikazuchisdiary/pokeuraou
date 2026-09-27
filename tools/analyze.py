@@ -108,6 +108,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--view-host", default="127.0.0.1")
     ap.add_argument("--view-port", type=int, default=8337)
     ap.add_argument("--sprite-url", default=None)
+    ap.add_argument("--game-url", default=None,
+                    help="the game page's address, for the page's link back (default: the "
+                    "launcher's port 8332 on the same host)")
     ap.add_argument("--interval-ms", type=float, default=100.0)
     ap.add_argument("--live-out", type=Path, default=None, help="keep the page's frames in this file")
     ap.add_argument("--locale", default="ja")
@@ -184,7 +187,7 @@ def main(argv: list[str] | None = None) -> None:
     server = liveview.LiveServer(
         args.view_host, 0 if args.no_view else args.view_port, sink=sink,
         sprite_url=args.sprite_url, on_command=lambda message: service.command(message),
-        keep_steps=600,
+        keep_steps=600, links={"game-url": args.game_url} if args.game_url else None,
     ).start()
     pools = {pool.id: pool}
     service = analysis.Service(
