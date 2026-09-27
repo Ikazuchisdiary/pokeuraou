@@ -299,9 +299,14 @@ CLOCKS = ("wall", "count")
 #: turns) it asks nothing; it matters where the legal list is longer than the width.
 PLAY_ORACLE = ALL_ACTIONS
 
-#: The deepening's depth guard for a person's game: None is `deepen.MAX_LEVELS` (8). IKA-342
-#: measures the guard; its answer replaces this one line.
-PLAY_MAX_LEVELS: int | None = None
+#: The deepening's depth guard for a person's game and the analysis mode (None would be
+#: `deepen.MAX_LEVELS`, 8, which generation and the board keep). IKA-342: 16. On 16 recorded
+#: M-C positions read for 7.5 to 60 s of the count clock, the answer at guard 16 lost less
+#: than guard 8's in the game of a long guard-32 read (15 s -0.003, 30 s -0.007 in 11 of 16,
+#: 60 s -0.011), and sat nearer the long guard-8 read than guard 32 did: the middle of two
+#: references that disagree. A read-only comparison with two references and no truth; the
+#: board at equal time waits for IKA-333's tools.
+PLAY_MAX_LEVELS: int | None = 16
 
 #: Threads a move spreads over (IKA-32 stage 2: the port's cells, three worker processes
 #: expanding the deepening's cells ahead, a big game's two LPs at once, the leaf's CUDA

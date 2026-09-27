@@ -17,7 +17,7 @@ that reached the depth guard, as they form.
 How it reads (`pokeuraou.analysis`): IKA-307's allocation for a long read -- the menus at
 ``--width`` (64: every legal action on most turns), then the best-first deepening of the
 side's Bayesian root (``h``) with the root's swap oracle (``--oracle``, default sall), the
-depth guard at ``--max-levels`` (default `deepen.MAX_LEVELS`; raise it for long reads). The
+depth guard at ``--max-levels`` (default `humanplay.PLAY_MAX_LEVELS`, 16, IKA-342). The
 cells are expanded ahead on ``--threads`` cores (IKA-32 stage 2; 4 to 8 is the useful range).
 The leaf and the menus' Q are ``play_human``'s.
 
