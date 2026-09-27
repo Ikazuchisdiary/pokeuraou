@@ -152,15 +152,22 @@ def test_the_port_orders_the_residuals_as_showdown(reg, oracle: Oracle, case: st
 @pytest.mark.oracle
 @pytest.mark.parametrize("case", sorted(FOES))
 def test_the_port_notes_the_ties_showdown_rolls(reg, oracle: Oracle, port, case: str) -> None:  # noqa: ANN001
-    """`test_python_notes_the_ties_showdown_rolls` with the port's notes."""
+    """`test_python_notes_the_ties_showdown_rolls` with the port's notes.
+
+    A budget that does not enumerate Speed ties notes the tie; one that does runs the
+    residual phase in both orders instead (IKA-352), and here, where the burns end alike
+    either way, says nothing (the orders that matter: `test_speed_tie_orders_oracle.py`).
+    """
     from ._port_showdown import port_weights
 
     positions, _ = _play(oracle, case)
     for turn in TURNS:
         start = _loaded(positions[turn - 1])
         chosen = _chosen(reg, start, STEPS[turn - 1])
-        notes = set(port_weights(port, start, chosen, Budget.matrix())["unmodelled"])
+        notes = set(port_weights(port, start, chosen, Budget.deterministic(0))["unmodelled"])
         assert notes == ({TIE_NOTE} if TIED[case][turn] else set()), turn
+        branched = set(port_weights(port, start, chosen, Budget.matrix())["unmodelled"])
+        assert TIE_NOTE not in branched, turn
 
 
 @pytest.mark.oracle

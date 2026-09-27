@@ -44,7 +44,7 @@ from .position import Position
 from .priors import SampledSet
 from .regulation import Regulation
 from .selection_book import BookEntry
-from .selfplay import position_from_sets, positions_from_sets
+from .selfplay import lead_branches_from_sets, position_from_sets
 from .teams import all_selections
 
 
@@ -145,7 +145,9 @@ def solve_selection(
     for spread_class in classes:
         # In one pipelined exchange with the port (IKA-209): the leads' switch-ins were a
         # quarter of a millisecond each in Python and are a round trip each over there.
-        positions = positions_from_sets(
+        # A draw in the leads' switch-ins (a Speed tie that decides the field) is every
+        # outcome at its weight, the cell their mean (IKA-352); nearly every opening has one.
+        openings = lead_branches_from_sets(
             reg,
             [
                 ([our_six[i] for i in ours], [spread_class.sets[j] for j in theirs])
@@ -153,7 +155,12 @@ def solve_selection(
                 for theirs in selections
             ],
         )
-        values = evaluate(positions)
+        positions = [pos for branches in openings for _weight, pos in branches]
+        values = np.asarray(evaluate(positions), dtype=np.float64)
+        if len(positions) != len(openings):
+            owner = np.repeat(np.arange(len(openings)), [len(b) for b in openings])
+            weights = np.array([w for branches in openings for w, _pos in branches])
+            values = np.bincount(owner, weights=weights * values, minlength=len(openings))
         evaluated += len(positions)
         matrices.append(values.reshape(len(selections), len(selections)))
 

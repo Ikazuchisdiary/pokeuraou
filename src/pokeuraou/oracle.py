@@ -42,6 +42,10 @@ class RandomnessPolicy:
     #: Answers for a step's accuracy rolls in order, then ``accuracy`` (IKA-235: a later
     #: hit of Triple Axel that misses).
     accuracy_script: tuple[str, ...] = ()
+    #: Orders for a step's shuffles of a tied group, in order, each as the places the group
+    #: lay in (`(2, 0, 1)`: the last first); a shuffle of another length follows
+    #: ``speed_tie`` (IKA-352: the orders of a group of three).
+    shuffle_script: tuple[tuple[int, ...], ...] = ()
 
     def to_json(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -57,6 +61,8 @@ class RandomnessPolicy:
             out["sample"] = self.sample
         if self.accuracy_script:
             out["accuracyScript"] = list(self.accuracy_script)
+        if self.shuffle_script:
+            out["shuffleScript"] = [list(order) for order in self.shuffle_script]
         return out
 
 

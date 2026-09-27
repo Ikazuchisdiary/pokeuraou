@@ -3463,8 +3463,18 @@ fn after_move_secondary_switches(turn: &mut Turn, action: &QueuedAction, mv: &Mo
 /// Python's `_residuals_then_emergency_exit`: the residual phase, then Emergency Exit for
 /// every Pokemon active at its start that crossed half in it (`residualPokemon`).
 pub(crate) fn residuals_then_emergency_exit(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
+    residuals_then_emergency_exit_in(reg, turn, None)
+}
+
+/// `residuals_then_emergency_exit` with the residual phase run in `order` when one is
+/// given -- one of the orders of a Speed tie (`resolve::residual_forks`, IKA-352).
+pub(crate) fn residuals_then_emergency_exit_in(
+    reg: &Reg,
+    turn: &mut Turn,
+    order: Option<&[Slot]>,
+) -> Result<(), String> {
     let before = active_hp(turn);
-    residuals(reg, turn)?;
+    residuals_in(reg, turn, order)?;
     for (side, row) in before.iter().enumerate() {
         for (slot, hp) in row.iter().enumerate() {
             if *hp < 0 {
@@ -5112,11 +5122,13 @@ fn trapper_gone(turn: &Turn, source_slot: Option<Id>) -> bool {
 /// list, so a Speed change *during* the phase (Speed Boost is itself an `onResidual`) does
 /// not reorder what is left of it. Cost: each computation is four Speed calculations, each
 /// of which builds a battler; eight per phase once made it 30% of generation time.
-fn residual_order(turn: &Turn) -> Result<(Vec<Slot>, bool), String> {
+///
+/// The ties come back as index ranges of the order, `start..end`, each a run of Pokemon
+/// at one Speed (IKA-352: the caller that enumerates ties runs the phase once per order).
+pub(crate) fn residual_order(turn: &Turn) -> Result<(Vec<Slot>, Vec<(usize, usize)>), String> {
     let trick_room = turn.pos.field.trick_room();
     let field = turn.field();
     let mut entries: Vec<(i64, i64, String, usize, usize)> = Vec::new();
-    let mut speeds: Vec<i64> = Vec::new();
     for side in 0..2 {
         let conditions = turn.pos.sides[side].side_conditions.clone();
         for slot in 0..turn.pos.sides[side].active.len() {
@@ -5128,30 +5140,45 @@ fn residual_order(turn: &Turn) -> Result<(Vec<Slot>, bool), String> {
                     if trick_room {
                         speed = 10000 - speed;
                     }
-                    speeds.push(speed);
                     entries.push((0, -speed, mon.species.as_str().to_string(), slot, side));
                 }
                 _ => entries.push((1, 0, String::new(), slot, side)),
             }
         }
     }
-    let mut unique = speeds.clone();
-    unique.sort_unstable();
-    unique.dedup();
-    let tied = unique.len() != speeds.len();
-    // A Speed tie here is reported by Python rather than branched, and broken by
-    // (-speed, species, slot, side) -- deliberately not by side, so the residual phase
-    // cannot become seat-dependent. The same sort gives the same order, so the tie is not
-    // a reason to refuse; it is a reason to sort on exactly the same key.
+    // The canonical order of a tie is (-speed, species, slot, side) -- deliberately not by
+    // side, so the residual phase cannot become seat-dependent. A budget that enumerates
+    // ties runs every order of it (`resolve::residual_forks`, IKA-352); one that does not
+    // runs this one and notes the tie.
     entries.sort();
-    Ok((
-        entries.into_iter().map(|(_, _, _, slot, side)| (side, slot)).collect(),
-        tied,
-    ))
+    let mut ties = Vec::new();
+    let mut start = 0;
+    while start < entries.len() {
+        let mut end = start + 1;
+        while end < entries.len()
+            && entries[start].0 == 0
+            && entries[end].0 == 0
+            && entries[end].1 == entries[start].1
+        {
+            end += 1;
+        }
+        if end - start > 1 {
+            ties.push((start, end));
+        }
+        start = end;
+    }
+    Ok((entries.into_iter().map(|(_, _, _, slot, side)| (side, slot)).collect(), ties))
 }
 
 /// End-of-turn effects, in Showdown's residual order.
 pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
+    residuals_in(reg, turn, None)
+}
+
+/// `residuals`, in `given` order when there is one: a Speed tie's order that the caller
+/// branches on (IKA-352), and so not noted. Without one, the canonical order, and a tie
+/// is noted as before -- the budgets that do not enumerate ties.
+fn residuals_in(reg: &Reg, turn: &mut Turn, given: Option<&[Slot]>) -> Result<(), String> {
     crate::resolve::RESIDUALS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let _ = reg;
     #[cfg(not(feature = "ika215-control"))]
@@ -5159,7 +5186,11 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
     // Sorted before anything ends, as Showdown's `updateSpeed()` and `fieldEvent`'s one
     // `speedSort` run before the weather's handler decrements it: on the turn the sun runs
     // out, Chlorophyll's doubled Speed still orders the phase (IKA-190).
-    let (order, tied) = residual_order(turn)?;
+    let (order, ties) = match given {
+        Some(order) => (order.to_vec(), Vec::new()),
+        None => residual_order(turn)?,
+    };
+    let tied = !ties.is_empty();
     if tied {
         turn.report("residual speed tie (Showdown breaks it at random)");
     }
@@ -5185,9 +5216,9 @@ pub(crate) fn residuals(reg: &Reg, turn: &mut Turn) -> Result<(), String> {
     // IKA-210's positive control orders the residuals after the weather ended, and notes a
     // tie there (IKA-190's bug in Python).
     #[cfg(feature = "ika210-control")]
-    let (order, tied_after) = residual_order(turn)?;
+    let (order, ties_after) = residual_order(turn)?;
     #[cfg(feature = "ika210-control")]
-    if tied_after && !tied {
+    if !ties_after.is_empty() && !tied {
         turn.report("residual speed tie (Showdown breaks it at random)");
     }
 

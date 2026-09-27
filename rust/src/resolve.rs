@@ -53,7 +53,9 @@ use crate::speed::{
     effective_speed, fractional_priority, move_priority, order_actions, ActionKind, QueuedAction,
     ORDER_MEGA, ORDER_MOVE, ORDER_SWITCH,
 };
-use crate::moves::{do_move, residuals_then_emergency_exit};
+use crate::moves::{
+    do_move, residual_order, residuals_then_emergency_exit, residuals_then_emergency_exit_in,
+};
 use serde_json::Value;
 
 pub type Slot = (usize, usize);
@@ -1484,13 +1486,18 @@ pub fn resolve_turn_logged<'a>(
             if events {
                 turn.log = Some(Box::default());
                 if tie_weight < 1.0 {
-                    // IKA-345: `tie <first> <second>` per Speed tie the order resolved.
-                    for group in ties.iter().filter(|g| g.len() == 2) {
-                        let at = |v: usize| permutation.iter().position(|x| *x == v);
-                        let (a, b) = (group[0], group[1]);
-                        let (first, second) = if at(a) <= at(b) { (a, b) } else { (b, a) };
-                        let (f, s) = (&queue[first], &queue[second]);
-                        chance_tag!(turn, "tie {} {}", Name(f.side, f.slot), Name(s.side, s.slot));
+                    // IKA-345: `tie <first> <second>` per Speed tie the order resolved; a
+                    // group of three or more gives one per pair in it (IKA-352).
+                    let at = |v: usize| permutation.iter().position(|x| *x == v);
+                    for group in ties.iter() {
+                        for (i, a) in group.iter().enumerate() {
+                            for b in &group[i + 1..] {
+                                let (a, b) = (*a, *b);
+                                let (first, second) = if at(a) <= at(b) { (a, b) } else { (b, a) };
+                                let (f, s) = (&queue[first], &queue[second]);
+                                chance_tag!(turn, "tie {} {}", Name(f.side, f.slot), Name(s.side, s.slot));
+                            }
+                        }
                     }
                 }
             }
@@ -1521,10 +1528,15 @@ pub fn resolve_turn_logged<'a>(
 
 /// Orders produced by resolving Speed ties, with their probabilities.
 ///
-/// Showdown shuffles a tied group, so each permutation is equally likely. Pairwise ties are
-/// what occur in doubles and are expanded exactly; a larger tied group keeps the canonical
-/// order. (Python's docstring said such a group "is reported"; neither its code nor this
-/// reports it -- IKA-212 left that as it was.)
+/// Showdown shuffles a tied group (`prng.shuffle`, a Fisher-Yates over the group), so each
+/// of a group's `k!` orders is equally likely, and the groups are independent. Every group
+/// is expanded, whatever its size (IKA-352: a group of three or more used to keep the
+/// canonical order, unnoted). The mid-turn re-sort cannot bias this: it treats tied
+/// entries alike, so it maps the orders of a group one to one, and Showdown's own re-sort
+/// shuffles the rest of a group again, which keeps every order at `1/k!` as well.
+///
+/// Orders come canonical first, then in lexicographic order of the group's positions; a
+/// pair is (as it lies, swapped) at a half each, as before IKA-352.
 fn tie_permutations(
     order: &[usize],
     ties: &[Vec<usize>],
@@ -1535,22 +1547,43 @@ fn tie_permutations(
     }
     let mut result = vec![(order.to_vec(), 1.0)];
     for group in ties {
-        if group.len() != 2 {
-            continue;
-        }
-        let (a, b) = (group[0], group[1]);
-        let mut expanded = Vec::with_capacity(result.len() * 2);
+        let arrangements = arrangements(group.len());
+        let count = arrangements.len() as f64;
+        let mut expanded = Vec::with_capacity(result.len() * arrangements.len());
         for (sequence, weight) in result {
-            let mut swapped = sequence.clone();
-            let i = swapped.iter().position(|v| *v == a).unwrap();
-            let j = swapped.iter().position(|v| *v == b).unwrap();
-            swapped.swap(i, j);
-            expanded.push((sequence, weight / 2.0));
-            expanded.push((swapped, weight / 2.0));
+            let at: Vec<usize> =
+                group.iter().map(|v| sequence.iter().position(|x| x == v).unwrap()).collect();
+            for arrangement in &arrangements {
+                let mut next = sequence.clone();
+                for (k, pick) in arrangement.iter().enumerate() {
+                    next[at[k]] = group[*pick];
+                }
+                expanded.push((next, weight / count));
+            }
         }
         result = expanded;
     }
     result
+}
+
+/// Every order of `0..k`, the identity first and then lexicographic: `k!` of them.
+pub(crate) fn arrangements(k: usize) -> Vec<Vec<usize>> {
+    fn extend(prefix: &mut Vec<usize>, left: &mut Vec<usize>, out: &mut Vec<Vec<usize>>) {
+        if left.is_empty() {
+            out.push(prefix.clone());
+            return;
+        }
+        for i in 0..left.len() {
+            let v = left.remove(i);
+            prefix.push(v);
+            extend(prefix, left, out);
+            prefix.pop();
+            left.insert(i, v);
+        }
+    }
+    let mut out = Vec::new();
+    extend(&mut Vec::with_capacity(k), &mut (0..k).collect(), &mut out);
+    out
 }
 
 fn build_queue(
@@ -2143,30 +2176,13 @@ fn run_queue<'a>(
 
     let mut branches = Vec::with_capacity(finished.len());
     let mut unmodelled: std::collections::BTreeSet<String> = Default::default();
-    for mut item in finished {
+    for item in finished {
         let started = phase_start();
-        residuals_then_emergency_exit(reg, &mut item.turn)?;
+        let forks = residual_forks(reg, item.turn)?;
         phase_end(3, started);
-        // `endTurn` clears Showdown's `trapped` flag (a benched Pokemon lost it in
-        // `clearVolatile`), so a child never inherits the root's verdict; the trap is
-        // read off the position from here on, as `resolve._clear_trapped` (IKA-175).
-        // Only a flagged one is written, so a shared bench Pokemon is not copied.
-        // `endTurn` sets `pokemon.trapped = pokemon.maybeTrapped = false` and reruns
-        // `TrapPokemon`; the flag is only ever Showdown's verdict on the position it was
-        // computed for, and a trapper that fainted or left this turn would otherwise keep
-        // its target trapped in every child. `actions._is_trapped` reads the trap off the
-        // position (IKA-163, IKA-169), which is what a generated position (never flagged)
-        // always did. A paused turn keeps it, as Showdown's mid-turn state does.
-        for side in item.turn.pos.sides.iter_mut() {
-            for mon in side.pokemon.iter_mut() {
-                if mon.trapped {
-                    std::rc::Rc::make_mut(mon).trapped = false;
-                }
-            }
+        for (share, turn) in forks {
+            branches.push(finished_branch(turn, item.weight * share, &mut unmodelled));
         }
-        item.turn.pos.turn += 1;
-        unmodelled.extend(item.turn.unmodelled.iter().cloned());
-        branches.push(Branch { probability: item.weight, position: item.turn.pos, log: item.turn.log });
     }
     // A paused branch gets no residuals and no turn increment: the residual phase is
     // behind the interrupt, so it belongs to whatever the resume produces.
@@ -2180,6 +2196,92 @@ fn run_queue<'a>(
         });
     }
     Ok(TurnResult { branches, exact, suspended, unmodelled })
+}
+
+/// The residual phase of a finished branch, once per order of a Speed tie among the
+/// Pokemon standing (IKA-352), with the orders that end alike folded into one.
+///
+/// `fieldEvent('Residual')` speed-sorts its handlers once and `prng.shuffle`s each tied
+/// run, so Showdown decides a residual tie at random. The port ran the canonical order
+/// and noted the tie -- the side with the smaller species id first, in every game -- and
+/// now runs each order at `1/k!` when the budget enumerates Speed ties. One order serves
+/// the whole phase: Showdown shuffles each effect's tied handlers apart (a Leftovers pair
+/// and a burn pair are two coin flips), which differs from this only where two effects'
+/// orders matter together (both Pokemon fainting to two effects in one phase); that is
+/// left as it is. A budget that does not enumerate ties keeps the canonical order and the
+/// note. Orders that end in the same state are one branch, the first order's, so a tie that
+/// changes nothing (the common case: nothing at the end of the turn touches both) leaves
+/// the turn exactly as it was.
+fn residual_forks<'a>(reg: &'a Reg, mut turn: Turn<'a>) -> Result<Vec<(f64, Turn<'a>)>, String> {
+    let (canonical, ties) = residual_order(&turn)?;
+    if ties.is_empty() || !turn.budget.enumerate_speed_ties {
+        residuals_then_emergency_exit(reg, &mut turn)?;
+        return Ok(vec![(1.0, turn)]);
+    }
+    let mut orders = vec![canonical];
+    for (start, end) in ties {
+        let arranged = arrangements(end - start);
+        let mut expanded = Vec::with_capacity(orders.len() * arranged.len());
+        for order in &orders {
+            for arrangement in &arranged {
+                let mut next = order.clone();
+                for (k, pick) in arrangement.iter().enumerate() {
+                    next[start + k] = order[start + *pick];
+                }
+                expanded.push(next);
+            }
+        }
+        orders = expanded;
+    }
+    let share = 1.0 / orders.len() as f64;
+    let last = orders.len() - 1;
+    let mut base = Some(turn);
+    let mut out: Vec<(f64, Turn<'a>)> = Vec::new();
+    for (index, order) in orders.iter().enumerate() {
+        let mut state =
+            if index == last { base.take().unwrap() } else { base.as_ref().unwrap().clone() };
+        residuals_then_emergency_exit_in(reg, &mut state, Some(order))?;
+        match out.iter_mut().find(|(_, kept)| same_turn(kept, &state)) {
+            Some((weight, kept)) => {
+                *weight += share;
+                crate::events::merge_logs(&mut kept.log, &state.log);
+                kept.unmodelled.extend(state.unmodelled);
+            }
+            None => out.push((share, state)),
+        }
+    }
+    if out.len() == 1 {
+        out[0].0 = 1.0;
+    }
+    Ok(out)
+}
+
+/// A finished branch once its residual phase has run: `endTurn`'s bookkeeping.
+fn finished_branch<'a>(
+    mut turn: Turn<'a>,
+    probability: f64,
+    unmodelled: &mut std::collections::BTreeSet<String>,
+) -> Branch {
+    // `endTurn` clears Showdown's `trapped` flag (a benched Pokemon lost it in
+    // `clearVolatile`), so a child never inherits the root's verdict; the trap is
+    // read off the position from here on, as `resolve._clear_trapped` (IKA-175).
+    // Only a flagged one is written, so a shared bench Pokemon is not copied.
+    // `endTurn` sets `pokemon.trapped = pokemon.maybeTrapped = false` and reruns
+    // `TrapPokemon`; the flag is only ever Showdown's verdict on the position it was
+    // computed for, and a trapper that fainted or left this turn would otherwise keep
+    // its target trapped in every child. `actions._is_trapped` reads the trap off the
+    // position (IKA-163, IKA-169), which is what a generated position (never flagged)
+    // always did. A paused turn keeps it, as Showdown's mid-turn state does.
+    for side in turn.pos.sides.iter_mut() {
+        for mon in side.pokemon.iter_mut() {
+            if mon.trapped {
+                std::rc::Rc::make_mut(mon).trapped = false;
+            }
+        }
+    }
+    turn.pos.turn += 1;
+    unmodelled.extend(turn.unmodelled.iter().cloned());
+    Branch { probability, position: turn.pos, log: turn.log }
 }
 
 /// `QueuedAction.label` (speed.py): what `acts` heads an action's events with.
@@ -2809,19 +2911,32 @@ pub fn resume_turn<'a>(
     }
 
     // `runSwitch` is order 101 sorted on speed, fastest first, so a fast replacement takes
-    // the hazards and fires its ability before a slow one.
-    placed.sort_by_key(|(speed, side, slot)| (-speed, *side, *slot));
+    // the hazards and fires its ability before a slow one; a Speed tie is every order that
+    // matters, at equal odds, when the budget enumerates ties (IKA-352).
     let gone: Vec<(usize, usize)> = placed.iter().map(|(_, side, slot)| (*side, *slot)).collect();
     let may_trace = placed.iter().any(|(_, side_index, slot)| {
         matches!(turn.mon_at(*side_index, *slot), Some(mon) if mon.ability == "trace")
     });
     let budget = turn.budget;
-    let forks = switch_in_with_draws(turn, &budget, may_trace, |state| {
-        for (_speed, side_index, slot) in &placed {
-            on_switch_in(reg, state, *side_index, *slot)?;
+    let mut orders = switch_in_orders(reg, &turn, &placed)?;
+    if !budget.enumerate_speed_ties {
+        orders.truncate(1);
+    }
+    let share = 1.0 / orders.len() as f64;
+    let last = orders.len() - 1;
+    let mut forks: Vec<(f64, Turn)> = Vec::new();
+    let mut base = Some(turn);
+    for (index, order) in orders.iter().enumerate() {
+        let state = if index == last { base.take().unwrap() } else { base.as_ref().unwrap().clone() };
+        for (weight, fork) in switch_in_with_draws(state, &budget, may_trace, |state| {
+            for (_speed, side_index, slot) in order {
+                on_switch_in(reg, state, *side_index, *slot)?;
+            }
+            Ok(())
+        })? {
+            forks.push((weight * share, fork));
         }
-        Ok(())
-    })?;
+    }
 
     // Python's `_without_replaced`: an action queued for the Pokemon that left goes with it
     // (`runAction` skips a Pokemon that is no longer active), so an Eject Button holder that
@@ -2992,6 +3107,79 @@ fn on_switch_in(reg: &Reg, turn: &mut Turn, side: usize, slot: usize) -> Result<
     let result = switched_in(reg, turn, side, slot);
     turn.current_actor = actor;
     result
+}
+
+/// A batch of switch-ins, `(speed, side, slot)` each.
+pub(crate) type Placed = Vec<(i64, usize, usize)>;
+
+/// The orders a batch of simultaneous switch-ins can run its switch-in effects in (IKA-352):
+/// fastest first, and every order of a Speed tie -- or only the first, when no order ends
+/// anywhere the first does not.
+///
+/// `runSwitch` (sim/battle-actions.ts) speed-sorts every active Pokemon once --
+/// `speedSort(allActive)`, whose tied group goes through `prng.shuffle` -- and gives each
+/// switch-in handler a fractional Speed from that order (`resolveEventHandler`: "Pokemon
+/// speeds including ties are resolved before all onSwitchIn handlers and aren't re-sorted
+/// in-between"). So one order is drawn, uniformly over each tied group's `k!`, and the
+/// abilities, items and hazards of the batch follow it. The port sorted on
+/// `(-speed, side, slot)` and so always ran side 0's first: the leads' weather or
+/// Intimidate of one seat, in every game.
+///
+/// Most ties change nothing (two Drizzles, two Intimidates, a Pokemon with no switch-in
+/// effect), and a caller that draws for them would spend a draw -- a game's random number --
+/// on nothing. So every order is tried on a copy (no draws: a Trace takes its first; no
+/// trace) and the orders are kept only when one ends in a state the first does not.
+pub(crate) fn switch_in_orders<'a>(
+    reg: &'a Reg,
+    turn: &Turn<'a>,
+    placed: &[(i64, usize, usize)],
+) -> Result<Vec<Placed>, String> {
+    let mut sorted = placed.to_vec();
+    sorted.sort_by_key(|(speed, side, slot)| (-speed, *side, *slot));
+    let mut orders = vec![sorted];
+    let mut start = 0;
+    while start < placed.len() {
+        let speed = orders[0][start].0;
+        let mut end = start + 1;
+        while end < placed.len() && orders[0][end].0 == speed {
+            end += 1;
+        }
+        if end - start > 1 {
+            let arranged = arrangements(end - start);
+            let mut expanded = Vec::with_capacity(orders.len() * arranged.len());
+            for order in &orders {
+                for arrangement in &arranged {
+                    let mut next = order.clone();
+                    for (k, pick) in arrangement.iter().enumerate() {
+                        next[start + k] = order[start + *pick];
+                    }
+                    expanded.push(next);
+                }
+            }
+            orders = expanded;
+        }
+        start = end;
+    }
+    if orders.len() == 1 {
+        return Ok(orders);
+    }
+    let run = |order: &[(i64, usize, usize)]| -> Result<Turn<'a>, String> {
+        let mut state = turn.clone();
+        state.draws = None;
+        state.log = None;
+        for (_speed, side, slot) in order {
+            on_switch_in(reg, &mut state, *side, *slot)?;
+        }
+        Ok(state)
+    };
+    let first = run(&orders[0])?;
+    for order in &orders[1..] {
+        if !same_turn(&first, &run(order)?) {
+            return Ok(orders);
+        }
+    }
+    orders.truncate(1);
+    Ok(orders)
 }
 
 /// Entry hazards, then the switch-in ability, then a Seed under a terrain already up
@@ -3335,6 +3523,10 @@ pub(crate) struct Draws {
     report: bool,
 }
 
+/// How a draw answered with its first option is noted (`draw`); a caller that reads the
+/// notes to know a phase drew looks for it (IKA-352).
+pub(crate) const DRAWN: &str = " (the first; not branched)";
+
 /// Python's `_draw`: Showdown's `sample` inside a switch-in.
 fn draw(turn: &mut Turn, weights: &[f64], what: &str) -> usize {
     if weights.len() < 2 {
@@ -3352,7 +3544,7 @@ fn draw(turn: &mut Turn, weights: &[f64], what: &str) -> usize {
     }
     let report = turn.draws.as_ref().map(|d| d.report).unwrap_or(false);
     if !turn.budget.pinned_policy || report {
-        turn.report(format!("{what} (the first; not branched)"));
+        turn.report(format!("{what}{DRAWN}"));
     }
     0
 }
