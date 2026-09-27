@@ -175,6 +175,7 @@ def _slice(encoded: Any, start: int, stop: int) -> Any:
     )
 
 
+@timing.timed("server.views")
 def _views(buffer: memoryview, layout: Sequence[dict[str, Any]]) -> dict[str, np.ndarray]:
     out: dict[str, np.ndarray] = {}
     for item in layout:
@@ -192,12 +193,21 @@ class _Handler(socketserver.StreamRequestHandler):
     def handle(self) -> None:
         attached: dict[str, shared_memory.SharedMemory] = {}
         server = self.server
+        # IKA-339: the serving thread's own rows. `server.read` holds the wait for the next
+        # line as well (its wall), and none of it as CPU; `server.reply` is the answer's
+        # line. Off, each is the shared no-op.
+        read, reply_stage = timing.stage("server.read"), timing.stage("server.reply")
         try:
-            for raw in self.rfile:
-                line = raw.decode("utf-8").strip()
-                if not line:
+            lines = iter(self.rfile)
+            while True:
+                with read:
+                    raw = next(lines, None)
+                    if raw is None:
+                        break
+                    line = raw.decode("utf-8").strip()
+                    request = json.loads(line) if line else None
+                if request is None:
                     continue
-                request = json.loads(line)
                 try:
                     reply = self._serve(request, attached)
                 except Exception as error:  # noqa: BLE001 -- reported, never fatal
@@ -207,8 +217,9 @@ class _Handler(socketserver.StreamRequestHandler):
                         reply["oom"] = True
                         reply["capGb"] = getattr(server, "memory_cap_gb", None)
                         server.note_oom(request.get("op"), reply["error"])  # type: ignore[attr-defined]
-                self.wfile.write((json.dumps(reply) + "\n").encode("utf-8"))
-                self.wfile.flush()
+                with reply_stage:
+                    self.wfile.write((json.dumps(reply) + "\n").encode("utf-8"))
+                    self.wfile.flush()
         except (ConnectionError, OSError, json.JSONDecodeError):
             pass
         finally:
@@ -282,7 +293,8 @@ class _Handler(socketserver.StreamRequestHandler):
         scores = (getattr(model, "block", None) or model)(arrays, rows)
 
         out = int(request["result_offset"])
-        buffer[out : out + scores.nbytes] = scores.tobytes()
+        with timing.stage("server.write"):
+            buffer[out : out + scores.nbytes] = scores.tobytes()
         server.note_request(rows)  # type: ignore[attr-defined]
         return {"ok": True, "rows": int(scores.shape[0])}
 
@@ -320,9 +332,10 @@ def _serve_q(server: Any, request: dict[str, Any], attached: dict) -> dict[str, 
         if list(matrix.shape) != [int(n) for n in item["shape"]]:
             raise ValueError(f"Q answered {matrix.shape}, asked {item['shape']}")
         out = int(item["result_offset"])
-        buffer[out : out + matrix.nbytes] = np.ascontiguousarray(
-            matrix, dtype=np.float64
-        ).tobytes()
+        with timing.stage("server.write"):
+            buffer[out : out + matrix.nbytes] = np.ascontiguousarray(
+                matrix, dtype=np.float64
+            ).tobytes()
     return {"ok": True}
 
 
@@ -783,6 +796,9 @@ def served_model(value: Any):
         # The arrays are already exactly `rows` long: the client's layout was planned from
         # the batch it is asking about, and `_views` reshapes to that plan.
         encoded = Encoded(**{name: arrays[name] for name in ARRAYS}, unknown_volatiles={})
+        if timing.ON:
+            # IKA-339: the eager passes by their size, for what a larger GRAPH_ROWS would take.
+            timing.count(f"server.eager.rows.{rows}")
         arrived = time.perf_counter()
         instance = mine()
         # Through the process's gate (`EAGER_PASSES`, IKA-334): a pass holds its
@@ -809,7 +825,10 @@ def served_model(value: Any):
         if graphs is None:
             return score(arrays, rows)
         started = time.perf_counter()
-        out = graphs.score(arrays, rows)
+        # IKA-339: staging, the replay's launch and the copy back, apart from the wait on
+        # the card (`server.sync`, inside it).
+        with timing.stage("server.graph"):
+            out = graphs.score(arrays, rows)
         if out is None:
             return score(arrays, rows)
         score.held += time.perf_counter() - started
@@ -988,7 +1007,8 @@ class _Graphs:
             graph.replay()
             result.copy_(out, non_blocking=True)
             done.record()
-        done.synchronize()
+        with timing.stage("server.sync"):
+            done.synchronize()
         return result.numpy().copy()
 
     def _capture(self, inputs: dict[str, Any], pool: Any) -> tuple[Any, Any]:  # noqa: ANN401

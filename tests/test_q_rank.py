@@ -294,6 +294,49 @@ def test_one_round_trip_plays_the_games_of_one_request_per_ranking(
     assert 2 * together[1] == apart[1]
 
 
+def test_a_matrix_both_sides_rank_from_is_solved_once(
+    pool, stub_q, monkeypatch  # noqa: ANN001, ARG001
+) -> None:
+    """IKA-339: with the benches open both sides rank from one matrix, and its game is
+    solved once; the games do not move. The control drops the shared memo, as before."""
+    from pokeuraou import equilibrium
+
+    solves = [0]
+    real = equilibrium.solve
+
+    def counted(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        solves[0] += 1
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(equilibrium, "solve", counted)
+    solver = SolvedSelections(pool.reg, pool.teams, _stub)
+    tested, other = _arm("q-nocover", solver), _arm("refs2-nocover", solver)
+    real_prefetch = qrank.prefetch
+    got = {}
+    for how in ("shared", "apart"):
+        if how == "apart":
+            monkeypatch.setattr(
+                qrank, "prefetch",
+                lambda *a, **k: {s: g[:3] for s, g in real_prefetch(*a, **k).items()},
+            )
+        solves[0] = 0
+        before = sum(_rankings().values())
+        records = [
+            pool_match_game(
+                pool.reg, pool, (tested, other), seed=339, game_index=0, which=which,
+                hide_bench=False, max_turns=3,
+            )[0]
+            for which in (0, 1)
+        ]
+        got[how] = (records, solves[0], sum(_rankings().values()) - before)
+    shared, apart = got["shared"], got["apart"]
+    assert [_game(r) for r in shared[0]] == [_game(r) for r in apart[0]]
+    assert shared[2] == apart[2] > 0
+    # Apart, every ranking solves its matrix (and the search solves its own games too);
+    # shared, one of each open menu's two rankings does not.
+    assert apart[1] - shared[1] == apart[2] // 2
+
+
 def test_each_arm_ranks_by_the_q_its_label_names(pool) -> None:  # noqa: ANN001
     """Stage 3: ``q-nocover`` and ``q-nocover.b`` in one match rank by two Qs."""
     encoder = Encoder(pool.reg)

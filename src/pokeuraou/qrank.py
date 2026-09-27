@@ -273,6 +273,16 @@ class RemoteQ:
     ) -> list[np.ndarray]:
         """The arrays into the shared block, one request line, the matrices back."""
         view = self._block.buf
+        # IKA-339: the worker's own side of a Q request -- the actions' encoding, the
+        # arrays and their copy into the block -- apart from the position's encoding and
+        # the port's features, which are rows of their own inside it.
+        with timing.stage("q.arrays"):
+            items = self._lay(reg, asks, view)
+        return self._post(op, items, view)
+
+    def _lay(
+        self, reg: Regulation, asks: Sequence[tuple[Position, Pools]], view: Any  # noqa: ANN401
+    ) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         at = 0
         for pos, pools in asks:
@@ -294,6 +304,9 @@ class RemoteQ:
                 ).reshape(array.shape)
                 np.copyto(target, array)
             items.append({"layout": layout, "shape": list(shape), "result_offset": result_offset})
+        return items
+
+    def _post(self, op: str, items: list[dict[str, Any]], view: Any) -> list[np.ndarray]:  # noqa: ANN401
         sent = time.perf_counter()
         with timing.stage("serve.q"):
             if op == "q":
@@ -506,7 +519,8 @@ class QGraphs:
             logits = self.net.pair(u, v) - self.net.pair(v, u).transpose(1, 2)
             result.copy_(torch.sigmoid(logits[0]).double(), non_blocking=True)
             done.record()
-        done.synchronize()
+        with timing.stage("server.qsync"):
+            done.synchronize()
         self.replays += 1
         timing.count("q.graph.replays")
         return result.numpy().copy()
@@ -525,9 +539,13 @@ def served_q(net: Any, device: Any, files: Sequence[str]) -> Callable[..., np.nd
 
     def answer(arrays: dict[str, np.ndarray]) -> np.ndarray:
         started = time.perf_counter()
-        out = graphs.matrix(arrays) if graphs is not None else None
+        # IKA-339: the graphs' road (staging, replays, the pair product, the copy back; the
+        # wait on the card is `server.qsync` inside it) and the eager one, apart.
+        with timing.stage("server.qgraph"):
+            out = graphs.matrix(arrays) if graphs is not None else None
         if out is None:
-            out = qhead.q_matrix(net, arrays, device)
+            with timing.stage("server.qeager"):
+                out = qhead.q_matrix(net, arrays, device)
         answer.held += time.perf_counter() - started
         answer.calls += 1
         return out
@@ -570,8 +588,9 @@ def _choices(actions: Sequence[SideAction]) -> tuple[str, ...]:
 
 
 #: What `prefetch` hands `q_ranking` for one side: (the choices of the pool it asked for,
-#: the other side's pool, the matrix).
-Given = tuple[tuple[str, ...], list[SideAction], np.ndarray]
+#: the other side's pool, the matrix, and a memo shared by every side that asked the same
+#: request -- where the first to solve the matrix's game leaves it, IKA-339).
+Given = tuple[tuple[str, ...], list[SideAction], np.ndarray, dict[str, Any]]
 
 
 def prefetch(
@@ -609,10 +628,25 @@ def prefetch(
     matrices = model.matrices(reg, asks)
     timing.count("q.prefetch.trips")
     timing.count("q.prefetch.requests", len(asks))
+    # IKA-339: one memo a request. Two sides that read one position and one pair of pools
+    # rank from one matrix, and so from one game: its solve is the same LP on the same
+    # numbers, and was solved twice (2.9 of 16 rankings a game in M-C generation).
+    memos: list[dict[str, Any]] = [{} for _ in asks]
     return {
-        side: (own_key, foe, matrices[index].copy())
+        side: (own_key, foe, matrices[index].copy(), memos[index])
         for side, (own_key, foe, index) in plan.items()
     }
+
+
+_Q_SOLVED: dict[Any, Any] = {}
+
+
+def _q_solve(solve: Callable[..., Any]) -> Callable[..., Any]:
+    """`solve` charged to `lp.q` rather than `lp` (IKA-339); `solve` when timing is off."""
+    found = _Q_SOLVED.get(solve)
+    if found is None:
+        found = _Q_SOLVED[solve] = timing.timed("lp.q")(getattr(solve, "__wrapped__", solve))
+    return found
 
 
 def q_ranking(
@@ -633,8 +667,10 @@ def q_ranking(
     from .equilibrium import EquilibriumError, solve
 
     def rank(pool: list[SideAction], _scored: object = None) -> np.ndarray:
+        memo: dict[str, Any] | None = None
         if given is not None and pool and given[0] == _choices(pool):
             foe, q = given[1], given[2]
+            memo = given[3] if len(given) > 3 else None
             timing.count("q.prefetched")
         else:
             foe = qhead.legal_pool(reg, pos, 1 - side)
@@ -648,12 +684,24 @@ def q_ranking(
         got["cells"] += int(q.size)
         timing.count("q.rankings")
         timing.count("q.cells", int(q.size))
-        try:
-            e = solve(q)
-        except (EquilibriumError, ValueError):
+        if memo is not None and "solved" in memo:
+            # IKA-339: the other side solved this matrix's game already.
+            e = memo["solved"]
+            timing.count("q.solve.shared")
+        else:
+            try:
+                # IKA-339: the Q's own game, as a row apart from the search's LPs (`lp`).
+                # Timing off, this is `solve` itself.
+                e = _q_solve(solve)(q)
+            except (EquilibriumError, ValueError):
+                e = None
+            if memo is not None:
+                memo["solved"] = e
+        if e is None:
             # An LP that does not solve still leaves an order: the mean against every reply.
             return q.mean(axis=1) if side == 0 else -q.mean(axis=0)
-        return np.asarray(e.row_ev if side == 0 else -np.asarray(e.col_ev), dtype=np.float64)
+        # A copy each: the two sides share `e` now, and neither may hand the other's array on.
+        return np.array(e.row_ev if side == 0 else -np.asarray(e.col_ev), dtype=np.float64)
 
     return rank
 
