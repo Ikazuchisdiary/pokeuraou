@@ -293,8 +293,12 @@ def test_the_play_defaults_follow_the_records() -> None:
 
     # IKA-307: the rest of the budget deepens with the swap oracle over every action.
     assert humanplay.PLAY_ORACLE == ALL_ACTIONS
-    # IKA-342 replaces this line; until then the guard is deepen.MAX_LEVELS.
-    assert humanplay.PLAY_MAX_LEVELS is None
+    # IKA-342: a person's game and the analysis mode deepen to guard 16; generation and the
+    # board keep deepen.MAX_LEVELS.
+    from pokeuraou.deepen import MAX_LEVELS
+
+    assert humanplay.PLAY_MAX_LEVELS == 16
+    assert MAX_LEVELS == 8
     # IKA-307's width-only optima are among the widths a small budget can take.
     assert {18, 26, 36} <= set(humanplay.WIDTHS)
     assert list(humanplay.WIDTHS) == sorted(humanplay.WIDTHS)
@@ -367,3 +371,137 @@ def test_the_oracle_game_is_the_same_at_any_thread_count(pool) -> None:  # noqa:
     assert after["expanded"] > before["expanded"]
     moves = [d for d in one["decisions"] if d["kind"] == "move" and d.get("deepened")]
     assert any("probed" in (d["deepened"][0] or d["deepened"][1] or {}) for d in moves)
+
+
+# ------------------------------------------------------------------------ IKA-344 ponder
+
+
+class _Budget:
+    """A reading of the budget that is the counted cells, one unit a cell."""
+
+    cell = 1.0
+
+    def ms(self, fills, refines, cells, probed=0, qs=0):  # noqa: ANN001, ANN201, ARG002
+        return float(fills + refines + cells)
+
+
+def test_the_ponder_cost_holds_past_the_budget_until_ready_and_replays_by_work() -> None:
+    import threading
+
+    from pokeuraou.deepen import _Meter
+
+    chosen = threading.Event()
+    cost = humanplay.PonderCost(_Budget(), 10, 100, lambda _u, _w: chosen.is_set())
+    meter = _Meter(cost)
+    meter.refined(4, 0)  # work 5
+    assert meter.spent == 5.0 and not cost.floor.is_set()
+    meter.refined(9, 0)  # work 15: past the budget, held under it
+    assert meter.spent < 10 and cost.held and cost.floor.is_set()
+    meter.refined(9, 0)  # work 25
+    chosen.set()
+    assert meter.spent == 25.0 and cost.ready_work == 25
+    # Replayed with the stop point, ready at the same work; without one, only the cap.
+    again = humanplay.PonderCost(_Budget(), 10, 100, None, replay=True, stop_at=25)
+    meter = _Meter(again)
+    meter.refined(14, 0)
+    assert meter.spent < 10
+    meter.refined(9, 0)
+    assert meter.spent == 25.0 and again.ready_work == 25
+    capped = humanplay.PonderCost(_Budget(), 10, 30, None, replay=True)
+    meter = _Meter(capped)
+    meter.refined(24, 0)
+    assert meter.spent < 10
+    meter.refined(9, 0)
+    assert meter.spent == 35.0 and capped.capped and capped.ready_work is None
+    # Ready before the budget is read: the budget still stops the move.
+    early = humanplay.PonderCost(_Budget(), 10, 100, lambda _u, _w: True)
+    meter = _Meter(early)
+    meter.refined(4, 0)
+    assert meter.spent == 5.0 and early.ready_work == 5 and not early.held
+
+
+class _SlowPerson(PolicyPerson):
+    """A stand-in who takes ``delay`` seconds over each move."""
+
+    def __init__(self, policy: str, seed: int, delay: float) -> None:
+        super().__init__(policy, seed)
+        self.delay = delay
+
+    def choose(self, kind, legal, text):  # noqa: ANN001, ANN201
+        if kind == "move":
+            time.sleep(self.delay)
+        return super().choose(kind, legal, text)
+
+
+def _no_ponder(record: dict) -> str:
+    record = copy.deepcopy(record)
+    record["clock"].pop("ponder", None)
+    for d in record["decisions"]:
+        d.get("plan", {}).pop("ponder", None)
+    return json.dumps(record, ensure_ascii=False)
+
+
+def test_a_person_who_answers_at_once_meets_the_agent_without_ponder(pool) -> None:  # noqa: ANN001
+    plain, _, _ = _play(pool, PolicyPerson("random", 5), seed=5)
+    ponder, clock, _ = _play(pool, PolicyPerson("random", 5), seed=5,
+                             agent=_agent(pool, ponder=True))
+    # The budget is a floor: the same game, the stop points aside.
+    assert _no_ponder(ponder) == json.dumps(plain, ensure_ascii=False)
+    # The positive control: the ponder road ran on every move of the agent.
+    moves = [d for d in ponder["decisions"] if "plan" in d]
+    assert moves and all("ponder" in d["plan"] for d in moves)
+    assert any(d["plan"]["ponder"]["ready"] is not None for d in moves)
+    assert all("personSeconds" in row for row in clock["decisions"] if row["kind"] == "move")
+
+
+def test_a_pondering_agent_reads_until_the_person_chooses_and_replays(pool, tmp_path) -> None:  # noqa: ANN001
+    agent = _agent(pool, ponder=True, ponder_seconds=3.0)
+    first, clock, _ = _play(pool, _SlowPerson("random", 5, 1.0), seed=5, agent=agent, turns=2)
+    moves = [row for row in clock["decisions"] if row["kind"] == "move"]
+    held = [row for row in moves if row.get("ponderHeld")]
+    # The person took a second a move: the agent read past its budget while they chose.
+    assert held, "no move read past its budget; the ponder was never on the game"
+    assert all(row["spentUnits"] > row["deepenBudget"] for row in held)
+    assert all(row["personSeconds"] >= 1.0 for row in moves)
+    plain, _, _ = _play(pool, PolicyPerson("random", 5), seed=5, turns=2)
+    assert _no_ponder(first) != json.dumps(plain, ensure_ascii=False)
+    # Read back from its record, stop points and all: the same game, byte for byte.
+    path = tmp_path / "g.jsonl"
+    humanplay.write_line(path, first)
+    script = ScriptPerson.from_record(path)
+    assert script.ponder and len(script.ponder) == len(
+        [d for d in first["decisions"] if "plan" in d]
+    )
+    again, _, _ = _play(pool, script, seed=5, agent=agent, turns=2)
+    assert json.dumps(again, ensure_ascii=False) == json.dumps(first, ensure_ascii=False)
+    # The control: the same inputs without the stop points are another game.
+    bare, _, _ = _play(pool, ScriptPerson(first["human"]["inputs"]), seed=5, agent=agent,
+                       turns=2)
+    assert json.dumps(bare, ensure_ascii=False) != json.dumps(first, ensure_ascii=False)
+    # The person's action is read only after the agent drew its own: another first
+    # answer, the same stop points, the same first move of the agent.
+    from pokeuraou.position import Position
+
+    first_move = next(d for d in first["decisions"] if "plan" in d)
+    side = first["human"]["side"]
+    mine = "ownChosen" if side == 1 else "foeChosen"
+    theirs = "foeChosen" if side == 1 else "ownChosen"
+    inputs = list(first["human"]["inputs"])
+    at = inputs.index(first_move[theirs], 1)
+    legal = side_actions(pool.reg, Position.from_json(first_move["position"]), side)
+    other = next(a.to_choice() for a in legal if a.to_choice() != inputs[at])
+    swapped = _ThenFirst([*inputs[:at], other])
+    swapped.ponder = list(script.ponder)
+    changed, _, _ = _play(pool, swapped, seed=5, agent=agent, turns=1)
+    move = next(d for d in changed["decisions"] if "plan" in d)
+    assert move[theirs] == other != first_move[theirs]
+    assert move[mine] == first_move[mine]
+
+
+class _ThenFirst(ScriptPerson):
+    """A script, then the first legal action once it runs out."""
+
+    def choose(self, kind, legal, text):  # noqa: ANN001, ANN201
+        if self.at >= len(self.lines):
+            return legal[0]
+        return super().choose(kind, legal, text)

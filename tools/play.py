@@ -53,6 +53,7 @@ def analysis_command(args: argparse.Namespace, current: Path) -> list[str]:
     command = [
         sys.executable, str(ROOT / "tools" / "analyze.py"),
         "--record", str(args.out), "--view-port", str(args.analysis_port),
+        "--game-url", f"http://127.0.0.1:{args.port}/",
     ]
     if current is not None:
         command += ["--current", str(current)]
@@ -123,6 +124,7 @@ def main(argv: list[str] | None = None) -> None:
             "--seconds", str(args.seconds), "--games", str(args.games), "--seed", str(seed),
             "--out", str(args.out), "--live-out", str(live),
             *(["--current-out", str(current)] if helper is not None else []),
+            *(["--analysis-url", f"http://127.0.0.1:{args.analysis_port}/"] if helper is not None else []),
             *(["--threads", str(args.threads)] if args.threads is not None else []),
             *([] if args.no_browser else ["--open-browser"]), *rest,
         ])

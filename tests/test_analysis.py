@@ -276,11 +276,21 @@ def test_the_page_starts_a_read_by_command_and_hears_it_end(pool, record) -> Non
         catalogue = until(lambda e: e.get("type") == "catalogue")
         (source,) = catalogue["sources"]
         assert source["games"][0]["decisions"]
+        # IKA-349: each decision carries the record's value where it has one (the agent's moves).
+        raw = json.loads(record.read_bytes())
+        moves = [d for d in raw["decisions"] if d["kind"] == "move"]
+        assert [d["value"] for d in source["games"][0]["decisions"]] == [m.get("searchValue") for m in moves]
+        assert any(d["value"] is not None for d in source["games"][0]["decisions"])
         liveview.ws_send_text(sock, json.dumps(
             {"cmd": "analyze", "source": 0, "game": 0, "decision": 1, "width": 6}
         ))
         done = until(lambda e: e.get("type") == "analysis" and e.get("state") == "done")
         assert done["stop"] == "steps" and done["steps"] == 15 and done["width"] == 6
+        # IKA-349: the actions played there, labelled as the reading labels its menus, both sides.
+        running = next(e for e in seen if e.get("type") == "analysis" and e.get("state") == "running")
+        assert sorted(p["side"] for p in running["played"]) == [0, 1]
+        assert all(p["text"] and p["parts"] for p in running["played"])
+        assert running["notes"] == analysis.notes_ja(analyzer.loc, running["notesRaw"])
         kinds = {e.get("type") for e in seen}
         assert {"sheets", "board", "think", "step", "answer", "status"} <= kinds
         statuses = [e for e in seen if e["type"] == "status"]

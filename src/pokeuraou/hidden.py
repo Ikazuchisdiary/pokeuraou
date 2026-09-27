@@ -362,6 +362,15 @@ def substitute(
     sides[side_index] = side
     swapped = position.copy()
     swapped.sides = sides
+    from . import rustnode
+
+    # Held in the port as `position` with these Pokemon (IKA-350), not written whole.
+    rustnode.note_completion(
+        position,
+        swapped,
+        side_index,
+        [index for index, mon in enumerate(original.pokemon) if mon.slot in replacement],
+    )
     return swapped
 
 

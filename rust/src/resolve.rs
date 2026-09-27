@@ -1375,26 +1375,33 @@ pub fn parse_actions_list(value: &Value) -> Vec<SlotAction> {
         .as_array()
         .map(|list| {
             list.iter()
-                .map(|entry| {
-                    let slot = entry["slot"].as_u64().unwrap_or(0) as usize;
-                    match entry["kind"].as_str().unwrap_or("pass") {
-                        "move" => SlotAction::Move {
-                            slot,
-                            move_id: Id::new(entry["moveId"].as_str().unwrap_or_default()),
-                            target: entry["target"].as_i64(),
-                            mega: entry["mega"].as_bool().unwrap_or(false),
-                        },
-                        "switch" => SlotAction::Switch {
-                            slot,
-                            party_index: entry["partyIndex"].as_u64().unwrap_or(1) as usize,
-                            species: Id::new(entry["species"].as_str().unwrap_or_default()),
-                        },
-                        _ => SlotAction::Pass { slot },
-                    }
+                .map(|entry| match entry.as_u64() {
+                    // A number the caller gave this action's text (`acts`, IKA-350).
+                    Some(id) => crate::held::action(id),
+                    None => parse_slot_action(entry),
                 })
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// One slot action as the caller writes it.
+pub fn parse_slot_action(entry: &Value) -> SlotAction {
+    let slot = entry["slot"].as_u64().unwrap_or(0) as usize;
+    match entry["kind"].as_str().unwrap_or("pass") {
+        "move" => SlotAction::Move {
+            slot,
+            move_id: Id::new(entry["moveId"].as_str().unwrap_or_default()),
+            target: entry["target"].as_i64(),
+            mega: entry["mega"].as_bool().unwrap_or(false),
+        },
+        "switch" => SlotAction::Switch {
+            slot,
+            party_index: entry["partyIndex"].as_u64().unwrap_or(1) as usize,
+            species: Id::new(entry["species"].as_str().unwrap_or_default()),
+        },
+        _ => SlotAction::Pass { slot },
+    }
 }
 
 pub fn parse_actions(case: &Value) -> [Vec<SlotAction>; 2] {
@@ -1467,6 +1474,16 @@ pub fn resolve_turn_logged<'a>(
             let mut turn = Turn::new(reg, pos.clone(), budget, attacks);
             if events {
                 turn.log = Some(Box::default());
+                if tie_weight < 1.0 {
+                    // IKA-345: `tie <first> <second>` per Speed tie the order resolved.
+                    for group in ties.iter().filter(|g| g.len() == 2) {
+                        let at = |v: usize| permutation.iter().position(|x| *x == v);
+                        let (a, b) = (group[0], group[1]);
+                        let (first, second) = if at(a) <= at(b) { (a, b) } else { (b, a) };
+                        let (f, s) = (&queue[first], &queue[second]);
+                        chance_tag!(turn, "tie {} {}", Name(f.side, f.slot), Name(s.side, s.slot));
+                    }
+                }
             }
             let start = Live { weight: 1.0, turn, remaining: sequence };
             let started = phase_start();
@@ -1899,6 +1916,7 @@ fn merge_live<'a>(items: Vec<Live<'a>>) -> Vec<Live<'a>> {
         |x, y| x.remaining == y.remaining && same_turn(&x.turn, &y.turn),
         |into, other| {
             into.weight += other.weight;
+            crate::events::merge_logs(&mut into.turn.log, &other.turn.log);
             into.turn.unmodelled.extend(other.turn.unmodelled);
         },
     )
@@ -1918,7 +1936,10 @@ fn merge_branches(items: Vec<Branch>) -> Vec<Branch> {
         items,
         |branch| state_fingerprint(&branch.position, &[], false),
         |x, y| same_position(&x.position, &y.position),
-        |into, other| into.probability += other.probability,
+        |into, other| {
+            into.probability += other.probability;
+            crate::events::merge_logs(&mut into.log, &other.log);
+        },
     )
     .0
 }
@@ -1933,7 +1954,10 @@ fn merge_suspended<'a>(items: Vec<Suspended<'a>>) -> Vec<Suspended<'a>> {
         items,
         |pause| state_fingerprint(&pause.turn.pos, &pause.remaining, true),
         |x, y| x.remaining == y.remaining && same_turn(&x.turn, &y.turn),
-        |into, other| into.probability += other.probability,
+        |into, other| {
+            into.probability += other.probability;
+            crate::events::merge_logs(&mut into.turn.log, &other.turn.log);
+        },
     )
     .0
 }
