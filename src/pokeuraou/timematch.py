@@ -81,6 +81,9 @@ class Condition:
     #: unrecorded; a number is that guard, and each move's record says why it stopped.
     max_levels: int | None = humanplay.PLAY_MAX_LEVELS
     width_only: bool = False
+    #: A fixed menu width in place of the width rule (``width=W``; with ``width_only`` it
+    #: is a board's ``d1@W``), or None: the rule.
+    width: int | None = None
     child_q: int | None = None
 
     @property
@@ -102,6 +105,7 @@ class Condition:
             f"guard {self.max_levels if self.max_levels is not None else MAX_LEVELS}"
             f"{'' if self.max_levels is not None else ' (unrecorded)'}"
             + (" , width only" if self.width_only else "")
+            + (f", width fixed at {self.width}" if self.width is not None else "")
             + (f", child Q {self.child_q}" if self.child_q is not None else "")
         )
 
@@ -114,7 +118,7 @@ class Condition:
 
 #: The keys a condition is written with, and what each one parses.
 CONDITION_KEYS = ("seconds", "threads", "cores", "clock", "oracle", "levels", "width_only",
-                  "child_q")
+                  "width", "child_q")
 
 
 def _oracle(spec: str) -> int | None:
@@ -175,6 +179,8 @@ def parse_condition(spec: str) -> Condition:
             got["max_levels"] = int(value) or None
         elif key == "child_q":
             got["child_q"] = int(value)
+        elif key == "width":
+            got["width"] = int(value)
         else:
             got[key] = _flag(value)
     if "seconds" not in got:
@@ -355,7 +361,8 @@ class Match:
             reg=self.reg, evaluate=self.evaluate, name=self.leaf_name,
             seconds=condition.seconds, cores=condition.price_cores, clock=condition.clock,
             rank_fill=self.rank_fill, rank_by_leaf=self.rank_by_leaf, bench_drop=self.bench_drop,
-            width_only=condition.width_only, max_levels=condition.max_levels,
+            width_only=condition.width_only, width=condition.width,
+            max_levels=condition.max_levels,
             child_q=condition.child_q, oracle=condition.oracle, halt=self.halt,
             # Off, as a person's game plays by default (the module's docstring).
             ponder=False, ponder_seconds=humanplay.PLAY_PONDER_SECONDS,

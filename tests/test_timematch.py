@@ -224,3 +224,18 @@ def test_a_pair_scores_zero_half_or_one_and_a_game_nobody_won_is_left_out() -> N
     assert got["low"] < got["elo"] < got["high"]
     assert timematch.elo_interval([]) == {"pairs": 0}
 
+
+def test_a_fixed_width_replaces_the_rule(pool) -> None:  # noqa: ANN001
+    wide = _cond("w36", 0.1, width_only=True, width=36, oracle=None)
+    narrow = _cond("w8", 0.1, width_only=True, width=8, oracle=None)
+    lines = timematch.play_pair(_match(pool, wide, narrow), 0, (pool.teams[0], pool.teams[1]))
+    rows = [r for ln in lines for r in ln["moves"]]
+    assert {r["width"] for r in rows if r["condition"] == "w36"} == {36}
+    assert {r["width"] for r in rows if r["condition"] == "w8"} == {8}
+    assert all(r["deepenBudget"] == 0 for r in rows)
+    assert parse_condition("w:seconds=1,width=36").width == 36
+    # The control: the rule at 0.1 s would not have chosen 36 there.
+    from pokeuraou.humanplay import plan_move
+
+    assert plan_move(0.1, 1, 40, 40, 3).width < 36
+    assert plan_move(0.1, 1, 40, 40, 3, width=36).width == 36

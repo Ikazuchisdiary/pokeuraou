@@ -208,6 +208,7 @@ def plan_move(
     form: str = "local",
     width_only: bool = False,
     share: float = WIDTH_SHARE,
+    width: int | None = None,
 ) -> MovePlan:
     """Width first, depth with the rest (the module's docstring; IKA-322 replaces this).
 
@@ -216,10 +217,13 @@ def plan_move(
     The widest of `WIDTHS` whose node is predicted within `WIDTH_SHARE` of the budget, or
     the narrowest when none is; what the prediction leaves goes to the deepening, unless
     it is under `MIN_DEEPEN_MS` or ``width_only``. ``share`` replaces `WIDTH_SHARE` (the
-    first width of an agent that widens mid-read, IKA-354).
+    first width of an agent that widens mid-read, IKA-354). ``width`` fixes the width
+    instead of the rule (a board's ``d1@W``: IKA-333's time match compares it with the
+    rule); the rest of the budget is still the deepening's.
     """
     budget_ms = max(0.0, seconds * 1000.0)
     price = node_time(cores, form)
+    fixed = width
 
     def cells_at(width: int) -> int:
         return min(width, rows) * min(width, cols) * max(classes, 1)
@@ -231,6 +235,8 @@ def plan_move(
         # Past every legal action on both sides a wider menu is the same menu.
         if candidate >= rows and candidate >= cols:
             break
+    if fixed is not None:
+        width = fixed
     predicted = price.ms(cells_at(width))
     left = budget_ms - predicted
     deepen_ms = 0.0 if width_only or left < MIN_DEEPEN_MS else left
@@ -1117,6 +1123,9 @@ class Agent:
     objective: Objective = HP_SHARE
     #: No deepening: the width rule alone (a baseline, and how `NODE_TIME` is measured).
     width_only: bool = False
+    #: A fixed menu width in place of the width rule (a board's ``d1@W``, IKA-333), or
+    #: None: the rule. The budget left after the predicted node still deepens.
+    width: int | None = None
     #: The deepening's depth guard (IKA-307, a label's ``g<L>``), or None: `MAX_LEVELS`.
     #: Given, each move's record says why the deepening and its lines stopped.
     max_levels: int | None = None
@@ -1628,6 +1637,7 @@ class HumanGame:
         counts = (legal_count(reg, pos, me), legal_count(reg, pos, you), classes)
         plan = plan_move(
             agent.seconds, agent.cores, *counts, form=agent.form, width_only=agent.width_only,
+            width=agent.width,
         )
         # IKA-354: read narrow first, widen to the rule's width with what is left.
         later = None

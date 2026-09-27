@@ -9,9 +9,9 @@ The game and the conditions are `pokeuraou.timematch`'s (its docstring says how 
 seats read, what is outside the clock and what a pair is). A condition is
 ``name:key=value,...`` with the keys ``seconds`` (required), ``threads``, ``cores``,
 ``clock`` (wall|count), ``oracle`` (sall|none|s<W>), ``levels`` (the deepening's guard; 0:
-`deepen.MAX_LEVELS` unrecorded), ``width_only`` and ``child_q``. A key left out is the
-human-play default -- what
-``tools/play_human.py`` plays with no flag (IKA-343) -- and so are the leaf
+`deepen.MAX_LEVELS` unrecorded), ``width_only``, ``width`` (fixed, in place of the rule) and
+``child_q``. A key left out is the human-play default -- what ``tools/play_human.py``
+plays with no flag (IKA-343) -- and so are the leaf
 (`play_human.DEFAULT_VALUE`), the menus (``q-nocover`` by `qrank.DEFAULT_Q`; a match stops
 without the Q, as a board does, IKA-338) and the bench belief. **The first --arm is the
 tested condition**: the Elo is its, and ``--sprt E0 E1`` tests it (`pokeuraou.sprt`: H1
