@@ -1577,6 +1577,45 @@ class RustNode:
             total = float(sum(weights))
             presets.append(int(rng.choice(len(weights), p=[w / total for w in weights])))
 
+    def replacement_branches(
+        self, pos: Position, choices: list[SideAction]
+    ) -> list[tuple[float, PortPhase]] | None:
+        """`resolve_replacements` with every draw answered every way (IKA-352): the phase's
+        outcomes and their weights, for a caller with no generator that reads them all."""
+        return self._phase_branches(
+            {
+                "kind": "replacements",
+                "position": _position(pos),
+                "choices": [[dump_action(a) for a in side.slots] for side in choices],
+                "events": False,
+            }
+        )
+
+    def lead_branches(self, pos: Position) -> list[tuple[float, PortPhase]] | None:
+        """`apply_lead_abilities` with every draw answered every way (IKA-352)."""
+        return self._phase_branches({"kind": "leads", "position": _position(pos), "events": False})
+
+    def _phase_branches(self, request: dict[str, Any]) -> list[tuple[float, PortPhase]] | None:
+        """`_phase` walked over every answer to every draw, breadth first: one request for a
+        phase that draws nothing (its only outcome at weight 1), one more per option of each
+        draw met. Options of weight 0 are left out."""
+        out: list[tuple[float, PortPhase]] = []
+        pending: list[tuple[list[int], float]] = [([], 1.0)]
+        while pending:
+            presets, weight = pending.pop(0)
+            response = self._ask({**request, "presets": presets})
+            if response is None:
+                return None
+            weights = response.get("draw")
+            if not weights:
+                out.append((weight, PortPhase.read(response)))
+                continue
+            total = float(sum(weights))
+            pending.extend(
+                ([*presets, i], weight * w / total) for i, w in enumerate(weights) if w > 0
+            )
+        return out
+
 
 def _note_repeat(request: dict[str, Any]) -> None:
     """IKA-258: count a request whose content this decision already sent (`timing.repeat`).

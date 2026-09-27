@@ -25,6 +25,7 @@ import itertools
 from dataclasses import replace
 from fractions import Fraction
 
+import numpy as np
 import pytest
 
 from pokeuraou.actions import SideAction, side_actions
@@ -239,6 +240,61 @@ def test_the_port_notes_the_leads_tie_it_cannot_draw(reg) -> None:  # noqa: ANN0
     opening = _opening(reg, _sampled(ours), _sampled(theirs))
     notes = port.apply_lead_abilities(reg, opening).unmodelled
     assert "switch-in speed tie (the first; not branched)" in notes
+
+
+@pytest.mark.parametrize("name", sorted(LEADS))
+def test_the_selection_solve_reads_every_outcome_of_the_leads_tie(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
+    """A caller with no generator -- the selection solve's openings -- gets both fields at
+    a half each, and `positions_from_sets` still the first of them."""
+    from pokeuraou.selfplay import lead_branches_from_sets, positions_from_sets
+
+    ours, theirs = LEADS[name]
+    showdown = {_field(_lead(oracle, name, tie)) for tie in ("keep", "reverse")}
+    pairs = [(_sampled(ours), _sampled(theirs))]
+    [branches] = lead_branches_from_sets(reg, pairs)
+    assert {_field(pos) for _w, pos in branches} == showdown
+    assert sum(w for w, _pos in branches) == pytest.approx(1.0)
+    assert len(branches) == len(showdown)
+    [first] = positions_from_sets(reg, pairs)
+    assert first.to_json() == branches[0][1].to_json()
+
+
+def _replacement_case(reg):  # noqa: ANN001, ANN202
+    """Both leads down, Rillaboom and Indeedee coming in at one Speed."""
+    from pokeuraou.actions import switch_actions_after_faint
+    from pokeuraou.selfplay import position_from_sets
+
+    ours = [SNEASLER, KINGAMBIT, RILLABOOM]
+    theirs = [SNEASLER, KINGAMBIT, INDEEDEE]
+    pos = position_from_sets(reg, _sampled(ours), _sampled(theirs))
+    for side in pos.sides:
+        lead = side.pokemon[0]
+        lead.hp = 0
+        lead.fainted = True
+    chosen = []
+    for side in range(2):
+        options = switch_actions_after_faint(reg, pos, side, [True, False])
+        chosen.append(next(a for a in options if a.to_choice() == "switch 3, pass"))
+    return pos, chosen
+
+
+def test_the_replacement_search_reads_both_outcomes_of_the_tie(reg) -> None:  # noqa: ANN001
+    """The replacement node's matrix (no generator) prices the cell at the mean of the two
+    fields -- the same `runSwitch` shuffle as the leads' (the Showdown fact above)."""
+    from pokeuraou import port
+    from pokeuraou.selfplay import replacement_matrix
+
+    pos, chosen = _replacement_case(reg)
+    branches = port.replacement_branches(reg, pos, chosen)
+    assert sorted((w, _field(phase.position)) for w, phase in branches) == [
+        (0.5, ("grassyterrain", 5)), (0.5, ("psychicterrain", 5))
+    ]
+
+    def by_terrain(positions):  # noqa: ANN001, ANN202
+        return np.array([1.0 if p.field.terrain == "grassyterrain" else 0.0 for p in positions])
+
+    cell = replacement_matrix(reg, pos, [[chosen[0]], [chosen[1]]], by_terrain)
+    assert cell.tolist() == [[0.5]]
 
 
 # ---------------------------------------------------------------------------

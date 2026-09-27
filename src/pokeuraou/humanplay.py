@@ -123,6 +123,7 @@ from .selfplay import (
     _set_json,
     _shown_record,
     position_from_sets,
+    replacement_matrix,
 )
 from .teams import Roster, pick_four_indices
 
@@ -1461,14 +1462,8 @@ class HumanGame:
         leaf = self.agent.evaluate
 
         def matrix(at: Position) -> np.ndarray:
-            resolved = [
-                [port.resolve_replacements(reg, at, [a, b]).position for b in options[1]]
-                for a in options[0]
-            ]
-            if leaf is None:
-                return np.array([[HP_SHARE(p) for p in row] for row in resolved], dtype=np.float64)
-            flat = [p for row in resolved for p in row]
-            return np.asarray(leaf(flat), dtype=np.float64).reshape(len(options[0]), len(options[1]))
+            # A phase that draws is every outcome at its weight (IKA-352).
+            return replacement_matrix(reg, at, options, leaf)
 
         mine = options[me]
         policy = [1.0]

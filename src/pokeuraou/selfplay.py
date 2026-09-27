@@ -501,7 +501,19 @@ def positions_from_sets(
     its Pokemon with the other openings that put the same set in the same slot (IKA-267:
     8,100 positions of 12 sets were 97,200 stat lines of 48 different Pokemon). These
     positions go to a leaf evaluator, which reads them.
+
+    A draw in the leads' switch-ins (IKA-352: a Speed tie that changes where they end, a
+    Trace between two foes) is its first option here; `lead_branches_from_sets` has every
+    option, and its first is this position.
     """
+    return [branches[0][1] for branches in lead_branches_from_sets(reg, pairs)]
+
+
+def lead_branches_from_sets(
+    reg: Regulation, pairs: Sequence[tuple[list[SampledSet], list[SampledSet]]]
+) -> list[list[tuple[float, Position]]]:
+    """`positions_from_sets` with every outcome of the leads' draws at its weight (IKA-352):
+    one `(1.0, position)` for an opening that draws nothing, which is nearly all of them."""
     active = reg.meta.active_per_side
     made: dict[tuple[int, int, int], Pokemon] = {}
     openings = [_opening(reg, own, foe, made) for own, foe in pairs]
@@ -510,26 +522,30 @@ def positions_from_sets(
         key = (tuple(id(s) for s in own[:active]), tuple(id(s) for s in foe[:active]))
         groups.setdefault(key, []).append(index)
     firsts = [members[0] for members in groups.values()]
-    answered = port.apply_lead_abilities_many(reg, [openings[i] for i in firsts])
-    out: list[Position | None] = [None] * len(pairs)
+    answered = port.lead_branches_many(reg, [openings[i] for i in firsts])
+    out: list[list[tuple[float, Position]] | None] = [None] * len(pairs)
     unshared: list[int] = []
-    for members, phase in zip(groups.values(), answered, strict=True):
-        led = phase.position
+    for members, branches in zip(groups.values(), answered, strict=True):
         opening = openings[members[0]]
-        if not _bench_untouched(led, opening, active):
+        led = [(weight, phase.position) for weight, phase in branches]
+        if not all(_bench_untouched(pos, opening, active) for _weight, pos in led):
             out[members[0]] = led
             unshared.extend(members[1:])
             continue
         for index in members:
-            out[index] = led if index == members[0] else _with_back(led, openings[index], active)
+            out[index] = (
+                led
+                if index == members[0]
+                else [(weight, _with_back(pos, openings[index], active)) for weight, pos in led]
+            )
     if unshared:
-        for index, phase in zip(
+        for index, branches in zip(
             unshared,
-            port.apply_lead_abilities_many(reg, [openings[i] for i in unshared]),
+            port.lead_branches_many(reg, [openings[i] for i in unshared]),
             strict=True,
         ):
-            out[index] = phase.position
-    return [pos for pos in out if pos is not None]
+            out[index] = [(weight, phase.position) for weight, phase in branches]
+    return [branches for branches in out if branches is not None]
 
 
 def _bench_untouched(led: Position, opening: Position, active: int) -> bool:
@@ -2310,19 +2326,7 @@ def _do_replacement_node(
         The replacement node used `hp-share` regardless of what the move nodes used, which
         would leave a third of a game's decisions scored by the thing being replaced.
         """
-        resolved = [
-            [port.resolve_replacements(reg, at, [a, b]).position for b in options[1]]
-            for a in options[0]
-        ]
-        if evaluate is None:
-            return np.array(
-                [[HP_SHARE(after) for after in row] for row in resolved],
-                dtype=np.float64,
-            )
-        flat = [after for row in resolved for after in row]
-        return np.asarray(evaluate(flat), dtype=np.float64).reshape(
-            len(options[0]), len(options[1])
-        )
+        return replacement_matrix(reg, at, options, evaluate)
 
     foe_value: float | None = None
     if sheets is not None:
@@ -2419,6 +2423,36 @@ def _do_replacement_node(
     outcome = port.resolve_replacements(reg, pos, chosen, rng=rng)
     record.unmodelled.extend(outcome.unmodelled)
     return outcome.position
+
+
+def replacement_matrix(
+    reg: Regulation,
+    at: Position,
+    options: Sequence[Sequence[SideAction]],
+    evaluate: LeafEvaluator | None,
+) -> np.ndarray:
+    """Every pair of replacements resolved from `at` and scored, side 0's value.
+
+    A phase that draws -- a Speed tie among the switch-ins that changes where they end, a
+    Trace between two foes -- is every outcome at its weight (IKA-352), not the first one:
+    the cell is their weighted mean. A phase that draws nothing is its one position, scored
+    as before.
+    """
+    cells = [
+        port.replacement_branches(reg, at, [a, b]) for a in options[0] for b in options[1]
+    ]
+    flat = [phase.position for cell in cells for _weight, phase in cell]
+    weights = np.array([weight for cell in cells for weight, _phase in cell], dtype=np.float64)
+    owner = np.repeat(np.arange(len(cells)), [len(cell) for cell in cells])
+    if evaluate is None:
+        values = np.array([HP_SHARE(after) for after in flat], dtype=np.float64)
+    else:
+        values = np.asarray(evaluate(flat), dtype=np.float64)
+    if len(flat) == len(cells):
+        scored = values
+    else:
+        scored = np.bincount(owner, weights=weights * values, minlength=len(cells))
+    return scored.reshape(len(options[0]), len(options[1]))
 
 
 def _pass(slot: int) -> Any:  # noqa: ANN401
@@ -2765,8 +2799,10 @@ __all__ = [
     "GameRecord",
     "final_position",
     "generate",
+    "lead_branches_from_sets",
     "play_game",
     "position_from_sets",
     "positions_from_sets",
+    "replacement_matrix",
     "selfplay_dir",
 ]
