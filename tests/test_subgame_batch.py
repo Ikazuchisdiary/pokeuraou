@@ -85,8 +85,9 @@ def roster():  # noqa: ANN201
     return loaded
 
 
-def _per_sub_game(reg, cells, evaluate, *, budget, sub_limit, sub_branches, shares=None):  # noqa: ANN001, ANN202, ARG001
+def _per_sub_game(reg, cells, evaluate, *, budget, sub_limit, sub_branches, shares=None, child_q=None):  # noqa: ANN001, ANN202, ARG001, E501
     """The pass as it was before IKA-291: `_refined_value` per cell, a call per sub-game."""
+    assert child_q is None, "the per-sub-game pass builds children by damage only (IKA-362)"
     return [
         search_mod._refined_value(
             reg, pos, ours, theirs, evaluate, budget=budget,
