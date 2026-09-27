@@ -1162,6 +1162,11 @@ class Agent:
     #: oracle goes with the whole reading, so it is not asked. ``"open"``: open roots only
     #: (no bench hidden), a Bayesian root read whole.
     restricted: bool | str = False
+    #: A fixed depth-2 read (IKA-362's D; IKA-68's restricted ``search(depth=2)``, the
+    #: Bayesian root's `_restricted_belief`): the depth-1 support's rectangle read a ply
+    #: deeper, its children's matrices whole, whatever the clock says -- with
+    #: ``width_only`` it is the whole move. 1: none.
+    depth: int = 1
     #: Read on while the person chooses (IKA-344, `PonderCost`): the person is asked when
     #: the move starts, and the move deepens until they have chosen -- its budget first,
     #: `ponder_seconds` at most. False: the agent chooses first, then the person is asked.
@@ -1254,6 +1259,7 @@ def solve_move(
     sub_limit: int | None = None,
     sub_branches: int | None = None,
     restricted: bool | str = False,
+    depth: int = 1,
 ) -> SolvedMove:
     """Side ``me``'s answer on the menus ``ours`` (side 0's) x ``theirs`` (side 1's): the
     open game (`search`) when ``exact``, else its Bayesian game over the other side's
@@ -1267,9 +1273,12 @@ def solve_move(
     # The deepening's children, when given (IKA-362); else `search`'s defaults.
     subs = {k: v for k, v in (("sub_limit", sub_limit), ("sub_branches", sub_branches))
             if v is not None}
+    if depth >= 2 and cells:
+        raise ValueError("a fixed depth-2 read is not deepened as well (IKA-362's D)")
     if exact:
         got = search(
             reg, pos, ours, theirs, leaf, budget=budget, **subs,
+            **({"depth": depth, "solve_restricted": True} if depth >= 2 else {}),
             **(
                 {"deepen": cells, "deepen_cost": cost, "levels": levels,
                  "child_q": child_q, "discount": discount,
@@ -1293,6 +1302,7 @@ def solve_move(
     answers = belief_solve(
         reg, pos, ours, theirs, spreads,
         {me: leaf, you: _not_asked}, budget=budget, sides=(me,), **subs,
+        **({"depth": depth} if depth >= 2 else {}),
         deepen=(
             {me: {"cells": cells, "cost": cost, "levels": levels,
                   # The restricted reading asks the whole matrices itself (IKA-362).
@@ -1735,7 +1745,7 @@ class HumanGame:
                 reg, pos, me, ours, theirs, spreads, agent.leaf, budget=budget, exact=exact,
                 cells=cells, cost=cost, levels=agent.max_levels, child_q=agent.child_q,
                 sub_limit=agent.sub_limit, sub_branches=agent.sub_branches,
-                restricted=agent.restricted,
+                restricted=agent.restricted, depth=agent.depth,
                 outside=outside, progress=progress, grow=grow,
             )
         except EquilibriumError:

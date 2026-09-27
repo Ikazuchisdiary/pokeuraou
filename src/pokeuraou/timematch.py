@@ -92,6 +92,8 @@ class Condition:
     sub_branches: int | None = None
     #: The restricted reading of the deepened root (`humanplay.Agent.restricted`, IKA-362).
     restricted: bool | str = False
+    #: A fixed depth-2 read (`humanplay.Agent.depth`, IKA-362's D).
+    depth: int = 1
 
     @property
     def price_cores(self) -> int:
@@ -118,6 +120,7 @@ class Condition:
             + (f", {self.sub_branches} branches kept" if self.sub_branches is not None else "")
             + ((", open roots read restricted" if self.restricted == "open"
                 else ", root read restricted") if self.restricted else "")
+            + (f", depth {self.depth} fixed" if self.depth > 1 else "")
             + (f", child Q {self.child_q}" if self.child_q is not None else "")
         )
 
@@ -130,7 +133,8 @@ class Condition:
 
 #: The keys a condition is written with, and what each one parses.
 CONDITION_KEYS = ("seconds", "threads", "cores", "clock", "oracle", "levels", "width_only",
-                  "width", "child_q", "knockouts", "sub_limit", "sub_branches", "restricted")
+                  "width", "child_q", "knockouts", "sub_limit", "sub_branches", "restricted",
+                  "depth")
 
 
 def _oracle(spec: str) -> int | None:
@@ -191,7 +195,7 @@ def parse_condition(spec: str) -> Condition:
             got["max_levels"] = int(value) or None
         elif key == "child_q":
             got["child_q"] = int(value)
-        elif key in ("width", "sub_limit", "sub_branches"):
+        elif key in ("width", "sub_limit", "sub_branches", "depth"):
             got[key] = int(value)
         elif key == "restricted":
             got[key] = "open" if value == "open" else _flag(value)
@@ -385,6 +389,7 @@ class Match:
             width_only=condition.width_only, width=condition.width,
             knockouts=condition.knockouts, sub_limit=condition.sub_limit,
             sub_branches=condition.sub_branches, restricted=condition.restricted,
+            depth=condition.depth,
             max_levels=condition.max_levels,
             child_q=condition.child_q, oracle=condition.oracle, halt=self.halt,
             # Off, as a person's game plays by default (the module's docstring).

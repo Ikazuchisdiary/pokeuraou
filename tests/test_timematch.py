@@ -272,3 +272,21 @@ def test_the_port_threads_leave_a_node_time_pair_as_it_was(pool, monkeypatch) ->
     assert json.dumps(_timeless(three)) == json.dumps(_timeless(one))
     monkeypatch.setattr(timematch, "PORT_THREADS", None)
     timematch.spread_threads(pool.reg, 1)
+
+
+def test_a_fixed_depth_two_read_plays_and_replays(pool) -> None:  # noqa: ANN001
+    """IKA-362's D: ``depth=2`` with ``width_only`` reads the support rectangle a ply
+    deeper on both kinds of root; the count clock replays it, and it plays another game
+    than the depth-1 agent at the same width (the read reached the answer)."""
+    d = _cond("d", 0.3, width_only=True, depth=2)
+    flat = _cond("flat", 0.3, width_only=True)
+    teams = (pool.teams[0], pool.teams[1])
+    first = timematch.play_pair(_match(pool, d, flat, turns=4), 5, teams)
+    again = timematch.play_pair(_match(pool, d, flat, turns=4), 5, teams)
+    assert json.dumps(_timeless(first)) == json.dumps(_timeless(again))
+    same = timematch.play_pair(_match(pool, flat, _cond("flat2", 0.3, width_only=True), turns=4), 5,
+                               teams)
+    assert json.dumps(_timeless([ln["moves"] for ln in first])) != json.dumps(
+        _timeless([ln["moves"] for ln in same])) or [ln["outcome"] for ln in first] != [
+        ln["outcome"] for ln in same]
+    assert parse_condition("d:seconds=3,clock=count,width_only=on,depth=2").depth == 2
