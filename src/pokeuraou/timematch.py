@@ -147,12 +147,15 @@ def _flag(spec: str) -> bool:
 
 def parse_condition(spec: str) -> Condition:
     """``name:key=value,key=value``. Every key left out is the human-play default
-    (`Condition`'s, which reads `humanplay`'s). ``levels=0`` is `deepen.MAX_LEVELS`
+    (`Condition`'s, which reads `humanplay`'s), but for the threads on the count clock: 1,
+    since a count-clock game is the same game at any number of threads (IKA-343) and one
+    thread a game lets many games share the machine. ``levels=0`` is `deepen.MAX_LEVELS`
     unrecorded, as ``play_human --max-levels 0``.
 
         long:seconds=10
         g16:seconds=10,levels=16
         old:seconds=1,threads=1,oracle=none
+        c10:seconds=10,clock=count
     """
     name, sep, rest = spec.partition(":")
     if not sep or not name or not rest:
@@ -188,6 +191,8 @@ def parse_condition(spec: str) -> Condition:
             got[key] = _flag(value)
     if "seconds" not in got:
         raise ValueError(f"a condition names its seconds a move: {spec!r}")
+    if got.get("clock") == "count" and "threads" not in got:
+        got["threads"] = 1
     condition = Condition(name=name, **got)
     if condition.seconds <= 0 or condition.threads < 1:
         raise ValueError(f"seconds must be > 0 and threads >= 1: {spec!r}")

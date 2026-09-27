@@ -106,6 +106,8 @@ def test_a_condition_left_alone_is_the_human_play_agent() -> None:
     assert (old.threads, old.oracle, old.max_levels, old.width_only) == (1, None, 16, True)
     assert parse_condition("g:seconds=1,levels=0").max_levels is None
     assert parse_condition("c:seconds=1,clock=count,threads=4").price_cores == 1
+    counted = parse_condition("c:seconds=1,clock=count")
+    assert (counted.threads, counted.price_cores) == (1, 1)
     assert parse_condition("o:seconds=1,oracle=s24").oracle == 24
     for bad in ("x", "x:threads=4", "x:seconds=1,speed=2", "x:seconds=1,seconds=2",
                 "x:seconds=0", "x:seconds=1,oracle=all", "x y:seconds=1"):
