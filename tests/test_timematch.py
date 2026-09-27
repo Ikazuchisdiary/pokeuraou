@@ -290,3 +290,30 @@ def test_a_fixed_depth_two_read_plays_and_replays(pool) -> None:  # noqa: ANN001
         _timeless([ln["moves"] for ln in same])) or [ln["outcome"] for ln in first] != [
         ln["outcome"] for ln in same]
     assert parse_condition("d:seconds=3,clock=count,width_only=on,depth=2").depth == 2
+
+
+def test_the_openings_root_at_every_legal_action(pool, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-366's ``root_all``: with ``depth2_auto``, a move where a side has more legal
+    actions than the widest menu reads every legal action of both sides at the root when
+    that node fits the budget; the count clock replays it; each move row carries its read's
+    value. The control: the same condition without it never reads past the widest menu.
+    The depth-2 read after it ranks its children by the Q, which this test has not: it is
+    left out (none fits), the root is what is checked."""
+    monkeypatch.setattr(humanplay, "depth2_children", lambda *_args: None)
+    wide = _cond("all", 1.0, depth2_auto=True, root_all=True)
+    rule = _cond("rule", 1.0, depth2_auto=True)
+    teams = (pool.teams[0], pool.teams[1])
+    first = timematch.play_pair(_match(pool, wide, rule, turns=2), 6, teams)
+    again = timematch.play_pair(_match(pool, wide, rule, turns=2), 6, teams)
+    assert json.dumps(_timeless(first)) == json.dumps(_timeless(again))
+    rows = [r for ln in first for r in ln["moves"]]
+    widened = [r for r in rows if r.get("rootAll")]
+    assert widened, "no root was widened; the check would be vacuous"
+    assert all(r["condition"] == "all" for r in widened)
+    assert any(max(r["rows"], r["cols"]) > humanplay.WIDTHS[-1] for r in widened)
+    assert all(max(r["rows"], r["cols"]) <= humanplay.WIDTHS[-1]
+               for r in rows if r["condition"] == "rule")
+    assert all(0.0 <= r["value0"] <= 1.0 for r in rows)
+    assert parse_condition("a:seconds=1,depth2_auto=on,root_all=on").root_all
+    with pytest.raises(ValueError, match="depth2_auto"):
+        _match(pool, wide, rule).agent(_cond("x", 1.0, root_all=True))
