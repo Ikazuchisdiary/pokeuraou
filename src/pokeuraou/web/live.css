@@ -76,29 +76,59 @@ button { font: inherit; color: inherit; }
 .readseg { display: inline-flex; align-items: center; gap: 4px; }
 .readseg[hidden] { display: none; }
 .seglabel { font-size: 12px; color: var(--dim); }
-#theme .short { display: none; }
+/* IKA-349: the gear and its panel (a popover under the gear; a bottom sheet on a phone) */
+.gear { flex: none; width: 40px; height: 40px; display: inline-grid; place-items: center; border-radius: 10px; border: 1px solid var(--line);
+  background: var(--surface); color: var(--dim); cursor: pointer; padding: 0; }
+.gear:hover, .gear[aria-expanded="true"] { color: var(--ink); }
+.settings { position: fixed; z-index: 40; top: calc(env(safe-area-inset-top, 0px) + 58px); right: 16px; width: 340px;
+  max-height: calc(100vh - 80px); overflow-y: auto; background: var(--surface); color: var(--ink); border: 1px solid var(--line);
+  border-radius: var(--radius); box-shadow: var(--shadow); padding: 12px 16px 16px; }
+.settings[hidden] { display: none; }
+.settings .grip { display: none; width: 40px; height: 4px; border-radius: 2px; background: var(--line); margin: 0 auto 8px; }
+.settings .shead { display: flex; align-items: center; justify-content: space-between; }
+.settings .shead h2 { margin: 0; font-size: 15px; }
+.settings .sgroup { padding: 12px 0; border-top: 1px solid var(--line); margin-top: 10px; }
+.settings .sgroup[hidden] { display: none; }
+.settings .sgroup h3 { margin: 0 0 8px; }
+.settings .seg { flex-wrap: wrap; }
+.settings .note { margin: 6px 0 0; }
+.backdrop { display: none; position: fixed; inset: 0; z-index: 39; background: rgba(0, 0, 0, .4); }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.gamepick select { max-width: 22em; font-size: 12px; padding: 3px 6px; border-radius: 8px; border: 1px solid var(--line);
+  background: var(--surface-2); color: var(--ink); }
+#analysisBox { display: none !important; }
+.primary.small { padding: 3px 12px; border-radius: 8px; font-size: 12px; white-space: nowrap; flex: none; }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) .seg button[aria-pressed="true"], :root:not([data-theme="light"]) .seg .segb[aria-current="page"] {
     background: color-mix(in srgb, var(--ink) 12%, var(--surface)); box-shadow: inset 0 0 0 1px var(--line); }
 }
 :root[data-theme="dark"] .seg button[aria-pressed="true"], :root[data-theme="dark"] .seg .segb[aria-current="page"] {
   background: color-mix(in srgb, var(--ink) 12%, var(--surface)); box-shadow: inset 0 0 0 1px var(--line); }
-/* 375: the header in two rows -- logo, page, theme / state, the reading's three steps */
+/* 375: one row -- logo, page, state (short), gear */
 @media (max-width: 560px) {
-  .top { display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; gap: 8px;
-    grid-template-areas: "brand mode . theme" "status tools tools tools"; }
-  .top .brand { grid-area: brand; } .top .modeseg { grid-area: mode; } .top #theme { grid-area: theme; }
-  .top #status { grid-area: status; } .top .tools { grid-area: tools; justify-content: flex-end; min-width: 0; }
-  .top .grow { display: none; }
-  #theme .long, .readseg .seglabel { display: none; }
-  #theme .short { display: inline; }
+  .top { flex-wrap: nowrap; gap: 8px; }
+  .top .brand b { font-size: 16px; }
+  .top .status { min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
   .top .status .long { display: none; } .top .status .short { display: inline; }
-  body.analysis .mon { grid-template-columns: 56px minmax(0, 1fr); padding: 8px; }
-  body.analysis .mon .art.s-lg { width: 56px; height: 56px; }
-  body.analysis .mon-name { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; text-align: left; font-size: 13px; }
-  body.analysis .hp-track { min-width: 64px; }
+  /* the analysis page's cards in two rows: picture and name, then HP across the card */
+  body.analysis .mon { grid-template-columns: 40px minmax(0, 1fr); padding: 6px; gap: 6px; align-items: center; }
+  body.analysis .mon > div:not(.mon-more) { display: contents; }
+  body.analysis .mon-name { grid-column: 1 / -1; grid-row: 1; display: block; white-space: nowrap; overflow: hidden;
+    text-overflow: ellipsis; text-align: left; font-size: 13px; }
+  body.analysis .mon .art.s-lg, body.analysis .mon .art.s-md { width: 40px; height: 40px; min-width: 40px; max-width: 40px; grid-column: 1; grid-row: 2; justify-self: start; }
+  body.analysis .mon .mon-sub, body.analysis .mon .mon-more { grid-column: 1 / -1; margin-top: 0; }
+  body.analysis .mon .mon-sub span { white-space: nowrap; }
+  /* the card is ~124 px wide here: picture and % side by side, the HP bar across the card below */
+  body.analysis .mon .hp { display: contents; }
+  body.analysis .mon .hp-num { grid-column: 2; grid-row: 2; min-width: 0; text-align: left; font-size: 16px; }
+  body.analysis .mon .hp-track { grid-column: 1 / -1; grid-row: 3; min-width: 48px; }
   .seg button, .seg .segb { padding: 5px 8px; font-size: 12px; }
   .top .status { padding: 5px 10px; font-size: 12px; }
+  .settings { position: fixed; left: 0; right: 0; bottom: 0; top: auto; width: auto; max-height: 85vh; overflow-y: auto;
+    border-radius: 16px 16px 0 0; padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px)); }
+  .settings .grip { display: block; }
+  .backdrop { display: block; }
+  .backdrop[hidden] { display: none; }
 }
 .brand b { font-family: var(--font-display); font-weight: 400; font-size: 18px; letter-spacing: 0.02em; }
 .brand span { font-size: 12px; color: var(--dim); }
@@ -162,7 +192,6 @@ body.analysis .mon .art.s-lg { width: 64px; height: 64px; }
 .tl-svg .band { fill: color-mix(in srgb, var(--ink) 7%, transparent); }
 .tl-svg .mid { stroke: var(--line); stroke-dasharray: 4 4; }
 .tl-svg .ax { fill: var(--faint); font: 11px var(--font-num); text-anchor: end; }
-body.comparing .colhead { display: none; }
 .tl-svg .rec { stroke: var(--faint); stroke-width: 2.5; vector-effect: non-scaling-stroke; }
 .tl-svg .rec.gap { stroke-width: 1.2; stroke-dasharray: 4 4; }
 .tl-svg .recpt { fill: var(--faint); }
@@ -187,31 +216,10 @@ body.comparing .colhead { display: none; }
   .played .row { grid-template-columns: minmax(0, 1fr) auto; }
   .played .row > .act { grid-column: 1 / -1; grid-row: 2; }
 }
-.widen { align-self: end; }
 .notes { margin: 6px 0 0; padding: 0; display: grid; gap: 4px; font-size: 12px; }
 .notes li { list-style: none; display: flex; gap: 6px; align-items: baseline; color: var(--dim); }
 .notes li::before { content: "注"; flex: none; font-size: 10px; font-weight: 700; color: var(--warn);
   border: 1px solid color-mix(in srgb, var(--warn) 50%, transparent); border-radius: 4px; padding: 0 3px; }
-/* two readings side by side */
-.cmp-head { display: grid; grid-template-columns: minmax(0, 1fr) 1fr 1fr; gap: 10px; font-size: 12px; color: var(--dim); align-items: end; }
-.cmp-head .tag { display: grid; gap: 2px; } .cmp-head .tag small { color: var(--faint); }
-.chipA, .chipB { display: inline-block; width: 1.4em; text-align: center; border-radius: 5px; font: 700 11px var(--font-num); }
-.chipA { background: var(--surface-2); color: var(--dim); border: 1px solid var(--line); }
-.chipB { background: var(--ai); color: #fff; }
-.mix.you .chipB { background: var(--you); }
-.cmp { display: grid; gap: 2px; margin-top: 6px; }
-.cmp .r { display: grid; grid-template-columns: minmax(0, 1fr) 1fr 1fr; gap: 10px; align-items: center; padding: 5px 0; font-size: 13px; border-top: 1px solid var(--line); }
-.cmp .cell { display: grid; grid-template-columns: minmax(30px, 1fr) 3.2em; gap: 6px; align-items: center; }
-.cmp .cell .track i { background: var(--faint); }
-.mix.ai .cmp .cell.b .track i { background: var(--ai); } .mix.you .cmp .cell.b .track i { background: var(--you); }
-.cmp .bcol { display: grid; gap: 1px; }
-.cmp .d { font: 11px var(--font-num); }
-.cmp-val { display: grid; grid-template-columns: minmax(0, 1fr) 1fr 1fr; gap: 10px; font-size: 13px; padding: 8px 0 0; border-top: 1px solid var(--line); margin-top: 4px; }
-@media (max-width: 560px) {
-  .cmp-head, .cmp .r, .cmp-val { grid-template-columns: minmax(0, 1fr) 4.6em 4.6em; }
-  .cmp .cell { grid-template-columns: 1fr; gap: 2px; }
-  .cmp .cell .track { height: 6px; }
-}
 /* the end of a game: the card over the court, with the way into the analysis page */
 .endcard { display: grid; gap: 8px; justify-items: center; text-align: center; }
 .endcard b { font-family: var(--font-display); font-weight: 400; font-size: 28px; }

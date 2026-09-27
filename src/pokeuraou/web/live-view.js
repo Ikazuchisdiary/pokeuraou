@@ -239,12 +239,8 @@ function onStep(s) {
   S.last = s;
   renderClock(s.ms, s.kind === "done", s);
   renderBalance(s); renderStrip(s); drawChart();
-  document.body.classList.toggle("comparing", !!(S.analysis && S.cmpA));
-  if (S.analysis && S.cmpA) { renderCompare("ours", s); renderCompare("theirs", s); }
-  else {
-    renderMix("ours", s.ours, s.ourP, s.ourLoss, aiSide(), s.kind === "done", s.oursParts);
-    renderMix("theirs", s.theirs, s.theirP, s.theirLoss, S.personSide, s.kind === "done", s.theirsParts);
-  }
+  renderMix("ours", s.ours, s.ourP, s.ourLoss, aiSide(), s.kind === "done", s.oursParts);
+  renderMix("theirs", s.theirs, s.theirP, s.theirLoss, S.personSide, s.kind === "done", s.theirsParts);
   if (S.analysis) renderPlayed(s);
   renderClasses(s);
   if ($("countBox").open) renderCounters(s);
@@ -580,14 +576,10 @@ $("countBox").addEventListener("toggle", () => S.last && $("countBox").open && r
 // ------------------------------------------------------------------ the value chart
 // One band per decision; inside a band the line is the value while the AI thinks (x = share of
 // the budget). The area between the line and 0.5 is tinted for whoever it favours.
-// A band's label under the value chart: its turn; on the analysis page a turn read again is
-// "N 回目", and the two readings being compared are "A（幅 w）" and "B（幅 w）".
+// A band's label under the value chart: its turn; on the analysis page a turn read again is "N 回目".
 function bandLabel(H, i) {
   const d = H[i];
   if (!S.analysis) return `T${d.turn}`;
-  if (S.cmpA && i >= H.length - 2 && H.length >= 2 && H[H.length - 2].turn === H[H.length - 1].turn) {
-    return i === H.length - 1 ? `B（幅 ${d.width}）` : `A（幅 ${d.width}）`;
-  }
   const same = H.filter((x) => x.turn === d.turn);
   return same.length > 1 ? `T${d.turn} ${same.indexOf(d) + 1} 回目` : `T${d.turn}`;
 }
@@ -625,20 +617,28 @@ function drawChart() {
   g.beginPath(); g.moveTo(L, Y(0.5)); g.lineTo(w - R, Y(0.5)); g.stroke(); g.setLineDash([]);
   const path = () => {
     g.beginPath();
-    H.forEach((d, i) => d.pts.forEach(([f, v], j) => (i || j ? g.lineTo(X(i, f), Y(v)) : g.moveTo(X(i, f), Y(v)))));
+    // On the analysis page each band is a reading of its own: its line does not join the next.
+    H.forEach((d, i) => d.pts.forEach(([f, v], j) => ((i && !(S.analysis && j === 0)) || j ? g.lineTo(X(i, f), Y(v)) : g.moveTo(X(i, f), Y(v)))));
   };
   const lastD = H.length - 1, lastP = H[lastD].pts[H[lastD].pts.length - 1];
   const area = (tint, above) => {
     g.save(); g.beginPath();
     if (above) g.rect(0, 0, w, Y(0.5)); else g.rect(0, Y(0.5), w, h);
     g.clip(); path();
-    g.lineTo(X(lastD, lastP[0]), Y(0.5)); g.lineTo(X(0, H[0].pts[0][0]), Y(0.5)); g.closePath();
+    // The fill closes under the last line only: on the analysis page that is the last reading.
+    const from = S.analysis ? lastD : 0;
+    g.lineTo(X(lastD, lastP[0]), Y(0.5)); g.lineTo(X(from, H[from].pts[0][0]), Y(0.5)); g.closePath();
     g.globalAlpha = 0.16; g.fillStyle = tint; g.fill(); g.restore();
   };
   area(col("--ai"), true); area(col("--you"), false);
   path(); g.strokeStyle = col("--ink"); g.globalAlpha = 0.85; g.lineWidth = 1.6; g.lineJoin = "round"; g.stroke(); g.globalAlpha = 1;
   g.fillStyle = lastP[1] >= 0.5 ? col("--ai") : col("--you");
   g.beginPath(); g.arc(X(lastD, lastP[0]), Y(lastP[1]), 4, 0, 7); g.fill();
+  // A reading kept with its last value only (a page that came in late): a grey dot there.
+  if (S.analysis) H.forEach((d, i) => {
+    if (i === lastD || d.pts.length !== 1) return;
+    g.fillStyle = col("--faint"); g.beginPath(); g.arc(X(i, d.pts[0][0]), Y(d.pts[0][1]), 4, 0, 7); g.fill();
+  });
 }
 window.addEventListener("resize", drawChart);
 window.addEventListener("resize", () => renderTimeline());
@@ -725,6 +725,7 @@ function applyHide() {
   document.body.classList.toggle("read-off", game && readMode === "off");
   $("hiddenBar").hidden = !(game && readMode === "off");
   document.querySelectorAll("#readSeg button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.v === readMode)));
+  $("readHelp").textContent = READ_HELP[readMode] || "";
   updateLinks();
   drawChart();
 }
@@ -779,13 +780,36 @@ try { theme = localStorage.getItem("pokeuraou-theme") || "auto"; } catch (_) { /
 function applyTheme() {
   if (theme === "auto") document.documentElement.removeAttribute("data-theme");
   else document.documentElement.setAttribute("data-theme", theme);
-  $("theme").innerHTML = `<span class="long">テーマ: ${THEME_JA[theme]}</span><span class="short" aria-hidden="true">◐</span>`;
+  document.querySelectorAll("#themeSeg button").forEach((b) => b.setAttribute("aria-pressed", String(b.dataset.t === theme)));
   drawChart();
 }
-$("theme").onclick = () => {
-  theme = THEMES[(THEMES.indexOf(theme) + 1) % 3];
+document.querySelectorAll("#themeSeg button").forEach((b) => b.onclick = () => {
+  theme = b.dataset.t;
   try { localStorage.setItem("pokeuraou-theme", theme); } catch (_) { /* ignore */ }
   applyTheme();
+});
+
+// ------------------------------------------------------------------ the settings (IKA-349): behind the gear
+// Everything a person need not think about: the theme, how the game page shows the reading, the
+// analysis page's reading settings and its gauges. Values act at once and stay in localStorage.
+function openSettings(open) {
+  $("settings").hidden = !open; $("settingsBackdrop").hidden = !open;
+  $("gear").setAttribute("aria-expanded", String(open));
+  if (open) { const f = $("settings").querySelector("button[aria-pressed=true], button, select, input"); if (f) f.focus(); }
+  else $("gear").focus();
+}
+$("gear").onclick = () => openSettings($("settings").hidden);
+$("settingsClose").onclick = () => openSettings(false);
+$("settingsBackdrop").onclick = () => openSettings(false);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("settings").hidden) openSettings(false); });
+document.addEventListener("pointerdown", (e) => {
+  if ($("settings").hidden || window.matchMedia("(max-width: 560px)").matches) return;
+  if (!$("settings").contains(e.target) && !$("gear").contains(e.target)) openSettings(false);
+});
+const READ_HELP = {
+  show: "AI の混合戦略・形勢・読み筋をいつも見せます。",
+  until: "あなたが手を送るまで、AI の読みをぼかします。",
+  off: "AI の読みの欄を消し、場を広く使います。対局のあと、分析の画面で見られます。",
 };
 if (window.matchMedia) window.matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawChart);
 applyTheme();
@@ -802,9 +826,10 @@ function enterAnalysis() {
   if (S.analysis) return;
   S.analysis = true;
   document.body.classList.add("analysis");
-  $("analysisBox").hidden = false; $("inputBox").hidden = true;
+  $("inputBox").hidden = true;
   $("timelineBox").hidden = false; $("playedBox").hidden = false; $("pvBox").open = true;
-  $("readSeg").hidden = true; $("stopTop").hidden = false; $("logBox").open = false;
+  $("readGroup").hidden = true; $("engineGroup").hidden = false; $("stopTop").hidden = false; $("goTop").hidden = false;
+  $("logBox").open = false;
   $("modeGame").removeAttribute("aria-current"); $("modeAnalysis").setAttribute("aria-current", "page");
   applyHide();
   document.querySelector(".brand span").textContent = "検討";
@@ -898,10 +923,9 @@ function openFromUrl() {
   if (d) $("aTurn").value = String(d.index);
   stepState(); startRead();
 }
-function startRead(keepA) {
+function startRead() {
   const g = pickedGame();
   if (!g) return;
-  if (!keepA) S.cmpA = null;
   LiveData.command({
     cmd: "analyze", source: +$("aSource").value, game: +$("aGame").value, decision: +$("aTurn").value,
     side: +$("aSide").value, width: +$("aWidth").value || null, guard: +$("aGuard").value || null,
@@ -909,27 +933,21 @@ function startRead(keepA) {
   setStatus("読み始めます…", "think");
   renderTimeline();
 }
-// Widen: the reading so far stays as reading A, the same position is read again wider (B).
-$("aWiden").onclick = () => {
-  const st = S.analysisState, w = +$("aWidth").value || (st && st.width) || 64;
-  if (S.last && st) S.cmpA = { snap: S.last, width: st.width, guard: st.guard, key: readKey(st) };
-  $("aWidth").value = Math.min(256, Math.round(w * 1.5));
-  startRead(true);
-};
-const readKey = (e) => `${e.source}.${e.game}.${e.decision}.${e.side}`;
+
 function stopRead() { LiveData.command({ cmd: "stop" }); }
 $("aGo").onclick = startRead;
+$("goTop").onclick = () => startRead();
+$("aReread").onclick = () => { openSettings(false); startRead(); };
 $("aStop").onclick = stopRead;
 $("stopTop").onclick = stopRead;
 function setRunning(on) {
   S.running = on;
-  $("aStop").disabled = !on; $("stopTop").disabled = !on;
+  $("aStop").disabled = !on; $("stopTop").disabled = !on; $("stopTop").hidden = S.analysis && !on; $("goTop").hidden = !S.analysis || on;
   $("clockbar").classList.toggle("endless", on);
 }
 function onAnalysis(e) {
   S.analysisState = e;
   if (e.state === "running") {
-    if (S.cmpA && S.cmpA.key !== readKey(e)) S.cmpA = null;
     S.played = e.played || [];
     setRunning(true);
     // The picker shows what is being read (a read started from the command line, or another page).
@@ -942,7 +960,6 @@ function onAnalysis(e) {
     setStatus(`読んでいます（ターン ${e.turn}・側 ${e.side}）`, "think", `読んでいます T${e.turn}`);
     $("aNote").textContent = "";
     renderNotes(e);
-    $("aWiden").disabled = false;
     log(e.turn, `検討を始めた: 側 ${e.side} から、幅 ${e.width}（候補集合 ${e.menu[0]}×${e.menu[1]}）・最善応答オラクル ${esc(e.oracle)}・深化の深さの上限 ${e.guard} 段` +
       (e.exact ? "・裏は尽きている" : `・相手の裏の決定化 ${e.classCount} 通り`));
   } else {
@@ -1026,37 +1043,6 @@ function renderPlayed(s) {
     const who = mine ? "検討する側" : "相手";
     return `<div class="row"><span class="who ${mine ? "a" : "y"}">${who}</span><span class="act">${actHtml(p.parts, boardWho(p.side))}</span><span class="n">${n}</span></div>`;
   }).join("");
-}
-// Two readings side by side: A (kept when the width was raised) against B (the reading now).
-let cmpAt = 0;
-function renderCompare(key, s) {
-  const now = performance.now();
-  if (s.kind !== "done" && now - cmpAt < 400) return;
-  if (key === "theirs") cmpAt = now;
-  const A = S.cmpA, a = A.snap, st = S.analysisState || {};
-  const la = key === "ours" ? a.ours : a.theirs, pa = key === "ours" ? a.ourP : a.theirP, qa = key === "ours" ? a.oursParts : a.theirsParts;
-  const lb = key === "ours" ? s.ours : s.theirs, pb = key === "ours" ? s.ourP : s.theirP, qb = key === "ours" ? s.oursParts : s.theirsParts;
-  const side = key === "ours" ? aiSide() : S.personSide;
-  const rows = new Map();
-  lb.forEach((l, i) => rows.set(l, { parts: qb[i], b: pb[i], a: null }));
-  la.forEach((l, i) => { const r = rows.get(l); if (r) r.a = pa[i]; else rows.set(l, { parts: qa[i], a: pa[i], b: null }); });
-  const list = [...rows.values()].filter((r) => (r.a || 0) >= LIVE_MIN || (r.b || 0) >= LIVE_MIN)
-    .sort((x, y) => (y.b || 0) - (x.b || 0) || (y.a || 0) - (x.a || 0));
-  const cell = (p, cls) => (p == null ? `<span class="cell ${cls}"><span class="note">なし</span></span>`
-    : `<span class="cell ${cls}"><span class="track"><i style="width:${(100 * p).toFixed(1)}%"></i></span><b class="pct n">${pct(p)}</b></span>`);
-  const el = $(key);
-  el._labels = null;
-  el.innerHTML = `<div class="cmp-head"><span>手</span><span class="tag"><span><span class="chipA">A</span> 残した読み</span><small>幅 ${A.width}・深さ ${A.guard}</small></span>
-      <span class="tag"><span><span class="chipB">B</span> 今の読み</span><small>幅 ${st.width}・深さ ${st.guard}</small></span></div>
-    <div class="cmp">${list.map((r) => {
-      const d = r.a != null && r.b != null ? r.b - r.a : null;
-      const only = r.a == null ? '<span class="badge">B だけ</span>' : r.b == null ? '<span class="badge">A だけ</span>' : "";
-      return `<div class="r"><span class="act">${actHtml(r.parts, boardWho(side))}${only}</span>${cell(r.a, "a")}<span class="bcol">${cell(r.b, "b")}${d == null || Math.abs(d) < 0.0005 ? "" : `<span class="d n ${d > 0 ? "up" : "down"}">${d > 0 ? "+" : "−"}${(100 * Math.abs(d)).toFixed(1)}</span>`}</span></div>`;
-    }).join("")}</div>` +
-    (key === "ours" ? `<div class="cmp-val"><span>値（検討する側）</span><span class="n">${v3(a.value)}</span><span class="n">${v3(s.value)} ${dlt(s.value - a.value)}</span></div>
-      <p class="note"><button type="button" class="ghost small" id="dropA">A を消す</button> 読み筋・裏の読みは B（今の読み）のものです。</p>` : "");
-  const drop = $("dropA");
-  if (drop) drop.onclick = () => { S.cmpA = null; $("ours").innerHTML = ""; $("theirs").innerHTML = ""; if (S.last) onStep(S.last); };
 }
 // The notes the engine writes (English) that the page can say in Japanese; others as they are.
 const NOTES_JA = [
