@@ -648,6 +648,11 @@ class Settings:
     #: Least milliseconds between two walks of the tree for the guard's count; a walk that
     #: took t waits at least 10 t (a big tree is walked less often).
     guard_every_ms: float = 1000.0
+    #: Read by a ladder of stages instead of the deepening (IKA-367/364: a name in
+    #: `ladder.LADDERS` or stages joined by ``+``), until the person stops it or the last
+    #: stage completes; its cells on the worker processes `humanplay.use_ladder_pool`
+    #: started. None: the deepening.
+    ladder: str | None = None
 
     def oracle_label(self) -> str:
         if self.oracle is None:
@@ -1020,13 +1025,30 @@ class Analyzer:
                 limits or Limits(rss_gb=0, free_gb=0, gpu_gb=0), session.halt, tick=tick,
                 every=0.5 if max_seconds is None else min(0.5, max(0.01, max_seconds / 10)),
             ).start()
+        rungs: list[dict[str, Any]] = []
         try:
-            solved = solve_move(
-                reg, pos, me, ours, theirs, spreads, self.leaf, budget=budget, exact=exact,
-                cells=ENDLESS, cost=StopCost(stop, started), levels=settings.levels,
-                outside=outside, progress=session, discount=settings.discount,
-                grow=session.widen,
-            )
+            if settings.ladder is not None:
+                from .ladder import parse_ladder
+
+                def on_rung(rung: Any) -> None:  # noqa: ANN401 - ladder.Rung
+                    # Each completed stage is the answer so far (IKA-364).
+                    rungs.append(rung.to_json())
+                    session.steps = len(rungs)
+                    emit("analysis", {**state, "rung": rungs[-1], "steps": len(rungs)})
+
+                solved = solve_move(
+                    reg, pos, me, ours, theirs, spreads, self.leaf, budget=budget, exact=exact,
+                    ladder={"stages": parse_ladder(settings.ladder), "budget_ms": None,
+                            "clock": "wall", "start_ms": 0.0, "began": started, "stop": stop,
+                            "on_rung": on_rung},
+                )
+            else:
+                solved = solve_move(
+                    reg, pos, me, ours, theirs, spreads, self.leaf, budget=budget, exact=exact,
+                    cells=ENDLESS, cost=StopCost(stop, started), levels=settings.levels,
+                    outside=outside, progress=session, discount=settings.discount,
+                    grow=session.widen,
+                )
         except EquilibriumError as problem:
             session.halt("error", str(problem))
             raise
@@ -1038,7 +1060,9 @@ class Analyzer:
         reason = session.reason
         if not reason:
             report = solved.deepened
-            reason = "exhausted" if report is not None and report.stop == "exhausted" else "person"
+            reason = ("exhausted" if (report is not None and report.stop == "exhausted")
+                      or (solved.ladder is not None and solved.ladder.stopped == "done")
+                      else "person")
         mine = solved.ours if me == 0 else solved.theirs
         other = solved.theirs if me == 0 else solved.ours
         seconds = time.perf_counter() - started
@@ -1050,7 +1074,9 @@ class Analyzer:
             steps=session.steps, seconds=seconds, stop=reason, guard=settings.levels,
             guard_lines=session.guard_count, nodes=session.nodes, exact=exact,
             classes=classes,
-            deepened=None if solved.deepened is None else solved.deepened.to_json(),
+            deepened=(solved.deepened.to_json() if solved.deepened is not None
+                      else {"ladder": solved.ladder.to_json()} if solved.ladder is not None
+                      else None),
             notes=notes + sorted(solved.unmodelled),
             memory=None if watch is None else watch.peak,
             width=int(state["width"]), widened_to=widened_to,

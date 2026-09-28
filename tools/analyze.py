@@ -86,6 +86,11 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--threads", type=int, default=humanplay.default_threads(),
                     help="cores the read spreads over (IKA-32 stage 2: worker processes expand "
                     "cells ahead, a big game's two LPs at once); they change no answer")
+    ap.add_argument("--ladder", default=None,
+                    help="read by a ladder of stages instead of the deepening (IKA-367; a name in "
+                    "ladder.LADDERS such as L5, or stages joined by +) until stopped or its last "
+                    "stage, each completed stage the answer so far; its cells on --threads - 1 "
+                    "worker processes (IKA-364). Default: none (the deepening)")
     ap.add_argument("--value", type=Path, nargs="+", default=None,
                     help=f"the leaf (one model or an ensemble). Default: {' '.join(DEFAULT_VALUE)}")
     ap.add_argument("--hp-share", action="store_true", help="no leaf: the hp-share proxy")
@@ -187,7 +192,15 @@ def main(argv: list[str] | None = None) -> None:
             humanplay.served_q(address, q_path, encoder) if address and evaluate is not None
             else qrank.LocalQ(q_path, encoder, device=device or "cpu")
         )
-    if address and evaluate is not None:
+    if args.ladder is not None:
+        # IKA-364: the ladder's cells on threads - 1 worker processes.
+        humanplay.use_threads(args.threads)
+        workers = humanplay.use_ladder_pool(args.threads, reg, humanplay.ladder_spec(
+            leaf=evaluate, address=address, merge=args.merge == "on", values=values,
+            device=device, graphs=args.leaf_graphs == "on", cuda_memory_gb=args.cuda_memory_gb,
+            q_path=q_path if qrank.is_q(fill) else None))
+        say(f"ladder {args.ladder}: cells on {workers} worker process(es)")
+    elif address and evaluate is not None:
         humanplay.use_threads(args.threads, reg, (address, "value", args.merge == "on"),
                               factory=humanplay.served_process_leaf)
     else:
@@ -200,7 +213,7 @@ def main(argv: list[str] | None = None) -> None:
     settings = analysis.Settings(
         width=args.width, oracle=_oracle_width(args.oracle), levels=args.max_levels,
         discount=args.depth_discount, rank_fill=fill, bench_drop=args.bench_drop, open_information=args.open,
-        interval_ms=args.interval_ms,
+        interval_ms=args.interval_ms, ladder=args.ladder,
     )
     analyzer = analysis.Analyzer(reg, evaluate, name, loc=loc, settings=settings)
     sources = [analysis.Source(path.name, path, limit=args.limit) for path in args.record]

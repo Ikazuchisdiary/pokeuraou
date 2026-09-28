@@ -302,3 +302,22 @@ def test_the_page_starts_a_read_by_command_and_hears_it_end(pool, record) -> Non
         sock.close()
     finally:
         server.close()
+
+
+# ------------------------------------------------------------------------ the ladder
+
+
+def test_a_ladder_read_gives_each_stage_and_ends_on_the_last(pool, record) -> None:  # noqa: ANN001
+    """IKA-364: the analysis mode read by a ladder: each completed stage is sent as the
+    answer so far, the read ends when the last stage completes, and its answer is that
+    stage's -- the same as the ladder read on the same node (`solve_move`)."""
+    analyzer, game, point = _hidden_point(pool, record)
+    stages = "d2r2b3n4+d2r3ban4"
+    heard: list = []
+    got = analyzer.run(game, point, settings=_settings(width=5, oracle=None, ladder=stages),
+                       listener=lambda kind, payload: heard.append((kind, payload)))
+    rungs = [p["rung"]["stage"] for k, p in heard if k == "analysis" and "rung" in p]
+    assert rungs == ["d2r2b3n4", "d2r3ban4"]
+    assert got.stop == "exhausted" and got.steps == 2
+    assert [r["stage"] for r in got.deepened["ladder"]["rungs"]] == rungs
+    assert any("ladder read to d2r3ban4" in note for note in got.notes)

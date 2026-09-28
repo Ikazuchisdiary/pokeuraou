@@ -42,6 +42,8 @@ as one stage of depth 3, and so on -- so every cell of a stage is the same tree.
 
 from __future__ import annotations
 
+import contextlib
+import os
 import re
 import time
 from collections.abc import Callable, Sequence
@@ -262,6 +264,11 @@ class LadderResult:
     unmodelled: set[str] = field(default_factory=set)
     #: The depth-1 answer it started from (its strategy and guaranteed value).
     start: tuple[np.ndarray, float] | None = None
+    #: Worker processes that read its cells (`start_pool`, IKA-364); 0: read here.
+    workers: int = 0
+    #: With workers: where the reader's time went (`_Pool.stats`: its waits on them, its
+    #: sends and receives, the workers' own reading time, its CPU and wall).
+    pool: dict[str, float] = field(default_factory=dict)
 
     @property
     def depth_reached(self) -> str:
@@ -271,7 +278,10 @@ class LadderResult:
         return {"rungs": [r.to_json() for r in self.rungs], "stopped": self.stopped,
                 "unfinished": self.unfinished, "abandoned": self.abandoned,
                 "spentMs": round(self.spent_ms, 1), "wallMs": round(self.wall_ms, 1),
-                "work": dict(self.work)}
+                "work": dict(self.work),
+                **({"workers": self.workers,
+                    "pool": {k: round(v, 1) for k, v in self.pool.items()}}
+                   if self.workers else {})}
 
 
 #: A priori branches kept per refined cell, by (all kept, knock-outs forked): a stage's
@@ -311,13 +321,13 @@ def _order(strategy: np.ndarray, ev: np.ndarray, count: int, *, larger: bool) ->
 
 class _Clock:
     def __init__(self, kind: str, cost: LadderCost, start_ms: float, budget_ms: float | None,
-                 stop: Any) -> None:  # noqa: ANN401 - threading.Event
+                 stop: Any, began: float | None = None) -> None:  # noqa: ANN401 - threading.Event
         self.kind = kind
         self.cost = cost
         self.start_ms = start_ms
         self.budget_ms = budget_ms
         self.stop = stop
-        self.began = time.perf_counter()
+        self.began = time.perf_counter() if began is None else began
 
     def wall_ms(self) -> float:
         return (time.perf_counter() - self.began) * 1000.0
@@ -363,6 +373,7 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
     start_ms: float = 0.0,
     stop: Any = None,  # noqa: ANN401
     on_rung: Callable[[Rung], None] | None = None,
+    began: float | None = None,
 ) -> LadderResult:
     """Side ``side``'s answer, stage by stage (the module's docstring).
 
@@ -373,7 +384,13 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
     caller's ``stop`` event the only brake), read on ``clock`` (``count``: `LadderCost`,
     ``wall``); ``start_ms`` is what the move has spent before (the node). ``on_rung`` is
     called with each completed stage. ``budget`` is the root's (the stages fork the
-    knock-outs on it where they say so).
+    knock-outs on it where they say so). ``began`` is when the wall clock started
+    (`time.perf_counter`; None: now): a move's reading counts the depth-1 node it built.
+
+    With a pool of worker processes (`start_pool`, IKA-364) a top-level read sends each
+    stage's cells to the workers and takes their values back in the order it asked them,
+    so the budget is read at the same points as without; on the count clock, with the
+    serial chunks (`POOL_CHUNK` = `CHUNK`), it is the serial read to the bit.
     """
     cost = cost or LADDER_COSTS["local", 1]
     w = np.asarray(weights, dtype=np.float64)
@@ -394,7 +411,16 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
     work = _zero()
     outer = search.WORK
     search.WORK = work
-    run = _Clock(clock, cost, start_ms, budget_ms, stop)
+    run = _Clock(clock, cost, start_ms, budget_ms, stop, began)
+    # The workers read a top-level read's cells; a cell's own read (depth 3 and up) is
+    # always read where it is.
+    pool = _POOL if outer is None and _POOL is not None and _POOL.alive() else None
+    if pool is not None:
+        pool.begin(row, col, items, budget, hidden_side, cost)
+        result.workers = len(pool.conns)
+        cpu_began = time.process_time()
+    #: The completed stages' counted and wall milliseconds (the wall clock's scale).
+    stages_count = stages_wall = 0.0
     #: Measured milliseconds per fresh cell, by kind: the next stage's prediction.
     measured: dict[tuple, tuple[float, int]] = {}
     #: By depth, the completed stages' measured and a-priori (`_guess_cell_ms`) totals: a
@@ -418,13 +444,23 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
                     (sum(v[0] for v in calib.values()), sum(v[1] for v in calib.values()))
                     if calib else None)
                 ratio = 1.0 if not have or have[1] <= 0 else have[0] / have[1]
-                per_cell = guess * min(max(ratio, 0.05), 3.0)
+                # IKA-364: the depth-3 guesses run 100-200 times the counted cost (1,794 ms a
+                # cell guessed for d3r8b3k24x, 12-24 counted), so a floor of 0.05 predicted
+                # the next depth-3 stage at 4-8 times its cost and a 32 s read stopped at
+                # 5-14 s.
+                per_cell = guess * min(max(ratio, 0.002), 3.0)
             fresh_keys = {_key(side, i, j, k, stage) for k in range(kinds) for i in rows
                           for j in cols[k]} - set(memo)
-            if per_cell * len(fresh_keys) > run.left_ms(work):
+            # The prediction is in counted milliseconds; on the wall clock it is scaled by
+            # this read's wall a counted millisecond so far (the workers read several at once:
+            # IKA-364), 1 before a stage has completed.
+            speed = (stages_wall / stages_count
+                     if run.kind == "wall" and stages_count > 0 else 1.0)
+            if per_cell * len(fresh_keys) * speed > run.left_ms(work):
                 result.stopped, result.unfinished = "budget", stage.label
                 break
             stage_began = run.spent_ms(work)
+            count_began, wall_began = cost.ms(work), run.wall_ms()
             fresh = 0
             abandoned = False
             answer = None
@@ -438,23 +474,45 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
                         ours, theirs = (i, j) if side == 0 else (j, i)
                         asked[key] = (k, ours, theirs)
                 keys = list(asked)
-                for at in range(0, len(keys), step):
-                    chunk = keys[at:at + step]
-                    try:
-                        got = _read_cells(reg, [asked[key] for key in chunk], row, col, items,
-                                          leaf, stage, budget, stage_budget, turns, clean,
-                                          hidden_side, result.unmodelled, cost, stop)
-                    except Stopped:
-                        abandoned = True
-                        break
-                    for key, v in zip(chunk, got, strict=True):
-                        memo[key] = v
-                    fresh += len(chunk)
-                    left = len(keys) - (at + len(chunk))
-                    per = (run.spent_ms(work) - stage_began) / max(fresh, 1)
-                    if run.stopped() or run.left_ms(work) < 0 or per * left > run.left_ms(work):
-                        abandoned = True
-                        break
+                size = step if pool is None or stage.sub is not None else pool.chunk(len(keys))
+                chunks = [keys[at:at + size] for at in range(0, len(keys), size)]
+                asks = [[asked[key] for key in chunk] for chunk in chunks]
+                if pool is None:
+                    reads = _serial(asks, lambda cells, stage=stage, stage_budget=stage_budget:
+                                    _read_cells(reg, cells, row, col, items, leaf, stage, budget,
+                                                stage_budget, turns, clean, hidden_side,
+                                                result.unmodelled, cost, stop))
+                else:
+                    reads = pool.cells(asks, stage, stage_budget, work, result.unmodelled)
+                done = 0
+                try:
+                    for index, got in reads:
+                        if got is _TICK:
+                            # Waiting on the workers: the caller's stop, and the wall clock.
+                            if run.stopped() or (run.kind == "wall" and run.left_ms(work) < 0):
+                                abandoned = True
+                                break
+                            continue
+                        if got is _STOPPED:
+                            abandoned = True
+                            break
+                        chunk = chunks[index]
+                        for key, v in zip(chunk, got, strict=True):
+                            memo[key] = v
+                        fresh += len(chunk)
+                        done += len(chunk)
+                        left = len(keys) - done
+                        per = (run.spent_ms(work) - stage_began) / max(fresh, 1)
+                        # What the rest will take: at the rate so far, or -- the workers on
+                        # the wall clock -- at the workers' own rate, spread over them.
+                        need = (pool.eta_ms(left) if pool is not None and run.kind == "wall"
+                                else per * left)
+                        if (run.stopped() or run.left_ms(work) < 0
+                                or need > run.left_ms(work)):
+                            abandoned = True
+                            break
+                finally:
+                    reads.close()
                 if abandoned:
                     break
                 for i, j, k in todo:
@@ -498,7 +556,10 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
                 result.stopped = "stop" if run.stopped() else "budget"
                 result.unfinished, result.abandoned = stage.label, abandoned
                 break
-            spent = run.spent_ms(work) - stage_began
+            # What the stage cost, counted (on the count clock the clock's own reading).
+            spent = cost.ms(work) - count_began
+            stages_count += spent
+            stages_wall += run.wall_ms() - wall_began
             total, count = measured.get(stage.kind, (0.0, 0))
             measured[stage.kind] = (total + spent, count + fresh)
             got_ms, guessed = calib.get(stage.depth, (0.0, 0.0))
@@ -520,6 +581,10 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
             # A cell's own read (depth 3 and up): its work is the cell's.
             for kind, n in work.items():
                 outer[kind] += n
+    if pool is not None:
+        pool.end()
+        result.pool = dict(pool.stats, parentCpuMs=(time.process_time() - cpu_began) * 1000.0,
+                           wallMs=run.wall_ms())
     result.spent_ms = run.spent_ms(work)
     result.wall_ms = run.wall_ms()
     result.work = work
@@ -857,5 +922,332 @@ def _children_at_once(  # noqa: PLR0913, PLR0912, C901 - a cell's children throu
     return float(np.asarray(values) @ weights)
 
 
+# ------------------------------------------------------------ one position on every core
+#
+# IKA-364: a stage's cells do not depend on each other -- each is its own turn, its
+# children's games and their leaves -- and the only synchronisation is the stage's LP. So a
+# position is read on every core by handing a stage's cells to worker processes (each its
+# own port, GIL and, through the machine's inference server, the leaf and the Q: IKA-363)
+# while the reading process keeps the stages, the memo, the clock and the LPs.
+
+#: `_serial`'s and `_Pool.cells`' answer while the workers have not returned the next
+#: chunk: the reader looks at its stop and its wall clock, and waits on.
+_TICK = object()
+#: A chunk whose cell met the caller's stop (`Stopped`).
+_STOPPED = object()
+
+#: Seconds the reader waits on the workers before it looks at its clock again.
+TICK_SECONDS = 0.02
+
+#: Cells a worker is sent at once from a depth-2 stage. None: the stage spread over the
+#: workers, one chunk each (at most `CHUNK`); `CHUNK`: the serial read's chunks, so the
+#: same forward passes (the Q's and the stacked leaf's move with their batch), and on the
+#: count clock the serial read to the bit.
+POOL_CHUNK: int | None = None
+
+#: With `POOL_CHUNK` None: chunks a worker gets from a stage, about. More chunks wait less
+#: on a stage's slowest chunk and send more round trips (``POKEURAOU_LADDER_SPREAD``).
+#: IKA-364, 16 threads, 7 positions at 8 s: 1 -> 4 took the workers' wait on a stage's
+#: last chunks from 45% to 19% of their time and the server's share from 16% to 28%.
+POOL_SPREAD = int(os.environ.get("POKEURAOU_LADDER_SPREAD", "4"))
+
+#: Chunks a worker holds at once: one it reads, one waiting, so it never waits on a trip.
+POOL_DEPTH = 2
+
+#: What the workers did (the positive control that the pool read the cells): chunks and
+#: cells read, reads begun, and chunks read past the stop and thrown away.
+POOL_COUNTS: dict[str, int] = {"chunks": 0, "cells": 0, "reads": 0, "dropped": 0}
+
+
+def _serial(asks: list[list], read_one: Callable[[list], list]) -> Any:  # noqa: ANN401 - a generator
+    """The chunks read here, one after the other: ``(index, values)``, `_STOPPED` where a
+    cell met the caller's stop."""
+    for index, cells in enumerate(asks):
+        try:
+            got = read_one(cells)
+        except Stopped:
+            yield index, _STOPPED
+            return
+        yield index, got
+
+
+def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  # noqa: ANN401
+               cancel: Any) -> None:  # noqa: ANN401 - a multiprocessing Event
+    """A worker: its own regulation, leaf (``factory(reg, *args)``, which also installs the
+    Q its children's menus need) and a port of one cell thread; `_read_cells` on each chunk
+    of the read it was last told of. ``cancel`` is its stop: a depth-3 cell met by it is
+    dropped (`Stopped`)."""
+    import traceback
+
+    from . import rustnode
+    from .damage import register_mega_stones
+    from .regulation import load_regulation
+
+    reg = load_regulation(format_id)
+    register_mega_stones(reg)
+    rustnode.set_port_threads(1)
+    try:
+        leaf = factory(reg, *args)
+    except Exception as error:  # noqa: BLE001 - said to the parent, which reads without it
+        conn.send(("failed", f"{type(error).__name__}: {error}"))
+        return
+    conn.send(("ready", None))
+    context: tuple | None = None
+    turns: dict[bool, dict] = {False: {}, True: {}}
+    clean: dict[tuple[int, int], bool] = {}
+    while True:
+        try:
+            message = conn.recv()
+        except EOFError:
+            return
+        if message is None:
+            return
+        if message[0] == "read":
+            # A new read: its menus, completions and budget. The shared turns and the cells'
+            # bench reach are keyed by the read's own indices, so they start again.
+            context = message[1:]
+            turns = {False: {}, True: {}}
+            clean = {}
+            continue
+        _kind, task, stage, stage_budget, cells = message
+        row, col, items, root_budget, hidden_side, cost = context
+        work = _zero()
+        notes: set[str] = set()
+        if cancel.is_set():
+            # Sent before the reader stopped: not read.
+            conn.send(("stopped", task, None, work, notes, (0.0, 0.0, 0)))
+            continue
+        search.WORK = work
+        clock = time.perf_counter()
+        served = _served(leaf)
+        try:
+            got = _read_cells(reg, cells, row, col, items, leaf, stage, root_budget,
+                              stage_budget, turns, clean, hidden_side, notes, cost, cancel)
+            status = "done"
+        except Stopped:
+            got, status = None, "stopped"
+        except Exception as error:  # noqa: BLE001 - raised again in the reader
+            got, status = (f"{type(error).__name__}: {error}\n{traceback.format_exc()}",
+                           "error")
+        finally:
+            search.WORK = None
+        after = _served(leaf)
+        took = (time.perf_counter() - clock, after[0] - served[0], after[1] - served[1])
+        conn.send((status, task, got, work, notes, took))
+
+
+def _served(leaf: Any) -> tuple[float, int]:  # noqa: ANN401
+    """Seconds this process has waited on the inference server, and its round trips: the
+    leaf's and the Q's (0 for a leaf and a Q held here)."""
+    from . import qrank
+
+    q = qrank._INSTALLED.get("")
+    waited = float(getattr(leaf, "waited", 0.0)) + float(getattr(q, "waited", 0.0))
+    trips = int(getattr(leaf, "calls", 0)) + int(getattr(q, "trips", 0))
+    return waited, trips
+
+
+class _Pool:
+    """Worker processes reading stages' cells (`start_pool`)."""
+
+    def __init__(self, processes: list, conns: list, cancel: Any) -> None:  # noqa: ANN401
+        self.processes = processes
+        self.conns = conns
+        self.cancel = cancel
+        self.stats: dict[str, float] = {}
+        self._got_ms, self._got_cells = 0.0, 0
+
+    def alive(self) -> bool:
+        return bool(self.conns) and all(p.is_alive() for p in self.processes)
+
+    def eta_ms(self, cells: int) -> float:
+        """Wall milliseconds ``cells`` more of the chunks in hand will take: the workers'
+        own milliseconds a cell so far, spread over them."""
+        per = self._got_ms / max(self._got_cells, 1)
+        return per * cells / len(self.conns)
+
+    def chunk(self, cells: int) -> int:
+        if POOL_CHUNK is not None:
+            return POOL_CHUNK
+        return max(1, min(CHUNK, -(-cells // (POOL_SPREAD * len(self.conns)))))
+
+    def begin(self, row: Sequence[Any], col: Sequence[Any], items: Sequence[Any],
+              budget: Budget, hidden_side: int, cost: LadderCost) -> None:
+        plain = [Item(position=it.position, weight=float(getattr(it, "weight", 1.0)),
+                      exact=bool(getattr(it, "exact", True)),
+                      slots=tuple(getattr(it, "slots", ()) or ())) for it in items]
+        for conn in self.conns:
+            conn.send(("read", list(row), list(col), plain, budget, hidden_side, cost))
+        POOL_COUNTS["reads"] += 1
+        #: This read's: chunks taken, the reader's milliseconds blocked on the workers, in
+        #: sends and in receives (unpickling included), and the workers' own reading.
+        #: The workers' idle time, by what they waited for: ``supplyMs`` the reader's
+        #: sends (chunks left to send), ``tailMs`` the stage's last chunks on the other
+        #: workers (all sent, theirs back), ``betweenMs`` the reader between two stages' cells
+        #: (its LP, the next rectangle), and ``serverMs`` / ``serverTrips`` the inference
+        #: server inside their reading.
+        self.stats = {"chunks": 0, "waitMs": 0.0, "sendMs": 0.0, "recvMs": 0.0,
+                      "workerMs": 0.0, "serverMs": 0.0, "serverTrips": 0, "supplyMs": 0.0,
+                      "tailMs": 0.0, "betweenMs": 0.0}
+        self._last_end = time.perf_counter()
+
+    def end(self) -> None:
+        """The read is over: the workers idle since the last stage's cells were back."""
+        self.stats["betweenMs"] += (time.perf_counter() - self._last_end) * 1000.0 * len(
+            self.conns)
+
+    def cells(self, asks: list[list], stage: Stage, stage_budget: Budget,
+              work: dict[str, int], notes: set[str]) -> Any:  # noqa: ANN401 - a generator
+        """`_serial`'s answers from the workers: each chunk's values in the order asked,
+        its counted work and notes added as it is taken; `_TICK` while waiting. Closed
+        early (the reader stopped), the chunks still out are cancelled and thrown away."""
+        from multiprocessing.connection import wait
+
+        out: dict[int, list[int]] = {i: [] for i in range(len(self.conns))}
+        which = {id(conn): i for i, conn in enumerate(self.conns)}
+        results: dict[int, tuple] = {}
+        sent = taken = 0
+        #: The workers' milliseconds and cells of the chunks back so far (`eta_ms`).
+        self._got_ms, self._got_cells = 0.0, 0
+        now = time.perf_counter()
+        self.stats["betweenMs"] += (now - self._last_end) * 1000.0 * len(self.conns)
+        idle_since = [now] * len(self.conns)
+        try:
+            while taken < len(asks):
+                while sent < len(asks):
+                    i = min(out, key=lambda k: len(out[k]))
+                    if len(out[i]) >= POOL_DEPTH:
+                        break
+                    clock = time.perf_counter()
+                    if not out[i]:
+                        self.stats["supplyMs"] += (clock - idle_since[i]) * 1000.0
+                    self.conns[i].send(("cells", sent, stage, stage_budget, asks[sent]))
+                    self.stats["sendMs"] += (time.perf_counter() - clock) * 1000.0
+                    out[i].append(sent)
+                    sent += 1
+                if taken in results:
+                    status, values, done_work, done_notes = results.pop(taken)
+                    self.stats["chunks"] += 1
+                    for kind, n in done_work.items():
+                        work[kind] += n
+                    notes.update(done_notes)
+                    POOL_COUNTS["chunks"] += 1
+                    POOL_COUNTS["cells"] += len(asks[taken])
+                    index = taken
+                    taken += 1
+                    yield index, (_STOPPED if status == "stopped" else values)
+                    continue
+                clock = time.perf_counter()
+                ready = wait(self.conns, timeout=TICK_SECONDS)
+                self.stats["waitMs"] += (time.perf_counter() - clock) * 1000.0
+                if not ready:
+                    yield None, _TICK
+                    continue
+                for conn in ready:
+                    clock = time.perf_counter()
+                    status, task, values, done_work, done_notes, times = conn.recv()
+                    back = time.perf_counter()
+                    self.stats["recvMs"] += (back - clock) * 1000.0
+                    took, server_s, trips = times
+                    self.stats["workerMs"] += took * 1000.0
+                    self.stats["serverMs"] += server_s * 1000.0
+                    self.stats["serverTrips"] += trips
+                    self._got_ms += took * 1000.0
+                    self._got_cells += len(asks[task])
+                    i = which[id(conn)]
+                    out[i].remove(task)
+                    if not out[i]:
+                        idle_since[i] = back
+                    if status == "error":
+                        raise RuntimeError(f"a ladder worker failed on a chunk: {values}")
+                    results[task] = (status, values, done_work, done_notes)
+        finally:
+            self._drain(out)
+            self._last_end = time.perf_counter()
+            if sent == len(asks):
+                for since in idle_since:
+                    self.stats["tailMs"] += max(0.0, self._last_end - since) * 1000.0
+
+    def _drain(self, out: dict[int, list[int]]) -> None:
+        if not any(out.values()):
+            return
+        self.cancel.set()
+        try:
+            for i, tasks in out.items():
+                for _ in tasks:
+                    self.conns[i].recv()
+                    POOL_COUNTS["dropped"] += 1
+                tasks.clear()
+        finally:
+            self.cancel.clear()
+
+    def close(self) -> None:
+        for process, conn in zip(self.processes, self.conns, strict=True):
+            with contextlib.suppress(OSError, EOFError):
+                conn.send(None)
+            process.join(timeout=10)
+            if process.is_alive():
+                process.kill()
+            conn.close()
+
+
+#: The worker processes a top-level read hands its cells to, or None: read here.
+_POOL: _Pool | None = None
+
+
+def start_pool(reg: Any, count: int, factory: Any, args: tuple[Any, ...] = ()) -> int:  # noqa: ANN401
+    """Start ``count`` worker processes that read the ladder's cells (IKA-364), each with
+    the leaf ``factory(reg, *args)`` -- a module-level function, so a spawned process can
+    import it, that also installs the Q the children's menus are ranked by -- and a port of
+    one thread. Kept for the process's life (`stop_pool`). The leaf must answer as the
+    reader's own does (the same model; the machine's inference server keeps one copy of it
+    for them all). Returns how many are ready; 0 reads every cell here."""
+    import multiprocessing
+
+    global _POOL  # noqa: PLW0603 - the process's one pool
+    stop_pool()
+    if count <= 0:
+        return 0
+    context = multiprocessing.get_context("spawn")
+    cancel = context.Event()
+    started = []
+    for _ in range(count):
+        mine, theirs = context.Pipe()
+        process = context.Process(target=_pool_main,
+                                  args=(theirs, reg.meta.format_id, factory, tuple(args), cancel),
+                                  daemon=True)
+        process.start()
+        theirs.close()
+        started.append((process, mine))
+    ready = []
+    for process, conn in started:
+        try:
+            state, why = conn.recv()
+        except EOFError:
+            state, why = "failed", "the worker exited"
+        if state == "ready":
+            ready.append((process, conn))
+        else:
+            print(f"[ladder] a worker did not start: {why}", flush=True)
+            process.join(timeout=5)
+    if ready:
+        _POOL = _Pool([p for p, _c in ready], [c for _p, c in ready], cancel)
+    return len(ready)
+
+
+def stop_pool() -> None:
+    """Stop the worker processes (`start_pool`)."""
+    global _POOL  # noqa: PLW0603
+    if _POOL is not None:
+        _POOL.close()
+        _POOL = None
+
+
+def pool_workers() -> int:
+    """How many worker processes read the ladder's cells (0: none)."""
+    return 0 if _POOL is None else len(_POOL.conns)
+
+
 __all__ = ["LADDERS", "LADDER_COSTS", "Item", "LadderCost", "LadderResult", "Rung", "Stage",
-           "Stopped", "parse_ladder", "parse_stage", "read"]
+           "Stopped", "parse_ladder", "parse_stage", "pool_workers", "read", "start_pool",
+           "stop_pool"]

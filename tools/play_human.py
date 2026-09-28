@@ -254,6 +254,13 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--oracle", default="sall",
                     help="the root's swap oracle while deepening: sall (every legal action, the "
                     "default: IKA-307's allocation), s<W> (the rest of a width-W menu) or none")
+    ap.add_argument("--ladder", default=None,
+                    help="read each move by a ladder of stages instead of the deepening (IKA-367; "
+                    "a name in ladder.LADDERS such as L5, or stages joined by +), the answer the "
+                    "last stage completed in the budget. With --threads N its cells are read by "
+                    "N-1 worker processes (IKA-364; with a server, each asks it; without, at "
+                    f"most {humanplay.LADDER_LOCAL_WORKERS_MAX} load the leaf and the Q). "
+                    "Default: none (the deepening)")
     ap.add_argument("--child-q", type=int, default=None,
                     help="the deepening's child menus: each side's k best by the Q (IKA-307), "
                     "instead of narrow's damage-ranked 8")
@@ -386,7 +393,16 @@ def main(argv: list[str] | None = None) -> None:
         q_files = model.describe()
 
     threads, cores = resolve_cores(args.threads, args.cores, args.clock)
-    if address and evaluate is not None:
+    if args.ladder is not None:
+        # IKA-364: the ladder's cells on the workers; the port's cells and the LPs here.
+        humanplay.use_threads(threads)
+        spec = humanplay.ladder_spec(
+            leaf=evaluate, address=address, merge=args.merge == "on", values=values,
+            device=device, graphs=args.leaf_graphs == "on", cuda_memory_gb=args.cuda_memory_gb,
+            q_path=q_path if qrank.is_q(fill) else None)
+        workers = humanplay.use_ladder_pool(threads, reg, spec)
+        say(f"ladder {args.ladder}: cells on {workers} worker process(es)")
+    elif address and evaluate is not None:
         humanplay.use_threads(threads, reg, (address, "value", args.merge == "on"),
                               factory=humanplay.served_process_leaf)
     else:
@@ -401,7 +417,7 @@ def main(argv: list[str] | None = None) -> None:
         clock=args.clock, rank_fill=fill, bench_drop=args.bench_drop,
         width_only=args.width_only, max_levels=args.max_levels or None, child_q=args.child_q,
         oracle=_oracle_width(args.oracle), halt=halt,
-        ponder=args.ponder == "on", ponder_seconds=args.ponder_seconds,
+        ponder=args.ponder == "on", ponder_seconds=args.ponder_seconds, ladder=args.ladder,
     )
     if args.child_q is not None and not qrank.is_q(fill):
         raise SystemExit("--child-q ranks the children by the Q: it needs a Q (a q rank fill)")

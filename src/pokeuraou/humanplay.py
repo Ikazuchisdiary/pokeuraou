@@ -722,6 +722,77 @@ def served_process_leaf(reg: Regulation, address: str, arm: str, merge: bool) ->
     return RemoteValue(address, arm, Encoder(reg), merge=merge)
 
 
+#: Ladder workers with a leaf and a Q of their own (no inference server), at most: each
+#: holds torch, a CUDA context and both models (IKA-363: 1.3-1.4 GB of RSS a process).
+LADDER_LOCAL_WORKERS_MAX = AHEAD_WORKERS_MAX
+
+
+def ladder_process_leaf(reg: Regulation, kind: str, *args: Any) -> Any:  # noqa: ANN401
+    """A ladder worker's leaf, with the Q its children's menus are ranked by installed
+    (`ladder.start_pool`, IKA-364). ``kind``:
+
+    * ``served`` (address, arm, merge, Q path or None, Q arm): the machine's inference
+      server's arms (IKA-363); the worker imports no torch;
+    * ``local`` (values, device, graphs, CUDA cap, Q path or None): the files loaded here
+      (`process_leaf`, `qrank.LocalQ`);
+    * ``hp-share``: no leaf, no Q."""
+    from . import qrank
+    from .encode import Encoder
+
+    if kind == "served":
+        from .inference import RemoteValue
+
+        address, arm, merge, q_path, q_arm = args
+        encoder = Encoder(reg)
+        leaf = RemoteValue(address, arm, encoder, merge=merge)
+        if q_path is not None:
+            qrank.install(qrank.RemoteQ(address, q_arm, encoder))
+        return leaf
+    if kind == "local":
+        values, device, graphs, cuda_memory_gb, q_path = args
+        leaf = process_leaf(reg, values, device, graphs, cuda_memory_gb)
+        if q_path is not None:
+            qrank.install(qrank.LocalQ(Path(q_path), Encoder(reg), device=device))
+        return leaf
+    if kind == "hp-share":
+        return HP_SHARE.batch
+    raise ValueError(f"a ladder worker's leaf is served, local or hp-share, not {kind!r}")
+
+
+def ladder_spec(  # noqa: PLR0913 - what a tool loaded its leaf and Q from
+    *, leaf: Any, address: str | None, merge: bool, values: Sequence[Any] | None,  # noqa: ANN401
+    device: str | None, graphs: bool, cuda_memory_gb: float, q_path: Any,  # noqa: ANN401
+) -> tuple[Any, ...]:
+    """`ladder_process_leaf`'s arguments for a tool's leaf (None: hp-share) and Q path
+    (None: no Q): the server's arms when ``address`` is given, else the same files here."""
+    if leaf is None:
+        return ("hp-share",)
+    q = None if q_path is None else str(q_path)
+    if address:
+        return ("served", address, "value", merge, q, "q")
+    return ("local", [str(v) for v in values or ()], str(device or "cpu"), graphs,
+            cuda_memory_gb, q)
+
+
+def use_ladder_pool(threads: int, reg: Regulation, spec: tuple[Any, ...] | None) -> int:
+    """Read a ladder's cells on ``threads`` cores (IKA-364): ``threads - 1`` worker
+    processes (`ladder.start_pool`), each with the leaf `ladder_process_leaf(reg, *spec)`,
+    the reader the one left. With a leaf of their own (``local``) at most
+    `LADDER_LOCAL_WORKERS_MAX`; 1 or no ``spec`` reads every cell here. Returns the
+    workers."""
+    from . import ladder
+
+    if spec is None or threads <= 1:
+        wanted = 0
+    elif spec[0] == "local":
+        wanted = min(threads - 1, LADDER_LOCAL_WORKERS_MAX)
+    else:
+        wanted = threads - 1
+    if ladder.pool_workers() != wanted:
+        ladder.start_pool(reg, wanted, ladder_process_leaf, tuple(spec or ()))
+    return ladder.pool_workers()
+
+
 def use_threads(
     threads: int,
     reg: Regulation | None = None,
@@ -1966,12 +2037,13 @@ class HumanGame:
             from .ladder import LADDER_COSTS, parse_ladder
 
             # IKA-367: the whole budget on the agent's clock, the node's share spent first
-            # (its prediction on the count clock, the time so far on the wall clock).
+            # (its prediction on the count clock; on the wall clock the time from the move's
+            # start, the depth-1 node the ladder builds included: IKA-364).
             ladder = {
                 "stages": parse_ladder(agent.ladder), "budget_ms": plan.budget_ms,
                 "clock": agent.clock, "cost": LADDER_COSTS.get((agent.form, agent.cores)),
-                "start_ms": (node_ms if agent.clock == "count"
-                             else (time.perf_counter() - started) * 1000.0),
+                **({"start_ms": node_ms} if agent.clock == "count"
+                   else {"start_ms": 0.0, "began": started}),
                 **({"stop": agent.halt} if agent.halt is not None else {}),
             }
         elif plan.deepen_ms > 0 and not agent.depth2_auto:
