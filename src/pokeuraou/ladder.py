@@ -520,6 +520,7 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
     here_began = (tuple(rustnode.PORT_WAITED), time.process_time(), _served(leaf),
                   dict(subshare.COUNTS), portlp.COUNTS["lps"], portserved.COUNTS["requests"])
     if pool is not None:
+        pool.reg = reg
         pool.begin(row, col, items, budget, hidden_side, cost)
         result.workers = len(pool.conns)
         cpu_began = time.process_time()
@@ -648,7 +649,7 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
                 else:
                     ahead = (_Ahead(side, stage, stages[at_stage + 1:at_stage + 2], budget,
                                     stage_budget, rows, cols, attempt, w, trial, memo, todo,
-                                    set(asked), pool, (x, ys), begins)
+                                    set(asked), pool, (x, ys), begins, reg)
                              if looks_ahead else None)
                     reads = pool.cells(
                         asks, stage, stage_budget, work, result.unmodelled, adopt=adopt,
@@ -690,8 +691,9 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
                     if v is not None:
                         trial[k][i, j] = v if side == 0 else -v
                 try:
-                    restricted = solve_bayesian(
-                        [trial[k][np.ix_(rows, cols[k])] for k in range(kinds)], w)
+                    # IKA-387: in the port with `portlp` on (the same answer to the bit).
+                    restricted = portlp.solve_bayesian_one(
+                        reg, [trial[k][np.ix_(rows, cols[k])] for k in range(kinds)], w)
                 except EquilibriumError:
                     break
                 sx = np.zeros(len(trial[0]), dtype=np.float64)
@@ -833,8 +835,11 @@ class _Ahead:
                  stage_budget: Budget, rows: list[int], cols: list[list[int]], attempt: int,
                  w: np.ndarray, trial: list[np.ndarray], memo: dict, todo: list,
                  asked: set, pool: _Pool, before: tuple,
-                 begins: Callable[[Stage, int], bool] | None = None) -> None:
+                 begins: Callable[[Stage, int], bool] | None = None,
+                 reg: Any = None) -> None:  # noqa: ANN401 - a Regulation
         self.side, self.stage, self.budget, self.stage_budget = side, stage, budget, stage_budget
+        #: IKA-387: the port that solves the answer's LP (`portlp`).
+        self.reg = reg
         self.begins = begins
         self.after = after[0] if after else None
         self.rows, self.cols = list(rows), [list(c) for c in cols]
@@ -859,8 +864,8 @@ class _Ahead:
             if v is not None:
                 prices[k][i, j] = v if side == 0 else -v
         try:
-            got = solve_bayesian([prices[k][np.ix_(self.rows, self.cols[k])]
-                                  for k in range(kinds)], self.w)
+            got = portlp.solve_bayesian_one(self.reg, [prices[k][np.ix_(self.rows, self.cols[k])]
+                                                       for k in range(kinds)], self.w)
         except EquilibriumError:
             x, ys = self.before
             return x, list(ys), float("nan"), prices
@@ -1481,10 +1486,18 @@ def _kids_fill(reg: Any, kids: list[_Child], leaf: Any, budget: Budget,  # noqa:
         leaf, [p.encoded for p in pending])
     for p, got in zip(pending, scores, strict=True):
         p.scored(got)
-    for kid, p in zip(kids, pending, strict=True):
-        m = np.asarray(p.finish(), dtype=np.float64)
+    mats = [np.asarray(p.finish(), dtype=np.float64) for p in pending]
+    # IKA-387: with `portlp` on, every child's matrix solved in the port in one crossing.
+    solved = portlp.solve_many(reg, mats) if portlp.ON[0] else None
+    for n, (kid, p) in enumerate(zip(kids, pending, strict=True)):
+        m = mats[n]
         try:
-            eq = solve(m)
+            if solved is None:
+                eq = solve(m)
+            elif isinstance(solved[n], Exception):
+                raise solved[n]
+            else:
+                eq = solved[n]
         except EquilibriumError:
             return _ALONE
         unmodelled.update(p.unmodelled)
@@ -1526,18 +1539,48 @@ def _kid_solve(kid: _Child, attempt: int, passes: int) -> None:
     """A child's pass read (its cells in ``kid.memo``): the rectangle solved (``kid.answer``)
     and the oracle's row and column added, as `read` does after a pass; ``kid.active`` off
     when it is done (the last pass, nothing added, or no solution)."""
-    w = _one()
+    game = _kid_game(kid)
+    try:
+        restricted = solve_bayesian([game], _one())
+    except EquilibriumError:
+        kid.active = False
+        return
+    _kid_after(kid, restricted, attempt, passes)
+
+
+def _kids_solve(reg: Any, jobs: list[tuple[_Child, int, int]]) -> None:  # noqa: ANN401
+    """`_kid_solve(kid, attempt, passes)` of each job, in order -- with `portlp` on, their
+    rectangles solved in the port in one crossing (IKA-387: the same answers to the bit)."""
+    if not portlp.ON[0] or not jobs:
+        for kid, attempt, passes in jobs:
+            _kid_solve(kid, attempt, passes)
+        return
+    games = [_kid_game(kid) for kid, _attempt, _passes in jobs]
+    solved = portlp.solve_bayesian_many(reg, [([g], _one()) for g in games])
+    for (kid, attempt, passes), got in zip(jobs, solved, strict=True):
+        if isinstance(got, EquilibriumError):
+            kid.active = False
+            continue
+        if isinstance(got, Exception):
+            raise got
+        _kid_after(kid, got, attempt, passes)
+
+
+def _kid_game(kid: _Child) -> np.ndarray:
+    """A child's pass's values written into its prices, and the rectangle `_kid_solve` solves."""
     trial = [kid.trial]
     for i in kid.rows:
         for j in kid.cols:
             v = kid.memo[(i, j)]
             if v is not None:
                 trial[0][i, j] = v
-    try:
-        restricted = solve_bayesian([trial[0][np.ix_(kid.rows, kid.cols)]], w)
-    except EquilibriumError:
-        kid.active = False
-        return
+    return trial[0][np.ix_(kid.rows, kid.cols)]
+
+
+def _kid_after(kid: _Child, restricted: Any, attempt: int, passes: int) -> None:  # noqa: ANN401
+    """`_kid_solve` once its rectangle is solved: the answer, and the oracle's row and column."""
+    w = _one()
+    trial = [kid.trial]
     sx = np.zeros(len(trial[0]), dtype=np.float64)
     sx[kid.rows] = restricted.row_strategy
     y = np.zeros(trial[0].shape[1], dtype=np.float64)
@@ -1648,9 +1691,7 @@ def _children_at_once(  # noqa: PLR0913, PLR0912, C901 - a cell's children throu
                 # The Q is asked once a group (`search._refine_cells`' ``qs``).
                 for kid, size in zip(group_kids, groups, strict=True):
                     kid.work["qs"] += 1 if size else 0
-        for kid in kids:
-            if kid.active:
-                _kid_solve(kid, attempt, sub.passes)
+        _kids_solve(reg, [(kid, attempt, sub.passes) for kid in kids if kid.active])
         if not any(kid.active for kid in kids):
             break
     if table is not None:
@@ -1974,6 +2015,8 @@ class _Pool:
         self.cancel = cancel
         #: IKA-378: the workers' table of sub-games (`SHARE`), and the reads begun on it.
         self.table = table
+        #: IKA-387: the read's regulation, for the reader's port (`portlp`, `deep_passes`).
+        self.reg: Any = None
         self.generation = 0
         self.stats: dict[str, float] = {}
         self._got_ms, self._got_cells = 0.0, 0
@@ -2078,7 +2121,8 @@ class _Pool:
         #: pass by pass, ``kidsJoined`` a cell's child joined to one already read or being
         #: read, ``passChunks`` the chunks of their depth-2 passes, ``wholeCells`` the cells
         #: read whole after a pass was refused, ``passSplits`` chunks cut in the tail
-        #: (`PASS_SPLIT`).
+        #: (`PASS_SPLIT`). IKA-387 (`portlp` on): ``kidSolves`` the children's pass
+        #: rectangles solved here in the port, in ``kidSolveTrips`` crossings.
         self.stats = {"chunks": 0, "waitMs": 0.0, "sendMs": 0.0, "recvMs": 0.0,
                       "workerMs": 0.0, "serverMs": 0.0, "serverTrips": 0, "supplyMs": 0.0,
                       "tailMs": 0.0, "betweenMs": 0.0, "cpuMs": 0.0, "portMs": 0.0,
@@ -2088,7 +2132,7 @@ class _Pool:
                       "sameSubgames": 0, "keptSubgames": 0, "sharedKids": 0,
                       "busySubgames": 0, "waitedSubgames": 0, "openCells": 0, "kidReads": 0,
                       "kidsJoined": 0, "passChunks": 0, "wholeCells": 0, "passSplits": 0,
-                      "portLps": 0, "portServed": 0}
+                      "portLps": 0, "kidSolves": 0, "kidSolveTrips": 0, "portServed": 0}
         self._last_end = time.perf_counter()
         self._trace = ({"t0": self._last_end, "workers": len(self.conns), "calls": [],
                         "chunks": [], "stages": []} if TRACE_DIR else None)
@@ -2565,8 +2609,29 @@ class _Pool:
                                ("kid", drive, (a, b)), top=drive.top)
                     inner.append(("open", drive.stage, drive.budget, op.payload, op))
 
+        #: IKA-387: with `portlp` on, the children whose pass is back wait here, and are
+        #: solved together in one crossing once the answers back are taken (`flush`).
+        together = portlp.ON[0]
+        waiting: list[_Drive] = []
+
         def step(drive: _Drive) -> None:
+            if together:
+                waiting.append(drive)
+                return
             _kid_solve(drive.kid, drive.attempt, drive.stage.passes)
+            stepped(drive)
+
+        def flush() -> None:
+            while waiting:
+                now_waiting = list(waiting)
+                waiting.clear()
+                _kids_solve(self.reg, [(d.kid, d.attempt, d.stage.passes) for d in now_waiting])
+                self.stats["kidSolves"] += len(now_waiting)
+                self.stats["kidSolveTrips"] += 1
+                for drive in now_waiting:
+                    stepped(drive)
+
+        def stepped(drive: _Drive) -> None:
             if drive.kid.active:
                 drive.attempt += 1
                 start_pass(drive)
@@ -2799,6 +2864,7 @@ class _Pool:
                             opened(ref, values)
                     if not any(t in mine for t in out[i]):
                         idle_since[i] = back
+                flush()
         finally:
             if taken < len(asks):
                 self._drain()

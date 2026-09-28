@@ -463,6 +463,23 @@ def solve_bayesian(
     :func:`solve` instead would solve a different game -- one where the opponent must move
     before learning their own spread -- and would overstate our value.
     """
+    mats, w = bayesian_inputs(matrices, weights)
+
+    (value_row, x_raw), (value_col, y_raw) = _both(
+        sum(mat.size for mat in mats),
+        lambda: _bayesian_maximin(mats, w),
+        lambda: _bayesian_minimax(mats, w),
+    )
+
+    return assemble_bayesian(mats, w, value_row, value_col, _clean(x_raw, eps),
+                             tuple(_clean(y, eps) for y in y_raw))
+
+
+def bayesian_inputs(
+    matrices: list[np.ndarray], weights: np.ndarray
+) -> tuple[list[np.ndarray], np.ndarray]:
+    """`solve_bayesian`'s matrices as float64 and its weights normalised, or its ValueError
+    (IKA-387: `portlp` checks a game here before the port solves it)."""
     if not matrices:
         raise ValueError("no matrices to solve")
     mats = [np.asarray(mat, dtype=np.float64) for mat in matrices]
@@ -477,16 +494,16 @@ def solve_bayesian(
         raise ValueError(f"{w.shape[0]} weights for {len(mats)} matrices")
     if w.min() < 0:
         raise ValueError("class weights must be non-negative")
-    w = w / w.sum()
+    return mats, w / w.sum()
 
-    (value_row, x_raw), (value_col, y_raw) = _both(
-        sum(mat.size for mat in mats),
-        lambda: _bayesian_maximin(mats, w),
-        lambda: _bayesian_minimax(mats, w),
-    )
 
-    x = _clean(x_raw, eps)
-    ys = tuple(_clean(y, eps) for y in y_raw)
+def assemble_bayesian(
+    mats: list[np.ndarray], w: np.ndarray, value_row: float, value_col: float,
+    x: np.ndarray, ys: tuple[np.ndarray, ...],
+) -> BayesianEquilibrium:
+    """`solve_bayesian`'s answer from its two LPs' values and cleaned strategies (IKA-387:
+    the port solves them, `portlp`, and this builds the rest here, as `solve_bayesian`
+    does). ``w`` normalised (`bayesian_inputs`)."""
     value = 0.5 * (value_row + value_col)
 
     row_ev = sum(w[k] * (mats[k] @ ys[k]) for k in range(len(mats)))
