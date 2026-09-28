@@ -20,7 +20,9 @@ What it starts:
   agent's never share a process's threads): the page at http://127.0.0.1:8337/ lists the
   game in progress (「進行中の局」) and the games already in ``--out`` (「記録を読み直す」 picks
   up the ones finished since). Its threads come on top of the agent's: while it reads, the
-  agent's moves have fewer cores and deepen less in the same seconds.
+  agent's moves have fewer cores and deepen less in the same seconds. Its answers go to
+  ``data/human/analysis.jsonl`` (beside ``--out``): the value over the game shows the
+  values read there again, after a reload or the next start (IKA-356).
 
 Both pages open in the browser (``--no-browser`` to only print the addresses). Closing: the
 game ends with the last game (``--games``); Enter or Ctrl+C closes the pages and the
@@ -52,12 +54,18 @@ GAME_PORT = 8332
 ANALYSIS_PORT = 8337
 
 
+def analysis_out(args: argparse.Namespace) -> Path:
+    """Where the analysis mode keeps its answers (IKA-356): beside the games, so a page
+    started again shows the values read before on the value over the game."""
+    return args.out.parent / "analysis.jsonl"
+
+
 def analysis_command(args: argparse.Namespace, current: Path) -> list[str]:
     """`tools/analyze.py` as this launcher starts it."""
     command = [
         sys.executable, str(ROOT / "tools" / "analyze.py"),
         "--record", str(args.out), "--view-port", str(args.analysis_port),
-        "--game-url", f"http://127.0.0.1:{args.port}/",
+        "--game-url", f"http://127.0.0.1:{args.port}/", "--out", str(analysis_out(args)),
     ]
     if current is not None:
         command += ["--current", str(current)]
@@ -98,7 +106,10 @@ def main(argv: list[str] | None = None) -> None:
     if args.replay is not None:
         import live_view
 
-        live_view.main([str(args.replay), "--port", str(args.port), "--speed", str(args.speed), *rest])
+        live_view.main([
+            str(args.replay), "--port", str(args.port), "--speed", str(args.speed),
+            "--analysis-url", f"http://127.0.0.1:{args.analysis_port}/", *rest,
+        ])
         return
 
     if args.analysis_only:
@@ -106,6 +117,7 @@ def main(argv: list[str] | None = None) -> None:
 
         analyze.main([
             "--record", str(args.out), "--view-port", str(args.analysis_port),
+            "--out", str(analysis_out(args)),
             *(["--threads", str(args.analysis_threads)] if args.analysis_threads is not None else []),
             *([] if args.no_browser else ["--open-browser"]), *rest,
         ])

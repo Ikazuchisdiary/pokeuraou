@@ -20,9 +20,11 @@ from __future__ import annotations
 
 import copy
 import json
+import struct
 import threading
 import urllib.request
 
+import numpy as np
 import pytest
 
 from pokeuraou import humanplay, liveview
@@ -319,6 +321,78 @@ def test_the_record_file_reads_back(tmp_path) -> None:  # noqa: ANN001
     sink.close()
     got = list(liveview.read_record(tmp_path / "live.bin"))
     assert got == [(0.5, b"\x02{}"), (1.25, b"\x02{\"a\": 1}")]
+
+
+#: A record kept before IKA-345 (`tools/analyze.py --live-out` of IKA-337's page check, the
+#: wire of master 4f78dfb to 91683b5), cut after the first step whose principal variation
+#: opens a chance branch into a node.
+OLD_RECORD = repo_root() / "tests" / "fixtures" / "live-before-ika345.bin"
+
+
+def test_a_record_from_before_ika345_is_read_in_todays_form() -> None:
+    """IKA-356: the labels were strings then; the upgrade makes them labels of their parts and
+    keeps everything else -- the events, the seconds, the numbers, the branches' text."""
+    frames = list(liveview.read_record(OLD_RECORD))
+    kinds = [frame[0] for _s, frame in frames]
+    assert liveview.STEP in kinds and liveview.LABELS not in kinds, "not an old record"
+    # The control: today's reader cannot read it as it was kept.
+    with pytest.raises((IndexError, ValueError, struct.error)):
+        plain = liveview.Decoder()
+        for _s, frame in frames:
+            plain.feed(frame)
+    up, steps = liveview.upgrade_record(frames)
+    assert steps == kinds.count(liveview.STEP) > 0
+    # The old step's actions by its own table of strings (STRINGS frames did not change).
+    old = liveview.Decoder()
+    wanted = []
+    for _s, frame in frames:
+        if frame[0] == liveview.STRINGS:
+            old.feed(frame)
+        elif frame[0] == liveview.STEP:
+            head = liveview._HEAD.unpack_from(frame, 1)
+            n_ours, n_theirs = head[-3], head[-2]
+            at = 1 + liveview._HEAD.size
+            ours = np.frombuffer(frame, dtype="<u4", count=n_ours, offset=at)
+            p = np.frombuffer(frame, dtype="<f8", count=n_ours, offset=at + 4 * n_ours)
+            at += 16 * n_ours
+            theirs = np.frombuffer(frame, dtype="<u4", count=n_theirs, offset=at)
+            wanted.append(([old.strings[i] for i in ours], p.tolist(),
+                           [old.strings[i] for i in theirs], head))
+    new = liveview.Decoder()
+    got_steps, got_events = [], []
+    for _s, frame in up:
+        got = new.feed(frame)
+        if got is None:
+            continue
+        (got_steps if got["type"] == "step" else got_events).append(got)
+    assert len(got_steps) == len(wanted)
+    for step, (ours, p, theirs, head) in zip(got_steps, wanted, strict=True):
+        assert step["ours"] == ours and step["theirs"] == theirs and step["ourP"] == p
+        got_head = (step["value0"], step["value"], step["decision"], step["turn"])
+        assert got_head == (head[16], head[17], head[2], head[3])
+        # Two parts are the two active slots; one part names no slot.
+        for parts in step["oursParts"]:
+            assert [q[0] for q in parts] == ([0, 1] if len(parts) == 2 else [-1] * len(parts))
+    branches = [b for pair in got_steps[-1]["pv"] for b in pair["branches"]]
+    assert branches and all(b["textOnly"] and b["what"] and not b["causes"] for b in branches)
+    assert any("node" in b and b["node"]["field"] == [[], []] for b in branches)
+    # The events and the seconds are the record's own.
+    assert [f for _s, f in up if f[0] == liveview.EVENT] == [f for _s, f in frames if f[0] == liveview.EVENT]
+    assert got_events
+    assert sorted({s for s, _f in up}) == sorted({s for s, _f in frames})
+    # Today's record is left as it is, and so is one upgraded already.
+    assert liveview.upgrade_record(up) == (up, 0)
+
+
+def test_a_record_of_today_is_not_upgraded(pool) -> None:  # noqa: ANN001
+    kept: list[tuple[float, bytes]] = []
+    server = liveview.LiveServer("127.0.0.1", 0, sink=lambda frame: kept.append((0.0, frame))).start()
+    try:
+        _play(pool, PolicyPerson("first"), seed=4, listener=server.listener, turns=1)
+    finally:
+        server.close()
+    assert any(frame[0] == liveview.STEP for _s, frame in kept)
+    assert liveview.upgrade_record(kept) == (kept, 0)
 
 
 # ------------------------------------------------------------------------ the server
