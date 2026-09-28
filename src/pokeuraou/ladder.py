@@ -1284,6 +1284,10 @@ class _Open:
     value: float | None = None
     done: bool = False
     whole: bool = False
+    #: The stage's cell it is part of (None: it is one), and (a stage's cell) the workers'
+    #: milliseconds of its tasks.
+    top: Any = None
+    ms: float = 0.0
 
 
 @dataclass
@@ -1302,6 +1306,8 @@ class _Drive:
     #: A pass the port refused: its cells are read whole.
     refused: bool = False
     value: float | None = None
+    #: The stage's cell whose task began it (its milliseconds go there).
+    top: Any = None
 
 
 @dataclass
@@ -2476,7 +2482,7 @@ class _Pool:
             else:
                 for a, b in asked:
                     op = _Open(drive.stage, drive.budget, (kid.position, kid.row[a], kid.col[b]),
-                               ("kid", drive, (a, b)))
+                               ("kid", drive, (a, b)), top=drive.top)
                     inner.append(("open", drive.stage, drive.budget, op.payload, op))
 
         def step(drive: _Drive) -> None:
@@ -2533,6 +2539,7 @@ class _Pool:
             if op.owner[0] == "top":
                 index = op.owner[1]
                 results[index] = ("done", [value], works, op.notes)
+                self._got_ms += op.ms
                 self._got_cells += 1
                 if early is not None:
                     early(index, [value])
@@ -2567,7 +2574,7 @@ class _Pool:
                 if drive is None:
                     kid = _Child(position, list(crow), list(ccol), m, x, y)
                     kid.key, kid.notes, kid.work = key, set(kid_notes), dict(kid_work)
-                    drive = _Drive(kid, sub, budget_of(sub), op.road)
+                    drive = _Drive(kid, sub, budget_of(sub), op.road, top=op.top or op)
                     if key is not None:
                         drives[key] = drive
                     begun.append(drive)
@@ -2672,7 +2679,11 @@ class _Pool:
                         raise RuntimeError(f"a ladder worker failed on a chunk: {values}")
                     if task in mine:
                         kind, ref = mine.pop(task)
-                        self._got_ms += took * 1000.0
+                        # The workers' milliseconds go to the stage's cell the task is part of,
+                        # counted (`eta_ms`) once that cell is done: many cells are part read at
+                        # once, and a first cell done with every task's milliseconds so far
+                        # predicted a stage at 15 times its length (abandoned after a cell).
+                        (ref[0].top if kind == "pass" else ref.top or ref).ms += took * 1000.0
                         if status == "stopped":
                             halted = True
                         elif kind == "pass":
