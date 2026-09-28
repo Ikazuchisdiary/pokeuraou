@@ -814,6 +814,58 @@ pub fn folded_cells(text: &str) -> Result<Vec<(usize, usize, FoldTree)>, String>
     Ok(out)
 }
 
+/// IKA-386: a fold tree as the port built it (`encoded_node`'s `turn_leaves`), not read back
+/// from text: its weights are the doubles the header would have carried, and Python reads that
+/// header's shortest round-trip text back to the same doubles.
+pub fn fold_tree_from_value(value: &Value) -> Result<FoldTree, String> {
+    let Some(fields) = value.as_object() else {
+        return Err("a fold node is not an object".into());
+    };
+    if let Some(leaf) = fields.get("leaf") {
+        return Ok(FoldTree::Leaf(leaf.as_u64().ok_or("a fold's leaf is not an index")? as usize));
+    }
+    if let Some(chooser) = fields.get("best") {
+        let options = fields.get("options").and_then(Value::as_array).ok_or("a choice without options")?;
+        return Ok(FoldTree::Best(
+            chooser.as_i64().ok_or("a choice's chooser is not a number")?,
+            options.iter().map(fold_tree_from_value).collect::<Result<_, _>>()?,
+        ));
+    }
+    let parts = fields.get("avg").and_then(Value::as_array).ok_or("a fold node of no known kind")?;
+    let mut out = Vec::with_capacity(parts.len());
+    for part in parts {
+        let pair = part.as_array().filter(|p| p.len() == 2).ok_or("a chance part is not a pair")?;
+        out.push((pair[0].as_f64().ok_or("a chance weight is not a number")?, fold_tree_from_value(&pair[1])?));
+    }
+    Ok(FoldTree::Avg(out))
+}
+
+/// IKA-386: a sub-game's matrix from its node as the port filled it -- the span block and the
+/// replacement cells' trees (`[[row, column, tree], ...]`) -- and its leaves' values, and its
+/// solved value: `folds`' answer for the node, without the crossing.
+pub fn fold_and_solve(
+    block: &[u8],
+    count: usize,
+    total: usize,
+    folded: &[Value],
+    values: &[f64],
+    m: usize,
+    n: usize,
+) -> Result<Result<Solved, Unsolved>, String> {
+    FOLDS.fetch_add(1, Ordering::Relaxed);
+    let mut payoff = fold(block, count, total, values, m, n)?;
+    for cell in folded {
+        let parts = cell.as_array().filter(|p| p.len() == 3).ok_or("a folded cell is not [row, column, tree]")?;
+        let i = parts[0].as_u64().ok_or("a folded cell's row")? as usize;
+        let j = parts[1].as_u64().ok_or("a folded cell's column")? as usize;
+        if i >= m || j >= n {
+            return Err("a folded cell outside its node".into());
+        }
+        payoff[i * n + j] = fold_value(&fold_tree_from_value(&parts[2])?, values)?;
+    }
+    Ok(solve(&payoff, m, n, 1e-9))
+}
+
 /// Python's `sum` of floats (3.12: Neumaier's compensated sum, from the int 0 it starts at).
 pub fn python_sum(items: impl IntoIterator<Item = f64>) -> f64 {
     let mut items = items.into_iter();
@@ -951,7 +1003,7 @@ fn matrix(value: &Value) -> Result<(Vec<f64>, usize, usize), String> {
     Ok((data, m, n))
 }
 
-fn unsolved_json(why: Unsolved) -> Value {
+pub fn unsolved_json(why: Unsolved) -> Value {
     match why {
         Unsolved::Invalid(reason) => json!({ "invalid": reason }),
         Unsolved::Failed(reason) => json!({ "failed": reason }),

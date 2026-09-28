@@ -148,7 +148,7 @@ from typing import Any
 import numpy as np
 
 from . import deepen as _deepen
-from . import port, portlp, rank_scores, timing
+from . import port, portlp, portserved, rank_scores, timing
 from .actions import SideAction
 from .budget import Budget
 from .equilibrium import Equilibrium, EquilibriumError, solve
@@ -1332,6 +1332,13 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
     # 4. The sub-games' nodes, a crossing per `FILL_BATCH`, scored as the rows gather.
     def fill(subs: list, links_of: list) -> None:
         nonlocal held
+        served = portserved.leaf_of(evaluate, stack)
+        if served is not None and not waiting:
+            # IKA-386: the same crossings filled, scored by the inference server and solved,
+            # all in the port in one crossing; nothing is left waiting here.
+            portserved.fill_scored(reg, _fill_chunks(subs, links_of), served, budget=budget,
+                                   gather=GATHER_ROWS)
+            return
         for chunk, links in _fill_chunks(subs, links_of):
             filled = port.pending_payoffs(
                 reg, [(pos, row, col) for _sub, pos, row, col in chunk], evaluate, budget=budget,
