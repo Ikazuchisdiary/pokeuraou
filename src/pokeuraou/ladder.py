@@ -456,6 +456,35 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
     #: By depth, the completed stages' measured and a-priori (`_guess_cell_ms`) totals: a
     #: new kind's guess is scaled by how far the guesses have been off in this read.
     calib: dict[int, tuple[float, float]] = {}
+
+    def per_cell_ms(stage: Stage, guess: float) -> float:
+        """A fresh cell of ``stage``, predicted in counted milliseconds."""
+        if stage.kind in measured:
+            return measured[stage.kind][0] / max(measured[stage.kind][1], 1)
+        have = calib.get(stage.depth) or (
+            (sum(v[0] for v in calib.values()), sum(v[1] for v in calib.values()))
+            if calib else None)
+        ratio = 1.0 if not have or have[1] <= 0 else have[0] / have[1]
+        # IKA-364: the depth-3 guesses run 100-200 times the counted cost (1,794 ms a cell
+        # guessed for d3r8b3k24x, 12-24 counted), so a floor of 0.05 predicted the next
+        # depth-3 stage at 4-8 times its cost and a 32 s read stopped at 5-14 s.
+        return guess * min(max(ratio, 0.002), 3.0)
+
+    def speed() -> float:
+        # The prediction is in counted milliseconds; on the wall clock it is scaled by this
+        # read's wall a counted millisecond so far (the workers read several at once:
+        # IKA-364), 1 before a stage has completed.
+        return stages_wall / stages_count if run.kind == "wall" and stages_count > 0 else 1.0
+
+    fills = run.kind == "wall" and FILL_WALL and pool is not None
+
+    def begins(stage: Stage, cells: int) -> bool:
+        """IKA-374 (`AHEAD`): whether a stage of ``cells`` fresh cells would be begun now."""
+        if fills:
+            return run.left_ms(work) > 0
+        return (per_cell_ms(stage, _guess_cell_ms(stage, cost)) * cells * speed()
+                <= run.left_ms(work))
+
     try:
         for at_stage, stage in enumerate(stages):
             if run.stopped():
@@ -467,32 +496,27 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
             cols = [_order(ys[k], x @ prices[k], stage.rect, larger=False) for k in range(kinds)]
             trial = [p.copy() for p in prices]
             guess = _guess_cell_ms(stage, cost)
-            if stage.kind in measured:
-                per_cell = measured[stage.kind][0] / max(measured[stage.kind][1], 1)
-            else:
-                have = calib.get(stage.depth) or (
-                    (sum(v[0] for v in calib.values()), sum(v[1] for v in calib.values()))
-                    if calib else None)
-                ratio = 1.0 if not have or have[1] <= 0 else have[0] / have[1]
-                # IKA-364: the depth-3 guesses run 100-200 times the counted cost (1,794 ms a
-                # cell guessed for d3r8b3k24x, 12-24 counted), so a floor of 0.05 predicted
-                # the next depth-3 stage at 4-8 times its cost and a 32 s read stopped at
-                # 5-14 s.
-                per_cell = guess * min(max(ratio, 0.002), 3.0)
+            per_cell = per_cell_ms(stage, guess)
             fresh_keys = {_key(side, i, j, k, stage) for k in range(kinds) for i in rows
                           for j in cols[k]} - set(memo)
-            # The prediction is in counted milliseconds; on the wall clock it is scaled by
-            # this read's wall a counted millisecond so far (the workers read several at once:
-            # IKA-364), 1 before a stage has completed.
-            speed = (stages_wall / stages_count
-                     if run.kind == "wall" and stages_count > 0 else 1.0)
-            predicted = per_cell * len(fresh_keys) * speed
+            # IKA-374: less the cells read ahead and back (none on the count clock).
+            held = pool.ready(fresh_keys) if pool is not None else 0
+            predicted = per_cell * (len(fresh_keys) - held) * speed()
             result.next_predicted_ms, result.next_left_ms = predicted, run.left_ms(work)
-            fills = run.kind == "wall" and FILL_WALL and pool is not None
-            speculate = run.kind == "wall" and SPECULATE and pool is not None
+            looks_ahead = run.kind == "wall" and AHEAD and pool is not None
+            tail = run.kind == "wall" and TAIL and pool is not None
             if predicted > run.left_ms(work) and not (fills and run.left_ms(work) > 0):
                 result.stopped, result.unfinished = "budget", stage.label
                 break
+            if pool is not None and pool._trace is not None:
+                ahead = stages[at_stage + 1] if at_stage + 1 < len(stages) else None
+                pool.note({"stage": stage.label, "at": at_stage, "rows": list(rows),
+                           "cols": [list(c) for c in cols], "fresh": len(fresh_keys),
+                           "predicted": round(predicted, 1),
+                           **({"next": ahead.label, "sameKind": ahead.kind == stage.kind,
+                               "staleRows": _order(x, row_ev0, ahead.rect, larger=True),
+                               "staleCols": [_order(ys[k], x @ prices[k], ahead.rect, larger=False)
+                                             for k in range(kinds)]} if ahead else {})})
             stage_began = run.spent_ms(work)
             count_began, wall_began = cost.ms(work), run.wall_ms()
             fresh = 0
@@ -509,9 +533,12 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
                         asked[key] = (k, ours, theirs)
                 keys = list(asked)
                 done = 0
-                adopt: dict[int, int] = {}
+                adopt: dict[int, tuple[int, list[tuple]]] = {}
+                head: list[list[tuple]] = []
+                spec_ready: dict = {}
                 if pool is not None:
-                    # IKA-370: the cells the previous stage's tail read ahead for this one.
+                    # IKA-370, IKA-374: the cells an earlier tail read ahead for this one --
+                    # back (taken now) and still out (waited for, as chunks of their own).
                     spec_ready, spec_flying = pool.claim(keys)
                     for key, (value, done_work, done_notes) in spec_ready.items():
                         memo[key] = value
@@ -520,13 +547,15 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
                         result.unmodelled.update(done_notes)
                     fresh += len(spec_ready)
                     done += len(spec_ready)
-                    keys = [k for k in keys if k not in spec_ready and k not in spec_flying]
-                    adopt = {n: task for n, task in enumerate(spec_flying.values())}
-                    head = [[k] for k in spec_flying]
+                    flying = {k for wanted in spec_flying.values() for k in wanted}
+                    keys = [k for k in keys if k not in spec_ready and k not in flying]
+                    for task, wanted in spec_flying.items():
+                        adopt[len(head)] = (task, wanted)
+                        head.append(wanted)
+                if pool is None or stage.sub is not None:
+                    chunks = head + [keys[at:at + step] for at in range(0, len(keys), step)]
                 else:
-                    head = []
-                size = step if pool is None or stage.sub is not None else pool.chunk(len(keys))
-                chunks = head + [keys[at:at + size] for at in range(0, len(keys), size)]
+                    chunks = head + pool.split(keys, shrink=tail, of=len(asked))
                 keys = [k for chunk in chunks for k in chunk]
                 asks = [[asked[key] for key in chunk] for chunk in chunks]
                 if pool is None:
@@ -535,11 +564,12 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
                                                 stage_budget, turns, clean, hidden_side,
                                                 result.unmodelled, cost, stop))
                 else:
-                    spare = (_spare(side, stages[at_stage + 1], budget, x, ys, prices, row_ev0,
-                                    kinds, memo, set(asked), pool)
-                             if speculate and at_stage + 1 < len(stages) else None)
+                    ahead = (_Ahead(side, stage, stages[at_stage + 1:at_stage + 2], budget,
+                                    stage_budget, rows, cols, attempt, w, trial, memo, todo,
+                                    set(asked), pool, (x, ys), begins)
+                             if looks_ahead else None)
                     reads = pool.cells(asks, stage, stage_budget, work, result.unmodelled,
-                                       adopt=adopt, spare=spare)
+                                       adopt=adopt, ahead=ahead, tail=tail)
                 try:
                     for index, got in reads:
                         if got is _TICK:
@@ -556,7 +586,7 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
                             memo[key] = v
                         fresh += len(chunk)
                         done += len(chunk)
-                        left = len(keys) + len(spec_ready if pool is not None else ()) - done
+                        left = len(keys) + len(spec_ready) - done
                         per = (run.spent_ms(work) - stage_began) / max(fresh, 1)
                         # What the rest will take: at the rate so far, or -- the workers on
                         # the wall clock -- at the workers' own rate, spread over them.
@@ -622,6 +652,10 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
             calib[stage.depth] = (got_ms + spent, guessed + guess * fresh)
             prices = trial
             x, ys = answer[0], answer[1]
+            if pool is not None:
+                pool.note({"done": stage.label, "rows": list(rows), "cols": [list(c) for c in cols],
+                           "support": [int(i) for i in np.flatnonzero(x > 1e-9)],
+                           "replies": [[int(j) for j in np.flatnonzero(y > 1e-9)] for y in ys]})
             rung = Rung(stage=stage.label, value=answer[2], strategy=x, replies=tuple(ys),
                         rows=len(rows), cols=tuple(len(c) for c in cols), fresh=fresh,
                         spent_ms=run.spent_ms(work), wall_ms=run.wall_ms(), optimism=answer[3],
@@ -657,38 +691,144 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
     return result
 
 
-#: On the wall clock with the worker processes, a stage's tail -- its last chunks out, the
-#: other workers idle -- reads the next stage's likely cells one at a time (IKA-370): its
-#: rectangle as this stage's answer-before-the-stage orders it (the support corner first),
-#: kept by the pool until a stage asks for them. A cell taken is counted when taken; a cell
-#: no stage takes is never counted (the node time is the read's). The count clock does not
-#: speculate (its reads are the serial read to the bit). Off by default
-#: (``POKEURAOU_LADDER_SPECULATE=1`` turns it on): it took the workers' idle from 29% to
-#: 13-17% of their time at 16 threads and 16% to 7-10% at 8, and the node time per wall
-#: second fell (16: 3.67-3.82 -> 3.17-3.35; 8: 3.51-3.56 -> 2.95-3.36). The reads ahead go
-#: one cell a trip, and the inference server is what the workers wait on (its trips 47 ->
-#: 71-81 a node second, 23 -> 25 ms each); a quarter of them no stage took.
-SPECULATE = os.environ.get("POKEURAOU_LADDER_SPECULATE", "0") != "0"
+#: On the wall clock with the worker processes, a worker with nothing of the stage left to
+#: read reads ahead (IKA-374, after IKA-370's one cell a trip): the depth-2 cells the
+#: stage's oracle pass and the next stage will likely ask, most likely first, in chunks the
+#: size the stage cuts, kept by the pool until a stage asks for them (`_Ahead`) -- a stage
+#: takes a part of a chunk cell by cell (`search.WORK_CELLS`). The likely cells are read off
+#: the answer the rectangle has on the values back so far (an LP on the partial rectangle):
+#: 89-94% of the cells read ahead were taken (IKA-370's, off the answer before the stage:
+#: 69-81%). A worker reads a stage's chunk before a chunk read ahead that came before it
+#: (`_next_message`), and is given one only when it has nothing else. Not for a stage the
+#: read will not begin, and not for depth 3 and up: a deeper cell runs for seconds and
+#: looks at the stop only between its children, so the cells read ahead past the last
+#: stage held the next read's workers (one read began 4.4 s late) and it read 3.58 against
+#: 5.39 without them. A cell taken is counted when taken; a cell no stage takes is never
+#: counted (the node time is the read's). The answer is still the last completed stage's,
+#: and the count clock never reads ahead (its reads are the serial read to the bit). With
+#: `TAIL`, against master (ABBA, 7 positions at 8 s): the workers' idle 27-31% -> 18-19%
+#: (open, 16 threads) and 14-16% -> 5-6% (hidden), the node time a wall second 5.17 ->
+#: 5.46 (open, 16) and 4.52 -> 4.73 (hidden, 8), the same at open 8 and hidden 16: the
+#: work filling the idle makes every port read and server trip slower (8 physical cores).
+#: ``POKEURAOU_LADDER_AHEAD=0`` turns it off.
+AHEAD = os.environ.get("POKEURAOU_LADDER_AHEAD", "1") != "0"
+
+#: On the wall clock with the worker processes, a stage's last chunks are cut smaller as the
+#: cells left to send run out (never more than a worker's share of them), and go only to a
+#: worker with nothing out, never behind a chunk in hand (IKA-374). ``POKEURAOU_LADDER_TAIL=0``
+#: turns it off.
+TAIL = os.environ.get("POKEURAOU_LADDER_TAIL", "1") != "0"
 
 
-def _spare(side: int, stage: Stage, budget: Budget, x: np.ndarray, ys: list, prices: list,  # noqa: PLR0913
-           row_ev: np.ndarray, kinds: int, memo: dict, current: set, pool: _Pool) -> Any:  # noqa: ANN401
-    """The cells ``stage`` will likely ask, most likely first: its rectangle's sides as the
-    answer ``x`` / ``ys`` orders them, cell by cell in growing corners."""
-    stage_budget = replace(budget, enumerate_knockouts=True) if stage.knockouts else budget
-    rows = _order(x, row_ev, stage.rect, larger=True)
-    cols = [_order(ys[k], x @ prices[k], stage.rect, larger=False) for k in range(kinds)]
-    side_len = max(len(rows), *(len(c) for c in cols))
-    for r in range(side_len):
+class _Ahead:
+    """The chunks a stage's tail reads ahead (`AHEAD`): called by `_Pool.cells` for the next
+    one, a list of ``(stage, stage_budget, key, cell)`` of one stage, or None when there is
+    nothing left to read ahead.
+
+    Made at the pass's start with its rectangle (``rows`` / ``cols``), the prices before it
+    (``trial``), the memo it fills and its cells (``todo``, ``asked``); planned at the first
+    call, with the values back by then: the rectangle's answer on them (the prices where a
+    cell is not back), then -- when the stage has an oracle pass left -- the row and the
+    columns that pass would add, and the next stage's rectangle as that answer orders it, in
+    growing corners from the support."""
+
+    def __init__(self, side: int, stage: Stage, after: Sequence[Stage], budget: Budget,  # noqa: PLR0913
+                 stage_budget: Budget, rows: list[int], cols: list[list[int]], attempt: int,
+                 w: np.ndarray, trial: list[np.ndarray], memo: dict, todo: list,
+                 asked: set, pool: _Pool, before: tuple,
+                 begins: Callable[[Stage, int], bool] | None = None) -> None:
+        self.side, self.stage, self.budget, self.stage_budget = side, stage, budget, stage_budget
+        self.begins = begins
+        self.after = after[0] if after else None
+        self.rows, self.cols = list(rows), [list(c) for c in cols]
+        self.attempt, self.w, self.trial, self.memo = attempt, w, trial, memo
+        self.todo, self.asked, self.pool, self.before = todo, asked, pool, before
+        self._chunks: Any = None
+
+    def __call__(self) -> list | None:
+        if self._chunks is None:
+            self._chunks = iter(self._plan())
+        for chunk in self._chunks:
+            live = [c for c in chunk if c[2] not in self.memo and not self.pool.holds(c[2])]
+            if live:
+                return live
+        return None
+
+    def _answer(self) -> tuple[np.ndarray, list[np.ndarray], float, list[np.ndarray]]:
+        side, kinds = self.side, len(self.trial)
+        prices = [t.copy() for t in self.trial]
+        for i, j, k in self.todo:
+            v = self.memo.get(_key(side, i, j, k, self.stage))
+            if v is not None:
+                prices[k][i, j] = v if side == 0 else -v
+        try:
+            got = solve_bayesian([prices[k][np.ix_(self.rows, self.cols[k])]
+                                  for k in range(kinds)], self.w)
+        except EquilibriumError:
+            x, ys = self.before
+            return x, list(ys), float("nan"), prices
+        x = np.zeros(len(prices[0]), dtype=np.float64)
+        x[self.rows] = got.row_strategy
+        ys = []
         for k in range(kinds):
-            corner = [(rows[r], j) for j in cols[k][:r + 1]] if r < len(rows) else []
-            corner += [(i, cols[k][r]) for i in rows[:r]] if r < len(cols[k]) else []
-            for i, j in corner:
+            y = np.zeros(prices[k].shape[1], dtype=np.float64)
+            y[self.cols[k]] = got.col_strategies[k]
+            ys.append(y)
+        return x, ys, float(got.value), prices
+
+    def _plan(self) -> list[list[tuple]]:
+        side, kinds, w = self.side, len(self.trial), self.w
+        x, ys, value, prices = self._answer()
+        col_ev = [x @ prices[k] for k in range(kinds)]
+        row_ev = sum(w[k] * (prices[k] @ ys[k]) for k in range(kinds))
+        plan: list[list[tuple]] = []
+        seen: set[tuple] = set()
+
+        def cells(stage: Stage, budget: Budget, pairs: Any) -> list[tuple]:  # noqa: ANN401
+            got = []
+            for i, j, k in pairs:
                 key = _key(side, i, j, k, stage)
-                if key in memo or key in current or pool.holds(key):
+                if key in seen or key in self.memo or key in self.asked or self.pool.holds(key):
                     continue
+                seen.add(key)
                 ours, theirs = (i, j) if side == 0 else (j, i)
-                yield stage, stage_budget, key, (k, ours, theirs)
+                got.append((stage, budget, key, (k, ours, theirs)))
+            return got
+
+        def cut(stage: Stage, got: list[tuple]) -> None:
+            size = 1 if stage.sub is not None else self.pool.chunk(len(got))
+            plan.extend(got[at:at + size] for at in range(0, len(got), size))
+
+        if self.attempt < self.stage.passes and value == value and self.stage.sub is None:
+            # The oracle's pass: the row and the columns it would add on this answer.
+            rows, cols = list(self.rows), [list(c) for c in self.cols]
+            best_row = int(np.argmax(row_ev))
+            if best_row not in rows and float(row_ev[best_row]) > value + search.ORACLE_TOLERANCE:
+                rows.append(best_row)
+            for k in range(kinds):
+                earned = float(col_ev[k] @ ys[k])
+                best_col = int(np.argmin(col_ev[k]))
+                if best_col not in cols[k] and float(
+                        col_ev[k][best_col]) < earned - search.ORACLE_TOLERANCE:
+                    cols[k].append(best_col)
+            cut(self.stage, cells(self.stage, self.stage_budget,
+                                  [(i, j, k) for k in range(kinds) for i in rows for j in cols[k]]))
+        if self.after is not None and self.after.sub is None:
+            after = self.after
+            budget = replace(self.budget, enumerate_knockouts=True) if after.knockouts else self.budget
+            rows = _order(x, row_ev, after.rect, larger=True)
+            cols = [_order(ys[k], col_ev[k], after.rect, larger=False) for k in range(kinds)]
+            corners = []
+            for r in range(max(len(rows), *(len(c) for c in cols))):
+                for k in range(kinds):
+                    corners += [(rows[r], j, k) for j in cols[k][:r + 1]] if r < len(rows) else []
+                    corners += [(i, cols[k][r], k) for i in rows[:r]] if r < len(cols[k]) else []
+            got = cells(after, budget, corners)
+            # Not for a stage the read will not begin: its cells would be read for nothing,
+            # and still be out when the next read begins.
+            if self.begins is None or self.begins(after, len(got)):
+                cut(after, got)
+        return plan
 
 
 def _key(side: int, i: int, j: int, k: int, stage: Stage) -> tuple:
@@ -1055,6 +1195,12 @@ POOL_DEPTH = 2
 #: cells read, reads begun, and chunks read past the stop and thrown away.
 POOL_COUNTS: dict[str, int] = {"chunks": 0, "cells": 0, "reads": 0, "dropped": 0}
 
+#: IKA-374: a directory the reader writes each pooled read's timeline to (one JSON line a
+#: read, ``<pid>.jsonl``): every chunk's worker, cells, send / back times and its worker's
+#: own milliseconds, each `cells` call's stage and bounds, and each stage's rectangle. For
+#: measuring where the workers wait; None (the default): nothing is kept.
+TRACE_DIR = os.environ.get("POKEURAOU_LADDER_TRACE") or None
+
 
 def _serial(asks: list[list], read_one: Callable[[list], list]) -> Any:  # noqa: ANN401 - a generator
     """The chunks read here, one after the other: ``(index, values)``, `_STOPPED` where a
@@ -1092,11 +1238,17 @@ def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  
     context: tuple | None = None
     turns: dict[bool, dict] = {False: {}, True: {}}
     clean: dict[tuple[int, int], bool] = {}
+    #: IKA-374: what has come and is not read yet.
+    pending: list = []
     while True:
         try:
-            message = conn.recv()
+            if not pending:
+                pending.append(conn.recv())
+            while conn.poll():
+                pending.append(conn.recv())
         except EOFError:
             return
+        message = pending.pop(_next_message(pending))
         if message is None:
             return
         if message[0] == "read":
@@ -1106,15 +1258,19 @@ def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  
             turns = {False: {}, True: {}}
             clean = {}
             continue
-        _kind, task, stage, stage_budget, cells = message
+        kind, task, stage, stage_budget, cells = message
         row, col, items, root_budget, hidden_side, cost = context
         work = _zero()
         notes: set[str] = set()
         if cancel.is_set():
             # Sent before the reader stopped: not read.
-            conn.send(("stopped", task, None, work, notes, (0.0, 0.0, 0, 0.0, 0.0, 0)))
+            conn.send(("stopped", task, None, [work], notes, (0.0, 0.0, 0, 0.0, 0.0, 0)))
             continue
         search.WORK = work
+        # IKA-374: the work is said cell by cell: a stage may take a part of a chunk read
+        # ahead (`AHEAD`), and counts only the cells it takes.
+        by_cell = [] if stage.sub is None else None
+        search.WORK_CELLS = by_cell
         clock = time.perf_counter()
         cpu = time.process_time()
         served = _served(leaf)
@@ -1130,6 +1286,13 @@ def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  
                            "error")
         finally:
             search.WORK = None
+            search.WORK_CELLS = None
+        # One cell of a deeper stage (`_deep_cell` reads nothing through `WORK_CELLS`), or a
+        # chunk that stopped, or one the port refused -- read a cell at a time, its refused
+        # cells counting nothing: the chunk's work goes on its first cell (the total kept).
+        if status != "done" or by_cell is None or len(by_cell) != len(cells):
+            by_cell = [work] + [_zero() for _ in cells[1:]]
+        work = by_cell
         after = _served(leaf)
         # IKA-370: the chunk's wall, the server's share and trips, this process's CPU, and
         # its port's share and reads -- what is left of the wall is the time it was ready
@@ -1138,6 +1301,15 @@ def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  
                 time.process_time() - cpu, rustnode.PORT_WAITED[0] - ported[0],
                 rustnode.PORT_WAITED[1] - ported[1])
         conn.send((status, task, got, work, notes, took))
+
+
+def _next_message(pending: list) -> int:
+    """IKA-374: which of the messages come to a worker it reads next -- the first sent, but a
+    stage's chunk before a chunk read ahead: a read ahead never holds up a stage's chunk
+    that is waiting behind it. A read's context (and the end) keeps its place: nothing sent
+    after it is read before it."""
+    bound = next((n for n, m in enumerate(pending) if m is None or m[0] == "read"), len(pending))
+    return next((n for n in range(bound) if pending[n][0] != "ahead"), 0)
 
 
 def _served(leaf: Any) -> tuple[float, int]:  # noqa: ANN401
@@ -1166,12 +1338,24 @@ class _Pool:
         #: the workers reading them (`_settle`).
         self._orphan_tasks: set[int] = set()
         self._orphans: set[int] = set()
+        #: IKA-374: the read's context message (`begin`), and the workers it is still due to.
+        self._context: tuple = ()
+        self._due: set[int] = set()
         self._tasks = 0
-        #: IKA-370: the speculation (`SPECULATE`): out (task -> key), back (key -> value,
-        #: work, notes), and out by key.
-        self._spec_out: dict[int, tuple] = {}
+        #: The cells read ahead (IKA-370 `SPECULATE`, IKA-374 `AHEAD`): chunks out (task ->
+        #: their keys), cells back (key -> value, work, notes), and cells out (key -> task).
+        self._spec_out: dict[int, list[tuple]] = {}
         self._spec_ready: dict[tuple, tuple] = {}
         self._spec_flying: dict[tuple, int] = {}
+        #: IKA-374: this read's timeline (`TRACE_DIR`), or None.
+        self._trace: dict[str, Any] | None = None
+        self._trace_sent: dict[int, tuple] = {}
+
+    def note(self, what: dict[str, Any]) -> None:
+        """A stage's record in the timeline (`TRACE_DIR`)."""
+        if self._trace is not None:
+            self._trace["stages"].append(
+                dict(what, t=round((time.perf_counter() - self._trace["t0"]) * 1000.0, 2)))
 
     def alive(self) -> bool:
         return bool(self.conns) and all(p.is_alive() for p in self.processes)
@@ -1187,14 +1371,36 @@ class _Pool:
             return POOL_CHUNK
         return max(1, min(CHUNK, -(-cells // (POOL_SPREAD * len(self.conns)))))
 
+    def split(self, keys: list, *, shrink: bool = False, of: int | None = None) -> list[list]:
+        """A depth-2 pass's cells cut into chunks of `chunk` cells -- sized by the pass's
+        ``of`` cells (default: ``keys``), those read ahead (`AHEAD`) included; ``shrink``
+        (`TAIL`): a chunk never more than a worker's share of the cells left, so the last
+        are single."""
+        size = self.chunk(len(keys) if of is None else of)
+        if not shrink:
+            return [keys[at:at + size] for at in range(0, len(keys), size)]
+        chunks, at = [], 0
+        while at < len(keys):
+            step = max(1, min(size, -(-(len(keys) - at) // len(self.conns))))
+            chunks.append(keys[at:at + step])
+            at += step
+        return chunks
+
     def begin(self, row: Sequence[Any], col: Sequence[Any], items: Sequence[Any],
               budget: Budget, hidden_side: int, cost: LadderCost) -> None:
         plain = [Item(position=it.position, weight=float(getattr(it, "weight", 1.0)),
                       exact=bool(getattr(it, "exact", True)),
                       slots=tuple(getattr(it, "slots", ()) or ())) for it in items]
         self._settle()
-        for conn in self.conns:
-            conn.send(("read", list(row), list(col), plain, budget, hidden_side, cost))
+        # IKA-374: a worker still inside a chunk an earlier read gave up gets this read's
+        # context when that chunk is back (`cells`), not now: a message over the pipe's
+        # buffer (8 KB on Windows) waits until the worker takes it, and an 8 s read began
+        # 4.4 s late behind depth-3 and 4 cells read ahead for the read before it.
+        self._context = ("read", list(row), list(col), plain, budget, hidden_side, cost)
+        self._due = set(self._orphans)
+        for i, conn in enumerate(self.conns):
+            if i not in self._due:
+                conn.send(self._context)
         POOL_COUNTS["reads"] += 1
         #: This read's: chunks taken, the reader's milliseconds blocked on the workers, in
         #: sends and in receives (unpickling included), and the workers' own reading.
@@ -1206,53 +1412,108 @@ class _Pool:
         #: reading, ``portMs`` / ``portReads`` their waits on their ports; the speculation's
         #: cells sent, their workers' milliseconds, the cells a stage took from it and the
         #: cells it read for nothing (``specCells``, ``specMs``, ``specUsed``, ``specWasted``).
+        #: IKA-374 (`AHEAD`): ``specChunks`` the chunks read ahead, ``specPartial`` the
+        #: chunks a stage took a part of (the rest kept).
         self.stats = {"chunks": 0, "waitMs": 0.0, "sendMs": 0.0, "recvMs": 0.0,
                       "workerMs": 0.0, "serverMs": 0.0, "serverTrips": 0, "supplyMs": 0.0,
                       "tailMs": 0.0, "betweenMs": 0.0, "cpuMs": 0.0, "portMs": 0.0,
                       "portReads": 0, "specCells": 0, "specMs": 0.0, "specUsed": 0,
-                      "specWasted": 0}
+                      "specWasted": 0, "specChunks": 0, "specPartial": 0}
         self._last_end = time.perf_counter()
+        self._trace = ({"t0": self._last_end, "workers": len(self.conns), "calls": [],
+                        "chunks": [], "stages": []} if TRACE_DIR else None)
+        #: The timeline's chunks out: task -> (worker, sent, cells, call, speculation).
+        self._trace_sent: dict[int, tuple] = {}
+
+    def _t(self, clock: float) -> float:
+        return round((clock - self._trace["t0"]) * 1000.0, 2)
 
     def end(self) -> None:
         """The read is over: the workers idle since the last stage's cells were back, and
         the speculation not taken thrown away."""
         self.stats["betweenMs"] += (time.perf_counter() - self._last_end) * 1000.0 * len(
             self.conns)
-        self.stats["specWasted"] += len(self._spec_ready) + len(self._spec_out)
+        self.stats["specWasted"] += len(self._spec_ready) + sum(
+            len(keys) for keys in self._spec_out.values())
         self._drain()
         self.stats["lingering"] = sum(len(t) for t in self._out.values())
+        if self._trace is not None:
+            import json
+
+            trace, self._trace = self._trace, None
+            trace["end"] = self._t_of(trace, time.perf_counter())
+            trace.pop("t0")
+            os.makedirs(TRACE_DIR, exist_ok=True)
+            with open(os.path.join(TRACE_DIR, f"{os.getpid()}.jsonl"), "ab") as fh:
+                fh.write((json.dumps(trace) + "\n").encode("utf-8"))
+
+    @staticmethod
+    def _t_of(trace: dict[str, Any], clock: float) -> float:
+        return round((clock - trace["t0"]) * 1000.0, 2)
 
     def claim(self, keys: Sequence[tuple]) -> tuple[dict, dict]:
-        """The speculation's answers for ``keys``: back (key -> value, work, notes) and still
-        out (key -> task, for `cells`' ``adopt``). Both are the stage's from here."""
-        ready = {k: self._spec_ready.pop(k) for k in keys if k in self._spec_ready}
-        flying = {k: self._spec_flying.pop(k) for k in keys if k in self._spec_flying}
-        self.stats["specUsed"] += len(ready) + len(flying)
-        return ready, flying
+        """The cells read ahead for ``keys``: back (key -> value, work, notes) and still out
+        (task -> the keys of ``keys`` it reads: `cells`' ``adopt``). Both are the stage's from
+        here."""
+        ready = {}
+        origins: dict[int, list] = {}
+        for k in keys:
+            if k in self._spec_ready:
+                value, done_work, notes, (task, size) = self._spec_ready.pop(k)
+                ready[k] = (value, done_work, notes)
+                origins.setdefault(task, [size, 0])[1] += 1
+        by_task: dict[int, list[tuple]] = {}
+        for k in keys:
+            task = self._spec_flying.pop(k, None)
+            if task is not None:
+                by_task.setdefault(task, []).append(k)
+        for task, wanted in by_task.items():
+            origins.setdefault(-task, [len(self._spec_out[task]), 0])[1] += len(wanted)
+        self.stats["specUsed"] += len(ready) + sum(len(w) for w in by_task.values())
+        # The positive control that a chunk's cells are counted cell by cell.
+        self.stats["specPartial"] += sum(1 for size, got in origins.values() if got < size)
+        return ready, by_task
 
     def holds(self, key: tuple) -> bool:
         return key in self._spec_ready or key in self._spec_flying
 
+    def ready(self, keys: Any) -> int:  # noqa: ANN401
+        """How many of ``keys`` are read ahead and back."""
+        return sum(1 for k in keys if k in self._spec_ready)
+
+    def _ahead_back(self, task: int, status: str, values: Any, cell_work: list,  # noqa: ANN401
+                    notes: set[str]) -> None:
+        """A chunk read ahead is back: its cells kept for `claim` (a cell by cell's work)."""
+        keys = self._spec_out.pop(task, [])
+        for n, key in enumerate(keys):
+            self._spec_flying.pop(key, None)
+            if status == "done":
+                self._spec_ready[key] = (values[n], cell_work[n], notes, (task, len(keys)))
+
     def cells(self, asks: list[list], stage: Stage, stage_budget: Budget,  # noqa: C901, PLR0912, PLR0915
-              work: dict[str, int], notes: set[str], *, adopt: dict[int, int] | None = None,
-              spare: Any = None) -> Any:  # noqa: ANN401 - a generator
+              work: dict[str, int], notes: set[str], *,
+              adopt: dict[int, tuple[int, list[tuple]]] | None = None, ahead: Any = None,
+              tail: bool = False) -> Any:  # noqa: ANN401 - a generator
         """`_serial`'s answers from the workers: each chunk's values in the order asked,
         its counted work and notes added as it is taken; `_TICK` while waiting. Closed
         early (the reader stopped), the chunks still out are cancelled and thrown away.
 
-        IKA-370: ``adopt`` names chunks (by index) that are already out as speculation
-        (their task), taken here when back. ``spare`` yields ``(stage, stage_budget, key,
-        cell)``: cells the workers read one at a time when nothing of this stage is left to
-        send -- the next stage's likely cells, kept for `claim`."""
+        ``adopt`` names chunks (by index) that are already out, read ahead: index -> (task,
+        the chunk's keys among the task's), taken here when back. ``ahead()``
+        (IKA-370, IKA-374) gives the next chunk to read ahead -- a list of ``(stage,
+        stage_budget, key, cell)`` of one stage, or None -- sent to a worker with nothing
+        out once this call's chunks are all sent, one at a time, and kept for `claim`.
+        ``tail`` (IKA-374): the last chunks go only to a worker with nothing out, never
+        behind a chunk in hand."""
         from multiprocessing.connection import wait
 
         out = self._out
         which = {id(conn): i for i, conn in enumerate(self.conns)}
         results: dict[int, tuple] = {}
         mine: dict[int, int] = {}
-        for index, task in (adopt or {}).items():
-            self._spec_out.pop(task, None)
-            mine[task] = index
+        adopted: dict[int, tuple[int, list[tuple]]] = {}
+        for index, (task, wanted) in (adopt or {}).items():
+            adopted[task] = (index, wanted)
         to_send = [n for n in range(len(asks)) if n not in (adopt or {})]
         at = taken = 0
         #: The workers' milliseconds and cells of the chunks back so far (`eta_ms`).
@@ -1260,6 +1521,12 @@ class _Pool:
         now = time.perf_counter()
         self.stats["betweenMs"] += (now - self._last_end) * 1000.0 * len(self.conns)
         idle_since = [now] * len(self.conns)
+        trace = self._trace
+        sent = self._trace_sent
+        if trace is not None:
+            call = {"stage": stage.label, "t": self._t(now), "chunks": len(asks),
+                    "cells": sum(len(a) for a in asks)}
+            trace["calls"].append(call)
         try:
             while taken < len(asks):
                 while True:
@@ -1270,6 +1537,8 @@ class _Pool:
                         break
                     clock = time.perf_counter()
                     if at < len(to_send):
+                        if tail and out[i] and len(to_send) - at <= len(self.conns):
+                            break
                         index = to_send[at]
                         at += 1
                         self._tasks += 1
@@ -1278,27 +1547,36 @@ class _Pool:
                         if not out[i]:
                             self.stats["supplyMs"] += (clock - idle_since[i]) * 1000.0
                         self.conns[i].send(("cells", task, stage, stage_budget, asks[index]))
-                    elif spare is not None:
-                        got = next(spare, None)
+                        size = len(asks[index])
+                    elif ahead is not None and not out[i]:
+                        got = ahead()
                         if got is None:
-                            spare = None
+                            ahead = None
                             break
-                        spec_stage, spec_budget, key, cell = got
                         self._tasks += 1
                         task = self._tasks
-                        self._spec_out[task] = key
-                        self._spec_flying[key] = task
-                        self.stats["specCells"] += 1
-                        self.conns[i].send(("cells", task, spec_stage, spec_budget, [cell]))
+                        keys = [key for _s, _b, key, _c in got]
+                        self._spec_out[task] = keys
+                        for key in keys:
+                            self._spec_flying[key] = task
+                        self.stats["specCells"] += len(keys)
+                        self.stats["specChunks"] += 1
+                        self.conns[i].send(("ahead", task, got[0][0], got[0][1],
+                                            [cell for _s, _b, _k, cell in got]))
+                        size = len(keys)
                     else:
                         break
                     self.stats["sendMs"] += (time.perf_counter() - clock) * 1000.0
                     out[i].append(task)
+                    if trace is not None:
+                        sent[task] = (i, self._t(clock), size, len(trace["calls"]) - 1,
+                                      task not in mine)
                 if taken in results:
                     status, values, done_work, done_notes = results.pop(taken)
                     self.stats["chunks"] += 1
-                    for kind, n in done_work.items():
-                        work[kind] += n
+                    for cell_work in done_work:
+                        for kind, n in cell_work.items():
+                            work[kind] += n
                     notes.update(done_notes)
                     POOL_COUNTS["chunks"] += 1
                     POOL_COUNTS["cells"] += len(asks[taken])
@@ -1324,11 +1602,20 @@ class _Pool:
                     self.stats["cpuMs"] += cpu_s * 1000.0
                     self.stats["portMs"] += port_s * 1000.0
                     self.stats["portReads"] += port_reads
+                    if trace is not None and task in sent:
+                        w_i, t_sent, n_cells, at_call, spec = sent.pop(task)
+                        trace["chunks"].append(
+                            [at_call, w_i, n_cells, t_sent, self._t(back), round(took * 1000.0, 2),
+                             round(server_s * 1000.0, 2), trips, round(cpu_s * 1000.0, 2),
+                             round(port_s * 1000.0, 2), port_reads, int(spec), status])
                     i = which[id(conn)]
                     out[i].remove(task)
+                    self._orphan_tasks.discard(task)
                     if not any(t in self._orphan_tasks for t in out[i]):
                         self._orphans.discard(i)
-                    self._orphan_tasks.discard(task)
+                        if i in self._due:
+                            self._due.discard(i)
+                            self.conns[i].send(self._context)
                     if status == "error":
                         raise RuntimeError(f"a ladder worker failed on a chunk: {values}")
                     if task in mine:
@@ -1336,18 +1623,30 @@ class _Pool:
                         self._got_ms += took * 1000.0
                         self._got_cells += len(asks[index])
                         results[index] = (status, values, done_work, done_notes)
-                    elif task in self._spec_out:
-                        key = self._spec_out.pop(task)
-                        self._spec_flying.pop(key, None)
+                    elif task in adopted:
+                        # A chunk read ahead that this stage asked for: its cells taken as
+                        # `claim` takes them, the rest kept for a later stage.
+                        index, wanted = adopted.pop(task)
                         self.stats["specMs"] += took * 1000.0
+                        self._ahead_back(task, status, values, done_work, done_notes)
                         if status == "done":
-                            self._spec_ready[key] = (values[0], done_work, done_notes)
-                    if not any(t in mine for t in out[i]):
+                            got = [self._spec_ready.pop(key) for key in wanted]
+                            results[index] = (status, [g[0] for g in got], [g[1] for g in got],
+                                              done_notes)
+                        else:
+                            results[index] = (status, None, [], done_notes)
+                    elif task in self._spec_out:
+                        self.stats["specMs"] += took * 1000.0
+                        self._ahead_back(task, status, values, done_work, done_notes)
+                    if not any(t in mine or t in adopted for t in out[i]):
                         idle_since[i] = back
         finally:
             if taken < len(asks):
                 self._drain()
             self._last_end = time.perf_counter()
+            if trace is not None:
+                call["end"] = self._t(self._last_end)
+                call["taken"] = taken
             if at == len(to_send):
                 for since in idle_since:
                     self.stats["tailMs"] += max(0.0, self._last_end - since) * 1000.0
