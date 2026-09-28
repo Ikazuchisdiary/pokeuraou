@@ -78,6 +78,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import sys
 import threading
 import time
@@ -788,6 +789,10 @@ def use_ladder_pool(threads: int, reg: Regulation, spec: tuple[Any, ...] | None)
         wanted = min(threads - 1, LADDER_LOCAL_WORKERS_MAX)
     else:
         wanted = threads - 1
+    # IKA-370: the count of workers named apart from the threads (a measurement's knob).
+    named = os.environ.get("POKEURAOU_LADDER_WORKERS")
+    if wanted and named:
+        wanted = int(named)
     if ladder.pool_workers() != wanted:
         ladder.start_pool(reg, wanted, ladder_process_leaf, tuple(spec or ()))
     return ladder.pool_workers()

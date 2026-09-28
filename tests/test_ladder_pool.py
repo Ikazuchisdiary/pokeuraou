@@ -156,8 +156,8 @@ def test_the_wall_clock_and_the_stop(roster, pool, monkeypatch) -> None:  # noqa
     stop = threading.Event()
     cells = ladder._Pool.cells
 
-    def stopping(self, asks, stage, *rest):  # noqa: ANN001, ANN202
-        inner = cells(self, asks, stage, *rest)
+    def stopping(self, asks, stage, *rest, **how):  # noqa: ANN001, ANN003, ANN202
+        inner = cells(self, asks, stage, *rest, **how)
         try:
             for index, got in inner:
                 if stage.depth == 3 and got is not ladder._TICK:
@@ -197,8 +197,8 @@ def test_a_read_stopped_and_begun_again_with_its_cells(roster, pool, monkeypatch
     if workers:
         cells = ladder._Pool.cells
 
-        def stopping(self, asks, stage, *rest):  # noqa: ANN001, ANN202
-            inner = cells(self, asks, stage, *rest)
+        def stopping(self, asks, stage, *rest, **named):  # noqa: ANN001, ANN003, ANN202
+            inner = cells(self, asks, stage, *rest, **named)
             try:
                 for index, got in inner:
                     if stage.depth == 3 and got is not ladder._TICK and index >= 1:
@@ -238,3 +238,52 @@ def test_a_read_stopped_and_begun_again_with_its_cells(roster, pool, monkeypatch
     # Only the cells the first call did not keep were read again.
     assert sum(r.fresh for r in second.rungs) == total - kept
     assert len(memo) == total
+
+
+def test_the_tail_reads_the_next_stage_ahead_on_the_wall_clock(roster, pool, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-370: on the wall clock a stage's tail reads the next stage's likely cells, and a
+    stage takes those it asks for. No value moves (hp-share answers a cell alike in any
+    chunk) and only the cells taken are counted: every stage, value, strategy and counted
+    work is the serial read's. The positive control: stages took cells read ahead."""
+    reg = roster.reg
+    monkeypatch.setattr(ladder, "SPECULATE", True)
+    stages = "d2r2b3n4+d2r3b3n4+d2r4ban4x+d3r2ban4/r2ban4"
+    used = 0
+    for pos in _played(roster)[:3]:
+        node = _node(reg, pos, 6)
+        walled = _read(reg, node, stages, workers=True, clock="wall")
+        serial = _read(reg, node, stages, workers=False)
+        assert walled.stopped == serial.stopped == "done"
+        assert [r.stage for r in walled.rungs] == [r.stage for r in serial.rungs]
+        for x, y in zip(walled.rungs, serial.rungs, strict=True):
+            assert x.value == y.value and x.fresh == y.fresh and x.work == y.work
+            assert (x.rows, x.cols) == (y.rows, y.cols)
+            np.testing.assert_array_equal(x.strategy, y.strategy)
+        assert walled.work == serial.work and walled.unmodelled == serial.unmodelled
+        used += walled.pool["specUsed"]
+        assert walled.pool["specCells"] >= walled.pool["specUsed"]
+    assert used > 0, "no stage took a cell read ahead"
+
+
+def test_a_filled_budget_ends_at_the_budget(roster, pool, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-370: filling the wall clock's budget (`FILL_WALL`) begins every stage while time
+    is left, so a read ends at its budget inside a stage it began (never before one it did
+    not), and ends there without waiting for the chunks still out (they are taken, and
+    thrown away, when the next read begins). The answer is its last completed stage."""
+    reg = roster.reg
+    monkeypatch.setattr(ladder, "FILL_WALL", True)
+    stages = "d2r2b3n4+d3r4ban4/r3ban4+d4r3ban4/r3ban4/r3ban4"
+    cut = 0
+    for pos in _played(roster)[:3]:
+        node = _node(reg, pos, 6)
+        got = _read(reg, node, stages, 300.0, workers=True, clock="wall")
+        assert got.wall_ms < 300.0 + 1000.0, "the read waited past its budget"
+        if got.stopped == "budget":
+            assert got.abandoned and got.unfinished is not None
+            cut += 1
+            if got.rungs:
+                np.testing.assert_array_equal(got.strategy, got.rungs[-1].strategy)
+        again = _read(reg, node, "d2r2b3n4", workers=True)
+        serial = _read(reg, node, "d2r2b3n4", workers=False)
+        assert again.rungs[0].value == serial.rungs[0].value
+    assert cut >= 1, "no read met its budget"
