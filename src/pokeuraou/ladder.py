@@ -24,7 +24,9 @@ column). Stages run from coarse to fine; each starts from the one before it:
 The budget is read on a count clock (the work `search._refine_cells` reports in
 `search.WORK`, priced by `LadderCost`), so the same budget is the same answer on a busy
 machine and an idle one, or on the wall clock. A stage is not begun when its predicted
-cost does not fit what is left, and is abandoned once what it has spent says it will not.
+cost does not fit what is left, and is abandoned once what it has spent says it will not --
+except on the wall clock for a ladder that fills its budget (`FILLS`, IKA-376: L6, whose
+stages a rule writes past L5's, `unending`), which begins every stage while time is left.
 
 One reader for both roots: the open game is the Bayesian game of one completion of weight 1,
 as `search._restricted_belief` is `_restricted_search` there. Cells are (row, column,
@@ -167,10 +169,67 @@ LADDERS: dict[str, tuple[str, ...]] = {
 }
 
 
+def _level(rect: int, branches: str, child: int) -> str:
+    return f"r{rect}b{branches}k{child}"
+
+
+def unending(depth: int = 4, *, last: int = 9) -> tuple[str, ...]:
+    """The stages a rule writes past a hand-written ladder, depth ``depth`` to ``last``
+    (IKA-376): at each depth D the rounds L5 wrote for depth 4 and IKA-369's extensions
+    asked for, each a few times the one before it --
+
+    1. narrow: the root's 4 x 4 at three branches, each level below 3 x 3 at three
+       branches, the children at the Q's 24 and the lowest level's at 16;
+    2. the root's 8 x 8 (the level below it 4 x 4) -- L5's two depth-4 stages;
+    3. every branch at the root's cells;
+    4. every branch at every level, the lowest level's children at 24;
+    5. the children wider (the level below the root 6 x 6, the next 4 x 4) -- IKA-369: the
+       root wider moved no answer (12 x 12 at depth 4: 0.0000), the children wider and depth
+       5 did (0.0025, 0.0006), so the root stays at 8;
+
+    then depth D + 1 from step 1. The stage syntax stops at depth 9, which no machine
+    reaches (a depth-5 cell reads a depth-4 read per child), so the ladder never runs out
+    in a move or an analysis."""
+    out: list[str] = []
+    for d in range(depth, last + 1):
+        below = d - 2  # the levels under the root's cells
+
+        def stage(top: int, top_b: str, rects: list[int], b: str, low_k: int, d: int = d,
+                  below: int = below) -> str:
+            levels = [_level(rects[i], b, 24 if i < below - 1 else low_k) for i in range(below)]
+            return f"d{d}r{top}b{top_b}k24x/" + "/".join(levels)
+
+        narrow = [3] * below
+        eight = [4] + [3] * (below - 1)
+        wide = ([6, 4] + [3] * (below - 2))[:below]
+        out += [stage(4, "3", narrow, "3", 16), stage(8, "3", eight, "3", 16),
+                stage(8, "a", eight, "3", 16), stage(8, "a", eight, "a", 24),
+                stage(8, "a", wide, "a", 24)]
+    return tuple(out)
+
+
+# L5, then the rule (`unending`) from where L5 leaves depth 4: its stages never run out, and
+# on the wall clock it fills the budget (`FILLS`).
+LADDERS["L6"] = LADDERS["L5"] + unending(4)[2:]
+
+#: Ladders that fill a wall-clock budget (`FILL_WALL` for one ladder): a stage is begun while
+#: time is left and given up at the budget, never left unbegun on a prediction (IKA-376:
+#: L5's 12 stages were read in 46% of a 64 s budget, IKA-369).
+FILLS = frozenset({"L6"})
+
+
+class Ladder(tuple):
+    """A ladder's stages; ``fills``: it fills a wall-clock budget (`FILLS`)."""
+
+    fills: bool = False
+
+
 def parse_ladder(spec: str) -> tuple[Stage, ...]:
     """A named ladder (`LADDERS`) or stages joined by ``+``."""
     labels = LADDERS.get(spec) or tuple(spec.split("+"))
-    return tuple(parse_stage(label) for label in labels)
+    out = Ladder(parse_stage(label) for label in labels)
+    out.fills = spec in FILLS
+    return out
 
 
 @dataclass(frozen=True, slots=True)
@@ -491,7 +550,9 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
         # IKA-364), 1 before a stage has completed.
         return stages_wall / stages_count if run.kind == "wall" and stages_count > 0 else 1.0
 
-    fills = run.kind == "wall" and FILL_WALL and pool is not None
+    # IKA-376: a ladder named in `FILLS` fills the budget as `FILL_WALL` does.
+    fills = (run.kind == "wall" and (FILL_WALL or getattr(stages, "fills", False))
+             and pool is not None)
 
     def begins(stage: Stage, cells: int) -> bool:
         """IKA-374 (`AHEAD`): whether a stage of ``cells`` fresh cells would be begun now."""
@@ -2469,6 +2530,7 @@ class _Pool:
         now = time.perf_counter()
         self.stats["betweenMs"] += (now - self._last_end) * 1000.0 * len(self.conns)
         idle_since = [now] * len(self.conns)
+        ticked = now
         trace = self._trace
         sent = self._trace_sent
         if trace is not None:
@@ -2646,6 +2708,12 @@ class _Pool:
                 if halted:
                     yield taken, _STOPPED
                     return
+                if time.perf_counter() - ticked >= TICK_SECONDS:
+                    # IKA-376: the clock is looked at while the workers keep answering, too --
+                    # small tasks back every few milliseconds never left `wait` empty, and a
+                    # depth-5 stage's top cell is seconds: a 30 s read ended at 43 s.
+                    ticked = time.perf_counter()
+                    yield None, _TICK
                 if taken in results:
                     status, values, done_work, done_notes = results.pop(taken)
                     self.stats["chunks"] += 1
@@ -2663,6 +2731,7 @@ class _Pool:
                 ready = wait(self.conns, timeout=TICK_SECONDS)
                 self.stats["waitMs"] += (time.perf_counter() - clock) * 1000.0
                 if not ready:
+                    ticked = time.perf_counter()
                     yield None, _TICK
                     continue
                 for conn in ready:

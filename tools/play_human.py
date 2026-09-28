@@ -299,7 +299,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--ladder", default=None,
                     help="read each move by a ladder of stages instead of the deepening (IKA-367; "
                     "a name in ladder.LADDERS such as L5, or stages joined by +), the answer the "
-                    "last stage completed in the budget. With --threads N its cells are read by "
+                    "last stage completed in the budget (L6 fills the budget on the wall clock "
+                    "and its stages do not run out, IKA-376). With --threads N its cells are read by "
                     "N-1 worker processes (IKA-364; with a server, each asks it; without, at "
                     f"most {humanplay.LADDER_LOCAL_WORKERS_MAX} load the leaf and the Q). "
                     "Default: none (the deepening)")

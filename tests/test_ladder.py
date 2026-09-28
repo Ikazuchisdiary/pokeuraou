@@ -102,6 +102,24 @@ def test_a_stage_label_reads_back() -> None:
             ladder.parse_ladder(bad)
 
 
+def test_the_rule_writes_stages_past_l5() -> None:
+    """IKA-376: the rule (`ladder.unending`) begins with L5's two depth-4 stages, so L6 is L5
+    and then the rule; every stage it writes reads back, one depth at a time up to 9, and
+    L6 alone fills a wall-clock budget."""
+    rule = ladder.unending(4)
+    assert rule[:2] == ladder.LADDERS["L5"][-2:]
+    l6 = ladder.parse_ladder("L6")
+    assert [s.label for s in l6[:len(ladder.LADDERS["L5"])]] == list(ladder.LADDERS["L5"])
+    assert [s.label for s in l6[len(ladder.LADDERS["L5"]):]] == list(rule[2:])
+    assert rule[4] == "d4r8bak24x/r6bak24/r4bak24"  # IKA-369's S2
+    assert rule[5] == "d5r4b3k24x/r3b3k24/r3b3k24/r3b3k16"
+    depths = [s.depth for s in l6]
+    assert depths == sorted(depths) and depths[-1] == 9
+    assert len({s.label for s in l6}) == len(l6)
+    assert l6.fills and not ladder.parse_ladder("L5").fills
+    assert not ladder.parse_ladder("d2r2b3n4").fills
+
+
 def test_every_answer_is_a_completed_stage(roster) -> None:  # noqa: ANN001
     reg = roster.reg
     stages = "d2r2b3n4+d2r4ban6x"
