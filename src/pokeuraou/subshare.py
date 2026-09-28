@@ -67,8 +67,9 @@ COUNTS: dict[str, int] = {"hits": 0, "same": 0, "puts": 0, "misses": 0, "torn": 
 BUSY = object()
 #: IKA-380: `Table.claim` marks the sub-games it will fill. At 16 threads (L5, 24 s, master)
 #: 8-10% of the sub-games filled were filled again by another worker process at the same
-#: time (both missed the table: it keeps a sub-game once solved), and for 85% of those the
-#: other's was kept by the end of the second one's call. ``POKEURAOU_LADDER_MARKS=0``: no marks.
+#: time (both missed the table: it keeps a sub-game once solved), and for 83-88% of those
+#: the other's was kept by the end of the second one's call; with the marks (and the deep
+#: cells read pass by pass) 2.9-4.7% were filled twice. ``POKEURAOU_LADDER_MARKS=0``: no marks.
 MARKS = os.environ.get("POKEURAOU_LADDER_MARKS", "1") != "0"
 #: A row's word 6: 0 a kept value, `_FLYING` a mark that a process is filling the key.
 _FLYING = 1
