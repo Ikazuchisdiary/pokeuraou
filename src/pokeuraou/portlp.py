@@ -19,6 +19,17 @@ Two roads, both one crossing for many games:
   `fold.fold_value`'s Python sums -- and solved; a matrix already whole (the hp-share road) is
   solved as it is.
 
+IKA-387 adds the rest of the ladder's LPs, on the same `lp` command:
+
+* `solve_many` again for a deep cell's children's own matrices (`ladder._kids_fill`), all of
+  one call in one crossing;
+* `solve_bayesian_many` for their pass rectangles (`ladder._kids_solve`: a pass's children
+  in one crossing; the reader's `deep_passes` gathers the children whose pass came back in
+  one round of answers), the answer built by `equilibrium.assemble_bayesian` as
+  `solve_bayesian` builds it;
+* `solve_bayesian_one` for a stage's rectangle (`ladder.read`) and the answer a stage's
+  tail reads ahead from (`ladder._Ahead._answer`).
+
     POKEURAOU_LADDER_PORT_LP=1     # on (default off; data generation never sets it)
 
 Off, nothing here runs and every answer is Python's. A game the port cannot solve is
@@ -37,14 +48,24 @@ from typing import Any
 import numpy as np
 
 from . import rustnode
-from .equilibrium import Equilibrium, EquilibriumError, assemble
+from .equilibrium import (
+    BayesianEquilibrium,
+    Equilibrium,
+    EquilibriumError,
+    assemble,
+    assemble_bayesian,
+    bayesian_inputs,
+    solve,
+    solve_bayesian,
+)
 
 ENV = "POKEURAOU_LADDER_PORT_LP"
 #: Whether the ladder's LPs go to the port. A list so a test can turn it on in one process.
 ON = [os.environ.get(ENV, "0").strip() == "1"]
-#: What went: crossings, games (`solve_many`), sub-games folded in the port and given whole,
-#: and the LPs the port reports it solved (the positive control).
-COUNTS = {"crossings": 0, "games": 0, "folded": 0, "whole": 0, "lps": 0}
+#: What went: crossings, games (`solve_many`), Bayesian games (`solve_bayesian_many`),
+#: sub-games folded in the port and given whole, and the LPs the port reports it solved (the
+#: positive control).
+COUNTS = {"crossings": 0, "games": 0, "bayes": 0, "folded": 0, "whole": 0, "lps": 0}
 
 
 def set_on(on: bool) -> None:
@@ -115,6 +136,71 @@ def solve_many(
     return out
 
 
+def solve_bayesian_many(
+    reg: Any,  # noqa: ANN401 - a Regulation
+    games: Sequence[tuple[Sequence[np.ndarray], np.ndarray]],
+) -> list[BayesianEquilibrium | Exception]:
+    """`equilibrium.solve_bayesian` of each ``(matrices, weights)`` in one crossing (IKA-387):
+    its `BayesianEquilibrium`, or the error `solve_bayesian` would have raised (returned in
+    its place). The port is sent the weights as given and normalises them as Python does."""
+    if not games:
+        return []
+    checked: list[tuple[list[np.ndarray], np.ndarray] | Exception] = []
+    asked: list[dict[str, Any]] = []
+    for mats, weights in games:
+        try:
+            got = bayesian_inputs(list(mats), weights)
+        except ValueError as exc:
+            checked.append(exc)
+            continue
+        checked.append(got)
+        asked.append({"bayes": [_game(a) for a in got[0]],
+                      "weights": _b64(np.asarray(weights, dtype=np.float64).reshape(-1))})
+    answers = _ask(reg, {"kind": "lp", "games": asked})["answers"] if asked else []
+    if len(answers) != len(asked):
+        raise RuntimeError(f"`lp` answered {len(answers)} of {len(asked)} games")
+    got_answers = iter(answers)
+    COUNTS["bayes"] += len(asked)
+    out: list[BayesianEquilibrium | Exception] = []
+    for one_game in checked:
+        if isinstance(one_game, Exception):
+            out.append(one_game)
+            continue
+        mats, w = one_game
+        one = next(got_answers)
+        error = _error(one)
+        if error is not None:
+            out.append(error)
+            continue
+        out.append(assemble_bayesian(mats, w, float(one["valueRow"]), float(one["valueCol"]),
+                                     _unb64(one["x"]), tuple(_unb64(y) for y in one["ys"])))
+    return out
+
+
+def solve_one(reg: Any, payoff: np.ndarray) -> Equilibrium:  # noqa: ANN401 - a Regulation
+    """`equilibrium.solve` of one matrix -- in the port when `ON`, else in Python -- raising
+    as `solve` raises (IKA-387)."""
+    if not ON[0]:
+        return solve(payoff)
+    got = solve_many(reg, [payoff])[0]
+    if isinstance(got, Exception):
+        raise got
+    return got
+
+
+def solve_bayesian_one(
+    reg: Any, matrices: Sequence[np.ndarray], weights: np.ndarray  # noqa: ANN401 - a Regulation
+) -> BayesianEquilibrium:
+    """`equilibrium.solve_bayesian` of one game -- in the port when `ON`, else in Python --
+    raising as it raises (IKA-387)."""
+    if not ON[0]:
+        return solve_bayesian(list(matrices), weights)
+    got = solve_bayesian_many(reg, [(matrices, weights)])[0]
+    if isinstance(got, Exception):
+        raise got
+    return got
+
+
 def solve_subs(reg: Any, subs: Sequence[Any]) -> None:  # noqa: ANN401 - a Regulation, `search._Sub`s
     """Solve, in one crossing, every sub-game of `subs` that `search._sub_value` would solve:
     each filled one not solved yet (an alias's first in its place). Sets its ``solved`` and
@@ -172,4 +258,5 @@ def counts() -> dict[str, int]:
     return dict(COUNTS)
 
 
-__all__ = ["COUNTS", "ENV", "ON", "counts", "set_on", "solve_many", "solve_subs"]
+__all__ = ["COUNTS", "ENV", "ON", "counts", "set_on", "solve_bayesian_many",
+           "solve_bayesian_one", "solve_many", "solve_one", "solve_subs"]

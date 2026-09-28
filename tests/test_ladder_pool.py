@@ -200,22 +200,27 @@ def test_the_ports_lps_read_as_pythons(roster, pool) -> None:  # noqa: ANN001
             nodes += [(_node(reg, pos, 5, spreads, side), "d2r2b3n4+d2r3ban4x", side)
                       for side in (0, 1)]
     assert len(nodes) >= 5
-    solved = {"here": 0, "pool": 0}
+    solved = {"here": 0, "pool": 0, "bayes": 0, "readerLps": 0}
     try:
         for node, how, side in nodes:
             portlp.set_on(False)
             plain = _read(reg, node, how, side=side, workers=False)
             assert plain.rungs and plain.here["portLps"] == 0
             portlp.set_on(True)
+            bayes = portlp.COUNTS["bayes"]
             serial = _read(reg, node, how, side=side, workers=False)
+            # IKA-387: the stages' rectangles and the deep children's, in this process.
+            solved["bayes"] += portlp.COUNTS["bayes"] - bayes
             pooled = _read(reg, node, how, side=side, workers=True)
             _same(serial, plain)
             _same(pooled, plain)
             solved["here"] += serial.here["portLps"]
             solved["pool"] += pooled.pool["portLps"]
+            # IKA-387: the reader's own port solves its stages' rectangles.
+            solved["readerLps"] += pooled.here["portLps"]
     finally:
         portlp.set_on(False)
-    assert solved["here"] > 0 and solved["pool"] > 0, solved
+    assert all(v > 0 for v in solved.values()), solved
 
 
 def test_a_sub_game_another_worker_fills_is_taken_or_filled_again(roster, monkeypatch) -> None:  # noqa: ANN001
@@ -472,6 +477,45 @@ def test_a_deep_cell_is_read_pass_by_pass_on_the_wall_clock(roster, pool, monkey
         kids += walled.pool["kidReads"]
     assert opened > 0, "no deep cell was opened"
     assert kids > 0, "no child was read pass by pass"
+
+
+def test_the_readers_kid_lps_in_the_port_pass_by_pass(roster, pool, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-387 (`portlp` on): the reader walking deep cells pass by pass (`deep_passes`) solves
+    the children whose pass is back in one crossing a round of answers, and every stage,
+    value, strategy, counted work and note is the serial read's with scipy (hp-share answers
+    a cell alike in any batch and order). The positive controls: children's rectangles
+    solved in the reader's port, in no more crossings than rectangles (hp-share's two workers
+    answer about one child a round; on 16 a round holds more)."""
+    reg = roster.reg
+    monkeypatch.setattr(ladder, "SPLIT", True)
+    monkeypatch.setattr(ladder, "PASSES", True)
+    stages = "d2r2b3n4+d3r3ban4/r2ban4+d4r2b3n4/r2b3n4/r2b3n4"
+    solves = trips = 0
+    try:
+        for pos in _played(roster)[:3]:
+            node = _node(reg, pos, 6)
+            portlp.set_on(False)
+            serial = _read(reg, node, stages, workers=False)
+            portlp.set_on(True)
+            walled = _read(reg, node, stages, workers=True, clock="wall")
+            assert walled.stopped == serial.stopped == "done"
+            _same_but_time(walled, serial)
+            solves += walled.pool["kidSolves"]
+            trips += walled.pool["kidSolveTrips"]
+    finally:
+        portlp.set_on(False)
+    assert solves > 0, "no child's rectangle was solved in the reader's port"
+    assert 0 < trips <= solves, (trips, solves)
+
+
+def _same_but_time(a, b) -> None:  # noqa: ANN001
+    assert [r.stage for r in a.rungs] == [r.stage for r in b.rungs]
+    for x, y in zip(a.rungs, b.rungs, strict=True):
+        assert x.value == y.value and x.fresh == y.fresh and x.work == y.work
+        assert (x.rows, x.cols) == (y.rows, y.cols)
+        np.testing.assert_array_equal(x.strategy, y.strategy)
+    np.testing.assert_array_equal(a.strategy, b.strategy)
+    assert a.work == b.work and a.unmodelled == b.unmodelled
 
 
 def test_a_worker_reads_a_stage_chunk_before_one_read_ahead() -> None:

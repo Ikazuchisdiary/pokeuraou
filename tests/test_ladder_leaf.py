@@ -103,12 +103,15 @@ def test_the_ports_folds_and_lps_read_as_pythons(kit, monkeypatch) -> None:  # n
     positive control: sub-games folded in the port, and its LPs."""
     plain = _read(kit, monkeypatch, batch=True, stack=True)
     folded, lps = portlp.COUNTS["folded"], portlp.COUNTS["lps"]
+    bayes, games = portlp.COUNTS["bayes"], portlp.COUNTS["games"]
     portlp.set_on(True)
     try:
         ported = _read(kit, monkeypatch, batch=True, stack=True)
     finally:
         portlp.set_on(False)
     assert portlp.COUNTS["folded"] > folded and portlp.COUNTS["lps"] > lps
+    # IKA-387: the deep children's matrices and pass rectangles, and the stages' rectangles.
+    assert portlp.COUNTS["bayes"] > bayes and portlp.COUNTS["games"] > games
     assert [(r.stage, r.spent_ms) for r in ported.ladder.rungs] == [
         (r.stage, r.spent_ms) for r in plain.ladder.rungs]
     assert ported.ladder.work == plain.ladder.work
