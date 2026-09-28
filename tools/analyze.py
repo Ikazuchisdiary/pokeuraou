@@ -96,7 +96,8 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--ladder", default=None,
                     help="read by a ladder of stages instead of the deepening (IKA-367; a name in "
                     "ladder.LADDERS such as L5, or stages joined by +) until stopped or its last "
-                    "stage, each completed stage the answer so far; its cells on --threads - 1 "
+                    "stage (L6's stages do not run out, IKA-376), each completed stage the answer "
+                    "so far; its cells on --threads - 1 "
                     "worker processes (IKA-364). Default: none (the deepening)")
     ap.add_argument("--value", type=Path, nargs="+", default=None,
                     help=f"the leaf (one model or an ensemble). Default: {' '.join(DEFAULT_VALUE)}")
