@@ -50,7 +50,6 @@ mod small_rules;
 mod speed;
 mod terrain;
 mod transform;
-mod turn_memo;
 mod wire;
 
 #[cfg(feature = "count-allocations")]

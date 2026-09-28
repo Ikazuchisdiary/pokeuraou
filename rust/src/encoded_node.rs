@@ -475,9 +475,6 @@ pub fn fill_shared_on<'r>(
     };
 
     let wanted = request.wanted_cells();
-    // IKA-375: the cells this node found in the process's memo of turns (`turn_memo`).
-    let memo_before = crate::turn_memo::counts();
-    let mut memo_used = false;
     match pool.filter(|_| !request.position_json.is_null()) {
         None => {
             for &(i, j) in &wanted {
@@ -489,15 +486,7 @@ pub fn fill_shared_on<'r>(
                     Some(result) => result,
                     None => {
                         let actions = [request.ours[i].clone(), request.theirs[j].clone()];
-                        let answered = if request.memo {
-                            memo_used = true;
-                            crate::turn_memo::turn(&request.position, &actions, request.budget, || {
-                                resolve_turn(reg, &request.position, &actions, request.budget)
-                            })
-                        } else {
-                            resolve_turn(reg, &request.position, &actions, request.budget)
-                        };
-                        match answered {
+                        match resolve_turn(reg, &request.position, &actions, request.budget) {
                             Err(reason) => {
                                 refused.push(json!([i, j, reason]));
                                 continue;
@@ -637,12 +626,6 @@ pub fn fill_shared_on<'r>(
     if like.is_some() {
         // The cells whose turn was read off the earlier node rather than resolved.
         header["readOff"] = json!(read_off);
-    }
-    if memo_used {
-        // IKA-375: the cells whose turn came from the memo, and those resolved (and kept).
-        let after = crate::turn_memo::counts();
-        header["memoHits"] = json!(after.hits - memo_before.hits);
-        header["memoMisses"] = json!(after.misses - memo_before.misses);
     }
     (header, encoded, leaf_values, span_bytes, kept)
 }

@@ -107,10 +107,7 @@ pub fn end(started: Instant) {
 
 pub fn report() -> serde_json::Value {
     let kinds = KINDS.lock().map(|k| k.clone()).unwrap_or_default();
-    // IKA-375: the serving thread's memo of turns (`turn_memo`).
-    let memo = crate::turn_memo::counts();
     serde_json::json!({
-        "turnMemo": { "hits": memo.hits, "misses": memo.misses, "dropped": memo.dropped },
         "positionRead": POSITION_READ.json(),
         "positionWrite": POSITION_WRITE.json(),
         "kinds": kinds.iter().map(|(kind, row)| (kind.clone(), serde_json::json!({

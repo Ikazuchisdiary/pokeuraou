@@ -440,22 +440,6 @@ def port_threads() -> int | None:
     return _PORT_THREADS[0]
 
 
-#: IKA-375: ask the port to find each encoded node's cells in its memo of the turns it
-#: resolved before, and to keep the ones it resolves (`rust/src/turn_memo.rs`). The same
-#: answer to the bit -- a cell's turn is a function of the position, the actions and the
-#: budget, and an entry is found by all three compared whole -- and only the ladder's
-#: workers ask (`memo_turns`): every other road's requests are the bytes they were.
-_MEMO_TURNS = [False]
-#: IKA-375: encoded nodes' cells found in the memo and cells resolved, over this process
-#: (the positive control that the memo answered).
-MEMO_COUNTS = [0, 0]
-
-
-def memo_turns(on: bool = True) -> None:
-    """Ask the port for its memo of turns on every encoded node from now on (`_MEMO_TURNS`)."""
-    _MEMO_TURNS[0] = on
-
-
 #: A thread's own processes (`own_node`), by format; the module's `_NODES` otherwise.
 _LOCAL = threading.local()
 
@@ -1110,8 +1094,6 @@ class RustNode:
             }
             if wants_old:
                 request["encoding"] = rules.to_request()
-            if _MEMO_TURNS[0]:
-                request["memo"] = True
             link = links[len(requests)] if links is not None else None
             if link:
                 request.update(link)
@@ -1148,9 +1130,6 @@ class RustNode:
             timing.add("rust.child.encode", node.encode_us / 1e6)
             timing.count("leaves.offered", int(head.get("offered", 0)))
             timing.count("leaves.stored", int(head["leaves"]))
-            if "memoHits" in head:
-                MEMO_COUNTS[0] += int(head["memoHits"])
-                MEMO_COUNTS[1] += int(head["memoMisses"])
             if "readOff" in head:
                 # Cells whose turn the port read off an earlier node; null, a node it could
                 # not read anything off (the positions were not two completions of one).
@@ -1343,8 +1322,6 @@ class RustNode:
         wants_old = bool(rules is not None and rules.mega_from_slots)
         if wants_old:
             request["encoding"] = rules.to_request()
-        if _MEMO_TURNS[0]:
-            request["memo"] = True
         # What this process holds, if anything. A `shm` key with no name says "I hold
         # none, but I will make one" -- which is what the first node of every process
         # sends, and how a block ends up the size of the node that needed it.
@@ -1379,9 +1356,6 @@ class RustNode:
         # ratio has been read off `Collector.seen` and never counted; this is the count.
         timing.count("leaves.offered", int(header.get("offered", 0)))
         timing.count("leaves.stored", int(header["leaves"]))
-        if "memoHits" in header:
-            MEMO_COUNTS[0] += int(header["memoHits"])
-            MEMO_COUNTS[1] += int(header["memoMisses"])
         if timing.ON:
             # The same call cut by what it was for (IKA-98): its whole wall clock here,
             # nestings included, and the child's four clocks together.

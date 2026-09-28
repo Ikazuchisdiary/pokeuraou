@@ -53,9 +53,6 @@ pub struct Request {
     /// An encoded node's spans in the header as JSON rather than in the body (IKA-302):
     /// only for the test that holds the two roads to the same lists.
     pub json_spans: bool,
-    /// IKA-375: find each cell's turn in this process's memo of turns it resolved before,
-    /// and keep the ones it resolves (`turn_memo`). Only the ladder's workers ask.
-    pub memo: bool,
 }
 
 impl Request {
@@ -124,7 +121,6 @@ pub fn parse_request(value: &Value) -> Result<Request, String> {
     };
     Ok(Request {
         json_spans: value.get("jsonSpans").and_then(Value::as_bool).unwrap_or(false),
-        memo: value.get("memo").and_then(Value::as_bool).unwrap_or(false),
         ours_json: Vec::new(),
         theirs_json: Vec::new(),
         position_json,
