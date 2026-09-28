@@ -1671,6 +1671,14 @@ SPLIT = os.environ.get("POKEURAOU_LADDER_SPLIT", "1") != "0"
 #: 4.8 s). ``POKEURAOU_LADDER_PASSES=0``: IKA-375's split (a child read whole on a worker).
 PASSES = os.environ.get("POKEURAOU_LADDER_PASSES", "1") != "0"
 
+#: IKA-380: with `PASSES`, a pass's chunk sent while fewer tasks wait than workers are idle
+#: (a deep stage's tail) is cut into parts, one a worker. The chunks of `CHUNK` cells were
+#: 70% of what ran in the deep stages' tails (open, 24 s, 16 threads). A part is the Q's
+#: group of its cells (the Q's answer for a row moves with its batch, in the last places),
+#: so the cut may move a child's menu where two actions' Q values are that close.
+#: ``POKEURAOU_LADDER_PASS_SPLIT=0``: whole chunks.
+PASS_SPLIT = os.environ.get("POKEURAOU_LADDER_PASS_SPLIT", "1") != "0"
+
 #: IKA-378: a read fills each child sub-game once (`subshare`, `search.SHARE`) -- one table
 #: for the read, in shared memory for its worker processes. In a 1-process read at 16 s
 #: (L5), 36% (open) and 43% (hidden) of the sub-games were a child with the same menus filled
@@ -1987,7 +1995,8 @@ class _Pool:
         #: (`PASSES`) ``openCells`` the deep cells opened, ``kidReads`` the children read here
         #: pass by pass, ``kidsJoined`` a cell's child joined to one already read or being
         #: read, ``passChunks`` the chunks of their depth-2 passes, ``wholeCells`` the cells
-        #: read whole after a pass was refused.
+        #: read whole after a pass was refused, ``passSplits`` chunks cut in the tail
+        #: (`PASS_SPLIT`).
         self.stats = {"chunks": 0, "waitMs": 0.0, "sendMs": 0.0, "recvMs": 0.0,
                       "workerMs": 0.0, "serverMs": 0.0, "serverTrips": 0, "supplyMs": 0.0,
                       "tailMs": 0.0, "betweenMs": 0.0, "cpuMs": 0.0, "portMs": 0.0,
@@ -1996,7 +2005,7 @@ class _Pool:
                       "childTasks": 0, "heldPositions": 0, "sharedSubgames": 0,
                       "sameSubgames": 0, "keptSubgames": 0, "sharedKids": 0,
                       "busySubgames": 0, "waitedSubgames": 0, "openCells": 0, "kidReads": 0,
-                      "kidsJoined": 0, "passChunks": 0, "wholeCells": 0}
+                      "kidsJoined": 0, "passChunks": 0, "wholeCells": 0, "passSplits": 0}
         self._last_end = time.perf_counter()
         self._trace = ({"t0": self._last_end, "workers": len(self.conns), "calls": [],
                         "chunks": [], "stages": []} if TRACE_DIR else None)
@@ -2595,6 +2604,19 @@ class _Pool:
                     if not out[i]:
                         self.stats["supplyMs"] += (clock - idle_since[i]) * 1000.0
                     kind, st, bud, payload, ref = inner.popleft() if inner else tops.popleft()
+                    if kind == "pass" and PASS_SPLIT and len(payload) > 1:
+                        # The tail: fewer tasks than idle workers -- the chunk in parts.
+                        idle = sum(1 for k in out if not out[k] and k not in self._orphans)
+                        want = min(len(payload), idle - len(inner) - len(tops))
+                        if want > 1:
+                            drive, cells = ref
+                            size = -(-len(payload) // want)
+                            parts = [(payload[a:a + size], cells[a:a + size])
+                                     for a in range(0, len(payload), size)]
+                            for part, part_cells in reversed(parts[1:]):
+                                inner.appendleft(("pass", st, bud, part, (drive, part_cells)))
+                            payload, ref = parts[0][0], (drive, parts[0][1])
+                            self.stats["passSplits"] += 1
                     mine[task] = (kind, ref)
                     self.conns[i].send((kind, task, st, bud, payload))
                     if kind == "pass":

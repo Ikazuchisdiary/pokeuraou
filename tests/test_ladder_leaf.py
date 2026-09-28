@@ -146,13 +146,13 @@ def test_a_child_read_pass_by_pass_is_the_child_read_whole(kit, monkeypatch, tmp
     without workers: mixture, value, stages, counted work and notes to the bit (a pass a
     child game, `STACK` off, here and in the workers). The positive controls: chunks of
     passes were sent and children read by the reader, and children joined."""
-    from pokeuraou.value import ValueConfig as _Config, save_model
+    from pokeuraou.value import save_model
 
     reg, pos, leaf = kit
     encoder = Encoder(reg)
     path = tmp_path / "seed7.pt"
-    net = leaf.nets[0] if hasattr(leaf, "nets") else leaf.net
-    save_model(path, net, net.state_dict(), encoder.vocab, _Config(), meta={})
+    net = leaf.nets[0]
+    save_model(path, net, net.state_dict(), encoder.vocab, ValueConfig(), meta={})
     ours = narrow(reg, pos, 0, limit=5).actions
     theirs = narrow(reg, pos, 1, limit=5).actions
     stages = "d2r2b2n4x+d3r4ban4x/r2b2n3"
