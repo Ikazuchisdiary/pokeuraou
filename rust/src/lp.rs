@@ -1154,6 +1154,10 @@ mod tests {
         assert_eq!((cells[0].0, cells[0].1), (1, 0));
         let v = fold_value(&cells[0].2, &[0.2, 0.9, 0.4]).unwrap();
         assert_eq!(v, python_sum([0.1 * 0.2, 2.5e-05 * 0.4]) / python_sum([0.1, 2.5e-05]));
+        // IKA-386: the same tree as the port built it, not read back from text.
+        let built: Value = serde_json::from_str(text).unwrap();
+        let from_value = fold_tree_from_value(&built[0][2]).unwrap();
+        assert_eq!(fold_value(&from_value, &[0.2, 0.9, 0.4]).unwrap().to_bits(), v.to_bits());
     }
 
     #[test]
