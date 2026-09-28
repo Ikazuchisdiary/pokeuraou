@@ -24,6 +24,11 @@ processes writing one row at once -- fails its check and reads as absent; a row 
 within `PROBE` slots of its key or not at all, and a full neighbourhood is overwritten. The
 notes (sets of strings) are kept once each in a second region, by their hash. `Local` is
 the same for a read with no worker processes, in a dict.
+
+IKA-380: a sub-game is kept once solved, so two worker processes that meet it at the same
+time both filled it. A process that will fill a sub-game now marks its row first
+(`Table.claim`); another that claims it meanwhile is told `BUSY`, fills its own others first
+and looks again (`search._refine_cells`).
 """
 
 from __future__ import annotations
@@ -52,9 +57,21 @@ _FIELD = (1 << 21) - 1
 #: What a table was asked this process's life (the positive control): sub-games taken from
 #: it (``hits``) and from an earlier sub-game of the same call (``same``), put (``puts``),
 #: looked for and not there (``misses``), rows whose check failed (``torn``); a deep cell's
-#: children taken and put (``kidHits``, ``kidPuts``).
+#: children taken and put (``kidHits``, ``kidPuts``). IKA-380: sub-games another process was
+#: filling when claimed (``busy``, `Table.claim`), and of those, found filled when looked at
+#: again (``waited``, also in ``hits``).
 COUNTS: dict[str, int] = {"hits": 0, "same": 0, "puts": 0, "misses": 0, "torn": 0,
-                          "kidHits": 0, "kidPuts": 0}
+                          "kidHits": 0, "kidPuts": 0, "busy": 0, "waited": 0}
+
+#: IKA-380: `Table.claim`'s answer for a key another process is filling now.
+BUSY = object()
+#: IKA-380: `Table.claim` marks the sub-games it will fill. At 16 threads (L5, 24 s, master)
+#: 8-10% of the sub-games filled were filled again by another worker process at the same
+#: time (both missed the table: it keeps a sub-game once solved), and for 85% of those the
+#: other's was kept by the end of the second one's call. ``POKEURAOU_LADDER_MARKS=0``: no marks.
+MARKS = os.environ.get("POKEURAOU_LADDER_MARKS", "1") != "0"
+#: A row's word 6: 0 a kept value, `_FLYING` a mark that a process is filling the key.
+_FLYING = 1
 
 #: What a row holds: the value (None: none), the cells charged, the notes, and the packed
 #: work of a deep cell's child (`pack_work`; 0 for a sub-game).
@@ -137,6 +154,10 @@ class Local:
         COUNTS[("kidHits" if kid else "hits") if got is not None else "misses"] += 1
         return got
 
+    def claim(self, key: tuple[int, int]) -> Row | None:
+        """`Table.claim` in one process: nothing else fills a key while this one does."""
+        return self.get(key)
+
     def put(self, key: tuple[int, int], value: float | None, cells: int, notes: Iterable[str],
             extra: int = 0, *, kid: bool = False) -> None:
         COUNTS["kidPuts" if kid else "puts"] += 1
@@ -180,10 +201,9 @@ class Table:
         # The read's generation in the key: a row of another read never matches.
         return key[0] ^ (self.generation * 0x9E3779B97F4A7C15 & _MASK), key[1]
 
-    def get(self, key: tuple[int, int], *, kid: bool = False) -> Row | None:
-        """The row kept under ``key`` in this read, or None. ``kid``: a deep cell's child's
-        (counted apart)."""
-        k1, k2 = self._key(key)
+    def _lookup(self, k1: int, k2: int) -> Row | object | None:
+        """The row kept under a key's words in this read, `BUSY` for a mark (`claim`), or
+        None (absent, torn, or its notes not readable)."""
         base = k1 % self.slots
         for step in range(PROBE):
             row = self.rows[(base + step) % self.slots].tolist()
@@ -191,15 +211,61 @@ class Table:
                 continue
             if _check(row) != row[_WORDS - 1]:
                 COUNTS["torn"] += 1
-                break
+                return None
+            if row[6] == _FLYING:
+                return BUSY
             notes = self._note(int(row[4]))
             if notes is None:
-                break
-            COUNTS["kidHits" if kid else "hits"] += 1
+                return None
             value = float(np.uint64(row[2]).view(np.float64))
             return (None if value != value else value), int(row[3]) >> 24, notes, int(row[5])  # noqa: PLR0124 - NaN
-        COUNTS["misses"] += 1
         return None
+
+    def get(self, key: tuple[int, int], *, kid: bool = False) -> Row | None:
+        """The row kept under ``key`` in this read, or None (a key being filled elsewhere,
+        `claim`, is absent). ``kid``: a deep cell's child's (counted apart)."""
+        got = self._lookup(*self._key(key))
+        if got is None or got is BUSY:
+            COUNTS["misses"] += 1
+            return None
+        COUNTS["kidHits" if kid else "hits"] += 1
+        return got  # type: ignore[return-value]
+
+    def claim(self, key: tuple[int, int]) -> Row | object | None:
+        """IKA-380: `get` for a sub-game, and where the key is absent, a mark in its row that
+        this process is filling it: until this process's `put` (which writes over the mark),
+        a claim elsewhere answers `BUSY` and a `get` reads it as absent. Two processes that
+        claim a key at the same moment may both fill it, as every process did before the
+        marks. A mark whose fill never ends (a read stopped) is only a look again for nothing
+        (the one who met it fills the key itself)."""
+        if not MARKS:
+            return self.get(key)
+        k1, k2 = self._key(key)
+        got = self._lookup(k1, k2)
+        if got is BUSY:
+            COUNTS["busy"] += 1
+            return BUSY
+        if got is not None:
+            COUNTS["hits"] += 1
+            return got
+        COUNTS["misses"] += 1
+        self._write(k1, k2, [k1, k2, 0, self.generation, 0, 0, _FLYING])
+        return None
+
+    def _write(self, k1: int, k2: int, words: list[int]) -> None:
+        """A row (seven words, the check added) in the key's own slot, else the first of its
+        neighbourhood that is free or another read's, else the key's first slot."""
+        base = k1 % self.slots
+        at = base
+        for step in range(PROBE):
+            slot = (base + step) % self.slots
+            row = self.rows[slot].tolist()
+            if (row[0] == k1 and row[1] == k2) or (row[3] & _GEN_MASK) != self.generation \
+                    or row[_WORDS - 1] == 0:
+                at = slot
+                break
+        words.append(_check(words))
+        self.rows[at] = np.array(words, dtype=np.uint64)
 
     def put(self, key: tuple[int, int], value: float | None, cells: int, notes: Iterable[str],
             extra: int = 0, *, kid: bool = False) -> None:
@@ -211,20 +277,9 @@ class Table:
             return
         self._known.setdefault(nh, notes)
         k1, k2 = self._key(key)
-        base = k1 % self.slots
-        at = base
-        for step in range(PROBE):
-            slot = (base + step) % self.slots
-            row = self.rows[slot].tolist()
-            if (row[0] == k1 and row[1] == k2) or (row[3] & _GEN_MASK) != self.generation \
-                    or row[_WORDS - 1] == 0:
-                at = slot
-                break
         v = int(np.float64(np.nan if value is None else value).view(np.uint64))
         meta = (min(cells, (1 << 40) - 1) << 24) | self.generation
-        words = [k1, k2, v, meta, nh, extra, 0]
-        words.append(_check(words))
-        self.rows[at] = np.array(words, dtype=np.uint64)
+        self._write(k1, k2, [k1, k2, v, meta, nh, extra, 0])
         COUNTS["kidPuts" if kid else "puts"] += 1
 
     def _note(self, nh: int) -> frozenset[str] | None:
@@ -269,5 +324,5 @@ class Table:
             self._shm.unlink()
 
 
-__all__ = ["COUNTS", "Local", "Table", "completion_digest", "kid_key", "menu_key", "pack_work",
+__all__ = ["BUSY", "COUNTS", "Local", "Table", "completion_digest", "kid_key", "menu_key", "pack_work",
            "unpack_work"]

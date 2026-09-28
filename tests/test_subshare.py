@@ -49,6 +49,40 @@ def test_a_row_is_read_by_another_handle_with_its_notes() -> None:
         table.close()
 
 
+def test_a_sub_game_being_filled_is_busy_elsewhere(monkeypatch) -> None:  # noqa: ANN001
+    """IKA-380: a claim marks a key absent from the table as being filled by its claimer:
+    another handle's claim answers `BUSY` and its get reads it as absent, until the put
+    writes the value over the mark; the claimer's own later claim finds the value. Another
+    read's mark is absent. Without marks (``MARKS`` off) a claim is a get."""
+    table = subshare.Table(slots=1024)
+    other = subshare.Table(table.name, slots=1024)
+    try:
+        for t in (table, other):
+            t.begin(3)
+        key = subshare.menu_key((5, 6), _acts("move 1"), _acts("move 2"), True)
+        assert table.claim(key) is None
+        before = dict(subshare.COUNTS)
+        assert other.claim(key) is subshare.BUSY
+        assert other.get(key) is None
+        assert subshare.COUNTS["busy"] == before["busy"] + 1
+        other.begin(4)
+        assert other.claim(key) is None  # another read: its own mark now
+        other.begin(3)
+        table.put(key, 0.75, 9, {"n"})
+        assert other.claim(key) == (0.75, 9, frozenset({"n"}), 0)
+        assert table.claim(key) == (0.75, 9, frozenset({"n"}), 0)
+        monkeypatch.setattr(subshare, "MARKS", False)
+        fresh = subshare.menu_key((7, 8), _acts("move 1"), _acts("move 2"), True)
+        assert table.claim(fresh) is None and other.claim(fresh) is None
+        local = subshare.Local()
+        assert local.claim(fresh) is None
+        local.put(fresh, 0.5, 1, ())
+        assert local.claim(fresh) == (0.5, 1, frozenset(), 0)
+    finally:
+        other.close()
+        table.close()
+
+
 def test_the_key_tells_menus_and_forks_apart() -> None:
     a = subshare.menu_key((1, 2), _acts("move 1", "move 2"), _acts("move 3"), False)
     assert a == subshare.menu_key((1, 2), _acts("move 1", "move 2"), _acts("move 3"), False)
