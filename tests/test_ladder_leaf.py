@@ -121,6 +121,7 @@ def test_a_child_read_once_is_every_one_read(kit, monkeypatch) -> None:  # noqa:
             reg, pos, 0, ours, theirs, None, leaf, budget=Budget.matrix(), exact=True,
             ladder={"stages": ladder.parse_ladder(stages), "budget_ms": None})
     assert _same(got[False], got[True])
+    assert got[False].ladder.unmodelled == got[True].ladder.unmodelled
     assert got[False].ladder.here["sharedKids"] == 0
     assert got[True].ladder.here["sharedKids"] > 0
     assert got[True].ladder.here["sharedSubgames"] > 0
