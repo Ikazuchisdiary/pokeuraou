@@ -179,6 +179,67 @@ def test_the_wall_clock_and_the_stop(roster, pool, monkeypatch) -> None:  # noqa
     assert again.rungs[0].value == walled.rungs[0].value
 
 
+@pytest.mark.parametrize("workers", [True, False])
+def test_a_read_stopped_and_begun_again_with_its_cells(roster, pool, monkeypatch, workers) -> None:  # noqa: ANN001
+    """IKA-369: the long reference's read is cut into calls. Stopped inside its depth-3 stage
+    and begun again with the cells it kept (``memo``), it is the read that ran to the end --
+    every stage's rectangle, value and answer -- and the second call reads only what the
+    first did not keep."""
+    reg = roster.reg
+    pos = _played(roster)[1]
+    node = _node(reg, pos, 6)
+    stages = "d2r2b3n4+d2r4ban4x+d3r4ban4/r3ban4"
+    whole = _read(reg, node, stages, workers=workers)
+    assert whole.stopped == "done" and len(whole.rungs) == 3
+    total = sum(r.fresh for r in whole.rungs)
+    stop = threading.Event()
+    memo: dict = {}
+    if workers:
+        cells = ladder._Pool.cells
+
+        def stopping(self, asks, stage, *rest, **named):  # noqa: ANN001, ANN003, ANN202
+            inner = cells(self, asks, stage, *rest, **named)
+            try:
+                for index, got in inner:
+                    if stage.depth == 3 and got is not ladder._TICK and index >= 1:
+                        stop.set()
+                    yield index, got
+            finally:
+                inner.close()
+
+        monkeypatch.setattr(ladder._Pool, "cells", stopping)
+    else:
+        # Read here, a depth-3 cell is `_deep_cell`: the stop once two of them are read.
+        deep_cell = ladder._deep_cell
+        seen = [0]
+
+        def counting(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+            got = deep_cell(*args, **kwargs)
+            seen[0] += 1
+            if seen[0] >= 2:
+                stop.set()
+            return got
+
+        monkeypatch.setattr(ladder, "_deep_cell", counting)
+    first = _read(reg, node, stages, workers=workers, stop=stop, memo=memo)
+    monkeypatch.undo()
+    assert first.stopped == "stop" and first.unfinished == "d3r4ban4/r3ban4"
+    kept = len(memo)
+    # The cells of the stages done, and some of the one stopped inside.
+    assert sum(r.fresh for r in first.rungs) < kept < total
+    second = _read(reg, node, stages, workers=workers, memo=memo)
+    assert second.stopped == "done"
+    assert [r.stage for r in second.rungs] == [r.stage for r in whole.rungs]
+    for x, y in zip(second.rungs, whole.rungs, strict=True):
+        assert x.value == y.value and (x.rows, x.cols) == (y.rows, y.cols)
+        np.testing.assert_array_equal(x.strategy, y.strategy)
+    for x, y in zip(second.prices, whole.prices, strict=True):
+        np.testing.assert_array_equal(x, y)
+    # Only the cells the first call did not keep were read again.
+    assert sum(r.fresh for r in second.rungs) == total - kept
+    assert len(memo) == total
+
+
 def test_the_tail_reads_the_next_stage_ahead_on_the_wall_clock(roster, pool, monkeypatch) -> None:  # noqa: ANN001
     """IKA-370, IKA-374: on the wall clock a stage's tail reads the likely cells of its
     oracle pass and of the next stage, in chunks, and a stage takes those it asks for --
