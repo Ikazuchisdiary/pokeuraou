@@ -73,6 +73,7 @@ from pokeuraou.benchflags import say_open_reference
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
 from pokeuraou.payoff import OBJECTIVES
+from pokeuraou.search import ROSTER_RANK_FILL
 from pokeuraou.selection_book import (
     ARMS,
     DEFAULT_EPSILON,
@@ -381,6 +382,8 @@ def main() -> None:
                         max_turns=args.max_turns,
                         evaluate=evaluate,
                         rank_by_leaf=args.rank_by_leaf,
+                        # M-B's roster has no Q: refs2, named (IKA-341).
+                        rank_fill=ROSTER_RANK_FILL,
                         open_information=True,
                     )
                     handle.write(

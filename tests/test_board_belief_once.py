@@ -115,10 +115,10 @@ def _play(pool, arms, which):  # noqa: ANN001, ANN202
 
 def _arms(pool):  # noqa: ANN001, ANN202
     a = PoolArm(name="a", evaluate=_stub, solver=SolvedSelections(pool.reg, pool.teams, _stub),
-                limit=4, rank_by_leaf=True)
+                limit=4, rank_by_leaf=True, rank_fill="refs2")
     b = PoolArm(name="b", evaluate=_other,
                 solver=SolvedSelections(pool.reg, pool.teams, _other),
-                limit=4, rank_by_leaf=True)
+                limit=4, rank_by_leaf=True, rank_fill="refs2")
     return a, b
 
 

@@ -609,7 +609,8 @@ def collect_one(
     from pokeuraou.selfplay import _menus
 
     budget = Budget.matrix()
-    ours, theirs = _menus(reg, pos, (limit, limit), leaf, budget, True)
+    # The refs2 menus these readings were taken on, named since IKA-341.
+    ours, theirs = _menus(reg, pos, (limit, limit), leaf, budget, True, rank_fill="refs2")
     pools = (legal(reg, pos, 0), legal(reg, pos, 1))
     out: dict[str, Any] = {
         "menu": [[a.to_choice() for a in ours], [a.to_choice() for a in theirs]],

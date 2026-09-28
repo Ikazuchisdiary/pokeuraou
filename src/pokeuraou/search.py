@@ -209,10 +209,26 @@ DEFAULT_REFERENCES = 2
 #: are (narrow.py's principles). Only the root's leaf-ranked menu reads it; the damage
 #: menus -- a sub-game's, a deepened child's, the ranking's own references -- keep the cover.
 #:
-#: This is the LIBRARY's default -- `play_game`, `generate_pool`, `PoolArm` and M-B's
-#: roster path, none of which holds a Q -- and a damage-ranked arm's, which reads no fill.
-#: It is not what M-C generation and the board play since IKA-338: see `SHIPPED_RANK_FILL`.
+#: The refs fills (and `leaf_ranking` behind them) are kept, played only when named
+#: (IKA-341, the user's decision of 9/28): M-B's roster path plays them, a person's game
+#: falls back to them with no Q, the hp-share leaf and a test without torch have no Q to
+#: rank by, and the records played at ``refs2`` (M-C gen-0, all of M-B) are rebuilt by them
+#: (`tools/q_teach.py menus`, `tools/rank_fill_menus.py`).
+#:
+#: Since IKA-341 this is no leaf-ranked menu's default anywhere: an unnamed fill of a
+#: leaf-ranked menu is `SHIPPED_RANK_FILL`, in the library as in generation and the board
+#: (`resolve_rank_fill`). ``refs2`` is played only where it is named -- M-B's roster path
+#: (`ROSTER_RANK_FILL`, M-B has no Q), a person's game with no Q (`tools/play_human.py`, a
+#: note), and research that names the refs fills (IKA-268, IKA-310, IKA-323). What stays is
+#: its other job: the label of an arm whose menu reads no fill (the damage or the policy
+#: ranking). Its records carry no ``rankFill`` (`provenance.LEGACY_RANK_FILL`), as before
+#: IKA-268, so the label is kept to keep those bytes.
 DEFAULT_RANK_FILL = f"refs{DEFAULT_REFERENCES}"
+
+#: M-B's roster path's fill, named (IKA-341): M-B has no Q, and its generation, board and
+#: tools have played ``refs2`` since IKA-268. Every leaf-ranked `play_game` / `_menus` of
+#: the roster path passes it; `tools/agent_drift.py` holds a tool that does not to account.
+ROSTER_RANK_FILL = f"refs{DEFAULT_REFERENCES}"
 
 #: The fill of a leaf-ranked menu that names none, in M-C generation and on the board
 #: (IKA-338): rank by the default Q (`qrank.DEFAULT_Q`) without the cover.
@@ -226,7 +242,10 @@ DEFAULT_RANK_FILL = f"refs{DEFAULT_REFERENCES}"
 #:
 #: The tools resolve an unnamed ``--rank-fill`` with `resolve_rank_fill`; ``refs2`` is still
 #: played when named. A q fill with no Q stops -- it never falls back to ``refs2`` in
-#: generation or on the board (`qrank.default_q`).
+#: generation or on the board (`qrank.default_q`). Since IKA-341 the library resolves an
+#: unnamed fill the same way (`play_game`, `_menus`, `generate_pool`, `PoolArm`): it loads
+#: no Q itself, so a leaf-ranked call with none installed stops at its first menu
+#: (`qrank.installed`).
 SHIPPED_RANK_FILL = "q-nocover"
 
 
@@ -234,7 +253,9 @@ def resolve_rank_fill(given: str | None, rank_leaf: bool) -> str:
     """The fill an arm plays: the one named, else `SHIPPED_RANK_FILL` for a leaf-ranked menu.
 
     A damage-ranked arm reads no fill, so it keeps `DEFAULT_RANK_FILL`: its records then
-    carry no ``rankFill``, as before IKA-338, and it needs no Q.
+    carry no ``rankFill``, as before IKA-338, and it needs no Q. ``rank_leaf`` is whether
+    the arm's menu is ranked by the leaf -- False under the damage ranking and under a
+    policy, which supersedes the leaf.
     """
     if given is not None:
         return given
@@ -1690,6 +1711,7 @@ __all__ = [
     "DEFAULT_SUB_BRANCHES",
     "DEFAULT_SUB_LIMIT",
     "ORACLE_TOLERANCE",
+    "ROSTER_RANK_FILL",
     "SHIPPED_RANK_FILL",
     "BeliefResult",
     "SearchResult",

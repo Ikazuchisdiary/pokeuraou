@@ -119,7 +119,7 @@ def run_worker(args: argparse.Namespace) -> None:
         return got
 
     def play_counted(*a: Any, **kw: Any) -> Any:  # noqa: ANN401
-        if kw.get("rank_fill", DEFAULT_RANK_FILL) != args.played:
+        if kw.get("rank_fill") != args.played:
             raise SystemExit(f"generation passed rank_fill {kw.get('rank_fill')!r}")
         return original_play(*a, **kw)
 
@@ -214,7 +214,9 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--first-game", type=int, default=0)
     ap.add_argument("--games", type=int, default=240)
     ap.add_argument("--limit", type=int, default=12)
-    ap.add_argument("--played", default=DEFAULT_RANK_FILL, help="the fill the games play")
+    ap.add_argument("--played", default=DEFAULT_RANK_FILL,
+                    help="the fill the games play, named (IKA-341): refs2, the fill IKA-268 "
+                    "measured; a q fill needs a Q, which this tool does not load")
     ap.add_argument("--fills", default="refs2,refs1,refs2-fast",
                     help="comma-separated fills whose menus are built beside the played one")
     ap.add_argument("--jobs", type=int, default=1)

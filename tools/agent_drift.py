@@ -61,10 +61,12 @@ AGENT_ARGS = (
     # Which completion a hidden-bench menu is ranked from (IKA-143). Its default is what
     # ships, so omitting it drifts nothing; a tool that passes "first" plays the old rule.
     "rank_view",
-    # How a leaf ranking fills its cells (IKA-268). `play_game`'s default (refs2) is what
-    # M-B generation ships, so omitting it drifts nothing here. M-C generation plays
-    # q-nocover since IKA-338, and passes it: its tools' fill is checked where they resolve
-    # it, at their options (`resolution_drift` below), since no `play_game` call shows it.
+    # How a leaf ranking fills its cells (IKA-268). Since IKA-341 `play_game`'s default is
+    # no longer what M-B generation ships: unnamed, a leaf-ranked side plays q-nocover by
+    # the process's Q, and M-B generation names `search.ROSTER_RANK_FILL` (refs2, M-B has no
+    # Q) -- so a roster tool that leaves it off plays another menu, or stops. M-C
+    # generation passes it too: its tools' fill is checked where they resolve it, at their
+    # options (`resolution_drift` below), since no `play_game` call shows it.
     "rank_fill",
     # Which completions a hidden-bench belief leaves out (IKA-283). Its default is what
     # ships, so omitting it drifts nothing; a tool that passes a drop plays another game.
@@ -272,13 +274,17 @@ def shipping_args() -> set[str]:
         reference |= kwargs
     reference &= set(AGENT_ARGS)
     # `depth`, `policy`, `solve_sparsely` and `solve_restricted` default to what
-    # generation ships (1, None, False, False), so omitting them changes nothing. The five
+    # generation ships (1, None, False, False), so omitting them changes nothing. The six
     # that bite are the ones whose default is NOT what ships: the leaf (None means
     # hp-share), the narrowing order (False means damage, generation uses the leaf), the
     # sheets (None means the search is handed the opponent's four), the width (8, where
-    # generation plays 12) and the bench prior (None means the uniform belief, where
-    # generation weights the bench by the opponent's selection equilibrium).
-    return reference & {"evaluate", "rank_by_leaf", "sheets", "search_limit", "bench_prior"}
+    # generation plays 12), the bench prior (None means the uniform belief, where
+    # generation weights the bench by the opponent's selection equilibrium) and the fill
+    # (None means q-nocover by a Q M-B does not have, where M-B generation names refs2,
+    # IKA-341).
+    return reference & {
+        "evaluate", "rank_by_leaf", "sheets", "search_limit", "bench_prior", "rank_fill",
+    }
 
 
 def pool_generation_missing(reference: set[str]) -> list[str]:

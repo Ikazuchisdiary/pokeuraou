@@ -58,6 +58,15 @@ Q_RANK_FILL = re.compile(r"q(-nocover)?(?:\.([a-z0-9_]+))?")
 Pools = tuple[Sequence[SideAction], Sequence[SideAction]]
 
 
+class QVocabularyError(ValueError, RuntimeError):
+    """A Q that reads another vocabulary than the leaf's encoder (IKA-341).
+
+    A `ValueError` where a local Q raised one and a `RuntimeError` where a served Q did,
+    so a caller that caught either still does; a person's game catches this one to fall
+    back with a note (`tools/play_human.py`).
+    """
+
+
 def is_q(label: str) -> bool:
     """Whether a rank-fill label ranks by a Q rather than by filling cells with the leaf."""
     return Q_RANK_FILL.fullmatch(label) is not None
@@ -149,7 +158,7 @@ class LocalQ:
 
         self.net = qhead.load_q(self.path, self.device)
         if self.net.vocab_fingerprint != self.encoder.vocab.fingerprint():
-            raise ValueError(f"{self.path} reads another vocabulary than this encoder's")
+            raise QVocabularyError(f"{self.path} reads another vocabulary than this encoder's")
         self._device = torch.device(self.device)
         self.calls = 0
         self._digests = [file_sha256(self.path)]
@@ -232,7 +241,7 @@ class RemoteQ:
         self._file = self._sock.makefile("rwb")
         about = self._ask({"op": "describe_q", "model": self.model})
         if about["fingerprint"] != self.encoder.vocab.fingerprint():
-            raise RuntimeError(f"the server's Q arm {self.model!r} reads another vocabulary")
+            raise QVocabularyError(f"the server's Q arm {self.model!r} reads another vocabulary")
         self.properties = bool(about["properties"])
         self._files = list(about["files"])
         # The server hashed the files it loaded (IKA-340); this process never sees them.

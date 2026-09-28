@@ -97,6 +97,7 @@ def _arms(pool, leaf_a, leaf_b, *, b_solves: bool = True):  # noqa: ANN001, ANN2
         name="arm-a", evaluate=leaf_a,
         solver=SolvedSelections(pool.reg, pool.teams, leaf_a, tag="a"),
         limit=2, rank_by_leaf=True,
+        rank_fill="refs2",
     )
     b = PoolArm(
         name="arm-b" if b_solves else "hp-share",
@@ -266,7 +267,7 @@ def test_a_read_during_another_workers_rename_waits_for_it(pool, tmp_path, monke
 
 def test_identical_arms_see_identical_inputs_in_both_seats(pool, monkeypatch) -> None:  # noqa: ANN001
     solver = SolvedSelections(pool.reg, pool.teams, _stub)
-    same = PoolArm(name="arm", evaluate=_stub, solver=solver, limit=2, rank_by_leaf=True)
+    same = PoolArm(name="arm", evaluate=_stub, solver=solver, limit=2, rank_by_leaf=True, rank_fill="refs2")
     calls, _ = _play(pool, (same, same), monkeypatch, seed=5, games=range(6))
     for game in range(6):
         first, second = calls[2 * game], calls[2 * game + 1]

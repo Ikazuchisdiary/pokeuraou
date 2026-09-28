@@ -206,8 +206,9 @@ def main() -> None:
         pos = positions[taken]
         taken += 1
         started = time.perf_counter()
+        # The refs2 menus this reading was measured on, named since IKA-341.
         ours, theirs = _menus(
-            reg, pos, (args.limit, args.limit), leaf, budget, args.rank_leaf
+            reg, pos, (args.limit, args.limit), leaf, budget, args.rank_leaf, rank_fill="refs2"
         )
         if len(ours) < 2 or len(theirs) < 2:
             skipped["a side with fewer than 2 actions"] += 1

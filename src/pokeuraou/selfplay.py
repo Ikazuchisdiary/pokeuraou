@@ -65,12 +65,13 @@ from .qrank import is_q
 from .regulation import STAT_IDS, Regulation, repo_root
 from .rustnode import PortPause, PortTurn, ResumedTurn
 from .search import (
-    DEFAULT_RANK_FILL,
+    ROSTER_RANK_FILL,
     belief_solve,
     believed_ranking,
     leaf_ranking,
     parse_rank_fill,
     rank_fill_covers,
+    resolve_rank_fill,
     search,
 )
 from .selection_book import (
@@ -703,7 +704,7 @@ def _menus(
     spreads: dict[int, list] | None = None,
     rank_view: str = "heaviest",
     used: dict[int, tuple[int, tuple[str, ...]]] | None = None,
-    rank_fill: str = DEFAULT_RANK_FILL,
+    rank_fill: str | None = None,
     wide: Sequence[int] = (),
     wider: dict[int, tuple[list[SideAction], list[SideAction]]] | None = None,
 ) -> tuple[list[SideAction], list[SideAction]]:
@@ -729,7 +730,9 @@ def _menus(
     off is in each `Narrowed.uncovered` and tallied in `narrow.COVERLESS`. A ``q`` or
     ``q-nocover`` label (IKA-274, `qrank`) ranks by the process's Q instead of filling
     cells with the leaf: Q over both whole pools on the same view, each candidate scored
-    against the other side's half of its solve.
+    against the other side's half of its solve. Unnamed (None), a leaf-ranked menu
+    takes `search.SHIPPED_RANK_FILL` and needs the process's Q (IKA-341); ``refs2`` is
+    played only when named.
 
     ``wide`` asks for the same agent's menus at other widths too, written into ``wider``
     by width: the candidates of the root's double oracle (IKA-293). They are ranked by
@@ -738,6 +741,7 @@ def _menus(
     """
     if rank_view not in RANK_VIEWS:
         raise ValueError(f"rank_view {rank_view!r} is not one of {RANK_VIEWS}")
+    rank_fill = resolve_rank_fill(rank_fill, rank_by_leaf and policy is None)
     references, fast_fill = parse_rank_fill(rank_fill)
     cover = rank_fill_covers(rank_fill)
     rank_budget = Budget.fast() if fast_fill else budget
@@ -988,7 +992,7 @@ def play_game(
     bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None = None,
     one_agent: bool = True,
     rank_view: str | tuple[str, str] = "heaviest",
-    rank_fill: str | tuple[str, str] = DEFAULT_RANK_FILL,
+    rank_fill: str | None | tuple[str | None, str | None] = None,
     bench_drop: str | tuple[str, str] = DEFAULT_BENCH_DROP,
     deepen: str | tuple[str, str] = DEFAULT_DEEPEN,
     knockouts: bool | tuple[bool, bool] = False,
@@ -1057,7 +1061,11 @@ def play_game(
 
     ``rank_fill`` takes a pair too: how each agent's leaf ranking fills its cells --
     ``refs<N>`` replies at the matrix budget, ``-fast`` for `Budget.fast` (IKA-268). It
-    changes nothing with the damage or policy ranking.
+    changes nothing with the damage or policy ranking. Unnamed (None, per side), a
+    leaf-ranked side plays `search.SHIPPED_RANK_FILL` by the process's Q and stops
+    without one (IKA-341); a side that reads no fill keeps `search.DEFAULT_RANK_FILL`,
+    so its record carries no ``rankFill``. M-B's roster path names
+    `search.ROSTER_RANK_FILL`.
 
     ``bench_drop`` takes a pair too: which completions of the opponent's unseen slots
     each agent's belief leaves out at a move node (`hidden.parse_bench_drop`, IKA-283).
@@ -1107,7 +1115,15 @@ def play_game(
     for rule in views_rule:
         if rule not in RANK_VIEWS:
             raise ValueError(f"rank_view {rule!r} is not one of {RANK_VIEWS}")
-    fills = (rank_fill, rank_fill) if isinstance(rank_fill, str) else tuple(rank_fill)
+    given = (
+        (rank_fill, rank_fill) if rank_fill is None or isinstance(rank_fill, str)
+        else tuple(rank_fill)
+    )
+    # IKA-341: an unnamed side resolves as generation's tools do, per side.
+    fills = tuple(
+        resolve_rank_fill(given[side], bool(ranked[side]) and policies[side] is None)
+        for side in (0, 1)
+    )
     for fill in fills:
         parse_rank_fill(fill)
     drops = (bench_drop, bench_drop) if isinstance(bench_drop, str) else tuple(bench_drop)
@@ -2751,6 +2767,8 @@ def generate(
                 evaluate=evaluate,
                 depth=depth,
                 rank_by_leaf=rank_by_leaf,
+                # M-B has no Q: its roster path plays refs2, named (IKA-341).
+                rank_fill=ROSTER_RANK_FILL,
                 policy=policy,
                 solve_sparsely=solve_sparsely,
                 solve_restricted=solve_restricted,
