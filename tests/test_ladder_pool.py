@@ -143,18 +143,22 @@ def test_the_pool_reads_a_bayesian_root_as_the_serial_read(roster, pool) -> None
     assert checked >= 2
 
 
-def test_the_wall_clock_and_the_stop(roster, pool, monkeypatch) -> None:  # noqa: ANN001
+@pytest.mark.parametrize("split", [False, True])
+def test_the_wall_clock_and_the_stop(roster, pool, monkeypatch, split) -> None:  # noqa: ANN001
     reg = roster.reg
     pos = _played(roster)[1]
     node = _node(reg, pos, 6)
     stages = "d2r2b3n4+d3r4ban4/r3ban4"
+    # IKA-375: a deep stage's cells go through `deep_cells` with `SPLIT`, `cells` without.
+    monkeypatch.setattr(ladder, "SPLIT", split)
     walled = _read(reg, node, stages, 60_000.0, workers=True, clock="wall")
     assert walled.stopped == "done" and len(walled.rungs) == 2 and walled.workers == WORKERS
     # The stop, set when the first cell of the depth-3 stage comes back: the read ends
     # inside that stage with the first stage's answer, and the chunks still out are thrown
     # away.
     stop = threading.Event()
-    cells = ladder._Pool.cells
+    method = "deep_cells" if split else "cells"
+    cells = getattr(ladder._Pool, method)
 
     def stopping(self, asks, stage, *rest, **how):  # noqa: ANN001, ANN003, ANN202
         inner = cells(self, asks, stage, *rest, **how)
@@ -166,7 +170,7 @@ def test_the_wall_clock_and_the_stop(roster, pool, monkeypatch) -> None:  # noqa
         finally:
             inner.close()
 
-    monkeypatch.setattr(ladder._Pool, "cells", stopping)
+    monkeypatch.setattr(ladder._Pool, method, stopping)
     before = dict(ladder.POOL_COUNTS)
     got = _read(reg, node, stages, workers=True, clock="wall", stop=stop)
     monkeypatch.undo()
@@ -269,6 +273,37 @@ def test_the_tail_reads_the_next_stage_ahead_on_the_wall_clock(roster, pool, mon
         assert walled.pool["specCells"] >= walled.pool["specUsed"]
     assert used > 0, "no stage took a cell read ahead"
     assert partial > 0, "no stage took a part of a chunk read ahead"
+
+
+def test_a_deep_cell_is_read_child_by_child_on_the_wall_clock(roster, pool, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-375: on the wall clock a deep cell's turn and children's menus are read on one
+    worker and each child on whichever worker is free (`SPLIT`), the cell's value folded by
+    the reader. No value moves (hp-share answers a child alike in any batch): every stage,
+    value, strategy, counted work and note is the serial read's. The positive controls:
+    cells were split and their children sent (depth 3 and 4); the workers' ports held
+    positions by number (`HOLD`)."""
+    reg = roster.reg
+    monkeypatch.setattr(ladder, "SPLIT", True)
+    monkeypatch.setattr(ladder, "HOLD", True)
+    stages = "d2r2b3n4+d3r3ban4/r2ban4+d4r2b3n4/r2b3n4/r2b3n4"
+    split = children = held = 0
+    for pos in _played(roster)[:3]:
+        node = _node(reg, pos, 6)
+        walled = _read(reg, node, stages, workers=True, clock="wall")
+        serial = _read(reg, node, stages, workers=False)
+        assert walled.stopped == serial.stopped == "done"
+        assert [r.stage for r in walled.rungs] == [r.stage for r in serial.rungs]
+        for x, y in zip(walled.rungs, serial.rungs, strict=True):
+            assert x.value == y.value and x.fresh == y.fresh and x.work == y.work
+            assert (x.rows, x.cols) == (y.rows, y.cols)
+            np.testing.assert_array_equal(x.strategy, y.strategy)
+        assert walled.work == serial.work and walled.unmodelled == serial.unmodelled
+        split += walled.pool["splitCells"]
+        children += walled.pool["childTasks"]
+        held += walled.pool["heldPositions"]
+    assert split > 0, "no deep cell was read child by child"
+    assert children > split
+    assert held > 0, "the workers' ports held no position by number"
 
 
 def test_a_worker_reads_a_stage_chunk_before_one_read_ahead() -> None:
