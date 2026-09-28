@@ -701,6 +701,115 @@ def deep(args: argparse.Namespace) -> None:  # noqa: C901 - the units and their 
             tmp.replace(out / f"{n}.npz")
 
 
+def ladder_ref(args: argparse.Namespace) -> None:  # noqa: C901, PLR0915 - the read, its stops, its files
+    """A reference read to depth 4 (IKA-369): the base reference's game (``--base``, every
+    cell at depth 2) read by the ladder's stages ``--stages`` with no budget -- its root
+    matrix the base's, its answer the base's -- on every core (``--threads``) through the
+    machine's inference server. A read is stopped at ``--minutes`` and begun again by the
+    next call where it stopped: the cells read are kept per position
+    (``SET/ref-<name>/parts/<n>.memo.pkl``, `ladder.read`'s ``memo``). Done, it writes each
+    stage's root matrix as a reference of its own, ``SET/ref-<name>@<i>/<n>.npz`` for the
+    stage ``i`` (from 1), the last also as ``SET/ref-<name>/<n>.npz``, and the stages'
+    answers, values and work in ``SET/ref-<name>/parts/<n>.json``."""
+    import pickle
+    import threading
+    from types import SimpleNamespace
+
+    from pokeuraou import ladder
+    from pokeuraou.budget import Budget
+    from pokeuraou.equilibrium import solve_bayesian
+    from pokeuraou.position import Position
+
+    kit = _Kit(args)
+    stages = ladder.parse_ladder(args.stages)
+    out = Path(args.set) / f"ref-{args.name}"
+    parts = out / "parts"
+    parts.mkdir(parents=True, exist_ok=True)
+    base_dir = Path(args.set) / f"ref-{args.base}"
+    deadline = time.perf_counter() + args.minutes * 60.0
+    stop = threading.Event()
+    timer = threading.Timer(max(0.0, args.minutes * 60.0), stop.set)
+    timer.daemon = True
+    timer.start()
+    budget = Budget.matrix()
+    for n in _mine(args, len(kit.positions)):
+        if (out / f"{n}.npz").exists() or not (base_dir / f"{n}.npz").exists():
+            continue
+        if stop.is_set() or time.perf_counter() > deadline:
+            break
+        base = np.load(base_dir / f"{n}.npz")
+        pos = Position.from_json(kit.positions[n]["position"])
+        spreads = kit.spreads(n)
+        ours, theirs = (_from_choices(kit.reg, pos, side, base[key])
+                        for side, key in ((0, "rows"), (1, "cols")))
+        mats, w = _game(base["d2"], base.get("weights", None))
+        items = [ladder.Item(pos)] if spreads is None else list(spreads[1])
+        eq = solve_bayesian(mats, w)
+        start = SimpleNamespace(row_strategy=eq.row_strategy,
+                                col_strategies=list(eq.col_strategies))
+        memo_path = parts / f"{n}.memo.pkl"
+        held = pickle.loads(memo_path.read_bytes()) if memo_path.exists() else {
+            "memo": {}, "seconds": 0.0, "calls": 0, "stages": args.stages}
+        if held["stages"] != args.stages:
+            raise SystemExit(f"position {n}: its kept cells are of the stages {held['stages']!r}")
+        memo = held["memo"]
+        had = len(memo)
+        began = time.perf_counter()
+
+        def keep(memo=memo, held=held, began=began, memo_path=memo_path) -> None:  # noqa: ANN001
+            # The seconds and calls up to this one, and this one's so far.
+            tmp = memo_path.with_suffix(".tmp")
+            tmp.write_bytes(pickle.dumps(dict(held, memo=memo, seconds=held["seconds"] + (
+                time.perf_counter() - began), calls=held["calls"] + 1)))
+            tmp.replace(memo_path)
+
+        def rung_done(rung, keep=keep, n=n, memo=memo) -> None:  # noqa: ANN001
+            keep()
+            print(f"ladder-ref {n}: {rung.stage} done, rectangle {rung.rows}x{list(rung.cols)}, "
+                  f"fresh {rung.fresh}, value {rung.value:+.4f}, wall {rung.wall_ms / 1000:.1f}s, "
+                  f"cells kept {len(memo)}", file=sys.stderr, flush=True)
+
+        try:
+            got = ladder.read(kit.reg, 0, ours, theirs, items, mats, w, start, kit.leaf,
+                              budget=budget, stages=stages, budget_ms=None, stop=stop,
+                              memo=memo, on_rung=rung_done)
+        finally:
+            keep()
+        took = time.perf_counter() - began
+        print(f"ladder-ref {n}: {got.stopped} at {got.depth_reached}, cells {had} -> {len(memo)}, "
+              f"{took:.1f}s this call, {held['seconds'] + took:.1f}s in all, work {got.work}",
+              file=sys.stderr, flush=True)
+        if got.stopped != "done":
+            break
+        # Each stage's root matrix: the stages up to it read again from the kept cells (no
+        # cell is read; the LPs give the same rectangles).
+        rows_json = []
+        hidden = spreads is not None
+        for i in range(1, len(stages) + 1):
+            again = got if i == len(stages) else ladder.read(
+                kit.reg, 0, ours, theirs, items, mats, w, start, kit.leaf, budget=budget,
+                stages=stages[:i], budget_ms=None, memo=dict(memo))
+            if len(again.rungs) != i:
+                raise SystemExit(f"position {n}: stage {i} did not complete from the kept cells")
+            prices = again.prices
+            stage_dir = Path(args.set) / f"ref-{args.name}@{i}"
+            stage_dir.mkdir(parents=True, exist_ok=True)
+            payload = {"d1": base["d1"], "d2": np.stack(prices) if hidden else prices[0],
+                       "rows": base["rows"], "cols": base["cols"],
+                       **({"weights": base["weights"]} if hidden else {})}
+            np.savez(stage_dir / f"{n}.npz", **payload)
+            rung = again.rungs[-1]
+            rows_json.append(rung.to_json() | {"x": [round(float(v), 6) for v in rung.strategy]})
+        with_all = dict(payload, stages=args.stages, seconds=held["seconds"] + took)
+        tmp = out / f"{n}.tmp.npz"
+        np.savez(tmp, **with_all)
+        tmp.replace(out / f"{n}.npz")
+        _write(parts / f"{n}.json", {"n": n, "stages": args.stages, "rungs": rows_json,
+                                     "seconds": round(held["seconds"] + took, 1),
+                                     "cells": len(memo), "work": got.work})
+    timer.cancel()
+
+
 def _game(matrix, weights=None) -> tuple[list[np.ndarray], np.ndarray]:  # noqa: ANN001
     """A reference game: an open position's (R, C) matrix, or a hidden one's (K, R, C) with
     the completions' weights (IKA-367)."""
@@ -1124,7 +1233,7 @@ def main(argv: list[str] | None = None) -> None:
     b.add_argument("--seed", type=int, default=36200)
     b.add_argument("--width", type=int, default=64)
     b.add_argument("--out", type=Path, required=True)
-    for name in ("reference", "reference3", "evaluate", "deep", "sweep"):
+    for name in ("reference", "reference3", "evaluate", "deep", "sweep", "ladder-ref"):
         s = sub.add_parser(name)
         s.add_argument("--set", type=Path, required=True)
         s.add_argument("--from", dest="start", type=int, default=0)
@@ -1173,6 +1282,15 @@ def main(argv: list[str] | None = None) -> None:
             s.add_argument("--keep-matrix", action="store_true",
                            help="a ladder's root prices at the longest budget kept as a "
                                 "reference ref-<arm>@<s>")
+        elif name == "ladder-ref":
+            s.add_argument("--name", required=True, help="the reference's name: SET/ref-<name>")
+            s.add_argument("--base", default="r24", help="the every-cell depth-2 reference")
+            s.add_argument("--stages", required=True,
+                           help="a ladder: a name (ladder.LADDERS) or stages joined by +")
+            s.add_argument("--minutes", type=float, default=25.0,
+                           help="stop the read here; the next call goes on from its cells")
+            s.add_argument("--threads", type=int, default=1,
+                           help="the cells on threads - 1 worker processes (IKA-364)")
     bh = sub.add_parser("build-hidden")
     bh.add_argument("--games-dir", type=Path, required=True)
     bh.add_argument("--pool", default="regmc-matchupweb")
@@ -1207,7 +1325,7 @@ def main(argv: list[str] | None = None) -> None:
     args = ap.parse_args(argv)
     {"build": build, "reference": reference, "reference3": reference3, "evaluate": evaluate,
      "rescore": rescore, "report": report, "subset": subset, "deep": deep, "sweep": sweep,
-     "build-hidden": build_hidden,
+     "build-hidden": build_hidden, "ladder-ref": ladder_ref,
      "curve": curve, "fit": fit}[args.cmd](args)
 
 

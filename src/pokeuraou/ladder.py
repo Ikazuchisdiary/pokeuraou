@@ -374,6 +374,7 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
     stop: Any = None,  # noqa: ANN401
     on_rung: Callable[[Rung], None] | None = None,
     began: float | None = None,
+    memo: dict[tuple, float | None] | None = None,
 ) -> LadderResult:
     """Side ``side``'s answer, stage by stage (the module's docstring).
 
@@ -391,6 +392,12 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
     stage's cells to the workers and takes their values back in the order it asked them,
     so the budget is read at the same points as without; on the count clock, with the
     serial chunks (`POOL_CHUNK` = `CHUNK`), it is the serial read to the bit.
+
+    ``memo`` (IKA-369): the caller's table of cells read, filled in place and read again --
+    a read stopped and begun again with the same table reads no cell twice (the long
+    reference, `tools/position_set.py ladder-ref`). With it, a worker's cells are kept as
+    they arrive, also those a stop throws away before their turn; the answer is the same
+    (a cell's value does not depend on when it was read). None: a table of this read's own.
     """
     cost = cost or LADDER_COSTS["local", 1]
     w = np.asarray(weights, dtype=np.float64)
@@ -403,7 +410,8 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
     result = LadderResult(strategy=x, value=value, replies=tuple(ys), prices=prices,
                           start=(x, value))
     #: (completion, own row, own column, kind) -> the cell's value in side 0's units, or None.
-    memo: dict[tuple, float | None] = {}
+    kept = memo is not None
+    memo = {} if memo is None else memo
     #: The turns shared across completions, per knock-out setting (`search.TurnShare`).
     turns: dict[bool, dict] = {False: {}, True: {}}
     clean: dict[tuple[int, int], bool] = {}
@@ -483,7 +491,10 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
                                                 stage_budget, turns, clean, hidden_side,
                                                 result.unmodelled, cost, stop))
                 else:
-                    reads = pool.cells(asks, stage, stage_budget, work, result.unmodelled)
+                    reads = pool.cells(
+                        asks, stage, stage_budget, work, result.unmodelled,
+                        (lambda task, values, chunks=chunks: memo.update(
+                            zip(chunks[task], values, strict=True))) if kept else None)
                 done = 0
                 try:
                     for index, got in reads:
@@ -1097,10 +1108,12 @@ class _Pool:
             self.conns)
 
     def cells(self, asks: list[list], stage: Stage, stage_budget: Budget,
-              work: dict[str, int], notes: set[str]) -> Any:  # noqa: ANN401 - a generator
+              work: dict[str, int], notes: set[str],
+              early: Callable[[int, list], None] | None = None) -> Any:  # noqa: ANN401 - a generator
         """`_serial`'s answers from the workers: each chunk's values in the order asked,
         its counted work and notes added as it is taken; `_TICK` while waiting. Closed
-        early (the reader stopped), the chunks still out are cancelled and thrown away."""
+        early (the reader stopped), the chunks still out are cancelled and thrown away.
+        ``early(task, values)``: each chunk read to the end, as it arrives (IKA-369)."""
         from multiprocessing.connection import wait
 
         out: dict[int, list[int]] = {i: [] for i in range(len(self.conns))}
@@ -1160,6 +1173,8 @@ class _Pool:
                         idle_since[i] = back
                     if status == "error":
                         raise RuntimeError(f"a ladder worker failed on a chunk: {values}")
+                    if early is not None and status == "done":
+                        early(task, values)
                     results[task] = (status, values, done_work, done_notes)
         finally:
             self._drain(out)
