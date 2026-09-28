@@ -175,14 +175,14 @@ class LadderCost:
 
 
 #: Measured (IKA-367, `tools/position_set.py fit`): non-negative least squares of each
-#: stage's wall milliseconds on the work it added -- ladder L1 read at 64 s on 24 recorded
-#: M-C positions (width 36), eight processes sharing the card, depth-2 and depth-3 stages
-#: (151 stages, R^2 0.934, wall over the priced clock 1.05). The depth-2 stages alone, in
-#: one process, fitted subgame 6.2 ms and cell 0.058 ms (71 stages, R^2 0.979): the prices
-#: trade against each other, the totals agree. The Q's pass and a child's own read came out
-#: at 0 (their cost is in the others).
+#: stage's wall milliseconds on the work it added -- ladder L1 read at 64 s, one process with
+#: the machine to itself (a person's game), the stacked pass (`STACK`), the GPU leaf without
+#: CUDA graphs: 10 recorded open M-C positions and 6 hidden ones (3-6 completions), width 36;
+#: 83 stages, R^2 0.951, wall over the priced clock 1.01. The Q's pass and a child's own read
+#: came out at 0 (their cost is in the others). Before the stacked pass, and with eight
+#: processes sharing the card, the same fit gave about 1.7 times these.
 LADDER_COSTS: dict[tuple[str, int], LadderCost] = {
-    ("local", 1): LadderCost(turn=7.0, subgame=11.5, cell=0.027, q=0.0, read=0.0),
+    ("local", 1): LadderCost(turn=0.66, subgame=3.6, cell=0.048, q=0.0, read=0.0),
 }
 
 
