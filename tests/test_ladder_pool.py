@@ -405,7 +405,10 @@ def test_a_deep_cell_is_read_child_by_child_on_the_wall_clock(roster, pool, monk
     assert held > 0, "the workers' ports held no position by number"
 
 
-def test_a_deep_cell_is_read_pass_by_pass_on_the_wall_clock(roster, pool, monkeypatch) -> None:  # noqa: ANN001
+@pytest.mark.parametrize("stages", ["d2r2b3n4+d3r3ban4/r2ban4+d4r2b3n4/r2b3n4/r2b3n4",
+                                    "d2r2b3n4+d5r2b2n3/r2b2n3/r2b2n3/r2b2n3"])
+def test_a_deep_cell_is_read_pass_by_pass_on_the_wall_clock(roster, pool, monkeypatch,  # noqa: ANN001
+                                                            stages) -> None:  # noqa: ANN001
     """IKA-380 (`PASSES`): on the wall clock the reader walks a deep cell's tree -- the cell
     opened on a worker, each child read by its stage pass by pass, a deeper child's cells
     opened in turn -- and every stage, value, strategy, counted work and note is the serial
@@ -413,11 +416,11 @@ def test_a_deep_cell_is_read_pass_by_pass_on_the_wall_clock(roster, pool, monkey
     depth-3 cell's children are read whole where it is opened (`_deep_open`'s own road); a
     depth-4 cell's children (read by a depth-3 stage, `_deep_children`'s road) are read here.
     The positive controls: cells opened, children read pass by pass. (The depth-2 passes
-    in chunks are `tests/test_ladder_leaf.py`'s, on a learned leaf.)"""
+    in chunks are `tests/test_ladder_leaf.py`'s, on a learned leaf.) IKA-376: and depth 5,
+    which the rule's ladder (L6) reaches, nests one more deep child."""
     reg = roster.reg
     monkeypatch.setattr(ladder, "SPLIT", True)
     monkeypatch.setattr(ladder, "PASSES", True)
-    stages = "d2r2b3n4+d3r3ban4/r2ban4+d4r2b3n4/r2b3n4/r2b3n4"
     opened = kids = 0
     for pos in _played(roster)[:3]:
         node = _node(reg, pos, 6)
@@ -464,14 +467,23 @@ def test_the_tail_is_cut_small() -> None:
     assert all(len(c) <= -(-(50 - sum(sizes[:n])) // 4) for n, c in enumerate(cut))
 
 
-def test_a_filled_budget_ends_at_the_budget(roster, pool, monkeypatch) -> None:  # noqa: ANN001
+@pytest.mark.parametrize("via", ["env", "ladder"])
+def test_a_filled_budget_ends_at_the_budget(roster, pool, monkeypatch, via) -> None:  # noqa: ANN001
     """IKA-370: filling the wall clock's budget (`FILL_WALL`) begins every stage while time
     is left, so a read ends at its budget inside a stage it began (never before one it did
     not), and ends there without waiting for the chunks still out (they are taken, and
-    thrown away, when the next read begins). The answer is its last completed stage."""
+    thrown away, when the next read begins). The answer is its last completed stage.
+    IKA-376: a ladder named in `FILLS` does the same with `FILL_WALL` off."""
     reg = roster.reg
-    monkeypatch.setattr(ladder, "FILL_WALL", True)
     stages = "d2r2b3n4+d3r4ban4/r3ban4+d4r3ban4/r3ban4/r3ban4"
+    if via == "env":
+        monkeypatch.setattr(ladder, "FILL_WALL", True)
+    else:
+        monkeypatch.setattr(ladder, "FILL_WALL", False)
+        monkeypatch.setitem(ladder.LADDERS, "T", tuple(stages.split("+")))
+        monkeypatch.setattr(ladder, "FILLS", frozenset({"T"}))
+        stages = "T"
+        assert ladder.parse_ladder("T").fills
     cut = 0
     for pos in _played(roster)[:3]:
         node = _node(reg, pos, 6)
