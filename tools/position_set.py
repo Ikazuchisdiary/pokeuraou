@@ -952,10 +952,14 @@ def curve(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912 - one table 
     print(f"{len(ns)} positions read by every condition at every budget")
     keys = sorted({k for b in arms.values() for rows in b.values() for r in rows.values()
                    for k in r if isinstance(r[k], dict) and "loss" in r[k]})
-    keys = [k for k in keys if all(k in rows[n] for b in arms.values() for rows in b.values()
-                                   for n in ns)]
+    # A reference need not cover every position (the long ones were cut at a time): each
+    # is read on the positions it has for every condition.
+    key_ns = {k: [n for n in ns if all(k in rows[n] for b in arms.values()
+                                       for rows in b.values())] for k in keys}
+    keys = [k for k in keys if len(key_ns[k]) >= 10]
     for key in keys:
-        print(f"\nagainst {key}:")
+        kn = key_ns[key]
+        print(f"\nagainst {key} ({len(kn)} positions):")
         print(f"  {'condition':<14}{'s':>6}{'wall s':>9}{'loss':>9}{'se':>8}{'curse':>9}"
               f"{'change':>10}{'se':>8}{'worse':>7}")
         series: dict = {}
@@ -963,23 +967,32 @@ def curve(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912 - one table 
             prev = None
             for b in sorted(budgets):
                 rows = budgets[b]
-                loss = np.array([rows[n][key]["loss"] for n in ns])
-                curse = np.array([rows[n][key]["curse"] for n in ns])
-                wall = np.mean([rows[n]["wall"] for n in ns])
+                loss = np.array([rows[n][key]["loss"] for n in kn])
+                curse = np.array([rows[n][key]["curse"] for n in kn])
+                wall = np.mean([rows[n]["wall"] for n in kn])
                 change = se_c = worse = ""
                 if prev is not None:
                     d = loss - prev
                     change = f"{d.mean():+.4f}"
-                    se_c = f"{d.std() / np.sqrt(len(ns)):.4f}"
+                    se_c = f"{d.std() / np.sqrt(len(kn)):.4f}"
                     worse = f"{int((d > 1e-4).sum())}"
                 print(f"  {arm:<14}{b:>6g}{wall:>9.2f}{loss.mean():>9.4f}"
-                      f"{loss.std() / np.sqrt(len(ns)):>8.4f}{curse.mean():>+9.4f}"
+                      f"{loss.std() / np.sqrt(len(kn)):>8.4f}{curse.mean():>+9.4f}"
                       f"{change:>10}{se_c:>8}{worse:>7}")
                 series.setdefault(arm, {})[b] = float(loss.mean())
                 prev = loss
         if args.svg:
             svg = Path(args.svg)
             _svg(series, key, svg.with_name(f"{svg.stem}-{key}{svg.suffix}"))
+        for pair in args.pairs or []:
+            # "A:B": A's loss minus B's at every budget both read (negative: A better).
+            a, b = pair.split(":")
+            for budget in sorted(set(arms[a]) & set(arms[b])):
+                d = np.array([arms[a][budget][n][key]["loss"] - arms[b][budget][n][key]["loss"]
+                              for n in kn])
+                print(f"  {a} - {b} at {budget:g} s: {d.mean():+.4f} (se "
+                      f"{d.std() / np.sqrt(len(kn)):.4f}), {a} worse on {int((d > 1e-4).sum())}, "
+                      f"better on {int((d < -1e-4).sum())} of {len(kn)}")
     if args.stages:
         # One ladder read's own curve: each stage's answer, where it completed.
         name, _at, budget = args.stages.partition("@")
@@ -997,7 +1010,10 @@ def curve(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912 - one table 
             prev_label = None
             for label in labels:
                 have = {n: next(g for g in r["rungScores"] if g["stage"] == label)
-                        for n, r in rows.items() if any(g["stage"] == label for g in r["rungScores"])}
+                        for n, r in rows.items()
+                        if any(g["stage"] == label and key in g for g in r["rungScores"])}
+                if not have:
+                    continue
                 loss = np.array([g[key]["loss"] for g in have.values()])
                 curse = np.array([g[key]["curse"] for g in have.values()])
                 spent = np.array([g["spentMs"] for g in have.values()]) / 1000
@@ -1027,11 +1043,12 @@ def curve(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912 - one table 
                 ends.append((name or args.elo_arm, float(s)))
             (la, lo), (ha, hi) = ends
             for key in keys:
+                kn = key_ns[key]
                 d = np.array([arms[la][lo][n][key]["loss"] - arms[ha][hi][n][key]["loss"]
-                              for n in ns])
+                              for n in kn])
                 print(f"  {la}@{lo:g} -> {ha}@{hi:g}, {float(elo):+.1f} Elo: loss falls "
                       f"{d.mean():+.4f} "
-                      f"(se {d.std() / np.sqrt(len(ns)):.4f}) against {key}"
+                      f"(se {d.std() / np.sqrt(len(kn)):.4f}) against {key}"
                       + (f"; {float(elo) / d.mean():+.0f} Elo per unit" if d.mean() > 0 else ""))
                 if key == args.elo_key:
                     total_elo += float(elo)
@@ -1141,6 +1158,8 @@ def main(argv: list[str] | None = None) -> None:
     c.add_argument("--arms", default=None, help="comma-separated conditions (default: all)")
     c.add_argument("--svg", default=None, help="figure path; one per reference")
     c.add_argument("--stages", default=None, help="ARM@SECONDS: a ladder read's stages")
+    c.add_argument("--pairs", action="append", default=None,
+                   help="A:B: A's loss minus B's at each budget both read, paired")
     c.add_argument("--virtual", action="append", default=None,
                    help="ARM@S=B1,B2,...: a ladder read's answers at smaller budgets (ARM~)")
     c.add_argument("--elo", default=None, help="lo:hi=Elo,... steps of a recorded curve")

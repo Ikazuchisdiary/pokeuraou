@@ -142,9 +142,26 @@ LADDERS: dict[str, tuple[str, ...]] = {
     "L2": ("d2r4b3k8", "d2r4bak24x", "d2r8bak24x", "d3r4b3k24x/r3b3k16",
            "d3r8b3k24x/r3b3k16", "d3r8bak24x/r4bak24", "d3r12bak24x/r4bak24",
            "d4r4b3k24x/r3b3k24/r3b3k16"),
+    # L2 with the 8 x 8 rectangle first (IKA-367: every branch on the 4 x 4 blundered where
+    # the 4 x 4 left the opponent's answer out -- one position lost 0.96 -- and the 8 x 8
+    # took most of the gain), then every branch on it, then wider.
+    "L3": ("d2r4b3k8", "d2r8b3k8", "d2r8bak24x", "d2r12bak24x", "d3r8b3k24x/r3b3k16",
+           "d3r8bak24x/r4bak24", "d3r12bak24x/r4bak24", "d4r4b3k24x/r3b3k24/r3b3k16"),
     # Depth 2 only, ever wider: what depth 3 adds over the same time spent on width.
     "L0": ("d2r4b3k8", "d2r4bak24x", "d2r8bak24x", "d2r12bak24x", "d2r16bak24x",
            "d2r24bak24x"),
+    # Width first at three branches and narrow children, then the children wider, then every
+    # branch (IKA-367: behind a hidden bench the 4 -> 8 rectangle at three branches took the
+    # gain, and every branch with the knock-outs cost 11 s of the clock for nothing seen).
+    "L5": ("d2r4b3k8", "d2r8b3k8", "d2r12b3k8", "d2r12b3k16", "d2r16b3k16", "d2r16bak24x",
+           "d2r24bak24x", "d3r8b3k24x/r3b3k16", "d3r8bak24x/r4bak24", "d3r12bak24x/r6bak24",
+           "d4r4b3k24x/r3b3k24/r3b3k16", "d4r8b3k24x/r4b3k24/r3b3k16"),
+    # L3's start (the 8 x 8 before every branch), L0's widening (it wins on the recorded
+    # positions, IKA-367), then the support's depth 3 and 4 on the wide depth 2: the
+    # analysis view's minutes and hours.
+    "L4": ("d2r4b3k8", "d2r8b3k8", "d2r8bak24x", "d2r12bak24x", "d2r16bak24x",
+           "d2r24bak24x", "d3r8b3k24x/r3b3k16", "d3r8bak24x/r4bak24", "d3r12bak24x/r6bak24",
+           "d4r4b3k24x/r3b3k24/r3b3k16", "d4r8b3k24x/r4b3k24/r3b3k16"),
 }
 
 
