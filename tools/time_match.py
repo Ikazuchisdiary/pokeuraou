@@ -43,7 +43,6 @@ import json
 import os
 import subprocess
 import sys
-import threading
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -245,7 +244,7 @@ def worker(args: argparse.Namespace) -> None:
         ([str(v) for v in values], str(device), args.leaf_graphs == "on", args.cuda_memory_gb),
     )
     started_workers = deepen.workers(reg)
-    halt = threading.Event()
+    halt = humanplay.MemoryBrake()  # the move's own growth, IKA-355
     watch = memory_watch(
         analysis.Limits(rss_gb=args.max_rss_gb, free_gb=args.min_free_gb, gpu_gb=args.max_gpu_gb),
         halt, lambda text: print(text, file=sys.stderr, flush=True),

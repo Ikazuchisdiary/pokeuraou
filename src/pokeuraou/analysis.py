@@ -383,13 +383,18 @@ class Limits:
     """Where the memory watch stops a read. ``rss_gb``: this process and its worker
     processes, resident. ``free_gb``: the host's available memory may not fall under it.
     ``gpu_gb``: the card's memory in use (every process on it; the house rule stops at 11
-    GB of the 12). 0 turns one off."""
+    GB of the 12). 0 turns one off.
+
+    ``hard_free_gb``: the floor under ``free_gb`` that a person's game keeps whatever the
+    cause (IKA-355, `Reading.brake`); the analysis mode's watch (`Reading.over`) does not
+    read it."""
 
     rss_gb: float = 10.0
     free_gb: float = 2.0
     gpu_gb: float = 11.0
     #: The share of a limit from which the page warns.
     warn: float = 0.9
+    hard_free_gb: float = 0.5
 
 
 def host_available_gb() -> float | None:
@@ -504,11 +509,45 @@ class Reading:
             return f"GPU のメモリ {self.gpu_gb:.1f} GB（上限 {limits.gpu_gb:g} GB）"
         return ""
 
+    def brake(self, limits: Limits, base_rss: float, share: float = 1.0) -> tuple[str, str]:
+        """A person's game's reading of the limits (IKA-355): what this reading asks of
+        the move in hand, and why in words.
+
+        ``("stop", why)``: stop deepening -- this process with its workers past
+        ``rss_gb``, the card past ``gpu_gb``, the host's free memory under
+        ``hard_free_gb`` whatever the cause, or under ``free_gb`` because this process
+        grew: without its growth since ``base_rss`` (the resident memory when the move's
+        deepening began) the host would be at the floor or above.
+        ``("low", why)``: under ``free_gb``, but other work took the memory (the host
+        would be under the floor without this move's growth too) -- read on, say so.
+        ``("", "")``: nothing. ``share`` reads each limit at that share, as `over`."""
+        if limits.rss_gb > 0 and self.rss_gb >= share * limits.rss_gb:
+            return "stop", f"このプロセスと補助のメモリ {self.rss_gb:.1f} GB（上限 {limits.rss_gb:g} GB）"
+        if limits.gpu_gb > 0 and self.gpu_gb >= share * limits.gpu_gb:
+            return "stop", f"GPU のメモリ {self.gpu_gb:.1f} GB（上限 {limits.gpu_gb:g} GB）"
+        if limits.hard_free_gb > 0 and self.free_gb <= limits.hard_free_gb / share:
+            return "stop", f"ホストの空きメモリ {self.free_gb:.1f} GB（底 {limits.hard_free_gb:g} GB）"
+        if limits.free_gb > 0 and self.free_gb <= limits.free_gb / share:
+            grown = self.rss_gb - base_rss
+            grown = 0.0 if math.isnan(grown) else max(0.0, grown)
+            if self.free_gb + grown >= limits.free_gb / share:
+                return "stop", (
+                    f"ホストの空きメモリ {self.free_gb:.1f} GB（下限 {limits.free_gb:g} GB）、"
+                    f"この手の読みで {grown:.1f} GB 増えた"
+                )
+            return "low", (
+                f"ホストの空きメモリ {self.free_gb:.1f} GB（下限 {limits.free_gb:g} GB）は"
+                f"ほかの処理によるもの（この手の読みの増え {grown:.1f} GB）"
+            )
+        return "", ""
+
 
 class MemoryWatch:
     """Reads the memory every ``every`` seconds (the card every ``gpu_every``) while a read
     runs, and stops it (``halt("memory", why)``) the first time a reading is past a limit.
-    ``tick`` is called after each look (the status frames)."""
+    ``tick`` is called after each look (the status frames). ``judge`` reads a reading into
+    the reason to stop ("" for none), `Reading.over` by default; a person's game gives its
+    own (IKA-355). ``lock`` is held over each look, so a caller can look in between."""
 
     def __init__(
         self,
@@ -521,8 +560,11 @@ class MemoryWatch:
         read_host: Callable[[], float | None] = host_available_gb,
         read_rss: Callable[[], float | None] = tree_rss_gb,
         read_gpu: Callable[[], tuple[float, float] | None] = gpu_used_gb,
+        judge: Callable[[Reading], str] | None = None,
     ) -> None:
         self.limits = limits
+        self.judge = judge
+        self.lock = threading.RLock()
         self.halt = halt
         self.every = every
         self.gpu_every = gpu_every
@@ -537,6 +579,10 @@ class MemoryWatch:
         self._thread: threading.Thread | None = None
 
     def look(self) -> Reading:
+        with self.lock:
+            return self._look()
+
+    def _look(self) -> Reading:
         now = time.perf_counter()
         reading = Reading(gpu_gb=self.last.gpu_gb, gpu_total_gb=self.last.gpu_total_gb)
         host = self.read_host()
@@ -555,16 +601,17 @@ class MemoryWatch:
             self.peak.free_gb = min(self.peak.free_gb, reading.free_gb)
         if not math.isnan(reading.gpu_gb):
             self.peak.gpu_gb = max(self.peak.gpu_gb, reading.gpu_gb)
-        why = reading.over(self.limits)
+        why = reading.over(self.limits) if self.judge is None else self.judge(reading)
         if why:
             self.halt("memory", why)
         return reading
 
     def _run(self) -> None:
         while not self._done.is_set():
-            reading = self.look()
-            if self.tick is not None:
-                self.tick(reading)
+            with self.lock:
+                reading = self._look()
+                if self.tick is not None:
+                    self.tick(reading)
             self._done.wait(self.every)
 
     def start(self) -> MemoryWatch:

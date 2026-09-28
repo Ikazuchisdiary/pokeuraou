@@ -518,6 +518,8 @@ h3 small { font-weight: 400; font-size: 11px; color: var(--faint); letter-spacin
 .log li:first-child { border-top: 0; }
 .log .t { font-family: var(--font-num); color: var(--faint); font-size: 12px; padding-top: 1px; }
 .log .err { color: var(--bad); }
+.log .warn::before { content: "注"; display: inline-block; margin-right: 6px; font-size: 10px; font-weight: 700; color: var(--warn);
+  border: 1px solid color-mix(in srgb, var(--warn) 50%, transparent); border-radius: 4px; padding: 0 3px; }
 #logBox > summary { list-style: none; cursor: pointer; font-size: 13px; font-weight: 700; color: var(--dim); letter-spacing: 0.06em; }
 #logBox[open] > summary { margin-bottom: 10px; }
 #logBox > summary::-webkit-details-marker { display: none; }
