@@ -44,16 +44,23 @@ from pokeuraou import openmp  # noqa: E402
 
 openmp.quiet_wait()  # before anything loads torch (IKA-360)
 
-from play_human import DEFAULT_Q, DEFAULT_VALUE, Q_FILL, _oracle_width, leaf_name  # noqa: E402
+from play_human import (  # noqa: E402
+    DEFAULT_Q,
+    DEFAULT_VALUE,
+    NO_Q_FILL,
+    Q_FILL,
+    _oracle_width,
+    install_menus,
+    leaf_name,
+)
 
-from pokeuraou import analysis, humanplay, liveview, qrank  # noqa: E402
+from pokeuraou import analysis, humanplay, liveview  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.deepen import MAX_LEVELS  # noqa: E402
 from pokeuraou.hidden import DEFAULT_BENCH_DROP, parse_bench_drop  # noqa: E402
 from pokeuraou.names import localiser  # noqa: E402
 from pokeuraou.pool import load_pool  # noqa: E402
 from pokeuraou.regulation import repo_root  # noqa: E402
-from pokeuraou.search import DEFAULT_RANK_FILL, parse_rank_fill  # noqa: E402
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -97,7 +104,7 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--leaf-graphs", default="on", choices=("on", "off"))
     ap.add_argument("--rank-fill", default=None,
                     help=f"how the menus are ranked. Default: {Q_FILL} when a Q is there, "
-                    f"else {DEFAULT_RANK_FILL}")
+                    f"else {NO_Q_FILL} with a note")
     ap.add_argument("--q-model", type=Path, default=None, help=f"the Q. Default: {DEFAULT_Q}")
     ap.add_argument("--bench-drop", default=DEFAULT_BENCH_DROP)
     ap.add_argument("--device", default=None)
@@ -175,30 +182,17 @@ def main(argv: list[str] | None = None) -> None:
             reg, values, device, graphs=args.leaf_graphs == "on"
         )
         name = leaf_name(values)
-    fill = args.rank_fill
+    # The menus, as play_human picks them (IKA-341: the same fallback, one function).
     q_path = args.q_model or (repo_root() / DEFAULT_Q)
-    if fill is None:
-        fill = Q_FILL if q_path.exists() and encoder is not None else DEFAULT_RANK_FILL
-        if fill != Q_FILL:
-            why = "no leaf to read its encoding" if encoder is None else f"no Q at {q_path}"
-            say(f"note: menus ranked by {fill}, not {Q_FILL} ({why}; --q-model names one)")
-    parse_rank_fill(fill)
-    if qrank.is_q(fill):
-        if encoder is None:
-            raise SystemExit(f"{fill} needs a leaf's encoder (not --hp-share)")
-        if not q_path.exists():
-            raise SystemExit(f"{fill} needs a Q: no file at {q_path}")
-        qrank.install(
-            humanplay.served_q(address, q_path, encoder) if address and evaluate is not None
-            else qrank.LocalQ(q_path, encoder, device=device or "cpu")
-        )
+    fill, q_files = install_menus(args.rank_fill, q_path, encoder, evaluate, address, device, say)
     if args.ladder is not None:
         # IKA-364: the ladder's cells on threads - 1 worker processes.
         humanplay.use_threads(args.threads)
         workers = humanplay.use_ladder_pool(args.threads, reg, humanplay.ladder_spec(
             leaf=evaluate, address=address, merge=args.merge == "on", values=values,
             device=device, graphs=args.leaf_graphs == "on", cuda_memory_gb=args.cuda_memory_gb,
-            q_path=q_path if qrank.is_q(fill) else None))
+            # The workers install the Q this process did (none: its fill needs none).
+            q_path=q_path if q_files else None))
         say(f"ladder {args.ladder}: cells on {workers} worker process(es)")
     elif address and evaluate is not None:
         humanplay.use_threads(args.threads, reg, (address, "value", args.merge == "on"),

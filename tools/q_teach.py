@@ -21,6 +21,14 @@ sides when both see the whole board.
             the stored cells are compared bit for bit.
     menus   the views' positive control: with the leaf that played the games, `narrow` on
             each view reproduces the recorded menus (`ownActions` / `foeActions`).
+            It rebuilds the menus with the refs2 ranking (`search.leaf_ranking`), as fill's
+            width-12 check does, so it holds for games played at refs2 -- M-C gen-0
+            (`data/selfplay-mc0`), whose records carry no ``rankFill``. Games played at
+            q-nocover (``rankFill`` q-nocover: `data/selfplay-mc1`, M-C generation since
+            IKA-338) were ranked by the Q, and their recorded menus are not expected to
+            match: a miss there is not a fault of the index or the views (IKA-341). Fill's
+            width-12 check still compares cells (any menu's cells are the stored ones); its
+            menu is just not the one such a game played.
     cost    per-view cells, leaves and seconds from the shards, and the projection.
 
     python tools/q_teach.py index --games-dir data/selfplay-mc0 --out <dir>/index.npz
@@ -279,7 +287,9 @@ def control(ctx: dict[str, Any], pos: Any, pools: tuple[list, list], matrix: np.
     [whole-pool cells equal, whole-pool max |diff|, width-12 cells equal, width-12 cells,
     width-12 max |diff|]. The whole pool through `search.search` is the same call on the
     same menus; the width-12 menus (`narrow` ranked by this leaf, as `_menus` ranks) are
-    the matrix a generation node fills, and its cells must be the stored ones.
+    the matrix a generation node fills, and its cells must be the stored ones. The menus
+    are refs2's (`leaf_ranking`): the generation node's own for games played at refs2 only
+    (M-C gen-0); a game played at q-nocover had other menus (IKA-341).
     """
     from pokeuraou.budget import Budget
     from pokeuraou.narrow import narrow

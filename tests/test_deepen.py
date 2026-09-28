@@ -696,15 +696,16 @@ def test_the_wider_menus_come_from_the_same_ranking(roster) -> None:  # noqa: AN
     reg = roster.reg
     for pos in _played(roster)[:2]:
         for ranked in (False, True):
-            plain = selfplay._menus(reg, pos, (4, 4), LEAF, Budget.matrix(), ranked)
+            plain = selfplay._menus(reg, pos, (4, 4), LEAF, Budget.matrix(), ranked, rank_fill="refs2")
             wider: dict = {}
             got = selfplay._menus(
                 reg, pos, (4, 4), LEAF, Budget.matrix(), ranked, wide=[8, 8], wider=wider,
+                rank_fill="refs2",
             )
             assert [[a.to_choice() for a in m] for m in got] == [
                 [a.to_choice() for a in m] for m in plain
             ]
-            alone = selfplay._menus(reg, pos, (8, 8), LEAF, Budget.matrix(), ranked)
+            alone = selfplay._menus(reg, pos, (8, 8), LEAF, Budget.matrix(), ranked, rank_fill="refs2")
             assert sorted(wider) == [8]
             assert [[a.to_choice() for a in m] for m in wider[8]] == [
                 [a.to_choice() for a in m] for m in alone

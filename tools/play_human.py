@@ -82,6 +82,48 @@ DEFAULT_Q = qrank.DEFAULT_Q
 #: The fill the user chose on 9/26 for boards and human play (IKA-274 stage 2), and M-C
 #: generation's since IKA-338.
 Q_FILL = SHIPPED_RANK_FILL
+#: What a person's game ranks by when it has no Q to read -- no file, no leaf's encoder
+#: (hp-share), or a Q of another vocabulary than the leaf's -- with a note (IKA-330;
+#: kept by the user's decision of 9/28, IKA-341). Named here: no library default.
+NO_Q_FILL = DEFAULT_RANK_FILL
+
+
+def install_menus(
+    named: str | None, q_path: Path, encoder, evaluate, address: str | None,  # noqa: ANN001
+    device: str | None, say: Callable[[str], None],
+) -> tuple[str, list[str]]:
+    """The fill a person's opponent (or a reading) ranks its menus by, and the Q files it
+    installed (`qrank.install`).
+
+    A named fill is played or the tool stops (a q fill with no leaf or no Q). Unnamed,
+    `Q_FILL` by the Q at ``q_path`` when there is one this leaf's encoder reads, else
+    `NO_Q_FILL` with a note -- as for a missing leaf -- where generation and the board stop
+    (IKA-338). A Q of another vocabulary (`qrank.QVocabularyError`, e.g. a pool on another
+    regulation than the Q's) is one it cannot read: a note, not a stop (IKA-341).
+    """
+    fill = named
+    if fill is None:
+        fill = Q_FILL if q_path.exists() and encoder is not None else NO_Q_FILL
+        if fill != Q_FILL:
+            why = "no leaf to read its encoding" if encoder is None else f"no Q at {q_path}"
+            say(f"note: menus ranked by {fill}, not {Q_FILL} ({why}; --q-model names one)")
+    parse_rank_fill(fill)
+    if not qrank.is_q(fill):
+        return fill, []
+    if encoder is None:
+        raise SystemExit(f"{fill} needs a leaf's encoder (not --hp-share)")
+    if not q_path.exists():
+        raise SystemExit(f"{fill} needs a Q: no file at {q_path}")
+    try:
+        model = (humanplay.served_q(address, q_path, encoder) if address and evaluate is not None
+                 else qrank.LocalQ(q_path, encoder, device=device or "cpu"))
+    except qrank.QVocabularyError as problem:
+        if named is not None:
+            raise
+        say(f"note: menus ranked by {NO_Q_FILL}, not {Q_FILL} ({problem}; --q-model names one)")
+        return NO_Q_FILL, []
+    qrank.install(model)
+    return fill, model.describe()
 
 
 def leaf_name(files: list[Path]) -> str:
@@ -281,7 +323,7 @@ def main(argv: list[str] | None = None) -> None:
                     "the eager answer to the bit; on a card only)")
     ap.add_argument("--rank-fill", default=None,
                     help=f"how the agent's menus are ranked. Default: {Q_FILL} when a Q is there, "
-                    f"else {DEFAULT_RANK_FILL}")
+                    f"else {NO_Q_FILL} with a note")
     ap.add_argument("--q-model", type=Path, default=None, help=f"the Q. Default: {DEFAULT_Q}")
     ap.add_argument("--bench-drop", default=DEFAULT_BENCH_DROP)
     ap.add_argument("--person", default="terminal")
@@ -373,24 +415,8 @@ def main(argv: list[str] | None = None) -> None:
         name = leaf_name(values)
 
     # The menus.
-    fill = args.rank_fill
-    q_files: list[str] = []
     q_path = args.q_model or (repo_root() / DEFAULT_Q)
-    if fill is None:
-        fill = Q_FILL if q_path.exists() and encoder is not None else DEFAULT_RANK_FILL
-        if fill != Q_FILL:
-            why = "no leaf to read its encoding" if encoder is None else f"no Q at {q_path}"
-            say(f"note: menus ranked by {fill}, not {Q_FILL} ({why}; --q-model names one)")
-    parse_rank_fill(fill)
-    if qrank.is_q(fill):
-        if encoder is None:
-            raise SystemExit(f"{fill} needs a leaf's encoder (not --hp-share)")
-        if not q_path.exists():
-            raise SystemExit(f"{fill} needs a Q: no file at {q_path}")
-        model = (humanplay.served_q(address, q_path, encoder) if address and evaluate is not None
-                 else qrank.LocalQ(q_path, encoder, device=device or "cpu"))
-        qrank.install(model)
-        q_files = model.describe()
+    fill, q_files = install_menus(args.rank_fill, q_path, encoder, evaluate, address, device, say)
 
     threads, cores = resolve_cores(args.threads, args.cores, args.clock)
     if args.ladder is not None:

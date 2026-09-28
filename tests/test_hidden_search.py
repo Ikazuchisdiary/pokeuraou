@@ -286,11 +286,12 @@ def test_the_menu_is_ranked_from_a_completion_and_not_from_the_position(setup) -
     assert elsewhere, "every completion is the true bench, which cannot be"
     moved = {0: spreads[0], 1: [elsewhere[0], *[c for c in spreads[1] if c is not elsewhere[0]]]}
 
-    ours, _ = _menus(reg, position, (24, 24), HP_SHARE.batch, budget, True, None, moved)
+    ours, _ = _menus(reg, position, (24, 24), HP_SHARE.batch, budget, True, None, moved, rank_fill="refs2")
     direct, _ = _menus(
-        reg, elsewhere[0].position, (24, 24), HP_SHARE.batch, budget, True, None, None
+        reg, elsewhere[0].position, (24, 24), HP_SHARE.batch, budget, True, None, None,
+        rank_fill="refs2",
     )
-    leaky, _ = _menus(reg, position, (24, 24), HP_SHARE.batch, budget, True, None, None)
+    leaky, _ = _menus(reg, position, (24, 24), HP_SHARE.batch, budget, True, None, None, rank_fill="refs2")
 
     assert [a.to_choice() for a in ours] == [a.to_choice() for a in direct], (
         "the menu is not the one ranking from that completion gives; the spread did not "
@@ -314,4 +315,4 @@ def test_a_menu_with_nothing_hidden_is_the_old_menu(setup) -> None:  # noqa: ANN
 def _menus_of(reg, position, budget, spreads):  # noqa: ANN001, ANN202
     from pokeuraou.selfplay import _menus
 
-    return _menus(reg, position, (24, 24), HP_SHARE.batch, budget, True, None, spreads)
+    return _menus(reg, position, (24, 24), HP_SHARE.batch, budget, True, None, spreads, rank_fill="refs2")

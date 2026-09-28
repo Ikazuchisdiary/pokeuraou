@@ -645,7 +645,10 @@ class Settings:
     levels: int = MAX_LEVELS
     #: The depth discount (``d<P>``, IKA-342), a factor a ply, or None: none.
     discount: float | None = None
-    rank_fill: str = "refs2"
+    #: The menus' fill (`search.parse_rank_fill`). Unnamed (None), a leaf-ranked menu takes
+    #: `search.SHIPPED_RANK_FILL` and needs the process's Q (IKA-341); `tools/analyze.py`
+    #: always names one -- q-nocover by the Q, else refs2 with a note, as play_human does.
+    rank_fill: str | None = None
     rank_by_leaf: bool = True
     bench_drop: str = DEFAULT_BENCH_DROP
     open_information: bool = False

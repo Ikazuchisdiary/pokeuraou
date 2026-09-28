@@ -55,6 +55,7 @@ def _generate(pool, out: Path, ranks: Path | None, indices=(0, 1, 2)):  # noqa: 
         pool.reg, pool, games=0, hide_bench=True, seed=278, out=out, solver=solver,
         evaluate=_stub, objective=HP_SHARE, search_limit=3, max_turns=8,
         rank_by_leaf=True, indices=list(indices), rank_scores_out=ranks,
+        rank_fill="refs2",
     )
     games = [json.loads(ln) for ln in out.read_text(encoding="utf-8").splitlines() if ln]
     return stats, games
@@ -152,12 +153,12 @@ def test_the_score_is_the_one_narrow_ordered_by(pool, monkeypatch) -> None:  # n
 
     monkeypatch.setattr(selfplay, "narrow", spy)
     # Null: nothing gathers outside the block, and the ranking is the very same function.
-    selfplay._menus(reg, pos, (3, 3), _stub, Budget.matrix(), True)
+    selfplay._menus(reg, pos, (3, 3), _stub, Budget.matrix(), True, rank_fill="refs2")
     assert len(seen) == 2
     seen.clear()
     with rank_scores.collecting() as sink:
         rank_scores.at_node(0, pos.turn, 0)
-        selfplay._menus(reg, pos, (3, 3), _stub, Budget.matrix(), True)
+        selfplay._menus(reg, pos, (3, 3), _stub, Budget.matrix(), True, rank_fill="refs2")
     assert [row["side"] for row in sink.rows] == [0, 1]
     for row, narrowed in zip(sink.rows, seen, strict=True):
         assert narrowed.considered == len(row["candidates"])

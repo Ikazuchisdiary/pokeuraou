@@ -126,7 +126,8 @@ def collect_one(
 
     ensemble = leaves[0]
     budget = Budget.matrix()
-    ours, theirs = _menus(reg, pos, (limit, limit), ensemble, budget, True)
+    # The refs2 menus these signals were measured on, named since IKA-341.
+    ours, theirs = _menus(reg, pos, (limit, limit), ensemble, budget, True, rank_fill="refs2")
     if len(ours) < 2 or len(theirs) < 2:
         return None
     matrices, _notes, _exact = port.batched_payoffs(

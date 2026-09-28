@@ -18,7 +18,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from pokeuraou import selfplay
+from pokeuraou import qrank, selfplay
 from pokeuraou.budget import Budget
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.pool import load_pool
@@ -66,9 +66,14 @@ def test_the_menus_rank_with_the_fill_they_are_given(pool, monkeypatch) -> None:
     pos = selfplay.position_from_sets(reg, team[:4], team[:4], rng=np.random.default_rng(0))
     budget = Budget.matrix()
 
-    # Null: the default is what ranked before -- the default reply count and the very
-    # budget object the node fills with.
-    selfplay._menus(reg, pos, (4, 4), _stub, budget, True)
+    # Null: refs2, named, is what ranked before -- the default reply count and the very
+    # budget object the node fills with. Unnamed it is q-nocover since IKA-341, and with
+    # no Q in the process that stops before any cell is filled.
+    monkeypatch.setattr(qrank, "_INSTALLED", {})  # whatever another test left installed
+    with pytest.raises(RuntimeError, match="needs a Q"):
+        selfplay._menus(reg, pos, (4, 4), _stub, budget, True)
+    assert asked == []
+    selfplay._menus(reg, pos, (4, 4), _stub, budget, True, rank_fill="refs2")
     assert [(s, r) for s, r, _b in asked] == [(0, DEFAULT_REFERENCES), (1, DEFAULT_REFERENCES)]
     assert all(b is budget for _s, _r, b in asked)
 

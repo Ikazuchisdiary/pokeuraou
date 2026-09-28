@@ -2042,3 +2042,4 @@ oracle も深化も両側の裏が尽きたノード（move の決定の 35〜38
 
 IKA-338 の取り込み（ブランチ `ika-338-qnocover-default` のコード 8b2e4c4）以降の master では、M-C のデータ生成（`generate_queue.py --pool`・`selfplay.py --pool`）と対戦評価（`match_queue.py --pool`・`pool_match.py`）は、葉の順位付けの条件で `--rank-fill` を名指ししなければ `q-nocover`、Q は `data/models/q-mc0.pt` で打つ（無ければ止まる）。それより前の M-C の生成データ（`data/selfplay-mc0` など）と、名指しの無い対戦評価は `refs2`。記録の `rankFill` で見分けられる（`refs2` の局には無い）。
 判定は IKA-331（同じ壁時計の構築プールから学んだ評価モデルで +3.8 [−6.3, +14.0]、非劣性 H1、局は 1.18 倍）。新しい既定の局は、前の master に `--rank-fill q-nocover --q-model q-mc0.pt` を明示した局とバイト一致（データ生成 600/600、records/IKA-338.md）。
+IKA-341（9/28）からはライブラリの名指しの無い葉の順位付けも `q-nocover` で、`refs2` を打つのは名指ししたとき（M-B は `ROSTER_RANK_FILL` で名指し）だけ。どの道具の局も変わっていない（records/IKA-341.md）。

@@ -233,6 +233,7 @@ def test_the_menu_ranks_from_the_same_completion(setup, monkeypatch) -> None:  #
         spreads = selfplay._believed(full, drops)
         menus.append(selfplay._menus(
             reg, position, (4, 4), _stub, Budget.matrix(), True, spreads=spreads, used=used,
+            rank_fill="refs2",
         ))
         views.append((list(asked), {s: used[s][1] for s in used}))
     assert menus[0] == menus[1]

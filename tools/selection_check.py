@@ -66,6 +66,7 @@ from pokeuraou.names import localiser
 from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.priors import find_cached_chaos, load_chaos
 from pokeuraou.regulation import to_id
+from pokeuraou.search import ROSTER_RANK_FILL
 from pokeuraou.selection import SpreadClass, solve_selection
 from pokeuraou.selfplay import play_game
 from pokeuraou.standings import find_cached_standings, load_standings, sample_standings_team
@@ -462,6 +463,8 @@ def main() -> None:
                     # agents.
                     evaluate=value,
                     rank_by_leaf=args.rank_by_leaf,
+                    # M-B's roster has no Q: refs2, named (IKA-341).
+                    rank_fill=ROSTER_RANK_FILL,
                     # The sheets are indexed by SIDE, so they swap with the seat. Handing
                     # side 1 our roster's four while telling the search side 1's sheet is
                     # the opponent's six is a hidden-bench run that believes the wrong

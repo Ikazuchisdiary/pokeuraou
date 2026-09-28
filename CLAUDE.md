@@ -72,7 +72,7 @@ uv run pytest --junitxml=reports/pytest.xml && uv run python tools/ci_skip_audit
 4. 盤は `tools/match_queue.py`（M-C は `--pool`、止めるのは `--sprt 0 10`）。レーティングは `tools/ratings.py`。
 5. 今の M-C の本番の評価モデルは `data/models/value-mc1.pt`・`value-mc1-s1.pt`（gen-1、2 本の平均。IKA-346）。次の世代は、gen-0 + gen-1 のように前の世代のデータに足して、前の世代の評価モデルの種ごとに温間始動で学ぶ（`--init-from <前の種 k> --epochs 2 --lr 5e-4 --keep last`）。
 - Q（`data/models/q-mc0.pt`）は評価モデルを替えるたびに確かめる（IKA-346・IKA-348）: 新しい世代の局面 3,000（`q_teach.py index` の先頭）を、前と新しい評価モデルで `q_teach.py fill` し、`tools/q_drift.py` で Q のセルの MAE の増え方 r を出す。r が 11% 未満なら Q はそのまま。以上なら Q の教材を新しい評価モデルで作り直し（`q_train.py --checkpoint --stop-after` で 30 分以内の呼び出しに分ける）、同じ評価モデルの対戦評価（SPRT(0,10)）で前の Q と比べて、H1 のときだけ替える。gen-1 は r = +55.7% だったが、作り直した q-mc1 は q-mc0 に H0（−7.6 [−20.1, +5.0]）で、本番の Q は q-mc0 のまま（records/IKA-348.md）。r は「作り直しを試す」合図で、Q を替える理由にはならない。
-- M-C のデータ生成と対戦評価の候補集合は、葉の順位付けで `--rank-fill` を名指ししなければ `q-nocover`（Q は `data/models/q-mc0.pt`、無ければ止まる。IKA-338）。`refs2` は名指しすれば打てる。ライブラリ（`play_game` など）と M-B の既定は `refs2` のまま。人と打つ道具は Q が無ければ注記して `refs2`。
+- M-C のデータ生成と対戦評価の候補集合は、葉の順位付けで `--rank-fill` を名指ししなければ `q-nocover`（Q は `data/models/q-mc0.pt`、無ければ止まる。IKA-338）。`refs2` は名指しすれば打てる。IKA-341 からライブラリ（`play_game`・`_menus`・`generate_pool`・`PoolArm`）も同じで、名指しが無い葉の順位付けは `q-nocover`（Q が入っていなければ止まる）。M-B（Q が無い）は `search.ROSTER_RANK_FILL`（`refs2`）を名指しで打つ。人と打つ道具・検討は、読める Q が無ければ注記して `refs2`。refs の仕組み（`leaf_ranking`・`refs<N>`）は名指しでだけ打つ研究用に残す。
 - 生成の設定と、対戦・計測の道具の設定がずれていないかは `agent_drift.py` が見る。対戦で打つ手は、生成と同じ引数で `play_game` を呼んでいなければならない。
 - 速さの内訳は `tools/profile_stages.py`（段の計時・二度呼びの数え・標本採り。既定で off）で測る。
 

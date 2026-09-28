@@ -44,6 +44,7 @@ import numpy as np  # noqa: E402
 
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.priors import find_cached_chaos, load_chaos  # noqa: E402
+from pokeuraou.search import ROSTER_RANK_FILL  # noqa: E402
 from pokeuraou.selfplay import play_game  # noqa: E402
 from pokeuraou.standings import (  # noqa: E402
     find_cached_standings,
@@ -209,6 +210,7 @@ def main() -> None:
             [roster.sets[i] for i in own_pick], [foe_six[j] for j in foe_pick],
             "growth-probe",
             search_limit=args.limit, max_turns=40, evaluate=evaluate, rank_by_leaf=True,
+            rank_fill=ROSTER_RANK_FILL,  # M-B's roster has no Q (IKA-341)
             open_information=True,
         )
         if args.write is not None and record.outcome is not None:
