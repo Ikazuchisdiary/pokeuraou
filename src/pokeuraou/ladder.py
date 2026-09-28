@@ -705,7 +705,11 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
 #: stage held the next read's workers (one read began 4.4 s late) and it read 3.58 against
 #: 5.39 without them. A cell taken is counted when taken; a cell no stage takes is never
 #: counted (the node time is the read's). The answer is still the last completed stage's,
-#: and the count clock never reads ahead (its reads are the serial read to the bit).
+#: and the count clock never reads ahead (its reads are the serial read to the bit). With
+#: `TAIL`, against master (ABBA, 7 positions at 8 s): the workers' idle 27-31% -> 18-19%
+#: (open, 16 threads) and 14-16% -> 5-6% (hidden), the node time a wall second 5.17 ->
+#: 5.46 (open, 16) and 4.52 -> 4.73 (hidden, 8), the same at open 8 and hidden 16: the
+#: work filling the idle makes every port read and server trip slower (8 physical cores).
 #: ``POKEURAOU_LADDER_AHEAD=0`` turns it off.
 AHEAD = os.environ.get("POKEURAOU_LADDER_AHEAD", "1") != "0"
 
