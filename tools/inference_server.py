@@ -157,9 +157,21 @@ def main() -> None:
         cap = f"{args.cuda_memory_gb:g} GB" if args.cuda_memory_gb > 0 else "none"
         print(f"  cuda memory cap: {cap}; eager passes at once: {EAGER_PASSES or 'no gate'} "
               f"(IKA-334)", file=sys.stderr)
-    print(f"  on {args.device}; requests are served as they arrive and are never merged "
-          f"across workers, so every answer is the one a worker would have computed itself",
+    print(f"  on {args.device}; a request is served as it arrived, and every answer is the one "
+          f"a worker would have computed itself, unless the request asks for the merged road "
+          f"(merge, IKA-363: the requests waiting at once share a pass)",
           file=sys.stderr, flush=True)
+
+    def merge_line() -> str:
+        """The merged road's passes (IKA-363): the positive control that it merged."""
+        mergers = list(server.mergers.values())
+        if not mergers:
+            return ""
+        passes = sum(m.passes for m in mergers)
+        asked = sum(m.requests for m in mergers)
+        return (f"; merged road: {asked:,} requests in {passes:,} passes "
+                f"({sum(m.merged for m in mergers):,} of them shared, the largest "
+                f"{max(m.largest for m in mergers):,} rows)")
 
     stopping = threading.Event()
 
@@ -240,13 +252,13 @@ def main() -> None:
                   f"{1000 * waited / calls:.2f} ms queued, {1000 * held / calls:.2f} ms "
                   f"working; cuda reserved {reserved:.2f} GB, in use {in_use:.2f} GB"
                   + (f"; {server.oom_replies} out-of-memory replies so far (IKA-336)"
-                     if server.oom_replies else ""),
+                     if server.oom_replies else "") + merge_line(),
                   file=sys.stderr, flush=True)
             served, last = now, time.perf_counter()
     note()
     server.shutdown()
     print(f"stopped after {server.requests_served:,} requests, "
-          f"{server.rows_served:,} rows", file=sys.stderr)
+          f"{server.rows_served:,} rows" + merge_line(), file=sys.stderr)
 
 
 if __name__ == "__main__":
