@@ -118,6 +118,38 @@ pub fn keep(position: &Position) -> u64 {
     id
 }
 
+/// IKA-378: a 128-bit digest of a position -- two hashes (FNV-1a and SipHash-1-3 with zero
+/// keys) of the JSON this process writes for it, whose keys are in order. The same position
+/// has the same digest in every process of one build, so the ladder's worker processes can
+/// share a child's sub-game by it (`digest` on a `turn`); two positions with one digest are
+/// the caller's 2^-128 risk, not an answer this process gives.
+pub fn digest(position: &Position) -> [u64; 2] {
+    use std::hash::Hasher;
+    struct Both {
+        fnv: u64,
+        sip: std::collections::hash_map::DefaultHasher,
+    }
+    impl std::io::Write for Both {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            for &b in bytes {
+                self.fnv ^= b as u64;
+                self.fnv = self.fnv.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+            self.sip.write(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut both = Both {
+        fnv: 0xcbf2_9ce4_8422_2325,
+        sip: std::collections::hash_map::DefaultHasher::new(),
+    };
+    serde_json::to_writer(&mut both, &position.to_json()).expect("a position writes as JSON");
+    [both.fnv, both.sip.finish()]
+}
+
 /// `forget`: the decision is over.
 pub fn forget() {
     STORE.with(|store| store.borrow_mut().clear());
@@ -164,6 +196,15 @@ pub fn action(id: u64) -> crate::resolve::SlotAction {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_digest_is_the_positions_and_moves_with_it() {
+        let one = test_position();
+        assert_eq!(digest(&one), digest(&test_position()));
+        let mut other = one.clone();
+        other.turn += 1;
+        assert_ne!(digest(&one), digest(&other));
+    }
 
     #[test]
     fn only_a_lone_held_key_is_a_number() {

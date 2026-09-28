@@ -52,7 +52,7 @@ from typing import Any
 
 import numpy as np
 
-from . import port, rustnode, search
+from . import port, rustnode, search, subshare
 from .budget import Budget
 from .equilibrium import EquilibriumError, solve, solve_bayesian
 from .position import Position
@@ -452,7 +452,14 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
     # The workers read a top-level read's cells; a cell's own read (depth 3 and up) is
     # always read where it is.
     pool = _POOL if outer is None and _POOL is not None and _POOL.alive() else None
-    here_began = (tuple(rustnode.PORT_WAITED), time.process_time(), _served(leaf))
+    # IKA-378 (`SHARE`): a read's child sub-games, each filled once -- here in a table of the
+    # read's own, on the workers in theirs (`_Pool.begin`).
+    shared_before = (search.SHARE, rustnode.DIGESTS[0])
+    if outer is None and pool is None and SHARE:
+        search.SHARE = subshare.Local()
+        rustnode.DIGESTS[0] = True
+    here_began = (tuple(rustnode.PORT_WAITED), time.process_time(), _served(leaf),
+                  dict(subshare.COUNTS))
     if pool is not None:
         pool.begin(row, col, items, budget, hidden_side, cost)
         result.workers = len(pool.conns)
@@ -685,6 +692,8 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
                 on_rung(rung)
     finally:
         search.WORK = outer
+        if outer is None:
+            search.SHARE, rustnode.DIGESTS[0] = shared_before
         if outer is not None:
             # A cell's own read (depth 3 and up): its work is the cell's.
             for kind, n in work.items():
@@ -700,7 +709,13 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
                        "portReads": rustnode.PORT_WAITED[1] - here_began[0][1],
                        "cpuMs": (time.process_time() - here_began[1]) * 1000.0,
                        "serverMs": (_served(leaf)[0] - here_began[2][0]) * 1000.0,
-                       "serverTrips": _served(leaf)[1] - here_began[2][1]}
+                       "serverTrips": _served(leaf)[1] - here_began[2][1],
+                       # IKA-378: the sub-games this process took rather than filled.
+                       "sharedSubgames": sum(subshare.COUNTS[k] - here_began[3][k]
+                                             for k in ("hits", "same")),
+                       "sameSubgames": subshare.COUNTS["same"] - here_began[3]["same"],
+                       "keptSubgames": subshare.COUNTS["puts"] - here_began[3]["puts"],
+                       "sharedKids": subshare.COUNTS["kidHits"] - here_began[3]["kidHits"]}
     result.work = work
     if result.rungs:
         result.unmodelled.add(f"ladder read to {result.depth_reached} ({len(result.rungs)} "
@@ -885,7 +900,7 @@ def _read_cells(  # noqa: PLR0913 - the cells and how they are read
                 reg, row[i], col[j], hidden_side, tuple(item.slots), item.position)
         shares.append(search.TurnShare(cache=turns[stage.knockouts], key=(i, j),
                                        side=hidden_side, slots=tuple(item.slots),
-                                       clean=clean[(i, j)]))
+                                       clean=clean[(i, j)], completion=k))
     asked = [(items[k].position, row[i], col[j]) for k, i, j in cells]
     try:
         found = search._refine_cells(reg, asked, leaf, budget=budget, sub_limit=stage.child,
@@ -1045,7 +1060,7 @@ def _deep_split(  # noqa: PLR0913 - one cell and its stage
     is read here to the end -- fewer than two children to read, or a child with an empty
     menu (the one-at-a-time road's own end) -- else ``("split", weights, entries, kids)``:
     per kept branch ``("leaf", value)`` (a battle over) or ``("kid", n)``, and each child's
-    (position, row menu, column menu), for `_deep_child` on any worker."""
+    (position, row menu, column menu, digest), for `_deep_child` on any worker."""
     got = _deep_expand(reg, pos, ours, theirs, stage, budget, unmodelled)
     if got is None:
         return ("value", None)
@@ -1054,7 +1069,7 @@ def _deep_split(  # noqa: PLR0913 - one cell and its stage
         return ("value", _deep_children(reg, branches, weights, listed, leaf, stage, root_budget,
                                         budget, unmodelled, cost, stop))
     entries: list[tuple[str, Any]] = []
-    kids: list[tuple[Position, list, list]] = []
+    kids: list[tuple[Position, list, list, Any]] = []
     menus = iter(listed)
     for branch in branches:
         if branch.position.ended:
@@ -1062,20 +1077,21 @@ def _deep_split(  # noqa: PLR0913 - one cell and its stage
             continue
         crow, ccol = next(menus)
         entries.append(("kid", len(kids)))
-        kids.append((branch.position, list(crow), list(ccol)))
+        kids.append((branch.position, list(crow), list(ccol), getattr(branch, "digest", None)))
     return ("split", np.asarray(weights, dtype=np.float64), entries, kids)
 
 
 @dataclass
 class _Kid:
-    """A child as `_deep_children` reads a branch: its position."""
+    """A child as `_deep_children` reads a branch: its position (and its digest, IKA-378)."""
 
     position: Position
+    digest: Any = None
 
 
 def _deep_child(  # noqa: PLR0913 - one child and its stage
     reg: Any,  # noqa: ANN401
-    child: tuple[Position, list, list],
+    child: tuple[Position, list, list, Any],
     leaf: Any,  # noqa: ANN401
     stage: Stage,
     root_budget: Budget,
@@ -1086,8 +1102,8 @@ def _deep_child(  # noqa: PLR0913 - one child and its stage
 ) -> float | None:
     """IKA-375 (`SPLIT`): one child of a deep cell (`_deep_split`), read by ``stage.sub`` as
     `_deep_children` reads it among its siblings; None where that road gives the cell None."""
-    position, crow, ccol = child
-    return _deep_children(reg, [_Kid(position)], np.ones(1, dtype=np.float64), [(crow, ccol)],
+    position, crow, ccol, digest = child
+    return _deep_children(reg, [_Kid(position, digest)], np.ones(1, dtype=np.float64), [(crow, ccol)],
                           leaf, stage, root_budget, budget, unmodelled, cost, stop)
 
 
@@ -1146,6 +1162,12 @@ class _Child:
     memo: dict = field(default_factory=dict)
     answer: tuple | None = None
     active: bool = True
+    #: IKA-378 (`SHARE`): its key in the read's table, whether it was taken from there, and
+    #: the notes and counted work (less the read) of its read here, to keep.
+    key: tuple | None = None
+    taken: bool = False
+    notes: set = field(default_factory=set)
+    work: dict = field(default_factory=dict)
 
 
 def _children_at_once(  # noqa: PLR0913, PLR0912, C901 - a cell's children through one stage
@@ -1166,15 +1188,34 @@ def _children_at_once(  # noqa: PLR0913, PLR0912, C901 - a cell's children throu
     way, so each child's value is the one its own `read` gives. `_ALONE` where that road
     would stop or fall back on its own."""
     sub = stage.sub
-    kids: list[_Child] = []
+    everyone: list[_Child] = []
     listed = iter(menus)
+    table = search.SHARE
     for branch in branches:
         if branch.position.ended:
             continue
         crow, ccol = next(listed)
         if not crow or not ccol:
             return _ALONE
-        kids.append(_Child(branch.position, list(crow), list(ccol), None, None, None))
+        kid = _Child(branch.position, list(crow), list(ccol), None, None, None)
+        digest = getattr(branch, "digest", None)
+        if table is not None and digest is not None:
+            # IKA-378: a child this read has read already -- the same menus, the same fork
+            # for its matrix, the same stage for its read -- is taken, with the work its read
+            # counted.
+            kid.key = subshare.kid_key(digest, kid.row, kid.col, budget.enumerate_knockouts,
+                                       sub.label)
+            got = table.get(kid.key, kid=True)
+            if got is not None:
+                value, cells, notes, packed = got
+                kid.taken, kid.active = True, False
+                kid.answer = None if value is None else (None, None, value)
+                unmodelled.update(notes)
+                for name, n in subshare.unpack_work(packed).items():
+                    work[name] += n
+                work["cells"] += cells
+        everyone.append(kid)
+    kids = [kid for kid in everyone if not kid.taken]
     if stop is not None and stop.is_set():
         raise Stopped
     if kids:
@@ -1196,6 +1237,8 @@ def _children_at_once(  # noqa: PLR0913, PLR0912, C901 - a cell's children throu
             work["subgames"] += 1
             work["cells"] += m.size
             kid.prices, kid.x, kid.y = m, np.asarray(eq.row_strategy), np.asarray(eq.col_strategy)
+            kid.notes = set(p.unmodelled)
+            kid.work = {"turns": 0, "subgames": 1, "cells": m.size, "qs": 0}
     w = np.asarray([1.0], dtype=np.float64)
     w = w / w.sum()
     sub_budget = replace(root_budget, enumerate_knockouts=True) if sub.knockouts else root_budget
@@ -1210,6 +1253,7 @@ def _children_at_once(  # noqa: PLR0913, PLR0912, C901 - a cell's children throu
     for attempt in range(sub.passes + 1):
         cells: list = []
         groups: list[int] = []
+        group_kids: list[_Child] = []
         owners: list = []
         for kid in kids:
             if not kid.active:
@@ -1222,11 +1266,14 @@ def _children_at_once(  # noqa: PLR0913, PLR0912, C901 - a cell's children throu
             for at in range(0, len(asked), CHUNK):
                 chunk = asked[at:at + CHUNK]
                 groups.append(len(chunk))
+                group_kids.append(kid)
                 cells += [(kid.position, kid.row[i], kid.col[j]) for i, j in chunk]
                 owners += [(kid, cell) for cell in chunk]
         if stop is not None and stop.is_set():
             raise Stopped
         if cells:
+            # IKA-378: the pass's work cell by cell, so each child's is known (and kept).
+            outer_cells, search.WORK_CELLS = search.WORK_CELLS, []
             try:
                 found = search._refine_cells(reg, cells, leaf, budget=sub_budget,
                                              sub_limit=sub.child, sub_branches=sub.branches,
@@ -1234,8 +1281,19 @@ def _children_at_once(  # noqa: PLR0913, PLR0912, C901 - a cell's children throu
                                              q_groups=groups, stack=STACK)
             except port.PortRefused:
                 return _ALONE
-            for (kid, cell), (value, _notes, _solved) in zip(owners, found, strict=True):
+            finally:
+                by_cell, search.WORK_CELLS = search.WORK_CELLS, outer_cells
+            if outer_cells is not None:
+                outer_cells.extend(by_cell)
+            for (kid, cell), (value, _notes, _solved), done in zip(owners, found, by_cell,
+                                                                  strict=True):
                 kid.memo[cell] = value
+                for name in ("turns", "subgames", "cells"):
+                    kid.work[name] += done[name]
+            if sub.q:
+                # The Q is asked once a group (`search._refine_cells`' ``qs``).
+                for kid, size in zip(group_kids, groups, strict=True):
+                    kid.work["qs"] += 1 if size else 0
         for kid in kids:
             if not kid.active:
                 continue
@@ -1278,8 +1336,14 @@ def _children_at_once(  # noqa: PLR0913, PLR0912, C901 - a cell's children throu
                 kid.active = False
         if not any(kid.active for kid in kids):
             break
+    if table is not None:
+        for kid in kids:
+            packed = subshare.pack_work(kid.work)
+            if kid.key is not None and packed:
+                table.put(kid.key, None if kid.answer is None else kid.answer[2],
+                          kid.work["cells"], kid.notes, packed, kid=True)
     values = []
-    live = iter(kids)
+    live = iter(everyone)
     for branch in branches:
         if branch.position.ended:
             values.append(float(np.asarray(leaf([branch.position]))[0]))
@@ -1355,6 +1419,15 @@ HOLD = os.environ.get("POKEURAOU_LADDER_HOLD", "1") != "0"
 #: ``POKEURAOU_LADDER_SPLIT=0`` turns it off.
 SPLIT = os.environ.get("POKEURAOU_LADDER_SPLIT", "1") != "0"
 
+#: IKA-378: a read fills each child sub-game once (`subshare`, `search.SHARE`) -- one table
+#: for the read, in shared memory for its worker processes. In a 1-process read at 16 s
+#: (L5), 36% (open) and 43% (hidden) of the sub-games were a child with the same menus filled
+#: before in the read; on every core 55-60% (IKA-375), most on another worker in the same
+#: stage. Charged to the count clock as if filled, so the stages are the same; a value taken
+#: is the value where it was filled, the same but for the last places the leaf's and the Q's
+#: batches move. ``POKEURAOU_LADDER_SHARE=0`` fills every sub-game where it is met.
+SHARE = os.environ.get("POKEURAOU_LADDER_SHARE", "1") != "0"
+
 
 def _serial(asks: list[list], read_one: Callable[[list], list]) -> Any:  # noqa: ANN401 - a generator
     """The chunks read here, one after the other: ``(index, values)``, `_STOPPED` where a
@@ -1368,12 +1441,12 @@ def _serial(asks: list[list], read_one: Callable[[list], list]) -> Any:  # noqa:
         yield index, got
 
 
-def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  # noqa: ANN401
-               cancel: Any) -> None:  # noqa: ANN401 - a multiprocessing Event
+def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  # noqa: ANN401, PLR0913
+               cancel: Any, share: str | None = None) -> None:  # noqa: ANN401 - a multiprocessing Event
     """A worker: its own regulation, leaf (``factory(reg, *args)``, which also installs the
     Q its children's menus need) and a port of one cell thread; `_read_cells` on each chunk
     of the read it was last told of. ``cancel`` is its stop: a depth-3 cell met by it is
-    dropped (`Stopped`)."""
+    dropped (`Stopped`). ``share`` names the reader's table of sub-games (`SHARE`)."""
     import traceback
 
     from . import rustnode
@@ -1388,6 +1461,15 @@ def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  
     except Exception as error:  # noqa: BLE001 - said to the parent, which reads without it
         conn.send(("failed", f"{type(error).__name__}: {error}"))
         return
+    table = None
+    if share is not None:
+        try:
+            table = subshare.Table(share)
+        except (OSError, ValueError) as error:
+            conn.send(("failed", f"the sub-game table: {type(error).__name__}: {error}"))
+            return
+        search.SHARE = table
+        rustnode.DIGESTS[0] = True
     conn.send(("ready", None))
     context: tuple | None = None
     turns: dict[bool, dict] = {False: {}, True: {}}
@@ -1429,9 +1511,12 @@ def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  
         if message[0] == "read":
             # A new read: its menus, completions and budget. The shared turns and the cells'
             # bench reach are keyed by the read's own indices, so they start again.
-            context = message[1:]
+            context = message[1:7]
             turns = {False: {}, True: {}}
             clean = {}
+            if table is not None:
+                # IKA-378: the read's own rows of the table (`_Pool.begin`).
+                table.begin(message[7])
             continue
         kind, task, stage, stage_budget, cells = message
         row, col, items, root_budget, hidden_side, cost = context
@@ -1439,8 +1524,9 @@ def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  
         notes: set[str] = set()
         if cancel.is_set():
             # Sent before the reader stopped: not read.
-            conn.send(("stopped", task, None, [work], notes, (0.0, 0.0, 0, 0.0, 0.0, 0, 0)))
+            conn.send(("stopped", task, None, [work], notes, (0.0, 0.0, 0, 0.0, 0.0, 0, 0, (0, 0, 0), 0)))
             continue
+        shared_began = dict(subshare.COUNTS)
         search.WORK = work
         # IKA-374: the work is said cell by cell: a stage may take a part of a chunk read
         # ahead (`AHEAD`), and counts only the cells it takes.
@@ -1491,7 +1577,12 @@ def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  
         # port held by number at the chunk's end (`HOLD`'s positive control).
         took = (time.perf_counter() - clock, after[0] - served[0], after[1] - served[1],
                 time.process_time() - cpu, rustnode.PORT_WAITED[0] - ported[0],
-                rustnode.PORT_WAITED[1] - ported[1], len(rustnode._HELD) if HOLD else 0)  # noqa: SLF001
+                rustnode.PORT_WAITED[1] - ported[1], len(rustnode._HELD) if HOLD else 0,  # noqa: SLF001
+                # IKA-378: sub-games taken from the table or the same call, and kept in it.
+                (subshare.COUNTS["hits"] - shared_began["hits"],
+                 subshare.COUNTS["same"] - shared_began["same"],
+                 subshare.COUNTS["kidHits"] - shared_began["kidHits"]),
+                subshare.COUNTS["puts"] - shared_began["puts"])
         conn.send((status, task, got, work, notes, took))
 
 
@@ -1518,10 +1609,14 @@ def _served(leaf: Any) -> tuple[float, int]:  # noqa: ANN401
 class _Pool:
     """Worker processes reading stages' cells (`start_pool`)."""
 
-    def __init__(self, processes: list, conns: list, cancel: Any) -> None:  # noqa: ANN401
+    def __init__(self, processes: list, conns: list, cancel: Any,  # noqa: ANN401
+                 table: subshare.Table | None = None) -> None:
         self.processes = processes
         self.conns = conns
         self.cancel = cancel
+        #: IKA-378: the workers' table of sub-games (`SHARE`), and the reads begun on it.
+        self.table = table
+        self.generation = 0
         self.stats: dict[str, float] = {}
         self._got_ms, self._got_cells = 0.0, 0
         #: Tasks out, per worker (a stage's chunks and the speculation), across `cells` calls.
@@ -1588,7 +1683,11 @@ class _Pool:
         # context when that chunk is back (`cells`), not now: a message over the pipe's
         # buffer (8 KB on Windows) waits until the worker takes it, and an 8 s read began
         # 4.4 s late behind depth-3 and 4 cells read ahead for the read before it.
-        self._context = ("read", list(row), list(col), plain, budget, hidden_side, cost)
+        # IKA-378: each read its own rows of the sub-game table (a chunk of an earlier read
+        # still out keeps to that read's: its worker is sent this after it is back).
+        self.generation += 1
+        self._context = ("read", list(row), list(col), plain, budget, hidden_side, cost,
+                         self.generation)
         self._due = set(self._orphans)
         for i, conn in enumerate(self.conns):
             if i not in self._due:
@@ -1608,13 +1707,16 @@ class _Pool:
         #: chunks a stage took a part of (the rest kept). IKA-375 (`SPLIT`): ``splitCells``
         #: the deep cells read child by child, ``childTasks`` the children sent; (`HOLD`)
         #: ``heldPositions`` the positions the workers' ports held by number, summed over
-        #: the chunks' ends.
+        #: the chunks' ends. IKA-378 (`SHARE`): ``sharedSubgames`` the sub-games the workers
+        #: took from the table or an earlier one of the same call (``sameSubgames`` the latter),
+        #: ``keptSubgames`` put in it; ``sharedKids`` a deep cell's children taken from it.
         self.stats = {"chunks": 0, "waitMs": 0.0, "sendMs": 0.0, "recvMs": 0.0,
                       "workerMs": 0.0, "serverMs": 0.0, "serverTrips": 0, "supplyMs": 0.0,
                       "tailMs": 0.0, "betweenMs": 0.0, "cpuMs": 0.0, "portMs": 0.0,
                       "portReads": 0, "specCells": 0, "specMs": 0.0, "specUsed": 0,
                       "specWasted": 0, "specChunks": 0, "specPartial": 0, "splitCells": 0,
-                      "childTasks": 0, "heldPositions": 0}
+                      "childTasks": 0, "heldPositions": 0, "sharedSubgames": 0,
+                      "sameSubgames": 0, "keptSubgames": 0, "sharedKids": 0}
         self._last_end = time.perf_counter()
         self._trace = ({"t0": self._last_end, "workers": len(self.conns), "calls": [],
                         "chunks": [], "stages": []} if TRACE_DIR else None)
@@ -1795,8 +1897,12 @@ class _Pool:
                     status, task, values, done_work, done_notes, times = conn.recv()
                     back = time.perf_counter()
                     self.stats["recvMs"] += (back - clock) * 1000.0
-                    took, server_s, trips, cpu_s, port_s, port_reads, held = times
+                    took, server_s, trips, cpu_s, port_s, port_reads, held, shared, kept = times
                     self.stats["heldPositions"] += held
+                    self.stats["sharedSubgames"] += shared[0] + shared[1]
+                    self.stats["sameSubgames"] += shared[1]
+                    self.stats["sharedKids"] += shared[2]
+                    self.stats["keptSubgames"] += kept
                     self.stats["workerMs"] += took * 1000.0
                     self.stats["serverMs"] += server_s * 1000.0
                     self.stats["serverTrips"] += trips
@@ -1950,8 +2056,12 @@ class _Pool:
                     status, task, values, done_work, done_notes, times = conn.recv()
                     back = time.perf_counter()
                     self.stats["recvMs"] += (back - clock) * 1000.0
-                    took, server_s, trips, cpu_s, port_s, port_reads, held = times
+                    took, server_s, trips, cpu_s, port_s, port_reads, held, shared, kept = times
                     self.stats["heldPositions"] += held
+                    self.stats["sharedSubgames"] += shared[0] + shared[1]
+                    self.stats["sameSubgames"] += shared[1]
+                    self.stats["sharedKids"] += shared[2]
+                    self.stats["keptSubgames"] += kept
                     self.stats["workerMs"] += took * 1000.0
                     self.stats["serverMs"] += server_s * 1000.0
                     self.stats["serverTrips"] += trips
@@ -2052,6 +2162,9 @@ class _Pool:
             if process.is_alive():
                 process.kill()
             conn.close()
+        if self.table is not None:
+            self.table.close()
+            self.table = None
 
 
 #: The worker processes a top-level read hands its cells to, or None: read here.
@@ -2073,11 +2186,14 @@ def start_pool(reg: Any, count: int, factory: Any, args: tuple[Any, ...] = ()) -
         return 0
     context = multiprocessing.get_context("spawn")
     cancel = context.Event()
+    # IKA-378: the table the workers share their sub-games in (`SHARE`).
+    table = subshare.Table() if SHARE else None
     started = []
     for _ in range(count):
         mine, theirs = context.Pipe()
         process = context.Process(target=_pool_main,
-                                  args=(theirs, reg.meta.format_id, factory, tuple(args), cancel),
+                                  args=(theirs, reg.meta.format_id, factory, tuple(args), cancel,
+                                        None if table is None else table.name),
                                   daemon=True)
         process.start()
         theirs.close()
@@ -2094,7 +2210,9 @@ def start_pool(reg: Any, count: int, factory: Any, args: tuple[Any, ...] = ()) -
             print(f"[ladder] a worker did not start: {why}", flush=True)
             process.join(timeout=5)
     if ready:
-        _POOL = _Pool([p for p, _c in ready], [c for _p, c in ready], cancel)
+        _POOL = _Pool([p for p, _c in ready], [c for _p, c in ready], cancel, table)
+    elif table is not None:
+        table.close()
     return len(ready)
 
 

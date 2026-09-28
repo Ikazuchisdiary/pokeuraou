@@ -104,6 +104,28 @@ def test_children_at_once_are_the_one_at_a_time_road(kit, monkeypatch) -> None: 
     assert _same(alone, gathered)
 
 
+def test_a_child_read_once_is_every_one_read(kit, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-378 (`ladder.SHARE`): with a pass a child game (`STACK` off, so a block's values do
+    not depend on what else is scored), a read that takes a deep cell's child and a sub-game
+    it has read before is the read that reads every one: mixture, value, stages and counted
+    work to the bit. The positive control: children taken (`sharedKids`) and sub-games."""
+    reg, pos, leaf = kit
+    ours = narrow(reg, pos, 0, limit=5).actions
+    theirs = narrow(reg, pos, 1, limit=5).actions
+    stages = "d2r2b2n4x+d3r4ban4x/r2b2n3"
+    got = {}
+    for share in (False, True):
+        monkeypatch.setattr(ladder, "SHARE", share)
+        monkeypatch.setattr(ladder, "STACK", False)
+        got[share] = humanplay.solve_move(
+            reg, pos, 0, ours, theirs, None, leaf, budget=Budget.matrix(), exact=True,
+            ladder={"stages": ladder.parse_ladder(stages), "budget_ms": None})
+    assert _same(got[False], got[True])
+    assert got[False].ladder.here["sharedKids"] == 0
+    assert got[True].ladder.here["sharedKids"] > 0
+    assert got[True].ladder.here["sharedSubgames"] > 0
+
+
 def test_one_pass_moves_the_values_only_in_the_last_places(kit, monkeypatch) -> None:  # noqa: ANN001
     per_game = _read(kit, monkeypatch, batch=True, stack=False)
     seen = _counting(monkeypatch)

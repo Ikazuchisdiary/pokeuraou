@@ -157,6 +157,7 @@ from .node_solver import solve_node
 from .port import batched_payoff
 from .position import Position
 from .regulation import Regulation
+from .subshare import COUNTS, menu_key
 
 #: A leaf evaluator: many positions in, one probability each out.
 LeafEvaluator = Callable[[list[Position]], np.ndarray]
@@ -931,6 +932,25 @@ class _Sub:
     #: `_refined_value` would have raised it.
     error: port.PortRefused | None = None
     ended: bool = False
+    #: IKA-378 (`SHARE`): the same sub-game earlier in this call, whose value this one takes;
+    #: or ``shared``, the value (and `notes`) taken from the read's table.
+    alias: _Sub | None = None
+    shared: bool = False
+    #: The solved value (`_sub_value`), once it is (a float, or None where it has none).
+    solved: Any = field(default=None, repr=False)
+    done: bool = False
+
+
+def _sub_value(sub: _Sub) -> float | None:
+    """A filled sub-game's value, solved once (an alias of it takes the same)."""
+    if not sub.done:
+        payoff = sub.payoff if sub.pending is None else sub.pending.finish()
+        try:
+            sub.solved = float(solve(payoff).value)
+        except EquilibriumError:
+            sub.solved = None
+        sub.done = True
+    return sub.solved
 
 
 @dataclass
@@ -968,6 +988,9 @@ class TurnShare:
     slots: tuple[int, ...]
     #: Whether `reaches_bench` clears the two actions; otherwise the cell resolves its own.
     clean: bool
+    #: IKA-378: the completion's index in its read, for the digest of a branch read off
+    #: another completion's turn (`subshare.completion_digest`); None: not shared.
+    completion: int | None = None
 
 
 def _cell_reaches_bench(  # noqa: PLR0913 - one cell and the hidden slots
@@ -1041,6 +1064,13 @@ def _cell_turns(
         if made is None:
             again.append(index)
             continue
+        if SHARE is not None and share.completion is not None:
+            # IKA-378: the made branch's digest, from the reference branch's.
+            from .subshare import completion_digest
+
+            for mine, theirs in zip(made.outcomes, reference[1].outcomes, strict=True):
+                if theirs.digest is not None:
+                    mine.digest = completion_digest(theirs.digest, share.completion)
         answers[index] = made
     if timing.ON:
         timing.count("depth2.turns", len(asked) + len(again))
@@ -1153,6 +1183,8 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
 
     # 1. The turns. A refused one is raised where `_kept_branches` raised it: first in order.
     kept_positions: list[list[Position]] = []
+    #: IKA-378: each kept branch's digest (`PortBranch.digest`), for `SHARE`.
+    kept_digests: list[list[Any]] = []
     with timing.region("d2.turns"):
         for result in _cell_turns(reg, cells, budget, shares):
             if isinstance(result, port.PortRefused):
@@ -1162,9 +1194,11 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
             kept = _kept_from(result, sub_branches, cell.unmodelled)
             if kept is None:
                 kept_positions.append([])
+                kept_digests.append([])
                 continue
             branches, cell.weights = kept
             kept_positions.append([branch.position for branch in branches])
+            kept_digests.append([branch.digest for branch in branches])
 
     # 2. Both sides' menus at every branch that has a game left in it.
     with timing.region("d2.menus"):
@@ -1205,8 +1239,16 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
         #: With ``stack``, the ended branches, scored in one call after the loop (IKA-363):
         #: a call a branch was a round trip a branch through a server.
         ended_subs: list[tuple[_Sub, Position]] = []
+        #: IKA-378: every sub-game the count clock charges and its cells -- filled, taken
+        #: from the table, or the same as one earlier in this call -- and the filled ones'
+        #: keys, to keep in the table once solved.
+        counted: list[tuple[_Sub, int]] = []
+        keyed: dict[tuple[int, int], _Sub] = {}
+        to_keep: list[tuple[_Sub, tuple[int, int], int]] = []
+        table = SHARE
         for index, (cell, positions) in enumerate(zip(work, kept_positions, strict=True)):
             share = shares[index] if shares is not None else None
+            digests = kept_digests[index]
             menus_of = [
                 None if pos.ended else (next(menus), next(menus)) for pos in positions
             ]
@@ -1226,9 +1268,26 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
                             raise narrowed
                     if sub.error is None:
                         row, col = menu[0].actions, menu[1].actions
+                        key = (None if table is None or not row or not col
+                               or digests[branch] is None
+                               else menu_key(digests[branch], row, col,
+                                             budget.enumerate_knockouts))
                         if not row or not col:
                             sub.empty = True
+                        elif key is not None and key in keyed:
+                            sub.alias = keyed[key]
+                            counted.append((sub, len(row) * len(col)))
+                            COUNTS["same"] += 1
+                        elif key is not None and (got := table.get(key)) is not None:
+                            sub.value, n, notes, _extra = got
+                            sub.notes = set(notes)
+                            sub.shared = True
+                            counted.append((sub, n))
                         else:
+                            if key is not None:
+                                keyed[key] = sub
+                                to_keep.append((sub, key, len(row) * len(col)))
+                            counted.append((sub, len(row) * len(col)))
                             to_fill.append((sub, pos, row, col))
                             related.append(
                                 None
@@ -1246,15 +1305,17 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
 
     if WORK is not None:
         # IKA-367: the work a count clock charges (`ladder`); nothing read back here.
+        # IKA-378: a sub-game taken from the table or from an earlier one of this call is
+        # charged as if it were filled -- the count clock reads the same stages either way.
         WORK["turns"] += len(cells)
-        WORK["subgames"] += len(to_fill)
-        WORK["cells"] += sum(len(row) * len(col) for _sub, _pos, row, col in to_fill)
+        WORK["subgames"] += len(counted)
+        WORK["cells"] += sum(n for _sub, n in counted)
         qs = (0 if child_q is None else sum(1 for size in q_groups if size)
               if q_groups is not None else 1 if kept_positions else 0)
         WORK["qs"] += qs
         if WORK_CELLS is not None:
             # IKA-374: the same work, cell by cell (the Q's passes on the first cell).
-            sizes = {id(sub): len(row) * len(col) for sub, _pos, row, col in to_fill}
+            sizes = {id(sub): n for sub, n in counted}
             for n, cell in enumerate(work):
                 filled = [sizes[id(sub)] for sub in cell.subs if id(sub) in sizes]
                 WORK_CELLS.append({"turns": 1, "subgames": len(filled), "cells": sum(filled),
@@ -1289,13 +1350,27 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
                 score()
     score()
     with timing.region("d2.fold"):
-        return [_fold_cell(cell) for cell in work]
+        folded = [_fold_cell(cell) for cell in work]
+    if table is not None:
+        for sub, key, n in to_keep:
+            if sub.error is None and (sub.done or sub.pending is not None or sub.payoff is not None):
+                table.put(key, _sub_value(sub), n, sub.notes)
+    return folded
 
 
 #: The depth-2 work `_refine_cells` has done, counted into this dict when it is one (keys
 #: ``turns``, ``subgames``, ``cells``, ``qs``): what `ladder`'s count clock charges
 #: (IKA-367). None: nothing counted, and nothing else changes either way.
 WORK: dict[str, int] | None = None
+
+#: IKA-378: the read's table of child sub-games (`subshare.Table` / `Local`), or None (the
+#: default, and everything but the ladder): with one, `_refine_cells` fills a sub-game --
+#: a kept branch's child with its two menus and knock-out fork, by the port's digest of the
+#: child (`rustnode.DIGESTS` must be on) -- only when neither the table nor an earlier
+#: sub-game of the same call has it, and keeps what it solves. The count clock charges a
+#: sub-game so taken as if filled. The value is the one the sub-game had where it was
+#: filled: the same but for the last places the leaf's and the Q's batches move.
+SHARE: Any = None
 
 #: IKA-374: with `WORK` counted, the same work cell by cell, appended here when it is a list
 #: (`ladder`'s reads ahead take some cells of a chunk and not others). None: not kept.
@@ -1326,13 +1401,15 @@ def _fold_cell(cell: _Cell) -> tuple[float | None, set[str], int]:
             value, notes, did = sub.value, set(), 0
         elif sub.empty:
             value, notes, did = None, set(), 0
+        elif sub.shared:
+            value, notes, did = sub.value, sub.notes, 1
+        elif sub.alias is not None:
+            first = sub.alias
+            if first.error is not None:
+                raise first.error
+            value, notes, did = _sub_value(first), first.notes, 1
         else:
-            payoff = sub.payoff if sub.pending is None else sub.pending.finish()
-            notes, did = sub.notes, 1
-            try:
-                value = float(solve(payoff).value)
-            except EquilibriumError:
-                value = None
+            value, notes, did = _sub_value(sub), sub.notes, 1
         cell.unmodelled.update(notes)
         solved += did
         if value is None:
