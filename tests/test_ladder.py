@@ -209,7 +209,8 @@ def pool(tmp_path_factory):  # noqa: ANN001, ANN201
 
 
 def _timeless(value):  # noqa: ANN001, ANN202
-    times = ("seconds", "ratio", "menuSeconds", "selectionSeconds", "wallMs")
+    # IKA-370: "here" is the read's own waits and CPU (milliseconds).
+    times = ("seconds", "ratio", "menuSeconds", "selectionSeconds", "wallMs", "here")
     if isinstance(value, dict):
         return {k: _timeless(v) for k, v in value.items() if k not in times}
     if isinstance(value, list):
