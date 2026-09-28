@@ -750,8 +750,11 @@ def ladder_ref(args: argparse.Namespace) -> None:  # noqa: C901, PLR0915 - the r
         memo_path = parts / f"{n}.memo.pkl"
         held = pickle.loads(memo_path.read_bytes()) if memo_path.exists() else {
             "memo": {}, "seconds": 0.0, "calls": 0, "stages": args.stages}
-        if held["stages"] != args.stages:
+        # Kept cells of the same stages, or of their first ones (a reference read further: a
+        # cell's key names how it was read, so the cells carry over).
+        if not (args.stages == held["stages"] or args.stages.startswith(held["stages"] + "+")):
             raise SystemExit(f"position {n}: its kept cells are of the stages {held['stages']!r}")
+        held["stages"] = args.stages
         memo = held["memo"]
         had = len(memo)
         began = time.perf_counter()
@@ -806,7 +809,10 @@ def ladder_ref(args: argparse.Namespace) -> None:  # noqa: C901, PLR0915 - the r
         tmp.replace(out / f"{n}.npz")
         _write(parts / f"{n}.json", {"n": n, "stages": args.stages, "rungs": rows_json,
                                      "seconds": round(held["seconds"] + took, 1),
-                                     "cells": len(memo), "work": got.work})
+                                     "cells": len(memo), "work": got.work,
+                                     # Cells given up by hand (kept at their price: a cell
+                                     # no worker finished inside a call), if any.
+                                     "gaveUp": [list(map(str, k)) for k in held.get("gaveUp", [])]})
     timer.cancel()
 
 
