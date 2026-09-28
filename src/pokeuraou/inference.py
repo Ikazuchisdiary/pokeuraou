@@ -994,11 +994,10 @@ def served_model(value: Any):
         instance = mine()
         # Through the process's gate (`EAGER_PASSES`, IKA-334): a pass holds its
         # activations on the card until its answer is back, and the card runs the passes
-        # one after another anyway. Waiting at the gate counts as `waited`.
-        with _EAGER_GATE:
-            entered = time.perf_counter()
-            out = instance.from_encoded(encoded)
-            done = time.perf_counter()
+        # one after another anyway. Waiting at the gate counts as `waited`. Out of memory,
+        # it runs again alone (`eager_pass`, IKA-377).
+        out, entered = eager_pass(lambda: instance.from_encoded(encoded))
+        done = time.perf_counter()
         # Kept for the same reason they were added: they are how anyone knows whether the
         # serving side is queueing. `waited` is finding this thread's copy and the wait at
         # the eager gate (IKA-334); the gate's wait replaces a wait the card imposed anyway.
@@ -1063,6 +1062,55 @@ EAGER_PASSES = int(os.environ.get("POKEURAOU_EAGER_PASSES", "2"))
 _EAGER_GATE = (
     threading.BoundedSemaphore(EAGER_PASSES) if EAGER_PASSES > 0 else contextlib.nullcontext()
 )
+#: Taken by a pass that ran out of memory, to run again with the whole gate (IKA-377).
+_ALONE = threading.Lock()
+#: Eager passes that ran out of memory and were run again alone: [retried, of them failed
+#: again]. For the server's report.
+EAGER_RETRIES = [0, 0]
+
+
+def eager_pass(run: Callable[[], Any]) -> tuple[Any, float]:
+    """`run()`, an eager forward pass, through the process's gate: (its answer, when it got
+    in). Every eager pass of the server goes here -- the value arms' blocks over
+    `GRAPH_ROWS` (`served_model`) and Q's passes the graphs do not take (`qrank.served_q`).
+
+    IKA-377. A pass that runs out of CUDA memory is run once more *alone*: it waits for the
+    whole gate (no other eager pass on the card), empties the allocator's cache and runs
+    again, and so does not fail the worker's request. The allocator has already freed its
+    cache and retried by then (`num_alloc_retries`); what it cannot do is wait for another
+    thread's pass to give its activations back. The second run is the same pass on the
+    same rows, so the same answer. If it fails again the error is the request's.
+    """
+    try:
+        with _EAGER_GATE:
+            entered = time.perf_counter()
+            return run(), entered
+    except Exception as error:
+        if not is_out_of_memory(error):
+            raise
+    import torch
+
+    with _ALONE:
+        gate = _EAGER_GATE
+        held = 0
+        try:
+            if isinstance(gate, threading.BoundedSemaphore):
+                for _ in range(EAGER_PASSES):
+                    gate.acquire()
+                    held += 1
+            EAGER_RETRIES[0] += 1
+            timing.count("server.eager.alone")
+            torch.cuda.empty_cache()
+            entered = time.perf_counter()
+            try:
+                return run(), entered
+            except Exception as error:
+                if is_out_of_memory(error):
+                    EAGER_RETRIES[1] += 1
+                raise
+        finally:
+            for _ in range(held):
+                gate.release()
 
 #: Graphs kept per arm (and index dtype), least recently replayed dropped first. Each holds
 #: about 0.65 MB of host memory on one net and 0.86 MB on a two-net ensemble (IKA-107: 511

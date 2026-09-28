@@ -781,6 +781,7 @@ def served_q(
     reparametrised, so the serving threads share it.
     """
     from . import qhead
+    from .inference import eager_pass
 
     graphs = QGraphs(net, device) if QGraphs.usable(device) else None
     batch_graphs = QBatchGraphs(net, device) if QBatchGraphs.usable(device) else None
@@ -792,8 +793,10 @@ def served_q(
         with timing.stage("server.qgraph"):
             out = graphs.matrix(arrays) if graphs is not None else None
         if out is None:
+            # Through the value arms' gate (IKA-377): a batch past the graphs' cells is
+            # 0.1-0.3 GB of activations, and nothing bounded how many ran at once.
             with timing.stage("server.qeager"):
-                out = qhead.q_matrix(net, arrays, device)
+                out, _entered = eager_pass(lambda: qhead.q_matrix(net, arrays, device))
         answer.held += time.perf_counter() - started
         answer.calls += 1
         return out
@@ -806,7 +809,7 @@ def served_q(
             out = batch_graphs.matrices(requests) if batch_graphs is not None else None
         if out is None:
             with timing.stage("server.qbatcheager"):
-                out = qhead.q_matrices(net, requests, device)
+                out, _entered = eager_pass(lambda: qhead.q_matrices(net, requests, device))
         answer.held += time.perf_counter() - started
         answer.calls += 1
         answer.batched += len(requests)
