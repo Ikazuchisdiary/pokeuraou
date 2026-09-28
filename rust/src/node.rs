@@ -912,6 +912,11 @@ fn answer<R: BufRead, W: Write>(
         }
         Ok(value) if value["kind"].as_str() == Some("qfeatures") => qfeatures(reg, &value),
         Ok(value) if value["kind"].as_str() == Some("many") => many(reg, &value),
+        // IKA-381: games solved here (HiGHS), and sub-games folded from their leaves' values
+        // and solved; only when a caller asks (`portlp.py`, off by default).
+        Ok(value) if value["kind"].as_str() == Some("lp") => crate::lp::lp_command(&value),
+        Ok(value) if value["kind"].as_str() == Some("folds") => crate::lp::folds_command(&value),
+        Ok(value) if value["kind"].as_str() == Some("lpCounts") => crate::lp::report(),
         // The cell threads' own account (IKA-32): how many, and how much ran on them.
         Ok(value) if value["kind"].as_str() == Some("parallel") => crate::par::report(),
         Ok(value) if value["kind"].as_str() == Some("fills") => {

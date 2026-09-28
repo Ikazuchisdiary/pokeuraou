@@ -325,9 +325,14 @@ def solve(payoff: np.ndarray, eps: float = 1e-9) -> Equilibrium:
         m * n, lambda: _maximin(a), lambda: _maximin(-a.T)
     )
     value_col = -value_col_neg
+    return assemble(a, value_row, value_col, _clean(x_raw, eps), _clean(y_raw, eps))
 
-    x = _clean(x_raw, eps)
-    y = _clean(y_raw, eps)
+
+def assemble(
+    a: np.ndarray, value_row: float, value_col: float, x: np.ndarray, y: np.ndarray
+) -> Equilibrium:
+    """`solve`'s answer from its two LPs' values and cleaned strategies (IKA-381: the port
+    solves them, `portlp`, and this builds the rest here, as `solve` does)."""
     value = 0.5 * (value_row + value_col)
 
     row_ev = a @ y

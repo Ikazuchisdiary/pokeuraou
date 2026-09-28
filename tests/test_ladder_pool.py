@@ -22,7 +22,7 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from pokeuraou import humanplay, ladder
+from pokeuraou import humanplay, ladder, portlp
 from pokeuraou.budget import Budget
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.hidden import completions
@@ -181,6 +181,41 @@ def test_a_sub_game_filled_once_reads_as_every_one_filled(roster, pool, monkeypa
     node, how, side = nodes[0]
     again = _read(reg, node, how, side=side, workers=True)
     assert again.pool["keptSubgames"] > 0
+
+
+def test_the_ports_lps_read_as_pythons(roster, pool) -> None:  # noqa: ANN001
+    """IKA-381 (`portlp`): a read whose sub-games are solved in the port (HiGHS in Rust, one
+    crossing a call) is the read that solves them with scipy, to the bit -- every rung, the
+    counted work and the notes -- in this process and on the workers, on open roots (depth 2
+    and 3, the knock-out fork) and on Bayesian roots. hp-share has no forward pass to share,
+    so its sub-games reach the port whole (`folds` with the matrix). The positive control:
+    LPs the ports solved, here and on the workers."""
+    reg = roster.reg
+    stages = "d2r2b3n3+d2r3b3n4+d2r4ban4x+d3r2ban4/r2ban4"
+    nodes = [(_node(reg, pos, 6), stages, 0) for pos in _played(roster)[:3]]
+    sheet = list(roster.sets)[:6]
+    for pos in _played(roster)[:3]:
+        spreads = {s: completions(reg, pos, s, sheet, seen=frozenset({0, 1})) for s in (0, 1)}
+        if len(spreads[1]) >= 2:
+            nodes += [(_node(reg, pos, 5, spreads, side), "d2r2b3n4+d2r3ban4x", side)
+                      for side in (0, 1)]
+    assert len(nodes) >= 5
+    solved = {"here": 0, "pool": 0}
+    try:
+        for node, how, side in nodes:
+            portlp.set_on(False)
+            plain = _read(reg, node, how, side=side, workers=False)
+            assert plain.rungs and plain.here["portLps"] == 0
+            portlp.set_on(True)
+            serial = _read(reg, node, how, side=side, workers=False)
+            pooled = _read(reg, node, how, side=side, workers=True)
+            _same(serial, plain)
+            _same(pooled, plain)
+            solved["here"] += serial.here["portLps"]
+            solved["pool"] += pooled.pool["portLps"]
+    finally:
+        portlp.set_on(False)
+    assert solved["here"] > 0 and solved["pool"] > 0, solved
 
 
 def test_a_sub_game_another_worker_fills_is_taken_or_filled_again(roster, monkeypatch) -> None:  # noqa: ANN001
