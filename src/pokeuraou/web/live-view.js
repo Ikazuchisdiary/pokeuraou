@@ -190,8 +190,30 @@ function onEvent(e) {
       break;
     case "answer":
       S.pondering = false;
-      if (!S.analysis) setStatus(`AI は手を決めました（${e.seconds.toFixed(1)} 秒）`, "turn");
+      if (!S.analysis) {
+        if (e.memoryStop) {
+          // IKA-355: the memory watch stopped this move's reading; it played what it had.
+          setStatus(`AI は手を決めました（${e.seconds.toFixed(1)} 秒・メモリが少ないので読みを止めました）`, "warn",
+            `メモリが少ないので読みを止めました`);
+          const budget = S.sheets && S.sheets.seconds ? `持ち時間 ${S.sheets.seconds} 秒のうち ` : "";
+          log(e.turn, `メモリが少ないので、この手の読みを止めました（${budget}${e.seconds.toFixed(1)} 秒）` +
+            (typeof e.memoryStop === "string" ? `: ${esc(e.memoryStop)}` : ""), "err");
+        } else {
+          setStatus(`AI は手を決めました（${e.seconds.toFixed(1)} 秒）`, "turn");
+        }
+      }
       renderClock(e.seconds * 1000, true);
+      break;
+    case "memory":
+      // IKA-355: the memory watch's state. Low from other work: the AI reads on.
+      if (e.state === "stop") {
+        log(null, `メモリが少ないので読みを止めます: ${esc(e.why)}`, "err");
+        toast(`メモリが少ないので読みを止めます: ${e.why}`);
+      } else if (e.state === "low") {
+        log(null, `ほかの処理でメモリの空きが少なくなっています。AI は読みを続けます（空きが ${e.hardFreeGb} GB を切ったら止めます）: ${esc(e.why)}`, "warn");
+      } else {
+        log(null, "メモリの空きが戻りました", "dim");
+      }
       break;
     case "prompt":
       S.prompt = e; S.chosen = []; S.mega = -1; S.answered = false; renderInput(); applyHide();

@@ -79,6 +79,7 @@ from __future__ import annotations
 import json
 import math
 import sys
+import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
@@ -271,6 +272,10 @@ class HaltingCost:
     def __init__(self, inner: Any, stop: Any, cells: int) -> None:  # noqa: ANN401
         self.inner = inner
         self.stop = stop
+        # A `MemoryBrake` measures this move's growth from here (IKA-355).
+        begin = getattr(stop, "begin", None)
+        if begin is not None:
+            begin()
         self.cell = inner.cell
         #: What the loop reads once stopped: past its budget of ``cells``.
         self.full = float(cells + 1) * inner.cell
@@ -300,6 +305,22 @@ class HaltingCost:
         if inner is None or name.startswith("__"):
             raise AttributeError(name)
         return getattr(inner, name)
+
+
+class MemoryBrake(threading.Event):
+    """The memory watch's brake on a person's game (IKA-355): an `Event` the watch sets
+    and clears, which also hears when a move starts deepening (`HaltingCost`), so the watch
+    can tell this move's growth from other work's (``on_begin``), and keeps the watch's
+    words for the stop (``why``, the page's)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.on_begin: Any = None  # noqa: ANN401
+        self.why = ""
+
+    def begin(self) -> None:
+        if self.on_begin is not None:
+            self.on_begin()
 
 
 class PonderCost:
@@ -1157,7 +1178,8 @@ class Agent:
     oracle: int | None = None
     #: A `threading.Event` the memory watch sets near a limit (IKA-343): while it is set, a
     #: move stops deepening at its next step (`HaltingCost`) and plays the answer it has.
-    #: None: no brake. Unset, it changes no move.
+    #: None: no brake. Unset, it changes no move. A `MemoryBrake` also hears each move's
+    #: start of deepening, so the watch measures that move's growth (IKA-355).
     halt: Any = None  # noqa: ANN401
     #: Read narrow first and widen with what is left (IKA-354), or None: width first, the
     #: rest to deepening, as before. ``(share, at)``: the first width is the one the width
@@ -1919,8 +1941,11 @@ class HumanGame:
         mine = ours if me == 0 else theirs
         index = _sample_index(self.rng, strategy)
         took = time.perf_counter() - started
+        braked = isinstance(cost, HaltingCost) and cost.stopped
         if self.listener is not None:
             self.emit("answer", {
+                # IKA-355: the page says the memory stopped this move's reading, and why.
+                **({"memoryStop": getattr(agent.halt, "why", "") or True} if braked else {}),
                 "decision": len(self.record.decisions), "turn": pos.turn,
                 "actions": list(mine), "strategy": strategy, "value0": value,
                 "seconds": took, "deepened": deepened,
@@ -1980,7 +2005,7 @@ class HumanGame:
             # board hands the other side's `PonderCost` (IKA-333).
             **({"spentUnits": round(tally.last, 3)} if tally is not None else {}),
             **({"deepened": report} if report is not None else {}),
-            **({"memoryStop": True} if isinstance(cost, HaltingCost) and cost.stopped else {}),
+            **({"memoryStop": True} if braked else {}),
             **({"ponderHeld": pondering.held, "ponderCapped": pondering.capped}
                if pondering is not None else {}),
         })
