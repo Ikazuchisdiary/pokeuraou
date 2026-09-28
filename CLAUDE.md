@@ -8,7 +8,9 @@ Pokémon Champions（VGC 2026 Reg M-C）のダブルバトル検討ソルバ。�
 ## コマンド
 
 ```bash
-# 初回（vendor の Showdown、sim-bridge、Rust の port、Python）
+# 初回（vendor の Showdown・HiGHS、sim-bridge、Rust の port、Python）
+# port の build は vendor/HiGHS（1.12.0、scipy と同じ commit）を cmake で作る。cmake と C++ の compiler が要る
+# （Windows は MinGW-Builds 14.2.0 の g++ を ~/.cargo/config.toml の CXX_x86_64_pc_windows_gnu で指す。rust/README.md）
 git submodule update --init
 cd vendor/pokemon-showdown && npm ci && node build decl && cd -
 npm install && npm run build                       # packages/sim-bridge/dist（オラクル。テストが使う）
