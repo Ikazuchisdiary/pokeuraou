@@ -241,15 +241,19 @@ def test_a_read_stopped_and_begun_again_with_its_cells(roster, pool, monkeypatch
 
 
 def test_the_tail_reads_the_next_stage_ahead_on_the_wall_clock(roster, pool, monkeypatch) -> None:  # noqa: ANN001
-    """IKA-370: on the wall clock a stage's tail reads the next stage's likely cells, and a
-    stage takes those it asks for. No value moves (hp-share answers a cell alike in any
-    chunk) and only the cells taken are counted: every stage, value, strategy and counted
-    work is the serial read's. The positive control: stages took cells read ahead."""
+    """IKA-370, IKA-374: on the wall clock a stage's tail reads the likely cells of its
+    oracle pass and of the next stage, in chunks, and a stage takes those it asks for --
+    back, or still out (waited for), a chunk's cells it did not ask kept for a later stage.
+    No value moves (hp-share answers a cell alike in any chunk) and only the cells taken
+    are counted, cell by cell: every stage, value, strategy and counted work is the serial
+    read's. With `TAIL` the last chunks are cut small. The positive controls: stages took
+    cells read ahead, some from a chunk they took only a part of."""
     reg = roster.reg
-    monkeypatch.setattr(ladder, "SPECULATE", True)
-    stages = "d2r2b3n4+d2r3b3n4+d2r4ban4x+d3r2ban4/r2ban4"
-    used = 0
-    for pos in _played(roster)[:3]:
+    monkeypatch.setattr(ladder, "AHEAD", True)
+    stages = "d2r2b3n4+d2r3b3n4+d2r4ban4x+d2r5ban4x+d3r2ban4/r2ban4"
+    used = partial = 0
+    for tail, pos in [(tail, pos) for tail in (False, True) for pos in _played(roster)[:3]]:
+        monkeypatch.setattr(ladder, "TAIL", tail)
         node = _node(reg, pos, 6)
         walled = _read(reg, node, stages, workers=True, clock="wall")
         serial = _read(reg, node, stages, workers=False)
@@ -261,8 +265,38 @@ def test_the_tail_reads_the_next_stage_ahead_on_the_wall_clock(roster, pool, mon
             np.testing.assert_array_equal(x.strategy, y.strategy)
         assert walled.work == serial.work and walled.unmodelled == serial.unmodelled
         used += walled.pool["specUsed"]
+        partial += walled.pool["specPartial"]
         assert walled.pool["specCells"] >= walled.pool["specUsed"]
     assert used > 0, "no stage took a cell read ahead"
+    assert partial > 0, "no stage took a part of a chunk read ahead"
+
+
+def test_a_worker_reads_a_stage_chunk_before_one_read_ahead() -> None:
+    """IKA-374: the worker's order (`ladder._next_message`): the first sent, but a stage's
+    chunk before a chunk read ahead sent before it; nothing passes a read's context or the
+    end."""
+    cells, ahead, read = ("cells",), ("ahead",), ("read",)
+    assert ladder._next_message([cells, ahead]) == 0
+    assert ladder._next_message([ahead, ahead, cells]) == 2
+    assert ladder._next_message([ahead, read, cells]) == 0
+    assert ladder._next_message([read, cells]) == 0
+    assert ladder._next_message([ahead, None]) == 0
+    assert ladder._next_message([None, cells]) == 0
+
+
+def test_the_tail_is_cut_small() -> None:
+    """IKA-374: `TAIL`'s chunks -- never more than a worker's share of the cells left, so the
+    last are single; without it the stage's even chunks, as before."""
+    pool = ladder._Pool([], [object()] * 4, None)
+    keys = list(range(50))
+    even = pool.split(keys)
+    size = pool.chunk(50)
+    assert even == [keys[at:at + size] for at in range(0, 50, size)]
+    cut = pool.split(keys, shrink=True)
+    assert [k for c in cut for k in c] == keys
+    sizes = [len(c) for c in cut]
+    assert sizes == sorted(sizes, reverse=True) and sizes[0] == size and sizes[-3:] == [1] * 3
+    assert all(len(c) <= -(-(50 - sum(sizes[:n])) // 4) for n, c in enumerate(cut))
 
 
 def test_a_filled_budget_ends_at_the_budget(roster, pool, monkeypatch) -> None:  # noqa: ANN001

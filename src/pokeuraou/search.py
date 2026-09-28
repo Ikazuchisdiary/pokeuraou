@@ -1249,8 +1249,16 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
         WORK["turns"] += len(cells)
         WORK["subgames"] += len(to_fill)
         WORK["cells"] += sum(len(row) * len(col) for _sub, _pos, row, col in to_fill)
-        WORK["qs"] += (0 if child_q is None else sum(1 for size in q_groups if size)
-                       if q_groups is not None else 1 if kept_positions else 0)
+        qs = (0 if child_q is None else sum(1 for size in q_groups if size)
+              if q_groups is not None else 1 if kept_positions else 0)
+        WORK["qs"] += qs
+        if WORK_CELLS is not None:
+            # IKA-374: the same work, cell by cell (the Q's passes on the first cell).
+            sizes = {id(sub): len(row) * len(col) for sub, _pos, row, col in to_fill}
+            for n, cell in enumerate(work):
+                filled = [sizes[id(sub)] for sub in cell.subs if id(sub) in sizes]
+                WORK_CELLS.append({"turns": 1, "subgames": len(filled), "cells": sum(filled),
+                                   "qs": 0 if n else qs, "reads": 0})
 
     # 4. The sub-games' nodes, a crossing per `FILL_BATCH`, scored as the rows gather.
     with timing.region("d2.fills"):
@@ -1288,6 +1296,10 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
 #: ``turns``, ``subgames``, ``cells``, ``qs``): what `ladder`'s count clock charges
 #: (IKA-367). None: nothing counted, and nothing else changes either way.
 WORK: dict[str, int] | None = None
+
+#: IKA-374: with `WORK` counted, the same work cell by cell, appended here when it is a list
+#: (`ladder`'s reads ahead take some cells of a chunk and not others). None: not kept.
+WORK_CELLS: list[dict[str, int]] | None = None
 
 #: ``1`` asks the Q one child at a time in a depth-2 read (`_refine_cells`), for checking
 #: that the one forward pass per read changes no menu (IKA-362).
