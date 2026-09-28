@@ -112,6 +112,8 @@ jobs:
       - name: the oracle has to exist before anything claims it was tested
         run: test -f packages/sim-bridge/dist/cli/oracle.js
 
+      # IKA-381: the build also builds vendor/HiGHS (the submodule above) with cmake and g++,
+      # both on the runner; the first build is a minute longer and rust-cache keeps it.
       - name: build the Rust node
         run: cargo build --release --manifest-path rust/Cargo.toml
       # The port's own unit tests (rust/src/moves_unit_tests.rs), which took over what
