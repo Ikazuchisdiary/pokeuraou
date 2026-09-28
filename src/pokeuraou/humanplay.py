@@ -645,10 +645,88 @@ def load_leaf(
     return leaf, encoder, device
 
 
+def inference_address(given: str | None = None) -> str | None:
+    """The machine's inference server to send the reading's requests to (IKA-363), or None.
+
+    ``given`` (a tool's ``--inference``) or else `inference.ENV_SERVER`
+    (``POKEURAOU_INFERENCE=host:port``); ``local`` or empty means none. A server that is
+    named and does not answer stops the tool: a read that quietly fell back to a CUDA
+    context of its own would be another memory budget than the one asked for.
+    """
+    import os
+    import socket
+
+    from .inference import ENV_SERVER
+
+    address = given if given is not None else os.environ.get(ENV_SERVER, "")
+    if not address or address == "local":
+        return None
+    host, _, port = address.rpartition(":")
+    try:
+        socket.create_connection((host, int(port)), timeout=5).close()
+    except (OSError, ValueError) as problem:
+        raise SystemExit(
+            f"no inference server answers at {address!r} ({problem}); start one "
+            f"(tools/inference_server.py) or pass --inference local to read here"
+        ) from None
+    return address
+
+
+def served_leaf(
+    reg: Regulation, address: str, values: Sequence[Path | str], *, merge: bool = False,
+    arm: str = "value", q_path: Path | None = None, q_arm: str = "q",
+) -> tuple[Any, Any]:
+    """The agent's leaf on the machine's inference server (IKA-363): a `RemoteValue` on arm
+    ``arm`` and its encoder, and the server's Q arm installed when ``q_path`` is given. This
+    process imports no torch and holds no CUDA context.
+
+    The server is asked what its arms are, and a server holding other files than
+    ``values`` / ``q_path`` stops the tool: the arm's name is what this process was told,
+    not what the server loaded.
+    """
+    from . import qrank
+    from .encode import Encoder
+    from .inference import RemoteValue
+
+    encoder = Encoder(reg)
+    leaf = RemoteValue(address, arm, encoder, merge=merge)
+    wanted = [Path(v).name for v in values]
+    have = leaf.describe()
+    if sorted(have) != sorted(wanted):
+        leaf.close()
+        raise SystemExit(f"the inference server's arm {arm!r} holds {have}, not {wanted}")
+    if q_path is not None:
+        qrank.install(served_q(address, q_path, encoder, arm=q_arm))
+    return leaf, encoder
+
+
+def served_q(address: str, q_path: Path, encoder: Any, *, arm: str = "q") -> Any:  # noqa: ANN401
+    """The server's Q arm ``arm`` as a `qrank.RemoteQ` (IKA-363), stopping when it holds
+    another file than ``q_path``."""
+    from . import qrank
+
+    q = qrank.RemoteQ(address, arm, encoder)
+    if [Path(f).name for f in q.describe()] != [Path(q_path).name]:
+        raise SystemExit(
+            f"the inference server's Q arm {arm!r} holds {q.describe()}, not {Path(q_path).name}"
+        )
+    return q
+
+
+def served_process_leaf(reg: Regulation, address: str, arm: str, merge: bool) -> Any:  # noqa: ANN401
+    """`process_leaf` for a deepening worker process when the agent's leaf is served
+    (IKA-363): the same server arm, its own connection, no CUDA context."""
+    from .encode import Encoder
+    from .inference import RemoteValue
+
+    return RemoteValue(address, arm, Encoder(reg), merge=merge)
+
+
 def use_threads(
     threads: int,
     reg: Regulation | None = None,
     leaf: tuple[Any, ...] | None = None,
+    factory: Any = None,  # noqa: ANN401 - a module-level function, as `process_leaf`
 ) -> None:
     """Spread one move over `threads` cores (IKA-32): the port's cell pool (stage 1), the
     deepening's cells expanded ahead and a big game's two LPs at once (stage 2). With
@@ -657,7 +735,8 @@ def use_threads(
     expanded by ``threads - 1`` worker processes (at most `AHEAD_WORKERS_MAX`), each with
     its own leaf, port and GIL; without, by helper threads in this process. None of them
     changes a move -- only how long it takes -- so a game on the count clock is the same
-    game at any count; 1 turns them all off."""
+    game at any count; 1 turns them all off. ``factory`` builds a worker's leaf from
+    ``leaf`` in place of `process_leaf` (`served_process_leaf` for a served leaf)."""
     from . import deepen, equilibrium, rustnode
 
     if threads < 1:
@@ -667,7 +746,8 @@ def use_threads(
     if reg is not None:
         wanted = 0 if threads == 1 or leaf is None else min(threads - 1, AHEAD_WORKERS_MAX)
         if deepen.workers(reg) != wanted:
-            deepen.start_workers(reg, wanted, process_leaf, tuple(leaf or ()), port_threads=1)
+            deepen.start_workers(reg, wanted, factory or process_leaf, tuple(leaf or ()),
+                                 port_threads=1)
     # Without worker processes: two helper threads from four cores up, each with a port of
     # `threads` cell threads (the helpers' Python and the loop's LPs share one GIL, so more
     # helpers wait on it). With them, each worker also expands `AHEAD_DEEPER` cells a

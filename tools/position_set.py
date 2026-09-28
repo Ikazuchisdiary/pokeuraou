@@ -217,17 +217,24 @@ class _Kit:
         self.reg = pool.reg
         register_mega_stones(self.reg)
         values = args.value or [repo_root() / p for p in DEFAULT_VALUE]
-        humanplay.cap_cuda(args.cuda_memory_gb, args.device)
-        self.leaf, encoder, self.device = humanplay.load_leaf(
-            self.reg, [Path(v) for v in values], args.device,
-            # CUDA graphs as a person's game loads the leaf (IKA-367's timing), else off.
-            graphs=bool(getattr(args, "leaf_graphs", False)))
-        if str(self.device) == "cpu":
-            import torch
+        q_path = Path(args.q_model or repo_root() / DEFAULT_Q)
+        address = humanplay.inference_address(args.inference)
+        if address:
+            # IKA-363: the leaf and the Q on the machine's server; no CUDA context here.
+            self.leaf, encoder = humanplay.served_leaf(
+                self.reg, address, values, merge=args.merge == "on", q_path=q_path)
+            self.device = f"server {address}"
+        else:
+            humanplay.cap_cuda(args.cuda_memory_gb, args.device)
+            self.leaf, encoder, self.device = humanplay.load_leaf(
+                self.reg, [Path(v) for v in values], args.device,
+                # CUDA graphs as a person's game loads the leaf (IKA-367's timing), else off.
+                graphs=bool(getattr(args, "leaf_graphs", False)))
+            if str(self.device) == "cpu":
+                import torch
 
-            torch.set_num_threads(1)
-        qrank.install(qrank.LocalQ(Path(args.q_model or repo_root() / DEFAULT_Q), encoder,
-                                   device=self.device))
+                torch.set_num_threads(1)
+            qrank.install(qrank.LocalQ(q_path, encoder, device=self.device))
         humanplay.use_threads(1, self.reg, None)
         data = json.loads((Path(args.set) / "positions.json").read_bytes())
         self.positions = data["positions"]
@@ -1114,6 +1121,12 @@ def main(argv: list[str] | None = None) -> None:
         s.add_argument("--q-model", type=Path, default=None)
         s.add_argument("--device", default=None)
         s.add_argument("--cuda-memory-gb", type=float, default=0.8)
+        s.add_argument("--inference", default=None, metavar="HOST:PORT",
+                       help="the machine's inference server (IKA-363; arms value and q). "
+                       "Default: POKEURAOU_INFERENCE, else the leaf is loaded here")
+        s.add_argument("--merge", default="off", choices=("on", "off"),
+                       help="the server's merged road: the values move in the last places "
+                       "with the timing (off: the answers a local leaf gives)")
         if name == "reference3":
             s.add_argument("--name", required=True)
             s.add_argument("--base", required=True, help="the depth-2 reference it deepens")
