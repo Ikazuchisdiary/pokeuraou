@@ -1373,7 +1373,7 @@ fn volatile_handled(vid: &str) -> bool {
 // ---------------------------------------------------------------------------
 
 /// The actions one side chose, as the case fixture writes them.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum SlotAction {
     Move { slot: usize, move_id: Id, target: Option<i64>, mega: bool },
     Switch { slot: usize, party_index: usize, species: Id },

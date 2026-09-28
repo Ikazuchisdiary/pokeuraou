@@ -505,6 +505,7 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
             result.next_predicted_ms, result.next_left_ms = predicted, run.left_ms(work)
             looks_ahead = run.kind == "wall" and AHEAD and pool is not None
             tail = run.kind == "wall" and TAIL and pool is not None
+            affine = run.kind == "wall" and AFFINE and pool is not None
             if predicted > run.left_ms(work) and not (fills and run.left_ms(work) > 0):
                 result.stopped, result.unfinished = "budget", stage.label
                 break
@@ -552,7 +553,17 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
                     for task, wanted in spec_flying.items():
                         adopt[len(head)] = (task, wanted)
                         head.append(wanted)
-                if pool is None or stage.sub is not None:
+                homes: list[int | None] | None = None
+                if pool is not None and affine:
+                    # IKA-375: a root cell read again at this stage's kind goes to the worker
+                    # that read it last, whose port holds its children's turns (`MEMO`).
+                    split, homes = pool.split_home(
+                        keys, [asked[key] for key in keys],
+                        size=step if stage.sub is not None else None, shrink=tail,
+                        of=len(asked))
+                    chunks = head + split
+                    homes = [None] * len(head) + homes
+                elif pool is None or stage.sub is not None:
                     chunks = head + [keys[at:at + step] for at in range(0, len(keys), step)]
                 else:
                     chunks = head + pool.split(keys, shrink=tail, of=len(asked))
@@ -569,7 +580,7 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
                                     set(asked), pool, (x, ys), begins)
                              if looks_ahead else None)
                     reads = pool.cells(asks, stage, stage_budget, work, result.unmodelled,
-                                       adopt=adopt, ahead=ahead, tail=tail)
+                                       adopt=adopt, ahead=ahead, tail=tail, homes=homes)
                 try:
                     for index, got in reads:
                         if got is _TICK:
@@ -1201,6 +1212,30 @@ POOL_COUNTS: dict[str, int] = {"chunks": 0, "cells": 0, "reads": 0, "dropped": 0
 #: measuring where the workers wait; None (the default): nothing is kept.
 TRACE_DIR = os.environ.get("POKEURAOU_LADDER_TRACE") or None
 
+#: IKA-375: a worker's port keeps the turns it resolves for its encoded nodes and finds a
+#: cell it resolved before (`rustnode.memo_turns`, `rust/src/turn_memo.rs`). A root cell read
+#: again at a later stage's kind -- more branches, wider children's menus -- fills its
+#: children's sub-games again, and 40-49% of an 8 s read's sub-game cells were a turn
+#: resolved before in the same read. The same answers to the bit. ``POKEURAOU_LADDER_MEMO=0``
+#: turns it off.
+MEMO = os.environ.get("POKEURAOU_LADDER_MEMO", "1") != "0"
+
+#: IKA-375: a worker names each position to its port by number for the length of a chunk
+#: (`rustnode.hold_positions`, IKA-302's road that generation takes): a position crosses once
+#: a chunk, and a turn's branches go back to the port as the numbers it gave them, not as the
+#: JSON it wrote a moment before. The same requests' answers. ``POKEURAOU_LADDER_HOLD=0``
+#: sends every position whole, as before.
+HOLD = os.environ.get("POKEURAOU_LADDER_HOLD", "1") != "0"
+
+#: IKA-375: on the wall clock, a stage's cells are cut into chunks by the worker that read the
+#: same root cell last (its home), and a worker is given its own chunks first, then new cells,
+#: then (so none waits) another's -- so a root cell read again at a later stage's kind finds
+#: its children's turns in that worker's port (`MEMO`): a port's memo sees only its own
+#: worker's cells, and a stage's chunks went to whichever worker was free. The count clock
+#: cuts and hands out as before (its reads are the serial read to the bit).
+#: ``POKEURAOU_LADDER_AFFINE=0`` turns it off.
+AFFINE = os.environ.get("POKEURAOU_LADDER_AFFINE", "1") != "0"
+
 
 def _serial(asks: list[list], read_one: Callable[[list], list]) -> Any:  # noqa: ANN401 - a generator
     """The chunks read here, one after the other: ``(index, values)``, `_STOPPED` where a
@@ -1229,6 +1264,7 @@ def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  
     reg = load_regulation(format_id)
     register_mega_stones(reg)
     rustnode.set_port_threads(1)
+    rustnode.memo_turns(MEMO)
     try:
         leaf = factory(reg, *args)
     except Exception as error:  # noqa: BLE001 - said to the parent, which reads without it
@@ -1264,7 +1300,7 @@ def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  
         notes: set[str] = set()
         if cancel.is_set():
             # Sent before the reader stopped: not read.
-            conn.send(("stopped", task, None, [work], notes, (0.0, 0.0, 0, 0.0, 0.0, 0)))
+            conn.send(("stopped", task, None, [work], notes, (0.0, 0.0, 0, 0.0, 0.0, 0, 0, 0)))
             continue
         search.WORK = work
         # IKA-374: the work is said cell by cell: a stage may take a part of a chunk read
@@ -1275,6 +1311,11 @@ def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  
         cpu = time.process_time()
         served = _served(leaf)
         ported = tuple(rustnode.PORT_WAITED)
+        memo = tuple(rustnode.MEMO_COUNTS)
+        if HOLD:
+            # A chunk is the span its positions are not changed in place over: what the
+            # port held for the last one is forgotten ahead of this one's first request.
+            rustnode.hold_positions()
         try:
             got = _read_cells(reg, cells, row, col, items, leaf, stage, root_budget,
                               stage_budget, turns, clean, hidden_side, notes, cost, cancel)
@@ -1299,7 +1340,8 @@ def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  
         # to run and did not (the machine's other processes).
         took = (time.perf_counter() - clock, after[0] - served[0], after[1] - served[1],
                 time.process_time() - cpu, rustnode.PORT_WAITED[0] - ported[0],
-                rustnode.PORT_WAITED[1] - ported[1])
+                rustnode.PORT_WAITED[1] - ported[1], rustnode.MEMO_COUNTS[0] - memo[0],
+                rustnode.MEMO_COUNTS[1] - memo[1])
         conn.send((status, task, got, work, notes, took))
 
 
@@ -1347,6 +1389,8 @@ class _Pool:
         self._spec_out: dict[int, list[tuple]] = {}
         self._spec_ready: dict[tuple, tuple] = {}
         self._spec_flying: dict[tuple, int] = {}
+        #: IKA-375: this read's root cells' workers (`AFFINE`, `split_home`).
+        self._home: dict[tuple, int] = {}
         #: IKA-374: this read's timeline (`TRACE_DIR`), or None.
         self._trace: dict[str, Any] | None = None
         self._trace_sent: dict[int, tuple] = {}
@@ -1386,6 +1430,29 @@ class _Pool:
             at += step
         return chunks
 
+    def split_home(self, keys: list, cells: list, *, size: int | None, shrink: bool,
+                   of: int) -> tuple[list[list], list[int | None]]:
+        """IKA-375 (`AFFINE`): ``keys`` cut into chunks by the home of their cells (``cells``,
+        the (completion, ours, theirs) of each key; its home the worker that read that root
+        cell last this read), each home's in `split`'s size (``size``: this size), and the
+        cells without one after them, cut as `split` cuts (``shrink``). Returns the chunks
+        and each chunk's home (None: new cells)."""
+        by_home: dict[int | None, list] = {}
+        for key, cell in zip(keys, cells, strict=True):
+            by_home.setdefault(self._home.get(cell), []).append(key)
+        chunks: list[list] = []
+        homes: list[int | None] = []
+        step = size if size is not None else self.chunk(of)
+        for home, group in sorted(by_home.items(), key=lambda kv: (kv[0] is None, kv[0] or 0)):
+            if home is None:
+                cut = (self.split(group, shrink=shrink, of=of) if size is None
+                       else [group[at:at + size] for at in range(0, len(group), size)])
+            else:
+                cut = [group[at:at + step] for at in range(0, len(group), step)]
+            chunks += cut
+            homes += [home] * len(cut)
+        return chunks, homes
+
     def begin(self, row: Sequence[Any], col: Sequence[Any], items: Sequence[Any],
               budget: Budget, hidden_side: int, cost: LadderCost) -> None:
         plain = [Item(position=it.position, weight=float(getattr(it, "weight", 1.0)),
@@ -1397,6 +1464,8 @@ class _Pool:
         # buffer (8 KB on Windows) waits until the worker takes it, and an 8 s read began
         # 4.4 s late behind depth-3 and 4 cells read ahead for the read before it.
         self._context = ("read", list(row), list(col), plain, budget, hidden_side, cost)
+        #: IKA-375: each root cell's (completion, ours, theirs) worker, this read (`AFFINE`).
+        self._home = {}
         self._due = set(self._orphans)
         for i, conn in enumerate(self.conns):
             if i not in self._due:
@@ -1413,12 +1482,15 @@ class _Pool:
         #: cells sent, their workers' milliseconds, the cells a stage took from it and the
         #: cells it read for nothing (``specCells``, ``specMs``, ``specUsed``, ``specWasted``).
         #: IKA-374 (`AHEAD`): ``specChunks`` the chunks read ahead, ``specPartial`` the
-        #: chunks a stage took a part of (the rest kept).
+        #: chunks a stage took a part of (the rest kept). IKA-375 (`MEMO`): ``memoHits`` the
+        #: sub-game cells the workers' ports found in their memo of turns, ``memoMisses``
+        #: those they resolved.
         self.stats = {"chunks": 0, "waitMs": 0.0, "sendMs": 0.0, "recvMs": 0.0,
                       "workerMs": 0.0, "serverMs": 0.0, "serverTrips": 0, "supplyMs": 0.0,
                       "tailMs": 0.0, "betweenMs": 0.0, "cpuMs": 0.0, "portMs": 0.0,
                       "portReads": 0, "specCells": 0, "specMs": 0.0, "specUsed": 0,
-                      "specWasted": 0, "specChunks": 0, "specPartial": 0}
+                      "specWasted": 0, "specChunks": 0, "specPartial": 0, "memoHits": 0,
+                      "memoMisses": 0, "homeChunks": 0, "strayChunks": 0}
         self._last_end = time.perf_counter()
         self._trace = ({"t0": self._last_end, "workers": len(self.conns), "calls": [],
                         "chunks": [], "stages": []} if TRACE_DIR else None)
@@ -1493,7 +1565,7 @@ class _Pool:
     def cells(self, asks: list[list], stage: Stage, stage_budget: Budget,  # noqa: C901, PLR0912, PLR0915
               work: dict[str, int], notes: set[str], *,
               adopt: dict[int, tuple[int, list[tuple]]] | None = None, ahead: Any = None,
-              tail: bool = False) -> Any:  # noqa: ANN401 - a generator
+              tail: bool = False, homes: list[int | None] | None = None) -> Any:  # noqa: ANN401 - a generator
         """`_serial`'s answers from the workers: each chunk's values in the order asked,
         its counted work and notes added as it is taken; `_TICK` while waiting. Closed
         early (the reader stopped), the chunks still out are cancelled and thrown away.
@@ -1504,7 +1576,9 @@ class _Pool:
         stage_budget, key, cell)`` of one stage, or None -- sent to a worker with nothing
         out once this call's chunks are all sent, one at a time, and kept for `claim`.
         ``tail`` (IKA-374): the last chunks go only to a worker with nothing out, never
-        behind a chunk in hand."""
+        behind a chunk in hand. ``homes`` (IKA-375, `AFFINE`): each chunk's worker, or None --
+        a worker is sent the first chunk of its own, else the first without a home, else the
+        first left; without it, the chunks go in order."""
         from multiprocessing.connection import wait
 
         out = self._out
@@ -1515,7 +1589,20 @@ class _Pool:
         for index, (task, wanted) in (adopt or {}).items():
             adopted[task] = (index, wanted)
         to_send = [n for n in range(len(asks)) if n not in (adopt or {})]
-        at = taken = 0
+        taken = 0
+        home = self._home
+
+        def pick(i: int) -> int:
+            """The place in ``to_send`` of the chunk worker ``i`` is sent next."""
+            if homes is None:
+                return 0
+            loose = None
+            for n, index in enumerate(to_send):
+                if homes[index] == i:
+                    return n
+                if loose is None and homes[index] is None:
+                    loose = n
+            return 0 if loose is None else loose
         #: The workers' milliseconds and cells of the chunks back so far (`eta_ms`).
         self._got_ms, self._got_cells = 0.0, 0
         now = time.perf_counter()
@@ -1536,11 +1623,10 @@ class _Pool:
                     if len(out[i]) >= POOL_DEPTH:
                         break
                     clock = time.perf_counter()
-                    if at < len(to_send):
-                        if tail and out[i] and len(to_send) - at <= len(self.conns):
+                    if to_send:
+                        if tail and out[i] and len(to_send) <= len(self.conns):
                             break
-                        index = to_send[at]
-                        at += 1
+                        index = to_send.pop(pick(i))
                         self._tasks += 1
                         task = self._tasks
                         mine[task] = index
@@ -1548,6 +1634,11 @@ class _Pool:
                             self.stats["supplyMs"] += (clock - idle_since[i]) * 1000.0
                         self.conns[i].send(("cells", task, stage, stage_budget, asks[index]))
                         size = len(asks[index])
+                        for cell in asks[index]:
+                            home[cell] = i
+                        if homes is not None:
+                            self.stats["homeChunks"] += homes[index] == i
+                            self.stats["strayChunks"] += homes[index] is not None and homes[index] != i
                     elif ahead is not None and not out[i]:
                         got = ahead()
                         if got is None:
@@ -1564,6 +1655,8 @@ class _Pool:
                         self.conns[i].send(("ahead", task, got[0][0], got[0][1],
                                             [cell for _s, _b, _k, cell in got]))
                         size = len(keys)
+                        for _s, _b, _k, cell in got:
+                            home[cell] = i
                     else:
                         break
                     self.stats["sendMs"] += (time.perf_counter() - clock) * 1000.0
@@ -1595,7 +1688,9 @@ class _Pool:
                     status, task, values, done_work, done_notes, times = conn.recv()
                     back = time.perf_counter()
                     self.stats["recvMs"] += (back - clock) * 1000.0
-                    took, server_s, trips, cpu_s, port_s, port_reads = times
+                    took, server_s, trips, cpu_s, port_s, port_reads, memo_hits, memo_misses = times
+                    self.stats["memoHits"] += memo_hits
+                    self.stats["memoMisses"] += memo_misses
                     self.stats["workerMs"] += took * 1000.0
                     self.stats["serverMs"] += server_s * 1000.0
                     self.stats["serverTrips"] += trips
@@ -1647,7 +1742,7 @@ class _Pool:
             if trace is not None:
                 call["end"] = self._t(self._last_end)
                 call["taken"] = taken
-            if at == len(to_send):
+            if not to_send:
                 for since in idle_since:
                     self.stats["tailMs"] += max(0.0, self._last_end - since) * 1000.0
 
