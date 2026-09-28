@@ -1200,6 +1200,11 @@ class Agent:
     #: is predicted within the whole budget, and the depth-2 read gets what it leaves
     #: (IKA-366). Elsewhere the width rule's menus, as without it.
     root_all: bool = False
+    #: The width rule, then -- instead of the deepening -- a ladder of stages read coarse to
+    #: fine (`ladder.read`, IKA-367) within the whole budget on the agent's clock: a name in
+    #: `ladder.LADDERS` or stages joined by ``+``. The answer is the last stage completed.
+    #: None: off.
+    ladder: str | None = None
     #: Read on while the person chooses (IKA-344, `PonderCost`): the person is asked when
     #: the move starts, and the move deepens until they have chosen -- its budget first,
     #: `ponder_seconds` at most. False: the agent chooses first, then the person is asked.
@@ -1218,6 +1223,16 @@ class Agent:
                 )
         if self.root_all and not self.depth2_auto:
             raise ValueError("root_all widens depth2_auto's root; it needs depth2_auto (IKA-366)")
+        if self.ladder is not None:
+            from .ladder import LADDER_COSTS, parse_ladder
+
+            parse_ladder(self.ladder)
+            if self.depth2_auto or self.depth > 1 or self.width_only or self.ponder:
+                raise ValueError("a ladder is the move's whole reading after the width rule: "
+                                 "not with depth2_auto, depth, width_only or ponder (IKA-367)")
+            if self.clock == "count" and (self.form, self.cores) not in LADDER_COSTS:
+                raise ValueError(f"no ladder prices for {self.form!r} on {self.cores} core(s) "
+                                 f"(ladder.LADDER_COSTS: {sorted(LADDER_COSTS)})")
         if self.clock == "count" and not self.width_only and (self.form, self.cores) not in COSTS:
             raise ValueError(
                 f"the count clock spends the budget at measured prices, and there are none "
@@ -1270,6 +1285,8 @@ class SolvedMove:
     value: float
     deepened: Any  # deepen.Deepened or None
     unmodelled: set[str]
+    #: A ladder's reading (`ladder.LadderResult`, IKA-367), or None.
+    ladder: Any = None  # noqa: ANN401
 
 
 def solve_move(
@@ -1297,6 +1314,7 @@ def solve_move(
     depth: int = 1,
     refine: int | None = None,
     passes: int | None = None,
+    ladder: dict[str, Any] | None = None,
 ) -> SolvedMove:
     """Side ``me``'s answer on the menus ``ours`` (side 0's) x ``theirs`` (side 1's): the
     open game (`search`) when ``exact``, else its Bayesian game over the other side's
@@ -1305,8 +1323,17 @@ def solve_move(
     ``levels`` and ``discount`` are the depth guard and the depth discount (IKA-342);
     ``grow`` widens the root mid-read (`deepen.Grow`, IKA-354).
     What `HumanGame` asks at each move, and what the analysis mode asks with no budget
-    (IKA-337). Raises `EquilibriumError` as the solves do."""
+    (IKA-337). Raises `EquilibriumError` as the solves do.
+
+    ``ladder`` reads the depth-1 node's answer on, stage by stage (`ladder.read`, IKA-367):
+    its keyword arguments (``stages``, ``budget_ms``, ``clock``, ``cost``, ``start_ms``,
+    ``stop``, ``on_rung``). It goes with no deepening and no fixed depth."""
     you = 1 - me
+    if ladder is not None:
+        if cells or depth >= 2:
+            raise ValueError("a ladder is read on the depth-1 node alone (IKA-367)")
+        return _ladder_move(reg, pos, me, ours, theirs, spreads, leaf, budget=budget,
+                            exact=exact, how=ladder)
     # The deepening's children, when given (IKA-362); else `search`'s defaults.
     subs = {k: v for k, v in (("sub_limit", sub_limit), ("sub_branches", sub_branches),
                               ("refine", refine), ("passes", passes))
@@ -1362,6 +1389,60 @@ def solve_move(
         # Side 1 solved the negated transpose: its value back in side 0's units.
         value=float(got.value) if me == 0 else -float(got.value),
         deepened=got.deepened, unmodelled=set(got.unmodelled),
+    )
+
+
+def _ladder_move(  # noqa: PLR0913 - solve_move's, with the ladder's settings
+    reg: Regulation,
+    pos: Position,
+    me: int,
+    ours: list[SideAction],
+    theirs: list[SideAction],
+    spreads: dict[int, list] | None,
+    leaf: LeafEvaluator,
+    *,
+    budget: Budget,
+    exact: bool,
+    how: dict[str, Any],
+) -> SolvedMove:
+    """`solve_move` with a ladder (IKA-367): the depth-1 node (the open game's matrix or the
+    Bayesian node's), then `ladder.read` on it for side ``me``."""
+    from types import SimpleNamespace
+
+    from . import ladder as _ladder
+
+    you = 1 - me
+    if exact:
+        got = search(reg, pos, ours, theirs, leaf, budget=budget)
+        eq = got.equilibrium
+        built = [np.asarray(got.payoff, dtype=np.float64)]
+        weights = [1.0]
+        items: list[Any] = [_ladder.Item(pos)]
+        start = SimpleNamespace(
+            row_strategy=eq.row_strategy if me == 0 else eq.col_strategy,
+            col_strategies=[eq.col_strategy if me == 0 else eq.row_strategy],
+        )
+        notes = set(got.unmodelled)
+    else:
+        assert spreads is not None
+        answers = belief_solve(reg, pos, ours, theirs, spreads, {me: leaf, you: _not_asked},
+                               budget=budget, sides=(me,))
+        got = answers[me]
+        _row, _col, built, weights = got.node_payoff
+        items = list(spreads[you])
+        start = SimpleNamespace(row_strategy=got.strategy, col_strategies=list(got.replies))
+        notes = set(got.unmodelled)
+    matrices = [m if me == 0 else -np.asarray(m).T for m in built]
+    read = _ladder.read(reg, me, ours, theirs, items, matrices, weights, start, leaf,
+                        budget=budget, **how)
+    notes |= read.unmodelled
+    value = float(read.value) if me == 0 else -float(read.value)
+    model = (read.replies[0].tolist() if exact
+             else _averaged(read.replies, [item.weight for item in items]))
+    return SolvedMove(
+        strategy=np.asarray(read.strategy, dtype=np.float64), model=[float(v) for v in model],
+        ours=list(ours), theirs=list(theirs), value=value, deepened=None, unmodelled=notes,
+        ladder=read,
     )
 
 
@@ -1750,6 +1831,7 @@ class HumanGame:
         wide = (
             [agent.oracle]
             if agent.oracle is not None and plan.deepen_ms > 0 and not agent.depth2_auto
+            and agent.ladder is None
             else []
         )
         ours, theirs = _menus(
@@ -1777,7 +1859,20 @@ class HumanGame:
             )
         cells = 0
         cost: Any = None
-        if plan.deepen_ms > 0 and not agent.depth2_auto:
+        ladder = None
+        if agent.ladder is not None:
+            from .ladder import LADDER_COSTS, parse_ladder
+
+            # IKA-367: the whole budget on the agent's clock, the node's share spent first
+            # (its prediction on the count clock, the time so far on the wall clock).
+            ladder = {
+                "stages": parse_ladder(agent.ladder), "budget_ms": plan.budget_ms,
+                "clock": agent.clock, "cost": LADDER_COSTS.get((agent.form, agent.cores)),
+                "start_ms": (node_ms if agent.clock == "count"
+                             else (time.perf_counter() - started) * 1000.0),
+                **({"stop": agent.halt} if agent.halt is not None else {}),
+            }
+        elif plan.deepen_ms > 0 and not agent.depth2_auto:
             if agent.clock == "wall":
                 cost = WallCost(started)
                 cells = int(round(plan.budget_ms))
@@ -1810,7 +1905,8 @@ class HumanGame:
                 sub_limit=agent.sub_limit, sub_branches=agent.sub_branches,
                 restricted=agent.restricted, depth=2 if d2k is not None else agent.depth,
                 refine=agent.refine, passes=agent.passes,
-                outside=outside, progress=progress, grow=grow,
+                outside=outside, progress=progress if ladder is None else None, grow=grow,
+                ladder=ladder,
             )
         except EquilibriumError:
             return None
@@ -1874,6 +1970,7 @@ class HumanGame:
             "deepenBudget": cells,
             **({"depth2Children": d2k} if agent.depth2_auto else {}),
             **({"rootAll": True} if root_all else {}),
+            **({"ladder": solved.ladder.to_json()} if solved.ladder is not None else {}),
             # The read's value in side 0's units (IKA-366: the turns' share of a result).
             "value0": round(float(value), 5),
             **({"widenTo": later, "widened": grow is not None and grow.done}

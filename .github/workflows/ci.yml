@@ -144,13 +144,14 @@ jobs:
       # reason is a failure on its own. The numbers are measured, not guessed:
       #   standings  data/standings/*.json.gz, from a small community API that the tool's
       #              own docstring calls a manual one-off fetch. Not called on every push.
-      #   torch      twenty skips (twelve counted on the first full CI run, IKA-51; two more
+      #   torch      twenty-one skips (twelve counted on the first full CI run, IKA-51; two more
       #              from IKA-274's Q-net tests in tests/test_qhead.py, one from its local-
       #              against-served Q test in tests/test_q_rank.py, one from its graphed-Q
       #              test there, stage 3; one from IKA-307's batched Q pass in
       #              tests/test_deepen_guard.py; one from IKA-347's port-against-Python
       #              encoding in tests/test_encode_games_port.py; two from IKA-348's q_train
-      #              resume tests in tests/test_q_train_resume.py); the `learn` job below runs them with torch
+      #              resume tests in tests/test_q_train_resume.py; one from IKA-367's ladder with a learned
+      #              leaf in tests/test_ladder_leaf.py); the `learn` job below runs them with torch
       #              present and allows none of these.
       #   cuda       none here (the modules that need a card skip for torch first); the
       #              `learn` job has no card either and allows the six CUDA-graph tests
@@ -159,7 +160,7 @@ jobs:
         if: always()
         run: >
           uv run python tools/ci_skip_audit.py --junit reports/pytest.xml
-          --absent standings=9 --absent torch=20 --absent cuda=0
+          --absent standings=9 --absent torch=21 --absent cuda=0
 
       - uses: actions/upload-artifact@v4
         if: always()

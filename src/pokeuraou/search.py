@@ -1080,6 +1080,8 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
     sub_branches: int,
     shares: Sequence[TurnShare | None] | None = None,
     child_q: int | None = None,
+    q_groups: Sequence[int] | None = None,
+    stack: bool = False,
 ) -> list[tuple[float | None, set[str], int]]:
     """`_refined_value` of every cell, with all their sub-games' leaves in one call (IKA-291).
 
@@ -1102,6 +1104,13 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
     allows), both sides' damage scores for every branch in one (`narrow_many`), and the
     sub-games' nodes `FILL_BATCH` at a time (`port.pending_payoffs`). Each answer is the one
     its own crossing gave, and a refusal is raised or kept where `_refined_value` met it.
+
+    ``q_groups`` (IKA-367) splits the cells, in order, into groups whose children's menus
+    are asked of the Q one group at a time -- the forward passes the same cells would have
+    had in calls of those sizes, so a caller that gathers several such calls into one
+    gets the same menus to the bit (the Q's answer for a row moves with its batch).
+    ``stack`` scores the gathered sub-games in one forward pass (`port.score_stacked`)
+    instead of a pass each: not the same leaf to the last places, so only the ladder asks.
     """
     from .narrow import narrow_many
 
@@ -1113,7 +1122,8 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
         nonlocal held
         if waiting:
             with timing.region("d2.score"):
-                values = port.score_segments(evaluate, [p.encoded for p in waiting])
+                values = (port.score_stacked if stack else port.score_segments)(
+                    evaluate, [p.encoded for p in waiting])
             for pending, scores in zip(waiting, values, strict=True):
                 pending.scored(scores)
             waiting.clear()
@@ -1151,7 +1161,15 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
             from .deepen import _q_menus
 
             live = [pos for pos, side in asks if side == 0]
-            if os.environ.get(CHILD_Q_SERIAL_ENV) == "1":
+            if q_groups is not None:
+                by_q = []
+                at = 0
+                for size in q_groups:
+                    group = [pos for positions in kept_positions[at:at + size]
+                             for pos in positions if not pos.ended]
+                    by_q += _q_menus(reg, group, child_q) if group else []
+                    at += size
+            elif os.environ.get(CHILD_Q_SERIAL_ENV) == "1":
                 # One forward pass a child, for the check that batching changes nothing.
                 by_q = [m for pos in live for m in _q_menus(reg, [pos], child_q)]
             else:
@@ -1194,6 +1212,14 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
                     # `_refined_value` stops at this branch; the ones after it are not asked.
                     break
 
+    if WORK is not None:
+        # IKA-367: the work a count clock charges (`ladder`); nothing read back here.
+        WORK["turns"] += len(cells)
+        WORK["subgames"] += len(to_fill)
+        WORK["cells"] += sum(len(row) * len(col) for _sub, _pos, row, col in to_fill)
+        WORK["qs"] += (0 if child_q is None else sum(1 for size in q_groups if size)
+                       if q_groups is not None else 1 if kept_positions else 0)
+
     # 4. The sub-games' nodes, a crossing per `FILL_BATCH`, scored as the rows gather.
     with timing.region("d2.fills"):
         for chunk, links in _fill_chunks(to_fill, related):
@@ -1225,6 +1251,11 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
     with timing.region("d2.fold"):
         return [_fold_cell(cell) for cell in work]
 
+
+#: The depth-2 work `_refine_cells` has done, counted into this dict when it is one (keys
+#: ``turns``, ``subgames``, ``cells``, ``qs``): what `ladder`'s count clock charges
+#: (IKA-367). None: nothing counted, and nothing else changes either way.
+WORK: dict[str, int] | None = None
 
 #: ``1`` asks the Q one child at a time in a depth-2 read (`_refine_cells`), for checking
 #: that the one forward pass per read changes no menu (IKA-362).
