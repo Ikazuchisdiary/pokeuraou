@@ -80,6 +80,10 @@ _CHANGE = struct.Struct("<IIBBBI")
 #: A node's active (`progress.NodeMon`): name, sprite, HP %, flags (1 fainted, 2 came in,
 #: 4 empty slot).
 _FIELD = struct.Struct("<IIBB")
+#: A branch's flags: 1 ended, 2 has a node, 4 the node read further than sent, and 8
+#: (IKA-356) a branch of a record upgraded from before IKA-345 (`upgrade_record`): its text
+#: (``what``) only -- no draws, no changes, no field.
+BRANCH_TEXT_ONLY = 8
 
 #: A step's kind, by index on the wire; ``grow`` (the root widened mid-read, IKA-354) last
 #: so the older indices stay.
@@ -394,7 +398,8 @@ class Decoder:
             w, v, what, flags = struct.unpack_from("<ffIB", frame, at)
             at += struct.calcsize("<ffIB")
             got: dict[str, Any] = {"weight": w, "value": v, "what": s[what],
-                                   "ended": bool(flags & 1), "more": bool(flags & 4)}
+                                   "ended": bool(flags & 1), "more": bool(flags & 4),
+                                   "textOnly": bool(flags & BRANCH_TEXT_ONLY)}
             (nc,) = struct.unpack_from("<B", frame, at)
             at += 1
             causes = []
@@ -483,6 +488,163 @@ def read_record(path: Path) -> Iterator[tuple[float, bytes]]:
         at += 12
         yield seconds, data[at:at + size]
         at += size
+
+
+class _Upgrade:
+    """Reads a record kept before IKA-345 into today's frames (`upgrade_record`).
+
+    Before IKA-345 a step named an action by a string id (the label's whole text) and a
+    chance branch had only its text (``what``); the table of labels, the draws (causes), the
+    changes and the node's field did not exist. The upgrade keeps one table of strings of its
+    own (the old strings in their order, plus each label's parts where they are new), so
+    every string id in a step is mapped; each old label becomes a label of its parts split at
+    `SLOT_SEPARATOR` (two parts are active slots 0 and 1; otherwise no slot, so no icon), a
+    part's move its text and no target; each branch gets no causes, no changes and an empty
+    field, and the flag `BRANCH_TEXT_ONLY` so that the page shows its text instead."""
+
+    def __init__(self) -> None:
+        self.strings: list[str] = []
+        self.ids: dict[str, int] = {}
+        self.old: list[int] = []  # an old string id -> ours
+        self._new: list[str] = []
+        self.labels: dict[int, int] = {}  # an old string id (a label's text) -> a label id
+        self._new_labels: list[bytes] = []
+
+    def intern(self, text: str) -> int:
+        got = self.ids.get(text)
+        if got is None:
+            got = len(self.strings)
+            self.strings.append(text)
+            self.ids[text] = got
+            self._new.append(text)
+        return got
+
+    def old_strings(self, frame: bytes) -> list[bytes]:
+        first, count = struct.unpack_from("<IH", frame, 1)
+        if first != len(self.old):
+            raise ValueError(f"strings from {first}, the old table has {len(self.old)}")
+        at = 7
+        for _ in range(count):
+            (size,) = struct.unpack_from("<H", frame, at)
+            at += 2
+            self.old.append(self.intern(frame[at:at + size].decode("utf-8")))
+            at += size
+        return self._flush_strings()
+
+    def _flush_strings(self) -> list[bytes]:
+        if not self._new:
+            return []
+        first = len(self.strings) - len(self._new)
+        parts = [struct.pack("<BIH", STRINGS, first, len(self._new))]
+        for text in self._new:
+            raw = text.encode("utf-8")
+            parts.append(struct.pack("<H", len(raw)) + raw)
+        self._new = []
+        return [b"".join(parts)]
+
+    def label(self, sid: int) -> int:
+        got = self.labels.get(sid)
+        if got is None:
+            got = len(self.labels)
+            self.labels[sid] = got
+            texts = [t for t in self.strings[self.old[sid]].split(SLOT_SEPARATOR) if t] or [""]
+            slots = [0, 1] if len(texts) == 2 else [-1] * len(texts)
+            self._new_labels.append(struct.pack("<B", len(texts)) + b"".join(
+                _PART.pack(slot, self.intern(t), self.intern(t), -1, NONE, NONE, 0)
+                for slot, t in zip(slots, texts, strict=True)
+            ))
+        return got
+
+    def step(self, frame: bytes) -> list[bytes]:
+        out = [bytes([STEP]), frame[1:1 + _HEAD.size]]
+        head = _HEAD.unpack_from(frame, 1)
+        n_ours, n_theirs, n_classes = head[-3:]
+        at = 1 + _HEAD.size
+
+        def copy(size: int) -> None:
+            nonlocal at
+            out.append(frame[at:at + size])
+            at += size
+
+        def unpack(fmt: str) -> tuple[Any, ...]:
+            nonlocal at
+            got = struct.unpack_from(fmt, frame, at)
+            at += struct.calcsize(fmt)
+            return got
+
+        def labels(count: int) -> None:
+            nonlocal at
+            ids = np.frombuffer(frame, dtype="<u4", count=count, offset=at)
+            out.append(np.array([self.label(int(i)) for i in ids], dtype="<u4").tobytes())
+            at += 4 * count
+
+        def pairs() -> None:
+            (count,) = unpack("<B")
+            out.append(struct.pack("<B", count))
+            for _ in range(count):
+                o, t, klass, rd, p, v, nb = unpack("<IIhBffB")
+                out.append(struct.pack("<IIhBffB", self.label(o), self.label(t), klass, rd, p, v, nb))
+                for _ in range(nb):
+                    branch()
+
+        def top() -> None:
+            (count,) = unpack("<B")
+            out.append(struct.pack("<B", count))
+            for _ in range(count):
+                sid, p = unpack("<If")
+                out.append(struct.pack("<If", self.label(sid), p))
+
+        def branch() -> None:
+            w, v, what, flags = unpack("<ffIB")
+            out.append(struct.pack("<ffIB", w, v, self.old[what], flags | BRANCH_TEXT_ONLY))
+            out.append(b"\x00\x00\x00")  # no causes; no changes on either side
+            if flags & 2:
+                (value,) = unpack("<f")
+                out.append(struct.pack("<f", value) + b"\x00\x00")  # the field: none a side
+                top()
+                top()
+                pairs()
+
+        labels(n_ours)
+        copy(8 * n_ours + 4 * n_ours)
+        labels(n_theirs)
+        copy(4 * n_theirs + 4 * n_theirs)
+        for _ in range(n_classes):
+            weight, value, bench, ids = unpack("<ffII")
+            out.append(struct.pack("<ffII", weight, value, self.old[bench], self.old[ids]))
+            copy(4 * n_theirs)
+        pairs()
+        if at != len(frame):
+            raise ValueError(f"old step frame has {len(frame) - at} bytes left over")
+        frames = self._flush_strings()
+        if self._new_labels:
+            first = len(self.labels) - len(self._new_labels)
+            frames.append(struct.pack("<BIH", LABELS, first, len(self._new_labels))
+                          + b"".join(self._new_labels))
+            self._new_labels = []
+        return [*frames, b"".join(out)]
+
+
+def upgrade_record(frames: Sequence[tuple[float, bytes]]) -> tuple[list[tuple[float, bytes]], int]:
+    """A record's frames in today's form, and how many steps were upgraded (0: it already
+    was). A record is from before IKA-345 when a step comes before any table of labels (today's
+    `Wire` sends a step's labels before the step)."""
+    frames = list(frames)
+    kinds = [frame[0] for _seconds, frame in frames]
+    if STEP not in kinds or (LABELS in kinds and kinds.index(LABELS) < kinds.index(STEP)):
+        return frames, 0
+    up = _Upgrade()
+    out: list[tuple[float, bytes]] = []
+    steps = 0
+    for seconds, frame in frames:
+        if frame[0] == STRINGS:
+            out.extend((seconds, f) for f in up.old_strings(frame))
+        elif frame[0] == STEP:
+            out.extend((seconds, f) for f in up.step(frame))
+            steps += 1
+        else:
+            out.append((seconds, frame))
+    return out, steps
 
 
 # ----------------------------------------------------------------------------- the websocket
@@ -584,6 +746,11 @@ FILES = {
 }
 
 
+#: Events of which a page connecting late is sent only the newest (IKA-356): the analysis
+#: mode's catalogue is sent again after each read, with the reads.
+LATEST_ONLY = frozenset({"catalogue"})
+
+
 class LiveServer:
     """The page, the socket, and the game's frames for every page connected.
 
@@ -629,6 +796,8 @@ class LiveServer:
         self.clients: list[tuple[socket.socket, threading.Lock]] = []
         #: What a page connecting now is sent first: strings, events, the steps kept.
         self.history: list[bytes] = []
+        #: Where in `history` the event of each `LATEST_ONLY` kind is.
+        self._latest: dict[str, int] = {}
         self._current: list[bytes] = []
         server = self
 
@@ -699,12 +868,21 @@ class LiveServer:
             self._send(frames, keep="step", done=payload.kind == "done")
             return
         frames = self.wire.event(kind, payload)
-        self._send(frames, keep="event")
+        self._send(frames, keep="latest" if kind in LATEST_ONLY else "event", kind=kind)
 
-    def _send(self, frames: list[bytes], *, keep: str, done: bool = False) -> None:
+    def _send(self, frames: list[bytes], *, keep: str, done: bool = False, kind: str = "") -> None:
         with self.lock:
             for frame in frames:
-                if frame[0] in (STRINGS, LABELS) or keep == "event":
+                if keep == "latest":
+                    # One of its kind is kept, where the first one was: a page connecting
+                    # late reads the newest (the catalogue with the reads so far, IKA-356).
+                    at = self._latest.get(kind)
+                    if at is None:
+                        self._latest[kind] = len(self.history)
+                        self.history.append(frame)
+                    else:
+                        self.history[at] = frame
+                elif frame[0] in (STRINGS, LABELS) or keep == "event":
                     self.history.append(frame)
                 elif done:
                     # The decision's last step stays; the ones before it are dropped.
@@ -883,6 +1061,7 @@ __all__ = [
     "WebPerson",
     "Wire",
     "read_record",
+    "upgrade_record",
     "ws_connect",
     "ws_read",
     "ws_send_text",

@@ -450,8 +450,10 @@ def main(argv: list[str] | None = None) -> None:
     for n in range(args.games):
         index = args.game_index + n
         if server is not None:
-            # The page's end card says whether another game follows (IKA-349).
-            server.listener("session", {"game": n, "games": args.games, "gamesLeft": args.games - n - 1})
+            # The page's end card says whether another game follows (IKA-349); its links to
+            # the analysis page name the game by its index in the record (IKA-356).
+            server.listener("session", {"game": n, "games": args.games, "gamesLeft": args.games - n - 1,
+                                        "gameIndex": index})
         if args.human_team_file or args.agent_team_file:
             if not (args.human_team_file and args.agent_team_file):
                 raise SystemExit("give both --human-team-file and --agent-team-file")

@@ -146,7 +146,7 @@ function setStatus(text, cls, short) {
 }
 function log(turn, html, cls) {
   const li = document.createElement("li");
-  li.innerHTML = `<span class="t">${turn != null ? "T" + turn : "·"}</span><div class="${cls || ""}">${html}</div>`;
+  li.innerHTML = `<span class="t">${turn === "" ? "" : turn != null ? "T" + turn : "·"}</span><div class="${cls || ""}">${html}</div>`;
   $("log").prepend(li);
 }
 function toast(text) {
@@ -157,23 +157,42 @@ function toast(text) {
 function onEvent(e) {
   switch (e.type) {
     case "session":
-      S.gamesLeft = e.gamesLeft; S.ended = false; document.body.classList.remove("ended");
-      $("result").hidden = true; $("result").innerHTML = ""; updateLinks();
+      S.gamesLeft = e.gamesLeft; S.games = e.games; S.gameNo = e.game; S.gameIndex = e.gameIndex;
+      if (S.ended) {
+        // The next game starts at once (IKA-356): the last game's card stays over its board
+        // until the new game's first board, so that its result can be read and analysed (its
+        // button quieter: the selection is what to do now); the AI's reading of the last game
+        // is cleared, and the log marks where the last game ends.
+        const more = $("result").querySelector(".more");
+        if (more) more.textContent = `${e.game + 1} 局目（全 ${e.games} 局）が始まりました。選出を選んでください`;
+        const go = $("result").querySelector(".btnlink");
+        if (go) { go.classList.add("quiet"); go.textContent = `${e.game} 局目を分析する`; }
+        $("result").classList.add("between");
+        if (S.lastEnd) log("", `${e.game} 局目（${S.lastEnd.head}・${S.lastEnd.turns} ターン）`, "gamehead");
+        resetReading();
+      } else {
+        $("result").hidden = true; $("result").innerHTML = "";
+      }
+      S.ended = false; document.body.classList.remove("ended"); updateLinks();
       break;
     case "sheets":
       S.sheets = e; S.names = e.names; S.personSide = e.personSide; S.agentSide = e.agentSide;
       e.teams.forEach((team) => team.forEach(learn));
       renderSheets();
-      if (!e.analysis) log(null, `対局開始。AI は <b>${esc(e.agent)}</b>、1 手 ${e.seconds} 秒（${e.clock === "wall" ? "実時間" : "ノード時間"}・${e.cores} コア）`);
+      if (!e.analysis) log(null, `対局開始${S.games > 1 ? `（${S.gameNo + 1} / ${S.games} 局目）` : ""}。AI は <b>${esc(e.agent)}</b>、1 手 ${e.seconds} 秒（${e.clock === "wall" ? "実時間" : "ノード時間"}・${e.cores} コア）`, S.gameNo > 0 ? "newgame" : "");
       break;
     case "catalogue":
-      enterAnalysis(); S.catalogue = e; renderPicker(true); openFromUrl(); renderTimeline();
+      enterAnalysis(); S.catalogue = e; learnReads(e); renderPicker(true); openFromUrl(); renderTimeline();
       break;
     case "analysis":
       enterAnalysis(); onAnalysis(e);
       break;
     case "select":
-      S.select = e; S.picked = []; renderInput(); setStatus("選出を選んでください", "turn");
+      S.select = e; S.picked = []; renderInput(); setStatus(`${e.size} 体を選んでください`, "turn");
+      if ($("result").classList.contains("between")) {
+        const more = $("result").querySelector(".more");
+        if (more && S.games) more.textContent = `${S.gameNo + 1} 局目（全 ${S.games} 局）が始まりました。${e.size} 体を選んでください`;
+      }
       break;
     case "board":
       e.sides.forEach((sd) => [...sd.active, ...sd.bench].forEach(learn));
@@ -223,7 +242,7 @@ function onEvent(e) {
       S.sent = false;
       if (S.prompt) { S.prompt = null; S.answered = true; applyHide(); }
       renderInput();
-      log(e.turn, `<a class="alink" data-turn="${e.turn}" target="pokeuraou-analysis">分析</a><span class="ai-c">AI</span> <span class="logacts">${actHtml(e.agentParts || [[-1, e.agent]], boardWho(aiSide()))}</span><br><span class="you-c">あなた</span> <span class="logacts">${actHtml(e.personParts || [[-1, e.person]], boardWho(S.personSide))}</span>` +
+      log(e.turn, `<a class="alink" data-turn="${e.turn}"${S.gameIndex != null ? ` data-game="${S.gameIndex}"` : ""} target="pokeuraou-analysis">分析</a><span class="ai-c">AI</span> <span class="logacts">${actHtml(e.agentParts || [[-1, e.agent]], boardWho(aiSide()))}</span><br><span class="you-c">あなた</span> <span class="logacts">${actHtml(e.personParts || [[-1, e.person]], boardWho(S.personSide))}</span>` +
         (e.offMenu ? ` <span class="badge" title="あなたの手は AI の候補集合の外でした">候補集合の外</span>` : "") +
         ((e.changes || []).length ? `<br><span class="dim">${e.changes.map((c) =>
           `${esc(c.species)}${c.entered ? " 登場" : ""}${c.from !== c.to ? ` ${c.from}→${c.to}%` : ""}${c.fainted ? " ひんし" : ""}${c.status ? " " + esc(c.status) : ""}`).join("・")}</span>` : ""));
@@ -233,7 +252,7 @@ function onEvent(e) {
       const mine = e.outcome === null ? null : (e.outcome > 0.5) === (e.personSide === 0);
       const head = mine === null ? "打ち切り" : mine ? "あなたの勝ち" : "AI の勝ち";
       setStatus(`終局: ${head}`, "end");
-      const r = $("result"); r.hidden = false;
+      const r = $("result"); r.hidden = false; r.classList.remove("between");
       // Why the game ended, in words (selfplay/humanplay's end reasons).
       const why = e.reason === "turn-cap" ? "ターンの上限で打ち切り"
         : e.reason === "unresolved" ? "解決できない局面で打ち切り"
@@ -241,10 +260,14 @@ function onEvent(e) {
         : e.reason === "wipeout" || mine !== null ? (mine ? "AI の 4 体がひんし" : "あなたの 4 体がひんし")
         : e.reason ? esc(e.reason) : "";
       const more = S.gamesLeft > 0 ? "次の局を待っています" : "続けて打つには tools/play.py を起動し直してください";
-      r.innerHTML = `<div class="endcard"><b class="${mine === null ? "" : mine ? "you-c" : "ai-c"}">${head}</b><span>${e.turns} ターン${why ? "・" + why : ""}</span>
-        <a class="primary btnlink" href="${esc(withQuery(ANALYSIS_URL, { open: "last" }))}" target="pokeuraou-analysis">この対局を分析する</a>
-        <small>${more}</small></div>`;
+      const count = S.games > 1 ? `<small class="gameno">${S.gameNo + 1} / ${S.games} 局目</small>` : "";
+      r.innerHTML = `<div class="endcard">${count}<b class="${mine === null ? "" : mine ? "you-c" : "ai-c"}">${head}</b><span>${e.turns} ターン${why ? "・" + why : ""}</span>
+        <a class="primary btnlink" href="${esc(withQuery(ANALYSIS_URL, gameQuery({ open: "last" })))}" target="pokeuraou-analysis">この対局を分析する</a>
+        <small class="more">${more}</small></div>`;
       log(e.turns, `<b>終局: ${head}</b>`);
+      // This game's turns can be analysed from now on, also while the next game is played.
+      document.querySelectorAll("#log .alink:not([data-ended])").forEach((a) => { a.dataset.ended = "1"; });
+      S.lastEnd = { head, turns: e.turns };
       S.ended = true; document.body.classList.add("ended");
       S.prompt = null; S.select = null; S.answered = true; renderInput(); applyHide();
       break;
@@ -254,6 +277,7 @@ function onEvent(e) {
 }
 
 function onStep(s) {
+  document.body.classList.remove("noread");
   if (s.decision !== S.decision || !S.history.length) {
     S.decision = s.decision;
     S.history.push({ decision: s.decision, turn: s.turn, pts: [], done: false, width: S.analysisState && S.analysisState.width });
@@ -323,6 +347,7 @@ function renderBoard() {
   const b = S.board;
   if (!b) return;
   $("result").hidden = !b.ended || $("result").innerHTML === "";
+  if ($("result").hidden) $("result").classList.remove("between");
   const top = aiSide(), bottom = S.personSide;
   const draw = (i, where) => {
     const sd = b.sides[i], mine = i === b.viewer;
@@ -561,7 +586,9 @@ function fieldHtml(n) {
     return `<span class="fm${m.new ? " new" : ""}${m.fainted ? " ko" : ""}" title="${esc(tip)}">${art(m.name, "xs", tip)}<span class="hpb"><i class="${hpCls(m.percent) === "low" ? "b" : hpCls(m.percent) === "mid" ? "w" : ""}" style="width:${m.fainted ? 0 : m.percent}%"></i></span></span>`;
   }).join("")}</span>`;
   const names = S.analysis ? ["検討する側", "相手"] : ["AI", "あなた"];
-  return `<div class="nodefield">${row(n.field[0], "a", names[0])}${row(n.field[1], "y", names[1])}` +
+  // A record kept before IKA-345 has no field: the value alone.
+  const rows = n.field[0].length || n.field[1].length ? row(n.field[0], "a", names[0]) + row(n.field[1], "y", names[1]) : "";
+  return `<div class="nodefield">${rows}` +
     `<span class="val">次のターン 値 <span class="n">${v3(n.value)}</span>${n.more ? "・この先も読んだが省略" : ""}</span></div>`;
 }
 function topsHtml(n, who) {
@@ -571,15 +598,32 @@ function topsHtml(n, who) {
 }
 function branchHtml(b, key, parentValue, s, siblings) {
   const chance = siblings > 1;
+  // A record kept before IKA-345 has the branch's text only (no draws, no per-side changes).
+  const body = b.textOnly
+    ? `${b.ended ? '<span class="cause-row"><span class="cause end">決着</span></span>' : ""}<span class="res"><span class="old" title="IKA-345 より前の記録: 分岐の文だけが残っている">${esc(b.what)}</span></span>`
+    : `${causeHtml(b, siblings, b.ended)}
+    ${b.ended ? "" : resultHtml(b)}`;
   const head = `<span class="pp${chance ? " c" : ""} n">${pct(b.weight)}</span><span class="pvmain">
-    ${causeHtml(b, siblings, b.ended)}
-    ${b.ended ? "" : resultHtml(b)}
+    ${body}
     <span class="pvmeta"><span class="n">${v3(b.value)}</span> ${dlt(b.value - parentValue)}</span></span>`;
   if (!b.node) return `<div class="leaf">${head}</div>`;
   const n = b.node;
   const who = { a: fieldWho(n.field[0]), y: fieldWho(n.field[1]) };
   const inner = fieldHtml({ ...n, more: b.more }) + topsHtml(n, who) + n.pairs.map((p, i) => pairHtml(p, `${key}.${i}`, n.value, s, who)).join("");
   return `<details data-key="${key}"${S.open.has(key) ? " open" : ""}><summary>${head}</summary>${inner}</details>`;
+}
+// A new game (IKA-356, --games 2 or more): the AI's reading, its value chart and the PV's open
+// rows were the last game's.
+function resetReading() {
+  S.history = []; S.last = null; S.decision = -1; S.think = null;
+  S.order = { ours: { keys: [], at: 0 }, theirs: { keys: [], at: 0 } };
+  S.open = new Set(["p0"]);
+  for (const id of ["ours", "theirs", "classes", "pv", "strip", "counters", "plan"]) $(id).innerHTML = "";
+  $("balAi").textContent = "–"; $("balYou").textContent = "–"; $("balBar").style.width = "50%";
+  $("clocktext").textContent = "–"; $("clockbar").querySelector("i").style.width = "0";
+  $("pvSum").textContent = "確率の付いた木"; $("beliefSum").textContent = "–";
+  document.body.classList.add("noread");
+  drawChart();
 }
 function renderPv(s) {
   $("pv").innerHTML = s.pv.length
@@ -701,7 +745,8 @@ function renderInput() {
   }
   const p = S.prompt;
   if (!p) {
-    box.innerHTML = S.sent ? '<span class="note">送りました。ターンの結果を待っています</span>' : '<span class="note">AI の番を待っています</span>';
+    box.innerHTML = S.ended ? `<span class="note">${S.gamesLeft > 0 ? "次の局を待っています" : "対局は終わりました"}</span>`
+      : S.sent ? '<span class="note">送りました。ターンの結果を待っています</span>' : '<span class="note">AI の番を待っています</span>';
     return;
   }
   const nSlots = p.slots.length ? p.slots[0].length : 0;
@@ -783,10 +828,17 @@ function updateLinks() {
   }
   $("modeGame").removeAttribute("href");
   const [ok, why] = analysisOpen();
-  setLink($("modeAnalysis"), ok, withQuery(ANALYSIS_URL, { open: S.ended ? "last" : "current" }), ok && S.ended ? "この対局を分析する（別のタブ）" : why);
-  document.querySelectorAll("#log .alink").forEach((a) => setLink(a, S.ended, withQuery(ANALYSIS_URL, { open: "last", turn: a.dataset.turn }),
-    S.ended ? `ターン ${a.dataset.turn} を分析する` : "対局が終わると開けます"));
+  setLink($("modeAnalysis"), ok, withQuery(ANALYSIS_URL, S.ended ? gameQuery({ open: "last" }) : { open: "current" }), ok && S.ended ? "この対局を分析する（別のタブ）" : why);
+  // A turn's link opens its own game (IKA-356: with --games 2 or more, the last game in the
+  // record is not always the one the turn was played in).
+  document.querySelectorAll("#log .alink").forEach((a) => {
+    const done = !!a.dataset.ended;
+    const q = { open: "last", ...(a.dataset.game != null ? { game: a.dataset.game } : {}), turn: a.dataset.turn };
+    setLink(a, done, withQuery(ANALYSIS_URL, q), done ? `ターン ${a.dataset.turn} を分析する` : "対局が終わると開けます");
+  });
 }
+// The analysis page's query for the game being played: which game of the record it is.
+function gameQuery(q) { return S.gameIndex != null ? { ...q, game: S.gameIndex } : q; }
 
 // ------------------------------------------------------------------ sheets
 function renderSheets() {
@@ -868,6 +920,8 @@ function enterAnalysis() {
   $("balLabel").textContent = "形勢（検討する側から見た値）";
   $("input").innerHTML = "";
   setStatus("局面を選んでください");
+  $("sideBottom").innerHTML = `<div class="note">ターンを選んで「この局面を読む」と、その局面が出ます</div>`;
+  setRunning(false);
 }
 function fillSelect(el, options, keep) {
   const was = keep ? el.value : null;
@@ -932,17 +986,21 @@ $("aRefresh").onclick = () => LiveData.command({ cmd: "refresh" });
 // ?open=current (the game in progress, its move in hand) or ?open=last (the last game recorded,
 // after the list is read again), and &turn=T: the page picks it and reads it (IKA-349).
 let pendingOpen = null;
-try { const q = new URLSearchParams(location.search); if (q.get("open")) pendingOpen = { open: q.get("open"), turn: q.get("turn") }; } catch (_) { /* ignore */ }
+// &game=G (IKA-356) names the game by its index in the record (the last such game: an index
+// starts again at 0 each time the game page is started).
+try { const q = new URLSearchParams(location.search); if (q.get("open")) pendingOpen = { open: q.get("open"), turn: q.get("turn"), game: q.get("game") }; } catch (_) { /* ignore */ }
 function openFromUrl() {
   if (!pendingOpen || !S.catalogue) return;
   const p = pendingOpen, c = S.catalogue;
   if (p.open === "last" && !p.refreshed) { p.refreshed = true; LiveData.command({ cmd: "refresh" }); return; }
   pendingOpen = null;
   try { history.replaceState(null, "", location.pathname); } catch (_) { /* ignore */ }
-  const src = c.sources.find((s) => (p.open === "current" ? s.current : !s.current) && s.games.length);
+  const named = (s) => (p.game != null && p.open !== "current" ? s.games.map((g) => g.gameIndex).lastIndexOf(+p.game) : -1);
+  const src = c.sources.find((s) => !s.current && named(s) >= 0)
+    || c.sources.find((s) => (p.open === "current" ? s.current : !s.current) && s.games.length);
   if (!src) { setStatus(p.open === "current" ? "進行中の局はまだありません" : "記録に局がありません"); return; }
   $("aSource").value = String(src.id); renderPicker(true);
-  const gi = p.open === "current" ? 0 : src.games.length - 1;
+  const gi = p.open === "current" ? 0 : named(src) >= 0 ? named(src) : src.games.length - 1;
   $("aGame").value = String(src.games[gi].index); renderTurns(false);
   const g = pickedGame(), want = p.turn != null ? +p.turn : null;
   const d = want == null ? g.decisions[g.decisions.length - 1] : (g.decisions.find((x) => x.turn === want) || g.decisions[0]);
@@ -1017,7 +1075,16 @@ function onAnalysis(e) {
       `止めた T${e.turn}・${(e.steps || 0).toLocaleString("ja-JP")} ステップ`);
     $("aNote").textContent = e.why || "";
     renderNotes(e);
-    if (S.last && e.source != null) S.readValues.set(`${e.source}.${e.game}.${e.decision}`, e.side === 0 ? S.last.value : 1 - S.last.value);
+    // The read's value (side 0's), kept for the value over the game. A done event sent again to
+    // a page loaded late may be of an earlier position of the game in progress: only one whose
+    // turn is the listed decision's counts (the catalogue has the reads too, IKA-356).
+    if (e.source != null) {
+      const v0 = e.value0 != null ? e.value0 : S.last ? (e.side === 0 ? S.last.value : 1 - S.last.value) : null;
+      const d = catalogueDecision(e.source, e.game, e.decision);
+      if (v0 != null && (!d || d.turn === e.turn)) {
+        S.readValues.set(`${e.source}.${e.game}.${e.decision}`, { value0: v0, side: e.side, steps: e.steps, seconds: e.seconds, width: e.width });
+      }
+    }
     renderTimeline();
     log(e.turn, `${esc(e.stopText)}${e.why ? `: ${esc(e.why)}` : ""}。深化のステップ ${(e.steps || 0).toLocaleString("ja-JP")}・${(e.seconds || 0).toFixed(1)} 秒・深さの上限に当たった読み筋 ${e.guardLines}・木のノード ${(e.nodes || 0).toLocaleString("ja-JP")}`,
       e.stop === "memory" ? "err" : "");
@@ -1032,7 +1099,20 @@ function renderNotes(e) {
 }
 
 // ------------------------------------------------------------------ the analysis page (IKA-349)
+// The reads of each position (source.game.decision -> {value0, side, steps, seconds, width}). The
+// server keeps them and lists them in the catalogue (IKA-356), so a page loaded again has them.
 S.readValues = new Map();
+function learnReads(c) {
+  S.readValues = new Map();
+  c.sources.forEach((src) => src.games.forEach((g) => g.decisions.forEach((d) => {
+    if (d.read) S.readValues.set(`${src.id}.${g.index}.${d.index}`, d.read);
+  })));
+}
+function catalogueDecision(source, game, decision) {
+  const src = S.catalogue && S.catalogue.sources[source];
+  const g = src && src.games[game];
+  return g ? g.decisions.find((x) => x.index === decision) || null : null;
+}
 // The game's value over all its turns: the record's (grey, dashed across turns with none) and
 // the ones read on this page (the reading side's colour), from the reading side.
 function renderTimeline() {
@@ -1043,10 +1123,11 @@ function renderTimeline() {
   const cur = +$("aTurn").value;
   const d = g.decisions.find((x) => x.index === cur) || g.decisions[0];
   $("tTurn").textContent = `T${d.turn}`;
-  $("tLabel").textContent = `${g.label}・側 ${side} から`;
+  $("tLabel").textContent = `側 ${side} から読む`;
   const mine = (v0) => (v0 == null ? null : side === 0 ? v0 : 1 - v0);
   const rec = g.decisions.map((x) => mine(x.value));
-  const read = g.decisions.map((x) => { const v = S.readValues.get(`${src}.${gi}.${x.index}`); return v == null ? null : mine(v); });
+  const info = g.decisions.map((x) => S.readValues.get(`${src}.${gi}.${x.index}`) || null);
+  const read = info.map((r) => (r ? mine(r.value0) : null));
   const all = [...rec, ...read].filter((v) => v != null);
   let lo = Math.min(0.4, ...all), hi = Math.max(0.6, ...all);
   const pad = (hi - lo) * 0.1; lo = Math.max(0, lo - pad); hi = Math.min(1, hi + pad);
@@ -1065,7 +1146,9 @@ function renderTimeline() {
   idx.forEach((i) => { s += `<circle class="recpt" cx="${X(i)}" cy="${Y(rec[i])}" r="3"/>`; });
   const ridx = read.map((v, i) => (v == null ? -1 : i)).filter((i) => i >= 0);
   if (ridx.length > 1) s += `<polyline class="readl" points="${ridx.map((i) => `${X(i)},${Y(read[i])}`).join(" ")}"/>`;
-  ridx.forEach((i) => { s += `<circle class="readpt" cx="${X(i)}" cy="${Y(read[i])}" r="5"><title>T${g.decisions[i].turn} 読んだ値 ${read[i].toFixed(3)}</title></circle>`; });
+  const how = (r) => [r.width ? `幅 ${r.width}` : "", r.steps ? `深化のステップ ${r.steps.toLocaleString("ja-JP")}` : "",
+    r.seconds != null ? `${(+r.seconds).toFixed(1)} 秒` : ""].filter(Boolean).join("・");
+  ridx.forEach((i) => { s += `<circle class="readpt" cx="${X(i)}" cy="${Y(read[i])}" r="5"><title>T${g.decisions[i].turn} 読んだ値 ${read[i].toFixed(3)}${how(info[i]) ? `（${how(info[i])}）` : ""}</title></circle>`; });
   svg.setAttribute("viewBox", `0 0 ${W} ${Hh}`);
   svg.innerHTML = s;
   turns.innerHTML = g.decisions.map((x, i) => `<button type="button" data-i="${x.index}" aria-current="${x.index === d.index}"${read[i] != null ? ' class="read" title="読んだターン"' : ""}>T${x.turn}</button>`).join("");

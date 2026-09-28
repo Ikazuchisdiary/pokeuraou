@@ -155,6 +155,9 @@ class Game:
     side: int = 0
     information: str = "hidden-bench"
     note: str = ""
+    #: The record's ``gameIndex`` (play_human's game index), where it has one: the game page's
+    #: links name the game by it (IKA-356).
+    index: int | None = None
 
 
 def _roster(reg: Regulation, data: dict[str, Any]) -> Roster:
@@ -253,7 +256,9 @@ def game_from_record(
     if human:
         you = "勝ち" if outcome is not None and (outcome > 0.5) == (side == 0) else (
             "負け" if outcome is not None else "打ち切り")
-        label = f"局 {record.get('gameIndex', index)}: 人（側{side}）の{you}・{record.get('turns')} ターン"
+        # Counted from 1, as the game page counts its games (IKA-356).
+        number = int(record.get("gameIndex", index)) + 1
+        label = f"{number} 局目: あなた（側 {side}）の{you}・{record.get('turns')} ターン"
     else:
         result = "側0 の勝ち" if outcome == 1.0 else "側1 の勝ち" if outcome == 0.0 else "打ち切り"
         label = (
@@ -263,6 +268,7 @@ def game_from_record(
     return Game(
         label=label, points=_points(record), teams=teams, leads=_leads(record), side=side,
         information=str(record.get("information", "open")), note=note,
+        index=int(record["gameIndex"]) if record.get("gameIndex") is not None else None,
     )
 
 
@@ -1090,7 +1096,8 @@ class Analyzer:
             "sent": None if recorder is None else recorder.sent,
         })
         emit("analysis", {
-            **state, "state": "done", "stop": reason, "stopText": STOPS.get(reason, reason),
+            **state, "state": "done", "value0": result.value0,
+            "stop": reason, "stopText": STOPS.get(reason, reason),
             "why": session.why, "steps": session.steps, "seconds": seconds,
             "guardLines": session.guard_count, "nodes": session.nodes,
             # The page reads them in Japanese (IKA-349); `--out` keeps the port's own.
@@ -1160,6 +1167,52 @@ class Service:
         self.session: Session | None = None
         self.runs = 0
         self.results: list[Result] = []
+        #: The last read of each position (IKA-356), by `read_key`: the page's value over
+        #: the game shows it again after a reload, from the catalogue. Seeded from ``out``
+        #: (the answers of earlier runs) for the record sources.
+        self.reads: dict[tuple[str, str, int, int], dict[str, Any]] = {}
+        self._seed_reads()
+
+    @staticmethod
+    def read_key(source: Source, game: Game, point: Point) -> tuple[str, str, int, int]:
+        """A position read, as the reads are kept: the source's and the game's names, the
+        decision and its turn (the game in progress has one decision, a new one each move)."""
+        return (source.name, game.label, point.decision, point.turn)
+
+    @staticmethod
+    def read_summary(result: Result) -> dict[str, Any]:
+        """What the catalogue says of a read: its value (side 0's), the side it was read
+        from, and how long and wide it read."""
+        return {
+            "value0": result.value0, "side": result.side, "steps": result.steps,
+            "seconds": round(result.seconds, 1), "width": result.width, "guard": result.guard,
+            "stop": result.stop,
+        }
+
+    def _seed_reads(self) -> None:
+        """The reads ``out`` holds from earlier runs, for the record sources (a point file's
+        game is a different game in another run)."""
+        if self.out is None or not self.out.exists():
+            return
+        records = {s.name for s in self.sources if not s.current}
+        try:
+            lines = self.out.read_bytes().splitlines()
+        except OSError:
+            return
+        for raw in lines:
+            try:
+                row = json.loads(raw)
+                if row.get("source") not in records:
+                    continue
+                key = (str(row["source"]), str(row["game"]), int(row["decision"]), int(row["turn"]))
+                self.reads[key] = {
+                    "value0": float(row["value0"]), "side": int(row["side"]),
+                    "steps": int(row.get("steps", 0)), "seconds": round(float(row.get("seconds", 0.0)), 1),
+                    "width": int(row.get("width", 0)), "guard": int(row.get("guard", 0)),
+                    "stop": str(row.get("stop", "")),
+                }
+            except (ValueError, KeyError, TypeError):
+                continue
 
     # -- the page's side (the socket's thread)
     def command(self, message: dict[str, Any]) -> None:
@@ -1196,25 +1249,34 @@ class Service:
         return widen.request(int(message["width"]))
 
     # -- the loop's side
-    def catalogue(self) -> dict[str, Any]:
+    def catalogue(self, *, reload: bool = True) -> dict[str, Any]:
+        """The games the page can read, each decision with its record's value and this
+        service's last read of it (``read``, IKA-356). ``reload`` False lists the games as
+        last loaded (after a read: the reads changed, not the files)."""
         reg = self.analyzer.reg
         out = []
         for index, source in enumerate(self.sources):
-            try:
-                games = source.load(reg, self.pools)
-                problem = ""
-            except (OSError, ValueError, KeyError) as error:
-                games, problem = [], str(error)
+            problem = ""
+            if reload:
+                try:
+                    games = source.load(reg, self.pools)
+                except (OSError, ValueError, KeyError) as error:
+                    games, problem = [], str(error)
+            else:
+                games = source.games
             out.append({
                 "id": index, "name": source.name, "current": source.current, "problem": problem,
                 "games": [
                     {
                         "index": g, "label": game.label, "side": game.side,
+                        "gameIndex": game.index,
                         "open": game.teams is None or game.information == "open",
                         "note": game.note,
                         "decisions": [
                             {"index": k, "decision": p.decision, "turn": p.turn,
-                             "value": p.value}
+                             "value": p.value,
+                             **({"read": read} if (read := self.reads.get(
+                                 self.read_key(source, game, p))) is not None else {})}
                             for k, p in enumerate(game.points)
                         ],
                     }
@@ -1234,8 +1296,8 @@ class Service:
             },
         }
 
-    def publish_catalogue(self) -> None:
-        self.server.listener("catalogue", self.catalogue())
+    def publish_catalogue(self, *, reload: bool = True) -> None:
+        self.server.listener("catalogue", self.catalogue(reload=reload))
 
     def status(self, session: Session, reading: Reading, state: str) -> None:
         self.server.status(self.server.wire.status(
@@ -1297,6 +1359,9 @@ class Service:
             # A wider width asked for as the read ended: read it from the start.
             self.commands.put({**message, "width": left})
         self.results.append(result)
+        # The catalogue carries the read, so that a page loaded again shows it (IKA-356).
+        self.reads[self.read_key(source, game, point)] = self.read_summary(result)
+        self.publish_catalogue(reload=False)
         self.say(
             f"analysis {run}: {result.stop} after {result.steps} steps, {result.seconds:.1f} s, "
             f"value {result.value:.4f}, lines at the guard {result.guard_lines}, nodes {result.nodes}"

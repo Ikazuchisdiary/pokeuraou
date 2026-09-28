@@ -309,8 +309,7 @@ def test_the_page_starts_a_read_by_command_and_hears_it_end(pool, record) -> Non
 
 def test_a_ladder_read_gives_each_stage_and_ends_on_the_last(pool, record) -> None:  # noqa: ANN001
     """IKA-364: the analysis mode read by a ladder: each completed stage is sent as the
-    answer so far, the read ends when the last stage completes, and its answer is that
-    stage's -- the same as the ladder read on the same node (`solve_move`)."""
+    answer so far, and the read ends when the last stage completes, on that stage."""
     analyzer, game, point = _hidden_point(pool, record)
     stages = "d2r2b3n4+d2r3ban4"
     heard: list = []
@@ -321,3 +320,86 @@ def test_a_ladder_read_gives_each_stage_and_ends_on_the_last(pool, record) -> No
     assert got.stop == "exhausted" and got.steps == 2
     assert [r["stage"] for r in got.deepened["ladder"]["rungs"]] == rungs
     assert any("ladder read to d2r3ban4" in note for note in got.notes)
+
+
+def _history(server) -> list[dict]:  # noqa: ANN001
+    """What a page connecting now is sent (it reads until the server goes quiet)."""
+    host, port = server.address
+    sock = liveview.ws_connect(host, port)
+    sock.settimeout(1.0)
+    decoder = liveview.Decoder()
+    got = []
+    try:
+        while True:
+            _op, payload = liveview.ws_read(sock)
+            event = decoder.feed(payload)
+            if event is not None:
+                got.append(event)
+    except TimeoutError:
+        pass
+    finally:
+        sock.close()
+    return got
+
+
+def test_the_catalogue_keeps_the_reads_for_a_page_loaded_again(pool, record, tmp_path) -> None:  # noqa: ANN001
+    """IKA-356: a read's value is the service's to keep: the catalogue is sent again after
+    each read with it, a page loaded again is sent only that catalogue, and a service started
+    again on the same ``out`` lists the reads it holds (not the game in progress's)."""
+    analyzer = analysis.Analyzer(pool.reg, None, "hp-share", settings=_settings())
+    out = tmp_path / "analysis.jsonl"
+    service = None
+    server = liveview.LiveServer(on_command=lambda message: service.command(message)).start()
+    try:
+        service = analysis.Service(
+            analyzer, server, [analysis.Source("games", record)], max_steps=10, out=out,
+            limits=analysis.Limits(rss_gb=0, free_gb=0, gpu_gb=0), pools={pool.id: pool},
+        )
+        loop = threading.Thread(target=service.serve, daemon=True)
+        loop.start()
+        (first,) = [e for e in _history(server) if e["type"] == "catalogue"]
+        assert not any("read" in d for d in first["sources"][0]["games"][0]["decisions"])
+        for decision in (1, 2):
+            service.command({"cmd": "analyze", "source": 0, "game": 0, "decision": decision, "width": 6})
+            deadline = time.perf_counter() + 60
+            while len(service.results) < decision and time.perf_counter() < deadline:
+                time.sleep(0.05)
+        assert len(service.results) == 2
+        time.sleep(0.2)  # the catalogue goes out right after the result is kept
+        again = _history(server)
+        catalogues = [e for e in again if e["type"] == "catalogue"]
+        assert len(catalogues) == 1, "a page loaded again is sent the newest catalogue only"
+        decisions = catalogues[0]["sources"][0]["games"][0]["decisions"]
+        reads = {d["index"]: d["read"] for d in decisions if "read" in d}
+        assert sorted(reads) == [1, 2]
+        for d, result in zip((1, 2), service.results, strict=True):
+            assert reads[d]["value0"] == result.value0 and reads[d]["steps"] == 10
+            assert reads[d]["side"] == result.side and reads[d]["width"] == 6
+        # The done events say the value the page keeps (side 0's), not only the last step's.
+        done = [e for e in again if e["type"] == "analysis" and e.get("state") == "done"]
+        assert [e["value0"] for e in done] == [r.value0 for r in service.results]
+        service.command({"cmd": "quit"})
+        loop.join(timeout=30)
+    finally:
+        server.close()
+    # Started again on the same out: the reads are there before anything is read.
+    restarted = analysis.Service(
+        analyzer, None, [analysis.Source("games", record)], out=out,
+        pools={pool.id: pool},
+    )
+    decisions = restarted.catalogue()["sources"][0]["games"][0]["decisions"]
+    assert {d["index"]: d["read"]["value0"] for d in decisions if "read" in d} == {
+        1: service.results[0].value0, 2: service.results[1].value0,
+    }
+    # A point file's game is another game in another run: its reads are not listed again.
+    lines = [json.loads(raw) for raw in out.read_bytes().splitlines()]
+    moved = tmp_path / "moved.jsonl"
+    moved.write_bytes(b"".join(
+        (json.dumps({**row, "source": "進行中の局"}, ensure_ascii=False) + "\n").encode("utf-8")
+        for row in lines
+    ))
+    current = analysis.Service(
+        analyzer, None, [analysis.Source("進行中の局", tmp_path / "none.json", current=True)],
+        out=moved,
+    )
+    assert current.reads == {}
