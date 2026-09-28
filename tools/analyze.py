@@ -100,9 +100,10 @@ def main(argv: list[str] | None = None) -> None:
                     help="the machine's inference server to send the forward passes to (IKA-363; "
                     "its arms value and q must be the leaf's and the Q's files). Default: "
                     "POKEURAOU_INFERENCE, else none: the leaf is loaded here. local: here")
-    ap.add_argument("--merge", default="on", choices=("on", "off"),
+    ap.add_argument("--merge", default="off", choices=("on", "off"),
                     help="with a server: share its forward passes with other processes' requests "
-                    "(the merged road; a value moves in the last places with the timing)")
+                    "(the merged road; a value moves in the last places with the timing, and "
+                    "IKA-363 measured no speed from it: the processes are bound by the CPU)")
     ap.add_argument("--cuda-memory-gb", type=float, default=humanplay.PLAY_CUDA_MEMORY_GB,
                     help="cap this process's CUDA allocator and each worker's (IKA-334); 0: no cap")
     ap.add_argument("--open-browser", action="store_true",

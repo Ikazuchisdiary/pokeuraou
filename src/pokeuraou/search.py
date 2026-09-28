@@ -1110,7 +1110,8 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
     had in calls of those sizes, so a caller that gathers several such calls into one
     gets the same menus to the bit (the Q's answer for a row moves with its batch).
     ``stack`` scores the gathered sub-games in one forward pass (`port.score_stacked`)
-    instead of a pass each: not the same leaf to the last places, so only the ladder asks.
+    instead of a pass each, and the ended branches of all the cells in one call (IKA-363):
+    not the same leaf to the last places, so only the ladder asks.
     """
     from .narrow import narrow_many
 
@@ -1180,13 +1181,19 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
         to_fill: list[tuple[_Sub, Position, list[SideAction], list[SideAction]]] = []
         #: Per sub-game to fill, the completions' shared key: its cell's actions and branch.
         related: list[tuple | None] = []
+        #: With ``stack``, the ended branches, scored in one call after the loop (IKA-363):
+        #: a call a branch was a round trip a branch through a server.
+        ended_subs: list[tuple[_Sub, Position]] = []
         for index, (cell, positions) in enumerate(zip(work, kept_positions, strict=True)):
             share = shares[index] if shares is not None else None
             menus_of = [
                 None if pos.ended else (next(menus), next(menus)) for pos in positions
             ]
             for branch, (pos, menu) in enumerate(zip(positions, menus_of, strict=True)):
-                if menu is None:
+                if menu is None and stack:
+                    sub = _Sub(ended=True)
+                    ended_subs.append((sub, pos))
+                elif menu is None:
                     sub = _Sub(value=float(evaluate([pos])[0]), ended=True)
                 else:
                     sub = _Sub()
@@ -1211,6 +1218,10 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
                 if sub.empty or sub.error is not None:
                     # `_refined_value` stops at this branch; the ones after it are not asked.
                     break
+        if ended_subs:
+            values = np.asarray(evaluate([pos for _sub, pos in ended_subs]), dtype=np.float64)
+            for (sub, _pos), value in zip(ended_subs, values, strict=True):
+                sub.value = float(value)
 
     if WORK is not None:
         # IKA-367: the work a count clock charges (`ladder`); nothing read back here.

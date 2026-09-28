@@ -62,12 +62,15 @@ def test_a_cell_is_one_call_and_the_old_road_to_the_bit(roster, monkeypatch) -> 
             _same_tree(old[1], new[at][1])
             cells += sum(1 for _n, _c, took in new[at][1][1:] if took)
             at += 1
-    # Positive control: the new road scored the cells' children in `segments` calls, one
-    # a cell, where the old one made a `from_encoded` call a branch.
+    # Positive control: the new road scored the cells' children in `segments` calls, at
+    # most one a cell, where the old one made a `from_encoded` call a branch (the root's
+    # own fills are `from_encoded` calls on both roads).
     assert cells > 20
-    assert calls_new["from_encoded"] == 0 and 0 < calls_new["segments"] <= cells
-    assert sized.calls["segments"] == 0 and sized.calls["from_encoded"] >= cells
-    assert blocks_new >= sized.calls["from_encoded"]
+    assert 0 < calls_new["segments"] <= cells and sized.calls["segments"] == 0
+    old_calls = sum(sized.calls.values())
+    assert sum(calls_new.values()) < old_calls
+    assert sized.calls["from_encoded"] - calls_new["from_encoded"] >= calls_new["segments"]
+    assert blocks_new > calls_new["segments"]
 
 
 def test_stacking_a_cells_blocks_is_seen(roster, monkeypatch) -> None:  # noqa: ANN001

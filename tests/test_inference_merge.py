@@ -133,3 +133,26 @@ def test_requests_that_arrive_together_share_a_pass(blocks) -> None:  # noqa: AN
     # The unmerged road beside it: its own size every time, never merged.
     for values in unmerged:
         assert np.array_equal(values, _alone(_Sized(), parts[0]))
+
+
+def test_a_tool_sends_its_leaf_to_the_named_server_and_checks_what_it_holds(reg) -> None:  # noqa: ANN001
+    """`humanplay.served_leaf` (IKA-363): the server's arm, asked what it holds; a server
+    holding other files stops the tool, and `inference_address` stops on a server that does
+    not answer rather than reading on a CUDA context of its own."""
+    from pokeuraou import humanplay
+
+    register_mega_stones(reg)
+    server, address = serve({"value": _Sized()}, arms={"value": ["value-a.pt", "value-b.pt"]})
+    try:
+        assert humanplay.inference_address(address) == address
+        assert humanplay.inference_address("local") is None
+        leaf, _encoder = humanplay.served_leaf(reg, address, ["x/value-b.pt", "y/value-a.pt"])
+        assert isinstance(leaf, RemoteValue) and not leaf.merge
+        leaf.close()
+        with pytest.raises(SystemExit):
+            humanplay.served_leaf(reg, address, ["value-a.pt"])
+    finally:
+        server.shutdown()
+        server.server_close()
+    with pytest.raises(SystemExit):
+        humanplay.inference_address(address)

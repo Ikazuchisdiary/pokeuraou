@@ -38,6 +38,14 @@ are the answers this project was already getting.
 That last property is what makes the server checkable rather than plausible: the same
 games, played through the server, must produce the same decisions.
 
+**The merged road** (IKA-363, `_Merger`) is there for a request that asks for it (``merge``,
+`RemoteValue(merge=True)`): the requests of every connection waiting when the card comes free
+share one pass, and an answer moves in the last places with who else asked. Off by default
+everywhere. Measured on 2026-09-28 it bought no speed -- 24 match workers on two servers
+finished 96 games in 300 s against 87-92 unmerged, and 16 time-match processes on one server
+played in the same wall time either way -- because those processes are bound by the CPU,
+not by the card. It halved the server's own time per request (3.8 ms against 7-8 ms).
+
 The arrays go through shared memory and only a control line goes through the socket.
 Generation moves about 900 MB a second of encoded leaves, which is not a thing to put down
 a socket, and this project has already lost a worker to a 64 MB pipe write.

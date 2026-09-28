@@ -23,9 +23,9 @@ there; ``--inference HOST:PORT`` names a server already running. A process then 
 torch and no CUDA context (1.3-2 GB of the card each, locally), so the processes are limited
 by the CPU and the RAM rather than the card. ``--merge on`` asks the server's merged road: the
 requests of all processes waiting at once share a forward pass, which moves a value in the
-last places with the timing (a node-time game is then not replayed by seed); ``auto`` (the
-default) merges when a condition is on the wall clock and not on the count clock. Without a
-server the processes load the leaf themselves, as before.
+last places with the timing (a node-time game is then not replayed by seed); off (the
+default), a served node-time game is the local one to the byte (IKA-363: 32 of 32 games).
+Without a server the processes load the leaf themselves, as before.
 
 The pairs are handed out by `workqueue.run_workers` to ``--parallel`` processes, one game at
 a time in each. Each process is held to its own share of the logical cores (``--cpu-sets``;
@@ -101,9 +101,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--inference", default=None, metavar="HOST:PORT",
                     help="an inference server already running (its arms value and q must be the "
                     "leaf's and the Q's files); default: none, the processes load the leaf")
-    ap.add_argument("--merge", default="auto", choices=("auto", "on", "off"),
-                    help="the server's merged road (IKA-363): auto merges when a condition is on "
-                    "the wall clock")
+    ap.add_argument("--merge", default="off", choices=("on", "off"),
+                    help="the server's merged road (IKA-363; off: every answer is the one a local "
+                    "leaf gives, so a node-time game is the same game served or not)")
     ap.add_argument("--cpu-workers", type=int, default=0,
                     help="the last N of the --parallel processes score the leaf and the Q on the "
                     "CPU (node-time runs: more games at once than the card holds; each game is "
@@ -187,12 +187,8 @@ def cpu_sets(spec: str | None, parallel: int) -> list[list[int]]:
 
 
 def merging(args: argparse.Namespace) -> bool:
-    """Whether the processes ask the server's merged road (`--merge`; auto: a wall clock)."""
-    if not (args.served or args.inference):
-        return False
-    if args.merge != "auto":
-        return args.merge == "on"
-    return any(timematch.parse_condition(spec).clock == "wall" for spec in args.arm)
+    """Whether the processes ask the server's merged road (`--merge`)."""
+    return bool(args.served or args.inference) and args.merge == "on"
 
 
 def settings(args: argparse.Namespace, tested, other, values, q_path) -> dict:  # noqa: ANN001
