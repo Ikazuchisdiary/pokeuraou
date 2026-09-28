@@ -37,6 +37,7 @@ from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.policy import load_policy
 from pokeuraou.priors import find_cached_chaos, load_chaos
 from pokeuraou.provenance import open_games, provenance, write_game
+from pokeuraou.search import ROSTER_RANK_FILL
 from pokeuraou.selection_book import BenchPrior, BookEntry, SelectionBook, draw_across
 from pokeuraou.selfplay import play_game
 from pokeuraou.standings import find_cached_standings, load_standings, sample_standings_team
@@ -951,6 +952,8 @@ def main() -> None:
                 one_agent=False,
                 depth=depths,
                 rank_by_leaf=ranks,
+                # M-B's roster has no Q: refs2, named (IKA-341).
+                rank_fill=ROSTER_RANK_FILL,
                 policy=rankers,
                 solve_sparsely=sparse,
                 solve_restricted=restrict,

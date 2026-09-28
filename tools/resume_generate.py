@@ -52,6 +52,7 @@ from pokeuraou.encode import Encoder
 from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.position import Position
 from pokeuraou.provenance import open_games, provenance, write_game
+from pokeuraou.search import ROSTER_RANK_FILL
 from pokeuraou.selfplay import play_game
 from pokeuraou.teams import load_roster
 from pokeuraou.value import BatchedValue, load_model
@@ -215,6 +216,8 @@ def main() -> None:
             max_turns=args.max_turns,
             evaluate=value,
             rank_by_leaf=args.rank_leaf,
+            # M-B's roster has no Q: refs2, named (IKA-341).
+            rank_fill=ROSTER_RANK_FILL,
             solve_sparsely=args.solve_sparsely,
             start=position,
             open_information=True,

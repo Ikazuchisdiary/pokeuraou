@@ -622,7 +622,7 @@ def test_the_menu_is_ranked_from_the_heaviest_completion_not_the_first(
     asked = _ranking_by_world(monkeypatch, theirs[4].position)
 
     ours, _ = selfplay._menus(
-        reg, position, (6, 6), None, Budget.matrix(), True, None, spreads
+        reg, position, (6, 6), None, Budget.matrix(), True, None, spreads, rank_fill="refs2"
     )
 
     side0 = [at for side, at in asked if side == 0]
@@ -656,6 +656,7 @@ def test_the_old_rule_is_kept_and_uniform_weights_pick_the_first(
     selfplay._menus(
         reg, position, (6, 6), None, Budget.matrix(), True, None, spreads,
         rank_view="first", used=used,
+        rank_fill="refs2",
     )
     assert [at for side, at in asked if side == 0] == [theirs[0].position]
     assert used[0] == (0, theirs[0].species)
@@ -664,6 +665,7 @@ def test_the_old_rule_is_kept_and_uniform_weights_pick_the_first(
     used = {}
     selfplay._menus(
         reg, position, (6, 6), None, Budget.matrix(), True, None, spreads, used=used,
+        rank_fill="refs2",
     )
     assert used[0] == (4, theirs[4].species)
     # Side 1 ranks from side 0's completions, which are uniform: the first, as before.
@@ -674,6 +676,7 @@ def test_the_old_rule_is_kept_and_uniform_weights_pick_the_first(
         selfplay._menus(
             reg, position, (6, 6), None, Budget.matrix(), True, None, spreads,
             rank_view="sampled",
+            rank_fill="refs2",
         )
 
 
@@ -709,6 +712,7 @@ def test_play_game_records_which_completion_each_side_ranked_from(
         search_limit=2, max_turns=1, rank_by_leaf=True,
         sheets=(sheet, sheet), bench_prior=(Favouring(), Favouring()),
         rank_view=("heaviest", "first"),
+        rank_fill="refs2",
     )
     first = record.decisions[0]
     assert first.kind == "move" and first.turn == 1

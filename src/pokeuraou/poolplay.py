@@ -58,8 +58,9 @@ from .deepen import DEFAULT_DEEPEN
 from .hidden import DEFAULT_BENCH_DROP
 from .payoff import HP_SHARE, Objective
 from .pool import Pool, draw_pair
+from .qrank import is_q
 from .regulation import Regulation
-from .search import DEFAULT_RANK_FILL
+from .search import resolve_rank_fill
 from .selection_book import (
     DEFAULT_EPSILON,
     DEFAULT_TEMPERATURE,
@@ -274,7 +275,7 @@ def generate_pool(
     explore_temperature: float = DEFAULT_TEMPERATURE,
     rank_by_leaf: bool = False,
     policy: Any = None,
-    rank_fill: str = DEFAULT_RANK_FILL,
+    rank_fill: str | None = None,
     bench_drop: str = DEFAULT_BENCH_DROP,
     deepen: str = DEFAULT_DEEPEN,
     depth: int = 1,
@@ -313,6 +314,16 @@ def generate_pool(
     """
     if selection not in SELECTIONS:
         raise ValueError(f"selection must be one of {SELECTIONS}, got {selection!r}")
+    played_fill = resolve_rank_fill(rank_fill, rank_by_leaf and policy is None)
+    if rank_scores_out is not None and is_q(played_fill):
+        # IKA-341: the file is written by the refs ranking (`search.leaf_ranking`); a q fill
+        # ranks by the Q and fills no cell, so every game's line came out with no ranking
+        # in it and nothing said so.
+        raise ValueError(
+            f"rank_scores_out records the refs leaf ranking; the fill {played_fill} ranks by "
+            "a Q and fills no cell, so there is nothing to record. Name a refs fill (e.g. "
+            "refs2) to record one"
+        )
     if selection == SOLVED and solver is None:
         if evaluate is None:
             raise ValueError(
@@ -499,8 +510,10 @@ class PoolArm:
     solver: SolvedSelections | None
     limit: int
     rank_by_leaf: bool
-    #: How its leaf ranking fills its cells (`search.parse_rank_fill`, IKA-268).
-    rank_fill: str = DEFAULT_RANK_FILL
+    #: How its leaf ranking fills its cells (`search.parse_rank_fill`, IKA-268). Unnamed
+    #: (None), resolved at construction as generation's tools resolve it
+    #: (`search.resolve_rank_fill`, IKA-341): q-nocover for a leaf-ranked arm.
+    rank_fill: str | None = None
     #: Which completions its belief drops (`hidden.parse_bench_drop`, IKA-283).
     bench_drop: str = DEFAULT_BENCH_DROP
     #: How it deepens its move decisions (`deepen.parse_deepen`, IKA-33); none is off.
@@ -512,6 +525,9 @@ class PoolArm:
     #: Whether its matrix budget takes the knock-out branch (`Budget.enumerate_knockouts`,
     #: IKA-359); off ships.
     knockouts: bool = False
+
+    def __post_init__(self) -> None:
+        self.rank_fill = resolve_rank_fill(self.rank_fill, self.rank_by_leaf)
 
     @property
     def selection(self) -> str:

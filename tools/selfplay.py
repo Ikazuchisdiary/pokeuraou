@@ -48,7 +48,7 @@ from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.priors import build_cooccurrence, find_cached_chaos, load_chaos
 from pokeuraou.regulation import Regulation
 from pokeuraou.search import (
-    DEFAULT_RANK_FILL,
+    ROSTER_RANK_FILL,
     SHIPPED_RANK_FILL,
     parse_rank_fill,
     resolve_rank_fill,
@@ -102,7 +102,8 @@ def add_pool_flags(ap: argparse.ArgumentParser) -> None:
         "refs<N> replies at the matrix budget, refs<N>-fast at Budget.fast (IKA-268), "
         "q / q-nocover rank by a Q (IKA-274). "
         f"Default {SHIPPED_RANK_FILL} (IKA-338), by {qrank.DEFAULT_Q} unless --q-arm / "
-        f"--q-model names a Q; {DEFAULT_RANK_FILL} is played when named.",
+        f"--q-model names a Q; refs2 is played when named. The roster path (M-B) plays "
+        f"{ROSTER_RANK_FILL} (IKA-341).",
     )
     ap.add_argument(
         "--bench-drop",
@@ -126,7 +127,8 @@ def add_pool_flags(ap: argparse.ArgumentParser) -> None:
     ap.add_argument(
         "--record-rank-scores",
         action="store_true",
-        help="with --pool and --rank-leaf: also write each game's leaf rankings -- every "
+        help="with --pool, --rank-leaf and a refs --rank-fill (a q fill has no cells to "
+        "record; IKA-341): also write each game's leaf rankings -- every "
         "candidate's leaf values against the replies and the score narrow ordered by -- "
         "to rank-<name>.jsonl.gz beside --out (IKA-278, teacher data for IKA-274). Changes "
         "no game and no byte of --out.",
@@ -149,11 +151,16 @@ _ROSTER_ONLY = {
 def rank_scores_path(
     args: argparse.Namespace, ap: argparse.ArgumentParser, out: Path
 ) -> Path | None:
-    """Where `--record-rank-scores` writes, or None; without a leaf ranking it stops."""
+    """Where `--record-rank-scores` writes, or None; without a refs leaf ranking it stops."""
     if not args.record_rank_scores:
         return None
     if not args.rank_leaf:
         ap.error("--record-rank-scores records the leaf ranking; pass --rank-leaf")
+    if qrank.is_q(args.rank_fill):
+        # IKA-341: a q fill ranks by the Q and fills no cell; the file came out with no
+        # ranking in any game's line (the shipped fill since IKA-338).
+        ap.error(f"--record-rank-scores records the refs leaf ranking, and {args.rank_fill} "
+                 "ranks by a Q with no cell to record: name --rank-fill refs2 (a refs fill)")
     from pokeuraou.rank_scores import path_for
 
     return path_for(out)
@@ -478,11 +485,11 @@ def main() -> None:
     add_pool_flags(ap)
     args = ap.parse_args()
     # Named, or the pool path's shipped fill for a leaf-ranked menu (IKA-338). The roster
-    # path takes no fill, so an unnamed one is the one it plays.
+    # path (M-B, no Q) takes no fill: it plays `ROSTER_RANK_FILL` (IKA-341).
     named_fill = args.rank_fill
     args.rank_fill = (
         resolve_rank_fill(named_fill, args.rank_leaf) if args.pool is not None
-        else named_fill or DEFAULT_RANK_FILL
+        else named_fill or ROSTER_RANK_FILL
     )
     try:
         parse_rank_fill(args.rank_fill)
@@ -493,11 +500,11 @@ def main() -> None:
     if args.pool is not None:
         run_pool(args, ap)
         return
-    if args.rank_fill != DEFAULT_RANK_FILL:
+    if args.rank_fill != ROSTER_RANK_FILL:
         # The roster path's `generate` takes no fill, and a flag it dropped would be
         # recorded nowhere and played by nobody.
         ap.error("--rank-fill is the pool path's (IKA-268); the roster path ranks at "
-                 f"{DEFAULT_RANK_FILL}")
+                 f"{ROSTER_RANK_FILL}")
     if args.bench_drop != DEFAULT_BENCH_DROP:
         # The same for the belief: the roster path's `generate` takes no drop.
         ap.error("--bench-drop is the pool path's (IKA-283); the roster path believes "

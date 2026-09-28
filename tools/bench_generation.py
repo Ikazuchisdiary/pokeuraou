@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.payoff import OBJECTIVES
 from pokeuraou.priors import find_cached_chaos, load_chaos
+from pokeuraou.search import ROSTER_RANK_FILL
 from pokeuraou.selfplay import play_game
 from pokeuraou.standings import find_cached_standings, load_standings, sample_standings_team
 from pokeuraou.teams import all_selections, load_roster
@@ -119,6 +120,8 @@ def main() -> None:
             objective=OBJECTIVES["hp-share"],
             search_limit=args.limit,
             rank_by_leaf=args.rank_leaf,
+            # M-B's roster has no Q: refs2, named (IKA-341).
+            rank_fill=ROSTER_RANK_FILL,
             solve_sparsely=args.solve_sparsely,
             depth=args.depth,
             max_turns=40,

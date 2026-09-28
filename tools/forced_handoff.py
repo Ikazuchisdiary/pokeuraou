@@ -42,6 +42,7 @@ from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.payoff import OBJECTIVES  # noqa: E402
 from pokeuraou.position import Position  # noqa: E402
 from pokeuraou.regulation import load_regulation  # noqa: E402
+from pokeuraou.search import ROSTER_RANK_FILL  # noqa: E402
 from pokeuraou.selfplay import play_game  # noqa: E402
 
 CHIPPERS = {"toxapex", "incineroar"}
@@ -170,6 +171,7 @@ def main() -> None:
                 reg, game_rng, [], [], pick["foeArchetype"],
                 objective=objective, search_limit=args.limit,
                 max_turns=args.max_turns, evaluate=value, rank_by_leaf=True,
+                rank_fill=ROSTER_RANK_FILL,  # M-B's roster has no Q (IKA-341)
                 start=Position.from_json(pick["position"]),
                 first_action=forced,
                 open_information=True,

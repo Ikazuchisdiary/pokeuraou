@@ -141,7 +141,7 @@ def test_the_root_menu_is_ranked_against_the_foes_half_of_the_q_solve(
         )
     assert expect[True] != expect[False]  # the cover can be seen in the menus
     # Positive control: the Q's order is not the leaf ranking's.
-    leafy = selfplay._menus(reg, pos, (4, 4), _stub, budget, True)  # noqa: SLF001
+    leafy = selfplay._menus(reg, pos, (4, 4), _stub, budget, True, rank_fill="refs2")  # noqa: SLF001
     assert leafy != expect[True]
 
     for label, cover in (("q", True), ("q-nocover", False)):
