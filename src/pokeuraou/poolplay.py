@@ -282,8 +282,13 @@ def generate_pool(
     indices: Iterable[int] | None = None,
     on_finish: Callable[[int], None] | None = None,
     rank_scores_out: Path | None = None,
+    q_record: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     """Plays pool-against-pool games and appends one JSON line per finished game.
+
+    ``q_record`` (IKA-340) is the Q the rank fill ranked by, as `qrank.record_fields`
+    gives it (``qModel`` and ``qModelSha256``): written into every record after ``pool``,
+    the way a match record carries it. None or empty writes nothing.
 
     ``rank_scores_out`` (IKA-278), when given, is a second file that gets each written
     game's leaf rankings (`rank_scores`), written just before the game's own line. It
@@ -448,6 +453,8 @@ def generate_pool(
                             else ["uniform", "uniform"]
                         ),
                     }
+                    if q_record:
+                        payload.update(q_record)
                     if index is not None:
                         payload["gameIndex"] = index
                     if writer is not None:

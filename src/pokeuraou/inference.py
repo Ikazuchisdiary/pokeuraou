@@ -325,7 +325,8 @@ def _serve_q(server: Any, request: dict[str, Any], attached: dict) -> dict[str, 
     model = q_models[name]
     if request["op"] == "describe_q":
         return {"ok": True, "files": list(model.files), "fingerprint": model.fingerprint,
-                "properties": bool(model.properties)}
+                "properties": bool(model.properties),
+                "sha256": list(getattr(model, "digests", []))}
     handle = request["shm"]
     if handle not in attached:
         attached[handle] = shared_memory.SharedMemory(name=handle)

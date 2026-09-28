@@ -164,10 +164,13 @@ def _ends_rule(leaf: object) -> str:
     return "by the net" if getattr(rules, "net_scores_ends", False) else "as the result"
 
 
-def _install_q(args: argparse.Namespace, encoder: Encoder, ap: argparse.ArgumentParser) -> list[str]:
-    """The Qs the q rank fills rank by (IKA-274): installed, and their files as the server
-    (or this worker) holds them -- for the records and the echo; a named Q's (stage 3,
-    ``q-nocover.NAME``) as ``NAME=file``. Empty without a q fill."""
+def _install_q(
+    args: argparse.Namespace, encoder: Encoder, ap: argparse.ArgumentParser
+) -> dict[str, list[str]]:
+    """The Qs the q rank fills rank by (IKA-274): installed, and what the records name
+    them by (`qrank.record_fields`): their files as the server (or this worker) holds
+    them, a named Q's (stage 3, ``q-nocover.NAME``) as ``NAME=file``, and each file's
+    sha256 (IKA-340). Empty without a q fill."""
     for fill, leafy, label in ((args.rank_fill, args.rank_leaf, "--rank-fill"),
                                (args.baseline_rank_fill, args.baseline_rank_leaf,
                                 "--baseline-rank-fill")):
@@ -185,12 +188,12 @@ def _install_q(args: argparse.Namespace, encoder: Encoder, ap: argparse.Argument
         args, encoder, (args.rank_fill, args.baseline_rank_fill, *probing), ap.error
     )
     if not models:
-        return []
-    files = qrank.describe_installed(models)
-    print(f"  Q: {', '.join(files)} "
+        return {}
+    fields = qrank.record_fields(models)
+    print(f"  Q: {', '.join(fields['qModel'])} "
           + (f"(served by {args.inference})" if args.inference else "(loaded here)"),
           file=sys.stderr)
-    return files
+    return fields
 
 
 def _q_delta(before: dict[str, dict[str, int]], label: str) -> tuple[int, int]:
@@ -365,7 +368,7 @@ def main(argv: list[str] | None = None) -> None:
         if other_encoder is encoder
         else build_leaves(args, encoder, other_encoder)
     )
-    q_files = _install_q(args, encoder, ap)
+    q_record = _install_q(args, encoder, ap)
     home = args.games_out.parent if args.games_out is not None else Path(".")
 
     def solver_for(leaf: object, name: str, store: Path | None) -> SolvedSelections:
@@ -584,8 +587,9 @@ def main(argv: list[str] | None = None) -> None:
                     "epsilon": args.explore_epsilon,
                     "temperature": args.explore_temperature,
                 },
-                # The Q behind a q rank fill (IKA-274), as its holder names it.
-                **({"qModel": q_files} if q_files else {}),
+                # The Q behind a q rank fill (IKA-274), as its holder names it, and
+                # each file's sha256 (IKA-340).
+                **q_record,
                 **({"aivat": luck_block} if luck_block is not None else {}),
             },
             source=provenance(

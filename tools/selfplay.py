@@ -159,8 +159,11 @@ def rank_scores_path(
     return path_for(out)
 
 
-def _install_q(args: argparse.Namespace, reg: Regulation, ap: argparse.ArgumentParser) -> None:
-    """The Q a q rank fill ranks by (IKA-274), installed and echoed; nothing otherwise."""
+def _install_q(
+    args: argparse.Namespace, reg: Regulation, ap: argparse.ArgumentParser
+) -> dict[str, list[str]]:
+    """The Q a q rank fill ranks by (IKA-274), installed and echoed; nothing otherwise.
+    Returns what each record names it by (`qrank.record_fields`, IKA-340), empty without."""
     if qrank.is_q(args.rank_fill) and not args.rank_leaf:
         ap.error(f"--rank-fill {args.rank_fill} ranks the leaf-ranked menu: it needs --rank-leaf")
     from pokeuraou.encode import Encoder
@@ -177,6 +180,7 @@ def _install_q(args: argparse.Namespace, reg: Regulation, ap: argparse.ArgumentP
         print(f"  Q: {', '.join(qrank.describe_installed(models))} "
               + (f"(the {args.q_arm} arm on {args.inference})" if args.q_arm else "(loaded here)"),
               file=sys.stderr)
+    return qrank.record_fields(models)
 
 
 def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
@@ -199,7 +203,7 @@ def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
     reg = pool.reg
     register_mega_stones(reg)
     evaluate, leaf_label = build_leaf(args, reg)
-    _install_q(args, reg, ap)
+    q_record = _install_q(args, reg, ap)
     selection = "uniform" if args.uniform_selection else SOLVED
     print(pool.summary(), file=sys.stderr)
     if pool.character:
@@ -264,6 +268,7 @@ def run_pool(args: argparse.Namespace, ap: argparse.ArgumentParser) -> None:
         indices=drawn,
         on_finish=client.finish if client is not None else None,
         rank_scores_out=ranks_out,
+        q_record=q_record,
     )
     if client is not None:
         client.close()

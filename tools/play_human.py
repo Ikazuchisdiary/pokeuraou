@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import math
 import re
 import sys
 import threading
@@ -146,23 +147,79 @@ def resolve_cores(threads: int | None, cores: int | None, clock: str) -> tuple[i
 
 def memory_watch(
     limits: analysis.Limits, halt: threading.Event, say: Callable[[str], None],
+    emit: Callable[[str, dict], None] | None = None, *, start: bool = True,
+    **readers: Callable,
 ) -> analysis.MemoryWatch:
-    """IKA-337's memory watch over a person's game (IKA-343): twice a second it reads this
-    process with its workers, the host's free memory and the card; past a limit it sets
-    ``halt``, which makes the move in hand stop deepening at its next step and play the
-    answer it has (`humanplay.HaltingCost`), and says so once; back under 90% of every limit
-    it lifts the brake."""
+    """IKA-337's memory watch over a person's game (IKA-343, IKA-355): twice a second it
+    reads this process with its workers, the host's free memory and the card, and reads
+    them by `analysis.Reading.brake`:
+
+    * this process past ``rss_gb``, the card past ``gpu_gb``, the host under
+      ``hard_free_gb``, or under ``free_gb`` because this move's deepening grew this
+      process: it sets ``halt``, which makes the move in hand stop deepening at its next
+      step and play the answer it has (`humanplay.HaltingCost`);
+    * the host under ``free_gb`` because other work took the memory: it reads on and says so.
+      Before IKA-355 this stopped every move too, and on a busy machine the agent played at
+      0.08-0.19 of its budget (IKA-343 §1.2).
+
+    A `humanplay.MemoryBrake` ``halt`` tells it when each move starts deepening: the
+    growth is measured from there, and the brake is lifted and read again. Within a move the
+    brake is lifted only once every limit is back under 90% (``limits.warn``).
+
+    Each change of state (``stop``, ``low``, ``ok``) is said once on the terminal and, with
+    ``emit``, sent to the page as a ``memory`` event. ``readers`` replace the watch's
+    readings (``read_host``, ``read_rss``, ``read_gpu``: the tests'); ``start=False``
+    leaves the thread off (the tests call ``look``)."""
+    state = {"base": math.nan, "shown": ""}
+
+    def show(kind: str, why: str) -> None:
+        if kind == state["shown"]:
+            return
+        state["shown"] = kind
+        if kind == "stop":
+            say(f"note: memory near its limit, the agent stops deepening: {why}")
+        elif kind == "low":
+            say(f"note: host memory is low from other work; the agent reads on (it stops "
+                f"under {limits.hard_free_gb:g} GB free): {why}")
+        else:
+            say("note: memory back under its limits")
+        if emit is not None:
+            emit("memory", {"state": kind or "ok", "why": why,
+                            "freeGb": limits.free_gb, "hardFreeGb": limits.hard_free_gb})
+
+    def judge(reading: analysis.Reading) -> str:
+        kind, why = reading.brake(limits, state["base"])
+        if kind == "low" and not halt.is_set():
+            show("low", why)
+        return why if kind == "stop" else ""
+
     def stop(reason: str, why: str) -> None:  # noqa: ARG001
         if not halt.is_set():
-            say(f"note: memory near its limit, the agent stops deepening: {why}")
+            halt.why = why  # type: ignore[attr-defined]
         halt.set()
+        show("stop", why)
 
     def tick(reading: analysis.Reading) -> None:
-        if halt.is_set() and not reading.over(limits, limits.warn):
-            halt.clear()
-            say("note: memory back under its limits, the agent deepens again")
+        kind, _why = reading.brake(limits, state["base"], limits.warn)
+        if kind:
+            return
+        halt.clear()
+        show("", "")
 
-    return analysis.MemoryWatch(limits, stop, tick=tick).start()
+    watch = analysis.MemoryWatch(limits, stop, tick=tick, judge=judge, **readers)
+    rss = watch.read_rss()
+    state["base"] = math.nan if rss is None else rss
+
+    def begin() -> None:
+        with watch.lock:
+            got = watch.read_rss()
+            state["base"] = math.nan if got is None else got
+            halt.clear()
+            watch.look()
+
+    if isinstance(halt, humanplay.MemoryBrake):
+        halt.on_begin = begin
+    return watch.start() if start else watch
 
 
 def main(argv: list[str] | None = None) -> None:
@@ -241,7 +298,12 @@ def main(argv: list[str] | None = None) -> None:
                     help="the memory watch (IKA-337): a move stops deepening before this process "
                     "and its workers hold this much (0: off)")
     ap.add_argument("--min-free-gb", type=float, default=analysis.Limits.free_gb,
-                    help="... or before the host's free memory falls under this (0: off)")
+                    help="... or before the host's free memory falls under this because the "
+                    "move's own reading grew (0: off). Under it from other work, the agent "
+                    "reads on and says so (IKA-355)")
+    ap.add_argument("--hard-free-gb", type=float, default=analysis.Limits.hard_free_gb,
+                    help="... and before the host's free memory falls under this, whatever the "
+                    "cause (0: off)")
     ap.add_argument("--max-gpu-gb", type=float, default=analysis.Limits.gpu_gb,
                     help="... or before the card holds this much, all processes (0: off)")
     ap.add_argument("--quiet", action="store_true", help="no board on the terminal (stand-in persons)")
@@ -332,7 +394,7 @@ def main(argv: list[str] | None = None) -> None:
             ([str(v) for v in values] if values and not args.hp_share else None,
              str(device or "cpu"), args.leaf_graphs == "on", args.cuda_memory_gb),
         )
-    halt = threading.Event()
+    halt = humanplay.MemoryBrake()
     agent = humanplay.Agent(
         reg=reg, evaluate=evaluate, name=name, seconds=args.seconds, cores=cores,
         clock=args.clock, rank_fill=fill, bench_drop=args.bench_drop,
@@ -348,10 +410,6 @@ def main(argv: list[str] | None = None) -> None:
         + (" / width only" if args.width_only else "")
         + (f" / ponder (up to {args.ponder_seconds:g} s)" if args.ponder == "on" else "")
         + " / bench hidden")
-    watch = memory_watch(
-        analysis.Limits(rss_gb=args.max_rss_gb, free_gb=args.min_free_gb, gpu_gb=args.max_gpu_gb),
-        halt, lambda text: print(text, file=sys.stderr),
-    )
 
     server = None
     if args.view or args.live_out is not None:
@@ -365,6 +423,12 @@ def main(argv: list[str] | None = None) -> None:
             print(f"画面: {server.url}", file=sys.stderr)
             if args.open_browser:
                 webbrowser.open(server.url)
+    watch = memory_watch(
+        analysis.Limits(rss_gb=args.max_rss_gb, free_gb=args.min_free_gb, gpu_gb=args.max_gpu_gb,
+                        hard_free_gb=args.hard_free_gb),
+        halt, lambda text: print(text, file=sys.stderr),
+        emit=None if server is None else server.listener,
+    )
     person = _person(args.person, reg, loc, args.seed, server)
     for n in range(args.games):
         index = args.game_index + n
