@@ -264,6 +264,9 @@ class EncodedNode:
     #: `replacementsEncoded` only, when a pair's phase drew (IKA-352): each row's
     #: (pair index, weight). None when every pair is its one row, in order.
     branches: list[tuple[int, float]] | None = None
+    #: IKA-381 (`portlp`, when on): the body's span block as the port wrote it, and its span
+    #: and leaf counts, for the port to fold the matrix from (`folds`). None when off.
+    span_block: tuple[bytes, int, int] | None = None
 
     @staticmethod
     @timing.timed("rust.unpack")
@@ -310,7 +313,12 @@ class EncodedNode:
             if "spanCount" in header
             else [(int(i), int(j), list(indices), list(w)) for i, j, indices, w in header["spans"]]
         )
+        span_block = None
+        if _SPAN_BLOCKS[0] and "spanCount" in header:
+            count, total, at = (int(header[k]) for k in ("spanCount", "spanLeaves", "spanAt"))
+            span_block = (bytes(body[at:at + 12 * total + 12 * count]), count, total)
         return EncodedNode(
+            span_block=span_block,
             encoded=Encoded(
                 species=arrays["species"],
                 ability=arrays["ability"],
@@ -347,6 +355,10 @@ class EncodedNode:
                 else None
             ),
         )
+
+
+#: IKA-381: whether `EncodedNode.unpack` keeps each node's span block (`portlp` turns it on).
+_SPAN_BLOCKS = [False]
 
 
 def _binary_spans(
@@ -800,6 +812,11 @@ class RustNode:
             unmodelled=tuple(response["unmodelled"]),
             position=Position.from_json(raw) if raw else None,
         )
+
+    @timing.timed("rust.lp")
+    def lp(self, request: dict[str, Any]) -> dict[str, Any]:
+        """IKA-381: an `lp` or `folds` request (`portlp`), its one header line back."""
+        return self._exchange(request)
 
     def parallel(self) -> dict[str, Any]:
         """The port's cell-thread counters (IKA-32): `threads`, and how many maps and items

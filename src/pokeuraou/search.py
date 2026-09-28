@@ -148,7 +148,7 @@ from typing import Any
 import numpy as np
 
 from . import deepen as _deepen
-from . import port, rank_scores, timing
+from . import port, portlp, rank_scores, timing
 from .actions import SideAction
 from .budget import Budget
 from .equilibrium import Equilibrium, EquilibriumError, solve
@@ -1381,6 +1381,10 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
                 fill(again, [None] * len(again))
             score()
     with timing.region("d2.fold"):
+        if portlp.ON[0]:
+            # IKA-381: every sub-game `_fold_cell` would solve, folded and solved in the port
+            # in one crossing; `_fold_cell` then reads their values as `_sub_value` left them.
+            portlp.solve_subs(reg, [sub for cell in work for sub in cell.subs])
         folded = [_fold_cell(cell) for cell in work]
     if table is not None:
         for sub, key, n in to_keep:

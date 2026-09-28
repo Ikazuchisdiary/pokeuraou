@@ -43,6 +43,14 @@ serde = { version = "1", features = ["derive"] }
 # float parser is not correctly rounded and the training arrays must be the bytes Python wrote.
 serde_json = { version = "1", features = ["raw_value"] }
 
+[build-dependencies]
+# IKA-381: builds vendor/HiGHS (1.12.0, scipy's commit) for the LP in src/lp.rs (build.rs).
+# Pinned below 0.1.57: from there it links kernel32 as `raw-dylib`, which needs a dlltool
+# on PATH with the windows-gnu toolchain.
+cmake = "=0.1.54"
+# The compiler cmake is handed on Windows (build.rs); already cmake's own dependency.
+cc = "1"
+
 [profile.release]
 opt-level = 3
 lto = true

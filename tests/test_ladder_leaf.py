@@ -23,7 +23,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from pokeuraou import humanplay, ladder, rustnode  # noqa: E402
+from pokeuraou import humanplay, ladder, portlp, rustnode  # noqa: E402
 from pokeuraou.budget import Budget  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.encode import Encoder  # noqa: E402
@@ -93,6 +93,31 @@ def test_a_stacked_read_is_deterministic(kit, monkeypatch) -> None:  # noqa: ANN
     finally:
         rustnode.set_port_threads(before)
     assert _same(first, other)
+
+
+def test_the_ports_folds_and_lps_read_as_pythons(kit, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-381 (`portlp`): the sub-games folded from their scored leaves and solved in the port
+    read as Python's fold and scipy's LP: the same stages and counted work, the mixture and
+    value to the last places -- to the bit where numpy's dot takes the order the port copies
+    (the 9800X3D's OpenBLAS core; records/IKA-381.md), within 1e-9 on another machine. The
+    positive control: sub-games folded in the port, and its LPs."""
+    plain = _read(kit, monkeypatch, batch=True, stack=True)
+    folded, lps = portlp.COUNTS["folded"], portlp.COUNTS["lps"]
+    portlp.set_on(True)
+    try:
+        ported = _read(kit, monkeypatch, batch=True, stack=True)
+    finally:
+        portlp.set_on(False)
+    assert portlp.COUNTS["folded"] > folded and portlp.COUNTS["lps"] > lps
+    assert [(r.stage, r.spent_ms) for r in ported.ladder.rungs] == [
+        (r.stage, r.spent_ms) for r in plain.ladder.rungs]
+    assert ported.ladder.work == plain.ladder.work
+    np.testing.assert_allclose(ported.strategy, plain.strategy, rtol=0, atol=1e-9)
+    assert abs(ported.value - plain.value) < 1e-9
+    from .test_portlp import openblas_core
+
+    if openblas_core() == "SkylakeX":
+        assert _same(ported, plain)
 
 
 def test_children_at_once_are_the_one_at_a_time_road(kit, monkeypatch) -> None:  # noqa: ANN001

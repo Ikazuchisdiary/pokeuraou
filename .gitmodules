@@ -2,3 +2,6 @@
 	path = vendor/pokemon-showdown
 	url = https://github.com/smogon/pokemon-showdown.git
 	shallow = true
+[submodule "vendor/HiGHS"]
+	path = vendor/HiGHS
+	url = https://github.com/scipy/HiGHS.git

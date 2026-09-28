@@ -240,6 +240,8 @@ pub fn report() -> serde_json::Value {
         "items": PARALLEL_ITEMS.load(Ordering::Relaxed),
         "offMain": OFF_MAIN_ITEMS.load(Ordering::Relaxed),
         "nodes": NODE_ITEMS.load(Ordering::Relaxed),
+        // IKA-381: the games and sub-games this process solved (`lp`, `folds`).
+        "lp": crate::lp::report(),
     })
 }
 

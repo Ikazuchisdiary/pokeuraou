@@ -31,6 +31,7 @@ mod held;
 mod id;
 mod inert;
 mod level_struggle;
+mod lp;
 mod magic_guard;
 mod modelled;
 mod move_hooks;

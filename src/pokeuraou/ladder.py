@@ -54,7 +54,7 @@ from typing import Any
 
 import numpy as np
 
-from . import port, rustnode, search, subshare
+from . import port, portlp, rustnode, search, subshare
 from .budget import Budget
 from .equilibrium import EquilibriumError, solve, solve_bayesian
 from .position import Position
@@ -518,7 +518,7 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
         search.SHARE = subshare.Local()
         rustnode.DIGESTS[0] = True
     here_began = (tuple(rustnode.PORT_WAITED), time.process_time(), _served(leaf),
-                  dict(subshare.COUNTS))
+                  dict(subshare.COUNTS), portlp.COUNTS["lps"])
     if pool is not None:
         pool.begin(row, col, items, budget, hidden_side, cost)
         result.workers = len(pool.conns)
@@ -776,7 +776,9 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
                                              for k in ("hits", "same")),
                        "sameSubgames": subshare.COUNTS["same"] - here_began[3]["same"],
                        "keptSubgames": subshare.COUNTS["puts"] - here_began[3]["puts"],
-                       "sharedKids": subshare.COUNTS["kidHits"] - here_began[3]["kidHits"]}
+                       "sharedKids": subshare.COUNTS["kidHits"] - here_began[3]["kidHits"],
+                       # IKA-381: the LPs this process's port solved (`portlp`).
+                       "portLps": portlp.COUNTS["lps"] - here_began[4]}
     result.work = work
     if result.rungs:
         result.unmodelled.add(f"ladder read to {result.depth_reached} ({len(result.rungs)} "
@@ -1844,6 +1846,8 @@ def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  
             if table is not None:
                 # IKA-378: the read's own rows of the table (`_Pool.begin`).
                 table.begin(message[7])
+            # IKA-381: the reader's `portlp` setting, for this read's chunks.
+            portlp.set_on(bool(message[8]))
             continue
         kind, task, stage, stage_budget, cells = message
         row, col, items, root_budget, hidden_side, cost = context
@@ -1852,9 +1856,10 @@ def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  
         if cancel.is_set():
             # Sent before the reader stopped: not read.
             conn.send(("stopped", task, None, [work], notes,
-                       (0.0, 0.0, 0, 0.0, 0.0, 0, 0, (0, 0, 0, 0, 0), 0)))
+                       (0.0, 0.0, 0, 0.0, 0.0, 0, 0, (0, 0, 0, 0, 0), 0, 0)))
             continue
         shared_began = dict(subshare.COUNTS)
+        lps_began = portlp.COUNTS["lps"]
         search.WORK = work
         # IKA-374: the work is said cell by cell: a stage may take a part of a chunk read
         # ahead (`AHEAD`), and counts only the cells it takes.
@@ -1926,7 +1931,9 @@ def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  
                  subshare.COUNTS["kidHits"] - shared_began["kidHits"],
                  subshare.COUNTS["busy"] - shared_began["busy"],
                  subshare.COUNTS["waited"] - shared_began["waited"]),
-                subshare.COUNTS["puts"] - shared_began["puts"])
+                subshare.COUNTS["puts"] - shared_began["puts"],
+                # IKA-381: the LPs its port solved (`portlp`).
+                portlp.COUNTS["lps"] - lps_began)
         conn.send((status, task, got, work, notes, took))
 
 
@@ -2033,8 +2040,9 @@ class _Pool:
         if self.table is not None:
             # IKA-380: the reader keeps the children it reads pass by pass (`deep_passes`).
             self.table.begin(self.generation)
+        # IKA-381: and whether the workers solve their LPs in their ports (`portlp`), as here.
         self._context = ("read", list(row), list(col), plain, budget, hidden_side, cost,
-                         self.generation)
+                         self.generation, portlp.ON[0])
         self._due = set(self._orphans)
         for i, conn in enumerate(self.conns):
             if i not in self._due:
@@ -2072,7 +2080,8 @@ class _Pool:
                       "childTasks": 0, "heldPositions": 0, "sharedSubgames": 0,
                       "sameSubgames": 0, "keptSubgames": 0, "sharedKids": 0,
                       "busySubgames": 0, "waitedSubgames": 0, "openCells": 0, "kidReads": 0,
-                      "kidsJoined": 0, "passChunks": 0, "wholeCells": 0, "passSplits": 0}
+                      "kidsJoined": 0, "passChunks": 0, "wholeCells": 0, "passSplits": 0,
+                      "portLps": 0}
         self._last_end = time.perf_counter()
         self._trace = ({"t0": self._last_end, "workers": len(self.conns), "calls": [],
                         "chunks": [], "stages": []} if TRACE_DIR else None)
@@ -2137,7 +2146,8 @@ class _Pool:
 
     def _took(self, times: tuple) -> tuple:
         """A task's timings (`_pool_main`) added to the read's stats; the first six back."""
-        took, server_s, trips, cpu_s, port_s, port_reads, held, shared, kept = times
+        took, server_s, trips, cpu_s, port_s, port_reads, held, shared, kept, lps = times
+        self.stats["portLps"] += lps
         self.stats["heldPositions"] += held
         self.stats["sharedSubgames"] += shared[0] + shared[1]
         self.stats["sameSubgames"] += shared[1]

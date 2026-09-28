@@ -200,7 +200,7 @@ from typing import Any
 
 import numpy as np
 
-from . import port, timing
+from . import port, portlp, timing
 from .actions import SideAction
 from .budget import Budget
 from .equilibrium import Equilibrium, EquilibriumError, solve
@@ -3377,6 +3377,11 @@ def _q_menus(
             reg, [asks[n] for n in wanted[start:start + Q_MENU_CHUNK]]
         ))
     matrices = dict(zip(wanted, got, strict=True)) if wanted else {}
+    # IKA-381: every game of the call solved in the port in one crossing (`portlp`, off by
+    # default): the same `Equilibrium`s, each error where `solve` would have raised it.
+    solved = (dict(zip(wanted, portlp.solve_many(
+        reg, [np.asarray(matrices[n], dtype=np.float64) for n in wanted]), strict=True))
+        if portlp.ON[0] and wanted else None)
     out: list[tuple[list[SideAction], list[SideAction]]] = []
     for n, (pos, pools) in enumerate(asks):
         if n not in matrices:
@@ -3384,7 +3389,12 @@ def _q_menus(
             continue
         q = np.asarray(matrices[n], dtype=np.float64)
         try:
-            e = solve(q)
+            if solved is None:
+                e = solve(q)
+            else:
+                e = solved[n]
+                if isinstance(e, Exception):
+                    raise e
             scores = (np.asarray(e.row_ev), -np.asarray(e.col_ev))
         except (EquilibriumError, ValueError):
             # The mean against every reply, as `qrank.q_ranking` falls back to.

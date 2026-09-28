@@ -286,6 +286,34 @@ uv run python tools/selfplay.py --games 100
 
 （9/12〜9/23 は既定でオフ、壊れていたら黙って Python に戻る作りでした。）
 
+### 作るのに要るもの：HiGHS（IKA-381、9/29 から）
+
+port は均衡の LP を自分で解けます（`src/lp.rs`、`lp` と `folds` の 2 つの命令。使うのは
+`POKEURAOU_LADDER_PORT_LP=1` のときの読みだけで、既定はオフ。生成は使いません）。LP は
+scipy 1.18.1 と同じ HiGHS 1.12.0 で、`vendor/HiGHS`（scipy/HiGHS 4f96ee8 を固定した
+submodule）を `build.rs` が cmake で静的ライブラリにします。C API の数個の関数は `lp.rs` に
+手で書いてあり、bindgen（libclang）は要りません。`highs-sys` を使わないのは、どの版も
+HiGHS 1.12.0 を同梱していない（1.12.x は 1.11.0、1.14.x は 1.14.0）ためです。
+
+作るのに要るもの:
+
+* `git submodule update --init vendor/HiGHS`（CI は `submodules: recursive` で取ります）
+* cmake と、その target の C++ コンパイラ
+  * Linux（CI の ubuntu）: 入っている cmake と g++。
+  * Windows（`x86_64-pc-windows-gnu`）: Rust の self-contained のリンカと同じ MinGW-Builds
+    14.2.0（posix-seh・msvcrt）の g++。同じ版なので、リンカが持つ `libstdc++.a` を静的に
+    つなげて、exe は DLL を増やしません。g++ は PATH に置かず、`~/.cargo/config.toml` の
+    `[env]` で名指しします（`CC_/CXX_/AR_x86_64_pc_windows_gnu`、
+    `CMAKE_GENERATOR_x86_64_pc_windows_gnu = "Ninja"`）。PATH に gcc があると、rustc がすべての
+    build で self-contained のリンカを使わなくなるためです。このマシンでは
+    `C:/Users/Ikazuchi/tools/mingw64-14.2.0-msvcrt`、cmake と ninja は scoop。
+* `cmake` crate は 0.1.54 に固定（0.1.57 から kernel32 を `raw-dylib` でつなぎ、windows-gnu では
+  PATH に dlltool が要る）。
+
+初回の build は HiGHS の分だけ延びます（このマシンで 4 コア 83 秒。以後は target の中に残る）。
+LP の答えは scipy の `equilibrium.solve` とビット一致（捕まえた 59,050 の LP で全部。
+records/IKA-381.md）。
+
 ### 境界はノード単位
 
 `batched_payoffs` はもともとこの計画のノード境界（局面と両側の行動リストが入り、行列が出る）
