@@ -92,14 +92,15 @@ def build_leaves(
     if args.inference is not None:
         from pokeuraou.inference import RemoteValue
 
-        value = RemoteValue(args.inference, args.inference_arm, encoder)
+        value = RemoteValue(args.inference, args.inference_arm, encoder, merge=args.inference_merge)
         baseline = None
         if args.baseline_inference_arm:
             baseline = (
                 value
                 if args.baseline_inference_arm == args.inference_arm
                 and other_encoder is encoder
-                else RemoteValue(args.inference, args.baseline_inference_arm, other_encoder)
+                else RemoteValue(args.inference, args.baseline_inference_arm, other_encoder,
+                                  merge=args.inference_merge)
             )
         # Asked of the server: a worker is told an arm's name, never what it holds.
         names = [leaf_name(value.describe())]
@@ -137,7 +138,7 @@ def luck_leaf(args: argparse.Namespace, value: object, encoder: Encoder) -> obje
     if args.inference is not None:
         from pokeuraou.inference import RemoteValue
 
-        return RemoteValue(args.inference, args.inference_arm, encoder)
+        return RemoteValue(args.inference, args.inference_arm, encoder, merge=args.inference_merge)
     from pokeuraou.value import BatchedValue
 
     return BatchedValue(value.nets, value.encoder, device=value.device)  # type: ignore[attr-defined]
@@ -229,6 +230,11 @@ def main(argv: list[str] | None = None) -> None:
                     "--baseline-inference-arm or --baseline-hp-share is required")
     ap.add_argument("--inference", default=None, metavar="HOST:PORT")
     ap.add_argument("--inference-arm", default="value")
+    ap.add_argument("--inference-merge", action="store_true",
+                    help="ask the server's merged road (IKA-363): the requests of all workers "
+                    "waiting at once share a forward pass, so the games move in the last places "
+                    "with the timing and are not replayable by seed. Off: every answer is the "
+                    "one this worker would compute itself")
     ap.add_argument("--baseline-inference-arm", default=None,
                     help="the server's name for the other arm")
     ap.add_argument("--baseline-hp-share", action="store_true",

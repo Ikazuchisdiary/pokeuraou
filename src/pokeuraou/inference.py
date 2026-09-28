@@ -262,6 +262,21 @@ class _Handler(socketserver.StreamRequestHandler):
         arrays = _views(buffer, request["layout"])
         rows = int(request["rows"])
 
+        if request.get("merge"):
+            # IKA-363: scored together with whatever the other connections asked meanwhile.
+            sizes = (
+                [int(s) for s in request["segments"]]
+                if request["op"] == "score_segments" else [rows]
+            )
+            if sum(sizes) != rows:
+                raise ValueError(f"segments add up to {sum(sizes)} rows, the request says {rows}")
+            scores = server.merger(name).score(arrays, sizes)  # type: ignore[attr-defined]
+            for size in sizes:
+                server.note_request(size)  # type: ignore[attr-defined]
+            out = int(request["result_offset"])
+            buffer[out : out + scores.nbytes] = scores.tobytes()
+            return {"ok": True, "rows": int(scores.shape[0])}
+
         if request["op"] == "score_segments":
             # IKA-291: several blocks in one round trip, each scored as its own request
             # would have been -- the same rows in a call of the same size. A model from
@@ -339,6 +354,120 @@ def _serve_q(server: Any, request: dict[str, Any], attached: dict) -> dict[str, 
     return {"ok": True}
 
 
+#: The most rows one merged pass takes (IKA-363): `CHUNK_ROWS`, the size `BatchedValue`
+#: cuts at anyway. A request larger than this is a pass of its own.
+MERGE_ROWS = int(os.environ.get("POKEURAOU_MERGE_ROWS", str(CHUNK_ROWS)))
+
+
+class _Merger:
+    """One arm's merged road (IKA-363): the requests of every connection that are waiting
+    when the card comes free, scored in one forward pass.
+
+    The unmerged road answers each request at its own size, so an answer never depends on
+    who else asked. That is kept (it is what makes a node-time game, a test or an A/B
+    replayable) and a request asks for this road with ``merge``. Here a request's rows share
+    a pass with other requests' rows, which moves a value in the last places (5.96e-08 on
+    the card, `port.score_stacked`) and makes the answer depend on the timing. What it buys
+    is the passes: a deepening sends thousands of requests of a few dozen rows, and a pass
+    costs about the same at 8 rows as at 512 (a graph's replay, IKA-107), so twelve workers
+    each waiting on their own pass queue behind one card.
+
+    No window is waited for: a pass takes what queued while the last one ran (up to
+    `MERGE_ROWS`), so one lone client is answered at once and at its own size -- the answer
+    the unmerged road gives it. Requests of another dtype or width (the port's int32
+    indices beside the encoder's int64) go in a pass of their own kind.
+    """
+
+    def __init__(self, model: Any, max_rows: int = MERGE_ROWS) -> None:  # noqa: ANN401
+        import queue
+
+        self.model = model
+        self.max_rows = max(1, int(max_rows))
+        self.queue: queue.Queue = queue.Queue()
+        self._carry: dict[str, Any] | None = None
+        #: Passes run, requests they answered, and passes that answered more than one.
+        self.passes = 0
+        self.requests = 0
+        self.merged = 0
+        self.rows = 0
+        self.largest = 0
+        threading.Thread(target=self._run, daemon=True, name="merge").start()
+
+    def score(self, arrays: dict[str, np.ndarray], sizes: Sequence[int]) -> np.ndarray:
+        rows = int(sum(sizes))
+        if rows == 0:
+            return np.zeros(0, dtype=np.float64)
+        slot: dict[str, Any] = {"arrays": arrays, "rows": rows, "out": None, "error": None,
+                                "done": threading.Event()}
+        self.queue.put(slot)
+        slot["done"].wait()
+        if slot["error"] is not None:
+            raise slot["error"]
+        return slot["out"]
+
+    def _take(self) -> list[dict[str, Any]]:
+        import queue
+
+        first = self._carry if self._carry is not None else self.queue.get()
+        self._carry = None
+        batch, rows = [first], int(first["rows"])
+        while rows < self.max_rows:
+            try:
+                nxt = self.queue.get_nowait()
+            except queue.Empty:
+                break
+            if rows + int(nxt["rows"]) > self.max_rows:
+                self._carry = nxt
+                break
+            batch.append(nxt)
+            rows += int(nxt["rows"])
+        return batch
+
+    def _run(self) -> None:
+        one = getattr(self.model, "block", None) or self.model
+        while True:
+            batch = self._take()
+            kinds: dict[tuple, list[dict[str, Any]]] = {}
+            for slot in batch:
+                kind = tuple(
+                    (name, slot["arrays"][name].dtype.str, slot["arrays"][name].shape[1:])
+                    for name in ARRAYS
+                )
+                kinds.setdefault(kind, []).append(slot)
+            for members in kinds.values():
+                try:
+                    if len(members) == 1:
+                        arrays = members[0]["arrays"]
+                    else:
+                        arrays = {
+                            name: np.concatenate([m["arrays"][name] for m in members])
+                            for name in ARRAYS
+                        }
+                    rows = sum(int(m["rows"]) for m in members)
+                    with timing.stage("server.merge"):
+                        scores = np.asarray(one(arrays, rows), dtype=np.float64)
+                    at = 0
+                    for m in members:
+                        m["out"] = scores[at : at + int(m["rows"])].copy()
+                        at += int(m["rows"])
+                    self.passes += 1
+                    self.requests += len(members)
+                    self.merged += len(members) > 1
+                    self.rows += rows
+                    self.largest = max(self.largest, rows)
+                    timing.count("server.merge.requests", len(members))
+                except Exception as error:  # noqa: BLE001 - each waiting request gets it
+                    for m in members:
+                        m["error"] = error
+                # No view of a connection's shared block outlives its request: a block
+                # still exported cannot be closed when that worker leaves.
+                arrays = None
+                for m in members:
+                    m["arrays"] = None
+                    m["done"].set()
+            del batch, kinds, members, slot
+
+
 class _Server(socketserver.ThreadingTCPServer):
     allow_reuse_address = True
     daemon_threads = True
@@ -361,6 +490,14 @@ class _Server(socketserver.ThreadingTCPServer):
         self.oom_replies = 0
         self.memory_cap_gb: float | None = None
         self._lock = threading.Lock()
+        #: Each arm's merged road (IKA-363), built on the first request that asks for it.
+        self.mergers: dict[str, _Merger] = {}
+
+    def merger(self, name: str) -> _Merger:
+        with self._lock:
+            if name not in self.mergers:
+                self.mergers[name] = _Merger(self.models[name])
+            return self.mergers[name]
 
     def note_oom(self, op: Any, error: str) -> None:  # noqa: ANN401
         with self._lock:
@@ -401,6 +538,44 @@ def serve(
     return server, f"{shown_host}:{shown_port}"
 
 
+def start_server(
+    arms: dict[str, Sequence[Path | str]],
+    *,
+    q_arms: dict[str, Path | str] | None = None,
+    regulation: str | None = None,
+    log: Path,
+    device: str = "cuda",
+    env: dict[str, str] | None = None,
+) -> tuple[Any, str]:
+    """Start `tools/inference_server.py` as a child process: (the process, its address).
+
+    For a tool that wants one server for its own processes (IKA-363: `time_match --served`,
+    `position_set --served`). The address is the server's first line of stdout; its log is
+    ``log``. Stop it with ``process.terminate()``.
+    """
+    import subprocess
+
+    from .regulation import repo_root
+
+    command = [sys.executable, str(repo_root() / "tools" / "inference_server.py"),
+               "--device", device, *(["--regulation", regulation] if regulation else [])]
+    for name, files in arms.items():
+        command += ["--arm", name, *(str(f) for f in files)]
+    for name, file in (q_arms or {}).items():
+        command += ["--q-arm", name, str(file)]
+    log.parent.mkdir(parents=True, exist_ok=True)
+    errors = log.open("w", encoding="utf-8")
+    process = subprocess.Popen(  # noqa: S603
+        command, env=env, stdout=subprocess.PIPE, stderr=errors, text=True,
+    )
+    assert process.stdout is not None
+    address = process.stdout.readline().strip()
+    if not address:
+        process.terminate()
+        raise SystemExit(f"the inference server exited before naming an address; see {log}")
+    return process, address
+
+
 @dataclass
 class RemoteValue:
     """A leaf that lives in another process, with the interface the search already uses.
@@ -419,6 +594,11 @@ class RemoteValue:
     #: depends on the number of rows in the call, so the two paths agree only while they
     #: cut a long batch in the same places.
     batch_size: int = CHUNK_ROWS
+    #: Ask for the server's merged road (IKA-363, `_Merger`): this worker's requests share
+    #: a forward pass with other workers' when they arrive together, and an answer moves in
+    #: the last places with who else asked. Off, the answers are the ones a worker would
+    #: compute itself, to the bit.
+    merge: bool = False
 
     def __post_init__(self) -> None:
         self.evaluated = 0
@@ -561,6 +741,7 @@ class RemoteValue:
                     "rows": rows,
                     "layout": layout,
                     "result_offset": result_offset,
+                    **({"merge": True} if self.merge else {}),
                 }) + "\n").encode("utf-8")
             )
             self._file.flush()
@@ -665,6 +846,7 @@ class RemoteValue:
                     "segments": [int(len(block.species)) for block in blocks],
                     "layout": layout,
                     "result_offset": result_offset,
+                    **({"merge": True} if self.merge else {}),
                 }) + "\n").encode("utf-8")
             )
             self._file.flush()

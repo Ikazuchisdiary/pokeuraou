@@ -2453,32 +2453,65 @@ def _expand(
         return spent, False, fills
     weights /= total
 
-    # Finished branches are scored by the leaf, as `_subgame_value` scores them, in one
-    # call for the cell -- a row-wise leaf gives the same numbers either way.
-    ended = [branch.position for branch in branches if branch.position.ended]
-    finished = iter(np.asarray(evaluate(ended), dtype=np.float64) if ended else ())
+    live = [n for n, branch in enumerate(branches) if not branch.position.ended]
     menus: dict[int, tuple[list[SideAction], list[SideAction]]] = {}
     if child_q is not None:
-        live = [n for n, branch in enumerate(branches) if not branch.position.ended]
         got = _q_menus(reg, [branches[n].position for n in live], child_q)
         menus = dict(zip(live, got, strict=True))
         if watch is not None and live:
             watch.child_passes += 1
             watch.child_ranked += len(live)
+    elif live:
+        from .narrow import narrow_many
+
+        # Every branch's two menus in one crossing (`narrow_many` is `narrow` of each).
+        got = narrow_many(
+            reg, [(branches[n].position, side) for n in live for side in (0, 1)],
+            limit=sub_limit,
+        )
+        for k, n in enumerate(live):
+            row_got, col_got = got[2 * k], got[2 * k + 1]
+            failed = next((x for x in (row_got, col_got) if isinstance(x, Exception)), None)
+            # A menu that failed is raised where the loop below meets that branch.
+            menus[n] = failed if failed is not None else (  # type: ignore[assignment]
+                list(row_got.actions), list(col_got.actions)
+            )
+    # The branches the loop below fills: those before the first whose menu is empty, where
+    # it stops (IKA-365).
+    filled_at: list[int] = []
+    for n in live:
+        if isinstance(menus[n], Exception) or not menus[n][0] or not menus[n][1]:
+            break
+        filled_at.append(n)
+    # Finished branches are scored by the leaf, as `_subgame_value` scores them, in one
+    # call for the cell; with the children's leaves in the same call when the leaf takes
+    # encoded blocks (IKA-365: one round trip to a server, not one a branch). Each block is
+    # scored as it would be alone (`port.score_segments`), so the values are the same.
+    ended = [branch.position for branch in branches if branch.position.ended]
+    early = _expand_scored(reg, branches, filled_at, menus, ended, evaluate, budget)
+    if early is None:
+        finished = iter(np.asarray(evaluate(ended), dtype=np.float64) if ended else ())
+        pending: dict[int, Any] = {}
+    else:
+        finished, pending = early
     kept: list[tuple[float, _Node | float]] = []
     for n, (weight, branch) in enumerate(zip(weights, branches, strict=True)):
         child_pos = branch.position
         if child_pos.ended:
             kept.append((float(weight), float(next(finished))))
             continue
-        if child_q is None:
-            row = narrow(reg, child_pos, 0, limit=sub_limit).actions
-            col = narrow(reg, child_pos, 1, limit=sub_limit).actions
-        else:
-            row, col = menus[n]
+        if isinstance(menus[n], Exception):
+            raise menus[n]
+        row, col = menus[n]
         if not row or not col:
             return spent, False, fills
-        payoff, notes = batched_payoff(reg, child_pos, row, col, evaluate, budget=budget)
+        if n in pending:
+            got_n = pending[n]
+            if isinstance(got_n, Exception):
+                raise got_n
+            payoff, notes = np.asarray(got_n.finish(), dtype=np.float64), set(got_n.unmodelled)
+        else:
+            payoff, notes = batched_payoff(reg, child_pos, row, col, evaluate, budget=budget)
         fills += 1
         spent += len(row) * len(col)
         unmodelled.update(notes)
@@ -2496,6 +2529,54 @@ def _expand(
         ))
     node.children[cell] = kept
     return spent, True, fills
+
+
+def _expand_scored(
+    reg: Regulation,
+    branches: Sequence[Any],
+    filled_at: Sequence[int],
+    menus: dict[int, tuple[list[SideAction], list[SideAction]]],
+    ended: list[Position],
+    evaluate: LeafEvaluator,
+    budget: Budget,
+) -> tuple[Any, dict[int, Any]] | None:
+    """The ended branches' values and the filled branches' pending payoffs, scored in one
+    call into the leaf (IKA-365), or None when the leaf takes no encoded blocks.
+
+    `_expand` filled and scored a branch at a time: through a server that was one round
+    trip a branch (and one more for the ended ones), a few dozen rows each, and a served
+    deepening spent its time in the trips. Here the port fills every branch in one crossing
+    (`pending_payoffs`, each node the one `batched_payoff` fills) and the ended positions are
+    encoded as their own block, so one `score_segments` call scores them all, each block in
+    a pass of its own size -- the values `_expand` got a branch at a time. A branch the port
+    refused comes back as its `PortRefused`, raised where the loop meets it.
+    """
+    if not filled_at:
+        return None
+    asks = [(branches[n].position, *menus[n]) for n in filled_at]
+    pending = port.pending_payoffs(reg, asks, evaluate, budget=budget)
+    if pending is None:
+        return None
+    owner = getattr(evaluate, "__self__", evaluate)
+    encoder = getattr(owner, "encoder", None)
+    blocks = [p.encoded for p in pending if not isinstance(p, Exception)]
+    if ended:
+        if encoder is None or not hasattr(encoder, "encode_positions"):
+            finished = iter(np.asarray(evaluate(ended), dtype=np.float64))
+        else:
+            blocks.append(encoder.encode_positions(ended))
+            finished = None
+    else:
+        finished = iter(())
+    values = port.score_segments(evaluate, blocks) if blocks else []
+    at = 0
+    for p in pending:
+        if not isinstance(p, Exception):
+            p.scored(values[at])
+            at += 1
+    if finished is None:
+        finished = iter(np.asarray(values[at], dtype=np.float64))
+    return finished, dict(zip(filled_at, pending, strict=True))
 
 
 #: Cells expanded ahead of the loop (`set_ahead`): 0 is off, the serial `_expand` as before.

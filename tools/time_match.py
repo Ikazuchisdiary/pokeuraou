@@ -17,6 +17,16 @@ without the Q, as a board does, IKA-338) and the bench belief. **The first --arm
 tested condition**: the Elo is its, and ``--sprt E0 E1`` tests it (`pokeuraou.sprt`: H1
 is "it is worth E1 or more"). ``--pairs`` is the cap.
 
+**The leaf on a server** (IKA-363). ``--served`` starts one inference server
+(`tools/inference_server.py`: the leaf and the Q) and every process sends its forward passes
+there; ``--inference HOST:PORT`` names a server already running. A process then holds no
+torch and no CUDA context (1.3-2 GB of the card each, locally), so the processes are limited
+by the CPU and the RAM rather than the card. ``--merge on`` asks the server's merged road: the
+requests of all processes waiting at once share a forward pass, which moves a value in the
+last places with the timing (a node-time game is then not replayed by seed); ``auto`` (the
+default) merges when a condition is on the wall clock and not on the count clock. Without a
+server the processes load the leaf themselves, as before.
+
 The pairs are handed out by `workqueue.run_workers` to ``--parallel`` processes, one game at
 a time in each. Each process is held to its own share of the logical cores (``--cpu-sets``;
 by default the machine split evenly, so ``--parallel 2`` gives each game four physical
@@ -86,6 +96,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--bench-drop", default=DEFAULT_BENCH_DROP)
     ap.add_argument("--max-turns", type=int, default=MAX_TURNS)
     ap.add_argument("--device", default=None)
+    ap.add_argument("--served", action="store_true",
+                    help="start one inference server for the leaf and the Q; the processes hold "
+                    "no model (IKA-363)")
+    ap.add_argument("--inference", default=None, metavar="HOST:PORT",
+                    help="an inference server already running (its arms value and q must be the "
+                    "leaf's and the Q's files); default: none, the processes load the leaf")
+    ap.add_argument("--merge", default="auto", choices=("auto", "on", "off"),
+                    help="the server's merged road (IKA-363): auto merges when a condition is on "
+                    "the wall clock")
     ap.add_argument("--cpu-workers", type=int, default=0,
                     help="the last N of the --parallel processes score the leaf and the Q on the "
                     "CPU (node-time runs: more games at once than the card holds; each game is "
@@ -168,6 +187,15 @@ def cpu_sets(spec: str | None, parallel: int) -> list[list[int]]:
     return sets
 
 
+def merging(args: argparse.Namespace) -> bool:
+    """Whether the processes ask the server's merged road (`--merge`; auto: a wall clock)."""
+    if not (args.served or args.inference):
+        return False
+    if args.merge != "auto":
+        return args.merge == "on"
+    return any(timematch.parse_condition(spec).clock == "wall" for spec in args.arm)
+
+
 def settings(args: argparse.Namespace, tested, other, values, q_path) -> dict:  # noqa: ANN001
     import hashlib
 
@@ -204,6 +232,9 @@ def settings(args: argparse.Namespace, tested, other, values, q_path) -> dict:  
         "cudaMemoryGb": args.cuda_memory_gb,
         "limits": {"rssGb": args.max_rss_gb, "freeGb": args.min_free_gb, "gpuGb": args.max_gpu_gb},
         "leafGraphs": args.leaf_graphs,
+        # IKA-363: where the forward passes ran, and whether the server merged them.
+        "served": bool(args.served or args.inference),
+        "merge": merging(args),
     }
 
 
@@ -227,23 +258,33 @@ def worker(args: argparse.Namespace) -> None:
     pool = load_pool(args.pool)
     reg = pool.reg
     register_mega_stones(reg)
-    humanplay.cap_cuda(args.cuda_memory_gb, args.device)
-    evaluate, encoder, device = humanplay.load_leaf(
-        reg, values, args.device, graphs=args.leaf_graphs == "on"
-    )
-    if str(device) == "cpu":
-        import torch
-
-        # One thread a process: the CPU processes sit beside the card's (--cpu-workers).
-        torch.set_num_threads(1)
-    q = qrank.LocalQ(q_path, encoder, device=device)
-    qrank.install(q)
     threads = max(tested.threads, other.threads)
     timematch.PORT_THREADS = args.port_threads
-    humanplay.use_threads(
-        threads, reg,
-        ([str(v) for v in values], str(device), args.leaf_graphs == "on", args.cuda_memory_gb),
-    )
+    if args.inference:
+        # IKA-363: the leaf and the Q on the server; no torch here.
+        merge = merging(args)
+        evaluate, encoder = humanplay.served_leaf(reg, args.inference, values, merge=merge,
+                                                  q_path=q_path)
+        device = f"server {args.inference}" + (" (merged)" if merge else "")
+        q = qrank.installed()
+        humanplay.use_threads(threads, reg, (args.inference, "value", merge),
+                              factory=humanplay.served_process_leaf)
+    else:
+        humanplay.cap_cuda(args.cuda_memory_gb, args.device)
+        evaluate, encoder, device = humanplay.load_leaf(
+            reg, values, args.device, graphs=args.leaf_graphs == "on"
+        )
+        if str(device) == "cpu":
+            import torch
+
+            # One thread a process: the CPU processes sit beside the card's (--cpu-workers).
+            torch.set_num_threads(1)
+        q = qrank.LocalQ(q_path, encoder, device=device)
+        qrank.install(q)
+        humanplay.use_threads(
+            threads, reg,
+            ([str(v) for v in values], str(device), args.leaf_graphs == "on", args.cuda_memory_gb),
+        )
     started_workers = deepen.workers(reg)
     halt = threading.Event()
     watch = memory_watch(
@@ -497,21 +538,43 @@ def driver(args: argparse.Namespace, argv: list[str]) -> int:
         timematch.parse_condition(spec).clock == "wall" for spec in args.arm
     ):
         raise SystemExit("--cpu-workers is for node-time conditions: on the wall clock it is the agent")
+    if args.cpu_workers and (args.served or args.inference):
+        raise SystemExit("--cpu-workers is for a local leaf: with a server no process holds one")
+
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(ROOT / "src")
+    server = None
+    inference = args.inference
+    if args.served:
+        from pokeuraou.inference import start_server
+        from pokeuraou.pool import load_pool
+
+        server, inference = start_server(
+            {"value": values}, q_arms={"q": q_path},
+            regulation=load_pool(args.pool).reg.meta.format_id,
+            log=out / "logs" / "inference.log", env=env,
+            device=args.device or "cuda",
+        )
+        print(f"  inference server {inference} (the processes hold no model), merged road "
+              f"{'on' if merging(args) else 'off'}", file=sys.stderr, flush=True)
 
     def command(k: int, address: str) -> list[str]:
         on_cpu = k >= args.parallel - args.cpu_workers
         return [sys.executable, str(Path(__file__).resolve()), *argv, "--worker", str(k),
                 "--address", address, "--cpus", ",".join(str(c) for c in sets[k]),
-                *(["--device", "cpu"] if on_cpu else [])]
+                *(["--device", "cpu"] if on_cpu else []),
+                *(["--inference", inference] if inference and not args.inference else [])]
 
-    env = dict(os.environ)
-    env["PYTHONPATH"] = str(ROOT / "src")
     outcome: dict = {}
-    code = run_workers(
-        range(args.start, args.start + args.pairs), command, workers=args.parallel,
-        out_dir=out, env=env, label="time match", monitor=monitor,
-        poll=args.poll, max_failures=0, outcome=outcome,
-    )
+    try:
+        code = run_workers(
+            range(args.start, args.start + args.pairs), command, workers=args.parallel,
+            out_dir=out, env=env, label="time match", monitor=monitor,
+            poll=args.poll, max_failures=0, outcome=outcome,
+        )
+    finally:
+        if server is not None:
+            server.terminate()
     monitor.save()
     result = summary(out, tested, other, monitor, outcome)
     (out / "summary.json").write_bytes((json.dumps(result, indent=1) + "\n").encode("utf-8"))
