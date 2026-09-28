@@ -143,6 +143,46 @@ def test_the_pool_reads_a_bayesian_root_as_the_serial_read(roster, pool) -> None
     assert checked >= 2
 
 
+def test_a_sub_game_filled_once_reads_as_every_one_filled(roster, pool, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-378 (`SHARE`): a read that fills each child sub-game once -- here in a table of
+    its own, on the workers in the shared one -- is the read that fills every one where it
+    is met: every rung, the counted work and the notes, on open roots (depth 2 and 3, the
+    knock-out fork) and on Bayesian roots (a branch read off another completion's turn).
+    hp-share scores a row the same in any batch, so the values are the same to the bit. The
+    positive control: sub-games taken from the table, here and across the workers, and from
+    an earlier sub-game of the same call. (A deep cell's children are shared on the learned
+    leaf's road, `tests/test_ladder_leaf.py`: hp-share reads them one at a time.)"""
+    reg = roster.reg
+    # Children met again with other menus (n3, n4) and in the other fork (x).
+    stages = "d2r2b3n3+d2r3b3n4+d2r4ban4x+d3r2ban4/r2ban4"
+    table = {"serial": 0, "pool": 0, "same": 0}
+    nodes = [(_node(reg, pos, 6), stages, 0) for pos in _played(roster)[:3]]
+    sheet = list(roster.sets)[:6]
+    for pos in _played(roster)[:3]:
+        spreads = {s: completions(reg, pos, s, sheet, seen=frozenset({0, 1})) for s in (0, 1)}
+        if len(spreads[1]) >= 2:
+            nodes += [(_node(reg, pos, 5, spreads, side), "d2r2b3n4+d2r3ban4x", side)
+                      for side in (0, 1)]
+    assert len(nodes) >= 5
+    for node, how, side in nodes:
+        monkeypatch.setattr(ladder, "SHARE", False)
+        plain = _read(reg, node, how, side=side, workers=False)
+        assert plain.here["sharedSubgames"] == 0 and plain.rungs
+        monkeypatch.setattr(ladder, "SHARE", True)
+        serial = _read(reg, node, how, side=side, workers=False)
+        pooled = _read(reg, node, how, side=side, workers=True)
+        _same(serial, plain)
+        _same(pooled, plain)
+        table["serial"] += serial.here["sharedSubgames"] - serial.here["sameSubgames"]
+        table["same"] += serial.here["sameSubgames"]
+        table["pool"] += pooled.pool["sharedSubgames"] - pooled.pool["sameSubgames"]
+    assert table["serial"] > 0 and table["pool"] > 0 and table["same"] > 0, table
+    # A read takes nothing an earlier read kept: the same node read again fills its own.
+    node, how, side = nodes[0]
+    again = _read(reg, node, how, side=side, workers=True)
+    assert again.pool["keptSubgames"] > 0
+
+
 @pytest.mark.parametrize("split", [False, True])
 def test_the_wall_clock_and_the_stop(roster, pool, monkeypatch, split) -> None:  # noqa: ANN001
     reg = roster.reg

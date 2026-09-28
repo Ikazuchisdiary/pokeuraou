@@ -1026,6 +1026,8 @@ class RustNode:
         # IKA-302: with positions held, the port keeps every branch it writes under a
         # number, and a sub-game's `score` and `fills` name it instead of sending it back.
         refs = {"refs": True} if _HOLD[0] and full else {}
+        if DIGESTS[0] and full:
+            refs["digest"] = True
         answers = self._many(
             [
                 {
@@ -1444,6 +1446,7 @@ class RustNode:
                 "full": full,
                 "select": select,
                 "events": events,
+                **({"digest": True} if DIGESTS[0] and full else {}),
             }
         )
         return None if response is None else PortTurn.read(response)
@@ -1803,6 +1806,10 @@ def _note_repeat(request: dict[str, Any]) -> None:
 # edits one in place and asks again is exactly what the switch keeps this away from.
 
 _HOLD = [False]
+#: IKA-378: a full turn's branches come with the port's digest of each position
+#: (`PortBranch.digest`), by which the ladder shares a child's sub-game across its worker
+#: processes (`subshare`). Off: the requests and answers are the bytes they were.
+DIGESTS = [False]
 #: id -> (the object, its entry). The object is held so its id cannot be reused.
 _HELD: dict[int, tuple[Position, _Stored]] = {}
 #: A request's bytes -> the answer, for the kinds answered from the position alone.
@@ -2172,6 +2179,9 @@ class PortBranch:
     #: The draws this branch took, when events were asked for (IKA-345, `EventLog::chance`):
     #: ``<kind> <user> <move> <target> [<arg>...]``; a merged branch keeps what all share.
     chance: list[str] = field(default_factory=list)
+    #: IKA-378: the port's digest of `position` (two 64-bit words) when asked for
+    #: (`DIGESTS`), or a digest made from one (`search._cell_turns`); None: not known.
+    digest: tuple[int, int] | None = None
 
 
 @dataclass
@@ -2215,6 +2225,7 @@ class PortTurn:
                     list(b.get("events") or []),
                     _acts(b),
                     list(b.get("chance") or []),
+                    tuple(b["digest"]) if "digest" in b else None,
                 )
                 for b in branches
             ]
