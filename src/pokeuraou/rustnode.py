@@ -45,6 +45,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
@@ -100,6 +101,11 @@ def binary_path() -> Path:
 
 #: Set once the bridge has failed, so a broken one is not retried for every node.
 _GAVE_UP = False
+
+#: IKA-370: seconds this process has waited on its ports' answers and the reads it waited
+#: on (`RustNode._with_deadline`), always kept (two clock reads a read): a ladder worker
+#: splits its time into its own CPU, its port and the inference server with it.
+PORT_WAITED = [0.0, 0]
 
 
 def binary_fingerprint() -> dict[str, Any]:
@@ -671,6 +677,7 @@ class RustNode:
         does not finish. On expiry the child is killed, which closes the pipe and releases
         the thread still blocked inside the read.
         """
+        began = time.perf_counter()
         try:
             return self._reader.submit(call).result(timeout=NODE_TIMEOUT)
         except FuturesTimeout:
@@ -679,6 +686,9 @@ class RustNode:
                 f"the Rust node did not answer within {NODE_TIMEOUT:.0f}s ({what}); "
                 f"killed it. {self._stderr_text()}"
             ) from None
+        finally:
+            PORT_WAITED[0] += time.perf_counter() - began
+            PORT_WAITED[1] += 1
 
     @timing.timed("rust.score")
     def score(
