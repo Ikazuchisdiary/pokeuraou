@@ -224,6 +224,8 @@ class _Kit:
             self.leaf, encoder = humanplay.served_leaf(
                 self.reg, address, values, merge=args.merge == "on", q_path=q_path)
             self.device = f"server {address}"
+            #: A ladder worker's leaf and Q (IKA-364, `humanplay.ladder_process_leaf`).
+            self.spec: tuple = ("served", address, "value", args.merge == "on", str(q_path), "q")
         else:
             humanplay.cap_cuda(args.cuda_memory_gb, args.device)
             self.leaf, encoder, self.device = humanplay.load_leaf(
@@ -235,7 +237,16 @@ class _Kit:
 
                 torch.set_num_threads(1)
             qrank.install(qrank.LocalQ(q_path, encoder, device=self.device))
+            self.spec = ("local", [str(v) for v in values], str(self.device),
+                         bool(getattr(args, "leaf_graphs", False)), args.cuda_memory_gb,
+                         str(q_path))
         humanplay.use_threads(1, self.reg, None)
+        threads = int(getattr(args, "threads", 1) or 1)
+        if threads > 1:
+            # IKA-364: a ladder's cells on threads - 1 workers, the port's cells here.
+            humanplay.use_threads(threads)
+            got = humanplay.use_ladder_pool(threads, self.reg, self.spec)
+            print(f"ladder cells on {got} worker process(es)", file=sys.stderr, flush=True)
         data = json.loads((Path(args.set) / "positions.json").read_bytes())
         self.positions = data["positions"]
         self.width = data["width"]
@@ -759,8 +770,9 @@ def sweep(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912, PLR0915 - t
         counts = (humanplay.legal_count(kit.reg, pos, 0), humanplay.legal_count(kit.reg, pos, 1),
                   classes)
         for base in conds:
-            if base.clock != "count":
-                raise SystemExit("a sweep reads on the node clock (clock=count)")
+            if base.clock != "count" and base.ladder is None:
+                raise SystemExit("a sweep reads on the node clock (clock=count); a ladder may "
+                                 "read on the wall clock (IKA-364)")
             for seconds in budgets:
                 cond = replace(base, seconds=seconds)
                 name = f"{cond.name}@{seconds:g}"
@@ -778,13 +790,18 @@ def sweep(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912, PLR0915 - t
                 extra: dict = {}
                 began = time.perf_counter()
                 if cond.ladder is not None:
+                    # The node clock, or the wall clock from here (the depth-1 node the
+                    # ladder builds included, as a person's move counts it: IKA-364).
+                    clocked = ({"clock": "count", "start_ms": node_ms} if cond.clock == "count"
+                               else {"clock": "wall", "start_ms": 0.0, "began": began})
                     solved = humanplay.solve_move(
                         kit.reg, pos, 0, list(ours), list(theirs), spreads, kit.leaf,
                         budget=budget, exact=exact, ladder={"stages": parse_ladder(cond.ladder),
-                                            "budget_ms": seconds * 1000.0, "clock": "count",
-                                            "cost": LADDER_COSTS["local", 1],
-                                            "start_ms": node_ms})
+                                            "budget_ms": seconds * 1000.0,
+                                            "cost": LADDER_COSTS["local", 1], **clocked})
                     extra["ladder"] = solved.ladder.to_json()
+                    extra["nodeWorkMs"] = round(LADDER_COSTS["local", 1].ms(
+                        solved.ladder.work), 1)
                 elif cond.depth2_auto:
                     d2k = humanplay.depth2_children(seconds * 1000.0 - node_ms, classes, price)
                     solved = humanplay.solve_move(
@@ -1150,6 +1167,9 @@ def main(argv: list[str] | None = None) -> None:
             s.add_argument("--arm", action="append", required=True,
                            help="a time-match condition (its seconds are the sweep's)")
             s.add_argument("--seconds", default="1,4,16,64")
+            s.add_argument("--threads", type=int, default=1,
+                           help="a ladder's cells on threads - 1 worker processes (IKA-364; "
+                           "with --inference each asks the server). 1: read here")
             s.add_argument("--keep-matrix", action="store_true",
                            help="a ladder's root prices at the longest budget kept as a "
                                 "reference ref-<arm>@<s>")
