@@ -62,7 +62,7 @@ import sys
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from multiprocessing import shared_memory
 from pathlib import Path
@@ -994,11 +994,10 @@ def served_model(value: Any):
         instance = mine()
         # Through the process's gate (`EAGER_PASSES`, IKA-334): a pass holds its
         # activations on the card until its answer is back, and the card runs the passes
-        # one after another anyway. Waiting at the gate counts as `waited`.
-        with _EAGER_GATE:
-            entered = time.perf_counter()
-            out = instance.from_encoded(encoded)
-            done = time.perf_counter()
+        # one after another anyway. Waiting at the gate counts as `waited`. Out of memory,
+        # it runs again alone (`eager_pass`, IKA-377).
+        out, entered = eager_pass(lambda: instance.from_encoded(encoded))
+        done = time.perf_counter()
         # Kept for the same reason they were added: they are how anyone knows whether the
         # serving side is queueing. `waited` is finding this thread's copy and the wait at
         # the eager gate (IKA-334); the gate's wait replaces a wait the card imposed anyway.
@@ -1063,6 +1062,55 @@ EAGER_PASSES = int(os.environ.get("POKEURAOU_EAGER_PASSES", "2"))
 _EAGER_GATE = (
     threading.BoundedSemaphore(EAGER_PASSES) if EAGER_PASSES > 0 else contextlib.nullcontext()
 )
+#: Taken by a pass that ran out of memory, to run again with the whole gate (IKA-377).
+_ALONE = threading.Lock()
+#: Eager passes that ran out of memory and were run again alone: [retried, of them failed
+#: again]. For the server's report.
+EAGER_RETRIES = [0, 0]
+
+
+def eager_pass(run: Callable[[], Any]) -> tuple[Any, float]:
+    """`run()`, an eager forward pass, through the process's gate: (its answer, when it got
+    in). Every eager pass of the server goes here -- the value arms' blocks over
+    `GRAPH_ROWS` (`served_model`) and Q's passes the graphs do not take (`qrank.served_q`).
+
+    IKA-377. A pass that runs out of CUDA memory is run once more *alone*: it waits for the
+    whole gate (no other eager pass on the card), empties the allocator's cache and runs
+    again, and so does not fail the worker's request. The allocator has already freed its
+    cache and retried by then (`num_alloc_retries`); what it cannot do is wait for another
+    thread's pass to give its activations back. The second run is the same pass on the
+    same rows, so the same answer. If it fails again the error is the request's.
+    """
+    try:
+        with _EAGER_GATE:
+            entered = time.perf_counter()
+            return run(), entered
+    except Exception as error:
+        if not is_out_of_memory(error):
+            raise
+    import torch
+
+    with _ALONE:
+        gate = _EAGER_GATE
+        held = 0
+        try:
+            if isinstance(gate, threading.BoundedSemaphore):
+                for _ in range(EAGER_PASSES):
+                    gate.acquire()
+                    held += 1
+            EAGER_RETRIES[0] += 1
+            timing.count("server.eager.alone")
+            torch.cuda.empty_cache()
+            entered = time.perf_counter()
+            try:
+                return run(), entered
+            except Exception as error:
+                if is_out_of_memory(error):
+                    EAGER_RETRIES[1] += 1
+                raise
+        finally:
+            for _ in range(held):
+                gate.release()
 
 #: Graphs kept per arm (and index dtype), least recently replayed dropped first. Each holds
 #: about 0.65 MB of host memory on one net and 0.86 MB on a two-net ensemble (IKA-107: 511
@@ -1084,6 +1132,72 @@ GRAPH_CACHE = int(os.environ.get("POKEURAOU_GRAPH_CACHE", "512"))
 #: synchronize, "beginAllocateToPool: already recording"). Replays take it too, as within
 #: one arm, so no replay is enqueued inside another arm's capture.
 _GRAPH_LOCK = threading.Lock()
+
+
+class _GraphThread:
+    """The one thread and the one side stream every CUDA graph of the process is warmed up
+    and captured on (IKA-377): `_Graphs`, `qrank.QGraphs` and `qrank.QBatchGraphs`.
+
+    cuBLAS keeps a workspace (8 MiB blocks of the caching allocator, two or three a stream)
+    for every pair of a thread's handle and a stream it ran on, for the life of the
+    process: no `empty_cache` frees it, since a captured graph may write into it. Each
+    capture used to warm up on a fresh `torch.cuda.Stream()` -- a stream from torch's pool
+    of 32 -- on whichever serving thread met a new shape first. Sixteen serving threads
+    times the pieces (the value graphs, Q's trunk and sides, the batch graphs' trunk,
+    sides and pair) came to all 32 pool streams, each holding workspaces: 1,034 MiB
+    reserved (651 allocated) of a 3.26 GiB cap when a 16-thread ladder read of hidden
+    positions ran out of memory on a value pass. Here there is one handle on one stream
+    besides the default stream: every graph's workspace is the same one, as every graph
+    captured by one thread shared its workspace already (the replays run one at a time
+    under `_GRAPH_LOCK`, on the one default stream).
+
+    A capture replays the kernels eager chose for the same shapes whichever thread and
+    stream captured it, so the answers do not move (`tests/test_inference.py`,
+    `tests/test_q_rank.py` on CUDA). The caller holds `_GRAPH_LOCK` throughout and waits
+    here, so nothing else is enqueued meanwhile, as before.
+    """
+
+    def __init__(self) -> None:
+        self._executor: Any = None
+        self._stream: Any = None
+        self._warm: set[Any] = set()
+
+    def run(self, warm_key: Any, warm: Callable[[], Any] | None, capture: Callable[[], Any],
+            pool: Any) -> tuple[Any, Any]:  # noqa: ANN401
+        """(graph, output) of `capture` in `pool`, after `warm` twice the first time
+        `warm_key` is met. Called with `_GRAPH_LOCK` held."""
+        if self._executor is None:
+            from concurrent.futures import ThreadPoolExecutor
+
+            self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="cuda-graphs")
+        return self._executor.submit(self._run, warm_key, warm, capture, pool).result()
+
+    def _run(self, warm_key: Any, warm: Callable[[], Any] | None, capture: Callable[[], Any],
+             pool: Any) -> tuple[Any, Any]:  # noqa: ANN401
+        import torch
+
+        # Grad mode is the thread's own: the callers' `no_grad` does not reach here.
+        with torch.no_grad():
+            if self._stream is None:
+                self._stream = torch.cuda.Stream()
+            side = self._stream
+            if warm is not None and warm_key not in self._warm:
+                # Warm-up off the default stream first, as capturing asks (cuBLAS and the
+                # ensemble's mapped call set themselves up on first use).
+                side.wait_stream(torch.cuda.current_stream())
+                with torch.cuda.stream(side):
+                    for _ in range(2):
+                        warm()
+                torch.cuda.current_stream().wait_stream(side)
+                self._warm.add(warm_key)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, pool=pool, stream=side, capture_error_mode="thread_local"):
+                out = capture()
+            return graph, out
+
+
+#: The process's graph thread (IKA-377): only ever used with `_GRAPH_LOCK` held.
+GRAPH_THREAD = _GraphThread()
 
 
 class _Graphs:
@@ -1133,7 +1247,6 @@ class _Graphs:
         self.kinds: dict[tuple, tuple[dict[str, Any], Any, dict[int, tuple[Any, Any]]]] = {}
         self.captured = 0
         self.evicted = 0
-        self.warm: set[int] = set()
         #: Why the graphs were given up, once a capture has failed.
         self.failed: str | None = None
 
@@ -1205,24 +1318,19 @@ class _Graphs:
     def _capture(self, inputs: dict[str, Any], pool: Any) -> tuple[Any, Any]:  # noqa: ANN401
         import torch
 
-        if threading.get_ident() not in self.warm:
-            # Warm-up off the default stream first, as capturing asks (cuBLAS and the
-            # ensemble's mapped call set themselves up on first use, per thread: a
-            # thread that had not warmed failed its capture with the others running).
-            # Once a thread is enough: its later sizes are captured cold, a third of the
-            # cost of a capture, and replay the eager answer all the same (tested).
-            side = torch.cuda.Stream()
-            side.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(side):
-                for _ in range(2):
-                    self.value._mean_logit(inputs)
-            torch.cuda.current_stream().wait_stream(side)
-            self.warm.add(threading.get_ident())
-        graph = torch.cuda.CUDAGraph()
-        with torch.cuda.graph(graph, pool=pool, capture_error_mode="thread_local"):
+        # Warmed up once, off the default stream, as capturing asks (cuBLAS and the
+        # ensemble's mapped call set themselves up on first use, per thread: a thread that
+        # had not warmed failed its capture with the others running). All captures run on
+        # the process's one graph thread (IKA-377), so once is enough: later sizes are
+        # captured cold, a third of the cost of a capture, and replay the eager answer all
+        # the same (tested).
+        return GRAPH_THREAD.run(
+            (self, "value"),
+            lambda: self.value._mean_logit(inputs),
             # `BatchedValue.from_encoded`'s own expression, on the same rows.
-            out = torch.sigmoid(self.value._mean_logit(inputs)).double()
-        return graph, out
+            lambda: torch.sigmoid(self.value._mean_logit(inputs)).double(),
+            pool,
+        )
 
 
 def load_models(paths: dict[str, Sequence[Path]], encoder: Any, device_name: str) -> dict:

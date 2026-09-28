@@ -33,7 +33,6 @@ import json
 import os
 import re
 import socket
-import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
@@ -398,33 +397,16 @@ class QGraphs:
         self.trunk: tuple[Any, tuple[Any, Any, Any]] | None = None
         #: (side, pool size) -> (graph, that side's action vectors)
         self.sides: dict[tuple[int, int], tuple[Any, Any]] = {}
-        self.warm: set[tuple[int, str]] = set()
         self.captured = 0
         self.replays = 0
         #: Why the graphs were given up, once a capture has failed.
         self.failed: str | None = None
 
-    def _warm(self, what: str, run: Callable[[], Any]) -> None:
-        """Runs `run` twice off the default stream before this thread's first capture of
-        `what` (cuBLAS and friends set themselves up on first use, per thread)."""
-        import torch
-
-        key = (threading.get_ident(), what)
-        if key in self.warm:
-            return
-        side = torch.cuda.Stream()
-        side.wait_stream(torch.cuda.current_stream())
-        with torch.cuda.stream(side):
-            for _ in range(2):
-                run()
-        torch.cuda.current_stream().wait_stream(side)
-        self.warm.add(key)
-
     def _capture(self, what: str, run: Callable[[], Any]) -> tuple[Any, Any]:  # noqa: ANN401
         import torch
 
-        self._warm(what, run)
-        graph = torch.cuda.CUDAGraph()
+        from .inference import GRAPH_THREAD
+
         # One pool per piece, never one for all. A shared pool is safe only when graphs
         # replay in the order they were captured, and these replay in a request's order
         # (trunk, side 0, side 1) whatever order their sizes were first met in: with one
@@ -436,8 +418,9 @@ class QGraphs:
         # a server, and a 4,000-pair board lost both servers to an abort after 2 minutes.
         if what not in self.pools:
             self.pools[what] = torch.cuda.graph_pool_handle()
-        with torch.cuda.graph(graph, pool=self.pools[what], capture_error_mode="thread_local"):
-            out = run()
+        # Warmed up (twice, off the default stream: cuBLAS and friends set themselves up on
+        # first use) and captured on the process's one graph thread and stream (IKA-377).
+        graph, out = GRAPH_THREAD.run((self, what), run, run, self.pools[what])
         self.captured += 1
         timing.count("q.graph.captured")
         return graph, out
@@ -624,7 +607,6 @@ class QBatchGraphs:
         #: (serial of side 0's graph, serial of side 1's) -> (graph, matrix)
         self.pairs: OrderedDict = OrderedDict()
         self._serial = 0
-        self.warm: set[tuple[int, str]] = set()
         self.captured = 0
         self.replays = 0
         self.evicted = 0
@@ -633,20 +615,13 @@ class QBatchGraphs:
     def _capture(self, what: str, run: Callable[[], Any]) -> tuple[Any, Any]:  # noqa: ANN401
         import torch
 
-        key = (threading.get_ident(), what)
-        if key not in self.warm:
-            side = torch.cuda.Stream()
-            side.wait_stream(torch.cuda.current_stream())
-            with torch.cuda.stream(side):
-                for _ in range(2):
-                    run()
-            torch.cuda.current_stream().wait_stream(side)
-            self.warm.add(key)
-        graph = torch.cuda.CUDAGraph()
+        from .inference import GRAPH_THREAD
+
         if what not in self.pools:
             self.pools[what] = torch.cuda.graph_pool_handle()
-        with torch.cuda.graph(graph, pool=self.pools[what], capture_error_mode="thread_local"):
-            out = run()
+        # Warmed up once a piece and captured on the process's one graph thread and stream
+        # (IKA-377), as `QGraphs`' pieces are.
+        graph, out = GRAPH_THREAD.run((self, what), run, run, self.pools[what])
         self.captured += 1
         timing.count("q.batchgraph.captured")
         return graph, out
@@ -806,6 +781,7 @@ def served_q(
     reparametrised, so the serving threads share it.
     """
     from . import qhead
+    from .inference import eager_pass
 
     graphs = QGraphs(net, device) if QGraphs.usable(device) else None
     batch_graphs = QBatchGraphs(net, device) if QBatchGraphs.usable(device) else None
@@ -817,8 +793,10 @@ def served_q(
         with timing.stage("server.qgraph"):
             out = graphs.matrix(arrays) if graphs is not None else None
         if out is None:
+            # Through the value arms' gate (IKA-377): a batch past the graphs' cells is
+            # 0.1-0.3 GB of activations, and nothing bounded how many ran at once.
             with timing.stage("server.qeager"):
-                out = qhead.q_matrix(net, arrays, device)
+                out, _entered = eager_pass(lambda: qhead.q_matrix(net, arrays, device))
         answer.held += time.perf_counter() - started
         answer.calls += 1
         return out
@@ -831,7 +809,7 @@ def served_q(
             out = batch_graphs.matrices(requests) if batch_graphs is not None else None
         if out is None:
             with timing.stage("server.qbatcheager"):
-                out = qhead.q_matrices(net, requests, device)
+                out, _entered = eager_pass(lambda: qhead.q_matrices(net, requests, device))
         answer.held += time.perf_counter() - started
         answer.calls += 1
         answer.batched += len(requests)

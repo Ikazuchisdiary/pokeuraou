@@ -782,6 +782,169 @@ def test_two_arms_capturing_at_once_answer_as_eager(parts):
         assert model.replays == per_arm * len(sizes), name
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graphs need a card")
+def test_graphs_met_on_many_threads_hold_memory_on_one_side_stream(parts):
+    """IKA-377: cuBLAS keeps a workspace for every (thread's handle, stream) it ran on, for
+    the life of the process. Each capture used to warm up on a fresh pool stream on the
+    serving thread that met the shape, and a 16-thread ladder read left all 32 pool streams
+    holding workspaces (1,034 MiB of a 3.26 GiB cap) when the server ran out of memory.
+    Eight threads each meeting new sizes must leave the card's segments on the default
+    stream and one side stream (the process's graph thread), and every answer the eager one.
+    """
+    regulation, encoder, net = parts
+    device = torch.device("cuda")
+    from pokeuraou import inference
+    from pokeuraou.beliefnode import _subset
+
+    local = BatchedValue(net.to(device), encoder, device=device)
+    model = inference.served_model(BatchedValue(net.to(device), encoder, device=device))
+    encoded = encoder.encode_positions(_positions(regulation, 64))
+    threads_n = 8
+    ready = threading.Barrier(threads_n)
+    wrong: list[str] = []
+
+    def ask(index: int) -> None:
+        ready.wait()
+        for size in range(1 + 8 * index, 9 + 8 * index):
+            block = _subset(encoded, list(range(size)))
+            arrays = {name: np.asarray(getattr(block, name)) for name in inference.ARRAYS}
+            if not np.array_equal(model.block(arrays, size), local.from_encoded(block)):
+                wrong.append(f"{size}: not the eager answer")
+
+    threads = [threading.Thread(target=ask, args=(k,)) for k in range(threads_n)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    torch.cuda.synchronize()
+    assert not wrong, wrong[:5]
+    assert model.graphs.failed is None and model.graphs.captured == 8 * threads_n
+    side = {seg["stream"] for seg in torch.cuda.memory_snapshot() if seg["stream"] != 0}
+    assert len(side) <= 1, f"{len(side)} side streams hold card memory"
+
+
+def test_an_eager_pass_out_of_memory_runs_again_alone(monkeypatch):
+    """IKA-377: a 16-thread ladder read stopped on the server's out-of-memory reply to a
+    value pass, with another thread's pass holding its activations. A pass that runs out of
+    memory now waits for the whole gate -- no other eager pass on the card -- and runs
+    again, and the worker gets the answer. A slow pass is inside the gate when a second
+    one (in the gate's other place) runs out of memory: its second run must start only when
+    it is alone, after the slow one. Any other error is the request's, unretried."""
+    from types import SimpleNamespace
+
+    import pokeuraou.inference as inference
+    import pokeuraou.value as value_module
+
+    class OutOfMemoryError(RuntimeError):
+        """torch's name for it (`inference.is_out_of_memory` reads the name)."""
+
+    inside = {"now": 0}
+    count = threading.Lock()
+    seen: dict[str, list] = {"alone": [], "calls": [], "order": []}
+    slow_in = threading.Barrier(2)
+
+    class Pass:
+        def __init__(self, nets, encoder, device=None, batch_size=None):  # noqa: ANN001
+            pass
+
+        def from_encoded(self, encoded):  # noqa: ANN001, ANN202
+            kind = int(encoded.species[0, 0, 0])
+            with count:
+                inside["now"] += 1
+                seen["calls"].append(kind)
+                now = inside["now"]
+            try:
+                if kind == 1:  # slow: holds the card a while
+                    slow_in.wait()
+                    threading.Event().wait(0.2)
+                    seen["order"].append("slow done")
+                elif kind == 2:  # out of memory the first time
+                    if seen["calls"].count(2) == 1:
+                        seen["order"].append("out of memory")
+                        raise OutOfMemoryError("CUDA out of memory. Tried to allocate 80.00 MiB")
+                    seen["alone"].append(now)
+                    seen["order"].append("again")
+                elif kind == 3:
+                    raise ValueError("not a memory error")
+            finally:
+                with count:
+                    inside["now"] -= 1
+            return np.full(len(encoded.species), float(kind))
+
+    monkeypatch.setattr(value_module, "BatchedValue", Pass)
+    monkeypatch.setattr(inference, "EAGER_RETRIES", [0, 0])
+    stand_in = SimpleNamespace(nets=[object(), object()], encoder=None, device=None, batch_size=4096)
+    score = inference.served_model(stand_in)
+
+    def arrays(kind: int) -> dict:
+        return {name: np.full((3, 2, 4), kind) for name in inference.ARRAYS}
+
+    got: dict[int, np.ndarray] = {}
+    slow = threading.Thread(target=lambda: got.setdefault(1, score(arrays(1), 3)))
+    slow.start()
+
+    def failing() -> None:
+        slow_in.wait()  # the slow pass is inside the gate, and the other place is free
+        got[2] = score(arrays(2), 3)
+
+    second = threading.Thread(target=failing)
+    second.start()
+    for thread in (slow, second):
+        thread.join()
+    assert np.array_equal(got[2], np.full(3, 2.0))
+    assert np.array_equal(got[1], np.full(3, 1.0))
+    assert seen["calls"].count(2) == 2
+    assert seen["order"] == ["out of memory", "slow done", "again"], seen["order"]
+    assert seen["alone"] == [1], seen["alone"]
+    assert inference.EAGER_RETRIES == [1, 0]
+    with pytest.raises(ValueError, match="not a memory error"):
+        score(arrays(3), 3)
+    assert seen["calls"].count(3) == 1
+    assert inference.EAGER_RETRIES == [1, 0]
+
+
+def test_q_eager_passes_go_through_the_process_gate(monkeypatch):
+    """IKA-377: Q's eager passes (a ``q_batch`` past the graphs' cells: 0.1-0.3 GB of
+    activations) had no gate, beside the value arms' two. They go through the same one:
+    eight threads asking at once put two inside, and with the gate lifted more (the control
+    that the count sees an overlap)."""
+    import contextlib
+    from types import SimpleNamespace
+
+    import pokeuraou.inference as inference
+    from pokeuraou import qhead, qrank
+
+    inside = {"now": 0, "most": 0}
+    count = threading.Lock()
+
+    def q_matrices(net, requests, device):  # noqa: ANN001, ANN202
+        with count:
+            inside["now"] += 1
+            inside["most"] = max(inside["most"], inside["now"])
+        threading.Event().wait(0.05)
+        with count:
+            inside["now"] -= 1
+        return [np.zeros((2, 3)) for _ in requests]
+
+    monkeypatch.setattr(qhead, "q_matrices", q_matrices)
+    net = SimpleNamespace(config=SimpleNamespace(properties=False), vocab_fingerprint="v")
+    answer = qrank.served_q(net, torch.device("cpu"), ["q.pt"])
+    assert answer.batch_graphs is None
+
+    def most_at_once() -> int:
+        inside["most"] = 0
+        threads = [threading.Thread(target=answer.batch, args=([{}],)) for _ in range(8)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        return inside["most"]
+
+    assert most_at_once() == 2
+    monkeypatch.setattr(inference, "_EAGER_GATE", contextlib.nullcontext())
+    assert most_at_once() > 2
+
+
 def test_the_eager_passes_go_through_the_process_gate(monkeypatch):
     """IKA-334: twelve serving threads each holding an eager pass's activations at once
     filled the card (4.6 GB a server), and on WDDM that hung the card instead of failing.
