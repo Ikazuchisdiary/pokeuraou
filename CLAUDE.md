@@ -83,6 +83,7 @@ uv run pytest --junitxml=reports/pytest.xml && uv run python tools/ci_skip_audit
   - ページのアイコンは Status に合わせる: Backlog ⚪・Todo 🔵・In Progress 🟡・Done ✅・Canceled ❌。課題を作るときも Status を変えるときも、同じ更新でアイコンを付け替える（`notion-update-page` の `icon`）。
   - ユーザーへの報告と Notion の本文で課題に触れるときは、番号をその課題のページへのリンクにする（例: `[IKA-372](https://app.notion.com/p/3e94b8acaa6c819788e7c10aef4379a7)`）。URL は Issues を `ID` で引いて得る。
   - 結果（取り込み・段の報告など）は Notion のコメントにせず、本文の先頭に地の文で書く: `notion-update-page` の `insert_content`・`position: {type: start}` で、`### YYYY-MM-DD HH:MM UTC — 書き手` の見出し、結果、`---`（区切り線）の順。区切り線で下の課題の本文と分ける。新しい結果ほど上に来る。
+  - 起票も報告も、読んで分かることを優先する。数字の比較は表に、流れや依存は図（Notion の mermaid のコードブロック）に、曲線や分布は必要なら画像にする。タイトルは短く（目安 40 字以内）、何をするか・何を問うかだけを書く。経緯・条件・数字は本文に回す。
 - **用語:** 同じページの下の「用語集」（https://app.notion.com/p/3e64b8acaa6c8195a66ce7bc42f24256）に従う。たとえば「控え」は「裏」、「完成形」は「裏の決定化」、「盤」は「対戦評価」と書く。コードの識別子・旗・JSON のキーは変えず、古い記録は旧名のまま読む。
 - **ファイル:** すべて LF（`tests/test_line_endings.py`）。Python の `write_text` は Windows で CRLF になるので、bytes で書く。`tools/` と `src/` に機械ごとの絶対パスを書かない（`tests/test_no_machine_specific_paths.py`）。`scratchpad/` は当時のコードをそのまま残す記録なので、lint しない・書き換えない。
 - **本番の経路:** 生成を遅くする変更は入れない。前後を交互（ABBA）に回し、同じ窓で壁時計を比べる（同じ exe、同じ長さのパスで）。規則を変えて局が変わるなら、盤で弱くならないことを確かめる。
