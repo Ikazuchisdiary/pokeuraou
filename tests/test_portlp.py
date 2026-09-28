@@ -119,6 +119,69 @@ def test_the_ports_bayesian_games_are_solves(roster) -> None:  # noqa: ANN001
         json.dumps(one)  # the answer is plain JSON
 
 
+def _same_bayesian(a: equilibrium.BayesianEquilibrium,
+                   b: equilibrium.BayesianEquilibrium) -> bool:
+    def raw(v) -> bytes:  # noqa: ANN001
+        return b"" if v is None else np.asarray(v).tobytes()
+
+    return (a.value == b.value and a.duality_gap == b.duality_gap
+            and all(raw(getattr(a, f)) == raw(getattr(b, f))
+                    for f in ("row_strategy", "col_marginal", "row_ev", "row_ev_loss", "weights"))
+            and len(a.col_strategies) == len(b.col_strategies)
+            and all(raw(x) == raw(y) for x, y in zip(a.col_strategies, b.col_strategies,
+                                                     strict=True))
+            and all(raw(x) == raw(y) for x, y in zip(a.col_ev_loss, b.col_ev_loss, strict=True)))
+
+
+def test_the_ports_bayesian_equilibria_are_solve_bayesians(roster) -> None:  # noqa: ANN001
+    """IKA-387: `solve_bayesian_many` gives `solve_bayesian`'s `BayesianEquilibrium` to the bit
+    (every field) -- one class (a deep child's pass rectangle, `ladder._kids_solve`) and
+    several (a stage's rectangle, `ladder.read`), with ties, a dominating row, a shared or
+    uneven column count and weights not summing to 1 -- in one crossing; an invalid game is
+    `solve_bayesian`'s ValueError in its place. The positive control: the port's LPs."""
+    rng = np.random.default_rng(387)
+    games = []
+    for n in range(200):
+        m = int(rng.integers(1, 20))
+        k = 1 if n % 2 == 0 else int(rng.integers(2, 5))
+        shared = int(rng.integers(1, 20))
+        mats = []
+        for _ in range(k):
+            a = rng.random((m, shared if n % 3 else int(rng.integers(1, 20))))
+            if n % 5 == 0:
+                a = np.round(a, 1)
+            if n % 7 == 0:
+                a[0] = a.max(axis=0)
+            mats.append(a)
+        w = rng.random(k) * 3.0 if k > 1 else np.asarray([1.0])
+        games.append((mats, w))
+    before = (portlp.COUNTS["lps"], portlp.COUNTS["crossings"])
+    got = portlp.solve_bayesian_many(roster.reg, games)
+    assert portlp.COUNTS["lps"] - before[0] == 2 * len(games)
+    assert portlp.COUNTS["crossings"] - before[1] == 1
+    for (mats, w), e in zip(games, got, strict=True):
+        assert isinstance(e, equilibrium.BayesianEquilibrium)
+        assert _same_bayesian(e, equilibrium.solve_bayesian(mats, w))
+    good = games[1]
+    bad = [([np.array([[0.5, np.nan]])], np.asarray([1.0])), ([], np.asarray([])),
+           ([np.ones((2, 2)), np.ones((3, 2))], np.asarray([0.5, 0.5])),
+           ([np.ones((2, 2))], np.asarray([-1.0])), good]
+    errors = portlp.solve_bayesian_many(roster.reg, bad)
+    assert all(isinstance(e, ValueError) for e in errors[:4])
+    assert _same_bayesian(errors[4], equilibrium.solve_bayesian(*good))
+    # One at a time, on and off: the same answer.
+    was = portlp.ON[0]
+    try:
+        for on in (True, False):
+            portlp.set_on(on)
+            one = portlp.solve_bayesian_one(roster.reg, *good)
+            assert _same_bayesian(one, equilibrium.solve_bayesian(*good))
+            assert _same_equilibrium(portlp.solve_one(roster.reg, good[0][0]),
+                                     equilibrium.solve(good[0][0]))
+    finally:
+        portlp.set_on(was)
+
+
 #: (game seed, turn) of `_played` positions whose width-8 nodes hold a cell of 16 leaves
 #: (the dot's blocks) and cells a replacement stopped (9 and 14 fold trees).
 FILLED = ((0, 0), (1, 2), (4, 3))
@@ -170,6 +233,99 @@ def test_the_ports_sub_games_are_folds_and_solves(roster) -> None:  # noqa: ANN0
     portlp.solve_subs(reg, whole)
     assert [s.solved for s in whole] == [
         float(equilibrium.solve(s.payoff).value) for s in whole]
+
+
+def _kids(rng: np.random.Generator, count: int) -> list:
+    """Deep children (`ladder._Child`) begun on random prices, their first pass read."""
+    from pokeuraou import ladder
+
+    kids = []
+    for _ in range(count):
+        m, n = (int(v) for v in rng.integers(2, 9, 2))
+        prices = rng.random((m, n))
+        if rng.random() < 0.3:
+            prices = np.round(prices, 1)
+        start = equilibrium.solve(prices)
+        kid = ladder._Child(None, list(range(m)), list(range(n)), prices,
+                            np.asarray(start.row_strategy), np.asarray(start.col_strategy))
+        kid.rows = [int(i) for i in rng.permutation(m)[:max(1, m // 2)]]
+        kid.cols = [int(j) for j in rng.permutation(n)[:max(1, n // 2)]]
+        kid.trial = prices.copy()
+        kids.append(kid)
+    return kids
+
+
+def _read_pass(rng: np.random.Generator, kids: list) -> None:
+    for kid in kids:
+        for i in kid.rows:
+            for j in kid.cols:
+                kid.memo.setdefault((i, j), float(rng.random()) if rng.random() < 0.9 else None)
+
+
+def test_the_kids_passes_solved_together_are_solved_alone(roster) -> None:  # noqa: ANN001
+    """IKA-387 (`ladder._kids_solve`): a pass of many deep children, their rectangles solved in
+    the port in one crossing, is each child's `_kid_solve` with scipy -- answer, the oracle's
+    rows and columns, whether it goes on -- pass after pass, each child its own. The positive
+    control: the Bayesian games the port solved, one crossing a pass."""
+    from pokeuraou import ladder
+
+    was = portlp.ON[0]
+    try:
+        for seed in range(4):
+            got = {}
+            for on in (False, True):
+                rng = np.random.default_rng(3870 + seed)
+                kids = _kids(rng, 7)
+                portlp.set_on(on)
+                before = (portlp.COUNTS["bayes"], portlp.COUNTS["crossings"])
+                passes = 3
+                for attempt in range(passes + 1):
+                    _read_pass(rng, kids)
+                    live = [k for k in kids if k.active]
+                    ladder._kids_solve(roster.reg, [(k, attempt, passes) for k in live])
+                    if on and live:
+                        assert portlp.COUNTS["bayes"] - before[0] == len(live)
+                        assert portlp.COUNTS["crossings"] - before[1] == 1
+                        before = (portlp.COUNTS["bayes"], portlp.COUNTS["crossings"])
+                got[on] = [(k.rows, k.cols, k.active, None if k.answer is None else (
+                    k.answer[0].tobytes(), [y.tobytes() for y in k.answer[1]], k.answer[2]))
+                    for k in kids]
+            assert got[True] == got[False]
+            # The children differ (a child's answer given to another would show).
+            assert len({str(a) for a in got[True]}) == len(got[True])
+    finally:
+        portlp.set_on(was)
+
+
+def test_the_kids_matrices_solved_together_are_solved_alone(roster, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-387 (`ladder._kids_fill`): the deep children's own matrices, solved in the port in
+    one crossing, are each `solve` with scipy -- prices, both strategies, notes and counted
+    work. The leaf is the port's filled nodes with made-up values (`_filled`). The positive
+    control: the games the port solved."""
+    from pokeuraou import ladder
+
+    subs = _filled(roster)
+    pendings = [s.pending for s in subs]
+    monkeypatch.setattr(port, "pending_payoffs", lambda *_a, **_k: pendings)
+    monkeypatch.setattr(port, "score_stacked", lambda _leaf, encoded: [p.values for p in pendings])
+    monkeypatch.setattr(ladder, "STACK", True)
+    was = portlp.ON[0]
+    got = {}
+    try:
+        for on in (False, True):
+            portlp.set_on(on)
+            kids = [ladder._Child(None, [], [], None, None, None) for _ in pendings]
+            games = portlp.COUNTS["games"]
+            notes: set[str] = set()
+            assert ladder._kids_fill(roster.reg, kids, None, Budget.matrix(), notes) is None
+            if on:
+                assert portlp.COUNTS["games"] - games == len(kids)
+            got[on] = ([(k.prices.tobytes(), k.x.tobytes(), k.y.tobytes(), sorted(k.notes),
+                         k.work) for k in kids], sorted(notes))
+    finally:
+        portlp.set_on(was)
+    assert got[True] == got[False]
+    assert len({a[1] + a[2] for a in got[True][0]}) == len(pendings)
 
 
 def test_a_sub_game_solved_already_or_elsewhere_is_left_alone(roster) -> None:  # noqa: ANN001
