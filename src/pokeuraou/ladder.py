@@ -580,7 +580,7 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
                                                 stage_budget, turns, clean, hidden_side,
                                                 result.unmodelled, cost, stop))
                 elif split and not adopt:
-                    reads = pool.deep_cells(
+                    reads = (pool.deep_passes if PASSES else pool.deep_cells)(
                         asks, stage, stage_budget, work, result.unmodelled,
                         early=(lambda index, values, chunks=chunks: memo.update(
                             zip(chunks[index], values, strict=True))) if kept else None)
@@ -1121,6 +1121,195 @@ def _deep_value(weights: np.ndarray, entries: list, kids: list) -> float | None:
     return float(np.asarray(values) @ weights)
 
 
+def _deep_open(  # noqa: PLR0913, PLR0912, C901 - one cell and its stage
+    reg: Any,  # noqa: ANN401
+    pos: Position,
+    ours: Any,  # noqa: ANN401
+    theirs: Any,  # noqa: ANN401
+    leaf: Any,  # noqa: ANN401
+    stage: Stage,
+    root_budget: Budget,
+    budget: Budget,
+    unmodelled: set[str],
+    cost: LadderCost,
+    stop: Any,  # noqa: ANN401
+) -> tuple:
+    """IKA-380 (`PASSES`): a deep cell's first step on a worker -- its turn, kept branches and
+    children's menus (`_deep_expand`), then each child made ready for the reader to read pass
+    by pass (`_Pool.deep_passes`). ``("value", v)`` where the cell is read here to the end, as
+    its own road reads it (a child with an empty menu, a matrix refused or with no solution,
+    no forward pass to share); else ``("open", road, weights, entries)``, per kept branch
+    ``("leaf", value)`` (a battle over), ``("taken", value)`` (a child this read has read,
+    `SHARE`; its work is this task's) or ``("kid", position, row menu, column menu, key,
+    matrix, x, y, notes, work)``: a child to read, its own matrix filled and solved, ``work``
+    what that counted (not this task's: the reader charges a child to every cell that reads
+    it, as the table charges a child taken).
+
+    ``road`` is ``"at-once"`` for a child read by a depth-2 stage -- as `_children_at_once`
+    reads it: the matrices in one crossing, the child taken from the read's table where it
+    is kept -- and ``"alone"`` for a deeper one, as `_deep_children` reads it one at a time
+    (each matrix its own `search.batched_payoff`)."""
+    got = _deep_expand(reg, pos, ours, theirs, stage, budget, unmodelled)
+    if got is None:
+        return ("value", None)
+    branches, weights, listed = got
+    work = search.WORK
+    sub = stage.sub
+
+    def whole() -> tuple:
+        return ("value", _deep_children(reg, branches, weights, listed, leaf, stage, root_budget,
+                                        budget, unmodelled, cost, stop))
+
+    if (work is None or not listed or any(not r or not c for r, c in listed)
+            or (sub.sub is None and not BATCH_CHILDREN)):
+        return whole()
+    mark = dict(work)
+    entries: list[tuple] = []
+    if sub.sub is None:
+        road = "at-once"
+        everyone = _kids_open(branches, listed, budget, sub, unmodelled, work)
+        kids = [kid for kid in everyone if not kid.taken]
+        if stop is not None and stop.is_set():
+            raise Stopped
+        if kids and _kids_fill(reg, kids, leaf, budget, unmodelled) is _ALONE:
+            work.clear()
+            work.update(mark)
+            return whole()
+        live = iter(everyone)
+        for branch in branches:
+            if branch.position.ended:
+                entries.append(("leaf", float(np.asarray(leaf([branch.position]))[0])))
+                continue
+            kid = next(live)
+            if kid.taken:
+                entries.append(("taken", None if kid.answer is None else kid.answer[2]))
+            else:
+                entries.append(("kid", kid.position, kid.row, kid.col, kid.key, kid.prices,
+                                kid.x, kid.y, kid.notes, dict(kid.work, reads=0)))
+    else:
+        road = "alone"
+        menus = iter(listed)
+        for branch in branches:
+            child = branch.position
+            if child.ended:
+                entries.append(("leaf", float(np.asarray(leaf([child]))[0])))
+                continue
+            crow, ccol = next(menus)
+            if stop is not None and stop.is_set():
+                raise Stopped
+            try:
+                m, notes = search.batched_payoff(reg, child, crow, ccol, leaf, budget=budget)
+                m = np.asarray(m, dtype=np.float64)
+                eq = solve(m)
+            except (EquilibriumError, port.PortRefused):
+                work.clear()
+                work.update(mark)
+                return whole()
+            unmodelled.update(notes)
+            digest = getattr(branch, "digest", None)
+            key = (None if digest is None or search.SHARE is None
+                   else subshare.kid_key(digest, crow, ccol, budget.enumerate_knockouts,
+                                         sub.label))
+            entries.append(("kid", child, list(crow), list(ccol), key, m,
+                            np.asarray(eq.row_strategy), np.asarray(eq.col_strategy), set(notes),
+                            {"turns": 0, "subgames": 1, "cells": m.size, "qs": 0, "reads": 0}))
+    return ("open", road, np.asarray(weights, dtype=np.float64), entries)
+
+
+def _pass_cells(reg: Any, cells: list, leaf: Any, stage: Stage,  # noqa: ANN401
+                budget: Budget) -> list | None:
+    """IKA-380 (`PASSES`): a chunk of one pass of a child's depth-2 read (`_Pool.deep_passes`),
+    each cell's value as `_children_at_once` reads it (the chunk its Q's group); None where
+    the port refused one (the cells that read the child are then read whole, as that road
+    falls back)."""
+    try:
+        found = search._refine_cells(reg, cells, leaf, budget=budget, sub_limit=stage.child,
+                                     sub_branches=stage.branches,
+                                     child_q=stage.child if stage.q else None,
+                                     q_groups=[len(cells)], stack=STACK)
+    except port.PortRefused:
+        return None
+    return [value for value, _notes, _solved in found]
+
+
+def _open_fold(road: str, weights: np.ndarray, entries: list, values: list,
+               charges: list) -> tuple[float | None, list[dict[str, int]]]:
+    """IKA-380: an opened cell's value (`_deep_open`) from its children's, and the counted
+    work its children add, as its own road counts it: `_children_at_once` counts every child
+    it read and a read for each child up to the first without a value; `_deep_children`
+    stops at that child (it and those before it counted)."""
+    works: list[dict[str, int]] = []
+    if road == "at-once":
+        works += [c for c in charges if c is not None]
+    reads = 0
+    out: list[float] = []
+    value: float | None = 0.0
+    for n, entry in enumerate(entries):
+        if entry[0] == "leaf":
+            out.append(entry[1])
+            continue
+        reads += 1
+        if road == "alone":
+            works.append(charges[n])
+        if values[n] is None:
+            value = None
+            break
+        out.append(float(values[n]))
+    works.append({"reads": reads})
+    if value is None:
+        return None, works
+    return float(np.asarray(out) @ weights), works
+
+
+@dataclass
+class _Open:
+    """IKA-380: a deep cell the reader reads (`_Pool.deep_passes`): what it is a cell of (a
+    stage's ask, or a child read by a deep stage), its tasks' counted work and notes, its
+    `_deep_open` answer and its children's values and charges."""
+
+    stage: Stage
+    budget: Budget
+    payload: tuple
+    #: ``("top", index)`` or ``("kid", drive, (i, j))``.
+    owner: tuple
+    works: list = field(default_factory=list)
+    notes: set = field(default_factory=set)
+    road: str | None = None
+    weights: np.ndarray | None = None
+    entries: list | None = None
+    values: list = field(default_factory=list)
+    charges: list = field(default_factory=list)
+    left: int = 0
+    #: Its value where it was read to the end in one task (``value``, ``whole``).
+    value: float | None = None
+    done: bool = False
+    whole: bool = False
+    #: The stage's cell it is part of (None: it is one), and (a stage's cell) the workers'
+    #: milliseconds of its tasks.
+    top: Any = None
+    ms: float = 0.0
+
+
+@dataclass
+class _Drive:
+    """IKA-380: a child the reader reads by ``stage`` pass by pass (`_Pool.deep_passes`), and
+    the cells waiting on it (each an `_Open` and its entry)."""
+
+    kid: _Child
+    stage: Stage
+    budget: Budget
+    road: str
+    attempt: int = 0
+    out: int = 0
+    waiters: list = field(default_factory=list)
+    done: bool = False
+    #: A pass the port refused: its cells are read whole.
+    refused: bool = False
+    value: float | None = None
+    #: The stage's cell whose task began it (its milliseconds go there).
+    top: Any = None
+
+
 @dataclass
 class _Start:
     row_strategy: np.ndarray
@@ -1170,24 +1359,20 @@ class _Child:
     work: dict = field(default_factory=dict)
 
 
-def _children_at_once(  # noqa: PLR0913, PLR0912, C901 - a cell's children through one stage
-    reg: Any,  # noqa: ANN401
+# IKA-380: `_children_at_once`'s steps, one child at a time, so the reader can take a child
+# through them pass by pass on the worker processes (`_Pool.deep_passes`) with the same
+# arithmetic.
+
+def _kids_open(  # noqa: PLR0913 - a cell's children and their stage
     branches: list,
-    weights: np.ndarray,
     menus: list,
-    leaf: Any,  # noqa: ANN401
-    stage: Stage,
-    root_budget: Budget,
     budget: Budget,
+    sub: Stage,
     unmodelled: set[str],
-    stop: Any,  # noqa: ANN401
     work: dict[str, int],
-) -> float | None | object:
-    """`_deep_cell`'s loop over the children with ``stage.sub`` of depth 2, every child at once
-    (`BATCH_CHILDREN`): each step is `read`'s for one child, the arithmetic written the same
-    way, so each child's value is the one its own `read` gives. `_ALONE` where that road
-    would stop or fall back on its own."""
-    sub = stage.sub
+) -> list[_Child] | object:
+    """A `_Child` per live branch, in order; a child this read has read already (`SHARE`,
+    IKA-378) taken, with the work its read counted. `_ALONE` where a side has no action."""
     everyone: list[_Child] = []
     listed = iter(menus)
     table = search.SHARE
@@ -1215,41 +1400,149 @@ def _children_at_once(  # noqa: PLR0913, PLR0912, C901 - a cell's children throu
                     work[name] += n
                 work["cells"] += cells
         everyone.append(kid)
+    return everyone
+
+
+def _kids_fill(reg: Any, kids: list[_Child], leaf: Any, budget: Budget,  # noqa: ANN401
+               unmodelled: set[str]) -> object | None:
+    """Each child's own matrix -- in one crossing, scored in one call -- and its solution;
+    each child's notes and work (its matrix: a sub-game) kept on it, counted by the caller.
+    `_ALONE` where a node is refused, no forward pass can be shared or a matrix has none."""
+    pending = port.pending_payoffs(reg, [(k.position, k.row, k.col) for k in kids], leaf,
+                                   budget=budget)
+    if pending is None or any(isinstance(p, port.PortRefused) for p in pending):
+        return _ALONE
+    scores = (port.score_stacked if STACK else port.score_segments)(
+        leaf, [p.encoded for p in pending])
+    for p, got in zip(pending, scores, strict=True):
+        p.scored(got)
+    for kid, p in zip(kids, pending, strict=True):
+        m = np.asarray(p.finish(), dtype=np.float64)
+        try:
+            eq = solve(m)
+        except EquilibriumError:
+            return _ALONE
+        unmodelled.update(p.unmodelled)
+        kid.prices, kid.x, kid.y = m, np.asarray(eq.row_strategy), np.asarray(eq.col_strategy)
+        kid.notes = set(p.unmodelled)
+        kid.work = {"turns": 0, "subgames": 1, "cells": m.size, "qs": 0}
+    return None
+
+
+def _one() -> np.ndarray:
+    """The weight of a child's one completion, as `read` makes it (K = 1)."""
+    w = np.asarray([1.0], dtype=np.float64)
+    return w / w.sum()
+
+
+def _kid_begin(kid: _Child, sub: Stage) -> None:
+    """A child's rectangle and prices for its stage ``sub``, as `read` starts a stage."""
+    w = _one()
+    prices = [np.array(kid.prices, dtype=np.float64, copy=True)]
+    x = np.asarray(kid.x, dtype=np.float64)
+    ys = [np.asarray(kid.y, dtype=np.float64)]
+    kid.rows = _order(x, sum(w[k] * (prices[k] @ ys[k]) for k in range(1)), sub.rect,
+                      larger=True)
+    kid.cols = _order(ys[0], x @ prices[0], sub.rect, larger=False)
+    kid.trial = prices[0].copy()
+
+
+def _kid_asked(kid: _Child) -> list[tuple[int, int]]:
+    """The cells of a child's pass not read yet, in `read`'s order."""
+    asked: list[tuple[int, int]] = []
+    for i in kid.rows:
+        for j in kid.cols:
+            if (i, j) not in kid.memo and (i, j) not in asked:
+                asked.append((i, j))
+    return asked
+
+
+def _kid_solve(kid: _Child, attempt: int, passes: int) -> None:
+    """A child's pass read (its cells in ``kid.memo``): the rectangle solved (``kid.answer``)
+    and the oracle's row and column added, as `read` does after a pass; ``kid.active`` off
+    when it is done (the last pass, nothing added, or no solution)."""
+    w = _one()
+    trial = [kid.trial]
+    for i in kid.rows:
+        for j in kid.cols:
+            v = kid.memo[(i, j)]
+            if v is not None:
+                trial[0][i, j] = v
+    try:
+        restricted = solve_bayesian([trial[0][np.ix_(kid.rows, kid.cols)]], w)
+    except EquilibriumError:
+        kid.active = False
+        return
+    sx = np.zeros(len(trial[0]), dtype=np.float64)
+    sx[kid.rows] = restricted.row_strategy
+    y = np.zeros(trial[0].shape[1], dtype=np.float64)
+    y[kid.cols] = restricted.col_strategies[0]
+    sys_ = [y]
+    col_ev = [sx @ trial[k] for k in range(1)]
+    row_ev = sum(w[k] * (trial[k] @ sys_[k]) for k in range(1))
+    guarantee = float(sum(w[k] * float(col_ev[k].min()) for k in range(1)))
+    kid.answer = (sx, sys_, guarantee)
+    if attempt == passes:
+        kid.active = False
+        return
+    grew = False
+    best_row = int(np.argmax(row_ev))
+    if best_row not in kid.rows and float(row_ev[best_row]) > float(
+            restricted.value) + search.ORACLE_TOLERANCE:
+        kid.rows.append(best_row)
+        grew = True
+    earned = float(col_ev[0] @ sys_[0])
+    best_col = int(np.argmin(col_ev[0]))
+    if best_col not in kid.cols and float(
+            col_ev[0][best_col]) < earned - search.ORACLE_TOLERANCE:
+        kid.cols.append(best_col)
+        grew = True
+    if not grew:
+        kid.active = False
+
+
+def _kid_keep(table: Any, kid: _Child) -> None:  # noqa: ANN401
+    """A child read, kept in the read's table (`SHARE`) with the work its read counted."""
+    packed = subshare.pack_work(kid.work)
+    if kid.key is not None and packed:
+        table.put(kid.key, None if kid.answer is None else kid.answer[2],
+                  kid.work["cells"], kid.notes, packed, kid=True)
+
+
+def _children_at_once(  # noqa: PLR0913, PLR0912, C901 - a cell's children through one stage
+    reg: Any,  # noqa: ANN401
+    branches: list,
+    weights: np.ndarray,
+    menus: list,
+    leaf: Any,  # noqa: ANN401
+    stage: Stage,
+    root_budget: Budget,
+    budget: Budget,
+    unmodelled: set[str],
+    stop: Any,  # noqa: ANN401
+    work: dict[str, int],
+) -> float | None | object:
+    """`_deep_cell`'s loop over the children with ``stage.sub`` of depth 2, every child at once
+    (`BATCH_CHILDREN`): each step is `read`'s for one child, the arithmetic written the same
+    way, so each child's value is the one its own `read` gives. `_ALONE` where that road
+    would stop or fall back on its own."""
+    sub = stage.sub
+    table = search.SHARE
+    everyone = _kids_open(branches, menus, budget, sub, unmodelled, work)
+    if everyone is _ALONE:
+        return _ALONE
     kids = [kid for kid in everyone if not kid.taken]
     if stop is not None and stop.is_set():
         raise Stopped
     if kids:
-        pending = port.pending_payoffs(reg, [(k.position, k.row, k.col) for k in kids], leaf,
-                                       budget=budget)
-        if pending is None or any(isinstance(p, port.PortRefused) for p in pending):
+        if _kids_fill(reg, kids, leaf, budget, unmodelled) is _ALONE:
             return _ALONE
-        scores = (port.score_stacked if STACK else port.score_segments)(
-            leaf, [p.encoded for p in pending])
-        for p, got in zip(pending, scores, strict=True):
-            p.scored(got)
-        for kid, p in zip(kids, pending, strict=True):
-            m = np.asarray(p.finish(), dtype=np.float64)
-            try:
-                eq = solve(m)
-            except EquilibriumError:
-                return _ALONE
-            unmodelled.update(p.unmodelled)
+        for kid in kids:
             work["subgames"] += 1
-            work["cells"] += m.size
-            kid.prices, kid.x, kid.y = m, np.asarray(eq.row_strategy), np.asarray(eq.col_strategy)
-            kid.notes = set(p.unmodelled)
-            kid.work = {"turns": 0, "subgames": 1, "cells": m.size, "qs": 0}
-    w = np.asarray([1.0], dtype=np.float64)
-    w = w / w.sum()
+            work["cells"] += kid.work["cells"]
     sub_budget = replace(root_budget, enumerate_knockouts=True) if sub.knockouts else root_budget
     for kid in kids:
-        prices = [np.array(kid.prices, dtype=np.float64, copy=True)]
-        x = np.asarray(kid.x, dtype=np.float64)
-        ys = [np.asarray(kid.y, dtype=np.float64)]
-        kid.rows = _order(x, sum(w[k] * (prices[k] @ ys[k]) for k in range(1)), sub.rect,
-                          larger=True)
-        kid.cols = _order(ys[0], x @ prices[0], sub.rect, larger=False)
-        kid.trial = prices[0].copy()
+        _kid_begin(kid, sub)
     for attempt in range(sub.passes + 1):
         cells: list = []
         groups: list[int] = []
@@ -1258,11 +1551,7 @@ def _children_at_once(  # noqa: PLR0913, PLR0912, C901 - a cell's children throu
         for kid in kids:
             if not kid.active:
                 continue
-            asked: list[tuple[int, int]] = []
-            for i in kid.rows:
-                for j in kid.cols:
-                    if (i, j) not in kid.memo and (i, j) not in asked:
-                        asked.append((i, j))
+            asked = _kid_asked(kid)
             for at in range(0, len(asked), CHUNK):
                 chunk = asked[at:at + CHUNK]
                 groups.append(len(chunk))
@@ -1295,53 +1584,13 @@ def _children_at_once(  # noqa: PLR0913, PLR0912, C901 - a cell's children throu
                 for kid, size in zip(group_kids, groups, strict=True):
                     kid.work["qs"] += 1 if size else 0
         for kid in kids:
-            if not kid.active:
-                continue
-            trial = [kid.trial]
-            for i in kid.rows:
-                for j in kid.cols:
-                    v = kid.memo[(i, j)]
-                    if v is not None:
-                        trial[0][i, j] = v
-            try:
-                restricted = solve_bayesian([trial[0][np.ix_(kid.rows, kid.cols)]], w)
-            except EquilibriumError:
-                kid.active = False
-                continue
-            sx = np.zeros(len(trial[0]), dtype=np.float64)
-            sx[kid.rows] = restricted.row_strategy
-            y = np.zeros(trial[0].shape[1], dtype=np.float64)
-            y[kid.cols] = restricted.col_strategies[0]
-            sys_ = [y]
-            col_ev = [sx @ trial[k] for k in range(1)]
-            row_ev = sum(w[k] * (trial[k] @ sys_[k]) for k in range(1))
-            guarantee = float(sum(w[k] * float(col_ev[k].min()) for k in range(1)))
-            kid.answer = (sx, sys_, guarantee)
-            if attempt == sub.passes:
-                kid.active = False
-                continue
-            grew = False
-            best_row = int(np.argmax(row_ev))
-            if best_row not in kid.rows and float(row_ev[best_row]) > float(
-                    restricted.value) + search.ORACLE_TOLERANCE:
-                kid.rows.append(best_row)
-                grew = True
-            earned = float(col_ev[0] @ sys_[0])
-            best_col = int(np.argmin(col_ev[0]))
-            if best_col not in kid.cols and float(
-                    col_ev[0][best_col]) < earned - search.ORACLE_TOLERANCE:
-                kid.cols.append(best_col)
-                grew = True
-            if not grew:
-                kid.active = False
+            if kid.active:
+                _kid_solve(kid, attempt, sub.passes)
         if not any(kid.active for kid in kids):
             break
     if table is not None:
         for kid in kids:
-            packed = subshare.pack_work(kid.work)
-            if kid.key is not None and packed:
-                table.put(kid.key, None if kid.answer is None else kid.answer[2],
-                          kid.work["cells"], kid.notes, packed, kid=True)
+            _kid_keep(table, kid)
     values = []
     live = iter(everyone)
     for branch in branches:
@@ -1418,6 +1667,23 @@ HOLD = os.environ.get("POKEURAOU_LADDER_HOLD", "1") != "0"
 #: wall-clock reads. The count clock reads a cell on one worker, as before.
 #: ``POKEURAOU_LADDER_SPLIT=0`` turns it off.
 SPLIT = os.environ.get("POKEURAOU_LADDER_SPLIT", "1") != "0"
+
+#: IKA-380: with `SPLIT`, a deep cell's children are read pass by pass on the workers
+#: (`_Pool.deep_passes`): a child's depth-2 pass in chunks, its rectangle solved by the
+#: reader, a deeper child's cells opened in turn; a child two cells of the stage reach is
+#: read once. At 24-45 s (open, 16 threads, L5, master) the workers were idle 21-29% of a
+#: read, all but 1-2 points in the deep stages' tails, where a stage waited on its slowest
+#: child read whole on one worker (the longest task of a deep stage: median 0.5-1.9 s, up to
+#: 4.8 s). ``POKEURAOU_LADDER_PASSES=0``: IKA-375's split (a child read whole on a worker).
+PASSES = os.environ.get("POKEURAOU_LADDER_PASSES", "1") != "0"
+
+#: IKA-380: with `PASSES`, a pass's chunk sent while fewer tasks wait than workers are idle
+#: (a deep stage's tail) is cut into parts, one a worker. The chunks of `CHUNK` cells were
+#: 70% of what ran in the deep stages' tails (open, 24 s, 16 threads). A part is the Q's
+#: group of its cells (the Q's answer for a row moves with its batch, in the last places),
+#: so the cut may move a child's menu where two actions' Q values are that close.
+#: ``POKEURAOU_LADDER_PASS_SPLIT=0``: whole chunks.
+PASS_SPLIT = os.environ.get("POKEURAOU_LADDER_PASS_SPLIT", "1") != "0"
 
 #: IKA-378: a read fills each child sub-game once (`subshare`, `search.SHARE`) -- one table
 #: for the read, in shared memory for its worker processes. In a 1-process read at 16 s
@@ -1524,7 +1790,8 @@ def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  
         notes: set[str] = set()
         if cancel.is_set():
             # Sent before the reader stopped: not read.
-            conn.send(("stopped", task, None, [work], notes, (0.0, 0.0, 0, 0.0, 0.0, 0, 0, (0, 0, 0), 0)))
+            conn.send(("stopped", task, None, [work], notes,
+                       (0.0, 0.0, 0, 0.0, 0.0, 0, 0, (0, 0, 0, 0, 0), 0)))
             continue
         shared_began = dict(subshare.COUNTS)
         search.WORK = work
@@ -1550,6 +1817,18 @@ def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  
             elif kind == "child":
                 got = _deep_child(reg, cells, leaf, stage, root_budget, stage_budget, notes,
                                   cost, cancel)
+            elif kind == "open":
+                # IKA-380 (`PASSES`): a deep cell's turn, its children's menus and matrices;
+                # the children read pass by pass by the reader.
+                position, ours, theirs = cells
+                got = _deep_open(reg, position, ours, theirs, leaf, stage, root_budget,
+                                 stage_budget, notes, cost, cancel)
+            elif kind == "whole":
+                position, ours, theirs = cells
+                got = _deep_cell(reg, position, ours, theirs, leaf, stage, root_budget,
+                                 stage_budget, notes, cost, cancel)
+            elif kind == "pass":
+                got = _pass_cells(reg, cells, leaf, stage, stage_budget)
             else:
                 got = _read_cells(reg, cells, row, col, items, leaf, stage, root_budget,
                                   stage_budget, turns, clean, hidden_side, notes, cost, cancel)
@@ -1565,7 +1844,7 @@ def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  
         # One cell of a deeper stage (`_deep_cell` reads nothing through `WORK_CELLS`), or a
         # chunk that stopped, or one the port refused -- read a cell at a time, its refused
         # cells counting nothing: the chunk's work goes on its first cell (the total kept).
-        if kind in ("expand", "child"):
+        if kind in ("expand", "child", "open", "whole"):
             by_cell = [work]
         elif status != "done" or by_cell is None or len(by_cell) != len(cells):
             by_cell = [work] + [_zero() for _ in cells[1:]]
@@ -1579,9 +1858,13 @@ def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  
                 time.process_time() - cpu, rustnode.PORT_WAITED[0] - ported[0],
                 rustnode.PORT_WAITED[1] - ported[1], len(rustnode._HELD) if HOLD else 0,  # noqa: SLF001
                 # IKA-378: sub-games taken from the table or the same call, and kept in it.
+                # IKA-380: and those another process was filling when claimed, and of those
+                # the ones taken when looked at again.
                 (subshare.COUNTS["hits"] - shared_began["hits"],
                  subshare.COUNTS["same"] - shared_began["same"],
-                 subshare.COUNTS["kidHits"] - shared_began["kidHits"]),
+                 subshare.COUNTS["kidHits"] - shared_began["kidHits"],
+                 subshare.COUNTS["busy"] - shared_began["busy"],
+                 subshare.COUNTS["waited"] - shared_began["waited"]),
                 subshare.COUNTS["puts"] - shared_began["puts"])
         conn.send((status, task, got, work, notes, took))
 
@@ -1686,6 +1969,9 @@ class _Pool:
         # IKA-378: each read its own rows of the sub-game table (a chunk of an earlier read
         # still out keeps to that read's: its worker is sent this after it is back).
         self.generation += 1
+        if self.table is not None:
+            # IKA-380: the reader keeps the children it reads pass by pass (`deep_passes`).
+            self.table.begin(self.generation)
         self._context = ("read", list(row), list(col), plain, budget, hidden_side, cost,
                          self.generation)
         self._due = set(self._orphans)
@@ -1710,13 +1996,22 @@ class _Pool:
         #: the chunks' ends. IKA-378 (`SHARE`): ``sharedSubgames`` the sub-games the workers
         #: took from the table or an earlier one of the same call (``sameSubgames`` the latter),
         #: ``keptSubgames`` put in it; ``sharedKids`` a deep cell's children taken from it.
+        #: IKA-380: ``busySubgames`` the sub-games another worker was filling when claimed
+        #: (`subshare.Table.claim`), ``waitedSubgames`` of those, taken when looked at again;
+        #: (`PASSES`) ``openCells`` the deep cells opened, ``kidReads`` the children read here
+        #: pass by pass, ``kidsJoined`` a cell's child joined to one already read or being
+        #: read, ``passChunks`` the chunks of their depth-2 passes, ``wholeCells`` the cells
+        #: read whole after a pass was refused, ``passSplits`` chunks cut in the tail
+        #: (`PASS_SPLIT`).
         self.stats = {"chunks": 0, "waitMs": 0.0, "sendMs": 0.0, "recvMs": 0.0,
                       "workerMs": 0.0, "serverMs": 0.0, "serverTrips": 0, "supplyMs": 0.0,
                       "tailMs": 0.0, "betweenMs": 0.0, "cpuMs": 0.0, "portMs": 0.0,
                       "portReads": 0, "specCells": 0, "specMs": 0.0, "specUsed": 0,
                       "specWasted": 0, "specChunks": 0, "specPartial": 0, "splitCells": 0,
                       "childTasks": 0, "heldPositions": 0, "sharedSubgames": 0,
-                      "sameSubgames": 0, "keptSubgames": 0, "sharedKids": 0}
+                      "sameSubgames": 0, "keptSubgames": 0, "sharedKids": 0,
+                      "busySubgames": 0, "waitedSubgames": 0, "openCells": 0, "kidReads": 0,
+                      "kidsJoined": 0, "passChunks": 0, "wholeCells": 0, "passSplits": 0}
         self._last_end = time.perf_counter()
         self._trace = ({"t0": self._last_end, "workers": len(self.conns), "calls": [],
                         "chunks": [], "stages": []} if TRACE_DIR else None)
@@ -1778,6 +2073,24 @@ class _Pool:
     def ready(self, keys: Any) -> int:  # noqa: ANN401
         """How many of ``keys`` are read ahead and back."""
         return sum(1 for k in keys if k in self._spec_ready)
+
+    def _took(self, times: tuple) -> tuple:
+        """A task's timings (`_pool_main`) added to the read's stats; the first six back."""
+        took, server_s, trips, cpu_s, port_s, port_reads, held, shared, kept = times
+        self.stats["heldPositions"] += held
+        self.stats["sharedSubgames"] += shared[0] + shared[1]
+        self.stats["sameSubgames"] += shared[1]
+        self.stats["sharedKids"] += shared[2]
+        self.stats["busySubgames"] += shared[3]
+        self.stats["waitedSubgames"] += shared[4]
+        self.stats["keptSubgames"] += kept
+        self.stats["workerMs"] += took * 1000.0
+        self.stats["serverMs"] += server_s * 1000.0
+        self.stats["serverTrips"] += trips
+        self.stats["cpuMs"] += cpu_s * 1000.0
+        self.stats["portMs"] += port_s * 1000.0
+        self.stats["portReads"] += port_reads
+        return took, server_s, trips, cpu_s, port_s, port_reads
 
     def _ahead_back(self, task: int, status: str, values: Any, cell_work: list,  # noqa: ANN401
                     notes: set[str]) -> None:
@@ -1897,18 +2210,7 @@ class _Pool:
                     status, task, values, done_work, done_notes, times = conn.recv()
                     back = time.perf_counter()
                     self.stats["recvMs"] += (back - clock) * 1000.0
-                    took, server_s, trips, cpu_s, port_s, port_reads, held, shared, kept = times
-                    self.stats["heldPositions"] += held
-                    self.stats["sharedSubgames"] += shared[0] + shared[1]
-                    self.stats["sameSubgames"] += shared[1]
-                    self.stats["sharedKids"] += shared[2]
-                    self.stats["keptSubgames"] += kept
-                    self.stats["workerMs"] += took * 1000.0
-                    self.stats["serverMs"] += server_s * 1000.0
-                    self.stats["serverTrips"] += trips
-                    self.stats["cpuMs"] += cpu_s * 1000.0
-                    self.stats["portMs"] += port_s * 1000.0
-                    self.stats["portReads"] += port_reads
+                    took, server_s, trips, cpu_s, port_s, port_reads = self._took(times)
                     if trace is not None and task in sent:
                         w_i, t_sent, n_cells, at_call, spec = sent.pop(task)
                         trace["chunks"].append(
@@ -2056,18 +2358,7 @@ class _Pool:
                     status, task, values, done_work, done_notes, times = conn.recv()
                     back = time.perf_counter()
                     self.stats["recvMs"] += (back - clock) * 1000.0
-                    took, server_s, trips, cpu_s, port_s, port_reads, held, shared, kept = times
-                    self.stats["heldPositions"] += held
-                    self.stats["sharedSubgames"] += shared[0] + shared[1]
-                    self.stats["sameSubgames"] += shared[1]
-                    self.stats["sharedKids"] += shared[2]
-                    self.stats["keptSubgames"] += kept
-                    self.stats["workerMs"] += took * 1000.0
-                    self.stats["serverMs"] += server_s * 1000.0
-                    self.stats["serverTrips"] += trips
-                    self.stats["cpuMs"] += cpu_s * 1000.0
-                    self.stats["portMs"] += port_s * 1000.0
-                    self.stats["portReads"] += port_reads
+                    took, server_s, trips, cpu_s, port_s, port_reads = self._took(times)
                     if trace is not None and task in sent:
                         w_i, t_sent, n_cells, at_call, spec = sent.pop(task)
                         trace["chunks"].append(
@@ -2118,6 +2409,317 @@ class _Pool:
                 call["end"] = self._t(self._last_end)
                 call["taken"] = taken
             if not expands and not children:
+                for since in idle_since:
+                    self.stats["tailMs"] += max(0.0, self._last_end - since) * 1000.0
+
+    def deep_passes(self, asks: list[list], stage: Stage, stage_budget: Budget,  # noqa: C901, PLR0912, PLR0915
+                    work: dict[str, int], notes: set[str], *,
+                    early: Callable[[int, list], None] | None = None) -> Any:  # noqa: ANN401 - a generator
+        """IKA-380 (`PASSES`): `cells` for a deep stage (a cell a chunk), each cell's tree read
+        by the workers in small tasks the reader hands out and joins:
+
+        * ``open`` (`_deep_open`): a cell's turn, its children's menus and matrices;
+        * a child read by a depth-2 stage: each of its passes in ``pass`` chunks of `CHUNK`
+          cells (`_pass_cells`, the Q's groups of `_children_at_once`), the pass's rectangle
+          solved here (`_kid_solve`), then the next pass; the child kept in the read's table;
+        * a child read by a deeper stage: each cell of its passes opened as above, and so on.
+
+        IKA-375's split read a child whole on one worker: a deep stage waited on its longest
+        child (up to 4.8 s at 24-45 s, open, 16 threads), and the workers were idle 21-29% of
+        a read, nearly all of it in the deep stages' tails. A child met by two cells of the
+        stage is read once (by its key), charged to both as the table charges a child taken.
+        The same arithmetic and counted work as the cell read on one worker (`_open_fold`);
+        the leaves and the Q go to the server in other batches, so the last places move as
+        between any two wall-clock reads. A task a worker stops ends the stage (`_STOPPED`).
+        Yields as `cells` does."""
+        from collections import deque
+        from multiprocessing.connection import wait
+
+        out = self._out
+        which = {id(conn): i for i, conn in enumerate(self.conns)}
+        row, col, items, root_budget = self._context[1:5]
+
+        def budget_of(st: Stage) -> Budget:
+            return replace(root_budget, enumerate_knockouts=True) if st.knockouts else root_budget
+
+        #: What to send: the tasks of children and cells begun (first), then the stage's cells.
+        inner: deque = deque()
+        tops: deque = deque()
+        #: task -> (kind, the `_Open` or (the `_Drive`, its cells))
+        mine: dict[int, tuple] = {}
+        drives: dict[Any, _Drive] = {}
+        results: dict[int, tuple] = {}
+        halted = False
+        taken = 0
+        for index, ask in enumerate(asks):
+            (k, i, j), = ask
+            op = _Open(stage, stage_budget, (items[k].position, row[i], col[j]), ("top", index))
+            tops.append(("open", stage, stage_budget, op.payload, op))
+        self._got_ms, self._got_cells = 0.0, 0
+        now = time.perf_counter()
+        self.stats["betweenMs"] += (now - self._last_end) * 1000.0 * len(self.conns)
+        idle_since = [now] * len(self.conns)
+        trace = self._trace
+        sent = self._trace_sent
+        if trace is not None:
+            call = {"stage": stage.label, "t": self._t(now), "chunks": len(asks),
+                    "cells": sum(len(a) for a in asks)}
+            trace["calls"].append(call)
+
+        def start_pass(drive: _Drive) -> None:
+            kid = drive.kid
+            asked = _kid_asked(kid)
+            drive.out = len(asked)
+            if not asked:
+                step(drive)
+                return
+            if drive.stage.sub is None:
+                for at in range(0, len(asked), CHUNK):
+                    chunk = asked[at:at + CHUNK]
+                    inner.append(("pass", drive.stage, drive.budget,
+                                  [(kid.position, kid.row[a], kid.col[b]) for a, b in chunk],
+                                  (drive, chunk)))
+            else:
+                for a, b in asked:
+                    op = _Open(drive.stage, drive.budget, (kid.position, kid.row[a], kid.col[b]),
+                               ("kid", drive, (a, b)), top=drive.top)
+                    inner.append(("open", drive.stage, drive.budget, op.payload, op))
+
+        def step(drive: _Drive) -> None:
+            _kid_solve(drive.kid, drive.attempt, drive.stage.passes)
+            if drive.kid.active:
+                drive.attempt += 1
+                start_pass(drive)
+            else:
+                finish_drive(drive)
+
+        def finish_drive(drive: _Drive) -> None:
+            kid = drive.kid
+            drive.done = True
+            drive.value = None if kid.answer is None else kid.answer[2]
+            if drive.road == "at-once" and self.table is not None:
+                _kid_keep(self.table, kid)
+            self.stats["kidReads"] += 1
+            waiters, drive.waiters = drive.waiters, []
+            for op, n in waiters:
+                settle(op, n, drive)
+
+        def settle(op: _Open, n: int, drive: _Drive) -> None:
+            if op.done or op.whole:
+                return
+            op.values[n] = drive.value
+            op.charges[n] = dict(drive.kid.work)
+            op.notes |= drive.kid.notes
+            op.left -= 1
+            if op.left == 0:
+                finish(op)
+
+        def refused(drive: _Drive) -> None:
+            """A pass the port refused: every cell reading the child is read whole."""
+            drive.done, drive.refused = True, True
+            waiters, drive.waiters = drive.waiters, []
+            for op, _n in waiters:
+                whole(op)
+
+        def whole(op: _Open) -> None:
+            if op.done or op.whole:
+                return
+            op.whole = True
+            op.works = []
+            self.stats["wholeCells"] += 1
+            inner.appendleft(("whole", op.stage, op.budget, op.payload, op))
+
+        def finish(op: _Open) -> None:
+            op.done = True
+            if op.road is None or op.whole:
+                value, extra = op.value, []
+            else:
+                value, extra = _open_fold(op.road, op.weights, op.entries, op.values, op.charges)
+            works = op.works + extra
+            if op.owner[0] == "top":
+                index = op.owner[1]
+                results[index] = ("done", [value], works, op.notes)
+                self._got_ms += op.ms
+                self._got_cells += 1
+                if early is not None:
+                    early(index, [value])
+                return
+            _kind, drive, cell = op.owner
+            drive.kid.memo[cell] = value
+            for done in works:
+                for name, n in done.items():
+                    drive.kid.work[name] = drive.kid.work.get(name, 0) + n
+            drive.out -= 1
+            if drive.out == 0:
+                step(drive)
+
+        def opened(op: _Open, answer: tuple) -> None:
+            if answer[0] == "value":
+                op.value = answer[1]
+                finish(op)
+                return
+            _open, op.road, op.weights, op.entries = answer
+            op.values = [None] * len(op.entries)
+            op.charges = [None] * len(op.entries)
+            self.stats["openCells"] += 1
+            sub = op.stage.sub
+            joined: list[tuple[_Drive, int]] = []
+            begun: list[_Drive] = []
+            for n, entry in enumerate(op.entries):
+                if entry[0] in ("leaf", "taken"):
+                    op.values[n] = entry[1]
+                    continue
+                _k, position, crow, ccol, key, m, x, y, kid_notes, kid_work = entry
+                drive = drives.get(key) if key is not None else None
+                if drive is None:
+                    kid = _Child(position, list(crow), list(ccol), m, x, y)
+                    kid.key, kid.notes, kid.work = key, set(kid_notes), dict(kid_work)
+                    drive = _Drive(kid, sub, budget_of(sub), op.road, top=op.top or op)
+                    if key is not None:
+                        drives[key] = drive
+                    begun.append(drive)
+                else:
+                    self.stats["kidsJoined"] += 1
+                op.left += 1
+                joined.append((drive, n))
+            if any(drive.refused for drive, _n in joined):
+                # A child whose pass the port refused: this cell is read whole (the children
+                # it began are still read: another cell may join them).
+                whole(op)
+            else:
+                for drive, n in joined:
+                    if drive.done:
+                        settle(op, n, drive)
+                    else:
+                        drive.waiters.append((op, n))
+            for drive in begun:
+                _kid_begin(drive.kid, drive.stage)
+                start_pass(drive)
+            if op.left == 0 and not op.done and not op.whole:
+                finish(op)
+
+        try:
+            while taken < len(asks):
+                while True:
+                    i = min(out, key=lambda k: len(out[k]) + (POOL_DEPTH if k in self._orphans
+                                                               else 0))
+                    if len(out[i]) >= POOL_DEPTH or not (inner or tops):
+                        break
+                    clock = time.perf_counter()
+                    self._tasks += 1
+                    task = self._tasks
+                    if not out[i]:
+                        self.stats["supplyMs"] += (clock - idle_since[i]) * 1000.0
+                    kind, st, bud, payload, ref = inner.popleft() if inner else tops.popleft()
+                    if kind == "pass" and PASS_SPLIT and len(payload) > 1:
+                        # The tail: fewer tasks than idle workers -- the chunk in parts.
+                        idle = sum(1 for k in out if not out[k] and k not in self._orphans)
+                        want = min(len(payload), idle - len(inner) - len(tops))
+                        if want > 1:
+                            drive, cells = ref
+                            size = -(-len(payload) // want)
+                            parts = [(payload[a:a + size], cells[a:a + size])
+                                     for a in range(0, len(payload), size)]
+                            for part, part_cells in reversed(parts[1:]):
+                                inner.appendleft(("pass", st, bud, part, (drive, part_cells)))
+                            payload, ref = parts[0][0], (drive, parts[0][1])
+                            self.stats["passSplits"] += 1
+                    mine[task] = (kind, ref)
+                    self.conns[i].send((kind, task, st, bud, payload))
+                    if kind == "pass":
+                        self.stats["passChunks"] += 1
+                    self.stats["sendMs"] += (time.perf_counter() - clock) * 1000.0
+                    out[i].append(task)
+                    if trace is not None:
+                        sent[task] = (i, self._t(clock), len(payload) if kind == "pass" else 1,
+                                      len(trace["calls"]) - 1, False)
+                if halted:
+                    yield taken, _STOPPED
+                    return
+                if taken in results:
+                    status, values, done_work, done_notes = results.pop(taken)
+                    self.stats["chunks"] += 1
+                    for cell_work in done_work:
+                        for kind, n in cell_work.items():
+                            work[kind] += n
+                    notes.update(done_notes)
+                    POOL_COUNTS["chunks"] += 1
+                    POOL_COUNTS["cells"] += len(asks[taken])
+                    index = taken
+                    taken += 1
+                    yield index, values
+                    continue
+                clock = time.perf_counter()
+                ready = wait(self.conns, timeout=TICK_SECONDS)
+                self.stats["waitMs"] += (time.perf_counter() - clock) * 1000.0
+                if not ready:
+                    yield None, _TICK
+                    continue
+                for conn in ready:
+                    clock = time.perf_counter()
+                    status, task, values, done_work, done_notes, times = conn.recv()
+                    back = time.perf_counter()
+                    self.stats["recvMs"] += (back - clock) * 1000.0
+                    took, server_s, trips, cpu_s, port_s, port_reads = self._took(times)
+                    if trace is not None and task in sent:
+                        w_i, t_sent, n_cells, at_call, spec = sent.pop(task)
+                        trace["chunks"].append(
+                            [at_call, w_i, n_cells, t_sent, self._t(back), round(took * 1000.0, 2),
+                             round(server_s * 1000.0, 2), trips, round(cpu_s * 1000.0, 2),
+                             round(port_s * 1000.0, 2), port_reads, int(spec), status])
+                    i = which[id(conn)]
+                    out[i].remove(task)
+                    self._orphan_tasks.discard(task)
+                    if not any(t in self._orphan_tasks for t in out[i]):
+                        self._orphans.discard(i)
+                        if i in self._due:
+                            self._due.discard(i)
+                            self.conns[i].send(self._context)
+                    if status == "error":
+                        raise RuntimeError(f"a ladder worker failed on a chunk: {values}")
+                    if task in mine:
+                        kind, ref = mine.pop(task)
+                        # The workers' milliseconds go to the stage's cell the task is part of,
+                        # counted (`eta_ms`) once that cell is done: many cells are part read at
+                        # once, and a first cell done with every task's milliseconds so far
+                        # predicted a stage at 15 times its length (abandoned after a cell).
+                        (ref[0].top if kind == "pass" else ref.top or ref).ms += took * 1000.0
+                        if status == "stopped":
+                            halted = True
+                        elif kind == "pass":
+                            drive, chunk = ref
+                            if drive.done:
+                                pass
+                            elif values is None:
+                                refused(drive)
+                            else:
+                                kid = drive.kid
+                                for cell, value, done in zip(chunk, values, done_work, strict=True):
+                                    kid.memo[cell] = value
+                                    for name in ("turns", "subgames", "cells", "qs"):
+                                        kid.work[name] += done[name]
+                                drive.out -= len(chunk)
+                                if drive.out == 0:
+                                    step(drive)
+                        elif kind == "whole":
+                            ref.works = list(done_work)
+                            ref.notes.update(done_notes)
+                            ref.value = values
+                            finish(ref)
+                        elif not (ref.done or ref.whole):
+                            ref.works.extend(done_work)
+                            ref.notes.update(done_notes)
+                            opened(ref, values)
+                    if not any(t in mine for t in out[i]):
+                        idle_since[i] = back
+        finally:
+            if taken < len(asks):
+                self._drain()
+            self._last_end = time.perf_counter()
+            if trace is not None:
+                call["end"] = self._t(self._last_end)
+                call["taken"] = taken
+            if not inner and not tops:
                 for since in idle_since:
                     self.stats["tailMs"] += max(0.0, self._last_end - since) * 1000.0
 

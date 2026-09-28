@@ -183,21 +183,79 @@ def test_a_sub_game_filled_once_reads_as_every_one_filled(roster, pool, monkeypa
     assert again.pool["keptSubgames"] > 0
 
 
-@pytest.mark.parametrize("split", [False, True])
+def test_a_sub_game_another_worker_fills_is_taken_or_filled_again(roster, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-380: a sub-game another process is filling (`subshare.Table.claim` answers `BUSY`)
+    is looked at again once the call's own are scored: taken where it is kept by then,
+    filled here where it is not -- either way every cell's value, notes and the counted work
+    are those of the call that fills every sub-game. The positive controls: sub-games
+    deferred, then taken (``waited``) or filled again."""
+    from pokeuraou import rustnode, search, subshare
+
+    reg = roster.reg
+    pos = _played(roster)[1]
+    ours = narrow(reg, pos, 0, limit=6).actions
+    theirs = narrow(reg, pos, 1, limit=6).actions
+    cells = [(pos, a, b) for a in ours[:3] for b in theirs[:3]]
+
+    class Busy:
+        """Every key claimed is being filled elsewhere; a get finds ``rows``' rows."""
+
+        def __init__(self, rows: dict) -> None:
+            self.rows, self.claimed, self.puts = rows, 0, 0
+
+        def claim(self, key):  # noqa: ANN001, ANN202
+            self.claimed += 1
+            return subshare.BUSY
+
+        def get(self, key, *, kid=False):  # noqa: ANN001, ANN202
+            return self.rows.get(key)
+
+        def put(self, *args, **named) -> None:  # noqa: ANN002, ANN003
+            self.puts += 1
+
+    def refine(table):  # noqa: ANN001, ANN202
+        work = ladder._zero()
+        monkeypatch.setattr(search, "SHARE", table)
+        monkeypatch.setattr(search, "WORK", work)
+        got = search._refine_cells(reg, cells, LEAF, budget=Budget.matrix(), sub_limit=4,
+                                   sub_branches=3)
+        return got, work
+
+    saved = rustnode.DIGESTS[0]
+    rustnode.DIGESTS[0] = True
+    try:
+        plain = refine(None)
+        kept = subshare.Local()
+        assert refine(kept) == plain
+        taken, again = Busy(dict(kept._rows)), Busy({})
+        before = dict(subshare.COUNTS)
+        assert refine(taken) == plain
+        waited = subshare.COUNTS["waited"] - before["waited"]
+        assert refine(again) == plain
+    finally:
+        rustnode.DIGESTS[0] = saved
+    assert taken.claimed > 0 and waited == taken.claimed and taken.puts == 0
+    # Not kept elsewhere by the second look: filled here, and kept.
+    assert again.claimed == taken.claimed and again.puts == again.claimed
+
+
+@pytest.mark.parametrize("split", [False, "split", "passes"])
 def test_the_wall_clock_and_the_stop(roster, pool, monkeypatch, split) -> None:  # noqa: ANN001
     reg = roster.reg
     pos = _played(roster)[1]
     node = _node(reg, pos, 6)
     stages = "d2r2b3n4+d3r4ban4/r3ban4"
-    # IKA-375: a deep stage's cells go through `deep_cells` with `SPLIT`, `cells` without.
-    monkeypatch.setattr(ladder, "SPLIT", split)
+    # IKA-375: a deep stage's cells go through `deep_cells` with `SPLIT`, `cells` without;
+    # IKA-380: `deep_passes` with `PASSES` too.
+    monkeypatch.setattr(ladder, "SPLIT", bool(split))
+    monkeypatch.setattr(ladder, "PASSES", split == "passes")
     walled = _read(reg, node, stages, 60_000.0, workers=True, clock="wall")
     assert walled.stopped == "done" and len(walled.rungs) == 2 and walled.workers == WORKERS
     # The stop, set when the first cell of the depth-3 stage comes back: the read ends
     # inside that stage with the first stage's answer, and the chunks still out are thrown
     # away.
     stop = threading.Event()
-    method = "deep_cells" if split else "cells"
+    method = {False: "cells", "split": "deep_cells", "passes": "deep_passes"}[split]
     cells = getattr(ladder._Pool, method)
 
     def stopping(self, asks, stage, *rest, **how):  # noqa: ANN001, ANN003, ANN202
@@ -324,6 +382,7 @@ def test_a_deep_cell_is_read_child_by_child_on_the_wall_clock(roster, pool, monk
     positions by number (`HOLD`)."""
     reg = roster.reg
     monkeypatch.setattr(ladder, "SPLIT", True)
+    monkeypatch.setattr(ladder, "PASSES", False)
     monkeypatch.setattr(ladder, "HOLD", True)
     stages = "d2r2b3n4+d3r3ban4/r2ban4+d4r2b3n4/r2b3n4/r2b3n4"
     split = children = held = 0
@@ -344,6 +403,37 @@ def test_a_deep_cell_is_read_child_by_child_on_the_wall_clock(roster, pool, monk
     assert split > 0, "no deep cell was read child by child"
     assert children > split
     assert held > 0, "the workers' ports held no position by number"
+
+
+def test_a_deep_cell_is_read_pass_by_pass_on_the_wall_clock(roster, pool, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-380 (`PASSES`): on the wall clock the reader walks a deep cell's tree -- the cell
+    opened on a worker, each child read by its stage pass by pass, a deeper child's cells
+    opened in turn -- and every stage, value, strategy, counted work and note is the serial
+    read's (hp-share answers a cell alike in any batch). hp-share has no encoded road, so a
+    depth-3 cell's children are read whole where it is opened (`_deep_open`'s own road); a
+    depth-4 cell's children (read by a depth-3 stage, `_deep_children`'s road) are read here.
+    The positive controls: cells opened, children read pass by pass. (The depth-2 passes
+    in chunks are `tests/test_ladder_leaf.py`'s, on a learned leaf.)"""
+    reg = roster.reg
+    monkeypatch.setattr(ladder, "SPLIT", True)
+    monkeypatch.setattr(ladder, "PASSES", True)
+    stages = "d2r2b3n4+d3r3ban4/r2ban4+d4r2b3n4/r2b3n4/r2b3n4"
+    opened = kids = 0
+    for pos in _played(roster)[:3]:
+        node = _node(reg, pos, 6)
+        walled = _read(reg, node, stages, workers=True, clock="wall")
+        serial = _read(reg, node, stages, workers=False)
+        assert walled.stopped == serial.stopped == "done"
+        assert [r.stage for r in walled.rungs] == [r.stage for r in serial.rungs]
+        for x, y in zip(walled.rungs, serial.rungs, strict=True):
+            assert x.value == y.value and x.fresh == y.fresh and x.work == y.work
+            assert (x.rows, x.cols) == (y.rows, y.cols)
+            np.testing.assert_array_equal(x.strategy, y.strategy)
+        assert walled.work == serial.work and walled.unmodelled == serial.unmodelled
+        opened += walled.pool["openCells"]
+        kids += walled.pool["kidReads"]
+    assert opened > 0, "no deep cell was opened"
+    assert kids > 0, "no child was read pass by pass"
 
 
 def test_a_worker_reads_a_stage_chunk_before_one_read_ahead() -> None:

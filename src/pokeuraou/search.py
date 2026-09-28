@@ -157,7 +157,7 @@ from .node_solver import solve_node
 from .port import batched_payoff
 from .position import Position
 from .regulation import Regulation
-from .subshare import COUNTS, menu_key
+from .subshare import BUSY, COUNTS, menu_key
 
 #: A leaf evaluator: many positions in, one probability each out.
 LeafEvaluator = Callable[[list[Position]], np.ndarray]
@@ -1245,6 +1245,8 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
         counted: list[tuple[_Sub, int]] = []
         keyed: dict[tuple[int, int], _Sub] = {}
         to_keep: list[tuple[_Sub, tuple[int, int], int]] = []
+        #: IKA-380: the sub-games another process was filling when claimed (`Table.claim`).
+        deferred: list[tuple[_Sub, tuple[int, int], Position, list, list]] = []
         table = SHARE
         for index, (cell, positions) in enumerate(zip(work, kept_positions, strict=True)):
             share = shares[index] if shares is not None else None
@@ -1278,7 +1280,13 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
                             sub.alias = keyed[key]
                             counted.append((sub, len(row) * len(col)))
                             COUNTS["same"] += 1
-                        elif key is not None and (got := table.get(key)) is not None:
+                        elif key is not None and (got := table.claim(key)) is BUSY:
+                            # IKA-380: another process is filling it now: looked at again
+                            # once this call's own are scored, filled here if still absent.
+                            keyed[key] = sub
+                            counted.append((sub, len(row) * len(col)))
+                            deferred.append((sub, key, pos, row, col))
+                        elif key is not None and got is not None:
                             sub.value, n, notes, _extra = got
                             sub.notes = set(notes)
                             sub.shared = True
@@ -1322,8 +1330,9 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
                                    "qs": 0 if n else qs, "reads": 0})
 
     # 4. The sub-games' nodes, a crossing per `FILL_BATCH`, scored as the rows gather.
-    with timing.region("d2.fills"):
-        for chunk, links in _fill_chunks(to_fill, related):
+    def fill(subs: list, links_of: list) -> None:
+        nonlocal held
+        for chunk, links in _fill_chunks(subs, links_of):
             filled = port.pending_payoffs(
                 reg, [(pos, row, col) for _sub, pos, row, col in chunk], evaluate, budget=budget,
                 links=links,
@@ -1348,7 +1357,29 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
                 held += pending.rows
             if held >= GATHER_ROWS:
                 score()
+
+    with timing.region("d2.fills"):
+        fill(to_fill, related)
     score()
+    if deferred:
+        # IKA-380: the sub-games another process was filling when this call claimed them,
+        # looked at again now that this call's own are scored: taken where they are kept by
+        # now, filled here (and kept) where they are not.
+        again = []
+        for sub, key, pos, row, col in deferred:
+            got = table.get(key)
+            if got is not None:
+                sub.value, _n, notes, _extra = got
+                sub.notes = set(notes)
+                sub.shared = True
+                COUNTS["waited"] += 1
+            else:
+                again.append((sub, pos, row, col))
+                to_keep.append((sub, key, len(row) * len(col)))
+        if again:
+            with timing.region("d2.fills"):
+                fill(again, [None] * len(again))
+            score()
     with timing.region("d2.fold"):
         folded = [_fold_cell(cell) for cell in work]
     if table is not None:
@@ -1369,7 +1400,9 @@ WORK: dict[str, int] | None = None
 #: child (`rustnode.DIGESTS` must be on) -- only when neither the table nor an earlier
 #: sub-game of the same call has it, and keeps what it solves. The count clock charges a
 #: sub-game so taken as if filled. The value is the one the sub-game had where it was
-#: filled: the same but for the last places the leaf's and the Q's batches move.
+#: filled: the same but for the last places the leaf's and the Q's batches move. IKA-380: a
+#: sub-game another process is filling (`claim` answers `BUSY`) is looked at again after
+#: this call's own are scored, and filled here only if it is still not kept.
 SHARE: Any = None
 
 #: IKA-374: with `WORK` counted, the same work cell by cell, appended here when it is a list
@@ -1407,7 +1440,9 @@ def _fold_cell(cell: _Cell) -> tuple[float | None, set[str], int]:
             first = sub.alias
             if first.error is not None:
                 raise first.error
-            value, notes, did = _sub_value(first), first.notes, 1
+            # IKA-380: the first may be one another process filled (`claim`'s look again).
+            value = first.value if first.shared else _sub_value(first)
+            notes, did = first.notes, 1
         else:
             value, notes, did = _sub_value(sub), sub.notes, 1
         cell.unmodelled.update(notes)

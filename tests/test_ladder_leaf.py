@@ -127,6 +127,71 @@ def test_a_child_read_once_is_every_one_read(kit, monkeypatch) -> None:  # noqa:
     assert got[True].ladder.here["sharedSubgames"] > 0
 
 
+def stackless_leaf(reg, path):  # noqa: ANN001, ANN201
+    """A ladder worker's leaf for `test_a_child_read_pass_by_pass_is_the_child_read_whole`:
+    the saved net on the CPU at one thread, a forward pass a child game (`ladder.STACK` off
+    in the worker too), so a value never depends on what it is scored with."""
+    from pokeuraou import humanplay
+
+    ladder.STACK = False
+    torch.set_num_threads(1)
+    return humanplay.process_leaf(reg, [path], "cpu", False)
+
+
+def test_a_child_read_pass_by_pass_is_the_child_read_whole(kit, monkeypatch, tmp_path) -> None:  # noqa: ANN001
+    """IKA-380 (`ladder.PASSES`): on the wall clock with worker processes, a depth-3 cell's
+    children read pass by pass -- each pass's depth-2 cells in chunks on the workers, its
+    rectangle solved by the reader, a child two cells reach read once -- is the read that
+    reads each cell whole on one worker (`PASSES` off, IKA-375's split) and the read here
+    without workers: mixture, value, stages, counted work and notes to the bit (a pass a
+    child game, `STACK` off, here and in the workers). The positive controls: chunks of
+    passes were sent and children read by the reader, and children joined."""
+    from pokeuraou.value import save_model
+
+    reg, pos, leaf = kit
+    encoder = Encoder(reg)
+    path = tmp_path / "seed7.pt"
+    net = leaf.nets[0]
+    save_model(path, net, net.state_dict(), encoder.vocab, ValueConfig(), meta={})
+    ours = narrow(reg, pos, 0, limit=5).actions
+    theirs = narrow(reg, pos, 1, limit=5).actions
+    stages = "d2r2b2n4x+d3r4ban4x/r2b2n3"
+    monkeypatch.setattr(ladder, "STACK", False)
+    monkeypatch.setattr(ladder, "SPLIT", True)
+
+    def solved(passes: bool, workers: bool):  # noqa: ANN202
+        monkeypatch.setattr(ladder, "PASSES", passes)
+        saved = ladder._POOL
+        if not workers:
+            ladder._POOL = None
+        try:
+            return humanplay.solve_move(
+                reg, pos, 0, ours, theirs, None, leaf, budget=Budget.matrix(), exact=True,
+                ladder={"stages": ladder.parse_ladder(stages), "budget_ms": 600_000.0,
+                        "clock": "wall"})
+        finally:
+            ladder._POOL = saved
+
+    assert ladder.start_pool(reg, 2, stackless_leaf, (str(path),)) == 2
+    try:
+        passes = solved(True, True)
+        split = solved(False, True)
+    finally:
+        ladder.stop_pool()
+    alone = solved(True, False)
+    assert [r.stage for r in passes.ladder.rungs] == stages.split("+")
+    for other in (split, alone):
+        # The wall clock's milliseconds aside.
+        assert np.asarray(passes.strategy).tobytes() == np.asarray(other.strategy).tobytes()
+        assert passes.value == other.value and passes.ladder.work == other.ladder.work
+        assert ([(r.stage, r.value, r.work, r.fresh) for r in passes.ladder.rungs]
+                == [(r.stage, r.value, r.work, r.fresh) for r in other.ladder.rungs])
+        assert passes.ladder.unmodelled == other.ladder.unmodelled
+    assert passes.ladder.pool["passChunks"] > 0 and passes.ladder.pool["kidReads"] > 0
+    assert passes.ladder.pool["kidsJoined"] + passes.ladder.pool["sharedKids"] > 0
+    assert split.ladder.pool["passChunks"] == 0
+
+
 def test_one_pass_moves_the_values_only_in_the_last_places(kit, monkeypatch) -> None:  # noqa: ANN001
     per_game = _read(kit, monkeypatch, batch=True, stack=False)
     seen = _counting(monkeypatch)
