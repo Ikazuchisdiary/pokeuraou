@@ -547,6 +547,254 @@ class QGraphs:
         return result.numpy().copy()
 
 
+#: The most positions `QBatchGraphs` captures a ``q_batch`` pass for: `deepen.Q_MENU_CHUNK`,
+#: the chunk the ladder's and the deepening's child menus ask in. A longer batch, or one
+#: with a pool past `Q_GRAPH_POOL`, is answered by the eager pass (`qhead.q_matrices`),
+#: the same answer. 0 turns the batched graphs off (the A/B of IKA-373).
+Q_BATCH_GRAPHS = int(os.environ.get("POKEURAOU_Q_BATCH_GRAPHS", "16"))
+#: Graphs kept per piece (the sides' actions, the pair head), least recently replayed
+#: dropped first. A graph held 0.4 MB of the server's host memory (219 graphs, +0.09 GB);
+#: a 16-thread ladder read of seven positions captured 876 (IKA-373). The cap bounds a
+#: long session's memory; a dropped shape met again is captured again, the same answer.
+Q_BATCH_GRAPH_CACHE = int(os.environ.get("POKEURAOU_Q_BATCH_GRAPH_CACHE", "512"))
+#: The most padded cells (B x N0 x N1) a batch graph is captured for; a larger batch is
+#: answered eagerly. A graph keeps its pool's card memory, which only its own captures can
+#: use, and the pool grows with the shapes. Over the 3,162 passes of a 16-thread read of
+#: seven hidden positions (cells p50 4,352, p90 59,577, max 166,208; IKA-373): no cap
+#: graphed them all for +2,096 MiB reserved, and the server (3.5 GB cap, IKA-334) ran out
+#: of memory on a value pass; 65,536 graphed 94% for +656 MiB (eager alone: +1,686 peak),
+#: at 1.41 against 1.35 ms of CPU a pass (eager 3.61). The open positions' passes are all
+#: under it.
+Q_BATCH_GRAPH_CELLS = int(os.environ.get("POKEURAOU_Q_BATCH_GRAPH_CELLS", str(16 * 64 * 64)))
+
+
+class QBatchGraphs:
+    """``q_batch`` (`qhead.q_matrices`) as CUDA graphs, one set per batch shape (IKA-373).
+
+    The eager batched pass is about 150 kernels launched from the server's Python: 3.5 ms
+    of the server's CPU (and its GIL) for a few microseconds of arithmetic, since the
+    ladder's child menus ask a median of three positions with pools of a dozen actions.
+    That was 7/10 of the server's time under a 16-thread ladder read (IKA-370 §4).
+
+    `qhead.q_matrices` stacks the positions and pads each side's pool to the longest in
+    the batch, so a pass's shape is (B, N0, N1). The graphs are cut where `QGraphs` cuts
+    them, at those exact shapes (nothing more is padded, so each piece replays the kernels
+    eager chose for the same shapes on the same inputs, and the matrices are
+    `q_matrices`' to the bit; `tests/test_q_rank.py` on CUDA):
+
+    * the trunk and both contexts read the B positions: one graph per B;
+    * each side's actions read the trunk's rows and the (B, N) padded pool: one graph per
+      (side, B, N);
+    * the pair head, with the sigmoid and the cast `q_matrices` applies, reads both: one
+      graph per pair of side graphs. Unlike `QGraphs` it is captured too: a ladder read
+      meets few (B, N0, N1), and its eager kernels were most of what the pieces leave.
+
+    Each piece has its own memory pool, as `QGraphs`' do, and a request replays one graph
+    of each, in order, so an output is read before any other graph of its pool replays
+    (one pool for all the pieces answered 2 to 4 of the 3,836 matrices of 400 captured
+    passes wrong, by up to 0.93).
+    A pair graph reads its two side graphs' outputs, so dropping a side graph drops the
+    pair graphs over it. The inputs are staged in page-locked memory; the padded pools go
+    through flat buffers viewed at (B, N, ...), so a piece reads a contiguous tensor as
+    eager does. Enqueued under the process's graph lock (`inference._GRAPH_LOCK`) and
+    waited for outside it.
+    """
+
+    @staticmethod
+    def usable(device: Any) -> bool:  # noqa: ANN401
+        return Q_BATCH_GRAPHS > 0 and Q_GRAPH_POOL > 0 and getattr(device, "type", None) == "cuda"
+
+    def __init__(self, net: Any, device: Any) -> None:  # noqa: ANN401
+        from collections import OrderedDict
+
+        from .inference import _GRAPH_LOCK
+
+        self.net = net
+        self.device = device
+        self.lock = _GRAPH_LOCK
+        self.kind: tuple | None = None
+        self.inputs: dict[str, Any] = {}
+        #: Each side's padded actions and features, flat: viewed at (B, N, ...) a shape.
+        self.flat: dict[str, Any] = {}
+        self.pools: dict[str, Any] = {}
+        #: B -> (graph, (rows, side 0's context, side 1's context))
+        self.trunks: dict[int, tuple[Any, Any]] = {}
+        #: (side, B, N) -> (serial, graph, action vectors)
+        self.sides: OrderedDict = OrderedDict()
+        #: (serial of side 0's graph, serial of side 1's) -> (graph, matrix)
+        self.pairs: OrderedDict = OrderedDict()
+        self._serial = 0
+        self.warm: set[tuple[int, str]] = set()
+        self.captured = 0
+        self.replays = 0
+        self.evicted = 0
+        self.failed: str | None = None
+
+    def _capture(self, what: str, run: Callable[[], Any]) -> tuple[Any, Any]:  # noqa: ANN401
+        import torch
+
+        key = (threading.get_ident(), what)
+        if key not in self.warm:
+            side = torch.cuda.Stream()
+            side.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(side):
+                for _ in range(2):
+                    run()
+            torch.cuda.current_stream().wait_stream(side)
+            self.warm.add(key)
+        graph = torch.cuda.CUDAGraph()
+        if what not in self.pools:
+            self.pools[what] = torch.cuda.graph_pool_handle()
+        with torch.cuda.graph(graph, pool=self.pools[what], capture_error_mode="thread_local"):
+            out = run()
+        self.captured += 1
+        timing.count("q.batchgraph.captured")
+        return graph, out
+
+    def _side(self, s: int, b: int, n: int, view: tuple[Any, Any]) -> tuple[int, Any, Any]:  # noqa: ANN401
+        key = (s, b, n)
+        if key in self.sides:
+            self.sides.move_to_end(key)
+            return self.sides[key]
+        if len(self.sides) >= Q_BATCH_GRAPH_CACHE:
+            _key, (gone, _graph, _out) = self.sides.popitem(last=False)
+            # The pair graphs that read the dropped graph's output go with it.
+            for pair in [p for p in self.pairs if gone in p]:
+                del self.pairs[pair]
+            self.evicted += 1
+            timing.count("q.batchgraph.evicted")
+        h, ctx0, ctx1 = self.trunks[b][1]
+        acts, feats = view
+        ctx = ctx0 if s == 0 else ctx1
+        graph, out = self._capture(
+            f"side{s}", lambda: self.net.encode_actions(h, ctx, s, acts, feats)
+        )
+        self._serial += 1
+        self.sides[key] = (self._serial, graph, out)
+        return self.sides[key]
+
+    def matrices(self, requests: list[dict[str, np.ndarray]]) -> list[np.ndarray] | None:
+        """`qhead.q_matrices(requests)`, or None when the batch is not for the graphs."""
+        if self.failed or not requests or len(requests) > Q_BATCH_GRAPHS:
+            return None
+        sizes = [(len(r["acts0"]), len(r["acts1"])) for r in requests]
+        if min(min(s) for s in sizes) <= 0:
+            return None
+        n = (max(s[0] for s in sizes), max(s[1] for s in sizes))
+        if max(n) > Q_GRAPH_POOL or len(requests) * n[0] * n[1] > Q_BATCH_GRAPH_CELLS:
+            return None
+        import torch
+
+        from . import qhead
+
+        names = qhead.POSITION_ARRAYS
+        first = requests[0]
+        kind = tuple((name, first[name].dtype.str, tuple(first[name].shape[1:])) for name in names)
+        kind += (("acts", tuple(first["acts0"].shape[1:])),)
+        if self.kind is not None and kind != self.kind:
+            return None
+        props = bool(self.net.config.properties)
+        b = len(requests)
+        tail = tuple(first["acts0"].shape[1:])
+        # `q_matrices`' own arrays: the positions stacked, each side's pool padded with
+        # zeros to the longest, staged in page-locked memory.
+        staged = {
+            name: torch.from_numpy(
+                np.ascontiguousarray(np.concatenate([r[name] for r in requests], axis=0))
+            ).pin_memory()
+            for name in names
+        }
+        padded: list[tuple[Any, Any]] = []
+        for s in (0, 1):
+            acts = np.zeros((b, n[s], *tail), dtype=np.int64)
+            feats = np.zeros((b, n[s], qhead.FEATURE_WIDTH), dtype=np.float32) if props else None
+            for i, r in enumerate(requests):
+                acts[i, : len(r[f"acts{s}"])] = r[f"acts{s}"]
+                if feats is not None:
+                    feats[i, : len(r[f"feats{s}"])] = r[f"feats{s}"]
+            padded.append((
+                torch.from_numpy(acts).pin_memory(),
+                None if feats is None else torch.from_numpy(feats).pin_memory(),
+            ))
+        result = torch.empty((b, n[0], n[1]), dtype=torch.float64, pin_memory=True)
+        done = torch.cuda.Event()
+        with self.lock, torch.no_grad():
+            try:
+                if self.kind is None:
+                    self.inputs = {
+                        name: torch.zeros((Q_BATCH_GRAPHS, *staged[name].shape[1:]),
+                                          dtype=staged[name].dtype, device=self.device)
+                        for name in names
+                    }
+                    width = Q_BATCH_GRAPHS * Q_GRAPH_POOL
+                    for s in (0, 1):
+                        self.flat[f"acts{s}"] = torch.zeros(
+                            width * int(np.prod(tail)), dtype=torch.int64, device=self.device)
+                        if props:
+                            self.flat[f"feats{s}"] = torch.zeros(
+                                width * qhead.FEATURE_WIDTH, dtype=torch.float32,
+                                device=self.device)
+                    self.kind = kind
+                for name in names:
+                    self.inputs[name][:b].copy_(staged[name], non_blocking=True)
+                views: list[tuple[Any, Any]] = []
+                for s in (0, 1):
+                    acts, feats = padded[s]
+                    av = self.flat[f"acts{s}"][: acts.numel()].view(acts.shape)
+                    av.copy_(acts, non_blocking=True)
+                    fv = None
+                    if feats is not None:
+                        fv = self.flat[f"feats{s}"][: feats.numel()].view(feats.shape)
+                        fv.copy_(feats, non_blocking=True)
+                    views.append((av, fv))
+                if b not in self.trunks:
+                    def trunk(b: int = b) -> tuple[Any, Any, Any]:  # noqa: ANN401
+                        batch = {name: self.inputs[name][:b] for name in names}
+                        h, sides = self.net.mons(batch)
+                        field = batch["field"]
+                        ctx0 = self.net.context(torch.cat([sides[:, 0], sides[:, 1], field], dim=-1))
+                        ctx1 = self.net.context(torch.cat([sides[:, 1], sides[:, 0], field], dim=-1))
+                        return h, ctx0, ctx1
+
+                    self.trunks[b] = self._capture("trunk", trunk)
+                side0 = self._side(0, b, n[0], views[0])
+                side1 = self._side(1, b, n[1], views[1])
+                key = (side0[0], side1[0])
+                if key in self.pairs:
+                    self.pairs.move_to_end(key)
+                else:
+                    if len(self.pairs) >= Q_BATCH_GRAPH_CACHE:
+                        self.pairs.popitem(last=False)
+                        self.evicted += 1
+                        timing.count("q.batchgraph.evicted")
+                    u, v = side0[2], side1[2]
+                    net = self.net
+                    self.pairs[key] = self._capture(
+                        "pair",
+                        # `QNet.forward`'s last line and `q_matrices`' sigmoid and cast.
+                        lambda: torch.sigmoid(net.pair(u, v) - net.pair(v, u).transpose(1, 2)).double(),
+                    )
+            except Exception as error:  # noqa: BLE001 - the eager road answers instead
+                # A capture that failed can leave its pool mid-recording, so no graph is
+                # trusted after one: every batch from here is answered eagerly.
+                self.failed = f"{type(error).__name__}: {error}"
+                timing.count("q.batchgraph.failed")
+                return None
+            self.trunks[b][0].replay()
+            side0[1].replay()
+            side1[1].replay()
+            graph, out = self.pairs[key]
+            graph.replay()
+            result.copy_(out, non_blocking=True)
+            done.record()
+        with timing.stage("server.qbatchsync"):
+            done.synchronize()
+        self.replays += 1
+        timing.count("q.batchgraph.replays")
+        got = result.numpy()
+        return [got[i, :a, :c].copy() for i, (a, c) in enumerate(sizes)]
+
+
 def served_q(
     net: Any, device: Any, files: Sequence[str], digests: Sequence[str] = ()  # noqa: ANN401
 ) -> Callable[..., np.ndarray]:
@@ -560,6 +808,7 @@ def served_q(
     from . import qhead
 
     graphs = QGraphs(net, device) if QGraphs.usable(device) else None
+    batch_graphs = QBatchGraphs(net, device) if QBatchGraphs.usable(device) else None
 
     def answer(arrays: dict[str, np.ndarray]) -> np.ndarray:
         started = time.perf_counter()
@@ -575,9 +824,14 @@ def served_q(
         return out
 
     def batch(requests: list[dict[str, np.ndarray]]) -> list[np.ndarray]:
-        """Several positions' matrices in one eager forward pass (IKA-307, op ``q_batch``)."""
+        """Several positions' matrices in one forward pass (IKA-307, op ``q_batch``): by
+        `QBatchGraphs` on a card (IKA-373), else eagerly -- the same answer."""
         started = time.perf_counter()
-        out = qhead.q_matrices(net, requests, device)
+        with timing.stage("server.qbatchgraph"):
+            out = batch_graphs.matrices(requests) if batch_graphs is not None else None
+        if out is None:
+            with timing.stage("server.qbatcheager"):
+                out = qhead.q_matrices(net, requests, device)
         answer.held += time.perf_counter() - started
         answer.calls += 1
         answer.batched += len(requests)
@@ -588,6 +842,7 @@ def served_q(
     answer.batched = 0
     answer.batch = batch
     answer.graphs = graphs
+    answer.batch_graphs = batch_graphs
     answer.fingerprint = net.vocab_fingerprint
     answer.properties = bool(net.config.properties)
     answer.files = list(files)

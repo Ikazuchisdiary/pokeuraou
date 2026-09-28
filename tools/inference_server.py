@@ -150,7 +150,9 @@ def main() -> None:
     for name, model in q_models.items():
         print(f"  Q arm {name}: {', '.join(model.files)} "
               + ("(CUDA graphs: trunk, each side's pool size; pair head eager)"
-                 if getattr(model, "graphs", None) is not None else "(eager)"),
+                 if getattr(model, "graphs", None) is not None else "(eager)")
+              + ("; q_batch by CUDA graphs per batch shape (IKA-373)"
+                 if getattr(model, "batch_graphs", None) is not None else ""),
               file=sys.stderr)
     if args.device == "cuda":
         print(f"  cuda waits: {scheduling()}", file=sys.stderr)
@@ -213,6 +215,13 @@ def main() -> None:
             graphed = [m.graphs for m in q_models.values() if getattr(m, "graphs", None)]
             timing.set_total("server.q.graphed", 0.0, calls=sum(g.replays for g in graphed))
             timing.set_total("server.q.captured", 0.0, calls=sum(g.captured for g in graphed))
+            # IKA-373: the batched passes (op ``q_batch``) the batch graphs answered.
+            batched = [m.batch_graphs for m in q_models.values()
+                       if getattr(m, "batch_graphs", None)]
+            timing.set_total("server.q.batchgraphed", 0.0,
+                             calls=sum(g.replays for g in batched))
+            timing.set_total("server.q.batchcaptured", 0.0,
+                             calls=sum(g.captured for g in batched))
         # Rows are a count, not a call count. Putting `rows_served` in the calls column
         # made the queueing row read as 3.2 million calls of 0.03 microseconds each.
         timing.count("server.rows", int(server.rows_served) - _reported_rows[0])
