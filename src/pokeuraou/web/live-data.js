@@ -72,7 +72,8 @@ function decodeStep(buf) {
   const branch = () => {
     const b = { weight: f32(), value: f32(), what: strings[u32()] };
     const flags = u8();
-    b.ended = !!(flags & 1); b.more = !!(flags & 4);
+    // 8: a branch of a record kept before IKA-345 (liveview.upgrade_record): its text only.
+    b.ended = !!(flags & 1); b.more = !!(flags & 4); b.textOnly = !!(flags & 8);
     b.causes = arr(u8(), () => ({ plain: !!u8(), head: strings[u32()], body: strings[u32()], title: strings[u32()] }));
     b.changes = arr(2, () => arr(u8(), () => {
       const c = { name: strings[u32()], sprite: strings[u32()], from: u8(), to: u8() };

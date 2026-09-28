@@ -5,7 +5,10 @@
     uv run python tools/live_view.py data/human/live.bin --dump | head  # the frames as JSON lines
 
 The file is what ``tools/play_human.py --live-out`` keeps (`pokeuraou.liveview.FileSink`):
-the page's own frames with the seconds each was sent at.
+the page's own frames with the seconds each was sent at. A record kept before IKA-345 (the
+labels were plain strings then) is read into today's frames as it is loaded
+(`pokeuraou.liveview.upgrade_record`): its labels become one part a slot, and its chance
+branches keep their one-line text (the draws and the field were not recorded).
 """
 
 from __future__ import annotations
@@ -30,9 +33,15 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--sprite-url", default=None,
                     help="where the page takes images, {id} = Showdown's sprite id "
                     "(default: Showdown's server; \"\" for none)")
+    ap.add_argument("--analysis-url", default=None,
+                    help="the analysis page's address, for the page's links to it (default: the "
+                    "launcher's port 8337 on the same host)")
     ap.add_argument("--dump", action="store_true", help="print the frames as JSON lines instead")
     args = ap.parse_args(argv)
     frames = list(liveview.read_record(args.record))
+    frames, upgraded = liveview.upgrade_record(frames)
+    if upgraded:
+        print(f"IKA-345 より前の形の記録を今の形に直して読みます（{upgraded} フレーム）", file=sys.stderr)
     if args.dump:
         decoder = liveview.Decoder()
         for seconds, frame in frames:
@@ -40,7 +49,10 @@ def main(argv: list[str] | None = None) -> None:
             if got is not None:
                 sys.stdout.write(json.dumps({"t": round(seconds, 4), **got}, ensure_ascii=False) + "\n")
         return
-    server = liveview.LiveServer(args.host, args.port, sprite_url=args.sprite_url).start()
+    server = liveview.LiveServer(
+        args.host, args.port, sprite_url=args.sprite_url,
+        links={"analysis-url": args.analysis_url} if args.analysis_url else None,
+    ).start()
     print(f"画面: {server.url}（{len(frames)} フレーム）", file=sys.stderr)
     try:
         input("ページを開いたら Enter で再生 > ")

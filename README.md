@@ -82,7 +82,8 @@ uv run python tools/play_human.py --person record:data/human/games.jsonl@0 --clo
 ```
 
 * 局は `data/human/games.jsonl`（1 行 1 局、対戦評価の記録と同じ形）、実時間の記録は `games.clock.jsonl`、
-  画面のフレームは `data/human/live/<時刻>.bin` に残る
+  画面のフレームは `data/human/live/<時刻>.bin` に残る。IKA-345 より前の `.bin` も、読み込む時に今の形に直して再生する（分岐は当時の 1 行の文だけ。IKA-356）
+* 検討モードで読んだ値は `data/human/analysis.jsonl` に残り、ページを読み込み直しても起動し直しても対局全体の値の推移に出る（IKA-356）
 * 実時間の局は機械の速さで AI の手が変わるので、種と人の入力から打ち直しても同じ局にはならない。
   同じ局を再現したいときはノード時間で打つ
 

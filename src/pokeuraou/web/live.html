@@ -66,7 +66,7 @@
     </div>
     <svg class="tl-svg" id="tSvg" role="img" aria-label="対局全体の値の推移"></svg>
     <div class="tl-turns" id="tTurns"></div>
-    <p class="note tl-legend"><span class="lg rec"></span>記録の値　<span class="lg read"></span>このページで読んだ値　<span class="lg gap"></span>値の無いターン</p>
+    <p class="note tl-legend"><span class="lg rec"></span>記録の値　<span class="lg read"></span>読んだ値　<span class="lg gap"></span>値の無いターン　<span class="lg turn"></span>読んだターン</p>
   </section>
   <section class="stage" id="stage" aria-label="場">
     <div class="side" id="sideTop"></div>
@@ -109,6 +109,7 @@
         <div class="balance-bar"><i id="balBar" style="width:50%"></i></div>
       </div>
       <canvas class="chart" id="chart" aria-label="値の推移"></canvas>
+      <p class="chartwait" id="chartWait">選出が決まると読みを始めます</p>
       <div class="strip n" id="strip"></div>
 
       <h3><span id="oursTitle">AI の混合戦略</span> <small>手ごとの確率・損は期待値の損</small></h3>
