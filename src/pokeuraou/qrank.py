@@ -28,6 +28,7 @@ of a match that name a ``q`` label rank with it.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -151,9 +152,14 @@ class LocalQ:
             raise ValueError(f"{self.path} reads another vocabulary than this encoder's")
         self._device = torch.device(self.device)
         self.calls = 0
+        self._digests = [file_sha256(self.path)]
 
     def describe(self) -> list[str]:
         return [Path(self.path).name]
+
+    def digests(self) -> list[str]:
+        """The sha256 of each file `describe` names, in its order (IKA-340)."""
+        return list(self._digests)
 
     def matrix(
         self, reg: Regulation, pos: Position, pools: tuple[Sequence[SideAction], Sequence[SideAction]]
@@ -229,6 +235,8 @@ class RemoteQ:
             raise RuntimeError(f"the server's Q arm {self.model!r} reads another vocabulary")
         self.properties = bool(about["properties"])
         self._files = list(about["files"])
+        # The server hashed the files it loaded (IKA-340); this process never sees them.
+        self._digests = list(about["sha256"])
 
     def _ask(self, request: dict[str, Any]) -> dict[str, Any]:
         self._file.write((json.dumps(request) + "\n").encode("utf-8"))
@@ -245,6 +253,10 @@ class RemoteQ:
 
     def describe(self) -> list[str]:
         return list(self._files)
+
+    def digests(self) -> list[str]:
+        """The sha256 of each file `describe` names, as the server hashed it (IKA-340)."""
+        return list(self._digests)
 
     def close(self) -> None:
         try:
@@ -526,8 +538,11 @@ class QGraphs:
         return result.numpy().copy()
 
 
-def served_q(net: Any, device: Any, files: Sequence[str]) -> Callable[..., np.ndarray]:  # noqa: ANN401
-    """The server's side of a Q arm: (arrays) -> the N0 x N1 matrix.
+def served_q(
+    net: Any, device: Any, files: Sequence[str], digests: Sequence[str] = ()  # noqa: ANN401
+) -> Callable[..., np.ndarray]:
+    """The server's side of a Q arm: (arrays) -> the N0 x N1 matrix. ``digests`` are the
+    sha256 of ``files``, for the records (IKA-340).
 
     On a card, by `QGraphs` (stage 3); a pool past `Q_GRAPH_POOL`, or a CPU server, by the
     eager pass (`qhead.q_matrix`), which is the same answer. The module is only read, never
@@ -567,6 +582,7 @@ def served_q(net: Any, device: Any, files: Sequence[str]) -> Callable[..., np.nd
     answer.fingerprint = net.vocab_fingerprint
     answer.properties = bool(net.config.properties)
     answer.files = list(files)
+    answer.digests = list(digests)
     return answer
 
 
@@ -578,7 +594,8 @@ def load_q_arms(paths: dict[str, Path], device_name: str) -> dict[str, Any]:
 
     device = torch.device(device_name)
     return {
-        name: served_q(qhead.load_q(path, device_name), device, [Path(path).name])
+        name: served_q(qhead.load_q(path, device_name), device, [Path(path).name],
+                       [file_sha256(path)])
         for name, path in paths.items()
     }
 
@@ -848,6 +865,25 @@ def install_from_args(
 Q_NAME = re.compile(r"[a-z0-9_]+")
 
 
+def file_sha256(path: Path | str) -> str:
+    """The sha256 of a Q file as it is on disk (IKA-340): what a record names it by, since
+    a file name alone says nothing once the file is replaced by a retrained one."""
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def record_fields(models: dict[str, Any]) -> dict[str, list[str]]:
+    """The Qs behind `install_from_args`'s models, as a record carries them (IKA-340):
+    ``qModel`` the files (`describe_installed`, the form a match record already had) and
+    ``qModelSha256`` each one's sha256 in the same order. Empty without a Q, so a record
+    that ranked by none gains no field."""
+    if not models:
+        return {}
+    digests: list[str] = []
+    for name in sorted(models):
+        digests += models[name].digests()
+    return {"qModel": describe_installed(models), "qModelSha256": digests}
+
+
 def describe_installed(models: dict[str, Any]) -> list[str]:
     """The files behind `install_from_args`'s Qs, for a record: the default's as they are,
     a named one's as ``NAME=file``."""
@@ -865,6 +901,8 @@ __all__ = [
     "tail_wants_default_q",
     "install_from_args",
     "describe_installed",
+    "file_sha256",
+    "record_fields",
     "prefetch",
     "q_covers",
     "q_name",

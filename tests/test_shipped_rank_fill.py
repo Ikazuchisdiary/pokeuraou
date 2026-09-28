@@ -48,6 +48,9 @@ class FakeQ:
     def describe(self) -> list[str]:
         return [self.path.name]
 
+    def digests(self) -> list[str]:
+        return [qrank.file_sha256(self.path)]
+
 
 @pytest.fixture
 def q_here(tmp_path, monkeypatch):  # noqa: ANN001, ANN201

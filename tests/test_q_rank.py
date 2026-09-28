@@ -402,6 +402,8 @@ def test_a_q_loaded_here_and_served_answer_alike(pool, pos, tmp_path) -> None:  
         remote = qrank.RemoteQ(address, "q", encoder)
         try:
             assert remote.describe() == ["q.pt"]
+            # IKA-340: the server hashed the file it loaded, as the worker would have.
+            assert remote.digests() == local.digests() == [qrank.file_sha256(path)]
             assert np.array_equal(remote.matrix(reg, pos, pools), here)
         finally:
             remote.close()
