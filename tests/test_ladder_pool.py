@@ -16,7 +16,9 @@ Played on `rizabanadohido` under hp-share with damage-ordered children (``n``): 
 
 from __future__ import annotations
 
+import collections
 import threading
+import time
 from types import SimpleNamespace
 
 import numpy as np
@@ -577,3 +579,47 @@ def test_a_filled_budget_ends_at_the_budget(roster, pool, monkeypatch, via) -> N
         serial = _read(reg, node, "d2r2b3n4", workers=False)
         assert again.rungs[0].value == serial.rungs[0].value
     assert cut >= 1, "no read met its budget"
+
+
+def _orphaned_pool(orphans: dict[int, list[int]], free: tuple[int, ...] = ()):  # noqa: ANN202
+    """A `_Pool` on real pipes with no worker behind them (the test reads the workers' ends):
+    a worker in ``orphans`` is inside chunks (its task ids) an earlier read gave up, as
+    `_Pool._settle` leaves it; a worker in ``free`` has nothing out."""
+    import multiprocessing
+
+    ends = [multiprocessing.Pipe() for _ in range(len(orphans) + len(free))]
+    mine = [a for a, _b in ends]
+    theirs = [b for _a, b in ends]
+    pool_ = ladder._Pool([], mine, multiprocessing.get_context().Event())  # noqa: SLF001
+    pool_.stats = collections.defaultdict(float)
+    pool_._last_end = time.perf_counter()  # noqa: SLF001
+    for i, tasks in orphans.items():
+        pool_._out[i] = list(tasks)  # noqa: SLF001
+    pool_._orphans = set(orphans)  # noqa: SLF001
+    pool_._orphan_tasks = {t for tasks in orphans.values() for t in tasks}  # noqa: SLF001
+    return pool_, theirs
+
+
+def test_no_chunk_goes_to_a_worker_still_in_an_earlier_reads_chunk() -> None:
+    """A worker inside a chunk an earlier read gave up is sent the new read's context only when
+    that chunk is back (`_Pool.begin`); a chunk sent to it before is read under the earlier
+    read's rows, menus and sub-game table generation, and is answered as this read's.
+    CI (818a902): `test_a_filled_budget_ends_at_the_budget` read 0.4216 for 0.4302 -- with
+    every worker still in a deep chunk of the read before and each with one task left out, the
+    send loop chose the least loaded worker by its count plus the orphan penalty but stopped on
+    the bare count, and sent this read's chunk to a worker that had not its context.
+    The positive control: a worker with nothing out is sent the chunk."""
+    stage = SimpleNamespace(label="d2")
+    # Both workers are in an orphan chunk, one task each left out (below POOL_DEPTH).
+    pool_, theirs = _orphaned_pool({0: [5], 1: [6]})
+    walk = pool_.cells([[("cell",)]], stage, None, ladder._zero(), set())  # noqa: SLF001
+    assert next(walk) == (None, ladder._TICK)  # noqa: SLF001
+    assert not any(end.poll(0) for end in theirs), "a chunk went to a worker not told this read"
+    assert pool_._out == {0: [5], 1: [6]}  # noqa: SLF001
+    walk.close()
+    # The positive control: one worker is free, the other is still in its orphan chunk.
+    pool_, theirs = _orphaned_pool({0: [5]}, free=(1,))
+    walk = pool_.cells([[("cell",)]], stage, None, ladder._zero(), set())  # noqa: SLF001
+    assert next(walk) == (None, ladder._TICK)  # noqa: SLF001
+    assert [end.poll(0) for end in theirs] == [False, True], "the free worker got no chunk"
+    walk.close()
