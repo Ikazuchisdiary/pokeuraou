@@ -317,3 +317,37 @@ def test_the_openings_root_at_every_legal_action(pool, monkeypatch) -> None:  # 
     assert parse_condition("a:seconds=1,depth2_auto=on,root_all=on").root_all
     with pytest.raises(ValueError, match="depth2_auto"):
         _match(pool, wide, rule).agent(_cond("x", 1.0, root_all=True))
+
+
+# ------------------------------------------------------------------------ IKA-384
+
+
+def test_a_decided_game_is_stopped_where_the_turns_reads_agree(pool) -> None:  # noqa: ANN001
+    """`Match.adjudication`: a game whose turn's two reads are away from 1/2 by the
+    threshold ends there, scored 0/1 by the side of 1/2 the reads' mean is on; without it
+    the same pair is played on (control: nothing is stopped, and the reads up to the stop
+    are the same)."""
+    a, b = _cond("a", 0.3), _cond("b", 0.2)
+    teams = (pool.teams[0], pool.teams[1])
+    plain = timematch.play_pair(_match(pool, a, b, turns=4), 1, teams)
+    assert all("adjudicated" not in ln for ln in plain)
+    assert all(ln["endReason"] != "adjudicated" for ln in plain)
+    match = _match(pool, a, b, turns=4)
+    match.adjudication = (1, 0.02)
+    cut = timematch.play_pair(match, 1, teams)
+    stopped = [ln for ln in cut if "adjudicated" in ln]
+    assert stopped, "nothing was adjudicated; the test would be vacuous"
+    for ln in stopped:
+        assert ln["endReason"] == "adjudicated"
+        assert ln["outcome"] in (0.0, 1.0)
+        assert ln["turns"] == ln["adjudicated"]["turn"] + 1
+        assert (ln["outcome"] == 1.0) == (ln["adjudicated"]["value"] > 0.5)
+        assert abs(ln["adjudicated"]["value"] - 0.5) >= 0.02 - 1e-9
+        mine = ln["moves"]
+        other = plain[ln["game"]]["moves"]
+        assert len(mine) < len(other)
+        assert _timeless(mine) == _timeless(other[:len(mine)])
+    # A threshold nothing reaches is the game played out, the same to the byte.
+    match.adjudication = (1, 0.51)
+    never = timematch.play_pair(match, 1, teams)
+    assert json.dumps(_timeless(never)) == json.dumps(_timeless(plain))

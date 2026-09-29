@@ -1799,6 +1799,11 @@ class HumanGame:
         return got
 
     # -- the game
+    def adjudicate(self, pos: Position) -> float | None:  # noqa: ARG002
+        """Side 0's result if the game is to stop at ``pos`` (None: play on; always None
+        here -- a person's game is played out)."""
+        return None
+
     def play(self) -> GameRecord:
         reg = self.reg
         four = [
@@ -1933,6 +1938,12 @@ class HumanGame:
                 break
             pos = advanced
             record.turns = pos.turn
+            verdict = None if pos.ended else self.adjudicate(pos)
+            if verdict is not None:
+                # IKA-384: a match that stops a decided game early (`TimedGame.adjudicate`).
+                record.end_reason = "adjudicated"
+                record.outcome = verdict
+                break
         if pos.ended and pos.winner is not None:
             record.outcome = 1.0 if pos.winner == pos.sides[0].id else 0.0
         _close_record(record, pos)

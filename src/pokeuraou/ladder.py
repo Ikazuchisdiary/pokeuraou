@@ -437,6 +437,12 @@ CHUNK = 8
 #: references cannot score (IKA-364, IKA-367 §6).
 FILL_WALL = os.environ.get("POKEURAOU_LADDER_FILL", "0") != "0"
 
+#: IKA-384: a ladder in `FILLS` (L6) fills a count-clock budget as it fills a wall-clock
+#: one (`POKEURAOU_LADDER_COUNT_FILL=1`; default off, so every count-clock read is what it was).
+#: It makes a single-core count-clock game read L6 the way the all-core wall-clock agent does:
+#: the budget is spent, the answer is the last completed stage.
+COUNT_FILL = os.environ.get("POKEURAOU_LADDER_COUNT_FILL", "0") != "0"
+
 
 class Stopped(Exception):  # noqa: N818 - a signal, not an error
     """The caller's stop event, met inside a cell's own read (depth 3 and up)."""
@@ -555,6 +561,13 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
     # IKA-376: a ladder named in `FILLS` fills the budget as `FILL_WALL` does.
     fills = (run.kind == "wall" and (FILL_WALL or getattr(stages, "fills", False))
              and pool is not None)
+    # IKA-384: the same rule on the count clock, for a ladder named in `FILLS`, only when
+    # `COUNT_FILL` asks (default off: the count clock's reads are references and keep their
+    # predictions). A stage is begun while counted time is left and is given up when the
+    # counted cost passes the budget (checked after each chunk of cells, CHUNK cells at a
+    # time on the serial road, so it can overshoot by one chunk).
+    if run.kind == "count" and COUNT_FILL and getattr(stages, "fills", False):
+        fills = True
 
     def begins(stage: Stage, cells: int) -> bool:
         """IKA-374 (`AHEAD`): whether a stage of ``cells`` fresh cells would be begun now."""

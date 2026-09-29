@@ -287,6 +287,7 @@ class TimedGame(humanplay.HumanGame):
         *args: Any,  # noqa: ANN401
         seats: tuple[humanplay.Agent, humanplay.Agent],
         conditions: tuple[Condition, Condition],
+        adjudication: tuple[int, float] | None = None,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         super().__init__(*args, **kwargs)
@@ -299,6 +300,32 @@ class TimedGame(humanplay.HumanGame):
         #: Reads that gave no answer (no menu, an LP failure), by side: the person's seat
         #: then plays its first legal action, the agent's seat ends the game.
         self.fallbacks = [0, 0]
+        #: IKA-384: ``(first turn, threshold)`` -- stop a game whose turn's two reads agree
+        #: it is decided (`adjudicate`); None plays every game out.
+        self.adjudication = adjudication
+        #: Where the game was stopped, or None.
+        self.adjudicated: dict[str, Any] | None = None
+
+    def adjudicate(self, pos: Any) -> float | None:  # noqa: ANN401, ARG002
+        """Side 0's result when the last turn's two reads (both seats, their values in side
+        0's units) have a mean within ``threshold`` of a win or a loss, from turn
+        ``first turn`` on: 1.0 or 0.0 by the side of one half. Measured on 3,118 recorded
+        games (`records/IKA-384.md`): from turn 3 at 0.45 it stops 94% of games and
+        1.6% of those on the wrong side."""
+        if self.adjudication is None:
+            return None
+        first, threshold = self.adjudication
+        moves = [r for r in self.clock if r["kind"] == "move" and "value0" in r]
+        if len(moves) < 2 or moves[-1]["decision"] != moves[-2]["decision"]:
+            return None
+        last = moves[-2:]
+        if last[0]["turn"] < first:
+            return None
+        value = (last[0]["value0"] + last[1]["value0"]) / 2.0
+        if abs(value - 0.5) < threshold - 1e-12:
+            return None
+        self.adjudicated = {"turn": last[0]["turn"], "value": round(value, 5)}
+        return 1.0 if value > 0.5 else 0.0
 
     def order(self) -> tuple[int, int]:
         """Which side reads first: `me` (the reads are independent; the order only has to
@@ -397,6 +424,9 @@ class Match:
     seed: int
     max_turns: int
     halt: Any = None  # noqa: ANN401
+    #: IKA-384: ``(first turn, threshold)`` of `TimedGame.adjudicate`; None: every game is
+    #: played to its end.
+    adjudication: tuple[int, float] | None = None
     #: Menus ranked by the leaf (the human-play agent's); False only for cheap tests.
     rank_by_leaf: bool = True
     loc: Any = None  # noqa: ANN401
@@ -442,7 +472,8 @@ def play_pair(match: Match, pair: int, teams: tuple[Any, Any]) -> list[dict[str,
         person = SeatPerson(entry, you, np.random.default_rng([match.seed, pair, 1, you]))
 
         def make_game(*args: Any, seats=seats, conditions=conditions, **kwargs: Any) -> TimedGame:  # noqa: ANN401
-            return TimedGame(*args, seats=seats, conditions=conditions, **kwargs)
+            return TimedGame(*args, seats=seats, conditions=conditions,
+                             adjudication=match.adjudication, **kwargs)
 
         began = time.perf_counter()
         payload, clock, played = humanplay.play(
@@ -483,6 +514,7 @@ def game_line(
         "seconds": round(seconds, 3),
         "selectionSeconds": round(selection_seconds, 3),
         "fallbacks": list(played.fallbacks),
+        **({"adjudicated": played.adjudicated} if played.adjudicated is not None else {}),
         "memoryStops": sum(1 for r in rows if r.get("memoryStop")),
         "unmodelled": len(payload.get("unmodelled") or []),
         "moves": [r for r in rows if r["kind"] == "move"],
