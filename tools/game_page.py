@@ -1320,9 +1320,9 @@ def _mix_seat(m: dict[str, Any] | None, side: int, sprites: Sprites) -> str:
         f'<div class="mseat s{side}">{head}'
         f"<h5>均衡で打っていた手<small>　均衡で打つ {_played_n(m)} 通り</small></h5>"
         f"{picked}{_table_html(rows, side, sprites, kind='mix')}{_rest_html(m.get('sup'))}"
+        f"<h5>選んだ手に対する相手の手<small>{view}</small></h5>{reply}"
         f"<h5>相手の読み<small>{n_opp}</small></h5>"
-        f"{_table_html(list(m['opp']), 1 - side, sprites, kind='opp')}{_rest_html(osup)}"
-        f"<h5>選んだ手に対する相手の手<small>{view}</small></h5>{reply}</div>"
+        f"{_table_html(list(m['opp']), 1 - side, sprites, kind='opp')}{_rest_html(osup)}</div>"
     )
 
 
