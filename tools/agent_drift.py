@@ -131,6 +131,8 @@ OWN_RESOLUTION = {
     "are q-nocover by the Q it names (the default Q), the same for every reading (IKA-362)",
     "child_menus.py": "measures child menus built by damage and by the Q it names (the "
     "default Q); plays no game (IKA-362)",
+    "selection_sweep.py": "reads selection cells as a person's move reads them, menus q-nocover "
+    "by the Q it names (the default Q); plays no game (IKA-392)",
 }
 
 
