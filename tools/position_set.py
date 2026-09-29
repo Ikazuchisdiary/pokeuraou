@@ -299,7 +299,14 @@ def reference(args: argparse.Namespace) -> None:
         began = time.perf_counter()
         pos = Position.from_json(kit.positions[n]["position"])
         spreads = kit.spreads(n)
-        ours, theirs, _outside = kit.menus(pos, spreads)
+        if getattr(args, "menus_from", None):
+            # IKA-394: another leaf's game on the menus of an existing reference (the rows
+            # and columns of SET/ref-<name>), so that two leaves' games share their actions.
+            base = np.load(Path(args.set) / f"ref-{args.menus_from}" / f"{n}.npz")
+            ours = _from_choices(kit.reg, pos, 0, base["rows"])
+            theirs = _from_choices(kit.reg, pos, 1, base["cols"])
+        else:
+            ours, theirs, _outside = kit.menus(pos, spreads)
         budget = Budget.matrix()
         # A hidden position: the game once per completion of side 1's bench (IKA-367).
         worlds = [pos] if spreads is None else [c.position for c in spreads[1]]
@@ -1273,6 +1280,9 @@ def main(argv: list[str] | None = None) -> None:
             s.add_argument("--sub-limit", type=int, default=24)
         if name == "reference":
             s.add_argument("--name", required=True, help="the reference's name: SET/ref-<name>")
+            s.add_argument("--menus-from", default=None, metavar="NAME",
+                           help="IKA-394: the rows and columns of SET/ref-<NAME> instead of "
+                           "this leaf's own menus (another leaf's game on the same actions)")
             s.add_argument("--sub-limit", type=int, default=24)
             s.add_argument("--sub-branches", type=int, default=64,
                            help="branches kept per refined cell (64: all, in practice)")
