@@ -2942,6 +2942,16 @@ class _Pool:
 _POOL: _Pool | None = None
 
 
+def _worker_args(args: tuple[Any, ...], index: int) -> tuple[Any, ...]:
+    """IKA-390: a served leaf's address may name several inference servers (``a,b``): worker
+    ``index`` asks the ``index mod n``th, its leaf, its Q and its port's direct requests
+    alike (they all read the address the leaf was made with). One address: unchanged."""
+    if len(args) > 1 and args[0] == "served" and isinstance(args[1], str) and "," in args[1]:
+        addresses = [a for a in args[1].split(",") if a]
+        return (args[0], addresses[index % len(addresses)], *args[2:])
+    return args
+
+
 def start_pool(reg: Any, count: int, factory: Any, args: tuple[Any, ...] = ()) -> int:  # noqa: ANN401
     """Start ``count`` worker processes that read the ladder's cells (IKA-364), each with
     the leaf ``factory(reg, *args)`` -- a module-level function, so a spawned process can
@@ -2960,10 +2970,11 @@ def start_pool(reg: Any, count: int, factory: Any, args: tuple[Any, ...] = ()) -
     # IKA-378: the table the workers share their sub-games in (`SHARE`).
     table = subshare.Table() if SHARE else None
     started = []
-    for _ in range(count):
+    for index in range(count):
         mine, theirs = context.Pipe()
         process = context.Process(target=_pool_main,
-                                  args=(theirs, reg.meta.format_id, factory, tuple(args), cancel,
+                                  args=(theirs, reg.meta.format_id, factory,
+                                        _worker_args(tuple(args), index), cancel,
                                         None if table is None else table.name),
                                   daemon=True)
         process.start()

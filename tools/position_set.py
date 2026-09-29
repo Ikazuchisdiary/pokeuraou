@@ -225,7 +225,10 @@ class _Kit:
                 self.reg, address, values, merge=args.merge == "on", q_path=q_path)
             self.device = f"server {address}"
             #: A ladder worker's leaf and Q (IKA-364, `humanplay.ladder_process_leaf`).
-            self.spec: tuple = ("served", address, "value", args.merge == "on", str(q_path), "q")
+            # IKA-390: with --ladder-inference, the workers' servers (a list, one per worker
+            # in turn, `ladder.start_pool`); this process's own leaf stays on ``address``.
+            self.spec: tuple = ("served", getattr(args, "ladder_inference", None) or address,
+                                "value", args.merge == "on", str(q_path), "q")
         else:
             humanplay.cap_cuda(args.cuda_memory_gb, args.device)
             self.leaf, encoder, self.device = humanplay.load_leaf(
@@ -1256,6 +1259,10 @@ def main(argv: list[str] | None = None) -> None:
         s.add_argument("--inference", default=None, metavar="HOST:PORT",
                        help="the machine's inference server (IKA-363; arms value and q). "
                        "Default: POKEURAOU_INFERENCE, else the leaf is loaded here")
+        s.add_argument("--ladder-inference", default=None, metavar="HOST:PORT[,HOST:PORT...]",
+                       help="IKA-390: the servers the ladder's worker processes ask, worker i "
+                       "the (i mod n)th (the same models as --inference; this process keeps "
+                       "asking --inference). Default: all ask --inference")
         s.add_argument("--merge", default="off", choices=("on", "off"),
                        help="the server's merged road: the values move in the last places "
                        "with the timing (off: the answers a local leaf gives)")
