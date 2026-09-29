@@ -138,9 +138,13 @@ def test_a_game_that_kills_every_worker_is_abandoned() -> None:
             client = WorkClient(address)
             assert client.take() == 7
             client.close()  # dropped without finishing, as a crash would
+            # Wait for the server to notice the drop and give the game back. `remaining`
+            # cannot say so: it counts a held game and a returned one alike, so it never
+            # left 1 and this wait did nothing. `pending` is 1 only once it is released.
             deadline = time.time() + 30
-            while time.time() < deadline and queue.remaining == 0:
+            while time.time() < deadline and queue.pending == 0:
                 time.sleep(0.01)
+            assert queue.pending == 1
         with WorkClient(address) as client:
             assert client.take() is None
         assert queue.abandoned == [7]
