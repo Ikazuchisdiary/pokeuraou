@@ -590,6 +590,9 @@ def _top_mixture(actions: Sequence[str], policy: Sequence[float], top: int = 4) 
 #: Rows of a mixture a read summary keeps (the heaviest, at least 1%): the rest is one sum.
 SUMMARY_ROWS = 8
 SUMMARY_HARD = 3
+#: A move is one the mixture plays (in its support) from this probability up (`read_summary`,
+#: and what `tools/game_page.py` counts with).
+SUPPORT_MIN = 0.005
 
 
 def _mixture_top(choices: Sequence[str], p: np.ndarray, keep: int) -> tuple[list[list[Any]], list[Any]]:
@@ -597,6 +600,12 @@ def _mixture_top(choices: Sequence[str], p: np.ndarray, keep: int) -> tuple[list
     shown = [int(i) for i in order[:keep] if p[i] >= 0.01]
     rest = [int(len(p) - len(shown)), round(float(1.0 - sum(p[i] for i in shown)), 4)]
     return [[choices[i], round(float(p[i]), 4)] for i in shown], rest
+
+
+def _played(choices: Sequence[str], p: np.ndarray) -> list[list[Any]]:
+    """The moves a mixture plays -- its support at `SUPPORT_MIN` -- with their probabilities."""
+    order = np.argsort(-p, kind="stable")
+    return [[choices[i], round(float(p[i]), 5)] for i in order if p[i] >= SUPPORT_MIN]
 
 
 def read_summary(last: tuple[Any, ...], weights: Sequence[float], chosen: str) -> dict[str, Any]:
@@ -622,6 +631,11 @@ def read_summary(last: tuple[Any, ...], weights: Sequence[float], chosen: str) -
         "chosenP": None if index is None else round(float(x[index]), 4),
         "chosenRank": None if index is None else int(np.where(order == index)[0][0]) + 1,
         "opp": opp, "oppRest": opp_rest, "hard": None, "hardChosen": None,
+        # The whole mixtures, in menu order: the page counts the moves it plays from them (the
+        # support), whatever threshold it names.
+        "p": [round(float(v), 5) for v in x], "q": [round(float(v), 5) for v in y],
+        # Every move each mixture plays (probability at least SUPPORT_MIN), heaviest first.
+        "supp": _played(mine_names, x), "oppSupp": _played(other_names, y),
     }
     prices = getattr(ladder, "prices", None)
     if prices:
@@ -653,6 +667,26 @@ def read_summary(last: tuple[Any, ...], weights: Sequence[float], chosen: str) -
                 against = offset + sum(wk * np.asarray(p)[index] for wk, p in zip(w, prices, strict=True))
                 j = int(np.argmin(against))
                 out["hardChosen"] = [other_names[j], round(float(against[j]), 6)]
+                # Among the moves the other side plays in this read (its mixture at least
+                # SUPPORT_MIN): the one that is hardest for the drawn move and the one it does best
+                # against (the seat's own win rate, weighted over the completions).
+                played = [k for k in range(len(other_names)) if y[k] >= SUPPORT_MIN] or list(
+                    range(len(other_names))
+                )
+                low = min(played, key=lambda k: against[k])
+                high = max(played, key=lambda k: against[k])
+                # The drawn move's value against every column of the other side's menu, in menu
+                # order (the page reads the value of the move the other side really played from
+                # it), and against the other side's modelled mixture.
+                out["cols"] = other_names
+                out["vs"] = [round(float(v), 6) for v in against]
+                replies = getattr(ladder, "replies", None)
+                if replies is not None and len(replies) == len(w):
+                    out["chosenEv"] = round(float(offset + sum(
+                        wk * float(np.asarray(p)[index] @ np.asarray(r))
+                        for wk, p, r in zip(w, prices, replies, strict=True))), 6)
+                out["hardIn"] = [other_names[low], round(float(against[low]), 6)]
+                out["bestIn"] = [other_names[high], round(float(against[high]), 6)]
     return out
 
 
