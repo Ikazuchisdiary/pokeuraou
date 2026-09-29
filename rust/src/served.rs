@@ -70,18 +70,21 @@ pub enum Failed {
     Broken(String),
 }
 
-struct Client {
+pub struct Client {
     address: String,
     shm: String,
     capacity: usize,
     reader: BufReader<TcpStream>,
     writer: TcpStream,
-    block: Shared,
+    pub block: Shared,
 }
 
 thread_local! {
     /// One connection and one attachment, kept while the caller names the same ones.
     static CLIENT: RefCell<Option<Client>> = const { RefCell::new(None) };
+    /// IKA-389: the same for the Q's block (`qrank.RemoteQ._block`), a connection of its own
+    /// so the leaf's and the Q's do not replace each other.
+    static Q_CLIENT: RefCell<Option<Client>> = const { RefCell::new(None) };
 }
 
 fn connect(server: &Server) -> Result<Client, Failed> {
@@ -152,7 +155,52 @@ fn with_client<T>(
     server: &Server,
     call: impl FnOnce(&mut Client) -> Result<T, Failed>,
 ) -> Result<T, Failed> {
-    CLIENT.with(|cell| {
+    with_client_of(&CLIENT, server, call)
+}
+
+/// IKA-389: `with_client` on the Q's own connection.
+pub fn with_q_client<T>(
+    server: &Server,
+    call: impl FnOnce(&mut Client) -> Result<T, Failed>,
+) -> Result<T, Failed> {
+    with_client_of(&Q_CLIENT, server, call)
+}
+
+/// One request line to the server and its reply, `ok` or the server's refusal.
+pub fn ask(client: &mut Client, request: &Value, stats: &mut Stats) -> Result<Value, Failed> {
+    let broken = |e: std::io::Error| Failed::Broken(e.to_string());
+    let mut line = request.to_string();
+    line.push('\n');
+    client.writer.write_all(line.as_bytes()).map_err(broken)?;
+    client.writer.flush().map_err(broken)?;
+    stats.requests += 1;
+    let waited = Instant::now();
+    let mut reply = String::new();
+    if client.reader.read_line(&mut reply).map_err(broken)? == 0 {
+        return Err(Failed::Broken("the inference server closed the connection".into()));
+    }
+    stats.wait_ns += waited.elapsed().as_nanos() as u64;
+    let reply: Value = serde_json::from_str(reply.trim())
+        .map_err(|e| Failed::Broken(format!("the inference server's reply: {e}")))?;
+    if reply.get("ok").and_then(Value::as_bool) != Some(true) {
+        return Err(Failed::Refused {
+            error: reply
+                .get("error")
+                .map(|e| e.as_str().map(String::from).unwrap_or(e.to_string()))
+                .unwrap_or_default(),
+            oom: reply.get("oom").and_then(Value::as_bool).unwrap_or(false),
+            cap_gb: reply.get("capGb").and_then(Value::as_f64),
+        });
+    }
+    Ok(reply)
+}
+
+fn with_client_of<T>(
+    key: &'static std::thread::LocalKey<RefCell<Option<Client>>>,
+    server: &Server,
+    call: impl FnOnce(&mut Client) -> Result<T, Failed>,
+) -> Result<T, Failed> {
+    key.with(|cell| {
         let mut held = cell.borrow_mut();
         let stale = held.as_ref().is_none_or(|c| {
             c.address != server.address || c.shm != server.shm || c.capacity != server.capacity

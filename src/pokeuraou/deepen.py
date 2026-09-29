@@ -3362,8 +3362,13 @@ def _q_menus(
     the root's ``q-nocover`` ranking (`qrank.q_ranking`), without the cover. The Q is
     asked for every position in one forward pass (`batched`).
     """
-    from . import qhead, qrank
+    from . import portmenus, qhead, qrank
 
+    # IKA-389: all of it in the port in one crossing (`portmenus`, off by default): the same
+    # menus, to the bit.
+    ported = portmenus.q_menus(reg, positions, width, Q_MENU_CHUNK)
+    if ported is not None:
+        return ported
     asks = [
         (pos, (qhead.legal_pool(reg, pos, 0), qhead.legal_pool(reg, pos, 1)))
         for pos in positions

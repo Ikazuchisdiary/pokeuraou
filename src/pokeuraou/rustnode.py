@@ -1221,6 +1221,22 @@ class RustNode:
         }
         return self._exchange_list("fillsServed", requests, extra)
 
+    @timing.timed("rust.qmenus")
+    def q_menus(self, positions: Sequence[Position], extra: dict[str, Any]) -> dict[str, Any]:
+        """IKA-389 (`portmenus`): `deepen._q_menus` of ``positions`` in one crossing -- the
+        pools, the Q's requests to the inference server ``extra`` names, the games and the
+        menus, built in the port. Each position goes as a held one where it is held."""
+        return self._exchange_list(
+            "qMenus", [{"position": _position(pos)} for pos in positions], extra
+        )
+
+    def port_lists(self, kind: str, positions: Sequence[Position], extra: dict[str, Any] | None = None,
+                   each: dict[str, Any] | None = None) -> dict[str, Any]:
+        """IKA-389's checks: `legal` / `qArrays` of ``positions`` in one crossing."""
+        return self._exchange_list(
+            kind, [{"position": _position(pos), **(each or {})} for pos in positions], extra
+        )
+
     @timing.timed("rust.leads")
     def apply_lead_abilities_many(self, positions: Sequence[Position]) -> list[PortPhase | None]:
         """`apply_lead_abilities` without a generator, for many positions in one go."""

@@ -135,10 +135,23 @@ def _near_misses(reg: Regulation, pos: Position, side_index: int, legal: set[str
     return sorted(out - legal)
 
 
+def _port_agrees(reg: Regulation, pos: Position, side_index: int) -> list[SideAction]:
+    """IKA-389: the port's `side_actions` (`rust/src/legal.rs`, the Q's menus) is this one,
+    action by action and in order -- so what Showdown is asked here holds the port too."""
+    from pokeuraou import portmenus, rustnode
+
+    actions = side_actions(reg, pos, side_index)
+    pools = rustnode.require_node(reg).port_lists("legal", [pos], each={"raw": True})["pools"][0]
+    assert [portmenus._action(a) for a in pools[side_index]] == actions, (  # noqa: SLF001
+        f"turn {pos.turn} side {side_index}: the port lists other actions than side_actions"
+    )
+    return actions
+
+
 def _assert_enumeration_matches(
     reg: Regulation, handle: BattleHandle, pos: Position, side_index: int
 ) -> tuple[int, int]:
-    actions = side_actions(reg, pos, side_index)
+    actions = _port_agrees(reg, pos, side_index)
     assert actions, f"no legal actions enumerated for side {side_index} at turn {pos.turn}"
 
     choices = [a.to_choice() for a in actions]
@@ -365,8 +378,9 @@ def test_mega_is_a_once_per_side_resource(reg: Regulation, team_a: list[TeamSet]
     assert any(a.declares_mega for a in actions), "expected some Mega actions"
     assert all(sum(1 for s in a.slots if isinstance(s, MoveAction) and s.mega) <= 1 for a in actions)
 
+    _port_agrees(reg, pos, 0)
     side.mega_used = True
-    after = side_actions(reg, pos, 0)
+    after = _port_agrees(reg, pos, 0)
     assert not any(a.declares_mega for a in after), "Mega must vanish once the side has used it"
 
 
@@ -381,7 +395,7 @@ def test_trapped_pokemon_cannot_switch(reg: Regulation, team_a: list[TeamSet]) -
     pos = _synthetic_position(reg, team_a)
     mon = pos.sides[0].pokemon[pos.sides[0].active[0]]
     mon.trapped = True
-    for action in side_actions(reg, pos, 0):
+    for action in _port_agrees(reg, pos, 0):
         for slot_action in action.slots:
             assert not (isinstance(slot_action, SwitchAction) and slot_action.slot == 0)
 
@@ -391,7 +405,7 @@ def test_fainted_slot_only_passes(reg: Regulation, team_a: list[TeamSet]) -> Non
     mon = pos.sides[0].pokemon[pos.sides[0].active[1]]
     mon.hp = 0
     mon.fainted = True
-    for action in side_actions(reg, pos, 0):
+    for action in _port_agrees(reg, pos, 0):
         assert isinstance(action.slots[1], PassAction)
 
 
@@ -402,7 +416,7 @@ def test_choice_lock_restricts_to_one_move(reg: Regulation, team_a: list[TeamSet
     mon.locked_move = locked
     ids = {
         s.move_id
-        for a in side_actions(reg, pos, 0)
+        for a in _port_agrees(reg, pos, 0)
         for s in a.slots
         if isinstance(s, MoveAction) and s.slot == 0
     }
@@ -419,7 +433,7 @@ def test_taunt_removes_status_moves(reg: Regulation, team_a: list[TeamSet]) -> N
     mon.volatiles.append(Effect(id="taunt", duration=3))
     ids = {
         s.move_id
-        for a in side_actions(reg, pos, 0)
+        for a in _port_agrees(reg, pos, 0)
         for s in a.slots
         if isinstance(s, MoveAction) and s.slot == 0
     }
@@ -566,7 +580,7 @@ def test_a_choice_item_with_its_move_out_of_pp_offers_only_struggle(
     mon.moves[0].pp = 0
     ids = {
         s.move_id
-        for a in side_actions(reg, pos, 0)
+        for a in _port_agrees(reg, pos, 0)
         for s in a.slots
         if isinstance(s, MoveAction) and s.slot == 0
     }
