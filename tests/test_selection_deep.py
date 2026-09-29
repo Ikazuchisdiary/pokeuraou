@@ -342,3 +342,102 @@ def test_a_condition_names_its_selection() -> None:
     assert got.selection == "stage=d2r4b3k8;rects=8" and "selection read" in got.describe()
     with pytest.raises(ValueError):
         parse_condition("x:seconds=1,selection=shift=bad")
+
+
+# ------------------------------------------------------------------------ a person's game
+
+
+def _play_human_tool():  # noqa: ANN202
+    from tests._harness import load_tool
+
+    return load_tool("play_human")
+
+
+def _args(**kwargs):  # noqa: ANN003, ANN202
+    from types import SimpleNamespace
+
+    base = {"selection_reading": None, "selection_seconds": None, "clock": "wall"}
+    return SimpleNamespace(**{**base, **kwargs})
+
+
+def test_a_persons_game_reads_the_selection_deeper_unless_told_not_to() -> None:
+    tool = _play_human_tool()
+    leaf = _stub
+    assert tool.resolve_selection(_args(), leaf) == ("default", humanplay.PLAY_SELECTION_SECONDS)
+    assert humanplay.PLAY_SELECTION_SECONDS == 90.0
+    # the leaf's solve: told so, on the count clock (a replay), and without a leaf
+    assert tool.resolve_selection(_args(selection_reading="none"), leaf) == (None, None)
+    assert tool.resolve_selection(_args(clock="count"), leaf) == (None, None)
+    assert tool.resolve_selection(_args(), None) == (None, None)
+    # named: its own seconds, or its stages alone on the count clock; a leaf is required
+    assert tool.resolve_selection(_args(selection_reading="rects=4", selection_seconds=30.0),
+                                  leaf) == ("rects=4", 30.0)
+    assert tool.resolve_selection(_args(selection_reading="rects=4", clock="count"),
+                                  leaf) == ("rects=4", None)
+    with pytest.raises(SystemExit):
+        tool.resolve_selection(_args(selection_reading="default"), None)
+    with pytest.raises(ValueError):
+        tool.resolve_selection(_args(selection_reading="shift=bad"), leaf)
+
+
+def _agent(pool, **kwargs):  # noqa: ANN001, ANN003, ANN202
+    settings = {"seconds": 0.4, "cores": 1, "clock": "count", "rank_by_leaf": False,
+                "rank_fill": "refs2"}
+    settings.update(kwargs)
+    return humanplay.Agent(reg=pool.reg, evaluate=_stub, name="hp-share", **settings)
+
+
+def _events(pool, agent):  # noqa: ANN001, ANN202
+    seen: list[str] = []
+    payload, clock, _game = humanplay.play(
+        agent, humanplay.PolicyPerson("first"), (pool.teams[0], pool.teams[1]), agent_side=1,
+        seed=2, max_turns=1, listener=lambda kind, _data: seen.append(kind))
+    return seen, payload, clock
+
+
+def test_the_screen_is_told_the_selection_is_being_read(pool) -> None:  # noqa: ANN001
+    seen, _payload, clock = _events(pool, _agent(pool))
+    assert seen[:2] == ["sheets", "select"] and "selecting" not in seen
+    assert "selectionRead" not in clock
+    seen, payload, clock = _events(pool, _agent(pool, selection_reading=READING))
+    # the teams first, then the reading (so the page is not blank), then the person's turn
+    assert seen[:3] == ["sheets", "selecting", "select"] and seen.count("sheets") == 1
+    read = clock["selectionRead"]
+    assert read["cells"] > 0 and read["reading"] == READING and read["steps"]
+    assert payload["picks"]  # a game was played from the deeper solve
+
+
+def test_the_selection_workers_are_made_for_the_selection_and_closed_after_it(  # noqa: ANN201
+    pool, monkeypatch,  # noqa: ANN001
+):
+    log: list[str] = []
+
+    class Fake:
+        def __init__(self, reg, count, spec, *, rank_fill, rank_by_leaf):  # noqa: ANN001
+            log.append(f"made {count}")
+            self.inner = selection_deep.SerialReader(reg, _stub, rank_fill=rank_fill,
+                                                     rank_by_leaf=rank_by_leaf)
+            self.cells = self.seconds = 0
+
+        def read(self, *args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+            return self.inner.read(*args, **kwargs)
+
+        def close(self):  # noqa: ANN202
+            log.append("closed")
+
+    monkeypatch.setattr(selection_deep, "PoolReader", Fake)
+    lazy = selection_deep.LazyPoolReader(pool.reg, 3, (), rank_fill="refs2", rank_by_leaf=False)
+    monkeypatch.setattr(selection_deep, "READER", lazy)
+    seen: list[str] = []
+
+    def listener(kind, _data):  # noqa: ANN001, ANN202
+        seen.append(kind)
+        if kind == "select":
+            log.append("person asked")
+
+    humanplay.play(_agent(pool, selection_reading=READING), humanplay.PolicyPerson("first"),
+                   (pool.teams[0], pool.teams[1]), agent_side=1, seed=2, max_turns=1,
+                   listener=listener)
+    # made when the first cell is read, closed before the person is asked (and so before any move)
+    assert log == ["made 3", "closed", "person asked"]
+    assert lazy.inner is None

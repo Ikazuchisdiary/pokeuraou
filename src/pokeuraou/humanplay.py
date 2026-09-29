@@ -518,6 +518,15 @@ PLAY_PONDER = False
 PLAY_PONDER_SECONDS = 600.0
 
 
+#: A person's game (`tools/play_human.py`, IKA-392): the selection is read deeper than the
+#: leaf's one estimate of each cell -- `selection_deep`'s default reading, the wall clock's
+#: 90 s (IKA-30's budget for a selection), on every core. The board that decided it: the
+#: reading of 65 cells beat the leaf's selection by +23.2 Elo [+8.0, +38.6]. A count-clock game
+#: or one without a leaf keeps the leaf's solve. Generation and `timematch` do not read it.
+PLAY_SELECTION_READING = "default"
+PLAY_SELECTION_SECONDS = 90.0
+
+
 def default_threads(cpus: int | None = None) -> int:
     """`PLAY_THREADS`, or fewer on a machine with fewer physical cores (half the logical
     ones, as ``os.cpu_count`` counts them with hyper-threading)."""
@@ -2507,28 +2516,8 @@ def play(
     size = reg.meta.picked_team_size
     six = (list(teams[0].sets), list(teams[1].sets))
     species = ([s.species for s in six[0]], [s.species for s in six[1]])
-    started = time.perf_counter()
-    if entry is None and agent.evaluate is not None:
-        from . import selection_deep
-
-        reader = None
-        if agent.selection_reading is not None:
-            reader = selection_deep.READER or selection_deep.SerialReader(
-                reg, agent.evaluate, rank_fill=agent.rank_fill, rank_by_leaf=agent.rank_by_leaf)
-        entry = solve_entry(
-            reg, teams, agent.evaluate, agent.name, reading=agent.selection_reading,
-            reader=reader, seconds=agent.selection_seconds,
-        )
-    selection_seconds = time.perf_counter() - started
-    mine = agent_pick(
-        entry, agent_side, six[agent_side], size,
-        np.random.default_rng([seed, game_index, 1, agent_side]),
-    )
-    if out is not None:
-        out.write(f"\n相手のチーム（サイド {agent_side}）:\n{render_sheet(reg, six[agent_side], loc)}\n")
-        out.write(f"\n自分のチーム（サイド {you}）:\n")
-    if listener is not None:
-        listener("sheets", {
+    def sheets_event() -> None:
+        listener("sheets", {  # type: ignore[misc]
             "agentSide": agent_side, "personSide": you, "seed": seed, "gameIndex": game_index,
             "agent": agent.name, "seconds": agent.seconds, "clock": agent.clock,
             "cores": agent.cores,
@@ -2543,6 +2532,41 @@ def play(
             },
             "names": ["AI" if s == agent_side else "あなた" for s in (0, 1)],
         })
+
+    started = time.perf_counter()
+    deep_report: list[Any] = []
+    sheets_sent = False
+    if entry is None and agent.evaluate is not None:
+        from . import selection_deep
+
+        reader = None
+        if agent.selection_reading is not None:
+            reader = selection_deep.READER or selection_deep.SerialReader(
+                reg, agent.evaluate, rank_fill=agent.rank_fill, rank_by_leaf=agent.rank_by_leaf)
+            if listener is not None:
+                # The page has its teams and says the AI is reading the selection, for as long
+                # as that takes (a person's 90 s): the screen must not look stopped.
+                sheets_event()
+                sheets_sent = True
+                listener("selecting", {"seconds": agent.selection_seconds,
+                                       "reading": agent.selection_reading})
+        entry = solve_entry(
+            reg, teams, agent.evaluate, agent.name, reading=agent.selection_reading,
+            reader=reader, seconds=agent.selection_seconds, report=deep_report,
+        )
+        if reader is not None and hasattr(reader, "release"):
+            reader.release()
+    selection_seconds = time.perf_counter() - started
+    mine = agent_pick(
+        entry, agent_side, six[agent_side], size,
+        np.random.default_rng([seed, game_index, 1, agent_side]),
+    )
+    if out is not None:
+        out.write(f"\n相手のチーム（サイド {agent_side}）:\n{render_sheet(reg, six[agent_side], loc)}\n")
+        out.write(f"\n自分のチーム（サイド {you}）:\n")
+    if listener is not None:
+        if not sheets_sent:
+            sheets_event()
         listener("select", {"size": size, "team": len(six[you])})
     yours = person.select(six[you], size, render_sheet(reg, six[you], loc))
     inputs = [selection_line(yours)]
@@ -2619,6 +2643,13 @@ def play(
         "secondsPerMove": agent.seconds,
         "searchSeconds": search_seconds,
         "selectionSeconds": round(selection_seconds, 4),
+        # IKA-392: what a deeper selection read (only when it did).
+        **({"selectionRead": {
+            "reading": agent.selection_reading, "cells": deep_report[0].cells,
+            "completed": deep_report[0].completed, "seconds": round(deep_report[0].seconds, 2),
+            "value": round(deep_report[0].value, 5),
+            "leafValue": round(deep_report[0].leaf_value, 5),
+            "steps": deep_report[0].steps}} if deep_report else {}),
         "moves": len(moves),
         "meanRatio": round(float(np.mean([m["ratio"] for m in moves])), 4) if moves else None,
         "decisions": game.clock,

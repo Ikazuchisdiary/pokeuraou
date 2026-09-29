@@ -187,7 +187,16 @@ function onEvent(e) {
     case "analysis":
       enterAnalysis(); onAnalysis(e);
       break;
+    case "selecting": {
+      // IKA-392: the AI reads the selection (a person's game: 90 s) before the person is asked.
+      clearInterval(S.selTimer);
+      const end = Date.now() + (e.seconds || 0) * 1000;
+      const tick = () => setStatus(e.seconds ? `AI が選出を読んでいます（残り ${Math.max(0, Math.ceil((end - Date.now()) / 1000))} 秒）` : "AI が選出を読んでいます", "think");
+      tick(); S.selTimer = setInterval(tick, 1000);
+      break;
+    }
     case "select":
+      clearInterval(S.selTimer);
       S.select = e; S.picked = []; renderInput(); setStatus(`${e.size} 体を選んでください`, "turn");
       if ($("result").classList.contains("between")) {
         const more = $("result").querySelector(".more");
