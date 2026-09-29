@@ -106,6 +106,9 @@ class Condition:
     #: coarse to fine within the rest of the budget (`humanplay.Agent.ladder`, IKA-367): a
     #: name in `ladder.LADDERS` or stages joined by ``+``. None: off.
     ladder: str | None = None
+    #: IKA-393: the ladder read where the person's bench is hidden (more than one completion),
+    #: in place of ``ladder`` (`humanplay.Agent.hidden_ladder`). None: ``ladder`` everywhere.
+    hidden_ladder: str | None = None
 
     @property
     def price_cores(self) -> int:
@@ -138,6 +141,8 @@ class Condition:
             + (", depth 2 as the budget allows" if self.depth2_auto else "")
             + (", the opening's root at every legal action" if self.root_all else "")
             + (f", ladder {self.ladder}" if self.ladder is not None else "")
+            + (f", ladder {self.hidden_ladder} behind a hidden bench"
+               if self.hidden_ladder is not None else "")
             + (f", child Q {self.child_q}" if self.child_q is not None else "")
         )
 
@@ -151,7 +156,8 @@ class Condition:
 #: The keys a condition is written with, and what each one parses.
 CONDITION_KEYS = ("seconds", "threads", "cores", "clock", "oracle", "levels", "width_only",
                   "width", "child_q", "knockouts", "sub_limit", "sub_branches", "restricted",
-                  "depth", "refine", "passes", "depth2_auto", "root_all", "ladder")
+                  "depth", "refine", "passes", "depth2_auto", "root_all", "ladder",
+                  "hidden_ladder")
 
 
 def _oracle(spec: str) -> int | None:
@@ -216,7 +222,7 @@ def parse_condition(spec: str) -> Condition:
             got[key] = int(value)
         elif key == "restricted":
             got[key] = "open" if value == "open" else _flag(value)
-        elif key == "ladder":
+        elif key in ("ladder", "hidden_ladder"):
             from .ladder import parse_ladder
 
             parse_ladder(value)  # refuses a stage it cannot read, before a game starts
@@ -496,7 +502,7 @@ class Match:
             sub_branches=condition.sub_branches, restricted=condition.restricted,
             depth=condition.depth, refine=condition.refine, passes=condition.passes,
             depth2_auto=condition.depth2_auto, root_all=condition.root_all,
-            ladder=condition.ladder, max_levels=condition.max_levels,
+            ladder=condition.ladder, hidden_ladder=condition.hidden_ladder, max_levels=condition.max_levels,
             child_q=condition.child_q, oracle=condition.oracle, halt=self.halt,
             # Off, as a person's game plays by default (the module's docstring).
             ponder=False, ponder_seconds=humanplay.PLAY_PONDER_SECONDS,

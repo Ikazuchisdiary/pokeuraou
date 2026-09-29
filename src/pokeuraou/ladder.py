@@ -225,10 +225,22 @@ class Ladder(tuple):
 
 
 def parse_ladder(spec: str) -> tuple[Stage, ...]:
-    """A named ladder (`LADDERS`) or stages joined by ``+``."""
+    """A named ladder (`LADDERS`) or stages joined by ``+``. ``<name>@<n>`` (IKA-393): the
+    first n stages of the named ladder, so a read that stops at a stage rather than a budget
+    (``L6@7`` is the seven stages up to and with depth 2's last; ``L6@0`` is none: the depth-1
+    answer). It never fills a budget, whatever the name."""
+    cut = None
+    if "@" in spec:
+        spec, _, count = spec.partition("@")
+        if spec not in LADDERS or not count.isdigit() or int(count) > len(LADDERS[spec]):
+            raise ValueError(f"<name>@<n> is a named ladder ({', '.join(LADDERS)}) and n at "
+                             f"most its stage count; not {spec}@{count}")
+        cut = int(count)
     labels = LADDERS.get(spec) or tuple(spec.split("+"))
+    if cut is not None:
+        labels = labels[:cut]
     out = Ladder(parse_stage(label) for label in labels)
-    out.fills = spec in FILLS
+    out.fills = spec in FILLS and cut is None
     return out
 
 
