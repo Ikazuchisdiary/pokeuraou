@@ -134,6 +134,7 @@ pub struct Widths {
 }
 
 /// One batch of positions as flat buffers, in the shapes `Encoded` declares.
+#[derive(Default)]
 pub struct Encoded {
     pub species: Vec<i32>,
     pub ability: Vec<i32>,

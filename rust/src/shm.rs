@@ -91,6 +91,26 @@ mod platform {
         pub fn rewind(&mut self) {
             self.at = 0;
         }
+
+        /// IKA-386: `data` at byte `at` of the block (the inference server's block).
+        pub fn write_at(&mut self, at: usize, data: &[u8]) -> io::Result<()> {
+            if at > self.capacity || data.len() > self.capacity - at {
+                return Err(io::Error::new(io::ErrorKind::WriteZero, "past the shared block"));
+            }
+            // SAFETY: the view is at least `capacity` bytes and the write fits in it.
+            unsafe { std::ptr::copy_nonoverlapping(data.as_ptr(), self.base.add(at), data.len()) };
+            Ok(())
+        }
+
+        /// IKA-386: `out.len()` bytes from byte `at` of the block.
+        pub fn read_at(&mut self, at: usize, out: &mut [u8]) -> io::Result<()> {
+            if at > self.capacity || out.len() > self.capacity - at {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "past the shared block"));
+            }
+            // SAFETY: as `write_at`; the other process wrote these bytes before it answered.
+            unsafe { std::ptr::copy_nonoverlapping(self.base.add(at), out.as_mut_ptr(), out.len()) };
+            Ok(())
+        }
     }
 
     impl Write for Shared {
@@ -143,7 +163,8 @@ mod platform {
 
     impl Shared {
         pub fn attach(name: &str, capacity: usize) -> Option<Shared> {
-            let file = OpenOptions::new().write(true).open(format!("/dev/shm/{name}")).ok()?;
+            let file =
+                OpenOptions::new().read(true).write(true).open(format!("/dev/shm/{name}")).ok()?;
             Some(Shared { name: name.to_string(), file, capacity, at: 0 })
         }
 
@@ -158,6 +179,25 @@ mod platform {
         pub fn rewind(&mut self) {
             self.at = 0;
             let _ = self.file.seek(SeekFrom::Start(0));
+        }
+
+        /// IKA-386: `data` at byte `at` of the block (the inference server's block).
+        pub fn write_at(&mut self, at: usize, data: &[u8]) -> io::Result<()> {
+            if at > self.capacity || data.len() > self.capacity - at {
+                return Err(io::Error::new(io::ErrorKind::WriteZero, "past the shared block"));
+            }
+            self.file.seek(SeekFrom::Start(at as u64))?;
+            self.file.write_all(data)
+        }
+
+        /// IKA-386: `out.len()` bytes from byte `at` of the block.
+        pub fn read_at(&mut self, at: usize, out: &mut [u8]) -> io::Result<()> {
+            use std::io::Read;
+            if at > self.capacity || out.len() > self.capacity - at {
+                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "past the shared block"));
+            }
+            self.file.seek(SeekFrom::Start(at as u64))?;
+            self.file.read_exact(out)
         }
     }
 
@@ -205,6 +245,14 @@ mod platform {
         }
 
         pub fn rewind(&mut self) {}
+
+        pub fn write_at(&mut self, _at: usize, _data: &[u8]) -> io::Result<()> {
+            Err(io::Error::new(io::ErrorKind::Unsupported, "no shared memory on this platform"))
+        }
+
+        pub fn read_at(&mut self, _at: usize, _out: &mut [u8]) -> io::Result<()> {
+            Err(io::Error::new(io::ErrorKind::Unsupported, "no shared memory on this platform"))
+        }
     }
 
     impl Write for Shared {

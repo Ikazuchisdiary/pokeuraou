@@ -46,6 +46,7 @@ mod resolve;
 mod qfeatures;
 mod score;
 mod semi_invulnerable;
+mod served;
 mod shm;
 mod small_rules;
 mod speed;

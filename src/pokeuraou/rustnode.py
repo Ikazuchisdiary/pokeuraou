@@ -361,6 +361,33 @@ class EncodedNode:
 _SPAN_BLOCKS = [False]
 
 
+def _fill_requests(
+    asks: Sequence[tuple[Position, list[SideAction], list[SideAction]]],
+    budget: Budget,
+    rules: Any,  # noqa: ANN401 - EncodingRules or None
+    links: Sequence[dict[str, Any] | None] | None,
+) -> list[dict[str, Any]]:
+    """Each node's request of a `fills` crossing (`RustNode.fill_encoded_many`)."""
+    wants_old = bool(rules is not None and rules.mega_from_slots)
+    requests = []
+    for pos, ours, theirs in asks:
+        request = {
+            "position": _position(pos),
+            "ours": _candidates(ours),
+            "theirs": _candidates(theirs),
+            "budget": dump_budget(budget),
+            "objectives": [],
+            "encode": True,
+        }
+        if wants_old:
+            request["encoding"] = rules.to_request()
+        link = links[len(requests)] if links is not None else None
+        if link:
+            request.update(link)
+        requests.append(request)
+    return requests
+
+
 def _binary_spans(
     header: dict[str, Any], body: Any  # noqa: ANN401 - a bytearray or a memoryview of one
 ) -> list[tuple[int, int, list[int], list[float]]]:
@@ -1101,22 +1128,7 @@ class RustNode:
             return []
         started = timing.clock()
         wants_old = bool(rules is not None and rules.mega_from_slots)
-        requests = []
-        for pos, ours, theirs in asks:
-            request = {
-                "position": _position(pos),
-                "ours": _candidates(ours),
-                "theirs": _candidates(theirs),
-                "budget": dump_budget(budget),
-                "objectives": [],
-                "encode": True,
-            }
-            if wants_old:
-                request["encoding"] = rules.to_request()
-            link = links[len(requests)] if links is not None else None
-            if link:
-                request.update(link)
-            requests.append(request)
+        requests = _fill_requests(asks, budget, rules, links)
         extra = {}
         if not self._shm_off:
             extra["shm"] = (
@@ -1181,6 +1193,33 @@ class RustNode:
             timing.add(f"rust.fill@{used}", timing.clock() - started)
             timing.add(f"rust.child@{used}", (parse_us + header_us) / 1e6)
         return nodes
+
+    @timing.timed("rust.fill")
+    def fills_served(
+        self,
+        asks: Sequence[tuple[Position, list[SideAction], list[SideAction]]],
+        chunks: Sequence[int],
+        budget: Budget,
+        *,
+        server: dict[str, Any],
+        gather: int,
+        rules: Any = None,  # noqa: ANN401 - EncodingRules
+        links: Sequence[dict[str, Any] | None] | None = None,
+    ) -> dict[str, Any]:
+        """IKA-386 (`portserved`): `fill_encoded_many` of each crossing ``chunks`` cuts
+        ``asks`` into, the leaves scored by the inference server ``server`` names (the port
+        asks it, as `RemoteValue.from_encoded` would) and each node folded and solved there,
+        all in one crossing. The answer's `nodes` carry each node's notes, counts and value;
+        nothing of its leaves comes back."""
+        requests = _fill_requests(asks, budget, rules, links)
+        extra = {
+            "chunks": [int(n) for n in chunks],
+            "shapes": [[len(ours), len(theirs)] for _pos, ours, theirs in asks],
+            "server": server,
+            "gather": int(gather),
+            "netScoresEnds": bool(rules is not None and rules.net_scores_ends),
+        }
+        return self._exchange_list("fillsServed", requests, extra)
 
     @timing.timed("rust.leads")
     def apply_lead_abilities_many(self, positions: Sequence[Position]) -> list[PortPhase | None]:
