@@ -1424,6 +1424,10 @@ def render_html(
         f"対戦評価の 1 局（第 {model['pair']} 組の {int(model['game']) + 1} 局目）・乱数の種 {model['seed']} ・ "
         f"{played} ターン ・ {END_REASONS.get(reason, reason)}"
     )
+    if model["turnCount"] is not None and model["turnCount"] != played:
+        # The game line's `turns` is the turn number the game stood at when it stopped: one more
+        # than the turns played, when the last of them ended it.
+        extra += f"（局の記録の turns は終了時のターン番号 {model['turnCount']}）"
     if model["adjudicated"]:
         got = model["adjudicated"]
         extra += f"（T{got['turn']} の勝率 {percent(got['value'])}、席 0 から見て）"

@@ -998,7 +998,11 @@ def transcript_page(args: argparse.Namespace) -> None:
     import game_page
 
     # A run's directory (its transcripts-worker*.jsonl, in worker order) or one file.
-    files = sorted(args.transcript.glob("transcripts-worker*.jsonl")) if args.transcript.is_dir() else [args.transcript]
+    files = (
+        sorted(args.transcript.glob("transcripts-worker*.jsonl"))
+        if args.transcript.is_dir()
+        else [args.transcript]
+    )
     lines = [json.loads(raw) for path in files for raw in path.read_bytes().splitlines() if raw.strip()]
     if args.pair is not None:
         found = [ln for ln in lines if ln["pair"] == args.pair and ln["game"] == args.which]
