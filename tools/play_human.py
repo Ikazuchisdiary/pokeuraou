@@ -304,6 +304,17 @@ def main(argv: list[str] | None = None) -> None:
                     "N-1 worker processes (IKA-364; with a server, each asks it; without, at "
                     f"most {humanplay.LADDER_LOCAL_WORKERS_MAX} load the leaf and the Q). "
                     "Default: none (the deepening)")
+    ap.add_argument("--selection-reading", default=None,
+                    help="read the selection deeper than the value function's one estimate of "
+                    "each cell (IKA-392, selection_deep): `default` or `stage=d2r4b3k8,rects=8-16,"
+                    "confirm=2,shift=add`. With --selection-seconds S it reads for S seconds of wall "
+                    "time (the stages widen while time is left), else exactly the stages it names. "
+                    "The cells are read by --selection-workers processes (default: --threads). "
+                    "Default: none (the leaf's solve)")
+    ap.add_argument("--selection-seconds", type=float, default=None,
+                    help="the wall-clock time of the deeper selection (with --selection-reading)")
+    ap.add_argument("--selection-workers", type=int, default=None,
+                    help="worker processes reading the selection's cells (default: --threads)")
     ap.add_argument("--child-q", type=int, default=None,
                     help="the deepening's child menus: each side's k best by the Q (IKA-307), "
                     "instead of narrow's damage-ranked 8")
@@ -438,6 +449,24 @@ def main(argv: list[str] | None = None) -> None:
             ([str(v) for v in values] if values and not args.hp_share else None,
              str(device or "cpu"), args.leaf_graphs == "on", args.cuda_memory_gb),
         )
+    if args.selection_reading is not None:
+        from pokeuraou import selection_deep
+
+        selection_deep.parse_reading(args.selection_reading)
+        if evaluate is None:
+            raise SystemExit("--selection-reading reads cells by a leaf: it needs one")
+        readers = args.selection_workers if args.selection_workers is not None else threads
+        if readers > 1:
+            selection_deep.use_reader(selection_deep.PoolReader(
+                reg, readers,
+                humanplay.ladder_spec(
+                    leaf=evaluate, address=address, merge=args.merge == "on", values=values,
+                    device=device, graphs=args.leaf_graphs == "on",
+                    cuda_memory_gb=args.cuda_memory_gb,
+                    q_path=q_path if qrank.is_q(fill) else None),
+                rank_fill=fill))
+        say(f"selection read {args.selection_reading} on {max(readers, 1)} process(es)"
+            + (f" for {args.selection_seconds:g} s" if args.selection_seconds else ""))
     halt = humanplay.MemoryBrake()
     agent = humanplay.Agent(
         reg=reg, evaluate=evaluate, name=name, seconds=args.seconds, cores=cores,
@@ -445,6 +474,7 @@ def main(argv: list[str] | None = None) -> None:
         width_only=args.width_only, max_levels=args.max_levels or None, child_q=args.child_q,
         oracle=_oracle_width(args.oracle), halt=halt,
         ponder=args.ponder == "on", ponder_seconds=args.ponder_seconds, ladder=args.ladder,
+        selection_reading=args.selection_reading, selection_seconds=args.selection_seconds,
     )
     if args.child_q is not None and not qrank.is_q(fill):
         raise SystemExit("--child-q ranks the children by the Q: it needs a Q (a q rank fill)")
