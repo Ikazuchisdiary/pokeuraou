@@ -18,12 +18,13 @@ import hashlib
 import numpy as np
 import pytest
 
-from pokeuraou import deepen, ladder, portmenus, portserved, qhead, qrank, rustnode
+from pokeuraou import deepen, ladder, portlp, portmenus, portserved, qhead, qrank, rustnode
 from pokeuraou.actions import side_actions
 from pokeuraou.budget import Budget
 from pokeuraou.damage import register_mega_stones
 from pokeuraou.encode import Encoder
 from pokeuraou.equilibrium import EquilibriumError, solve
+from pokeuraou.hidden import completions
 from pokeuraou.inference import serve
 from pokeuraou.position import Position
 from pokeuraou.teams import load_roster
@@ -234,6 +235,7 @@ def served(roster):  # noqa: ANN001, ANN201
     server.shutdown()
     portmenus.ON[0] = False
     portserved.ON[0] = False
+    portlp.set_on(False)
 
 
 def _both(reg, positions, width, stub):  # noqa: ANN001, ANN202
@@ -300,4 +302,51 @@ def test_a_ladder_read_is_the_same_read(roster, served) -> None:  # noqa: ANN001
         _same(ported, python)
         assert ported_log == python_log
         assert python.here["portMenus"] == 0 and ported.here["portMenus"] > 0
+
+
+@pytest.mark.parametrize("stages", ["d2r2b3k3+d2r3bak4x", "d2r3bak4x+d3r2bak3/r2bak3"])
+def test_a_read_that_keeps_its_branches_in_the_port_is_the_same_read(roster, served, stages) -> None:  # noqa: ANN001
+    """B3b: with positions held (as a ladder worker holds them), a read whose depth-2 turns
+    leave their branches in the port (`bare`) reads as one that has them written out --
+    every rung, the counted work, the notes and the Q's requests. The positive control: the
+    branches the port kept (`here["portBare"]`); a depth-3 stage reads its children's
+    children off kept branches too."""
+    stub, _model = served
+    reg = roster.reg
+    nodes = [(_node(reg, pos, 5), 0) for pos in _played(roster)[:2]]
+    # A Bayesian root: its cells' turns are shared across the bench's completions, and a
+    # share's first turn is written out whole (the others are read off its branches).
+    sheet = list(roster.sets)[:6]
+    for pos in _played(roster)[:3]:
+        spreads = {s: completions(reg, pos, s, sheet, seen=frozenset({0, 1})) for s in (0, 1)}
+        if len(spreads[1]) >= 2:
+            nodes.append((_node(reg, pos, 5, spreads, 1), 1))
+            break
+    assert len(nodes) == 3
+    whole_turns = 0
+    for (ours, theirs, items, matrices, weights, start), side in nodes:
+        saved = ladder._POOL
+        ladder._POOL = None
+        reads = []
+        try:
+            for bare in (False, True):
+                portmenus.set_on(True)
+                portmenus.BARE_ON[0] = bare
+                rustnode.hold_positions()
+                del stub.log[:]
+                reads.append((ladder.read(reg, 0, ours, theirs, items, matrices, weights, start,
+                                          LEAF, budget=Budget.matrix(),
+                                          stages=ladder.parse_ladder(stages), budget_ms=None),
+                              list(stub.log)))
+        finally:
+            ladder._POOL = saved
+            portmenus.ON[0] = False
+            portmenus.BARE_ON[0] = False
+            rustnode.hold_positions(False)
+        (whole, whole_log), (bare, bare_log) = reads
+        _same(bare, whole)
+        assert bare_log == whole_log
+        assert whole.here["portBare"] == 0 and (side == 1 or bare.here["portBare"] > 0), bare.here
+        whole_turns += bare.here["portWholeTurns"]
+    assert whole_turns > 0, whole_turns
 
