@@ -26,6 +26,7 @@ from __future__ import annotations
 import copy
 import json
 
+import numpy as np
 import pytest
 
 from pokeuraou import humanplay, timematch
@@ -351,3 +352,121 @@ def test_a_decided_game_is_stopped_where_the_turns_reads_agree(pool) -> None:  #
     match.adjudication = (1, 0.51)
     never = timematch.play_pair(match, 1, teams)
     assert json.dumps(_timeless(never)) == json.dumps(_timeless(plain))
+
+
+# ------------------------------------------------------------------------ the transcript
+
+
+def _played_with_transcript(pool):  # noqa: ANN001, ANN202
+    a, b = _cond("a", 0.3), _cond("b", 0.2)
+    teams = (pool.teams[0], pool.teams[1])
+    plain = timematch.play_pair(_match(pool, a, b, turns=4), 1, teams)
+    match = _match(pool, a, b, turns=4)
+    match.transcript = True
+    return plain, timematch.play_pair(match, 1, teams), match, teams
+
+
+def test_the_transcript_leaves_the_games_as_they_were(pool, monkeypatch) -> None:  # noqa: ANN001
+    """With it on, the games are the same to the byte (the wall-clock fields aside) as with it
+    off, and off writes no transcript; the account has an event trace for every move turn, each
+    the drawn outcome's (its position the game's own), and a different seed's is another."""
+    plain, on, match, teams = _played_with_transcript(pool)
+    assert all("transcript" not in ln for ln in plain)
+    stripped = [{k: v for k, v in ln.items() if k != "transcript"} for ln in on]
+    assert json.dumps(_timeless(stripped)) == json.dumps(_timeless(plain))
+    moves = 0
+    for ln in on:
+        for d in ln["transcript"]["decisions"]:
+            if d["kind"] == "move":
+                moves += 1
+                assert d["events"] and d["events"]["lines"], "a move turn without its trace"
+                assert d["events"]["matched"], "the port's re-asked outcome is not the game's"
+    assert moves >= 4, "no turns were played; the test would be vacuous"
+    match.seed = 4
+    other = timematch.play_pair(match, 1, teams)
+    assert json.dumps(_timeless([ln["transcript"] for ln in other])) != json.dumps(
+        _timeless([ln["transcript"] for ln in on])
+    )
+    # The control that the identity check can fail: a note that draws from the game's rng.
+    original = timematch.TimedGame._note_turn
+
+    def touching(self, *args):  # noqa: ANN001, ANN002, ANN202
+        self.rng.random()
+        return original(self, *args)
+
+    monkeypatch.setattr(timematch.TimedGame, "_note_turn", touching)
+    match.seed = 3
+    broken = timematch.play_pair(match, 1, teams)
+    assert json.dumps(_timeless([{k: v for k, v in ln.items() if k != "transcript"} for ln in broken])) != (
+        json.dumps(_timeless(plain))
+    )
+
+
+def test_a_transcript_is_shown_as_one_japanese_page(pool) -> None:  # noqa: ANN001
+    """`show_game.py --transcript`: one column (no toggles), a card a move turn, the seats named,
+    Japanese names from the dump; a game with no result reads as stopped."""
+    from ._harness import load_tool
+
+    show_game = load_tool("show_game")
+    import game_page
+
+    _plain, on, _match_, _teams = _played_with_transcript(pool)
+    loc = show_game.Localiser(pool.reg, show_game.load_names("ja"))
+    line = on[0]
+    page = game_page.render_html(pool.reg, loc, line)
+    turns = [d for d in line["transcript"]["decisions"] if d["kind"] == "move"]
+    assert page.count('<section class="turn"') == len(turns)
+    # The log is one long column: the only thing that opens and closes is a turn's mixtures.
+    assert page.count("<details") == page.count('<details class="mix"') and "<summary" in page
+    assert "席 0" in page and "席 1" in page
+    first = line["transcript"]["ownSix"][0]
+    assert loc.species(first) in page and loc.species(first) != first
+    assert "打ち切り" in page
+    # The control that the page can fail: a page of another game is not this one.
+    assert game_page.render_html(pool.reg, loc, on[1]) != page
+    # The mixtures of each seat's read are in the account, one per seat of every move turn.
+    for d in turns:
+        assert sorted(d["reads"]) == ["0", "1"]
+        assert d["reads"]["0"]["rows"] and d["reads"]["0"]["menu"][0] >= 1
+    assert page.count('<details class="mix"') == len(turns)
+
+
+def _action(index: int, target: int | None = None):  # noqa: ANN202
+    from pokeuraou.actions import MoveAction, SideAction
+
+    return SideAction(slots=(MoveAction(slot=0, move_index=index, move_id="x", target=target),))
+
+
+def test_a_reads_summary_says_what_the_seat_would_have_played_and_what_hurt_it() -> None:
+    """`read_summary`: the mixture's heaviest rows and the sum of the rest, where the drawn move
+    stands, the other side's modelled mixture, and from the ladder's matrices the opponent's moves
+    that take most from the mixture (and from the drawn move). Side 1's matrices are side 0's
+    negated, so its own win rate is one more than the entry (the control below breaks that)."""
+    from types import SimpleNamespace
+
+    mine = [_action(1), _action(2), _action(3)]
+    other = [_action(1, 1), _action(2, 1), _action(3, 1)]
+    x = np.array([0.6, 0.3, 0.1])
+    y = np.array([0.5, 0.5, 0.0])
+    payoff = np.array([[0.9, 0.5, 0.2], [0.4, 0.6, 0.7], [0.5, 0.5, 0.5]])
+    for me, offset in ((0, 0.0), (1, 1.0)):
+        matrix = payoff if me == 0 else -payoff
+        ladder = SimpleNamespace(prices=[matrix], replies=(y,))
+        got = timematch.read_summary((me, mine, other, x, y, ladder, True), [1.0], mine[1].to_choice())
+        assert got["rows"][0] == [mine[0].to_choice(), 0.6] and got["chosenRank"] == 2
+        assert got["chosenP"] == 0.3 and got["rowsRest"][0] == 0
+        assert got["opp"][0][1] == 0.5
+        by_col = offset + x @ matrix
+        worst = int(np.argmin(by_col))
+        assert got["hard"][0] == [other[worst].to_choice(), round(float(by_col[worst]), 4)]
+        assert got["hardChosen"][1] == round(float((offset + matrix[1]).min()), 4)
+        assert got["eq"] == round(float(offset + x @ matrix @ y), 4)
+    # No matrices (a read without a ladder): the mixtures only, and nothing made up.
+    plain = timematch.read_summary((0, mine, other, x, y, None, True), [1.0], mine[0].to_choice())
+    assert plain["hard"] is None and plain["hardChosen"] is None and "eq" not in plain
+    # The control: with side 1's offset dropped the number differs.
+    wrong = timematch.read_summary(
+        (1, mine, other, x, y, SimpleNamespace(prices=[-payoff], replies=(y,)), True), [1.0],
+        mine[0].to_choice(),
+    )
+    assert wrong["eq"] == round(float(1.0 + x @ -payoff @ y), 4) != round(float(x @ -payoff @ y), 4)

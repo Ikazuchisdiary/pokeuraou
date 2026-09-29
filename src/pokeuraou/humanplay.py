@@ -1740,6 +1740,8 @@ class HumanGame:
         self.inputs: list[str] = []
         self.clock: list[dict[str, Any]] = []
         self.extras: dict[int, dict[str, Any]] = {}
+        self.drawn: tuple[int, bool] | None = None
+        self.last_read: tuple[Any, ...] | None = None
         self.leaves = (agent.evaluate, agent.evaluate)
         self.listener = listener
         self.interval_ms = interval_ms
@@ -2108,6 +2110,9 @@ class HumanGame:
         deepened, unmodelled = solved.deepened, solved.unmodelled
         mine = ours if me == 0 else theirs
         index = _sample_index(self.rng, strategy)
+        #: This read's answer as it stands (its menu, mixture, model of the other side and the
+        #: ladder's reading): a transcript reads it (`timematch.TimedGame`); nothing here does.
+        self.last_read = (me, mine, theirs if me == 0 else ours, strategy, model, solved.ladder, exact)
         took = time.perf_counter() - started
         braked = isinstance(cost, HaltingCost) and cost.stopped
         if self.listener is not None:
@@ -2307,6 +2312,9 @@ class HumanGame:
         if not counts.size or float(counts.sum()) <= 0:
             return None
         index = _sample_index(self.rng, counts)
+        #: The outcome this turn drew (of the branches, then the pauses): read by a
+        #: transcript (`timematch.TimedGame`); nothing in the game reads it.
+        self.drawn = (index, index < len(weights.branches))
         if index < len(weights.branches):
             return port.branch(reg, pos, chosen, Budget.exact(), index)
         paused = port.turn(reg, pos, chosen, Budget.exact(), select=index).pause
