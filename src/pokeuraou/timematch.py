@@ -632,17 +632,27 @@ def read_summary(last: tuple[Any, ...], weights: Sequence[float], chosen: str) -
         if all(np.asarray(p).shape == shape for p in prices) and len(prices) == len(w):
             by_col = offset + sum(wk * (x @ np.asarray(p)) for wk, p in zip(w, prices, strict=True))
             worst = np.argsort(by_col, kind="stable")[:SUMMARY_HARD]
-            out["hard"] = [[other_names[j], round(float(by_col[j]), 4)] for j in worst]
+            out["hard"] = [[other_names[j], round(float(by_col[j]), 6)] for j in worst]
+            # What the read guarantees: each completion of the hidden bench has its own hardest
+            # column (the opponent knows its own bench), weighted. `hard` above is by column over
+            # all completions at once (the same move whatever its bench), which is never lower.
+            exact = float(offset + sum(
+                wk * float((x @ np.asarray(p)).min()) for wk, p in zip(w, prices, strict=True)))
+            out["guarantee"] = round(exact, 6)
+            # Against the ladder's own value for the answer (the same thing, in the seat's units):
+            # the record's check that the matrices kept are the ones the answer was solved on.
+            if hasattr(ladder, "value"):
+                out["guaranteeGap"] = abs(exact - (offset + float(ladder.value)))
             replies = getattr(ladder, "replies", None)
             if replies is not None and len(replies) == len(w):
                 # The read's own value from the matrices: the seat's win rate at its answer.
                 out["eq"] = round(float(offset + sum(
                     wk * float(x @ np.asarray(p) @ np.asarray(r))
-                    for wk, p, r in zip(w, prices, replies, strict=True))), 4)
+                    for wk, p, r in zip(w, prices, replies, strict=True))), 6)
             if index is not None:
                 against = offset + sum(wk * np.asarray(p)[index] for wk, p in zip(w, prices, strict=True))
                 j = int(np.argmin(against))
-                out["hardChosen"] = [other_names[j], round(float(against[j]), 4)]
+                out["hardChosen"] = [other_names[j], round(float(against[j]), 6)]
     return out
 
 

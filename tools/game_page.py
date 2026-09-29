@@ -606,6 +606,7 @@ def mixtures(
                     "actual": got["hardChosen"][0] == chosen[other],
                 },
                 "eq": got.get("eq"),
+                "guarantee": got.get("guarantee"),
             }
         )
     return out
@@ -815,8 +816,15 @@ h2{font-size:15px;margin:28px 0 8px;color:var(--dim);font-weight:600;letter-spac
 .mix>summary::after{content:"▸";position:absolute;right:12px;top:8px;color:var(--dim)}
 .mix[open]>summary::after{content:"▾"}
 .mh{display:block;font-size:12px;font-weight:700;color:var(--dim);margin-bottom:4px}.mh small{font-weight:400;margin-left:8px}
-.msl{display:flex;flex-wrap:wrap;gap:2px 6px;align-items:center;font-size:12.5px;padding:2px 0 2px 8px;margin-bottom:2px}
-.msl .seat{margin-right:2px}
+.mix>summary{padding-right:32px}
+.msl{font-size:12.5px;padding:2px 0 2px 8px;margin-bottom:4px}
+.msl .l1,.msl .l2{display:block}.msl .l2{padding-left:2.6em;margin-top:1px}
+.msl .seat{margin-right:6px}
+.bc.wr{position:relative;overflow:visible;background:var(--track);height:6px;margin:1px 0}
+.bc.wr .m50{position:absolute;left:50%;top:-4px;bottom:-4px;width:2px;background:var(--faint)}
+.bc.wr .dt{position:absolute;top:-4px;width:14px;height:14px;margin-left:-7px;border-radius:50%;background:var(--faint);border:2px solid var(--surface)}
+.bc.wr .dt.s0{background:var(--s0)}.bc.wr .dt.s1{background:var(--s1)}
+.nc .gz{color:var(--faint);font-size:11px}
 .msl b.rare{color:var(--faint)}.msl b.often{font-weight:800}
 .mbody{padding:4px 12px 12px;display:grid;grid-template-columns:1fr;gap:12px}
 .mseat{border-left:4px solid var(--faint);padding-left:10px}.mseat.s0{border-left-color:var(--s0)}.mseat.s1{border-left-color:var(--s1)}
@@ -834,7 +842,8 @@ h2{font-size:15px;margin:28px 0 8px;color:var(--dim);font-weight:600;letter-spac
 .nc{text-align:right;white-space:nowrap}.nc .gp{color:var(--bad);font-size:11px}
 .tag.pk{margin:2px 0 0 30px;font-size:11px}
 .ic.xs.f0,.ic.xs.f1{width:24px;height:24px;flex:none}
-@media (max-width:720px){.mt .r{grid-template-columns:minmax(0,1fr) auto}.bc{grid-column:1/-1;order:3}.pt .pm{display:block}}
+@media (max-width:720px){.mt .r{grid-template-columns:minmax(0,1fr) auto}.bc{grid-column:1/-1;order:3}.pt .pm{display:block}
+.mh small{display:block;margin-left:0}.msl .l2{padding-left:0}}
 .dmg{font-family:var(--num);font-weight:700;color:var(--bad)}
 .tag{display:inline-block;font-size:12px;line-height:1.5;padding:0 8px;border-radius:999px;border:1px solid var(--line);background:var(--surface);color:var(--dim);white-space:nowrap}
 .resid{margin:8px 0 0;padding:8px 10px;border-radius:10px;background:var(--surface-2)}
@@ -1090,14 +1099,22 @@ def _table_html(rows: list[dict[str, Any]], side: int, sprites: Sprites, *, kind
             share = r["ev"]
             number = f'<span class="n">{share * 100:.0f}%</span>'
             if r.get("gap") is not None:
-                number += f' <span class="gp n">{MINUS}{r["gap"] * 100:.0f}pt</span>'
+                if r["gap"] * 100 >= 1:
+                    number += f' <span class="gp n">{MINUS}{r["gap"] * 100:.0f}pt</span>'
+                else:
+                    number += ' <span class="gz n">±0</span>'
+            # A win rate is a point on a 0-100 scale (a line at 50%), not a bar: a bar is a share.
+            gauge = (
+                f'<div class="bc wr"><span class="m50"></span>'
+                f'<span class="dt s{side}" style="left:{max(0.0, min(1.0, share)) * 100:.1f}%"></span></div>'
+            )
         else:
             share = r["p"]
             number = f'<span class="n">{_pct(share)}</span>'
+            gauge = f'<div class="bc"><span class="bb s{side}" style="width:{max(0.0, min(1.0, share)) * 100:.0f}%"></span></div>'
         body.append(
             f'<div class="r{" pick" if r.get("picked") else ""}"><div class="pc">{_pair_html(r["pair"], side, sprites)}{mark}</div>'
-            f'<div class="bc"><span class="bb s{side}" style="width:{max(0.0, min(1.0, share)) * 100:.0f}%"></span></div>'
-            f'<div class="nc">{number}</div></div>'
+            f'{gauge}<div class="nc">{number}</div></div>'
         )
     return f'<div class="mt">{"".join(body)}</div>'
 
@@ -1105,7 +1122,7 @@ def _table_html(rows: list[dict[str, Any]], side: int, sprites: Sprites, *, kind
 def _mix_seat(m: dict[str, Any] | None, side: int, sprites: Sprites) -> str:
     if m is None:
         return f'<div class="mseat s{side}"><h4><span class="seat s{side}">{SEAT[side]}</span> の読み</h4><p class="dim">この席の読みはありません</p></div>'
-    view = f"（{SEAT[side]}から見た勝率）"
+    view = f"（{SEAT[side]} から見た勝率）"
     rows = list(m["rows"])
     if not any(r["picked"] for r in rows):
         rows.append({"pair": m["chosen"], "p": m["chosenP"] or 0.0, "picked": True})
@@ -1135,7 +1152,18 @@ def _mix_seat(m: dict[str, Any] | None, side: int, sprites: Sprites) -> str:
     base = m["eq"] if m.get("eq") is not None else m["own"]
     if m["hard"]:
         hrows = [{**h, "gap": None if base is None else max(0.0, base - h["ev"])} for h in m["hard"]]
-        hard = f"<h5>辛い相手の手（自分の混合に対して勝率を下げる順・上位 3）<small>{view}</small></h5>{_table_html(hrows, side, sprites, kind='hard')}"
+        flat = max(h["ev"] for h in m["hard"]) - min(h["ev"] for h in m["hard"]) <= 0.01
+        note = '<p class="dim">均衡では、相手のどの応手もほぼ同じ値（＝均衡の値）になる。</p>' if flat else ""
+        if m.get("guarantee") is not None:
+            note += (
+                f'<p class="dim">読みの値（保証値）{m["guarantee"] * 100:.0f}%は、相手が裏ごとに一番辛い手を選べるときの値。'
+                "下の値は、相手が裏によらず同じ手を打つときの値なので、それ以上になる。"
+                "深く読んでいない手の値は浅い読みのまま。</p>"
+            )
+        hard = (
+            f"<h5>辛い相手の手（自分の混合に対して勝率を下げる順・上位 3）<small>{view}</small></h5>"
+            f"{note}{_table_html(hrows, side, sprites, kind='hard')}"
+        )
         hc = m["hardChosen"]
         if hc:
             crow = [{**hc, "gap": None if base is None else max(0.0, base - hc["ev"])}]
@@ -1167,11 +1195,15 @@ def _mix_line(m: dict[str, Any] | None, side: int) -> str:
     if m["hardChosen"]:
         hc = m["hardChosen"]
         names = " ／ ".join(f"{esc(x['name'])} {esc(x['text'])}" for x in hc["pair"])
-        hard = f' <span class="dim">・一番辛い相手の手</span> {names} <span class="dim">→ {SEAT[side]}から見て</span> <b class="n">{hc["ev"] * 100:.0f}%</b>'
-    return (
-        f'<div class="msl">{label}<span class="dim">選んだ手</span> {moves} '
-        f'<span class="dim">・均衡の確率</span> <b class="n {weight}">{_pct(p)}</b>{place}{rare}{off}{hard}</div>'
+        hard = (
+            f'<div class="l2"><span class="dim">一番辛い相手の手</span> {names} '
+            f'<span class="dim">→ {SEAT[side]} から見て</span> <b class="n">{hc["ev"] * 100:.0f}%</b></div>'
+        )
+    line1 = (
+        f'<div class="l1">{label}<span class="dim">選んだ手</span> {moves} '
+        f'<span class="dim">・均衡の確率</span> <b class="n {weight}">{_pct(p)}</b>{place}{rare}{off}</div>'
     )
+    return f'<div class="msl">{line1}{hard}</div>'
 
 
 def _mix_html(t: dict[str, Any], sprites: Sprites) -> str:

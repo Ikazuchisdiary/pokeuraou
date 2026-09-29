@@ -458,9 +458,22 @@ def test_a_reads_summary_says_what_the_seat_would_have_played_and_what_hurt_it()
         assert got["opp"][0][1] == 0.5
         by_col = offset + x @ matrix
         worst = int(np.argmin(by_col))
-        assert got["hard"][0] == [other[worst].to_choice(), round(float(by_col[worst]), 4)]
-        assert got["hardChosen"][1] == round(float((offset + matrix[1]).min()), 4)
-        assert got["eq"] == round(float(offset + x @ matrix @ y), 4)
+        assert got["hard"][0] == [other[worst].to_choice(), round(float(by_col[worst]), 6)]
+        assert got["hardChosen"][1] == round(float((offset + matrix[1]).min()), 6)
+        assert got["eq"] == round(float(offset + x @ matrix @ y), 6)
+        # One completion: the lowest column is the guarantee.
+        assert got["guarantee"] == got["hard"][0][1]
+    # Two completions of the hidden bench: the opponent that knows its own bench takes its own
+    # hardest column in each, so the guarantee is the weighted sum of the lowest columns, and
+    # the lowest column over both at once (`hard`) is never below it (here above it).
+    second = np.array([[0.2, 0.9, 0.5], [0.6, 0.3, 0.5], [0.5, 0.5, 0.5]])
+    both = timematch.read_summary(
+        (0, mine, other, x, y, SimpleNamespace(prices=[payoff, second], replies=(y, y)), False),
+        [0.5, 0.5], mine[0].to_choice(),
+    )
+    lows = [float((x @ m).min()) for m in (payoff, second)]
+    assert both["guarantee"] == round(0.5 * lows[0] + 0.5 * lows[1], 6)
+    assert both["hard"][0][1] > both["guarantee"]
     # No matrices (a read without a ladder): the mixtures only, and nothing made up.
     plain = timematch.read_summary((0, mine, other, x, y, None, True), [1.0], mine[0].to_choice())
     assert plain["hard"] is None and plain["hardChosen"] is None and "eq" not in plain
@@ -469,4 +482,4 @@ def test_a_reads_summary_says_what_the_seat_would_have_played_and_what_hurt_it()
         (1, mine, other, x, y, SimpleNamespace(prices=[-payoff], replies=(y,)), True), [1.0],
         mine[0].to_choice(),
     )
-    assert wrong["eq"] == round(float(1.0 + x @ -payoff @ y), 4) != round(float(x @ -payoff @ y), 4)
+    assert wrong["eq"] == round(float(1.0 + x @ -payoff @ y), 6) != round(float(x @ -payoff @ y), 6)
