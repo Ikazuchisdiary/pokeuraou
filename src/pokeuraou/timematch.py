@@ -23,7 +23,10 @@ deepening's guard, the swap oracle -- so a match can say what ten times the time
   over the other side's bench), outside the clock;
 - *selection*: the one solve of the two sheets (`humanplay.solve_entry`), each side drawing
   its ordered four from its own side's pure equilibrium, outside the clock. Both
-  conditions get the same selection, whatever their seconds.
+  conditions get the same selection, whatever their seconds -- unless a condition names a
+  ``selection=`` reading (IKA-392, `selection_deep`): then each seat plays its four, and
+  believes in the other's, from the solve of its own condition (the pair solves once per
+  reading), the leaf's solve for the one that names none.
 
 **A pair** is two games on one pair of teams from the M-C pool (`pool.draw_pair`) with the
 conditions swapped between the sides, the same seed and the same selection draws, so the
@@ -55,7 +58,7 @@ from typing import Any
 
 import numpy as np
 
-from . import deepen, equilibrium, humanplay, rustnode
+from . import deepen, equilibrium, humanplay, rustnode, selection_deep
 from .deepen import ALL_ACTIONS, MAX_LEVELS
 from .selfplay import _do_self_switch_node, _sample_index
 from .sprt import elo_of
@@ -106,6 +109,11 @@ class Condition:
     #: coarse to fine within the rest of the budget (`humanplay.Agent.ladder`, IKA-367): a
     #: name in `ladder.LADDERS` or stages joined by ``+``. None: off.
     ladder: str | None = None
+    #: The selection this side plays from (`selection_deep`, IKA-392): a reading spec (its
+    #: commas written as semicolons), else the leaf's solve every game has played. Each side
+    #: draws its four, and holds its belief about the other's, from the solve of its own
+    #: condition; the two sides of a pair solve once each.
+    selection: str | None = None
 
     @property
     def price_cores(self) -> int:
@@ -138,6 +146,7 @@ class Condition:
             + (", depth 2 as the budget allows" if self.depth2_auto else "")
             + (", the opening's root at every legal action" if self.root_all else "")
             + (f", ladder {self.ladder}" if self.ladder is not None else "")
+            + (f", selection read {self.selection}" if self.selection is not None else "")
             + (f", child Q {self.child_q}" if self.child_q is not None else "")
         )
 
@@ -151,7 +160,7 @@ class Condition:
 #: The keys a condition is written with, and what each one parses.
 CONDITION_KEYS = ("seconds", "threads", "cores", "clock", "oracle", "levels", "width_only",
                   "width", "child_q", "knockouts", "sub_limit", "sub_branches", "restricted",
-                  "depth", "refine", "passes", "depth2_auto", "root_all", "ladder")
+                  "depth", "refine", "passes", "depth2_auto", "root_all", "ladder", "selection")
 
 
 def _oracle(spec: str) -> int | None:
@@ -220,6 +229,11 @@ def parse_condition(spec: str) -> Condition:
             from .ladder import parse_ladder
 
             parse_ladder(value)  # refuses a stage it cannot read, before a game starts
+            got[key] = value
+        elif key == "selection":
+            from .selection_deep import parse_reading
+
+            parse_reading(value)  # refuses a reading it cannot parse, before a game starts
             got[key] = value
         else:
             got[key] = _flag(value)
@@ -496,7 +510,9 @@ class Match:
             sub_branches=condition.sub_branches, restricted=condition.restricted,
             depth=condition.depth, refine=condition.refine, passes=condition.passes,
             depth2_auto=condition.depth2_auto, root_all=condition.root_all,
-            ladder=condition.ladder, max_levels=condition.max_levels,
+            ladder=condition.ladder, selection_reading=condition.selection,
+            # A board reads the stages a reading names, on the count clock (no seconds).
+            selection_seconds=None, max_levels=condition.max_levels,
             child_q=condition.child_q, oracle=condition.oracle, halt=self.halt,
             # Off, as a person's game plays by default (the module's docstring).
             ponder=False, ponder_seconds=humanplay.PLAY_PONDER_SECONDS,
@@ -508,11 +524,37 @@ def play_pair(match: Match, pair: int, teams: tuple[Any, Any]) -> list[dict[str,
     side 0, then on side 1. Returns their lines (`game_line`)."""
     reg = match.reg
     started = time.perf_counter()
-    entry = (
-        humanplay.solve_entry(reg, teams, match.evaluate, match.leaf_name)
-        if match.evaluate is not None else None
-    )
+    # The selection of each condition (IKA-392): one solve per reading, however many sides
+    # play from it. Both conditions on the same one (every run before it): the one solve,
+    # one belief, exactly as they always were.
+    reports: dict[str | None, list[Any]] = {}
+    entries: dict[str | None, Any] = {}
+    for condition in (match.tested, match.other):
+        if condition.selection not in entries:
+            reports[condition.selection] = []
+            entries[condition.selection] = (
+                humanplay.solve_entry(reg, teams, match.evaluate, match.leaf_name,
+                                      reading=condition.selection,
+                                      reader=None if condition.selection is None else (
+                                          selection_deep.READER or selection_deep.SerialReader(
+                                              reg, match.evaluate, rank_fill=match.rank_fill,
+                                              rank_by_leaf=match.rank_by_leaf)),
+                                      report=reports[condition.selection])
+                if match.evaluate is not None else None
+            )
     selection_seconds = time.perf_counter() - started
+    split = match.tested.selection != match.other.selection
+    selection_info = {
+        condition.name: {
+            "reading": condition.selection, "cells": reports[condition.selection][0].cells,
+            "seconds": round(reports[condition.selection][0].seconds, 2),
+            "value": round(reports[condition.selection][0].value, 5),
+            "leafValue": round(reports[condition.selection][0].leaf_value, 5),
+            "completed": reports[condition.selection][0].completed,
+        }
+        for condition in (match.tested, match.other)
+        if reports.get(condition.selection)
+    }
     agent_side = pair % 2
     lines = []
     for game in (0, 1):
@@ -522,7 +564,21 @@ def play_pair(match: Match, pair: int, teams: tuple[Any, Any]) -> list[dict[str,
         )
         seats = (match.agent(conditions[0]), match.agent(conditions[1]))
         you = 1 - agent_side
-        person = SeatPerson(entry, you, np.random.default_rng([match.seed, pair, 1, you]))
+        seat_entries = [entries[c.selection] for c in conditions]
+        entry = seat_entries[agent_side]
+        person = SeatPerson(seat_entries[you], you,
+                            np.random.default_rng([match.seed, pair, 1, you]))
+        priors = None
+        if split and entry is not None:
+            # Each seat's belief about a side's four is its own solve's mixture for that
+            # side: the belief about side s is held by seat 1 - s (`HumanGame` reads
+            # `bench_prior[s]` for the seat opposite it).
+            species = ([x.species for x in teams[0].sets], [x.species for x in teams[1].sets])
+            priors = tuple(
+                humanplay.BenchPrior.of(seat_entries[1 - side], side, species[side],
+                                        epsilon=humanplay.BELIEF_EPSILON, temperature=1.0)
+                for side in (0, 1)
+            )
 
         def make_game(*args: Any, seats=seats, conditions=conditions, **kwargs: Any) -> TimedGame:  # noqa: ANN401
             return TimedGame(*args, seats=seats, conditions=conditions,
@@ -533,11 +589,12 @@ def play_pair(match: Match, pair: int, teams: tuple[Any, Any]) -> list[dict[str,
         payload, clock, played = humanplay.play(
             seats[agent_side], person, teams, agent_side=agent_side, seed=match.seed,
             game_index=pair, max_turns=match.max_turns, loc=match.loc, entry=entry,
-            make_game=make_game,
+            make_game=make_game, priors=priors,
         )
         line = game_line(
             match, pair, game, teams, conditions, tested_side, payload, clock, played,
             seconds=time.perf_counter() - began, selection_seconds=selection_seconds,
+            selection=selection_info or None,
         )
         if match.transcript:
             line["transcript"] = transcript_of(payload, played)
@@ -551,6 +608,7 @@ def game_line(
     match: Match, pair: int, game: int, teams: tuple[Any, Any],
     conditions: tuple[Condition, Condition], tested_side: int, payload: dict[str, Any],
     clock: dict[str, Any], played: TimedGame, *, seconds: float, selection_seconds: float,
+    selection: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     outcome = payload["outcome"]
     score = None if outcome is None else (outcome if tested_side == 0 else 1.0 - outcome)
@@ -571,6 +629,7 @@ def game_line(
         "endReason": payload["endReason"],
         "seconds": round(seconds, 3),
         "selectionSeconds": round(selection_seconds, 3),
+        **({"selection": selection} if selection else {}),
         "fallbacks": list(played.fallbacks),
         **({"adjudicated": played.adjudicated} if played.adjudicated is not None else {}),
         "memoryStops": sum(1 for r in rows if r.get("memoryStop")),
