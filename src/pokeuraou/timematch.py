@@ -302,9 +302,16 @@ class TimedGame(humanplay.HumanGame):
         seats: tuple[humanplay.Agent, humanplay.Agent],
         conditions: tuple[Condition, Condition],
         adjudication: tuple[int, float] | None = None,
+        transcript: bool = False,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
         super().__init__(*args, **kwargs)
+        #: `--transcript`: the port's account of each move turn's drawn outcome, by
+        #: decision index (`_note_turn`); None: not asked for, nothing is done.
+        self.turn_events: dict[int, dict[str, Any]] | None = {} if transcript else None
+        #: `--transcript`: each seat's read of a move decision as a reader sees it
+        #: (`read_summary`), by decision index and side.
+        self.read_notes: dict[int, dict[int, dict[str, Any]]] | None = {} if transcript else None
         self.seats = seats
         self.conditions = conditions
         #: The person's seat's move this turn, read beside the agent's.
@@ -352,10 +359,17 @@ class TimedGame(humanplay.HumanGame):
         self.agent, self.me, self.you = self.seats[side], side, 1 - side
         spread_threads(self.reg, condition.threads)
         start = len(self.clock)
+        decision = len(self.record.decisions)
         try:
             got = humanplay.HumanGame._agent_move(self, pos, spreads, shown)
         finally:
             self.agent, self.me, self.you = saved
+        if self.read_notes is not None and got is not None and self.last_read is not None:
+            exact = self.last_read[6]
+            weights = [1.0] if exact else [float(item.weight) for item in spreads[1 - side]]
+            self.read_notes.setdefault(decision, {})[side] = read_summary(
+                self.last_read, weights, got[0].to_choice()
+            )
         for row in self.clock[start:]:
             row["side"] = side
             row["condition"] = condition.name
@@ -370,6 +384,41 @@ class TimedGame(humanplay.HumanGame):
         other = got[self.you]
         self._answer = None if other is None else other[0]
         return got[self.me]
+
+    def _advance_turn(self, pos, chosen, hidden):  # noqa: ANN001, ANN202
+        decision = len(self.record.decisions) - 1
+        advanced = super()._advance_turn(pos, chosen, hidden)
+        if self.turn_events is not None:
+            self._note_turn(decision, pos, chosen, advanced)
+        return advanced
+
+    def _note_turn(self, decision: int, pos: Any, chosen: Any, advanced: Any) -> None:  # noqa: ANN401
+        """`--transcript`: what the drawn outcome of the turn did, as the port says it (its
+        trace and the cut of it by action), asked for again by the outcome's index -- the
+        game itself is not touched (the draw was made, and the game's rng is not read here).
+        A turn that paused for a mid-turn switch has only the trace up to the pause; what
+        the rest of it did is in the positions around it."""
+        from .budget import Budget
+        from .port import turn as port_turn
+
+        if self.drawn is None:
+            return
+        index, is_branch = self.drawn
+        answer = port_turn(self.reg, pos, list(chosen), Budget.exact(), select=index, events=True)
+        if is_branch:
+            same = advanced is not None and answer.position is not None and (
+                answer.position.to_json() == advanced.to_json()
+            )
+            self.turn_events[decision] = {
+                "lines": list(answer.events), "acts": [[s, lbl] for s, lbl in answer.acts],
+                "paused": False, "matched": bool(same),
+            }
+        elif answer.pause is not None:
+            self.turn_events[decision] = {
+                "lines": list(answer.pause.events),
+                "acts": [[s, lbl] for s, lbl in answer.pause.acts],
+                "paused": True, "matched": True,
+            }
 
     def _replacement(self, pos, owed, seen, shown, leads, recorded_shown):  # noqa: ANN001, ANN202
         self._owed = owed
@@ -441,6 +490,10 @@ class Match:
     #: IKA-384: ``(first turn, threshold)`` of `TimedGame.adjudicate`; None: every game is
     #: played to its end.
     adjudication: tuple[int, float] | None = None
+    #: A game's account for a reader (`transcript_of`, `--transcript`): each game line
+    #: from `play_pair` then carries it under ``transcript``. Off: the game is played and
+    #: written as it always was.
+    transcript: bool = False
     #: Menus ranked by the leaf (the human-play agent's); False only for cheap tests.
     rank_by_leaf: bool = True
     loc: Any = None  # noqa: ANN401
@@ -529,7 +582,8 @@ def play_pair(match: Match, pair: int, teams: tuple[Any, Any]) -> list[dict[str,
 
         def make_game(*args: Any, seats=seats, conditions=conditions, **kwargs: Any) -> TimedGame:  # noqa: ANN401
             return TimedGame(*args, seats=seats, conditions=conditions,
-                             adjudication=match.adjudication, **kwargs)
+                             adjudication=match.adjudication, transcript=match.transcript,
+                             **kwargs)
 
         began = time.perf_counter()
         payload, clock, played = humanplay.play(
@@ -537,11 +591,15 @@ def play_pair(match: Match, pair: int, teams: tuple[Any, Any]) -> list[dict[str,
             game_index=pair, max_turns=match.max_turns, loc=match.loc, entry=entry,
             make_game=make_game, priors=priors,
         )
-        lines.append(game_line(
+        line = game_line(
             match, pair, game, teams, conditions, tested_side, payload, clock, played,
             seconds=time.perf_counter() - began, selection_seconds=selection_seconds,
             selection=selection_info or None,
-        ))
+        )
+        if match.transcript:
+            line["transcript"] = transcript_of(payload, played)
+            line["transcript"]["teamNames"] = [teams[0].name, teams[1].name]
+        lines.append(line)
         del played
     return lines
 
@@ -579,6 +637,148 @@ def game_line(
         "moves": [r for r in rows if r["kind"] == "move"],
         "others": [r for r in rows if r["kind"] != "move"],
         **match.stamp,
+    }
+
+
+def _top_mixture(actions: Sequence[str], policy: Sequence[float], top: int = 4) -> list[list[Any]]:
+    """The heaviest rows of an equilibrium mixture: ``[choice, weight]``, at least 0.1%."""
+    ranked = sorted(zip(actions, policy, strict=True), key=lambda pair: -pair[1])
+    return [[a, round(float(w), 4)] for a, w in ranked[:top] if w >= 0.001]
+
+
+#: Rows of a mixture a read summary keeps (the heaviest, at least 1%): the rest is one sum.
+SUMMARY_ROWS = 8
+SUMMARY_HARD = 3
+#: A move is one the mixture plays (in its support) from this probability up (`read_summary`,
+#: and what `tools/game_page.py` counts with).
+SUPPORT_MIN = 0.005
+
+
+def _mixture_top(choices: Sequence[str], p: np.ndarray, keep: int) -> tuple[list[list[Any]], list[Any]]:
+    order = np.argsort(-p, kind="stable")
+    shown = [int(i) for i in order[:keep] if p[i] >= 0.01]
+    rest = [int(len(p) - len(shown)), round(float(1.0 - sum(p[i] for i in shown)), 4)]
+    return [[choices[i], round(float(p[i]), 4)] for i in shown], rest
+
+
+def _played(choices: Sequence[str], p: np.ndarray) -> list[list[Any]]:
+    """The moves a mixture plays -- its support at `SUPPORT_MIN` -- with their probabilities."""
+    order = np.argsort(-p, kind="stable")
+    return [[choices[i], round(float(p[i]), 5)] for i in order if p[i] >= SUPPORT_MIN]
+
+
+def read_summary(last: tuple[Any, ...], weights: Sequence[float], chosen: str) -> dict[str, Any]:
+    """One seat's read of a move decision as a reader sees it (`--transcript`): its mixture over its
+    menu (the heaviest rows, and the sum of the rest), where the move it drew stands, the other
+    side's mixture it modelled (weighted over the completions of the hidden bench), and -- when the
+    read is a ladder's, which keeps the matrices at the prices in hand -- the opponent's moves
+    that took most from it against its own mixture, and the one that took most against the move
+    drawn. Values are in the read: the seat's own win rate by the matrices' cells, where a cell
+    that no stage refined keeps its depth-1 price. Not the game's real value."""
+    me, mine, other, strategy, model, ladder = last[:6]
+    x = np.asarray(strategy, dtype=np.float64)
+    mine_names = [a.to_choice() for a in mine]
+    other_names = [a.to_choice() for a in other]
+    rows, rows_rest = _mixture_top(mine_names, x, SUMMARY_ROWS)
+    y = np.asarray(model, dtype=np.float64)
+    opp, opp_rest = _mixture_top(other_names, y, SUMMARY_ROWS)
+    order = np.argsort(-x, kind="stable")
+    index = mine_names.index(chosen) if chosen in mine_names else None
+    out: dict[str, Any] = {
+        "menu": [len(mine_names), len(other_names)],
+        "rows": rows, "rowsRest": rows_rest, "chosen": chosen,
+        "chosenP": None if index is None else round(float(x[index]), 4),
+        "chosenRank": None if index is None else int(np.where(order == index)[0][0]) + 1,
+        "opp": opp, "oppRest": opp_rest, "hard": None, "hardChosen": None,
+        # The whole mixtures, in menu order: the page counts the moves it plays from them (the
+        # support), whatever threshold it names.
+        "p": [round(float(v), 5) for v in x], "q": [round(float(v), 5) for v in y],
+        # Every move each mixture plays (probability at least SUPPORT_MIN), heaviest first.
+        "supp": _played(mine_names, x), "oppSupp": _played(other_names, y),
+    }
+    prices = getattr(ladder, "prices", None)
+    if prices:
+        w = np.asarray(weights, dtype=np.float64)
+        w = w / w.sum()
+        offset = 0.0 if me == 0 else 1.0  # the matrices are side 0's, negated and turned for side 1
+        shape = (len(mine_names), len(other_names))
+        if all(np.asarray(p).shape == shape for p in prices) and len(prices) == len(w):
+            by_col = offset + sum(wk * (x @ np.asarray(p)) for wk, p in zip(w, prices, strict=True))
+            worst = np.argsort(by_col, kind="stable")[:SUMMARY_HARD]
+            out["hard"] = [[other_names[j], round(float(by_col[j]), 6)] for j in worst]
+            # What the read guarantees: each completion of the hidden bench has its own hardest
+            # column (the opponent knows its own bench), weighted. `hard` above is by column over
+            # all completions at once (the same move whatever its bench), which is never lower.
+            exact = float(offset + sum(
+                wk * float((x @ np.asarray(p)).min()) for wk, p in zip(w, prices, strict=True)))
+            out["guarantee"] = round(exact, 6)
+            # Against the ladder's own value for the answer (the same thing, in the seat's units):
+            # the record's check that the matrices kept are the ones the answer was solved on.
+            if hasattr(ladder, "value"):
+                out["guaranteeGap"] = abs(exact - (offset + float(ladder.value)))
+            replies = getattr(ladder, "replies", None)
+            if replies is not None and len(replies) == len(w):
+                # The read's own value from the matrices: the seat's win rate at its answer.
+                out["eq"] = round(float(offset + sum(
+                    wk * float(x @ np.asarray(p) @ np.asarray(r))
+                    for wk, p, r in zip(w, prices, replies, strict=True))), 6)
+            if index is not None:
+                against = offset + sum(wk * np.asarray(p)[index] for wk, p in zip(w, prices, strict=True))
+                j = int(np.argmin(against))
+                out["hardChosen"] = [other_names[j], round(float(against[j]), 6)]
+                # Among the moves the other side plays in this read (its mixture at least
+                # SUPPORT_MIN): the one that is hardest for the drawn move and the one it does best
+                # against (the seat's own win rate, weighted over the completions).
+                played = [k for k in range(len(other_names)) if y[k] >= SUPPORT_MIN] or list(
+                    range(len(other_names))
+                )
+                low = min(played, key=lambda k: against[k])
+                high = max(played, key=lambda k: against[k])
+                # The drawn move's value against every column of the other side's menu, in menu
+                # order (the page reads the value of the move the other side really played from
+                # it), and against the other side's modelled mixture.
+                out["cols"] = other_names
+                out["vs"] = [round(float(v), 6) for v in against]
+                replies = getattr(ladder, "replies", None)
+                if replies is not None and len(replies) == len(w):
+                    out["chosenEv"] = round(float(offset + sum(
+                        wk * float(np.asarray(p)[index] @ np.asarray(r))
+                        for wk, p, r in zip(w, prices, replies, strict=True))), 6)
+                out["hardIn"] = [other_names[low], round(float(against[low]), 6)]
+                out["bestIn"] = [other_names[high], round(float(against[high]), 6)]
+    return out
+
+
+def transcript_of(payload: dict[str, Any], played: TimedGame) -> dict[str, Any]:
+    """A game as `tools/show_game.py --transcript` reads it (`time_match --transcript`).
+
+    Per decision the position it was made in (`Position.to_json`), the two choices as
+    `SideAction.to_choice` writes them, the read's value in side 0's units and the heaviest
+    rows of each side's mixture; per move decision, the port's account of the outcome the
+    game drew (`TimedGame._note_turn`: its trace and where each action's part begins);
+    the position the game stopped at. Nothing here is read back by a game. What the line
+    does not carry is not made up: a turn that paused has the trace up to the pause only.
+    The two reads of a move decision (each seat's ladder stage, value and clock) are the
+    game line's ``moves`` rows, which the reader takes from there by ``decision``.
+    """
+    decisions = []
+    for index, d in enumerate(payload["decisions"]):
+        decisions.append({
+            "kind": d["kind"], "turn": d["turn"], "position": d["position"],
+            "ownChosen": d.get("ownChosen"), "foeChosen": d.get("foeChosen"),
+            "value": d.get("searchValue"), "shown": d.get("shown"),
+            "own": _top_mixture(d["ownActions"], d["ownPolicy"]),
+            "foe": _top_mixture(d["foeActions"], d["foePolicy"]),
+            "events": (played.turn_events or {}).get(index),
+            "reads": {str(s): r for s, r in ((played.read_notes or {}).get(index) or {}).items()},
+        })
+    return {
+        "version": 1,
+        "ownSix": payload["ownSix"], "foeSix": payload["foeSix"],
+        "ownPick": payload["ownPick"], "foePick": payload["foePick"],
+        "ownTeam": payload["ownTeam"], "foeTeam": payload["foeTeam"],
+        "decisions": decisions,
+        "finalPosition": payload.get("finalPosition"),
     }
 
 
