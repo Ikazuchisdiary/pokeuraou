@@ -1383,6 +1383,11 @@ class Agent:
     #: `ladder.LADDERS` or stages joined by ``+``. The answer is the last stage completed.
     #: None: off.
     ladder: str | None = None
+    #: IKA-393: with a ladder, the ladder read where the person's bench is hidden (more than
+    #: one completion) in place of ``ladder``: a stage-fixed match that keeps the cost of the
+    #: hidden reads down (they cost ~3.4x an open read at the same stage). The stages differ
+    #: only where the bench is open. None: ``ladder`` everywhere.
+    hidden_ladder: str | None = None
     #: The selection read deeper than the value function's one estimate of each cell
     #: (`selection_deep`, IKA-392): a reading spec (``default``, or ``stage=..,rects=8-16,..``)
     #: for the solve `play` makes when it is not handed one, over ``selection_seconds`` of wall
@@ -1412,6 +1417,8 @@ class Agent:
             from .ladder import LADDER_COSTS, parse_ladder
 
             parse_ladder(self.ladder)
+            if self.hidden_ladder is not None:
+                parse_ladder(self.hidden_ladder)
             if self.depth2_auto or self.depth > 1 or self.width_only or self.ponder:
                 raise ValueError("a ladder is the move's whole reading after the width rule: "
                                  "not with depth2_auto, depth, width_only or ponder (IKA-367)")
@@ -1428,6 +1435,14 @@ class Agent:
     @property
     def leaf(self) -> LeafEvaluator:
         return self.evaluate if self.evaluate is not None else self.objective.batch
+
+
+def ladder_spec_for(agent: Any, classes: int) -> str:  # noqa: ANN401 - an Agent
+    """The ladder a read uses: ``hidden_ladder`` where the person's bench is hidden (more than
+    one completion), else ``ladder`` (IKA-393)."""
+    if agent.hidden_ladder is not None and classes > 1:
+        return agent.hidden_ladder
+    return agent.ladder
 
 
 def legal_count(reg: Regulation, pos: Position, side: int) -> int:
@@ -2065,7 +2080,8 @@ class HumanGame:
             # (its prediction on the count clock; on the wall clock the time from the move's
             # start, the depth-1 node the ladder builds included: IKA-364).
             ladder = {
-                "stages": parse_ladder(agent.ladder), "budget_ms": plan.budget_ms,
+                "stages": parse_ladder(ladder_spec_for(agent, classes)),
+                "budget_ms": plan.budget_ms,
                 "clock": agent.clock, "cost": LADDER_COSTS.get((agent.form, agent.cores)),
                 **({"start_ms": node_ms} if agent.clock == "count"
                    else {"start_ms": 0.0, "began": started}),
