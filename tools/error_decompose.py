@@ -348,6 +348,181 @@ def open_set(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912, PLR0915 
     print(text)
 
 
+def _bayes(mats: list[np.ndarray], w: np.ndarray):  # noqa: ANN202 - the solved Bayesian game
+    return solve_bayesian(mats, w)
+
+
+def cross(args: argparse.Namespace) -> None:
+    """E1 (IKA-394): the answer of one evaluation model's depth-2 game scored in another's.
+    ``--model LABEL REFNAME``: SET/ref-REFNAME holds that model's game on the same rows and
+    columns (`position_set.py reference --menus-from`). A's answer is A's own game's
+    equilibrium (Bayesian on a hidden position); the loss is B's game value minus what A's
+    mixture guarantees in B's game. A = B is the control (0)."""
+    labels = [m[0] for m in args.model]
+    table: dict[tuple[str, str], list[float]] = {}
+    per: dict[int, dict] = {}
+    for n in range(10**6):
+        games = {}
+        for label, ref in args.model:
+            path = Path(args.set) / f"ref-{ref}" / f"{n}.npz"
+            if path.exists():
+                d = np.load(path)
+                d2 = np.asarray(d["d2"], dtype=np.float64)
+                w = np.asarray(d["weights"], dtype=np.float64) if "weights" in d.files else None
+                games[label] = ([d2] if d2.ndim == 2 else [d2[k] for k in range(len(d2))],
+                                np.ones(1) if w is None else w / w.sum())
+        if n > 400 and not games:
+            break
+        if len(games) != len(labels):
+            continue
+        answers = {a: _value(*games[a])[1] for a in labels}
+        values = {b: _value(*games[b])[0] for b in labels}
+        row = {}
+        for a in labels:
+            for b in labels:
+                loss = values[b] - _guarantee(answers[a], *games[b])
+                table.setdefault((a, b), []).append(loss)
+                row[f"{a}->{b}"] = loss
+        per[n] = row
+        off = {k: round(v, 4) for k, v in row.items() if k.split("->")[0] != k.split("->")[1]}
+        print(f"cross {n}: {json.dumps(off)}", file=sys.stderr, flush=True)
+    lines = [f"CROSS {args.set}: {len(per)} positions; loss of A's answer (row) in B's game (column)"]
+    for a in labels:
+        for b in labels:
+            lines.append(_row(f"{a} -> {b}", table[a, b]))
+    turns = json.loads((Path(args.set) / "positions.json").read_bytes())["positions"]
+    for grp in ("turn2-3", "turn4-5", "turn6+"):
+        ns = [n for n in per if _turn_group(turns[n].get("turn", 0)) == grp]
+        if ns:
+            lines.append(f"[{grp}: {len(ns)} positions] mean loss of A's answer in B's game")
+            for a in labels:
+                lines.append("  " + f"{a:<12}" + "  ".join(
+                    f"{b}: {np.mean([per[n][f'{a}->{b}'] for n in ns]):.4f}" for b in labels))
+    text = "\n".join(lines) + "\n"
+    Path(args.out).mkdir(parents=True, exist_ok=True)
+    (Path(args.out) / f"cross-{args.tag}.txt").write_bytes(text.encode("utf-8"))
+    _write(Path(args.out) / f"cross-{args.tag}.json", per)
+    print(text)
+
+
+def hidden_deep(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912, PLR0915 - one pass
+    """E2 (IKA-394): hidden positions with a ladder reference read to depth 3 (``ref-<NAME>`` and
+    its stages ``ref-<NAME>@<i>``, from ``position_set.py ladder-ref``): the answers of depth 2
+    (r24), of each stage, and of the older ``ref-deep`` scored in the last stage's game;
+    and (e) a few cells' depth-3 values put into the depth-2 matrices."""
+    set_dir = Path(args.set)
+    rng = np.random.default_rng(args.seed)
+    data = json.loads((set_dir / "positions.json").read_bytes())
+    rows = []
+    for n, entry in enumerate(data["positions"]):
+        final_path = set_dir / f"ref-{args.name}" / f"{n}.npz"
+        parts_path = set_dir / f"ref-{args.name}" / "parts" / f"{n}.json"
+        if not final_path.exists() or not parts_path.exists():
+            continue
+        r24 = np.load(set_dir / "ref-r24" / f"{n}.npz")
+        w = np.asarray(r24["weights"], dtype=np.float64)
+        w = w / w.sum()
+        k_all = len(w)
+        shallow = [np.asarray(r24["d2"], dtype=np.float64)[k] for k in range(k_all)]
+        final = [np.asarray(np.load(final_path)["d2"], dtype=np.float64)[k] for k in range(k_all)]
+        best = _bayes(final, w)
+        rec = {"n": n, "turn": entry["turn"], "K": k_all, "V": float(best.value)}
+        rungs = json.loads(parts_path.read_bytes())["rungs"]
+        answers = {"r24 (depth 2)": _bayes(shallow, w).row_strategy}
+        for i, g in enumerate(rungs):
+            answers[f"stage {i + 1}: {g['stage']}"] = np.asarray(g["x"], dtype=np.float64)
+        deep_path = set_dir / "ref-deep" / f"{n}.npz"
+        deep = None
+        if deep_path.exists():
+            deep = [np.asarray(np.load(deep_path)["d2"], dtype=np.float64)[k] for k in range(k_all)]
+            answers["old deep (8x8 depth 3)"] = _bayes(deep, w).row_strategy
+        rec["loss"] = {k: float(best.value) - _guarantee(x, final, w) for k, x in answers.items()}
+        if deep is not None:
+            vd = float(_bayes(deep, w).value)
+            rec["lossInDeep"] = {k: vd - _guarantee(x, deep, w) for k, x in answers.items()}
+        # (e) the depth-3 values of a few cells, in the depth-2 matrices.
+        eq0 = _bayes(shallow, w)
+        x0 = eq0.row_strategy
+        diffs = [np.abs(final[k] - shallow[k]) > 1e-9 for k in range(k_all)]
+        total = int(sum(d.sum() for d in diffs))
+        row_ev = sum(w[k] * (shallow[k] @ eq0.col_strategies[k]) for k in range(k_all))
+        values = [float(x0 @ shallow[k] @ eq0.col_strategies[k]) for k in range(k_all)]
+        e = {"cells": total, "none": rec["loss"]["r24 (depth 2)"]}
+
+        def solved_loss(masks: list[np.ndarray], shallow=shallow, final=final, w=w,
+                        best=best) -> float:
+            mixed = [np.where(m, f, s) for m, f, s in zip(masks, final, shallow, strict=True)]
+            xm = _bayes(mixed, w).row_strategy
+            return float(best.value) - _guarantee(xm, final, w)
+
+        for k in args.rect:
+            rr = _rectangle(x0, row_ev, k, larger=True)
+            masks = []
+            for j in range(k_all):
+                col_ev = x0 @ shallow[j]
+                cc = _rectangle(eq0.col_strategies[j], col_ev, k, larger=False)
+                m = np.zeros_like(diffs[j])
+                m[np.ix_(rr, cc)] = True
+                masks.append(m & diffs[j])
+            count = int(sum(m.sum() for m in masks))
+            if count == 0:
+                e[f"rect{k}"] = {"cells": 0, "loss": e["none"], "near": e["none"],
+                                 "random": e["none"]}
+                continue
+            cells = [(j, i, c) for j in range(k_all) for i, c in np.argwhere(diffs[j])]
+            order = sorted(cells, key=lambda t: abs(shallow[t[0]][t[1], t[2]] - values[t[0]]))
+            near = [np.zeros_like(d) for d in diffs]
+            for j, i, c in order[:count]:
+                near[j][i, c] = True
+            rnd = []
+            for _ in range(args.draws):
+                pick = rng.choice(len(cells), size=min(count, len(cells)), replace=False)
+                mk = [np.zeros_like(d) for d in diffs]
+                for t in pick:
+                    j, i, c = cells[t]
+                    mk[j][i, c] = True
+                rnd.append(solved_loss(mk))
+            e[f"rect{k}"] = {"cells": count, "loss": solved_loss(masks),
+                             "near": solved_loss(near), "random": float(np.mean(rnd))}
+        e["all"] = solved_loss(diffs)
+        rec["e"] = e
+        rows.append(rec)
+        shown = {a: round(b, 4) for a, b in rec["loss"].items()}
+        print(f"hidden-deep {n}: K={k_all} loss {json.dumps(shown)}", file=sys.stderr, flush=True)
+    _write(Path(args.out) / f"hidden-deep-{args.name}.json", rows)
+    lines = [f"HIDDEN DEEP {set_dir} ref-{args.name}: {len(rows)} positions "
+             f"(K: {[r['K'] for r in rows]}, turns {[r['turn'] for r in rows]})",
+             "loss of each answer in the last stage's Bayesian game (depth 3 of the ladder)"]
+    keys = list(rows[0]["loss"])
+    for key in keys:
+        lines.append(_row(key, [r["loss"][key] for r in rows if key in r["loss"]]))
+    lines.append("loss of each answer in the old deep reference (the reference the earlier records used)")
+    sel = [r for r in rows if "lossInDeep" in r]
+    for key in keys:
+        v = [r["lossInDeep"][key] for r in sel if key in r["lossInDeep"]]
+        if v:
+            lines.append(_row(key, v))
+    lines.append("(e) a few cells' depth-3 values in the depth-2 matrices (loss in the last stage's game)")
+    lines.append(_row("no cell (the depth-2 answer)", [r["e"]["none"] for r in rows]))
+    for k in args.rect:
+        sel = [r for r in rows if f"rect{k}" in r["e"] and r["e"][f"rect{k}"]["cells"] > 0]
+        if not sel:
+            continue
+        lines.append(f"  -- rectangle {k}x{k}: {np.mean([r['e'][f'rect{k}']['cells'] for r in sel]):.1f} "
+                     f"cells (over all completions) on average of {len(sel)} positions")
+        for label, key in (("the rectangle's cells", "loss"), ("same count, nearest the value", "near"),
+                           ("same count, at random", "random")):
+            lines.append(_row(f"     {label}", [r["e"][f"rect{k}"][key] for r in sel]))
+    lines.append(_row("all differing cells (control: must be 0)", [r["e"]["all"] for r in rows]))
+    lines.append("per position (n turn K cells | depth-2 loss | stage losses):")
+    for r in rows:
+        lines.append(f"  {r['n']} t{r['turn']} K{r['K']} cells {r['e']['cells']} | "
+                     + " ".join(f"{v:.4f}" for v in r["loss"].values()))
+    text = "\n".join(lines) + "\n"
+    (Path(args.out) / f"hidden-deep-{args.name}.txt").write_bytes(text.encode("utf-8"))
+    print(text)
+
+
 def calib(args: argparse.Namespace) -> None:  # noqa: C901, PLR0915 - one pass over the games
     """The evaluation model against the recorded results (IKA-394): for the move decisions of
     recorded games, the model's win probability of the position (side 0) and the recorded
@@ -460,6 +635,18 @@ def main(argv: list[str] | None = None) -> None:
     o.add_argument("--seed", type=int, default=39401)
     o.add_argument("--rect", type=int, nargs="+", default=[2, 3, 4, 6, 8])
     o.add_argument("--draws", type=int, default=20)
+    cr = sub.add_parser("cross")
+    cr.add_argument("--set", type=Path, required=True)
+    cr.add_argument("--out", type=Path, required=True)
+    cr.add_argument("--tag", required=True)
+    cr.add_argument("--model", nargs=2, action="append", required=True, metavar=("LABEL", "REF"))
+    hd = sub.add_parser("hidden-deep")
+    hd.add_argument("--set", type=Path, required=True)
+    hd.add_argument("--name", required=True)
+    hd.add_argument("--out", type=Path, required=True)
+    hd.add_argument("--seed", type=int, default=39402)
+    hd.add_argument("--rect", type=int, nargs="+", default=[2, 3, 4, 6])
+    hd.add_argument("--draws", type=int, default=10)
     c = sub.add_parser("calib")
     c.add_argument("--games", type=Path, required=True)
     c.add_argument("--out", type=Path, required=True)
@@ -469,7 +656,8 @@ def main(argv: list[str] | None = None) -> None:
     c.add_argument("--device", default=None)
     c.add_argument("--model", nargs=2, action="append", default=[], metavar=("LABEL", "PATH,PATH"))
     args = ap.parse_args(argv)
-    {"hidden": hidden, "open": open_set, "calib": calib}[args.cmd](args)
+    {"hidden": hidden, "open": open_set, "calib": calib,
+     "hidden-deep": hidden_deep, "cross": cross}[args.cmd](args)
 
 
 if __name__ == "__main__":
