@@ -41,6 +41,10 @@ order; each piece's ``logs`` and ``workers.json`` are kept as ``logs.<n>``, ``wo
 
 Output in ``--out``: ``settings.json`` (everything that decides the games, written before
 the first; ``chunks`` lists the pieces), ``games-worker<k>.jsonl`` (`timematch.game_line`),
+``transcripts-worker<k>.jsonl`` with ``--transcript`` (one line a game: the game's identity and
+reads, and its account for a reader, `timematch.transcript_of`; the games files are the same with or
+without it; ``tools/show_game.py --transcript FILE --pair P --which G --out game.html`` shows a game
+as one page in Japanese),
 ``logs/`` (each process echoes its settings at its start), ``sprt.json`` with ``--sprt``,
 ``summary.json`` at the end (the Elo with its interval, and per condition the seconds against the budget, the
 width, the cells and the deepening's steps and depth).
@@ -114,6 +118,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--count-fill", action="store_true",
                     help="IKA-384: a count-clock ladder in ladder.FILLS (L6) fills its budget as "
                     "it does on the wall clock (ladder.COUNT_FILL). Default: off")
+    ap.add_argument("--transcript", action="store_true",
+                    help="also write each game's account for a reader to transcripts-worker<k>.jsonl "
+                    "(the positions, both sides' choices, the port's account of each turn, the "
+                    "reads; `tools/show_game.py --transcript` shows it). The games, their lines "
+                    "and the games files are the same with it on. Default: off")
     ap.add_argument("--cpu-workers", type=int, default=0,
                     help="the last N of the --parallel processes score the leaf and the Q on the "
                     "CPU (node-time runs: more games at once than the card holds; each game is "
@@ -244,6 +253,7 @@ def settings(args: argparse.Namespace, tested, other, values, q_path) -> dict:  
         **({"adjudicate": [int(args.adjudicate[0]), args.adjudicate[1]]}
            if args.adjudicate is not None else {}),
         **({"countFill": True} if args.count_fill else {}),
+        **({"transcript": True} if args.transcript else {}),
     }
 
 
@@ -311,6 +321,7 @@ def worker(args: argparse.Namespace) -> None:
         max_turns=args.max_turns, halt=halt,
         adjudication=None if args.adjudicate is None
         else (int(args.adjudicate[0]), float(args.adjudicate[1])),
+        transcript=args.transcript,
     )
     # The echo: what this process plays, as it resolved it (read this, not the command).
     print(
@@ -333,6 +344,7 @@ def worker(args: argparse.Namespace) -> None:
             _k, a, b = draw_pair(np.random.default_rng([args.seed, pair]), pool.pairs)
             teams = (pool.teams[a], pool.teams[b])
             lines = timematch.play_pair(match, pair, teams)
+            accounts = [line.pop("transcript") for line in lines] if args.transcript else []
             alive = deepen.workers_alive(reg)
             peak = watch.peak
             for line in lines:
@@ -346,6 +358,18 @@ def worker(args: argparse.Namespace) -> None:
             with out.open("ab") as handle:
                 for line in lines:
                     handle.write((json.dumps(line, ensure_ascii=False) + "\n").encode("utf-8"))
+            if accounts:
+                # The same identity as the game's line, and its reads; then the account.
+                with (args.out / f"transcripts-worker{args.worker}.jsonl").open("ab") as handle:
+                    for line, account in zip(lines, accounts, strict=True):
+                        head = {k: line[k] for k in (
+                            "pair", "game", "seed", "teams", "picks", "conditions", "testedSide",
+                            "outcome", "turns", "endReason", "moves", "others",
+                        )}
+                        if "adjudicated" in line:
+                            head["adjudicated"] = line["adjudicated"]
+                        handle.write((json.dumps({**head, "transcript": account},
+                                                 ensure_ascii=False) + "\n").encode("utf-8"))
             if alive < started_workers:
                 raise SystemExit(
                     f"a deepening worker died during pair {pair} ({alive} of {started_workers} "

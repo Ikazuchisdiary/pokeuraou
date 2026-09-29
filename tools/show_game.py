@@ -196,6 +196,8 @@ def name_action(
 
 
 SLOT_LABELS = ("自1", "自2", "敵1", "敵2")
+#: How a side-wide line (a screen going up) names the side; `game_page` names them 席 0/席 1.
+SIDE_LABELS = ("自", "敵")
 #: The resolver writes these after "->" for a status, where a forme change writes a species.
 STATUSES = frozenset({"brn", "psn", "tox", "par", "slp", "frz", "fnt"})
 
@@ -341,7 +343,7 @@ def translate_event(loc: Localiser, line: str, occupants: dict[str, str]) -> str
                 f" → 現在 {rest[3]}{caused}"
             )
     elif code in ("p1", "p2"):
-        head = "自" if code == "p1" else "敵"
+        head = SIDE_LABELS[0 if code == "p1" else 1]
     else:
         head = code
 
@@ -991,6 +993,37 @@ def render(
     return out.getvalue()
 
 
+def transcript_page(args: argparse.Namespace) -> None:
+    """``--transcript``: one game of a time match's transcripts as an HTML page."""
+    import game_page
+
+    # A run's directory (its transcripts-worker*.jsonl, in worker order) or one file.
+    files = (
+        sorted(args.transcript.glob("transcripts-worker*.jsonl"))
+        if args.transcript.is_dir()
+        else [args.transcript]
+    )
+    lines = [json.loads(raw) for path in files for raw in path.read_bytes().splitlines() if raw.strip()]
+    if args.pair is not None:
+        found = [ln for ln in lines if ln["pair"] == args.pair and ln["game"] == args.which]
+        if not found:
+            raise SystemExit(f"{args.transcript} has no pair {args.pair} game {args.which}")
+        line = found[0]
+    elif args.game < len(lines):
+        line = lines[args.game]
+    else:
+        raise SystemExit(f"{args.transcript} has {len(lines)} games, not {args.game + 1}")
+    reg = load_regulation(line["transcript"]["decisions"][0]["position"]["format"])
+    from pokeuraou.damage import register_mega_stones
+
+    register_mega_stones(reg)
+    loc = Localiser(reg, load_names(args.locale))
+    out = args.out if args.out != Path("game.txt") else Path("game.html")
+    page = game_page.render_html(reg, loc, line, embed=args.embed_sprites, open_mix=args.open_mixtures)
+    out.write_bytes(page.encode("utf-8"))
+    print(f"{args.transcript.name} pair {line['pair']} game {line['game']} -> {out} ({len(page):,} chars)")
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--dir", type=Path, default=Path("data/selfplay-gen2"))
@@ -1004,7 +1037,23 @@ def main() -> None:
         help="who re-resolves the turns for \"起きたこと\": the port (IKA-215); Python's resolver "
         "was the other choice until IKA-212 deleted it",
     )
+    ap.add_argument(
+        "--transcript", type=Path, default=None,
+        help="a time match's transcripts-worker<k>.jsonl (`time_match --transcript`): one game "
+        "of it as a single HTML page (--game is the line, or --pair and --which); --out is the "
+        "page (default game.html)",
+    )
+    ap.add_argument("--pair", type=int, default=None, help="with --transcript: the pair")
+    ap.add_argument("--which", type=int, default=0, help="with --transcript and --pair: game 0 or 1")
+    ap.add_argument("--open-mixtures", action="store_true",
+                    help="with --transcript: write each turn's mixtures open (for a screenshot)")
+    ap.add_argument("--embed-sprites", action="store_true",
+                    help="with --transcript: fetch the icons now and write them into the page")
     args = ap.parse_args()
+
+    if args.transcript is not None:
+        transcript_page(args)
+        return
 
     path = args.file or sorted(args.dir.glob("*.jsonl"))[0]
     with path.open(encoding="utf-8") as handle:
