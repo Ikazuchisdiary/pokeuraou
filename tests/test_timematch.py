@@ -455,6 +455,33 @@ def test_the_pages_rank_is_among_the_moves_played_not_the_menu() -> None:
     assert game_page.place_text({"sup": None, "chosenP": 0.3, "chosenRank": 2}) == "（2 位）"
 
 
+def test_the_page_says_which_field_moves_fail(pool, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-395's verdicts are shown as small marks on the move in a seat's row and in the tables
+    (the candidates are not changed): every grade has words, and a verdict reaches the page --
+    with none reported, the page has no such mark (the control)."""
+    from ._harness import load_tool
+
+    show_game = load_tool("show_game")
+    import game_page
+
+    from pokeuraou import narrow
+
+    assert set(game_page.DEAD_TEXT) == {
+        narrow.DEAD, narrow.DEAD_BUT_CHANGEABLE, narrow.DEAD_BUT_DODGES_SUCKER_PUNCH,
+        narrow.DEAD_BUT_FEEDS_STOMPING_TANTRUM, narrow.DEAD_IF_FIRST_ACTS,
+    }
+    _plain, on, _m, _t = _played_with_transcript(pool)
+    loc = show_game.Localiser(pool.reg, show_game.load_names("ja"))
+    clean = game_page.render_html(pool.reg, loc, on[0])
+    assert 'class="tag dead"' not in clean
+    monkeypatch.setattr(narrow, "dead_field_moves", lambda reg, pos, side, action: [narrow.DEAD, None])
+    game_page._ACTIONS.clear()
+    marked = game_page.render_html(pool.reg, loc, on[0])
+    assert marked.count('class="tag dead"') > 0 and "失敗が決まっている" in marked
+    assert "失敗の札の意味" in marked and "失敗の札の意味" not in clean
+    game_page._ACTIONS.clear()
+
+
 def _action(index: int, target: int | None = None):  # noqa: ANN202
     from pokeuraou.actions import MoveAction, SideAction
 

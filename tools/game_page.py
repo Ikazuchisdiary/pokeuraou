@@ -32,7 +32,8 @@ from typing import Any
 
 import show_game
 
-from pokeuraou import timematch
+from pokeuraou import narrow, timematch
+from pokeuraou.actions import side_actions
 from pokeuraou.hpdisplay import displayed_percent, uses_floor_display
 from pokeuraou.humanplay import sprite_id
 from pokeuraou.names import Localiser
@@ -271,23 +272,61 @@ def board(
 # ----------------------------------------------------------------------------- the choices
 
 
+#: What a field move that is sure to fail is called (`narrow.dead_field_move`, IKA-395): the
+#: candidate sets are unchanged, the page only says so.
+DEAD_TEXT = {
+    narrow.DEAD: "失敗が決まっている",
+    narrow.DEAD_BUT_DODGES_SUCKER_PUNCH: "失敗するがふいうちは外す",
+    narrow.DEAD_BUT_FEEDS_STOMPING_TANTRUM: "失敗するがじだんだを強める",
+    narrow.DEAD_BUT_CHANGEABLE: "先に場が消えれば成功",
+    narrow.DEAD_IF_FIRST_ACTS: "味方が先に張れば失敗",
+}
+_ACTIONS: dict[tuple[int, int], dict[str, Any]] = {}
+
+
+def dead_labels(reg: Regulation, position: dict[str, Any], side: int, choice: str) -> list[str | None]:
+    """Per slot of a choice: the words for a field move that fails, or None. The legal actions of
+    the position are listed once (the choice string finds its `SideAction`)."""
+    key = (id(position), side)
+    if key not in _ACTIONS:
+        parsed = Position.from_json(position)
+        _ACTIONS[key] = {
+            "pos": parsed,
+            "by": {a.to_choice(): a for a in side_actions(reg, parsed, side)},
+        }
+    got = _ACTIONS[key]
+    action = got["by"].get(choice)
+    if action is None:
+        return []
+    try:
+        verdicts = narrow.dead_field_moves(reg, got["pos"], side, action)
+    except Exception:  # noqa: BLE001 - a note must not stop a page
+        return []
+    return [DEAD_TEXT.get(v) if v else None for v in verdicts]
+
+
 def hands(
     reg: Regulation, loc: Localiser, position: dict[str, Any], choices: list[str | None]
-) -> list[list[str | None]]:
+) -> list[list[dict[str, Any] | None]]:
     """Each side's choice as the words for each active slot (None: nothing to do there), from the
-    position it was made in."""
+    position it was made in, and for a field move that fails, why (`dead_labels`)."""
     parsed = Position.from_json(position)
-    out: list[list[str | None]] = []
+    out: list[list[dict[str, Any] | None]] = []
     for side, choice in enumerate(choices):
         if not choice:
             out.append([])
             continue
         text = show_game.name_action(reg, loc, position["sides"], side, choice, parsed)
-        row: list[str | None] = []
-        for part in text.split(" ｜ "):
+        dead = dead_labels(reg, position, side, choice)
+        row: list[dict[str, Any] | None] = []
+        for slot, part in enumerate(text.split(" ｜ ")):
             _who, _, what = part.partition(": ")
             what = what.replace("→ 敵", "→ 相手の").replace("→ 味方", "→ 味方の")
-            row.append(None if what == "行動なし" else what)
+            row.append(
+                None
+                if what == "行動なし"
+                else {"text": what, "dead": dead[slot] if slot < len(dead) else None}
+            )
         out.append(row)
     return out
 
@@ -546,6 +585,7 @@ def pair_of(
     parsed = Position.from_json(position)
     text = show_game.name_action(reg, loc, position["sides"], side, choice, parsed)
     slots = position["sides"][side]["active"]
+    dead = dead_labels(reg, position, side, choice)
     out = []
     for slot, part in enumerate(text.split(" ｜ ")):
         who, _, what = part.partition(": ")
@@ -555,7 +595,14 @@ def pair_of(
             what = re.sub(r" → .*?( \+ メガ)?$", r"\1", what)
         party = slots[slot] if slot < len(slots) else None
         species = position["sides"][side]["pokemon"][party]["species"] if party is not None else ""
-        out.append({"species": species, "name": loc.species(species) if species else who, "text": what})
+        out.append(
+            {
+                "species": species,
+                "name": loc.species(species) if species else who,
+                "text": what,
+                "dead": dead[slot] if slot < len(dead) else None,
+            }
+        )
     return out
 
 
@@ -863,6 +910,7 @@ h2{font-size:15px;margin:28px 0 8px;color:var(--dim);font-weight:600;letter-spac
 .rng .band{position:absolute;top:0;height:8px;border-radius:4px;background:var(--faint)}
 .rng .band.s0{background:var(--s0)}.rng .band.s1{background:var(--s1)}
 .rng .pt{position:absolute;top:-3px;width:14px;height:14px;margin-left:-7px;border-radius:50%;background:var(--surface);border:3px solid var(--ink)}
+.tag.dead{color:var(--warn);border-color:var(--warn);font-size:11px;white-space:normal}
 .eqt{margin-top:4px}.eqt .tag{font-size:12px;white-space:normal;border-radius:10px}.eqt .tag.off{color:var(--faint)}
 .tag.lb{margin-right:6px;font-size:11px;white-space:nowrap}
 .gq{color:var(--good);font-size:11px}
@@ -911,7 +959,9 @@ th{color:var(--dim);font-weight:600;font-size:12px}
 .ic.sm,.ph.sm{width:32px;height:32px}.mons{grid-template-columns:1fr}.mons .mon+.mon{margin-top:10px;padding-top:8px;border-top:1px solid var(--line)}
 .sx{font-size:10px}.sx .ic,.sx .ph{width:48px;height:48px;max-width:none;aspect-ratio:auto}
 .chart .desk{display:none}.chart .mob{display:block}.chart .mob text{font-size:12px}.chart .mob .lab{font-size:13px}
-.wb .split{left:0;top:26px}}
+.wb .split{left:0;top:26px}.wb.hs{margin-bottom:26px}}
+.mnote{font-size:12px;margin:0}
+.dl-legend{list-style:none;margin:0 0 6px;padding:0;font-size:13px}.dl-legend li{margin:4px 0}
 """
 
 
@@ -919,7 +969,7 @@ def _hp_class(pct: int) -> str:
     return "" if pct > 50 else "mid" if pct > 20 else "low"
 
 
-def _mon_html(mon: dict[str, Any] | None, sprites: Sprites, hand: str | None = None) -> str:
+def _mon_html(mon: dict[str, Any] | None, sprites: Sprites, hand: dict[str, Any] | None = None) -> str:
     if mon is None:
         return '<div class="mon"><span class="dim">（空き）</span></div>'
     delta = ""
@@ -940,7 +990,14 @@ def _mon_html(mon: dict[str, Any] | None, sprites: Sprites, hand: str | None = N
     )
     text = "" if mon["fainted"] else f'{mon["pct"]}% <small class="n">{mon["hp"][0]}/{mon["hp"][1]}</small>'
     name = name_html(mon["name"]) + (" ひんし" if mon["fainted"] else "")
-    move = f'<div class="mv">{esc(hand)}</div>' if hand else ""
+    move = ""
+    if hand:
+        mark = (
+            f' <span class="tag dead" title="{esc(dead_meaning(hand["dead"]))}">{esc(hand["dead"])}</span>'
+            if hand.get("dead")
+            else ""
+        )
+        move = f'<div class="mv">{esc(hand["text"])}{mark}</div>'
     return (
         f'<div class="mon {state}">{sprites.img(mon["species"], mon["name"])}'
         f'<div class="mi"><div class="nm">{name}</div>{hp}'
@@ -952,7 +1009,7 @@ def _side_html(
     side: int,
     view: dict[str, Any],
     sprites: Sprites,
-    hands: list[str | None] | None = None,
+    hands: list[dict[str, Any] | None] | None = None,
     tag: str = "",
 ) -> str:
     bench = ""
@@ -1021,7 +1078,7 @@ def _bar_html(turn: dict[str, Any]) -> str:
             marks += f'<span class="gap" style="left:{lo * 100:.1f}%;width:{(hi - lo) * 100:.1f}%"></span>'
             split = f'<span class="split">読みが割れた（{abs(a - b) * 100:.0f}pt）</span>'
     return (
-        f'<div class="wb"><div class="bar"><i class="b0" style="width:{value * 100:.1f}%"></i>'
+        f'<div class="wb{" hs" if split else ""}"><div class="bar"><i class="b0" style="width:{value * 100:.1f}%"></i>'
         f'<i class="b1" style="width:{(1 - value) * 100:.1f}%"></i></div>{marks}{split}</div>'
     )
 
@@ -1121,7 +1178,13 @@ def _pair_html(pair: list[dict[str, str]], side: int, sprites: Sprites) -> str:
     """A move of one seat as its Pokemon's lines: icon, name, the move."""
     lines = "".join(
         f'<div class="pr">{sprites.img(p["species"], p["name"], f"ic xs f{side}") if p["species"] else ""}'
-        f'<span class="pt"><span class="wn">{name_html(p["name"])}</span> <span class="pm">{esc(p["text"])}</span></span></div>'
+        f'<span class="pt"><span class="wn">{name_html(p["name"])}</span> <span class="pm">{esc(p["text"])}</span>'
+        + (
+            f' <span class="tag dead" title="{esc(dead_meaning(p["dead"]))}">{esc(p["dead"])}</span>'
+            if p.get("dead")
+            else ""
+        )
+        + "</span></div>"
         for p in pair
     )
     return lines or '<div class="pr dim">行動なし</div>'
@@ -1300,13 +1363,19 @@ def _mix_html(t: dict[str, Any], sprites: Sprites) -> str:
         return ""
     lines = "".join(_mix_line(mix[s], s) for s in (0, 1))
     seats = "".join(_mix_seat(mix[s], s, sprites) for s in (0, 1))
+    # The words of "worst" and "best" only where a table of replies stands under them.
+    has_values = any(m and (m.get("worst") or m.get("best")) for m in mix)
+    note = (
+        '<p class="dim mnote">辛い＝相手の全ての手の中で、選んだ手に一番辛い手。有利＝相手が均衡の中で打つ手のうち、'
+        "選んだ手に一番有利な手。値は相手が裏によらず同じ手を打つときの期待値で、深く読んでいない手は浅い読みのまま。</p>"
+        if has_values
+        else ""
+    )
     return (
         f'<details class="mix"{" open" if sprites.open_mix else ""}><summary>'
         '<span class="mh">この手番の読み <small>両席の均衡と、相手の読みの中の値。真の強さではありません</small></span>'
         f"{lines}</summary>"
-        f'<div class="mbody"><p class="dim mnote">辛い＝相手の全ての手の中で、選んだ手に一番辛い手。有利＝相手が均衡の中で打つ手のうち、'
-        "選んだ手に一番有利な手。値は相手が裏によらず同じ手を打つときの期待値で、深く読んでいない手は浅い読みのまま。</p>"
-        f"{seats}</div></details>"
+        f'<div class="mbody">{note}{seats}</div></details>'
     )
 
 
@@ -1485,6 +1554,38 @@ def _table(model: dict[str, Any]) -> str:
     return f"<table><tr><th>ターン</th><th>席 0 から見た勝率</th><th>前のターンとの差</th></tr>{rows}</table>"
 
 
+#: What each mark on a field move that fails means (the words the marks carry, one line each).
+DEAD_MEANING = {
+    narrow.DEAD: "すでに張ってある場を張り直す技で、失敗する（失敗を変える事情は見つからない）。",
+    narrow.DEAD_BUT_DODGES_SUCKER_PUNCH: "失敗するが、相手のふいうちは変化技を選んだ相手に当たらないので、外す意味が残る。",
+    narrow.DEAD_BUT_FEEDS_STOMPING_TANTRUM: "失敗するが、味方のじだんだ・テンパーフレア・メトロノームの威力を上げる。",
+    narrow.DEAD_BUT_CHANGEABLE: "場を消す・変える技（かわらわり等）を相手が先に出せば、張り直しが成功する。",
+    narrow.DEAD_IF_FIRST_ACTS: "同じターンの 2 体目の手。1 体目が止まらなければ失敗する（保険の組）。",
+}
+
+
+def dead_meaning(label: str) -> str:
+    """The meaning of a mark's words (its hover text), from `DEAD_MEANING`."""
+    for key, words in DEAD_TEXT.items():
+        if words == label:
+            return f"{label}: {DEAD_MEANING[key]}"
+    return label
+
+
+def _dead_legend(turns_html: str) -> str:
+    """The legend of the marks, when the page has any (each mark's words with its meaning)."""
+    used = [k for k, words in DEAD_TEXT.items() if f">{esc(words)}<" in turns_html]
+    if not used:
+        return ""
+    items = "".join(
+        f'<li><span class="tag dead">{esc(DEAD_TEXT[k])}</span> {esc(DEAD_MEANING[k])}</li>' for k in used
+    )
+    return (
+        '<h2>失敗の札の意味</h2><ul class="dl-legend">'
+        f'{items}</ul><p class="legend">候補には残してある（読みは変えていない）。札は局面から見た注記。</p>'
+    )
+
+
 def render_html(
     reg: Regulation, loc: Localiser, line: dict[str, Any], *, embed: bool = False, open_mix: bool = False
 ) -> str:
@@ -1551,5 +1652,6 @@ def render_html(
         f"「均衡で打つ手」は、混合の確率が {SUPPORT_MIN * 100:g}% 以上の手（サポート）。"
         f"「候補」は行列に載せた手の数で、そのほとんどは確率がほぼ 0 の手。</p>{turns}{last}{final}"
         f"<h2>勝率の表</h2>{_table(model)}"
+        f"{_dead_legend(turns)}"
         "</main></body></html>\n"
     )
