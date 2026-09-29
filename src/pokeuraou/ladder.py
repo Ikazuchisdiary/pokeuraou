@@ -225,10 +225,22 @@ class Ladder(tuple):
 
 
 def parse_ladder(spec: str) -> tuple[Stage, ...]:
-    """A named ladder (`LADDERS`) or stages joined by ``+``."""
+    """A named ladder (`LADDERS`) or stages joined by ``+``. ``<name>@<n>`` (IKA-393): the
+    first n stages of the named ladder, so a read that stops at a stage rather than a budget
+    (``L6@7`` is the seven stages up to and with depth 2's last; ``L6@0`` is none: the depth-1
+    answer). It never fills a budget, whatever the name."""
+    cut = None
+    if "@" in spec:
+        spec, _, count = spec.partition("@")
+        if spec not in LADDERS or not count.isdigit() or int(count) > len(LADDERS[spec]):
+            raise ValueError(f"<name>@<n> is a named ladder ({', '.join(LADDERS)}) and n at "
+                             f"most its stage count; not {spec}@{count}")
+        cut = int(count)
     labels = LADDERS.get(spec) or tuple(spec.split("+"))
+    if cut is not None:
+        labels = labels[:cut]
     out = Ladder(parse_stage(label) for label in labels)
-    out.fills = spec in FILLS
+    out.fills = spec in FILLS and cut is None
     return out
 
 
@@ -2173,6 +2185,17 @@ class _Pool:
         #: The timeline's chunks out: task -> (worker, sent, cells, call, speculation).
         self._trace_sent: dict[int, tuple] = {}
 
+    def _load(self, worker: int) -> int:
+        """Tasks worker ``worker`` has out, and `POOL_DEPTH` more while it is inside a chunk an
+        earlier read gave up (`_settle`): it has not been sent this read's context (`begin`
+        sends it when that chunk is back), so a chunk sent to it now would be read under the
+        earlier read's rows, menus and table generation. A worker like that is full: a caller
+        that sends while ``_load < POOL_DEPTH`` never sends to it. (Before: the send loop
+        picked the least loaded by this number but stopped on the bare count, so with every
+        worker still in an orphan chunk, the one with a single task out was sent a chunk --
+        a chunk of the new read read under the old context.)"""
+        return len(self._out[worker]) + (POOL_DEPTH if worker in self._orphans else 0)
+
     def _t(self, clock: float) -> float:
         return round((clock - self._trace["t0"]) * 1000.0, 2)
 
@@ -2305,9 +2328,8 @@ class _Pool:
             while taken < len(asks):
                 while True:
                     # A worker still inside a chunk a read gave up is full (`_settle`).
-                    i = min(out, key=lambda k: len(out[k]) + (POOL_DEPTH if k in self._orphans
-                                                               else 0))
-                    if len(out[i]) >= POOL_DEPTH:
+                    i = min(out, key=self._load)
+                    if self._load(i) >= POOL_DEPTH:
                         break
                     clock = time.perf_counter()
                     if at < len(to_send):
@@ -2471,9 +2493,8 @@ class _Pool:
         try:
             while taken < len(asks):
                 while True:
-                    i = min(out, key=lambda k: len(out[k]) + (POOL_DEPTH if k in self._orphans
-                                                               else 0))
-                    if len(out[i]) >= POOL_DEPTH or not (children or expands):
+                    i = min(out, key=self._load)
+                    if self._load(i) >= POOL_DEPTH or not (children or expands):
                         break
                     clock = time.perf_counter()
                     self._tasks += 1
@@ -2782,9 +2803,8 @@ class _Pool:
         try:
             while taken < len(asks):
                 while True:
-                    i = min(out, key=lambda k: len(out[k]) + (POOL_DEPTH if k in self._orphans
-                                                               else 0))
-                    if len(out[i]) >= POOL_DEPTH or not (inner or tops):
+                    i = min(out, key=self._load)
+                    if self._load(i) >= POOL_DEPTH or not (inner or tops):
                         break
                     clock = time.perf_counter()
                     self._tasks += 1

@@ -1383,6 +1383,18 @@ class Agent:
     #: `ladder.LADDERS` or stages joined by ``+``. The answer is the last stage completed.
     #: None: off.
     ladder: str | None = None
+    #: IKA-393: with a ladder, the ladder read where the person's bench is hidden (more than
+    #: one completion) in place of ``ladder``: a stage-fixed match that keeps the cost of the
+    #: hidden reads down (they cost ~3.4x an open read at the same stage). The stages differ
+    #: only where the bench is open. None: ``ladder`` everywhere.
+    hidden_ladder: str | None = None
+    #: The selection read deeper than the value function's one estimate of each cell
+    #: (`selection_deep`, IKA-392): a reading spec (``default``, or ``stage=..,rects=8-16,..``)
+    #: for the solve `play` makes when it is not handed one, over ``selection_seconds`` of wall
+    #: time when that is given (else the stages the spec names). None: the leaf's solve, as
+    #: every game has played.
+    selection_reading: str | None = None
+    selection_seconds: float | None = None
     #: Read on while the person chooses (IKA-344, `PonderCost`): the person is asked when
     #: the move starts, and the move deepens until they have chosen -- its budget first,
     #: `ponder_seconds` at most. False: the agent chooses first, then the person is asked.
@@ -1405,6 +1417,8 @@ class Agent:
             from .ladder import LADDER_COSTS, parse_ladder
 
             parse_ladder(self.ladder)
+            if self.hidden_ladder is not None:
+                parse_ladder(self.hidden_ladder)
             if self.depth2_auto or self.depth > 1 or self.width_only or self.ponder:
                 raise ValueError("a ladder is the move's whole reading after the width rule: "
                                  "not with depth2_auto, depth, width_only or ponder (IKA-367)")
@@ -1421,6 +1435,14 @@ class Agent:
     @property
     def leaf(self) -> LeafEvaluator:
         return self.evaluate if self.evaluate is not None else self.objective.batch
+
+
+def ladder_spec_for(agent: Any, classes: int) -> str:  # noqa: ANN401 - an Agent
+    """The ladder a read uses: ``hidden_ladder`` where the person's bench is hidden (more than
+    one completion), else ``ladder`` (IKA-393)."""
+    if agent.hidden_ladder is not None and classes > 1:
+        return agent.hidden_ladder
+    return agent.ladder
 
 
 def legal_count(reg: Regulation, pos: Position, side: int) -> int:
@@ -2058,7 +2080,8 @@ class HumanGame:
             # (its prediction on the count clock; on the wall clock the time from the move's
             # start, the depth-1 node the ladder builds included: IKA-364).
             ladder = {
-                "stages": parse_ladder(agent.ladder), "budget_ms": plan.budget_ms,
+                "stages": parse_ladder(ladder_spec_for(agent, classes)),
+                "budget_ms": plan.budget_ms,
                 "clock": agent.clock, "cost": LADDER_COSTS.get((agent.form, agent.cores)),
                 **({"start_ms": node_ms} if agent.clock == "count"
                    else {"start_ms": 0.0, "began": started}),
@@ -2390,18 +2413,39 @@ class HumanGame:
 # ----------------------------------------------------------------------------- selection
 
 
-def solve_entry(
-    reg: Regulation, teams: tuple[Roster, Roster], evaluate: LeafEvaluator, model: str
+def solve_entry(  # noqa: PLR0913 - the leaf's solve, or the deeper one (IKA-392)
+    reg: Regulation, teams: tuple[Roster, Roster], evaluate: LeafEvaluator, model: str,
+    *, reading: str | None = None, reader: Any = None,  # noqa: ANN401
+    seconds: float | None = None, report: list[Any] | None = None,
 ) -> BookEntry:
     """The selection game of the two sheets, with side 0's team as the row player (as
-    `poolplay.SolvedSelections` solves a pair)."""
+    `poolplay.SolvedSelections` solves a pair).
+
+    ``reading`` (a `selection_deep` spec) reads the cells that matter deeper, on ``reader``
+    (`selection_deep.SerialReader` here when None) for ``seconds`` of wall time (None: the
+    stages the spec names); the entry's ``model`` then names the reading, so it is not the
+    leaf's solve under another name. Without it the solve is `solve_selection`'s, unchanged.
+    ``report`` collects the deep solve's `selection_deep.DeepReport`.
+    """
     from .selection import SpreadClass, book_entry, solve_selection
 
     row, col = teams
-    analysis = solve_selection(
-        reg, row.sets, [SpreadClass(weight=1.0, sets=tuple(col.sets), label="sheet")], evaluate
+    if reading is None:
+        analysis = solve_selection(
+            reg, row.sets, [SpreadClass(weight=1.0, sets=tuple(col.sets), label="sheet")], evaluate
+        )
+        return book_entry(analysis, key=f"{row.id}|{col.id}", player=col.name, model=model)
+    from . import selection_deep
+
+    parsed = selection_deep.parse_reading(reading)
+    analysis, deep = selection_deep.solve_selection_deep(
+        reg, row.sets, col.sets, evaluate, reader or selection_deep.SerialReader(reg, evaluate),
+        parsed, deadline=None if seconds is None else time.perf_counter() + seconds,
     )
-    return book_entry(analysis, key=f"{row.id}|{col.id}", player=col.name, model=model)
+    if report is not None:
+        report.append(deep)
+    return book_entry(analysis, key=f"{row.id}|{col.id}", player=col.name,
+                      model=f"{model}+selection[{parsed.label}]")
 
 
 def agent_pick(
@@ -2446,6 +2490,7 @@ def play(
     on_move: Callable[[Position, list[frozenset[str]], list[list[str]]], None] | None = None,
     entry: BookEntry | None = None,
     make_game: Callable[..., HumanGame] | None = None,
+    priors: tuple[BenchPrior | None, BenchPrior | None] | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any], HumanGame]:
     """Plays one game. ``teams`` are side 0's and side 1's sheets. Returns the game's
     record line, its clock line, and the game object (for a caller that wants the board).
@@ -2464,7 +2509,16 @@ def play(
     species = ([s.species for s in six[0]], [s.species for s in six[1]])
     started = time.perf_counter()
     if entry is None and agent.evaluate is not None:
-        entry = solve_entry(reg, teams, agent.evaluate, agent.name)
+        from . import selection_deep
+
+        reader = None
+        if agent.selection_reading is not None:
+            reader = selection_deep.READER or selection_deep.SerialReader(
+                reg, agent.evaluate, rank_fill=agent.rank_fill, rank_by_leaf=agent.rank_by_leaf)
+        entry = solve_entry(
+            reg, teams, agent.evaluate, agent.name, reading=agent.selection_reading,
+            reader=reader, seconds=agent.selection_seconds,
+        )
     selection_seconds = time.perf_counter() - started
     mine = agent_pick(
         entry, agent_side, six[agent_side], size,
@@ -2493,8 +2547,7 @@ def play(
     yours = person.select(six[you], size, render_sheet(reg, six[you], loc))
     inputs = [selection_line(yours)]
     picks = (mine, yours) if agent_side == 0 else (yours, mine)
-    priors = None
-    if entry is not None:
+    if entry is not None and priors is None:
         priors = tuple(
             BenchPrior.of(entry, side, species[side], epsilon=belief_epsilon, temperature=1.0)
             for side in (0, 1)

@@ -583,6 +583,177 @@ def drop_dead_actions(
     return alive or pool
 
 
+#: IKA-395. Moves that put up a field. A recast is a failure Showdown reports (`-fail`) when
+#: the same field is already up; Trick Room, Magic Room and Wonder Room are not in here
+#: (`onFieldRestart` ends them), nor are Spikes and Toxic Spikes (they stack).
+_SIDE_FIELD_MOVES = frozenset({"tailwind", "reflect", "lightscreen", "auroraveil", "safeguard"})
+_WEATHER_MOVES = {
+    "sunnyday": "sunnyday", "raindance": "raindance", "sandstorm": "sandstorm",
+    "snowscape": "snowscape",
+}
+_TERRAIN_MOVES = {
+    "electricterrain": "electricterrain", "grassyterrain": "grassyterrain",
+    "mistyterrain": "mistyterrain", "psychicterrain": "psychicterrain",
+}
+_PSEUDO_MOVES = frozenset({"gravity", "fairylock"})
+#: What can take a field away, or change it, in the same turn (Showdown: Brick Break and
+#: Psychic Fangs break screens, Court Change swaps sides' conditions; a later cast then works).
+_SIDE_REMOVERS = frozenset({"brickbreak", "psychicfangs", "ragingbull", "defog", "courtchange"})
+#: The weather / terrain a move or an ability puts up. A setter of the *same* one changes
+#: nothing (its own cast fails too), so only the others count as a change.
+_WEATHER_OF_MOVE = {**_WEATHER_MOVES, "chillyreception": "snowscape"}
+_WEATHER_OF_ABILITY = {
+    "drought": "sunnyday", "orichalcumpulse": "sunnyday", "desolateland": "sunnyday",
+    "drizzle": "raindance", "primordialsea": "raindance", "sandstream": "sandstorm",
+    "snowwarning": "snowscape", "deltastream": "deltastream",
+}
+_TERRAIN_OF_ABILITY = {
+    "electricsurge": "electricterrain", "hadronengine": "electricterrain",
+    "grassysurge": "grassyterrain", "seedsower": "grassyterrain",
+    "mistysurge": "mistyterrain", "psychicsurge": "psychicterrain",
+}
+#: Moves that take a terrain away whatever it is.
+_TERRAIN_REMOVERS = frozenset({"steelroller", "icespinner"})
+
+DEAD = "dead"
+DEAD_BUT_CHANGEABLE = "dead-but-changeable"
+DEAD_BUT_DODGES_SUCKER_PUNCH = "dead-but-dodges-sucker-punch"
+DEAD_BUT_FEEDS_STOMPING_TANTRUM = "dead-but-feeds-stomping-tantrum"
+DEAD_IF_FIRST_ACTS = "dead-if-first-acts"
+
+
+def _field_already_up(pos: Position, side: int, move_id: str) -> bool:
+    """The field this move puts up is already up for `side` at the start of the turn."""
+    field_now = pos.field
+    if move_id in _SIDE_FIELD_MOVES:
+        if pos.sides[side].has_side_condition(move_id):
+            return True
+        # Aurora Veil's onTry: it fails unless it is snowing.
+        return move_id == "auroraveil" and field_now.weather not in ("snowscape", "hail")
+    if move_id in _WEATHER_MOVES:
+        return field_now.weather == _WEATHER_MOVES[move_id]
+    if move_id in _TERRAIN_MOVES:
+        return field_now.terrain == _TERRAIN_MOVES[move_id]
+    if move_id in _PSEUDO_MOVES:
+        return any(effect.id == move_id for effect in field_now.pseudo_weather)
+    return False
+
+
+def _is_field_move(move_id: str) -> bool:
+    return (
+        move_id in _SIDE_FIELD_MOVES or move_id in _WEATHER_MOVES
+        or move_id in _TERRAIN_MOVES or move_id in _PSEUDO_MOVES
+    )
+
+
+def _live_actives(pos: Position, side: int) -> list:
+    return [mon for mon in pos.sides[side].active_pokemon() if mon is not None and not mon.fainted]
+
+
+def _ability_ids(reg: Regulation, mon) -> set[str]:  # noqa: ANN001
+    """Its ability, and the one its Mega Evolution would bring."""
+    from .regulation import to_id
+
+    out = {mon.ability}
+    if mon.item and not mon.is_mega:
+        mega = reg.mega_map.get(mon.item, {}).get(mon.species)
+        if mega is not None and mega in reg.species:
+            out |= {to_id(name) for name in reg.species[mega].abilities}
+    return out
+
+
+def _field_can_change(reg: Regulation, pos: Position, move_id: str) -> bool:
+    """Something on the field (or, for weather and terrain, anywhere in either party) can
+    remove or change this move's field before the user's turn comes."""
+    moves = {
+        slot.id for side in (0, 1) for mon in _live_actives(pos, side) for slot in mon.moves
+    }
+    everyone = [mon for side in pos.sides for mon in side.pokemon if not mon.fainted]
+    if move_id in _SIDE_FIELD_MOVES:
+        return bool(moves & _SIDE_REMOVERS)
+    if move_id in _WEATHER_MOVES:
+        mine = _WEATHER_MOVES[move_id]
+        return any(w != mine for m, w in _WEATHER_OF_MOVE.items() if m in moves) or any(
+            _WEATHER_OF_ABILITY.get(a, mine) != mine for mon in everyone for a in _ability_ids(reg, mon)
+        )
+    if move_id in _TERRAIN_MOVES:
+        mine = _TERRAIN_MOVES[move_id]
+        return bool(moves & _TERRAIN_REMOVERS) or any(
+            t != mine for t in (_TERRAIN_MOVES[m] for m in moves if m in _TERRAIN_MOVES)
+        ) or any(
+            _TERRAIN_OF_ABILITY.get(a, mine) != mine for mon in everyone for a in _ability_ids(reg, mon)
+        )
+    return False
+
+
+def dead_field_moves(
+    reg: Regulation, pos: Position, side: int, action: SideAction
+) -> list[str | None]:
+    """Per slot of `action`: why its field move fails, or None (IKA-395).
+
+    Decides nothing about the candidate list. `drop_dead_actions` and the port's legal.rs do
+    not call this: the search, the generation and the candidate sets are unchanged. It is
+    for a reader of a game (the transcript's turn page) that wants to say "this cannot work".
+
+    Unlike Fake Out, a field move that fails is NOT dominated by every other move, so the
+    verdict has grades (records/IKA-395.md, each one checked against Showdown):
+
+    * `dead`: the field is up at the start of the turn (a recast fails: Tailwind, Reflect,
+      Light Screen, Aurora Veil, Safeguard, the same weather or terrain, Gravity, Fairy Lock;
+      Aurora Veil without snow) and nothing below can matter.
+    * `dead-but-changeable`: a Pokemon on the field has a move that removes or changes the
+      field (Brick Break, Psychic Fangs, Court Change, ...; a weather or terrain move, or an
+      ability in either party that sets one, Mega form included), so a faster foe may take
+      it down first and the recast works.
+    * `dead-but-dodges-sucker-punch`: a foe on the field has Sucker Punch, which fails against
+      a status move even when that move fails, so the "wasted" move dodges it.
+    * `dead-but-feeds-stomping-tantrum`: an ally on the field has Stomping Tantrum or Temper
+      Flare, or holds a Metronome, which read that this Pokemon's last move failed.
+    * `dead-if-first-acts`: the field is not up yet, but an earlier slot of the same action
+      puts up the same one; the second cast fails unless the first slot is stopped (Fake Out's
+      flinch, a full paralysis...), which makes the pair a hedge.
+
+    Trick Room, Magic Room and Wonder Room (a recast ends them) and Spikes and Toxic Spikes
+    (they stack) are never reported.
+    """
+    reasons: list[str | None] = []
+    own = _live_actives(pos, side)
+    foes = _live_actives(pos, 1 - side)
+    for index, slot_action in enumerate(action.slots):
+        move_id = getattr(slot_action, "move_id", None)
+        if move_id is None or not _is_field_move(move_id):
+            reasons.append(None)
+            continue
+        if _field_already_up(pos, side, move_id):
+            if _field_can_change(reg, pos, move_id):
+                reasons.append(DEAD_BUT_CHANGEABLE)
+            elif any(slot.id == "suckerpunch" for mon in foes for slot in mon.moves):
+                reasons.append(DEAD_BUT_DODGES_SUCKER_PUNCH)
+            elif any(
+                slot.id in ("stompingtantrum", "temperflare") for mon in own for slot in mon.moves
+            ) or any(mon.item == "metronome" for mon in own):
+                reasons.append(DEAD_BUT_FEEDS_STOMPING_TANTRUM)
+            else:
+                reasons.append(DEAD)
+            continue
+        earlier = any(
+            getattr(previous, "move_id", None) == move_id for previous in action.slots[:index]
+        )
+        reasons.append(DEAD_IF_FIRST_ACTS if earlier else None)
+    return reasons
+
+
+def dead_field_move(
+    reg: Regulation, pos: Position, side: int, action: SideAction
+) -> str | None:
+    """`dead_field_moves` for a whole action: `dead` if any slot is plainly dead, else the
+    first slot's grade, else None."""
+    reasons = dead_field_moves(reg, pos, side, action)
+    if DEAD in reasons:
+        return DEAD
+    return next((reason for reason in reasons if reason is not None), None)
+
+
 @timing.timed("narrow")
 def narrow(
     reg: Regulation,

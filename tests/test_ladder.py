@@ -126,6 +126,36 @@ def test_the_rule_writes_stages_past_l5() -> None:
     assert not ladder.parse_ladder("d2r2b3n4").fills
 
 
+def test_a_read_that_stops_at_a_stage(roster, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-393: ``<name>@<n>`` is the named ladder's first n stages and reads them all with no
+    budget (`stopped == "done"`); n = 0 is no stage (the depth-1 answer). L6@n is L6's first n
+    stages and never fills a budget. The hidden-bench ladder is chosen by the completions."""
+    l6 = ladder.LADDERS["L6"]
+    assert [s.label for s in ladder.parse_ladder("L6@7")] == list(l6[:7])
+    assert len(ladder.parse_ladder("L6@0")) == 0
+    assert not ladder.parse_ladder("L6@7").fills and ladder.parse_ladder("L6").fills
+    for bad in ("L6@", "L6@x", "L6@41", "d2r4b3k8@1", "L9@1"):
+        with pytest.raises(ValueError):
+            ladder.parse_ladder(bad)
+    cond = timematch.parse_condition("a:seconds=1000000,clock=count,ladder=L6@7,hidden_ladder=L6@4")
+    assert (cond.ladder, cond.hidden_ladder) == ("L6@7", "L6@4")
+    assert timematch.parse_condition("a:seconds=1,clock=count").hidden_ladder is None
+    agent = SimpleNamespace(ladder="L6@7", hidden_ladder="L6@4")
+    assert humanplay.ladder_spec_for(agent, 1) == "L6@7"
+    assert humanplay.ladder_spec_for(agent, 3) == "L6@4"
+    assert humanplay.ladder_spec_for(SimpleNamespace(ladder="L6@7", hidden_ladder=None), 3) == "L6@7"
+    monkeypatch.setitem(ladder.LADDERS, "T2", ("d2r2b3n4", "d2r4ban6x"))
+    reg = roster.reg
+    pos = _played(roster)[1]
+    two = _open_read(reg, pos, "T2")
+    one = _open_read(reg, pos, "T2@1")
+    none = _open_read(reg, pos, "T2@0")
+    assert two.stopped == "done" and len(two.rungs) == 2
+    assert one.stopped == "done" and [r.stage for r in one.rungs] == ["d2r2b3n4"]
+    assert one.rungs[0].value == two.rungs[0].value  # the same first stage
+    assert none.stopped == "done" and none.rungs == []
+
+
 def test_every_answer_is_a_completed_stage(roster) -> None:  # noqa: ANN001
     reg = roster.reg
     stages = "d2r2b3n4+d2r4ban6x"
