@@ -149,11 +149,13 @@ KNOWN_UNGATED: frozenset[str] = frozenset()
 #: TypeScript) and was struck off when IKA-212 deleted resolve.py: what is left of Python's
 #: engine (`port_coverage.ENGINE_FILES`) never names it, so it is "python is silent too".
 #:
+#: The five that decide whether a switch is offered were struck off on 2026-09-29 (IKA-389):
+#: the port lists the Q's menus itself now (`rust/src/legal.rs`, `side_actions` held to the
+#: Python's action for action), so it names them where they act -- in the menu, not the turn.
+#:
 #: Recorded rather than required to be empty so that `--check` can fail on the next one
-#: without first demanding these six be re-argued.
-KNOWN_UNREFERENCED: frozenset[str] = frozenset(
-    {"shadowtag", "arenatrap", "magnetpull", "dancer", "runaway", "shedshell"}
-)
+#: without first demanding this one be re-argued.
+KNOWN_UNREFERENCED: frozenset[str] = frozenset({"dancer"})
 
 
 # ---------------------------------------------------------------------------

@@ -292,6 +292,31 @@ pub struct Reg {
     /// keeps it, so the trace's lines come in it (Shell Smash: def, spd, atk, ...). Only
     /// the moves whose order is not the sorted one (IKA-215).
     pub boost_order: HashMap<String, Vec<String>>,
+    /// IKA-389, for `legal.rs` (`Regulation.trapping_volatiles` / `trapping_pseudo_weather`):
+    /// the volatiles and pseudo-weathers a move's condition traps with -- the moves whose
+    /// `customHooks` name `condition.onTrapPokemon`, by their `volatileStatus` and
+    /// `pseudoWeather`.
+    pub trapping_volatiles: HashSet<String>,
+    pub trapping_pseudo_weather: HashSet<String>,
+    /// IKA-389 (`actions._frees_holder`): the items and abilities whose dump entry has its
+    /// own `onTrapPokemon` hook (Shed Shell, the champions Run Away).
+    pub items_freeing: HashSet<String>,
+    pub abilities_freeing: HashSet<String>,
+}
+
+/// The ids of a dump table's entries whose `customHooks` name `hook`.
+fn hooked(doc: &Value, table: &str, hook: &str) -> HashSet<String> {
+    doc[table]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .filter(|e| {
+                    e["customHooks"].as_array().is_some_and(|h| h.iter().any(|v| v.as_str() == Some(hook)))
+                })
+                .filter_map(|e| e["id"].as_str().map(String::from))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// The key order of every move's own `boosts`, read from the dump text a second time.
@@ -689,7 +714,29 @@ impl Reg {
             move_ids = ordered("moves", move_ids, &order)?;
         }
 
+        // `Regulation.__init__`'s trap_hooked: a move's own condition that traps.
+        let mut trapping_volatiles = HashSet::new();
+        let mut trapping_pseudo_weather = HashSet::new();
+        for entry in doc["moves"].as_array().map(Vec::as_slice).unwrap_or(&[]) {
+            let hooked = entry["customHooks"]
+                .as_array()
+                .is_some_and(|h| h.iter().any(|v| v.as_str() == Some("condition.onTrapPokemon")));
+            if !hooked {
+                continue;
+            }
+            if let Some(v) = raw_str(entry, "volatileStatus") {
+                trapping_volatiles.insert(v);
+            }
+            if let Some(p) = raw_str(entry, "pseudoWeather") {
+                trapping_pseudo_weather.insert(p);
+            }
+        }
+
         Ok(Reg {
+            trapping_volatiles,
+            trapping_pseudo_weather,
+            items_freeing: hooked(&doc, "items", "onTrapPokemon"),
+            abilities_freeing: hooked(&doc, "abilities", "onTrapPokemon"),
             species_ids,
             ability_ids,
             item_ids,

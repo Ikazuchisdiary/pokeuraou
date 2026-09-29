@@ -1176,6 +1176,13 @@ fn answer<R: BufRead, W: Write>(
         // IKA-386: a depth-2 call's sub-games filled, scored by the inference server and
         // solved here, in one crossing (`portserved.py`, off by default).
         Ok(value) if value["kind"].as_str() == Some("fillsServed") => fills_served(reg, encoder, &value),
+        // IKA-389: a read's children's menus by the Q, built and ranked here in one crossing
+        // (`portmenus.py`, off by default); and the pieces, for the checks that hold them to
+        // the Python's.
+        Ok(value) if value["kind"].as_str() == Some("qMenus") => crate::qmenus::q_menus(reg, encoder, &value),
+        Ok(value) if value["kind"].as_str() == Some("legal") => crate::qmenus::legal_command(reg, &value),
+        Ok(value) if value["kind"].as_str() == Some("qArrays") => crate::qmenus::arrays_command(reg, encoder, &value),
+        Ok(value) if value["kind"].as_str() == Some("qScores") => crate::qmenus::scores_command(&value),
         // The cell threads' own account (IKA-32): how many, and how much ran on them.
         Ok(value) if value["kind"].as_str() == Some("parallel") => crate::par::report(),
         Ok(value) if value["kind"].as_str() == Some("fills") => {
