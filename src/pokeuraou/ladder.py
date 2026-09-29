@@ -304,7 +304,10 @@ class Rung:
                 "cols": list(self.cols), "fresh": self.fresh,
                 "spentMs": round(self.spent_ms, 1), "wallMs": round(self.wall_ms, 1),
                 "optimism": round(self.optimism, 6), "work": dict(self.work),
-                "predictedMs": round(self.predicted_ms, 1)}
+                "predictedMs": round(self.predicted_ms, 1),
+                # IKA-384: the row the stage's answer plays most (the menu's index), so a
+                # record says where a deeper stage moved the answer (`RECORD_TOP`).
+                **({"top": int(np.argmax(self.strategy))} if RECORD_TOP else {})}
 
 
 @dataclass
@@ -442,6 +445,10 @@ FILL_WALL = os.environ.get("POKEURAOU_LADDER_FILL", "0") != "0"
 #: It makes a single-core count-clock game read L6 the way the all-core wall-clock agent does:
 #: the budget is spent, the answer is the last completed stage.
 COUNT_FILL = os.environ.get("POKEURAOU_LADDER_COUNT_FILL", "0") != "0"
+
+#: IKA-384: rungs' JSON carries `top`, the row their strategy plays most (off: the JSON is what
+#: it was; `tools/time_match.py` turns it on for its records).
+RECORD_TOP = os.environ.get("POKEURAOU_LADDER_TOP", "0") != "0"
 
 
 class Stopped(Exception):  # noqa: N818 - a signal, not an error

@@ -302,3 +302,15 @@ def test_the_count_clock_fills_a_budget_only_when_asked(roster, monkeypatch) -> 
         assert filled.spent_ms >= budget
         checked += 1
     assert checked >= 1, "no position where the prediction refused the second stage"
+
+
+def test_a_rung_records_the_row_it_plays_most_only_when_asked(roster, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-384: ``RECORD_TOP`` adds ``top`` (the strategy's most played row) to each rung's JSON;
+    off, the JSON has no such key."""
+    pos = _played(roster)[0]
+    got = _open_read(roster.reg, pos, "d2r2b3n4+d2r4ban6x")
+    monkeypatch.setattr(ladder, "RECORD_TOP", False)
+    assert all("top" not in r.to_json() for r in got.rungs)
+    monkeypatch.setattr(ladder, "RECORD_TOP", True)
+    tops = [r.to_json()["top"] for r in got.rungs]
+    assert tops == [int(np.argmax(r.strategy)) for r in got.rungs] and len(tops) == 2

@@ -264,9 +264,10 @@ def worker(args: argparse.Namespace) -> None:
     tested, other = conditions(args)
     values, q_path = files(args)
     parse_bench_drop(args.bench_drop)
-    if args.count_fill:
-        from pokeuraou import ladder
+    from pokeuraou import ladder
 
+    ladder.RECORD_TOP = True  # IKA-384: the record says which row each stage's answer plays most
+    if args.count_fill:
         ladder.COUNT_FILL = True
     pool = load_pool(args.pool)
     reg = pool.reg
