@@ -431,6 +431,30 @@ def test_a_transcript_is_shown_as_one_japanese_page(pool) -> None:  # noqa: ANN0
     assert page.count('<details class="mix"') == len(turns)
 
 
+def test_the_pages_rank_is_among_the_moves_played_not_the_menu() -> None:
+    """The denominator of "2 位 / N 通り" was the menu (64 candidates); it is the moves the
+    mixture plays (probability >= `game_page.SUPPORT_MIN`), the menu beside, and a drawn move
+    below the threshold is said to be outside the equilibrium. Counted from the whole vector."""
+    from ._harness import load_tool
+
+    load_tool("show_game")
+    import game_page
+
+    vector = [0.6, 0.3, 0.09, 0.006, 0.004, 0.0, 0.0]  # four moves at 0.5% or more, seven candidates
+    shown = [["a", 0.6], ["b", 0.3], ["c", 0.09]]
+    sup = game_page.support_of(vector, shown)
+    assert sup["n"] == 4 and sup["menu"] == 7
+    assert sup["rest"][0] == 1 and abs(sup["rest"][1] - 0.006) < 1e-9
+    assert sup["small"][0] == 3 and abs(sup["small"][1] - (1 - 0.996)) < 1e-9
+    inside = game_page.place_text({"sup": sup, "chosenP": 0.3, "chosenRank": 2})
+    assert inside == "（4 通り中 2 位）"  # not "of 7": the menu is not the moves played
+    outside = game_page.place_text({"sup": sup, "chosenP": 0.004, "chosenRank": 5})
+    assert "均衡の外" in outside and "0.4%" in outside
+    # A record from before the vectors were kept: the rank alone, no invented count.
+    assert game_page.support_of(None, shown) is None
+    assert game_page.place_text({"sup": None, "chosenP": 0.3, "chosenRank": 2}) == "（2 位）"
+
+
 def _action(index: int, target: int | None = None):  # noqa: ANN202
     from pokeuraou.actions import MoveAction, SideAction
 
@@ -455,6 +479,9 @@ def test_a_reads_summary_says_what_the_seat_would_have_played_and_what_hurt_it()
         got = timematch.read_summary((me, mine, other, x, y, ladder, True), [1.0], mine[1].to_choice())
         assert got["rows"][0] == [mine[0].to_choice(), 0.6] and got["chosenRank"] == 2
         assert got["chosenP"] == 0.3 and got["rowsRest"][0] == 0
+        assert got["p"] == [0.6, 0.3, 0.1] and got["q"] == [0.5, 0.5, 0.0]
+        assert [c for c, _p in got["supp"]] == [m.to_choice() for m in mine]
+        assert [c for c, _p in got["oppSupp"]] == [o.to_choice() for o in other[:2]]  # 0.0 is outside
         assert got["opp"][0][1] == 0.5
         by_col = offset + x @ matrix
         worst = int(np.argmin(by_col))
@@ -463,6 +490,16 @@ def test_a_reads_summary_says_what_the_seat_would_have_played_and_what_hurt_it()
         assert got["eq"] == round(float(offset + x @ matrix @ y), 6)
         # One completion: the lowest column is the guarantee.
         assert got["guarantee"] == got["hard"][0][1]
+        # Among the columns the modelled mixture plays (here the first two; the third has 0):
+        # the hardest and the best reply to the drawn move.
+        against = offset + matrix[1]
+        assert got["vs"] == [round(float(v), 6) for v in against]
+        assert got["cols"] == [o.to_choice() for o in other]
+        assert got["chosenEv"] == round(float(offset + matrix[1] @ y), 6)
+        low, high = int(np.argmin(against[:2])), int(np.argmax(against[:2]))
+        assert got["hardIn"] == [other[low].to_choice(), round(float(against[low]), 6)]
+        assert got["bestIn"] == [other[high].to_choice(), round(float(against[high]), 6)]
+        assert got["hardIn"][1] >= got["hardChosen"][1] and got["bestIn"][1] <= float(against.max())
     # Two completions of the hidden bench: the opponent that knows its own bench takes its own
     # hardest column in each, so the guarantee is the weighted sum of the lowest columns, and
     # the lowest column over both at once (`hard`) is never below it (here above it).

@@ -32,6 +32,7 @@ from typing import Any
 
 import show_game
 
+from pokeuraou import timematch
 from pokeuraou.hpdisplay import displayed_percent, uses_floor_display
 from pokeuraou.humanplay import sprite_id
 from pokeuraou.names import Localiser
@@ -45,6 +46,8 @@ RESIDUAL_MAX = 6
 #: far (points) between turns is marked on the chart.
 SPLIT_PT = 8
 MARK_PT = 5
+#: A move is one the mixture plays (in its support) from this probability up.
+SUPPORT_MIN = timematch.SUPPORT_MIN
 SPRITES = "https://play.pokemonshowdown.com/sprites/gen5/{}.png"
 END_REASONS = {
     "wipeout": "全滅で決着",
@@ -556,11 +559,42 @@ def pair_of(
     return out
 
 
+def support_of(vector: list[float] | None, shown: list[list[Any]]) -> dict[str, Any] | None:
+    """How many moves a mixture plays (probability at least `SUPPORT_MIN`), the ones among them
+    the table does not list (count, sum), and the candidates it gives about none (count, sum).
+    None for a record from before the whole vector was kept."""
+    if vector is None:
+        return None
+    played = [v for v in vector if v >= SUPPORT_MIN]
+    listed = sum(p for _c, p in shown if p >= SUPPORT_MIN)
+    listed_n = sum(1 for _c, p in shown if p >= SUPPORT_MIN)
+    return {
+        "n": len(played),
+        "menu": len(vector),
+        "rest": [len(played) - listed_n, max(0.0, sum(played) - listed)],
+        "small": [len(vector) - len(played), max(0.0, 1.0 - sum(played))],
+    }
+
+
+def place_text(m: dict[str, Any]) -> str:
+    """Where the drawn move stands: among the moves the mixture plays, and out of them when its
+    probability is below the threshold; the menu's size beside, small."""
+    sup = m.get("sup")
+    p = m["chosenP"] or 0.0
+    if sup is None:
+        return f"（{m['chosenRank']} 位）" if m["chosenRank"] else ""
+    if p < SUPPORT_MIN:
+        return f"（均衡の外・確率 {p * 100:.1f}%）"
+    return f"（{sup['n']} 通り中 {m['chosenRank']} 位）"
+
+
 def mixtures(
     reg: Regulation, loc: Localiser, decision: dict[str, Any], reads: list[dict[str, Any] | None]
 ) -> list[dict[str, Any] | None]:
-    """Each seat's read as tables: its mixture, the other side's it modelled, the hardest moves
-    against it. Names are given here once so the page only lays them out."""
+    """Each seat's read for the page: the moves it plays (its support) and where the drawn one
+    stands, the other side's it modelled, and how the drawn move does against the other side's
+    moves -- the worst of all its columns, the best among those the other side plays, the one it
+    really played. Names are given here once so the page only lays them out."""
     position = decision["position"]
     saw = decision.get("reads") or {}
     chosen = [decision.get("ownChosen"), decision.get("foeChosen")]
@@ -577,38 +611,42 @@ def mixtures(
 
         value0 = reads[side]["value0"] if reads[side] else None
         own_win = None if value0 is None else (value0 if side == 0 else 1 - value0)
-        out.append(
-            {
-                "side": side,
-                "own": own_win,
-                "menu": got["menu"],
-                "chosen": pair(got["chosen"], side),
-                "chosenP": got["chosenP"],
-                "chosenRank": got["chosenRank"],
-                "rows": [
-                    {"pair": pair(c, side), "p": p, "picked": c == got["chosen"]} for c, p in got["rows"]
-                ],
-                "rowsRest": got["rowsRest"],
-                "opp": [
-                    {"pair": pair(c, other), "p": p, "actual": c == chosen[other]} for c, p in got["opp"]
-                ],
-                "oppRest": got["oppRest"],
-                "hard": None
-                if got["hard"] is None
-                else [
-                    {"pair": pair(c, other), "ev": v, "actual": c == chosen[other]} for c, v in got["hard"]
-                ],
-                "hardChosen": None
-                if got["hardChosen"] is None
-                else {
-                    "pair": pair(got["hardChosen"][0], other),
-                    "ev": got["hardChosen"][1],
-                    "actual": got["hardChosen"][0] == chosen[other],
-                },
-                "eq": got.get("eq"),
-                "guarantee": got.get("guarantee"),
-            }
+        supp = got.get("supp")
+        if supp is None:  # a record from before the support was kept: the rows it has (>= 1%)
+            supp = got["rows"]
+        osupp = got.get("oppSupp")
+        if osupp is None:
+            osupp = got["opp"]
+        actual = chosen[other]
+        cols, vs = got.get("cols"), got.get("vs")
+        on_menu = bool(cols) and actual in cols
+        m = {
+            "side": side,
+            "own": own_win,
+            "menu": got["menu"],
+            "chosen": pair(got["chosen"], side),
+            "chosenP": got["chosenP"],
+            "chosenRank": got["chosenRank"],
+            "chosenEv": got.get("chosenEv"),
+            "rows": [{"pair": pair(c, side), "p": p, "picked": c == got["chosen"]} for c, p in supp],
+            "sup": support_of(got.get("p"), got["rows"]),
+            "osup": support_of(got.get("q"), got["opp"]),
+            "opp": [{"pair": pair(c, other), "p": p, "actual": c == actual} for c, p in osupp],
+            "eq": got.get("eq"),
+            "guarantee": got.get("guarantee"),
+        }
+        for key, field in (("worst", "hardChosen"), ("best", "bestIn")):
+            found = got.get(field)
+            m[key] = (
+                None
+                if found is None
+                else {"pair": pair(found[0], other), "ev": found[1], "actual": found[0] == actual}
+            )
+        m["actualEv"] = (
+            {"pair": pair(actual, other), "ev": vs[cols.index(actual)]} if on_menu and vs else None
         )
+        m["actualOffMenu"] = bool(cols) and not on_menu
+        out.append(m)
     return out
 
 
@@ -820,6 +858,14 @@ h2{font-size:15px;margin:28px 0 8px;color:var(--dim);font-weight:600;letter-spac
 .msl{font-size:12.5px;padding:2px 0 2px 8px;margin-bottom:4px}
 .msl .l1,.msl .l2{display:block}.msl .l2{padding-left:2.6em;margin-top:1px}
 .msl .seat{margin-right:6px}
+.rng{position:relative;height:8px;margin:2px 8px 8px 8px;max-width:360px;background:var(--track);border-radius:4px}
+.rng .m50{position:absolute;left:50%;top:-3px;bottom:-3px;width:2px;background:var(--faint)}
+.rng .band{position:absolute;top:0;height:8px;border-radius:4px;background:var(--faint)}
+.rng .band.s0{background:var(--s0)}.rng .band.s1{background:var(--s1)}
+.rng .pt{position:absolute;top:-3px;width:14px;height:14px;margin-left:-7px;border-radius:50%;background:var(--surface);border:3px solid var(--ink)}
+.eqt{margin-top:4px}.eqt .tag{font-size:12px;white-space:normal;border-radius:10px}.eqt .tag.off{color:var(--faint)}
+.tag.lb{margin-right:6px;font-size:11px;white-space:nowrap}
+.gq{color:var(--good);font-size:11px}
 .bc.wr{position:relative;overflow:visible;background:var(--track);height:6px;margin:1px 0}
 .bc.wr .m50{position:absolute;left:50%;top:-4px;bottom:-4px;width:2px;background:var(--faint)}
 .bc.wr .dt{position:absolute;top:-4px;width:14px;height:14px;margin-left:-7px;border-radius:50%;background:var(--faint);border:2px solid var(--surface)}
@@ -903,7 +949,11 @@ def _mon_html(mon: dict[str, Any] | None, sprites: Sprites, hand: str | None = N
 
 
 def _side_html(
-    side: int, view: dict[str, Any], sprites: Sprites, hands: list[str | None] | None = None
+    side: int,
+    view: dict[str, Any],
+    sprites: Sprites,
+    hands: list[str | None] | None = None,
+    tag: str = "",
 ) -> str:
     bench = ""
     if view["bench"]:
@@ -923,7 +973,7 @@ def _side_html(
     )
     return (
         f'<div class="row s{side}"><span class="seat s{side}">{SEAT[side]}</span>'
-        f'<div style="flex:1"><div class="mons">{mons}</div>{bench}</div></div>'
+        f'<div style="flex:1"><div class="mons">{mons}</div>{bench}{tag}</div></div>'
     )
 
 
@@ -1082,128 +1132,166 @@ def _pct(p: float) -> str:
 
 
 def _table_html(rows: list[dict[str, Any]], side: int, sprites: Sprites, *, kind: str) -> str:
-    """One table: the pair of moves, a bar and its number (a probability, or a win rate for
-    the hard moves), and a mark on the row that was picked or actually played."""
+    """One table of a mixture: the pair of moves, a bar (a probability) and its number, and a mark
+    on the row that was drawn or that the other side really played."""
     body = []
     for r in rows:
         mark = ""
         if r.get("picked"):
             mark = '<span class="tag pk">選んだ手</span>'
         elif r.get("actual"):
-            mark = (
-                '<span class="tag pk">実際の手</span>'
-                if kind == "hard"
-                else '<span class="tag pk">相手が実際に選んだ手</span>'
-            )
-        if kind == "hard":
-            share = r["ev"]
-            number = f'<span class="n">{share * 100:.0f}%</span>'
-            if r.get("gap") is not None:
-                if r["gap"] * 100 >= 1:
-                    number += f' <span class="gp n">{MINUS}{r["gap"] * 100:.0f}pt</span>'
-                else:
-                    number += ' <span class="gz n">±0</span>'
-            # A win rate is a point on a 0-100 scale (a line at 50%), not a bar: a bar is a share.
-            gauge = (
-                f'<div class="bc wr"><span class="m50"></span>'
-                f'<span class="dt s{side}" style="left:{max(0.0, min(1.0, share)) * 100:.1f}%"></span></div>'
-            )
-        else:
-            share = r["p"]
-            number = f'<span class="n">{_pct(share)}</span>'
-            gauge = f'<div class="bc"><span class="bb s{side}" style="width:{max(0.0, min(1.0, share)) * 100:.0f}%"></span></div>'
+            mark = '<span class="tag pk">相手が実際に選んだ手</span>'
+        share = r["p"]
         body.append(
             f'<div class="r{" pick" if r.get("picked") else ""}"><div class="pc">{_pair_html(r["pair"], side, sprites)}{mark}</div>'
-            f'{gauge}<div class="nc">{number}</div></div>'
+            f'<div class="bc"><span class="bb s{side}" style="width:{max(0.0, min(1.0, share)) * 100:.0f}%"></span></div>'
+            f'<div class="nc"><span class="n">{_pct(share)}</span></div></div>'
         )
     return f'<div class="mt">{"".join(body)}</div>'
 
 
-def _mix_seat(m: dict[str, Any] | None, side: int, sprites: Sprites) -> str:
+def _reply_table(items: list[dict[str, Any]], side: int, sprites: Sprites) -> str:
+    """The drawn move against some of the other side's moves: a label, the pair, the win rate as a
+    point on a 0-100 scale (a line at 50%, not a bar: a bar is a share), and the difference from
+    the read's value."""
+    body = []
+    for it in items:
+        gap = it.get("gap")
+        if gap is None:
+            diff = ""
+        elif abs(gap) * 100 < 1:
+            diff = ' <span class="gz n">±0</span>'
+        else:
+            cls = "gp" if gap < 0 else "gq"
+            diff = f' <span class="{cls} n">{MINUS if gap < 0 else "+"}{abs(gap) * 100:.0f}pt</span>'
+        mark = (
+            '<span class="tag pk">実際の手</span>'
+            if it.get("actual") and it["label"] != "実際に選んだ手"
+            else ""
+        )
+        body.append(
+            f'<div class="r"><div class="pc"><span class="tag lb">{esc(it["label"])}</span>'
+            f"{_pair_html(it['pair'], 1 - side, sprites)}{mark}</div>"
+            f'<div class="bc wr"><span class="m50"></span>'
+            f'<span class="dt s{side}" style="left:{max(0.0, min(1.0, it["ev"])) * 100:.1f}%"></span></div>'
+            f'<div class="nc"><span class="n">{it["ev"] * 100:.0f}%</span>{diff}</div></div>'
+        )
+    return f'<div class="mt">{"".join(body)}</div>'
+
+
+def _rest_html(sup: dict[str, Any] | None) -> str:
+    """Under a table: the candidates that were given about no probability (said apart, so that
+    they are not read as moves played)."""
+    if sup is None or sup["small"][0] <= 0:
+        return ""
+    return (
+        f'<p class="dim rest">ほかの候補 {sup["small"][0]} 通りは確率 {SUPPORT_MIN * 100:g}% 未満'
+        f"（合計 {_pct(sup['small'][1])}）で、均衡では打たない。</p>"
+    )
+
+
+def _played_n(m: dict[str, Any]) -> int:
+    return m["sup"]["n"] if m.get("sup") else len(m["rows"])
+
+
+def _eq_tag(m: dict[str, Any] | None) -> str:
+    """The small tag under a seat's Pokemon: how likely the equilibrium is to play the drawn move."""
     if m is None:
-        return f'<div class="mseat s{side}"><h4><span class="seat s{side}">{SEAT[side]}</span> の読み</h4><p class="dim">この席の読みはありません</p></div>'
+        return ""
+    p = m["chosenP"] or 0.0
+    where = esc(place_text(m))
+    if p < SUPPORT_MIN:
+        return f'<div class="eqt"><span class="tag off">均衡外の手{where}</span></div>'
+    return f'<div class="eqt"><span class="tag">均衡で打つ確率 <b class="n">{_pct(p)}</b>{where}</span></div>'
+
+
+def _mix_seat(m: dict[str, Any] | None, side: int, sprites: Sprites) -> str:
+    head = f'<h4><span class="seat s{side}">{SEAT[side]}</span> の読み</h4>'
+    if m is None:
+        return f'<div class="mseat s{side}">{head}<p class="dim">この席の読みはありません</p></div>'
     view = f"（{SEAT[side]} から見た勝率）"
     rows = list(m["rows"])
-    if not any(r["picked"] for r in rows):
-        rows.append({"pair": m["chosen"], "p": m["chosenP"] or 0.0, "picked": True})
-    rest = m["rowsRest"]
-    more = (
-        f'<p class="dim rest">ほか {rest[0]} 通り（合計 {_pct(rest[1])}）</p>'
-        if rest[0] > 0 and rest[1] >= 0.005
-        else ""
-    )
-    place = f"（{m['chosenRank']} 位 / {m['menu'][0]} 通り）" if m["chosenRank"] else ""
-    opp = list(m["opp"])
-    top = opp[0] if opp else None
-    said = (
-        f'<p class="dim">相手は {_pct(top["p"])} で次の手を打つと見ていた: '
-        + " / ".join(f"{esc(p['name'])} {esc(p['text'])}" for p in top["pair"])
-        + "</p>"
-        if top
-        else ""
-    )
-    orest = m["oppRest"]
-    omore = (
-        f'<p class="dim rest">ほか {orest[0]} 通り（合計 {_pct(orest[1])}）</p>'
-        if orest[0] > 0 and orest[1] >= 0.005
-        else ""
-    )
-    hard = ""
-    base = m["eq"] if m.get("eq") is not None else m["own"]
-    if m["hard"]:
-        hrows = [{**h, "gap": None if base is None else max(0.0, base - h["ev"])} for h in m["hard"]]
-        flat = max(h["ev"] for h in m["hard"]) - min(h["ev"] for h in m["hard"]) <= 0.01
-        note = '<p class="dim">均衡では、相手のどの応手もほぼ同じ値（＝均衡の値）になる。</p>' if flat else ""
-        if m.get("guarantee") is not None:
-            note += (
-                f'<p class="dim">読みの値（保証値）{m["guarantee"] * 100:.0f}%は、相手が裏ごとに一番辛い手を選べるときの値。'
-                "下の値は、相手が裏によらず同じ手を打つときの値なので、それ以上になる。"
-                "深く読んでいない手の値は浅い読みのまま。</p>"
-            )
-        hard = (
-            f"<h5>辛い相手の手（自分の混合に対して勝率を下げる順・上位 3）<small>{view}</small></h5>"
-            f"{note}{_table_html(hrows, side, sprites, kind='hard')}"
+    picked = (
+        ""
+        if any(r["picked"] for r in rows)
+        else (
+            f'<p class="dim">選んだ手は均衡の外（確率 {(m["chosenP"] or 0.0) * 100:.1f}%）:'
+            + " / ".join(f" {esc(p['name'])} {esc(p['text'])}" for p in m["chosen"])
+            + "</p>"
         )
-        hc = m["hardChosen"]
-        if hc:
-            crow = [{**hc, "gap": None if base is None else max(0.0, base - hc["ev"])}]
-            hard += f"<h5>選んだ手に対して一番辛い相手の手<small>{view}</small></h5>{_table_html(crow, side, sprites, kind='hard')}"
+    )
+    osup = m.get("osup")
+    n_opp = f"　相手の均衡で打つ {osup['n']} 通り" if osup else ""
+    base = m["eq"] if m.get("eq") is not None else m["own"]
+    items = []
+    for key, label in (("worst", "一番辛い"), ("best", "一番有利")):
+        got = m.get(key)
+        if got is not None:
+            items.append(
+                {
+                    "label": label,
+                    "pair": got["pair"],
+                    "ev": got["ev"],
+                    "actual": got["actual"],
+                    "gap": None if base is None else got["ev"] - base,
+                }
+            )
+    real = m.get("actualEv")
+    if real is not None and not any(i["actual"] for i in items):
+        items.append(
+            {
+                "label": "実際に選んだ手",
+                "pair": real["pair"],
+                "ev": real["ev"],
+                "actual": True,
+                "gap": None if base is None else real["ev"] - base,
+            }
+        )
+    if items:
+        reply = _reply_table(items, side, sprites)
     else:
-        hard = '<h5>辛い相手の手</h5><p class="dim">この読みには手ごとの行列がありません（深さ 1 の答え）</p>'
+        reply = '<p class="dim">この読みには手ごとの値がありません（深さ 1 の答え）</p>'
+    if m.get("actualOffMenu"):
+        reply += '<p class="dim">相手が実際に選んだ手は、この読みの候補にありませんでした。</p>'
     return (
-        f'<div class="mseat s{side}"><h4><span class="seat s{side}">{SEAT[side]}</span> の読み</h4>'
-        f"<h5>均衡で打っていた手<small>{view}</small></h5>"
-        f'<p class="dim">選んだ手の確率 {_pct(m["chosenP"] or 0.0)}{place}</p>'
-        f"{_table_html(rows, side, sprites, kind='mix')}{more}"
-        f"<h5>選んだ手は、相手のどんな読みだったか</h5>{said}{_table_html(opp, 1 - side, sprites, kind='opp')}{omore}"
-        f"{hard}</div>"
+        f'<div class="mseat s{side}">{head}'
+        f"<h5>均衡で打っていた手<small>　均衡で打つ {_played_n(m)} 通り</small></h5>"
+        f"{picked}{_table_html(rows, side, sprites, kind='mix')}{_rest_html(m.get('sup'))}"
+        f"<h5>相手の読み<small>{n_opp}</small></h5>"
+        f"{_table_html(list(m['opp']), 1 - side, sprites, kind='opp')}{_rest_html(osup)}"
+        f"<h5>選んだ手に対する相手の手<small>{view}</small></h5>{reply}</div>"
     )
 
 
 def _mix_line(m: dict[str, Any] | None, side: int) -> str:
-    """The closed form: one line a seat."""
+    """The closed form: a seat's line of numbers and a scale of the drawn move's range."""
     label = f'<span class="seat s{side}">{SEAT[side]}</span>'
     if m is None:
-        return f'<div class="msl">{label}<span class="dim">読みなし</span></div>'
-    moves = " ／ ".join(f"{esc(p['name'])} {esc(p['text'])}" for p in m["chosen"])
-    p = m["chosenP"] or 0.0
-    weight = "rare" if p < 0.05 else "often" if p >= 0.2 else ""
-    rare = ' <span class="tag">珍しい手</span>' if p < 0.05 and p >= 0.005 else ""
-    off = ' <span class="tag">均衡外</span>' if p < 0.005 else ""
-    place = f"（{m['chosenRank']} 位 / {m['menu'][0]} 通り）" if m["chosenRank"] else ""
-    hard = ""
-    if m["hardChosen"]:
-        hc = m["hardChosen"]
-        names = " ／ ".join(f"{esc(x['name'])} {esc(x['text'])}" for x in hc["pair"])
-        hard = (
-            f'<div class="l2"><span class="dim">一番辛い相手の手</span> {names} '
-            f'<span class="dim">→ {SEAT[side]} から見て</span> <b class="n">{hc["ev"] * 100:.0f}%</b></div>'
+        return f'<div class="msl"><div class="l1">{label}<span class="dim">この席の読みはありません</span></div></div>'
+    line = f'{label}<span class="dim">均衡で打つ</span> <b class="n">{_played_n(m)}</b> <span class="dim">通り</span>'
+    scale = ""
+    worst, best = m.get("worst"), m.get("best")
+    if worst and best:
+        lo, hi = sorted((worst["ev"], best["ev"]))
+        spot = m.get("chosenEv") if m.get("chosenEv") is not None else m["own"]
+        dot = (
+            f'<span class="pt s{side}" style="left:{max(0.0, min(1.0, spot)) * 100:.1f}%"></span>'
+            if spot is not None
+            else ""
         )
-    line1 = (
-        f'<div class="l1">{label}<span class="dim">選んだ手</span> {moves} '
-        f'<span class="dim">・均衡の確率</span> <b class="n {weight}">{_pct(p)}</b>{place}{rare}{off}</div>'
-    )
-    return f'<div class="msl">{line1}{hard}</div>'
+        line += (
+            f' <span class="dim">・相手の均衡の中で 最悪</span> <b class="n">{worst["ev"] * 100:.0f}%</b>'
+            f' <span class="dim">／ 最善</span> <b class="n">{best["ev"] * 100:.0f}%</b>'
+            f' <span class="dim">（{SEAT[side]} から見て）</span>'
+        )
+        scale = (
+            f'<div class="rng"><span class="m50"></span>'
+            f'<span class="band s{side}" style="left:{max(0.0, lo) * 100:.1f}%;width:{max(0.01, min(1.0, hi) - max(0.0, lo)) * 100:.1f}%"></span>'
+            f"{dot}</div>"
+        )
+    else:
+        line += ' <span class="dim">・手ごとの値はありません（深さ 1 の答え）</span>'
+    return f'<div class="msl"><div class="l1">{line}</div>{scale}</div>'
 
 
 def _mix_html(t: dict[str, Any], sprites: Sprites) -> str:
@@ -1213,8 +1301,12 @@ def _mix_html(t: dict[str, Any], sprites: Sprites) -> str:
     lines = "".join(_mix_line(mix[s], s) for s in (0, 1))
     seats = "".join(_mix_seat(mix[s], s, sprites) for s in (0, 1))
     return (
-        f'<details class="mix"{" open" if sprites.open_mix else ""}><summary><span class="mh">均衡の手と辛い手 <small>読みの中の値で、真の強さではありません</small></span>{lines}</summary>'
-        f'<div class="mbody">{seats}</div></details>'
+        f'<details class="mix"{" open" if sprites.open_mix else ""}><summary>'
+        '<span class="mh">この手番の読み <small>両席の均衡と、相手の読みの中の値。真の強さではありません</small></span>'
+        f"{lines}</summary>"
+        f'<div class="mbody"><p class="dim mnote">辛い＝相手の全ての手の中で、選んだ手に一番辛い手。有利＝相手が均衡の中で打つ手のうち、'
+        "選んだ手に一番有利な手。値は相手が裏によらず同じ手を打つときの期待値で、深く読んでいない手は浅い読みのまま。</p>"
+        f"{seats}</div></details>"
     )
 
 
@@ -1242,9 +1334,9 @@ def _turn_html(t: dict[str, Any], model: dict[str, Any], sprites: Sprites) -> st
         if s < len(screens) and screens[s]
     )
     sides = (
-        _side_html(0, t["board"][0], sprites, t["hands"][0])
+        _side_html(0, t["board"][0], sprites, t["hands"][0], _eq_tag(t["mix"][0]))
         + field_mid
-        + _side_html(1, t["board"][1], sprites, t["hands"][1])
+        + _side_html(1, t["board"][1], sprites, t["hands"][1], _eq_tag(t["mix"][1]))
         + kept
     )
     note = f'<p class="note">{esc(t["note"])}</p>' if t["note"] else ""
@@ -1455,7 +1547,9 @@ def render_html(
         f"<h2>チーム（6 体・選出 4 体）</h2>{_teams(model, names, sprites)}"
         f'<h2>ターンごと</h2><p class="legend">各ターンの帯の ▼（橙）は席 0 の読み、▲（青）は席 1 の読み。'
         f"どちらも席 0 から見た勝率で、{SPLIT_PT}pt 以上離れたターンは間を塗って「読みが割れた」と書く。"
-        f"見出しの ▲ は席 0 有利へ、▼ は席 1 有利への動き。</p>{turns}{last}{final}"
+        f"見出しの ▲ は席 0 有利へ、▼ は席 1 有利への動き。"
+        f"「均衡で打つ手」は、混合の確率が {SUPPORT_MIN * 100:g}% 以上の手（サポート）。"
+        f"「候補」は行列に載せた手の数で、そのほとんどは確率がほぼ 0 の手。</p>{turns}{last}{final}"
         f"<h2>勝率の表</h2>{_table(model)}"
         "</main></body></html>\n"
     )
