@@ -77,7 +77,13 @@ def _played(roster, turns: int = 4, seed: int = 3) -> list[Position]:  # noqa: A
     return out
 
 
-def _open_read(reg, pos, stages, budget_ms=None, *, side=0, width=8):  # noqa: ANN001, ANN202
+def _named(stages, fills):  # noqa: ANN001, ANN202
+    parsed = ladder.parse_ladder(stages)
+    parsed.fills = fills
+    return parsed
+
+
+def _open_read(reg, pos, stages, budget_ms=None, *, side=0, width=8, fills=False):  # noqa: ANN001, ANN202
     ours = narrow(reg, pos, 0, limit=width).actions
     theirs = narrow(reg, pos, 1, limit=width).actions
     got = search(reg, pos, ours, theirs, LEAF, budget=Budget.matrix())
@@ -87,7 +93,7 @@ def _open_read(reg, pos, stages, budget_ms=None, *, side=0, width=8):  # noqa: A
                             col_strategies=[eq.col_strategy if side == 0 else eq.row_strategy])
     return ladder.read(reg, side, ours, theirs, [ladder.Item(pos)], [m if side == 0 else -m.T],
                        [1.0], start, LEAF, budget=Budget.matrix(),
-                       stages=ladder.parse_ladder(stages), budget_ms=budget_ms)
+                       stages=_named(stages, fills), budget_ms=budget_ms)
 
 
 def test_a_stage_label_reads_back() -> None:
@@ -265,3 +271,46 @@ def test_the_agent_plays_a_ladder_and_the_count_clock_replays_it(pool, monkeypat
     assert all("ladder" not in r for ln in first for r in ln["moves"] if r["condition"] == "flat")
     other = timematch.play_pair(match(4), 1, teams)
     assert json.dumps(_timeless(other)) != json.dumps(_timeless(first))
+
+
+def test_the_count_clock_fills_a_budget_only_when_asked(roster, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-384: ``COUNT_FILL`` with a ladder in `FILLS` begins the stage the prediction says
+    will not fit and spends the counted budget on it (the answer is still the last completed
+    stage, to the bit); off, or for a ladder not in `FILLS`, that stage is not begun."""
+    reg = roster.reg
+    stages = "d2r2b3n4+d2r4ban6x"
+    checked = 0
+    for pos in _played(roster):
+        full = _open_read(reg, pos, stages)
+        first, second = full.rungs
+        if first.spent_ms >= second.spent_ms or abs(first.value - second.value) < 1e-9:
+            continue
+        budget = first.spent_ms + 0.05 * (second.spent_ms - first.spent_ms)
+        monkeypatch.setattr(ladder, "COUNT_FILL", False)
+        off = _open_read(reg, pos, stages, budget, fills=True)
+        if off.cut != (0, 0):
+            continue  # the prediction let the stage begin: no difference to show here
+        assert off.unfinished == "d2r4ban6x"
+        monkeypatch.setattr(ladder, "COUNT_FILL", True)
+        unnamed = _open_read(reg, pos, stages, budget, fills=False)
+        assert unnamed.cut == (0, 0) and unnamed.work == off.work
+        filled = _open_read(reg, pos, stages, budget, fills=True)
+        assert filled.cut[0] > 0, "the flag did not begin the stage"
+        assert [r.stage for r in filled.rungs] == ["d2r2b3n4"]
+        np.testing.assert_array_equal(filled.strategy, first.strategy)
+        assert filled.unfinished == "d2r4ban6x"
+        assert filled.spent_ms >= budget
+        checked += 1
+    assert checked >= 1, "no position where the prediction refused the second stage"
+
+
+def test_a_rung_records_the_row_it_plays_most_only_when_asked(roster, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-384: ``RECORD_TOP`` adds ``top`` (the strategy's most played row) to each rung's JSON;
+    off, the JSON has no such key."""
+    pos = _played(roster)[0]
+    got = _open_read(roster.reg, pos, "d2r2b3n4+d2r4ban6x")
+    monkeypatch.setattr(ladder, "RECORD_TOP", False)
+    assert all("top" not in r.to_json() for r in got.rungs)
+    monkeypatch.setattr(ladder, "RECORD_TOP", True)
+    tops = [r.to_json()["top"] for r in got.rungs]
+    assert tops == [int(np.argmax(r.strategy)) for r in got.rungs] and len(tops) == 2

@@ -104,6 +104,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--merge", default="off", choices=("on", "off"),
                     help="the server's merged road (IKA-363; off: every answer is the one a local "
                     "leaf gives, so a node-time game is the same game served or not)")
+    ap.add_argument("--adjudicate", type=float, nargs=2, default=None,
+                    metavar=("FIRST_TURN", "THRESHOLD"),
+                    help="IKA-384: stop a game as decided when the mean of a turn's two reads' values "
+                    "is THRESHOLD or more from 1/2 (from turn FIRST_TURN on), the side of 1/2 "
+                    "giving the result. 3 0.45 stopped 94%% of 3,118 recorded games early, 1.6%% of "
+                    "those on the wrong side (records/IKA-384.md). Default: every game is played "
+                    "to its end")
+    ap.add_argument("--count-fill", action="store_true",
+                    help="IKA-384: a count-clock ladder in ladder.FILLS (L6) fills its budget as "
+                    "it does on the wall clock (ladder.COUNT_FILL). Default: off")
     ap.add_argument("--cpu-workers", type=int, default=0,
                     help="the last N of the --parallel processes score the leaf and the Q on the "
                     "CPU (node-time runs: more games at once than the card holds; each game is "
@@ -230,6 +240,10 @@ def settings(args: argparse.Namespace, tested, other, values, q_path) -> dict:  
         # IKA-363: where the forward passes ran, and whether the server merged them.
         "served": bool(args.served or args.inference),
         "merge": merging(args),
+        # IKA-384: only when set, so a run without them keeps its settings.
+        **({"adjudicate": [int(args.adjudicate[0]), args.adjudicate[1]]}
+           if args.adjudicate is not None else {}),
+        **({"countFill": True} if args.count_fill else {}),
     }
 
 
@@ -250,6 +264,11 @@ def worker(args: argparse.Namespace) -> None:
     tested, other = conditions(args)
     values, q_path = files(args)
     parse_bench_drop(args.bench_drop)
+    from pokeuraou import ladder
+
+    ladder.RECORD_TOP = True  # IKA-384: the record says which row each stage's answer plays most
+    if args.count_fill:
+        ladder.COUNT_FILL = True
     pool = load_pool(args.pool)
     reg = pool.reg
     register_mega_stones(reg)
@@ -290,6 +309,8 @@ def worker(args: argparse.Namespace) -> None:
         reg=reg, evaluate=evaluate, leaf_name=leaf_name(values), rank_fill=Q_FILL,
         bench_drop=args.bench_drop, tested=tested, other=other, seed=args.seed,
         max_turns=args.max_turns, halt=halt,
+        adjudication=None if args.adjudicate is None
+        else (int(args.adjudicate[0]), float(args.adjudicate[1])),
     )
     # The echo: what this process plays, as it resolved it (read this, not the command).
     print(
