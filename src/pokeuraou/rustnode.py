@@ -1063,10 +1063,14 @@ class RustNode:
 
     @timing.timed("rust.turn")
     def turn_many(
-        self, asks: Sequence[tuple[Position, list[SideAction]]], budget: Budget, *, full: bool
+        self, asks: Sequence[tuple[Position, list[SideAction]]], budget: Budget, *, full: bool,
+        bare: Sequence[bool] | None = None,
     ) -> list[PortTurn | str]:
         """`turn` for many (position, actions) in one crossing (IKA-295). A refused turn is
-        its refusal's text in place of the answer, where `turn` would have returned None."""
+        its refusal's text in place of the answer, where `turn` would have returned None.
+
+        ``bare[n]`` (IKA-389, with positions held): turn n's branches come back as their
+        numbers in the port and whether they ended (`HeldPosition`), not written out."""
         # IKA-302: with positions held, the port keeps every branch it writes under a
         # number, and a sub-game's `score` and `fills` name it instead of sending it back.
         refs = {"refs": True} if _HOLD[0] and full else {}
@@ -1083,8 +1087,9 @@ class RustNode:
                     "select": None,
                     "events": False,
                     **refs,
+                    **({"bare": True} if refs and bare is not None and bare[n] else {}),
                 }
-                for pos, actions in asks
+                for n, (pos, actions) in enumerate(asks)
             ]
         )
         out: list[PortTurn | str] = []
@@ -1097,7 +1102,13 @@ class RustNode:
                 for outcome, raw in zip(turn.outcomes, answer["branches"], strict=True):
                     key = raw.get("held")
                     if key is not None:
-                        _store(outcome.position, int(key))
+                        held = outcome.position
+                        if held.__class__ is HeldPosition:
+                            held.node = self
+                            held.stored = _Stored(int(key), held)
+                            BARE["branches"] += 1
+                        else:
+                            _store(held, int(key))
                         self._known.add(int(key))
             out.append(turn)
         return out
@@ -1942,6 +1953,54 @@ class _Stored:
         return self._json
 
 
+#: IKA-389: `bare` turns' branches kept as numbers, the ones written out after all
+#: (`HeldPosition.whole`), and the crossings that did it (the positive control).
+BARE = {"branches": 0, "materialized": 0, "crossings": 0}
+
+
+class HeldPosition:
+    """A turn's branch the port holds and did not write out (IKA-389, `bare`): its number
+    and whether it has ended. Requests name it by its number (`_position`); anything else
+    read of it asks the port for the position once (`whole`) and reads that."""
+
+    __slots__ = ("_whole", "ended", "key", "node", "stored")
+
+    def __init__(self, key: int, ended: bool) -> None:
+        self.key = key
+        self.ended = ended
+        self.node: RustNode | None = None
+        self.stored: _Stored | None = None
+        self._whole: Position | None = None
+
+    def whole(self) -> Position:
+        if self._whole is None:
+            materialize([self])
+        assert self._whole is not None
+        return self._whole
+
+    def __getattr__(self, name: str) -> Any:  # noqa: ANN401
+        return getattr(self.whole(), name)
+
+
+def materialize(positions: Sequence[Any]) -> list[Any]:  # noqa: ANN401
+    """Each `HeldPosition` of ``positions`` written out by its port (one crossing a port),
+    everything else as it is: the positions to read."""
+    wanted: dict[int, list[HeldPosition]] = {}
+    for pos in positions:
+        if pos.__class__ is HeldPosition and pos._whole is None:  # noqa: SLF001
+            wanted.setdefault(id(pos.node), []).append(pos)
+    for group in wanted.values():
+        node = group[0].node
+        if node is None:
+            raise RuntimeError("a held branch with no port to ask")
+        got = node._exchange({"kind": "positions", "ids": [p.key for p in group]})["positions"]  # noqa: SLF001
+        for pos, raw in zip(group, got, strict=True):
+            pos._whole = Position.from_json(raw)  # noqa: SLF001
+        BARE["materialized"] += len(group)
+        BARE["crossings"] += 1
+    return [p.whole() if p.__class__ is HeldPosition else p for p in positions]
+
+
 def _define(stored: _Stored, known: set[int], lines: list[bytes]) -> None:
     """The `hold` line for `stored` (and first its base's, if the port lacks it)."""
     known.add(stored.key)
@@ -1990,6 +2049,9 @@ def _forget() -> None:
 
 def _position(pos: Position) -> dict[str, Any] | _Stored:
     """`pos.to_json()`, or with `hold_positions` its number in the port (IKA-302)."""
+    if pos.__class__ is HeldPosition:
+        # IKA-389: a branch the port kept and never wrote out: its number, always.
+        return pos.stored
     if not _HOLD[0]:
         return pos.to_json()
     found = _HELD.get(id(pos))
@@ -2293,7 +2355,8 @@ class PortTurn:
             outcomes = [
                 PortBranch(
                     float(b["probability"]),
-                    Position.from_json(b["position"]),
+                    Position.from_json(b["position"]) if "position" in b
+                    else HeldPosition(int(b["held"]), bool(b["ended"])),
                     list(b.get("events") or []),
                     _acts(b),
                     list(b.get("chance") or []),

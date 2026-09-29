@@ -111,18 +111,21 @@ def turns(
     budget: Budget,
     *,
     full: bool = True,
+    bare: Sequence[bool] | None = None,
 ) -> list[PortTurn | PortRefused]:
     """`turn` of every (position, actions) in one crossing (IKA-295).
 
     Each answer is the one `turn` would have given alone; a refused one is the
     `PortRefused` that `turn` would have raised, handed back in its place so that the
-    caller raises it where it would have been met.
+    caller raises it where it would have been met. ``bare`` (IKA-389): the turns whose
+    branches stay in the port as `rustnode.HeldPosition`s.
     """
     if not asks:
         return []
 
     def call(node: RustNode) -> list[PortTurn | PortRefused]:
-        answers = node.turn_many([(pos, list(actions)) for pos, actions in asks], budget, full=full)
+        answers = node.turn_many([(pos, list(actions)) for pos, actions in asks], budget, full=full,
+                                 bare=bare)
         return [
             PortRefused(f"the port refused a turn: {answer}") if isinstance(answer, str) else answer
             for answer in answers

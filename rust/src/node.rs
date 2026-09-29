@@ -1180,6 +1180,14 @@ fn answer<R: BufRead, W: Write>(
         // (`portmenus.py`, off by default); and the pieces, for the checks that hold them to
         // the Python's.
         Ok(value) if value["kind"].as_str() == Some("qMenus") => crate::qmenus::q_menus(reg, encoder, &value),
+        // IKA-389: held positions written out, for a caller that kept only their numbers
+        // (a `bare` turn's branches) and needs one whole.
+        Ok(value) if value["kind"].as_str() == Some("positions") => json!({
+            "positions": value["ids"]
+                .as_array()
+                .map(|ids| ids.iter().map(|id| crate::held::json(&json!({ "held": id }))).collect::<Vec<_>>())
+                .unwrap_or_default(),
+        }),
         Ok(value) if value["kind"].as_str() == Some("legal") => crate::qmenus::legal_command(reg, &value),
         Ok(value) if value["kind"].as_str() == Some("qArrays") => crate::qmenus::arrays_command(reg, encoder, &value),
         Ok(value) if value["kind"].as_str() == Some("qScores") => crate::qmenus::scores_command(&value),

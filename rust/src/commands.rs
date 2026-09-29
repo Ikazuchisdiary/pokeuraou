@@ -454,7 +454,7 @@ fn requested_pause<'a>(reg: &'a Reg, value: &Value) -> Result<Suspended<'a>, Str
 /// `refs` (IKA-302): each branch's position is also kept here under a number the caller
 /// can send back in its place (`held`). `digest` (IKA-378): and each branch's position's
 /// `held::digest`, by which the ladder's workers share a child's sub-game.
-fn result_json(result: &TurnResult, full: bool, refs: bool, digest: bool) -> Result<Value, String> {
+fn result_json(result: &TurnResult, full: bool, refs: bool, digest: bool, bare: bool) -> Result<Value, String> {
     let unmodelled: Vec<String> = result.unmodelled.iter().cloned().collect();
     if !full {
         return Ok(json!({
@@ -469,8 +469,15 @@ fn result_json(result: &TurnResult, full: bool, refs: bool, digest: bool) -> Res
             .branches
             .iter()
             .map(|b| {
-                let mut branch =
-                    json!({ "probability": b.probability, "position": b.position.to_json() });
+                // IKA-389 `bare` (with `refs`): the position stays here, under its number,
+                // and only whether it has ended goes back -- an ended one whole, since the
+                // caller's leaf reads it; the caller asks for any other whole (`positions`)
+                // where it needs more.
+                let mut branch = if bare && refs && !b.position.ended {
+                    json!({ "probability": b.probability, "ended": b.position.ended })
+                } else {
+                    json!({ "probability": b.probability, "position": b.position.to_json() })
+                };
                 if refs {
                     branch["held"] = json!(crate::held::keep(&b.position));
                 }
@@ -509,7 +516,8 @@ fn turn_command(reg: &Reg, value: &Value) -> Result<Value, String> {
     let full = value["full"].as_bool().unwrap_or(false);
     let refs = value.get("refs").and_then(Value::as_bool).unwrap_or(false);
     let digest = value.get("digest").and_then(Value::as_bool).unwrap_or(false);
-    let mut out = result_json(&result, full, refs, digest)?;
+    let bare = value.get("bare").and_then(Value::as_bool).unwrap_or(false);
+    let mut out = result_json(&result, full, refs, digest, bare)?;
     if let Some(index) = value.get("select").and_then(Value::as_u64).map(|k| k as usize) {
         let count = result.branches.len();
         if index < count {
@@ -569,7 +577,7 @@ fn alternatives_command(reg: &Reg, value: &Value) -> Result<Value, String> {
             resumed.unmodelled.insert("simultaneous mid-turn replacements".into());
         }
         options.push(option.iter().map(slot_action_json).collect::<Vec<_>>());
-        results.push(result_json(&resumed, full, false, false)?);
+        results.push(result_json(&resumed, full, false, false, false)?);
     }
     Ok(json!({ "chooser": chooser, "options": options, "results": results }))
 }

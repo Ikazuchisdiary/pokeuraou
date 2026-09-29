@@ -38,7 +38,30 @@ ENV = "POKEURAOU_LADDER_PORT_MENUS"
 ON = [os.environ.get(ENV, "0").strip() == "1"]
 #: What went: crossings, positions asked about, of them the ones with a game (the positive
 #: control), the Q's requests the port sent, and games the LP could not solve.
-COUNTS = {"crossings": 0, "positions": 0, "asked": 0, "requests": 0, "unsolved": 0}
+COUNTS = {"crossings": 0, "positions": 0, "asked": 0, "requests": 0, "unsolved": 0,
+          # IKA-389 B3b: depth-2 turns whose branches stayed in the port, and those written
+          # out whole because another completion's cells are read off them.
+          "bareTurns": 0, "wholeTurns": 0}
+
+
+BARE_ENV = "POKEURAOU_LADDER_PORT_BARE"
+#: B3b: whether a depth-2 call's turns leave their branches in the port. Off by default; on
+#: turns this road (and so `portserved` and `portlp`) on.
+BARE_ON = [os.environ.get(BARE_ENV, "0").strip() == "1"]
+
+
+def set_bare(on: bool) -> None:
+    BARE_ON[0] = bool(on)
+    if on:
+        set_on(True)
+
+
+def bare_turns() -> bool:
+    """Whether a depth-2 call's turns leave their branches in the port (B3b): with the flag
+    on and positions held (`rustnode.hold_positions`). The branches are then named by number
+    -- to the port's menus and fills -- and a branch read otherwise is written out then
+    (`rustnode.HeldPosition`)."""
+    return BARE_ON[0] and ON[0] and rustnode._HOLD[0]  # noqa: SLF001
 
 
 def set_on(on: bool) -> None:
@@ -48,7 +71,7 @@ def set_on(on: bool) -> None:
         portserved.set_on(True)
 
 
-set_on(ON[0])
+set_on(ON[0] or BARE_ON[0])
 
 #: The gemv and thread-count symbols of numpy's OpenBLAS, by its build's prefix.
 _SYMBOLS = (
@@ -178,6 +201,18 @@ def q_menus(
 
 def counts() -> dict[str, int]:
     return dict(COUNTS)
+
+
+#: What a ladder read reports of this road (`tally`), by name.
+TALLY = ("portMenus", "portBare", "portWholeTurns", "portWrittenOut")
+
+
+def tally() -> tuple[int, int, int, int]:
+    """The process's totals a read reports the change of: children whose menus the port built,
+    branches left in the port, turns written out whole for a share, and kept branches written
+    out after all (the positive controls of B3a and B3b)."""
+    return (COUNTS["asked"], rustnode.BARE["branches"], COUNTS["wholeTurns"],
+            rustnode.BARE["materialized"])
 
 
 __all__ = ["COUNTS", "ENV", "ON", "blas", "counts", "q_menus", "set_on"]

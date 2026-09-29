@@ -519,7 +519,7 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
         rustnode.DIGESTS[0] = True
     here_began = (tuple(rustnode.PORT_WAITED), time.process_time(), _served(leaf),
                   dict(subshare.COUNTS), portlp.COUNTS["lps"], portserved.COUNTS["requests"],
-                  portmenus.COUNTS["asked"])
+                  portmenus.tally())
     if pool is not None:
         pool.reg = reg
         pool.begin(row, col, items, budget, hidden_side, cost)
@@ -784,8 +784,10 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
                        "portLps": portlp.COUNTS["lps"] - here_began[4],
                        # IKA-386: the inference server's requests its port sent.
                        "portServed": portserved.COUNTS["requests"] - here_began[5],
-                       # IKA-389: the children whose Q menus this process's port built.
-                       "portMenus": portmenus.COUNTS["asked"] - here_began[6]}
+                       # IKA-389: the children whose Q menus this process's port built, and
+                       # the depth-2 branches it kept (B3b).
+                       **{name: now - then for name, now, then
+                          in zip(portmenus.TALLY, portmenus.tally(), here_began[6], strict=True)}}
     result.work = work
     if result.rungs:
         result.unmodelled.add(f"ladder read to {result.depth_reached} ({len(result.rungs)} "
@@ -1898,6 +1900,7 @@ def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  
             portserved.ON[0] = bool(message[9])
             # IKA-389: and whether they build the children's Q menus (`portmenus`).
             portmenus.ON[0] = bool(message[10])
+            portmenus.BARE_ON[0] = bool(message[11])
             continue
         kind, task, stage, stage_budget, cells = message
         row, col, items, root_budget, hidden_side, cost = context
@@ -1906,12 +1909,13 @@ def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  
         if cancel.is_set():
             # Sent before the reader stopped: not read.
             conn.send(("stopped", task, None, [work], notes,
-                       (0.0, 0.0, 0, 0.0, 0.0, 0, 0, (0, 0, 0, 0, 0), 0, 0, 0, 0)))
+                       (0.0, 0.0, 0, 0.0, 0.0, 0, 0, (0, 0, 0, 0, 0), 0, 0, 0,
+                        (0,) * len(portmenus.TALLY))))
             continue
         shared_began = dict(subshare.COUNTS)
         lps_began = portlp.COUNTS["lps"]
         served_began = portserved.COUNTS["requests"]
-        menus_began = portmenus.COUNTS["asked"]
+        menus_began = portmenus.tally()
         search.WORK = work
         # IKA-374: the work is said cell by cell: a stage may take a part of a chunk read
         # ahead (`AHEAD`), and counts only the cells it takes.
@@ -1989,7 +1993,7 @@ def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  
                 # IKA-386: the inference server's requests its port sent (`portserved`).
                 portserved.COUNTS["requests"] - served_began,
                 # IKA-389: the children whose Q menus its port built (`portmenus`).
-                portmenus.COUNTS["asked"] - menus_began)
+                tuple(now - then for now, then in zip(portmenus.tally(), menus_began, strict=True)))
         conn.send((status, task, got, work, notes, took))
 
 
@@ -2100,7 +2104,8 @@ class _Pool:
             self.table.begin(self.generation)
         # IKA-381: and whether the workers solve their LPs in their ports (`portlp`), as here.
         self._context = ("read", list(row), list(col), plain, budget, hidden_side, cost,
-                         self.generation, portlp.ON[0], portserved.ON[0], portmenus.ON[0])
+                         self.generation, portlp.ON[0], portserved.ON[0], portmenus.ON[0],
+                         portmenus.BARE_ON[0])
         self._due = set(self._orphans)
         for i, conn in enumerate(self.conns):
             if i not in self._due:
@@ -2141,7 +2146,7 @@ class _Pool:
                       "busySubgames": 0, "waitedSubgames": 0, "openCells": 0, "kidReads": 0,
                       "kidsJoined": 0, "passChunks": 0, "wholeCells": 0, "passSplits": 0,
                       "portLps": 0, "kidSolves": 0, "kidSolveTrips": 0, "portServed": 0,
-                      "portMenus": 0}
+                      **dict.fromkeys(portmenus.TALLY, 0)}
         self._last_end = time.perf_counter()
         self._trace = ({"t0": self._last_end, "workers": len(self.conns), "calls": [],
                         "chunks": [], "stages": []} if TRACE_DIR else None)
@@ -2209,7 +2214,8 @@ class _Pool:
         took, server_s, trips, cpu_s, port_s, port_reads, held, shared, kept, lps, asked, menus = times
         self.stats["portLps"] += lps
         self.stats["portServed"] += asked
-        self.stats["portMenus"] += menus
+        for name, n in zip(portmenus.TALLY, menus, strict=True):
+            self.stats[name] += n
         self.stats["heldPositions"] += held
         self.stats["sharedSubgames"] += shared[0] + shared[1]
         self.stats["sameSubgames"] += shared[1]

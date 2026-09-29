@@ -148,7 +148,7 @@ from typing import Any
 import numpy as np
 
 from . import deepen as _deepen
-from . import port, portlp, portserved, rank_scores, timing
+from . import port, portlp, portmenus, portserved, rank_scores, rustnode, timing
 from .actions import SideAction
 from .budget import Budget
 from .equilibrium import Equilibrium, EquilibriumError, solve
@@ -1036,9 +1036,24 @@ def _cell_turns(
             leading[share.key] = index
         asked.append(index)
 
+    # IKA-389 (`portmenus`): a turn whose branches are read only by number -- every one but a
+    # clean share's first, whose positions another completion's cells are read off --
+    # leaves them in the port (`rustnode.HeldPosition`).
+    bare_ok = portmenus.bare_turns()
+
     def resolve(indices: list[int]) -> None:
+        bare = None
+        if bare_ok:
+            bare = [
+                not (shares is not None and shares[i] is not None and shares[i].clean
+                     and shares[i].key not in shares[i].cache)
+                for i in indices
+            ]
+            portmenus.COUNTS["wholeTurns"] += bare.count(False)
+            portmenus.COUNTS["bareTurns"] += bare.count(True)
         found = port.turns(
-            reg, [(cells[i][0], [cells[i][1], cells[i][2]]) for i in indices], budget, full=True
+            reg, [(cells[i][0], [cells[i][1], cells[i][2]]) for i in indices], budget, full=True,
+            bare=bare,
         )
         for index, answer in zip(indices, found, strict=True):
             answers[index] = answer
@@ -1259,7 +1274,7 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
                     sub = _Sub(ended=True)
                     ended_subs.append((sub, pos))
                 elif menu is None:
-                    sub = _Sub(value=float(evaluate([pos])[0]), ended=True)
+                    sub = _Sub(value=float(evaluate(rustnode.materialize([pos]))[0]), ended=True)
                 else:
                     sub = _Sub()
                     for narrowed in menu:
@@ -1307,7 +1322,9 @@ def _refine_cells(  # noqa: PLR0913, C901, PLR0912 - the cells, the depth-2 knob
                     # `_refined_value` stops at this branch; the ones after it are not asked.
                     break
         if ended_subs:
-            values = np.asarray(evaluate([pos for _sub, pos in ended_subs]), dtype=np.float64)
+            # IKA-389: an ended branch the port kept is written out here (the leaf reads it).
+            ended_positions = rustnode.materialize([pos for _sub, pos in ended_subs])
+            values = np.asarray(evaluate(ended_positions), dtype=np.float64)
             for (sub, _pos), value in zip(ended_subs, values, strict=True):
                 sub.value = float(value)
 
