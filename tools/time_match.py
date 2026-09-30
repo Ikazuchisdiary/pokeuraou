@@ -74,7 +74,7 @@ from pokeuraou.selfplay import MAX_TURNS  # noqa: E402
 from pokeuraou.sprt import Sprt  # noqa: E402
 from pokeuraou.workqueue import WorkClient, run_workers  # noqa: E402
 
-GAME_FILES = "games-worker*.jsonl"
+GAME_FILES = "games-*worker*.jsonl"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -95,6 +95,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--pool", default="regmc-matchupweb")
     ap.add_argument("--value", type=Path, nargs="+", default=None,
                     help=f"the leaf. Default: {' '.join(DEFAULT_VALUE)}")
+    ap.add_argument("--other-value", type=Path, nargs="+", default=None,
+                    help="IKA-398: the second condition's own leaf (the first --arm reads --value, "
+                    "the second this). Served only, and threads=1 in both conditions. With "
+                    "--served the run starts one server for each leaf, and a third for the Q "
+                    "alone, so a condition's forward passes queue behind its own leaf only")
+    ap.add_argument("--other-inference", default=None, metavar="HOST:PORT",
+                    help="a running server holding --other-value as arm 'value'")
+    ap.add_argument("--q-inference", default=None, metavar="HOST:PORT",
+                    help="a running server holding the Q (--q-model) as arm 'q', asked for the "
+                    "menus of both conditions; default: the --inference server")
     ap.add_argument("--q-model", type=Path, default=None, help=f"the Q. Default: {qrank.DEFAULT_Q}")
     ap.add_argument("--bench-drop", default=DEFAULT_BENCH_DROP)
     ap.add_argument("--max-turns", type=int, default=MAX_TURNS)
@@ -182,6 +192,19 @@ def files(args: argparse.Namespace) -> tuple[list[Path], Path]:
     return [Path(v) for v in values], Path(q_path)
 
 
+def other_files(args: argparse.Namespace) -> list[Path] | None:
+    """The second condition's leaf files (``--other-value``), or None: the same leaf."""
+    if args.other_value is None:
+        return None
+    missing = [str(p) for p in args.other_value if not Path(p).exists()]
+    if missing:
+        raise SystemExit(f"missing: {', '.join(missing)} (--other-value)")
+    if not (args.served or (args.inference and args.other_inference)):
+        raise SystemExit("--other-value needs the leaves on servers: --served, or --inference "
+                         "with --other-inference")
+    return [Path(v) for v in args.other_value]
+
+
 def cpu_sets(spec: str | None, parallel: int) -> list[list[int]]:
     if spec is None:
         if parallel <= 1:
@@ -230,6 +253,7 @@ def settings(args: argparse.Namespace, tested, other, values, q_path) -> dict:  
         "other": other.to_json(),
         "leaf": [str(v) for v in values],
         "leafName": leaf_name(values),
+        **({"otherLeaf": [str(v) for v in other_files(args)]} if args.other_value else {}),
         "rankFill": Q_FILL,
         "qModel": str(q_path),
         "benchDrop": args.bench_drop,
@@ -273,6 +297,9 @@ def worker(args: argparse.Namespace) -> None:
         psutil.Process().cpu_affinity([int(c) for c in args.cpus.split(",")])
     tested, other = conditions(args)
     values, q_path = files(args)
+    other_values = other_files(args)
+    if other_values is not None and (tested.threads != 1 or other.threads != 1):
+        raise SystemExit("--other-value: the deepening workers hold one leaf, so threads=1 in both")
     parse_bench_drop(args.bench_drop)
     from pokeuraou import ladder
 
@@ -287,8 +314,11 @@ def worker(args: argparse.Namespace) -> None:
     if args.inference:
         # IKA-363: the leaf and the Q on the server; no torch here.
         merge = merging(args)
-        evaluate, encoder = humanplay.served_leaf(reg, args.inference, values, merge=merge,
-                                                  q_path=q_path)
+        evaluate, encoder = humanplay.served_leaf(
+            reg, args.inference, values, merge=merge,
+            q_path=None if args.q_inference else q_path)
+        if args.q_inference:
+            qrank.install(humanplay.served_q(args.q_inference, q_path, encoder))
         device = f"server {args.inference}" + (" (merged)" if merge else "")
         q = qrank.installed()
         humanplay.use_threads(threads, reg, (args.inference, "value", merge),
@@ -315,8 +345,18 @@ def worker(args: argparse.Namespace) -> None:
         analysis.Limits(rss_gb=args.max_rss_gb, free_gb=args.min_free_gb, gpu_gb=args.max_gpu_gb),
         halt, lambda text: print(text, file=sys.stderr, flush=True),
     )
+    other_evaluate = None
+    other_note = ""
+    if other_values is not None:
+        other_evaluate, _ = humanplay.served_leaf(reg, args.other_inference, other_values,
+                                                  merge=merge)
+        other_note = (f"  other condition's leaf {leaf_name(other_values)} "
+                      f"({', '.join(str(v) for v in other_values)}) on server "
+                      f"{args.other_inference}, Q on {args.q_inference or args.inference}\n")
     match = timematch.Match(
         reg=reg, evaluate=evaluate, leaf_name=leaf_name(values), rank_fill=Q_FILL,
+        other_evaluate=other_evaluate,
+        other_leaf_name=None if other_values is None else leaf_name(other_values),
         bench_drop=args.bench_drop, tested=tested, other=other, seed=args.seed,
         max_turns=args.max_turns, halt=halt,
         adjudication=None if args.adjudicate is None
@@ -328,6 +368,7 @@ def worker(args: argparse.Namespace) -> None:
         f"worker {args.worker}: cpus {args.cpus or 'all'} "
         f"(affinity {len(__import__('psutil').Process().cpu_affinity())} logical)\n"
         f"  tested {tested.describe()}\n  other  {other.describe()}\n"
+        f"{other_note}"
         f"  leaf {match.leaf_name} ({', '.join(str(v) for v in values)}) on {device}, "
         f"menus {Q_FILL} ({', '.join(q.describe())}), bench drop {args.bench_drop}\n"
         f"  deepening workers {started_workers}, threads {threads}, "
@@ -584,17 +625,40 @@ def driver(args: argparse.Namespace, argv: list[str]) -> int:
     env = dict(os.environ)
     env["PYTHONPATH"] = str(ROOT / "src")
     server = None
+    extra_servers: list = []
     inference = args.inference
+    other_inference = args.other_inference
+    q_inference = args.q_inference
+    other_values = other_files(args)
+    if other_values is not None and (tested.threads != 1 or other.threads != 1):
+        raise SystemExit("--other-value: the deepening workers hold one leaf, so threads=1 in both")
     if args.served:
         from pokeuraou.inference import start_server
         from pokeuraou.pool import load_pool
 
-        server, inference = start_server(
-            {"value": values}, q_arms={"q": q_path},
-            regulation=load_pool(args.pool).reg.meta.format_id,
-            log=out / "logs" / "inference.log", env=env,
-            device=args.device or "cuda",
-        )
+        regulation = load_pool(args.pool).reg.meta.format_id
+        device = args.device or "cuda"
+        if other_values is None:
+            server, inference = start_server(
+                {"value": values}, q_arms={"q": q_path}, regulation=regulation,
+                log=out / "logs" / "inference.log", env=env, device=device,
+            )
+        else:
+            # IKA-398: one server a leaf, and the Q on a third that the two conditions share
+            # (its 'value' arm is never asked): each condition's leaf calls queue behind its
+            # own leaf's calls only.
+            server, inference = start_server(
+                {"value": values}, regulation=regulation,
+                log=out / "logs" / "inference.log", env=env, device=device)
+            other_server, other_inference = start_server(
+                {"value": other_values}, regulation=regulation,
+                log=out / "logs" / "inference-other.log", env=env, device=device)
+            q_server, q_inference = start_server(
+                {"value": other_values}, q_arms={"q": q_path}, regulation=regulation,
+                log=out / "logs" / "inference-q.log", env=env, device=device)
+            extra_servers = [other_server, q_server]
+            print(f"  other leaf's server {other_inference}, Q's server {q_inference}",
+                  file=sys.stderr, flush=True)
         print(f"  inference server {inference} (the processes hold no model), merged road "
               f"{'on' if merging(args) else 'off'}", file=sys.stderr, flush=True)
 
@@ -603,7 +667,10 @@ def driver(args: argparse.Namespace, argv: list[str]) -> int:
         return [sys.executable, str(Path(__file__).resolve()), *argv, "--worker", str(k),
                 "--address", address, "--cpus", ",".join(str(c) for c in sets[k]),
                 *(["--device", "cpu"] if on_cpu else []),
-                *(["--inference", inference] if inference and not args.inference else [])]
+                *(["--inference", inference] if inference and not args.inference else []),
+                *(["--other-inference", other_inference]
+                  if other_inference and not args.other_inference else []),
+                *(["--q-inference", q_inference] if q_inference and not args.q_inference else [])]
 
     outcome: dict = {}
     try:
@@ -613,8 +680,9 @@ def driver(args: argparse.Namespace, argv: list[str]) -> int:
             poll=args.poll, max_failures=0, outcome=outcome,
         )
     finally:
-        if server is not None:
-            server.terminate()
+        for proc in (server, *extra_servers):
+            if proc is not None:
+                proc.terminate()
     monitor.save()
     result = summary(out, tested, other, monitor, outcome)
     (out / "summary.json").write_bytes((json.dumps(result, indent=1) + "\n").encode("utf-8"))

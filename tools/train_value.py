@@ -204,6 +204,16 @@ def warm_start(
     net, meta = load_model(path, encoder)
     blob = torch.load(path, map_location="cpu", weights_only=False)
     config = replace(ValueConfig(**blob["config"]), **run)
+    if config.attention and not net.config.attention:
+        # IKA-90: the attention layer's output projection starts at zero, so before the
+        # first step this net answers exactly as the loaded one.
+        torch.manual_seed(config.seed)
+        grown = build(encoder, config)
+        grown._active_feature = net._active_feature
+        missing, unexpected = grown.load_state_dict(net.state_dict(), strict=False)
+        if unexpected or any(not k.startswith("mon_attention.") for k in missing):
+            raise SystemExit(f"warm start into attention: missing {missing}, unexpected {unexpected}")
+        net = grown
     if config.move_properties and not net.config.move_properties:
         # IKA-318: an id-only model gains the move-property branch. Its input columns start
         # at zero, so before the first step this net answers exactly as the loaded one; the
@@ -303,6 +313,13 @@ def main() -> None:
         "at zero, so the first step starts from that model's own answers.",
     )
     ap.add_argument(
+        "--attention",
+        action="store_true",
+        help="IKA-90: one residual attention layer across the Pokemon tokens of both sides. "
+        "With --init-from a model without it, its output projection starts at zero, so the "
+        "first step starts from that model's own answers.",
+    )
+    ap.add_argument(
         "--drop-train-moves",
         default="",
         help="comma-separated move ids: leave every training decision whose position holds "
@@ -386,6 +403,7 @@ def main() -> None:
             ("swa_from", args.swa_from),
             ("pct_start", args.pct_start),
             ("move_properties", True if args.move_properties else None),
+            ("attention", True if args.attention else None),
         )
         if value is not None
     }
