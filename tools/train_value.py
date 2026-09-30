@@ -288,6 +288,14 @@ def main() -> None:
     ap.add_argument("--swa-from", type=float, default=None)
     ap.add_argument("--pct-start", type=float, default=None)
     ap.add_argument(
+        "--width-scale",
+        type=float,
+        default=1.0,
+        help="IKA-398: multiply every embedding and hidden width by this (species 48, "
+        "ability 24, item 24, move 32, mon 160, side 192, head 256). Fresh initialisation "
+        "only: a warm start needs the source model's shapes.",
+    )
+    ap.add_argument(
         "--move-properties",
         action="store_true",
         help="IKA-318: read each move's dex properties (qhead.move_table) beside its id "
@@ -381,6 +389,15 @@ def main() -> None:
         )
         if value is not None
     }
+    if args.width_scale != 1.0:
+        if args.init_from is not None:
+            raise SystemExit("--width-scale changes the shapes; it cannot warm-start")
+        base = ValueConfig()
+        for name in (
+            "species_dim", "ability_dim", "item_dim", "move_dim", "mon_dim", "side_dim",
+            "head_dim",
+        ):
+            schedule[name] = int(round(getattr(base, name) * args.width_scale))
     run = dict(
         epochs=args.epochs,
         batch_size=args.batch_size,
