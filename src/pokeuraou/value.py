@@ -450,7 +450,7 @@ def concat_datasets(parts: Sequence[Dataset]) -> Dataset:
     )
 
 
-def td_target(dataset: Dataset, lam: float) -> np.ndarray:
+def td_target(dataset: Dataset, lam: float, *, from_game: int | None = None) -> np.ndarray:
     """``(1 - lam) * outcome + lam * search_value``, the label to fit instead of the outcome.
 
     The outcome is the truth but it is an extremely noisy sample of it. Every decision in
@@ -496,6 +496,12 @@ def td_target(dataset: Dataset, lam: float) -> np.ndarray:
 
     A decision without ``foeSearchValue`` (open, self-switch, before IKA-127) has NaN
     there, and any mixture must fall back to ``searchValue`` for it.
+
+    :param from_game: when given, rows of games numbered below it keep the outcome alone
+        (``lam = 0`` there) and the mix applies from that game on (IKA-403). In a pool of
+        several generations the teacher of each shard is the previous generation's leaf,
+        and the first one (value-gen11L, log loss 0.4744 on mc2's held-out games) is worse
+        than the student while the later ones are better (0.4087 against 0.4150).
     """
     if not 0.0 <= lam <= 1.0:
         raise ValueError(f"lam must be in [0, 1], got {lam}")
@@ -504,9 +510,12 @@ def td_target(dataset: Dataset, lam: float) -> np.ndarray:
     outcome = dataset.outcome.astype(np.float32)
     if lam == 0.0:
         return outcome
-    return ((1.0 - lam) * outcome + lam * dataset.search_value.astype(np.float32)).astype(
+    mixed = ((1.0 - lam) * outcome + lam * dataset.search_value.astype(np.float32)).astype(
         np.float32
     )
+    if from_game is None:
+        return mixed
+    return np.where(dataset.game >= from_game, mixed, outcome).astype(np.float32)
 
 
 def load_ensemble(
