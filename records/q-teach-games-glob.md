@@ -11,3 +11,8 @@ gen-2 の局のファイルは `games-bNN-workerK.jsonl` で、`tools/q_teach.py
 - tests/test_games_file_glob.py: 両方の名前を拾い、rank-worker・workers-Q1.json・summary.jsonl は拾わない。変更前のコードで落ち、変更後に通る。
 - ruff 通過。test_luck の 3 件は worktree に port の exe が無いため PortUnavailable（glob と無関係）。
 - 注意: `games-*worker*` は再開の `games-r1-worker0.jsonl` も読む（読む側では望ましい）。
+
+## 取り込み前の確認
+- 再開のファイルとの重なり: `queue_restart.py merge` は out の全 `*.jsonl` の gameIndex を集め（`have`）、再開側の局が `have` にあれば `dropped-duplicates.jsonl` に回して書かない（merge 関数の `if index in have:`）。よって `games-r1-worker0.jsonl` は元のファイルと同じ局を含まず、新しい glob で二重に数えない。
+- port の exe を worktree で作り直し（cargo build --release、vendor/HiGHS を init）、test_games_file_glob・test_luck・test_sprt・test_profile_stages は全部通った。
+- data/selfplay-mc1 で旧 q_teach.py（master）と新で index を作り、file_no・offset・length・line・decision・turn・game の配列と files が全部一致（先頭 100 も同じ）。
