@@ -208,7 +208,7 @@ def read_games(
     # was missing from the scale, which is every measurement taken on the ensemble floor.
     # `run_and_report.sh` had the same bug and was fixed; this copy was not.
     paths = sorted(
-        set(root.glob("**/games-seed*.jsonl")) | set(root.glob("**/games-worker*.jsonl"))
+        set(root.glob("**/games-seed*.jsonl")) | set(root.glob("**/games-*worker*.jsonl"))
     )
 
     # Parsed once per file and kept, keyed on the file's size and mtime.

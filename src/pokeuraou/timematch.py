@@ -505,10 +505,29 @@ class Match:
     loc: Any = None  # noqa: ANN401
     #: Extra fields written into every game line (the pool, the Q).
     stamp: dict[str, Any] = field(default_factory=dict)
+    #: IKA-398: the other condition's own leaf, in place of ``evaluate`` (None: both
+    #: conditions read ``evaluate``, as every run before it). Each condition's moves and its
+    #: selection solve read its leaf only.
+    other_evaluate: Any = None  # noqa: ANN401
+    other_leaf_name: str | None = None
+
+    def leaf_of(self, condition: Condition) -> tuple[Any, str]:
+        """The leaf a condition reads and its name."""
+        if self.other_evaluate is not None and condition is self.other:
+            return self.other_evaluate, self.other_leaf_name or self.leaf_name
+        return self.evaluate, self.leaf_name
+
+    def solve_key(self, condition: Condition) -> tuple[str | None, bool]:
+        """What a condition's selection solve depends on: its reading and whether it has a
+        leaf of its own. Conditions with the same key share one solve."""
+        return condition.selection, (
+            self.other_evaluate is not None and condition is self.other
+        )
 
     def agent(self, condition: Condition) -> humanplay.Agent:
+        evaluate, leaf_name = self.leaf_of(condition)
         return humanplay.Agent(
-            reg=self.reg, evaluate=self.evaluate, name=self.leaf_name,
+            reg=self.reg, evaluate=evaluate, name=leaf_name,
             seconds=condition.seconds, cores=condition.price_cores, clock=condition.clock,
             rank_fill=self.rank_fill, rank_by_leaf=self.rank_by_leaf, bench_drop=self.bench_drop,
             width_only=condition.width_only, width=condition.width,
@@ -534,33 +553,35 @@ def play_pair(match: Match, pair: int, teams: tuple[Any, Any]) -> list[dict[str,
     # The selection of each condition (IKA-392): one solve per reading, however many sides
     # play from it. Both conditions on the same one (every run before it): the one solve,
     # one belief, exactly as they always were.
-    reports: dict[str | None, list[Any]] = {}
-    entries: dict[str | None, Any] = {}
+    reports: dict[Any, list[Any]] = {}
+    entries: dict[Any, Any] = {}
     for condition in (match.tested, match.other):
-        if condition.selection not in entries:
-            reports[condition.selection] = []
-            entries[condition.selection] = (
-                humanplay.solve_entry(reg, teams, match.evaluate, match.leaf_name,
+        key = match.solve_key(condition)
+        evaluate, leaf_name = match.leaf_of(condition)
+        if key not in entries:
+            reports[key] = []
+            entries[key] = (
+                humanplay.solve_entry(reg, teams, evaluate, leaf_name,
                                       reading=condition.selection,
                                       reader=None if condition.selection is None else (
                                           selection_deep.READER or selection_deep.SerialReader(
-                                              reg, match.evaluate, rank_fill=match.rank_fill,
+                                              reg, evaluate, rank_fill=match.rank_fill,
                                               rank_by_leaf=match.rank_by_leaf)),
-                                      report=reports[condition.selection])
-                if match.evaluate is not None else None
+                                      report=reports[key])
+                if evaluate is not None else None
             )
     selection_seconds = time.perf_counter() - started
-    split = match.tested.selection != match.other.selection
+    split = match.solve_key(match.tested) != match.solve_key(match.other)
     selection_info = {
         condition.name: {
-            "reading": condition.selection, "cells": reports[condition.selection][0].cells,
-            "seconds": round(reports[condition.selection][0].seconds, 2),
-            "value": round(reports[condition.selection][0].value, 5),
-            "leafValue": round(reports[condition.selection][0].leaf_value, 5),
-            "completed": reports[condition.selection][0].completed,
+            "reading": condition.selection, "cells": reports[match.solve_key(condition)][0].cells,
+            "seconds": round(reports[match.solve_key(condition)][0].seconds, 2),
+            "value": round(reports[match.solve_key(condition)][0].value, 5),
+            "leafValue": round(reports[match.solve_key(condition)][0].leaf_value, 5),
+            "completed": reports[match.solve_key(condition)][0].completed,
         }
         for condition in (match.tested, match.other)
-        if reports.get(condition.selection)
+        if reports.get(match.solve_key(condition))
     }
     agent_side = pair % 2
     lines = []
@@ -571,7 +592,7 @@ def play_pair(match: Match, pair: int, teams: tuple[Any, Any]) -> list[dict[str,
         )
         seats = (match.agent(conditions[0]), match.agent(conditions[1]))
         you = 1 - agent_side
-        seat_entries = [entries[c.selection] for c in conditions]
+        seat_entries = [entries[match.solve_key(c)] for c in conditions]
         entry = seat_entries[agent_side]
         person = SeatPerson(seat_entries[you], you,
                             np.random.default_rng([match.seed, pair, 1, you]))

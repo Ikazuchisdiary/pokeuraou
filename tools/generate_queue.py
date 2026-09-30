@@ -60,7 +60,7 @@ def main() -> None:
     ap.add_argument("--q-model", default=None,
                     help="the Q a q / q-nocover --rank-fill ranks by (IKA-274): the servers "
                     "load it as the Q arm `q` (workers get --q-arm q); unserved, every "
-                    "worker loads it (--q-model). Default with --pool: data/models/q-mc0.pt "
+                    "worker loads it (--q-model). Default with --pool: data/models/q-mc2.pt "
                     "when the workers rank by the default Q -- with --rank-leaf after -- and "
                     "no --rank-fill, q-nocover is what M-C generation plays (IKA-338) -- and "
                     "a stop if that file is not there")

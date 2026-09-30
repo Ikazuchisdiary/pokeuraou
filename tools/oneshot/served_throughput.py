@@ -29,7 +29,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def count(directory: Path) -> int:
     total = 0
-    for path in directory.glob("games-worker*.jsonl"):
+    for path in directory.glob("games-*worker*.jsonl"):
         try:
             with path.open(encoding="utf-8") as handle:
                 total += sum(1 for line in handle if line.strip())

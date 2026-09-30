@@ -66,7 +66,7 @@ ENCODED = ("species", "ability", "item", "moves", "mon", "mask", "side", "field"
 
 
 def run_index(args: argparse.Namespace) -> None:
-    files = sorted(Path(args.games_dir).glob("games-worker*.jsonl"))
+    files = sorted(Path(args.games_dir).glob("games-*worker*.jsonl"))
     rows: list[tuple[int, int, int, int, int, int, int]] = []
     for f, path in enumerate(files):
         offset = 0
