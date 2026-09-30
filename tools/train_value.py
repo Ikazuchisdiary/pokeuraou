@@ -338,6 +338,13 @@ def main() -> None:
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--no-save", action="store_true")
     ap.add_argument(
+        "--unpacked",
+        action="store_true",
+        help="read the dataset into plain int64/float32 arrays (29 GB for mc0123) instead of "
+        "the default lossless packed form (about a third of that, same batches bit for "
+        "bit; pokeuraou.packed). For A/B of the packing only.",
+    )
+    ap.add_argument(
         "--curve",
         default="",
         help="comma-separated fractions of the training games, e.g. 0.125,0.25,0.5,1.0. "
@@ -358,7 +365,7 @@ def main() -> None:
             f"{ENCODING_REVISION}; re-run tools/encode_dataset.py, which rebuilds the stale "
             "shards itself"
         )
-    dataset = load_dataset(args.data)
+    dataset = load_dataset(args.data, packed=not args.unpacked)
     target = None
     if args.td_lambda:
         meta = __import__("json").loads(str(np.load(args.data)["meta_json"]))

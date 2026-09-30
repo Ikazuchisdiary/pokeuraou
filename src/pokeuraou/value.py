@@ -506,11 +506,13 @@ class Dataset:
 
     def tensors(self, index: np.ndarray, device: torch.device) -> dict[str, Tensor]:
         e = self.encoded
+        # A packed dataset (`load_dataset`) holds ids narrow; the batch is widened back to
+        # the int64 the encoder produced, so the net sees the same tensors either way.
         return {
-            "species": torch.from_numpy(np.ascontiguousarray(e.species[index])).to(device),
-            "ability": torch.from_numpy(np.ascontiguousarray(e.ability[index])).to(device),
-            "item": torch.from_numpy(np.ascontiguousarray(e.item[index])).to(device),
-            "moves": torch.from_numpy(np.ascontiguousarray(e.moves[index])).to(device),
+            "species": torch.from_numpy(np.ascontiguousarray(e.species[index], np.int64)).to(device),
+            "ability": torch.from_numpy(np.ascontiguousarray(e.ability[index], np.int64)).to(device),
+            "item": torch.from_numpy(np.ascontiguousarray(e.item[index], np.int64)).to(device),
+            "moves": torch.from_numpy(np.ascontiguousarray(e.moves[index], np.int64)).to(device),
             "mon": torch.from_numpy(np.ascontiguousarray(e.mon[index])).to(device),
             "mask": torch.from_numpy(np.ascontiguousarray(e.mask[index])).to(device),
             "side": torch.from_numpy(np.ascontiguousarray(e.side[index])).to(device),
@@ -588,9 +590,18 @@ def concat_datasets(parts: Sequence[Dataset]) -> Dataset:
     unknown: Counter[str] = Counter()
     for part in parts:
         unknown.update(part.encoded.unknown_volatiles)
+    from .packed import PackedFloat
+
+    def joined(name: str) -> Any:
+        arrays = [getattr(p.encoded, name) for p in parts]
+        # Packed shards join packed, without a dense join in between (`load_dataset`).
+        if any(isinstance(a, PackedFloat) for a in arrays):
+            return PackedFloat.concat(arrays)
+        return np.concatenate(arrays)
+
     encoded = Encoded(
         **{
-            name: np.concatenate([getattr(p.encoded, name) for p in parts])
+            name: joined(name)
             for name in ("species", "ability", "item", "moves", "mon", "mask", "side", "field")
         },
         unknown_volatiles=dict(unknown),
@@ -701,21 +712,28 @@ def load_ensemble(
     return nets, metas
 
 
-def load_dataset(path: str | Path) -> Dataset:
-    """Reads a cache written by ``tools/encode_dataset.py``."""
+def load_dataset(path: str | Path, *, packed: bool = True) -> Dataset:
+    """Reads a cache written by ``tools/encode_dataset.py``.
+
+    With ``packed`` (the default) the big arrays are kept small and exact: ids in the
+    narrowest integer type that holds them, float columns that are only ever 0.0 or 1.0 as
+    uint8 (:mod:`pokeuraou.packed`), each inflated a chunk at a time so the dense arrays
+    are never in memory. :meth:`Dataset.tensors` widens a batch back to the dense types, so
+    a net sees the same numbers either way. ``packed=False`` is the plain read.
+    """
     data = np.load(Path(path), allow_pickle=False)
     meta = json.loads(str(data["meta_json"]))
-    encoded = Encoded(
-        species=data["species"],
-        ability=data["ability"],
-        item=data["item"],
-        moves=data["moves"],
-        mon=data["mon"],
-        mask=data["mask"],
-        side=data["side"],
-        field=data["field"],
-        unknown_volatiles=meta.get("unknown_volatiles", {}),
-    )
+    if packed:
+        arrays = {
+            key: _read_packed(Path(path), key)
+            for key in ("species", "ability", "item", "moves", "mon", "mask", "side", "field")
+        }
+    else:
+        arrays = {
+            key: data[key]
+            for key in ("species", "ability", "item", "moves", "mon", "mask", "side", "field")
+        }
+    encoded = Encoded(**arrays, unknown_volatiles=meta.get("unknown_volatiles", {}))
     return Dataset(
         encoded=encoded,
         outcome=data["outcome"],
@@ -737,14 +755,30 @@ def load_dataset(path: str | Path) -> Dataset:
     )
 
 
+def _read_packed(path: Path, key: str) -> Any:
+    """One array of a cache in its small exact form (`load_dataset`)."""
+    from .packed import NpzMember, PackedFloat, narrow_ints
+
+    member = NpzMember(path, key)
+    if member.dtype.kind in "iu":
+        return narrow_ints(member.chunks(), member.shape[0], member.shape[1:])
+    if member.dtype == np.float32 and len(member.shape) >= 2:
+        return PackedFloat.from_chunks(member.chunks(), member.shape)
+    return np.load(path, allow_pickle=False)[key]
+
+
 def save_dataset(path: str | Path, dataset: Dataset, meta: dict[str, Any]) -> None:
+    from .packed import AsType, PackedFloat, save_npz_streamed
+
     e = dataset.encoded
-    np.savez_compressed(
-        Path(path),
-        species=e.species,
-        ability=e.ability,
-        item=e.item,
-        moves=e.moves,
+    packed = any(isinstance(getattr(e, k), PackedFloat) for k in ("mon", "mask", "side", "field"))
+    # A packed dataset keeps its ids narrow; the file keeps the encoder's int64.
+    ids = {
+        k: AsType(getattr(e, k), np.int64) if packed else getattr(e, k)
+        for k in ("species", "ability", "item", "moves")
+    }
+    entries = dict(
+        **ids,
         mon=e.mon,
         mask=e.mask,
         side=e.side,
@@ -757,14 +791,20 @@ def save_dataset(path: str | Path, dataset: Dataset, meta: dict[str, Any]) -> No
         kind=dataset.kind,
         foe=dataset.foe,
         foe_search_value=dataset.foe_search_value,
-        meta_json=json.dumps(
-            {
-                **meta,
-                "foe_names": list(dataset.foe_names),
-                "unknown_volatiles": e.unknown_volatiles,
-            }
+        meta_json=np.asarray(
+            json.dumps(
+                {
+                    **meta,
+                    "foe_names": list(dataset.foe_names),
+                    "unknown_volatiles": e.unknown_volatiles,
+                }
+            )
         ),
     )
+    if packed:
+        save_npz_streamed(Path(path), entries)
+    else:
+        np.savez_compressed(Path(path), **entries)
 
 
 # ---------------------------------------------------------------------------
