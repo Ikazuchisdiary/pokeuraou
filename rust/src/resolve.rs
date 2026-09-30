@@ -1158,6 +1158,8 @@ fn move_field_is_ported(field: &str, move_id: &str) -> bool {
         // in `crit_probability` (`runEvent('CriticalHit')`): Storm Throw, Flower Trick,
         // Frost Breath.
             | ("willCrit", _)
+        // `steel_beam`: half the user's max HP after a hit or a failure (IKA-406).
+            | ("mindBlownRecoil", "steelbeam" | "mindblown")
         // `moves::smart_hits`: Dragon Darts, a hit on each foe or both on one.
             | ("smartTarget", "dragondarts")
         // `moves::later_hit_chance`: Triple Axel, Population Bomb (IKA-235).

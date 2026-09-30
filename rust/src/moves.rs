@@ -1434,7 +1434,10 @@ fn use_move<'a>(
     } else {
         match crate::semi_invulnerable::reached_or_fail(&mut turn, action, mv, &targets) {
             Some(kept) => kept,
-            None => return Ok(vec![(1.0, turn)]),
+            None => {
+                fail_before_hit_steps(&mut turn, action, mv)?;
+                return Ok(vec![(1.0, turn)]);
+            }
         }
     };
     if turn.log.is_some() {
@@ -1451,6 +1454,7 @@ fn use_move<'a>(
         .collect();
     if targets.is_empty() {
         turn.move_failed[action.side][action.slot] = true;
+        fail_before_hit_steps(&mut turn, action, mv)?;
         return Ok(vec![(1.0, turn)]);
     }
     turn.move_damage_total = 0;
@@ -1510,6 +1514,20 @@ fn use_move<'a>(
         after_move(state, action, mv)?;
     }
     Ok(branches)
+}
+
+/// A damaging move that fails in the hit steps' first checks (a semi-invulnerable target, a
+/// Psychic Terrain block) still reaches `trySpreadMoveHit` and so `MoveFail`: Steel Beam's
+/// recoil, then the user's Emergency Exit if it crossed half (IKA-406).
+fn fail_before_hit_steps(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), String> {
+    if !crate::steel_beam::has_field(mv) {
+        return Ok(());
+    }
+    let me = (action.side, action.slot);
+    begin_move_watch(turn);
+    crate::steel_beam::recoil_on_fail(turn, me, mv)?;
+    exits_if_crossed(turn, me, false);
+    Ok(())
 }
 
 /// Last Resort's `onTry` (data/moves.ts, IKA-208): `false` with fewer than two moves, or
@@ -3852,6 +3870,7 @@ fn hit_substitute(
         }
     }
     crate::level_struggle::struggle_recoil(turn, me, mv, dealt)?;
+    crate::steel_beam::recoil_after_hit(turn, me, mv, dealt)?;
     if let Some(drain) = mv.drain.as_ref().and_then(Value::as_array) {
         if dealt > 0 && drain.len() >= 2 {
             let numerator = drain[0].as_i64().unwrap_or(1);
@@ -3941,6 +3960,11 @@ fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), S
         }
     }
     crate::level_struggle::struggle_recoil(turn, me, mv, total)?;
+    crate::steel_beam::recoil_after_hit(turn, me, mv, total)?;
+    // `onMoveFail`: the move reached the hit steps and nothing connected (IKA-406).
+    if !turn.move_connected {
+        crate::steel_beam::recoil_on_fail(turn, me, mv)?;
+    }
     after_move_secondary_switches(turn, action, mv)?;
     let (item, maxhp) = match turn.mon_at(me.0, me.1) {
         None => (None, 0),
