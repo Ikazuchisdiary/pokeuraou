@@ -401,10 +401,49 @@ def test_the_screen_is_told_the_selection_is_being_read(pool) -> None:  # noqa: 
     assert "selectionRead" not in clock
     seen, payload, clock = _events(pool, _agent(pool, selection_reading=READING))
     # the teams first, then the reading (so the page is not blank), then the person's turn
-    assert seen[:3] == ["sheets", "selecting", "select"] and seen.count("sheets") == 1
+    # and the person's turn at once: both choose in the same time (the reading ends with
+    # `selected`, which does not say what the AI chose)
+    assert seen[:4] == ["sheets", "selecting", "select", "selected"] and seen.count("sheets") == 1
     read = clock["selectionRead"]
     assert read["cells"] > 0 and read["reading"] == READING and read["steps"]
     assert payload["picks"]  # a game was played from the deeper solve
+
+
+def test_the_person_picks_while_the_ai_reads_the_selection(pool) -> None:  # noqa: ANN001
+    import threading
+
+    done = threading.Event()
+    asked: dict[str, bool] = {}
+
+    class Waits(humanplay.PolicyPerson):
+        def select(self, six, size, text):  # noqa: ANN001, ANN202
+            # sequential play would ask only after the reading, when `selected` had been heard
+            asked["before_done"] = not done.is_set()
+            asked["reading_finished_while_asking"] = done.wait(30)
+            return super().select(six, size, text)
+
+    def listen(kind, _data):  # noqa: ANN001, ANN202
+        if kind == "selected":
+            done.set()
+
+    agent = _agent(pool, selection_reading=READING)
+    payload, _clock, _game = humanplay.play(
+        agent, Waits("first"), (pool.teams[0], pool.teams[1]), agent_side=1, seed=2,
+        max_turns=1, listener=listen)
+    assert asked == {"before_done": True, "reading_finished_while_asking": True}
+    assert payload["human"]["inputs"][0] == "1 2 3 4"
+
+
+def test_a_failing_person_stops_the_game_after_the_reading(pool) -> None:  # noqa: ANN001
+    class Broken(humanplay.PolicyPerson):
+        def select(self, six, size, text):  # noqa: ANN001, ANN202
+            raise ValueError("no such selection")
+
+    with pytest.raises(ValueError, match="no such selection"):
+        humanplay.play(
+            _agent(pool, selection_reading=READING), Broken("first"),
+            (pool.teams[0], pool.teams[1]), agent_side=1, seed=2, max_turns=1,
+            listener=lambda *_a: None)
 
 
 def test_the_selection_workers_are_made_for_the_selection_and_closed_after_it(  # noqa: ANN201
@@ -434,10 +473,13 @@ def test_the_selection_workers_are_made_for_the_selection_and_closed_after_it(  
         seen.append(kind)
         if kind == "select":
             log.append("person asked")
+        if kind == "selected":
+            log.append("reading done")
 
     humanplay.play(_agent(pool, selection_reading=READING), humanplay.PolicyPerson("first"),
                    (pool.teams[0], pool.teams[1]), agent_side=1, seed=2, max_turns=1,
                    listener=listener)
-    # made when the first cell is read, closed before the person is asked (and so before any move)
-    assert log == ["made 3", "closed", "person asked"]
+    # the person is asked first (the reading runs beside them); the workers are made when the
+    # first cell is read and closed before the reading is announced done (so before any move)
+    assert log == ["person asked", "made 3", "closed", "reading done"]
     assert lazy.inner is None

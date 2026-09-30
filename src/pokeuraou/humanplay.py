@@ -2457,6 +2457,33 @@ def solve_entry(  # noqa: PLR0913 - the leaf's solve, or the deeper one (IKA-392
                       model=f"{model}+selection[{parsed.label}]")
 
 
+class _Asked:
+    """``ask()`` running on a helper thread from now on; ``result()`` waits for it and
+    raises what it raised. The thread is a daemon: a game that fails while the person
+    is still choosing does not wait for them."""
+
+    def __init__(self, ask: Callable[[], Any]) -> None:
+        self._done = threading.Event()
+        self._value: Any = None
+        self._error: BaseException | None = None
+
+        def run() -> None:
+            try:
+                self._value = ask()
+            except BaseException as error:  # noqa: BLE001 - re-raised in result()
+                self._error = error
+            finally:
+                self._done.set()
+
+        threading.Thread(target=run, name="person-select", daemon=True).start()
+
+    def result(self) -> Any:  # noqa: ANN401
+        self._done.wait()
+        if self._error is not None:
+            raise self._error
+        return self._value
+
+
 def agent_pick(
     entry: BookEntry | None, side: int, six: Sequence[SampledSet], size: int,
     rng: np.random.Generator,
@@ -2536,6 +2563,7 @@ def play(
     started = time.perf_counter()
     deep_report: list[Any] = []
     sheets_sent = False
+    selecting_person: _Asked | None = None
     if entry is None and agent.evaluate is not None:
         from . import selection_deep
 
@@ -2550,12 +2578,23 @@ def play(
                 sheets_sent = True
                 listener("selecting", {"seconds": agent.selection_seconds,
                                        "reading": agent.selection_reading})
+        if reader is not None and listener is not None:
+            # The person picks while the AI reads (as in a real game, both take their time):
+            # the solve uses both full sheets, never the person's four. The person's answer is
+            # awaited on a helper thread (it runs no HiGHS; see
+            # highs-thread-exit-hangs-thread-start), the reading on this one.
+            listener("select", {"size": size, "team": len(six[you])})
+            selecting_person = _Asked(lambda: person.select(six[you], size,
+                                                            render_sheet(reg, six[you], loc)))
         entry = solve_entry(
             reg, teams, agent.evaluate, agent.name, reading=agent.selection_reading,
             reader=reader, seconds=agent.selection_seconds, report=deep_report,
         )
         if reader is not None and hasattr(reader, "release"):
             reader.release()
+        if selecting_person is not None:
+            # Not the AI's four: the page only learns that its reading is done.
+            listener("selected", {})  # type: ignore[misc]
     selection_seconds = time.perf_counter() - started
     mine = agent_pick(
         entry, agent_side, six[agent_side], size,
@@ -2564,11 +2603,14 @@ def play(
     if out is not None:
         out.write(f"\n相手のチーム（サイド {agent_side}）:\n{render_sheet(reg, six[agent_side], loc)}\n")
         out.write(f"\n自分のチーム（サイド {you}）:\n")
-    if listener is not None:
-        if not sheets_sent:
-            sheets_event()
-        listener("select", {"size": size, "team": len(six[you])})
-    yours = person.select(six[you], size, render_sheet(reg, six[you], loc))
+    if selecting_person is not None:
+        yours = selecting_person.result()
+    else:
+        if listener is not None:
+            if not sheets_sent:
+                sheets_event()
+            listener("select", {"size": size, "team": len(six[you])})
+        yours = person.select(six[you], size, render_sheet(reg, six[you], loc))
     inputs = [selection_line(yours)]
     picks = (mine, yours) if agent_side == 0 else (yours, mine)
     if entry is not None and priors is None:
