@@ -144,6 +144,7 @@ function setStatus(text, cls, short) {
   el.innerHTML = short ? `<span class="long">${esc(text)}</span><span class="short">${esc(short)}</span>` : esc(text);
   el.title = text; el.className = "status " + (cls || "");
 }
+function stopSelecting() { clearInterval(S.selTimer); S.selTimer = null; }
 function log(turn, html, cls) {
   const li = document.createElement("li");
   li.innerHTML = `<span class="t">${turn === "" ? "" : turn != null ? "T" + turn : "·"}</span><div class="${cls || ""}">${html}</div>`;
@@ -189,14 +190,20 @@ function onEvent(e) {
       break;
     case "selecting": {
       // IKA-392: the AI reads the selection (a person's game: 90 s) before the person is asked.
-      clearInterval(S.selTimer);
+      stopSelecting();
       const end = Date.now() + (e.seconds || 0) * 1000;
-      const tick = () => setStatus(e.seconds ? `AI が選出を読んでいます（残り ${Math.max(0, Math.ceil((end - Date.now()) / 1000))} 秒）` : "AI が選出を読んでいます", "think");
-      tick(); S.selTimer = setInterval(tick, 1000);
+      const words = () => {
+        if (!e.seconds) return "AI が選出を読んでいます";
+        const left = Math.ceil((end - Date.now()) / 1000);
+        return left > 0 ? `AI が選出を読んでいます（残り ${left} 秒）` : "AI が選出を読んでいます（まもなく終わります）";
+      };
+      setStatus(words(), "think");
+      // Only the words change after the first draw: the status dot's pulse is not restarted.
+      S.selTimer = setInterval(() => { const el = $("status"); const t = words(); el.textContent = t; el.title = t; }, 1000);
       break;
     }
     case "select":
-      clearInterval(S.selTimer);
+      stopSelecting();
       S.select = e; S.picked = []; renderInput(); setStatus(`${e.size} 体を選んでください`, "turn");
       if ($("result").classList.contains("between")) {
         const more = $("result").querySelector(".more");
@@ -258,6 +265,7 @@ function onEvent(e) {
       updateLinks();
       break;
     case "end": {
+      stopSelecting();
       const mine = e.outcome === null ? null : (e.outcome > 0.5) === (e.personSide === 0);
       const head = mine === null ? "打ち切り" : mine ? "あなたの勝ち" : "AI の勝ち";
       setStatus(`終局: ${head}`, "end");
@@ -1232,6 +1240,6 @@ function fmtTime(sec) {
 LiveData.connect({
   onEvent, onStep, onStatus,
   onOpen: () => setStatus("接続した"),
-  onClose: () => setStatus("切れた（再読み込みで繋ぎ直す）"),
+  onClose: () => { stopSelecting(); setStatus("切れた（再読み込みで繋ぎ直す）"); },
 });
 })();
