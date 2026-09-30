@@ -690,6 +690,10 @@ def mixtures(
             "eq": got.get("eq"),
             "guarantee": got.get("guarantee"),
             "generated": bool(got.get("generated")),
+            # A generation read solved again and checked against the record (`reread`), or the
+            # reason a re-solve was not shown.
+            "reread": bool(got.get("reread")),
+            "rereadNote": got.get("rereadNote"),
         }
         for key, field in (("worst", "hardChosen"), ("best", "bestIn")):
             found = got.get(field)
@@ -1280,7 +1284,10 @@ def _eq_tag(m: dict[str, Any] | None) -> str:
 
 
 def _mix_seat(m: dict[str, Any] | None, side: int, sprites: Sprites) -> str:
-    head = f'<h4><span class="seat s{side}">{SEAT[side]}</span> の読み</h4>'
+    again = (
+        "<small>　解き直した読み（記録の混合と一致を確かめた）</small>" if m is not None and m.get("reread") else ""
+    )
+    head = f'<h4><span class="seat s{side}">{SEAT[side]}</span> の読み{again}</h4>'
     if m is None:
         return f'<div class="mseat s{side}">{head}<p class="dim">この席の読みはありません</p></div>'
     view = f"（{SEAT[side]} から見た勝率）"
@@ -1328,11 +1335,16 @@ def _mix_seat(m: dict[str, Any] | None, side: int, sprites: Sprites) -> str:
     if m.get("actualOffMenu"):
         reply += '<p class="dim">相手が実際に選んだ手は、この読みの候補にありませんでした。</p>'
     if m.get("generated"):
+        missing = (
+            f"この手番は解き直しが記録と一致しなかったので、解き直した読みは出していません（{esc(m['rereadNote'])}）。"
+            if m.get("rereadNote")
+            else "生成の局の記録には、手ごとの値と、この席が相手に見ていた混合がありません。"
+        )
         return (
             f'<div class="mseat s{side}">{head}'
             f"<h5>均衡で打っていた手<small>　均衡で打つ {_played_n(m)} 通り</small></h5>"
             f"{picked}{_table_html(rows, side, sprites, kind='mix')}{_rest_html(m.get('sup'))}"
-            '<p class="dim">生成の局の記録には、手ごとの値と、この席が相手に見ていた混合がありません。</p></div>'
+            f'<p class="dim">{missing}</p></div>'
         )
     return (
         f'<div class="mseat s{side}">{head}'
@@ -1636,7 +1648,10 @@ def _read_of_record(decision: dict[str, Any], side: int, chosen: str | None) -> 
     }
 
 
-def selfplay_line(reg: Regulation, loc: Localiser, record: dict[str, Any], node: Any) -> dict[str, Any]:  # noqa: ANN401, ARG001
+def selfplay_line(  # noqa: PLR0912 - one pass over the record's decisions
+    reg: Regulation, loc: Localiser, record: dict[str, Any], node: Any,  # noqa: ANN401
+    rereads: dict[int, Any] | None = None,
+) -> dict[str, Any]:
     """A generation game (a line of ``games-*.jsonl``) as the line `render_html` reads.
 
     What happened is `show_game.turn_trace` -- the port's re-resolution of each move decision, the
@@ -1645,7 +1660,12 @@ def selfplay_line(reg: Regulation, loc: Localiser, record: dict[str, Any], node:
     units) and its mixture where the record has one (a hidden-bench game: each seat solved its own
     game). A record without ``foeSearchValue`` from an open game solved one game, so both seats
     read the same value; from a hidden-bench game, seat 1 then has no read (a dash). Nothing else
-    is made up: no stage, clock, condition, seed or pair."""
+    is made up: no stage, clock, condition, seed or pair.
+
+    ``rereads`` (`tools/reread.py`'s `reread_game`, by decision index): where a decision's
+    re-solve matched the record, each seat's read is the re-solve's -- its mixture, the other
+    side's mixture it modelled, the values of its moves -- and the page says it was solved again;
+    where it did not, the record's mixture stays and the reason is shown."""
     decisions_in = record["decisions"]
     decisions: list[dict[str, Any]] = []
     moves: list[dict[str, Any]] = []
@@ -1672,10 +1692,16 @@ def selfplay_line(reg: Regulation, loc: Localiser, record: dict[str, Any], node:
             chosen = (d.get("ownChosen"), d.get("foeChosen"))
             foe_value = d.get("foeSearchValue")
             values = (d.get("searchValue"), foe_value if foe_value is not None else (None if hidden else d.get("searchValue")))
+            again = None if rereads is None else rereads.get(i)
             for side in (0, 1):
                 if values[side] is None:
                     continue
-                got = _read_of_record(d, side, chosen[side])
+                if again is not None and again.matched:
+                    got = again.reads[side]
+                else:
+                    got = _read_of_record(d, side, chosen[side])
+                    if got is not None and rereads is not None:
+                        got["rereadNote"] = "解き直していない" if again is None else again.reason
                 if got is not None:
                     reads[str(side)] = got
                 moves.append({"decision": i, "side": side, "value0": values[side], "generated": True})
@@ -1702,6 +1728,10 @@ def selfplay_line(reg: Regulation, loc: Localiser, record: dict[str, Any], node:
         "outcome": record.get("outcome"), "endReason": record.get("endReason"),
         "turns": record.get("turns"), "conditions": ["—", "—"], "teams": None,
         "seed": None, "pair": None, "game": None, "adjudicated": None,
+        "reread": None if rereads is None else {
+            "matched": sum(1 for got in rereads.values() if got.matched),
+            "total": sum(1 for d in decisions_in if d["kind"] == "move"),
+        },
     }
 
 
@@ -1738,6 +1768,12 @@ def render_html(
             f"生成の 1 局（{line['generated']}）・{played} ターン ・ {END_REASONS.get(reason, reason or '—')}"
             "・読みの段・時計・席の条件は記録にない（—）"
         )
+        again = line.get("reread")
+        if again is not None:
+            extra += (
+                f"・各手番の読みは、記録の局面と設定で解き直したもの（解き直した読み（記録の混合と一致を確かめた）: "
+                f"{again['matched']} / {again['total']} 手番。一致しない手番は記録の混合だけを出す）"
+            )
     else:
         extra = (
             f"対戦評価の 1 局（第 {model['pair']} 組の {int(model['game']) + 1} 局目）・乱数の種 {model['seed']} ・ "
