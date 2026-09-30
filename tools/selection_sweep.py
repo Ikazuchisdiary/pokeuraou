@@ -55,8 +55,8 @@ from pokeuraou.selection_deep import (  # noqa: E402
     solve_selection_deep,
 )
 
-DEFAULT_VALUE = ("data/models/value-mc2.pt", "data/models/value-mc2-s1.pt")
-DEFAULT_Q = "data/models/q-mc2.pt"
+DEFAULT_VALUE = ("data/models/value-mc3.pt", "data/models/value-mc3-s1.pt")
+DEFAULT_Q = "data/models/q-mc3.pt"
 
 
 class TableReader:

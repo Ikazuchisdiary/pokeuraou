@@ -991,11 +991,12 @@ def add_q_flags(ap: Any) -> None:  # noqa: ANN401 - an ArgumentParser
     )
 
 
-#: Where the default Q is, from the repository root: the Q of M-C's shipped leaf (q-mc2
-#: since IKA-400: taught by value-mc2x2's cells; q-mc0, IKA-274 stage 3, before it). What a
+#: Where the default Q is, from the repository root: the Q of M-C's shipped leaf (q-mc3
+#: since IKA-402: taught by value-mc3's cells; q-mc2 from IKA-400, q-mc0, IKA-274 stage 3,
+#: before it). What a
 #: q fill ranks by when no Q is named, in generation, on the board and in human play
 #: (IKA-338; `search.SHIPPED_RANK_FILL`).
-DEFAULT_Q = "data/models/q-mc2.pt"
+DEFAULT_Q = "data/models/q-mc3.pt"
 
 
 def default_q() -> Path:
