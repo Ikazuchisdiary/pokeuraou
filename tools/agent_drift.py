@@ -118,6 +118,15 @@ KNOWN_DRIFT = frozenset(
 FILL_OPTIONS = ("--rank-fill", "--baseline-rank-fill")
 #: A launcher's `--q-model`: unset, the Q the workers' fills want (`qrank.tail_wants_default_q`).
 Q_OPTIONS = ("--q-model",)
+#: Where a person's game (`tools/play_human.py`) differs from generation and the time match on
+#: purpose, and why. Not a drift: the check names it so that it is read as a decision.
+PLAY_ONLY_DEFAULTS = (
+    "the selection is read deeper than the leaf's one estimate of each cell, 90 s of wall time on "
+    "every core, when the game is on the wall clock with a leaf (`--selection-reading none` "
+    "turns it off; IKA-392: the reading beat the leaf's selection by +23.2 Elo [+8.0, +38.6] on "
+    "the time match's board). Generation (`poolplay`, `selfplay`), the time match's conditions "
+    "and the move's reading do not read it",
+)
 #: Tools that resolve an unnamed fill or Q their own way on purpose, and why.
 OWN_RESOLUTION = {
     "play_human.py": "a person's game: q-nocover when the Q is there, else refs2 with a "
@@ -353,6 +362,8 @@ def main(argv: list[str] | None = None) -> int:
               f"{'; '.join(play_drift)}")
     else:
         print("  ok        time_match.py (IKA-333): play_human's agent, its defaults included")
+    for note in PLAY_ONLY_DEFAULTS:
+        print(f"  own way   play_human.py: {note}")
     print()
     # `tools/oneshot/` is in scope too. A tool is shelved there when its question was
     # asked once, not because it stopped being runnable -- and a shelved tool that builds

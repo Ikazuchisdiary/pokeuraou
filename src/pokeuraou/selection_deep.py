@@ -332,6 +332,41 @@ class PoolReader:
         self.processes = []
 
 
+class LazyPoolReader:
+    """A `PoolReader` made when a selection is read and closed when it is done (`release`), so
+    the workers do not sit on memory and cores through the game's moves. Made again for the
+    next game (a second or so on a served leaf)."""
+
+    def __init__(self, reg: Any, count: int, spec: tuple, *,  # noqa: ANN401
+                 rank_fill: str | None = "q-nocover", rank_by_leaf: bool = True) -> None:
+        self.reg, self.count, self.spec = reg, count, spec
+        self.rank_fill, self.rank_by_leaf = rank_fill, rank_by_leaf
+        self.inner: PoolReader | None = None
+        self.workers = count
+
+    @property
+    def cells(self) -> int:
+        return 0 if self.inner is None else self.inner.cells
+
+    @property
+    def seconds(self) -> float:
+        return 0.0 if self.inner is None else self.inner.seconds
+
+    def read(self, *args: Any, **kwargs: Any) -> dict[tuple[int, int], float]:  # noqa: ANN401
+        if self.inner is None:
+            self.inner = PoolReader(self.reg, self.count, self.spec, rank_fill=self.rank_fill,
+                                    rank_by_leaf=self.rank_by_leaf)
+        return self.inner.read(*args, **kwargs)
+
+    def release(self) -> None:
+        if self.inner is not None:
+            self.inner.close()
+            self.inner = None
+
+    def close(self) -> None:
+        self.release()
+
+
 # --------------------------------------------------------------------------- the prices
 
 
@@ -515,6 +550,6 @@ def solve_selection_deep(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the stages,
 
 
 __all__ = [
-    "DeepReport", "PoolReader", "Reading", "SerialReader", "fit_shift", "parse_reading",
+    "DeepReport", "LazyPoolReader", "PoolReader", "Reading", "SerialReader", "fit_shift", "parse_reading",
     "prices", "read_cell", "solve_selection_deep",
 ]

@@ -46,6 +46,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import math
+import os
 import re
 import sys
 import threading
@@ -53,6 +54,7 @@ import time
 import webbrowser
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
@@ -171,6 +173,27 @@ def _person(spec: str, reg, loc, seed: int, server=None):  # noqa: ANN001, ANN20
     raise SystemExit(
         f"--person is terminal, web, first, random, script:<file> or record:<file>[@n], not {spec!r}"
     )
+
+
+def resolve_selection(args: argparse.Namespace, evaluate: Any) -> tuple[str | None, float | None]:  # noqa: ANN401
+    """The reading a person's selection gets and its wall-clock seconds (IKA-392). Unset: the
+    default reading for `humanplay.PLAY_SELECTION_SECONDS` on the wall clock with a leaf, else
+    the leaf's solve (a count-clock game replays, a game without a leaf has nothing to read
+    with). ``none``: the leaf's solve. A reading named alone on the count clock reads its
+    stages, not seconds."""
+    from pokeuraou import selection_deep
+
+    given = args.selection_reading
+    if given == "none" or (given is None and (args.clock != "wall" or evaluate is None)):
+        return None, None
+    if given is not None and evaluate is None:
+        raise SystemExit("--selection-reading reads cells by a leaf: it needs one")
+    reading = humanplay.PLAY_SELECTION_READING if given is None else given
+    selection_deep.parse_reading(reading)
+    seconds = args.selection_seconds
+    if seconds is None and args.clock == "wall":
+        seconds = humanplay.PLAY_SELECTION_SECONDS
+    return reading, seconds
 
 
 def resolve_cores(threads: int | None, cores: int | None, clock: str) -> tuple[int, int]:
@@ -305,16 +328,19 @@ def main(argv: list[str] | None = None) -> None:
                     f"most {humanplay.LADDER_LOCAL_WORKERS_MAX} load the leaf and the Q). "
                     "Default: none (the deepening)")
     ap.add_argument("--selection-reading", default=None,
-                    help="read the selection deeper than the value function's one estimate of "
-                    "each cell (IKA-392, selection_deep): `default` or `stage=d2r4b3k8,rects=8-16,"
-                    "confirm=2,shift=add`. With --selection-seconds S it reads for S seconds of wall "
-                    "time (the stages widen while time is left), else exactly the stages it names. "
-                    "The cells are read by --selection-workers processes (default: --threads). "
-                    "Default: none (the leaf's solve)")
+                    help="how the AI reads the selection (IKA-392, selection_deep): `none` (the "
+                    "value function's one estimate of each cell), `default`, or `stage=d2r4b3k8,"
+                    "rects=8-16,confirm=2,shift=add`. Unset: `default` on the wall clock with a "
+                    "leaf (the board that decided it: +23.2 Elo over `none`), else `none`. With "
+                    "--selection-seconds S the reading runs S seconds of wall time (the "
+                    "rectangle widens while time is left), else exactly the stages it names")
     ap.add_argument("--selection-seconds", type=float, default=None,
-                    help="the wall-clock time of the deeper selection (with --selection-reading)")
+                    help="the wall-clock time of the deeper selection (unset: "
+                    f"{humanplay.PLAY_SELECTION_SECONDS:g} s for the default reading)")
     ap.add_argument("--selection-workers", type=int, default=None,
-                    help="worker processes reading the selection's cells (default: --threads)")
+                    help="worker processes reading the selection's cells (default: every logical "
+                    "core with an inference server, else at most "
+                    f"{humanplay.LADDER_LOCAL_WORKERS_MAX}, each with a leaf of its own)")
     ap.add_argument("--child-q", type=int, default=None,
                     help="the deepening's child menus: each side's k best by the Q (IKA-307), "
                     "instead of narrow's damage-ranked 8")
@@ -449,15 +475,16 @@ def main(argv: list[str] | None = None) -> None:
             ([str(v) for v in values] if values and not args.hp_share else None,
              str(device or "cpu"), args.leaf_graphs == "on", args.cuda_memory_gb),
         )
-    if args.selection_reading is not None:
+    selection_reading, selection_seconds = resolve_selection(args, evaluate)
+    if selection_reading is not None:
         from pokeuraou import selection_deep
 
-        selection_deep.parse_reading(args.selection_reading)
-        if evaluate is None:
-            raise SystemExit("--selection-reading reads cells by a leaf: it needs one")
-        readers = args.selection_workers if args.selection_workers is not None else threads
+        readers = args.selection_workers if args.selection_workers is not None else (
+            (os.cpu_count() or 2) if address else min(os.cpu_count() or 2,
+                                                       humanplay.LADDER_LOCAL_WORKERS_MAX))
         if readers > 1:
-            selection_deep.use_reader(selection_deep.PoolReader(
+            # Made for each selection and closed after it: no idle workers through the moves.
+            selection_deep.use_reader(selection_deep.LazyPoolReader(
                 reg, readers,
                 humanplay.ladder_spec(
                     leaf=evaluate, address=address, merge=args.merge == "on", values=values,
@@ -465,8 +492,10 @@ def main(argv: list[str] | None = None) -> None:
                     cuda_memory_gb=args.cuda_memory_gb,
                     q_path=q_path if qrank.is_q(fill) else None),
                 rank_fill=fill))
-        say(f"selection read {args.selection_reading} on {max(readers, 1)} process(es)"
-            + (f" for {args.selection_seconds:g} s" if args.selection_seconds else ""))
+        say(f"selection read {selection_reading} on {max(readers, 1)} process(es)"
+            + (f" for {selection_seconds:g} s" if selection_seconds else " (its stages)"))
+    else:
+        say("selection: the leaf's one estimate of each cell")
     halt = humanplay.MemoryBrake()
     agent = humanplay.Agent(
         reg=reg, evaluate=evaluate, name=name, seconds=args.seconds, cores=cores,
@@ -474,7 +503,7 @@ def main(argv: list[str] | None = None) -> None:
         width_only=args.width_only, max_levels=args.max_levels or None, child_q=args.child_q,
         oracle=_oracle_width(args.oracle), halt=halt,
         ponder=args.ponder == "on", ponder_seconds=args.ponder_seconds, ladder=args.ladder,
-        selection_reading=args.selection_reading, selection_seconds=args.selection_seconds,
+        selection_reading=selection_reading, selection_seconds=selection_seconds,
     )
     if args.child_q is not None and not qrank.is_q(fill):
         raise SystemExit("--child-q ranks the children by the Q: it needs a Q (a q rank fill)")
