@@ -17,6 +17,14 @@ Japanese by `show_game`'s translators; a turn that paused for a switch in the mi
 trace up to the pause, and the page says so. A read a seat did not write (a replacement, a
 switch in the middle of a turn) is a dash. Names come from `configs/names/ja.json`
 (`pokeuraou.names`); a name it has not got stays English, as the localiser does.
+
+**A generation game** (`selfplay_line`, `show_game.py --file ... --html`) is turned into the same
+line from its record: what happened is the port's re-resolution of each turn (`show_game.turn_trace`,
+the branch matched to the next recorded position, as the text is), the two reads are the record's
+two seats' own values (``searchValue``, ``foeSearchValue``) and mixtures. The record has no ladder
+stage, clock, per-move values or the model each seat held of the other's mixture, no condition
+name, seed or pair: the page says "生成の局" / "—" for them (``generated`` on the line and the
+reads) and does not show a table it has no rows for.
 """
 
 from __future__ import annotations
@@ -165,7 +173,7 @@ def read_of(row: dict[str, Any] | None) -> dict[str, Any] | None:
     stage = None
     #: A read with no stage finished (the ladder's first did not fit the budget) or no deepening
     #: is the depth-1 answer: the root's matrix solved (a row with no ``value0`` has no read at all).
-    depth: int | None = 1
+    depth: int | None = None if row.get("generated") else 1
     ladder = row.get("ladder")
     if ladder and ladder.get("rungs"):
         stage = ladder["rungs"][-1].get("stage")
@@ -681,6 +689,7 @@ def mixtures(
             "opp": [{"pair": pair(c, other), "p": p, "actual": c == actual} for c, p in osupp],
             "eq": got.get("eq"),
             "guarantee": got.get("guarantee"),
+            "generated": bool(got.get("generated")),
         }
         for key, field in (("worst", "hardChosen"), ("best", "bestIn")):
             found = got.get(field)
@@ -734,6 +743,8 @@ def build(reg: Regulation, loc: Localiser, line: dict[str, Any]) -> dict[str, An
                     )
                 elif not events.get("matched", True):
                     note = "port の再現が実際の局面と一致しませんでした"
+                if events.get("note"):
+                    note = f"{note} {events['note']}" if note else events["note"]
             for extra in between:
                 sides = extra["position"]["sides"]
                 for s in (0, 1):
@@ -1316,6 +1327,13 @@ def _mix_seat(m: dict[str, Any] | None, side: int, sprites: Sprites) -> str:
         reply = '<p class="dim">この読みには手ごとの値がありません（深さ 1 の答え）</p>'
     if m.get("actualOffMenu"):
         reply += '<p class="dim">相手が実際に選んだ手は、この読みの候補にありませんでした。</p>'
+    if m.get("generated"):
+        return (
+            f'<div class="mseat s{side}">{head}'
+            f"<h5>均衡で打っていた手<small>　均衡で打つ {_played_n(m)} 通り</small></h5>"
+            f"{picked}{_table_html(rows, side, sprites, kind='mix')}{_rest_html(m.get('sup'))}"
+            '<p class="dim">生成の局の記録には、手ごとの値と、この席が相手に見ていた混合がありません。</p></div>'
+        )
     return (
         f'<div class="mseat s{side}">{head}'
         f"<h5>均衡で打っていた手<small>　均衡で打つ {_played_n(m)} 通り</small></h5>"
@@ -1352,6 +1370,8 @@ def _mix_line(m: dict[str, Any] | None, side: int) -> str:
             f'<span class="band s{side}" style="left:{max(0.0, lo) * 100:.1f}%;width:{max(0.01, min(1.0, hi) - max(0.0, lo)) * 100:.1f}%"></span>'
             f"{dot}</div>"
         )
+    elif m.get("generated"):
+        line += ' <span class="dim">・手ごとの値は記録にありません</span>'
     else:
         line += ' <span class="dim">・手ごとの値はありません（深さ 1 の答え）</span>'
     return f'<div class="msl"><div class="l1">{line}</div>{scale}</div>'
@@ -1586,6 +1606,105 @@ def _dead_legend(turns_html: str) -> str:
     )
 
 
+# ----------------------------------------------------------------------------- a generation game
+
+
+def _read_of_record(decision: dict[str, Any], side: int, chosen: str | None) -> dict[str, Any] | None:
+    """One seat's read of a generation decision as `mixtures` reads it: the seat's own mixture over
+    its menu (the record's ``ownActions``/``ownPolicy`` for seat 0, ``foeActions``/``foePolicy`` for
+    seat 1). The record has no per-move values and not the model the seat held of the other's
+    mixture, so ``opp`` is empty and ``cols`` absent (``generated`` says so)."""
+    names = decision["ownActions" if side == 0 else "foeActions"]
+    policy = decision["ownPolicy" if side == 0 else "foePolicy"]
+    if not names or len(names) != len(policy):
+        return None
+    p = [float(v) for v in policy]
+    order = sorted(range(len(p)), key=lambda k: -p[k])
+    index = names.index(chosen) if chosen in names else None
+    return {
+        "menu": [len(names), len(decision["foeActions" if side == 0 else "ownActions"])],
+        "rows": [[names[k], round(p[k], 4)] for k in order if p[k] >= 0.01][:8],
+        "chosen": chosen,
+        "chosenP": None if index is None else round(p[index], 4),
+        "chosenRank": None if index is None else order.index(index) + 1,
+        "opp": [],
+        "oppSupp": [],
+        "supp": [[names[k], round(p[k], 5)] for k in order if p[k] >= SUPPORT_MIN],
+        "p": [round(v, 5) for v in p],
+        "q": None,
+        "generated": True,
+    }
+
+
+def selfplay_line(reg: Regulation, loc: Localiser, record: dict[str, Any], node: Any) -> dict[str, Any]:  # noqa: ANN401, ARG001
+    """A generation game (a line of ``games-*.jsonl``) as the line `render_html` reads.
+
+    What happened is `show_game.turn_trace` -- the port's re-resolution of each move decision, the
+    branch matched to the next recorded position -- in the shape `timematch._note_turn` writes.
+    Seat 0's read is ``searchValue`` and its mixture; seat 1's is ``foeSearchValue`` (side 0's
+    units) and its mixture where the record has one (a hidden-bench game: each seat solved its own
+    game). A record without ``foeSearchValue`` from an open game solved one game, so both seats
+    read the same value; from a hidden-bench game, seat 1 then has no read (a dash). Nothing else
+    is made up: no stage, clock, condition, seed or pair."""
+    decisions_in = record["decisions"]
+    decisions: list[dict[str, Any]] = []
+    moves: list[dict[str, Any]] = []
+    hidden = record.get("information") == "hidden-bench"
+    for i, d in enumerate(decisions_in):
+        events = None
+        reads: dict[str, Any] = {}
+        if d["kind"] == "move":
+            traced = show_game.turn_trace(reg, d, decisions_in[i + 1 :], record.get("outcome"), node)
+            if isinstance(traced, show_game._Trace):
+                cut = [traced.cut] if traced.cut else []
+                events = {
+                    "lines": list(traced.lines),
+                    "acts": [[s, lbl] for s, lbl in traced.acts],
+                    "paused": traced.paused or bool(traced.cut),
+                    "matched": True,
+                    "note": " ".join([*traced.notes, *cut]) or None,
+                }
+            elif traced:
+                events = {
+                    "lines": [], "acts": [], "paused": False, "matched": True,
+                    "note": " ".join(text for _h, lines in traced for text in lines),
+                }
+            chosen = (d.get("ownChosen"), d.get("foeChosen"))
+            foe_value = d.get("foeSearchValue")
+            values = (d.get("searchValue"), foe_value if foe_value is not None else (None if hidden else d.get("searchValue")))
+            for side in (0, 1):
+                if values[side] is None:
+                    continue
+                got = _read_of_record(d, side, chosen[side])
+                if got is not None:
+                    reads[str(side)] = got
+                moves.append({"decision": i, "side": side, "value0": values[side], "generated": True})
+        decisions.append({
+            "kind": d["kind"], "turn": d["turn"], "position": d["position"],
+            "ownChosen": d.get("ownChosen"), "foeChosen": d.get("foeChosen"),
+            "value": d.get("searchValue"), "shown": None, "events": events, "reads": reads,
+        })
+    pool = record.get("pool") or {}
+    names = pool.get("names")
+    source = str(pool.get("id") or record.get("foeArchetype") or "?")
+    if record.get("gameIndex") is not None:
+        source += f"・局 {record['gameIndex']}"
+    return {
+        "generated": source,
+        "transcript": {
+            "ownSix": record["ownSix"], "foeSix": record["foeSix"],
+            "ownPick": record["ownPick"], "foePick": record["foePick"],
+            "ownTeam": record["ownTeam"], "foeTeam": record["foeTeam"],
+            "decisions": decisions, "finalPosition": record.get("finalPosition"),
+            "teamNames": names if names and len(names) == 2 else None,
+        },
+        "moves": moves,
+        "outcome": record.get("outcome"), "endReason": record.get("endReason"),
+        "turns": record.get("turns"), "conditions": ["—", "—"], "teams": None,
+        "seed": None, "pair": None, "game": None, "adjudicated": None,
+    }
+
+
 def render_html(
     reg: Regulation, loc: Localiser, line: dict[str, Any], *, embed: bool = False, open_mix: bool = False
 ) -> str:
@@ -1607,16 +1726,23 @@ def render_html(
         head, cls = f"打ち切り（{played} ターン）", ""
     if outcome in (0.0, 1.0) and reason == "adjudicated":
         head += "（判定）"
+    generated = bool(line.get("generated"))
     conditions = model["conditions"] or ["", ""]
     team = model.get("teamNames") or model["teams"] or ["", ""]
     vs = (
         f'<span class="seat s0">席 0</span> {esc(team[0])}（条件 {esc(conditions[0])}） 対 '
         f'<span class="seat s1">席 1</span> {esc(team[1])}（条件 {esc(conditions[1])}）'
     )
-    extra = (
-        f"対戦評価の 1 局（第 {model['pair']} 組の {int(model['game']) + 1} 局目）・乱数の種 {model['seed']} ・ "
-        f"{played} ターン ・ {END_REASONS.get(reason, reason)}"
-    )
+    if generated:
+        extra = (
+            f"生成の 1 局（{line['generated']}）・{played} ターン ・ {END_REASONS.get(reason, reason or '—')}"
+            "・読みの段・時計・席の条件は記録にない（—）"
+        )
+    else:
+        extra = (
+            f"対戦評価の 1 局（第 {model['pair']} 組の {int(model['game']) + 1} 局目）・乱数の種 {model['seed']} ・ "
+            f"{played} ターン ・ {END_REASONS.get(reason, reason)}"
+        )
     if model["turnCount"] is not None and model["turnCount"] != played:
         # The game line's `turns` is the turn number the game stood at when it stopped: one more
         # than the turns played, when the last of them ended it.
@@ -1642,7 +1768,7 @@ def render_html(
     return (
         '<!doctype html><html lang="ja"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width,initial-scale=1">'
-        f"<title>{esc(head)} — 対戦評価の 1 局</title><style>{CSS}</style></head><body><main>"
+        f"<title>{esc(head)} — {"生成の 1 局" if generated else "対戦評価の 1 局"}</title><style>{CSS}</style></head><body><main>"
         f'<div class="banner {cls}"><h1>{esc(head)}</h1><p class="vs">{vs}</p><p>{esc(extra)}</p></div>'
         f"<h2>席 0 から見た勝率の推移</h2>{_chart(model)}"
         f"<h2>チーム（6 体・選出 4 体）</h2>{_teams(model, names, sprites)}"

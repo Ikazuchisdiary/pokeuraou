@@ -550,14 +550,31 @@ class _PortTurn:
         self.suspended = list(port.pauses or [])
 
 
-def turn_events(
+class _Trace:
+    """One re-resolved turn before it is read into words: the port's trace lines and the cut of
+    it by action (``acts``), the position it was resolved from, the caveats about which branch
+    it is (``notes``), whether it stops at a mid-turn switch (``paused``) and, when the recorded
+    replacement does not match, the sentence that says so (``cut``)."""
+
+    def __init__(
+        self, lines: list[str], acts: list, pos: object, notes: list[str],
+        *, paused: bool = False, cut: str | None = None,
+    ) -> None:
+        self.lines = lines
+        self.acts = acts
+        self.pos = pos
+        self.notes = notes
+        self.paused = paused
+        self.cut = cut
+
+
+def turn_trace(
     reg: Regulation,
-    loc: Localiser,
     decision: dict,
     rest: list[dict],
     outcome: float | None = None,
     node: object | None = None,
-) -> list[tuple[str | None, list[str]]]:
+) -> _Trace | list[tuple[str | None, list[str]]]:
     """What actually happened, by re-resolving the turn that was played.
 
     The records keep the position and both chosen actions but not the resolver's event
@@ -659,10 +676,10 @@ def turn_events(
             (r for action, r in alternatives if action.to_choice() == answer), None
         )
         if picked is None or not (picked.branches or picked.suspended):
-            return [
-                *group_events(loc, list(prefix), list(paused.acts), pos),
-                (None, [f"（中断までの表示。記録の交代手 {answer!r} が再開手と一致しない）"]),
-            ]
+            return _Trace(
+                list(prefix), list(paused.acts), pos, notes,
+                cut=f"（中断までの表示。記録の交代手 {answer!r} が再開手と一致しない）",
+            )
         if gap != (0, 0):
             prefix_note = (
                 f"⚠ 中断時の局面が記録と一致しません（HP差 {gap[0]}、状態差 {gap[1]}）。"
@@ -720,9 +737,28 @@ def turn_events(
         elif len(result.branches) > 1:
             note = "以下は最終ターンの最尤の枝です（照合先がない）"
 
-    groups = group_events(loc, [*prefix, *branch.events], list(branch.acts), pos)
     if note:
         notes.append(note)
+    return _Trace([*prefix, *branch.events], list(branch.acts), pos, notes, paused=resumed)
+
+
+def turn_events(
+    reg: Regulation,
+    loc: Localiser,
+    decision: dict,
+    rest: list[dict],
+    outcome: float | None = None,
+    node: object | None = None,
+) -> list[tuple[str | None, list[str]]]:
+    """What actually happened, by re-resolving the turn that was played (`turn_trace`), as the
+    groups the text prints."""
+    traced = turn_trace(reg, decision, rest, outcome, node)
+    if isinstance(traced, list):
+        return traced
+    groups = group_events(loc, traced.lines, traced.acts, traced.pos)
+    if traced.cut:
+        return [*groups, (None, [traced.cut])]
+    notes = traced.notes
     if notes:
         # In front of the events, not after them. A caveat about a list belongs before the
         # list: printed underneath, it was read past, and a poison tick from a branch that
@@ -1049,6 +1085,9 @@ def main() -> None:
                     help="with --transcript: write each turn's mixtures open (for a screenshot)")
     ap.add_argument("--embed-sprites", action="store_true",
                     help="with --transcript: fetch the icons now and write them into the page")
+    ap.add_argument("--html", action="store_true",
+                    help="the generation game (--file/--dir, --game) as a single HTML page "
+                    "(game_page.render_html); --out is the page (default game.html)")
     args = ap.parse_args()
 
     if args.transcript is not None:
@@ -1066,6 +1105,21 @@ def main() -> None:
 
     reg = load_regulation(record["decisions"][0]["position"]["format"])
     loc = Localiser(reg, load_names(args.locale))
+    if args.html:
+        import game_page
+
+        from pokeuraou import rustnode
+        from pokeuraou.damage import register_mega_stones
+
+        register_mega_stones(reg)
+        line = game_page.selfplay_line(reg, loc, record, rustnode.RustNode(reg))
+        out = args.out if args.out != Path("game.txt") else Path("game.html")
+        page = game_page.render_html(
+            reg, loc, line, embed=args.embed_sprites, open_mix=args.open_mixtures
+        )
+        out.write_bytes(page.encode("utf-8"))
+        print(f"{path.name} game {args.game} -> {out} ({len(page):,} chars)")
+        return
     text = render(reg, loc, record, args.top)
     args.out.write_text(text, encoding="utf-8")
     print(f"{path.name} game {args.game} -> {args.out} ({len(text):,} chars)")
