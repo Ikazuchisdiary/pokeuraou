@@ -89,6 +89,10 @@ def test_formes_compose_and_stay_distinguishable(bundle) -> None:  # noqa: ANN00
     assert dusk.startswith("ルガルガン") and "Dusk" in dusk
     assert loc.species("lycanroc") == "ルガルガン"
     assert loc.species("lycanrocdusk") != loc.species("lycanroc")
+    # Base not translated either (Showdown's text has none for Floette): still "base (forme)",
+    # the shape a screen sets the forme in small type from, and never the id-like "Floette-Eternal".
+    assert loc.species("floetteeternal") == "Floette (Eternal)"
+    assert loc.species("alcremiecaramelswirl") == "Alcremie (Caramel-Swirl)"
     # Base and forme both translated.
     assert loc.species("taurospaldeaaqua").startswith("ケンタロス")
     assert loc.species("taurospaldeaaqua") != loc.species("tauros")
