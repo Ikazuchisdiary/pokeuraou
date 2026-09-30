@@ -274,6 +274,15 @@ def main() -> None:
         "outcome, whatever this is set to, or the rows stop being comparable.",
     )
     ap.add_argument(
+        "--td-from-game",
+        type=int,
+        default=None,
+        help="with --td-lambda: rows of games numbered below this keep the outcome alone, "
+        "the mix applies from this game on (IKA-403). In a pool of several generations "
+        "the first shard's teacher (value-gen11L) is worse than the student; the later "
+        "ones are better.",
+    )
+    ap.add_argument(
         "--target-file",
         type=Path,
         default=None,
@@ -360,6 +369,8 @@ def main() -> None:
         )
     dataset = load_dataset(args.data)
     target = None
+    if args.td_from_game is not None and not args.td_lambda:
+        raise SystemExit("--td-from-game needs --td-lambda")
     if args.td_lambda:
         meta = __import__("json").loads(str(np.load(args.data)["meta_json"]))
         leaves = meta.get("objectives") or {}
@@ -378,10 +389,16 @@ def main() -> None:
                 f"--td-lambda needs searchValue to be a win probability, but {wrong} "
                 "generated part of this pool"
             )
-        target = td_target(dataset, args.td_lambda)
+        target = td_target(dataset, args.td_lambda, from_game=args.td_from_game)
+        moved = target != dataset.outcome
         print(
             f"TD target: {1 - args.td_lambda:.2f} x outcome + {args.td_lambda:.2f} x "
             f"searchValue (leaves {sorted(leaves)}). Validation stays on the outcome."
+        )
+        print(
+            f"  from game {args.td_from_game}: {int(moved.sum()):,} of {len(target):,} rows "
+            f"have a target other than the outcome, mean |target - outcome| "
+            f"{float(np.abs(target - dataset.outcome).mean()):.4f}"
         )
     if args.target_file is not None:
         if args.td_lambda or args.target_key is None:
@@ -624,6 +641,7 @@ def main() -> None:
                 # training (IKA-194). None for a fresh initialisation.
                 "init_from": init_meta or None,
                 "td_lambda": args.td_lambda,
+                "td_from_game": args.td_from_game,
                 "target_file": None if args.target_file is None else str(args.target_file),
                 "target_key": args.target_key,
                 "seed": args.seed,

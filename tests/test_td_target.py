@@ -59,3 +59,25 @@ def test_a_dataset_without_search_values_is_refused() -> None:
     data.search_value = np.zeros(0, np.float32)
     with pytest.raises(ValueError, match="search_value"):
         td_target(data, 0.4)
+
+
+def test_from_game_keeps_the_outcome_below_it_and_mixes_from_it() -> None:
+    data = dataset_with([1.0, 0.0, 1.0, 0.0], [0.25, 0.75, 0.25, 0.75])
+    data.game = np.array([0, 1, 2, 3])
+    mixed = td_target(data, 0.4, from_game=2)
+    assert np.array_equal(mixed[:2], data.outcome[:2])
+    assert np.allclose(mixed[2:], [0.6 + 0.4 * 0.25, 0.4 * 0.75])
+    # The control that can fail: without the boundary the first two rows are mixed too.
+    assert not np.allclose(td_target(data, 0.4)[:2], data.outcome[:2])
+
+
+def test_from_game_none_is_the_old_target_bit_for_bit() -> None:
+    data = dataset_with([1.0, 0.0, 1.0], [0.3, 0.9, 0.5])
+    assert np.array_equal(td_target(data, 0.3), td_target(data, 0.3, from_game=None))
+    assert np.array_equal(td_target(data, 0.3, from_game=0), td_target(data, 0.3))
+
+
+def test_from_game_past_every_game_is_the_outcome_and_lambda_zero_ignores_it() -> None:
+    data = dataset_with([1.0, 0.0, 1.0], [0.3, 0.9, 0.5])
+    assert np.array_equal(td_target(data, 0.5, from_game=10**9), data.outcome)
+    assert np.array_equal(td_target(data, 0.0, from_game=1), data.outcome)
