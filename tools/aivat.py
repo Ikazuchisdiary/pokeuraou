@@ -548,7 +548,7 @@ def _evaluator(
 
 def _games(directory: Path) -> Any:  # noqa: ANN401
     """(file name, line number, record) of every game in a match directory."""
-    for path in sorted(directory.glob("games-worker*.jsonl")):
+    for path in sorted(directory.glob("games-*worker*.jsonl")):
         with path.open("rb") as handle:
             for number, line in enumerate(handle):
                 if line.strip():

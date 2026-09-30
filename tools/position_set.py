@@ -122,7 +122,7 @@ def _write(path: Path, payload: dict) -> None:
 
 def build(args: argparse.Namespace) -> None:
     rng = np.random.default_rng(args.seed)
-    files = sorted(Path(args.games_dir).glob("games-worker*.jsonl"))
+    files = sorted(Path(args.games_dir).glob("games-*worker*.jsonl"))
     rng.shuffle(files)
     picked = []
     for f in files:
@@ -159,7 +159,7 @@ def build_hidden(args: argparse.Namespace) -> None:
     reg = pool.reg
     register_mega_stones(reg)
     rng = np.random.default_rng(args.seed)
-    files = sorted(Path(args.games_dir).glob("games-worker*.jsonl"))
+    files = sorted(Path(args.games_dir).glob("games-*worker*.jsonl"))
     rng.shuffle(files)
     picked = []
 

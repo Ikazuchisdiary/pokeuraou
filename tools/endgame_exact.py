@@ -523,7 +523,7 @@ def solve_to_end(
 def scan(games_dir: Path, games_per_file: int, max_product: int) -> list[dict[str, Any]]:
     """Every move decision with a recorded menu product at most `max_product`."""
     found: list[dict[str, Any]] = []
-    for path in sorted(games_dir.glob("games-worker*.jsonl")):
+    for path in sorted(games_dir.glob("games-*worker*.jsonl")):
         with path.open(encoding="utf-8") as handle:
             for line_no, line in enumerate(handle):
                 if line_no >= games_per_file:

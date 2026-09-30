@@ -72,7 +72,7 @@ def read(
     # FAILED, which this tool never reads either.
     written = 0
     provenance: dict[str, dict] = {}
-    for path in sorted(directory.glob("games-worker*.jsonl")) + sorted(
+    for path in sorted(directory.glob("games-*worker*.jsonl")) + sorted(
         directory.glob("games-seed*.jsonl")
     ):
         with path.open(encoding="utf-8") as handle:

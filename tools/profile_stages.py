@@ -290,7 +290,7 @@ class GamesWritten:
         self.handles: dict[Path, Any] = {}
 
     def __call__(self) -> int:
-        for path in self.directory.glob("games-worker*.jsonl"):
+        for path in self.directory.glob("games-*worker*.jsonl"):
             handle = self.handles.get(path)
             if handle is None:
                 handle = self.handles[path] = path.open("rb")

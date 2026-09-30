@@ -535,7 +535,7 @@ def calib(args: argparse.Namespace) -> None:  # noqa: C901, PLR0915 - one pass o
     reg = load_pool(args.pool).reg
     register_mega_stones(reg)
     games = []
-    for f in sorted(Path(args.games).glob("games-worker*.jsonl"))[: args.files]:
+    for f in sorted(Path(args.games).glob("games-*worker*.jsonl"))[: args.files]:
         for line in f.read_bytes().splitlines():
             if line.strip():
                 games.append(json.loads(line))

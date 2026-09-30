@@ -74,7 +74,7 @@ from pokeuraou.selfplay import MAX_TURNS  # noqa: E402
 from pokeuraou.sprt import Sprt  # noqa: E402
 from pokeuraou.workqueue import WorkClient, run_workers  # noqa: E402
 
-GAME_FILES = "games-worker*.jsonl"
+GAME_FILES = "games-*worker*.jsonl"
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:

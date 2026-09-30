@@ -126,7 +126,7 @@ def _scan_file(path: str) -> list[dict[str, Any]]:
 
 
 def run_scan(args: argparse.Namespace) -> None:
-    files = sorted(str(p) for d in args.dirs for p in Path(d).glob("games-worker*.jsonl"))
+    files = sorted(str(p) for d in args.dirs for p in Path(d).glob("games-*worker*.jsonl"))
     with Pool(args.jobs) as pool:
         parts = pool.map(_scan_file, files)
     with open(args.out, "wb") as handle:
