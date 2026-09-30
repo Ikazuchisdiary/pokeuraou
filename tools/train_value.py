@@ -54,6 +54,7 @@ from pokeuraou.value import (
     split_for,
     td_target,
     train,
+    widen_net,
 )
 
 
@@ -204,6 +205,16 @@ def warm_start(
     net, meta = load_model(path, encoder)
     blob = torch.load(path, map_location="cpu", weights_only=False)
     config = replace(ValueConfig(**blob["config"]), **run)
+    if config.attention and not net.config.attention:
+        # IKA-90: the attention layer's output projection starts at zero, so before the
+        # first step this net answers exactly as the loaded one.
+        torch.manual_seed(config.seed)
+        grown = build(encoder, config)
+        grown._active_feature = net._active_feature
+        missing, unexpected = grown.load_state_dict(net.state_dict(), strict=False)
+        if unexpected or any(not k.startswith("mon_attention.") for k in missing):
+            raise SystemExit(f"warm start into attention: missing {missing}, unexpected {unexpected}")
+        net = grown
     if config.move_properties and not net.config.move_properties:
         # IKA-318: an id-only model gains the move-property branch. Its input columns start
         # at zero, so before the first step this net answers exactly as the loaded one; the
@@ -296,11 +307,26 @@ def main() -> None:
         "only: a warm start needs the source model's shapes.",
     )
     ap.add_argument(
+        "--widen",
+        type=int,
+        default=1,
+        help="IKA-405: with --init-from, grow the hidden layers (mon 160, side 192, head 256) "
+        "to this many times their width before training, in the form that leaves the model's "
+        "answers unchanged (value.widen_net). 1 (default) does not touch the shapes.",
+    )
+    ap.add_argument(
         "--move-properties",
         action="store_true",
         help="IKA-318: read each move's dex properties (qhead.move_table) beside its id "
         "embedding. With --init-from an id-only model, the new branch's input columns start "
         "at zero, so the first step starts from that model's own answers.",
+    )
+    ap.add_argument(
+        "--attention",
+        action="store_true",
+        help="IKA-90: one residual attention layer across the Pokemon tokens of both sides. "
+        "With --init-from a model without it, its output projection starts at zero, so the "
+        "first step starts from that model's own answers.",
     )
     ap.add_argument(
         "--drop-train-moves",
@@ -386,6 +412,7 @@ def main() -> None:
             ("swa_from", args.swa_from),
             ("pct_start", args.pct_start),
             ("move_properties", True if args.move_properties else None),
+            ("attention", True if args.attention else None),
         )
         if value is not None
     }
@@ -410,6 +437,18 @@ def main() -> None:
     init_meta: dict = {}
     if args.init_from is not None:
         net, init_meta, config = warm_start(args.init_from, encoder, run)
+        if args.widen != 1:
+            from dataclasses import replace
+
+            net = widen_net(net, encoder, args.widen, seed=args.seed)
+            config = replace(
+                config,
+                mon_dim=net.config.mon_dim,
+                side_dim=net.config.side_dim,
+                head_dim=net.config.head_dim,
+                width_groups=net.config.width_groups,
+            )
+            init_meta["widened"] = args.widen
         net = net.to(device)
         print(
             f"warm start from {args.init_from} ({init_meta.get('format_id')}, grown "
