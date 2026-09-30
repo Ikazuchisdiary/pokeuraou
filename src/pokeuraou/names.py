@@ -35,6 +35,11 @@ _MEGA_SUFFIX = re.compile(r"^Mega(?:-([XY]))?$")
 _FULLWIDTH = {"X": "Ｘ", "Y": "Ｙ"}
 
 
+def _forme_suffix(name: str, base_species: str) -> str:
+    """"Lycanroc-Dusk" minus "Lycanroc-" is "Dusk"."""
+    return name.removeprefix(f"{base_species}-")
+
+
 def names_dir() -> Path:
     return repo_root() / "configs" / "names"
 
@@ -278,7 +283,14 @@ class Localiser:
         found = self.reg.species.get(key)
         base_ja = self.names._base_japanese(self.reg, key)
         if base_ja is None:
-            return found.name if found else species_id
+            if found is None:
+                return species_id
+            if to_id(found.base_species) == key:
+                return found.name
+            # Showdown has no Japanese for the base either (Floette, Alcremie, Toxtricity
+            # ...): the English base and the forme in the same "base (forme)" shape as a
+            # translated base, so a screen sets the forme in small type either way.
+            return f"{found.base_species} ({_forme_suffix(found.name, found.base_species)})"
 
         forme_ja = self.names.species_pieces(key).get("forme")
         if forme_ja:
@@ -298,11 +310,7 @@ class Localiser:
             return f"メガ{base_ja}{_FULLWIDTH.get(mega.group(1) or '', '')}"
         # English suffix for the part Showdown has not translated: "Lycanroc-Dusk" minus
         # "Lycanroc-" is "Dusk".
-        suffix = found.name
-        prefix = f"{found.base_species}-"
-        if suffix.startswith(prefix):
-            suffix = suffix[len(prefix) :]
-        return f"{base_ja} ({suffix})"
+        return f"{base_ja} ({_forme_suffix(found.name, found.base_species)})"
 
     def move(self, move_id: str) -> str:
         found = self.reg.moves.get(to_id(move_id))

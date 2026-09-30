@@ -32,6 +32,12 @@ const S = {
   analysis: false, catalogue: null, status: null, running: false, analysisState: null,
 };
 const $ = (id) => document.getElementById(id);
+// A species name with its forme ("ウインディ (Hisui)", "Floette (Eternal)": the localiser writes
+// base (forme)): the forme in small type, the same as the game page (tools/game_page.py name_html).
+const nameHtml = (n) => {
+  const [base, ...rest] = String(n == null ? "" : n).split(" (");
+  return rest.length ? `${esc(base)}<small class="forme">(${esc(rest.join(" (").replace(/\)$/, ""))})</small>` : esc(base);
+};
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const pct = (p) => (p >= 0.1 || p === 0 ? (100 * p).toFixed(0) : (100 * p).toFixed(1)) + "%";
 const v3 = (v) => v.toFixed(3);
@@ -144,7 +150,30 @@ function setStatus(text, cls, short) {
   el.innerHTML = short ? `<span class="long">${esc(text)}</span><span class="short">${esc(short)}</span>` : esc(text);
   el.title = text; el.className = "status " + (cls || "");
 }
-function stopSelecting() { clearInterval(S.selTimer); S.selTimer = null; }
+// The AI reads the selection while the person picks (IKA-392): the status counts the AI's
+// seconds down until the AI is done (`selected`, or the first board).
+// The seconds go into the words only (the class, title of the dot and the short text stay).
+function statusText(text) {
+  const el = $("status"), long = el.querySelector(".long");
+  if (long) long.textContent = text; else el.textContent = text;
+  el.title = text;
+}
+function selRest() {
+  const left = Math.ceil((S.selEnd - Date.now()) / 1000);
+  return !S.selSeconds ? "" : left > 0 ? `残り ${left} 秒` : "まもなく終わります";
+}
+// The same seconds in the input box (a phone's status pill has no room for them).
+function selBox() {
+  const rest = selRest(), a = $("selAi"), w = $("selRest");
+  if (a) a.textContent = `AI も選出を読んでいます${rest ? "・" + rest : ""}`;
+  if (w) w.textContent = rest ? `（${rest}）` : "";
+}
+function selWords() {
+  const rest = selRest();
+  if (S.sent) return `AI の選出を待っています${rest ? `（${rest}）` : ""}`;
+  return `${S.select ? S.select.size : 4} 体を選んでください（AI も選出を読んでいます${rest ? "・" + rest : ""}）`;
+}
+function stopSelecting() { clearInterval(S.selTimer); S.selTimer = null; S.selecting = false; }
 function log(turn, html, cls) {
   const li = document.createElement("li");
   li.innerHTML = `<span class="t">${turn === "" ? "" : turn != null ? "T" + turn : "·"}</span><div class="${cls || ""}">${html}</div>`;
@@ -189,28 +218,34 @@ function onEvent(e) {
       enterAnalysis(); onAnalysis(e);
       break;
     case "selecting": {
-      // IKA-392: the AI reads the selection (a person's game: 90 s) before the person is asked.
+      // IKA-392: the AI reads the selection for e.seconds while the person picks (`select`
+      // follows at once); what the status says depends on whether the person has picked.
       stopSelecting();
-      const end = Date.now() + (e.seconds || 0) * 1000;
-      const words = () => {
-        if (!e.seconds) return "AI が選出を読んでいます";
-        const left = Math.ceil((end - Date.now()) / 1000);
-        return left > 0 ? `AI が選出を読んでいます（残り ${left} 秒）` : "AI が選出を読んでいます（まもなく終わります）";
-      };
-      setStatus(words(), "think");
+      S.selecting = true;
+      S.selEnd = Date.now() + (e.seconds || 0) * 1000; S.selSeconds = e.seconds || 0;
       // Only the words change after the first draw: the status dot's pulse is not restarted.
-      S.selTimer = setInterval(() => { const el = $("status"); const t = words(); el.textContent = t; el.title = t; }, 1000);
+      S.selTimer = setInterval(() => { statusText(selWords()); selBox(); }, 1000);
       break;
     }
+    case "selected":
+      // The AI has its four (not shown: it is public when both have chosen, at the first board).
+      if (S.selecting) {
+        stopSelecting();
+        if (S.select) setStatus(`${S.select.size} 体を選んでください`, "turn");
+        else setStatus("AI の選出が決まりました。まもなく始まります", "think");
+      }
+      break;
     case "select":
-      stopSelecting();
-      S.select = e; S.picked = []; renderInput(); setStatus(`${e.size} 体を選んでください`, "turn");
+      S.select = e; S.picked = []; S.sent = false; renderInput();
+      if (S.selecting) setStatus(selWords(), "turn", "選出の番");
+      else setStatus(`${e.size} 体を選んでください`, "turn");
       if ($("result").classList.contains("between")) {
         const more = $("result").querySelector(".more");
         if (more && S.games) more.textContent = `${S.gameNo + 1} 局目（全 ${S.games} 局）が始まりました。${e.size} 体を選んでください`;
       }
       break;
     case "board":
+      stopSelecting();
       e.sides.forEach((sd) => [...sd.active, ...sd.bench].forEach(learn));
       S.board = e; renderBoard();
       if (S.select) { S.select = null; renderInput(); }
@@ -261,7 +296,7 @@ function onEvent(e) {
       log(e.turn, `<a class="alink" data-turn="${e.turn}"${S.gameIndex != null ? ` data-game="${S.gameIndex}"` : ""} target="pokeuraou-analysis">分析</a><span class="ai-c">AI</span> <span class="logacts">${actHtml(e.agentParts || [[-1, e.agent]], boardWho(aiSide()))}</span><br><span class="you-c">あなた</span> <span class="logacts">${actHtml(e.personParts || [[-1, e.person]], boardWho(S.personSide))}</span>` +
         (e.offMenu ? ` <span class="badge" title="あなたの手は AI の候補集合の外でした">候補集合の外</span>` : "") +
         ((e.changes || []).length ? `<br><span class="dim">${e.changes.map((c) =>
-          `${esc(c.species)}${c.entered ? " 登場" : ""}${c.from !== c.to ? ` ${c.from}→${c.to}%` : ""}${c.fainted ? " ひんし" : ""}${c.status ? " " + esc(c.status) : ""}`).join("・")}</span>` : ""));
+          `${nameHtml(c.species)}${c.entered ? " 登場" : ""}${c.from !== c.to ? ` ${c.from}→${c.to}%` : ""}${c.fainted ? " ひんし" : ""}${c.status ? " " + esc(c.status) : ""}`).join("・")}</span>` : ""));
       updateLinks();
       break;
     case "end": {
@@ -344,7 +379,7 @@ function monCard(m, mine, key) {
   return `<article class="mon${m.fainted ? " fainted" : ""}${S.openMon.has(key) ? " open" : ""}" data-key="${key}" title="押すと詳細">
     ${art(m.species, "lg")}
     <div style="min-width:0">
-      <div class="mon-name">${esc(m.species)} ${status}</div>
+      <div class="mon-name"><span>${nameHtml(m.species)}</span> ${status}</div>
       <div class="hp"><div class="hp-track"><i class="${hpCls(prev)}" style="width:${prev}%" data-to="${hpNow}"></i></div>
         <b class="hp-num n">${hpNow}<small>%</small></b></div>
       <div class="mon-sub">${exact}${boosts}${(m.volatiles || []).length ? `<span>${m.volatiles.map((v) => esc(volJa(v))).join("・")}</span>` : ""}</div>
@@ -354,7 +389,7 @@ function monCard(m, mine, key) {
   </article>`;
 }
 function benchHtml(side, mine) {
-  const minis = side.bench.map((m) => `<span class="mini${m.fainted ? " fainted" : ""}">${art(m.species, "sm")}<span>${esc(m.species)}</span>
+  const minis = side.bench.map((m) => `<span class="mini${m.fainted ? " fainted" : ""}">${art(m.species, "sm")}<span>${nameHtml(m.species)}</span>
     <span class="n dim">${m.fainted ? "ひんし" : mine && m.hp ? m.hp[0] + "/" + m.hp[1] : m.percent + "%"}</span></span>`);
   for (let i = 0; i < side.hidden; i++) minis.push(`<span class="facedown" title="まだ見ていない裏">?</span>`);
   if (!minis.length) return "";
@@ -734,7 +769,8 @@ function send(line) {
   LiveData.send(line);
   S.prompt = null; S.select = null; S.answered = true; S.sent = true;
   renderInput(); applyHide();
-  if (S.pondering) setStatus("AI が読みを止めて手を引くのを待っています", "think");
+  if (S.selecting) setStatus(selWords(), "think", "AI を待つ");
+  else if (S.pondering) setStatus("AI が読みを止めて手を引くのを待っています", "think");
 }
 function renderInput() {
   const box = $("input");
@@ -742,15 +778,16 @@ function renderInput() {
   if (S.select && S.sheets) {
     const team = S.sheets.teams[S.personSide], foe = S.sheets.teams[aiSide()];
     const size = S.select.size;
-    box.innerHTML = `<div class="ask">選出（${size} 体を順に押す。先の 2 体が先発）</div>
+    box.innerHTML = `<div class="ask">選出（${size} 体を順に押す。先の 2 体が先発）</div>${S.selecting ? '<div class="note" id="selAi"></div>' : ""}
       <div class="foeteam"><span class="note">相手</span>${foe.map((m) => art(m.species, "sm")).join("")}</div>
       <div class="pickgrid">${team.map((m, i) => {
         const at = S.picked.indexOf(i);
         return `<button type="button" class="pick" data-i="${i}" aria-pressed="${at >= 0}">${at >= 0 ? `<span class="ord">${at + 1}</span>` : ""}${at >= 0 && at < 2 ? '<span class="lead">先発</span>' : ""}
-          ${art(m.species, "md")}<b>${esc(m.species)}</b><small>${esc(m.item)}</small></button>`;
+          ${art(m.species, "md")}<b>${nameHtml(m.species)}</b><small>${esc(m.item)}</small></button>`;
       }).join("")}</div>
       <div class="sendbar"><button type="button" class="ghost" id="clear">やり直す</button>
         <button type="button" class="primary" id="go" ${S.picked.length === size ? "" : "disabled"}>この選出で始める</button></div>`;
+    selBox();
     box.querySelectorAll(".pick").forEach((b) => b.onclick = () => {
       const i = +b.dataset.i, at = S.picked.indexOf(i);
       if (at >= 0) S.picked.splice(at, 1); else if (S.picked.length < size) S.picked.push(i);
@@ -763,7 +800,9 @@ function renderInput() {
   const p = S.prompt;
   if (!p) {
     box.innerHTML = S.ended ? `<span class="note">${S.gamesLeft > 0 ? "次の局を待っています" : "対局は終わりました"}</span>`
+      : S.sent && S.selecting ? '<span class="note">選出を送りました。AI の選出を待っています<span id="selRest"></span></span>'
       : S.sent ? '<span class="note">送りました。ターンの結果を待っています</span>' : '<span class="note">AI の番を待っています</span>';
+    selBox();
     return;
   }
   const nSlots = p.slots.length ? p.slots[0].length : 0;
@@ -863,7 +902,7 @@ function renderSheets() {
   if (!e) return;
   const order = [aiSide(), e.personSide];
   $("sheets").innerHTML = order.map((i) => `<div><div class="who ${i === e.personSide ? "you" : "ai"}">${esc(e.names[i])}</div>
-    ${e.teams[i].map((m) => `<div class="sheet-mon">${art(m.species, "sm")}<div><b>${esc(m.species)}</b> <span class="dim" style="display:inline">@ ${esc(m.item)}</span>
+    ${e.teams[i].map((m) => `<div class="sheet-mon">${art(m.species, "sm")}<div><b>${nameHtml(m.species)}</b> <span class="dim" style="display:inline">@ ${esc(m.item)}</span>
       <span class="dim">${esc(m.ability)}・${esc(m.nature)}・<span class="n">${m.sp.join("-")}</span></span>
       <span class="dim">${m.moves.map(esc).join(" / ")}</span></div></div>`).join("")}</div>`).join("");
 }
