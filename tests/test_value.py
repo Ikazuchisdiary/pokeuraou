@@ -461,7 +461,8 @@ def test_attention_reads_the_other_pokemon_and_commutes_with_the_side_flip(encod
     present = torch.ones(5, 2, m, 1)
     present[:, 1, m - 1] = 0.0  # the foe's last slot is empty
     perturbed = mon.clone()
-    perturbed[:, 1, 0] += torch.randn(5, 160)  # a foe Pokemon changes (not a uniform shift: LayerNorm removes that)
+    # A foe Pokemon changes. Not by a uniform shift: LayerNorm removes that.
+    perturbed[:, 1, 0] += torch.randn(5, 160)
     with torch.no_grad():
         assert torch.equal(layer(mon, present), mon)  # zero projection: identity
         layer.out.weight.normal_(0.0, 0.1)
