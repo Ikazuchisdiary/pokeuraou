@@ -85,8 +85,8 @@ import numpy as np  # noqa: E402
 
 from pokeuraou.regulation import repo_root  # noqa: E402
 
-DEFAULT_VALUE = ("data/models/value-mc2.pt", "data/models/value-mc2-s1.pt")
-DEFAULT_Q = "data/models/q-mc2.pt"
+DEFAULT_VALUE = ("data/models/value-mc3.pt", "data/models/value-mc3-s1.pt")
+DEFAULT_Q = "data/models/q-mc3.pt"
 
 
 def _mine(args: argparse.Namespace, count: int):  # noqa: ANN201 - an iterator of positions
