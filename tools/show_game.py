@@ -1088,7 +1088,25 @@ def main() -> None:
     ap.add_argument("--html", action="store_true",
                     help="the generation game (--file/--dir, --game) as a single HTML page "
                     "(game_page.render_html); --out is the page (default game.html)")
+    ap.add_argument("--reread", action="store_true",
+                    help="with --html: solve each move decision again with the record's settings "
+                    "(tools/reread.py) and show each seat's read -- the other side's mixture it "
+                    "modelled and its moves' values -- where the re-solve matches the record's "
+                    "mixtures and values; the record's mixture alone elsewhere, with the reason")
+    ap.add_argument("--models", type=Path, default=Path("data/models"),
+                    help="with --reread: where the record's leaf and Q are found by name")
+    ap.add_argument("--pools", type=Path, default=Path("data/pool"),
+                    help="with --reread: where the record's pool file is found by its id")
+    ap.add_argument("--value", type=Path, nargs="+", default=None,
+                    help="with --reread: the leaf's model files (default: by the record's "
+                    "searchObjective under --models; the label must match the record's)")
+    ap.add_argument("--q-model", type=Path, default=None,
+                    help="with --reread and a q rank fill: the Q file (default: the record's "
+                    "qModel under --models; checked against qModelSha256)")
+    ap.add_argument("--device", default="cpu", help="with --reread: the leaf's torch device")
     args = ap.parse_args()
+    if args.reread and not args.html:
+        ap.error("--reread goes with --html")
 
     if args.transcript is not None:
         transcript_page(args)
@@ -1112,7 +1130,20 @@ def main() -> None:
         from pokeuraou.damage import register_mega_stones
 
         register_mega_stones(reg)
-        line = game_page.selfplay_line(reg, loc, record, rustnode.RustNode(reg))
+        rereads = None
+        if args.reread:
+            import reread
+
+            sheets, leaf = reread.load_inputs(
+                reg, record, models=args.models, pools=args.pools, values=args.value,
+                q_model=args.q_model, device=args.device,
+            )
+            rereads = reread.reread_game(reg, record, sheets=sheets, evaluate=leaf)
+            for index, got in sorted(rereads.items()):
+                d = record["decisions"][index]
+                print(f"  T{d['turn']} {d['kind']}: {'一致' if got.matched else '不一致'} "
+                      f"(最大差 {got.worst:.1e}){'' if got.matched else ' ' + str(got.reason)}")
+        line = game_page.selfplay_line(reg, loc, record, rustnode.RustNode(reg), rereads)
         out = args.out if args.out != Path("game.txt") else Path("game.html")
         page = game_page.render_html(
             reg, loc, line, embed=args.embed_sprites, open_mix=args.open_mixtures
