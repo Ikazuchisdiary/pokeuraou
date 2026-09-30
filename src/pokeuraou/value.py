@@ -109,6 +109,95 @@ class ValueConfig:
     move_properties: bool = False
     #: Width of one move's property vector after its own small layer, when on.
     move_property_dim: int = 32
+    #: IKA-405: how many equal groups each hidden layer's LayerNorm normalises separately.
+    #: 1 is the plain LayerNorm over the whole layer -- every model before this field. A
+    #: net grown by `widen_net` to k times the width has k groups of the original width, so
+    #: group 0 is the original layer and its normalisation does not see the added units.
+    width_groups: int = 1
+    #: IKA-90: one residual attention layer over the (up to) 2 x picked_team_size Pokemon
+    #: tokens, after `mon_mlp` and before the pooling. Its output projection starts at zero,
+    #: so a net warm-started from a model without it answers exactly as that model until
+    #: training moves it. Off: parameters, keys and answers are those of every earlier model.
+    attention: bool = False
+    attention_heads: int = 4
+
+
+class _GroupLayerNorm(nn.Module):
+    """LayerNorm applied to each of `groups` equal slices of the last dimension.
+
+    The parameters are `weight` and `bias` of the whole width, named and shaped as in
+    `nn.LayerNorm`, so a state dict reads across. With one group it is `nn.LayerNorm`
+    (`_norm` returns that class then, not this one).
+    """
+
+    def __init__(self, dim: int, groups: int, eps: float = 1e-5) -> None:
+        super().__init__()
+        if dim % groups:
+            raise ValueError(f"{dim} is not divisible into {groups} groups")
+        self.groups = groups
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+        self.bias = nn.Parameter(torch.zeros(dim))
+
+    def forward(self, x: Tensor) -> Tensor:
+        shaped = x.unflatten(-1, (self.groups, -1))
+        normed = nn.functional.layer_norm(shaped, shaped.shape[-1:], eps=self.eps)
+        return normed.flatten(-2) * self.weight + self.bias
+
+
+def _norm(dim: int, groups: int) -> nn.Module:
+    return nn.LayerNorm(dim) if groups == 1 else _GroupLayerNorm(dim, groups)
+
+
+class _MonAttention(nn.Module):
+    """Pre-norm residual self-attention across all Pokemon of both sides (IKA-90).
+
+    A token attends to every present token, its own side's and the other side's. Which
+    side a key is on is read only as "same as the query's or not" (a learned per-head term
+    added to the score by `rel[query, key]`), never as side 0 or 1, so swapping the two
+    sides permutes the tokens and nothing else: the layer commutes with the side flip, and
+    the head's `head(o, t) - head(t, o)` keeps the value antisymmetric. `out` starts at
+    zero, so the layer is the identity until it is trained.
+    """
+
+    def __init__(self, dim: int, heads: int, tokens_per_side: int) -> None:
+        super().__init__()
+        if dim % heads:
+            raise ValueError(f"attention width {dim} does not split into {heads} heads")
+        self.heads = heads
+        self.head_dim = dim // heads
+        self.norm = nn.LayerNorm(dim)
+        self.qkv = nn.Linear(dim, 3 * dim)
+        # Per head: what a query looks for in a same-side key and in an opposing key.
+        self.rel = nn.Parameter(torch.randn(2, heads, self.head_dim) * 0.02)
+        self.out = nn.Linear(dim, dim)
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
+        side = torch.arange(2 * tokens_per_side) // tokens_per_side
+        self.register_buffer("rel_index", (side[:, None] != side[None, :]).long(), persistent=False)
+
+    def forward(self, mon: Tensor, present: Tensor) -> Tensor:
+        """`mon` (B,2,M,D), `present` (B,2,M,1) -> (B,2,M,D)."""
+        b, sides, m, d = mon.shape
+        n = sides * m
+        x = mon.reshape(b, n, d)
+        q, k, v = self.qkv(self.norm(x)).chunk(3, dim=-1)
+
+        def split(t: Tensor) -> Tensor:
+            return t.view(b, n, self.heads, self.head_dim).transpose(1, 2)  # (B,H,N,hd)
+
+        q, k, v = split(q), split(k), split(v)
+        scores = q @ k.transpose(-1, -2)  # (B,H,N,N)
+        # q . rel[same/opposite] for each query, then picked per (query, key) pair.
+        per_rel = torch.einsum("bhnd,rhd->bhnr", q, self.rel)  # (B,H,N,2)
+        index = self.rel_index.unsqueeze(0).unsqueeze(0).expand(b, self.heads, n, n)
+        scores = scores + per_rel.gather(-1, index)
+        scores = scores / self.head_dim**0.5
+        keys = present.reshape(b, 1, 1, n) > 0
+        # A large negative, not -inf: an absent query has no key of its own to fall back on.
+        attn = torch.softmax(scores.masked_fill(~keys, -1e9), dim=-1)
+        mixed = (attn @ v).transpose(1, 2).reshape(b, n, d)
+        return mon + self.out(mixed).view(b, sides, m, d)
 
 
 class ValueNet(nn.Module):
@@ -126,6 +215,7 @@ class ValueNet(nn.Module):
         self.config = config
         sizes = encoder.vocab.sizes
         widths = encoder.widths
+        groups = config.width_groups
 
         self.species = nn.Embedding(sizes["species"], config.species_dim, padding_idx=0)
         self.ability = nn.Embedding(sizes["ability"], config.ability_dim, padding_idx=0)
@@ -141,10 +231,10 @@ class ValueNet(nn.Module):
         )
         self.mon_mlp = nn.Sequential(
             nn.Linear(mon_in, config.mon_dim),
-            nn.LayerNorm(config.mon_dim),
+            _norm(config.mon_dim, groups),
             nn.GELU(),
             nn.Linear(config.mon_dim, config.mon_dim),
-            nn.LayerNorm(config.mon_dim),
+            _norm(config.mon_dim, groups),
             nn.GELU(),
         )
         if config.move_properties:
@@ -162,20 +252,24 @@ class ValueNet(nn.Module):
             self.move_prop_in = nn.Linear(config.move_property_dim, config.mon_dim)
             nn.init.zeros_(self.move_prop_in.weight)
             nn.init.zeros_(self.move_prop_in.bias)
+        if config.attention:
+            self.mon_attention = _MonAttention(
+                config.mon_dim, config.attention_heads, encoder.mons_per_side
+            )
         # active mean, active max, bench mean, bench max
         pooled = 4 * config.mon_dim + widths["side"]
         self.side_mlp = nn.Sequential(
             nn.Linear(pooled, config.side_dim),
-            nn.LayerNorm(config.side_dim),
+            _norm(config.side_dim, groups),
             nn.GELU(),
         )
         self.head = nn.Sequential(
             nn.Linear(2 * config.side_dim + widths["field"], config.head_dim),
-            nn.LayerNorm(config.head_dim),
+            _norm(config.head_dim, groups),
             nn.GELU(),
             nn.Dropout(config.dropout),
             nn.Linear(config.head_dim, config.head_dim),
-            nn.LayerNorm(config.head_dim),
+            _norm(config.head_dim, groups),
             nn.GELU(),
             nn.Dropout(config.dropout),
             nn.Linear(config.head_dim, 1),
@@ -206,6 +300,8 @@ class ValueNet(nn.Module):
             mon = self.mon_mlp(features)  # (B,2,M,mon_dim)
 
         present = batch["mask"].unsqueeze(-1)
+        if self.config.attention:
+            mon = self.mon_attention(mon, present)
         is_active = batch["mon"][..., self._active_feature].unsqueeze(-1)
         active = present * is_active
         bench = present * (1.0 - is_active)
@@ -267,6 +363,84 @@ def build(encoder: Encoder, config: ValueConfig) -> ValueNet:
     net = ValueNet(encoder, config)
     net._active_feature = encoder.mon_names.index("is_active")
     return net
+
+
+def widen_net(net: ValueNet, encoder: Encoder, factor: int, *, seed: int = 0) -> ValueNet:
+    """`net` with every hidden layer `factor` times as wide, answering exactly as `net` (IKA-405).
+
+    The hidden layers are `mon_dim`, `side_dim` and `head_dim`; the embeddings are not
+    widened. The grown net keeps the old units as group 0 of each layer and adds
+    `factor - 1` groups. Two things make the old units' values unchanged by the added ones:
+
+    * every layer is followed by a LayerNorm, which over a wider layer would take its mean
+      and variance over the added units too. The grown net normalises each group of the
+      original width on its own (`ValueConfig.width_groups`, `_GroupLayerNorm`), so group 0
+      sees exactly its old inputs.
+    * the weights from added input units into the old units are zero, and the final layer
+      reads only the old head units at first. The added units are read by nothing that the
+      answer depends on until training moves those weights.
+
+    The added units' own incoming weights (from every input, old or added) are the fresh
+    default initialisation at `seed`; their LayerNorm is the identity-start (1, 0). The
+    value is identical up to float32 rounding: the matrix products run over a longer sum of
+    which the extra terms are exact zeros. `net` is not modified.
+    """
+    config = net.config
+    if factor < 1:
+        raise ValueError(f"factor {factor}")
+    if config.move_properties:
+        raise ValueError("widen_net does not handle the move-property branch")
+    if config.attention:
+        raise ValueError("widen_net does not handle the attention layer")
+    if config.width_groups != 1:
+        raise ValueError("widen_net grows a net that has not been widened")
+    from dataclasses import replace
+
+    wide_config = replace(
+        config,
+        mon_dim=config.mon_dim * factor,
+        side_dim=config.side_dim * factor,
+        head_dim=config.head_dim * factor,
+        width_groups=factor,
+    )
+    torch.manual_seed(seed)
+    wide = build(encoder, wide_config)
+    wide._active_feature = net._active_feature
+    widths = encoder.widths
+    d, s, h = config.mon_dim, config.side_dim, config.head_dim
+    big_d, big_s, big_h = wide_config.mon_dim, wide_config.side_dim, wide_config.head_dim
+    mon_in = wide.mon_mlp[0].in_features
+    # Linear layer -> (input blocks in the old net, the same blocks in the wide net). A
+    # block that is a widened layer's output keeps its first `old` columns in place.
+    blocks = {
+        "mon_mlp.0": ([mon_in], [mon_in]),
+        "mon_mlp.3": ([d], [big_d]),
+        "side_mlp.0": ([d] * 4 + [widths["side"]], [big_d] * 4 + [widths["side"]]),
+        "head.0": ([s, s, widths["field"]], [big_s, big_s, widths["field"]]),
+        "head.4": ([h], [big_h]),
+        "head.8": ([h], [big_h]),
+    }
+    old_state, new_state = net.state_dict(), wide.state_dict()
+    with torch.no_grad():
+        for key, value in old_state.items():
+            target = new_state[key]
+            layer = key.rsplit(".", 1)[0]
+            if value.shape == target.shape:
+                target.copy_(value)
+            elif layer in blocks and key.endswith(".weight"):
+                old_blocks, new_blocks = blocks[layer]
+                columns = []
+                offset = 0
+                for old_size, new_size in zip(old_blocks, new_blocks, strict=True):
+                    columns.append(torch.arange(old_size) + offset)
+                    offset += new_size
+                target[: value.shape[0]] = 0.0
+                target[: value.shape[0], torch.cat(columns)] = value
+            else:
+                # bias of a Linear, weight and bias of a LayerNorm: first `old` entries.
+                target[: value.shape[0]] = value
+    wide.load_state_dict(new_state)
+    return wide
 
 
 # ---------------------------------------------------------------------------
@@ -1011,6 +1185,7 @@ __all__ = [
     "save_model",
     "split_for",
     "train",
+    "widen_net",
 ]
 
 

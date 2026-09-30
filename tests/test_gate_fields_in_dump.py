@@ -41,9 +41,9 @@ REGULATIONS = ["gen9championsvgc2026regmb", "gen9championsvgc2026regmc"]
 #: Gate fields that are functions: the dump lists them in `customHooks`, not as a key.
 HOOK_FIELDS = frozenset({"damageCallback", "onHitField"})
 
-#: Gate field -> the moves carrying it that M-C's dump holds. The port models none of them.
+#: Gate field -> the moves carrying it that M-C's dump holds. The port models none of them
+#: (Steel Beam's `mindBlownRecoil` left with IKA-406: `steel_beam.rs`, tests/test_steel_beam_oracle.py).
 GATED = {
-    "steelbeam": "mindBlownRecoil",
     "sleeptalk": "sleepUsable",
     "snore": "sleepUsable",
 }

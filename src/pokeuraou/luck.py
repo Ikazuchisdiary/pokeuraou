@@ -382,7 +382,7 @@ class CorrectedPairs:
 
     def poll(self) -> int:
         seen = 0
-        for path in sorted(self.directory.glob("games-worker*.jsonl")):
+        for path in sorted(self.directory.glob("games-*worker*.jsonl")):
             offset = self._offsets.get(path, 0)
             with path.open("rb") as handle:
                 handle.seek(offset)

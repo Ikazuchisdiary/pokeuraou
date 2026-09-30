@@ -94,7 +94,7 @@ def _cycle_clock():  # noqa: ANN202
 
 def load_positions(games_dir: Path, wanted: int, seed: int) -> list[Position]:
     """Move decisions' positions, an even share from every worker file, shuffled."""
-    files = sorted(games_dir.glob("games-worker*.jsonl"))
+    files = sorted(games_dir.glob("games-*worker*.jsonl"))
     share = -(-wanted * 3 // (2 * len(files)))
     out: list[Position] = []
     for path in files:

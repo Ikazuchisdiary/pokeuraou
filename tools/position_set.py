@@ -85,8 +85,8 @@ import numpy as np  # noqa: E402
 
 from pokeuraou.regulation import repo_root  # noqa: E402
 
-DEFAULT_VALUE = ("data/models/value-mc1.pt", "data/models/value-mc1-s1.pt")
-DEFAULT_Q = "data/models/q-mc0.pt"
+DEFAULT_VALUE = ("data/models/value-mc2.pt", "data/models/value-mc2-s1.pt")
+DEFAULT_Q = "data/models/q-mc2.pt"
 
 
 def _mine(args: argparse.Namespace, count: int):  # noqa: ANN201 - an iterator of positions
@@ -122,7 +122,7 @@ def _write(path: Path, payload: dict) -> None:
 
 def build(args: argparse.Namespace) -> None:
     rng = np.random.default_rng(args.seed)
-    files = sorted(Path(args.games_dir).glob("games-worker*.jsonl"))
+    files = sorted(Path(args.games_dir).glob("games-*worker*.jsonl"))
     rng.shuffle(files)
     picked = []
     for f in files:
@@ -159,7 +159,7 @@ def build_hidden(args: argparse.Namespace) -> None:
     reg = pool.reg
     register_mega_stones(reg)
     rng = np.random.default_rng(args.seed)
-    files = sorted(Path(args.games_dir).glob("games-worker*.jsonl"))
+    files = sorted(Path(args.games_dir).glob("games-*worker*.jsonl"))
     rng.shuffle(files)
     picked = []
 
