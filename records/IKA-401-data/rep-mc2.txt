@@ -1,0 +1,103 @@
+views 3564; one-side loss in win-probability units (x100 = points)
+
+| width | leaf | q-mc0 | q-mc1 | q-mc2 | random |
+|---|---|---|---|---|---|
+| 12 | 0.0008 (0.0002) | 0.0340 (0.0008) | 0.0292 (0.0008) | 0.0247 (0.0007) | 0.1099 (0.0013) |
+| 16 | 0.0003 (0.0001) | 0.0269 (0.0007) | 0.0213 (0.0006) | 0.0177 (0.0006) | 0.0920 (0.0011) |
+| 24 | 0.0001 (0.0000) | 0.0166 (0.0006) | 0.0123 (0.0005) | 0.0099 (0.0004) | 0.0653 (0.0009) |
+| 32 | 0.0000 (0.0000) | 0.0096 (0.0004) | 0.0072 (0.0003) | 0.0051 (0.0003) | 0.0468 (0.0007) |
+| 64 | 0.0000 (0.0000) | 0.0013 (0.0001) | 0.0009 (0.0001) | 0.0007 (0.0001) | 0.0109 (0.0004) |
+
+kept weight of the full equilibrium / share of views holding the whole support
+| width | leaf | q-mc0 | q-mc1 | q-mc2 | random |
+|---|---|---|---|---|---|
+| 12 | 0.997 / 0.985 | 0.752 / 0.226 | 0.787 / 0.263 | 0.820 / 0.301 | 0.220 / 0.007 |
+| 16 | 0.999 / 0.994 | 0.817 / 0.317 | 0.850 / 0.370 | 0.878 / 0.422 | 0.293 / 0.013 |
+| 24 | 1.000 / 0.999 | 0.897 / 0.496 | 0.919 / 0.553 | 0.936 / 0.607 | 0.433 / 0.042 |
+| 32 | 1.000 / 1.000 | 0.938 / 0.639 | 0.955 / 0.707 | 0.966 / 0.758 | 0.566 / 0.112 |
+| 64 | 1.000 / 1.000 | 0.992 / 0.934 | 0.995 / 0.952 | 0.996 / 0.965 | 0.894 / 0.647 |
+
+paired loss difference (second - first; negative = second is better), mean [95% CI], share of views that differ
+  q-mc1 - q-mc0 @12: -0.0048 [-0.0063, -0.0033]  differ 0.724
+  q-mc1 - q-mc0 @16: -0.0056 [-0.0069, -0.0043]  differ 0.637
+  q-mc1 - q-mc0 @24: -0.0043 [-0.0053, -0.0032]  differ 0.496
+  q-mc1 - q-mc0 @32: -0.0024 [-0.0032, -0.0016]  differ 0.362
+  q-mc1 - q-mc0 @64: -0.0004 [-0.0006, -0.0002]  differ 0.075
+  q-mc2 - q-mc0 @12: -0.0093 [-0.0108, -0.0078]  differ 0.745
+  q-mc2 - q-mc0 @16: -0.0093 [-0.0106, -0.0079]  differ 0.653
+  q-mc2 - q-mc0 @24: -0.0067 [-0.0078, -0.0057]  differ 0.511
+  q-mc2 - q-mc0 @32: -0.0046 [-0.0054, -0.0037]  differ 0.380
+  q-mc2 - q-mc0 @64: -0.0006 [-0.0009, -0.0002]  differ 0.078
+  q-mc2 - q-mc1 @12: -0.0045 [-0.0059, -0.0031]  differ 0.686
+  q-mc2 - q-mc1 @16: -0.0037 [-0.0049, -0.0025]  differ 0.604
+  q-mc2 - q-mc1 @24: -0.0025 [-0.0034, -0.0016]  differ 0.461
+  q-mc2 - q-mc1 @32: -0.0022 [-0.0029, -0.0015]  differ 0.319
+  q-mc2 - q-mc1 @64: -0.0001 [-0.0004, +0.0001]  differ 0.062
+  random2 - random @12: +0.0018 [+0.0005, +0.0030]  differ 0.999
+  random2 - random @16: +0.0003 [-0.0008, +0.0014]  differ 0.999
+  random2 - random @24: +0.0002 [-0.0008, +0.0011]  differ 0.994
+  random2 - random @32: +0.0002 [-0.0006, +0.0010]  differ 0.983
+  random2 - random @64: -0.0003 [-0.0007, +0.0001]  differ 0.533
+
+head to head, one decision: A's advantage over an even game (win-probability units; + = first listed wins), mean [95% CI]
+  leaf vs q-mc0 @12: +0.0066 [+0.0061, +0.0071]
+  leaf vs q-mc0 @16: +0.0048 [+0.0044, +0.0052]
+  leaf vs q-mc0 @24: +0.0028 [+0.0025, +0.0031]
+  leaf vs q-mc0 @32: +0.0017 [+0.0015, +0.0019]
+  leaf vs q-mc0 @64: +0.0002 [+0.0001, +0.0003]
+  leaf vs q-mc1 @12: +0.0047 [+0.0043, +0.0051]
+  leaf vs q-mc1 @16: +0.0034 [+0.0031, +0.0038]
+  leaf vs q-mc1 @24: +0.0017 [+0.0015, +0.0019]
+  leaf vs q-mc1 @32: +0.0010 [+0.0008, +0.0011]
+  leaf vs q-mc1 @64: +0.0001 [+0.0001, +0.0002]
+  leaf vs q-mc2 @12: +0.0036 [+0.0033, +0.0039]
+  leaf vs q-mc2 @16: +0.0025 [+0.0022, +0.0027]
+  leaf vs q-mc2 @24: +0.0013 [+0.0011, +0.0015]
+  leaf vs q-mc2 @32: +0.0007 [+0.0005, +0.0008]
+  leaf vs q-mc2 @64: +0.0001 [+0.0001, +0.0002]
+  q-mc0 vs q-mc1 @12: -0.0025 [-0.0032, -0.0019]
+  q-mc0 vs q-mc1 @16: -0.0018 [-0.0023, -0.0013]
+  q-mc0 vs q-mc1 @24: -0.0011 [-0.0014, -0.0008]
+  q-mc0 vs q-mc1 @32: -0.0008 [-0.0010, -0.0006]
+  q-mc0 vs q-mc1 @64: -0.0001 [-0.0002, -0.0000]
+  q-mc0 vs q-mc2 @12: -0.0038 [-0.0044, -0.0032]
+  q-mc0 vs q-mc2 @16: -0.0030 [-0.0035, -0.0026]
+  q-mc0 vs q-mc2 @24: -0.0017 [-0.0021, -0.0014]
+  q-mc0 vs q-mc2 @32: -0.0011 [-0.0014, -0.0009]
+  q-mc0 vs q-mc2 @64: -0.0001 [-0.0002, +0.0000]
+  q-mc1 vs q-mc2 @12: -0.0018 [-0.0023, -0.0012]
+  q-mc1 vs q-mc2 @16: -0.0013 [-0.0018, -0.0009]
+  q-mc1 vs q-mc2 @24: -0.0005 [-0.0007, -0.0003]
+  q-mc1 vs q-mc2 @32: -0.0004 [-0.0006, -0.0003]
+  q-mc1 vs q-mc2 @64: +0.0000 [-0.0001, +0.0001]
+
+answer movement between two Qs (TV distance of the menu equilibria, mean) and views whose support differs
+  q-mc0|q-mc1 @12: tv 0.3775  supdiff 0.676  menudiff 0.999
+  q-mc0|q-mc1 @16: tv 0.3139  supdiff 0.605  menudiff 1.000
+  q-mc0|q-mc1 @24: tv 0.2139  supdiff 0.467  menudiff 0.997
+  q-mc0|q-mc1 @32: tv 0.1482  supdiff 0.343  menudiff 0.991
+  q-mc0|q-mc1 @64: tv 0.0267  supdiff 0.069  menudiff 0.560
+  q-mc0|q-mc2 @12: tv 0.3996  supdiff 0.721  menudiff 0.999
+  q-mc0|q-mc2 @16: tv 0.3275  supdiff 0.628  menudiff 0.999
+  q-mc0|q-mc2 @24: tv 0.2268  supdiff 0.493  menudiff 0.997
+  q-mc0|q-mc2 @32: tv 0.1535  supdiff 0.361  menudiff 0.991
+  q-mc0|q-mc2 @64: tv 0.0274  supdiff 0.073  menudiff 0.565
+  q-mc1|q-mc2 @12: tv 0.3502  supdiff 0.661  menudiff 1.000
+  q-mc1|q-mc2 @16: tv 0.2824  supdiff 0.579  menudiff 1.000
+  q-mc1|q-mc2 @24: tv 0.1861  supdiff 0.437  menudiff 0.997
+  q-mc1|q-mc2 @32: tv 0.1244  supdiff 0.302  menudiff 0.988
+  q-mc1|q-mc2 @64: tv 0.0224  supdiff 0.058  menudiff 0.560
+
+loss difference split by whether the menus hold different support actions
+  q-mc1 - q-mc0 @12 supdiff=0: n=1153 -0.0002 (se 0.0007)
+  q-mc1 - q-mc0 @12 supdiff=1: n=2411 -0.0070 (se 0.0011)
+  q-mc1 - q-mc0 @24 supdiff=0: n=1901 -0.0001 (se 0.0002)
+  q-mc1 - q-mc0 @24 supdiff=1: n=1663 -0.0090 (se 0.0011)
+  q-mc2 - q-mc0 @12 supdiff=0: n=993 -0.0002 (se 0.0007)
+  q-mc2 - q-mc0 @12 supdiff=1: n=2571 -0.0128 (se 0.0010)
+  q-mc2 - q-mc0 @24 supdiff=0: n=1808 +0.0002 (se 0.0002)
+  q-mc2 - q-mc0 @24 supdiff=1: n=1756 -0.0139 (se 0.0010)
+  q-mc2 - q-mc1 @12 supdiff=0: n=1209 -0.0000 (se 0.0005)
+  q-mc2 - q-mc1 @12 supdiff=1: n=2355 -0.0068 (se 0.0010)
+  q-mc2 - q-mc1 @24 supdiff=0: n=2005 -0.0002 (se 0.0002)
+  q-mc2 - q-mc1 @24 supdiff=1: n=1559 -0.0054 (se 0.0010)
