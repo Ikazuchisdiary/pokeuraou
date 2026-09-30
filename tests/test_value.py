@@ -413,6 +413,85 @@ def test_a_move_property_model_saves_loads_and_refuses_another_dex(encoder, tmp_
         load_model(path, encoder)
 
 
+def test_attention_is_off_by_default(encoder) -> None:  # noqa: ANN001
+    """The default net is the one every shipped leaf was trained as (IKA-90)."""
+    assert ValueConfig().attention is False
+    keys = set(build(encoder, ValueConfig()).state_dict())
+    assert not any(k.startswith("mon_attention") for k in keys)
+
+
+def test_attention_starts_as_the_net_without_it(encoder) -> None:  # noqa: ANN001
+    """Zero-initialised output projection: a warm start answers exactly as its source.
+
+    Bit for bit. The positive controls move only the projection and must move the answer
+    (else the equality is of a layer nothing reads), and the moved net must still be
+    antisymmetric.
+    """
+    from dataclasses import replace
+
+    plain = build(encoder, ValueConfig()).eval()
+    config = replace(plain.config, attention=True)
+    torch.manual_seed(0)
+    att = build(encoder, config).eval()
+    missing, unexpected = att.load_state_dict(plain.state_dict(), strict=False)
+    assert not unexpected
+    assert {k.split(".")[0] for k in missing} == {"mon_attention"}
+    batch = _random_batch(encoder)
+    with torch.no_grad():
+        assert torch.equal(plain(batch), att(batch))
+        att.mon_attention.out.weight.normal_(0.0, 0.1)
+        moved = att(batch)
+        assert float((moved - plain(batch)).abs().max()) > 1e-3
+        assert float((moved + att(_flip(batch))).abs().max()) < 1e-5
+
+
+def test_attention_reads_the_other_pokemon_and_commutes_with_the_side_flip(encoder) -> None:  # noqa: ANN001
+    """With the projection live, a token's output depends on the OTHER side's tokens.
+
+    Without that the layer would be a per-Pokemon map the MLP already is. The control is
+    the same perturbation through the zero projection, which must not move anything, and a
+    token that is not present, which must not move anyone.
+    """
+    from pokeuraou.value import _MonAttention
+
+    m = encoder.mons_per_side
+    torch.manual_seed(3)
+    layer = _MonAttention(160, 4, m).eval()
+    mon = torch.randn(5, 2, m, 160)
+    present = torch.ones(5, 2, m, 1)
+    present[:, 1, m - 1] = 0.0  # the foe's last slot is empty
+    perturbed = mon.clone()
+    perturbed[:, 1, 0] += torch.randn(5, 160)  # a foe Pokemon changes (not a uniform shift: LayerNorm removes that)
+    with torch.no_grad():
+        assert torch.equal(layer(mon, present), mon)  # zero projection: identity
+        layer.out.weight.normal_(0.0, 0.1)
+        base = layer(mon, present)
+        changed = layer(perturbed, present)
+        # our side's tokens move when a foe token moves ...
+        assert float((changed[:, 0] - base[:, 0]).abs().max()) > 1e-3
+        # ... an empty slot's contents move nobody else ...
+        junk = mon.clone()
+        junk[:, 1, m - 1] += 5.0 * torch.randn(5, 160)
+        assert torch.allclose(layer(junk, present)[:, :, : m - 1], base[:, :, : m - 1], atol=1e-6)
+        # ... and swapping the sides swaps the outputs, nothing more.
+        flipped = layer(mon.flip(1), present.flip(1))
+        assert torch.allclose(flipped, base.flip(1), atol=1e-5)
+
+
+def test_an_attention_model_saves_and_loads(encoder, tmp_path) -> None:  # noqa: ANN001
+    config = ValueConfig(attention=True)
+    torch.manual_seed(1)
+    net = build(encoder, config).eval()
+    with torch.no_grad():
+        net.mon_attention.out.weight.normal_(0.0, 0.1)
+    path = tmp_path / "value.pt"
+    save_model(path, net, net.state_dict(), encoder.vocab, config, meta={}, widths=encoder.widths)
+    loaded, _meta = load_model(path, encoder)
+    batch = _random_batch(encoder, seed=2)
+    with torch.no_grad():
+        assert torch.equal(net(batch), loaded(batch))
+
+
 def test_auc_is_the_rank_statistic() -> None:
     # Perfect separation, perfect inversion, and a constant score.
     assert auc(np.array([0.1, 0.2, 0.9, 0.8]), np.array([0, 0, 1, 1])) == 1.0
