@@ -54,6 +54,7 @@ from pokeuraou.value import (
     split_for,
     td_target,
     train,
+    widen_net,
 )
 
 
@@ -296,6 +297,14 @@ def main() -> None:
         "only: a warm start needs the source model's shapes.",
     )
     ap.add_argument(
+        "--widen",
+        type=int,
+        default=1,
+        help="IKA-405: with --init-from, grow the hidden layers (mon 160, side 192, head 256) "
+        "to this many times their width before training, in the form that leaves the model's "
+        "answers unchanged (value.widen_net). 1 (default) does not touch the shapes.",
+    )
+    ap.add_argument(
         "--move-properties",
         action="store_true",
         help="IKA-318: read each move's dex properties (qhead.move_table) beside its id "
@@ -410,6 +419,18 @@ def main() -> None:
     init_meta: dict = {}
     if args.init_from is not None:
         net, init_meta, config = warm_start(args.init_from, encoder, run)
+        if args.widen != 1:
+            from dataclasses import replace
+
+            net = widen_net(net, encoder, args.widen, seed=args.seed)
+            config = replace(
+                config,
+                mon_dim=net.config.mon_dim,
+                side_dim=net.config.side_dim,
+                head_dim=net.config.head_dim,
+                width_groups=net.config.width_groups,
+            )
+            init_meta["widened"] = args.widen
         net = net.to(device)
         print(
             f"warm start from {args.init_from} ({init_meta.get('format_id')}, grown "
