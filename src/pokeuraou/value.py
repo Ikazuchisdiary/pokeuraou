@@ -114,6 +114,12 @@ class ValueConfig:
     #: net grown by `widen_net` to k times the width has k groups of the original width, so
     #: group 0 is the original layer and its normalisation does not see the added units.
     width_groups: int = 1
+    #: IKA-90: one residual attention layer over the (up to) 2 x picked_team_size Pokemon
+    #: tokens, after `mon_mlp` and before the pooling. Its output projection starts at zero,
+    #: so a net warm-started from a model without it answers exactly as that model until
+    #: training moves it. Off: parameters, keys and answers are those of every earlier model.
+    attention: bool = False
+    attention_heads: int = 4
 
 
 class _GroupLayerNorm(nn.Module):
@@ -141,6 +147,57 @@ class _GroupLayerNorm(nn.Module):
 
 def _norm(dim: int, groups: int) -> nn.Module:
     return nn.LayerNorm(dim) if groups == 1 else _GroupLayerNorm(dim, groups)
+
+
+class _MonAttention(nn.Module):
+    """Pre-norm residual self-attention across all Pokemon of both sides (IKA-90).
+
+    A token attends to every present token, its own side's and the other side's. Which
+    side a key is on is read only as "same as the query's or not" (a learned per-head term
+    added to the score by `rel[query, key]`), never as side 0 or 1, so swapping the two
+    sides permutes the tokens and nothing else: the layer commutes with the side flip, and
+    the head's `head(o, t) - head(t, o)` keeps the value antisymmetric. `out` starts at
+    zero, so the layer is the identity until it is trained.
+    """
+
+    def __init__(self, dim: int, heads: int, tokens_per_side: int) -> None:
+        super().__init__()
+        if dim % heads:
+            raise ValueError(f"attention width {dim} does not split into {heads} heads")
+        self.heads = heads
+        self.head_dim = dim // heads
+        self.norm = nn.LayerNorm(dim)
+        self.qkv = nn.Linear(dim, 3 * dim)
+        # Per head: what a query looks for in a same-side key and in an opposing key.
+        self.rel = nn.Parameter(torch.randn(2, heads, self.head_dim) * 0.02)
+        self.out = nn.Linear(dim, dim)
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
+        side = torch.arange(2 * tokens_per_side) // tokens_per_side
+        self.register_buffer("rel_index", (side[:, None] != side[None, :]).long(), persistent=False)
+
+    def forward(self, mon: Tensor, present: Tensor) -> Tensor:
+        """`mon` (B,2,M,D), `present` (B,2,M,1) -> (B,2,M,D)."""
+        b, sides, m, d = mon.shape
+        n = sides * m
+        x = mon.reshape(b, n, d)
+        q, k, v = self.qkv(self.norm(x)).chunk(3, dim=-1)
+
+        def split(t: Tensor) -> Tensor:
+            return t.view(b, n, self.heads, self.head_dim).transpose(1, 2)  # (B,H,N,hd)
+
+        q, k, v = split(q), split(k), split(v)
+        scores = q @ k.transpose(-1, -2)  # (B,H,N,N)
+        # q . rel[same/opposite] for each query, then picked per (query, key) pair.
+        per_rel = torch.einsum("bhnd,rhd->bhnr", q, self.rel)  # (B,H,N,2)
+        index = self.rel_index.unsqueeze(0).unsqueeze(0).expand(b, self.heads, n, n)
+        scores = scores + per_rel.gather(-1, index)
+        scores = scores / self.head_dim**0.5
+        keys = present.reshape(b, 1, 1, n) > 0
+        # A large negative, not -inf: an absent query has no key of its own to fall back on.
+        attn = torch.softmax(scores.masked_fill(~keys, -1e9), dim=-1)
+        mixed = (attn @ v).transpose(1, 2).reshape(b, n, d)
+        return mon + self.out(mixed).view(b, sides, m, d)
 
 
 class ValueNet(nn.Module):
@@ -195,6 +252,10 @@ class ValueNet(nn.Module):
             self.move_prop_in = nn.Linear(config.move_property_dim, config.mon_dim)
             nn.init.zeros_(self.move_prop_in.weight)
             nn.init.zeros_(self.move_prop_in.bias)
+        if config.attention:
+            self.mon_attention = _MonAttention(
+                config.mon_dim, config.attention_heads, encoder.mons_per_side
+            )
         # active mean, active max, bench mean, bench max
         pooled = 4 * config.mon_dim + widths["side"]
         self.side_mlp = nn.Sequential(
@@ -239,6 +300,8 @@ class ValueNet(nn.Module):
             mon = self.mon_mlp(features)  # (B,2,M,mon_dim)
 
         present = batch["mask"].unsqueeze(-1)
+        if self.config.attention:
+            mon = self.mon_attention(mon, present)
         is_active = batch["mon"][..., self._active_feature].unsqueeze(-1)
         active = present * is_active
         bench = present * (1.0 - is_active)
@@ -327,6 +390,8 @@ def widen_net(net: ValueNet, encoder: Encoder, factor: int, *, seed: int = 0) ->
         raise ValueError(f"factor {factor}")
     if config.move_properties:
         raise ValueError("widen_net does not handle the move-property branch")
+    if config.attention:
+        raise ValueError("widen_net does not handle the attention layer")
     if config.width_groups != 1:
         raise ValueError("widen_net grows a net that has not been widened")
     from dataclasses import replace

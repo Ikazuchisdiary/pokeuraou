@@ -156,3 +156,12 @@ def test_train_value_widen_at_zero_epochs_saves_an_equal_wider_model(  # noqa: A
     assert meta["init_from"]["widened"] == 2
     loaded = load_dataset(npz)
     assert float(np.abs(_logits(wide, loaded) - _logits(net, loaded)).max()) < 1e-5
+
+
+def test_widen_refuses_the_attention_layer(setup) -> None:  # noqa: ANN001
+    from dataclasses import replace
+
+    encoder, _data, _net = setup
+    attn = build(encoder, replace(ValueConfig(), attention=True))
+    with pytest.raises(ValueError, match="attention"):
+        widen_net(attn, encoder, 2)
