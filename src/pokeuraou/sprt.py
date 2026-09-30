@@ -59,7 +59,7 @@ REGULARIZE = 1e-3
 
 #: The files a match writes its games to: `match_queue` workers, and the older seeded runs
 #: `tools/paired_result.py` also reads.
-GAME_FILES = ("games-worker*.jsonl", "games-seed*.jsonl")
+GAME_FILES = ("games-*worker*.jsonl", "games-seed*.jsonl")
 
 
 def expected_score(elo: float) -> float:

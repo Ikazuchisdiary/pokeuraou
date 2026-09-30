@@ -547,3 +547,54 @@ def test_a_reads_summary_says_what_the_seat_would_have_played_and_what_hurt_it()
         mine[0].to_choice(),
     )
     assert wrong["eq"] == round(float(1.0 + x @ -payoff @ y), 6) != round(float(x @ -payoff @ y), 6)
+
+
+# ------------------------------------------------- IKA-398: a condition with a leaf of its own
+
+
+class _Stop(Exception):  # noqa: N818
+    pass
+
+
+def _leaf_match(pool, other_evaluate):  # noqa: ANN001, ANN202
+    tested = _cond("A", 1.0)
+    other = _cond("B", 1.0)
+    return Match(
+        reg=pool.reg, evaluate="leaf-A", leaf_name="A-name", rank_fill="refs2",
+        bench_drop=DEFAULT_BENCH_DROP, tested=tested, other=other, seed=3, max_turns=3,
+        rank_by_leaf=False, other_evaluate=other_evaluate,
+        other_leaf_name=None if other_evaluate is None else "B-name",
+    )
+
+
+def test_each_condition_reads_and_solves_its_own_leaf(monkeypatch, pool) -> None:  # noqa: ANN001
+    from pokeuraou.pool import draw_pair
+
+    def run(match):  # noqa: ANN001, ANN202
+        solved, played = [], []
+        monkeypatch.setattr(
+            humanplay, "solve_entry",
+            lambda reg, teams, evaluate, model, **kw: solved.append((evaluate, model)),  # noqa: ARG005
+        )
+
+        def play(seat, person, teams, **kw):  # noqa: ANN001, ANN003, ANN202, ARG001
+            played.append(kw["make_game"].keywords if hasattr(kw["make_game"], "keywords") else None)
+            raise _Stop
+
+        monkeypatch.setattr(humanplay, "play", play)
+        _k, a, b = draw_pair(np.random.default_rng([3, 0]), pool.pairs)
+        with pytest.raises(_Stop):
+            timematch.play_pair(match, 0, (pool.teams[a], pool.teams[b]))
+        return solved
+
+    # Own leaves: each condition's selection is solved by its own leaf, once each.
+    own = _leaf_match(pool, "leaf-B")
+    assert run(own) == [("leaf-A", "A-name"), ("leaf-B", "B-name")]
+    assert own.agent(own.tested).evaluate == "leaf-A" and own.agent(own.tested).name == "A-name"
+    assert own.agent(own.other).evaluate == "leaf-B" and own.agent(own.other).name == "B-name"
+    assert own.solve_key(own.tested) != own.solve_key(own.other)
+    # The control that this can fail: no leaf of its own is every run before it, one solve.
+    same = _leaf_match(pool, None)
+    assert run(same) == [("leaf-A", "A-name")]
+    assert same.agent(same.other).evaluate == "leaf-A"
+    assert same.solve_key(same.tested) == same.solve_key(same.other)

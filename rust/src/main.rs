@@ -53,6 +53,7 @@ mod served;
 mod shm;
 mod small_rules;
 mod speed;
+mod steel_beam;
 mod terrain;
 mod transform;
 mod wire;

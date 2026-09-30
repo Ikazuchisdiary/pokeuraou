@@ -45,7 +45,7 @@ def main() -> None:
         by_index: dict[int, dict[int, float]] = defaultdict(dict)
         loose = 0
         total = 0
-        for path in sorted(directory.glob("games-worker*.jsonl")) + sorted(
+        for path in sorted(directory.glob("games-*worker*.jsonl")) + sorted(
             directory.glob("games-seed*.jsonl")
         ):
             with path.open(encoding="utf-8") as handle:

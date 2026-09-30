@@ -1999,6 +1999,24 @@ q-nocover の腕は名前に `/rankfill:q-nocover` が付くので、上の gen-
 Q（q-mc0）は value-mc0 の答えで学んだもので、value-mc1 の答えに対してセルの誤差が +55.7%（水準のずれを除いても +29.4%）。規則（11% 未満ならそのまま）を超えたので、作り直した（IKA-348）。
 作り直した q-mc1（gen-1 の 10 万局面を value-mc1x2 で埋めた教材、30 エポック）は、value-mc1x2 の上の対戦評価で q-mc0 に SPRT(0,10) H0（933 対、−7.6 [−20.1, +5.0]）。本番の Q は q-mc0 のまま。
 
+### M-C gen-2（2026-09-30、IKA-400）
+
+データ生成: `data/selfplay-mc2`、200,000 局（局 0〜199,999、run seed 40001、20,000 局 × 10 区切り）、評価モデル value-mc1（x1）、候補集合 q-nocover・Q `data/models/q-mc0.pt`、幅 12、裏非公開、選出は value-mc1 で解く
+（gen-1 と同じ形で評価モデルの名前だけ違う。選出の store は value-mc1 で先に 2,145 対を解き、対戦評価の worker は新しく解いた対 0）。専有 147.4 分（1,357 局/分、他の仕事の無い区切りで 1,391 局/分）。
+学習: gen-0 + gen-1 + gen-2（279,997 局・3,171,556 決定）を、value-mc1 の種ごとに温間始動（種 k ← gen-1 の種 k、`--epochs 2 --lr 5e-4 --keep last --split-seed 0 --holdout 0.15`）の 2 本 = `value-mc2.pt`・`value-mc2-s1.pt`（1 エポック約 16 秒）。
+
+```
+M-C の対戦評価（match_queue --pool、幅 12・rank-leaf・裏非公開・推論サーバ 24/2、両腕 q-nocover・Q q-mc0）。data/matches-mc/mc2-*
+  A/A 対照 value-mc2x2 どうし 100 対                   100/100 が同じ局
+  value-mc2x2 対 value-mc1x2         SPRT(0,10) H1（426 対で停止）  +48.6 [+28.6, +68.9]（固定局数 525 対）  → 本番を value-mc2 に
+  hp-share に対する行（各 1,000 対）  value-mc2x2 +284.9 [+265.7, +305.6]、value-mc1x2 +246.9 [+228.1, +266.9]
+```
+
+原点 hp-share/w12/hidden-bench につないだ ratings.py の表は作っていない（上の行は hp-share 相手の直接の値。value-mc1x2 の IKA-346 の行 +263.4 と同じ腕で 16 の差があり、1 回ずつの行のゆらぎの大きさ）。
+保留局の損失（参考、検証は対戦評価を予言しない）: gen-2 の局で value-mc1x2 0.4428、value-mc2x2 0.4150（value-mc1 が打った局で mc2 だけがその分布を学んでいるので、分布の差）。
+Q（q-mc0）のセルの誤差は新しい評価モデルの答えに対して r = +29.6%（value-mc1x2 から value-mc2x2、水準のずれを除いて +19.4%）で、規則の 11% を超えた。作り直した q-mc2（gen-2 の 10 万局面を value-mc2x2 で埋めた教材、30 エポック）は、value-mc2x2 の上の対戦評価で q-mc0 に SPRT(0,10) が 3,999 対で決まらず（+7.5 [+0.6, +14.3]、H1 の境 LLR +2.98 に対し +2.02）。
+**Q を q-mc2 に替えた（ユーザーの判断 9/30、規則（H1 のときだけ替える）の例外）**。`data/models/q-mc2.pt`（q-mc0 は残す）。
+
 ### M-C の打ち手: 同じ CPU なら深さ 2 も深化も幅に負ける 〔9/25・IKA-292〕
 
 M-C の盤（match_queue --pool、value-mc0x2、rank-leaf、隠蔽、served 24/2）、SPRT(0, 10)。費用は 1 局の CPU 秒で揃えた

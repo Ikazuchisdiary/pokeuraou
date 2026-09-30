@@ -83,7 +83,7 @@ def candidate_refs(
     kept; the positions are read again when they are measured.
     """
     refs: list[tuple[str, int, int]] = []
-    for path in sorted(games_dir.glob("games-worker*.jsonl")):
+    for path in sorted(games_dir.glob("games-*worker*.jsonl")):
         with path.open(encoding="utf-8") as handle:
             for line_no, line in enumerate(handle):
                 if line_no >= games_per_file:
