@@ -62,6 +62,9 @@ pub struct Ctx<'a> {
     pub defender_side_conditions: &'a [Id],
     pub defender_ally_abilities: &'a [Id],
     pub field_abilities: &'a [Id],
+    /// Which of `defender_ally_abilities` / `field_abilities` sit behind an Ability Shield.
+    pub defender_ally_shielded: &'a [Id],
+    pub field_shielded: &'a [Id],
     pub active_per_half: i64,
 }
 
@@ -444,6 +447,13 @@ pub fn any_ruin(field_abilities: &[Id]) -> bool {
 /// either side, applies it once (`move.ruinedAtk`).
 pub fn ruined(field_abilities: &[Id], owner: Id, ruin: &str) -> bool {
     owner != ruin && field_abilities.iter().any(|a| *a == ruin)
+}
+
+/// Whether a damaging move of this user passes the `breakable` abilities of the Pokemon it
+/// hits and of third Pokemon (`suppressingAbility`). Mycelium Might sets `ignoreAbility` on
+/// status moves only.
+pub fn breaks_for_damage(ability: &str) -> bool {
+    matches!(ability, "moldbreaker" | "teravolt" | "turboblaze")
 }
 
 pub fn is_mold_breaker(ability: &str) -> bool {
