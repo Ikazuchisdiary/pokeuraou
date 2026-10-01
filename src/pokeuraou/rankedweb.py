@@ -224,6 +224,7 @@ class RankedApp:
             "regulation": reg.meta.format_name,
             "event": self.prior.source_line(),
             "spreadNote": self.prior.spread_line(),
+            "estNote": self.prior.short_line(),
             "eventName": self.prior.standings.event,
             "eventTeams": len(self.prior.standings.teams),
             "species": self.species_options(),

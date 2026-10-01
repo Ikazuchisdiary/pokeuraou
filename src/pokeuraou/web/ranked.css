@@ -147,3 +147,13 @@ body.ranked h3 small { color: var(--dim); }
 .rk-prov .v { min-width: 0; overflow-wrap: anywhere; }
 .rk-bring li { grid-template-columns: minmax(0, 1fr) 76px 76px; }
 @media (max-width: 700px) { .rk-prov > div { grid-template-columns: 6.5em minmax(0, 1fr); } }
+
+/* ---- design review 2: one-sentence band; start and back on their own lines; notes under headings */
+.rk-estnote { align-items: center; }
+.rk-estnote p { margin: 0; color: var(--ink); font-size: 14px; }
+.rk-selrow .who { display: grid; gap: 2px; }
+.rk-selrow .ln { display: flex; flex-wrap: wrap; gap: 0 6px; align-items: baseline; min-width: 0; }
+body.ranked .rk-cols h3 { display: block; }
+body.ranked .rk-cols h3 small { display: block; margin-top: 2px; }
+.rk-set.thin { border: 1px solid var(--line); border-top: 3px solid var(--ai); box-shadow: 0 0 0 2px var(--warn); }
+.rk-alt small { font-size: 11px; }

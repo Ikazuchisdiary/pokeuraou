@@ -170,10 +170,29 @@ function renderOpp() {
   $("oppMsg").innerHTML = (STATE.teamProblems || []).map((p) => `<li>${esc(p)}</li>`).join("");
   const note = $("estNote");
   note.hidden = !sets.length;
-  $("estEvent").textContent = META.event;
-  $("estSpread").textContent = META.spreadNote;
+  $("estEvent").textContent = META.estNote;
+  alignThin();
   refreshSolve();
 }
+
+// Thin-estimate bands set the head of every card in a row to the same height: the card without a
+// band takes the room of the tallest band beside it.
+function alignThin() {
+  const cards = Array.from(document.querySelectorAll("#oppSets .rk-set"));
+  cards.forEach((c) => { c.style.paddingTop = ""; const b = c.querySelector(".rk-thin"); if (b) b.style.minHeight = ""; });
+  const rows = new Map();
+  cards.forEach((c) => { const k = c.offsetTop; rows.set(k, (rows.get(k) || []).concat(c)); });
+  rows.forEach((row) => {
+    const h = Math.max(0, ...row.map((c) => { const b = c.querySelector(".rk-thin"); return b ? b.offsetHeight : 0; }));
+    if (!h) return;
+    row.forEach((c) => {
+      const b = c.querySelector(".rk-thin");
+      if (b) b.style.minHeight = h + "px";
+      else c.style.paddingTop = (parseFloat(getComputedStyle(c).paddingTop) + h + 8) + "px";
+    });
+  });
+}
+window.addEventListener("resize", () => { clearTimeout(alignThin.t); alignThin.t = setTimeout(alignThin, 120); });
 
 function refreshSolve() {
   const ready = STATE.mine && (STATE.opponent || []).length === 6 && STATE.opponent.every((v) => v && v.moves.length) && !(STATE.teamProblems || []).length;
@@ -184,12 +203,13 @@ function refreshSolve() {
   else if ((STATE.opponent || []).length !== 6) why = "相手の 6 種族を入れて「型を推定する」を押してください";
   else if ((STATE.teamProblems || []).length) why = "相手の型の問題を直してください";
   else if (!ready) why = "技が入っていない相手がいます";
+  if (!why && !running) why = STATE.job && STATE.job.state === "done" ? "型を直したら、もう一度求められます" : "相手の型を確かめて、押してください";
   $("readSummary").textContent = running ? "" : why;
 }
 
 function renderResult(r) {
   const mine = r.mine, theirs = r.theirs;
-  const row = (s, cls) => `<div class="rk-selrow ${cls}"><div class="who"><span class="lab">先発</span><b>${s.leads.map(nameHtml).join("・")}</b><span class="sep">／</span><span class="lab">裏</span>${s.back.map(nameHtml).join("・")}</div><span class="pct" title="この選出を選ぶ確率">${pct(s.p, s.p < 0.1 ? 1 : 0)}</span><div class="pbar"><i style="width:${Math.round(s.p * 100)}%"></i></div></div>`;
+  const row = (s, cls) => `<div class="rk-selrow ${cls}"><div class="who"><div class="ln"><span class="lab">先発</span><b>${s.leads.map(nameHtml).join("・")}</b></div><div class="ln"><span class="lab">裏</span>${s.back.map(nameHtml).join("・")}</div></div><span class="pct" title="この選出を選ぶ確率">${pct(s.p, s.p < 0.1 ? 1 : 0)}</span><div class="pbar"><i style="width:${Math.round(s.p * 100)}%"></i></div></div>`;
   const bring = (side) => `<ul class="rk-bring"><li class="head"><span>体</span><span class="n">選ぶ確率</span><span class="n">先発の確率</span></li>${side.members.map((m) =>
     `<li><span>${nameHtml(m.species)}</span><span class="n">${pct(m.bring)}</span><span class="n">${pct(m.lead)}</span></li>`).join("")}</ul>`;
   const hints = [];

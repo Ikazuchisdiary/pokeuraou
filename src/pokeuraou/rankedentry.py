@@ -419,6 +419,11 @@ class FieldPrior:
         return (f"{s.event}（{s.event_format}）の {len(s.teams):,} チームの実際の型から、"
                 "相手の編成に近い構築ほど重く見て推定しています。ほかの大会は使っていません。")
 
+    def short_line(self) -> str:
+        """The one sentence on the estimate's band."""
+        name = self.standings.event.split(" ")[0]
+        return f"{name} の大会 {len(self.standings.teams):,} チームの型から推定しています"
+
     def spread_line(self) -> str:
         return ("配分（SP）は大会の公開シートに載らないので、"
                 + (f"貼り付けで集めた {self.pool_teams} 構築（Match Up Web）にある同じ種族の配分を使い、"
