@@ -525,6 +525,10 @@ class PoolArm:
     #: Whether its matrix budget takes the knock-out branch (`Budget.enumerate_knockouts`,
     #: IKA-359); off ships.
     knockouts: bool = False
+    #: Whether its belief keeps the pre-IKA-411 rule: an opponent's Mega of Floette-Eternal
+    #: or Meowstic-F stops naming its sheet member (`play_game`'s ``dex_base_belief``).
+    #: Off ships; on is only for measuring the fix.
+    dex_base_belief: bool = False
 
     def __post_init__(self) -> None:
         self.rank_fill = resolve_rank_fill(self.rank_fill, self.rank_by_leaf)
@@ -589,9 +593,14 @@ def pool_match_game(
     max_turns: int = MAX_TURNS,
     epsilon: float = 0.0,
     temperature: float = 1.0,
+    pairs: Sequence[tuple[int, int]] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     """Plays game ``game_index`` of a pool match with the tested arm (``arms[0]``) at
     side ``which`` (IKA-259).
+
+    ``pairs`` draws the pair from these instead of every pair of the pool (IKA-411: a
+    match about a change that only some teams can meet plays only their pairs). The
+    record's pair index is still the one in ``pool.pairs``.
 
     The pair and its seats come from ``[seed, game_index]`` alone, so both seats of a game
     are the same two teams in the same seats with the ARMS swapped -- what makes the two a
@@ -612,7 +621,11 @@ def pool_match_game(
     if which not in (0, 1):
         raise ValueError(f"which must be 0 or 1, got {which}")
     rng = np.random.default_rng([seed, game_index])
-    k, a, b = draw_pair(rng, pool.pairs)
+    if pairs is None:
+        k, a, b = draw_pair(rng, pool.pairs)
+    else:
+        _k, a, b = draw_pair(rng, pairs)
+        k = pool.pairs.index((min(a, b), max(a, b)))
     team0, team1 = pool.teams[a], pool.teams[b]
     six = (list(team0.sets), list(team1.sets))
     species = ([s.species for s in six[0]], [s.species for s in six[1]])
@@ -668,6 +681,7 @@ def pool_match_game(
         depth=(side_arms[0].depth, side_arms[1].depth),
         solve_restricted=(side_arms[0].solve_restricted, side_arms[1].solve_restricted),
         knockouts=(side_arms[0].knockouts, side_arms[1].knockouts),
+        dex_base_belief=(side_arms[0].dex_base_belief, side_arms[1].dex_base_belief),
         selection=(species[0], species[1], picks[0], picks[1]),
     )
     sources = tuple(arm.selection for arm in side_arms)
@@ -687,6 +701,7 @@ def pool_match_game(
         "deepens": tuple(arm.deepen for arm in side_arms),
         "depths": tuple(arm.depth for arm in side_arms),
         "knockouts": tuple(arm.knockouts for arm in side_arms),
+        "dex_base": tuple(arm.dex_base_belief for arm in side_arms),
         "solvers": tuple(
             "restricted" if arm.depth >= 2 and arm.solve_restricted else "full"
             for arm in side_arms

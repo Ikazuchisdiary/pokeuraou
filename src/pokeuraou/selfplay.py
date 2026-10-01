@@ -306,6 +306,11 @@ class GameRecord:
     #: Whether each side's matrix budget took the knock-out branch
     #: (`Budget.enumerate_knockouts`, IKA-359). Written only when a side did.
     knockouts: list[bool] = field(default_factory=lambda: [False, False])
+    #: Whether each side's belief read the opponent's Megas by the dex's base species, as
+    #: before IKA-411 (`play_game`'s ``dex_base_belief``, for measuring the fix), and how
+    #: many of its beliefs that changed. Written only when a side did.
+    dex_base_belief: list[bool] = field(default_factory=lambda: [False, False])
+    dex_base_rewrites: list[int] = field(default_factory=lambda: [0, 0])
     #: The equilibrium mixtures over the 90 ordered selections, when a book was used.
     #: These are the policy targets a selection head would learn -- the *solver's*
     #: recommendation, not the softened distribution the game was drawn from.
@@ -389,6 +394,12 @@ class GameRecord:
                 else {}
             ),
             **({"knockouts": list(self.knockouts)} if any(self.knockouts) else {}),
+            **(
+                {"dexBaseBelief": list(self.dex_base_belief),
+                 "dexBaseRewrites": list(self.dex_base_rewrites)}
+                if any(self.dex_base_belief)
+                else {}
+            ),
             **(
                 {"depth": list(self.depth), "solveRestricted": list(self.solve_restricted)}
                 if set(self.depth) != {1}
@@ -937,6 +948,44 @@ def _rank_views(
     return [None if g is None else [g[0], list(g[1])] for g in got]
 
 
+def _belief_view(
+    reg: Regulation, pos: Position, side: int, seen: frozenset[int], dex_base: bool,
+    record: GameRecord, believer: int,
+) -> Position:
+    """`pos` as the believer's belief about `side` reads it (IKA-411).
+
+    Unchanged, unless ``dex_base``: then `side`'s Pokemon carry the dex's base species, as
+    `_make_pokemon` wrote it before IKA-411, so a Mega of Floette-Eternal or Meowstic-F no
+    longer names its sheet member and the belief puts it back on the bench -- the old rule,
+    kept per side only to measure the fix against it.
+
+    Only a Pokemon whose species has left its set's (a Mega) is rewritten: one still
+    wearing its set's species names its sheet member by `species` under either rule, and
+    the dex's base it would add names no other member (Species Clause). With nothing to
+    rewrite the position itself is returned; otherwise the believer's
+    ``dex_base_rewrites`` counts the belief it changed.
+    """
+    if not dex_base or len(seen) == len(pos.sides[side].pokemon):
+        # Nothing hidden: the belief is the position itself under either rule.
+        return pos
+    from .regulation import to_id
+
+    rewrite: dict[int, str] = {}
+    for index, mon in enumerate(pos.sides[side].pokemon):
+        found = reg.species.get(to_id(mon.base_species))
+        if found is None or to_id(mon.species) == to_id(mon.base_species):
+            continue
+        if to_id(found.base_species) != to_id(mon.base_species):
+            rewrite[index] = found.base_species
+    if not rewrite:
+        return pos
+    view = pos.copy()
+    for index, base in rewrite.items():
+        view.sides[side].pokemon[index].base_species = base
+    record.dex_base_rewrites[believer] += 1
+    return view
+
+
 def _bench_weights(
     bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None,
     side: int,
@@ -1000,6 +1049,7 @@ def play_game(
     bench_drop: str | tuple[str, str] = DEFAULT_BENCH_DROP,
     deepen: str | tuple[str, str] = DEFAULT_DEEPEN,
     knockouts: bool | tuple[bool, bool] = False,
+    dex_base_belief: bool | tuple[bool, bool] = False,
 ) -> GameRecord:
     """Plays one game to a result, sampling both sides from the turn's equilibrium.
 
@@ -1079,6 +1129,10 @@ def play_game(
     (`Budget.enumerate_knockouts`, IKA-359): off ships. Two sides that differ build and
     solve their own menus, as for any other setting that differs.
 
+    ``dex_base_belief`` (a pair too) has that side believe the opponent's bench as before
+    IKA-411: a Mega of Floette-Eternal or Meowstic-F stops naming its sheet member, which
+    goes back on the bench (`_belief_view`). Off ships; on is only for measuring the fix.
+
     ``deepen`` takes a pair too: how each agent deepens its move decisions best first
     after the depth-1 solve (`deepen.parse_deepen`, IKA-33): ``none`` ships and is the
     search unchanged, ``m<N>`` / ``r<N>`` spend N cells and read the root whole /
@@ -1136,6 +1190,10 @@ def play_game(
     deepens = (deepen, deepen) if isinstance(deepen, str) else tuple(deepen)
     specs = [deepen_spec(label) for label in deepens]
     kos = (knockouts, knockouts) if isinstance(knockouts, bool) else tuple(knockouts)
+    dex_bases = (
+        (dex_base_belief, dex_base_belief) if isinstance(dex_base_belief, bool)
+        else tuple(bool(d) for d in dex_base_belief)
+    )
     cells = (specs[0].cells, specs[1].cells)
     deep_restricted = (specs[0].reading == "restricted", specs[1].reading == "restricted")
     # The root's double oracle's width per side (IKA-293), or None; whether it swaps,
@@ -1209,6 +1267,7 @@ def play_game(
     record.bench_drop = list(drops)
     record.deepen = list(deepens)
     record.knockouts = [bool(k) for k in kos]
+    record.dex_base_belief = list(dex_bases)
     record.depth = [int(d) for d in depths]
     record.solve_restricted = [bool(r) for r in restricted]
     pos = start if start is not None else position_from_sets(reg, own, foe, rng=rng)
@@ -1277,7 +1336,7 @@ def play_game(
             pos = _do_replacement_node(
                 reg, rng, pos, owed, record, leaves,
                 sheets=sheets, shown=shown, bench_prior=bench_prior, leads=leads,
-                recorded_shown=recorded_shown,
+                recorded_shown=recorded_shown, dex_base=dex_bases,
             )
             continue
 
@@ -1290,11 +1349,15 @@ def play_game(
         spreads = None
         if sheets is not None:
             try:
+                views = [
+                    _belief_view(reg, pos, side, shown[side], dex_bases[1 - side], record, 1 - side)
+                    for side in (0, 1)
+                ]
                 spreads = {
                     side: completions(
-                        reg, pos, side, sheets[side], seen=shown[side],
+                        reg, views[side], side, sheets[side], seen=shown[side],
                         weights=_bench_weights(
-                            bench_prior, side, pos, shown[side], record, leads[side]
+                            bench_prior, side, views[side], shown[side], record, leads[side]
                         ),
                     )
                     for side in (0, 1)
@@ -1708,7 +1771,7 @@ def play_game(
             hidden=(
                 None
                 if sheets is None
-                else _HiddenBench(sheets, list(seen), bench_prior, list(leads))
+                else _HiddenBench(sheets, list(seen), bench_prior, list(leads), dex_bases)
             ),
         )
         if advanced is None:
@@ -1774,6 +1837,9 @@ class _HiddenBench:
     seen: list[frozenset[str]]
     bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None
     leads: list[frozenset[str] | None]
+    #: Per side, whether its belief keeps the pre-IKA-411 rule (`play_game`'s
+    #: ``dex_base_belief``).
+    dex_base: tuple[bool, bool] = (False, False)
 
 
 def _advance(
@@ -1961,11 +2027,14 @@ def _self_switch_spread(
     with timing.stage("selfswitch.complete"):
         carried = seen_identities(pause.position, other, hidden.seen[other])
         shown = seen_slots(pause.position, other, carried)
+        view = _belief_view(
+            reg, pause.position, other, shown, hidden.dex_base[chooser], record, chooser
+        )
         try:
             spread = completions(
-                reg, pause.position, other, hidden.sheets[other], seen=shown,
+                reg, view, other, hidden.sheets[other], seen=shown,
                 weights=_bench_weights(
-                    hidden.bench_prior, other, pause.position, shown, record,
+                    hidden.bench_prior, other, view, shown, record,
                     hidden.leads[other],
                 ),
             )
@@ -2328,6 +2397,7 @@ def _do_replacement_node(
     bench_prior: tuple[BenchPrior | None, BenchPrior | None] | None = None,
     leads: list[frozenset[str] | None] | None = None,
     recorded_shown: list[list[str]] | None = None,
+    dex_base: tuple[bool, bool] = (False, False),
 ) -> Position:
     """Solves and applies the replacement phase.
 
@@ -2406,11 +2476,15 @@ def _do_replacement_node(
         seen = shown or [frozenset(), frozenset()]
         answers: dict[int, tuple[list[float], float]] = {}
         try:
+            views = [
+                _belief_view(reg, pos, side, seen[side], dex_base[1 - side], record, 1 - side)
+                for side in (0, 1)
+            ]
             spreads = {
                 side: completions(
-                    reg, pos, side, sheets[side], seen=seen[side],
+                    reg, views[side], side, sheets[side], seen=seen[side],
                     weights=_bench_weights(
-                        bench_prior, side, pos, seen[side], record,
+                        bench_prior, side, views[side], seen[side], record,
                         (leads or [None, None])[side],
                     ),
                 )

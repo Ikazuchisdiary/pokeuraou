@@ -131,3 +131,50 @@ def test_showdown_keeps_the_set_species_as_base_species_through_the_mega(
 
     position, _sheet = _opening(mreg, species, stone)
     assert position.sides[1].pokemon[0].base_species == snap["baseSpecies"]
+
+
+# The old rule, kept per side to measure the fix against (`play_game`'s dex_base_belief).
+
+
+def _after_mega(reg: Regulation, species: str, stone: str):  # noqa: ANN202
+    position, sheet = _opening(reg, species, stone)
+    ours = next(a for a in side_actions(reg, position, 0) if not a.declares_mega)
+    theirs = next(a for a in side_actions(reg, position, 1) if a.declares_mega)
+    after = port.turn(reg, position, [ours, theirs], Budget.exact(), full=True).outcomes[0].position
+    assert after.sides[1].pokemon[0].is_mega
+    shown = seen_slots(after, 1, seen_identities(after, 1, seen_identities(position, 1)))
+    return after, sheet, shown
+
+
+@pytest.mark.parametrize(("species", "stone", "old"), [
+    ("floetteeternal", "floettite", 10),
+    ("meowsticf", "meowsticite", 10),
+    ("charizard", "charizarditey", 6),
+])
+def test_the_old_rule_is_the_belief_before_the_fix(
+    mreg: Regulation, species: str, stone: str, old: int
+) -> None:
+    """Under the old rule the believer's view puts the sheet member back on the bench --
+    the 10 completions the old `_make_pokemon` gave -- and counts the belief it changed;
+    for Charizard, whose dex base is its set species, it hands back the position itself."""
+    from pokeuraou.selfplay import GameRecord, _belief_view
+
+    after, sheet, shown = _after_mega(mreg, species, stone)
+    record = GameRecord(own_team=[], foe_team=[], foe_archetype="test")
+    assert _belief_view(mreg, after, 1, shown, False, record, 0) is after
+    view = _belief_view(mreg, after, 1, shown, True, record, 0)
+    assert len(completions(mreg, view, 1, sheet, seen=shown)) == old
+    assert (view is after) == (old == 6)
+    assert record.dex_base_rewrites == [0 if old == 6 else 1, 0]
+    # The true position is not touched.
+    assert after.sides[1].pokemon[0].base_species == species
+
+
+def test_the_old_rule_changes_nothing_with_nothing_hidden(mreg: Regulation) -> None:
+    from pokeuraou.selfplay import GameRecord, _belief_view
+
+    after, _sheet, _shown = _after_mega(mreg, "floetteeternal", "floettite")
+    record = GameRecord(own_team=[], foe_team=[], foe_archetype="test")
+    every = frozenset(mon.slot for mon in after.sides[1].pokemon)
+    assert _belief_view(mreg, after, 1, every, True, record, 0) is after
+    assert record.dex_base_rewrites == [0, 0]

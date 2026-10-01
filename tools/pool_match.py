@@ -17,6 +17,9 @@ What an arm is, per arm, and so in whichever seat it sits:
   `--q-arm` on the server or `--q-model` here). An arm with `--rank-leaf` and no fill named
   plays `q-nocover` by `data/models/q-mc3.pt`, as M-C generation does, and stops without
   that file; `refs2` is played when named (IKA-338),
+* whether its belief keeps the pre-IKA-411 rule, under which an opponent's Mega of
+  Floette-Eternal or Meowstic-F stops naming its sheet member (`--dex-base-belief` /
+  `--baseline-dex-base-belief`; only for measuring the fix),
 * whether its leaf scores a finished battle by the net instead of as its result
   (`--net-scores-ends` / `--baseline-net-scores-ends`: IKA-253 undone, for measuring it),
 * its selection: an arm with a leaf solves the pair's selection game with THAT leaf,
@@ -291,6 +294,15 @@ def main(argv: list[str] | None = None) -> None:
                     "crit or the roll decides (Budget.enumerate_knockouts, IKA-359)")
     ap.add_argument("--baseline-knockouts", action="store_true",
                     help="same for the other arm")
+    ap.add_argument("--dex-base-belief", action="store_true",
+                    help="the tested arm believes the opponent's bench as before IKA-411: a "
+                    "Mega of Floette-Eternal or Meowstic-F stops naming its sheet member, which "
+                    "goes back on the bench (only for measuring the fix)")
+    ap.add_argument("--baseline-dex-base-belief", action="store_true",
+                    help="same for the other arm")
+    ap.add_argument("--pairs-with", nargs="+", default=None, metavar="SPECIES",
+                    help="draw only the pool's pairs where either team has one of these "
+                    "species ids (IKA-411: a match about a change only some teams meet)")
     add_bench_flags(ap)
     ap.add_argument("--net-scores-ends", action="store_true",
                     help="the tested arm's leaf scores a finished battle by the net, not as "
@@ -355,6 +367,16 @@ def main(argv: list[str] | None = None) -> None:
     pool = load_pool(args.pool)
     reg = pool.reg
     register_mega_stones(reg)
+    pairs = None
+    if args.pairs_with:
+        unknown = [s for s in args.pairs_with if s not in reg.species]
+        if unknown:
+            ap.error(f"--pairs-with: not species ids of {reg.meta.format_id}: {unknown}")
+        holding = {t for t, team in enumerate(pool.teams)
+                   if any(s.species in args.pairs_with for s in team.sets)}
+        pairs = [(a, b) for a, b in pool.pairs if a in holding or b in holding]
+        if not pairs:
+            ap.error(f"--pairs-with {args.pairs_with}: no team of the pool has one")
     # One encoder per arm when their rules differ: the rules travel with the leaf.
     tested_rules = EncodingRules(net_scores_ends=args.net_scores_ends)
     other_rules = EncodingRules(net_scores_ends=args.baseline_net_scores_ends)
@@ -385,6 +407,7 @@ def main(argv: list[str] | None = None) -> None:
         limit=args.limit, rank_by_leaf=args.rank_leaf, rank_fill=args.rank_fill,
         bench_drop=args.bench_drop, deepen=args.deepen, depth=args.depth,
         solve_restricted=args.solve_restricted, knockouts=args.knockouts,
+        dex_base_belief=args.dex_base_belief,
     )
     other_limit = args.limit if args.baseline_limit is None else args.baseline_limit
     if baseline is None:
@@ -395,7 +418,8 @@ def main(argv: list[str] | None = None) -> None:
                         deepen=args.baseline_deepen,
                         depth=args.baseline_depth,
                         solve_restricted=args.baseline_solve_restricted,
-                        knockouts=args.baseline_knockouts)
+                        knockouts=args.baseline_knockouts,
+                        dex_base_belief=args.baseline_dex_base_belief)
     else:
         assert baseline_name is not None
         # One solver per arm even over one leaf: shared, the second arm would reuse the
@@ -414,12 +438,16 @@ def main(argv: list[str] | None = None) -> None:
             depth=args.baseline_depth,
             solve_restricted=args.baseline_solve_restricted,
             knockouts=args.baseline_knockouts,
+            dex_base_belief=args.baseline_dex_base_belief,
         )
     arms = (tested, other)
     print(pool.summary(), file=sys.stderr)
     print(f"pool match / {reg.meta.format_id} / bench {'hidden' if hide_bench else 'OPEN'} / "
           f"selection eps={args.explore_epsilon}, T={args.explore_temperature}",
           file=sys.stderr)
+    if pairs is not None:
+        print(f"  pairs: {len(pairs)} of {len(pool.pairs)}, those with "
+              f"{' / '.join(args.pairs_with)} in either team", file=sys.stderr)
     for label, arm in (("tested arm", tested), ("other arm", other)):
         store = arm.solver.store if arm.solver is not None else None
         print(
@@ -431,6 +459,7 @@ def main(argv: list[str] | None = None) -> None:
             + (f" / ends {_ends_rule(arm.evaluate)}" if arm.evaluate is not None else "")
             + (f" / depth {arm.depth} restricted" if arm.depth != 1 else "")
             + (" / knockout branch" if arm.knockouts else "")
+            + (" / belief by the dex's base species (pre-IKA-411)" if arm.dex_base_belief else "")
             + " / selection "
             f"{arm.selection}" + (f" by its own leaf, store {store}" if store else "")
             + f" / belief {'solved' if arm.solver is not None and hide_bench else 'uniform'}",
@@ -454,6 +483,8 @@ def main(argv: list[str] | None = None) -> None:
         tags += f"@d{tested.depth}"
     if tested.knockouts != other.knockouts:
         tags += "@ko" if tested.knockouts else "@noko"
+    if hide_bench and tested.dex_base_belief != other.dex_base_belief:
+        tags += "@dexbase" if tested.dex_base_belief else "@setbase"
     arm_label = f"{tested.name}{tags}"
 
     client = WorkClient(args.queue) if args.queue else None
@@ -475,7 +506,7 @@ def main(argv: list[str] | None = None) -> None:
     # The echo, per seat and per ARM (0 tested, 1 other): what each arm's side was given.
     echo = [[{"selection": {}, "belief": {}, "leaf": set(), "fill": {}, "drop": {},
               "deepen": {}, "deepened": 0, "widened": 0, "swapped": 0, "oracle": 0,
-              "depth": {}, "knockouts": 0,
+              "depth": {}, "knockouts": 0, "dexbase": 0, "dexbase_rewrites": 0,
               "coverless": {"menus": 0, "dropping": 0, "dropped": 0},
               "q": [0, 0], "qprobe": [0, 0], "childq": [0, 0], "lines": {}, "calls": 0}
              for _ in arms]
@@ -494,6 +525,7 @@ def main(argv: list[str] | None = None) -> None:
                 reg, pool, arms, seed=args.seed, game_index=game_index, which=which,
                 hide_bench=hide_bench, max_turns=args.max_turns,
                 epsilon=args.explore_epsilon, temperature=args.explore_temperature,
+                pairs=pairs,
             ),
         )
         done += 1
@@ -515,6 +547,10 @@ def main(argv: list[str] | None = None) -> None:
             bucket["drop"][played_drop] = bucket["drop"].get(played_drop, 0) + 1
             # Games this side played with the knock-out branch, read off the record.
             bucket["knockouts"] += int(record.knockouts[side])
+            # Games this side believed by the old rule, and the beliefs it changed: the
+            # positive control that the rule reached the arm (IKA-411).
+            bucket["dexbase"] += int(record.dex_base_belief[side])
+            bucket["dexbase_rewrites"] += record.dex_base_rewrites[side]
             played_deepen = record.deepen[side]
             bucket["deepen"][played_deepen] = bucket["deepen"].get(played_deepen, 0) + 1
             # Decisions this side actually deepened, read off the game (IKA-33).
@@ -632,6 +668,9 @@ def main(argv: list[str] | None = None) -> None:
                 f"rank fill {bucket['fill']}, bench drop {bucket['drop']}, "
                 + (f"knockout branch in {bucket['knockouts']:,} games, "
                    if bucket["knockouts"] else "")
+                + (f"pre-IKA-411 belief in {bucket['dexbase']:,} games "
+                   f"({bucket['dexbase_rewrites']:,} beliefs changed by it), "
+                   if bucket["dexbase"] else "")
                 + f"deepen {bucket['deepen']} ({bucket['deepened']:,} decisions deepened"
                 + (
                     f", oracle asked at {bucket['oracle']:,}, {bucket['widened']:,} actions "
