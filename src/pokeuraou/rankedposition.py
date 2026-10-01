@@ -301,6 +301,9 @@ def normalize(reg: Regulation, board: Board, form: dict[str, Any]) -> dict[str, 
             "itemGone": item_gone,
             "ability": pick(raw.get("ability"), reg.abilities, "特性"),
         }
+    if len(theirs) > reg.meta.picked_team_size:
+        raise RankedError(f"相手の見えた体が {len(theirs)} 体になりました。"
+                          f"選出は {reg.meta.picked_team_size} 体までです")
     for sid, mon in theirs.items():
         # A move a Pokemon is locked into has been used: it is one of its moves
         if mon["locked"] and mon["locked"] not in mon["moves"]:

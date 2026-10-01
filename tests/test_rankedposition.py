@@ -156,6 +156,7 @@ def test_an_invalid_form_is_refused_in_words(world) -> None:  # noqa: ANN001
     bad(lambda f: f["theirs"]["tyranitar"].update(
         moves=["rockslide", "crunch", "protect", "icywind", "tailwind"]), "見えた技")
     bad(lambda f: f["mineActive"].__setitem__(1, 0), "2 回")
+    bad(lambda f: f["theirs"].update({s: {} for s in OPP[2:5]}), "選出は 4 体まで")
     bad(lambda f: f["field"].update(weather="rainbow"), "天気")
     bad(lambda f: f["events"]["damage"].append(
         {"attacker": "tyranitar", "move": "crunch", "target": 5, "amount": 10}), "4 体の中")
