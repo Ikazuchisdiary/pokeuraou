@@ -231,10 +231,9 @@ def with_record_state(typed, record, groups: tuple[str, ...]):  # noqa: ANN001, 
             ref = by_id.get(identity(mon))
             if ref is None:
                 continue
-            if "pp" in groups:
-                # the move slots as the battle had them: PP spent, used, and the order they stand in
-                if sorted(m.id for m in ref.moves) == sorted(m.id for m in mon.moves):
-                    mon.moves = [m.copy() for m in ref.moves]
+            # the move slots as the battle had them: PP spent, used, and the order they stand in
+            if "pp" in groups and sorted(m.id for m in ref.moves) == sorted(m.id for m in mon.moves):
+                mon.moves = [m.copy() for m in ref.moves]
             if "mem" in groups:
                 for name in MEMORY_FIELDS:
                     setattr(mon, name, getattr(ref, name))
