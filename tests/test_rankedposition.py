@@ -501,3 +501,57 @@ def test_a_pokemon_that_stayed_on_the_field_cannot_fake_out_again(world) -> None
     # The comparison can fail: Rillaboom (also Fake Out) coming in on turn 2 can use it.
     _edit(stayed, 1, lambda f: f.update(mineActive=[2, 0]))
     assert fakeout_for_slot0(stayed, 1)
+
+
+def test_the_server_routes_walk_the_board_and_serve_the_page(world) -> None:  # noqa: ANN001
+    import json
+    import urllib.error
+    import urllib.request
+
+    from pokeuraou.rankedweb import RankedServer
+
+    def reader(game, point, seconds, report):  # noqa: ANN001, ANN202
+        return _result(point)
+
+    _REG[:] = [world.reg]
+    app = _app(world, reader)
+    server = RankedServer(app, "127.0.0.1", 0).start()
+    try:
+        def call(path, body=None):  # noqa: ANN001, ANN202
+            data = None if body is None else json.dumps(body).encode()
+            req = urllib.request.Request(server.url.rstrip("/") + path, data=data)
+            try:
+                with urllib.request.urlopen(req) as resp:
+                    return resp.status, json.loads(resp.read())
+            except urllib.error.HTTPError as err:
+                return err.code, json.loads(err.read())
+
+        assert call("/api/board") == (200, {"started": False, "read": {"state": "idle"}})
+        assert call("/api/board/start", {"brought": [0, 1, 2], "leads": OPP[:2]})[0] == 400
+        code, state = call("/api/board/start", {"brought": [0, 1, 2, 3], "leads": OPP[:2]})
+        assert code == 200 and state["started"] and state["options"]["status"]
+        form = state["turns"][0]["form"]
+        form["theirs"]["tyranitar"]["pct"] = 77
+        assert call("/api/board/save", {"index": 0, "form": form})[0] == 200
+        form["theirs"]["tyranitar"]["pct"] = 0
+        code, bad = call("/api/board/save", {"index": 0, "form": form})
+        assert code == 400 and "HP" in bad["error"]
+        assert call("/api/board/next", {})[1]["turns"][1]["form"]["theirs"]["tyranitar"]["pct"] == 77
+        assert call("/api/board/choose", {"species": "tyranitar", "alternative": 1})[0] == 200
+        assert call("/api/board/read", {"index": 1})[1]["state"] == "running"
+        for _ in range(100):
+            job = call("/api/board/job")[1]
+            if job["state"] != "running":
+                break
+            time.sleep(0.05)
+        assert job["state"] == "done" and job["result"]["value"] == 0.57
+        assert call("/api/board/drop", {})[1]["turns"].__len__() == 1
+        assert call("/api/board/reset", {})[1]["started"] is False
+        for page, marker in (("position", b"ranked-position.js"), ("ranked-position.js", b"/api/board/save"),
+                             ("ranked-position.css", b".ps-mon"), ("ranked.html", b"ranked-position.html")):
+            with urllib.request.urlopen(f"{server.url}{page}") as resp:
+                assert marker in resp.read()
+        with urllib.request.urlopen(server.url + "position") as resp:
+            assert b'name="sprite-url"' in resp.read()
+    finally:
+        server.close()

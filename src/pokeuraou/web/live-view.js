@@ -54,6 +54,8 @@ const metaUrl = (name, port) => {
   return (m && m.getAttribute("content")) || `${location.protocol}//${location.hostname}:${port}/`;
 };
 const ANALYSIS_URL = metaUrl("analysis-url", 8337), GAME_URL = metaUrl("game-url", 8332);
+// The ranked-match screen (IKA-408, tools/ranked_entry.py): a position typed in by hand, read.
+const RANKED_URL = metaUrl("ranked-url", 8338) + "ranked-position.html";
 const withQuery = (url, q) => url + (url.includes("?") ? "&" : "?") + new URLSearchParams(q).toString();
 // How the game page shows the AI's reading: show / until the person's move is sent / off.
 const READ_MODES = ["show", "until", "off"];
@@ -877,6 +879,7 @@ function setLink(a, ok, href, title) {
   a.title = title;
 }
 function updateLinks() {
+  setLink($("modeRanked"), true, RANKED_URL, "ランクマ用: ゲーム画面の局面を手で入れて検討する（別のタブ）");
   if (S.analysis) {
     setLink($("modeGame"), true, GAME_URL, "対戦の画面（別のタブ）");
     $("modeAnalysis").removeAttribute("href");
