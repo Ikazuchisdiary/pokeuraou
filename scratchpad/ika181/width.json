@@ -1,0 +1,30 @@
+[heavy] 2026-10-02T00:58:50 start (1 cores): C:/Users/Ikazuchi/repos/pokeuraou/.venv/Scripts/python.exe C:/tmp/ika181/width.py C:/Users/Ikazuchi/repos/pokeuraou/data/selfplay-mc4 48 25
+{
+ "files": 48,
+ "games_per_file": 25,
+ "kinds": {
+  "move": 10044,
+  "replacement": 3483,
+  "selfswitch": 364
+ },
+ "move_decisions": 10044,
+ "mean_pool_per_side": {
+  "off": 51.99412584627638,
+  "benefit": 53.35981680605337,
+  "all": 84.84473317403425
+ },
+ "mean_q_cells": {
+  "off": 3416.3997411389882,
+  "benefit": 3581.179410593389,
+  "all": 8902.897252090801
+ },
+ "decisions_grown": {
+  "benefit": 1664,
+  "all": 9684
+ },
+ "sides_grown": {
+  "benefit": 1800,
+  "all": 17415
+ }
+}
+[heavy] 2026-10-02T00:58:56 end rc=0 after 7s
