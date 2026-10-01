@@ -233,3 +233,25 @@ def test_a_swapped_action_is_the_same_choice_in_the_other_position() -> None:
     assert [(s.move_id, s.target) for s in own.slots] == [("b", -2), ("a", 1)]
     foe = swap_action(action, False, True)
     assert [(s.move_id, s.target) for s in foe.slots] == [("a", 2), ("b", -1)]
+
+
+def test_a_charging_move_keeps_aiming_at_the_same_pokemon(roster) -> None:  # noqa: ANN001
+    """IKA-412 found it: `twoturnmove.extra.targetLoc` is a position, so a swap of the target's
+    side must move it (and a swap of the holder's side moves an ally target)."""
+    pos = _played(roster)[0]
+    holder = pos.sides[0].pokemon[0]
+    holder.volatiles.append(Effect(id="twoturnmove", move="phantomforce", extra={"targetLoc": 2}))
+    ally = pos.sides[1].pokemon[0]
+    ally.volatiles.append(Effect(id="twoturnmove", move="solarbeam", extra={"targetLoc": -1}))
+
+    def locs(p: Position) -> tuple[int, int]:
+        loc_a = next(v for m in p.sides[0].pokemon for v in m.volatiles if v.id == "twoturnmove")
+        loc_b = next(v for m in p.sides[1].pokemon for v in m.volatiles if v.id == "twoturnmove")
+        return loc_a.extra["targetLoc"], loc_b.extra["targetLoc"]
+
+    assert locs(pos) == (2, -1)
+    # side 1 swapped: side 0's foe target 2 -> 1, and side 1's own ally target -1 -> -2
+    assert locs(swap_positions(pos, (False, True))) == (1, -2)
+    # side 0 swapped: its holder's foe target and side 1's ally target are not on side 0 / side 1
+    assert locs(swap_positions(pos, (True, False))) == (2, -1)
+    assert locs(swap_positions(pos, (True, True))) == (1, -2)

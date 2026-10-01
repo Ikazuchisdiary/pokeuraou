@@ -12,6 +12,8 @@ What a swap of one side's positions moves, in the canonical position (`position.
 * `Side.active` -- the party index standing in each position: reversed.
 * `Side.slot_conditions` -- per-position conditions (Wish, Future Sight's slot, ...): reversed.
 * `Pokemon.active_index` -- the position a Pokemon stands in, derived from `active`.
+* `twoturnmove.extra.targetLoc` -- where a charging move will fire, a position number seen from
+  its holder (found by the IKA-412 check: Phantom Force aimed at the foe's left position).
 * `Effect.source_slot` -- "who applied this", by position, in either of the two encodings
   in use (`"01"` side digit and position digit, Showdown's `"p1a"`): the position part of
   every effect whose source stands on the swapped side is exchanged.
@@ -81,6 +83,17 @@ def swap_positions(pos: Position, sides: tuple[bool, bool] = (True, True)) -> Po
                 mon.active_index = 1 - mon.active_index
     for effect in out.effects():
         effect.source_slot = _swap_position_of_source(effect.source_slot, sides)
+    # A charging move fires at the position it was aimed at: `twoturnmove.extra.targetLoc`
+    # is Showdown's target location (+1/+2 a foe position, -1/-2 an ally position), seen from
+    # the Pokemon that holds the volatile.
+    for index, side in enumerate(out.sides):
+        for mon in side.pokemon:
+            for volatile in mon.volatiles:
+                loc = volatile.extra.get("targetLoc") if volatile.extra else None
+                if not isinstance(loc, int) or loc == 0:
+                    continue
+                if (loc > 0 and sides[1 - index]) or (loc < 0 and sides[index]):
+                    volatile.extra["targetLoc"] = (3 - loc) if loc > 0 else (-3 - loc)
     return out
 
 
@@ -109,10 +122,8 @@ def _swap_slot_action(
 def swap_action(action: SideAction, own: bool, foe: bool) -> SideAction:
     """The same choice when the acting side (`own`) and/or the opposing side (`foe`) swapped."""
     slots = action.slots
-    if own and len(slots) == 2:
-        order = [(0, slots[1]), (1, slots[0])]  # (new position, the action that moves there)
-    else:
-        order = list(enumerate(slots))
+    # (new position, the action that moves there)
+    order = [(0, slots[1]), (1, slots[0])] if own and len(slots) == 2 else list(enumerate(slots))
     return SideAction(
         slots=tuple(_swap_slot_action(a, k, own, foe) for k, a in order)
     )
