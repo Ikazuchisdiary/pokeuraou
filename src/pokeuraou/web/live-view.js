@@ -1282,6 +1282,6 @@ function fmtTime(sec) {
 LiveData.connect({
   onEvent, onStep, onStatus,
   onOpen: () => setStatus("接続した"),
-  onClose: () => { stopSelecting(); setStatus("切れた（再読み込みで繋ぎ直す）"); },
+  onClose: () => { stopSelecting(); setStatus("切れた（再読み込みで繋ぎ直す）", "warn"); },
 });
 })();
