@@ -7,7 +7,7 @@
 use crate::battler::{Battler, DamageResult, FieldState, N_ROLLS, V_CHARGE, V_HELPING_HAND};
 use crate::battler::{V_INGRAIN, V_MAGNET_RISE, V_SMACK_DOWN, V_TELEKINESIS};
 use crate::effects::{
-    ability_modifiers, any_ruin, is_mold_breaker, is_retyping, item_modifiers, pierces_ghost,
+    ability_modifiers, any_ruin, breaks_for_damage, is_mold_breaker, is_retyping, item_modifiers, pierces_ghost,
     resist_berry, ruin_of, ruined, suppresses_weather, type_boost_item, type_boost_item_fp, type_changing_ability,
     type_immunity_ability, Ctx, ModDef, Slot, AURA_ABILITIES, AURA_BREAK_ABILITY, AURA_BROKEN_FP,
     AURA_FP, SCREEN_CONDITIONS, SCREEN_FP_DOUBLES, SCREEN_FP_SINGLES, TYPE_CHANGE_BOOST_FP,
@@ -245,7 +245,12 @@ fn collect(slot: Slot, ctx: &Ctx, a: &Battler, d: &Battler, field: &FieldState) 
 
     let mut aura_fp: Option<i64> = None;
     if slot == Slot::BasePower {
-        let broken = ctx.field_abilities.iter().any(|x| x.as_str() == AURA_BREAK_ABILITY);
+        // Aura Break is `breakable`: a Mold Breaker user's move never gets its
+        // `hasAuraBreak`, unless the holder has an Ability Shield (IKA-414).
+        let passes = breaks_for_damage(a.ability.as_str())
+            && !ctx.field_shielded.iter().any(|x| x.as_str() == AURA_BREAK_ABILITY);
+        let broken =
+            !passes && ctx.field_abilities.iter().any(|x| x.as_str() == AURA_BREAK_ABILITY);
         for (ability, move_type) in AURA_ABILITIES {
             if ctx.field_abilities.iter().any(|x| x.as_str() == ability)
                 && ctx.move_type.as_str() == move_type
@@ -297,7 +302,11 @@ fn collect(slot: Slot, ctx: &Ctx, a: &Battler, d: &Battler, field: &FieldState) 
             }
         }
         for ability in ctx.defender_ally_abilities {
-            if ability.as_str() == "friendguard" {
+            // `breakable` too, and the holder is a third Pokemon (IKA-414).
+            if ability.as_str() == "friendguard"
+                && !(breaks_for_damage(a.ability.as_str())
+                    && !ctx.defender_ally_shielded.iter().any(|x| x.as_str() == "friendguard"))
+            {
                 chain.add(0.75, 1.0, "friendguard");
             }
         }
@@ -553,6 +562,14 @@ pub fn calculate(
         }
         ally_abilities.push(*ability);
     }
+    let mut ally_shielded: Small<Id, 4> = Small::new(Id::EMPTY);
+    for ability in &field.shielded_abilities[defender_side] {
+        ally_shielded.push(*ability);
+    }
+    let mut field_shielded: Small<Id, 4> = Small::new(Id::EMPTY);
+    for ability in field.shielded_abilities[0].iter().chain(&field.shielded_abilities[1]) {
+        field_shielded.push(*ability);
+    }
     let mut field_abilities: Small<Id, 4> = Small::new(Id::EMPTY);
     for ability in field.active_abilities[0].iter().chain(&field.active_abilities[1]) {
         field_abilities.push(*ability);
@@ -595,6 +612,8 @@ pub fn calculate(
         defender_side_conditions: &field.side_conditions[defender_side],
         defender_ally_abilities: ally_abilities.as_slice(),
         field_abilities: field_abilities.as_slice(),
+        defender_ally_shielded: ally_shielded.as_slice(),
+        field_shielded: field_shielded.as_slice(),
         active_per_half: field.active_per_half,
     };
 
