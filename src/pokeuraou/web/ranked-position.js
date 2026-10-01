@@ -8,7 +8,7 @@ const TYPE_COLORS = {
   rock: "#afa981", ghost: "#704170", dragon: "#5060e1", dark: "#624d4e", steel: "#60a1b8", fairy: "#ef70ef",
 };
 const STAT_LONG = { hp: "HP", atk: "攻撃", def: "防御", spa: "特攻", spd: "特防", spe: "素早さ" };
-const spreadLine = (s) => `${esc(STAT_LONG[s.stat])}の配分を ${s.before} → ${s.after} にしました（SP ${s.low}〜${s.high} が可能。${esc(STAT_LONG[s.stat])}の値は ${s.statLow}〜${s.statHigh}）`;
+const spreadLine = (s) => `${esc(STAT_LONG[s.stat])}の配分を ${s.before} → ${s.after} にしました（配分は ${s.low}〜${s.high} のどれか。${esc(STAT_LONG[s.stat])}の値は ${s.statLow}〜${s.statHigh}）`;
 const moved = () => BOARD.spread.filter((s) => s.before !== s.after);
 const BOOST_NAMES = { atk: "攻撃", def: "防御", spa: "特攻", spd: "特防", spe: "素早さ", accuracy: "命中", evasion: "回避" };
 const metaSprite = document.querySelector('meta[name="sprite-url"]');
