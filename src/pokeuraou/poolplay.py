@@ -55,6 +55,7 @@ import numpy as np
 
 from . import rank_scores, timing
 from .deepen import DEFAULT_DEEPEN
+from .eqselect import DEFAULT_EQ_SELECT, parse_eq_select
 from .hidden import DEFAULT_BENCH_DROP
 from .payoff import HP_SHARE, Objective
 from .pool import Pool, draw_pair
@@ -536,9 +537,13 @@ class PoolArm:
     #: Which ally targets of `normal` moves its menus list (`actions.ALLY_TARGET_MODES`,
     #: IKA-181); "off" ships.
     ally_targets: str = "off"
+    #: Which point of its optimal set it plays (`eqselect.parse_eq_select`, IKA-196): the
+    #: LP's vertex, ``lp``, ships.
+    eq_select: str = DEFAULT_EQ_SELECT
 
     def __post_init__(self) -> None:
         self.rank_fill = resolve_rank_fill(self.rank_fill, self.rank_by_leaf)
+        parse_eq_select(self.eq_select)
 
     @property
     def selection(self) -> str:
@@ -691,6 +696,7 @@ def pool_match_game(
         dex_base_belief=(side_arms[0].dex_base_belief, side_arms[1].dex_base_belief),
         rust_binary=(side_arms[0].rust_binary, side_arms[1].rust_binary),
         ally_targets=(side_arms[0].ally_targets, side_arms[1].ally_targets),
+        eq_select=(side_arms[0].eq_select, side_arms[1].eq_select),
         selection=(species[0], species[1], picks[0], picks[1]),
     )
     sources = tuple(arm.selection for arm in side_arms)
@@ -712,6 +718,7 @@ def pool_match_game(
         "knockouts": tuple(arm.knockouts for arm in side_arms),
         "dex_base": tuple(arm.dex_base_belief for arm in side_arms),
         "allies": tuple(arm.ally_targets for arm in side_arms),
+        "eq_selects": tuple(arm.eq_select for arm in side_arms),
         "binaries": tuple(None if arm.rust_binary is None else str(arm.rust_binary) for arm in side_arms),
         "solvers": tuple(
             "restricted" if arm.depth >= 2 and arm.solve_restricted else "full"

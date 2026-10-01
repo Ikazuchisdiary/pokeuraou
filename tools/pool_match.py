@@ -22,6 +22,8 @@ What an arm is, per arm, and so in whichever seat it sits:
   `--baseline-dex-base-belief`; only for measuring the fix),
 * which ally targets of `normal` moves its menus list (`--ally-targets` /
   `--baseline-ally-targets`: off ships, benefit, all; IKA-181),
+* which point of its optimal set it plays (`--eq-select` / `--baseline-eq-select`,
+  IKA-196: lp ships; unif, ment<D>, qre<T> for measuring),
 * whether its leaf scores a finished battle by the net instead of as its result
   (`--net-scores-ends` / `--baseline-net-scores-ends`: IKA-253 undone, for measuring it),
 * its selection: an arm with a leaf solves the pair's selection game with THAT leaf,
@@ -54,13 +56,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
+from pokeuraou import eqselect, qrank  # noqa: E402
 from pokeuraou import narrow as narrowing  # noqa: E402
-from pokeuraou import qrank  # noqa: E402
 from pokeuraou.actions import ALLY_TARGET_MODES, team_ally_benefits  # noqa: E402
 from pokeuraou.benchflags import add_bench_flags, require_bench  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.deepen import DEFAULT_DEEPEN, deepen_spec, parse_deepen  # noqa: E402
 from pokeuraou.encode import Encoder, EncodingRules  # noqa: E402
+from pokeuraou.eqselect import DEFAULT_EQ_SELECT, parse_eq_select  # noqa: E402
 from pokeuraou.hidden import DEFAULT_BENCH_DROP, parse_bench_drop  # noqa: E402
 from pokeuraou.payoff import HP_SHARE  # noqa: E402
 from pokeuraou.pool import load_pool  # noqa: E402
@@ -320,6 +323,14 @@ def main(argv: list[str] | None = None) -> None:
                     help="draw only the pool's pairs where either team has a member whose "
                     "`normal` move gains on another member (`actions.team_ally_benefits`, "
                     "IKA-181)")
+    ap.add_argument("--eq-select", default=DEFAULT_EQ_SELECT,
+                    help="which point of its optimal set the tested arm plays at its move "
+                    "and replacement nodes (IKA-196): lp, the LP's vertex (ships); unif, the "
+                    "one taking most from a uniformly replying opponent; ment<D>, the "
+                    "largest entropy within D of the value; qre<T>, the logit QRE at "
+                    "temperature T. Depth 1 without a deepening only")
+    ap.add_argument("--baseline-eq-select", default=DEFAULT_EQ_SELECT,
+                    help="same for the other arm")
     ap.add_argument("--pairs-with", nargs="+", default=None, metavar="SPECIES",
                     help="draw only the pool's pairs where either team has one of these "
                     "species ids (IKA-411: a match about a change only some teams meet)")
@@ -374,6 +385,11 @@ def main(argv: list[str] | None = None) -> None:
     for drop in (args.bench_drop, args.baseline_bench_drop):
         try:
             parse_bench_drop(drop)
+        except ValueError as problem:
+            ap.error(str(problem))
+    for label in (args.eq_select, args.baseline_eq_select):
+        try:
+            parse_eq_select(label)
         except ValueError as problem:
             ap.error(str(problem))
     for depth, restricted in ((args.depth, args.solve_restricted),
@@ -436,6 +452,7 @@ def main(argv: list[str] | None = None) -> None:
         dex_base_belief=args.dex_base_belief,
         rust_binary=args.rust_binary,
         ally_targets=args.ally_targets,
+        eq_select=args.eq_select,
     )
     other_limit = args.limit if args.baseline_limit is None else args.baseline_limit
     if baseline is None:
@@ -449,7 +466,8 @@ def main(argv: list[str] | None = None) -> None:
                         knockouts=args.baseline_knockouts,
                         dex_base_belief=args.baseline_dex_base_belief,
                         rust_binary=args.baseline_rust_binary,
-                        ally_targets=args.baseline_ally_targets)
+                        ally_targets=args.baseline_ally_targets,
+                        eq_select=args.baseline_eq_select)
     else:
         assert baseline_name is not None
         # One solver per arm even over one leaf: shared, the second arm would reuse the
@@ -471,6 +489,7 @@ def main(argv: list[str] | None = None) -> None:
             dex_base_belief=args.baseline_dex_base_belief,
             rust_binary=args.baseline_rust_binary,
             ally_targets=args.baseline_ally_targets,
+            eq_select=args.baseline_eq_select,
         )
     arms = (tested, other)
     print(pool.summary(), file=sys.stderr)
@@ -496,6 +515,7 @@ def main(argv: list[str] | None = None) -> None:
             + (" / belief by the dex's base species (pre-IKA-411)" if arm.dex_base_belief else "")
             + (f" / port {arm.rust_binary}" if arm.rust_binary is not None else "")
             + (f" / ally targets {arm.ally_targets}" if arm.ally_targets != "off" else "")
+            + (f" / equilibrium {arm.eq_select}" if arm.eq_select != DEFAULT_EQ_SELECT else "")
             + " / selection "
             f"{arm.selection}" + (f" by its own leaf, store {store}" if store else "")
             + f" / belief {'solved' if arm.solver is not None and hide_bench else 'uniform'}",
@@ -525,6 +545,8 @@ def main(argv: list[str] | None = None) -> None:
         tags += "@port" if tested.rust_binary is not None else "@ownport"
     if tested.ally_targets != other.ally_targets:
         tags += f"@ally:{tested.ally_targets}"
+    if tested.eq_select != other.eq_select:
+        tags += f"@eq:{tested.eq_select}"
     arm_label = f"{tested.name}{tags}"
 
     client = WorkClient(args.queue) if args.queue else None
@@ -548,6 +570,7 @@ def main(argv: list[str] | None = None) -> None:
               "deepen": {}, "deepened": 0, "widened": 0, "swapped": 0, "oracle": 0,
               "depth": {}, "knockouts": 0, "dexbase": 0, "dexbase_rewrites": 0, "ports": {},
               "ally": {}, "ally_menus": 0, "ally_played": 0,
+              "eq": {},
               "coverless": {"menus": 0, "dropping": 0, "dropped": 0},
               "q": [0, 0], "qprobe": [0, 0], "childq": [0, 0], "lines": {}, "calls": 0}
              for _ in arms]
@@ -604,6 +627,9 @@ def main(argv: list[str] | None = None) -> None:
             bucket["ally"][played_ally] = bucket["ally"].get(played_ally, 0) + 1
             bucket["ally_menus"] += record.ally_menus[side]
             bucket["ally_played"] += record.ally_played[side]
+            # Which point of the optimal set this side played, read off the game (IKA-196).
+            played_eq = record.eq_select[side]
+            bucket["eq"][played_eq] = bucket["eq"].get(played_eq, 0) + 1
             played_deepen = record.deepen[side]
             bucket["deepen"][played_deepen] = bucket["deepen"].get(played_deepen, 0) + 1
             # Decisions this side actually deepened, read off the game (IKA-33).
@@ -729,6 +755,8 @@ def main(argv: list[str] | None = None) -> None:
                 + (f"ally targets {bucket['ally']} (menus holding one {bucket['ally_menus']:,}, "
                    f"played {bucket['ally_played']:,}), "
                    if set(bucket["ally"]) != {"off"} else "")
+                + (f"equilibrium {bucket['eq']}, "
+                   if set(bucket["eq"]) - {DEFAULT_EQ_SELECT} else "")
                 + f"deepen {bucket['deepen']} ({bucket['deepened']:,} decisions deepened"
                 + (
                     f", oracle asked at {bucket['oracle']:,}, {bucket['widened']:,} actions "
@@ -774,6 +802,12 @@ def main(argv: list[str] | None = None) -> None:
                   f"scored {_ends_rule(arm.evaluate)}", file=sys.stderr)
             if arms[0].evaluate is arms[1].evaluate:
                 break
+    # Each label's solves in this worker, counted where the strategy is chosen (IKA-196):
+    # how many there were, how many moved off the LP's vertex, fell back to it, and the time.
+    for label, stats in sorted(eqselect.STATS.items()):
+        print(f"  equilibrium {label}: {int(stats['calls']):,} solves, {int(stats['moved']):,} "
+              f"moved off the LP's vertex, {int(stats['fallbacks']):,} fell back to it, "
+              f"{stats['seconds']:.2f} s", file=sys.stderr)
     for arm, label in zip(arms, names, strict=True):
         if arm.solver is not None:
             s = arm.solver

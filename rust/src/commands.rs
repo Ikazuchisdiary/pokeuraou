@@ -201,6 +201,7 @@ fn turn_state_json(turn: &Turn) -> Result<Value, String> {
         rolls_stratified,
         move_start_hp,
         move_hit,
+        move_dolled,
         draws,
         log,
         damaged_by,
@@ -232,6 +233,7 @@ fn turn_state_json(turn: &Turn) -> Result<Value, String> {
         "unmodelled": unmodelled.iter().cloned().collect::<Vec<_>>(),
         "moveStartHp": move_start_hp.map(|hp| json!([[hp[0][0], hp[0][1]], [hp[1][0], hp[1][1]]])),
         "moveHit": flags_json(move_hit),
+        "moveDolled": flags_json(move_dolled),
         "log": log.as_deref().map(log_json),
         "damagedBy": crate::damage_callback::to_json(damaged_by),
     }))
@@ -332,6 +334,7 @@ fn turn_from<'a>(reg: &'a Reg, pos: Position, state: &Value) -> Result<Turn<'a>,
         }
     };
     turn.move_hit = flags_from(&state["moveHit"])?;
+    turn.move_dolled = flags_from(&state["moveDolled"])?;
     turn.log = log_from(&state["log"])?;
     Ok(turn)
 }
