@@ -2017,6 +2017,19 @@ M-C の対戦評価（match_queue --pool、幅 12・rank-leaf・裏非公開・�
 Q（q-mc0）のセルの誤差は新しい評価モデルの答えに対して r = +29.6%（value-mc1x2 から value-mc2x2、水準のずれを除いて +19.4%）で、規則の 11% を超えた。作り直した q-mc2（gen-2 の 10 万局面を value-mc2x2 で埋めた教材、30 エポック）は、value-mc2x2 の上の対戦評価で q-mc0 に SPRT(0,10) が 3,999 対で決まらず（+7.5 [+0.6, +14.3]、H1 の境 LLR +2.98 に対し +2.02）。
 **Q を q-mc2 に替えた（ユーザーの判断 9/30、規則（H1 のときだけ替える）の例外）**。`data/models/q-mc2.pt`（q-mc0 は残す）。
 
+### M-C gen-4（2026-10-01、IKA-409）
+
+データ生成: `data/selfplay-mc4`、399,991 局（run seed 40003、20,000 局 × 20 区切り、9 局は未決着で捨てた）、評価モデル value-mc3（x1、6 エポック版）、候補集合 q-nocover・Q `data/models/q-mc3.pt`、幅 12、裏非公開、選出は value-mc3 で先に解く（worker が新しく解いた対 0）。専有 318.6 分（1,255 局/分。1 ターンの CPU 秒が gen-3 より +18%、原因は未確認）。メガシンカ後の裏の信念の不具合（IKA-411）を直す前のコードで打たれている（局の 10.9%）。
+学習: gen-0〜4（12,436,572 決定、`data/selfplay-mc01234-encoded.npz`）を value-mc3 の種ごとから温間始動、6 エポック（1 本 約 10 分）。保留局の損失は 2 本平均で value-mc3 0.3968 → value-mc4 0.3910。
+
+```
+M-C の対戦評価（match_queue --pool、幅 12・rank-leaf・裏非公開、両腕 q-nocover・Q q-mc3）。data/matches-mc/i409-*
+  A/A 対照 100 対                                    100/100 が同じ局
+  value-mc4x2 対 value-mc3x2   SPRT(0,10) H1（297 対で停止）  +51.1 [+25.8, +77.0]   → 本番を value-mc4 に
+Q: q-mc4（gen-4 の 10 万局面を value-mc4x2 で埋めた教材、30 エポック）対 q-mc3（value-mc4x2 の上）
+  SPRT(−10,0) H1（1,867 対）   +2.4 [−8.7, +13.5]（非劣性）  → Q を q-mc4 に。r = +14.4%（記録のみ）
+```
+
 ### M-C gen-3（2026-10-01、IKA-402・IKA-405）
 
 データ生成: `data/selfplay-mc3`、399,993 局（局 0〜399,999、run seed 40002、20,000 局 × 20 区切り、7 局は未決着で捨てた）、評価モデル value-mc2（x1）、候補集合 q-nocover・Q `data/models/q-mc2.pt`、幅 12、裏非公開、選出は value-mc2 で先に 2,145 対を解く（worker が新しく解いた対 0）。専有 295.3 分（1,355 局/分）。

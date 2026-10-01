@@ -17,7 +17,7 @@ cd rust && cargo build --release && cd -          # port の exe（古いと止�
 uv sync --group learn                             # 評価モデルと Q を使うので torch が要る
 ```
 
-評価モデル（`data/models/value-mc3.pt`・`value-mc3-s1.pt`、IKA-402・405 から）、Q（`data/models/q-mc3.pt`、IKA-402）、
+評価モデル（`data/models/value-mc4.pt`・`value-mc4-s1.pt`、IKA-409 から）、Q（`data/models/q-mc4.pt`、IKA-409）、
 構築プール（`data/pool/regmc-matchupweb.json`）を `data/` に置く。評価モデルが無ければ
 HP 比の打ち手に、読める Q が無ければ（ファイルが無い、評価モデルと語彙が違う）候補集合の順位付けが `refs2` に落ち、どちらも起動時に注記を出す。
 

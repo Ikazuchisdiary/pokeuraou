@@ -15,7 +15,7 @@ What an arm is, per arm, and so in whichever seat it sits:
   `--baseline-rank-fill`, IKA-268; a `-nocover` label builds its leaf-ranked menu without
   the cover, IKA-323; `q` / `q-nocover` rank it by a learned Q instead, IKA-274, named by
   `--q-arm` on the server or `--q-model` here). An arm with `--rank-leaf` and no fill named
-  plays `q-nocover` by `data/models/q-mc3.pt`, as M-C generation does, and stops without
+  plays `q-nocover` by `data/models/q-mc4.pt`, as M-C generation does, and stops without
   that file; `refs2` is played when named (IKA-338),
 * whether its belief keeps the pre-IKA-411 rule, under which an opponent's Mega of
   Floette-Eternal or Meowstic-F stops naming its sheet member (`--dex-base-belief` /

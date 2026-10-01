@@ -321,14 +321,14 @@ def load_analyzer(args):  # noqa: ANN001, ANN201
 
     reg = load_pool(args.data / "pool" / "regmc-matchupweb.json").reg
     register_mega_stones(reg)
-    values = [args.data / "models" / m for m in ("value-mc3.pt", "value-mc3-s1.pt")]
+    values = [args.data / "models" / m for m in ("value-mc4.pt", "value-mc4-s1.pt")]
     evaluate, encoder, device = humanplay.load_leaf(reg, values, "cpu", graphs=False)
     ph = ranked_entry._play_human()
-    fill, _files = ph.install_menus(None, args.data / "models" / "q-mc3.pt", encoder, evaluate, None, device,
+    fill, _files = ph.install_menus(None, args.data / "models" / "q-mc4.pt", encoder, evaluate, None, device,
                                     lambda t: print(t, file=sys.stderr))
     settings = analysis.Settings(width=analysis.DEFAULT_WIDTH, oracle=ph._oracle_width("sall"),
                                  levels=humanplay.PLAY_MAX_LEVELS or analysis.MAX_LEVELS, rank_fill=fill)
-    return reg, analysis.Analyzer(reg, evaluate, "value-mc3x2", settings=settings)
+    return reg, analysis.Analyzer(reg, evaluate, "value-mc4x2", settings=settings)
 
 
 def choose_positions(reg, records: list[Path], count: int, seed: int, pool) -> list[tuple]:  # noqa: ANN001
