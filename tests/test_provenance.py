@@ -60,6 +60,17 @@ def test_file_name_and_stem_are_one_agent() -> None:
     assert agent_name(source(leaves=["value-a.pt", "value-b"]), 0) == "value-a/w24"
 
 
+def test_promoted_gen3_leaf_has_one_name() -> None:
+    """`value-mc3e6x2` (IKA-405) and `value-mc3x2` (IKA-409) are the same bytes renamed at
+    promotion; the gen-4 rows sat in a second group while the names differed. A different
+    epoch count (`value-mc3e4x2`) is a different model and keeps its name."""
+    old = agent_name(source(leaves=["value-mc3e6x2.pt", "value-mc3e4x2"]), 0)
+    new = agent_name(source(leaves=["value-mc3x2", "value-mc3e4x2"]), 0)
+    assert old == new == "value-mc3x2/w24"
+    assert agent_name(source(leaves=["value-mc3e6.pt", "value-mc3e6"]), 0) == "value-mc3/w24"
+    assert agent_name(source(leaves=["value-mc3e6x2", "value-mc3e4x2"]), 1) == "value-mc3e4x2/w24"
+
+
 def test_own_book_is_in_the_name() -> None:
     """Drawing the four from a solved equilibrium is worth more than any two models on
     this scale, so it is a different agent."""

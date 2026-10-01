@@ -2028,7 +2028,20 @@ M-C の対戦評価（match_queue --pool、幅 12・rank-leaf・裏非公開、�
   value-mc4x2 対 value-mc3x2   SPRT(0,10) H1（297 対で停止）  +51.1 [+25.8, +77.0]   → 本番を value-mc4 に
 Q: q-mc4（gen-4 の 10 万局面を value-mc4x2 で埋めた教材、30 エポック）対 q-mc3（value-mc4x2 の上）
   SPRT(−10,0) H1（1,867 対）   +2.4 [−8.7, +13.5]（非劣性）  → Q を q-mc4 に。r = +14.4%（記録のみ）
+つなぎ（IKA-409 後、records/ratings-gen4-bridge.md）: value-mc3x2 の上で Q だけを違える。q-mc3 対 q-mc2、固定 400 対（800 局、SPRT なし）
+  −4.3 [−25.5, +16.8]（data/matches-mc/bridge-mc3-q3-vs-q2）
+ratings.py、data/matches-mc の 59,228 局、18 打ち手、群は 1 つ、原点 hp-share/w12/hidden-bench
+  value-mc4x2 /rankfill:q-nocover（Q q-mc4、gen-4 の本番）          +415.7 ±48.5
+  value-mc4x2 /rankfill:q-nocover（Q q-mc3）                         +413.4 ±47.3
+  value-mc3x2 /rankfill:q-nocover（Q q-mc2、gen-3 の 6 エポック版）   +369.8 ±32.5
+  value-mc3x2 /rankfill:q-nocover（Q q-mc3）                         +363.8 ±40.1
+  value-mc2x2 /rankfill:q-nocover（Q q-mc2、gen-2 の本番）            +299.5 ±17.5
+  value-mc1x2 /rankfill:q-nocover（Q q-mc0、gen-1 の本番）            +254.2 ±11.3
 ```
+
+gen-4 の行は、はじめ ratings.py の表で残りの 15 打ち手から切れた別の群（±216）だった。原因は 2 つ。
+value-mc3x2 の名前（IKA-405 の対戦評価の記録は `value-mc3e6x2`、IKA-409 は `value-mc3x2`。同じ重みを本番にしたときに名前を替えた）と、Q（群の側の 6 エポック版は q-mc2 の組だけ、gen-4 の側は q-mc3 の組だけ）。
+名前は `provenance.LEAF_ALIASES` で 1 つにした。Q は上のつなぎの対戦評価でつないだ。行どうしの差は ±40〜48 の幅の中で、gen-3 と gen-4 の差を精密には言えない。
 
 ### M-C gen-3（2026-10-01、IKA-402・IKA-405）
 

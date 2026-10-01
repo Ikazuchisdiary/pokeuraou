@@ -96,8 +96,9 @@ def is_hidden(name: str) -> bool:
     return "hidden-bench" in name.split("/")
 
 #: The version of how a name is built from a record. A cached file is read again when it
-#: differs, because its rows carry names. 2: the Q file joined the ranking fill.
-NAMES = 2
+#: differs, because its rows carry names. 2: the Q file joined the ranking fill. 3: leaf
+#: aliases (`provenance.LEAF_ALIASES`).
+NAMES = 3
 
 #: How a pairing played twice on one seed's draws is counted (IKA-44). `newest` counts the
 #: draws once, from the newest run that did not fail; `independent` counts every run, which

@@ -251,6 +251,18 @@ def provenance(
     }
 
 
+#: Leaf names that are the same bytes under another name. IKA-405's matches recorded the
+#: 6-epoch gen-3 leaf as `value-mc3e6x2` (files `value-mc3e6-s0.pt`, `-s1.pt`); promoting it
+#: renamed the files to `value-mc3.pt` and `value-mc3-s1.pt` (commit c0be672), and IKA-409's
+#: matches record `value-mc3x2`. sha1 of both pairs agree (506faff7... for s0, 9fa83bbd...
+#: for s1), so the two names are one leaf and one rating node. Without this the gen-4 rows
+#: were a second group the fit could not connect to the rest.
+LEAF_ALIASES = {
+    "value-mc3e6": "value-mc3",
+    "value-mc3e6x2": "value-mc3x2",
+}
+
+
 def agent_name(source: dict[str, Any], side: int) -> str:
     """A stable name for the agent that played one side of a recorded game.
 
@@ -276,6 +288,7 @@ def agent_name(source: dict[str, Any], side: int) -> str:
     # what a rating is keyed on.
     if leaf.endswith(".pt"):
         leaf = leaf[: -len(".pt")]
+    leaf = LEAF_ALIASES.get(leaf, leaf)
     limit = (source.get("limits") or [0, 0])[side]
     depth = (source.get("depths") or [1, 1])[side]
     ranking = (source.get("rankings") or ["damage", "damage"])[side]
