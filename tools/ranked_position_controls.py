@@ -315,6 +315,7 @@ def run(args) -> None:  # noqa: ANN001
             point0 = game.points[k]
             pos0 = point0.pos()
             row["volatiles"] = any(m.volatiles for s in pos0.sides for m in s.pokemon)
+            row["volatileIds"] = sorted({e.id for s in pos0.sides for m in s.pokemon for e in m.volatiles})
             specs = {
                 "null": (observed, true_base, "exact"), "a_low": (observed, true_base, "low"),
                 "a_mid": (observed, true_base, "mid"), "a_high": (observed, true_base, "high"),

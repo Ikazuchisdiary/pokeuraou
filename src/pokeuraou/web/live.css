@@ -610,3 +610,6 @@ body.analysis #inputBox { display: none; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { transition: none !important; animation: none !important; }
 }
+
+/* IKA-408: three modes now; keep the status chip in view on a phone */
+@media (max-width: 480px) { .modeseg .segb { padding: 5px 7px; font-size: 12px; } }

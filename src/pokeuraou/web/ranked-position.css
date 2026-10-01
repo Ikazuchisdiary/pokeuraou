@@ -152,3 +152,12 @@ body.pos .rk-bar .summary { flex: 1 1 200px; }
   .ps-seen .ps-f, .ps-fgrid .ps-f { display: flex; width: 100%; }
   .ps-seen .ps-f select, .ps-fgrid .ps-f select { flex: 1 1 0; min-width: 0; width: 100%; }
 }
+
+/* ---- design review 3 (IKA-408): the fold marker stays; the title does not split */
+.ps-boosts summary { display: list-item; }
+@media (max-width: 700px) {
+  .ps-more > summary, .ps-fold > summary, .ps-boosts summary { display: list-item; min-height: 44px; padding: 10px 0;
+    box-sizing: border-box; }
+  .ps-fold > summary small { display: block; margin: 2px 0 0; }
+  .ps-boosts summary { padding: 10px 0; }
+}
