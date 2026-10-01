@@ -1,0 +1,9 @@
+928 games; rows mean 9.0, cols mean 9.0, completions mean 3.0 (max 6)
+LP pair: 1.77 ms a game; LP strategy mixed in 508/928 (54.7%)
+label | moved | moved % | TV mean (moved) | value loss max | uniform-reply gain mean (moved) | ms a game | fallbacks
+unif | 98 | 10.6 | 0.259 | 5.30e-08 | +0.0044 | 0.98 | 0
+ment0 | 112 | 12.1 | 0.449 | 3.44e-07 | -0.0098 | 13.84 | 8
+ment0.001 | 788 | 84.9 | 0.316 | 1.00e-03 | -0.0019 | 43.00 | 6
+qre0.005 | 768 | 82.8 | 0.350 | 6.67e-03 | -0.0003 | 4.16 | 0
+qre0.02 | 794 | 85.6 | 0.476 | 3.64e-02 | -0.0019 | 4.28 | 0
+qre0.2 | 794 | 85.6 | 0.733 | 2.96e-01 | -0.0242 | 1.74 | 0
