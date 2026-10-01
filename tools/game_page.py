@@ -642,6 +642,18 @@ def place_text(m: dict[str, Any]) -> str:
     return f"（{sup['n']} 通り中 {m['chosenRank']} 位）"
 
 
+def _column_gap(
+    column: str, cols: list[str] | None, vs: list[float] | None, eq: float | None, own: float | None
+) -> float | None:
+    """The drawn move's win rate against one of the other side's moves (`vs`, indexed like `cols`,
+    from the seat's side) less the read's value: `eq`, or the node's value where the record has no
+    `eq`. None where the column is not among the read's columns or there is no value."""
+    base = eq if eq is not None else own
+    if not cols or not vs or base is None or column not in cols:
+        return None
+    return vs[cols.index(column)] - base
+
+
 def mixtures(
     reg: Regulation, loc: Localiser, decision: dict[str, Any], reads: list[dict[str, Any] | None]
 ) -> list[dict[str, Any] | None]:
@@ -685,7 +697,18 @@ def mixtures(
             "rows": [{"pair": pair(c, side), "p": p, "picked": c == got["chosen"]} for c, p in supp],
             "sup": support_of(got.get("p"), got["rows"]),
             "osup": support_of(got.get("q"), got["opp"]),
-            "opp": [{"pair": pair(c, other), "p": p, "actual": c == actual} for c, p in osupp],
+            "opp": [
+                {
+                    "pair": pair(c, other),
+                    "p": p,
+                    "actual": c == actual,
+                    # The chosen move's win rate against this column, from the seat's own side,
+                    # less the read's value (eq, else the value of the node): the same quantity
+                    # the table of replies gave (IKA reply column).
+                    "gap": _column_gap(c, cols, vs, got.get("eq"), own_win),
+                }
+                for c, p in osupp
+            ],
             "eq": got.get("eq"),
             "guarantee": got.get("guarantee"),
             "generated": bool(got.get("generated")),
@@ -927,12 +950,16 @@ h2{font-size:15px;margin:28px 0 8px;color:var(--dim);font-weight:600;letter-spac
 .tag.dead{color:var(--warn);border-color:var(--warn);font-size:11px;white-space:normal}
 .eqt{margin-top:4px}.eqt .tag{font-size:12px;white-space:normal;border-radius:10px}.eqt .tag.off{color:var(--faint)}
 .tag.lb{margin-right:6px;font-size:11px;white-space:nowrap}
-.gq{color:var(--good);font-size:11px}
+.gd{display:inline-block;font-size:13px;line-height:1.5;padding:0 8px;border-radius:999px;border:1px solid currentColor;white-space:nowrap}
+.gq{color:var(--good)}
+.gnote{font-size:13px;color:var(--ink);margin:2px 0 6px}
+.mt .r.hd{padding-top:0;padding-bottom:0;font-size:12px;color:var(--dim);background:none!important}
+.dc{text-align:left}
 .bc.wr{position:relative;overflow:visible;background:var(--track);height:6px;margin:1px 0}
 .bc.wr .m50{position:absolute;left:50%;top:-4px;bottom:-4px;width:2px;background:var(--faint)}
 .bc.wr .dt{position:absolute;top:-4px;width:14px;height:14px;margin-left:-7px;border-radius:50%;background:var(--faint);border:2px solid var(--surface)}
 .bc.wr .dt.s0{background:var(--s0)}.bc.wr .dt.s1{background:var(--s1)}
-.nc .gz{color:var(--faint);font-size:11px}
+.gz{color:var(--faint)}
 .msl b.rare{color:var(--faint)}.msl b.often{font-weight:800}
 .mbody{padding:4px 12px 12px;display:grid;grid-template-columns:1fr;gap:12px}
 .mseat{border-left:4px solid var(--faint);padding-left:10px}.mseat.s0{border-left-color:var(--s0)}.mseat.s1{border-left-color:var(--s1)}
@@ -947,10 +974,11 @@ h2{font-size:15px;margin:28px 0 8px;color:var(--dim);font-weight:600;letter-spac
 .pt{min-width:0}.pt .wn{margin-right:2px}
 .bc{height:8px;border-radius:4px;background:var(--track);overflow:hidden}.bb{display:block;height:8px;border-radius:4px;background:var(--faint)}
 .bb.s0{background:var(--s0)}.bb.s1{background:var(--s1)}
-.nc{text-align:right;white-space:nowrap}.nc .gp{color:var(--bad);font-size:11px}
+.mt.opp .r{grid-template-columns:minmax(0,320px) minmax(0,240px) 48px 112px}
+.nc{text-align:right;white-space:nowrap}.gp{color:var(--bad)}
 .tag.pk{margin:2px 0 0 30px;font-size:11px}
 .ic.xs.f0,.ic.xs.f1{width:24px;height:24px;flex:none}
-@media (max-width:720px){.mt .r{grid-template-columns:minmax(0,1fr) auto}.bc{grid-column:1/-1;order:3}.pt .pm{display:block}
+@media (max-width:720px){.mt .r,.mt.opp .r{grid-template-columns:minmax(0,1fr) auto}.bc{grid-column:1/-1;order:3}.mt.opp .dc{grid-column:1/-1;order:4;padding:2px 0 6px}.mt.opp .r:not(.hd){border-bottom:1px solid var(--line)}.mt.opp .r.hd{display:none}.mseat h5 small{display:block;margin-left:0}.pt .pm{display:block}
 .mh small{display:block;margin-left:0}.msl .l2{padding-left:0}}
 .dmg{font-family:var(--num);font-weight:700;color:var(--bad)}
 .tag{display:inline-block;font-size:12px;line-height:1.5;padding:0 8px;border-radius:999px;border:1px solid var(--line);background:var(--surface);color:var(--dim);white-space:nowrap}
@@ -1208,6 +1236,17 @@ def _pct(p: float) -> str:
     return "<1%" if p < 0.005 else f"{p * 100:.0f}%"
 
 
+def _gap_html(gap: float | None) -> str:
+    """The difference in win rate, from the seat's side, as a small tag of its own: red minus,
+    green plus. It says "勝率" so that it is not read as a change of the share beside it."""
+    if gap is None:
+        return ""
+    if abs(gap) * 100 < 1:
+        return '<span class="gd gz n">勝率 ±0</span>'
+    cls = "gp" if gap < 0 else "gq"
+    return f'<span class="gd {cls} n">勝率 {MINUS if gap < 0 else "+"}{abs(gap) * 100:.0f}pt</span>'
+
+
 def _table_html(rows: list[dict[str, Any]], side: int, sprites: Sprites, *, kind: str) -> str:
     """One table of a mixture: the pair of moves, a bar (a probability) and its number, and a mark
     on the row that was drawn or that the other side really played."""
@@ -1222,38 +1261,17 @@ def _table_html(rows: list[dict[str, Any]], side: int, sprites: Sprites, *, kind
         body.append(
             f'<div class="r{" pick" if r.get("picked") else ""}"><div class="pc">{_pair_html(r["pair"], side, sprites)}{mark}</div>'
             f'<div class="bc"><span class="bb s{side}" style="width:{max(0.0, min(1.0, share)) * 100:.0f}%"></span></div>'
-            f'<div class="nc"><span class="n">{_pct(share)}</span></div></div>'
+            f'<div class="nc"><span class="n">{_pct(share)}</span></div>'
+            + (f'<div class="dc">{_gap_html(r.get("gap"))}</div>' if kind == "opp" else "")
+            + "</div>"
         )
-    return f'<div class="mt">{"".join(body)}</div>'
-
-
-def _reply_table(items: list[dict[str, Any]], side: int, sprites: Sprites) -> str:
-    """The drawn move against some of the other side's moves: a label, the pair, the win rate as a
-    point on a 0-100 scale (a line at 50%, not a bar: a bar is a share), and the difference from
-    the read's value."""
-    body = []
-    for it in items:
-        gap = it.get("gap")
-        if gap is None:
-            diff = ""
-        elif abs(gap) * 100 < 1:
-            diff = ' <span class="gz n">±0</span>'
-        else:
-            cls = "gp" if gap < 0 else "gq"
-            diff = f' <span class="{cls} n">{MINUS if gap < 0 else "+"}{abs(gap) * 100:.0f}pt</span>'
-        mark = (
-            '<span class="tag pk">実際の手</span>'
-            if it.get("actual") and it["label"] != "実際に選んだ手"
-            else ""
+    if kind == "opp":
+        body.insert(
+            0,
+            '<div class="r hd"><div class="pc"></div><div class="bc0"></div>'
+            '<div class="nc">確率</div><div class="dc">勝率の差</div></div>',
         )
-        body.append(
-            f'<div class="r"><div class="pc"><span class="tag lb">{esc(it["label"])}</span>'
-            f"{_pair_html(it['pair'], 1 - side, sprites)}{mark}</div>"
-            f'<div class="bc wr"><span class="m50"></span>'
-            f'<span class="dt s{side}" style="left:{max(0.0, min(1.0, it["ev"])) * 100:.1f}%"></span></div>'
-            f'<div class="nc"><span class="n">{it["ev"] * 100:.0f}%</span>{diff}</div></div>'
-        )
-    return f'<div class="mt">{"".join(body)}</div>'
+    return f'<div class="mt {kind}">{"".join(body)}</div>'
 
 
 def _rest_html(sup: dict[str, Any] | None) -> str:
@@ -1289,7 +1307,6 @@ def _mix_seat(m: dict[str, Any] | None, side: int, sprites: Sprites) -> str:
     head = f'<h4><span class="seat s{side}">{SEAT[side]}</span> の読み{again}</h4>'
     if m is None:
         return f'<div class="mseat s{side}">{head}<p class="dim">この席の読みはありません</p></div>'
-    view = f"（{SEAT[side]} から見た勝率）"
     rows = list(m["rows"])
     picked = (
         ""
@@ -1302,37 +1319,11 @@ def _mix_seat(m: dict[str, Any] | None, side: int, sprites: Sprites) -> str:
     )
     osup = m.get("osup")
     n_opp = f"　相手の均衡で打つ {osup['n']} 通り" if osup else ""
-    base = m["eq"] if m.get("eq") is not None else m["own"]
-    items = []
-    for key, label in (("worst", "一番辛い"), ("best", "一番有利")):
-        got = m.get(key)
-        if got is not None:
-            items.append(
-                {
-                    "label": label,
-                    "pair": got["pair"],
-                    "ev": got["ev"],
-                    "actual": got["actual"],
-                    "gap": None if base is None else got["ev"] - base,
-                }
-            )
-    real = m.get("actualEv")
-    if real is not None and not any(i["actual"] for i in items):
-        items.append(
-            {
-                "label": "実際に選んだ手",
-                "pair": real["pair"],
-                "ev": real["ev"],
-                "actual": True,
-                "gap": None if base is None else real["ev"] - base,
-            }
-        )
-    if items:
-        reply = _reply_table(items, side, sprites)
-    else:
-        reply = '<p class="dim">この読みには手ごとの値がありません（深さ 1 の答え）</p>'
-    if m.get("actualOffMenu"):
-        reply += '<p class="dim">相手が実際に選んだ手は、この読みの候補にありませんでした。</p>'
+    off_menu = (
+        '<p class="dim">相手が実際に選んだ手は、この読みの候補にありませんでした。</p>'
+        if m.get("actualOffMenu")
+        else ""
+    )
     if m.get("generated"):
         missing = (
             f"この手番は解き直しが記録と一致しなかったので、解き直した読みは出していません（{esc(m['rereadNote'])}）。"
@@ -1349,9 +1340,10 @@ def _mix_seat(m: dict[str, Any] | None, side: int, sprites: Sprites) -> str:
         f'<div class="mseat s{side}">{head}'
         f"<h5>均衡で打っていた手<small>　均衡で打つ {_played_n(m)} 通り</small></h5>"
         f"{picked}{_table_html(rows, side, sprites, kind='mix')}{_rest_html(m.get('sup'))}"
-        f"<h5>選んだ手に対する相手の手<small>{view}</small></h5>{reply}"
         f"<h5>相手の読み<small>{n_opp}</small></h5>"
-        f"{_table_html(list(m['opp']), 1 - side, sprites, kind='opp')}{_rest_html(osup)}</div>"
+        f'<p class="gnote">勝率の差＝相手がその手を打つと、{SEAT[side]} の勝率がどれだけ上下するか'
+        f"（{SEAT[side]} が選んだ手に対して。例: {_gap_html(-0.15)} は 15pt 下がる）</p>"
+        f"{_table_html(list(m['opp']), 1 - side, sprites, kind='opp')}{_rest_html(osup)}{off_menu}</div>"
     )
 
 
@@ -1394,11 +1386,13 @@ def _mix_html(t: dict[str, Any], sprites: Sprites) -> str:
         return ""
     lines = "".join(_mix_line(mix[s], s) for s in (0, 1))
     seats = "".join(_mix_seat(mix[s], s, sprites) for s in (0, 1))
-    # The words of "worst" and "best" only where a table of replies stands under them.
-    has_values = any(m and (m.get("worst") or m.get("best")) for m in mix)
+    # The note on the differences only where a row has one.
+    has_values = any(m and any(r.get("gap") is not None for r in m["opp"]) for m in mix)
     note = (
-        '<p class="dim mnote">辛い＝相手の全ての手の中で、選んだ手に一番辛い手。有利＝相手が均衡の中で打つ手のうち、'
-        "選んだ手に一番有利な手。値は相手が裏によらず同じ手を打つときの期待値で、深く読んでいない手は浅い読みのまま。</p>"
+        '<details class="dim mnote"><summary>勝率の差の見方</summary>'
+        "<p>差＝選んだ手が相手のその手に対して取る勝率から、その席の読みの値（均衡の値。記録に無ければ局面の値）を引いた値。"
+        "赤＝不利、緑＝有利。値は相手が裏によらず同じ手を打つときの期待値で、深く読んでいない手は浅い読みのまま。"
+        "確率が小さい行にも出す。</p></details>"
         if has_values
         else ""
     )
