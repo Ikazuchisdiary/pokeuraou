@@ -32,3 +32,24 @@
 - `src/pokeuraou/timematch.py`: 条件の鍵 `selection_seconds`、`play_pair(games=)`、選出の後に読み手を返す。
 - `src/pokeuraou/selection_deep.py`: `PoolReader` が `ladder._worker_args` で、サーバの一覧の k 番目を k 番目の読み手に。
 - 確かめたのは 3 秒・5 秒の短い 1 局のスモークテスト（15 worker が立ち、局が終わる）と本番の 1 局だけ。テスト・ruff・agent_drift は回していない。旗が既定 off の経路が変わらないことのビット一致は見ていない。
+
+## 局 2 から 4
+
+2026-10-02。origin/master の取り込み後、port の exe を作り直し、同じ設定で種 1002、1003、1004 の 3 局を 1 局ずつ打った。構築の組は局 1 と別。局ごとの出力は `C:/tmp/showcase/game2/` から `game4/`、HTML は `C:/tmp/showcase/game2.html` から `game4.html`。勝率は席 0 側で、2 席の読みの平均。
+
+| 局 | 構築（席 0 対 席 1） | 結果 | 勝率の推移（席 0 側） | かかった時間 |
+|---|---|---|---|---|
+| 2（種 1002） | Brady Perish 対 Standard Zard Y | 席 1 の勝ち、12 ターン | T1 60%、T2 71%、T3 65%、T4 16%、T5 6%、T6 以降 0% | 1091 秒。選出 92.7 秒、対局 991 秒 |
+| 3（種 1003） | Gengar + Swamp Rain 対 Mence + Metagross | 席 1 の勝ち、9 ターン | T1 62%、T2 62%、T3 65%、T4 35%、T5 42%、T6 19%、T7 以降 0% | 820 秒。選出 91.7 秒、対局 721 秒 |
+| 4（種 1004） | Gengar + Swamp (Kommo) 対 Phox + Floette (Rilla) | 席 1 の勝ち、12 ターン | T1 25%、T2 17%、T3 10%、T4 5%、T5 2%、T6 2%、T7 以降 0% | 1058 秒。選出 91.0 秒、対局 960 秒 |
+
+## 旗のテスト
+
+`tests/test_timematch.py` に 3 本を足した。
+
+- `games=(0,)` は game 0 だけを打ち、既定で 2 局打つ場合の game 0 と時刻以外が同じ（陽性対照は既定の 2 局）。
+- `selection_seconds` は条件の鍵として読まれ、`describe` に出て、エージェントに届く。
+- サーバの一覧は、k 番目の worker に k 番目の住所を渡す。1 本のときは変わらない。
+
+通した検査は ruff（変更した 4 ファイル）、`agent_drift.py --check`（終了コード 0、time_match は ok）、`test_timematch.py`・`test_selection_deep.py`・`test_ladder_servers.py`、`test_line_endings.py`、`test_no_machine_specific_paths.py`。
+

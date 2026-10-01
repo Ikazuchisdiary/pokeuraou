@@ -598,3 +598,35 @@ def test_each_condition_reads_and_solves_its_own_leaf(monkeypatch, pool) -> None
     assert run(same) == [("leaf-A", "A-name")]
     assert same.agent(same.other).evaluate == "leaf-A"
     assert same.solve_key(same.tested) == same.solve_key(same.other)
+
+
+# ------------------------------------------------------------------------ a showcase game
+
+
+def test_a_single_game_pair_plays_only_game_zero_and_the_same_game(pool) -> None:  # noqa: ANN001
+    a, b = _cond("a", 0.3), _cond("b", 0.2)
+    teams = (pool.teams[0], pool.teams[1])
+    both = timematch.play_pair(_match(pool, a, b), 0, teams)
+    one = timematch.play_pair(_match(pool, a, b), 0, teams, games=(0,))
+    assert len(both) == 2, "the control: the default plays both games"
+    assert len(one) == 1 and one[0]["game"] == 0
+    assert json.dumps(_timeless(one[0])) == json.dumps(_timeless(both[0]))
+
+
+def test_selection_seconds_is_a_condition_key_and_reaches_the_agent(pool) -> None:  # noqa: ANN001
+    got = parse_condition("s:seconds=1,selection=default,selection_seconds=90")
+    assert got.selection_seconds == 90.0
+    assert "for 90 s" in got.describe()
+    assert parse_condition("s:seconds=1").selection_seconds is None
+    match = _match(pool, got, parse_condition("t:seconds=1"))
+    assert match.agent(got).selection_seconds == 90.0
+    assert match.agent(match.other).selection_seconds is None
+
+
+def test_a_list_of_servers_gives_worker_k_the_kth() -> None:
+    from pokeuraou.ladder import _worker_args
+
+    spec = ("served", "a:1,b:2", "value", False, "q.pt", "q")
+    assert [_worker_args(spec, k)[1] for k in range(4)] == ["a:1", "b:2", "a:1", "b:2"]
+    one = ("served", "a:1", "value", False, "q.pt", "q")
+    assert _worker_args(one, 3) == one
