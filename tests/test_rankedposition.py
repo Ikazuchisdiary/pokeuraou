@@ -598,3 +598,20 @@ def test_what_a_pokemon_carries_over_turns_is_in_the_position(world) -> None:  #
     bad["mine"]["0"]["locked"] = "surf"
     with pytest.raises(RankedError, match="持っていません"):
         rp.normalize(reg, board, bad)
+
+
+def test_seeing_a_pokemon_mega_evolve_shows_its_item(world) -> None:  # noqa: ANN001
+    reg = world.reg
+    board = _board(world)
+    _edit(board, 0, lambda f: f["theirs"]["tyranitar"].update(mega=True))
+    derived = rp.derive(reg, board, world.prior, world.base, observe_spread=False)
+    assert derived.sets["tyranitar"].item == "tyranitarite"
+    mon = derived.built[0].position.sides[1].pokemon[0]
+    assert mon.is_mega and mon.species == "tyranitarmega" and mon.item == "tyranitarite"
+    # The comparison can fail: not Mega Evolved, nothing is said of the item.
+    plain = rp.derive(reg, _board(world), world.prior, world.base, observe_spread=False)
+    assert plain.sets["tyranitar"].item == "leftovers"
+    # A species with two stones takes the one the field holds most (Charizard: X and Y).
+    members = [SimpleNamespace(item="charizarditey")] * 3 + [SimpleNamespace(item="charizarditex")]
+    assert rp.mega_stone(reg, "charizard", members) == "charizarditey"
+    assert rp.mega_stone(reg, "garchomp", []) != "" and rp.mega_stone(reg, "incineroar", []) is None
