@@ -306,7 +306,9 @@ class BoardApp:
                 ref.one, set=derived.sets[sid], sp_source="observed" if narrowed else ref.one.sp_source)
             view = app.view_set(derived.sets[sid], one)
             view["refine"] = {"notes": ref.notes, "members": ref.members, "unmatched": ref.unmatched}
-            members = app.prior.members.get(sid, [])
+            # What the field's sets are before anything was seen: the tier the estimate reads.
+            base = self._base()[sid].belief
+            members = list(base.members) if base is not None else app.prior.members.get(sid, [])
             counts: dict[str, int] = {}
             for m in members:
                 for mv in m.moves:
