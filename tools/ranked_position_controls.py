@@ -548,7 +548,9 @@ def summarize(files: list[Path]) -> None:
     for r in rows:
         if "skipped" in r:
             print("  skipped:", r["n"], r["skipped"][:100])
-    names = {"x_true": "x_true (true sets, one active's set wrong)",
+    names = {"n_swap": "n_swap (null, another pair of unseen members)",
+             "n_best": "n_best (null, the analysis' heaviest unseen pair)",
+             "x_true": "x_true (true sets, one active's set wrong)",
              "n_unseen": "n_unseen (n_all + the unseen members as they were)",
              "n_pp": "n_pp  (null + PP from the record)", "n_mem": "n_mem (n_pp + what it remembers)",
              "n_all": "n_all (n_mem + volatiles, side states)",
