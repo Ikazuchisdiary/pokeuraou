@@ -151,6 +151,7 @@ from . import deepen as _deepen
 from . import port, portlp, portmenus, portserved, rank_scores, rustnode, timing
 from .actions import SideAction
 from .budget import Budget
+from .eqselect import DEFAULT_EQ_SELECT, parse_eq_select, reselect_bayesian, reselected
 from .equilibrium import Equilibrium, EquilibriumError, solve
 from .narrow import narrow
 from .node_solver import solve_node
@@ -439,6 +440,7 @@ def search(
     progress: _deepen.Progress | None = None,
     discount: float | None = None,
     grow: _deepen.Grow | None = None,
+    select: tuple[str, str] = (DEFAULT_EQ_SELECT, DEFAULT_EQ_SELECT),
 ) -> SearchResult:
     """Solve this turn's matrix game, optionally refining the cells that decide it.
 
@@ -475,7 +477,20 @@ def search(
 
     ``grow`` widens the root while it deepens (IKA-354, `deepen.Grow`): the result's
     ``ours`` / ``theirs`` are then the grown menus.
+
+    ``select`` is (row player's, column player's) point of the optimal set
+    (`eqselect.parse_eq_select`, IKA-196): ``lp`` is the LP's vertex. Another label
+    replaces that player's strategy (never the value) of the depth-1 full-matrix answer,
+    and is refused with a deepening, depth 2 or the sparse solve.
     """
+    selecting = tuple(select) != (DEFAULT_EQ_SELECT, DEFAULT_EQ_SELECT)
+    for label in select:
+        parse_eq_select(label)
+    if selecting and (deepen or depth > 1 or solve_sparsely):
+        raise ValueError(
+            f"equilibrium selection {tuple(select)} goes with the undeepened depth-1 "
+            "full-matrix search (IKA-196)"
+        )
     if progress is not None and (depth > 1 or solve_sparsely):
         raise ValueError("progress reports the depth-1 full-matrix search and its deepening")
     if deepen and (depth > 1 or solve_sparsely):
@@ -531,6 +546,9 @@ def search(
             deepened=got.report,
         )
     if depth <= 1:
+        if selecting:
+            with timing.region("lp.select"):
+                equilibrium = reselected(payoff, equilibrium, select)
         if progress is not None:
             _deepen.announce_depth1(progress, pos, row, col, payoff, equilibrium)
         return SearchResult(
@@ -1543,6 +1561,7 @@ def belief_solve(
     deepen: dict[int, dict[str, Any]] | None = None,
     progress: _deepen.Progress | None = None,
     child_q: int | None = None,
+    select: tuple[str, str] = (DEFAULT_EQ_SELECT, DEFAULT_EQ_SELECT),
 ) -> dict[int, BeliefResult]:
     """Both sides' answers, resolving each turn as few times as it has to be resolved.
 
@@ -1578,12 +1597,24 @@ def belief_solve(
     `progress` is called with each `deepen.Step` of every wanted side's answer as it forms
     (IKA-332; the step's root says which side), deepened or not. Depth 1 only; it changes
     nothing that is computed.
+
+    `select` is per side: which point of its optimal set a side plays
+    (`eqselect.parse_eq_select`, IKA-196). ``lp`` is the LP's vertex, as before; another
+    label replaces the strategy (never the value) of a depth-1 answer that was not
+    deepened, and is refused anywhere else.
     """
     from .beliefnode import belief_payoffs
     from .equilibrium import solve_bayesian
 
     depths = (depth, depth) if isinstance(depth, int) else tuple(depth)
     deepen = deepen or {}
+    for side in (0, 1):
+        parse_eq_select(select[side])
+        if select[side] != DEFAULT_EQ_SELECT and (side in deepen or depths[side] != 1):
+            raise ValueError(
+                f"equilibrium selection {select[side]!r} on side {side} goes with an "
+                "undeepened depth-1 answer (IKA-196)"
+            )
     for side in deepen:
         if depths[side] != 1:
             raise ValueError("deepen on a hidden bench goes with depth 1 (IKA-294)")
@@ -1623,8 +1654,14 @@ def belief_solve(
         matrices = [m if side == 0 else -m.T for m in built]
         with timing.region("lp.side"):
             solved = solve_bayesian(matrices, weights)
+        strategy = np.asarray(solved.row_strategy, dtype=np.float64)
+        if select[side] != DEFAULT_EQ_SELECT:
+            with timing.region("lp.select"):
+                strategy = reselect_bayesian(
+                    matrices, weights, float(solved.value), strategy, select[side]
+                )
         out[side] = BeliefResult(
-            strategy=np.asarray(solved.row_strategy, dtype=np.float64),
+            strategy=strategy,
             value=float(solved.value),
             replies=tuple(np.asarray(y, dtype=np.float64) for y in solved.col_strategies),
             ours=row,

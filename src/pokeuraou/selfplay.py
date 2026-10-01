@@ -39,6 +39,7 @@ from . import luck, port, qrank, rank_scores, rustnode, timing
 from .actions import SideAction, switch_actions_after_faint
 from .budget import Budget
 from .deepen import DEFAULT_DEEPEN, deepen_spec
+from .eqselect import DEFAULT_EQ_SELECT, parse_eq_select, reselect, reselect_bayesian
 from .equilibrium import EquilibriumError, solve
 from .fold import TurnLeaves
 from .hidden import (
@@ -316,6 +317,9 @@ class GameRecord:
     #: ``rust_binary``, IKA-413): its fingerprint (path, size, sha256, build time), else
     #: None. Written only when a side had one.
     rust_binary: list[dict | None] = field(default_factory=lambda: [None, None])
+    #: Which point of its optimal set each side played (`eqselect.parse_eq_select`,
+    #: IKA-196). Written only when a side played another than the LP's vertex.
+    eq_select: list[str] = field(default_factory=lambda: [DEFAULT_EQ_SELECT, DEFAULT_EQ_SELECT])
     #: The equilibrium mixtures over the 90 ordered selections, when a book was used.
     #: These are the policy targets a selection head would learn -- the *solver's*
     #: recommendation, not the softened distribution the game was drawn from.
@@ -406,6 +410,11 @@ class GameRecord:
                 else {}
             ),
             **({"rustBinary": list(self.rust_binary)} if any(self.rust_binary) else {}),
+            **(
+                {"eqSelect": list(self.eq_select)}
+                if set(self.eq_select) != {DEFAULT_EQ_SELECT}
+                else {}
+            ),
             **(
                 {"depth": list(self.depth), "solveRestricted": list(self.solve_restricted)}
                 if set(self.depth) != {1}
@@ -1067,6 +1076,7 @@ def play_game(
     knockouts: bool | tuple[bool, bool] = False,
     dex_base_belief: bool | tuple[bool, bool] = False,
     rust_binary: Path | str | None | tuple[Path | str | None, Path | str | None] = None,
+    eq_select: str | tuple[str, str] = DEFAULT_EQ_SELECT,
 ) -> GameRecord:
     """Plays one game to a result, sampling both sides from the turn's equilibrium.
 
@@ -1150,6 +1160,12 @@ def play_game(
     its solves -- read through that port executable instead of the process's own; the game
     itself, the replacements and the mid-turn choices keep the process's. None is no change
     at all. For measuring a port change against the port before it.
+
+    ``eq_select`` (a pair too, IKA-196) is which point of its optimal set each side plays,
+    at its move and replacement nodes (`eqselect.parse_eq_select`): ``lp``, the LP's
+    vertex, ships and changes nothing. Another label goes with depth 1, no deepening and
+    the full-matrix solve on that side; it replaces the strategy a side samples from and
+    never a value.
 
     ``dex_base_belief`` (a pair too) has that side believe the opponent's bench as before
     IKA-411: a Mega of Floette-Eternal or Meowstic-F stops naming its sheet member, which
@@ -1243,6 +1259,16 @@ def play_game(
         }
         for spec in specs
     ]
+    selects = (eq_select, eq_select) if isinstance(eq_select, str) else tuple(eq_select)
+    for side in (0, 1):
+        parse_eq_select(selects[side])
+        if selects[side] != DEFAULT_EQ_SELECT and (
+            cells[side] or depths[side] != 1 or sparse[side] or restricted[side]
+        ):
+            raise ValueError(
+                f"eq_select {selects[side]!r} on side {side} goes with depth 1, no deepening "
+                "and the full-matrix solve (IKA-196)"
+            )
     for side in (0, 1):
         if cells[side] and (depths[side] != 1 or sparse[side] or restricted[side]):
             raise ValueError(
@@ -1301,6 +1327,7 @@ def play_game(
     record.rust_binary = [None if b is None else _fingerprint(b) for b in binaries]
     record.depth = [int(d) for d in depths]
     record.solve_restricted = [bool(r) for r in restricted]
+    record.eq_select = list(selects)
     pos = start if start is not None else position_from_sets(reg, own, foe, rng=rng)
     # Each side's matrix budget; `budget` is side 0's, and side 1's is the same object
     # unless its knock-out setting differs (IKA-359).
@@ -1367,7 +1394,7 @@ def play_game(
             pos = _do_replacement_node(
                 reg, rng, pos, owed, record, leaves,
                 sheets=sheets, shown=shown, bench_prior=bench_prior, leads=leads,
-                recorded_shown=recorded_shown, dex_base=dex_bases,
+                recorded_shown=recorded_shown, dex_base=dex_bases, selects=selects,
             )
             continue
 
@@ -1515,6 +1542,7 @@ def play_game(
                                 for side in asked
                                 if hidden_deep[side]
                             } or None,
+                            select=selects,
                         )
                         if asked
                         else {}
@@ -1620,6 +1648,7 @@ def play_game(
                                     if hidden_deep[1]
                                     else None
                                 ),
+                                select=selects,
                             )
                 except EquilibriumError:
                     break
@@ -1653,6 +1682,7 @@ def play_game(
                         solve_restricted=restricted[0] or deep_restricted[0],
                         deepen=cells[0],
                         outside=own_wider.get(oracles[0]) if widens[0] else None,
+                        select=selects,
                         **how[0],
                     )
             except EquilibriumError:
@@ -1705,6 +1735,7 @@ def play_game(
                             solve_restricted=restricted[1] or deep_restricted[1],
                             deepen=cells[1],
                             outside=foe_wider.get(oracles[1]) if widens[1] else None,
+                            select=selects,
                             **how[1],
                         )
                 except EquilibriumError:
@@ -2439,6 +2470,7 @@ def _do_replacement_node(
     leads: list[frozenset[str] | None] | None = None,
     recorded_shown: list[list[str]] | None = None,
     dex_base: tuple[bool, bool] = (False, False),
+    selects: tuple[str, str] = (DEFAULT_EQ_SELECT, DEFAULT_EQ_SELECT),
 ) -> Position:
     """Solves and applies the replacement phase.
 
@@ -2545,11 +2577,13 @@ def _do_replacement_node(
                 # Side 1 minimises what side 0 maximises, so its game is the transpose of
                 # the negation -- the same turn read from the other end, as in the move
                 # node, rather than a second matrix that could drift from this one.
-                solved = solve_bayesian(
-                    [m if side == 0 else -m.T for m in built], weights
+                own_game = [m if side == 0 else -m.T for m in built]
+                solved = solve_bayesian(own_game, weights)
+                strategy = reselect_bayesian(
+                    own_game, weights, float(solved.value), solved.row_strategy, selects[side]
                 )
                 answers[side] = (
-                    [float(x) for x in solved.row_strategy],
+                    [float(x) for x in strategy],
                     float(solved.value),
                 )
             own_policy, value = answers[0]
@@ -2571,8 +2605,16 @@ def _do_replacement_node(
         payoff = matrix(pos, leaves[0])
         try:
             equilibrium = solve(payoff)
-            own_policy = [float(x) for x in equilibrium.row_strategy]
-            foe_policy = [float(x) for x in equilibrium.col_strategy]
+            own_policy = [
+                float(x) for x in reselect(
+                    payoff, equilibrium.value, equilibrium.row_strategy, selects[0]
+                )
+            ]
+            foe_policy = [
+                float(x) for x in reselect(
+                    -payoff.T, -equilibrium.value, equilibrium.col_strategy, selects[1]
+                )
+            ]
             value = float(equilibrium.value)
         except EquilibriumError:
             own_policy = [1.0 / len(options[0])] * len(options[0])
@@ -2581,8 +2623,11 @@ def _do_replacement_node(
         if leaves[1] is not leaves[0]:
             foe_payoff = matrix(pos, leaves[1])
             try:
+                foe_eq = solve(foe_payoff)
                 foe_policy = [
-                    float(x) for x in solve(foe_payoff).col_strategy
+                    float(x) for x in reselect(
+                        -foe_payoff.T, -foe_eq.value, foe_eq.col_strategy, selects[1]
+                    )
                 ]
             except EquilibriumError:
                 foe_policy = [1.0 / len(options[1])] * len(options[1])
