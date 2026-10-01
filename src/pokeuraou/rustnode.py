@@ -108,7 +108,7 @@ _GAVE_UP = False
 PORT_WAITED = [0.0, 0]
 
 
-def binary_fingerprint() -> dict[str, Any]:
+def binary_fingerprint(path: Path | str | None = None) -> dict[str, Any]:
     """What the binary *is*, for a record that has to mean the code that ran.
 
     A differential that only checks the binary exists can pass against a build from before
@@ -116,7 +116,7 @@ def binary_fingerprint() -> dict[str, Any]:
     played by the executable, and between an edit and a `cargo build` the two disagree.
     So this hashes the executable.
     """
-    path = binary_path()
+    path = Path(path) if path is not None else binary_path()
     if not path.exists():
         return {"path": str(path), "present": False}
     raw = path.read_bytes()
@@ -514,6 +514,45 @@ def own_node(reg: Regulation, threads: int | None = None):  # noqa: ANN201
         made.close()
 
 
+#: The warm processes of other executables (`binary_scope`), by (format, path).
+_BINARY_NODES: dict[tuple[str, str], RustNode] = {}
+
+
+def _scoped(reg: Regulation) -> RustNode | None:
+    """The process of the executable this thread is inside a `binary_scope` of, or None."""
+    path = getattr(_LOCAL, "binary", None)
+    if path is None:
+        return None
+    key = (reg.meta.format_id, str(path))
+    node = _BINARY_NODES.get(key)
+    if node is None:
+        node = _BINARY_NODES[key] = RustNode(reg, binary=Path(path))
+    return node
+
+
+@contextlib.contextmanager
+def binary_scope(binary: Path | str | None):  # noqa: ANN201
+    """Every road on this thread asks the port of ``binary`` for the block (IKA-413).
+
+    For an agent whose rules are another build's -- a match of a port change against the
+    port before it, one arm's search read through each. ``None`` is no scope at all: the
+    roads answer from the module's process as ever, byte for byte. The other build's
+    process is started on first use and kept (`reset` closes it). Not with positions held
+    by number (`hold_positions`): that table is the module's own process's.
+    """
+    if binary is None:
+        yield
+        return
+    if _HOLD[0]:
+        raise RuntimeError("a binary scope does not hold positions (hold_positions is on)")
+    before = getattr(_LOCAL, "binary", None)
+    _LOCAL.binary = Path(binary)
+    try:
+        yield
+    finally:
+        _LOCAL.binary = before
+
+
 def node_for(reg: Regulation) -> RustNode | None:
     """The warm process for this regulation, or None if it is not usable.
 
@@ -525,6 +564,9 @@ def node_for(reg: Regulation) -> RustNode | None:
     own = _own(format_id)
     if own is not None:
         return own
+    scoped = _scoped(reg)
+    if scoped is not None:
+        return scoped
     if format_id in _NODES:
         return _NODES[format_id]
     if not available():
@@ -553,6 +595,9 @@ def reset() -> None:
             continue
         with contextlib.suppress(Exception):
             node.close()
+    for key in list(_BINARY_NODES):
+        with contextlib.suppress(Exception):
+            _BINARY_NODES.pop(key).close()
     # A fresh process holds no positions, and numbers the old one gave its branches may be
     # given again by the new one (IKA-302): what this side holds goes with it.
     _forget()
@@ -620,6 +665,9 @@ def require_node(reg: Regulation) -> RustNode:
     own = _own(format_id)
     if own is not None:
         return own
+    scoped = _scoped(reg)
+    if scoped is not None:
+        return scoped
     held = _NODES.get(format_id)
     if held is not None:
         return held

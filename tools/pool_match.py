@@ -300,6 +300,13 @@ def main(argv: list[str] | None = None) -> None:
                     "goes back on the bench (only for measuring the fix)")
     ap.add_argument("--baseline-dex-base-belief", action="store_true",
                     help="same for the other arm")
+    ap.add_argument("--rust-binary", type=Path, default=None,
+                    help="the tested arm's move-node search reads the port executable at this "
+                    "path (IKA-413: a port change measured against the port before it); the "
+                    "game itself, the replacements and the selection stay with the process's "
+                    "own. Default: the process's own, byte for byte")
+    ap.add_argument("--baseline-rust-binary", type=Path, default=None,
+                    help="same for the other arm")
     ap.add_argument("--pairs-with", nargs="+", default=None, metavar="SPECIES",
                     help="draw only the pool's pairs where either team has one of these "
                     "species ids (IKA-411: a match about a change only some teams meet)")
@@ -408,6 +415,7 @@ def main(argv: list[str] | None = None) -> None:
         bench_drop=args.bench_drop, deepen=args.deepen, depth=args.depth,
         solve_restricted=args.solve_restricted, knockouts=args.knockouts,
         dex_base_belief=args.dex_base_belief,
+        rust_binary=args.rust_binary,
     )
     other_limit = args.limit if args.baseline_limit is None else args.baseline_limit
     if baseline is None:
@@ -419,7 +427,8 @@ def main(argv: list[str] | None = None) -> None:
                         depth=args.baseline_depth,
                         solve_restricted=args.baseline_solve_restricted,
                         knockouts=args.baseline_knockouts,
-                        dex_base_belief=args.baseline_dex_base_belief)
+                        dex_base_belief=args.baseline_dex_base_belief,
+                        rust_binary=args.baseline_rust_binary)
     else:
         assert baseline_name is not None
         # One solver per arm even over one leaf: shared, the second arm would reuse the
@@ -439,6 +448,7 @@ def main(argv: list[str] | None = None) -> None:
             solve_restricted=args.baseline_solve_restricted,
             knockouts=args.baseline_knockouts,
             dex_base_belief=args.baseline_dex_base_belief,
+            rust_binary=args.baseline_rust_binary,
         )
     arms = (tested, other)
     print(pool.summary(), file=sys.stderr)
@@ -460,6 +470,7 @@ def main(argv: list[str] | None = None) -> None:
             + (f" / depth {arm.depth} restricted" if arm.depth != 1 else "")
             + (" / knockout branch" if arm.knockouts else "")
             + (" / belief by the dex's base species (pre-IKA-411)" if arm.dex_base_belief else "")
+            + (f" / port {arm.rust_binary}" if arm.rust_binary is not None else "")
             + " / selection "
             f"{arm.selection}" + (f" by its own leaf, store {store}" if store else "")
             + f" / belief {'solved' if arm.solver is not None and hide_bench else 'uniform'}",
@@ -485,6 +496,8 @@ def main(argv: list[str] | None = None) -> None:
         tags += "@ko" if tested.knockouts else "@noko"
     if hide_bench and tested.dex_base_belief != other.dex_base_belief:
         tags += "@dexbase" if tested.dex_base_belief else "@setbase"
+    if tested.rust_binary != other.rust_binary:
+        tags += "@port" if tested.rust_binary is not None else "@ownport"
     arm_label = f"{tested.name}{tags}"
 
     client = WorkClient(args.queue) if args.queue else None
@@ -506,7 +519,7 @@ def main(argv: list[str] | None = None) -> None:
     # The echo, per seat and per ARM (0 tested, 1 other): what each arm's side was given.
     echo = [[{"selection": {}, "belief": {}, "leaf": set(), "fill": {}, "drop": {},
               "deepen": {}, "deepened": 0, "widened": 0, "swapped": 0, "oracle": 0,
-              "depth": {}, "knockouts": 0, "dexbase": 0, "dexbase_rewrites": 0,
+              "depth": {}, "knockouts": 0, "dexbase": 0, "dexbase_rewrites": 0, "ports": {},
               "coverless": {"menus": 0, "dropping": 0, "dropped": 0},
               "q": [0, 0], "qprobe": [0, 0], "childq": [0, 0], "lines": {}, "calls": 0}
              for _ in arms]
@@ -551,6 +564,12 @@ def main(argv: list[str] | None = None) -> None:
             # positive control that the rule reached the arm (IKA-411).
             bucket["dexbase"] += int(record.dex_base_belief[side])
             bucket["dexbase_rewrites"] += record.dex_base_rewrites[side]
+            # Games this side's search was read through another port, by that port's
+            # fingerprint as the game recorded it (IKA-413): the positive control that the
+            # executable reached the arm, and which one.
+            if record.rust_binary[side] is not None:
+                port_key = str(record.rust_binary[side].get("sha256"))
+                bucket["ports"][port_key] = bucket["ports"].get(port_key, 0) + 1
             played_deepen = record.deepen[side]
             bucket["deepen"][played_deepen] = bucket["deepen"].get(played_deepen, 0) + 1
             # Decisions this side actually deepened, read off the game (IKA-33).
@@ -671,6 +690,8 @@ def main(argv: list[str] | None = None) -> None:
                 + (f"pre-IKA-411 belief in {bucket['dexbase']:,} games "
                    f"({bucket['dexbase_rewrites']:,} beliefs changed by it), "
                    if bucket["dexbase"] else "")
+                + (f"port executable (sha256 -> games) {bucket['ports']}, "
+                   if bucket["ports"] else "")
                 + f"deepen {bucket['deepen']} ({bucket['deepened']:,} decisions deepened"
                 + (
                     f", oracle asked at {bucket['oracle']:,}, {bucket['widened']:,} actions "

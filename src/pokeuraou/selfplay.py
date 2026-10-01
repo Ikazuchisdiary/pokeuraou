@@ -28,13 +28,14 @@ from __future__ import annotations
 import json
 from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field, replace
+from functools import cache
 from pathlib import Path
 from time import perf_counter
 from typing import Any, Protocol
 
 import numpy as np
 
-from . import luck, port, qrank, rank_scores, timing
+from . import luck, port, qrank, rank_scores, rustnode, timing
 from .actions import SideAction, switch_actions_after_faint
 from .budget import Budget
 from .deepen import DEFAULT_DEEPEN, deepen_spec
@@ -311,6 +312,10 @@ class GameRecord:
     #: many of its beliefs that changed. Written only when a side did.
     dex_base_belief: list[bool] = field(default_factory=lambda: [False, False])
     dex_base_rewrites: list[int] = field(default_factory=lambda: [0, 0])
+    #: Each side's port executable when it was not the process's own (`play_game`'s
+    #: ``rust_binary``, IKA-413): its fingerprint (path, size, sha256, build time), else
+    #: None. Written only when a side had one.
+    rust_binary: list[dict | None] = field(default_factory=lambda: [None, None])
     #: The equilibrium mixtures over the 90 ordered selections, when a book was used.
     #: These are the policy targets a selection head would learn -- the *solver's*
     #: recommendation, not the softened distribution the game was drawn from.
@@ -400,6 +405,7 @@ class GameRecord:
                 if any(self.dex_base_belief)
                 else {}
             ),
+            **({"rustBinary": list(self.rust_binary)} if any(self.rust_binary) else {}),
             **(
                 {"depth": list(self.depth), "solveRestricted": list(self.solve_restricted)}
                 if set(self.depth) != {1}
@@ -706,6 +712,16 @@ def _belief_deepen(
         "outside": outside,
         **({"sub_limit": how["sub_limit"]} if "sub_limit" in how else {}),
     }
+
+
+@cache
+def _fingerprint_of(path: str) -> str:
+    return json.dumps(rustnode.binary_fingerprint(path))
+
+
+def _fingerprint(path: Path | str) -> dict:
+    """The executable's fingerprint, read once per path (it is hashed, 12 MB)."""
+    return json.loads(_fingerprint_of(str(path)))
 
 
 def _menus(
@@ -1050,6 +1066,7 @@ def play_game(
     deepen: str | tuple[str, str] = DEFAULT_DEEPEN,
     knockouts: bool | tuple[bool, bool] = False,
     dex_base_belief: bool | tuple[bool, bool] = False,
+    rust_binary: Path | str | None | tuple[Path | str | None, Path | str | None] = None,
 ) -> GameRecord:
     """Plays one game to a result, sampling both sides from the turn's equilibrium.
 
@@ -1129,6 +1146,11 @@ def play_game(
     (`Budget.enumerate_knockouts`, IKA-359): off ships. Two sides that differ build and
     solve their own menus, as for any other setting that differs.
 
+    ``rust_binary`` (a pair too, IKA-413) has that side's move-node search -- its menus and
+    its solves -- read through that port executable instead of the process's own; the game
+    itself, the replacements and the mid-turn choices keep the process's. None is no change
+    at all. For measuring a port change against the port before it.
+
     ``dex_base_belief`` (a pair too) has that side believe the opponent's bench as before
     IKA-411: a Mega of Floette-Eternal or Meowstic-F stops naming its sheet member, which
     goes back on the bench (`_belief_view`). Off ships; on is only for measuring the fix.
@@ -1193,6 +1215,14 @@ def play_game(
     dex_bases = (
         (dex_base_belief, dex_base_belief) if isinstance(dex_base_belief, bool)
         else tuple(bool(d) for d in dex_base_belief)
+    )
+    binaries = tuple(
+        None if b is None else Path(b)
+        for b in (
+            (rust_binary, rust_binary)
+            if rust_binary is None or isinstance(rust_binary, (str, Path))
+            else rust_binary
+        )
     )
     cells = (specs[0].cells, specs[1].cells)
     deep_restricted = (specs[0].reading == "restricted", specs[1].reading == "restricted")
@@ -1268,6 +1298,7 @@ def play_game(
     record.deepen = list(deepens)
     record.knockouts = [bool(k) for k in kos]
     record.dex_base_belief = list(dex_bases)
+    record.rust_binary = [None if b is None else _fingerprint(b) for b in binaries]
     record.depth = [int(d) for d in depths]
     record.solve_restricted = [bool(r) for r in restricted]
     pos = start if start is not None else position_from_sets(reg, own, foe, rng=rng)
@@ -1382,6 +1413,8 @@ def play_game(
         same_menu = (
             ranked[1] == ranked[0]
             and budgets[1] == budgets[0]
+            # Two ports are two answers: each side builds its own menu and solve (IKA-413).
+            and binaries[1] == binaries[0]
             and policies[1] is policies[0]
             and views_rule[1] == views_rule[0]
             # A leaf ranking filled another way orders another menu (IKA-268).
@@ -1417,13 +1450,14 @@ def play_game(
         own_views: dict[int, tuple[int, tuple[str, ...]]] = {}
         foe_views: dict[int, tuple[int, tuple[str, ...]]] | None = None
         rank_scores.at_node(len(record.decisions), pos.turn, 0)  # IKA-278
-        ours, theirs = _menus(
-            reg, pos, limits, own_leaf, budget, ranked[0], policies[0], spreads,
-            rank_view=views_rule[0], used=own_views, rank_fill=fills[0],
-            # Side 1 reads these too when the two build one menu.
-            wide=[oracles[side] for side in (0, 1) if widens[side] and (side == 0 or same_menu)],
-            wider=own_wider,
-        )
+        with rustnode.binary_scope(binaries[0]):
+            ours, theirs = _menus(
+                reg, pos, limits, own_leaf, budget, ranked[0], policies[0], spreads,
+                rank_view=views_rule[0], used=own_views, rank_fill=fills[0],
+                # Side 1 reads these too when the two build one menu.
+                wide=[oracles[side] for side in (0, 1) if widens[side] and (side == 0 or same_menu)],
+                wider=own_wider,
+            )
         menu_seconds = perf_counter() - menu_started
         if not ours or not theirs:
             break
@@ -1463,48 +1497,49 @@ def play_game(
                 # the side it is read on is what keeps the other side's node and LP from
                 # being built and thrown away (IKA-282: half of the board's matrix,
                 # dirty fill and LP).
-                asked = tuple(
-                    side for side in ((0, 1) if same_menu else (0,)) if not deep[side]
-                )
-                answers = (
-                    belief_solve(
-                        reg, pos, ours, theirs, spreads,
-                        {0: own_leaf, 1: foe_leaf}, budget=budget,
-                        sides=asked, depth=depths,
-                        deepen={
-                            side: _belief_deepen(
-                                cells[side], how[side],
-                                own_wider.get(oracles[side]) if widens[side] else None,
-                                deep_restricted[side],
-                            )
-                            for side in asked
-                            if hidden_deep[side]
-                        } or None,
+                with rustnode.binary_scope(binaries[0]):
+                    asked = tuple(
+                        side for side in ((0, 1) if same_menu else (0,)) if not deep[side]
                     )
-                    if asked
-                    else {}
-                )
-                if deep[0]:
-                    own_deep = search(
-                        reg, pos, ours, theirs, own_leaf, budget=budget,
-                        deepen=cells[0], solve_restricted=deep_restricted[0],
-                        outside=own_wider.get(oracles[0]) if widens[0] else None,
-                        **how[0],
-                    )
-                if same_menu and deep[1]:
-                    # One agent on both sides reads both strategies off one solve.
-                    foe_deep = (
-                        own_deep
-                        if own_deep is not None
-                        and leaves[1] is leaves[0]
-                        and deepens[1] == deepens[0]
-                        else search(
-                            reg, pos, ours, theirs, foe_leaf, budget=budgets[1],
-                            deepen=cells[1], solve_restricted=deep_restricted[1],
-                            outside=own_wider.get(oracles[1]) if widens[1] else None,
-                            **how[1],
+                    answers = (
+                        belief_solve(
+                            reg, pos, ours, theirs, spreads,
+                            {0: own_leaf, 1: foe_leaf}, budget=budget,
+                            sides=asked, depth=depths,
+                            deepen={
+                                side: _belief_deepen(
+                                    cells[side], how[side],
+                                    own_wider.get(oracles[side]) if widens[side] else None,
+                                    deep_restricted[side],
+                                )
+                                for side in asked
+                                if hidden_deep[side]
+                            } or None,
                         )
+                        if asked
+                        else {}
                     )
+                    if deep[0]:
+                        own_deep = search(
+                            reg, pos, ours, theirs, own_leaf, budget=budget,
+                            deepen=cells[0], solve_restricted=deep_restricted[0],
+                            outside=own_wider.get(oracles[0]) if widens[0] else None,
+                            **how[0],
+                        )
+                    if same_menu and deep[1]:
+                        # One agent on both sides reads both strategies off one solve.
+                        foe_deep = (
+                            own_deep
+                            if own_deep is not None
+                            and leaves[1] is leaves[0]
+                            and deepens[1] == deepens[0]
+                            else search(
+                                reg, pos, ours, theirs, foe_leaf, budget=budgets[1],
+                                deepen=cells[1], solve_restricted=deep_restricted[1],
+                                outside=own_wider.get(oracles[1]) if widens[1] else None,
+                                **how[1],
+                            )
+                        )
             except EquilibriumError:
                 break
             own_seconds = perf_counter() - solve_started
@@ -1554,36 +1589,38 @@ def play_game(
                 foe_started = perf_counter()
                 foe_views = {}
                 rank_scores.at_node(len(record.decisions), pos.turn, 1)  # IKA-278
-                foe_ours, foe_theirs = _menus(
-                    reg, pos, limits, foe_leaf, budgets[1], ranked[1], policies[1], spreads,
-                    rank_view=views_rule[1], used=foe_views, rank_fill=fills[1],
-                    wide=[oracles[1]] if widens[1] else [], wider=foe_wider,
-                )
+                with rustnode.binary_scope(binaries[1]):
+                    foe_ours, foe_theirs = _menus(
+                        reg, pos, limits, foe_leaf, budgets[1], ranked[1], policies[1], spreads,
+                        rank_view=views_rule[1], used=foe_views, rank_fill=fills[1],
+                        wide=[oracles[1]] if widens[1] else [], wider=foe_wider,
+                    )
                 if not foe_ours or not foe_theirs:
                     break
                 try:
-                    if deep[1]:
-                        foe_deep = search(
-                            reg, pos, foe_ours, foe_theirs, foe_leaf, budget=budgets[1],
-                            deepen=cells[1], solve_restricted=deep_restricted[1],
-                            outside=foe_wider.get(oracles[1]) if widens[1] else None,
-                            **how[1],
-                        )
-                    else:
-                        foe_answers = belief_solve(
-                            reg, pos, foe_ours, foe_theirs, spreads,
-                            {0: own_leaf, 1: foe_leaf}, budget=budgets[1], sides=(1,),
-                            depth=depths,
-                            deepen=(
-                                {1: _belief_deepen(
-                                    cells[1], how[1],
-                                    foe_wider.get(oracles[1]) if widens[1] else None,
-                                    deep_restricted[1],
-                                )}
-                                if hidden_deep[1]
-                                else None
-                            ),
-                        )
+                    with rustnode.binary_scope(binaries[1]):
+                        if deep[1]:
+                            foe_deep = search(
+                                reg, pos, foe_ours, foe_theirs, foe_leaf, budget=budgets[1],
+                                deepen=cells[1], solve_restricted=deep_restricted[1],
+                                outside=foe_wider.get(oracles[1]) if widens[1] else None,
+                                **how[1],
+                            )
+                        else:
+                            foe_answers = belief_solve(
+                                reg, pos, foe_ours, foe_theirs, spreads,
+                                {0: own_leaf, 1: foe_leaf}, budget=budgets[1], sides=(1,),
+                                depth=depths,
+                                deepen=(
+                                    {1: _belief_deepen(
+                                        cells[1], how[1],
+                                        foe_wider.get(oracles[1]) if widens[1] else None,
+                                        deep_restricted[1],
+                                    )}
+                                    if hidden_deep[1]
+                                    else None
+                                ),
+                            )
                 except EquilibriumError:
                     break
                 solved.append((1, foe_deep if foe_deep is not None else foe_answers[1]))
@@ -1609,14 +1646,15 @@ def play_game(
         else:
             solve_started = perf_counter()
             try:
-                own_search = search(
-                    reg, pos, ours, theirs, own_leaf, budget=budget, depth=depths[0],
-                    solve_sparsely=sparse[0],
-                    solve_restricted=restricted[0] or deep_restricted[0],
-                    deepen=cells[0],
-                    outside=own_wider.get(oracles[0]) if widens[0] else None,
-                    **how[0],
-                )
+                with rustnode.binary_scope(binaries[0]):
+                    own_search = search(
+                        reg, pos, ours, theirs, own_leaf, budget=budget, depth=depths[0],
+                        solve_sparsely=sparse[0],
+                        solve_restricted=restricted[0] or deep_restricted[0],
+                        deepen=cells[0],
+                        outside=own_wider.get(oracles[0]) if widens[0] else None,
+                        **how[0],
+                    )
             except EquilibriumError:
                 break
             own_seconds = perf_counter() - solve_started
@@ -1641,31 +1679,34 @@ def play_game(
                 or (fills[1] != fills[0] and ranked[0] and policies[0] is None)
                 or deepens[1] != deepens[0]
                 or budgets[1] != budgets[0]
+                or binaries[1] != binaries[0]
             ):
                 foe_started = perf_counter()
                 rank_scores.at_node(len(record.decisions), pos.turn, 1)  # IKA-278
-                foe_ours, foe_theirs = (
-                    (ours, theirs)
-                    if same_menu
-                    else _menus(
-                        reg, pos, limits, foe_leaf, budgets[1], ranked[1], policies[1],
-                        spreads, rank_view=views_rule[1], rank_fill=fills[1],
-                        wide=[oracles[1]] if widens[1] else [], wider=foe_wider,
+                with rustnode.binary_scope(binaries[1]):
+                    foe_ours, foe_theirs = (
+                        (ours, theirs)
+                        if same_menu
+                        else _menus(
+                            reg, pos, limits, foe_leaf, budgets[1], ranked[1], policies[1],
+                            spreads, rank_view=views_rule[1], rank_fill=fills[1],
+                            wide=[oracles[1]] if widens[1] else [], wider=foe_wider,
+                        )
                     )
-                )
                 if same_menu:
                     foe_wider = own_wider
                 if not foe_ours or not foe_theirs:
                     break
                 try:
-                    foe_search = search(
-                        reg, pos, foe_ours, foe_theirs, foe_leaf, budget=budgets[1],
-                        depth=depths[1], solve_sparsely=sparse[1],
-                        solve_restricted=restricted[1] or deep_restricted[1],
-                        deepen=cells[1],
-                        outside=foe_wider.get(oracles[1]) if widens[1] else None,
-                        **how[1],
-                    )
+                    with rustnode.binary_scope(binaries[1]):
+                        foe_search = search(
+                            reg, pos, foe_ours, foe_theirs, foe_leaf, budget=budgets[1],
+                            depth=depths[1], solve_sparsely=sparse[1],
+                            solve_restricted=restricted[1] or deep_restricted[1],
+                            deepen=cells[1],
+                            outside=foe_wider.get(oracles[1]) if widens[1] else None,
+                            **how[1],
+                        )
                 except EquilibriumError:
                     break
                 solved.append((1, foe_search))
