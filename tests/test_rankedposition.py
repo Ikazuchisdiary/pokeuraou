@@ -555,3 +555,46 @@ def test_the_server_routes_walk_the_board_and_serve_the_page(world) -> None:  # 
             assert b'name="sprite-url"' in resp.read()
     finally:
         server.close()
+
+
+def test_what_a_pokemon_carries_over_turns_is_in_the_position(world) -> None:  # noqa: ANN001
+    reg = world.reg
+    sets = {s: o.set for s, o in world.base.items()}
+    board = _two_turns(world, mine_active=(0, 1))
+
+    def edit(form):  # noqa: ANN001, ANN202
+        form["mine"]["0"]["protect"] = 2                   # Garchomp protected twice in a row
+        form["theirs"]["tyranitar"]["protect"] = 1
+        form["theirs"]["tyranitar"]["item"] = "choicescarf"
+        form["theirs"]["tyranitar"]["locked"] = "crunch"  # locked into a move it used: so a seen move
+    _edit(board, 0, edit)
+    built = rp.build_position(reg, board, board.turns[0], sets).position
+    chomp = built.sides[0].pokemon[0]
+    assert [(e.id, e.duration, e.counter) for e in chomp.volatiles] == [("stall", 1, 9)]
+    ty = built.sides[1].pokemon[0]
+    assert {(e.id, e.counter, e.move) for e in ty.volatiles} == {
+        ("stall", 3, None), ("choicelock", None, "crunch")}
+    assert "crunch" in board.turns[0]["theirs"]["tyranitar"]["moves"]
+    # Unburden follows the ability and the spent item. The control: the same Pokemon with its item
+    # still in hand has none.
+    _edit(board, 0, lambda f: f["mine"]["1"].update(itemGone=True))
+    sets["tyranitar"] = world.base["tyranitar"].set
+    mine_sets = world.mine.sets
+    old = mine_sets[1].ability
+    mine_sets[1].ability = "unburden"
+    try:
+        spent = rp.build_position(reg, board, board.turns[0], sets).position.sides[0].pokemon[1]
+        assert [e.id for e in spent.volatiles] == ["unburden"] and spent.item is None
+        _edit(board, 0, lambda f: f["mine"]["1"].update(itemGone=False))
+        held = rp.build_position(reg, board, board.turns[0], sets).position.sides[0].pokemon[1]
+        assert held.volatiles == []
+    finally:
+        mine_sets[1].ability = old
+    # The next turn forgets last turn's Protect (it is typed again) and keeps the lock.
+    nxt = rp.next_form(board.turns[0])
+    assert nxt["mine"]["0"]["protect"] == 0 and nxt["theirs"]["tyranitar"]["locked"] == "crunch"
+    # A move a Pokemon of the person's is locked into must be one of its moves.
+    bad = rp.normalize(reg, board, board.turns[0])
+    bad["mine"]["0"]["locked"] = "surf"
+    with pytest.raises(RankedError, match="持っていません"):
+        rp.normalize(reg, board, bad)

@@ -179,6 +179,16 @@ function boostBox(side, key, boosts) {
 function check(side, key, f, label, value) {
   return `<label class="ps-check${changed(side, key, f, value)}"><input type="checkbox" data-side="${side}" data-key="${esc(key)}" data-f="${f}" ${value ? "checked" : ""}> ${label}</label>`;
 }
+// What the person sees of a Pokemon's state that decides what it can do next: Protect used in a row
+// (the next one is likelier to fail), and the move a Choice item locks it into.
+function stateRows(side, key, st, itemId, moveOptions) {
+  const protect = `<label class="ps-f${changed(side, key, "protect", st.protect)}" title="前のターンに「まもる」「みきり」などを使ったか（続けて使うと失敗しやすい）"><span>まもる系</span><select data-side="${side}" data-key="${esc(key)}" data-f="protect">
+    ${[["0", "使っていない"], ["1", "前のターンに使った"], ["2", "2 回続けて使った"]].map(([v, n]) => `<option value="${v}" ${String(st.protect || 0) === v ? "selected" : ""}>${n}</option>`).join("")}</select></label>`;
+  const choice = itemId && /^choice/.test(itemId) && !st.itemGone && moveOptions.length
+    ? `<label class="ps-f${changed(side, key, "locked", st.locked)}" title="こだわり系の持ち物で、同じ技しか出せなくなっている技"><span>固定された技</span><select data-side="${side}" data-key="${esc(key)}" data-f="locked">
+      <option value="">なし（まだ出していない）</option>${moveOptions.map((m) => `<option value="${esc(m.id)}" ${st.locked === m.id ? "selected" : ""}>${esc(m.name)}</option>`).join("")}</select></label>` : "";
+  return `<div class="ps-row">${protect}${choice}</div>`;
+}
 function slotSelect(side, slot, current, options) {
   const opts = options.map((o) => `<option value="${esc(o.id)}" ${String(o.id) === String(current) ? "selected" : ""}>${esc(o.name)}</option>`).join("");
   return `<select class="ps-slot" data-slot="${side}${slot}" aria-label="場の ${slot + 1} 体目">${current == null ? `<option value="" selected>（空き）</option>` : ""}${opts}</select>`;
@@ -197,6 +207,7 @@ function mineCard(i, slot) {
     </div>
     <div class="ps-row">${statusSelect("m", i, st.status)}</div>
     ${boostBox("m", i, st.boosts)}
+    ${stateRows("m", i, st, v.item ? v.item.id : null, v.moves)}
     <div class="ps-row ps-checks">${check("m", i, "mega", "メガシンカ済み", st.mega)}${check("m", i, "itemGone", "持ち物を使った", st.itemGone)}</div>
   </article>`;
 }
@@ -251,6 +262,7 @@ function oppCard(sid, slot) {
     <div class="ps-hint" data-hphint="${esc(sid)}">${esc(hpHint(sid))}</div>
     <div class="ps-row">${statusSelect("t", sid, st.status)}${check("t", sid, "fainted", "倒れた", st.fainted)}</div>
     ${boostBox("t", sid, st.boosts)}
+    ${stateRows("t", sid, st, st.item, st.moves.map((m) => ({ id: m, name: moveName(m) })))}
     <div class="ps-seen">
       <h4>見えた情報 <small>見えたものだけ入れてください。相手の型の候補が自動で絞られます</small></h4>
       <div class="ps-chips${changed("t", sid, "moves", st.moves)}"><span class="lab">使った技</span>${moveChips}${addMove}</div>
@@ -422,7 +434,7 @@ function setValue(el) {
   }
   else if (f === "pct") { box.pct = v === "" ? 100 : v; if (v === 20 || v === 50 || box.colour) structural = true; if (v !== 20 && v !== 50) box.colour = null; }
   else if (f === "hp") box.hp = v === "" ? 0 : v;
-  else { box[f] = v; if (f === "fainted" || f === "itemGone") structural = true; }
+  else { box[f] = v; if (f === "fainted" || f === "itemGone" || f === "locked") structural = true; }
   if (f === "hp" && box.hp === 0) structural = true;
   if (f === "boost") el.closest("details").querySelector("summary b").textContent = boostSummary(box.boosts);
 }
