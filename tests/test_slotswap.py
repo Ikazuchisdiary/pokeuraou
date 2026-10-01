@@ -19,7 +19,6 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-import torch
 
 from pokeuraou import slotswap
 from pokeuraou.actions import MoveAction, SideAction
@@ -32,7 +31,6 @@ from pokeuraou.position import Effect, Position
 from pokeuraou.selfplay import position_from_sets
 from pokeuraou.slotswap import SwapSlots, swap_action, swap_batch, swap_encoded, swap_positions
 from pokeuraou.teams import load_roster
-from pokeuraou.value import ValueConfig, build
 
 from ._port import Budget, resolve_turn
 
@@ -127,6 +125,7 @@ def test_the_array_swap_is_the_encoding_of_the_position_swap(roster) -> None:  #
 
 
 def test_the_torch_swap_is_the_numpy_swap(roster) -> None:  # noqa: ANN001
+    torch = pytest.importorskip("torch", reason="value function needs the optional learn group")
     encoder = Encoder(roster.reg)
     enc = encoder.encode_positions(_played(roster))
     rng = np.random.default_rng(0)
@@ -146,6 +145,9 @@ def test_the_torch_swap_is_the_numpy_swap(roster) -> None:  # noqa: ANN001
 
 
 def test_the_network_tells_the_arrangements_apart_only_by_the_slot_columns(roster) -> None:  # noqa: ANN001
+    torch = pytest.importorskip("torch", reason="value function needs the optional learn group")
+    from pokeuraou.value import ValueConfig, build  # noqa: PLC0415
+
     encoder = Encoder(roster.reg)
     enc = encoder.encode_positions(_played(roster))
     flip = np.ones((len(enc), 2), dtype=bool)
