@@ -589,7 +589,7 @@ def narrate(
 def pair_of(
     reg: Regulation, loc: Localiser, position: dict[str, Any], side: int, choice: str
 ) -> list[dict[str, str]]:
-    """A choice as its Pokemon's parts (species, name, the move without its target)."""
+    """A choice as its Pokemon's parts (species, name, the move with the target it names)."""
     parsed = Position.from_json(position)
     text = show_game.name_action(reg, loc, position["sides"], side, choice, parsed)
     slots = position["sides"][side]["active"]
@@ -599,8 +599,7 @@ def pair_of(
         who, _, what = part.partition(": ")
         if what == "行動なし":
             continue
-        if not what.startswith("交代"):
-            what = re.sub(r" → .*?( \+ メガ)?$", r"\1", what)
+        what = what.replace("→ 敵", "→ 相手の").replace("→ 味方", "→ 味方の")  # as `hands`
         party = slots[slot] if slot < len(slots) else None
         species = position["sides"][side]["pokemon"][party]["species"] if party is not None else ""
         out.append(
