@@ -326,6 +326,9 @@ pub struct Turn<'a> {
     /// and Emergency Exit read once the hits are over (IKA-191). Never read across actions.
     pub(crate) move_start_hp: Option<[[i64; 2]; 2]>,
     pub(crate) move_hit: [[bool; 2]; 2],
+    /// The targets whose Substitute took the hit (IKA-214): `move.hitTargets` keeps them, which
+    /// Magician reads, while `AfterMoveSecondary` (Pickpocket) does not. Never read across actions.
+    pub(crate) move_dolled: [[bool; 2]; 2],
     /// Python's `_Turn.draws`: how a draw inside one switch-in is answered (IKA-203). Set
     /// only by `switch_in_with_draws`, for the length of the switch-in.
     pub(crate) draws: Option<Draws>,
@@ -358,6 +361,7 @@ impl<'a> Turn<'a> {
             rolls_stratified: false,
             move_start_hp: None,
             move_hit: [[false; 2]; 2],
+            move_dolled: [[false; 2]; 2],
             draws: None,
             log: None,
             damaged_by: None,
@@ -982,6 +986,8 @@ fn ability_handled(ability: &str) -> bool {
             | "infiltrator"
             // `moves::good_as_gold_blocks` and `moves::flower_veil` (IKA-202).
             | "goodasgold" | "flowerveil"
+            // `moves::magician` and `moves::pickpocket`, after the move (IKA-214).
+            | "magician" | "pickpocket"
             // Weather setters, applied on switch-in and mega.
             | "drought" | "drizzle" | "sandstream" | "snowwarning"
             // `trace` in `switch_in_ability`, `synchronize` in `apply_status_from`, and
@@ -1891,6 +1897,7 @@ fn same_turn(a: &Turn, b: &Turn) -> bool {
         // The move resolving now's; stale between actions, where branches merge (IKA-191).
         move_start_hp: _,
         move_hit: _,
+        move_dolled: _,
         // Set only inside one switch-in, None wherever branches merge (IKA-203).
         draws: _,
         // The readable trace; Python's `_MERGE_IGNORED_STATE` (IKA-215).

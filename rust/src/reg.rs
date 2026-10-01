@@ -852,12 +852,13 @@ impl Reg {
         self.mega_by_species.contains(&(base.to_string(), item_id.to_string()))
     }
 
+    /// Knock Off's `onBasePower` gate: `singleEvent('TakeItem', item, ..., target, target)` is
+    /// the item's own `onTakeItem` alone -- never Sticky Hold, which is the ability's -- and
+    /// the 1.5x applies when the holder has an item that may leave it (IKA-214).
     pub fn item_is_removable(&self, species_id: &str, item_id: Option<&str>) -> bool {
         match item_id {
             None => false,
-            Some(item) => !self
-                .mega_by_species
-                .contains(&(species_id.to_string(), item.to_string())),
+            Some(item) => !self.mega_stone_stays(species_id, item),
         }
     }
 }
