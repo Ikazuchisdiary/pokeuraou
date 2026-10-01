@@ -740,6 +740,10 @@ def narrow_spreads(
     out = dict(sets)
     notes: list[SpreadNote] = []
     for sid, per in allowed.items():
+        # A stat the events left free (every value possible) was not narrowed: nothing to say.
+        per = {stat: v for stat, v in per.items() if len(v) <= reg.meta.sp_per_stat_max}
+        if not per:
+            continue
         one = out[sid]
         sp = dict(one.sp)
         keep = set(per)

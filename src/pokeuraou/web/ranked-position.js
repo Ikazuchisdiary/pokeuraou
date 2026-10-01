@@ -305,7 +305,8 @@ function eventsHtml() {
 
 // ------------------------------------------------------------------ result
 function actionRows(rows) {
-  return rows.map((r) => `<div class="ps-act"><span class="t">${esc(r.text)}</span><span class="p">${pct(r.p, r.p < 0.1 ? 1 : 0)}</span><div class="pbar"><i style="width:${Math.round(r.p * 100)}%"></i></div></div>`).join("");
+  const shown = rows.filter((r, i) => i === 0 || r.p >= 0.005);
+  return shown.map((r) => `<div class="ps-act"><span class="t">${esc(r.text)}</span><span class="p">${pct(r.p, r.p < 0.1 ? 1 : 0)}</span><div class="pbar"><i style="width:${Math.round(r.p * 100)}%"></i></div></div>`).join("");
 }
 function renderResult(res) {
   const o = res.ours, t = res.theirs;

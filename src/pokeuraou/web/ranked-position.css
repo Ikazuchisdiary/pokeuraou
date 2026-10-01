@@ -114,3 +114,5 @@ body.pos .rk-bar .summary { flex: 1 1 200px; }
   body.pos .rk-bar { gap: 8px; }
   body.pos .rk-bar .summary { flex-basis: 100%; }
 }
+#eventsTitle { display: block; }
+#eventsTitle small { margin-left: 0; }
