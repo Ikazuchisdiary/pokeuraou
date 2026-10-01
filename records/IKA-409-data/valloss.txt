@@ -1,0 +1,68 @@
+[heavy] 2026-10-01T18:32:22 start (4 cores): C:/Users/Ikazuchi/repos/pokeuraou/.venv/Scripts/python.exe C:/tmp/ika409/valloss.py C:/Users/Ikazuchi/repos/pokeuraou
+decisions 12436572 games 1079981 id range 0 1079980 per-gen games [39998, 39999, 200000, 399993, 399991]
+val decisions 1862517 games 161998 by generation [(70836, 6057), (66100, 5946), (337669, 29898), (687554, 60046), (700358, 60051)]
+mc3 s0 done
+mc3 s1 done
+mc4 s0 done
+mc4 s1 done
+
+== all val: n 1862517
+  mc3 s0  logloss 0.3980 (game-se 0.0008)  brier 0.1318
+  mc3 s1  logloss 0.3981 (game-se 0.0008)  brier 0.1318
+  mc3 x2  logloss 0.3968 (game-se 0.0008)  brier 0.1314
+  mc4 s0  logloss 0.3928 (game-se 0.0008)  brier 0.1298
+  mc4 s1  logloss 0.3928 (game-se 0.0008)  brier 0.1298
+  mc4 x2  logloss 0.3910 (game-se 0.0008)  brier 0.1292
+  paired mc3x2 - mc4x2: +0.0058 (se 0.0002)
+  mc4 s0/s1 mean |p diff| 0.0313
+
+== gen-0 rows: n 70836
+  mc3 s0  logloss 0.3926 (game-se 0.0043)  brier 0.1301
+  mc3 s1  logloss 0.3917 (game-se 0.0043)  brier 0.1298
+  mc3 x2  logloss 0.3908 (game-se 0.0043)  brier 0.1295
+  mc4 s0  logloss 0.3911 (game-se 0.0044)  brier 0.1295
+  mc4 s1  logloss 0.3897 (game-se 0.0043)  brier 0.1290
+  mc4 x2  logloss 0.3884 (game-se 0.0043)  brier 0.1286
+  paired mc3x2 - mc4x2: +0.0024 (se 0.0008)
+  mc4 s0/s1 mean |p diff| 0.0330
+
+== gen-1 rows: n 66100
+  mc3 s0  logloss 0.3940 (game-se 0.0045)  brier 0.1297
+  mc3 s1  logloss 0.3933 (game-se 0.0045)  brier 0.1295
+  mc3 x2  logloss 0.3924 (game-se 0.0044)  brier 0.1292
+  mc4 s0  logloss 0.3942 (game-se 0.0045)  brier 0.1299
+  mc4 s1  logloss 0.3947 (game-se 0.0045)  brier 0.1298
+  mc4 x2  logloss 0.3926 (game-se 0.0045)  brier 0.1293
+  paired mc3x2 - mc4x2: -0.0002 (se 0.0009)
+  mc4 s0/s1 mean |p diff| 0.0316
+
+== gen-2 rows: n 337669
+  mc3 s0  logloss 0.3926 (game-se 0.0020)  brier 0.1297
+  mc3 s1  logloss 0.3926 (game-se 0.0020)  brier 0.1297
+  mc3 x2  logloss 0.3914 (game-se 0.0020)  brier 0.1293
+  mc4 s0  logloss 0.3917 (game-se 0.0020)  brier 0.1294
+  mc4 s1  logloss 0.3913 (game-se 0.0020)  brier 0.1292
+  mc4 x2  logloss 0.3897 (game-se 0.0020)  brier 0.1287
+  paired mc3x2 - mc4x2: +0.0017 (se 0.0004)
+  mc4 s0/s1 mean |p diff| 0.0312
+
+== gen-3 rows: n 687554
+  mc3 s0  logloss 0.3912 (game-se 0.0013)  brier 0.1292
+  mc3 s1  logloss 0.3912 (game-se 0.0013)  brier 0.1292
+  mc3 x2  logloss 0.3900 (game-se 0.0013)  brier 0.1288
+  mc4 s0  logloss 0.3900 (game-se 0.0014)  brier 0.1288
+  mc4 s1  logloss 0.3899 (game-se 0.0014)  brier 0.1288
+  mc4 x2  logloss 0.3882 (game-se 0.0014)  brier 0.1282
+  paired mc3x2 - mc4x2: +0.0018 (se 0.0003)
+  mc4 s0/s1 mean |p diff| 0.0306
+
+== gen-4 rows: n 700358
+  mc3 s0  logloss 0.4082 (game-se 0.0013)  brier 0.1356
+  mc3 s1  logloss 0.4088 (game-se 0.0013)  brier 0.1358
+  mc3 x2  logloss 0.4071 (game-se 0.0013)  brier 0.1352
+  mc4 s0  logloss 0.3962 (game-se 0.0014)  brier 0.1310
+  mc4 s1  logloss 0.3965 (game-se 0.0014)  brier 0.1311
+  mc4 x2  logloss 0.3945 (game-se 0.0013)  brier 0.1305
+  paired mc3x2 - mc4x2: +0.0126 (se 0.0003)
+  mc4 s0/s1 mean |p diff| 0.0318
+[heavy] 2026-10-01T18:38:08 end rc=0 after 346s
