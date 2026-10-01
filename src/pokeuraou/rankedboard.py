@@ -288,7 +288,9 @@ class BoardApp:
             "theirs": rows(1, list(result.theirs), [float(x) for x in result.model]),
             "seconds": float(result.seconds), "steps": int(result.steps), "stop": result.stop,
             "classes": int(result.classes), "exact": bool(result.exact),
-            "notes": plain_notes(notes_ja(loc, result.notes)),
+            "notes": plain_notes(notes_ja(loc, result.notes)) + (
+                ["メモリが少なくなったので、決めた時間より早く読みを止めました"]
+                if result.stop == "memory" else []),
             "turn": int(result.turn),
         }
 
