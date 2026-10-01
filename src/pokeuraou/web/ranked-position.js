@@ -223,7 +223,7 @@ function estimateHtml(sid) {
   lines.push(`配分 ${esc(sp || "すべて 0")}${v.spProvisional ? "（仮の配分）" : ""}`);
   const extra = [];
   if (r.members) extra.push(`大会の型 ${r.members[0]} 体 → 見えたものに合う ${r.members[1]} 体`);
-  (r.notes || []).forEach((n) => extra.push(n));
+  (r.notes || []).forEach((n) => extra.push(esc(n)));
   moved().filter((s) => s.id === sid).forEach((s) => extra.push(spreadLine(s)));
   const alts = (v.alternatives || []).length > 1
     ? `<div class="rk-alts" role="group" aria-label="残っている型の候補">${v.alternatives.map((a) =>
