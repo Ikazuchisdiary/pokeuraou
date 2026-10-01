@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from .humanplay import species_types, sprite_id
+from .rankedboard import BoardApp, Reader
 from .rankedentry import (
     WHOLE_MIN,
     FieldPrior,
@@ -47,6 +48,10 @@ FILES = {
     "/ranked.html": ("ranked.html", "text/html; charset=utf-8"),
     "/ranked.css": ("ranked.css", "text/css; charset=utf-8"),
     "/ranked.js": ("ranked.js", "text/javascript; charset=utf-8"),
+    "/position": ("ranked-position.html", "text/html; charset=utf-8"),
+    "/ranked-position.html": ("ranked-position.html", "text/html; charset=utf-8"),
+    "/ranked-position.css": ("ranked-position.css", "text/css; charset=utf-8"),
+    "/ranked-position.js": ("ranked-position.js", "text/javascript; charset=utf-8"),
     "/live.css": ("live.css", "text/css; charset=utf-8"),
 }
 
@@ -103,6 +108,8 @@ def _sp_label(one: OpponentSet) -> str:
         return f"プールの同じ種族の最頻（{one.sp_n} 件、性格は違う）"
     if one.sp_source == "neutral":
         return "基礎能力から作った中立の配分"
+    if one.sp_source == "observed":
+        return "見えた動き（先に動いた・受けたダメージ）から絞った配分"
     return "上書き"
 
 
@@ -110,7 +117,8 @@ class RankedApp:
     """One session of the screen."""
 
     def __init__(self, reg: Regulation, prior: FieldPrior, learned: LearnedIds | None, loc: Any,  # noqa: ANN401
-                 solver: Solver, *, seconds: float | None = None, model: str = "") -> None:
+                 solver: Solver, *, seconds: float | None = None, model: str = "",
+                 reader: Reader | None = None, read_seconds: float = 40.0) -> None:
         self.reg = reg
         self.prior = prior
         self.learned = learned
@@ -121,12 +129,14 @@ class RankedApp:
         self.mine: Roster | None = None
         self.opponent: list[OpponentSet | None] = []
         self.team_problems: list[str] = []
-        self.lock = threading.Lock()
+        self.lock = threading.RLock()
         self._job: dict[str, Any] = {"state": "idle"}
         self._jobs: queue.Queue[tuple[Roster, Roster, list[OpponentSet]]] = queue.Queue()
         self._names = self._species_names()
         self._worker = threading.Thread(target=self._work, daemon=True)
         self._worker.start()
+        #: The typed-in position (IKA-408), with its own read thread.
+        self.board = BoardApp(self, reader, read_seconds)
 
     # -- names
     def _species_names(self) -> dict[str, str]:
@@ -163,7 +173,16 @@ class RankedApp:
     def _name(self, kind: str, value: str | None) -> str:
         if self.loc is None:
             return str(value) if value else ""
-        return str(getattr(self.loc, kind)(value))
+        got = str(getattr(self.loc, kind)(value))
+        if kind == "item" and value:
+            # The names table has no Japanese for the Champions-only Mega Stones: name them by
+            # their Pokemon rather than show the English (or guess the official wording).
+            item = self.reg.items.get(to_id(value))
+            if item is not None and item.mega_stone and got == item.name:
+                base = next(iter(item.mega_stone))
+                tail = item.name.rsplit(" ", 1)[-1] if item.name.rsplit(" ", 1)[-1] in ("X", "Y", "Z") else ""
+                return f"{self.loc.species(to_id(base))}のメガストーン" + (f"（{tail}）" if tail else "")
+        return got
 
     def _pair(self, kind: str, value: str | None) -> dict[str, str] | None:
         if not value:
@@ -238,6 +257,7 @@ class RankedApp:
                           for s in STAT_IDS],
             "spLimit": reg.meta.sp_limit, "spMax": reg.meta.sp_per_stat_max,
             "seconds": self.seconds,
+            "readSeconds": self.board.seconds,
             "model": self.model,
             "learned": None if self.learned is None else list(self.learned.sources),
         }
@@ -431,10 +451,15 @@ class RankedServer:
                     self._json(200, app.state())
                 elif path == "/api/job":
                     self._json(200, app.job())
+                elif path == "/api/board":
+                    with app.lock:
+                        self._json(200, app.board.state())
+                elif path == "/api/board/job":
+                    self._json(200, app.board.job())
                 elif path in FILES:
                     name, kind = FILES[path]
                     body = (server.web / name).read_bytes()
-                    if name == "ranked.html":
+                    if name.endswith(".html"):
                         body = re.sub(
                             rb'<meta name="sprite-url" content="[^"]*">',
                             lambda _m: b'<meta name="sprite-url" content="'
@@ -463,6 +488,22 @@ class RankedServer:
                         self._json(200, app.choose(int(data["index"]), int(data["alternative"])))
                     elif path == "/api/solve":
                         self._json(200, app.start())
+                    elif path == "/api/board/start":
+                        self._json(200, app.board.start(
+                            [int(x) for x in data["brought"]], [str(x) for x in data["leads"]],
+                            [str(x) for x in data.get("seen", [])]))
+                    elif path == "/api/board/save":
+                        self._json(200, app.board.save(int(data["index"]), dict(data["form"])))
+                    elif path == "/api/board/choose":
+                        self._json(200, app.board.choose(str(data["species"]), int(data["alternative"])))
+                    elif path == "/api/board/next":
+                        self._json(200, app.board.next_turn())
+                    elif path == "/api/board/drop":
+                        self._json(200, app.board.drop_last())
+                    elif path == "/api/board/reset":
+                        self._json(200, app.board.reset())
+                    elif path == "/api/board/read":
+                        self._json(200, app.board.start_read(int(data["index"])))
                     else:
                         self.send_error(404)
                 except (RankedError, UnknownSpecies) as exc:

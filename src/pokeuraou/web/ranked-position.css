@@ -1,0 +1,163 @@
+/* pokeuraou 局面の検討（IKA-408）— 色・部品は live.css と ranked.css を使う。ここは局面の入力の分だけ */
+body.pos .rk-back { text-decoration: none; margin-left: 12px; align-self: center; }
+.ps-layout { padding-bottom: 8px; }
+.ps-h { margin: 14px 0 6px; font-size: 14px; }
+.ps-h small { display: block; margin-top: 2px; font-weight: 400; font-size: 12px; color: var(--dim); }
+.ps-pick { display: flex; flex-wrap: wrap; gap: 8px; }
+.ps-chip { display: inline-flex; align-items: center; gap: 8px; padding: 6px 12px 6px 8px; border: 1px solid var(--line); border-radius: 999px;
+  background: var(--surface-2); cursor: pointer; font-size: 13px; color: var(--ink); min-height: 40px; }
+.ps-chip.on { border-color: var(--you); background: color-mix(in srgb, var(--you) 14%, var(--surface)); font-weight: 700; }
+.ps-chip .art { width: 28px; height: 28px; border-radius: 50%; }
+.ps-no { font-size: 11px; padding: 1px 8px; border-radius: 999px; background: var(--btn, var(--you)); color: #fff; }
+.ps-no.alt { background: var(--dim); }
+
+/* the turns */
+.ps-turns { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+.ps-tab { padding: 6px 14px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface-2); cursor: pointer; font-size: 13px; color: var(--ink); min-height: 36px; }
+.ps-tab.on { border-color: var(--you); background: color-mix(in srgb, var(--you) 16%, var(--surface)); font-weight: 700; }
+.ps-diff { margin: 0 0 8px; }
+#boardBox { display: grid; gap: 16px; }
+#boardBox > .ps-turns, #boardBox > .ps-diff, #boardBox > .rk-msgs { margin: 0; }
+
+/* the four on the field, and the benches */
+.ps-field h2, #eventsTitle, #fieldTitle, #readTitle { margin-bottom: 8px; }
+#eventsTitle small { display: block; font-weight: 400; font-size: 12px; color: var(--dim); margin-top: 2px; }
+.ps-mons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 8px; }
+.ps-mons:empty { display: none; }
+.ps-mon { border: 1px solid var(--line); border-radius: 12px; background: var(--surface); padding: 10px; display: grid; gap: 8px; align-content: start; min-width: 0; }
+.ps-mon.opp { border-top: 3px solid var(--ai); }
+.ps-mon.mine { border-top: 3px solid var(--you); }
+.ps-mon.down { opacity: .6; }
+.ps-mon.empty { border-style: dashed; }
+.ps-head { display: flex; gap: 10px; align-items: center; min-width: 0; }
+.ps-head .art { width: 48px; height: 48px; border-radius: 10px; flex: none; }
+.ps-who { display: grid; gap: 2px; min-width: 0; flex: 1; }
+.ps-nm { font-weight: 700; font-size: 15px; }
+.ps-line { font-size: 12px; color: var(--dim); display: flex; gap: 4px; align-items: center; flex-wrap: wrap; }
+.ps-slot { font: inherit; font-weight: 700; font-size: 15px; color: var(--ink); background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 4px 6px; max-width: 100%; }
+.ps-row { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; }
+.ps-f { display: inline-flex; gap: 6px; align-items: center; font-size: 13px; color: var(--dim); padding: 2px 6px; border-radius: 8px; border: 1px solid transparent; }
+.ps-f > span { white-space: nowrap; }
+.ps-f input, .ps-f select, .ps-evrow input, .ps-evrow select, .ps-add, .ps-boost input, .ps-fgrid select, .ps-cond select {
+  font: inherit; font-size: 14px; color: var(--ink); background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; min-height: 36px; }
+.ps-f input[type="number"] { width: 4.8em; text-align: right; font-family: var(--font-num); }
+.ps-f em { font-style: normal; color: var(--dim); font-family: var(--font-num); font-size: 13px; }
+.ps-f.hp input { font-weight: 600; }
+.ps-hpbar { flex: 1 1 60px; height: 8px; border-radius: 4px; background: var(--track); overflow: hidden; min-width: 60px; }
+.ps-hpbar i { display: block; height: 100%; background: var(--good, #3fa129); }
+.ps-mon.opp .ps-hpbar i { background: var(--ai); }
+.ps-hint { font-size: 12px; color: var(--dim); min-height: 0; }
+.ps-hint:empty { display: none; }
+.ps-check { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink); padding: 4px 6px; border-radius: 8px; border: 1px solid transparent; min-height: 32px; }
+.ps-check input { width: 18px; height: 18px; }
+.ps-checks { gap: 4px 10px; }
+.ps-boosts { font-size: 13px; border-radius: 8px; padding: 0 6px; border: 1px solid transparent; }
+.ps-boosts summary { cursor: pointer; color: var(--dim); padding: 4px 0; }
+.ps-boosts summary b { color: var(--ink); font-weight: 500; }
+.ps-bgrid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; padding: 4px 0 6px; }
+.ps-boost { display: grid; gap: 2px; font-size: 11px; color: var(--dim); }
+.ps-boost input { width: 100%; text-align: center; padding: 4px; font-family: var(--font-num); }
+
+/* what changed since the last turn */
+.chg { border-color: var(--warn) !important; background: color-mix(in srgb, var(--warn) 16%, transparent); }
+
+/* what was seen of the opponent, and what the system made of it */
+.ps-seen { display: grid; gap: 6px; padding-top: 8px; border-top: 1px dashed var(--line); }
+.ps-seen h4 { margin: 0; font-size: 13px; }
+.ps-seen h4 small { display: block; font-weight: 400; font-size: 11px; color: var(--dim); }
+.ps-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 2px; border-radius: 8px; border: 1px solid transparent; }
+.ps-chips .lab, .ps-unseen .lab { font-size: 12px; color: var(--dim); }
+.ps-x { padding: 4px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--surface-2); font-size: 12px; cursor: pointer; color: var(--ink); min-height: 30px; }
+.ps-x:hover { border-color: var(--bad); }
+.ps-est { font-size: 12px; color: var(--dim); display: grid; gap: 2px; padding: 8px; border-radius: 8px; background: var(--surface-2); }
+.ps-est b { color: var(--ink); }
+.ps-est ul { margin: 2px 0 0; padding-left: 16px; color: var(--ink); }
+.ps-more { margin-top: 8px; }
+.ps-more > summary { cursor: pointer; font-size: 13px; color: var(--dim); padding: 4px 0; }
+.ps-unseen { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-top: 8px; }
+.ps-unseen:empty { display: none; }
+
+/* the field's state */
+.ps-fgrid { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; }
+.ps-sides { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 12px; }
+.ps-side h4 { margin: 0 0 6px; font-size: 13px; }
+.ps-conds { display: flex; flex-wrap: wrap; gap: 6px; }
+.ps-cond { display: inline-flex; gap: 4px; align-items: center; border-radius: 999px; border: 1px solid var(--line); padding: 2px; background: var(--surface-2); }
+.ps-cond button { padding: 4px 10px; border-radius: 999px; border: 0; background: transparent; font-size: 13px; cursor: pointer; color: var(--ink); min-height: 30px; }
+.ps-cond.on { border-color: var(--you); background: color-mix(in srgb, var(--you) 14%, var(--surface)); }
+.ps-cond.on button { font-weight: 700; }
+.ps-cond select { min-height: 30px; padding: 2px 6px; font-size: 12px; }
+
+/* events */
+.ps-ev h4 { margin: 14px 0 6px; font-size: 13px; }
+.ps-ev h4:first-child { margin-top: 0; }
+.ps-evrow { display: flex; flex-wrap: wrap; gap: 6px 8px; align-items: center; font-size: 13px; }
+.ps-evrow input { width: 9em; }
+.ps-evrow input[type="number"] { width: 7em; }
+.ps-evlist { margin: 6px 0 0; padding: 0; list-style: none; display: grid; gap: 4px; font-size: 13px; }
+.ps-evres ul { margin: 10px 0 0; padding-left: 16px; font-size: 13px; }
+.ps-evres small { display: block; color: var(--dim); }
+
+/* the result */
+.ps-act { display: grid; grid-template-columns: minmax(0, 1fr) 64px; gap: 4px 8px; align-items: center; padding: 5px 0; border-bottom: 1px solid var(--line); font-size: 13px; }
+.ps-act .p { text-align: right; font-family: var(--font-num); font-weight: 600; }
+.ps-act .pbar { grid-column: 1 / -1; height: 5px; border-radius: 3px; background: var(--track); overflow: hidden; }
+.ps-act .pbar i { display: block; height: 100%; background: var(--you); }
+body.pos .rk-bar .ghost { flex: none; }
+body.pos .rk-bar { flex-wrap: wrap; justify-content: flex-end; }
+body.pos .rk-bar .summary { flex: 1 1 200px; }
+
+@media (max-width: 700px) {
+  .ps-mons, .ps-sides { grid-template-columns: 1fr; }
+  .ps-bgrid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .ps-evrow input { width: 100%; }
+  body.pos .rk-bar { gap: 8px; }
+  body.pos .rk-bar .summary { flex-basis: 100%; }
+}
+#eventsTitle { display: block; }
+#eventsTitle small { margin-left: 0; }
+
+/* ---- design review 1 (IKA-408) */
+.ps-evrow input[type="checkbox"], .ps-f input[type="checkbox"] { width: 20px; height: 20px; min-height: 0; padding: 0; flex: none; }
+.ps-check { cursor: pointer; }
+.ps-check input { margin: 0; }
+.ps-fold > summary { cursor: pointer; font-family: var(--font-display, inherit); font-size: 15px; list-style-position: inside; }
+.ps-fold > summary small { margin-left: 8px; font-size: 12px; color: var(--dim); font-weight: 400; }
+.ps-fold[open] > summary { margin-bottom: 8px; }
+.ps-est .rk-alts { margin-top: 6px; }
+@media (max-width: 700px) {
+  .ps-check { min-height: 44px; padding: 8px 8px; }
+  .ps-check input { width: 24px; height: 24px; }
+  .ps-evrow input[type="checkbox"], .ps-f input[type="checkbox"] { width: 24px; height: 24px; }
+  .ps-x, .ps-evrow .ghost, .ps-evrow select, .ps-evrow input, .ps-f select, .ps-f input, .ps-add, .ps-cond button, .ps-cond select,
+  .ps-slot, .ps-tab, .ps-chip, .ps-fgrid select { min-height: 44px; }
+  .ps-evrow input[type="checkbox"], .ps-f input[type="checkbox"] { min-height: 0; }
+  .ps-boost input { min-height: 44px; }
+  .ps-boosts summary { min-height: 44px; display: flex; align-items: center; }
+}
+@media (max-width: 700px) {
+  body.pos .ghost.small, body.pos .rk-bar .ghost, body.pos .rk-bar .primary { min-height: 44px; }
+  .ps-more > summary, .ps-fold > summary { min-height: 44px; display: flex; align-items: center; }
+}
+
+/* ---- design review 2 (IKA-408) */
+.ps-fold > summary { font-family: inherit; font-size: 13px; font-weight: 700; color: var(--dim); letter-spacing: 0.06em; }
+.ps-fold > summary small { letter-spacing: 0; }
+.ps-boosts summary b { margin-left: .6em; }
+.ps-mon, .ps-est, .ps-seen, .ps-row, .ps-chips, .rk-alts { min-width: 0; max-width: 100%; }
+.ps-mon select, .ps-mon input:not([type="checkbox"]), .rk-alt { max-width: 100%; }
+.ps-f { max-width: 100%; }
+.ps-f select { min-width: 0; max-width: 100%; text-overflow: ellipsis; }
+@media (max-width: 700px) {
+  .ps-seen .ps-f, .ps-fgrid .ps-f { display: flex; width: 100%; }
+  .ps-seen .ps-f select, .ps-fgrid .ps-f select { flex: 1 1 0; min-width: 0; width: 100%; }
+}
+
+/* ---- design review 3 (IKA-408): the fold marker stays; the title does not split */
+.ps-boosts summary { display: list-item; }
+@media (max-width: 700px) {
+  .ps-more > summary, .ps-fold > summary, .ps-boosts summary { display: list-item; min-height: 44px; padding: 10px 0;
+    box-sizing: border-box; }
+  .ps-fold > summary small { display: block; margin: 2px 0 0; }
+  .ps-boosts summary { padding: 10px 0; }
+}
