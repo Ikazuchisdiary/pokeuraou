@@ -370,6 +370,52 @@ class LazyPoolReader:
         self.release()
 
 
+class MemoReader:
+    """``reader`` with the cells it read kept in ``memo`` (IKA-416): two readings of one pair
+    (two conditions of a match) read a cell once. A cell is named by what its read depends on
+    -- ``tag`` (the leaf and the menus, the caller's), the reading's stage, width and value,
+    and the two ordered fours -- so a hit is the value the reader would give again (a cell's
+    read is the node-time ladder of one position: the same every time). The answer keeps the
+    order of ``cells``, as the reader's does."""
+
+    def __init__(self, reader: Any, memo: dict, tag: Any = None) -> None:  # noqa: ANN401
+        self.reader, self.memo, self.tag = reader, memo, tag
+        self.workers = getattr(reader, "workers", 1)
+        #: Cells answered from the memo, and cells read (a positive control that it ran).
+        self.hits = 0
+        self.cells = 0
+
+    def read(
+        self, reading: Reading, our_six: Sequence[SampledSet], their_six: Sequence[SampledSet],
+        selections: Sequence[tuple[int, ...]], cells: Sequence[tuple[int, int]],
+        deadline: float | None = None,
+    ) -> dict[tuple[int, int], float]:
+        head = (self.tag, reading.stage, reading.width, reading.value)
+
+        def name(cell: tuple[int, int]) -> tuple:
+            return (head, tuple(selections[cell[0]]), tuple(selections[cell[1]]))
+
+        fresh = [c for c in cells if name(c) not in self.memo]
+        got = self.reader.read(reading, our_six, their_six, selections, fresh, deadline) if fresh else {}
+        for c, v in got.items():
+            self.memo[name(c)] = v
+        self.cells += len(got)
+        out: dict[tuple[int, int], float] = {}
+        for c in cells:
+            if name(c) in self.memo:
+                out[c] = self.memo[name(c)]
+        self.hits += len(out) - len(got)
+        return out
+
+    def release(self) -> None:
+        if hasattr(self.reader, "release"):
+            self.reader.release()
+
+    def close(self) -> None:
+        if hasattr(self.reader, "close"):
+            self.reader.close()
+
+
 # --------------------------------------------------------------------------- the prices
 
 
@@ -553,6 +599,6 @@ def solve_selection_deep(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the stages,
 
 
 __all__ = [
-    "DeepReport", "LazyPoolReader", "PoolReader", "Reading", "SerialReader", "fit_shift", "parse_reading",
-    "prices", "read_cell", "solve_selection_deep",
+    "DeepReport", "LazyPoolReader", "MemoReader", "PoolReader", "Reading", "SerialReader", "fit_shift",
+    "parse_reading", "prices", "read_cell", "solve_selection_deep",
 ]
