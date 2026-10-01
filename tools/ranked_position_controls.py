@@ -70,7 +70,8 @@ from pokeuraou.rankedentry import FieldPrior, OpponentSet  # noqa: E402
 from pokeuraou.regulation import to_id  # noqa: E402
 
 FORMAT_ID = "gen9championsvgc2026regmc"
-VARIANTS = ("null", "a_low", "a_mid", "a_high", "b", "c", "x", "n_pp", "n_mem", "n_all", "n_unseen")
+VARIANTS = ("null", "a_low", "a_mid", "a_high", "b", "c", "x", "n_pp", "n_mem", "n_all", "n_unseen", "x_true",
+            "n_swap", "n_best")
 
 
 # ----------------------------------------------------------------------------- a record as forms
@@ -220,7 +221,7 @@ MEMORY_FIELDS = ("last_move", "locked_move", "move_last_turn_failed", "times_att
 
 def with_record_state(typed, record, groups: tuple[str, ...]):  # noqa: ANN001, ANN201
     """The typed position with some of what the record's position holds put back: ``pp`` (the move
-    slots' PP), ``mem`` (what a Pokemon remembers of the turns before), ``vol`` (the volatiles and the
+    slots: PP, order), ``mem`` (what a Pokemon remembers of the turns before), ``vol`` (the volatiles and the
     side conditions the form has no field for). Pokemon are matched by identity; an unseen member
     of the opponent's four has no match and is left."""
     out = typed.copy()
@@ -231,11 +232,9 @@ def with_record_state(typed, record, groups: tuple[str, ...]):  # noqa: ANN001, 
             if ref is None:
                 continue
             if "pp" in groups:
-                slots = {m.id: m for m in ref.moves}
-                for slot in mon.moves:
-                    if slot.id in slots:
-                        slot.pp, slot.maxpp = slots[slot.id].pp, slots[slot.id].maxpp
-                        slot.disabled, slot.used = slots[slot.id].disabled, slots[slot.id].used
+                # the move slots as the battle had them: PP spent, used, and the order they stand in
+                if sorted(m.id for m in ref.moves) == sorted(m.id for m in mon.moves):
+                    mon.moves = [m.copy() for m in ref.moves]
             if "mem" in groups:
                 for name in MEMORY_FIELDS:
                     setattr(mon, name, getattr(ref, name))
@@ -260,6 +259,19 @@ def with_record_state(typed, record, groups: tuple[str, ...]):  # noqa: ANN001, 
                     new.slot = mon.slot
                     side_t.pokemon[mon.slot] = new
             side_t.mega_capable_slots = list(side_r.mega_capable_slots)
+    return out
+
+
+def with_unseen(reg, typed, chosen: list, seen_ids):  # noqa: ANN001, ANN201
+    """The typed position with the opponent's unseen members replaced by ``chosen`` (sets of its sheet)."""
+    from pokeuraou.selfplay import _make_pokemon
+
+    out = typed.copy()
+    side = out.sides[1]
+    placed = [m for m in side.pokemon if m.active_index is None and identity(m) not in seen_ids]
+    for mon, sset in zip(placed, chosen, strict=False):
+        side.pokemon[mon.slot] = _make_pokemon(reg, mon.slot, sset, None)
+    side.mega_capable_slots = [m.slot for m in side.pokemon if reg.mega_target(m.species, m.item) is not None]
     return out
 
 
@@ -380,11 +392,12 @@ def run(args) -> None:  # noqa: ANN001
             est_base = {o.set.species: o for o in est}
             true_base = {s.species: override_of(s) for s in foe.sets}
             wrong_base = dict(est_base)
+            wrong_true = dict(true_base)
             actives = [a for a in game.points[k].pos().sides[1].active if a is not None]
             first = game.points[k].pos().sides[1].pokemon[actives[0]]
             wrong_sid = next(s.species for s in foe.sets if base_id(reg, s.species) == identity(first))
             if len(prior.belief(wrong_sid, six).candidates()) > 1:
-                wrong_base[wrong_sid] = rarest(prior, wrong_sid, six)
+                wrong_base[wrong_sid] = wrong_true[wrong_sid] = rarest(prior, wrong_sid, six)
                 row["xDiffers"] = True
             else:
                 row["xDiffers"] = False
@@ -397,7 +410,7 @@ def run(args) -> None:  # noqa: ANN001
                 "null": (observed, true_base, "exact"), "a_low": (observed, true_base, "low"),
                 "a_mid": (observed, true_base, "mid"), "a_high": (observed, true_base, "high"),
                 "b": (plain, est_base, "mid"), "c": (observed, est_base, "mid"),
-                "x": (plain, wrong_base, "mid"),
+                "x": (plain, wrong_base, "mid"), "x_true": (observed, wrong_true, "mid"),
             }
             reads = {}
 
@@ -420,6 +433,24 @@ def run(args) -> None:  # noqa: ANN001
                                           ("n_unseen", ("pp", "mem", "vol", "unseen"))):
                         filled = with_record_state(analysis.Position.from_json(p.position), pos0, groups)
                         reads[label] = read(g, replace(p, position=filled.to_json()))
+                if name == "null":
+                    # an arbitrary other pair of the unseen candidates, and the analysis' own heaviest
+                    unseen = [x for x in foe.sets if base_id(reg, x.species) not in p.seen[1]]
+                    held = {identity(m) for m in analysis.Position.from_json(p.position).sides[1].pokemon}
+                    others = [x for x in unseen if base_id(reg, x.species) not in held] or unseen
+                    typed_pos = analysis.Position.from_json(p.position)
+                    n_unseen_slots = sum(1 for m in typed_pos.sides[1].pokemon
+                                         if m.active_index is None and identity(m) not in p.seen[1])
+                    if n_unseen_slots:
+                        swapped = with_unseen(reg, typed_pos, others[:n_unseen_slots], p.seen[1])
+                        reads["n_swap"] = read(g, replace(p, position=swapped.to_json()))
+                        spreads = analyzer.spreads(g, p, typed_pos, analyzer.settings, [])
+                        heaviest = max(spreads[1], key=lambda c: c.weight)
+                        wanted = [x for x in foe.sets if x.species in set(heaviest.species)]
+                        best_pos = with_unseen(reg, typed_pos, wanted, p.seen[1])
+                        reads["n_best"] = read(g, replace(p, position=best_pos.to_json()))
+                    else:
+                        reads["n_swap"] = reads["n_best"] = reads["null"]
                 sets_by_variant[name] = {
                     s: (v.item, tuple(sorted(v.moves)), v.nature) for s, v in derived.sets.items()}
             if args.repeat and n < args.repeat:
@@ -518,7 +549,8 @@ def summarize(files: list[Path]) -> None:
     for r in rows:
         if "skipped" in r:
             print("  skipped:", r["n"], r["skipped"][:100])
-    names = {"n_unseen": "n_unseen (n_all + the unseen members as they were)",
+    names = {"x_true": "x_true (true sets, one active's set wrong)",
+             "n_unseen": "n_unseen (n_all + the unseen members as they were)",
              "n_pp": "n_pp  (null + PP from the record)", "n_mem": "n_mem (n_pp + what it remembers)",
              "n_all": "n_all (n_mem + volatiles, side states)",
              "null": "null  (form, true sets, exact HP)", "a_low": "a_low (true sets, HP band bottom)",
@@ -533,16 +565,17 @@ def summarize(files: list[Path]) -> None:
               f"{sum(1 for r in sub if r.get('repeatSame'))}/{sum(1 for r in sub if 'repeatSame' in r)})")
         print(f"{'variant':<38}{'TV':>8}{'SE':>8}{'|dV|':>8}{'SE':>8}{'best same':>11}")
         for v in VARIANTS:
-            sel = [r for r in sub if (v != "x" or r["xDiffers"])]
+            sel = [r for r in sub if (v not in ("x", "x_true") or r["xDiffers"])]
             t, ts = mean_se([r[v]["tv"] for r in sel])
             d, ds = mean_se([abs(r[v]["dv"]) for r in sel])
             same = sum(1 for r in sel if r[v]["same"])
             print(f"{names[v]:<38}{t:>8.4f}{ts:>8.4f}{d:>8.4f}{ds:>8.4f}{same:>7}/{len(sel):<3}")
         # paired differences
         for a, b, label in (("c", "b", "c - b (what seeing buys)"), ("x", "b", "x - b (a wrong set costs)"),
+                            ("x_true", "a_mid", "x_true - a_mid (a wrong set among true ones)"),
                             ("a_low", "a_high", "a_low - a_high (the HP band's width)"),
                             ("a_mid", "null", "a_mid - null (a per cent vs exact)")):
-            sel = [r for r in sub if (a != "x" or r["xDiffers"])]
+            sel = [r for r in sub if (a not in ("x", "x_true") or r["xDiffers"])]
             dt, dts = mean_se([r[a]["tv"] - r[b]["tv"] for r in sel])
             dv, dvs = mean_se([abs(r[a]["dv"]) - abs(r[b]["dv"]) for r in sel])
             print(f"  {label:<42} dTV {dt:+.4f} ({dts:.4f})   d|dV| {dv:+.4f} ({dvs:.4f})   n {len(sel)}")
