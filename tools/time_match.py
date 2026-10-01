@@ -154,6 +154,22 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
                     help="play more pairs in a run's --out: the same settings (bar the pairs, the "
                     "processes and the checkout's head), the SPRT going on from the pairs in, in "
                     "order. Pairs already in are not played again")
+    ap.add_argument("--ladder-pool", action="store_true",
+                    help="a showcase game's all-core read (IKA-364's form, as play_human "
+                    "--ladder): a ladder condition's cells are read by threads-1 worker "
+                    "processes (humanplay.use_ladder_pool) and a selection reading by one per "
+                    "logical core (selection_deep.LazyPoolReader), in place of the deepening's "
+                    "workers. Needs a server. Default: off")
+    ap.add_argument("--ladder-servers", type=int, default=1,
+                    help="with --served and --ladder-pool: this many servers; the ladder's "
+                    "workers ask them in turn (IKA-390; this process keeps asking the first). "
+                    "Default: 1")
+    ap.add_argument("--ladder-inference", default=None, metavar="HOST:PORT[,HOST:PORT...]",
+                    help="the servers the ladder's workers ask (a running set; or --served "
+                    "--ladder-servers)")
+    ap.add_argument("--single-game", action="store_true",
+                    help="play only game 0 of each pair (a showcase game; the selection is "
+                    "solved once)")
     # A worker's own.
     ap.add_argument("--worker", type=int, default=None, help=argparse.SUPPRESS)
     ap.add_argument("--address", default=None, help=argparse.SUPPRESS)
@@ -278,6 +294,8 @@ def settings(args: argparse.Namespace, tested, other, values, q_path) -> dict:  
            if args.adjudicate is not None else {}),
         **({"countFill": True} if args.count_fill else {}),
         **({"transcript": True} if args.transcript else {}),
+        **({"ladderPool": True, "ladderServers": args.ladder_servers} if args.ladder_pool else {}),
+        **({"singleGame": True} if args.single_game else {}),
     }
 
 
@@ -321,8 +339,26 @@ def worker(args: argparse.Namespace) -> None:
             qrank.install(humanplay.served_q(args.q_inference, q_path, encoder))
         device = f"server {args.inference}" + (" (merged)" if merge else "")
         q = qrank.installed()
-        humanplay.use_threads(threads, reg, (args.inference, "value", merge),
-                              factory=humanplay.served_process_leaf)
+        if args.ladder_pool:
+            # play_human --ladder's form: the port's cells and the LPs here, the ladder's
+            # cells on threads-1 worker processes, each asking its own server (IKA-390).
+            humanplay.use_threads(threads)
+            spec = humanplay.ladder_spec(
+                leaf=evaluate, address=args.ladder_inference or args.inference, merge=merge,
+                values=values, device=None, graphs=False, cuda_memory_gb=args.cuda_memory_gb,
+                q_path=q_path)
+            pooled = humanplay.use_ladder_pool(threads, reg, spec)
+            if tested.selection is not None or other.selection is not None:
+                from pokeuraou import selection_deep
+
+                readers = os.cpu_count() or 2
+                selection_deep.use_reader(selection_deep.LazyPoolReader(
+                    reg, readers, spec, rank_fill=Q_FILL))
+            print(f"ladder pool: {pooled} worker process(es), servers "
+                  f"{args.ladder_inference or args.inference}", file=sys.stderr, flush=True)
+        else:
+            humanplay.use_threads(threads, reg, (args.inference, "value", merge),
+                                  factory=humanplay.served_process_leaf)
     else:
         humanplay.cap_cuda(args.cuda_memory_gb, args.device)
         evaluate, encoder, device = humanplay.load_leaf(
@@ -384,7 +420,8 @@ def worker(args: argparse.Namespace) -> None:
                 break
             _k, a, b = draw_pair(np.random.default_rng([args.seed, pair]), pool.pairs)
             teams = (pool.teams[a], pool.teams[b])
-            lines = timematch.play_pair(match, pair, teams)
+            lines = timematch.play_pair(match, pair, teams,
+                                        games=(0,) if args.single_game else (0, 1))
             accounts = [line.pop("transcript") for line in lines] if args.transcript else []
             alive = deepen.workers_alive(reg)
             peak = watch.peak
@@ -629,6 +666,7 @@ def driver(args: argparse.Namespace, argv: list[str]) -> int:
     inference = args.inference
     other_inference = args.other_inference
     q_inference = args.q_inference
+    ladder_inference = args.ladder_inference
     other_values = other_files(args)
     if other_values is not None and (tested.threads != 1 or other.threads != 1):
         raise SystemExit("--other-value: the deepening workers hold one leaf, so threads=1 in both")
@@ -659,6 +697,16 @@ def driver(args: argparse.Namespace, argv: list[str]) -> int:
             extra_servers = [other_server, q_server]
             print(f"  other leaf's server {other_inference}, Q's server {q_inference}",
                   file=sys.stderr, flush=True)
+        if args.ladder_pool and args.ladder_servers > 1 and other_values is None:
+            addresses = [inference]
+            for k in range(1, args.ladder_servers):
+                extra, address = start_server(
+                    {"value": values}, q_arms={"q": q_path}, regulation=regulation,
+                    log=out / "logs" / f"inference-ladder{k}.log", env=env, device=device)
+                extra_servers.append(extra)
+                addresses.append(address)
+            ladder_inference = ",".join(addresses)
+            print(f"  ladder servers {ladder_inference}", file=sys.stderr, flush=True)
         print(f"  inference server {inference} (the processes hold no model), merged road "
               f"{'on' if merging(args) else 'off'}", file=sys.stderr, flush=True)
 
@@ -670,7 +718,9 @@ def driver(args: argparse.Namespace, argv: list[str]) -> int:
                 *(["--inference", inference] if inference and not args.inference else []),
                 *(["--other-inference", other_inference]
                   if other_inference and not args.other_inference else []),
-                *(["--q-inference", q_inference] if q_inference and not args.q_inference else [])]
+                *(["--q-inference", q_inference] if q_inference and not args.q_inference else []),
+                *(["--ladder-inference", ladder_inference]
+                  if ladder_inference and not args.ladder_inference else [])]
 
     outcome: dict = {}
     try:

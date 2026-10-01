@@ -117,6 +117,9 @@ class Condition:
     #: draws its four, and holds its belief about the other's, from the solve of its own
     #: condition; the two sides of a pair solve once each.
     selection: str | None = None
+    #: The wall-clock seconds the selection reading runs (`humanplay.PLAY_SELECTION_SECONDS`
+    #: is a person's game's 90); None: the stages the reading names.
+    selection_seconds: float | None = None
 
     @property
     def price_cores(self) -> int:
@@ -152,6 +155,7 @@ class Condition:
             + (f", ladder {self.hidden_ladder} behind a hidden bench"
                if self.hidden_ladder is not None else "")
             + (f", selection read {self.selection}" if self.selection is not None else "")
+            + (f" for {self.selection_seconds:g} s" if self.selection_seconds is not None else "")
             + (f", child Q {self.child_q}" if self.child_q is not None else "")
         )
 
@@ -166,7 +170,7 @@ class Condition:
 CONDITION_KEYS = ("seconds", "threads", "cores", "clock", "oracle", "levels", "width_only",
                   "width", "child_q", "knockouts", "sub_limit", "sub_branches", "restricted",
                   "depth", "refine", "passes", "depth2_auto", "root_all", "ladder",
-                  "hidden_ladder", "selection")
+                  "hidden_ladder", "selection", "selection_seconds")
 
 
 def _oracle(spec: str) -> int | None:
@@ -236,6 +240,8 @@ def parse_condition(spec: str) -> Condition:
 
             parse_ladder(value)  # refuses a stage it cannot read, before a game starts
             got[key] = value
+        elif key == "selection_seconds":
+            got[key] = float(value)
         elif key == "selection":
             from .selection_deep import parse_reading
 
@@ -538,16 +544,18 @@ class Match:
             ladder=condition.ladder, hidden_ladder=condition.hidden_ladder,
             selection_reading=condition.selection,
             # A board reads the stages a reading names, on the count clock (no seconds).
-            selection_seconds=None, max_levels=condition.max_levels,
+            selection_seconds=condition.selection_seconds, max_levels=condition.max_levels,
             child_q=condition.child_q, oracle=condition.oracle, halt=self.halt,
             # Off, as a person's game plays by default (the module's docstring).
             ponder=False, ponder_seconds=humanplay.PLAY_PONDER_SECONDS,
         )
 
 
-def play_pair(match: Match, pair: int, teams: tuple[Any, Any]) -> list[dict[str, Any]]:  # noqa: ANN401
+def play_pair(match: Match, pair: int, teams: tuple[Any, Any],  # noqa: ANN401
+              games: tuple[int, ...] = (0, 1)) -> list[dict[str, Any]]:
     """The two games of ``pair`` on ``teams`` (side 0's, side 1's): the tested condition on
-    side 0, then on side 1. Returns their lines (`game_line`)."""
+    side 0, then on side 1. Returns their lines (`game_line`). ``games`` names the ones to
+    play (``(0,)``: one showcase game; the selection is solved once either way)."""
     reg = match.reg
     started = time.perf_counter()
     # The selection of each condition (IKA-392): one solve per reading, however many sides
@@ -563,6 +571,7 @@ def play_pair(match: Match, pair: int, teams: tuple[Any, Any]) -> list[dict[str,
             entries[key] = (
                 humanplay.solve_entry(reg, teams, evaluate, leaf_name,
                                       reading=condition.selection,
+                                      seconds=condition.selection_seconds,
                                       reader=None if condition.selection is None else (
                                           selection_deep.READER or selection_deep.SerialReader(
                                               reg, evaluate, rank_fill=match.rank_fill,
@@ -570,6 +579,8 @@ def play_pair(match: Match, pair: int, teams: tuple[Any, Any]) -> list[dict[str,
                                       report=reports[key])
                 if evaluate is not None else None
             )
+    if selection_deep.READER is not None and hasattr(selection_deep.READER, "release"):
+        selection_deep.READER.release()
     selection_seconds = time.perf_counter() - started
     split = match.solve_key(match.tested) != match.solve_key(match.other)
     selection_info = {
@@ -585,7 +596,7 @@ def play_pair(match: Match, pair: int, teams: tuple[Any, Any]) -> list[dict[str,
     }
     agent_side = pair % 2
     lines = []
-    for game in (0, 1):
+    for game in games:
         tested_side = game
         conditions = (
             (match.tested, match.other) if tested_side == 0 else (match.other, match.tested)

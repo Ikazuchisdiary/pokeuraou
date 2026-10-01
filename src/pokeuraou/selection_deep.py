@@ -269,9 +269,12 @@ class PoolReader:
         self.cells = 0
         self.seconds = 0.0
         self.processes = []
-        for _ in range(count):
+        from .ladder import _worker_args  # a comma list of servers: worker k asks the kth (IKA-390)
+
+        for k in range(count):
             process = context.Process(
-                target=_worker, args=(reg.meta.format_id, spec, rank_fill, rank_by_leaf,
+                target=_worker, args=(reg.meta.format_id, _worker_args(tuple(spec), k),
+                                      rank_fill, rank_by_leaf,
                                       self.tasks, self.results, self.stop), daemon=True)
             process.start()
             self.processes.append(process)
