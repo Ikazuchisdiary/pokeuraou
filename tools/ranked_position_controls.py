@@ -70,7 +70,7 @@ from pokeuraou.rankedentry import FieldPrior, OpponentSet  # noqa: E402
 from pokeuraou.regulation import to_id  # noqa: E402
 
 FORMAT_ID = "gen9championsvgc2026regmc"
-VARIANTS = ("null", "a_low", "a_mid", "a_high", "b", "c", "x", "n_pp", "n_mem", "n_all")
+VARIANTS = ("null", "a_low", "a_mid", "a_high", "b", "c", "x", "n_pp", "n_mem", "n_all", "n_unseen")
 
 
 # ----------------------------------------------------------------------------- a record as forms
@@ -121,8 +121,18 @@ def carried(mon, *, locks: bool = True) -> dict:  # noqa: ANN001
     return out
 
 
+def now_ability(mon, came_with: str | None) -> str | None:  # noqa: ANN001
+    """The ability in effect when it is not the one the Pokemon's set has (Trace copied one). The
+    Mega forme's own ability is the Mega Evolution's, not this."""
+    if mon.is_mega or not came_with or to_id(mon.ability) == to_id(came_with):
+        return None
+    return mon.ability
+
+
 def form_of(reg, game, d: int, mine_idx, foe_id, used, *, observed: bool) -> dict:  # noqa: ANN001
     """The form a person would type for decision ``d``'s position."""
+    mine_roster, foe_roster = game.teams
+    foe_ability = {s.species: s.ability for s in foe_roster.sets}
     point = game.points[d]
     pos = point.pos()
     floor = uses_floor_display(reg)
@@ -135,7 +145,7 @@ def form_of(reg, game, d: int, mine_idx, foe_id, used, *, observed: bool) -> dic
             "hp": mon.hp, "status": None if mon.status == "fnt" else mon.status,
             "boosts": {k: v for k, v in mon.boosts.items() if v},
             "mega": bool(mon.is_mega), "itemGone": mon.item is None and mon.base_item is not None,
-            **carried(mon)}
+            **carried(mon), "abilityNow": now_ability(mon, mine_roster.sets[idx].ability)}
     for mon in side1.pokemon:
         if mon.slot not in shown1 and mon.active_index is None:
             continue
@@ -148,6 +158,7 @@ def form_of(reg, game, d: int, mine_idx, foe_id, used, *, observed: bool) -> dic
             "boosts": {k: v for k, v in mon.boosts.items() if v}, "mega": bool(mon.is_mega),
             "fainted": bool(mon.fainted), "moves": list(used.get(sid, [])) if observed else [],
             **carried(mon, locks=observed),
+            "abilityNow": now_ability(mon, foe_ability[sid]) if observed else None,
             "item": mon.base_item if (gone and observed) else None, "itemGone": gone and observed,
             "ability": None}
         theirs[sid] = entry
@@ -237,6 +248,18 @@ def with_record_state(typed, record, groups: tuple[str, ...]):  # noqa: ANN001, 
             side_t.mega_used = side_r.mega_used
     if "vol" in groups:
         out.field = record.field.copy()
+    if "unseen" in groups:
+        # the opponent's members nobody has seen: the typed position holds some of its six, the
+        # record's the ones it really brought; their identity is the one thing a person cannot type
+        for side_t, side_r in zip(out.sides, record.sides, strict=True):
+            have = {identity(m) for m in side_t.pokemon}
+            spare = [m for m in side_r.pokemon if identity(m) not in have]
+            for mon in side_t.pokemon:
+                if identity(mon) not in {identity(m) for m in side_r.pokemon} and spare:
+                    new = spare.pop(0).copy()
+                    new.slot = mon.slot
+                    side_t.pokemon[mon.slot] = new
+            side_t.mega_capable_slots = list(side_r.mega_capable_slots)
     return out
 
 
@@ -338,7 +361,7 @@ def run(args) -> None:  # noqa: ANN001
     out = args.out.open("ab")
     done = 0
     for n, (path, gindex, k, kind) in enumerate(chosen):
-        if n % of != shard:
+        if n % of != shard or (args.only and str(n) not in args.only.split(",")):
             continue
         if path not in games_cache:
             games_cache[path] = {g.index: g for g in analysis.load_games(path, pools=pools, limit=24)}
@@ -393,7 +416,8 @@ def run(args) -> None:  # noqa: ANN001
                 if name == "null":
                     # the same form with what it cannot say put back from the record, a group at a time
                     for label, groups in (("n_pp", ("pp",)), ("n_mem", ("pp", "mem")),
-                                          ("n_all", ("pp", "mem", "vol"))):
+                                          ("n_all", ("pp", "mem", "vol")),
+                                          ("n_unseen", ("pp", "mem", "vol", "unseen"))):
                         filled = with_record_state(analysis.Position.from_json(p.position), pos0, groups)
                         reads[label] = read(g, replace(p, position=filled.to_json()))
                 sets_by_variant[name] = {
@@ -494,7 +518,8 @@ def summarize(files: list[Path]) -> None:
     for r in rows:
         if "skipped" in r:
             print("  skipped:", r["n"], r["skipped"][:100])
-    names = {"n_pp": "n_pp  (null + PP from the record)", "n_mem": "n_mem (n_pp + what it remembers)",
+    names = {"n_unseen": "n_unseen (n_all + the unseen members as they were)",
+             "n_pp": "n_pp  (null + PP from the record)", "n_mem": "n_mem (n_pp + what it remembers)",
              "n_all": "n_all (n_mem + volatiles, side states)",
              "null": "null  (form, true sets, exact HP)", "a_low": "a_low (true sets, HP band bottom)",
              "a_mid": "a_mid (true sets, HP band middle)", "a_high": "a_high (true sets, HP band top)",
@@ -547,6 +572,7 @@ def main() -> None:
     r.add_argument("--seed", type=int, default=0)
     r.add_argument("--max-steps", type=int, default=0)
     r.add_argument("--shard", default="0/1")
+    r.add_argument("--only", default="", help="positions by number, comma separated (default: all)")
     r.add_argument("--repeat", type=int, default=0,
                    help="re-read the first N positions' b to check determinism")
     r.add_argument("--out", type=Path, required=True)

@@ -155,12 +155,12 @@ def max_hp(reg: Regulation, sset: SampledSet) -> int:
 
 def _blank_mine(reg: Regulation, sset: SampledSet) -> dict[str, Any]:
     return {"hp": max_hp(reg, sset), "status": None, "boosts": {}, "mega": False, "itemGone": False,
-            "protect": 0, "locked": None}
+            "protect": 0, "locked": None, "abilityNow": None}
 
 
 def _blank_theirs() -> dict[str, Any]:
     return {"pct": 100, "colour": None, "status": None, "boosts": {}, "mega": False, "fainted": False,
-            "protect": 0, "locked": None,
+            "protect": 0, "locked": None, "abilityNow": None,
             "moves": [], "item": None, "itemGone": False, "ability": None}
 
 
@@ -247,6 +247,7 @@ def normalize(reg: Regulation, board: Board, form: dict[str, Any]) -> dict[str, 
             "itemGone": bool(raw.get("itemGone")),
             "protect": integer(raw.get("protect", 0) or 0, 0, 2, f"{name} のまもるの連続回数"),
             "locked": pick(raw.get("locked"), reg.moves, "技"),
+            "abilityNow": pick(raw.get("abilityNow"), reg.abilities, "特性"),
         }
         if mine[str(i)]["locked"] and mine[str(i)]["locked"] not in board.mine.sets[i].moves:
             raise RankedError(f"{name} は {board.name('move', mine[str(i)]['locked'])} を持っていません")
@@ -294,6 +295,7 @@ def normalize(reg: Regulation, board: Board, form: dict[str, Any]) -> dict[str, 
             "fainted": bool(raw.get("fainted")),
             "protect": integer(raw.get("protect", 0) or 0, 0, 2, f"{name} のまもるの連続回数"),
             "locked": pick(raw.get("locked"), reg.moves, "技"),
+            "abilityNow": pick(raw.get("abilityNow"), reg.abilities, "特性"),
             "moves": moves,
             "item": item,
             "itemGone": item_gone,
@@ -491,6 +493,8 @@ def _fill(  # noqa: PLR0913
     mon.boosts = {k: int(v) for k, v in state["boosts"].items() if v}
     if state.get("itemGone"):
         mon.item = None
+    if state.get("abilityNow"):
+        mon.ability = state["abilityNow"]       # Trace and its like changed it
     # State a battle carries that the position would otherwise lack (Protect's chain, a Choice lock,
     # Unburden): the three the recorded games meet most (`tools/ranked_position_controls.py`).
     if state.get("protect"):
@@ -919,6 +923,12 @@ def opponent_roster_of(reg: Regulation, board: Board, derived: Derived) -> Roste
     )
 
 
+def _changed_ability(before: Any, after: Any) -> str | None:  # noqa: ANN401
+    """The ability a Pokemon has after the leads' switch-ins, when it is not the one it came with
+    (Trace copied one)."""
+    return after.ability if to_id(after.ability) != to_id(before.ability) else None
+
+
 def initial_form(reg: Regulation, board: Board, sets: dict[str, SampledSet]) -> dict[str, Any]:
     """Turn 1 as the game shows it when the first turn starts: the leads' switch-in abilities
     have run (weather set, Intimidate taken), so those are put in for the person to correct."""
@@ -932,8 +942,12 @@ def initial_form(reg: Regulation, board: Board, sets: dict[str, SampledSet]) -> 
     form["field"]["terrain"] = led.field.terrain
     form["field"]["terrainTurns"] = int(led.field.terrain_duration or 5)
     for idx, slot in built.mine_slots.items():
-        form["mine"][str(idx)]["boosts"] = {k: v for k, v in led.sides[0].pokemon[slot].boosts.items() if v}
+        mon = led.sides[0].pokemon[slot]
+        form["mine"][str(idx)]["boosts"] = {k: v for k, v in mon.boosts.items() if v}
+        form["mine"][str(idx)]["abilityNow"] = _changed_ability(built.position.sides[0].pokemon[slot], mon)
     for sid, slot in built.opp_slots.items():
         if sid in form["theirs"]:
-            form["theirs"][sid]["boosts"] = {k: v for k, v in led.sides[1].pokemon[slot].boosts.items() if v}
+            mon = led.sides[1].pokemon[slot]
+            form["theirs"][sid]["boosts"] = {k: v for k, v in mon.boosts.items() if v}
+            form["theirs"][sid]["abilityNow"] = _changed_ability(built.position.sides[1].pokemon[slot], mon)
     return form

@@ -615,3 +615,25 @@ def test_seeing_a_pokemon_mega_evolve_shows_its_item(world) -> None:  # noqa: AN
     members = [SimpleNamespace(item="charizarditey")] * 3 + [SimpleNamespace(item="charizarditex")]
     assert rp.mega_stone(reg, "charizard", members) == "charizarditey"
     assert rp.mega_stone(reg, "garchomp", []) != "" and rp.mega_stone(reg, "incineroar", []) is None
+
+
+def test_an_ability_the_leads_copied_is_the_one_in_effect(world, port) -> None:  # noqa: ANN001
+    reg = world.reg
+    sets = {s: o.set for s, o in world.base.items()}
+    came_with = world.mine.sets[0].ability
+    world.mine.sets[0].ability = "trace"             # Garchomp stands in for a Trace user
+    try:
+        form = rp.initial_form(reg, _board(world), sets)
+        # Trace copies one of the opposing leads' abilities (Tyranitar's Sand Stream or Salamence's
+        # Intimidate): whichever it copied is the one in effect, and the position says so.
+        assert form["mine"]["0"]["abilityNow"] in ("sandstream", "intimidate")
+        board = _board(world)
+        board.turns = [rp.normalize(reg, board, form)]
+        built = rp.build_position(reg, board, board.turns[0], sets).position
+        assert built.sides[0].pokemon[0].ability == form["mine"]["0"]["abilityNow"]
+        # The comparison can fail: with another ability nothing is copied and nothing is said.
+        world.mine.sets[0].ability = came_with
+        plain = rp.initial_form(reg, _board(world), sets)
+        assert plain["mine"]["0"]["abilityNow"] is None
+    finally:
+        world.mine.sets[0].ability = came_with
