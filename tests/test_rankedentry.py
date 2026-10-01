@@ -188,6 +188,55 @@ def test_choosing_an_alternative_changes_the_set_and_the_label(world) -> None:  
         world.prior.choose(one, 5)
 
 
+# ------------------------------------------------------------------------------ the composition
+
+
+@pytest.fixture(scope="module")
+def duo(reg):  # noqa: ANN001, ANN201
+    """A is played with B as set X (4 teams) and with C as set Y (6 teams): alone, Y is the
+    commonest; read for a six holding B, X is."""
+    a, b, c = _species(reg, 3)
+    x, y = (ITEMS[0], MOVES[:4]), (ITEMS[1], MOVES[4:8])
+    teams = ([[_member(reg, a, *x), _member(reg, b, ITEMS[2], MOVES[:4])] for _ in range(4)]
+             + [[_member(reg, a, *y), _member(reg, c, ITEMS[3], MOVES[:4])] for _ in range(6)])
+    return SimpleNamespace(prior=FieldPrior(reg, _standings(teams), None), a=a, b=b, c=c, x=x, y=y)
+
+
+def test_the_set_is_read_from_the_teams_that_share_the_most_of_the_six(duo) -> None:  # noqa: ANN001
+    alone = duo.prior.belief(duo.a, tier_min=3)
+    assert alone.overlap == 1 and len(alone.members) == 10
+    assert duo.prior.estimate(alone).set.item == duo.y[0]  # the species' marginal: Y, 6 of 10
+    with_b = duo.prior.belief(duo.a, [duo.a, duo.b], tier_min=3)
+    assert with_b.overlap == 2 and len(with_b.members) == 4 and with_b.teams_in_tier() == 4
+    assert with_b.tiers == ((2, 4), (1, 6))
+    one = duo.prior.estimate(with_b)
+    assert one.set.item == duo.x[0] and one.species_n == 4  # the composition moved the answer
+    # The control: a six that holds C reads as the marginal does (the same teams).
+    with_c = duo.prior.belief(duo.a, [duo.a, duo.c], tier_min=3)
+    assert with_c.overlap == 2 and duo.prior.estimate(with_c).set.item == duo.y[0]
+    # Too few teams at the top tier: the next one down is used (here, every team).
+    assert duo.prior.belief(duo.a, [duo.a, duo.b], tier_min=5).overlap == 1
+    # fill_team reads every member for the whole six.
+    sets, _problems = duo.prior.fill_team([duo.a], [duo.a, duo.b])
+    assert sets[0].belief is not None and sets[0].belief.overlap in (1, 2)
+
+
+def test_an_observation_removes_the_sets_that_cannot_have_produced_it(duo) -> None:  # noqa: ANN001
+    base = duo.prior.belief(duo.a, tier_min=3)
+    seen_move = base.observe(rankedentry.Observation(moves=frozenset({MOVES[5]})))  # only Y has it
+    assert len(seen_move.members) == 6 and {m.item for m in seen_move.members} == {duo.y[0]}
+    assert duo.prior.estimate(seen_move).set.item == duo.y[0]
+    seen_item = base.observe(rankedentry.Observation(item=duo.x[0]))
+    assert len(seen_item.members) == 4 and duo.prior.estimate(seen_item).set.item == duo.x[0]
+    both = seen_move.observe(rankedentry.Observation(item=duo.x[0]))
+    assert both.members == () and both.seen.item == duo.x[0] and MOVES[5] in both.seen.moves
+    with pytest.raises(RankedError, match="見たこと"):
+        duo.prior.estimate(both)
+    assert len(base.members) == 10  # observing leaves the belief it came from alone
+    # Moves that belong to different sets together fit none.
+    assert len(base.observe(rankedentry.Observation(moves=frozenset({MOVES[0], MOVES[4]}))).members) == 0
+
+
 # ------------------------------------------------------------------------------ overrides
 
 

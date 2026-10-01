@@ -24,6 +24,7 @@ from typing import Any
 
 from .humanplay import species_types, sprite_id
 from .rankedentry import (
+    WHOLE_MIN,
     FieldPrior,
     LearnedIds,
     OpponentSet,
@@ -56,15 +57,43 @@ Solver = Callable[[Roster, Roster, Callable[[dict[str, Any]], None]], tuple[Book
 
 def _kind_label(one: OpponentSet) -> str:
     if one.kind == "whole":
-        return f"最頻の型（{one.species_n} 体中 {one.whole_n} 体）"
+        return f"この編成でよく使われる型（{one.species_n} 体中 {one.whole_n} 体）"
     if one.kind == "part":
         top = one.alternatives[0].count if one.alternatives else 0
-        return f"部分ごとの最頻（{one.species_n} 体、最頻の型でも {top} 体）"
+        return f"部分ごとの最頻（{one.species_n} 体の中で、最頻の型でも {top} 体）"
     if one.kind == "candidate":
         return f"候補の型（{one.whole_n} 体）"
     if one.kind == "override":
         return "上書き"
     return "手入力"
+
+
+def _thin_reasons(one: OpponentSet) -> list[str]:
+    """Why this estimate stands on little (the screen sets such a card apart): few members
+    behind the set, a species the field does not show, a spread made up from base stats."""
+    out: list[str] = []
+    if one.kind == "part":
+        top = one.alternatives[0].count if one.alternatives else 0
+        out.append(f"大会でもこの種族の型はばらばらで、最頻の型でも {top} 体だけです")
+    elif one.kind == "candidate" and one.whole_n < WHOLE_MIN:
+        out.append(f"選んだ型は大会で {one.whole_n} 体だけです")
+    elif one.kind == "manual":
+        out.append("大会に出ていない種族なので、型は手で入れる必要があります")
+    if one.sp_provisional:
+        out.append("配分は仮です（基礎能力から作った中立の配分）")
+    return out
+
+
+def _basis_label(one: OpponentSet) -> str:
+    """What teams the sets were read from: how many of the opposing six they share."""
+    belief = one.belief
+    if belief is None:
+        return ""
+    if belief.overlap <= 1:
+        return f"この種族を使った構築すべて {belief.teams_in_tier()} 件（編成では絞れませんでした）"
+    parts = "・".join(f"{k} 種族一致 {n} 件" for k, n in belief.tiers if k >= belief.overlap)
+    return (f"相手の 6 種族のうち {belief.overlap} 種族以上が同じ構築 {belief.teams_in_tier()} 件"
+            f"（{parts}）")
 
 
 def _sp_label(one: OpponentSet) -> str:
@@ -169,6 +198,7 @@ class RankedApp:
         if extra is not None:
             out.update({
                 "kind": extra.kind, "kindLabel": _kind_label(extra),
+                "basisLabel": _basis_label(extra),
                 "speciesN": extra.species_n, "wholeN": extra.whole_n,
                 "alternatives": [
                     {"index": i, "count": c.count,
@@ -183,6 +213,7 @@ class RankedApp:
                                 and one.item == c.item and one.nature == c.nature), -1),
                 "spSource": extra.sp_source, "spLabel": _sp_label(extra), "spN": extra.sp_n,
                 "spProvisional": extra.sp_provisional,
+                "thin": _thin_reasons(extra),
                 "notes": list(extra.notes), "overridden": list(extra.overridden),
             })
         return out
@@ -192,6 +223,7 @@ class RankedApp:
         return {
             "regulation": reg.meta.format_name,
             "event": self.prior.source_line(),
+            "spreadNote": self.prior.spread_line(),
             "eventName": self.prior.standings.event,
             "eventTeams": len(self.prior.standings.teams),
             "species": self.species_options(),
@@ -241,7 +273,7 @@ class RankedApp:
         if errors:
             raise RankedError(" / ".join(errors))
         present = [i for i in ids if i in self.prior.members]
-        filled = self.prior.fill_team(present)[0] if present else []
+        filled = self.prior.fill_team(present, ids)[0] if present else []
         by_species = {o.set.species: o for o in filled}
         sets: list[OpponentSet | None] = [
             by_species[sid] if sid in by_species else blank_set(self.reg, sid) for sid in ids

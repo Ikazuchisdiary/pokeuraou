@@ -39,11 +39,17 @@
 <main class="rk-layout">
   <section class="panel" id="mineBox" aria-labelledby="mineTitle">
     <h2 id="mineTitle"><span class="rk-no">1</span>自分の構築</h2>
-    <label class="field wide" for="paste">Showdown のチーム文字列（英語名）を貼り付け</label>
-    <textarea id="paste" class="rk-paste" rows="6" spellcheck="false" placeholder="Incineroar @ Sitrus Berry&#10;Ability: Intimidate&#10;EVs: 32 HP / 20 Def / 14 SpD&#10;Careful Nature&#10;- Fake Out&#10;- Flare Blitz&#10;…（6 体）"></textarea>
-    <div class="sendbar"><span class="summary" id="mineSummary"></span><button type="button" class="primary" id="loadMine">読み込む</button></div>
+    <div id="mineEdit">
+      <label class="field wide" for="paste">Showdown のチーム文字列（英語名）を貼り付けてください</label>
+      <textarea id="paste" class="rk-paste" rows="6" spellcheck="false" placeholder="（入力例。貼り付けると消えます）&#10;Incineroar @ Sitrus Berry&#10;Ability: Intimidate&#10;EVs: 32 HP / 20 Def / 14 SpD&#10;Careful Nature&#10;- Fake Out&#10;- Flare Blitz&#10;…（6 体ぶん）"></textarea>
+      <div class="sendbar"><span class="summary" id="mineSummary"></span><button type="button" class="primary" id="loadMine">構築を読み込む</button></div>
+    </div>
     <ul class="rk-msgs" id="mineMsg"></ul>
-    <div class="rk-sets" id="mineSets"></div>
+    <div class="rk-brief" id="mineBrief" hidden>
+      <div class="rk-chips" id="mineChips"></div>
+      <button type="button" class="ghost small" id="mineRedo">貼り付けを直す</button>
+    </div>
+    <details class="rk-fold" id="mineFold" hidden><summary>6 体の型を見る</summary><div class="rk-sets" id="mineSets"></div></details>
   </section>
 
   <section class="panel" id="oppBox" aria-labelledby="oppTitle">
@@ -53,14 +59,13 @@
     <datalist id="speciesList"></datalist>
     <div class="sendbar"><span class="summary" id="oppSummary"></span><button type="button" class="primary" id="fillOpp">型を推定する</button></div>
     <ul class="rk-msgs" id="oppMsg"></ul>
-    <div class="rk-estnote" id="estNote" hidden></div>
+    <div class="rk-estnote" id="estNote" hidden><span class="rk-badge">推定</span><div><p id="estEvent"></p><p id="estSpread"></p></div></div>
     <div class="rk-sets" id="oppSets"></div>
   </section>
 
   <section class="panel" id="readBox" aria-labelledby="readTitle">
-    <h2 id="readTitle"><span class="rk-no">3</span>選出を読む</h2>
-    <p class="note" id="readNote">相手の型は推定です。型を直してから読み直せます。</p>
-    <div class="sendbar"><span class="summary" id="readSummary"></span><button type="button" class="primary" id="solve" disabled>選出を読む</button></div>
+    <h2 id="readTitle"><span class="rk-no">3</span>選出の結果</h2>
+    <p class="note" id="readNote">下の「選出を求める」を押すと、ここに出ます。</p>
     <div class="rk-progress" id="progress" hidden>
       <div class="rk-ptrack"><div class="rk-pbar" id="pbar"></div></div>
       <span class="n" id="ptext"></span>
@@ -68,6 +73,10 @@
     <div class="rk-error" id="readError" role="alert" hidden></div>
     <div id="result" hidden></div>
   </section>
+  <div class="rk-bar" role="region" aria-label="選出を求める">
+    <span class="summary" id="readSummary"></span>
+    <button type="button" class="primary" id="solve" disabled>選出を求める</button>
+  </div>
 </main>
 <datalist id="itemList"></datalist>
 <datalist id="moveList"></datalist>

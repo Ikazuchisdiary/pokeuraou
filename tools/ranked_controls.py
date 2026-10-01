@@ -11,16 +11,20 @@ counted apart, not hidden).
 
 ``compare``: for pairs of pool teams, our side is team i pasted, the opponent is team j. The
 selection is solved against (a) j's true sets and (b) the sets estimated from j's six species
-alone (`FieldPrior`). The estimate's mixture is then scored in the TRUE game: the loss is the
-value of the true game minus the worst case of the estimate's mixture against the true
-matrix. The uniform mixture's loss is the scale. Leaf only (the leaf's one estimate of each
-cell, no deeper reading), on the production leaf value-mc3 x2.
+(`FieldPrior`: each species alone with ``--tiers 0``, or read for the whole six, the field teams
+that share the most of it first, with ``--tiers N`` = `TIER_MIN`; ``--holdout`` takes the field
+teams that bring exactly j's six out first, since the pool's teams are mostly field entries).
+The estimate's mixture is then scored in the TRUE game: the loss is the value of the true
+game minus the worst case of the estimate's mixture against the true matrix. The uniform
+mixture's loss is the scale. Leaf only (the leaf's one estimate of each cell, no deeper
+reading), on the production leaf value-mc3 x2.
 """
 
 from __future__ import annotations
 
 import argparse
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,7 +39,7 @@ import numpy as np  # noqa: E402
 from pokeuraou import humanplay  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.pool import load_pool  # noqa: E402
-from pokeuraou.rankedentry import FieldPrior, roster_from_paste  # noqa: E402
+from pokeuraou.rankedentry import TIER_MIN, FieldPrior, roster_from_paste  # noqa: E402
 from pokeuraou.selection import SpreadClass, solve_selection  # noqa: E402
 
 FORMAT_ID = "gen9championsvgc2026regmc"
@@ -67,59 +71,88 @@ def paste_control(root: Path) -> None:
           f"no cached paste {missing}")
 
 
-def compare(root: Path, pairs: int, values: list[Path]) -> None:
+def compare(root: Path, pairs: int, values: list[Path], tiers: list[int], holdout: bool) -> None:
+    """Each setting of the estimate is scored on the same pairs, in the same true games.
+
+    ``tiers``: 0 reads each species alone (the marginal, what stage 1a first shipped); N > 0
+    reads it for the opposing six with `TIER_MIN` = N. ``holdout``: the field teams that bring
+    exactly the opposing six are taken out of the field before the estimate (the pool's teams
+    may themselves be tournament entries, which would hand the estimate its answer).
+    """
     pool = load_pool(root / "pool" / "regmc-matchupweb.json")
     reg = pool.reg
     register_mega_stones(reg)
     prior = FieldPrior.load(reg, root)
     evaluate, _enc, _dev = humanplay.load_leaf(reg, values, "cpu", graphs=False)
     n = len(pool.teams)
-    rows = []
-    member_same = member_total = 0
+
+    def without_exact(theirs) -> FieldPrior:  # noqa: ANN001
+        six = frozenset(s.species for s in theirs.sets)
+        kept = [t for t in prior.standings.teams if frozenset(t.species) != six]
+        return FieldPrior(reg, replace(prior.standings, teams=kept), pool)
+
+    chosen = []
     for k in range(pairs * 3):
-        if len(rows) == pairs:
-            break
         i, j = k % n, (k * 7 + 3) % n
         if i == j:
             continue
-        mine, theirs = pool.teams[i], pool.teams[j]
-        if any(s.species not in prior.members for s in theirs.sets):
-            continue  # a species the field never shows: nothing to estimate from (refused)
-        est, problems = prior.fill_team([s.species for s in theirs.sets])
-        if problems:
+        # a species the field never shows (with the holdout: nor without the exact-six teams)
+        # has nothing to estimate from: refused, so not a pair
+        field = without_exact(pool.teams[j]) if holdout else prior
+        if any(s.species not in field.members for s in pool.teams[j].sets):
             continue
-        est_sets = [o.set for o in est]
-        member_total += 6
-        member_same += sum(sets_equal_nosp(a, b) for a, b in zip(est_sets, theirs.sets, strict=True))
+        _est, problems = prior.fill_team([s.species for s in pool.teams[j].sets], [])
+        if problems:
+            continue  # the marginal read has a clause clash it cannot move off: the same pairs for all
+        chosen.append((i, j))
+        if len(chosen) == pairs:
+            break
+    exact = sum(1 for _i, j in chosen
+                if any(frozenset(t.species) == frozenset(s.species for s in pool.teams[j].sets)
+                       for t in prior.standings.teams))
+    print(f"pairs {len(chosen)}; opponents whose exact six is a field entry: {exact}", flush=True)
+    truth = []
+    for i, j in chosen:
+        mine, theirs = pool.teams[i], pool.teams[j]
         true = solve_selection(reg, mine.sets, [SpreadClass(1.0, tuple(theirs.sets), "true")], evaluate)
-        guess = solve_selection(reg, mine.sets, [SpreadClass(1.0, tuple(est_sets), "estimate")], evaluate)
-        a_true = true.matrices[0]
-        x_est = np.asarray(guess.equilibrium.row_strategy)
-        x_true = np.asarray(true.equilibrium.row_strategy)
-        uniform = np.full(len(x_est), 1.0 / len(x_est))
-        def worst(x, matrix=a_true):  # noqa: ANN001, ANN202
-            return float((x @ matrix).min())
-
-        rows.append({
-            "pair": (mine.id, theirs.id), "v_true": true.value, "v_est": guess.value,
-            "loss_est": true.value - worst(x_est), "loss_uniform": true.value - worst(uniform),
-            "loss_true": true.value - worst(x_true),
-            "same_top": int(np.argmax(x_est) == np.argmax(x_true)),
-            "l1": float(np.abs(x_est - x_true).sum()),
-        })
-        print(f"  {mine.id} vs {theirs.id}: value true {true.value:.3f} est {guess.value:.3f}; "
-              f"loss est {rows[-1]['loss_est']:.4f} uniform {rows[-1]['loss_uniform']:.4f} "
-              f"(true mixture {rows[-1]['loss_true']:.1e}); top same {rows[-1]['same_top']}", flush=True)
-    m = lambda key: float(np.mean([r[key] for r in rows]))  # noqa: E731
-    sd = lambda key: float(np.std([r[key] for r in rows], ddof=1) / np.sqrt(len(rows)))  # noqa: E731
-    print(f"\npairs {len(rows)}; estimated members equal to the true set in species, ability, item, "
-          f"nature, moves: {member_same}/{member_total} (spread not compared)")
-    print(f"our value: true game {m('v_true'):.4f}, estimated game {m('v_est'):.4f}, "
-          f"|difference| {np.mean([abs(r['v_true'] - r['v_est']) for r in rows]):.4f}")
-    print(f"loss in the true game: estimate's mixture {m('loss_est'):.4f} (SE {sd('loss_est'):.4f}); "
-          f"uniform {m('loss_uniform'):.4f} (SE {sd('loss_uniform'):.4f}); true mixture {m('loss_true'):.1e}")
-    print(f"top selection same as the true game's: {sum(r['same_top'] for r in rows)}/{len(rows)}; "
-          f"mean L1 between mixtures {m('l1'):.3f}")
+        truth.append((mine, theirs, true, np.asarray(true.equilibrium.row_strategy), true.matrices[0]))
+    uniform_loss = float(np.mean([t[2].value - float((np.full(90, 1 / 90) @ t[4]).min()) for t in truth]))
+    print(f"loss of the uniform mixture in the true games (the scale): {uniform_loss:.4f}")
+    head = ("setting", "same sets", "loss", "SE", "top same", "|dv|", "overlap>=2", "vs marginal (paired SE)")
+    print(f"{head[0]:<28}{head[1]:>12}{head[2]:>9}{head[3]:>8}{head[4]:>10}{head[5]:>8}{head[6]:>12}"
+          f"  {head[7]}")
+    for held in ((False, True) if holdout else (False,)):
+        base_losses: list[float] = []
+        for tier in tiers:
+            same = total = tops = clash = deep = 0
+            losses, dvs = [], []
+            for mine, theirs, true, x_true, a_true in truth:
+                field = without_exact(theirs) if held else prior
+                species = [s.species for s in theirs.sets]
+                est, problems = field.fill_team(species, [] if tier == 0 else None,
+                                                tier_min=tier or TIER_MIN)
+                clash += bool(problems)
+                deep += sum(1 for o in est if o.belief is not None and o.belief.overlap >= 2)
+                est_sets = [o.set for o in est]
+                total += 6
+                same += sum(sets_equal_nosp(a, b) for a, b in zip(est_sets, theirs.sets, strict=True))
+                guess = solve_selection(reg, mine.sets, [SpreadClass(1.0, tuple(est_sets), "estimate")],
+                                        evaluate)
+                x_est = np.asarray(guess.equilibrium.row_strategy)
+                losses.append(true.value - float((x_est @ a_true).min()))
+                dvs.append(abs(true.value - guess.value))
+                tops += int(np.argmax(x_est) == np.argmax(x_true))
+            label = ("marginal" if tier == 0 else f"six, tier_min {tier}") + (" +holdout" if held else "")
+            se = np.std(losses, ddof=1) / np.sqrt(len(losses))
+            if tier == 0:
+                base_losses = losses
+            diff = np.array(losses) - np.array(base_losses)
+            versus = ("" if tier == 0 or not base_losses else
+                      f"{diff.mean():+.4f} ({np.std(diff, ddof=1) / np.sqrt(len(diff)):.4f})")
+            note = f"  (clauses unresolved in {clash} pairs)" if clash else ""
+            print(f"{label:<28}{same:>5}/{total:<6}{np.mean(losses):>9.4f}{se:>8.4f}"
+                  f"{tops:>6}/{len(truth):<3}{np.mean(dvs):>8.4f}{deep:>8}/{total:<3}  {versus}{note}",
+                  flush=True)
 
 
 def sets_equal_nosp(a, b) -> bool:  # noqa: ANN001
@@ -133,12 +166,17 @@ def main() -> None:
     ap.add_argument("--data-dir", type=Path, default=ROOT / "data")
     ap.add_argument("--pairs", type=int, default=40)
     ap.add_argument("--value", type=Path, nargs="+", default=None)
+    ap.add_argument("--tiers", type=int, nargs="+", default=[0, 3, 5, 10, 20],
+                    help="0: each species alone; N: read for the opposing six with TIER_MIN = N")
+    ap.add_argument("--holdout", action="store_true",
+                    help="also score with the field teams that bring exactly the opposing six removed")
     args = ap.parse_args()
     if args.mode == "paste":
         paste_control(args.data_dir)
     else:
         compare(args.data_dir, args.pairs, args.value or [
-            args.data_dir / "models" / "value-mc3.pt", args.data_dir / "models" / "value-mc3-s1.pt"])
+            args.data_dir / "models" / "value-mc3.pt", args.data_dir / "models" / "value-mc3-s1.pt"],
+            args.tiers, args.holdout)
 
 
 if __name__ == "__main__":

@@ -10,6 +10,11 @@ const metaSprite = document.querySelector('meta[name="sprite-url"]');
 const SPRITE_URL = metaSprite ? metaSprite.getAttribute("content") : "";
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+// "Floette (Eternal)": the localiser writes base (forme) -- the forme in small type, as the game page does
+const nameHtml = (n) => {
+  const [base, ...rest] = String(n == null ? "" : n).split(" (");
+  return rest.length ? `${esc(base)}<small class="forme">(${esc(rest.join(" (").replace(/\)$/, ""))})</small>` : esc(base);
+};
 const pct = (x, d) => (x * 100).toFixed(d == null ? 0 : d) + "%";
 
 let META = null;
@@ -88,15 +93,17 @@ function unlearnedTag(v) {
 function renderSet(v, role, index) {
   const unlearnedMoves = new Set((v.unlearned || []).filter((u) => u.kind === "move").map((u) => u.id));
   const moves = v.moves.map((m) => `<li class="${unlearnedMoves.has(m.id) ? "nolearn" : ""}">${esc(m.name)}</li>`).join("");
-  let tags = "", alts = "", edit = "", editor = "";
+  let tags = "", alts = "", edit = "", editor = "", prov = "", thin = "";
   if (role === "opp") {
     const t = [];
-    t.push(`<span class="rk-tag ${v.kind === "part" ? "part" : ""}">${esc(v.kindLabel)}</span>`);
-    t.push(`<span class="rk-tag ${v.spProvisional ? "prov" : ""}">${v.spProvisional ? "仮の配分" : "配分は推定"}：${esc(v.spLabel)}</span>`);
+    prov = `<div class="rk-prov"><div><span class="k">推定した型</span><span class="v">${esc(v.kindLabel)}</span></div>
+      <div><span class="k">型の根拠</span><span class="v">${esc(v.basisLabel)}</span></div>
+      <div><span class="k">配分の出どころ</span><span class="v">${v.spProvisional ? "<b>仮の配分</b>：" : ""}${esc(v.spLabel)}</span></div></div>`;
+    if (v.thin && v.thin.length) thin = `<div class="rk-thin"><b>根拠が薄い推定です</b>${v.thin.map((x) => `<span>${esc(x)}</span>`).join("")}</div>`;
     if (v.overridden.length) t.push(`<span class="rk-tag edit">上書き：${esc(v.overridden.map((k) => ({ ability: "特性", item: "持ち物", nature: "性格", moves: "技", sp: "配分" }[k] || k)).join("・"))}</span>`);
     t.push(unlearnedTag(v));
     (v.notes || []).forEach((n) => t.push(`<span class="rk-tag">${esc(n)}</span>`));
-    tags = `<div class="rk-tags">${t.join("")}</div>`;
+    tags = t.length ? `<div class="rk-tags">${t.join("")}</div>` : "";
     if (v.alternatives && v.alternatives.length > 1) {
       alts = `<div class="rk-alts" role="group" aria-label="別の型">${v.alternatives.map((a) =>
         `<button type="button" class="rk-alt" data-i="${index}" data-a="${a.index}" aria-pressed="${String(v.chosen === a.index)}">${esc(a.label)}（${a.count} 体）<small>${esc(a.moves.join("・"))}</small></button>`).join("")}</div>`;
@@ -107,12 +114,13 @@ function renderSet(v, role, index) {
     const u = unlearnedTag(v);
     if (u) tags = `<div class="rk-tags">${u}</div>`;
   }
-  return `<article class="rk-set ${role}">
-    <div class="rk-head">${art(v.species, "md")}<div class="rk-name">${esc(v.species.name)}${typeDots(v.species)}</div></div>
+  return `<article class="rk-set ${role}${thin ? " thin" : ""}">
+    ${thin}
+    <div class="rk-head">${art(v.species, "md")}<div class="rk-name">${nameHtml(v.species.name)}${typeDots(v.species)}</div></div>
     <div class="rk-line"><span>特性 <b>${esc(v.ability ? v.ability.name : "—")}</b></span><span>持ち物 <b>${esc(v.item ? v.item.name : "なし")}</b></span><span>性格 <b>${esc(v.nature.name)}</b></span></div>
     <ul class="rk-moves">${moves}</ul>
     ${spBars(v)}
-    ${tags}${alts}${edit}${editor}
+    ${prov}${tags}${alts}${edit}${editor}
   </article>`;
 }
 function renderEditor(v, index) {
@@ -145,7 +153,12 @@ function renderMine(resp) {
   $("mineMsg").innerHTML = msgs.join("");
   const team = resp ? resp.team : STATE.mine;
   $("mineSets").innerHTML = team ? team.map((v, i) => renderSet(v, "mine", i)).join("") : "";
-  $("mineSummary").textContent = team ? "読み込みました。6 体とも規則に通っています" : "";
+  $("mineSummary").textContent = "";
+  // loaded: the six fold into one row (the paste and the cards are one tap away)
+  $("mineEdit").hidden = !!team;
+  $("mineBrief").hidden = !team;
+  $("mineFold").hidden = !team;
+  $("mineChips").innerHTML = team ? team.map((v) => `<span class="rk-chip">${art(v.species, "xs")}${nameHtml(v.species.name)}</span>`).join("") : "";
   refreshSolve();
 }
 
@@ -157,7 +170,8 @@ function renderOpp() {
   $("oppMsg").innerHTML = (STATE.teamProblems || []).map((p) => `<li>${esc(p)}</li>`).join("");
   const note = $("estNote");
   note.hidden = !sets.length;
-  note.innerHTML = sets.length ? `<b>相手の型は推定です。</b>${esc(META.event)}` : "";
+  $("estEvent").textContent = META.event;
+  $("estSpread").textContent = META.spreadNote;
   refreshSolve();
 }
 
@@ -175,9 +189,9 @@ function refreshSolve() {
 
 function renderResult(r) {
   const mine = r.mine, theirs = r.theirs;
-  const row = (s, cls) => `<div class="rk-selrow ${cls}"><div class="who">${s.leads.map((n) => `<b>${esc(n)}</b>`).join(" + ")}<em>/ ${s.back.map(esc).join(" + ")}</em></div><span class="pct">${pct(s.p, s.p < 0.1 ? 1 : 0)}</span><div class="pbar"><i style="width:${Math.round(s.p * 100)}%"></i></div></div>`;
-  const bring = (side) => `<ul class="rk-bring"><li class="head"><span>体</span><span class="n">選出</span><span class="n">先発</span></li>${side.members.map((m) =>
-    `<li><span>${esc(m.species)}</span><span class="n">${pct(m.bring)}</span><span class="n">${pct(m.lead)}</span></li>`).join("")}</ul>`;
+  const row = (s, cls) => `<div class="rk-selrow ${cls}"><div class="who"><span class="lab">先発</span><b>${s.leads.map(nameHtml).join("・")}</b><span class="sep">／</span><span class="lab">裏</span>${s.back.map(nameHtml).join("・")}</div><span class="pct" title="この選出を選ぶ確率">${pct(s.p, s.p < 0.1 ? 1 : 0)}</span><div class="pbar"><i style="width:${Math.round(s.p * 100)}%"></i></div></div>`;
+  const bring = (side) => `<ul class="rk-bring"><li class="head"><span>体</span><span class="n">選ぶ確率</span><span class="n">先発の確率</span></li>${side.members.map((m) =>
+    `<li><span>${nameHtml(m.species)}</span><span class="n">${pct(m.bring)}</span><span class="n">${pct(m.lead)}</span></li>`).join("")}</ul>`;
   const hints = [];
   const prov = r.estimated.filter((e) => e.provisional).map((e) => e.species);
   if (prov.length) hints.push(`仮の配分で読んでいます：${prov.join("、")}`);
@@ -193,10 +207,11 @@ function renderResult(r) {
   $("result").innerHTML = `
     <div class="rk-value"><b class="n">${pct(r.value, 1)}</b><span>あなたの勝率の見積もり（相手の型の推定が当たっているとしたとき。読んだ時間 ${Math.round(r.elapsed || r.seconds)} 秒）</span></div>
     <div class="rk-cols">
-      <div><h3>おすすめの選出 <small>先発 2 体 + 後ろ 2 体、混ぜる確率</small></h3>${mine.selections.map((s) => row(s, "mine")).join("")}<h3>体ごとの選出・先発の確率</h3>${bring(mine)}</div>
-      <div><h3>相手の選出の読み <small>推定した型での最善</small></h3>${theirs.selections.map((s) => row(s, "opp")).join("")}<h3>体ごとの選出・先発の確率</h3>${bring(theirs)}</div>
+      <div><h3>おすすめの選出 <small>％は、その選出を選ぶ確率（混ぜて選びます）</small></h3>${mine.selections.map((s) => row(s, "mine")).join("")}<h3>体ごとの確率</h3>${bring(mine)}</div>
+      <div><h3>相手が選びそうな選出 <small>推定した型での最善。％は、その選出を選ぶ確率</small></h3>${theirs.selections.map((s) => row(s, "opp")).join("")}<h3>体ごとの確率</h3>${bring(theirs)}</div>
     </div>
-    <div class="rk-hints rk-msgs">${hints.map((h) => `<li class="warn">${esc(h)}</li>`).join("")}</div>`;
+    <div class="rk-hints rk-msgs">${hints.map((h) => `<li class="warn">${esc(h)}</li>`).join("")}<li class="warn"><b>相手の型の推定が外れると、この結果は変わります。</b></li></div>`;
+  $("result").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
 // ------------------------------------------------------------------ actions
@@ -281,6 +296,7 @@ function watch() {
 }
 
 $("loadMine").onclick = loadMine;
+$("mineRedo").onclick = () => { $("mineEdit").hidden = false; $("mineBrief").hidden = true; $("paste").focus(); };
 $("fillOpp").onclick = fillOpp;
 $("solve").onclick = solve;
 
@@ -295,7 +311,7 @@ $("solve").onclick = solve;
   $("speciesInputs").innerHTML = [1, 2, 3, 4, 5, 6].map((n) => `<input list="speciesList" aria-label="相手の ${n} 体目" placeholder="${n} 体目" autocomplete="off">`).join("");
   $("aboutEvent").textContent = META.event;
   $("aboutModel").textContent = (META.model ? `評価モデル: ${META.model}。` : "") + (META.learned ? "学んでいない種族・技は、学習の局に出た id の一覧から判定します。" : "");
-  $("readNote").textContent = `相手の型は推定です。読みは ${META.seconds ? Math.round(META.seconds) : 90} 秒かかります。型を直してから読み直せます。`;
+  $("readNote").textContent = `下の「選出を求める」を押すと、ここに出ます（${META.seconds ? Math.round(META.seconds) : 90} 秒ほどかかります）。型を直してから、もう一度求められます。`;
   const state = await api("/api/state");
   STATE = state;
   (QUERY.get("edit") || "").split(",").filter(Boolean).forEach((i) => editing.add(Number(i)));

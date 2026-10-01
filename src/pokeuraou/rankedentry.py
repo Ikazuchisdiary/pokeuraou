@@ -51,6 +51,9 @@ EVENT_FILE = "2027-baltimore.json.gz"
 POOL_NAME = "regmc-matchupweb"
 #: A whole set is used when at least this many members of the species hold it.
 WHOLE_MIN = 3
+#: A species' sets are read from the field teams sharing the most of the opponent's six, down
+#: to the first tier that holds at least this many members of the species.
+TIER_MIN = 10
 #: How many whole sets are offered as one-tap alternatives.
 ALTERNATIVES = 3
 #: A species this fast is given its second spread slot as Speed, a slower one as HP.
@@ -254,6 +257,61 @@ class Candidate:
     count: int
 
 
+@dataclass(frozen=True, slots=True)
+class Observation:
+    """What has been seen of one opponent member in play: moves it used, the item it showed
+    (or consumed), the ability that activated. `SetBelief.observe` drops the sets that
+    cannot have produced it (stage 1b, IKA-408, feeds these in)."""
+
+    moves: frozenset[str] = frozenset()
+    item: str | None = None
+    ability: str | None = None
+
+    def merged(self, other: Observation) -> Observation:
+        return Observation(self.moves | other.moves, other.item or self.item, other.ability or self.ability)
+
+    def consistent(self, member: TeamMember) -> bool:
+        if not self.moves <= set(member.moves):
+            return False
+        if self.item is not None and member.item != self.item:
+            return False
+        # A field record whose ability is the mega forme's is unknown here: it cannot rule out.
+        return self.ability is None or member.ability in (None, self.ability)
+
+
+@dataclass(frozen=True, slots=True)
+class SetBelief:
+    """The field's sets for one species, read for one opposing six.
+
+    ``members`` are the field members of the species that stand behind the estimate: those of
+    the teams sharing the most of the six with the opponent's, down to the first tier with
+    enough of them (`TIER_MIN`). ``overlap`` is that tier's number of shared species (1: every
+    team with the species, the composition not used), ``tiers`` how many field teams share
+    exactly k of the six, and ``seen`` what has been observed. The candidates are the whole
+    sets in ``members`` with their counts; `observe` returns the belief with the members an
+    observation rules out removed, so a read of the set is never made from what was seen
+    not to be."""
+
+    species: str
+    members: tuple[TeamMember, ...]
+    overlap: int
+    tiers: tuple[tuple[int, int], ...]
+    seen: Observation = Observation()
+
+    def observe(self, obs: Observation) -> SetBelief:
+        merged = self.seen.merged(obs)
+        return replace(self, members=tuple(m for m in self.members if obs.consistent(m)), seen=merged)
+
+    def candidates(self) -> list[Candidate]:
+        """Every whole set among the members, commonest first (ties by name, so it is fixed)."""
+        counts = Counter((m.ability, m.item, m.nature, tuple(sorted(m.moves))) for m in self.members)
+        ranked = sorted(counts.items(), key=lambda kv: (-kv[1], str(kv[0])))
+        return [Candidate(a, i, n, mv, c) for (a, i, n, mv), c in ranked]
+
+    def teams_in_tier(self) -> int:
+        return sum(n for k, n in self.tiers if k >= self.overlap)
+
+
 @dataclass(slots=True)
 class OpponentSet:
     """One opponent member as estimated, with where each part came from."""
@@ -261,7 +319,7 @@ class OpponentSet:
     set: SampledSet
     #: "whole" | "part" | "candidate" | "override" | "manual"
     kind: str
-    #: Members of this species in the field, and how many hold the chosen whole set.
+    #: Members behind the estimate (the belief's tier), and how many hold the chosen whole set.
     species_n: int
     whole_n: int
     alternatives: tuple[Candidate, ...]
@@ -271,6 +329,8 @@ class OpponentSet:
     sp_n: int
     notes: list[str] = field(default_factory=list)
     overridden: tuple[str, ...] = ()
+    #: What the estimate was read from: `FieldPrior.estimate` of it again, after an observation.
+    belief: SetBelief | None = None
 
     @property
     def sp_provisional(self) -> bool:
@@ -323,11 +383,17 @@ class FieldPrior:
         self.standings = standings
         self.event_file = event_file
         self.members: dict[str, list[TeamMember]] = {}
-        for team in standings.teams:
+        #: per species, (index of the field team, member): the composition read needs the team.
+        self.entries: dict[str, list[tuple[int, TeamMember]]] = {}
+        self.team_species: list[frozenset[str]] = []
+        for index, team in enumerate(standings.teams):
+            self.team_species.append(frozenset(team.species))
             for member in team.members:
                 self.members.setdefault(member.species, []).append(member)
+                self.entries.setdefault(member.species, []).append((index, member))
         self.spreads: dict[str, list[tuple[str, tuple[int, ...]]]] = {}
         self.pool_id = pool.id if pool is not None else None
+        self.pool_teams = len(pool.teams) if pool is not None else 0
         for roster in (pool.teams if pool is not None else ()):
             for one in roster.sets:
                 self.spreads.setdefault(one.species, []).append(
@@ -350,27 +416,50 @@ class FieldPrior:
 
     def source_line(self) -> str:
         s = self.standings
-        members = sum(map(len, self.members.values()))
-        return (f"{s.event}（{s.event_format}）の {len(s.teams)} 構築・{members} 体"
-                "。ほかの大会は使っていません。配分は大会データに無く、プールの貼り付けから取ります")
+        return (f"{s.event}（{s.event_format}）の {len(s.teams):,} チームの実際の型から、"
+                "相手の編成に近い構築ほど重く見て推定しています。ほかの大会は使っていません。")
 
-    def candidates(self, species_id: str) -> list[Candidate]:
-        """Every whole set the field played, commonest first (ties by name, so it is fixed)."""
-        found = self.members.get(species_id)
-        if not found:
+    def spread_line(self) -> str:
+        return ("配分（SP）は大会の公開シートに載らないので、"
+                + (f"貼り付けで集めた {self.pool_teams} 構築（Match Up Web）にある同じ種族の配分を使い、"
+                   if self.pool_teams else "")
+                + "それも無い種族は「仮の配分」にします。")
+
+    def belief(self, species_id: str, composition: Sequence[str] | None = None,
+               *, tier_min: int = TIER_MIN) -> SetBelief:
+        """The field's sets for the species, read for the opposing six ``composition``.
+
+        Every field team holding the species shares some of the six with it; the sets come
+        from the teams sharing the most, down to the first tier (6 shared, at least 5, ...)
+        that holds ``tier_min`` members of the species, and from all of them when none does.
+        Without a composition every team shares just the species: the species' marginal.
+        """
+        entries = self.entries.get(species_id)
+        if not entries:
             raise UnknownSpecies(
                 f"{self.reg.species[species_id].name if species_id in self.reg.species else species_id}"
                 f" は {self.standings.event} に出ていないので、型を推定できません。型を手で入れてください"
             )
-        counts = Counter((m.ability, m.item, m.nature, tuple(sorted(m.moves))) for m in found)
-        ranked = sorted(counts.items(), key=lambda kv: (-kv[1], str(kv[0])))
-        return [Candidate(a, i, n, mv, c) for (a, i, n, mv), c in ranked]
+        six = frozenset(composition or ()) | {species_id}
+        shared = [len(self.team_species[index] & six) for index, _m in entries]
+        exact = Counter(shared)
+        overlap, held = 1, 0
+        for k in range(min(len(six), max(exact)), 0, -1):
+            held += exact.get(k, 0)
+            if held >= tier_min:
+                overlap = k
+                break
+        members = tuple(m for (_i, m), k in zip(entries, shared, strict=True) if k >= overlap)
+        return SetBelief(species_id, members, overlap, tuple(sorted(exact.items(), reverse=True)))
+
+    def candidates(self, species_id: str, composition: Sequence[str] | None = None) -> list[Candidate]:
+        return self.belief(species_id, composition).candidates()
 
     def _ability_mode(self, species_id: str) -> str | None:
         known = Counter(m.ability for m in self.members.get(species_id, ()) if m.ability)
         return sorted(known.items(), key=lambda kv: (-kv[1], kv[0]))[0][0] if known else None
 
-    def _build(self, species_id: str, c: Candidate, kind: str, *, species_n: int, whole_n: int,
+    def _build(self, species_id: str, c: Candidate, kind: str, *, belief: SetBelief, whole_n: int,
                alternatives: tuple[Candidate, ...], notes: list[str]) -> OpponentSet:
         ability = c.ability
         if ability is None:
@@ -382,7 +471,8 @@ class FieldPrior:
             species=species_id, ability=to_id(ability), item=c.item, nature=c.nature, sp=sp,
             moves=list(c.moves),
         )
-        return OpponentSet(built, kind, species_n, whole_n, alternatives, source, n, notes)
+        return OpponentSet(built, kind, len(belief.members), whole_n, alternatives, source, n, notes,
+                           belief=belief)
 
     def _spread(self, species_id: str, nature: str) -> tuple[dict[str, int], str, int]:
         have = self.spreads.get(species_id, [])
@@ -394,16 +484,21 @@ class FieldPrior:
                 return dict(zip(STAT_IDS, top, strict=True)), label, len(pick)
         return neutral_spread(self.reg, species_id), "neutral", 0
 
-    def fill(self, species_id: str) -> OpponentSet:
-        """The estimate for one species: the commonest whole set, or part by part when rare."""
-        ranked = self.candidates(species_id)
-        species_n = len(self.members[species_id])
+    def estimate(self, belief: SetBelief) -> OpponentSet:
+        """The estimate from a belief: the commonest whole set, or part by part when rare.
+
+        After `SetBelief.observe` the same call gives the read of what is left; a belief that
+        an observation emptied has no read (`RankedError`)."""
+        species_id = belief.species
+        if not belief.members:
+            raise RankedError("見たことと合う型が大会データにありません")
+        ranked = belief.candidates()
         alternatives = tuple(ranked[:ALTERNATIVES])
         top = ranked[0]
         if top.count >= WHOLE_MIN:
-            return self._build(species_id, top, "whole", species_n=species_n, whole_n=top.count,
+            return self._build(species_id, top, "whole", belief=belief, whole_n=top.count,
                                alternatives=alternatives, notes=[])
-        found = self.members[species_id]
+        found = belief.members
         nature = Counter(m.nature for m in found)
         item = Counter(m.item for m in found)
         ability = Counter(m.ability for m in found if m.ability)
@@ -418,21 +513,26 @@ class FieldPrior:
             tuple(sorted(m for m, _n in picked)), 0,
         )
         return self._build(
-            species_id, mixed, "part", species_n=species_n, whole_n=0, alternatives=alternatives,
+            species_id, mixed, "part", belief=belief, whole_n=0, alternatives=alternatives,
             notes=[f"最頻の型でも {top.count} 体なので、部分ごとの最頻を組み合わせました"],
         )
 
+    def fill(self, species_id: str, composition: Sequence[str] | None = None,
+             *, tier_min: int = TIER_MIN) -> OpponentSet:
+        """The estimate for one species of the opposing six ``composition``."""
+        return self.estimate(self.belief(species_id, composition, tier_min=tier_min))
+
     def choose(self, one: OpponentSet, index: int) -> OpponentSet:
         """The index-th alternative as the set (its spread re-chosen for its nature)."""
-        if not 0 <= index < len(one.alternatives):
+        if not 0 <= index < len(one.alternatives) or one.belief is None:
             raise RankedError(f"候補は {len(one.alternatives)} 個です")
-        species_id = one.set.species
         return self._build(
-            species_id, one.alternatives[index], "candidate", species_n=one.species_n,
+            one.set.species, one.alternatives[index], "candidate", belief=one.belief,
             whole_n=one.alternatives[index].count, alternatives=one.alternatives, notes=[],
         )
 
-    def fill_team(self, species_ids: Sequence[str]) -> tuple[list[OpponentSet], list[str]]:
+    def fill_team(self, species_ids: Sequence[str], composition: Sequence[str] | None = None,
+                  *, tier_min: int = TIER_MIN) -> tuple[list[OpponentSet], list[str]]:
         """The species' estimates and what is wrong with them as a team (clauses; the count
         of six is the caller's, which may hold some back for a hand entry).
 
@@ -443,8 +543,9 @@ class FieldPrior:
         problems: list[str] = []
         out: list[OpponentSet] = []
         taken: set[str] = set()
+        six = list(composition if composition is not None else species_ids)
         for species_id in species_ids:
-            one = self.fill(species_id)
+            one = self.fill(species_id, six, tier_min=tier_min)
             item = one.set.item
             if item and item in taken and reg.meta.item_clause is not None:
                 for index, alt in enumerate(one.alternatives):
