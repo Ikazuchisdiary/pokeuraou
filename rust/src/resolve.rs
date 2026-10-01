@@ -919,12 +919,16 @@ pub(crate) fn grounded_ignoring(turn: &Turn, mon: &Pokemon, ignore_ability: bool
 
 pub fn field_state(pos: &Position) -> FieldState {
     let mut abilities: [Vec<Id>; 2] = [Vec::new(), Vec::new()];
+    let mut shielded: [Vec<Id>; 2] = [Vec::new(), Vec::new()];
     let mut conditions: [Vec<Id>; 2] = [Vec::new(), Vec::new()];
     for (index, side) in pos.sides.iter().enumerate() {
         for slot in 0..side.active.len() {
             if let Some(mon) = side.active_pokemon(slot) {
                 if !mon.fainted {
                     abilities[index].push(mon.ability);
+                    if matches!(mon.item, Some(i) if i.as_str() == "abilityshield") {
+                        shielded[index].push(mon.ability);
+                    }
                 }
             }
         }
@@ -936,6 +940,7 @@ pub fn field_state(pos: &Position) -> FieldState {
         pseudo_weather: pos.field.pseudo_weather.iter().map(|p| p.id).collect(),
         side_conditions: conditions,
         active_abilities: abilities,
+        shielded_abilities: shielded,
         active_per_half: pos.sides[0].active.len() as i64,
     }
 }

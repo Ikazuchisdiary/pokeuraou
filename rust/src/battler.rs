@@ -194,6 +194,10 @@ pub struct FieldState {
     pub pseudo_weather: Vec<Id>,
     pub side_conditions: [Vec<Id>; 2],
     pub active_abilities: [Vec<Id>; 2],
+    /// The abilities of the active Pokemon holding an Ability Shield, by side: `breakable`
+    /// abilities of a third Pokemon (Friend Guard, Aura Break) survive a Mold Breaker only
+    /// through it (IKA-414).
+    pub shielded_abilities: [Vec<Id>; 2],
     pub active_per_half: i64,
 }
 
@@ -297,6 +301,7 @@ impl From<&FieldCase> for FieldState {
             pseudo_weather: ids(&case.pseudo_weather),
             side_conditions: [ids(&case.side_conditions[0]), ids(&case.side_conditions[1])],
             active_abilities: [ids(&case.active_abilities[0]), ids(&case.active_abilities[1])],
+            shielded_abilities: [Vec::new(), Vec::new()],
             active_per_half: case.active_per_half,
         }
     }
