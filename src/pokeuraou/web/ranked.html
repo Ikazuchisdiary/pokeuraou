@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- 画像の取得元（対局の画面と同じ）。{id} は Showdown の sprite id。空にすると画像なし（名前の札） -->
+<meta name="sprite-url" content="https://play.pokemonshowdown.com/sprites/gen5/{id}.png">
+<title>pokeuraou 選出の検討</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Dela+Gothic+One&family=IBM+Plex+Mono:wght@400;600&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="live.css">
+<link rel="stylesheet" href="ranked.css">
+</head>
+<body class="ranked">
+<header class="top">
+  <div class="brand"><b>pokeuraou</b><span>選出の検討</span></div>
+  <span class="grow"></span>
+  <button class="gear" id="gear" type="button" aria-label="設定" title="設定" aria-expanded="false" aria-controls="settings">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"
+      d="M10.3 3h3.4l.5 2.4a7 7 0 0 1 1.9 1.1l2.3-.8 1.7 2.9-1.8 1.6a7 7 0 0 1 0 2.2l1.8 1.6-1.7 2.9-2.3-.8a7 7 0 0 1-1.9 1.1l-.5 2.4h-3.4l-.5-2.4a7 7 0 0 1-1.9-1.1l-2.3.8-1.7-2.9 1.8-1.6a7 7 0 0 1 0-2.2L3.9 8.6l1.7-2.9 2.3.8a7 7 0 0 1 1.9-1.1z"/>
+      <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+  </button>
+</header>
+<div class="backdrop" id="settingsBackdrop" hidden></div>
+<section class="settings" id="settings" role="dialog" aria-modal="false" aria-labelledby="settingsTitle" hidden>
+  <div class="grip" aria-hidden="true"></div>
+  <div class="shead"><h2 id="settingsTitle">設定</h2><button type="button" class="ghost small" id="settingsClose">閉じる</button></div>
+  <div class="sgroup">
+    <h3>表示</h3>
+    <span class="seg" role="group" aria-label="テーマ" id="themeSeg"><button type="button" data-t="auto">自動</button><button type="button" data-t="light">ライト</button><button type="button" data-t="dark">ダーク</button></span>
+  </div>
+  <div class="sgroup">
+    <h3>データの出どころ</h3>
+    <p class="note" id="aboutEvent"></p>
+    <p class="note" id="aboutModel"></p>
+  </div>
+</section>
+<main class="rk-layout">
+  <section class="panel" id="mineBox" aria-labelledby="mineTitle">
+    <h2 id="mineTitle"><span class="rk-no">1</span>自分の構築</h2>
+    <label class="field wide" for="paste">Showdown のチーム文字列（英語名）を貼り付け</label>
+    <textarea id="paste" class="rk-paste" rows="6" spellcheck="false" placeholder="Incineroar @ Sitrus Berry&#10;Ability: Intimidate&#10;EVs: 32 HP / 20 Def / 14 SpD&#10;Careful Nature&#10;- Fake Out&#10;- Flare Blitz&#10;…（6 体）"></textarea>
+    <div class="sendbar"><span class="summary" id="mineSummary"></span><button type="button" class="primary" id="loadMine">読み込む</button></div>
+    <ul class="rk-msgs" id="mineMsg"></ul>
+    <div class="rk-sets" id="mineSets"></div>
+  </section>
+
+  <section class="panel" id="oppBox" aria-labelledby="oppTitle">
+    <h2 id="oppTitle"><span class="rk-no">2</span>相手の 6 種族</h2>
+    <p class="note">見せ合いで見える種族だけを入れます。メガは持ち物で決まるので、メガ前の種族名を入れてください。</p>
+    <div class="rk-species" id="speciesInputs"></div>
+    <datalist id="speciesList"></datalist>
+    <div class="sendbar"><span class="summary" id="oppSummary"></span><button type="button" class="primary" id="fillOpp">型を推定する</button></div>
+    <ul class="rk-msgs" id="oppMsg"></ul>
+    <div class="rk-estnote" id="estNote" hidden></div>
+    <div class="rk-sets" id="oppSets"></div>
+  </section>
+
+  <section class="panel" id="readBox" aria-labelledby="readTitle">
+    <h2 id="readTitle"><span class="rk-no">3</span>選出を読む</h2>
+    <p class="note" id="readNote">相手の型は推定です。型を直してから読み直せます。</p>
+    <div class="sendbar"><span class="summary" id="readSummary"></span><button type="button" class="primary" id="solve" disabled>選出を読む</button></div>
+    <div class="rk-progress" id="progress" hidden>
+      <div class="rk-ptrack"><div class="rk-pbar" id="pbar"></div></div>
+      <span class="n" id="ptext"></span>
+    </div>
+    <div class="rk-error" id="readError" role="alert" hidden></div>
+    <div id="result" hidden></div>
+  </section>
+</main>
+<datalist id="itemList"></datalist>
+<datalist id="moveList"></datalist>
+<script src="ranked.js"></script>
+</body>
+</html>

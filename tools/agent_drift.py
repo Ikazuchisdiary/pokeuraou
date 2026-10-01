@@ -142,6 +142,9 @@ OWN_RESOLUTION = {
     "default Q); plays no game (IKA-362)",
     "selection_sweep.py": "reads selection cells as a person's move reads them, menus q-nocover "
     "by the Q it names (the default Q); plays no game (IKA-392)",
+    "ranked_entry.py": "reads a ranked match's selection with play_human's own set-up "
+    "(its install_menus: q-nocover by the Q it names, the default Q; its leaf, its 90 s "
+    "default reading); plays no game (IKA-407)",
     "show_game.py": "--reread re-solves a recorded generation game with the Q the record names "
     "(its qModel, checked against qModelSha256), not the default; plays no game",
 }
