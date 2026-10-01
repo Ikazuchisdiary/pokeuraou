@@ -87,6 +87,8 @@ def _rough(moves: list[str] = IDLE_MOVES) -> TeamSet:
 
 
 PELIPPER = _mon("Pelipper", "Drizzle", PARTNER, 10)
+SLIDE = ["rockslide", "protect", "swordsdance", "fakeout"]
+SLIDER = _mon("Garchomp", "Sand Veil", SLIDE, 32, "lifeorb", atk=32)
 
 
 def _teams(a: TeamSet, b: TeamSet, user: TeamSet | None = None, partner: TeamSet | None = None):  # noqa: ANN202
@@ -173,6 +175,16 @@ CASES: dict[str, tuple] = {
     "control-misty-explosion-user-without-an-aura": _case(
         _teams(_sturdy(), _sturdy(), _user(BOOM)),
         [], "move 1, move 1", "|faint|p1a: Gholdengo", "p2b: Snorlax",
+    ),
+    # Spicy Spray burns the user after the damage is dealt to both targets: the second target's
+    # damage is not halved (a burn halves a physical hit), in Showdown.
+    "spicy-spray-first-target-burns-the-user": _case(
+        _teams(_sturdy("Spicy Spray", "Scovillain"), _sturdy(), SLIDER),
+        [], "move 1, move 1", "|-status|p1a: Garchomp|brn|[from] ability: Spicy Spray", "p2b: Snorlax",
+    ),
+    "control-spicy-spray-last-target": _case(
+        _teams(_sturdy(), _sturdy("Spicy Spray", "Scovillain"), SLIDER),
+        [], "move 1, move 1", "|-status|p1a: Garchomp|brn|[from] ability: Spicy Spray", "p2a: Snorlax",
     ),
     # The first target's hit has not happened when the second is computed: its Rough Skin takes the
     # user's last HP after the damage is dealt to both, and the second target is still hit.
