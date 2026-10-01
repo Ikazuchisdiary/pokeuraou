@@ -145,3 +145,27 @@ def test_the_text_path_is_the_traces_groups(tools, played) -> None:  # noqa: ANN
             assert got[0] == (None, traced.notes) and got[1:] == direct
         else:
             assert got == direct
+
+
+def test_a_mixture_row_names_the_target_of_a_single_target_move(tools, played) -> None:  # noqa: ANN001
+    """The seat's read lists each move with the foe it aims at (as the played-move line does), a
+    spread move and a switch carry none; two rows differing only in the target stay different."""
+    show_game, game_page = tools
+    reg, record, _node = played
+    loc = show_game.Localiser(reg, show_game.load_names("ja"))
+    seen_target = seen_plain = 0
+    for d in record["decisions"]:
+        if d["kind"] != "move":
+            continue
+        for side, actions in ((0, d["ownActions"]), (1, d["foeActions"])):
+            for choice in actions:
+                pair = game_page.pair_of(reg, loc, d["position"], side, choice)
+                full = show_game.name_action(reg, loc, d["position"]["sides"], side, choice)
+                for part, whole in zip(pair, full.split(" ｜ "), strict=False):
+                    if " → 敵" in whole and not whole.split(": ", 1)[1].startswith("交代"):
+                        assert "→ 相手の" in part["text"], (choice, part, whole)
+                        seen_target += 1
+                    elif " → " not in whole:
+                        assert "→" not in part["text"], (choice, part, whole)
+                        seen_plain += 1
+    assert seen_target and seen_plain  # positive control: both shapes occurred

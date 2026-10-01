@@ -157,3 +157,6 @@ body.ranked .rk-cols h3 { display: block; }
 body.ranked .rk-cols h3 small { display: block; margin-top: 2px; }
 .rk-set.thin { border: 1px solid var(--line); border-top: 3px solid var(--ai); box-shadow: 0 0 0 2px var(--warn); }
 .rk-alt small { font-size: 11px; }
+
+/* IKA-408: the link to the typed-in position */
+a.ghost { text-decoration: none; display: inline-flex; align-items: center; flex: none; }
