@@ -135,3 +135,20 @@ body.pos .rk-bar .summary { flex: 1 1 200px; }
   .ps-boost input { min-height: 44px; }
   .ps-boosts summary { min-height: 44px; display: flex; align-items: center; }
 }
+@media (max-width: 700px) {
+  body.pos .ghost.small, body.pos .rk-bar .ghost, body.pos .rk-bar .primary { min-height: 44px; }
+  .ps-more > summary, .ps-fold > summary { min-height: 44px; display: flex; align-items: center; }
+}
+
+/* ---- design review 2 (IKA-408) */
+.ps-fold > summary { font-family: inherit; font-size: 13px; font-weight: 700; color: var(--dim); letter-spacing: 0.06em; }
+.ps-fold > summary small { letter-spacing: 0; }
+.ps-boosts summary b { margin-left: .6em; }
+.ps-mon, .ps-est, .ps-seen, .ps-row, .ps-chips, .rk-alts { min-width: 0; max-width: 100%; }
+.ps-mon select, .ps-mon input:not([type="checkbox"]), .rk-alt { max-width: 100%; }
+.ps-f { max-width: 100%; }
+.ps-f select { min-width: 0; max-width: 100%; text-overflow: ellipsis; }
+@media (max-width: 700px) {
+  .ps-seen .ps-f, .ps-fgrid .ps-f { display: flex; width: 100%; }
+  .ps-seen .ps-f select, .ps-fgrid .ps-f select { flex: 1 1 0; min-width: 0; width: 100%; }
+}

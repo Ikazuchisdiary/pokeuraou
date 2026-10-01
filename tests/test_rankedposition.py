@@ -483,3 +483,21 @@ def test_a_reads_notes_are_plain_and_mega_stones_have_japanese_names(world) -> N
     assert app._name("item", "charizarditey") == "リザードンのメガストーン（Y）"
     assert app._name("item", "leftovers") == loc.item("leftovers")      # a plain item is the table's own
     del NS
+
+
+def test_a_pokemon_that_stayed_on_the_field_cannot_fake_out_again(world) -> None:  # noqa: ANN001
+    from pokeuraou.actions import MoveAction, side_actions
+
+    reg = world.reg
+    sets = {s: o.set for s, o in world.base.items()}
+
+    def fakeout_for_slot0(board, t):  # noqa: ANN001, ANN202
+        built = rp.build_position(reg, board, board.turns[t], sets, prev=board.turns[t - 1] if t else None)
+        return any(isinstance(a.slots[0], MoveAction) and a.slots[0].move_id == "fakeout"
+                   for a in side_actions(reg, built.position, 0))
+
+    stayed = _two_turns(world, mine_active=(1, 0))           # Incineroar (Fake Out) leads and stays
+    assert fakeout_for_slot0(stayed, 0) and not fakeout_for_slot0(stayed, 1)
+    # The comparison can fail: Rillaboom (also Fake Out) coming in on turn 2 can use it.
+    _edit(stayed, 1, lambda f: f.update(mineActive=[2, 0]))
+    assert fakeout_for_slot0(stayed, 1)

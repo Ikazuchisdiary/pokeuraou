@@ -7,6 +7,9 @@ const TYPE_COLORS = {
   fighting: "#ff8000", poison: "#9141cb", ground: "#915121", flying: "#81b9ef", psychic: "#ef4179", bug: "#91a119",
   rock: "#afa981", ghost: "#704170", dragon: "#5060e1", dark: "#624d4e", steel: "#60a1b8", fairy: "#ef70ef",
 };
+const STAT_LONG = { hp: "HP", atk: "攻撃", def: "防御", spa: "特攻", spd: "特防", spe: "素早さ" };
+const spreadLine = (s) => `${esc(STAT_LONG[s.stat])}の配分を ${s.before} → ${s.after} にしました（SP ${s.low}〜${s.high} が可能。${esc(STAT_LONG[s.stat])}の値は ${s.statLow}〜${s.statHigh}）`;
+const moved = () => BOARD.spread.filter((s) => s.before !== s.after);
 const BOOST_NAMES = { atk: "攻撃", def: "防御", spa: "特攻", spd: "特防", spe: "素早さ", accuracy: "命中", evasion: "回避" };
 const metaSprite = document.querySelector('meta[name="sprite-url"]');
 const SPRITE_URL = metaSprite ? metaSprite.getAttribute("content") : "";
@@ -210,7 +213,7 @@ function estimateHtml(sid) {
   const extra = [];
   if (r.members) extra.push(`大会の型 ${r.members[0]} 体 → 見えたものに合う ${r.members[1]} 体`);
   (r.notes || []).forEach((n) => extra.push(n));
-  BOARD.spread.filter((s) => s.id === sid).forEach((s) => extra.push(`${esc(META.statNames[META.stats.indexOf(s.stat)])}の配分 ${s.before} → ${s.after}（${s.low}〜${s.high} が可能）`));
+  moved().filter((s) => s.id === sid).forEach((s) => extra.push(spreadLine(s)));
   const alts = (v.alternatives || []).length > 1
     ? `<div class="rk-alts" role="group" aria-label="残っている型の候補">${v.alternatives.map((a) =>
       `<button type="button" class="rk-alt" data-choose="${esc(sid)}" data-a="${a.index}" aria-pressed="${String(v.chosen === a.index)}">${esc(a.label)}（${a.count} 体）<small>${esc(a.moves.join("・"))}</small></button>`).join("")}</div>` : "";
@@ -302,7 +305,7 @@ function eventsHtml() {
   const dmgList = ev.damage.map((d, i) => `<li>相手の${esc(oppName(d.attacker))} の ${esc(moveName(d.move))} で、自分の${esc(mineName(d.target))} が <b>${d.amount}</b> ダメージ${d.crit ? "（急所）" : ""} <button type="button" class="ps-x" data-del-dmg="${i}">消す</button></li>`).join("");
   const foes = p.theirActive.filter((x) => x), mine = p.mineActive.filter((x) => x != null);
   const dropHint = mine.map((i) => { const was = p.mine[String(i)].hp, now = FORM.mine[String(i)] ? FORM.mine[String(i)].hp : was; return was !== now ? `${mineName(i)} の HP は ${was} → ${now}（${was - now} 減）` : ""; }).filter(Boolean).join(" ／ ");
-  const results = [...(BOARD.spread.map((s) => `${esc(s.species)} の${esc(META.statNames[META.stats.indexOf(s.stat)])}の配分を ${s.before} → ${s.after} にしました（${s.low}〜${s.high} が可能。実数値 ${s.statLow}〜${s.statHigh}）<small>${s.because.map(esc).join("、")}</small>`)),
+  const results = [...moved().map((s) => `${esc(s.species)}: ${spreadLine(s)}<small>${s.because.map(esc).join("、")}</small>`),
     ...BOARD.lines.map(esc)];
   return `<p class="note">ターン ${p.turn} の始めの局面で計算します。途中で能力変化や天気が変わったときは、外れることがあります。</p>
     <div class="ps-ev">
@@ -385,7 +388,7 @@ function renderDerived() {
   document.querySelectorAll("[data-hphint]").forEach((el) => { el.textContent = hpHint(el.dataset.hphint); });
   const res = $("evRes");
   if (res && CUR > 0) {
-    const results = [...BOARD.spread.map((s) => `${esc(s.species)} の${esc(META.statNames[META.stats.indexOf(s.stat)])}の配分を ${s.before} → ${s.after} にしました（${s.low}〜${s.high} が可能。実数値 ${s.statLow}〜${s.statHigh}）<small>${s.because.map(esc).join("、")}</small>`), ...BOARD.lines.map(esc)];
+    const results = [...moved().map((s) => `${esc(s.species)}: ${spreadLine(s)}<small>${s.because.map(esc).join("、")}</small>`), ...BOARD.lines.map(esc)];
     res.innerHTML = results.length ? `<ul>${results.map((r) => `<li>${r}</li>`).join("")}</ul>` : "";
   }
   const running = BOARD.read && BOARD.read.state === "running";

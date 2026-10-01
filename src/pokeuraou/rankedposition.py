@@ -63,6 +63,18 @@ HP_MODES = ("low", "mid", "high")
 SPREAD_MOVES = {"bodypress": "def"}
 
 
+Namer = Callable[[str, str], str]
+
+
+def english_names(reg: Regulation) -> Namer:
+    """The dex's own names: ``kind`` is species, move, item or ability."""
+    tables = {"species": reg.species, "move": reg.moves, "item": reg.items, "ability": reg.abilities}
+
+    def name(kind: str, ident: str) -> str:
+        return str(tables[kind][ident].name)
+    return name
+
+
 # ----------------------------------------------------------------------------- the board
 
 
@@ -81,6 +93,11 @@ class Board:
     #: the selection screen or the match has shown).
     opp_seen: list[str] = field(default_factory=list)
     turns: list[dict[str, Any]] = field(default_factory=list)
+    #: ``(kind, id) -> name`` for what the person reads (the screen's localiser); English by default.
+    namer: Callable[[str, str], str] | None = None
+
+    def name(self, kind: str, ident: str) -> str:
+        return (self.namer or english_names(self.reg))(kind, ident)
 
     def check(self) -> None:
         reg = self.reg
@@ -214,7 +231,7 @@ def normalize(reg: Regulation, board: Board, form: dict[str, Any]) -> dict[str, 
     mine: dict[str, Any] = {}
     for i in board.brought:
         raw = dict(mine_in.get(str(i)) or _blank_mine(reg, board.mine.sets[i]))
-        name = reg.species[board.mine.sets[i].species].name
+        name = board.name("species", board.mine.sets[i].species)
         maxhp = _blank_mine(reg, board.mine.sets[i])["hp"]
         mine[str(i)] = {
             "hp": integer(raw.get("hp", maxhp), 0, maxhp, f"{name} の HP"),
@@ -229,7 +246,7 @@ def normalize(reg: Regulation, board: Board, form: dict[str, Any]) -> dict[str, 
         if idx is not None and idx not in board.brought:
             raise RankedError("出ている自分の体が、選んだ 4 体の中にありません")
         if idx is not None and mine[str(idx)]["hp"] == 0:
-            name = reg.species[board.mine.sets[idx].species].name
+            name = board.name("species", board.mine.sets[idx].species)
             raise RankedError(f"{name} は倒れているので場に出せません")
     if len([x for x in active_mine if x is not None]) != len({x for x in active_mine if x is not None}):
         raise RankedError("同じ自分の体が 2 回出ています")
@@ -245,7 +262,7 @@ def normalize(reg: Regulation, board: Board, form: dict[str, Any]) -> dict[str, 
         if sid not in board.opp_six:
             raise RankedError("相手の体は、相手の 6 種族の中から選んでください")
         raw = dict(theirs_in.get(sid) or _blank_theirs())
-        name = reg.species[sid].name
+        name = board.name("species", sid)
         colour = raw.get("colour") or None
         if colour not in (None, "r", "y", "g"):
             raise RankedError("HP の色は r・y・g のどれかです")
@@ -274,7 +291,7 @@ def normalize(reg: Regulation, board: Board, form: dict[str, Any]) -> dict[str, 
         if sid is not None and sid not in theirs:
             raise RankedError("出ている相手の体が見えた体の中にありません")
         if sid is not None and theirs[sid]["fainted"]:
-            raise RankedError(f"{reg.species[sid].name} は倒れているので場に出せません")
+            raise RankedError(f"{board.name('species', sid)} は倒れているので場に出せません")
     if len([x for x in active_theirs if x]) != len({x for x in active_theirs if x}):
         raise RankedError("同じ相手の体が 2 回出ています")
 
@@ -362,10 +379,10 @@ def hp_for(reg: Regulation, pct: int, colour: str | None, maxhp: int, mode: str 
     return b.low + (b.width - 1) // 2
 
 
-def _apply_mega(reg: Regulation, mon: Any, notes: list[str]) -> None:  # noqa: ANN401
+def _apply_mega(reg: Regulation, mon: Any, notes: list[str], name: Namer) -> None:  # noqa: ANN401
     target = reg.mega_target(mon.species, mon.item)
     if target is None:
-        raise RankedError(f"{reg.species[mon.species].name} は持ち物でメガシンカできません")
+        raise RankedError(f"{name('species', mon.species)} は持ち物でメガシンカできません")
     found = reg.species[target]
     mon.species = target
     mon.types = tuple(found.types)
@@ -378,11 +395,15 @@ def _apply_mega(reg: Regulation, mon: Any, notes: list[str]) -> None:  # noqa: A
 
 def build_position(
     reg: Regulation, board: Board, form: dict[str, Any], sets: dict[str, SampledSet],
-    *, hp_mode: str = "mid",
+    *, hp_mode: str = "mid", prev: dict[str, Any] | None = None,
 ) -> Built:
     """The form as a `Position`: actives first on each side (so ``active`` is ``[0, 1]``), then
     the rest of the four. The opponent's four are the ones seen, then unseen ones from its six
-    (they are completed again by the analysis, which weighs who the opponent would bring)."""
+    (they are completed again by the analysis, which weighs who the opponent would bring).
+
+    ``prev`` is the turn before: a Pokemon that stood on the field then and stands there now has
+    acted since it came in, so Fake Out and its two relatives no longer work for it
+    (`Pokemon.active_move_actions`, which a form cannot be asked for)."""
     four = reg.meta.picked_team_size
     notes: list[str] = []
     active_n = reg.meta.active_per_side
@@ -397,7 +418,9 @@ def build_position(
         state = form["mine"][str(idx)]
         active = form["mineActive"].index(idx) if idx in form["mineActive"] else None
         mon = _make_pokemon(reg, slot, sset, active)
-        _fill(reg, mon, state, mon.maxhp, notes)
+        _fill(reg, mon, state, mon.maxhp, notes, board.name)
+        if prev is not None and active is not None and idx in prev["mineActive"]:
+            mon.active_move_actions = 1
         mon.hp = int(state["hp"])
         mon.fainted = mon.hp == 0
         mons.append(mon)
@@ -413,9 +436,11 @@ def build_position(
     for sid, slot in opp_slots.items():
         active = form["theirActive"].index(sid) if sid in form["theirActive"] else None
         mon = _make_pokemon(reg, slot, sets[sid], active)
+        if prev is not None and active is not None and sid in prev["theirActive"]:
+            mon.active_move_actions = 1
         state = form["theirs"].get(sid)
         if state is not None:
-            _fill(reg, mon, state, mon.maxhp, notes)
+            _fill(reg, mon, state, mon.maxhp, notes, board.name)
             if state["fainted"]:
                 mon.hp = 0
                 mon.fainted = True
@@ -441,7 +466,9 @@ def build_position(
     return Built(position, mine_slots, opp_slots, problems, notes)
 
 
-def _fill(reg: Regulation, mon: Any, state: dict[str, Any], maxhp: int, notes: list[str]) -> None:  # noqa: ANN401
+def _fill(  # noqa: PLR0913
+    reg: Regulation, mon: Any, state: dict[str, Any], maxhp: int, notes: list[str], name: Namer,  # noqa: ANN401
+) -> None:
     mon.status = state["status"]
     mon.boosts = {k: int(v) for k, v in state["boosts"].items() if v}
     if state.get("itemGone"):
@@ -450,7 +477,7 @@ def _fill(reg: Regulation, mon: Any, state: dict[str, Any], maxhp: int, notes: l
         item = mon.item or mon.base_item
         held = mon.item
         mon.item = item
-        _apply_mega(reg, mon, notes)
+        _apply_mega(reg, mon, notes, name)
         mon.item = held if held else item
     del maxhp
 
@@ -507,7 +534,9 @@ def seen_union(board: Board, upto: int | None = None) -> dict[str, Observation]:
     return out
 
 
-def _force(reg: Regulation, one: SampledSet, seen: Observation) -> tuple[SampledSet, list[str]]:
+def _force(
+    reg: Regulation, one: SampledSet, seen: Observation, name: Namer,
+) -> tuple[SampledSet, list[str]]:
     """The set with what was seen put in: the seen moves (the commonest others fill the rest),
     the seen item and ability."""
     notes: list[str] = []
@@ -518,16 +547,18 @@ def _force(reg: Regulation, one: SampledSet, seen: Observation) -> tuple[Sampled
     ability, item = one.ability, one.item
     if seen.ability and to_id(ability or "") != seen.ability:
         ability = seen.ability
-        notes.append(f"特性は見えた {reg.abilities[seen.ability].name} にしました")
+        notes.append(f"特性は見えた {name('ability', seen.ability)} にしました")
     if seen.item and item != seen.item:
         item = seen.item
-        notes.append(f"持ち物は見えた {reg.items[seen.item].name} にしました")
+        notes.append(f"持ち物は見えた {name('item', seen.item)} にしました")
     if set(moves) != set(one.moves):
         notes.append("技に見えた技を入れました")
     return replace(one, moves=moves, ability=ability, item=item), notes
 
 
-def refine_opponent(prior: FieldPrior, base: OpponentSet, seen: Observation) -> Refined:
+def refine_opponent(
+    prior: FieldPrior, base: OpponentSet, seen: Observation, name: Namer | None = None,
+) -> Refined:
     """The estimate for one opposing Pokemon given what has been seen of it (never what has
     not): the field's sets that could have produced it, the commonest of them; the person's own
     choice or typed set is kept when it is consistent with it."""
@@ -548,7 +579,7 @@ def refine_opponent(prior: FieldPrior, base: OpponentSet, seen: Observation) -> 
             one = prior.estimate(narrowed)
             if tuple(one.set.moves) != tuple(base.set.moves) or one.set.item != base.set.item:
                 notes.append(f"見えたものから、大会の型 {members[0]} 体のうち {members[1]} 体に絞りました")
-    chosen, more = _force(reg, one.set, seen)
+    chosen, more = _force(reg, one.set, seen, name or english_names(reg))
     notes += more
     if chosen is not one.set:
         one = replace(one, set=chosen)
@@ -691,7 +722,8 @@ def narrow_spreads(
                 second = (1, their_slot) if mine_is_first else (0, mine_slot)
                 obs = MovedFirst(first, second, first_move=raw["firstMove"], second_move=raw["secondMove"])
                 label = "先に動いた" if not mine_is_first else "後に動いた"
-                found.append((obs, sid, "spe", f"ターン {t}: {reg.species[sid].name} が自分の体より{label}"))
+                who = board.name("species", sid)
+                found.append((obs, sid, "spe", f"ターン {t}: {who} が自分の体より{label}"))
             else:
                 lines.append(f"ターン {t}: 相手どうし・自分どうしの順は素早さの手がかりにしません")
         for raw in events["damage"]:
@@ -707,14 +739,14 @@ def narrow_spreads(
                 lines.append(f"ターン {t}: ダメージの体が前のターンに出ていないので使えません")
                 continue
             if axis is None:
-                lines.append(f"ターン {t}: {reg.moves[move].name} は配分の手がかりになりません")
+                lines.append(f"ターン {t}: {board.name('move', move)} は配分の手がかりになりません")
                 continue
             capped = board.turns[t]["mine"][str(idx)]["hp"] == 0
             obs = DamageTaken(
                 (1, their_slot), (0, mine_slot), move, int(raw["amount"]), crit=bool(raw["crit"]),
                 spread=_spread_hit(reg, pos, mine_slot, move), capped=capped)
-            found.append((obs, sid, axis, f"ターン {t}: {reg.species[sid].name} の {reg.moves[move].name} で "
-                                          f"{raw['amount']} ダメージ"))
+            who, what = board.name("species", sid), board.name("move", move)
+            found.append((obs, sid, axis, f"ターン {t}: {who} の {what} で {raw['amount']} ダメージ"))
         # One grid per Pokemon over the stats its observations read.
         for sid in dict.fromkeys(f[1] for f in found):
             mine_obs = [f for f in found if f[1] == sid]
@@ -804,7 +836,7 @@ def derive(
     ``choices`` are the person's picks among the remaining candidates, ``species -> (item, nature,
     moves)``: kept while that set is still one of the commonest the observations leave."""
     seen = seen_union(board)
-    refined = {sid: refine_opponent(prior, one, seen.get(sid, Observation()))
+    refined = {sid: refine_opponent(prior, one, seen.get(sid, Observation()), board.name)
                for sid, one in base.items()}
     for sid, key in (choices or {}).items():
         ref = refined.get(sid)
@@ -819,7 +851,8 @@ def derive(
 
     def built_for(t: int) -> Built:
         if t not in built_cache:
-            built_cache[t] = build_position(reg, board, board.turns[t], sets, hp_mode=hp_mode)
+            built_cache[t] = build_position(reg, board, board.turns[t], sets, hp_mode=hp_mode,
+                                            prev=board.turns[t - 1] if t > 0 else None)
         return built_cache[t]
 
     spread_notes: list[SpreadNote] = []

@@ -107,6 +107,7 @@ class BoardApp:
             opp_six = [o.set.species for o in app.opponent if o is not None]
             board = rp.Board(app.reg, app.mine, [int(i) for i in brought], opp_six,
                              [str(s) for s in leads], [str(s) for s in seen])
+            board.namer = app._name
             board.check()
             sets = {sid: o.set for sid, o in self._base().items()}
             board.turns = [rp.initial_form(app.reg, board, sets)]
