@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<!-- 画像の取得元（対局の画面と同じ）。{id} は Showdown の sprite id。空にすると画像なし（名前の札） -->
+<meta name="sprite-url" content="https://play.pokemonshowdown.com/sprites/gen5/{id}.png">
+<title>pokeuraou 局面の検討</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Dela+Gothic+One&family=IBM+Plex+Mono:wght@400;600&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap">
+<link rel="stylesheet" href="live.css">
+<link rel="stylesheet" href="ranked.css">
+<link rel="stylesheet" href="ranked-position.css">
+</head>
+<body class="ranked pos">
+<header class="top">
+  <div class="brand"><b>pokeuraou</b><span>局面の検討</span></div>
+  <a class="ghost small rk-back" href="ranked.html">← 選出の検討</a>
+  <span class="grow"></span>
+  <button class="gear" id="gear" type="button" aria-label="設定" title="設定" aria-expanded="false" aria-controls="settings">
+    <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"
+      d="M10.3 3h3.4l.5 2.4a7 7 0 0 1 1.9 1.1l2.3-.8 1.7 2.9-1.8 1.6a7 7 0 0 1 0 2.2l1.8 1.6-1.7 2.9-2.3-.8a7 7 0 0 1-1.9 1.1l-.5 2.4h-3.4l-.5-2.4a7 7 0 0 1-1.9-1.1l-2.3.8-1.7-2.9 1.8-1.6a7 7 0 0 1 0-2.2L3.9 8.6l1.7-2.9 2.3.8a7 7 0 0 1 1.9-1.1z"/>
+      <circle cx="12" cy="12" r="3" fill="none" stroke="currentColor" stroke-width="1.8"/></svg>
+  </button>
+</header>
+<div class="backdrop" id="settingsBackdrop" hidden></div>
+<section class="settings" id="settings" role="dialog" aria-modal="false" aria-labelledby="settingsTitle" hidden>
+  <div class="grip" aria-hidden="true"></div>
+  <div class="shead"><h2 id="settingsTitle">設定</h2><button type="button" class="ghost small" id="settingsClose">閉じる</button></div>
+  <div class="sgroup">
+    <h3>表示</h3>
+    <span class="seg" role="group" aria-label="テーマ" id="themeSeg"><button type="button" data-t="auto">自動</button><button type="button" data-t="light">ライト</button><button type="button" data-t="dark">ダーク</button></span>
+  </div>
+  <div class="sgroup">
+    <h3>データの出どころ</h3>
+    <p class="note" id="aboutEvent"></p>
+    <p class="note" id="aboutRead"></p>
+  </div>
+  <div class="sgroup">
+    <h3>入力をやり直す</h3>
+    <button type="button" class="ghost small" id="resetBoard">選出から入れ直す</button>
+  </div>
+</section>
+
+<main class="rk-layout ps-layout">
+  <section class="panel" id="setupBox" hidden aria-labelledby="setupTitle">
+    <h2 id="setupTitle"><span class="rk-no">1</span>誰が出ているか</h2>
+    <p class="note" id="setupNeed" hidden>先に「選出の検討」で、自分の構築と相手の 6 種族を入れてください。</p>
+    <div id="setupForm">
+      <h3 class="ps-h">自分の選出（4 体）<small>先発の 2 体から順に押します</small></h3>
+      <div class="ps-pick" id="pickMine"></div>
+      <h3 class="ps-h">相手の先発と、見えた体<small>先発は 2 体。見せ合いやバトルで見えた体を押します</small></h3>
+      <div class="ps-pick" id="pickOpp"></div>
+      <ul class="rk-msgs" id="setupMsg"></ul>
+      <div class="sendbar"><span class="summary" id="setupSummary"></span><button type="button" class="primary" id="startBoard" disabled>局面の入力を始める</button></div>
+    </div>
+  </section>
+
+  <section id="boardBox" hidden>
+    <nav class="ps-turns" id="turnBar" aria-label="ターン"></nav>
+    <p class="note ps-diff" id="diffNote"></p>
+    <ul class="rk-msgs" id="turnMsg"></ul>
+
+    <section class="panel ps-field" aria-labelledby="oppFieldTitle">
+      <h2 id="oppFieldTitle">相手の場</h2>
+      <div class="ps-mons" id="oppActive"></div>
+      <details class="ps-more" id="oppBenchBox"><summary id="oppBenchSum">相手の裏</summary><div class="ps-mons" id="oppBench"></div><div class="ps-unseen" id="oppUnseen"></div></details>
+    </section>
+    <section class="panel ps-field" aria-labelledby="mineFieldTitle">
+      <h2 id="mineFieldTitle">自分の場</h2>
+      <div class="ps-mons" id="mineActive"></div>
+      <details class="ps-more" id="mineBenchBox" open><summary id="mineBenchSum">自分の裏</summary><div class="ps-mons" id="mineBench"></div></details>
+    </section>
+    <section class="panel" aria-labelledby="fieldTitle">
+      <h2 id="fieldTitle">場の状態</h2>
+      <div id="fieldState"></div>
+    </section>
+    <section class="panel" id="eventsBox" aria-labelledby="eventsTitle">
+      <h2 id="eventsTitle">このターンに起きたこと<small>分かるときだけ。相手の配分を絞る手がかりになります</small></h2>
+      <div id="events"></div>
+    </section>
+    <section class="panel" id="readBox" aria-labelledby="readTitle">
+      <h2 id="readTitle">次の手の読み</h2>
+      <p class="note" id="readNote"></p>
+      <div class="rk-progress" id="progress" hidden>
+        <div class="rk-ptrack"><div class="rk-pbar" id="pbar"></div></div>
+        <span class="n" id="ptext"></span>
+      </div>
+      <div class="rk-error" id="readError" role="alert" hidden></div>
+      <div id="result" hidden></div>
+    </section>
+    <div class="rk-bar" role="region" aria-label="局面を読む">
+      <span class="summary" id="barSummary"></span>
+      <button type="button" class="ghost" id="nextTurn">次のターンへ</button>
+      <button type="button" class="primary" id="readTurn" disabled>このターンを読む</button>
+    </div>
+  </section>
+</main>
+<datalist id="moveList"></datalist>
+<datalist id="itemList"></datalist>
+<script src="ranked-position.js"></script>
+</body>
+</html>
