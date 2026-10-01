@@ -34,6 +34,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field, replace
 from typing import Any
@@ -559,6 +560,18 @@ def seen_union(board: Board, upto: int | None = None) -> dict[str, Observation]:
     return out
 
 
+def mega_stone(reg: Regulation, species_id: str, members: Sequence[Any]) -> str | None:
+    """The Mega Stone a Pokemon that Mega Evolved holds: seeing it Mega Evolve shows its item. When
+    the species has more than one (Charizard's X and Y), the one the field holds most."""
+    base = to_id(reg.species[species_id].base_species)
+    stones = [i for i, item in reg.items.items()
+              if item.mega_stone and any(to_id(k) == base for k in item.mega_stone)]
+    if not stones:
+        return None
+    held = Counter(m.item for m in members if m.item in stones)
+    return sorted(stones, key=lambda i: (-held[i], i))[0]
+
+
 def _force(
     reg: Regulation, one: SampledSet, seen: Observation, name: Namer,
 ) -> tuple[SampledSet, list[str]]:
@@ -861,6 +874,12 @@ def derive(
     ``choices`` are the person's picks among the remaining candidates, ``species -> (item, nature,
     moves)``: kept while that set is still one of the commonest the observations leave."""
     seen = seen_union(board)
+    for form in board.turns:
+        for sid, state in form["theirs"].items():
+            if state["mega"] and seen.get(sid, Observation()).item is None:
+                stone = mega_stone(reg, sid, prior.members.get(sid, ()))
+                if stone:
+                    seen[sid] = seen.get(sid, Observation()).merged(Observation(item=stone))
     refined = {sid: refine_opponent(prior, one, seen.get(sid, Observation()), board.name)
                for sid, one in base.items()}
     for sid, key in (choices or {}).items():

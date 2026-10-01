@@ -70,7 +70,7 @@ from pokeuraou.rankedentry import FieldPrior, OpponentSet  # noqa: E402
 from pokeuraou.regulation import to_id  # noqa: E402
 
 FORMAT_ID = "gen9championsvgc2026regmc"
-VARIANTS = ("null", "a_low", "a_mid", "a_high", "b", "c", "x")
+VARIANTS = ("null", "a_low", "a_mid", "a_high", "b", "c", "x", "n_pp", "n_mem", "n_all")
 
 
 # ----------------------------------------------------------------------------- a record as forms
@@ -103,7 +103,7 @@ def moves_used(reg, game, k: int, foe_id: dict[str, str]) -> dict[str, list[str]
                 if party is None:
                     continue
                 sid = foe_id.get(identity(pos.sides[1].pokemon[party]))
-                if sid and slot.move_id not in out[sid]:
+                if sid and slot.move_id in reg.moves and slot.move_id not in out[sid]:
                     out[sid].append(slot.move_id)
     return out
 
@@ -200,6 +200,44 @@ def board_for(reg, game, k: int, *, observed: bool, namer=None):  # noqa: ANN001
     except rp.RankedError as exc:
         raise Unusable(str(exc)) from exc
     return board
+
+
+#: What a form cannot say of a Pokemon, in the order it is put back to see what the gap is made of.
+MEMORY_FIELDS = ("last_move", "locked_move", "move_last_turn_failed", "times_attacked", "active_move_actions",
+                 "status_duration", "status_counter", "trapped", "newly_switched", "ability_state")
+
+
+def with_record_state(typed, record, groups: tuple[str, ...]):  # noqa: ANN001, ANN201
+    """The typed position with some of what the record's position holds put back: ``pp`` (the move
+    slots' PP), ``mem`` (what a Pokemon remembers of the turns before), ``vol`` (the volatiles and the
+    side conditions the form has no field for). Pokemon are matched by identity; an unseen member
+    of the opponent's four has no match and is left."""
+    out = typed.copy()
+    for side_t, side_r in zip(out.sides, record.sides, strict=True):
+        by_id = {identity(m): m for m in side_r.pokemon}
+        for mon in side_t.pokemon:
+            ref = by_id.get(identity(mon))
+            if ref is None:
+                continue
+            if "pp" in groups:
+                slots = {m.id: m for m in ref.moves}
+                for slot in mon.moves:
+                    if slot.id in slots:
+                        slot.pp, slot.maxpp = slots[slot.id].pp, slots[slot.id].maxpp
+                        slot.disabled, slot.used = slots[slot.id].disabled, slots[slot.id].used
+            if "mem" in groups:
+                for name in MEMORY_FIELDS:
+                    setattr(mon, name, getattr(ref, name))
+            if "vol" in groups:
+                mon.volatiles = [e.copy() for e in ref.volatiles]
+                mon.unmodelled_volatiles = list(ref.unmodelled_volatiles)
+        if "vol" in groups:
+            side_t.side_conditions = [e.copy() for e in side_r.side_conditions]
+            side_t.slot_conditions = [[e.copy() for e in g] for g in side_r.slot_conditions]
+            side_t.mega_used = side_r.mega_used
+    if "vol" in groups:
+        out.field = record.field.copy()
+    return out
 
 
 def override_of(one: SampledSet) -> OpponentSet:
@@ -352,6 +390,12 @@ def run(args) -> None:  # noqa: ANN001
                 derived = rp.derive(reg, board, prior, base, hp_mode=mode, observe_spread=False)
                 g, p, _built = make_game(reg, mine, board, derived, len(board.turns) - 1)
                 reads[name] = read(g, p)
+                if name == "null":
+                    # the same form with what it cannot say put back from the record, a group at a time
+                    for label, groups in (("n_pp", ("pp",)), ("n_mem", ("pp", "mem")),
+                                          ("n_all", ("pp", "mem", "vol"))):
+                        filled = with_record_state(analysis.Position.from_json(p.position), pos0, groups)
+                        reads[label] = read(g, replace(p, position=filled.to_json()))
                 sets_by_variant[name] = {
                     s: (v.item, tuple(sorted(v.moves)), v.nature) for s, v in derived.sets.items()}
             if args.repeat and n < args.repeat:
@@ -450,7 +494,9 @@ def summarize(files: list[Path]) -> None:
     for r in rows:
         if "skipped" in r:
             print("  skipped:", r["n"], r["skipped"][:100])
-    names = {"null": "null  (form, true sets, exact HP)", "a_low": "a_low (true sets, HP band bottom)",
+    names = {"n_pp": "n_pp  (null + PP from the record)", "n_mem": "n_mem (n_pp + what it remembers)",
+             "n_all": "n_all (n_mem + volatiles, side states)",
+             "null": "null  (form, true sets, exact HP)", "a_low": "a_low (true sets, HP band bottom)",
              "a_mid": "a_mid (true sets, HP band middle)", "a_high": "a_high (true sets, HP band top)",
              "b": "b     (estimated sets)", "c": "c     (b + seen moves/items)",
              "x": "x     (b with one wrong set)"}
