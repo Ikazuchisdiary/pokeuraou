@@ -974,7 +974,7 @@ h2{font-size:15px;margin:28px 0 8px;color:var(--dim);font-weight:600;letter-spac
 .nc{text-align:right;white-space:nowrap}.nc .gp{color:var(--bad);font-size:11px}
 .tag.pk{margin:2px 0 0 30px;font-size:11px}
 .ic.xs.f0,.ic.xs.f1{width:24px;height:24px;flex:none}
-@media (max-width:720px){.mt .r{grid-template-columns:minmax(0,1fr) auto}.bc{grid-column:1/-1;order:3}.pt .pm{display:block}
+@media (max-width:720px){.mt .r,.mt.opp .r{grid-template-columns:minmax(0,1fr) auto}.bc{grid-column:1/-1;order:3}.pt .pm{display:block}
 .mh small{display:block;margin-left:0}.msl .l2{padding-left:0}}
 .dmg{font-family:var(--num);font-weight:700;color:var(--bad)}
 .tag{display:inline-block;font-size:12px;line-height:1.5;padding:0 8px;border-radius:999px;border:1px solid var(--line);background:var(--surface);color:var(--dim);white-space:nowrap}
