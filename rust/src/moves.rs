@@ -2263,6 +2263,7 @@ fn hit_target<'a>(
                         state.faint(action.side, action.slot);
                     }
                     if on_doll {
+                        state.move_dolled[target.0][target.1] = true;
                         hit_substitute(&mut state, action, mv, target, amount, &budget)?;
                         continue;
                     }
@@ -2869,31 +2870,17 @@ fn after_hit(
         crate::airborne::pop_air_balloon(turn, target);
     }
 
-    // Knock Off removes what it hit; Thief and Covet take it when the attacker has
-    // nothing. A mega stone refuses to leave the species it belongs to, and only that
-    // species, which `item_is_removable` reads from the regulation's own mega map.
-    if matches!(mv.id.as_str(), "knockoff" | "thief" | "covet") {
-        let target_item = match turn.mon_at(target.0, target.1) {
-            None => None,
-            Some(mon) if mon.fainted => None,
-            Some(mon) => mon.item,
-        };
-        if let Some(item) = target_item {
-            let species = turn.mon_at(target.0, target.1).unwrap().species;
-            let removable = turn
-                .reg
-                .item_is_removable(species.as_str(), Some(item.as_str()));
-            let attacker_empty =
-                matches!(turn.mon_at(me.0, me.1), Some(mon) if mon.item.is_none());
-            if removable && mv.id == "knockoff" {
-                turn.consume_item(target.0, target.1, "knockoff");
-            } else if removable && attacker_empty {
-                turn.consume_item(target.0, target.1, mv.id.as_str());
-                if let Some(mon) = turn.mon_at_mut(me.0, me.1) {
-                    mon.item = Some(item);
-                }
-                log_event!(turn, "{} stole {}", Name(me.0, me.1), item);
-            }
+    // Knock Off's, Thief's and Covet's `onAfterHit` (IKA-214): `if (moveData.onAfterHit &&
+    // pokemon.hp)` -- not for a user a contact ability just knocked out -- and the holder
+    // need not have survived the hit: `takeItem` does not look at its HP.
+    if matches!(mv.id.as_str(), "knockoff" | "thief" | "covet")
+        && matches!(turn.mon_at(me.0, me.1), Some(m) if !m.fainted && m.hp > 0)
+    {
+        if mv.id == "knockoff" {
+            // `const item = target.takeItem(); if (item) this.add('-enditem', ...)`.
+            take_item(turn, target, None, (mv.id.as_str(), me));
+        } else {
+            thief_after_hit(turn, mv, me, target);
         }
     }
 
@@ -3319,6 +3306,7 @@ fn field_for_hit(turn: &Turn) -> crate::battler::FieldState {
 fn begin_move_watch(turn: &mut Turn) {
     turn.move_start_hp = Some(active_hp(turn));
     turn.move_hit = [[false; 2]; 2];
+    turn.move_dolled = [[false; 2]; 2];
 }
 
 /// `battle.canSwitch(side)` (Python's `_can_switch`).
@@ -4026,6 +4014,7 @@ fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), S
         crate::steel_beam::recoil_on_fail(turn, me, mv)?;
     }
     after_move_secondary_switches(turn, action, mv)?;
+    pickpocket(turn, action, mv)?;
     let (item, maxhp) = match turn.mon_at(me.0, me.1) {
         None => (None, 0),
         Some(mon) => (mon.item, mon.maxhp),
@@ -4092,6 +4081,10 @@ fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), S
         }
     }
 
+    if !sheer {
+        magician(turn, action, mv)?;
+    }
+
     if mv.self_switch && turn.move_connected {
         mark_self_switch(turn, action);
     }
@@ -4099,6 +4092,112 @@ fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), S
     check_white_herb(turn);
     turn.move_damage_total = 0;
     turn.move_connected = false;
+    Ok(())
+}
+
+/// The Pokemon the move hit, other than its user, as `move_hit` marks them -- and, with
+/// `dolls`, those whose Substitute took the hit (Magician's `move.hitTargets`; Pickpocket's
+/// `AfterMoveSecondary` targets leave them out, which `Showdown` shows by not stealing).
+fn hit_targets(turn: &Turn, me: Slot, dolls: bool) -> Vec<Slot> {
+    let mut hit = Vec::new();
+    for side in 0..2 {
+        for slot in 0..2 {
+            if (turn.move_hit[side][slot] || (dolls && turn.move_dolled[side][slot])) && (side, slot) != me {
+                hit.push((side, slot));
+            }
+        }
+    }
+    hit
+}
+
+/// Magician's `onAfterMoveSecondarySelf` (data/abilities.ts, IKA-214):
+///
+///     if (!move || source.switchFlag === true || !move.hitTargets || source.item ||
+///         source.volatiles['gem'] || move.id === 'fling' || move.category === 'Status') return;
+///     for (const pokemon of hitTargets (by speed)) {
+///         if (pokemon !== source) {
+///             const yourItem = pokemon.takeItem(source);
+///             if (!yourItem) continue;
+///             if (!source.setItem(yourItem)) { pokemon.item = yourItem.id; continue; }
+///             this.add('-item', source, yourItem, '[from] ability: Magician', ...);
+///             return;
+///         }
+///     }
+///
+/// Only the first target whose item comes off gives it up. The user must not have been
+/// knocked out (`setItem` fails then); the item's own `onTakeItem` is asked about the holder
+/// by `takeItem`, and Magician does not ask it about the receiver.
+fn magician(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), String> {
+    let me = (action.side, action.slot);
+    let eligible = mv.category != "Status"
+        && mv.id != "fling"
+        && !user_self_switches(turn, mv)
+        && matches!(turn.mon_at(me.0, me.1),
+            Some(m) if m.ability == "magician" && m.item.is_none() && !m.has_volatile("gem"));
+    if !eligible {
+        return Ok(());
+    }
+    let hit = hit_targets(turn, me, true);
+    for target in by_speed(turn, hit)? {
+        let Some(Some(item)) = take_item(turn, target, Some(me), (mv.id.as_str(), me)) else {
+            continue;
+        };
+        if matches!(turn.mon_at(me.0, me.1), Some(m) if m.fainted || m.hp <= 0) {
+            // `source.setItem` fails for a Pokemon with no HP: the holder gets it back.
+            turn.mon_at_mut(target.0, target.1).unwrap().item = Some(item);
+            continue;
+        }
+        receive_item(turn, me, item);
+        log_event!(turn, "{} took {} (Magician)", Name(me.0, me.1), item);
+        after_receiving(turn, &[me]);
+        return Ok(());
+    }
+    Ok(())
+}
+
+/// Pickpocket's `onAfterMoveSecondary` (data/abilities.ts, IKA-214), for each Pokemon the
+/// move hit, fastest first:
+///
+///     if (source && source !== target && move?.flags['contact']) {
+///         if (target.item || target.switchFlag || target.forceSwitchFlag || source.switchFlag === true) return;
+///         const yourItem = source.takeItem(target);
+///         if (!yourItem) return;
+///         if (!target.setItem(yourItem)) { source.item = yourItem.id; return; }
+///         ...
+///
+/// The attacker's Sticky Hold stops it (`source` is not the holder), and so does a mega stone
+/// of the attacker's own base species; a holder that has fainted cannot `setItem`.
+fn pickpocket(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), String> {
+    let me = (action.side, action.slot);
+    if !mv.has_flag(F_CONTACT) || sheer_forced(turn, me, mv) {
+        return Ok(());
+    }
+    let hit: Vec<Slot> = hit_targets(turn, me, false)
+        .into_iter()
+        .filter(|t| matches!(turn.mon_at(t.0, t.1), Some(m) if m.ability == "pickpocket"))
+        .collect();
+    for target in by_speed(turn, hit)? {
+        let switching = |turn: &Turn, at: Slot, volatile: &str| {
+            matches!(turn.mon_at(at.0, at.1), Some(m) if m.has_volatile(volatile))
+        };
+        if matches!(turn.mon_at(target.0, target.1), Some(m) if m.item.is_some())
+            || switching(turn, target, "pendingselfswitch")
+            || switching(turn, target, "pendingforceswitch")
+            || user_self_switches(turn, mv)
+        {
+            continue;
+        }
+        let Some(Some(item)) = take_item(turn, me, Some(target), (mv.id.as_str(), me)) else {
+            continue;
+        };
+        if matches!(turn.mon_at(target.0, target.1), Some(m) if m.fainted || m.hp <= 0) {
+            turn.mon_at_mut(me.0, me.1).unwrap().item = Some(item);
+            continue;
+        }
+        receive_item(turn, target, item);
+        log_event!(turn, "{} took {} (Pickpocket)", Name(target.0, target.1), item);
+        after_receiving(turn, &[target]);
+    }
     Ok(())
 }
 
@@ -4918,6 +5017,13 @@ fn apply_status_move(
             }
         }
     }
+    // Corrosive Gas's `onHit(target, source) { const item = target.takeItem(source); ... }`,
+    // on every adjacent Pokemon the move reached, the user's partner included (IKA-214).
+    if mv.id == "corrosivegas" {
+        for target in targets {
+            take_item(turn, *target, Some(me), (mv.id.as_str(), me));
+        }
+    }
     if mv.id == "psychup" {
         psych_up(turn, me, targets);
     }
@@ -4976,17 +5082,100 @@ fn transform_move(turn: &mut Turn, me: Slot, targets: &[Slot]) -> Result<(), Str
 /// `onTakeItem` answers -- in Reg M-C only the mega stones have one -- and Unburden's
 /// `onTakeItem(item, pokemon) { pokemon.addVolatile('unburden'); }` hears. `None` is
 /// `takeItem`'s `undefined` (nothing held), `Some(None)` its `false`.
-fn take_item(reg: &Reg, turn: &mut Turn, holder: Slot) -> Option<Option<Id>> {
-    let mon = turn.mon_at_mut(holder.0, holder.1)?;
+///
+/// `by` is the `source` argument (`None`: the holder itself, `takeItem()`), and `active` the
+/// move being used and its user, which Sticky Hold reads (`this.activeMove`, and `breakable`
+/// for a Mold Breaker user). Sticky Hold's `onTakeItem` (data/abilities.ts, IKA-214):
+///
+///     if (!pokemon.hp || pokemon.item === 'stickybarb') return;
+///     if ((source && source !== pokemon) || this.activeMove.id === 'knockoff') {
+///         this.add('-activate', pokemon, 'ability: Sticky Hold'); return false;
+///     }
+///
+/// so a holder that fainted of the hit gives its item up, and Knock Off is stopped though it
+/// calls `takeItem()` with no source. The item's own handler is the mega stone's, on the
+/// holder's base species.
+fn take_item(turn: &mut Turn, holder: Slot, by: Option<Slot>, active: (&str, Slot)) -> Option<Option<Id>> {
+    let mon = turn.mon_at(holder.0, holder.1)?;
     let item = mon.item?;
-    if reg.mega_stone_stays(mon.species.as_str(), item.as_str()) {
+    let stays = turn.reg.mega_stone_stays(mon.species.as_str(), item.as_str());
+    let (user, active_id) = (active.1, active.0);
+    let ability_ignored = user != holder
+        && matches!(turn.mon_at(user.0, user.1), Some(m) if is_mold_breaker(m.ability.as_str()));
+    let sticky = mon.ability == "stickyhold"
+        && !ability_ignored
+        && !mon.fainted
+        && mon.hp > 0
+        && item.as_str() != "stickybarb"
+        && (by.is_some_and(|s| s != holder) || active_id == "knockoff");
+    if stays {
         return Some(None);
     }
+    if sticky {
+        log_event!(turn, "{} held {} (Sticky Hold)", Name(holder.0, holder.1), item);
+        return Some(None);
+    }
+    let mon = turn.mon_at_mut(holder.0, holder.1)?;
     mon.item = None;
     if mon.ability == "unburden" && !mon.has_volatile("unburden") {
         mon.volatiles.push(Effect::new(Id::new("unburden")));
     }
+    log_event!(turn, "{} lost {} ({})", Name(holder.0, holder.1), item, active_id);
     Some(Some(item))
+}
+
+/// `setItem` on a Pokemon that has the HP and is on the field: the new item's `onStart`
+/// (a Choice item drops `choicelock`; a terrain seed on its terrain is used at once). A
+/// White Herb and a berry are seen at the `Update` that follows, `after_receiving`.
+fn receive_item(turn: &mut Turn, at: Slot, item: Id) {
+    turn.mon_at_mut(at.0, at.1).unwrap().item = Some(item);
+    if turn.reg.choice_items.contains(item.as_str()) {
+        let mon = turn.mon_at_mut(at.0, at.1).unwrap();
+        mon.volatiles.retain(|v| v.id.as_str() != "choicelock");
+    }
+    crate::terrain::use_terrain_seed(turn, at.0, at.1);
+}
+
+fn after_receiving(turn: &mut Turn, receivers: &[Slot]) {
+    crate::resolve::check_white_herb(turn);
+    for at in receivers {
+        eat_received_berry(turn, *at);
+    }
+}
+
+/// An item taken by an attacker or by the holder it hit, whose receiver is asked by the
+/// item (`singleEvent('TakeItem', item, ..., receiver, giver)`): a mega stone does not go to
+/// a Pokemon of its own base species, and the giver keeps it -- put back as the move's own
+/// `target.item = yourItem.id`, without the `End` that `setItem` would have run.
+fn hand_over(turn: &mut Turn, giver: Slot, receiver: Slot, item: Id) -> bool {
+    let species = turn.mon_at(receiver.0, receiver.1).unwrap().species;
+    if turn.reg.mega_stone_stays(species.as_str(), item.as_str()) {
+        turn.mon_at_mut(giver.0, giver.1).unwrap().item = Some(item);
+        return false;
+    }
+    receive_item(turn, receiver, item);
+    true
+}
+
+/// Thief's and Covet's `onAfterHit` (data/moves.ts):
+///
+///     if (source.item || source.volatiles['gem']) return;
+///     const yourItem = target.takeItem(source);
+///     if (!yourItem) return;
+///     if (!this.singleEvent('TakeItem', yourItem, target.itemState, source, target, move, yourItem) ||
+///         !source.setItem(yourItem)) {
+///         target.item = yourItem.id; // bypass setItem so we don't break choicelock or anything
+///         return;
+///     }
+fn thief_after_hit(turn: &mut Turn, mv: &Move, me: Slot, target: Slot) {
+    if matches!(turn.mon_at(me.0, me.1), Some(m) if m.item.is_some() || m.has_volatile("gem")) {
+        return;
+    }
+    let Some(Some(item)) = take_item(turn, target, Some(me), (mv.id.as_str(), me)) else { return };
+    if hand_over(turn, target, me, item) {
+        log_event!(turn, "{} stole {}", Name(me.0, me.1), item);
+        after_receiving(turn, &[me]);
+    }
 }
 
 /// Trick and Switcheroo's `onHit` (data/moves.ts, IKA-208):
@@ -5011,8 +5200,8 @@ fn swap_items(reg: &Reg, turn: &mut Turn, me: Slot, target: Slot) -> bool {
     if !alive(turn, me) || !alive(turn, target) {
         return false;
     }
-    let yours = take_item(reg, turn, target);
-    let mine = take_item(reg, turn, me);
+    let yours = take_item(turn, target, Some(me), ("trick", me));
+    let mine = take_item(turn, me, None, ("trick", me));
     let restore = |turn: &mut Turn, yours: Option<Option<Id>>, mine: Option<Option<Id>>| {
         if let Some(Some(item)) = yours {
             turn.mon_at_mut(target.0, target.1).unwrap().item = Some(item);
