@@ -200,10 +200,12 @@ def test_the_opponents_read_carries_the_difference_in_win_rate(tools, played) ->
         html = game_page._mix_seat(_read(rows), side, sprites)
         assert "選んだ手に対する相手の手" not in html
         assert "一番辛い" not in html
-        assert re.search(r'class="gp n">−19pt', html)  # the minus, red
-        assert re.search(r'class="gq n">\+43pt', html)  # the plus, green, on a share under 1%
+        assert re.search(r'class="gd gp n">勝率 −19pt', html)  # the minus, red
+        assert re.search(r'class="gd gq n">勝率 \+43pt', html)  # the plus, green, on a share under 1%
         assert html.count("pt</span>") == 2  # the row with no value shows none
-        assert f"{game_page.SEAT[side]} から見て" in html
+        assert "勝率の差" in html  # the column head
+        # one sentence, in the seat's terms
+        assert f"{game_page.SEAT[side]} の勝率がどれだけ上下するか" in html
     cols, vs = ["a", "b"], [0.31, 0.93]
     assert game_page._column_gap("a", cols, vs, 0.5, 0.4) == pytest.approx(-0.19)
     assert game_page._column_gap("b", cols, vs, None, 0.5) == pytest.approx(0.43)  # no eq: the node's value

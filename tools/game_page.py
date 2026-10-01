@@ -950,12 +950,16 @@ h2{font-size:15px;margin:28px 0 8px;color:var(--dim);font-weight:600;letter-spac
 .tag.dead{color:var(--warn);border-color:var(--warn);font-size:11px;white-space:normal}
 .eqt{margin-top:4px}.eqt .tag{font-size:12px;white-space:normal;border-radius:10px}.eqt .tag.off{color:var(--faint)}
 .tag.lb{margin-right:6px;font-size:11px;white-space:nowrap}
-.gq{color:var(--good);font-size:11px}
+.gd{display:inline-block;font-size:13px;line-height:1.5;padding:0 8px;border-radius:999px;border:1px solid currentColor;white-space:nowrap}
+.gq{color:var(--good)}
+.gnote{font-size:13px;color:var(--ink);margin:2px 0 6px}
+.mt .r.hd{padding-top:0;padding-bottom:0;font-size:12px;color:var(--dim);background:none!important}
+.dc{text-align:left}
 .bc.wr{position:relative;overflow:visible;background:var(--track);height:6px;margin:1px 0}
 .bc.wr .m50{position:absolute;left:50%;top:-4px;bottom:-4px;width:2px;background:var(--faint)}
 .bc.wr .dt{position:absolute;top:-4px;width:14px;height:14px;margin-left:-7px;border-radius:50%;background:var(--faint);border:2px solid var(--surface)}
 .bc.wr .dt.s0{background:var(--s0)}.bc.wr .dt.s1{background:var(--s1)}
-.nc .gz{color:var(--faint);font-size:11px}
+.gz{color:var(--faint)}
 .msl b.rare{color:var(--faint)}.msl b.often{font-weight:800}
 .mbody{padding:4px 12px 12px;display:grid;grid-template-columns:1fr;gap:12px}
 .mseat{border-left:4px solid var(--faint);padding-left:10px}.mseat.s0{border-left-color:var(--s0)}.mseat.s1{border-left-color:var(--s1)}
@@ -970,11 +974,11 @@ h2{font-size:15px;margin:28px 0 8px;color:var(--dim);font-weight:600;letter-spac
 .pt{min-width:0}.pt .wn{margin-right:2px}
 .bc{height:8px;border-radius:4px;background:var(--track);overflow:hidden}.bb{display:block;height:8px;border-radius:4px;background:var(--faint)}
 .bb.s0{background:var(--s0)}.bb.s1{background:var(--s1)}
-.mt.opp .r{grid-template-columns:minmax(0,320px) minmax(0,300px) 130px}
-.nc{text-align:right;white-space:nowrap}.nc .gp{color:var(--bad);font-size:11px}
+.mt.opp .r{grid-template-columns:minmax(0,320px) minmax(0,240px) 48px 112px}
+.nc{text-align:right;white-space:nowrap}.gp{color:var(--bad)}
 .tag.pk{margin:2px 0 0 30px;font-size:11px}
 .ic.xs.f0,.ic.xs.f1{width:24px;height:24px;flex:none}
-@media (max-width:720px){.mt .r,.mt.opp .r{grid-template-columns:minmax(0,1fr) auto}.bc{grid-column:1/-1;order:3}.pt .pm{display:block}
+@media (max-width:720px){.mt .r,.mt.opp .r{grid-template-columns:minmax(0,1fr) auto}.bc{grid-column:1/-1;order:3}.mt.opp .dc{grid-column:1/-1;order:4}.mt.opp .r.hd{display:none}.mseat h5 small{display:block;margin-left:0}.pt .pm{display:block}
 .mh small{display:block;margin-left:0}.msl .l2{padding-left:0}}
 .dmg{font-family:var(--num);font-weight:700;color:var(--bad)}
 .tag{display:inline-block;font-size:12px;line-height:1.5;padding:0 8px;border-radius:999px;border:1px solid var(--line);background:var(--surface);color:var(--dim);white-space:nowrap}
@@ -1233,13 +1237,14 @@ def _pct(p: float) -> str:
 
 
 def _gap_html(gap: float | None) -> str:
-    """The difference in win rate, from the seat's side: red minus, green plus."""
+    """The difference in win rate, from the seat's side, as a small tag of its own: red minus,
+    green plus. It says "勝率" so that it is not read as a change of the share beside it."""
     if gap is None:
         return ""
     if abs(gap) * 100 < 1:
-        return ' <span class="gz n">±0</span>'
+        return '<span class="gd gz n">勝率 ±0</span>'
     cls = "gp" if gap < 0 else "gq"
-    return f' <span class="{cls} n">{MINUS if gap < 0 else "+"}{abs(gap) * 100:.0f}pt</span>'
+    return f'<span class="gd {cls} n">勝率 {MINUS if gap < 0 else "+"}{abs(gap) * 100:.0f}pt</span>'
 
 
 def _table_html(rows: list[dict[str, Any]], side: int, sprites: Sprites, *, kind: str) -> str:
@@ -1256,7 +1261,15 @@ def _table_html(rows: list[dict[str, Any]], side: int, sprites: Sprites, *, kind
         body.append(
             f'<div class="r{" pick" if r.get("picked") else ""}"><div class="pc">{_pair_html(r["pair"], side, sprites)}{mark}</div>'
             f'<div class="bc"><span class="bb s{side}" style="width:{max(0.0, min(1.0, share)) * 100:.0f}%"></span></div>'
-            f'<div class="nc"><span class="n">{_pct(share)}</span>{_gap_html(r.get("gap"))}</div></div>'
+            f'<div class="nc"><span class="n">{_pct(share)}</span></div>'
+            + (f'<div class="dc">{_gap_html(r.get("gap"))}</div>' if kind == "opp" else "")
+            + "</div>"
+        )
+    if kind == "opp":
+        body.insert(
+            0,
+            '<div class="r hd"><div class="pc"></div><div class="bc0"></div>'
+            '<div class="nc">確率</div><div class="dc">勝率の差</div></div>',
         )
     return f'<div class="mt {kind}">{"".join(body)}</div>'
 
@@ -1327,8 +1340,9 @@ def _mix_seat(m: dict[str, Any] | None, side: int, sprites: Sprites) -> str:
         f'<div class="mseat s{side}">{head}'
         f"<h5>均衡で打っていた手<small>　均衡で打つ {_played_n(m)} 通り</small></h5>"
         f"{picked}{_table_html(rows, side, sprites, kind='mix')}{_rest_html(m.get('sup'))}"
-        f"<h5>相手の読み<small>{n_opp}　右の差＝選んだ手に対してその手を打たれたときの{SEAT[side]}の勝率から、"
-        f"均衡の値を引いた差（{SEAT[side]} から見て）</small></h5>"
+        f"<h5>相手の読み<small>{n_opp}</small></h5>"
+        f'<p class="gnote">勝率の差＝相手がその手を打つと、{SEAT[side]} の勝率がどれだけ上下するか'
+        f"（{SEAT[side]} が選んだ手に対して。例: −15pt は 15pt 下がる）</p>"
         f"{_table_html(list(m['opp']), 1 - side, sprites, kind='opp')}{_rest_html(osup)}{off_menu}</div>"
     )
 
@@ -1375,9 +1389,10 @@ def _mix_html(t: dict[str, Any], sprites: Sprites) -> str:
     # The note on the differences only where a row has one.
     has_values = any(m and any(r.get("gap") is not None for r in m["opp"]) for m in mix)
     note = (
-        '<p class="dim mnote">相手の読みの各行の右の差（pt）＝その席が選んだ手に対し、相手がその行の手を打ったときの勝率から、'
-        "その席の読みの値（均衡の値。記録に無ければ局面の値）を引いた差で、その席から見た値（赤＝不利、緑＝有利）。"
-        "値は相手が裏によらず同じ手を打つときの期待値で、深く読んでいない手は浅い読みのまま。確率が小さい行にも出す。</p>"
+        '<details class="dim mnote"><summary>勝率の差の見方</summary>'
+        "<p>差＝選んだ手が相手のその手に対して取る勝率から、その席の読みの値（均衡の値。記録に無ければ局面の値）を引いた値。"
+        "赤＝不利、緑＝有利。値は相手が裏によらず同じ手を打つときの期待値で、深く読んでいない手は浅い読みのまま。"
+        "確率が小さい行にも出す。</p></details>"
         if has_values
         else ""
     )
