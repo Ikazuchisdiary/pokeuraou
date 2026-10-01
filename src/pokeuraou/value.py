@@ -40,6 +40,7 @@ from torch import Tensor, nn
 
 from . import timing
 from .encode import Encoded, Encoder, Vocabulary, settle
+from .slotswap import SwapSlots, swap_batch
 
 
 @dataclass(slots=True)
@@ -842,6 +843,7 @@ def train(
     val_index: np.ndarray | None = None,
     target: np.ndarray | None = None,
     snapshots: dict[str, dict[str, Tensor]] | None = None,
+    swap_slots: SwapSlots | None = None,
 ) -> tuple[list[EpochReport], dict[str, Tensor]]:
     """Fits the network and returns the epoch history and the best weights.
 
@@ -856,6 +858,11 @@ def train(
     :param snapshots: when given, filled with the final weights (``"last"``) and both
         averages (``"ema"``, ``"swa"``) of a ``keep="last"`` run, so one fit answers all
         three (`tools/sweep_value.py`).
+
+    :param swap_slots: when given, each training row is shown in a random arrangement of its
+        sides' left and right Pokemon, drawn afresh every epoch (IKA-412, `slotswap`). The
+        validation rows are never exchanged. Off by default: nothing then changes, nor does
+        the random stream the batch order draws from.
 
     ``epochs=0`` trains nothing and returns the weights the net came in with -- the null
     control of a warm start (`tools/train_value.py --init-from`, IKA-194).
@@ -892,6 +899,7 @@ def train(
     ema = _Averages(net, config) if averaging else None
     loss_fn = nn.BCEWithLogitsLoss()
     rng = np.random.default_rng(config.seed)
+    swap_rng = np.random.default_rng([config.seed, 412]) if swap_slots is not None else None
 
     history: list[EpochReport] = []
     best = {k: v.detach().clone() for k, v in net.state_dict().items()}
@@ -908,6 +916,8 @@ def train(
         for start in range(0, len(order) - config.batch_size + 1, config.batch_size):
             batch_idx = order[start : start + config.batch_size]
             batch = dataset.tensors(batch_idx, device)
+            if swap_slots is not None:
+                batch = swap_batch(batch, swap_slots.draw(swap_rng, batch_idx), swap_slots)
             logit = net(batch)
             loss = loss_fn(logit, fitted[batch_idx].to(device))
             optimiser.zero_grad(set_to_none=True)

@@ -42,6 +42,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pokeuraou.encode import ENCODING_REVISION, Encoder
 from pokeuraou.regulation import load_regulation
+from pokeuraou.slotswap import SwapSlots, position_reader_rows
 from pokeuraou.value import (
     Dataset,
     ValueConfig,
@@ -344,6 +345,13 @@ def main() -> None:
         "one of them out of the fit, and keep the validation games as they are -- a move "
         "the net has never been taught, on the same marking (IKA-318)",
     )
+    ap.add_argument(
+        "--swap-slots",
+        action="store_true",
+        help="show every training row in a random arrangement of each side's left and right "
+        "Pokemon, drawn afresh each epoch (IKA-412). Rows holding a Pokemon whose ability "
+        "reads its position (Imposter) are never exchanged. Validation is never exchanged.",
+    )
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     ap.add_argument("--no-save", action="store_true")
     ap.add_argument(
@@ -499,6 +507,20 @@ def main() -> None:
             f"{', '.join(dropped_moves)} (validation unchanged)"
         )
     print(f"{parameters:,} parameters on {device}")
+    swap = None
+    if args.swap_slots:
+        reader = np.zeros(len(dataset), dtype=bool)
+        imposter = encoder.vocab.abilities.get("imposter", 0)
+        for start in range(0, len(dataset), 1_000_000):
+            part = np.arange(start, min(start + 1_000_000, len(dataset)))
+            reader[part] = position_reader_rows(
+                dataset.encoded.ability[part], dataset.encoded.mask[part], imposter
+            )
+        swap = SwapSlots.of(encoder.mon_names, encoder.side_names, exclude=reader)
+        print(
+            f"--swap-slots: a random left/right arrangement per training row and epoch; "
+            f"{int(reader.sum()):,} rows hold an Imposter and stay as played"
+        )
 
     # The identity the architecture is supposed to guarantee, checked before training so a
     # failure is a bug in the model rather than a training artefact. Eval mode matters:
@@ -561,6 +583,7 @@ def main() -> None:
         # Only when moves were dropped: otherwise `train` resolves the same split itself,
         # as every run before IKA-318 did.
         **({"train_index": train_idx, "val_index": val_idx} if dropped_moves else {}),
+        **({"swap_slots": swap} if swap is not None else {}),
     )
     net.load_state_dict(best)
 
@@ -657,6 +680,7 @@ def main() -> None:
                 # gives one number for both cannot say whether a rival's better AUC came
                 # from a better fit or from easier games.
                 "split_seed": args.split_seed,
+                "swap_slots": bool(args.swap_slots),
                 "holdout": args.holdout,
                 "encoding_revision": ENCODING_REVISION,
                 # What the games that taught this could see. A value trained on omniscient
