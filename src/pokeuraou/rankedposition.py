@@ -258,6 +258,7 @@ def normalize(reg: Regulation, board: Board, form: dict[str, Any]) -> dict[str, 
         if item_gone and item is None:
             raise RankedError(f"{name} の持ち物が使われた・落とされたなら、その持ち物の名前を入れてください")
         theirs[sid] = {
+            **({"hpExact": int(raw["hpExact"])} if raw.get("hpExact") is not None else {}),
             "pct": integer(raw.get("pct", 100), 1, 100, f"{name} の HP（%）"),
             "colour": colour,
             "status": pick(raw.get("status"), STATUSES, "状態異常"),
@@ -418,8 +419,11 @@ def build_position(
             if state["fainted"]:
                 mon.hp = 0
                 mon.fainted = True
+            elif hp_mode == "exact" and state.get("hpExact") is not None:
+                mon.hp = int(state["hpExact"])    # measuring only: the screen never has this
             else:
-                mon.hp = hp_for(reg, state["pct"], state["colour"], mon.maxhp, hp_mode)
+                mon.hp = hp_for(reg, state["pct"], state["colour"], mon.maxhp,
+                                "mid" if hp_mode == "exact" else hp_mode)
             if state["itemGone"]:
                 mon.item = None
         mons.append(mon)
@@ -793,11 +797,23 @@ class Derived:
 def derive(
     reg: Regulation, board: Board, prior: FieldPrior, base: dict[str, OpponentSet], *,
     hp_mode: str = "mid", observe_spread: bool = True,
+    choices: dict[str, tuple[Any, ...]] | None = None,
 ) -> Derived:
-    """The opponent's sets after every observation of every turn, and each turn's position."""
+    """The opponent's sets after every observation of every turn, and each turn's position.
+
+    ``choices`` are the person's picks among the remaining candidates, ``species -> (item, nature,
+    moves)``: kept while that set is still one of the commonest the observations leave."""
     seen = seen_union(board)
     refined = {sid: refine_opponent(prior, one, seen.get(sid, Observation()))
                for sid, one in base.items()}
+    for sid, key in (choices or {}).items():
+        ref = refined.get(sid)
+        if ref is None or ref.one.belief is None or ref.unmatched:
+            continue
+        for index, alt in enumerate(ref.one.alternatives):
+            if (alt.item, alt.nature, alt.moves) == tuple(key):
+                refined[sid] = Refined(prior.choose(ref.one, index), ref.notes, ref.members, False)
+                break
     sets = {sid: r.one.set for sid, r in refined.items()}
     built_cache: dict[int, Built] = {}
 

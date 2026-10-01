@@ -13,6 +13,7 @@ It owns one never-exiting thread for the reads (a thread that ran HiGHS spins on
 from __future__ import annotations
 
 import queue
+import re
 import threading
 import time
 from collections.abc import Callable
@@ -31,6 +32,41 @@ Reader = Callable[[Game, Point, float, Callable[[dict[str, Any]], None]], Result
 
 NO_READER = "この画面では局面を読めません（読みの設定がありません）"
 
+#: The analysis mode's notes in words a player reads.
+_DEEP = re.compile(r"選択的延長のセルで、確率の高い分岐 (\d+) つだけを深さ 2 で読んだ")
+
+
+def plain_notes(notes: list[str]) -> list[str]:
+    out: list[str] = []
+    for note in notes:
+        found = _DEEP.fullmatch(note)
+        text = (f"一部の局面は、確率の高い {found.group(1)} 通りの手だけを先まで読みました"
+                if found else note)
+        if text not in out:
+            out.append(text)
+    return out
+
+
+def make_game(
+    reg: Any, mine: Any, board: rp.Board, derived: rp.Derived, index: int,  # noqa: ANN401
+) -> tuple[Game, Point, rp.Built]:
+    """The analysis mode's input for turn ``index`` of a typed-in match: the position, the two
+    sheets (the person's, and the opponent's six as estimated), who has been seen, who led."""
+    built = derived.built[index]
+    pos = built.position
+    form = board.turns[index]
+    mine_seen = frozenset(
+        identity(pos.sides[0].pokemon[built.mine_slots[i]]) for i in board.mine_seen(index))
+    opp_seen = frozenset(
+        identity(pos.sides[1].pokemon[built.opp_slots[s]]) for s in board.seen_species(index))
+    leads = (frozenset(to_id(mine.sets[i].species) for i in board.brought[:2]),
+             frozenset(to_id(reg.species[s].base_species) for s in board.opp_leads))
+    point = Point(decision=0, turn=int(form["turn"]), position=pos.to_json(), seen=(mine_seen, opp_seen))
+    game = Game(label=f"ランクマの検討 ターン {form['turn']}", points=[point],
+                teams=(mine, rp.opponent_roster_of(reg, board, derived)),
+                leads=leads, side=0, information="hidden-bench")
+    return game, point, built
+
 
 class BoardApp:
     """One session's typed-in match."""
@@ -42,6 +78,8 @@ class BoardApp:
         self.board: rp.Board | None = None
         self.derived: rp.Derived | None = None
         self.hp_mode = "mid"
+        #: The person's picks among the candidates left, ``species -> (item, nature, moves)``.
+        self.choices: dict[str, tuple[Any, ...]] = {}
         self.read_job: dict[str, Any] = {"state": "idle"}
         self._reads: queue.Queue[tuple[Game, Point, int, rp.Built]] = queue.Queue()
         self._worker = threading.Thread(target=self._work, daemon=True)
@@ -73,6 +111,7 @@ class BoardApp:
             sets = {sid: o.set for sid, o in self._base().items()}
             board.turns = [rp.initial_form(app.reg, board, sets)]
             self.board = board
+            self.choices = {}
             self._derive()
             self.read_job = {"state": "idle"}
             return self.state()
@@ -91,6 +130,20 @@ class BoardApp:
             if not 0 <= index < len(board.turns):
                 raise RankedError("そのターンはありません")
             board.turns[index] = rp.normalize(self.app.reg, board, form)
+            self._derive()
+            self._stale()
+            return self.state()
+
+    def choose(self, species: str, alternative: int) -> dict[str, Any]:
+        """One of the candidates left for an opposing Pokemon, as its set."""
+        with self.app.lock:
+            self._need_board()
+            assert self.derived is not None
+            ref = self.derived.refined.get(species)
+            if ref is None or not 0 <= alternative < len(ref.one.alternatives):
+                raise RankedError("その候補はありません")
+            alt = ref.one.alternatives[alternative]
+            self.choices[species] = (alt.item, alt.nature, alt.moves)
             self._derive()
             self._stale()
             return self.state()
@@ -125,28 +178,15 @@ class BoardApp:
 
     def _derive(self) -> None:
         board = self._need_board()
-        self.derived = rp.derive(self.app.reg, board, self.app.prior, self._base(), hp_mode=self.hp_mode)
+        self.derived = rp.derive(self.app.reg, board, self.app.prior, self._base(), hp_mode=self.hp_mode,
+                                 choices=self.choices)
 
     # -- the read
     def game_and_point(self, index: int) -> tuple[Game, Point, rp.Built]:
-        """The analysis mode's input for turn ``index``: the position, the two sheets, who has
-        been seen, who led."""
+        """The analysis mode's input for turn ``index``."""
         board, derived = self._need_board(), self.derived
         assert derived is not None and self.app.mine is not None
-        built = derived.built[index]
-        pos = built.position
-        form = board.turns[index]
-        mine_seen = frozenset(
-            identity(pos.sides[0].pokemon[built.mine_slots[i]]) for i in board.mine_seen(index))
-        opp_seen = frozenset(
-            identity(pos.sides[1].pokemon[built.opp_slots[s]]) for s in board.seen_species(index))
-        leads = (frozenset(to_id(self.app.mine.sets[i].species) for i in board.brought[:2]),
-                 frozenset(to_id(self.app.reg.species[s].base_species) for s in board.opp_leads))
-        point = Point(decision=0, turn=int(form["turn"]), position=pos.to_json(), seen=(mine_seen, opp_seen))
-        game = Game(label=f"ランクマの検討 ターン {form['turn']}", points=[point],
-                    teams=(self.app.mine, rp.opponent_roster_of(self.app.reg, board, derived)),
-                    leads=leads, side=0, information="hidden-bench")
-        return game, point, built
+        return make_game(self.app.reg, self.app.mine, board, derived, index)
 
     def solvable(self, index: int) -> str | None:
         if self.reader is None:
@@ -247,7 +287,7 @@ class BoardApp:
             "theirs": rows(1, list(result.theirs), [float(x) for x in result.model]),
             "seconds": float(result.seconds), "steps": int(result.steps), "stop": result.stop,
             "classes": int(result.classes), "exact": bool(result.exact),
-            "notes": notes_ja(loc, result.notes),
+            "notes": plain_notes(notes_ja(loc, result.notes)),
             "turn": int(result.turn),
         }
 

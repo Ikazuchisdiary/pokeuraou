@@ -173,7 +173,16 @@ class RankedApp:
     def _name(self, kind: str, value: str | None) -> str:
         if self.loc is None:
             return str(value) if value else ""
-        return str(getattr(self.loc, kind)(value))
+        got = str(getattr(self.loc, kind)(value))
+        if kind == "item" and value:
+            # The names table has no Japanese for the Champions-only Mega Stones: name them by
+            # their Pokemon rather than show the English (or guess the official wording).
+            item = self.reg.items.get(to_id(value))
+            if item is not None and item.mega_stone and got == item.name:
+                base = next(iter(item.mega_stone))
+                tail = item.name.rsplit(" ", 1)[-1] if item.name.rsplit(" ", 1)[-1] in ("X", "Y", "Z") else ""
+                return f"{self.loc.species(to_id(base))}のメガストーン" + (f"（{tail}）" if tail else "")
+        return got
 
     def _pair(self, kind: str, value: str | None) -> dict[str, str] | None:
         if not value:
@@ -485,6 +494,8 @@ class RankedServer:
                             [str(x) for x in data.get("seen", [])]))
                     elif path == "/api/board/save":
                         self._json(200, app.board.save(int(data["index"]), dict(data["form"])))
+                    elif path == "/api/board/choose":
+                        self._json(200, app.board.choose(str(data["species"]), int(data["alternative"])))
                     elif path == "/api/board/next":
                         self._json(200, app.board.next_turn())
                     elif path == "/api/board/drop":

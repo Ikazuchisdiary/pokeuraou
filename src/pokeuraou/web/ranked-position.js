@@ -134,7 +134,23 @@ $("resetBoard").onclick = async () => {
 };
 
 // ------------------------------------------------------------------ the turn
-function enterTurn() { FORM = clone(BOARD.turns[CUR].form); }
+function enterTurn() {
+  FORM = clone(BOARD.turns[CUR].form);
+  const p = prevForm();
+  if (!p) { FOLD = { mineBench: true, field: true, oppBench: false }; return; }
+  const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+  const bench = (f, side) => (side === "m" ? BOARD.brought.filter((i) => !f.mineActive.includes(i)).map((i) => f.mine[String(i)])
+    : Object.keys(f.theirs).filter((s) => !f.theirActive.includes(s)).map((s) => f.theirs[s]));
+  FOLD = { mineBench: !same(bench(FORM, "m"), bench(p, "m")), oppBench: !same(bench(FORM, "t"), bench(p, "t")),
+    field: !same([FORM.field, FORM.sides], [p.field, p.sides]) };
+}
+let FOLD = { mineBench: true, field: true, oppBench: false };
+document.addEventListener("toggle", (e) => {
+  const d = e.target;
+  if (d.id === "mineBenchBox") FOLD.mineBench = d.open;
+  else if (d.id === "oppBenchBox") FOLD.oppBench = d.open;
+  else if (d.id === "fieldBox") FOLD.field = d.open;
+}, true);
 const prevForm = () => (CUR > 0 ? BOARD.turns[CUR - 1].form : null);
 function changed(side, key, f, value) {
   const p = prevForm();
@@ -189,12 +205,16 @@ function estimateHtml(sid) {
   const lines = [];
   lines.push(`<b>推定</b> ${esc(v.ability ? v.ability.name : "—")} ・ ${esc(v.item ? v.item.name : "持ち物なし")} ・ ${esc(v.nature.name)}`);
   lines.push(`技 ${v.moves.map((m) => esc(m.name)).join("・")}`);
-  lines.push(`配分 ${esc(v.sp.join("-"))}${v.spProvisional ? "（仮）" : ""}`);
+  const sp = v.sp.map((x, i) => (x ? `${META.statNames[i]} ${x}` : "")).filter(Boolean).join("・");
+  lines.push(`配分 ${esc(sp || "すべて 0")}${v.spProvisional ? "（仮の配分）" : ""}`);
   const extra = [];
   if (r.members) extra.push(`大会の型 ${r.members[0]} 体 → 見えたものに合う ${r.members[1]} 体`);
   (r.notes || []).forEach((n) => extra.push(n));
   BOARD.spread.filter((s) => s.id === sid).forEach((s) => extra.push(`${esc(META.statNames[META.stats.indexOf(s.stat)])}の配分 ${s.before} → ${s.after}（${s.low}〜${s.high} が可能）`));
-  return `<div class="ps-est" data-est="${esc(sid)}">${lines.map((l) => `<div>${l}</div>`).join("")}${extra.length ? `<ul>${extra.map((x) => `<li>${x}</li>`).join("")}</ul>` : ""}</div>`;
+  const alts = (v.alternatives || []).length > 1
+    ? `<div class="rk-alts" role="group" aria-label="残っている型の候補">${v.alternatives.map((a) =>
+      `<button type="button" class="rk-alt" data-choose="${esc(sid)}" data-a="${a.index}" aria-pressed="${String(v.chosen === a.index)}">${esc(a.label)}（${a.count} 体）<small>${esc(a.moves.join("・"))}</small></button>`).join("")}</div>` : "";
+  return `<div class="ps-est" data-est="${esc(sid)}">${lines.map((l) => `<div>${l}</div>`).join("")}${extra.length ? `<ul>${extra.map((x) => `<li>${x}</li>`).join("")}</ul>` : ""}${alts}</div>`;
 }
 
 function hpHint(sid) {
@@ -278,8 +298,8 @@ function eventsHtml() {
   const actives = [...p.mineActive.filter((x) => x != null).map((i) => ({ id: `m:${i}`, name: `自分の${mineName(i)}` })),
     ...p.theirActive.filter((x) => x).map((s) => ({ id: `t:${s}`, name: `相手の${oppName(s)}` }))];
   const opts = (sel) => `<option value="">選ぶ</option>${actives.map((a) => `<option value="${esc(a.id)}" ${a.id === sel ? "selected" : ""}>${esc(a.name)}</option>`).join("")}`;
-  const orderList = ev.order.map((o, i) => `<li>${esc(refName(o.first))} が先、${esc(refName(o.second))} が後${o.firstMove || o.secondMove ? `（${esc(o.firstMove ? moveName(o.firstMove) : "?")} / ${esc(o.secondMove ? moveName(o.secondMove) : "?")}）` : ""} <button type="button" class="ps-x" data-del-order="${i}">取り消す</button></li>`).join("");
-  const dmgList = ev.damage.map((d, i) => `<li>相手の${esc(oppName(d.attacker))} の ${esc(moveName(d.move))} で、自分の${esc(mineName(d.target))} が <b>${d.amount}</b> ダメージ${d.crit ? "（急所）" : ""} <button type="button" class="ps-x" data-del-dmg="${i}">取り消す</button></li>`).join("");
+  const orderList = ev.order.map((o, i) => `<li>${esc(refName(o.first))} が先、${esc(refName(o.second))} が後${o.firstMove || o.secondMove ? `（${esc(o.firstMove ? moveName(o.firstMove) : "?")} / ${esc(o.secondMove ? moveName(o.secondMove) : "?")}）` : ""} <button type="button" class="ps-x" data-del-order="${i}">消す</button></li>`).join("");
+  const dmgList = ev.damage.map((d, i) => `<li>相手の${esc(oppName(d.attacker))} の ${esc(moveName(d.move))} で、自分の${esc(mineName(d.target))} が <b>${d.amount}</b> ダメージ${d.crit ? "（急所）" : ""} <button type="button" class="ps-x" data-del-dmg="${i}">消す</button></li>`).join("");
   const foes = p.theirActive.filter((x) => x), mine = p.mineActive.filter((x) => x != null);
   const dropHint = mine.map((i) => { const was = p.mine[String(i)].hp, now = FORM.mine[String(i)] ? FORM.mine[String(i)].hp : was; return was !== now ? `${mineName(i)} の HP は ${was} → ${now}（${was - now} 減）` : ""; }).filter(Boolean).join(" ／ ");
   const results = [...(BOARD.spread.map((s) => `${esc(s.species)} の${esc(META.statNames[META.stats.indexOf(s.stat)])}の配分を ${s.before} → ${s.after} にしました（${s.low}〜${s.high} が可能。実数値 ${s.statLow}〜${s.statHigh}）<small>${s.because.map(esc).join("、")}</small>`)),
@@ -288,7 +308,7 @@ function eventsHtml() {
     <div class="ps-ev">
       <h4>どちらが先に動いたか</h4>
       <div class="ps-evrow"><select id="ordA" aria-label="先に動いた体">${opts("")}</select><span>が先、</span><select id="ordB" aria-label="後に動いた体">${opts("")}</select><span>が後</span>
-        <button type="button" class="ghost small" id="addOrder">足す</button></div>
+        <button type="button" class="ghost small" id="addOrder">この順を記録する</button></div>
       <details class="ps-more"><summary>先制技のときは、使った技も</summary><div class="ps-evrow"><input id="ordMA" list="moveList" placeholder="先の体の技" autocomplete="off"><input id="ordMB" list="moveList" placeholder="後の体の技" autocomplete="off"></div></details>
       <ul class="ps-evlist">${orderList}</ul>
       <h4>受けたダメージ</h4>
@@ -296,7 +316,7 @@ function eventsHtml() {
         <input id="dmgM" list="moveList" placeholder="技" autocomplete="off" aria-label="技"><span>で、自分の</span>
         <select id="dmgT" aria-label="受けた自分の体">${mine.map((i) => `<option value="${i}">${esc(mineName(i))}</option>`).join("")}</select>
         <input id="dmgN" type="number" min="1" inputmode="numeric" placeholder="ダメージ" aria-label="ダメージ"><label class="ps-check"><input type="checkbox" id="dmgC"> 急所</label>
-        <button type="button" class="ghost small" id="addDmg">足す</button></div>
+        <button type="button" class="ghost small" id="addDmg">このダメージを記録する</button></div>
       ${dropHint ? `<div class="ps-hint">${esc(dropHint)}（1 回の攻撃だけで減ったときは、この数がダメージです）</div>` : ""}
       <ul class="ps-evlist">${dmgList}</ul>
       <div class="ps-evres" id="evRes">${results.length ? `<ul>${results.map((r) => `<li>${r}</li>`).join("")}</ul>` : ""}</div>
@@ -346,6 +366,7 @@ function renderAll() {
   $("mineBench").innerHTML = mineBench.map((i) => mineCard(i, null)).join("");
   $("mineBenchSum").textContent = `自分の裏（${mineBench.length} 体）`;
   $("fieldState").innerHTML = fieldHtml();
+  $("fieldBox").open = FOLD.field; $("mineBenchBox").open = FOLD.mineBench; $("oppBenchBox").open = FOLD.oppBench;
   $("events").innerHTML = eventsHtml();
   renderDerived();
   renderRead();
@@ -445,6 +466,14 @@ document.addEventListener("change", (e) => {
 document.addEventListener("click", async (e) => {
   const t = e.target.closest("button"); if (!t) return;
   if (t.dataset.turn != null) { CUR = Number(t.dataset.turn); enterTurn(); renderAll(); }
+  else if (t.dataset.choose) {
+    clearTimeout(saveTimer);
+    try {
+      BOARD = await api("/api/board/save", { index: CUR, form: FORM });
+      BOARD = await api("/api/board/choose", { species: t.dataset.choose, alternative: Number(t.dataset.a) });
+      FORM = clone(BOARD.turns[CUR].form); renderAll();
+    } catch (err) { $("turnMsg").innerHTML = `<li>${esc(err.message)}</li>`; }
+  }
   else if (t.id === "dropTurn") { if (confirm("最後のターンの入力を消します。")) { BOARD = await api("/api/board/drop", {}); CUR = BOARD.turns.length - 1; enterTurn(); renderAll(); } }
   else if (t.dataset.rmMove) { const mv = FORM.theirs[t.dataset.rmMove].moves; mv.splice(mv.indexOf(t.dataset.m), 1); structural = true; schedule(true); }
   else if (t.dataset.appear) {
@@ -483,7 +512,8 @@ $("nextTurn").onclick = async () => {
 $("readTurn").onclick = async () => {
   $("readError").hidden = true; $("result").hidden = true;
   try { BOARD.read = await api("/api/board/read", { index: CUR }); }
-  catch (e) { $("readError").hidden = false; $("readError").textContent = e.message; return; }
+  catch (e) { $("readError").hidden = false; $("readError").textContent = e.message; $("readBox").scrollIntoView({ behavior: "smooth", block: "start" }); return; }
+  $("readBox").scrollIntoView({ behavior: "smooth", block: "start" });
   watch();
 };
 function watch() {

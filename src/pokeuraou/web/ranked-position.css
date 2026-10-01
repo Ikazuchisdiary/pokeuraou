@@ -116,3 +116,22 @@ body.pos .rk-bar .summary { flex: 1 1 200px; }
 }
 #eventsTitle { display: block; }
 #eventsTitle small { margin-left: 0; }
+
+/* ---- design review 1 (IKA-408) */
+.ps-evrow input[type="checkbox"], .ps-f input[type="checkbox"] { width: 20px; height: 20px; min-height: 0; padding: 0; flex: none; }
+.ps-check { cursor: pointer; }
+.ps-check input { margin: 0; }
+.ps-fold > summary { cursor: pointer; font-family: var(--font-display, inherit); font-size: 15px; list-style-position: inside; }
+.ps-fold > summary small { margin-left: 8px; font-size: 12px; color: var(--dim); font-weight: 400; }
+.ps-fold[open] > summary { margin-bottom: 8px; }
+.ps-est .rk-alts { margin-top: 6px; }
+@media (max-width: 700px) {
+  .ps-check { min-height: 44px; padding: 8px 8px; }
+  .ps-check input { width: 24px; height: 24px; }
+  .ps-evrow input[type="checkbox"], .ps-f input[type="checkbox"] { width: 24px; height: 24px; }
+  .ps-x, .ps-evrow .ghost, .ps-evrow select, .ps-evrow input, .ps-f select, .ps-f input, .ps-add, .ps-cond button, .ps-cond select,
+  .ps-slot, .ps-tab, .ps-chip, .ps-fgrid select { min-height: 44px; }
+  .ps-evrow input[type="checkbox"], .ps-f input[type="checkbox"] { min-height: 0; }
+  .ps-boost input { min-height: 44px; }
+  .ps-boosts summary { min-height: 44px; display: flex; align-items: center; }
+}

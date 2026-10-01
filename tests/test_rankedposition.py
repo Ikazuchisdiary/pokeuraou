@@ -445,3 +445,41 @@ def test_a_read_that_fails_is_shown_and_the_worker_lives_on(world) -> None:  # n
     no_reader.board.start([0, 1, 2, 3], OPP[:2], [])
     with pytest.raises(RankedError, match="読みの設定"):
         no_reader.board.start_read(0)
+
+
+def test_a_pick_among_the_candidates_left_is_kept_until_what_is_seen_rules_it_out(world) -> None:  # noqa: ANN001
+    app = _app(world, None)
+    board = app.board
+    state = board.start([0, 1, 2, 3], OPP[:2], [])
+    assert state["opp"]["tyranitar"]["item"]["id"] == "leftovers"
+    picked = board.choose("tyranitar", 2)              # the third of the field's sets: Choice Scarf
+    got = picked["opp"]["tyranitar"]
+    assert got["item"]["id"] == "choicescarf" and got["chosen"] == 2
+    form = picked["turns"][0]["form"]
+    form["theirs"]["tyranitar"]["moves"] = ["crunch"]  # both the Life Orb and the Scarf set have it
+    kept = board.save(0, form)
+    assert kept["opp"]["tyranitar"]["item"]["id"] == "choicescarf"
+    form["theirs"]["tyranitar"]["moves"] = ["crunch", "firepunch"]   # only the Life Orb set has this
+    moved = board.save(0, form)
+    assert moved["opp"]["tyranitar"]["item"]["id"] == "lifeorb"
+    with pytest.raises(RankedError, match="候補"):
+        board.choose("tyranitar", 9)
+
+
+def test_a_reads_notes_are_plain_and_mega_stones_have_japanese_names(world) -> None:  # noqa: ANN001
+    from types import SimpleNamespace as NS
+
+    from pokeuraou.rankedboard import plain_notes
+
+    notes = plain_notes(["選択的延長のセルで、確率の高い分岐 3 つだけを深さ 2 で読んだ",
+                         "選択的延長のセルで、確率の高い分岐 3 つだけを深さ 2 で読んだ", "別の注記"])
+    assert notes == ["一部の局面は、確率の高い 3 通りの手だけを先まで読みました", "別の注記"]
+    # A Mega Stone the names table lacks is named by its Pokemon, not shown in English.
+    from pokeuraou.names import localiser
+
+    loc = localiser(world.reg, "ja")
+    app = RankedApp(world.reg, world.prior, None, loc, lambda m, o, r: (None, "stub"), seconds=1.0)
+    assert app._name("item", "tyranitarite") == "バンギラスのメガストーン"
+    assert app._name("item", "charizarditey") == "リザードンのメガストーン（Y）"
+    assert app._name("item", "leftovers") == loc.item("leftovers")      # a plain item is the table's own
+    del NS
