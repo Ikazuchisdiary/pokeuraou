@@ -64,7 +64,7 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
-from pokeuraou.provenance import agent_name
+from pokeuraou.provenance import agent_name, q_identity
 
 #: (side 0 agent, side 1 agent, side 0's wins, games played). A single game is one of
 #: these with `played` 1, which is what lets a per-seat total and a per-game record sit in
@@ -94,6 +94,10 @@ def is_hidden(name: str) -> bool:
     weights the bench by its book is `.../hidden-bench/belief:book`, and `endswith` called
     it open (IKA-123)."""
     return "hidden-bench" in name.split("/")
+
+#: The version of how a name is built from a record. A cached file is read again when it
+#: differs, because its rows carry names. 2: the Q file joined the ranking fill.
+NAMES = 2
 
 #: How a pairing played twice on one seed's draws is counted (IKA-44). `newest` counts the
 #: draws once, from the newest run that did not fail; `independent` counts every run, which
@@ -242,7 +246,7 @@ def read_games(
         key = str(path.relative_to(root)).replace("\\", "/")
         stamp = [stat.st_size, int(stat.st_mtime)]
         hit = cache.get(key)
-        if hit and hit.get("stamp") == stamp and "draws" in hit:
+        if hit and hit.get("stamp") == stamp and "draws" in hit and hit.get("names") == NAMES:
             fresh[key] = files[key] = hit
             continue
         rows: dict[tuple[str, str], list[float]] = {}
@@ -260,6 +264,10 @@ def read_games(
                 if not record or outcome is None:
                     continue
                 needed += recover_old_axes(record)
+                # Which Q each arm's leaf ranking read, from the game's own `qModel`.
+                fills = record.get("rankFills") or []
+                if game.get("qModel") and len(fills) == 2:
+                    record["qModels"] = [q_identity(game["qModel"], str(f)) for f in fills]
                 engine = game.get("engine") or {}
                 here[str(engine.get("sources", "unrecorded"))] += 1
                 pair = (agent_name(record, 0), agent_name(record, 1))
@@ -274,6 +282,7 @@ def read_games(
             "builds": dict(here),
             "rows": listed,
             "draws": draws,
+            "names": NAMES,
         }
     # The cache is an optimisation, so a read-only checkout or a full disk must cost the
     # rebuild rather than the answer.
@@ -568,8 +577,9 @@ def fit(
     games: list[Observation],
     *,
     anchor: str | None = None,
-    iterations: int = 500,
+    iterations: int = 100,
     prior: float = 1.0,
+    tolerance: float = 1e-9,
 ) -> tuple[dict[str, float], float, dict[str, float]]:
     """Ratings in logits, the seat advantage, and a standard error per agent.
 
@@ -592,21 +602,42 @@ def fit(
     cols = np.array([index[b] for _a, b, _w, _n in games])
     wins = np.array([w for _a, _b, w, _n in games], dtype=np.float64)
     count = np.array([n for _a, _b, _w, n in games], dtype=np.float64)
-    total = float(count.sum())
-
-    step = 0.05
+    # Newton's method on the penalised log likelihood, in (ratings, seat). This was a
+    # fixed 500 steps of gradient ascent, and it had not converged: the direction along
+    # a chain of agents joined by few games (the mc3 family hangs off mc2 by 765 games)
+    # has curvature a thousandth of the rest, so after 500 steps it sat 100 Elo short and
+    # the table put value-mc3e6x2 under value-mc2x2 against the games that beat it
+    # (records/ratings-q-identity.md). `iterations` is now a cap, and the loop stops
+    # when the step is below `tolerance`; the count is left on `fit.steps`.
+    size = len(names) + 1
+    steps = 0
     for _ in range(iterations):
+        steps += 1
         predicted = 1.0 / (1.0 + np.exp(-(rating[rows] - rating[cols] + seat)))
-        # An aggregated row of n games with k wins contributes exactly what those n games
-        # would have, which is why a summary and its games are interchangeable here -- and
-        # why counting both would be counting the same games twice.
         error = wins - count * predicted
-        gradient = np.zeros(len(names))
+        gradient = np.zeros(size)
         np.add.at(gradient, rows, error)
         np.add.at(gradient, cols, -error)
-        gradient -= prior * rating
-        rating += step * gradient / max(total / len(names), 1.0)
-        seat += step * error.sum() / total
+        gradient[: len(names)] -= prior * rating
+        gradient[-1] = error.sum()
+        weight = count * predicted * (1.0 - predicted)
+        curvature = np.zeros((size, size))
+        curvature[np.arange(len(names)), np.arange(len(names))] = prior
+        np.add.at(curvature, (rows, rows), weight)
+        np.add.at(curvature, (cols, cols), weight)
+        np.add.at(curvature, (rows, cols), -weight)
+        np.add.at(curvature, (cols, rows), -weight)
+        np.add.at(curvature, (rows, size - 1), weight)
+        np.add.at(curvature, (size - 1, rows), weight)
+        np.add.at(curvature, (cols, size - 1), -weight)
+        np.add.at(curvature, (size - 1, cols), -weight)
+        curvature[-1, -1] = weight.sum()
+        move = np.linalg.solve(curvature, gradient)
+        rating += move[: len(names)]
+        seat += float(move[-1])
+        if float(np.abs(move).max()) < tolerance:
+            break
+    fit.steps = steps  # type: ignore[attr-defined]
 
     # Curvature at the optimum, for a standard error per agent. Each game contributes
     # p(1-p) to both of its players; the prior contributes its own weight.
@@ -733,6 +764,7 @@ def main() -> None:
     total = sum(n for _a, _b, _w, n in games)
     from_rows = sum(n for _a, _b, _w, n in summaries)
     print(f"{total} games, {len(rating)} agents")
+    print(f"  fit: Newton, converged in {getattr(fit, 'steps', '?')} steps")
     if from_rows:
         print(
             f"  {from_rows} of them from matches that kept only per-seat totals, which is "

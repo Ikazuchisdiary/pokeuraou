@@ -38,6 +38,31 @@ from .regulation import repo_root
 #: reading a record does not import the search.
 LEGACY_RANK_FILL = "refs2"
 
+def q_identity(q_models: object, rank_fill: str) -> str | None:
+    """Which Q file one arm's leaf ranking read, from a game's `qModel` list.
+
+    A queued match writes `qModel` as `[<the plain arm's Q>, "new=<the .new arm's Q>"]`
+    (the second entry only when the match has a `.new` arm). The arm label `.new` says
+    which arm of THAT match this was, not which Q -- IKA-400's `.new` read q-mc2 and
+    IKA-402's plain arm read q-mc2 -- so the file is what names the agent. Returns the
+    stem without `.pt`, or None when the record cannot say.
+    """
+    if not isinstance(q_models, list):
+        return None
+    want_new = rank_fill.endswith(".new")
+    for entry in q_models:
+        text = str(entry)
+        if text.startswith("new="):
+            if want_new:
+                text = text[len("new="):]
+            else:
+                continue
+        elif want_new:
+            continue
+        return text[: -len(".pt")] if text.endswith(".pt") else text
+    return None
+
+
 #: What every game before IKA-283 did with the completions its bench prior barely weighs
 #: (`hidden.parse_bench_drop`): kept them all. Fixed for the same reason as the fill above.
 LEGACY_BENCH_DROP = "none"
@@ -324,7 +349,18 @@ def agent_name(source: dict[str, Any], side: int) -> str:
     # a leaf ranking fills cells at all.
     rank_fill = (source.get("rankFills") or [LEGACY_RANK_FILL, LEGACY_RANK_FILL])[side]
     if rank_fill != LEGACY_RANK_FILL and ranking == "leaf":
-        name += f"/rankfill:{rank_fill}"
+        # Which Q that fill read is part of the agent: `.new` only means "this match's
+        # candidate arm", so q-mc2 was `.new` in one match and the plain arm in the next
+        # and one name held two Qs. `qModels` is the per-side Q file, which the rating
+        # reader copies from the game's `qModel` (`q_identity`); a record that cannot say
+        # reads `(q?)` and keeps its arm label.
+        q_file = (source.get("qModels") or [None, None])[side]
+        if q_file:
+            name += f"/rankfill:{rank_fill.removesuffix('.new')}({q_file})"
+        elif rank_fill.startswith("q-nocover"):
+            name += f"/rankfill:{rank_fill}(q?)"
+        else:
+            name += f"/rankfill:{rank_fill}"
     # Its belief left out the completions its prior barely weighs (IKA-283): another
     # Bayesian game, so another agent. Only a hidden bench has completions.
     bench_drop = (source.get("benchDrops") or [LEGACY_BENCH_DROP, LEGACY_BENCH_DROP])[side]
@@ -385,6 +421,7 @@ __all__ = [
     "agent_name",
     "engine_fingerprint",
     "open_games",
+    "q_identity",
     "provenance",
     "write_game",
 ]
