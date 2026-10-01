@@ -442,7 +442,11 @@ def _make_pokemon(reg: Regulation, index: int, entry: SampledSet, active: int | 
     return Pokemon(
         slot=index,
         species=entry.species,
-        base_species=species.base_species,
+        # The set's own species id, as `position.ts` writes `baseSpecies` -- not the dex's
+        # `baseSpecies`. For Floette-Eternal and Meowstic-F the dex says "Floette" and
+        # "Meowstic", which is neither the sheet member nor its Mega, so once the Mega was on
+        # the board the belief forgot the sheet member had been brought (IKA-411).
+        base_species=entry.species,
         types=species.types,
         ability=entry.ability,
         nature=entry.nature,
