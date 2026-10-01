@@ -169,3 +169,43 @@ def test_a_mixture_row_names_the_target_of_a_single_target_move(tools, played) -
                         assert "→" not in part["text"], (choice, part, whole)
                         seen_plain += 1
     assert seen_target and seen_plain  # positive control: both shapes occurred
+
+
+def _read(side_rows: list[tuple[str, float, float | None]]) -> dict:
+    """A hand-made `mixtures` entry: the opponent's rows (name, share, gap)."""
+    one = [{"species": "", "name": "A", "text": "move"}]
+    return {
+        "side": 0, "own": 0.5, "menu": 3, "chosen": one, "chosenP": 0.5, "chosenRank": 1,
+        "chosenEv": 0.5, "rows": [{"pair": one, "p": 1.0, "picked": True}],
+        "sup": {"n": 1, "menu": 1, "rest": [0, 0.0], "small": [0, 0.0]},
+        "osup": {"n": len(side_rows), "menu": 3, "rest": [0, 0.0], "small": [0, 0.0]},
+        "opp": [
+            {"pair": [{"species": "", "name": n, "text": "t"}], "p": p, "actual": False, "gap": g}
+            for n, p, g in side_rows
+        ],
+        "eq": 0.5, "guarantee": None, "generated": False, "reread": False, "rereadNote": None,
+        "worst": None, "best": None, "actualEv": None, "actualOffMenu": False,
+    }
+
+
+def test_the_opponents_read_carries_the_difference_in_win_rate(tools, played) -> None:  # noqa: ANN001
+    """Each row of the opponent's read ends in the drawn move's win rate against that row less the
+    read's value, in the seat's own terms (seat 1 too); the old table of replies is gone. A row
+    with a tiny share still gets its difference; the control: a record without a value gets none."""
+    _show, game_page = tools
+    reg = played[0]
+    sprites = game_page.Sprites(reg)
+    rows = [("Aaa", 0.6, -0.19), ("Bbb", 0.003, 0.43), ("Ccc", 0.4, None)]
+    for side in (0, 1):
+        html = game_page._mix_seat(_read(rows), side, sprites)
+        assert "選んだ手に対する相手の手" not in html
+        assert "一番辛い" not in html
+        assert re.search(r'class="gp n">−19pt', html)  # the minus, red
+        assert re.search(r'class="gq n">\+43pt', html)  # the plus, green, on a share under 1%
+        assert html.count("pt</span>") == 2  # the row with no value shows none
+        assert f"{game_page.SEAT[side]} から見て" in html
+    cols, vs = ["a", "b"], [0.31, 0.93]
+    assert game_page._column_gap("a", cols, vs, 0.5, 0.4) == pytest.approx(-0.19)
+    assert game_page._column_gap("b", cols, vs, None, 0.5) == pytest.approx(0.43)  # no eq: the node's value
+    assert game_page._column_gap("z", cols, vs, 0.5, 0.4) is None
+    assert game_page._column_gap("a", None, None, 0.5, 0.4) is None
