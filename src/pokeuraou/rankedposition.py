@@ -153,11 +153,13 @@ def max_hp(reg: Regulation, sset: SampledSet) -> int:
 
 
 def _blank_mine(reg: Regulation, sset: SampledSet) -> dict[str, Any]:
-    return {"hp": max_hp(reg, sset), "status": None, "boosts": {}, "mega": False, "itemGone": False}
+    return {"hp": max_hp(reg, sset), "status": None, "boosts": {}, "mega": False, "itemGone": False,
+            "protect": 0, "locked": None}
 
 
 def _blank_theirs() -> dict[str, Any]:
     return {"pct": 100, "colour": None, "status": None, "boosts": {}, "mega": False, "fainted": False,
+            "protect": 0, "locked": None,
             "moves": [], "item": None, "itemGone": False, "ability": None}
 
 
@@ -192,6 +194,9 @@ def next_form(form: dict[str, Any]) -> dict[str, Any]:
         for cid in TIMED:
             if cid in side:
                 side[cid] = max(1, int(side[cid]) - 1)
+    # Whether a Pokemon protected is what the turn that just ended showed: typed again.
+    for mon in (*out["mine"].values(), *out["theirs"].values()):
+        mon["protect"] = 0
     return out
 
 
@@ -239,7 +244,11 @@ def normalize(reg: Regulation, board: Board, form: dict[str, Any]) -> dict[str, 
             "boosts": boosts(raw.get("boosts")),
             "mega": bool(raw.get("mega")),
             "itemGone": bool(raw.get("itemGone")),
+            "protect": integer(raw.get("protect", 0) or 0, 0, 2, f"{name} のまもるの連続回数"),
+            "locked": pick(raw.get("locked"), reg.moves, "技"),
         }
+        if mine[str(i)]["locked"] and mine[str(i)]["locked"] not in board.mine.sets[i].moves:
+            raise RankedError(f"{name} は {board.name('move', mine[str(i)]['locked'])} を持っていません")
     active_mine = [None if x in (None, "") else int(x) for x in list(form.get("mineActive", []))[:active_n]]
     active_mine += [None] * (active_n - len(active_mine))
     for idx in active_mine:
@@ -282,11 +291,19 @@ def normalize(reg: Regulation, board: Board, form: dict[str, Any]) -> dict[str, 
             "boosts": boosts(raw.get("boosts")),
             "mega": bool(raw.get("mega")),
             "fainted": bool(raw.get("fainted")),
+            "protect": integer(raw.get("protect", 0) or 0, 0, 2, f"{name} のまもるの連続回数"),
+            "locked": pick(raw.get("locked"), reg.moves, "技"),
             "moves": moves,
             "item": item,
             "itemGone": item_gone,
             "ability": pick(raw.get("ability"), reg.abilities, "特性"),
         }
+    for sid, mon in theirs.items():
+        # A move a Pokemon is locked into has been used: it is one of its moves
+        if mon["locked"] and mon["locked"] not in mon["moves"]:
+            if len(mon["moves"]) >= reg.meta.max_move_count:
+                raise RankedError(f"{board.name('species', sid)} の見えた技が多すぎます")
+            mon["moves"].append(mon["locked"])
     for sid in active_theirs:
         if sid is not None and sid not in theirs:
             raise RankedError("出ている相手の体が見えた体の中にありません")
@@ -473,6 +490,14 @@ def _fill(  # noqa: PLR0913
     mon.boosts = {k: int(v) for k, v in state["boosts"].items() if v}
     if state.get("itemGone"):
         mon.item = None
+    # State a battle carries that the position would otherwise lack (Protect's chain, a Choice lock,
+    # Unburden): the three the recorded games meet most (`tools/ranked_position_controls.py`).
+    if state.get("protect"):
+        mon.volatiles.append(Effect(id="stall", duration=1, counter=3 ** int(state["protect"])))
+    if state.get("locked"):
+        mon.volatiles.append(Effect(id="choicelock", move=state["locked"]))
+    if mon.ability == "unburden" and state.get("itemGone"):
+        mon.volatiles.append(Effect(id="unburden"))
     if state["mega"]:
         item = mon.item or mon.base_item
         held = mon.item

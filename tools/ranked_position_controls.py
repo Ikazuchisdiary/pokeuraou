@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import random
 import sys
 import time
@@ -107,6 +108,19 @@ def moves_used(reg, game, k: int, foe_id: dict[str, str]) -> dict[str, list[str]
     return out
 
 
+def carried(mon, *, locks: bool = True) -> dict:  # noqa: ANN001
+    """What the person sees of a Pokemon's volatile state that the form has a field for: how many
+    turns in a row it used Protect, and the move a Choice item has it locked into (``locks``: a lock
+    names a move the Pokemon used, so a variant that must not use what was seen leaves it out)."""
+    out: dict = {}
+    for effect in mon.volatiles:
+        if effect.id == "stall":
+            out["protect"] = min(2, max(1, round(math.log(max(effect.counter or 3, 3), 3))))
+        elif effect.id == "choicelock" and effect.move and locks:
+            out["locked"] = effect.move
+    return out
+
+
 def form_of(reg, game, d: int, mine_idx, foe_id, used, *, observed: bool) -> dict:  # noqa: ANN001
     """The form a person would type for decision ``d``'s position."""
     point = game.points[d]
@@ -120,7 +134,8 @@ def form_of(reg, game, d: int, mine_idx, foe_id, used, *, observed: bool) -> dic
         mine[str(idx)] = {
             "hp": mon.hp, "status": None if mon.status == "fnt" else mon.status,
             "boosts": {k: v for k, v in mon.boosts.items() if v},
-            "mega": bool(mon.is_mega), "itemGone": mon.item is None and mon.base_item is not None}
+            "mega": bool(mon.is_mega), "itemGone": mon.item is None and mon.base_item is not None,
+            **carried(mon)}
     for mon in side1.pokemon:
         if mon.slot not in shown1 and mon.active_index is None:
             continue
@@ -132,6 +147,7 @@ def form_of(reg, game, d: int, mine_idx, foe_id, used, *, observed: bool) -> dic
             "status": None if mon.status == "fnt" else mon.status,
             "boosts": {k: v for k, v in mon.boosts.items() if v}, "mega": bool(mon.is_mega),
             "fainted": bool(mon.fainted), "moves": list(used.get(sid, [])) if observed else [],
+            **carried(mon, locks=observed),
             "item": mon.base_item if (gone and observed) else None, "itemGone": gone and observed,
             "ability": None}
         theirs[sid] = entry
