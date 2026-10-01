@@ -570,9 +570,9 @@ def seen_union(board: Board, upto: int | None = None) -> dict[str, Observation]:
 def mega_stone(reg: Regulation, species_id: str, members: Sequence[Any]) -> str | None:
     """The Mega Stone a Pokemon that Mega Evolved holds: seeing it Mega Evolve shows its item. When
     the species has more than one (Charizard's X and Y), the one the field holds most."""
-    base = to_id(reg.species[species_id].base_species)
-    stones = [i for i, item in reg.items.items()
-              if item.mega_stone and any(to_id(k) == base for k in item.mega_stone)]
+    # The regulation's own table of (species, stone) -> Mega, not the stone's `megaStone` key matched
+    # against the dex base species: Floettite names "Floette-Eternal", whose base is "Floette" (IKA-411).
+    stones = [i for i in reg.items if (species_id, i) in reg.mega_by_species]
     if not stones:
         return None
     held = Counter(m.item for m in members if m.item in stones)

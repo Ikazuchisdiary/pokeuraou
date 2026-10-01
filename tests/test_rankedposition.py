@@ -32,7 +32,7 @@ from pokeuraou import rankedposition as rp
 from pokeuraou.analysis import Result
 from pokeuraou.observe import _rolls
 from pokeuraou.priors import SampledSet
-from pokeuraou.rankedentry import FieldPrior, Observation, RankedError
+from pokeuraou.rankedentry import FieldPrior, Observation, RankedError, blank_set
 from pokeuraou.rankedweb import RankedApp
 from pokeuraou.regulation import to_id
 from pokeuraou.standings import Standings, TeamMember, TournamentTeam
@@ -638,3 +638,42 @@ def test_an_ability_the_leads_copied_is_the_one_in_effect(world, port) -> None: 
         assert plain["mine"]["0"]["abilityNow"] is None
     finally:
         world.mine.sets[0].ability = came_with
+
+
+def test_every_mega_holder_gets_its_stone_including_the_forms_with_a_different_base(world) -> None:  # noqa: ANN001
+    """IKA-411: Floettite names "Floette-Eternal" while the dex base is "Floette", and the stone was
+    looked up by the base."""
+    reg = world.reg
+    holders = {sid for sid, _ in reg.mega_by_species}
+    assert {"floetteeternal", "meowsticf"} <= holders
+    for sid in sorted(holders):
+        stone = rp.mega_stone(reg, sid, ())
+        assert stone is not None and (sid, stone) in reg.mega_by_species, sid
+    assert rp.mega_stone(reg, "floetteeternal", ()) == "floettite"
+    # The comparison can fail: a species with no Mega has no stone.
+    assert all(rp.mega_stone(reg, sid, ()) is None for sid in reg.species if sid not in holders)
+
+
+def test_a_lead_with_a_different_dex_base_is_the_lead_the_belief_names(world) -> None:  # noqa: ANN001
+    """IKA-411: `make_game` built the opponent's leads from the dex base species ("floette"), which
+    no body of the position carries, so the leads never reached the bench weights."""
+    from pokeuraou import rankedboard as rb
+    from pokeuraou.hidden import identity
+
+    reg = world.reg
+    opp = ["floetteeternal", "meowsticf", "talonflame", "ninetales", "kingambit", "sylveon"]
+    board = rp.Board(reg, world.mine, [0, 1, 2, 3], opp, opp[:2], [])
+    board.check()
+    base = {s: world.prior.fill(s, opp) for s in opp[2:]}
+    for s in opp[:2]:  # not in the test field: the person's own entry
+        one = blank_set(reg, s)
+        one.set.moves = ["protect", "moonblast", "shadowball", "psychic"]
+        base[s] = one
+    board.turns = [rp.normalize(reg, board, rp.blank_form(reg, board))]
+    derived = rp.derive(reg, board, world.prior, base, observe_spread=False)
+    game, point, built = rb.make_game(reg, world.mine, board, derived, 0)
+    bodies = {identity(m) for m in built.position.sides[1].pokemon}
+    assert game.leads[1] == frozenset({"floetteeternal", "meowsticf"})
+    assert game.leads[1] <= bodies
+    # The comparison can fail: the old base-species form is in no body.
+    assert not frozenset({"floette", "meowstic"}) <= bodies

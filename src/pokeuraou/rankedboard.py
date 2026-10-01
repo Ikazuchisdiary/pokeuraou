@@ -60,7 +60,9 @@ def make_game(
     opp_seen = frozenset(
         identity(pos.sides[1].pokemon[built.opp_slots[s]]) for s in board.seen_species(index))
     leads = (frozenset(to_id(mine.sets[i].species) for i in board.brought[:2]),
-             frozenset(to_id(reg.species[s].base_species) for s in board.opp_leads))
+             # `identity` of the built bodies: the sheet's own species id (IKA-411), not the dex's
+             # base species ("Floette" for Floette-Eternal).
+             frozenset(identity(pos.sides[1].pokemon[built.opp_slots[s]]) for s in board.opp_leads))
     point = Point(decision=0, turn=int(form["turn"]), position=pos.to_json(), seen=(mine_seen, opp_seen))
     game = Game(label=f"ランクマの検討 ターン {form['turn']}", points=[point],
                 teams=(mine, rp.opponent_roster_of(reg, board, derived)),
