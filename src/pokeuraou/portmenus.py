@@ -143,6 +143,11 @@ def q_menus(
     does not go (then the caller builds them itself)."""
     if not ON[0] or not positions:
         return None
+    from . import actions
+
+    if actions.ALLY_TARGETS[0] != "off":
+        # IKA-181: the port's `legal.rs` lists no ally target of a `normal` move.
+        return None
     from . import port, qrank
     from .encode import Encoder
     from .inference import request_failed

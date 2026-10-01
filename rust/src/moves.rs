@@ -1277,14 +1277,13 @@ fn use_move<'a>(
 
     // The target must still be *waiting* to attack. One that already moved this turn --
     // commonly a faster Aqua Jet in the same priority bracket -- leaves nothing to counter,
-    // and Showdown's `willMove` returns nothing.
+    // and Showdown's `willMove` returns nothing. The target's side is not asked: Sucker Punch
+    // on an attacking ally lands (`onTry` reads only `willMove(target)`, IKA-181).
     if move_id.as_str() == "suckerpunch" {
         let candidates = resolve_targets(reg, &mut turn, action, mv)?;
-        let pending = candidates.iter().any(|slot| {
-            slot.0 != action.side
-                && turn.attacks[slot.0][slot.1]
-                && !turn.acted[slot.0][slot.1]
-        });
+        let pending = candidates
+            .iter()
+            .any(|slot| turn.attacks[slot.0][slot.1] && !turn.acted[slot.0][slot.1]);
         if !pending {
             log_event!(turn, "{} failed (nothing left to counter)", Label(reg, action));
             turn.move_failed[action.side][action.slot] = true;

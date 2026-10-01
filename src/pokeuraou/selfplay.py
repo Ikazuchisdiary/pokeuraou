@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable, Collection, Iterable, Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass, field, replace
 from functools import cache
 from pathlib import Path
@@ -36,7 +37,13 @@ from typing import Any, Protocol
 import numpy as np
 
 from . import luck, port, qrank, rank_scores, rustnode, timing
-from .actions import SideAction, switch_actions_after_faint
+from .actions import (
+    ALLY_TARGET_MODES,
+    SideAction,
+    names_ally,
+    switch_actions_after_faint,
+)
+from .actions import ally_targets as ally_scope
 from .budget import Budget
 from .deepen import DEFAULT_DEEPEN, deepen_spec
 from .equilibrium import EquilibriumError, solve
@@ -316,6 +323,12 @@ class GameRecord:
     #: ``rust_binary``, IKA-413): its fingerprint (path, size, sha256, build time), else
     #: None. Written only when a side had one.
     rust_binary: list[dict | None] = field(default_factory=lambda: [None, None])
+    #: Which ally targets of `normal` moves each side's menus listed
+    #: (`actions.ALLY_TARGET_MODES`, IKA-181), and per side the move decisions whose menu
+    #: held one and those where the side played one. Written only when a side was not off.
+    ally_targets: list[str] = field(default_factory=lambda: ["off", "off"])
+    ally_menus: list[int] = field(default_factory=lambda: [0, 0])
+    ally_played: list[int] = field(default_factory=lambda: [0, 0])
     #: The equilibrium mixtures over the 90 ordered selections, when a book was used.
     #: These are the policy targets a selection head would learn -- the *solver's*
     #: recommendation, not the softened distribution the game was drawn from.
@@ -406,6 +419,12 @@ class GameRecord:
                 else {}
             ),
             **({"rustBinary": list(self.rust_binary)} if any(self.rust_binary) else {}),
+            **(
+                {"allyTargets": list(self.ally_targets), "allyMenus": list(self.ally_menus),
+                 "allyPlayed": list(self.ally_played)}
+                if set(self.ally_targets) != {"off"}
+                else {}
+            ),
             **(
                 {"depth": list(self.depth), "solveRestricted": list(self.solve_restricted)}
                 if set(self.depth) != {1}
@@ -898,6 +917,14 @@ def _menus(
     return own, foe
 
 
+@contextmanager
+def _agent_scope(binary: Path | None, allies: str) -> Iterator[None]:
+    """One agent's work at a move node: read through its port executable (IKA-413) with its
+    ally targets listed (IKA-181)."""
+    with rustnode.binary_scope(binary), ally_scope(allies):
+        yield
+
+
 def _one_view(views: list[tuple[Position, float]]) -> Position:
     """The one position of `_menus.views` (a Q ranks from one view, as the leaf does)."""
     (at, _weight), = views
@@ -1067,6 +1094,7 @@ def play_game(
     knockouts: bool | tuple[bool, bool] = False,
     dex_base_belief: bool | tuple[bool, bool] = False,
     rust_binary: Path | str | None | tuple[Path | str | None, Path | str | None] = None,
+    ally_targets: str | tuple[str, str] = "off",
 ) -> GameRecord:
     """Plays one game to a result, sampling both sides from the turn's equilibrium.
 
@@ -1155,6 +1183,11 @@ def play_game(
     IKA-411: a Mega of Floette-Eternal or Meowstic-F stops naming its sheet member, which
     goes back on the bench (`_belief_view`). Off ships; on is only for measuring the fix.
 
+    ``ally_targets`` (a pair too, IKA-181) is which ally targets of `normal` moves that
+    side's move-node menus list (`actions.ALLY_TARGET_MODES`): the side's menus and solves
+    run under it (`actions.ally_targets`), both sides' pools in them, as for the other
+    per-side settings. "off" ships.
+
     ``deepen`` takes a pair too: how each agent deepens its move decisions best first
     after the depth-1 solve (`deepen.parse_deepen`, IKA-33): ``none`` ships and is the
     search unchanged, ``m<N>`` / ``r<N>`` spend N cells and read the root whole /
@@ -1224,8 +1257,17 @@ def play_game(
             else rust_binary
         )
     )
+    allies = (ally_targets, ally_targets) if isinstance(ally_targets, str) else tuple(ally_targets)
+    for mode in allies:
+        if mode not in ALLY_TARGET_MODES:
+            raise ValueError(f"ally_targets {mode!r} is not one of {ALLY_TARGET_MODES}")
+
+    def scope(side: int) -> Any:  # noqa: ANN401
+        """Side `side`'s agent: its port executable and its ally targets."""
+        return _agent_scope(binaries[side], allies[side])
+
     cells = (specs[0].cells, specs[1].cells)
-    deep_restricted = (specs[0].reading == "restricted", specs[1].reading == "restricted")
+    deep_restricted =(specs[0].reading == "restricted", specs[1].reading == "restricted")
     # The root's double oracle's width per side (IKA-293), or None; whether it swaps,
     # and whether it runs alone, without deepening.
     oracles = (specs[0].oracle, specs[1].oracle)
@@ -1299,6 +1341,7 @@ def play_game(
     record.knockouts = [bool(k) for k in kos]
     record.dex_base_belief = list(dex_bases)
     record.rust_binary = [None if b is None else _fingerprint(b) for b in binaries]
+    record.ally_targets = list(allies)
     record.depth = [int(d) for d in depths]
     record.solve_restricted = [bool(r) for r in restricted]
     pos = start if start is not None else position_from_sets(reg, own, foe, rng=rng)
@@ -1415,6 +1458,8 @@ def play_game(
             and budgets[1] == budgets[0]
             # Two ports are two answers: each side builds its own menu and solve (IKA-413).
             and binaries[1] == binaries[0]
+            # Ally targets listed otherwise are other pools, so other menus (IKA-181).
+            and allies[1] == allies[0]
             and policies[1] is policies[0]
             and views_rule[1] == views_rule[0]
             # A leaf ranking filled another way orders another menu (IKA-268).
@@ -1450,7 +1495,7 @@ def play_game(
         own_views: dict[int, tuple[int, tuple[str, ...]]] = {}
         foe_views: dict[int, tuple[int, tuple[str, ...]]] | None = None
         rank_scores.at_node(len(record.decisions), pos.turn, 0)  # IKA-278
-        with rustnode.binary_scope(binaries[0]):
+        with scope(0):
             ours, theirs = _menus(
                 reg, pos, limits, own_leaf, budget, ranked[0], policies[0], spreads,
                 rank_view=views_rule[0], used=own_views, rank_fill=fills[0],
@@ -1497,7 +1542,7 @@ def play_game(
                 # the side it is read on is what keeps the other side's node and LP from
                 # being built and thrown away (IKA-282: half of the board's matrix,
                 # dirty fill and LP).
-                with rustnode.binary_scope(binaries[0]):
+                with scope(0):
                     asked = tuple(
                         side for side in ((0, 1) if same_menu else (0,)) if not deep[side]
                     )
@@ -1589,7 +1634,7 @@ def play_game(
                 foe_started = perf_counter()
                 foe_views = {}
                 rank_scores.at_node(len(record.decisions), pos.turn, 1)  # IKA-278
-                with rustnode.binary_scope(binaries[1]):
+                with scope(1):
                     foe_ours, foe_theirs = _menus(
                         reg, pos, limits, foe_leaf, budgets[1], ranked[1], policies[1], spreads,
                         rank_view=views_rule[1], used=foe_views, rank_fill=fills[1],
@@ -1598,7 +1643,7 @@ def play_game(
                 if not foe_ours or not foe_theirs:
                     break
                 try:
-                    with rustnode.binary_scope(binaries[1]):
+                    with scope(1):
                         if deep[1]:
                             foe_deep = search(
                                 reg, pos, foe_ours, foe_theirs, foe_leaf, budget=budgets[1],
@@ -1646,7 +1691,7 @@ def play_game(
         else:
             solve_started = perf_counter()
             try:
-                with rustnode.binary_scope(binaries[0]):
+                with scope(0):
                     own_search = search(
                         reg, pos, ours, theirs, own_leaf, budget=budget, depth=depths[0],
                         solve_sparsely=sparse[0],
@@ -1680,10 +1725,11 @@ def play_game(
                 or deepens[1] != deepens[0]
                 or budgets[1] != budgets[0]
                 or binaries[1] != binaries[0]
+                or allies[1] != allies[0]
             ):
                 foe_started = perf_counter()
                 rank_scores.at_node(len(record.decisions), pos.turn, 1)  # IKA-278
-                with rustnode.binary_scope(binaries[1]):
+                with scope(1):
                     foe_ours, foe_theirs = (
                         (ours, theirs)
                         if same_menu
@@ -1698,7 +1744,7 @@ def play_game(
                 if not foe_ours or not foe_theirs:
                     break
                 try:
-                    with rustnode.binary_scope(binaries[1]):
+                    with scope(1):
                         foe_search = search(
                             reg, pos, foe_ours, foe_theirs, foe_leaf, budget=budgets[1],
                             depth=depths[1], solve_sparsely=sparse[1],
@@ -1776,6 +1822,12 @@ def play_game(
             ours[own_index],
             foe_theirs[_sample_index(rng, foe_strategy)],
         ]
+        for side, menu in ((0, ours), (1, foe_theirs)):
+            # IKA-181's positive control: the side's own menu held an ally target, and it
+            # played one.
+            if allies[side] != "off":
+                record.ally_menus[side] += int(any(names_ally(reg, a) for a in menu))
+                record.ally_played[side] += int(names_ally(reg, chosen[side]))
         record.decisions.append(
             Decision(
                 turn=pos.turn,

@@ -15,6 +15,8 @@ order), allies are ``-1`` and ``-2``.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from itertools import product
 from typing import TYPE_CHECKING
@@ -101,6 +103,182 @@ RECHARGE = "recharge"
 #: condition on the Pokemon it traps. Only Mega Gengar's Shadow Tag has a holder in the
 #: champions dex; the dump names the hook but not the condition, which is code.
 TRAPPING_ABILITIES = frozenset({"shadowtag", "arenatrap", "magnetpull"})
+
+#: IKA-181. Showdown lets a `normal` single-target move name the user's ally
+#: (`Battle.validTargetLoc`: `case 'normal': return isAdjacent;`, and in doubles the ally is
+#: adjacent), and the menu never offered it. Which of those choices the menu lists:
+#:
+#: - ``off``: none, as before IKA-181 (ships).
+#: - ``benefit``: only where the ally's ability or item turns the move into a gain
+#:   (`ally_benefits`), or the move is one whose use on an ally is its point
+#:   (`ALLY_USE_MOVES`).
+#: - ``all``: every one Showdown accepts (for the differential tests and counting).
+ALLY_TARGET_MODES = ("off", "benefit", "all")
+#: The process's mode. A list so `ally_targets` can change it in place; per agent in a
+#: match through `play_game`'s ``ally_targets``.
+ALLY_TARGETS = ["off"]
+
+
+def set_ally_targets(mode: str) -> None:
+    if mode not in ALLY_TARGET_MODES:
+        raise ValueError(f"ally target mode {mode!r} is not one of {ALLY_TARGET_MODES}")
+    ALLY_TARGETS[0] = mode
+
+
+@contextmanager
+def ally_targets(mode: str | None) -> Iterator[None]:
+    """`ALLY_TARGETS` set to ``mode`` inside the block; None leaves it as it is."""
+    if mode is None:
+        yield
+        return
+    before = ALLY_TARGETS[0]
+    set_ally_targets(mode)
+    try:
+        yield
+    finally:
+        ALLY_TARGETS[0] = before
+
+
+#: `normal` moves whose use on an ally is what they are for (doubles staples): After You and
+#: Instruct order the ally, Pollen Puff heals it, Spicy Extract and Decorate boost it, Psych
+#: Up copies its boosts, and Skill Swap, Role Play, Entrainment and Topsy-Turvy rework its
+#: ability or boosts.
+ALLY_USE_MOVES = frozenset(
+    {
+        "afteryou", "instruct", "pollenpuff", "spicyextract", "decorate", "psychup",
+        "skillswap", "roleplay", "entrainment", "topsyturvy",
+    }
+)
+#: Abilities that take a move of these types (status moves too) and gain from it
+#: (`onTryHit`: `target !== source && move.type === ...`). Lightning Rod and Storm Drain
+#: are left out: their `onAnyRedirectTarget` already pulls the ally's move aimed at a foe
+#: onto the holder, so naming the ally adds nothing.
+ALLY_ABSORBING = {
+    "voltabsorb": {"Electric"}, "motordrive": {"Electric"},
+    "waterabsorb": {"Water"}, "dryskin": {"Water"},
+    "sapsipper": {"Grass"}, "flashfire": {"Fire"}, "wellbakedbody": {"Fire"},
+    "eartheater": {"Ground"},
+}
+#: Abilities a damaging hit of these types raises a stat of (`onDamagingHit`); None is any
+#: type. Berserk and Anger Shell need the hit to cross half HP; listed, the search decides.
+ALLY_HIT_TYPES: dict[str, set[str] | None] = {
+    "justified": {"Dark"}, "rattled": {"Bug", "Dark", "Ghost"},
+    "steamengine": {"Fire", "Water"}, "thermalexchange": {"Fire"},
+    "watercompaction": {"Water"}, "stamina": None, "berserk": None, "angershell": None,
+    "electromorphosis": None,
+}
+#: Items a damaging hit consumes for a gain, by the move's type or category.
+ALLY_HIT_ITEMS: dict[str, set[str]] = {
+    "absorbbulb": {"Water"}, "luminousmoss": {"Water"}, "cellbattery": {"Electric"},
+    "snowball": {"Ice"}, "keeberry": {"Physical"}, "marangaberry": {"Special"},
+}
+#: Status conditions abilities profit from.
+ALLY_STATUS_ABILITIES = {
+    "guts": {"brn", "par", "psn", "tox", "slp"}, "quickfeet": {"brn", "par", "psn", "tox", "slp"},
+    "marvelscale": {"brn", "par", "psn", "tox", "slp"}, "poisonheal": {"psn", "tox"},
+    "toxicboost": {"psn", "tox"}, "flareboost": {"brn"},
+}
+#: Moves that take the target's item away, for an ally with Unburden.
+ITEM_TAKING_MOVES = frozenset(
+    {"knockoff", "trick", "switcheroo", "thief", "covet", "bugbite", "pluck", "incinerate"}
+)
+_ATE_ABILITIES = {"pixilate": "Fairy", "aerilate": "Flying", "refrigerate": "Ice",
+                  "galvanize": "Electric"}
+_WEATHER_BALL = {"sunnyday": "Fire", "desolateland": "Fire", "raindance": "Water",
+                 "primordialsea": "Water", "sandstorm": "Rock", "hail": "Ice", "snowscape": "Ice"}
+_TERRAIN_PULSE = {"electricterrain": "Electric", "grassyterrain": "Grass",
+                  "mistyterrain": "Fairy", "psychicterrain": "Psychic"}
+
+
+def team_ally_benefits(reg: Regulation, sets) -> list[tuple[int, int, str]]:  # noqa: ANN001
+    """(user, ally, move) of a team sheet where `ally_benefits` holds, read off the sets'
+    abilities and items (`benefit` before a battle: which teams the mode can change)."""
+    out: list[tuple[int, int, str]] = []
+    for u, user in enumerate(sets):
+        for a, ally in enumerate(sets):
+            if a == u:
+                continue
+            for move_id in user.moves:
+                move = reg.moves.get(move_id)
+                if move is not None and move.target == "normal" and ally_benefits(
+                    reg, move, user, ally
+                ):
+                    out.append((u, a, move_id))
+    return out
+
+
+def names_ally(reg: Regulation, action: SideAction) -> bool:
+    """Whether a slot of ``action`` aims a `normal` move at its ally (IKA-181)."""
+    for slot in action.slots:
+        if isinstance(slot, MoveAction) and slot.target is not None and slot.target < 0:
+            move = reg.moves.get(slot.move_id)
+            if move is not None and move.target == "normal":
+                return True
+    return False
+
+
+def _ally_move_types(move, user, pos: Position | None) -> set[str]:  # noqa: ANN001
+    """The types the move may have: its own, and what Weather Ball, Terrain Pulse, an -ate
+    ability or Liquid Voice may make it. A superset is safe -- an extra choice costs width,
+    a missing one is a move the search never sees."""
+    types = {move.type}
+    if pos is not None:
+        if move.id == "weatherball" and pos.field.weather in _WEATHER_BALL:
+            types.add(_WEATHER_BALL[pos.field.weather])
+        if move.id == "terrainpulse" and pos.field.terrain in _TERRAIN_PULSE:
+            types.add(_TERRAIN_PULSE[pos.field.terrain])
+    if user is not None:
+        if move.type == "Normal" and user.ability in _ATE_ABILITIES:
+            types.add(_ATE_ABILITIES[user.ability])
+        if user.ability == "liquidvoice" and "sound" in move.flags:
+            types.add("Water")
+    return types
+
+
+def ally_benefits(reg: Regulation, move, user, ally, pos: Position | None = None) -> bool:  # noqa: ANN001
+    """Whether ``move`` from ``user`` on its ``ally`` can be a gain (IKA-181's ``benefit``).
+
+    The ally's ability or item: an absorbing ability for the move's type, an ability or
+    item a damaging hit of that type raises, a status condition the ability profits from,
+    Contrary under a lowering status move, Own Tempo under Swagger or Flatter, Unburden
+    under a move that takes its item. Or the move is in `ALLY_USE_MOVES`. It reads the
+    ally's ability and item now, not what a Mega Evolution would give.
+    """
+    if move.id in ALLY_USE_MOVES:
+        return True
+    ability = ally.ability
+    item = ally.item
+    types = _ally_move_types(move, user, pos)
+    damaging = move.category != "Status"
+    if ability in ALLY_ABSORBING and types & ALLY_ABSORBING[ability]:
+        return True
+    if damaging and ability in ALLY_HIT_TYPES:
+        wanted = ALLY_HIT_TYPES[ability]
+        if wanted is None or types & wanted:
+            return True
+    if ability == "weakarmor" and move.category == "Physical":
+        return True
+    if damaging and item in ALLY_HIT_ITEMS and (
+        types & ALLY_HIT_ITEMS[item] or move.category in ALLY_HIT_ITEMS[item]
+    ):
+        return True
+    if damaging and item == "weaknesspolicy":
+        # A team sheet's set has no `types` (`team_ally_benefits`).
+        ally_types = getattr(ally, "types", None) or _species_types(reg, ally.species)
+        if any(reg.type_effectiveness(t, tuple(ally_types)) > 1 for t in types):
+            return True
+    raw = move.raw
+    status = raw.get("status")
+    if status and ability in ALLY_STATUS_ABILITIES and status in ALLY_STATUS_ABILITIES[ability]:
+        return True
+    if ability == "contrary":
+        # Parting Shot lowers in its own `onHit`, not by a `boosts` the dump carries.
+        boosts = raw.get("boosts") or {}
+        if move.id == "partingshot" or any(v < 0 for v in boosts.values()):
+            return True
+    if ability == "owntempo" and raw.get("volatileStatus") == "confusion":
+        return True
+    return ability == "unburden" and bool(item) and move.id in ITEM_TAKING_MOVES
 
 
 @dataclass(frozen=True, slots=True)
@@ -403,12 +581,19 @@ def _targets_for(
     foe: Side,
     active_per_side: int,
     user_types: tuple[str, ...] = (),
+    own: Side | None = None,
+    pos: Position | None = None,
 ) -> list[int | None]:
     """Legal target indices for one move from one slot.
 
     Showdown rejects a choice that supplies a target for a move that takes none, and
     rejects one that omits a target for a single-target move, so the two cases are
     distinct rather than optional.
+
+    A `normal` move may also name the ally (IKA-181). Which of those are listed is
+    `ALLY_TARGETS` (off by default): with ``own`` (the user's side) given, a live ally
+    after the foes, as `any` lists it, under ``all`` always and under ``benefit`` where
+    `ally_benefits` says so.
 
     The target Showdown validates against is the request's, not the dex entry's
     (`Pokemon.getMoves`), and the two differ for Curse: a user that is not Ghost now is
@@ -437,6 +622,8 @@ def _targets_for(
             for i in range(active_per_side):
                 if i != slot:
                     options.append(-(i + 1))
+        elif target == "normal" and own is not None and ALLY_TARGETS[0] != "off":
+            options.extend(_ally_options(reg, move, slot, own, active_per_side, pos))
         return options
 
     if target in TARGETS_REQUIRING_ALLY:
@@ -448,6 +635,29 @@ def _targets_for(
         return options
 
     return [None]
+
+
+def _ally_options(
+    reg: Regulation, move, slot: int, own: Side, active_per_side: int,  # noqa: ANN001
+    pos: Position | None,
+) -> list[int]:
+    """The ally targets `ALLY_TARGETS` lists for a `normal` move from ``slot`` (IKA-181):
+    each live ally adjacent to the user (`validTargetLoc`: `Math.abs(targetLoc - sourceLoc)
+    === 1` on the user's own side)."""
+    mode = ALLY_TARGETS[0]
+    user_party = own.active[slot] if slot < len(own.active) else None
+    user = own.pokemon[user_party] if user_party is not None else None
+    out: list[int] = []
+    for i in range(active_per_side):
+        if i == slot or abs(i - slot) != 1:
+            continue
+        party = own.active[i] if i < len(own.active) else None
+        ally = own.pokemon[party] if party is not None else None
+        if ally is None or ally.fainted:
+            continue
+        if mode == "all" or ally_benefits(reg, move, user, ally, pos):
+            out.append(-(i + 1))
+    return out
 
 
 def slot_actions(
@@ -507,7 +717,9 @@ def slot_actions(
                 return [MoveAction(slot=slot, move_index=index, move_id=locked, target=None)]
             return [
                 MoveAction(slot=slot, move_index=index, move_id=locked, target=target)
-                for target in _targets_for(reg, locked, slot, foe, active_per_side)
+                for target in _targets_for(
+                    reg, locked, slot, foe, active_per_side, own=side, pos=pos
+                )
             ]
 
     out: list[SlotAction] = []
@@ -520,7 +732,9 @@ def slot_actions(
     if usable:
         user_types = mon.types or _species_types(reg, mon.species)
         for move_index, move_id in usable:
-            for target in _targets_for(reg, move_id, slot, foe, active_per_side, user_types):
+            for target in _targets_for(
+                reg, move_id, slot, foe, active_per_side, user_types, own=side, pos=pos
+            ):
                 out.append(
                     MoveAction(slot=slot, move_index=move_index, move_id=move_id, target=target)
                 )

@@ -533,6 +533,9 @@ class PoolArm:
     #: process's own (`play_game`'s ``rust_binary``, IKA-413). Only for measuring a port
     #: change against the port before it; the game itself is resolved by the process's.
     rust_binary: Path | None = None
+    #: Which ally targets of `normal` moves its menus list (`actions.ALLY_TARGET_MODES`,
+    #: IKA-181); "off" ships.
+    ally_targets: str = "off"
 
     def __post_init__(self) -> None:
         self.rank_fill = resolve_rank_fill(self.rank_fill, self.rank_by_leaf)
@@ -687,6 +690,7 @@ def pool_match_game(
         knockouts=(side_arms[0].knockouts, side_arms[1].knockouts),
         dex_base_belief=(side_arms[0].dex_base_belief, side_arms[1].dex_base_belief),
         rust_binary=(side_arms[0].rust_binary, side_arms[1].rust_binary),
+        ally_targets=(side_arms[0].ally_targets, side_arms[1].ally_targets),
         selection=(species[0], species[1], picks[0], picks[1]),
     )
     sources = tuple(arm.selection for arm in side_arms)
@@ -707,6 +711,7 @@ def pool_match_game(
         "depths": tuple(arm.depth for arm in side_arms),
         "knockouts": tuple(arm.knockouts for arm in side_arms),
         "dex_base": tuple(arm.dex_base_belief for arm in side_arms),
+        "allies": tuple(arm.ally_targets for arm in side_arms),
         "binaries": tuple(None if arm.rust_binary is None else str(arm.rust_binary) for arm in side_arms),
         "solvers": tuple(
             "restricted" if arm.depth >= 2 and arm.solve_restricted else "full"

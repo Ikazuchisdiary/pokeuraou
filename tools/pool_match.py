@@ -20,6 +20,8 @@ What an arm is, per arm, and so in whichever seat it sits:
 * whether its belief keeps the pre-IKA-411 rule, under which an opponent's Mega of
   Floette-Eternal or Meowstic-F stops naming its sheet member (`--dex-base-belief` /
   `--baseline-dex-base-belief`; only for measuring the fix),
+* which ally targets of `normal` moves its menus list (`--ally-targets` /
+  `--baseline-ally-targets`: off ships, benefit, all; IKA-181),
 * whether its leaf scores a finished battle by the net instead of as its result
   (`--net-scores-ends` / `--baseline-net-scores-ends`: IKA-253 undone, for measuring it),
 * its selection: an arm with a leaf solves the pair's selection game with THAT leaf,
@@ -54,6 +56,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from pokeuraou import narrow as narrowing  # noqa: E402
 from pokeuraou import qrank  # noqa: E402
+from pokeuraou.actions import ALLY_TARGET_MODES, team_ally_benefits  # noqa: E402
 from pokeuraou.benchflags import add_bench_flags, require_bench  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.deepen import DEFAULT_DEEPEN, deepen_spec, parse_deepen  # noqa: E402
@@ -307,6 +310,16 @@ def main(argv: list[str] | None = None) -> None:
                     "own. Default: the process's own, byte for byte")
     ap.add_argument("--baseline-rust-binary", type=Path, default=None,
                     help="same for the other arm")
+    ap.add_argument("--ally-targets", choices=ALLY_TARGET_MODES, default="off",
+                    help="which ally targets of `normal` moves the tested arm's menus list "
+                    "(IKA-181): off (ships), benefit (where the ally's ability or item "
+                    "gains, or the move is for an ally), all")
+    ap.add_argument("--baseline-ally-targets", choices=ALLY_TARGET_MODES, default="off",
+                    help="same for the other arm")
+    ap.add_argument("--pairs-ally-benefit", action="store_true",
+                    help="draw only the pool's pairs where either team has a member whose "
+                    "`normal` move gains on another member (`actions.team_ally_benefits`, "
+                    "IKA-181)")
     ap.add_argument("--pairs-with", nargs="+", default=None, metavar="SPECIES",
                     help="draw only the pool's pairs where either team has one of these "
                     "species ids (IKA-411: a match about a change only some teams meet)")
@@ -384,6 +397,12 @@ def main(argv: list[str] | None = None) -> None:
         pairs = [(a, b) for a, b in pool.pairs if a in holding or b in holding]
         if not pairs:
             ap.error(f"--pairs-with {args.pairs_with}: no team of the pool has one")
+    if args.pairs_ally_benefit:
+        holding = {t for t, team in enumerate(pool.teams) if team_ally_benefits(reg, team.sets)}
+        pairs = [(a, b) for a, b in (pairs if pairs is not None else pool.pairs)
+                 if a in holding or b in holding]
+        if not pairs:
+            ap.error("--pairs-ally-benefit: no team of the pool has one")
     # One encoder per arm when their rules differ: the rules travel with the leaf.
     tested_rules = EncodingRules(net_scores_ends=args.net_scores_ends)
     other_rules = EncodingRules(net_scores_ends=args.baseline_net_scores_ends)
@@ -416,6 +435,7 @@ def main(argv: list[str] | None = None) -> None:
         solve_restricted=args.solve_restricted, knockouts=args.knockouts,
         dex_base_belief=args.dex_base_belief,
         rust_binary=args.rust_binary,
+        ally_targets=args.ally_targets,
     )
     other_limit = args.limit if args.baseline_limit is None else args.baseline_limit
     if baseline is None:
@@ -428,7 +448,8 @@ def main(argv: list[str] | None = None) -> None:
                         solve_restricted=args.baseline_solve_restricted,
                         knockouts=args.baseline_knockouts,
                         dex_base_belief=args.baseline_dex_base_belief,
-                        rust_binary=args.baseline_rust_binary)
+                        rust_binary=args.baseline_rust_binary,
+                        ally_targets=args.baseline_ally_targets)
     else:
         assert baseline_name is not None
         # One solver per arm even over one leaf: shared, the second arm would reuse the
@@ -449,6 +470,7 @@ def main(argv: list[str] | None = None) -> None:
             knockouts=args.baseline_knockouts,
             dex_base_belief=args.baseline_dex_base_belief,
             rust_binary=args.baseline_rust_binary,
+            ally_targets=args.baseline_ally_targets,
         )
     arms = (tested, other)
     print(pool.summary(), file=sys.stderr)
@@ -456,8 +478,10 @@ def main(argv: list[str] | None = None) -> None:
           f"selection eps={args.explore_epsilon}, T={args.explore_temperature}",
           file=sys.stderr)
     if pairs is not None:
+        wanted = [*(args.pairs_with or []),
+                  *(["a member gaining from its ally's move"] if args.pairs_ally_benefit else [])]
         print(f"  pairs: {len(pairs)} of {len(pool.pairs)}, those with "
-              f"{' / '.join(args.pairs_with)} in either team", file=sys.stderr)
+              f"{' / '.join(wanted)} in either team", file=sys.stderr)
     for label, arm in (("tested arm", tested), ("other arm", other)):
         store = arm.solver.store if arm.solver is not None else None
         print(
@@ -471,6 +495,7 @@ def main(argv: list[str] | None = None) -> None:
             + (" / knockout branch" if arm.knockouts else "")
             + (" / belief by the dex's base species (pre-IKA-411)" if arm.dex_base_belief else "")
             + (f" / port {arm.rust_binary}" if arm.rust_binary is not None else "")
+            + (f" / ally targets {arm.ally_targets}" if arm.ally_targets != "off" else "")
             + " / selection "
             f"{arm.selection}" + (f" by its own leaf, store {store}" if store else "")
             + f" / belief {'solved' if arm.solver is not None and hide_bench else 'uniform'}",
@@ -498,6 +523,8 @@ def main(argv: list[str] | None = None) -> None:
         tags += "@dexbase" if tested.dex_base_belief else "@setbase"
     if tested.rust_binary != other.rust_binary:
         tags += "@port" if tested.rust_binary is not None else "@ownport"
+    if tested.ally_targets != other.ally_targets:
+        tags += f"@ally:{tested.ally_targets}"
     arm_label = f"{tested.name}{tags}"
 
     client = WorkClient(args.queue) if args.queue else None
@@ -520,6 +547,7 @@ def main(argv: list[str] | None = None) -> None:
     echo = [[{"selection": {}, "belief": {}, "leaf": set(), "fill": {}, "drop": {},
               "deepen": {}, "deepened": 0, "widened": 0, "swapped": 0, "oracle": 0,
               "depth": {}, "knockouts": 0, "dexbase": 0, "dexbase_rewrites": 0, "ports": {},
+              "ally": {}, "ally_menus": 0, "ally_played": 0,
               "coverless": {"menus": 0, "dropping": 0, "dropped": 0},
               "q": [0, 0], "qprobe": [0, 0], "childq": [0, 0], "lines": {}, "calls": 0}
              for _ in arms]
@@ -570,6 +598,12 @@ def main(argv: list[str] | None = None) -> None:
             if record.rust_binary[side] is not None:
                 port_key = str(record.rust_binary[side].get("sha256"))
                 bucket["ports"][port_key] = bucket["ports"].get(port_key, 0) + 1
+            # The ally targets this side's menus listed, the move decisions its menu held
+            # one at and those it played one at, read off the game (IKA-181).
+            played_ally = record.ally_targets[side]
+            bucket["ally"][played_ally] = bucket["ally"].get(played_ally, 0) + 1
+            bucket["ally_menus"] += record.ally_menus[side]
+            bucket["ally_played"] += record.ally_played[side]
             played_deepen = record.deepen[side]
             bucket["deepen"][played_deepen] = bucket["deepen"].get(played_deepen, 0) + 1
             # Decisions this side actually deepened, read off the game (IKA-33).
@@ -692,6 +726,9 @@ def main(argv: list[str] | None = None) -> None:
                    if bucket["dexbase"] else "")
                 + (f"port executable (sha256 -> games) {bucket['ports']}, "
                    if bucket["ports"] else "")
+                + (f"ally targets {bucket['ally']} (menus holding one {bucket['ally_menus']:,}, "
+                   f"played {bucket['ally_played']:,}), "
+                   if set(bucket["ally"]) != {"off"} else "")
                 + f"deepen {bucket['deepen']} ({bucket['deepened']:,} decisions deepened"
                 + (
                     f", oracle asked at {bucket['oracle']:,}, {bucket['widened']:,} actions "
