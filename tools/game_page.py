@@ -978,7 +978,7 @@ h2{font-size:15px;margin:28px 0 8px;color:var(--dim);font-weight:600;letter-spac
 .nc{text-align:right;white-space:nowrap}.gp{color:var(--bad)}
 .tag.pk{margin:2px 0 0 30px;font-size:11px}
 .ic.xs.f0,.ic.xs.f1{width:24px;height:24px;flex:none}
-@media (max-width:720px){.mt .r,.mt.opp .r{grid-template-columns:minmax(0,1fr) auto}.bc{grid-column:1/-1;order:3}.mt.opp .dc{grid-column:1/-1;order:4}.mt.opp .r.hd{display:none}.mseat h5 small{display:block;margin-left:0}.pt .pm{display:block}
+@media (max-width:720px){.mt .r,.mt.opp .r{grid-template-columns:minmax(0,1fr) auto}.bc{grid-column:1/-1;order:3}.mt.opp .dc{grid-column:1/-1;order:4;padding:2px 0 6px}.mt.opp .r:not(.hd){border-bottom:1px solid var(--line)}.mt.opp .r.hd{display:none}.mseat h5 small{display:block;margin-left:0}.pt .pm{display:block}
 .mh small{display:block;margin-left:0}.msl .l2{padding-left:0}}
 .dmg{font-family:var(--num);font-weight:700;color:var(--bad)}
 .tag{display:inline-block;font-size:12px;line-height:1.5;padding:0 8px;border-radius:999px;border:1px solid var(--line);background:var(--surface);color:var(--dim);white-space:nowrap}
@@ -1342,7 +1342,7 @@ def _mix_seat(m: dict[str, Any] | None, side: int, sprites: Sprites) -> str:
         f"{picked}{_table_html(rows, side, sprites, kind='mix')}{_rest_html(m.get('sup'))}"
         f"<h5>相手の読み<small>{n_opp}</small></h5>"
         f'<p class="gnote">勝率の差＝相手がその手を打つと、{SEAT[side]} の勝率がどれだけ上下するか'
-        f"（{SEAT[side]} が選んだ手に対して。例: −15pt は 15pt 下がる）</p>"
+        f"（{SEAT[side]} が選んだ手に対して。例: {_gap_html(-0.15)} は 15pt 下がる）</p>"
         f"{_table_html(list(m['opp']), 1 - side, sprites, kind='opp')}{_rest_html(osup)}{off_menu}</div>"
     )
 
