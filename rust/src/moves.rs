@@ -1473,7 +1473,7 @@ fn use_move<'a>(
                         let mut expanded: Vec<Outcome<'a>> = Vec::new();
                         for (w, state) in here {
                             for (inner, next) in
-                                hit_target(reg, state, action, mv, target, false, budget, None, Some(hits))?
+                                hit_target(reg, state, action, mv, target, false, budget, None, Some(hits), None)?
                             {
                                 expanded.push((w * inner, next));
                             }
@@ -1497,12 +1497,15 @@ fn use_move<'a>(
     } else {
         targets
     };
+    let view = spread_view(reg, &turn, action, spread, exploded.as_ref())?;
     let mut branches: Vec<Outcome<'a>> = vec![(1.0, turn)];
     for target in &targets {
         let mut expanded: Vec<Outcome<'a>> = Vec::new();
         for (weight, state) in branches.into_iter() {
             let started = crate::resolve::phase_start();
-            let hit = hit_target(reg, state, action, mv, *target, spread, budget, exploded.as_ref(), None)?;
+            let hit = hit_target(
+                reg, state, action, mv, *target, spread, budget, exploded.as_ref(), None, view.as_ref(),
+            )?;
             crate::resolve::phase_end(9, started);
             for (inner_weight, inner_state) in hit {
                 expanded.push((weight * inner_weight, inner_state));
@@ -1941,6 +1944,7 @@ fn hit_target<'a>(
     budget: Budget,
     exploded: Option<&crate::position::Pokemon>,
     forced_hits: Option<usize>,
+    view: Option<&SpreadView>,
 ) -> Result<Vec<Outcome<'a>>, String> {
     let move_id = action.move_id.unwrap();
     if let Some(blocked) = blocked_by_protect(&turn, action, mv, target) {
@@ -1949,9 +1953,12 @@ fn hit_target<'a>(
         return Ok(vec![(1.0, turn)]);
     }
 
-    let attacker = match exploded {
-        Some(mon) => Battler::from_pokemon(reg, mon)?,
-        None => match turn.battler_at(action.side, action.slot)? {
+    // A spread move reads the user and the field as they were before it hit anyone
+    // (`SpreadView`); the first hit of every target is computed from that.
+    let attacker = match (view, exploded) {
+        (Some(view), _) => view.attacker,
+        (None, Some(mon)) => Battler::from_pokemon(reg, mon)?,
+        (None, None) => match turn.battler_at(action.side, action.slot)? {
             Some(attacker) => attacker,
             None => return Ok(vec![(1.0, turn)]),
         },
@@ -2061,7 +2068,7 @@ fn hit_target<'a>(
     {
         budget.fixed_roll().and_then(|fixed| {
             let field = crate::move_hooks::field_past_screens(
-                field_for_hit(&turn),
+                first_hit_field(&turn, view),
                 move_id.as_str(),
                 target,
             );
@@ -2105,7 +2112,7 @@ fn hit_target<'a>(
             outcomes.push((acc_weight, state));
             continue;
         }
-        let field = field_for_hit(&turn);
+        let field = first_hit_field(&turn, view);
         // Brick Break, Psychic Fangs: the screens are gone before `getDamage` (IKA-240).
         let field = crate::move_hooks::field_past_screens(field, move_id.as_str(), target);
         for (crit_weight, crit, draw_rolls) in draws.iter() {
@@ -3229,14 +3236,67 @@ fn active_hp(turn: &Turn) -> [[i64; 2]; 2] {
     out
 }
 
+/// What a spread move's damage reads, as it stands before the move hits anyone (IKA-413).
+///
+/// Showdown computes the damage of every target before it deals any of it
+/// (`spreadMoveHit`: `getSpreadDamage`, then `spreadDamage`, and only then the targets'
+/// `DamagingHit`, the secondaries and the faints, which `faintMessages` takes after the
+/// whole move). This port hits the targets one by one, so the first target's knock-out and
+/// the effects of its hit were already in the state when the second was computed: a Friend
+/// Guard, an aura, a Cloud Nine, a Ruin holder it had knocked out was gone, a weather its
+/// Sand Spit had raised was there, the user's HP after its Rough Skin was lower (a pinch
+/// ability, Eruption), its ability after a Mummy was Mummy. The view is taken in
+/// `use_move` after the move's own preparation and read for the first hit of every target:
+/// the user and the field, which are what `getDamage` reads of anyone but the target
+/// itself (the target's own state is its own, and nothing the other target's hit does
+/// reaches it).
+///
+/// Only the user's own damage and accuracy read it: a later hit of a multi-hit move, the
+/// secondaries and the effects of the hits are computed from the state as it is, as before.
+struct SpreadView {
+    attacker: Battler,
+    field: crate::battler::FieldState,
+}
+
+/// The view of a spread move, or None for any other. A user that exploded is the one the
+/// move was used by (its own ability and stats count), but it is not in the field's list:
+/// `faint()` zeroed its HP, and `Side.allies()` -- where `onAny*` handlers are found --
+/// lists only Pokemon with HP, so an exploding Fairy Aura holder gives its blast no aura.
+/// What `faint()` leaves is the Pokemon at the first target's hit, not at the second's: a
+/// target the move knocks out still has its HP when the damage is computed.
+fn spread_view(
+    reg: &Reg,
+    turn: &Turn,
+    action: &QueuedAction,
+    spread: bool,
+    exploded: Option<&crate::position::Pokemon>,
+) -> Result<Option<SpreadView>, String> {
+    if !spread {
+        return Ok(None);
+    }
+    let attacker = match exploded {
+        Some(mon) => Some(Battler::from_pokemon(reg, mon)?),
+        None => turn.battler_at(action.side, action.slot)?,
+    };
+    let Some(attacker) = attacker else { return Ok(None) };
+    Ok(Some(SpreadView { attacker, field: turn.field() }))
+}
+
+/// The field a target's first hit is computed on: a spread move's view, or the field now.
+fn first_hit_field(turn: &Turn, view: Option<&SpreadView>) -> crate::battler::FieldState {
+    match view {
+        Some(view) => view.field.clone(),
+        None => field_for_hit(turn),
+    }
+}
+
 /// The field one target's damage is computed on (IKA-222).
 ///
-/// Showdown computes a spread move's damage for every target before any is dealt
-/// (`getSpreadDamage`, then `spreadDamage`), and a Pokemon knocked out by the move stays on
-/// the field until `faintMessages` after it. This port hits the targets one by one, so a
-/// Ruin holder the move has already knocked out is put back for the targets after it --
-/// it still lowers their stat in Showdown. Only the Ruin abilities are put back: the other
-/// field abilities (Friend Guard, the auras, Cloud Nine) keep the reading they had.
+/// A Pokemon knocked out by the move stays on the field until `faintMessages` after it.
+/// For a spread move's first hits that is `SpreadView`; this is what the later hits of a
+/// multi-hit move read, and a single target that the move knocks out between two hits
+/// leaves nothing but a Ruin holder to put back (a Ruin holder the move has already knocked
+/// out still lowers the stat in Showdown).
 fn field_for_hit(turn: &Turn) -> crate::battler::FieldState {
     let mut field = turn.field();
     let Some(start) = turn.move_start_hp else { return field };
