@@ -540,6 +540,11 @@ class PoolArm:
     #: Which point of its optimal set it plays (`eqselect.parse_eq_select`, IKA-196): the
     #: LP's vertex, ``lp``, ships.
     eq_select: str = DEFAULT_EQ_SELECT
+    #: Plays the user's line 1 on the side it applies to (`pool_match_game`'s
+    #: ``line_only_with``): the selection fixed by `draw_line1` and Raichu's Mega Evolution
+    #: forced at its first turn on the field (`play_game`'s ``force_mega``, IKA-419f).
+    #: Off ships.
+    line1: bool = False
 
     def __post_init__(self) -> None:
         self.rank_fill = resolve_rank_fill(self.rank_fill, self.rank_by_leaf)
@@ -592,6 +597,109 @@ def draw_side(
     return tuple(entry.selections[index])
 
 
+#: IKA-419f, the user's "line 1": Raichu (Mega X, Electric Terrain) and Espathra (boosts,
+#: Baton Pass) lead; the back two are an ace from these, chosen by the equilibrium
+#: conditioned on the rows holding Raichu and Espathra, else the fixed pair below.
+LINE1_LEADS = ("raichu", "espathra")
+LINE1_BACK_CANDIDATES = ("archaludon", "whimsicott", "politoed", "charizard")
+LINE1_BACK_FALLBACK = ("archaludon", "politoed")
+#: The species line 1 Mega Evolves at its first turn on the field.
+LINE1_MEGA = "raichu"
+
+
+def draw_line1(
+    entry: BookEntry | None,
+    side: int,
+    species: Sequence[str],
+    rng: np.random.Generator,
+    *,
+    epsilon: float,
+    temperature: float,
+) -> tuple[tuple[int, ...], dict[str, Any]]:
+    """The ordered four of line 1 for the side whose six is ``species`` (party order).
+
+    Leads: Raichu then Espathra. Back two: the equilibrium's mixture (the same one
+    `draw_side` reads for this side) conditioned on the rows that bring both and whose
+    other two are among `LINE1_BACK_CANDIDATES`, one row drawn with ``rng`` and its other
+    two kept in that row's order; when those rows carry no probability (or there is no
+    solve), `LINE1_BACK_FALLBACK`. The note says which, and the conditioned mass.
+    """
+    index_of = {sp: i for i, sp in enumerate(species)}
+    missing = [sp for sp in (*LINE1_LEADS, *LINE1_BACK_FALLBACK) if sp not in index_of]
+    if missing:
+        raise ValueError(f"line 1 needs {missing} in the six {list(species)}")
+    leads = tuple(index_of[sp] for sp in LINE1_LEADS)
+    fallback = (*leads, *(index_of[sp] for sp in LINE1_BACK_FALLBACK))
+    if entry is None:
+        return fallback, {"rule": "fallback", "mass": 0.0, "reason": "no solve"}
+    mixture = np.asarray(
+        entry.our_mixture(epsilon=epsilon, temperature=temperature)
+        if side == 0
+        else entry.their_mixture(0, epsilon=epsilon, temperature=temperature),
+        dtype=np.float64,
+    )
+    candidates = {index_of[sp] for sp in LINE1_BACK_CANDIDATES if sp in index_of}
+    rows = [
+        r for r, sel in enumerate(entry.selections)
+        if set(leads) <= set(sel) and set(sel) - set(leads) <= candidates
+    ]
+    weights = mixture[rows] if rows else np.zeros(0)
+    mass = float(weights.sum()) / float(mixture.sum())
+    draw = rng.random()  # always taken: the stream moves the same whichever rule applies
+    if mass <= 1e-12:
+        return fallback, {"rule": "fallback", "mass": mass, "reason": "zero mass"}
+    cumulative = np.cumsum(weights / weights.sum())
+    row = rows[min(int(np.searchsorted(cumulative, draw, side="right")), len(rows) - 1)]
+    back = tuple(i for i in entry.selections[row] if i not in leads)
+    return (*leads, *back), {"rule": "equilibrium", "mass": mass}
+
+
+def check_line1(
+    record: Any,  # noqa: ANN401
+    sides: dict[str, Any],
+    side: int,
+    arm_line1: bool,
+    line_only_with: Sequence[str] | None,
+    species: Sequence[str],
+    bucket: dict[str, Any],
+) -> None:
+    """Asserts that line 1 reached ``side`` of a played game exactly when it should have,
+    and counts what it did into ``bucket`` ("games", "selection", "forced").
+
+    It reads the game, not the arm: the record's ``force_mega``, the selection rule in
+    ``sides["lines"]``, the picks, and the move at the forcing turn. Raises AssertionError
+    when the seat the flag was meant for did not get it, or another seat did.
+    """
+    expected = arm_line1 and (
+        line_only_with is None or any(sp in line_only_with for sp in species)
+    )
+    note = sides["lines"][side]
+    played = record.force_mega[side]
+    assert (note is not None) == expected, f"line 1 selection: expected {expected}, got {note}"
+    assert (played == LINE1_MEGA) == expected, f"line 1 Mega forcing: expected {expected}, got {played}"
+    if not expected:
+        assert record.forced_mega[side] is None, "a side without line 1 had its Mega forced"
+        return
+    leads = tuple(species.index(sp) for sp in LINE1_LEADS)
+    picks = tuple(sides["picks"][side])
+    assert picks[:2] == leads, f"line 1 leads {picks[:2]} != {leads}"
+    bucket["games"] += 1
+    key = f"{note['rule']}" + (f" ({note['reason']})" if "reason" in note else "")
+    bucket["selection"][key] = bucket["selection"].get(key, 0) + 1
+    forced = record.forced_mega[side]
+    if forced is None:
+        assert not record.decisions, "line 1: Raichu led but no turn forced its Mega"
+        bucket["forced"]["no move node"] = bucket["forced"].get("no move node", 0) + 1
+        return
+    if forced["rule"] != "unavailable":
+        node = next(
+            d for d in record.decisions if d.kind == "move" and d.turn == forced["turn"]
+        )
+        chosen = node.own_chosen if side == 0 else node.foe_chosen
+        assert "mega" in chosen, f"line 1 forced the Mega but played {chosen!r}"
+    bucket["forced"][forced["rule"]] = bucket["forced"].get(forced["rule"], 0) + 1
+
+
 def pool_match_game(
     reg: Regulation,
     pool: Pool,
@@ -607,6 +715,7 @@ def pool_match_game(
     temperature: float = 1.0,
     pairs: Sequence[tuple[int, int]] | None = None,
     ally_only_with: Sequence[str] | None = None,
+    line_only_with: Sequence[str] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     """Plays game ``game_index`` of a pool match with the tested arm (``arms[0]``) at
     side ``which`` (IKA-259).
@@ -618,6 +727,11 @@ def pool_match_game(
     ``ally_only_with`` limits each arm's ``ally_targets`` to the side whose six holds one of
     these species ids; the other side plays "off" whatever its arm holds (IKA-419d: the
     user's build gets the ally targets, its opponent keeps the shipped menus).
+
+    ``line_only_with`` does the same for an arm's ``line1`` (IKA-419f): it takes effect on
+    the side whose six holds one of these species ids (None: on either side whose arm has
+    it), and an arm's ``line1`` on any other side does nothing. ``sides["lines"]`` says per
+    side whether it did, with the selection rule and conditioned mass.
 
     The pair and its seats come from ``[seed, game_index]`` alone, so both seats of a game
     are the same two teams in the same seats with the ARMS swapped -- what makes the two a
@@ -659,14 +773,27 @@ def pool_match_game(
     entries = tuple(
         arm.solver.entry(a, b) if arm.solver is not None else None for arm in side_arms
     )
-    picks = tuple(
-        draw_side(
-            side_arms[side], entries[side], side, six[side],
-            selection_rng(seed, game_index, side),
-            size=size, epsilon=epsilon, temperature=temperature,
-        )
+    on_line = tuple(
+        side_arms[side].line1
+        and (line_only_with is None or any(sp in line_only_with for sp in species[side]))
         for side in (0, 1)
     )
+    line_notes: list[dict[str, Any] | None] = [None, None]
+    drawn_picks: list[tuple[int, ...]] = []
+    for side in (0, 1):
+        if on_line[side]:
+            pick, line_notes[side] = draw_line1(
+                entries[side], side, species[side], selection_rng(seed, game_index, side),
+                epsilon=epsilon, temperature=temperature,
+            )
+        else:
+            pick = draw_side(
+                side_arms[side], entries[side], side, six[side],
+                selection_rng(seed, game_index, side),
+                size=size, epsilon=epsilon, temperature=temperature,
+            )
+        drawn_picks.append(pick)
+    picks = tuple(drawn_picks)
     # bench_prior[s] prices side s's bench and is read by side 1 - s: so it is built from
     # the entry of the arm sitting at 1 - s, about side s.
     priors: tuple[BenchPrior | None, BenchPrior | None] | None = None
@@ -708,6 +835,7 @@ def pool_match_game(
         rust_binary=(side_arms[0].rust_binary, side_arms[1].rust_binary),
         ally_targets=allies,
         eq_select=(side_arms[0].eq_select, side_arms[1].eq_select),
+        force_mega=tuple(LINE1_MEGA if on_line[side] else None for side in (0, 1)),
         selection=(species[0], species[1], picks[0], picks[1]),
     )
     sources = tuple(arm.selection for arm in side_arms)
@@ -729,6 +857,7 @@ def pool_match_game(
         "knockouts": tuple(arm.knockouts for arm in side_arms),
         "dex_base": tuple(arm.dex_base_belief for arm in side_arms),
         "allies": allies,
+        "lines": tuple(line_notes),
         "eq_selects": tuple(arm.eq_select for arm in side_arms),
         "binaries": tuple(None if arm.rust_binary is None else str(arm.rust_binary) for arm in side_arms),
         "solvers": tuple(
@@ -747,6 +876,8 @@ __all__ = [
     "SOLVED",
     "PoolArm",
     "SolvedSelections",
+    "check_line1",
+    "draw_line1",
     "draw_side",
     "generate_pool",
     "pool_match_game",

@@ -39,6 +39,7 @@ import numpy as np
 from . import luck, port, qrank, rank_scores, rustnode, timing
 from .actions import (
     ALLY_TARGET_MODES,
+    MoveAction,
     SideAction,
     names_ally,
     switch_actions_after_faint,
@@ -333,6 +334,12 @@ class GameRecord:
     #: Which point of its optimal set each side played (`eqselect.parse_eq_select`,
     #: IKA-196). Written only when a side played another than the LP's vertex.
     eq_select: list[str] = field(default_factory=lambda: [DEFAULT_EQ_SELECT, DEFAULT_EQ_SELECT])
+    #: The species each side was told to Mega Evolve at the first turn it stands on the
+    #: field (`play_game`'s ``force_mega``, IKA-419f), and what the forcing did per side:
+    #: None until the turn came, then {"turn", "rule", "mass"}. Written only when a side
+    #: had one.
+    force_mega: list[str | None] = field(default_factory=lambda: [None, None])
+    forced_mega: list[dict | None] = field(default_factory=lambda: [None, None])
     #: The equilibrium mixtures over the 90 ordered selections, when a book was used.
     #: These are the policy targets a selection head would learn -- the *solver's*
     #: recommendation, not the softened distribution the game was drawn from.
@@ -432,6 +439,11 @@ class GameRecord:
             **(
                 {"eqSelect": list(self.eq_select)}
                 if set(self.eq_select) != {DEFAULT_EQ_SELECT}
+                else {}
+            ),
+            **(
+                {"forceMega": list(self.force_mega), "forcedMega": list(self.forced_mega)}
+                if any(self.force_mega)
                 else {}
             ),
             **(
@@ -716,6 +728,48 @@ def _sample_index(rng: np.random.Generator, weights: np.ndarray) -> int:
     if total <= 0:
         return int(rng.integers(len(weights)))
     return int(rng.choice(len(weights), p=weights / total))
+
+
+def _forced_mega_choice(
+    pos: Position,
+    side: int,
+    species: str,
+    menu: Sequence[SideAction],
+    strategy: np.ndarray,
+    rng: np.random.Generator,
+) -> tuple[int | None, dict[str, Any]] | None:
+    """The move that Mega Evolves ``species`` at this node (``force_mega``, IKA-419f).
+
+    None while the species is not standing on the field (the forcing waits for its first
+    turn there). Otherwise ``(index, note)``: ``index`` is a menu row drawn from the side's
+    equilibrium conditioned on the rows that declare the Mega on that Pokemon (rule
+    ``mixture``), or the first such row in the menu's order when they all carry probability
+    0 (rule ``menu-order``), or None when the menu has no such row (rule ``unavailable``:
+    the Mega is used, or the slot cannot, and the search's own draw stands).
+    """
+    own = pos.sides[side]
+    slots = {
+        slot for slot, party in enumerate(own.active)
+        if party is not None and not own.pokemon[party].fainted
+        and own.pokemon[party].species == species
+    }
+    if not slots:
+        return None
+    wanted = [
+        i for i, action in enumerate(menu)
+        if any(
+            isinstance(a, MoveAction) and a.mega and a.slot in slots for a in action.slots
+        )
+    ]
+    if not wanted:
+        return None, {"rule": "unavailable", "mass": 0.0}
+    weights = np.asarray(strategy, dtype=np.float64)[wanted]
+    total = float(weights.sum())
+    mass = total / max(float(np.asarray(strategy, dtype=np.float64).sum()), 1e-300)
+    if total > 1e-12:
+        pick = wanted[int(rng.choice(len(wanted), p=weights / total))]
+        return pick, {"rule": "mixture", "mass": mass}
+    return wanted[0], {"rule": "menu-order", "mass": mass}
 
 
 #: Which completion of the opponent's unseen slots a leaf or policy ranking reads
@@ -1105,6 +1159,7 @@ def play_game(
     rust_binary: Path | str | None | tuple[Path | str | None, Path | str | None] = None,
     ally_targets: str | tuple[str, str] = "off",
     eq_select: str | tuple[str, str] = DEFAULT_EQ_SELECT,
+    force_mega: str | None | tuple[str | None, str | None] = None,
 ) -> GameRecord:
     """Plays one game to a result, sampling both sides from the turn's equilibrium.
 
@@ -1204,6 +1259,13 @@ def play_game(
     run under it (`actions.ally_targets`), both sides' pools in them, as for the other
     per-side settings. "off" ships.
 
+    ``force_mega`` (a pair too, IKA-419f) names the species a side Mega Evolves at the first
+    move node where it stands on the field with the Mega still unused: the side's move is
+    drawn from its own equilibrium restricted to the actions that Mega Evolve it (the
+    mixture conditioned on them; when they all carry probability 0, the first of them in
+    the menu's order). Everything else is the search's own; the other side is not told.
+    None ships.
+
     ``deepen`` takes a pair too: how each agent deepens its move decisions best first
     after the depth-1 solve (`deepen.parse_deepen`, IKA-33): ``none`` ships and is the
     search unchanged, ``m<N>`` / ``r<N>`` spend N cells and read the root whole /
@@ -1272,6 +1334,10 @@ def play_game(
             if rust_binary is None or isinstance(rust_binary, (str, Path))
             else rust_binary
         )
+    )
+    forced_species = (
+        (force_mega, force_mega) if force_mega is None or isinstance(force_mega, str)
+        else tuple(force_mega)
     )
     allies = (ally_targets, ally_targets) if isinstance(ally_targets, str) else tuple(ally_targets)
     for mode in allies:
@@ -1368,6 +1434,7 @@ def play_game(
     record.dex_base_belief = list(dex_bases)
     record.rust_binary = [None if b is None else _fingerprint(b) for b in binaries]
     record.ally_targets = list(allies)
+    record.force_mega = list(forced_species)
     record.depth = [int(d) for d in depths]
     record.solve_restricted = [bool(r) for r in restricted]
     record.eq_select = list(selects)
@@ -1849,9 +1916,25 @@ def play_game(
                 )
             else:
                 own_index = wanted[0]
+        foe_index = _sample_index(rng, foe_strategy)
+        for side, menu, strategy in ((0, ours, own_strategy), (1, foe_theirs, foe_strategy)):
+            if forced_species[side] is None or record.forced_mega[side] is not None:
+                continue
+            forced = _forced_mega_choice(
+                pos, side, forced_species[side], menu, strategy, rng
+            )
+            if forced is None:
+                continue  # the species is not on the field yet
+            index, note = forced
+            record.forced_mega[side] = {"turn": pos.turn, **note}
+            if index is not None:
+                if side == 0:
+                    own_index = index
+                else:
+                    foe_index = index
         chosen = [
             ours[own_index],
-            foe_theirs[_sample_index(rng, foe_strategy)],
+            foe_theirs[foe_index],
         ]
         for side, menu in ((0, ours), (1, foe_theirs)):
             # IKA-181's positive control: the side's own menu held an ally target, and it

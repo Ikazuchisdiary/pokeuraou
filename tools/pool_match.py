@@ -67,7 +67,12 @@ from pokeuraou.eqselect import DEFAULT_EQ_SELECT, parse_eq_select  # noqa: E402
 from pokeuraou.hidden import DEFAULT_BENCH_DROP, parse_bench_drop  # noqa: E402
 from pokeuraou.payoff import HP_SHARE  # noqa: E402
 from pokeuraou.pool import load_pool  # noqa: E402
-from pokeuraou.poolplay import PoolArm, SolvedSelections, pool_match_game  # noqa: E402
+from pokeuraou.poolplay import (  # noqa: E402
+    PoolArm,
+    SolvedSelections,
+    check_line1,
+    pool_match_game,
+)
 from pokeuraou.provenance import open_games, provenance, write_game  # noqa: E402
 from pokeuraou.search import (  # noqa: E402
     SHIPPED_RANK_FILL,
@@ -339,6 +344,15 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--ally-only-with", nargs="+", default=None, metavar="SPECIES",
                     help="the arms' --ally-targets apply only to the side whose six holds one of "
                     "these species ids; the other side plays off (IKA-419d)")
+    ap.add_argument("--line1", action="store_true",
+                    help="the tested arm plays the user's line 1 (IKA-419f): leads Raichu and "
+                    "Espathra, the back two drawn from the equilibrium conditioned on the rows "
+                    "holding both (else Archaludon and Politoed), Raichu Mega Evolved at its "
+                    "first turn on the field. Only on the side `--line-only-with` names")
+    ap.add_argument("--baseline-line1", action="store_true", help="same for the other arm")
+    ap.add_argument("--line-only-with", nargs="+", default=None, metavar="SPECIES",
+                    help="the arms' --line1 applies only to the side whose six holds one of "
+                    "these species ids (IKA-419f)")
     add_bench_flags(ap)
     ap.add_argument("--net-scores-ends", action="store_true",
                     help="the tested arm's leaf scores a finished battle by the net, not as "
@@ -460,6 +474,7 @@ def main(argv: list[str] | None = None) -> None:
         rust_binary=args.rust_binary,
         ally_targets=args.ally_targets,
         eq_select=args.eq_select,
+        line1=args.line1,
     )
     other_limit = args.limit if args.baseline_limit is None else args.baseline_limit
     if baseline is None:
@@ -474,7 +489,8 @@ def main(argv: list[str] | None = None) -> None:
                         dex_base_belief=args.baseline_dex_base_belief,
                         rust_binary=args.baseline_rust_binary,
                         ally_targets=args.baseline_ally_targets,
-                        eq_select=args.baseline_eq_select)
+                        eq_select=args.baseline_eq_select,
+                        line1=args.baseline_line1)
     else:
         assert baseline_name is not None
         # One solver per arm even over one leaf: shared, the second arm would reuse the
@@ -497,6 +513,7 @@ def main(argv: list[str] | None = None) -> None:
             rust_binary=args.baseline_rust_binary,
             ally_targets=args.baseline_ally_targets,
             eq_select=args.baseline_eq_select,
+            line1=args.baseline_line1,
         )
     arms = (tested, other)
     print(pool.summary(), file=sys.stderr)
@@ -523,6 +540,8 @@ def main(argv: list[str] | None = None) -> None:
             + (f" / port {arm.rust_binary}" if arm.rust_binary is not None else "")
             + (f" / ally targets {arm.ally_targets}" if arm.ally_targets != "off" else "")
             + (f" / equilibrium {arm.eq_select}" if arm.eq_select != DEFAULT_EQ_SELECT else "")
+            + (f" / line 1 (on sides holding {args.line_only_with or 'any'})"
+               if arm.line1 else "")
             + " / selection "
             f"{arm.selection}" + (f" by its own leaf, store {store}" if store else "")
             + f" / belief {'solved' if arm.solver is not None and hide_bench else 'uniform'}",
@@ -554,6 +573,8 @@ def main(argv: list[str] | None = None) -> None:
         tags += f"@ally:{tested.ally_targets}"
     if tested.eq_select != other.eq_select:
         tags += f"@eq:{tested.eq_select}"
+    if tested.line1 != other.line1:
+        tags += "@line1" if tested.line1 else "@noline1"
     arm_label = f"{tested.name}{tags}"
 
     client = WorkClient(args.queue) if args.queue else None
@@ -577,7 +598,7 @@ def main(argv: list[str] | None = None) -> None:
               "deepen": {}, "deepened": 0, "widened": 0, "swapped": 0, "oracle": 0,
               "depth": {}, "knockouts": 0, "dexbase": 0, "dexbase_rewrites": 0, "ports": {},
               "ally": {}, "ally_menus": 0, "ally_played": 0,
-              "eq": {},
+              "eq": {}, "line": {"games": 0, "selection": {}, "forced": {}},
               "coverless": {"menus": 0, "dropping": 0, "dropped": 0},
               "q": [0, 0], "qprobe": [0, 0], "childq": [0, 0], "lines": {}, "calls": 0}
              for _ in arms]
@@ -597,6 +618,7 @@ def main(argv: list[str] | None = None) -> None:
                 hide_bench=hide_bench, max_turns=args.max_turns,
                 epsilon=args.explore_epsilon, temperature=args.explore_temperature,
                 pairs=pairs, ally_only_with=args.ally_only_with,
+                line_only_with=args.line_only_with,
             ),
         )
         done += 1
@@ -635,6 +657,12 @@ def main(argv: list[str] | None = None) -> None:
             bucket["ally_menus"] += record.ally_menus[side]
             bucket["ally_played"] += record.ally_played[side]
             # Which point of the optimal set this side played, read off the game (IKA-196).
+            # The positive control and the assert that line 1 reached exactly the side it
+            # was meant for, read off the game (IKA-419f).
+            check_line1(
+                record, sides, side, arms[arm_index].line1, args.line_only_with,
+                [s.species for s in pool.teams[sides["teams"][side]].sets], bucket["line"],
+            )
             played_eq = record.eq_select[side]
             bucket["eq"][played_eq] = bucket["eq"].get(played_eq, 0) + 1
             played_deepen = record.deepen[side]
@@ -764,6 +792,9 @@ def main(argv: list[str] | None = None) -> None:
                    if set(bucket["ally"]) != {"off"} else "")
                 + (f"equilibrium {bucket['eq']}, "
                    if set(bucket["eq"]) - {DEFAULT_EQ_SELECT} else "")
+                + (f"line 1 in {bucket['line']['games']:,} games (selection "
+                   f"{bucket['line']['selection']}, Mega forced {bucket['line']['forced']}), "
+                   if bucket["line"]["games"] else "")
                 + f"deepen {bucket['deepen']} ({bucket['deepened']:,} decisions deepened"
                 + (
                     f", oracle asked at {bucket['oracle']:,}, {bucket['widened']:,} actions "
