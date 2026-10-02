@@ -344,3 +344,118 @@ def test_a_rung_records_the_row_it_plays_most_only_when_asked(roster, monkeypatc
     monkeypatch.setattr(ladder, "RECORD_TOP", True)
     tops = [r.to_json()["top"] for r in got.rungs]
     assert tops == [int(np.argmax(r.strategy)) for r in got.rungs] and len(tops) == 2
+
+
+# ----------------------------------------------------------------------- IKA-418: the root widened
+
+
+def test_root_widths_spell_and_order() -> None:
+    assert humanplay.parse_root_widths("12-24-48-64-all") == (12, 24, 48, 64, 0)
+    assert humanplay.parse_root_widths("all") == (0,)
+    for bad in ("", "24-12", "12-12", "all-12", "12-x", "0-12", "12--24"):
+        with pytest.raises(ValueError):
+            humanplay.parse_root_widths(bad)
+    cond = timematch.parse_condition("a:seconds=1,clock=count,ladder=L6,root_widths=12-all")
+    assert cond.root_widths == "12-all"
+    assert timematch.parse_condition("a:seconds=1,clock=count,ladder=L6").root_widths is None
+    with pytest.raises(ValueError):
+        timematch.parse_condition("a:seconds=1,clock=count,ladder=L6,root_widths=64-12")
+    # A root widened over a move is a ladder's.
+    with pytest.raises(ValueError):
+        humanplay.Agent(reg=None, evaluate=None, name="x", seconds=1.0, cores=1, clock="wall",
+                        root_widths=(12, 0))
+
+
+def test_the_steps_taken_fit_the_share_and_widen() -> None:
+    price = humanplay.NodeTime(fixed_ms=0.0, cell_ms=1.0)
+
+    def menu(rows: int, cols: int):  # noqa: ANN202
+        return [object()] * rows, [object()] * cols
+
+    steps = humanplay.RootSteps([menu(2, 2), menu(4, 4), menu(4, 4), menu(8, 8)], price, 1, 30.0)
+    first = steps.node_ms(*steps.menus[0])
+    assert first == 4.0
+    # 4 + 16 fit 30; the repeated menu is left out; 8 x 8 (64) does not fit.
+    later = steps.later(first, (2, 2))
+    assert [(len(o), len(t), ms) for o, t, ms in later] == [(4, 4, 16.0)]
+    # A wider share takes it too (the control: the steps' count answers to the share).
+    steps.share_ms = 100.0
+    assert [(len(o), ms) for o, _t, ms in steps.later(first, (2, 2))] == [(4, 16.0), (8, 64.0)]
+    # Classes multiply the cells.
+    steps.classes, steps.share_ms = 3, 30.0
+    assert steps.later(steps.node_ms(*steps.menus[0]), (2, 2)) == []
+
+
+def _node_ms(price, ours, theirs):  # noqa: ANN001, ANN202
+    return price.ms(len(ours) * len(theirs))
+
+
+def test_a_widened_root_reads_the_wider_menu_as_a_fixed_one_does(roster) -> None:  # noqa: ANN001
+    """The staged read ends where a read on the widest menu it reached ends -- the same answer
+    to the bit and the same clock, the nodes before it charged -- and a share too small for the
+    later step leaves the read on the first menu (the control that the share bites)."""
+    reg = roster.reg
+    price = humanplay.NodeTime(fixed_ms=10.0, cell_ms=0.05)
+    stages = ladder.parse_ladder("d2r2b3n4+d2r3ban4")
+    checked = 0
+    for pos in _played(roster):
+        narrow_menus = tuple(narrow(reg, pos, s, limit=3).actions for s in (0, 1))
+        wide_menus = tuple(narrow(reg, pos, s, limit=6).actions for s in (0, 1))
+        if tuple(map(len, narrow_menus)) == tuple(map(len, wide_menus)):
+            continue
+        first = _node_ms(price, *narrow_menus)
+        second = _node_ms(price, *wide_menus)
+
+        def staged(share: float, narrow_menus=narrow_menus, wide_menus=wide_menus, first=first,
+                   pos=pos):  # noqa: ANN202
+            how = {"stages": stages, "budget_ms": None, "clock": "count", "start_ms": first,
+                   "root": humanplay.RootSteps([narrow_menus, wide_menus], price, 1, share)}
+            return humanplay.solve_move(reg, pos, 0, list(narrow_menus[0]), list(narrow_menus[1]),
+                                        None, LEAF, budget=Budget.matrix(), exact=True,
+                                        ladder=how)
+
+        def fixed(menus, start, pos=pos):  # noqa: ANN001, ANN202
+            how = {"stages": stages, "budget_ms": None, "clock": "count", "start_ms": start}
+            return humanplay.solve_move(reg, pos, 0, list(menus[0]), list(menus[1]), None, LEAF,
+                                        budget=Budget.matrix(), exact=True, ladder=how)
+
+        wide = staged(first + second + 1.0)
+        assert [s["rows"] for s in wide.root] == [len(narrow_menus[0]), len(wide_menus[0])]
+        direct = fixed(wide_menus, first + second)
+        np.testing.assert_array_equal(wide.strategy, direct.strategy)
+        assert [(r.stage, r.spent_ms) for r in wide.ladder.rungs] == [
+            (r.stage, r.spent_ms) for r in direct.ladder.rungs]
+        assert len(wide.strategy) == len(wide_menus[0])
+        short = staged(first + 0.5 * second)
+        assert len(short.root) == 1 and len(short.strategy) == len(narrow_menus[0])
+        np.testing.assert_array_equal(short.strategy, fixed(narrow_menus, first).strategy)
+        checked += 1
+    assert checked >= 1, "no position where the wide menu is wider than the narrow"
+
+
+def test_the_agent_widens_its_root_and_says_so(pool, monkeypatch) -> None:  # noqa: ANN001
+    from pokeuraou.hidden import DEFAULT_BENCH_DROP
+
+    monkeypatch.setattr(humanplay, "NODE_TIME", {("local", 1): humanplay.NodeTime(10.0, 0.05)})
+    steps = timematch.parse_condition(
+        "lad:seconds=0.5,clock=count,ladder=d2r2b3n4,root_widths=3-6")
+    plain = timematch.parse_condition("lad:seconds=0.5,clock=count,ladder=d2r2b3n4,width=3")
+    flat = timematch.Condition(name="flat", seconds=0.5, threads=1, clock="count", width_only=True)
+
+    def moves(tested):  # noqa: ANN001, ANN202
+        match = timematch.Match(
+            reg=pool.reg, evaluate=None, leaf_name="hp-share", rank_fill="refs2",
+            bench_drop=DEFAULT_BENCH_DROP, tested=tested, other=flat, seed=3, max_turns=3,
+            rank_by_leaf=False)
+        lines = timematch.play_pair(match, 1, (pool.teams[0], pool.teams[1]))
+        return [r for ln in lines for r in ln["moves"] if r["condition"] == "lad"]
+
+    widened, fixed = moves(steps), moves(plain)
+    assert widened and all("rootSteps" in r for r in widened)
+    assert any(len(r["rootSteps"]) == 2 for r in widened), "no move took the second step"
+    assert all("rootSteps" not in r for r in fixed)
+    # The move is read on the last step's menus (the row's sides may be swapped by the seat).
+    for r in widened:
+        last = r["rootSteps"][-1]
+        assert sorted((r["rows"], r["cols"])) == sorted((last["rows"], last["cols"]))
+        assert r["nodeCells"] == last["rows"] * last["cols"] * max(r["classes"], 1)

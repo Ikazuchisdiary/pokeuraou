@@ -1,0 +1,3 @@
+147 pairs; 147 same mixture, stage and menu; 0 differ
+steps taken (count of reads): {1: 3, 2: 3, 3: 21, 4: 58, 5: 62}
+147 reads; same as the composed answer with the earlier nodes NOT charged: 136 ; same mixture as the width rule's arm: 123
