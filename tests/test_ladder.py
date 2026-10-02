@@ -83,7 +83,7 @@ def _named(stages, fills):  # noqa: ANN001, ANN202
     return parsed
 
 
-def _open_read(reg, pos, stages, budget_ms=None, *, side=0, width=8, fills=False):  # noqa: ANN001, ANN202
+def _open_read(reg, pos, stages, budget_ms=None, *, side=0, width=8, fills=False, child=None):  # noqa: ANN001, ANN202
     ours = narrow(reg, pos, 0, limit=width).actions
     theirs = narrow(reg, pos, 1, limit=width).actions
     got = search(reg, pos, ours, theirs, LEAF, budget=Budget.matrix())
@@ -93,7 +93,32 @@ def _open_read(reg, pos, stages, budget_ms=None, *, side=0, width=8, fills=False
                             col_strategies=[eq.col_strategy if side == 0 else eq.row_strategy])
     return ladder.read(reg, side, ours, theirs, [ladder.Item(pos)], [m if side == 0 else -m.T],
                        [1.0], start, LEAF, budget=Budget.matrix(),
-                       stages=_named(stages, fills), budget_ms=budget_ms)
+                       stages=_named(stages, fills), budget_ms=budget_ms, child=child)
+
+
+def test_a_read_names_its_own_child_setting(roster, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-422 (`read`'s ``child``): a read that names ``guarantee`` is the read made with the
+    module's `CHILD` set to it, whatever the module's is, and the module's is put back (also
+    when the read raises). The control: side 1's two settings differ at depth 3."""
+    reg = roster.reg
+    stages = "d2r2ban4+d3r2ban4/r2ban4"
+    for name, value in {"DIAG": False, "VALUE": "guarantee", "ORACLE_PASSES": 0,
+                        "KEEP": False}.items():
+        monkeypatch.setattr(ladder, name, value)
+    moved = 0
+    for pos in _played(roster, turns=6):
+        monkeypatch.setattr(ladder, "CHILD", "seat")
+        seat = _open_read(reg, pos, stages, side=1, width=6)
+        named = _open_read(reg, pos, stages, side=1, width=6, child="guarantee")
+        assert ladder.CHILD == "seat"
+        monkeypatch.setattr(ladder, "CHILD", "guarantee")
+        module = _open_read(reg, pos, stages, side=1, width=6)
+        assert [r.value for r in named.rungs] == [r.value for r in module.rungs]
+        moved += any(a.value != b.value for a, b in zip(named.rungs, seat.rungs, strict=True))
+    assert moved >= 1, "the two settings read side 1 alike"
+    with pytest.raises(ValueError, match="child is one of"):
+        _open_read(reg, _played(roster)[0], stages, child="best")
+    assert ladder.CHILD == "guarantee"
 
 
 def test_a_stage_label_reads_back() -> None:

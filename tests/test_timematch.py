@@ -114,6 +114,19 @@ def test_a_condition_left_alone_is_the_human_play_agent() -> None:
             parse_condition(bad)
 
 
+def test_a_condition_names_how_its_ladder_reads_children() -> None:
+    """IKA-422: ``child`` is the ladder's `CHILD` for that condition's reads: left out, the
+    module's; ``seat`` or ``guarantee`` reach the agent (`Agent.ladder_child`); ``full`` (the
+    serial road's research reading) and anything else are refused."""
+    assert parse_condition("a:seconds=4,ladder=L6").child is None
+    got = parse_condition("a:seconds=4,ladder=L6,child=guarantee")
+    assert got.child == "guarantee" and got.to_json()["child"] == "guarantee"
+    assert parse_condition("a:seconds=4,child=seat").child == "seat"
+    for bad in ("child=full", "child=best", "child="):
+        with pytest.raises(ValueError):
+            parse_condition(f"a:seconds=4,{bad}")
+
+
 def _drift():  # noqa: ANN202
     from ._harness import load_tool
 

@@ -115,6 +115,9 @@ class Condition:
     #: IKA-418: the ladder's root widened step by step (`humanplay.Agent.root_widths`):
     #: widths joined by ``-``, ``all`` for every legal action (``12-24-48-64-all``). None: off.
     root_widths: str | None = None
+    #: IKA-422: how the ladder reads a deep cell's children (`ladder.CHILD`): ``seat`` or
+    #: ``guarantee``. None: the module's (``seat``).
+    child: str | None = None
     #: The selection this side plays from (`selection_deep`, IKA-392): a reading spec (its
     #: commas written as semicolons), else the leaf's solve every game has played. Each side
     #: draws its four, and holds its belief about the other's, from the solve of its own
@@ -174,7 +177,7 @@ class Condition:
 CONDITION_KEYS = ("seconds", "threads", "cores", "clock", "oracle", "levels", "width_only",
                   "width", "child_q", "knockouts", "sub_limit", "sub_branches", "restricted",
                   "depth", "refine", "passes", "depth2_auto", "root_all", "ladder",
-                  "hidden_ladder", "root_widths", "selection", "selection_seconds")
+                  "hidden_ladder", "root_widths", "selection", "selection_seconds", "child")
 
 
 def _oracle(spec: str) -> int | None:
@@ -246,6 +249,12 @@ def parse_condition(spec: str) -> Condition:
             got[key] = value
         elif key == "root_widths":
             humanplay.parse_root_widths(value)  # refuses a spelling it cannot read
+            got[key] = value
+        elif key == "child":
+            from .ladder import CHILDREN
+
+            if value not in CHILDREN or value == "full":
+                raise ValueError(f"child is seat or guarantee, not {value!r}")
             got[key] = value
         elif key == "selection_seconds":
             got[key] = float(value)
@@ -549,6 +558,7 @@ class Match:
             depth=condition.depth, refine=condition.refine, passes=condition.passes,
             depth2_auto=condition.depth2_auto, root_all=condition.root_all,
             ladder=condition.ladder, hidden_ladder=condition.hidden_ladder,
+            ladder_child=condition.child,
             root_widths=(None if condition.root_widths is None
                          else humanplay.parse_root_widths(condition.root_widths)),
             selection_reading=condition.selection,

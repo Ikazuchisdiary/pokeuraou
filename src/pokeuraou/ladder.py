@@ -584,8 +584,56 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
     on_rung: Callable[[Rung], None] | None = None,
     began: float | None = None,
     memo: dict[tuple, float | None] | None = None,
+    child: str | None = None,
 ) -> LadderResult:
-    """Side ``side``'s answer, stage by stage (the module's docstring).
+    """Side ``side``'s answer, stage by stage (the module's docstring; the arguments are
+    `_read`'s).
+
+    ``child`` (IKA-422): this read's `CHILD` (a match's condition names it, so two conditions
+    in one process read their deep cells' children their own ways); None: the module's. Not
+    with worker processes (they read the module's).
+    """
+    global CHILD  # noqa: PLW0603 - set for the length of this read, put back
+    if child is not None and child != CHILD:
+        if child not in CHILDREN:
+            raise ValueError(f"child is one of {', '.join(CHILDREN)}; not {child!r}")
+        if _POOL is not None and _POOL.alive():
+            raise ValueError("a read's own CHILD is for reads without worker processes")
+        saved, CHILD = CHILD, child
+        try:
+            return read(reg, side, row, col, items, matrices, weights, start, leaf, budget=budget,
+                        stages=stages, budget_ms=budget_ms, cost=cost, clock=clock,
+                        start_ms=start_ms, stop=stop, on_rung=on_rung, began=began, memo=memo)
+        finally:
+            CHILD = saved
+    return _read(reg, side, row, col, items, matrices, weights, start, leaf, budget=budget,
+                 stages=stages, budget_ms=budget_ms, cost=cost, clock=clock, start_ms=start_ms,
+                 stop=stop, on_rung=on_rung, began=began, memo=memo)
+
+
+def _read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the clock
+    reg: Any,  # noqa: ANN401
+    side: int,
+    row: Sequence[Any],
+    col: Sequence[Any],
+    items: Sequence[Any],
+    matrices: Sequence[np.ndarray],
+    weights: Sequence[float],
+    start: Any,  # noqa: ANN401
+    leaf: Any,  # noqa: ANN401
+    *,
+    budget: Budget,
+    stages: Sequence[Stage],
+    budget_ms: float | None,
+    cost: LadderCost | None = None,
+    clock: str = "count",
+    start_ms: float = 0.0,
+    stop: Any = None,  # noqa: ANN401
+    on_rung: Callable[[Rung], None] | None = None,
+    began: float | None = None,
+    memo: dict[tuple, float | None] | None = None,
+) -> LadderResult:
+    """`read`'s body.
 
     ``row`` / ``col`` are side 0's and side 1's menus; ``matrices[k]`` completion k's
     depth-1 matrix in ``side``'s orientation (its own actions the rows; side 1's is the

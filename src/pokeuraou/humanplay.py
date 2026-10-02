@@ -1398,6 +1398,10 @@ class Agent:
     #: hidden reads down (they cost ~3.4x an open read at the same stage). The stages differ
     #: only where the bench is open. None: ``ladder`` everywhere.
     hidden_ladder: str | None = None
+    #: IKA-422: the ladder's `CHILD` (how a deep cell's children are read: ``seat`` or
+    #: ``guarantee``) for this agent's reads, for a match between the two. None: the
+    #: module's (``seat``).
+    ladder_child: str | None = None
     #: IKA-418: with a ladder, the root's menus widened over the move (`RootSteps`): the widths
     #: in order (``0``: every legal action), each one a depth-1 node solved in turn on the
     #: menus of the same ranking, the ladder's stages then reading the rectangle of the last
@@ -2199,6 +2203,7 @@ class HumanGame:
                 **({"start_ms": node_ms} if agent.clock == "count"
                    else {"start_ms": 0.0, "began": started}),
                 **({"stop": agent.halt} if agent.halt is not None else {}),
+                **({"child": agent.ladder_child} if agent.ladder_child is not None else {}),
                 **({"root": RootSteps([(ours, theirs), *(wider[w] for w in steps[1:])],
                                       node_time(agent.cores, agent.form), classes,
                                       WIDTH_SHARE * plan.budget_ms)} if len(steps) > 1 else {}),
