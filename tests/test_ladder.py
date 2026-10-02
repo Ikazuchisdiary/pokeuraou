@@ -83,7 +83,7 @@ def _named(stages, fills):  # noqa: ANN001, ANN202
     return parsed
 
 
-def _open_read(reg, pos, stages, budget_ms=None, *, side=0, width=8, fills=False):  # noqa: ANN001, ANN202
+def _open_read(reg, pos, stages, budget_ms=None, *, side=0, width=8, fills=False, child=None):  # noqa: ANN001, ANN202
     ours = narrow(reg, pos, 0, limit=width).actions
     theirs = narrow(reg, pos, 1, limit=width).actions
     got = search(reg, pos, ours, theirs, LEAF, budget=Budget.matrix())
@@ -93,7 +93,32 @@ def _open_read(reg, pos, stages, budget_ms=None, *, side=0, width=8, fills=False
                             col_strategies=[eq.col_strategy if side == 0 else eq.row_strategy])
     return ladder.read(reg, side, ours, theirs, [ladder.Item(pos)], [m if side == 0 else -m.T],
                        [1.0], start, LEAF, budget=Budget.matrix(),
-                       stages=_named(stages, fills), budget_ms=budget_ms)
+                       stages=_named(stages, fills), budget_ms=budget_ms, child=child)
+
+
+def test_a_read_names_its_own_child_setting(roster, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-422 (`read`'s ``child``): a read that names ``guarantee`` is the read made with the
+    module's `CHILD` set to it, whatever the module's is, and the module's is put back (also
+    when the read raises). The control: side 1's two settings differ at depth 3."""
+    reg = roster.reg
+    stages = "d2r2ban4+d3r2ban4/r2ban4"
+    for name, value in {"DIAG": False, "VALUE": "guarantee", "ORACLE_PASSES": 0,
+                        "KEEP": False}.items():
+        monkeypatch.setattr(ladder, name, value)
+    moved = 0
+    for pos in _played(roster, turns=6):
+        monkeypatch.setattr(ladder, "CHILD", "seat")
+        seat = _open_read(reg, pos, stages, side=1, width=6)
+        named = _open_read(reg, pos, stages, side=1, width=6, child="guarantee")
+        assert ladder.CHILD == "seat"
+        monkeypatch.setattr(ladder, "CHILD", "guarantee")
+        module = _open_read(reg, pos, stages, side=1, width=6)
+        assert [r.value for r in named.rungs] == [r.value for r in module.rungs]
+        moved += any(a.value != b.value for a, b in zip(named.rungs, seat.rungs, strict=True))
+    assert moved >= 1, "the two settings read side 1 alike"
+    with pytest.raises(ValueError, match="child is one of"):
+        _open_read(reg, _played(roster)[0], stages, child="best")
+    assert ladder.CHILD == "guarantee"
 
 
 def test_a_stage_label_reads_back() -> None:
@@ -637,11 +662,12 @@ def test_a_seat_swapped_read_is_the_other_sides_read(roster, monkeypatch) -> Non
 
 
 def test_a_depth_three_childs_value_follows_the_switch(roster, monkeypatch) -> None:  # noqa: ANN001
-    """IKA-421 (`ladder.CHILD`): a depth-3 cell's children are read as side 0 by default, so
-    side 1 reading a position and side 0 reading it with the seats swapped differ at depth 3
-    (the control: some position moves). ``seat`` reads each child as the root's reader --
-    the two then agree at every stage, and side 0's own read is the default's; ``full`` takes
-    each child's whole game -- the two agree as well. A child setting it does not know is
+    """IKA-421 (`ladder.CHILD`): ``guarantee`` (the reference before IKA-422) reads a depth-3
+    cell's children as side 0, so side 1 reading a position and side 0 reading it with the
+    seats swapped differ at depth 3 (the control: some position moves). ``seat`` (the
+    default since IKA-422) reads each child as the root's reader -- the two then agree at
+    every stage, and side 0's own read is the reference's to the bit; ``full`` takes each
+    child's whole game -- the two agree as well. A child setting it does not know is
     refused."""
     reg = roster.reg
     stages = "d2r2ban4+d3r2ban4/r2ban4"
@@ -665,7 +691,7 @@ def test_a_depth_three_childs_value_follows_the_switch(roster, monkeypatch) -> N
         deep = [n for n, r in enumerate(other.rungs) if r.stage.startswith("d3")]
         moved += any(abs((1 - swapped.rungs[n].value) - (-other.rungs[n].value)) > 1e-6
                      for n in deep if n < len(swapped.rungs))
-        assert [r.value for r in own_s.rungs] == pytest.approx([r.value for r in own.rungs], abs=1e-12)
+        assert [r.value for r in own_s.rungs] == [r.value for r in own.rungs]
         for got_other, got_swapped in ((other_s, swapped_s), (other_f, swapped_f)):
             assert [r.stage for r in got_other.rungs] == [r.stage for r in got_swapped.rungs]
             for x, y in zip(got_swapped.rungs, got_other.rungs, strict=True):
@@ -674,6 +700,57 @@ def test_a_depth_three_childs_value_follows_the_switch(roster, monkeypatch) -> N
     monkeypatch.setattr(ladder, "CHILD", "best")
     with pytest.raises(ValueError, match="POKEURAOU_LADDER_CHILD"):
         _open_read(reg, _played(roster)[0], stages)
+
+
+def test_the_mirror_holds_at_depth_four_on_both_children_roads(roster, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-422: with the children read as the reader (`CHILD` ``seat``, the default), side 1
+    reading a position is side 0 reading the seat-swapped one at every stage to depth 4 --
+    a depth-3 cell's children (read together, `_children_at_once`) and a depth-4 cell's (read
+    one at a time, `_deep_children`); and the children read together are the children read
+    one at a time. The controls: the reference (``guarantee``) does not hold the mirror at
+    depth 3 or 4, and the together road ran (`_children_at_once` is called) where it was
+    asked for and not where it was not."""
+    reg = roster.reg
+    stages = "d2r2ban4+d3r2ban4/r2ban4+d4r2ban3/r2ban3/r2ban3"
+    for name, value in {"DIAG": False, "VALUE": "guarantee", "ORACLE_PASSES": 0,
+                        "KEEP": False}.items():
+        monkeypatch.setattr(ladder, name, value)
+    calls = {"together": 0}
+    together = ladder._children_at_once  # noqa: SLF001
+
+    def counted(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        calls["together"] += 1
+        return together(*args, **kwargs)
+
+    monkeypatch.setattr(ladder, "_children_at_once", counted)
+
+    def mirror(child, batch):  # noqa: ANN001, ANN202
+        monkeypatch.setattr(ladder, "CHILD", child)
+        monkeypatch.setattr(ladder, "BATCH_CHILDREN", batch)
+        got = []
+        for pos in _played(roster, turns=5):
+            got.append((_open_read(reg, pos, stages, side=1, width=6),
+                        _open_read(reg, pos.swapped(), stages, side=0, width=6)))
+        return got
+
+    seat = mirror("seat", True)
+    assert calls["together"] > 0, "the children were not read together"
+    asked = calls["together"]
+    one_at_a_time = mirror("seat", False)
+    assert calls["together"] == asked, "the one-at-a-time road read children together"
+    reference = mirror("guarantee", True)
+    deepest = moved = 0
+    for (other, swapped), (other_1, _swapped_1), (other_g, swapped_g) in zip(
+            seat, one_at_a_time, reference, strict=True):
+        assert [r.stage for r in other.rungs] == [r.stage for r in swapped.rungs]
+        deepest = max(deepest, max((int(r.stage[1]) for r in other.rungs), default=0))
+        for x, y, z in zip(swapped.rungs, other.rungs, other_1.rungs, strict=True):
+            assert x.value == pytest.approx(1 + y.value, abs=1e-9), x.stage
+            assert z.value == pytest.approx(y.value, abs=1e-9), x.stage
+        for x, y in zip(swapped_g.rungs, other_g.rungs, strict=False):
+            moved += x.stage[1] in "34" and abs(x.value - (1 + y.value)) > 1e-6
+    assert deepest == 4, "no position read to depth 4"
+    assert moved >= 1, "the reference held the mirror at depth 3 and 4 as well"
 
 
 def test_the_ika421_switches_read_their_own_environment() -> None:
@@ -694,7 +771,9 @@ def test_the_ika421_switches_read_their_own_environment() -> None:
         return subprocess.run([sys.executable, "-c", probe], env={**env, **flags},
                               capture_output=True, text=True, check=True).stdout.split()
 
-    assert ask() == ["False", "guarantee", "0", "False", "guarantee", "True"]
+    # IKA-422: the children are read as the reader by default.
+    assert ask() == ["False", "guarantee", "0", "False", "seat", "True"]
     assert ask(POKEURAOU_LADDER_DIAG="1", POKEURAOU_LADDER_VALUE="full",
                POKEURAOU_LADDER_ORACLE_PASSES="4", POKEURAOU_LADDER_KEEP="1",
-               POKEURAOU_LADDER_CHILD="seat") == ["True", "full", "4", "True", "seat", "True"]
+               POKEURAOU_LADDER_CHILD="guarantee") == ["True", "full", "4", "True", "guarantee",
+                                                       "True"]

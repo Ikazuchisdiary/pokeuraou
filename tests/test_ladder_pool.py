@@ -481,6 +481,40 @@ def test_a_deep_cell_is_read_pass_by_pass_on_the_wall_clock(roster, pool, monkey
     assert kids > 0, "no child was read pass by pass"
 
 
+@pytest.mark.parametrize("how", ["count", "split", "passes"])
+def test_the_workers_read_the_children_as_side_one_reads_them(roster, pool, monkeypatch,  # noqa: ANN001
+                                                              how) -> None:  # noqa: ANN001
+    """IKA-422 (`ladder.CHILD` ``seat``, the default): a read for side 1 -- its depth-3 and
+    depth-4 cells' children read as side 1 -- by the workers is the serial read: on the count
+    clock whole cells on a worker, on the wall clock a cell's children on whichever worker is
+    free (`SPLIT`) and pass by pass by the reader (`PASSES`). The positive controls: side 1's
+    serial read differs from the reference's (``guarantee``) at depth 3 or 4 for some
+    position, and the wall clock's reader opened cells and read children pass by pass."""
+    reg = roster.reg
+    stages = "d2r2b3n4+d3r3ban4/r2ban4+d4r2b3n4/r2b3n4/r2b3n4"
+    monkeypatch.setattr(ladder, "SPLIT", how != "count")
+    monkeypatch.setattr(ladder, "PASSES", how == "passes")
+    clock = {"clock": "wall"} if how != "count" else {}
+    differed = opened = kids = 0
+    for pos in _played(roster)[:3]:
+        node = _node(reg, pos, 6, side=1)
+        monkeypatch.setattr(ladder, "CHILD", "guarantee")
+        reference = _read(reg, node, stages, side=1, workers=False)
+        monkeypatch.setattr(ladder, "CHILD", "seat")
+        serial = _read(reg, node, stages, side=1, workers=False)
+        pooled = _read(reg, node, stages, side=1, workers=True, **clock)
+        assert serial.stopped == pooled.stopped == "done"
+        (_same if how == "count" else _same_but_time)(pooled, serial)
+        differed += any(abs(x.value - y.value) > 1e-6 for x, y in
+                        zip(serial.rungs, reference.rungs, strict=True) if x.stage[1] in "34")
+        if how != "count":
+            opened += pooled.pool["openCells"] if how == "passes" else pooled.pool["splitCells"]
+            kids += pooled.pool["kidReads"] if how == "passes" else pooled.pool["childTasks"]
+    assert differed >= 1, "side 1 read the children as the reference does"
+    if how != "count":
+        assert opened > 0 and kids > 0, "the reader opened no cell or read no child"
+
+
 def test_the_readers_kid_lps_in_the_port_pass_by_pass(roster, pool, monkeypatch) -> None:  # noqa: ANN001
     """IKA-387 (`portlp` on): the reader walking deep cells pass by pass (`deep_passes`) solves
     the children whose pass is back in one crossing a round of answers, and every stage,
