@@ -1,0 +1,74 @@
+
+== open @ 8s
+  d0->d1: n 1922 borne 0.952 (0.054)  null -0.048 (0.058)  dlog -0.0330 (0.0055)  mean change +0.0004  |change| 0.0572  extreme 0.243->0.352
+  d1->d2a: n 1922 borne 0.457 (0.089)  null +0.173 (0.090)  dlog -0.0004 (0.0045)  mean change -0.0190  |change| 0.0300  extreme 0.352->0.407
+  d2a->d2: n 1922 borne 0.717 (0.107)  null +0.138 (0.108)  dlog -0.0038 (0.0038)  mean change +0.0157  |change| 0.0214  extreme 0.407->0.407
+  d1->d2: n 1922 borne 0.605 (0.088)  null -0.015 (0.089)  dlog -0.0042 (0.0037)  mean change -0.0034  |change| 0.0315  extreme 0.352->0.407
+  d0->d2: n 1922 borne 0.831 (0.044)  null -0.011 (0.048)  dlog -0.0373 (0.0067)  mean change -0.0030  |change| 0.0715  extreme 0.243->0.407
+   [turn 2-3] n 141  d0->d1 dlog -0.0090 (0.0150) borne 0.68 (0.39) | d1->d2 dlog +0.0217 (0.0136) borne -0.26 (0.43) change -0.0139 |0.0479|
+   [turn 4-6] n 915  d0->d1 dlog -0.0261 (0.0088) borne 0.85 (0.08) | d1->d2 dlog +0.0009 (0.0056) borne 0.49 (0.14) change -0.0030 |0.0350|
+   [turn 7+] n 866  d0->d1 dlog -0.0442 (0.0075) borne 1.08 (0.06) | d1->d2 dlog -0.0139 (0.0054) borne 0.90 (0.10) change -0.0021 |0.0252|
+   [alive 8] n 46  d0->d1 dlog -0.0051 (0.0258) borne 0.43 (0.70) | d1->d2 dlog +0.0245 (0.0203) borne -0.41 (1.03) change -0.0077 |0.0468|
+   [alive 6-7] n 471  d0->d1 dlog -0.0110 (0.0096) borne 0.85 (0.18) | d1->d2 dlog +0.0079 (0.0088) borne 0.28 (0.23) change -0.0070 |0.0408|
+   [alive 4-5] n 910  d0->d1 dlog -0.0334 (0.0080) borne 0.95 (0.07) | d1->d2 dlog -0.0075 (0.0052) borne 0.69 (0.11) change -0.0037 |0.0310|
+   [alive 2-3] n 495  d0->d1 dlog -0.0558 (0.0121) borne 1.04 (0.06) | d1->d2 dlog -0.0124 (0.0068) borne 0.84 (0.13) change +0.0010 |0.0223|
+   [classes 1] n 1922  d0->d1 dlog -0.0330 (0.0055) borne 0.95 (0.05) | d1->d2 dlog -0.0042 (0.0037) borne 0.61 (0.09) change -0.0034 |0.0315|
+   [hpgap <0.5] n 643  d0->d1 dlog -0.0475 (0.0116) borne 0.89 (0.09) | d1->d2 dlog -0.0042 (0.0068) borne 0.55 (0.15) change -0.0044 |0.0480|
+   [hpgap 0.5-1.5] n 932  d0->d1 dlog -0.0347 (0.0077) borne 1.05 (0.08) | d1->d2 dlog -0.0078 (0.0055) borne 0.75 (0.13) change -0.0029 |0.0294|
+   [hpgap >=1.5] n 347  d0->d1 dlog -0.0020 (0.0063) borne 0.50 (0.17) | d1->d2 dlog +0.0053 (0.0071) borne -0.28 (0.18) change -0.0028 |0.0068|
+   [played protect] n 1225  d0->d1 dlog -0.0347 (0.0065) borne 1.05 (0.07) | d1->d2 dlog -0.0069 (0.0050) borne 0.69 (0.10) change -0.0033 |0.0298|
+   [played switch] n 348  d0->d1 dlog -0.0153 (0.0144) borne 0.86 (0.18) | d1->d2 dlog +0.0055 (0.0108) borne 0.28 (0.28) change -0.0042 |0.0329|
+   [played neither] n 531  d0->d1 dlog -0.0242 (0.0117) borne 0.73 (0.10) | d1->d2 dlog -0.0027 (0.0065) borne 0.55 (0.18) change -0.0029 |0.0342|
+   [turnsleft 1-2] n 908  d0->d1 dlog -0.0400 (0.0069) borne 1.02 (0.04) | d1->d2 dlog -0.0026 (0.0026) borne 0.64 (0.09) change +0.0005 |0.0154|
+   [turnsleft 3-5] n 774  d0->d1 dlog -0.0317 (0.0099) borne 0.91 (0.10) | d1->d2 dlog -0.0067 (0.0080) borne 0.57 (0.13) change -0.0060 |0.0459|
+   [turnsleft 6+] n 240  d0->d1 dlog -0.0109 (0.0157) borne 0.80 (0.28) | d1->d2 dlog -0.0027 (0.0114) borne 0.69 (0.36) change -0.0096 |0.0463|
+
+== hidden @ 8s
+  d0->d1: n 1967 borne 1.025 (0.110)  null +0.106 (0.112)  dlog -0.0170 (0.0041)  mean change -0.0063  |change| 0.0585  extreme 0.044->0.059
+  d1->d2a: n 1967 borne 0.644 (0.163)  null -0.022 (0.163)  dlog +0.0031 (0.0041)  mean change -0.0294  |change| 0.0393  extreme 0.059->0.073
+  d2a->d2: n 1967 borne 0.050 (0.218)  null -0.409 (0.218)  dlog +0.0010 (0.0024)  mean change +0.0140  |change| 0.0217  extreme 0.073->0.072
+  d1->d2: n 1967 borne 0.397 (0.161)  null +0.203 (0.162)  dlog +0.0041 (0.0033)  mean change -0.0154  |change| 0.0379  extreme 0.059->0.072
+  d0->d2: n 1967 borne 0.808 (0.088)  null -0.025 (0.090)  dlog -0.0130 (0.0056)  mean change -0.0217  |change| 0.0747  extreme 0.044->0.072
+   [turn 1] n 524  d0->d1 dlog -0.0110 (0.0061) borne 1.12 (0.31) | d1->d2 dlog +0.0071 (0.0052) borne 0.07 (0.38) change -0.0277 |0.0427|
+   [turn 2-3] n 854  d0->d1 dlog -0.0168 (0.0061) borne 0.99 (0.17) | d1->d2 dlog +0.0022 (0.0045) borne 0.49 (0.26) change -0.0136 |0.0385|
+   [turn 4-6] n 506  d0->d1 dlog -0.0234 (0.0101) borne 1.01 (0.15) | d1->d2 dlog -0.0013 (0.0070) borne 0.64 (0.23) change -0.0087 |0.0354|
+   [turn 7+] n 83  d0->d1 dlog -0.0188 (0.0187) borne 1.25 (0.38) | d1->d2 dlog +0.0370 (0.0304) borne -0.88 (0.53) change +0.0028 |0.0180|
+   [alive 8] n 1002  d0->d1 dlog -0.0127 (0.0053) borne 1.05 (0.19) | d1->d2 dlog +0.0014 (0.0041) borne 0.56 (0.26) change -0.0221 |0.0410|
+   [alive 6-7] n 765  d0->d1 dlog -0.0174 (0.0075) borne 0.92 (0.15) | d1->d2 dlog +0.0027 (0.0054) borne 0.41 (0.23) change -0.0123 |0.0383|
+   [alive 4-5] n 200  d0->d1 dlog -0.0374 (0.0110) borne 1.37 (0.17) | d1->d2 dlog +0.0226 (0.0137) borne -0.70 (0.32) change +0.0066 |0.0211|
+   [classes 3-4] n 916  d0->d1 dlog -0.0250 (0.0067) borne 1.08 (0.13) | d1->d2 dlog +0.0079 (0.0054) borne 0.19 (0.21) change -0.0079 |0.0366|
+   [classes 6+] n 1051  d0->d1 dlog -0.0101 (0.0050) borne 0.95 (0.18) | d1->d2 dlog +0.0007 (0.0039) borne 0.59 (0.24) change -0.0219 |0.0391|
+   [hpgap <0.5] n 1199  d0->d1 dlog -0.0212 (0.0053) borne 1.13 (0.15) | d1->d2 dlog +0.0060 (0.0042) borne 0.37 (0.21) change -0.0185 |0.0432|
+   [hpgap 0.5-1.5] n 613  d0->d1 dlog -0.0123 (0.0082) borne 0.82 (0.18) | d1->d2 dlog +0.0030 (0.0065) borne 0.45 (0.29) change -0.0120 |0.0344|
+   [hpgap >=1.5] n 155  d0->d1 dlog -0.0038 (0.0035) borne 0.53 (0.26) | d1->d2 dlog -0.0068 (0.0050) borne 1.07 (0.19) change -0.0046 |0.0111|
+   [played protect] n 921  d0->d1 dlog -0.0113 (0.0057) borne 0.86 (0.16) | d1->d2 dlog +0.0018 (0.0054) borne 0.56 (0.21) change -0.0169 |0.0386|
+   [played switch] n 693  d0->d1 dlog -0.0112 (0.0074) borne 0.82 (0.18) | d1->d2 dlog +0.0018 (0.0057) borne 0.61 (0.27) change -0.0159 |0.0396|
+   [played neither] n 599  d0->d1 dlog -0.0259 (0.0078) borne 1.29 (0.20) | d1->d2 dlog +0.0076 (0.0051) borne 0.05 (0.32) change -0.0115 |0.0358|
+   [turnsleft 1-2] n 141  d0->d1 dlog -0.0144 (0.0064) borne 1.11 (0.22) | d1->d2 dlog +0.0206 (0.0177) borne -1.25 (0.42) change +0.0014 |0.0108|
+   [turnsleft 3-5] n 724  d0->d1 dlog -0.0340 (0.0072) borne 1.27 (0.14) | d1->d2 dlog +0.0030 (0.0050) borne 0.24 (0.22) change -0.0126 |0.0365|
+   [turnsleft 6+] n 1102  d0->d1 dlog -0.0063 (0.0056) borne 0.81 (0.17) | d1->d2 dlog +0.0026 (0.0043) borne 0.55 (0.24) change -0.0194 |0.0424|
+
+== hidden-seen @ 8s
+  d0->d1: n 1967 borne 1.110 (0.108)  null +0.001 (0.111)  dlog -0.0206 (0.0042)  mean change +0.0013  |change| 0.0587  extreme 0.047->0.059
+  d1->d2a: n 1967 borne 0.447 (0.157)  null +0.112 (0.158)  dlog +0.0059 (0.0043)  mean change -0.0325  |change| 0.0417  extreme 0.059->0.074
+  d2a->d2: n 1967 borne 0.427 (0.166)  null +0.065 (0.166)  dlog -0.0028 (0.0039)  mean change +0.0295  |change| 0.0360  extreme 0.074->0.072
+  d1->d2: n 1967 borne 0.385 (0.155)  null +0.012 (0.156)  dlog +0.0031 (0.0033)  mean change -0.0030  |change| 0.0389  extreme 0.059->0.072
+  d0->d2: n 1967 borne 0.842 (0.085)  null +0.062 (0.087)  dlog -0.0175 (0.0056)  mean change -0.0017  |change| 0.0756  extreme 0.047->0.072
+   [turn 1] n 524  d0->d1 dlog -0.0125 (0.0063) borne 1.17 (0.30) | d1->d2 dlog +0.0037 (0.0046) borne 0.13 (0.40) change -0.0101 |0.0383|
+   [turn 2-3] n 854  d0->d1 dlog -0.0239 (0.0062) borne 1.15 (0.16) | d1->d2 dlog +0.0020 (0.0046) borne 0.36 (0.24) change -0.0023 |0.0414|
+   [turn 4-6] n 506  d0->d1 dlog -0.0242 (0.0102) borne 1.02 (0.15) | d1->d2 dlog -0.0017 (0.0074) borne 0.66 (0.22) change +0.0014 |0.0384|
+   [turn 7+] n 83  d0->d1 dlog -0.0159 (0.0182) borne 1.25 (0.42) | d1->d2 dlog +0.0407 (0.0322) borne -0.62 (0.47) change +0.0080 |0.0206|
+   [alive 8] n 1002  d0->d1 dlog -0.0152 (0.0054) borne 1.13 (0.18) | d1->d2 dlog +0.0007 (0.0040) borne 0.46 (0.25) change -0.0066 |0.0401|
+   [alive 6-7] n 765  d0->d1 dlog -0.0228 (0.0076) borne 1.02 (0.15) | d1->d2 dlog +0.0020 (0.0056) borne 0.39 (0.22) change -0.0023 |0.0411|
+   [alive 4-5] n 200  d0->d1 dlog -0.0390 (0.0112) borne 1.48 (0.17) | d1->d2 dlog +0.0192 (0.0146) borne -0.04 (0.27) change +0.0122 |0.0249|
+   [classes 3-4] n 916  d0->d1 dlog -0.0291 (0.0068) borne 1.15 (0.13) | d1->d2 dlog +0.0066 (0.0055) borne 0.31 (0.20) change -0.0003 |0.0392|
+   [classes 6+] n 1051  d0->d1 dlog -0.0132 (0.0051) borne 1.06 (0.18) | d1->d2 dlog +0.0001 (0.0039) borne 0.46 (0.24) change -0.0053 |0.0387|
+   [hpgap <0.5] n 1199  d0->d1 dlog -0.0253 (0.0054) borne 1.19 (0.14) | d1->d2 dlog +0.0029 (0.0041) borne 0.43 (0.21) change -0.0033 |0.0427|
+   [hpgap 0.5-1.5] n 613  d0->d1 dlog -0.0154 (0.0081) borne 0.93 (0.18) | d1->d2 dlog +0.0047 (0.0070) borne 0.29 (0.24) change -0.0034 |0.0393|
+   [hpgap >=1.5] n 155  d0->d1 dlog -0.0049 (0.0044) borne 0.78 (0.24) | d1->d2 dlog -0.0011 (0.0025) borne 0.71 (0.39) change +0.0007 |0.0086|
+   [played protect] n 921  d0->d1 dlog -0.0159 (0.0058) borne 0.99 (0.16) | d1->d2 dlog -0.0004 (0.0054) borne 0.60 (0.21) change -0.0042 |0.0393|
+   [played switch] n 693  d0->d1 dlog -0.0149 (0.0075) borne 0.93 (0.18) | d1->d2 dlog +0.0015 (0.0054) borne 0.40 (0.27) change -0.0028 |0.0404|
+   [played neither] n 599  d0->d1 dlog -0.0289 (0.0080) borne 1.31 (0.19) | d1->d2 dlog +0.0062 (0.0051) borne 0.17 (0.30) change -0.0004 |0.0368|
+   [turnsleft 1-2] n 141  d0->d1 dlog -0.0160 (0.0083) borne 1.12 (0.20) | d1->d2 dlog +0.0224 (0.0184) borne -0.89 (0.38) change +0.0033 |0.0123|
+   [turnsleft 3-5] n 724  d0->d1 dlog -0.0393 (0.0072) borne 1.39 (0.14) | d1->d2 dlog +0.0023 (0.0052) borne 0.35 (0.21) change -0.0026 |0.0389|
+   [turnsleft 6+] n 1102  d0->d1 dlog -0.0089 (0.0057) borne 0.88 (0.17) | d1->d2 dlog +0.0012 (0.0042) borne 0.45 (0.23) change -0.0041 |0.0424|
