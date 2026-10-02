@@ -1,0 +1,58 @@
+{
+  "id": "ika419-user-rain-sun-screens",
+  "name": "IKA-419 user team (Charizard Y, Politoed, Whimsicott, Archaludon, Espathra, Raichu X)",
+  "source": {
+    "moves_items_abilities": "user screenshot, 2026-10-02 (names resolved from Showdown's ja text; the two mega stones by the stone naming convention, the ja table has no stone names)",
+    "nature_and_sp": "not in the screenshot: same species in data/pool/regmc-matchupweb.json (Charizard team 24, Politoed team 36, Whimsicott team 8, Archaludon team 13, Raichu team 14), Espathra from no pool team (nature Timid as in the 2027-baltimore standings; SP is a plain special-attacker spread, hp 2 / spa 32 / spe 32)"
+  },
+  "team": [
+    {
+      "species": "Charizard",
+      "ability": "Blaze",
+      "item": "Charizardite Y",
+      "nature": "Timid",
+      "moves": ["Heat Wave", "Weather Ball", "Helping Hand", "Protect"],
+      "sp": {"hp": 22, "def": 15, "spa": 11, "spd": 1, "spe": 17}
+    },
+    {
+      "species": "Politoed",
+      "ability": "Drizzle",
+      "item": "Sitrus Berry",
+      "nature": "Calm",
+      "moves": ["Muddy Water", "Encore", "Rain Dance", "Psych Up"],
+      "sp": {"hp": 32, "def": 24, "spd": 7, "spe": 3}
+    },
+    {
+      "species": "Whimsicott",
+      "ability": "Chlorophyll",
+      "item": "Life Orb",
+      "nature": "Timid",
+      "moves": ["Moonblast", "Solar Beam", "Psychic", "Protect"],
+      "sp": {"hp": 2, "spa": 32, "spe": 32}
+    },
+    {
+      "species": "Archaludon",
+      "ability": "Stamina",
+      "item": "Leftovers",
+      "nature": "Bold",
+      "moves": ["Electro Shot", "Dragon Pulse", "Snarl", "Protect"],
+      "sp": {"hp": 32, "def": 10, "spa": 5, "spd": 18, "spe": 1}
+    },
+    {
+      "species": "Espathra",
+      "ability": "Speed Boost",
+      "item": "Electric Seed",
+      "nature": "Timid",
+      "moves": ["Lumina Crash", "Baton Pass", "Calm Mind", "Protect"],
+      "sp": {"hp": 2, "spa": 32, "spe": 32}
+    },
+    {
+      "species": "Raichu",
+      "ability": "Lightning Rod",
+      "item": "Raichunite X",
+      "nature": "Timid",
+      "moves": ["Fake Out", "Rising Voltage", "Reflect", "Light Screen"],
+      "sp": {"hp": 29, "def": 5, "spe": 32}
+    }
+  ]
+}
