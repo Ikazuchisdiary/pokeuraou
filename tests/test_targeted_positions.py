@@ -121,6 +121,32 @@ def test_a_probe_reads_both_seats_under_both_conditions(pool) -> None:  # noqa: 
         timematch.play_pair(match, 5, teams, probe=True)
 
 
+def test_a_ladder_read_stopped_by_the_memory_watch_is_a_memory_stop(pool) -> None:  # noqa: ANN001
+    """The memory watch's event stops a ladder read (`stopped: stop`, no stage), and the move's
+    row says so (``memoryStop``), as the deepening's rows always did: a run that plays at depth
+    1 for want of memory is not the agents compared (IKA-423: 96% of two probes' reads)."""
+    import threading
+
+    start, _recorded, teams, _plain = _recorded_start(pool)
+    ladder = _cond("a", 0.5, ladder="d2r2b3n4")
+    other = _cond("b", 0.5, ladder="d2r2b3n4")
+
+    def moves(event):  # noqa: ANN001, ANN202
+        match = _match(pool, ladder, other, turns=3)
+        match.halt = event
+        lines = timematch.play_pair(match, 5, teams, start=start, probe=True)
+        return [r for ln in lines for r in ln["moves"]]
+
+    free = moves(threading.Event())
+    assert free and not any(r.get("memoryStop") for r in free)
+    assert all(r["ladder"]["rungs"] for r in free), "the control read no stage; it proves nothing"
+    event = threading.Event()
+    event.set()
+    stopped = moves(event)
+    assert stopped and all(r.get("memoryStop") for r in stopped)
+    assert all(r["ladder"]["stopped"] == "stop" and not r["ladder"]["rungs"] for r in stopped)
+
+
 # ---------------------------------------------------------------------- the choice of starts
 
 

@@ -2303,7 +2303,13 @@ class HumanGame:
         #: ladder's reading): a transcript reads it (`timematch.TimedGame`); nothing here does.
         self.last_read = (me, mine, theirs if me == 0 else ours, strategy, model, solved.ladder, exact)
         took = time.perf_counter() - started
-        braked = isinstance(cost, HaltingCost) and cost.stopped
+        # IKA-423: a ladder read stopped by the caller's event (`agent.halt`, the memory watch)
+        # is a stopped move too. Only the deepening's cost was looked at before, so a run of
+        # ladder conditions on a host short of memory played at depth 1 and reported no
+        # memory stop (probes of IKA-423: 96% of the reads, `stopped: stop`).
+        braked = (isinstance(cost, HaltingCost) and cost.stopped) or (
+            solved.ladder is not None and solved.ladder.stopped == "stop"
+        )
         if self.listener is not None:
             self.emit("answer", {
                 # IKA-355: the page says the memory stopped this move's reading, and why.
