@@ -28,7 +28,10 @@ scores the values against the recorded games' results instead.
   at the production weights. Each read keeps the depth-0 value (the leaf on the position, or
   the completions' weighted leaf), the depth-1 node's value and every stage's value with its
   counted time. ``--d1-only`` stops after the depth-1 node (a cheap read for a weak model).
-  Written to ``SET/read-<name>/<n>.json``.
+  Written to ``SET/read-<name>/<n>.json``. IKA-421 stage 2: each answer's most played row
+  (``top``) and its distance from the depth-1 answer (``tv``); with ``POKEURAOU_LADDER_DIAG=1``
+  each stage's other values (`ladder.DIAG`); ``--side 1`` / ``--swap`` read the open game from
+  the other seat (the mirror), every value still in the recorded side 0's units.
 * **report**: per value (depth 0, depth 1, the last stage of depth 2 / 3 completed within
   each of ``--budgets``), its log loss, Brier score and calibration against the results, the
   paired differences with standard errors (one position a game, so the positions are the
@@ -227,16 +230,32 @@ class Kit:
         return {0: zero, 1: one}
 
 
+def orientation(side: int, swap: bool) -> tuple[float, float]:
+    """(a, b): a read's value v in the recorded side 0's units is a + b v (IKA-421's mirror).
+    Side 1 reads the negated transpose (-P); the swapped position's side 0 is the recorded
+    side 1 (1 - P)."""
+    return {(0, False): (0.0, 1.0), (1, False): (0.0, -1.0),
+            (0, True): (1.0, -1.0), (1, True): (1.0, 1.0)}[side, swap]
+
+
 def _one_read(kit: Kit, pos, spreads, args: argparse.Namespace) -> dict:  # noqa: ANN001
     from pokeuraou import humanplay
     from pokeuraou.budget import Budget
     from pokeuraou.ladder import LADDER_COSTS, parse_ladder
     from pokeuraou.selfplay import _menus
 
+    side, swap = getattr(args, "side", 0), getattr(args, "swap", False)
     exact = spreads is None
+    if (side or swap) and not exact:
+        raise SystemExit("--side 1 / --swap read the open game only (IKA-421's mirror)")
+    if swap:
+        pos = pos.swapped()
+    # The leaf's value of the position as read (the swapped one's side 0 is side 1).
+    leaf_a, leaf_b = (1.0, -1.0) if swap else (0.0, 1.0)
+    a, b = orientation(side, swap)
     classes = 1 if exact else len(spreads[1])
     if exact:
-        d0 = float(kit.leaf([pos])[0])
+        d0 = leaf_a + leaf_b * float(kit.leaf([pos])[0])
     else:
         vals = np.asarray(kit.leaf([c.position for c in spreads[1]]), dtype=np.float64)
         d0 = float(np.dot([c.weight for c in spreads[1]], vals))
@@ -247,28 +266,42 @@ def _one_read(kit: Kit, pos, spreads, args: argparse.Namespace) -> dict:  # noqa
     began = time.perf_counter()
     stages = parse_ladder("L6@0" if args.d1_only else args.ladder)
     solved = humanplay.solve_move(
-        kit.reg, pos, 0, list(ours), list(theirs), spreads, kit.leaf, budget=Budget.matrix(),
+        kit.reg, pos, side, list(ours), list(theirs), spreads, kit.leaf, budget=Budget.matrix(),
         exact=exact, ladder={"stages": stages, "budget_ms": args.seconds * 1000.0,
                              "cost": LADDER_COSTS["local", 1], "clock": "count",
                              "start_ms": node_ms})
     x0, v0 = solved.ladder.start
-    return {"d0": d0, "d1": float(v0), "rows": len(ours), "cols": len(theirs),
-            "classes": classes, "nodeMs": round(node_ms, 2),
-            "wall": round(time.perf_counter() - began, 3),
-            "stopped": solved.ladder.stopped, "unfinished": solved.ladder.unfinished,
-            "rungs": [{"stage": g.stage, "value": float(g.value), "spentMs": round(g.spent_ms, 1)}
-                      for g in solved.ladder.rungs]}
+    out = {"d0": d0, "d1": a + b * float(v0), "rows": len(ours), "cols": len(theirs),
+           "classes": classes, "nodeMs": round(node_ms, 2),
+           "wall": round(time.perf_counter() - began, 3),
+           "stopped": solved.ladder.stopped, "unfinished": solved.ladder.unfinished,
+           # IKA-421: the row each answer plays most, and how far its mixture is from the
+           # depth-1 answer's (total variation: 0 the same, 1 no row in common).
+           "top": int(np.argmax(x0)),
+           "rungs": [{"stage": g.stage, "value": a + b * float(g.value),
+                      "spentMs": round(g.spent_ms, 1), "top": int(np.argmax(g.strategy)),
+                      "tv": round(0.5 * float(np.abs(np.asarray(g.strategy) - np.asarray(x0)).sum()), 6),
+                      # IKA-421 (`ladder.DIAG`): in the reading side's own units (``orient``).
+                      **({"diag": g.diag} if g.diag is not None else {})}
+                     for g in solved.ladder.rungs]}
+    if side or swap:
+        out.update(side=side, swap=swap, orient=[a, b])
+    return out
 
 
 def read(args: argparse.Namespace) -> None:
     import position_set as ps
 
+    from pokeuraou import ladder
     from pokeuraou.position import Position
 
     kit = Kit(args)
     out = Path(args.set) / f"read-{args.name}"
     args.stride, args.offset = 1, 0
-    units = list(range(args.start, min(args.stop, len(kit.positions))))
+    units = ([int(n) for n in args.only.split(",")] if getattr(args, "only", None)
+             else list(range(args.start, min(args.stop, len(kit.positions)))))
+    if (args.side or args.swap) and not args.open_only:
+        raise SystemExit("--side 1 / --swap go with --open-only (the mirror is the open game's)")
     for n in ps._units(args, units):  # noqa: SLF001 - the claim queue
         path = out / f"{n}.json"
         if path.exists():
@@ -276,13 +309,23 @@ def read(args: argparse.Namespace) -> None:
         entry = kit.positions[n]
         pos = Position.from_json(entry["position"])
         spreads = kit.spreads(entry)
-        row = {"n": n, "game": entry["game"], "open": _one_read(kit, pos, None, args)}
+        if args.hidden_only and spreads is None:
+            continue
+        row = {"n": n, "game": entry["game"]}
+        if (ladder.VALUE != "guarantee" or ladder.ORACLE_PASSES or ladder.KEEP
+                or ladder.CHILD != "guarantee"):
+            # IKA-421: the reading's switches, said in the row.
+            row["ladder"] = {"value": ladder.VALUE, "passes": ladder.ORACLE_PASSES,
+                             "keep": ladder.KEEP, "child": ladder.CHILD}
+        if not args.hidden_only:
+            row["open"] = _one_read(kit, pos, None, args)
         if spreads is not None and not args.open_only:
             row["hidden"] = _one_read(kit, pos, spreads, args)
         _write(path, row)
-        print(json.dumps({"n": n, "open": row["open"]["wall"],
+        print(json.dumps({"n": n, "open": row.get("open", {}).get("wall"),
                           "hidden": row.get("hidden", {}).get("wall"),
-                          "stages": len(row["open"]["rungs"])}), file=sys.stderr, flush=True)
+                          "stages": len(row.get("open", row.get("hidden", {})).get("rungs", []))}),
+              file=sys.stderr, flush=True)
 
 
 # ----------------------------------------------------------------------------- report
@@ -561,6 +604,15 @@ def main(argv: list[str] | None = None) -> None:
     r.add_argument("--width", type=int, default=64)
     r.add_argument("--d1-only", action="store_true")
     r.add_argument("--open-only", action="store_true")
+    r.add_argument("--hidden-only", action="store_true",
+                   help="IKA-421: only the Bayesian read, of the positions with a hidden bench")
+    r.add_argument("--side", type=int, default=0, choices=(0, 1),
+                   help="IKA-421: the side that reads (the open game only); values are written "
+                   "in side 0's units")
+    r.add_argument("--swap", action="store_true",
+                   help="IKA-421: read the position with its seats swapped (the open game only); "
+                   "values are written in the recorded side 0's units")
+    r.add_argument("--only", default=None, help="IKA-421: these positions, comma-separated")
     r.add_argument("--from", dest="start", type=int, default=0)
     r.add_argument("--to", dest="stop", type=int, default=10**9)
     r.add_argument("--claim", default=None)

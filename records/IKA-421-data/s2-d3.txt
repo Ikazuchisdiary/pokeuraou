@@ -1,0 +1,23 @@
+positions read all four ways: 50
+with a depth-3 stage in all four: 50; stage ['d3r8b3k24x/r3b3k16']
+menu check: sizes match the reads in 50 of 50; depth-1 tops agree across seats in 36
+
+seat (side 1 reading, its children as side 0) vs (seats swapped, children as the reader):
+  depth 2 last stage: swap - side1 -0.0000 (0.0000), mean |.| 0.0000
+  depth 3 stage:      swap - side1 +0.0276 (0.0057), mean |.| 0.0316, max 0.1346
+  answer's top differs: depth 2 16 of 50, depth 3 24 of 50
+  where it differs at depth 3: log loss side1 0.6354, swap 0.6671, d1 0.5800
+
+side 0 reading: children as side 0 (default) vs their whole game (full):
+  depth 3: full - default +0.0118 (0.0047), mean |.| 0.0188
+  answer's top differs: 8 of 50
+  where it differs: log loss default 0.4780, full 0.5216, d1 0.5331
+
+values against the results (all positions):
+  d1      log 0.6241 vs d1 +0.0000 (0.0000) bias +0.1051
+  own2    log 0.6585 vs d1 +0.0344 (0.0302) bias +0.0989
+  own3    log 0.6588 vs d1 +0.0347 (0.0394) bias +0.0801
+  full3   log 0.6633 vs d1 +0.0392 (0.0361) bias +0.0918
+  side13  log 0.6627 vs d1 +0.0386 (0.0381) bias +0.0980
+  swap3   log 0.6732 vs d1 +0.0492 (0.0364) bias +0.1256
+  depth 3 - depth 2 (own): -0.0188 (0.0070); side 1's: -0.0039 (0.0071); swapped: +0.0237 (0.0059)

@@ -310,6 +310,8 @@ class Rung:
     predicted_ms: float = 0.0
     #: The counted work at its end (`LadderCost`'s kinds): what `fit` prices.
     work: dict[str, int] = field(default_factory=dict)
+    #: IKA-421: the stage's other values (`DIAG`, `_diagnose`), None when off.
+    diag: dict[str, float] | None = None
 
     def to_json(self) -> dict[str, Any]:
         return {"stage": self.stage, "value": round(self.value, 6), "rows": self.rows,
@@ -319,7 +321,8 @@ class Rung:
                 "predictedMs": round(self.predicted_ms, 1),
                 # IKA-384: the row the stage's answer plays most (the menu's index), so a
                 # record says where a deeper stage moved the answer (`RECORD_TOP`).
-                **({"top": int(np.argmax(self.strategy))} if RECORD_TOP else {})}
+                **({"top": int(np.argmax(self.strategy))} if RECORD_TOP else {}),
+                **({"diag": dict(self.diag)} if self.diag is not None else {})}
 
 
 @dataclass
@@ -462,6 +465,91 @@ COUNT_FILL = os.environ.get("POKEURAOU_LADDER_COUNT_FILL", "0") != "0"
 #: it was; `tools/time_match.py` turns it on for its records).
 RECORD_TOP = os.environ.get("POKEURAOU_LADDER_TOP", "0") != "0"
 
+#: IKA-421: each rung also carries the stage's other values (`_diagnose`): the rectangle's
+#: own value, the full matrices' value at the stage's prices, the side's best row against
+#: the other side's answer, and the first-order change of the re-priced cells. Off by
+#: default (``POKEURAOU_LADDER_DIAG=1``): the answer and the clock are the same either way
+#: (the extra LPs are not counted work).
+DIAG = os.environ.get("POKEURAOU_LADDER_DIAG", "0") != "0"
+
+#: IKA-421: what a rung's value is (``POKEURAOU_LADDER_VALUE``): ``guarantee`` (default, what
+#: the stage's strategy guarantees against every column of the matrices at the stage's prices,
+#: a lower bound of their game), ``full`` (the value of the whole matrices at those prices),
+#: ``rect`` (the rectangle's own value) or ``mid`` (half way between the guarantee and the
+#: side's best row against the other side's answer: the two bounds of the whole game). The
+#: strategy is the same whichever; only the value reported changes.
+VALUE = os.environ.get("POKEURAOU_LADDER_VALUE", "guarantee")
+VALUES = ("guarantee", "full", "rect", "mid")
+
+#: IKA-421: the oracle passes of every stage (``POKEURAOU_LADDER_ORACLE_PASSES``, each may add
+#: the side's best row and the other side's best column per completion); 0: the stage's own
+#: (`Stage.passes`, 1). More passes take the rectangle nearer the whole game's answer at the
+#: stage's prices, at the cost of the cells they add. (Not IKA-380's `PASSES`, the workers'
+#: road for deep cells.)
+ORACLE_PASSES = int(os.environ.get("POKEURAOU_LADDER_ORACLE_PASSES", "0"))
+
+#: IKA-421: a stage whose answer guarantees less, at the stage's own prices, than the answer
+#: before it keeps the answer before it (``POKEURAOU_LADDER_KEEP=1``; off by default). The
+#: rectangle drops the rows of a wide support (L6's first depth-2 stage keeps 4), and the
+#: other side may then answer outside it at the depth-1 prices.
+KEEP = os.environ.get("POKEURAOU_LADDER_KEEP", "0") != "0"
+
+#: IKA-421: a depth-3-or-more cell's children (``POKEURAOU_LADDER_CHILD``): ``guarantee``
+#: (default) reads each child as side 0 and takes what side 0's answer guarantees -- a value
+#: that leans against side 0 whichever side reads the root; ``seat`` reads each child as the
+#: root's reading side and takes its guarantee (leaning against the reader, as the root's own
+#: value does); ``full`` takes the value of the child's whole matrix at its read's prices
+#: (the same from either seat). The serial road only (no worker processes).
+CHILD = os.environ.get("POKEURAOU_LADDER_CHILD", "guarantee")
+CHILDREN = ("guarantee", "seat", "full")
+#: The side the top-level read reads for (`CHILD` ``seat``).
+_READER = [0]
+
+
+def _diagnose(reg: Any, w: np.ndarray, before: list[np.ndarray], after: list[np.ndarray],  # noqa: ANN401, PLR0913
+              first: tuple[np.ndarray, list[np.ndarray], list[np.ndarray]],
+              prev: tuple[np.ndarray, list[np.ndarray]],
+              now: tuple[np.ndarray, list[np.ndarray]], rows: list[int], cols: list[list[int]],
+              lower: float, rect: float, upper: float) -> dict[str, float]:
+    """A stage's values beside its guarantee (`DIAG`), all in the reading side's units:
+
+    * ``lower`` the guarantee (the rung's value by default), ``rect`` the rectangle's value,
+      ``upper`` the side's best row against the other side's answer (over every row) --
+      ``lower`` <= the whole matrices' value <= ``upper``;
+    * ``full`` the whole matrices' value at the stage's prices, ``fullBefore`` at the prices
+      before the stage (the depth-1 value at the first stage);
+    * ``cellPrev`` the change of the re-priced cells at the previous answer (the first-order
+      change of the whole game's value), ``cellNow`` at the stage's answer, ``cellStart`` the
+      change from the depth-1 prices at the depth-1 answer (``first`` / the read's start);
+    * ``prevGuarantee`` what the previous answer guarantees at the stage's prices (above
+      ``lower``: the stage's answer is worse than the one before it, at its own prices),
+      ``prevSupport`` the rows the previous answer played;
+    * ``rectMean`` the mean change of the rectangle's cells, ``changed`` the share of them
+      the stage re-priced."""
+    from . import portlp
+
+    kinds = len(after)
+    x0, y0 = prev
+    x1, y1 = now
+    out = {"lower": lower, "rect": rect, "upper": upper}
+    try:
+        out["full"] = float(portlp.solve_bayesian_one(reg, after, w).value)
+        out["fullBefore"] = float(portlp.solve_bayesian_one(reg, before, w).value)
+    except EquilibriumError:
+        out["full"] = out["fullBefore"] = float("nan")
+    out["cellPrev"] = float(sum(w[k] * (x0 @ (after[k] - before[k]) @ y0[k]) for k in range(kinds)))
+    out["cellNow"] = float(sum(w[k] * (x1 @ (after[k] - before[k]) @ y1[k]) for k in range(kinds)))
+    sx, sy, start_prices = first
+    out["cellStart"] = float(sum(w[k] * (sx @ (after[k] - start_prices[k]) @ sy[k])
+                                 for k in range(kinds)))
+    # The previous answer's guarantee at the stage's prices, and how many rows it played.
+    out["prevGuarantee"] = float(sum(w[k] * float((x0 @ after[k]).min()) for k in range(kinds)))
+    out["prevSupport"] = float(np.count_nonzero(x0 > 1e-9))
+    diffs = [(after[k] - before[k])[np.ix_(rows, cols[k])] for k in range(kinds)]
+    out["rectMean"] = float(sum(w[k] * diffs[k].mean() for k in range(kinds)))
+    out["changed"] = float(sum(w[k] * np.mean(np.abs(diffs[k]) > 0) for k in range(kinds)))
+    return out
+
 
 class Stopped(Exception):  # noqa: N818 - a signal, not an error
     """The caller's stop event, met inside a cell's own read (depth 3 and up)."""
@@ -522,6 +610,12 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
     value = float(sum(w[k] * float((x @ prices[k]).min()) for k in range(kinds)))
     result = LadderResult(strategy=x, value=value, replies=tuple(ys), prices=prices,
                           start=(x, value))
+    if VALUE not in VALUES:
+        raise ValueError(f"POKEURAOU_LADDER_VALUE is one of {', '.join(VALUES)}; not {VALUE!r}")
+    #: IKA-421 (`DIAG`): the depth-1 answer and prices, kept for `_diagnose`.
+    first = (x, list(ys), [p.copy() for p in prices]) if DIAG else None
+    if CHILD not in CHILDREN:
+        raise ValueError(f"POKEURAOU_LADDER_CHILD is one of {', '.join(CHILDREN)}; not {CHILD!r}")
     #: (completion, own row, own column, kind) -> the cell's value in side 0's units, or None.
     kept = memo is not None
     memo = {} if memo is None else memo
@@ -595,8 +689,16 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
         return (per_cell_ms(stage, _guess_cell_ms(stage, cost)) * cells * speed()
                 <= run.left_ms(work))
 
+    if CHILD != "guarantee" and pool is not None:
+        raise ValueError("POKEURAOU_LADDER_CHILD is read on the serial road only (no ladder pool)")
+    reader_before = _READER[0]
+    if outer is None:
+        _READER[0] = side
     try:
         for at_stage, stage in enumerate(stages):
+            if ORACLE_PASSES:
+                # IKA-421: every stage's oracle passes; the stage's kind (its cells) is the same.
+                stage = replace(stage, passes=ORACLE_PASSES)  # noqa: PLW2901
             if run.stopped():
                 result.stopped, result.unfinished = "stop", stage.label
                 break
@@ -739,7 +841,8 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
                 col_ev = [sx @ trial[k] for k in range(kinds)]
                 row_ev = sum(w[k] * (trial[k] @ sys_[k]) for k in range(kinds))
                 guarantee = float(sum(w[k] * float(col_ev[k].min()) for k in range(kinds)))
-                answer = (sx, sys_, guarantee, float(restricted.value) - guarantee)
+                answer = (sx, sys_, guarantee, float(restricted.value) - guarantee,
+                          float(np.max(row_ev)))
                 if attempt == stage.passes:
                     break
                 grew = False
@@ -770,23 +873,43 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
             measured[stage.kind] = (total + spent, count + fresh)
             got_ms, guessed = calib.get(stage.depth, (0.0, 0.0))
             calib[stage.depth] = (got_ms + spent, guessed + guess * fresh)
+            kept_before = False
+            if KEEP:
+                # IKA-421: the answer before the stage, if it guarantees more at these prices.
+                before_g = float(sum(w[k] * float((x @ trial[k]).min()) for k in range(kinds)))
+                if before_g > answer[2] + search.ORACLE_TOLERANCE:
+                    upper_before = float(np.max(sum(w[k] * (trial[k] @ ys[k]) for k in range(kinds))))
+                    answer = (x, list(ys), before_g, answer[2] + answer[3] - before_g, upper_before)
+                    kept_before = True
+            diag = None
+            if first is not None or VALUE == "full":
+                # IKA-421: not counted work (the clock above has been read).
+                diag = _diagnose(reg, w, prices, trial, first or (x, list(ys), prices), (x, ys),
+                                 (answer[0], answer[1]), rows, cols, answer[2],
+                                 answer[2] + answer[3], answer[4])
+                if KEEP:
+                    diag["kept"] = float(kept_before)
+            told = {"guarantee": answer[2], "rect": answer[2] + answer[3],
+                    "mid": (answer[2] + answer[4]) / 2,
+                    "full": diag["full"] if diag is not None else None}[VALUE]
             prices = trial
             x, ys = answer[0], answer[1]
             if pool is not None:
                 pool.note({"done": stage.label, "rows": list(rows), "cols": [list(c) for c in cols],
                            "support": [int(i) for i in np.flatnonzero(x > 1e-9)],
                            "replies": [[int(j) for j in np.flatnonzero(y > 1e-9)] for y in ys]})
-            rung = Rung(stage=stage.label, value=answer[2], strategy=x, replies=tuple(ys),
+            rung = Rung(stage=stage.label, value=told, strategy=x, replies=tuple(ys),
                         rows=len(rows), cols=tuple(len(c) for c in cols), fresh=fresh,
                         spent_ms=run.spent_ms(work), wall_ms=run.wall_ms(), optimism=answer[3],
                         predicted_ms=predicted,
-                        work=dict(work))
+                        work=dict(work), diag=diag if first is not None else None)
             result.rungs.append(rung)
-            result.strategy, result.value, result.replies = x, answer[2], tuple(ys)
+            result.strategy, result.value, result.replies = x, told, tuple(ys)
             result.prices = prices
             if on_rung is not None:
                 on_rung(rung)
     finally:
+        _READER[0] = reader_before
         search.WORK = outer
         if outer is None:
             search.SHARE, rustnode.DIGESTS[0] = shared_before
@@ -1105,7 +1228,7 @@ def _deep_children(  # noqa: PLR0913 - a cell's children and their stage
     the branches' values weighted."""
     work = search.WORK
     menus = iter(listed)
-    if BATCH_CHILDREN and stage.sub.sub is None and work is not None:
+    if BATCH_CHILDREN and stage.sub.sub is None and work is not None and CHILD == "guarantee":
         mark = dict(work)
         got = _children_at_once(reg, branches, weights, listed, leaf, stage, root_budget, budget,
                                 unmodelled, stop, work)
@@ -1137,16 +1260,30 @@ def _deep_children(  # noqa: PLR0913 - a cell's children and their stage
         if work is not None:
             work["subgames"] += 1
             work["cells"] += m.size
-        start = _Start(eq.row_strategy, [eq.col_strategy])
-        got = read(reg, 0, crow, ccol, [Item(child)], [m], [1.0], start, leaf,
-                   budget=root_budget, stages=[stage.sub], budget_ms=None, cost=cost, stop=stop)
+        # IKA-421 (`CHILD`): side 0 reads the child, or the root's reading side (``seat``).
+        reader = _READER[0] if CHILD == "seat" else 0
+        if reader == 0:
+            start = _Start(eq.row_strategy, [eq.col_strategy])
+            got = read(reg, 0, crow, ccol, [Item(child)], [m], [1.0], start, leaf,
+                       budget=root_budget, stages=[stage.sub], budget_ms=None, cost=cost,
+                       stop=stop)
+        else:
+            start = _Start(eq.col_strategy, [eq.row_strategy])
+            got = read(reg, 1, crow, ccol, [Item(child)], [-m.T], [1.0], start, leaf,
+                       budget=root_budget, stages=[stage.sub], budget_ms=None, cost=cost,
+                       stop=stop)
         if work is not None:
             work["reads"] += 1
         if not got.rungs:
             if got.stopped == "stop":
                 raise Stopped
             return None
-        values.append(float(got.value))
+        if CHILD == "full":
+            # The child's whole matrix at its read's prices (side 0's: the reader is side 0).
+            values.append(float(portlp.solve_bayesian_one(reg, got.prices,
+                                                          np.ones(1, dtype=np.float64)).value))
+        else:
+            values.append(float(got.value) if reader == 0 else -float(got.value))
     return float(np.asarray(values) @ weights)
 
 

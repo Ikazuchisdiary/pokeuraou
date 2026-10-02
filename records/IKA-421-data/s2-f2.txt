@@ -1,0 +1,86 @@
+== hidden40 base
+
+against F2
+  arm            s   n     loss      se    curse  outside
+  w64            4  40   0.0300  0.0068  +0.0050    0.000
+  w64            8  40   0.0174  0.0038  +0.0097    0.000
+  w64           16  40   0.0165  0.0035  +0.0148    0.000
+
+against F1
+  arm            s   n     loss      se    curse  outside
+  w64            4  40   0.0287  0.0047  +0.0078    0.000
+  w64            8  40   0.0237  0.0037  +0.0200    0.000
+  w64           16  40   0.0266  0.0039  +0.0290    0.000
+== hidden40 keep
+
+against F2
+  arm            s   n     loss      se    curse  outside
+  w64            4  40   0.0293  0.0062  +0.0099    0.000
+  w64            8  40   0.0223  0.0049  +0.0147    0.000
+  w64           16  40   0.0164  0.0033  +0.0147    0.000
+
+against F1
+  arm            s   n     loss      se    curse  outside
+  w64            4  40   0.0211  0.0041  +0.0057    0.000
+  w64            8  40   0.0214  0.0038  +0.0177    0.000
+  w64           16  40   0.0252  0.0039  +0.0275    0.000
+== hidden40 ika418-w64
+
+against F2
+  arm            s   n     loss      se    curse  outside
+  w64            4  40   0.0300  0.0068  +0.0050    0.000
+  w64           16  40   0.0165  0.0035  +0.0148    0.000
+
+against F1
+  arm            s   n     loss      se    curse  outside
+  w64            4  40   0.0287  0.0047  +0.0078    0.000
+  w64           16  40   0.0266  0.0039  +0.0290    0.000
+== open9 base
+
+against F2
+  arm            s   n     loss      se    curse  outside
+  w64            4   9   0.0020  0.0012  +0.0007    0.000
+  w64            8   9   0.0033  0.0025  -0.0236    0.000
+  w64           16   9   0.0032  0.0025  -0.0225    0.000
+
+against F1
+  arm            s   n     loss      se    curse  outside
+  w64            4   9   0.0123  0.0084  +0.0285    0.000
+  w64            8   9   0.0121  0.0084  +0.0027    0.000
+  w64           16   9   0.0117  0.0083  +0.0034    0.000
+== open9 keep
+
+against F2
+  arm            s   n     loss      se    curse  outside
+  w64            4   9   0.0020  0.0012  +0.0007    0.000
+  w64            8   9   0.0033  0.0025  -0.0236    0.000
+  w64           16   9   0.0032  0.0025  -0.0225    0.000
+
+against F1
+  arm            s   n     loss      se    curse  outside
+  w64            4   9   0.0123  0.0084  +0.0285    0.000
+  w64            8   9   0.0121  0.0084  +0.0027    0.000
+  w64           16   9   0.0117  0.0083  +0.0034    0.000
+== open9 ika418-w64
+
+against F2
+  arm            s   n     loss      se    curse  outside
+  w64            4   9   0.0020  0.0012  +0.0007    0.000
+  w64           16   9   0.0032  0.0025  -0.0225    0.000
+
+against F1
+  arm            s   n     loss      se    curse  outside
+  w64            4   9   0.0123  0.0084  +0.0285    0.000
+  w64           16   9   0.0117  0.0083  +0.0034    0.000
+hidden40 F2|w64|4.0: n 40 base 0.0300 keep 0.0293 diff -0.0006 (se 0.0028) better 4 worse 4 moved 8
+hidden40 F2|w64|8.0: n 40 base 0.0174 keep 0.0223 diff +0.0049 (se 0.0026) better 0 worse 9 moved 9
+hidden40 F2|w64|16.0: n 40 base 0.0165 keep 0.0164 diff -0.0001 (se 0.0005) better 3 worse 3 moved 6
+hidden40 F1|w64|4.0: n 40 base 0.0287 keep 0.0211 diff -0.0076 (se 0.0030) better 8 worse 0 moved 8
+hidden40 F1|w64|8.0: n 40 base 0.0237 keep 0.0214 diff -0.0023 (se 0.0021) better 6 worse 3 moved 9
+hidden40 F1|w64|16.0: n 40 base 0.0266 keep 0.0252 diff -0.0014 (se 0.0016) better 4 worse 2 moved 6
+open9 F2|w64|4.0: n 9 base 0.0020 keep 0.0020 diff +0.0000 (se 0.0000) better 0 worse 0 moved 0
+open9 F2|w64|8.0: n 9 base 0.0033 keep 0.0033 diff +0.0000 (se 0.0000) better 0 worse 0 moved 0
+open9 F2|w64|16.0: n 9 base 0.0032 keep 0.0032 diff +0.0000 (se 0.0000) better 0 worse 0 moved 0
+open9 F1|w64|4.0: n 9 base 0.0123 keep 0.0123 diff +0.0000 (se 0.0000) better 0 worse 0 moved 0
+open9 F1|w64|8.0: n 9 base 0.0121 keep 0.0121 diff +0.0000 (se 0.0000) better 0 worse 0 moved 0
+open9 F1|w64|16.0: n 9 base 0.0117 keep 0.0117 diff +0.0000 (se 0.0000) better 0 worse 0 moved 0

@@ -459,3 +459,242 @@ def test_the_agent_widens_its_root_and_says_so(pool, monkeypatch) -> None:  # no
         last = r["rootSteps"][-1]
         assert sorted((r["rows"], r["cols"])) == sorted((last["rows"], last["cols"]))
         assert r["nodeCells"] == last["rows"] * last["cols"] * max(r["classes"], 1)
+
+
+# ----------------------------------------------------------------------- IKA-421: a stage's values
+
+
+IKA421_STAGES = "d2r2b3n4+d2r4ban6x"
+
+
+def _hidden_read(roster, pos, stages=IKA421_STAGES):  # noqa: ANN001, ANN202
+    """Side 0's Bayesian read over 6 completions of side 1's bench (two of it seen)."""
+    reg = roster.reg
+    sheet = list(roster.sets)[:6]
+    ours = narrow(reg, pos, 0, limit=6).actions
+    theirs = narrow(reg, pos, 1, limit=6).actions
+    spreads = {side: completions(reg, pos, side, sheet, seen=frozenset({0, 1})) for side in (0, 1)}
+    assert len(spreads[1]) >= 2
+    return humanplay.solve_move(reg, pos, 0, ours, theirs, spreads, LEAF, budget=Budget.matrix(),
+                                exact=False, ladder={"stages": ladder.parse_ladder(stages),
+                                                     "budget_ms": None}).ladder
+
+
+def _reads(roster, monkeypatch, stages=IKA421_STAGES, **flags):  # noqa: ANN001, ANN202
+    """The open and the Bayesian read of every played position under ``flags``."""
+    for name, value in {"DIAG": False, "VALUE": "guarantee", "ORACLE_PASSES": 0, "KEEP": False,
+                        **flags}.items():
+        monkeypatch.setattr(ladder, name, value)
+    out = []
+    for pos in _played(roster):
+        out.append(_open_read(roster.reg, pos, stages))
+        out.append(_hidden_read(roster, pos, stages))
+    return out
+
+
+def _same_answers(a, b) -> None:  # noqa: ANN001
+    assert [r.stage for r in a.rungs] == [r.stage for r in b.rungs]
+    for x, y in zip(a.rungs, b.rungs, strict=True):
+        np.testing.assert_array_equal(x.strategy, y.strategy)
+        assert (x.spent_ms, x.rows, x.cols, x.fresh) == (y.spent_ms, y.rows, y.cols, y.fresh)
+    np.testing.assert_array_equal(a.strategy, b.strategy)
+
+
+def test_the_diagnosis_changes_no_answer_and_its_bounds_hold(roster, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-421 (`ladder.DIAG`): with the switch on, every rung carries the stage's other values
+    and the answers, values and clock are the same to the bit; off, no rung has them. The
+    guarantee is the lower bound of the whole matrices' game at the stage's prices, the side's
+    best row against the other side's answer the upper; the first stage's game before it is
+    the depth-1 game (its value the read's start). The control that the bounds bite: some
+    stage's guarantee lies below the whole game's value (the pessimism IKA-421 measured)."""
+    off = _reads(roster, monkeypatch)
+    on = _reads(roster, monkeypatch, DIAG=True)
+    below = 0
+    for a, b in zip(off, on, strict=True):
+        _same_answers(a, b)
+        assert [r.value for r in a.rungs] == [r.value for r in b.rungs]
+        assert all(r.diag is None and "diag" not in r.to_json() for r in a.rungs)
+        for n, r in enumerate(b.rungs):
+            d = r.to_json()["diag"]
+            assert d["lower"] == r.value and d["rect"] == pytest.approx(r.value + r.optimism)
+            assert d["lower"] <= d["full"] + 1e-9 <= d["upper"] + 2e-9
+            assert 0.0 <= d["changed"] <= 1.0 + 1e-9
+            if n == 0:
+                assert d["fullBefore"] == pytest.approx(b.start[1], abs=1e-9)
+                assert d["cellStart"] == pytest.approx(d["cellPrev"], abs=1e-12)
+            below += d["full"] - d["lower"] > 1e-6
+    assert below >= 1, "no stage's guarantee fell below the whole game's value"
+
+
+def test_the_value_switch_moves_only_the_value(roster, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-421 (`ladder.VALUE`): ``full`` / ``rect`` / ``mid`` report the whole game's value,
+    the rectangle's, or half way between the bounds; the strategies and the clock are the
+    guarantee's to the bit. A value it does not know is refused."""
+    base = _reads(roster, monkeypatch, DIAG=True)
+    moved = 0
+    for name, of in (("full", lambda d: d["full"]), ("rect", lambda d: d["rect"]),
+                     ("mid", lambda d: (d["lower"] + d["upper"]) / 2)):
+        got = _reads(roster, monkeypatch, VALUE=name)
+        for a, b in zip(base, got, strict=True):
+            _same_answers(a, b)
+            for x, y in zip(a.rungs, b.rungs, strict=True):
+                assert y.value == pytest.approx(of(x.diag), abs=1e-12)
+                moved += abs(y.value - x.value) > 1e-6
+            assert b.value == (b.rungs[-1].value if b.rungs else b.start[1])
+    assert moved >= 1, "no switch moved a value"
+    monkeypatch.setattr(ladder, "VALUE", "best")
+    with pytest.raises(ValueError, match="POKEURAOU_LADDER_VALUE"):
+        _open_read(roster.reg, _played(roster)[0], IKA421_STAGES)
+
+
+def test_more_oracle_passes_grow_the_rectangle(roster, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-421 (`ladder.ORACLE_PASSES`): 0 is every stage's own one pass, to the bit; more passes let
+    the oracle add rows and columns again, so some stage's rectangle is wider, and its
+    guarantee is never below the whole game's lower bound it bounds (still a guarantee)."""
+    base = _reads(roster, monkeypatch)
+    again = _reads(roster, monkeypatch, ORACLE_PASSES=0)
+    for a, b in zip(base, again, strict=True):
+        _same_answers(a, b)
+    more = _reads(roster, monkeypatch, ORACLE_PASSES=4, DIAG=True)
+    wider = 0
+    for a, b in zip(base, more, strict=True):
+        for x, y in zip(a.rungs, b.rungs, strict=False):  # more passes may cost a stage
+            wider += y.rows > x.rows or any(c > d for c, d in zip(y.cols, x.cols, strict=True))
+        for r in b.rungs:
+            assert r.diag["lower"] <= r.diag["full"] + 1e-9
+    assert wider >= 1, "more passes grew no rectangle"
+
+
+def test_a_stage_that_guarantees_less_keeps_the_answer_before(roster, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-421 (`ladder.KEEP`): with the switch on, no stage's answer guarantees less at its
+    own prices than the answer before it -- where the rectangle's answer would, the answer
+    before is kept (its strategy, its guarantee). The control that it bites: some stage of the
+    plain read guarantees less than the answer before it, and there the switch keeps it."""
+    # A rectangle of one row first: narrower than the depth-1 answer's support.
+    stages = "d2r1b3n4+d2r2ban6x"
+    plain = _reads(roster, monkeypatch, stages, DIAG=True)
+    keep = _reads(roster, monkeypatch, stages, DIAG=True, KEEP=True)
+    worse = kept = 0
+    for a, b in zip(plain, keep, strict=True):
+        worse += sum(r.diag["prevGuarantee"] > r.diag["lower"] + 1e-6 for r in a.rungs)
+        before = b.start[0]
+        for r in b.rungs:
+            assert r.diag["prevGuarantee"] <= r.diag["lower"] + 1e-6
+            if r.diag["kept"]:
+                np.testing.assert_array_equal(r.strategy, before)
+                kept += 1
+            before = r.strategy
+    assert worse >= 1, "no stage guaranteed less than the answer before it"
+    assert kept >= 1, "the switch kept no answer"
+
+
+def test_a_seat_swapped_read_is_the_other_sides_read(roster, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-421's mirror (`tools/depth_outcome.py --swap` / ``--side 1``): side 0 reading the
+    position with its seats swapped is side 1 reading the position -- the same strategies, the
+    values one apart (1 - P against -P) -- under hp-share, whose value is the mirror's. And the
+    two sides' readings bound the same depth-1 game from either side at the start."""
+    import importlib
+
+    from pokeuraou.regulation import repo_root
+
+    for name, value in {"DIAG": False, "VALUE": "guarantee", "ORACLE_PASSES": 0, "KEEP": False}.items():
+        monkeypatch.setattr(ladder, name, value)
+    # The tool sets this default for its own reads at import; here it is undone after the test.
+    monkeypatch.setenv("POKEURAOU_LADDER_COUNT_FILL", "0")
+    monkeypatch.syspath_prepend(str(repo_root() / "tools"))
+    orientation = importlib.import_module("depth_outcome").orientation
+    reg = roster.reg
+
+    def by_action(menu, strategy):  # noqa: ANN001, ANN202 - the menus' orders may differ
+        return {a.to_choice(): round(float(p), 9) for a, p in zip(menu, strategy, strict=True)
+                if p > 1e-9}
+
+    checked = same = rungs = 0
+    for pos in _played(roster):
+        own = _open_read(reg, pos, IKA421_STAGES, side=0)
+        other = _open_read(reg, pos, IKA421_STAGES, side=1)
+        flipped = pos.swapped()
+        swapped = _open_read(reg, flipped, IKA421_STAGES, side=0)
+        assert own.start[1] == pytest.approx(-other.start[1], abs=1e-9)
+        assert [r.stage for r in swapped.rungs] == [r.stage for r in other.rungs]
+        assert swapped.start[1] == pytest.approx(1 + other.start[1], abs=1e-9)
+        # The tool writes every read in the recorded side 0's units.
+        for (side, swap), read in (((1, False), other), ((0, True), swapped), ((0, False), own)):
+            a, b = orientation(side, swap)
+            assert a + b * read.start[1] == pytest.approx(own.start[1], abs=1e-9)
+        menu_swapped = narrow(reg, flipped, 0, limit=8).actions
+        menu_other = narrow(reg, pos, 1, limit=8).actions
+        assert sorted(a.to_choice() for a in menu_swapped) == sorted(a.to_choice() for a in menu_other)
+        for x, y in zip(swapped.rungs, other.rungs, strict=True):
+            assert x.value == pytest.approx(1 + y.value, abs=1e-9)
+            # The strategies may be two optima of a tied game (the LP's vertex moves with the
+            # constant one between the two matrices); the values are the same.
+            same += by_action(menu_swapped, x.strategy) == by_action(menu_other, y.strategy)
+            rungs += 1
+        checked += 1
+    assert checked >= 2
+    assert same >= rungs // 2, f"the two reads agreed in {same} of {rungs} stages' strategies"
+
+
+def test_a_depth_three_childs_value_follows_the_switch(roster, monkeypatch) -> None:  # noqa: ANN001
+    """IKA-421 (`ladder.CHILD`): a depth-3 cell's children are read as side 0 by default, so
+    side 1 reading a position and side 0 reading it with the seats swapped differ at depth 3
+    (the control: some position moves). ``seat`` reads each child as the root's reader --
+    the two then agree at every stage, and side 0's own read is the default's; ``full`` takes
+    each child's whole game -- the two agree as well. A child setting it does not know is
+    refused."""
+    reg = roster.reg
+    stages = "d2r2ban4+d3r2ban4/r2ban4"
+    for name, value in {"DIAG": False, "VALUE": "guarantee", "ORACLE_PASSES": 0,
+                        "KEEP": False}.items():
+        monkeypatch.setattr(ladder, name, value)
+
+    def three(child):  # noqa: ANN001, ANN202
+        monkeypatch.setattr(ladder, "CHILD", child)
+        out = []
+        for pos in _played(roster, turns=6):
+            out.append((_open_read(reg, pos, stages, side=0, width=6),
+                        _open_read(reg, pos, stages, side=1, width=6),
+                        _open_read(reg, pos.swapped(), stages, side=0, width=6)))
+        return out
+
+    plain, seat, full = three("guarantee"), three("seat"), three("full")
+    moved = 0
+    for (own, other, swapped), (own_s, other_s, swapped_s), (_o, other_f, swapped_f) in zip(
+            plain, seat, full, strict=True):
+        deep = [n for n, r in enumerate(other.rungs) if r.stage.startswith("d3")]
+        moved += any(abs((1 - swapped.rungs[n].value) - (-other.rungs[n].value)) > 1e-6
+                     for n in deep if n < len(swapped.rungs))
+        assert [r.value for r in own_s.rungs] == pytest.approx([r.value for r in own.rungs], abs=1e-12)
+        for got_other, got_swapped in ((other_s, swapped_s), (other_f, swapped_f)):
+            assert [r.stage for r in got_other.rungs] == [r.stage for r in got_swapped.rungs]
+            for x, y in zip(got_swapped.rungs, got_other.rungs, strict=True):
+                assert x.value == pytest.approx(1 + y.value, abs=1e-9)
+    assert moved >= 1, "no depth-3 stage read differently from the two seats"
+    monkeypatch.setattr(ladder, "CHILD", "best")
+    with pytest.raises(ValueError, match="POKEURAOU_LADDER_CHILD"):
+        _open_read(reg, _played(roster)[0], stages)
+
+
+def test_the_ika421_switches_read_their_own_environment() -> None:
+    """IKA-421: each switch is read from its own variable at import, and none takes another
+    module setting's name (``PASSES`` was IKA-380's before this one shadowed it); unset, each is
+    off."""
+    import subprocess
+    import sys
+
+    from pokeuraou.regulation import repo_root
+
+    probe = ("from pokeuraou import ladder as L; "
+             "print(L.DIAG, L.VALUE, L.ORACLE_PASSES, L.KEEP, L.CHILD, L.PASSES)")
+    env = {k: v for k, v in __import__("os").environ.items() if not k.startswith("POKEURAOU_LADDER_")}
+    env["PYTHONPATH"] = str(repo_root() / "src")
+
+    def ask(**flags: str) -> str:
+        return subprocess.run([sys.executable, "-c", probe], env={**env, **flags},
+                              capture_output=True, text=True, check=True).stdout.split()
+
+    assert ask() == ["False", "guarantee", "0", "False", "guarantee", "True"]
+    assert ask(POKEURAOU_LADDER_DIAG="1", POKEURAOU_LADDER_VALUE="full",
+               POKEURAOU_LADDER_ORACLE_PASSES="4", POKEURAOU_LADDER_KEEP="1",
+               POKEURAOU_LADDER_CHILD="seat") == ["True", "full", "4", "True", "seat", "True"]
