@@ -141,6 +141,8 @@ OWN_RESOLUTION = {
     "root_width.py": "reads a position set's recorded positions with a ladder at fixed or staged "
     "root widths: menus q-nocover by the Q it names (the default Q), the same for every arm; "
     "plays no game (IKA-418)",
+    "depth_outcome.py": "reads recorded held-out positions with a ladder to score its values "
+    "against the games' results: menus q-nocover by the Q it is given; plays no game (IKA-421)",
     "child_menus.py": "measures child menus built by damage and by the Q it names (the "
     "default Q); plays no game (IKA-362)",
     "selection_sweep.py": "reads selection cells as a person's move reads them, menus q-nocover "
