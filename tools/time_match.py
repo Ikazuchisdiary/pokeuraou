@@ -170,6 +170,16 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     ap.add_argument("--single-game", action="store_true",
                     help="play only game 0 of each pair (a showcase game; the selection is "
                     "solved once)")
+    ap.add_argument("--starts", type=Path, default=None,
+                    help="IKA-423: begin each pair at a recorded position, in place of the "
+                    "selection: pair N is line N of this file (`tools/targeted_positions.py` "
+                    "writes it). The pool is not drawn from; the two games of a pair differ "
+                    "only in which seat reads under which condition. Default: off")
+    ap.add_argument("--probe", action="store_true",
+                    help="IKA-423, with --starts: play only each start's first move decision "
+                    "and write both seats' reads (the answer's most played move, its "
+                    "probability, the value, the stage), in place of a result. "
+                    "`tools/targeted_positions.py select` reads them. Default: off")
     # A worker's own.
     ap.add_argument("--worker", type=int, default=None, help=argparse.SUPPRESS)
     ap.add_argument("--address", default=None, help=argparse.SUPPRESS)
@@ -190,6 +200,17 @@ def conditions(args: argparse.Namespace) -> tuple[timematch.Condition, timematch
         raise SystemExit(f"--arm: {problem}") from problem
     if tested.name == other.name:
         raise SystemExit("the two conditions need different names")
+    if args.probe and args.starts is None:
+        raise SystemExit("--probe reads the first move of a start: it needs --starts")
+    if args.starts is not None:
+        if not args.starts.exists():
+            raise SystemExit(f"--starts {args.starts} does not exist")
+        n = sum(1 for raw in args.starts.read_bytes().splitlines() if raw.strip())
+        if args.start + args.pairs > n:
+            raise SystemExit(f"--starts holds {n} positions: pairs {args.start}.."
+                             f"{args.start + args.pairs - 1} go past them")
+        if args.single_game:
+            raise SystemExit("--starts plays both games of a pair (the seats swap)")
     for c in (tested, other):
         priced = (humanplay.Agent.form, c.price_cores) in humanplay.COSTS
         if c.clock == "count" and not c.width_only and not priced:
@@ -296,6 +317,9 @@ def settings(args: argparse.Namespace, tested, other, values, q_path) -> dict:  
         **({"transcript": True} if args.transcript else {}),
         **({"ladderPool": True, "ladderServers": args.ladder_servers} if args.ladder_pool else {}),
         **({"singleGame": True} if args.single_game else {}),
+        **({"starts": {"path": str(args.starts),
+                       "sha256": hashlib.sha256(args.starts.read_bytes()).hexdigest()},
+            "probe": args.probe} if args.starts is not None else {}),
     }
 
 
@@ -413,15 +437,31 @@ def worker(args: argparse.Namespace) -> None:
         file=sys.stderr, flush=True,
     )
     out = args.out / f"games-worker{args.worker}.jsonl"
+    starts = None
+    if args.starts is not None:
+        # IKA-423: pair N begins at line N of the file, on the teams it names.
+        starts = [humanplay.GameStart.from_json(json.loads(raw))
+                  for raw in args.starts.read_bytes().splitlines() if raw.strip()]
+        roster = {t.id: t for t in pool.teams}
+        missing = sorted({i for s in starts for i in s.teams if i not in roster})
+        if missing:
+            raise SystemExit(f"--starts names teams the pool {args.pool} does not hold: {missing[:3]}")
+        print(f"  starts {args.starts} ({len(starts)} positions)"
+              + (", probing the first move only" if args.probe else ""), file=sys.stderr, flush=True)
     with WorkClient(args.address) as client:
         while True:
             pair = client.take()
             if pair is None:
                 break
-            _k, a, b = draw_pair(np.random.default_rng([args.seed, pair]), pool.pairs)
-            teams = (pool.teams[a], pool.teams[b])
-            lines = timematch.play_pair(match, pair, teams,
-                                        games=(0,) if args.single_game else (0, 1))
+            if starts is not None:
+                teams = (roster[starts[pair].teams[0]], roster[starts[pair].teams[1]])
+                lines = timematch.play_pair(match, pair, teams, start=starts[pair],
+                                            probe=args.probe)
+            else:
+                _k, a, b = draw_pair(np.random.default_rng([args.seed, pair]), pool.pairs)
+                teams = (pool.teams[a], pool.teams[b])
+                lines = timematch.play_pair(match, pair, teams,
+                                            games=(0,) if args.single_game else (0, 1))
             accounts = [line.pop("transcript") for line in lines] if args.transcript else []
             alive = deepen.workers_alive(reg)
             peak = watch.peak

@@ -349,6 +349,8 @@ class TimedGame(humanplay.HumanGame):
         #: Reads that gave no answer (no menu, an LP failure), by side: the person's seat
         #: then plays its first legal action, the agent's seat ends the game.
         self.fallbacks = [0, 0]
+        #: IKA-423: each seat's last move read (`probe_of`), by side: what a probe keeps.
+        self.reads: dict[int, dict[str, Any]] = {}
         #: IKA-384: ``(first turn, threshold)`` -- stop a game whose turn's two reads agree
         #: it is decided (`adjudicate`); None plays every game out.
         self.adjudication = adjudication
@@ -403,6 +405,9 @@ class TimedGame(humanplay.HumanGame):
             row["condition"] = condition.name
         if got is None:
             self.fallbacks[side] += 1
+        elif self.last_read is not None:
+            self.reads[side] = probe_of(self.last_read, [r for r in self.clock[start:]
+                                                         if r["kind"] == "move"])
         return got
 
     def _agent_move(self, pos, spreads, recorded_shown, **_ponder):  # noqa: ANN001, ANN003, ANN202
@@ -570,11 +575,37 @@ class Match:
         )
 
 
+def probe_of(last: tuple[Any, ...], rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """IKA-423: what one seat's read of a move decision says, for a start's selection: the
+    move its answer plays most (`SideAction.to_choice`; the first of equals), that move's
+    probability, the menu's size, the answer's value in side 0's units and the stage it came
+    from (the last stage of the ladder, or None)."""
+    me, mine, _other, strategy, _model, ladder = last[:6]
+    x = np.asarray(strategy, dtype=np.float64)
+    top = int(np.argmax(x))
+    row = rows[-1] if rows else {}
+    rungs = None if ladder is None else ladder.to_json().get("rungs")
+    return {
+        "side": me, "top": mine[top].to_choice(), "topP": round(float(x[top]), 5),
+        "menu": [a.to_choice() for a in mine], "p": [round(float(v), 6) for v in x],
+        "value0": row.get("value0"), "stage": rungs[-1].get("stage") if rungs else None,
+    }
+
+
 def play_pair(match: Match, pair: int, teams: tuple[Any, Any],  # noqa: ANN401
-              games: tuple[int, ...] = (0, 1)) -> list[dict[str, Any]]:
+              games: tuple[int, ...] = (0, 1), *, start: humanplay.GameStart | None = None,
+              probe: bool = False) -> list[dict[str, Any]]:
     """The two games of ``pair`` on ``teams`` (side 0's, side 1's): the tested condition on
     side 0, then on side 1. Returns their lines (`game_line`). ``games`` names the ones to
-    play (``(0,)``: one showcase game; the selection is solved once either way)."""
+    play (``(0,)``: one showcase game; the selection is solved once either way).
+
+    ``start`` (IKA-423) begins both games at a recorded position (`humanplay.GameStart`; no
+    selection is solved: the position is where the pair begins, and the two games differ only
+    in which seat reads under which condition). With ``probe`` each game stops after its first
+    move decision and its line carries both seats' reads (`probe_of`) under ``probe``: the
+    two games together are the four reads (each condition on each seat) that choose a start."""
+    if probe and start is None:
+        raise ValueError("a probe reads a start's first move: it needs a start")
     reg = match.reg
     started = time.perf_counter()
     # The selection of each condition (IKA-392): one solve per reading, however many sides
@@ -589,7 +620,9 @@ def play_pair(match: Match, pair: int, teams: tuple[Any, Any],  # noqa: ANN401
     for condition in (match.tested, match.other):
         key = match.solve_key(condition)
         evaluate, leaf_name = match.leaf_of(condition)
-        if key not in entries:
+        if key not in entries and start is not None:
+            reports[key], entries[key] = [], None
+        elif key not in entries:
             reports[key] = []
             if condition.selection is not None:
                 memos[key] = selection_deep.MemoReader(
@@ -654,13 +687,17 @@ def play_pair(match: Match, pair: int, teams: tuple[Any, Any],  # noqa: ANN401
         payload, clock, played = humanplay.play(
             seats[agent_side], person, teams, agent_side=agent_side, seed=match.seed,
             game_index=pair, max_turns=match.max_turns, loc=match.loc, entry=entry,
-            make_game=make_game, priors=priors,
+            make_game=make_game, priors=priors, start=start, probe=probe,
         )
         line = game_line(
             match, pair, game, teams, conditions, tested_side, payload, clock, played,
             seconds=time.perf_counter() - began, selection_seconds=selection_seconds,
             selection=selection_info or None,
         )
+        if start is not None:
+            line["start"] = start.name
+        if probe:
+            line["probe"] = {str(side): read for side, read in sorted(played.reads.items())}
         if match.transcript:
             line["transcript"] = transcript_of(payload, played)
             line["transcript"]["teamNames"] = [teams[0].name, teams[1].name]
