@@ -54,11 +54,13 @@ from typing import Any
 import numpy as np
 
 from . import rank_scores, timing
+from .actions import BATON_MOVE, baton_slots
 from .deepen import DEFAULT_DEEPEN
 from .eqselect import DEFAULT_EQ_SELECT, parse_eq_select
 from .hidden import DEFAULT_BENCH_DROP
 from .payoff import HP_SHARE, Objective
 from .pool import Pool, draw_pair
+from .position import Position
 from .qrank import is_q
 from .regulation import Regulation
 from .search import resolve_rank_fill
@@ -545,6 +547,13 @@ class PoolArm:
     #: forced at its first turn on the field (`play_game`'s ``force_mega``, IKA-419f).
     #: Off ships.
     line1: bool = False
+    #: With ``line1``: the back two are these species (ids, in this order) and nothing is drawn
+    #: from the equilibrium (IKA-419g). None ships.
+    line1_back: tuple[str, ...] | None = None
+    #: Holds Baton Pass back on the side it applies to (`HOLD_BATON_SPECIES`, ``hold_only_with``)
+    #: until that species' Special Attack and Special Defense are both +1 (`play_game`'s
+    #: ``hold_baton``, IKA-419g). Off ships.
+    hold_baton: bool = False
 
     def __post_init__(self) -> None:
         self.rank_fill = resolve_rank_fill(self.rank_fill, self.rank_by_leaf)
@@ -615,6 +624,7 @@ def draw_line1(
     *,
     epsilon: float,
     temperature: float,
+    fixed_back: Sequence[str] | None = None,
 ) -> tuple[tuple[int, ...], dict[str, Any]]:
     """The ordered four of line 1 for the side whose six is ``species`` (party order).
 
@@ -623,12 +633,21 @@ def draw_line1(
     other two are among `LINE1_BACK_CANDIDATES`, one row drawn with ``rng`` and its other
     two kept in that row's order; when those rows carry no probability (or there is no
     solve), `LINE1_BACK_FALLBACK`. The note says which, and the conditioned mass.
+
+    ``fixed_back`` (IKA-419g) names the back two outright, in this order: rule "fixed", the
+    solve not read, the stream still moved by the same one draw.
     """
     index_of = {sp: i for i, sp in enumerate(species)}
     missing = [sp for sp in (*LINE1_LEADS, *LINE1_BACK_FALLBACK) if sp not in index_of]
     if missing:
         raise ValueError(f"line 1 needs {missing} in the six {list(species)}")
     leads = tuple(index_of[sp] for sp in LINE1_LEADS)
+    if fixed_back is not None:
+        absent = [sp for sp in fixed_back if sp not in index_of]
+        if absent or len(fixed_back) != 2:
+            raise ValueError(f"line 1's back {list(fixed_back)} needs two of the six {list(species)}")
+        rng.random()  # the same one draw as the other rules take
+        return (*leads, *(index_of[sp] for sp in fixed_back)), {"rule": "fixed", "mass": 1.0}
     fallback = (*leads, *(index_of[sp] for sp in LINE1_BACK_FALLBACK))
     if entry is None:
         return fallback, {"rule": "fallback", "mass": 0.0, "reason": "no solve"}
@@ -662,9 +681,11 @@ def check_line1(
     line_only_with: Sequence[str] | None,
     species: Sequence[str],
     bucket: dict[str, Any],
+    arm_back: Sequence[str] | None = None,
 ) -> None:
     """Asserts that line 1 reached ``side`` of a played game exactly when it should have,
-    and counts what it did into ``bucket`` ("games", "selection", "forced").
+    and counts what it did into ``bucket`` ("games", "selection", "forced"). ``arm_back``
+    (IKA-419g) is the arm's fixed back two: the picks must end with them, in order.
 
     It reads the game, not the arm: the record's ``force_mega``, the selection rule in
     ``sides["lines"]``, the picks, and the move at the forcing turn. Raises AssertionError
@@ -683,6 +704,11 @@ def check_line1(
     leads = tuple(species.index(sp) for sp in LINE1_LEADS)
     picks = tuple(sides["picks"][side])
     assert picks[:2] == leads, f"line 1 leads {picks[:2]} != {leads}"
+    if arm_back is not None:
+        back = tuple(species.index(sp) for sp in arm_back)
+        assert picks[2:] == back and note["rule"] == "fixed", (
+            f"line 1 back {picks[2:]} ({note['rule']}) != the fixed {back}"
+        )
     bucket["games"] += 1
     key = f"{note['rule']}" + (f" ({note['reason']})" if "reason" in note else "")
     bucket["selection"][key] = bucket["selection"].get(key, 0) + 1
@@ -698,6 +724,83 @@ def check_line1(
         chosen = node.own_chosen if side == 0 else node.foe_chosen
         assert "mega" in chosen, f"line 1 forced the Mega but played {chosen!r}"
     bucket["forced"][forced["rule"]] = bucket["forced"].get(forced["rule"], 0) + 1
+
+
+#: IKA-419g: the species whose Baton Pass an arm's ``hold_baton`` holds back.
+HOLD_BATON_SPECIES = "espathra"
+
+
+def _slot_uses_baton(pos: Position, side: int, slot: int, choice: str) -> bool:
+    """Whether the side action text ``choice`` has slot ``slot`` use Baton Pass in ``pos``."""
+    parts = choice.split(", ")
+    if slot >= len(parts):
+        return False
+    words = parts[slot].split()
+    if not words or words[0] != "move" or len(words) < 2:
+        return False
+    own = pos.sides[side]
+    party = own.active[slot]
+    if party is None:
+        return False
+    moves = own.pokemon[party].moves
+    index = int(words[1]) - 1
+    return 0 <= index < len(moves) and moves[index].id == BATON_MOVE
+
+
+def check_hold_baton(
+    record: Any,  # noqa: ANN401
+    side: int,
+    arm_hold: bool,
+    species: Sequence[str],
+    bucket: dict[str, Any],
+) -> None:
+    """Asserts that the Baton hold reached ``side`` of a played game exactly when it should
+    have, and counts what it did into ``bucket`` ("games", "held", "held_legal", "open",
+    "open_menu", "baton_open").
+
+    It re-reads the recorded decisions rather than trusting the game's own tally: for each
+    move node of the side, the position's Espathra and its boosts, and the menu's choice
+    texts. Raises AssertionError when the side the flag was meant for did not hold, another
+    side did, a held node's menu or choice still had a Baton Pass, or the re-read counts
+    differ from the tally `play_game` recorded.
+    """
+    expected = arm_hold and HOLD_BATON_SPECIES in species
+    played = record.hold_baton[side]
+    assert (played == HOLD_BATON_SPECIES) == expected, (
+        f"baton hold: expected {expected}, the game recorded {played}"
+    )
+    if not expected:
+        assert record.baton_hold[side] is None, "a side without the hold carries its tally"
+        return
+    counts = {"held": 0, "held_legal": 0, "open": 0, "open_menu": 0, "baton_open": 0}
+    for d in record.decisions:
+        if d.kind != "move":
+            continue
+        pos = Position.from_json(d.position)
+        menu = d.own_actions if side == 0 else d.foe_actions
+        chosen = d.own_chosen if side == 0 else d.foe_chosen
+        for slot, opened in baton_slots(pos, side, HOLD_BATON_SPECIES):
+            in_menu = any(_slot_uses_baton(pos, side, slot, c) for c in menu)
+            if opened:
+                counts["open"] += 1
+                counts["open_menu"] += int(in_menu)
+                counts["baton_open"] += int(_slot_uses_baton(pos, side, slot, chosen))
+                continue
+            counts["held"] += 1
+            assert not in_menu, f"turn {d.turn}: a held node's menu lists a Baton Pass"
+            assert not _slot_uses_baton(pos, side, slot, chosen), (
+                f"turn {d.turn}: the hold was shut and Baton Pass was played"
+            )
+    tally = record.baton_hold[side]
+    assert tally["leaks"] == 0, f"the game's own tally counted {tally['leaks']} leaks"
+    for key, value in counts.items():
+        if key in ("held_legal", "baton_open"):
+            continue  # the unheld pool is not in the record; baton_open is the re-read's only
+        assert tally[key] == value, f"baton hold {key}: game tallied {tally[key]}, re-read {value}"
+    bucket["games"] += 1
+    for key in ("held", "held_legal", "open", "open_menu"):
+        bucket[key] += tally[key]
+    bucket["baton_open"] += counts["baton_open"]
 
 
 def pool_match_game(
@@ -778,6 +881,9 @@ def pool_match_game(
         and (line_only_with is None or any(sp in line_only_with for sp in species[side]))
         for side in (0, 1)
     )
+    on_hold = tuple(
+        side_arms[side].hold_baton and HOLD_BATON_SPECIES in species[side] for side in (0, 1)
+    )
     line_notes: list[dict[str, Any] | None] = [None, None]
     drawn_picks: list[tuple[int, ...]] = []
     for side in (0, 1):
@@ -785,6 +891,7 @@ def pool_match_game(
             pick, line_notes[side] = draw_line1(
                 entries[side], side, species[side], selection_rng(seed, game_index, side),
                 epsilon=epsilon, temperature=temperature,
+                fixed_back=side_arms[side].line1_back,
             )
         else:
             pick = draw_side(
@@ -836,6 +943,7 @@ def pool_match_game(
         ally_targets=allies,
         eq_select=(side_arms[0].eq_select, side_arms[1].eq_select),
         force_mega=tuple(LINE1_MEGA if on_line[side] else None for side in (0, 1)),
+        hold_baton=tuple(HOLD_BATON_SPECIES if on_hold[side] else None for side in (0, 1)),
         selection=(species[0], species[1], picks[0], picks[1]),
     )
     sources = tuple(arm.selection for arm in side_arms)
@@ -876,6 +984,8 @@ __all__ = [
     "SOLVED",
     "PoolArm",
     "SolvedSelections",
+    "HOLD_BATON_SPECIES",
+    "check_hold_baton",
     "check_line1",
     "draw_line1",
     "draw_side",

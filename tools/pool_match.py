@@ -70,6 +70,7 @@ from pokeuraou.pool import load_pool  # noqa: E402
 from pokeuraou.poolplay import (  # noqa: E402
     PoolArm,
     SolvedSelections,
+    check_hold_baton,
     check_line1,
     pool_match_game,
 )
@@ -350,6 +351,14 @@ def main(argv: list[str] | None = None) -> None:
                     "holding both (else Archaludon and Politoed), Raichu Mega Evolved at its "
                     "first turn on the field. Only on the side `--line-only-with` names")
     ap.add_argument("--baseline-line1", action="store_true", help="same for the other arm")
+    ap.add_argument("--line1-back", nargs=2, default=None, metavar="SPECIES",
+                    help="with --line1: the tested arm's back two are these species ids, in this "
+                    "order, and nothing is drawn from the equilibrium (IKA-419g)")
+    ap.add_argument("--hold-baton", action="store_true",
+                    help="the tested arm leaves Baton Pass out of its candidates on the side "
+                    "holding Espathra until Espathra's Special Attack and Special Defense are "
+                    "both +1 or more (IKA-419g)")
+    ap.add_argument("--baseline-hold-baton", action="store_true", help="same for the other arm")
     ap.add_argument("--line-only-with", nargs="+", default=None, metavar="SPECIES",
                     help="the arms' --line1 applies only to the side whose six holds one of "
                     "these species ids (IKA-419f)")
@@ -475,6 +484,8 @@ def main(argv: list[str] | None = None) -> None:
         ally_targets=args.ally_targets,
         eq_select=args.eq_select,
         line1=args.line1,
+        line1_back=tuple(args.line1_back) if args.line1_back else None,
+        hold_baton=args.hold_baton,
     )
     other_limit = args.limit if args.baseline_limit is None else args.baseline_limit
     if baseline is None:
@@ -490,7 +501,8 @@ def main(argv: list[str] | None = None) -> None:
                         rust_binary=args.baseline_rust_binary,
                         ally_targets=args.baseline_ally_targets,
                         eq_select=args.baseline_eq_select,
-                        line1=args.baseline_line1)
+                        line1=args.baseline_line1,
+                        hold_baton=args.baseline_hold_baton)
     else:
         assert baseline_name is not None
         # One solver per arm even over one leaf: shared, the second arm would reuse the
@@ -514,6 +526,7 @@ def main(argv: list[str] | None = None) -> None:
             ally_targets=args.baseline_ally_targets,
             eq_select=args.baseline_eq_select,
             line1=args.baseline_line1,
+            hold_baton=args.baseline_hold_baton,
         )
     arms = (tested, other)
     print(pool.summary(), file=sys.stderr)
@@ -541,7 +554,10 @@ def main(argv: list[str] | None = None) -> None:
             + (f" / ally targets {arm.ally_targets}" if arm.ally_targets != "off" else "")
             + (f" / equilibrium {arm.eq_select}" if arm.eq_select != DEFAULT_EQ_SELECT else "")
             + (f" / line 1 (on sides holding {args.line_only_with or 'any'})"
+               + (f", back {list(arm.line1_back)}" if arm.line1_back else "")
                if arm.line1 else "")
+            + (" / Baton Pass held until Espathra is +1/+1 in Sp. Atk/Sp. Def"
+               if arm.hold_baton else "")
             + " / selection "
             f"{arm.selection}" + (f" by its own leaf, store {store}" if store else "")
             + f" / belief {'solved' if arm.solver is not None and hide_bench else 'uniform'}",
@@ -575,6 +591,10 @@ def main(argv: list[str] | None = None) -> None:
         tags += f"@eq:{tested.eq_select}"
     if tested.line1 != other.line1:
         tags += "@line1" if tested.line1 else "@noline1"
+    if tested.line1_back != other.line1_back:
+        tags += f"@back:{'+'.join(tested.line1_back or ())}"
+    if tested.hold_baton != other.hold_baton:
+        tags += "@holdbaton" if tested.hold_baton else "@noholdbaton"
     arm_label = f"{tested.name}{tags}"
 
     client = WorkClient(args.queue) if args.queue else None
@@ -599,6 +619,8 @@ def main(argv: list[str] | None = None) -> None:
               "depth": {}, "knockouts": 0, "dexbase": 0, "dexbase_rewrites": 0, "ports": {},
               "ally": {}, "ally_menus": 0, "ally_played": 0,
               "eq": {}, "line": {"games": 0, "selection": {}, "forced": {}},
+              "hold": {"games": 0, "held": 0, "held_legal": 0, "open": 0, "open_menu": 0,
+                       "baton_open": 0},
               "coverless": {"menus": 0, "dropping": 0, "dropped": 0},
               "q": [0, 0], "qprobe": [0, 0], "childq": [0, 0], "lines": {}, "calls": 0}
              for _ in arms]
@@ -662,6 +684,12 @@ def main(argv: list[str] | None = None) -> None:
             check_line1(
                 record, sides, side, arms[arm_index].line1, args.line_only_with,
                 [s.species for s in pool.teams[sides["teams"][side]].sets], bucket["line"],
+                arms[arm_index].line1_back,
+            )
+            # IKA-419g: the same for the Baton hold, re-read from the recorded menus.
+            check_hold_baton(
+                record, side, arms[arm_index].hold_baton,
+                [s.species for s in pool.teams[sides["teams"][side]].sets], bucket["hold"],
             )
             played_eq = record.eq_select[side]
             bucket["eq"][played_eq] = bucket["eq"].get(played_eq, 0) + 1
@@ -795,6 +823,12 @@ def main(argv: list[str] | None = None) -> None:
                 + (f"line 1 in {bucket['line']['games']:,} games (selection "
                    f"{bucket['line']['selection']}, Mega forced {bucket['line']['forced']}), "
                    if bucket["line"]["games"] else "")
+                + (f"Baton hold in {bucket['hold']['games']:,} games (held nodes "
+                   f"{bucket['hold']['held']:,}, of them with a Baton Pass legal "
+                   f"{bucket['hold']['held_legal']:,}; open nodes {bucket['hold']['open']:,}, "
+                   f"menu had one at {bucket['hold']['open_menu']:,}, played at "
+                   f"{bucket['hold']['baton_open']:,}), "
+                   if bucket["hold"]["games"] else "")
                 + f"deepen {bucket['deepen']} ({bucket['deepened']:,} decisions deepened"
                 + (
                     f", oracle asked at {bucket['oracle']:,}, {bucket['widened']:,} actions "

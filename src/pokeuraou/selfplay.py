@@ -41,10 +41,14 @@ from .actions import (
     ALLY_TARGET_MODES,
     MoveAction,
     SideAction,
+    baton_slots,
     names_ally,
+    side_actions,
     switch_actions_after_faint,
+    uses_baton,
 )
 from .actions import ally_targets as ally_scope
+from .actions import hold_baton as baton_scope
 from .budget import Budget
 from .deepen import DEFAULT_DEEPEN, deepen_spec
 from .eqselect import DEFAULT_EQ_SELECT, parse_eq_select, reselect, reselect_bayesian
@@ -340,6 +344,14 @@ class GameRecord:
     #: had one.
     force_mega: list[str | None] = field(default_factory=lambda: [None, None])
     forced_mega: list[dict | None] = field(default_factory=lambda: [None, None])
+    #: The species each side held Baton Pass back for (`play_game`'s ``hold_baton``, IKA-419g),
+    #: and per side what the hold did over the game's move nodes: ``held`` (the species on the
+    #: field with its Special Attack or Special Defense below +1), ``held_legal`` (of those,
+    #: nodes where the unheld pool had a Baton Pass action), ``open`` (both at +1 or more),
+    #: ``open_menu`` (of those, nodes whose menu listed one), ``leaks`` (held nodes whose menu
+    #: or choice still had one: always 0). Written only when a side held one.
+    hold_baton: list[str | None] = field(default_factory=lambda: [None, None])
+    baton_hold: list[dict | None] = field(default_factory=lambda: [None, None])
     #: The equilibrium mixtures over the 90 ordered selections, when a book was used.
     #: These are the policy targets a selection head would learn -- the *solver's*
     #: recommendation, not the softened distribution the game was drawn from.
@@ -444,6 +456,11 @@ class GameRecord:
             **(
                 {"forceMega": list(self.force_mega), "forcedMega": list(self.forced_mega)}
                 if any(self.force_mega)
+                else {}
+            ),
+            **(
+                {"holdBaton": list(self.hold_baton), "batonHold": list(self.baton_hold)}
+                if any(self.hold_baton)
                 else {}
             ),
             **(
@@ -981,10 +998,13 @@ def _menus(
 
 
 @contextmanager
-def _agent_scope(binary: Path | None, allies: str) -> Iterator[None]:
+def _agent_scope(
+    binary: Path | None, allies: str, hold: tuple[str | None, int] = (None, 0)
+) -> Iterator[None]:
     """One agent's work at a move node: read through its port executable (IKA-413) with its
-    ally targets listed (IKA-181)."""
-    with rustnode.binary_scope(binary), ally_scope(allies):
+    ally targets listed (IKA-181) and, when ``hold`` names a species, its Baton Pass held
+    back until that species' Special Attack and Special Defense are both +1 (IKA-419g)."""
+    with rustnode.binary_scope(binary), ally_scope(allies), baton_scope(*hold):
         yield
 
 
@@ -1160,6 +1180,7 @@ def play_game(
     ally_targets: str | tuple[str, str] = "off",
     eq_select: str | tuple[str, str] = DEFAULT_EQ_SELECT,
     force_mega: str | None | tuple[str | None, str | None] = None,
+    hold_baton: str | None | tuple[str | None, str | None] = None,
 ) -> GameRecord:
     """Plays one game to a result, sampling both sides from the turn's equilibrium.
 
@@ -1266,6 +1287,11 @@ def play_game(
     the menu's order). Everything else is the search's own; the other side is not told.
     None ships.
 
+    ``hold_baton`` (a pair too, IKA-419g) names the species whose Baton Pass a side leaves out
+    of its candidates (`actions.hold_baton`) while that species' Special Attack and Special
+    Defense are not both at +1 or more. The side's own menus are built without those actions,
+    so its search never prices them; the other side's model of it is not told. None ships.
+
     ``deepen`` takes a pair too: how each agent deepens its move decisions best first
     after the depth-1 solve (`deepen.parse_deepen`, IKA-33): ``none`` ships and is the
     search unchanged, ``m<N>`` / ``r<N>`` spend N cells and read the root whole /
@@ -1339,14 +1365,18 @@ def play_game(
         (force_mega, force_mega) if force_mega is None or isinstance(force_mega, str)
         else tuple(force_mega)
     )
+    holds = (
+        (hold_baton, hold_baton) if hold_baton is None or isinstance(hold_baton, str)
+        else tuple(hold_baton)
+    )
     allies = (ally_targets, ally_targets) if isinstance(ally_targets, str) else tuple(ally_targets)
     for mode in allies:
         if mode not in ALLY_TARGET_MODES:
             raise ValueError(f"ally_targets {mode!r} is not one of {ALLY_TARGET_MODES}")
 
     def scope(side: int) -> Any:  # noqa: ANN401
-        """Side `side`'s agent: its port executable and its ally targets."""
-        return _agent_scope(binaries[side], allies[side])
+        """Side `side`'s agent: its port executable, its ally targets and its Baton hold."""
+        return _agent_scope(binaries[side], allies[side], (holds[side], side))
 
     cells = (specs[0].cells, specs[1].cells)
     deep_restricted =(specs[0].reading == "restricted", specs[1].reading == "restricted")
@@ -1435,6 +1465,12 @@ def play_game(
     record.rust_binary = [None if b is None else _fingerprint(b) for b in binaries]
     record.ally_targets = list(allies)
     record.force_mega = list(forced_species)
+    record.hold_baton = list(holds)
+    record.baton_hold = [
+        None if holds[side] is None
+        else {"held": 0, "held_legal": 0, "open": 0, "open_menu": 0, "leaks": 0}
+        for side in (0, 1)
+    ]
     record.depth = [int(d) for d in depths]
     record.solve_restricted = [bool(r) for r in restricted]
     record.eq_select = list(selects)
@@ -1554,6 +1590,8 @@ def play_game(
             and binaries[1] == binaries[0]
             # Ally targets listed otherwise are other pools, so other menus (IKA-181).
             and allies[1] == allies[0]
+            # A Baton Pass held back is another pool too (IKA-419g).
+            and holds[1] == holds[0]
             and policies[1] is policies[0]
             and views_rule[1] == views_rule[0]
             # A leaf ranking filled another way orders another menu (IKA-268).
@@ -1823,6 +1861,7 @@ def play_game(
                 or budgets[1] != budgets[0]
                 or binaries[1] != binaries[0]
                 or allies[1] != allies[0]
+                or holds[1] != holds[0]
             ):
                 foe_started = perf_counter()
                 rank_scores.at_node(len(record.decisions), pos.turn, 1)  # IKA-278
@@ -1937,6 +1976,25 @@ def play_game(
             foe_theirs[foe_index],
         ]
         for side, menu in ((0, ours), (1, foe_theirs)):
+            # IKA-419g's positive control, read off the menus the side played from: the
+            # holder stood on the field, the gate was shut, the unheld pool held a Baton Pass
+            # (so the hold had something to take out), and neither the menu nor the choice
+            # has one. A leak is counted, and the match's check refuses a game that has one.
+            if holds[side] is not None:
+                tally = record.baton_hold[side]
+                for slot, opened in baton_slots(pos, side, holds[side]):
+                    if opened:
+                        tally["open"] += 1
+                        tally["open_menu"] += int(any(uses_baton(a, {slot}) for a in menu))
+                        continue
+                    tally["held"] += 1
+                    tally["held_legal"] += int(
+                        any(uses_baton(a, {slot}) for a in side_actions(reg, pos, side))
+                    )
+                    tally["leaks"] += int(
+                        any(uses_baton(a, {slot}) for a in menu)
+                        or uses_baton(chosen[side], {slot})
+                    )
             # IKA-181's positive control: the side's own menu held an ally target, and it
             # played one.
             if allies[side] != "off":

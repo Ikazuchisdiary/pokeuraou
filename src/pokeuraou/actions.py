@@ -139,6 +139,72 @@ def ally_targets(mode: str | None) -> Iterator[None]:
         ALLY_TARGETS[0] = before
 
 
+#: IKA-419g: the baton hold. ``(species, side)`` while an agent that holds Baton Pass back is
+#: reading its menus (`hold_baton`), else None. `side_actions` then leaves out, for that side,
+#: every action in which that species uses Baton Pass while its Special Attack and Special
+#: Defense are not both at +1 or more. Off ships (None).
+BATON_HOLD: list[tuple[str, int] | None] = [None]
+BATON_MOVE = "batonpass"
+#: The boosts the holder must have reached before it may pass them.
+BATON_GATE_STATS = ("spa", "spd")
+BATON_GATE_LEVEL = 1
+
+
+@contextmanager
+def hold_baton(species: str | None, side: int) -> Iterator[None]:
+    """`BATON_HOLD` set to ``(species, side)`` inside the block; a None species leaves it
+    as it is."""
+    if species is None:
+        yield
+        return
+    before = BATON_HOLD[0]
+    BATON_HOLD[0] = (species, side)
+    try:
+        yield
+    finally:
+        BATON_HOLD[0] = before
+
+
+def baton_gate_open(mon) -> bool:  # noqa: ANN001
+    """Whether ``mon`` has Special Attack and Special Defense both at +1 or more."""
+    return all(mon.boost(stat) >= BATON_GATE_LEVEL for stat in BATON_GATE_STATS)
+
+
+def baton_slots(pos: Position, side_index: int, species: str) -> list[tuple[int, bool]]:
+    """``(slot, gate open)`` for each live slot of ``side_index`` holding ``species``."""
+    side = pos.sides[side_index]
+    out = []
+    for slot, party in enumerate(side.active):
+        if party is None:
+            continue
+        mon = side.pokemon[party]
+        if mon.fainted or mon.species != species:
+            continue
+        out.append((slot, baton_gate_open(mon)))
+    return out
+
+
+def uses_baton(action: SideAction, slots: set[int]) -> bool:
+    """Whether ``action`` has a move slot in ``slots`` using Baton Pass."""
+    return any(
+        isinstance(a, MoveAction) and a.slot in slots and a.move_id == BATON_MOVE
+        for a in action.slots
+    )
+
+
+def _without_held_baton(pos: Position, side_index: int, actions: list[SideAction]) -> list[SideAction]:
+    hold = BATON_HOLD[0]
+    if hold is None or hold[1] != side_index:
+        return actions
+    closed = {slot for slot, opened in baton_slots(pos, side_index, hold[0]) if not opened}
+    if not closed:
+        return actions
+    kept = [a for a in actions if not uses_baton(a, closed)]
+    # Never leave the menu empty: the holder's other moves are always legal, and this keeps a
+    # position with nothing else (Struggle-like locks) the way it was.
+    return kept or actions
+
+
 #: `normal` moves whose use on an ally is what they are for (doubles staples): After You and
 #: Instruct order the ally, Pollen Puff heals it, Spicy Extract and Decorate boost it, Psych
 #: Up copies its boosts, and Skill Swap, Role Play, Entrainment and Topsy-Turvy rework its
@@ -969,7 +1035,7 @@ def side_actions(
         if len(switches) != len(set(switches)):
             continue
         out.append(SideAction(slots=tuple(combo)))
-    return out
+    return _without_held_baton(pos, side_index, out)
 
 
 def switch_actions_after_faint(
