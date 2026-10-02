@@ -563,19 +563,25 @@ def play_pair(match: Match, pair: int, teams: tuple[Any, Any],  # noqa: ANN401
     # one belief, exactly as they always were.
     reports: dict[Any, list[Any]] = {}
     entries: dict[Any, Any] = {}
+    # Two readings of the pair read a cell once (IKA-416: a reading's first stages are often
+    # another's whole). A cell is named by its leaf, so two leaves never share one.
+    memo: dict = {}
+    memos: dict[Any, selection_deep.MemoReader] = {}
     for condition in (match.tested, match.other):
         key = match.solve_key(condition)
         evaluate, leaf_name = match.leaf_of(condition)
         if key not in entries:
             reports[key] = []
+            if condition.selection is not None:
+                memos[key] = selection_deep.MemoReader(
+                    selection_deep.READER or selection_deep.SerialReader(
+                        reg, evaluate, rank_fill=match.rank_fill, rank_by_leaf=match.rank_by_leaf),
+                    memo, tag=leaf_name)
             entries[key] = (
                 humanplay.solve_entry(reg, teams, evaluate, leaf_name,
                                       reading=condition.selection,
                                       seconds=condition.selection_seconds,
-                                      reader=None if condition.selection is None else (
-                                          selection_deep.READER or selection_deep.SerialReader(
-                                              reg, evaluate, rank_fill=match.rank_fill,
-                                              rank_by_leaf=match.rank_by_leaf)),
+                                      reader=memos.get(key),
                                       report=reports[key])
                 if evaluate is not None else None
             )
@@ -590,6 +596,7 @@ def play_pair(match: Match, pair: int, teams: tuple[Any, Any],  # noqa: ANN401
             "value": round(reports[match.solve_key(condition)][0].value, 5),
             "leafValue": round(reports[match.solve_key(condition)][0].leaf_value, 5),
             "completed": reports[match.solve_key(condition)][0].completed,
+            "memoHits": memos[match.solve_key(condition)].hits,
         }
         for condition in (match.tested, match.other)
         if reports.get(match.solve_key(condition))

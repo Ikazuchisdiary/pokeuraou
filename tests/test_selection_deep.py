@@ -337,6 +337,73 @@ def test_each_seat_plays_and_believes_from_its_own_selection(monkeypatch, pool) 
     assert any(distinct)
 
 
+def test_two_readings_of_a_pair_read_a_cell_once() -> None:
+    """IKA-416: a shorter reading whose stages are the first of a longer one is answered from the
+    longer one's cells, and its answer is the one it gives reading them itself, to the bit."""
+    for seed in (0, 1, 2):
+        truth, leaf = _instance(seed)
+        memo: dict = {}
+        inner = TruthReader(truth)
+        long_reader = selection_deep.MemoReader(inner, memo, tag="leaf")
+        _a, long_report = solve_selection_deep(
+            None, (), (), None, long_reader, parse_reading("rects=8-16,confirm=2"), base=_base(leaf))
+        asked = len(inner.asked)
+        short_reader = selection_deep.MemoReader(inner, memo, tag="leaf")
+        short, short_report = solve_selection_deep(
+            None, (), (), None, short_reader, parse_reading("rects=8,confirm=2"), base=_base(leaf))
+        # the positive control: every cell of the shorter reading came from the memo
+        assert short_report.cells > 0 and short_reader.hits == short_report.cells
+        assert len(inner.asked) == asked and long_reader.cells == long_report.cells
+        alone, alone_report = solve_selection_deep(
+            None, (), (), None, TruthReader(truth), parse_reading("rects=8,confirm=2"), base=_base(leaf))
+        assert short_report.read == alone_report.read
+        assert list(short_report.read) == list(alone_report.read)  # the order the prices sum in
+        assert np.array_equal(short.equilibrium.row_strategy, alone.equilibrium.row_strategy)
+        assert np.array_equal(short.matrices[0], alone.matrices[0])
+    # the control that a cell is named by what its read depends on: another stage, another
+    # width, another leaf share nothing
+    truth, leaf = _instance(0)
+    memo = {}
+    first = selection_deep.MemoReader(TruthReader(truth), memo, tag="leaf")
+    solve_selection_deep(None, (), (), None, first, parse_reading("rects=8,confirm=2"), base=_base(leaf))
+    again = selection_deep.MemoReader(TruthReader(truth), memo, tag="leaf")
+    solve_selection_deep(None, (), (), None, again, parse_reading("rects=8,confirm=2"), base=_base(leaf))
+    assert again.hits == first.cells > 0 and again.cells == 0
+    for spec, tag in (("stage=d2r8b3k8,rects=8,confirm=2", "leaf"),
+                      ("width=32,rects=8,confirm=2", "leaf"), ("rects=8,confirm=2", "other leaf")):
+        other = selection_deep.MemoReader(TruthReader(truth), memo, tag=tag)
+        solve_selection_deep(None, (), (), None, other, parse_reading(spec), base=_base(leaf))
+        assert other.hits == 0 and other.cells > 0
+
+
+def test_a_pairs_two_readings_share_their_cells_in_a_match(monkeypatch, pool) -> None:  # noqa: ANN001
+    """IKA-416: in `play_pair`, the second condition's reading is answered from the first's cells,
+    and its entry is the one it solves alone (in the port, the stub leaf)."""
+    longer = "stage=d2r4b3n8;rects=2-3;confirm=0;width=8"
+    made: list = []
+    real = selection_deep.MemoReader
+
+    def keep(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        made.append(real(*args, **kwargs))
+        return made[-1]
+
+    monkeypatch.setattr(selection_deep, "MemoReader", keep)
+    deep_long = parse_condition(f"long:seconds=1,clock=count,selection={longer}")
+    deep_short = parse_condition(f"short:seconds=1,clock=count,selection={READING}")
+    agent, person, kwargs = _calls(monkeypatch, _match(pool, deep_long, deep_short), pool)[0]
+    by_seat = {kwargs["agent_side"]: kwargs["entry"], 1 - kwargs["agent_side"]: person.entry}
+    short_entry = by_seat[1]
+    assert "rects=2," in short_entry.model
+    assert [m.hits for m in made] == [0, 4] and made[0].cells > 4 and made[1].cells == 0
+    reader = selection_deep.SerialReader(pool.reg, _stub, rank_fill="refs2", rank_by_leaf=False)
+    alone = humanplay.solve_entry(pool.reg, (pool.teams[0], pool.teams[1]), _stub, "stub",
+                                  reading=READING, reader=reader)
+    assert reader.cells == 4
+    drop = ("seconds", "notes")  # the notes say the seconds the reading took
+    assert ({k: v for k, v in short_entry.to_json().items() if k not in drop}
+            == {k: v for k, v in alone.to_json().items() if k not in drop})
+
+
 def test_a_condition_names_its_selection() -> None:
     got = parse_condition("x:seconds=1,selection=stage=d2r4b3k8;rects=8")
     assert got.selection == "stage=d2r4b3k8;rects=8" and "selection read" in got.describe()
