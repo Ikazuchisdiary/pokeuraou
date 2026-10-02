@@ -132,10 +132,14 @@ def run(args: argparse.Namespace) -> None:
     kit = ps._Kit(args)
     out = Path(args.out)
     budgets = [float(s) for s in args.seconds.split(",")]
+    claim, args.claim = args.claim, None  # the claims below are per (position, arm, budget)
+    claims = Path(claim) if claim else None
+    if claims is not None:
+        claims.mkdir(parents=True, exist_ok=True)
     for n in ps._mine(args, len(kit.positions)):
         pos = Position.from_json(kit.positions[n]["position"])
         legal = (humanplay.legal_count(kit.reg, pos, 0), humanplay.legal_count(kit.reg, pos, 1))
-        previous: tuple[tuple[int, int], str] | None = None
+        sizes: dict[tuple[int, int], str] = {}
         for name, spec in _arms(args):
             staged = spec.startswith("staged:")
             for seconds in (budgets if staged else [max(budgets)]):
@@ -145,11 +149,18 @@ def run(args: argparse.Namespace) -> None:
                 if not staged:
                     want = _width(spec)
                     size = (min(want, legal[0]), min(want, legal[1]))
-                    if previous is not None and size == previous[0]:
+                    if size in sizes:
+                        # The menu of an arm before it (every legal action already there).
                         ps._write(path, {"n": n, "spec": spec, "seconds": seconds,
-                                         "sameAs": previous[1], "rows": size[0], "cols": size[1]})
+                                         "sameAs": sizes[size], "rows": size[0], "cols": size[1]})
                         continue
-                    previous = (size, name)
+                    sizes[size] = name
+                if claims is not None:
+                    try:
+                        os.close(os.open(claims / f"{n}-{name}-{seconds:g}",
+                                         os.O_CREAT | os.O_EXCL | os.O_WRONLY))
+                    except FileExistsError:
+                        continue
                 row = _read(kit, n, spec, seconds, args.ladder)
                 ps._write(path, row)
                 print(json.dumps({"n": n, "arm": name, "seconds": seconds, "wall": row["wall"],
@@ -204,7 +215,7 @@ def policy_rows(rows: int, cols: int, classes: int, seconds: float) -> dict[str,
     """The policies at one position and budget: label -> (the fixed arm to read, milliseconds
     the policy spent before it that the arm's own clock does not hold).
 
-    ``rule``: the width rule's menu (`humanplay.plan_move`), the arm named ``w<width>``.
+    ``rule``: the width rule's menu (`humanplay.plan_move`), the arm with that menu.
     ``allfit``: every legal action (arm ``wall``) when that node fits `humanplay.WIDTH_SHARE`
     of the budget, else the rule's. ``staged``: the last of 12, 24, 48, 64, every legal action
     that fits the share with the nodes read before it (as `humanplay.RootSteps.later`), the
@@ -219,8 +230,19 @@ def policy_rows(rows: int, cols: int, classes: int, seconds: float) -> dict[str,
 
     plan = humanplay.plan_move(seconds, 1, rows, cols, classes)
     every = max(rows, cols)
-    out = {"rule": (f"w{plan.width}", 0.0),
-           "allfit": ("wall" if node_ms(every) <= share else f"w{plan.width}", 0.0)}
+
+    def arm_of(width: int) -> str:
+        """The arm whose menu is the rule's (a width past a side's legal actions is the same
+        menu as a narrower one that already holds them all)."""
+        size = (min(width, rows), min(width, cols))
+        for w, arm in ((12, "w12"), (24, "w24"), (36, "w36"), (48, "w48"), (64, "w64"),
+                       (every, "wall")):
+            if (min(w, rows), min(w, cols)) == size:
+                return arm
+        return f"w{width}"
+
+    out = {"rule": (arm_of(plan.width), 0.0),
+           "allfit": ("wall" if node_ms(every) <= share else arm_of(plan.width), 0.0)}
     spent, last, picked, before = 0.0, None, "w12", 0.0
     for width, arm in ((12, "w12"), (24, "w24"), (48, "w48"), (64, "w64"), (every, "wall")):
         size = (min(width, rows), min(width, cols))
