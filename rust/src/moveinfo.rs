@@ -300,8 +300,13 @@ pub fn base_power(
             let doubled = crate::airborne::terrain_under(attacker, ctx).is_some();
             return Some(if doubled { declared * 2 } else { declared });
         }
+        // `basePowerCallback`: `if (this.field.isTerrain('electricterrain') &&
+        // target.isGrounded()) return move.basePower * 2;` -- the target's footing, not the
+        // user's (IKA-419: a Flying target took 140).
         "risingvoltage" => {
-            return Some(if ctx.terrain_name() == Some("electricterrain") {
+            return Some(if ctx.terrain_name() == Some("electricterrain")
+                && crate::damage::is_grounded(defender)
+            {
                 declared * 2
             } else {
                 declared

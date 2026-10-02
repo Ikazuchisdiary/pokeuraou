@@ -411,6 +411,7 @@ pub fn status_move_is_fully_modelled(id: &str) -> bool {
             | "auroraveil"
             | "babydolleyes"
             | "banefulbunker"
+            | "batonpass"
             | "bulkup"
             | "calmmind"
             | "charge"

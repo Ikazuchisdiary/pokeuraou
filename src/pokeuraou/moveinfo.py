@@ -347,7 +347,11 @@ def base_power(
         return const(declared * 2 if ctx.terrain in _TERRAIN_PULSE_TYPE else declared)
 
     if move_id == "risingvoltage":
-        return const(declared * 2 if ctx.terrain == "electricterrain" else declared)
+        # Showdown doubles it only into a grounded target (IKA-419), as the port does.
+        from .damage import _is_grounded
+
+        doubled = ctx.terrain == "electricterrain" and _is_grounded(defender)
+        return const(declared * 2 if doubled else declared)
 
     if move_id == "expandingforce":
         return const(declared)

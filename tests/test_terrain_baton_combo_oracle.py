@@ -21,9 +21,10 @@ Showdown a5df827, the pieces each case looks at:
   Electro Shot fires at once in the rain; Weather Ball is a 100-power Fire move in the sun.
 
 Each case plays in Showdown and holds the port's one outcome (deterministic budget, a
-paused turn resumed with Showdown's replacement) to it. A case named ``known-gap-*``
-records a divergence the port has today: it is marked ``xfail(strict=True)``, so a port
-that starts to agree with Showdown fails it and the mark has to come off.
+paused turn resumed with Showdown's replacement) to it. Two of them diverged before
+IKA-419's fixes, which is the positive control (`POKEURAOU_RUST_NODE_BIN=<old exe>`):
+Baton Pass was a plain self-switch that left the boosts behind (with a "status move:
+batonpass" note), and Rising Voltage doubled into a target that is not grounded (silently).
 """
 
 from __future__ import annotations
@@ -77,45 +78,54 @@ ARCHALUDON = TeamSet(
 )
 
 
-def _foe(species: str, ability: str, item: str | None = None) -> TeamSet:
-    """Bulky foes that only Protect or Helping Hand (Splash is not in Reg M-C), so the
-    user's side acts on a known board."""
+def _foe(species: str, ability: str, moves: tuple[str, ...] = ()) -> TeamSet:
+    """Bulky foes that Protect or Helping Hand (Splash is not in Reg M-C), so the user's
+    side acts on a known board; a third and fourth move for the cases that need one."""
     return TeamSet(
-        species=species, ability=ability, nature="Serious", item=item,
-        moves=["Protect", "Helping Hand"],
+        species=species, ability=ability, nature="Serious",
+        moves=["Protect", "Helping Hand", *moves],
         sp={"hp": 32, "def": 16, "spd": 16},
     )
 
 
 #: Incineroar is grounded and immune to Lumina Crash; Corviknight (Flying) is not grounded.
 FOES = [_foe("Incineroar", "Blaze"), _foe("Corviknight", "Pressure"), _foe("Milotic", "Marvel Scale")]
+#: Foes that put volatiles on the user's side for Baton Pass to carry or leave: Taunt and
+#: Leech Seed have no `noCopy`, Yawn has (not legal sets: the bridge does not check
+#: learnsets).
+STATUSERS = [
+    _foe("Incineroar", "Blaze", ("Taunt", "Yawn")),
+    _foe("Corviknight", "Pressure", ("Leech Seed",)),
+    _foe("Milotic", "Marvel Scale"),
+]
 #: Foe choice: both Helping Hand (nothing reaches my side).
 IDLE = "move 2 -2, move 2 -1"
 
-#: The volatiles a case compares (the charging turn's, and Baton Pass's copyable ones).
-VOLATILES = {"twoturnmove", "solarbeam", "electroshot", "focusenergy", "substitute"}
-
-
-def _case(mine, team, setup, turn, shown, replace=None, port_turn=None):  # noqa: ANN001, ANN202
-    return (mine, team, setup, turn, shown, replace, port_turn or turn)
-
-
-#: The divergences the port has today, each with its reason (see the module docstring).
-KNOWN_GAPS = {
-    "known-gap-baton-pass-hands-the-boosts-on": (
-        "IKA-419: the port reads Baton Pass's selfSwitch 'copyvolatile' as a plain self-switch "
-        "and notes 'status move: batonpass'; the boosts stay behind"
-    ),
-    "known-gap-rising-voltage-terrain-ungrounded": (
-        "IKA-419: moveinfo.rs doubles Rising Voltage in Electric Terrain without "
-        "Showdown's target.isGrounded(); no note"
-    ),
+#: The volatiles a case compares (the charging turn's, and Baton Pass's copyable ones and
+#: its left-behind Yawn), each with its duration, counter and extra fields.
+VOLATILES = {
+    "twoturnmove", "solarbeam", "electroshot", "focusenergy", "substitute", "taunt",
+    "leechseed", "yawn", "confusion",
 }
+
+#: A Baton Pass user that also sets up Substitute and Focus Energy (not a legal set: the
+#: bridge does not check learnsets).
+PASSER = TeamSet(
+    species="Espathra", ability="Speed Boost", nature="Timid", item="Sitrus Berry",
+    moves=["Substitute", "Baton Pass", "Focus Energy", "Draco Meteor"],
+    sp={"hp": 32, "spa": 32, "spe": 2},
+)
+
+
+def _case(mine, team, setup, turn, shown, replace=None, port_turn=None, foes=None, needs=None):  # noqa: ANN001, ANN202, PLR0913
+    return (mine, team, setup, turn, shown, replace, port_turn or turn, foes or FOES, needs)
+
 
 #: name -> (my six or fewer, team order, setup turns, compared turn, Showdown log line,
 #: my replacement choice when the compared turn asks for one, the compared turn as the
 #: port's menu names it when that differs: a charging move's second turn is Showdown's
-#: only "move 1" but the port keeps the move's own index).
+#: only "move 1" but the port keeps the move's own index, the foes, and a (species,
+#: volatile) my side must carry before the compared turn).
 CASES: dict[str, tuple] = {
     # Mega Raichu X sets the terrain at the Mega Evolution; Espathra beside it eats its Seed
     # at once (Defense +1), and Speed Boost raises Speed at the end of the turn.
@@ -134,7 +144,7 @@ CASES: dict[str, tuple] = {
         ["move 2 1 mega, move 4", IDLE], "|move|p1a: Raichu|Rising Voltage|p2a: Incineroar",
     ),
     # Rising Voltage in the terrain into Corviknight, which is not grounded: 70 power.
-    "known-gap-rising-voltage-terrain-ungrounded": _case(
+    "rising-voltage-terrain-ungrounded": _case(
         [RAICHU, ESPATHRA, CHARIZARD], "team 123", [],
         ["move 2 2 mega, move 4", IDLE], "|move|p1a: Raichu|Rising Voltage|p2b: Corviknight",
     ),
@@ -160,9 +170,43 @@ CASES: dict[str, tuple] = {
     ),
     # Calm Mind (with Seed and Speed Boost) on turn 1, Baton Pass to Charizard on turn 2:
     # the boosts go with it.
-    "known-gap-baton-pass-hands-the-boosts-on": _case(
+    "baton-pass-hands-the-boosts-on": _case(
         [RAICHU, ESPATHRA, CHARIZARD], "team 123", [["move 3 mega, move 3", IDLE]],
         ["move 4, move 2", IDLE], "|switch|p1b: Charizard", replace="pass, switch 3",
+    ),
+    # Lowered stats go too: Draco Meteor's Special Attack -2 (and Speed Boost's +1).
+    "baton-pass-hands-a-drop-on": _case(
+        [RAICHU, PASSER, CHARIZARD], "team 123", [["move 4, move 4 1", IDLE]],
+        ["move 4, move 2", IDLE], "|switch|p1b: Charizard", replace="pass, switch 3",
+    ),
+    # Substitute (with its HP) and Focus Energy go with the boosts.
+    "baton-pass-hands-substitute-and-focus-energy": _case(
+        [RAICHU, PASSER, CHARIZARD], "team 123",
+        [["move 4, move 1", IDLE], ["move 4, move 3", IDLE]],
+        ["move 3, move 2", IDLE], "|switch|p1b: Charizard", replace="pass, switch 3",
+    ),
+    # Leech Seed has no `noCopy`: Showdown hands it on, and it drains Charizard at the end
+    # of the turn. (Taunt has none either, but a Taunted Pokemon cannot use Baton Pass.)
+    "baton-pass-hands-leech-seed-on": _case(
+        [RAICHU, ESPATHRA, CHARIZARD], "team 123", [["move 4, move 3", "move 2 -2, move 3 2"]],
+        ["move 4, move 2", IDLE], "|switch|p1b: Charizard", replace="pass, switch 3",
+        foes=STATUSERS, needs=("espathra", "leechseed"),
+    ),
+    # Yawn is `noCopy`: it stays with Espathra, so Charizard does not fall asleep.
+    "baton-pass-leaves-yawn-behind": _case(
+        [RAICHU, ESPATHRA, CHARIZARD], "team 123", [["move 4, move 3", "move 4 2, move 2 -1"]],
+        ["move 4, move 2", IDLE], "|switch|p1b: Charizard", replace="pass, switch 3",
+        foes=STATUSERS, needs=("espathra", "yawn"),
+    ),
+    # Baton Pass from the first slot, the partner's turn after it.
+    "baton-pass-from-the-left-slot": _case(
+        [ESPATHRA, RAICHU, CHARIZARD], "team 123", [["move 3, move 3 mega", IDLE]],
+        ["move 2, move 2 1", IDLE], "|switch|p1a: Charizard", replace="switch 3, pass",
+    ),
+    # Baton Pass with an empty bench: nothing to pass to, the boosts stay on Espathra.
+    "baton-pass-with-no-bench": _case(
+        [RAICHU, ESPATHRA], "team 12", [["move 3 mega, move 3", IDLE]],
+        ["move 4, move 2", IDLE], "|-fail|p1b: Espathra",
     ),
     # Control: the same switch by an ordinary switch action drops the boosts.
     "control-plain-switch-drops-the-boosts": _case(
@@ -245,7 +289,16 @@ def _state(pos: Position) -> dict[str, object]:
                 mon.fainted,
                 mon.item,
                 tuple(sorted((k, v) for k, v in mon.boosts.items() if v)) if not mon.fainted else (),
-                tuple(sorted(v.id for v in mon.volatiles if v.id in VOLATILES)) if not mon.fainted else (),
+                tuple(
+                    sorted(
+                        # Showdown's `name` in the extra fields is a label only.
+                        (v.id, v.duration, v.counter,
+                         tuple(sorted((k, x) for k, x in v.extra.items() if k != "name")))
+                        for v in mon.volatiles
+                        if v.id in VOLATILES
+                    )
+                ) if not mon.fainted else (),
+                mon.status,
             )
     return out
 
@@ -271,30 +324,19 @@ def bridged(monkeypatch: pytest.MonkeyPatch):  # noqa: ANN201
     os.environ.pop(rustnode.ENV_ENABLE, None)
 
 
-def _params() -> list:
-    out = []
-    for name in sorted(CASES):
-        marks = []
-        if name.startswith("known-gap-"):
-            marks.append(pytest.mark.xfail(strict=True, reason=KNOWN_GAPS[name]))
-        out.append(pytest.param(name, marks=marks))
-    return out
-
-
-def test_every_known_gap_is_a_case() -> None:
-    assert set(KNOWN_GAPS) == {n for n in CASES if n.startswith("known-gap-")}
-
-
 def play(reg, oracle: Oracle, name: str) -> tuple[dict, dict, tuple[str, ...]]:  # noqa: ANN001
     """Showdown's state after the compared turn, the port's, and the port's notes."""
-    mine, team, setup, choices, shown, replace, port_choices = CASES[name]
-    handle = oracle.create(FORMAT_ID, mine, FOES, policy=RandomnessPolicy())
+    mine, team, setup, choices, shown, replace, port_choices, foes, needs = CASES[name]
+    handle = oracle.create(FORMAT_ID, mine, foes, policy=RandomnessPolicy())
     handle.step([team, "team 123"])
     assert handle.choice_errors == [], handle.choice_errors
     for turn in setup:
         handle.step(turn)
         assert handle.choice_errors == [], handle.choice_errors
     before = Position.from_json(handle.position)
+    if needs is not None:
+        carrier = next(m for m in before.sides[0].pokemon if m.base_species == needs[0])
+        assert needs[1] in {v.id for v in carrier.volatiles}, (name, carrier.volatiles)
     for side in before.sides:
         for party in side.pokemon:
             party.stats_override = None
@@ -328,8 +370,49 @@ def play(reg, oracle: Oracle, name: str) -> tuple[dict, dict, tuple[str, ...]]: 
     return theirs, _state(result.branches[0].position), notes
 
 
-@pytest.mark.parametrize("name", _params())
+@pytest.mark.parametrize("name", sorted(CASES))
 def test_the_port_matches_showdown(reg, oracle: Oracle, bridged: None, name: str) -> None:  # noqa: ANN001
-    theirs, ours, _notes = play(reg, oracle, name)
+    theirs, ours, notes = play(reg, oracle, name)
     diff = {k: (theirs[k], ours.get(k)) for k in theirs if theirs[k] != ours.get(k)}
     assert not diff, f"{name}: (showdown, port) {diff}"
+    # Baton Pass is modelled now: the port no longer reports it.
+    assert not [n for n in notes if "batonpass" in n], notes
+
+
+#: Python's calculator (narrowing's scores, `observe`'s reading of a hit) on Rising Voltage
+#: from a Mega Raichu X already out: (setup turns, the hit, the target's party slot).
+CALCULATOR_CASES = {
+    "terrain-grounded": ([["move 3 mega, move 4", IDLE]], ["move 2 1, move 4", IDLE], 0),
+    "terrain-ungrounded": ([["move 3 mega, move 4", IDLE]], ["move 2 2, move 4", IDLE], 1),
+    "no-terrain-ungrounded": ([["move 3, move 4", IDLE]], ["move 2 2, move 4", IDLE], 1),
+}
+
+
+@pytest.mark.parametrize("name", sorted(CALCULATOR_CASES))
+def test_the_python_calculator_matches_showdown_on_rising_voltage(reg, oracle: Oracle, name: str) -> None:  # noqa: ANN001
+    from pokeuraou.damage import calculate, effective_damage, register_mega_stones
+    from pokeuraou.moveinfo import MoveContext
+    from pokeuraou.view import battler, field_state
+
+    register_mega_stones(reg)
+    setup, choices, target = CALCULATOR_CASES[name]
+    handle = oracle.create(FORMAT_ID, [RAICHU, ESPATHRA, CHARIZARD], FOES, policy=RandomnessPolicy())
+    handle.step(["team 123", "team 123"])
+    for turn in setup:
+        handle.step(turn)
+        assert handle.choice_errors == [], handle.choice_errors
+    before = Position.from_json(handle.position)
+    handle.step(choices)
+    assert handle.choice_errors == [], handle.choice_errors
+    after = Position.from_json(handle.position)
+    handle.close()
+    lost = before.sides[1].pokemon[target].hp - after.sides[1].pokemon[target].hp
+    assert lost > 0
+    attacker = before.sides[0].pokemon[before.sides[0].active[0]]
+    defender = before.sides[1].pokemon[target]
+    dfn = battler(reg, defender)
+    result = calculate(
+        reg, battler(reg, attacker), dfn, "risingvoltage", field_state(before, reg), defender_side=1,
+        move_ctx=MoveContext(weather=before.field.weather, terrain=before.field.terrain),
+    )
+    assert int(effective_damage(result, dfn)[0, 0]) == lost, (name, before.field.terrain)

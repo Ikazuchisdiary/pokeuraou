@@ -2643,6 +2643,49 @@ fn restore_types(reg: &Reg, mon: &mut Pokemon) {
     }
 }
 
+/// The `selfSwitch` value that makes the newcomer take the user's boosts and volatiles.
+pub(crate) const COPY_VOLATILE: &str = "copyvolatile";
+
+/// The conditions Showdown a5df827 marks `noCopy: true` (data/conditions.ts and the
+/// `condition` blocks of data/moves.ts, abilities.ts, items.ts), which
+/// `Pokemon#copyVolatileFrom` leaves behind. One space-separated string, not a list of
+/// literals: `tools/port_coverage.py` reads a quoted id as the port acting on it, and
+/// this table is the port passing these ids over (31 of them).
+const NO_COPY: &str = " attract choicelock commanded commanding counter defensecurl \
+    destinybond disable dynamax encore flashfire foresight glaiverush gmaxchistrike \
+    imprison lockon minimize miracleeye mirrorcoat nightmare protosynthesis quarkdrive \
+    saltcure smackdown spotlight stockpile syrupbomb torment trapped trapper yawn ";
+
+/// Whether this Pokemon's self-switch flag came from a `copyvolatile` move: Baton Pass,
+/// whose `moves::mark_self_switch` writes the move onto `pendingselfswitch`. Read before
+/// the flag comes off for the replacement.
+pub(crate) fn passes_volatiles(mon: &Pokemon) -> bool {
+    mon.volatiles.iter().any(|e| e.id == "pendingselfswitch" && e.move_id.is_some())
+}
+
+/// `BattleActions#switchIn`'s `switchCopyFlag` and `Pokemon#copyVolatileFrom` (IKA-419):
+/// for a conscious Pokemon leaving under Baton Pass, its boosts and every volatile that is
+/// not `noCopy`. The switch flags are not volatiles in Showdown (`switchFlag`), so they
+/// stay. No `onCopy` handler (Gastro Acid, Power Trick, Power Shift) has a volatile this
+/// port carries.
+fn copy_volatiles(leaving: &Pokemon) -> Option<([i8; 7], Vec<crate::position::Effect>)> {
+    if leaving.fainted {
+        return None;
+    }
+    let volatiles = leaving
+        .volatiles
+        .iter()
+        .filter(|e| {
+            let id = e.id.as_str();
+            !NO_COPY.split_whitespace().any(|n| n == id)
+                && id != "pendingselfswitch"
+                && id != "pendingforceswitch"
+        })
+        .cloned()
+        .collect();
+    Some((leaving.boosts, volatiles))
+}
+
 fn do_switch(reg: &Reg, turn: &mut Turn, action: &QueuedAction) -> Result<(), String> {
     do_switch_with(reg, turn, action, true)
 }
@@ -2673,6 +2716,18 @@ fn do_switch_with(
     action: &QueuedAction,
     run_switch_in: bool,
 ) -> Result<(), String> {
+    do_switch_passing(reg, turn, action, run_switch_in, false)
+}
+
+/// `do_switch_with`, and with `baton` the newcomer takes the leaving Pokemon's boosts and
+/// copyable volatiles (`copy_volatiles`): a Baton Pass replacement (IKA-419).
+fn do_switch_passing(
+    reg: &Reg,
+    turn: &mut Turn,
+    action: &QueuedAction,
+    run_switch_in: bool,
+    baton: bool,
+) -> Result<(), String> {
     let Some(_) = action.switch_to else { return Ok(()) };
     let incoming_index = {
         let side = &turn.pos.sides[action.side];
@@ -2694,6 +2749,11 @@ fn do_switch_with(
     }
 
     let leaving_index = turn.pos.sides[action.side].active[action.slot];
+    // Baton Pass: what the newcomer takes from the Pokemon leaving, read before its
+    // volatiles are cleared (`copyVolatileFrom` runs before `oldActive.clearVolatile()`).
+    let passed = leaving_index
+        .filter(|_| baton)
+        .and_then(|i| copy_volatiles(&turn.pos.sides[action.side].pokemon[i]));
     if let Some(leaving_index) = leaving_index {
         let (regenerates, fainted) = {
             let leaving = &turn.pos.sides[action.side].pokemon[leaving_index];
@@ -2745,6 +2805,12 @@ fn do_switch_with(
         }
         if matches!(incoming.status, Some(s) if s.as_str() == "tox") {
             incoming.status_counter = Some(0);
+        }
+        if let Some((boosts, volatiles)) = passed {
+            // `this.clearVolatile(); this.boosts = pokemon.boosts;` then the copyable
+            // volatiles, shallow-cloned with their counters and durations.
+            incoming.boosts = boosts;
+            incoming.volatiles = volatiles;
         }
     }
     if turn.log.is_some() {
@@ -2894,7 +2960,9 @@ pub fn resume_turn<'a>(
             if !owed[side_index][*slot] {
                 continue;
             }
+            let mut baton = false;
             if let Some(mon) = turn.mon_at_mut(side_index, *slot) {
+                baton = passes_volatiles(mon);
                 mon.volatiles.retain(|v| v.id.as_str() != "pendingselfswitch");
             }
             let queued = QueuedAction {
@@ -2911,7 +2979,7 @@ pub fn resume_turn<'a>(
                 switch_species: Some(*species),
                 branch_probability: 1.0,
             };
-            do_switch_with(reg, &mut turn, &queued, false)?;
+            do_switch_passing(reg, &mut turn, &queued, false, baton)?;
             let speed = match turn.battler_at(side_index, *slot)? {
                 None => 0,
                 Some(incoming) => {

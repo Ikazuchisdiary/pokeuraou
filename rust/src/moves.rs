@@ -3160,9 +3160,17 @@ fn attacker_ability_of(turn: &Turn, me: Slot) -> Option<Id> {
 /// queue, and `resume_turn` continues once the choice is made. A Pokemon with an empty bench
 /// is not marked at all -- Showdown's `switchFlag` has nothing to answer it with, and the
 /// move simply leaves it in place.
-fn mark_self_switch(turn: &mut Turn, action: &QueuedAction) {
+fn mark_self_switch(turn: &mut Turn, action: &QueuedAction, mv: &Move) {
     let alive = matches!(turn.mon_at(action.side, action.slot), Some(mon) if !mon.fainted);
     if !alive {
+        return;
+    }
+    // Baton Pass's `onHit`: `if (!this.canSwitch(target.side) || target.volatiles['commanded'])
+    // { this.add('-fail', target); return this.NOT_FAIL; }`. `NOT_FAIL` leaves
+    // `moveThisTurnResult` null, not false, so nothing is marked failed: no one to pass to
+    // is no switch, as for any self-switch below (Commander is in neither regulation).
+    // Its `self.onHit` sets `skipBeforeSwitchOutEventFlag`, which only Pursuit reads.
+    if mv.id == "batonpass" && !can_switch(turn, action.side) {
         return;
     }
     // Red Card's drag runs first and takes the U-turn's flag with it (IKA-191).
@@ -3191,6 +3199,16 @@ fn mark_self_switch(turn: &mut Turn, action: &QueuedAction) {
         }
     }
     turn.add_volatile(action.side, action.slot, "pendingselfswitch", None);
+    // `selfSwitch: 'copyvolatile'` (Baton Pass): the flag carries the move, which
+    // `BattleActions#switchIn` reads off the switch's source effect to call
+    // `copyVolatileFrom` (`resolve::copy_volatiles`, IKA-419).
+    if mv.raw.get("selfSwitch").and_then(Value::as_str) == Some(crate::resolve::COPY_VOLATILE) {
+        if let Some(mon) = turn.mon_at_mut(action.side, action.slot) {
+            if let Some(flag) = mon.volatiles.iter_mut().find(|e| e.id == "pendingselfswitch") {
+                flag.move_id = Some(Id::new(&mv.id));
+            }
+        }
+    }
     turn.self_switch_pending = true;
     log_event!(turn, "{} must switch out", Name(action.side, action.slot));
 }
@@ -4085,7 +4103,7 @@ fn after_move(turn: &mut Turn, action: &QueuedAction, mv: &Move) -> Result<(), S
     }
 
     if mv.self_switch && turn.move_connected {
-        mark_self_switch(turn, action);
+        mark_self_switch(turn, action, mv);
     }
 
     check_white_herb(turn);
@@ -5037,7 +5055,7 @@ fn apply_status_move(
         turn.report(format!("status move: {}", mv.id));
     }
     if mv.self_switch && !suppress_self_switch {
-        mark_self_switch(turn, action);
+        mark_self_switch(turn, action, mv);
     }
     // Memento, Healing Wish: `if (moveData.selfdestruct === 'ifHit' && damage[i] !== false)
     // this.faint(source)` -- a status move's `damage[i]` is `undefined` once it reached a
