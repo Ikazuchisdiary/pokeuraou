@@ -334,6 +334,11 @@ def main(argv: list[str] | None = None) -> None:
     ap.add_argument("--pairs-with", nargs="+", default=None, metavar="SPECIES",
                     help="draw only the pool's pairs where either team has one of these "
                     "species ids (IKA-411: a match about a change only some teams meet)")
+    ap.add_argument("--pairs-no-mirror", action="store_true",
+                    help="leave out the pairs of a team against itself (IKA-419d)")
+    ap.add_argument("--ally-only-with", nargs="+", default=None, metavar="SPECIES",
+                    help="the arms' --ally-targets apply only to the side whose six holds one of "
+                    "these species ids; the other side plays off (IKA-419d)")
     add_bench_flags(ap)
     ap.add_argument("--net-scores-ends", action="store_true",
                     help="the tested arm's leaf scores a finished battle by the net, not as "
@@ -413,6 +418,8 @@ def main(argv: list[str] | None = None) -> None:
         pairs = [(a, b) for a, b in pool.pairs if a in holding or b in holding]
         if not pairs:
             ap.error(f"--pairs-with {args.pairs_with}: no team of the pool has one")
+    if args.pairs_no_mirror:
+        pairs = [(a, b) for a, b in (pairs if pairs is not None else pool.pairs) if a != b]
     if args.pairs_ally_benefit:
         holding = {t for t, team in enumerate(pool.teams) if team_ally_benefits(reg, team.sets)}
         pairs = [(a, b) for a, b in (pairs if pairs is not None else pool.pairs)
@@ -589,7 +596,7 @@ def main(argv: list[str] | None = None) -> None:
                 reg, pool, arms, seed=args.seed, game_index=game_index, which=which,
                 hide_bench=hide_bench, max_turns=args.max_turns,
                 epsilon=args.explore_epsilon, temperature=args.explore_temperature,
-                pairs=pairs,
+                pairs=pairs, ally_only_with=args.ally_only_with,
             ),
         )
         done += 1

@@ -606,6 +606,7 @@ def pool_match_game(
     epsilon: float = 0.0,
     temperature: float = 1.0,
     pairs: Sequence[tuple[int, int]] | None = None,
+    ally_only_with: Sequence[str] | None = None,
 ) -> tuple[Any, dict[str, Any]]:
     """Plays game ``game_index`` of a pool match with the tested arm (``arms[0]``) at
     side ``which`` (IKA-259).
@@ -613,6 +614,10 @@ def pool_match_game(
     ``pairs`` draws the pair from these instead of every pair of the pool (IKA-411: a
     match about a change that only some teams can meet plays only their pairs). The
     record's pair index is still the one in ``pool.pairs``.
+
+    ``ally_only_with`` limits each arm's ``ally_targets`` to the side whose six holds one of
+    these species ids; the other side plays "off" whatever its arm holds (IKA-419d: the
+    user's build gets the ally targets, its opponent keeps the shipped menus).
 
     The pair and its seats come from ``[seed, game_index]`` alone, so both seats of a game
     are the same two teams in the same seats with the ARMS swapped -- what makes the two a
@@ -644,6 +649,12 @@ def pool_match_game(
     mirror = a == b
     side_arms = (arms[0], arms[1]) if which == 0 else (arms[1], arms[0])
     size = reg.meta.picked_team_size
+    allies = tuple(
+        side_arms[side].ally_targets
+        if ally_only_with is None or any(sp in ally_only_with for sp in species[side])
+        else "off"
+        for side in (0, 1)
+    )
 
     entries = tuple(
         arm.solver.entry(a, b) if arm.solver is not None else None for arm in side_arms
@@ -695,7 +706,7 @@ def pool_match_game(
         knockouts=(side_arms[0].knockouts, side_arms[1].knockouts),
         dex_base_belief=(side_arms[0].dex_base_belief, side_arms[1].dex_base_belief),
         rust_binary=(side_arms[0].rust_binary, side_arms[1].rust_binary),
-        ally_targets=(side_arms[0].ally_targets, side_arms[1].ally_targets),
+        ally_targets=allies,
         eq_select=(side_arms[0].eq_select, side_arms[1].eq_select),
         selection=(species[0], species[1], picks[0], picks[1]),
     )
@@ -717,7 +728,7 @@ def pool_match_game(
         "depths": tuple(arm.depth for arm in side_arms),
         "knockouts": tuple(arm.knockouts for arm in side_arms),
         "dex_base": tuple(arm.dex_base_belief for arm in side_arms),
-        "allies": tuple(arm.ally_targets for arm in side_arms),
+        "allies": allies,
         "eq_selects": tuple(arm.eq_select for arm in side_arms),
         "binaries": tuple(None if arm.rust_binary is None else str(arm.rust_binary) for arm in side_arms),
         "solvers": tuple(
