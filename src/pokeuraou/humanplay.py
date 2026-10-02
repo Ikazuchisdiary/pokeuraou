@@ -1833,6 +1833,36 @@ class _Asker:
         return self.action
 
 
+@dataclass(frozen=True)
+class GameStart:
+    """IKA-423: where a game begins when it does not begin at the selection.
+
+    A recorded position (`position`), the identities each side has shown by then (`seen`,
+    `hidden.identity`: carried across turns as the game carries them), and the sides' ordered
+    four as indices into their six (`picks`; the order of the position's party slots, since
+    the opening order is gone once a switch has renumbered them). The selection is not played
+    or solved: both seats begin from this position, with the belief about the benches the
+    game's own rule gives (`bench_prior` None: uniform). `tools/targeted_positions.py` builds
+    only starts where each side has shown all four, so no belief is drawn at all.
+    """
+
+    name: str
+    teams: tuple[str, str]
+    position: Position
+    seen: tuple[frozenset[str], frozenset[str]]
+    picks: tuple[tuple[int, ...], tuple[int, ...]]
+
+    @staticmethod
+    def from_json(line: dict[str, Any]) -> GameStart:
+        return GameStart(
+            name=str(line["id"]),
+            teams=(line["teams"][0], line["teams"][1]),
+            position=Position.from_json(line["position"]),
+            seen=(frozenset(line["seenIds"][0]), frozenset(line["seenIds"][1])),
+            picks=(tuple(line["picks"][0]), tuple(line["picks"][1])),
+        )
+
+
 class HumanGame:
     """One game: the agent at side ``agent_side``, the person at the other."""
 
@@ -1852,8 +1882,15 @@ class HumanGame:
         listener: Callable[[str, Any], None] | None = None,
         interval_ms: float = 100.0,
         on_move: Callable[[Position, list[frozenset[str]], list[list[str]]], None] | None = None,
+        start: GameStart | None = None,
+        probe: bool = False,
     ) -> None:
         self.agent = agent
+        #: IKA-423: begin at this position instead of the selection's (`GameStart`).
+        self.start = start
+        #: IKA-423: stop after the first move decision has been read and written (nobody
+        #: plays it): a start's reads under a condition, for `tools/targeted_positions.py`.
+        self.probe = probe
         self.reg = agent.reg
         self.person = person
         self.me = agent_side
@@ -1953,8 +1990,14 @@ class HumanGame:
         record.rank_fill = [self.agent.rank_fill, self.agent.rank_fill]
         record.bench_drop = [self.agent.bench_drop, self.agent.bench_drop]
         self.record = record
-        pos = position_from_sets(reg, four[0], four[1], rng=self.rng)
-        seen: list[frozenset[str]] = [frozenset(), frozenset()]
+        if self.start is not None:
+            # IKA-423: no opening, no lead draw: the recorded position as it is, and what
+            # each side had shown by then. The leads' pair is the position's actives.
+            pos = self.start.position
+            seen = [frozenset(self.start.seen[0]), frozenset(self.start.seen[1])]
+        else:
+            pos = position_from_sets(reg, four[0], four[1], rng=self.rng)
+            seen = [frozenset(), frozenset()]
         leads: list[frozenset[str] | None] = [
             frozenset(
                 shown_species(
@@ -2038,6 +2081,8 @@ class HumanGame:
                 decision.foe_chosen = human_action.to_choice()
             record.decisions.append(decision)
             self.extras[len(record.decisions) - 1] = extra
+            if self.probe:
+                break
             self.say(
                 "-- 相手の行動: "
                 + agent_action.describe(reg, self.loc, target_names(pos, self.me))
@@ -2640,6 +2685,8 @@ def play(
     entry: BookEntry | None = None,
     make_game: Callable[..., HumanGame] | None = None,
     priors: tuple[BenchPrior | None, BenchPrior | None] | None = None,
+    start: GameStart | None = None,
+    probe: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any], HumanGame]:
     """Plays one game. ``teams`` are side 0's and side 1's sheets. Returns the game's
     record line, its clock line, and the game object (for a caller that wants the board).
@@ -2648,6 +2695,10 @@ def play(
     ``entry`` is the selection solve of these two sheets when the caller already has it
     (`solve_entry`; solved here when None). ``make_game`` builds the game in place of
     `HumanGame`, with its arguments (`timematch`'s agent in the person's seat, IKA-333).
+
+    ``start`` (IKA-423) begins the game at a recorded position (`GameStart`): no selection is
+    solved or asked, the picks are the start's, and the belief about a bench is the uniform one
+    (``priors`` None). ``probe`` stops after the first move decision (`HumanGame.probe`).
     """
     reg = agent.reg
     if agent_side not in (0, 1):
@@ -2677,7 +2728,7 @@ def play(
     deep_report: list[Any] = []
     sheets_sent = False
     selecting_person: _Asked | None = None
-    if entry is None and agent.evaluate is not None:
+    if start is None and entry is None and agent.evaluate is not None:
         from . import selection_deep
 
         reader = None
@@ -2709,14 +2760,18 @@ def play(
             # Not the AI's four: the page only learns that its reading is done.
             listener("selected", {})  # type: ignore[misc]
     selection_seconds = time.perf_counter() - started
-    mine = agent_pick(
-        entry, agent_side, six[agent_side], size,
-        np.random.default_rng([seed, game_index, 1, agent_side]),
+    mine = (
+        start.picks[agent_side] if start is not None else agent_pick(
+            entry, agent_side, six[agent_side], size,
+            np.random.default_rng([seed, game_index, 1, agent_side]),
+        )
     )
     if out is not None:
         out.write(f"\n相手のチーム（サイド {agent_side}）:\n{render_sheet(reg, six[agent_side], loc)}\n")
         out.write(f"\n自分のチーム（サイド {you}）:\n")
-    if selecting_person is not None:
+    if start is not None:
+        yours = start.picks[you]
+    elif selecting_person is not None:
         yours = selecting_person.result()
     else:
         if listener is not None:
@@ -2735,10 +2790,13 @@ def play(
         agent, person, agent_side=agent_side, sheets=six, picks=picks, bench_prior=priors,
         rng=np.random.default_rng([seed, game_index, 2]), max_turns=max_turns, loc=loc, out=out,
         listener=listener, interval_ms=interval_ms, on_move=on_move,
+        **({"start": start, "probe": probe} if start is not None else {}),
     )
     game.inputs = inputs
     record = game.play()
-    record.selection_source = "solved" if entry is not None else "uniform"
+    record.selection_source = (
+        "start" if start is not None else "solved" if entry is not None else "uniform"
+    )
     if entry is not None:
         record.selection_value = float(entry.value)
     widths = [row["width"] for row in game.clock if row["kind"] == "move"] or [0]
