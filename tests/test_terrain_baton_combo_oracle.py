@@ -66,6 +66,12 @@ WHIMSICOTT = TeamSet(
     moves=["Moonblast", "Solar Beam", "Psychic", "Protect"],
     sp={"hp": 2, "spa": 32, "spe": 32},
 )
+#: Whimsicott with Sunny Day (not the user's set: a weather move into its own weather).
+SUNNY_WHIMSICOTT = TeamSet(
+    species="Whimsicott", ability="Chlorophyll", nature="Timid", item="Life Orb",
+    moves=["Moonblast", "Sunny Day", "Psychic", "Protect"],
+    sp={"hp": 2, "spa": 32, "spe": 32},
+)
 POLITOED = TeamSet(
     species="Politoed", ability="Drizzle", nature="Calm", item="Sitrus Berry",
     moves=["Muddy Water", "Encore", "Rain Dance", "Psych Up"],
@@ -270,12 +276,29 @@ CASES: dict[str, tuple] = {
         [RAICHU, ARCHALUDON, ESPATHRA], "team 123", [],
         ["move 3 mega, move 1 1", IDLE], "|-prepare|p1b: Archaludon|Electro Shot",
     ),
+    # Rain Dance in Drizzle's rain: `setWeather` returns false for the same weather, so the
+    # rain keeps the turns it had (the port reset them to 5 before IKA-419).
+    "rain-dance-in-rain-fails": _case(
+        [POLITOED, RAICHU, CHARIZARD], "team 123", [["move 4 -2, move 4", IDLE]],
+        ["move 3, move 4", IDLE], "|-fail|p1a: Politoed",
+    ),
+    # Sunny Day the turn after Mega Charizard Y's Drought set the sun.
+    "sunny-day-in-sun-fails": _case(
+        [CHARIZARD, SUNNY_WHIMSICOTT, RAICHU], "team 123", [["move 4 mega, move 4", IDLE]],
+        ["move 2 1, move 2", IDLE], "|-fail|p1b: Whimsicott",
+    ),
+    # Control: Rain Dance in the sun replaces it with five turns of rain.
+    "control-rain-dance-in-sun": _case(
+        [CHARIZARD, POLITOED, RAICHU], "team 123", [],
+        ["move 4 mega, move 3", IDLE], "|-weather|RainDance",
+    ),
 }
 
 
 def _state(pos: Position) -> dict[str, object]:
     out: dict[str, object] = {
         "weather": pos.field.weather,
+        "weather turns": pos.field.weather_duration,
         "terrain": pos.field.terrain,
     }
     for index, side in enumerate(pos.sides):

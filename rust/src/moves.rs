@@ -4830,10 +4830,18 @@ fn apply_status_move(
     }
     if let Some(weather) = mv.weather.as_deref() {
         let weather = weather.to_lowercase().replace(' ', "");
-        turn.pos.field.weather = Some(Id::new(&weather));
-        turn.pos.field.weather_duration =
-            Some(effect_duration(turn, mv, &weather, action.side, action.slot).unwrap_or(5));
-        log_event!(turn, "weather -> {}", weather);
+        // `Field#setWeather`: `if (this.weather === status.id) ... return false;` -- the
+        // same weather again changes nothing, its turns left included (IKA-419: a Rain
+        // Dance in Drizzle's rain gave the rain 5 more turns). The judge above reads the
+        // unchanged weather as the move's failure.
+        if turn.pos.field.weather.as_ref().map(|w| w.as_str()) == Some(weather.as_str()) {
+            log_event!(turn, "{} failed ({} already up)", Label(reg, action), weather);
+        } else {
+            turn.pos.field.weather = Some(Id::new(&weather));
+            turn.pos.field.weather_duration =
+                Some(effect_duration(turn, mv, &weather, action.side, action.slot).unwrap_or(5));
+            log_event!(turn, "weather -> {}", weather);
+        }
     }
     if let Some(terrain) = mv.terrain.as_deref() {
         let terrain = terrain.to_lowercase().replace(' ', "");
