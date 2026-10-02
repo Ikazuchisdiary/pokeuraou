@@ -166,14 +166,20 @@ def stackless_leaf(reg, path):  # noqa: ANN001, ANN201
     return humanplay.process_leaf(reg, [path], "cpu", False)
 
 
-def test_a_child_read_pass_by_pass_is_the_child_read_whole(kit, monkeypatch, tmp_path) -> None:  # noqa: ANN001
+@pytest.mark.parametrize("me", [0, 1])
+def test_a_child_read_pass_by_pass_is_the_child_read_whole(kit, monkeypatch, tmp_path,  # noqa: ANN001
+                                                           me) -> None:  # noqa: ANN001
     """IKA-380 (`ladder.PASSES`): on the wall clock with worker processes, a depth-3 cell's
     children read pass by pass -- each pass's depth-2 cells in chunks on the workers, its
     rectangle solved by the reader, a child two cells reach read once -- is the read that
     reads each cell whole on one worker (`PASSES` off, IKA-375's split) and the read here
     without workers: mixture, value, stages, counted work and notes to the bit (a pass a
     child game, `STACK` off, here and in the workers). The positive controls: chunks of
-    passes were sent and children read by the reader, and children joined."""
+    passes were sent and children read by the reader, and children joined.
+
+    IKA-422: for side 1 as well (``me``), whose children are read as side 1 (`CHILD` ``seat``,
+    each child's mirror and each cell's actions the other way round): the control is that its
+    read differs from the one that reads them as side 0 (``guarantee``)."""
     from pokeuraou.value import save_model
 
     reg, pos, leaf = kit
@@ -194,7 +200,7 @@ def test_a_child_read_pass_by_pass_is_the_child_read_whole(kit, monkeypatch, tmp
             ladder._POOL = None
         try:
             return humanplay.solve_move(
-                reg, pos, 0, ours, theirs, None, leaf, budget=Budget.matrix(), exact=True,
+                reg, pos, me, ours, theirs, None, leaf, budget=Budget.matrix(), exact=True,
                 ladder={"stages": ladder.parse_ladder(stages), "budget_ms": 600_000.0,
                         "clock": "wall"})
         finally:
@@ -208,6 +214,13 @@ def test_a_child_read_pass_by_pass_is_the_child_read_whole(kit, monkeypatch, tmp
         ladder.stop_pool()
     alone = solved(True, False)
     assert [r.stage for r in passes.ladder.rungs] == stages.split("+")
+    monkeypatch.setattr(ladder, "CHILD", "guarantee")
+    reference = solved(True, False)
+    # Side 0 reads the children as the reference does; side 1 does not.
+    moved = any(a.value != b.value for a, b in zip(alone.ladder.rungs, reference.ladder.rungs,
+                                                    strict=True))
+    assert moved == (me == 1), f"side {me}: a read of the children as the reader moved: {moved}"
+    monkeypatch.setattr(ladder, "CHILD", "seat")
     for other in (split, alone):
         # The wall clock's milliseconds aside.
         assert np.asarray(passes.strategy).tobytes() == np.asarray(other.strategy).tobytes()

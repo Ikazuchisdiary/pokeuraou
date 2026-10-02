@@ -494,16 +494,24 @@ ORACLE_PASSES = int(os.environ.get("POKEURAOU_LADDER_ORACLE_PASSES", "0"))
 #: other side may then answer outside it at the depth-1 prices.
 KEEP = os.environ.get("POKEURAOU_LADDER_KEEP", "0") != "0"
 
-#: IKA-421: a depth-3-or-more cell's children (``POKEURAOU_LADDER_CHILD``): ``guarantee``
-#: (default) reads each child as side 0 and takes what side 0's answer guarantees -- a value
-#: that leans against side 0 whichever side reads the root; ``seat`` reads each child as the
-#: root's reading side and takes its guarantee (leaning against the reader, as the root's own
-#: value does); ``full`` takes the value of the child's whole matrix at its read's prices
-#: (the same from either seat). The serial road only (no worker processes).
-CHILD = os.environ.get("POKEURAOU_LADDER_CHILD", "guarantee")
+#: IKA-421, IKA-422: a depth-3-or-more cell's children (``POKEURAOU_LADDER_CHILD``): ``seat``
+#: (default, IKA-422) reads each child as the root's reading side and takes its guarantee
+#: (leaning against the reader, as the root's own value does), so a read from seat 1 is a
+#: read from seat 0 of the mirrored position; ``guarantee`` (the reference before IKA-422)
+#: reads each child as side 0 and takes what side 0's answer guarantees -- a value that leans
+#: against side 0 whichever side reads the root; ``full`` takes the value of the child's
+#: whole matrix at its read's prices (the same from either seat; the serial road only, no
+#: worker processes). ``seat`` and ``guarantee`` give a read from side 0 the same value to
+#: the bit.
+CHILD = os.environ.get("POKEURAOU_LADDER_CHILD", "seat")
 CHILDREN = ("guarantee", "seat", "full")
 #: The side the top-level read reads for (`CHILD` ``seat``).
 _READER = [0]
+
+
+def _reader() -> int:
+    """The side a deep cell's children are read as (`CHILD`)."""
+    return _READER[0] if CHILD == "seat" else 0
 
 
 def _diagnose(reg: Any, w: np.ndarray, before: list[np.ndarray], after: list[np.ndarray],  # noqa: ANN401, PLR0913
@@ -689,8 +697,8 @@ def read(  # noqa: PLR0913, PLR0912, PLR0915, C901 - the root, the stages, the c
         return (per_cell_ms(stage, _guess_cell_ms(stage, cost)) * cells * speed()
                 <= run.left_ms(work))
 
-    if CHILD != "guarantee" and pool is not None:
-        raise ValueError("POKEURAOU_LADDER_CHILD is read on the serial road only (no ladder pool)")
+    if CHILD == "full" and pool is not None:
+        raise ValueError("POKEURAOU_LADDER_CHILD=full is read on the serial road only (no ladder pool)")
     reader_before = _READER[0]
     if outer is None:
         _READER[0] = side
@@ -1228,7 +1236,7 @@ def _deep_children(  # noqa: PLR0913 - a cell's children and their stage
     the branches' values weighted."""
     work = search.WORK
     menus = iter(listed)
-    if BATCH_CHILDREN and stage.sub.sub is None and work is not None and CHILD == "guarantee":
+    if BATCH_CHILDREN and stage.sub.sub is None and work is not None and CHILD != "full":
         mark = dict(work)
         got = _children_at_once(reg, branches, weights, listed, leaf, stage, root_budget, budget,
                                 unmodelled, stop, work)
@@ -1261,7 +1269,7 @@ def _deep_children(  # noqa: PLR0913 - a cell's children and their stage
             work["subgames"] += 1
             work["cells"] += m.size
         # IKA-421 (`CHILD`): side 0 reads the child, or the root's reading side (``seat``).
-        reader = _READER[0] if CHILD == "seat" else 0
+        reader = _reader()
         if reader == 0:
             start = _Start(eq.row_strategy, [eq.col_strategy])
             got = read(reg, 0, crow, ccol, [Item(child)], [m], [1.0], start, leaf,
@@ -1426,7 +1434,7 @@ def _deep_open(  # noqa: PLR0913, PLR0912, C901 - one cell and its stage
                 continue
             kid = next(live)
             if kid.taken:
-                entries.append(("taken", None if kid.answer is None else kid.answer[2]))
+                entries.append(("taken", None if kid.answer is None else _kid_value(kid)))
             else:
                 entries.append(("kid", kid.position, kid.row, kid.col, kid.key, kid.prices,
                                 kid.x, kid.y, kid.notes, dict(kid.work, reads=0)))
@@ -1453,7 +1461,7 @@ def _deep_open(  # noqa: PLR0913, PLR0912, C901 - one cell and its stage
             digest = getattr(branch, "digest", None)
             key = (None if digest is None or search.SHARE is None
                    else subshare.kid_key(digest, crow, ccol, budget.enumerate_knockouts,
-                                         sub.label))
+                                         _kid_label(sub)))
             entries.append(("kid", child, list(crow), list(ccol), key, m,
                             np.asarray(eq.row_strategy), np.asarray(eq.col_strategy), set(notes),
                             {"turns": 0, "subgames": 1, "cells": m.size, "qs": 0, "reads": 0}))
@@ -1601,6 +1609,38 @@ class _Child:
     taken: bool = False
     notes: set = field(default_factory=set)
     work: dict = field(default_factory=dict)
+    #: IKA-422: the side that reads it (`CHILD`). From side 1 the child is read as its mirror:
+    #: prices ``-m.T`` (rows: side 1's menu), so the cell ``(a, b)`` of its rectangle is
+    #: the position's cell (row menu ``b``, column menu ``a``), its value negated.
+    reader: int = 0
+
+
+def _kid_cell(kid: _Child, a: int, b: int) -> tuple[int, int]:
+    """IKA-422: the (row menu, column menu) indices of the position's cell that the child's
+    rectangle cell ``(a, b)`` is."""
+    return (a, b) if kid.reader == 0 else (b, a)
+
+
+def _kid_ask(kid: _Child, a: int, b: int) -> tuple[Position, Any, Any]:  # noqa: ANN401
+    """IKA-422: the position and the two actions of the child's rectangle cell ``(a, b)``."""
+    i, j = _kid_cell(kid, a, b)
+    return kid.position, kid.row[i], kid.col[j]
+
+
+def _kid_framed(kid: _Child, value: float | None) -> float | None:
+    """IKA-422: a cell's value (side 0's units) in the child's frame, or the other way."""
+    return value if value is None or kid.reader == 0 else -value
+
+
+def _kid_value(kid: _Child) -> float:
+    """IKA-422: a child's guarantee (its reader's), in side 0's units."""
+    return float(_kid_framed(kid, kid.answer[2]))
+
+
+def _kid_label(sub: Stage) -> str:
+    """IKA-422: a child's stage in the read's table: a read's children are met from one side,
+    but a table must not give one side's guarantee to the other."""
+    return sub.label if _reader() == 0 else f"{sub.label}@1"
 
 
 # IKA-380: `_children_at_once`'s steps, one child at a time, so the reader can take a child
@@ -1626,14 +1666,15 @@ def _kids_open(  # noqa: PLR0913 - a cell's children and their stage
         crow, ccol = next(listed)
         if not crow or not ccol:
             return _ALONE
-        kid = _Child(branch.position, list(crow), list(ccol), None, None, None)
+        kid = _Child(branch.position, list(crow), list(ccol), None, None, None,
+                     reader=_reader())
         digest = getattr(branch, "digest", None)
         if table is not None and digest is not None:
             # IKA-378: a child this read has read already -- the same menus, the same fork
             # for its matrix, the same stage for its read -- is taken, with the work its read
             # counted.
             kid.key = subshare.kid_key(digest, kid.row, kid.col, budget.enumerate_knockouts,
-                                       sub.label)
+                                       _kid_label(sub))
             got = table.get(kid.key, kid=True)
             if got is not None:
                 value, cells, notes, packed = got
@@ -1693,7 +1734,10 @@ def _kid_begin(kid: _Child, sub: Stage) -> None:
     prices = [np.array(kid.prices, dtype=np.float64, copy=True)]
     x = np.asarray(kid.x, dtype=np.float64)
     ys = [np.asarray(kid.y, dtype=np.float64)]
-    kid.rows = _order(x, sum(w[k] * (prices[k] @ ys[k]) for k in range(1)), sub.rect,
+    if kid.reader == 1:
+        # IKA-422: the child as side 1 reads it: its mirror (rows: side 1's menu).
+        prices, x, ys = [-prices[0].T.copy()], ys[0], [x]
+    kid.rows =_order(x, sum(w[k] * (prices[k] @ ys[k]) for k in range(1)), sub.rect,
                       larger=True)
     kid.cols = _order(ys[0], x @ prices[0], sub.rect, larger=False)
     kid.trial = prices[0].copy()
@@ -1838,7 +1882,7 @@ def _children_at_once(  # noqa: PLR0913, PLR0912, C901 - a cell's children throu
                 chunk = asked[at:at + CHUNK]
                 groups.append(len(chunk))
                 group_kids.append(kid)
-                cells += [(kid.position, kid.row[i], kid.col[j]) for i, j in chunk]
+                cells += [_kid_ask(kid, i, j) for i, j in chunk]
                 owners += [(kid, cell) for cell in chunk]
         if stop is not None and stop.is_set():
             raise Stopped
@@ -1858,7 +1902,7 @@ def _children_at_once(  # noqa: PLR0913, PLR0912, C901 - a cell's children throu
                 outer_cells.extend(by_cell)
             for (kid, cell), (value, _notes, _solved), done in zip(owners, found, by_cell,
                                                                   strict=True):
-                kid.memo[cell] = value
+                kid.memo[cell] = _kid_framed(kid, value)
                 for name in ("turns", "subgames", "cells"):
                     kid.work[name] += done[name]
             if sub.q:
@@ -1881,7 +1925,7 @@ def _children_at_once(  # noqa: PLR0913, PLR0912, C901 - a cell's children throu
         work["reads"] += 1
         if kid.answer is None:
             return None
-        values.append(float(kid.answer[2]))
+        values.append(_kid_value(kid))
     return float(np.asarray(values) @ weights)
 
 
@@ -2058,6 +2102,9 @@ def _pool_main(conn: Any, format_id: str, factory: Any, args: tuple[Any, ...],  
             # A new read: its menus, completions and budget. The shared turns and the cells'
             # bench reach are keyed by the read's own indices, so they start again.
             context = message[1:7]
+            # IKA-422: the side the read is for (the context's hidden side is the other),
+            # which reads a deep cell's children (`CHILD`).
+            _READER[0] = 1 - context[4]
             turns = {False: {}, True: {}}
             clean = {}
             if table is not None:
@@ -2795,11 +2842,11 @@ class _Pool:
                 for at in range(0, len(asked), CHUNK):
                     chunk = asked[at:at + CHUNK]
                     inner.append(("pass", drive.stage, drive.budget,
-                                  [(kid.position, kid.row[a], kid.col[b]) for a, b in chunk],
+                                  [_kid_ask(kid, a, b) for a, b in chunk],
                                   (drive, chunk)))
             else:
                 for a, b in asked:
-                    op = _Open(drive.stage, drive.budget, (kid.position, kid.row[a], kid.col[b]),
+                    op = _Open(drive.stage, drive.budget, _kid_ask(kid, a, b),
                                ("kid", drive, (a, b)), top=drive.top)
                     inner.append(("open", drive.stage, drive.budget, op.payload, op))
 
@@ -2835,7 +2882,7 @@ class _Pool:
         def finish_drive(drive: _Drive) -> None:
             kid = drive.kid
             drive.done = True
-            drive.value = None if kid.answer is None else kid.answer[2]
+            drive.value = None if kid.answer is None else _kid_value(kid)
             if drive.road == "at-once" and self.table is not None:
                 _kid_keep(self.table, kid)
             self.stats["kidReads"] += 1
@@ -2884,7 +2931,7 @@ class _Pool:
                     early(index, [value])
                 return
             _kind, drive, cell = op.owner
-            drive.kid.memo[cell] = value
+            drive.kid.memo[cell] = _kid_framed(drive.kid, value)
             for done in works:
                 for name, n in done.items():
                     drive.kid.work[name] = drive.kid.work.get(name, 0) + n
@@ -2911,7 +2958,7 @@ class _Pool:
                 _k, position, crow, ccol, key, m, x, y, kid_notes, kid_work = entry
                 drive = drives.get(key) if key is not None else None
                 if drive is None:
-                    kid = _Child(position, list(crow), list(ccol), m, x, y)
+                    kid = _Child(position, list(crow), list(ccol), m, x, y, reader=_reader())
                     kid.key, kid.notes, kid.work = key, set(kid_notes), dict(kid_work)
                     drive = _Drive(kid, sub, budget_of(sub), op.road, top=op.top or op)
                     if key is not None:
@@ -3040,7 +3087,7 @@ class _Pool:
                             else:
                                 kid = drive.kid
                                 for cell, value, done in zip(chunk, values, done_work, strict=True):
-                                    kid.memo[cell] = value
+                                    kid.memo[cell] = _kid_framed(kid, value)
                                     for name in ("turns", "subgames", "cells", "qs"):
                                         kid.work[name] += done[name]
                                 drive.out -= len(chunk)

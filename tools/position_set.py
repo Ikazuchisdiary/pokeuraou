@@ -856,6 +856,12 @@ def _best_got(x: np.ndarray, matrix, weights=None) -> tuple[float, float]:  # no
     return best, got
 
 
+def _oriented(matrix, side: int):  # noqa: ANN001, ANN202
+    """A reference game as the reading side sees it (IKA-422): side 1's win probabilities
+    against side 0's mixtures, rows its own. Side 0's is the stored matrix."""
+    return matrix if side == 0 else 1.0 - np.asarray(matrix, dtype=np.float64).T
+
+
 def _score(x: np.ndarray, claimed: float, refs: dict) -> dict:
     """``refs``: label -> (matrix, weights or None)."""
     out = {}
@@ -886,6 +892,7 @@ def sweep(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912, PLR0915 - t
         return f"{name}:{','.join(keys)}"
 
     conds = [timematch.parse_condition(spelled(a)) for a in args.arm]
+    side = int(getattr(args, "side", 0))
     price = humanplay.node_time(1)
     refs_dirs = sorted(d for d in Path(args.set).glob("ref-*") if d.is_dir())
     for n in _mine(args, len(kit.positions)):
@@ -897,11 +904,15 @@ def sweep(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912, PLR0915 - t
         ref = found["r24"] if "r24" in found else next(iter(found.values()))
         spreads = kit.spreads(n)
         exact = spreads is None
+        if side and not exact:
+            raise SystemExit("--side 1 reads open positions only")
         classes = 1 if exact else len(spreads[1])
         full = kit.menus(pos, spreads)
         if [a.to_choice() for a in full[0]] != list(ref["rows"]):
             raise SystemExit(f"position {n}: the menus are not the reference's (another leaf or Q?)")
-        index = {c: i for i, c in enumerate(ref["rows"])}
+        if side and [a.to_choice() for a in full[1]] != list(ref["cols"]):
+            raise SystemExit(f"position {n}: the column menus are not the reference's")
+        index = {c: i for i, c in enumerate(ref["cols"] if side else ref["rows"])}
         counts = (humanplay.legal_count(kit.reg, pos, 0), humanplay.legal_count(kit.reg, pos, 1),
                   classes)
         for base in conds:
@@ -910,7 +921,8 @@ def sweep(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912, PLR0915 - t
                                  "read on the wall clock (IKA-364)")
             for seconds in budgets:
                 cond = replace(base, seconds=seconds)
-                name = f"{cond.name}@{seconds:g}"
+                arm = cond.name + ("-s1" if side else "")
+                name = f"{arm}@{seconds:g}"
                 path = Path(args.set) / "sweep" / name / f"{n}.json"
                 if path.exists():
                     continue
@@ -930,7 +942,7 @@ def sweep(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912, PLR0915 - t
                     clocked = ({"clock": "count", "start_ms": node_ms} if cond.clock == "count"
                                else {"clock": "wall", "start_ms": 0.0, "began": began})
                     solved = humanplay.solve_move(
-                        kit.reg, pos, 0, list(ours), list(theirs), spreads, kit.leaf,
+                        kit.reg, pos, side, list(ours), list(theirs), spreads, kit.leaf,
                         budget=budget, exact=exact, ladder={"stages": parse_ladder(cond.ladder),
                                             "budget_ms": seconds * 1000.0,
                                             "cost": LADDER_COSTS["local", 1], **clocked})
@@ -964,7 +976,8 @@ def sweep(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912, PLR0915 - t
                         extra["expanded"] = solved.deepened.expanded
                 took = time.perf_counter() - began
 
-                def mapped(strategy, actions=solved.ours, index=index):  # noqa: ANN001, ANN202
+                def mapped(strategy, actions=solved.theirs if side else solved.ours,  # noqa: ANN001, ANN202
+                           index=index):
                     x = np.zeros(len(index), dtype=np.float64)
                     lost = 0.0
                     for a, p in zip(actions, strategy, strict=True):
@@ -976,13 +989,16 @@ def sweep(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912, PLR0915 - t
                     return (x / x.sum() if x.sum() > 0 else x), lost
 
                 x, outside_mass = mapped(solved.strategy)
-                refs = {"d1": (ref["d1"], ref.get("weights", None))} | {
-                    f"d2-{k}": (r["d2"], r.get("weights", None))
+                refs = {"d1": (_oriented(ref["d1"], side), ref.get("weights", None))} | {
+                    f"d2-{k}": (_oriented(r["d2"], side), r.get("weights", None))
                     for k, r in found.items()}
+                # The reading's own units: side 1's are its win probabilities (1 - side 0's).
+                claim = solved.value if side == 0 else 1.0 - solved.value
                 if cond.ladder is not None:
                     # Each completed stage scored as the answer it was: the read's own curve.
                     # The depth-1 answer first, as a stage that spent the node.
                     x0, v0 = solved.ladder.start
+                    v0 = v0 if side == 0 else 1.0 + v0
                     extra["rungScores"] = [
                         {"stage": "d1", "spentMs": round(node_ms, 1), "wallMs": 0.0,
                          "x": [round(float(v), 6) for v in mapped(x0)[0]], "claimed": v0}
@@ -991,14 +1007,15 @@ def sweep(args: argparse.Namespace) -> None:  # noqa: C901, PLR0912, PLR0915 - t
                         {"stage": g.stage, "spentMs": round(g.spent_ms, 1),
                          "wallMs": round(g.wall_ms, 1),
                          "x": [round(float(v), 6) for v in mapped(g.strategy)[0]],
-                         "claimed": g.value}
-                        | _score(mapped(g.strategy)[0], g.value, refs)
+                         "claimed": g.value if side == 0 else 1.0 + g.value}
+                        | _score(mapped(g.strategy)[0], g.value if side == 0 else 1.0 + g.value,
+                                 refs)
                         for g in solved.ladder.rungs]
-                row = {"n": n, "arm": cond.name, "budget": seconds, "wall": round(took, 3),
+                row = {"n": n, "arm": arm, "budget": seconds, "wall": round(took, 3),
                        "nodeMs": round(node_ms, 2), "width": width, "classes": classes,
-                       "claimed": solved.value,
+                       "claimed": claim, "side": side,
                        "outsideMass": outside_mass, "x": [round(float(v), 6) for v in x],
-                       **extra} | _score(x, solved.value, refs)
+                       **extra} | _score(x, claim, refs)
                 _write(path, row)
                 if (args.keep_matrix and cond.ladder is not None and width >= kit.width
                         and seconds == max(budgets)):
@@ -1033,7 +1050,7 @@ def _sweep_rows(set_dir: Path) -> dict:
             if all(key in r for r, _x in scored):
                 continue
             npz = np.load(d / f"{n}.npz")
-            game = (npz["d2"], npz.get("weights", None))
+            game = (_oriented(npz["d2"], row.get("side", 0)), npz.get("weights", None))
             for r, xr in scored:
                 b, got = _best_got(xr, *game)
                 r[key] = {"best": b, "got": got, "loss": b - got, "curse": r["claimed"] - got}
@@ -1321,6 +1338,10 @@ def main(argv: list[str] | None = None) -> None:
             s.add_argument("--keep-matrix", action="store_true",
                            help="a ladder's root prices at the longest budget kept as a "
                                 "reference ref-<arm>@<s>")
+            s.add_argument("--side", type=int, default=0, choices=(0, 1),
+                           help="the side that reads (IKA-422; open positions only): side 1 "
+                                "reads its own menu, its mixture scored in the reference "
+                                "game from its side; the arm is written as <arm>-s1")
         elif name == "ladder-ref":
             s.add_argument("--name", required=True, help="the reference's name: SET/ref-<name>")
             s.add_argument("--base", default="r24", help="the every-cell depth-2 reference")
