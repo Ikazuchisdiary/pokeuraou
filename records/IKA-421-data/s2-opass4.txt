@@ -1,0 +1,122 @@
+s2top vs s2opass4: 600 positions
+
+== open
+  [first depth-2 stage of each read, n 300]
+    base answer's top differs from depth 1's: 0.363; mean distance from depth 1's mixture 0.344
+    s2opass4 kept an earlier answer at some depth-2 stage: 0.000; tops differ base vs s2opass4: 37 (0.123)
+    log loss vs d1: base guarantee -0.0203 (0.0118), base full -0.0074 (0.0045), s2opass4 guarantee -0.0198 (0.0101), s2opass4 full -0.0061 (0.0054)
+    s2opass4 - base: guarantee +0.0005 (0.0058), full +0.0013 (0.0018); bias base +0.0058 s2opass4 +0.0157
+    where the tops differ (n 37): d1 log 0.2901, base 0.2380, s2opass4 0.2185; s2opass4 - base -0.0195 (0.0381); full: base 0.2657 s2opass4 0.2657
+  [last depth-2 stage of each read, n 300]
+    base answer's top differs from depth 1's: 0.450; mean distance from depth 1's mixture 0.438
+    s2opass4 kept an earlier answer at some depth-2 stage: 0.000; tops differ base vs s2opass4: 10 (0.033)
+    log loss vs d1: base guarantee -0.0055 (0.0109), base full -0.0038 (0.0103), s2opass4 guarantee -0.0022 (0.0114), s2opass4 full -0.0026 (0.0113)
+    s2opass4 - base: guarantee +0.0032 (0.0025), full +0.0012 (0.0021); bias base +0.0248 s2opass4 +0.0263
+    where the tops differ (n 10): d1 log 0.2319, base 0.2022, s2opass4 0.2055; s2opass4 - base +0.0032 (0.0073); full: base 0.1953 s2opass4 0.2002
+
+== hidden
+  [first depth-2 stage of each read, n 299]
+    base answer's top differs from depth 1's: 0.482; mean distance from depth 1's mixture 0.405
+    s2opass4 kept an earlier answer at some depth-2 stage: 0.000; tops differ base vs s2opass4: 79 (0.264)
+    log loss vs d1: base guarantee +0.0134 (0.0173), base full -0.0068 (0.0035), s2opass4 guarantee +0.0204 (0.0169), s2opass4 full -0.0072 (0.0046)
+    s2opass4 - base: guarantee +0.0070 (0.0160), full -0.0004 (0.0019); bias base -0.0378 s2opass4 -0.0229
+    where the tops differ (n 79): d1 log 0.5294, base 0.5814, s2opass4 0.6153; s2opass4 - base +0.0338 (0.0592); full: base 0.5241 s2opass4 0.5207
+  [last depth-2 stage of each read, n 299]
+    base answer's top differs from depth 1's: 0.548; mean distance from depth 1's mixture 0.515
+    s2opass4 kept an earlier answer at some depth-2 stage: 0.000; tops differ base vs s2opass4: 54 (0.181)
+    log loss vs d1: base guarantee +0.0078 (0.0107), base full -0.0046 (0.0056), s2opass4 guarantee +0.0107 (0.0119), s2opass4 full -0.0047 (0.0060)
+    s2opass4 - base: guarantee +0.0029 (0.0066), full -0.0001 (0.0010); bias base -0.0233 s2opass4 -0.0133
+    where the tops differ (n 54): d1 log 0.4408, base 0.4320, s2opass4 0.4639; s2opass4 - base +0.0319 (0.0314); full: base 0.4351 s2opass4 0.4345
+read s2opass4: 600 rows
+
+== open: per stage, means over the reads that completed it (se)
+stage | n | step | value - d1 | full - d1 | guarantee - full | rect - full | upper - full | cells at d1 answer | changed share
+0 d2r4b3k8 | 300 | -0.0129 (0.0039) | -0.0129 (0.0039) | -0.0008 (0.0023) | -0.0122 (0.0029) | -0.0032 (0.0032) | +0.0087 (0.0018) | -0.0061 (0.0054) | 0.79
+1 d2r8b3k8 | 300 | +0.0049 (0.0015) | -0.0080 (0.0040) | -0.0017 (0.0032) | -0.0063 (0.0017) | -0.0010 (0.0020) | +0.0048 (0.0014) | -0.0061 (0.0054) | 0.56
+2 d2r12b3k8 | 300 | +0.0026 (0.0008) | -0.0054 (0.0042) | -0.0018 (0.0036) | -0.0036 (0.0012) | -0.0009 (0.0013) | +0.0043 (0.0015) | -0.0061 (0.0054) | 0.46
+3 d2r12b3k16 | 292 | +0.0023 (0.0010) | -0.0031 (0.0045) | -0.0020 (0.0043) | -0.0011 (0.0005) | -0.0005 (0.0005) | +0.0017 (0.0012) | -0.0057 (0.0055) | 0.52
+4 d2r16b3k16 | 224 | -0.0001 (0.0001) | -0.0043 (0.0049) | -0.0042 (0.0048) | -0.0001 (0.0001) | -0.0001 (0.0001) | +0.0027 (0.0026) | -0.0029 (0.0063) | 0.28
+5 d2r16bak24x | 140 | +0.0020 (0.0025) | -0.0020 (0.0026) | -0.0015 (0.0025) | -0.0005 (0.0005) | +0.0000 (0.0000) | +0.0000 (0.0000) | +0.0055 (0.0069) | 0.50
+6 d2r24bak24x | 129 | -0.0000 (0.0000) | -0.0024 (0.0026) | -0.0024 (0.0026) | -0.0000 (0.0000) | -0.0000 (0.0000) | +0.0000 (0.0000) | -0.0017 (0.0031) | 0.14
+  [first depth-2 stage, n 300; d1 log 0.2185, bias +0.0286]
+    guarantee log 0.1987  vs d1 -0.0198 (0.0101)  bias +0.0157  move -0.0129  borne 1.08 (0.21)
+    full      log 0.2124  vs d1 -0.0061 (0.0054)  bias +0.0278  move -0.0008  borne 1.04 (0.38)
+    rect      log 0.2120  vs d1 -0.0065 (0.0118)  bias +0.0247  move -0.0040  borne 0.66 (0.19)
+    mid       log 0.2091  vs d1 -0.0094 (0.0084)  bias +0.0261  move -0.0025  borne 1.05 (0.29)
+  [last depth-2 stage, n 300; d1 log 0.2185, bias +0.0286]
+    guarantee log 0.2163  vs d1 -0.0022 (0.0114)  bias +0.0263  move -0.0023  borne 0.54 (0.20)
+    full      log 0.2159  vs d1 -0.0026 (0.0113)  bias +0.0272  move -0.0014  borne 0.55 (0.20)
+    rect      log 0.2158  vs d1 -0.0027 (0.0114)  bias +0.0271  move -0.0015  borne 0.55 (0.20)
+    mid       log 0.2173  vs d1 -0.0012 (0.0107)  bias +0.0282  move -0.0004  borne 0.52 (0.23)
+
+== hidden: per stage, means over the reads that completed it (se)
+stage | n | step | value - d1 | full - d1 | guarantee - full | rect - full | upper - full | cells at d1 answer | changed share
+0 d2r4b3k8 | 299 | -0.0171 (0.0037) | -0.0171 (0.0037) | +0.0021 (0.0024) | -0.0192 (0.0027) | +0.0004 (0.0016) | +0.0167 (0.0015) | +0.0061 (0.0042) | 0.95
+1 d2r8b3k8 | 207 | +0.0137 (0.0033) | -0.0001 (0.0038) | +0.0052 (0.0038) | -0.0052 (0.0008) | +0.0018 (0.0012) | +0.0066 (0.0012) | +0.0084 (0.0052) | 0.72
+2 d2r12b3k8 | 92 | +0.0005 (0.0019) | +0.0058 (0.0064) | +0.0097 (0.0060) | -0.0039 (0.0023) | +0.0016 (0.0010) | +0.0025 (0.0011) | +0.0122 (0.0078) | 0.55
+  [first depth-2 stage, n 299; d1 log 0.4797, bias -0.0058]
+    guarantee log 0.5001  vs d1 +0.0204 (0.0169)  bias -0.0229  move -0.0171  borne 0.15 (0.36)
+    full      log 0.4725  vs d1 -0.0072 (0.0046)  bias -0.0037  move +0.0021  borne 1.22 (0.56)
+    rect      log 0.4822  vs d1 +0.0024 (0.0109)  bias -0.0033  move +0.0025  borne 0.66 (0.39)
+    mid       log 0.4766  vs d1 -0.0032 (0.0061)  bias -0.0050  move +0.0008  borne 0.72 (0.48)
+  [last depth-2 stage, n 299; d1 log 0.4797, bias -0.0058]
+    guarantee log 0.4905  vs d1 +0.0107 (0.0119)  bias -0.0133  move -0.0075  borne 0.33 (0.40)
+    full      log 0.4750  vs d1 -0.0047 (0.0060)  bias -0.0022  move +0.0036  borne 0.81 (0.47)
+    rect      log 0.4818  vs d1 +0.0020 (0.0109)  bias -0.0019  move +0.0039  borne 0.66 (0.38)
+    mid       log 0.4776  vs d1 -0.0022 (0.0064)  bias -0.0023  move +0.0035  borne 0.66 (0.45)
+
+== hidden-seen: per stage, means over the reads that completed it (se)
+stage | n | step | value - d1 | full - d1 | guarantee - full | rect - full | upper - full | cells at d1 answer | changed share
+0 d2r4b3k8 | 300 | -0.0148 (0.0032) | -0.0148 (0.0032) | +0.0035 (0.0024) | -0.0182 (0.0021) | -0.0004 (0.0016) | +0.0172 (0.0019) | +0.0080 (0.0043) | 0.96
+1 d2r8b3k8 | 300 | +0.0122 (0.0020) | -0.0026 (0.0030) | +0.0046 (0.0029) | -0.0071 (0.0009) | +0.0011 (0.0010) | +0.0076 (0.0011) | +0.0081 (0.0043) | 0.74
+2 d2r12b3k8 | 300 | +0.0041 (0.0011) | +0.0015 (0.0033) | +0.0048 (0.0032) | -0.0033 (0.0008) | +0.0007 (0.0005) | +0.0028 (0.0006) | +0.0081 (0.0044) | 0.66
+3 d2r12b3k16 | 248 | +0.0019 (0.0009) | +0.0055 (0.0038) | +0.0069 (0.0037) | -0.0013 (0.0006) | +0.0005 (0.0003) | +0.0008 (0.0003) | +0.0090 (0.0049) | 0.78
+4 d2r16b3k16 | 105 | +0.0004 (0.0004) | -0.0011 (0.0060) | -0.0005 (0.0062) | -0.0007 (0.0007) | +0.0001 (0.0001) | +0.0001 (0.0001) | +0.0055 (0.0085) | 0.45
+  [first depth-2 stage, n 300; d1 log 0.4762, bias +0.0003]
+    guarantee log 0.4862  vs d1 +0.0100 (0.0117)  bias -0.0145  move -0.0148  borne 0.31 (0.42)
+    full      log 0.4691  vs d1 -0.0071 (0.0046)  bias +0.0037  move +0.0035  borne 1.12 (0.55)
+    rect      log 0.4774  vs d1 +0.0012 (0.0110)  bias +0.0034  move +0.0031  borne 0.76 (0.39)
+    mid       log 0.4722  vs d1 -0.0040 (0.0058)  bias +0.0032  move +0.0029  borne 0.86 (0.49)
+  [last depth-2 stage, n 300; d1 log 0.4762, bias +0.0003]
+    guarantee log 0.4815  vs d1 +0.0053 (0.0109)  bias +0.0034  move +0.0031  borne 0.43 (0.39)
+    full      log 0.4802  vs d1 +0.0040 (0.0108)  bias +0.0053  move +0.0050  borne 0.52 (0.40)
+    rect      log 0.4797  vs d1 +0.0036 (0.0110)  bias +0.0055  move +0.0052  borne 0.55 (0.39)
+    mid       log 0.4805  vs d1 +0.0043 (0.0108)  bias +0.0050  move +0.0047  borne 0.50 (0.40)
+== hidden40 opass4
+
+against F2
+  arm            s   n     loss      se    curse  outside
+  w64            4  40   0.0220  0.0046  +0.0132    0.000
+  w64            8  40   0.0186  0.0039  +0.0162    0.000
+  w64           16  40   0.0138  0.0024  +0.0102    0.000
+
+against F1
+  arm            s   n     loss      se    curse  outside
+  w64            4  40   0.0253  0.0041  +0.0205    0.000
+  w64            8  40   0.0273  0.0039  +0.0289    0.000
+  w64           16  40   0.0309  0.0047  +0.0312    0.000
+== open9 opass4
+
+against F2
+  arm            s   n     loss      se    curse  outside
+  w64            4   9   0.0020  0.0012  +0.0007    0.000
+  w64            8   9   0.0033  0.0025  -0.0236    0.000
+  w64           16   9   0.0032  0.0025  -0.0225    0.000
+
+against F1
+  arm            s   n     loss      se    curse  outside
+  w64            4   9   0.0119  0.0085  +0.0281    0.000
+  w64            8   9   0.0121  0.0084  +0.0027    0.000
+  w64           16   9   0.0117  0.0083  +0.0034    0.000
+hidden40 F2|w64|4.0: n 40 base 0.0300 opass4 0.0220 diff -0.0080 (se 0.0042) better 12 worse 8 moved 20
+hidden40 F2|w64|8.0: n 40 base 0.0174 opass4 0.0186 diff +0.0012 (se 0.0022) better 6 worse 9 moved 15
+hidden40 F2|w64|16.0: n 40 base 0.0165 opass4 0.0138 diff -0.0027 (se 0.0023) better 6 worse 7 moved 13
+hidden40 F1|w64|4.0: n 40 base 0.0287 opass4 0.0253 diff -0.0034 (se 0.0019) better 13 worse 8 moved 21
+hidden40 F1|w64|8.0: n 40 base 0.0237 opass4 0.0273 diff +0.0036 (se 0.0022) better 5 worse 11 moved 16
+hidden40 F1|w64|16.0: n 40 base 0.0266 opass4 0.0309 diff +0.0043 (se 0.0025) better 5 worse 8 moved 13
+open9 F2|w64|4.0: n 9 base 0.0020 opass4 0.0020 diff -0.0000 (se 0.0000) better 0 worse 0 moved 0
+open9 F2|w64|8.0: n 9 base 0.0033 opass4 0.0033 diff +0.0000 (se 0.0000) better 0 worse 0 moved 0
+open9 F2|w64|16.0: n 9 base 0.0032 opass4 0.0032 diff +0.0000 (se 0.0000) better 0 worse 0 moved 0
+open9 F1|w64|4.0: n 9 base 0.0123 opass4 0.0119 diff -0.0004 (se 0.0004) better 1 worse 0 moved 1
+open9 F1|w64|8.0: n 9 base 0.0121 opass4 0.0121 diff +0.0000 (se 0.0000) better 0 worse 0 moved 0
+open9 F1|w64|16.0: n 9 base 0.0117 opass4 0.0117 diff +0.0000 (se 0.0000) better 0 worse 0 moved 0

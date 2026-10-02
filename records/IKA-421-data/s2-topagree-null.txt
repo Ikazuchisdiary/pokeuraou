@@ -1,0 +1,25 @@
+s2top vs s2top: 600 positions
+
+== open
+  [first depth-2 stage of each read, n 300]
+    base answer's top differs from depth 1's: 0.363; mean distance from depth 1's mixture 0.344
+    s2top kept an earlier answer at some depth-2 stage: 0.000; tops differ base vs s2top: 0 (0.000)
+    log loss vs d1: base guarantee -0.0203 (0.0118), base full -0.0074 (0.0045), s2top guarantee -0.0203 (0.0118), s2top full -0.0074 (0.0045)
+    s2top - base: guarantee +0.0000 (0.0000), full +0.0000 (0.0000); bias base +0.0058 s2top +0.0058
+  [last depth-2 stage of each read, n 300]
+    base answer's top differs from depth 1's: 0.450; mean distance from depth 1's mixture 0.438
+    s2top kept an earlier answer at some depth-2 stage: 0.000; tops differ base vs s2top: 0 (0.000)
+    log loss vs d1: base guarantee -0.0055 (0.0109), base full -0.0038 (0.0103), s2top guarantee -0.0055 (0.0109), s2top full -0.0038 (0.0103)
+    s2top - base: guarantee +0.0000 (0.0000), full +0.0000 (0.0000); bias base +0.0248 s2top +0.0248
+
+== hidden
+  [first depth-2 stage of each read, n 300]
+    base answer's top differs from depth 1's: 0.480; mean distance from depth 1's mixture 0.405
+    s2top kept an earlier answer at some depth-2 stage: 0.000; tops differ base vs s2top: 0 (0.000)
+    log loss vs d1: base guarantee +0.0134 (0.0172), base full -0.0068 (0.0035), s2top guarantee +0.0134 (0.0172), s2top full -0.0068 (0.0035)
+    s2top - base: guarantee +0.0000 (0.0000), full +0.0000 (0.0000); bias base -0.0380 s2top -0.0380
+  [last depth-2 stage of each read, n 300]
+    base answer's top differs from depth 1's: 0.547; mean distance from depth 1's mixture 0.514
+    s2top kept an earlier answer at some depth-2 stage: 0.000; tops differ base vs s2top: 0 (0.000)
+    log loss vs d1: base guarantee +0.0078 (0.0106), base full -0.0046 (0.0056), s2top guarantee +0.0078 (0.0106), s2top full -0.0046 (0.0056)
+    s2top - base: guarantee +0.0000 (0.0000), full +0.0000 (0.0000); bias base -0.0236 s2top -0.0236

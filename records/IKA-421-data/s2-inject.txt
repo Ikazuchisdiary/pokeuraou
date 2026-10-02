@@ -1,0 +1,16 @@
+upper bound is the worst row: failed ['test_the_diagnosis_changes_no_answer_and_its_bounds_hold'] | FAILED tests/test_ladder.py::test_the_diagnosis_changes_no_answer_and_its_bounds_hold
+the diagnosis moves a price: failed ['test_the_diagnosis_changes_no_answer_and_its_bounds_hold', 'test_the_value_switch_moves_only_the_value'] | FAILED tests/test_ladder.py::test_the_value_switch_moves_only_the_value - Ass...
+the value switch moves the strategy: failed ['test_the_value_switch_moves_only_the_value'] | FAILED tests/test_ladder.py::test_the_value_switch_moves_only_the_value - Ass...
+the passes switch is ignored: failed ['test_more_oracle_passes_grow_the_rectangle'] | FAILED tests/test_ladder.py::test_more_oracle_passes_grow_the_rectangle - Ass...
+the tool's swapped orientation is side 1's: failed ['test_a_seat_swapped_read_is_the_other_sides_read'] | FAILED tests/test_ladder.py::test_a_seat_swapped_read_is_the_other_sides_read
+A/A: a statement that does nothing: failed none | !!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!
+restored, hashes match
+the keep switch never keeps: failed ['test_a_stage_that_guarantees_less_keeps_the_answer_before'] | FAILED tests/test_ladder.py::test_a_stage_that_guarantees_less_keeps_the_answer_before
+A/A: a statement that does nothing: failed none | .....                                                                    [100%]
+restored, hashes match
+the passes switch is ignored: failed ['test_more_oracle_passes_grow_the_rectangle'] | FAILED tests/test_ladder.py::test_more_oracle_passes_grow_the_rectangle - Ass...
+the passes switch reads IKA-380's variable: failed ['test_the_ika421_switches_read_their_own_environment'] | FAILED tests/test_ladder.py::test_the_ika421_switches_read_their_own_environment
+the seat switch reads children as side 0: failed ['test_a_depth_three_childs_value_follows_the_switch'] | FAILED tests/test_ladder.py::test_a_depth_three_childs_value_follows_the_switch
+the full switch takes the guarantee: failed ['test_a_depth_three_childs_value_follows_the_switch'] | FAILED tests/test_ladder.py::test_a_depth_three_childs_value_follows_the_switch
+A/A: a statement that does nothing: failed none | .......                                                                  [100%]
+restored, hashes match

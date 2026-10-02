@@ -28,7 +28,10 @@ scores the values against the recorded games' results instead.
   at the production weights. Each read keeps the depth-0 value (the leaf on the position, or
   the completions' weighted leaf), the depth-1 node's value and every stage's value with its
   counted time. ``--d1-only`` stops after the depth-1 node (a cheap read for a weak model).
-  Written to ``SET/read-<name>/<n>.json``.
+  Written to ``SET/read-<name>/<n>.json``. IKA-421 stage 2: each answer's most played row
+  (``top``) and its distance from the depth-1 answer (``tv``); with ``POKEURAOU_LADDER_DIAG=1``
+  each stage's other values (`ladder.DIAG`); ``--side 1`` / ``--swap`` read the open game from
+  the other seat (the mirror), every value still in the recorded side 0's units.
 * **report**: per value (depth 0, depth 1, the last stage of depth 2 / 3 completed within
   each of ``--budgets``), its log loss, Brier score and calibration against the results, the
   paired differences with standard errors (one position a game, so the positions are the
