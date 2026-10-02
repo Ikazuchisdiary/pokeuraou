@@ -92,7 +92,10 @@ DEFAULT_Q = "data/models/q-mc4.pt"
 def _mine(args: argparse.Namespace, count: int):  # noqa: ANN201 - an iterator of positions
     """This process's positions: ``--from``..``--to``, every ``--stride``-th from ``--offset``,
     or with ``--claim`` each one no other process has claimed yet (`_units`)."""
-    return _units(args, list(range(args.start, min(args.stop, count))))
+    only = getattr(args, "only", None)  # IKA-418: these positions of the set, in this order
+    picked = ([int(n) for n in only.split(",")] if only
+              else list(range(args.start, min(args.stop, count))))
+    return _units(args, picked)
 
 
 def _units(args: argparse.Namespace, units: list):  # noqa: ANN201 - an iterator of units
@@ -305,6 +308,11 @@ def reference(args: argparse.Namespace) -> None:
             base = np.load(Path(args.set) / f"ref-{args.menus_from}" / f"{n}.npz")
             ours = _from_choices(kit.reg, pos, 0, base["rows"])
             theirs = _from_choices(kit.reg, pos, 1, base["cols"])
+        elif getattr(args, "all_actions", False):
+            # IKA-418: every legal action of both sides, not the set's width.
+            from pokeuraou.deepen import ALL_ACTIONS
+
+            ours, theirs, _outside = kit.menus_at(pos, ALL_ACTIONS, spreads)
         else:
             ours, theirs, _outside = kit.menus(pos, spreads)
         budget = Budget.matrix()
@@ -318,6 +326,8 @@ def reference(args: argparse.Namespace) -> None:
             d2 = d1.copy()
             for i, a in enumerate(ours):
                 for j, b in enumerate(theirs):
+                    if getattr(args, "d1_only", False):
+                        break  # IKA-418: the depth-1 game on its own (d2 is d1)
                     value, _n, _s = _refined_value(kit.reg, world, a, b, kit.leaf, budget=budget,
                                                    sub_limit=args.sub_limit,
                                                    sub_branches=args.sub_branches)
@@ -1254,6 +1264,8 @@ def main(argv: list[str] | None = None) -> None:
         s.add_argument("--set", type=Path, required=True)
         s.add_argument("--from", dest="start", type=int, default=0)
         s.add_argument("--to", dest="stop", type=int, default=10**9)
+        s.add_argument("--only", default=None, metavar="N,N,...",
+                       help="IKA-418: just these positions (instead of --from..--to)")
         s.add_argument("--stride", type=int, default=1, help="every k-th position (IKA-367)")
         s.add_argument("--offset", type=int, default=0, help="from the start plus this")
         s.add_argument("--claim", default=None,
@@ -1283,6 +1295,10 @@ def main(argv: list[str] | None = None) -> None:
             s.add_argument("--menus-from", default=None, metavar="NAME",
                            help="IKA-394: the rows and columns of SET/ref-<NAME> instead of "
                            "this leaf's own menus (another leaf's game on the same actions)")
+            s.add_argument("--all-actions", action="store_true",
+                           help="IKA-418: every legal action of both sides, not the set's width")
+            s.add_argument("--d1-only", action="store_true",
+                           help="IKA-418: the depth-1 matrices only (d2 is d1: no refined cells)")
             s.add_argument("--sub-limit", type=int, default=24)
             s.add_argument("--sub-branches", type=int, default=64,
                            help="branches kept per refined cell (64: all, in practice)")

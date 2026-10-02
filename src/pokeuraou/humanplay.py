@@ -84,6 +84,7 @@ import threading
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from dataclasses import replace as dc_replace
 from pathlib import Path
 from typing import Any, TextIO
 
@@ -1397,6 +1398,13 @@ class Agent:
     #: hidden reads down (they cost ~3.4x an open read at the same stage). The stages differ
     #: only where the bench is open. None: ``ladder`` everywhere.
     hidden_ladder: str | None = None
+    #: IKA-418: with a ladder, the root's menus widened over the move (`RootSteps`): the widths
+    #: in order (``0``: every legal action), each one a depth-1 node solved in turn on the
+    #: menus of the same ranking, the ladder's stages then reading the rectangle of the last
+    #: node's answer. A step after the first is taken while the nodes so far and its own fit
+    #: `WIDTH_SHARE` of the budget. The first step is read whatever it costs (a single step
+    #: is a fixed root). None: the width rule's menus, as before.
+    root_widths: tuple[int, ...] | None = None
     #: The selection read deeper than the value function's one estimate of each cell
     #: (`selection_deep`, IKA-392): a reading spec (``default``, or ``stage=..,rects=8-16,..``)
     #: for the solve `play` makes when it is not handed one, over ``selection_seconds`` of wall
@@ -1422,6 +1430,10 @@ class Agent:
                 )
         if self.root_all and not self.depth2_auto:
             raise ValueError("root_all widens depth2_auto's root; it needs depth2_auto (IKA-366)")
+        if self.root_widths is not None:
+            if self.ladder is None:
+                raise ValueError("root_widths widens a ladder's root; it needs a ladder (IKA-418)")
+            check_root_widths(self.root_widths)
         if self.ladder is not None:
             from .ladder import LADDER_COSTS, parse_ladder
 
@@ -1452,6 +1464,61 @@ def ladder_spec_for(agent: Any, classes: int) -> str:  # noqa: ANN401 - an Agent
     if agent.hidden_ladder is not None and classes > 1:
         return agent.hidden_ladder
     return agent.ladder
+
+
+def parse_root_widths(spec: str) -> tuple[int, ...]:
+    """``12-24-48-64-all`` -> ``(12, 24, 48, 64, 0)`` (`Agent.root_widths`; ``all``: ``0``)."""
+    got = tuple(0 if part == "all" else int(part) for part in spec.split("-")
+                if part == "all" or part.isdigit())
+    if len(got) != len(spec.split("-")):
+        raise ValueError(f"root widths are positive numbers or all joined by -, not {spec!r}")
+    check_root_widths(got)
+    return got
+
+
+def check_root_widths(widths: Sequence[int]) -> None:
+    """Widths in ascending order, each positive, ``0`` (every legal action) only last."""
+    if not widths or any(w < 0 for w in widths):
+        raise ValueError(f"root widths are positive numbers, 0 for all: {tuple(widths)!r}")
+    body = [w for w in widths if w != 0]
+    if body != sorted(set(body)) or (0 in widths and widths[-1] != 0) or list(widths).count(0) > 1:
+        raise ValueError(f"root widths ascend, all (0) last: {tuple(widths)!r}")
+
+
+@dataclass
+class RootSteps:
+    """IKA-418: the root menus a ladder's move widens through (`Agent.root_widths`).
+
+    ``menus``: side 0's and side 1's menus at each step, narrowest first (the ranking's
+    prefixes, `selfplay._menus`'s ``wide``); the first is the one the move begins with.
+    ``price`` is a depth-1 node's cost (`NodeTime`) over ``classes`` completions and
+    ``share_ms`` the part of the budget the nodes may take together."""
+
+    menus: list[tuple[list[SideAction], list[SideAction]]]
+    price: NodeTime
+    classes: int
+    share_ms: float
+
+    def node_ms(self, ours: Sequence[Any], theirs: Sequence[Any]) -> float:
+        return self.price.ms(len(ours) * len(theirs) * max(self.classes, 1))
+
+    def later(
+        self, spent_ms: float, taken: tuple[int, int],
+    ) -> list[tuple[list[SideAction], list[SideAction], float]]:
+        """The steps after the first that are taken, each with its node's milliseconds: one
+        whose menus are no wider than the last taken (every action already there) is left
+        out, and the list stops at the first that does not fit the share."""
+        out = []
+        for ours, theirs in self.menus[1:]:
+            if (len(ours), len(theirs)) == taken:
+                continue
+            ms = self.node_ms(ours, theirs)
+            if spent_ms + ms > self.share_ms:
+                break
+            out.append((ours, theirs, ms))
+            spent_ms += ms
+            taken = (len(ours), len(theirs))
+        return out
 
 
 def legal_count(reg: Regulation, pos: Position, side: int) -> int:
@@ -1496,6 +1563,9 @@ class SolvedMove:
     unmodelled: set[str]
     #: A ladder's reading (`ladder.LadderResult`, IKA-367), or None.
     ladder: Any = None  # noqa: ANN401
+    #: IKA-418: the root's widening steps taken (`RootSteps`): each node's menu sizes and
+    #: milliseconds, the first included. None: no `root_widths`.
+    root: list[dict[str, Any]] | None = None
 
 
 def solve_move(
@@ -1621,26 +1691,49 @@ def _ladder_move(  # noqa: PLR0913 - solve_move's, with the ladder's settings
     from . import ladder as _ladder
 
     you = 1 - me
-    if exact:
-        got = search(reg, pos, ours, theirs, leaf, budget=budget)
-        eq = got.equilibrium
-        built = [np.asarray(got.payoff, dtype=np.float64)]
-        weights = [1.0]
-        items: list[Any] = [_ladder.Item(pos)]
-        start = SimpleNamespace(
-            row_strategy=eq.row_strategy if me == 0 else eq.col_strategy,
-            col_strategies=[eq.col_strategy if me == 0 else eq.row_strategy],
-        )
-        notes = set(got.unmodelled)
-    else:
+    how = dict(how)
+    #: IKA-418: the root's later steps (`RootSteps`); not the ladder's own keyword.
+    root: RootSteps | None = how.pop("root", None)
+
+    def node(
+        ours: list[SideAction], theirs: list[SideAction],
+    ) -> tuple[Any, list[np.ndarray], list[float], list[Any], SimpleNamespace, set[str]]:
+        """The depth-1 node on these menus: its search, matrices, weights, items, answer."""
+        if exact:
+            got = search(reg, pos, ours, theirs, leaf, budget=budget)
+            eq = got.equilibrium
+            return (
+                got, [np.asarray(got.payoff, dtype=np.float64)], [1.0], [_ladder.Item(pos)],
+                SimpleNamespace(
+                    row_strategy=eq.row_strategy if me == 0 else eq.col_strategy,
+                    col_strategies=[eq.col_strategy if me == 0 else eq.row_strategy],
+                ),
+                set(got.unmodelled),
+            )
         assert spreads is not None
         answers = belief_solve(reg, pos, ours, theirs, spreads, {me: leaf, you: _not_asked},
                                budget=budget, sides=(me,))
         got = answers[me]
         _row, _col, built, weights = got.node_payoff
-        items = list(spreads[you])
-        start = SimpleNamespace(row_strategy=got.strategy, col_strategies=list(got.replies))
-        notes = set(got.unmodelled)
+        return (
+            got, built, weights, list(spreads[you]),
+            SimpleNamespace(row_strategy=got.strategy, col_strategies=list(got.replies)),
+            set(got.unmodelled),
+        )
+
+    got, built, weights, items, start, notes = node(ours, theirs)
+    steps = None
+    if root is not None:
+        steps = [{"rows": len(ours), "cols": len(theirs), "nodeMs": round(root.node_ms(ours, theirs), 2)}]
+        # Each later step solves its node again on the wider menus; the count clock is charged
+        # its price (the wall clock counts the time from the move's start).
+        spent = root.node_ms(ours, theirs)
+        for wider_ours, wider_theirs, ms in root.later(spent, (len(ours), len(theirs))):
+            ours, theirs = wider_ours, wider_theirs
+            got, built, weights, items, start, notes = node(ours, theirs)
+            if how.get("clock") == "count":
+                how["start_ms"] = how.get("start_ms", 0.0) + ms
+            steps.append({"rows": len(ours), "cols": len(theirs), "nodeMs": round(ms, 2)})
     matrices = [m if me == 0 else -np.asarray(m).T for m in built]
     read = _ladder.read(reg, me, ours, theirs, items, matrices, weights, start, leaf,
                         budget=budget, **how)
@@ -1651,7 +1744,7 @@ def _ladder_move(  # noqa: PLR0913 - solve_move's, with the ladder's settings
     return SolvedMove(
         strategy=np.asarray(read.strategy, dtype=np.float64), model=[float(v) for v in model],
         ours=list(ours), theirs=list(theirs), value=value, deepened=None, unmodelled=notes,
-        ladder=read,
+        ladder=read, root=steps,
     )
 
 
@@ -2045,6 +2138,17 @@ class HumanGame:
             if wide_ms <= plan.budget_ms:
                 limits = (counts[0], counts[1]) if me == 0 else (counts[1], counts[0])
                 node_ms, root_all = wide_ms, True
+        # IKA-418: the ladder's root widened step by step; the first step's menus the move
+        # begins with, the later ones the same ranking's longer prefixes.
+        steps: list[int] = []
+        if agent.root_widths is not None and agent.ladder is not None:
+            every = max(counts[0], counts[1])
+            steps = sorted({min(w or every, every) for w in agent.root_widths})
+            limits = (steps[0], steps[0])
+            cells0 = min(steps[0], counts[0]) * min(steps[0], counts[1]) * max(classes, 1)
+            node_ms = node_time(agent.cores, agent.form).ms(cells0)
+            plan = dc_replace(plan, width=steps[0], cells=cells0, predicted_ms=node_ms,
+                              deepen_ms=max(0.0, plan.budget_ms - node_ms))
         if agent.depth2_auto:
             d2k = depth2_children(
                 plan.budget_ms - node_ms, classes, node_time(agent.cores, agent.form)
@@ -2059,7 +2163,7 @@ class HumanGame:
         ours, theirs = _menus(
             reg, pos, limits, agent.leaf, budget, agent.rank_by_leaf,
             None, spreads, rank_fill=agent.rank_fill,
-            wide=[*wide, *([later] if later is not None else [])], wider=wider,
+            wide=[*wide, *([later] if later is not None else []), *steps[1:]], wider=wider,
         )
         outside = wider.get(agent.oracle) if agent.oracle is not None else None
         if not ours or not theirs:
@@ -2095,6 +2199,9 @@ class HumanGame:
                 **({"start_ms": node_ms} if agent.clock == "count"
                    else {"start_ms": 0.0, "began": started}),
                 **({"stop": agent.halt} if agent.halt is not None else {}),
+                **({"root": RootSteps([(ours, theirs), *(wider[w] for w in steps[1:])],
+                                      node_time(agent.cores, agent.form), classes,
+                                      WIDTH_SHARE * plan.budget_ms)} if len(steps) > 1 else {}),
             }
         elif plan.deepen_ms > 0 and not agent.depth2_auto:
             if agent.clock == "wall":
@@ -2201,6 +2308,7 @@ class HumanGame:
             **({"depth2Children": d2k} if agent.depth2_auto else {}),
             **({"rootAll": True} if root_all else {}),
             **({"ladder": solved.ladder.to_json()} if solved.ladder is not None else {}),
+            **({"rootSteps": solved.root} if solved.root is not None else {}),
             # The read's value in side 0's units (IKA-366: the turns' share of a result).
             "value0": round(float(value), 5),
             **({"widenTo": later, "widened": grow is not None and grow.done}

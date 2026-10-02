@@ -112,6 +112,9 @@ class Condition:
     #: IKA-393: the ladder read where the person's bench is hidden (more than one completion),
     #: in place of ``ladder`` (`humanplay.Agent.hidden_ladder`). None: ``ladder`` everywhere.
     hidden_ladder: str | None = None
+    #: IKA-418: the ladder's root widened step by step (`humanplay.Agent.root_widths`):
+    #: widths joined by ``-``, ``all`` for every legal action (``12-24-48-64-all``). None: off.
+    root_widths: str | None = None
     #: The selection this side plays from (`selection_deep`, IKA-392): a reading spec (its
     #: commas written as semicolons), else the leaf's solve every game has played. Each side
     #: draws its four, and holds its belief about the other's, from the solve of its own
@@ -154,6 +157,7 @@ class Condition:
             + (f", ladder {self.ladder}" if self.ladder is not None else "")
             + (f", ladder {self.hidden_ladder} behind a hidden bench"
                if self.hidden_ladder is not None else "")
+            + (f", root widened {self.root_widths}" if self.root_widths is not None else "")
             + (f", selection read {self.selection}" if self.selection is not None else "")
             + (f" for {self.selection_seconds:g} s" if self.selection_seconds is not None else "")
             + (f", child Q {self.child_q}" if self.child_q is not None else "")
@@ -170,7 +174,7 @@ class Condition:
 CONDITION_KEYS = ("seconds", "threads", "cores", "clock", "oracle", "levels", "width_only",
                   "width", "child_q", "knockouts", "sub_limit", "sub_branches", "restricted",
                   "depth", "refine", "passes", "depth2_auto", "root_all", "ladder",
-                  "hidden_ladder", "selection", "selection_seconds")
+                  "hidden_ladder", "root_widths", "selection", "selection_seconds")
 
 
 def _oracle(spec: str) -> int | None:
@@ -239,6 +243,9 @@ def parse_condition(spec: str) -> Condition:
             from .ladder import parse_ladder
 
             parse_ladder(value)  # refuses a stage it cannot read, before a game starts
+            got[key] = value
+        elif key == "root_widths":
+            humanplay.parse_root_widths(value)  # refuses a spelling it cannot read
             got[key] = value
         elif key == "selection_seconds":
             got[key] = float(value)
@@ -542,6 +549,8 @@ class Match:
             depth=condition.depth, refine=condition.refine, passes=condition.passes,
             depth2_auto=condition.depth2_auto, root_all=condition.root_all,
             ladder=condition.ladder, hidden_ladder=condition.hidden_ladder,
+            root_widths=(None if condition.root_widths is None
+                         else humanplay.parse_root_widths(condition.root_widths)),
             selection_reading=condition.selection,
             # A board reads the stages a reading names, on the count clock (no seconds).
             selection_seconds=condition.selection_seconds, max_levels=condition.max_levels,
