@@ -2017,6 +2017,23 @@ M-C の対戦評価（match_queue --pool、幅 12・rank-leaf・裏非公開・�
 Q（q-mc0）のセルの誤差は新しい評価モデルの答えに対して r = +29.6%（value-mc1x2 から value-mc2x2、水準のずれを除いて +19.4%）で、規則の 11% を超えた。作り直した q-mc2（gen-2 の 10 万局面を value-mc2x2 で埋めた教材、30 エポック）は、value-mc2x2 の上の対戦評価で q-mc0 に SPRT(0,10) が 3,999 対で決まらず（+7.5 [+0.6, +14.3]、H1 の境 LLR +2.98 に対し +2.02）。
 **Q を q-mc2 に替えた（ユーザーの判断 9/30、規則（H1 のときだけ替える）の例外）**。`data/models/q-mc2.pt`（q-mc0 は残す）。
 
+### M-C gen-4 の状態入力版 value-mc4st（2026-10-04、IKA-425・IKA-427）
+
+新しい局は打っていない。gen-4 と同じデータ（gen-0〜4、12,436,572 決定）を符号化の revision 3 で符号化し直し（`data/selfplay-mc01234-encoded-rev3.npz`）、状態入力（トリックルーム・おいかぜ・壁の残りターン、ねむり・もうどく・ほろびのカウンタ、固定された技と直前の技）を足して学んだ。
+学習: value-mc3 の種ごとから温間始動、`--state-inputs --epochs 6 --lr 5e-4 --keep last`（新しい入力の重みは 0 から）= `value-mc4st.pt`・`value-mc4st-s1.pt`。保留局の損失は 2 本平均で value-mc4x2 0.3910 → value-mc4stx2 0.3882（同じ手順の対照の 2 本は 0.3910）。
+
+```
+M-C の対戦評価（match_queue --pool、幅 12・rank-leaf・裏非公開、両腕 q-nocover・Q q-mc4、各腕の評価モデルで先に解いた選出）。C:/tmp/ika425s2b/s3/matches
+  null value-mc4stx2 どうし 40 対                       40/40 が同じ局
+  value-mc4stx2 対 value-mc4x2   SPRT(0,10) H1（1,870 対で停止）  +10.9 [+1.3, +20.6]   → 本番を value-mc4st に（IKA-427）
+Q: q-mc4st（gen-4 の 10 万局面を value-mc4stx2 で埋めた教材、30 エポック、胴体も状態入力を読む）対 q-mc4（value-mc4stx2 の上）。data/matches-mc/q427-*
+  null（new に q-mc4）100 対                            100/100 が同じ局
+  SPRT(−10,0) H1（1,071 対で停止）   +7.9 [−4.9, +20.6]（非劣性、1,103 対）  → Q を q-mc4st に。r = +8.7%（記録のみ）
+生成の速さ（ABBA、2,500 局 × 8 区切り、専有）: value-mc4st x1 + q-mc4st は value-mc4 x1 + q-mc4 より 1 局の壁時計 +2.2%、1 決定 +2.7%
+```
+
+ratings.py の表にはまだつないでいない。
+
 ### M-C gen-4（2026-10-01、IKA-409）
 
 データ生成: `data/selfplay-mc4`、399,991 局（run seed 40003、20,000 局 × 20 区切り、9 局は未決着で捨てた）、評価モデル value-mc3（x1、6 エポック版）、候補集合 q-nocover・Q `data/models/q-mc3.pt`、幅 12、裏非公開、選出は value-mc3 で先に解く（worker が新しく解いた対 0）。専有 318.6 分（1,255 局/分。1 ターンの CPU 秒が gen-3 より +18%、原因は未確認）。メガシンカ後の裏の信念の不具合（IKA-411）を直す前のコードで打たれている（局の 10.9%）。
