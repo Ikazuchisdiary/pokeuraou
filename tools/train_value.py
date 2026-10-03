@@ -44,15 +44,18 @@ from pokeuraou.encode import ENCODING_REVISION, Encoder
 from pokeuraou.regulation import load_regulation
 from pokeuraou.slotswap import SwapSlots, position_reader_rows
 from pokeuraou.value import (
+    AUX_TARGETS,
     Dataset,
     ValueConfig,
     auc,
+    aux_target_arrays,
     build,
     final_material_targets,
     game_weights,
     grow_state_inputs,
     load_dataset,
     load_model,
+    parse_aux_targets,
     predict,
     save_model,
     split_for,
@@ -237,15 +240,17 @@ def warm_start(
         if config.move_properties or config.attention:
             raise SystemExit("--state-inputs warm-starts a plain net only")
         net = grow_state_inputs(net, encoder)
-    if config.aux_weight > 0 and not hasattr(net, "aux"):
+    if (config.aux_weight > 0 and not hasattr(net, "aux")) or (
+        config.aux_targets and not hasattr(net, "aux_heads")
+    ):
         # IKA-425: the auxiliary regression head is new. The win logit does not read it, so
         # before the first step this net answers exactly as the loaded one; the head's own
-        # initialisation is drawn from --seed.
+        # initialisation is drawn from --seed. IKA-428: the same for the `aux_heads`.
         torch.manual_seed(config.seed)
         grown = build(encoder, config)
         grown._active_feature = net._active_feature
         missing, unexpected = grown.load_state_dict(net.state_dict(), strict=False)
-        if unexpected or any(not k.startswith("aux.") for k in missing):
+        if unexpected or any(not k.startswith(("aux.", "aux_heads.")) for k in missing):
             raise SystemExit(f"warm start into the aux head: missing {missing}, unexpected {unexpected}")
         net = grown
     if (config.dropout, config.encoder_dropout) != (net.config.dropout, net.config.encoder_dropout):
@@ -404,6 +409,14 @@ def main() -> None:
         "The saved model drops the head.",
     )
     ap.add_argument(
+        "--aux-targets",
+        default="",
+        help='IKA-428: more auxiliary heads, "name:weight,..." from value.AUX_TARGETS '
+        "(end_side, ahead1, ahead2, ahead4, ko_next, turns_left, mon_end, search), each "
+        "built from the rows of --data (value.aux_target_arrays) and added as weight x its "
+        "loss. Training only: the saved model drops the heads. Off by default.",
+    )
+    ap.add_argument(
         "--game-weights",
         default="",
         help='IKA-425: per-row weights of the cross entropy by game number, "FROM:W,FROM:W" '
@@ -531,6 +544,7 @@ def main() -> None:
             ("encoder_dropout", args.encoder_dropout),
             ("weight_decay", args.weight_decay),
             ("aux_weight", args.aux_weight if args.aux_weight else None),
+            ("aux_targets", args.aux_targets or None),
         )
         if value is not None
     }
@@ -667,6 +681,18 @@ def main() -> None:
             f"(alive, HP; mean {aux_target.mean(axis=0).round(4).tolist()}, "
             f"std {aux_target.std(axis=0).round(4).tolist()})"
         )
+    if config.aux_targets:
+        heads = parse_aux_targets(config.aux_targets)
+        arrays = aux_target_arrays(dataset, [name for name, _ in heads], encoder)
+        extra["aux_targets"] = arrays
+        for name, weight in heads:
+            a = arrays[name]
+            scored = a[a >= 0] if name == "mon_end" else a
+            print(
+                f"auxiliary head {name}: {weight:g} x {AUX_TARGETS[name][2]}, target shape "
+                f"{a.shape[1:]}, mean {scored.reshape(-1).mean():.4f}, std "
+                f"{scored.reshape(-1).std():.4f}"
+            )
     if args.game_weights:
         weights = game_weights(dataset.game, args.game_weights)
         extra["row_weight"] = weights
@@ -750,12 +776,12 @@ def main() -> None:
             )
 
     if not args.no_save:
-        if config.aux_weight > 0:
-            # The head only taught the trunk; a saved model is the plain one.
+        if config.aux_weight > 0 or config.aux_targets:
+            # The heads only taught the trunk; a saved model is the plain one.
             from dataclasses import replace
 
-            best = {k: v for k, v in best.items() if not k.startswith("aux.")}
-            config = replace(config, aux_weight=0.0)
+            best = {k: v for k, v in best.items() if not k.startswith(("aux.", "aux_heads."))}
+            config = replace(config, aux_weight=0.0, aux_targets="")
         args.out.parent.mkdir(parents=True, exist_ok=True)
         save_model(
             args.out,
