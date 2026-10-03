@@ -200,4 +200,9 @@ def test_second_load_maps_the_cache_and_makes_the_same_batches(tmp_path, small_c
     other = _dataset(40, 7)
     save_dataset(path, other, {"format_id": "x"})
     assert packed.cache_dir(path) != directory
+    del first, second, loaded  # unmapped, so the stale cache can be removed on Windows
+    import gc
+
+    gc.collect()
     _same(other.tensors(index, cpu), load_dataset(path).tensors(index, cpu))
+    assert [d.name for d in directory.parent.iterdir()] == [packed.cache_dir(path).name]

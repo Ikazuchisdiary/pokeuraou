@@ -492,6 +492,11 @@ def save_cache(directory: Path, arrays: dict[str, np.ndarray | PackedFloat]) -> 
         shutil.rmtree(tmp, ignore_errors=True)
         if not (directory / "index.json").exists():
             raise
+    # The caches of earlier contents of the same file. One still mapped by a running
+    # process cannot be removed on Windows and stays until a later run.
+    for other in directory.parent.iterdir():
+        if other != directory and ".tmp-" not in other.name:
+            shutil.rmtree(other, ignore_errors=True)
 
 
 def load_cache(directory: Path) -> dict[str, np.ndarray | PackedFloat] | None:
