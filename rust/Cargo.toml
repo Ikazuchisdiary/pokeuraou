@@ -40,6 +40,16 @@ ika347-control = []
 # screens) written one slot along. Never for use; the byte comparison against
 # `encode.py` (tests/test_encode_state_port.py) has to fail.
 ika425-control = []
+# IKA-429: the encoder computes every leaf's bind columns twice, through the pair cache and
+# afresh, and panics where they differ. For checking the cache's keys on real fills only.
+bind-verify = []
+# IKA-429's positive controls. `ika429-control`: the encoder writes the side's bind columns
+# one slot along (the `bind` request does not), so the comparison of Python's placement
+# with the port's arrays (tests/test_encode_bind_port.py) has to fail.
+# `ika429-cache-control`: the pair cache keys an HP-reading move without the HPs, so
+# `bind-verify` has to stop on it.
+ika429-control = []
+ika429-cache-control = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

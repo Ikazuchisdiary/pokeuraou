@@ -174,8 +174,9 @@ def test_the_state_columns_read_the_position(positions: list[Position]) -> None:
     for pid in STATE_PSEUDO_WEATHERS:
         assert enc.field[bare, field[f"pseudo_{pid}"]] == 1.0
         assert enc.field[bare, field[f"pseudo_{pid}_turns"]] == 0.0
-    # The state columns are the trailing ones of each block.
-    narrow = encoder.base_widths
-    assert encoder.mon_names[narrow["mon"] :] == STATE_MON_FEATURES
-    assert len(encoder.side_names) - narrow["side"] == len(STATE_SIDE_CONDITIONS)
-    assert len(encoder.field_names) - narrow["field"] == len(STATE_PSEUDO_WEATHERS)
+    # The state columns are the trailing ones of each revision-3 block (IKA-429's bind
+    # columns come after them).
+    narrow, state = encoder.base_widths, encoder.state_widths
+    assert encoder.mon_names[narrow["mon"] : state["mon"]] == STATE_MON_FEATURES
+    assert state["side"] - narrow["side"] == len(STATE_SIDE_CONDITIONS)
+    assert state["field"] - narrow["field"] == len(STATE_PSEUDO_WEATHERS)

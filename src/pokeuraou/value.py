@@ -39,7 +39,14 @@ import torch
 from torch import Tensor, nn
 
 from . import timing
-from .encode import MOVE_ID_FEATURES, Encoded, Encoder, Vocabulary, settle
+from .encode import (
+    BIND_MON_FEATURES,
+    MOVE_ID_FEATURES,
+    Encoded,
+    Encoder,
+    Vocabulary,
+    settle,
+)
 from .slotswap import SwapSlots, swap_batch
 
 
@@ -135,6 +142,12 @@ class ValueConfig:
     #: module and draws nothing from the random stream, so the net, its answers and a
     #: training run are those of every earlier model.
     encoder_dropout: float = 0.0
+    #: IKA-429: read the bind columns too (encoding revision 4, `BIND_MON_FEATURES` and
+    #: `BIND_SIDE_FEATURES`). Needs `state_inputs`. Off: the net reads what it read before
+    #: (a stored config without it reads back off). On: the Pokemon's bind columns join
+    #: `mon_mlp`'s first layer after the move ids' embeddings, the side's join `side_mlp`'s.
+    #: A warm start from a net without it gives them zero weights (`grow_bind_inputs`).
+    bind_inputs: bool = False
     #: IKA-425 stage 2a: weight of the auxiliary regression. Above 0, the net has a small
     #: extra head (`aux`) that reads the same hidden layer as the win logit and regresses the
     #: end-of-game material of the game the row belongs to (`final_material_targets`: the
@@ -236,11 +249,15 @@ class ValueNet(nn.Module):
         super().__init__()
         self.config = config
         sizes = encoder.vocab.sizes
-        # IKA-425: the columns of each block this net reads -- all of them with
-        # `state_inputs`, the revision-2 prefix without.
-        widths = dict(encoder.widths if config.state_inputs else encoder.base_widths)
+        # IKA-425: the columns of each block this net reads -- the revision-2 prefix, the
+        # revision-3 prefix with `state_inputs`, all of them with `bind_inputs` (IKA-429).
+        widths = net_widths(encoder, config)
         self.in_widths = widths
         self._move_ids = len(MOVE_ID_FEATURES) if config.state_inputs else 0
+        # IKA-429: where the move ids sit in a full-width row (before the bind columns),
+        # and how many bind columns follow them. 0 for a net without `bind_inputs`.
+        self._bind = len(BIND_MON_FEATURES) if config.bind_inputs else 0
+        self._ids_end = encoder.state_widths["mon"]
         groups = config.width_groups
 
         self.species = nn.Embedding(sizes["species"], config.species_dim, padding_idx=0)
@@ -331,7 +348,14 @@ class ValueNet(nn.Module):
             self.item(batch["item"]),
             move_pooled,
         ]
-        if self._move_ids:
+        if self._bind:
+            # IKA-429: the bind columns after the move ids; they join the first layer last,
+            # so a net grown from a `state_inputs` one keeps its inputs' places.
+            k, end = self._move_ids, self._ids_end
+            parts.append(mon[..., : end - k])
+            parts.append(self.move(mon[..., end - k : end].long()).flatten(-2))
+            parts.append(mon[..., end:])
+        elif self._move_ids:
             # IKA-425: the locked and the last move, ids carried in the last columns,
             # read through the move embedding (index 0, none, is the zero row).
             k = self._move_ids
@@ -436,6 +460,16 @@ def move_property_table(encoder: Encoder) -> np.ndarray:
     return np.ascontiguousarray(table[:rows], dtype=np.float32)
 
 
+def net_widths(encoder: Encoder, config: ValueConfig) -> dict[str, int]:
+    """The columns of each block a net with `config` reads: revision 2's prefix, revision
+    3's with `state_inputs` (IKA-425), every column with `bind_inputs` (IKA-429)."""
+    if config.bind_inputs:
+        if not config.state_inputs:
+            raise ValueError("bind_inputs needs state_inputs: the bind columns follow the state ones")
+        return dict(encoder.widths)
+    return dict(encoder.state_widths if config.state_inputs else encoder.base_widths)
+
+
 def build(encoder: Encoder, config: ValueConfig) -> ValueNet:
     net = ValueNet(encoder, config)
     net._active_feature = encoder.mon_names.index("is_active")
@@ -534,7 +568,29 @@ def grow_state_inputs(net: ValueNet, encoder: Encoder) -> ValueNet:
 
     if net.config.state_inputs:
         raise ValueError("the net already reads the state columns")
-    grown = build(encoder, replace(net.config, state_inputs=True))
+    return _grown_inputs(net, encoder, replace(net.config, state_inputs=True))
+
+
+def grow_bind_inputs(net: ValueNet, encoder: Encoder) -> ValueNet:
+    """`net` (a `state_inputs` net) given IKA-429's bind columns as zero-weight inputs.
+
+    As `grow_state_inputs`: the bind columns come last in `mon_mlp.0` (after the move ids'
+    embeddings) and in `side_mlp.0` (after the side's state columns), with zero weights, so
+    the grown net answers as `net` did until training moves them.
+    """
+    from dataclasses import replace
+
+    if not net.config.state_inputs:
+        raise ValueError("grow the state columns first (grow_state_inputs)")
+    if net.config.bind_inputs:
+        raise ValueError("the net already reads the bind columns")
+    return _grown_inputs(net, encoder, replace(net.config, bind_inputs=True))
+
+
+def _grown_inputs(net: ValueNet, encoder: Encoder, config: ValueConfig) -> ValueNet:
+    """`net` rebuilt under `config`, whose first layers read more columns, each appended
+    after the ones `net` read: old weights copied to the old places, the new ones 0."""
+    grown = build(encoder, config)
     grown._active_feature = net._active_feature
     old_state, new_state = net.state_dict(), grown.state_dict()
     d, s = net.config.mon_dim, net.config.side_dim
@@ -1443,8 +1499,9 @@ def load_model(path: str | Path, encoder: Encoder) -> tuple[ValueNet, dict[str, 
     # IKA-425 appended state columns to each block (revision 3). A model without
     # `state_inputs` reads the revision-2 prefix, so what it stored must be that prefix;
     # one with it reads every column.
+    # IKA-429 appended the bind columns (revision 4); only a `bind_inputs` model reads them.
     config = ValueConfig(**blob["config"])
-    expected = encoder.widths if config.state_inputs else encoder.base_widths
+    expected = net_widths(encoder, config)
     stored = blob.get("widths") or {}
     if stored and stored != expected:
         raise ValueError(
@@ -1470,7 +1527,9 @@ __all__ = [
     "ValueNet",
     "auc",
     "build",
+    "grow_bind_inputs",
     "grow_state_inputs",
+    "net_widths",
     "load_dataset",
     "load_model",
     "move_property_table",

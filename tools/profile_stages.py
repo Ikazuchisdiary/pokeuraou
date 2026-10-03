@@ -86,8 +86,8 @@ GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("bridge", ("rust.fill", "rust.ask", "rust.header", "rust.body", "rust.unpack",
                 "rust.resolve", "rust.score")),
     ("served", ("serve.copy", "serve.wait")),
-    ("child", ("rust.child.resolve", "rust.child.encode", "rust.child.parse",
-               "rust.child.header")),
+    ("child", ("rust.child.resolve", "rust.child.encode", "rust.child.bind",
+               "rust.child.parse", "rust.child.header")),
     ("server", ("server.held", "server.queue")),
     ("inclusive", ("refused",)),
     # Outside the search, and the Python around each crossing (IKA-258).

@@ -473,6 +473,12 @@ def lead_branches_many(
     return out
 
 
+def bind_columns(reg: Regulation, positions: Sequence[Position]) -> tuple[Any, Any]:
+    """The bind columns of each position (IKA-429, `rust/src/bind.rs`), as the port's encoder
+    writes them: (positions x 2 x mons per side x 4) and (positions x 2 x 7) float32, flat."""
+    return ask(reg, lambda node: node.bind(positions))
+
+
 def apply_lead_abilities_many(reg: Regulation, positions: Sequence[Position]) -> list[PortPhase]:
     """`apply_lead_abilities` without a generator, for many positions: pipelined, so the
     selection solve's 8,100 turn-1 positions do not wait on 8,100 round trips."""

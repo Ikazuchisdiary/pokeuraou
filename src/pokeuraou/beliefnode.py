@@ -716,7 +716,9 @@ def _patched(
 
     encoder = encoder or _encoder_for(reg)
     rules = rules or CURRENT_RULES
-    source = encoder.encode_positions([item.position])
+    # Only the hidden bench rows are read from it, and a bench row's bind columns are 0
+    # (IKA-429), so the port is not asked for them.
+    source = encoder.encode_positions([item.position], bind=False)
     if hasattr(encoder, "note"):
         encoder.note(
             "patched side=" + ("shared" if rules.patch_shares_side else "rebuilt"),

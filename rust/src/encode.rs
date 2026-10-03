@@ -93,6 +93,10 @@ pub const STATE_SIDE_CONDITIONS: [&str; 4] = ["tailwind", "reflect", "lightscree
 pub const STATE_PSEUDO_WEATHERS: [&str; 1] = ["trickroom"];
 /// `encode.LOCK_VOLATILES`: where the locked move is read, first found wins.
 pub const LOCK_VOLATILES: [&str; 4] = ["twoturnmove", "lockedmove", "choicelock", "encore"];
+/// IKA-429's bind columns (`encode.py`'s `BIND_MON_FEATURES` and `BIND_SIDE_FEATURES`),
+/// appended after the state columns: four per Pokemon, seven per side (`bind.rs`).
+pub const BIND_MON_FEATURES: usize = crate::bind::BIND_FEATURES;
+pub const BIND_SIDE_FEATURES: usize = crate::bind::BIND_SIDE_FEATURES;
 
 const STAT_SCALE: f64 = 200.0;
 const HP_SCALE: f64 = 250.0;
@@ -173,6 +177,10 @@ pub struct Encoder<'a> {
     pub widths: Widths,
     /// `_StatCache`: live stats from SP, memoised. The key is the same triple.
     stats: std::cell::RefCell<HashMap<(String, String, [i64; 6]), [f64; 6]>>,
+    /// IKA-429: the bind columns' pair rolls, under exact keys (`bind::BindCache`).
+    pub bind_cache: std::cell::RefCell<crate::bind::BindCache>,
+    /// Microseconds spent on the bind columns since the last `take_bind_us`.
+    bind_us: std::cell::Cell<f64>,
 }
 
 impl<'a> Encoder<'a> {
@@ -182,13 +190,46 @@ impl<'a> Encoder<'a> {
             mon: 2 + 6 + 6 + BOOST_IDS.len() + 1 + STATUSES.len() + 8 + vocab.types.len() + 8
                 + VOLATILES.len()
                 + 1
-                + STATE_MON_FEATURES,
-            side: SIDE_CONDITIONS.len() + 4 + 2 * SLOT_CONDITIONS.len() + STATE_SIDE_CONDITIONS.len(),
+                + STATE_MON_FEATURES
+                + BIND_MON_FEATURES,
+            side: SIDE_CONDITIONS.len() + 4 + 2 * SLOT_CONDITIONS.len() + STATE_SIDE_CONDITIONS.len()
+                + BIND_SIDE_FEATURES,
             field: 2 + WEATHERS.len() + 2 + TERRAINS.len() + PSEUDO_WEATHERS.len() + 2
                 + STATE_PSEUDO_WEATHERS.len(),
             mons_per_side: reg.picked_team_size,
         };
-        Encoder { reg, vocab, widths, stats: Default::default() }
+        Encoder {
+            reg,
+            vocab,
+            widths,
+            stats: Default::default(),
+            bind_cache: Default::default(),
+            bind_us: Default::default(),
+        }
+    }
+
+    /// The bind columns' microseconds since the last call (IKA-429), for a fill's header.
+    pub fn take_bind_us(&self) -> f64 {
+        self.bind_us.replace(0.0)
+    }
+
+    /// IKA-429: `bind::bind` through this encoder's cache (and, built with `bind-verify`,
+    /// afresh as well, stopping where the two differ).
+    pub fn bind_of(&self, position: &Position) -> crate::bind::Bound {
+        let m = self.widths.mons_per_side;
+        let bound = crate::bind::bind(self.reg, position, m, Some(&mut self.bind_cache.borrow_mut()));
+        #[cfg(feature = "bind-verify")]
+        {
+            let fresh = crate::bind::bind(self.reg, position, m, None);
+            if fresh.rows != bound.rows || fresh.sides != bound.sides {
+                panic!(
+                    "bind-verify: the cached bind columns differ from the fresh ones at turn {}: \
+                     cached {:?} {:?}, fresh {:?} {:?}",
+                    position.turn, bound.rows, bound.sides, fresh.rows, fresh.sides
+                );
+            }
+        }
+        bound
     }
 
     fn stats_of(&self, mon: &Pokemon) -> [f64; 6] {
@@ -278,6 +319,25 @@ impl<'a> Encoder<'a> {
                 }
             }
         }
+        // IKA-429: the bind columns, last in each Pokemon's row and each side's; timed apart
+        // (`bind_us`), so a fill's header can say what they cost.
+        let bind_started = std::time::Instant::now();
+        for (b, position) in positions.iter().enumerate() {
+            let bound = self.bind_of(position);
+            for s in 0..2 {
+                let side_end = (b * 2 + s + 1) * self.widths.side;
+                for (k, value) in bound.sides[s].iter().enumerate() {
+                    #[cfg(feature = "ika429-control")]
+                    let k = (k + 1) % BIND_SIDE_FEATURES;
+                    out.side[side_end - BIND_SIDE_FEATURES + k] = *value;
+                }
+                for p in 0..m {
+                    let mon_end = ((b * 2 + s) * m + p + 1) * self.widths.mon;
+                    out.mon[mon_end - BIND_MON_FEATURES..mon_end].copy_from_slice(&bound.rows[s * m + p]);
+                }
+            }
+        }
+        self.bind_us.set(self.bind_us.get() + bind_started.elapsed().as_secs_f64() * 1e6);
         out
     }
 
