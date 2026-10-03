@@ -67,13 +67,16 @@ def test_packed_load_makes_the_same_batches(tmp_path, small_chunks) -> None:  # 
     save_dataset(path, plain, {"format_id": "x"})
     back = load_dataset(path)
     assert isinstance(back.encoded.mon, PackedFloat)
-    # Positive controls: the packing ran (uint8 columns exist, ids narrowed, the id that
+    # Positive controls: the packing ran (bit columns exist, ids narrowed, the id that
     # does not fit 16 bits widened), and the demotion path ran (column 5 had a late 0.5).
-    assert back.encoded.mon.bin.dtype == np.uint8 and back.encoded.mon.bin.shape[-1] > 0
-    assert 5 in back.encoded.mon.wide_cols and 3 in back.encoded.mon.wide_cols
+    mon = back.encoded.mon
+    assert len(mon.bin_cols) > 0 and mon.parts[packed.BIN].shape[-1] == (len(mon.bin_cols) + 7) // 8
+    assert 5 in mon.wide_cols and 3 in mon.wide_cols
+    assert 5 in mon.cols[packed.U8].tolist()
     assert back.encoded.species.dtype == np.int16
     assert back.encoded.ability.dtype == np.int32
-    assert back.encoded.mon.nbytes < plain.encoded.mon.nbytes
+    # The rows only: a uint16 table is 256 kB, more than the 40 rows of this toy set.
+    assert sum(p.nbytes for p in mon.parts.values()) < plain.encoded.mon.nbytes
     index = np.array([39, 0, 5, 5, 17, 38])
     cpu = torch.device("cpu")
     _same(plain.tensors(index, cpu), back.tensors(index, cpu))
@@ -88,10 +91,54 @@ def test_the_comparison_can_fail(tmp_path, small_chunks) -> None:  # noqa: ANN00
     path = tmp_path / "d.npz"
     save_dataset(path, plain, {"format_id": "x"})
     back = load_dataset(path)
-    back.encoded.mon.wide[3, 0, 0, 0] += np.float32(1e-7)
+    mon = back.encoded.mon
+    # Column 2 (real-valued, 20 rows x 8 distinct at most) is a uint8 code: change one
+    # table entry that a stored code points at by one ulp.
+    j = mon.cols[packed.U8].tolist().index(2)
+    code = mon.parts[packed.U8][3, 0, 0, j]
+    mon.tables[packed.U8][j, code] = np.nextafter(mon.tables[packed.U8][j, code], np.float32(2))
     cpu = torch.device("cpu")
     with pytest.raises(AssertionError):
         _same(plain.tensors(np.arange(20), cpu), back.tensors(np.arange(20), cpu))
+
+
+@pytest.mark.parametrize("distinct", [2, 3, 256, 257, 65536, 65537])
+def test_every_form_and_every_move_between_forms_is_exact(
+    distinct: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A column enters each form from the first chunk, and moves to each wider form when a
+    later chunk brings a value that does not fit -- including a 0/1 column that turns out
+    not to be one, and a coded column that outgrows 256 or 65,536 values. The dense rows
+    must come back bit for bit, and the column must end in the form its count asks for."""
+    rows = max(2 * distinct, 64)
+    # Ten chunks: the first sees a fifth of the values, the later ones bring the rest.
+    monkeypatch.setattr(packed, "CHUNK_ROWS", rows // 10)
+    rng = np.random.default_rng(distinct)
+    values = rng.permutation(np.arange(distinct, dtype=np.float32) / 7.0)
+    # (rows, 2, 3): column 0 gets `distinct` values spread over all rows, so the early
+    # chunks see few and the later ones bring the rest; column 1 is 0/1 until the last row;
+    # column 2 is 0/1 throughout and has -0.0 nowhere.
+    array = np.zeros((rows, 2, 3), dtype=np.float32)
+    array[..., 0] = np.resize(values, (rows, 2))
+    array[:, :, 1] = (rng.random((rows, 2)) < 0.5).astype(np.float32)
+    array[-1, 1, 1] = np.float32(-0.0)
+    array[:, :, 2] = (rng.random((rows, 2)) < 0.5).astype(np.float32)
+    got = PackedFloat.from_array(array)
+    assert np.asarray(got).tobytes() == array.tobytes()
+    index = rng.integers(0, rows, 50)
+    assert got[index].tobytes() == array[index].tobytes()
+    assert got[3].tobytes() == array[3].tobytes()
+    want = (
+        packed.BIN if distinct == 2 and set(values.tolist()) <= {0.0, 1.0}
+        else packed.U8 if distinct <= 256
+        else packed.U16 if distinct <= 65536
+        else packed.F32
+    )
+    assert 0 in got.cols[want].tolist()
+    assert 1 in got.cols[packed.U8].tolist()  # moved from bits by the -0.0 in the last chunk
+    assert 2 in got.cols[packed.BIN].tolist()
+    if want != packed.F32:
+        assert sum(p.nbytes for p in got.parts.values()) < array.nbytes
 
 
 def test_unpacked_load_is_the_plain_read(tmp_path) -> None:  # noqa: ANN001
@@ -125,3 +172,32 @@ def test_concat_of_packed_shards_and_a_streamed_save(tmp_path, small_chunks) -> 
         assert np.array_equal(data["game"], want.game)
     back = load_dataset(out, packed=False)
     assert back.encoded.mon.tobytes() == want.encoded.mon.tobytes()
+
+
+def test_second_load_maps_the_cache_and_makes_the_same_batches(tmp_path, small_chunks) -> None:  # noqa: ANN001
+    """IKA-426: the first load writes the packed arrays beside the file, every load reads
+    them mapped, and the batches are the plain dataset's bit for bit. A re-encoded file
+    gets a cache of its own."""
+    plain = _dataset(40, 6, late_half=True)
+    path = tmp_path / "d.npz"
+    save_dataset(path, plain, {"format_id": "x"})
+    first = load_dataset(path)
+    directory = packed.cache_dir(path)
+    assert (directory / "index.json").exists()
+    second = load_dataset(path)
+    cpu = torch.device("cpu")
+    index = np.array([39, 0, 5, 5, 17, 38])
+    for loaded in (first, second):
+        # Positive control: the arrays are the mapped files, not a private copy.
+        assert isinstance(loaded.encoded.species, np.memmap)
+        assert isinstance(loaded.encoded.mon.parts[packed.BIN], np.memmap)
+        _same(plain.tensors(index, cpu), loaded.tensors(index, cpu))
+        _same(plain.tensors(np.arange(40), cpu), loaded.tensors(np.arange(40), cpu))
+    unmapped = load_dataset(path, cache=False)
+    assert not isinstance(unmapped.encoded.species, np.memmap)
+    _same(plain.tensors(index, cpu), unmapped.tensors(index, cpu))
+
+    other = _dataset(40, 7)
+    save_dataset(path, other, {"format_id": "x"})
+    assert packed.cache_dir(path) != directory
+    _same(other.tensors(index, cpu), load_dataset(path).tensors(index, cpu))

@@ -501,8 +501,9 @@ class Dataset:
         rng = np.random.default_rng(seed)
         rng.shuffle(games)
         cut = int(len(games) * (1.0 - holdout))
-        train_games = set(games[:cut].tolist())
-        is_train = np.array([g in train_games for g in self.game])
+        # The same answer as a Python membership test per decision, without a list of
+        # 12 million bools (IKA-426).
+        is_train = np.isin(self.game, games[:cut])
         return np.flatnonzero(is_train), np.flatnonzero(~is_train)
 
     def tensors(self, index: np.ndarray, device: torch.device) -> dict[str, Tensor]:
@@ -722,22 +723,43 @@ def load_ensemble(
     return nets, metas
 
 
-def load_dataset(path: str | Path, *, packed: bool = True) -> Dataset:
+def load_dataset(path: str | Path, *, packed: bool = True, cache: bool = True) -> Dataset:
     """Reads a cache written by ``tools/encode_dataset.py``.
 
     With ``packed`` (the default) the big arrays are kept small and exact: ids in the
-    narrowest integer type that holds them, float columns that are only ever 0.0 or 1.0 as
-    uint8 (:mod:`pokeuraou.packed`), each inflated a chunk at a time so the dense arrays
-    are never in memory. :meth:`Dataset.tensors` widens a batch back to the dense types, so
-    a net sees the same numbers either way. ``packed=False`` is the plain read.
+    narrowest integer type that holds them, float columns as bits, small codes or float32
+    (:mod:`pokeuraou.packed`), each inflated a chunk at a time so the dense arrays are
+    never in memory. :meth:`Dataset.tensors` widens a batch back to the dense types, so a
+    net sees the same numbers either way. ``packed=False`` is the plain read.
+
+    With ``cache`` (the default, packed only) the packed arrays are written once beside
+    the file (`packed.cache_dir`) and read back memory-mapped (IKA-426). The second read
+    takes seconds instead of two minutes, adds the arrays to no process's commit, and
+    several runs on one file share one copy in memory. The ``.npz`` itself is unchanged.
+    A cache that cannot be written (a read-only directory) is reported and skipped.
     """
+    from . import packed as packing
+
     data = np.load(Path(path), allow_pickle=False)
     meta = json.loads(str(data["meta_json"]))
+    keys = ("species", "ability", "item", "moves", "mon", "mask", "side", "field")
     if packed:
-        arrays = {
-            key: _read_packed(Path(path), key)
-            for key in ("species", "ability", "item", "moves", "mon", "mask", "side", "field")
-        }
+        arrays = None
+        directory = packing.cache_dir(path) if cache else None
+        if directory is not None:
+            arrays = packing.load_cache(directory)
+        if arrays is None:
+            arrays = {key: _read_packed(Path(path), key) for key in keys}
+            if directory is not None:
+                try:
+                    packing.save_cache(directory, arrays)
+                except OSError as exc:
+                    print(f"load_dataset: no packed cache for {path} ({exc})")
+                else:
+                    # Read back mapped, and let the private copy go.
+                    arrays = packing.load_cache(directory)
+        assert arrays is not None
+        arrays = {key: arrays[key] for key in keys}
     else:
         arrays = {
             key: data[key]

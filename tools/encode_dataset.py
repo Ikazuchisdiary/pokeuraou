@@ -453,7 +453,8 @@ def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict
         if all(have.get(k) == v for k, v in want.items()) and not _lacks_foe_values(
             cache, directory, sources
         ):
-            dataset = load_dataset(cache)
+            # Read once and joined in memory: no mapped copy beside each shard (IKA-426).
+            dataset = load_dataset(cache, cache=False)
             print(f"  {directory.name}: {len(dataset):,} decisions from cache")
             return dataset, have
         print(f"  {directory.name}: cache is stale, re-encoding")
