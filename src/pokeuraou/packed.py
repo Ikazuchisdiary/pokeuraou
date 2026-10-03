@@ -168,6 +168,8 @@ class PackedFloat:
         self.tables = tables
         #: row j of a table for the part's column j, broadcast against a batch of codes.
         self._rows = {form: np.arange(len(cols[form])) for form in (U8, U16)}
+        #: the column numbers and tables as tensors, per device (`tensor`).
+        self._on_device: dict[Any, dict[Any, Any]] = {}
 
     # The names the earlier two-form layout had: columns of 0s and 1s, and the rest.
     @property
@@ -209,6 +211,53 @@ class PackedFloat:
         if isinstance(key, (int, np.integer, slice, np.ndarray, list)):
             return self._dense(key)
         return np.asarray(self)[key]
+
+    def tensor(self, index: np.ndarray, device: Any) -> Any:
+        """``torch.from_numpy(self[index]).to(device)``, with the same bits, but widened on
+        `device`: only the packed rows cross to it, and the bits and tables are read
+        there. On the GPU this is cheaper than widening on the CPU and copying 11 times
+        the bytes over (IKA-426)."""
+        import torch
+
+        tables = self._device_tables(device)
+        bits = torch.from_numpy(np.ascontiguousarray(self.parts[BIN][index])).to(device)
+        lead = tuple(bits.shape[:-1])
+        out = torch.empty((*lead, self.shape[-1]), dtype=torch.float32, device=device)
+        nb = len(self.cols[BIN])
+        if nb:
+            unpacked = (bits.unsqueeze(-1) >> tables["shift"]) & 1
+            out[..., tables[BIN]] = unpacked.reshape(*lead, -1)[..., :nb].to(torch.float32)
+        for form in (U8, U16):
+            if len(self.cols[form]):
+                codes = np.ascontiguousarray(self.parts[form][index])
+                if form == U16:
+                    codes = codes.astype(np.int32)
+                at = torch.from_numpy(codes).to(device).long() + tables[("offset", form)]
+                out[..., tables[form]] = tables[("table", form)][at]
+        if len(self.cols[F32]):
+            out[..., tables[F32]] = torch.from_numpy(
+                np.ascontiguousarray(self.parts[F32][index])
+            ).to(device)
+        return out
+
+    def _device_tables(self, device: Any) -> dict[Any, Any]:
+        import torch
+
+        device = torch.device(device)
+        if device not in self._on_device:
+            t: dict[Any, Any] = {
+                form: torch.from_numpy(self.cols[form]).to(device) for form in self.cols
+            }
+            t["shift"] = torch.arange(8, dtype=torch.uint8, device=device)
+            for form in (U8, U16):
+                t[("table", form)] = torch.from_numpy(
+                    np.ascontiguousarray(self.tables[form]).reshape(-1)
+                ).to(device)
+                t[("offset", form)] = (
+                    torch.arange(len(self.cols[form]), device=device) * _CAP[form]
+                )
+            self._on_device[device] = t
+        return self._on_device[device]
 
     def chunks(self, rows: int | None = None) -> Iterator[np.ndarray]:
         rows = rows or CHUNK_ROWS

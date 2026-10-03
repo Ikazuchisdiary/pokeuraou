@@ -507,18 +507,30 @@ class Dataset:
         return np.flatnonzero(is_train), np.flatnonzero(~is_train)
 
     def tensors(self, index: np.ndarray, device: torch.device) -> dict[str, Tensor]:
+        from .packed import PackedFloat
+
         e = self.encoded
-        # A packed dataset (`load_dataset`) holds ids narrow; the batch is widened back to
-        # the int64 the encoder produced, so the net sees the same tensors either way.
+
+        def ids(array: np.ndarray) -> Tensor:
+            # A packed dataset (`load_dataset`) holds ids narrow; the batch is widened back
+            # to the int64 the encoder produced, so the net sees the same tensors either way.
+            return torch.from_numpy(np.ascontiguousarray(array[index])).to(device).long()
+
+        def floats(array: Any) -> Tensor:
+            # Packed float rows are widened on `device` (IKA-426): the same bits.
+            if isinstance(array, PackedFloat):
+                return array.tensor(index, device)
+            return torch.from_numpy(np.ascontiguousarray(array[index])).to(device)
+
         return {
-            "species": torch.from_numpy(np.ascontiguousarray(e.species[index], np.int64)).to(device),
-            "ability": torch.from_numpy(np.ascontiguousarray(e.ability[index], np.int64)).to(device),
-            "item": torch.from_numpy(np.ascontiguousarray(e.item[index], np.int64)).to(device),
-            "moves": torch.from_numpy(np.ascontiguousarray(e.moves[index], np.int64)).to(device),
-            "mon": torch.from_numpy(np.ascontiguousarray(e.mon[index])).to(device),
-            "mask": torch.from_numpy(np.ascontiguousarray(e.mask[index])).to(device),
-            "side": torch.from_numpy(np.ascontiguousarray(e.side[index])).to(device),
-            "field": torch.from_numpy(np.ascontiguousarray(e.field[index])).to(device),
+            "species": ids(e.species),
+            "ability": ids(e.ability),
+            "item": ids(e.item),
+            "moves": ids(e.moves),
+            "mon": floats(e.mon),
+            "mask": floats(e.mask),
+            "side": floats(e.side),
+            "field": floats(e.field),
         }
 
 
