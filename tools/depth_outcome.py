@@ -20,6 +20,10 @@ scores the values against the recorded games' results instead.
   M-C generation gave side 0's belief there (`belief_weights.production_weights`: the
   selection store the games were played from, the shown Pokemon and the leads). Written to
   ``SET/positions.jsonl`` (one line a position).
+* **next** (IKA-424): each position's next move decision in its game (the weights built as
+  ``build`` builds them; each position is first rebuilt and must equal its line), written as a
+  set of its own (``OUT/positions.jsonl``, each line's ``of`` the position it follows) that
+  ``read --d1-only`` reads: the target of a value's temporal consistency.
 * **read**: each position read by side 0 with ladder ``--ladder`` (L6) on the node clock at
   ``--seconds`` (`POKEURAOU_LADDER_COUNT_FILL`: the stages fill the budget, so the answer at
   any smaller budget is the last stage completed inside it, IKA-384/418), on the menus at
@@ -43,6 +47,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import time
 from pathlib import Path
@@ -97,13 +102,50 @@ def held_out_games(merged: Path, shards: list[Path], gen: int, holdout: float,
     return mine.astype(np.int64), rows, count
 
 
-def build(args: argparse.Namespace) -> None:  # noqa: C901, PLR0915 - one pass over the games
+def _entry(pool, store: Path, game: dict, d: dict, here: int, name: str,  # noqa: ANN001
+           args: argparse.Namespace) -> dict:
+    """One position of the set: a recorded move decision ``d`` of ``game`` (the shard's game
+    ``here``, in file ``name``) with side 1's completions as side 0 sees them and the weights
+    generation gave them."""
     import belief_weights as bw
 
-    from pokeuraou.damage import register_mega_stones
     from pokeuraou.hidden import completions, seen_slots
-    from pokeuraou.pool import load_pool
     from pokeuraou.position import Position
+
+    reg = pool.reg
+    named = game["pool"]
+    teams = [next(t for t in pool.teams if t.id == named["teams"][side]) for side in (0, 1)]
+    pos = Position.from_json(d["position"])
+    shown = d["shownIdentities"]
+    seen1 = sorted(seen_slots(pos, 1, shown[1]))
+    seen0 = sorted(seen_slots(pos, 0, shown[0]))
+    comp = completions(reg, pos, 1, list(teams[1].sets), seen=frozenset(seen1))
+    keys = [tuple(sorted(c.species)) for c in comp]
+    weights: dict = {}
+    explains = None
+    if len(comp) >= 2:
+        try:
+            w, info = bw.production_weights(pool, store, game, d, pos, keys,
+                                            epsilon=args.epsilon, temperature=args.temperature)
+            explains = bool(info.get("explains"))
+        except ValueError:
+            # The tool's rebuilt leads miss a form's spelling (a Mega of a regional / event
+            # form): uniform, said in the position.
+            w = np.full(len(keys), 1.0 / len(keys))
+            explains = "error"
+        weights = {",".join(k): float(v) for k, v in zip(keys, w, strict=True)}
+    return {"game": here, "source": name, "gameIndex": game.get("gameIndex"),
+            "turn": d["turn"], "turns": game["turns"], "outcome": float(game["outcome"]),
+            "teams": named["teams"], "seen": [seen0, seen1], "classes": len(comp),
+            "weights": weights, "explains": explains,
+            "searchValue": d.get("searchValue"), "foeSearchValue": d.get("foeSearchValue"),
+            "ownChosen": d.get("ownChosen"), "foeChosen": d.get("foeChosen"),
+            "position": d["position"]}
+
+
+def build(args: argparse.Namespace) -> None:
+    from pokeuraou.damage import register_mega_stones
+    from pokeuraou.pool import load_pool
 
     shards = [Path(s) for s in args.shards]
     val, rows, count = held_out_games(Path(args.merged), shards, args.gen, args.holdout,
@@ -147,36 +189,7 @@ def build(args: argparse.Namespace) -> None:  # noqa: C901, PLR0915 - one pass o
                 if not moves:
                     continue
                 d = moves[int(rng.integers(len(moves)))]
-                named = game["pool"]
-                teams = [next(t for t in pool.teams if t.id == named["teams"][side]) for side in (0, 1)]
-                pos = Position.from_json(d["position"])
-                shown = d["shownIdentities"]
-                seen1 = sorted(seen_slots(pos, 1, shown[1]))
-                seen0 = sorted(seen_slots(pos, 0, shown[0]))
-                comp = completions(reg, pos, 1, list(teams[1].sets), seen=frozenset(seen1))
-                keys = [tuple(sorted(c.species)) for c in comp]
-                weights: dict = {}
-                explains = None
-                if len(comp) >= 2:
-                    try:
-                        w, info = bw.production_weights(pool, store, game, d, pos, keys,
-                                                        epsilon=args.epsilon,
-                                                        temperature=args.temperature)
-                        explains = bool(info.get("explains"))
-                    except ValueError:
-                        # The tool's rebuilt leads miss a form's spelling (a Mega of a
-                        # regional / event form): uniform, said in the position.
-                        w = np.full(len(keys), 1.0 / len(keys))
-                        explains = "error"
-                    weights = {",".join(k): float(v) for k, v in zip(keys, w, strict=True)}
-                lines.append(json.dumps({
-                    "game": here, "source": name, "gameIndex": game.get("gameIndex"),
-                    "turn": d["turn"], "turns": game["turns"], "outcome": float(game["outcome"]),
-                    "teams": named["teams"], "seen": [seen0, seen1], "classes": len(comp),
-                    "weights": weights, "explains": explains,
-                    "searchValue": d.get("searchValue"), "foeSearchValue": d.get("foeSearchValue"),
-                    "ownChosen": d.get("ownChosen"), "foeChosen": d.get("foeChosen"),
-                    "position": d["position"]}))
+                lines.append(json.dumps(_entry(pool, store, game, d, here, name, args)))
     if gid != count:
         raise SystemExit(f"the files hold {gid} games, the shard {count}")
     order = np.random.default_rng(args.seed + 1).permutation(len(lines))
@@ -187,6 +200,81 @@ def build(args: argparse.Namespace) -> None:  # noqa: C901, PLR0915 - one pass o
                                 "holdout": args.holdout, "store": str(args.store),
                                 "gamesDir": str(args.games_dir)})
     print(f"{len(lines)} positions ({checked} games checked against the shard) -> "
+          f"{out / 'positions.jsonl'}", file=sys.stderr, flush=True)
+
+
+def following(decisions: list[dict], position: dict) -> tuple[int, dict | None]:
+    """The index of the move decision whose position is ``position``, and the game's next
+    move decision after it (None: the game ended before side 0 moved again)."""
+    at = next((i for i, d in enumerate(decisions)
+               if d["kind"] == "move" and d["position"] == position), None)
+    if at is None:
+        raise ValueError("the position is not one of the game's move decisions")
+    return at, next((d for d in decisions[at + 1:] if d["kind"] == "move"), None)
+
+
+GAME_INDEX = re.compile(rb'"gameIndex": (\d+)')
+
+
+def build_next(args: argparse.Namespace) -> None:
+    """IKA-424: the next move decision of each position's game, as a set of its own
+    (``positions.jsonl``, each line's ``of`` the position it follows), for the temporal
+    consistency of a value: how well a position's value foretells the next position's."""
+    from pokeuraou.damage import register_mega_stones
+    from pokeuraou.pool import load_pool
+
+    set_dir = Path(args.set)
+    entries = [json.loads(line) for line in
+               (set_dir / "positions.jsonl").read_bytes().splitlines() if line.strip()]
+    games_dir = Path(args.games_dir or json.loads((set_dir / "build.json").read_bytes())["gamesDir"])
+    pool = load_pool(args.pool)
+    register_mega_stones(pool.reg)
+    store = Path(args.store)
+    wanted: dict[str, dict[int, list[int]]] = {}
+    for n, e in enumerate(entries):
+        wanted.setdefault(e["source"], {}).setdefault(e["gameIndex"], []).append(n)
+    found: dict[int, dict] = {}
+    ended = 0
+    for name, by_index in sorted(wanted.items()):
+        with (games_dir / name).open("rb") as fh:
+            for line in fh:
+                if not line.strip():
+                    continue
+                # Parse only the games asked for (the files are 20 GB): the index's text first.
+                hit = GAME_INDEX.search(line)
+                if hit is not None and int(hit.group(1)) not in by_index:
+                    continue
+                game = json.loads(line)
+                for n in by_index.get(game.get("gameIndex"), []):
+                    e = entries[n]
+                    if float(game["outcome"]) != e["outcome"]:
+                        continue  # another game of the same index (a restarted worker's file)
+                    try:
+                        at, nd = following(game["decisions"], e["position"])
+                    except ValueError:
+                        continue
+                    if n in found:
+                        raise SystemExit(f"position {n}: two games match")
+                    # The control: the position itself, rebuilt, is the set's line to the bit
+                    # (the same game, and `_entry` is what `build` wrote).
+                    again = _entry(pool, store, game, game["decisions"][at], e["game"], name, args)
+                    if json.dumps(again) != json.dumps(e):
+                        raise SystemExit(f"position {n}: rebuilt, it is not the set's line")
+                    if nd is None:
+                        found[n] = {}
+                        ended += 1
+                        continue
+                    found[n] = {"of": n, **_entry(pool, store, game, nd, e["game"], name, args)}
+    missing = [n for n in range(len(entries)) if n not in found]
+    if missing:
+        raise SystemExit(f"{len(missing)} positions' games not found (first {missing[:5]})")
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    lines = [json.dumps(found[n]) for n in range(len(entries)) if found[n]]
+    (out / "positions.jsonl").write_bytes(("\n".join(lines) + "\n").encode("utf-8"))
+    _write(out / "build.json", {"of": str(set_dir), "positions": len(entries), "next": len(lines),
+                                "ended": ended, "store": str(store), "gamesDir": str(games_dir)})
+    print(f"{len(lines)} next positions, {ended} games ended before side 0 moved again -> "
           f"{out / 'positions.jsonl'}", file=sys.stderr, flush=True)
 
 
@@ -592,6 +680,14 @@ def main(argv: list[str] | None = None) -> None:
     b.add_argument("--temperature", type=float, default=0.5)
     b.add_argument("--pool", default=DEFAULT_POOL)
     b.add_argument("--out", required=True)
+    x = sub.add_parser("next", help="IKA-424: each position's next move decision, as a set")
+    x.add_argument("--set", required=True)
+    x.add_argument("--games-dir", default=None, help="default: the set's build.json")
+    x.add_argument("--store", required=True, help="the selection store the games were played from")
+    x.add_argument("--epsilon", type=float, default=0.25)
+    x.add_argument("--temperature", type=float, default=0.5)
+    x.add_argument("--pool", default=DEFAULT_POOL)
+    x.add_argument("--out", required=True)
     r = sub.add_parser("read")
     r.add_argument("--set", required=True)
     r.add_argument("--name", required=True)
@@ -625,7 +721,7 @@ def main(argv: list[str] | None = None) -> None:
     p.add_argument("--splits", action="store_true", help="also by the position's kind")
     p.add_argument("--out", default=None)
     args = ap.parse_args(argv)
-    {"build": build, "read": read, "report": report}[args.cmd](args)
+    {"build": build, "next": build_next, "read": read, "report": report}[args.cmd](args)
 
 
 if __name__ == "__main__":
