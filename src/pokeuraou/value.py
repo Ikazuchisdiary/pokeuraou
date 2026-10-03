@@ -155,6 +155,12 @@ class ValueConfig:
     #: antisymmetric. `train` adds `aux_weight` x MSE to the cross entropy. The head is
     #: never read by `forward`; a model saved for use drops it. 0.0 builds nothing.
     aux_weight: float = 0.0
+    #: IKA-428: more auxiliary targets, ``"name:weight,name:weight"`` from `AUX_TARGETS`
+    #: (each built from the dataset's rows by `aux_target_arrays`). Each has its own small
+    #: head under `aux_heads`, read by training only; a model saved for use drops them and
+    #: this field. "" builds nothing, so the net, its answers and a training run are those
+    #: of every earlier model.
+    aux_targets: str = ""
 
 
 class _GroupLayerNorm(nn.Module):
@@ -321,6 +327,17 @@ class ValueNet(nn.Module):
         )
         if config.aux_weight > 0:
             self.aux = nn.Linear(config.head_dim, AUX_DIM)
+        if config.aux_targets:
+            # IKA-428: one head per named target (`AUX_TARGETS`), built after every other
+            # module so that the modules above draw the same initialisation as without.
+            heads = {}
+            for name, _weight in parse_aux_targets(config.aux_targets):
+                kind, dim, _loss = AUX_TARGETS[name]
+                if kind == "mon":
+                    heads[name] = nn.Linear(config.mon_dim + config.head_dim, 1)
+                else:
+                    heads[name] = nn.Linear(config.head_dim, dim)
+            self.aux_heads = nn.ModuleDict(heads)
 
     def columns(self, batch: dict[str, Tensor], name: str) -> Tensor:
         """`batch[name]` ("mon", "side" or "field") cut to the columns this net reads.
@@ -367,6 +384,10 @@ class ValueNet(nn.Module):
 
     def side_vectors(self, batch: dict[str, Tensor]) -> Tensor:
         """(B, 2, side_dim), computed without reference to which side is which."""
+        return self._sides_and_mons(batch)[0]
+
+    def _sides_and_mons(self, batch: dict[str, Tensor]) -> tuple[Tensor, Tensor]:
+        """`side_vectors` and the per-Pokemon vectors it pooled, (B, 2, M, mon_dim)."""
         features, move_mask = self.mon_inputs(batch)
         if self.config.move_properties:
             props = self.move_prop_embed(self.move_props[batch["moves"]])
@@ -397,7 +418,7 @@ class ValueNet(nn.Module):
         sides = self.side_mlp(pooled)
         if self.config.encoder_dropout > 0:
             sides = nn.functional.dropout(sides, self.config.encoder_dropout, self.training)
-        return sides
+        return sides, mon
 
     def forward(self, batch: dict[str, Tensor]) -> Tensor:
         """Logit of side 0 winning, antisymmetric by construction."""
@@ -426,6 +447,47 @@ class ValueNet(nn.Module):
         h_mirrored = hidden(torch.cat([theirs, ours, field], dim=-1))
         logit = (last(h_forward) - last(h_mirrored)).squeeze(-1)
         return logit, self.aux(h_forward) - self.aux(h_mirrored)
+
+    def forward_heads(
+        self, batch: dict[str, Tensor]
+    ) -> tuple[Tensor, Tensor | None, dict[str, Tensor]]:
+        """The win logit, the `aux` regression (None without it) and each `aux_heads` output.
+
+        The same passes as :meth:`forward_aux`. Each named head reads the head's hidden layer
+        the way its kind says (`AUX_TARGETS`), so every output keeps the symmetry of its
+        target when the sides are exchanged:
+
+        * ``anti`` (B, dim): ``f(h_forward) - f(h_mirrored)``, side 0 minus side 1.
+        * ``sym`` (B, dim): ``f(h_forward) + f(h_mirrored)``, the same for both sides.
+        * ``side`` (B, 2, dim): ``f(h_forward)`` for side 0, ``f(h_mirrored)`` for side 1.
+        * ``mon`` (B, 2, M): one logit per Pokemon from its own vector beside its side's
+          hidden layer.
+
+        Training only (IKA-428).
+        """
+        sides, mon = self._sides_and_mons(batch)
+        ours, theirs = sides[:, 0], sides[:, 1]
+        field = self.columns(batch, "field")
+        last = self.head[-1]
+        hidden = self.head[:-1]
+        h_forward = hidden(torch.cat([ours, theirs, field], dim=-1))
+        h_mirrored = hidden(torch.cat([theirs, ours, field], dim=-1))
+        logit = (last(h_forward) - last(h_mirrored)).squeeze(-1)
+        aux = self.aux(h_forward) - self.aux(h_mirrored) if hasattr(self, "aux") else None
+        outputs: dict[str, Tensor] = {}
+        for name, head in self.aux_heads.items():
+            kind = AUX_TARGETS[name][0]
+            if kind == "anti":
+                outputs[name] = head(h_forward) - head(h_mirrored)
+            elif kind == "sym":
+                outputs[name] = head(h_forward) + head(h_mirrored)
+            elif kind == "side":
+                outputs[name] = torch.stack([head(h_forward), head(h_mirrored)], dim=1)
+            else:  # mon
+                per_side = torch.stack([h_forward, h_mirrored], dim=1)  # (B,2,head_dim)
+                context = per_side.unsqueeze(2).expand(-1, -1, mon.shape[2], -1)
+                outputs[name] = head(torch.cat([mon, context], dim=-1)).squeeze(-1)
+        return logit, aux, outputs
 
     #: Index of `is_active` inside the per-Pokemon numeric block. Set by :func:`build`.
     _active_feature: int = 0
@@ -923,6 +985,190 @@ def final_material_targets(dataset: Dataset) -> np.ndarray:
     return np.repeat(per_game, ends - starts, axis=0).astype(np.float32)
 
 
+#: IKA-428: the auxiliary targets `ValueConfig.aux_targets` can name, as (kind, dim, loss).
+#: The kind is how the head reads the hidden layer (`ValueNet.forward_heads`); the loss is
+#: the mean squared error ("mse") or the cross entropy against a probability ("bce").
+#: Every target is built from the rows of the encoded dataset (`aux_target_arrays`).
+AUX_TARGETS: dict[str, tuple[str, int, str]] = {
+    # Each side's alive fraction and team HP fraction at the game's end (`end_material`).
+    "end_side": ("side", 2, "mse"),
+    # The material difference (alive, HP; side 0 minus side 1) k turns on: the first row
+    # of the same game at least k turns later, or the end when there is none.
+    "ahead1": ("anti", 2, "mse"),
+    "ahead2": ("anti", 2, "mse"),
+    "ahead4": ("anti", 2, "mse"),
+    # How many of each side's Pokemon faint before the next turn's decision (or the end).
+    "ko_next": ("side", 1, "mse"),
+    # Turns left in the game, (last row's turn - this turn + 1) / 8. The same for both sides.
+    "turns_left": ("sym", 1, "mse"),
+    # Whether each Pokemon is alive at the game's end, matched by species (a team holds
+    # one of each). Absent slots are not scored.
+    "mon_end": ("mon", 1, "bce"),
+    # The generating search's value at this decision (`Dataset.search_value`) as a second,
+    # separate win probability.
+    "search": ("anti", 1, "bce"),
+}
+
+
+def parse_aux_targets(spec: str) -> list[tuple[str, float]]:
+    """``"name:weight,..."`` -> [(name, weight)], refusing an unknown name or a weight <= 0."""
+    out: list[tuple[str, float]] = []
+    for part in (p for p in spec.split(",") if p):
+        name, _, weight = part.partition(":")
+        if name not in AUX_TARGETS or not weight or float(weight) <= 0:
+            raise ValueError(
+                f"aux target {part!r}: want name:weight with a name of {sorted(AUX_TARGETS)} "
+                "and a weight above 0"
+            )
+        out.append((name, float(weight)))
+    if len({n for n, _ in out}) != len(out):
+        raise ValueError(f"aux targets {spec!r} name one target twice")
+    return out
+
+
+def _game_runs(game: np.ndarray) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """(starts, ends, run of each row) of the contiguous runs of one game id each."""
+    steps = np.diff(game.astype(np.int64))
+    if (steps < 0).any():
+        raise ValueError("a game's rows must be contiguous and in order")
+    starts = np.r_[0, np.flatnonzero(steps != 0) + 1]
+    ends = np.r_[starts[1:], len(game)]
+    if len(np.unique(game[starts])) != len(starts):
+        raise ValueError("a game id appears in two separate runs of rows")
+    run = np.repeat(np.arange(len(starts)), ends - starts)
+    return starts, ends, run
+
+
+def _rows_in_chunks(array: Any, index: np.ndarray, pick: Any, chunk: int = 500_000) -> np.ndarray:
+    """``pick(np.asarray(array[index]))`` a chunk of rows at a time, concatenated."""
+    parts = [
+        pick(np.asarray(array[index[s : s + chunk]], np.float32))
+        for s in range(0, len(index), chunk)
+    ]
+    return np.concatenate(parts) if parts else np.zeros(0, np.float32)
+
+
+def end_material(dataset: Dataset) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """(material per row (rows, 2, 2), end material per game (games, 2, 2), ends, run).
+
+    Material is a side's ``alive_fraction`` and ``team_hp_fraction``. The end of a game is
+    its last row's material with the losing side's set to 0: the last row is the last
+    decision, taken before the turn that ended the game, and the game ended because the
+    loser had nothing left. A drawn game (outcome 0.5) keeps the last row as it is.
+    """
+    from .encode import side_feature_names
+
+    names = side_feature_names()
+    columns = [names.index("alive_fraction"), names.index("team_hp_fraction")]
+    _starts, ends, run = _game_runs(dataset.game)
+    material = _rows_in_chunks(
+        dataset.encoded.side, np.arange(len(dataset)), lambda a: a[:, :, columns]
+    )
+    end = material[ends - 1].copy()
+    outcome = np.asarray(dataset.outcome, np.float32)[ends - 1]
+    end[outcome == 1.0, 1, :] = 0.0
+    end[outcome == 0.0, 0, :] = 0.0
+    return material, end, ends, run
+
+
+def _ahead(dataset: Dataset, k: int, ends: np.ndarray, run: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """(row index of the first row of the same game at least k turns on, whether there is one)."""
+    turn = np.asarray(dataset.turn, np.int64)
+    if (turn < 0).any() or turn.max(initial=0) >= 1 << 20:
+        raise ValueError("turns out of range")
+    key = run.astype(np.int64) << 20 | turn
+    if (np.diff(key) < 0).any():
+        raise ValueError("turns must not decrease inside a game")
+    j = np.searchsorted(key, key + k, side="left")
+    there = j < ends[run]
+    return np.minimum(j, len(key) - 1), there
+
+
+def aux_target_arrays(
+    dataset: Dataset, names: Sequence[str], encoder: Encoder | None = None
+) -> dict[str, np.ndarray]:
+    """Per-row float32 targets of the named `AUX_TARGETS`, in the shapes their heads output.
+
+    ``mon_end`` is (rows, 2, M) with 1 alive, 0 fainted and -1 for an empty slot (not
+    scored); it needs the `encoder` for the per-Pokemon column names. The rows of a game
+    must be contiguous with turns that never decrease (checked), which every encoded
+    dataset is (IKA-425).
+    """
+    out: dict[str, np.ndarray] = {}
+    if not names:
+        return out
+    material, end, ends, run = end_material(dataset)
+    for name in names:
+        if name == "end_side":
+            out[name] = end[run]
+        elif name.startswith("ahead") or name == "ko_next":
+            k = 1 if name == "ko_next" else int(name[len("ahead"):])
+            j, there = _ahead(dataset, k, ends, run)
+            later = np.where(there[:, None, None], material[j], end[run])
+            if name == "ko_next":
+                # alive_fraction is alive / M; the count that faints, never below 0.
+                m = dataset.encoded.mask.shape[-1]
+                fainted = (material[:, :, 0] - later[:, :, 0]) * m
+                out[name] = np.maximum(fainted, 0.0)[:, :, None].astype(np.float32)
+            else:
+                out[name] = (later[:, 0, :] - later[:, 1, :]).astype(np.float32)
+        elif name == "turns_left":
+            turn = np.asarray(dataset.turn, np.float32)
+            last = turn[ends - 1][run]
+            out[name] = ((last - turn + 1.0) / 8.0)[:, None].astype(np.float32)
+        elif name == "mon_end":
+            if encoder is None:
+                raise ValueError("mon_end needs the encoder")
+            out[name] = _mon_end(dataset, ends, run, encoder.mon_names.index("fainted"))
+        elif name == "search":
+            value = np.asarray(dataset.search_value, np.float32)
+            if len(value) != len(dataset) or not np.isfinite(value).all():
+                raise ValueError("the dataset's search_value is missing or not finite")
+            out[name] = np.clip(value, 0.0, 1.0)[:, None]
+        else:
+            raise ValueError(f"unknown aux target {name!r}")
+    return out
+
+
+def _mon_end(dataset: Dataset, ends: np.ndarray, run: np.ndarray, fainted_col: int) -> np.ndarray:
+    """(rows, 2, M): each present Pokemon's alive (1) or fainted (0) at its game's end."""
+    e = dataset.encoded
+    last = ends - 1
+    species_last = np.asarray(e.species[last]).astype(np.int64)  # (games, 2, M)
+    present_last = _rows_in_chunks(e.mask, last, lambda a: a) > 0
+    alive_last = present_last & (
+        _rows_in_chunks(e.mon, last, lambda a: a[..., fainted_col], chunk=100_000) == 0
+    )
+    outcome = np.asarray(dataset.outcome, np.float32)[last]
+    alive_last[outcome == 1.0, 1, :] = False
+    alive_last[outcome == 0.0, 0, :] = False
+    out = np.empty((len(dataset), *species_last.shape[1:]), np.float32)
+    for s in range(0, len(dataset), 500_000):
+        rows = np.arange(s, min(s + 500_000, len(dataset)))
+        species = np.asarray(e.species[rows]).astype(np.int64)  # (n, 2, M)
+        present = np.asarray(e.mask[rows]) > 0
+        g = run[rows]
+        same = species[:, :, :, None] == species_last[g][:, :, None, :]  # (n, 2, M, M)
+        alive = (same & alive_last[g][:, :, None, :]).any(axis=-1)
+        found = same.any(axis=-1)
+        out[rows] = np.where(present & found, alive.astype(np.float32), -1.0)
+    return out
+
+
+def aux_loss(name: str, output: Tensor, wanted: Tensor) -> Tensor:
+    """The loss of one `AUX_TARGETS` head on a batch (IKA-428)."""
+    kind, _dim, loss = AUX_TARGETS[name]
+    if loss == "mse":
+        return ((output - wanted) ** 2).mean()
+    if kind == "mon":
+        scored = wanted >= 0
+        each = nn.functional.binary_cross_entropy_with_logits(
+            output, wanted.clamp(min=0.0), reduction="none"
+        )
+        return (each * scored).sum() / scored.sum().clamp(min=1)
+    return nn.functional.binary_cross_entropy_with_logits(output, wanted)
+
+
 def game_weights(game: np.ndarray, spec: str) -> np.ndarray:
     """Per-row float32 weights from ``"FROM:W,FROM:W,..."``: a row of game g gets the weight of
     the last entry whose FROM is at most g (IKA-425). FROM must start at 0 and increase."""
@@ -1097,6 +1343,7 @@ def train(
     swap_slots: SwapSlots | None = None,
     aux_target: np.ndarray | None = None,
     row_weight: np.ndarray | None = None,
+    aux_targets: dict[str, np.ndarray] | None = None,
 ) -> tuple[list[EpochReport], dict[str, Tensor]]:
     """Fits the network and returns the epoch history and the best weights.
 
@@ -1123,6 +1370,9 @@ def train(
     :param row_weight: per-row weights of the cross entropy (`game_weights`); a batch's loss is
         the weighted mean. None keeps the plain mean and the exact computation of every run
         before this was added (IKA-425).
+    :param aux_targets: per-row targets of each head named by ``config.aux_targets``
+        (`aux_target_arrays`), needed exactly when it is not empty: the loss adds each
+        head's weight x `aux_loss` (IKA-428).
 
     ``epochs=0`` trains nothing and returns the weights the net came in with -- the null
     control of a warm start (`tools/train_value.py --init-from`, IKA-194).
@@ -1135,6 +1385,11 @@ def train(
         raise ValueError("the net has no auxiliary head; build it with aux_weight > 0")
     if row_weight is not None and len(row_weight) != len(dataset):
         raise ValueError("row_weight is one weight per dataset row")
+    head_weights = dict(parse_aux_targets(config.aux_targets))
+    if set(head_weights) != set(aux_targets or {}):
+        raise ValueError("config.aux_targets and aux_targets must name the same targets")
+    if head_weights and swap_slots is not None and "mon_end" in head_weights:
+        raise ValueError("--swap-slots moves the Pokemon but not the mon_end targets")
 
     if config.keep not in ("best", "last") or config.average not in ("none", "ema", "swa"):
         raise ValueError(f"keep={config.keep!r} average={config.average!r}")
@@ -1185,11 +1440,14 @@ def train(
             batch = dataset.tensors(batch_idx, device)
             if swap_slots is not None:
                 batch = swap_batch(batch, swap_slots.draw(swap_rng, batch_idx), swap_slots)
-            if aux_target is None and row_weight is None:
+            heads: dict[str, Tensor] = {}
+            if aux_target is None and row_weight is None and not head_weights:
                 logit = net(batch)
                 loss = loss_fn(logit, fitted[batch_idx].to(device))
             else:
-                if aux_target is None:
+                if head_weights:
+                    logit, aux, heads = net.forward_heads(batch)
+                elif aux_target is None:
                     logit = net(batch)
                 else:
                     logit, aux = net.forward_aux(batch)
@@ -1204,6 +1462,10 @@ def train(
                 if aux_target is not None:
                     wanted = torch.from_numpy(aux_target[batch_idx]).to(device)
                     loss = loss + config.aux_weight * ((aux - wanted) ** 2).mean()
+                for name, output in heads.items():
+                    assert aux_targets is not None
+                    wanted = torch.from_numpy(aux_targets[name][batch_idx]).to(device)
+                    loss = loss + head_weights[name] * aux_loss(name, output, wanted)
             optimiser.zero_grad(set_to_none=True)
             loss.backward()
             nn.utils.clip_grad_norm_(net.parameters(), 1.0)
@@ -1347,7 +1609,11 @@ def save_model(
     torch.save(
         {
             "weights": weights,
-            "config": asdict(config),
+            # IKA-428: `aux_targets` is written only when set, so a model trained without
+            # it (or saved for use, which drops it) reads back in code from before it.
+            "config": {
+                k: v for k, v in asdict(config).items() if k != "aux_targets" or v
+            },
             "format_id": vocab.format_id,
             "vocab_fingerprint": vocab.fingerprint(),
             # Rows per table, index 0 included -- what `load_model` cuts the current
