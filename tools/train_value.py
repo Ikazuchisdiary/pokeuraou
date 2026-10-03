@@ -420,6 +420,14 @@ def main() -> None:
         "bit; pokeuraou.packed). For A/B of the packing only.",
     )
     ap.add_argument(
+        "--no-cache",
+        action="store_true",
+        help="IKA-426: pack the dataset in this process's own memory instead of mapping the "
+        "packed copy kept beside it (<data>.packed/, written by the first run on a file). "
+        "Same batches bit for bit; the mapped copy takes no commit, loads in seconds and is "
+        "shared by runs on the same file.",
+    )
+    ap.add_argument(
         "--curve",
         default="",
         help="comma-separated fractions of the training games, e.g. 0.125,0.25,0.5,1.0. "
@@ -440,7 +448,7 @@ def main() -> None:
             f"{ENCODING_REVISION}; re-run tools/encode_dataset.py, which rebuilds the stale "
             "shards itself"
         )
-    dataset = load_dataset(args.data, packed=not args.unpacked)
+    dataset = load_dataset(args.data, packed=not args.unpacked, cache=not args.no_cache)
     target = None
     if args.td_from_game is not None and not args.td_lambda:
         raise SystemExit("--td-from-game needs --td-lambda")
