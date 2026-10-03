@@ -325,6 +325,11 @@ class QConfig:
     properties: bool = False
     #: One round of attention over the eight Pokemon rows after the trunk.
     attend: bool = True
+    #: The trunk reads the state columns of encoding revision 3 (IKA-425's
+    #: `ValueConfig.state_inputs`), as a leaf trained with them does (IKA-427). Off: the
+    #: trunk reads revision 2's columns, as every Q up to q-mc4 did; a file saved without
+    #: the key loads as off.
+    state_inputs: bool = False
 
 
 def _torch() -> Any:  # noqa: ANN401
@@ -374,8 +379,9 @@ def build_net(  # noqa: C901, PLR0915
             c = config
             self.config = c
             # The default trunk reads revision 2's columns of the encoding (IKA-425:
-            # `ValueConfig.state_inputs` off), as every trained Q and leaf before it did.
-            self.trunk = build(encoder, ValueConfig())
+            # `ValueConfig.state_inputs` off), as every trained Q and leaf before it did;
+            # `state_inputs` builds the trunk of a leaf that reads the state columns too.
+            self.trunk = build(encoder, ValueConfig(state_inputs=c.state_inputs))
             widths = self.trunk.in_widths
             tc = self.trunk.config
             mon_dim, side_dim, move_dim = tc.mon_dim, tc.side_dim, tc.move_dim

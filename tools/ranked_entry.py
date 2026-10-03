@@ -92,7 +92,7 @@ def real_solver(reg, args):  # noqa: ANN001, ANN201
     """The leaf, the menus and the reading a person's game reads its selection with."""
     ph = _play_human()
     values = args.value or [args.data_dir_root / p for p in (
-        "models/value-mc4.pt", "models/value-mc4-s1.pt")]
+        "models/value-mc4st.pt", "models/value-mc4st-s1.pt")]
     humanplay.cap_cuda(args.cuda_memory_gb, args.device)
     evaluate, encoder, device = humanplay.load_leaf(reg, values, args.device, graphs=True)
     name = ph.leaf_name(list(values))

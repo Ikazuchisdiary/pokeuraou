@@ -143,6 +143,25 @@ def test_the_flags_filter_as_the_python_loop_did(
     assert _differing(got["python"], got["rust"]) == []
 
 
+@pytest.mark.parametrize("engine", ["rust", "python"])
+def test_reading_in_parts_writes_the_same_shard(
+    tmp_path: Path, games: list[dict], engine: str
+) -> None:
+    """`--parts` (IKA-427): each run of files read, packed and joined is the single read."""
+    directory = tmp_path / "games"
+    _write_games(directory, games)
+    (directory / "games-worker2.jsonl").write_bytes(_line(games[2]) + _line(games[0]))
+    shard = encode_dataset.shard_path(directory)
+    written = {}
+    for parts in (1, 2, 3):
+        _dataset, meta = encode_dataset.encode_dir(directory, _args(engine=engine, parts=parts))
+        written[parts] = _members(shard)
+        shard.unlink()
+    assert meta["games"] == 7
+    assert _differing(written[1], written[2]) == []
+    assert _differing(written[1], written[3]) == []
+
+
 def test_a_partial_line_mid_file_stops_the_port(tmp_path: Path, games: list[dict]) -> None:
     """Python skipped any line it could not parse; the port skips only a file's last one."""
     directory = tmp_path / "games"

@@ -338,6 +338,12 @@ def main(argv: list[str] | None = None) -> None:  # noqa: PLR0915, C901
         default=None,
         help="a leaf (value-*.pt) whose weights start the trunk; read only",
     )
+    ap.add_argument(
+        "--state-inputs",
+        action="store_true",
+        help="the trunk reads encoding revision 3's state columns (IKA-425/427), as a leaf "
+        "trained with train_value.py --state-inputs does. Must match --init-trunk's leaf",
+    )
     ap.add_argument("--max-hours", type=float, default=None, help="stop after this wall clock")
     ap.add_argument(
         "--checkpoint",
@@ -376,11 +382,22 @@ def main(argv: list[str] | None = None) -> None:  # noqa: PLR0915, C901
     )
     reg = load_regulation(args.regulation)
     encoder = Encoder(reg)
-    config = QConfig(properties=args.properties)
+    config = QConfig(properties=args.properties, state_inputs=args.state_inputs)
     table = move_table(reg, encoder.vocab) if args.properties else None
     device = torch.device(args.device)
     net = build_net(encoder, config, table)
     if args.init_trunk is not None:
+        leaf_state = bool(
+            torch.load(args.init_trunk, map_location="cpu", weights_only=False)["config"].get(
+                "state_inputs", False
+            )
+        )
+        if leaf_state != args.state_inputs:
+            raise SystemExit(
+                f"{args.init_trunk} was trained with state_inputs={leaf_state}; "
+                f"pass {'--state-inputs' if leaf_state else 'no --state-inputs'} so the "
+                "trunk reads the columns its weights were trained on"
+            )
         load_trunk(net, args.init_trunk, encoder)
         print(f"trunk initialised from {args.init_trunk}", flush=True)
     net = net.to(device)
