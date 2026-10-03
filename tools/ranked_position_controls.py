@@ -324,8 +324,8 @@ def load_analyzer(args):  # noqa: ANN001, ANN201
     values = [args.data / "models" / m for m in ("value-mc4st.pt", "value-mc4st-s1.pt")]
     evaluate, encoder, device = humanplay.load_leaf(reg, values, "cpu", graphs=False)
     ph = ranked_entry._play_human()
-    fill, _files = ph.install_menus(None, args.data / "models" / "q-mc4.pt", encoder, evaluate, None, device,
-                                    lambda t: print(t, file=sys.stderr))
+    fill, _files = ph.install_menus(None, args.data / "models" / "q-mc4st.pt", encoder, evaluate, None,
+                                    device, lambda t: print(t, file=sys.stderr))
     settings = analysis.Settings(width=analysis.DEFAULT_WIDTH, oracle=ph._oracle_width("sall"),
                                  levels=humanplay.PLAY_MAX_LEVELS or analysis.MAX_LEVELS, rank_fill=fill)
     return reg, analysis.Analyzer(reg, evaluate, "value-mc4stx2", settings=settings)

@@ -48,6 +48,8 @@ from pokeuraou.value import (
     ValueConfig,
     auc,
     build,
+    final_material_targets,
+    game_weights,
     grow_state_inputs,
     load_dataset,
     load_model,
@@ -235,6 +237,26 @@ def warm_start(
         if config.move_properties or config.attention:
             raise SystemExit("--state-inputs warm-starts a plain net only")
         net = grow_state_inputs(net, encoder)
+    if config.aux_weight > 0 and not hasattr(net, "aux"):
+        # IKA-425: the auxiliary regression head is new. The win logit does not read it, so
+        # before the first step this net answers exactly as the loaded one; the head's own
+        # initialisation is drawn from --seed.
+        torch.manual_seed(config.seed)
+        grown = build(encoder, config)
+        grown._active_feature = net._active_feature
+        missing, unexpected = grown.load_state_dict(net.state_dict(), strict=False)
+        if unexpected or any(not k.startswith("aux.") for k in missing):
+            raise SystemExit(f"warm start into the aux head: missing {missing}, unexpected {unexpected}")
+        net = grown
+    if (config.dropout, config.encoder_dropout) != (net.config.dropout, net.config.encoder_dropout):
+        # IKA-425: the dropout of the model read is replaced by this run's. The head's
+        # Dropout modules are built from the config, so set them as well as the record.
+        net.config = replace(
+            net.config, dropout=config.dropout, encoder_dropout=config.encoder_dropout
+        )
+        for module in net.head:
+            if isinstance(module, torch.nn.Dropout):
+                module.p = config.dropout
     record = {
         "path": str(path),
         "format_id": blob["format_id"],
@@ -354,6 +376,42 @@ def main() -> None:
         "first step starts from that model's own answers.",
     )
     ap.add_argument(
+        "--dropout",
+        type=float,
+        default=None,
+        help="IKA-425: dropout of the head (a warm start otherwise keeps the model's, 0.4)",
+    )
+    ap.add_argument(
+        "--encoder-dropout",
+        type=float,
+        default=None,
+        help="IKA-425: dropout on the per-Pokemon and per-side vectors, training only "
+        "(default 0: none)",
+    )
+    ap.add_argument(
+        "--weight-decay",
+        type=float,
+        default=None,
+        help="IKA-425: AdamW weight decay (a warm start otherwise keeps the model's, 0.01)",
+    )
+    ap.add_argument(
+        "--aux-weight",
+        type=float,
+        default=0.0,
+        help="IKA-425: add this x the mean squared error of an auxiliary head that regresses "
+        "the end-of-game material difference (value.final_material_targets: alive fraction "
+        "and team HP fraction of the game's last recorded position, side 0 minus side 1). "
+        "The saved model drops the head.",
+    )
+    ap.add_argument(
+        "--game-weights",
+        default="",
+        help='IKA-425: per-row weights of the cross entropy by game number, "FROM:W,FROM:W" '
+        '(e.g. "0:0.5,79997:1,679990:2" weights games from 0 by 0.5, from 79997 by 1, from '
+        "679990 by 2; mc01234's games start at 0, 39998, 79997, 279997, 679990). Off: every "
+        "row counts the same, as in every run before.",
+    )
+    ap.add_argument(
         "--drop-train-moves",
         default="",
         help="comma-separated move ids: leave every training decision whose position holds "
@@ -469,6 +527,10 @@ def main() -> None:
             ("move_properties", True if args.move_properties else None),
             ("attention", True if args.attention else None),
             ("state_inputs", True if args.state_inputs else None),
+            ("dropout", args.dropout),
+            ("encoder_dropout", args.encoder_dropout),
+            ("weight_decay", args.weight_decay),
+            ("aux_weight", args.aux_weight if args.aux_weight else None),
         )
         if value is not None
     }
@@ -596,6 +658,22 @@ def main() -> None:
         f"\ntraining: {config.epochs} epochs OneCycle to lr {config.lr:g} "
         f"(warm-up {config.pct_start:g}), keep {config.keep}, average {config.average}"
     )
+    extra: dict = {}
+    if config.aux_weight > 0:
+        aux_target = final_material_targets(dataset)
+        extra["aux_target"] = aux_target
+        print(
+            f"auxiliary head: {config.aux_weight:g} x MSE on the final material difference "
+            f"(alive, HP; mean {aux_target.mean(axis=0).round(4).tolist()}, "
+            f"std {aux_target.std(axis=0).round(4).tolist()})"
+        )
+    if args.game_weights:
+        weights = game_weights(dataset.game, args.game_weights)
+        extra["row_weight"] = weights
+        print(
+            f"--game-weights {args.game_weights}: mean row weight over training rows "
+            f"{float(weights[train_idx].mean()):.4f}"
+        )
     history, best = train(
         net,
         dataset,
@@ -604,6 +682,7 @@ def main() -> None:
         holdout=args.holdout,
         log=log,
         target=target,
+        **extra,
         # Only when moves were dropped: otherwise `train` resolves the same split itself,
         # as every run before IKA-318 did.
         **({"train_index": train_idx, "val_index": val_idx} if dropped_moves else {}),
@@ -671,6 +750,12 @@ def main() -> None:
             )
 
     if not args.no_save:
+        if config.aux_weight > 0:
+            # The head only taught the trunk; a saved model is the plain one.
+            from dataclasses import replace
+
+            best = {k: v for k, v in best.items() if not k.startswith("aux.")}
+            config = replace(config, aux_weight=0.0)
         args.out.parent.mkdir(parents=True, exist_ok=True)
         save_model(
             args.out,

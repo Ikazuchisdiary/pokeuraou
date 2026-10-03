@@ -130,6 +130,18 @@ class ValueConfig:
     #: up in the move embedding and join `mon_mlp`'s first layer. A warm start from a model
     #: without it gives all of those input columns zero weights (`grow_state_inputs`).
     state_inputs: bool = False
+    #: IKA-425 stage 2a: dropout on the per-Pokemon vectors (after `mon_mlp`, before the
+    #: pooling) and on each side's vector (after `side_mlp`), in training only. 0.0 adds no
+    #: module and draws nothing from the random stream, so the net, its answers and a
+    #: training run are those of every earlier model.
+    encoder_dropout: float = 0.0
+    #: IKA-425 stage 2a: weight of the auxiliary regression. Above 0, the net has a small
+    #: extra head (`aux`) that reads the same hidden layer as the win logit and regresses the
+    #: end-of-game material of the game the row belongs to (`final_material_targets`: the
+    #: difference in alive fraction and in team HP fraction, side 0 minus side 1), also
+    #: antisymmetric. `train` adds `aux_weight` x MSE to the cross entropy. The head is
+    #: never read by `forward`; a model saved for use drops it. 0.0 builds nothing.
+    aux_weight: float = 0.0
 
 
 class _GroupLayerNorm(nn.Module):
@@ -290,6 +302,8 @@ class ValueNet(nn.Module):
             nn.Dropout(config.dropout),
             nn.Linear(config.head_dim, 1),
         )
+        if config.aux_weight > 0:
+            self.aux = nn.Linear(config.head_dim, AUX_DIM)
 
     def columns(self, batch: dict[str, Tensor], name: str) -> Tensor:
         """`batch[name]` ("mon", "side" or "field") cut to the columns this net reads.
@@ -337,6 +351,8 @@ class ValueNet(nn.Module):
             mon = self.mon_mlp[1:](first)
         else:
             mon = self.mon_mlp(features)  # (B,2,M,mon_dim)
+        if self.config.encoder_dropout > 0:
+            mon = nn.functional.dropout(mon, self.config.encoder_dropout, self.training)
 
         present = batch["mask"].unsqueeze(-1)
         if self.config.attention:
@@ -354,7 +370,10 @@ class ValueNet(nn.Module):
             ],
             dim=-1,
         )
-        return self.side_mlp(pooled)
+        sides = self.side_mlp(pooled)
+        if self.config.encoder_dropout > 0:
+            sides = nn.functional.dropout(sides, self.config.encoder_dropout, self.training)
+        return sides
 
     def forward(self, batch: dict[str, Tensor]) -> Tensor:
         """Logit of side 0 winning, antisymmetric by construction."""
@@ -364,6 +383,25 @@ class ValueNet(nn.Module):
         forward = self.head(torch.cat([ours, theirs, field], dim=-1))
         mirrored = self.head(torch.cat([theirs, ours, field], dim=-1))
         return (forward - mirrored).squeeze(-1)
+
+    def forward_aux(self, batch: dict[str, Tensor]) -> tuple[Tensor, Tensor]:
+        """The win logit of :meth:`forward` and the auxiliary regression, (B,) and (B, AUX_DIM).
+
+        The same two passes through the head, taken up to its last layer so the hidden layer
+        feeds both outputs; the regression is antisymmetric the same way (side 0 minus side 1
+        of what it reads), so a target that is a difference between the sides changes sign
+        when the sides are exchanged. Training only (needs `aux_weight` > 0); `forward` does
+        not read the head.
+        """
+        sides = self.side_vectors(batch)
+        ours, theirs = sides[:, 0], sides[:, 1]
+        field = self.columns(batch, "field")
+        last = self.head[-1]
+        hidden = self.head[:-1]
+        h_forward = hidden(torch.cat([ours, theirs, field], dim=-1))
+        h_mirrored = hidden(torch.cat([theirs, ours, field], dim=-1))
+        logit = (last(h_forward) - last(h_mirrored)).squeeze(-1)
+        return logit, self.aux(h_forward) - self.aux(h_mirrored)
 
     #: Index of `is_active` inside the per-Pokemon numeric block. Set by :func:`build`.
     _active_feature: int = 0
@@ -795,6 +833,51 @@ def td_target(dataset: Dataset, lam: float, *, from_game: int | None = None) -> 
     return np.where(dataset.game >= from_game, mixed, outcome).astype(np.float32)
 
 
+#: Outputs of the auxiliary regression head (`ValueConfig.aux_weight`): the difference in
+#: alive fraction and in team HP fraction, side 0 minus side 1.
+AUX_DIM = 2
+
+
+def final_material_targets(dataset: Dataset) -> np.ndarray:
+    """(rows, AUX_DIM) float32: each row's game's last recorded position's material difference.
+
+    A game's rows are contiguous and in turn order (checked: ``game`` never goes back to an
+    earlier id, ``turn`` never decreases inside a game), so the game's last row is its last
+    decision, taken before that turn was resolved. Its ``alive_fraction`` and
+    ``team_hp_fraction`` (side 0 minus side 1) are the end-of-game material the auxiliary
+    head regresses, repeated on every row of the game. It is the last decision's position,
+    not the final board: the turn that ends the game is not in it.
+    """
+    game = dataset.game
+    if len(game) == 0:
+        return np.zeros((0, AUX_DIM), np.float32)
+    steps = np.diff(game.astype(np.int64))
+    if (steps < 0).any():
+        raise ValueError("a game's rows must be contiguous and in order for the final material")
+    starts = np.r_[0, np.flatnonzero(steps != 0) + 1]
+    ends = np.r_[starts[1:], len(game)]
+    if len(np.unique(game[starts])) != len(starts):
+        raise ValueError("a game id appears in two separate runs of rows")
+    from .encode import side_feature_names
+
+    names = side_feature_names()
+    columns = [names.index("alive_fraction"), names.index("team_hp_fraction")]
+    last = np.asarray(dataset.encoded.side[ends - 1], np.float32)  # (games, 2, side)
+    per_game = last[:, 0, :][:, columns] - last[:, 1, :][:, columns]
+    return np.repeat(per_game, ends - starts, axis=0).astype(np.float32)
+
+
+def game_weights(game: np.ndarray, spec: str) -> np.ndarray:
+    """Per-row float32 weights from ``"FROM:W,FROM:W,..."``: a row of game g gets the weight of
+    the last entry whose FROM is at most g (IKA-425). FROM must start at 0 and increase."""
+    entries = [(int(a), float(b)) for a, b in (part.split(":") for part in spec.split(","))]
+    froms = [a for a, _ in entries]
+    if froms[0] != 0 or froms != sorted(set(froms)) or any(w < 0 for _, w in entries):
+        raise ValueError(f"{spec!r}: FROM must start at 0 and increase, weights be >= 0")
+    weights = np.array([w for _, w in entries], np.float32)
+    return weights[np.searchsorted(froms, game, side="right") - 1]
+
+
 def load_ensemble(
     paths: Sequence[str | Path], encoder: Encoder
 ) -> tuple[list[ValueNet], list[dict[str, Any]]]:
@@ -956,6 +1039,8 @@ def train(
     target: np.ndarray | None = None,
     snapshots: dict[str, dict[str, Tensor]] | None = None,
     swap_slots: SwapSlots | None = None,
+    aux_target: np.ndarray | None = None,
+    row_weight: np.ndarray | None = None,
 ) -> tuple[list[EpochReport], dict[str, Tensor]]:
     """Fits the network and returns the epoch history and the best weights.
 
@@ -976,10 +1061,24 @@ def train(
         validation rows are never exchanged. Off by default: nothing then changes, nor does
         the random stream the batch order draws from.
 
+    :param aux_target: (rows, AUX_DIM) per-row regression targets (`final_material_targets`),
+        needed when ``config.aux_weight`` > 0: the loss is the cross entropy plus
+        ``aux_weight`` x the mean squared error of the net's auxiliary head (IKA-425).
+    :param row_weight: per-row weights of the cross entropy (`game_weights`); a batch's loss is
+        the weighted mean. None keeps the plain mean and the exact computation of every run
+        before this was added (IKA-425).
+
     ``epochs=0`` trains nothing and returns the weights the net came in with -- the null
     control of a warm start (`tools/train_value.py --init-from`, IKA-194).
     """
     import time
+
+    if (config.aux_weight > 0) != (aux_target is not None):
+        raise ValueError("aux_weight > 0 and aux_target go together")
+    if aux_target is not None and not hasattr(net, "aux"):
+        raise ValueError("the net has no auxiliary head; build it with aux_weight > 0")
+    if row_weight is not None and len(row_weight) != len(dataset):
+        raise ValueError("row_weight is one weight per dataset row")
 
     if config.keep not in ("best", "last") or config.average not in ("none", "ema", "swa"):
         raise ValueError(f"keep={config.keep!r} average={config.average!r}")
@@ -1030,8 +1129,25 @@ def train(
             batch = dataset.tensors(batch_idx, device)
             if swap_slots is not None:
                 batch = swap_batch(batch, swap_slots.draw(swap_rng, batch_idx), swap_slots)
-            logit = net(batch)
-            loss = loss_fn(logit, fitted[batch_idx].to(device))
+            if aux_target is None and row_weight is None:
+                logit = net(batch)
+                loss = loss_fn(logit, fitted[batch_idx].to(device))
+            else:
+                if aux_target is None:
+                    logit = net(batch)
+                else:
+                    logit, aux = net.forward_aux(batch)
+                each = nn.functional.binary_cross_entropy_with_logits(
+                    logit, fitted[batch_idx].to(device), reduction="none"
+                )
+                if row_weight is None:
+                    loss = each.mean()
+                else:
+                    weight = torch.from_numpy(row_weight[batch_idx]).to(device)
+                    loss = (each * weight).sum() / weight.sum().clamp(min=1e-6)
+                if aux_target is not None:
+                    wanted = torch.from_numpy(aux_target[batch_idx]).to(device)
+                    loss = loss + config.aux_weight * ((aux - wanted) ** 2).mean()
             optimiser.zero_grad(set_to_none=True)
             loss.backward()
             nn.utils.clip_grad_norm_(net.parameters(), 1.0)
