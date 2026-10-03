@@ -246,7 +246,7 @@ def main() -> None:
         default=None,
         help="the Q a q / q-nocover rank fill ranks by (IKA-274): with --served the servers "
         "load it as the Q arm `q` and every worker gets --q-arm q; otherwise every worker "
-        "gets --q-model. Default with --pool: data/models/q-mc4.pt when an arm ranks by the "
+        "gets --q-model. Default with --pool: data/models/q-mc4st.pt when an arm ranks by the "
         "default Q -- an arm with --rank-leaf and no --rank-fill after -- plays q-nocover, "
         "what M-C generation plays (IKA-338) -- and a stop if that file is not there",
     )

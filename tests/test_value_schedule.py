@@ -163,7 +163,7 @@ def warm(mb, tmp_path):  # noqa: ANN001, ANN201
     net = build(mb_encoder, ValueConfig()).eval()
     model = tmp_path / "mb.pt"
     save_model(model, net, net.state_dict(), mb_encoder.vocab, ValueConfig(), meta={"m": 1},
-               widths=mb_encoder.widths)
+               widths=net.in_widths)
     mc_encoder = Encoder(load_regulation(MC))
     mc_data = _dataset(mc_encoder)
     data = tmp_path / "mc.npz"

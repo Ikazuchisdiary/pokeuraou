@@ -120,6 +120,29 @@ SIDE_CONDITIONS = (
 )
 SLOT_CONDITIONS = ("wideguard", "quickguard", "craftyshield", "matblock", "healingwish", "lunardance")
 
+#: IKA-425: state the canonical position carried and revision 2 did not read, appended at
+#: the end of each block so every revision-2 column keeps its index. A model trained on
+#: revision 2 reads the leading `Encoder.base_widths` columns and nothing else
+#: (`value.ValueNet`), so it answers bit for bit as it did.
+#:
+#: * per Pokemon: sleep turns left (`statusCounter` under `slp`, / 3), the toxic stage
+#:   (`statusCounter` under `tox`, / 8), Perish Song's count (/ 4), and two move ids
+#:   carried as numbers -- the move the Pokemon is locked into and the move it used last.
+#:   The ids are vocabulary integers in a float32 column (exact below 2**24); the net
+#:   looks them up in its move embedding and never reads them as magnitudes. They are
+#:   the last two columns (`MOVE_ID_FEATURES`).
+#: * per side: turns left of Tailwind and the three screens (/ 8).
+#: * field: turns left of Trick Room (/ 8).
+STATE_MON_FEATURES = ("sleep_turns", "toxic_stage", "perish_turns", "locked_move_id", "last_move_id")
+MOVE_ID_FEATURES = ("locked_move_id", "last_move_id")
+STATE_SIDE_CONDITIONS = ("tailwind", "reflect", "lightscreen", "auroraveil")
+STATE_PSEUDO_WEATHERS = ("trickroom",)
+#: Where the locked move is read, first found wins: a charging move, a rampage, a choice
+#: item, Encore -- each volatile's `move`. `position.ts` writes the same precedence into
+#: `lockedMove` (twoturnmove, choicelock, encore), but the port's positions leave that
+#: field empty, so the volatiles are what both encoders read.
+LOCK_VOLATILES = ("twoturnmove", "lockedmove", "choicelock", "encore")
+
 #: Stats are divided by this before they reach the network. Level 50 with 32 SP tops out
 #: near 200 for a non-HP stat, so the scaled features sit in roughly [0.2, 1.4] -- the
 #: point is only that the scale is fixed and stated, not fitted to a particular dataset.
@@ -146,7 +169,11 @@ TURN_CLIP = 40.0
 #: also a shard key -- already sees. Nor by M-C's order being rewritten to begin with
 #: M-B's (9/24): that renumbered M-C ids, not columns, the M-C fingerprint changed with
 #: it (9616b72545058306 -> c2557340f3ed460f), and no M-C model or shard existed.
-ENCODING_REVISION = 2
+#:
+#:   3  IKA-425: the state columns (`STATE_MON_FEATURES` and the two lists after it)
+#:      appended to each block. No revision-2 column moved or changed meaning; the
+#:      revision is raised because every cached shard lacks the new columns.
+ENCODING_REVISION = 3
 
 
 @dataclass(frozen=True, slots=True)
@@ -502,6 +529,7 @@ def mon_feature_names(vocab: Vocabulary) -> tuple[str, ...]:
     names += [f"pp_fraction_{i}" for i in range(4)]
     names += [f"move_disabled_{i}" for i in range(4)]
     names += [f"volatile_{v}" for v in VOLATILES] + ["volatile_other"]
+    names += list(STATE_MON_FEATURES)
     return tuple(names)
 
 
@@ -510,6 +538,7 @@ def side_feature_names() -> tuple[str, ...]:
     names += ["mega_used", "mega_available", "alive_fraction", "team_hp_fraction"]
     for slot in range(2):
         names += [f"slot{slot}_{c}" for c in SLOT_CONDITIONS]
+    names += [f"side_{c}_turns" for c in STATE_SIDE_CONDITIONS]
     return tuple(names)
 
 
@@ -518,7 +547,17 @@ def field_feature_names() -> tuple[str, ...]:
     names += ["terrain_none"] + [f"terrain_{t}" for t in TERRAINS] + ["terrain_duration"]
     names += [f"pseudo_{p}" for p in PSEUDO_WEATHERS]
     names += ["turn_scaled", "turn_is_first"]
+    names += [f"pseudo_{p}_turns" for p in STATE_PSEUDO_WEATHERS]
     return tuple(names)
+
+
+def locked_move_of(mon: Any) -> str | None:  # noqa: ANN401
+    """The move `LOCK_VOLATILES` names for this Pokemon, or None (IKA-425)."""
+    for vid in LOCK_VOLATILES:
+        effect = mon.volatile(vid)
+        if effect is not None and effect.move:
+            return effect.move
+    return None
 
 
 class _StatCache:
@@ -590,6 +629,15 @@ class Encoder:
             "mon": len(self.mon_names),
             "side": len(self.side_names),
             "field": len(self.field_names),
+        }
+
+    @property
+    def base_widths(self) -> dict[str, int]:
+        """The widths of revision 2: the leading columns, without IKA-425's state ones."""
+        return {
+            "mon": len(self.mon_names) - len(STATE_MON_FEATURES),
+            "side": len(self.side_names) - len(STATE_SIDE_CONDITIONS),
+            "field": len(self.field_names) - len(STATE_PSEUDO_WEATHERS),
         }
 
     def encode(self, positions: list[dict[str, Any]]) -> Encoded:
@@ -702,7 +750,13 @@ class Encoder:
         turn = float(position.turn)
         out[base] = min(turn, TURN_CLIP) / TURN_CLIP
         out[base + 1] = 1.0 if turn <= 1 else 0.0
-        assert base + 2 == len(names)
+        base += 2
+
+        durations = {effect.id: effect.duration for effect in state.pseudo_weather}
+        for i, name in enumerate(STATE_PSEUDO_WEATHERS):
+            out[base + i] = float(durations.get(name) or 0) / 8.0
+        base += len(STATE_PSEUDO_WEATHERS)
+        assert base == len(names)
 
     def _encode_side(self, out: np.ndarray, side: Any) -> None:  # noqa: ANN401
         conditions = {c.id for c in side.side_conditions}
@@ -735,6 +789,11 @@ class Encoder:
             for i, name in enumerate(SLOT_CONDITIONS):
                 out[base + i] = 1.0 if name in ids else 0.0
             base += len(SLOT_CONDITIONS)
+
+        durations = {c.id: c.duration for c in side.side_conditions}
+        for i, name in enumerate(STATE_SIDE_CONDITIONS):
+            out[base + i] = float(durations.get(name) or 0) / 8.0
+        base += len(STATE_SIDE_CONDITIONS)
         assert base == len(self.side_names)
 
     def _row_key(self, mon: Any, side: Any) -> tuple[int, bool, bool] | None:  # noqa: ANN401
@@ -841,6 +900,17 @@ class Encoder:
             out[base + len(VOLATILES)] = 1.0
             unknown[vid] = unknown.get(vid, 0) + 1
         base += len(VOLATILES) + 1
+
+        # IKA-425's state columns (`STATE_MON_FEATURES`).
+        counter = float(mon.status_counter or 0)
+        out[base] = counter / 3.0 if status == "slp" else 0.0
+        out[base + 1] = counter / 8.0 if status == "tox" else 0.0
+        perish = mon.volatile("perishsong")
+        out[base + 2] = float(perish.duration or 0) / 4.0 if perish is not None else 0.0
+        locked = locked_move_of(mon)
+        out[base + 3] = float(self.vocab.moves.get(locked, 0)) if locked else 0.0
+        out[base + 4] = float(self.vocab.moves.get(mon.last_move, 0)) if mon.last_move else 0.0
+        base += len(STATE_MON_FEATURES)
         assert base == len(self.mon_names)
 
 
@@ -848,7 +918,12 @@ __all__ = [
     "BOOST_IDS",
     "CURRENT_RULES",
     "ENCODING_REVISION",
+    "LOCK_VOLATILES",
+    "MOVE_ID_FEATURES",
     "SIDE_CONDITIONS",
+    "STATE_MON_FEATURES",
+    "STATE_PSEUDO_WEATHERS",
+    "STATE_SIDE_CONDITIONS",
     "STATUSES",
     "VOCAB_TABLES",
     "VOLATILES",
@@ -859,6 +934,7 @@ __all__ = [
     "build_vocabulary",
     "dump_ids",
     "field_feature_names",
+    "locked_move_of",
     "mon_feature_names",
     "read_vocab_extends",
     "read_vocab_order",

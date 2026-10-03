@@ -86,7 +86,7 @@ def _load_trunk(path: Path, encoder: Encoder, device_name: str):
         rows = torch.arange(len(items), device=device)
         ours = sides[rows, index]
         theirs = sides[rows, 1 - index]
-        return torch.cat([ours, theirs, batch["field"]], dim=-1).cpu().numpy()
+        return torch.cat([ours, theirs, net.columns(batch, "field")], dim=-1).cpu().numpy()
 
     return embed
 

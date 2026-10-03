@@ -50,6 +50,7 @@ from pokeuraou.value import (
     build,
     final_material_targets,
     game_weights,
+    grow_state_inputs,
     load_dataset,
     load_model,
     predict,
@@ -230,6 +231,12 @@ def warm_start(
         if unexpected or set(missing) != new:
             raise SystemExit(f"warm start into move properties: missing {missing}, unexpected {unexpected}")
         net = grown
+    if config.state_inputs and not net.config.state_inputs:
+        # IKA-425: the state columns join each first layer with zero weights, so before
+        # the first step this net answers as the loaded one.
+        if config.move_properties or config.attention:
+            raise SystemExit("--state-inputs warm-starts a plain net only")
+        net = grow_state_inputs(net, encoder)
     if config.aux_weight > 0 and not hasattr(net, "aux"):
         # IKA-425: the auxiliary regression head is new. The win logit does not read it, so
         # before the first step this net answers exactly as the loaded one; the head's own
@@ -358,6 +365,14 @@ def main() -> None:
         action="store_true",
         help="IKA-90: one residual attention layer across the Pokemon tokens of both sides. "
         "With --init-from a model without it, its output projection starts at zero, so the "
+        "first step starts from that model's own answers.",
+    )
+    ap.add_argument(
+        "--state-inputs",
+        action="store_true",
+        help="IKA-425: read the encoding's state columns (turns left of Trick Room, Tailwind "
+        "and the screens, sleep and toxic counters, Perish Song, the locked and the last "
+        "move). With --init-from a model without them, their weights start at zero, so the "
         "first step starts from that model's own answers.",
     )
     ap.add_argument(
@@ -511,6 +526,7 @@ def main() -> None:
             ("pct_start", args.pct_start),
             ("move_properties", True if args.move_properties else None),
             ("attention", True if args.attention else None),
+            ("state_inputs", True if args.state_inputs else None),
             ("dropout", args.dropout),
             ("encoder_dropout", args.encoder_dropout),
             ("weight_decay", args.weight_decay),
@@ -747,7 +763,8 @@ def main() -> None:
             best,
             encoder.vocab,
             config,
-            widths=encoder.widths,
+            # The columns the net reads: revision 2's prefix unless --state-inputs (IKA-425).
+            widths=net.in_widths,
             meta={
                 "data": str(args.data),
                 "decisions": len(dataset),

@@ -235,7 +235,7 @@ def test_the_tool_takes_the_flags_and_saves_a_plain_model(mc, tmp_path, monkeypa
     net = build(encoder, ValueConfig()).eval()
     parent = tmp_path / "parent.pt"
     save_model(parent, net, net.state_dict(), encoder.vocab, ValueConfig(), meta={"m": 1},
-               widths=encoder.widths)
+               widths=net.in_widths)  # the columns a revision-2 net reads (IKA-425/427)
 
     def run(out, *flags) -> None:  # noqa: ANN001, ANN002
         monkeypatch.setattr(

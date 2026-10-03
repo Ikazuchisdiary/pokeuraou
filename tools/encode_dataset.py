@@ -411,6 +411,82 @@ def _read_python(
     )
 
 
+def _packed(dataset: Dataset) -> Dataset:
+    """The dataset with its big arrays in `load_dataset`'s packed forms (same values).
+
+    Ids in the narrowest integer type, float arrays of two or more axes as `PackedFloat`:
+    the rule `value._read_packed` applies to a file, applied to arrays in memory.
+    """
+    from dataclasses import replace
+
+    from pokeuraou.packed import CHUNK_ROWS, PackedFloat, narrow_ints
+
+    def small(array: np.ndarray) -> Any:
+        if array.dtype.kind in "iu":
+            chunks = (array[i : i + CHUNK_ROWS] for i in range(0, len(array), CHUNK_ROWS))
+            return narrow_ints(chunks, len(array), array.shape[1:])
+        if array.dtype == np.float32 and array.ndim >= 2:
+            return PackedFloat.from_array(array)
+        return array
+
+    e = dataset.encoded
+    encoded = Encoded(
+        **{name: small(getattr(e, name)) for name in _ENCODED_ARRAYS},
+        unknown_volatiles=e.unknown_volatiles,
+    )
+    return replace(dataset, encoded=encoded)
+
+
+def _read_in_parts(
+    directory: Path,
+    sources: list[list[Any]],
+    args: argparse.Namespace,
+    read: Any,  # noqa: ANN401 - _read_rust or _read_python
+    parts: int,
+) -> Games | None:
+    """`read` over `parts` runs of the directory's files in order, joined (IKA-427).
+
+    One generation of 400,000 games is 13.6 GB of dense per-Pokemon features at encoding
+    revision 2 and more at revision 3; read whole, it does not fit beside a training run
+    in 31 GB. Each run of files is read dense, packed (`_packed`, a fifth of the size) and
+    let go, and the packed runs are joined. The files are taken in `sources_of`'s order
+    and `concat_datasets` numbers the games on from the run before, so the shard holds the
+    same games, numbers and values as a single read.
+    """
+    from pokeuraou.value import concat_datasets
+
+    pieces: list[Games] = []
+    for q in range(parts):
+        group = sources[q * len(sources) // parts : (q + 1) * len(sources) // parts]
+        got = read(directory, group, args)
+        print(f"  part {q + 1}/{parts}: {len(group)} files, "
+              f"{0 if got is None else len(got.dataset):,} decisions", flush=True)
+        if got is not None:
+            got.dataset = _packed(got.dataset)
+            pieces.append(got)
+    if not pieces:
+        return None
+
+    def total(name: str) -> Counter[Any]:
+        out: Counter[Any] = Counter()
+        for piece in pieces:
+            out.update(getattr(piece, name))
+        return out
+
+    return Games(
+        encoder=pieces[0].encoder,
+        dataset=concat_datasets([piece.dataset for piece in pieces]),
+        games=sum(piece.games for piece in pieces),
+        search_limits=total("search_limits"),
+        provenances=total("provenances"),
+        engines=total("engines"),
+        objectives=total("objectives"),
+        selections=total("selections"),
+        information=total("information"),
+        branching=total("branching"),
+    )
+
+
 def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict[str, Any]]:
     """Encodes one directory of games, or reads back the cache if it is still valid."""
     cache = shard_path(directory)
@@ -461,7 +537,11 @@ def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict
 
     started = time.perf_counter()
     read = _read_python if args.engine == "python" else _read_rust
-    read_games = read(directory, sources, args)
+    parts = max(1, min(getattr(args, "parts", 1), len(sources)))
+    if parts > 1:
+        read_games = _read_in_parts(directory, sources, args, read, parts)
+    else:
+        read_games = read(directory, sources, args)
     if read_games is None:
         raise SystemExit(f"no finished games found in {directory}")
     encoder = read_games.encoder
@@ -542,6 +622,14 @@ def main() -> None:
         "--jobs", type=int, default=1, help="files the port reads at once (--engine rust)"
     )
     ap.add_argument(
+        "--parts",
+        type=int,
+        default=1,
+        help="read each directory's files in this many runs, packing each before the next "
+        "(IKA-427): the same shard in a fraction of the memory. A 400,000-game generation "
+        "is 13.6 GB dense in one run",
+    )
+    ap.add_argument(
         "--force", action="store_true", help="re-encode even when a shard looks current"
     )
     ap.add_argument(
@@ -553,6 +641,8 @@ def main() -> None:
         "the question of whether match games help is one to measure, not to assume.",
     )
     args = ap.parse_args()
+    if args.parts > 1 and args.limit:
+        raise SystemExit("--limit counts games per read, so it would mean another thing per part")
 
     started = time.perf_counter()
     parts: list[Dataset] = []

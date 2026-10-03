@@ -434,7 +434,7 @@ class QGraphs:
         net = self.net
         batch = {name: self.inputs[name] for name in qhead.POSITION_ARRAYS}
         h, sides = net.mons(batch)
-        field = batch["field"]
+        field = net.trunk.columns(batch, "field")
         ctx0 = net.context(torch.cat([sides[:, 0], sides[:, 1], field], dim=-1))
         ctx1 = net.context(torch.cat([sides[:, 1], sides[:, 0], field], dim=-1))
         return h, ctx0, ctx1
@@ -726,7 +726,7 @@ class QBatchGraphs:
                     def trunk(b: int = b) -> tuple[Any, Any, Any]:  # noqa: ANN401
                         batch = {name: self.inputs[name][:b] for name in names}
                         h, sides = self.net.mons(batch)
-                        field = batch["field"]
+                        field = self.net.trunk.columns(batch, "field")
                         ctx0 = self.net.context(torch.cat([sides[:, 0], sides[:, 1], field], dim=-1))
                         ctx1 = self.net.context(torch.cat([sides[:, 1], sides[:, 0], field], dim=-1))
                         return h, ctx0, ctx1
@@ -991,12 +991,13 @@ def add_q_flags(ap: Any) -> None:  # noqa: ANN401 - an ArgumentParser
     )
 
 
-#: Where the default Q is, from the repository root: the Q of M-C's shipped leaf (q-mc4
-#: since IKA-409: taught by value-mc4's cells; q-mc3 from IKA-402, q-mc2 from IKA-400,
-#: q-mc0, IKA-274 stage 3, before it). What a
+#: Where the default Q is, from the repository root: the Q of M-C's shipped leaf (q-mc4st
+#: since IKA-427: taught by value-mc4st's cells, its trunk reads the state columns; q-mc4
+#: from IKA-409, q-mc3 from IKA-402, q-mc2 from IKA-400, q-mc0, IKA-274 stage 3, before
+#: it). What a
 #: q fill ranks by when no Q is named, in generation, on the board and in human play
 #: (IKA-338; `search.SHIPPED_RANK_FILL`).
-DEFAULT_Q = "data/models/q-mc4.pt"
+DEFAULT_Q = "data/models/q-mc4st.pt"
 
 
 def default_q() -> Path:
