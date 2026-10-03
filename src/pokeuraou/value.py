@@ -39,7 +39,7 @@ import torch
 from torch import Tensor, nn
 
 from . import timing
-from .encode import Encoded, Encoder, Vocabulary, settle
+from .encode import MOVE_ID_FEATURES, Encoded, Encoder, Vocabulary, settle
 from .slotswap import SwapSlots, swap_batch
 
 
@@ -121,6 +121,15 @@ class ValueConfig:
     #: training moves it. Off: parameters, keys and answers are those of every earlier model.
     attention: bool = False
     attention_heads: int = 4
+    #: IKA-425: read the encoder's state columns (encoding revision 3: turns left of Trick
+    #: Room, Tailwind and the screens, the sleep and toxic counters, Perish Song's count,
+    #: the locked and the last move). Off: the net reads the revision-2 columns only
+    #: (`Encoder.base_widths`), so every model before this field -- a stored config without
+    #: it reads back off -- answers bit for bit as it did on a revision-3 encoding. On: the
+    #: numeric state columns join each block's first layer, and the two move ids are looked
+    #: up in the move embedding and join `mon_mlp`'s first layer. A warm start from a model
+    #: without it gives all of those input columns zero weights (`grow_state_inputs`).
+    state_inputs: bool = False
 
 
 class _GroupLayerNorm(nn.Module):
@@ -215,7 +224,11 @@ class ValueNet(nn.Module):
         super().__init__()
         self.config = config
         sizes = encoder.vocab.sizes
-        widths = encoder.widths
+        # IKA-425: the columns of each block this net reads -- all of them with
+        # `state_inputs`, the revision-2 prefix without.
+        widths = dict(encoder.widths if config.state_inputs else encoder.base_widths)
+        self.in_widths = widths
+        self._move_ids = len(MOVE_ID_FEATURES) if config.state_inputs else 0
         groups = config.width_groups
 
         self.species = nn.Embedding(sizes["species"], config.species_dim, padding_idx=0)
@@ -229,6 +242,8 @@ class ValueNet(nn.Module):
             + config.item_dim
             + config.move_dim
             + widths["mon"]
+            - self._move_ids
+            + self._move_ids * config.move_dim
         )
         self.mon_mlp = nn.Sequential(
             nn.Linear(mon_in, config.mon_dim),
@@ -276,22 +291,45 @@ class ValueNet(nn.Module):
             nn.Linear(config.head_dim, 1),
         )
 
-    def side_vectors(self, batch: dict[str, Tensor]) -> Tensor:
-        """(B, 2, side_dim), computed without reference to which side is which."""
+    def columns(self, batch: dict[str, Tensor], name: str) -> Tensor:
+        """`batch[name]` ("mon", "side" or "field") cut to the columns this net reads.
+
+        The whole array when it is already that wide (a revision-2 encoding read by a
+        revision-2 net, or any encoding read by a `state_inputs` net), so nothing is
+        copied on that road; the leading columns otherwise (IKA-425).
+        """
+        x = batch[name]
+        width = self.in_widths[name]
+        return x if x.shape[-1] == width else x[..., :width]
+
+    def mon_inputs(self, batch: dict[str, Tensor]) -> tuple[Tensor, Tensor]:
+        """(the first layer's input (B,2,M,mon_in), the move mask (B,2,M,4,1)).
+
+        Shared with `qhead.QNet.mons`, which runs the same trunk.
+        """
         moves = self.move(batch["moves"])  # (B,2,M,4,move_dim)
         move_mask = (batch["moves"] > 0).float().unsqueeze(-1)
         move_pooled = (moves * move_mask).sum(dim=3) / move_mask.sum(dim=3).clamp(min=1.0)
+        mon = self.columns(batch, "mon")
+        parts = [
+            self.species(batch["species"]),
+            self.ability(batch["ability"]),
+            self.item(batch["item"]),
+            move_pooled,
+        ]
+        if self._move_ids:
+            # IKA-425: the locked and the last move, ids carried in the last columns,
+            # read through the move embedding (index 0, none, is the zero row).
+            k = self._move_ids
+            parts.append(mon[..., :-k])
+            parts.append(self.move(mon[..., -k:].long()).flatten(-2))
+        else:
+            parts.append(mon)
+        return torch.cat(parts, dim=-1), move_mask
 
-        features = torch.cat(
-            [
-                self.species(batch["species"]),
-                self.ability(batch["ability"]),
-                self.item(batch["item"]),
-                move_pooled,
-                batch["mon"],
-            ],
-            dim=-1,
-        )
+    def side_vectors(self, batch: dict[str, Tensor]) -> Tensor:
+        """(B, 2, side_dim), computed without reference to which side is which."""
+        features, move_mask = self.mon_inputs(batch)
         if self.config.move_properties:
             props = self.move_prop_embed(self.move_props[batch["moves"]])
             props_pooled = (props * move_mask).sum(dim=3) / move_mask.sum(dim=3).clamp(min=1.0)
@@ -312,7 +350,7 @@ class ValueNet(nn.Module):
                 _masked_max(mon, active),
                 _masked_mean(mon, bench),
                 _masked_max(mon, bench),
-                batch["side"],
+                self.columns(batch, "side"),
             ],
             dim=-1,
         )
@@ -322,7 +360,7 @@ class ValueNet(nn.Module):
         """Logit of side 0 winning, antisymmetric by construction."""
         sides = self.side_vectors(batch)
         ours, theirs = sides[:, 0], sides[:, 1]
-        field = batch["field"]
+        field = self.columns(batch, "field")
         forward = self.head(torch.cat([ours, theirs, field], dim=-1))
         mirrored = self.head(torch.cat([theirs, ours, field], dim=-1))
         return (forward - mirrored).squeeze(-1)
@@ -407,7 +445,7 @@ def widen_net(net: ValueNet, encoder: Encoder, factor: int, *, seed: int = 0) ->
     torch.manual_seed(seed)
     wide = build(encoder, wide_config)
     wide._active_feature = net._active_feature
-    widths = encoder.widths
+    widths = net.in_widths
     d, s, h = config.mon_dim, config.side_dim, config.head_dim
     big_d, big_s, big_h = wide_config.mon_dim, wide_config.side_dim, wide_config.head_dim
     mon_in = wide.mon_mlp[0].in_features
@@ -442,6 +480,46 @@ def widen_net(net: ValueNet, encoder: Encoder, factor: int, *, seed: int = 0) ->
                 target[: value.shape[0]] = value
     wide.load_state_dict(new_state)
     return wide
+
+
+def grow_state_inputs(net: ValueNet, encoder: Encoder) -> ValueNet:
+    """`net` given IKA-425's state columns as zero-weight inputs, answering as `net` did.
+
+    The new columns come last in each first layer's input: after the revision-2 numeric
+    columns in `mon_mlp.0` (the numeric state columns, then the two move ids' embeddings),
+    after the side vector's revision-2 columns in `side_mlp.0`, after the field's in
+    `head.0`. Their weights are zero, every other weight is copied, so before the first step
+    the answer is `net`'s up to float32 rounding (the products run over a longer sum whose
+    extra terms are exact zeros). `net` is not modified.
+    """
+    from dataclasses import replace
+
+    if net.config.state_inputs:
+        raise ValueError("the net already reads the state columns")
+    grown = build(encoder, replace(net.config, state_inputs=True))
+    grown._active_feature = net._active_feature
+    old_state, new_state = net.state_dict(), grown.state_dict()
+    d, s = net.config.mon_dim, net.config.side_dim
+    old_w, new_w = net.in_widths, grown.in_widths
+    mon_old = net.mon_mlp[0].in_features
+    # Linear -> the input positions, in the grown layer, of the old layer's columns.
+    keep = {
+        "mon_mlp.0.weight": torch.arange(mon_old),
+        "side_mlp.0.weight": torch.arange(4 * d + old_w["side"]),
+        "head.0.weight": torch.cat([torch.arange(2 * s), 2 * s + torch.arange(old_w["field"])]),
+    }
+    assert grown.side_mlp[0].in_features == 4 * d + new_w["side"]
+    assert grown.head[0].in_features == 2 * s + new_w["field"]
+    with torch.no_grad():
+        for key, value in old_state.items():
+            target = new_state[key]
+            if key in keep:
+                target.zero_()
+                target[:, keep[key]] = value
+            else:
+                target.copy_(value)
+    grown.load_state_dict(new_state)
+    return grown
 
 
 # ---------------------------------------------------------------------------
@@ -1071,7 +1149,8 @@ def save_model(
             # before this key existed is read from its embedding shapes instead.
             "vocab_sizes": dict(vocab.sizes),
             "active_feature": net._active_feature,
-            "widths": dict(widths or {}),
+            # The columns the net reads (`ValueNet.in_widths`) unless told otherwise.
+            "widths": dict(widths or net.in_widths),
             "meta": meta,
         },
         Path(path),
@@ -1210,17 +1289,22 @@ def load_model(path: str | Path, encoder: Encoder) -> tuple[ValueNet, dict[str, 
     # HP. A shape mismatch would eventually raise from `load_state_dict`, but only if the
     # change happened to alter a width the weights touch, and the message would name a
     # tensor rather than the cause.
+    #
+    # IKA-425 appended state columns to each block (revision 3). A model without
+    # `state_inputs` reads the revision-2 prefix, so what it stored must be that prefix;
+    # one with it reads every column.
+    config = ValueConfig(**blob["config"])
+    expected = encoder.widths if config.state_inputs else encoder.base_widths
     stored = blob.get("widths") or {}
-    if stored and stored != encoder.widths:
+    if stored and stored != expected:
         raise ValueError(
-            f"feature widths {encoder.widths} do not match the model's {stored}; the "
+            f"feature widths {expected} do not match the model's {stored}; the "
             "encoder gained or lost a feature, so the same column no longer means the "
             "same quantity"
         )
     if "move_props" in weights:
         weights = dict(weights)
         weights["move_props"] = _checked_move_props(weights["move_props"], encoder)
-    config = ValueConfig(**blob["config"])
     net = build(encoder, config)
     net._active_feature = int(blob["active_feature"])
     net.load_state_dict(weights)
@@ -1236,6 +1320,7 @@ __all__ = [
     "ValueNet",
     "auc",
     "build",
+    "grow_state_inputs",
     "load_dataset",
     "load_model",
     "move_property_table",

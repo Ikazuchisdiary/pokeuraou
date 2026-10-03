@@ -365,7 +365,6 @@ def build_net(  # noqa: C901, PLR0915
         raise ValueError("a net with properties needs the move table")
     props = int(table.shape[1]) if config.properties and table is not None else 0
     extra = FEATURE_WIDTH if config.properties else 0
-    widths = encoder.widths
 
     class QNet(nn.Module):
         """The leaf's trunk -> Pokemon rows; action -> the rows it names; pair -> logit."""
@@ -374,7 +373,10 @@ def build_net(  # noqa: C901, PLR0915
             super().__init__()
             c = config
             self.config = c
+            # The default trunk reads revision 2's columns of the encoding (IKA-425:
+            # `ValueConfig.state_inputs` off), as every trained Q and leaf before it did.
             self.trunk = build(encoder, ValueConfig())
+            widths = self.trunk.in_widths
             tc = self.trunk.config
             mon_dim, side_dim, move_dim = tc.mon_dim, tc.side_dim, tc.move_dim
             if props:
@@ -420,19 +422,7 @@ def build_net(  # noqa: C901, PLR0915
         def mons(self, batch: dict[str, Any]) -> tuple[Any, Any]:  # noqa: ANN401
             """(B, 2, M, mon_dim) rows and (B, 2, side_dim) side vectors, by the leaf's trunk."""
             t = self.trunk
-            moves = t.move(batch["moves"])
-            move_mask = (batch["moves"] > 0).float().unsqueeze(-1)
-            move_pooled = (moves * move_mask).sum(dim=3) / move_mask.sum(dim=3).clamp(min=1.0)
-            features = torch.cat(
-                [
-                    t.species(batch["species"]),
-                    t.ability(batch["ability"]),
-                    t.item(batch["item"]),
-                    move_pooled,
-                    batch["mon"],
-                ],
-                dim=-1,
-            )
+            features, move_mask = t.mon_inputs(batch)
             mon = t.mon_mlp(features)
             if props:
                 pooled = (self.move_props[batch["moves"]] * move_mask).sum(3) / move_mask.sum(3).clamp(
@@ -451,7 +441,7 @@ def build_net(  # noqa: C901, PLR0915
                     _masked_max(mon, active),
                     _masked_mean(mon, bench),
                     _masked_max(mon, bench),
-                    batch["side"],
+                    t.columns(batch, "side"),
                 ],
                 dim=-1,
             )
@@ -515,7 +505,7 @@ def build_net(  # noqa: C901, PLR0915
         ) -> Any:  # noqa: ANN401
             """(B, N0, N1) logits of side 0 winning, antisymmetric under the mirror."""
             h, sides = self.mons(batch)
-            field = batch["field"]
+            field = self.trunk.columns(batch, "field")
             ctx0 = self.context(torch.cat([sides[:, 0], sides[:, 1], field], dim=-1))
             ctx1 = self.context(torch.cat([sides[:, 1], sides[:, 0], field], dim=-1))
             u = self.encode_actions(h, ctx0, 0, acts0, feats0)

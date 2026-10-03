@@ -277,8 +277,11 @@ fn encode_file(job: &Job, path: &str) -> Result<Part, String> {
             // IKA-347's positive control: the turn feature written one slot along.
             let mut encoded = encoded;
             let width = encoder.widths.field;
+            // `turn_scaled` and the pseudo-weather column before it; IKA-425's state
+            // column comes after `turn_is_first`.
+            let turn = width - 2 - crate::encode::STATE_PSEUDO_WEATHERS.len();
             for row in encoded.field.chunks_mut(width) {
-                row.swap(width - 2, width - 3);
+                row.swap(turn, turn - 1);
             }
             encoded
         };

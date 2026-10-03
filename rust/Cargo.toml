@@ -36,6 +36,10 @@ ika32-control = []
 # IKA-347's positive control: `encode-games` writes the turn feature one slot along. Never
 # for use; the byte comparison against `tools/encode_dataset.py --engine python` has to fail.
 ika347-control = []
+# IKA-425's positive control: the side's state columns (turns left of Tailwind and the
+# screens) written one slot along. Never for use; the byte comparison against
+# `encode.py` (tests/test_encode_state_port.py) has to fail.
+ika425-control = []
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }

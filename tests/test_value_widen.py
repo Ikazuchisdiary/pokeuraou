@@ -143,7 +143,7 @@ def test_train_value_widen_at_zero_epochs_saves_an_equal_wider_model(  # noqa: A
     encoder, data, net = setup
     model = tmp_path / "m.pt"
     save_model(model, net, net.state_dict(), encoder.vocab, ValueConfig(), meta={},
-               widths=encoder.widths)
+               widths=net.in_widths)
     npz = tmp_path / "d.npz"
     save_dataset(npz, data, meta={"format_id": MC, "encoding_revision": ENCODING_REVISION})
     out = tmp_path / "wide.pt"

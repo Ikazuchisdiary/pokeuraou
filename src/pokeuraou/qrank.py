@@ -434,7 +434,7 @@ class QGraphs:
         net = self.net
         batch = {name: self.inputs[name] for name in qhead.POSITION_ARRAYS}
         h, sides = net.mons(batch)
-        field = batch["field"]
+        field = net.trunk.columns(batch, "field")
         ctx0 = net.context(torch.cat([sides[:, 0], sides[:, 1], field], dim=-1))
         ctx1 = net.context(torch.cat([sides[:, 1], sides[:, 0], field], dim=-1))
         return h, ctx0, ctx1
@@ -726,7 +726,7 @@ class QBatchGraphs:
                     def trunk(b: int = b) -> tuple[Any, Any, Any]:  # noqa: ANN401
                         batch = {name: self.inputs[name][:b] for name in names}
                         h, sides = self.net.mons(batch)
-                        field = batch["field"]
+                        field = self.net.trunk.columns(batch, "field")
                         ctx0 = self.net.context(torch.cat([sides[:, 0], sides[:, 1], field], dim=-1))
                         ctx1 = self.net.context(torch.cat([sides[:, 1], sides[:, 0], field], dim=-1))
                         return h, ctx0, ctx1

@@ -481,7 +481,8 @@ def main(argv: list[str] | None = None) -> None:  # noqa: PLR0915, C901
         "vocab_fingerprint": encoder.vocab.fingerprint(),
         "regulation": args.regulation,
         "move_table": table,
-        "widths": encoder.widths,
+        # The columns the trunk reads (revision 2's prefix of a revision-3 encoding, IKA-425).
+        "widths": net.trunk.in_widths,
         "history": history,
         "views": len(views),
         "train_views": len(train_ix),

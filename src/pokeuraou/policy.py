@@ -278,7 +278,7 @@ def load_policy(
         }
         sides = value_net.side_vectors(batch)
         return torch.cat(
-            [sides[0, side], sides[0, 1 - side], batch["field"][0]], dim=-1
+            [sides[0, side], sides[0, 1 - side], value_net.columns(batch, "field")[0]], dim=-1
         ).unsqueeze(0).to(device)
 
     @torch.no_grad()

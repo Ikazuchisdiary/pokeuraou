@@ -399,7 +399,7 @@ def test_a_move_property_model_saves_loads_and_refuses_another_dex(encoder, tmp_
     with torch.no_grad():
         net.move_prop_in.weight.normal_(0.0, 0.1)
     path = tmp_path / "value.pt"
-    save_model(path, net, net.state_dict(), encoder.vocab, config, meta={}, widths=encoder.widths)
+    save_model(path, net, net.state_dict(), encoder.vocab, config, meta={}, widths=net.in_widths)
     loaded, _meta = load_model(path, encoder)
     batch = _random_batch(encoder, seed=2)
     with torch.no_grad():
@@ -486,7 +486,7 @@ def test_an_attention_model_saves_and_loads(encoder, tmp_path) -> None:  # noqa:
     with torch.no_grad():
         net.mon_attention.out.weight.normal_(0.0, 0.1)
     path = tmp_path / "value.pt"
-    save_model(path, net, net.state_dict(), encoder.vocab, config, meta={}, widths=encoder.widths)
+    save_model(path, net, net.state_dict(), encoder.vocab, config, meta={}, widths=net.in_widths)
     loaded, _meta = load_model(path, encoder)
     batch = _random_batch(encoder, seed=2)
     with torch.no_grad():

@@ -85,6 +85,15 @@ pub const SIDE_CONDITIONS: [&str; 11] = [
 pub const SLOT_CONDITIONS: [&str; 6] =
     ["wideguard", "quickguard", "craftyshield", "matblock", "healingwish", "lunardance"];
 
+/// IKA-425's state columns, appended to each block (`encode.py`'s `STATE_MON_FEATURES`
+/// and the lists after it): sleep turns, toxic stage, Perish Song, the locked move's id,
+/// the last move's id per Pokemon; turns left of these per side; of these on the field.
+pub const STATE_MON_FEATURES: usize = 5;
+pub const STATE_SIDE_CONDITIONS: [&str; 4] = ["tailwind", "reflect", "lightscreen", "auroraveil"];
+pub const STATE_PSEUDO_WEATHERS: [&str; 1] = ["trickroom"];
+/// `encode.LOCK_VOLATILES`: where the locked move is read, first found wins.
+pub const LOCK_VOLATILES: [&str; 4] = ["twoturnmove", "lockedmove", "choicelock", "encore"];
+
 const STAT_SCALE: f64 = 200.0;
 const HP_SCALE: f64 = 250.0;
 const TURN_CLIP: f64 = 40.0;
@@ -172,9 +181,11 @@ impl<'a> Encoder<'a> {
         let widths = Widths {
             mon: 2 + 6 + 6 + BOOST_IDS.len() + 1 + STATUSES.len() + 8 + vocab.types.len() + 8
                 + VOLATILES.len()
-                + 1,
-            side: SIDE_CONDITIONS.len() + 4 + 2 * SLOT_CONDITIONS.len(),
-            field: 2 + WEATHERS.len() + 2 + TERRAINS.len() + PSEUDO_WEATHERS.len() + 2,
+                + 1
+                + STATE_MON_FEATURES,
+            side: SIDE_CONDITIONS.len() + 4 + 2 * SLOT_CONDITIONS.len() + STATE_SIDE_CONDITIONS.len(),
+            field: 2 + WEATHERS.len() + 2 + TERRAINS.len() + PSEUDO_WEATHERS.len() + 2
+                + STATE_PSEUDO_WEATHERS.len(),
             mons_per_side: reg.picked_team_size,
         };
         Encoder { reg, vocab, widths, stats: Default::default() }
@@ -300,6 +311,19 @@ impl<'a> Encoder<'a> {
         let turn = position.turn as f64;
         out[base] = (turn.min(TURN_CLIP) / TURN_CLIP) as f32;
         out[base + 1] = if turn <= 1.0 { 1.0 } else { 0.0 };
+        base += 2;
+
+        // IKA-425: turns left, from the effect's `duration` (absent reads 0).
+        for (i, name) in STATE_PSEUDO_WEATHERS.iter().enumerate() {
+            let duration = position
+                .field
+                .pseudo_weather
+                .iter()
+                .find(|p| p.id.as_str() == *name)
+                .and_then(|p| p.duration)
+                .unwrap_or(0);
+            out[base + i] = (duration as f64 / 8.0) as f32;
+        }
     }
 
     fn encode_side(&self, out: &mut [f32], side: &Side, rules: EncodeRules) {
@@ -337,6 +361,14 @@ impl<'a> Encoder<'a> {
                 out[base + i] = if present { 1.0 } else { 0.0 };
             }
             base += SLOT_CONDITIONS.len();
+        }
+
+        // IKA-425: turns left, from the condition's `duration` (absent reads 0).
+        for (i, name) in STATE_SIDE_CONDITIONS.iter().enumerate() {
+            let duration = side.side_condition(name).and_then(|c| c.duration).unwrap_or(0);
+            #[cfg(feature = "ika425-control")]
+            let i = (i + 1) % STATE_SIDE_CONDITIONS.len();
+            out[base + i] = (duration as f64 / 8.0) as f32;
         }
     }
 
@@ -433,5 +465,43 @@ impl<'a> Encoder<'a> {
             out[base + VOLATILES.len()] = 1.0;
             *unknown.entry(vid.as_str().to_string()).or_insert(0) += 1;
         }
+        base += VOLATILES.len() + 1;
+
+        // IKA-425's state columns, as `_encode_mon` writes them.
+        let counter = mon.status_counter.unwrap_or(0) as f64;
+        out[base] =
+            if matches!(status, Some(s) if s.as_str() == "slp") { (counter / 3.0) as f32 } else { 0.0 };
+        out[base + 1] =
+            if matches!(status, Some(s) if s.as_str() == "tox") { (counter / 8.0) as f32 } else { 0.0 };
+        out[base + 2] = match mon.volatile("perishsong") {
+            Some(perish) => (perish.duration.unwrap_or(0) as f64 / 4.0) as f32,
+            None => 0.0,
+        };
+        out[base + 3] = self.move_id_of(locked_move_of(mon));
+        out[base + 4] = self.move_id_of(mon.last_move);
     }
+
+    /// A move's vocabulary integer as a float32 column (0 for none or unknown).
+    fn move_id_of(&self, id: Option<crate::id::Id>) -> f32 {
+        match id {
+            Some(id) if !id.as_str().is_empty() => {
+                self.vocab.moves.get(id.as_str()).copied().unwrap_or(0) as f32
+            }
+            _ => 0.0,
+        }
+    }
+}
+
+/// `encode.locked_move_of`: the move the first of `LOCK_VOLATILES` present names.
+pub fn locked_move_of(mon: &Pokemon) -> Option<crate::id::Id> {
+    for vid in LOCK_VOLATILES {
+        if let Some(effect) = mon.volatile(vid) {
+            if let Some(m) = effect.move_id {
+                if !m.as_str().is_empty() {
+                    return Some(m);
+                }
+            }
+        }
+    }
+    None
 }

@@ -48,6 +48,7 @@ from pokeuraou.value import (
     ValueConfig,
     auc,
     build,
+    grow_state_inputs,
     load_dataset,
     load_model,
     predict,
@@ -228,6 +229,12 @@ def warm_start(
         if unexpected or set(missing) != new:
             raise SystemExit(f"warm start into move properties: missing {missing}, unexpected {unexpected}")
         net = grown
+    if config.state_inputs and not net.config.state_inputs:
+        # IKA-425: the state columns join each first layer with zero weights, so before
+        # the first step this net answers as the loaded one.
+        if config.move_properties or config.attention:
+            raise SystemExit("--state-inputs warm-starts a plain net only")
+        net = grow_state_inputs(net, encoder)
     record = {
         "path": str(path),
         "format_id": blob["format_id"],
@@ -339,6 +346,14 @@ def main() -> None:
         "first step starts from that model's own answers.",
     )
     ap.add_argument(
+        "--state-inputs",
+        action="store_true",
+        help="IKA-425: read the encoding's state columns (turns left of Trick Room, Tailwind "
+        "and the screens, sleep and toxic counters, Perish Song, the locked and the last "
+        "move). With --init-from a model without them, their weights start at zero, so the "
+        "first step starts from that model's own answers.",
+    )
+    ap.add_argument(
         "--drop-train-moves",
         default="",
         help="comma-separated move ids: leave every training decision whose position holds "
@@ -445,6 +460,7 @@ def main() -> None:
             ("pct_start", args.pct_start),
             ("move_properties", True if args.move_properties else None),
             ("attention", True if args.attention else None),
+            ("state_inputs", True if args.state_inputs else None),
         )
         if value is not None
     }
@@ -654,7 +670,8 @@ def main() -> None:
             best,
             encoder.vocab,
             config,
-            widths=encoder.widths,
+            # The columns the net reads: revision 2's prefix unless --state-inputs (IKA-425).
+            widths=net.in_widths,
             meta={
                 "data": str(args.data),
                 "decisions": len(dataset),
