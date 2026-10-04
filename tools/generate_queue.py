@@ -39,6 +39,12 @@ import subprocess
 import sys
 from pathlib import Path
 
+# IKA-431: OpenBLAS commits a buffer per thread it may run when it loads -- numpy's copy
+# and scipy's, about 0.5 GB each on this 16-thread machine, a gigabyte in every process
+# that never touches it. Set before numpy loads, and inherited by the workers, servers and
+# port nodes this starts. A worker runs on one core and no answer moves (records/IKA-431.md).
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 

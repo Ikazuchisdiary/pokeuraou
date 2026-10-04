@@ -271,6 +271,40 @@ def test_an_arm_says_what_it_holds_rather_than_what_it_is_called(parts):
         server.shutdown()
 
 
+def test_arms_with_the_same_files_share_one_model(parts, tmp_path):
+    """IKA-431: a board between two Q's names one value model as both arms, and each arm
+    kept its own nets and CUDA graphs. Arms whose files have the same bytes share one
+    served model; an arm with other bytes, or the same files in another order, gets its own.
+    The shared arm answers as the arm it shares with."""
+    from pokeuraou.inference import load_models
+    from pokeuraou.value import save_model
+
+    regulation, encoder, net = parts
+    one, copy, other = tmp_path / "one.pt", tmp_path / "copy.pt", tmp_path / "other.pt"
+    save_model(one, net, net.state_dict(), encoder.vocab, ValueConfig(), meta={})
+    copy.write_bytes(one.read_bytes())
+    torch.manual_seed(8)
+    second = build(encoder, ValueConfig()).eval()
+    save_model(other, second, second.state_dict(), encoder.vocab, ValueConfig(), meta={})
+    models = load_models(
+        {"value": [one], "baseline": [copy], "else": [other],
+         "pair": [one, other], "reversed": [other, one], "pair2": [copy, other]},
+        encoder, "cpu",
+    )
+    assert models["baseline"] is models["value"]
+    assert models["pair2"] is models["pair"]
+    assert len({id(m) for m in models.values()}) == 4
+    # The control: the shared object is an answer, not a stand-in -- the arms with other
+    # bytes answer otherwise on the same rows.
+    batch = encoder.encode_positions(_positions(regulation, 6))
+    rows = {name: models[name](
+        {k: getattr(batch, k) for k in ("species", "ability", "item", "moves", "mon", "mask",
+                                        "side", "field")}, len(batch))
+        for name in ("value", "baseline", "else")}
+    assert np.array_equal(rows["value"], rows["baseline"])
+    assert not np.array_equal(rows["value"], rows["else"])
+
+
 def test_the_leaf_has_no_operation_that_couples_rows(parts):
     """Nothing in the leaf lets one row of a batch change another's answer.
 

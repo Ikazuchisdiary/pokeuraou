@@ -1334,14 +1334,28 @@ class _Graphs:
 
 
 def load_models(paths: dict[str, Sequence[Path]], encoder: Any, device_name: str) -> dict:
-    """Loads each named arm as a `BatchedValue`. Several files are an ensemble."""
+    """Loads each named arm as a `BatchedValue`. Several files are an ensemble.
+
+    Arms whose files have the same bytes in the same order share one served model
+    (IKA-431): a board between two Q's names one value model twice (`--value` and
+    `--baseline`), and each copy kept its own CUDA graphs, about 0.5 GB of host memory a
+    set. The shared model is the same nets on the same rows, so neither arm's answer moves;
+    its counters add both arms' calls, which the server's report sums anyway.
+    """
+    import hashlib
+
     import torch
 
     from .value import BatchedValue, load_model
 
     device = torch.device(device_name)
     models: dict[str, Any] = {}
+    by_bytes: dict[tuple[str, ...], Any] = {}
     for name, group in paths.items():
+        key = tuple(hashlib.sha256(Path(path).read_bytes()).hexdigest() for path in group)
+        if key in by_bytes:
+            models[name] = by_bytes[key]
+            continue
         nets = [load_model(path, encoder)[0].to(device).eval() for path in group]
         value = BatchedValue(nets if len(nets) > 1 else nets[0], encoder, device=device)
         # Averaging an ensemble is `BatchedValue`'s job, not this module's, and a checkout
@@ -1354,7 +1368,7 @@ def load_models(paths: dict[str, Sequence[Path]], encoder: Any, device_name: str
                 f"kept {len(value.nets)}. Averaging them here instead would be a second "
                 f"path to a quantity that already has one, and the two differ by 4e-08."
             )
-        models[name] = served_model(value)
+        models[name] = by_bytes[key] = served_model(value)
     return models
 
 
