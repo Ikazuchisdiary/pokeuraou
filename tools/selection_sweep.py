@@ -56,7 +56,7 @@ from pokeuraou.selection_deep import (  # noqa: E402
 )
 
 DEFAULT_VALUE = ("data/models/value-mc4bindaux.pt", "data/models/value-mc4bindaux-s1.pt")
-DEFAULT_Q = "data/models/q-mc4st.pt"
+DEFAULT_Q = "data/models/q-mc4bindaux.pt"
 
 
 class TableReader:

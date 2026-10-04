@@ -96,7 +96,7 @@ def real_solver(reg, args):  # noqa: ANN001, ANN201
     humanplay.cap_cuda(args.cuda_memory_gb, args.device)
     evaluate, encoder, device = humanplay.load_leaf(reg, values, args.device, graphs=True)
     name = ph.leaf_name(list(values))
-    q_path = args.q_model or (args.data_dir_root / "models" / "q-mc4st.pt")
+    q_path = args.q_model or (args.data_dir_root / "models" / "q-mc4bindaux.pt")
 
     def say(text: str) -> None:
         print(text, file=sys.stderr)
