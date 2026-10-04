@@ -47,11 +47,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import sys
 import time
 from collections.abc import Callable, Iterator, Sequence
 from pathlib import Path
+
+# IKA-431: OpenBLAS commits a buffer per thread it may run when it loads -- numpy's copy
+# and scipy's, about 0.5 GB each on this 16-thread machine, a gigabyte in a worker that runs
+# on one core. Set before numpy loads (a launcher sets it already); no answer moves
+# (records/IKA-431.md).
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))

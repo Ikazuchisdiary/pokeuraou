@@ -34,6 +34,11 @@ from pathlib import Path
 # library -- and writes the stack to stderr on the way down.
 faulthandler.enable()
 
+# IKA-431: OpenBLAS commits a buffer per thread it may run when it loads -- numpy's copy,
+# about 0.5 GB on this 16-thread machine, in a server whose arithmetic is torch's. Set
+# before numpy loads; a launcher sets it already, this is for a server started by hand.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "1")
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
@@ -122,6 +127,8 @@ def main() -> None:
             total = torch.cuda.mem_get_info()[1]
             torch.cuda.set_per_process_memory_fraction(min(1.0, args.cuda_memory_gb * 1e9 / total))
     models = load_models(paths, encoder, args.device)
+    # Arms with the same files share one served model (IKA-431); its counters are summed once.
+    served_models = list({id(m): m for m in models.values()}.values())
     q_models = {}
     if args.q_arm:
         from pokeuraou.qrank import load_q_arms
@@ -144,9 +151,13 @@ def main() -> None:
         server.memory_cap_gb = args.cuda_memory_gb
     # First line of stdout, so a launcher can read it without parsing the prose.
     print(address, flush=True)
+    first_arm: dict[int, str] = {}
     for name, group in paths.items():
+        shared = first_arm.setdefault(id(models[name]), name)
         print(f"  arm {name}: {', '.join(p.name for p in group)}"
-              + (" (ensemble, logits averaged)" if len(group) > 1 else ""),
+              + (" (ensemble, logits averaged)" if len(group) > 1 else "")
+              + (f" (the same files as arm {shared}: one model and one set of graphs, IKA-431)"
+                 if shared != name else ""),
               file=sys.stderr)
     for name, model in q_models.items():
         print(f"  Q arm {name}: {', '.join(model.files)} "
@@ -207,13 +218,13 @@ def main() -> None:
             return
         timing.set_total(
             "server.held",
-            sum(getattr(m, "held", 0.0) for m in models.values()),
-            calls=sum(getattr(m, "calls", 0) for m in models.values()),
+            sum(getattr(m, "held", 0.0) for m in served_models),
+            calls=sum(getattr(m, "calls", 0) for m in served_models),
         )
         timing.set_total(
             "server.queue",
-            sum(getattr(m, "waited", 0.0) for m in models.values()),
-            calls=sum(getattr(m, "calls", 0) for m in models.values()),
+            sum(getattr(m, "waited", 0.0) for m in served_models),
+            calls=sum(getattr(m, "calls", 0) for m in served_models),
         )
         if q_models:
             timing.set_total(
@@ -261,9 +272,9 @@ def main() -> None:
             # What CUDA is holding says what the server had on it when it died. One died
             # three times with no traceback and nothing from `faulthandler`, which rules
             # out a native fault and leaves being killed from outside.
-            waited = sum(getattr(m, "waited", 0.0) for m in models.values())
-            held = sum(getattr(m, "held", 0.0) for m in models.values())
-            calls = sum(getattr(m, "calls", 0) for m in models.values()) or 1
+            waited = sum(getattr(m, "waited", 0.0) for m in served_models)
+            held = sum(getattr(m, "held", 0.0) for m in served_models)
+            calls = sum(getattr(m, "calls", 0) for m in served_models) or 1
             reserved = torch.cuda.memory_reserved() / 1e9 if torch.cuda.is_available() else 0.0
             in_use = torch.cuda.memory_allocated() / 1e9 if torch.cuda.is_available() else 0.0
             print(f"  {now:,} requests, {server.rows_served:,} rows "
