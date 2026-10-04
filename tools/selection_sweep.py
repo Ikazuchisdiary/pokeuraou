@@ -55,7 +55,7 @@ from pokeuraou.selection_deep import (  # noqa: E402
     solve_selection_deep,
 )
 
-DEFAULT_VALUE = ("data/models/value-mc4st.pt", "data/models/value-mc4st-s1.pt")
+DEFAULT_VALUE = ("data/models/value-mc4bindaux.pt", "data/models/value-mc4bindaux-s1.pt")
 DEFAULT_Q = "data/models/q-mc4st.pt"
 
 

@@ -85,7 +85,7 @@ import numpy as np  # noqa: E402
 
 from pokeuraou.regulation import repo_root  # noqa: E402
 
-DEFAULT_VALUE = ("data/models/value-mc4st.pt", "data/models/value-mc4st-s1.pt")
+DEFAULT_VALUE = ("data/models/value-mc4bindaux.pt", "data/models/value-mc4bindaux-s1.pt")
 DEFAULT_Q = "data/models/q-mc4st.pt"
 
 

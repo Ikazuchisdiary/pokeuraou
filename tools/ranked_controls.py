@@ -17,7 +17,7 @@ teams that bring exactly j's six out first, since the pool's teams are mostly fi
 The estimate's mixture is then scored in the TRUE game: the loss is the value of the true
 game minus the worst case of the estimate's mixture against the true matrix. The uniform
 mixture's loss is the scale. Leaf only (the leaf's one estimate of each cell, no deeper
-reading), on the production leaf value-mc4st x2.
+reading), on the production leaf value-mc4bindaux x2.
 """
 
 from __future__ import annotations
@@ -175,7 +175,7 @@ def main() -> None:
         paste_control(args.data_dir)
     else:
         compare(args.data_dir, args.pairs, args.value or [
-            args.data_dir / "models" / "value-mc4st.pt", args.data_dir / "models" / "value-mc4st-s1.pt"],
+            args.data_dir / "models" / "value-mc4bindaux.pt", args.data_dir / "models" / "value-mc4bindaux-s1.pt"],
             args.tiers, args.holdout)
 
 
