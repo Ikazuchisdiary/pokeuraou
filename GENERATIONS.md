@@ -2017,6 +2017,24 @@ M-C の対戦評価（match_queue --pool、幅 12・rank-leaf・裏非公開・�
 Q（q-mc0）のセルの誤差は新しい評価モデルの答えに対して r = +29.6%（value-mc1x2 から value-mc2x2、水準のずれを除いて +19.4%）で、規則の 11% を超えた。作り直した q-mc2（gen-2 の 10 万局面を value-mc2x2 で埋めた教材、30 エポック）は、value-mc2x2 の上の対戦評価で q-mc0 に SPRT(0,10) が 3,999 対で決まらず（+7.5 [+0.6, +14.3]、H1 の境 LLR +2.98 に対し +2.02）。
 **Q を q-mc2 に替えた（ユーザーの判断 9/30、規則（H1 のときだけ替える）の例外）**。`data/models/q-mc2.pt`（q-mc0 は残す）。
 
+### M-C gen-4 の縛り・補助の目標版 value-mc4bindaux（2026-10-04、IKA-428・IKA-429・IKA-430）
+
+新しい局は打っていない。gen-4 と同じデータ（gen-0〜4、12,436,572 決定）を符号化の revision 4 で符号化し直し（`data/selfplay-mc01234-encoded.npz`。revision 3 は `-rev3`）、状態入力に縛りの列（場の 2 体どうしで、先に動いて 1 回で倒せるか。port のダメージ計算で数える）を足し、補助の目標（終局の残り・探索値・2 手番先の残りの差）と合わせて学んだ。
+学習: value-mc3 の種ごとから温間始動、`--state-inputs --bind-inputs --aux-weight 5 --aux-targets search:1,ahead2:5 --epochs 6 --lr 5e-4 --keep last`（新しい入力の重みは 0 から）= `value-mc4bindaux.pt`・`value-mc4bindaux-s1.pt`。保留局の損失は 2 本平均で value-mc4stx2 0.3882 → value-mc4bindauxx2 0.3803（IKA-429 §9）。
+
+```
+M-C の対戦評価（match_queue --pool、幅 12・rank-leaf・裏非公開、両腕 q-nocover・Q q-mc4st、各腕の評価モデルで先に解いた選出）。C:/tmp/ika430/s1/matches
+  null value-mc4bindauxx2 どうし 40 対                      40/40 が同じ局
+  value-mc4bindauxx2 対 value-mc4stx2   SPRT(0,10) H1（974 対で停止）  +19.8 [+6.0, +33.7]（1,053 対）  → 本番を value-mc4bindaux に（IKA-430）
+  参考（別の試験、同じ相手）: 縛りだけ value-mc4bindx2 +13.8 [+3.3, +24.2]（IKA-429）、補助だけ value-mc4stax2 +17.0 [+4.7, +29.4]（IKA-428）
+Q: q-mc4bindaux（gen-4 の 10 万局面を value-mc4bindauxx2 で埋めた教材、30 エポック、胴体も状態入力と縛りの列を読む）対 q-mc4st（value-mc4bindauxx2 の上）。C:/tmp/ika430/q/matches
+  null（new に q-mc4st）100 対                             100/100 が同じ局
+  SPRT(−10,0) H1（2,465 対で停止）   +0.7 [−8.1, +9.5]（非劣性、2,516 対）  → Q を q-mc4bindaux に。r = +20.2%（記録のみ）
+生成の速さ（ABBA、2,500 局 × 8 区切り、専有）: value-mc4bindaux x1 + q-mc4bindaux は value-mc4st x1 + q-mc4st より 1 局の壁時計 +5.4%、1 決定 +4.1%（局が 1.6% 長い）
+```
+
+ratings.py の表にはまだつないでいない。
+
 ### M-C gen-4 の状態入力版 value-mc4st（2026-10-04、IKA-425・IKA-427）
 
 新しい局は打っていない。gen-4 と同じデータ（gen-0〜4、12,436,572 決定）を符号化の revision 3 で符号化し直し（`data/selfplay-mc01234-encoded-rev3.npz`）、状態入力（トリックルーム・おいかぜ・壁の残りターン、ねむり・もうどく・ほろびのカウンタ、固定された技と直前の技）を足して学んだ。

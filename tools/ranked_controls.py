@@ -175,7 +175,8 @@ def main() -> None:
         paste_control(args.data_dir)
     else:
         compare(args.data_dir, args.pairs, args.value or [
-            args.data_dir / "models" / "value-mc4bindaux.pt", args.data_dir / "models" / "value-mc4bindaux-s1.pt"],
+            args.data_dir / "models" / "value-mc4bindaux.pt",
+            args.data_dir / "models" / "value-mc4bindaux-s1.pt"],
             args.tiers, args.holdout)
 
 
