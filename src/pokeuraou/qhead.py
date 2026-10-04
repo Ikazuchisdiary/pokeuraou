@@ -330,6 +330,10 @@ class QConfig:
     #: trunk reads revision 2's columns, as every Q up to q-mc4 did; a file saved without
     #: the key loads as off.
     state_inputs: bool = False
+    #: The trunk also reads the bind columns of encoding revision 4 (IKA-429's
+    #: `ValueConfig.bind_inputs`, which needs `state_inputs`), as a leaf trained with them
+    #: does (IKA-430). Off, and a file saved without the key, read revision 3's columns.
+    bind_inputs: bool = False
 
 
 def _torch() -> Any:  # noqa: ANN401
@@ -380,8 +384,11 @@ def build_net(  # noqa: C901, PLR0915
             self.config = c
             # The default trunk reads revision 2's columns of the encoding (IKA-425:
             # `ValueConfig.state_inputs` off), as every trained Q and leaf before it did;
-            # `state_inputs` builds the trunk of a leaf that reads the state columns too.
-            self.trunk = build(encoder, ValueConfig(state_inputs=c.state_inputs))
+            # `state_inputs` builds the trunk of a leaf that reads the state columns too,
+            # `bind_inputs` one that reads the bind columns after them (IKA-430).
+            self.trunk = build(
+                encoder, ValueConfig(state_inputs=c.state_inputs, bind_inputs=c.bind_inputs)
+            )
             widths = self.trunk.in_widths
             tc = self.trunk.config
             mon_dim, side_dim, move_dim = tc.mon_dim, tc.side_dim, tc.move_dim

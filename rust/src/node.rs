@@ -392,6 +392,38 @@ fn score_pool(reg: &Reg, value: &Value) -> Value {
 /// Both sides' candidate features for the candidate model (IKA-274): `qfeatures`
 /// answers `WIDTH` numbers per candidate of each side's list, from the same calculator the
 /// `score` command uses. A position the calculator refuses is refused whole.
+/// `bind` (IKA-429): each position's bind columns, as the encoder writes them -- `mon`, the
+/// four per Pokemon row (positions x 2 sides x mons per side x 4), and `side`,
+/// `BIND_SIDE_FEATURES` per side (positions x 2 x 7), flat. Every value is a multiple of 1/2048, so its JSON
+/// text reads back as the same float32. `positions` is a list of written positions;
+/// `position` alone (held or written) is one.
+fn bind_command(reg: &Reg, encoder: &crate::encode::Encoder, value: &Value) -> Value {
+    let positions: Vec<Position> = match value.get("positions").and_then(Value::as_array) {
+        Some(list) => list.iter().map(Position::from_json).collect(),
+        None => vec![crate::held::position(&value["position"])],
+    };
+    let m = encoder.widths.mons_per_side;
+    let mut mon: Vec<f32> = Vec::with_capacity(positions.len() * 2 * m * crate::bind::BIND_FEATURES);
+    let mut side: Vec<f32> = Vec::with_capacity(positions.len() * 2 * crate::bind::BIND_SIDE_FEATURES);
+    for position in &positions {
+        if &*position.format != reg.format_id.as_str() {
+            return json!({
+                "error": format!(
+                    "position is {} but the regulation is {}", position.format, reg.format_id
+                )
+            });
+        }
+        let bound = encoder.bind_of(position);
+        for row in &bound.rows {
+            mon.extend_from_slice(row);
+        }
+        for one in &bound.sides {
+            side.extend_from_slice(one);
+        }
+    }
+    json!({ "kind": "bind", "count": positions.len(), "mon": mon, "side": side })
+}
+
 fn qfeatures(reg: &Reg, value: &Value) -> Value {
     let position = crate::held::position(&value["position"]);
     if &*position.format != reg.format_id.as_str() {
@@ -934,6 +966,7 @@ fn fills_served(reg: &Reg, encoder: &crate::encode::Encoder, value: &Value) -> V
                 "megaFromSlots": header["encoding"]["megaFromSlots"],
                 "resolveUs": header["resolveUs"],
                 "encodeUs": header["encodeUs"],
+                "bindUs": header["bindUs"],
             });
             if let Some(read_off) = header.get("readOff") {
                 answer["readOff"] = read_off.clone();
@@ -1167,6 +1200,8 @@ fn answer<R: BufRead, W: Write>(
             return qfeatures_binary(reg, &value, stdout);
         }
         Ok(value) if value["kind"].as_str() == Some("qfeatures") => qfeatures(reg, &value),
+        // IKA-429: the bind columns of positions, for `encode.py` (which has no calculator).
+        Ok(value) if value["kind"].as_str() == Some("bind") => bind_command(reg, encoder, &value),
         Ok(value) if value["kind"].as_str() == Some("many") => many(reg, &value),
         // IKA-381: games solved here (HiGHS), and sub-games folded from their leaves' values
         // and solved; only when a caller asks (`portlp.py`, off by default).

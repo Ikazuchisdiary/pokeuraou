@@ -250,6 +250,10 @@ class EncodedNode:
     #: different costs with two different fixes, so they are reported apart.
     resolve_us: float = 0.0
     encode_us: float = 0.0
+    #: IKA-429: the part of `encode_us` the bind columns took, and the child's pair cache's
+    #: hits and misses so far (cumulative over the process).
+    bind_us: float = 0.0
+    bind_cache: tuple[int, ...] = ()
     #: And what the crossing itself cost over there: reading this request, and building
     #: and serialising the header that answers it. Apart for the same reason -- the fix
     #: for one is a binary request and the fix for the other is a binary header.
@@ -338,6 +342,8 @@ class EncodedNode:
             unmodelled=tuple(header["unmodelled"]),
             resolve_us=float(header.get("resolveUs", 0.0)),
             encode_us=float(header.get("encodeUs", 0.0)),
+            bind_us=float(header.get("bindUs", 0.0)),
+            bind_cache=tuple(int(c) for c in header.get("bindCache", ())),
             parse_us=float(header.get("parseUs", 0.0)),
             # The fold and the text are both the header being JSON, and one number is what
             # a table has room for. The split stays in the header for anyone who needs it.
@@ -1218,6 +1224,7 @@ class RustNode:
                 )
             timing.add("rust.child.resolve", node.resolve_us / 1e6)
             timing.add("rust.child.encode", node.encode_us / 1e6)
+            timing.add("rust.child.bind", node.bind_us / 1e6)
             timing.count("leaves.offered", int(head.get("offered", 0)))
             timing.count("leaves.stored", int(head["leaves"]))
             if "readOff" in head:
@@ -1297,6 +1304,25 @@ class RustNode:
         )
 
     @timing.timed("rust.leads")
+    @timing.timed("rust.bind")
+    def bind(self, positions: Sequence[Position]) -> tuple[Any, Any]:
+        """The bind columns of `positions` (IKA-429), flat float32: the four per Pokemon row
+        and the seven per side, as the port's encoder writes them. One crossing; a single
+        position goes as `_position` writes it (held, if it is), several written out."""
+        import numpy as np
+
+        if len(positions) == 1:
+            request: dict[str, Any] = {"kind": "bind", "position": _position(positions[0])}
+        else:
+            request = {"kind": "bind", "positions": [pos.to_json() for pos in positions]}
+        response = self._exchange(request)
+        if int(response["count"]) != len(positions):
+            raise RuntimeError(f"`bind` answered {response['count']} of {len(positions)} positions")
+        return (
+            np.asarray(response["mon"], dtype=np.float32),
+            np.asarray(response["side"], dtype=np.float32),
+        )
+
     def apply_lead_abilities_many(self, positions: Sequence[Position]) -> list[PortPhase | None]:
         """`apply_lead_abilities` without a generator, for many positions in one go."""
         answers = self._exchange_many(
@@ -1478,6 +1504,7 @@ class RustNode:
         # are one wait on a pipe, so there is no other honest source for the split.
         timing.add("rust.child.resolve", node.resolve_us / 1e6)
         timing.add("rust.child.encode", node.encode_us / 1e6)
+        timing.add("rust.child.bind", node.bind_us / 1e6)
         timing.add("rust.child.parse", node.parse_us / 1e6)
         timing.add("rust.child.header", node.header_us / 1e6)
         # What the crossing actually carried, and by which road. The size of a body used

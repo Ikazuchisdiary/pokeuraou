@@ -52,6 +52,7 @@ from pokeuraou.value import (
     build,
     final_material_targets,
     game_weights,
+    grow_bind_inputs,
     grow_state_inputs,
     load_dataset,
     load_model,
@@ -240,6 +241,9 @@ def warm_start(
         if config.move_properties or config.attention:
             raise SystemExit("--state-inputs warm-starts a plain net only")
         net = grow_state_inputs(net, encoder)
+    if config.bind_inputs and not net.config.bind_inputs:
+        # IKA-429: the bind columns, the same way.
+        net = grow_bind_inputs(net, encoder)
     if (config.aux_weight > 0 and not hasattr(net, "aux")) or (
         config.aux_targets and not hasattr(net, "aux_heads")
     ):
@@ -379,6 +383,13 @@ def main() -> None:
         "and the screens, sleep and toxic counters, Perish Song, the locked and the last "
         "move). With --init-from a model without them, their weights start at zero, so the "
         "first step starts from that model's own answers.",
+    )
+    ap.add_argument(
+        "--bind-inputs",
+        action="store_true",
+        help="IKA-429: read the encoding's bind columns too (縛り: who moves first and knocks "
+        "out whom, revision 4). Needs --state-inputs. With --init-from a model without them, "
+        "their weights start at zero.",
     )
     ap.add_argument(
         "--dropout",
@@ -540,6 +551,7 @@ def main() -> None:
             ("move_properties", True if args.move_properties else None),
             ("attention", True if args.attention else None),
             ("state_inputs", True if args.state_inputs else None),
+            ("bind_inputs", True if args.bind_inputs else None),
             ("dropout", args.dropout),
             ("encoder_dropout", args.encoder_dropout),
             ("weight_decay", args.weight_decay),

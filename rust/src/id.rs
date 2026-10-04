@@ -51,6 +51,18 @@ impl Id {
     pub fn starts_with(&self, prefix: &str) -> bool {
         self.as_str().starts_with(prefix)
     }
+
+    /// The id as four words, its length first: equal ids give equal words and different
+    /// ids different ones (every constructor zero-fills past the length). For a cache key
+    /// hashed word by word (IKA-429).
+    #[inline]
+    pub fn words(&self) -> [u64; 4] {
+        let mut raw = [0u8; 32];
+        raw[0] = self.len;
+        raw[1..].copy_from_slice(&self.bytes);
+        let word = |k: usize| u64::from_le_bytes(raw[8 * k..8 * k + 8].try_into().unwrap());
+        [word(0), word(1), word(2), word(3)]
+    }
 }
 
 impl Default for Id {

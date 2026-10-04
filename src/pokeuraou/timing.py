@@ -90,6 +90,7 @@ WORKER_STAGES = (
     "rust.replacements",  # the replacement phase
     "rust.resume",      # a paused turn resumed
     "rust.alternatives",  # a pause's alternatives, encoded or not
+    "rust.bind",        # the bind columns Encoder.encode_positions asks the port for (IKA-429)
     # A Q rank fill's request (IKA-339), in the order a request makes them:
     "rust.qfeatures",   # the port's per-candidate features (RustNode.qfeatures, IKA-350), the wait included
     "q.arrays",         # the actions' encoding, the arrays and their copy into the block
@@ -122,6 +123,7 @@ STAGES = (
     "rust.score",    # the damage ranking, through the child
     "rust.child.resolve",  # what the child says it spent resolving  (its own clock)
     "rust.child.encode",   # what the child says it spent encoding   (its own clock)
+    "rust.child.bind",     # ... of which the bind columns (IKA-429)  (its own clock)
     "rust.child.parse",    # ... reading the request's JSON          (its own clock)
     "rust.child.header",   # ... building and serialising the header (its own clock)
     "serve.copy",    # laying an encoded batch into the shared block
@@ -148,7 +150,8 @@ PURPOSE_ROWS = tuple(name for name in STAGES if "@" in name)
 #: either to the rows beside it would count the same seconds twice. The purpose rows are
 #: `rust.fill` and its nestings cut the other way, so they are borrowed for the same reason.
 BORROWED = frozenset(
-    {"rust.child.resolve", "rust.child.encode", "rust.child.parse", "rust.child.header",
+    {"rust.child.resolve", "rust.child.encode", "rust.child.bind", "rust.child.parse",
+     "rust.child.header",
      "server.held", "server.queue", "refused", *PURPOSE_ROWS}
 )
 

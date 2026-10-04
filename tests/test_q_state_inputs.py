@@ -51,7 +51,8 @@ def test_the_default_is_off_and_an_old_file_reads_as_off() -> None:
 def test_the_trunk_reads_the_widths_of_its_leaf(setup) -> None:  # noqa: ANN001
     encoder, _batch, _plain, _leaf = setup
     assert qhead.build_net(encoder, qhead.QConfig()).trunk.in_widths == encoder.base_widths
-    assert qhead.build_net(encoder, qhead.QConfig(state_inputs=True)).trunk.in_widths == encoder.widths
+    state = qhead.build_net(encoder, qhead.QConfig(state_inputs=True)).trunk.in_widths
+    assert state == encoder.state_widths
 
 
 def test_a_state_leaf_loads_only_into_a_state_trunk(setup, tmp_path: Path) -> None:  # noqa: ANN001

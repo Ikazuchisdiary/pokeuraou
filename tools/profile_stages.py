@@ -86,8 +86,8 @@ GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("bridge", ("rust.fill", "rust.ask", "rust.header", "rust.body", "rust.unpack",
                 "rust.resolve", "rust.score")),
     ("served", ("serve.copy", "serve.wait")),
-    ("child", ("rust.child.resolve", "rust.child.encode", "rust.child.parse",
-               "rust.child.header")),
+    ("child", ("rust.child.resolve", "rust.child.encode", "rust.child.bind",
+               "rust.child.parse", "rust.child.header")),
     ("server", ("server.held", "server.queue")),
     ("inclusive", ("refused",)),
     # Outside the search, and the Python around each crossing (IKA-258).
@@ -1336,7 +1336,7 @@ def main() -> None:
     ap.add_argument("--q-model", default=None,
                     help="generation: generate_queue.py's --q-model (IKA-274, a q rank fill). "
                     "Unset, the driver's own default runs: with --pool and --rank-leaf, "
-                    "q-nocover by data/models/q-mc4st.pt (IKA-338)")
+                    "q-nocover by data/models/q-mc4bindaux.pt (IKA-338)")
     ap.add_argument("--baseline", default="data/models/value-gen10.pt")
     ap.add_argument("--case", default="sash-ko", help="analysis: a human_baseline case")
     ap.add_argument("--device", default="cuda")

@@ -57,6 +57,12 @@ impl VolatileFlags {
     pub fn has(&self, bit: u16) -> bool {
         self.0 & bit != 0
     }
+
+    /// The whole mask, for a cache key (IKA-429).
+    #[inline]
+    pub fn bits(&self) -> u16 {
+        self.0
+    }
 }
 
 #[derive(Clone, Copy, Debug)]

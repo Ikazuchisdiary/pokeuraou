@@ -143,6 +143,31 @@ STATE_PSEUDO_WEATHERS = ("trickroom",)
 #: field empty, so the volatiles are what both encoders read.
 LOCK_VOLATILES = ("twoturnmove", "lockedmove", "choicelock", "encore")
 
+#: IKA-429: 縛り (binding), appended after the state columns -- whether an active Pokemon
+#: can move before an opposing one and knock it out with one attack, from the port's damage
+#: calculator (`rust/src/bind.rs`, which defines each number). Python has no calculator, so
+#: `Encoder.encode_positions` asks the port for these columns (the `bind` request); the
+#: training arrays come from the port's own encoder. Only the active Pokemon are paired, so
+#: a bench row reads 0 here and stays a function of that Pokemon and the field.
+#:
+#: * per Pokemon: the foes it binds, the foes binding it (each a bind strength, the move
+#:   going first times the share of rolls that knock out, summed over the foes and halved),
+#:   and the same two for knock-outs regardless of who moves first.
+#: * per side: how many foes are bound (halved), both foes bound (両縛り), the foes bound by
+#:   a Pokemon that no foe binds back (halved), both foes bound by one Pokemon's one spread
+#:   move, the share of rolls with which that move knocks out its user's partner, and
+#:   whether the bound side has Wide Guard or a Fake Out that stops it.
+BIND_MON_FEATURES = ("bind_out", "bind_in", "ko_out", "ko_in")
+BIND_SIDE_FEATURES = (
+    "foes_bound",
+    "double_bind",
+    "secure_bound",
+    "spread_double",
+    "spread_ally_ko",
+    "spread_wide_guard",
+    "spread_fake_out",
+)
+
 #: Stats are divided by this before they reach the network. Level 50 with 32 SP tops out
 #: near 200 for a non-HP stat, so the scaled features sit in roughly [0.2, 1.4] -- the
 #: point is only that the scale is fixed and stated, not fitted to a particular dataset.
@@ -173,7 +198,9 @@ TURN_CLIP = 40.0
 #:   3  IKA-425: the state columns (`STATE_MON_FEATURES` and the two lists after it)
 #:      appended to each block. No revision-2 column moved or changed meaning; the
 #:      revision is raised because every cached shard lacks the new columns.
-ENCODING_REVISION = 3
+#:   4  IKA-429: the bind columns (`BIND_MON_FEATURES`, `BIND_SIDE_FEATURES`) appended to
+#:      the Pokemon and side blocks, after the state columns. No revision-3 column moved.
+ENCODING_REVISION = 4
 
 
 @dataclass(frozen=True, slots=True)
@@ -530,6 +557,7 @@ def mon_feature_names(vocab: Vocabulary) -> tuple[str, ...]:
     names += [f"move_disabled_{i}" for i in range(4)]
     names += [f"volatile_{v}" for v in VOLATILES] + ["volatile_other"]
     names += list(STATE_MON_FEATURES)
+    names += list(BIND_MON_FEATURES)
     return tuple(names)
 
 
@@ -539,6 +567,7 @@ def side_feature_names() -> tuple[str, ...]:
     for slot in range(2):
         names += [f"slot{slot}_{c}" for c in SLOT_CONDITIONS]
     names += [f"side_{c}_turns" for c in STATE_SIDE_CONDITIONS]
+    names += list(BIND_SIDE_FEATURES)
     return tuple(names)
 
 
@@ -634,10 +663,20 @@ class Encoder:
     @property
     def base_widths(self) -> dict[str, int]:
         """The widths of revision 2: the leading columns, without IKA-425's state ones."""
+        state = self.state_widths
         return {
-            "mon": len(self.mon_names) - len(STATE_MON_FEATURES),
-            "side": len(self.side_names) - len(STATE_SIDE_CONDITIONS),
-            "field": len(self.field_names) - len(STATE_PSEUDO_WEATHERS),
+            "mon": state["mon"] - len(STATE_MON_FEATURES),
+            "side": state["side"] - len(STATE_SIDE_CONDITIONS),
+            "field": state["field"] - len(STATE_PSEUDO_WEATHERS),
+        }
+
+    @property
+    def state_widths(self) -> dict[str, int]:
+        """The widths of revision 3: the leading columns, without IKA-429's bind ones."""
+        return {
+            "mon": len(self.mon_names) - len(BIND_MON_FEATURES),
+            "side": len(self.side_names) - len(BIND_SIDE_FEATURES),
+            "field": len(self.field_names),
         }
 
     def encode(self, positions: list[dict[str, Any]]) -> Encoded:
@@ -655,12 +694,16 @@ class Encoder:
         self.used[what] = self.used.get(what, 0) + count
 
     @timing.timed("encode")
-    def encode_positions(self, positions: list[Position]) -> Encoded:
+    def encode_positions(self, positions: list[Position], *, bind: bool = True) -> Encoded:
         """Encodes positions directly, which is the path the search uses.
 
         Reading the dataclass avoids building a nested dict per leaf, which was 64% of the
         per-leaf cost: 0.228 ms of `to_json` against 0.117 ms of encoding and 0.012 ms of
         forward pass.
+
+        The bind columns (IKA-429) come from the port, one crossing for the call. `bind`
+        False leaves them 0: for a caller that reads only bench rows (`beliefnode._patched`),
+        where they are 0 anyway, or none of those columns.
         """
         n = len(positions)
         self.note(
@@ -709,6 +752,9 @@ class Encoder:
             for array in (species, ability, item, moves, mon):
                 rows = array.reshape(n * 2 * m, *array.shape[3:])
                 rows[copy_to] = rows[copy_from]
+        if bind and n:
+            # After the copies: a Pokemon's bind columns are its position's, not its row's.
+            self._fill_bind(positions, mon, side)
         return Encoded(
             species=species,
             ability=ability,
@@ -721,6 +767,45 @@ class Encoder:
             unknown_volatiles=unknown,
             decided=decided,
         )
+
+    def _fill_bind(self, positions: list[Position], mon: np.ndarray, side: np.ndarray) -> None:
+        """Write the port's bind columns into `mon` and `side` (IKA-429), in place.
+
+        The columns read the active Pokemon, the field, the side conditions and how many
+        of each side have fainted, and nothing else of the position (`bind.rs`). Positions
+        that share all of those *objects* -- the selection solve's 8,100 openings are 900
+        lead quartets, each with nine backs (`selfplay.positions_from_sets`) -- are asked
+        for once. The key is object identity, held for this call, so it never joins two
+        positions that differ.
+        """
+        from . import port
+
+        keys: dict[tuple, int] = {}
+        which = np.empty(len(positions), dtype=np.int64)
+        asked: list[Position] = []
+        for b, position in enumerate(positions):
+            key = (
+                id(position.field),
+                *(
+                    (
+                        tuple(one.active),
+                        tuple(id(p) for p in one.active_pokemon()),
+                        id(one.side_conditions),
+                        sum(1 for p in one.pokemon if p.fainted),
+                    )
+                    for one in position.sides
+                ),
+            )
+            found = keys.get(key)
+            if found is None:
+                found = keys[key] = len(asked)
+                asked.append(position)
+            which[b] = found
+        mon_rows, side_rows = port.bind_columns(self.reg, asked)
+        k_mon, k_side = len(BIND_MON_FEATURES), len(BIND_SIDE_FEATURES)
+        m = self.mons_per_side
+        mon[..., mon.shape[-1] - k_mon :] = mon_rows.reshape(len(asked), 2, m, k_mon)[which]
+        side[..., side.shape[-1] - k_side :] = side_rows.reshape(len(asked), 2, k_side)[which]
 
     # ------------------------------------------------------------------ pieces --
 
@@ -794,7 +879,8 @@ class Encoder:
         for i, name in enumerate(STATE_SIDE_CONDITIONS):
             out[base + i] = float(durations.get(name) or 0) / 8.0
         base += len(STATE_SIDE_CONDITIONS)
-        assert base == len(self.side_names)
+        # The bind columns follow (`_fill_bind`).
+        assert base + len(BIND_SIDE_FEATURES) == len(self.side_names)
 
     def _row_key(self, mon: Any, side: Any) -> tuple[int, bool, bool] | None:  # noqa: ANN401
         """What a Pokemon's row depends on besides the object itself, or None to encode it.
@@ -911,7 +997,8 @@ class Encoder:
         out[base + 3] = float(self.vocab.moves.get(locked, 0)) if locked else 0.0
         out[base + 4] = float(self.vocab.moves.get(mon.last_move, 0)) if mon.last_move else 0.0
         base += len(STATE_MON_FEATURES)
-        assert base == len(self.mon_names)
+        # The bind columns follow (`_fill_bind`).
+        assert base + len(BIND_MON_FEATURES) == len(self.mon_names)
 
 
 __all__ = [

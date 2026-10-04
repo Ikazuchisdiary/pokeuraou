@@ -584,6 +584,10 @@ pub fn fill_shared_on<'r>(
     let body_bytes = span_at + span_bytes.len();
     let fold_us = fold_started.elapsed().as_secs_f64() * 1e6;
 
+    let bind_cache = {
+        let cache = encoder.bind_cache.borrow();
+        [cache.hits, cache.misses]
+    };
     let mut header = json!({
         "kind": "encoded",
         "leaves": collector.leaves.len(),
@@ -612,6 +616,10 @@ pub fn fill_shared_on<'r>(
         "bytes": body_bytes,
         "resolveUs": resolve_us,
         "encodeUs": encode_us,
+        // IKA-429: the part of `encodeUs` the bind columns took.
+        "bindUs": encoder.take_bind_us(),
+        // And the pair cache's hits and misses so far in this process (cumulative).
+        "bindCache": bind_cache,
         "foldUs": fold_us,
     });
     if request.json_spans {

@@ -70,7 +70,8 @@ def test_a_revision_two_net_reads_only_the_leading_columns(setup) -> None:  # no
 def test_growing_answers_as_before_and_the_state_then_moves_it(setup) -> None:  # noqa: ANN001
     encoder, batch, net = setup
     grown = grow_state_inputs(net, encoder).eval()
-    assert grown.in_widths == encoder.widths
+    # Revision 3's columns: IKA-429's bind columns after them are not a state net's.
+    assert grown.in_widths == encoder.state_widths
     with torch.no_grad():
         before = net(batch)
         after = grown(batch)
@@ -94,7 +95,7 @@ def test_growing_answers_as_before_and_the_state_then_moves_it(setup) -> None:  
         moved_ids = ids_only(batch) - after
         numeric = grow_state_inputs(net, encoder).eval()
         fill(numeric.mon_mlp[0].weight[:, mon_old : mon_old + 3])
-        fill(numeric.side_mlp[0].weight[:, -(encoder.widths["side"] - base_w["side"]) :])
+        fill(numeric.side_mlp[0].weight[:, -(encoder.state_widths["side"] - base_w["side"]) :])
         fill(numeric.head[0].weight[:, -1:])
         moved_numeric = numeric(batch) - after
     assert float(moved_ids[0].abs()) < 1e-6  # no locked or last move in the base position

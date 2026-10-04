@@ -18,6 +18,7 @@ mod events;
 mod ability_notes;
 mod airborne;
 mod battler;
+mod bind;
 mod blas;
 #[cfg(feature = "count-allocations")]
 mod counting_alloc;
@@ -75,6 +76,7 @@ fn main() {
         Some("encode") => encode_main(&args[2..]),
         Some("encode-games") => encode_games::main(&args[2..]),
         Some("clones") => clones_main(&args[2..]),
+        Some("bind-bench") => bind_bench_main(&args[2..]),
         _ => {
             eprintln!(
                 "usage:\n  {0} damage <regulation.json> <cases.json> [repeats]\n  \
@@ -82,6 +84,90 @@ fn main() {
                 args[0]
             );
             std::process::exit(2);
+        }
+    }
+}
+
+/// `bind-bench <regulation.json> <fixture.json> [repeats]` (IKA-429): the cost of the bind
+/// columns against the encoder's, on the same positions, alternating A B B A.
+fn bind_bench_main(args: &[String]) {
+    let reg = reg::Reg::load(&args[0]).unwrap_or_else(|e| {
+        eprintln!("regulation: {e}");
+        std::process::exit(1);
+    });
+    let text = std::fs::read_to_string(&args[1]).expect("fixture");
+    let doc: Value = serde_json::from_str(&text).expect("fixture json");
+    let positions: Vec<position::Position> = doc["positions"]
+        .as_array()
+        .expect("positions")
+        .iter()
+        .map(position::Position::from_json)
+        .collect();
+    let repeats: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(5);
+    let borrowed: Vec<&position::Position> = positions.iter().collect();
+    let encoder = encode::Encoder::new(&reg);
+    let m = encoder.widths.mons_per_side;
+    let n = positions.len() as f64;
+    let mut sums = [0.0f64; bind::BIND_FEATURES];
+    let mut any = 0usize;
+    let mut rows_with = [0usize; bind::BIND_FEATURES];
+    let calls_before = damage::CALLS.load(std::sync::atomic::Ordering::Relaxed);
+    let mut differ = 0usize;
+    let mut check = bind::BindCache::default();
+    for pos in &positions {
+        let rows = bind::bind_rows(&reg, pos, m, None);
+        let again = bind::bind(&reg, pos, m, Some(&mut check));
+        let fresh = bind::bind(&reg, pos, m, None);
+        if again.rows != rows || again.sides != fresh.sides {
+            differ += 1;
+        }
+        let mut seen = false;
+        for row in &rows {
+            for k in 0..bind::BIND_FEATURES {
+                sums[k] += row[k] as f64;
+                if row[k] > 0.0 {
+                    rows_with[k] += 1;
+                }
+            }
+            if row[0] > 0.0 {
+                seen = true;
+            }
+        }
+        any += usize::from(seen);
+    }
+    let calcs = damage::CALLS.load(std::sync::atomic::Ordering::Relaxed) - calls_before;
+    eprintln!(
+        "positions {} calcs/position {:.2} (three passes) positions with a bind {:.4} column sums {:?} \
+         rows>0 {:?} cache hits {} misses {} cached-vs-fresh differ {}",
+        positions.len(),
+        calcs as f64 / n,
+        any as f64 / n,
+        sums,
+        rows_with,
+        check.hits,
+        check.misses,
+        differ
+    );
+    // A: the whole encoding (its bind columns through the encoder's cache, warm after the
+    // first pass); B: the bind columns afresh; C: through a cache emptied for the pass.
+    for round in 0..repeats {
+        for which in ["A", "B", "C", "C", "B", "A"] {
+            let started = Instant::now();
+            if which == "A" {
+                let encoded = encoder.encode_positions(&borrowed);
+                std::hint::black_box(&encoded.mon);
+            } else if which == "B" {
+                for pos in &positions {
+                    std::hint::black_box(bind::bind(&reg, pos, m, None));
+                }
+            } else {
+                let mut cache = bind::BindCache::default();
+                for pos in &positions {
+                    std::hint::black_box(bind::bind(&reg, pos, m, Some(&mut cache)));
+                }
+            }
+            let us = started.elapsed().as_secs_f64() / n * 1e6;
+            println!("{round} {which} {us:.3} us/position");
         }
     }
 }
