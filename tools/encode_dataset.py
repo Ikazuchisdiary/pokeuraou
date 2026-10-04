@@ -47,6 +47,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from pokeuraou import rustnode
 from pokeuraou.encode import ENCODING_REVISION, Encoded, Encoder
+from pokeuraou.packed import AsType, NpzMember
 from pokeuraou.payoff import HP_SHARE
 from pokeuraou.position import Position
 from pokeuraou.provenance import SELF_PLAY
@@ -487,8 +488,17 @@ def _read_in_parts(
     )
 
 
-def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict[str, Any]]:
-    """Encodes one directory of games, or reads back the cache if it is still valid."""
+def encode_dir(
+    directory: Path, args: argparse.Namespace, *, load: bool = True
+) -> tuple[Dataset | None, dict[str, Any]]:
+    """Encodes one directory of games, or reads back the cache if it is still valid.
+
+    With ``load=False`` (a cacheable run only) the dataset is not handed back: a current
+    shard is not read, and a fresh one is let go once written. `main` then joins the
+    shards from the files a chunk at a time (`write_joined`, IKA-430).
+    """
+    if not load and (args.limit or args.kinds):
+        raise ValueError("load=False needs a cached shard, and a filtered run writes none")
     cache = shard_path(directory)
     sources = sources_of(directory)
     if not sources:
@@ -529,6 +539,9 @@ def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict
         if all(have.get(k) == v for k, v in want.items()) and not _lacks_foe_values(
             cache, directory, sources
         ):
+            if not load:
+                print(f"  {directory.name}: shard is current")
+                return None, have
             # Read once and joined in memory: no mapped copy beside each shard (IKA-426).
             dataset = load_dataset(cache, cache=False)
             print(f"  {directory.name}: {len(dataset):,} decisions from cache")
@@ -597,7 +610,214 @@ def encode_dir(directory: Path, args: argparse.Namespace) -> tuple[Dataset, dict
         f"in {time.perf_counter() - started:.0f}s"
         + (f" -> {cache.name}" if cacheable else " (filtered run, not cached)")
     )
-    return dataset, meta
+    return (dataset if load else None), meta
+
+
+#: The per-decision columns of a shard: small enough to hold whole for a join.
+_SMALL_ARRAYS = ("outcome", "game", "turn", "search_value", "hp_share", "kind", "foe", "foe_search_value")
+
+
+@dataclass
+class Joined:
+    """The small columns of shards joined as `concat_datasets` joins them.
+
+    The big arrays (`_ENCODED_ARRAYS`) stay in the files; `write_joined` streams them.
+    """
+
+    shards: list[Path]
+    small: dict[str, np.ndarray]
+    foe_names: tuple[str, ...]
+    unknown_volatiles: dict[str, int]
+
+
+def join_small(shards: list[Path]) -> Joined:
+    """`concat_datasets`' renumbering, on the small columns read from the shard files.
+
+    ``game`` restarts at zero in each shard and is offset by the games before it; ``foe``
+    indexes the shard's own ``foe_names`` and is remapped into one list in order of first
+    appearance; a shard without ``foe_search_value`` is NaN there when another has it.
+    """
+    columns: dict[str, list[np.ndarray]] = {k: [] for k in _SMALL_ARRAYS}
+    names: list[str] = []
+    index: dict[str, int] = {}
+    unknown: Counter[str] = Counter()
+    offset = 0
+    for path in shards:
+        with np.load(path, allow_pickle=False) as data:
+            meta = json.loads(str(data["meta_json"]))
+            arrays = {k: data[k] for k in _SMALL_ARRAYS if k in data.files}
+        rows = len(arrays["outcome"])
+        if len(arrays.get("hp_share", ())) != rows:
+            raise SystemExit(
+                f"{path} carries no hp_share; re-encode it rather than joining, because a "
+                "zero there is a real value (the opponent has everything left)"
+            )
+        unknown.update(meta.get("unknown_volatiles") or {})
+        remap = np.empty(len(meta["foe_names"]), dtype=np.int32)
+        for i, name in enumerate(meta["foe_names"]):
+            if name not in index:
+                index[name] = len(names)
+                names.append(name)
+            remap[i] = index[name]
+        game = arrays["game"]
+        arrays["foe"] = remap[arrays["foe"]] if len(arrays["foe"]) else arrays["foe"]
+        arrays["game"] = game.astype(np.int64) + offset
+        offset += int(game.max()) + 1 if len(game) else 0
+        for k in _SMALL_ARRAYS:
+            columns[k].append(arrays.get(k, np.zeros(0, dtype=np.float32)))
+    if len(shards) == 1:
+        with np.load(shards[0], allow_pickle=False) as data:
+            small = {k: data[k] for k in _SMALL_ARRAYS if k in data.files}
+        small.setdefault("foe_search_value", np.zeros(0, dtype=np.float32))
+        return Joined(list(shards), small, tuple(names), dict(unknown))
+    small = {
+        k: np.concatenate(columns[k]) for k in _SMALL_ARRAYS if k not in ("foe_search_value",)
+    }
+    small["game"] = small["game"].astype(np.int32)
+    small["foe"] = small["foe"].astype(np.int32)
+    have = [len(f) == len(o) for f, o in zip(columns["foe_search_value"], columns["outcome"], strict=True)]
+    small["foe_search_value"] = (
+        np.concatenate(
+            [
+                f.astype(np.float32) if ok else np.full(len(o), np.nan, dtype=np.float32)
+                for f, o, ok in zip(columns["foe_search_value"], columns["outcome"], have, strict=True)
+            ]
+        )
+        if any(have)
+        else np.zeros(0, dtype=np.float32)
+    )
+    return Joined(list(shards), small, tuple(names), dict(unknown))
+
+
+class _Streamed(AsType):
+    """One big member of every shard, one after another, a chunk of rows at a time."""
+
+    def __init__(self, shards: list[Path], key: str, dtype: Any = None) -> None:  # noqa: ANN401
+        self.members = [NpzMember(p, key) for p in shards]
+        dtypes = {m.dtype for m in self.members}
+        tails = {m.shape[1:] for m in self.members}
+        if len(dtypes) != 1 or len(tails) != 1:
+            raise SystemExit(f"shards disagree on {key}: dtypes {dtypes}, row shapes {tails}")
+        stored = np.dtype(dtypes.pop())
+        self.dtype = stored if dtype is None else np.dtype(dtype)
+        self.shape = (sum(m.shape[0] for m in self.members), *tails.pop())
+
+    def chunks(self, rows: int | None = None) -> Any:  # noqa: ANN401 - an iterator of arrays
+        for member in self.members:
+            for chunk in member.chunks(rows):
+                yield chunk if chunk.dtype == self.dtype else chunk.astype(self.dtype)
+
+
+def write_joined(out: Path, joined: Joined, meta: dict[str, Any]) -> None:
+    """The npz `save_dataset(out, concat_datasets(shards), meta)` writes, without the join.
+
+    IKA-430: joining gen-0..4 in memory held 13 GB (IKA-427 §2.4). Here the big arrays go
+    from each shard's file to the output a chunk of rows at a time, in the shards' order,
+    and only the small columns are held. The members, their order, dtypes and the meta are
+    the ones `save_dataset` writes (`tests/test_encode_join_streamed.py`).
+    """
+    from pokeuraou.packed import save_npz_streamed
+
+    ids = ("species", "ability", "item", "moves")  # save_dataset writes ids as int64
+    entries: dict[str, Any] = {
+        k: _Streamed(joined.shards, k, np.int64 if k in ids else None) for k in _ENCODED_ARRAYS
+    }
+    entries.update(joined.small)
+    entries["meta_json"] = np.asarray(
+        json.dumps(
+            {
+                **meta,
+                "foe_names": list(joined.foe_names),
+                "unknown_volatiles": joined.unknown_volatiles,
+            }
+        )
+    )
+    save_npz_streamed(out, entries)
+
+
+def _summary(metas: list[dict[str, Any]], small: dict[str, np.ndarray], foe_names: Any, unknown: Any) -> None:  # noqa: ANN401
+    """The dataset's properties, printed before anything is trained on it."""
+
+    def merged(key: str) -> dict[str, int]:
+        out: Counter[str] = Counter()
+        for meta in metas:
+            out.update(meta.get(key) or {})
+        return dict(out)
+
+    outcome = small["outcome"]
+    total_games = sum(int(m.get("games", 0)) for m in metas)
+    print(f"\n{total_games:,} finished games, {len(outcome):,} decisions")
+    print(f"  side-0 win rate {outcome.mean() * 100:.1f}%")
+    print(f"  search budget per game: {merged('search_limits')}")
+    print(f"  games by provenance: {merged('provenances')}")
+    print(f"  games by engine build: {merged('engines')}")
+    print(f"  games by generating leaf: {merged('objectives')}")
+    print(f"  games by what the search could see: {merged('information')}")
+    print(f"  games by selection rule: {merged('selections')}")
+    foe_values = small["foe_search_value"]
+    if len(foe_values) == len(outcome):
+        # The two seats' opinions of the same decision under a hidden bench (IKA-127).
+        # Their gap is how different the two games each side solved were; zero-width
+        # would mean the belief changed nothing.
+        both = ~np.isnan(foe_values)
+        if both.any():
+            gap = small["search_value"][both] - foe_values[both]
+            print(
+                f"  decisions carrying side 1's own value: {int(both.sum()):,} of "
+                f"{len(outcome):,}; searchValue - foeSearchValue mean {gap.mean():+.4f}, "
+                f"mean |gap| {np.abs(gap).mean():.4f}"
+            )
+    branching = merged("branching")
+    total = sum(branching.values())
+    if total:
+        single = branching.get("1", 0)
+        print(
+            f"  decisions offering only one action: {single:,} of {total:,} "
+            f"({single / total * 100:.1f}%) -- no policy to learn there, value only"
+        )
+    print(
+        "  opponent pools: "
+        f"{dict(Counter(foe_names[i] for i in small['foe']).most_common(6))}"
+    )
+    unknown = Counter(unknown)
+    if unknown:
+        print("  volatiles the encoder does not name (they land in one 'other' bit):")
+        for name, count in unknown.most_common(12):
+            print(f"    {count:>7}  {name}")
+    else:
+        print("  every volatile encountered is in the vocabulary")
+
+
+def _joined_meta(args: argparse.Namespace, metas: list[dict[str, Any]]) -> dict[str, Any]:
+    def merged(key: str) -> dict[str, int]:
+        out: Counter[str] = Counter()
+        for meta in metas:
+            out.update(meta.get(key) or {})
+        return dict(out)
+
+    return {
+        "format_id": metas[0]["format_id"],
+        "vocab_fingerprint": metas[0]["vocab_fingerprint"],
+        "encoding_revision": ENCODING_REVISION,
+        "source_dir": [str(d) for d in args.dir],
+        "games": sum(int(m.get("games", 0)) for m in metas),
+        "search_limits": merged("search_limits"),
+        "provenances": merged("provenances"),
+        "engines": merged("engines"),
+        "objectives": merged("objectives"),
+        "information": merged("information"),
+        "selections": merged("selections"),
+    }
+
+
+def _check_fingerprints(metas: list[dict[str, Any]]) -> None:
+    fingerprints = {m.get("vocab_fingerprint") for m in metas}
+    if len(fingerprints) > 1:
+        raise SystemExit(
+            f"shards were encoded with different vocabularies ({fingerprints}); "
+            "delete the stale ones and re-encode, because the embedding indices in one "
+            "do not mean the same species in another"
+        )
 
 
 def main() -> None:
@@ -645,95 +865,33 @@ def main() -> None:
         raise SystemExit("--limit counts games per read, so it would mean another thing per part")
 
     started = time.perf_counter()
-    parts: list[Dataset] = []
-    metas: list[dict[str, Any]] = []
-    for directory in args.dir:
-        dataset, meta = encode_dir(directory, args)
-        parts.append(dataset)
-        metas.append(meta)
-
-    fingerprints = {m.get("vocab_fingerprint") for m in metas}
-    if len(fingerprints) > 1:
-        raise SystemExit(
-            f"shards were encoded with different vocabularies ({fingerprints}); "
-            "delete the stale ones and re-encode, because the embedding indices in one "
-            "do not mean the same species in another"
-        )
-    dataset = concat_datasets(parts)
-
-    def merged(key: str) -> dict[str, int]:
-        out: Counter[str] = Counter()
-        for meta in metas:
-            out.update(meta.get(key) or {})
-        return dict(out)
-
-    total_games = sum(int(m.get("games", 0)) for m in metas)
-    search_limits = merged("search_limits")
-    provenances = merged("provenances")
-    engines = merged("engines")
-    objectives = merged("objectives")
-    information = merged("information")
-    selections = merged("selections")
-    unknown = Counter(dataset.encoded.unknown_volatiles)
-
-    print(f"\n{total_games:,} finished games, {len(dataset):,} decisions")
-    print(f"  side-0 win rate {dataset.outcome.mean() * 100:.1f}%")
-    print(f"  search budget per game: {search_limits}")
-    print(f"  games by provenance: {provenances}")
-    print(f"  games by engine build: {engines}")
-    print(f"  games by generating leaf: {objectives}")
-    print(f"  games by what the search could see: {information}")
-    print(f"  games by selection rule: {selections}")
-    if len(dataset.foe_search_value) == len(dataset):
-        # The two seats' opinions of the same decision under a hidden bench (IKA-127).
-        # Their gap is how different the two games each side solved were; zero-width
-        # would mean the belief changed nothing.
-        both = ~np.isnan(dataset.foe_search_value)
-        if both.any():
-            gap = dataset.search_value[both] - dataset.foe_search_value[both]
-            print(
-                f"  decisions carrying side 1's own value: {int(both.sum()):,} of "
-                f"{len(dataset):,}; searchValue - foeSearchValue mean {gap.mean():+.4f}, "
-                f"mean |gap| {np.abs(gap).mean():.4f}"
-            )
-    branching = merged("branching")
-    total = sum(branching.values())
-    if total:
-        single = branching.get("1", 0)
-        print(
-            f"  decisions offering only one action: {single:,} of {total:,} "
-            f"({single / total * 100:.1f}%) -- no policy to learn there, value only"
-        )
-    print(
-        "  opponent pools: "
-        f"{dict(Counter(dataset.foe_names[i] for i in dataset.foe).most_common(6))}"
-    )
-    if unknown:
-        print("  volatiles the encoder does not name (they land in one 'other' bit):")
-        for name, count in unknown.most_common(12):
-            print(f"    {count:>7}  {name}")
-    else:
-        print("  every volatile encountered is in the vocabulary")
-
     out = args.out or shard_path(args.dir[0])
-    if out != shard_path(args.dir[0]) or len(args.dir) > 1:
-        save_dataset(
-            out,
-            dataset,
-            meta={
-                "format_id": metas[0]["format_id"],
-                "vocab_fingerprint": metas[0]["vocab_fingerprint"],
-                "encoding_revision": ENCODING_REVISION,
-                "source_dir": [str(d) for d in args.dir],
-                "games": total_games,
-                "search_limits": search_limits,
-                "provenances": provenances,
-                "engines": engines,
-                "objectives": objectives,
-                "information": information,
-                "selections": selections,
-            },
-        )
+    joining = out != shard_path(args.dir[0]) or len(args.dir) > 1
+    metas: list[dict[str, Any]] = []
+    if not args.limit and not args.kinds:
+        # Every directory ends as a shard on disk, so the join reads them back a chunk at
+        # a time instead of holding them (IKA-430; 13 GB for gen-0..4 in IKA-427 §2.4).
+        for directory in args.dir:
+            metas.append(encode_dir(directory, args, load=False)[1])
+        _check_fingerprints(metas)
+        joined = join_small([shard_path(d) for d in args.dir])
+        _summary(metas, joined.small, joined.foe_names, joined.unknown_volatiles)
+        if joining:
+            write_joined(out, joined, _joined_meta(args, metas))
+    else:
+        # A filtered run writes no shards: the old join in memory.
+        parts: list[Dataset] = []
+        for directory in args.dir:
+            dataset, meta = encode_dir(directory, args)
+            assert dataset is not None
+            parts.append(dataset)
+            metas.append(meta)
+        _check_fingerprints(metas)
+        dataset = concat_datasets(parts)
+        small = {k: getattr(dataset, k) for k in _SMALL_ARRAYS}
+        _summary(metas, small, dataset.foe_names, dataset.encoded.unknown_volatiles)
+        if joining:
+            save_dataset(out, dataset, meta=_joined_meta(args, metas))
     size = out.stat().st_size / 1e6
     print(f"\n-> {out} ({size:,.0f} MB) in {time.perf_counter() - started:.0f}s")
 
