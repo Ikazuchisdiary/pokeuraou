@@ -20,6 +20,7 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
+from pokeuraou import rustnode  # noqa: E402
 from pokeuraou.damage import register_mega_stones  # noqa: E402
 from pokeuraou.encode import Encoder  # noqa: E402
 from pokeuraou.inference import RemoteValue, serve  # noqa: E402
@@ -98,7 +99,13 @@ def test_two_workers_at_once_get_what_they_would_get_alone(parts, device_name):
     try:
 
         def ask(positions):
-            with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20) as remote:
+            # A worker is a process of its own in generation, with its own port process.
+            # Here it is a thread, and `RemoteValue.__call__` encodes in it, which asks the
+            # port for the bind columns (IKA-429); a process answers one line at a time, so
+            # two threads on the module's one process crossed their answers and hung.
+            with rustnode.own_node(regulation), RemoteValue(
+                address, "value", encoder, buffer_bytes=8 << 20
+            ) as remote:
                 for _ in range(6):
                     results[len(positions)] = remote(positions)
 
@@ -154,7 +161,10 @@ def test_blocks_from_several_workers_at_once_get_what_they_would_get_alone(parts
                             wrong.append(f"blocks {index}/{block}")
 
         def send_whole(index):
-            with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20) as remote:
+            # A port process of this thread's own, as in `ask` above (IKA-429).
+            with rustnode.own_node(regulation), RemoteValue(
+                address, "value", encoder, buffer_bytes=8 << 20
+            ) as remote:
                 for _ in range(8):
                     if not np.array_equal(remote(whole[index]), whole_alone[index]):
                         wrong.append(f"whole {index}")
