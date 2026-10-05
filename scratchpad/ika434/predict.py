@@ -58,7 +58,9 @@ with torch.no_grad():
                 logits[f"{name}#{k}"].append(np.concatenate(out))
         print(f"  {row:,} rows read, {time.time() - started:.0f}s", flush=True)
 assert row == len(game)
-np.savez(OUT / "predict.npz", game=game[take], turn=turn[take], kind=kind[take], outcome=outcome[take],
+import os  # noqa: E402
+
+np.savez(OUT / os.environ.get("PREDICT_OUT", "predict.npz"),game=game[take], turn=turn[take], kind=kind[take], outcome=outcome[take],
          side=np.concatenate(sides), field=np.concatenate(fields),
          side_names=np.array(enc.side_names), field_names=np.array(enc.field_names),
          **{f"logit_{k}": np.concatenate(v).astype(np.float64) for k, v in logits.items()})

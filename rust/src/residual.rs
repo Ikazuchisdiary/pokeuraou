@@ -26,7 +26,7 @@ use crate::reg::Reg;
 use crate::resolve::field_state;
 use crate::speed::effective_speed;
 
-pub const FEATURES: usize = 16;
+pub const FEATURES: usize = 18;
 
 /// The names of the columns, in order (Python reads them from the header line on stderr).
 pub const NAMES: [&str; FEATURES] = [
@@ -46,6 +46,11 @@ pub const NAMES: [&str; FEATURES] = [
     "absorb_best",
     "bench_alive",
     "active_alive",
+    // Stage 1b (IKA-434): `outspeed` with the speed after this turn, a Trick Room or a
+    // Tailwind with one turn left taken away; and the foes bound only with the partner's
+    // Helping Hand (every roll x1.5), not without it.
+    "outspeed_next",
+    "hh_bind_sure",
 ];
 
 struct Mon {
@@ -53,6 +58,8 @@ struct Mon {
     moves: Vec<Id>,
     ctx: MoveContext,
     speed: i64,
+    /// The Speed once this turn's expiring Tailwind is gone (stage 1b).
+    speed_next: i64,
     holds: bool,
 }
 
@@ -74,12 +81,24 @@ struct Pair {
 }
 
 fn pair_of(value: &PairValue, defender: &Mon, by_speed: u32) -> Pair {
+    pair_scaled(value, defender, by_speed, false)
+}
+
+/// `pair_of`, with every roll x1.5 (rounded down) when `helped`: Helping Hand, roughly.
+fn pair_scaled(value: &PairValue, defender: &Mon, by_speed: u32, helped: bool) -> Pair {
     let hp = defender.battler.hp;
     let mut out = Pair::default();
     if hp <= 0 {
         return out;
     }
-    for eval in &value.moves {
+    for original in &value.moves {
+        let mut scaled = *original;
+        if helped {
+            for r in scaled.rolls.iter_mut() {
+                *r = *r * 3 / 2;
+            }
+        }
+        let eval = &scaled;
         let rolls = ko_count(eval, hp, defender.holds);
         let first = if eval.first == 1 { by_speed } else { u32::from(eval.first) };
         if rolls == 16 {
@@ -125,10 +144,23 @@ pub fn features(reg: &Reg, pos: &Position, m: usize, calls: &mut Calls) -> [[f32
     let mut out = [[0.0f32; FEATURES]; 2];
     let field: FieldState = field_state(pos);
     let trick_room = field.trick_room();
+    // After this turn: a Trick Room with one turn left (or none counted) ends.
+    let trick_room_next = trick_room
+        && pos
+            .field
+            .pseudo_weather
+            .iter()
+            .any(|e| e.id.as_str() == "trickroom" && e.duration.map(|d| d > 1).unwrap_or(false));
     // actives[s], bench[s]: the live Pokemon of each side, built once.
     let mut actives: [Vec<Mon>; 2] = [Vec::new(), Vec::new()];
     let mut bench: [Vec<Mon>; 2] = [Vec::new(), Vec::new()];
     for (s, side) in pos.sides.iter().enumerate().take(2) {
+        let lasting: Vec<crate::position::Effect> = side
+            .side_conditions
+            .iter()
+            .filter(|e| !(e.id.as_str() == "tailwind" && e.duration.map(|d| d <= 1).unwrap_or(true)))
+            .cloned()
+            .collect();
         let active_indices: Vec<usize> = side.active.iter().take(2).filter_map(|i| *i).collect();
         for (index, mon) in side.pokemon.iter().enumerate().take(m) {
             if mon.fainted || mon.hp <= 0 {
@@ -137,8 +169,10 @@ pub fn features(reg: &Reg, pos: &Position, m: usize, calls: &mut Calls) -> [[f32
             let Ok(mut battler) = Battler::from_pokemon(reg, mon) else { continue };
             battler.hp = mon.hp;
             let speed = effective_speed(&battler, &field, &side.side_conditions);
+            let speed_next = effective_speed(&battler, &field, &lasting);
             let holds = survives_one_hit(&battler);
-            let built = Mon { battler, moves: usable_moves(mon), ctx: move_context(pos, s, mon), speed, holds };
+            let built =
+                Mon { battler, moves: usable_moves(mon), ctx: move_context(pos, s, mon), speed, speed_next, holds };
             if active_indices.contains(&index) {
                 actives[s].push(built);
             } else {
@@ -163,6 +197,16 @@ pub fn features(reg: &Reg, pos: &Position, m: usize, calls: &mut Calls) -> [[f32
         );
         pair_of(&value, defender, by_speed(attacker.speed, defender.speed, trick_room))
     };
+    // The field pairs also as helped by the partner's Helping Hand (stage 1b), from the same rolls.
+    let eval_both = |attacker: &Mon, defender: &Mon, defender_side: usize, live_foes: usize, ally_alive: bool| {
+        let value = evaluate_pair(
+            reg, &field, &attacker.battler, &defender.battler, &attacker.moves, defender_side, live_foes,
+            ally_alive, &attacker.ctx, false,
+        );
+        let speed = by_speed(attacker.speed, defender.speed, trick_room);
+        (pair_of(&value, defender, speed), pair_scaled(&value, defender, speed, true))
+    };
+    let mut field_hh = [[[Pair::default(); 2]; 2]; 2];
     // field[s][a][d], bench_def[s][a][b], bench_atk[s][b][d], switch_in[s][d][b]: the last is
     // the foe's active d against side s's bench b (bench_def from the other side).
     let mut field_pairs = [[[Pair::default(); 2]; 2]; 2];
@@ -175,7 +219,9 @@ pub fn features(reg: &Reg, pos: &Position, m: usize, calls: &mut Calls) -> [[f32
         let before = count_calls();
         for (a, attacker) in actives[s].iter().enumerate() {
             for (d, defender) in actives[foe].iter().enumerate() {
-                field_pairs[s][a][d] = eval(attacker, defender, foe, live_foes, ally_alive);
+                let (plain, helped) = eval_both(attacker, defender, foe, live_foes, ally_alive);
+                field_pairs[s][a][d] = plain;
+                field_hh[s][a][d] = helped;
             }
         }
         let after_field = count_calls();
@@ -215,6 +261,17 @@ pub fn features(reg: &Reg, pos: &Position, m: usize, calls: &mut Calls) -> [[f32
             row[9] += best as f32;
             for a in 0..na {
                 row[10] += by_speed(actives[s][a].speed, actives[foe][d].speed, trick_room) as f32 / 2.0;
+                row[16] +=
+                    by_speed(actives[s][a].speed_next, actives[foe][d].speed_next, trick_room_next) as f32 / 2.0;
+            }
+            // Bound only with the partner's Helping Hand.
+            if !pairs.iter().any(|p| p.bind_sure) {
+                let helped = (0..na).any(|a| {
+                    na == 2
+                        && actives[s][1 - a].moves.iter().any(|m| m.as_str() == "helpinghand")
+                        && field_hh[s][a][d].bind_sure
+                });
+                row[17] += f32::from(helped);
             }
         }
         for b in 0..bench[foe].len() {
