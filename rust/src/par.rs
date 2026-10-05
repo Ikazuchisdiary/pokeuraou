@@ -251,13 +251,33 @@ mod tests {
 
     #[test]
     fn items_come_back_in_index_order_and_off_the_asking_thread() {
+        use std::sync::atomic::AtomicBool;
+        use std::thread::ThreadId;
         let pool = Pool::leaked(4);
-        let before = OFF_MAIN_ITEMS.load(Ordering::Relaxed);
+        let asker = std::thread::current().id();
+        // Set by the first item a thread other than the asker takes. An item on the asker's
+        // thread waits for it (up to a deadline), so the asker cannot finish every item
+        // before a worker wakes, however few cores the machine has. A pool with no workers
+        // never sets it, and the wait ends at the deadline.
+        let worker_took_one = AtomicBool::new(false);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        let ran_on: Mutex<Vec<ThreadId>> = Mutex::new(Vec::new());
         for _ in 0..20 {
             let out = pool.map_with(
                 257,
                 || std::rc::Rc::new(7usize),
                 |seven, k| {
+                    let me = std::thread::current().id();
+                    if me != asker {
+                        worker_took_one.store(true, Ordering::SeqCst);
+                    } else {
+                        while !worker_took_one.load(Ordering::SeqCst)
+                            && std::time::Instant::now() < deadline
+                        {
+                            std::thread::yield_now();
+                        }
+                    }
+                    ran_on.lock().unwrap().push(me);
                     // Uneven work, so the finishing order is not the index order.
                     let mut spin = 0u64;
                     for step in 0..((k * 7919) % 2000) as u64 {
@@ -271,7 +291,9 @@ mod tests {
             assert_eq!(indices, (0..257).collect::<Vec<_>>());
             assert!(out.iter().all(|(_, seven, _)| *seven == 7));
         }
-        assert!(OFF_MAIN_ITEMS.load(Ordering::Relaxed) > before, "no item ran on a worker");
+        let ran_on = ran_on.into_inner().unwrap();
+        assert_eq!(ran_on.len(), 20 * 257);
+        assert!(ran_on.iter().any(|id| *id != asker), "no item ran on a worker");
     }
 
     #[test]
