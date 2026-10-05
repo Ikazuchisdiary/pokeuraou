@@ -2017,6 +2017,31 @@ M-C の対戦評価（match_queue --pool、幅 12・rank-leaf・裏非公開・�
 Q（q-mc0）のセルの誤差は新しい評価モデルの答えに対して r = +29.6%（value-mc1x2 から value-mc2x2、水準のずれを除いて +19.4%）で、規則の 11% を超えた。作り直した q-mc2（gen-2 の 10 万局面を value-mc2x2 で埋めた教材、30 エポック）は、value-mc2x2 の上の対戦評価で q-mc0 に SPRT(0,10) が 3,999 対で決まらず（+7.5 [+0.6, +14.3]、H1 の境 LLR +2.98 に対し +2.02）。
 **Q を q-mc2 に替えた（ユーザーの判断 9/30、規則（H1 のときだけ替える）の例外）**。`data/models/q-mc2.pt`（q-mc0 は残す）。
 
+### M-C gen-5 value-mc5（2026-10-06、IKA-432・IKA-433）
+
+生成: gen-5 を 399,994 局（400,000 のうち 6 局は未決着）。評価モデルは value-mc4bindaux x1、Q は q-mc4bindaux、幅 12、裏非公開、run seed 40004、選出は value-mc4bindaux で先に解いた 2,145 組（新しい解き 0）。20 区切り、平均 1,140 局/分（gen-4 は 1,255。14 コアで他の担当と同居）。`data/selfplay-mc5/`。
+符号化: revision 4。gen-5 は 4,766,928 決定、gen-0〜5 の結合 `data/selfplay-mc012345-encoded.npz` は 1,479,975 局・17,203,500 決定。
+学習: 結合のデータを、温間始動なしでゼロから 30 エポック（`--state-inputs --bind-inputs --aux-weight 5 --aux-targets search:1,ahead2:5 --epochs 30 --lr 2e-3 --keep best --split-seed 0 --holdout 0.15 --seed 10`、2 本目は `--seed 11`）= `value-mc5.pt`・`value-mc5-s1.pt`。1 本 55〜59 分。
+
+```
+保留局の損失（2 本平均、gen-0〜5 の学習分割の保留 2,579,780 決定。gen-5 の局は新しい 3 組が約 85% を学んでいる）
+  組                       全体      gen-5 の局
+  value-mc4bindaux（前）    0.37770   0.38237
+  温間始動 2 本             0.37588   0.37455
+  ゼロから 2 本（本番）     0.37229   0.36986
+  温間 + dropout 0.3 の 2 本 0.37467  0.37334
+M-C の対戦評価（match_queue --pool、幅 12・rank-leaf・裏非公開、両腕 q-nocover・Q q-mc4bindaux、各腕の評価モデルで先に解いた選出）。C:/tmp/ika432/matches
+  null value-mc5x2（ゼロから）どうし 40 対                  40/40 が同じ局
+  ゼロから 2 本対 value-mc4bindauxx2   SPRT(0,10) H1（984 対で停止）  +22.5 [+8.2, +36.8]（1,007 対）  → 本番を value-mc5 に
+  参考: value-mc4bindaux 種 0 + IKA-433 の scratch-s0（gen-0〜4）対 value-mc4bindauxx2  H1（1,075 対）  +19.5 [+6.1, +32.9]（1,090 対）
+Q: q-mc5（gen-5 の 10 万局面を value-mc5x2 で埋めた教材、30 エポック）対 q-mc4bindaux（value-mc5x2 の上）。C:/tmp/ika432/q/matches
+  null（new に q-mc4bindaux）100 対                        100/100 が同じ局
+  SPRT(−10,0) H1（2,482 対で停止）   +1.1 [−7.7, +9.9]（非劣性、2,538 対）  → Q を q-mc5 に。r = +20.7%（記録のみ）
+生成の速さ（ABBA、2,500 局 × 4 組、専有）: value-mc5 x1 + q-mc5 は value-mc4bindaux x1 + q-mc4bindaux より 1 局の壁時計 +2.3%、1 決定 −0.2%（局が 2.5% 長い）。同一性の対照は 1,000/1,000 局が一致
+```
+
+過去の世代の差は +59.2（value-mc3）、+51.1（value-mc4）、+19.8（value-mc4bindaux、同じデータの入力と目標の変更）で、今回の +22.5 は新しい局 40 万を足し、温間始動をやめた分。局の差と学び方の差は分けていない（ゼロから 2 本対温間始動 2 本の対戦評価は回していない）。dropout 0.3 と混合の組の対戦評価も回していない。ratings.py の表にはまだつないでいない。
+
 ### M-C gen-4 の縛り・補助の目標版 value-mc4bindaux（2026-10-04、IKA-428・IKA-429・IKA-430）
 
 新しい局は打っていない。gen-4 と同じデータ（gen-0〜4、12,436,572 決定）を符号化の revision 4 で符号化し直し（`data/selfplay-mc01234-encoded.npz`。revision 3 は `-rev3`）、状態入力に縛りの列（場の 2 体どうしで、先に動いて 1 回で倒せるか。port のダメージ計算で数える）を足し、補助の目標（終局の残り・探索値・2 手番先の残りの差）と合わせて学んだ。
