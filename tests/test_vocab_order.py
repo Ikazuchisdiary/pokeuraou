@@ -170,6 +170,15 @@ def _positions(reg) -> list:  # noqa: ANN001
     ]
 
 
+def _in_format(position, format_id: str):  # noqa: ANN001, ANN202
+    """`position` with the same Pokemon, stated as a position of `format_id`."""
+    from pokeuraou.position import Position
+
+    doc = position.to_json()
+    doc["format"] = format_id
+    return Position.from_json(doc)
+
+
 def _with_new_move(position):  # noqa: ANN001, ANN202
     from pokeuraou.position import Position
 
@@ -326,11 +335,14 @@ def test_an_mb_model_loads_onto_mc_and_scores_mb_positions_bit_for_bit(saved) ->
 
     positions = _positions(mb_encoder.reg)
     before = _scores(mb_net, mb_encoder, positions)
-    assert before.tobytes() == _scores(net, encoder, positions).tobytes()
+    # The encoder asks the port for the bind columns (IKA-429), and the port refuses a
+    # position of another format, so M-C's encoder is given the same positions as M-C's.
+    in_mc = [_in_format(p, MC) for p in positions]
+    assert before.tobytes() == _scores(net, encoder, in_mc).tobytes()
 
     # Positive control: an M-C-only species and item are read from the new rows. Writing
     # those rows moves the carrier's score and leaves every M-B position where it was.
-    carrier = [_mc_only_carrier(positions[0])]
+    carrier = [_mc_only_carrier(in_mc[0])]
     e = encoder.encode_positions(carrier)
     assert e.species[0, 0, 0] == encoder.vocab.species["salamence"] >= have["species"]
     assert e.item[0, 0, 0] == encoder.vocab.items["salamencite"] >= have["item"]
@@ -339,7 +351,7 @@ def test_an_mb_model_loads_onto_mc_and_scores_mb_positions_bit_for_bit(saved) ->
         net.species.weight[have["species"]:] = 1.0
         net.item.weight[have["item"]:] = 1.0
     assert zero_rows.tobytes() != _scores(net, encoder, carrier).tobytes()
-    assert before.tobytes() == _scores(net, encoder, positions).tobytes()
+    assert before.tobytes() == _scores(net, encoder, in_mc).tobytes()
 
 
 def test_an_mb_model_is_refused_by_mc_in_its_old_sorted_order(saved, tmp_path: Path) -> None:  # noqa: ANN001
@@ -398,7 +410,8 @@ def test_the_port_reads_the_same_order(tmp_path: Path) -> None:
     # the same by the port: species and item of M-B positions and of an M-C-only carrier.
     mc_dump = str(regulation_dir() / f"{MC}.json")
     mc_encoder = Encoder(load_regulation(MC))
-    mc_positions = _positions(reg) + [_mc_only_carrier(positions[0])]
+    mc_positions = [_in_format(p, MC) for p in _positions(reg)]
+    mc_positions.append(_mc_only_carrier(mc_positions[0]))
     mc_fixture = tmp_path / "turns-mc.json"
     mc_fixture.write_bytes(json.dumps(
         {"format_id": MC, "positions": [p.to_json() for p in mc_positions]}

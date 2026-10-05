@@ -28,7 +28,8 @@ from pokeuraou.budget import Budget
 from .test_rust_node import _node, _with_parting_shot
 
 #: The child's own clocks: how long this answer took, which is the one thing that differs.
-CLOCKS = ("resolveUs", "encodeUs", "foldUs", "parseUs", "headerUs")
+#: `bindUs` (IKA-429) is the part of `encodeUs` the bind columns took, so it is a clock too.
+CLOCKS = ("resolveUs", "encodeUs", "bindUs", "foldUs", "parseUs", "headerUs")
 
 
 @pytest.fixture()
@@ -61,6 +62,13 @@ def _ask(node: rustnode.RustNode, request: dict[str, Any]) -> tuple[dict[str, An
     for nested in header.get("nodes", []):
         for key in CLOCKS:
             nested.pop(key, None)
+        # IKA-429: a node's `bindCache` is its encoder's hits and misses so far, and a pool
+        # thread has its own encoder (stage 2), so which count a node reports depends on
+        # which nodes that thread had already met. It is a counter of the cache, not part
+        # of the answer: the arrays behind the header (compared as bytes) are. The headers
+        # of a single node, which is encoded on the reading thread, keep it and are
+        # compared with it.
+        nested.pop("bindCache", None)
     return header, body
 
 
@@ -132,6 +140,7 @@ def test_the_answers_are_the_same_bytes_at_one_and_at_four_threads(processes) ->
         },
     ]
     folded = 0
+    looked_up = 0
     for request in requests:
         alone, alone_body = _ask(one, request)
         spread, spread_body = _ask(many, request)
@@ -139,7 +148,11 @@ def test_the_answers_are_the_same_bytes_at_one_and_at_four_threads(processes) ->
         assert spread == alone, f"{request.get('kind', 'fill')}: the headers differ"
         assert spread_body == alone_body, f"{request.get('kind', 'fill')}: the arrays differ"
         folded += len(alone.get("folded", []))
+        looked_up += sum(alone.get("bindCache", [0, 0]))
     assert folded, "no cell paused: the pool's resuming was never compared"
+    # Positive control for the `bindCache` counters that stay in the comparison above: a
+    # single node's bind cache was asked, so equal counters are not two zeros.
+    assert looked_up > 0, "the bind cache was never asked: its counters were not compared"
 
     counted = many.parallel()
     assert counted["threads"] == 4

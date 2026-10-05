@@ -96,7 +96,7 @@ def test_an_open_root_is_the_old_road(roster, monkeypatch) -> None:  # noqa: ANN
         for pos in _played(roster)[:2]:
             ours, theirs = _menus(reg, pos)
             answers[road].append(search(reg, pos, ours, theirs, leaf, budget=Budget.matrix(),
-                                        deepen=300))
+                                        deepen=1000))
     expanded = 0
     for a, b in zip(answers["new"], answers["old"], strict=True):
         assert np.array_equal(a.payoff, b.payoff)

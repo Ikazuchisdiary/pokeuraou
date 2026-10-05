@@ -314,7 +314,10 @@ def test_an_open_root_expanded_ahead_is_the_same_search(roster) -> None:  # noqa
         answers = []
         for ahead in (0, 4):
             deepen_mod.set_ahead(ahead)
-            answers.append(search(reg, pos, ours, theirs, leaf, budget=Budget.matrix(), deepen=300))
+            # How many cells a budget buys moves with the stand-in leaf's answers, which
+            # are a function of the encoding's columns: 300 bought 10 cells in CI under
+            # revision 3 (IKA-425) and 6 under revision 4 (IKA-429). 1,000 buys 36 here.
+            answers.append(search(reg, pos, ours, theirs, leaf, budget=Budget.matrix(), deepen=1000))
         a, b = answers
         assert np.array_equal(a.payoff, b.payoff)
         assert np.array_equal(a.equilibrium.row_strategy, b.equilibrium.row_strategy)

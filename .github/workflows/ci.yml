@@ -146,7 +146,14 @@ jobs:
       # reason is a failure on its own. The numbers are measured, not guessed:
       #   standings  data/standings/*.json.gz, from a small community API that the tool's
       #              own docstring calls a manual one-off fetch. Not called on every push.
-      #   torch      twenty-six skips (twelve counted on the first full CI run, IKA-51; two more
+      #   torch      thirty-four skips (IKA-435: eight more from the files IKA-425 to IKA-433 added
+      #              without it -- tests/test_value_stage2a.py, test_value_state_inputs.py,
+      #              test_value_aux_targets.py, test_value_bind_inputs.py,
+      #              test_value_attention_warm.py, test_q_state_inputs.py,
+      #              test_q_bind_inputs.py and test_encode_join_streamed.py, one each as the
+      #              whole module skips; the budget was left at 26 and the audit failed the
+      #              first run after IKA-425 stage 2a, which went unread);
+      #              twenty-six skips before them (twelve counted on the first full CI run, IKA-51; two more
       #              from IKA-274's Q-net tests in tests/test_qhead.py, one from its local-
       #              against-served Q test in tests/test_q_rank.py, one from its graphed-Q
       #              test there, stage 3; one from IKA-307's batched Q pass in
@@ -167,7 +174,7 @@ jobs:
         if: always()
         run: >
           uv run python tools/ci_skip_audit.py --junit reports/pytest.xml
-          --absent standings=9 --absent torch=26 --absent cuda=0
+          --absent standings=9 --absent torch=34 --absent cuda=0
 
       - uses: actions/upload-artifact@v4
         if: always()
