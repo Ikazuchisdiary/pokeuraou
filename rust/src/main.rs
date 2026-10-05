@@ -45,6 +45,7 @@ mod moves;
 mod par;
 mod position;
 mod reg;
+mod residual;
 mod resolve;
 mod qfeatures;
 mod qmenus;
@@ -77,6 +78,7 @@ fn main() {
         Some("encode-games") => encode_games::main(&args[2..]),
         Some("clones") => clones_main(&args[2..]),
         Some("bind-bench") => bind_bench_main(&args[2..]),
+        Some("residual-features") => residual::main(&args[2..]),
         _ => {
             eprintln!(
                 "usage:\n  {0} damage <regulation.json> <cases.json> [repeats]\n  \
