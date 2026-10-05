@@ -6,6 +6,11 @@
   `forward`'s;
 - the losses reach the trunk; off (the default) builds and trains what it did before;
 - `tools/train_value.py --aux-targets` saves a plain model that code without the field reads.
+
+IKA-434 adds `lookahead`, a target read from a file (`tools/lookahead_target.py`) and NaN on rows
+without one: its loss leaves those rows out, the tool refuses a file without the head (and the
+head without the file), and `lookahead_target.py` computes the static logit with the model of
+each game's generation.
 """
 
 from __future__ import annotations
@@ -96,6 +101,13 @@ def mc():  # noqa: ANN201
     return encoder, _dataset(encoder)
 
 
+def _look(dataset: Dataset) -> np.ndarray:
+    """A lookahead column that names its row, NaN on every fifth row (no target)."""
+    column = np.linspace(-2.0, 2.0, len(dataset)).astype(np.float32)
+    column[::5] = np.nan
+    return column
+
+
 def _material(r: int) -> np.ndarray:
     return np.array([[1.0 - r / 100, 0.8 - r / 300], [0.9 - r / 200, 0.7 - r / 400]], np.float32)
 
@@ -117,7 +129,7 @@ def test_parse_refuses_unknown_names_and_bad_weights() -> None:
 
 def test_each_target_reads_the_rows_it_names(mc) -> None:  # noqa: ANN001
     encoder, dataset = mc
-    t = aux_target_arrays(dataset, list(AUX_TARGETS), encoder)
+    t = aux_target_arrays(dataset, list(AUX_TARGETS), encoder, {"lookahead": _look(dataset)})
     for name, (kind, dim, _loss) in AUX_TARGETS.items():
         want = {"anti": (dim,), "sym": (dim,), "side": (2, dim), "mon": (2, 4)}[kind]
         assert t[name].shape == (len(dataset), *want) and t[name].dtype == np.float32, name
@@ -151,6 +163,7 @@ def test_each_target_reads_the_rows_it_names(mc) -> None:  # noqa: ANN001
         last = t["mon_end"][r0 + 3]
         assert last[0].tolist() == [side0[2], side0[1], side0[0], side0[3]]  # re-ordered row
     assert np.allclose(t["search"][:, 0], dataset.search_value)
+    assert np.array_equal(t["lookahead"][:, 0], _look(dataset), equal_nan=True)
 
 
 def test_rows_out_of_order_are_refused(mc) -> None:  # noqa: ANN001
@@ -228,7 +241,7 @@ def test_off_builds_and_trains_the_old_net(mc) -> None:  # noqa: ANN001
 @pytest.mark.parametrize("name", sorted(AUX_TARGETS))
 def test_each_loss_reaches_the_trunk(mc, name) -> None:  # noqa: ANN001
     encoder, dataset = mc
-    targets = aux_target_arrays(dataset, [name], encoder)
+    targets = aux_target_arrays(dataset, [name], encoder, {"lookahead": _look(dataset)})
     _n, plain = _fit(encoder, dataset, _config())
     net, headed = _fit(encoder, dataset, _config(aux_targets=f"{name}:5"), aux_targets=targets)
     trunk = [k for k in plain if k.startswith("mon_mlp.0")]
@@ -285,3 +298,152 @@ def test_the_tool_trains_the_heads_and_saves_a_plain_model(mc, tmp_path, monkeyp
     assert not hasattr(headed_net, "aux_heads") and headed_net.config.state_inputs
     sa, sb = plain_net.state_dict(), headed_net.state_dict()
     assert not _same(sa, sb)  # the heads moved the trunk
+
+
+def test_the_lookahead_column_is_read_from_outside_and_checked(mc) -> None:  # noqa: ANN001
+    encoder, dataset = mc
+    with pytest.raises(ValueError, match="one value per row"):
+        aux_target_arrays(dataset, ["lookahead"], encoder)
+    with pytest.raises(ValueError, match="one value per row"):
+        aux_target_arrays(dataset, ["lookahead"], encoder, {"lookahead": _look(dataset)[:-1]})
+    bad = _look(dataset)
+    bad[1] = np.inf
+    with pytest.raises(ValueError, match="infinite"):
+        aux_target_arrays(dataset, ["lookahead"], encoder, {"lookahead": bad})
+    # needs nothing else from the rows: a dataset without material columns reads it
+    only = aux_target_arrays(dataset, ["lookahead"], None, {"lookahead": _look(dataset)})
+    assert set(only) == {"lookahead"}
+
+
+def test_the_lookahead_loss_scores_only_the_rows_with_a_target() -> None:
+    from pokeuraou.value import aux_loss
+
+    output = torch.tensor([[0.5], [1.5], [-2.0], [9.0]], requires_grad=True)
+    wanted = torch.tensor([[1.0], [float("nan")], [-1.0], [float("nan")]])
+    loss = aux_loss("lookahead", output, wanted)
+    assert float(loss.detach()) == pytest.approx(((0.5 - 1.0) ** 2 + (-2.0 + 1.0) ** 2) / 2)
+    loss.backward()
+    assert output.grad[1].item() == 0.0 and output.grad[3].item() == 0.0  # NaN rows: no gradient
+    assert output.grad[0].item() != 0.0 and output.grad[2].item() != 0.0
+    # no row with a target: zero, not NaN
+    assert float(aux_loss("lookahead", output.detach(), torch.full((4, 1), float("nan")))) == 0.0
+
+
+def test_the_lookahead_values_move_the_fit_and_a_repeat_does_not(mc) -> None:  # noqa: ANN001
+    # The same column trains the same weights twice; a column whose scored values moved does not.
+    encoder, dataset = mc
+    base = _look(dataset)
+    other = base.copy()
+    moved = base + 1.0  # NaN stays NaN
+    cfg = _config(aux_targets="lookahead:5")
+
+    def weights(column):  # noqa: ANN001, ANN202
+        t = aux_target_arrays(dataset, ["lookahead"], encoder, {"lookahead": column})
+        return _fit(encoder, dataset, cfg, aux_targets=t)[1]
+
+    assert _same(weights(base), weights(other))
+    assert not _same(weights(base), weights(moved))
+
+
+def _lookahead_tool():  # noqa: ANN202
+    spec = importlib.util.spec_from_file_location(
+        "lookahead_target_tool_434", repo_root() / "tools" / "lookahead_target.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_the_target_formula_models_list_and_objectives_check() -> None:
+    tool = _lookahead_tool()
+    assert tool.parse_models("0:a.pt,10:b.pt") == [(0, "a.pt"), (10, "b.pt")]
+    for bad in ("1:a.pt", "0:a.pt,0:b.pt", "0:a.pt,5:b.pt,3:c.pt"):
+        with pytest.raises(ValueError):
+            tool.parse_models(bad)
+    sv = np.array([0.5, 0.9, 0.0, 1.0, 0.2])
+    static = np.array([0.0, 0.5, 0.0, 0.0, np.nan])
+    got = tool.lookahead_from(sv, static, clip=6.0)
+    logit9 = np.log(0.9 / 0.1)
+    assert got.dtype == np.float32
+    assert got[0] == 0.0 and got[1] == pytest.approx(logit9 - 0.5, abs=1e-6)
+    assert got[2] == -6.0 and got[3] == 6.0  # 0 and 1 are cut at 1e-4 first, then at the clip
+    assert np.isnan(got[4])
+    game = np.array([0, 0, 1, 2, 3])  # four games: 0-1 by a, 2-3 by b
+    tool.check_objectives([(0, "x/a.pt"), (2, "y/b.pt")], game, {"value:a": 2, "value:b": 2})
+    tool.check_objectives([(0, "x/a.pt"), (2, "-")], game, {"value:a": 2})  # a "-" leaf is not checked
+    with pytest.raises(SystemExit, match="records"):
+        tool.check_objectives([(0, "x/a.pt"), (2, "y/b.pt")], game, {"value:a": 1, "value:b": 3})
+
+
+def test_the_tool_writes_each_games_static_logit_from_its_own_model(mc, tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    # Games 0-3 were "generated" by net A, games 4-7 by net B (different weights): every row's
+    # static logit must be that row's own net's, and the target the clipped logit difference.
+    encoder, dataset = mc
+    data = tmp_path / "mc.npz"
+    save_dataset(data, dataset, meta={"format_id": MC, "encoding_revision": ENCODING_REVISION})
+    paths = []
+    for seed in (11, 12):
+        torch.manual_seed(seed)
+        net = build(encoder, ValueConfig()).eval()
+        path = tmp_path / f"net{seed}.pt"
+        save_model(path, net, net.state_dict(), encoder.vocab, ValueConfig(), meta={"m": 1},
+                   widths=net.in_widths)
+        paths.append((path, net))
+    out, static_out = tmp_path / "look.npy", tmp_path / "static.npy"
+    monkeypatch.setattr(
+        sys, "argv",
+        ["lookahead_target.py", "--data", str(data), "--models",
+         f"0:{paths[0][0]},4:{paths[1][0]}", "--out", str(out), "--static-out", str(static_out),
+         "--clip", "1.5"],
+    )
+    _lookahead_tool().main()
+    static = np.load(static_out)
+    target = np.load(out)
+    batch = dataset.tensors(np.arange(len(dataset)), CPU)
+    first = dataset.game < 4
+    with torch.no_grad():
+        want = np.where(first, paths[0][1](batch).numpy(), paths[1][1](batch).numpy())
+        wrong = np.where(first, paths[1][1](batch).numpy(), paths[0][1](batch).numpy())
+    assert np.allclose(static, want, atol=1e-5)
+    assert not np.allclose(static, wrong, atol=1e-3)  # the two nets do differ here
+    sv = np.clip(dataset.search_value.astype(np.float64), 1e-4, 1 - 1e-4)
+    manual = np.clip(np.log(sv / (1 - sv)) - want, -1.5, 1.5)
+    assert np.allclose(target, manual, atol=1e-5)
+    assert float(np.abs(target).max()) <= 1.5 + 1e-6 and (np.abs(target) >= 1.5 - 1e-6).any()
+
+
+def test_the_trainer_wants_the_head_and_the_file_together(mc, tmp_path, monkeypatch) -> None:  # noqa: ANN001
+    encoder, dataset = mc
+    data = tmp_path / "mc.npz"
+    save_dataset(data, dataset, meta={"format_id": MC, "encoding_revision": ENCODING_REVISION})
+    torch.manual_seed(7)
+    net = build(encoder, ValueConfig()).eval()
+    parent = tmp_path / "parent.pt"
+    save_model(parent, net, net.state_dict(), encoder.vocab, ValueConfig(), meta={"m": 1},
+               widths=net.in_widths)
+    column = tmp_path / "look.npy"
+    np.save(column, _look(dataset))
+
+    def run(out, *flags) -> None:  # noqa: ANN001, ANN002
+        monkeypatch.setattr(
+            sys, "argv",
+            ["train_value.py", "--data", str(data), "--init-from", str(parent), "--epochs", "1",
+             "--batch-size", "8", "--keep", "last", "--lr", "5e-4", "--out", str(out),
+             "--device", "cpu", *flags],
+        )
+        _tool().main()
+
+    with pytest.raises(SystemExit, match="go together"):
+        run(tmp_path / "a.pt", "--aux-targets", "lookahead:1")
+    with pytest.raises(SystemExit, match="go together"):
+        run(tmp_path / "b.pt", "--lookahead-file", str(column))
+    base, headed = tmp_path / "base.pt", tmp_path / "headed.pt"
+    run(base)
+    run(headed, "--aux-targets", "lookahead:2", "--lookahead-file", str(column))
+    blob = torch.load(headed, weights_only=False)
+    assert "aux_targets" not in blob["config"]
+    assert not any(k.startswith("aux") for k in blob["weights"])  # the head is dropped on saving
+    plain_net, _ = load_model(base, encoder)
+    headed_net, _ = load_model(headed, encoder)
+    assert not _same(plain_net.state_dict(), headed_net.state_dict())  # the head moved the trunk

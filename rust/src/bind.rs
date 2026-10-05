@@ -176,20 +176,20 @@ impl Words {
 
 /// One usable damaging move against one defender: what the knock-out share needs.
 #[derive(Clone, Copy)]
-struct MoveEval {
+pub(crate) struct MoveEval {
     /// The move's place in the attacker's usable moves, so its hits on two Pokemon pair up.
-    index: u8,
+    pub(crate) index: u8,
     /// Whether it reaches both foes in one use (`allAdjacentFoes`, `allAdjacent`).
-    spread_kind: bool,
+    pub(crate) spread_kind: bool,
     /// 2 first, 0 after, 1 decided by Speed.
-    first: u8,
-    hits: i64,
-    rolls: [i64; N_ROLLS],
+    pub(crate) first: u8,
+    pub(crate) hits: i64,
+    pub(crate) rolls: [i64; N_ROLLS],
 }
 
 #[derive(Default)]
-struct PairValue {
-    moves: Vec<MoveEval>,
+pub(crate) struct PairValue {
+    pub(crate) moves: Vec<MoveEval>,
 }
 
 /// One Pokemon as the calculator sees it: what the key words are built from, kept.
@@ -245,7 +245,7 @@ impl BindCache {
     }
 }
 
-fn move_context(pos: &Position, side: usize, mon: &Pokemon) -> MoveContext {
+pub(crate) fn move_context(pos: &Position, side: usize, mon: &Pokemon) -> MoveContext {
     MoveContext {
         weather: pos.field.weather,
         terrain: pos.field.terrain,
@@ -296,7 +296,7 @@ fn priority_blocked(priority: i64, defender: &Battler, field: &FieldState, defen
 }
 
 /// The moves this Pokemon can use: PP left, not disabled, the locked one only if locked.
-fn usable_moves(mon: &Pokemon) -> Vec<Id> {
+pub(crate) fn usable_moves(mon: &Pokemon) -> Vec<Id> {
     let locked = crate::encode::locked_move_of(mon);
     mon.moves
         .iter()
@@ -310,7 +310,7 @@ fn usable_moves(mon: &Pokemon) -> Vec<Id> {
 /// `on_ally` the defender is the attacker's partner, `defender_side` the attacker's own, and
 /// only the moves that hit every adjacent Pokemon (`allAdjacent`: Earthquake, Surf) count.
 #[allow(clippy::too_many_arguments)]
-fn evaluate_pair(
+pub(crate) fn evaluate_pair(
     reg: &Reg,
     field: &FieldState,
     attacker: &Battler,
@@ -382,7 +382,7 @@ fn ko_rolls(eval: &MoveEval, defender: &Battler) -> u32 {
 /// its roll reaches the HP and no such survival applies (`holds` is that survival, worked
 /// out once per defender).
 #[inline]
-fn ko_count(eval: &MoveEval, hp: i64, holds: bool) -> u32 {
+pub(crate) fn ko_count(eval: &MoveEval, hp: i64, holds: bool) -> u32 {
     if hp <= 0 {
         return 0;
     }
@@ -396,7 +396,7 @@ fn ko_count(eval: &MoveEval, hp: i64, holds: bool) -> u32 {
 }
 
 /// Whether `effective_damage` leaves this defender at 1 HP from any single hit.
-fn survives_one_hit(defender: &Battler) -> bool {
+pub(crate) fn survives_one_hit(defender: &Battler) -> bool {
     use crate::effects::{survives_at_one_ability, survives_at_one_item};
     let survives = defender.item.map(|i| survives_at_one_item(i.as_str())).unwrap_or(false)
         || survives_at_one_ability(defender.ability.as_str());
