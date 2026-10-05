@@ -213,16 +213,6 @@ def warm_start(
     net, meta = load_model(path, encoder)
     blob = torch.load(path, map_location="cpu", weights_only=False)
     config = replace(ValueConfig(**blob["config"]), **run)
-    if config.attention and not net.config.attention:
-        # IKA-90: the attention layer's output projection starts at zero, so before the
-        # first step this net answers exactly as the loaded one.
-        torch.manual_seed(config.seed)
-        grown = build(encoder, config)
-        grown._active_feature = net._active_feature
-        missing, unexpected = grown.load_state_dict(net.state_dict(), strict=False)
-        if unexpected or any(not k.startswith("mon_attention.") for k in missing):
-            raise SystemExit(f"warm start into attention: missing {missing}, unexpected {unexpected}")
-        net = grown
     if config.move_properties and not net.config.move_properties:
         # IKA-318: an id-only model gains the move-property branch. Its input columns start
         # at zero, so before the first step this net answers exactly as the loaded one; the
@@ -238,12 +228,26 @@ def warm_start(
     if config.state_inputs and not net.config.state_inputs:
         # IKA-425: the state columns join each first layer with zero weights, so before
         # the first step this net answers as the loaded one.
-        if config.move_properties or config.attention:
+        if config.move_properties:
             raise SystemExit("--state-inputs warm-starts a plain net only")
         net = grow_state_inputs(net, encoder)
     if config.bind_inputs and not net.config.bind_inputs:
         # IKA-429: the bind columns, the same way.
         net = grow_bind_inputs(net, encoder)
+    if config.attention and not net.config.attention:
+        # IKA-90: the attention layer's output projection starts at zero, so before the
+        # first step this net answers exactly as the loaded one. IKA-433: grown after the
+        # state and bind columns, so that `build(encoder, config)` has the widths of the net
+        # in hand and the attention block is the only key missing (before, the columns
+        # were grown from an attention net, which the guard above refused).
+        torch.manual_seed(config.seed)
+        grown = build(encoder, config)
+        grown._active_feature = net._active_feature
+        missing, unexpected = grown.load_state_dict(net.state_dict(), strict=False)
+        # (`config` also names the auxiliary heads, so a net built from it has those too.)
+        if unexpected or any(not k.startswith(("mon_attention.", "aux.", "aux_heads.")) for k in missing):
+            raise SystemExit(f"warm start into attention: missing {missing}, unexpected {unexpected}")
+        net = grown
     if (config.aux_weight > 0 and not hasattr(net, "aux")) or (
         config.aux_targets and not hasattr(net, "aux_heads")
     ):
