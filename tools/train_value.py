@@ -423,9 +423,16 @@ def main() -> None:
         "--aux-targets",
         default="",
         help='IKA-428: more auxiliary heads, "name:weight,..." from value.AUX_TARGETS '
-        "(end_side, ahead1, ahead2, ahead4, ko_next, turns_left, mon_end, search), each "
+        "(end_side, ahead1, ahead2, ahead4, ko_next, turns_left, mon_end, search, lookahead), each "
         "built from the rows of --data (value.aux_target_arrays) and added as weight x its "
         "loss. Training only: the saved model drops the heads. Off by default.",
+    )
+    ap.add_argument(
+        "--lookahead-file",
+        default="",
+        help="IKA-434: .npy of one float32 per row of --data, in its row order (written by "
+        "tools/lookahead_target.py): the target of the `lookahead` auxiliary head, NaN on "
+        "a row without one. Needed exactly when --aux-targets names `lookahead`.",
     )
     ap.add_argument(
         "--game-weights",
@@ -474,6 +481,8 @@ def main() -> None:
         "whether more self-play would still help.",
     )
     args = ap.parse_args()
+    if ("lookahead" in dict(parse_aux_targets(args.aux_targets))) != bool(args.lookahead_file):
+        raise SystemExit("--lookahead-file and the `lookahead` aux target go together")
 
     # A model is trained on the arrays in the file and then searched with the encoder in
     # this tree. If a column changed meaning between the two, the model learns one feature
@@ -695,7 +704,10 @@ def main() -> None:
         )
     if config.aux_targets:
         heads = parse_aux_targets(config.aux_targets)
-        arrays = aux_target_arrays(dataset, [name for name, _ in heads], encoder)
+        external = {}
+        if args.lookahead_file:
+            external["lookahead"] = np.load(args.lookahead_file)
+        arrays = aux_target_arrays(dataset, [name for name, _ in heads], encoder, external)
         extra["aux_targets"] = arrays
         for name, weight in heads:
             a = arrays[name]

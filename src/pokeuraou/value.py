@@ -1007,7 +1007,14 @@ AUX_TARGETS: dict[str, tuple[str, int, str]] = {
     # The generating search's value at this decision (`Dataset.search_value`) as a second,
     # separate win probability.
     "search": ("anti", 1, "bce"),
+    # IKA-434: the generating search's value minus the generating evaluation model's static
+    # value, both as logits of side 0 winning (what a one-turn look ahead adds to the leaf).
+    # Not built from the rows: `tools/lookahead_target.py` writes it (NaN where the row's
+    # generating leaf was not a learned model) and `aux_target_arrays` takes it as `external`.
+    "lookahead": ("anti", 1, "mse_nan"),
 }
+#: Targets read from outside the dataset's rows (`aux_target_arrays(external=...)`).
+EXTERNAL_AUX_TARGETS = frozenset({"lookahead"})
 
 
 def parse_aux_targets(spec: str) -> list[tuple[str, float]]:
@@ -1085,7 +1092,10 @@ def _ahead(dataset: Dataset, k: int, ends: np.ndarray, run: np.ndarray) -> tuple
 
 
 def aux_target_arrays(
-    dataset: Dataset, names: Sequence[str], encoder: Encoder | None = None
+    dataset: Dataset,
+    names: Sequence[str],
+    encoder: Encoder | None = None,
+    external: dict[str, np.ndarray] | None = None,
 ) -> dict[str, np.ndarray]:
     """Per-row float32 targets of the named `AUX_TARGETS`, in the shapes their heads output.
 
@@ -1097,9 +1107,18 @@ def aux_target_arrays(
     out: dict[str, np.ndarray] = {}
     if not names:
         return out
-    material, end, ends, run = end_material(dataset)
+    material = end = ends = run = None
+    if any(n not in EXTERNAL_AUX_TARGETS for n in names):
+        material, end, ends, run = end_material(dataset)
     for name in names:
-        if name == "end_side":
+        if name in EXTERNAL_AUX_TARGETS:
+            column = None if external is None else external.get(name)
+            if column is None or column.shape != (len(dataset),):
+                raise ValueError(f"aux target {name!r} needs a column of one value per row")
+            if np.isinf(column).any():
+                raise ValueError(f"aux target {name!r} has an infinite value (NaN means no target)")
+            out[name] = np.asarray(column, np.float32)[:, None]
+        elif name == "end_side":
             out[name] = end[run]
         elif name.startswith("ahead") or name == "ko_next":
             k = 1 if name == "ko_next" else int(name[len("ahead"):])
@@ -1160,6 +1179,11 @@ def aux_loss(name: str, output: Tensor, wanted: Tensor) -> Tensor:
     kind, _dim, loss = AUX_TARGETS[name]
     if loss == "mse":
         return ((output - wanted) ** 2).mean()
+    if loss == "mse_nan":
+        # IKA-434: a NaN target is a row without one; the mean is over the rows with one.
+        scored = ~torch.isnan(wanted)
+        err = (output - torch.where(scored, wanted, output.detach())) ** 2
+        return (err * scored).sum() / scored.sum().clamp(min=1)
     if kind == "mon":
         scored = wanted >= 0
         each = nn.functional.binary_cross_entropy_with_logits(
