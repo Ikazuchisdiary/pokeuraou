@@ -1053,3 +1053,35 @@ def test_two_leaves_in_one_process_each_get_their_own_rule(bridged: None) -> Non
     finally:
         port._encoded = real  # noqa: SLF001
     _assert_same(mixed, [old_payoff[0], new_payoff[0]], ["revision 1", "current"])
+
+
+def test_a_reset_that_meets_a_reset_does_not_pop_a_key_twice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two threads whose answers failed together both `disable`, and both `reset`.
+
+    The second reset took its snapshot of `_NODES` before the first had popped, so its
+    `_NODES.pop(key)` raised `KeyError('gen9championsvgc2026regmc')` out of `port.ask` (CI
+    10/6, `test_an_ensemble_arm_survives_several_workers_at_once`, four threads on the
+    module's one process). Here the interleaving is made exact on one thread: closing the
+    first node runs a second reset, which empties the table under the first one's snapshot.
+    """
+    closed: list[str] = []
+
+    class Fake:
+        def __init__(self, name: str, inner: bool) -> None:
+            self.name = name
+            self.inner = inner
+
+        def close(self) -> None:
+            closed.append(self.name)
+            if self.inner:
+                rustnode.reset()
+
+    table: dict[str, Any] = {"first": Fake("first", True), "second": Fake("second", False)}
+    monkeypatch.setattr(rustnode, "_NODES", table)
+    rustnode.reset()
+    assert table == {}
+    # Positive control for the interleaving: the inner reset did run, and closed the second
+    # node while the outer one held a snapshot that still listed it.
+    assert closed == ["first", "second"], closed
