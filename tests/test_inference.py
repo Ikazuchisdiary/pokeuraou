@@ -450,7 +450,13 @@ def test_an_ensemble_arm_survives_several_workers_at_once(parts, device_name):
 
         def ask(rows: int) -> None:
             try:
-                with RemoteValue(address, "value", encoder, buffer_bytes=8 << 20) as remote:
+                # A worker is a process with its own port process in generation. Four
+                # threads on the module's one process cross their answers, and one thread's
+                # protocol failure resets the module's table under the others (a KeyError
+                # on the format id, CI 10/6); see `own_node`.
+                with rustnode.own_node(regulation), RemoteValue(
+                    address, "value", encoder, buffer_bytes=8 << 20
+                ) as remote:
                     for _ in range(8):
                         results[rows] = remote(batches[rows])
             except BaseException as error:  # noqa: BLE001 -- reported on the main thread

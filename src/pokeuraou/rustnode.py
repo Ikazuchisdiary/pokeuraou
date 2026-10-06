@@ -596,7 +596,10 @@ def reset() -> None:
     _GAVE_UP = False
     _RESTARTS = 0
     for key in list(_NODES):
-        node = _NODES.pop(key)
+        # Not `_NODES.pop(key)`: two threads whose answers failed together both reset, and
+        # the second one's snapshot still lists keys the first has popped (a KeyError on
+        # the format id out of `port.ask`, CI 10/6).
+        node = _NODES.pop(key, None)
         if node is None:
             continue
         with contextlib.suppress(Exception):
