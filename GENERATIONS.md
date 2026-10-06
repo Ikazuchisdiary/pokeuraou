@@ -2040,7 +2040,54 @@ Q: q-mc5（gen-5 の 10 万局面を value-mc5x2 で埋めた教材、30 エポ�
 生成の速さ（ABBA、2,500 局 × 4 組、専有）: value-mc5 x1 + q-mc5 は value-mc4bindaux x1 + q-mc4bindaux より 1 局の壁時計 +2.3%、1 決定 −0.2%（局が 2.5% 長い）。同一性の対照は 1,000/1,000 局が一致
 ```
 
-過去の世代の差は +59.2（value-mc3）、+51.1（value-mc4）、+19.8（value-mc4bindaux、同じデータの入力と目標の変更）で、今回の +22.5 は新しい局 40 万を足し、温間始動をやめた分。局の差と学び方の差は分けていない（ゼロから 2 本対温間始動 2 本の対戦評価は回していない）。dropout 0.3 と混合の組の対戦評価も回していない。ratings.py の表にはまだつないでいない。
+過去の世代の差は +59.2（value-mc3）、+51.1（value-mc4）、+19.8（value-mc4bindaux、同じデータの入力と目標の変更）で、今回の +22.5 は新しい局 40 万を足し、温間始動をやめた分。局の差と学び方の差は分けていない（ゼロから 2 本対温間始動 2 本の対戦評価は回していない）。dropout 0.3 と混合の組の対戦評価も回していない。
+
+ratings.py の表へのつなぎ（IKA-437、records/IKA-437.md）: gen-4 の value-mc4stx2・value-mc4bindauxx2・value-mc5x2 の本番化の対戦評価（`C:/tmp` に残っていた記録）を `data/matches-mc/v425-*`・`v430-*`・`q430-*`・`v432-*`・`q432-*` に写した。別名と Q の追加の対応は要らず、群は 1 つになった。足した対戦評価は 1 本で、value-mc5x2（q-mc5）対 value-mc4stx2（q-mc4st）、固定 400 対（800 局）、`data/matches-mc/v437-mc5x2-vs-mc4stx2`、+48.1 [+25.6, +70.9]（つなぐ前の表の予測 +42.0 ±25.1）。
+
+```
+ratings.py、data/matches-mc の 89,256 局、27 打ち手、群は 1 つ、原点 hp-share/w12/hidden-bench（M-C の全打ち手。幅 12・rank-leaf・裏非公開。± は 95%）
+  value-mc5x2               q-mc5          +464.2 ± 52.7   5,877 局   ← gen-5 の本番
+  value-mc5x2               q-mc4bindaux   +462.7 ± 52.7   7,653 局
+  scratchx2（参考の腕 A）   q-mc4bindaux   +459.0 ± 54.0   2,341 局
+  value-mc4bindauxx2        q-mc4bindaux   +439.6 ± 52.0   9,230 局
+  value-mc4bindauxx2        q-mc4st        +438.8 ± 51.6   7,699 局
+  value-mc4stx2             q-mc4st        +419.0 ± 50.0   5,113 局
+  value-mc4stx2             q-mc4          +412.6 ± 48.1   6,647 局
+  value-mc4x2               q-mc4          +402.4 ± 47.0  13,270 局
+  value-mc4x2               q-mc3          +401.1 ± 45.9   5,308 局
+  value-mc4x3               q-mc4          +399.7 ± 48.3   4,159 局
+  value-mc4x4               q-mc4          +396.1 ± 49.6   1,849 局
+  value-mc3x2               q-mc2          +365.5 ± 32.2   4,174 局
+  value-mc3x2               q-mc3          +355.8 ± 39.5   1,526 局
+  value-mc3e4x2             q-mc3          +354.8 ± 32.1   3,443 局
+  value-L3x2                q-mc2          +353.3 ± 30.8   8,400 局
+  value-mc3e4x2             q-mc2          +351.5 ± 29.9  21,150 局
+  value-mc3e2x2             q-mc2          +340.7 ± 31.3   5,168 局
+  value-mc2x2               q-mc2          +298.6 ± 17.5   8,764 局
+  value-mc2x2               q-mc0          +291.7 ± 15.8  11,850 局
+  value-mc1x2               q-mc0          +254.2 ± 11.3  12,476 局
+  value-mc1x2               q-mc1          +248.9 ± 16.5   3,189 局
+  value-mc1g1x2             q-mc0          +246.8 ± 18.4   2,181 局
+  value-mc0-warm2x2         Q なし         +231.0 ± 14.9   4,129 局
+  value-mc0x2               q-mc0          +229.7 ± 14.5   3,255 局
+  value-mc0-scratchx2       Q なし         +207.8 ± 14.6   3,661 局
+  value-gen11L              Q なし         +151.0 ± 16.7   2,000 局
+  hp-share/w12/hidden-bench 原点                0         14,000 局
+```
+
+世代の差を、同じ当てはめの隣どうしの差（表、95%）と各本番化の対戦評価（SPRT の直接値）で並べる。
+
+```
+                                     表（同じ Q）          SPRT の直接値
+  gen-3 → gen-4 (mc3x2 → mc4x2)      +45.3 ±25.1 (q-mc3)   +51.1 [+25.8, +77.0]（IKA-409）
+  gen-4 → mc4st                      +10.1 ±10.9 (q-mc4)   +10.9 [+1.3, +20.6]（IKA-427）
+  mc4st → mc4bindaux                 +19.8 ±13.4 (q-mc4st) +19.8 [+6.0, +33.7]（IKA-430）
+  mc4bindaux → mc5                   +23.1 ±13.7 (q-mc4bindaux) +22.5 [+8.2, +36.8]（IKA-432）
+  mc4st → mc5（本課題で直接）       +45.2 ±17.4           +48.1 [+25.6, +70.9]
+  本番どうし（Q も替わる）: gen-3 本番 → gen-4 本番 +36.9、→ mc4st +16.6 ±18.0、→ mc4bindaux +20.6 ±15.2、→ mc5 +24.6 ±15.4
+```
+
+表の値は原点までの距離の幅（±47〜53）が大きいので、世代の差は隣どうしの差で読む。gen-4 の本番から gen-5 の本番まで +61.8 ±25.0。
 
 ### M-C gen-4 の縛り・補助の目標版 value-mc4bindaux（2026-10-04、IKA-428・IKA-429・IKA-430）
 
@@ -2058,7 +2105,7 @@ Q: q-mc4bindaux（gen-4 の 10 万局面を value-mc4bindauxx2 で埋めた教�
 生成の速さ（ABBA、2,500 局 × 8 区切り、専有）: value-mc4bindaux x1 + q-mc4bindaux は value-mc4st x1 + q-mc4st より 1 局の壁時計 +5.4%、1 決定 +4.1%（局が 1.6% 長い）
 ```
 
-ratings.py の表にはまだつないでいない。
+ratings.py の表につないだ（IKA-437。上の gen-5 の節の表、records/IKA-437.md）。本番化の対戦評価の記録は `data/matches-mc/v430-*`・`q430-*`。
 
 ### M-C gen-4 の状態入力版 value-mc4st（2026-10-04、IKA-425・IKA-427）
 
@@ -2075,7 +2122,7 @@ Q: q-mc4st（gen-4 の 10 万局面を value-mc4stx2 で埋めた教材、30 エ
 生成の速さ（ABBA、2,500 局 × 8 区切り、専有）: value-mc4st x1 + q-mc4st は value-mc4 x1 + q-mc4 より 1 局の壁時計 +2.2%、1 決定 +2.7%
 ```
 
-ratings.py の表にはまだつないでいない。
+ratings.py の表につないだ（IKA-437。gen-5 の節の表）。本番化の対戦評価の記録は `data/matches-mc/v425-*`。
 
 ### M-C gen-4（2026-10-01、IKA-409）
 
