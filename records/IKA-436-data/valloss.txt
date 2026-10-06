@@ -1,0 +1,181 @@
+[heavy] 2026-10-07T04:58:00 start (4 cores): C:/Users/Ikazuchi/repos/pokeuraou/.venv/Scripts/python.exe C:/tmp/ika436/valloss.py C:/Users/Ikazuchi/repos/pokeuraou
+decisions 17203500 games 1479975 id range 0 1479974 per-gen games [39998, 39999, 200000, 399993, 399991, 399994]
+val decisions 2579780 games 221997 by generation [(71443, 6100), (65404, 5875), (341216, 30193), (690684, 60204), (702147, 60100), (708886, 59525)]
+prod s0 done
+prod s1 done
+d03 s0 done
+d03 s1 done
+
+== all val: n 2579780
+  prod x2  logloss 0.37229 (game-se 0.00070)
+  d03 x2  logloss 0.37182 (game-se 0.00070)
+  prod s0  logloss 0.37486 (game-se 0.00071)
+  prod s1  logloss 0.37485 (game-se 0.00070)
+  d03 s0  logloss 0.37416 (game-se 0.00070)
+  d03 s1  logloss 0.37435 (game-se 0.00070)
+  paired prod x2 - d03 x2: +0.00047 (se 0.00009)
+
+== gen-0 rows: n 71443
+  prod x2  logloss 0.37529 (game-se 0.00440)
+  d03 x2  logloss 0.37458 (game-se 0.00439)
+  prod s0  logloss 0.37796 (game-se 0.00444)
+  prod s1  logloss 0.37828 (game-se 0.00443)
+  d03 s0  logloss 0.37717 (game-se 0.00440)
+  d03 s1  logloss 0.37742 (game-se 0.00444)
+  paired prod x2 - d03 x2: +0.00070 (se 0.00062)
+
+== gen-1 rows: n 65404
+  prod x2  logloss 0.37236 (game-se 0.00441)
+  d03 x2  logloss 0.37241 (game-se 0.00441)
+  prod s0  logloss 0.37532 (game-se 0.00445)
+  prod s1  logloss 0.37467 (game-se 0.00445)
+  d03 s0  logloss 0.37486 (game-se 0.00444)
+  d03 s1  logloss 0.37491 (game-se 0.00445)
+  paired prod x2 - d03 x2: -0.00005 (se 0.00058)
+
+== gen-2 rows: n 341216
+  prod x2  logloss 0.37222 (game-se 0.00195)
+  d03 x2  logloss 0.37164 (game-se 0.00194)
+  prod s0  logloss 0.37497 (game-se 0.00197)
+  prod s1  logloss 0.37462 (game-se 0.00196)
+  d03 s0  logloss 0.37396 (game-se 0.00195)
+  d03 s1  logloss 0.37420 (game-se 0.00195)
+  paired prod x2 - d03 x2: +0.00058 (se 0.00026)
+
+== gen-3 rows: n 690684
+  prod x2  logloss 0.37267 (game-se 0.00136)
+  d03 x2  logloss 0.37213 (game-se 0.00135)
+  prod s0  logloss 0.37492 (game-se 0.00137)
+  prod s1  logloss 0.37539 (game-se 0.00136)
+  d03 s0  logloss 0.37448 (game-se 0.00135)
+  d03 s1  logloss 0.37449 (game-se 0.00136)
+  paired prod x2 - d03 x2: +0.00054 (se 0.00018)
+
+== gen-4 rows: n 702147
+  prod x2  logloss 0.37409 (game-se 0.00136)
+  d03 x2  logloss 0.37357 (game-se 0.00135)
+  prod s0  logloss 0.37676 (game-se 0.00137)
+  prod s1  logloss 0.37659 (game-se 0.00136)
+  d03 s0  logloss 0.37595 (game-se 0.00135)
+  d03 s1  logloss 0.37610 (game-se 0.00136)
+  paired prod x2 - d03 x2: +0.00052 (se 0.00018)
+
+== gen-5 rows: n 708886
+  prod x2  logloss 0.36986 (game-se 0.00131)
+  d03 x2  logloss 0.36954 (game-se 0.00131)
+  prod s0  logloss 0.37253 (game-se 0.00133)
+  prod s1  logloss 0.37239 (game-se 0.00132)
+  d03 s0  logloss 0.37180 (game-se 0.00131)
+  d03 s1  logloss 0.37220 (game-se 0.00132)
+  paired prod x2 - d03 x2: +0.00032 (se 0.00018)
+
+== gen-5 turn 1: n 63883
+  prod x2  logloss 0.61462 (game-se 0.00153)
+  d03 x2  logloss 0.61389 (game-se 0.00149)
+  prod s0  logloss 0.61651 (game-se 0.00156)
+  prod s1  logloss 0.61604 (game-se 0.00154)
+  d03 s0  logloss 0.61551 (game-se 0.00150)
+  d03 s1  logloss 0.61534 (game-se 0.00151)
+  paired prod x2 - d03 x2: +0.00073 (se 0.00033)
+
+== gen-5 turns 2-3: n 174256
+  prod x2  logloss 0.50864 (game-se 0.00185)
+  d03 x2  logloss 0.50818 (game-se 0.00184)
+  prod s0  logloss 0.51150 (game-se 0.00188)
+  prod s1  logloss 0.51099 (game-se 0.00186)
+  d03 s0  logloss 0.51053 (game-se 0.00185)
+  d03 s1  logloss 0.51074 (game-se 0.00186)
+  paired prod x2 - d03 x2: +0.00046 (se 0.00032)
+
+== gen-5 turns 4-6: n 262430
+  prod x2  logloss 0.34906 (game-se 0.00190)
+  d03 x2  logloss 0.34914 (game-se 0.00190)
+  prod s0  logloss 0.35186 (game-se 0.00192)
+  prod s1  logloss 0.35182 (game-se 0.00191)
+  d03 s0  logloss 0.35152 (game-se 0.00191)
+  d03 s1  logloss 0.35204 (game-se 0.00192)
+  paired prod x2 - d03 x2: -0.00008 (se 0.00029)
+
+== gen-5 turns 7-10: n 170592
+  prod x2  logloss 0.21080 (game-se 0.00161)
+  d03 x2  logloss 0.20979 (game-se 0.00160)
+  prod s0  logloss 0.21344 (game-se 0.00163)
+  prod s1  logloss 0.21307 (game-se 0.00162)
+  d03 s0  logloss 0.21207 (game-se 0.00162)
+  d03 s1  logloss 0.21223 (game-se 0.00162)
+  paired prod x2 - d03 x2: +0.00102 (se 0.00027)
+
+== gen-5 turns 11-15: n 32924
+  prod x2  logloss 0.16307 (game-se 0.00281)
+  d03 x2  logloss 0.16262 (game-se 0.00284)
+  prod s0  logloss 0.16529 (game-se 0.00290)
+  prod s1  logloss 0.16652 (game-se 0.00283)
+  d03 s0  logloss 0.16464 (game-se 0.00288)
+  d03 s1  logloss 0.16589 (game-se 0.00290)
+  paired prod x2 - d03 x2: +0.00045 (se 0.00062)
+
+== gen-5 turns 16-end: n 4801
+  prod x2  logloss 0.28230 (game-se 0.01124)
+  d03 x2  logloss 0.29672 (game-se 0.01172)
+  prod s0  logloss 0.28522 (game-se 0.01113)
+  prod s1  logloss 0.29750 (game-se 0.01214)
+  d03 s0  logloss 0.29777 (game-se 0.01200)
+  d03 s1  logloss 0.31037 (game-se 0.01204)
+  paired prod x2 - d03 x2: -0.01443 (se 0.00324)
+
+== all turn 1: n 236360
+  prod x2  logloss 0.61385 (game-se 0.00081)
+  d03 x2  logloss 0.61344 (game-se 0.00079)
+  prod s0  logloss 0.61560 (game-se 0.00083)
+  prod s1  logloss 0.61545 (game-se 0.00082)
+  d03 s0  logloss 0.61510 (game-se 0.00080)
+  d03 s1  logloss 0.61485 (game-se 0.00080)
+  paired prod x2 - d03 x2: +0.00041 (se 0.00017)
+
+== all turns 2-3: n 660764
+  prod x2  logloss 0.50758 (game-se 0.00099)
+  d03 x2  logloss 0.50707 (game-se 0.00099)
+  prod s0  logloss 0.51023 (game-se 0.00101)
+  prod s1  logloss 0.51010 (game-se 0.00100)
+  d03 s0  logloss 0.50941 (game-se 0.00099)
+  d03 s1  logloss 0.50959 (game-se 0.00100)
+  paired prod x2 - d03 x2: +0.00051 (se 0.00017)
+
+== all turns 4-6: n 977636
+  prod x2  logloss 0.34512 (game-se 0.00100)
+  d03 x2  logloss 0.34463 (game-se 0.00100)
+  prod s0  logloss 0.34773 (game-se 0.00101)
+  prod s1  logloss 0.34795 (game-se 0.00101)
+  d03 s0  logloss 0.34704 (game-se 0.00100)
+  d03 s1  logloss 0.34735 (game-se 0.00101)
+  paired prod x2 - d03 x2: +0.00049 (se 0.00015)
+
+== all turns 7-10: n 587206
+  prod x2  logloss 0.20673 (game-se 0.00086)
+  d03 x2  logloss 0.20620 (game-se 0.00085)
+  prod s0  logloss 0.20929 (game-se 0.00087)
+  prod s1  logloss 0.20902 (game-se 0.00086)
+  d03 s0  logloss 0.20858 (game-se 0.00086)
+  d03 s1  logloss 0.20846 (game-se 0.00086)
+  paired prod x2 - d03 x2: +0.00053 (se 0.00015)
+
+== all turns 11-15: n 100706
+  prod x2  logloss 0.16475 (game-se 0.00170)
+  d03 x2  logloss 0.16465 (game-se 0.00171)
+  prod s0  logloss 0.16744 (game-se 0.00173)
+  prod s1  logloss 0.16800 (game-se 0.00173)
+  d03 s0  logloss 0.16692 (game-se 0.00173)
+  d03 s1  logloss 0.16805 (game-se 0.00175)
+  paired prod x2 - d03 x2: +0.00011 (se 0.00038)
+
+== all turns 16-end: n 17108
+  prod x2  logloss 0.26591 (game-se 0.00642)
+  d03 x2  logloss 0.26767 (game-se 0.00634)
+  prod s0  logloss 0.27531 (game-se 0.00660)
+  prod s1  logloss 0.27451 (game-se 0.00666)
+  d03 s0  logloss 0.27408 (game-se 0.00647)
+  d03 s1  logloss 0.27986 (game-se 0.00661)
+  paired prod x2 - d03 x2: -0.00176 (se 0.00202)
+mean |win-prob diff| between prod seeds: 0.03710
+mean |win-prob diff| between d03 seeds: 0.03601
+[heavy] 2026-10-07T05:00:34 end rc=0 after 154s
