@@ -587,7 +587,9 @@ def test_a_filled_budget_ends_at_the_budget(roster, pool, monkeypatch, via) -> N
     """IKA-370: filling the wall clock's budget (`FILL_WALL`) begins every stage while time
     is left, so a read ends at its budget inside a stage it began (never before one it did
     not), and ends there without waiting for the chunks still out (they are taken, and
-    thrown away, when the next read begins). The answer is its last completed stage.
+    thrown away, when the next read begins). The answer is its last completed stage. A read
+    whose stage ended with the budget spent begins no next stage and has no stage to give
+    up (``abandoned`` False, ``next_left_ms`` <= 0); any other stop at the budget gave one up.
     IKA-376: a ladder named in `FILLS` does the same with `FILL_WALL` off."""
     reg = roster.reg
     stages = "d2r2b3n4+d3r4ban4/r3ban4+d4r3ban4/r3ban4/r3ban4"
@@ -605,7 +607,13 @@ def test_a_filled_budget_ends_at_the_budget(roster, pool, monkeypatch, via) -> N
         got = _read(reg, node, stages, 300.0, workers=True, clock="wall")
         assert got.wall_ms < 300.0 + 1000.0, "the read waited past its budget"
         if got.stopped == "budget":
-            assert got.abandoned and got.unfinished is not None
+            assert got.unfinished is not None
+            if not got.abandoned:
+                # The budget ran out between two stages (a stage ended in the last
+                # milliseconds): the next one was never begun, so nothing was thrown away.
+                # That is the one road to "budget" without a given-up stage, and its mark
+                # is the time left when the stage was due (IKA-370: not begun only at <= 0).
+                assert got.next_left_ms <= 0.0, "stopped at the budget with time left"
             cut += 1
             if got.rungs:
                 np.testing.assert_array_equal(got.strategy, got.rungs[-1].strategy)
