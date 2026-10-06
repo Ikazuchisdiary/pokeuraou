@@ -260,6 +260,10 @@ def provenance(
 LEAF_ALIASES = {
     "value-mc3e6": "value-mc3",
     "value-mc3e6x2": "value-mc3x2",
+    # IKA-432: the gen-5 pair was boarded as value-mc5scrx2 (its files were value-mc5scr-s0/-s1,
+    # trained from nothing) before the files were shipped as value-mc5 / value-mc5-s1.
+    "value-mc5scr": "value-mc5",
+    "value-mc5scrx2": "value-mc5x2",
 }
 
 

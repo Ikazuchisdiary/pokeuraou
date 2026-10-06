@@ -71,6 +71,15 @@ def test_promoted_gen3_leaf_has_one_name() -> None:
     assert agent_name(source(leaves=["value-mc3e6x2", "value-mc3e4x2"]), 1) == "value-mc3e4x2/w24"
 
 
+def test_promoted_gen5_leaf_has_one_name() -> None:
+    """IKA-432 boarded the gen-5 pair as `value-mc5scrx2` before shipping it as `value-mc5x2`;
+    the two names are one agent. The old production pair keeps its own name."""
+    boarded = agent_name(source(leaves=["value-mc5scrx2", "value-mc4bindauxx2"]), 0)
+    shipped = agent_name(source(leaves=["value-mc5x2.pt", "value-mc4bindauxx2"]), 0)
+    assert boarded == shipped == "value-mc5x2/w24"
+    assert agent_name(source(leaves=["value-mc5scrx2", "value-mc4bindauxx2"]), 1) == "value-mc4bindauxx2/w24"
+
+
 def test_own_book_is_in_the_name() -> None:
     """Drawing the four from a solved equilibrium is worth more than any two models on
     this scale, so it is a different agent."""
