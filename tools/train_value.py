@@ -359,6 +359,13 @@ def main() -> None:
         "only: a warm start needs the source model's shapes.",
     )
     ap.add_argument(
+        "--head-layers",
+        type=int,
+        default=None,
+        help="IKA-439: hidden layers of the head (head_dim wide each; ValueConfig's 2). "
+        "Fresh initialisation only.",
+    )
+    ap.add_argument(
         "--widen",
         type=int,
         default=1,
@@ -573,6 +580,10 @@ def main() -> None:
         )
         if value is not None
     }
+    if args.head_layers is not None:
+        if args.init_from is not None:
+            raise SystemExit("--head-layers changes the shapes; it cannot warm-start")
+        schedule["head_layers"] = args.head_layers
     if args.width_scale != 1.0:
         if args.init_from is not None:
             raise SystemExit("--width-scale changes the shapes; it cannot warm-start")
