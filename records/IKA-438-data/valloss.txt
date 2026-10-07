@@ -1,0 +1,188 @@
+[heavy] 2026-10-07T14:01:01 start (4 cores): C:/Users/Ikazuchi/repos/pokeuraou/.venv/Scripts/python.exe C:/tmp/ika438/valloss.py C:/Users/Ikazuchi/repos/pokeuraou
+decisions 22062769 games 1879969 id range 0 1879968 per-gen games [39998, 39999, 200000, 399993, 399991, 399994, 399994]
+val decisions 3307903 games 281996 by generation [(71443, 6100), (65397, 5874), (341216, 30193), (690684, 60204), (702147, 60100), (710794, 59676), (726222, 59849)]
+old s0 done
+old s1 done
+new s0 done
+new s1 done
+
+== all val: n 3307903
+  old x2  logloss 0.37111 (game-se 0.00061)
+  new x2  logloss 0.37013 (game-se 0.00061)
+  old s0  logloss 0.37375 (game-se 0.00062)
+  old s1  logloss 0.37370 (game-se 0.00062)
+  new s0  logloss 0.37233 (game-se 0.00062)
+  new s1  logloss 0.37217 (game-se 0.00062)
+  paired old - new: +0.00097 (se 0.00009)
+
+== gen-0 rows: n 71443
+  old x2  logloss 0.37529 (game-se 0.00440)
+  new x2  logloss 0.37489 (game-se 0.00438)
+  old s0  logloss 0.37796 (game-se 0.00444)
+  old s1  logloss 0.37828 (game-se 0.00443)
+  new s0  logloss 0.37708 (game-se 0.00442)
+  new s1  logloss 0.37729 (game-se 0.00439)
+  paired old - new: +0.00039 (se 0.00065)
+
+== gen-1 rows: n 65397
+  old x2  logloss 0.37239 (game-se 0.00442)
+  new x2  logloss 0.37216 (game-se 0.00441)
+  old s0  logloss 0.37535 (game-se 0.00445)
+  old s1  logloss 0.37470 (game-se 0.00445)
+  new s0  logloss 0.37497 (game-se 0.00446)
+  new s1  logloss 0.37360 (game-se 0.00442)
+  paired old - new: +0.00023 (se 0.00064)
+
+== gen-2 rows: n 341216
+  old x2  logloss 0.37222 (game-se 0.00195)
+  new x2  logloss 0.37193 (game-se 0.00194)
+  old s0  logloss 0.37497 (game-se 0.00197)
+  old s1  logloss 0.37462 (game-se 0.00196)
+  new s0  logloss 0.37415 (game-se 0.00195)
+  new s1  logloss 0.37388 (game-se 0.00194)
+  paired old - new: +0.00030 (se 0.00027)
+
+== gen-3 rows: n 690684
+  old x2  logloss 0.37267 (game-se 0.00136)
+  new x2  logloss 0.37189 (game-se 0.00135)
+  old s0  logloss 0.37492 (game-se 0.00137)
+  old s1  logloss 0.37539 (game-se 0.00136)
+  new s0  logloss 0.37399 (game-se 0.00136)
+  new s1  logloss 0.37387 (game-se 0.00135)
+  paired old - new: +0.00078 (se 0.00019)
+
+== gen-4 rows: n 702147
+  old x2  logloss 0.37409 (game-se 0.00136)
+  new x2  logloss 0.37320 (game-se 0.00135)
+  old s0  logloss 0.37676 (game-se 0.00137)
+  old s1  logloss 0.37659 (game-se 0.00136)
+  new s0  logloss 0.37544 (game-se 0.00136)
+  new s1  logloss 0.37518 (game-se 0.00136)
+  paired old - new: +0.00089 (se 0.00019)
+
+== gen-5 rows: n 710794
+  old x2  logloss 0.36639 (game-se 0.00129)
+  new x2  logloss 0.36841 (game-se 0.00131)
+  old s0  logloss 0.36899 (game-se 0.00131)
+  old s1  logloss 0.36891 (game-se 0.00130)
+  new s0  logloss 0.37061 (game-se 0.00132)
+  new s1  logloss 0.37045 (game-se 0.00131)
+  paired old - new: -0.00202 (se 0.00020)
+
+== gen-6 rows: n 726222
+  old x2  logloss 0.37030 (game-se 0.00129)
+  new x2  logloss 0.36569 (game-se 0.00129)
+  old s0  logloss 0.37325 (game-se 0.00130)
+  old s1  logloss 0.37299 (game-se 0.00129)
+  new s0  logloss 0.36785 (game-se 0.00130)
+  new s1  logloss 0.36789 (game-se 0.00130)
+  paired old - new: +0.00461 (se 0.00022)
+
+== gen-6 turn 1: n 64597
+  old x2  logloss 0.62378 (game-se 0.00149)
+  new x2  logloss 0.61540 (game-se 0.00151)
+  old s0  logloss 0.62648 (game-se 0.00151)
+  old s1  logloss 0.62537 (game-se 0.00151)
+  new s0  logloss 0.61666 (game-se 0.00153)
+  new s1  logloss 0.61698 (game-se 0.00152)
+  paired old - new: +0.00838 (se 0.00045)
+
+== gen-6 turns 2-3: n 173865
+  old x2  logloss 0.51648 (game-se 0.00180)
+  new x2  logloss 0.50950 (game-se 0.00183)
+  old s0  logloss 0.51977 (game-se 0.00181)
+  old s1  logloss 0.51915 (game-se 0.00182)
+  new s0  logloss 0.51156 (game-se 0.00184)
+  new s1  logloss 0.51187 (game-se 0.00184)
+  paired old - new: +0.00698 (se 0.00042)
+
+== gen-6 turns 4-6: n 264277
+  old x2  logloss 0.35323 (game-se 0.00186)
+  new x2  logloss 0.34925 (game-se 0.00186)
+  old s0  logloss 0.35624 (game-se 0.00188)
+  old s1  logloss 0.35613 (game-se 0.00188)
+  new s0  logloss 0.35149 (game-se 0.00187)
+  new s1  logloss 0.35172 (game-se 0.00187)
+  paired old - new: +0.00397 (se 0.00033)
+
+== gen-6 turns 7-10: n 180927
+  old x2  logloss 0.20966 (game-se 0.00160)
+  new x2  logloss 0.20771 (game-se 0.00158)
+  old s0  logloss 0.21224 (game-se 0.00162)
+  old s1  logloss 0.21212 (game-se 0.00161)
+  new s0  logloss 0.20983 (game-se 0.00160)
+  new s1  logloss 0.20964 (game-se 0.00160)
+  paired old - new: +0.00195 (se 0.00028)
+
+== gen-6 turns 11-15: n 37079
+  old x2  logloss 0.15667 (game-se 0.00276)
+  new x2  logloss 0.15389 (game-se 0.00269)
+  old s0  logloss 0.15845 (game-se 0.00280)
+  old s1  logloss 0.16010 (game-se 0.00281)
+  new s0  logloss 0.15578 (game-se 0.00271)
+  new s1  logloss 0.15627 (game-se 0.00273)
+  paired old - new: +0.00277 (se 0.00060)
+
+== gen-6 turns 16-end: n 5477
+  old x2  logloss 0.31715 (game-se 0.01235)
+  new x2  logloss 0.30175 (game-se 0.01104)
+  old s0  logloss 0.32879 (game-se 0.01300)
+  old s1  logloss 0.32516 (game-se 0.01231)
+  new s0  logloss 0.31599 (game-se 0.01115)
+  new s1  logloss 0.29987 (game-se 0.01130)
+  paired old - new: +0.01539 (se 0.00356)
+
+== all turn 1: n 301163
+  old x2  logloss 0.61564 (game-se 0.00071)
+  new x2  logloss 0.61479 (game-se 0.00071)
+  old s0  logloss 0.61765 (game-se 0.00072)
+  old s1  logloss 0.61718 (game-se 0.00072)
+  new s0  logloss 0.61621 (game-se 0.00072)
+  new s1  logloss 0.61612 (game-se 0.00072)
+  paired old - new: +0.00085 (se 0.00017)
+
+== all turns 2-3: n 835186
+  old x2  logloss 0.50863 (game-se 0.00087)
+  new x2  logloss 0.50764 (game-se 0.00087)
+  old s0  logloss 0.51140 (game-se 0.00088)
+  old s1  logloss 0.51116 (game-se 0.00087)
+  new s0  logloss 0.50971 (game-se 0.00088)
+  new s1  logloss 0.50985 (game-se 0.00088)
+  paired old - new: +0.00099 (se 0.00017)
+
+== all turns 4-6: n 1242508
+  old x2  logloss 0.34600 (game-se 0.00088)
+  new x2  logloss 0.34507 (game-se 0.00088)
+  old s0  logloss 0.34867 (game-se 0.00089)
+  old s1  logloss 0.34885 (game-se 0.00088)
+  new s0  logloss 0.34738 (game-se 0.00089)
+  new s1  logloss 0.34729 (game-se 0.00088)
+  paired old - new: +0.00093 (se 0.00014)
+
+== all turns 7-10: n 768360
+  old x2  logloss 0.20678 (game-se 0.00075)
+  new x2  logloss 0.20603 (game-se 0.00075)
+  old s0  logloss 0.20929 (game-se 0.00076)
+  old s1  logloss 0.20917 (game-se 0.00076)
+  new s0  logloss 0.20818 (game-se 0.00076)
+  new s1  logloss 0.20788 (game-se 0.00076)
+  paired old - new: +0.00076 (se 0.00013)
+
+== all turns 11-15: n 137930
+  old x2  logloss 0.16202 (game-se 0.00145)
+  new x2  logloss 0.16154 (game-se 0.00144)
+  old s0  logloss 0.16442 (game-se 0.00148)
+  old s1  logloss 0.16532 (game-se 0.00148)
+  new s0  logloss 0.16390 (game-se 0.00146)
+  new s1  logloss 0.16362 (game-se 0.00146)
+  paired old - new: +0.00048 (se 0.00033)
+
+== all turns 16-end: n 22756
+  old x2  logloss 0.27400 (game-se 0.00583)
+  new x2  logloss 0.25930 (game-se 0.00552)
+  old s0  logloss 0.28480 (game-se 0.00605)
+  old s1  logloss 0.28088 (game-se 0.00593)
+  new s0  logloss 0.27025 (game-se 0.00572)
+  new s1  logloss 0.26014 (game-se 0.00554)
+  paired old - new: +0.01470 (se 0.00186)
+[heavy] 2026-10-07T14:06:59 end rc=0 after 359s
