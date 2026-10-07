@@ -1,0 +1,16 @@
+| leg | first | wall s | games/min | cpu s/game | gpu MB | stopped |
+| A1 | 0 | 148.0 | 1014 | 0.963 | 6271 | [] | written 2500
+| B1 | 0 | 147.6 | 1016 | 0.957 | 6384 | [] | written 2500
+| B2 | 2500 | 143.6 | 1044 | 0.939 | 6207 | [] | written 2500
+| A2 | 2500 | 140.2 | 1069 | 0.913 | 6204 | [] | written 2499
+| A3 | 5000 | 138.6 | 1083 | 0.899 | 6358 | [] | written 2500
+| B3 | 5000 | 138.2 | 1086 | 0.898 | 6287 | [] | written 2500
+| B4 | 7500 | 136.6 | 1098 | 0.888 | 6434 | [] | written 2500
+| A4 | 7500 | 137.3 | 1092 | 0.891 | 6592 | [] | written 2500
+| C1 | 0 | 62.0 | 968 | 0.976 | 5885 | [] | written 1000
+pair 1: wall B/A 0.9972, cpu B/A 0.9930
+pair 2: wall B/A 1.0242, cpu B/A 1.0285
+pair 3: wall B/A 0.9970, cpu B/A 0.9987
+pair 4: wall B/A 0.9944, cpu B/A 0.9973
+arm A: games 9999, wall 564.1, games/min 1063, cpu s/game 0.916, turns/game 9.824, decisions/game 12.168, wall per decision ms 4.636
+arm B: games 10000, wall 565.9, games/min 1060, cpu s/game 0.920, turns/game 9.849, decisions/game 12.200, wall per decision ms 4.639
