@@ -366,6 +366,12 @@ def main(argv: list[str] | None = None) -> None:
                     "holding Espathra until Espathra's Special Attack and Special Defense are "
                     "both +1 or more (IKA-419g)")
     ap.add_argument("--baseline-hold-baton", action="store_true", help="same for the other arm")
+    ap.add_argument("--bench-oracle", action="store_true",
+                    help="the tested arm believes the opponent's bench is the four the "
+                    "opponent really drew: a ceiling for any bench belief, not a legal "
+                    "player; its selection is unchanged (IKA-440)")
+    ap.add_argument("--baseline-bench-oracle", action="store_true",
+                    help="same for the other arm")
     ap.add_argument("--line-only-with", nargs="+", default=None, metavar="SPECIES",
                     help="the arms' --line1 applies only to the side whose six holds one of "
                     "these species ids (IKA-419f)")
@@ -493,6 +499,7 @@ def main(argv: list[str] | None = None) -> None:
         line1=args.line1,
         line1_back=tuple(args.line1_back) if args.line1_back else None,
         hold_baton=args.hold_baton,
+        bench_oracle=args.bench_oracle,
     )
     other_limit = args.limit if args.baseline_limit is None else args.baseline_limit
     if baseline is None:
@@ -509,7 +516,8 @@ def main(argv: list[str] | None = None) -> None:
                         ally_targets=args.baseline_ally_targets,
                         eq_select=args.baseline_eq_select,
                         line1=args.baseline_line1,
-                        hold_baton=args.baseline_hold_baton)
+                        hold_baton=args.baseline_hold_baton,
+                        bench_oracle=args.baseline_bench_oracle)
     else:
         assert baseline_name is not None
         # One solver per arm even over one leaf: shared, the second arm would reuse the
@@ -534,6 +542,7 @@ def main(argv: list[str] | None = None) -> None:
             eq_select=args.baseline_eq_select,
             line1=args.baseline_line1,
             hold_baton=args.baseline_hold_baton,
+            bench_oracle=args.baseline_bench_oracle,
         )
     arms = (tested, other)
     print(pool.summary(), file=sys.stderr)
@@ -567,7 +576,9 @@ def main(argv: list[str] | None = None) -> None:
                if arm.hold_baton else "")
             + " / selection "
             f"{arm.selection}" + (f" by its own leaf, store {store}" if store else "")
-            + f" / belief {'solved' if arm.solver is not None and hide_bench else 'uniform'}",
+            + " / belief "
+            + ("ORACLE (the opponent's drawn four)" if arm.bench_oracle and hide_bench
+               else "solved" if arm.solver is not None and hide_bench else "uniform"),
             file=sys.stderr,
         )
     ranking = tuple("leaf" if arm.rank_by_leaf else "damage" for arm in arms)
@@ -602,6 +613,8 @@ def main(argv: list[str] | None = None) -> None:
         tags += f"@back:{'+'.join(tested.line1_back or ())}"
     if tested.hold_baton != other.hold_baton:
         tags += "@holdbaton" if tested.hold_baton else "@noholdbaton"
+    if hide_bench and tested.bench_oracle != other.bench_oracle:
+        tags += "@oracle" if tested.bench_oracle else "@nooracle"
     arm_label = f"{tested.name}{tags}"
 
     client = WorkClient(args.queue) if args.queue else None
