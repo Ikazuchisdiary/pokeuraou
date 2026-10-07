@@ -554,6 +554,11 @@ class PoolArm:
     #: until that species' Special Attack and Special Defense are both +1 (`play_game`'s
     #: ``hold_baton``, IKA-419g). Off ships.
     hold_baton: bool = False
+    #: Believes the opponent's bench is the four the opponent really drew: its prior about
+    #: that side is the drawn selection with probability 1 (IKA-440). A ceiling for any
+    #: bench belief, not a legal player -- it reads the opponent's private draw. Off ships;
+    #: only for measuring how much a better belief could be worth.
+    bench_oracle: bool = False
 
     def __post_init__(self) -> None:
         self.rank_fill = resolve_rank_fill(self.rank_fill, self.rank_by_leaf)
@@ -915,6 +920,15 @@ def pool_match_game(
             if entries[0] is not None
             else None
         )
+        # IKA-440: an oracle arm's prior about the side across is that side's actual draw.
+        if side_arms[1].bench_oracle:
+            about0 = BenchPrior(
+                selections=(tuple(picks[0]),), probabilities=(1.0,), species=tuple(species[0])
+            )
+        if side_arms[0].bench_oracle:
+            about1 = BenchPrior(
+                selections=(tuple(picks[1]),), probabilities=(1.0,), species=tuple(species[1])
+            )
         if about0 is not None or about1 is not None:
             priors = (about0, about1)
 
@@ -949,7 +963,9 @@ def pool_match_game(
     sources = tuple(arm.selection for arm in side_arms)
     record.selection_source = sources[0] if sources[0] == sources[1] else "mixed"
     beliefs = tuple(
-        "uniform" if not hide_bench or entries[s] is None else SOLVED for s in (0, 1)
+        "oracle" if hide_bench and side_arms[s].bench_oracle
+        else "uniform" if not hide_bench or entries[s] is None else SOLVED
+        for s in (0, 1)
     )
     sides = {
         "pair": k,
