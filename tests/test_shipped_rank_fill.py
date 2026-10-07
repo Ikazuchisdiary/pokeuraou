@@ -80,7 +80,7 @@ def pool_file(tmp_path):  # noqa: ANN001, ANN201
 
 def test_the_default_fill_is_q_nocover() -> None:
     assert SHIPPED_RANK_FILL == "q-nocover"
-    assert qrank.DEFAULT_Q == "data/models/q-mc5.pt"
+    assert qrank.DEFAULT_Q == "data/models/q-mc6.pt"
     assert resolve_rank_fill(None, True) == "q-nocover"
     # A damage-ranked arm reads no fill: it keeps the library's, so it needs no Q.
     assert resolve_rank_fill(None, False) == DEFAULT_RANK_FILL == "refs2"

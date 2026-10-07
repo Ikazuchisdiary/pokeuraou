@@ -1,7 +1,7 @@
 """IKA-419: the selection game's value per pair of builds, and how well it matches played games.
 
 The cheap evaluation of a build is the equilibrium value of the 90 x 90 selection game of the
-build against each pool build, with the production leaf (`value-mc5`, the mean of two nets).
+build against each pool build, with the production leaf (`value-mc6`, the mean of two nets).
 This tool computes it and checks it against the win rates of games already played.
 
 Three steps, each its own subcommand. Nothing here learns a leaf.
@@ -44,7 +44,7 @@ from typing import Any
 import numpy as np
 
 DEFAULT_POOL = "regmc-matchupweb"
-DEFAULT_VALUE = ("data/models/value-mc5.pt", "data/models/value-mc5-s1.pt")
+DEFAULT_VALUE = ("data/models/value-mc6.pt", "data/models/value-mc6-s1.pt")
 
 #: The `pool` object of a record, whatever scalar keys (id, sha256, pair) come before `teams`.
 _POOL_RE = re.compile(rb'"pool": \{[^{}\[\]]*?"teams": \["([0-9a-f]+)", "([0-9a-f]+)"\]')
