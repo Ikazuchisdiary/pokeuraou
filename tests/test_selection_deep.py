@@ -430,8 +430,12 @@ def _args(**kwargs):  # noqa: ANN003, ANN202
 def test_a_persons_game_reads_the_selection_deeper_unless_told_not_to() -> None:
     tool = _play_human_tool()
     leaf = _stub
-    assert tool.resolve_selection(_args(), leaf) == ("default", humanplay.PLAY_SELECTION_SECONDS)
+    assert tool.resolve_selection(_args(), leaf) == (humanplay.PLAY_SELECTION_READING,
+                                                     humanplay.PLAY_SELECTION_SECONDS)
     assert humanplay.PLAY_SELECTION_SECONDS == 90.0
+    # the reading the tool played before IKA-440, by its name
+    assert tool.resolve_selection(_args(selection_reading="default"), leaf) == (
+        "default", humanplay.PLAY_SELECTION_SECONDS)
     # the leaf's solve: told so, on the count clock (a replay), and without a leaf
     assert tool.resolve_selection(_args(selection_reading="none"), leaf) == (None, None)
     assert tool.resolve_selection(_args(clock="count"), leaf) == (None, None)
@@ -445,6 +449,52 @@ def test_a_persons_game_reads_the_selection_deeper_unless_told_not_to() -> None:
         tool.resolve_selection(_args(selection_reading="default"), None)
     with pytest.raises(ValueError):
         tool.resolve_selection(_args(selection_reading="shift=bad"), leaf)
+
+
+def test_a_persons_selection_reads_each_cell_at_depth_one() -> None:
+    """IKA-440: the default reads each cell at depth 1 over a wider rectangle; the depth-2
+    reading played before is still the one ``default`` names."""
+    new = parse_reading(humanplay.PLAY_SELECTION_READING)
+    assert (new.stage, new.rects, new.confirm, new.shift) == ("L6@0", (8, 11), 2, "add")
+    assert new.fill, "with seconds the rectangle keeps widening while time is left"
+    old = parse_reading(humanplay.PLAY_SELECTION_READING_IKA392)
+    assert old == Reading() == parse_reading("stage=d2r4b3k8,rects=8-16,confirm=2,shift=add")
+    assert new != old
+
+
+class _RecordingReader:
+    """Answers every cell from a fixed matrix and keeps the readings it was asked to use."""
+
+    workers = 1
+
+    def __init__(self, truth: np.ndarray) -> None:
+        self.truth, self.readings, self.cells = truth, [], 0
+
+    def read(self, reading, our, their, selections, cells, deadline=None):  # noqa: ANN001, ANN201
+        self.readings.append(reading)
+        self.cells += len(cells)
+        return {c: float(self.truth[c]) for c in cells}
+
+
+def test_naming_the_old_reading_plays_the_old_selection(pool) -> None:  # noqa: ANN001
+    reg, teams = pool.reg, (pool.teams[0], pool.teams[1])
+    truth, _ = _instance(440)
+
+    def entry(reading: str):  # noqa: ANN202
+        reader = _RecordingReader(truth)
+        got = humanplay.solve_entry(reg, teams, _stub, "stub", reading=reading, reader=reader)
+        # The seconds (and a note that prints them) differ run to run; the answer does not.
+        return ({k: v for k, v in got.to_json().items() if k not in ("seconds", "model", "notes")},
+                reader)
+
+    named, named_reader = entry(humanplay.PLAY_SELECTION_READING_IKA392)
+    spelled, spelled_reader = entry("stage=d2r4b3k8,rects=8-16,confirm=2,shift=add")
+    assert named == spelled and named_reader.cells == spelled_reader.cells
+    assert {r.stage for r in named_reader.readings} == {"d2r4b3k8"}
+    # the new default asks for other cells, read another way (the comparison can fail)
+    new, new_reader = entry(humanplay.PLAY_SELECTION_READING)
+    assert {r.stage for r in new_reader.readings} == {"L6@0"}
+    assert new_reader.cells != named_reader.cells or new != named
 
 
 def _agent(pool, **kwargs):  # noqa: ANN001, ANN003, ANN202
