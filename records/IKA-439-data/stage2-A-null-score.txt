@@ -1,0 +1,8 @@
+complete pairs 40 (won 0 / split 40 / lost 0)
+pairs, all: n 40, score 0.5000, Elo -0.0 [-0.0, -0.0]
+games, turns <= 15: n 78, score 0.5000, Elo -0.0 [-78.9, +78.9]
+games, turns >= 16: n 2, score 0.5000, Elo -0.0 [-2400.0, +2400.0]
+pairs whose longer game ended <= 15: n 39, score 0.5000, Elo -0.0 [-0.0, -0.0]
+pairs whose longer game ended >= 16: n 1
+turns per game 9.55 ; games >= 16: 2
+search seconds per game: tested 0.6572, other 0.6599, ratio 0.9958 over 80 games

@@ -1,0 +1,60 @@
+"""IKA-439 stage 2 A: value-mc6w15 x2 (width 1.5) against value-mc6 x2 (production), fixed-setting board.
+
+    board.py <name> <workers> <servers>
+
+Pool regmc-matchupweb, served, hidden bench, width 12, rank-leaf, q-nocover with q-mc6 for both
+arms, each arm's own presolved selection store, --baseline named. This worktree's tree and exe.
+Records: C:/tmp/ika439/matches/<name>/.
+"""
+
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+M = Path("C:/Users/Ikazuchi/repos/pokeuraou")
+WT = M / ".claude/worktrees/agent-abab28403d0bd0449"
+PY = str(M / ".venv/Scripts/python.exe")
+HERE = Path("C:/tmp/ika439")
+OUT = HERE / "matches"
+EXE = str(WT / "rust/target/release/pokeuraou-damage.exe")
+
+Q = M / "data/models/q-mc6.pt"
+ARMS = {
+    "new": ([HERE / "w15/value-mc6w15.pt", HERE / "w15/value-mc6w15-s1.pt"], HERE / "store-mc6w15x2"),
+    "old": ([M / "data/models/value-mc6.pt", M / "data/models/value-mc6-s1.pt"],
+            M / "data/selection-solved/value-mc6x2"),
+}
+# name -> (tested, other, seed, pairs, sprt)
+MATCHES = {
+    "null": ("new", "new", 44300, 40, None),
+    "w15-vs-mc6": ("new", "old", 44301, 4000, ("0", "10")),
+}
+
+name, workers, servers = sys.argv[1], sys.argv[2], sys.argv[3]
+tested, other, seed, games, sprt = MATCHES[name]
+out = OUT / name
+if out.exists():
+    sys.exit(f"{out} exists")
+OUT.mkdir(parents=True, exist_ok=True)
+tf, ts = ARMS[tested]
+of, os_ = ARMS[other]
+cmd = [PY, str(WT / "tools/match_queue.py"), "--pool", "regmc-matchupweb", "--out", str(out),
+       "--games", str(games), "--seed", str(seed), "--served", "--servers", servers, "--workers", workers,
+       "--hide-bench", *(["--sprt", *sprt] if sprt else []),
+       "--q-model", str(Q), "--value", *map(str, tf), "--baseline", *map(str, of),
+       "--", "--limit", "12", "--rank-leaf", "--rank-fill", "q-nocover", "--selection-store", str(ts),
+       "--baseline-limit", "12", "--baseline-rank-leaf", "--baseline-rank-fill", "q-nocover",
+       "--baseline-selection-store", str(os_)]
+log = HERE / f"board-{name}.log"
+with log.open("w", encoding="utf-8", newline="\n") as fh:
+    fh.write(f"== {name} {time.strftime('%F %T')} tested={tested} other={other}\n" + " ".join(cmd) + "\n")
+    fh.flush()
+    started = time.time()
+    rc = subprocess.run(cmd, cwd=str(WT), stdout=fh, stderr=subprocess.STDOUT,
+                        env={**os.environ, "PYTHONPATH": str(WT / "src"), "POKEURAOU_RUST_NODE_BIN": EXE},
+                        check=False).returncode
+    fh.write(f"== end {time.strftime('%F %T')} rc={rc} after {time.time() - started:.0f}s\n")
+print(name, "rc", rc, f"{time.time() - started:.0f}s")
+sys.exit(rc)

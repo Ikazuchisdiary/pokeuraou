@@ -1,0 +1,9 @@
+complete pairs 40 (won 4 / split 35 / lost 1)
+pairs, all: n 40, score 0.5375, Elo +26.1 [-11.6, +64.5]
+games, turns <= 15: n 76, score 0.5395, Elo +27.5 [-51.3, +109.3]
+games, turns >= 16: n 4, score 0.5000, Elo -0.0 [-2400.0, +2400.0]
+pairs whose longer game ended <= 15: n 38, score 0.5395, Elo +27.5 [-12.2, +67.9]
+pairs whose longer game ended >= 16: n 2, score 0.5000, Elo -0.0 [-0.0, -0.0]
+turns per game 10.0625 ; games >= 16: 4
+condition cand: 725 moves, mean seconds per move 2.3776
+condition prod: 725 moves, mean seconds per move 2.3745

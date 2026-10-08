@@ -1,0 +1,8 @@
+complete pairs 4000 (won 942 / split 2208 / lost 850)
+pairs, all: n 4000, score 0.5115, Elo +8.0 [+0.8, +15.2]
+games, turns <= 15: n 7729, score 0.5122, Elo +8.5 [+0.8, +16.3]
+games, turns >= 16: n 271, score 0.4908, Elo -6.4 [-48.2, +35.1]
+pairs whose longer game ended <= 15: n 3738, score 0.5119, Elo +8.3 [+0.8, +15.7]
+pairs whose longer game ended >= 16: n 262, score 0.5057, Elo +4.0 [-25.4, +33.4]
+turns per game 9.82975 ; games >= 16: 271
+search seconds per game: tested 0.5299, other 0.5302, ratio 0.9994 over 8000 games

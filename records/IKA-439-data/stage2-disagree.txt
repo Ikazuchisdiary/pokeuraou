@@ -1,0 +1,19 @@
+move decisions 20196
+old0 done 0.5017254646199258
+old1 done 0.5020257215894117
+new0 done 0.502382437421375
+new1 done 0.5029842463691918
+prod: s10 vs s11: n 20000, mean |dp| 0.03375, rms dp 0.05444, mean |dlogit| 0.3442
+w15 : s10 vs s11: n 20000, mean |dp| 0.03544, rms dp 0.05814, mean |dlogit| 0.3698
+x2 (prob mean) w15 vs prod: n 20000, mean |dp| 0.02757, rms dp 0.04420, mean |dlogit| 0.2926
+seed 10: w15 vs prod: n 20000, mean |dp| 0.03680, rms dp 0.05941, mean |dlogit| 0.3841
+seed 11: w15 vs prod: n 20000, mean |dp| 0.03677, rms dp 0.05956, mean |dlogit| 0.3866
+w15 s10 vs prod s11: n 20000, mean |dp| 0.03659, rms dp 0.05900, mean |dlogit| 0.3716
+ turns 1-3 prod seeds: n 6785, mean |dp| 0.04324, rms dp 0.05729, mean |dlogit| 0.2295
+ turns 1-3 w15 seeds : n 6785, mean |dp| 0.04395, rms dp 0.05921, mean |dlogit| 0.2357
+ turns 4-8 prod seeds: n 10004, mean |dp| 0.03224, rms dp 0.05487, mean |dlogit| 0.3822
+ turns 4-8 w15 seeds : n 10004, mean |dp| 0.03476, rms dp 0.05923, mean |dlogit| 0.4201
+ turns 9-15 prod seeds: n 3076, mean |dp| 0.01824, rms dp 0.04568, mean |dlogit| 0.4610
+ turns 9-15 w15 seeds : n 3076, mean |dp| 0.01950, rms dp 0.05129, mean |dlogit| 0.4911
+ turns 16-99 prod seeds: n 135, mean |dp| 0.02177, rms dp 0.05928, mean |dlogit| 0.6361
+ turns 16-99 w15 seeds : n 135, mean |dp| 0.02129, rms dp 0.06829, mean |dlogit| 0.6120
