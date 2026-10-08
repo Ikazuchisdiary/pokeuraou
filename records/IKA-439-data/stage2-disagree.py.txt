@@ -1,0 +1,78 @@
+"""IKA-439 stage 2: how far apart are the two seeds of a pair, on positions from the A match's games?
+
+Positions: the 'position' of move decisions in C:/tmp/ika439/matches/w15-vs-mc6/games-worker*.jsonl
+(a fixed random sample). For each of prod (value-mc6, -s1) and w15 (value-mc6w15, -s1): the win
+probability of side 0 from each seed's net (BatchedValue of one net), then
+  mean |p_s10 - p_s11|, the same in logit, and the same for the pair means (x2) new vs old.
+    disagree.py <worktree> <main checkout> [n positions]
+"""
+import glob
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from pokeuraou.encode import Encoder
+from pokeuraou.position import Position
+from pokeuraou.regulation import load_regulation
+from pokeuraou.value import BatchedValue, load_model
+
+WT, M = Path(sys.argv[1]), Path(sys.argv[2])
+N = int(sys.argv[3]) if len(sys.argv) > 3 else 20000
+rng = np.random.default_rng(0)
+rows = []
+for p in sorted(glob.glob("C:/tmp/ika439/matches/w15-vs-mc6/games-worker*.jsonl")):
+    for line in open(p, encoding="utf-8"):
+        if line.strip():
+            g = json.loads(line)
+            for d in g["decisions"]:
+                if d["kind"] == "move":
+                    rows.append((g["turns"], d["turn"], d["position"]))
+print("move decisions", len(rows), flush=True)
+pick = rng.choice(len(rows), size=min(N, len(rows)), replace=False)
+positions = [Position.from_json(rows[i][2]) for i in pick]
+turn = np.array([rows[i][1] for i in pick])
+reg = load_regulation(positions[0].format if hasattr(positions[0], "format") else "gen9championsvgc2026regmc")
+enc = Encoder(reg)
+files = {
+    "old0": M / "data/models/value-mc6.pt", "old1": M / "data/models/value-mc6-s1.pt",
+    "new0": Path("C:/tmp/ika439/w15/value-mc6w15.pt"), "new1": Path("C:/tmp/ika439/w15/value-mc6w15-s1.pt"),
+}
+dev = torch.device("cpu")
+torch.set_num_threads(8)
+prob = {}
+for k, f in files.items():
+    net, _ = load_model(f, enc)
+    prob[k] = np.clip(BatchedValue(net, enc, device=dev)(positions), 1e-6, 1 - 1e-6)
+    print(k, "done", float(prob[k].mean()), flush=True)
+
+
+def logit(p):
+    return np.log(p / (1 - p))
+
+
+def report(name, a, b, mask=None):
+    m = np.ones(len(a), bool) if mask is None else mask
+    d = np.abs(a - b)[m]
+    dl = np.abs(logit(a) - logit(b))[m]
+    print(f"{name}: n {int(m.sum())}, mean |dp| {d.mean():.5f}, rms dp {np.sqrt((d ** 2).mean()):.5f}, "
+          f"mean |dlogit| {dl.mean():.4f}")
+    return float(d.mean()), float(np.sqrt((d ** 2).mean())), float(dl.mean())
+
+
+out = {}
+out["old seeds"] = report("prod: s10 vs s11", prob["old0"], prob["old1"])
+out["new seeds"] = report("w15 : s10 vs s11", prob["new0"], prob["new1"])
+x_old = (prob["old0"] + prob["old1"]) / 2
+x_new = (prob["new0"] + prob["new1"]) / 2
+out["x2 new vs old"] = report("x2 (prob mean) w15 vs prod", x_new, x_old)
+out["old0 vs new0"] = report("seed 10: w15 vs prod", prob["new0"], prob["old0"])
+out["old1 vs new1"] = report("seed 11: w15 vs prod", prob["new1"], prob["old1"])
+out["cross"] = report("w15 s10 vs prod s11", prob["new0"], prob["old1"])
+for lo, hi in ((1, 3), (4, 8), (9, 15), (16, 99)):
+    m = (turn >= lo) & (turn <= hi)
+    out[f"turn {lo}-{hi} old seeds"] = report(f" turns {lo}-{hi} prod seeds", prob["old0"], prob["old1"], m)
+    out[f"turn {lo}-{hi} new seeds"] = report(f" turns {lo}-{hi} w15 seeds ", prob["new0"], prob["new1"], m)
+Path("C:/tmp/ika439/disagree.json").write_bytes(json.dumps(out, indent=1).encode())

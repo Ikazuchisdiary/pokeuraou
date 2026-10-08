@@ -1,0 +1,79 @@
+"""IKA-439 stage 2: pair Elo with a 95% interval, split by game length, search seconds / seconds per move.
+
+    score2.py <match dir> <mq|tm> [tested condition name for tm]
+
+mq = match_queue records (games-worker*.jsonl with provenance/searchSeconds); tm = time_match records.
+Length classes: a game that ended at turn <= 15, or at turn >= 16 (by `turns`). Games are scored
+one at a time (the tested arm's score, 1 / 0.5 / 0), so the per-class interval treats games as
+independent (the two games of a pair are not); the overall line is pair-level (the match's own).
+A pair is also put in a class by its longer game.
+"""
+import glob
+import json
+import math
+import sys
+from collections import defaultdict
+
+d, kind = sys.argv[1], sys.argv[2]
+pairs = defaultdict(dict)
+games = []  # (score, turns, pair)
+secs = defaultdict(list)
+move_secs = defaultdict(list)
+for path in sorted(glob.glob(f"{d}/games-*worker*.jsonl")):
+    for line in open(path, encoding="utf-8"):
+        if not line.strip():
+            continue
+        g = json.loads(line)
+        if kind == "mq":
+            side = 1 if g["provenance"]["seat"].endswith("side 1") else 0
+            out = g["outcome"]
+            score = out if side == 0 else 1.0 - out
+            pid, gid = g["gameIndex"], g["seatIndex"]
+            secs["tested"].append(g["searchSeconds"][side])
+            secs["other"].append(g["searchSeconds"][1 - side])
+        else:
+            score = g["testedScore"]
+            pid, gid = g["pair"], g["game"]
+            for m in g["moves"]:
+                move_secs[m["condition"]].append(m["seconds"])
+        pairs[pid][gid] = (score, g["turns"])
+        games.append((score, g["turns"], pid))
+if len(sys.argv) > 4:  # first N pair indices only (what the SPRT read, in index order)
+    keep = set(sorted(pairs)[: int(sys.argv[4])])
+    pairs = {p: v for p, v in pairs.items() if p in keep}
+    games = [x for x in games if x[2] in keep]
+
+
+def elo(s):
+    s = min(max(s, 1e-6), 1 - 1e-6)
+    return -400 * math.log10(1 / s - 1)
+
+
+def line(label, scores):
+    n = len(scores)
+    if n < 2:
+        print(f"{label}: n {n}")
+        return
+    mean = sum(scores) / n
+    se = math.sqrt(sum((x - mean) ** 2 for x in scores) / (n - 1) / n)
+    print(f"{label}: n {n}, score {mean:.4f}, Elo {elo(mean):+.1f} [{elo(mean - 1.96 * se):+.1f}, "
+          f"{elo(mean + 1.96 * se):+.1f}]")
+
+
+full = {p: sum(v[0] for v in g.values()) / 2 for p, g in pairs.items() if len(g) == 2}
+won = sum(1 for x in full.values() if x == 1)
+lost = sum(1 for x in full.values() if x == 0)
+print(f"complete pairs {len(full)} (won {won} / split {len(full) - won - lost} / lost {lost})")
+line("pairs, all", list(full.values()))
+for label, lo, hi in (("games, turns <= 15", 0, 15), ("games, turns >= 16", 16, 10**9)):
+    line(label, [s for s, t, _ in games if lo <= t <= hi])
+line("pairs whose longer game ended <= 15", [full[p] for p in full if max(v[1] for v in pairs[p].values()) <= 15])
+line("pairs whose longer game ended >= 16", [full[p] for p in full if max(v[1] for v in pairs[p].values()) >= 16])
+print("turns per game", sum(t for _, t, _ in games) / len(games), "; games >= 16:", sum(1 for _, t, _ in games if t >= 16))
+if kind == "mq":
+    t, o = secs["tested"], secs["other"]
+    print(f"search seconds per game: tested {sum(t) / len(t):.4f}, other {sum(o) / len(o):.4f}, "
+          f"ratio {sum(t) / sum(o):.4f} over {len(t)} games")
+else:
+    for c, v in move_secs.items():
+        print(f"condition {c}: {len(v)} moves, mean seconds per move {sum(v) / len(v):.4f}")

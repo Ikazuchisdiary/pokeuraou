@@ -1,0 +1,57 @@
+"""IKA-439 stage 2 B: equal-wall-clock time match, width-1.5 x2 (tested) against value-mc6 x2 (production).
+
+    chainB.py null | main <first chunk start> <n chunks>
+
+4 s a move, 1 core, 1 thread, L6, wall clock, both conditions; q-mc6 for both; 8 processes; exclusive.
+null = 40 pairs of the tested leaf against itself (seed 33400); main = 100-pair chunks of the match
+(seed 33401), --resume after the first. Records C:/tmp/ika439/tm/<name>. Log C:/tmp/ika439/chainB.log
+"""
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+H = Path("C:/tmp/ika439")
+M = Path("C:/Users/Ikazuchi/repos/pokeuraou")
+WT = M / ".claude/worktrees/agent-abab28403d0bd0449"
+PY = str(M / ".venv/Scripts/python.exe")
+HEAVY = "C:/tmp/pokeuraou-machine/heavy.py"
+EXE = str(WT / "rust/target/release/pokeuraou-damage.exe")
+NEW = [str(H / "w15/value-mc6w15.pt"), str(H / "w15/value-mc6w15-s1.pt")]
+OLD = [str(M / "data/models/value-mc6.pt"), str(M / "data/models/value-mc6-s1.pt")]
+Q = str(M / "data/models/q-mc6.pt")
+ARM = "seconds=4,cores=1,threads=1,ladder=L6"
+env = dict(os.environ, PYTHONPATH=str(WT / "src"), POKEURAOU_RUST_NODE_BIN=EXE, PYTHONUNBUFFERED="1")
+
+
+def say(t):
+    with open(H / "chainB.log", "a", encoding="utf-8", newline="\n") as fh:
+        fh.write(f"{time.strftime('%H:%M:%S')} {t}\n")
+
+
+def run(name, start, pairs, other, seed, resume, est):
+    out = H / "tm" / name
+    cmd = [PY, str(WT / "tools/time_match.py"), "--out", str(out), "--arm", f"cand:{ARM}", "--arm", f"prod:{ARM}",
+           "--value", *NEW, "--other-value", *other, "--q-model", Q, "--served", "--parallel", "8",
+           "--pairs", str(pairs), "--start", str(start), "--seed", str(seed)]
+    if resume:
+        cmd.append("--resume")
+    log = H / f"tm-{name}-{start}.log"
+    with open(log, "w", encoding="utf-8", newline="\n") as fh:
+        rc = subprocess.run([PY, HEAVY, "--agent", "ika-439", "--exclusive", "--gpu", "--cores", "16",
+                             "--est-min", str(est), "--why", f"IKA-439 time match {name} {start}", "--", *cmd],
+                            cwd=str(WT), env=env, stdout=fh, stderr=subprocess.STDOUT).returncode
+    say(f"{name} start {start} pairs {pairs} rc={rc}")
+    return rc
+
+
+if sys.argv[1] == "null":
+    sys.exit(run("null", 0, 40, NEW, 33400, False, 12))
+first, n = int(sys.argv[2]), int(sys.argv[3])
+for k in range(n):
+    start = first + 100 * k
+    rc = run("main", start, 100, OLD, 33401, start > 0, 25)
+    if rc:
+        sys.exit(rc)
+say("chainB end")
