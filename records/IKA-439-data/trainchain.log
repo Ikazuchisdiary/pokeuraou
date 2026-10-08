@@ -1,0 +1,21 @@
+02:54:21 start value-w15.pt
+04:19:42 value-w15.pt rc=0 5121s GPU before 3593 MB peak 6874 MB
+04:19:42 chain w15 end
+04:19:57 start value-w20.pt
+05:34:00 value-w20.pt rc=0 4443s GPU before 3465 MB peak 4141 MB
+05:34:00 chain w20 end
+05:34:12 start value-w15-s1.pt
+06:47:13 value-w15-s1.pt rc=0 4380s GPU before 3465 MB peak 4040 MB
+06:47:13 start value-w20-s1.pt
+06:47:39 value-w15-s1.pt exists, skipped
+08:01:50 value-w20-s1.pt rc=0 4477s GPU before 3465 MB peak 4130 MB
+08:01:50 start value-h3.pt
+09:18:09 value-h3.pt rc=0 4579s GPU before 3454 MB peak 3875 MB
+09:18:09 start value-h3-s1.pt
+10:34:37 value-h3-s1.pt rc=0 4587s GPU before 3454 MB peak 3871 MB
+10:34:37 queue end
+10:34:40 start value-w20-s1.pt
+11:48:56 value-w20-s1.pt rc=0 4456s GPU before 3454 MB peak 4119 MB
+11:48:56 value-h3.pt exists, skipped
+11:48:56 value-h3-s1.pt exists, skipped
+11:48:56 queue end

@@ -1,0 +1,115 @@
+"""IKA-439: forward-pass cost of the production net and the capacity candidates, ABBA, IKA-398's form.
+
+    fwdbench.py <worktree> <main checkout> [rounds]
+
+Random weights (time only). 2 nets per variant (the production ensemble is 2), BatchedValue._mean_logit,
+production recipe config (state + bind inputs). Real encoded rows (gen-6). Per call, in ms:
+  graph512 = CUDA graph replay + sync, 512 rows        eager4096 = launch + run + sync, 4096 rows
+  cpu64    = 64 rows on the CPU, 1 thread
+Order per round: P A B C C B A P  (variants listed in VARIANTS), median of each block's calls.
+"""
+from __future__ import annotations
+
+import dataclasses
+import json
+import statistics
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from pokeuraou.encode import Encoder
+from pokeuraou.regulation import load_regulation
+from pokeuraou.value import BatchedValue, ValueConfig, build, load_dataset
+
+WT = Path(sys.argv[1])
+M = Path(sys.argv[2])
+ROUNDS = int(sys.argv[3]) if len(sys.argv) > 3 else 3
+path = M / "data/selfplay-mc6-encoded.npz"
+meta = json.loads(str(np.load(path)["meta_json"]))
+enc = Encoder(load_regulation(meta["format_id"]))
+ds = load_dataset(path)
+dev = torch.device("cuda")
+cpu = torch.device("cpu")
+base = ValueConfig(state_inputs=True, bind_inputs=True, aux_weight=5.0, aux_targets="search:1,ahead2:5")
+DIMS = ("species_dim", "ability_dim", "item_dim", "move_dim", "mon_dim", "side_dim", "head_dim")
+
+
+def cfg(scale: float = 1.0, head_layers: int = 2) -> ValueConfig:
+    kw = {n: int(round(getattr(ValueConfig(), n) * scale)) for n in DIMS}
+    return dataclasses.replace(base, head_layers=head_layers, **kw)
+
+
+VARIANTS = {"P": cfg(), "w15": cfg(1.5), "w20": cfg(2.0), "h3": cfg(1.0, 3)}
+ORDER = ["P", "w15", "w20", "h3", "h3", "w20", "w15", "P"]
+torch.manual_seed(0)
+nets = {}
+for name, c in VARIANTS.items():
+    two = [build(enc, c).eval() for _ in range(2)]
+    # the saved model drops the aux heads
+    nets[name] = {"cpu": two}
+    nets[name]["params"] = sum(p.numel() for p in two[0].parameters())
+rows = {n: ds.tensors(np.arange(n), dev) for n in (512, 4096)}
+rows_cpu = ds.tensors(np.arange(64), cpu)
+ob = {}
+
+
+def prep(name):
+    c = nets[name]
+    gpu_nets = [build(enc, VARIANTS[name]).to(dev).eval() for _ in range(2)]
+    for g, s in zip(gpu_nets, c["cpu"]):
+        g.load_state_dict(s.state_dict())
+    val = BatchedValue(gpu_nets, enc, device=dev, batch_size=8192)
+    cval = BatchedValue(c["cpu"], enc, device=cpu, batch_size=8192)
+    b512 = rows[512]
+    st = torch.cuda.Stream()
+    st.wait_stream(torch.cuda.current_stream())
+    with torch.no_grad(), torch.cuda.stream(st):
+        for _ in range(3):
+            val._mean_logit(b512)
+    torch.cuda.current_stream().wait_stream(st)
+    g = torch.cuda.CUDAGraph()
+    with torch.no_grad(), torch.cuda.graph(g):
+        val._mean_logit(b512)
+    ob[name] = (val, cval, g)
+
+
+for name in VARIANTS:
+    prep(name)
+
+
+def timeit(fn, iters, cuda):
+    for _ in range(5):
+        fn()
+    if cuda:
+        torch.cuda.synchronize()
+    ts = []
+    for _ in range(iters):
+        t = time.perf_counter()
+        fn()
+        if cuda:
+            torch.cuda.synchronize()
+        ts.append((time.perf_counter() - t) * 1e3)
+    return statistics.median(ts)
+
+
+torch.set_num_threads(1)
+res = {n: {"graph512": [], "eager4096": [], "cpu64": []} for n in VARIANTS}
+with torch.no_grad():
+    for r in range(ROUNDS):
+        for name in ORDER:
+            val, cval, g = ob[name]
+            res[name]["graph512"].append(timeit(g.replay, 200, True))
+            res[name]["eager4096"].append(timeit(lambda: val._mean_logit(rows[4096]), 40, True))
+            res[name]["cpu64"].append(timeit(lambda: cval._mean_logit(rows_cpu), 60, False))
+        print("round", r, "done", flush=True)
+out = {}
+for name in VARIANTS:
+    out[name] = {"params_per_net": nets[name]["params"]}
+    for k, v in res[name].items():
+        out[name][k] = {"median": statistics.median(v), "values": v}
+for name in VARIANTS:
+    print(name, out[name]["params_per_net"], {k: round(out[name][k]["median"], 3) for k in ("graph512", "eager4096", "cpu64")}, flush=True)
+Path("C:/tmp/ika439/fwdbench.json").write_bytes(json.dumps(out, indent=1).encode())

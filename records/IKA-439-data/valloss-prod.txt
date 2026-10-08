@@ -1,0 +1,75 @@
+[heavy] 2026-10-08T03:00:02 start (4 cores): C:/Users/Ikazuchi/repos/pokeuraou/.venv/Scripts/python.exe C:/tmp/ika439/pyrun.py C:/tmp/ika439/valloss.py C:/Users/Ikazuchi/repos/pokeuraou/.claude/worktrees/agent-abab28403d0bd0449 C:/Users/Ikazuchi/repos/pokeuraou
+val decisions 3307903 games 281996
+prod 0 done
+prod 1 done
+
+== all val: n 3307903
+  prod x2      logloss 0.37013 (game-se 0.00061)
+  prod s0      logloss 0.37233 (game-se 0.00062)
+  prod s1      logloss 0.37217 (game-se 0.00062)
+
+== gen-0 rows: n 71443
+  prod x2      logloss 0.37489 (game-se 0.00438)
+  prod s0      logloss 0.37708 (game-se 0.00442)
+  prod s1      logloss 0.37729 (game-se 0.00439)
+
+== gen-1 rows: n 65397
+  prod x2      logloss 0.37216 (game-se 0.00441)
+  prod s0      logloss 0.37497 (game-se 0.00446)
+  prod s1      logloss 0.37360 (game-se 0.00442)
+
+== gen-2 rows: n 341216
+  prod x2      logloss 0.37193 (game-se 0.00194)
+  prod s0      logloss 0.37415 (game-se 0.00195)
+  prod s1      logloss 0.37388 (game-se 0.00194)
+
+== gen-3 rows: n 690684
+  prod x2      logloss 0.37189 (game-se 0.00135)
+  prod s0      logloss 0.37399 (game-se 0.00136)
+  prod s1      logloss 0.37387 (game-se 0.00135)
+
+== gen-4 rows: n 702147
+  prod x2      logloss 0.37320 (game-se 0.00135)
+  prod s0      logloss 0.37544 (game-se 0.00136)
+  prod s1      logloss 0.37518 (game-se 0.00136)
+
+== gen-5 rows: n 710794
+  prod x2      logloss 0.36841 (game-se 0.00131)
+  prod s0      logloss 0.37061 (game-se 0.00132)
+  prod s1      logloss 0.37045 (game-se 0.00131)
+
+== gen-6 rows: n 726222
+  prod x2      logloss 0.36569 (game-se 0.00129)
+  prod s0      logloss 0.36785 (game-se 0.00130)
+  prod s1      logloss 0.36789 (game-se 0.00130)
+
+== gen-6 turn 1: n 64597
+  prod x2      logloss 0.61540 (game-se 0.00151)
+  prod s0      logloss 0.61666 (game-se 0.00153)
+  prod s1      logloss 0.61698 (game-se 0.00152)
+
+== gen-6 turns 2-3: n 173865
+  prod x2      logloss 0.50950 (game-se 0.00183)
+  prod s0      logloss 0.51156 (game-se 0.00184)
+  prod s1      logloss 0.51187 (game-se 0.00184)
+
+== gen-6 turns 4-6: n 264277
+  prod x2      logloss 0.34925 (game-se 0.00186)
+  prod s0      logloss 0.35149 (game-se 0.00187)
+  prod s1      logloss 0.35172 (game-se 0.00187)
+
+== gen-6 turns 7-10: n 180927
+  prod x2      logloss 0.20771 (game-se 0.00158)
+  prod s0      logloss 0.20983 (game-se 0.00160)
+  prod s1      logloss 0.20964 (game-se 0.00160)
+
+== gen-6 turns 11-15: n 37079
+  prod x2      logloss 0.15389 (game-se 0.00269)
+  prod s0      logloss 0.15578 (game-se 0.00271)
+  prod s1      logloss 0.15627 (game-se 0.00273)
+
+== gen-6 turns 16-end: n 5477
+  prod x2      logloss 0.30175 (game-se 0.01104)
+  prod s0      logloss 0.31599 (game-se 0.01115)
+  prod s1      logloss 0.29987 (game-se 0.01130)
+[heavy] 2026-10-08T03:01:57 end rc=0 after 115s

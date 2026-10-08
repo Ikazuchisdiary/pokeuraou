@@ -1,0 +1,87 @@
+"""IKA-439: held-out log loss of candidate pairs against the production pair value-mc6 x2.
+
+Same held-out split as IKA-438's valloss.py (gen-0..6 join, split_seed 0, holdout 0.15), CPU.
+    valloss.py <worktree> <main checkout> label=path0,path1 [label=path0,path1 ...]
+The control label is "prod" = data/models/value-mc6.pt, value-mc6-s1.pt (always added first).
+Output: stdout and C:/tmp/ika439/valloss-<labels>.json
+"""
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from pokeuraou.encode import Encoder
+from pokeuraou.regulation import load_regulation
+from pokeuraou.value import ValueConfig, load_dataset, load_model, predict, split_for
+
+WT = Path(sys.argv[1])
+M = Path(sys.argv[2])
+H = Path("C:/tmp/ika439")
+torch.set_num_threads(4)
+path = M / "data/selfplay-mc0123456-encoded.npz"
+meta = json.loads(str(np.load(path)["meta_json"]))
+ds = load_dataset(path)
+games = np.sort(np.unique(ds.game))
+NG = 7
+counts = [len(np.unique(load_dataset(M / f"data/selfplay-mc{k}-encoded.npz").game)) for k in range(NG)]
+assert sum(counts) == len(games), (counts, len(games))
+_, val = split_for(ds, 0.15, ValueConfig(seed=0, split_seed=0))
+g = ds.game[val]
+turn = ds.turn[val]
+bounds = [games[c - 1] for c in np.cumsum(counts)[:-1]]
+grp = np.searchsorted(np.array(bounds), g, side="left")
+print("val decisions", len(val), "games", len(np.unique(g)), flush=True)
+assert len(val) == 3307903, len(val)  # IKA-438's held-out set
+enc = Encoder(load_regulation(meta["format_id"]))
+sets = {"prod": [M / "data/models/value-mc6.pt", M / "data/models/value-mc6-s1.pt"]}
+for a in sys.argv[3:]:
+    label, files = a.split("=")
+    sets[label] = [Path(f) for f in files.split(",")]
+logit = {}
+for label, files in sets.items():
+    zs = []
+    for i, p in enumerate(files):
+        net, _ = load_model(p, enc)
+        z = predict(net, ds, val, device=torch.device("cpu")).astype(np.float64)
+        logit[f"{label} s{i}"] = z
+        zs.append(z)
+        print(label, i, "done", flush=True)
+    logit[f"{label} x2"] = sum(zs) / len(zs)
+y = ds.outcome[val].astype(np.float64)
+
+
+def per(z):
+    p = np.clip(1 / (1 + np.exp(-z)), 1e-7, 1 - 1e-7)
+    return -(y * np.log(p) + (1 - y) * np.log(1 - p))
+
+
+def se(v, mask):
+    ug, inv = np.unique(g[mask], return_inverse=True)
+    pg = np.bincount(inv, weights=v[mask]) / np.bincount(inv)
+    return float(pg.std(ddof=1) / np.sqrt(len(pg)))
+
+
+TB = ((2, 3), (4, 6), (7, 10), (11, 15), (16, 10**6))
+groups = {"all val": np.ones(len(val), bool)}
+for k in range(NG):
+    groups[f"gen-{k} rows"] = grp == k
+groups["gen-6 turn 1"] = (grp == 6) & (turn == 1)
+for lo, hi in TB:
+    groups[f"gen-6 turns {lo}-{hi if hi < 10**6 else 'end'}"] = (grp == 6) & (turn >= lo) & (turn <= hi)
+out = {}
+labels = [k for k in sets]
+for gn, mask in groups.items():
+    print(f"\n== {gn}: n {int(mask.sum())}")
+    for k in [f"{lb} x2" for lb in labels] + [k for k in logit if not k.endswith("x2")]:
+        l = per(logit[k])
+        out[f"{gn}/{k}"] = (float(l[mask].mean()), se(l, mask), int(mask.sum()))
+        print(f"  {k:12s} logloss {l[mask].mean():.5f} (game-se {se(l, mask):.5f})")
+    for lb in labels[1:]:
+        d = per(logit["prod x2"]) - per(logit[f"{lb} x2"])
+        out[f"{gn}/prod-{lb}"] = (float(d[mask].mean()), se(d, mask))
+        print(f"  paired prod - {lb}: {d[mask].mean():+.5f} (se {se(d, mask):.5f})")
+(H / ("valloss-" + "-".join(labels) + ".json")).write_bytes(json.dumps(out, indent=1).encode())

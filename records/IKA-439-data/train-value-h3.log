@@ -1,0 +1,113 @@
+C:\Users\Ikazuchi\repos\pokeuraou\.venv\Scripts\python.exe C:\Users\Ikazuchi\repos\pokeuraou\.claude\worktrees\agent-abab28403d0bd0449\tools\train_value.py --data C:\Users\Ikazuchi\repos\pokeuraou\data\selfplay-mc0123456-encoded.npz --state-inputs --bind-inputs --aux-weight 5 --aux-targets search:1,ahead2:5 --epochs 30 --lr 2e-3 --keep best --split-seed 0 --holdout 0.15 --seed 10 --out C:\tmp\ika439\models\value-h3.pt --head-layers 3
+[heavy] 2026-10-08T08:01:50 start (3 cores): C:\Users\Ikazuchi\repos\pokeuraou\.venv\Scripts\python.exe C:\Users\Ikazuchi\repos\pokeuraou\.claude\worktrees\agent-abab28403d0bd0449\tools\train_value.py --data C:\Users\Ikazuchi\repos\pokeuraou\data\selfplay-mc0123456-encoded.npz --state-inputs --bind-inputs --aux-weight 5 --aux-targets search:1,ahead2:5 --epochs 30 --lr 2e-3 --keep best --split-seed 0 --holdout 0.15 --seed 10 --out C:\tmp\ika439\models\value-h3.pt --head-layers 3
+22,062,769 decisions from 1,879,969 games -> 18,754,866 train / 3,307,903 validation, split by game at split-seed 0 (fit seed 10)
+490,326 parameters on cuda
+antisymmetry V(x) + V(mirror x) - 1: max |error| 1.19e-07 at init
+
+training: 30 epochs OneCycle to lr 0.002 (warm-up 0.2), keep best, average none
+auxiliary head: 5 x MSE on the final material difference (alive, HP; mean [-9.999999747378752e-05, -9.999999747378752e-05], std [0.3718000054359436, 0.3240000009536743])
+auxiliary head search: 1 x bce, target shape (1,), mean 0.4999, std 0.3567
+auxiliary head ahead2: 5 x mse, target shape (2,), mean -0.0001, std 0.3651
+  epoch   1  train 1.3580  val 0.4008  val AUC 0.8938  154.2s
+  epoch   2  train 1.2661  val 0.3922  val AUC 0.8985  151.1s
+  epoch   3  train 1.2495  val 0.3878  val AUC 0.9010  151.1s
+  epoch   4  train 1.2403  val 0.3856  val AUC 0.9023  151.2s
+  epoch   5  train 1.2352  val 0.3849  val AUC 0.9027  151.4s
+  epoch   6  train 1.2315  val 0.3833  val AUC 0.9034  151.3s
+  epoch   7  train 1.2276  val 0.3826  val AUC 0.9039  151.5s
+  epoch   8  train 1.2228  val 0.3813  val AUC 0.9045  151.1s
+  epoch   9  train 1.2189  val 0.3804  val AUC 0.9050  151.1s
+  epoch  10  train 1.2164  val 0.3798  val AUC 0.9054  151.7s
+  epoch  11  train 1.2141  val 0.3799  val AUC 0.9054  151.8s
+  epoch  12  train 1.2122  val 0.3786  val AUC 0.9060  151.7s
+  epoch  13  train 1.2104  val 0.3782  val AUC 0.9062  151.9s
+  epoch  14  train 1.2085  val 0.3781  val AUC 0.9062  151.8s
+  epoch  15  train 1.2067  val 0.3776  val AUC 0.9065  151.7s
+  epoch  16  train 1.2047  val 0.3773  val AUC 0.9068  151.4s
+  epoch  17  train 1.2025  val 0.3768  val AUC 0.9070  151.3s
+  epoch  18  train 1.2004  val 0.3766  val AUC 0.9070  151.5s
+  epoch  19  train 1.1980  val 0.3761  val AUC 0.9073  151.4s
+  epoch  20  train 1.1954  val 0.3751  val AUC 0.9078  151.5s
+  epoch  21  train 1.1928  val 0.3746  val AUC 0.9081  153.0s
+  epoch  22  train 1.1899  val 0.3740  val AUC 0.9084  151.6s
+  epoch  23  train 1.1870  val 0.3739  val AUC 0.9085  151.8s
+  epoch  24  train 1.1841  val 0.3736  val AUC 0.9087  152.4s
+  epoch  25  train 1.1811  val 0.3727  val AUC 0.9090  152.3s
+  epoch  26  train 1.1783  val 0.3723  val AUC 0.9093  152.0s
+  epoch  27  train 1.1757  val 0.3720  val AUC 0.9096  151.9s
+  epoch  28  train 1.1737  val 0.3717  val AUC 0.9096  151.7s
+  epoch  29  train 1.1723  val 0.3717  val AUC 0.9097  151.8s
+  epoch  30  train 1.1716  val 0.3717  val AUC 0.9097  151.8s
+
+antisymmetry after training: max |error| 1.19e-07
+
+held-out games, model versus the baselines
+                          AUC   log loss    Brier
+       learned value   0.9097     0.3717   0.1227
+   generating search   0.9050     0.3808   0.1258
+            hp-share   0.7984     0.5802   0.1981
+        always 0.501       --     0.6931   0.2500
+
+by turn (the aggregate hides this)
+   turn        n  model AUC  search AUC  model mean  search mean   actual
+      1   301163      0.717       0.697       0.500        0.496    50.1%
+      2   393683      0.795       0.779       0.500        0.501    50.1%
+      3   441503      0.849       0.838       0.500        0.501    50.1%
+      4   445097      0.894       0.887       0.499        0.500    50.0%
+      5   425912      0.927       0.923       0.500        0.501    50.1%
+      6   371499      0.950       0.949       0.502        0.501    50.2%
+      7   299687      0.965       0.964       0.501        0.501    50.1%
+      8   221466      0.975       0.975       0.501        0.501    50.1%
+      9   150578      0.980       0.980       0.500        0.500    50.1%
+     10    96629      0.983       0.983       0.501        0.501    50.3%
+     11    59331      0.984       0.984       0.502        0.502    50.2%
+     12    35728      0.985       0.985       0.501        0.502    50.2%
+     13    21483      0.984       0.983       0.503        0.504    50.5%
+     14    13116      0.982       0.981       0.493        0.492    49.4%
+     15     8272      0.980       0.978       0.498        0.497    50.0%
+     16     5270      0.978       0.976       0.496        0.494    49.9%
+     17     3510      0.972       0.970       0.499        0.497    50.6%
+     18     2505      0.972       0.965       0.491        0.485    49.6%
+     19     1811      0.966       0.960       0.494        0.489    49.8%
+     20     1375      0.967       0.959       0.518        0.514    52.1%
+     21     1071      0.963       0.953       0.517        0.509    52.0%
+     22      863      0.959       0.948       0.508        0.501    51.1%
+     23      720      0.954       0.945       0.507        0.500    50.8%
+     24      612      0.955       0.944       0.508        0.503    50.8%
+     25      511      0.946       0.936       0.506        0.501    50.9%
+     26      436      0.949       0.939       0.491        0.489    49.8%
+     27      387      0.956       0.944       0.496        0.505    51.2%
+     28      348      0.954       0.953       0.482        0.497    50.0%
+     29      309      0.948       0.953       0.482        0.496    50.2%
+     30      284      0.952       0.956       0.471        0.485    49.3%
+     31      250      0.945       0.942       0.482        0.498    50.8%
+     32      224      0.942       0.941       0.485        0.491    50.9%
+
+is the number a probability? learned value
+         predicted range        n  mean pred  actual
+     0.0000..0.0124      413488      0.002    0.3%
+     0.0124..0.1413      413488      0.067    7.3%
+     0.1413..0.3227      413488      0.232   24.4%
+     0.3227..0.5000      410044      0.412   41.9%
+     0.5000..0.6786      416931      0.588   58.5%
+     0.6786..0.8590      413488      0.769   76.0%
+     0.8590..0.9877      413488      0.933   92.7%
+     0.9877..1.0000      413488      0.998   99.7%
+
+the same for the generating search
+         predicted range        n  mean pred  actual
+     0.0000..0.0123      413488      0.002    0.4%
+     0.0123..0.1531      413488      0.073    7.9%
+     0.1531..0.3360      413488      0.245   25.4%
+     0.3360..0.5014      413487      0.420   42.7%
+     0.5014..0.6658      413488      0.582   58.0%
+     0.6658..0.8469      413488      0.755   74.7%
+     0.8469..0.9879      413488      0.927   92.1%
+     0.9879..1.0000      413488      0.998   99.6%
+
+move nodes: n 2,386,485  model AUC 0.9114  generating-search AUC 0.9105
+
+replacement nodes: n 921,418  model AUC 0.9050  generating-search AUC 0.8896
+
+-> C:\tmp\ika439\models\value-h3.pt
+[heavy] 2026-10-08T09:18:09 end rc=0 after 4579s
